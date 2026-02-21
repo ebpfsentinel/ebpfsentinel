@@ -1,0 +1,46 @@
+# config-tls.yaml — TLS-enabled agent configuration for integration tests.
+# Cert/key path placeholders replaced by provisioning scripts.
+
+agent:
+  interfaces:
+    - lo
+  bind_address: "0.0.0.0"
+  log_level: info
+  log_format: json
+  http_port: 18443
+  grpc_port: 50151
+  metrics_port: 19090
+  tls:
+    enabled: true
+    cert_path: __CERT_PATH__
+    key_path: __KEY_PATH__
+
+firewall:
+  enabled: true
+  mode: alert
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

@@ -1,0 +1,130 @@
+# eBPFsentinel — Threat Intelligence Configuration Example
+# ========================================================
+#
+# Integrates external OSINT feeds (IP blocklists, IOC databases) for
+# real-time traffic correlation. Feed data is loaded into eBPF maps
+# for wire-speed matching via a two-phase lookup:
+#   1. Bloom filter pre-check (O(1), zero false negatives)
+#   2. Full HashMap lookup only on Bloom filter hit
+#
+# Advanced features:
+#   - VLAN quarantine: move matching traffic to an isolation VLAN
+#     via bpf_skb_vlan_push instead of dropping (forensic analysis)
+#   - Adaptive backpressure: event emission skipped when RingBuf >75% full
+#   - Suspend-aware timestamps: bpf_ktime_get_boot_ns for accurate timing
+#
+# Supports CSV, JSON, STIX, and plaintext formats with configurable
+# field mappings.
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/threatintel.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+threatintel:
+  enabled: true
+
+  # Mode controls enforcement:
+  #   "alert"      — log IOC matches only
+  #   "block"      — drop traffic to/from IOC-listed IPs
+  #   "quarantine" — move matching traffic to an isolation VLAN via
+  #                  bpf_skb_vlan_push (requires quarantine_vlan_id below)
+  mode: alert
+
+  # VLAN ID for quarantine mode. Traffic matching IOCs is tagged with
+  # this 802.1Q VLAN ID instead of being dropped, allowing network
+  # forensics on a dedicated isolation segment.
+  # quarantine_vlan_id: 999
+
+  # ── Feeds ──────────────────────────────────────────────────────────
+  #
+  # Fields:
+  #   id                    — Unique feed identifier (required, non-empty)
+  #   name                  — Human-readable feed name (required, non-empty)
+  #   url                   — Feed URL; must use http:// or https:// (required)
+  #   format                — "plaintext", "csv", "json", or "stix" (default: "plaintext")
+  #   enabled               — Whether this feed is active (default: true)
+  #   refresh_interval_secs — How often to re-fetch (default: 3600 = 1 hour)
+  #   max_iocs              — Maximum IOCs to load from this feed (default: 500000)
+  #   default_action        — Per-feed action override: "alert" or "block"
+  #   min_confidence        — Minimum confidence score to accept (0 = accept all)
+  #   auth_header           — Optional HTTP auth header (e.g., "X-OTX-API-KEY: abc123")
+  #
+  # Field mapping (for CSV/JSON feeds):
+  #   ip_field              — Column/field name for the IP address
+  #   confidence_field      — Column/field name for the confidence score
+  #   category_field        — Column/field name for the threat category
+  #   separator             — Field separator for CSV (default: ",")
+  #   comment_prefix        — Lines starting with this are ignored (e.g., "#", ";")
+  #   skip_header           — Skip the first line (CSV column header)
+
+  feeds:
+    # ── Plaintext feeds ────────────────────────────────────────────
+    # Spamhaus DROP — well-known IP blocklist (one CIDR per line)
+    - id: spamhaus-drop
+      name: Spamhaus DROP
+      url: https://www.spamhaus.org/drop/drop.txt
+      format: plaintext
+      comment_prefix: ";"
+      refresh_interval_secs: 86400 # Daily
+      min_confidence: 0 # Accept all (no confidence field)
+
+    # Spamhaus EDROP — extended drop list
+    - id: spamhaus-edrop
+      name: Spamhaus EDROP
+      url: https://www.spamhaus.org/drop/edrop.txt
+      format: plaintext
+      comment_prefix: ";"
+      refresh_interval_secs: 86400
+
+    # Emerging Threats compromised IPs
+    - id: et-compromised
+      name: Emerging Threats Compromised
+      url: https://rules.emergingthreats.net/blockrules/compromised-ips.txt
+      format: plaintext
+      refresh_interval_secs: 3600 # Hourly
+      default_action: alert
+
+    # ── CSV feed ───────────────────────────────────────────────────
+    # Abuse.ch Feodo Tracker (CSV with header)
+    - id: feodo-tracker
+      name: Feodo Tracker Botnet C2
+      url: https://feodotracker.abuse.ch/downloads/ipblocklist.csv
+      format: csv
+      ip_field: dst_ip
+      confidence_field: confidence
+      category_field: malware
+      separator: ","
+      skip_header: true
+      min_confidence: 75
+      refresh_interval_secs: 1800 # Every 30 minutes
+      default_action: block
+
+    # ── JSON feed ──────────────────────────────────────────────────
+    # AlienVault OTX (requires API key)
+    - id: otx-malicious-ips
+      name: AlienVault OTX Malicious IPs
+      url: https://otx.alienvault.com/api/v1/indicators/export
+      format: json
+      ip_field: indicator
+      confidence_field: pulse_count
+      category_field: type
+      min_confidence: 3
+      refresh_interval_secs: 3600
+      auth_header: "X-OTX-API-KEY: your-otx-api-key-here"
+      max_iocs: 100000
+
+    # ── STIX feed ──────────────────────────────────────────────────
+    # STIX 2.1 threat intelligence bundle
+    - id: stix-enterprise
+      name: Enterprise STIX Feed
+      url: https://taxii.example.com/api/collections/indicators/objects
+      format: stix
+      refresh_interval_secs: 7200 # Every 2 hours
+      auth_header: "Authorization: Bearer your-taxii-token-here"
+      min_confidence: 50
+      max_iocs: 200000
+      default_action: block

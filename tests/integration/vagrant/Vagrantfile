@@ -1,0 +1,151 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+#
+# Vagrantfile for eBPFsentinel integration testing.
+#
+# Usage:
+#   vagrant up        # Create and provision VM
+#   vagrant ssh       # SSH into VM
+#   vagrant halt      # Stop VM
+#   vagrant destroy   # Delete VM
+#
+# Provider: VirtualBox (default) or VMware Workstation (vmware_desktop)
+# Base box: bento/ubuntu-24.04 (provisioned inline)
+
+VAGRANTFILE_API_VERSION = "2"
+
+Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
+  config.vm.hostname = "ebpfsentinel-test"
+  config.vm.box = "bento/ubuntu-24.04"
+
+  # VirtualBox provider (default)
+  config.vm.provider "virtualbox" do |vb|
+    vb.memory = 4096
+    vb.cpus = 4
+    vb.name = "eBPFsentinel Integration Test VM"
+    vb.gui = false
+    # Nested virtualization for Docker
+    vb.customize ["modifyvm", :id, "--nested-hw-virt", "on"]
+  end
+
+  # VMware Workstation provider (alternative)
+  config.vm.provider "vmware_desktop" do |v|
+    v.vmx["memsize"] = "4096"
+    v.vmx["numvcpus"] = "4"
+    v.vmx["displayname"] = "eBPFsentinel Integration Test VM"
+    v.gui = false
+    v.linked_clone = false
+  end
+
+  # Port forwards for direct host access to agent endpoints
+  config.vm.network "forwarded_port", guest: 18080, host: 18080, auto_correct: true
+  config.vm.network "forwarded_port", guest: 50151, host: 50151, auto_correct: true
+  config.vm.network "forwarded_port", guest: 19090, host: 19090, auto_correct: true
+  config.vm.network "forwarded_port", guest: 18443, host: 18443, auto_correct: true
+
+  # Private network for host-to-VM performance testing
+  config.vm.network "private_network", ip: "192.168.56.10"
+
+  # Sync project directory into VM
+  config.vm.synced_folder "../../../", "/home/vagrant/ebpfsentinel",
+    type: "rsync",
+    rsync__exclude: [".git/", "target/", "node_modules/", ".vagrant/"]
+
+  # Inline provisioning
+  config.vm.provision "shell", name: "base-packages", inline: <<-SHELL
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      apt-get update
+      apt-get install -y --no-install-recommends \
+        build-essential pkg-config libssl-dev protobuf-compiler \
+        linux-headers-$(uname -r) iproute2 tcpdump curl wget jq git \
+        ca-certificates gnupg lsb-release openssl net-tools \
+        apt-transport-https software-properties-common \
+        iperf3 hping3 nmap ncat stress-ng netcat-openbsd bc
+
+      # Install bpftool if available
+      apt-get install -y --no-install-recommends linux-tools-$(uname -r) bpftool 2>/dev/null || true
+
+      # eBPF sysctl tuning
+      cat >> /etc/sysctl.d/99-ebpfsentinel.conf <<SYSCTL
+net.core.bpf_jit_enable=1
+kernel.perf_event_paranoid=-1
+SYSCTL
+      sysctl --system
+
+      # Raise memlock limit for eBPF map allocation
+      cat >> /etc/security/limits.d/99-ebpfsentinel.conf <<LIMITS
+*  soft  memlock  unlimited
+*  hard  memlock  unlimited
+LIMITS
+    SHELL
+
+    config.vm.provision "shell", name: "docker", inline: <<-SHELL
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      if ! command -v docker &>/dev/null; then
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+          gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+          https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
+          tee /etc/apt/sources.list.d/docker.list > /dev/null
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-buildx-plugin
+        usermod -aG docker vagrant
+      fi
+    SHELL
+
+    config.vm.provision "shell", name: "k8s-tools", inline: <<-SHELL
+      set -euxo pipefail
+      ARCH=$(dpkg --print-architecture)
+
+      if ! command -v minikube &>/dev/null; then
+        curl -LO "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-${ARCH}"
+        install -m 0755 "minikube-linux-${ARCH}" /usr/local/bin/minikube
+        rm -f "minikube-linux-${ARCH}"
+      fi
+
+      if ! command -v kubectl &>/dev/null; then
+        KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+        curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
+        install -m 0755 kubectl /usr/local/bin/kubectl
+        rm -f kubectl
+      fi
+    SHELL
+
+    config.vm.provision "shell", name: "bats", inline: <<-SHELL
+      set -euxo pipefail
+
+      if ! command -v bats &>/dev/null; then
+        git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats-core
+        (cd /tmp/bats-core && ./install.sh /usr/local)
+        rm -rf /tmp/bats-core
+      fi
+
+      if ! command -v grpcurl &>/dev/null; then
+        ARCH=$(dpkg --print-architecture)
+        GRPCURL_VERSION="1.9.1"
+        [ "$ARCH" = "amd64" ] && GRPCURL_ARCH="x86_64" || GRPCURL_ARCH="$ARCH"
+        curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_${GRPCURL_ARCH}.tar.gz" | \
+          tar -xz -C /usr/local/bin grpcurl
+      fi
+    SHELL
+
+    config.vm.provision "shell", name: "rust", privileged: false, inline: <<-SHELL
+      set -euxo pipefail
+
+      if ! command -v rustc &>/dev/null; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+        source "$HOME/.cargo/env"
+        rustup toolchain install nightly --component rust-src
+      fi
+    SHELL
+
+  # Setup provisioner: generates certs, builds agent, prepares configs
+  config.vm.provision "shell", name: "setup", privileged: false, path: "provision/setup.sh"
+end

@@ -1,0 +1,49 @@
+# config-auth-jwt.yaml — JWT authentication-enabled agent configuration.
+# Public key path placeholder replaced by provisioning scripts.
+
+agent:
+  interfaces:
+    - lo
+  bind_address: "0.0.0.0"
+  log_level: info
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  mode: alert
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
+
+auth:
+  enabled: true
+  jwt:
+    public_key_path: __JWT_PUBKEY__
+    issuer: ebpfsentinel-test
+    audience: ebpfsentinel

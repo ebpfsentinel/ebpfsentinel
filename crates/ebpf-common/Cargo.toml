@@ -1,0 +1,14 @@
+[package]
+name = "ebpf-common"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[features]
+default = ["std"]
+std = []
+# Enable aya::Pod impls for eBPF map types (userspace only)
+userspace = ["aya"]
+
+[dependencies]
+aya = { version = "0.13.1", optional = true }

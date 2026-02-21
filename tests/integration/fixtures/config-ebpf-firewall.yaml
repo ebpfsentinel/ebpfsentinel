@@ -1,0 +1,101 @@
+# config-ebpf-firewall.yaml — Firewall eBPF scenario test config
+#
+# Tests array-based rule matching with:
+#   - Wildcard rules (any src_ip, any port)
+#   - CIDR subnet matching (/24)
+#   - Port ranges (80-443)
+#   - Priority-based first-match-wins
+#   - Default policy (pass)
+#
+# Network topology:
+#   Host: 10.200.0.1 (veth-ebpf0)
+#   NS:   10.200.0.2 (veth-ebpf1 inside ebpf-test-ns)
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: pass
+  rules:
+    # Priority 5: Allow ICMP from 10.200.0.0/24 subnet (CIDR match)
+    # This tests CIDR subnet matching — any host in the /24 subnet can ping
+    - id: fw-allow-icmp-subnet
+      priority: 5
+      action: allow
+      protocol: icmp
+      src_ip: "10.200.0.0/24"
+      dst_ip: "10.200.0.1"
+      scope: global
+      enabled: true
+
+    # Priority 10: Deny ALL ICMP (wildcard: no src/dst IP filter)
+    # Lower priority than the subnet allow — tests first-match-wins ordering
+    - id: fw-deny-icmp-all
+      priority: 10
+      action: deny
+      protocol: icmp
+      scope: global
+      enabled: true
+
+    # Priority 20: Deny TCP port range 9990-9999 (port range matching)
+    - id: fw-deny-tcp-range
+      priority: 20
+      action: deny
+      protocol: tcp
+      dst_port: "9990-9999"
+      scope: global
+      enabled: true
+
+    # Priority 30: Log TCP from namespace to host on port 8888 (single port)
+    - id: fw-log-tcp-8888
+      priority: 30
+      action: log
+      protocol: tcp
+      src_ip: "10.200.0.2"
+      dst_ip: "10.200.0.1"
+      dst_port: 8888
+      scope: global
+      enabled: true
+
+    # Priority 40: Deny all TCP to port 7777 (wildcard src/dst IP)
+    - id: fw-deny-tcp-7777
+      priority: 40
+      action: deny
+      protocol: tcp
+      dst_port: 7777
+      scope: global
+      enabled: true
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

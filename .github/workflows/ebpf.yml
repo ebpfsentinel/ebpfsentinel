@@ -1,0 +1,62 @@
+name: eBPF Build
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "crates/ebpf-common/**"
+      - "crates/ebpf-programs/**"
+      - "crates/xtask/**"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "crates/ebpf-common/**"
+      - "crates/ebpf-programs/**"
+      - "crates/xtask/**"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ebpf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ebpf-build:
+    name: Build eBPF Programs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            crates/ebpf-programs/xdp-firewall
+            crates/ebpf-programs/xdp-ratelimit
+            crates/ebpf-programs/tc-ids
+            crates/ebpf-programs/tc-threatintel
+            crates/ebpf-programs/tc-dns
+            crates/ebpf-programs/uprobe-dlp
+
+      - name: Build all eBPF kernel programs
+        run: cargo xtask ebpf-build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ebpf-programs
+          path: |
+            crates/ebpf-programs/xdp-firewall/target/bpfel-unknown-none/release/xdp-firewall
+            crates/ebpf-programs/xdp-ratelimit/target/bpfel-unknown-none/release/xdp-ratelimit
+            crates/ebpf-programs/tc-ids/target/bpfel-unknown-none/release/tc-ids
+            crates/ebpf-programs/tc-threatintel/target/bpfel-unknown-none/release/tc-threatintel
+            crates/ebpf-programs/tc-dns/target/bpfel-unknown-none/release/tc-dns
+            crates/ebpf-programs/uprobe-dlp/target/bpfel-unknown-none/release/uprobe-dlp
+          retention-days: 7

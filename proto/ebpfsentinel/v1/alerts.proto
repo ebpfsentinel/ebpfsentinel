@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package ebpfsentinel.v1;
+
+// Real-time alert streaming service (FR31, FR52).
+service AlertStreamService {
+  // Server-streaming RPC: client subscribes and receives alerts in real time.
+  rpc StreamAlerts(StreamAlertsRequest) returns (stream AlertEvent);
+}
+
+// Request to subscribe to the alert stream with optional filters.
+message StreamAlertsRequest {
+  // Optional severity filter (e.g. "high", "critical"). Empty = all severities.
+  string min_severity = 1;
+  // Optional component filter (e.g. "ids", "dlp", "threatintel"). Empty = all components.
+  string component = 2;
+}
+
+// A single alert event streamed to the client.
+message AlertEvent {
+  // Unique alert identifier.
+  string id = 1;
+  // Wall-clock timestamp in nanoseconds since UNIX epoch.
+  uint64 timestamp_ns = 2;
+  // Originating component (e.g. "ids", "dlp", "threatintel").
+  string component = 3;
+  // Alert severity: "low", "medium", "high", "critical".
+  string severity = 4;
+  // Matched rule ID.
+  string rule_id = 5;
+  // Action taken: "alert" or "block".
+  string action = 6;
+  // Source IP address as four big-endian uint32 words.
+  // IPv4: [v4, 0, 0, 0]. IPv6: full 128-bit address.
+  repeated uint32 src_addr = 7;
+  // Destination IP address (same encoding as src_addr).
+  repeated uint32 dst_addr = 8;
+  // Source port.
+  uint32 src_port = 9;
+  // Destination port.
+  uint32 dst_port = 10;
+  // IP protocol number (6=TCP, 17=UDP, etc.).
+  uint32 protocol = 11;
+  // Human-readable alert message.
+  string message = 12;
+  // True if the addresses are IPv6.
+  bool is_ipv6 = 13;
+  // Whether this alert has been marked as a false positive.
+  bool false_positive = 14;
+  // Reverse-DNS domain for source IP (empty if not resolved).
+  string src_domain = 15;
+  // Reverse-DNS domain for destination IP (empty if not resolved).
+  string dst_domain = 16;
+  // Reputation score for source domain (0.0=clean, 1.0=malicious, -1 if absent).
+  double src_domain_score = 17;
+  // Reputation score for destination domain (-1 if absent).
+  double dst_domain_score = 18;
+}

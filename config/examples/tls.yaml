@@ -1,0 +1,36 @@
+# eBPFsentinel — TLS Termination Configuration Example
+# ====================================================
+#
+# Enables TLS 1.3 (via rustls with aws-lc backend) for both the REST API
+# and gRPC streaming endpoints. Requires a PEM-encoded certificate chain
+# and private key.
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/tls.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+  # ── TLS configuration ─────────────────────────────────────────────
+  #
+  # Fields:
+  #   enabled   — Enable TLS on HTTP and gRPC listeners (default: false)
+  #   cert_path — Path to PEM-encoded server certificate (full chain).
+  #               Include intermediate certificates for proper chain validation.
+  #   key_path  — Path to PEM-encoded private key.
+  #               File should be readable only by the agent (chmod 600).
+  #               Logged as warning if world-readable.
+  #
+  # Generate a self-signed certificate for testing:
+  #   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+  #     -keyout /etc/ebpfsentinel/server.key \
+  #     -out /etc/ebpfsentinel/server.crt \
+  #     -days 365 -nodes -subj "/CN=ebpfsentinel"
+  #
+  # For production, use certificates from your PKI or Let's Encrypt.
+  tls:
+    enabled: true
+    cert_path: /etc/ebpfsentinel/server.crt
+    key_path: /etc/ebpfsentinel/server.key

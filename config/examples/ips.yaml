@@ -1,0 +1,120 @@
+# eBPFsentinel — Intrusion Prevention (IPS) Configuration Example
+# ===============================================================
+#
+# Active intrusion prevention with automatic IP blacklisting. When an IP
+# exceeds the auto_blacklist_threshold, it is added to an in-kernel blocklist
+# for wire-speed enforcement. Shares the IDS rule format but adds blacklist
+# management and whitelist safeguards.
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/ips.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+ips:
+  enabled: true
+
+  # Mode controls enforcement:
+  #   "alert"  — log detections only (observe)
+  #   "block"  — actively enforce (blacklist offending IPs)
+  # Individual rules can override the global mode.
+  mode: block
+
+  # ── Blacklist configuration ────────────────────────────────────────
+
+  # Number of detections before auto-blacklisting an IP.
+  # Set higher to reduce false positives, lower for aggressive blocking.
+  auto_blacklist_threshold: 5
+
+  # Maximum time (in seconds) an IP stays blacklisted.
+  # After this duration, the IP is removed and must re-trigger to be blocked again.
+  # Default: 3600 (1 hour). Set to 7200 for 2 hours in high-threat environments.
+  max_blacklist_duration_secs: 7200
+
+  # Maximum entries in the blacklist table. Oldest entries are evicted
+  # when the limit is reached. Size this for your expected threat volume.
+  max_blacklist_size: 50000
+
+  # ── Whitelist ──────────────────────────────────────────────────────
+  # IPs and CIDRs that should NEVER be blacklisted, regardless of detections.
+  # Use this for trusted infrastructure: internal networks, monitoring systems,
+  # load balancers, DNS resolvers, etc.
+  whitelist:
+    - "10.0.0.0/8"            # Internal RFC1918
+    - "172.16.0.0/12"         # Internal RFC1918
+    - "192.168.0.0/16"        # Internal RFC1918
+    - "127.0.0.1"             # Loopback
+    - "203.0.113.50"          # External monitoring probe
+
+  # ── Event sampling ───────────────────────────────────────────────
+  # Same sampling modes as IDS (none, random, hash).
+  # Use with caution in block mode: sampled-out events won't trigger blocks.
+  sampling:
+    mode: hash
+    rate: 1.0              # 100% — no sampling in block mode (safety first)
+
+  # ── Rules ──────────────────────────────────────────────────────────
+  #
+  # Same fields as IDS rules, with IPS-specific enforcement.
+  # Fields:
+  #   id, description, enabled, severity, mode, protocol, dst_port,
+  #   pattern, threshold (type/count/window_secs/track_by)
+
+  rules:
+    # Auto-block SSH brute-force sources after 10 attempts in 2 minutes
+    - id: ips-ssh-bruteforce
+      description: "Auto-block SSH brute-force sources"
+      severity: high
+      mode: block
+      protocol: tcp
+      dst_port: 22
+      threshold:
+        type: threshold
+        count: 10
+        window_secs: 120
+        track_by: src_ip
+
+    # Immediately block reverse shell connections (no threshold needed)
+    - id: ips-reverse-shell
+      description: "Immediately block reverse shell traffic"
+      severity: critical
+      mode: block
+      protocol: tcp
+      dst_port: 4444
+
+    # Block RDP brute-force (Windows Remote Desktop)
+    - id: ips-rdp-bruteforce
+      description: "Auto-block RDP brute-force sources"
+      severity: high
+      mode: block
+      protocol: tcp
+      dst_port: 3389
+      threshold:
+        type: threshold
+        count: 15
+        window_secs: 300
+        track_by: src_ip
+
+    # Alert on DNS tunneling (high volume, don't block to avoid breaking DNS)
+    - id: ips-dns-tunnel
+      description: "DNS tunnel detection (alert only)"
+      severity: medium
+      mode: alert
+      protocol: udp
+      dst_port: 53
+      threshold:
+        type: threshold
+        count: 50
+        window_secs: 60
+        track_by: src_ip
+
+    # Block SMB/CIFS probes from external networks
+    - id: ips-smb-probe
+      description: "Block external SMB probes"
+      severity: high
+      mode: block
+      protocol: tcp
+      dst_port: 445

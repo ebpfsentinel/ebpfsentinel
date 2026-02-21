@@ -1,0 +1,58 @@
+[package]
+name = "domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+regex = { workspace = true }
+ebpf-common = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "firewall_engine"
+harness = false
+
+[[bench]]
+name = "ids_engine"
+harness = false
+
+[[bench]]
+name = "ips_engine"
+harness = false
+
+[[bench]]
+name = "l7_engine"
+harness = false
+
+[[bench]]
+name = "dlp_engine"
+harness = false
+
+[[bench]]
+name = "ratelimit_engine"
+harness = false
+
+[[bench]]
+name = "threatintel_engine"
+harness = false
+
+[[bench]]
+name = "alert_router"
+harness = false
+
+[[bench]]
+name = "l7_parsers"
+harness = false
+
+[[bench]]
+name = "feed_parser"
+harness = false

@@ -1,0 +1,181 @@
+# eBPFsentinel — Application Layer Firewall (L7) Configuration Example
+# ====================================================================
+#
+# Protocol-aware filtering at the application layer. Inspects HTTP requests,
+# TLS Client Hello (SNI), gRPC calls, SMTP/FTP commands, and SMB operations.
+# Rules are evaluated in priority order (lowest number = highest precedence);
+# the first matching rule wins.
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/l7.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+l7:
+  enabled: true
+
+  # Ports to inspect for L7 content. Traffic on these ports is passed
+  # to the userspace L7 parser for protocol detection and rule matching.
+  ports: [80, 443, 8080, 8443, 25, 21, 445]
+
+  # ── Rules ──────────────────────────────────────────────────────────
+  #
+  # Fields:
+  #   id           — Unique rule identifier (required, non-empty)
+  #   enabled      — Whether this rule is active (default: true)
+  #   priority     — Lower number = higher precedence; first match wins
+  #   action       — "allow", "deny", or "log" (pass + emit event)
+  #   protocol     — "http", "tls", "grpc", "smtp", "ftp", or "smb"
+  #
+  # Protocol-specific matcher fields:
+  #   HTTP:  method, path, host, content_type
+  #   TLS:   sni
+  #   gRPC:  service, grpc_method
+  #   SMTP:  command
+  #   FTP:   command
+  #   SMB:   smb_command (u16 opcode), is_smb2 (bool)
+  #
+  # Optional L3/L4 narrowing:
+  #   src_ip   — Source CIDR filter
+  #   dst_ip   — Destination CIDR filter
+  #   dst_port — Destination port (single or range)
+  #
+  # Host and SNI fields support domain pattern matching:
+  #   "example.com"      — exact match
+  #   "*.example.com"    — wildcard (any subdomain)
+
+  rules:
+    # ── HTTP rules ───────────────────────────────────────────────────
+    # Block DELETE requests to admin paths
+    - id: l7-block-admin-delete
+      priority: 10
+      action: deny
+      protocol: http
+      method: DELETE
+      path: "/admin"
+
+    # Block file upload to any host via multipart content type
+    - id: l7-block-upload
+      priority: 15
+      action: deny
+      protocol: http
+      method: POST
+      content_type: "multipart/form-data"
+      dst_port: 80
+
+    # Log all POST requests to API endpoints from external networks
+    - id: l7-log-api-external
+      priority: 50
+      action: log
+      protocol: http
+      method: POST
+      path: "/api"
+      src_ip: "0.0.0.0/0"
+
+    # Allow GET requests to the health check endpoint
+    - id: l7-allow-healthz
+      priority: 5
+      action: allow
+      protocol: http
+      method: GET
+      path: "/healthz"
+
+    # Block requests to a specific malicious host
+    - id: l7-block-malicious-host
+      priority: 20
+      action: deny
+      protocol: http
+      host: "*.malware-cdn.example.com"
+
+    # ── TLS/SNI rules ────────────────────────────────────────────────
+    # Block TLS connections to known malware C2 domains (via SNI)
+    - id: l7-block-c2-tls
+      priority: 10
+      action: deny
+      protocol: tls
+      sni: "c2.malicious-actor.com"
+
+    # Block all TLS connections to a suspicious wildcard domain
+    - id: l7-block-suspicious-tls
+      priority: 11
+      action: deny
+      protocol: tls
+      sni: "*.evil-domain.net"
+
+    # Log TLS connections to external services for auditing
+    - id: l7-log-external-tls
+      priority: 100
+      action: log
+      protocol: tls
+      dst_port: 443
+      src_ip: "10.0.0.0/8"
+
+    # ── gRPC rules ───────────────────────────────────────────────────
+    # Block access to admin gRPC service from outside the cluster
+    - id: l7-block-grpc-admin
+      priority: 20
+      action: deny
+      protocol: grpc
+      service: "admin.AdminService"
+      src_ip: "0.0.0.0/0"
+
+    # Log all gRPC method calls to a sensitive service
+    - id: l7-log-grpc-billing
+      priority: 60
+      action: log
+      protocol: grpc
+      service: "billing.PaymentService"
+      grpc_method: "ProcessPayment"
+
+    # ── SMTP rules ───────────────────────────────────────────────────
+    # Block SMTP VRFY command (used for email address enumeration)
+    - id: l7-block-smtp-vrfy
+      priority: 30
+      action: deny
+      protocol: smtp
+      command: VRFY
+      dst_port: 25
+
+    # Block SMTP EXPN command (mailing list expansion)
+    - id: l7-block-smtp-expn
+      priority: 31
+      action: deny
+      protocol: smtp
+      command: EXPN
+
+    # ── FTP rules ────────────────────────────────────────────────────
+    # Block FTP DELE command (prevent file deletion)
+    - id: l7-block-ftp-delete
+      priority: 40
+      action: deny
+      protocol: ftp
+      command: DELE
+      dst_port: 21
+
+    # Log FTP STOR commands (file uploads)
+    - id: l7-log-ftp-upload
+      priority: 70
+      action: log
+      protocol: ftp
+      command: STOR
+
+    # ── SMB rules ────────────────────────────────────────────────────
+    # Block SMB2 Tree Connect (opcode 3) from external networks
+    - id: l7-block-smb-tree-connect
+      priority: 35
+      action: deny
+      protocol: smb
+      smb_command: 3
+      is_smb2: true
+      src_ip: "0.0.0.0/0"
+      dst_port: 445
+
+    # Log all SMB1 traffic (legacy, should be rare)
+    - id: l7-log-smb1
+      priority: 80
+      action: log
+      protocol: smb
+      is_smb2: false

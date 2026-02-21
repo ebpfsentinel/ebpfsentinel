@@ -1,0 +1,105 @@
+# config-ebpf-benchmark.yaml — Full-stack eBPF benchmark config
+# All domains enabled with production-like limits for throughput testing
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: warn
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules:
+    - id: fw-bench-deny-9999
+      priority: 10
+      action: deny
+      protocol: tcp
+      dst_port: 9999
+      scope: global
+      enabled: true
+    - id: fw-bench-log-icmp
+      priority: 100
+      action: log
+      protocol: icmp
+      scope: global
+      enabled: true
+
+ids:
+  enabled: true
+  mode: alert
+  rules:
+    - id: ids-bench-reverse-shell
+      description: "Benchmark: reverse shell detection"
+      severity: critical
+      protocol: tcp
+      dst_port: 4444
+      enabled: true
+    - id: ids-bench-ssh
+      description: "Benchmark: SSH detection"
+      severity: high
+      protocol: tcp
+      dst_port: 22
+      enabled: true
+      threshold:
+        type: threshold
+        count: 100
+        window_secs: 60
+        track_by: src_ip
+
+ips:
+  enabled: true
+  mode: alert
+  auto_blacklist_threshold: 10
+  max_blacklist_duration_secs: 3600
+  max_blacklist_size: 10000
+  whitelist:
+    - "10.200.0.0/24"
+  rules:
+    - id: ips-bench-reverse-shell
+      description: "Benchmark: block reverse shell"
+      severity: critical
+      protocol: tcp
+      dst_port: 4444
+      mode: block
+      enabled: true
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: true
+  default_rate: 100000
+  default_burst: 200000
+  default_algorithm: token_bucket
+  rules:
+    - id: rl-bench-global
+      rate: 100000
+      burst: 200000
+      scope: global
+      algorithm: token_bucket
+      action: drop
+      enabled: true
+
+threatintel:
+  enabled: true
+  mode: alert
+  feeds: []
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 60
+  throttle_window_secs: 300
+  throttle_max_per_window: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

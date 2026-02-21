@@ -1,0 +1,32 @@
+# eBPFsentinel — Audit Trail Configuration Example
+# ================================================
+#
+# Records all rule changes (create, update, delete) and configuration
+# modifications in a persistent redb database. Provides compliance-ready
+# audit logs with configurable retention.
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/audit.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+audit:
+  enabled: true
+
+  # Retention period in days. Entries older than this are automatically purged.
+  # Default: 90 (PCI-DSS minimum for audit log retention).
+  # Set to 365 for annual compliance requirements, or 30 for dev/staging.
+  retention_days: 365
+
+  # Maximum number of entries kept in the redb buffer.
+  # Oldest entries are evicted when the buffer is full.
+  # Default: 100,000. Size based on your rule change frequency.
+  buffer_size: 100000
+
+  # Path to the redb database file for persistent audit storage.
+  # Use an absolute path in production. Empty string disables persistent storage.
+  # Default: "data/audit.redb"
+  storage_path: /var/lib/ebpfsentinel/audit.redb

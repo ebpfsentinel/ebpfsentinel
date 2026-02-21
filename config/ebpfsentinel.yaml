@@ -1,0 +1,43 @@
+# eBPFsentinel — Default Configuration
+#
+# Adapt `agent.interfaces` to your host network interface(s).
+# See config/ebpfsentinel.example.yaml for all available options.
+
+agent:
+  # Network interfaces to attach eBPF programs to (REQUIRED).
+  # Change to match your host: ip -o link show | awk -F': ' '{print $2}'
+  interfaces: [eth0]
+
+  # IP address to bind HTTP/gRPC/metrics listeners to.
+  # Use "0.0.0.0" to listen on all interfaces, "127.0.0.1" for localhost only.
+  bind_address: "127.0.0.1"
+
+  # Serve the Swagger UI at /swagger-ui (useful for development/debugging).
+  swagger_ui: false
+
+  log_level: info
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+
+ids:
+  enabled: true
+
+ips:
+  enabled: true
+
+dlp:
+  enabled: true
+
+ratelimit:
+  enabled: true
+
+threatintel:
+  enabled: true
+
+dns:
+  enabled: true

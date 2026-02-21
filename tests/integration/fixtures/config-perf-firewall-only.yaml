@@ -1,0 +1,55 @@
+# config-perf-firewall-only.yaml — Only firewall enabled
+# For measuring isolated firewall overhead without other domains.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: warn
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules:
+    - id: fw-perf-deny-9999
+      priority: 10
+      action: deny
+      protocol: tcp
+      dst_port: 9999
+      scope: global
+      enabled: true
+    - id: fw-perf-log-icmp
+      priority: 100
+      action: log
+      protocol: icmp
+      scope: global
+      enabled: true
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

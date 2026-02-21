@@ -1,0 +1,167 @@
+# eBPFsentinel — Firewall Configuration Example
+# ===============================================
+#
+# L3/L4 packet filtering via XDP with two-phase matching:
+#   1. LPM Trie (O(log n)) for CIDR-only rules (source/destination subnet)
+#   2. Linear scan for rules with port/protocol/VLAN filters (priority order)
+#
+# The first matching rule wins. If no rule matches, the default_policy applies.
+#
+# Advanced features:
+#   - Tail-call chaining: firewall → rate limiter via PROG_ARRAY
+#   - XDP metadata: matched rule ID forwarded to TC programs via bpf_xdp_adjust_meta
+#   - Packet mirroring: suspicious traffic mirrored to DEVMAP monitoring port
+#   - CPU steering: clean traffic directed to specific CPUs via CPUMAP
+#   - FIB enrichment: next-hop/routing info via bpf_fib_lookup
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/firewall.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+firewall:
+  enabled: true
+
+  # Mode controls enforcement behavior:
+  #   "alert"  — deny rules are logged but traffic is passed (observe-only)
+  #   "block"  — deny rules are actively enforced (packets dropped)
+  mode: block
+
+  # Default policy when no rule matches:
+  #   "pass" — allow unmatched traffic (allowlist approach: deny what you specify)
+  #   "drop" — deny unmatched traffic (blocklist approach: allow what you specify)
+  default_policy: drop
+
+  # ── Rules ──────────────────────────────────────────────────────────
+  #
+  # Fields:
+  #   id         — Unique rule identifier (required, non-empty)
+  #   enabled    — Whether this rule is active (default: true)
+  #   priority   — Lower number = higher precedence; first match wins
+  #   action     — "allow", "deny", or "log" (pass + emit event)
+  #   protocol   — "tcp", "udp", "icmp", or "any" (default: "any")
+  #   src_ip     — Source CIDR filter; omit to match any source
+  #   dst_ip     — Destination CIDR filter; omit to match any destination
+  #   src_port   — Source port: single (22), range ("1024-65535"), or
+  #                explicit ({start: 1024, end: 65535}); omit to match any
+  #   dst_port   — Destination port (same formats as src_port)
+  #   vlan_id    — 802.1Q VLAN ID (1-4094); omit to match any VLAN
+  #   scope      — "global", interface name, or {interface: "eth0"} / {namespace: "prod"}
+  #
+  # Maximum 4096 rules per address family (IPv4 / IPv6).
+  # CIDR-only rules are automatically loaded into LPM Trie maps for O(log n) lookup.
+  # Rules with port/protocol/VLAN filters use the linear array scan.
+
+  rules:
+    # ── Web traffic ────────────────────────────────────────────────
+    # Allow inbound HTTP/HTTPS to the web server subnet
+    - id: fw-allow-web
+      priority: 10
+      action: allow
+      protocol: tcp
+      dst_ip: "10.0.1.0/24"
+      dst_port: "80-443"
+      scope:
+        interface: eth0
+
+    # ── SSH access control ─────────────────────────────────────────
+    # Allow SSH only from the management network
+    - id: fw-allow-ssh-mgmt
+      priority: 20
+      action: allow
+      protocol: tcp
+      src_ip: "192.168.100.0/24"
+      dst_port: 22
+      scope: global
+
+    # Deny SSH from everywhere else (IPv4)
+    - id: fw-deny-ssh-external
+      priority: 21
+      action: deny
+      protocol: tcp
+      src_ip: "0.0.0.0/0"
+      dst_port: 22
+      scope: global
+
+    # Deny SSH from everywhere else (IPv6)
+    - id: fw-deny-ssh-external-v6
+      priority: 22
+      action: deny
+      protocol: tcp
+      src_ip: "::/0"
+      dst_port: 22
+      scope: global
+
+    # ── IPv6 examples ──────────────────────────────────────────────
+    # Allow traffic from a specific IPv6 documentation prefix
+    - id: fw-allow-v6-internal
+      priority: 30
+      action: allow
+      protocol: any
+      src_ip: "2001:db8::/32"
+      scope: global
+
+    # Allow IPv6 link-local multicast (neighbor discovery)
+    - id: fw-allow-v6-link-local
+      priority: 31
+      action: allow
+      protocol: any
+      src_ip: "fe80::/10"
+      scope: global
+
+    # ── VLAN isolation ─────────────────────────────────────────────
+    # Allow HTTPS management traffic on VLAN 10 (management VLAN)
+    - id: fw-allow-mgmt-vlan
+      priority: 40
+      action: allow
+      protocol: tcp
+      dst_ip: "10.0.10.0/24"
+      dst_port: 443
+      vlan_id: 10
+      scope: global
+
+    # Deny all traffic on VLAN 200 (guest network isolation)
+    - id: fw-deny-guest-vlan
+      priority: 50
+      action: deny
+      protocol: any
+      vlan_id: 200
+      scope: global
+
+    # ── DNS ────────────────────────────────────────────────────────
+    # Allow outbound DNS (TCP + UDP)
+    - id: fw-allow-dns-udp
+      priority: 60
+      action: allow
+      protocol: udp
+      dst_port: 53
+      scope: global
+
+    - id: fw-allow-dns-tcp
+      priority: 61
+      action: allow
+      protocol: tcp
+      dst_port: 53
+      scope: global
+
+    # ── Monitoring ─────────────────────────────────────────────────
+    # Log all ICMP traffic (useful for diagnostics)
+    - id: fw-log-icmp
+      priority: 100
+      action: log
+      protocol: icmp
+      scope: global
+
+    # ── Namespace-scoped rule ──────────────────────────────────────
+    # Allow Kubernetes pod-to-pod traffic in the "production" namespace
+    - id: fw-allow-prod-pods
+      priority: 70
+      action: allow
+      protocol: any
+      src_ip: "10.244.0.0/16"
+      dst_ip: "10.244.0.0/16"
+      scope:
+        namespace: production

@@ -1,0 +1,92 @@
+# config-full.yaml — Full-featured agent configuration for integration tests.
+# All features enabled with test-safe settings.
+
+agent:
+  interfaces:
+    - lo
+  bind_address: "0.0.0.0"
+  swagger_ui: true
+  log_level: debug
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  mode: alert
+  default_policy: pass
+  rules:
+    - id: fw-test-001
+      priority: 100
+      action: deny
+      protocol: tcp
+      dst_port: 9999
+      scope: global
+      enabled: true
+
+ids:
+  enabled: true
+  mode: alert
+  rules: []
+
+ips:
+  enabled: true
+  mode: alert
+  max_blacklist_duration_secs: 3600
+  auto_blacklist_threshold: 3
+  max_blacklist_size: 10000
+  whitelist: []
+  rules: []
+
+dlp:
+  enabled: true
+  mode: alert
+  patterns: []
+
+ratelimit:
+  enabled: true
+  default_rate: 1000
+  default_burst: 2000
+  rules: []
+
+threatintel:
+  enabled: true
+  mode: alert
+  feeds: []
+
+l7:
+  enabled: true
+  ports: []
+  rules: []
+
+alerting:
+  enabled: true
+  dedup_window_secs: 60
+  throttle_window_secs: 300
+  throttle_max_per_window: 100
+  routes: []
+
+dns:
+  enabled: true
+  cache:
+    max_entries: 10000
+    min_ttl_secs: 60
+    purge_interval_secs: 30
+  blocklist:
+    domains: []
+    action: block
+    inject_target: threatintel
+    grace_period_secs: 300
+  reputation:
+    enabled: true
+    max_tracked_domains: 10000
+    auto_block_threshold: 0.8
+    auto_block_enabled: false
+    decay_half_life_hours: 24
+
+audit:
+  enabled: true
+  retention_days: 90
+  buffer_size: 100000
+  storage_path: __DATA_DIR__/audit.redb

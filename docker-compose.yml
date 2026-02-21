@@ -1,0 +1,73 @@
+# eBPFsentinel — Docker Compose deployment
+#
+# Usage:
+#   docker compose up -d        # start agent
+#   docker compose logs -f      # view logs
+#   docker compose down         # stop agent
+#
+# Prerequisites:
+#   - Linux kernel 5.17+ with BTF support
+#   - Docker with host networking support
+#
+# Hot-reload: edit config/ebpfsentinel.yaml while running — the agent
+# detects changes automatically and reloads rules without restart.
+
+services:
+  agent:
+    build: .
+    image: ebpfsentinel:latest
+    container_name: ebpfsentinel
+
+    # XDP programs attach to host network interfaces directly
+    network_mode: host
+
+    # eBPF requires elevated privileges.
+    # Option A (simple): full privileges
+    privileged: true
+    # Option B (fine-grained, kernel 5.8+): uncomment below, comment privileged
+    # cap_add:
+    #   - BPF
+    #   - NET_ADMIN
+    #   - SYS_ADMIN
+    #   - PERFMON
+
+    # Security: prevent child processes from gaining new privileges
+    security_opt:
+      - no-new-privileges:true
+
+    # Defense-in-depth: read-only root prevents writes to container filesystem
+    # even under privileged mode (no dropped binaries, no modified libraries).
+    read_only: true
+    # /tmp writable for libraries that may need scratch space (TLS, etc.)
+    tmpfs:
+      - /tmp:size=64m
+
+    volumes:
+      # Agent configuration — writable for hot-reload via file watcher
+      - ./config/ebpfsentinel.yaml:/etc/ebpfsentinel/config.yaml
+      # Persistent data: audit logs, alerts, rule change history (redb)
+      - ebpfsentinel-data:/data
+      # eBPF filesystem — required for map pinning
+      - /sys/fs/bpf:/sys/fs/bpf
+      # Debug filesystem — required for eBPF tracing
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+
+    restart: unless-stopped
+
+    # Uses the agent's built-in CLI health check (no curl needed)
+    healthcheck:
+      test: ["CMD", "ebpfsentinel-agent", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  ebpfsentinel-data:
+    driver: local

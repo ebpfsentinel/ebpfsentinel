@@ -1,0 +1,163 @@
+# eBPFsentinel — Intrusion Detection (IDS) Configuration Example
+# ==============================================================
+#
+# Network intrusion detection via TC classifier eBPF programs. Supports
+# protocol+port matching, regex payload inspection, threshold-based detection,
+# event sampling, and domain-aware matching via DNS intelligence.
+#
+# Advanced features:
+#   - Kernel-side sampling: bpf_get_prandom_u32 drops events before RingBuf
+#     emission (zero userspace overhead for sampled-out packets)
+#   - L7 protocol detection: bpf_strncmp identifies HTTP/TLS/SSH in payload
+#   - Adaptive backpressure: bpf_ringbuf_query skips events when >75% full
+#   - Socket attribution: bpf_sk_lookup_tcp/udp for process identification
+#   - Suspend-aware timestamps: bpf_ktime_get_boot_ns
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/ids.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+ids:
+  enabled: true
+
+  # Mode controls enforcement:
+  #   "alert"  — log detections only (observe)
+  #   "block"  — actively drop matching traffic
+  # Individual rules can override the global mode.
+  mode: alert
+
+  # ── Event sampling ───────────────────────────────────────────────
+  # Reduces processing load by analyzing only a fraction of events.
+  #
+  # mode:
+  #   "none"   — process every event (default)
+  #   "random" — randomly sample events at the given rate
+  #              When kernel_sampling is true, uses bpf_get_prandom_u32 in the
+  #              eBPF program itself — sampled-out packets never reach userspace.
+  #   "hash"   — deterministic hash-based sampling (consistent per-flow)
+  # rate: 0.0 – 1.0 (required for random/hash modes)
+  # kernel_sampling: true/false — push sampling into eBPF (default: true for random)
+  sampling:
+    mode: random
+    rate: 0.5              # Process 50% of events
+    kernel_sampling: true  # bpf_get_prandom_u32 — zero userspace overhead
+
+  # ── Rules ──────────────────────────────────────────────────────────
+  #
+  # Fields:
+  #   id               — Unique rule identifier (required, non-empty)
+  #   description      — Human-readable description (optional)
+  #   enabled          — Whether this rule is active (default: true)
+  #   severity         — "low", "medium", "high", or "critical"
+  #   mode             — Per-rule mode override ("alert" or "block"); inherits global if omitted
+  #   protocol         — "tcp", "udp", "icmp", or "any" (default: "any")
+  #   dst_port         — Destination port to match (optional, single port only)
+  #   pattern          — Regex pattern for payload inspection (optional; ReDoS-safe)
+  #   threshold        — Rate-based detection config (optional, see below)
+  #   domain_pattern   — Domain name pattern for DNS-aware matching (optional)
+  #   domain_match_mode — How to interpret domain_pattern: "exact", "wildcard", or "regex"
+  #                       Required when domain_pattern is set (and vice versa).
+
+  rules:
+    # ── Threshold detection ──────────────────────────────────────────
+    #
+    # threshold.type:
+    #   "limit"     — Alert on first N occurrences, then suppress
+    #   "threshold" — Alert only after N occurrences within window
+    #   "both"      — Combine limit and threshold behavior
+    # threshold.count: Number of occurrences (must be > 0)
+    # threshold.window_secs: Time window in seconds (must be > 0)
+    # threshold.track_by: "src_ip", "dst_ip", or "both"
+
+    # Detect SSH brute-force (>5 connections in 60s from same source)
+    - id: ids-ssh-bruteforce
+      description: "SSH brute-force detection"
+      severity: high
+      protocol: tcp
+      dst_port: 22
+      threshold:
+        type: threshold
+        count: 5
+        window_secs: 60
+        track_by: src_ip
+
+    # Rate-limit alerts for HTTP port scanning (first 20 events per source, then suppress)
+    - id: ids-http-portscan
+      description: "HTTP port scan detection with alert rate limiting"
+      severity: medium
+      protocol: tcp
+      dst_port: 80
+      threshold:
+        type: limit
+        count: 20
+        window_secs: 10
+        track_by: src_ip
+
+    # Detect ICMP flood (combined limit + threshold tracking both directions)
+    - id: ids-icmp-flood
+      description: "ICMP flood detection"
+      severity: medium
+      protocol: icmp
+      threshold:
+        type: both
+        count: 100
+        window_secs: 10
+        track_by: both
+
+    # ── Payload pattern matching ─────────────────────────────────────
+    # Detect SQL injection attempts in HTTP traffic
+    - id: ids-sqli-attempt
+      description: "SQL injection pattern in HTTP payload"
+      severity: critical
+      protocol: tcp
+      dst_port: 80
+      pattern: "(?i)(union\\s+select|drop\\s+table|;\\s*delete\\s+from)"
+
+    # Detect reverse shell on common backdoor port (block mode override)
+    - id: ids-reverse-shell
+      description: "Reverse shell on TCP/4444"
+      severity: critical
+      protocol: tcp
+      dst_port: 4444
+      mode: block
+
+    # ── DNS exfiltration ─────────────────────────────────────────────
+    # Detect high-volume DNS queries on non-standard port
+    - id: ids-dns-exfil
+      description: "DNS exfiltration on UDP/5353"
+      severity: high
+      protocol: udp
+      dst_port: 5353
+
+    # ── Domain-aware matching ────────────────────────────────────────
+    # Requires DNS intelligence to be enabled for domain→IP resolution.
+
+    # Exact domain match: alert on traffic to a known C2 server
+    - id: ids-c2-exact
+      description: "Known C2 callback domain"
+      severity: critical
+      protocol: tcp
+      dst_port: 443
+      domain_pattern: "c2.malicious-actor.com"
+      domain_match_mode: exact
+
+    # Wildcard match: detect traffic to any subdomain of a suspicious TLD
+    - id: ids-suspicious-wildcard
+      description: "Traffic to suspicious wildcard domain"
+      severity: high
+      protocol: tcp
+      domain_pattern: "*.evil-domain.net"
+      domain_match_mode: wildcard
+
+    # Regex match: detect DGA-style domain beacon patterns
+    - id: ids-dga-beacon
+      description: "DGA beacon pattern detection"
+      severity: high
+      protocol: tcp
+      dst_port: 443
+      domain_pattern: "beacon\\.[a-z]{8,12}\\.(com|net|org)"
+      domain_match_mode: regex

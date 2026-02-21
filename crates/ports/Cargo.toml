@@ -1,0 +1,15 @@
+[package]
+name = "ports"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+test-utils = []
+
+[dependencies]
+domain = { workspace = true }
+ebpf-common = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ebpfsentinel-test
+  labels:
+    app.kubernetes.io/name: ebpfsentinel
+    app.kubernetes.io/component: test

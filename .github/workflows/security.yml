@@ -1,0 +1,81 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * *" # Daily at 6am UTC
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Vulnerability scan ───────────────────────────────────────────
+  audit:
+    name: Cargo Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── License and advisory check ───────────────────────────────────
+  deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # ── Unsafe code audit ────────────────────────────────────────────
+  unsafe-audit:
+    name: Unsafe Code Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify forbid(unsafe_code) in pure-logic crates
+        run: |
+          for crate in domain ports application infrastructure; do
+            if ! grep -q 'forbid(unsafe_code)' "crates/$crate/src/lib.rs"; then
+              echo "ERROR: crates/$crate/src/lib.rs missing #![forbid(unsafe_code)]"
+              exit 1
+            fi
+          done
+          echo "All pure-logic crates forbid unsafe code"
+
+      - name: Verify deny(unsafe_code) in adapters
+        run: |
+          if ! grep -q 'deny(unsafe_code)' "crates/adapters/src/lib.rs"; then
+            echo "ERROR: crates/adapters/src/lib.rs missing #![deny(unsafe_code)]"
+            exit 1
+          fi
+          echo "Adapters crate denies unsafe code (with targeted allows)"
+
+      - name: Count unsafe blocks
+        run: |
+          echo "=== Unsafe code usage ==="
+          grep -rn "unsafe " crates/ --include="*.rs" | grep -v "//.*unsafe" | grep -v "forbid\|deny\|allow" || echo "No unsafe blocks found"
+
+  # ── SBOM generation ──────────────────────────────────────────────
+  sbom:
+    name: SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx
+      - name: Generate SBOM
+        run: cargo cyclonedx --format json --output-file sbom.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.json
+          retention-days: 90

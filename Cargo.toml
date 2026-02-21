@@ -1,0 +1,132 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ebpf-common",
+    "crates/domain",
+    "crates/ports",
+    "crates/application",
+    "crates/adapters",
+    "crates/infrastructure",
+    "crates/agent",
+    "crates/xtask",
+]
+# eBPF program crates target bpfel-unknown-none (nightly) — excluded from default build
+# Build via: cargo xtask ebpf-build
+exclude = [
+    "crates/ebpf-programs/xdp-firewall",
+    "crates/ebpf-programs/xdp-ratelimit",
+    "crates/ebpf-programs/tc-dns",
+    "crates/ebpf-programs/tc-ids",
+    "crates/ebpf-programs/tc-threatintel",
+    "crates/ebpf-programs/uprobe-dlp",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/ebpfsentinel/ebpfsentinel"
+rust-version = "1.93"
+
+[workspace.dependencies]
+# eBPF
+aya = "0.13.1"
+aya-ebpf = "0.1.1"
+aya-build = "0.1.3"
+aya-log = "0.2.1"
+aya-log-ebpf = "0.1.0"
+network-types = "0.1.0"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tokio-rustls = "0.26"
+
+# HTTP
+axum = "0.8"
+http-body-util = "0.1"
+tower = "0.5"
+tower-http = "0.6"
+tower_governor = "0.8"
+
+# gRPC
+tonic = { version = "0.14", features = ["tls-aws-lc"] }
+tonic-health = "0.14"
+tonic-reflection = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+prost = "0.14"
+tokio-stream = "0.1"
+
+# Storage
+redb = "3.1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Metrics
+prometheus-client = "0.24"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# HTTP client
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
+
+# Email
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder", "hostname"] }
+
+# File watching
+notify = "8"
+notify-debouncer-mini = "0.7"
+
+# JWT & Crypto
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+sha2 = "0.10"
+
+# TLS
+rustls-pemfile = "2"
+
+# Config & Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+
+# Regex
+regex = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Testing & Benchmarking
+tempfile = "3"
+base64 = "0.22"
+criterion = { version = "0.8", features = ["html_reports"] }
+
+# OpenAPI
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+
+# Internal crates
+ebpf-common = { path = "crates/ebpf-common" }
+domain = { path = "crates/domain" }
+ports = { path = "crates/ports" }
+application = { path = "crates/application" }
+adapters = { path = "crates/adapters" }
+infrastructure = { path = "crates/infrastructure" }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

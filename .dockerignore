@@ -1,0 +1,40 @@
+# Build artifacts
+target/
+**/target/
+
+# Version control
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Secrets & environment
+.env
+.env.local
+*.pem
+*.key
+credentials.json
+
+# CI/CD
+.github/
+
+# Planning docs (not needed in image)
+../_bmad-output/
+
+# Test/bench/fuzz (not needed for production build)
+tests/
+benches/
+fuzz/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IA
+CLAUDE.md
+.claude

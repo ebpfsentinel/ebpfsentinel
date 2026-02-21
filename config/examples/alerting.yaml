@@ -1,0 +1,99 @@
+# eBPFsentinel — Alert Pipeline Configuration Example
+# ===================================================
+#
+# Routes security alerts to multiple destinations (log, email, webhook)
+# based on severity and event type. Includes built-in deduplication and
+# throttling to prevent alert storms.
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/alerting.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+alerting:
+  enabled: true
+
+  # ── Deduplication ──────────────────────────────────────────────────
+  # Window (seconds) within which identical alerts are suppressed.
+  # Identical = same rule ID + same source/destination.
+  dedup_window_secs: 120
+
+  # ── Throttling ─────────────────────────────────────────────────────
+  # Maximum alerts per route within the throttle window.
+  # Prevents alert fatigue and protects downstream sinks.
+  throttle_window_secs: 600    # 10-minute window
+  throttle_max: 50             # Max 50 alerts per route per window
+
+  # ── SMTP configuration ─────────────────────────────────────────────
+  # Required when any route uses destination: "email".
+  #
+  # Fields:
+  #   host         — SMTP server hostname (required)
+  #   port         — SMTP port (default: 587 for STARTTLS)
+  #   username     — SMTP auth username (optional)
+  #   password     — SMTP auth password (optional; masked in sanitized config)
+  #   from_address — Sender email address (required)
+  #   tls          — Enable STARTTLS (default: true)
+  smtp:
+    host: smtp.example.com
+    port: 587
+    username: alerts@example.com
+    password: "smtp-password-here"
+    from_address: ebpfsentinel-alerts@example.com
+    tls: true
+
+  # ── Alert routes ───────────────────────────────────────────────────
+  #
+  # Fields:
+  #   name            — Unique route name (required, non-empty)
+  #   destination     — "log", "email", or "webhook"
+  #   min_severity    — Minimum severity to route: "low", "medium", "high", "critical"
+  #   event_types     — Optional filter by source domain (e.g., ["ids", "ips", "dlp"])
+  #   webhook_url     — Webhook endpoint URL (required for destination: "webhook")
+  #   email_to        — Recipient address (required for destination: "email")
+  #   webhook_headers — Optional custom HTTP headers for webhook requests
+
+  routes:
+    # Log everything (catch-all for observability)
+    - name: all-to-log
+      destination: log
+      min_severity: low
+
+    # Email critical alerts to the security team
+    - name: critical-email
+      destination: email
+      min_severity: critical
+      email_to: security-team@example.com
+
+    # Email high-severity IPS events to the on-call engineer
+    - name: ips-high-email
+      destination: email
+      min_severity: high
+      event_types: [ips]
+      email_to: oncall@example.com
+
+    # Webhook for all high+ alerts to Slack/PagerDuty/SIEM
+    - name: high-webhook-slack
+      destination: webhook
+      min_severity: high
+      webhook_url: "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+
+    # Webhook for IDS/IPS events to a SIEM collector with custom auth header
+    - name: siem-ids-ips
+      destination: webhook
+      min_severity: medium
+      event_types: [ids, ips]
+      webhook_url: "https://siem.example.com/api/v1/events"
+      webhook_headers:
+        Authorization: "Bearer siem-api-token-here"
+        X-Source: "ebpfsentinel"
+
+    # Webhook for DLP data leak alerts
+    - name: dlp-webhook
+      destination: webhook
+      min_severity: high
+      event_types: [dlp]
+      webhook_url: "https://security.example.com/api/dlp-alerts"

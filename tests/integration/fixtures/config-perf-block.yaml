@@ -1,0 +1,103 @@
+# config-perf-block.yaml — Full stack, firewall=block, ips=block
+# Derived from config-ebpf-benchmark.yaml for Docker performance tests.
+# Active blocking on ports 9999 and 7777 — verifies blocked traffic = 0 bps.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: warn
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: pass
+  rules:
+    - id: fw-perf-deny-9999
+      priority: 10
+      action: deny
+      protocol: tcp
+      dst_port: 9999
+      scope: global
+      enabled: true
+    - id: fw-perf-deny-7777
+      priority: 20
+      action: deny
+      protocol: tcp
+      dst_port: 7777
+      scope: global
+      enabled: true
+    - id: fw-perf-log-icmp
+      priority: 100
+      action: log
+      protocol: icmp
+      scope: global
+      enabled: true
+
+ids:
+  enabled: true
+  mode: alert
+  rules:
+    - id: ids-perf-reverse-shell
+      description: "Perf: reverse shell detection"
+      severity: critical
+      protocol: tcp
+      dst_port: 4444
+      enabled: true
+
+ips:
+  enabled: true
+  mode: block
+  auto_blacklist_threshold: 10
+  max_blacklist_duration_secs: 3600
+  max_blacklist_size: 10000
+  whitelist:
+    - "__WHITELIST_SUBNET__"
+  rules:
+    - id: ips-perf-reverse-shell
+      description: "Perf: block reverse shell"
+      severity: critical
+      protocol: tcp
+      dst_port: 4444
+      mode: block
+      enabled: true
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: true
+  default_rate: 100000
+  default_burst: 200000
+  default_algorithm: token_bucket
+  rules:
+    - id: rl-perf-global
+      rate: 100000
+      burst: 200000
+      scope: global
+      algorithm: token_bucket
+      action: drop
+      enabled: true
+
+threatintel:
+  enabled: true
+  mode: alert
+  feeds: []
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 60
+  throttle_window_secs: 300
+  throttle_max_per_window: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

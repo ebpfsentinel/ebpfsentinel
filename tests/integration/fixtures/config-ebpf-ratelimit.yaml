@@ -1,0 +1,54 @@
+# config-ebpf-ratelimit.yaml — Rate limiting eBPF scenario test config
+# Tests: 100 tok/s global rate limit, token_bucket algorithm
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: true
+  default_rate: 100
+  default_burst: 200
+  default_algorithm: token_bucket
+  rules:
+    # Low global rate limit for easy testing
+    - id: rl-test-global
+      rate: 100
+      burst: 200
+      scope: global
+      algorithm: token_bucket
+      action: drop
+      enabled: true
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

@@ -1,0 +1,117 @@
+# eBPFsentinel — DNS Intelligence Configuration Example
+# =====================================================
+#
+# Passive DNS capture via TC eBPF classifier. Builds a domain-to-IP resolution
+# cache from observed DNS traffic, enables domain-based blocklists (inline +
+# external feeds), and feeds the domain reputation scoring engine.
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/dns.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+dns:
+  enabled: true
+
+  # ── DNS cache ──────────────────────────────────────────────────────
+  # Stores resolved domain-to-IP mappings from observed DNS traffic.
+  # Used by domain-aware IDS rules and reputation scoring.
+  cache:
+    # Maximum cache entries. Range: 1,000 – 1,000,000.
+    # Size based on expected unique domains in your environment.
+    max_entries: 100000
+
+    # Minimum TTL floor in seconds (prevents cache churn from
+    # very short TTLs). Must be >= 10.
+    min_ttl_secs: 60
+
+    # How often (in seconds) to sweep expired entries. Must be >= 10.
+    purge_interval_secs: 30
+
+  # ── Domain blocklist ───────────────────────────────────────────────
+  # When a DNS response resolves to a blocked domain, the resolved IPs
+  # are injected into an eBPF map for wire-speed enforcement.
+  blocklist:
+    # Inline blocked domains — exact or wildcard patterns.
+    # Wildcard patterns match any subdomain: "*.evil.com" blocks
+    # "a.evil.com", "b.c.evil.com", etc. Maximum depth: 5 label levels.
+    domains:
+      - "*.malware-domain.com"
+      - "phishing.example.net"
+      - "*.cryptominer-pool.org"
+      - "c2-callback.evil-actor.io"
+      - "*.tracking-adware.com"
+
+    # Action when a blocked domain resolves:
+    #   "block" — inject resolved IPs into the enforcement map
+    #   "alert" — log the resolution but don't block
+    #   "log"   — same as alert (lightweight logging)
+    action: block
+
+    # eBPF map to inject blocked IPs into:
+    #   "threatintel" — adds to the threat intel IOC map (default)
+    #   "firewall"    — adds as firewall deny rules
+    #   "ips"         — adds to the IPS blacklist
+    inject_target: threatintel
+
+    # Grace period (seconds) before removing injected IPs after a domain
+    # is unblocked. Prevents flapping when blocklists are updated.
+    grace_period_secs: 300
+
+    # ── External blocklist feeds ───────────────────────────────────
+    # Periodically fetched domain blocklists. Maximum 10 feeds.
+    #
+    # Fields:
+    #   name                  — Human-readable feed name (required)
+    #   url                   — Feed URL (required, http:// or https://)
+    #   format                — "plaintext" (one domain per line) or
+    #                           "hosts" (/etc/hosts format: "0.0.0.0 domain")
+    #   refresh_interval_secs — Refresh interval (minimum 60 seconds)
+    feeds:
+      # Steven Black's unified hosts file (ad + malware domains)
+      - name: steven-black-hosts
+        url: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+        format: hosts
+        refresh_interval_secs: 86400     # Daily
+
+      # Abuse.ch URLhaus domain blocklist
+      - name: urlhaus-domains
+        url: "https://urlhaus.abuse.ch/downloads/hostfile/"
+        format: hosts
+        refresh_interval_secs: 3600      # Hourly
+
+      # Custom internal blocklist
+      - name: internal-blocklist
+        url: "https://security.internal.example.com/blocked-domains.txt"
+        format: plaintext
+        refresh_interval_secs: 300       # Every 5 minutes
+
+  # ── Domain reputation scoring ──────────────────────────────────────
+  # Behavioral scoring engine that tracks domain reputation over time.
+  # Domains involved in suspicious activity accumulate negative scores.
+  reputation:
+    # Enable reputation tracking (requires DNS cache to be active).
+    enabled: true
+
+    # Maximum domains to track simultaneously. Range: 1,000 – 100,000.
+    max_tracked_domains: 50000
+
+    # Score threshold (0.0 – 1.0) above which a domain is considered malicious.
+    # 0.8 = 80% confidence that the domain is malicious.
+    auto_block_threshold: 0.8
+
+    # Automatically block domains that exceed the threshold.
+    # When enabled, domains exceeding auto_block_threshold are added
+    # to the runtime blocklist.
+    auto_block_enabled: true
+
+    # TTL (seconds) for auto-blocked domains. After this period,
+    # the domain is unblocked and must re-accumulate to be blocked again.
+    auto_block_ttl_secs: 7200          # 2 hours
+
+    # Score decay half-life in hours. Older signals lose weight over time,
+    # allowing domains to recover reputation. Must be >= 1.
+    decay_half_life_hours: 24

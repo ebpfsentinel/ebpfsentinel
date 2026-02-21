@@ -1,0 +1,55 @@
+[package]
+name = "adapters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+domain = { workspace = true }
+ports = { workspace = true }
+application = { workspace = true }
+infrastructure = { workspace = true }
+ebpf-common = { workspace = true, features = ["userspace"] }
+
+anyhow = { workspace = true }
+jsonwebtoken = { workspace = true }
+aya = { workspace = true }
+aya-log = { workspace = true }
+axum = { workspace = true }
+http-body-util = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tower_governor = { workspace = true }
+tonic = { workspace = true }
+tonic-health = { workspace = true }
+tonic-reflection = { workspace = true }
+prost = { workspace = true }
+tonic-prost = { workspace = true }
+tokio-stream = { workspace = true }
+redb = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
+thiserror = { workspace = true }
+utoipa = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
+reqwest = { workspace = true }
+lettre = { workspace = true }
+sha2 = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }
+
+[dev-dependencies]
+ports = { workspace = true, features = ["test-utils"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+base64 = { workspace = true }
+
+[lints]
+workspace = true

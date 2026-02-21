@@ -1,0 +1,53 @@
+# config-perf-ratelimit-only.yaml — Only ratelimit enabled (1M pps limit)
+# For measuring isolated ratelimit overhead without other domains.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: warn
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: true
+  default_rate: 1000000
+  default_burst: 2000000
+  default_algorithm: token_bucket
+  rules:
+    - id: rl-perf-global-1m
+      rate: 1000000
+      burst: 2000000
+      scope: global
+      algorithm: token_bucket
+      action: drop
+      enabled: true
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

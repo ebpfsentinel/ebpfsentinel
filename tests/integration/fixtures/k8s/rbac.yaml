@@ -1,0 +1,25 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ebpfsentinel
+  labels:
+    app.kubernetes.io/name: ebpfsentinel
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ebpfsentinel
+  labels:
+    app.kubernetes.io/name: ebpfsentinel
+subjects:
+  - kind: ServiceAccount
+    name: ebpfsentinel
+    namespace: ebpfsentinel-test
+roleRef:
+  kind: ClusterRole
+  name: ebpfsentinel
+  apiGroup: rbac.authorization.k8s.io

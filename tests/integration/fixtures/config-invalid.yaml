@@ -1,0 +1,9 @@
+# config-invalid.yaml — Intentionally invalid config for negative testing.
+# Missing required agent.interfaces field (empty list).
+
+agent:
+  interfaces: []
+  log_level: info
+  http_port: 18080
+  grpc_port: 18080
+  metrics_port: 19090

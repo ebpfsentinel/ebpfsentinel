@@ -1,0 +1,79 @@
+[package]
+name = "ebpfsentinel-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+domain = { path = "../crates/domain" }
+ebpf-common = { path = "../crates/ebpf-common" }
+infrastructure = { path = "../crates/infrastructure" }
+serde_json = "1"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_l7_parsers"
+path = "fuzz_targets/fuzz_l7_parsers.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_feed_parser"
+path = "fuzz_targets/fuzz_feed_parser.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_dlp_scan"
+path = "fuzz_targets/fuzz_dlp_scan.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_packet_event"
+path = "fuzz_targets/fuzz_packet_event.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_dns_parser"
+path = "fuzz_targets/fuzz_dns_parser.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ids_ips"
+path = "fuzz_targets/fuzz_ids_ips.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_firewall"
+path = "fuzz_targets/fuzz_firewall.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ratelimit"
+path = "fuzz_targets/fuzz_ratelimit.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_alert_router"
+path = "fuzz_targets/fuzz_alert_router.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_config"
+path = "fuzz_targets/fuzz_config.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_domain_reputation"
+path = "fuzz_targets/fuzz_domain_reputation.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_domain_matcher"
+path = "fuzz_targets/fuzz_domain_matcher.rs"
+doc = false

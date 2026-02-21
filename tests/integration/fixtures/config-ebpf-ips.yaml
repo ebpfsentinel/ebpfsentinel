@@ -1,0 +1,92 @@
+# config-ebpf-ips.yaml — IPS eBPF scenario test config
+# Tests: block mode, auto-blacklist threshold 3, reverse shell + SSH
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: true
+  mode: alert
+  rules:
+    # IDS rule for reverse shell (feeds IPS)
+    - id: ids-reverse-shell
+      description: "Reverse shell detection"
+      severity: critical
+      protocol: tcp
+      dst_port: 4444
+      enabled: true
+
+    # IDS rule for SSH (feeds IPS)
+    - id: ids-ssh-detect
+      description: "SSH connection detection"
+      severity: high
+      protocol: tcp
+      dst_port: 22
+      enabled: true
+
+ips:
+  enabled: true
+  mode: block
+  auto_blacklist_threshold: 3
+  max_blacklist_duration_secs: 300
+  max_blacklist_size: 1000
+  whitelist:
+    - "192.168.0.0/16"
+  rules:
+    # Block reverse shell sources immediately
+    - id: ips-reverse-shell-block
+      description: "Block reverse shell traffic"
+      severity: critical
+      protocol: tcp
+      dst_port: 4444
+      mode: block
+      enabled: true
+
+    # Block SSH brute-force after threshold
+    - id: ips-ssh-block
+      description: "Block SSH brute-force sources"
+      severity: high
+      protocol: tcp
+      dst_port: 22
+      mode: block
+      enabled: true
+      threshold:
+        type: threshold
+        count: 3
+        window_secs: 60
+        track_by: src_ip
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max_per_window: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

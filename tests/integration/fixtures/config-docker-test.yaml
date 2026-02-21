@@ -1,0 +1,42 @@
+# eBPFsentinel — Docker integration test configuration (loopback interface)
+agent:
+  interfaces: [lo]
+  bind_address: "0.0.0.0"
+  swagger_ui: true
+  log_level: info
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  mode: alert
+  default_policy: pass
+
+ids:
+  enabled: false
+  mode: alert
+
+ips:
+  enabled: false
+  mode: alert
+
+dlp:
+  enabled: false
+  mode: alert
+
+ratelimit:
+  enabled: false
+  mode: alert
+
+threatintel:
+  enabled: false
+  mode: alert
+
+dns:
+  enabled: true
+  blocklist:
+    domains: []
+  reputation:
+    enabled: false

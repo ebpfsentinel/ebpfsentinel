@@ -1,0 +1,111 @@
+# eBPFsentinel — Data Loss Prevention (DLP) Configuration Example
+# ===============================================================
+#
+# Userspace DLP engine inspects TLS-decrypted payloads (via uprobe on
+# SSL_write/SSL_read) for sensitive data patterns. Each pattern has a
+# regex, severity, data type classification, and optional per-pattern
+# mode override.
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/dlp.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+dlp:
+  enabled: true
+
+  # Mode controls enforcement:
+  #   "alert" — log pattern matches only (observe)
+  #   "block" — actively block connections leaking sensitive data
+  mode: alert
+
+  # ── Patterns ───────────────────────────────────────────────────────
+  #
+  # Fields:
+  #   id          — Unique pattern identifier (required, non-empty)
+  #   name        — Human-readable name (required, non-empty)
+  #   regex       — Rust-compatible regex pattern (required, non-empty;
+  #                 validated at load time with ReDoS protection: 10 MiB size,
+  #                 200 nesting depth)
+  #   severity    — "low", "medium", "high", or "critical"
+  #   data_type   — Classification label (e.g., "pci", "pii", "credentials")
+  #   mode        — Per-pattern mode override ("alert" or "block");
+  #                 inherits global mode if omitted
+  #   description — Optional human-readable description
+  #   enabled     — Whether this pattern is active (default: true)
+
+  patterns:
+    # ── PCI DSS — Payment card data ────────────────────────────────
+    # Visa credit card numbers (16 digits starting with 4)
+    - id: dlp-visa-cc
+      name: Visa Credit Card
+      regex: "\\b4[0-9]{3}[\\s-]?[0-9]{4}[\\s-]?[0-9]{4}[\\s-]?[0-9]{4}\\b"
+      severity: critical
+      data_type: pci
+      mode: block
+      description: "Visa card number (16 digits, with optional separators)"
+
+    # Mastercard numbers (starts with 51-55 or 2221-2720)
+    - id: dlp-mastercard-cc
+      name: Mastercard Credit Card
+      regex: "\\b5[1-5][0-9]{2}[\\s-]?[0-9]{4}[\\s-]?[0-9]{4}[\\s-]?[0-9]{4}\\b"
+      severity: critical
+      data_type: pci
+      mode: block
+      description: "Mastercard number (16 digits)"
+
+    # ── PII — Personally Identifiable Information ──────────────────
+    # US Social Security Number (with separators)
+    - id: dlp-us-ssn
+      name: US Social Security Number
+      regex: "\\b[0-9]{3}-[0-9]{2}-[0-9]{4}\\b"
+      severity: high
+      data_type: pii
+      description: "US SSN in XXX-XX-XXXX format"
+
+    # Email addresses (broad pattern for data leak detection)
+    - id: dlp-email-address
+      name: Email Address
+      regex: "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"
+      severity: low
+      data_type: pii
+      description: "Email address pattern"
+
+    # ── Credentials — API keys and tokens ──────────────────────────
+    # AWS Access Key ID (starts with AKIA)
+    - id: dlp-aws-key
+      name: AWS Access Key ID
+      regex: "\\bAKIA[0-9A-Z]{16}\\b"
+      severity: critical
+      data_type: credentials
+      mode: block
+      description: "AWS IAM access key ID"
+
+    # JSON Web Tokens (3-part base64url dot-separated structure)
+    - id: dlp-jwt-token
+      name: JSON Web Token
+      regex: "\\beyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\b"
+      severity: high
+      data_type: credentials
+      description: "JWT bearer token (header.payload.signature)"
+
+    # Generic API key pattern (common prefix formats)
+    - id: dlp-generic-api-key
+      name: Generic API Key
+      regex: "\\b(sk|pk|api|key)[_-][A-Za-z0-9]{20,}\\b"
+      severity: high
+      data_type: credentials
+      description: "Generic API key with common prefixes (sk_, pk_, api_, key_)"
+
+    # ── Custom — Internal identifiers ──────────────────────────────
+    # Internal employee ID (disabled by default, enable when needed)
+    - id: dlp-internal-empid
+      name: Internal Employee ID
+      regex: "\\bEMP-[0-9]{6}\\b"
+      severity: medium
+      data_type: internal
+      description: "Internal employee identifier (EMP-XXXXXX)"
+      enabled: false

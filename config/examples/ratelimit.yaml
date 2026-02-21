@@ -1,0 +1,144 @@
+# eBPFsentinel — Rate Limiting (DDoS Protection) Configuration Example
+# ====================================================================
+#
+# XDP-based rate limiting with five algorithms. Enforces per-IP or global
+# packet rate limits at wire speed using per-CPU lock-free hash maps
+# (PerCpuHashMap) for zero cross-CPU contention.
+#
+# Advanced features:
+#   - Per-CPU buckets: each CPU maintains independent counters (effective
+#     capacity = rate × num_cpus; acceptable for DDoS mitigation)
+#   - SYN cookie algorithm: kernel-side SYN+ACK generation via
+#     bpf_tcp_gen_syncookie for SYN flood mitigation without TCP stack
+#   - Kernel-side maintenance: bpf_timer for periodic bucket expiration
+#   - Adaptive backpressure: bpf_ringbuf_query skips events when >75% full
+#   - Suspend-aware timestamps: bpf_ktime_get_boot_ns for accurate timing
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/ratelimit.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+ratelimit:
+  enabled: true
+
+  # Default rate (tokens per second) for IPs without a specific rule match.
+  default_rate: 1000
+
+  # Default burst size (max token bucket capacity).
+  # Allows short bursts above the sustained rate.
+  default_burst: 2000
+
+  # Default algorithm for rules that don't specify one:
+  #   "token_bucket"    — Smooth rate limiting with burst allowance (recommended)
+  #   "fixed_window"    — Simple counter reset each window (can allow 2x burst at boundary)
+  #   "sliding_window"  — Weighted hybrid of current + previous window (smoother than fixed)
+  #   "leaky_bucket"    — Constant drain rate, queues excess (strict smoothing)
+  #   "syncookie"       — SYN flood protection: generates SYN+ACK cookies in XDP via
+  #                        bpf_tcp_gen_syncookie (TCP SYN packets only, others pass through)
+  default_algorithm: token_bucket
+
+  # ── Rules ──────────────────────────────────────────────────────────
+  #
+  # Fields:
+  #   id        — Unique rule identifier (required, non-empty)
+  #   enabled   — Whether this rule is active (default: true)
+  #   rate      — Tokens per second (required, must be > 0)
+  #   burst     — Maximum burst / bucket size (required, must be > 0)
+  #   src_ip    — Source CIDR filter (optional; omit to match all sources)
+  #   action    — "drop" (block excess) or "pass" (allow + log excess)
+  #              Aliases: "deny"/"block" = drop, "allow" = pass
+  #   scope     — "source_ip" (per-IP tracking) or "global" (aggregate limit)
+  #              Aliases: "src_ip"/"per_ip"/"per-ip" = source_ip
+  #   algorithm — Per-rule algorithm override (see default_algorithm above)
+
+  rules:
+    # ── Per-IP rate limits ─────────────────────────────────────────
+    # General per-IP limit: 500 packets/sec with token bucket (default)
+    - id: rl-general-per-ip
+      rate: 500
+      burst: 1000
+      scope: source_ip
+      algorithm: token_bucket
+      action: drop
+
+    # Stricter limit for traffic from external networks
+    - id: rl-external-strict
+      rate: 100
+      burst: 200
+      src_ip: "0.0.0.0/0"
+      scope: source_ip
+      algorithm: sliding_window
+      action: drop
+
+    # Lenient limit for trusted internal network
+    - id: rl-internal-lenient
+      rate: 5000
+      burst: 10000
+      src_ip: "10.0.0.0/8"
+      scope: source_ip
+      algorithm: token_bucket
+      action: pass          # Monitor only, don't drop internal traffic
+
+    # ── Global rate limits ─────────────────────────────────────────
+    # Global ICMP rate limit (aggregate across all sources)
+    - id: rl-icmp-global
+      rate: 200
+      burst: 500
+      scope: global
+      algorithm: leaky_bucket
+      action: drop
+
+    # Global DNS rate limit (prevent DNS amplification)
+    - id: rl-dns-global
+      rate: 1000
+      burst: 2000
+      scope: global
+      algorithm: fixed_window
+      action: drop
+
+    # ── Algorithm comparison examples ──────────────────────────────
+    # Same rate with different algorithms to illustrate behavior:
+
+    # Fixed window: simple, but allows 2x burst at window boundary
+    - id: rl-demo-fixed
+      rate: 300
+      burst: 600
+      scope: source_ip
+      algorithm: fixed_window
+      action: drop
+      enabled: false         # Disabled — for documentation only
+
+    # Sliding window: smoother than fixed, weighted average of windows
+    - id: rl-demo-sliding
+      rate: 300
+      burst: 600
+      scope: source_ip
+      algorithm: sliding_window
+      action: drop
+      enabled: false
+
+    # Leaky bucket: strictest smoothing, constant drain rate
+    - id: rl-demo-leaky
+      rate: 300
+      burst: 600
+      scope: source_ip
+      algorithm: leaky_bucket
+      action: drop
+      enabled: false
+
+    # ── SYN cookie protection ────────────────────────────────────
+    # SYN flood mitigation: responds to TCP SYN packets with
+    # SYN+ACK cookies generated in XDP (bpf_tcp_gen_syncookie).
+    # Non-SYN packets pass through unaffected. No state is kept
+    # for half-open connections — only completed handshakes reach
+    # the kernel TCP stack.
+    - id: rl-syncookie-protection
+      rate: 10000           # SYN rate threshold before cookie activation
+      burst: 20000
+      scope: global
+      algorithm: syncookie
+      action: drop

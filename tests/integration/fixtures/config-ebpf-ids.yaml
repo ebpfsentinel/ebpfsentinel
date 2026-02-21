@@ -1,0 +1,76 @@
+# config-ebpf-ids.yaml — IDS eBPF scenario test config
+# Tests: detect reverse shell (4444), SSH brute-force (22), HTTP scan (80)
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: true
+  mode: alert
+  rules:
+    # Detect reverse shell on TCP/4444
+    - id: ids-reverse-shell
+      description: "Reverse shell detection"
+      severity: critical
+      protocol: tcp
+      dst_port: 4444
+      enabled: true
+
+    # SSH brute-force (threshold: >3 in 30s for fast test cycles)
+    - id: ids-ssh-bruteforce
+      description: "SSH brute-force detection"
+      severity: high
+      protocol: tcp
+      dst_port: 22
+      enabled: true
+      threshold:
+        type: threshold
+        count: 3
+        window_secs: 30
+        track_by: src_ip
+
+    # HTTP scan detection
+    - id: ids-http-scan
+      description: "HTTP scan detection"
+      severity: medium
+      protocol: tcp
+      dst_port: 80
+      enabled: true
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max_per_window: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

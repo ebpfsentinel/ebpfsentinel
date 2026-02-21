@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ebpfsentinel-config
+  namespace: ebpfsentinel-test
+  labels:
+    app.kubernetes.io/name: ebpfsentinel
+data:
+  config.yaml: |
+    agent:
+      interfaces:
+        - eth0
+      log_level: info
+      log_format: json
+      http_port: 8080
+      grpc_port: 50051
+      metrics_port: 9090
+
+    firewall:
+      enabled: true
+      mode: alert
+      rules: []
+
+    ids:
+      enabled: false
+
+    ips:
+      enabled: false
+
+    dlp:
+      enabled: false
+
+    ratelimit:
+      enabled: false
+
+    threatintel:
+      enabled: false
+
+    l7:
+      enabled: false
+
+    alerting:
+      enabled: false
+
+    audit:
+      enabled: true
+      storage_path: /data/audit.redb

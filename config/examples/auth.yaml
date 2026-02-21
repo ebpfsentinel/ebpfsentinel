@@ -1,0 +1,113 @@
+# eBPFsentinel — Authentication & RBAC Configuration Example
+# ==========================================================
+#
+# Three authentication methods available. API keys can be combined with
+# either JWT or OIDC (but not both JWT and OIDC simultaneously).
+#
+#   1. API Keys — standalone, no external identity provider required
+#   2. JWT      — RSA public key validation (RS256 algorithm)
+#   3. OIDC     — JWKS-based token validation (Kubernetes, Auth0, Okta, etc.)
+#
+# RBAC roles: admin (full access), operator (namespace-scoped writes),
+# viewer (read-only).
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/auth.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+# ── Option A: API Keys only (simplest setup) ──────────────────────────
+# Uncomment this block and comment out Options B/C below.
+
+auth:
+  enabled: true
+
+  # Whether /metrics endpoint requires authentication.
+  # Set to true if your metrics contain sensitive topology information.
+  # Default: false (Prometheus scraper can access without auth).
+  metrics_auth_required: false
+
+  # ── Static API keys ────────────────────────────────────────────────
+  #
+  # Fields:
+  #   name       — Human-readable key name (required, non-empty)
+  #   key        — Secret key value (required, non-empty; masked in sanitized config)
+  #   role       — RBAC role: "admin", "operator", or "viewer" (default: "viewer")
+  #   namespaces — Optional namespace scoping (empty = unrestricted)
+  #
+  # Use with X-API-Key header:
+  #   curl -H "X-API-Key: sk-admin-CHANGE-ME" http://localhost:8080/api/v1/firewall/rules
+  # Or with CLI --token flag:
+  #   ebpfsentinel-agent --token sk-admin-CHANGE-ME firewall list
+  api_keys:
+    # Full admin access (use sparingly, rotate regularly)
+    - name: admin-key
+      key: "sk-admin-CHANGE-ME-TO-A-SECURE-VALUE"
+      role: admin
+
+    # Operator scoped to production and staging namespaces
+    - name: ops-team
+      key: "sk-ops-CHANGE-ME-TO-A-SECURE-VALUE"
+      role: operator
+      namespaces: [production, staging]
+
+    # Read-only access for monitoring systems (Grafana, Datadog, etc.)
+    - name: monitoring
+      key: "sk-monitoring-CHANGE-ME-TO-A-SECURE-VALUE"
+      role: viewer
+
+    # Read-only access for CI/CD pipeline health checks
+    - name: ci-pipeline
+      key: "sk-ci-CHANGE-ME-TO-A-SECURE-VALUE"
+      role: viewer
+
+# ── Option B: JWT (RS256 public key) ────────────────────────────────
+# Replace the auth block above with this one for JWT-based auth.
+# Can be combined with api_keys for mixed environments.
+#
+# auth:
+#   enabled: true
+#   jwt:
+#     # Path to the RSA public key in PEM format (RS256).
+#     # Generate with: openssl rsa -in private.pem -pubout -out jwt-pub.pem
+#     public_key_path: /etc/ebpfsentinel/jwt-pub.pem
+#
+#     # Expected "iss" claim in tokens. Validated when set.
+#     issuer: "https://auth.example.com"
+#
+#     # Expected "aud" claim in tokens. Validated when set.
+#     audience: "ebpfsentinel"
+#
+#   # Optional: add API keys alongside JWT for service accounts
+#   api_keys:
+#     - name: monitoring
+#       key: "sk-monitoring-CHANGE-ME"
+#       role: viewer
+
+# ── Option C: OIDC (JWKS endpoint) ──────────────────────────────────
+# Replace the auth block above with this one for OIDC-based auth.
+# Ideal for Kubernetes service account tokens or OAuth2 providers.
+#
+# auth:
+#   enabled: true
+#   oidc:
+#     # JWKS endpoint URL for key discovery.
+#     # Kubernetes: https://kubernetes.default.svc/openid/v1/jwks
+#     # Auth0:      https://YOUR_DOMAIN.auth0.com/.well-known/jwks.json
+#     # Okta:       https://YOUR_ORG.okta.com/oauth2/default/v1/keys
+#     jwks_url: "https://kubernetes.default.svc/openid/v1/jwks"
+#
+#     # Expected "iss" claim. Validated when set.
+#     issuer: "https://kubernetes.default.svc"
+#
+#     # Expected "aud" claim. Validated when set.
+#     audience: "ebpfsentinel"
+#
+#   # Optional: add API keys alongside OIDC
+#   api_keys:
+#     - name: emergency-admin
+#       key: "sk-emergency-CHANGE-ME"
+#       role: admin
