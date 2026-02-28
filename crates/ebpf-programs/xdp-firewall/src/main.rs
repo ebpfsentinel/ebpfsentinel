@@ -15,7 +15,6 @@ use aya_ebpf::{
     },
     programs::XdpContext,
 };
-use aya_log_ebpf::info;
 use core::mem;
 use ebpf_common::{
     conntrack::{
@@ -114,6 +113,22 @@ static FIREWALL_DEFAULT_POLICY: Array<u8> = Array::with_max_entries(1, 0);
 /// Per-CPU packet counters. Index: 0=passed, 1=dropped, 2=errors, 3=events_dropped.
 #[map]
 static FIREWALL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 0);
+
+/// Per-CPU scratch buffer for IPv4 rule scan context.
+/// Avoids allocating `RuleScanCtx` on the 512-byte BPF stack.
+#[map]
+static SCAN_CTX_V4: PerCpuArray<RuleScanCtx> = PerCpuArray::with_max_entries(1, 0);
+
+/// Per-CPU scratch buffer for IPv6 rule scan context.
+/// Avoids allocating `RuleScanCtxV6` on the 512-byte BPF stack.
+#[map]
+static SCAN_CTX_V6: PerCpuArray<RuleScanCtxV6> = PerCpuArray::with_max_entries(1, 0);
+
+/// Per-CPU scratch buffer for packet context shared across action/event helpers.
+/// Avoids passing 8+ arguments through inlined functions that would blow
+/// the 512-byte BPF stack.
+#[map]
+static PKT_CTX: PerCpuArray<PacketCtx> = PerCpuArray::with_max_entries(1, 0);
 
 /// Shared kernel->userspace event ring buffer (1 MB).
 #[map]
@@ -298,6 +313,25 @@ struct RuleScanCtxV6 {
     matched_max_states: u16,
 }
 
+/// Per-packet context stored in a `PerCpuArray` to keep addresses and
+/// metadata off the 512-byte BPF stack. Populated once per packet,
+/// consumed by `apply_action`, `apply_default_policy`, and `emit_event`.
+#[repr(C)]
+struct PacketCtx {
+    src_addr: [u32; 4],
+    dst_addr: [u32; 4],
+    /// Raw IPv6 source bytes (network order) for LPM trie lookup.
+    /// Unused in the IPv4 path.
+    src_bytes_v6: [u8; 16],
+    /// Raw IPv6 destination bytes (network order) for LPM trie lookup.
+    dst_bytes_v6: [u8; 16],
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    flags: u8,
+    vlan_id: u16,
+}
+
 // ── bpf_loop callbacks ──────────────────────────────────────────────
 
 /// Callback for `bpf_loop`: scan one IPv4 firewall rule.
@@ -413,34 +447,12 @@ fn read_default_policy() -> u8 {
     }
 }
 
-/// Apply the default policy action.
+/// Apply the default policy action. Reads packet metadata from `PKT_CTX`.
 #[inline(always)]
-fn apply_default_policy(
-    ctx: &XdpContext,
-    src_addr: &[u32; 4],
-    dst_addr: &[u32; 4],
-    src_port: u16,
-    dst_port: u16,
-    protocol: u8,
-    flags: u8,
-    vlan_id: u16,
-) -> Result<u32, ()> {
+fn apply_default_policy(ctx: &XdpContext) -> Result<u32, ()> {
     let policy = read_default_policy();
     if policy == DEFAULT_POLICY_DROP {
-        emit_event(
-            src_addr,
-            dst_addr,
-            src_port,
-            dst_port,
-            protocol,
-            ACTION_DROP,
-            flags,
-            vlan_id,
-        );
-        info!(
-            ctx,
-            "DEFAULT_DROP {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port
-        );
+        emit_event(ACTION_DROP);
         increment_metric(METRIC_DROPPED);
         Ok(xdp_action::XDP_DROP)
     } else {
@@ -486,7 +498,7 @@ fn try_xdp_firewall(ctx: &XdpContext) -> Result<u32, ()> {
 }
 
 /// IPv4 firewall processing: linear scan of FIREWALL_RULES array.
-#[inline(always)]
+#[inline(never)]
 fn process_firewall_v4(
     ctx: &XdpContext,
     l3_offset: usize,
@@ -548,6 +560,18 @@ fn process_firewall_v4(
     let src_addr = [src_ip, 0, 0, 0];
     let dst_addr = [dst_ip, 0, 0, 0];
 
+    // Populate per-CPU packet context for apply_action / emit_event.
+    let pkt_ctx = PKT_CTX.get_ptr_mut(0).ok_or(())?;
+    unsafe {
+        (*pkt_ctx).src_addr = src_addr;
+        (*pkt_ctx).dst_addr = dst_addr;
+        (*pkt_ctx).src_port = src_port;
+        (*pkt_ctx).dst_port = dst_port;
+        (*pkt_ctx).protocol = protocol as u8;
+        (*pkt_ctx).flags = flags;
+        (*pkt_ctx).vlan_id = vlan_id;
+    }
+
     // Phase 0: Overload blacklist fast-path check.
     // If source IP is in the overload set (set_id=255), drop immediately.
     let overload_key = IpSetKeyV4 {
@@ -583,31 +607,11 @@ fn process_firewall_v4(
     // Keys use network byte order for correct prefix matching.
     let src_key = Key::new(32, src_ip.to_be_bytes());
     if let Some(val) = FW_LPM_SRC_V4.get(&src_key) {
-        return apply_action(
-            ctx,
-            val.action,
-            &src_addr,
-            &dst_addr,
-            src_port,
-            dst_port,
-            protocol as u8,
-            flags,
-            vlan_id,
-        );
+        return apply_action(ctx, val.action);
     }
     let dst_key = Key::new(32, dst_ip.to_be_bytes());
     if let Some(val) = FW_LPM_DST_V4.get(&dst_key) {
-        return apply_action(
-            ctx,
-            val.action,
-            &src_addr,
-            &dst_addr,
-            src_port,
-            dst_port,
-            protocol as u8,
-            flags,
-            vlan_id,
-        );
+        return apply_action(ctx, val.action);
     }
 
     // Phase 2: Linear scan for complex rules (port, protocol, VLAN).
@@ -619,84 +623,61 @@ fn process_firewall_v4(
 
     // Scan rules via bpf_loop (kernel 5.17+): verifier analyzes the callback
     // body only once, allowing up to 4096 rules without complexity limits.
-    let mut scan_ctx = RuleScanCtx {
-        count,
-        src_ip,
-        dst_ip,
-        src_port,
-        dst_port,
-        protocol: protocol as u8,
-        vlan_id,
-        ct_state,
-        tcp_flags,
-        icmp_type,
-        icmp_code,
-        dscp,
-        src_mac,
-        dst_mac,
-        matched_action: -1,
-        matched_rule_idx: -1,
-        matched_max_states: 0,
-    };
+    // Use per-CPU scratch buffer to keep RuleScanCtx off the 512-byte stack.
+    let scan_ctx = SCAN_CTX_V4.get_ptr_mut(0).ok_or(())?;
+    unsafe {
+        (*scan_ctx).count = count;
+        (*scan_ctx).src_ip = src_ip;
+        (*scan_ctx).dst_ip = dst_ip;
+        (*scan_ctx).src_port = src_port;
+        (*scan_ctx).dst_port = dst_port;
+        (*scan_ctx).protocol = protocol as u8;
+        (*scan_ctx).vlan_id = vlan_id;
+        (*scan_ctx).ct_state = ct_state;
+        (*scan_ctx).tcp_flags = tcp_flags;
+        (*scan_ctx).icmp_type = icmp_type;
+        (*scan_ctx).icmp_code = icmp_code;
+        (*scan_ctx).dscp = dscp;
+        (*scan_ctx).src_mac = src_mac;
+        (*scan_ctx).dst_mac = dst_mac;
+        (*scan_ctx).matched_action = -1;
+        (*scan_ctx).matched_rule_idx = -1;
+        (*scan_ctx).matched_max_states = 0;
+    }
     unsafe {
         bpf_loop(
             MAX_FIREWALL_RULES,
             scan_rule_v4 as *mut c_void,
-            &mut scan_ctx as *mut RuleScanCtx as *mut c_void,
+            scan_ctx as *mut RuleScanCtx as *mut c_void,
             0,
         );
     }
+    let matched_action = unsafe { (*scan_ctx).matched_action };
+    let matched_rule_idx = unsafe { (*scan_ctx).matched_rule_idx };
+    let matched_max_states = unsafe { (*scan_ctx).matched_max_states };
 
-    if scan_ctx.matched_action >= 0 {
-        let action = scan_ctx.matched_action as u8;
+    if matched_action >= 0 {
+        let action = matched_action as u8;
         // For PASS/LOG on NEW connections, enforce connection limits.
         if (action == ACTION_PASS || action == ACTION_LOG)
             && (ct_state == CT_STATE_NEW || ct_state == 0xFF)
         {
             if !check_connection_limits(
                 src_ip,
-                scan_ctx.matched_rule_idx,
-                scan_ctx.matched_max_states,
+                matched_rule_idx,
+                matched_max_states,
             ) {
                 // Connection limit exceeded → DROP.
-                emit_event(
-                    &src_addr,
-                    &dst_addr,
-                    src_port,
-                    dst_port,
-                    protocol as u8,
-                    ACTION_DROP,
-                    flags,
-                    vlan_id,
-                );
+                emit_event(ACTION_DROP);
                 increment_metric(METRIC_DROPPED);
                 return Ok(xdp_action::XDP_DROP);
             }
         }
-        return apply_action(
-            ctx,
-            action,
-            &src_addr,
-            &dst_addr,
-            src_port,
-            dst_port,
-            protocol as u8,
-            flags,
-            vlan_id,
-        );
+        return apply_action(ctx, action);
     }
 
     // No rule matched — apply default policy
-    apply_default_policy(
-        ctx,
-        &src_addr,
-        &dst_addr,
-        src_port,
-        dst_port,
-        protocol as u8,
-        flags,
-        vlan_id,
-    )
+    apply_default_policy(ctx)
 }
 
 /// Check if an IPv4 rule matches the packet fields.
@@ -844,7 +825,7 @@ fn mac_eq(a: &[u8; 6], b: &[u8; 6]) -> bool {
 ///
 /// Only called for NEW connections (ct_state == CT_STATE_NEW or 0xFF)
 /// that matched an ALLOW rule.
-#[inline(always)]
+#[inline(never)]
 fn check_connection_limits(
     src_ip: u32,
     rule_idx: i32,
@@ -962,8 +943,44 @@ fn ct_state_to_bitmask(state: u8) -> u8 {
     }
 }
 
+/// Perform IPv6 conntrack lookup. Returns the connection state, or 0xFF if
+/// no entry exists.
+#[inline(never)]
+fn conntrack_lookup_v6(
+    src_addr: &[u32; 4],
+    dst_addr: &[u32; 4],
+    src_port: u16,
+    dst_port: u16,
+    next_hdr: u8,
+) -> u8 {
+    let ct_key_v6 = normalize_key_v6(src_addr, dst_addr, src_port, dst_port, next_hdr);
+    if let Some(ct) = unsafe { CT_TABLE_V6.get(&ct_key_v6) } {
+        ct.state
+    } else {
+        0xFF
+    }
+}
+
+/// Perform IPv6 LPM trie lookup for source and destination CIDRs.
+/// Returns the matched action (>=0) or -1 if no LPM match.
+/// Reads raw IPv6 bytes from the `PacketCtx` pointer.
+#[inline(never)]
+fn lpm_lookup_v6(pkt_ctx: *const PacketCtx) -> i32 {
+    let src_bytes = unsafe { (*pkt_ctx).src_bytes_v6 };
+    let src_key_v6 = Key::new(128, src_bytes);
+    if let Some(val) = FW_LPM_SRC_V6.get(&src_key_v6) {
+        return val.action as i32;
+    }
+    let dst_bytes = unsafe { (*pkt_ctx).dst_bytes_v6 };
+    let dst_key_v6 = Key::new(128, dst_bytes);
+    if let Some(val) = FW_LPM_DST_V6.get(&dst_key_v6) {
+        return val.action as i32;
+    }
+    -1
+}
+
 /// IPv6 firewall processing: linear scan of FIREWALL_RULES_V6 array.
-#[inline(always)]
+#[inline(never)]
 fn process_firewall_v6(
     ctx: &XdpContext,
     l3_offset: usize,
@@ -976,11 +993,6 @@ fn process_firewall_v6(
     let dst_mac = unsafe { (*ethhdr).dst_addr };
 
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
-    // Grab raw bytes (network byte order) for LPM trie lookup.
-    let src_bytes_v6: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
-    let dst_bytes_v6: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
-    let src_addr = ipv6_addr_to_u32x4(&src_bytes_v6);
-    let dst_addr = ipv6_addr_to_u32x4(&dst_bytes_v6);
     let next_hdr = unsafe { (*ipv6hdr).next_hdr };
 
     // Extract DSCP from IPv6 traffic class. The _vtcfl field is:
@@ -988,6 +1000,18 @@ fn process_firewall_v6(
     let vtcfl = u32::from_be(unsafe { (*ipv6hdr)._vtcfl });
     let traffic_class = ((vtcfl >> 20) & 0xFF) as u8;
     let dscp = traffic_class >> 2;
+
+    // Populate per-CPU packet context early so IPv6 addresses live off-stack.
+    let pkt_ctx = PKT_CTX.get_ptr_mut(0).ok_or(())?;
+    unsafe {
+        (*pkt_ctx).src_bytes_v6 = (*ipv6hdr).src_addr;
+        (*pkt_ctx).dst_bytes_v6 = (*ipv6hdr).dst_addr;
+        (*pkt_ctx).src_addr = ipv6_addr_to_u32x4(&(*pkt_ctx).src_bytes_v6);
+        (*pkt_ctx).dst_addr = ipv6_addr_to_u32x4(&(*pkt_ctx).dst_bytes_v6);
+        (*pkt_ctx).flags = flags;
+        (*pkt_ctx).vlan_id = vlan_id;
+        (*pkt_ctx).protocol = next_hdr;
+    }
 
     let l4_offset = l3_offset + IPV6_HDR_LEN;
 
@@ -1019,37 +1043,34 @@ fn process_firewall_v6(
         (0u16, 0u16)
     };
 
+    // Store ports now that we have them.
+    unsafe {
+        (*pkt_ctx).src_port = src_port;
+        (*pkt_ctx).dst_port = dst_port;
+    }
+
+    // Read addresses from the off-stack context for local use.
+    let src_addr = unsafe { (*pkt_ctx).src_addr };
+    let dst_addr = unsafe { (*pkt_ctx).dst_addr };
+
     // Phase 0: Conntrack lookup (IPv6).
     // Look up the connection state once; used for fast-path bypass and
     // ct_state_mask matching during the rule scan.
-    let ct_key_v6 = normalize_key_v6(&src_addr, &dst_addr, src_port, dst_port, next_hdr);
-    let ct_state: u8 = if let Some(ct) = unsafe { CT_TABLE_V6.get(&ct_key_v6) } {
-        // Fast-path bypass: ESTABLISHED/RELATED skip rule evaluation entirely.
-        if ct.state == CT_STATE_ESTABLISHED || ct.state == CT_STATE_RELATED {
-            increment_metric(METRIC_PASSED);
-            write_xdp_metadata(ctx, ACTION_PASS, 0);
-            unsafe {
-                let _ = XDP_PROG_ARRAY.tail_call(ctx, PROG_IDX_RATELIMIT);
-            }
-            return Ok(xdp_action::XDP_PASS);
+    let ct_state: u8 = conntrack_lookup_v6(&src_addr, &dst_addr, src_port, dst_port, next_hdr);
+    if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
+        increment_metric(METRIC_PASSED);
+        write_xdp_metadata(ctx, ACTION_PASS, 0);
+        unsafe {
+            let _ = XDP_PROG_ARRAY.tail_call(ctx, PROG_IDX_RATELIMIT);
         }
-        ct.state
-    } else {
-        0xFF // No conntrack entry — treated as "unknown"
-    };
+        return Ok(xdp_action::XDP_PASS);
+    }
 
     // Phase 1: LPM Trie lookup — O(log n) for CIDR-only rules.
-    let src_key_v6 = Key::new(128, src_bytes_v6);
-    if let Some(val) = FW_LPM_SRC_V6.get(&src_key_v6) {
-        return apply_action(
-            ctx, val.action, &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
-        );
-    }
-    let dst_key_v6 = Key::new(128, dst_bytes_v6);
-    if let Some(val) = FW_LPM_DST_V6.get(&dst_key_v6) {
-        return apply_action(
-            ctx, val.action, &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
-        );
+    // Read raw bytes from off-stack PKT_CTX.
+    let lpm_action = lpm_lookup_v6(pkt_ctx);
+    if lpm_action >= 0 {
+        return apply_action(ctx, lpm_action as u8);
     }
 
     // Phase 2: Linear scan for complex rules (port, protocol, VLAN).
@@ -1060,36 +1081,41 @@ fn process_firewall_v6(
     };
 
     // Scan V6 rules via bpf_loop (kernel 5.17+).
-    let mut scan_ctx = RuleScanCtxV6 {
-        count,
-        src_addr,
-        dst_addr,
-        src_port,
-        dst_port,
-        protocol: next_hdr,
-        vlan_id,
-        ct_state,
-        tcp_flags,
-        icmp_type,
-        icmp_code,
-        dscp,
-        src_mac,
-        dst_mac,
-        matched_action: -1,
-        matched_rule_idx: -1,
-        matched_max_states: 0,
-    };
+    // Use per-CPU scratch buffer to keep RuleScanCtxV6 off the 512-byte stack.
+    let scan_ctx = SCAN_CTX_V6.get_ptr_mut(0).ok_or(())?;
+    unsafe {
+        (*scan_ctx).count = count;
+        (*scan_ctx).src_addr = src_addr;
+        (*scan_ctx).dst_addr = dst_addr;
+        (*scan_ctx).src_port = src_port;
+        (*scan_ctx).dst_port = dst_port;
+        (*scan_ctx).protocol = next_hdr;
+        (*scan_ctx).vlan_id = vlan_id;
+        (*scan_ctx).ct_state = ct_state;
+        (*scan_ctx).tcp_flags = tcp_flags;
+        (*scan_ctx).icmp_type = icmp_type;
+        (*scan_ctx).icmp_code = icmp_code;
+        (*scan_ctx).dscp = dscp;
+        (*scan_ctx).src_mac = src_mac;
+        (*scan_ctx).dst_mac = dst_mac;
+        (*scan_ctx).matched_action = -1;
+        (*scan_ctx).matched_rule_idx = -1;
+        (*scan_ctx).matched_max_states = 0;
+    }
     unsafe {
         bpf_loop(
             MAX_FIREWALL_RULES,
             scan_rule_v6 as *mut c_void,
-            &mut scan_ctx as *mut RuleScanCtxV6 as *mut c_void,
+            scan_ctx as *mut RuleScanCtxV6 as *mut c_void,
             0,
         );
     }
+    let matched_action = unsafe { (*scan_ctx).matched_action };
+    let matched_rule_idx = unsafe { (*scan_ctx).matched_rule_idx };
+    let matched_max_states = unsafe { (*scan_ctx).matched_max_states };
 
-    if scan_ctx.matched_action >= 0 {
-        let action = scan_ctx.matched_action as u8;
+    if matched_action >= 0 {
+        let action = matched_action as u8;
         // For PASS/LOG on NEW connections, enforce connection limits.
         // Use src_addr[0] as the source key for the IPv4-keyed counter map.
         if (action == ACTION_PASS || action == ACTION_LOG)
@@ -1097,40 +1123,19 @@ fn process_firewall_v6(
         {
             if !check_connection_limits(
                 src_addr[0],
-                scan_ctx.matched_rule_idx,
-                scan_ctx.matched_max_states,
+                matched_rule_idx,
+                matched_max_states,
             ) {
-                emit_event(
-                    &src_addr,
-                    &dst_addr,
-                    src_port,
-                    dst_port,
-                    next_hdr,
-                    ACTION_DROP,
-                    flags,
-                    vlan_id,
-                );
+                emit_event(ACTION_DROP);
                 increment_metric(METRIC_DROPPED);
                 return Ok(xdp_action::XDP_DROP);
             }
         }
-        return apply_action(
-            ctx,
-            action,
-            &src_addr,
-            &dst_addr,
-            src_port,
-            dst_port,
-            next_hdr,
-            flags,
-            vlan_id,
-        );
+        return apply_action(ctx, action);
     }
 
     // No rule matched — apply default policy
-    apply_default_policy(
-        ctx, &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
-    )
+    apply_default_policy(ctx)
 }
 
 /// Check if an IPv6 rule matches the packet fields.
@@ -1248,47 +1253,21 @@ fn match_rule_v6(
 
 /// Apply firewall action (shared by IPv4 and IPv6 paths).
 ///
+/// Reads packet metadata from the `PKT_CTX` per-CPU scratch buffer
+/// (must be populated before calling).
+///
 /// On `XDP_PASS`, attempts a tail_call to the ratelimit program (index 0
 /// in `XDP_PROG_ARRAY`). If ratelimit isn't loaded, falls through to PASS.
 #[inline(always)]
-fn apply_action(
-    ctx: &XdpContext,
-    action: u8,
-    src_addr: &[u32; 4],
-    dst_addr: &[u32; 4],
-    src_port: u16,
-    dst_port: u16,
-    protocol: u8,
-    flags: u8,
-    vlan_id: u16,
-) -> Result<u32, ()> {
+fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
     match action {
         ACTION_DROP => {
-            emit_event(
-                src_addr,
-                dst_addr,
-                src_port,
-                dst_port,
-                protocol,
-                ACTION_DROP,
-                flags,
-                vlan_id,
-            );
-            info!(
-                ctx,
-                "DROP {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port
-            );
+            emit_event(ACTION_DROP);
             increment_metric(METRIC_DROPPED);
             Ok(xdp_action::XDP_DROP)
         }
         ACTION_LOG => {
-            emit_event(
-                src_addr, dst_addr, src_port, dst_port, protocol, ACTION_LOG, flags, vlan_id,
-            );
-            info!(
-                ctx,
-                "LOG {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port
-            );
+            emit_event(ACTION_LOG);
             increment_metric(METRIC_PASSED);
             write_xdp_metadata(ctx, ACTION_LOG, 0);
             // Try chaining to ratelimit; if not loaded, fall through to PASS.
@@ -1361,38 +1340,34 @@ fn write_xdp_metadata(ctx: &XdpContext, action: u8, rule_id: u32) {
     }
 }
 
-/// Emit a PacketEvent to the EVENTS RingBuf. Skips emission under
-/// backpressure (>75% full). If the buffer is full, increment the
-/// events_dropped metric — never block the hot path.
+/// Emit a `PacketEvent` to the EVENTS RingBuf. Reads packet metadata
+/// from the `PKT_CTX` per-CPU scratch buffer (must be populated before
+/// calling). Skips emission under backpressure (>75% full). If the
+/// buffer is full, increment the events_dropped metric.
 #[inline(always)]
-fn emit_event(
-    src_addr: &[u32; 4],
-    dst_addr: &[u32; 4],
-    src_port: u16,
-    dst_port: u16,
-    protocol: u8,
-    action: u8,
-    flags: u8,
-    vlan_id: u16,
-) {
+fn emit_event(action: u8) {
     if ringbuf_has_backpressure() {
         increment_metric(METRIC_EVENTS_DROPPED);
         return;
     }
+    let pkt = match PKT_CTX.get_ptr(0) {
+        Some(p) => p,
+        None => return,
+    };
     if let Some(mut entry) = EVENTS.reserve::<PacketEvent>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
             (*ptr).timestamp_ns = bpf_ktime_get_boot_ns();
-            (*ptr).src_addr = *src_addr;
-            (*ptr).dst_addr = *dst_addr;
-            (*ptr).src_port = src_port;
-            (*ptr).dst_port = dst_port;
-            (*ptr).protocol = protocol;
+            (*ptr).src_addr = (*pkt).src_addr;
+            (*ptr).dst_addr = (*pkt).dst_addr;
+            (*ptr).src_port = (*pkt).src_port;
+            (*ptr).dst_port = (*pkt).dst_port;
+            (*ptr).protocol = (*pkt).protocol;
             (*ptr).event_type = EVENT_TYPE_FIREWALL;
             (*ptr).action = action;
-            (*ptr).flags = flags;
+            (*ptr).flags = (*pkt).flags;
             (*ptr).rule_id = 0;
-            (*ptr).vlan_id = vlan_id;
+            (*ptr).vlan_id = (*pkt).vlan_id;
             (*ptr).cpu_id = bpf_get_smp_processor_id() as u16;
             (*ptr).socket_cookie = 0; // Not available in XDP context
         }
