@@ -37,9 +37,11 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
+      - name: Install bpf-linker
+        run: cargo +nightly install bpf-linker
+
       - name: Build eBPF programs
         run: cargo xtask ebpf-build
-        continue-on-error: true
 
       - name: Build agent (release)
         run: cargo build --release --bin ebpfsentinel-agent
