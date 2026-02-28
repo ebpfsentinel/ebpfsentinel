@@ -166,7 +166,11 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq linux-tools-$(uname -r) 2>/dev/null || true
+          sudo apt-get install -y jq
+          # Try kernel-specific package first, then generic linux-tools-common
+          sudo apt-get install -y "linux-tools-$(uname -r)" 2>/dev/null \
+            || sudo apt-get install -y linux-tools-common linux-tools-generic 2>/dev/null \
+            || echo "::warning::bpftool not available — eBPF tests will be skipped"
 
       - name: Suite 06 — eBPF Programs
         run: sudo bats --timing tests/integration/suites/06-ebpf-programs.bats

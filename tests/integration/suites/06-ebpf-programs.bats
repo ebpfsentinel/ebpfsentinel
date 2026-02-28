@@ -21,9 +21,14 @@ setup_file() {
         skip "eBPF tests require root privileges"
     fi
 
-    # Skip if bpftool not available
+    # Skip if bpftool not available or non-functional (Ubuntu ships a shim
+    # wrapper that prints a warning when the matching linux-tools package is
+    # missing instead of returning an error code).
     if ! command -v bpftool &>/dev/null; then
         skip "bpftool not installed"
+    fi
+    if ! bpftool version &>/dev/null; then
+        skip "bpftool present but not functional for kernel $(uname -r)"
     fi
 
     export PROJECT_ROOT
@@ -64,7 +69,7 @@ teardown_file() {
 
 @test "readyz reports ebpf_loaded: true" {
     [ "$(id -u)" -eq 0 ] || skip "requires root"
-    command -v bpftool &>/dev/null || skip "bpftool not installed"
+    bpftool version &>/dev/null || skip "bpftool not functional"
 
     # Wait for eBPF programs to load (may take a moment)
     local attempts=0
@@ -87,7 +92,7 @@ teardown_file() {
 
 @test "bpftool shows XDP program attached to veth" {
     [ "$(id -u)" -eq 0 ] || skip "requires root"
-    command -v bpftool &>/dev/null || skip "bpftool not installed"
+    bpftool version &>/dev/null || skip "bpftool not functional"
 
     # Give the agent time to attach programs
     sleep 2
