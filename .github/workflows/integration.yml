@@ -34,11 +34,22 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install protoc and LLVM
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler llvm-dev
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install bpf-linker
-        run: cargo +nightly install bpf-linker
+        run: |
+          # Install LLVM dev libraries required by bpf-linker
+          sudo apt-get install -y llvm-dev
+          # Ensure llvm-config is in PATH (some runners have versioned binaries only)
+          if ! command -v llvm-config &>/dev/null; then
+            LLVM_CONFIG=$(find /usr/lib/llvm-*/bin -name 'llvm-config' 2>/dev/null | sort -V | tail -1)
+            if [ -n "$LLVM_CONFIG" ]; then
+              export PATH="$(dirname "$LLVM_CONFIG"):$PATH"
+            fi
+          fi
+          cargo +nightly install bpf-linker
+          which bpf-linker
 
       - name: Build eBPF programs
         run: cargo xtask ebpf-build
