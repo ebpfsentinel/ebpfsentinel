@@ -9,28 +9,18 @@ use aya_ebpf::{
     programs::TcContext,
 };
 use core::mem;
-use ebpf_common::{
-    conntrack::{
-        ConnKey, ConnKeyV6, ConnTrackConfig, ConnValue, CT_FLAG_ASSURED, CT_FLAG_SEEN_REPLY,
-        CT_MAX_ENTRIES_V4, CT_MAX_ENTRIES_V6, CT_METRIC_COUNT, CT_METRIC_ERRORS,
-        CT_METRIC_ESTABLISHED, CT_METRIC_HITS, CT_METRIC_INVALID, CT_METRIC_LOOKUPS,
-        CT_METRIC_NEW, CT_STATE_CLOSE_WAIT, CT_STATE_ESTABLISHED, CT_STATE_FIN_WAIT,
-        CT_STATE_INVALID, CT_STATE_NEW, CT_STATE_SYN_RECV, CT_STATE_SYN_SENT,
-        CT_STATE_TIME_WAIT, normalize_key_v4,
-    },
-    event::{FLAG_IPV6, FLAG_VLAN},
+use ebpf_common::conntrack::{
+    ConnKey, ConnKeyV6, ConnTrackConfig, ConnValue, CT_FLAG_ASSURED, CT_FLAG_SEEN_REPLY,
+    CT_MAX_ENTRIES_V4, CT_MAX_ENTRIES_V6, CT_METRIC_COUNT, CT_METRIC_ERRORS,
+    CT_METRIC_ESTABLISHED, CT_METRIC_HITS, CT_METRIC_INVALID, CT_METRIC_LOOKUPS, CT_METRIC_NEW,
+    CT_STATE_CLOSE_WAIT, CT_STATE_ESTABLISHED, CT_STATE_FIN_WAIT, CT_STATE_INVALID, CT_STATE_NEW,
+    CT_STATE_SYN_RECV, CT_STATE_SYN_SENT, CT_STATE_TIME_WAIT, normalize_key_v4,
 };
-use network_types::{
-    eth::EthHdr,
-    ip::{IpProto, Ipv4Hdr},
-    tcp::TcpHdr,
-    udp::UdpHdr,
-};
+use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 
 // ── Constants ───────────────────────────────────────────────────────
 
 const ETH_P_IP: u16 = 0x0800;
-const ETH_P_IPV6: u16 = 0x86DD;
 const ETH_P_8021Q: u16 = 0x8100;
 const VLAN_HDR_LEN: usize = 4;
 const PROTO_TCP: u8 = 6;
@@ -47,18 +37,8 @@ const TCP_RST: u8 = 0x04;
 
 #[repr(C)]
 struct VlanHdr {
-    tci: u16,
+    _tci: u16,
     ether_type: u16,
-}
-
-#[repr(C)]
-struct Ipv6Hdr {
-    _vtcfl: u32,
-    _payload_len: u16,
-    next_hdr: u8,
-    _hop_limit: u8,
-    src_addr: [u8; 16],
-    dst_addr: [u8; 16],
 }
 
 // ── Maps ────────────────────────────────────────────────────────────
@@ -277,45 +257,49 @@ fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
 /// Advance the TCP state machine based on observed flags.
 #[inline(always)]
 unsafe fn advance_tcp_state(entry: *mut ConnValue, tcp_flags: u8, is_forward: bool) {
-    let state = (*entry).state;
+    let state = unsafe { (*entry).state };
 
     if tcp_flags & TCP_RST != 0 {
         // RST: immediate teardown
-        (*entry).state = CT_STATE_INVALID;
+        unsafe { (*entry).state = CT_STATE_INVALID };
         return;
     }
 
     match state {
         CT_STATE_SYN_SENT => {
             if !is_forward && tcp_flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) {
-                (*entry).state = CT_STATE_SYN_RECV;
-                (*entry).flags |= CT_FLAG_SEEN_REPLY;
+                unsafe {
+                    (*entry).state = CT_STATE_SYN_RECV;
+                    (*entry).flags |= CT_FLAG_SEEN_REPLY;
+                }
             }
         }
         CT_STATE_SYN_RECV => {
             if is_forward && tcp_flags & TCP_ACK != 0 {
-                (*entry).state = CT_STATE_ESTABLISHED;
-                (*entry).flags |= CT_FLAG_ASSURED;
+                unsafe {
+                    (*entry).state = CT_STATE_ESTABLISHED;
+                    (*entry).flags |= CT_FLAG_ASSURED;
+                }
                 increment_metric(CT_METRIC_ESTABLISHED);
             }
         }
         CT_STATE_ESTABLISHED => {
             if tcp_flags & TCP_FIN != 0 {
                 if is_forward {
-                    (*entry).state = CT_STATE_FIN_WAIT;
+                    unsafe { (*entry).state = CT_STATE_FIN_WAIT };
                 } else {
-                    (*entry).state = CT_STATE_CLOSE_WAIT;
+                    unsafe { (*entry).state = CT_STATE_CLOSE_WAIT };
                 }
             }
         }
         CT_STATE_FIN_WAIT => {
             if !is_forward && tcp_flags & TCP_FIN != 0 {
-                (*entry).state = CT_STATE_TIME_WAIT;
+                unsafe { (*entry).state = CT_STATE_TIME_WAIT };
             }
         }
         CT_STATE_CLOSE_WAIT => {
             if is_forward && tcp_flags & TCP_FIN != 0 {
-                (*entry).state = CT_STATE_TIME_WAIT;
+                unsafe { (*entry).state = CT_STATE_TIME_WAIT };
             }
         }
         _ => {}
