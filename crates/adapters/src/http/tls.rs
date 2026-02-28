@@ -16,13 +16,10 @@ pub fn load_rustls_config(cert_path: &Path, key_path: &Path) -> anyhow::Result<A
     // Ignore the error if already installed by another dependency.
     let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let certs: Vec<CertificateDer<'static>> =
-        CertificateDer::pem_file_iter(cert_path)
-            .map_err(|e| {
-                anyhow::anyhow!("failed to read TLS cert at '{}': {e}", cert_path.display())
-            })?
-            .collect::<Result<_, _>>()
-            .map_err(|e| anyhow::anyhow!("failed to parse TLS certificates: {e}"))?;
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert_path)
+        .map_err(|e| anyhow::anyhow!("failed to read TLS cert at '{}': {e}", cert_path.display()))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("failed to parse TLS certificates: {e}"))?;
 
     if certs.is_empty() {
         anyhow::bail!(
