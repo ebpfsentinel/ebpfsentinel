@@ -1,7 +1,7 @@
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-yanked = "deny"
+# Unmaintained crates: warn only for direct workspace dependencies
+unmaintained = "workspace"
+ignore = []
 
 [licenses]
 unlicensed = "deny"
