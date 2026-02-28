@@ -15,6 +15,7 @@ eBPFsentinel combines a stateful firewall, intrusion detection, rate limiting, a
 - **L7 Firewall** — Application-layer filtering for HTTP, TLS/SNI, gRPC, SMTP, FTP, and SMB
 - **Packet Scrubbing** — Kernel-side traffic normalization (TTL, MSS clamping, DF clearing, IP ID randomization)
 - **Multi-WAN Routing** — Policy-based gateway selection with ICMP/TCP health checks and failover
+- **L4 Load Balancer** — TCP/UDP/TLS passthrough load balancing with round-robin, weighted, IP hash, and least-connections algorithms
 
 ### Threat Detection & Prevention
 
@@ -31,7 +32,7 @@ eBPFsentinel combines a stateful firewall, intrusion detection, rate limiting, a
 - **Alert Pipeline** with routing to email, webhook, and log sinks
 - **Audit Trail** with rule change history
 - **Hot Reload** — update configuration without restart (file watcher, SIGHUP, or API)
-- **CLI** with 10 domain subcommands covering all endpoints
+- **CLI** with 11 domain subcommands covering all endpoints
 - **JWT/OIDC/API Key Authentication** with role-based access control
 - **TLS 1.3** for REST and gRPC
 
