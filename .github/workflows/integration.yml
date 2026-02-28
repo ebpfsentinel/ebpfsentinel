@@ -38,7 +38,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install bpf-linker
-        run: cargo +nightly install bpf-linker
+        run: cargo +nightly install bpf-linker --no-default-features
 
       - name: Build eBPF programs
         run: cargo xtask ebpf-build
