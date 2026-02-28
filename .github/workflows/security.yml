@@ -15,7 +15,6 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  checks: write
   contents: read
 
 jobs:
@@ -25,9 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+      - name: Run cargo audit
+        run: cargo audit
 
   # ── License and advisory check ───────────────────────────────────
   deny:
