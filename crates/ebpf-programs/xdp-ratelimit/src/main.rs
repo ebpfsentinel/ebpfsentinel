@@ -3,7 +3,7 @@
 
 use aya_ebpf::{
     bindings::xdp_action,
-    helpers::{bpf_for_each_map_elem, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
+    helpers::{bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
     macros::{map, xdp},
     maps::{Array, HashMap, LruPerCpuHashMap, PerCpuArray, RingBuf},
     programs::XdpContext,
@@ -1463,137 +1463,6 @@ fn emit_ratelimit_event(
     } else {
         increment_metric(METRIC_EVENTS_DROPPED);
     }
-}
-
-// ── Map iteration infrastructure (F14) ──────────────────────────────
-//
-// `bpf_for_each_map_elem` (kernel 5.13+) is available for kernel-side map
-// iteration, useful for garbage-collecting expired rate limit entries.
-//
-// Callback signature: `(map: *mut c_void, key: *const K, value: *const V,
-//                       ctx: *mut c_void) -> i64`
-//   Return 0 to continue iteration, 1 to stop.
-//
-// Import verified above; the helper is ready for future use in cleanup
-// callbacks for `RATELIMIT_BUCKETS`, `FIXED_WINDOW_BUCKETS`, etc.
-
-/// Suppress the unused import warning for `bpf_for_each_map_elem`.
-/// This helper is imported as infrastructure for future kernel-side
-/// map cleanup callbacks.
-#[allow(dead_code)]
-const _BPF_FOR_EACH_MAP_ELEM_AVAILABLE: unsafe fn(
-    *mut aya_ebpf::cty::c_void,
-    *mut aya_ebpf::cty::c_void,
-    *mut aya_ebpf::cty::c_void,
-    u64,
-) -> i64 = bpf_for_each_map_elem;
-
-// ── bpf_timer infrastructure (F21) ──────────────────────────────────
-//
-// `bpf_timer` (kernel 5.15+) enables periodic kernel-side operations
-// without userspace intervention. The timer must live inside a map value.
-//
-// Use cases:
-// - Expire stale rate limit buckets (garbage collection)
-// - Emit periodic heartbeat events to userspace
-// - Refresh cached configuration
-//
-// Timer lifecycle:
-// 1. `bpf_timer_init(&timer, &map, CLOCK_MONOTONIC)` — initialize timer
-// 2. `bpf_timer_set_callback(&timer, callback_fn)` — set callback
-// 3. `bpf_timer_start(&timer, nsecs, 0)` — arm the timer
-// 4. Callback fires after `nsecs` ns; re-arm for periodic operation
-
-/// Map value containing a `bpf_timer`. Must live inside an `Array` map.
-/// The timer is opaque (16 bytes) and managed by the kernel.
-#[repr(C)]
-struct TimerMapValue {
-    timer: aya_ebpf::bindings::bpf_timer,
-}
-
-/// Array map holding a single `bpf_timer` for periodic maintenance.
-/// Index 0: the maintenance timer (initialized by userspace trigger).
-#[map]
-#[allow(dead_code)]
-static MAINTENANCE_TIMER: Array<TimerMapValue> = Array::with_max_entries(1, 0);
-
-/// Maintenance timer interval: 10 seconds in nanoseconds.
-#[allow(dead_code)]
-const MAINTENANCE_INTERVAL_NS: u64 = 10 * NS_PER_SEC;
-
-/// `CLOCK_MONOTONIC` flag for `bpf_timer_init`.
-#[allow(dead_code)]
-const CLOCK_MONOTONIC: u64 = 1;
-
-/// Initialize and arm the maintenance timer. Called once from a triggered
-/// eBPF program path (e.g. first packet) or from userspace via a config write.
-///
-/// The timer callback will use `bpf_for_each_map_elem` to iterate over
-/// rate limit buckets and expire stale entries, then re-arm itself.
-#[inline(always)]
-#[allow(dead_code)]
-fn init_maintenance_timer() -> Result<(), i64> {
-    let val = MAINTENANCE_TIMER
-        .get_ptr_mut(0)
-        .ok_or(-1i64)?;
-
-    let timer_ptr = unsafe { &mut (*val).timer as *mut aya_ebpf::bindings::bpf_timer };
-
-    // Initialize the timer with CLOCK_MONOTONIC
-    let ret = unsafe {
-        aya_ebpf::helpers::r#gen::bpf_timer_init(
-            timer_ptr,
-            &MAINTENANCE_TIMER as *const _ as *mut _,
-            CLOCK_MONOTONIC,
-        )
-    };
-    if ret != 0 {
-        return Err(ret);
-    }
-
-    // Set the callback
-    let ret = unsafe {
-        aya_ebpf::helpers::r#gen::bpf_timer_set_callback(
-            timer_ptr,
-            maintenance_timer_callback as *mut _,
-        )
-    };
-    if ret != 0 {
-        return Err(ret);
-    }
-
-    // Arm the timer
-    let ret = unsafe {
-        aya_ebpf::helpers::r#gen::bpf_timer_start(timer_ptr, MAINTENANCE_INTERVAL_NS, 0)
-    };
-    if ret != 0 {
-        return Err(ret);
-    }
-
-    Ok(())
-}
-
-/// Timer callback for periodic maintenance. Re-arms itself for continuous
-/// operation. Future: use `bpf_for_each_map_elem` to iterate and expire
-/// stale rate limit entries.
-#[allow(dead_code)]
-unsafe extern "C" fn maintenance_timer_callback(
-    _map: *mut aya_ebpf::cty::c_void,
-    _key: *mut aya_ebpf::cty::c_void,
-    value: *mut aya_ebpf::cty::c_void,
-) -> i64 {
-    // Re-arm the timer for the next interval
-    unsafe {
-        let val = value as *mut TimerMapValue;
-        let timer_ptr = &mut (*val).timer as *mut aya_ebpf::bindings::bpf_timer;
-        let _ = aya_ebpf::helpers::r#gen::bpf_timer_start(
-            timer_ptr,
-            MAINTENANCE_INTERVAL_NS,
-            0,
-        );
-    }
-
-    0
 }
 
 #[panic_handler]

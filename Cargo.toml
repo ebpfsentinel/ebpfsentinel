@@ -15,6 +15,7 @@ members = [
 exclude = [
     "crates/ebpf-programs/xdp-firewall",
     "crates/ebpf-programs/xdp-ratelimit",
+    "crates/ebpf-programs/xdp-loadbalancer",
     "crates/ebpf-programs/tc-dns",
     "crates/ebpf-programs/tc-ids",
     "crates/ebpf-programs/tc-threatintel",

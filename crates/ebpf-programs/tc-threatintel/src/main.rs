@@ -5,7 +5,7 @@ use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
     helpers::{
-        bpf_get_smp_processor_id, bpf_ktime_get_boot_ns, bpf_skb_vlan_pop, bpf_skb_vlan_push,
+        bpf_get_smp_processor_id, bpf_ktime_get_boot_ns,
     },
     macros::{classifier, map},
     maps::{Array, HashMap, PerCpuArray, RingBuf, bloom_filter::BloomFilter},
@@ -15,7 +15,7 @@ use aya_log_ebpf::info;
 use core::mem;
 use ebpf_common::{
     event::{
-        EVENT_TYPE_THREATINTEL, FLAG_IPV6, FLAG_VLAN, META_FLAG_PRESENT, PacketEvent, XdpMetadata,
+        EVENT_TYPE_THREATINTEL, FLAG_IPV6, FLAG_VLAN, PacketEvent,
     },
     threatintel::{
         THREATINTEL_ACTION_DROP, THREATINTEL_MAX_ENTRIES, THREATINTEL_METRIC_DROPPED,
@@ -149,25 +149,6 @@ fn ipv6_addr_to_u32x4(addr: &[u8; 16]) -> [u32; 4] {
         u32_from_be_bytes([addr[8], addr[9], addr[10], addr[11]]),
         u32_from_be_bytes([addr[12], addr[13], addr[14], addr[15]]),
     ]
-}
-
-// ── XDP metadata reading ────────────────────────────────────────────
-
-/// Read XDP metadata (firewall verdict) prepended by `bpf_xdp_adjust_meta`.
-#[inline(always)]
-#[allow(dead_code)]
-fn read_xdp_metadata(ctx: &TcContext) -> Option<XdpMetadata> {
-    let data_meta = unsafe { (*ctx.skb.skb).data_meta as usize };
-    let data = ctx.data();
-    if data_meta + mem::size_of::<XdpMetadata>() > data {
-        return None;
-    }
-    let meta_ptr = data_meta as *const XdpMetadata;
-    let meta = unsafe { *meta_ptr };
-    if meta.meta_flags & META_FLAG_PRESENT == 0 {
-        return None;
-    }
-    Some(meta)
 }
 
 // ── Packet processing ───────────────────────────────────────────────
@@ -478,33 +459,6 @@ fn emit_event(
     } else {
         increment_metric(THREATINTEL_METRIC_EVENTS_DROPPED);
     }
-}
-
-// ── VLAN rewriting helpers (F15) ─────────────────────────────────────
-
-/// 802.1Q EtherType in big-endian (network byte order): 0x8100 stored as 0x0081.
-#[allow(dead_code)]
-const ETH_P_8021Q_BE: u16 = 0x0081;
-
-/// Push a VLAN tag onto a packet (e.g. quarantine VLAN).
-///
-/// Uses `bpf_skb_vlan_push` to insert an 802.1Q header with the given
-/// `vlan_id`. The `vlan_proto` is always 802.1Q (0x8100).
-#[inline(always)]
-#[allow(dead_code)]
-fn push_quarantine_vlan(ctx: &TcContext, vlan_id: u16) -> Result<(), i64> {
-    let ret = unsafe { bpf_skb_vlan_push(ctx.skb.skb as *mut _, ETH_P_8021Q_BE, vlan_id) };
-    if ret == 0 { Ok(()) } else { Err(ret) }
-}
-
-/// Pop the outermost VLAN tag from a packet.
-///
-/// Uses `bpf_skb_vlan_pop` to strip the 802.1Q header.
-#[inline(always)]
-#[allow(dead_code)]
-fn pop_vlan(ctx: &TcContext) -> Result<(), i64> {
-    let ret = unsafe { bpf_skb_vlan_pop(ctx.skb.skb as *mut _) };
-    if ret == 0 { Ok(()) } else { Err(ret) }
 }
 
 #[panic_handler]

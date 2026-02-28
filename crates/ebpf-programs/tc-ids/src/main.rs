@@ -5,8 +5,8 @@ use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
     helpers::{
-        bpf_get_prandom_u32, bpf_get_smp_processor_id, bpf_get_socket_cookie,
-        bpf_ktime_get_boot_ns, bpf_sk_lookup_tcp, bpf_sk_lookup_udp, bpf_sk_release,
+        bpf_get_prandom_u32, bpf_get_smp_processor_id,
+        bpf_ktime_get_boot_ns,
     },
     macros::{classifier, map},
     maps::{Array, HashMap, PerCpuArray, RingBuf},
@@ -16,12 +16,11 @@ use aya_log_ebpf::info;
 use core::mem;
 use ebpf_common::{
     event::{
-        PacketEvent, XdpMetadata, EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, FLAG_VLAN,
-        MAX_L7_PAYLOAD, META_FLAG_PRESENT,
+        PacketEvent, EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, FLAG_VLAN,
+        MAX_L7_PAYLOAD,
     },
     ids::{
         IdsSamplingConfig, IdsPatternKey, IdsPatternValue, IDS_ACTION_DROP, IDS_SAMPLING_RANDOM,
-        L7_PROTO_DNS, L7_PROTO_HTTP, L7_PROTO_SSH, L7_PROTO_TLS, L7_PROTO_UNKNOWN,
     },
 };
 use network_types::{
@@ -174,25 +173,6 @@ fn ipv6_addr_to_u32x4(addr: &[u8; 16]) -> [u32; 4] {
 }
 
 // ── XDP metadata reading ────────────────────────────────────────────
-
-/// Read XDP metadata (firewall verdict) prepended by `bpf_xdp_adjust_meta`.
-/// Returns `None` if metadata is not available (driver didn't support it or
-/// XDP didn't prepend it).
-#[inline(always)]
-#[allow(dead_code)]
-fn read_xdp_metadata(ctx: &TcContext) -> Option<XdpMetadata> {
-    let data_meta = unsafe { (*ctx.skb.skb).data_meta as usize };
-    let data = ctx.data();
-    if data_meta + mem::size_of::<XdpMetadata>() > data {
-        return None;
-    }
-    let meta_ptr = data_meta as *const XdpMetadata;
-    let meta = unsafe { *meta_ptr };
-    if meta.meta_flags & META_FLAG_PRESENT == 0 {
-        return None;
-    }
-    Some(meta)
-}
 
 // ── Packet processing ───────────────────────────────────────────────
 
@@ -493,144 +473,6 @@ fn emit_l7_event(
         increment_metric(METRIC_EVENTS_DROPPED);
     }
 }
-
-// ── Socket lookup for process attribution (F12) ─────────────────────
-
-/// Protocol constants for socket lookup.
-const SK_PROTO_TCP: u8 = 6;
-const SK_PROTO_UDP: u8 = 17;
-
-/// Look up the socket cookie for a given 5-tuple (src/dst IP + ports + protocol).
-///
-/// Uses `bpf_sk_lookup_tcp`/`bpf_sk_lookup_udp` to find the owning socket,
-/// then reads the cookie via `bpf_get_socket_cookie` for process attribution.
-/// The socket is released after reading the cookie.
-///
-/// Returns `Some(cookie)` if a socket was found, `None` otherwise.
-#[allow(dead_code)]
-#[inline(always)]
-fn lookup_socket_cookie(
-    ctx: &TcContext,
-    src_ip: u32,
-    dst_ip: u32,
-    src_port: u16,
-    dst_port: u16,
-    protocol: u8,
-) -> Option<u64> {
-    // Build the bpf_sock_tuple for IPv4 lookup.
-    let mut tuple: aya_ebpf::bindings::bpf_sock_tuple = unsafe { core::mem::zeroed() };
-    tuple.__bindgen_anon_1.ipv4.saddr = src_ip.to_be();
-    tuple.__bindgen_anon_1.ipv4.daddr = dst_ip.to_be();
-    tuple.__bindgen_anon_1.ipv4.sport = src_port.to_be();
-    tuple.__bindgen_anon_1.ipv4.dport = dst_port.to_be();
-
-    let tuple_size = core::mem::size_of::<aya_ebpf::bindings::bpf_sock_tuple__bindgen_ty_1__bindgen_ty_1>() as u32;
-    let ctx_ptr = ctx.skb.skb as *mut aya_ebpf::cty::c_void;
-
-    let sk = if protocol == SK_PROTO_TCP {
-        unsafe { bpf_sk_lookup_tcp(ctx_ptr, &mut tuple, tuple_size, 0, 0) }
-    } else if protocol == SK_PROTO_UDP {
-        unsafe { bpf_sk_lookup_udp(ctx_ptr, &mut tuple, tuple_size, 0, 0) }
-    } else {
-        return None;
-    };
-
-    if sk.is_null() {
-        return None;
-    }
-
-    let cookie = unsafe { bpf_get_socket_cookie(sk as *mut aya_ebpf::cty::c_void) };
-    unsafe {
-        bpf_sk_release(sk as *mut aya_ebpf::cty::c_void);
-    }
-
-    Some(cookie)
-}
-
-// Suppress unused constant warnings for infrastructure code.
-const _: () = {
-    _ = SK_PROTO_TCP;
-    _ = SK_PROTO_UDP;
-};
-
-// ── L7 protocol detection (F13) ─────────────────────────────────────
-
-/// Detect the L7 protocol from the first bytes of the TCP/UDP payload.
-///
-/// Performs simple byte-pattern matching for common protocols:
-/// - HTTP: starts with "GET ", "POST", "PUT ", "HEAD", "HTTP"
-/// - TLS: first byte 0x16 (handshake), second byte 0x03 (SSL 3.x / TLS)
-/// - SSH: starts with "SSH-"
-/// - DNS: UDP port 53 heuristic (payload >= 12 bytes for DNS header)
-///
-/// Returns one of the `L7_PROTO_*` constants.
-#[allow(dead_code)]
-#[inline(always)]
-fn detect_l7_protocol(ctx: &TcContext, l4_offset: usize, payload_len: usize) -> u8 {
-    if payload_len < 4 {
-        return L7_PROTO_UNKNOWN;
-    }
-
-    // Read the first 4 bytes of the L4 payload.
-    let start = ctx.data() + l4_offset;
-    let end = ctx.data_end();
-    if start + 4 > end {
-        return L7_PROTO_UNKNOWN;
-    }
-
-    let b0 = unsafe { *((start) as *const u8) };
-    let b1 = unsafe { *((start + 1) as *const u8) };
-    let b2 = unsafe { *((start + 2) as *const u8) };
-    let b3 = unsafe { *((start + 3) as *const u8) };
-
-    // TLS handshake: content_type=0x16, version major=0x03
-    if b0 == 0x16 && b1 == 0x03 {
-        return L7_PROTO_TLS;
-    }
-
-    // SSH: starts with "SSH-"
-    if b0 == b'S' && b1 == b'S' && b2 == b'H' && b3 == b'-' {
-        return L7_PROTO_SSH;
-    }
-
-    // HTTP request methods: "GET ", "POST", "PUT ", "HEAD"
-    if b0 == b'G' && b1 == b'E' && b2 == b'T' && b3 == b' ' {
-        return L7_PROTO_HTTP;
-    }
-    if b0 == b'P' && b1 == b'O' && b2 == b'S' && b3 == b'T' {
-        return L7_PROTO_HTTP;
-    }
-    if b0 == b'P' && b1 == b'U' && b2 == b'T' && b3 == b' ' {
-        return L7_PROTO_HTTP;
-    }
-    if b0 == b'H' && b1 == b'E' && b2 == b'A' && b3 == b'D' {
-        return L7_PROTO_HTTP;
-    }
-
-    // HTTP response: "HTTP"
-    if b0 == b'H' && b1 == b'T' && b2 == b'T' && b3 == b'P' {
-        return L7_PROTO_HTTP;
-    }
-
-    // DNS heuristic: payload >= 12 bytes (minimum DNS header size).
-    // Caller should only invoke this for UDP/53 traffic; here we just
-    // check the minimum size as a sanity check.
-    if payload_len >= 12 {
-        // Could be DNS — caller should validate via port number.
-        // We return UNKNOWN here; callers combine port + this function.
-    }
-
-    L7_PROTO_UNKNOWN
-}
-
-// Suppress unused import warnings for L7 protocol constants (infrastructure code).
-const _: () = {
-    _ = L7_PROTO_UNKNOWN;
-    _ = L7_PROTO_HTTP;
-    _ = L7_PROTO_TLS;
-    _ = L7_PROTO_SSH;
-    _ = L7_PROTO_DNS;
-};
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {

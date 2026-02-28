@@ -5,12 +5,11 @@ use aya_ebpf::{
     bindings::xdp_action,
     cty::c_void,
     helpers::{
-        bpf_check_mtu, bpf_csum_diff, bpf_fib_lookup as bpf_fib_lookup_helper,
         bpf_get_smp_processor_id, bpf_ktime_get_boot_ns, bpf_loop, bpf_xdp_adjust_meta,
     },
     macros::{map, xdp},
     maps::{
-        Array, CpuMap, DevMap, HashMap, LruHashMap, PerCpuArray, ProgramArray, RingBuf,
+        Array, HashMap, LruHashMap, PerCpuArray, ProgramArray, RingBuf,
         lpm_trie::{Key, LpmTrie},
     },
     programs::XdpContext,
@@ -35,7 +34,6 @@ use ebpf_common::{
         MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MATCH_SRC_SET, MAX_FIREWALL_RULES,
         MAX_IPSET_ENTRIES_V4, MAX_LPM_RULES,
     },
-    zone::MAX_ZONE_ENTRIES,
 };
 use network_types::{
     eth::EthHdr,
@@ -162,20 +160,6 @@ static FW_LPM_SRC_V6: LpmTrie<[u8; 16], LpmValue> = LpmTrie::with_max_entries(MA
 #[map]
 static FW_LPM_DST_V6: LpmTrie<[u8; 16], LpmValue> = LpmTrie::with_max_entries(MAX_LPM_RULES, 0);
 
-/// DevMap for packet mirroring (F16). Userspace populates entries with
-/// target interface indices. XDP programs can redirect a copy of the
-/// packet to a mirror port for out-of-band inspection.
-#[map]
-#[allow(dead_code)]
-static FW_MIRROR_DEVMAP: DevMap = DevMap::with_max_entries(64, 0);
-
-/// CpuMap for CPU steering (F17). Userspace populates entries so the XDP
-/// program can redirect packets to a specific CPU for processing, enabling
-/// RSS-like distribution or dedicated-core offload.
-#[map]
-#[allow(dead_code)]
-static FW_CPUMAP: CpuMap = CpuMap::with_max_entries(128, 0);
-
 // ── Conntrack fast-path maps (read-only, shared via pinning) ────────
 
 /// Shared conntrack table for ESTABLISHED bypass (read-only in XDP).
@@ -197,14 +181,6 @@ static CT_TABLE_V6: LruHashMap<ConnKeyV6, ConnValueV6> =
 #[map]
 static FW_IPSET_V4: HashMap<IpSetKeyV4, u8> =
     HashMap::with_max_entries(MAX_IPSET_ENTRIES_V4, 0);
-
-// ── Zone maps ──────────────────────────────────────────────────────
-
-/// Maps interface index (ifindex) to zone ID. Userspace populates this
-/// based on zone configuration. Zone ID 0 = unzoned.
-#[map]
-#[allow(dead_code)]
-static ZONE_MAP: HashMap<u32, u8> = HashMap::with_max_entries(MAX_ZONE_ENTRIES, 0);
 
 // ── Connection limit maps (Epic 25) ─────────────────────────────────
 
@@ -1375,171 +1351,6 @@ fn emit_event(action: u8) {
     } else {
         increment_metric(METRIC_EVENTS_DROPPED);
     }
-}
-
-// ── FIB lookup for routing enrichment (F11) ─────────────────────────
-
-/// Address family constants for `bpf_fib_lookup`.
-const AF_INET: u8 = 2;
-const AF_INET6: u8 = 10;
-
-/// Perform a FIB (Forwarding Information Base) lookup to determine the
-/// egress interface index for a given source/destination pair.
-///
-/// Returns `Some(ifindex)` on successful lookup, `None` otherwise.
-/// This can be used for routing enrichment in packet events.
-#[allow(dead_code)]
-#[inline(always)]
-fn fib_lookup_enrichment(
-    ctx: &XdpContext,
-    family: u8,
-    src: &[u32; 4],
-    dst: &[u32; 4],
-) -> Option<u32> {
-    let mut params: aya_ebpf::bindings::bpf_fib_lookup = unsafe { core::mem::zeroed() };
-    params.family = family;
-
-    if family == AF_INET {
-        params.__bindgen_anon_3.ipv4_src = src[0].to_be();
-        params.__bindgen_anon_4.ipv4_dst = dst[0].to_be();
-    } else if family == AF_INET6 {
-        params.__bindgen_anon_3.ipv6_src = *src;
-        params.__bindgen_anon_4.ipv6_dst = *dst;
-    }
-
-    // ifindex must be set to the ingress interface for the lookup.
-    params.ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
-
-    let ret = unsafe {
-        bpf_fib_lookup_helper(
-            ctx.ctx as *mut c_void,
-            &mut params,
-            core::mem::size_of::<aya_ebpf::bindings::bpf_fib_lookup>() as i32,
-            0,
-        )
-    };
-
-    if ret == 0 { Some(params.ifindex) } else { None }
-}
-
-// Suppress unused constant warnings for infrastructure code.
-const _: () = {
-    _ = AF_INET;
-    _ = AF_INET6;
-};
-
-// ── Checksum helpers (F18) ───────────────────────────────────────────
-
-/// Compute incremental checksum difference using `bpf_csum_diff`.
-///
-/// Used for SYN cookie response injection and other packet rewriting
-/// scenarios where the IP/TCP checksum must be updated incrementally.
-/// `from` and `to` are slices of u32 words (network byte order) representing
-/// the old and new header fields. Returns the checksum difference as an i64.
-#[inline(always)]
-#[allow(dead_code)]
-fn csum_diff(from: &[u32], to: &[u32]) -> i64 {
-    unsafe {
-        bpf_csum_diff(
-            from.as_ptr() as *mut u32,
-            (from.len() * 4) as u32,
-            to.as_ptr() as *mut u32,
-            (to.len() * 4) as u32,
-            0,
-        )
-    }
-}
-
-// ── Packet mirroring helper (F16) ───────────────────────────────────
-
-/// Redirect the current packet to a mirror interface via `FW_MIRROR_DEVMAP`.
-///
-/// `key` is the index into the `DevMap` (populated by userspace with the
-/// target ifindex). On success returns `XDP_REDIRECT`; on failure returns
-/// `XDP_PASS` so the packet continues normal processing.
-#[inline(always)]
-#[allow(dead_code)]
-fn mirror_packet(key: u32) -> u32 {
-    FW_MIRROR_DEVMAP
-        .redirect(key, 0)
-        .unwrap_or(xdp_action::XDP_PASS)
-}
-
-// ── CPU steering helper (F17) ───────────────────────────────────────
-
-/// Redirect the current packet to a specific CPU via `FW_CPUMAP`.
-///
-/// `cpu` is the index into the `CpuMap` (populated by userspace with the
-/// target CPU core and queue size). On success returns `XDP_REDIRECT`;
-/// on failure returns `XDP_PASS`.
-#[inline(always)]
-#[allow(dead_code)]
-fn steer_to_cpu(cpu: u32) -> u32 {
-    FW_CPUMAP.redirect(cpu, 0).unwrap_or(xdp_action::XDP_PASS)
-}
-
-// ── MTU validation helper (F19) ─────────────────────────────────────
-
-/// Check whether the current packet fits within the MTU of the given
-/// interface. Returns `true` if the packet size is within the MTU.
-///
-/// Uses `bpf_check_mtu` (kernel 5.12+). `ifindex` of 0 means use the
-/// current interface. `len_diff` accounts for planned encapsulation overhead.
-#[inline(always)]
-#[allow(dead_code)]
-fn check_mtu(ctx: &XdpContext, ifindex: u32, len_diff: i32) -> bool {
-    let mut mtu_len: u32 = 0;
-    let ret = unsafe {
-        bpf_check_mtu(
-            ctx.ctx as *mut c_void,
-            ifindex,
-            &mut mtu_len as *mut u32,
-            len_diff,
-            0,
-        )
-    };
-    // bpf_check_mtu returns 0 (BPF_MTU_CHK_RET_SUCCESS) if within MTU.
-    ret == 0
-}
-
-// ── SYN cookie generation (F10) ──────────────────────────────────────
-
-/// SYN cookie algorithm constant for ratelimit config.
-#[allow(dead_code)]
-const RATELIMIT_ALG_SYNCOOKIE: u8 = 4;
-
-/// Generate a SYN cookie for an incoming SYN packet using `bpf_tcp_gen_syncookie`.
-///
-/// `iph` points to the IP header (v4 or v6), `iph_len` is its byte length.
-/// `th` points to the TCP header, `th_len` is its byte length (≥20).
-///
-/// Returns the generated cookie value on success, or `None` on failure.
-/// The caller is responsible for crafting the SYN+ACK response packet
-/// using `bpf_xdp_adjust_head` and the checksum helpers (F18).
-///
-/// Requires a listening TCP socket on the destination port. The `sk`
-/// parameter can be obtained via `bpf_sk_lookup_tcp` from a TC program
-/// or `bpf_skc_lookup_tcp` from an XDP program.
-#[inline(always)]
-#[allow(dead_code)]
-fn gen_syncookie(
-    sk: *mut c_void,
-    iph: *mut c_void,
-    iph_len: u32,
-    th: *mut c_void,
-    th_len: u32,
-) -> Option<u32> {
-    // bpf_tcp_gen_syncookie returns i64: cookie on success, negative on error.
-    let ret = unsafe {
-        aya_ebpf::helpers::r#gen::bpf_tcp_gen_syncookie(
-            sk,
-            iph,
-            iph_len,
-            th as *mut aya_ebpf::bindings::tcphdr,
-            th_len,
-        )
-    };
-    if ret >= 0 { Some(ret as u32) } else { None }
 }
 
 #[panic_handler]

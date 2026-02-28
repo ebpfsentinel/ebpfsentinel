@@ -18,7 +18,10 @@ use ebpf_common::{
         LB_METRIC_PACKETS_FORWARDED, LB_METRIC_PACKETS_NO_BACKEND, EVENT_TYPE_LB,
     },
 };
-use network_types::{eth::EthHdr, ip::Ipv4Hdr};
+use network_types::{
+    eth::EthHdr,
+    ip::{IpProto, Ipv4Hdr},
+};
 
 // ── Constants ───────────────────────────────────────────────────────
 
@@ -123,11 +126,12 @@ fn try_xdp_loadbalancer(ctx: &XdpContext) -> Result<u32, ()> {
 #[inline(always)]
 fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, ()> {
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
-    let protocol = unsafe { (*ipv4hdr).proto };
-    let ihl = unsafe { (*ipv4hdr).ihl() } as usize * 4;
+    let proto = unsafe { (*ipv4hdr).proto };
+    let protocol = proto as u8;
+    let ihl = unsafe { (*ipv4hdr).ihl() } as usize;
     let l4_offset = l3_offset + ihl;
 
-    if protocol != PROTO_TCP && protocol != PROTO_UDP {
+    if proto != IpProto::Tcp && proto != IpProto::Udp {
         return Ok(xdp_action::XDP_PASS);
     }
 
@@ -148,11 +152,11 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
 
     let src_addr_raw = unsafe { (*ipv4hdr).src_addr };
     let dst_addr_raw = unsafe { (*ipv4hdr).dst_addr };
-    let src_ip = u32::from_be_bytes(src_addr_raw.to_be_bytes());
+    let src_ip = u32::from_be_bytes(src_addr_raw);
     let pkt_len = (ctx.data_end() - ctx.data()) as u64;
 
-    let src_addr = [u32::from_ne_bytes(src_addr_raw.to_ne_bytes()), 0, 0, 0];
-    let dst_addr = [u32::from_ne_bytes(dst_addr_raw.to_ne_bytes()), 0, 0, 0];
+    let src_addr = [u32::from_ne_bytes(src_addr_raw), 0, 0, 0];
+    let dst_addr = [u32::from_ne_bytes(dst_addr_raw), 0, 0, 0];
 
     // Select backend
     let backend = match select_backend(svc_config, src_ip) {
@@ -160,7 +164,6 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
         None => {
             increment_metric(LB_METRIC_PACKETS_NO_BACKEND);
             emit_event(
-                ctx,
                 &src_addr,
                 &dst_addr,
                 src_port,
@@ -178,14 +181,14 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     let ipv4hdr_mut: *mut Ipv4Hdr = unsafe { ptr_at_mut(ctx, l3_offset)? };
     let l4hdr_mut: *mut TcpUdpHdr = unsafe { ptr_at_mut(ctx, l4_offset)? };
 
-    let old_dst_ip = unsafe { (*ipv4hdr_mut).dst_addr };
-    let new_dst_ip = backend.addr_v4.to_be();
+    let old_dst_ip = u32::from_be_bytes(unsafe { (*ipv4hdr_mut).dst_addr });
+    let new_dst_ip = backend.addr_v4;
     let old_dst_port = unsafe { (*l4hdr_mut).dst_port };
     let new_dst_port = backend.port.to_be();
 
     // Update IP header
     unsafe {
-        (*ipv4hdr_mut).dst_addr = new_dst_ip;
+        (*ipv4hdr_mut).dst_addr = new_dst_ip.to_be_bytes();
     }
 
     // Incremental IP checksum update
@@ -212,7 +215,6 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
 
     emit_event(
-        ctx,
         &src_addr,
         &dst_addr,
         src_port,
@@ -264,7 +266,6 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
         None => {
             increment_metric(LB_METRIC_PACKETS_NO_BACKEND);
             emit_event(
-                ctx,
                 &src_addr,
                 &dst_addr,
                 src_port,
@@ -304,7 +305,6 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
 
     emit_event(
-        ctx,
         &src_addr,
         &dst_addr,
         src_port,
@@ -407,7 +407,7 @@ fn fnv1a(val: u32) -> u32 {
 #[inline(always)]
 fn update_ip_checksum(ipv4hdr: *mut Ipv4Hdr, old_val: u32, new_val: u32) {
     unsafe {
-        let mut csum = !u32::from(u16::from_be((*ipv4hdr).check));
+        let mut csum = !u32::from(u16::from_be_bytes((*ipv4hdr).check));
         // Subtract old, add new (32-bit words, split into 16-bit halves)
         csum = csum.wrapping_sub(old_val & 0xFFFF);
         csum = csum.wrapping_sub(old_val >> 16);
@@ -416,7 +416,7 @@ fn update_ip_checksum(ipv4hdr: *mut Ipv4Hdr, old_val: u32, new_val: u32) {
         // Fold carry
         csum = (csum & 0xFFFF).wrapping_add(csum >> 16);
         csum = (csum & 0xFFFF).wrapping_add(csum >> 16);
-        (*ipv4hdr).check = (!csum as u16).to_be();
+        (*ipv4hdr).check = (!csum as u16).to_be_bytes();
     }
 }
 
@@ -566,7 +566,6 @@ fn ringbuf_has_backpressure() -> bool {
 
 #[inline(always)]
 fn emit_event(
-    ctx: &XdpContext,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
     src_port: u16,
@@ -581,7 +580,7 @@ fn emit_event(
         return;
     }
 
-    let event = match EVENTS.reserve::<PacketEvent>(0) {
+    let mut event = match EVENTS.reserve::<PacketEvent>(0) {
         Some(e) => e,
         None => {
             increment_metric(LB_METRIC_EVENTS_DROPPED);
