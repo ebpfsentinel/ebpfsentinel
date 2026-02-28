@@ -82,4 +82,4 @@ jobs:
         with:
           name: sbom-cyclonedx
           path: ./*_bom.cdx.json
-          retention-days: 90
+          retention-days: 7

@@ -1,18 +1,6 @@
 name: eBPF Build
 
 on:
-  push:
-    branches: [main, develop]
-    paths:
-      - "crates/ebpf-common/**"
-      - "crates/ebpf-programs/**"
-      - "crates/xtask/**"
-  pull_request:
-    branches: [main, develop]
-    paths:
-      - "crates/ebpf-common/**"
-      - "crates/ebpf-programs/**"
-      - "crates/xtask/**"
   workflow_dispatch:
 
 env:

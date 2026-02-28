@@ -1,23 +1,7 @@
 name: Benchmarks
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "crates/domain/**"
-      - "crates/ebpf-common/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-  pull_request:
-    branches: [main]
-    paths:
-      - "crates/domain/**"
-      - "crates/ebpf-common/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
   workflow_dispatch:
-  schedule:
-    - cron: "0 4 * * 1" # Weekly Monday 4am UTC
 
 env:
   CARGO_TERM_COLOR: always
