@@ -5,15 +5,15 @@ High-performance network security agent powered by eBPF. Monitors, filters, and 
 ## What it does
 
 eBPFsentinel combines a stateful firewall, intrusion detection, rate limiting, and threat intelligence into a single agent that runs directly in the Linux kernel via eBPF — no kernel modules, no packet copies to userspace.
-on
+
 ### Network Security
 
 - **Stateful Firewall** — L3/L4 packet filtering with conntrack, CIDR matching, IP set aliases, security zones, VLAN filtering, schedule-based rules, and IPv4/IPv6 dual-stack
-- **NAT** — SNAT, DNAT, masquerade, port forwarding, 1:1 NAT with full packet rewriting
+- **NAT** — SNAT, DNAT, masquerade, port forwarding, 1:1 NAT with full packet rewriting (IPv4/IPv6)
 - **Rate Limiting** — Per-IP protection with 5 algorithms (token bucket, fixed window, sliding window, leaky bucket, SYN cookie)
 - **DDoS Mitigation** — Detects and mitigates SYN flood, UDP amplification, ICMP/RST/FIN/ACK flood, and volumetric attacks
 - **L7 Firewall** — Application-layer filtering for HTTP, TLS/SNI, gRPC, SMTP, FTP, and SMB
-- **Packet Scrubbing** — Kernel-side traffic normalization (TTL, MSS clamping, DF clearing, IP ID randomization)
+- **Packet Scrubbing** — Kernel-side traffic normalization (TTL/hop limit, MSS clamping, DF clearing, IP ID randomization)
 - **Multi-WAN Routing** — Policy-based gateway selection with ICMP/TCP health checks and failover
 
 ### Threat Detection & Prevention
