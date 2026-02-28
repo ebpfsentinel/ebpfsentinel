@@ -34,11 +34,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc and LLVM
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler llvm-dev
 
       - name: Install bpf-linker
-        run: cargo +nightly install bpf-linker --no-default-features
+        run: cargo +nightly install bpf-linker
 
       - name: Build eBPF programs
         run: cargo xtask ebpf-build
