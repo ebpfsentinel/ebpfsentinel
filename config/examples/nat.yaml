@@ -3,6 +3,7 @@
 #
 # Network Address Translation via TC classifiers with conntrack integration.
 # Supports SNAT, DNAT, masquerade, 1:1 NAT, port forwarding, and redirect.
+# Full IPv4/IPv6 dual-stack support.
 #
 # Architecture:
 #   INGRESS: packet → XDP (firewall) → TC (tc-conntrack) → TC (tc-nat-ingress: DNAT)
@@ -15,8 +16,8 @@
 #
 # Packet rewriting uses:
 #   - bpf_skb_store_bytes    — overwrite IP/port fields
-#   - bpf_l3_csum_replace    — incremental IP header checksum update
-#   - bpf_l4_csum_replace    — incremental TCP/UDP checksum update
+#   - bpf_l3_csum_replace    — incremental IP header checksum update (IPv4 only)
+#   - bpf_l4_csum_replace    — incremental TCP/UDP pseudo-header checksum update (IPv4/IPv6)
 #
 # Port allocation for SNAT/masquerade uses a hash-based scheme over an
 # LRU HashMap (65536 entries), ensuring even distribution across the
@@ -137,6 +138,30 @@ nat:
       int_port: "8000-8010"
       match_protocol: tcp
 
+  # ── IPv6 SNAT rules ─────────────────────────────────────────────
+  #
+  # IPv6 NAT uses NatRuleEntryV6 with [u32; 4] address/mask fields.
+  # Checksum: L4 pseudo-header only (IPv6 has no IP header checksum).
+
+  snat_rules_v6:
+    # SNAT: rewrite source to a specific IPv6 address for ULA traffic.
+    - id: nat-snat-ula
+      type: snat
+      translated_addr: "2001:db8:1::1"
+      match_src: "fd00::/8"
+      port_range: "32768-60999"
+
+  # ── IPv6 DNAT rules ─────────────────────────────────────────────
+
+  dnat_rules_v6:
+    # Port forwarding: redirect public port 8080 to an internal IPv6 web server.
+    - id: nat-pf-web-v6
+      type: dnat
+      translated_addr: "fd00::10"
+      translated_port: 80
+      match_dst_port: 8080
+      match_protocol: tcp
+
 # ── Firewall (allow NATed traffic) ─────────────────────────────────
 
 firewall:
@@ -177,4 +202,20 @@ firewall:
       priority: 20
       action: allow
       src_ip: "192.168.0.0/16"
+      state: [new]
+
+    # Allow inbound IPv6 traffic to port-forwarded web server
+    - id: fw-allow-web-pf-v6
+      priority: 12
+      action: allow
+      protocol: tcp
+      dst_ip: "fd00::10"
+      dst_port: 80
+      state: [new]
+
+    # Allow outbound from ULA network (will be SNATed)
+    - id: fw-allow-ula-outbound
+      priority: 21
+      action: allow
+      src_ip: "fd00::/8"
       state: [new]

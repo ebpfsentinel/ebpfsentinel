@@ -397,7 +397,8 @@ firewall:
   scrub:
     enabled: true
     reassemble_fragments: true  # Reassemble IP fragments before inspection
-    min_ttl: 1                  # Enforce minimum TTL (drop TTL=0)
-    max_mss: 1460               # Clamp TCP MSS to prevent fragmentation
-    random_ip_id: true          # Randomize IP ID field (anti-fingerprint)
-    clear_df: false             # Clear Don't Fragment bit
+    min_ttl: 1                  # Enforce minimum TTL (IPv4, drop TTL=0)
+    min_hop_limit: 1            # Enforce minimum hop limit (IPv6, no checksum update needed)
+    max_mss: 1460               # Clamp TCP MSS to prevent fragmentation (IPv4/IPv6)
+    random_ip_id: true          # Randomize IP ID field (IPv4 only, anti-fingerprint)
+    clear_df: false             # Clear Don't Fragment bit (IPv4 only)
