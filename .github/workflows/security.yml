@@ -14,6 +14,10 @@ concurrency:
   group: security-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  checks: write
+  contents: read
+
 jobs:
   # ── Vulnerability scan ───────────────────────────────────────────
   audit:
