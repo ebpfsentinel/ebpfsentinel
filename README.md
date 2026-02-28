@@ -63,38 +63,12 @@ agent:
   interfaces: [eth0]
 ```
 
-See the [Getting Started guide](../docs/getting-started/quickstart.md) for detailed setup instructions.
-
-## Documentation
-
-Full documentation is available in the [`docs/`](../docs/) directory:
-
-| Section | Description |
-| ------- | ----------- |
-| [Getting Started](../docs/getting-started/quickstart.md) | Installation, prerequisites, first run |
-| [Features](../docs/features/overview.md) | Detailed feature guides (firewall, IDS, DLP, ...) |
-| [Configuration](../docs/configuration/overview.md) | YAML reference for all sections |
-| [Architecture](../docs/architecture/overview.md) | Hexagonal/DDD design, eBPF pipeline, data flow |
-| [Kernel Reference](../docs/kernel/overview.md) | eBPF programs, maps, helpers, pipeline |
-| [REST API](../docs/api-reference/rest-api.md) | All endpoints with request/response formats |
-| [gRPC API](../docs/api-reference/grpc-api.md) | Alert streaming service |
-| [CLI Reference](../docs/cli-reference/index.md) | All commands and options |
-| [Prometheus Metrics](../docs/api-reference/prometheus-metrics.md) | Metric names and labels |
-| [Deployment](../docs/operations/deployment/docker.md) | Docker, Kubernetes, binary |
-| [Security](../docs/architecture/security-model.md) | TLS, auth, hardening |
-| [Development](../docs/development/building.md) | Building, testing, contributing |
-| [Examples](../docs/examples/index.md) | Real-world deployment scenarios |
-
-Per-feature configuration examples are in [`config/examples/`](config/examples/).
-
 ## Compatibility
 
 - **OS:** Linux only (kernel 5.17+ with BTF)
 - **Distros:** Debian 12+, Ubuntu 22.04+, RHEL 9+, Fedora 37+, Alpine 3.18+, Arch, NixOS, Talos
 - **Arch:** x86_64 (primary), aarch64 (cross-tested)
 - **Runtime:** Docker, Podman, Kubernetes (DaemonSet), Nomad
-
-See [Compatibility](../docs/operations/compatibility.md) for the full matrix.
 
 ## License
 
