@@ -73,9 +73,9 @@ jobs:
       - name: Install cargo-cyclonedx
         run: cargo install cargo-cyclonedx
       - name: Generate SBOM
-        run: cargo cyclonedx --format json --output-file sbom.json
+        run: cargo cyclonedx --format json
       - uses: actions/upload-artifact@v4
         with:
           name: sbom-cyclonedx
-          path: sbom.json
+          path: ./*_bom.cdx.json
           retention-days: 90
