@@ -3,14 +3,21 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+use application::alias_service_impl::AliasAppService;
 use application::audit_service_impl::AuditAppService;
+use application::conntrack_service_impl::ConnTrackAppService;
+use application::ddos_service_impl::DdosAppService;
+use application::dlp_service_impl::DlpAppService;
 use application::dns_blocklist_service_impl::DnsBlocklistAppService;
 use application::dns_cache_service_impl::DnsCacheAppService;
 use application::domain_reputation_service_impl::DomainReputationAppService;
 use application::firewall_service_impl::FirewallAppService;
+use application::ids_service_impl::IdsAppService;
 use application::ips_service_impl::IpsAppService;
 use application::l7_service_impl::L7AppService;
+use application::nat_service_impl::NatAppService;
 use application::ratelimit_service_impl::RateLimitAppService;
+use application::routing_service_impl::RoutingAppService;
 use application::threatintel_service_impl::ThreatIntelAppService;
 use infrastructure::config::AgentConfig;
 use infrastructure::metrics::AgentMetrics;
@@ -32,6 +39,13 @@ pub struct AppState {
     pub ratelimit_service: Arc<RwLock<RateLimitAppService>>,
     pub threatintel_service: Arc<RwLock<ThreatIntelAppService>>,
     pub audit_service: Arc<RwLock<AuditAppService>>,
+    pub ids_service: Option<Arc<RwLock<IdsAppService>>>,
+    pub conntrack_service: Option<Arc<RwLock<ConnTrackAppService>>>,
+    pub ddos_service: Option<Arc<RwLock<DdosAppService>>>,
+    pub dlp_service: Option<Arc<RwLock<DlpAppService>>>,
+    pub nat_service: Option<Arc<RwLock<NatAppService>>>,
+    pub alias_service: Option<Arc<RwLock<AliasAppService>>>,
+    pub routing_service: Option<Arc<RwLock<RoutingAppService>>>,
     pub dns_cache_service: Option<Arc<DnsCacheAppService>>,
     pub dns_blocklist_service: Option<Arc<DnsBlocklistAppService>>,
     pub domain_reputation_service: Option<Arc<DomainReputationAppService>>,
@@ -69,6 +83,13 @@ impl AppState {
             ratelimit_service,
             threatintel_service,
             audit_service,
+            ids_service: None,
+            conntrack_service: None,
+            ddos_service: None,
+            dlp_service: None,
+            nat_service: None,
+            alias_service: None,
+            routing_service: None,
             dns_cache_service: None,
             dns_blocklist_service: None,
             domain_reputation_service: None,
@@ -79,6 +100,55 @@ impl AppState {
             reload_trigger,
             ebpf_program_status,
         }
+    }
+
+    /// Attach an IDS service.
+    #[must_use]
+    pub fn with_ids_service(mut self, svc: Arc<RwLock<IdsAppService>>) -> Self {
+        self.ids_service = Some(svc);
+        self
+    }
+
+    /// Attach a conntrack service.
+    #[must_use]
+    pub fn with_conntrack_service(mut self, svc: Arc<RwLock<ConnTrackAppService>>) -> Self {
+        self.conntrack_service = Some(svc);
+        self
+    }
+
+    /// Attach a `DDoS` protection service.
+    #[must_use]
+    pub fn with_ddos_service(mut self, svc: Arc<RwLock<DdosAppService>>) -> Self {
+        self.ddos_service = Some(svc);
+        self
+    }
+
+    /// Attach a DLP service.
+    #[must_use]
+    pub fn with_dlp_service(mut self, svc: Arc<RwLock<DlpAppService>>) -> Self {
+        self.dlp_service = Some(svc);
+        self
+    }
+
+    /// Attach a NAT service.
+    #[must_use]
+    pub fn with_nat_service(mut self, svc: Arc<RwLock<NatAppService>>) -> Self {
+        self.nat_service = Some(svc);
+        self
+    }
+
+    /// Attach an alias service.
+    #[must_use]
+    pub fn with_alias_service(mut self, svc: Arc<RwLock<AliasAppService>>) -> Self {
+        self.alias_service = Some(svc);
+        self
+    }
+
+    /// Attach a routing service.
+    #[must_use]
+    pub fn with_routing_service(mut self, svc: Arc<RwLock<RoutingAppService>>) -> Self {
+        self.routing_service = Some(svc);
+        self
     }
 
     /// Attach DNS intelligence services.

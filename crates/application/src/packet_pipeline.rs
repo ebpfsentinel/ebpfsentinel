@@ -2,11 +2,15 @@ use std::sync::Arc;
 
 use domain::audit::entity::{AuditAction, AuditComponent};
 use domain::common::entity::DomainMode;
+use domain::ddos::entity::{DdosAttackType, DdosEvent};
 use domain::firewall::entity::FirewallAction;
 use domain::ids::entity::IdsAlert;
 use domain::l7::entity::DetectedProtocol;
 use domain::l7::parser::{detect_protocol, parse_payload};
 use domain::threatintel::entity::ThreatIntelAlert;
+use ebpf_common::ddos::{
+    EVENT_TYPE_DDOS_AMP, EVENT_TYPE_DDOS_CONNTRACK, EVENT_TYPE_DDOS_ICMP, EVENT_TYPE_DDOS_SYN,
+};
 use ebpf_common::dlp::DlpEvent;
 use ebpf_common::dns::DnsEvent;
 use ebpf_common::event::{
@@ -18,6 +22,7 @@ use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::audit_service_impl::AuditAppService;
+use crate::ddos_service_impl::DdosAppService;
 use crate::dlp_service_impl::DlpAppService;
 use crate::dns_cache_service_impl::DnsCacheAppService;
 use crate::ids_service_impl::IdsAppService;
@@ -57,6 +62,7 @@ pub struct EventDispatcher {
     dns_cache: Option<Arc<dyn DnsCachePort>>,
     dns_cache_svc: Option<Arc<DnsCacheAppService>>,
     dlp_service: Option<Arc<RwLock<DlpAppService>>>,
+    ddos_service: Option<Arc<RwLock<DdosAppService>>>,
 }
 
 impl EventDispatcher {
@@ -79,6 +85,7 @@ impl EventDispatcher {
             dns_cache,
             dns_cache_svc: None,
             dlp_service: None,
+            ddos_service: None,
         }
     }
 
@@ -93,6 +100,13 @@ impl EventDispatcher {
     #[must_use]
     pub fn with_dlp_service(mut self, svc: Arc<RwLock<DlpAppService>>) -> Self {
         self.dlp_service = Some(svc);
+        self
+    }
+
+    /// Set the `DDoS` service for processing `DDoS` events.
+    #[must_use]
+    pub fn with_ddos_service(mut self, svc: Arc<RwLock<DdosAppService>>) -> Self {
+        self.ddos_service = Some(svc);
         self
     }
 
@@ -209,6 +223,12 @@ impl EventDispatcher {
             }
             EVENT_TYPE_THREATINTEL => {
                 self.process_threatintel_event(event).await;
+            }
+            EVENT_TYPE_DDOS_SYN
+            | EVENT_TYPE_DDOS_ICMP
+            | EVENT_TYPE_DDOS_AMP
+            | EVENT_TYPE_DDOS_CONNTRACK => {
+                self.process_ddos_event(event).await;
             }
             other => {
                 tracing::debug!(event_type = other, "unhandled event type");
@@ -509,6 +529,57 @@ impl EventDispatcher {
                 self.metrics.record_packet("dlp", "alert");
             }
         }
+    }
+
+    async fn process_ddos_event(&self, event: PacketEvent) {
+        self.metrics.record_packet("ddos", "drop");
+
+        let Some(ref ddos_service) = self.ddos_service else {
+            return;
+        };
+
+        let Some(attack_type) = DdosAttackType::from_event_type(event.event_type) else {
+            return;
+        };
+
+        let ddos_event = DdosEvent {
+            timestamp_ns: event.timestamp_ns,
+            attack_type,
+            src_addr: event.src_addr,
+            dst_addr: event.dst_addr,
+            src_port: event.src_port,
+            dst_port: event.dst_port,
+            protocol: event.protocol,
+            is_ipv6: event.is_ipv6(),
+        };
+
+        let changed = {
+            let mut svc = ddos_service.write().await;
+            svc.process_event(&ddos_event)
+        };
+
+        if changed {
+            tracing::info!(
+                attack_type = ?attack_type,
+                src_ip = %event.src_ip(),
+                dst_ip = %event.dst_ip(),
+                "DDoS attack state changed"
+            );
+        }
+
+        self.audit_service.read().await.record_security_decision(
+            AuditComponent::Ratelimit,
+            AuditAction::Drop,
+            event.timestamp_ns,
+            event.src_addr,
+            event.dst_addr,
+            event.is_ipv6(),
+            event.src_port,
+            event.dst_port,
+            event.protocol,
+            "",
+            &format!("ddos {attack_type:?} drop"),
+        );
     }
 }
 

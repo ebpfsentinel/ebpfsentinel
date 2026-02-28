@@ -3,7 +3,9 @@
 mod api_client;
 mod cli;
 mod commands;
+mod ebpf_metrics;
 mod reload;
+mod schedule_eval;
 mod shutdown;
 mod startup;
 
@@ -11,8 +13,8 @@ use anyhow::Result;
 
 use api_client::ApiClient;
 use cli::{
-    AlertsCommand, AuditCommand, Command, DnsCommand, DomainsCommand, FirewallCommand, IpsCommand,
-    L7Command, RatelimitCommand, ThreatintelCommand,
+    AlertsCommand, AuditCommand, Command, DdosCommand, DnsCommand, DomainsCommand, FirewallCommand,
+    IpsCommand, L7Command, RatelimitCommand, ThreatintelCommand,
 };
 
 #[tokio::main]
@@ -170,6 +172,20 @@ async fn main() -> Result<()> {
                 DnsCommand::Stats => commands::cmd_dns_stats(&client, output).await,
                 DnsCommand::Blocklist => commands::cmd_dns_blocklist(&client, output).await,
                 DnsCommand::Flush => commands::cmd_dns_flush(&client, output).await,
+            }
+        }
+
+        Some(Command::Ddos(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                DdosCommand::Status => commands::cmd_ddos_status(&client, output).await,
+                DdosCommand::Attacks => commands::cmd_ddos_attacks(&client, output).await,
+                DdosCommand::History { limit } => {
+                    commands::cmd_ddos_history(&client, limit, output).await
+                }
+                DdosCommand::Policies => commands::cmd_ddos_policies(&client, output).await,
+                DdosCommand::Add { json } => commands::cmd_ddos_add(&client, &json, output).await,
+                DdosCommand::Delete { id } => commands::cmd_ddos_delete(&client, &id).await,
             }
         }
 

@@ -11,6 +11,7 @@ pub enum AuditComponent {
     Ratelimit,
     Threatintel,
     Dlp,
+    Ddos,
     Config,
 }
 
@@ -24,6 +25,7 @@ impl AuditComponent {
             Self::Ratelimit => "ratelimit",
             Self::Threatintel => "threatintel",
             Self::Dlp => "dlp",
+            Self::Ddos => "ddos",
             Self::Config => "config",
         }
     }
@@ -38,6 +40,7 @@ impl AuditComponent {
             "ratelimit" => Self::Ratelimit,
             "threatintel" => Self::Threatintel,
             "dlp" => Self::Dlp,
+            "ddos" => Self::Ddos,
             _ => Self::Config,
         }
     }

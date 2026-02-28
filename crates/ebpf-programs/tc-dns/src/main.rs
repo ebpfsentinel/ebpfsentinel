@@ -107,8 +107,6 @@ fn ipv6_addr_to_u32x4(addr: &[u8; 16]) -> [u32; 4] {
 
 #[inline(always)]
 fn try_tc_dns(ctx: &TcContext) -> Result<i32, ()> {
-    increment_metric(DNS_METRIC_PACKETS_INSPECTED);
-
     // Parse Ethernet header
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
@@ -170,6 +168,8 @@ fn process_dns_v4(
         return Ok(TC_ACT_OK);
     };
 
+    increment_metric(DNS_METRIC_PACKETS_INSPECTED);
+
     let src_addr = [src_ip, 0, 0, 0];
     let dst_addr = [dst_ip, 0, 0, 0];
     let dns_offset = l4_offset + mem::size_of::<UdpHdr>();
@@ -212,6 +212,8 @@ fn process_dns_v6(
     } else {
         return Ok(TC_ACT_OK);
     };
+
+    increment_metric(DNS_METRIC_PACKETS_INSPECTED);
 
     let dns_offset = l4_offset + mem::size_of::<UdpHdr>();
 

@@ -1,7 +1,9 @@
 use aya::Ebpf;
 use aya::maps::{HashMap, MapData};
+use domain::common::error::DomainError;
 use domain::ratelimit::entity::RateLimitPolicy;
 use ebpf_common::ratelimit::{ALGO_TOKEN_BUCKET, RateLimitConfig, RateLimitKey};
+use ports::secondary::ratelimit_map_port::RateLimitMapPort;
 use tracing::info;
 
 /// Manages the `RATELIMIT_CONFIG` eBPF `HashMap`.
@@ -84,6 +86,28 @@ impl RateLimitMapManager {
     /// Return the number of config entries in the map.
     pub fn config_count(&self) -> usize {
         self.config_map.keys().filter_map(Result::ok).count()
+    }
+}
+
+impl RateLimitMapPort for RateLimitMapManager {
+    fn load_policies(
+        &mut self,
+        policies: &[RateLimitPolicy],
+        default_rate: u64,
+        default_burst: u64,
+        default_algorithm: u8,
+    ) -> Result<(), DomainError> {
+        self.load_policies(policies, default_rate, default_burst, default_algorithm)
+            .map_err(|e| DomainError::EngineError(format!("ratelimit map load failed: {e}")))
+    }
+
+    fn clear_config(&mut self) -> Result<(), DomainError> {
+        self.clear_config()
+            .map_err(|e| DomainError::EngineError(format!("ratelimit map clear failed: {e}")))
+    }
+
+    fn config_count(&self) -> Result<usize, DomainError> {
+        Ok(self.config_count())
     }
 }
 

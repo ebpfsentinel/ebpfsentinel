@@ -43,7 +43,7 @@ FROM gcr.io/distroless/cc-debian12
 LABEL org.opencontainers.image.title="eBPFsentinel" \
     org.opencontainers.image.description="eBPF network security agent" \
     org.opencontainers.image.source="https://github.com/ebpfsentinel/ebpfsentinel" \
-    org.opencontainers.image.licenses="Apache-2.0"
+    org.opencontainers.image.licenses="AGPL-3.0-only"
 
 # Copy agent binary (stripped + LTO by cargo profile.release)
 COPY --from=builder /build/target/release/ebpfsentinel-agent \
@@ -68,6 +68,18 @@ COPY --from=builder \
 COPY --from=builder \
     /build/crates/ebpf-programs/tc-dns/target/bpfel-unknown-none/release/tc-dns \
     /usr/local/lib/ebpfsentinel/tc-dns
+COPY --from=builder \
+    /build/crates/ebpf-programs/tc-conntrack/target/bpfel-unknown-none/release/tc-conntrack \
+    /usr/local/lib/ebpfsentinel/tc-conntrack
+COPY --from=builder \
+    /build/crates/ebpf-programs/tc-nat-ingress/target/bpfel-unknown-none/release/tc-nat-ingress \
+    /usr/local/lib/ebpfsentinel/tc-nat-ingress
+COPY --from=builder \
+    /build/crates/ebpf-programs/tc-nat-egress/target/bpfel-unknown-none/release/tc-nat-egress \
+    /usr/local/lib/ebpfsentinel/tc-nat-egress
+COPY --from=builder \
+    /build/crates/ebpf-programs/tc-scrub/target/bpfel-unknown-none/release/tc-scrub \
+    /usr/local/lib/ebpfsentinel/tc-scrub
 
 # Copy default configuration
 COPY config/ebpfsentinel.yaml /etc/ebpfsentinel/config.yaml

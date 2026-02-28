@@ -9,7 +9,8 @@ pub struct ConfigFlags {
     pub dlp_enabled: u8,
     pub ratelimit_enabled: u8,
     pub threatintel_enabled: u8,
-    pub _padding: [u8; 2],
+    pub conntrack_enabled: u8,
+    pub nat_enabled: u8,
 }
 
 // SAFETY: ConfigFlags is #[repr(C)], Copy, 'static, and contains only primitive

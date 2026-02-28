@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use aya::Ebpf;
 use aya::maps::{BloomFilter, HashMap, MapData};
 use domain::common::error::DomainError;
@@ -9,17 +11,25 @@ use ebpf_common::threatintel::{
 use ports::secondary::threatintel_map_port::ThreatIntelMapPort;
 use tracing::{info, warn};
 
+/// Shared handle to the threat intel IPv4 map.
+pub type SharedTiV4Map = Arc<Mutex<HashMap<MapData, ThreatIntelKey, ThreatIntelValue>>>;
+/// Shared handle to the threat intel IPv6 map.
+pub type SharedTiV6Map = Arc<Mutex<HashMap<MapData, ThreatIntelKeyV6, ThreatIntelValue>>>;
+/// Shared handle to the IPv4 bloom filter.
+pub type SharedBloomV4 = Arc<Mutex<BloomFilter<MapData, ThreatIntelKey>>>;
+/// Shared handle to the IPv6 bloom filter.
+pub type SharedBloomV6 = Arc<Mutex<BloomFilter<MapData, ThreatIntelKeyV6>>>;
+
 /// Manages the `THREATINTEL_IOCS` (IPv4) and `THREATINTEL_IOCS_V6` (IPv6)
 /// eBPF `HashMap` maps.
 ///
-/// Provides typed wrappers around the raw eBPF maps for inserting,
-/// removing, and reloading threat intelligence IOCs. All writes are
-/// serialized through `&mut self` (single writer pattern).
+/// Maps are wrapped in `Arc<Mutex<>>` so they can be shared with
+/// `EbpfMapWriteAdapter` for DNS blocklist IP injection.
 pub struct ThreatIntelMapManager {
-    iocs_map: HashMap<MapData, ThreatIntelKey, ThreatIntelValue>,
-    iocs_v6_map: Option<HashMap<MapData, ThreatIntelKeyV6, ThreatIntelValue>>,
-    bloom_v4: Option<BloomFilter<MapData, ThreatIntelKey>>,
-    bloom_v6: Option<BloomFilter<MapData, ThreatIntelKeyV6>>,
+    iocs_map: SharedTiV4Map,
+    iocs_v6_map: Option<SharedTiV6Map>,
+    bloom_v4: Option<SharedBloomV4>,
+    bloom_v6: Option<SharedBloomV6>,
 }
 
 impl ThreatIntelMapManager {
@@ -31,19 +41,22 @@ impl ThreatIntelMapManager {
         let map = ebpf
             .take_map("THREATINTEL_IOCS")
             .ok_or_else(|| anyhow::anyhow!("map 'THREATINTEL_IOCS' not found in eBPF object"))?;
-        let iocs_map = HashMap::try_from(map)?;
+        let iocs_map = Arc::new(Mutex::new(HashMap::try_from(map)?));
 
         let iocs_v6_map = ebpf
             .take_map("THREATINTEL_IOCS_V6")
-            .and_then(|m| HashMap::try_from(m).ok());
+            .and_then(|m| HashMap::try_from(m).ok())
+            .map(|m| Arc::new(Mutex::new(m)));
 
         // Bloom filters are optional — graceful if absent (older eBPF object).
         let bloom_v4 = ebpf
             .take_map("THREATINTEL_BLOOM_V4")
-            .and_then(|m| BloomFilter::try_from(m).ok());
+            .and_then(|m| BloomFilter::try_from(m).ok())
+            .map(|m| Arc::new(Mutex::new(m)));
         let bloom_v6 = ebpf
             .take_map("THREATINTEL_BLOOM_V6")
-            .and_then(|m| BloomFilter::try_from(m).ok());
+            .and_then(|m| BloomFilter::try_from(m).ok())
+            .map(|m| Arc::new(Mutex::new(m)));
 
         info!(
             v6 = iocs_v6_map.is_some(),
@@ -59,15 +72,36 @@ impl ThreatIntelMapManager {
         })
     }
 
+    /// Return shared handles to the underlying maps for use by
+    /// `EbpfMapWriteAdapter` (DNS blocklist injection).
+    pub fn shared_handles(
+        &self,
+    ) -> (
+        SharedTiV4Map,
+        Option<SharedTiV6Map>,
+        Option<SharedBloomV4>,
+        Option<SharedBloomV6>,
+    ) {
+        (
+            Arc::clone(&self.iocs_map),
+            self.iocs_v6_map.as_ref().map(Arc::clone),
+            self.bloom_v4.as_ref().map(Arc::clone),
+            self.bloom_v6.as_ref().map(Arc::clone),
+        )
+    }
+
     /// Insert an IPv6 IOC into the V6 map.
     pub fn insert_ioc_v6(
         &mut self,
         key: &ThreatIntelKeyV6,
         value: &ThreatIntelValue,
     ) -> Result<(), DomainError> {
-        let v6_map = self.iocs_v6_map.as_mut().ok_or_else(|| {
+        let v6_arc = self.iocs_v6_map.as_ref().ok_or_else(|| {
             DomainError::EngineError("THREATINTEL_IOCS_V6 map not available".to_string())
         })?;
+        let mut v6_map = v6_arc
+            .lock()
+            .map_err(|e| DomainError::EngineError(format!("V6 map lock poisoned: {e}")))?;
         v6_map
             .insert(key, value, 0)
             .map_err(|e| DomainError::EngineError(format!("eBPF V6 map insert failed: {e}")))?;
@@ -76,9 +110,12 @@ impl ThreatIntelMapManager {
 
     /// Remove an IPv6 IOC from the V6 map.
     pub fn remove_ioc_v6(&mut self, key: &ThreatIntelKeyV6) -> Result<(), DomainError> {
-        let v6_map = self.iocs_v6_map.as_mut().ok_or_else(|| {
+        let v6_arc = self.iocs_v6_map.as_ref().ok_or_else(|| {
             DomainError::EngineError("THREATINTEL_IOCS_V6 map not available".to_string())
         })?;
+        let mut v6_map = v6_arc
+            .lock()
+            .map_err(|e| DomainError::EngineError(format!("V6 map lock poisoned: {e}")))?;
         v6_map
             .remove(key)
             .map_err(|e| DomainError::EngineError(format!("eBPF V6 map remove failed: {e}")))?;
@@ -93,6 +130,7 @@ impl ThreatIntelMapManager {
     /// `block_mode` determines the eBPF action for all entries:
     /// - `true` -> `THREATINTEL_ACTION_DROP` (block + alert)
     /// - `false` -> `THREATINTEL_ACTION_ALERT` (alert only, pass traffic)
+    #[allow(clippy::too_many_lines)]
     pub fn load_iocs(&mut self, iocs: &[Ioc], block_mode: bool) -> Result<(), DomainError> {
         self.clear_iocs()?;
         let action = if block_mode {
@@ -118,7 +156,8 @@ impl ThreatIntelMapManager {
                     let key = ThreatIntelKey { ip: u32::from(v4) };
                     self.insert_ioc(&key, &value)?;
                     // Best-effort bloom filter insert (non-fatal on error).
-                    if let Some(ref mut bloom) = self.bloom_v4
+                    if let Some(ref bloom_arc) = self.bloom_v4
+                        && let Ok(mut bloom) = bloom_arc.lock()
                         && let Err(e) = bloom.insert(key, 0)
                     {
                         warn!(ip = %v4, "bloom V4 insert failed: {e}");
@@ -140,7 +179,8 @@ impl ThreatIntelMapManager {
                         };
                         self.insert_ioc_v6(&key, &value)?;
                         // Best-effort bloom filter insert (non-fatal on error).
-                        if let Some(ref mut bloom) = self.bloom_v6
+                        if let Some(ref bloom_arc) = self.bloom_v6
+                            && let Ok(mut bloom) = bloom_arc.lock()
                             && let Err(e) = bloom.insert(key, 0)
                         {
                             warn!(ip = %v6, "bloom V6 insert failed: {e}");
@@ -163,35 +203,53 @@ impl ThreatIntelMapManager {
 }
 
 impl ThreatIntelMapPort for ThreatIntelMapManager {
+    fn load_all_iocs(&mut self, iocs: &[Ioc], block_mode: bool) -> Result<(), DomainError> {
+        self.load_iocs(iocs, block_mode)
+    }
+
     fn insert_ioc(
         &mut self,
         key: &ThreatIntelKey,
         value: &ThreatIntelValue,
     ) -> Result<(), DomainError> {
-        self.iocs_map
-            .insert(key, value, 0)
+        let mut map = self
+            .iocs_map
+            .lock()
+            .map_err(|e| DomainError::EngineError(format!("V4 map lock poisoned: {e}")))?;
+        map.insert(key, value, 0)
             .map_err(|e| DomainError::EngineError(format!("eBPF map insert failed: {e}")))?;
         Ok(())
     }
 
     fn remove_ioc(&mut self, key: &ThreatIntelKey) -> Result<(), DomainError> {
-        self.iocs_map
-            .remove(key)
+        let mut map = self
+            .iocs_map
+            .lock()
+            .map_err(|e| DomainError::EngineError(format!("V4 map lock poisoned: {e}")))?;
+        map.remove(key)
             .map_err(|e| DomainError::EngineError(format!("eBPF map remove failed: {e}")))?;
         Ok(())
     }
 
     fn clear_iocs(&mut self) -> Result<(), DomainError> {
         // Clear V4 map
-        let keys: Vec<ThreatIntelKey> = self.iocs_map.keys().filter_map(Result::ok).collect();
-        for key in &keys {
-            self.iocs_map
-                .remove(key)
-                .map_err(|e| DomainError::EngineError(format!("eBPF map clear failed: {e}")))?;
+        {
+            let mut map = self
+                .iocs_map
+                .lock()
+                .map_err(|e| DomainError::EngineError(format!("V4 map lock poisoned: {e}")))?;
+            let keys: Vec<ThreatIntelKey> = map.keys().filter_map(Result::ok).collect();
+            for key in &keys {
+                map.remove(key)
+                    .map_err(|e| DomainError::EngineError(format!("eBPF map clear failed: {e}")))?;
+            }
         }
 
         // Clear V6 map (if present)
-        if let Some(ref mut v6_map) = self.iocs_v6_map {
+        if let Some(ref v6_arc) = self.iocs_v6_map {
+            let mut v6_map = v6_arc
+                .lock()
+                .map_err(|e| DomainError::EngineError(format!("V6 map lock poisoned: {e}")))?;
             let v6_keys: Vec<ThreatIntelKeyV6> = v6_map.keys().filter_map(Result::ok).collect();
             for key in &v6_keys {
                 v6_map.remove(key).map_err(|e| {
@@ -204,11 +262,20 @@ impl ThreatIntelMapPort for ThreatIntelMapManager {
     }
 
     fn ioc_count(&self) -> Result<usize, DomainError> {
-        let v4_count = self.iocs_map.keys().filter_map(Result::ok).count();
-        let v6_count = self
-            .iocs_v6_map
-            .as_ref()
-            .map_or(0, |m| m.keys().filter_map(Result::ok).count());
+        let map = self
+            .iocs_map
+            .lock()
+            .map_err(|e| DomainError::EngineError(format!("V4 map lock poisoned: {e}")))?;
+        let v4_count = map.keys().filter_map(Result::ok).count();
+        let v6_count: usize =
+            self.iocs_v6_map
+                .as_ref()
+                .map_or(Ok::<usize, DomainError>(0), |v6_arc| {
+                    let v6_map = v6_arc.lock().map_err(|e| {
+                        DomainError::EngineError(format!("V6 map lock poisoned: {e}"))
+                    })?;
+                    Ok(v6_map.keys().filter_map(Result::ok).count())
+                })?;
         Ok(v4_count + v6_count)
     }
 }

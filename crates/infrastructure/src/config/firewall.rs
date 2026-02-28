@@ -1,11 +1,16 @@
 //! Firewall domain configuration structs and conversion logic.
 
+use std::collections::HashMap;
+
 use domain::common::entity::RuleId;
 use domain::firewall::entity::{FirewallRule, PortRange, Scope as DomainScope};
 use serde::{Deserialize, Serialize};
 
+use super::alias::AliasConfig;
+
 use super::common::{
-    ConfigError, default_mode, default_true, parse_action, parse_cidr, parse_protocol,
+    ConfigError, default_mode, default_true, parse_action, parse_cidr, parse_ct_state,
+    parse_protocol,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +26,22 @@ pub struct FirewallConfig {
 
     #[serde(default)]
     pub rules: Vec<FirewallRuleConfig>,
+
+    /// Named aliases for IP sets, port sets, URL tables, `GeoIP`, etc.
+    #[serde(default)]
+    pub aliases: HashMap<String, AliasConfig>,
+
+    /// Anti-lockout rule configuration.
+    #[serde(default)]
+    pub anti_lockout: AntiLockoutConfig,
+
+    /// Scrub (packet normalization) configuration.
+    #[serde(default)]
+    pub scrub: ScrubConfig,
+
+    /// Schedules for time-based rule activation.
+    #[serde(default)]
+    pub schedules: HashMap<String, ScheduleConfig>,
 }
 
 impl Default for FirewallConfig {
@@ -30,8 +51,72 @@ impl Default for FirewallConfig {
             mode: "alert".to_string(),
             default_policy: DefaultPolicy::Pass,
             rules: Vec::new(),
+            aliases: HashMap::new(),
+            anti_lockout: AntiLockoutConfig::default(),
+            scrub: ScrubConfig::default(),
+            schedules: HashMap::new(),
         }
     }
+}
+
+// ── Anti-lockout config (Epic 31) ───────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AntiLockoutConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Management interfaces (e.g. `["eth0"]`).
+    #[serde(default)]
+    pub interfaces: Vec<String>,
+    /// Management ports (e.g. `[22, 8080, 50051]`).
+    #[serde(default = "default_anti_lockout_ports")]
+    pub ports: Vec<u16>,
+}
+
+fn default_anti_lockout_ports() -> Vec<u16> {
+    vec![22, 8080, 50051]
+}
+
+impl Default for AntiLockoutConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interfaces: Vec::new(),
+            ports: default_anti_lockout_ports(),
+        }
+    }
+}
+
+// ── Scrub config (Epic 26) ──────────────────────────────────────────
+
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScrubConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub reassemble_fragments: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_ttl: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_mss: Option<u16>,
+    #[serde(default)]
+    pub random_ip_id: bool,
+    #[serde(default)]
+    pub clear_df: bool,
+}
+
+// ── Schedule config (Epic 28) ───────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleConfig {
+    pub entries: Vec<ScheduleEntryConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleEntryConfig {
+    pub days: Vec<String>,
+    pub time: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +155,71 @@ pub struct FirewallRuleConfig {
     /// Optional 802.1Q VLAN ID filter (None = match any VLAN).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vlan_id: Option<u16>,
+
+    /// Source IP set alias name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_alias: Option<String>,
+
+    /// Destination IP set alias name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_alias: Option<String>,
+
+    /// Source port set alias name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_port_alias: Option<String>,
+
+    /// Destination port set alias name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_port_alias: Option<String>,
+
+    /// Conntrack state filter (e.g. `[established, related]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<Vec<String>>,
+
+    // ── Extended fields (Epics 24-31) ───────────────────────────────
+    /// TCP flags specification (e.g. `"S/SA"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flags: Option<String>,
+
+    /// ICMP type to match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icmp_type: Option<u8>,
+
+    /// ICMP code to match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icmp_code: Option<u8>,
+
+    /// Negate source IP match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negate_source: Option<bool>,
+
+    /// Negate destination IP match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negate_destination: Option<bool>,
+
+    /// DSCP value to match (0-63).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dscp_match: Option<u8>,
+
+    /// DSCP value to mark on matched packets (0-63).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dscp_mark: Option<u8>,
+
+    /// Maximum concurrent states for this rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_states: Option<u16>,
+
+    /// Source MAC address (e.g. `"aa:bb:cc:dd:ee:ff"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_mac: Option<String>,
+
+    /// Destination MAC address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_mac: Option<String>,
+
+    /// Schedule name for time-based activation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
 }
 
 fn default_protocol() -> String {
@@ -123,10 +273,22 @@ impl FirewallRuleConfig {
             });
         }
 
+        // Validate conntrack state values
+        if let Some(ref states) = self.state {
+            for (i, state_str) in states.iter().enumerate() {
+                parse_ct_state(state_str).map_err(|()| ConfigError::InvalidValue {
+                    field: format!("{prefix}.state[{i}]"),
+                    value: state_str.clone(),
+                    expected: "new, established, related, invalid, syn_sent, syn_recv, fin_wait, close_wait, time_wait".to_string(),
+                })?;
+            }
+        }
+
         Ok(())
     }
 
     /// Convert to a domain `FirewallRule`.
+    #[allow(clippy::too_many_lines)]
     pub fn to_domain_rule(&self) -> Result<FirewallRule, ConfigError> {
         let action = parse_action(&self.action).map_err(|()| ConfigError::InvalidValue {
             field: "action".to_string(),
@@ -174,6 +336,56 @@ impl FirewallRuleConfig {
 
         let scope = self.scope.to_domain();
 
+        let ct_states = self
+            .state
+            .as_ref()
+            .map(|states| {
+                states
+                    .iter()
+                    .map(|s| {
+                        parse_ct_state(s).map_err(|()| ConfigError::InvalidValue {
+                            field: "state".to_string(),
+                            value: s.clone(),
+                            expected: "new, established, related, invalid".to_string(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+
+        let tcp_flags = self
+            .flags
+            .as_deref()
+            .map(domain::firewall::entity::parse_tcp_flags)
+            .transpose()
+            .map_err(|e| ConfigError::Validation {
+                field: "flags".to_string(),
+                message: e.to_string(),
+            })?;
+
+        let icmp_type = self.icmp_type;
+        let icmp_code = self.icmp_code;
+
+        let src_mac = self
+            .src_mac
+            .as_deref()
+            .map(domain::firewall::entity::parse_mac_address)
+            .transpose()
+            .map_err(|e| ConfigError::Validation {
+                field: "src_mac".to_string(),
+                message: e.to_string(),
+            })?;
+
+        let dst_mac = self
+            .dst_mac
+            .as_deref()
+            .map(domain::firewall::entity::parse_mac_address)
+            .transpose()
+            .map_err(|e| ConfigError::Validation {
+                field: "dst_mac".to_string(),
+                message: e.to_string(),
+            })?;
+
         Ok(FirewallRule {
             id: RuleId(self.id.clone()),
             enabled: self.enabled,
@@ -186,6 +398,24 @@ impl FirewallRuleConfig {
             dst_port,
             scope,
             vlan_id: self.vlan_id,
+            src_alias: self.src_alias.clone(),
+            dst_alias: self.dst_alias.clone(),
+            src_port_alias: self.src_port_alias.clone(),
+            dst_port_alias: self.dst_port_alias.clone(),
+            ct_states,
+            tcp_flags,
+            icmp_type,
+            icmp_code,
+            negate_src: self.negate_source.unwrap_or(false),
+            negate_dst: self.negate_destination.unwrap_or(false),
+            dscp_match: self.dscp_match,
+            dscp_mark: self.dscp_mark,
+            max_states: self.max_states,
+            src_mac,
+            dst_mac,
+            schedule: self.schedule.clone(),
+            system: false,
+            route_action: None,
         })
     }
 }

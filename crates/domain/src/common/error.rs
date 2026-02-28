@@ -19,6 +19,9 @@ pub enum DomainError {
 
     #[error("engine error: {0}")]
     EngineError(String),
+
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
 }
 
 impl From<DnsError> for DomainError {

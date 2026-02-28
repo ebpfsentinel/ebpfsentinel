@@ -6,17 +6,22 @@
 //!   `threatintel`, `alerting`, `audit`, `auth`: domain-specific configs
 
 mod alerting;
+mod alias;
 mod audit;
 mod auth;
 mod common;
+mod ddos;
 mod dlp;
 mod dns;
 mod firewall;
 mod ids;
 mod ips;
 mod l7;
+mod nat;
 mod ratelimit;
+mod routing;
 mod threatintel;
+mod zone;
 
 // ── Public re-exports ─────────────────────────────────────────────
 //
@@ -24,9 +29,14 @@ mod threatintel;
 // as `infrastructure::config::X`.
 
 pub use alerting::{AlertRouteConfig, AlertingConfig, SmtpConfig};
+pub use alias::AliasConfig;
 pub use audit::AuditConfig;
 pub use auth::{ApiKeyConfig, AuthConfig, JwtConfig, OidcConfig};
 pub use common::{ConfigError, parse_cidr, parse_domain_mode};
+pub use ddos::{
+    AmpPortConfig, AmpProtectionConfig, ConnTrackSectionConfig, DdosConfig, DdosPolicyConfig,
+    IcmpProtectionConfig, SynProtectionConfig,
+};
 pub use dlp::{DlpConfig, DlpPatternConfig};
 pub use dns::{
     DnsBlocklistFeedConfig, DnsBlocklistSectionConfig, DnsCacheConfig, DnsConfig,
@@ -38,28 +48,40 @@ pub use firewall::{
 pub use ids::{IdsConfig, IdsRuleConfig, SamplingConfig, ThresholdRuleConfig};
 pub use ips::{IpsConfig, IpsRuleConfig};
 pub use l7::{L7Config, L7RuleConfig};
+pub use nat::{NatConfig, NatRuleConfig};
 pub use ratelimit::{RateLimitRuleConfig, RateLimitSectionConfig};
+pub use routing::{GatewayConfig, HealthCheckConfig, RoutingConfig};
 pub use threatintel::{ThreatIntelConfig, ThreatIntelFeedConfig};
+pub use zone::{ZoneEntryConfig, ZonePairConfig, ZoneSectionConfig};
 
 use std::path::Path;
 
 use domain::alert::entity::AlertRoute;
+use domain::alias::entity::Alias;
 use domain::common::entity::DomainMode;
+use domain::conntrack::entity::ConnTrackSettings;
+use domain::ddos::entity::DdosPolicy;
 use domain::dlp::entity::DlpPattern;
 use domain::firewall::entity::FirewallRule;
 use domain::ids::entity::{IdsRule, SamplingMode};
 use domain::ips::entity::{IpsPolicy, WhitelistEntry};
 use domain::l7::entity::L7Rule;
+use domain::nat::entity::NatRule;
 use domain::ratelimit::entity::RateLimitPolicy;
 use domain::threatintel::entity::FeedConfig;
+use domain::zone::entity::ZoneConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{DEFAULT_GRPC_PORT, DEFAULT_HTTP_PORT, DEFAULT_METRICS_PORT};
+use alias::MAX_ALIASES;
 use common::{
     MAX_ALERTING_ROUTES, MAX_DLP_PATTERNS, MAX_FIREWALL_RULES, MAX_IDS_RULES, MAX_IPS_RULES,
     MAX_L7_RULES, MAX_RATELIMIT_RULES, MAX_THREATINTEL_FEEDS, check_limit,
     parse_domain_mode as pdm, warn_if_world_readable,
 };
+use ddos::MAX_DDOS_POLICIES;
+use nat::MAX_NAT_RULES;
+use zone::MAX_ZONES;
 
 // ── Top-level config ───────────────────────────────────────────────
 
@@ -87,6 +109,9 @@ pub struct AgentConfig {
     pub ratelimit: RateLimitSectionConfig,
 
     #[serde(default)]
+    pub ddos: DdosConfig,
+
+    #[serde(default)]
     pub threatintel: ThreatIntelConfig,
 
     #[serde(default)]
@@ -100,6 +125,18 @@ pub struct AgentConfig {
 
     #[serde(default)]
     pub auth: AuthConfig,
+
+    #[serde(default)]
+    pub conntrack: ConnTrackSectionConfig,
+
+    #[serde(default)]
+    pub nat: NatConfig,
+
+    #[serde(default)]
+    pub zones: ZoneSectionConfig,
+
+    #[serde(default)]
+    pub routing: RoutingConfig,
 }
 
 impl AgentConfig {
@@ -281,6 +318,12 @@ impl AgentConfig {
             rule_cfg.validate(idx)?;
         }
 
+        // Validate DDoS policies
+        check_limit("ddos.policies", self.ddos.policies.len(), MAX_DDOS_POLICIES)?;
+        for (idx, policy_cfg) in self.ddos.policies.iter().enumerate() {
+            policy_cfg.validate(idx)?;
+        }
+
         // Validate L7 rules
         for (idx, rule_cfg) in self.l7.rules.iter().enumerate() {
             rule_cfg.validate(idx)?;
@@ -350,6 +393,23 @@ impl AgentConfig {
         let smtp_present = self.alerting.smtp.is_some();
         for (idx, route_cfg) in self.alerting.routes.iter().enumerate() {
             route_cfg.validate(idx, smtp_present)?;
+        }
+
+        // Validate aliases
+        check_limit("firewall.aliases", self.firewall.aliases.len(), MAX_ALIASES)?;
+        for (name, alias_cfg) in &self.firewall.aliases {
+            alias_cfg.validate(name)?;
+        }
+
+        // Validate NAT rules
+        check_limit("nat.snat_rules", self.nat.snat_rules.len(), MAX_NAT_RULES)?;
+        check_limit("nat.dnat_rules", self.nat.dnat_rules.len(), MAX_NAT_RULES)?;
+        self.nat.validate()?;
+
+        // Validate zones
+        check_limit("zones.zones", self.zones.zones.len(), MAX_ZONES)?;
+        if self.zones.enabled {
+            self.zones.validate()?;
         }
 
         // Validate DNS cache config
@@ -446,6 +506,15 @@ impl AgentConfig {
             .collect()
     }
 
+    /// Convert all `DDoS` policy configs to domain policies.
+    pub fn ddos_policies(&self) -> Result<Vec<DdosPolicy>, ConfigError> {
+        self.ddos
+            .policies
+            .iter()
+            .map(DdosPolicyConfig::to_domain_policy)
+            .collect()
+    }
+
     /// Parse the threat intel mode from config to domain enum.
     pub fn threatintel_mode(&self) -> Result<DomainMode, ConfigError> {
         pdm(&self.threatintel.mode)
@@ -499,6 +568,42 @@ impl AgentConfig {
             .iter()
             .map(AlertRouteConfig::to_domain_route)
             .collect()
+    }
+
+    /// Convert alias configs to domain `Alias` entities.
+    pub fn aliases(&self) -> Result<Vec<Alias>, ConfigError> {
+        alias::aliases_to_domain(&self.firewall.aliases)
+    }
+
+    /// Convert NAT DNAT rule configs to domain `NatRule` entities.
+    pub fn nat_dnat_rules(&self) -> Result<Vec<NatRule>, ConfigError> {
+        self.nat
+            .dnat_rules
+            .iter()
+            .map(NatRuleConfig::to_domain_rule)
+            .collect()
+    }
+
+    /// Convert NAT SNAT rule configs to domain `NatRule` entities.
+    pub fn nat_snat_rules(&self) -> Result<Vec<NatRule>, ConfigError> {
+        self.nat
+            .snat_rules
+            .iter()
+            .map(NatRuleConfig::to_domain_rule)
+            .collect()
+    }
+
+    /// Convert zone section config to domain `ZoneConfig`.
+    pub fn zone_config(&self) -> Result<ZoneConfig, ConfigError> {
+        self.zones.to_domain_config()
+    }
+
+    /// Build conntrack settings from the conntrack section.
+    pub fn conntrack_settings(&self) -> ConnTrackSettings {
+        ConnTrackSettings {
+            enabled: self.conntrack.enabled,
+            ..ConnTrackSettings::default()
+        }
     }
 
     /// Convert DNS config to domain `DnsCacheConfig`.

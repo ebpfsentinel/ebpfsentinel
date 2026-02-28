@@ -77,3 +77,8 @@ doc = false
 name = "fuzz_domain_matcher"
 path = "fuzz_targets/fuzz_domain_matcher.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_ddos"
+path = "fuzz_targets/fuzz_ddos.rs"
+doc = false

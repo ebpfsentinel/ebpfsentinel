@@ -1,0 +1,14 @@
+[package]
+name = "tc-scrub"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aya-ebpf = "0.1.1"
+aya-log-ebpf = "0.1.0"
+ebpf-common = { path = "../../ebpf-common", default-features = false }
+network-types = "0.1.0"
+
+[[bin]]
+name = "tc-scrub"
+path = "src/main.rs"

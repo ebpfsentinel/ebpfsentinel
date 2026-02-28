@@ -1,4 +1,5 @@
 use domain::common::error::DomainError;
+use domain::threatintel::entity::Ioc;
 use ebpf_common::threatintel::{ThreatIntelKey, ThreatIntelValue};
 
 /// Secondary port for threat intelligence eBPF map operations.
@@ -21,6 +22,12 @@ pub trait ThreatIntelMapPort: Send + Sync {
 
     /// Return the number of IOCs currently in the eBPF map.
     fn ioc_count(&self) -> Result<usize, DomainError>;
+
+    /// Bulk-reload all IOCs into the eBPF maps.
+    ///
+    /// Clears existing entries, then inserts all provided IOCs with the
+    /// appropriate action based on `block_mode`.
+    fn load_all_iocs(&mut self, iocs: &[Ioc], block_mode: bool) -> Result<(), DomainError>;
 }
 
 #[cfg(test)]

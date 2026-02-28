@@ -2,7 +2,7 @@
 #![no_main]
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_pid_tgid, r#gen},
+    helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_boot_ns, r#gen},
     macros::{map, uprobe, uretprobe},
     maps::{HashMap, PerCpuArray, RingBuf},
     programs::{ProbeContext, RetProbeContext},
@@ -147,7 +147,7 @@ fn emit_dlp_event(user_buf: *const u8, data_len: u32, direction: u8) {
             // Fill header fields.
             (*ptr).pid = pid_tgid as u32;
             (*ptr).tgid = (pid_tgid >> 32) as u32;
-            (*ptr).timestamp_ns = 0; // Userspace sets this.
+            (*ptr).timestamp_ns = bpf_ktime_get_boot_ns();
             (*ptr).data_len = data_len;
             (*ptr).direction = direction;
             (*ptr)._padding = [0; 3];

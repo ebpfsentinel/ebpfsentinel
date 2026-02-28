@@ -1,5 +1,6 @@
-/// DNS event type constant for PacketEvent.event_type.
-pub const EVENT_TYPE_DNS: u8 = 7;
+// Re-export EVENT_TYPE_DNS from the canonical location in event.rs
+// for backward compatibility with code that imports it from dns::.
+pub use crate::event::EVENT_TYPE_DNS;
 
 /// DNS direction: packet is a query (dst_port == 53).
 pub const DNS_DIRECTION_QUERY: u8 = 0;
@@ -51,10 +52,18 @@ pub struct DnsEvent {
 /// Fixed-size buffer for DNS events in the RingBuf: header + raw payload.
 /// Userspace extracts the DNS payload from bytes[48..48+dns_payload_len].
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct DnsEventBuf {
     pub header: DnsEvent,
     pub payload: [u8; DNS_MAX_PAYLOAD],
 }
+
+// SAFETY: Both types are #[repr(C)], Copy, 'static, and contain only primitive
+// types. Safe for zero-copy eBPF RingBuf operations via aya.
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for DnsEvent {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for DnsEventBuf {}
 
 impl DnsEvent {
     /// Size of the DnsEvent header in bytes (payload offset).

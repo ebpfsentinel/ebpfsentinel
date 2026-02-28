@@ -97,6 +97,10 @@ impl From<DomainError> for ApiError {
             DomainError::EngineError(_) => Self::Internal {
                 message: err.to_string(),
             },
+            DomainError::PermissionDenied(_) => Self::Forbidden {
+                code: "PERMISSION_DENIED",
+                message: err.to_string(),
+            },
         }
     }
 }

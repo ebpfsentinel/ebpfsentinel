@@ -32,19 +32,6 @@ pub struct IdsSamplingConfig {
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for IdsSamplingConfig {}
 
-/// Legacy event struct (unused by current eBPF programs; events use PacketEvent).
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct IdsEvent {
-    pub src_ip: u32,
-    pub dst_ip: u32,
-    pub src_port: u16,
-    pub dst_port: u16,
-    pub protocol: u8,
-    pub rule_id: u32,
-    pub _padding: [u8; 3],
-}
-
 /// Key for the IDS_PATTERNS HashMap.
 /// Matches on destination port + protocol for kernel fast-path detection.
 /// Size: 4 bytes (aligned to 2 bytes).

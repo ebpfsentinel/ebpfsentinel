@@ -103,6 +103,9 @@ pub enum Command {
 
     /// Domain intelligence: reputation, blocklist management
     Domains(DomainArgs<DomainsCommand>),
+
+    /// `DDoS` protection: status, attacks, policies
+    Ddos(DomainArgs<DdosCommand>),
 }
 
 /// Generic domain args: connection + subcommand.
@@ -284,6 +287,35 @@ pub enum DomainsCommand {
     Unblock {
         /// Domain pattern to unblock
         domain: String,
+    },
+}
+
+// ── DDoS ────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum DdosCommand {
+    /// Show `DDoS` protection status
+    Status,
+    /// List active `DDoS` attacks
+    Attacks,
+    /// List historical `DDoS` attacks
+    History {
+        /// Maximum number of results
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// List `DDoS` mitigation policies
+    Policies,
+    /// Add a new `DDoS` policy from inline JSON
+    Add {
+        /// JSON policy body
+        #[arg(long)]
+        json: String,
+    },
+    /// Delete a `DDoS` policy by ID
+    Delete {
+        /// Policy ID to delete
+        id: String,
     },
 }
 
@@ -852,6 +884,99 @@ mod tests {
                 _ => panic!("expected Unblock"),
             },
             _ => panic!("expected Domains command"),
+        }
+    }
+
+    #[test]
+    fn cli_ddos_status() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ddos", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ddos(DomainArgs {
+                command: DdosCommand::Status,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_ddos_attacks() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ddos", "attacks"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ddos(DomainArgs {
+                command: DdosCommand::Attacks,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_ddos_history() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ddos", "history"]).unwrap();
+        match cli.command {
+            Some(Command::Ddos(args)) => match args.command {
+                DdosCommand::History { limit } => assert_eq!(limit, 100),
+                _ => panic!("expected History"),
+            },
+            _ => panic!("expected Ddos command"),
+        }
+    }
+
+    #[test]
+    fn cli_ddos_history_with_limit() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ddos", "history", "--limit", "50"])
+            .unwrap();
+        match cli.command {
+            Some(Command::Ddos(args)) => match args.command {
+                DdosCommand::History { limit } => assert_eq!(limit, 50),
+                _ => panic!("expected History"),
+            },
+            _ => panic!("expected Ddos command"),
+        }
+    }
+
+    #[test]
+    fn cli_ddos_policies() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ddos", "policies"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ddos(DomainArgs {
+                command: DdosCommand::Policies,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_ddos_add() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "ddos",
+            "add",
+            "--json",
+            r#"{"id":"ddos-001","attack_type":"syn_flood","detection_threshold_pps":5000}"#,
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Ddos(args)) => match args.command {
+                DdosCommand::Add { json } => assert!(json.contains("ddos-001")),
+                _ => panic!("expected Add"),
+            },
+            _ => panic!("expected Ddos command"),
+        }
+    }
+
+    #[test]
+    fn cli_ddos_delete() {
+        let cli =
+            Cli::try_parse_from(["ebpfsentinel-agent", "ddos", "delete", "ddos-001"]).unwrap();
+        match cli.command {
+            Some(Command::Ddos(args)) => match args.command {
+                DdosCommand::Delete { id } => assert_eq!(id, "ddos-001"),
+                _ => panic!("expected Delete"),
+            },
+            _ => panic!("expected Ddos command"),
         }
     }
 }

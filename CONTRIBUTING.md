@@ -37,7 +37,7 @@ cargo build --release               # Release build
 ### eBPF Kernel Programs
 
 ```bash
-cargo xtask ebpf-build              # Builds all 5 eBPF programs with nightly
+cargo xtask ebpf-build              # Builds all eBPF programs with nightly
 ```
 
 The eBPF programs are built for `bpfel-unknown-none` (little-endian BPF) and output to each program's `target/` directory. The `xtask` crate orchestrates this.
@@ -136,7 +136,7 @@ cargo deny check                    # License, advisory, ban, source checks
 ```
 
 The `deny.toml` policy:
-- 8 approved licenses (MIT, Apache-2.0, BSD-2/3-Clause, ISC, Unicode-3.0, Unicode-DFS-2016, OpenSSL)
+- 9 approved dependency licenses (MIT, Apache-2.0, AGPL-3.0-only, BSD-2/3-Clause, ISC, Unicode-3.0, Unicode-DFS-2016, OpenSSL)
 - Yanked crates denied
 - Unknown registries and git sources denied
 - Vulnerability advisories denied

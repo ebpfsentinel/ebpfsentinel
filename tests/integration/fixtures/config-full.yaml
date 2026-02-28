@@ -85,6 +85,16 @@ dns:
     auto_block_enabled: false
     decay_half_life_hours: 24
 
+ddos:
+  enabled: true
+  policies:
+    - id: ddos-test-syn
+      attack_type: syn_flood
+      detection_threshold_pps: 10000
+      mitigation_action: alert
+      auto_block_duration_secs: 300
+      enabled: true
+
 audit:
   enabled: true
   retention_days: 90

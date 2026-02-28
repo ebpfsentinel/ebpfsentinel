@@ -243,6 +243,17 @@ pub(super) fn parse_protocol(s: &str) -> Result<Protocol, ()> {
     }
 }
 
+/// Parse a conntrack state string to the domain `ConnState` for firewall rules.
+pub(super) fn parse_ct_state(s: &str) -> Result<domain::firewall::entity::ConnState, ()> {
+    match s.to_lowercase().as_str() {
+        "new" => Ok(domain::firewall::entity::ConnState::New),
+        "established" => Ok(domain::firewall::entity::ConnState::Established),
+        "related" => Ok(domain::firewall::entity::ConnState::Related),
+        "invalid" => Ok(domain::firewall::entity::ConnState::Invalid),
+        _ => Err(()),
+    }
+}
+
 pub(super) fn parse_severity(s: &str) -> Result<Severity, ()> {
     match s.to_lowercase().as_str() {
         "low" | "info" => Ok(Severity::Low),

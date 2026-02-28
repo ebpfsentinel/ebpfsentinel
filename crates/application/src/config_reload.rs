@@ -1,22 +1,31 @@
 use std::sync::Arc;
 
+use domain::alias::entity::Alias;
 use domain::audit::entity::{AuditAction, AuditComponent};
 use domain::audit::rule_change::ChangeActor;
 use domain::common::entity::DomainMode;
+use domain::conntrack::entity::ConnTrackSettings;
+use domain::ddos::entity::DdosPolicy;
 use domain::firewall::entity::FirewallRule;
 use domain::ids::entity::{IdsRule, SamplingMode};
 use domain::ips::entity::{IpsPolicy, WhitelistEntry};
 use domain::l7::entity::L7Rule;
+use domain::nat::entity::NatRule;
 use domain::ratelimit::entity::RateLimitPolicy;
 use ports::secondary::metrics_port::MetricsPort;
 use tokio::sync::{Mutex, RwLock};
 
+use crate::alias_service_impl::AliasAppService;
 use crate::audit_service_impl::AuditAppService;
+use crate::conntrack_service_impl::ConnTrackAppService;
+use crate::ddos_service_impl::DdosAppService;
 use crate::firewall_service_impl::FirewallAppService;
 use crate::ids_service_impl::IdsAppService;
 use crate::ips_service_impl::IpsAppService;
 use crate::l7_service_impl::L7AppService;
+use crate::nat_service_impl::NatAppService;
 use crate::ratelimit_service_impl::RateLimitAppService;
+use crate::routing_service_impl::RoutingAppService;
 use crate::threatintel_service_impl::ThreatIntelAppService;
 
 /// Application-level service for hot-reloading configuration.
@@ -29,8 +38,13 @@ pub struct ConfigReloadService {
     ips_service: Arc<RwLock<IpsAppService>>,
     l7_service: Arc<RwLock<L7AppService>>,
     ratelimit_service: Arc<RwLock<RateLimitAppService>>,
+    ddos_service: Arc<RwLock<DdosAppService>>,
     threatintel_service: Arc<RwLock<ThreatIntelAppService>>,
     audit_service: Arc<RwLock<AuditAppService>>,
+    conntrack_service: Option<Arc<RwLock<ConnTrackAppService>>>,
+    nat_service: Option<Arc<RwLock<NatAppService>>>,
+    alias_service: Option<Arc<RwLock<AliasAppService>>>,
+    routing_service: Option<Arc<RwLock<RoutingAppService>>>,
     metrics: Arc<dyn MetricsPort>,
     reload_mutex: Mutex<()>,
 }
@@ -43,6 +57,7 @@ impl ConfigReloadService {
         ips_service: Arc<RwLock<IpsAppService>>,
         l7_service: Arc<RwLock<L7AppService>>,
         ratelimit_service: Arc<RwLock<RateLimitAppService>>,
+        ddos_service: Arc<RwLock<DdosAppService>>,
         threatintel_service: Arc<RwLock<ThreatIntelAppService>>,
         audit_service: Arc<RwLock<AuditAppService>>,
         metrics: Arc<dyn MetricsPort>,
@@ -53,11 +68,135 @@ impl ConfigReloadService {
             ips_service,
             l7_service,
             ratelimit_service,
+            ddos_service,
             threatintel_service,
             audit_service,
+            conntrack_service: None,
+            nat_service: None,
+            alias_service: None,
+            routing_service: None,
             metrics,
             reload_mutex: Mutex::new(()),
         }
+    }
+
+    /// Set the conntrack service for reload integration.
+    pub fn set_conntrack_service(&mut self, svc: Arc<RwLock<ConnTrackAppService>>) {
+        self.conntrack_service = Some(svc);
+    }
+
+    /// Set the NAT service for reload integration.
+    pub fn set_nat_service(&mut self, svc: Arc<RwLock<NatAppService>>) {
+        self.nat_service = Some(svc);
+    }
+
+    /// Set the alias service for reload integration.
+    pub fn set_alias_service(&mut self, svc: Arc<RwLock<AliasAppService>>) {
+        self.alias_service = Some(svc);
+    }
+
+    /// Set the routing service for reload integration.
+    pub fn set_routing_service(&mut self, svc: Arc<RwLock<RoutingAppService>>) {
+        self.routing_service = Some(svc);
+    }
+
+    /// Reload conntrack settings.
+    pub async fn reload_conntrack(
+        &self,
+        settings: ConnTrackSettings,
+        enabled: bool,
+    ) -> Result<(), anyhow::Error> {
+        let Some(ref ct_svc) = self.conntrack_service else {
+            return Ok(());
+        };
+        let _guard = self.reload_mutex.lock().await;
+
+        let mut svc = ct_svc.write().await;
+        svc.set_enabled(enabled);
+        svc.reload_settings(settings)
+            .map_err(|e| anyhow::anyhow!("conntrack reload failed: {e}"))?;
+
+        self.metrics.record_config_reload("conntrack", "success");
+        tracing::info!(enabled, "conntrack configuration reloaded");
+        Ok(())
+    }
+
+    /// Reload NAT rules.
+    pub async fn reload_nat(
+        &self,
+        dnat_rules: Vec<NatRule>,
+        snat_rules: Vec<NatRule>,
+        enabled: bool,
+    ) -> Result<(), anyhow::Error> {
+        let Some(ref nat_svc) = self.nat_service else {
+            return Ok(());
+        };
+        let _guard = self.reload_mutex.lock().await;
+
+        let mut svc = nat_svc.write().await;
+        svc.set_enabled(enabled);
+
+        if enabled {
+            svc.reload_dnat_rules(dnat_rules)
+                .map_err(|e| anyhow::anyhow!("NAT DNAT reload failed: {e}"))?;
+            svc.reload_snat_rules(snat_rules)
+                .map_err(|e| anyhow::anyhow!("NAT SNAT reload failed: {e}"))?;
+        } else {
+            svc.reload_dnat_rules(Vec::new())
+                .map_err(|e| anyhow::anyhow!("NAT DNAT reload failed: {e}"))?;
+            svc.reload_snat_rules(Vec::new())
+                .map_err(|e| anyhow::anyhow!("NAT SNAT reload failed: {e}"))?;
+        }
+
+        self.metrics.record_config_reload("nat", "success");
+        tracing::info!(
+            enabled,
+            count = svc.rule_count(),
+            "NAT configuration reloaded"
+        );
+        Ok(())
+    }
+
+    /// Reload aliases.
+    pub async fn reload_aliases(&self, aliases: Vec<Alias>) -> Result<(), anyhow::Error> {
+        let Some(ref alias_svc) = self.alias_service else {
+            return Ok(());
+        };
+        let _guard = self.reload_mutex.lock().await;
+
+        let mut svc = alias_svc.write().await;
+        let count = aliases.len();
+        svc.reload_aliases(aliases)
+            .map_err(|e| anyhow::anyhow!("alias reload failed: {e}"))?;
+
+        self.metrics.record_config_reload("aliases", "success");
+        tracing::info!(count, "alias configuration reloaded");
+        Ok(())
+    }
+
+    /// Reload routing gateways.
+    pub async fn reload_routing(
+        &self,
+        gateways: Vec<domain::routing::entity::Gateway>,
+        enabled: bool,
+    ) -> Result<(), anyhow::Error> {
+        let Some(ref routing_svc) = self.routing_service else {
+            return Ok(());
+        };
+        let _guard = self.reload_mutex.lock().await;
+
+        let mut svc = routing_svc.write().await;
+        svc.set_enabled(enabled);
+        svc.reload_gateways(gateways)
+            .map_err(|e| anyhow::anyhow!("routing reload failed: {e}"))?;
+
+        self.metrics.record_config_reload("routing", "success");
+        tracing::info!(
+            enabled,
+            count = svc.gateway_count(),
+            "routing configuration reloaded"
+        );
+        Ok(())
     }
 
     /// Reload firewall rules atomically with mode and enabled awareness.
@@ -397,6 +536,55 @@ impl ConfigReloadService {
             }
         }
     }
+    /// Reload `DDoS` policies atomically with enabled awareness.
+    pub async fn reload_ddos(
+        &self,
+        policies: Vec<DdosPolicy>,
+        enabled: bool,
+    ) -> Result<(), anyhow::Error> {
+        let _guard = self.reload_mutex.lock().await;
+
+        let mut svc = self.ddos_service.write().await;
+
+        svc.set_enabled(enabled);
+
+        let effective_policies = if enabled { policies } else { Vec::new() };
+        let policy_count = effective_policies.len();
+
+        match svc.reload_policies(effective_policies) {
+            Ok(()) => {
+                drop(svc);
+                self.metrics.record_config_reload("ddos", "success");
+                tracing::info!(
+                    policy_count = policy_count,
+                    enabled = enabled,
+                    "DDoS configuration reloaded successfully"
+                );
+                let audit_svc = self.audit_service.read().await;
+                audit_svc.record_config_change(
+                    AuditAction::ConfigChanged,
+                    &format!("ddos reloaded: {policy_count} policies"),
+                );
+                audit_svc.record_rule_change(
+                    AuditComponent::Ddos,
+                    AuditAction::RuleUpdated,
+                    ChangeActor::ConfigReload,
+                    "ddos-config",
+                    None,
+                    Some(format!("{{\"policy_count\":{policy_count}}}")),
+                );
+                drop(audit_svc);
+                Ok(())
+            }
+            Err(e) => {
+                drop(svc);
+                self.metrics.record_config_reload("ddos", "failure");
+                tracing::warn!(error = %e, "DDoS configuration reload failed");
+                Err(anyhow::anyhow!("ddos reload failed: {e}"))
+            }
+        }
+    }
+
     /// Reload threat intel configuration: feeds, enabled, and mode.
     pub async fn reload_threatintel(
         &self,
@@ -466,6 +654,7 @@ mod tests {
     use domain::audit::entity::AuditEntry;
     use domain::audit::error::AuditError;
     use domain::common::entity::{Protocol, RuleId, Severity};
+    use domain::ddos::engine::DdosEngine;
     use domain::firewall::engine::FirewallEngine;
     use domain::firewall::entity::{FirewallAction, Scope};
     use domain::ids::engine::IdsEngine;
@@ -526,6 +715,24 @@ mod tests {
             scope: Scope::Global,
             enabled: true,
             vlan_id: None,
+            src_alias: None,
+            dst_alias: None,
+            src_port_alias: None,
+            dst_port_alias: None,
+            ct_states: None,
+            tcp_flags: None,
+            icmp_type: None,
+            icmp_code: None,
+            negate_src: false,
+            negate_dst: false,
+            dscp_match: None,
+            dscp_mark: None,
+            max_states: None,
+            src_mac: None,
+            dst_mac: None,
+            schedule: None,
+            system: false,
+            route_action: None,
         }
     }
 
@@ -552,22 +759,29 @@ mod tests {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn make_services() -> (
         Arc<RwLock<FirewallAppService>>,
         Arc<RwLock<IdsAppService>>,
         Arc<RwLock<IpsAppService>>,
         Arc<RwLock<L7AppService>>,
         Arc<RwLock<RateLimitAppService>>,
+        Arc<RwLock<DdosAppService>>,
         Arc<RwLock<ThreatIntelAppService>>,
         Arc<RwLock<AuditAppService>>,
         Arc<TestMetrics>,
     ) {
         let metrics = Arc::new(TestMetrics::new());
-        let fw_svc = FirewallAppService::new(
+        let mut fw_svc = FirewallAppService::new(
             FirewallEngine::new(),
             None,
             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
         );
+        // Disable anti-lockout in tests to avoid extra synthetic rules.
+        fw_svc.set_anti_lockout(crate::firewall_service_impl::AntiLockoutSettings {
+            enabled: false,
+            ..Default::default()
+        });
         let ids_svc = IdsAppService::new(
             IdsEngine::new(),
             None,
@@ -585,6 +799,10 @@ mod tests {
             RateLimitEngine::new(),
             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
         );
+        let ddos_svc = DdosAppService::new(
+            DdosEngine::new(),
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+        );
         let ti_svc = ThreatIntelAppService::new(
             ThreatIntelEngine::new(1_000_000),
             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
@@ -598,6 +816,7 @@ mod tests {
             Arc::new(RwLock::new(ips_svc)),
             Arc::new(RwLock::new(l7_svc)),
             Arc::new(RwLock::new(rl_svc)),
+            Arc::new(RwLock::new(ddos_svc)),
             Arc::new(RwLock::new(ti_svc)),
             Arc::new(RwLock::new(audit_svc)),
             metrics,
@@ -608,7 +827,7 @@ mod tests {
 
     #[tokio::test]
     async fn reload_success_updates_rules_and_metric() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -616,6 +835,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -632,7 +852,7 @@ mod tests {
 
     #[tokio::test]
     async fn reload_replaces_previous_rules() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -640,6 +860,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -667,7 +888,7 @@ mod tests {
 
     #[tokio::test]
     async fn reload_with_duplicate_ids_fails_and_records_metric() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -675,6 +896,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -689,7 +911,7 @@ mod tests {
 
     #[tokio::test]
     async fn reload_disabled_clears_rules() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -697,6 +919,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -717,7 +940,7 @@ mod tests {
 
     #[tokio::test]
     async fn reload_mode_change_updates_service() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -725,6 +948,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -749,7 +973,7 @@ mod tests {
 
     #[tokio::test]
     async fn ids_reload_success() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -757,6 +981,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -775,7 +1000,7 @@ mod tests {
 
     #[tokio::test]
     async fn ids_reload_disabled_clears_rules() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -783,6 +1008,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -813,7 +1039,7 @@ mod tests {
 
     #[tokio::test]
     async fn ids_reload_failure_records_metric() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -821,6 +1047,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -838,7 +1065,7 @@ mod tests {
 
     #[tokio::test]
     async fn ids_reload_mode_change() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -846,6 +1073,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -894,7 +1122,7 @@ mod tests {
 
     #[tokio::test]
     async fn ips_reload_success() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -902,6 +1130,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -928,7 +1157,7 @@ mod tests {
 
     #[tokio::test]
     async fn ips_reload_disabled_clears_rules() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -936,6 +1165,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -970,7 +1200,7 @@ mod tests {
 
     #[tokio::test]
     async fn ips_reload_updates_whitelist() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -978,6 +1208,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -1008,7 +1239,7 @@ mod tests {
 
     #[tokio::test]
     async fn ips_reload_mode_transition() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -1016,6 +1247,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -1050,7 +1282,7 @@ mod tests {
 
     #[tokio::test]
     async fn ips_reload_failure_records_metric() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -1058,6 +1290,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -1107,7 +1340,7 @@ mod tests {
 
     #[tokio::test]
     async fn l7_reload_success() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -1115,6 +1348,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -1130,7 +1364,7 @@ mod tests {
 
     #[tokio::test]
     async fn l7_reload_disabled_clears_rules() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -1138,6 +1372,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -1158,7 +1393,7 @@ mod tests {
 
     #[tokio::test]
     async fn l7_reload_failure_records_metric() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -1166,6 +1401,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -1196,7 +1432,7 @@ mod tests {
 
     #[tokio::test]
     async fn ratelimit_reload_success() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -1204,6 +1440,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -1219,7 +1456,7 @@ mod tests {
 
     #[tokio::test]
     async fn ratelimit_reload_disabled_clears_policies() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -1227,6 +1464,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),
@@ -1247,7 +1485,7 @@ mod tests {
 
     #[tokio::test]
     async fn ratelimit_reload_failure_records_metric() {
-        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ti_svc, audit_svc, metrics) =
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
             make_services();
         let reload = ConfigReloadService::new(
             Arc::clone(&fw_svc),
@@ -1255,6 +1493,7 @@ mod tests {
             Arc::clone(&ips_svc),
             Arc::clone(&l7_svc),
             Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
             Arc::clone(&ti_svc),
             Arc::clone(&audit_svc),
             metrics.clone(),

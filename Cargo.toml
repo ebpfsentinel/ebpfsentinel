@@ -18,13 +18,16 @@ exclude = [
     "crates/ebpf-programs/tc-dns",
     "crates/ebpf-programs/tc-ids",
     "crates/ebpf-programs/tc-threatintel",
+    "crates/ebpf-programs/tc-conntrack",
+    "crates/ebpf-programs/tc-nat-ingress",
+    "crates/ebpf-programs/tc-nat-egress",
     "crates/ebpf-programs/uprobe-dlp",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 repository = "https://github.com/ebpfsentinel/ebpfsentinel"
 rust-version = "1.93"
 

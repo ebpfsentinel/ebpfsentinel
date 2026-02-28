@@ -10,8 +10,10 @@ use adapters::audit::log_audit_sink::LogAuditSink;
 use adapters::auth::jwt_provider::JwtAuthProvider;
 use adapters::auth::oidc_provider::{self, OidcAuthProvider};
 use adapters::ebpf::{
-    ConfigFlagsManager, DlpEventReader, DnsEventReader, EbpfLoader, EventReader,
-    FirewallMapManager, IdsMapManager, L7PortsManager, RateLimitMapManager, ThreatIntelMapManager,
+    ConfigFlagsManager, ConnTrackMapManager, DlpEventReader, DnsEventReader, EbpfLoader,
+    EbpfMapWriteAdapter, EventReader, FirewallMapManager, IdsMapManager, IpSetMapManager,
+    L7PortsManager, MetricsReader, NatMapManager, RateLimitMapManager, ScrubConfigManager,
+    ThreatIntelMapManager,
 };
 use adapters::grpc::server::{GrpcTlsConfig, run_grpc_server};
 use adapters::http::tls::load_rustls_config;
@@ -20,8 +22,11 @@ use adapters::storage::redb_alert_store::RedbAlertStore;
 use adapters::storage::redb_audit_store::RedbAuditStore;
 use adapters::storage::redb_rule_change_store::RedbRuleChangeStore;
 use application::alert_pipeline::AlertPipeline;
+use application::alias_service_impl::AliasAppService;
 use application::audit_service_impl::AuditAppService;
 use application::config_reload::ConfigReloadService;
+use application::conntrack_service_impl::ConnTrackAppService;
+use application::dlp_service_impl::DlpAppService;
 use application::dns_blocklist_service_impl::DnsBlocklistAppService;
 use application::dns_cache_service_impl::DnsCacheAppService;
 use application::domain_reputation_service_impl::DomainReputationAppService;
@@ -29,13 +34,17 @@ use application::firewall_service_impl::FirewallAppService;
 use application::ids_service_impl::IdsAppService;
 use application::ips_service_impl::{IpsAppService, IpsBlacklistAdapter};
 use application::l7_service_impl::L7AppService;
+use application::nat_service_impl::NatAppService;
 use application::packet_pipeline::{AgentEvent, EventDispatcher};
 use application::ratelimit_service_impl::RateLimitAppService;
 use application::retry::RetryConfig;
+use application::routing_service_impl::RoutingAppService;
+use application::schedule_service_impl::ScheduleService;
 use application::threatintel_service_impl::ThreatIntelAppService;
 use domain::alert::circuit_breaker::CircuitBreaker;
 use domain::alert::engine::AlertRouter;
 use domain::alert::entity::Alert;
+use domain::dlp::engine::DlpEngine;
 use domain::firewall::engine::FirewallEngine;
 use domain::firewall::entity::FirewallRule;
 use domain::ids::engine::IdsEngine;
@@ -183,6 +192,157 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         enabled = config.ratelimit.enabled,
         "ratelimit engine initialized"
     );
+
+    // ── 5c½. Build DDoS service ──────────────────────────────────────
+    let ddos_policies = config.ddos_policies()?;
+    let mut ddos_engine = domain::ddos::engine::DdosEngine::new();
+    if config.ddos.enabled {
+        ddos_engine.reload(ddos_policies.clone())?;
+    }
+    let mut ddos_svc = application::ddos_service_impl::DdosAppService::new(
+        ddos_engine,
+        Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+    );
+    ddos_svc.set_enabled(config.ddos.enabled);
+    let ddos_svc = Arc::new(RwLock::new(ddos_svc));
+    info!(
+        policy_count = ddos_policies.len(),
+        enabled = config.ddos.enabled,
+        "DDoS engine initialized"
+    );
+
+    // ── 5c¾. Build DLP service ──────────────────────────────────────
+    let dlp_mode = config.dlp_mode()?;
+    let dlp_patterns = config.dlp_patterns()?;
+    let mut dlp_engine = DlpEngine::new();
+    if config.dlp.enabled {
+        dlp_engine.reload(dlp_patterns)?;
+    }
+    let mut dlp_svc = DlpAppService::new(dlp_engine, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
+    dlp_svc.set_mode(dlp_mode);
+    dlp_svc.set_enabled(config.dlp.enabled);
+    let dlp_svc = Arc::new(RwLock::new(dlp_svc));
+    info!(
+        pattern_count = config.dlp.patterns.len(),
+        enabled = config.dlp.enabled,
+        "DLP engine initialized"
+    );
+
+    // ── 5c⅘. Build ConnTrack service ────────────────────────────────
+    let ct_settings = config.conntrack_settings();
+    let mut ct_svc = ConnTrackAppService::new(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
+    ct_svc.set_enabled(config.conntrack.enabled);
+    if config.conntrack.enabled
+        && let Err(e) = ct_svc.reload_settings(ct_settings)
+    {
+        warn!("conntrack settings reload failed (non-fatal): {e}");
+    }
+    let conntrack_svc = Arc::new(RwLock::new(ct_svc));
+    info!(
+        enabled = config.conntrack.enabled,
+        "ConnTrack service initialized"
+    );
+
+    // ── 5c⅚. Build NAT service ──────────────────────────────────────
+    let mut nat_svc = NatAppService::new(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
+    nat_svc.set_enabled(config.nat.enabled);
+    if config.nat.enabled {
+        let dnat_rules = config.nat_dnat_rules()?;
+        let snat_rules = config.nat_snat_rules()?;
+        if let Err(e) = nat_svc.reload_dnat_rules(dnat_rules) {
+            warn!("NAT DNAT rules reload failed (non-fatal): {e}");
+        }
+        if let Err(e) = nat_svc.reload_snat_rules(snat_rules) {
+            warn!("NAT SNAT rules reload failed (non-fatal): {e}");
+        }
+    }
+    let nat_svc = Arc::new(RwLock::new(nat_svc));
+    info!(enabled = config.nat.enabled, "NAT service initialized");
+
+    // ── 5c⅞. Build Alias service ────────────────────────────────────
+    let mut alias_svc = AliasAppService::new(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
+    // Wire alias resolution adapter for URL table, DNS, and GeoIP lookups
+    let alias_resolver =
+        Arc::new(adapters::alias::alias_resolution_adapter::AliasResolutionAdapter::new());
+    alias_svc.set_resolution_port(alias_resolver);
+    let aliases = config.aliases()?;
+    if !aliases.is_empty()
+        && let Err(e) = alias_svc.reload_aliases(aliases)
+    {
+        warn!("alias reload failed (non-fatal): {e}");
+    }
+    let alias_svc = Arc::new(RwLock::new(alias_svc));
+    info!("alias service initialized");
+
+    // ── 5c⅞½. Build Routing service ─────────────────────────────────
+    let mut routing_svc = RoutingAppService::new();
+    routing_svc.set_enabled(config.routing.enabled);
+    if config.routing.enabled {
+        let gateways: Vec<_> = config
+            .routing
+            .gateways
+            .iter()
+            .map(infrastructure::config::GatewayConfig::to_domain)
+            .collect();
+        if let Err(e) = routing_svc.reload_gateways(gateways) {
+            warn!("routing gateways reload failed (non-fatal): {e}");
+        }
+    }
+    let routing_svc = Arc::new(RwLock::new(routing_svc));
+    info!(
+        gateway_count = config.routing.gateways.len(),
+        enabled = config.routing.enabled,
+        "routing service initialized"
+    );
+
+    // ── 5c⅞¾. Build Schedule service ────────────────────────────────
+    let mut schedule_svc = ScheduleService::new();
+    if !config.firewall.schedules.is_empty() {
+        use application::schedule_service_impl::{
+            Schedule, ScheduleEntry, parse_day, parse_time_range,
+        };
+        use std::collections::HashMap;
+
+        let mut schedules = HashMap::new();
+        let mut rule_schedule = HashMap::new();
+
+        for (id, sched_cfg) in &config.firewall.schedules {
+            let entries: Vec<ScheduleEntry> = sched_cfg
+                .entries
+                .iter()
+                .filter_map(|e| {
+                    let days: Vec<_> = e.days.iter().filter_map(|d| parse_day(d)).collect();
+                    let (start, end) = parse_time_range(&e.time)?;
+                    Some(ScheduleEntry {
+                        days,
+                        start_minutes: start,
+                        end_minutes: end,
+                    })
+                })
+                .collect();
+            schedules.insert(
+                id.clone(),
+                Schedule {
+                    id: id.clone(),
+                    entries,
+                },
+            );
+        }
+
+        // Wire rule → schedule mappings from firewall rules
+        for rule_cfg in &config.firewall.rules {
+            if let Some(ref sched_id) = rule_cfg.schedule {
+                rule_schedule.insert(rule_cfg.id.clone(), sched_id.clone());
+            }
+        }
+
+        schedule_svc.reload(schedules, rule_schedule);
+        info!(
+            schedule_count = config.firewall.schedules.len(),
+            "schedule service initialized"
+        );
+    }
+    let schedule_svc = Arc::new(RwLock::new(schedule_svc));
 
     // ── 5d. Build threat intel service ────────────────────────────────
     let ti_mode = config.threatintel_mode()?;
@@ -390,6 +550,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     }
 
     // ── 5b. Wire DNS intelligence and domain reputation services ────
+    let mut dns_blocklist_ref: Option<Arc<DnsBlocklistAppService>> = None;
     let dns_cache_for_ids: Option<Arc<dyn ports::secondary::dns_cache_port::DnsCachePort>> =
         if config.dns.enabled {
             let cache_config = config.dns_cache_config();
@@ -404,7 +565,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
             });
             let dns_blocklist_svc = DnsBlocklistAppService::new(
                 blocklist_config,
-                None, // eBPF map writer — wired when tc-dns is loaded
+                None, // eBPF map writer — wired after tc-threatintel loads
                 Arc::clone(&metrics) as Arc<dyn MetricsPort>,
             );
             // Wire IPS blacklist adapter when inject_target is "ips"
@@ -417,6 +578,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
                 dns_blocklist_svc
             };
             let dns_blocklist_svc = Arc::new(dns_blocklist_svc);
+            dns_blocklist_ref = Some(Arc::clone(&dns_blocklist_svc));
 
             app_state = app_state
                 .with_dns_services(Arc::clone(&dns_cache_svc), Arc::clone(&dns_blocklist_svc));
@@ -457,6 +619,14 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
             None
         };
 
+    let app_state = app_state
+        .with_ids_service(Arc::clone(&ids_svc))
+        .with_ddos_service(Arc::clone(&ddos_svc))
+        .with_dlp_service(Arc::clone(&dlp_svc))
+        .with_conntrack_service(Arc::clone(&conntrack_svc))
+        .with_nat_service(Arc::clone(&nat_svc))
+        .with_alias_service(Arc::clone(&alias_svc))
+        .with_routing_service(Arc::clone(&routing_svc));
     let app_state = Arc::new(app_state);
 
     // ── 6. Create cancellation token ────────────────────────────────
@@ -508,27 +678,26 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     });
 
     // ── 8. Spawn config hot-reload task ──────────────────────────────
-    let reload_service = Arc::new(ConfigReloadService::new(
+    let mut reload_service = ConfigReloadService::new(
         Arc::clone(&firewall_svc),
         Arc::clone(&ids_svc),
         Arc::clone(&ips_svc),
         Arc::clone(&l7_svc),
         Arc::clone(&rl_svc),
+        Arc::clone(&ddos_svc),
         Arc::clone(&ti_svc),
         Arc::clone(&audit_svc),
         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
-    ));
+    );
+    reload_service.set_conntrack_service(Arc::clone(&conntrack_svc));
+    reload_service.set_nat_service(Arc::clone(&nat_svc));
+    reload_service.set_alias_service(Arc::clone(&alias_svc));
+    reload_service.set_routing_service(Arc::clone(&routing_svc));
+    let reload_service = Arc::new(reload_service);
     // Clone auth provider for gRPC from the app state
     let grpc_auth: Option<Arc<dyn AuthProvider>> = app_state.auth_provider.clone();
 
-    let reload_handle = crate::reload::spawn_reload_task(
-        cli.config.clone(),
-        reload_service,
-        auth_handle,
-        cancel_token.clone(),
-        reload_trigger_rx,
-        Arc::clone(&shared_config),
-    );
+    // reload_handle is spawned after eBPF loading (step 10) to include EbpfMapHolder
 
     // ── 8b. Spawn gRPC alert streaming server ─────────────────────────
     let (alert_stream_tx, _) = broadcast::channel::<Alert>(ALERT_CHANNEL_CAPACITY);
@@ -565,14 +734,19 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     // ── 10. Load eBPF programs (each with graceful degradation) ────
     let ebpf_dir = resolve_ebpf_program_dir(&config);
     let mut ebpf_state = EbpfState::new();
+    let mut ebpf_map_holder = crate::reload::EbpfMapHolder::new();
+    let mut metrics_readers: Vec<MetricsReader> = Vec::new();
 
     // 10a. XDP Firewall
     let mut fw_loader: Option<EbpfLoader> = None;
     let fw_ok = if config.firewall.enabled {
         match try_load_xdp_firewall(&ebpf_dir, &config, &domain_rules, event_tx.clone()) {
-            Ok((loader, map_manager)) => {
+            Ok((loader, map_manager, fw_metrics_rdr)) => {
                 let mut svc = firewall_svc.write().await;
                 svc.set_map_port(Box::new(map_manager));
+                if let Some(rdr) = fw_metrics_rdr {
+                    metrics_readers.push(rdr);
+                }
                 metrics.set_ebpf_program_status("xdp_firewall", true);
                 ebpf_loaded.store(true, Ordering::Relaxed);
                 info!(
@@ -597,7 +771,18 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     // 10b. XDP Rate Limiter
     let rl_ok = if config.ratelimit.enabled {
         match try_load_xdp_ratelimit(&ebpf_dir, &config, event_tx.clone()) {
-            Ok(rl_loader) => {
+            Ok((rl_loader, rl_mgr_opt, rl_rdrs)) => {
+                metrics_readers.extend(rl_rdrs);
+                if let Some(rl_mgr) = rl_mgr_opt {
+                    let mut svc = rl_svc.write().await;
+                    let default_algo = parse_algorithm_byte(&config.ratelimit.default_algorithm);
+                    svc.set_defaults(
+                        config.ratelimit.default_rate,
+                        config.ratelimit.default_burst,
+                        default_algo,
+                    );
+                    svc.set_map_port(Box::new(rl_mgr));
+                }
                 // Wire tail-call: firewall → ratelimit (if both loaded).
                 if let Some(ref mut fw) = fw_loader {
                     match rl_loader.xdp_program_fd("xdp_ratelimit") {
@@ -627,6 +812,14 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         false
     };
 
+    // Wire IpSetMapManager from xdp-firewall to alias service (best-effort, before move)
+    if let Some(ref mut loader) = fw_loader
+        && let Ok(ipset_mgr) = IpSetMapManager::new(loader.ebpf_mut())
+    {
+        alias_svc.write().await.set_ipset_port(Box::new(ipset_mgr));
+        info!("alias IP set map wired from xdp-firewall");
+    }
+
     // Move firewall loader into eBPF state (after tail-call wiring)
     if let Some(loader) = fw_loader {
         ebpf_state.add_loader(loader);
@@ -635,7 +828,19 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     // 10c. TC IDS
     let ids_ok = if config.ids.enabled {
         match try_load_tc_ids(&ebpf_dir, &config, event_tx.clone()) {
-            Ok(loader) => {
+            Ok((loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr)) => {
+                if let Some(ids_mgr) = ids_mgr_opt {
+                    ids_svc.write().await.set_map_port(Box::new(ids_mgr));
+                }
+                if let Some(l7_mgr) = l7_mgr_opt {
+                    ebpf_map_holder.l7_ports = Some(l7_mgr);
+                }
+                if let Some(cfg_mgr) = cfg_mgr_opt {
+                    ebpf_map_holder.config_flags.push(cfg_mgr);
+                }
+                if let Some(rdr) = ids_rdr {
+                    metrics_readers.push(rdr);
+                }
                 ebpf_state.add_loader(loader);
                 metrics.set_ebpf_program_status("tc_ids", true);
                 info!("eBPF tc-ids active");
@@ -655,7 +860,28 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     // 10d. TC Threat Intel
     let ti_ok = if config.threatintel.enabled {
         match try_load_tc_threatintel(&ebpf_dir, &config, event_tx.clone()) {
-            Ok(loader) => {
+            Ok((loader, ti_mgr_opt, cfg_mgr_opt, ti_rdr)) => {
+                if let Some(rdr) = ti_rdr {
+                    metrics_readers.push(rdr);
+                }
+                if let Some(ti_mgr) = ti_mgr_opt {
+                    // Extract shared map handles before moving manager to service
+                    let (v4, v6, bv4, bv6) = ti_mgr.shared_handles();
+                    ti_svc.write().await.set_map_port(Box::new(ti_mgr));
+
+                    // Wire EbpfMapWriteAdapter to DNS blocklist service
+                    if let Some(ref blocklist) = dns_blocklist_ref {
+                        let writer = Arc::new(EbpfMapWriteAdapter::new(v4, v6, bv4, bv6));
+                        blocklist.set_map_writer(
+                            writer
+                                as Arc<dyn ports::secondary::ebpf_map_write_port::EbpfMapWritePort>,
+                        );
+                        info!("EbpfMapWriteAdapter wired to DNS blocklist service");
+                    }
+                }
+                if let Some(cfg_mgr) = cfg_mgr_opt {
+                    ebpf_map_holder.config_flags.push(cfg_mgr);
+                }
                 ebpf_state.add_loader(loader);
                 metrics.set_ebpf_program_status("tc_threatintel", true);
                 info!("eBPF tc-threatintel active");
@@ -675,7 +901,10 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     // 10e. TC DNS
     let dns_ok = if config.dns.enabled {
         match try_load_tc_dns(&ebpf_dir, &config, event_tx.clone()) {
-            Ok(loader) => {
+            Ok((loader, dns_rdr)) => {
+                if let Some(rdr) = dns_rdr {
+                    metrics_readers.push(rdr);
+                }
                 ebpf_state.add_loader(loader);
                 metrics.set_ebpf_program_status("tc_dns", true);
                 info!("eBPF tc-dns active");
@@ -695,7 +924,10 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     // 10f. Uprobe DLP
     let dlp_ok = if config.dlp.enabled {
         match try_load_uprobe_dlp(&ebpf_dir, &config, event_tx.clone()) {
-            Ok(loader) => {
+            Ok((loader, dlp_rdr)) => {
+                if let Some(rdr) = dlp_rdr {
+                    metrics_readers.push(rdr);
+                }
                 ebpf_state.add_loader(loader);
                 metrics.set_ebpf_program_status("uprobe_dlp", true);
                 info!("eBPF uprobe-dlp active");
@@ -712,6 +944,87 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         false
     };
 
+    // 10g. TC ConnTrack
+    let ct_ok = if config.conntrack.enabled {
+        match try_load_tc_conntrack(&ebpf_dir, &config, event_tx.clone()) {
+            Ok((loader, ct_mgr, ct_rdr)) => {
+                conntrack_svc.write().await.set_map_port(Box::new(ct_mgr));
+                if let Some(rdr) = ct_rdr {
+                    metrics_readers.push(rdr);
+                }
+                ebpf_state.add_loader(loader);
+                metrics.set_ebpf_program_status("tc_conntrack", true);
+                info!("eBPF tc-conntrack active");
+                true
+            }
+            Err(e) => {
+                warn!("tc-conntrack load failed (degraded mode): {e}");
+                metrics.set_ebpf_program_status("tc_conntrack", false);
+                false
+            }
+        }
+    } else {
+        metrics.set_ebpf_program_status("tc_conntrack", false);
+        false
+    };
+
+    // 10h. TC NAT (ingress + egress)
+    let nat_ok = if config.nat.enabled {
+        match try_load_tc_nat(&ebpf_dir, &config) {
+            Ok((ingress_loader, egress_loader, nat_mgr, nat_rdrs)) => {
+                metrics_readers.extend(nat_rdrs);
+                {
+                    let mut svc = nat_svc.write().await;
+                    svc.set_map_port(Box::new(nat_mgr));
+                    // Re-sync rules to eBPF maps now that maps are wired
+                    let dnat = config.nat_dnat_rules().unwrap_or_default();
+                    let snat = config.nat_snat_rules().unwrap_or_default();
+                    let _ = svc.reload_dnat_rules(dnat);
+                    let _ = svc.reload_snat_rules(snat);
+                }
+                ebpf_state.add_loader(ingress_loader);
+                ebpf_state.add_loader(egress_loader);
+                metrics.set_ebpf_program_status("tc_nat_ingress", true);
+                metrics.set_ebpf_program_status("tc_nat_egress", true);
+                info!("eBPF tc-nat-ingress + tc-nat-egress active");
+                true
+            }
+            Err(e) => {
+                warn!("tc-nat load failed (degraded mode): {e}");
+                metrics.set_ebpf_program_status("tc_nat_ingress", false);
+                metrics.set_ebpf_program_status("tc_nat_egress", false);
+                false
+            }
+        }
+    } else {
+        metrics.set_ebpf_program_status("tc_nat_ingress", false);
+        metrics.set_ebpf_program_status("tc_nat_egress", false);
+        false
+    };
+
+    // 10i. TC Scrub
+    let scrub_ok = if config.firewall.scrub.enabled {
+        match try_load_tc_scrub(&ebpf_dir, &config) {
+            Ok((loader, scrub_rdr)) => {
+                if let Some(rdr) = scrub_rdr {
+                    metrics_readers.push(rdr);
+                }
+                ebpf_state.add_loader(loader);
+                metrics.set_ebpf_program_status("tc_scrub", true);
+                info!("eBPF tc-scrub active");
+                true
+            }
+            Err(e) => {
+                warn!("tc-scrub load failed (degraded mode): {e}");
+                metrics.set_ebpf_program_status("tc_scrub", false);
+                false
+            }
+        }
+    } else {
+        metrics.set_ebpf_program_status("tc_scrub", false);
+        false
+    };
+
     // Populate eBPF program status for ops endpoint
     {
         let mut status = ebpf_program_status.write().await;
@@ -721,7 +1034,22 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         status.insert("tc_threatintel".to_string(), ti_ok);
         status.insert("tc_dns".to_string(), dns_ok);
         status.insert("uprobe_dlp".to_string(), dlp_ok);
+        status.insert("tc_conntrack".to_string(), ct_ok);
+        status.insert("tc_nat_ingress".to_string(), nat_ok);
+        status.insert("tc_nat_egress".to_string(), nat_ok);
+        status.insert("tc_scrub".to_string(), scrub_ok);
     }
+
+    // ── 10½. Spawn config hot-reload task (after eBPF loading for EbpfMapHolder) ──
+    let reload_handle = crate::reload::spawn_reload_task(
+        cli.config.clone(),
+        reload_service,
+        auth_handle,
+        cancel_token.clone(),
+        reload_trigger_rx,
+        Arc::clone(&shared_config),
+        ebpf_map_holder,
+    );
 
     // ── 11. Spawn event dispatcher (replaces flat event consumer) ───
     let dispatcher = EventDispatcher::new(
@@ -732,7 +1060,9 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
         alert_tx.clone(),
         dns_cache_for_ids,
-    );
+    )
+    .with_ddos_service(Arc::clone(&ddos_svc))
+    .with_dlp_service(Arc::clone(&dlp_svc));
     let dispatcher_cancel = cancel_token.clone();
     let dispatcher_handle = tokio::spawn(async move {
         dispatcher.run(event_rx, dispatcher_cancel).await;
@@ -754,6 +1084,19 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     .with_stream_sender(alert_stream_tx);
     if let Some(store) = alert_store {
         alert_pipeline = alert_pipeline.with_alert_store(store);
+    }
+
+    // Wire DNS alert enricher (best-effort: only if DNS cache is available)
+    if let Some(ref dns_cache) = app_state.dns_cache_service {
+        let enricher = application::alert_enrichment::DnsAlertEnricher::new(
+            Arc::clone(dns_cache) as Arc<dyn ports::secondary::dns_cache_port::DnsCachePort>,
+            app_state.domain_reputation_service.as_ref().map(|svc| {
+                Arc::clone(svc)
+                    as Arc<dyn ports::secondary::domain_reputation_port::DomainReputationPort>
+            }),
+        );
+        alert_pipeline = alert_pipeline.with_enricher(Arc::new(enricher));
+        info!("DNS alert enricher initialized");
     }
 
     // Wire alert senders
@@ -821,6 +1164,114 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     let alert_handle = tokio::spawn(async move {
         alert_pipeline.run(alert_rx, alert_cancel).await;
     });
+
+    // ── 11c. Spawn threat intel feed fetcher (periodic) ───────────────
+    let _feed_fetch_handle = if config.threatintel.enabled && !config.threatintel.feeds.is_empty() {
+        let fetcher = adapters::threatintel::HttpFeedFetcher::default();
+        let feed_ti_svc = Arc::clone(&ti_svc);
+        let feed_metrics = Arc::clone(&metrics) as Arc<dyn MetricsPort>;
+        let feed_cancel = cancel_token.clone();
+        // Use the minimum refresh interval across all enabled feeds (floor: 60s).
+        let refresh_secs = config
+            .threatintel
+            .feeds
+            .iter()
+            .filter(|f| f.enabled)
+            .map(|f| f.refresh_interval_secs)
+            .filter(|s| *s > 0)
+            .min()
+            .unwrap_or(3600)
+            .max(60);
+        info!(
+            refresh_interval_secs = refresh_secs,
+            feed_count = config.threatintel.feeds.len(),
+            "threat intel feed fetcher starting"
+        );
+        Some(tokio::spawn(async move {
+            // Initial fetch at startup
+            {
+                let feeds = feed_ti_svc.read().await.list_feeds().to_vec();
+                let iocs =
+                    application::feed_update::fetch_all_feeds(&feeds, &fetcher, &feed_metrics)
+                        .await;
+                if !iocs.is_empty()
+                    && let Err(e) = feed_ti_svc.write().await.reload_iocs(iocs)
+                {
+                    warn!("initial feed IOC reload failed: {e}");
+                }
+            }
+
+            let mut interval = tokio::time::interval(Duration::from_secs(refresh_secs));
+            interval.tick().await; // skip the first immediate tick (already fetched above)
+            loop {
+                tokio::select! {
+                    () = feed_cancel.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
+                let feeds = feed_ti_svc.read().await.list_feeds().to_vec();
+                let iocs =
+                    application::feed_update::fetch_all_feeds(&feeds, &fetcher, &feed_metrics)
+                        .await;
+                if !iocs.is_empty()
+                    && let Err(e) = feed_ti_svc.write().await.reload_iocs(iocs)
+                {
+                    warn!("periodic feed IOC reload failed: {e}");
+                }
+            }
+        }))
+    } else {
+        None
+    };
+
+    // ── 11c½. Spawn eBPF kernel metrics reader (periodic, every 10s) ──
+    if !metrics_readers.is_empty() {
+        info!(
+            reader_count = metrics_readers.len(),
+            maps = ?metrics_readers.iter().map(MetricsReader::map_name).collect::<Vec<_>>(),
+            "eBPF kernel metrics reader starting"
+        );
+        let kr_cancel = cancel_token.clone();
+        let kr_metrics = Arc::clone(&metrics) as Arc<dyn MetricsPort>;
+        tokio::spawn(async move {
+            crate::ebpf_metrics::run_kernel_metrics_loop(
+                metrics_readers,
+                kr_metrics,
+                Duration::from_secs(10),
+                kr_cancel,
+            )
+            .await;
+        });
+    }
+
+    // ── 11d. Spawn schedule evaluator (periodic, every 60s) ──────────
+    let _schedule_handle = if config.firewall.schedules.is_empty() {
+        None
+    } else {
+        let sched_svc = Arc::clone(&schedule_svc);
+        let sched_cancel = cancel_token.clone();
+        info!(
+            schedule_count = config.firewall.schedules.len(),
+            "schedule evaluator starting (60s interval)"
+        );
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    () = sched_cancel.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
+                let (day, minutes) = crate::schedule_eval::local_day_and_minutes();
+                let changed = sched_svc.write().await.evaluate_at(day, minutes);
+                if let Some(ref active_ids) = changed {
+                    tracing::info!(
+                        active_count = active_ids.len(),
+                        "schedule change: active rule set updated"
+                    );
+                    tracing::debug!(?active_ids, "active scheduled rule IDs");
+                }
+            }
+        }))
+    };
 
     // ── 12. Ready — wait for cancellation ───────────────────────────
     info!("agent ready, waiting for shutdown signal");
@@ -914,7 +1365,7 @@ fn try_load_xdp_firewall(
     config: &AgentConfig,
     domain_rules: &[FirewallRule],
     event_tx: mpsc::Sender<AgentEvent>,
-) -> anyhow::Result<(EbpfLoader, FirewallMapManager)> {
+) -> anyhow::Result<(EbpfLoader, FirewallMapManager, Option<MetricsReader>)> {
     use ebpf_common::firewall::{DEFAULT_POLICY_DROP, DEFAULT_POLICY_PASS};
     use infrastructure::config::DefaultPolicy;
 
@@ -948,10 +1399,19 @@ fn try_load_xdp_firewall(
     map_manager.load_v4_rules(&v4_entries)?;
     map_manager.load_v6_rules(&v6_entries)?;
 
+    // Populate ZONE_MAP (ifindex → zone_id) if zone config is present
+    if config.zones.enabled
+        && let Ok(zone_cfg) = config.zone_config()
+    {
+        adapters::ebpf::map_manager::populate_zone_map(loader.ebpf_mut(), &zone_cfg);
+    }
+
+    let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "FIREWALL_METRICS").ok();
+
     let reader = EventReader::new(loader.ebpf_mut())?;
     tokio::spawn(async move { reader.run(event_tx).await });
 
-    Ok((loader, map_manager))
+    Ok((loader, map_manager, metrics_rdr))
 }
 
 /// Load the XDP rate limiter program: attach XDP, populate policies, start event reader.
@@ -959,7 +1419,7 @@ fn try_load_xdp_ratelimit(
     ebpf_dir: &str,
     config: &AgentConfig,
     event_tx: mpsc::Sender<AgentEvent>,
-) -> anyhow::Result<EbpfLoader> {
+) -> anyhow::Result<(EbpfLoader, Option<RateLimitMapManager>, Vec<MetricsReader>)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-ratelimit")?;
     let mut loader = EbpfLoader::load(&program_bytes)?;
 
@@ -967,28 +1427,53 @@ fn try_load_xdp_ratelimit(
         loader.attach_xdp_program("xdp_ratelimit", iface)?;
     }
 
-    let mut rl_mgr = RateLimitMapManager::new(loader.ebpf_mut())?;
-    let policies = config.ratelimit_policies()?;
-    let default_algo = parse_algorithm_byte(&config.ratelimit.default_algorithm);
-    rl_mgr.load_policies(
-        &policies,
-        config.ratelimit.default_rate,
-        config.ratelimit.default_burst,
-        default_algo,
-    )?;
+    let rl_mgr_opt = match RateLimitMapManager::new(loader.ebpf_mut()) {
+        Ok(mut rl_mgr) => {
+            let policies = config.ratelimit_policies()?;
+            let default_algo = parse_algorithm_byte(&config.ratelimit.default_algorithm);
+            rl_mgr.load_policies(
+                &policies,
+                config.ratelimit.default_rate,
+                config.ratelimit.default_burst,
+                default_algo,
+            )?;
+            Some(rl_mgr)
+        }
+        Err(e) => {
+            warn!("RATELIMIT_CONFIG map not available: {e}");
+            None
+        }
+    };
+
+    let mut rdrs = Vec::new();
+    if let Ok(r) = MetricsReader::new(loader.ebpf_mut(), "RATELIMIT_METRICS") {
+        rdrs.push(r);
+    }
+    if let Ok(r) = MetricsReader::new(loader.ebpf_mut(), "DDOS_METRICS") {
+        rdrs.push(r);
+    }
 
     let reader = EventReader::new(loader.ebpf_mut())?;
     tokio::spawn(async move { reader.run(event_tx).await });
 
-    Ok(loader)
+    Ok((loader, rl_mgr_opt, rdrs))
 }
+
+/// IDS program load result: loader, IDS map manager, L7 ports manager, config flags manager, metrics reader.
+type TcIdsResult = (
+    EbpfLoader,
+    Option<IdsMapManager>,
+    Option<L7PortsManager>,
+    Option<ConfigFlagsManager>,
+    Option<MetricsReader>,
+);
 
 /// Load the TC IDS program: attach TC ingress, set up maps, start event reader.
 fn try_load_tc_ids(
     ebpf_dir: &str,
     config: &AgentConfig,
     event_tx: mpsc::Sender<AgentEvent>,
-) -> anyhow::Result<EbpfLoader> {
+) -> anyhow::Result<TcIdsResult> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-ids")?;
     let mut loader = EbpfLoader::load(&program_bytes)?;
 
@@ -996,35 +1481,72 @@ fn try_load_tc_ids(
         loader.attach_tc_program("tc_ids", iface)?;
     }
 
-    // IDS map managers (best-effort: non-fatal if maps not present)
-    if let Ok(_ids_mgr) = IdsMapManager::new(loader.ebpf_mut()) {
-        info!("tc-ids IDS_PATTERNS map initialized");
-    }
-    if let Ok(mut l7_mgr) = L7PortsManager::new(loader.ebpf_mut()) {
-        let ports = config.l7_ports();
-        if let Err(e) = l7_mgr.set_ports(&ports) {
-            warn!("failed to set L7 ports: {e}");
+    // IDS map manager (best-effort: non-fatal if maps not present)
+    let ids_mgr_opt = match IdsMapManager::new(loader.ebpf_mut()) {
+        Ok(ids_mgr) => {
+            info!("tc-ids IDS_PATTERNS map initialized");
+            Some(ids_mgr)
         }
-    }
-    if let Ok(mut cfg_mgr) = ConfigFlagsManager::new(loader.ebpf_mut()) {
-        let flags = build_config_flags(config);
-        if let Err(e) = cfg_mgr.set_flags(&flags) {
-            warn!("failed to set CONFIG_FLAGS: {e}");
+        Err(e) => {
+            warn!("IDS_PATTERNS map not available: {e}");
+            None
         }
-    }
+    };
+    let l7_mgr_opt = match L7PortsManager::new(loader.ebpf_mut()) {
+        Ok(mut l7_mgr) => {
+            let ports = config.l7_ports();
+            if let Err(e) = l7_mgr.set_ports(&ports) {
+                warn!("failed to set L7 ports: {e}");
+            }
+            Some(l7_mgr)
+        }
+        Err(e) => {
+            warn!("L7_PORTS map not available: {e}");
+            None
+        }
+    };
+    let cfg_mgr_opt = match ConfigFlagsManager::new(loader.ebpf_mut()) {
+        Ok(mut cfg_mgr) => {
+            let flags = build_config_flags(config);
+            if let Err(e) = cfg_mgr.set_flags(&flags) {
+                warn!("failed to set CONFIG_FLAGS: {e}");
+            }
+            Some(cfg_mgr)
+        }
+        Err(e) => {
+            warn!("CONFIG_FLAGS map not available in tc-ids: {e}");
+            None
+        }
+    };
+
+    let ids_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "IDS_METRICS").ok();
 
     let reader = EventReader::new(loader.ebpf_mut())?;
     tokio::spawn(async move { reader.run(event_tx).await });
 
-    Ok(loader)
+    Ok((
+        loader,
+        ids_mgr_opt,
+        l7_mgr_opt,
+        cfg_mgr_opt,
+        ids_metrics_rdr,
+    ))
 }
 
 /// Load the TC threat intel program: attach TC ingress, set up maps, start event reader.
+/// Threat intel program load result.
+type TcThreatIntelResult = (
+    EbpfLoader,
+    Option<ThreatIntelMapManager>,
+    Option<ConfigFlagsManager>,
+    Option<MetricsReader>,
+);
+
 fn try_load_tc_threatintel(
     ebpf_dir: &str,
     config: &AgentConfig,
     event_tx: mpsc::Sender<AgentEvent>,
-) -> anyhow::Result<EbpfLoader> {
+) -> anyhow::Result<TcThreatIntelResult> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-threatintel")?;
     let mut loader = EbpfLoader::load(&program_bytes)?;
 
@@ -1032,20 +1554,36 @@ fn try_load_tc_threatintel(
         loader.attach_tc_program("tc_threatintel", iface)?;
     }
 
-    if let Ok(_ti_mgr) = ThreatIntelMapManager::new(loader.ebpf_mut()) {
-        info!("tc-threatintel maps initialized");
-    }
-    if let Ok(mut cfg_mgr) = ConfigFlagsManager::new(loader.ebpf_mut()) {
-        let flags = build_config_flags(config);
-        if let Err(e) = cfg_mgr.set_flags(&flags) {
-            warn!("failed to set CONFIG_FLAGS: {e}");
+    let ti_mgr_opt = match ThreatIntelMapManager::new(loader.ebpf_mut()) {
+        Ok(ti_mgr) => {
+            info!("tc-threatintel maps initialized");
+            Some(ti_mgr)
         }
-    }
+        Err(e) => {
+            warn!("THREATINTEL_IOCS map not available: {e}");
+            None
+        }
+    };
+    let cfg_mgr_opt = match ConfigFlagsManager::new(loader.ebpf_mut()) {
+        Ok(mut cfg_mgr) => {
+            let flags = build_config_flags(config);
+            if let Err(e) = cfg_mgr.set_flags(&flags) {
+                warn!("failed to set CONFIG_FLAGS: {e}");
+            }
+            Some(cfg_mgr)
+        }
+        Err(e) => {
+            warn!("CONFIG_FLAGS map not available in tc-threatintel: {e}");
+            None
+        }
+    };
+
+    let ti_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "THREATINTEL_METRICS").ok();
 
     let reader = EventReader::new(loader.ebpf_mut())?;
     tokio::spawn(async move { reader.run(event_tx).await });
 
-    Ok(loader)
+    Ok((loader, ti_mgr_opt, cfg_mgr_opt, ti_metrics_rdr))
 }
 
 /// Load the TC DNS program: attach TC ingress, start DNS event reader.
@@ -1053,7 +1591,7 @@ fn try_load_tc_dns(
     ebpf_dir: &str,
     config: &AgentConfig,
     event_tx: mpsc::Sender<AgentEvent>,
-) -> anyhow::Result<EbpfLoader> {
+) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-dns")?;
     let mut loader = EbpfLoader::load(&program_bytes)?;
 
@@ -1061,10 +1599,12 @@ fn try_load_tc_dns(
         loader.attach_tc_program("tc_dns", iface)?;
     }
 
+    let dns_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "DNS_METRICS").ok();
+
     let reader = DnsEventReader::new(loader.ebpf_mut())?;
     tokio::spawn(async move { reader.run(event_tx).await });
 
-    Ok(loader)
+    Ok((loader, dns_metrics_rdr))
 }
 
 /// Load the uprobe DLP program: attach uprobes to SSL functions, start DLP event reader.
@@ -1072,7 +1612,7 @@ fn try_load_uprobe_dlp(
     ebpf_dir: &str,
     _config: &AgentConfig,
     event_tx: mpsc::Sender<AgentEvent>,
-) -> anyhow::Result<EbpfLoader> {
+) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "uprobe-dlp")?;
     let mut loader = EbpfLoader::load(&program_bytes)?;
 
@@ -1083,14 +1623,16 @@ fn try_load_uprobe_dlp(
     loader.attach_uprobe("uprobe_ssl_read_entry", "SSL_read", ssl_target, false)?;
     loader.attach_uprobe("uretprobe_ssl_read", "SSL_read", ssl_target, true)?;
 
+    let dlp_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "DLP_METRICS").ok();
+
     let reader = DlpEventReader::new(loader.ebpf_mut())?;
     tokio::spawn(async move { reader.run(event_tx).await });
 
-    Ok(loader)
+    Ok((loader, dlp_metrics_rdr))
 }
 
 /// Build `ConfigFlags` from the agent config for eBPF programs.
-fn build_config_flags(config: &AgentConfig) -> ebpf_common::config_flags::ConfigFlags {
+pub(crate) fn build_config_flags(config: &AgentConfig) -> ebpf_common::config_flags::ConfigFlags {
     ebpf_common::config_flags::ConfigFlags {
         firewall_enabled: u8::from(config.firewall.enabled),
         ids_enabled: u8::from(config.ids.enabled),
@@ -1098,7 +1640,8 @@ fn build_config_flags(config: &AgentConfig) -> ebpf_common::config_flags::Config
         dlp_enabled: u8::from(config.dlp.enabled),
         ratelimit_enabled: u8::from(config.ratelimit.enabled),
         threatintel_enabled: u8::from(config.threatintel.enabled),
-        _padding: [0; 2],
+        conntrack_enabled: u8::from(config.conntrack.enabled),
+        nat_enabled: u8::from(config.nat.enabled),
     }
 }
 
@@ -1109,5 +1652,96 @@ fn parse_algorithm_byte(algorithm: &str) -> u8 {
         "sliding_window" | "slidingwindow" => ebpf_common::ratelimit::ALGO_SLIDING_WINDOW,
         "leaky_bucket" | "leakybucket" => ebpf_common::ratelimit::ALGO_LEAKY_BUCKET,
         _ => ebpf_common::ratelimit::ALGO_TOKEN_BUCKET,
+    }
+}
+
+/// Load the TC conntrack program: attach TC ingress, create map manager, start event reader.
+fn try_load_tc_conntrack(
+    ebpf_dir: &str,
+    config: &AgentConfig,
+    event_tx: mpsc::Sender<AgentEvent>,
+) -> anyhow::Result<(EbpfLoader, ConnTrackMapManager, Option<MetricsReader>)> {
+    let program_bytes = read_ebpf_program(ebpf_dir, "tc-conntrack")?;
+    let mut loader = EbpfLoader::load(&program_bytes)?;
+
+    for iface in &config.agent.interfaces {
+        loader.attach_tc_program("tc_conntrack", iface)?;
+    }
+
+    let ct_mgr = ConnTrackMapManager::new(loader.ebpf_mut())?;
+    let ct_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "CT_METRICS").ok();
+
+    let reader = EventReader::new(loader.ebpf_mut())?;
+    tokio::spawn(async move { reader.run(event_tx).await });
+
+    Ok((loader, ct_mgr, ct_metrics_rdr))
+}
+
+/// Load the TC NAT programs (ingress + egress): attach TC, create map manager.
+fn try_load_tc_nat(
+    ebpf_dir: &str,
+    config: &AgentConfig,
+) -> anyhow::Result<(EbpfLoader, EbpfLoader, NatMapManager, Vec<MetricsReader>)> {
+    let ingress_bytes = read_ebpf_program(ebpf_dir, "tc-nat-ingress")?;
+    let mut ingress_loader = EbpfLoader::load(&ingress_bytes)?;
+
+    for iface in &config.agent.interfaces {
+        ingress_loader.attach_tc_program("tc_nat_ingress", iface)?;
+    }
+
+    let egress_bytes = read_ebpf_program(ebpf_dir, "tc-nat-egress")?;
+    let mut egress_loader = EbpfLoader::load(&egress_bytes)?;
+
+    for iface in &config.agent.interfaces {
+        egress_loader.attach_tc_program("tc_nat_egress", iface)?;
+    }
+
+    let nat_mgr =
+        NatMapManager::from_ingress_egress(ingress_loader.ebpf_mut(), egress_loader.ebpf_mut())?;
+
+    // NAT_METRICS from ingress loader (egress shares via pinning or separate map)
+    let mut rdrs = Vec::new();
+    if let Ok(r) = MetricsReader::new(ingress_loader.ebpf_mut(), "NAT_METRICS") {
+        rdrs.push(r);
+    }
+
+    Ok((ingress_loader, egress_loader, nat_mgr, rdrs))
+}
+
+/// Load the TC scrub program: attach TC ingress, write scrub config to eBPF map.
+fn try_load_tc_scrub(
+    ebpf_dir: &str,
+    config: &AgentConfig,
+) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>)> {
+    let program_bytes = read_ebpf_program(ebpf_dir, "tc-scrub")?;
+    let mut loader = EbpfLoader::load(&program_bytes)?;
+
+    for iface in &config.agent.interfaces {
+        loader.attach_tc_program("tc_scrub", iface)?;
+    }
+
+    // Write scrub config to the SCRUB_CONFIG eBPF Array map
+    if let Ok(mut scrub_mgr) = ScrubConfigManager::new(loader.ebpf_mut()) {
+        let flags = build_scrub_flags(config);
+        if let Err(e) = scrub_mgr.set_flags(&flags) {
+            warn!("failed to set SCRUB_CONFIG: {e}");
+        }
+    }
+
+    let scrub_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "SCRUB_METRICS").ok();
+
+    Ok((loader, scrub_metrics_rdr))
+}
+
+/// Build `ScrubFlags` from the agent config's scrub section.
+fn build_scrub_flags(config: &AgentConfig) -> ebpf_common::scrub::ScrubFlags {
+    let scrub = &config.firewall.scrub;
+    ebpf_common::scrub::ScrubFlags {
+        enabled: u8::from(scrub.enabled),
+        min_ttl: scrub.min_ttl.unwrap_or(0),
+        clear_df: u8::from(scrub.clear_df),
+        random_ip_id: u8::from(scrub.random_ip_id),
+        max_mss: scrub.max_mss.unwrap_or(0),
+        _pad: [0; 2],
     }
 }

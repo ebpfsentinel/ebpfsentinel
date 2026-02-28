@@ -15,7 +15,7 @@ use ports::secondary::metrics_port::MetricsPort;
 /// performs eBPF map writes via `EbpfMapWritePort`, and updates metrics.
 pub struct DnsBlocklistAppService {
     engine: RwLock<DomainBlocklistEngine>,
-    map_writer: Option<Arc<dyn EbpfMapWritePort>>,
+    map_writer: RwLock<Option<Arc<dyn EbpfMapWritePort>>>,
     ips_port: Option<Arc<dyn IpsBlacklistPort>>,
     metrics: Arc<dyn MetricsPort>,
     cleanup_interval: Duration,
@@ -30,10 +30,21 @@ impl DnsBlocklistAppService {
         Self {
             cleanup_interval: Duration::from_secs(config.grace_period_secs.min(60)),
             engine: RwLock::new(DomainBlocklistEngine::new(config)),
-            map_writer,
+            map_writer: RwLock::new(map_writer),
             ips_port: None,
             metrics,
         }
+    }
+
+    /// Set the eBPF map writer for runtime IP injection/removal.
+    ///
+    /// Called after eBPF programs are loaded and shared map handles are available.
+    pub fn set_map_writer(&self, writer: Arc<dyn EbpfMapWritePort>) {
+        let mut w = self
+            .map_writer
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *w = Some(writer);
     }
 
     /// Set the IPS blacklist port for `inject_target: ips` injection.
@@ -106,7 +117,11 @@ impl DnsBlocklistAppService {
                     "domain matched blocklist with inject_target=ips but no IPS port configured"
                 );
             }
-        } else if let Some(ref writer) = self.map_writer {
+        } else if let Some(ref writer) = *self
+            .map_writer
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
             let metadata = IocMetadata {
                 source: "dns-blocklist".to_string(),
                 domain: Some(domain.to_string()),
@@ -188,7 +203,11 @@ impl DnsBlocklistAppService {
                         }
                     }
                 }
-            } else if let Some(ref writer) = self.map_writer {
+            } else if let Some(ref writer) = *self
+                .map_writer
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
                 for ip in &expired {
                     let result = match inject_target {
                         InjectTarget::ThreatIntel => writer.remove_threatintel_ip(*ip),
@@ -230,7 +249,11 @@ impl DnsBlocklistAppService {
                     }
                 }
             }
-        } else if let Some(ref writer) = self.map_writer {
+        } else if let Some(ref writer) = *self
+            .map_writer
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
             for ip in &removed {
                 let result = match inject_target {
                     InjectTarget::ThreatIntel => writer.remove_threatintel_ip(*ip),

@@ -6,15 +6,15 @@ use domain::common::error::DomainError;
 use domain::threatintel::engine::ThreatIntelEngine;
 use domain::threatintel::entity::{FeedConfig, Ioc};
 use ports::secondary::metrics_port::MetricsPort;
+use ports::secondary::threatintel_map_port::ThreatIntelMapPort;
 
 /// Application-level threat intelligence service.
 ///
-/// Wraps the domain engine with metrics updates and feed configuration.
-/// eBPF map synchronization is handled externally by the caller after
-/// IOC mutations (the app service doesn't own the map port directly,
-/// since map sync is an infrastructure concern orchestrated at agent level).
+/// Wraps the domain engine with metrics updates, feed configuration,
+/// and optional eBPF map synchronization.
 pub struct ThreatIntelAppService {
     engine: ThreatIntelEngine,
+    map_port: Option<Box<dyn ThreatIntelMapPort + Send>>,
     metrics: Arc<dyn MetricsPort>,
     feeds: Vec<FeedConfig>,
     mode: DomainMode,
@@ -29,11 +29,18 @@ impl ThreatIntelAppService {
     ) -> Self {
         Self {
             engine,
+            map_port: None,
             metrics,
             feeds,
             mode: DomainMode::default(),
             enabled: true,
         }
+    }
+
+    /// Set the eBPF map port and perform an initial sync.
+    pub fn set_map_port(&mut self, port: Box<dyn ThreatIntelMapPort + Send>) {
+        self.map_port = Some(port);
+        self.sync_ebpf_maps();
     }
 
     pub fn mode(&self) -> DomainMode {
@@ -54,18 +61,21 @@ impl ThreatIntelAppService {
 
     pub fn add_ioc(&mut self, ioc: Ioc) -> Result<(), DomainError> {
         self.engine.add_ioc(ioc)?;
+        self.sync_ebpf_maps();
         self.update_metrics();
         Ok(())
     }
 
     pub fn remove_ioc(&mut self, ip: &IpAddr) -> Result<(), DomainError> {
         self.engine.remove_ioc(ip)?;
+        self.sync_ebpf_maps();
         self.update_metrics();
         Ok(())
     }
 
     pub fn reload_iocs(&mut self, iocs: Vec<Ioc>) -> Result<(), DomainError> {
         self.engine.reload(iocs)?;
+        self.sync_ebpf_maps();
         self.update_metrics();
         Ok(())
     }
@@ -94,6 +104,23 @@ impl ThreatIntelAppService {
     /// Mutable access to the engine.
     pub fn engine_mut(&mut self) -> &mut ThreatIntelEngine {
         &mut self.engine
+    }
+
+    /// Full-reload sync: bulk-load all engine IOCs into eBPF maps.
+    ///
+    /// In `Alert` mode, IOCs are loaded with `block_mode = false`
+    /// (observation only — traffic is not dropped).
+    fn sync_ebpf_maps(&mut self) {
+        let Some(ref mut map) = self.map_port else {
+            return;
+        };
+
+        let block_mode = self.mode != DomainMode::Alert;
+        let iocs: Vec<Ioc> = self.engine.all_iocs().cloned().collect();
+
+        if let Err(e) = map.load_all_iocs(&iocs, block_mode) {
+            tracing::warn!("failed to sync threat intel IOCs to eBPF maps: {e}");
+        }
     }
 
     fn update_metrics(&self) {

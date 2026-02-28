@@ -839,6 +839,155 @@ pub async fn cmd_domains_unblock(
     Ok(())
 }
 
+// ── DDoS Protection ────────────────────────────────────────────────────
+
+pub async fn cmd_ddos_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let status = client.ddos_status().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!("DDoS Protection Status");
+    println!("  Enabled:          {}", yes_no(status.enabled));
+    println!("  Active attacks:   {}", status.active_attacks);
+    println!("  Total mitigated:  {}", status.total_mitigated);
+    println!("  Policy count:     {}", status.policy_count);
+    Ok(())
+}
+
+pub async fn cmd_ddos_attacks(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let attacks = client.ddos_attacks().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&attacks)?);
+        return Ok(());
+    }
+
+    if attacks.is_empty() {
+        println!("No active DDoS attacks.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<16}  {:<18}  {:<10}  {:>10}  {:>10}  {:>12}  {:>8}",
+        "ID", "ATTACK TYPE", "STATUS", "PEAK PPS", "CUR PPS", "TOTAL PKTS", "SOURCES"
+    );
+
+    for a in &attacks {
+        println!(
+            "{:<16}  {:<18}  {:<10}  {:>10}  {:>10}  {:>12}  {:>8}",
+            a.id,
+            a.attack_type,
+            a.status,
+            a.peak_pps,
+            a.current_pps,
+            a.total_packets,
+            a.source_count,
+        );
+    }
+
+    println!("\n{} active attack(s).", attacks.len());
+    Ok(())
+}
+
+pub async fn cmd_ddos_history(
+    client: &ApiClient,
+    limit: usize,
+    output: OutputFormat,
+) -> Result<()> {
+    let attacks = client.ddos_history(limit).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&attacks)?);
+        return Ok(());
+    }
+
+    if attacks.is_empty() {
+        println!("No DDoS attack history.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<16}  {:<18}  {:<10}  {:>10}  {:>10}  {:>12}  {:>8}",
+        "ID", "ATTACK TYPE", "STATUS", "PEAK PPS", "CUR PPS", "TOTAL PKTS", "SOURCES"
+    );
+
+    for a in &attacks {
+        println!(
+            "{:<16}  {:<18}  {:<10}  {:>10}  {:>10}  {:>12}  {:>8}",
+            a.id,
+            a.attack_type,
+            a.status,
+            a.peak_pps,
+            a.current_pps,
+            a.total_packets,
+            a.source_count,
+        );
+    }
+
+    println!("\n{} historical attack(s).", attacks.len());
+    Ok(())
+}
+
+pub async fn cmd_ddos_policies(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let policies = client.ddos_policies().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&policies)?);
+        return Ok(());
+    }
+
+    if policies.is_empty() {
+        println!("No DDoS policies configured.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<16}  {:<18}  {:>12}  {:<10}  {:>12}  {:<7}",
+        "ID", "ATTACK TYPE", "THRESH PPS", "ACTION", "BLOCK (s)", "ENABLED"
+    );
+
+    for p in &policies {
+        println!(
+            "{:<16}  {:<18}  {:>12}  {:<10}  {:>12}  {:<7}",
+            p.id,
+            p.attack_type,
+            p.detection_threshold_pps,
+            p.mitigation_action,
+            p.auto_block_duration_secs,
+            yes_no(p.enabled),
+        );
+    }
+
+    println!("\n{} policy(ies) total.", policies.len());
+    Ok(())
+}
+
+pub async fn cmd_ddos_add(client: &ApiClient, json: &str, output: OutputFormat) -> Result<()> {
+    let body: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?;
+    let policy = client.create_ddos_policy(&body).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&policy)?);
+        return Ok(());
+    }
+
+    println!(
+        "DDoS policy created: {} (type={}, action={}, threshold={})",
+        policy.id, policy.attack_type, policy.mitigation_action, policy.detection_threshold_pps
+    );
+    Ok(())
+}
+
+pub async fn cmd_ddos_delete(client: &ApiClient, id: &str) -> Result<()> {
+    client.delete_ddos_policy(id).await?;
+    println!("DDoS policy deleted: {id}");
+    Ok(())
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn truncate(s: &str, max: usize) -> String {

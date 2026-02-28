@@ -248,3 +248,68 @@ impl FirewallArrayMapPort for FirewallMapManager {
         Ok(())
     }
 }
+
+/// Populate the `ZONE_MAP` (`HashMap<u32, u8>`) in the xdp-firewall eBPF
+/// program with (ifindex → `zone_id`) entries derived from `ZoneConfig`.
+///
+/// Zone IDs are 1-based (0 = unzoned). Interface names are resolved to
+/// ifindex via `/sys/class/net/<iface>/ifindex`.
+///
+/// Best-effort: logs warnings for unresolvable interfaces.
+pub fn populate_zone_map(ebpf: &mut Ebpf, zone_cfg: &domain::zone::entity::ZoneConfig) {
+    use aya::maps::HashMap;
+
+    let Some(map) = ebpf.take_map("ZONE_MAP") else {
+        tracing::warn!("ZONE_MAP not found in eBPF object, skipping zone wiring");
+        return;
+    };
+    let Ok(mut zone_map) = HashMap::<_, u32, u8>::try_from(map) else {
+        tracing::warn!("ZONE_MAP type mismatch");
+        return;
+    };
+
+    let mut count = 0u32;
+    for (zone_idx, zone) in zone_cfg.zones.iter().enumerate() {
+        #[allow(clippy::cast_possible_truncation)]
+        let zone_id = (zone_idx as u8).wrapping_add(1); // 1-based
+        for iface in &zone.interfaces {
+            match resolve_ifindex(iface) {
+                Some(ifindex) => {
+                    if let Err(e) = zone_map.insert(ifindex, zone_id, 0) {
+                        tracing::warn!(
+                            iface = %iface,
+                            ifindex,
+                            zone = %zone.id,
+                            "ZONE_MAP insert failed: {e}"
+                        );
+                    } else {
+                        count += 1;
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        iface = %iface,
+                        zone = %zone.id,
+                        "cannot resolve ifindex for interface"
+                    );
+                }
+            }
+        }
+    }
+
+    if count > 0 {
+        info!(
+            entries = count,
+            zones = zone_cfg.zones.len(),
+            "ZONE_MAP populated"
+        );
+    }
+}
+
+/// Resolve a network interface name to its ifindex via sysfs.
+fn resolve_ifindex(iface: &str) -> Option<u32> {
+    let path = format!("/sys/class/net/{iface}/ifindex");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+}

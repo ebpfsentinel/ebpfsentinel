@@ -1,0 +1,180 @@
+# eBPFsentinel — NAT Configuration Example
+# =========================================
+#
+# Network Address Translation via TC classifiers with conntrack integration.
+# Supports SNAT, DNAT, masquerade, 1:1 NAT, port forwarding, and redirect.
+#
+# Architecture:
+#   INGRESS: packet → XDP (firewall) → TC (tc-conntrack) → TC (tc-nat-ingress: DNAT)
+#   EGRESS:  app → TC (tc-nat-egress: SNAT/masquerade) → wire
+#
+# NAT entries are cached in the conntrack table. After the first packet of a
+# connection matches a NAT rule, subsequent packets use the cached translation
+# (CT_FLAG_NAT_SRC / CT_FLAG_NAT_DST flags). Reverse-direction packets are
+# automatically un-NATed using the conntrack mapping.
+#
+# Packet rewriting uses:
+#   - bpf_skb_store_bytes    — overwrite IP/port fields
+#   - bpf_l3_csum_replace    — incremental IP header checksum update
+#   - bpf_l4_csum_replace    — incremental TCP/UDP checksum update
+#
+# Port allocation for SNAT/masquerade uses a hash-based scheme over an
+# LRU HashMap (65536 entries), ensuring even distribution across the
+# configured port range.
+#
+# Prerequisites:
+#   - Connection tracking must be enabled (conntrack.enabled: true)
+#   - Firewall should allow the translated traffic
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/nat.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+# ── Connection tracking (required for NAT) ─────────────────────────
+
+conntrack:
+  enabled: true
+  half_open_threshold: 128
+  rst_threshold: 50
+  fin_threshold: 50
+  ack_threshold: 100
+
+# ── NAT ────────────────────────────────────────────────────────────
+
+nat:
+  enabled: true
+
+  # ── SNAT rules (tc-nat-egress) ─────────────────────────────────
+  #
+  # Applied on egress: rewrite the source address/port of outgoing packets.
+  #
+  # Fields:
+  #   id              — Unique rule identifier
+  #   type            — "snat", "masquerade", or "one_to_one"
+  #   match_src       — Source CIDR to match (packets from this network)
+  #   match_dst       — Destination CIDR to match (optional)
+  #   match_protocol  — "tcp", "udp", or "any" (optional, default: any)
+  #   translated_addr — New source IP (SNAT only)
+  #   interface       — Outgoing interface for masquerade (uses its IP)
+  #   port_range      — Ephemeral port range for SNAT/masquerade
+  #   external_addr   — External IP (1:1 NAT)
+  #   internal_addr   — Internal IP (1:1 NAT)
+
+  snat_rules:
+    # Masquerade: rewrite source to the IP of eth0 for LAN traffic.
+    # This is the most common NAT setup for internet access from a private LAN.
+    - id: nat-masq-lan
+      type: masquerade
+      interface: eth0
+      match_src: "192.168.0.0/16"
+      port_range: "10000-60000"
+
+    # Static SNAT: rewrite source to a specific public IP.
+    # Useful when the outgoing interface has multiple IPs or a fixed
+    # public address is required for auditing/whitelisting.
+    - id: nat-snat-servers
+      type: snat
+      translated_addr: "203.0.113.1"
+      match_src: "10.0.1.0/24"
+      port_range: "32768-60999"
+
+    # 1:1 NAT for a DMZ server: bidirectional static mapping.
+    # External 203.0.113.50 ↔ Internal 10.0.2.50
+    - id: nat-1to1-dmz
+      type: one_to_one
+      external_addr: "203.0.113.50"
+      internal_addr: "10.0.2.50"
+
+  # ── DNAT rules (tc-nat-ingress) ────────────────────────────────
+  #
+  # Applied on ingress: rewrite the destination address/port of incoming packets.
+  #
+  # Fields:
+  #   id              — Unique rule identifier
+  #   type            — "dnat", "redirect", or "port_forward"
+  #   match_dst       — Destination CIDR to match (optional)
+  #   match_dst_port  — Destination port or range to match
+  #   match_protocol  — "tcp", "udp", or "any" (optional, default: any)
+  #   translated_addr — New destination IP
+  #   translated_port — New destination port
+
+  dnat_rules:
+    # Port forwarding: redirect public port 8080 to internal web server port 80.
+    - id: nat-pf-web
+      type: dnat
+      translated_addr: "10.0.1.10"
+      translated_port: 80
+      match_dst_port: 8080
+      match_protocol: tcp
+
+    # Port forwarding: redirect public port 2222 to SSH on a jump host.
+    - id: nat-pf-ssh
+      type: dnat
+      translated_addr: "10.0.1.20"
+      translated_port: 22
+      match_dst_port: 2222
+      match_protocol: tcp
+
+    # Redirect: send all DNS traffic arriving on this host to a local resolver.
+    # Unlike DNAT, redirect keeps the same interface — only the port changes.
+    - id: nat-redirect-dns
+      type: redirect
+      translated_port: 5353
+      match_dst_port: 53
+      match_protocol: udp
+
+    # Port forward: map an external port range to an internal server and port range.
+    # Unlike DNAT, port_forward uses ext_port/int_port for range-to-range mapping
+    # (e.g. external 3000-3010 → internal 8000-8010 on the target server).
+    - id: nat-pf-app-range
+      type: port_forward
+      ext_port: "3000-3010"
+      internal_addr: "10.0.1.30"
+      int_port: "8000-8010"
+      match_protocol: tcp
+
+# ── Firewall (allow NATed traffic) ─────────────────────────────────
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: drop
+
+  rules:
+    - id: fw-allow-established
+      priority: 1
+      action: allow
+      state: [established, related]
+
+    - id: fw-drop-invalid
+      priority: 2
+      action: deny
+      state: [invalid]
+
+    # Allow new inbound traffic to port-forwarded services
+    - id: fw-allow-web-pf
+      priority: 10
+      action: allow
+      protocol: tcp
+      dst_ip: "10.0.1.10"
+      dst_port: 80
+      state: [new]
+
+    - id: fw-allow-ssh-pf
+      priority: 11
+      action: allow
+      protocol: tcp
+      dst_ip: "10.0.1.20"
+      dst_port: 22
+      state: [new]
+
+    # Allow outbound from LAN (will be masqueraded)
+    - id: fw-allow-lan-outbound
+      priority: 20
+      action: allow
+      src_ip: "192.168.0.0/16"
+      state: [new]

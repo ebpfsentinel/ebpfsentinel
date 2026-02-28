@@ -6,6 +6,7 @@ pub const EVENT_TYPE_DLP: u8 = 3;
 pub const EVENT_TYPE_RATELIMIT: u8 = 4;
 pub const EVENT_TYPE_THREATINTEL: u8 = 5;
 pub const EVENT_TYPE_L7: u8 = 6;
+pub const EVENT_TYPE_DNS: u8 = 7;
 
 /// Maximum L7 payload bytes captured by eBPF and sent via RingBuf.
 pub const MAX_L7_PAYLOAD: usize = 512;
@@ -81,6 +82,13 @@ pub struct PacketEvent {
     pub socket_cookie: u64,
 }
 
+// SAFETY: Both types are #[repr(C)], Copy, 'static, and contain only primitive
+// types with explicit padding. Safe for zero-copy eBPF map/RingBuf operations via aya.
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for PacketEvent {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for XdpMetadata {}
+
 impl PacketEvent {
     /// Extract the source IPv4 address (first element of `src_addr`).
     #[inline]
@@ -141,6 +149,7 @@ mod tests {
         assert_eq!(EVENT_TYPE_RATELIMIT, 4);
         assert_eq!(EVENT_TYPE_THREATINTEL, 5);
         assert_eq!(EVENT_TYPE_L7, 6);
+        assert_eq!(EVENT_TYPE_DNS, 7);
         assert_eq!(MAX_L7_PAYLOAD, 512);
     }
 

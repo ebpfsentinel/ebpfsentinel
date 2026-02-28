@@ -288,6 +288,38 @@ pub struct BlocklistRemoveResponse {
     pub removed: bool,
 }
 
+// ── DDoS Protection ─────────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct DdosStatusResponse {
+    pub enabled: bool,
+    pub active_attacks: usize,
+    pub total_mitigated: u64,
+    pub policy_count: usize,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct DdosAttackResponse {
+    pub id: String,
+    pub attack_type: String,
+    pub status: String,
+    pub start_time_ns: u64,
+    pub peak_pps: u64,
+    pub current_pps: u64,
+    pub total_packets: u64,
+    pub source_count: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct DdosPolicyResponse {
+    pub id: String,
+    pub attack_type: String,
+    pub detection_threshold_pps: u64,
+    pub mitigation_action: String,
+    pub auto_block_duration_secs: u64,
+    pub enabled: bool,
+}
+
 #[derive(Deserialize)]
 struct ApiErrorBody {
     error: ApiErrorDetail,
@@ -680,6 +712,70 @@ impl ApiClient {
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;
         handle_response(resp).await
+    }
+
+    // ── DDoS Protection ──────────────────────────────────────────────
+
+    pub async fn ddos_status(&self) -> anyhow::Result<DdosStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ddos/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn ddos_attacks(&self) -> anyhow::Result<Vec<DdosAttackResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ddos/attacks")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn ddos_history(&self, limit: usize) -> anyhow::Result<Vec<DdosAttackResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ddos/attacks/history")
+            .query(&[("limit", limit.to_string())])
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn ddos_policies(&self) -> anyhow::Result<Vec<DdosPolicyResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ddos/policies")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn create_ddos_policy(
+        &self,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<DdosPolicyResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/ddos/policies")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn delete_ddos_policy(&self, id: &str) -> anyhow::Result<()> {
+        let resp = self
+            .request(
+                reqwest::Method::DELETE,
+                &format!("/api/v1/ddos/policies/{id}"),
+            )
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_delete(resp).await
     }
 
     // ── Audit ───────────────────────────────────────────────────────

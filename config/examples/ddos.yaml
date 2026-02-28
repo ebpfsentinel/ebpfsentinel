@@ -1,0 +1,190 @@
+# eBPFsentinel — DDoS Protection Configuration Example
+# =====================================================
+#
+# Multi-layer DDoS detection and mitigation combining eBPF-side enforcement
+# (SYN cookies, ICMP rate limiting, amplification filtering) with userspace
+# policy-based detection (threshold monitoring, auto-blocking).
+#
+# Architecture:
+#   eBPF (kernel): per-source rate enforcement via PerCpuArray counters
+#   Userspace:     domain engine evaluates policies, triggers mitigations
+#
+# Detection supports 7 attack types:
+#   syn_flood, udp_amplification, icmp_flood, rst_flood,
+#   fin_flood, ack_flood, volumetric
+#
+# Mitigation actions:
+#   alert     — log the event (no enforcement)
+#   throttle  — rate-limit the source (aliases: ratelimit)
+#   block     — drop all traffic from the source (aliases: drop, deny)
+#
+# Prerequisites:
+#   - Connection tracking should be enabled for TCP state-based detections
+#   - Firewall should be enabled for block actions to take effect
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/ddos.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+# ── Connection tracking (recommended for TCP DDoS detection) ──────
+
+conntrack:
+  enabled: true
+
+# ── DDoS Protection ──────────────────────────────────────────────
+
+ddos:
+  enabled: true
+
+  # ── SYN Flood Protection (eBPF-side) ──────────────────────────
+  #
+  # When the SYN rate exceeds the threshold, SYN cookie validation
+  # is activated in the XDP pipeline. Legitimate connections complete
+  # the handshake; spoofed SYNs are silently dropped.
+
+  syn_protection:
+    enabled: true
+    threshold_mode: true        # Only activate when rate exceeds threshold
+    threshold_pps: 10000        # SYN packets/sec before activation
+
+  # ── ICMP Flood Protection (eBPF-side) ─────────────────────────
+  #
+  # Per-source ICMP echo request rate limiting. Drops oversized
+  # payloads (smurf/fraggle amplification vectors).
+
+  icmp_protection:
+    enabled: true
+    max_pps: 10                 # Max ICMP echo requests/sec per source
+    max_payload_size: 64        # Max ICMP payload in bytes (drop larger)
+
+  # ── UDP Amplification Protection (eBPF-side) ──────────────────
+  #
+  # Rate-limits responses from known amplification ports (DNS, NTP,
+  # memcached, SSDP, CLDAP, CHARGEN). Prevents this host from being
+  # used as a reflector.
+
+  amplification_protection:
+    enabled: true
+    ports:
+      - port: 53                # DNS
+        protocol: udp
+        max_pps: 1000
+      - port: 123               # NTP
+        protocol: udp
+        max_pps: 100
+      - port: 11211             # Memcached
+        protocol: udp
+        max_pps: 50
+      - port: 1900              # SSDP
+        protocol: udp
+        max_pps: 100
+      - port: 389               # CLDAP
+        protocol: udp
+        max_pps: 100
+      - port: 19                # CHARGEN
+        protocol: udp
+        max_pps: 10
+
+  # ── TCP Connection Tracking Anomalies (eBPF-side) ─────────────
+  #
+  # Detects and rate-limits TCP state machine abuses:
+  #   - Half-open flood: too many SYN_SENT without completing handshake
+  #   - RST/FIN/ACK floods: anomalous volume of control packets
+
+  connection_tracking:
+    enabled: true
+    half_open_threshold: 100    # Max half-open connections per source
+    rst_threshold: 50           # Max RST packets/sec per source
+    fin_threshold: 50           # Max FIN packets/sec per source
+    ack_threshold: 200          # Max ACK packets/sec per source (no matching conn)
+
+  # ── Detection Policies (userspace domain engine) ──────────────
+  #
+  # Fields:
+  #   id                       — Unique policy identifier
+  #   attack_type              — Detection type (see list above)
+  #   detection_threshold_pps  — Packets/sec threshold to trigger
+  #   mitigation_action        — alert, throttle, or block
+  #   auto_block_duration_secs — Seconds to block offending source (0 = indefinite)
+  #   enabled                  — Whether this policy is active
+  #
+  # Maximum 100 policies.
+
+  policies:
+    # Detect and block SYN floods exceeding 5000 pps
+    - id: ddos-syn-flood
+      attack_type: syn_flood
+      detection_threshold_pps: 5000
+      mitigation_action: block
+      auto_block_duration_secs: 300
+      enabled: true
+
+    # Detect and throttle UDP amplification attacks
+    - id: ddos-udp-amp
+      attack_type: udp_amplification
+      detection_threshold_pps: 10000
+      mitigation_action: throttle
+      auto_block_duration_secs: 600
+      enabled: true
+
+    # Detect and block ICMP floods
+    - id: ddos-icmp-flood
+      attack_type: icmp_flood
+      detection_threshold_pps: 1000
+      mitigation_action: block
+      auto_block_duration_secs: 120
+      enabled: true
+
+    # Alert on RST floods (potential scan/fingerprinting)
+    - id: ddos-rst-flood
+      attack_type: rst_flood
+      detection_threshold_pps: 500
+      mitigation_action: alert
+      auto_block_duration_secs: 0
+      enabled: true
+
+    # Alert on FIN floods
+    - id: ddos-fin-flood
+      attack_type: fin_flood
+      detection_threshold_pps: 500
+      mitigation_action: alert
+      auto_block_duration_secs: 0
+      enabled: true
+
+    # Block ACK floods (ACK to non-existent connections)
+    - id: ddos-ack-flood
+      attack_type: ack_flood
+      detection_threshold_pps: 2000
+      mitigation_action: block
+      auto_block_duration_secs: 300
+      enabled: true
+
+    # Detect volumetric attacks (total bandwidth-based)
+    - id: ddos-volumetric
+      attack_type: volumetric
+      detection_threshold_pps: 100000
+      mitigation_action: block
+      auto_block_duration_secs: 900
+      enabled: true
+
+# ── Firewall (companion rules) ───────────────────────────────────
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: drop
+
+  rules:
+    - id: fw-allow-established
+      priority: 1
+      action: allow
+      state: [established, related]
+
+    - id: fw-drop-invalid
+      priority: 2
+      action: deny
+      state: [invalid]

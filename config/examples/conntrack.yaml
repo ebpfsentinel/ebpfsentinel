@@ -1,0 +1,120 @@
+# eBPFsentinel — Connection Tracking Configuration Example
+# ========================================================
+#
+# Stateful connection tracking via a shared LRU hash map, updated by the
+# TC classifier (tc-conntrack) and read by XDP (xdp-firewall) for fast-path
+# bypass of established/related connections.
+#
+# Architecture:
+#   - tc-conntrack (TC ingress): creates/updates connection entries, runs the
+#     TCP state machine, detects UDP bidirectional streams, and evicts expired
+#     entries via LRU.
+#   - xdp-firewall (XDP): reads the conntrack table in O(1) — packets
+#     belonging to ESTABLISHED/RELATED connections bypass rule evaluation
+#     entirely (Phase 0 fast-path).
+#   - tc-nat-ingress / tc-nat-egress: read and annotate conntrack entries
+#     with NAT translation info (CT_FLAG_NAT_SRC / CT_FLAG_NAT_DST).
+#
+# Maps are shared between programs via BPF filesystem pinning:
+#   /sys/fs/bpf/ebpfsentinel/ct_table_v4   (LruHashMap, 262144 entries)
+#   /sys/fs/bpf/ebpfsentinel/ct_table_v6   (LruHashMap, 65536 entries)
+#   /sys/fs/bpf/ebpfsentinel/ct_config      (Array, 1 entry)
+#
+# TCP state machine:
+#   SYN           → SYN_SENT
+#   SYN+ACK       → SYN_RECV       (SEEN_REPLY flag set)
+#   ACK (3WHS)    → ESTABLISHED    (ASSURED flag set)
+#   FIN           → FIN_WAIT
+#   FIN bidir     → TIME_WAIT
+#   RST           → removed
+#   Timeout       → evicted (LRU)
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/conntrack.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+# ── Connection Tracking ────────────────────────────────────────────
+
+conntrack:
+  enabled: true
+
+  # Half-open connection threshold per source IP.
+  # Sources exceeding this limit have new SYN packets dropped.
+  # Protects against SYN flood attacks at the conntrack level.
+  half_open_threshold: 128
+
+  # RST flood threshold (packets per source per second).
+  rst_threshold: 50
+
+  # FIN flood threshold (packets per source per second).
+  fin_threshold: 50
+
+  # ACK flood threshold (ACKs to non-existent connections, per source per second).
+  ack_threshold: 100
+
+# ── Firewall (stateful rules using conntrack) ──────────────────────
+#
+# With conntrack enabled, firewall rules can use the `state` field
+# to filter by connection state: new, established, related, invalid.
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: drop
+
+  rules:
+    # Fast-path: allow all established and related connections.
+    # In practice, these are handled by XDP Phase 0 (conntrack fast-path)
+    # before rule evaluation — this rule is a safety net for edge cases.
+    - id: fw-allow-established
+      priority: 1
+      action: allow
+      state: [established, related]
+
+    # Drop packets belonging to invalid connections (e.g. ACK without SYN).
+    - id: fw-drop-invalid
+      priority: 2
+      action: deny
+      state: [invalid]
+
+    # Allow new inbound SSH from the management subnet only.
+    - id: fw-allow-ssh
+      priority: 10
+      action: allow
+      protocol: tcp
+      src_ip: "192.168.100.0/24"
+      dst_port: 22
+      state: [new]
+
+    # Allow new inbound HTTPS.
+    - id: fw-allow-https
+      priority: 20
+      action: allow
+      protocol: tcp
+      dst_port: 443
+      state: [new]
+
+    # Allow new outbound DNS (UDP + TCP).
+    - id: fw-allow-dns-udp
+      priority: 30
+      action: allow
+      protocol: udp
+      dst_port: 53
+      state: [new]
+
+    - id: fw-allow-dns-tcp
+      priority: 31
+      action: allow
+      protocol: tcp
+      dst_port: 53
+      state: [new]
+
+    # Log ICMP for diagnostics.
+    - id: fw-log-icmp
+      priority: 100
+      action: log
+      protocol: icmp

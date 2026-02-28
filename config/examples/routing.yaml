@@ -1,0 +1,112 @@
+# eBPFsentinel — Multi-WAN Routing Configuration Example
+# =====================================================
+#
+# Policy-based routing with multiple WAN gateways, health-check probes,
+# and automatic failover. Gateways are prioritized (lower = preferred)
+# and monitored via ICMP or TCP probes.
+#
+# When a gateway fails health checks, traffic is redirected to the next
+# available gateway by priority. Recovery requires consecutive successful
+# probes before the gateway is marked healthy again.
+#
+# Fields (GatewayConfig):
+#   id                — Unique gateway ID (0-255)
+#   name              — Human-readable name
+#   interface         — Egress network interface (e.g. "eth1")
+#   gateway_ip        — Gateway IPv4 address
+#   priority          — Priority ranking (lower = preferred, default: 100)
+#   enabled           — Administrative enable flag (default: true)
+#   health_check      — Optional health-check probe configuration
+#
+# Fields (HealthCheckConfig):
+#   target             — Probe target address (e.g. "8.8.8.8")
+#   protocol           — "icmp" or "tcp:<port>" (default: "icmp")
+#   interval_secs      — Probe interval in seconds (default: 10)
+#   timeout_secs       — Probe timeout in seconds (default: 5)
+#   failure_threshold  — Failures before marking down (default: 3)
+#   recovery_threshold — Successes before marking healthy (default: 2)
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/routing.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0, eth1, eth2]
+
+# ── Multi-WAN Routing ────────────────────────────────────────────
+
+routing:
+  enabled: true
+
+  gateways:
+    # Primary WAN — fiber link (highest priority)
+    - id: 1
+      name: wan-fiber
+      interface: eth1
+      gateway_ip: "203.0.113.1"
+      priority: 10
+      enabled: true
+      health_check:
+        target: "8.8.8.8"
+        protocol: icmp
+        interval_secs: 10
+        timeout_secs: 5
+        failure_threshold: 3
+        recovery_threshold: 2
+
+    # Secondary WAN — cable link (failover)
+    - id: 2
+      name: wan-cable
+      interface: eth2
+      gateway_ip: "198.51.100.1"
+      priority: 20
+      enabled: true
+      health_check:
+        target: "1.1.1.1"
+        protocol: "tcp:443"
+        interval_secs: 15
+        timeout_secs: 5
+        failure_threshold: 3
+        recovery_threshold: 2
+
+    # Tertiary WAN — LTE backup (last resort)
+    - id: 3
+      name: wan-lte
+      interface: wwan0
+      gateway_ip: "100.64.0.1"
+      priority: 100
+      enabled: true
+      health_check:
+        target: "9.9.9.9"
+        protocol: icmp
+        interval_secs: 30
+        timeout_secs: 10
+        failure_threshold: 5
+        recovery_threshold: 3
+
+    # Maintenance gateway (administratively disabled)
+    - id: 4
+      name: wan-maintenance
+      interface: eth3
+      gateway_ip: "10.255.0.1"
+      priority: 50
+      enabled: false
+
+# ── Firewall (companion rules) ───────────────────────────────────
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: drop
+
+  rules:
+    - id: fw-allow-established
+      priority: 1
+      action: allow
+      state: [established, related]
+
+    - id: fw-drop-invalid
+      priority: 2
+      action: deny
+      state: [invalid]

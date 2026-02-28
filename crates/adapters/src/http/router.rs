@@ -18,22 +18,32 @@ const WRITE_RATE_LIMIT_BURST: u32 = 60;
 
 use super::agent_handler::agent_status;
 use super::alert_handler::{list_alerts, mark_false_positive};
+use super::alias_handler::alias_status;
 use super::audit_handler::{list_audit_logs, rule_history};
+use super::conntrack_handler::{conntrack_status, flush_connections, list_connections};
+use super::ddos_handler::{
+    create_ddos_policy, ddos_attacks, ddos_history, ddos_status, delete_ddos_policy,
+    list_ddos_policies,
+};
+use super::dlp_handler::{dlp_status, list_dlp_patterns};
 use super::dns_handler::{dns_stats, flush_dns_cache, list_dns_blocklist, list_dns_cache};
 use super::domain_handler::{add_to_blocklist, list_domain_reputations, remove_from_blocklist};
 use super::firewall_handler::{create_rule, delete_rule, list_rules};
 use super::health_handler::{healthz, readyz};
+use super::ids_handler::{ids_status, list_ids_rules};
 use super::ips_handler::{
     list_ips_blacklist, list_ips_domain_blocks, list_ips_rules, patch_ips_rule_mode,
 };
 use super::l7_handler::{create_l7_rule, delete_l7_rule, list_l7_rules};
 use super::metrics_handler::metrics;
 use super::middleware::auth::jwt_auth_middleware;
+use super::nat_handler::{list_nat_rules, nat_status};
 use super::openapi::ApiDoc;
 use super::ops_handler::{get_config, get_ebpf_status, reload_config};
 use super::ratelimit_handler::{
     create_ratelimit_rule, delete_ratelimit_rule, list_ratelimit_rules,
 };
+use super::routing_handler::{list_gateways, routing_status};
 use super::state::AppState;
 use super::threatintel_handler::{list_feeds, list_iocs, threatintel_status};
 
@@ -43,6 +53,7 @@ use super::threatintel_handler::{list_feeds, list_iocs, threatintel_status};
 /// 1. **Public** (no auth): `/healthz`, `/readyz` — K8s probes
 /// 2. **Metrics** (conditional auth): `/metrics` — auth only when configured
 /// 3. **API** (protected): `/api/v1/*` — auth when provider is present
+#[allow(clippy::too_many_lines)]
 pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
     // Group 1: Public routes — never require auth (K8s probes)
     let public_routes = Router::new()
@@ -83,6 +94,8 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
             .route("/api/v1/ips/rules", get(list_ips_rules))
             .route("/api/v1/ips/blacklist", get(list_ips_blacklist))
             .route("/api/v1/ips/domain-blocks", get(list_ips_domain_blocks))
+            .route("/api/v1/ids/status", get(ids_status))
+            .route("/api/v1/ids/rules", get(list_ids_rules))
             .route("/api/v1/ratelimit/rules", get(list_ratelimit_rules))
             .route("/api/v1/threatintel/status", get(threatintel_status))
             .route("/api/v1/threatintel/iocs", get(list_iocs))
@@ -95,7 +108,20 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
             .route("/api/v1/dns/cache", get(list_dns_cache))
             .route("/api/v1/dns/stats", get(dns_stats))
             .route("/api/v1/dns/blocklist", get(list_dns_blocklist))
-            .route("/api/v1/domains/reputation", get(list_domain_reputations));
+            .route("/api/v1/domains/reputation", get(list_domain_reputations))
+            .route("/api/v1/ddos/status", get(ddos_status))
+            .route("/api/v1/ddos/attacks", get(ddos_attacks))
+            .route("/api/v1/ddos/attacks/history", get(ddos_history))
+            .route("/api/v1/ddos/policies", get(list_ddos_policies))
+            .route("/api/v1/conntrack/status", get(conntrack_status))
+            .route("/api/v1/conntrack/connections", get(list_connections))
+            .route("/api/v1/dlp/status", get(dlp_status))
+            .route("/api/v1/dlp/patterns", get(list_dlp_patterns))
+            .route("/api/v1/nat/status", get(nat_status))
+            .route("/api/v1/nat/rules", get(list_nat_rules))
+            .route("/api/v1/aliases/status", get(alias_status))
+            .route("/api/v1/routing/status", get(routing_status))
+            .route("/api/v1/routing/gateways", get(list_gateways));
 
         // Write routes (rate limited: 60 req/min per IP)
         let write_routes = Router::new()
@@ -113,7 +139,10 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
                 "/api/v1/alerts/{id}/false-positive",
                 post(mark_false_positive),
             )
+            .route("/api/v1/ddos/policies", post(create_ddos_policy))
+            .route("/api/v1/ddos/policies/{id}", delete(delete_ddos_policy))
             .route("/api/v1/config/reload", post(reload_config))
+            .route("/api/v1/conntrack/flush", post(flush_connections))
             .route("/api/v1/dns/cache", delete(flush_dns_cache))
             .route("/api/v1/domains/blocklist", post(add_to_blocklist))
             .route(

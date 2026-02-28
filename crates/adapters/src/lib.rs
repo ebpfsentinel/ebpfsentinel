@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 pub mod alert;
+pub mod alias;
 pub mod audit;
 pub mod auth;
 pub mod ebpf;

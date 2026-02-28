@@ -7,14 +7,16 @@
 #   1. Bloom filter pre-check (O(1), zero false negatives)
 #   2. Full HashMap lookup only on Bloom filter hit
 #
-# Advanced features:
-#   - VLAN quarantine: move matching traffic to an isolation VLAN
-#     via bpf_skb_vlan_push instead of dropping (forensic analysis)
-#   - Adaptive backpressure: event emission skipped when RingBuf >75% full
-#   - Suspend-aware timestamps: bpf_ktime_get_boot_ns for accurate timing
+# Feeds are SOURCE-AGNOSTIC: any HTTP/HTTPS endpoint serving IPs in
+# plaintext, CSV, or JSON works through field mappings — no provider-
+# specific code. Just configure id, url, format, and field mapping.
 #
-# Supports CSV, JSON, STIX, and plaintext formats with configurable
-# field mappings.
+# Cross-domain integration:
+#   - DNS blocklist → threat intel: blocked domain IPs are auto-injected
+#     into the kernel threat intel map (with TTL-aware expiry)
+#   - Threat intel → domain reputation: IOC matches feed a CtiMatch
+#     factor (weight 0.8) into reputation scoring → auto-block
+#   - Threat intel → IPS: matched IPs can be auto-blacklisted
 #
 # Usage:
 #   sudo ebpfsentinel-agent --config config/examples/threatintel.yaml
@@ -27,50 +29,52 @@ agent:
 threatintel:
   enabled: true
 
-  # Mode controls enforcement:
-  #   "alert"      — log IOC matches only
-  #   "block"      — drop traffic to/from IOC-listed IPs
-  #   "quarantine" — move matching traffic to an isolation VLAN via
-  #                  bpf_skb_vlan_push (requires quarantine_vlan_id below)
+  # Mode controls kernel-side enforcement:
+  #   "alert" — TC_ACT_OK (pass packet) + emit event to userspace
+  #   "block" — TC_ACT_SHOT (drop packet) + emit event to userspace
+  # Per-feed "default_action" can override this for individual feeds.
   mode: alert
-
-  # VLAN ID for quarantine mode. Traffic matching IOCs is tagged with
-  # this 802.1Q VLAN ID instead of being dropped, allowing network
-  # forensics on a dedicated isolation segment.
-  # quarantine_vlan_id: 999
 
   # ── Feeds ──────────────────────────────────────────────────────────
   #
-  # Fields:
-  #   id                    — Unique feed identifier (required, non-empty)
-  #   name                  — Human-readable feed name (required, non-empty)
-  #   url                   — Feed URL; must use http:// or https:// (required)
-  #   format                — "plaintext", "csv", "json", or "stix" (default: "plaintext")
-  #   enabled               — Whether this feed is active (default: true)
-  #   refresh_interval_secs — How often to re-fetch (default: 3600 = 1 hour)
-  #   max_iocs              — Maximum IOCs to load from this feed (default: 500000)
-  #   default_action        — Per-feed action override: "alert" or "block"
-  #   min_confidence        — Minimum confidence score to accept (0 = accept all)
-  #   auth_header           — Optional HTTP auth header (e.g., "X-OTX-API-KEY: abc123")
+  # Each feed is fetched independently. A failed fetch skips that feed
+  # without blocking others. Fetcher enforces:
+  #   - 30-second HTTP timeout
+  #   - 100 MiB response size cap
+  #   - http:// or https:// only (SSRF prevention)
   #
-  # Field mapping (for CSV/JSON feeds):
-  #   ip_field              — Column/field name for the IP address
-  #   confidence_field      — Column/field name for the confidence score
-  #   category_field        — Column/field name for the threat category
-  #   separator             — Field separator for CSV (default: ",")
-  #   comment_prefix        — Lines starting with this are ignored (e.g., "#", ";")
-  #   skip_header           — Skip the first line (CSV column header)
+  # Required fields: id, name, url
+  # Optional fields (with defaults):
+  #   format                — "plaintext" (also: "csv", "json")
+  #   enabled               — true
+  #   refresh_interval_secs — 3600 (1 hour)
+  #   max_iocs              — 500000
+  #   default_action        — inherits global mode
+  #   min_confidence        — 0 (accept all)
+  #   auth_header           — none
+  #
+  # Field mapping (CSV/JSON only):
+  #   ip_field              — column/field name for IP (default: "ip")
+  #   confidence_field      — column/field for confidence score
+  #   category_field        — column/field for threat category
+  #   separator             — CSV separator (default: ",")
+  #   comment_prefix        — lines starting with this are skipped
+  #   skip_header           — skip first line (CSV header)
 
   feeds:
     # ── Plaintext feeds ────────────────────────────────────────────
-    # Spamhaus DROP — well-known IP blocklist (one CIDR per line)
+    #
+    # Format: one IP per line, comment lines skipped.
+    # All IOCs receive confidence=100 (no confidence field).
+    # CIDR entries (containing "/") are skipped.
+
+    # Spamhaus DROP — well-known IP blocklist
     - id: spamhaus-drop
       name: Spamhaus DROP
       url: https://www.spamhaus.org/drop/drop.txt
       format: plaintext
-      comment_prefix: ";"
-      refresh_interval_secs: 86400 # Daily
-      min_confidence: 0 # Accept all (no confidence field)
+      comment_prefix: ";"           # Spamhaus uses ; for comments
+      refresh_interval_secs: 86400  # Daily
 
     # Spamhaus EDROP — extended drop list
     - id: spamhaus-edrop
@@ -85,26 +89,49 @@ threatintel:
       name: Emerging Threats Compromised
       url: https://rules.emergingthreats.net/blockrules/compromised-ips.txt
       format: plaintext
-      refresh_interval_secs: 3600 # Hourly
-      default_action: alert
+      refresh_interval_secs: 3600   # Hourly
+      default_action: alert         # Alert only, don't block
 
     # ── CSV feed ───────────────────────────────────────────────────
-    # Abuse.ch Feodo Tracker (CSV with header)
+    #
+    # Format: structured columns. Use field mapping to tell the parser
+    # which columns contain the IP, confidence, and category.
+    #
+    # Example CSV from Feodo Tracker:
+    #   first_seen_utc,dst_ip,dst_port,c2_status,last_online,malware
+    #   2024-01-15,198.51.100.1,443,online,2024-01-16,Emotet
+    #
+    # → ip_field: "dst_ip"  → extracts 198.51.100.1
+    # → category_field: "malware" → maps "Emotet" to ThreatType::Malware
+    # → skip_header: true   → skips the header line
+
     - id: feodo-tracker
       name: Feodo Tracker Botnet C2
       url: https://feodotracker.abuse.ch/downloads/ipblocklist.csv
       format: csv
-      ip_field: dst_ip
-      confidence_field: confidence
-      category_field: malware
+      ip_field: dst_ip              # Column containing the IP address
+      category_field: malware       # Column containing threat category
       separator: ","
-      skip_header: true
-      min_confidence: 75
-      refresh_interval_secs: 1800 # Every 30 minutes
-      default_action: block
+      skip_header: true             # First line is column headers
+      min_confidence: 75            # Only accept IOCs with confidence >= 75
+      refresh_interval_secs: 1800   # Every 30 minutes
+      default_action: block         # Override global mode to block for this feed
 
     # ── JSON feed ──────────────────────────────────────────────────
-    # AlienVault OTX (requires API key)
+    #
+    # Format: expects a top-level JSON array of objects.
+    # Field mapping extracts IP, confidence, and category from each object.
+    #
+    # Example JSON from OTX:
+    #   [
+    #     {"indicator": "198.51.100.1", "type": "IPv4", "pulse_count": 12},
+    #     {"indicator": "203.0.113.55", "type": "IPv4", "pulse_count": 5}
+    #   ]
+    #
+    # → ip_field: "indicator"        → extracts the IP
+    # → confidence_field: "pulse_count" → uses pulse count as confidence
+    # → category_field: "type"       → maps to threat type
+
     - id: otx-malicious-ips
       name: AlienVault OTX Malicious IPs
       url: https://otx.alienvault.com/api/v1/indicators/export
@@ -112,19 +139,52 @@ threatintel:
       ip_field: indicator
       confidence_field: pulse_count
       category_field: type
-      min_confidence: 3
+      min_confidence: 3             # At least 3 pulses
       refresh_interval_secs: 3600
       auth_header: "X-OTX-API-KEY: your-otx-api-key-here"
-      max_iocs: 100000
+      max_iocs: 100000              # Limit to 100K IOCs from this feed
 
-    # ── STIX feed ──────────────────────────────────────────────────
-    # STIX 2.1 threat intelligence bundle
-    - id: stix-enterprise
-      name: Enterprise STIX Feed
-      url: https://taxii.example.com/api/collections/indicators/objects
-      format: stix
-      refresh_interval_secs: 7200 # Every 2 hours
-      auth_header: "Authorization: Bearer your-taxii-token-here"
-      min_confidence: 50
-      max_iocs: 200000
-      default_action: block
+    # ── Internal / custom feed ────────────────────────────────────
+    #
+    # You can point to any internal SOC feed. Use auth_header for
+    # bearer tokens, API keys, or basic auth.
+
+    # - id: internal-soc
+    #   name: Internal SOC Feed
+    #   url: https://soc.internal.corp/api/iocs.csv
+    #   format: csv
+    #   ip_field: ip_address
+    #   confidence_field: score
+    #   category_field: classification
+    #   separator: ";"
+    #   skip_header: true
+    #   min_confidence: 50
+    #   auth_header: "Authorization: Bearer your-internal-token"
+    #   refresh_interval_secs: 300  # Every 5 minutes for fast response
+
+# ── DNS Integration (cross-domain) ──────────────────────────────────
+#
+# When dns.blocklist blocks a domain, its resolved IPs are automatically
+# injected into the THREATINTEL_IOCS kernel map. This bridges domain-
+# level intelligence with IP-level kernel enforcement.
+#
+# Example: if *.malware-cdn.com resolves to 198.51.100.42, that IP is
+# added to the threat intel map. When the DNS TTL expires, the IP is
+# removed automatically.
+#
+# To enable this, add a dns section:
+
+# dns:
+#   blocklist:
+#     - domain: "*.malware-cdn.com"
+#       action: block
+#     - domain: "*.phishing-kit.net"
+#       action: block
+#   feeds:
+#     - name: abuse-ch-domains
+#       url: "https://urlhaus.abuse.ch/downloads/hostfile/"
+#       format: plaintext
+#       refresh_interval: 3600
+#   reputation:
+#     enabled: true
+#     auto_block_threshold: 0.8   # Auto-block domains above this score

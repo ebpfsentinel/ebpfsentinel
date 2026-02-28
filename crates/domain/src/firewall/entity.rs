@@ -2,8 +2,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::entity::{Protocol, RuleId};
 use ebpf_common::firewall::{
-    ACTION_DROP, ACTION_LOG, ACTION_PASS, FirewallRuleEntry, FirewallRuleEntryV6, MATCH_DST_IP,
-    MATCH_DST_PORT, MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT,
+    ACTION_DROP, ACTION_LOG, ACTION_PASS, CT_MATCH_ESTABLISHED, CT_MATCH_INVALID, CT_MATCH_NEW,
+    CT_MATCH_RELATED, FirewallRuleEntry, FirewallRuleEntryV6, ICMP_WILDCARD, MATCH_CT_STATE,
+    MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MATCH2_DSCP,
+    MATCH2_DST_MAC, MATCH2_ICMP_CODE, MATCH2_ICMP_TYPE, MATCH2_NEGATE_DST, MATCH2_NEGATE_SRC,
+    MATCH2_SRC_MAC, MATCH2_TCP_FLAGS, ROUTE_ACTION_DUP_TO, ROUTE_ACTION_NONE,
+    ROUTE_ACTION_REPLY_TO, ROUTE_ACTION_ROUTE_TO,
 };
 
 use super::error::FirewallError;
@@ -15,6 +19,19 @@ pub enum FirewallAction {
     Allow,
     Deny,
     Log,
+}
+
+// ── Routing actions (Epic 29) ──────────────────────────────────────
+
+/// Policy routing action attached to a firewall rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RouteAction {
+    /// Force route to a specific interface (by ifindex).
+    RouteTo { ifindex: u16 },
+    /// Store ingress interface for stateful reply routing.
+    ReplyTo,
+    /// Mirror (duplicate) packet to another interface.
+    DupTo { ifindex: u16 },
 }
 
 // ── IP Network ──────────────────────────────────────────────────────
@@ -187,6 +204,86 @@ fn apply_mask_v6(addr: &[u32; 4], mask: &[u32; 4]) -> [u32; 4] {
     ]
 }
 
+// ── TCP flags ───────────────────────────────────────────────────
+
+/// TCP flags match specification (e.g. `flags S/SA`).
+///
+/// `match_bits`: flags that must be SET.
+/// `mask_bits`: which flag bits to inspect.
+/// Example: `S/SA` → match=SYN(0x02), mask=SYN|ACK(0x12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TcpFlagsMatch {
+    pub match_bits: u8,
+    pub mask_bits: u8,
+}
+
+/// TCP flag bit constants.
+pub const TCP_FLAG_FIN: u8 = 0x01;
+pub const TCP_FLAG_SYN: u8 = 0x02;
+pub const TCP_FLAG_RST: u8 = 0x04;
+pub const TCP_FLAG_PSH: u8 = 0x08;
+pub const TCP_FLAG_ACK: u8 = 0x10;
+pub const TCP_FLAG_URG: u8 = 0x20;
+
+/// Parse a TCP flags specification like `"S/SA"` or `"SA/SA"`.
+///
+/// Format: `match_flags/mask_flags` where each character is one of
+/// `F`(FIN), `S`(SYN), `R`(RST), `P`(PSH), `A`(ACK), `U`(URG).
+pub fn parse_tcp_flags(s: &str) -> Result<TcpFlagsMatch, FirewallError> {
+    let (match_str, mask_str) = s.split_once('/').ok_or(FirewallError::InvalidTcpFlags {
+        value: s.to_string(),
+    })?;
+    let match_bits = flags_str_to_bits(match_str).ok_or(FirewallError::InvalidTcpFlags {
+        value: s.to_string(),
+    })?;
+    let mask_bits = flags_str_to_bits(mask_str).ok_or(FirewallError::InvalidTcpFlags {
+        value: s.to_string(),
+    })?;
+    Ok(TcpFlagsMatch {
+        match_bits,
+        mask_bits,
+    })
+}
+
+fn flags_str_to_bits(s: &str) -> Option<u8> {
+    let mut bits = 0u8;
+    for c in s.chars() {
+        bits |= match c {
+            'F' | 'f' => TCP_FLAG_FIN,
+            'S' | 's' => TCP_FLAG_SYN,
+            'R' | 'r' => TCP_FLAG_RST,
+            'P' | 'p' => TCP_FLAG_PSH,
+            'A' | 'a' => TCP_FLAG_ACK,
+            'U' | 'u' => TCP_FLAG_URG,
+            _ => return None,
+        };
+    }
+    Some(bits)
+}
+
+// ── MAC address ─────────────────────────────────────────────────
+
+/// A 6-byte MAC address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacAddress(pub [u8; 6]);
+
+/// Parse a MAC address string like `"aa:bb:cc:dd:ee:ff"`.
+pub fn parse_mac_address(s: &str) -> Result<MacAddress, FirewallError> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 6 {
+        return Err(FirewallError::InvalidMacAddress {
+            value: s.to_string(),
+        });
+    }
+    let mut bytes = [0u8; 6];
+    for (i, part) in parts.iter().enumerate() {
+        bytes[i] = u8::from_str_radix(part, 16).map_err(|_| FirewallError::InvalidMacAddress {
+            value: s.to_string(),
+        })?;
+    }
+    Ok(MacAddress(bytes))
+}
+
 // ── Port range ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,6 +323,7 @@ pub enum Scope {
 
 // ── Firewall rule ───────────────────────────────────────────────────
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirewallRule {
     pub id: RuleId,
@@ -241,6 +339,71 @@ pub struct FirewallRule {
     /// Optional 802.1Q VLAN ID filter (None = match any VLAN, Some(vid) = exact).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vlan_id: Option<u16>,
+    /// Optional alias reference for source IP matching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_alias: Option<String>,
+    /// Optional alias reference for destination IP matching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_alias: Option<String>,
+    /// Optional alias reference for source port matching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_port_alias: Option<String>,
+    /// Optional alias reference for destination port matching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_port_alias: Option<String>,
+    /// Conntrack state filter (None = match any state).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ct_states: Option<Vec<ConnState>>,
+    // ── Extended fields (Epics 24-31) ───────────────────────────────
+    /// TCP flags match specification (e.g. `S/SA`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcp_flags: Option<TcpFlagsMatch>,
+    /// ICMP type to match (None = wildcard).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icmp_type: Option<u8>,
+    /// ICMP code to match (None = wildcard).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icmp_code: Option<u8>,
+    /// Negate source IP match (match if CIDR does NOT match).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub negate_src: bool,
+    /// Negate destination IP match (match if CIDR does NOT match).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub negate_dst: bool,
+    /// DSCP value to match (None = wildcard, 0-63).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dscp_match: Option<u8>,
+    /// DSCP value to mark on matched packets (None = no marking, 0-63).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dscp_mark: Option<u8>,
+    /// Maximum concurrent states for this rule (None = unlimited).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_states: Option<u16>,
+    /// Source MAC address for L2 matching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_mac: Option<MacAddress>,
+    /// Destination MAC address for L2 matching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_mac: Option<MacAddress>,
+    /// Schedule name for time-based activation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    /// System-generated rule flag (anti-lockout, etc). Cannot be deleted via API.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub system: bool,
+    /// Policy routing action (route-to, reply-to, dup-to).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_action: Option<RouteAction>,
+}
+
+/// Connection state names for stateful rule matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnState {
+    New,
+    Established,
+    Related,
+    Invalid,
 }
 
 impl FirewallRule {
@@ -256,7 +419,7 @@ impl FirewallRule {
             .validate()
             .map_err(|reason| FirewallError::InvalidRuleId { reason })?;
 
-        if self.priority == 0 {
+        if self.priority == 0 && !self.system {
             return Err(FirewallError::InvalidPriority);
         }
 
@@ -287,6 +450,36 @@ impl FirewallRule {
             return Err(FirewallError::InvalidVlanId { vlan_id: vid });
         }
 
+        // TCP flags only valid with TCP protocol
+        if self.tcp_flags.is_some() && self.protocol != Protocol::Tcp {
+            return Err(FirewallError::TcpFlagsWithNonTcp);
+        }
+
+        // ICMP type/code only valid with ICMP protocol
+        if (self.icmp_type.is_some() || self.icmp_code.is_some()) && self.protocol != Protocol::Icmp
+        {
+            return Err(FirewallError::IcmpFieldsWithNonIcmp);
+        }
+
+        // ICMP type/code and port ranges are mutually exclusive
+        if (self.icmp_type.is_some() || self.icmp_code.is_some())
+            && (self.src_port.is_some() || self.dst_port.is_some())
+        {
+            return Err(FirewallError::IcmpWithPorts);
+        }
+
+        // DSCP must be 0-63
+        if let Some(dscp) = self.dscp_match
+            && dscp > 63
+        {
+            return Err(FirewallError::InvalidDscp { value: dscp });
+        }
+        if let Some(dscp) = self.dscp_mark
+            && dscp > 63
+        {
+            return Err(FirewallError::InvalidDscp { value: dscp });
+        }
+
         Ok(())
     }
 
@@ -295,6 +488,7 @@ impl FirewallRule {
     /// - Wildcard fields have their `MATCH_*` flag unset.
     /// - CIDR addresses are pre-masked (`addr & mask`).
     /// - Port ranges encode both start and end.
+    #[allow(clippy::too_many_lines)]
     pub fn to_ebpf_entry(&self) -> FirewallRuleEntry {
         let mut flags: u8 = 0;
 
@@ -342,6 +536,67 @@ impl FirewallRule {
             flags |= MATCH_PROTO;
         }
 
+        // Build conntrack state mask
+        let ct_state_mask = build_ct_state_mask(self.ct_states.as_ref());
+        if ct_state_mask != 0 {
+            flags |= MATCH_CT_STATE;
+        }
+
+        // Extended match_flags2
+        let mut flags2: u8 = 0;
+        let (tcp_flags_match, tcp_flags_mask) = match self.tcp_flags {
+            Some(tf) => {
+                flags2 |= MATCH2_TCP_FLAGS;
+                (tf.match_bits, tf.mask_bits)
+            }
+            None => (0, 0),
+        };
+
+        let icmp_type = match self.icmp_type {
+            Some(t) => {
+                flags2 |= MATCH2_ICMP_TYPE;
+                t
+            }
+            None => ICMP_WILDCARD,
+        };
+        let icmp_code = match self.icmp_code {
+            Some(c) => {
+                flags2 |= MATCH2_ICMP_CODE;
+                c
+            }
+            None => ICMP_WILDCARD,
+        };
+
+        if self.negate_src {
+            flags2 |= MATCH2_NEGATE_SRC;
+        }
+        if self.negate_dst {
+            flags2 |= MATCH2_NEGATE_DST;
+        }
+
+        let dscp_match_val = match self.dscp_match {
+            Some(d) => {
+                flags2 |= MATCH2_DSCP;
+                d
+            }
+            None => 0xFF,
+        };
+
+        let src_mac = match self.src_mac {
+            Some(m) => {
+                flags2 |= MATCH2_SRC_MAC;
+                m.0
+            }
+            None => [0; 6],
+        };
+        let dst_mac = match self.dst_mac {
+            Some(m) => {
+                flags2 |= MATCH2_DST_MAC;
+                m.0
+            }
+            None => [0; 6],
+        };
+
         FirewallRuleEntry {
             src_ip,
             src_mask,
@@ -355,13 +610,28 @@ impl FirewallRule {
             match_flags: flags,
             vlan_id: self.vlan_id.unwrap_or(0),
             action: action_to_u8(self.action),
-            _padding: [0; 3],
+            ct_state_mask,
+            src_set_id: 0,
+            dst_set_id: 0,
+            tcp_flags_match,
+            tcp_flags_mask,
+            icmp_type,
+            icmp_code,
+            match_flags2: flags2,
+            dscp_match: dscp_match_val,
+            max_states: self.max_states.unwrap_or(0),
+            src_mac,
+            dst_mac,
+            dscp_mark: self.dscp_mark.unwrap_or(0xFF),
+            route_action: route_action_to_u8(self.route_action),
+            route_ifindex: route_action_ifindex(self.route_action),
         }
     }
 
     /// Convert to an array-based IPv6 eBPF rule entry.
     ///
     /// Same semantics as `to_ebpf_entry()` but with 128-bit addresses.
+    #[allow(clippy::too_many_lines)]
     pub fn to_ebpf_entry_v6(&self) -> FirewallRuleEntryV6 {
         let mut flags: u8 = 0;
 
@@ -411,6 +681,67 @@ impl FirewallRule {
             flags |= MATCH_PROTO;
         }
 
+        // Build conntrack state mask
+        let ct_state_mask = build_ct_state_mask(self.ct_states.as_ref());
+        if ct_state_mask != 0 {
+            flags |= MATCH_CT_STATE;
+        }
+
+        // Extended match_flags2
+        let mut flags2: u8 = 0;
+        let (tcp_flags_match, tcp_flags_mask) = match self.tcp_flags {
+            Some(tf) => {
+                flags2 |= MATCH2_TCP_FLAGS;
+                (tf.match_bits, tf.mask_bits)
+            }
+            None => (0, 0),
+        };
+
+        let icmp_type = match self.icmp_type {
+            Some(t) => {
+                flags2 |= MATCH2_ICMP_TYPE;
+                t
+            }
+            None => ICMP_WILDCARD,
+        };
+        let icmp_code = match self.icmp_code {
+            Some(c) => {
+                flags2 |= MATCH2_ICMP_CODE;
+                c
+            }
+            None => ICMP_WILDCARD,
+        };
+
+        if self.negate_src {
+            flags2 |= MATCH2_NEGATE_SRC;
+        }
+        if self.negate_dst {
+            flags2 |= MATCH2_NEGATE_DST;
+        }
+
+        let dscp_match_val = match self.dscp_match {
+            Some(d) => {
+                flags2 |= MATCH2_DSCP;
+                d
+            }
+            None => 0xFF,
+        };
+
+        let src_mac = match self.src_mac {
+            Some(m) => {
+                flags2 |= MATCH2_SRC_MAC;
+                m.0
+            }
+            None => [0; 6],
+        };
+        let dst_mac = match self.dst_mac {
+            Some(m) => {
+                flags2 |= MATCH2_DST_MAC;
+                m.0
+            }
+            None => [0; 6],
+        };
+
         FirewallRuleEntryV6 {
             src_addr,
             src_mask,
@@ -424,7 +755,21 @@ impl FirewallRule {
             match_flags: flags,
             vlan_id: self.vlan_id.unwrap_or(0),
             action: action_to_u8(self.action),
-            _padding: [0; 3],
+            ct_state_mask,
+            src_set_id: 0,
+            dst_set_id: 0,
+            tcp_flags_match,
+            tcp_flags_mask,
+            icmp_type,
+            icmp_code,
+            match_flags2: flags2,
+            dscp_match: dscp_match_val,
+            max_states: self.max_states.unwrap_or(0),
+            src_mac,
+            dst_mac,
+            dscp_mark: self.dscp_mark.unwrap_or(0xFF),
+            route_action: route_action_to_u8(self.route_action),
+            route_ifindex: route_action_ifindex(self.route_action),
         }
     }
 }
@@ -436,6 +781,41 @@ fn action_to_u8(action: FirewallAction) -> u8 {
         FirewallAction::Deny => ACTION_DROP,
         FirewallAction::Log => ACTION_LOG,
     }
+}
+
+/// Map an optional `RouteAction` to the eBPF route action constant.
+fn route_action_to_u8(ra: Option<RouteAction>) -> u8 {
+    match ra {
+        None => ROUTE_ACTION_NONE,
+        Some(RouteAction::RouteTo { .. }) => ROUTE_ACTION_ROUTE_TO,
+        Some(RouteAction::ReplyTo) => ROUTE_ACTION_REPLY_TO,
+        Some(RouteAction::DupTo { .. }) => ROUTE_ACTION_DUP_TO,
+    }
+}
+
+/// Extract the target ifindex from a `RouteAction` (0 if none).
+fn route_action_ifindex(ra: Option<RouteAction>) -> u16 {
+    match ra {
+        Some(RouteAction::RouteTo { ifindex } | RouteAction::DupTo { ifindex }) => ifindex,
+        _ => 0,
+    }
+}
+
+/// Build a bitmask from the optional conntrack states list.
+fn build_ct_state_mask(ct_states: Option<&Vec<ConnState>>) -> u8 {
+    let Some(states) = ct_states else {
+        return 0;
+    };
+    let mut mask = 0u8;
+    for state in states {
+        mask |= match state {
+            ConnState::New => CT_MATCH_NEW,
+            ConnState::Established => CT_MATCH_ESTABLISHED,
+            ConnState::Related => CT_MATCH_RELATED,
+            ConnState::Invalid => CT_MATCH_INVALID,
+        };
+    }
+    mask
 }
 
 // ── Packet info (evaluation input) ──────────────────────────────────
@@ -690,6 +1070,24 @@ mod tests {
             scope: Scope::Global,
             enabled: true,
             vlan_id: None,
+            src_alias: None,
+            dst_alias: None,
+            src_port_alias: None,
+            dst_port_alias: None,
+            ct_states: None,
+            tcp_flags: None,
+            icmp_type: None,
+            icmp_code: None,
+            negate_src: false,
+            negate_dst: false,
+            dscp_match: None,
+            dscp_mark: None,
+            max_states: None,
+            src_mac: None,
+            dst_mac: None,
+            schedule: None,
+            system: false,
+            route_action: None,
         }
     }
 

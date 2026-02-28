@@ -36,6 +36,12 @@ impl IdsAppService {
         }
     }
 
+    /// Set the eBPF map port and perform an initial sync.
+    pub fn set_map_port(&mut self, port: Box<dyn IdsMapPort + Send>) {
+        self.map_port = Some(port);
+        self.sync_ebpf_maps();
+    }
+
     pub fn mode(&self) -> DomainMode {
         self.mode
     }

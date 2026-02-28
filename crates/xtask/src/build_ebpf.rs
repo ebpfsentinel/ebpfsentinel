@@ -9,6 +9,10 @@ const EBPF_PROGRAMS: &[&str] = &[
     "tc-dns",
     "tc-ids",
     "tc-threatintel",
+    "tc-conntrack",
+    "tc-nat-ingress",
+    "tc-nat-egress",
+    "tc-scrub",
     "uprobe-dlp",
 ];
 

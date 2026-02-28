@@ -1,13 +1,19 @@
 # eBPFsentinel — Firewall Configuration Example
 # ===============================================
 #
-# L3/L4 packet filtering via XDP with two-phase matching:
+# Stateful L3/L4 packet filtering via XDP with three-phase matching:
+#   0. Conntrack fast-path (O(1)) — ESTABLISHED/RELATED connections bypass rules entirely
 #   1. LPM Trie (O(log n)) for CIDR-only rules (source/destination subnet)
-#   2. Linear scan for rules with port/protocol/VLAN filters (priority order)
+#   2. Linear scan for rules with port/protocol/VLAN/ct_state/IP set filters (priority order)
 #
 # The first matching rule wins. If no rule matches, the default_policy applies.
 #
 # Advanced features:
+#   - Connection tracking: TCP state machine with configurable timeouts
+#   - IP set aliases: named groups of IPs/CIDRs for reuse (GeoIP, blocklists, URL tables)
+#   - ct_state matching: filter by connection state (new, established, related, invalid)
+#   - Security zones: group interfaces with inter-zone policies
+#   - NAT: SNAT/DNAT/masquerade via TC classifiers (tc-nat-ingress, tc-nat-egress)
 #   - Tail-call chaining: firewall → rate limiter via PROG_ARRAY
 #   - XDP metadata: matched rule ID forwarded to TC programs via bpf_xdp_adjust_meta
 #   - Packet mirroring: suspicious traffic mirrored to DEVMAP monitoring port
@@ -22,6 +28,14 @@
 agent:
   interfaces: [eth0]
 
+# ── Connection Tracking ──────────────────────────────────────────────
+# Required for stateful rules (ct_state matching) and NAT.
+
+conntrack:
+  enabled: true
+
+# ── Firewall ─────────────────────────────────────────────────────────
+
 firewall:
   enabled: true
 
@@ -34,6 +48,52 @@ firewall:
   #   "pass" — allow unmatched traffic (allowlist approach: deny what you specify)
   #   "drop" — deny unmatched traffic (blocklist approach: allow what you specify)
   default_policy: drop
+
+  # ── Aliases ────────────────────────────────────────────────────────
+  #
+  # Named groups of IPs, CIDRs, or ports reusable across rules.
+  # Types: ip_set, port_set, nested, url_table, geoip, dynamic_dns
+  #
+  # Small aliases are expanded inline into rule entries.
+  # Large aliases (GeoIP, blocklists) use kernel IP set HashMap for O(1) lookup.
+
+  aliases:
+    # Static IP set — RFC 1918 private networks
+    rfc1918:
+      type: ip_set
+      values: ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
+
+    # Web server cluster
+    web_servers:
+      type: ip_set
+      values: ["10.0.1.10", "10.0.1.11", "10.0.1.12"]
+
+    # Port group
+    http_ports:
+      type: port_set
+      values: ["80-443", 8080, 8443]
+
+    # Nested alias (combines other aliases)
+    internal_nets:
+      type: nested
+      aliases: [rfc1918, web_servers]
+
+    # URL table — fetched periodically from remote source
+    blocklist:
+      type: url_table
+      url: "https://www.spamhaus.org/drop/drop.txt"
+      refresh_interval: 3600
+
+    # GeoIP — resolve country codes to IP sets (requires MaxMind database)
+    # blocked_countries:
+    #   type: geoip
+    #   country_codes: [CN, RU, KP]
+
+    # Dynamic DNS — resolve hostnames periodically
+    # vpn_gateway:
+    #   type: dynamic_dns
+    #   hostnames: ["vpn.example.com"]
+    #   refresh_interval: 300
 
   # ── Rules ──────────────────────────────────────────────────────────
   #
@@ -49,32 +109,66 @@ firewall:
   #                explicit ({start: 1024, end: 65535}); omit to match any
   #   dst_port   — Destination port (same formats as src_port)
   #   vlan_id    — 802.1Q VLAN ID (1-4094); omit to match any VLAN
+  #   state      — Conntrack state filter: [new, established, related, invalid]
+  #   src_alias  — Source IP set alias name; omit to match any
+  #   dst_alias  — Destination IP set alias name; omit to match any
   #   scope      — "global", interface name, or {interface: "eth0"} / {namespace: "prod"}
+  #
+  # Extended fields (advanced):
+  #   flags              — TCP flags specification (e.g. "S/SA" = SYN set, SYN+ACK mask)
+  #   icmp_type          — ICMP type to match (0-255)
+  #   icmp_code          — ICMP code to match (0-255)
+  #   negate_source      — Invert source IP match (match everything except src_ip)
+  #   negate_destination — Invert destination IP match
+  #   dscp_match         — Match packets with this DSCP value (0-63)
+  #   dscp_mark          — Rewrite DSCP value on matched packets (0-63)
+  #   max_states         — Maximum concurrent conntrack states for this rule
+  #   src_mac            — Source MAC address filter (e.g. "aa:bb:cc:dd:ee:ff")
+  #   dst_mac            — Destination MAC address filter
+  #   schedule           — Schedule name for time-based rule activation
+  #   src_port_alias     — Source port set alias name
+  #   dst_port_alias     — Destination port set alias name
   #
   # Maximum 4096 rules per address family (IPv4 / IPv6).
   # CIDR-only rules are automatically loaded into LPM Trie maps for O(log n) lookup.
-  # Rules with port/protocol/VLAN filters use the linear array scan.
+  # Rules with port/protocol/VLAN/state filters use the linear array scan.
 
   rules:
-    # ── Web traffic ────────────────────────────────────────────────
-    # Allow inbound HTTP/HTTPS to the web server subnet
+    # ── Stateful baseline ────────────────────────────────────────────
+    # Allow all established/related connections (fast-path in XDP conntrack)
+    - id: fw-allow-established
+      priority: 1
+      action: allow
+      state: [established, related]
+
+    # Drop invalid packets (e.g. ACK without prior SYN)
+    - id: fw-drop-invalid
+      priority: 2
+      action: deny
+      state: [invalid]
+
+    # ── Web traffic (using aliases) ──────────────────────────────────
+    # Allow new inbound HTTP/HTTPS to the web server cluster
     - id: fw-allow-web
       priority: 10
       action: allow
       protocol: tcp
-      dst_ip: "10.0.1.0/24"
+      src_alias: rfc1918
+      dst_alias: web_servers
       dst_port: "80-443"
+      state: [new]
       scope:
         interface: eth0
 
-    # ── SSH access control ─────────────────────────────────────────
-    # Allow SSH only from the management network
+    # ── SSH access control ───────────────────────────────────────────
+    # Allow new SSH only from the management network
     - id: fw-allow-ssh-mgmt
       priority: 20
       action: allow
       protocol: tcp
       src_ip: "192.168.100.0/24"
       dst_port: 22
+      state: [new]
       scope: global
 
     # Deny SSH from everywhere else (IPv4)
@@ -95,7 +189,7 @@ firewall:
       dst_port: 22
       scope: global
 
-    # ── IPv6 examples ──────────────────────────────────────────────
+    # ── IPv6 examples ────────────────────────────────────────────────
     # Allow traffic from a specific IPv6 documentation prefix
     - id: fw-allow-v6-internal
       priority: 30
@@ -112,7 +206,7 @@ firewall:
       src_ip: "fe80::/10"
       scope: global
 
-    # ── VLAN isolation ─────────────────────────────────────────────
+    # ── VLAN isolation ───────────────────────────────────────────────
     # Allow HTTPS management traffic on VLAN 10 (management VLAN)
     - id: fw-allow-mgmt-vlan
       priority: 40
@@ -131,13 +225,14 @@ firewall:
       vlan_id: 200
       scope: global
 
-    # ── DNS ────────────────────────────────────────────────────────
+    # ── DNS ──────────────────────────────────────────────────────────
     # Allow outbound DNS (TCP + UDP)
     - id: fw-allow-dns-udp
       priority: 60
       action: allow
       protocol: udp
       dst_port: 53
+      state: [new]
       scope: global
 
     - id: fw-allow-dns-tcp
@@ -145,9 +240,18 @@ firewall:
       action: allow
       protocol: tcp
       dst_port: 53
+      state: [new]
       scope: global
 
-    # ── Monitoring ─────────────────────────────────────────────────
+    # ── Blocklist (using URL table alias) ────────────────────────────
+    # Deny traffic from known bad sources
+    - id: fw-deny-blocklist
+      priority: 5
+      action: deny
+      src_alias: blocklist
+      scope: global
+
+    # ── Monitoring ───────────────────────────────────────────────────
     # Log all ICMP traffic (useful for diagnostics)
     - id: fw-log-icmp
       priority: 100
@@ -155,7 +259,7 @@ firewall:
       protocol: icmp
       scope: global
 
-    # ── Namespace-scoped rule ──────────────────────────────────────
+    # ── Namespace-scoped rule ────────────────────────────────────────
     # Allow Kubernetes pod-to-pod traffic in the "production" namespace
     - id: fw-allow-prod-pods
       priority: 70
@@ -163,5 +267,137 @@ firewall:
       protocol: any
       src_ip: "10.244.0.0/16"
       dst_ip: "10.244.0.0/16"
+      state: [new]
       scope:
         namespace: production
+
+    # ── Advanced rule examples ─────────────────────────────────────
+
+    # TCP flags: detect and log SYN scans (SYN set, SYN+ACK mask)
+    - id: fw-log-syn-scan
+      priority: 80
+      action: log
+      protocol: tcp
+      flags: "S/SA"
+      state: [new]
+      scope: global
+
+    # ICMP type/code: allow only echo request (type 8) and echo reply (type 0)
+    - id: fw-allow-ping
+      priority: 81
+      action: allow
+      protocol: icmp
+      icmp_type: 8
+      icmp_code: 0
+      scope: global
+
+    # Negate: deny everything EXCEPT the management subnet
+    - id: fw-deny-non-mgmt
+      priority: 82
+      action: deny
+      protocol: tcp
+      src_ip: "192.168.100.0/24"
+      negate_source: true
+      dst_port: 443
+      scope:
+        interface: eth0
+
+    # DSCP matching and marking: prioritize VoIP traffic (EF = 46)
+    - id: fw-mark-voip
+      priority: 83
+      action: allow
+      protocol: udp
+      dst_port: "5060-5061"
+      dscp_mark: 46
+      scope: global
+
+    # DSCP matching: log traffic marked as best-effort (0)
+    - id: fw-log-best-effort
+      priority: 84
+      action: log
+      protocol: any
+      dscp_match: 0
+      scope: global
+
+    # Max states: limit concurrent connections per rule
+    - id: fw-allow-smtp-limited
+      priority: 85
+      action: allow
+      protocol: tcp
+      dst_port: 25
+      state: [new]
+      max_states: 100
+      scope: global
+
+    # MAC address filtering: allow traffic only from a known server
+    - id: fw-allow-known-mac
+      priority: 86
+      action: allow
+      protocol: any
+      src_mac: "aa:bb:cc:dd:ee:ff"
+      dst_ip: "10.0.1.0/24"
+      scope:
+        interface: eth1
+
+    # Port alias: use a named port group instead of inline port range
+    - id: fw-allow-http-alias
+      priority: 87
+      action: allow
+      protocol: tcp
+      dst_port_alias: http_ports
+      state: [new]
+      scope: global
+
+    # Schedule-based rule: allow access only during business hours
+    - id: fw-allow-business-hours
+      priority: 88
+      action: allow
+      protocol: tcp
+      src_ip: "10.0.0.0/8"
+      dst_port: "80-443"
+      state: [new]
+      schedule: business_hours
+      scope: global
+
+  # ── Schedules ──────────────────────────────────────────────────
+  #
+  # Named time-based activation windows for rules.
+  # Each schedule has entries with days and time ranges.
+  # Days: mon, tue, wed, thu, fri, sat, sun
+  # Time: "HH:MM-HH:MM" (24-hour format)
+
+  schedules:
+    business_hours:
+      entries:
+        - days: [mon, tue, wed, thu, fri]
+          time: "08:00-18:00"
+
+    maintenance_window:
+      entries:
+        - days: [sun]
+          time: "02:00-06:00"
+
+  # ── Anti-Lockout ───────────────────────────────────────────────
+  #
+  # Safety net: always allows management access to specified ports
+  # on specified interfaces, even if firewall rules would block it.
+  # This prevents accidentally locking yourself out of the system.
+
+  anti_lockout:
+    enabled: true
+    interfaces: [eth0]
+    ports: [22, 8080, 50051]    # SSH, REST API, gRPC
+
+  # ── Packet Scrubbing ───────────────────────────────────────────
+  #
+  # Kernel-side traffic normalization via TC classifier (tc-scrub).
+  # Fixes ambiguities in packet headers that could be exploited
+  # for evasion or fingerprinting.
+
+  scrub:
+    enabled: true
+    reassemble_fragments: true  # Reassemble IP fragments before inspection
+    min_ttl: 1                  # Enforce minimum TTL (drop TTL=0)
+    max_mss: 1460               # Clamp TCP MSS to prevent fragmentation
+    random_ip_id: true          # Randomize IP ID field (anti-fingerprint)
+    clear_df: false             # Clear Don't Fragment bit

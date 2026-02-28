@@ -1,0 +1,151 @@
+# eBPFsentinel — Security Zones Configuration Example
+# ===================================================
+#
+# Zone-based firewall segmentation. Interfaces are grouped into security
+# zones, and inter-zone policies control traffic flow between them.
+#
+# Each zone has a default policy (allow or deny) for intra-zone traffic.
+# Traffic between zones is governed by explicit zone-pair policies.
+# If no policy matches, the traffic is denied (implicit deny).
+#
+# Constraints:
+#   - Zone IDs must be unique
+#   - An interface can belong to only one zone (no overlap)
+#   - Zone pair from/to must reference existing zones
+#   - Zone pair from and to must differ (no self-referencing)
+#   - Maximum 64 zones
+#
+# Policy values: allow (aliases: permit, accept), deny (aliases: drop, reject)
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/zones.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0, eth1, eth2, eth3]
+
+# ── Security Zones ───────────────────────────────────────────────
+
+zones:
+  enabled: true
+
+  # ── Zone Definitions ─────────────────────────────────────────
+
+  zones:
+    # WAN zone — untrusted internet-facing interfaces
+    - id: wan
+      interfaces: [eth0]
+      default_policy: deny
+
+    # LAN zone — trusted internal network
+    - id: lan
+      interfaces: [eth1]
+      default_policy: allow
+
+    # DMZ zone — semi-trusted servers (web, mail, DNS)
+    - id: dmz
+      interfaces: [eth2]
+      default_policy: deny
+
+    # Management zone — out-of-band admin access
+    - id: mgmt
+      interfaces: [eth3]
+      default_policy: deny
+
+  # ── Inter-Zone Policies ──────────────────────────────────────
+  #
+  # Each policy defines whether traffic is allowed between two zones.
+  # Policies are directional: from → to.
+  # Unlisted zone pairs default to deny.
+
+  policies:
+    # LAN → WAN: allow internet access from internal network
+    - from: lan
+      to: wan
+      policy: allow
+
+    # LAN → DMZ: allow access to DMZ servers from LAN
+    - from: lan
+      to: dmz
+      policy: allow
+
+    # DMZ → WAN: allow DMZ servers to reach the internet
+    - from: dmz
+      to: wan
+      policy: allow
+
+    # MGMT → LAN: allow management access to LAN devices
+    - from: mgmt
+      to: lan
+      policy: allow
+
+    # MGMT → DMZ: allow management access to DMZ servers
+    - from: mgmt
+      to: dmz
+      policy: allow
+
+    # MGMT → WAN: allow management station internet access
+    - from: mgmt
+      to: wan
+      policy: allow
+
+    # WAN → DMZ: allow inbound to DMZ (filtered by firewall rules)
+    - from: wan
+      to: dmz
+      policy: allow
+
+    # WAN → LAN: deny direct internet access to internal network
+    - from: wan
+      to: lan
+      policy: deny
+
+    # DMZ → LAN: deny DMZ-to-LAN (prevent lateral movement)
+    - from: dmz
+      to: lan
+      policy: deny
+
+# ── Firewall (companion rules for zone-based filtering) ──────────
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: drop
+
+  rules:
+    - id: fw-allow-established
+      priority: 1
+      action: allow
+      state: [established, related]
+
+    - id: fw-drop-invalid
+      priority: 2
+      action: deny
+      state: [invalid]
+
+    # Allow inbound HTTP/HTTPS to DMZ web servers
+    - id: fw-allow-dmz-web
+      priority: 10
+      action: allow
+      protocol: tcp
+      dst_ip: "10.0.2.0/24"
+      dst_port: "80-443"
+      state: [new]
+
+    # Allow inbound SMTP to DMZ mail server
+    - id: fw-allow-dmz-smtp
+      priority: 11
+      action: allow
+      protocol: tcp
+      dst_ip: "10.0.2.25"
+      dst_port: 25
+      state: [new]
+
+    # Allow SSH from management zone only
+    - id: fw-allow-mgmt-ssh
+      priority: 20
+      action: allow
+      protocol: tcp
+      src_ip: "10.0.3.0/24"
+      dst_port: 22
+      state: [new]

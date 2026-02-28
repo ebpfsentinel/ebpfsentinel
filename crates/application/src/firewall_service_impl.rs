@@ -1,11 +1,31 @@
 use std::sync::Arc;
 
+use domain::common::entity::Protocol;
 use domain::common::entity::{DomainMode, RuleId};
 use domain::common::error::DomainError;
 use domain::firewall::engine::FirewallEngine;
-use domain::firewall::entity::{FirewallAction, FirewallRule};
+use domain::firewall::entity::{FirewallAction, FirewallRule, PortRange, Scope};
+use domain::firewall::error::FirewallError;
 use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
 use ports::secondary::metrics_port::MetricsPort;
+
+/// Anti-lockout configuration (mirrors infrastructure config).
+#[derive(Debug, Clone)]
+pub struct AntiLockoutSettings {
+    pub enabled: bool,
+    pub interfaces: Vec<String>,
+    pub ports: Vec<u16>,
+}
+
+impl Default for AntiLockoutSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interfaces: Vec::new(),
+            ports: vec![22, 8080, 50051],
+        }
+    }
+}
 
 /// Application-level firewall service.
 ///
@@ -17,6 +37,7 @@ pub struct FirewallAppService {
     metrics: Arc<dyn MetricsPort>,
     mode: DomainMode,
     enabled: bool,
+    anti_lockout: AntiLockoutSettings,
 }
 
 impl FirewallAppService {
@@ -31,6 +52,7 @@ impl FirewallAppService {
             metrics,
             mode: DomainMode::default(),
             enabled: true,
+            anti_lockout: AntiLockoutSettings::default(),
         }
     }
 
@@ -71,17 +93,32 @@ impl FirewallAppService {
         Ok(())
     }
 
-    /// Remove a firewall rule by ID. Syncs to eBPF maps and updates metrics.
+    /// Remove a firewall rule by ID. System rules (anti-lockout) cannot be removed.
     pub fn remove_rule(&mut self, id: &RuleId) -> Result<(), DomainError> {
+        // Check if the rule is a system rule (anti-lockout).
+        if let Some(rule) = self.engine.rules().iter().find(|r| r.id == *id)
+            && rule.system
+        {
+            return Err(DomainError::from(FirewallError::SystemRuleProtected {
+                id: id.0.clone(),
+            }));
+        }
         self.engine.remove_rule(id)?;
         self.sync_ebpf_maps();
         self.update_metrics();
         Ok(())
     }
 
-    /// Reload all rules atomically. Syncs to eBPF maps and updates metrics.
+    /// Set anti-lockout configuration.
+    pub fn set_anti_lockout(&mut self, settings: AntiLockoutSettings) {
+        self.anti_lockout = settings;
+    }
+
+    /// Reload all rules atomically. Injects anti-lockout rules if enabled.
     pub fn reload_rules(&mut self, rules: Vec<FirewallRule>) -> Result<(), DomainError> {
-        self.engine.reload(rules)?;
+        let mut all_rules = self.generate_anti_lockout_rules();
+        all_rules.extend(rules);
+        self.engine.reload(all_rules)?;
         self.sync_ebpf_maps();
         self.update_metrics();
         Ok(())
@@ -95,6 +132,76 @@ impl FirewallAppService {
     /// Return the number of active rules.
     pub fn rule_count(&self) -> usize {
         self.engine.rules().len()
+    }
+
+    /// Generate anti-lockout rules based on current config.
+    ///
+    /// Creates one PASS rule per (port, interface) tuple at priority 0 (highest).
+    /// These rules are marked with `system: true` so they cannot be deleted via API.
+    fn generate_anti_lockout_rules(&self) -> Vec<FirewallRule> {
+        if !self.anti_lockout.enabled {
+            return Vec::new();
+        }
+
+        let interfaces = if self.anti_lockout.interfaces.is_empty() {
+            // No specific interfaces → apply on all interfaces (Scope::Global)
+            vec![None]
+        } else {
+            self.anti_lockout
+                .interfaces
+                .iter()
+                .map(|i| Some(i.clone()))
+                .collect()
+        };
+
+        let mut rules = Vec::new();
+        for port in &self.anti_lockout.ports {
+            for iface in &interfaces {
+                let scope = match iface {
+                    Some(name) => Scope::Interface(name.clone()),
+                    None => Scope::Global,
+                };
+                let id_suffix = match iface {
+                    Some(name) => format!("anti-lockout-{name}-{port}"),
+                    None => format!("anti-lockout-{port}"),
+                };
+                rules.push(FirewallRule {
+                    id: RuleId(id_suffix),
+                    enabled: true,
+                    priority: 0,
+                    action: FirewallAction::Allow,
+                    protocol: Protocol::Tcp,
+                    src_ip: None,
+                    dst_ip: None,
+                    src_port: None,
+                    src_port_alias: None,
+                    dst_port: Some(PortRange {
+                        start: *port,
+                        end: *port,
+                    }),
+                    dst_port_alias: None,
+                    vlan_id: None,
+                    scope,
+                    ct_states: None,
+                    src_alias: None,
+                    dst_alias: None,
+                    tcp_flags: None,
+                    icmp_type: None,
+                    icmp_code: None,
+                    negate_src: false,
+                    negate_dst: false,
+                    dscp_match: None,
+                    dscp_mark: None,
+                    max_states: None,
+                    src_mac: None,
+                    dst_mac: None,
+                    schedule: None,
+                    system: true,
+                    route_action: None,
+                });
+            }
+        }
+        rules
     }
 
     /// Full-reload sync: partition rules into V4/V6, apply mode overrides,
@@ -167,11 +274,35 @@ mod tests {
             scope: Scope::Global,
             enabled: true,
             vlan_id: None,
+            src_alias: None,
+            dst_alias: None,
+            src_port_alias: None,
+            dst_port_alias: None,
+            ct_states: None,
+            tcp_flags: None,
+            icmp_type: None,
+            icmp_code: None,
+            negate_src: false,
+            negate_dst: false,
+            dscp_match: None,
+            dscp_mark: None,
+            max_states: None,
+            src_mac: None,
+            dst_mac: None,
+            schedule: None,
+            system: false,
+            route_action: None,
         }
     }
 
     fn make_service() -> FirewallAppService {
-        FirewallAppService::new(FirewallEngine::new(), None, Arc::new(NoopMetrics))
+        let mut svc = FirewallAppService::new(FirewallEngine::new(), None, Arc::new(NoopMetrics));
+        // Disable anti-lockout for unit tests to avoid extra synthetic rules.
+        svc.set_anti_lockout(AntiLockoutSettings {
+            enabled: false,
+            ..Default::default()
+        });
+        svc
     }
 
     #[test]
