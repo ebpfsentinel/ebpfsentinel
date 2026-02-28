@@ -1,0 +1,69 @@
+# config-ebpf-ddos.yaml — DDoS/scrub eBPF scenario test config
+# Tests: tc-scrub program loading, DDoS detection, policy enforcement
+#
+# Network topology:
+#   Host: 10.200.0.1 (veth-ebpf0)
+#   NS:   10.200.0.2 (veth-ebpf1 inside ebpf-test-ns)
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+conntrack:
+  enabled: true
+
+ddos:
+  enabled: true
+  policies:
+    - id: ddos-test-syn
+      attack_type: syn_flood
+      detection_threshold_pps: 100
+      mitigation_action: alert
+      auto_block_duration_secs: 60
+      enabled: true
+    - id: ddos-test-icmp
+      attack_type: icmp_flood
+      detection_threshold_pps: 50
+      mitigation_action: alert
+      auto_block_duration_secs: 60
+      enabled: true
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max_per_window: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

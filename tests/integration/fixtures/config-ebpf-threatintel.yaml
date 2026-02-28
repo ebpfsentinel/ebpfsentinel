@@ -1,0 +1,52 @@
+# config-ebpf-threatintel.yaml — Threat intel eBPF scenario test config
+# Tests: IOC-based blocking, feed loading, threat intel metrics
+#
+# Network topology:
+#   Host: 10.200.0.1 (veth-ebpf0)
+#   NS:   10.200.0.2 (veth-ebpf1 inside ebpf-test-ns)
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: true
+  mode: alert
+  feeds: []
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max_per_window: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ebpf_helpers.bash — Shared helpers for eBPF scenario tests (suites 11-15)
+# ebpf_helpers.bash — Shared helpers for eBPF scenario tests (suites 11-15, 18-23)
 #
 # Agent launch strategy:
 #   1. Local binary + local eBPF programs (cargo xtask ebpf-build)

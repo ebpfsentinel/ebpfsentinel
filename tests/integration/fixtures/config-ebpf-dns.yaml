@@ -1,0 +1,64 @@
+# config-ebpf-dns.yaml — DNS intelligence eBPF scenario test config
+# Tests: DNS cache, blocklist enforcement, domain reputation
+#
+# Network topology:
+#   Host: 10.200.0.1 (veth-ebpf0)
+#   NS:   10.200.0.2 (veth-ebpf1 inside ebpf-test-ns)
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+dns:
+  enabled: true
+  cache:
+    max_entries: 10000
+    min_ttl_secs: 60
+    purge_interval_secs: 30
+  blocklist:
+    domains: []
+    action: block
+    inject_target: threatintel
+    grace_period_secs: 300
+  reputation:
+    enabled: true
+    max_tracked_domains: 10000
+    auto_block_threshold: 0.8
+    auto_block_enabled: false
+    decay_half_life_hours: 24
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

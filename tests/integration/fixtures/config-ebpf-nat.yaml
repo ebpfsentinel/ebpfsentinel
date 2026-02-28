@@ -1,0 +1,54 @@
+# config-ebpf-nat.yaml — NAT eBPF scenario test config
+# Tests: tc-nat-ingress/egress program loading, SNAT/DNAT rule config
+#
+# Network topology:
+#   Host: 10.200.0.1 (veth-ebpf0)
+#   NS:   10.200.0.2 (veth-ebpf1 inside ebpf-test-ns)
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+conntrack:
+  enabled: true
+
+nat:
+  enabled: true
+  snat_rules: []
+  dnat_rules: []
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

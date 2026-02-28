@@ -95,6 +95,22 @@ ddos:
       auto_block_duration_secs: 300
       enabled: true
 
+conntrack:
+  enabled: true
+
+nat:
+  enabled: true
+  snat_rules: []
+  dnat_rules: []
+
+routing:
+  enabled: true
+  gateways: []
+
+loadbalancer:
+  enabled: true
+  services: []
+
 audit:
   enabled: true
   retention_days: 90

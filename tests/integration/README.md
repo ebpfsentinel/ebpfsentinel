@@ -1,17 +1,16 @@
 # Integration Tests
 
-End-to-end test suite for the eBPFsentinel agent. Covers agent lifecycle, REST/gRPC APIs, eBPF packet processing scenarios, performance benchmarks, Docker/Kubernetes deployments, and host-to-VM network testing.
+End-to-end test suite for the eBPFsentinel agent. Covers agent lifecycle, REST/gRPC APIs (all domains), eBPF packet processing scenarios, performance benchmarks, Docker/Kubernetes deployments, and host-to-VM network testing.
 
 ## Directory Structure
 
 ```
 tests/integration/
 ├── Makefile                            # Test orchestration (21 targets)
-├── suites/                             # 15 BATS test suites (~116 tests)
+├── suites/                             # 23 BATS test suites (~183 tests)
 │   ├── 01-agent-lifecycle.bats
 │   ├── 02-rest-api-health.bats
 │   ├── ...
-│   └── 15-performance-benchmark.bats
 ├── lib/                                # Shared bash helper libraries
 │   ├── helpers.bash                    # Core: agent start/stop, HTTP/gRPC wrappers
 │   ├── assertions.bash                 # Custom BATS assertions
@@ -68,7 +67,7 @@ make test-perf-host-to-vm-quick
 
 ## Test Suites
 
-### Functional Tests (suites 01-10)
+### Functional Tests (suites 01-10, 16-17)
 
 Run without root. Require the agent binary built (`cargo build --release`).
 
@@ -77,24 +76,32 @@ Run without root. Require the agent binary built (`cargo build --release`).
 | **01-agent-lifecycle**   |     7 | Startup, graceful shutdown, SIGHUP reload, invalid config rejection, PID file management                                                                                         |
 | **02-rest-api-health**   |     6 | `/healthz`, `/readyz`, `/metrics` (Prometheus), system metrics (CPU/memory/uptime)                                                                                               |
 | **03-rest-api-firewall** |     8 | Firewall rule CRUD via REST: create, read, update, delete, priority ordering, bulk operations                                                                                    |
-| **04-rest-api-domains**  |    23 | Domain-specific REST APIs: IDS rules, IPS blacklist, rate limit config, threat intel feeds, alerting routes, L7 inspection, DLP patterns, DNS cache/blocklist, domain reputation |
+| **04-rest-api-domains**  |    23 | Domain-specific REST APIs: IPS blacklist, rate limit config, threat intel feeds, alerting routes, L7 inspection, DNS cache/blocklist, domain reputation |
 | **05-grpc-streaming**    |     4 | gRPC health check, server reflection, event streaming subscription                                                                                                               |
 | **06-ebpf-programs**     |     3 | eBPF program loading and attachment to a veth interface (requires kernel >= 5.17)                                                                                                |
 | **07-authentication**    |    11 | JWT RS256 validation, OIDC JWKS endpoint, API key auth, role-based access control (admin/operator/viewer), token expiry, composite auth                                          |
 | **08-tls**               |     5 | HTTPS termination on port 18443, gRPC over TLS, self-signed certificate validation, mTLS                                                                                         |
 | **09-docker**            |     4 | Docker image build, `docker compose` deployment with health checks, healthz via agent CLI (requires kernel BTF)                                                                  |
 | **10-kubernetes**        |     5 | Minikube DaemonSet deployment, ConfigMap injection, RBAC, pod health (VM-only)                                                                                                   |
+| **16-rest-api-ddos**     |     9 | DDoS protection: status, attacks, history, policy CRUD, validation (invalid type, zero threshold, nonexistent delete)                                                            |
+| **17-rest-api-extended** |    26 | Extended domains: IDS, DLP, conntrack, NAT, routing, aliases, LB (CRUD + validation), operations (config, eBPF status, reload), IPS domain-blocks                               |
 
-### eBPF Scenario Tests (suites 11-14)
+### eBPF Scenario Tests (suites 11-14, 18-23)
 
 Require **root** and **kernel >= 5.17**. Use isolated network namespaces with veth pairs (10.200.0.0/24) to test real eBPF packet processing.
 
-| Suite                           | Tests | What it covers                                                                                                                                    |
-| ------------------------------- | ----: | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **11-ebpf-firewall-scenarios**  |     9 | Packet matching: source/dest CIDR, port ranges, protocol filters, priority-based rule ordering, default policy (pass/deny), IPv6, VLAN tagging    |
-| **12-ebpf-ids-scenarios**       |     6 | Intrusion detection: reverse shell detection (port 4444), SSH brute-force threshold alerts, alert deduplication, REST alert notification pipeline |
-| **13-ebpf-ips-scenarios**       |     6 | Intrusion prevention: auto-blacklist after threshold, dynamic rule injection, whitelist bypass for trusted subnets, blacklist expiry, TTL         |
-| **14-ebpf-ratelimit-scenarios** |     5 | Token bucket rate limiting: per-rule rate enforcement, ICMP/TCP/UDP rate control, burst handling, global vs per-source tracking                   |
+| Suite                              | Tests | What it covers                                                                                                                                    |
+| ---------------------------------- | ----: | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **11-ebpf-firewall-scenarios**     |     9 | Packet matching: source/dest CIDR, port ranges, protocol filters, priority-based rule ordering, default policy (pass/deny), IPv6, VLAN tagging    |
+| **12-ebpf-ids-scenarios**          |     6 | Intrusion detection: reverse shell detection (port 4444), SSH brute-force threshold alerts, alert deduplication, REST alert notification pipeline |
+| **13-ebpf-ips-scenarios**          |     6 | Intrusion prevention: auto-blacklist after threshold, dynamic rule injection, whitelist bypass for trusted subnets, blacklist expiry, TTL         |
+| **14-ebpf-ratelimit-scenarios**    |     5 | Token bucket rate limiting: per-rule rate enforcement, ICMP/TCP/UDP rate control, burst handling, global vs per-source tracking                   |
+| **18-ebpf-threatintel-scenarios**  |     5 | Threat intel: TC program attachment, status/feeds/IOC API access, metrics counters                                                                |
+| **19-ebpf-conntrack-scenarios**    |     6 | Connection tracking: TC program attachment, connection table population, connection count, flush, metrics                                         |
+| **20-ebpf-dns-scenarios**          |     6 | DNS intelligence: TC program attachment, cache/stats/blocklist API, cache flush, UDP:53 packet observation                                       |
+| **21-ebpf-loadbalancer-scenarios** |     7 | Load balancer: XDP program attachment, service CRUD with eBPF map sync, backend detail, service deletion, metrics                                |
+| **22-ebpf-nat-scenarios**          |     5 | NAT: TC ingress/egress program attachment, status/rules API, conntrack co-dependency, metrics                                                    |
+| **23-ebpf-ddos-scenarios**         |     8 | DDoS/scrub: TC scrub program attachment, policy loading, ICMP/SYN flood detection, attack history, metrics                                       |
 
 ### Performance Benchmark (suite 15)
 
@@ -195,6 +202,12 @@ All fixtures use `__PLACEHOLDER__` tokens substituted at runtime:
 | `config-ebpf-ids.yaml`            | IDS scenario tests (alert mode, threshold detection)            |
 | `config-ebpf-ips.yaml`            | IPS scenario tests (auto-blacklist, whitelist bypass)           |
 | `config-ebpf-ratelimit.yaml`      | Rate limit tests (token bucket, per-rule rates)                 |
+| `config-ebpf-threatintel.yaml`    | Threat intel scenario tests (IOC blocking, feeds)               |
+| `config-ebpf-conntrack.yaml`      | Connection tracking tests (state tracking, flush)               |
+| `config-ebpf-dns.yaml`            | DNS intelligence tests (cache, blocklist, reputation)           |
+| `config-ebpf-loadbalancer.yaml`   | Load balancer tests (XDP service CRUD, backend selection)       |
+| `config-ebpf-nat.yaml`            | NAT tests (SNAT/DNAT rules, conntrack co-dependency)            |
+| `config-ebpf-ddos.yaml`           | DDoS/scrub tests (flood detection, policy enforcement)          |
 | `config-perf-alert.yaml`          | Performance -- all domains, alert mode (observe only)           |
 | `config-perf-block.yaml`          | Performance -- all domains, block mode (ports 9999/7777 denied) |
 | `config-perf-firewall-only.yaml`  | Perf isolation -- firewall domain only                          |
@@ -234,7 +247,7 @@ make vagrant-destroy       # Delete VM
 | `test-vm`                 | Run all suites in Vagrant VM | Vagrant              |
 | `test-suite SUITE=<name>` | Run a single suite           | agent binary         |
 | `test-k8s`                | Kubernetes suite only        | Minikube             |
-| `test-ebpf-scenarios`     | Suites 11-14                 | root, kernel >= 5.17 |
+| `test-ebpf-scenarios`     | Suites 11-14, 18-23          | root, kernel >= 5.17 |
 | `test-performance`        | Suite 15                     | root, kernel >= 5.17 |
 | `test-ebpf-all`           | Suites 11-15                 | root, kernel >= 5.17 |
 | `test-ebpf-vm`            | eBPF suites in Vagrant VM    | Vagrant              |
