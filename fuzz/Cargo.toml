@@ -82,3 +82,38 @@ doc = false
 name = "fuzz_ddos"
 path = "fuzz_targets/fuzz_ddos.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_alias"
+path = "fuzz_targets/fuzz_alias.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_audit"
+path = "fuzz_targets/fuzz_audit.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_auth"
+path = "fuzz_targets/fuzz_auth.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_conntrack"
+path = "fuzz_targets/fuzz_conntrack.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_nat"
+path = "fuzz_targets/fuzz_nat.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_routing"
+path = "fuzz_targets/fuzz_routing.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_zone"
+path = "fuzz_targets/fuzz_zone.rs"
+doc = false
