@@ -54,7 +54,6 @@ const VLAN_HDR_LEN: usize = 4;
 const IPV6_HDR_LEN: usize = 40;
 const PROTO_TCP: u8 = 6;
 const PROTO_UDP: u8 = 17;
-const PROTO_ICMP: u8 = 1;
 const PROTO_ICMPV6: u8 = 58;
 
 // ── Inline ICMP header type ─────────────────────────────────────────
@@ -304,7 +303,7 @@ struct RuleScanCtxV6 {
 /// Callback for `bpf_loop`: scan one IPv4 firewall rule.
 /// Returns 0 to continue, 1 to stop (match found or index >= count).
 unsafe extern "C" fn scan_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
-    let lctx = &mut *(ctx as *mut RuleScanCtx);
+    let lctx = unsafe { &mut *(ctx as *mut RuleScanCtx) };
     if index >= lctx.count {
         return 1;
     }
@@ -337,7 +336,7 @@ unsafe extern "C" fn scan_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
 /// Callback for `bpf_loop`: scan one IPv6 firewall rule.
 /// Returns 0 to continue, 1 to stop (match found or index >= count).
 unsafe extern "C" fn scan_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
-    let lctx = &mut *(ctx as *mut RuleScanCtxV6);
+    let lctx = unsafe { &mut *(ctx as *mut RuleScanCtxV6) };
     if index >= lctx.count {
         return 1;
     }
@@ -890,7 +889,7 @@ fn check_connection_limits(
                         _pad: [0; 2],
                         addr: src_ip,
                     };
-                    let _ = unsafe { FW_IPSET_V4.insert(&ipset_key, &1u8, 0) };
+                    let _ = FW_IPSET_V4.insert(&ipset_key, &1u8, 0);
                     return false;
                 }
             }
