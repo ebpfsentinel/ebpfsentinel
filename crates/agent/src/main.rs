@@ -14,7 +14,7 @@ use anyhow::Result;
 use api_client::ApiClient;
 use cli::{
     AlertsCommand, AuditCommand, Command, DdosCommand, DnsCommand, DomainsCommand, FirewallCommand,
-    IpsCommand, L7Command, RatelimitCommand, ThreatintelCommand,
+    IpsCommand, L7Command, LbCommand, RatelimitCommand, ThreatintelCommand,
 };
 
 #[tokio::main]
@@ -214,6 +214,17 @@ async fn main() -> Result<()> {
                 DomainsCommand::Unblock { domain } => {
                     commands::cmd_domains_unblock(&client, &domain, output).await
                 }
+            }
+        }
+
+        Some(Command::Lb(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                LbCommand::Status => commands::cmd_lb_status(&client, output).await,
+                LbCommand::Services => commands::cmd_lb_services(&client, output).await,
+                LbCommand::Service { id } => commands::cmd_lb_service(&client, &id, output).await,
+                LbCommand::Add { json } => commands::cmd_lb_add(&client, &json, output).await,
+                LbCommand::Delete { id } => commands::cmd_lb_delete(&client, &id).await,
             }
         }
 

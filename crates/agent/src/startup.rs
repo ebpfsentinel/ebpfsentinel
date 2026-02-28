@@ -211,6 +211,24 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         "DDoS engine initialized"
     );
 
+    // ── 5c⅝. Build Load Balancer service ────────────────────────────
+    let lb_services_cfg = config.lb_services()?;
+    let mut lb_engine = domain::loadbalancer::engine::LbEngine::new();
+    if config.loadbalancer.enabled {
+        lb_engine.reload(lb_services_cfg.clone())?;
+    }
+    let mut lb_svc = application::lb_service_impl::LbAppService::new(
+        lb_engine,
+        Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+    );
+    lb_svc.set_enabled(config.loadbalancer.enabled);
+    let lb_svc = Arc::new(RwLock::new(lb_svc));
+    info!(
+        service_count = lb_services_cfg.len(),
+        enabled = config.loadbalancer.enabled,
+        "Load balancer engine initialized"
+    );
+
     // ── 5c¾. Build DLP service ──────────────────────────────────────
     let dlp_mode = config.dlp_mode()?;
     let dlp_patterns = config.dlp_patterns()?;
@@ -626,7 +644,8 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         .with_conntrack_service(Arc::clone(&conntrack_svc))
         .with_nat_service(Arc::clone(&nat_svc))
         .with_alias_service(Arc::clone(&alias_svc))
-        .with_routing_service(Arc::clone(&routing_svc));
+        .with_routing_service(Arc::clone(&routing_svc))
+        .with_loadbalancer_service(Arc::clone(&lb_svc));
     let app_state = Arc::new(app_state);
 
     // ── 6. Create cancellation token ────────────────────────────────
@@ -693,6 +712,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     reload_service.set_nat_service(Arc::clone(&nat_svc));
     reload_service.set_alias_service(Arc::clone(&alias_svc));
     reload_service.set_routing_service(Arc::clone(&routing_svc));
+    reload_service.set_loadbalancer_service(Arc::clone(&lb_svc));
     let reload_service = Arc::new(reload_service);
     // Clone auth provider for gRPC from the app state
     let grpc_auth: Option<Arc<dyn AuthProvider>> = app_state.auth_provider.clone();
@@ -1025,6 +1045,27 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         false
     };
 
+    // 10k. XDP Load Balancer
+    let lb_ok = if config.loadbalancer.enabled {
+        match try_load_xdp_loadbalancer(&ebpf_dir, &config) {
+            Ok((loader, lb_mgr)) => {
+                lb_svc.write().await.set_map_port(Box::new(lb_mgr));
+                ebpf_state.add_loader(loader);
+                metrics.set_ebpf_program_status("xdp_loadbalancer", true);
+                info!("eBPF xdp-loadbalancer active");
+                true
+            }
+            Err(e) => {
+                warn!("xdp-loadbalancer load failed (degraded mode): {e}");
+                metrics.set_ebpf_program_status("xdp_loadbalancer", false);
+                false
+            }
+        }
+    } else {
+        metrics.set_ebpf_program_status("xdp_loadbalancer", false);
+        false
+    };
+
     // Populate eBPF program status for ops endpoint
     {
         let mut status = ebpf_program_status.write().await;
@@ -1038,6 +1079,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         status.insert("tc_nat_ingress".to_string(), nat_ok);
         status.insert("tc_nat_egress".to_string(), nat_ok);
         status.insert("tc_scrub".to_string(), scrub_ok);
+        status.insert("xdp_loadbalancer".to_string(), lb_ok);
     }
 
     // ── 10½. Spawn config hot-reload task (after eBPF loading for EbpfMapHolder) ──
@@ -1745,4 +1787,21 @@ fn build_scrub_flags(config: &AgentConfig) -> ebpf_common::scrub::ScrubFlags {
         min_hop_limit: scrub.min_hop_limit.unwrap_or(0),
         _pad: 0,
     }
+}
+
+/// Load and attach the XDP load balancer program.
+fn try_load_xdp_loadbalancer(
+    ebpf_dir: &str,
+    config: &AgentConfig,
+) -> anyhow::Result<(EbpfLoader, adapters::ebpf::LbMapManager)> {
+    let program_bytes = read_ebpf_program(ebpf_dir, "xdp-loadbalancer")?;
+    let mut loader = EbpfLoader::load(&program_bytes)?;
+
+    for iface in &config.agent.interfaces {
+        loader.attach_xdp_program("xdp_loadbalancer", iface)?;
+    }
+
+    let lb_mgr = adapters::ebpf::LbMapManager::new(loader.ebpf_mut())?;
+
+    Ok((loader, lb_mgr))
 }

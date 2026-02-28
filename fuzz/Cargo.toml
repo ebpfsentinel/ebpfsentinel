@@ -117,3 +117,8 @@ doc = false
 name = "fuzz_zone"
 path = "fuzz_targets/fuzz_zone.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_loadbalancer"
+path = "fuzz_targets/fuzz_loadbalancer.rs"
+doc = false

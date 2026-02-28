@@ -23,6 +23,7 @@ use crate::firewall_service_impl::FirewallAppService;
 use crate::ids_service_impl::IdsAppService;
 use crate::ips_service_impl::IpsAppService;
 use crate::l7_service_impl::L7AppService;
+use crate::lb_service_impl::LbAppService;
 use crate::nat_service_impl::NatAppService;
 use crate::ratelimit_service_impl::RateLimitAppService;
 use crate::routing_service_impl::RoutingAppService;
@@ -45,6 +46,7 @@ pub struct ConfigReloadService {
     nat_service: Option<Arc<RwLock<NatAppService>>>,
     alias_service: Option<Arc<RwLock<AliasAppService>>>,
     routing_service: Option<Arc<RwLock<RoutingAppService>>>,
+    loadbalancer_service: Option<Arc<RwLock<LbAppService>>>,
     metrics: Arc<dyn MetricsPort>,
     reload_mutex: Mutex<()>,
 }
@@ -75,6 +77,7 @@ impl ConfigReloadService {
             nat_service: None,
             alias_service: None,
             routing_service: None,
+            loadbalancer_service: None,
             metrics,
             reload_mutex: Mutex::new(()),
         }
@@ -98,6 +101,42 @@ impl ConfigReloadService {
     /// Set the routing service for reload integration.
     pub fn set_routing_service(&mut self, svc: Arc<RwLock<RoutingAppService>>) {
         self.routing_service = Some(svc);
+    }
+
+    /// Set the load balancer service for reload integration.
+    pub fn set_loadbalancer_service(&mut self, svc: Arc<RwLock<LbAppService>>) {
+        self.loadbalancer_service = Some(svc);
+    }
+
+    /// Reload load balancer services.
+    pub async fn reload_loadbalancer(
+        &self,
+        services: Vec<domain::loadbalancer::entity::LbService>,
+        enabled: bool,
+    ) -> Result<(), anyhow::Error> {
+        let Some(ref lb_svc) = self.loadbalancer_service else {
+            return Ok(());
+        };
+        let _guard = self.reload_mutex.lock().await;
+
+        let mut svc = lb_svc.write().await;
+        svc.set_enabled(enabled);
+
+        if enabled {
+            svc.reload_services(services)
+                .map_err(|e| anyhow::anyhow!("LB reload failed: {e}"))?;
+        } else {
+            svc.reload_services(Vec::new())
+                .map_err(|e| anyhow::anyhow!("LB reload failed: {e}"))?;
+        }
+
+        self.metrics.record_config_reload("loadbalancer", "success");
+        tracing::info!(
+            enabled,
+            count = svc.service_count(),
+            "load balancer configuration reloaded"
+        );
+        Ok(())
     }
 
     /// Reload conntrack settings.

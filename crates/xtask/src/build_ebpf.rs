@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 const EBPF_PROGRAMS: &[&str] = &[
     "xdp-firewall",
     "xdp-ratelimit",
+    "xdp-loadbalancer",
     "tc-dns",
     "tc-ids",
     "tc-threatintel",

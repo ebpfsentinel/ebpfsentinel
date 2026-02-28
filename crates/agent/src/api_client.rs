@@ -320,6 +320,47 @@ pub struct DdosPolicyResponse {
     pub enabled: bool,
 }
 
+// ── Load Balancer ────────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct LbStatusResponse {
+    pub enabled: bool,
+    pub service_count: usize,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct LbServiceResponse {
+    pub id: String,
+    pub name: String,
+    pub protocol: String,
+    pub listen_port: u16,
+    pub algorithm: String,
+    pub backend_count: usize,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct LbServiceDetailResponse {
+    pub id: String,
+    pub name: String,
+    pub protocol: String,
+    pub listen_port: u16,
+    pub algorithm: String,
+    pub enabled: bool,
+    pub backends: Vec<LbBackendResponse>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct LbBackendResponse {
+    pub id: String,
+    pub addr: String,
+    pub port: u16,
+    pub weight: u32,
+    pub enabled: bool,
+    pub status: String,
+    pub active_connections: u64,
+}
+
 #[derive(Deserialize)]
 struct ApiErrorBody {
     error: ApiErrorDetail,
@@ -812,6 +853,60 @@ impl ApiClient {
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;
         handle_response(resp).await
+    }
+
+    // ── Load Balancer ──────────────────────────────────────────────
+
+    pub async fn lb_status(&self) -> anyhow::Result<LbStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/lb/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn list_lb_services(&self) -> anyhow::Result<Vec<LbServiceResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/lb/services")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn get_lb_service(&self, id: &str) -> anyhow::Result<LbServiceDetailResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, &format!("/api/v1/lb/services/{id}"))
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn create_lb_service(
+        &self,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<LbServiceResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/lb/services")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn delete_lb_service(&self, id: &str) -> anyhow::Result<()> {
+        let resp = self
+            .request(
+                reqwest::Method::DELETE,
+                &format!("/api/v1/lb/services/{id}"),
+            )
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_delete(resp).await
     }
 }
 

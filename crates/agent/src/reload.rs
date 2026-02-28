@@ -331,6 +331,21 @@ async fn perform_reload(
         tracing::warn!(error = %e, "routing config reload failed at application level");
     }
 
+    // Phase 6f½: Load Balancer reload
+    let lb_services = match config.lb_services() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid LB services");
+            return;
+        }
+    };
+    if let Err(e) = reload_service
+        .reload_loadbalancer(lb_services, config.loadbalancer.enabled)
+        .await
+    {
+        tracing::warn!(error = %e, "load balancer config reload failed at application level");
+    }
+
     // Phase 6g: IPS reload
     let ips_rules = match config.ips_rules() {
         Ok(r) => r,

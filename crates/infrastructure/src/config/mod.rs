@@ -17,6 +17,7 @@ mod firewall;
 mod ids;
 mod ips;
 mod l7;
+mod loadbalancer;
 mod nat;
 mod ratelimit;
 mod routing;
@@ -48,6 +49,7 @@ pub use firewall::{
 pub use ids::{IdsConfig, IdsRuleConfig, SamplingConfig, ThresholdRuleConfig};
 pub use ips::{IpsConfig, IpsRuleConfig};
 pub use l7::{L7Config, L7RuleConfig};
+pub use loadbalancer::{LbBackendConfig, LbServiceConfig as LbServiceCfg, LoadBalancerConfig};
 pub use nat::{NatConfig, NatRuleConfig};
 pub use ratelimit::{RateLimitRuleConfig, RateLimitSectionConfig};
 pub use routing::{GatewayConfig, HealthCheckConfig, RoutingConfig};
@@ -80,6 +82,7 @@ use common::{
     parse_domain_mode as pdm, warn_if_world_readable,
 };
 use ddos::MAX_DDOS_POLICIES;
+use loadbalancer::MAX_LB_SERVICES;
 use nat::MAX_NAT_RULES;
 use zone::MAX_ZONES;
 
@@ -137,6 +140,9 @@ pub struct AgentConfig {
 
     #[serde(default)]
     pub routing: RoutingConfig,
+
+    #[serde(default)]
+    pub loadbalancer: LoadBalancerConfig,
 }
 
 impl AgentConfig {
@@ -415,6 +421,16 @@ impl AgentConfig {
         // Validate DNS cache config
         self.dns.validate()?;
 
+        // Validate load balancer services
+        check_limit(
+            "loadbalancer.services",
+            self.loadbalancer.services.len(),
+            MAX_LB_SERVICES,
+        )?;
+        for (idx, svc_cfg) in self.loadbalancer.services.iter().enumerate() {
+            svc_cfg.validate(idx)?;
+        }
+
         Ok(())
     }
 
@@ -616,6 +632,15 @@ impl AgentConfig {
         &self,
     ) -> Result<domain::dns::entity::DomainBlocklistConfig, ConfigError> {
         self.dns.to_domain_blocklist_config()
+    }
+
+    /// Convert all load balancer service configs to domain `LbService` entities.
+    pub fn lb_services(&self) -> Result<Vec<domain::loadbalancer::entity::LbService>, ConfigError> {
+        self.loadbalancer
+            .services
+            .iter()
+            .map(loadbalancer::LbServiceConfig::to_domain_service)
+            .collect()
     }
 }
 

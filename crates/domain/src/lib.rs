@@ -13,6 +13,7 @@ pub mod firewall;
 pub mod ids;
 pub mod ips;
 pub mod l7;
+pub mod loadbalancer;
 pub mod nat;
 pub mod ratelimit;
 pub mod routing;

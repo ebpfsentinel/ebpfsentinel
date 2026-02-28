@@ -13,6 +13,7 @@ pub mod health_handler;
 pub mod ids_handler;
 pub mod ips_handler;
 pub mod l7_handler;
+pub mod lb_handler;
 pub mod metrics_handler;
 pub mod middleware;
 pub mod nat_handler;

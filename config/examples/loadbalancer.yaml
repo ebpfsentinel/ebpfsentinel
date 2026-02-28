@@ -1,0 +1,126 @@
+# eBPFsentinel — L4 Load Balancer Configuration Example
+# =====================================================
+#
+# TCP/UDP/TLS-passthrough load balancing using XDP for wire-speed
+# packet redirection. Supports multiple balancing algorithms,
+# per-backend health checks, and weighted traffic distribution.
+#
+# Fields (LbServiceConfig):
+#   id             — Unique service identifier (max 64 chars)
+#   name           — Human-readable service name
+#   protocol       — "tcp", "udp", or "tls_passthrough"
+#   listen_port    — Frontend port to listen on
+#   algorithm      — "round_robin", "weighted", "ip_hash", or "least_conn"
+#   enabled        — Administrative enable flag (default: true)
+#   backends       — List of backend servers
+#   health_check   — Optional backend health-check probe configuration
+#
+# Fields (LbBackendConfig):
+#   id       — Unique backend identifier within the service
+#   addr     — Backend IP address (IPv4 or IPv6)
+#   port     — Backend port
+#   weight   — Traffic weight, higher = more traffic (default: 1)
+#   enabled  — Administrative enable flag (default: true)
+#
+# Fields (LbHealthCheckConfig):
+#   target             — Probe target address
+#   protocol           — "icmp" or "tcp" (default: "tcp")
+#   interval_secs      — Probe interval in seconds (default: 10)
+#   timeout_secs       — Probe timeout in seconds (default: 5)
+#   failure_threshold  — Failures before marking unhealthy (default: 3)
+#   recovery_threshold — Successes before marking healthy (default: 2)
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/loadbalancer.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+# ── L4 Load Balancer ───────────────────────────────────────────────
+
+loadbalancer:
+  enabled: true
+
+  services:
+    # HTTPS load balancer — TLS passthrough to backend web servers
+    - id: lb-https
+      name: web-https
+      protocol: tls_passthrough
+      listen_port: 443
+      algorithm: round_robin
+      enabled: true
+      backends:
+        - id: web-1
+          addr: "10.0.1.10"
+          port: 443
+          weight: 1
+          enabled: true
+        - id: web-2
+          addr: "10.0.1.11"
+          port: 443
+          weight: 1
+          enabled: true
+        - id: web-3
+          addr: "10.0.1.12"
+          port: 443
+          weight: 2
+          enabled: true
+      health_check:
+        target: "10.0.1.10"
+        protocol: tcp
+        interval_secs: 10
+        timeout_secs: 5
+        failure_threshold: 3
+        recovery_threshold: 2
+
+    # DNS load balancer — UDP round-robin
+    - id: lb-dns
+      name: dns-cluster
+      protocol: udp
+      listen_port: 53
+      algorithm: round_robin
+      enabled: true
+      backends:
+        - id: dns-1
+          addr: "10.0.2.10"
+          port: 53
+          weight: 1
+        - id: dns-2
+          addr: "10.0.2.11"
+          port: 53
+          weight: 1
+
+    # Database load balancer — TCP least-connections
+    - id: lb-db
+      name: postgres-cluster
+      protocol: tcp
+      listen_port: 5432
+      algorithm: least_conn
+      enabled: true
+      backends:
+        - id: db-primary
+          addr: "10.0.3.10"
+          port: 5432
+          weight: 3
+        - id: db-replica-1
+          addr: "10.0.3.11"
+          port: 5432
+          weight: 1
+        - id: db-replica-2
+          addr: "10.0.3.12"
+          port: 5432
+          weight: 1
+      health_check:
+        target: "10.0.3.10"
+        protocol: tcp
+        interval_secs: 5
+        timeout_secs: 3
+        failure_threshold: 2
+        recovery_threshold: 2
+
+# ── Firewall (companion rules) ─────────────────────────────────────
+
+firewall:
+  enabled: true

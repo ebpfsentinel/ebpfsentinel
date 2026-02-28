@@ -15,6 +15,7 @@ use application::firewall_service_impl::FirewallAppService;
 use application::ids_service_impl::IdsAppService;
 use application::ips_service_impl::IpsAppService;
 use application::l7_service_impl::L7AppService;
+use application::lb_service_impl::LbAppService;
 use application::nat_service_impl::NatAppService;
 use application::ratelimit_service_impl::RateLimitAppService;
 use application::routing_service_impl::RoutingAppService;
@@ -46,6 +47,7 @@ pub struct AppState {
     pub nat_service: Option<Arc<RwLock<NatAppService>>>,
     pub alias_service: Option<Arc<RwLock<AliasAppService>>>,
     pub routing_service: Option<Arc<RwLock<RoutingAppService>>>,
+    pub loadbalancer_service: Option<Arc<RwLock<LbAppService>>>,
     pub dns_cache_service: Option<Arc<DnsCacheAppService>>,
     pub dns_blocklist_service: Option<Arc<DnsBlocklistAppService>>,
     pub domain_reputation_service: Option<Arc<DomainReputationAppService>>,
@@ -90,6 +92,7 @@ impl AppState {
             nat_service: None,
             alias_service: None,
             routing_service: None,
+            loadbalancer_service: None,
             dns_cache_service: None,
             dns_blocklist_service: None,
             domain_reputation_service: None,
@@ -148,6 +151,13 @@ impl AppState {
     #[must_use]
     pub fn with_routing_service(mut self, svc: Arc<RwLock<RoutingAppService>>) -> Self {
         self.routing_service = Some(svc);
+        self
+    }
+
+    /// Attach a load balancer service.
+    #[must_use]
+    pub fn with_loadbalancer_service(mut self, svc: Arc<RwLock<LbAppService>>) -> Self {
+        self.loadbalancer_service = Some(svc);
         self
     }
 

@@ -35,6 +35,9 @@ use super::ips_handler::{
     list_ips_blacklist, list_ips_domain_blocks, list_ips_rules, patch_ips_rule_mode,
 };
 use super::l7_handler::{create_l7_rule, delete_l7_rule, list_l7_rules};
+use super::lb_handler::{
+    create_lb_service, delete_lb_service, get_lb_service, lb_status, list_lb_services,
+};
 use super::metrics_handler::metrics;
 use super::middleware::auth::jwt_auth_middleware;
 use super::nat_handler::{list_nat_rules, nat_status};
@@ -121,7 +124,10 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
             .route("/api/v1/nat/rules", get(list_nat_rules))
             .route("/api/v1/aliases/status", get(alias_status))
             .route("/api/v1/routing/status", get(routing_status))
-            .route("/api/v1/routing/gateways", get(list_gateways));
+            .route("/api/v1/routing/gateways", get(list_gateways))
+            .route("/api/v1/lb/status", get(lb_status))
+            .route("/api/v1/lb/services", get(list_lb_services))
+            .route("/api/v1/lb/services/{id}", get(get_lb_service));
 
         // Write routes (rate limited: 60 req/min per IP)
         let write_routes = Router::new()
@@ -149,6 +155,8 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
                 "/api/v1/domains/blocklist/{domain}",
                 delete(remove_from_blocklist),
             )
+            .route("/api/v1/lb/services", post(create_lb_service))
+            .route("/api/v1/lb/services/{id}", delete(delete_lb_service))
             .layer(GovernorLayer::new(governor_conf));
 
         let r = read_routes

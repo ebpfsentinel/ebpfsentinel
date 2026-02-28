@@ -988,6 +988,118 @@ pub async fn cmd_ddos_delete(client: &ApiClient, id: &str) -> Result<()> {
     Ok(())
 }
 
+// ── Load Balancer ──────────────────────────────────────────────────────
+
+pub async fn cmd_lb_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let status = client.lb_status().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!("Load Balancer Status");
+    println!("  Enabled:       {}", yes_no(status.enabled));
+    println!("  Service count: {}", status.service_count);
+    Ok(())
+}
+
+pub async fn cmd_lb_services(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let services = client.list_lb_services().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&services)?);
+        return Ok(());
+    }
+
+    if services.is_empty() {
+        println!("No load balancer services configured.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<16}  {:<20}  {:<8}  {:>6}  {:<14}  {:>8}  {:<7}",
+        "ID", "NAME", "PROTO", "PORT", "ALGORITHM", "BACKENDS", "ENABLED"
+    );
+
+    for svc in &services {
+        println!(
+            "{:<16}  {:<20}  {:<8}  {:>6}  {:<14}  {:>8}  {:<7}",
+            svc.id,
+            truncate(&svc.name, 20),
+            svc.protocol,
+            svc.listen_port,
+            svc.algorithm,
+            svc.backend_count,
+            yes_no(svc.enabled),
+        );
+    }
+
+    println!("\n{} service(s) total.", services.len());
+    Ok(())
+}
+
+pub async fn cmd_lb_service(client: &ApiClient, id: &str, output: OutputFormat) -> Result<()> {
+    let svc = client.get_lb_service(id).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&svc)?);
+        return Ok(());
+    }
+
+    println!("Service: {} ({})", svc.name, svc.id);
+    println!("  Protocol:  {}", svc.protocol);
+    println!("  Port:      {}", svc.listen_port);
+    println!("  Algorithm: {}", svc.algorithm);
+    println!("  Enabled:   {}", yes_no(svc.enabled));
+
+    if svc.backends.is_empty() {
+        println!("\n  No backends.");
+    } else {
+        println!(
+            "\n  {:<12}  {:<18}  {:>6}  {:>6}  {:<9}  {:>6}  {:<7}",
+            "BACKEND", "ADDR", "PORT", "WEIGHT", "STATUS", "CONNS", "ENABLED"
+        );
+        for be in &svc.backends {
+            println!(
+                "  {:<12}  {:<18}  {:>6}  {:>6}  {:<9}  {:>6}  {:<7}",
+                be.id,
+                be.addr,
+                be.port,
+                be.weight,
+                be.status,
+                be.active_connections,
+                yes_no(be.enabled),
+            );
+        }
+        println!("\n  {} backend(s) total.", svc.backends.len());
+    }
+    Ok(())
+}
+
+pub async fn cmd_lb_add(client: &ApiClient, json: &str, output: OutputFormat) -> Result<()> {
+    let body: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?;
+    let svc = client.create_lb_service(&body).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&svc)?);
+        return Ok(());
+    }
+
+    println!(
+        "LB service created: {} (protocol={}, port={}, algorithm={})",
+        svc.id, svc.protocol, svc.listen_port, svc.algorithm
+    );
+    Ok(())
+}
+
+pub async fn cmd_lb_delete(client: &ApiClient, id: &str) -> Result<()> {
+    client.delete_lb_service(id).await?;
+    println!("LB service deleted: {id}");
+    Ok(())
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn truncate(s: &str, max: usize) -> String {

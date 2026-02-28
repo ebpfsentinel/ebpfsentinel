@@ -12,6 +12,7 @@ pub enum AuditComponent {
     Threatintel,
     Dlp,
     Ddos,
+    Loadbalancer,
     Config,
 }
 
@@ -26,6 +27,7 @@ impl AuditComponent {
             Self::Threatintel => "threatintel",
             Self::Dlp => "dlp",
             Self::Ddos => "ddos",
+            Self::Loadbalancer => "loadbalancer",
             Self::Config => "config",
         }
     }
@@ -41,6 +43,7 @@ impl AuditComponent {
             "threatintel" => Self::Threatintel,
             "dlp" => Self::Dlp,
             "ddos" => Self::Ddos,
+            "loadbalancer" | "lb" => Self::Loadbalancer,
             _ => Self::Config,
         }
     }

@@ -13,6 +13,7 @@ pub mod ebpf_map_write_port;
 pub mod feed_source;
 pub mod ids_map_port;
 pub mod ips_blacklist_port;
+pub mod loadbalancer_map_port;
 pub mod metrics_port;
 pub mod nat_map_port;
 pub mod ratelimit_map_port;

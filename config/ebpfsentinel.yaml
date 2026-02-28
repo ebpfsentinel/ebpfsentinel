@@ -66,5 +66,8 @@ nat:
 routing:
   enabled: false
 
+loadbalancer:
+  enabled: false
+
 zones:
   enabled: false

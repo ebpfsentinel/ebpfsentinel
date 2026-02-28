@@ -106,6 +106,9 @@ pub enum Command {
 
     /// `DDoS` protection: status, attacks, policies
     Ddos(DomainArgs<DdosCommand>),
+
+    /// Load balancer: status, services, backends
+    Lb(DomainArgs<LbCommand>),
 }
 
 /// Generic domain args: connection + subcommand.
@@ -315,6 +318,32 @@ pub enum DdosCommand {
     /// Delete a `DDoS` policy by ID
     Delete {
         /// Policy ID to delete
+        id: String,
+    },
+}
+
+// ── Load Balancer ──────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum LbCommand {
+    /// Show load balancer status
+    Status,
+    /// List all load balancer services
+    Services,
+    /// Show a specific service and its backends
+    Service {
+        /// Service ID
+        id: String,
+    },
+    /// Add a new load balancer service from inline JSON
+    Add {
+        /// JSON service body
+        #[arg(long)]
+        json: String,
+    },
+    /// Delete a load balancer service by ID
+    Delete {
+        /// Service ID to delete
         id: String,
     },
 }
@@ -977,6 +1006,73 @@ mod tests {
                 _ => panic!("expected Delete"),
             },
             _ => panic!("expected Ddos command"),
+        }
+    }
+
+    #[test]
+    fn cli_lb_status() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "lb", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Lb(DomainArgs {
+                command: LbCommand::Status,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_lb_services() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "lb", "services"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Lb(DomainArgs {
+                command: LbCommand::Services,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_lb_service() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "lb", "service", "lb-001"]).unwrap();
+        match cli.command {
+            Some(Command::Lb(args)) => match args.command {
+                LbCommand::Service { id } => assert_eq!(id, "lb-001"),
+                _ => panic!("expected Service"),
+            },
+            _ => panic!("expected Lb command"),
+        }
+    }
+
+    #[test]
+    fn cli_lb_add() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "lb",
+            "add",
+            "--json",
+            r#"{"id":"lb-001","name":"web","protocol":"tcp","listen_port":443,"backends":[{"id":"be-1","addr":"10.0.0.1","port":8080}]}"#,
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Lb(args)) => match args.command {
+                LbCommand::Add { json } => assert!(json.contains("lb-001")),
+                _ => panic!("expected Add"),
+            },
+            _ => panic!("expected Lb command"),
+        }
+    }
+
+    #[test]
+    fn cli_lb_delete() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "lb", "delete", "lb-001"]).unwrap();
+        match cli.command {
+            Some(Command::Lb(args)) => match args.command {
+                LbCommand::Delete { id } => assert_eq!(id, "lb-001"),
+                _ => panic!("expected Delete"),
+            },
+            _ => panic!("expected Lb command"),
         }
     }
 }
