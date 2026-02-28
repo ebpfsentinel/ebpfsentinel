@@ -33,6 +33,9 @@ fuzz/artifacts/
 *.key
 credentials.json
 
+# Allow test fixture keys (not real secrets, used by include_bytes! in tests)
+!crates/adapters/tests/fixtures/*.pem
+
 # IA
 CLAUDE.md
 .claude
