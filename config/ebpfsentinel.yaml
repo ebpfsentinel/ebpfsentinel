@@ -41,3 +41,30 @@ threatintel:
 
 dns:
   enabled: true
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: false
+
+auth:
+  enabled: false
+
+conntrack:
+  enabled: false
+
+ddos:
+  enabled: false
+
+l7:
+  enabled: false
+
+nat:
+  enabled: false
+
+routing:
+  enabled: false
+
+zones:
+  enabled: false
