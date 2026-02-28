@@ -1,5 +1,5 @@
 use domain::common::error::DomainError;
-use ebpf_common::nat::NatRuleEntry;
+use ebpf_common::nat::{NatRuleEntry, NatRuleEntryV6};
 
 /// Secondary port for NAT eBPF map operations.
 ///
@@ -13,6 +13,12 @@ pub trait NatMapPort: Send + Sync {
 
     /// Bulk-load SNAT rules into the `NAT_SNAT_RULES` array map.
     fn load_snat_rules(&mut self, rules: &[NatRuleEntry]) -> Result<(), DomainError>;
+
+    /// Bulk-load IPv6 DNAT rules into the `NAT_DNAT_RULES_V6` array map.
+    fn load_dnat_rules_v6(&mut self, rules: &[NatRuleEntryV6]) -> Result<(), DomainError>;
+
+    /// Bulk-load IPv6 SNAT rules into the `NAT_SNAT_RULES_V6` array map.
+    fn load_snat_rules_v6(&mut self, rules: &[NatRuleEntryV6]) -> Result<(), DomainError>;
 
     /// Enable or disable NAT processing globally.
     fn set_enabled(&mut self, enabled: bool) -> Result<(), DomainError>;

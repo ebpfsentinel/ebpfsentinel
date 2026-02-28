@@ -104,6 +104,9 @@ pub struct ScrubConfig {
     pub random_ip_id: bool,
     #[serde(default)]
     pub clear_df: bool,
+    /// Minimum IPv6 Hop Limit to enforce. 0 or `None` means no enforcement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_hop_limit: Option<u8>,
 }
 
 // ── Schedule config (Epic 28) ───────────────────────────────────────

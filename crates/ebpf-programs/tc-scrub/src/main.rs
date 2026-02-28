@@ -12,16 +12,18 @@ use aya_ebpf::{
 use core::mem;
 use ebpf_common::scrub::{
     ScrubFlags, SCRUB_METRIC_COUNT, SCRUB_METRIC_DF_CLEARED, SCRUB_METRIC_ERRORS,
-    SCRUB_METRIC_IPID_RANDOMIZED, SCRUB_METRIC_MSS_CLAMPED, SCRUB_METRIC_PACKETS,
-    SCRUB_METRIC_TTL_FIXED,
+    SCRUB_METRIC_HOP_FIXED, SCRUB_METRIC_IPID_RANDOMIZED, SCRUB_METRIC_MSS_CLAMPED,
+    SCRUB_METRIC_PACKETS, SCRUB_METRIC_TTL_FIXED,
 };
 use network_types::{eth::EthHdr, ip::Ipv4Hdr};
 
 // ── Constants ───────────────────────────────────────────────────────
 
 const ETH_P_IP: u16 = 0x0800;
+const ETH_P_IPV6: u16 = 0x86DD;
 const ETH_P_8021Q: u16 = 0x8100;
 const VLAN_HDR_LEN: usize = 4;
+const IPV6_HDR_LEN: usize = 40;
 const PROTO_TCP: u8 = 6;
 
 /// IPv4 flags field offset within Ipv4Hdr (frag_off contains flags + fragment offset).
@@ -47,6 +49,17 @@ const MAX_TCP_OPT_SCAN: usize = 40;
 struct VlanHdr {
     _tci: u16,
     ether_type: u16,
+}
+
+/// IPv6 fixed header (40 bytes).
+#[repr(C)]
+struct Ipv6Hdr {
+    _vtcfl: u32,
+    _payload_len: u16,
+    next_hdr: u8,
+    hop_limit: u8,
+    _src_addr: [u8; 16],
+    _dst_addr: [u8; 16],
 }
 
 // ── Maps ────────────────────────────────────────────────────────────
@@ -122,6 +135,9 @@ fn try_tc_scrub(ctx: &mut TcContext) -> Result<i32, ()> {
     if ether_type == ETH_P_IP {
         scrub_ipv4(ctx, &cfg, l3_offset)?;
         increment_metric(SCRUB_METRIC_PACKETS);
+    } else if ether_type == ETH_P_IPV6 {
+        scrub_ipv6(ctx, &cfg, l3_offset)?;
+        increment_metric(SCRUB_METRIC_PACKETS);
     }
 
     Ok(TC_ACT_OK)
@@ -164,6 +180,38 @@ fn scrub_ipv4(ctx: &mut TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result
     }
 
     // ── MSS clamping (TCP SYN only) ─────────────────────────────
+    if cfg.max_mss > 0 && protocol == PROTO_TCP {
+        scrub_mss_clamp(ctx, cfg.max_mss, l3_offset, l4_offset)?;
+    }
+
+    Ok(())
+}
+
+/// Apply scrub operations to an IPv6 packet.
+///
+/// IPv6 has no header checksum, no DF bit, and no IP ID field.
+/// Only hop limit normalization and MSS clamping apply.
+#[inline(never)]
+fn scrub_ipv6(ctx: &mut TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result<(), ()> {
+    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
+    let protocol = unsafe { (*ipv6hdr).next_hdr };
+    let l4_offset = l3_offset + IPV6_HDR_LEN;
+
+    // ── Hop Limit normalization (IPv6 equivalent of TTL) ────────
+    if cfg.min_hop_limit > 0 {
+        let hop_limit = unsafe { (*ipv6hdr).hop_limit };
+        if hop_limit < cfg.min_hop_limit {
+            // Hop Limit is at offset 7 in the IPv6 header.
+            // IPv6 has no header checksum, so just write the byte.
+            let hop_offset = l3_offset + 7;
+            ctx.store(hop_offset, &cfg.min_hop_limit, 0)
+                .map_err(|_| ())?;
+            increment_metric(SCRUB_METRIC_HOP_FIXED);
+        }
+    }
+
+    // ── MSS clamping (TCP SYN only) ─────────────────────────────
+    // TCP options are L4-agnostic, reuse the same function.
     if cfg.max_mss > 0 && protocol == PROTO_TCP {
         scrub_mss_clamp(ctx, cfg.max_mss, l3_offset, l4_offset)?;
     }

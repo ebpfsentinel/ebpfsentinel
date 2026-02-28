@@ -19,7 +19,9 @@ pub struct ScrubFlags {
     pub random_ip_id: u8,
     /// Maximum MSS to clamp on TCP SYN packets. 0 = no clamping.
     pub max_mss: u16,
-    pub _pad: [u8; 2],
+    /// Minimum IPv6 Hop Limit to enforce. 0 means no enforcement.
+    pub min_hop_limit: u8,
+    pub _pad: u8,
 }
 
 impl ScrubFlags {
@@ -31,7 +33,8 @@ impl ScrubFlags {
             clear_df: 0,
             random_ip_id: 0,
             max_mss: 0,
-            _pad: [0; 2],
+            min_hop_limit: 0,
+            _pad: 0,
         }
     }
 }
@@ -50,8 +53,10 @@ pub const SCRUB_METRIC_DF_CLEARED: u32 = 3;
 pub const SCRUB_METRIC_IPID_RANDOMIZED: u32 = 4;
 /// Processing errors.
 pub const SCRUB_METRIC_ERRORS: u32 = 5;
+/// IPv6 Hop Limit values corrected (raised to `min_hop_limit`).
+pub const SCRUB_METRIC_HOP_FIXED: u32 = 6;
 /// Total metric slots.
-pub const SCRUB_METRIC_COUNT: u32 = 6;
+pub const SCRUB_METRIC_COUNT: u32 = 8;
 
 // ── Pod impl ────────────────────────────────────────────────────────
 
@@ -82,6 +87,7 @@ mod tests {
         assert_eq!(mem::offset_of!(ScrubFlags, clear_df), 2);
         assert_eq!(mem::offset_of!(ScrubFlags, random_ip_id), 3);
         assert_eq!(mem::offset_of!(ScrubFlags, max_mss), 4);
+        assert_eq!(mem::offset_of!(ScrubFlags, min_hop_limit), 6);
     }
 
     #[test]
@@ -103,6 +109,7 @@ mod tests {
             SCRUB_METRIC_DF_CLEARED,
             SCRUB_METRIC_IPID_RANDOMIZED,
             SCRUB_METRIC_ERRORS,
+            SCRUB_METRIC_HOP_FIXED,
         ];
         for (i, &a) in indices.iter().enumerate() {
             for &b in &indices[i + 1..] {

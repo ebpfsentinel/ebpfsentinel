@@ -4,7 +4,7 @@ use aya::Ebpf;
 use aya::maps::{Array, HashMap, MapData};
 use domain::common::error::DomainError;
 use domain::conntrack::entity::{ConnTrackSettings, Connection, ConnectionState};
-use ebpf_common::conntrack::{ConnKey, ConnKeyV6, ConnTrackConfig, ConnValue};
+use ebpf_common::conntrack::{ConnKey, ConnKeyV6, ConnTrackConfig, ConnValue, ConnValueV6};
 use ports::secondary::conntrack_map_port::ConnTrackMapPort;
 use tracing::info;
 
@@ -12,11 +12,11 @@ use tracing::info;
 ///
 /// Uses 3 maps:
 /// - `CT_TABLE_V4`: `HashMap<ConnKey, ConnValue>` (IPv4 connections)
-/// - `CT_TABLE_V6`: `HashMap<ConnKeyV6, ConnValue>` (IPv6 connections)
+/// - `CT_TABLE_V6`: `HashMap<ConnKeyV6, ConnValueV6>` (IPv6 connections)
 /// - `CT_CONFIG`: `Array<ConnTrackConfig>` (single element: global config)
 pub struct ConnTrackMapManager {
     table_v4: HashMap<MapData, ConnKey, ConnValue>,
-    table_v6: HashMap<MapData, ConnKeyV6, ConnValue>,
+    table_v6: HashMap<MapData, ConnKeyV6, ConnValueV6>,
     config: Array<MapData, ConnTrackConfig>,
 }
 
@@ -143,7 +143,7 @@ fn u32x4_to_ipv6_bytes(words: &[u32; 4]) -> [u8; 16] {
     bytes
 }
 
-fn conn_from_v6(key: &ConnKeyV6, val: &ConnValue) -> Connection {
+fn conn_from_v6(key: &ConnKeyV6, val: &ConnValueV6) -> Connection {
     let src_ip = Ipv6Addr::from(u32x4_to_ipv6_bytes(&key.src_addr)).to_string();
     let dst_ip = Ipv6Addr::from(u32x4_to_ipv6_bytes(&key.dst_addr)).to_string();
     Connection {

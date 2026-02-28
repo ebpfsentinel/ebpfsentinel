@@ -70,6 +70,44 @@ pub struct NatRuleEntry {
     pub _pad2: [u8; 4],
 }
 
+/// Maximum NAT rules per direction (IPv6).
+pub const MAX_NAT_RULES_V6: u32 = 128;
+
+// ── NAT rule entry (IPv6) — 96 bytes ───────────────────────────────
+
+/// NAT rule for IPv6 traffic, stored in Array maps and scanned linearly.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NatRuleEntryV6 {
+    /// Source IPv6 address to match (pre-masked).
+    pub match_src_addr: [u32; 4],
+    /// Source IPv6 address mask.
+    pub match_src_mask: [u32; 4],
+    /// Destination IPv6 address to match (pre-masked).
+    pub match_dst_addr: [u32; 4],
+    /// Destination IPv6 address mask.
+    pub match_dst_mask: [u32; 4],
+    /// Destination port range start.
+    pub match_dst_port_start: u16,
+    /// Destination port range end.
+    pub match_dst_port_end: u16,
+    /// IP protocol (6=TCP, 17=UDP, 58=ICMPv6, 0=any).
+    pub match_protocol: u8,
+    /// Bitmask of active NAT_MATCH_* flags.
+    pub match_flags: u8,
+    /// NAT type (NAT_TYPE_*).
+    pub nat_type: u8,
+    pub _pad: u8,
+    /// Translated IPv6 address.
+    pub nat_addr: [u32; 4],
+    /// Translated port range start.
+    pub nat_port_start: u16,
+    /// Translated port range end.
+    pub nat_port_end: u16,
+    /// Interface index for masquerade.
+    pub nat_interface: u32,
+}
+
 // ── NAT port allocation key — 8 bytes ───────────────────────────────
 
 /// Key for NAT port allocation (LRU HashMap).
@@ -94,6 +132,8 @@ pub struct NatPortAllocValue {
 
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for NatRuleEntry {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for NatRuleEntryV6 {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for NatPortAllocKey {}
 #[cfg(feature = "userspace")]
@@ -131,6 +171,33 @@ mod tests {
         assert_eq!(mem::offset_of!(NatRuleEntry, nat_port_start), 28);
         assert_eq!(mem::offset_of!(NatRuleEntry, nat_port_end), 30);
         assert_eq!(mem::offset_of!(NatRuleEntry, nat_interface), 32);
+    }
+
+    #[test]
+    fn nat_rule_entry_v6_size() {
+        assert_eq!(mem::size_of::<NatRuleEntryV6>(), 96);
+    }
+
+    #[test]
+    fn nat_rule_entry_v6_alignment() {
+        assert_eq!(mem::align_of::<NatRuleEntryV6>(), 4);
+    }
+
+    #[test]
+    fn nat_rule_entry_v6_field_offsets() {
+        assert_eq!(mem::offset_of!(NatRuleEntryV6, match_src_addr), 0);
+        assert_eq!(mem::offset_of!(NatRuleEntryV6, match_src_mask), 16);
+        assert_eq!(mem::offset_of!(NatRuleEntryV6, match_dst_addr), 32);
+        assert_eq!(mem::offset_of!(NatRuleEntryV6, match_dst_mask), 48);
+        assert_eq!(mem::offset_of!(NatRuleEntryV6, match_dst_port_start), 64);
+        assert_eq!(mem::offset_of!(NatRuleEntryV6, match_dst_port_end), 66);
+        assert_eq!(mem::offset_of!(NatRuleEntryV6, match_protocol), 68);
+        assert_eq!(mem::offset_of!(NatRuleEntryV6, match_flags), 69);
+        assert_eq!(mem::offset_of!(NatRuleEntryV6, nat_type), 70);
+        assert_eq!(mem::offset_of!(NatRuleEntryV6, nat_addr), 72);
+        assert_eq!(mem::offset_of!(NatRuleEntryV6, nat_port_start), 88);
+        assert_eq!(mem::offset_of!(NatRuleEntryV6, nat_port_end), 90);
+        assert_eq!(mem::offset_of!(NatRuleEntryV6, nat_interface), 92);
     }
 
     #[test]

@@ -1742,6 +1742,7 @@ fn build_scrub_flags(config: &AgentConfig) -> ebpf_common::scrub::ScrubFlags {
         clear_df: u8::from(scrub.clear_df),
         random_ip_id: u8::from(scrub.random_ip_id),
         max_mss: scrub.max_mss.unwrap_or(0),
-        _pad: [0; 2],
+        min_hop_limit: scrub.min_hop_limit.unwrap_or(0),
+        _pad: 0,
     }
 }

@@ -19,7 +19,7 @@ use core::mem;
 use ebpf_common::{
     conntrack::{
         CT_SRC_COUNTER_MAX, CT_STATE_NEW, ConnKey, ConnKeyV6, ConnTrackConfig, ConnValue,
-        CT_MAX_ENTRIES_V4, CT_MAX_ENTRIES_V6, CT_STATE_ESTABLISHED, CT_STATE_RELATED,
+        ConnValueV6, CT_MAX_ENTRIES_V4, CT_MAX_ENTRIES_V6, CT_STATE_ESTABLISHED, CT_STATE_RELATED,
         OVERLOAD_SET_ID, SRC_COUNTER_FLAG_OVERLOADED, SrcStateCounter, normalize_key_v4,
         normalize_key_v6,
     },
@@ -187,7 +187,7 @@ static CT_TABLE_V4: LruHashMap<ConnKey, ConnValue> =
 /// Shared conntrack table for IPv6 ESTABLISHED bypass (read-only in XDP).
 /// Pinned at /sys/fs/bpf/ebpfsentinel/ct_table_v6, written by tc-conntrack.
 #[map]
-static CT_TABLE_V6: LruHashMap<ConnKeyV6, ConnValue> =
+static CT_TABLE_V6: LruHashMap<ConnKeyV6, ConnValueV6> =
     LruHashMap::with_max_entries(CT_MAX_ENTRIES_V6, 0);
 
 // ── IP Set maps ─────────────────────────────────────────────────────

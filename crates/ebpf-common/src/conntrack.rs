@@ -105,6 +105,42 @@ pub struct ConnValue {
     pub _pad2: [u8; 2],
 }
 
+// ── Conntrack value (IPv6) — 64 bytes ──────────────────────────────
+
+/// Connection state and counters for IPv6 connections.
+///
+/// Identical layout to `ConnValue` for the first 40 bytes (`state`..`last_seen_ns`)
+/// so the TCP state machine works on both. The `nat_addr` field is widened to
+/// 128-bit (`[u32; 4]`) for IPv6 NAT addresses.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnValueV6 {
+    /// Current connection state (CT_STATE_*).
+    pub state: u8,
+    /// Connection flags (CT_FLAG_*).
+    pub flags: u8,
+    /// NAT type: 0=none, 1=SNAT, 2=DNAT.
+    pub nat_type: u8,
+    pub _pad: u8,
+    /// Forward direction packet count.
+    pub packets_fwd: u32,
+    /// Reverse direction packet count.
+    pub packets_rev: u32,
+    /// Forward direction byte count.
+    pub bytes_fwd: u32,
+    /// Reverse direction byte count.
+    pub bytes_rev: u32,
+    /// Timestamp of first packet (ktime_get_boot_ns).
+    pub first_seen_ns: u64,
+    /// Timestamp of most recent packet.
+    pub last_seen_ns: u64,
+    /// NAT translated IPv6 address.
+    pub nat_addr: [u32; 4],
+    /// NAT translated port.
+    pub nat_port: u16,
+    pub _pad2: [u8; 2],
+}
+
 // ── Conntrack configuration — 80 bytes ──────────────────────────────
 
 /// Global conntrack configuration, stored in a single-element Array map.
@@ -268,6 +304,8 @@ unsafe impl aya::Pod for ConnKeyV6 {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for ConnValue {}
 #[cfg(feature = "userspace")]
+unsafe impl aya::Pod for ConnValueV6 {}
+#[cfg(feature = "userspace")]
 unsafe impl aya::Pod for ConnTrackConfig {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for SrcStateCounter {}
@@ -307,6 +345,44 @@ mod tests {
     #[test]
     fn conn_value_alignment() {
         assert_eq!(mem::align_of::<ConnValue>(), 8);
+    }
+
+    #[test]
+    fn conn_value_v6_size() {
+        assert_eq!(mem::size_of::<ConnValueV6>(), 64);
+    }
+
+    #[test]
+    fn conn_value_v6_alignment() {
+        assert_eq!(mem::align_of::<ConnValueV6>(), 8);
+    }
+
+    #[test]
+    fn conn_value_v6_field_offsets() {
+        assert_eq!(mem::offset_of!(ConnValueV6, state), 0);
+        assert_eq!(mem::offset_of!(ConnValueV6, flags), 1);
+        assert_eq!(mem::offset_of!(ConnValueV6, nat_type), 2);
+        assert_eq!(mem::offset_of!(ConnValueV6, packets_fwd), 4);
+        assert_eq!(mem::offset_of!(ConnValueV6, packets_rev), 8);
+        assert_eq!(mem::offset_of!(ConnValueV6, bytes_fwd), 12);
+        assert_eq!(mem::offset_of!(ConnValueV6, bytes_rev), 16);
+        assert_eq!(mem::offset_of!(ConnValueV6, first_seen_ns), 24);
+        assert_eq!(mem::offset_of!(ConnValueV6, last_seen_ns), 32);
+        assert_eq!(mem::offset_of!(ConnValueV6, nat_addr), 40);
+        assert_eq!(mem::offset_of!(ConnValueV6, nat_port), 56);
+    }
+
+    #[test]
+    fn conn_value_v6_state_same_offset_as_v4() {
+        // Ensures TCP state machine works on both types
+        assert_eq!(
+            mem::offset_of!(ConnValue, state),
+            mem::offset_of!(ConnValueV6, state)
+        );
+        assert_eq!(
+            mem::offset_of!(ConnValue, flags),
+            mem::offset_of!(ConnValueV6, flags)
+        );
     }
 
     #[test]

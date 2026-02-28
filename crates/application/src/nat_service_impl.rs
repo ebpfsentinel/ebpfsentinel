@@ -93,15 +93,25 @@ impl NatAppService {
             return;
         };
 
-        let entries: Vec<ebpf_common::nat::NatRuleEntry> = self
-            .dnat_rules
+        let enabled_rules: Vec<&NatRule> = self.dnat_rules.iter().filter(|r| r.enabled).collect();
+
+        let v4_entries: Vec<ebpf_common::nat::NatRuleEntry> = enabled_rules
             .iter()
-            .filter(|r| r.enabled)
-            .map(nat_rule_to_ebpf_entry)
+            .filter(|r| !is_v6_rule(r))
+            .map(|r| nat_rule_to_ebpf_entry(r))
             .collect();
 
-        if let Err(e) = port.load_dnat_rules(&entries) {
-            tracing::warn!("failed to load DNAT rules into eBPF: {e}");
+        let v6_entries: Vec<ebpf_common::nat::NatRuleEntryV6> = enabled_rules
+            .iter()
+            .filter(|r| is_v6_rule(r))
+            .map(|r| nat_rule_to_ebpf_entry_v6(r))
+            .collect();
+
+        if let Err(e) = port.load_dnat_rules(&v4_entries) {
+            tracing::warn!("failed to load DNAT V4 rules into eBPF: {e}");
+        }
+        if let Err(e) = port.load_dnat_rules_v6(&v6_entries) {
+            tracing::warn!("failed to load DNAT V6 rules into eBPF: {e}");
         }
     }
 
@@ -110,15 +120,25 @@ impl NatAppService {
             return;
         };
 
-        let entries: Vec<ebpf_common::nat::NatRuleEntry> = self
-            .snat_rules
+        let enabled_rules: Vec<&NatRule> = self.snat_rules.iter().filter(|r| r.enabled).collect();
+
+        let v4_entries: Vec<ebpf_common::nat::NatRuleEntry> = enabled_rules
             .iter()
-            .filter(|r| r.enabled)
-            .map(nat_rule_to_ebpf_entry)
+            .filter(|r| !is_v6_rule(r))
+            .map(|r| nat_rule_to_ebpf_entry(r))
             .collect();
 
-        if let Err(e) = port.load_snat_rules(&entries) {
-            tracing::warn!("failed to load SNAT rules into eBPF: {e}");
+        let v6_entries: Vec<ebpf_common::nat::NatRuleEntryV6> = enabled_rules
+            .iter()
+            .filter(|r| is_v6_rule(r))
+            .map(|r| nat_rule_to_ebpf_entry_v6(r))
+            .collect();
+
+        if let Err(e) = port.load_snat_rules(&v4_entries) {
+            tracing::warn!("failed to load SNAT V4 rules into eBPF: {e}");
+        }
+        if let Err(e) = port.load_snat_rules_v6(&v6_entries) {
+            tracing::warn!("failed to load SNAT V6 rules into eBPF: {e}");
         }
     }
 
@@ -271,6 +291,213 @@ fn parse_cidr_to_ip_mask(cidr: &str) -> Option<(u32, u32)> {
         !0u32 << (32 - prefix_len)
     };
     Some((u32::from(ip), mask))
+}
+
+/// Determine if a NAT rule targets IPv6 addresses.
+fn is_v6_rule(rule: &NatRule) -> bool {
+    use domain::nat::entity::NatType;
+    use std::net::IpAddr;
+
+    // Check NAT type addresses
+    match &rule.nat_type {
+        NatType::Snat { addr, .. } | NatType::Dnat { addr, .. } => {
+            if matches!(addr, IpAddr::V6(_)) {
+                return true;
+            }
+        }
+        NatType::OneToOne {
+            external, internal, ..
+        } => {
+            if matches!(external, IpAddr::V6(_)) || matches!(internal, IpAddr::V6(_)) {
+                return true;
+            }
+        }
+        NatType::PortForward { int_addr, .. } => {
+            if matches!(int_addr, IpAddr::V6(_)) {
+                return true;
+            }
+        }
+        NatType::Masquerade { .. } | NatType::Redirect { .. } => {}
+    }
+
+    // Check match CIDRs for IPv6 (contains ':')
+    if let Some(ref src) = rule.match_src
+        && src.contains(':')
+    {
+        return true;
+    }
+    if let Some(ref dst) = rule.match_dst
+        && dst.contains(':')
+    {}
+
+    false
+}
+
+/// Convert a domain `NatRule` to an eBPF `NatRuleEntryV6`.
+#[allow(clippy::too_many_lines)]
+fn nat_rule_to_ebpf_entry_v6(rule: &NatRule) -> ebpf_common::nat::NatRuleEntryV6 {
+    use domain::nat::entity::NatType;
+    use ebpf_common::nat::{
+        NAT_MATCH_DST_IP, NAT_MATCH_DST_PORT, NAT_MATCH_PROTO, NAT_MATCH_SRC_IP, NAT_TYPE_DNAT,
+        NAT_TYPE_MASQUERADE, NAT_TYPE_NONE, NAT_TYPE_ONETOONE, NAT_TYPE_REDIRECT, NAT_TYPE_SNAT,
+        NatRuleEntryV6,
+    };
+    use std::net::IpAddr;
+
+    let mut entry = NatRuleEntryV6 {
+        match_src_addr: [0; 4],
+        match_src_mask: [0; 4],
+        match_dst_addr: [0; 4],
+        match_dst_mask: [0; 4],
+        match_dst_port_start: 0,
+        match_dst_port_end: 0,
+        match_protocol: 0,
+        match_flags: 0,
+        nat_type: NAT_TYPE_NONE,
+        _pad: 0,
+        nat_addr: [0; 4],
+        nat_port_start: 0,
+        nat_port_end: 0,
+        nat_interface: 0,
+    };
+
+    // Set match criteria
+    if let Some(ref src_cidr) = rule.match_src
+        && let Some((addr, mask)) = parse_cidr_to_ipv6_addr_mask(src_cidr)
+    {
+        entry.match_src_addr = addr;
+        entry.match_src_mask = mask;
+        entry.match_flags |= NAT_MATCH_SRC_IP;
+    }
+
+    if let Some(ref dst_cidr) = rule.match_dst
+        && let Some((addr, mask)) = parse_cidr_to_ipv6_addr_mask(dst_cidr)
+    {
+        entry.match_dst_addr = addr;
+        entry.match_dst_mask = mask;
+        entry.match_flags |= NAT_MATCH_DST_IP;
+    }
+
+    if let Some(ref port_range) = rule.match_dst_port {
+        entry.match_dst_port_start = port_range.start;
+        entry.match_dst_port_end = port_range.end;
+        entry.match_flags |= NAT_MATCH_DST_PORT;
+    }
+
+    if let Some(ref proto_str) = rule.match_protocol {
+        let proto = match proto_str.to_lowercase().as_str() {
+            "tcp" => 6,
+            "udp" => 17,
+            "icmpv6" => 58,
+            _ => 0,
+        };
+        if proto > 0 {
+            entry.match_protocol = proto;
+            entry.match_flags |= NAT_MATCH_PROTO;
+        }
+    }
+
+    match &rule.nat_type {
+        NatType::Snat { addr, port_range } => {
+            entry.nat_type = NAT_TYPE_SNAT;
+            if let IpAddr::V6(v6) = addr {
+                entry.nat_addr = ipv6_to_u32x4(v6);
+            }
+            if let Some(range) = port_range {
+                entry.nat_port_start = range.start;
+                entry.nat_port_end = range.end;
+            }
+        }
+        NatType::Dnat { addr, port } => {
+            entry.nat_type = NAT_TYPE_DNAT;
+            if let IpAddr::V6(v6) = addr {
+                entry.nat_addr = ipv6_to_u32x4(v6);
+            }
+            if let Some(p) = port {
+                entry.nat_port_start = *p;
+                entry.nat_port_end = *p;
+            }
+        }
+        NatType::Masquerade { port_range, .. } => {
+            entry.nat_type = NAT_TYPE_MASQUERADE;
+            if let Some(range) = port_range {
+                entry.nat_port_start = range.start;
+                entry.nat_port_end = range.end;
+            }
+        }
+        NatType::OneToOne {
+            external, internal, ..
+        } => {
+            entry.nat_type = NAT_TYPE_ONETOONE;
+            if let IpAddr::V6(v6) = external {
+                entry.match_dst_addr = ipv6_to_u32x4(v6);
+                entry.match_dst_mask = [0xFFFF_FFFF; 4];
+                entry.match_flags |= NAT_MATCH_DST_IP;
+            }
+            if let IpAddr::V6(v6) = internal {
+                entry.nat_addr = ipv6_to_u32x4(v6);
+            }
+        }
+        NatType::Redirect { port } => {
+            entry.nat_type = NAT_TYPE_REDIRECT;
+            entry.nat_port_start = *port;
+            entry.nat_port_end = *port;
+        }
+        NatType::PortForward {
+            ext_port,
+            int_addr,
+            int_port,
+        } => {
+            entry.nat_type = NAT_TYPE_DNAT;
+            entry.match_dst_port_start = ext_port.start;
+            entry.match_dst_port_end = ext_port.end;
+            entry.match_flags |= NAT_MATCH_DST_PORT;
+            if let IpAddr::V6(v6) = int_addr {
+                entry.nat_addr = ipv6_to_u32x4(v6);
+            }
+            entry.nat_port_start = int_port.start;
+            entry.nat_port_end = int_port.end;
+        }
+    }
+
+    entry
+}
+
+/// Parse an IPv6 CIDR string like `2001:db8::/32` to (addr, mask) as `[u32; 4]`.
+fn parse_cidr_to_ipv6_addr_mask(cidr: &str) -> Option<([u32; 4], [u32; 4])> {
+    let (ip_str, prefix_str) = cidr.split_once('/').unwrap_or((cidr, "128"));
+    let ip: std::net::Ipv6Addr = ip_str.parse().ok()?;
+    let prefix_len: u32 = prefix_str.parse().ok()?;
+    let addr = ipv6_to_u32x4(&ip);
+    let mask = prefix_to_ipv6_mask(prefix_len);
+    Some((addr, mask))
+}
+
+/// Convert an `Ipv6Addr` to `[u32; 4]` in network byte order words.
+fn ipv6_to_u32x4(ip: &std::net::Ipv6Addr) -> [u32; 4] {
+    let octets = ip.octets();
+    [
+        u32::from_be_bytes([octets[0], octets[1], octets[2], octets[3]]),
+        u32::from_be_bytes([octets[4], octets[5], octets[6], octets[7]]),
+        u32::from_be_bytes([octets[8], octets[9], octets[10], octets[11]]),
+        u32::from_be_bytes([octets[12], octets[13], octets[14], octets[15]]),
+    ]
+}
+
+/// Convert a prefix length (0..128) to an IPv6 mask as `[u32; 4]`.
+fn prefix_to_ipv6_mask(prefix_len: u32) -> [u32; 4] {
+    let mut mask = [0u32; 4];
+    let mut remaining = prefix_len.min(128);
+    for word in &mut mask {
+        if remaining >= 32 {
+            *word = 0xFFFF_FFFF;
+            remaining -= 32;
+        } else if remaining > 0 {
+            *word = !0u32 << (32 - remaining);
+            remaining = 0;
+        }
+    }
+    mask
 }
 
 #[cfg(test)]
