@@ -44,7 +44,22 @@ jobs:
             crates/ebpf-programs/tc-ids
             crates/ebpf-programs/tc-threatintel
             crates/ebpf-programs/tc-dns
+            crates/ebpf-programs/tc-conntrack
+            crates/ebpf-programs/tc-nat-ingress
+            crates/ebpf-programs/tc-nat-egress
+            crates/ebpf-programs/tc-scrub
             crates/ebpf-programs/uprobe-dlp
+
+      - name: Install bpf-linker
+        run: |
+          sudo apt-get update && sudo apt-get install -y llvm-dev
+          if ! command -v llvm-config &>/dev/null; then
+            LLC=$(ls /usr/bin/llvm-config-* 2>/dev/null | sort -V | tail -1)
+            [ -n "$LLC" ] && sudo ln -sf "$LLC" /usr/bin/llvm-config
+          fi
+          llvm-config --version
+          cargo +nightly install bpf-linker
+          bpf-linker --version
 
       - name: Build all eBPF kernel programs
         run: cargo xtask ebpf-build
@@ -58,5 +73,9 @@ jobs:
             crates/ebpf-programs/tc-ids/target/bpfel-unknown-none/release/tc-ids
             crates/ebpf-programs/tc-threatintel/target/bpfel-unknown-none/release/tc-threatintel
             crates/ebpf-programs/tc-dns/target/bpfel-unknown-none/release/tc-dns
+            crates/ebpf-programs/tc-conntrack/target/bpfel-unknown-none/release/tc-conntrack
+            crates/ebpf-programs/tc-nat-ingress/target/bpfel-unknown-none/release/tc-nat-ingress
+            crates/ebpf-programs/tc-nat-egress/target/bpfel-unknown-none/release/tc-nat-egress
+            crates/ebpf-programs/tc-scrub/target/bpfel-unknown-none/release/tc-scrub
             crates/ebpf-programs/uprobe-dlp/target/bpfel-unknown-none/release/uprobe-dlp
           retention-days: 7

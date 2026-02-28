@@ -41,15 +41,14 @@ jobs:
         run: |
           # Install LLVM dev libraries required by bpf-linker
           sudo apt-get install -y llvm-dev
-          # Ensure llvm-config is in PATH (some runners have versioned binaries only)
+          # Ensure llvm-config is available (runners may only have llvm-config-NN)
           if ! command -v llvm-config &>/dev/null; then
-            LLVM_CONFIG=$(find /usr/lib/llvm-*/bin -name 'llvm-config' 2>/dev/null | sort -V | tail -1)
-            if [ -n "$LLVM_CONFIG" ]; then
-              export PATH="$(dirname "$LLVM_CONFIG"):$PATH"
-            fi
+            LLC=$(ls /usr/bin/llvm-config-* 2>/dev/null | sort -V | tail -1)
+            [ -n "$LLC" ] && sudo ln -sf "$LLC" /usr/bin/llvm-config
           fi
+          llvm-config --version
           cargo +nightly install bpf-linker
-          which bpf-linker
+          bpf-linker --version
 
       - name: Build eBPF programs
         run: cargo xtask ebpf-build
