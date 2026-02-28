@@ -7,6 +7,7 @@ use aya_ebpf::{
     macros::{classifier, map},
     maps::{Array, PerCpuArray},
     programs::TcContext,
+    EbpfContext,
 };
 use core::mem;
 use ebpf_common::scrub::{
@@ -25,7 +26,7 @@ const PROTO_TCP: u8 = 6;
 
 /// IPv4 flags field offset within Ipv4Hdr (frag_off contains flags + fragment offset).
 /// DF = bit 14 (0x4000 in network byte order).
-const IP_DF_BE: u16 = 0x0040; // 0x4000 in big-endian on LE host
+const IP_DF: u16 = 0x4000; // Don't Fragment flag in host byte order
 
 /// TCP option kind: MSS.
 const TCP_OPT_MSS: u8 = 2;
@@ -61,8 +62,8 @@ static SCRUB_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(SCRUB_MET
 // ── Entry point ─────────────────────────────────────────────────────
 
 #[classifier]
-pub fn tc_scrub(ctx: TcContext) -> i32 {
-    match try_tc_scrub(&ctx) {
+pub fn tc_scrub(mut ctx: TcContext) -> i32 {
+    match try_tc_scrub(&mut ctx) {
         Ok(action) => action,
         Err(()) => {
             increment_metric(SCRUB_METRIC_ERRORS);
@@ -101,7 +102,7 @@ fn get_config() -> Option<ScrubFlags> {
 // ── Packet processing ───────────────────────────────────────────────
 
 #[inline(always)]
-fn try_tc_scrub(ctx: &TcContext) -> Result<i32, ()> {
+fn try_tc_scrub(ctx: &mut TcContext) -> Result<i32, ()> {
     let cfg = match get_config() {
         Some(cfg) if cfg.enabled != 0 => cfg,
         _ => return Ok(TC_ACT_OK),
@@ -128,7 +129,7 @@ fn try_tc_scrub(ctx: &TcContext) -> Result<i32, ()> {
 
 /// Apply scrub operations to an IPv4 packet.
 #[inline(always)]
-fn scrub_ipv4(ctx: &TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result<(), ()> {
+fn scrub_ipv4(ctx: &mut TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result<(), ()> {
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let protocol = unsafe { (*ipv4hdr).proto } as u8;
     let ihl = unsafe { (*ipv4hdr).ihl() } as usize;
@@ -145,8 +146,8 @@ fn scrub_ipv4(ctx: &TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result<(),
 
     // ── Clear DF bit ────────────────────────────────────────────
     if cfg.clear_df != 0 {
-        let frag_off = unsafe { (*ipv4hdr).frag_off };
-        if frag_off & IP_DF_BE != 0 {
+        let frag_off = u16::from_be_bytes(unsafe { (*ipv4hdr).frags });
+        if frag_off & IP_DF != 0 {
             scrub_clear_df(ctx, l3_offset, frag_off)?;
             increment_metric(SCRUB_METRIC_DF_CLEARED);
         }
@@ -154,7 +155,7 @@ fn scrub_ipv4(ctx: &TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result<(),
 
     // ── Randomize IP ID ─────────────────────────────────────────
     if cfg.random_ip_id != 0 {
-        let old_id = unsafe { (*ipv4hdr).id };
+        let old_id = u16::from_be_bytes(unsafe { (*ipv4hdr).id });
         let new_id = (unsafe { bpf_get_prandom_u32() } & 0xFFFF) as u16;
         if old_id != new_id {
             scrub_random_ip_id(ctx, l3_offset, old_id, new_id)?;
@@ -172,7 +173,7 @@ fn scrub_ipv4(ctx: &TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result<(),
 
 /// Rewrite TTL field and update IPv4 header checksum.
 #[inline(always)]
-fn scrub_fix_ttl(ctx: &TcContext, l3_offset: usize, old_ttl: u8, new_ttl: u8) -> Result<(), ()> {
+fn scrub_fix_ttl(ctx: &mut TcContext, l3_offset: usize, old_ttl: u8, new_ttl: u8) -> Result<(), ()> {
     // TTL is at offset 8 in the IPv4 header
     let ttl_offset = l3_offset + 8;
     let csum_offset = (l3_offset + 10) as u32; // check field at offset 10
@@ -185,24 +186,25 @@ fn scrub_fix_ttl(ctx: &TcContext, l3_offset: usize, old_ttl: u8, new_ttl: u8) ->
     let old_val = (old_ttl as u32) << 8;
     let new_val = (new_ttl as u32) << 8;
     unsafe {
-        bpf_l3_csum_replace(ctx.as_ptr() as *mut _, csum_offset as u64, old_val as u64, new_val as u64, 2);
+        bpf_l3_csum_replace(ctx.as_ptr() as *mut _, csum_offset, old_val as u64, new_val as u64, 2);
     }
     Ok(())
 }
 
 /// Clear the DF bit in IPv4 flags and update checksum.
 #[inline(always)]
-fn scrub_clear_df(ctx: &TcContext, l3_offset: usize, old_frag_off: u16) -> Result<(), ()> {
-    let new_frag_off = old_frag_off & !IP_DF_BE;
+fn scrub_clear_df(ctx: &mut TcContext, l3_offset: usize, old_frag_off: u16) -> Result<(), ()> {
+    let new_frag_off = old_frag_off & !IP_DF;
     let frag_offset = l3_offset + 6; // frag_off at offset 6 in IPv4 header
     let csum_offset = (l3_offset + 10) as u32;
 
-    ctx.store(frag_offset, &new_frag_off, 0).map_err(|_| ())?;
+    let new_frag_be = new_frag_off.to_be();
+    ctx.store(frag_offset, &new_frag_be, 0).map_err(|_| ())?;
 
     unsafe {
         bpf_l3_csum_replace(
             ctx.as_ptr() as *mut _,
-            csum_offset as u64,
+            csum_offset,
             old_frag_off as u64,
             new_frag_off as u64,
             2,
@@ -214,7 +216,7 @@ fn scrub_clear_df(ctx: &TcContext, l3_offset: usize, old_frag_off: u16) -> Resul
 /// Randomize IP ID and update checksum.
 #[inline(always)]
 fn scrub_random_ip_id(
-    ctx: &TcContext,
+    ctx: &mut TcContext,
     l3_offset: usize,
     old_id: u16,
     new_id: u16,
@@ -228,7 +230,7 @@ fn scrub_random_ip_id(
     unsafe {
         bpf_l3_csum_replace(
             ctx.as_ptr() as *mut _,
-            csum_offset as u64,
+            csum_offset,
             old_id as u64,
             new_id_be as u64,
             2,
@@ -242,9 +244,9 @@ fn scrub_random_ip_id(
 /// Scans TCP options looking for MSS (kind=2, len=4), rewrites in-place.
 #[inline(always)]
 fn scrub_mss_clamp(
-    ctx: &TcContext,
+    ctx: &mut TcContext,
     max_mss: u16,
-    l3_offset: usize,
+    _l3_offset: usize,
     l4_offset: usize,
 ) -> Result<(), ()> {
     // Read TCP flags to check if SYN
@@ -308,7 +310,7 @@ fn scrub_mss_clamp(
                 unsafe {
                     bpf_l4_csum_replace(
                         ctx.as_ptr() as *mut _,
-                        tcp_csum_offset as u64,
+                        tcp_csum_offset,
                         old_mss_val as u64,
                         new_mss_val as u64,
                         2,

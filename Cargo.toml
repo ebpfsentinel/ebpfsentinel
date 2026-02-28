@@ -21,6 +21,7 @@ exclude = [
     "crates/ebpf-programs/tc-conntrack",
     "crates/ebpf-programs/tc-nat-ingress",
     "crates/ebpf-programs/tc-nat-egress",
+    "crates/ebpf-programs/tc-scrub",
     "crates/ebpf-programs/uprobe-dlp",
 ]
 
