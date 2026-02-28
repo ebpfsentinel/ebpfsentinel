@@ -10,6 +10,7 @@ agent:
   http_port: 18080
   grpc_port: 50151
   metrics_port: 19090
+  swagger_ui: true
 
 firewall:
   enabled: true
