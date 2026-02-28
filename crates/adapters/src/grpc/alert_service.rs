@@ -28,6 +28,18 @@ fn alert_to_event(alert: &Alert) -> proto::AlertEvent {
         dst_domain: alert.dst_domain.clone().unwrap_or_default(),
         src_domain_score: alert.src_domain_score.unwrap_or(-1.0),
         dst_domain_score: alert.dst_domain_score.unwrap_or(-1.0),
+        confidence: alert.confidence.map_or(-1, i32::from),
+        threat_type: alert.threat_type.clone().unwrap_or_default(),
+        data_type: alert.data_type.clone().unwrap_or_default(),
+        pid: alert.pid.unwrap_or(0),
+        tgid: alert.tgid.unwrap_or(0),
+        direction: alert.direction.map_or(-1, i32::from),
+        matched_domain: alert.matched_domain.clone().unwrap_or_default(),
+        attack_type: alert.attack_type.clone().unwrap_or_default(),
+        peak_pps: alert.peak_pps.unwrap_or(0),
+        current_pps: alert.current_pps.unwrap_or(0),
+        mitigation_status: alert.mitigation_status.clone().unwrap_or_default(),
+        total_packets: alert.total_packets.unwrap_or(0),
     }
 }
 
@@ -143,6 +155,18 @@ mod tests {
             dst_domain: None,
             src_domain_score: None,
             dst_domain_score: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: None,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
         }
     }
 

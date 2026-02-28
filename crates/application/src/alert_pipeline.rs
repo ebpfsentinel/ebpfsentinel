@@ -3,6 +3,7 @@ use std::sync::Arc;
 use domain::alert::engine::AlertRouter;
 use domain::alert::entity::{Alert, AlertDestination};
 use domain::audit::entity::{AuditAction, AuditComponent};
+use domain::ddos::entity::DdosAttack;
 use domain::dlp::entity::DlpAlert;
 use domain::ids::entity::IdsAlert;
 use ports::secondary::alert_enrichment_port::AlertEnrichmentPort;
@@ -273,6 +274,108 @@ impl AlertPipeline {
                     data_type = %dlp_alert.data_type,
                     action = %alert.action,
                     "DLP alert routed (no sender configured)"
+                );
+            }
+        }
+    }
+
+    /// Process a `DDoS` attack state change: convert to domain Alert, record metric,
+    /// pass through router, and dispatch to matching senders.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn process_ddos_alert(
+        &mut self,
+        attack: &DdosAttack,
+        src_addr: [u32; 4],
+        dst_addr: [u32; 4],
+        is_ipv6: bool,
+        src_port: u16,
+        dst_port: u16,
+        protocol: u8,
+    ) {
+        let description = format!(
+            "DDoS {:?} attack {} — status: {:?}, peak: {} pps, current: {} pps",
+            attack.attack_type,
+            attack.id,
+            attack.mitigation_status,
+            attack.peak_pps,
+            attack.current_pps,
+        );
+        let mut alert = Alert::from_ddos_attack(
+            attack,
+            src_addr,
+            dst_addr,
+            is_ipv6,
+            src_port,
+            dst_port,
+            protocol,
+            &description,
+        );
+
+        // Enrich with domain context (best-effort)
+        if let Some(ref enricher) = self.enricher {
+            enricher.enrich_alert(&mut alert);
+        }
+
+        // Record alert metrics
+        let severity_str = severity_label(alert.severity);
+        self.metrics.record_alert(&alert.component, severity_str);
+        self.metrics
+            .record_alert_by_rule(&alert.component, &alert.rule_id.0);
+
+        // Persist alert to store (best-effort)
+        if let Some(ref store) = self.alert_store
+            && let Err(e) = store.store_alert(&alert)
+        {
+            tracing::warn!(alert_id = %alert.id, error = %e, "failed to store DDoS alert");
+        }
+
+        // Broadcast to gRPC stream subscribers (best-effort, non-blocking)
+        if let Some(ref tx) = self.stream_tx {
+            let _ = tx.send(alert.clone());
+        }
+
+        // Pass through router (dedup, throttle, route matching)
+        let matched_routes = self.router.process_alert(&alert);
+
+        if matched_routes.is_empty() {
+            self.metrics.record_alert_dropped("no_route");
+            tracing::debug!(
+                attack_id = %alert.rule_id,
+                severity = severity_str,
+                "DDoS alert dropped: no matching route or dedup/throttle"
+            );
+            return;
+        }
+
+        // Dispatch to each matched route's sender
+        for (idx, route) in &matched_routes {
+            let sender = match &route.destination {
+                AlertDestination::Log => self.log_sender.as_ref(),
+                AlertDestination::Webhook { .. } => self.webhook_sender.as_ref(),
+                AlertDestination::Email { .. } => self.email_sender.as_ref(),
+            };
+
+            if let Some(sender) = sender {
+                if let Err(e) = sender.send(&alert, route).await {
+                    tracing::warn!(
+                        alert_id = %alert.id,
+                        route_name = %route.name,
+                        route_index = idx,
+                        error = %e,
+                        "DDoS alert send failed"
+                    );
+                }
+            } else {
+                tracing::info!(
+                    alert_id = %alert.id,
+                    attack_id = %alert.rule_id,
+                    severity = severity_str,
+                    route_name = %route.name,
+                    route_index = idx,
+                    attack_type = ?attack.attack_type,
+                    peak_pps = attack.peak_pps,
+                    action = %alert.action,
+                    "DDoS alert routed (no sender configured)"
                 );
             }
         }

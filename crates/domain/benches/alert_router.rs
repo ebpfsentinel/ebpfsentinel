@@ -27,6 +27,18 @@ fn make_alert(id: usize, severity: Severity) -> Alert {
         dst_domain: None,
         src_domain_score: None,
         dst_domain_score: None,
+        confidence: None,
+        threat_type: None,
+        data_type: None,
+        pid: None,
+        tgid: None,
+        direction: None,
+        matched_domain: None,
+        attack_type: None,
+        peak_pps: None,
+        current_pps: None,
+        mitigation_status: None,
+        total_packets: None,
     }
 }
 

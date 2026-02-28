@@ -55,4 +55,31 @@ message AlertEvent {
   double src_domain_score = 17;
   // Reputation score for destination domain (-1 if absent).
   double dst_domain_score = 18;
+
+  // ── Domain-specific context (populated based on component) ───
+
+  // ThreatIntel: IOC confidence score (0-100, -1 if absent).
+  int32 confidence = 19;
+  // ThreatIntel: threat category (malware, c2, scanner, spam, other). Empty if absent.
+  string threat_type = 20;
+  // DLP: data category (pci, pii, credentials, custom). Empty if absent.
+  string data_type = 21;
+  // DLP: process ID that triggered the alert (0 if absent).
+  uint32 pid = 22;
+  // DLP: thread group ID (0 if absent).
+  uint32 tgid = 23;
+  // DLP: direction (0=write, 1=read, -1 if absent).
+  int32 direction = 24;
+  // IDS: matched domain name for domain-aware rules. Empty if absent.
+  string matched_domain = 25;
+  // DDoS: attack type (SynFlood, UdpAmplification, etc.). Empty if absent.
+  string attack_type = 26;
+  // DDoS: peak packets per second observed (0 if absent).
+  uint64 peak_pps = 27;
+  // DDoS: current smoothed packets per second / EWMA (0 if absent).
+  uint64 current_pps = 28;
+  // DDoS: mitigation status (Detecting, Active, Mitigated, Expired). Empty if absent.
+  string mitigation_status = 29;
+  // DDoS: total packets in attack (0 if absent).
+  uint64 total_packets = 30;
 }

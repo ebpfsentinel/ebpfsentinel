@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::common::entity::{DomainMode, RuleId, Severity};
+use crate::ddos::entity::DdosAttack;
 use crate::dlp::entity::DlpAlert;
 use crate::ids::entity::IdsAlert;
 use crate::threatintel::entity::ThreatIntelAlert;
@@ -42,6 +43,44 @@ pub struct Alert {
     /// Reputation score for destination domain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dst_domain_score: Option<f64>,
+
+    // ── Domain-specific context (populated based on component) ───
+    /// Threat intel: IOC confidence score (0-100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<u8>,
+    /// Threat intel: threat category (malware, c2, scanner, spam, other).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threat_type: Option<String>,
+    /// DLP: data category (pci, pii, credentials, custom).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<String>,
+    /// DLP: process ID that triggered the alert.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// DLP: thread group ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tgid: Option<u32>,
+    /// DLP: direction (0=write, 1=read).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<u8>,
+    /// IDS: matched domain name for domain-aware rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_domain: Option<String>,
+    /// `DDoS`: attack type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack_type: Option<String>,
+    /// `DDoS`: peak packets per second observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_pps: Option<u64>,
+    /// `DDoS`: current smoothed packets per second (EWMA).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_pps: Option<u64>,
+    /// `DDoS`: mitigation status (detecting, active, mitigated, expired).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mitigation_status: Option<String>,
+    /// `DDoS`: total packets in attack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_packets: Option<u64>,
 }
 
 impl Alert {
@@ -66,6 +105,18 @@ impl Alert {
             dst_domain: None,
             src_domain_score: None,
             dst_domain_score: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: None,
+            direction: None,
+            matched_domain: ids.matched_domain.clone(),
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
         }
     }
 
@@ -92,6 +143,18 @@ impl Alert {
             dst_domain: None,
             src_domain_score: None,
             dst_domain_score: None,
+            confidence: None,
+            threat_type: None,
+            data_type: Some(dlp.data_type.clone()),
+            pid: Some(dlp.pid),
+            tgid: Some(dlp.tgid),
+            direction: Some(dlp.direction),
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
         }
     }
 
@@ -116,6 +179,69 @@ impl Alert {
             dst_domain: None,
             src_domain_score: None,
             dst_domain_score: None,
+            confidence: Some(ti.confidence),
+            threat_type: Some(ti.threat_type.to_string()),
+            data_type: None,
+            pid: None,
+            tgid: None,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+        }
+    }
+
+    /// Create a domain alert from a `DDoS` attack state change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_ddos_attack(
+        attack: &DdosAttack,
+        src_addr: [u32; 4],
+        dst_addr: [u32; 4],
+        is_ipv6: bool,
+        src_port: u16,
+        dst_port: u16,
+        protocol: u8,
+        description: &str,
+    ) -> Self {
+        let severity = match attack.attack_type.severity() {
+            crate::ddos::entity::DdosSeverity::Medium => Severity::Medium,
+            crate::ddos::entity::DdosSeverity::High => Severity::High,
+            crate::ddos::entity::DdosSeverity::Critical => Severity::Critical,
+        };
+        Self {
+            id: Self::generate_id(attack.last_seen_ns, &RuleId(attack.id.clone())),
+            timestamp_ns: attack.last_seen_ns,
+            component: "ddos".to_string(),
+            severity,
+            rule_id: RuleId(attack.id.clone()),
+            action: DomainMode::Block,
+            src_addr,
+            dst_addr,
+            src_port,
+            dst_port,
+            protocol,
+            is_ipv6,
+            message: description.to_string(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: None,
+            direction: None,
+            matched_domain: None,
+            attack_type: Some(format!("{:?}", attack.attack_type)),
+            peak_pps: Some(attack.peak_pps),
+            current_pps: Some(attack.current_pps),
+            mitigation_status: Some(format!("{:?}", attack.mitigation_status)),
+            total_packets: Some(attack.total_packets),
         }
     }
 

@@ -56,11 +56,16 @@ pub struct AlertResponse {
     pub severity: String,
     pub rule_id: String,
     pub action: String,
-    pub src_ip: u32,
-    pub dst_ip: u32,
+    /// Source address as four big-endian u32 words.
+    /// IPv4: `[v4, 0, 0, 0]`. IPv6: full 128-bit address.
+    pub src_addr: Vec<u32>,
+    /// Destination address (same encoding as `src_addr`).
+    pub dst_addr: Vec<u32>,
     pub src_port: u16,
     pub dst_port: u16,
     pub protocol: u8,
+    /// `true` if the addresses are IPv6.
+    pub is_ipv6: bool,
     pub message: String,
     pub false_positive: bool,
     /// Reverse-DNS domain for source IP.
@@ -75,6 +80,42 @@ pub struct AlertResponse {
     /// Reputation score for destination domain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dst_domain_score: Option<f64>,
+    /// Threat intel: IOC confidence score (0-100).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<u8>,
+    /// Threat intel: threat category.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threat_type: Option<String>,
+    /// DLP: data category (pci, pii, credentials, custom).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<String>,
+    /// DLP: process ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// DLP: thread group ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tgid: Option<u32>,
+    /// DLP: direction (0=write, 1=read).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<u8>,
+    /// IDS: matched domain name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_domain: Option<String>,
+    /// `DDoS`: attack type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attack_type: Option<String>,
+    /// `DDoS`: peak packets per second.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_pps: Option<u64>,
+    /// `DDoS`: current smoothed packets per second.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_pps: Option<u64>,
+    /// `DDoS`: mitigation status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mitigation_status: Option<String>,
+    /// `DDoS`: total packets in attack.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_packets: Option<u64>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -158,28 +199,37 @@ pub async fn list_alerts(
 
     let response_alerts: Vec<AlertResponse> = alerts
         .into_iter()
-        .map(|a| {
-            let src_ip = a.src_ip();
-            let dst_ip = a.dst_ip();
-            AlertResponse {
-                id: a.id,
-                timestamp_ns: a.timestamp_ns,
-                component: a.component,
-                severity: severity_label(a.severity).to_string(),
-                rule_id: a.rule_id.0,
-                action: a.action.as_str().to_string(),
-                src_ip,
-                dst_ip,
-                src_port: a.src_port,
-                dst_port: a.dst_port,
-                protocol: a.protocol,
-                message: a.message,
-                false_positive: a.false_positive,
-                src_domain: a.src_domain,
-                dst_domain: a.dst_domain,
-                src_domain_score: a.src_domain_score,
-                dst_domain_score: a.dst_domain_score,
-            }
+        .map(|a| AlertResponse {
+            id: a.id,
+            timestamp_ns: a.timestamp_ns,
+            component: a.component,
+            severity: severity_label(a.severity).to_string(),
+            rule_id: a.rule_id.0,
+            action: a.action.as_str().to_string(),
+            src_addr: a.src_addr.to_vec(),
+            dst_addr: a.dst_addr.to_vec(),
+            src_port: a.src_port,
+            dst_port: a.dst_port,
+            protocol: a.protocol,
+            is_ipv6: a.is_ipv6,
+            message: a.message,
+            false_positive: a.false_positive,
+            src_domain: a.src_domain,
+            dst_domain: a.dst_domain,
+            src_domain_score: a.src_domain_score,
+            dst_domain_score: a.dst_domain_score,
+            confidence: a.confidence,
+            threat_type: a.threat_type,
+            data_type: a.data_type,
+            pid: a.pid,
+            tgid: a.tgid,
+            direction: a.direction,
+            matched_domain: a.matched_domain,
+            attack_type: a.attack_type,
+            peak_pps: a.peak_pps,
+            current_pps: a.current_pps,
+            mitigation_status: a.mitigation_status,
+            total_packets: a.total_packets,
         })
         .collect();
 
@@ -282,27 +332,45 @@ mod tests {
             severity: "high".to_string(),
             rule_id: "ids-001".to_string(),
             action: "alert".to_string(),
-            src_ip: 0xC0A8_0001,
-            dst_ip: 0x0A00_0001,
+            src_addr: vec![0xC0A8_0001, 0, 0, 0],
+            dst_addr: vec![0x0A00_0001, 0, 0, 0],
             src_port: 12345,
             dst_port: 80,
             protocol: 6,
+            is_ipv6: false,
             message: "test alert".to_string(),
             false_positive: false,
             src_domain: None,
             dst_domain: Some("evil.com".to_string()),
             src_domain_score: None,
             dst_domain_score: Some(0.85),
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: None,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "test-001");
         assert_eq!(json["component"], "ids");
         assert_eq!(json["severity"], "high");
+        assert!(!json["is_ipv6"].as_bool().unwrap());
+        assert_eq!(json["src_addr"][0], 0xC0A8_0001u32);
         assert!(!json["false_positive"].as_bool().unwrap());
         // Domain fields: None → absent (skip_serializing_if), Some → present
         assert!(json.get("src_domain").is_none());
         assert_eq!(json["dst_domain"], "evil.com");
         assert!((json["dst_domain_score"].as_f64().unwrap() - 0.85).abs() < 0.01);
+        // Domain-specific fields absent when None
+        assert!(json.get("confidence").is_none());
+        assert!(json.get("attack_type").is_none());
     }
 
     #[test]
