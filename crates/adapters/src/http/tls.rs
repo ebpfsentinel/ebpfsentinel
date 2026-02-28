@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
+use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::server::TlsStream;
 
@@ -14,14 +15,12 @@ pub fn load_rustls_config(cert_path: &Path, key_path: &Path) -> anyhow::Result<A
     // Ensure a CryptoProvider is installed (required by rustls 0.23+).
     // Ignore the error if already installed by another dependency.
     let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let cert_file = std::fs::File::open(cert_path).map_err(|e| {
-        anyhow::anyhow!("failed to open TLS cert at '{}': {e}", cert_path.display())
-    })?;
-    let key_file = std::fs::File::open(key_path)
-        .map_err(|e| anyhow::anyhow!("failed to open TLS key at '{}': {e}", key_path.display()))?;
 
     let certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut io::BufReader::new(cert_file))
+        CertificateDer::pem_file_iter(cert_path)
+            .map_err(|e| {
+                anyhow::anyhow!("failed to read TLS cert at '{}': {e}", cert_path.display())
+            })?
             .collect::<Result<_, _>>()
             .map_err(|e| anyhow::anyhow!("failed to parse TLS certificates: {e}"))?;
 
@@ -32,15 +31,12 @@ pub fn load_rustls_config(cert_path: &Path, key_path: &Path) -> anyhow::Result<A
         );
     }
 
-    let key: PrivateKeyDer<'static> =
-        rustls_pemfile::private_key(&mut io::BufReader::new(key_file))
-            .map_err(|e| anyhow::anyhow!("failed to parse TLS private key: {e}"))?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "TLS key file contains no private key: {}",
-                    key_path.display()
-                )
-            })?;
+    let key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_file(key_path).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to parse TLS private key at '{}': {e}",
+            key_path.display()
+        )
+    })?;
 
     let config = ServerConfig::builder()
         .with_no_client_auth()
