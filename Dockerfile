@@ -49,37 +49,9 @@ LABEL org.opencontainers.image.title="eBPFsentinel" \
 COPY --from=builder /build/target/release/ebpfsentinel-agent \
     /usr/local/bin/ebpfsentinel-agent
 
-# Copy ALL eBPF programs
-COPY --from=builder \
-    /build/crates/ebpf-programs/xdp-firewall/target/bpfel-unknown-none/release/xdp-firewall \
-    /usr/local/lib/ebpfsentinel/xdp-firewall
-COPY --from=builder \
-    /build/crates/ebpf-programs/xdp-ratelimit/target/bpfel-unknown-none/release/xdp-ratelimit \
-    /usr/local/lib/ebpfsentinel/xdp-ratelimit
-COPY --from=builder \
-    /build/crates/ebpf-programs/tc-ids/target/bpfel-unknown-none/release/tc-ids \
-    /usr/local/lib/ebpfsentinel/tc-ids
-COPY --from=builder \
-    /build/crates/ebpf-programs/tc-threatintel/target/bpfel-unknown-none/release/tc-threatintel \
-    /usr/local/lib/ebpfsentinel/tc-threatintel
-COPY --from=builder \
-    /build/crates/ebpf-programs/uprobe-dlp/target/bpfel-unknown-none/release/uprobe-dlp \
-    /usr/local/lib/ebpfsentinel/uprobe-dlp
-COPY --from=builder \
-    /build/crates/ebpf-programs/tc-dns/target/bpfel-unknown-none/release/tc-dns \
-    /usr/local/lib/ebpfsentinel/tc-dns
-COPY --from=builder \
-    /build/crates/ebpf-programs/tc-conntrack/target/bpfel-unknown-none/release/tc-conntrack \
-    /usr/local/lib/ebpfsentinel/tc-conntrack
-COPY --from=builder \
-    /build/crates/ebpf-programs/tc-nat-ingress/target/bpfel-unknown-none/release/tc-nat-ingress \
-    /usr/local/lib/ebpfsentinel/tc-nat-ingress
-COPY --from=builder \
-    /build/crates/ebpf-programs/tc-nat-egress/target/bpfel-unknown-none/release/tc-nat-egress \
-    /usr/local/lib/ebpfsentinel/tc-nat-egress
-COPY --from=builder \
-    /build/crates/ebpf-programs/tc-scrub/target/bpfel-unknown-none/release/tc-scrub \
-    /usr/local/lib/ebpfsentinel/tc-scrub
+# Copy ALL eBPF programs (auto-discovered — xtask copies them all here)
+COPY --from=builder /build/target/bpfel-unknown-none/release/ \
+    /usr/local/lib/ebpfsentinel/
 
 # Copy default configuration
 COPY config/ebpfsentinel.yaml /etc/ebpfsentinel/config.yaml
