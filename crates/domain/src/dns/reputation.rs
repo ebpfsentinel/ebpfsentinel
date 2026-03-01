@@ -292,7 +292,7 @@ mod tests {
             last_seen: 0,
             total_connections: 1,
         };
-        assert_eq!(rep.compute_score(), 0.0);
+        assert!((rep.compute_score() - 0.0).abs() < f64::EPSILON);
     }
 
     // ── Score decay ─────────────────────────────────────────────────
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn entropy_empty_domain() {
-        assert_eq!(domain_entropy(""), 0.0);
+        assert!((domain_entropy("") - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]

@@ -218,8 +218,10 @@ mod tests {
 
     #[test]
     fn zero_timeout_rejected() {
-        let mut settings = ConnTrackSettings::default();
-        settings.tcp_established_timeout_secs = 0;
+        let settings = ConnTrackSettings {
+            tcp_established_timeout_secs: 0,
+            ..ConnTrackSettings::default()
+        };
         assert!(settings.validate().is_err());
     }
 

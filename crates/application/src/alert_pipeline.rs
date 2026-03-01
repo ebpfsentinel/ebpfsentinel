@@ -548,6 +548,7 @@ mod tests {
         Arc::new(RwLock::new(AuditAppService::new(sink)))
     }
 
+    #[allow(clippy::similar_names)]
     fn make_pipeline(routes: Vec<AlertRoute>, metrics: Arc<TestMetrics>) -> AlertPipeline {
         let router = AlertRouter::new(
             routes,

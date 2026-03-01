@@ -1,6 +1,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 use domain::l7::parser::{
     detect_protocol, parse_ftp, parse_http, parse_payload, parse_smb, parse_smtp,

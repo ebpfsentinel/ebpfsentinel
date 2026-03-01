@@ -36,8 +36,8 @@ mod tests {
 
     #[test]
     fn alert_sender_trait_is_implementable() {
-        fn _assert_send_sync<T: AlertSender>() {}
-        _assert_send_sync::<DummySender>();
+        fn assert_send_sync<T: AlertSender>() {}
+        assert_send_sync::<DummySender>();
     }
 
     #[test]

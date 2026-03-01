@@ -42,6 +42,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn channel_capacities_are_positive() {
         assert!(EVENT_CHANNEL_CAPACITY > 0);
         assert!(ALERT_CHANNEL_CAPACITY > 0);
@@ -50,12 +51,14 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn shutdown_timeout_is_reasonable() {
         assert!(GRACEFUL_SHUTDOWN_TIMEOUT.as_secs() >= 1);
         assert!(GRACEFUL_SHUTDOWN_TIMEOUT.as_secs() <= 30);
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn map_threshold_is_valid() {
         assert!(EBPF_MAP_CAPACITY_WARN_THRESHOLD > 0.0);
         assert!(EBPF_MAP_CAPACITY_WARN_THRESHOLD <= 1.0);

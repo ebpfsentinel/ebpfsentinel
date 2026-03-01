@@ -96,12 +96,12 @@ mod tests {
         bytes[0..8].copy_from_slice(&ts.to_ne_bytes());
 
         // src_addr at offset 8 ([u32; 4] = 16 bytes)
-        let src_ip: u32 = 0xC0A80001; // 192.168.0.1
+        let src_ip: u32 = 0xC0A8_0001; // 192.168.0.1
         bytes[8..12].copy_from_slice(&src_ip.to_ne_bytes());
         // src_addr[1..3] remain zero (IPv4)
 
         // dst_addr at offset 24 ([u32; 4] = 16 bytes)
-        let dst_ip: u32 = 0x0A000001; // 10.0.0.1
+        let dst_ip: u32 = 0x0A00_0001; // 10.0.0.1
         bytes[24..28].copy_from_slice(&dst_ip.to_ne_bytes());
         // dst_addr[1..3] remain zero (IPv4)
 
@@ -145,8 +145,8 @@ mod tests {
             unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<PacketEvent>()) };
 
         assert_eq!(event.timestamp_ns, 1_000_000_000);
-        assert_eq!(event.src_ip(), 0xC0A80001);
-        assert_eq!(event.dst_ip(), 0x0A000001);
+        assert_eq!(event.src_ip(), 0xC0A8_0001);
+        assert_eq!(event.dst_ip(), 0x0A00_0001);
         assert_eq!(event.src_port, 12345);
         assert_eq!(event.dst_port, 80);
         assert_eq!(event.protocol, 6);

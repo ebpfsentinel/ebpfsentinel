@@ -346,6 +346,7 @@ mod tests {
     };
     use std::net::{IpAddr, Ipv4Addr};
 
+    #[allow(clippy::cast_possible_truncation)]
     fn make_backend(id: &str, port: u16, weight: u32) -> LbBackend {
         LbBackend {
             id: id.to_string(),

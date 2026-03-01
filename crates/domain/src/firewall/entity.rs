@@ -1249,12 +1249,12 @@ mod tests {
         let mut rule = make_rule("r", 1);
         rule.protocol = Protocol::Any;
         rule.dst_ip = Some(IpNetwork::V4 {
-            addr: 0x0A000001, // 10.0.0.1
+            addr: 0x0A00_0001, // 10.0.0.1
             prefix_len: 32,
         });
         let entry = rule.to_ebpf_entry();
         assert_eq!(entry.match_flags, MATCH_DST_IP);
-        assert_eq!(entry.dst_ip, 0x0A000001);
+        assert_eq!(entry.dst_ip, 0x0A00_0001);
         assert_eq!(entry.dst_mask, 0xFFFF_FFFF);
     }
 
@@ -1289,11 +1289,11 @@ mod tests {
         rule.action = FirewallAction::Allow;
         rule.protocol = Protocol::Tcp;
         rule.src_ip = Some(IpNetwork::V4 {
-            addr: 0xC0A80000,
+            addr: 0xC0A8_0000,
             prefix_len: 16,
         });
         rule.dst_ip = Some(IpNetwork::V4 {
-            addr: 0x0A000001,
+            addr: 0x0A00_0001,
             prefix_len: 32,
         });
         rule.src_port = Some(PortRange {
@@ -1308,10 +1308,10 @@ mod tests {
             entry.match_flags,
             MATCH_SRC_IP | MATCH_DST_IP | MATCH_SRC_PORT | MATCH_DST_PORT | MATCH_PROTO
         );
-        assert_eq!(entry.src_ip, 0xC0A80000);
-        assert_eq!(entry.src_mask, 0xFFFF0000);
-        assert_eq!(entry.dst_ip, 0x0A000001);
-        assert_eq!(entry.dst_mask, 0xFFFFFFFF);
+        assert_eq!(entry.src_ip, 0xC0A8_0000);
+        assert_eq!(entry.src_mask, 0xFFFF_0000);
+        assert_eq!(entry.dst_ip, 0x0A00_0001);
+        assert_eq!(entry.dst_mask, 0xFFFF_FFFF);
         assert_eq!(entry.src_port_start, 1024);
         assert_eq!(entry.src_port_end, 65535);
         assert_eq!(entry.dst_port_start, 80);

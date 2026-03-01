@@ -111,14 +111,14 @@ mod tests {
 
     #[test]
     fn http_feed_fetcher_is_send_sync() {
-        fn _assert<T: Send + Sync>() {}
-        _assert::<HttpFeedFetcher>();
+        fn assert_impl<T: Send + Sync>() {}
+        assert_impl::<HttpFeedFetcher>();
     }
 
     #[test]
     fn http_feed_fetcher_implements_feed_source() {
-        fn _assert<T: FeedSource>() {}
-        _assert::<HttpFeedFetcher>();
+        fn assert_impl<T: FeedSource>() {}
+        assert_impl::<HttpFeedFetcher>();
     }
 
     #[test]

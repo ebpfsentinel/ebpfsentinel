@@ -1,6 +1,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 use domain::common::entity::RuleId;
 use domain::firewall::entity::{FirewallAction, PortRange};

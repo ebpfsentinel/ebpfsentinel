@@ -259,7 +259,7 @@ mod tests {
             id: AliasId(id.to_string()),
             kind: AliasKind::IpSet {
                 values: vec![IpNetwork::V4 {
-                    addr: 0xC0A80000,
+                    addr: 0xC0A8_0000,
                     prefix_len: 16,
                 }],
             },
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn convert_to_lpm_entries_v4() {
         let ips = vec![IpNetwork::V4 {
-            addr: 0xC0A80100, // 192.168.1.0 in host byte order
+            addr: 0xC0A8_0100, // 192.168.1.0 in host byte order
             prefix_len: 24,
         }];
         let (v4, v6) = convert_to_lpm_entries(&ips, ACTION_DROP);
@@ -362,7 +362,7 @@ mod tests {
     fn convert_to_lpm_entries_mixed() {
         let ips = vec![
             IpNetwork::V4 {
-                addr: 0x0A000000,
+                addr: 0x0A00_0000,
                 prefix_len: 8,
             },
             IpNetwork::V6 {
@@ -370,7 +370,7 @@ mod tests {
                 prefix_len: 128,
             },
             IpNetwork::V4 {
-                addr: 0xAC100000,
+                addr: 0xAC10_0000,
                 prefix_len: 12,
             },
         ];
@@ -414,7 +414,7 @@ mod tests {
         }
     }
 
-    /// Mock resolution port that returns fixed IPs for GeoIP lookups.
+    /// Mock resolution port that returns fixed IPs for `GeoIP` lookups.
     struct MockResolutionPort;
 
     impl ports::secondary::alias_resolution_port::AliasResolutionPort for MockResolutionPort {
@@ -427,7 +427,7 @@ mod tests {
         fn lookup_geoip(&self, _codes: &[String]) -> Result<Vec<IpNetwork>, DomainError> {
             Ok(vec![
                 IpNetwork::V4 {
-                    addr: 0x01020300,
+                    addr: 0x0102_0300,
                     prefix_len: 24,
                 },
                 IpNetwork::V6 {

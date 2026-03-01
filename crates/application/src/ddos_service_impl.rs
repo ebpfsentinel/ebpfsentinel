@@ -141,8 +141,8 @@ mod tests {
         DdosEvent {
             timestamp_ns: ts,
             attack_type,
-            src_addr: [0xC0A80001, 0, 0, 0],
-            dst_addr: [0x0A000001, 0, 0, 0],
+            src_addr: [0xC0A8_0001, 0, 0, 0],
+            dst_addr: [0x0A00_0001, 0, 0, 0],
             src_port: 12345,
             dst_port: 80,
             protocol: 6,

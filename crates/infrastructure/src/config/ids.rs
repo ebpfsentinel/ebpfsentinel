@@ -453,7 +453,7 @@ mod tests {
         // DomainPattern::parse should fail for non-wildcard with wildcard mode
         // Actually "not-a-wildcard" will parse as Exact, which is valid for wildcard mode too
         // Let me use an obviously invalid pattern
-        rule.domain_pattern = Some("".to_string());
+        rule.domain_pattern = Some(String::new());
         assert!(rule.validate(0).is_err());
     }
 

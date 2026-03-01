@@ -115,6 +115,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn max_entries_is_one_million() {
         assert!(THREATINTEL_MAX_ENTRIES >= 1_000_000);
     }

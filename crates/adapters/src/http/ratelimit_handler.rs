@@ -345,21 +345,21 @@ mod tests {
         use domain::firewall::entity::IpNetwork;
         assert_eq!(
             format_cidr(IpNetwork::V4 {
-                addr: 0x0A000000,
+                addr: 0x0A00_0000,
                 prefix_len: 8
             }),
             "10.0.0.0/8"
         );
         assert_eq!(
             format_cidr(IpNetwork::V4 {
-                addr: 0xC0A80100,
+                addr: 0xC0A8_0100,
                 prefix_len: 24
             }),
             "192.168.1.0/24"
         );
         assert_eq!(
             format_cidr(IpNetwork::V4 {
-                addr: 0xC0A80001,
+                addr: 0xC0A8_0001,
                 prefix_len: 32
             }),
             "192.168.0.1/32"

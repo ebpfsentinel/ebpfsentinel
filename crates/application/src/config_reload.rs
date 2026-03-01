@@ -688,6 +688,7 @@ impl ConfigReloadService {
 }
 
 #[cfg(test)]
+#[allow(clippy::similar_names)]
 mod tests {
     use super::*;
     use domain::audit::entity::AuditEntry;

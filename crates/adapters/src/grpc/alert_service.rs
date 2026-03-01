@@ -136,6 +136,7 @@ impl AlertStreamService for AlertStreamServiceImpl {
 mod tests {
     use super::*;
     use domain::common::entity::{DomainMode, RuleId};
+    use tokio_stream::StreamExt;
 
     fn make_alert(component: &str, severity: Severity, rule_id: &str) -> Alert {
         Alert {
@@ -193,8 +194,8 @@ mod tests {
         assert!(!event.false_positive);
         assert_eq!(event.src_domain, "");
         assert_eq!(event.dst_domain, "");
-        assert_eq!(event.src_domain_score, -1.0);
-        assert_eq!(event.dst_domain_score, -1.0);
+        assert!((event.src_domain_score - (-1.0)).abs() < f64::EPSILON);
+        assert!((event.dst_domain_score - (-1.0)).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -233,7 +234,6 @@ mod tests {
         tx.send(make_alert("ids", Severity::High, "ids-001"))
             .unwrap();
 
-        use tokio_stream::StreamExt;
         let event = stream.next().await.unwrap().unwrap();
         assert_eq!(event.rule_id, "ids-001");
         assert_eq!(event.severity, "high");
@@ -259,7 +259,6 @@ mod tests {
         tx.send(make_alert("ids", Severity::High, "ids-high"))
             .unwrap();
 
-        use tokio_stream::StreamExt;
         let event = stream.next().await.unwrap().unwrap();
         assert_eq!(event.rule_id, "ids-high");
     }
@@ -284,7 +283,6 @@ mod tests {
         tx.send(make_alert("dlp", Severity::High, "dlp-001"))
             .unwrap();
 
-        use tokio_stream::StreamExt;
         let event = stream.next().await.unwrap().unwrap();
         assert_eq!(event.component, "dlp");
         assert_eq!(event.rule_id, "dlp-001");

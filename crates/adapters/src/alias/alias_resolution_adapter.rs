@@ -190,7 +190,7 @@ mod tests {
         let net = parse_ip_network("192.168.1.0/24").unwrap();
         match net {
             IpNetwork::V4 { prefix_len, .. } => assert_eq!(prefix_len, 24),
-            _ => panic!("expected V4"),
+            IpNetwork::V6 { .. } => panic!("expected V4"),
         }
     }
 
@@ -199,7 +199,7 @@ mod tests {
         let net = parse_ip_network("10.0.0.1").unwrap();
         match net {
             IpNetwork::V4 { prefix_len, .. } => assert_eq!(prefix_len, 32),
-            _ => panic!("expected V4"),
+            IpNetwork::V6 { .. } => panic!("expected V4"),
         }
     }
 
@@ -208,7 +208,7 @@ mod tests {
         let net = parse_ip_network("2001:db8::/32").unwrap();
         match net {
             IpNetwork::V6 { prefix_len, .. } => assert_eq!(prefix_len, 32),
-            _ => panic!("expected V6"),
+            IpNetwork::V4 { .. } => panic!("expected V6"),
         }
     }
 
@@ -217,7 +217,7 @@ mod tests {
         let net = parse_ip_network("::1").unwrap();
         match net {
             IpNetwork::V6 { prefix_len, .. } => assert_eq!(prefix_len, 128),
-            _ => panic!("expected V6"),
+            IpNetwork::V4 { .. } => panic!("expected V6"),
         }
     }
 

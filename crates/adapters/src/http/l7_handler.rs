@@ -524,7 +524,7 @@ mod tests {
                 content_type: None,
             },
             src_ip: Some(IpNetwork::V4 {
-                addr: 0x0A000000,
+                addr: 0x0A00_0000,
                 prefix_len: 8,
             }),
             dst_ip: None,

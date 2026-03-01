@@ -127,7 +127,7 @@ mod tests {
             name: format!("gw-{id}"),
             interface: format!("eth{id}"),
             gateway_ip: format!("10.0.{id}.1"),
-            priority: id as u32 * 10,
+            priority: u32::from(id) * 10,
             enabled: true,
             health_check: None,
         }

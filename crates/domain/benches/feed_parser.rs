@@ -3,13 +3,14 @@
 use std::fmt::Write;
 use std::net::IpAddr;
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 use domain::common::error::DomainError;
 use domain::threatintel::entity::{FeedConfig, FeedFormat, FieldMapping, Ioc, ThreatType};
 use domain::threatintel::parser::{parse_feed, parse_threat_type};
 
-/// JSON parser for benchmarks (uses serde_json dev-dependency).
+/// JSON parser for benchmarks (uses `serde_json` dev-dependency).
 fn bench_json_parser(text: &str, config: &FeedConfig) -> Result<Vec<Ioc>, DomainError> {
     let mapping = config.field_mapping.clone().unwrap_or_default();
     let parsed: serde_json::Value = serde_json::from_str(text)

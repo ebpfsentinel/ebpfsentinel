@@ -820,8 +820,8 @@ mod tests {
     fn make_event(event_type: u8, rule_id: u32) -> PacketEvent {
         PacketEvent {
             timestamp_ns: 0,
-            src_addr: [0xC0A80001, 0, 0, 0],
-            dst_addr: [0x0A000001, 0, 0, 0],
+            src_addr: [0xC0A8_0001, 0, 0, 0],
+            dst_addr: [0x0A00_0001, 0, 0, 0],
             src_port: 12345,
             dst_port: 22,
             protocol: 6,

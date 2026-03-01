@@ -672,7 +672,7 @@ mod tests {
                     assert_eq!(limit, 50);
                     assert_eq!(offset, 0);
                 }
-                _ => panic!("expected List"),
+                AlertsCommand::MarkFp { .. } => panic!("expected List"),
             },
             _ => panic!("expected Alerts command"),
         }
@@ -685,7 +685,7 @@ mod tests {
         match cli.command {
             Some(Command::Alerts(args)) => match args.command {
                 AlertsCommand::MarkFp { id } => assert_eq!(id, "alert-001"),
-                _ => panic!("expected MarkFp"),
+                AlertsCommand::List { .. } => panic!("expected MarkFp"),
             },
             _ => panic!("expected Alerts command"),
         }
@@ -710,7 +710,7 @@ mod tests {
         match cli.command {
             Some(Command::Audit(args)) => match args.command {
                 AuditCommand::History { id } => assert_eq!(id, "fw-001"),
-                _ => panic!("expected History"),
+                AuditCommand::Logs { .. } => panic!("expected History"),
             },
             _ => panic!("expected Audit command"),
         }

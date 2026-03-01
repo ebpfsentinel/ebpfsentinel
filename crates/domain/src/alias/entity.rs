@@ -236,7 +236,7 @@ mod tests {
             id: AliasId("test".to_string()),
             kind: AliasKind::IpSet {
                 values: vec![IpNetwork::V4 {
-                    addr: 0xC0A80000,
+                    addr: 0xC0A8_0000,
                     prefix_len: 16,
                 }],
             },

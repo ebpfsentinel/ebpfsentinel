@@ -191,7 +191,7 @@ mod tests {
     fn resolve_simple_ip_set() {
         let mut resolver = AliasResolver::new();
         let net = IpNetwork::V4 {
-            addr: 0xC0A80000,
+            addr: 0xC0A8_0000,
             prefix_len: 16,
         };
         resolver.add(ip_set_alias("rfc1918", vec![net])).unwrap();
@@ -219,11 +219,11 @@ mod tests {
     fn resolve_nested_ip_set() {
         let mut resolver = AliasResolver::new();
         let net1 = IpNetwork::V4 {
-            addr: 0xC0A80000,
+            addr: 0xC0A8_0000,
             prefix_len: 16,
         };
         let net2 = IpNetwork::V4 {
-            addr: 0x0A000000,
+            addr: 0x0A00_0000,
             prefix_len: 8,
         };
         resolver.add(ip_set_alias("set-a", vec![net1])).unwrap();
@@ -242,7 +242,7 @@ mod tests {
     fn resolve_deeply_nested() {
         let mut resolver = AliasResolver::new();
         let net = IpNetwork::V4 {
-            addr: 0xC0A80000,
+            addr: 0xC0A8_0000,
             prefix_len: 16,
         };
         resolver.add(ip_set_alias("leaf", vec![net])).unwrap();

@@ -1,6 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::similar_names)]
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::time::Duration;
 
 use domain::alert::engine::AlertRouter;

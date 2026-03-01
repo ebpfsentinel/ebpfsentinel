@@ -847,7 +847,7 @@ mod tests {
 
     #[test]
     fn firewall_rule_vlan_id_valid() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 firewall:
@@ -857,7 +857,7 @@ firewall:
       action: deny
       protocol: tcp
       vlan_id: 100
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let rules = config.firewall_rules().unwrap();
         assert_eq!(rules[0].vlan_id, Some(100));
@@ -865,7 +865,7 @@ firewall:
 
     #[test]
     fn firewall_rule_vlan_id_too_large() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 firewall:
@@ -875,13 +875,13 @@ firewall:
       action: deny
       protocol: tcp
       vlan_id: 4095
-"#;
+";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
     #[test]
     fn firewall_rule_vlan_id_none_by_default() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 firewall:
@@ -890,7 +890,7 @@ firewall:
       priority: 10
       action: deny
       protocol: tcp
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let rules = config.firewall_rules().unwrap();
         assert_eq!(rules[0].vlan_id, None);
@@ -900,10 +900,10 @@ firewall:
 
     #[test]
     fn load_minimal_config() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.agent.interfaces, vec!["eth0"]);
         assert_eq!(config.agent.log_level, LogLevel::Info);
@@ -919,21 +919,21 @@ agent:
 
     #[test]
     fn load_missing_interfaces_fails() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: []
-"#;
+";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
     #[test]
     fn load_port_conflict_fails() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
   http_port: 8080
   grpc_port: 8080
-"#;
+";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
@@ -1002,7 +1002,7 @@ firewall:
 
     #[test]
     fn invalid_rule_action_fails() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 firewall:
@@ -1011,7 +1011,7 @@ firewall:
       priority: 1
       action: invalid_action
       protocol: tcp
-"#;
+";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
@@ -1064,21 +1064,21 @@ firewall:
 
     #[test]
     fn log_format_default_is_json() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.agent.log_format, LogFormat::Json);
     }
 
     #[test]
     fn log_format_from_yaml() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
   log_format: text
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.agent.log_format, LogFormat::Text);
     }
@@ -1087,12 +1087,12 @@ agent:
 
     #[test]
     fn firewall_mode_from_config() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 firewall:
   mode: block
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.firewall.mode, "block");
         assert_eq!(config.firewall_mode().unwrap(), DomainMode::Block);
@@ -1102,10 +1102,10 @@ firewall:
 
     #[test]
     fn default_alerting_config_backward_compat() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert!(config.alerting.enabled);
         assert_eq!(config.alerting.dedup_window_secs, 60);
@@ -1184,7 +1184,7 @@ alerting:
 
     #[test]
     fn email_route_without_smtp_config_fails() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 alerting:
@@ -1193,14 +1193,14 @@ alerting:
       destination: email
       min_severity: critical
       email_to: admin@example.com
-"#;
+";
         let err = AgentConfig::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("smtp"), "got: {err}");
     }
 
     #[test]
     fn webhook_route_without_url_fails() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 alerting:
@@ -1208,14 +1208,14 @@ alerting:
     - name: webhook-route
       destination: webhook
       min_severity: high
-"#;
+";
         let err = AgentConfig::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("webhook_url"), "got: {err}");
     }
 
     #[test]
     fn email_route_without_email_to_fails() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 alerting:
@@ -1226,14 +1226,14 @@ alerting:
     - name: email-route
       destination: email
       min_severity: critical
-"#;
+";
         let err = AgentConfig::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("email_to"), "got: {err}");
     }
 
     #[test]
     fn alerting_route_invalid_destination() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 alerting:
@@ -1241,13 +1241,13 @@ alerting:
     - name: bad
       destination: carrier_pigeon
       min_severity: low
-"#;
+";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
     #[test]
     fn alerting_route_invalid_severity() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 alerting:
@@ -1255,7 +1255,7 @@ alerting:
     - name: bad
       destination: log
       min_severity: extreme
-"#;
+";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
@@ -1277,10 +1277,10 @@ alerting:
 
     #[test]
     fn default_ips_config_backward_compat() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert!(config.ips.enabled);
         assert_eq!(config.ips.mode, "alert");
@@ -1332,14 +1332,14 @@ ips:
 
     #[test]
     fn ips_policy_extraction() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 ips:
   max_blacklist_duration_secs: 1800
   auto_blacklist_threshold: 10
   max_blacklist_size: 5000
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let policy = config.ips_policy();
         assert_eq!(
@@ -1352,19 +1352,19 @@ ips:
 
     #[test]
     fn ips_mode_parsing() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 ips:
   mode: block
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.ips_mode().unwrap(), DomainMode::Block);
     }
 
     #[test]
     fn ips_rule_invalid_severity_fails() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 ips:
@@ -1372,7 +1372,7 @@ ips:
     - id: bad
       severity: extreme
       protocol: tcp
-"#;
+";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
@@ -1380,10 +1380,10 @@ ips:
 
     #[test]
     fn empty_whitelist_default() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert!(config.ips.whitelist.is_empty());
         let wl = config.ips_whitelist().unwrap();
@@ -1440,10 +1440,10 @@ ips:
 
     #[test]
     fn default_l7_config() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert!(!config.l7.enabled);
         assert!(config.l7.ports.is_empty());
@@ -1547,7 +1547,7 @@ l7:
 
     #[test]
     fn l7_invalid_protocol_fails() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 l7:
@@ -1556,13 +1556,13 @@ l7:
       priority: 1
       action: deny
       protocol: invalid_proto
-"#;
+";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
     #[test]
     fn l7_invalid_action_fails() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 l7:
@@ -1571,18 +1571,18 @@ l7:
       priority: 1
       action: nuke
       protocol: http
-"#;
+";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
     #[test]
     fn l7_ports_extraction() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 l7:
   ports: [443, 80, 8080, 80, 443]
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let ports = config.l7_ports();
         assert_eq!(ports, vec![80, 443, 8080]);
@@ -1619,10 +1619,10 @@ l7:
 
     #[test]
     fn default_ratelimit_config() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert!(!config.ratelimit.enabled);
         assert_eq!(config.ratelimit.default_rate, 1000);
@@ -1678,7 +1678,7 @@ ratelimit:
 
     #[test]
     fn ratelimit_invalid_zero_rate_fails() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 ratelimit:
@@ -1686,13 +1686,13 @@ ratelimit:
     - id: bad
       rate: 0
       burst: 100
-"#;
+";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
     #[test]
     fn ratelimit_invalid_zero_burst_fails() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 ratelimit:
@@ -1700,13 +1700,13 @@ ratelimit:
     - id: bad
       rate: 100
       burst: 0
-"#;
+";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
     #[test]
     fn ratelimit_invalid_action_fails() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 ratelimit:
@@ -1715,7 +1715,7 @@ ratelimit:
       rate: 100
       burst: 200
       action: nuke
-"#;
+";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
@@ -1736,7 +1736,7 @@ ratelimit:
 
     #[test]
     fn ratelimit_action_aliases() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 ratelimit:
@@ -1753,7 +1753,7 @@ ratelimit:
       rate: 100
       burst: 200
       action: allow
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let policies = config.ratelimit_policies().unwrap();
         assert_eq!(policies[0].action, RateLimitAction::Drop);
@@ -1763,7 +1763,7 @@ ratelimit:
 
     #[test]
     fn ratelimit_scope_aliases() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 ratelimit:
@@ -1780,7 +1780,7 @@ ratelimit:
       rate: 100
       burst: 200
       scope: global
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let policies = config.ratelimit_policies().unwrap();
         assert_eq!(policies[0].scope, RateLimitScope::SourceIp);
@@ -1792,7 +1792,7 @@ ratelimit:
 
     #[test]
     fn ratelimit_default_algorithm() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 ratelimit:
@@ -1800,7 +1800,7 @@ ratelimit:
     - id: rl-001
       rate: 100
       burst: 200
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.ratelimit.default_algorithm, "token_bucket");
         let policies = config.ratelimit_policies().unwrap();
@@ -1809,7 +1809,7 @@ ratelimit:
 
     #[test]
     fn ratelimit_all_algorithms() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 ratelimit:
@@ -1830,7 +1830,7 @@ ratelimit:
       rate: 100
       burst: 200
       algorithm: leaky_bucket
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let policies = config.ratelimit_policies().unwrap();
         assert_eq!(policies[0].algorithm, RateLimitAlgorithm::TokenBucket);
@@ -1841,7 +1841,7 @@ ratelimit:
 
     #[test]
     fn ratelimit_algorithm_aliases() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 ratelimit:
@@ -1862,7 +1862,7 @@ ratelimit:
       rate: 100
       burst: 200
       algorithm: leakybucket
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let policies = config.ratelimit_policies().unwrap();
         assert_eq!(policies[0].algorithm, RateLimitAlgorithm::TokenBucket);
@@ -1873,7 +1873,7 @@ ratelimit:
 
     #[test]
     fn ratelimit_invalid_algorithm_fails() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 ratelimit:
@@ -1882,7 +1882,7 @@ ratelimit:
       rate: 100
       burst: 200
       algorithm: random_algo
-"#;
+";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
@@ -1890,10 +1890,10 @@ ratelimit:
 
     #[test]
     fn dlp_defaults_when_absent() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert!(config.dlp.enabled);
         assert_eq!(config.dlp.mode, "alert");
@@ -1968,12 +1968,12 @@ dlp:
 
     #[test]
     fn dlp_mode_parsed() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 dlp:
   mode: block
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.dlp_mode().unwrap(), DomainMode::Block);
     }
@@ -2065,10 +2065,10 @@ dlp:
 
     #[test]
     fn threatintel_defaults_when_absent() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert!(config.threatintel.enabled);
         assert_eq!(config.threatintel.mode, "alert");
@@ -2126,12 +2126,12 @@ threatintel:
 
     #[test]
     fn threatintel_mode_parsed() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 threatintel:
   mode: block
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.threatintel_mode().unwrap(), DomainMode::Block);
     }
@@ -2166,7 +2166,7 @@ threatintel:
 
     #[test]
     fn threatintel_feed_invalid_format_fails() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 threatintel:
@@ -2175,7 +2175,7 @@ threatintel:
       name: Bad
       url: https://example.com
       format: xml
-"#;
+";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
@@ -2205,7 +2205,7 @@ threatintel:
 
     #[test]
     fn threatintel_feed_action_override() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 threatintel:
@@ -2215,7 +2215,7 @@ threatintel:
       name: Blocked
       url: https://example.com/block.txt
       default_action: block
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let feeds = config.threatintel_feeds().unwrap();
         assert_eq!(feeds[0].default_action.as_deref(), Some("block"));
@@ -2225,10 +2225,10 @@ threatintel:
 
     #[test]
     fn auth_defaults_when_absent() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert!(!config.auth.enabled);
         assert!(config.auth.jwt.public_key_path.is_empty());
@@ -2239,12 +2239,12 @@ agent:
 
     #[test]
     fn auth_enabled_requires_some_method() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 auth:
   enabled: true
-"#;
+";
         let err = AgentConfig::from_yaml(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no auth method configured"), "error: {msg}");
@@ -2252,7 +2252,7 @@ auth:
 
     #[test]
     fn auth_enabled_with_key_path_ok() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 auth:
@@ -2262,7 +2262,7 @@ auth:
     issuer: https://idp.example.com
     audience: ebpfsentinel
   metrics_auth_required: true
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert!(config.auth.enabled);
         assert_eq!(
@@ -2279,19 +2279,19 @@ auth:
 
     #[test]
     fn auth_disabled_no_key_path_ok() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 auth:
   enabled: false
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert!(!config.auth.enabled);
     }
 
     #[test]
     fn auth_oidc_config_parsing() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 auth:
@@ -2300,7 +2300,7 @@ auth:
     jwks_url: https://kubernetes.default.svc/openid/v1/jwks
     issuer: https://kubernetes.default.svc
     audience: ebpfsentinel
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert!(config.auth.enabled);
         let oidc = config.auth.oidc.unwrap();
@@ -2317,7 +2317,7 @@ auth:
 
     #[test]
     fn auth_both_jwt_and_oidc_rejected() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 auth:
@@ -2326,7 +2326,7 @@ auth:
     public_key_path: /some/key.pem
   oidc:
     jwks_url: https://kubernetes.default.svc/openid/v1/jwks
-"#;
+";
         let err = AgentConfig::from_yaml(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("both"), "error: {msg}");

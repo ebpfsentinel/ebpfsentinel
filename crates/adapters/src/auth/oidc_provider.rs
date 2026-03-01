@@ -148,7 +148,7 @@ mod tests {
             - 3600
     }
 
-    /// Build a minimal JwkSet from the test RSA public key with the given kid.
+    /// Build a minimal `JwkSet` from the test RSA public key with the given kid.
     fn build_test_jwk_set(kid: &str) -> JwkSet {
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
@@ -159,8 +159,9 @@ mod tests {
             .replace("-----END PUBLIC KEY-----", "")
             .replace('\n', "");
 
-        use base64::engine::general_purpose::STANDARD;
-        let der_bytes = STANDARD.decode(&pem_str).unwrap();
+        let der_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&pem_str)
+            .unwrap();
 
         // Parse the DER-encoded SubjectPublicKeyInfo
         // RSA public key in PKCS#8 format: SEQUENCE { SEQUENCE { OID, NULL }, BIT STRING { SEQUENCE { n, e } } }
@@ -191,7 +192,7 @@ mod tests {
         e: Vec<u8>,
     }
 
-    /// Minimal ASN.1 DER parser for RSA SubjectPublicKeyInfo.
+    /// Minimal ASN.1 DER parser for RSA `SubjectPublicKeyInfo`.
     fn rsa_from_der(der: &[u8]) -> RsaComponents {
         // parse_sequence returns (content_of_sequence, rest_after_sequence)
         let (inner, _) = parse_sequence(der);

@@ -377,7 +377,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     const TEST_ADDR: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
-    const TEST_TS: u64 = 1234567890;
+    const TEST_TS: u64 = 1_234_567_890;
 
     /// Build a DNS header with given fields.
     fn build_header(id: u16, is_response: bool, rcode: u8, qdcount: u16, ancount: u16) -> Vec<u8> {
@@ -387,7 +387,7 @@ mod tests {
         if is_response {
             flags |= 1 << 15; // QR bit
         }
-        flags |= (rcode as u16) & 0x000F;
+        flags |= u16::from(rcode) & 0x000F;
         buf.extend_from_slice(&flags.to_be_bytes());
         buf.extend_from_slice(&qdcount.to_be_bytes());
         buf.extend_from_slice(&ancount.to_be_bytes());
@@ -397,6 +397,7 @@ mod tests {
     }
 
     /// Encode a domain name as DNS wire format labels.
+    #[allow(clippy::cast_possible_truncation)]
     fn encode_name(domain: &str) -> Vec<u8> {
         let mut buf = Vec::new();
         for label in domain.split('.') {
@@ -440,6 +441,7 @@ mod tests {
     }
 
     /// Build a CNAME resource record.
+    #[allow(clippy::cast_possible_truncation)]
     fn build_cname_record(name: &[u8], ttl: u32, target_name: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(name);
@@ -466,7 +468,7 @@ mod tests {
                 assert_eq!(q.src_addr, TEST_ADDR);
                 assert_eq!(q.timestamp_ns, TEST_TS);
             }
-            _ => panic!("expected Query"),
+            DnsPacket::Response(_) => panic!("expected Query"),
         }
     }
 
@@ -498,7 +500,7 @@ mod tests {
                 );
                 assert_eq!(r.answers[0].ttl, 300);
             }
-            _ => panic!("expected Response"),
+            DnsPacket::Query(_) => panic!("expected Response"),
         }
     }
 
@@ -526,7 +528,7 @@ mod tests {
                 );
                 assert_eq!(r.answers[0].ttl, 600);
             }
-            _ => panic!("expected Response"),
+            DnsPacket::Query(_) => panic!("expected Response"),
         }
     }
 
@@ -561,7 +563,7 @@ mod tests {
                     vec![IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))]
                 );
             }
-            _ => panic!("expected Response"),
+            DnsPacket::Query(_) => panic!("expected Response"),
         }
     }
 
@@ -601,7 +603,7 @@ mod tests {
                 );
                 assert_eq!(r.answers[0].ttl, 120);
             }
-            _ => panic!("expected Response"),
+            DnsPacket::Query(_) => panic!("expected Response"),
         }
     }
 
@@ -668,7 +670,7 @@ mod tests {
                 assert_eq!(r.queries[0].domain, "noexist.example.com");
                 assert!(r.answers.is_empty());
             }
-            _ => panic!("expected Response"),
+            DnsPacket::Query(_) => panic!("expected Response"),
         }
     }
 
@@ -685,7 +687,7 @@ mod tests {
                 assert_eq!(r.rcode, DnsResponseCode::NXDomain);
                 assert!(r.answers.is_empty());
             }
-            _ => panic!("expected Response"),
+            DnsPacket::Query(_) => panic!("expected Response"),
         }
     }
 
@@ -724,7 +726,7 @@ mod tests {
             DnsPacket::Query(q) => {
                 assert_eq!(q.domain, "example.com");
             }
-            _ => panic!("expected Query"),
+            DnsPacket::Response(_) => panic!("expected Query"),
         }
     }
 
@@ -769,7 +771,7 @@ mod tests {
                     vec![IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1))]
                 );
             }
-            _ => panic!("expected Response"),
+            DnsPacket::Query(_) => panic!("expected Response"),
         }
     }
 

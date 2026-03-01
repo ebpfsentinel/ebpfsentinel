@@ -159,7 +159,7 @@ mod tests {
             action,
             ChangeActor::Api,
             None,
-            Some(format!(r#"{{"id":"{}"}}"#, rule_id)),
+            Some(format!(r#"{{"id":"{rule_id}"}}"#)),
         )
     }
 
