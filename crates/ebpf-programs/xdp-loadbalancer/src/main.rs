@@ -285,6 +285,7 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     let ipv6hdr_mut: *mut Ipv6Hdr = unsafe { ptr_at_mut(ctx, l3_offset)? };
     let l4hdr_mut: *mut TcpUdpHdr = unsafe { ptr_at_mut(ctx, l4_offset)? };
 
+    let old_dst_addr = unsafe { (*ipv6hdr_mut).dst_addr };
     let old_dst_port = unsafe { (*l4hdr_mut).dst_port };
     let new_dst_port = backend.port.to_be();
 
@@ -294,14 +295,31 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
         unsafe {
             (*ipv6hdr_mut).dst_addr = new_addr;
         }
-    }
 
-    unsafe {
-        (*l4hdr_mut).dst_port = new_dst_port;
-    }
+        unsafe {
+            (*l4hdr_mut).dst_port = new_dst_port;
+        }
 
-    // IPv6 has no IP checksum, but L4 pseudo-header checksum needs update
-    update_l4_checksum_port_only(ctx, l4_offset, next_hdr, old_dst_port, new_dst_port);
+        // IPv6 has no IP checksum, but L4 pseudo-header includes addresses.
+        // Update L4 checksum for both address and port change.
+        update_l4_checksum_v6_dnat(
+            ctx,
+            l4_offset,
+            next_hdr,
+            &old_dst_addr,
+            &new_addr,
+            old_dst_port,
+            new_dst_port,
+        );
+    } else {
+        // IPv4 backend with IPv6 packet: only port changes
+        unsafe {
+            (*l4hdr_mut).dst_port = new_dst_port;
+        }
+
+        // IPv6 has no IP checksum, but L4 pseudo-header checksum needs update
+        update_l4_checksum_port_only(ctx, l4_offset, next_hdr, old_dst_port, new_dst_port);
+    }
 
     increment_metric(LB_METRIC_PACKETS_FORWARDED);
     add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
@@ -478,6 +496,54 @@ fn update_l4_checksum_port_only(
             let mut csum = !u32::from(u16::from_be(*csum_ptr));
             csum = csum.wrapping_sub(u32::from(u16::from_be(old_port)));
             csum = csum.wrapping_add(u32::from(u16::from_be(new_port)));
+            csum = (csum & 0xFFFF).wrapping_add(csum >> 16);
+            csum = (csum & 0xFFFF).wrapping_add(csum >> 16);
+            *csum_ptr = (!csum as u16).to_be();
+        }
+    }
+}
+
+/// Incremental TCP/UDP checksum update after IPv6 dst_addr + dst_port rewrite.
+///
+/// The L4 pseudo-header for IPv6 includes the full 128-bit source and destination
+/// addresses. When DNAT rewrites the destination address, the checksum must account
+/// for all 8 u16 words of the old and new address plus the port change.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn update_l4_checksum_v6_dnat(
+    ctx: &XdpContext,
+    l4_offset: usize,
+    protocol: u8,
+    old_addr: &[u8; 16],
+    new_addr: &[u8; 16],
+    old_port: u16,
+    new_port: u16,
+) {
+    let csum_offset = if protocol == PROTO_TCP {
+        l4_offset + 16 // TCP checksum at offset 16
+    } else {
+        l4_offset + 6 // UDP checksum at offset 6
+    };
+
+    if let Ok(csum_ptr) = unsafe { ptr_at_mut::<u16>(ctx, csum_offset) } {
+        unsafe {
+            let mut csum = !u32::from(u16::from_be(*csum_ptr));
+
+            // Address diff: 8 u16 words (128-bit address)
+            let mut i = 0;
+            while i < 16 {
+                let old_word = u16::from_be_bytes([old_addr[i], old_addr[i + 1]]);
+                let new_word = u16::from_be_bytes([new_addr[i], new_addr[i + 1]]);
+                csum = csum.wrapping_sub(u32::from(old_word));
+                csum = csum.wrapping_add(u32::from(new_word));
+                i += 2;
+            }
+
+            // Port diff
+            csum = csum.wrapping_sub(u32::from(u16::from_be(old_port)));
+            csum = csum.wrapping_add(u32::from(u16::from_be(new_port)));
+
+            // Fold carry
             csum = (csum & 0xFFFF).wrapping_add(csum >> 16);
             csum = (csum & 0xFFFF).wrapping_add(csum >> 16);
             *csum_ptr = (!csum as u16).to_be();

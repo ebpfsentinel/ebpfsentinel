@@ -122,6 +122,20 @@ fuzz_target!(|data: &[u8]| {
             dst_domain: None,
             src_domain_score: None,
             dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: None,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
         };
 
         let _ = router.process_alert(&alert);
@@ -158,6 +172,20 @@ fuzz_target!(|data: &[u8]| {
             dst_domain: None,
             src_domain_score: None,
             dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: None,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
         };
         let _ = router.process_alert(&alert);
     }

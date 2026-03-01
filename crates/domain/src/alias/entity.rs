@@ -2,6 +2,60 @@ use serde::{Deserialize, Serialize};
 
 use crate::firewall::entity::{IpNetwork, PortRange};
 
+/// `GeoIP` lookup result for a single IP address.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GeoIpInfo {
+    /// ISO 3166-1 alpha-2 country code (e.g. "FR").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
+    /// Full country name (e.g. "France").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_name: Option<String>,
+    /// City name (e.g. "Paris").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub city: Option<String>,
+    /// Autonomous System number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asn: Option<u32>,
+    /// Autonomous System organization name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_org: Option<String>,
+    /// Latitude coordinate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latitude: Option<f64>,
+    /// Longitude coordinate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub longitude: Option<f64>,
+}
+
+impl GeoIpInfo {
+    /// Format as a compact string: "CC/City (ASN: AS12345 Org)".
+    pub fn format_compact(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(ref cc) = self.country_code {
+            parts.push(cc.clone());
+        }
+        if let Some(ref city) = self.city {
+            parts.push(city.clone());
+        }
+        let location = parts.join("/");
+
+        if let (Some(asn), Some(org)) = (self.asn, &self.as_org) {
+            format!("{location} (ASN: AS{asn} {org})")
+        } else if let Some(asn) = self.asn {
+            format!("{location} (ASN: AS{asn})")
+        } else {
+            location
+        }
+    }
+}
+
+impl std::fmt::Display for GeoIpInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.format_compact())
+    }
+}
+
 /// Unique identifier for an alias.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AliasId(pub String);
@@ -345,5 +399,36 @@ mod tests {
             description: None,
         };
         assert!(alias.validate().is_err());
+    }
+
+    #[test]
+    fn geoip_info_format_compact_full() {
+        let info = GeoIpInfo {
+            country_code: Some("FR".to_string()),
+            country_name: Some("France".to_string()),
+            city: Some("Paris".to_string()),
+            asn: Some(3215),
+            as_org: Some("Orange S.A.".to_string()),
+            latitude: Some(48.8566),
+            longitude: Some(2.3522),
+        };
+        assert_eq!(info.format_compact(), "FR/Paris (ASN: AS3215 Orange S.A.)");
+    }
+
+    #[test]
+    fn geoip_info_format_compact_country_only() {
+        let info = GeoIpInfo {
+            country_code: Some("US".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(info.format_compact(), "US");
+    }
+
+    #[test]
+    fn geoip_info_default_is_empty() {
+        let info = GeoIpInfo::default();
+        assert!(info.country_code.is_none());
+        assert!(info.asn.is_none());
+        assert_eq!(info.format_compact(), "");
     }
 }

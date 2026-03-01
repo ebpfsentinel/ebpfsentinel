@@ -43,6 +43,12 @@ pub struct Alert {
     /// Reputation score for destination domain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dst_domain_score: Option<f64>,
+    /// `GeoIP` location for source IP (e.g. "US/New York (ASN: AS15169 Google)").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_geo: Option<String>,
+    /// `GeoIP` location for destination IP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_geo: Option<String>,
 
     // ── Domain-specific context (populated based on component) ───
     /// Threat intel: IOC confidence score (0-100).
@@ -105,6 +111,8 @@ impl Alert {
             dst_domain: None,
             src_domain_score: None,
             dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
             confidence: None,
             threat_type: None,
             data_type: None,
@@ -143,6 +151,8 @@ impl Alert {
             dst_domain: None,
             src_domain_score: None,
             dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
             confidence: None,
             threat_type: None,
             data_type: Some(dlp.data_type.clone()),
@@ -179,6 +189,8 @@ impl Alert {
             dst_domain: None,
             src_domain_score: None,
             dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
             confidence: Some(ti.confidence),
             threat_type: Some(ti.threat_type.to_string()),
             data_type: None,
@@ -230,6 +242,8 @@ impl Alert {
             dst_domain: None,
             src_domain_score: None,
             dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
             confidence: None,
             threat_type: None,
             data_type: None,

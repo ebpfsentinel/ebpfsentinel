@@ -41,6 +41,9 @@ utoipa-swagger-ui = { workspace = true }
 reqwest = { workspace = true }
 lettre = { workspace = true }
 sha2 = { workspace = true }
+maxminddb = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }

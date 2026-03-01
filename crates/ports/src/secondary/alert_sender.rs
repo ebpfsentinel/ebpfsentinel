@@ -67,6 +67,8 @@ mod tests {
             dst_domain: None,
             src_domain_score: None,
             dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
             confidence: None,
             threat_type: None,
             data_type: None,

@@ -1049,9 +1049,12 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
 
     // 10k. XDP Load Balancer
     let lb_ok = if config.loadbalancer.enabled {
-        match try_load_xdp_loadbalancer(&ebpf_dir, &config) {
-            Ok((loader, lb_mgr)) => {
+        match try_load_xdp_loadbalancer(&ebpf_dir, &config, event_tx.clone()) {
+            Ok((loader, lb_mgr, lb_metrics_rdr)) => {
                 lb_svc.write().await.set_map_port(Box::new(lb_mgr));
+                if let Some(rdr) = lb_metrics_rdr {
+                    metrics_readers.push(rdr);
+                }
                 ebpf_state.add_loader(loader);
                 metrics.set_ebpf_program_status("xdp_loadbalancer", true);
                 info!("eBPF xdp-loadbalancer active");
@@ -1142,15 +1145,40 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         alert_pipeline = alert_pipeline.with_alert_store(store);
     }
 
+    // Build GeoIP adapter from config (best-effort: non-fatal on failure)
+    let geoip_port: Option<Arc<dyn ports::secondary::geoip_port::GeoIpPort>> =
+        if let Some(ref geoip_cfg) = config.geoip {
+            if geoip_cfg.enabled {
+                match build_geoip_adapter(geoip_cfg) {
+                    Ok(adapter) => {
+                        info!("GeoIP adapter initialized");
+                        Some(Arc::new(adapter))
+                    }
+                    Err(e) => {
+                        warn!("GeoIP adapter initialization failed (degraded mode): {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
     // Wire DNS alert enricher (best-effort: only if DNS cache is available)
     if let Some(ref dns_cache) = app_state.dns_cache_service {
-        let enricher = application::alert_enrichment::DnsAlertEnricher::new(
+        let mut enricher = application::alert_enrichment::DnsAlertEnricher::new(
             Arc::clone(dns_cache) as Arc<dyn ports::secondary::dns_cache_port::DnsCachePort>,
             app_state.domain_reputation_service.as_ref().map(|svc| {
                 Arc::clone(svc)
                     as Arc<dyn ports::secondary::domain_reputation_port::DomainReputationPort>
             }),
         );
+        if let Some(ref geoip) = geoip_port {
+            enricher = enricher.with_geoip(Arc::clone(geoip));
+            info!("GeoIP alert enrichment enabled");
+        }
         alert_pipeline = alert_pipeline.with_enricher(Arc::new(enricher));
         info!("DNS alert enricher initialized");
     }
@@ -1832,11 +1860,45 @@ fn build_scrub_flags(config: &AgentConfig) -> ebpf_common::scrub::ScrubFlags {
     }
 }
 
+/// Build a `GeoIP` adapter from the config's source mode.
+///
+/// Only handles the `File` mode synchronously. `Url` and `MaxMindAccount`
+/// modes require async downloads and are not supported at startup (they
+/// will log a warning and return an error).
+fn build_geoip_adapter(
+    cfg: &infrastructure::config::GeoIpConfig,
+) -> anyhow::Result<adapters::geoip::MaxMindGeoIpAdapter> {
+    match &cfg.source {
+        infrastructure::config::GeoIpSource::File {
+            city_path,
+            asn_path,
+        } => adapters::geoip::MaxMindGeoIpAdapter::from_files(
+            Path::new(city_path),
+            asn_path.as_deref().map(Path::new),
+        ),
+        infrastructure::config::GeoIpSource::Url { .. } => {
+            anyhow::bail!(
+                "GeoIP URL mode requires async download — use `file` mode or pre-download databases"
+            );
+        }
+        infrastructure::config::GeoIpSource::MaxMindAccount { .. } => {
+            anyhow::bail!(
+                "GeoIP MaxMind account mode requires async download — use `file` mode or pre-download databases"
+            );
+        }
+    }
+}
+
 /// Load and attach the XDP load balancer program.
 fn try_load_xdp_loadbalancer(
     ebpf_dir: &str,
     config: &AgentConfig,
-) -> anyhow::Result<(EbpfLoader, adapters::ebpf::LbMapManager)> {
+    event_tx: mpsc::Sender<AgentEvent>,
+) -> anyhow::Result<(
+    EbpfLoader,
+    adapters::ebpf::LbMapManager,
+    Option<MetricsReader>,
+)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-loadbalancer")?;
     let mut loader = EbpfLoader::load(&program_bytes)?;
 
@@ -1846,5 +1908,12 @@ fn try_load_xdp_loadbalancer(
 
     let lb_mgr = adapters::ebpf::LbMapManager::new(loader.ebpf_mut())?;
 
-    Ok((loader, lb_mgr))
+    // MetricsReader for LB per-CPU metrics
+    let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "LB_METRICS").ok();
+
+    // EventReader for LB events from RingBuf
+    let reader = EventReader::new(loader.ebpf_mut())?;
+    tokio::spawn(async move { reader.run(event_tx).await });
+
+    Ok((loader, lb_mgr, metrics_rdr))
 }

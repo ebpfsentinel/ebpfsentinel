@@ -1,0 +1,41 @@
+# eBPFsentinel GeoIP Configuration Example
+#
+# GeoIP enriches alerts with geographic location and ASN information
+# for source and destination IP addresses. Requires MaxMind GeoLite2
+# or GeoIP2 databases in .mmdb format.
+
+# ── Required: minimal agent config ──────────────────────────────────
+agent:
+  interfaces: ["eth0"]
+
+# ── GeoIP Configuration ────────────────────────────────────────────
+geoip:
+  enabled: true
+
+  # Mode 1: Local file (recommended for production)
+  # Pre-download .mmdb files and reference them directly.
+  source:
+    mode: file
+    city_path: /opt/geoip/GeoLite2-City.mmdb
+    asn_path: /opt/geoip/GeoLite2-ASN.mmdb
+
+  # Mode 2: MaxMind account (auto-download)
+  # Requires a free MaxMind account: https://www.maxmind.com/en/geolite2/signup
+  # source:
+  #   mode: maxmind_account
+  #   account_id: "123456"
+  #   license_key: "your-license-key"
+  #   edition_ids: ["GeoLite2-City", "GeoLite2-ASN"]
+
+  # Mode 3: Direct URL (e.g. self-hosted mirror)
+  # source:
+  #   mode: url
+  #   city_url: "https://internal-mirror.example.com/GeoLite2-City.mmdb"
+  #   asn_url: "https://internal-mirror.example.com/GeoLite2-ASN.mmdb"
+
+  # Auto-refresh interval in hours (for maxmind_account and url modes).
+  # Set to 0 to disable auto-refresh.
+  refresh_interval_hours: 24
+
+  # Directory to store downloaded databases.
+  database_dir: /var/lib/ebpfsentinel/geoip

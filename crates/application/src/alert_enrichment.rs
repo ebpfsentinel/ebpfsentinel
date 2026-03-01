@@ -2,14 +2,18 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use domain::alert::entity::Alert;
+use domain::alias::entity::GeoIpInfo;
 use ports::secondary::alert_enrichment_port::AlertEnrichmentPort;
 use ports::secondary::dns_cache_port::DnsCachePort;
 use ports::secondary::domain_reputation_port::DomainReputationPort;
+use ports::secondary::geoip_port::GeoIpPort;
 
-/// Alert enricher that adds DNS reverse-lookup data and reputation scores.
+/// Alert enricher that adds DNS reverse-lookup data, reputation scores,
+/// and `GeoIP` location info.
 pub struct DnsAlertEnricher {
     dns_cache: Arc<dyn DnsCachePort>,
     reputation: Option<Arc<dyn DomainReputationPort>>,
+    geoip: Option<Arc<dyn GeoIpPort>>,
 }
 
 impl DnsAlertEnricher {
@@ -20,7 +24,15 @@ impl DnsAlertEnricher {
         Self {
             dns_cache,
             reputation,
+            geoip: None,
         }
+    }
+
+    /// Add a `GeoIP` port for IP-to-location enrichment.
+    #[must_use]
+    pub fn with_geoip(mut self, geoip: Arc<dyn GeoIpPort>) -> Self {
+        self.geoip = Some(geoip);
+        self
     }
 }
 
@@ -28,8 +40,8 @@ impl AlertEnrichmentPort for DnsAlertEnricher {
     fn enrich_alert(&self, alert: &mut Alert) {
         // Source IP → domain
         let src_ip = addr_to_ip(alert.src_addr, alert.is_ipv6);
-        if let Some(ip) = src_ip {
-            let domains = self.dns_cache.lookup_ip(&ip);
+        if let Some(ref ip) = src_ip {
+            let domains = self.dns_cache.lookup_ip(ip);
             if let Some(domain) = pick_most_recent(&domains, &*self.dns_cache) {
                 if let Some(ref rep_port) = self.reputation {
                     alert.src_domain_score = rep_port.get_score(&domain);
@@ -40,8 +52,8 @@ impl AlertEnrichmentPort for DnsAlertEnricher {
 
         // Destination IP → domain
         let dst_ip = addr_to_ip(alert.dst_addr, alert.is_ipv6);
-        if let Some(ip) = dst_ip {
-            let domains = self.dns_cache.lookup_ip(&ip);
+        if let Some(ref ip) = dst_ip {
+            let domains = self.dns_cache.lookup_ip(ip);
             if let Some(domain) = pick_most_recent(&domains, &*self.dns_cache) {
                 if let Some(ref rep_port) = self.reputation {
                     alert.dst_domain_score = rep_port.get_score(&domain);
@@ -49,7 +61,26 @@ impl AlertEnrichmentPort for DnsAlertEnricher {
                 alert.dst_domain = Some(domain);
             }
         }
+
+        // GeoIP enrichment
+        if let Some(ref geoip) = self.geoip {
+            if let Some(ref ip) = src_ip
+                && let Some(info) = geoip.lookup(ip)
+            {
+                alert.src_geo = Some(format_geo(&info));
+            }
+            if let Some(ref ip) = dst_ip
+                && let Some(info) = geoip.lookup(ip)
+            {
+                alert.dst_geo = Some(format_geo(&info));
+            }
+        }
     }
+}
+
+/// Format `GeoIP` info as a compact string for the alert field.
+fn format_geo(info: &GeoIpInfo) -> String {
+    info.format_compact()
 }
 
 /// Convert a `[u32; 4]` address to `IpAddr`.
@@ -181,6 +212,8 @@ mod tests {
             dst_domain: None,
             src_domain_score: None,
             dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
             confidence: None,
             threat_type: None,
             data_type: None,
@@ -270,6 +303,59 @@ mod tests {
         enricher.enrich_alert(&mut alert);
 
         assert_eq!(alert.dst_domain.as_deref(), Some("new.com"));
+    }
+
+    struct MockGeoIp;
+
+    impl ports::secondary::geoip_port::GeoIpPort for MockGeoIp {
+        fn lookup(&self, ip: &IpAddr) -> Option<domain::alias::entity::GeoIpInfo> {
+            let ip_str = ip.to_string();
+            if ip_str == "10.0.0.1" {
+                Some(domain::alias::entity::GeoIpInfo {
+                    country_code: Some("US".to_string()),
+                    country_name: Some("United States".to_string()),
+                    city: Some("New York".to_string()),
+                    asn: Some(15169),
+                    as_org: Some("Google LLC".to_string()),
+                    latitude: Some(40.7128),
+                    longitude: Some(-74.006),
+                })
+            } else {
+                None
+            }
+        }
+
+        fn is_ready(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn enrich_with_geoip() {
+        let cache = MockDnsCache { entries: vec![] };
+        let enricher = DnsAlertEnricher::new(Arc::new(cache), None).with_geoip(Arc::new(MockGeoIp));
+
+        let mut alert = make_alert(0, 0x0A00_0001); // dst = 10.0.0.1
+        enricher.enrich_alert(&mut alert);
+
+        assert!(alert.dst_geo.is_some());
+        let geo = alert.dst_geo.unwrap();
+        assert!(geo.contains("US"));
+        assert!(geo.contains("New York"));
+        assert!(geo.contains("AS15169"));
+        assert!(alert.src_geo.is_none()); // src is 0 → no lookup
+    }
+
+    #[test]
+    fn enrich_without_geoip_leaves_fields_none() {
+        let cache = MockDnsCache { entries: vec![] };
+        let enricher = DnsAlertEnricher::new(Arc::new(cache), None);
+
+        let mut alert = make_alert(0, 0x0A00_0001);
+        enricher.enrich_alert(&mut alert);
+
+        assert!(alert.src_geo.is_none());
+        assert!(alert.dst_geo.is_none());
     }
 
     #[test]

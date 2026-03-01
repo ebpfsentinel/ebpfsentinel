@@ -55,6 +55,10 @@ message AlertEvent {
   double src_domain_score = 17;
   // Reputation score for destination domain (-1 if absent).
   double dst_domain_score = 18;
+  // GeoIP location for source IP (empty if not resolved).
+  string src_geo = 31;
+  // GeoIP location for destination IP (empty if not resolved).
+  string dst_geo = 32;
 
   // ── Domain-specific context (populated based on component) ───
 

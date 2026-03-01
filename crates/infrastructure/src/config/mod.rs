@@ -14,6 +14,7 @@ mod ddos;
 mod dlp;
 mod dns;
 mod firewall;
+mod geoip;
 mod ids;
 mod ips;
 mod l7;
@@ -46,6 +47,7 @@ pub use dns::{
 pub use firewall::{
     DefaultPolicy, FirewallConfig, FirewallRuleConfig, PortRangeConfig, ScopeConfig, ScopeMap,
 };
+pub use geoip::{GeoIpConfig, GeoIpSource};
 pub use ids::{IdsConfig, IdsRuleConfig, SamplingConfig, ThresholdRuleConfig};
 pub use ips::{IpsConfig, IpsRuleConfig};
 pub use l7::{L7Config, L7RuleConfig};
@@ -143,6 +145,9 @@ pub struct AgentConfig {
 
     #[serde(default)]
     pub loadbalancer: LoadBalancerConfig,
+
+    #[serde(default)]
+    pub geoip: Option<GeoIpConfig>,
 }
 
 impl AgentConfig {
@@ -201,6 +206,15 @@ impl AgentConfig {
             if feed.auth_header.is_some() {
                 feed.auth_header = Some("***".to_string());
             }
+        }
+        // Mask GeoIP license key
+        if let Some(ref mut geoip_cfg) = sanitized.geoip
+            && let GeoIpSource::MaxMindAccount {
+                ref mut license_key,
+                ..
+            } = geoip_cfg.source
+        {
+            *license_key = "***".to_string();
         }
         sanitized
     }
@@ -429,6 +443,13 @@ impl AgentConfig {
         )?;
         for (idx, svc_cfg) in self.loadbalancer.services.iter().enumerate() {
             svc_cfg.validate(idx)?;
+        }
+
+        // Validate GeoIP config
+        if let Some(ref geoip_cfg) = self.geoip
+            && geoip_cfg.enabled
+        {
+            geoip_cfg.validate()?;
         }
 
         Ok(())

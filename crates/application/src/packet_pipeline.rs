@@ -19,6 +19,7 @@ use ebpf_common::dns::DnsEvent;
 use ebpf_common::event::{
     EVENT_TYPE_FIREWALL, EVENT_TYPE_IDS, EVENT_TYPE_RATELIMIT, EVENT_TYPE_THREATINTEL, PacketEvent,
 };
+use ebpf_common::loadbalancer::{EVENT_TYPE_LB, LB_ACTION_FORWARD, LB_ACTION_NO_BACKEND};
 use ports::secondary::dns_cache_port::DnsCachePort;
 use ports::secondary::metrics_port::MetricsPort;
 use tokio::sync::{RwLock, mpsc};
@@ -252,6 +253,9 @@ impl EventDispatcher {
             | EVENT_TYPE_DDOS_AMP
             | EVENT_TYPE_DDOS_CONNTRACK => {
                 self.process_ddos_event(event).await;
+            }
+            EVENT_TYPE_LB => {
+                self.process_lb_event(&event);
             }
             other => {
                 tracing::debug!(event_type = other, "unhandled event type");
@@ -689,6 +693,25 @@ impl EventDispatcher {
             event.protocol,
             "",
             &format!("ddos {attack_type:?} drop"),
+        );
+    }
+
+    fn process_lb_event(&self, event: &PacketEvent) {
+        let action_label = match event.action {
+            LB_ACTION_FORWARD => "forward",
+            LB_ACTION_NO_BACKEND => "no_backend",
+            _ => "unknown",
+        };
+        self.metrics.record_packet("loadbalancer", action_label);
+
+        tracing::debug!(
+            src_ip = %event.src_ip(),
+            dst_ip = %event.dst_ip(),
+            src_port = event.src_port,
+            dst_port = event.dst_port,
+            protocol = event.protocol,
+            action = action_label,
+            "load balancer event"
         );
     }
 }
@@ -1431,5 +1454,39 @@ mod tests {
             .await;
         let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
         assert_eq!(alert.rule_id.0, "ids-002");
+    }
+
+    // ── Load Balancer dispatch tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn lb_forward_event_records_metric() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        let mut event = make_event(EVENT_TYPE_LB, 0);
+        event.action = LB_ACTION_FORWARD;
+        dispatcher.dispatch_event(event).await;
+
+        assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.last_component.lock().unwrap(), "loadbalancer");
+        assert_eq!(*metrics.last_action.lock().unwrap(), "forward");
+    }
+
+    #[tokio::test]
+    async fn lb_no_backend_event_records_metric() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        let mut event = make_event(EVENT_TYPE_LB, 0);
+        event.action = LB_ACTION_NO_BACKEND;
+        dispatcher.dispatch_event(event).await;
+
+        assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.last_component.lock().unwrap(), "loadbalancer");
+        assert_eq!(*metrics.last_action.lock().unwrap(), "no_backend");
     }
 }

@@ -80,6 +80,12 @@ pub struct AlertResponse {
     /// Reputation score for destination domain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dst_domain_score: Option<f64>,
+    /// `GeoIP` location for source IP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_geo: Option<String>,
+    /// `GeoIP` location for destination IP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_geo: Option<String>,
     /// Threat intel: IOC confidence score (0-100).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u8>,
@@ -218,6 +224,8 @@ pub async fn list_alerts(
             dst_domain: a.dst_domain,
             src_domain_score: a.src_domain_score,
             dst_domain_score: a.dst_domain_score,
+            src_geo: a.src_geo,
+            dst_geo: a.dst_geo,
             confidence: a.confidence,
             threat_type: a.threat_type,
             data_type: a.data_type,
@@ -344,6 +352,8 @@ mod tests {
             dst_domain: Some("evil.com".to_string()),
             src_domain_score: None,
             dst_domain_score: Some(0.85),
+            src_geo: None,
+            dst_geo: None,
             confidence: None,
             threat_type: None,
             data_type: None,

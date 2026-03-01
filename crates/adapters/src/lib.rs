@@ -5,6 +5,7 @@ pub mod alias;
 pub mod audit;
 pub mod auth;
 pub mod ebpf;
+pub mod geoip;
 pub mod grpc;
 pub mod http;
 pub mod storage;

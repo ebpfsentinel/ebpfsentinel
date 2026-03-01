@@ -161,6 +161,10 @@ pub struct AlertResponse {
     pub src_domain_score: Option<f64>,
     #[serde(default)]
     pub dst_domain_score: Option<f64>,
+    #[serde(default)]
+    pub src_geo: Option<String>,
+    #[serde(default)]
+    pub dst_geo: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
