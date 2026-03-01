@@ -7,6 +7,18 @@ use crate::ids::entity::SamplingMode;
 use super::entity::{BlacklistEntry, EnforcementAction, IpsPolicy, WhitelistEntry};
 use super::error::IpsError;
 
+/// Mask an IPv4 address to a /24 network base.
+fn mask_v4_to_24(ip: std::net::Ipv4Addr) -> std::net::Ipv4Addr {
+    let bits = u32::from(ip) & 0xFFFF_FF00;
+    std::net::Ipv4Addr::from(bits)
+}
+
+/// Mask an IPv6 address to a /48 network base.
+fn mask_v6_to_48(ip: std::net::Ipv6Addr) -> std::net::Ipv6Addr {
+    let bits = u128::from(ip) & (u128::MAX << 80);
+    std::net::Ipv6Addr::from(bits)
+}
+
 /// IPS engine: manages an in-memory IP blacklist with detection counting,
 /// threshold-based auto-blacklisting, and TTL-based expiration.
 ///
@@ -18,6 +30,8 @@ pub struct IpsEngine {
     whitelist: Vec<WhitelistEntry>,
     policy: IpsPolicy,
     sampling: SamplingMode,
+    /// Active /24 (v4) or /48 (v6) subnet blocks with expiry tracking.
+    subnet_blocks: HashMap<(IpAddr, u8), Instant>,
 }
 
 impl IpsEngine {
@@ -28,6 +42,7 @@ impl IpsEngine {
             whitelist: Vec::new(),
             policy,
             sampling: SamplingMode::default(),
+            subnet_blocks: HashMap::new(),
         }
     }
 
@@ -47,17 +62,31 @@ impl IpsEngine {
         false
     }
 
-    /// Record a detection event for the given IP. Whitelisted IPs are
-    /// skipped entirely (returns `None`). Events are also skipped if
-    /// sampled out by the current sampling mode. Increments the detection
-    /// counter and returns a `BlacklistIp` enforcement action if the
-    /// threshold is reached.
+    /// Record a detection event for the given IP.
+    ///
+    /// Delegates to [`record_detection_with_country`] with `None`.
+    pub fn record_detection(&mut self, ip: IpAddr) -> Vec<EnforcementAction> {
+        self.record_detection_with_country(ip, None)
+    }
+
+    /// Record a detection event for the given IP with an optional country code.
+    ///
+    /// Whitelisted IPs are skipped entirely (returns `None`).
+    /// Increments the detection counter and returns a `BlacklistIp`
+    /// enforcement action if the threshold is reached.
+    ///
+    /// When `src_country` matches a key in `policy.country_thresholds`,
+    /// that per-country value is used instead of `auto_blacklist_threshold`.
     ///
     /// Detection counts reset if the time since the first detection in
     /// the current window exceeds `max_blacklist_duration`.
-    pub fn record_detection(&mut self, ip: IpAddr) -> Option<EnforcementAction> {
+    pub fn record_detection_with_country(
+        &mut self,
+        ip: IpAddr,
+        src_country: Option<&str>,
+    ) -> Vec<EnforcementAction> {
         if self.is_whitelisted(ip) {
-            return None;
+            return Vec::new();
         }
         let now = Instant::now();
         let (count, first_seen) = self.detection_counts.entry(ip).or_insert((0, now));
@@ -70,7 +99,16 @@ impl IpsEngine {
 
         *count += 1;
 
-        if *count >= self.policy.auto_blacklist_threshold {
+        let threshold = src_country
+            .and_then(|cc| {
+                self.policy
+                    .country_thresholds
+                    .as_ref()
+                    .and_then(|ct| ct.get(cc).copied())
+            })
+            .unwrap_or(self.policy.auto_blacklist_threshold);
+
+        if *count >= threshold {
             // Remove from detection counts since we're blacklisting
             self.detection_counts.remove(&ip);
 
@@ -82,12 +120,36 @@ impl IpsEngine {
                 self.policy.max_blacklist_duration,
             );
 
-            Some(EnforcementAction::BlacklistIp {
-                ip,
-                ttl: self.policy.max_blacklist_duration,
-            })
+            let ttl = self.policy.max_blacklist_duration;
+            let mut actions = vec![EnforcementAction::BlacklistIp { ip, ttl }];
+
+            // Also emit BlockSubnet if this IP's country is in country_thresholds
+            let is_country_hit = src_country.is_some_and(|cc| {
+                self.policy
+                    .country_thresholds
+                    .as_ref()
+                    .is_some_and(|ct| ct.contains_key(cc))
+            });
+            if is_country_hit {
+                let (subnet_addr, prefix_len) = match ip {
+                    IpAddr::V4(v4) => (IpAddr::V4(mask_v4_to_24(v4)), 24),
+                    IpAddr::V6(v6) => (IpAddr::V6(mask_v6_to_48(v6)), 48),
+                };
+                let key = (subnet_addr, prefix_len);
+                if let std::collections::hash_map::Entry::Vacant(e) = self.subnet_blocks.entry(key)
+                {
+                    e.insert(now);
+                    actions.push(EnforcementAction::BlockSubnet {
+                        addr: subnet_addr,
+                        prefix_len,
+                        ttl,
+                    });
+                }
+            }
+
+            actions
         } else {
-            None
+            Vec::new()
         }
     }
 
@@ -151,8 +213,8 @@ impl IpsEngine {
         self.detection_counts.clear();
     }
 
-    /// Scan for and remove expired entries. Returns `UnblacklistIp` actions
-    /// for each removed entry.
+    /// Scan for and remove expired entries. Returns `UnblacklistIp` and
+    /// `UnblockSubnet` actions for each removed entry.
     pub fn cleanup_expired(&mut self) -> Vec<EnforcementAction> {
         let expired_ips: Vec<IpAddr> = self
             .blacklist
@@ -166,6 +228,20 @@ impl IpsEngine {
             self.blacklist.remove(&ip);
             actions.push(EnforcementAction::UnblacklistIp { ip });
         }
+
+        // Expire subnet blocks (same TTL as max_blacklist_duration)
+        let expired_subnets: Vec<(IpAddr, u8)> = self
+            .subnet_blocks
+            .iter()
+            .filter(|(_, added_at)| added_at.elapsed() >= self.policy.max_blacklist_duration)
+            .map(|(&(addr, prefix), _)| (addr, prefix))
+            .collect();
+
+        for (addr, prefix_len) in expired_subnets {
+            self.subnet_blocks.remove(&(addr, prefix_len));
+            actions.push(EnforcementAction::UnblockSubnet { addr, prefix_len });
+        }
+
         actions
     }
 
@@ -231,6 +307,7 @@ mod tests {
             max_blacklist_duration: Duration::from_secs(60),
             auto_blacklist_threshold: 3,
             max_blacklist_size: 100,
+            country_thresholds: None,
         }
     }
 
@@ -377,8 +454,8 @@ mod tests {
     fn record_detection_under_threshold() {
         let mut engine = IpsEngine::new(test_policy());
         let addr = ip(10, 0, 0, 1);
-        assert!(engine.record_detection(addr).is_none());
-        assert!(engine.record_detection(addr).is_none());
+        assert!(engine.record_detection(addr).is_empty());
+        assert!(engine.record_detection(addr).is_empty());
         assert_eq!(engine.blacklist_size(), 0);
     }
 
@@ -386,12 +463,12 @@ mod tests {
     fn record_detection_at_threshold_triggers_blacklist() {
         let mut engine = IpsEngine::new(test_policy());
         let addr = ip(10, 0, 0, 1);
-        assert!(engine.record_detection(addr).is_none()); // 1
-        assert!(engine.record_detection(addr).is_none()); // 2
-        let action = engine.record_detection(addr); // 3 = threshold
-        assert!(action.is_some());
+        assert!(engine.record_detection(addr).is_empty()); // 1
+        assert!(engine.record_detection(addr).is_empty()); // 2
+        let actions = engine.record_detection(addr); // 3 = threshold
+        assert_eq!(actions.len(), 1);
         assert_eq!(
-            action.unwrap(),
+            actions[0],
             EnforcementAction::BlacklistIp {
                 ip: addr,
                 ttl: Duration::from_secs(60),
@@ -406,6 +483,7 @@ mod tests {
             max_blacklist_duration: Duration::from_millis(1),
             auto_blacklist_threshold: 3,
             max_blacklist_size: 100,
+            country_thresholds: None,
         };
         let mut engine = IpsEngine::new(policy);
         let addr = ip(10, 0, 0, 1);
@@ -418,7 +496,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
 
         // Counter should reset, so 1 detection after reset
-        assert!(engine.record_detection(addr).is_none());
+        assert!(engine.record_detection(addr).is_empty());
     }
 
     // ── cleanup_expired ──────────────────────────────────────────
@@ -458,12 +536,58 @@ mod tests {
     // ── policy ───────────────────────────────────────────────────
 
     #[test]
+    fn record_detection_country_threshold_lower() {
+        let mut ct = std::collections::HashMap::new();
+        ct.insert("RU".to_string(), 1_u32);
+        let policy = IpsPolicy {
+            auto_blacklist_threshold: 3,
+            country_thresholds: Some(ct),
+            ..test_policy()
+        };
+        let mut engine = IpsEngine::new(policy);
+        let addr = ip(10, 0, 0, 1);
+        // RU threshold is 1 -> blacklist after first detection + subnet block
+        let actions = engine.record_detection_with_country(addr, Some("RU"));
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(actions[0], EnforcementAction::BlacklistIp { .. }));
+        assert!(matches!(actions[1], EnforcementAction::BlockSubnet { .. }));
+        assert!(engine.is_blacklisted(addr));
+    }
+
+    #[test]
+    fn record_detection_unknown_country_uses_global() {
+        let mut ct = std::collections::HashMap::new();
+        ct.insert("RU".to_string(), 1_u32);
+        let policy = IpsPolicy {
+            auto_blacklist_threshold: 3,
+            country_thresholds: Some(ct),
+            ..test_policy()
+        };
+        let mut engine = IpsEngine::new(policy);
+        let addr = ip(10, 0, 0, 2);
+        // FR not in map -> uses global threshold of 3
+        assert!(
+            engine
+                .record_detection_with_country(addr, Some("FR"))
+                .is_empty()
+        );
+        assert!(
+            engine
+                .record_detection_with_country(addr, Some("FR"))
+                .is_empty()
+        );
+        let actions = engine.record_detection_with_country(addr, Some("FR"));
+        assert!(!actions.is_empty());
+    }
+
+    #[test]
     fn set_policy_updates() {
         let mut engine = IpsEngine::new(test_policy());
         let new_policy = IpsPolicy {
             max_blacklist_duration: Duration::from_secs(120),
             auto_blacklist_threshold: 5,
             max_blacklist_size: 500,
+            country_thresholds: None,
         };
         engine.set_policy(new_policy.clone());
         assert_eq!(engine.policy().auto_blacklist_threshold, 5);
@@ -512,10 +636,10 @@ mod tests {
         let addr = ip(10, 0, 0, 1);
         engine.set_whitelist(vec![wl_exact(10, 0, 0, 1)]);
         // Record 3+ detections — should never trigger blacklist
-        assert!(engine.record_detection(addr).is_none());
-        assert!(engine.record_detection(addr).is_none());
-        assert!(engine.record_detection(addr).is_none());
-        assert!(engine.record_detection(addr).is_none());
+        assert!(engine.record_detection(addr).is_empty());
+        assert!(engine.record_detection(addr).is_empty());
+        assert!(engine.record_detection(addr).is_empty());
+        assert!(engine.record_detection(addr).is_empty());
         assert_eq!(engine.blacklist_size(), 0);
     }
 
@@ -619,5 +743,97 @@ mod tests {
         // Then add to whitelist
         engine.set_whitelist(vec![wl_exact(10, 0, 0, 1)]);
         assert!(!engine.is_blacklisted(addr));
+    }
+
+    // ── Subnet blocking tests ────────────────────────────────────
+
+    #[test]
+    fn ips_engine_emits_block_subnet_for_high_risk_country() {
+        let mut ct = std::collections::HashMap::new();
+        ct.insert("RU".to_string(), 1_u32);
+        let policy = IpsPolicy {
+            auto_blacklist_threshold: 3,
+            country_thresholds: Some(ct),
+            ..test_policy()
+        };
+        let mut engine = IpsEngine::new(policy);
+        let addr = ip(1, 2, 3, 4);
+        let actions = engine.record_detection_with_country(addr, Some("RU"));
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(actions[0], EnforcementAction::BlacklistIp { .. }));
+        assert!(matches!(
+            actions[1],
+            EnforcementAction::BlockSubnet { prefix_len: 24, .. }
+        ));
+    }
+
+    #[test]
+    fn ips_engine_subnet_is_correct_24() {
+        let mut ct = std::collections::HashMap::new();
+        ct.insert("RU".to_string(), 1_u32);
+        let policy = IpsPolicy {
+            auto_blacklist_threshold: 3,
+            country_thresholds: Some(ct),
+            ..test_policy()
+        };
+        let mut engine = IpsEngine::new(policy);
+        let addr = ip(1, 2, 3, 4);
+        let actions = engine.record_detection_with_country(addr, Some("RU"));
+        if let EnforcementAction::BlockSubnet {
+            addr: subnet_addr,
+            prefix_len,
+            ..
+        } = &actions[1]
+        {
+            assert_eq!(*subnet_addr, ip(1, 2, 3, 0));
+            assert_eq!(*prefix_len, 24);
+        } else {
+            panic!("expected BlockSubnet");
+        }
+    }
+
+    #[test]
+    fn ips_engine_no_subnet_for_non_country_threshold_ip() {
+        let mut ct = std::collections::HashMap::new();
+        ct.insert("RU".to_string(), 1_u32);
+        let policy = IpsPolicy {
+            auto_blacklist_threshold: 3,
+            country_thresholds: Some(ct),
+            ..test_policy()
+        };
+        let mut engine = IpsEngine::new(policy);
+        let addr = ip(10, 0, 0, 1);
+        // 3 detections with FR (not in thresholds) -> no subnet block
+        engine.record_detection_with_country(addr, Some("FR"));
+        engine.record_detection_with_country(addr, Some("FR"));
+        let actions = engine.record_detection_with_country(addr, Some("FR"));
+        // Should only have BlacklistIp, no BlockSubnet
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], EnforcementAction::BlacklistIp { .. }));
+    }
+
+    #[test]
+    fn ips_engine_unblock_subnet_on_expiry() {
+        let mut ct = std::collections::HashMap::new();
+        ct.insert("RU".to_string(), 1_u32);
+        let policy = IpsPolicy {
+            max_blacklist_duration: Duration::from_millis(1),
+            auto_blacklist_threshold: 3,
+            max_blacklist_size: 100,
+            country_thresholds: Some(ct),
+        };
+        let mut engine = IpsEngine::new(policy);
+        let addr = ip(1, 2, 3, 4);
+        engine.record_detection_with_country(addr, Some("RU"));
+
+        // Wait for expiry
+        std::thread::sleep(Duration::from_millis(5));
+
+        let actions = engine.cleanup_expired();
+        // Should have UnblacklistIp + UnblockSubnet
+        let has_unblock_subnet = actions
+            .iter()
+            .any(|a| matches!(a, EnforcementAction::UnblockSubnet { .. }));
+        assert!(has_unblock_subnet);
     }
 }

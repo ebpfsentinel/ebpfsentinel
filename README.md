@@ -10,20 +10,20 @@ eBPFsentinel combines a stateful firewall, intrusion detection, rate limiting, a
 
 - **Stateful Firewall** — L3/L4 packet filtering with conntrack, CIDR matching, IP set aliases, GeoIP country blocking (LPM Trie), security zones, VLAN filtering, schedule-based rules, and IPv4/IPv6 dual-stack
 - **NAT** — SNAT, DNAT, masquerade, port forwarding, 1:1 NAT with full packet rewriting (IPv4/IPv6)
-- **Rate Limiting** — Per-IP protection with 5 algorithms (token bucket, fixed window, sliding window, leaky bucket, SYN cookie)
-- **DDoS Mitigation** — Detects and mitigates SYN flood, UDP amplification, ICMP/RST/FIN/ACK flood, and volumetric attacks
-- **L7 Firewall** — Application-layer filtering for HTTP, TLS/SNI, gRPC, SMTP, FTP, and SMB
+- **Rate Limiting** — Per-IP protection with 5 algorithms (token bucket, fixed window, sliding window, leaky bucket, SYN cookie) and per-country tiers via kernel-side LPM Trie lookup
+- **DDoS Mitigation** — Detects and mitigates SYN flood, UDP amplification, ICMP/RST/FIN/ACK flood, and volumetric attacks with per-country detection thresholds and automatic country CIDR blocking via LPM maps
+- **L7 Firewall** — Application-layer filtering for HTTP, TLS/SNI, gRPC, SMTP, FTP, and SMB with GeoIP-based source/destination country matching
 - **Packet Scrubbing** — Kernel-side traffic normalization (TTL, MSS clamping, DF clearing, IP ID randomization)
-- **Multi-WAN Routing** — Policy-based gateway selection with ICMP/TCP health checks and failover
+- **Multi-WAN Routing** — Policy-based gateway selection with ICMP/TCP health checks, failover, and geographic gateway preference (preferred_for_countries)
 - **L4 Load Balancer** — TCP/UDP/TLS passthrough load balancing with round-robin, weighted, IP hash, and least-connections algorithms
 
 ### Threat Detection & Prevention
 
-- **IDS/IPS** — Intrusion detection and prevention with pattern matching, sampling, and threshold detection
-- **Threat Intelligence** — OSINT feed integration with IOC correlation and auto-blocking
-- **GeoIP Blocking** — Country-based traffic blocking via MaxMind databases with O(log n) kernel-side LPM Trie lookup and automatic periodic refresh
+- **IDS/IPS** — Intrusion detection and prevention with pattern matching, country-aware sampling, per-country detection thresholds, and automatic /24 subnet blocking for high-risk countries via LPM maps
+- **Threat Intelligence** — OSINT feed integration with IOC correlation, auto-blocking, and confidence boost for high-risk source countries
+- **GeoIP Blocking** — Country-based traffic blocking via MaxMind databases with O(log n) kernel-side LPM Trie lookup, automatic periodic refresh, and cross-domain enforcement (DDoS auto-block, IPS /24 injection, rate limit country tiers) via coordinated LPM maps
 - **DLP** — Data loss prevention scanning SSL/TLS traffic for sensitive data patterns (PCI, PII, credentials)
-- **DNS Intelligence** — Passive DNS capture, domain blocklists, behavioral reputation scoring, and DNS-based alert enrichment
+- **DNS Intelligence** — Passive DNS capture, domain blocklists, behavioral reputation scoring with high-risk country factors, and DNS-based alert enrichment
 
 ### Operations
 

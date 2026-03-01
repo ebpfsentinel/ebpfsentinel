@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use domain::routing::entity::{Gateway, GatewayId, GatewayState, GatewayStatus};
 use domain::routing::error::RoutingError;
+use ports::secondary::geoip_port::GeoIpPort;
 
 /// Application-level gateway monitoring and multi-WAN routing service.
 ///
@@ -9,6 +11,7 @@ use domain::routing::error::RoutingError;
 /// gateway selection logic for policy routing rules.
 pub struct RoutingAppService {
     gateways: HashMap<GatewayId, GatewayState>,
+    geoip: Option<Arc<dyn GeoIpPort>>,
     enabled: bool,
 }
 
@@ -22,6 +25,7 @@ impl RoutingAppService {
     pub fn new() -> Self {
         Self {
             gateways: HashMap::new(),
+            geoip: None,
             enabled: false,
         }
     }
@@ -107,6 +111,34 @@ impl RoutingAppService {
     pub fn gateway_count(&self) -> usize {
         self.gateways.len()
     }
+
+    /// Set the `GeoIP` port for country-based gateway selection.
+    pub fn set_geoip_port(&mut self, port: Arc<dyn GeoIpPort>) {
+        self.geoip = Some(port);
+    }
+
+    /// Select a gateway preferred for a given destination country.
+    ///
+    /// Returns the first usable gateway whose `preferred_for_countries` contains
+    /// the given country code (case-insensitive). Falls back to [`select_gateway`]
+    /// if no country-specific gateway is usable.
+    pub fn select_gateway_for_country(&self, dst_country: Option<&str>) -> Option<&GatewayState> {
+        if let Some(cc) = dst_country {
+            let preferred = self.list_gateways().into_iter().find(|s| {
+                s.is_usable()
+                    && s.gateway
+                        .preferred_for_countries
+                        .as_ref()
+                        .is_some_and(|countries| {
+                            countries.iter().any(|c| c.eq_ignore_ascii_case(cc))
+                        })
+            });
+            if preferred.is_some() {
+                return preferred;
+            }
+        }
+        self.select_gateway()
+    }
 }
 
 #[cfg(test)]
@@ -123,6 +155,7 @@ mod tests {
             priority,
             enabled: true,
             health_check: None,
+            preferred_for_countries: None,
         }
     }
 

@@ -59,6 +59,7 @@ fuzz_target!(|data: &[u8]| {
             mitigation_action: action,
             auto_block_duration_secs: auto_block_secs,
             enabled: chunk[9] & 0x80 == 0,
+            country_thresholds: None,
         };
         policies.push(policy);
     }

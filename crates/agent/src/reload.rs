@@ -258,6 +258,14 @@ async fn perform_reload(
         tracing::warn!(error = %e, "ratelimit config reload failed at application level");
     }
 
+    // Phase 6a: Ratelimit country tiers reload
+    if let Ok(tiers) = config.ratelimit_country_tiers()
+        && !tiers.is_empty()
+        && let Err(e) = reload_service.reload_ratelimit_country_tiers(tiers).await
+    {
+        tracing::warn!(error = %e, "ratelimit country tiers reload failed");
+    }
+
     // Phase 6b: DDoS reload
     let ddos_policies = match config.ddos_policies() {
         Ok(p) => p,
@@ -405,8 +413,18 @@ async fn perform_reload(
             return;
         }
     };
+    let ti_country_boost = config
+        .threatintel
+        .country_confidence_boost
+        .clone()
+        .unwrap_or_default();
     if let Err(e) = reload_service
-        .reload_threatintel(ti_feeds, config.threatintel.enabled, ti_mode)
+        .reload_threatintel(
+            ti_feeds,
+            config.threatintel.enabled,
+            ti_mode,
+            ti_country_boost,
+        )
         .await
     {
         tracing::warn!(error = %e, "threat intel config reload failed");

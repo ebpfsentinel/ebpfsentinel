@@ -22,6 +22,8 @@ fn make_l7_rule(id: usize, priority: u32, matcher: L7Matcher) -> L7Rule {
         dst_ip: None,
         dst_port: None,
         enabled: true,
+        src_country_codes: None,
+        dst_country_codes: None,
     }
 }
 

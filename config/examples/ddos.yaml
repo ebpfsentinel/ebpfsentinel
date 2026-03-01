@@ -111,17 +111,27 @@ ddos:
   #   mitigation_action        — alert, throttle, or block
   #   auto_block_duration_secs — Seconds to block offending source (0 = indefinite)
   #   enabled                  — Whether this policy is active
+  #   country_thresholds       — Per-country PPS overrides (ISO 3166-1 alpha-2).
+  #                              When traffic from a country exceeds its threshold,
+  #                              all CIDRs for that country are auto-injected into
+  #                              the firewall LPM maps for kernel-side blocking.
   #
   # Maximum 100 policies.
 
   policies:
     # Detect and block SYN floods exceeding 5000 pps
+    # Per-country thresholds: lower thresholds for high-risk countries
+    # trigger automatic country CIDR blocking via LPM maps.
     - id: ddos-syn-flood
       attack_type: syn_flood
       detection_threshold_pps: 5000
       mitigation_action: block
       auto_block_duration_secs: 300
       enabled: true
+      country_thresholds:
+        RU: 2000            # Lower threshold for Russia
+        CN: 2000            # Lower threshold for China
+        KP: 500             # Very low threshold for North Korea
 
     # Detect and throttle UDP amplification attacks
     - id: ddos-udp-amp
@@ -130,6 +140,9 @@ ddos:
       mitigation_action: throttle
       auto_block_duration_secs: 600
       enabled: true
+      country_thresholds:
+        RU: 3000
+        CN: 3000
 
     # Detect and block ICMP floods
     - id: ddos-icmp-flood

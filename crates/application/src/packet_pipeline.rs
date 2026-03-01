@@ -279,15 +279,18 @@ impl EventDispatcher {
             .unwrap_or_default();
 
         // First pass: read-only evaluation (fast path, shared lock)
-        let (rule_id, threshold, alert, detail) = {
+        let (rule_clone, threshold, alert, detail, src_country) = {
             let svc = self.ids_service.read().await;
 
             if !svc.enabled() {
                 return;
             }
 
+            // Resolve source country for country-aware sampling and thresholds
+            let src_country = svc.resolve_country(event.src_addr, event.is_ipv6());
+
             let Some((_idx, rule, matched_domain)) =
-                svc.evaluate_event_with_context(&event, &dst_domains)
+                svc.evaluate_event_with_context(&event, &dst_domains, src_country.as_deref())
             else {
                 return;
             };
@@ -298,15 +301,20 @@ impl EventDispatcher {
                 self.metrics.record_ids_domain_match(&rule.id.0);
             }
             alert.matched_domain = matched_domain;
-            let rule_id = rule.id.clone();
+            let rule_clone = rule.clone();
             let threshold = rule.threshold.clone();
-            (rule_id, threshold, alert, detail)
+            (rule_clone, threshold, alert, detail, src_country)
         };
 
-        // Second pass: threshold check (only if rule has threshold config)
-        if let Some(ref thresh) = threshold {
+        // Second pass: threshold check with country-aware overrides
+        if threshold.is_some() {
             let mut svc = self.ids_service.write().await;
-            if !svc.check_threshold(&rule_id, thresh, event.src_addr[0], event.dst_addr[0]) {
+            if !svc.check_threshold_with_country(
+                &rule_clone,
+                event.src_addr[0],
+                event.dst_addr[0],
+                src_country.as_deref(),
+            ) {
                 return; // Suppressed by threshold
             }
         }
@@ -725,20 +733,7 @@ fn action_label(action: u8) -> &'static str {
     }
 }
 
-/// Convert a `[u32; 4]` address to `IpAddr`.
-///
-/// IPv4 uses only the first element; IPv6 uses all four u32s in network order.
-fn addr_to_ip(addr: [u32; 4], ipv6: bool) -> std::net::IpAddr {
-    if ipv6 {
-        let mut bytes = [0u8; 16];
-        for (i, word) in addr.iter().enumerate() {
-            bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
-        }
-        std::net::IpAddr::V6(std::net::Ipv6Addr::from(bytes))
-    } else {
-        std::net::IpAddr::V4(std::net::Ipv4Addr::from(addr[0]))
-    }
-}
+use crate::addr_to_ip;
 
 #[cfg(test)]
 mod tests {
@@ -814,6 +809,7 @@ mod tests {
             threshold: None,
             domain_pattern: None,
             domain_match_mode: None,
+            country_thresholds: None,
         }
     }
 
@@ -1202,6 +1198,8 @@ mod tests {
             dst_ip: None,
             dst_port: None,
             enabled: true,
+            src_country_codes: None,
+            dst_country_codes: None,
         }]);
         let metrics = Arc::new(TestMetrics::new());
         let (alert_tx, _alert_rx) = mpsc::channel(10);
@@ -1256,6 +1254,8 @@ mod tests {
             dst_ip: None,
             dst_port: None,
             enabled: true,
+            src_country_codes: None,
+            dst_country_codes: None,
         }]);
         l7.write().await.set_enabled(false);
         let metrics = Arc::new(TestMetrics::new());

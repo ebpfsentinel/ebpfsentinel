@@ -1,5 +1,7 @@
 //! Threat Intelligence domain configuration structs and conversion logic.
 
+use std::collections::HashMap;
+
 use domain::threatintel::entity::{FeedConfig, FeedFormat, FieldMapping};
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +17,11 @@ pub struct ThreatIntelConfig {
 
     #[serde(default)]
     pub feeds: Vec<ThreatIntelFeedConfig>,
+
+    /// Per-country confidence boost values (e.g. `{"RU": 10, "CN": 5}`).
+    /// Positive boosts IOC confidence, negative reduces it. Clamped 0-100.
+    #[serde(default)]
+    pub country_confidence_boost: Option<HashMap<String, i8>>,
 }
 
 impl Default for ThreatIntelConfig {
@@ -23,6 +30,7 @@ impl Default for ThreatIntelConfig {
             enabled: true,
             mode: "alert".to_string(),
             feeds: Vec::new(),
+            country_confidence_boost: None,
         }
     }
 }

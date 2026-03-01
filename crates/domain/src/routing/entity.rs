@@ -69,6 +69,9 @@ pub struct Gateway {
     pub enabled: bool,
     /// Health-check configuration.
     pub health_check: Option<HealthCheck>,
+    /// Country codes this gateway is preferred for (e.g. route traffic to those destinations).
+    #[serde(default)]
+    pub preferred_for_countries: Option<Vec<String>>,
 }
 
 /// Runtime gateway state tracked by the monitoring service.
@@ -130,6 +133,7 @@ mod tests {
             priority: u32::from(id) * 10,
             enabled: true,
             health_check: None,
+            preferred_for_countries: None,
         }
     }
 

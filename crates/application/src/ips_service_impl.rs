@@ -7,6 +7,9 @@ use domain::common::error::DomainError;
 use domain::ids::entity::{IdsRule, SamplingMode};
 use domain::ips::engine::IpsEngine;
 use domain::ips::entity::{BlacklistEntry, EnforcementAction, IpsPolicy, WhitelistEntry};
+use ebpf_common::firewall::{ACTION_DROP, FirewallLpmEntryV4, FirewallLpmEntryV6};
+use ports::secondary::geoip_port::GeoIpPort;
+use ports::secondary::lpm_coordinator_port::LpmCoordinatorPort;
 use ports::secondary::metrics_port::MetricsPort;
 
 /// Application-level IPS service.
@@ -19,6 +22,8 @@ pub struct IpsAppService {
     metrics: Arc<dyn MetricsPort>,
     mode: DomainMode,
     enabled: bool,
+    geoip: Option<Arc<dyn GeoIpPort>>,
+    lpm_coordinator: Option<Arc<dyn LpmCoordinatorPort>>,
 }
 
 impl IpsAppService {
@@ -29,7 +34,19 @@ impl IpsAppService {
             metrics,
             mode: DomainMode::default(),
             enabled: true,
+            geoip: None,
+            lpm_coordinator: None,
         }
+    }
+
+    /// Set the `GeoIP` port for country-aware auto-blacklist thresholds.
+    pub fn set_geoip_port(&mut self, port: Arc<dyn GeoIpPort>) {
+        self.geoip = Some(port);
+    }
+
+    /// Set the LPM coordinator for kernel-side /24 subnet enforcement.
+    pub fn set_lpm_coordinator(&mut self, coordinator: Arc<dyn LpmCoordinatorPort>) {
+        self.lpm_coordinator = Some(coordinator);
     }
 
     pub fn mode(&self) -> DomainMode {
@@ -61,12 +78,15 @@ impl IpsAppService {
     /// entry is created, but the caller should not enforce the action
     /// (observation only).
     pub fn record_detection(&mut self, ip: IpAddr) -> Vec<EnforcementAction> {
-        let mut actions = Vec::new();
+        let src_country = self.resolve_country(&ip);
+        let actions = self
+            .engine
+            .record_detection_with_country(ip, src_country.as_deref());
 
-        if let Some(action) = self.engine.record_detection(ip) {
+        if !actions.is_empty() {
             self.metrics.record_ips_block();
             self.update_blacklist_metric();
-            actions.push(action);
+            self.apply_subnet_enforcements(&actions);
         }
 
         actions
@@ -117,6 +137,7 @@ impl IpsAppService {
         let actions = self.engine.cleanup_expired();
         if !actions.is_empty() {
             self.update_blacklist_metric();
+            self.apply_subnet_enforcements(&actions);
         }
         actions
     }
@@ -190,9 +211,87 @@ impl IpsAppService {
         Ok(old_mode)
     }
 
+    /// Apply subnet-related enforcement actions to the LPM coordinator.
+    fn apply_subnet_enforcements(&self, actions: &[EnforcementAction]) {
+        let Some(ref coordinator) = self.lpm_coordinator else {
+            return;
+        };
+
+        for action in actions {
+            match action {
+                EnforcementAction::BlockSubnet {
+                    addr, prefix_len, ..
+                } => {
+                    let (src_v4, src_v6) = Self::ip_to_lpm_entries(*addr, *prefix_len);
+                    if let Err(e) = coordinator.insert_entries("ips", &src_v4, &src_v6) {
+                        tracing::warn!(
+                            addr = %addr,
+                            prefix_len,
+                            "IPS subnet block: failed to inject LPM entry: {e}"
+                        );
+                    } else {
+                        tracing::info!(
+                            addr = %addr,
+                            prefix_len,
+                            "IPS subnet block: injected LPM entry"
+                        );
+                    }
+                }
+                EnforcementAction::UnblockSubnet { addr, prefix_len } => {
+                    let (src_v4, src_v6) = Self::ip_to_lpm_entries(*addr, *prefix_len);
+                    if let Err(e) = coordinator.remove_entries("ips", &src_v4, &src_v6) {
+                        tracing::warn!(
+                            addr = %addr,
+                            prefix_len,
+                            "IPS subnet unblock: failed to remove LPM entry: {e}"
+                        );
+                    } else {
+                        tracing::info!(
+                            addr = %addr,
+                            prefix_len,
+                            "IPS subnet unblock: removed LPM entry"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Convert an IP address + prefix to LPM entry vectors.
+    fn ip_to_lpm_entries(
+        addr: IpAddr,
+        prefix_len: u8,
+    ) -> (Vec<FirewallLpmEntryV4>, Vec<FirewallLpmEntryV6>) {
+        match addr {
+            IpAddr::V4(v4) => {
+                let entry = FirewallLpmEntryV4 {
+                    prefix_len: u32::from(prefix_len),
+                    addr: v4.octets(),
+                    action: ACTION_DROP,
+                };
+                (vec![entry], Vec::new())
+            }
+            IpAddr::V6(v6) => {
+                let entry = FirewallLpmEntryV6 {
+                    prefix_len: u32::from(prefix_len),
+                    addr: v6.octets(),
+                    action: ACTION_DROP,
+                };
+                (Vec::new(), vec![entry])
+            }
+        }
+    }
+
     fn update_blacklist_metric(&self) {
         self.metrics
             .set_ips_blacklist_size(self.engine.blacklist_size() as u64);
+    }
+
+    /// Resolve the country code for an IP address via `GeoIP`.
+    pub fn resolve_country(&self, ip: &IpAddr) -> Option<String> {
+        let geoip = self.geoip.as_ref()?;
+        geoip.lookup(ip).and_then(|info| info.country_code)
     }
 }
 
@@ -288,6 +387,7 @@ mod tests {
             max_blacklist_duration: Duration::from_secs(60),
             auto_blacklist_threshold: 3,
             max_blacklist_size: 100,
+            country_thresholds: None,
         };
         let engine = IpsEngine::new(policy);
         let svc = IpsAppService::new(engine, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
@@ -394,6 +494,7 @@ mod tests {
             max_blacklist_duration: Duration::from_secs(120),
             auto_blacklist_threshold: 5,
             max_blacklist_size: 500,
+            country_thresholds: None,
         };
         svc.set_policy(new_policy);
         assert_eq!(svc.policy().auto_blacklist_threshold, 5);
@@ -417,6 +518,7 @@ mod tests {
             threshold: None,
             domain_pattern: None,
             domain_match_mode: None,
+            country_thresholds: None,
         }
     }
 

@@ -54,6 +54,10 @@ pub struct ReputationSectionConfig {
 
     #[serde(default = "default_decay_half_life_hours")]
     pub decay_half_life_hours: u64,
+
+    /// Country codes considered high-risk for `GeoIP` reputation scoring.
+    #[serde(default)]
+    pub high_risk_countries: Vec<String>,
 }
 
 fn default_max_tracked_domains() -> usize {
@@ -78,6 +82,7 @@ impl Default for ReputationSectionConfig {
             auto_block_enabled: false,
             auto_block_ttl_secs: default_auto_block_ttl(),
             decay_half_life_hours: default_decay_half_life_hours(),
+            high_risk_countries: Vec::new(),
         }
     }
 }
@@ -119,6 +124,7 @@ impl ReputationSectionConfig {
             auto_block_enabled: self.auto_block_enabled,
             auto_block_ttl_secs: self.auto_block_ttl_secs,
             decay_half_life_hours: self.decay_half_life_hours,
+            high_risk_countries: self.high_risk_countries.clone(),
         }
     }
 }

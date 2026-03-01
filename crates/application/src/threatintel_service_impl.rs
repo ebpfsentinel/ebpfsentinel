@@ -5,6 +5,7 @@ use domain::common::entity::DomainMode;
 use domain::common::error::DomainError;
 use domain::threatintel::engine::ThreatIntelEngine;
 use domain::threatintel::entity::{FeedConfig, Ioc};
+use ports::secondary::geoip_port::GeoIpPort;
 use ports::secondary::metrics_port::MetricsPort;
 use ports::secondary::threatintel_map_port::ThreatIntelMapPort;
 
@@ -15,6 +16,7 @@ use ports::secondary::threatintel_map_port::ThreatIntelMapPort;
 pub struct ThreatIntelAppService {
     engine: ThreatIntelEngine,
     map_port: Option<Box<dyn ThreatIntelMapPort + Send>>,
+    geoip: Option<Arc<dyn GeoIpPort>>,
     metrics: Arc<dyn MetricsPort>,
     feeds: Vec<FeedConfig>,
     mode: DomainMode,
@@ -30,6 +32,7 @@ impl ThreatIntelAppService {
         Self {
             engine,
             map_port: None,
+            geoip: None,
             metrics,
             feeds,
             mode: DomainMode::default(),
@@ -41,6 +44,16 @@ impl ThreatIntelAppService {
     pub fn set_map_port(&mut self, port: Box<dyn ThreatIntelMapPort + Send>) {
         self.map_port = Some(port);
         self.sync_ebpf_maps();
+    }
+
+    /// Set the `GeoIP` port for country-based confidence boosting.
+    pub fn set_geoip_port(&mut self, port: Arc<dyn GeoIpPort>) {
+        self.geoip = Some(port);
+    }
+
+    /// Set country confidence boost map on the underlying engine.
+    pub fn set_country_confidence_boost(&mut self, boost: std::collections::HashMap<String, i8>) {
+        self.engine.set_country_confidence_boost(boost);
     }
 
     pub fn mode(&self) -> DomainMode {
@@ -59,7 +72,11 @@ impl ThreatIntelAppService {
         self.enabled = enabled;
     }
 
-    pub fn add_ioc(&mut self, ioc: Ioc) -> Result<(), DomainError> {
+    pub fn add_ioc(&mut self, mut ioc: Ioc) -> Result<(), DomainError> {
+        if let Some(ref geoip) = self.geoip {
+            let cc = geoip.lookup(&ioc.ip).and_then(|info| info.country_code);
+            self.engine.apply_country_boost(&mut ioc, cc.as_deref());
+        }
         self.engine.add_ioc(ioc)?;
         self.sync_ebpf_maps();
         self.update_metrics();
@@ -74,6 +91,7 @@ impl ThreatIntelAppService {
     }
 
     pub fn reload_iocs(&mut self, iocs: Vec<Ioc>) -> Result<(), DomainError> {
+        let iocs = self.apply_country_boosts(iocs);
         self.engine.reload(iocs)?;
         self.sync_ebpf_maps();
         self.update_metrics();
@@ -104,6 +122,18 @@ impl ThreatIntelAppService {
     /// Mutable access to the engine.
     pub fn engine_mut(&mut self) -> &mut ThreatIntelEngine {
         &mut self.engine
+    }
+
+    /// Apply country confidence boosts to a batch of IOCs using `GeoIP` lookups.
+    fn apply_country_boosts(&self, mut iocs: Vec<Ioc>) -> Vec<Ioc> {
+        let Some(ref geoip) = self.geoip else {
+            return iocs;
+        };
+        for ioc in &mut iocs {
+            let cc = geoip.lookup(&ioc.ip).and_then(|info| info.country_code);
+            self.engine.apply_country_boost(ioc, cc.as_deref());
+        }
+        iocs
     }
 
     /// Full-reload sync: bulk-load all engine IOCs into eBPF maps.

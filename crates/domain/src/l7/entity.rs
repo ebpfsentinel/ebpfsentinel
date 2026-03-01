@@ -127,6 +127,10 @@ pub struct L7Rule {
     pub src_ip: Option<IpCidr>,
     pub dst_ip: Option<IpCidr>,
     pub dst_port: Option<PortRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_country_codes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_country_codes: Option<Vec<String>>,
     pub enabled: bool,
 }
 
@@ -343,6 +347,8 @@ mod tests {
             src_ip: None,
             dst_ip: None,
             dst_port: None,
+            src_country_codes: None,
+            dst_country_codes: None,
             enabled: true,
         }
     }
@@ -535,6 +541,8 @@ mod tests {
             src_ip: None,
             dst_ip: None,
             dst_port: None,
+            src_country_codes: None,
+            dst_country_codes: None,
             enabled: true,
         };
 
@@ -562,6 +570,8 @@ mod tests {
             src_ip: None,
             dst_ip: None,
             dst_port: None,
+            src_country_codes: None,
+            dst_country_codes: None,
             enabled: true,
         };
 
@@ -589,6 +599,8 @@ mod tests {
             src_ip: None,
             dst_ip: None,
             dst_port: None,
+            src_country_codes: None,
+            dst_country_codes: None,
             enabled: true,
         };
 
@@ -619,6 +631,8 @@ mod tests {
             src_ip: None,
             dst_ip: None,
             dst_port: None,
+            src_country_codes: None,
+            dst_country_codes: None,
             enabled: true,
         };
 
@@ -721,6 +735,8 @@ mod tests {
             src_ip: None,
             dst_ip: None,
             dst_port: None,
+            src_country_codes: None,
+            dst_country_codes: None,
             enabled: true,
         };
 
@@ -757,6 +773,8 @@ mod tests {
             src_ip: None,
             dst_ip: None,
             dst_port: None,
+            src_country_codes: None,
+            dst_country_codes: None,
             enabled: true,
         };
 

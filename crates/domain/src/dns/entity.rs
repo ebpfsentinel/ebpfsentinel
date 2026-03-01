@@ -301,6 +301,8 @@ pub enum ReputationFactor {
     L7RuleMatch { rule_id: String },
     /// Domain is queried at an unusually high rate.
     FrequentQueries { rate_per_min: f64 },
+    /// Domain resolved to an IP in a high-risk country.
+    HighRiskCountry { country_code: String },
 }
 
 impl ReputationFactor {
@@ -313,6 +315,7 @@ impl ReputationFactor {
             Self::ShortTtl { .. } => 0.2,
             Self::L7RuleMatch { .. } => 0.5,
             Self::FrequentQueries { .. } => 0.1,
+            Self::HighRiskCountry { .. } => 0.4,
         }
     }
 
@@ -325,6 +328,7 @@ impl ReputationFactor {
             Self::ShortTtl { .. } => "ttl",
             Self::L7RuleMatch { .. } => "l7",
             Self::FrequentQueries { .. } => "freq",
+            Self::HighRiskCountry { .. } => "geo",
         }
     }
 }
@@ -378,6 +382,8 @@ pub struct ReputationConfig {
     pub auto_block_ttl_secs: u64,
     /// Decay half-life in hours.
     pub decay_half_life_hours: u64,
+    /// Country codes considered high-risk for `GeoIP` reputation scoring.
+    pub high_risk_countries: Vec<String>,
 }
 
 impl Default for ReputationConfig {
@@ -389,6 +395,7 @@ impl Default for ReputationConfig {
             auto_block_enabled: false,
             auto_block_ttl_secs: 3600,
             decay_half_life_hours: 24,
+            high_risk_countries: Vec::new(),
         }
     }
 }

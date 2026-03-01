@@ -248,6 +248,7 @@ mod tests {
             auto_block_enabled: true,
             auto_block_ttl_secs: 3600,
             decay_half_life_hours: 24,
+            high_risk_countries: Vec::new(),
         }
     }
 

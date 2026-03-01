@@ -28,11 +28,32 @@ impl L7Engine {
         header: &PacketEvent,
         parsed: &ParsedProtocol,
     ) -> Option<(usize, &L7Rule)> {
+        self.evaluate_with_country(header, parsed, None, None)
+    }
+
+    /// Evaluate a parsed L7 event with optional `GeoIP` country codes.
+    ///
+    /// Like [`evaluate`](Self::evaluate) but also checks `src_country_codes`
+    /// and `dst_country_codes` on each rule. A `None` rule field is a wildcard
+    /// (always matches). A `Some` rule field requires the actual country code
+    /// to be present and contained in the list (case-insensitive).
+    pub fn evaluate_with_country(
+        &self,
+        header: &PacketEvent,
+        parsed: &ParsedProtocol,
+        src_country: Option<&str>,
+        dst_country: Option<&str>,
+    ) -> Option<(usize, &L7Rule)> {
         self.rules
             .iter()
             .enumerate()
             .filter(|(_, r)| r.enabled)
-            .find(|(_, r)| r.matches_l3l4(header) && r.matches_l7(parsed))
+            .find(|(_, r)| {
+                r.matches_l3l4(header)
+                    && r.matches_l7(parsed)
+                    && matches_country(r.src_country_codes.as_ref(), src_country)
+                    && matches_country(r.dst_country_codes.as_ref(), dst_country)
+            })
     }
 
     /// Add a rule. Validates the rule and rejects duplicates.
@@ -98,6 +119,21 @@ impl L7Engine {
     }
 }
 
+/// Check if an actual country code matches a rule's country-code list.
+///
+/// `None` `rule_codes` is a wildcard (always matches).
+/// `Some` `rule_codes` requires `actual` to be `Some` and present in the list
+/// (case-insensitive comparison).
+fn matches_country(rule_codes: Option<&Vec<String>>, actual: Option<&str>) -> bool {
+    match rule_codes {
+        None => true,
+        Some(codes) => match actual {
+            None => false,
+            Some(actual_code) => codes.iter().any(|c| c.eq_ignore_ascii_case(actual_code)),
+        },
+    }
+}
+
 impl Default for L7Engine {
     fn default() -> Self {
         Self::new()
@@ -126,6 +162,8 @@ mod tests {
             src_ip: None,
             dst_ip: None,
             dst_port: None,
+            src_country_codes: None,
+            dst_country_codes: None,
             enabled: true,
         }
     }
@@ -369,6 +407,8 @@ mod tests {
             src_ip: None,
             dst_ip: None,
             dst_port: None,
+            src_country_codes: None,
+            dst_country_codes: None,
             enabled: true,
         };
         engine.add_rule(rule).unwrap();
@@ -412,6 +452,8 @@ mod tests {
             src_ip: None,
             dst_ip: None,
             dst_port: None,
+            src_country_codes: None,
+            dst_country_codes: None,
             enabled: true,
         };
         engine.add_rule(smtp_rule).unwrap();

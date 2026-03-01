@@ -15,6 +15,9 @@ use crate::threatintel::error::ThreatIntelError;
 pub struct ThreatIntelEngine {
     iocs: HashMap<IpAddr, Ioc>,
     max_capacity: usize,
+    /// Per-country confidence adjustment (e.g. `{"RU": 10, "CN": 5}`).
+    /// Positive values boost, negative values reduce. Clamped to 0-100.
+    country_confidence_boost: HashMap<String, i8>,
 }
 
 impl ThreatIntelEngine {
@@ -23,6 +26,7 @@ impl ThreatIntelEngine {
         Self {
             iocs: HashMap::new(),
             max_capacity,
+            country_confidence_boost: HashMap::new(),
         }
     }
 
@@ -133,6 +137,37 @@ impl ThreatIntelEngine {
     /// Maximum capacity of the engine.
     pub fn max_capacity(&self) -> usize {
         self.max_capacity
+    }
+
+    /// Set per-country confidence boost values.
+    ///
+    /// Keys are ISO 3166-1 alpha-2 country codes (e.g. "RU", "CN").
+    /// Values are signed adjustments applied to IOC confidence scores.
+    pub fn set_country_confidence_boost(&mut self, boost: HashMap<String, i8>) {
+        self.country_confidence_boost = boost;
+    }
+
+    /// Apply country-based confidence adjustment to an IOC.
+    ///
+    /// If the IOC's IP resolves to a country with a configured boost,
+    /// the confidence is adjusted and clamped to 0-100.
+    /// No-op if `country_code` is `None` or no boost is configured for that country.
+    pub fn apply_country_boost(&self, ioc: &mut Ioc, country_code: Option<&str>) {
+        let Some(cc) = country_code else { return };
+        let Some(&boost) = self.country_confidence_boost.iter().find_map(|(k, v)| {
+            if k.eq_ignore_ascii_case(cc) {
+                Some(v)
+            } else {
+                None
+            }
+        }) else {
+            return;
+        };
+        let adjusted = i16::from(ioc.confidence) + i16::from(boost);
+        // Safety: clamp(0, 100) guarantees the value is non-negative and fits in u8.
+        #[allow(clippy::cast_sign_loss)]
+        let clamped = adjusted.clamp(0, 100) as u8;
+        ioc.confidence = clamped;
     }
 }
 
@@ -358,5 +393,67 @@ mod tests {
     fn max_capacity_getter() {
         let engine = ThreatIntelEngine::new(42);
         assert_eq!(engine.max_capacity(), 42);
+    }
+
+    // ── Country confidence boost ───────────────────────────────────
+
+    #[test]
+    fn country_boost_increases_confidence() {
+        let mut engine = ThreatIntelEngine::new(100);
+        engine.set_country_confidence_boost(HashMap::from([("RU".to_string(), 10)]));
+
+        let mut entry = ioc("10.0.0.1", "feed-a", 50);
+        engine.apply_country_boost(&mut entry, Some("RU"));
+        assert_eq!(entry.confidence, 60);
+    }
+
+    #[test]
+    fn country_boost_clamps_to_100() {
+        let mut engine = ThreatIntelEngine::new(100);
+        engine.set_country_confidence_boost(HashMap::from([("CN".to_string(), 15)]));
+
+        let mut entry = ioc("10.0.0.1", "feed-a", 95);
+        engine.apply_country_boost(&mut entry, Some("CN"));
+        assert_eq!(entry.confidence, 100);
+    }
+
+    #[test]
+    fn country_boost_clamps_to_0() {
+        let mut engine = ThreatIntelEngine::new(100);
+        engine.set_country_confidence_boost(HashMap::from([("US".to_string(), -20)]));
+
+        let mut entry = ioc("10.0.0.1", "feed-a", 10);
+        engine.apply_country_boost(&mut entry, Some("US"));
+        assert_eq!(entry.confidence, 0);
+    }
+
+    #[test]
+    fn no_boost_without_country() {
+        let mut engine = ThreatIntelEngine::new(100);
+        engine.set_country_confidence_boost(HashMap::from([("RU".to_string(), 10)]));
+
+        let mut entry = ioc("10.0.0.1", "feed-a", 50);
+        engine.apply_country_boost(&mut entry, None);
+        assert_eq!(entry.confidence, 50);
+    }
+
+    #[test]
+    fn no_boost_for_unconfigured_country() {
+        let mut engine = ThreatIntelEngine::new(100);
+        engine.set_country_confidence_boost(HashMap::from([("RU".to_string(), 10)]));
+
+        let mut entry = ioc("10.0.0.1", "feed-a", 50);
+        engine.apply_country_boost(&mut entry, Some("FR"));
+        assert_eq!(entry.confidence, 50);
+    }
+
+    #[test]
+    fn country_boost_case_insensitive() {
+        let mut engine = ThreatIntelEngine::new(100);
+        engine.set_country_confidence_boost(HashMap::from([("RU".to_string(), 10)]));
+
+        let mut entry = ioc("10.0.0.1", "feed-a", 50);
+        engine.apply_country_boost(&mut entry, Some("ru"));
+        assert_eq!(entry.confidence, 60);
     }
 }

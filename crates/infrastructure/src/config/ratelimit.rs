@@ -2,7 +2,7 @@
 
 use domain::common::entity::RuleId;
 use domain::ratelimit::entity::{
-    RateLimitAction, RateLimitAlgorithm, RateLimitPolicy, RateLimitScope,
+    CountryTierConfig, RateLimitAction, RateLimitAlgorithm, RateLimitPolicy, RateLimitScope,
 };
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +27,11 @@ pub struct RateLimitSectionConfig {
 
     #[serde(default)]
     pub rules: Vec<RateLimitRuleConfig>,
+
+    /// Per-country rate limit tier configurations.
+    /// Each tier maps country codes to a rate limit config loaded into eBPF LPM Trie maps.
+    #[serde(default)]
+    pub country_tiers: Vec<CountryTierConfigYaml>,
 }
 
 fn default_ratelimit_rate() -> u64 {
@@ -47,7 +52,100 @@ impl Default for RateLimitSectionConfig {
             default_burst: default_ratelimit_burst(),
             default_algorithm: default_ratelimit_algorithm(),
             rules: Vec::new(),
+            country_tiers: Vec::new(),
         }
+    }
+}
+
+/// YAML configuration for a country-tier rate limit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CountryTierConfigYaml {
+    /// Tier ID (1-15).
+    pub tier_id: u8,
+    /// Country codes assigned to this tier.
+    pub country_codes: Vec<String>,
+    /// Packets per second.
+    pub rate: u64,
+    /// Maximum burst (bucket size).
+    pub burst: u64,
+    /// Algorithm: `token_bucket`, `fixed_window`, `sliding_window`, `leaky_bucket`.
+    #[serde(default = "default_ratelimit_algorithm")]
+    pub algorithm: String,
+    /// Action on limit exceeded: `drop` or `pass`.
+    #[serde(default = "default_ratelimit_action")]
+    pub action: String,
+}
+
+impl CountryTierConfigYaml {
+    pub(super) fn validate(&self, idx: usize) -> Result<(), ConfigError> {
+        let prefix = format!("ratelimit.country_tiers[{idx}]");
+
+        if self.tier_id == 0 || self.tier_id > 15 {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.tier_id"),
+                message: "tier_id must be 1-15".to_string(),
+            });
+        }
+
+        if self.country_codes.is_empty() {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.country_codes"),
+                message: "country_codes must not be empty".to_string(),
+            });
+        }
+
+        if self.rate == 0 {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.rate"),
+                message: "rate must be > 0".to_string(),
+            });
+        }
+
+        if self.burst == 0 {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.burst"),
+                message: "burst must be > 0".to_string(),
+            });
+        }
+
+        parse_ratelimit_action(&self.action).map_err(|()| ConfigError::InvalidValue {
+            field: format!("{prefix}.action"),
+            value: self.action.clone(),
+            expected: "drop, pass".to_string(),
+        })?;
+
+        parse_ratelimit_algorithm(&self.algorithm).map_err(|()| ConfigError::InvalidValue {
+            field: format!("{prefix}.algorithm"),
+            value: self.algorithm.clone(),
+            expected: "token_bucket, fixed_window, sliding_window, leaky_bucket".to_string(),
+        })?;
+
+        Ok(())
+    }
+
+    pub fn to_domain_tier(&self) -> Result<CountryTierConfig, ConfigError> {
+        let action =
+            parse_ratelimit_action(&self.action).map_err(|()| ConfigError::InvalidValue {
+                field: "action".to_string(),
+                value: self.action.clone(),
+                expected: "drop, pass".to_string(),
+            })?;
+
+        let algorithm =
+            parse_ratelimit_algorithm(&self.algorithm).map_err(|()| ConfigError::InvalidValue {
+                field: "algorithm".to_string(),
+                value: self.algorithm.clone(),
+                expected: "token_bucket, fixed_window, sliding_window, leaky_bucket".to_string(),
+            })?;
+
+        Ok(CountryTierConfig {
+            tier_id: self.tier_id,
+            country_codes: self.country_codes.clone(),
+            rate: self.rate,
+            burst: self.burst,
+            algorithm,
+            action,
+        })
     }
 }
 
@@ -79,6 +177,10 @@ pub struct RateLimitRuleConfig {
 
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// Optional country code filter (userspace annotation only).
+    #[serde(default)]
+    pub country_codes: Option<Vec<String>>,
 }
 
 fn default_ratelimit_action() -> String {
@@ -182,6 +284,7 @@ impl RateLimitRuleConfig {
             src_ip,
             enabled: self.enabled,
             algorithm,
+            country_codes: self.country_codes.clone(),
         })
     }
 }

@@ -3,7 +3,11 @@ use std::sync::Arc;
 use domain::common::entity::RuleId;
 use domain::common::error::DomainError;
 use domain::ddos::engine::DdosEngine;
-use domain::ddos::entity::{DdosAttack, DdosEvent, DdosPolicy};
+use domain::ddos::entity::{DdosAttack, DdosEnforcementAction, DdosEvent, DdosPolicy};
+use ebpf_common::firewall::ACTION_DROP;
+use ports::secondary::alias_resolution_port::AliasResolutionPort;
+use ports::secondary::geoip_port::GeoIpPort;
+use ports::secondary::lpm_coordinator_port::LpmCoordinatorPort;
 use ports::secondary::metrics_port::MetricsPort;
 
 /// Application-level `DDoS` detection and mitigation service.
@@ -14,6 +18,9 @@ pub struct DdosAppService {
     engine: DdosEngine,
     metrics: Arc<dyn MetricsPort>,
     enabled: bool,
+    geoip: Option<Arc<dyn GeoIpPort>>,
+    lpm_coordinator: Option<Arc<dyn LpmCoordinatorPort>>,
+    alias_resolution: Option<Arc<dyn AliasResolutionPort>>,
 }
 
 impl DdosAppService {
@@ -22,7 +29,25 @@ impl DdosAppService {
             engine,
             metrics,
             enabled: true,
+            geoip: None,
+            lpm_coordinator: None,
+            alias_resolution: None,
         }
+    }
+
+    /// Set the `GeoIP` port for country-aware thresholds.
+    pub fn set_geoip_port(&mut self, port: Arc<dyn GeoIpPort>) {
+        self.geoip = Some(port);
+    }
+
+    /// Set the LPM coordinator for kernel-side country CIDR enforcement.
+    pub fn set_lpm_coordinator(&mut self, coordinator: Arc<dyn LpmCoordinatorPort>) {
+        self.lpm_coordinator = Some(coordinator);
+    }
+
+    /// Set the alias resolution port for `GeoIP` CIDR lookups.
+    pub fn set_alias_resolution(&mut self, port: Arc<dyn AliasResolutionPort>) {
+        self.alias_resolution = Some(port);
     }
 
     /// Process a `DDoS` event from the eBPF pipeline.
@@ -31,10 +56,14 @@ impl DdosAppService {
         if !self.enabled {
             return false;
         }
-        let changed = self.engine.process_event(event);
+        let src_country = self.resolve_country(event.src_addr, event.is_ipv6);
+        let changed = self
+            .engine
+            .process_event_with_country(event, src_country.as_deref());
         if changed {
             self.update_metrics();
         }
+        self.apply_pending_enforcements();
         changed
     }
 
@@ -45,6 +74,7 @@ impl DdosAppService {
         }
         self.engine.tick();
         self.update_metrics();
+        self.apply_pending_enforcements();
     }
 
     /// Return all active (non-expired) attacks.
@@ -110,9 +140,75 @@ impl DdosAppService {
         self.enabled = enabled;
     }
 
+    /// Drain and apply pending enforcement actions from the engine.
+    fn apply_pending_enforcements(&mut self) {
+        let enforcements = self.engine.take_pending_enforcements();
+        if enforcements.is_empty() {
+            return;
+        }
+
+        let (Some(coordinator), Some(resolver)) = (&self.lpm_coordinator, &self.alias_resolution)
+        else {
+            return;
+        };
+
+        for action in enforcements {
+            match action {
+                DdosEnforcementAction::BlockCountry { ref country_code } => {
+                    let codes = vec![country_code.clone()];
+                    match resolver.lookup_geoip(&codes) {
+                        Ok(ips) => {
+                            let (v4, v6) = crate::convert_to_lpm_entries(&ips, ACTION_DROP);
+                            let source = format!("ddos:{country_code}");
+                            if let Err(e) = coordinator.insert_entries(&source, &v4, &v6) {
+                                tracing::warn!(
+                                    country = country_code,
+                                    "DDoS auto-block: failed to inject CIDRs: {e}"
+                                );
+                            } else {
+                                tracing::info!(
+                                    country = country_code,
+                                    v4 = v4.len(),
+                                    v6 = v6.len(),
+                                    "DDoS auto-block: injected CIDRs for country"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                country = country_code,
+                                "DDoS auto-block: GeoIP lookup failed: {e}"
+                            );
+                        }
+                    }
+                }
+                DdosEnforcementAction::UnblockCountry { ref country_code } => {
+                    let source = format!("ddos:{country_code}");
+                    if let Err(e) = coordinator.remove_all_for_source(&source) {
+                        tracing::warn!(
+                            country = country_code,
+                            "DDoS auto-unblock: failed to remove CIDRs: {e}"
+                        );
+                    } else {
+                        tracing::info!(
+                            country = country_code,
+                            "DDoS auto-unblock: removed CIDRs for country"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn update_metrics(&self) {
         self.metrics
             .set_rules_loaded("ddos", self.engine.policy_count() as u64);
+    }
+
+    fn resolve_country(&self, addr: [u32; 4], is_ipv6: bool) -> Option<String> {
+        let geoip = self.geoip.as_ref()?;
+        let ip = crate::addr_to_ip(addr, is_ipv6);
+        geoip.lookup(&ip).and_then(|info| info.country_code)
     }
 }
 
@@ -134,6 +230,7 @@ mod tests {
             mitigation_action: DdosMitigationAction::Block,
             auto_block_duration_secs: 300,
             enabled: true,
+            country_thresholds: None,
         }
     }
 

@@ -3,9 +3,11 @@ use std::time::Duration;
 
 use domain::dns::blocklist::DomainBlocklistEngine;
 use domain::dns::entity::{
-    BlocklistAction, DomainBlocklistConfig, DomainBlocklistStats, InjectTarget,
+    BlocklistAction, DomainBlocklistConfig, DomainBlocklistStats, InjectTarget, ReputationFactor,
 };
+use ports::secondary::domain_reputation_port::DomainReputationPort;
 use ports::secondary::ebpf_map_write_port::{EbpfMapWritePort, IocMetadata};
+use ports::secondary::geoip_port::GeoIpPort;
 use ports::secondary::ips_blacklist_port::IpsBlacklistPort;
 use ports::secondary::metrics_port::MetricsPort;
 
@@ -17,6 +19,9 @@ pub struct DnsBlocklistAppService {
     engine: RwLock<DomainBlocklistEngine>,
     map_writer: RwLock<Option<Arc<dyn EbpfMapWritePort>>>,
     ips_port: Option<Arc<dyn IpsBlacklistPort>>,
+    geoip: RwLock<Option<Arc<dyn GeoIpPort>>>,
+    reputation_port: RwLock<Option<Arc<dyn DomainReputationPort>>>,
+    high_risk_countries: RwLock<Vec<String>>,
     metrics: Arc<dyn MetricsPort>,
     cleanup_interval: Duration,
 }
@@ -32,6 +37,9 @@ impl DnsBlocklistAppService {
             engine: RwLock::new(DomainBlocklistEngine::new(config)),
             map_writer: RwLock::new(map_writer),
             ips_port: None,
+            geoip: RwLock::new(None),
+            reputation_port: RwLock::new(None),
+            high_risk_countries: RwLock::new(Vec::new()),
             metrics,
         }
     }
@@ -54,6 +62,30 @@ impl DnsBlocklistAppService {
         self
     }
 
+    /// Set the `GeoIP` port for country-based reputation scoring.
+    pub fn set_geoip_port(&self, port: Arc<dyn GeoIpPort>) {
+        *self
+            .geoip
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(port);
+    }
+
+    /// Set the reputation port for injecting `GeoIP` factors.
+    pub fn set_reputation_port(&self, port: Arc<dyn DomainReputationPort>) {
+        *self
+            .reputation_port
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(port);
+    }
+
+    /// Set the list of high-risk country codes for reputation scoring.
+    pub fn set_high_risk_countries(&self, countries: Vec<String>) {
+        *self
+            .high_risk_countries
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = countries;
+    }
+
     /// Check if a domain is blocklisted and, if so, inject resolved IPs
     /// into the appropriate eBPF map.
     pub fn on_dns_response(
@@ -70,6 +102,8 @@ impl DnsBlocklistAppService {
 
         let blocklist_match = engine.evaluate(domain);
         let Some(bm) = blocklist_match else {
+            drop(engine);
+            self.check_geoip_reputation(domain, resolved_ips);
             return;
         };
 
@@ -166,6 +200,45 @@ impl DnsBlocklistAppService {
         }
 
         self.metrics.set_dns_injected_ips(injected_count as u64);
+
+        // GeoIP reputation: check resolved IPs against high-risk countries
+        self.check_geoip_reputation(domain, resolved_ips);
+    }
+
+    /// Check resolved IPs for high-risk country codes and inject reputation factors.
+    fn check_geoip_reputation(&self, domain: &str, resolved_ips: &[std::net::IpAddr]) {
+        let geoip_guard = self
+            .geoip
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reputation_guard = self
+            .reputation_port
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (Some(geoip), Some(reputation)) = (geoip_guard.as_ref(), reputation_guard.as_ref())
+        else {
+            return;
+        };
+        let countries = self
+            .high_risk_countries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if countries.is_empty() {
+            return;
+        }
+        for ip in resolved_ips {
+            if let Some(info) = geoip.lookup(ip)
+                && let Some(ref cc) = info.country_code
+                && countries.iter().any(|c| c.eq_ignore_ascii_case(cc))
+            {
+                reputation.update_reputation(
+                    domain,
+                    ReputationFactor::HighRiskCountry {
+                        country_code: cc.clone(),
+                    },
+                );
+            }
+        }
     }
 
     /// Run the background cleanup loop for expired injected IPs.

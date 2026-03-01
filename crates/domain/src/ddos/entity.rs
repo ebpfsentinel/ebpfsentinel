@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::common::entity::RuleId;
@@ -77,10 +79,21 @@ pub struct DdosAttack {
     pub consecutive_above: u32,
     /// Number of consecutive seconds below threshold.
     pub consecutive_below: u32,
+    /// ISO 3166-1 alpha-2 country code of the attack source (if resolved).
+    pub src_country: Option<String>,
     /// Count for the current 1-second window.
     window_count: u64,
     /// Timestamp of the current window start.
     window_start_ns: u64,
+}
+
+/// Kernel-side enforcement action emitted by the `DDoS` engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DdosEnforcementAction {
+    /// Block all CIDRs for a country via LPM Trie maps.
+    BlockCountry { country_code: String },
+    /// Remove country CIDRs from LPM Trie maps.
+    UnblockCountry { country_code: String },
 }
 
 /// EWMA smoothing factor for rate calculation.
@@ -112,6 +125,7 @@ impl DdosAttack {
             mitigation_status: DdosMitigationStatus::Detecting,
             consecutive_above: 0,
             consecutive_below: 0,
+            src_country: None,
             window_count: 1,
             window_start_ns: now_ns,
         }
@@ -201,6 +215,11 @@ pub struct DdosPolicy {
     /// Duration in seconds to auto-block sources (0 = indefinite).
     pub auto_block_duration_secs: u64,
     pub enabled: bool,
+    /// Per-country pps thresholds (ISO 3166-1 alpha-2 codes).
+    /// When traffic originates from a listed country, this threshold
+    /// is used instead of `detection_threshold_pps`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_thresholds: Option<HashMap<String, u64>>,
 }
 
 impl DdosPolicy {
@@ -212,6 +231,21 @@ impl DdosPolicy {
 
         if self.detection_threshold_pps == 0 {
             return Err(DdosError::InvalidThreshold);
+        }
+
+        if let Some(ref ct) = self.country_thresholds {
+            for (code, &val) in ct {
+                if code.len() != 2 || !code.chars().all(|c| c.is_ascii_uppercase()) {
+                    return Err(DdosError::InvalidPolicy(format!(
+                        "invalid country code: {code}"
+                    )));
+                }
+                if val == 0 {
+                    return Err(DdosError::InvalidPolicy(format!(
+                        "country threshold for {code} must be > 0"
+                    )));
+                }
+            }
         }
 
         Ok(())
@@ -365,6 +399,7 @@ mod tests {
             mitigation_action: DdosMitigationAction::Block,
             auto_block_duration_secs: 300,
             enabled: true,
+            country_thresholds: None,
         };
         assert!(valid.validate().is_ok());
 
@@ -379,6 +414,40 @@ mod tests {
             ..valid
         };
         assert!(empty_id.validate().is_err());
+    }
+
+    #[test]
+    fn ddos_policy_country_thresholds_validation() {
+        let mut ct = HashMap::new();
+        ct.insert("CN".to_string(), 1000_u64);
+        let valid = DdosPolicy {
+            id: RuleId("syn-geo".to_string()),
+            attack_type: DdosAttackType::SynFlood,
+            detection_threshold_pps: 5000,
+            mitigation_action: DdosMitigationAction::Block,
+            auto_block_duration_secs: 300,
+            enabled: true,
+            country_thresholds: Some(ct),
+        };
+        assert!(valid.validate().is_ok());
+
+        // Invalid country code (lowercase)
+        let mut bad_code = HashMap::new();
+        bad_code.insert("cn".to_string(), 1000);
+        let invalid = DdosPolicy {
+            country_thresholds: Some(bad_code),
+            ..valid.clone()
+        };
+        assert!(invalid.validate().is_err());
+
+        // Zero country threshold
+        let mut zero = HashMap::new();
+        zero.insert("CN".to_string(), 0);
+        let invalid = DdosPolicy {
+            country_thresholds: Some(zero),
+            ..valid
+        };
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

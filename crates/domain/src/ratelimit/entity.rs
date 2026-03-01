@@ -59,6 +59,9 @@ pub struct RateLimitPolicy {
     pub enabled: bool,
     /// Rate limiting algorithm to use.
     pub algorithm: RateLimitAlgorithm,
+    /// Optional country code filter (userspace annotation only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_codes: Option<Vec<String>>,
 }
 
 impl RateLimitPolicy {
@@ -160,6 +163,74 @@ impl RateLimitPolicy {
     }
 }
 
+/// Country-tier rate limit configuration.
+///
+/// Maps a set of country codes to a tier ID with specific rate limit parameters.
+/// Used to load per-country rate limits into eBPF LPM Trie maps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CountryTierConfig {
+    /// Tier ID (1-15). 0 is reserved for the default tier.
+    pub tier_id: u8,
+    /// ISO 3166-1 alpha-2 country codes assigned to this tier.
+    pub country_codes: Vec<String>,
+    /// Packets per second (rate).
+    pub rate: u64,
+    /// Maximum burst (bucket size).
+    pub burst: u64,
+    /// Rate limiting algorithm.
+    pub algorithm: RateLimitAlgorithm,
+    /// Action when rate exceeded.
+    pub action: RateLimitAction,
+}
+
+impl CountryTierConfig {
+    /// Convert to an eBPF `RateLimitConfig` for the tier config array map.
+    pub fn to_ebpf_config(&self) -> EbpfConfig {
+        let action = match self.action {
+            RateLimitAction::Drop => RATELIMIT_ACTION_DROP,
+            RateLimitAction::Pass => RATELIMIT_ACTION_PASS,
+        };
+
+        match self.algorithm {
+            RateLimitAlgorithm::TokenBucket => {
+                let ns_per_token = if self.rate > 0 {
+                    1_000_000_000 / self.rate
+                } else {
+                    0
+                };
+                EbpfConfig {
+                    ns_per_token,
+                    burst: self.burst,
+                    action,
+                    algorithm: ALGO_TOKEN_BUCKET,
+                    _padding: [0; 6],
+                }
+            }
+            RateLimitAlgorithm::FixedWindow => EbpfConfig {
+                ns_per_token: self.rate,
+                burst: 0,
+                action,
+                algorithm: ALGO_FIXED_WINDOW,
+                _padding: [0; 6],
+            },
+            RateLimitAlgorithm::SlidingWindow => EbpfConfig {
+                ns_per_token: self.rate,
+                burst: 0,
+                action,
+                algorithm: ALGO_SLIDING_WINDOW,
+                _padding: [0; 6],
+            },
+            RateLimitAlgorithm::LeakyBucket => EbpfConfig {
+                ns_per_token: self.rate,
+                burst: self.burst,
+                action,
+                algorithm: ALGO_LEAKY_BUCKET,
+                _padding: [0; 6],
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +246,7 @@ mod tests {
             src_ip: None,
             enabled: true,
             algorithm: RateLimitAlgorithm::default(),
+            country_codes: None,
         }
     }
 
@@ -313,5 +385,39 @@ mod tests {
             RateLimitAlgorithm::default(),
             RateLimitAlgorithm::TokenBucket
         );
+    }
+
+    #[test]
+    fn country_tier_config_to_ebpf_config_token_bucket() {
+        let tier = CountryTierConfig {
+            tier_id: 1,
+            country_codes: vec!["RU".to_string()],
+            rate: 500,
+            burst: 1000,
+            algorithm: RateLimitAlgorithm::TokenBucket,
+            action: RateLimitAction::Drop,
+        };
+        let cfg = tier.to_ebpf_config();
+        assert_eq!(cfg.ns_per_token, 2_000_000); // 1e9 / 500
+        assert_eq!(cfg.burst, 1000);
+        assert_eq!(cfg.action, RATELIMIT_ACTION_DROP);
+        assert_eq!(cfg.algorithm, ALGO_TOKEN_BUCKET);
+    }
+
+    #[test]
+    fn country_tier_config_to_ebpf_config_fixed_window() {
+        let tier = CountryTierConfig {
+            tier_id: 2,
+            country_codes: vec!["CN".to_string()],
+            rate: 200,
+            burst: 1,
+            algorithm: RateLimitAlgorithm::FixedWindow,
+            action: RateLimitAction::Pass,
+        };
+        let cfg = tier.to_ebpf_config();
+        assert_eq!(cfg.ns_per_token, 200);
+        assert_eq!(cfg.burst, 0);
+        assert_eq!(cfg.action, RATELIMIT_ACTION_PASS);
+        assert_eq!(cfg.algorithm, ALGO_FIXED_WINDOW);
     }
 }

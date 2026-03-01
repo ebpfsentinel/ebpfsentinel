@@ -17,6 +17,7 @@ fn test_policy() -> IpsPolicy {
         max_blacklist_duration: Duration::from_secs(3600),
         auto_blacklist_threshold: 3,
         max_blacklist_size: 2_000_000,
+        country_thresholds: None,
     }
 }
 

@@ -73,6 +73,7 @@ fuzz_target!(|data: &[u8]| {
             src_ip,
             enabled: chunk[18] & 2 != 0,
             algorithm,
+            country_codes: None,
         };
         policies.push(policy);
     }

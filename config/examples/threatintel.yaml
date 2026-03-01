@@ -35,6 +35,17 @@ threatintel:
   # Per-feed "default_action" can override this for individual feeds.
   mode: alert
 
+  # ── Country confidence boost ─────────────────────────────────────
+  # Adjusts IOC confidence score based on the source IP's country.
+  # Positive values increase confidence (more likely to trigger action),
+  # negative values decrease it. Values are clamped to 0–100.
+  # Use this to prioritize IOCs from known high-risk regions.
+  country_confidence_boost:
+    RU: 10                # +10 confidence for IOCs from Russia
+    CN: 5                 # +5 for China
+    KP: 15                # +15 for North Korea
+    IR: 10                # +10 for Iran
+
   # ── Feeds ──────────────────────────────────────────────────────────
   #
   # Each feed is fetched independently. A failed fetch skips that feed

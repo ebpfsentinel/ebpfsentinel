@@ -56,6 +56,14 @@ pub struct L7RuleConfig {
 
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// Source country codes (ISO 3166-1 alpha-2) for country-based matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_country_codes: Option<Vec<String>>,
+
+    /// Destination country codes (ISO 3166-1 alpha-2) for country-based matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_country_codes: Option<Vec<String>>,
 }
 
 impl L7RuleConfig {
@@ -155,6 +163,8 @@ impl L7RuleConfig {
             dst_ip,
             dst_port,
             enabled: self.enabled,
+            src_country_codes: self.src_country_codes.clone(),
+            dst_country_codes: self.dst_country_codes.clone(),
         })
     }
 

@@ -192,6 +192,8 @@ impl CreateL7RuleRequest {
             dst_ip,
             dst_port,
             enabled: self.enabled,
+            src_country_codes: None,
+            dst_country_codes: None,
         })
     }
 }
@@ -533,6 +535,8 @@ mod tests {
                 end: 8080,
             }),
             enabled: true,
+            src_country_codes: None,
+            dst_country_codes: None,
         };
         let resp = L7RuleResponse::from(&rule);
         assert_eq!(resp.id, "l7-001");

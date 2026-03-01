@@ -29,6 +29,9 @@ pub struct GatewayConfig {
     /// Health-check probe configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check: Option<HealthCheckConfig>,
+    /// Country codes this gateway is preferred for.
+    #[serde(default)]
+    pub preferred_for_countries: Option<Vec<String>>,
 }
 
 /// Health-check probe configuration.
@@ -95,6 +98,7 @@ impl GatewayConfig {
                     recovery_threshold: hc.recovery_threshold,
                 }
             }),
+            preferred_for_countries: self.preferred_for_countries.clone(),
         }
     }
 }
@@ -160,6 +164,7 @@ mod tests {
                 failure_threshold: 3,
                 recovery_threshold: 2,
             }),
+            preferred_for_countries: None,
         };
         let gw = cfg.to_domain();
         assert_eq!(gw.id, 1);

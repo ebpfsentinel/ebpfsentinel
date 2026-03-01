@@ -75,6 +75,8 @@ pub struct CreateDdosPolicyRequest {
     pub auto_block_duration_secs: u64,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default)]
+    pub country_thresholds: Option<std::collections::HashMap<String, u64>>,
 }
 
 fn default_mitigation_action() -> String {
@@ -325,6 +327,7 @@ fn parse_create_request(req: CreateDdosPolicyRequest) -> Result<DdosPolicy, ApiE
         mitigation_action,
         auto_block_duration_secs: req.auto_block_duration_secs,
         enabled: req.enabled,
+        country_thresholds: req.country_thresholds,
     })
 }
 
@@ -341,6 +344,7 @@ mod tests {
             mitigation_action: "block".to_string(),
             auto_block_duration_secs: 300,
             enabled: true,
+            country_thresholds: None,
         };
         let policy = parse_create_request(req).unwrap();
         assert_eq!(policy.id.0, "ddos-001");
@@ -358,6 +362,7 @@ mod tests {
             mitigation_action: "alert".to_string(),
             auto_block_duration_secs: 0,
             enabled: true,
+            country_thresholds: None,
         };
         assert!(parse_create_request(req).is_err());
     }
@@ -371,6 +376,7 @@ mod tests {
             mitigation_action: "alert".to_string(),
             auto_block_duration_secs: 0,
             enabled: true,
+            country_thresholds: None,
         };
         assert!(parse_create_request(req).is_err());
     }
@@ -409,6 +415,7 @@ mod tests {
             mitigation_action: DdosMitigationAction::Block,
             auto_block_duration_secs: 300,
             enabled: true,
+            country_thresholds: None,
         };
         let resp = DdosPolicyResponse::from_policy(&policy);
         assert_eq!(resp.id, "ddos-001");

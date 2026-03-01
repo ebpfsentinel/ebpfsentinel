@@ -49,6 +49,7 @@ fuzz_target!(|data: &[u8]| {
         } else {
             None
         },
+        preferred_for_countries: None,
     };
 
     let mut state = GatewayState::new(gateway);

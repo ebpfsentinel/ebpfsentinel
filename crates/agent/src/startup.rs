@@ -11,9 +11,9 @@ use adapters::auth::jwt_provider::JwtAuthProvider;
 use adapters::auth::oidc_provider::{self, OidcAuthProvider};
 use adapters::ebpf::{
     ConfigFlagsManager, ConnTrackMapManager, DlpEventReader, DnsEventReader, EbpfLoader,
-    EbpfMapWriteAdapter, EventReader, FirewallMapManager, GeoIpLpmManager, IdsMapManager,
-    IpSetMapManager, L7PortsManager, MetricsReader, NatMapManager, RateLimitMapManager,
-    ScrubConfigManager, ThreatIntelMapManager,
+    EbpfMapWriteAdapter, EventReader, FirewallMapManager, IdsMapManager, IpSetMapManager,
+    L7PortsManager, LpmCoordinator, MetricsReader, NatMapManager, RateLimitLpmManager,
+    RateLimitMapManager, ScrubConfigManager, ThreatIntelMapManager,
 };
 use adapters::grpc::server::{GrpcTlsConfig, run_grpc_server};
 use adapters::http::tls::load_rustls_config;
@@ -306,7 +306,9 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         alias_resolver.set_geoip_adapter(Arc::clone(adapter));
         info!("GeoIP wired into alias resolution adapter");
     }
-    alias_svc.set_resolution_port(Arc::new(alias_resolver));
+    let alias_resolver: Arc<dyn ports::secondary::alias_resolution_port::AliasResolutionPort> =
+        Arc::new(alias_resolver);
+    alias_svc.set_resolution_port(Arc::clone(&alias_resolver));
     let aliases = config.aliases()?;
     if !aliases.is_empty()
         && let Err(e) = alias_svc.reload_aliases(aliases)
@@ -818,7 +820,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     // 10b. XDP Rate Limiter
     let rl_ok = if config.ratelimit.enabled {
         match try_load_xdp_ratelimit(&ebpf_dir, &config, event_tx.clone()) {
-            Ok((rl_loader, rl_mgr_opt, rl_rdrs)) => {
+            Ok((rl_loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs)) => {
                 metrics_readers.extend(rl_rdrs);
                 if let Some(rl_mgr) = rl_mgr_opt {
                     let mut svc = rl_svc.write().await;
@@ -829,6 +831,24 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
                         default_algo,
                     );
                     svc.set_map_port(Box::new(rl_mgr));
+                }
+                if let Some(rl_lpm) = rl_lpm_opt {
+                    let mut svc = rl_svc.write().await;
+                    svc.set_lpm_port(Box::new(rl_lpm));
+                    svc.set_alias_resolution(Arc::clone(&alias_resolver));
+                    // Load initial country tiers
+                    if let Ok(tiers) = config.ratelimit_country_tiers()
+                        && !tiers.is_empty()
+                    {
+                        if let Err(e) = svc.reload_country_tiers(&tiers) {
+                            warn!("initial country tier load failed (non-fatal): {e}");
+                        } else {
+                            info!(
+                                count = tiers.len(),
+                                "initial country-tier rate limits loaded"
+                            );
+                        }
+                    }
                 }
                 // Wire tail-call: firewall → ratelimit (if both loaded).
                 if let Some(ref mut fw) = fw_loader {
@@ -859,20 +879,35 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         false
     };
 
-    // Wire GeoIpLpmManager from xdp-firewall to alias service (take LPM maps BEFORE others)
+    // Wire LpmCoordinator from xdp-firewall to alias, ddos, ips services (take LPM maps BEFORE others)
     if geoip_adapter.is_some()
         && let Some(ref mut loader) = fw_loader
     {
-        match GeoIpLpmManager::new(loader.ebpf_mut()) {
-            Ok(lpm_mgr) => {
+        match LpmCoordinator::new(loader.ebpf_mut()) {
+            Ok(coordinator) => {
+                let coordinator: Arc<
+                    dyn ports::secondary::lpm_coordinator_port::LpmCoordinatorPort,
+                > = Arc::new(coordinator);
                 alias_svc
                     .write()
                     .await
-                    .set_geoip_lpm_port(Box::new(lpm_mgr));
-                info!("GeoIP LPM maps wired from xdp-firewall");
+                    .set_lpm_coordinator(Arc::clone(&coordinator));
+                ddos_svc
+                    .write()
+                    .await
+                    .set_lpm_coordinator(Arc::clone(&coordinator));
+                ddos_svc
+                    .write()
+                    .await
+                    .set_alias_resolution(Arc::clone(&alias_resolver));
+                ips_svc
+                    .write()
+                    .await
+                    .set_lpm_coordinator(Arc::clone(&coordinator));
+                info!("LPM coordinator wired to alias, DDoS, IPS services");
             }
             Err(e) => {
-                warn!("GeoIP LPM maps not available (non-fatal): {e}");
+                warn!("LPM coordinator maps not available (non-fatal): {e}");
             }
         }
     }
@@ -1215,6 +1250,39 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         }
         alert_pipeline = alert_pipeline.with_enricher(Arc::new(enricher));
         info!("DNS alert enricher initialized");
+    }
+
+    // Wire GeoIP to domain services
+    if let Some(ref geoip) = geoip_port {
+        ddos_svc.write().await.set_geoip_port(Arc::clone(geoip));
+        ips_svc.write().await.set_geoip_port(Arc::clone(geoip));
+        ids_svc.write().await.set_geoip_port(Arc::clone(geoip));
+        l7_svc.write().await.set_geoip_port(Arc::clone(geoip));
+        ti_svc.write().await.set_geoip_port(Arc::clone(geoip));
+        rl_svc.write().await.set_geoip_port(Arc::clone(geoip));
+        routing_svc.write().await.set_geoip_port(Arc::clone(geoip));
+        info!("GeoIP wired to DDoS, IPS, IDS, L7, ThreatIntel, RateLimit, Routing");
+    }
+
+    // Wire ThreatIntel country confidence boost from config
+    if let Some(ref boost) = config.threatintel.country_confidence_boost {
+        ti_svc
+            .write()
+            .await
+            .engine_mut()
+            .set_country_confidence_boost(boost.clone());
+    }
+
+    // Wire DNS blocklist GeoIP reputation
+    if let Some(ref geoip) = geoip_port
+        && let Some(ref dns_bl) = dns_blocklist_ref
+    {
+        dns_bl.set_geoip_port(Arc::clone(geoip));
+        if let Some(ref rep_svc) = app_state.domain_reputation_service {
+            dns_bl.set_reputation_port(Arc::clone(rep_svc)
+                as Arc<dyn ports::secondary::domain_reputation_port::DomainReputationPort>);
+        }
+        dns_bl.set_high_risk_countries(config.dns.reputation.high_risk_countries.clone());
     }
 
     // Wire alert senders
@@ -1597,12 +1665,20 @@ fn try_load_xdp_firewall(
     Ok((loader, map_manager, metrics_rdr))
 }
 
+/// Load result for xdp-ratelimit: loader, map manager, LPM manager, metrics readers.
+type XdpRatelimitResult = (
+    EbpfLoader,
+    Option<RateLimitMapManager>,
+    Option<RateLimitLpmManager>,
+    Vec<MetricsReader>,
+);
+
 /// Load the XDP rate limiter program: attach XDP, populate policies, start event reader.
 fn try_load_xdp_ratelimit(
     ebpf_dir: &str,
     config: &AgentConfig,
     event_tx: mpsc::Sender<AgentEvent>,
-) -> anyhow::Result<(EbpfLoader, Option<RateLimitMapManager>, Vec<MetricsReader>)> {
+) -> anyhow::Result<XdpRatelimitResult> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-ratelimit")?;
     let mut loader = EbpfLoader::load(&program_bytes)?;
 
@@ -1628,6 +1704,14 @@ fn try_load_xdp_ratelimit(
         }
     };
 
+    let rl_lpm_opt = match RateLimitLpmManager::new(loader.ebpf_mut()) {
+        Ok(lpm_mgr) => Some(lpm_mgr),
+        Err(e) => {
+            warn!("rate limit LPM maps not available: {e}");
+            None
+        }
+    };
+
     let mut rdrs = Vec::new();
     if let Ok(r) = MetricsReader::new(loader.ebpf_mut(), "RATELIMIT_METRICS") {
         rdrs.push(r);
@@ -1639,7 +1723,7 @@ fn try_load_xdp_ratelimit(
     let reader = EventReader::new(loader.ebpf_mut())?;
     tokio::spawn(async move { reader.run(event_tx).await });
 
-    Ok((loader, rl_mgr_opt, rdrs))
+    Ok((loader, rl_mgr_opt, rl_lpm_opt, rdrs))
 }
 
 /// IDS program load result: loader, IDS map manager, L7 ports manager, config flags manager, metrics reader.

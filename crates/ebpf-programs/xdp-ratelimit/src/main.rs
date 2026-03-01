@@ -5,7 +5,10 @@ use aya_ebpf::{
     bindings::xdp_action,
     helpers::{bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
     macros::{map, xdp},
-    maps::{Array, HashMap, LruPerCpuHashMap, PerCpuArray, RingBuf},
+    maps::{
+        Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, RingBuf,
+        lpm_trie::Key,
+    },
     programs::XdpContext,
 };
 use aya_log_ebpf::info;
@@ -26,9 +29,10 @@ use ebpf_common::{
     },
     event::{PacketEvent, EVENT_TYPE_RATELIMIT, FLAG_IPV6, FLAG_VLAN},
     ratelimit::{
-        FixedWindowValue, LeakyBucketValue, RateLimitConfig, RateLimitKey, RateLimitValue,
-        SlidingWindowValue, ALGO_FIXED_WINDOW, ALGO_LEAKY_BUCKET, ALGO_SLIDING_WINDOW,
-        RATELIMIT_ACTION_DROP, SLIDING_WINDOW_NUM_SLOTS,
+        FixedWindowValue, LeakyBucketValue, RateLimitConfig, RateLimitKey, RateLimitTierValue,
+        RateLimitValue, SlidingWindowValue, ALGO_FIXED_WINDOW, ALGO_LEAKY_BUCKET,
+        ALGO_SLIDING_WINDOW, MAX_RL_LPM_ENTRIES, MAX_RL_TIERS, RATELIMIT_ACTION_DROP,
+        SLIDING_WINDOW_NUM_SLOTS,
     },
 };
 use network_types::{
@@ -158,6 +162,23 @@ static RATELIMIT_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0)
 /// Shared kernel→userspace event ring buffer (1 MB).
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
+
+// ── Country-Tier LPM Maps ──────────────────────────────────────────
+
+/// IPv4 source LPM Trie for country-tier rate limiting.
+/// Maps CIDR prefixes to tier IDs.
+#[map]
+static RL_LPM_SRC_V4: LpmTrie<[u8; 4], RateLimitTierValue> =
+    LpmTrie::with_max_entries(MAX_RL_LPM_ENTRIES, 0);
+
+/// IPv6 source LPM Trie for country-tier rate limiting.
+#[map]
+static RL_LPM_SRC_V6: LpmTrie<[u8; 16], RateLimitTierValue> =
+    LpmTrie::with_max_entries(MAX_RL_LPM_ENTRIES, 0);
+
+/// Tier configuration array. Index = tier_id (0-15).
+#[map]
+static RL_TIER_CONFIG: Array<RateLimitConfig> = Array::with_max_entries(MAX_RL_TIERS, 0);
 
 // ── DDoS Protection Maps ────────────────────────────────────────────
 
@@ -361,6 +382,30 @@ fn process_ratelimit_v4(
         }
     }
 
+    // ── Country-tier LPM lookup (before per-IP) ────────────────────
+    let lpm_key = Key::new(32, src_ip.to_be_bytes());
+    if let Some(tier_val) = unsafe { RL_LPM_SRC_V4.get(&lpm_key) } {
+        if let Some(tier_cfg) = RL_TIER_CONFIG.get(tier_val.tier_id as u32) {
+            if tier_cfg.ns_per_token > 0 {
+                let key = RateLimitKey { src_ip };
+                let now = unsafe { bpf_ktime_get_boot_ns() };
+                let passed = dispatch_algorithm(&key, tier_cfg, now);
+                if passed {
+                    increment_metric(METRIC_PASSED);
+                    return Ok(xdp_action::XDP_PASS);
+                }
+                let src_addr = [src_ip, 0, 0, 0];
+                let dst_addr = [dst_ip, 0, 0, 0];
+                let (src_port, dst_port) = read_l4_ports_v4(ctx, l4_offset);
+                emit_ratelimit_event(
+                    &src_addr, &dst_addr, src_port, dst_port, protocol, flags, vlan_id,
+                );
+                increment_metric(METRIC_THROTTLED);
+                return Ok(xdp_action::XDP_DROP);
+            }
+        }
+    }
+
     // ── Existing: generic rate limiting ────────────────────────────
     let key = RateLimitKey { src_ip };
     let config = lookup_config(&key)?;
@@ -422,6 +467,29 @@ fn process_ratelimit_v6(
     if next_hdr == PROTO_UDP {
         if let Some(action) = check_udp_amp_v6(ctx, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id) {
             return Ok(action);
+        }
+    }
+
+    // ── Country-tier LPM lookup (IPv6, before per-IP) ──────────────
+    let src_bytes = unsafe { (*ipv6hdr).src_addr };
+    let lpm_key_v6 = Key::new(128, src_bytes);
+    if let Some(tier_val) = unsafe { RL_LPM_SRC_V6.get(&lpm_key_v6) } {
+        if let Some(tier_cfg) = RL_TIER_CONFIG.get(tier_val.tier_id as u32) {
+            if tier_cfg.ns_per_token > 0 {
+                let key = RateLimitKey { src_ip: src_hash };
+                let now = unsafe { bpf_ktime_get_boot_ns() };
+                let passed = dispatch_algorithm(&key, tier_cfg, now);
+                if passed {
+                    increment_metric(METRIC_PASSED);
+                    return Ok(xdp_action::XDP_PASS);
+                }
+                let (src_port, dst_port) = read_l4_ports_raw(ctx, l4_offset, next_hdr);
+                emit_ratelimit_event(
+                    &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
+                );
+                increment_metric(METRIC_THROTTLED);
+                return Ok(xdp_action::XDP_DROP);
+            }
         }
     }
 

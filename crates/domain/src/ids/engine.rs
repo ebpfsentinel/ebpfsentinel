@@ -166,24 +166,32 @@ impl IdsEngine {
     /// Backward-compatible wrapper: does not perform domain matching.
     /// Use `evaluate_event_with_context` for domain-aware evaluation.
     pub fn evaluate_event(&self, event: &PacketEvent) -> Option<(usize, &IdsRule)> {
-        self.evaluate_event_with_context(event, &[])
+        self.evaluate_event_with_context(event, &[], None)
             .map(|(idx, rule, _matched_domain)| (idx, rule))
     }
 
-    /// Evaluate an event with optional domain context.
+    /// Evaluate an event with optional domain and country context.
     ///
     /// `dst_domains` contains the domains resolved for the destination IP
     /// (from the DNS cache reverse lookup). If a rule has a `domain_pattern`,
     /// at least one domain in the list must match. If `dst_domains` is empty,
     /// rules with `domain_pattern` will not match.
     ///
+    /// `src_country` is the resolved ISO 3166-1 alpha-2 country code for the
+    /// source IP. When provided, country-based sampling uses it to apply
+    /// different sampling rates.
+    ///
     /// Returns `(rule_index, rule, matched_domain)` on match.
     pub fn evaluate_event_with_context<'a>(
         &'a self,
         event: &PacketEvent,
         dst_domains: &[String],
+        src_country: Option<&str>,
     ) -> Option<(usize, &'a IdsRule, Option<String>)> {
-        if !self.sampling.should_process(event.src_ip(), event.dst_ip()) {
+        if !self
+            .sampling
+            .should_process_with_country(event.src_ip(), event.dst_ip(), src_country)
+        {
             return None;
         }
         let idx = event.rule_id as usize;
@@ -263,6 +271,30 @@ impl IdsEngine {
                 }
             }
         }
+    }
+
+    /// Country-aware threshold check.
+    ///
+    /// When the rule has `country_thresholds` and `src_country` matches a
+    /// key, that per-country [`ThresholdConfig`] is used instead of the
+    /// default rule threshold.
+    pub fn check_threshold_with_country(
+        &mut self,
+        rule: &IdsRule,
+        src_ip: u32,
+        dst_ip: u32,
+        src_country: Option<&str>,
+    ) -> bool {
+        let Some(base_threshold) = &rule.threshold else {
+            return true; // no threshold config → always alert
+        };
+
+        // Check for per-country override
+        let country_threshold =
+            src_country.and_then(|cc| rule.country_thresholds.as_ref().and_then(|ct| ct.get(cc)));
+
+        let effective = country_threshold.unwrap_or(base_threshold);
+        self.check_threshold(&rule.id, effective, src_ip, dst_ip)
     }
 
     /// Remove expired threshold entries to prevent unbounded memory growth.
@@ -364,6 +396,7 @@ mod tests {
             pattern: String::new(),
             enabled: true,
             threshold: None,
+            country_thresholds: None,
             domain_pattern: None,
             domain_match_mode: None,
         }
@@ -842,7 +875,7 @@ mod tests {
 
         let event = make_event(0);
         let domains = vec!["evil.com".to_string()];
-        let result = engine.evaluate_event_with_context(&event, &domains);
+        let result = engine.evaluate_event_with_context(&event, &domains, None);
         assert!(result.is_some());
         let (idx, r, matched) = result.unwrap();
         assert_eq!(idx, 0);
@@ -865,7 +898,7 @@ mod tests {
         let domains = vec!["evil.com".to_string()];
         assert!(
             engine
-                .evaluate_event_with_context(&event, &domains)
+                .evaluate_event_with_context(&event, &domains, None)
                 .is_some()
         );
     }
@@ -885,7 +918,7 @@ mod tests {
         let domains = vec!["good.com".to_string()];
         assert!(
             engine
-                .evaluate_event_with_context(&event, &domains)
+                .evaluate_event_with_context(&event, &domains, None)
                 .is_none()
         );
     }
@@ -903,7 +936,7 @@ mod tests {
 
         let event = make_event(0);
         let domains = vec!["malware.evil.com".to_string()];
-        let result = engine.evaluate_event_with_context(&event, &domains);
+        let result = engine.evaluate_event_with_context(&event, &domains, None);
         assert!(result.is_some());
         assert_eq!(result.unwrap().2.unwrap(), "malware.evil.com");
     }
@@ -924,7 +957,7 @@ mod tests {
         let domains = vec!["evil.com".to_string()];
         assert!(
             engine
-                .evaluate_event_with_context(&event, &domains)
+                .evaluate_event_with_context(&event, &domains, None)
                 .is_none()
         );
     }
@@ -942,7 +975,7 @@ mod tests {
 
         let event = make_event(0);
         let domains = vec!["c2-42.evil.com".to_string()];
-        let result = engine.evaluate_event_with_context(&event, &domains);
+        let result = engine.evaluate_event_with_context(&event, &domains, None);
         assert!(result.is_some());
         assert_eq!(result.unwrap().2.unwrap(), "c2-42.evil.com");
     }
@@ -962,7 +995,7 @@ mod tests {
         let domains = vec!["legit.evil.com".to_string()];
         assert!(
             engine
-                .evaluate_event_with_context(&event, &domains)
+                .evaluate_event_with_context(&event, &domains, None)
                 .is_none()
         );
     }
@@ -984,7 +1017,7 @@ mod tests {
         let domains = vec!["evil.com".to_string()];
         assert!(
             engine
-                .evaluate_event_with_context(&event, &domains)
+                .evaluate_event_with_context(&event, &domains, None)
                 .is_some()
         );
 
@@ -992,7 +1025,7 @@ mod tests {
         let bad_domains = vec!["good.com".to_string()];
         assert!(
             engine
-                .evaluate_event_with_context(&event, &bad_domains)
+                .evaluate_event_with_context(&event, &bad_domains, None)
                 .is_none()
         );
     }
@@ -1005,7 +1038,7 @@ mod tests {
         let event = make_event(0);
         // Even with domain context, non-domain rules match without checking domains
         let domains = vec!["anything.com".to_string()];
-        let result = engine.evaluate_event_with_context(&event, &domains);
+        let result = engine.evaluate_event_with_context(&event, &domains, None);
         assert!(result.is_some());
         let (_, _, matched_domain) = result.unwrap();
         assert!(matched_domain.is_none());
@@ -1024,7 +1057,11 @@ mod tests {
 
         let event = make_event(0);
         // No resolved domains → domain-only rule cannot match
-        assert!(engine.evaluate_event_with_context(&event, &[]).is_none());
+        assert!(
+            engine
+                .evaluate_event_with_context(&event, &[], None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1054,7 +1091,7 @@ mod tests {
         let domains = vec!["evil.com".to_string()];
         assert!(
             engine
-                .evaluate_event_with_context(&event, &domains)
+                .evaluate_event_with_context(&event, &domains, None)
                 .is_some()
         );
     }
@@ -1076,7 +1113,7 @@ mod tests {
             .unwrap();
         // ids-002 is now at index 0, has no domain pattern
         let event = make_event(0);
-        let result = engine.evaluate_event_with_context(&event, &["evil.com".to_string()]);
+        let result = engine.evaluate_event_with_context(&event, &["evil.com".to_string()], None);
         assert!(result.is_some());
         assert!(result.unwrap().2.is_none()); // No matched domain
     }
@@ -1099,7 +1136,7 @@ mod tests {
             "evil.com".to_string(),
             "other.com".to_string(),
         ];
-        let result = engine.evaluate_event_with_context(&event, &domains);
+        let result = engine.evaluate_event_with_context(&event, &domains, None);
         assert!(result.is_some());
         assert_eq!(result.unwrap().2.unwrap(), "evil.com");
     }

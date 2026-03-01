@@ -1,3 +1,18 @@
+/// Maximum entries in the rate limit LPM Trie maps for country tiers.
+pub const MAX_RL_LPM_ENTRIES: u32 = 131_072;
+/// Maximum number of rate limit tier configurations.
+pub const MAX_RL_TIERS: u32 = 16;
+
+/// Value stored in rate limit LPM Trie maps.
+/// Maps a CIDR prefix to a tier ID that indexes into the tier config array.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimitTierValue {
+    /// Tier ID (1-15, 0 reserved for default).
+    pub tier_id: u8,
+    pub _padding: [u8; 3],
+}
+
 /// Action: pass the packet (rate limit not exceeded).
 pub const RATELIMIT_ACTION_PASS: u8 = 0;
 /// Action: drop the packet (rate limit exceeded).
@@ -112,6 +127,8 @@ pub struct LeakyBucketValue {
 // SAFETY: All types are #[repr(C)], Copy, 'static, and contain only primitive types
 // with explicit padding. Safe for zero-copy eBPF map operations via aya.
 #[cfg(feature = "userspace")]
+unsafe impl aya::Pod for RateLimitTierValue {}
+#[cfg(feature = "userspace")]
 unsafe impl aya::Pod for RateLimitKey {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for RateLimitKeyV6 {}
@@ -130,6 +147,11 @@ unsafe impl aya::Pod for LeakyBucketValue {}
 mod tests {
     use super::*;
     use core::mem;
+
+    #[test]
+    fn ratelimit_tier_value_size() {
+        assert_eq!(mem::size_of::<RateLimitTierValue>(), 4);
+    }
 
     #[test]
     fn ratelimit_key_size() {

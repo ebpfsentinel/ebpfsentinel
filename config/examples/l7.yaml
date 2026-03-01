@@ -39,9 +39,11 @@ l7:
   #   SMB:   smb_command (u16 opcode), is_smb2 (bool)
   #
   # Optional L3/L4 narrowing:
-  #   src_ip   — Source CIDR filter
-  #   dst_ip   — Destination CIDR filter
-  #   dst_port — Destination port (single or range)
+  #   src_ip             — Source CIDR filter
+  #   dst_ip             — Destination CIDR filter
+  #   dst_port           — Destination port (single or range)
+  #   src_country_codes  — Source country filter (ISO 3166-1 alpha-2 list)
+  #   dst_country_codes  — Destination country filter (ISO 3166-1 alpha-2 list)
   #
   # Host and SNI fields support domain pattern matching:
   #   "example.com"      — exact match
@@ -161,6 +163,21 @@ l7:
       action: log
       protocol: ftp
       command: STOR
+
+    # ── GeoIP-based rules ─────────────────────────────────────────────
+    # Block all HTTP traffic from high-risk countries
+    - id: l7-block-http-high-risk
+      priority: 8
+      action: deny
+      protocol: http
+      src_country_codes: [KP, IR]
+
+    # Block TLS connections to destinations in sanctioned countries
+    - id: l7-block-tls-sanctioned-dst
+      priority: 9
+      action: deny
+      protocol: tls
+      dst_country_codes: [KP, SY, CU]
 
     # ── SMB rules ────────────────────────────────────────────────────
     # Block SMB2 Tree Connect (opcode 3) from external networks

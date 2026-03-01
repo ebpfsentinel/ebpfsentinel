@@ -115,3 +115,10 @@ dns:
     # Score decay half-life in hours. Older signals lose weight over time,
     # allowing domains to recover reputation. Must be >= 1.
     decay_half_life_hours: 24
+
+    # ── High-risk countries ──────────────────────────────────────────
+    # Countries considered high-risk for domain reputation scoring.
+    # Domains resolving to IPs in these countries receive a
+    # HighRiskCountry reputation factor (weight 0.4), accelerating
+    # their path toward the auto-block threshold.
+    high_risk_countries: [RU, CN, KP, IR]

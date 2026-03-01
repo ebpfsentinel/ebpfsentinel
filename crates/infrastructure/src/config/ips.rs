@@ -1,5 +1,7 @@
 //! IPS domain configuration structs and conversion logic.
 
+use std::collections::HashMap;
+
 use domain::common::entity::RuleId;
 use domain::ids::entity::IdsRule;
 use domain::ips::entity::IpsPolicy;
@@ -35,6 +37,10 @@ pub struct IpsConfig {
 
     #[serde(default)]
     pub rules: Vec<IpsRuleConfig>,
+
+    /// Per-country auto-blacklist thresholds (ISO 3166-1 alpha-2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_thresholds: Option<HashMap<String, u32>>,
 }
 
 fn default_max_blacklist_duration() -> u64 {
@@ -58,6 +64,7 @@ impl Default for IpsConfig {
             whitelist: Vec::new(),
             sampling: None,
             rules: Vec::new(),
+            country_thresholds: None,
         }
     }
 }
@@ -70,6 +77,7 @@ impl IpsConfig {
             ),
             auto_blacklist_threshold: self.auto_blacklist_threshold,
             max_blacklist_size: self.max_blacklist_size,
+            country_thresholds: self.country_thresholds.clone(),
         }
     }
 }
@@ -175,6 +183,7 @@ impl IpsRuleConfig {
             threshold,
             domain_pattern: None,
             domain_match_mode: None,
+            country_thresholds: None,
         })
     }
 }

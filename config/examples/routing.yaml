@@ -41,12 +41,14 @@ routing:
 
   gateways:
     # Primary WAN — fiber link (highest priority)
+    # Preferred for North American and European traffic.
     - id: 1
       name: wan-fiber
       interface: eth1
       gateway_ip: "203.0.113.1"
       priority: 10
       enabled: true
+      preferred_for_countries: [US, CA, GB, DE, FR, NL]
       health_check:
         target: "8.8.8.8"
         protocol: icmp
@@ -56,12 +58,14 @@ routing:
         recovery_threshold: 2
 
     # Secondary WAN — cable link (failover)
+    # Preferred for APAC traffic.
     - id: 2
       name: wan-cable
       interface: eth2
       gateway_ip: "198.51.100.1"
       priority: 20
       enabled: true
+      preferred_for_countries: [JP, AU, SG, KR, IN]
       health_check:
         target: "1.1.1.1"
         protocol: "tcp:443"

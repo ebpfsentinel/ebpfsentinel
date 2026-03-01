@@ -105,6 +105,7 @@ mod tests {
             src_ip: None,
             enabled: true,
             algorithm: RateLimitAlgorithm::default(),
+            country_codes: None,
         }
     }
 

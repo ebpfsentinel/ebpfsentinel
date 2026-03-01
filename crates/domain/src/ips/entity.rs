@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -33,6 +34,10 @@ pub struct IpsPolicy {
     pub auto_blacklist_threshold: u32,
     /// Maximum number of entries in the blacklist.
     pub max_blacklist_size: usize,
+    /// Per-country auto-blacklist thresholds (ISO 3166-1 alpha-2).
+    /// When traffic from a listed country is detected, this threshold
+    /// is used instead of `auto_blacklist_threshold`.
+    pub country_thresholds: Option<HashMap<String, u32>>,
 }
 
 impl Default for IpsPolicy {
@@ -41,6 +46,7 @@ impl Default for IpsPolicy {
             max_blacklist_duration: Duration::from_secs(3600),
             auto_blacklist_threshold: 3,
             max_blacklist_size: 10_000,
+            country_thresholds: None,
         }
     }
 }
@@ -53,6 +59,14 @@ pub enum EnforcementAction {
     BlacklistIp { ip: IpAddr, ttl: Duration },
     /// Remove an IP from the eBPF blacklist map.
     UnblacklistIp { ip: IpAddr },
+    /// Block the /24 (IPv4) or /48 (IPv6) subnet in LPM Trie maps.
+    BlockSubnet {
+        addr: IpAddr,
+        prefix_len: u8,
+        ttl: Duration,
+    },
+    /// Remove a subnet block from LPM Trie maps.
+    UnblockSubnet { addr: IpAddr, prefix_len: u8 },
 }
 
 /// A whitelist entry that can match a single IP or a CIDR range.

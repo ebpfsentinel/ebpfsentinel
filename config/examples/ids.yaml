@@ -41,10 +41,18 @@ ids:
   #   "hash"   — deterministic hash-based sampling (consistent per-flow)
   # rate: 0.0 – 1.0 (required for random/hash modes)
   # kernel_sampling: true/false — push sampling into eBPF (default: true for random)
+  # mode:
+  #   "none"          — process every event (default)
+  #   "random"        — randomly sample events at the given rate
+  #   "hash"          — deterministic hash-based sampling (consistent per-flow)
+  #   "country_based" — full inspection for high-risk countries, reduced for others
   sampling:
-    mode: random
-    rate: 0.5              # Process 50% of events
+    mode: country_based
+    rate: 0.5              # Fallback rate for random/hash modes
     kernel_sampling: true  # bpf_get_prandom_u32 — zero userspace overhead
+    high_risk_countries: [RU, CN, KP, IR]  # Full inspection (100%) for these countries
+    high_risk_rate: 1.0    # Sample rate for high-risk countries (1.0 = all events)
+    default_rate: 0.1      # Sample rate for all other countries (10%)
 
   # ── Rules ──────────────────────────────────────────────────────────
   #
@@ -58,6 +66,7 @@ ids:
   #   dst_port         — Destination port to match (optional, single port only)
   #   pattern          — Regex pattern for payload inspection (optional; ReDoS-safe)
   #   threshold        — Rate-based detection config (optional, see below)
+  #   country_thresholds — Per-country threshold overrides (optional, see below)
   #   domain_pattern   — Domain name pattern for DNS-aware matching (optional)
   #   domain_match_mode — How to interpret domain_pattern: "exact", "wildcard", or "regex"
   #                       Required when domain_pattern is set (and vice versa).
@@ -74,6 +83,7 @@ ids:
     # threshold.track_by: "src_ip", "dst_ip", or "both"
 
     # Detect SSH brute-force (>5 connections in 60s from same source)
+    # Per-country thresholds: stricter limits for high-risk countries
     - id: ids-ssh-bruteforce
       description: "SSH brute-force detection"
       severity: high
@@ -84,6 +94,17 @@ ids:
         count: 5
         window_secs: 60
         track_by: src_ip
+      country_thresholds:
+        RU:
+          type: threshold
+          count: 2               # Only 2 attempts from Russia before alerting
+          window_secs: 60
+          track_by: src_ip
+        CN:
+          type: threshold
+          count: 3
+          window_secs: 60
+          track_by: src_ip
 
     # Rate-limit alerts for HTTP port scanning (first 20 events per source, then suppress)
     - id: ids-http-portscan

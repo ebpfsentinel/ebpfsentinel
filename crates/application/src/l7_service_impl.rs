@@ -6,6 +6,7 @@ use domain::firewall::entity::FirewallAction;
 use domain::l7::engine::L7Engine;
 use domain::l7::entity::{L7Rule, ParsedProtocol};
 use ebpf_common::event::PacketEvent;
+use ports::secondary::geoip_port::GeoIpPort;
 use ports::secondary::metrics_port::MetricsPort;
 
 /// Application-level L7 firewall service.
@@ -16,6 +17,7 @@ pub struct L7AppService {
     engine: L7Engine,
     metrics: Arc<dyn MetricsPort>,
     enabled: bool,
+    geoip: Option<Arc<dyn GeoIpPort>>,
 }
 
 impl L7AppService {
@@ -24,13 +26,20 @@ impl L7AppService {
             engine,
             metrics,
             enabled: true,
+            geoip: None,
         }
+    }
+
+    /// Set the `GeoIP` port for country-based rule matching.
+    pub fn set_geoip_port(&mut self, port: Arc<dyn GeoIpPort>) {
+        self.geoip = Some(port);
     }
 
     /// Evaluate a parsed L7 event against all loaded rules.
     ///
-    /// Returns the action of the first matching rule, or `None`.
-    /// Records a metric with the matched action label.
+    /// Resolves source and destination countries via the `GeoIP` port
+    /// for country-based rule matching. Returns the action of the
+    /// first matching rule, or `None`.
     pub fn evaluate(
         &self,
         header: &PacketEvent,
@@ -40,7 +49,15 @@ impl L7AppService {
             return None;
         }
 
-        let result = self.engine.evaluate(header, parsed);
+        let src_country = self.resolve_country(header.src_addr, header.is_ipv6());
+        let dst_country = self.resolve_country(header.dst_addr, header.is_ipv6());
+
+        let result = self.engine.evaluate_with_country(
+            header,
+            parsed,
+            src_country.as_deref(),
+            dst_country.as_deref(),
+        );
         if let Some((_, rule)) = &result {
             let action_label = match rule.action {
                 FirewallAction::Allow => "allow",
@@ -50,6 +67,12 @@ impl L7AppService {
             self.metrics.record_packet("l7", action_label);
         }
         result.map(|(_, rule)| rule.action)
+    }
+
+    fn resolve_country(&self, addr: [u32; 4], is_ipv6: bool) -> Option<String> {
+        let geoip = self.geoip.as_ref()?;
+        let ip = crate::addr_to_ip(addr, is_ipv6);
+        geoip.lookup(&ip).and_then(|info| info.country_code)
     }
 
     /// Reload all L7 rules atomically.
@@ -153,6 +176,8 @@ mod tests {
             dst_ip: None,
             dst_port: None,
             enabled: true,
+            src_country_codes: None,
+            dst_country_codes: None,
         }
     }
 

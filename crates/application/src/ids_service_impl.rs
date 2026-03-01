@@ -6,6 +6,7 @@ use domain::ids::engine::IdsEngine;
 use domain::ids::entity::{IdsRule, SamplingMode, ThresholdConfig};
 use ebpf_common::event::PacketEvent;
 use ebpf_common::ids::IDS_ACTION_ALERT;
+use ports::secondary::geoip_port::GeoIpPort;
 use ports::secondary::ids_map_port::IdsMapPort;
 use ports::secondary::metrics_port::MetricsPort;
 
@@ -19,6 +20,7 @@ pub struct IdsAppService {
     metrics: Arc<dyn MetricsPort>,
     mode: DomainMode,
     enabled: bool,
+    geoip: Option<Arc<dyn GeoIpPort>>,
 }
 
 impl IdsAppService {
@@ -33,7 +35,13 @@ impl IdsAppService {
             metrics,
             mode: DomainMode::default(),
             enabled: true,
+            geoip: None,
         }
+    }
+
+    /// Set the `GeoIP` port for country-aware threshold and sampling.
+    pub fn set_geoip_port(&mut self, port: Arc<dyn GeoIpPort>) {
+        self.geoip = Some(port);
     }
 
     /// Set the eBPF map port and perform an initial sync.
@@ -98,14 +106,16 @@ impl IdsAppService {
         self.engine.evaluate_event(event)
     }
 
-    /// Evaluate a packet event with domain context for domain-aware rules.
+    /// Evaluate a packet event with domain and country context.
     /// Returns `(rule_index, rule, matched_domain)` on match.
     pub fn evaluate_event_with_context<'a>(
         &'a self,
         event: &PacketEvent,
         dst_domains: &[String],
+        src_country: Option<&str>,
     ) -> Option<(usize, &'a IdsRule, Option<String>)> {
-        self.engine.evaluate_event_with_context(event, dst_domains)
+        self.engine
+            .evaluate_event_with_context(event, dst_domains, src_country)
     }
 
     /// Check whether an alert should be emitted after a rule match,
@@ -119,6 +129,26 @@ impl IdsAppService {
     ) -> bool {
         self.engine
             .check_threshold(rule_id, threshold, src_ip, dst_ip)
+    }
+
+    /// Country-aware threshold check. Uses per-country threshold overrides
+    /// from the rule when available.
+    pub fn check_threshold_with_country(
+        &mut self,
+        rule: &IdsRule,
+        src_ip: u32,
+        dst_ip: u32,
+        src_country: Option<&str>,
+    ) -> bool {
+        self.engine
+            .check_threshold_with_country(rule, src_ip, dst_ip, src_country)
+    }
+
+    /// Resolve the country code for an IP address via the `GeoIP` port.
+    pub fn resolve_country(&self, src_addr: [u32; 4], is_ipv6: bool) -> Option<String> {
+        let geoip = self.geoip.as_ref()?;
+        let ip = crate::addr_to_ip(src_addr, is_ipv6);
+        geoip.lookup(&ip).and_then(|info| info.country_code)
     }
 
     /// Remove expired threshold tracking entries.
@@ -183,6 +213,7 @@ mod tests {
             threshold: None,
             domain_pattern: None,
             domain_match_mode: None,
+            country_thresholds: None,
         }
     }
 

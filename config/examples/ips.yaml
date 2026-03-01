@@ -38,6 +38,17 @@ ips:
   # when the limit is reached. Size this for your expected threat volume.
   max_blacklist_size: 50000
 
+  # ── Per-country blacklist thresholds ──────────────────────────────
+  # Override auto_blacklist_threshold for specific countries.
+  # IPs from high-risk countries are blacklisted sooner. When blacklisted,
+  # the source /24 (IPv4) or /48 (IPv6) subnet is also injected into
+  # the firewall LPM maps for kernel-side enforcement.
+  country_thresholds:
+    RU: 2                 # Only 2 detections before blacklisting Russian IPs
+    CN: 3                 # 3 detections for Chinese IPs
+    KP: 1                 # Immediate blacklisting for North Korean IPs
+    IR: 2                 # 2 detections for Iranian IPs
+
   # ── Whitelist ──────────────────────────────────────────────────────
   # IPs and CIDRs that should NEVER be blacklisted, regardless of detections.
   # Use this for trusted infrastructure: internal networks, monitoring systems,

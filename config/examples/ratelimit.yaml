@@ -130,6 +130,34 @@ ratelimit:
       action: drop
       enabled: false
 
+    # ── Per-country rate limit tiers ───────────────────────────────
+    # Country-specific rate limits enforced via kernel-side LPM Trie maps.
+    # Each tier maps country codes to a rate limit profile. Traffic from
+    # matched countries uses the tier config instead of per-IP rules.
+    # tier_id must be 1–15. Requires GeoIP to be enabled.
+
+  country_tiers:
+    - tier_id: 1
+      country_codes: [RU, CN]
+      rate: 200              # 200 pps for Russia and China
+      burst: 400
+      algorithm: token_bucket
+      action: drop
+
+    - tier_id: 2
+      country_codes: [KP, IR, SY]
+      rate: 50               # 50 pps for highly restricted countries
+      burst: 100
+      algorithm: token_bucket
+      action: drop
+
+    - tier_id: 3
+      country_codes: [US, CA, GB, DE, FR]
+      rate: 5000             # 5000 pps for trusted countries
+      burst: 10000
+      algorithm: token_bucket
+      action: drop
+
     # ── SYN cookie protection ────────────────────────────────────
     # SYN flood mitigation: responds to TCP SYN packets with
     # SYN+ACK cookies generated in XDP (bpf_tcp_gen_syncookie).

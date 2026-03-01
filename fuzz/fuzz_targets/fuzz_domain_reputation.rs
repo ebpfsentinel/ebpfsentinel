@@ -29,6 +29,7 @@ fuzz_target!(|data: &[u8]| {
         auto_block_enabled,
         auto_block_ttl_secs: 3600,
         decay_half_life_hours: 24,
+        high_risk_countries: Vec::new(),
     };
 
     let mut engine = DomainReputationEngine::new(config);

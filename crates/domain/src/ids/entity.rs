@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::common::entity::{DomainMode, Protocol, RuleId, Severity};
@@ -30,11 +32,28 @@ pub enum SamplingMode {
     Random { rate: f64 },
     /// Deterministic per-flow sampling: hash of `src_ip` ^ `dst_ip` determines selection.
     Hash { rate: f64 },
+    /// Country-aware sampling: traffic from high-risk countries is sampled at a
+    /// higher rate than other traffic.
+    CountryBased {
+        high_risk_countries: Vec<String>,
+        high_risk_rate: f64,
+        default_rate: f64,
+    },
 }
 
 impl SamplingMode {
     /// Returns `true` if this event should be processed (not sampled out).
     pub fn should_process(&self, src_ip: u32, dst_ip: u32) -> bool {
+        self.should_process_with_country(src_ip, dst_ip, None)
+    }
+
+    /// Country-aware variant of [`should_process`].
+    pub fn should_process_with_country(
+        &self,
+        src_ip: u32,
+        dst_ip: u32,
+        src_country: Option<&str>,
+    ) -> bool {
         match self {
             Self::None => true,
             Self::Random { rate } => {
@@ -49,6 +68,21 @@ impl SamplingMode {
                 let normalized = f64::from(hash) / f64::from(u32::MAX);
                 normalized < *rate
             }
+            Self::CountryBased {
+                high_risk_countries,
+                high_risk_rate,
+                default_rate,
+            } => {
+                let rate =
+                    if src_country.is_some_and(|cc| high_risk_countries.iter().any(|c| c == cc)) {
+                        *high_risk_rate
+                    } else {
+                        *default_rate
+                    };
+                let hash = (src_ip ^ dst_ip).wrapping_mul(2_654_435_761);
+                let normalized = f64::from(hash) / f64::from(u32::MAX);
+                normalized < rate
+            }
         }
     }
 
@@ -61,6 +95,17 @@ impl SamplingMode {
                     Ok(())
                 } else {
                     Err("sampling rate must be between 0.0 and 1.0")
+                }
+            }
+            Self::CountryBased {
+                high_risk_rate,
+                default_rate,
+                ..
+            } => {
+                if !(0.0..=1.0).contains(high_risk_rate) || !(0.0..=1.0).contains(default_rate) {
+                    Err("sampling rate must be between 0.0 and 1.0")
+                } else {
+                    Ok(())
                 }
             }
         }
@@ -129,6 +174,9 @@ pub struct IdsRule {
     /// How to interpret `domain_pattern`. Required when `domain_pattern` is set.
     #[serde(default)]
     pub domain_match_mode: Option<DomainMatchMode>,
+    /// Per-country threshold overrides (ISO 3166-1 alpha-2 codes).
+    #[serde(skip)]
+    pub country_thresholds: Option<HashMap<String, ThresholdConfig>>,
 }
 
 impl IdsRule {
@@ -282,6 +330,7 @@ mod tests {
             threshold: None,
             domain_pattern: None,
             domain_match_mode: None,
+            country_thresholds: None,
         }
     }
 
@@ -490,6 +539,38 @@ mod tests {
         assert!(SamplingMode::Random { rate: -0.1 }.validate().is_err());
         assert!(SamplingMode::Random { rate: 1.1 }.validate().is_err());
         assert!(SamplingMode::Hash { rate: 2.0 }.validate().is_err());
+    }
+
+    #[test]
+    fn country_based_sampling_high_risk_rate() {
+        let mode = SamplingMode::CountryBased {
+            high_risk_countries: vec!["CN".to_string(), "RU".to_string()],
+            high_risk_rate: 1.0,
+            default_rate: 0.0,
+        };
+        // High-risk country -> always process (rate 1.0)
+        assert!(mode.should_process_with_country(0xC0A8_0001, 0x0A00_0001, Some("CN")));
+        // Non-high-risk country -> never process (rate 0.0)
+        assert!(!mode.should_process_with_country(0xC0A8_0001, 0x0A00_0001, Some("FR")));
+        // No country -> default rate (0.0)
+        assert!(!mode.should_process_with_country(0xC0A8_0001, 0x0A00_0001, None));
+    }
+
+    #[test]
+    fn country_based_sampling_validate() {
+        let valid = SamplingMode::CountryBased {
+            high_risk_countries: vec!["CN".to_string()],
+            high_risk_rate: 0.8,
+            default_rate: 0.1,
+        };
+        assert!(valid.validate().is_ok());
+
+        let invalid = SamplingMode::CountryBased {
+            high_risk_countries: vec![],
+            high_risk_rate: 1.5,
+            default_rate: 0.1,
+        };
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

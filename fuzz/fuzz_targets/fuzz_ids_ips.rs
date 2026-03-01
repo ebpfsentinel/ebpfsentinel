@@ -58,6 +58,7 @@ fuzz_target!(|data: &[u8]| {
                     threshold: None,
                     domain_pattern: None,
                     domain_match_mode: None,
+                    country_thresholds: None,
                 };
                 // Exercise regex compilation with DoS limits.
                 let _ = engine.add_rule(rule);
@@ -81,6 +82,7 @@ fuzz_target!(|data: &[u8]| {
                     threshold: None,
                     domain_pattern: None,
                     domain_match_mode: None,
+                    country_thresholds: None,
                 });
             }
 
@@ -152,6 +154,7 @@ fuzz_target!(|data: &[u8]| {
                 max_blacklist_duration: std::time::Duration::from_secs(window_secs.max(1)),
                 auto_blacklist_threshold: thresh_count,
                 max_blacklist_size: 100,
+                country_thresholds: None,
             };
             let mut engine = IpsEngine::new(policy);
 

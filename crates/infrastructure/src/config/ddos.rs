@@ -1,5 +1,7 @@
 //! `DDoS` detection and mitigation configuration.
 
+use std::collections::HashMap;
+
 use domain::common::entity::RuleId;
 use domain::ddos::entity::{DdosAttackType, DdosMitigationAction, DdosPolicy};
 use serde::{Deserialize, Serialize};
@@ -195,6 +197,10 @@ pub struct DdosPolicyConfig {
 
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// Per-country pps thresholds (ISO 3166-1 alpha-2 codes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_thresholds: Option<HashMap<String, u64>>,
 }
 
 fn default_mitigation_action() -> String {
@@ -263,6 +269,7 @@ impl DdosPolicyConfig {
             mitigation_action,
             auto_block_duration_secs: self.auto_block_duration_secs,
             enabled: self.enabled,
+            country_thresholds: self.country_thresholds.clone(),
         })
     }
 }
@@ -301,6 +308,7 @@ mod tests {
             mitigation_action: "block".to_string(),
             auto_block_duration_secs: 300,
             enabled: true,
+            country_thresholds: None,
         }
     }
 

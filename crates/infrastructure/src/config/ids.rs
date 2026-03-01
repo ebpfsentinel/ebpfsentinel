@@ -14,12 +14,22 @@ use super::common::{
 /// Event sampling configuration for IDS/IPS.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingConfig {
-    /// Sampling mode: "none", "random", "hash".
+    /// Sampling mode: "none", "random", "hash", "`country_based`".
     #[serde(default = "default_sampling_mode")]
     pub mode: String,
 
     /// Sampling rate (0.0–1.0). Required for "random" and "hash" modes.
     pub rate: Option<f64>,
+
+    /// High-risk countries for `country_based` mode (ISO 3166-1 alpha-2).
+    #[serde(default)]
+    pub high_risk_countries: Option<Vec<String>>,
+
+    /// Sampling rate for high-risk countries (0.0–1.0). Default 1.0.
+    pub high_risk_rate: Option<f64>,
+
+    /// Default sampling rate for non-high-risk traffic (0.0–1.0). Default 0.1.
+    pub default_rate: Option<f64>,
 }
 
 fn default_sampling_mode() -> String {
@@ -43,10 +53,21 @@ impl SamplingConfig {
                 }
                 Ok(())
             }
+            "country_based" => {
+                let hr = self.high_risk_rate.unwrap_or(1.0);
+                let dr = self.default_rate.unwrap_or(0.1);
+                if !(0.0..=1.0).contains(&hr) || !(0.0..=1.0).contains(&dr) {
+                    return Err(ConfigError::Validation {
+                        field: format!("{prefix}.sampling"),
+                        message: "rates must be between 0.0 and 1.0".to_string(),
+                    });
+                }
+                Ok(())
+            }
             _ => Err(ConfigError::InvalidValue {
                 field: format!("{prefix}.sampling.mode"),
                 value: self.mode.clone(),
-                expected: "none, random, hash".to_string(),
+                expected: "none, random, hash, country_based".to_string(),
             }),
         }
     }
@@ -61,10 +82,15 @@ impl SamplingConfig {
             "hash" => Ok(SamplingMode::Hash {
                 rate: self.rate.unwrap_or(0.0),
             }),
+            "country_based" => Ok(SamplingMode::CountryBased {
+                high_risk_countries: self.high_risk_countries.clone().unwrap_or_default(),
+                high_risk_rate: self.high_risk_rate.unwrap_or(1.0),
+                default_rate: self.default_rate.unwrap_or(0.1),
+            }),
             _ => Err(ConfigError::InvalidValue {
                 field: "sampling.mode".to_string(),
                 value: self.mode.clone(),
-                expected: "none, random, hash".to_string(),
+                expected: "none, random, hash, country_based".to_string(),
             }),
         }
     }
@@ -235,6 +261,10 @@ pub struct IdsRuleConfig {
     /// How to interpret `domain_pattern`: "exact", "wildcard", or "regex".
     #[serde(default)]
     pub domain_match_mode: Option<String>,
+
+    /// Per-country threshold overrides (ISO 3166-1 alpha-2 → threshold config).
+    #[serde(default)]
+    pub country_thresholds: Option<std::collections::HashMap<String, ThresholdRuleConfig>>,
 }
 
 fn default_protocol_any() -> String {
@@ -278,6 +308,19 @@ impl IdsRuleConfig {
         // Validate threshold if present
         if let Some(ref threshold) = self.threshold {
             threshold.validate(&prefix)?;
+        }
+
+        // Validate per-country thresholds if present
+        if let Some(ref ct) = self.country_thresholds {
+            for (cc, thresh) in ct {
+                if cc.len() != 2 {
+                    return Err(ConfigError::Validation {
+                        field: format!("{prefix}.country_thresholds.{cc}"),
+                        message: "country code must be 2-letter ISO 3166-1 alpha-2".to_string(),
+                    });
+                }
+                thresh.validate(&format!("{prefix}.country_thresholds.{cc}"))?;
+            }
         }
 
         // Validate domain-aware fields
@@ -361,6 +404,16 @@ impl IdsRuleConfig {
             })
             .transpose()?;
 
+        let country_thresholds = self
+            .country_thresholds
+            .as_ref()
+            .map(|ct| {
+                ct.iter()
+                    .map(|(cc, cfg)| cfg.to_domain_threshold().map(|t| (cc.clone(), t)))
+                    .collect::<Result<std::collections::HashMap<_, _>, _>>()
+            })
+            .transpose()?;
+
         Ok(IdsRule {
             id: RuleId(self.id.clone()),
             description: self.description.clone().unwrap_or_default(),
@@ -373,6 +426,7 @@ impl IdsRuleConfig {
             threshold,
             domain_pattern: self.domain_pattern.clone(),
             domain_match_mode,
+            country_thresholds,
         })
     }
 }
@@ -394,6 +448,7 @@ mod tests {
             threshold: None,
             domain_pattern: None,
             domain_match_mode: None,
+            country_thresholds: None,
         }
     }
 

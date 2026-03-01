@@ -338,6 +338,11 @@ impl AgentConfig {
             rule_cfg.validate(idx)?;
         }
 
+        // Validate ratelimit country tiers
+        for (idx, tier_cfg) in self.ratelimit.country_tiers.iter().enumerate() {
+            tier_cfg.validate(idx)?;
+        }
+
         // Validate DDoS policies
         check_limit("ddos.policies", self.ddos.policies.len(), MAX_DDOS_POLICIES)?;
         for (idx, policy_cfg) in self.ddos.policies.iter().enumerate() {
@@ -540,6 +545,17 @@ impl AgentConfig {
             .rules
             .iter()
             .map(RateLimitRuleConfig::to_domain_policy)
+            .collect()
+    }
+
+    /// Convert all ratelimit country tier configs to domain `CountryTierConfig` vec.
+    pub fn ratelimit_country_tiers(
+        &self,
+    ) -> Result<Vec<domain::ratelimit::entity::CountryTierConfig>, ConfigError> {
+        self.ratelimit
+            .country_tiers
+            .iter()
+            .map(ratelimit::CountryTierConfigYaml::to_domain_tier)
             .collect()
     }
 

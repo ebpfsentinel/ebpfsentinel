@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use domain::alias::entity::Alias;
@@ -575,6 +576,36 @@ impl ConfigReloadService {
             }
         }
     }
+    /// Reload rate limit country tier configurations.
+    pub async fn reload_ratelimit_country_tiers(
+        &self,
+        tiers: Vec<domain::ratelimit::entity::CountryTierConfig>,
+    ) -> Result<(), anyhow::Error> {
+        let _guard = self.reload_mutex.lock().await;
+
+        let mut svc = self.ratelimit_service.write().await;
+        let tier_count = tiers.len();
+
+        match svc.reload_country_tiers(&tiers) {
+            Ok(()) => {
+                drop(svc);
+                self.metrics
+                    .record_config_reload("ratelimit_country_tiers", "success");
+                tracing::info!(tier_count, "ratelimit country tiers reloaded successfully");
+                Ok(())
+            }
+            Err(e) => {
+                drop(svc);
+                self.metrics
+                    .record_config_reload("ratelimit_country_tiers", "failure");
+                tracing::warn!(error = %e, "ratelimit country tiers reload failed");
+                Err(anyhow::anyhow!(
+                    "ratelimit country tiers reload failed: {e}"
+                ))
+            }
+        }
+    }
+
     /// Reload `DDoS` policies atomically with enabled awareness.
     pub async fn reload_ddos(
         &self,
@@ -624,12 +655,13 @@ impl ConfigReloadService {
         }
     }
 
-    /// Reload threat intel configuration: feeds, enabled, and mode.
+    /// Reload threat intel configuration: feeds, enabled, mode, and country boosts.
     pub async fn reload_threatintel(
         &self,
         feeds: Vec<domain::threatintel::entity::FeedConfig>,
         enabled: bool,
         mode: DomainMode,
+        country_confidence_boost: HashMap<String, i8>,
     ) -> Result<(), anyhow::Error> {
         let _guard = self.reload_mutex.lock().await;
 
@@ -648,6 +680,7 @@ impl ConfigReloadService {
         svc.set_mode(mode);
         svc.set_enabled(enabled);
         svc.set_feeds(feeds);
+        svc.set_country_confidence_boost(country_confidence_boost);
 
         if !enabled && let Err(e) = svc.reload_iocs(Vec::new()) {
             drop(svc);
@@ -789,6 +822,7 @@ mod tests {
             threshold: None,
             domain_pattern: None,
             domain_match_mode: None,
+            country_thresholds: None,
         }
     }
 
@@ -1157,6 +1191,7 @@ mod tests {
             threshold: None,
             domain_pattern: None,
             domain_match_mode: None,
+            country_thresholds: None,
         }
     }
 
@@ -1375,6 +1410,8 @@ mod tests {
             dst_ip: None,
             dst_port: None,
             enabled: true,
+            src_country_codes: None,
+            dst_country_codes: None,
         }
     }
 
@@ -1467,6 +1504,7 @@ mod tests {
             src_ip: None,
             enabled: true,
             algorithm: RateLimitAlgorithm::default(),
+            country_codes: None,
         }
     }
 
