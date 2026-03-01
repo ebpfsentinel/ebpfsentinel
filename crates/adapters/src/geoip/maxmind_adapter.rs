@@ -4,7 +4,7 @@ use std::path::Path;
 
 use domain::alias::entity::GeoIpInfo;
 use domain::firewall::entity::IpNetwork;
-use maxminddb::Reader;
+use maxminddb::{Reader, WithinOptions};
 use ports::secondary::geoip_port::GeoIpPort;
 use tracing::{info, warn};
 
@@ -149,16 +149,19 @@ impl MaxMindGeoIpAdapter {
         };
         let codes: HashSet<&str> = country_codes.iter().map(String::as_str).collect();
         let mut result = Vec::new();
+        let opts = WithinOptions::default().skip_empty_values();
 
         // Iterate all IPv4 networks
-        if let Ok(iter) = reader.within::<maxminddb::geoip2::City>(ipnetwork::IpNetwork::V4(
-            "0.0.0.0/0".parse().unwrap(),
-        )) {
-            for item in iter.flatten() {
-                if let Some(ref country) = item.info.country
-                    && let Some(iso) = country.iso_code
+        if let Ok(iter) = reader.within(
+            ipnetwork::IpNetwork::V4("0.0.0.0/0".parse().unwrap()),
+            opts,
+        ) {
+            for lookup_result in iter.flatten() {
+                if let Ok(Some(city)) = lookup_result.decode::<maxminddb::geoip2::City>()
+                    && let Some(iso) = city.country.iso_code
                     && codes.contains(iso)
-                    && let ipnetwork::IpNetwork::V4(net) = item.ip_net
+                    && let Ok(net) = lookup_result.network()
+                    && let ipnetwork::IpNetwork::V4(net) = net
                 {
                     result.push(IpNetwork::V4 {
                         addr: u32::from(net.ip()),
@@ -169,14 +172,16 @@ impl MaxMindGeoIpAdapter {
         }
 
         // Iterate all IPv6 networks
-        if let Ok(iter) = reader
-            .within::<maxminddb::geoip2::City>(ipnetwork::IpNetwork::V6("::/0".parse().unwrap()))
-        {
-            for item in iter.flatten() {
-                if let Some(ref country) = item.info.country
-                    && let Some(iso) = country.iso_code
+        if let Ok(iter) = reader.within(
+            ipnetwork::IpNetwork::V6("::/0".parse().unwrap()),
+            opts,
+        ) {
+            for lookup_result in iter.flatten() {
+                if let Ok(Some(city)) = lookup_result.decode::<maxminddb::geoip2::City>()
+                    && let Some(iso) = city.country.iso_code
                     && codes.contains(iso)
-                    && let ipnetwork::IpNetwork::V6(net) = item.ip_net
+                    && let Ok(net) = lookup_result.network()
+                    && let ipnetwork::IpNetwork::V6(net) = net
                 {
                     result.push(IpNetwork::V6 {
                         addr: net.ip().octets(),
@@ -203,32 +208,29 @@ impl GeoIpPort for MaxMindGeoIpAdapter {
 
         // City lookup
         if let Some(ref reader) = self.city_reader
-            && let Ok(city) = reader.lookup::<maxminddb::geoip2::City>(*ip)
+            && let Ok(result) = reader.lookup(*ip)
+            && let Ok(Some(city)) = result.decode::<maxminddb::geoip2::City>()
         {
-            if let Some(ref country) = city.country {
+            let country = &city.country;
+            if country.iso_code.is_some() {
                 info.country_code = country.iso_code.map(String::from);
-                info.country_name = country
-                    .names
-                    .as_ref()
-                    .and_then(|n| n.get("en").map(|s| (*s).to_string()));
+                info.country_name = country.names.english.map(ToString::to_string);
                 found = true;
             }
-            if let Some(ref city_data) = city.city {
-                info.city = city_data
-                    .names
-                    .as_ref()
-                    .and_then(|n| n.get("en").map(|s| (*s).to_string()));
+            let city_data = &city.city;
+            if city_data.geoname_id.is_some() {
+                info.city = city_data.names.english.map(ToString::to_string);
                 found = true;
             }
-            if let Some(ref loc) = city.location {
-                info.latitude = loc.latitude;
-                info.longitude = loc.longitude;
-            }
+            let loc = &city.location;
+            info.latitude = loc.latitude;
+            info.longitude = loc.longitude;
         }
 
         // ASN lookup
         if let Some(ref reader) = self.asn_reader
-            && let Ok(asn) = reader.lookup::<maxminddb::geoip2::Asn>(*ip)
+            && let Ok(result) = reader.lookup(*ip)
+            && let Ok(Some(asn)) = result.decode::<maxminddb::geoip2::Asn>()
         {
             info.asn = asn.autonomous_system_number;
             info.as_org = asn.autonomous_system_organization.map(String::from);
