@@ -69,5 +69,8 @@ routing:
 loadbalancer:
   enabled: false
 
+geoip:
+  enabled: false
+
 zones:
   enabled: false

@@ -1,8 +1,11 @@
 # eBPFsentinel GeoIP Configuration Example
 #
-# GeoIP enriches alerts with geographic location and ASN information
-# for source and destination IP addresses. Requires MaxMind GeoLite2
-# or GeoIP2 databases in .mmdb format.
+# GeoIP provides two capabilities:
+#   1. Alert enrichment — adds geographic location and ASN info to alerts
+#   2. Country blocking — blocks traffic from/to entire countries via
+#      kernel-side LPM Trie maps for O(log n) CIDR matching
+#
+# Requires MaxMind GeoLite2 or GeoIP2 databases in .mmdb format.
 
 # ── Required: minimal agent config ──────────────────────────────────
 agent:
@@ -33,9 +36,59 @@ geoip:
   #   city_url: "https://internal-mirror.example.com/GeoLite2-City.mmdb"
   #   asn_url: "https://internal-mirror.example.com/GeoLite2-ASN.mmdb"
 
-  # Auto-refresh interval in hours (for maxmind_account and url modes).
+  # Auto-refresh interval in hours. Periodically re-extracts country
+  # CIDRs from the database and reloads them into eBPF LPM Trie maps.
+  # Also re-downloads the database for maxmind_account and url modes.
   # Set to 0 to disable auto-refresh.
   refresh_interval_hours: 24
 
   # Directory to store downloaded databases.
   database_dir: /var/lib/ebpfsentinel/geoip
+
+# ── Firewall with GeoIP country blocking ────────────────────────────
+#
+# To block traffic from specific countries, define a GeoIP alias in the
+# firewall section. The agent extracts all CIDR blocks for the given
+# ISO 3166-1 alpha-2 country codes from the MaxMind City database and
+# loads them into kernel-side LPM Trie maps (FW_LPM_SRC_V4/V6).
+#
+# This provides O(log n) per-packet matching in XDP — no userspace
+# involvement after the initial load.
+
+firewall:
+  enabled: true
+  default_policy: pass
+
+  aliases:
+    # Block all inbound traffic from these countries.
+    # CIDRs are extracted from the MaxMind City database (IPv4 + IPv6)
+    # and loaded into eBPF LPM Trie maps as DROP rules on source IP.
+    blocked_countries:
+      type: geoip
+      country_codes: [CN, RU, KP]
+
+    # You can define multiple GeoIP aliases with different country sets.
+    # All GeoIP aliases are merged and bulk-loaded into the LPM maps.
+    # sanctioned_countries:
+    #   type: geoip
+    #   country_codes: [IR, SY, CU]
+
+  rules:
+    # GeoIP blocking is applied automatically via LPM Trie maps —
+    # no explicit rule is needed for country-based blocking.
+    # The aliases above are loaded at startup and refreshed periodically.
+
+    # Allow established connections
+    - id: fw-allow-established
+      priority: 1
+      action: allow
+      state: [established, related]
+
+    # Allow SSH from management network
+    - id: fw-allow-ssh
+      priority: 10
+      action: allow
+      protocol: tcp
+      src_ip: "192.168.100.0/24"
+      dst_port: 22
+      state: [new]

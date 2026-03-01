@@ -8,7 +8,7 @@ eBPFsentinel combines a stateful firewall, intrusion detection, rate limiting, a
 
 ### Network Security
 
-- **Stateful Firewall** — L3/L4 packet filtering with conntrack, CIDR matching, IP set aliases, security zones, VLAN filtering, schedule-based rules, and IPv4/IPv6 dual-stack
+- **Stateful Firewall** — L3/L4 packet filtering with conntrack, CIDR matching, IP set aliases, GeoIP country blocking (LPM Trie), security zones, VLAN filtering, schedule-based rules, and IPv4/IPv6 dual-stack
 - **NAT** — SNAT, DNAT, masquerade, port forwarding, 1:1 NAT with full packet rewriting (IPv4/IPv6)
 - **Rate Limiting** — Per-IP protection with 5 algorithms (token bucket, fixed window, sliding window, leaky bucket, SYN cookie)
 - **DDoS Mitigation** — Detects and mitigates SYN flood, UDP amplification, ICMP/RST/FIN/ACK flood, and volumetric attacks
@@ -21,6 +21,7 @@ eBPFsentinel combines a stateful firewall, intrusion detection, rate limiting, a
 
 - **IDS/IPS** — Intrusion detection and prevention with pattern matching, sampling, and threshold detection
 - **Threat Intelligence** — OSINT feed integration with IOC correlation and auto-blocking
+- **GeoIP Blocking** — Country-based traffic blocking via MaxMind databases with O(log n) kernel-side LPM Trie lookup and automatic periodic refresh
 - **DLP** — Data loss prevention scanning SSL/TLS traffic for sensitive data patterns (PCI, PII, credentials)
 - **DNS Intelligence** — Passive DNS capture, domain blocklists, behavioral reputation scoring, and DNS-based alert enrichment
 

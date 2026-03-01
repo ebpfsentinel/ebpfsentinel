@@ -10,7 +10,8 @@
 #
 # Advanced features:
 #   - Connection tracking: TCP state machine with configurable timeouts
-#   - IP set aliases: named groups of IPs/CIDRs for reuse (GeoIP, blocklists, URL tables)
+#   - IP set aliases: named groups of IPs/CIDRs for reuse (blocklists, URL tables)
+#   - GeoIP country blocking: LPM Trie O(log n) CIDR matching from MaxMind databases
 #   - ct_state matching: filter by connection state (new, established, related, invalid)
 #   - Security zones: group interfaces with inter-zone policies
 #   - NAT: SNAT/DNAT/masquerade via TC classifiers (tc-nat-ingress, tc-nat-egress)
@@ -55,7 +56,8 @@ firewall:
   # Types: ip_set, port_set, nested, url_table, geoip, dynamic_dns
   #
   # Small aliases are expanded inline into rule entries.
-  # Large aliases (GeoIP, blocklists) use kernel IP set HashMap for O(1) lookup.
+  # Large aliases (blocklists) use kernel IP set HashMap for O(1) lookup.
+  # GeoIP aliases use LPM Trie maps for O(log n) CIDR-based matching.
 
   aliases:
     # Static IP set — RFC 1918 private networks
@@ -84,7 +86,11 @@ firewall:
       url: "https://www.spamhaus.org/drop/drop.txt"
       refresh_interval: 3600
 
-    # GeoIP — resolve country codes to IP sets (requires MaxMind database)
+    # GeoIP — block traffic from entire countries via LPM Trie maps.
+    # Extracts all CIDR blocks from the MaxMind City database for the
+    # given ISO country codes and loads them as DROP rules on source IP.
+    # Requires geoip.enabled: true with a valid .mmdb database.
+    # Multiple GeoIP aliases are merged and bulk-loaded into the maps.
     # blocked_countries:
     #   type: geoip
     #   country_codes: [CN, RU, KP]
