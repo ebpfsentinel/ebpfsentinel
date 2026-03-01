@@ -17,6 +17,7 @@ dependencies = [
  "flate2",
  "http-body-util",
  "infrastructure",
+ "ipnetwork",
  "jsonwebtoken",
  "lettre",
  "maxminddb",

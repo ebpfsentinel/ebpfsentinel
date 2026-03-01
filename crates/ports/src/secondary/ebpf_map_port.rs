@@ -1,13 +1,14 @@
 use domain::common::error::DomainError;
-use ebpf_common::firewall::{
-    FirewallLpmEntryV4, FirewallLpmEntryV6, FirewallRuleEntry, FirewallRuleEntryV6,
-};
+use ebpf_common::firewall::{FirewallRuleEntry, FirewallRuleEntryV6};
 
 /// Secondary port for array-based eBPF firewall map operations.
 ///
 /// Provides a bulk-load interface to the kernel `FIREWALL_RULES` and
 /// `FIREWALL_RULES_V6` `Array` maps. Rules are loaded atomically by
 /// writing count=0, entries, then count=n.
+///
+/// CIDR-only LPM Trie rules (e.g. `GeoIP` blocking) are handled by the
+/// separate `GeoIpLpmPort` trait.
 ///
 /// Implemented by `FirewallMapManager` in the adapter layer.
 pub trait FirewallArrayMapPort: Send + Sync {
@@ -23,24 +24,6 @@ pub trait FirewallArrayMapPort: Send + Sync {
 
     /// Return the total number of rules currently loaded (V4 + V6).
     fn rule_count(&self) -> Result<usize, DomainError>;
-
-    /// Bulk-load IPv4 CIDR-only rules into LPM Trie maps (src + dst).
-    ///
-    /// Clears existing LPM entries before inserting. Rules that only match
-    /// on source or destination CIDR go here for O(log n) lookup; complex
-    /// rules (port, protocol, VLAN) remain in the linear Array maps.
-    fn load_lpm_v4_rules(
-        &mut self,
-        src_rules: &[FirewallLpmEntryV4],
-        dst_rules: &[FirewallLpmEntryV4],
-    ) -> Result<(), DomainError>;
-
-    /// Bulk-load IPv6 CIDR-only rules into LPM Trie maps (src + dst).
-    fn load_lpm_v6_rules(
-        &mut self,
-        src_rules: &[FirewallLpmEntryV6],
-        dst_rules: &[FirewallLpmEntryV6],
-    ) -> Result<(), DomainError>;
 }
 
 #[cfg(test)]

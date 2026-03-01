@@ -11,9 +11,9 @@ use adapters::auth::jwt_provider::JwtAuthProvider;
 use adapters::auth::oidc_provider::{self, OidcAuthProvider};
 use adapters::ebpf::{
     ConfigFlagsManager, ConnTrackMapManager, DlpEventReader, DnsEventReader, EbpfLoader,
-    EbpfMapWriteAdapter, EventReader, FirewallMapManager, IdsMapManager, IpSetMapManager,
-    L7PortsManager, MetricsReader, NatMapManager, RateLimitMapManager, ScrubConfigManager,
-    ThreatIntelMapManager,
+    EbpfMapWriteAdapter, EventReader, FirewallMapManager, GeoIpLpmManager, IdsMapManager,
+    IpSetMapManager, L7PortsManager, MetricsReader, NatMapManager, RateLimitMapManager,
+    ScrubConfigManager, ThreatIntelMapManager,
 };
 use adapters::grpc::server::{GrpcTlsConfig, run_grpc_server};
 use adapters::http::tls::load_rustls_config;
@@ -276,12 +276,37 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     let nat_svc = Arc::new(RwLock::new(nat_svc));
     info!(enabled = config.nat.enabled, "NAT service initialized");
 
+    // ── 5c⅞. Build GeoIP adapter (early, needed for alias + alert enrichment) ──
+    let geoip_adapter: Option<Arc<adapters::geoip::MaxMindGeoIpAdapter>> =
+        if let Some(ref geoip_cfg) = config.geoip {
+            if geoip_cfg.enabled {
+                match build_geoip_adapter(geoip_cfg) {
+                    Ok(adapter) => {
+                        info!("GeoIP adapter initialized");
+                        Some(Arc::new(adapter))
+                    }
+                    Err(e) => {
+                        warn!("GeoIP adapter initialization failed (degraded mode): {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
     // ── 5c⅞. Build Alias service ────────────────────────────────────
     let mut alias_svc = AliasAppService::new(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     // Wire alias resolution adapter for URL table, DNS, and GeoIP lookups
-    let alias_resolver =
-        Arc::new(adapters::alias::alias_resolution_adapter::AliasResolutionAdapter::new());
-    alias_svc.set_resolution_port(alias_resolver);
+    let mut alias_resolver =
+        adapters::alias::alias_resolution_adapter::AliasResolutionAdapter::new();
+    if let Some(ref adapter) = geoip_adapter {
+        alias_resolver.set_geoip_adapter(Arc::clone(adapter));
+        info!("GeoIP wired into alias resolution adapter");
+    }
+    alias_svc.set_resolution_port(Arc::new(alias_resolver));
     let aliases = config.aliases()?;
     if !aliases.is_empty()
         && let Err(e) = alias_svc.reload_aliases(aliases)
@@ -834,12 +859,37 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         false
     };
 
+    // Wire GeoIpLpmManager from xdp-firewall to alias service (take LPM maps BEFORE others)
+    if geoip_adapter.is_some()
+        && let Some(ref mut loader) = fw_loader
+    {
+        match GeoIpLpmManager::new(loader.ebpf_mut()) {
+            Ok(lpm_mgr) => {
+                alias_svc
+                    .write()
+                    .await
+                    .set_geoip_lpm_port(Box::new(lpm_mgr));
+                info!("GeoIP LPM maps wired from xdp-firewall");
+            }
+            Err(e) => {
+                warn!("GeoIP LPM maps not available (non-fatal): {e}");
+            }
+        }
+    }
+
     // Wire IpSetMapManager from xdp-firewall to alias service (best-effort, before move)
     if let Some(ref mut loader) = fw_loader
         && let Ok(ipset_mgr) = IpSetMapManager::new(loader.ebpf_mut())
     {
         alias_svc.write().await.set_ipset_port(Box::new(ipset_mgr));
         info!("alias IP set map wired from xdp-firewall");
+    }
+
+    // Initial dynamic alias refresh (loads GeoIP CIDRs into LPM maps at startup)
+    match alias_svc.write().await.refresh_dynamic() {
+        Ok(n) if n > 0 => info!(count = n, "initial dynamic alias refresh completed"),
+        Ok(_) => {}
+        Err(e) => warn!("initial dynamic alias refresh failed: {e}"),
     }
 
     // Move firewall loader into eBPF state (after tail-call wiring)
@@ -1145,26 +1195,10 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         alert_pipeline = alert_pipeline.with_alert_store(store);
     }
 
-    // Build GeoIP adapter from config (best-effort: non-fatal on failure)
-    let geoip_port: Option<Arc<dyn ports::secondary::geoip_port::GeoIpPort>> =
-        if let Some(ref geoip_cfg) = config.geoip {
-            if geoip_cfg.enabled {
-                match build_geoip_adapter(geoip_cfg) {
-                    Ok(adapter) => {
-                        info!("GeoIP adapter initialized");
-                        Some(Arc::new(adapter))
-                    }
-                    Err(e) => {
-                        warn!("GeoIP adapter initialization failed (degraded mode): {e}");
-                        None
-                    }
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+    // Cast the already-built GeoIP adapter to the GeoIpPort trait for alert enrichment
+    let geoip_port: Option<Arc<dyn ports::secondary::geoip_port::GeoIpPort>> = geoip_adapter
+        .as_ref()
+        .map(|a| Arc::clone(a) as Arc<dyn ports::secondary::geoip_port::GeoIpPort>);
 
     // Wire DNS alert enricher (best-effort: only if DNS cache is available)
     if let Some(ref dns_cache) = app_state.dns_cache_service {
@@ -1384,6 +1418,42 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
                 cleanup_ids.write().await.cleanup_expired_thresholds();
             }
         });
+    }
+
+    // ── 11f. Spawn periodic dynamic alias refresh (GeoIP + URL tables) ──
+    {
+        let refresh_interval_secs = config
+            .geoip
+            .as_ref()
+            .filter(|c| c.enabled)
+            .map_or(0, |c| c.refresh_interval_hours * 3600);
+
+        if refresh_interval_secs > 0 {
+            let alias_svc_clone = Arc::clone(&alias_svc);
+            let refresh_cancel = cancel_token.clone();
+            tokio::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(Duration::from_secs(refresh_interval_secs));
+                interval.tick().await; // skip first (already done at startup)
+                loop {
+                    tokio::select! {
+                        () = refresh_cancel.cancelled() => break,
+                        _ = interval.tick() => {}
+                    }
+                    match alias_svc_clone.write().await.refresh_dynamic() {
+                        Ok(n) => info!(count = n, "periodic dynamic alias refresh completed"),
+                        Err(e) => warn!("periodic dynamic alias refresh failed: {e}"),
+                    }
+                }
+            });
+            info!(
+                interval_hours = config
+                    .geoip
+                    .as_ref()
+                    .map_or(0, |c| c.refresh_interval_hours),
+                "periodic dynamic alias refresh task spawned"
+            );
+        }
     }
 
     // ── 12. Ready — wait for cancellation ───────────────────────────

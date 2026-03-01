@@ -5,7 +5,9 @@ use domain::alias::entity::Alias;
 use domain::alias::resolver::AliasResolver;
 use domain::common::error::DomainError;
 use domain::firewall::entity::{IpNetwork, PortRange};
+use ebpf_common::firewall::{ACTION_DROP, FirewallLpmEntryV4, FirewallLpmEntryV6};
 use ports::secondary::alias_resolution_port::AliasResolutionPort;
+use ports::secondary::geoip_lpm_port::GeoIpLpmPort;
 use ports::secondary::metrics_port::MetricsPort;
 use ports::secondary::nat_map_port::IpSetMapPort;
 
@@ -13,11 +15,13 @@ use ports::secondary::nat_map_port::IpSetMapPort;
 ///
 /// Orchestrates alias resolution across static, nested, URL table,
 /// `GeoIP`, and dynamic DNS sources. Manages IP set map synchronisation
-/// for large alias sets that need kernel-side O(1) lookup.
+/// for large alias sets that need kernel-side O(1) lookup, and LPM Trie
+/// maps for `GeoIP` CIDR-based blocking.
 pub struct AliasAppService {
     resolver: AliasResolver,
     resolution_port: Option<Arc<dyn AliasResolutionPort>>,
     ipset_port: Option<Box<dyn IpSetMapPort + Send>>,
+    geoip_lpm_port: Option<Box<dyn GeoIpLpmPort>>,
     metrics: Arc<dyn MetricsPort>,
     /// Maps alias name → `set_id` for eBPF IP set maps.
     set_id_map: HashMap<String, u8>,
@@ -30,6 +34,7 @@ impl AliasAppService {
             resolver: AliasResolver::new(),
             resolution_port: None,
             ipset_port: None,
+            geoip_lpm_port: None,
             metrics,
             set_id_map: HashMap::new(),
             next_set_id: 1,
@@ -44,6 +49,11 @@ impl AliasAppService {
     /// Set the eBPF IP set map port.
     pub fn set_ipset_port(&mut self, port: Box<dyn IpSetMapPort + Send>) {
         self.ipset_port = Some(port);
+    }
+
+    /// Set the eBPF LPM Trie map port for `GeoIP` CIDR blocking.
+    pub fn set_geoip_lpm_port(&mut self, port: Box<dyn GeoIpLpmPort>) {
+        self.geoip_lpm_port = Some(port);
     }
 
     /// Reload all aliases from config. Validates and loads into the resolver.
@@ -83,6 +93,8 @@ impl AliasAppService {
     /// Refresh dynamic aliases (URL tables, DNS, `GeoIP`) using the resolution port.
     /// Returns the number of aliases refreshed.
     pub fn refresh_dynamic(&mut self) -> Result<usize, DomainError> {
+        use domain::alias::entity::AliasKind;
+
         let Some(resolution_port) = self.resolution_port.clone() else {
             return Ok(0);
         };
@@ -90,31 +102,63 @@ impl AliasAppService {
         let mut refreshed = 0;
         let aliases = self.resolver.aliases().clone();
 
+        // Accumulate all GeoIP CIDRs across aliases for a single bulk load
+        let mut all_geoip_v4_src: Vec<FirewallLpmEntryV4> = Vec::new();
+        let mut all_geoip_v6_src: Vec<FirewallLpmEntryV6> = Vec::new();
+
         for (name, alias) in &aliases {
             let ips = Self::resolve_dynamic_alias(alias, resolution_port.as_ref());
             if ips.is_empty() {
                 continue;
             }
 
-            // Get set_id before borrowing ipset_port to avoid double mutable borrow
-            let set_id = self.get_or_assign_set_id(name);
+            let is_geoip = matches!(&alias.kind, AliasKind::GeoIp { .. });
 
-            // If we have an IP set port, load into eBPF
-            if let Some(ref mut ipset_port) = self.ipset_port {
-                let addrs: Vec<u32> = ips
-                    .iter()
-                    .filter_map(|ip| match ip {
-                        IpNetwork::V4 { addr, .. } => Some(*addr),
-                        IpNetwork::V6 { .. } => None, // V6 handled separately
-                    })
-                    .collect();
+            if is_geoip {
+                // GeoIP CIDRs → LPM Trie maps (block inbound from country)
+                let (v4_entries, v6_entries) = convert_to_lpm_entries(&ips, ACTION_DROP);
+                all_geoip_v4_src.extend(v4_entries);
+                all_geoip_v6_src.extend(v6_entries);
+            } else {
+                // Other dynamic aliases → IP set maps
+                let set_id = self.get_or_assign_set_id(name);
 
-                if let Err(e) = ipset_port.load_ipset_v4(set_id, &addrs) {
-                    tracing::warn!(alias = name, "failed to load IP set: {e}");
+                if let Some(ref mut ipset_port) = self.ipset_port {
+                    let addrs: Vec<u32> = ips
+                        .iter()
+                        .filter_map(|ip| match ip {
+                            IpNetwork::V4 { addr, .. } => Some(*addr),
+                            IpNetwork::V6 { .. } => None,
+                        })
+                        .collect();
+
+                    if let Err(e) = ipset_port.load_ipset_v4(set_id, &addrs) {
+                        tracing::warn!(alias = name, "failed to load IP set: {e}");
+                    }
                 }
             }
 
             refreshed += 1;
+        }
+
+        // Bulk-load accumulated GeoIP CIDRs into LPM maps
+        if !all_geoip_v4_src.is_empty() || !all_geoip_v6_src.is_empty() {
+            if let Some(ref mut lpm_port) = self.geoip_lpm_port {
+                // Load as source rules (blocking inbound traffic from these countries)
+                if let Err(e) = lpm_port.load_lpm_v4_rules(&all_geoip_v4_src, &[]) {
+                    tracing::warn!("failed to load GeoIP LPM V4 rules: {e}");
+                }
+                if let Err(e) = lpm_port.load_lpm_v6_rules(&all_geoip_v6_src, &[]) {
+                    tracing::warn!("failed to load GeoIP LPM V6 rules: {e}");
+                }
+                tracing::info!(
+                    v4 = all_geoip_v4_src.len(),
+                    v6 = all_geoip_v6_src.len(),
+                    "GeoIP CIDRs loaded into LPM Trie maps"
+                );
+            } else {
+                tracing::warn!("GeoIP CIDRs resolved but no LPM port configured; rules not loaded");
+            }
         }
 
         self.update_metrics();
@@ -167,6 +211,37 @@ impl AliasAppService {
         self.metrics
             .set_rules_loaded("aliases", self.resolver.aliases().len() as u64);
     }
+}
+
+/// Convert domain `IpNetwork` CIDRs to eBPF LPM Trie entry types.
+///
+/// IPv4 addresses are converted from host byte order (`u32`) to network
+/// byte order (`[u8; 4]`) as required by the LPM Trie key format.
+fn convert_to_lpm_entries(
+    ips: &[IpNetwork],
+    action: u8,
+) -> (Vec<FirewallLpmEntryV4>, Vec<FirewallLpmEntryV6>) {
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
+    for ip in ips {
+        match ip {
+            IpNetwork::V4 { addr, prefix_len } => {
+                v4.push(FirewallLpmEntryV4 {
+                    prefix_len: u32::from(*prefix_len),
+                    addr: addr.to_be_bytes(),
+                    action,
+                });
+            }
+            IpNetwork::V6 { addr, prefix_len } => {
+                v6.push(FirewallLpmEntryV6 {
+                    prefix_len: u32::from(*prefix_len),
+                    addr: *addr,
+                    action,
+                });
+            }
+        }
+    }
+    (v4, v6)
 }
 
 #[cfg(test)]
@@ -252,5 +327,138 @@ mod tests {
     fn refresh_without_port_returns_zero() {
         let mut svc = make_service();
         assert_eq!(svc.refresh_dynamic().unwrap(), 0);
+    }
+
+    #[test]
+    fn convert_to_lpm_entries_v4() {
+        let ips = vec![IpNetwork::V4 {
+            addr: 0xC0A80100, // 192.168.1.0 in host byte order
+            prefix_len: 24,
+        }];
+        let (v4, v6) = convert_to_lpm_entries(&ips, ACTION_DROP);
+        assert_eq!(v4.len(), 1);
+        assert!(v6.is_empty());
+        assert_eq!(v4[0].prefix_len, 24);
+        assert_eq!(v4[0].addr, [0xC0, 0xA8, 0x01, 0x00]); // network byte order
+        assert_eq!(v4[0].action, ACTION_DROP);
+    }
+
+    #[test]
+    fn convert_to_lpm_entries_v6() {
+        let addr = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let ips = vec![IpNetwork::V6 {
+            addr,
+            prefix_len: 32,
+        }];
+        let (v4, v6) = convert_to_lpm_entries(&ips, ACTION_DROP);
+        assert!(v4.is_empty());
+        assert_eq!(v6.len(), 1);
+        assert_eq!(v6[0].prefix_len, 32);
+        assert_eq!(v6[0].addr, addr);
+        assert_eq!(v6[0].action, ACTION_DROP);
+    }
+
+    #[test]
+    fn convert_to_lpm_entries_mixed() {
+        let ips = vec![
+            IpNetwork::V4 {
+                addr: 0x0A000000,
+                prefix_len: 8,
+            },
+            IpNetwork::V6 {
+                addr: [0xFF; 16],
+                prefix_len: 128,
+            },
+            IpNetwork::V4 {
+                addr: 0xAC100000,
+                prefix_len: 12,
+            },
+        ];
+        let (v4, v6) = convert_to_lpm_entries(&ips, ACTION_DROP);
+        assert_eq!(v4.len(), 2);
+        assert_eq!(v6.len(), 1);
+    }
+
+    /// Mock `GeoIpLpmPort` that records calls.
+    struct MockGeoIpLpmPort {
+        v4_src_count: usize,
+        v6_src_count: usize,
+    }
+
+    impl MockGeoIpLpmPort {
+        fn new() -> Self {
+            Self {
+                v4_src_count: 0,
+                v6_src_count: 0,
+            }
+        }
+    }
+
+    impl GeoIpLpmPort for MockGeoIpLpmPort {
+        fn load_lpm_v4_rules(
+            &mut self,
+            src_rules: &[FirewallLpmEntryV4],
+            _dst_rules: &[FirewallLpmEntryV4],
+        ) -> Result<(), DomainError> {
+            self.v4_src_count = src_rules.len();
+            Ok(())
+        }
+
+        fn load_lpm_v6_rules(
+            &mut self,
+            src_rules: &[FirewallLpmEntryV6],
+            _dst_rules: &[FirewallLpmEntryV6],
+        ) -> Result<(), DomainError> {
+            self.v6_src_count = src_rules.len();
+            Ok(())
+        }
+    }
+
+    /// Mock resolution port that returns fixed IPs for GeoIP lookups.
+    struct MockResolutionPort;
+
+    impl ports::secondary::alias_resolution_port::AliasResolutionPort for MockResolutionPort {
+        fn fetch_url_table(&self, _url: &str) -> Result<Vec<IpNetwork>, DomainError> {
+            Ok(Vec::new())
+        }
+        fn resolve_dns(&self, _hostname: &str) -> Result<Vec<IpNetwork>, DomainError> {
+            Ok(Vec::new())
+        }
+        fn lookup_geoip(&self, _codes: &[String]) -> Result<Vec<IpNetwork>, DomainError> {
+            Ok(vec![
+                IpNetwork::V4 {
+                    addr: 0x01020300,
+                    prefix_len: 24,
+                },
+                IpNetwork::V6 {
+                    addr: [0x20, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    prefix_len: 32,
+                },
+            ])
+        }
+    }
+
+    #[test]
+    fn refresh_dynamic_routes_geoip_to_lpm() {
+        let mut svc = make_service();
+        svc.set_resolution_port(Arc::new(MockResolutionPort));
+
+        // Load a GeoIP alias
+        let geoip_alias = Alias {
+            id: AliasId("block-cn".to_string()),
+            kind: AliasKind::GeoIp {
+                country_codes: vec!["CN".to_string()],
+            },
+            description: None,
+        };
+        svc.reload_aliases(vec![geoip_alias]).unwrap();
+
+        // Set up mock LPM port
+        let mock_lpm = MockGeoIpLpmPort::new();
+        svc.set_geoip_lpm_port(Box::new(mock_lpm));
+
+        // Refresh should route GeoIP CIDRs through LPM port
+        let refreshed = svc.refresh_dynamic().unwrap();
+        assert_eq!(refreshed, 1);
     }
 }

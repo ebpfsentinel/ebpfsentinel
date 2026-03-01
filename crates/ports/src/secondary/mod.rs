@@ -11,6 +11,7 @@ pub mod domain_reputation_port;
 pub mod ebpf_map_port;
 pub mod ebpf_map_write_port;
 pub mod feed_source;
+pub mod geoip_lpm_port;
 pub mod geoip_port;
 pub mod ids_map_port;
 pub mod ips_blacklist_port;

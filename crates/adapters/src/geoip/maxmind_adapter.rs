@@ -1,7 +1,9 @@
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::path::Path;
 
 use domain::alias::entity::GeoIpInfo;
+use domain::firewall::entity::IpNetwork;
 use maxminddb::Reader;
 use ports::secondary::geoip_port::GeoIpPort;
 use tracing::{info, warn};
@@ -134,6 +136,63 @@ impl MaxMindGeoIpAdapter {
             info!(path = %path.display(), "GeoIP ASN database reloaded");
         }
         Ok(())
+    }
+
+    /// Extract all CIDR networks from the City database for the given ISO country codes.
+    ///
+    /// Iterates all IPv4 and IPv6 networks in the database and returns those whose
+    /// country ISO code matches one of the provided codes. The returned
+    /// `IpNetwork` values can be converted to LPM Trie entries for eBPF maps.
+    pub fn networks_by_country(&self, country_codes: &[String]) -> Vec<IpNetwork> {
+        let Some(ref reader) = self.city_reader else {
+            return Vec::new();
+        };
+        let codes: HashSet<&str> = country_codes.iter().map(String::as_str).collect();
+        let mut result = Vec::new();
+
+        // Iterate all IPv4 networks
+        if let Ok(iter) = reader.within::<maxminddb::geoip2::City>(ipnetwork::IpNetwork::V4(
+            "0.0.0.0/0".parse().unwrap(),
+        )) {
+            for item in iter.flatten() {
+                if let Some(ref country) = item.info.country
+                    && let Some(iso) = country.iso_code
+                    && codes.contains(iso)
+                    && let ipnetwork::IpNetwork::V4(net) = item.ip_net
+                {
+                    result.push(IpNetwork::V4 {
+                        addr: u32::from(net.ip()),
+                        prefix_len: net.prefix(),
+                    });
+                }
+            }
+        }
+
+        // Iterate all IPv6 networks
+        if let Ok(iter) = reader
+            .within::<maxminddb::geoip2::City>(ipnetwork::IpNetwork::V6("::/0".parse().unwrap()))
+        {
+            for item in iter.flatten() {
+                if let Some(ref country) = item.info.country
+                    && let Some(iso) = country.iso_code
+                    && codes.contains(iso)
+                    && let ipnetwork::IpNetwork::V6(net) = item.ip_net
+                {
+                    result.push(IpNetwork::V6 {
+                        addr: net.ip().octets(),
+                        prefix_len: net.prefix(),
+                    });
+                }
+            }
+        }
+
+        info!(
+            codes = ?country_codes,
+            v4 = result.iter().filter(|n| matches!(n, IpNetwork::V4 { .. })).count(),
+            v6 = result.iter().filter(|n| matches!(n, IpNetwork::V6 { .. })).count(),
+            "GeoIP networks extracted"
+        );
+        result
     }
 }
 

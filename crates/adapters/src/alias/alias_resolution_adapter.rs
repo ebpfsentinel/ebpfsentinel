@@ -1,14 +1,20 @@
+use std::sync::Arc;
+
 use domain::common::error::DomainError;
 use domain::firewall::entity::IpNetwork;
 use ports::secondary::alias_resolution_port::AliasResolutionPort;
 use tracing::{debug, warn};
 
+use crate::geoip::MaxMindGeoIpAdapter;
+
 /// Adapter implementing `AliasResolutionPort` using HTTP + DNS resolution.
 ///
-/// Handles external lookups for URL table aliases, dynamic DNS aliases.
-/// `GeoIP` support requires the `maxminddb` crate (not included by default).
+/// Handles external lookups for URL table aliases, dynamic DNS aliases,
+/// and `GeoIP` country-based CIDR extraction (when a `MaxMindGeoIpAdapter`
+/// is configured).
 pub struct AliasResolutionAdapter {
     http_client: reqwest::Client,
+    geoip_adapter: Option<Arc<MaxMindGeoIpAdapter>>,
 }
 
 impl AliasResolutionAdapter {
@@ -20,7 +26,15 @@ impl AliasResolutionAdapter {
             .build()
             .unwrap_or_default();
 
-        Self { http_client }
+        Self {
+            http_client,
+            geoip_adapter: None,
+        }
+    }
+
+    /// Set the `GeoIP` adapter for country-based CIDR extraction.
+    pub fn set_geoip_adapter(&mut self, adapter: Arc<MaxMindGeoIpAdapter>) {
+        self.geoip_adapter = Some(adapter);
     }
 }
 
@@ -113,13 +127,14 @@ impl AliasResolutionPort for AliasResolutionAdapter {
     }
 
     fn lookup_geoip(&self, country_codes: &[String]) -> Result<Vec<IpNetwork>, DomainError> {
-        // GeoIP requires the maxminddb crate — not included by default.
-        // Return an empty result with a warning.
-        warn!(
-            codes = ?country_codes,
-            "GeoIP lookup requested but maxminddb is not enabled; returning empty result"
-        );
-        Ok(Vec::new())
+        let Some(ref adapter) = self.geoip_adapter else {
+            warn!(
+                codes = ?country_codes,
+                "GeoIP lookup requested but no adapter configured"
+            );
+            return Ok(Vec::new());
+        };
+        Ok(adapter.networks_by_country(country_codes))
     }
 }
 

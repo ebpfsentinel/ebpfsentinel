@@ -42,6 +42,7 @@ reqwest = { workspace = true }
 lettre = { workspace = true }
 sha2 = { workspace = true }
 maxminddb = { workspace = true }
+ipnetwork = "0.20"
 flate2 = { workspace = true }
 tar = { workspace = true }
 

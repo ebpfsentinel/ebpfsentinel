@@ -14,7 +14,10 @@ pub const DEFAULT_POLICY_PASS: u8 = 0;
 pub const DEFAULT_POLICY_DROP: u8 = 1;
 
 /// Maximum LPM Trie entries per map (4 maps: src/dst × v4/v6).
-pub const MAX_LPM_RULES: u32 = 4096;
+///
+/// A single country (e.g. CN ≈ 8 000 CIDRs, US ≈ 70 000) may require tens
+/// of thousands of entries. 131 072 accommodates multi-country GeoIP blocking.
+pub const MAX_LPM_RULES: u32 = 131_072;
 
 /// Match-flag bitmask: which fields of a rule are active (non-wildcard).
 pub const MATCH_SRC_IP: u8 = 0x01;
