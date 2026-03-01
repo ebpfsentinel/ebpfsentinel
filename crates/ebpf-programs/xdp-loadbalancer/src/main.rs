@@ -15,7 +15,8 @@ use ebpf_common::{
         LbBackendEntry, LbServiceConfig, LbServiceKey, LB_ACTION_FORWARD, LB_ACTION_NO_BACKEND,
         LB_ALG_IP_HASH, LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED, LB_MAX_BACKENDS,
         LB_METRIC_BYTES_FORWARDED, LB_METRIC_COUNT, LB_METRIC_EVENTS_DROPPED,
-        LB_METRIC_PACKETS_FORWARDED, LB_METRIC_PACKETS_NO_BACKEND, EVENT_TYPE_LB,
+        LB_METRIC_PACKETS_FORWARDED, LB_METRIC_PACKETS_NO_BACKEND, LB_METRIC_TOTAL_SEEN,
+        EVENT_TYPE_LB,
     },
 };
 use network_types::{
@@ -93,6 +94,7 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(EVENTS_RINGBUF_SIZE as u32, 0);
 
 #[xdp]
 pub fn xdp_loadbalancer(ctx: XdpContext) -> u32 {
+    increment_metric(LB_METRIC_TOTAL_SEEN);
     match try_xdp_loadbalancer(&ctx) {
         Ok(action) => action,
         Err(()) => xdp_action::XDP_PASS,

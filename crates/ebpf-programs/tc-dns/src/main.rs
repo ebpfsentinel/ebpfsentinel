@@ -13,7 +13,7 @@ use core::mem;
 use ebpf_common::dns::{
     DnsEvent, DnsEventBuf, DNS_DIRECTION_QUERY, DNS_DIRECTION_RESPONSE, DNS_MAX_PAYLOAD,
     DNS_METRIC_ERRORS, DNS_METRIC_EVENTS_DROPPED, DNS_METRIC_EVENTS_EMITTED,
-    DNS_METRIC_PACKETS_INSPECTED,
+    DNS_METRIC_PACKETS_INSPECTED, DNS_METRIC_TOTAL_SEEN,
 };
 use ebpf_common::event::{FLAG_IPV6, FLAG_VLAN};
 use network_types::{
@@ -61,9 +61,9 @@ struct VlanHdr {
 static DNS_EVENTS: RingBuf = RingBuf::with_byte_size(64 * 4096, 0);
 
 /// Per-CPU DNS counters. Index: 0=packets_inspected, 1=events_emitted,
-/// 2=errors, 3=events_dropped.
+/// 2=errors, 3=events_dropped, 4=total_seen.
 #[map]
-static DNS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 0);
+static DNS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
 
 // ── Entry point ─────────────────────────────────────────────────────
 
@@ -72,6 +72,7 @@ static DNS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 0);
 /// (passthrough — observation only, no blocking).
 #[classifier]
 pub fn tc_dns(ctx: TcContext) -> i32 {
+    increment_metric(DNS_METRIC_TOTAL_SEEN);
     match try_tc_dns(&ctx) {
         Ok(action) => action,
         Err(()) => {

@@ -55,6 +55,8 @@ pub const SCRUB_METRIC_IPID_RANDOMIZED: u32 = 4;
 pub const SCRUB_METRIC_ERRORS: u32 = 5;
 /// IPv6 Hop Limit values corrected (raised to `min_hop_limit`).
 pub const SCRUB_METRIC_HOP_FIXED: u32 = 6;
+/// Metric index: total packets seen (unconditional, first instruction).
+pub const SCRUB_METRIC_TOTAL_SEEN: u32 = 7;
 /// Total metric slots.
 pub const SCRUB_METRIC_COUNT: u32 = 8;
 

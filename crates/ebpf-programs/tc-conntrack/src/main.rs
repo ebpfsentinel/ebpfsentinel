@@ -13,6 +13,7 @@ use ebpf_common::conntrack::{
     ConnKey, ConnKeyV6, ConnTrackConfig, ConnValue, ConnValueV6, CT_FLAG_ASSURED,
     CT_FLAG_SEEN_REPLY, CT_MAX_ENTRIES_V4, CT_MAX_ENTRIES_V6, CT_METRIC_COUNT, CT_METRIC_ERRORS,
     CT_METRIC_ESTABLISHED, CT_METRIC_HITS, CT_METRIC_INVALID, CT_METRIC_LOOKUPS, CT_METRIC_NEW,
+    CT_METRIC_TOTAL_SEEN,
     CT_STATE_CLOSE_WAIT, CT_STATE_ESTABLISHED, CT_STATE_FIN_WAIT, CT_STATE_INVALID, CT_STATE_NEW,
     CT_STATE_SYN_RECV, CT_STATE_SYN_SENT, CT_STATE_TIME_WAIT, normalize_key_v4, normalize_key_v6,
 };
@@ -81,6 +82,7 @@ static CT_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(CT_METRIC_CO
 
 #[classifier]
 pub fn tc_conntrack(ctx: TcContext) -> i32 {
+    increment_metric(CT_METRIC_TOTAL_SEEN);
     match try_tc_conntrack(&ctx) {
         Ok(action) => action,
         Err(()) => {

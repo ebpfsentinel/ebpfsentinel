@@ -79,7 +79,9 @@ pub const LB_METRIC_PACKETS_FORWARDED: u32 = 0;
 pub const LB_METRIC_PACKETS_NO_BACKEND: u32 = 1;
 pub const LB_METRIC_BYTES_FORWARDED: u32 = 2;
 pub const LB_METRIC_EVENTS_DROPPED: u32 = 3;
-pub const LB_METRIC_COUNT: u32 = 4;
+/// Metric index: total packets seen (unconditional, first instruction).
+pub const LB_METRIC_TOTAL_SEEN: u32 = 4;
+pub const LB_METRIC_COUNT: u32 = 5;
 
 // SAFETY: All types are #[repr(C)], Copy, 'static, and contain only primitive types
 // with explicit padding. Safe for zero-copy eBPF map operations via aya.
@@ -165,7 +167,7 @@ mod tests {
         assert_eq!(LB_METRIC_PACKETS_NO_BACKEND, 1);
         assert_eq!(LB_METRIC_BYTES_FORWARDED, 2);
         assert_eq!(LB_METRIC_EVENTS_DROPPED, 3);
-        assert_eq!(LB_METRIC_COUNT, 4);
+        assert_eq!(LB_METRIC_COUNT, 5);
     }
 
     #[test]

@@ -25,6 +25,8 @@ pub const NAT_METRIC_DNAT_APPLIED: u32 = 1;
 pub const NAT_METRIC_MASQ_APPLIED: u32 = 2;
 pub const NAT_METRIC_PORT_ALLOC_FAIL: u32 = 3;
 pub const NAT_METRIC_ERRORS: u32 = 4;
+/// Metric index: total packets seen (unconditional, first instruction).
+pub const NAT_METRIC_TOTAL_SEEN: u32 = 5;
 pub const NAT_METRIC_COUNT: u32 = 8;
 
 // ── NAT match flags ─────────────────────────────────────────────────

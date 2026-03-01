@@ -17,7 +17,7 @@ use ebpf_common::{
     nat::{
         MAX_NAT_PORT_ALLOC, MAX_NAT_RULES, MAX_NAT_RULES_V6, NAT_MATCH_DST_IP, NAT_MATCH_PROTO,
         NAT_MATCH_SRC_IP, NAT_METRIC_COUNT, NAT_METRIC_ERRORS, NAT_METRIC_MASQ_APPLIED,
-        NAT_METRIC_SNAT_APPLIED, NAT_TYPE_MASQUERADE, NAT_TYPE_SNAT,
+        NAT_METRIC_SNAT_APPLIED, NAT_METRIC_TOTAL_SEEN, NAT_TYPE_MASQUERADE, NAT_TYPE_SNAT,
         NatPortAllocKey, NatPortAllocValue, NatRuleEntry, NatRuleEntryV6,
     },
 };
@@ -108,6 +108,7 @@ static NAT_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(NAT_METRIC_
 
 #[classifier]
 pub fn tc_nat_egress(ctx: TcContext) -> i32 {
+    increment_metric(NAT_METRIC_TOTAL_SEEN);
     match try_nat_egress(&ctx) {
         Ok(action) => action,
         Err(()) => {

@@ -108,9 +108,9 @@ static FIREWALL_RULE_COUNT_V6: Array<u32> = Array::with_max_entries(1, 0);
 #[map]
 static FIREWALL_DEFAULT_POLICY: Array<u8> = Array::with_max_entries(1, 0);
 
-/// Per-CPU packet counters. Index: 0=passed, 1=dropped, 2=errors, 3=events_dropped.
+/// Per-CPU packet counters. Index: 0=passed, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen.
 #[map]
-static FIREWALL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 0);
+static FIREWALL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
 
 
 /// Per-CPU scratch buffer for packet context shared across action/event helpers.
@@ -198,6 +198,7 @@ const METRIC_PASSED: u32 = 0;
 const METRIC_DROPPED: u32 = 1;
 const METRIC_ERRORS: u32 = 2;
 const METRIC_EVENTS_DROPPED: u32 = 3;
+const METRIC_TOTAL_SEEN: u32 = 4;
 
 /// RingBuf total size in bytes (must match EVENTS map declaration).
 const EVENTS_RINGBUF_SIZE: u64 = 256 * 4096;
@@ -373,6 +374,7 @@ unsafe extern "C" fn scan_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
 /// (NFR15: default-to-pass on internal error).
 #[xdp]
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
+    increment_metric(METRIC_TOTAL_SEEN);
     let action = match try_xdp_firewall(&ctx) {
         Ok(action) => action,
         Err(()) => {

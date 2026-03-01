@@ -18,6 +18,8 @@ pub const THREATINTEL_METRIC_MATCHED: u32 = 0;
 pub const THREATINTEL_METRIC_DROPPED: u32 = 1;
 pub const THREATINTEL_METRIC_ERRORS: u32 = 2;
 pub const THREATINTEL_METRIC_EVENTS_DROPPED: u32 = 3;
+/// Metric index: total packets seen (unconditional, first instruction).
+pub const THREATINTEL_METRIC_TOTAL_SEEN: u32 = 4;
 
 /// Key for the `THREATINTEL_IOCS` `HashMap` (IPv4).
 /// Matches on a single IPv4 address (network byte-order u32).

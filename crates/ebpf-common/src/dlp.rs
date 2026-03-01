@@ -16,6 +16,8 @@ pub const DLP_METRIC_READ_EVENTS: u32 = 1;
 pub const DLP_METRIC_ERRORS: u32 = 2;
 /// Metric index: events dropped due to RingBuf full.
 pub const DLP_METRIC_EVENTS_DROPPED: u32 = 3;
+/// Metric index: total probe invocations (unconditional, first thing in each probe).
+pub const DLP_METRIC_TOTAL_SEEN: u32 = 4;
 
 // ── Types ───────────────────────────────────────────────────────────
 

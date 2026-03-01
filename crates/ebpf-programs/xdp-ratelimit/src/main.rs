@@ -151,9 +151,9 @@ static SLIDING_WINDOW_BUCKETS: LruPerCpuHashMap<RateLimitKey, SlidingWindowValue
 static LEAKY_BUCKET_BUCKETS: LruPerCpuHashMap<RateLimitKey, LeakyBucketValue> =
     LruPerCpuHashMap::with_max_entries(65536, 0);
 
-/// Per-CPU counters. Index: 0=passed, 1=throttled, 2=errors, 3=events_dropped.
+/// Per-CPU counters. Index: 0=passed, 1=throttled, 2=errors, 3=events_dropped, 4=total_seen.
 #[map]
-static RATELIMIT_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 0);
+static RATELIMIT_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
 
 /// Shared kernel→userspace event ring buffer (1 MB).
 #[map]
@@ -224,6 +224,7 @@ const METRIC_PASSED: u32 = 0;
 const METRIC_THROTTLED: u32 = 1;
 const METRIC_ERRORS: u32 = 2;
 const METRIC_EVENTS_DROPPED: u32 = 3;
+const METRIC_TOTAL_SEEN: u32 = 4;
 
 /// RingBuf total size in bytes (must match EVENTS map declaration).
 const EVENTS_RINGBUF_SIZE: u64 = 256 * 4096;
@@ -255,6 +256,7 @@ fn increment_ddos_metric(index: u32) {
 /// XDP entry point. Default-to-pass on internal error (NFR15).
 #[xdp]
 pub fn xdp_ratelimit(ctx: XdpContext) -> u32 {
+    increment_metric(METRIC_TOTAL_SEEN);
     match try_xdp_ratelimit(&ctx) {
         Ok(action) => action,
         Err(()) => {

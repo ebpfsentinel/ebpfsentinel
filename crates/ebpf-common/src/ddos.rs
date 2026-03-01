@@ -202,8 +202,10 @@ pub const DDOS_METRIC_RST_FLOOD_DROPS: u32 = 11;
 pub const DDOS_METRIC_FIN_FLOOD_DROPS: u32 = 12;
 /// Metric index: ACK flood drops (ACK to non-existent connection).
 pub const DDOS_METRIC_ACK_FLOOD_DROPS: u32 = 13;
+/// Metric index: total packets seen (unconditional, first instruction).
+pub const DDOS_METRIC_TOTAL_SEEN: u32 = 14;
 /// Total number of DDoS metric slots.
-pub const DDOS_METRIC_COUNT: u32 = 14;
+pub const DDOS_METRIC_COUNT: u32 = 15;
 
 // ── Pod impls ────────────────────────────────────────────────────
 
@@ -353,7 +355,7 @@ mod tests {
         assert_eq!(DDOS_METRIC_RST_FLOOD_DROPS, 11);
         assert_eq!(DDOS_METRIC_FIN_FLOOD_DROPS, 12);
         assert_eq!(DDOS_METRIC_ACK_FLOOD_DROPS, 13);
-        assert_eq!(DDOS_METRIC_COUNT, 14);
+        assert_eq!(DDOS_METRIC_COUNT, 15);
     }
 
     #[test]

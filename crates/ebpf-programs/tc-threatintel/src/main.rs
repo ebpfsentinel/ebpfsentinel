@@ -20,6 +20,7 @@ use ebpf_common::{
     threatintel::{
         THREATINTEL_ACTION_DROP, THREATINTEL_MAX_ENTRIES, THREATINTEL_METRIC_DROPPED,
         THREATINTEL_METRIC_ERRORS, THREATINTEL_METRIC_EVENTS_DROPPED, THREATINTEL_METRIC_MATCHED,
+        THREATINTEL_METRIC_TOTAL_SEEN,
         ThreatIntelKey, ThreatIntelKeyV6, ThreatIntelValue,
     },
 };
@@ -84,9 +85,9 @@ static mut THREATINTEL_BLOOM_V4: BloomFilter<ThreatIntelKey> =
 static mut THREATINTEL_BLOOM_V6: BloomFilter<ThreatIntelKeyV6> =
     BloomFilter::with_max_entries(THREATINTEL_MAX_ENTRIES, 0);
 
-/// Per-CPU counters. Index: 0=matched, 1=dropped, 2=errors, 3=events_dropped.
+/// Per-CPU counters. Index: 0=matched, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen.
 #[map]
-static THREATINTEL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 0);
+static THREATINTEL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
 
 /// Shared kernel→userspace event ring buffer (1 MB).
 #[map]
@@ -119,6 +120,7 @@ fn ringbuf_has_backpressure() -> bool {
 /// returns TC_ACT_OK (NFR15: default-to-pass on internal error).
 #[classifier]
 pub fn tc_threatintel(ctx: TcContext) -> i32 {
+    increment_metric(THREATINTEL_METRIC_TOTAL_SEEN);
     match try_tc_threatintel(&ctx) {
         Ok(action) => action,
         Err(()) => {

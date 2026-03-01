@@ -11,7 +11,7 @@ use core::ffi::c_void;
 use ebpf_common::dlp::{
     DlpEvent, SslReadArgs, DLP_DIRECTION_READ, DLP_DIRECTION_WRITE, DLP_MAX_EXCERPT,
     DLP_METRIC_ERRORS, DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_READ_EVENTS,
-    DLP_METRIC_WRITE_EVENTS,
+    DLP_METRIC_TOTAL_SEEN, DLP_METRIC_WRITE_EVENTS,
 };
 
 // ── Maps ────────────────────────────────────────────────────────────
@@ -24,9 +24,9 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 4096, 0);
 #[map]
 static SSL_READ_ARGS: HashMap<u64, SslReadArgs> = HashMap::with_max_entries(10240, 0);
 
-/// Per-CPU DLP counters: write_events, read_events, errors, events_dropped.
+/// Per-CPU DLP counters: write_events, read_events, errors, events_dropped, total_seen.
 #[map]
-static DLP_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 0);
+static DLP_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
 
 // ── Probes ──────────────────────────────────────────────────────────
 
@@ -34,6 +34,7 @@ static DLP_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 0);
 /// The plaintext buffer is filled before the call, so we capture it here.
 #[uprobe]
 pub fn ssl_write(ctx: ProbeContext) {
+    increment_metric(DLP_METRIC_TOTAL_SEEN);
     match try_ssl_write(&ctx) {
         Ok(()) => {}
         Err(()) => increment_metric(DLP_METRIC_ERRORS),
@@ -45,6 +46,7 @@ pub fn ssl_write(ctx: ProbeContext) {
 /// the uretprobe fires.
 #[uprobe]
 pub fn ssl_read_entry(ctx: ProbeContext) {
+    increment_metric(DLP_METRIC_TOTAL_SEEN);
     match try_ssl_read_entry(&ctx) {
         Ok(()) => {}
         Err(()) => increment_metric(DLP_METRIC_ERRORS),

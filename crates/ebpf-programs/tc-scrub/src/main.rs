@@ -13,7 +13,7 @@ use core::mem;
 use ebpf_common::scrub::{
     ScrubFlags, SCRUB_METRIC_COUNT, SCRUB_METRIC_DF_CLEARED, SCRUB_METRIC_ERRORS,
     SCRUB_METRIC_HOP_FIXED, SCRUB_METRIC_IPID_RANDOMIZED, SCRUB_METRIC_MSS_CLAMPED,
-    SCRUB_METRIC_PACKETS, SCRUB_METRIC_TTL_FIXED,
+    SCRUB_METRIC_PACKETS, SCRUB_METRIC_TOTAL_SEEN, SCRUB_METRIC_TTL_FIXED,
 };
 use network_types::{eth::EthHdr, ip::Ipv4Hdr};
 
@@ -76,6 +76,7 @@ static SCRUB_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(SCRUB_MET
 
 #[classifier]
 pub fn tc_scrub(mut ctx: TcContext) -> i32 {
+    increment_metric(SCRUB_METRIC_TOTAL_SEEN);
     match try_tc_scrub(&mut ctx) {
         Ok(action) => action,
         Err(()) => {

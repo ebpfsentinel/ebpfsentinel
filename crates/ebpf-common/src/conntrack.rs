@@ -21,7 +21,9 @@ pub const CT_METRIC_EVICTED: u32 = 4;
 pub const CT_METRIC_ERRORS: u32 = 5;
 pub const CT_METRIC_LOOKUPS: u32 = 6;
 pub const CT_METRIC_HITS: u32 = 7;
-pub const CT_METRIC_COUNT: u32 = 8;
+/// Metric index: total packets seen (unconditional, first instruction).
+pub const CT_METRIC_TOTAL_SEEN: u32 = 8;
+pub const CT_METRIC_COUNT: u32 = 9;
 
 // ── Connection states ────────────────────────────────────────────────
 

@@ -18,6 +18,8 @@ pub const DNS_METRIC_PACKETS_INSPECTED: u32 = 0;
 pub const DNS_METRIC_EVENTS_EMITTED: u32 = 1;
 pub const DNS_METRIC_ERRORS: u32 = 2;
 pub const DNS_METRIC_EVENTS_DROPPED: u32 = 3;
+/// Metric index: total packets seen (unconditional, first instruction).
+pub const DNS_METRIC_TOTAL_SEEN: u32 = 4;
 
 /// DNS event header emitted from the tc-dns eBPF program to userspace
 /// via the DNS_EVENTS RingBuf.
