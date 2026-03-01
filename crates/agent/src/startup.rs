@@ -1103,6 +1103,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         alert_tx.clone(),
         dns_cache_for_ids,
     )
+    .with_ips_service(Arc::clone(&ips_svc))
     .with_ddos_service(Arc::clone(&ddos_svc))
     .with_dlp_service(Arc::clone(&dlp_svc));
     let dispatcher_cancel = cancel_token.clone();

@@ -120,25 +120,28 @@ teardown_file() {
     require_root
 
     # Toggle the reverse-shell rule to alert mode
-    local body
-    body='{"mode":"alert"}'
-    api_patch /api/v1/ips/rules/ips-reverse-shell-block "$body"
+    local patch_body
+    patch_body='{"mode":"alert"}'
+    local patch_resp
+    patch_resp="$(api_patch /api/v1/ips/rules/ips-reverse-shell-block "$patch_body")"
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ]
 
-    # Verify the mode changed
-    local rule_body
-    rule_body="$(api_get /api/v1/ips/rules/ips-reverse-shell-block)"
-    _load_http_status
-
+    # Verify the mode changed via the PATCH response or a list query
     local mode
-    mode="$(echo "$rule_body" | jq -r '.mode' 2>/dev/null)" || true
+    mode="$(echo "$patch_resp" | jq -r '.mode' 2>/dev/null)" || true
+    if [ -z "$mode" ] || [ "$mode" = "null" ]; then
+        # Fallback: GET all rules and filter
+        local rules_body
+        rules_body="$(api_get /api/v1/ips/rules)"
+        mode="$(echo "$rules_body" | jq -r '.[] | select(.id == "ips-reverse-shell-block") | .mode' 2>/dev/null)" || true
+    fi
     [ "$mode" = "alert" ]
 
     # Toggle back to block
-    body='{"mode":"block"}'
-    api_patch /api/v1/ips/rules/ips-reverse-shell-block "$body"
+    patch_body='{"mode":"block"}'
+    api_patch /api/v1/ips/rules/ips-reverse-shell-block "$patch_body" >/dev/null 2>&1
 }
 
 @test "blacklist entry has TTL" {

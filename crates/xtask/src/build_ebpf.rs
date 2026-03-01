@@ -52,6 +52,7 @@ pub fn build_all() -> Result<()> {
             .arg("build-std=core")
             .arg("--target")
             .arg("bpfel-unknown-none")
+            .env("CARGO_ENCODED_RUSTFLAGS", "-C\x1fdebuginfo=2\x1f-C\x1flink-arg=--btf")
             .current_dir(&program_dir)
             .status()
             .with_context(|| format!("failed to run cargo for {program}"))?;

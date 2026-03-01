@@ -239,6 +239,7 @@ name = "tc-dns"
 version = "0.1.0"
 dependencies = [
  "aya-ebpf",
+ "aya-ebpf-bindings",
  "ebpf-common",
  "network-types",
 ]

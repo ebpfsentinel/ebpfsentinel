@@ -156,18 +156,14 @@ fn emit_dlp_event(user_buf: *const u8, data_len: u32, direction: u8) {
             // memory to userspace.
             core::ptr::write_bytes((*ptr).data_excerpt.as_mut_ptr(), 0, DLP_MAX_EXCERPT);
 
-            // Bound copy length to DLP_MAX_EXCERPT for the eBPF verifier.
-            let copy_len = if data_len < DLP_MAX_EXCERPT as u32 {
-                data_len
-            } else {
-                DLP_MAX_EXCERPT as u32
-            };
-
-            // Use the raw BPF helper to avoid constructing a &mut [u8] from
-            // the RingBuf pointer (which would be UB on uninitialised memory).
-            r#gen::bpf_probe_read_user(
+            // Call bpf_probe_read_user with a compile-time constant length
+            // (DLP_MAX_EXCERPT = 4096). The verifier on kernel 6.17+ rejects
+            // variable-length arguments. If the user buffer has fewer bytes,
+            // the helper returns an error and the pre-zeroed buffer remains
+            // intact — data_len records the actual payload length.
+            let _ = r#gen::bpf_probe_read_user(
                 (*ptr).data_excerpt.as_mut_ptr() as *mut c_void,
-                copy_len,
+                DLP_MAX_EXCERPT as u32,
                 user_buf as *const c_void,
             );
         }

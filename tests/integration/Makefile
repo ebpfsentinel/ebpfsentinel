@@ -73,7 +73,7 @@ endif
 # ── eBPF scenario & performance tests ────────────────────────────
 
 .PHONY: test-ebpf-scenarios
-test-ebpf-scenarios: ## Run eBPF scenario suites 11-14, 18-23 (requires root)
+test-ebpf-scenarios: ## Run eBPF suites 11-14, 18-23 via sudo (binary mode)
 	sudo bats --timing \
 		$(SUITE_DIR)/11-ebpf-firewall-scenarios.bats \
 		$(SUITE_DIR)/12-ebpf-ids-scenarios.bats \
@@ -85,6 +85,21 @@ test-ebpf-scenarios: ## Run eBPF scenario suites 11-14, 18-23 (requires root)
 		$(SUITE_DIR)/21-ebpf-loadbalancer-scenarios.bats \
 		$(SUITE_DIR)/22-ebpf-nat-scenarios.bats \
 		$(SUITE_DIR)/23-ebpf-ddos-scenarios.bats
+
+.PHONY: test-ebpf-docker-runner
+test-ebpf-docker-runner: ## Run eBPF suites in privileged Docker (no sudo needed)
+	bash $(SCRIPT_DIR)/run-ebpf-docker.sh --skip-build
+
+.PHONY: test-ebpf-docker-all
+test-ebpf-docker-all: ## Run ALL suites (API + eBPF) in privileged Docker
+	bash $(SCRIPT_DIR)/run-ebpf-docker.sh --all --skip-build
+
+.PHONY: test-ebpf-docker-suite
+test-ebpf-docker-suite: ## Run single suite in Docker: make test-ebpf-docker-suite SUITE=11
+ifndef SUITE
+	$(error SUITE is required, e.g. make test-ebpf-docker-suite SUITE=11)
+endif
+	bash $(SCRIPT_DIR)/run-ebpf-docker.sh --suite $(SUITE) --skip-build
 
 .PHONY: test-performance
 test-performance: ## Run performance benchmark suite 15 (requires root)

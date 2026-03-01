@@ -112,15 +112,6 @@ static FIREWALL_DEFAULT_POLICY: Array<u8> = Array::with_max_entries(1, 0);
 #[map]
 static FIREWALL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 0);
 
-/// Per-CPU scratch buffer for IPv4 rule scan context.
-/// Avoids allocating `RuleScanCtx` on the 512-byte BPF stack.
-#[map]
-static SCAN_CTX_V4: PerCpuArray<RuleScanCtx> = PerCpuArray::with_max_entries(1, 0);
-
-/// Per-CPU scratch buffer for IPv6 rule scan context.
-/// Avoids allocating `RuleScanCtxV6` on the 512-byte BPF stack.
-#[map]
-static SCAN_CTX_V6: PerCpuArray<RuleScanCtxV6> = PerCpuArray::with_max_entries(1, 0);
 
 /// Per-CPU scratch buffer for packet context shared across action/event helpers.
 /// Avoids passing 8+ arguments through inlined functions that would blow
@@ -382,13 +373,22 @@ unsafe extern "C" fn scan_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
 /// (NFR15: default-to-pass on internal error).
 #[xdp]
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
-    match try_xdp_firewall(&ctx) {
+    let action = match try_xdp_firewall(&ctx) {
         Ok(action) => action,
         Err(()) => {
             increment_metric(METRIC_ERRORS);
             xdp_action::XDP_PASS
         }
+    };
+    // tail_call must happen in the XDP entry point (not subprogs) to
+    // satisfy kernel 6.17+ verifier: "tail_call is only allowed in
+    // functions that return 'int'".
+    if action == xdp_action::XDP_PASS {
+        unsafe {
+            let _ = XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_RATELIMIT);
+        }
     }
+    action
 }
 
 // ── Helpers: byte conversion ────────────────────────────────────────
@@ -434,10 +434,6 @@ fn apply_default_policy(ctx: &XdpContext) -> Result<u32, ()> {
     } else {
         increment_metric(METRIC_PASSED);
         write_xdp_metadata(ctx, ACTION_PASS, 0);
-        // Try chaining to ratelimit; if not loaded, fall through to PASS.
-        unsafe {
-            let _ = XDP_PROG_ARRAY.tail_call(ctx, PROG_IDX_RATELIMIT);
-        }
         Ok(xdp_action::XDP_PASS)
     }
 }
@@ -569,9 +565,6 @@ fn process_firewall_v4(
         if ct.state == CT_STATE_ESTABLISHED || ct.state == CT_STATE_RELATED {
             increment_metric(METRIC_PASSED);
             write_xdp_metadata(ctx, ACTION_PASS, 0);
-            unsafe {
-                let _ = XDP_PROG_ARRAY.tail_call(ctx, PROG_IDX_RATELIMIT);
-            }
             return Ok(xdp_action::XDP_PASS);
         }
         ct.state
@@ -599,38 +592,39 @@ fn process_firewall_v4(
 
     // Scan rules via bpf_loop (kernel 5.17+): verifier analyzes the callback
     // body only once, allowing up to 4096 rules without complexity limits.
-    // Use per-CPU scratch buffer to keep RuleScanCtx off the 512-byte stack.
-    let scan_ctx = SCAN_CTX_V4.get_ptr_mut(0).ok_or(())?;
-    unsafe {
-        (*scan_ctx).count = count;
-        (*scan_ctx).src_ip = src_ip;
-        (*scan_ctx).dst_ip = dst_ip;
-        (*scan_ctx).src_port = src_port;
-        (*scan_ctx).dst_port = dst_port;
-        (*scan_ctx).protocol = protocol as u8;
-        (*scan_ctx).vlan_id = vlan_id;
-        (*scan_ctx).ct_state = ct_state;
-        (*scan_ctx).tcp_flags = tcp_flags;
-        (*scan_ctx).icmp_type = icmp_type;
-        (*scan_ctx).icmp_code = icmp_code;
-        (*scan_ctx).dscp = dscp;
-        (*scan_ctx).src_mac = src_mac;
-        (*scan_ctx).dst_mac = dst_mac;
-        (*scan_ctx).matched_action = -1;
-        (*scan_ctx).matched_rule_idx = -1;
-        (*scan_ctx).matched_max_states = 0;
-    }
+    // The scan context is on the stack (not a PerCpuArray map value) because
+    // kernel 6.17+ requires the bpf_loop callback_ctx (R3) to be a stack
+    // frame pointer, not a map_value pointer.
+    let mut scan_ctx = RuleScanCtx {
+        count,
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        protocol: protocol as u8,
+        vlan_id,
+        ct_state,
+        tcp_flags,
+        icmp_type,
+        icmp_code,
+        dscp,
+        src_mac,
+        dst_mac,
+        matched_action: -1,
+        matched_rule_idx: -1,
+        matched_max_states: 0,
+    };
     unsafe {
         bpf_loop(
             MAX_FIREWALL_RULES,
             scan_rule_v4 as *mut c_void,
-            scan_ctx as *mut RuleScanCtx as *mut c_void,
+            &mut scan_ctx as *mut RuleScanCtx as *mut c_void,
             0,
         );
     }
-    let matched_action = unsafe { (*scan_ctx).matched_action };
-    let matched_rule_idx = unsafe { (*scan_ctx).matched_rule_idx };
-    let matched_max_states = unsafe { (*scan_ctx).matched_max_states };
+    let matched_action = scan_ctx.matched_action;
+    let matched_rule_idx = scan_ctx.matched_rule_idx;
+    let matched_max_states = scan_ctx.matched_max_states;
 
     if matched_action >= 0 {
         let action = matched_action as u8;
@@ -1036,9 +1030,6 @@ fn process_firewall_v6(
     if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
         increment_metric(METRIC_PASSED);
         write_xdp_metadata(ctx, ACTION_PASS, 0);
-        unsafe {
-            let _ = XDP_PROG_ARRAY.tail_call(ctx, PROG_IDX_RATELIMIT);
-        }
         return Ok(xdp_action::XDP_PASS);
     }
 
@@ -1057,38 +1048,38 @@ fn process_firewall_v6(
     };
 
     // Scan V6 rules via bpf_loop (kernel 5.17+).
-    // Use per-CPU scratch buffer to keep RuleScanCtxV6 off the 512-byte stack.
-    let scan_ctx = SCAN_CTX_V6.get_ptr_mut(0).ok_or(())?;
-    unsafe {
-        (*scan_ctx).count = count;
-        (*scan_ctx).src_addr = src_addr;
-        (*scan_ctx).dst_addr = dst_addr;
-        (*scan_ctx).src_port = src_port;
-        (*scan_ctx).dst_port = dst_port;
-        (*scan_ctx).protocol = next_hdr;
-        (*scan_ctx).vlan_id = vlan_id;
-        (*scan_ctx).ct_state = ct_state;
-        (*scan_ctx).tcp_flags = tcp_flags;
-        (*scan_ctx).icmp_type = icmp_type;
-        (*scan_ctx).icmp_code = icmp_code;
-        (*scan_ctx).dscp = dscp;
-        (*scan_ctx).src_mac = src_mac;
-        (*scan_ctx).dst_mac = dst_mac;
-        (*scan_ctx).matched_action = -1;
-        (*scan_ctx).matched_rule_idx = -1;
-        (*scan_ctx).matched_max_states = 0;
-    }
+    // Stack-allocated context (kernel 6.17+ requires bpf_loop callback_ctx
+    // to be a stack frame pointer, not a map_value pointer).
+    let mut scan_ctx = RuleScanCtxV6 {
+        count,
+        src_addr,
+        dst_addr,
+        src_port,
+        dst_port,
+        protocol: next_hdr,
+        vlan_id,
+        ct_state,
+        tcp_flags,
+        icmp_type,
+        icmp_code,
+        dscp,
+        src_mac,
+        dst_mac,
+        matched_action: -1,
+        matched_rule_idx: -1,
+        matched_max_states: 0,
+    };
     unsafe {
         bpf_loop(
             MAX_FIREWALL_RULES,
             scan_rule_v6 as *mut c_void,
-            scan_ctx as *mut RuleScanCtxV6 as *mut c_void,
+            &mut scan_ctx as *mut RuleScanCtxV6 as *mut c_void,
             0,
         );
     }
-    let matched_action = unsafe { (*scan_ctx).matched_action };
-    let matched_rule_idx = unsafe { (*scan_ctx).matched_rule_idx };
-    let matched_max_states = unsafe { (*scan_ctx).matched_max_states };
+    let matched_action = scan_ctx.matched_action;
+    let matched_rule_idx = scan_ctx.matched_rule_idx;
+    let matched_max_states = scan_ctx.matched_max_states;
 
     if matched_action >= 0 {
         let action = matched_action as u8;
@@ -1232,8 +1223,10 @@ fn match_rule_v6(
 /// Reads packet metadata from the `PKT_CTX` per-CPU scratch buffer
 /// (must be populated before calling).
 ///
-/// On `XDP_PASS`, attempts a tail_call to the ratelimit program (index 0
-/// in `XDP_PROG_ARRAY`). If ratelimit isn't loaded, falls through to PASS.
+/// Returns the XDP action. The tail_call to the ratelimit program is
+/// performed by the entry point (`xdp_firewall`) when the result is
+/// `XDP_PASS` — this satisfies the kernel 6.17+ verifier requirement
+/// that tail_call only happens in functions returning `int`.
 #[inline(always)]
 fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
     match action {
@@ -1246,19 +1239,11 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
             emit_event(ACTION_LOG);
             increment_metric(METRIC_PASSED);
             write_xdp_metadata(ctx, ACTION_LOG, 0);
-            // Try chaining to ratelimit; if not loaded, fall through to PASS.
-            unsafe {
-                let _ = XDP_PROG_ARRAY.tail_call(ctx, PROG_IDX_RATELIMIT);
-            }
             Ok(xdp_action::XDP_PASS)
         }
         ACTION_PASS | _ => {
             increment_metric(METRIC_PASSED);
             write_xdp_metadata(ctx, ACTION_PASS, 0);
-            // Try chaining to ratelimit; if not loaded, fall through to PASS.
-            unsafe {
-                let _ = XDP_PROG_ARRAY.tail_call(ctx, PROG_IDX_RATELIMIT);
-            }
             Ok(xdp_action::XDP_PASS)
         }
     }
@@ -1292,6 +1277,10 @@ fn increment_metric(index: u32) {
 /// Prepend `XdpMetadata` to the packet's data_meta area so that TC programs
 /// can read the firewall verdict without re-parsing. Best-effort: if
 /// `bpf_xdp_adjust_meta` fails (driver doesn't support it), silently skips.
+///
+/// After `bpf_xdp_adjust_meta`, we must re-read `data_meta` (via
+/// `ctx.metadata()`) and `data` (via `ctx.data()`) from the XDP context
+/// to satisfy the BPF verifier on kernel 6.17+.
 #[inline(always)]
 fn write_xdp_metadata(ctx: &XdpContext, action: u8, rule_id: u32) {
     let meta_size = mem::size_of::<XdpMetadata>() as i32;
@@ -1299,12 +1288,12 @@ fn write_xdp_metadata(ctx: &XdpContext, action: u8, rule_id: u32) {
     if ret != 0 {
         return; // Driver doesn't support metadata — skip silently
     }
-    // After adjust_meta, data_meta has grown by meta_size bytes.
-    // Write the metadata into the new space.
-    let data_meta = ctx.data() - meta_size as usize;
+    // After adjust_meta, re-read pointers from the XDP context so the
+    // verifier knows the metadata area is valid.
+    let data_meta = ctx.metadata();
     let data = ctx.data();
     if data_meta + mem::size_of::<XdpMetadata>() > data {
-        return; // Safety check
+        return; // Safety check — required by verifier
     }
     let meta_ptr = data_meta as *mut XdpMetadata;
     unsafe {

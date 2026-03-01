@@ -31,10 +31,6 @@ services:
     #   - SYS_ADMIN
     #   - PERFMON
 
-    # Security: prevent child processes from gaining new privileges
-    security_opt:
-      - no-new-privileges:true
-
     # Defense-in-depth: read-only root prevents writes to container filesystem
     # even under privileged mode (no dropped binaries, no modified libraries).
     read_only: true

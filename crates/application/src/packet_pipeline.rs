@@ -26,6 +26,7 @@ use crate::ddos_service_impl::DdosAppService;
 use crate::dlp_service_impl::DlpAppService;
 use crate::dns_cache_service_impl::DnsCacheAppService;
 use crate::ids_service_impl::IdsAppService;
+use crate::ips_service_impl::IpsAppService;
 use crate::l7_service_impl::L7AppService;
 use crate::threatintel_service_impl::ThreatIntelAppService;
 
@@ -61,6 +62,7 @@ pub struct EventDispatcher {
     alert_tx: mpsc::Sender<IdsAlert>,
     dns_cache: Option<Arc<dyn DnsCachePort>>,
     dns_cache_svc: Option<Arc<DnsCacheAppService>>,
+    ips_service: Option<Arc<RwLock<IpsAppService>>>,
     dlp_service: Option<Arc<RwLock<DlpAppService>>>,
     ddos_service: Option<Arc<RwLock<DdosAppService>>>,
 }
@@ -84,6 +86,7 @@ impl EventDispatcher {
             alert_tx,
             dns_cache,
             dns_cache_svc: None,
+            ips_service: None,
             dlp_service: None,
             ddos_service: None,
         }
@@ -93,6 +96,13 @@ impl EventDispatcher {
     #[must_use]
     pub fn with_dns_cache_svc(mut self, svc: Arc<DnsCacheAppService>) -> Self {
         self.dns_cache_svc = Some(svc);
+        self
+    }
+
+    /// Set the IPS service for auto-blacklisting on IDS detections.
+    #[must_use]
+    pub fn with_ips_service(mut self, svc: Arc<RwLock<IpsAppService>>) -> Self {
+        self.ips_service = Some(svc);
         self
     }
 
@@ -300,6 +310,13 @@ impl EventDispatcher {
 
         if self.alert_tx.try_send(alert).is_err() {
             self.metrics.record_event_dropped("alert_channel_full");
+        }
+
+        // Feed detection into IPS for auto-blacklisting
+        if let Some(ref ips_svc) = self.ips_service {
+            let src_ip = addr_to_ip(event.src_addr, event.is_ipv6());
+            let mut svc = ips_svc.write().await;
+            svc.record_detection(src_ip);
         }
     }
 

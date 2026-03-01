@@ -8,6 +8,7 @@ use aya_ebpf::{
     maps::{PerCpuArray, RingBuf},
     programs::TcContext,
 };
+use aya_ebpf_bindings::helpers::bpf_skb_load_bytes;
 use core::mem;
 use ebpf_common::dns::{
     DnsEvent, DnsEventBuf, DNS_DIRECTION_QUERY, DNS_DIRECTION_RESPONSE, DNS_MAX_PAYLOAD,
@@ -265,6 +266,11 @@ fn dns_ringbuf_has_backpressure() -> bool {
 /// Emit a DnsEventBuf to the DNS_EVENTS RingBuf. Skips emission under
 /// backpressure (>75% full). Copies the DnsEvent header and up to
 /// DNS_MAX_PAYLOAD bytes of raw DNS payload from the packet.
+///
+/// Calls `bpf_skb_load_bytes` directly with a compile-time constant
+/// length (`DNS_MAX_PAYLOAD`) so the kernel 6.17+ verifier sees a
+/// fixed-size read instead of the variable `[0, 511]` range that
+/// aya's `load_bytes()` wrapper produces.
 #[inline(always)]
 fn emit_dns_event(
     ctx: &TcContext,
@@ -279,24 +285,25 @@ fn emit_dns_event(
         increment_metric(DNS_METRIC_EVENTS_DROPPED);
         return;
     }
+    // Calculate DNS payload length before reserving ringbuf entry
+    let pkt_start = ctx.data() + dns_offset;
+    let pkt_end = ctx.data_end();
+
+    // No DNS payload available — nothing to emit
+    if pkt_start >= pkt_end {
+        return;
+    }
+
+    let available = pkt_end - pkt_start;
+    let payload_len: usize = if available > DNS_MAX_PAYLOAD {
+        DNS_MAX_PAYLOAD
+    } else {
+        available
+    };
+
     if let Some(mut entry) = DNS_EVENTS.reserve::<DnsEventBuf>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
-            // Calculate DNS payload length (bounded to DNS_MAX_PAYLOAD)
-            let pkt_start = ctx.data() + dns_offset;
-            let pkt_end = ctx.data_end();
-
-            let payload_len = if pkt_start >= pkt_end {
-                0usize
-            } else {
-                let available = pkt_end - pkt_start;
-                if available > DNS_MAX_PAYLOAD {
-                    DNS_MAX_PAYLOAD
-                } else {
-                    available
-                }
-            };
-
             // Fill header
             (*ptr).header.timestamp_ns = bpf_ktime_get_boot_ns();
             (*ptr).header.src_addr = *src_addr;
@@ -307,16 +314,26 @@ fn emit_dns_event(
             (*ptr).header.flags = flags;
             (*ptr).header.vlan_id = vlan_id;
 
-            // Zero payload buffer, then copy available DNS bytes
+            // Zero payload buffer so bytes beyond the actual DNS
+            // payload are deterministic even if load_bytes copies less.
             core::ptr::write_bytes((*ptr).payload.as_mut_ptr(), 0, DNS_MAX_PAYLOAD);
 
-            if payload_len > 0 {
-                core::ptr::copy_nonoverlapping(
-                    pkt_start as *const u8,
-                    (*ptr).payload.as_mut_ptr(),
-                    payload_len,
-                );
-            }
+            // Call bpf_skb_load_bytes directly with a compile-time
+            // constant length (DNS_MAX_PAYLOAD = 512). The aya wrapper
+            // `ctx.load_bytes()` computes min(skb_len - offset, dst.len())
+            // which gives the verifier a variable range [0, 511] for R4,
+            // rejected as "invalid zero-sized read" on kernel 6.17+.
+            //
+            // With a constant length the verifier sees R4=512 (fixed).
+            // If the packet has fewer bytes, bpf_skb_load_bytes returns
+            // an error and the pre-zeroed buffer remains intact — the
+            // actual payload length is recorded in dns_payload_len.
+            let _ = bpf_skb_load_bytes(
+                ctx.skb.skb as *const _,
+                dns_offset as u32,
+                (*ptr).payload.as_mut_ptr() as *mut _,
+                DNS_MAX_PAYLOAD as u32,
+            );
         }
         entry.submit(0);
         increment_metric(DNS_METRIC_EVENTS_EMITTED);

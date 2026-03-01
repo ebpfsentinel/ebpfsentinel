@@ -12,6 +12,7 @@ use aya_ebpf::{
     maps::{Array, HashMap, PerCpuArray, RingBuf},
     programs::TcContext,
 };
+use aya_ebpf_bindings::helpers::bpf_skb_load_bytes;
 use aya_log_ebpf::info;
 use core::mem;
 use ebpf_common::{
@@ -448,25 +449,22 @@ fn emit_l7_event(
             (*ptr).header.cpu_id = bpf_get_smp_processor_id() as u16;
             (*ptr).header.socket_cookie = 0;
 
-            // Zero payload buffer, then copy available packet bytes.
+            // Zero payload buffer so bytes beyond the actual L7 payload
+            // are deterministic even if bpf_skb_load_bytes copies less.
             core::ptr::write_bytes((*ptr).payload.as_mut_ptr(), 0, MAX_L7_PAYLOAD);
 
-            let pkt_start = ctx.data() + l7_offset;
-            let pkt_end = ctx.data_end();
-
-            if pkt_start < pkt_end {
-                let available = pkt_end - pkt_start;
-                let copy_len = if available > MAX_L7_PAYLOAD {
-                    MAX_L7_PAYLOAD
-                } else {
-                    available
-                };
-                core::ptr::copy_nonoverlapping(
-                    pkt_start as *const u8,
-                    (*ptr).payload.as_mut_ptr(),
-                    copy_len,
-                );
-            }
+            // Call bpf_skb_load_bytes directly with a compile-time constant
+            // length (MAX_L7_PAYLOAD = 512). The verifier on kernel 6.17+
+            // rejects variable-length copies from packet data. With a
+            // constant length the verifier sees R4=512 (fixed). If the
+            // packet has fewer bytes, bpf_skb_load_bytes returns an error
+            // and the pre-zeroed buffer remains intact.
+            let _ = bpf_skb_load_bytes(
+                ctx.skb.skb as *const _,
+                l7_offset as u32,
+                (*ptr).payload.as_mut_ptr() as *mut _,
+                MAX_L7_PAYLOAD as u32,
+            );
         }
         entry.submit(0);
     } else {

@@ -1,0 +1,49 @@
+# Dockerfile.testrunner — Container for running BATS integration tests as root
+#
+# Usage:
+#   docker build -t ebpfsentinel-testrunner -f tests/integration/Dockerfile.testrunner .
+#   docker run --rm --privileged --network host --pid host \
+#     -v /sys/fs/bpf:/sys/fs/bpf \
+#     -v /sys/kernel/btf:/sys/kernel/btf:ro \
+#     -v /sys/kernel/debug:/sys/kernel/debug:ro \
+#     ebpfsentinel-testrunner [suite-args...]
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bats \
+    curl \
+    jq \
+    iproute2 \
+    iputils-ping \
+    ncat \
+    iperf3 \
+    linux-base \
+    procps \
+    bc \
+    openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install bpftool from linux-tools if available, otherwise skip
+RUN apt-get update && apt-get install -y --no-install-recommends bpftool 2>/dev/null \
+    || apt-get install -y --no-install-recommends linux-tools-generic 2>/dev/null \
+    || true && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# Copy the agent binary and eBPF programs
+COPY target/release/ebpfsentinel-agent /usr/local/bin/ebpfsentinel-agent
+COPY target/bpfel-unknown-none/release/ /usr/local/lib/ebpfsentinel/
+
+# Copy the integration test directory
+COPY tests/integration/ /workspace/tests/integration/
+
+# Generate TLS certs and JWT tokens at build time
+RUN bash /workspace/tests/integration/scripts/generate-certs.sh && \
+    bash /workspace/tests/integration/scripts/generate-jwt-keys.sh
+
+ENV AGENT_BIN=/usr/local/bin/ebpfsentinel-agent
+ENV EBPF_PROGRAM_DIR=/usr/local/lib/ebpfsentinel
+
+ENTRYPOINT ["bats", "--timing"]
+CMD ["/workspace/tests/integration/suites/"]

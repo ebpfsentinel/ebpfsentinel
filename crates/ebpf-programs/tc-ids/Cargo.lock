@@ -302,6 +302,7 @@ name = "tc-ids"
 version = "0.1.0"
 dependencies = [
  "aya-ebpf",
+ "aya-ebpf-bindings",
  "aya-log-ebpf",
  "ebpf-common",
  "network-types",

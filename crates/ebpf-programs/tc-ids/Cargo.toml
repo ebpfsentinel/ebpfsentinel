@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 aya-ebpf = "0.1.1"
+aya-ebpf-bindings = "0.1.2"
 aya-log-ebpf = "0.1.0"
 ebpf-common = { path = "../../ebpf-common", default-features = false }
 network-types = "0.1.0"

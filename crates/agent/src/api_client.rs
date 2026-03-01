@@ -412,7 +412,11 @@ impl ApiClient {
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;
-        handle_response(resp).await
+        // readyz returns 503 with valid JSON when eBPF is not loaded (degraded mode).
+        // Accept both 200 and 503 as valid responses.
+        resp.json::<ReadyResponse>()
+            .await
+            .context("failed to parse readyz response")
     }
 
     // ── Agent Status ────────────────────────────────────────────────

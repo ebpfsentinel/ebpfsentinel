@@ -313,6 +313,8 @@ prepare_ebpf_config() {
 # ── Polling helpers ─────────────────────────────────────────────────
 
 # wait_for_alert <jq_filter> [max_attempts] [interval_secs]
+# The alerts API returns {"alerts": [...], ...}. The filter is applied to
+# the unwrapped .alerts array so callers can use `.[] | select(...)`.
 wait_for_alert() {
     local filter="${1:?usage: wait_for_alert <jq_filter>}"
     local max="${2:-30}"
@@ -323,8 +325,10 @@ wait_for_alert() {
         local body
         body="$(api_get /api/v1/alerts 2>/dev/null)" || true
         if [ -n "$body" ]; then
+            local alerts
+            alerts="$(echo "$body" | jq '.alerts // .' 2>/dev/null)" || alerts="$body"
             local match
-            match="$(echo "$body" | jq -r "$filter" 2>/dev/null)" || true
+            match="$(echo "$alerts" | jq -r "$filter" 2>/dev/null)" || true
             if [ -n "$match" ] && [ "$match" != "null" ]; then
                 echo "$match"
                 return 0
