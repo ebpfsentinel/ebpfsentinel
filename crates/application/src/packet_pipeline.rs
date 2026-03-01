@@ -3,8 +3,11 @@ use std::sync::Arc;
 use domain::audit::entity::{AuditAction, AuditComponent};
 use domain::common::entity::DomainMode;
 use domain::ddos::entity::{DdosAttackType, DdosEvent};
+use domain::dlp::entity::DlpAlert;
 use domain::firewall::entity::FirewallAction;
 use domain::ids::entity::IdsAlert;
+
+use crate::alert_event::AlertEvent;
 use domain::l7::entity::DetectedProtocol;
 use domain::l7::parser::{detect_protocol, parse_payload};
 use domain::threatintel::entity::ThreatIntelAlert;
@@ -24,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 use crate::audit_service_impl::AuditAppService;
 use crate::ddos_service_impl::DdosAppService;
 use crate::dlp_service_impl::DlpAppService;
+use crate::dns_blocklist_service_impl::DnsBlocklistAppService;
 use crate::dns_cache_service_impl::DnsCacheAppService;
 use crate::ids_service_impl::IdsAppService;
 use crate::ips_service_impl::IpsAppService;
@@ -59,12 +63,13 @@ pub struct EventDispatcher {
     threatintel_service: Arc<RwLock<ThreatIntelAppService>>,
     audit_service: Arc<RwLock<AuditAppService>>,
     metrics: Arc<dyn MetricsPort>,
-    alert_tx: mpsc::Sender<IdsAlert>,
+    alert_tx: mpsc::Sender<AlertEvent>,
     dns_cache: Option<Arc<dyn DnsCachePort>>,
     dns_cache_svc: Option<Arc<DnsCacheAppService>>,
     ips_service: Option<Arc<RwLock<IpsAppService>>>,
     dlp_service: Option<Arc<RwLock<DlpAppService>>>,
     ddos_service: Option<Arc<RwLock<DdosAppService>>>,
+    dns_blocklist_svc: Option<Arc<DnsBlocklistAppService>>,
 }
 
 impl EventDispatcher {
@@ -74,7 +79,7 @@ impl EventDispatcher {
         threatintel_service: Arc<RwLock<ThreatIntelAppService>>,
         audit_service: Arc<RwLock<AuditAppService>>,
         metrics: Arc<dyn MetricsPort>,
-        alert_tx: mpsc::Sender<IdsAlert>,
+        alert_tx: mpsc::Sender<AlertEvent>,
         dns_cache: Option<Arc<dyn DnsCachePort>>,
     ) -> Self {
         Self {
@@ -89,6 +94,7 @@ impl EventDispatcher {
             ips_service: None,
             dlp_service: None,
             ddos_service: None,
+            dns_blocklist_svc: None,
         }
     }
 
@@ -117,6 +123,13 @@ impl EventDispatcher {
     #[must_use]
     pub fn with_ddos_service(mut self, svc: Arc<RwLock<DdosAppService>>) -> Self {
         self.ddos_service = Some(svc);
+        self
+    }
+
+    /// Set the DNS blocklist service for evaluating DNS responses.
+    #[must_use]
+    pub fn with_dns_blocklist_svc(mut self, svc: Arc<DnsBlocklistAppService>) -> Self {
+        self.dns_blocklist_svc = Some(svc);
         self
     }
 
@@ -308,7 +321,7 @@ impl EventDispatcher {
             &detail,
         );
 
-        if self.alert_tx.try_send(alert).is_err() {
+        if self.alert_tx.try_send(AlertEvent::Ids(alert)).is_err() {
             self.metrics.record_event_dropped("alert_channel_full");
         }
 
@@ -413,7 +426,7 @@ impl EventDispatcher {
             &detail,
         );
 
-        if self.alert_tx.try_send(ids_alert).is_err() {
+        if self.alert_tx.try_send(AlertEvent::Ids(ids_alert)).is_err() {
             self.metrics.record_event_dropped("alert_channel_full");
         }
     }
@@ -495,7 +508,7 @@ impl EventDispatcher {
         }
     }
 
-    fn process_dns_event(&self, header: DnsEvent, _payload: &[u8]) {
+    fn process_dns_event(&self, header: DnsEvent, payload: &[u8]) {
         let direction = if header.direction == ebpf_common::dns::DNS_DIRECTION_RESPONSE {
             "response"
         } else {
@@ -509,6 +522,54 @@ impl EventDispatcher {
             direction,
             "DNS event received"
         );
+
+        // Only process responses (which contain resolved IPs)
+        if header.direction != ebpf_common::dns::DNS_DIRECTION_RESPONSE {
+            return;
+        }
+
+        let is_ipv6 = (header.flags & ebpf_common::event::FLAG_IPV6) != 0;
+        let src_ip = addr_to_ip(header.src_addr, is_ipv6);
+        let parsed =
+            match domain::dns::parser::parse_dns_packet(payload, src_ip, header.timestamp_ns) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::debug!(error = %e, "DNS packet parse error");
+                    return;
+                }
+            };
+
+        let domain::dns::entity::DnsPacket::Response(response) = parsed else {
+            return;
+        };
+
+        // Insert each answer record into DNS cache
+        if let Some(ref cache_svc) = self.dns_cache_svc {
+            for record in &response.answers {
+                if !record.resolved_ips.is_empty() {
+                    cache_svc.insert(
+                        record.domain.clone(),
+                        record.resolved_ips.clone(),
+                        u64::from(record.ttl),
+                        header.timestamp_ns,
+                    );
+                }
+            }
+        }
+
+        // Check DNS blocklist for each answered domain
+        if let Some(ref blocklist_svc) = self.dns_blocklist_svc {
+            for record in &response.answers {
+                if !record.resolved_ips.is_empty() {
+                    blocklist_svc.on_dns_response(
+                        &record.domain,
+                        &record.resolved_ips,
+                        record.ttl,
+                        header.timestamp_ns,
+                    );
+                }
+            }
+        }
     }
 
     async fn process_dlp_event(&self, event: &DlpEvent) {
@@ -544,6 +605,16 @@ impl EventDispatcher {
                     "DLP patterns matched in SSL traffic"
                 );
                 self.metrics.record_packet("dlp", "alert");
+
+                let patterns = svc.list_patterns();
+                for m in &matches {
+                    if let Some(pattern) = patterns.get(m.pattern_index) {
+                        let dlp_alert = DlpAlert::from_event(event, pattern);
+                        if self.alert_tx.try_send(AlertEvent::Dlp(dlp_alert)).is_err() {
+                            self.metrics.record_event_dropped("alert_channel_full");
+                        }
+                    }
+                }
             }
         }
     }
@@ -582,6 +653,28 @@ impl EventDispatcher {
                 dst_ip = %event.dst_ip(),
                 "DDoS attack state changed"
             );
+
+            // Find the most recent matching attack and send an alert
+            let svc = ddos_service.read().await;
+            if let Some(attack) = svc
+                .active_attacks()
+                .iter()
+                .rev()
+                .find(|a| a.attack_type == attack_type)
+            {
+                let alert = AlertEvent::Ddos {
+                    attack: attack.clone(),
+                    src_addr: event.src_addr,
+                    dst_addr: event.dst_addr,
+                    is_ipv6: event.is_ipv6(),
+                    src_port: event.src_port,
+                    dst_port: event.dst_port,
+                    protocol: event.protocol,
+                };
+                if self.alert_tx.try_send(alert).is_err() {
+                    self.metrics.record_event_dropped("alert_channel_full");
+                }
+            }
         }
 
         self.audit_service.read().await.record_security_decision(
@@ -766,7 +859,7 @@ mod tests {
     fn make_dispatcher(
         ids_service: Arc<RwLock<IdsAppService>>,
         metrics: Arc<TestMetrics>,
-        alert_tx: mpsc::Sender<IdsAlert>,
+        alert_tx: mpsc::Sender<AlertEvent>,
     ) -> EventDispatcher {
         EventDispatcher::new(
             ids_service,
@@ -779,11 +872,19 @@ mod tests {
         )
     }
 
+    /// Unwrap an `AlertEvent::Ids` variant for test assertions.
+    fn unwrap_ids_alert(event: AlertEvent) -> IdsAlert {
+        match event {
+            AlertEvent::Ids(a) => a,
+            _ => panic!("expected AlertEvent::Ids"),
+        }
+    }
+
     fn make_dispatcher_with_l7(
         ids_service: Arc<RwLock<IdsAppService>>,
         l7_service: Arc<RwLock<L7AppService>>,
         metrics: Arc<TestMetrics>,
-        alert_tx: mpsc::Sender<IdsAlert>,
+        alert_tx: mpsc::Sender<AlertEvent>,
     ) -> EventDispatcher {
         EventDispatcher::new(
             ids_service,
@@ -823,7 +924,7 @@ mod tests {
             .dispatch_event(make_event(EVENT_TYPE_IDS, 0))
             .await;
 
-        let alert = alert_rx.try_recv().unwrap();
+        let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
         assert_eq!(alert.rule_id.0, "ids-001");
         assert_eq!(alert.severity, Severity::High);
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
@@ -1216,7 +1317,7 @@ mod tests {
     fn make_dispatcher_with_dns(
         ids_service: Arc<RwLock<IdsAppService>>,
         metrics: Arc<TestMetrics>,
-        alert_tx: mpsc::Sender<IdsAlert>,
+        alert_tx: mpsc::Sender<AlertEvent>,
         dns_cache: Arc<dyn DnsCachePort>,
     ) -> EventDispatcher {
         EventDispatcher::new(
@@ -1254,7 +1355,7 @@ mod tests {
             .dispatch_event(make_event(EVENT_TYPE_IDS, 0))
             .await;
 
-        let alert = alert_rx.try_recv().unwrap();
+        let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
         assert_eq!(alert.rule_id.0, "ids-dom-1");
         assert_eq!(alert.matched_domain, Some("evil.com".to_string()));
     }
@@ -1300,7 +1401,7 @@ mod tests {
             .dispatch_event(make_event(EVENT_TYPE_IDS, 0))
             .await;
 
-        let alert = alert_rx.try_recv().unwrap();
+        let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
         assert_eq!(alert.rule_id.0, "ids-001");
         assert!(alert.matched_domain.is_none());
     }
@@ -1328,7 +1429,7 @@ mod tests {
         dispatcher
             .dispatch_event(make_event(EVENT_TYPE_IDS, 1))
             .await;
-        let alert = alert_rx.try_recv().unwrap();
+        let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
         assert_eq!(alert.rule_id.0, "ids-002");
     }
 }

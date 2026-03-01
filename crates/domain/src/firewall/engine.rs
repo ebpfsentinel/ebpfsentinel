@@ -84,6 +84,11 @@ impl FirewallEngine {
         &self.rules
     }
 
+    /// Return a mutable slice of all loaded rules.
+    pub fn rules_mut(&mut self) -> &mut [FirewallRule] {
+        &mut self.rules
+    }
+
     // ── Private helpers ────────────────────────────────────────────────
 
     fn sort_rules(&mut self) {

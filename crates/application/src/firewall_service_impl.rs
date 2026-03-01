@@ -124,6 +124,25 @@ impl FirewallAppService {
         Ok(())
     }
 
+    /// Apply a schedule: enable rules in the active set, disable scheduled rules not in the set.
+    /// Unscheduled rules (no `schedule` field) are never touched.
+    pub fn apply_schedule(&mut self, active_ids: &std::collections::HashSet<String>) {
+        let mut changed = false;
+        for rule in self.engine.rules_mut() {
+            if rule.schedule.is_some() {
+                let should_enable = active_ids.contains(&rule.id.0);
+                if rule.enabled != should_enable {
+                    rule.enabled = should_enable;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.sync_ebpf_maps();
+            self.update_metrics();
+        }
+    }
+
     /// Return a slice of all loaded rules (sorted by priority).
     pub fn list_rules(&self) -> &[FirewallRule] {
         self.engine.rules()

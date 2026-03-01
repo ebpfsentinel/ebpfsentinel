@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod alert_enrichment;
+pub mod alert_event;
 pub mod alert_pipeline;
 pub mod alias_service_impl;
 pub mod audit_service_impl;

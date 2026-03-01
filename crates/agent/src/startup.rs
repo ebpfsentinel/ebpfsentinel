@@ -48,7 +48,6 @@ use domain::dlp::engine::DlpEngine;
 use domain::firewall::engine::FirewallEngine;
 use domain::firewall::entity::FirewallRule;
 use domain::ids::engine::IdsEngine;
-use domain::ids::entity::IdsAlert;
 use domain::ips::engine::IpsEngine;
 use domain::l7::engine::L7Engine;
 use domain::ratelimit::engine::RateLimitEngine;
@@ -569,6 +568,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
 
     // ── 5b. Wire DNS intelligence and domain reputation services ────
     let mut dns_blocklist_ref: Option<Arc<DnsBlocklistAppService>> = None;
+    let mut dns_cache_svc_concrete: Option<Arc<DnsCacheAppService>> = None;
     let dns_cache_for_ids: Option<Arc<dyn ports::secondary::dns_cache_port::DnsCachePort>> =
         if config.dns.enabled {
             let cache_config = config.dns_cache_config();
@@ -576,6 +576,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
                 cache_config,
                 Arc::clone(&metrics) as Arc<dyn MetricsPort>,
             ));
+            dns_cache_svc_concrete = Some(Arc::clone(&dns_cache_svc));
 
             let blocklist_config = config.dns_blocklist_config().unwrap_or_else(|e| {
                 tracing::warn!("DNS blocklist config error, using defaults: {e}");
@@ -749,7 +750,8 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
 
     // ── 9. Create event + alert channels ──────────────────────────────
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
-    let (alert_tx, alert_rx) = mpsc::channel::<IdsAlert>(ALERT_CHANNEL_CAPACITY);
+    let (alert_tx, alert_rx) =
+        mpsc::channel::<application::alert_event::AlertEvent>(ALERT_CHANNEL_CAPACITY);
 
     // ── 10. Load eBPF programs (each with graceful degradation) ────
     let ebpf_dir = resolve_ebpf_program_dir(&config);
@@ -1106,6 +1108,17 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     .with_ips_service(Arc::clone(&ips_svc))
     .with_ddos_service(Arc::clone(&ddos_svc))
     .with_dlp_service(Arc::clone(&dlp_svc));
+    // Wire DNS services into the dispatcher for DNS response processing
+    let dispatcher = if let Some(ref svc) = dns_cache_svc_concrete {
+        dispatcher.with_dns_cache_svc(Arc::clone(svc))
+    } else {
+        dispatcher
+    };
+    let dispatcher = if let Some(ref svc) = dns_blocklist_ref {
+        dispatcher.with_dns_blocklist_svc(Arc::clone(svc))
+    } else {
+        dispatcher
+    };
     let dispatcher_cancel = cancel_token.clone();
     let dispatcher_handle = tokio::spawn(async move {
         dispatcher.run(event_rx, dispatcher_cancel).await;
@@ -1291,6 +1304,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         None
     } else {
         let sched_svc = Arc::clone(&schedule_svc);
+        let sched_fw_svc = Arc::clone(&firewall_svc);
         let sched_cancel = cancel_token.clone();
         info!(
             schedule_count = config.firewall.schedules.len(),
@@ -1311,10 +1325,38 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
                         "schedule change: active rule set updated"
                     );
                     tracing::debug!(?active_ids, "active scheduled rule IDs");
+                    sched_fw_svc.write().await.apply_schedule(active_ids);
                 }
             }
         }))
     };
+
+    // ── 11e. Spawn IPS/IDS cleanup task (every 60s) ──────────────────
+    {
+        let cleanup_ips = Arc::clone(&ips_svc);
+        let cleanup_ids = Arc::clone(&ids_svc);
+        let cleanup_cancel = cancel_token.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await; // skip first immediate tick
+            loop {
+                tokio::select! {
+                    () = cleanup_cancel.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
+                // IPS: remove expired blacklist entries
+                let actions = cleanup_ips.write().await.cleanup_expired();
+                if !actions.is_empty() {
+                    tracing::info!(
+                        expired_count = actions.len(),
+                        "IPS cleanup: removed expired blacklist entries"
+                    );
+                }
+                // IDS: remove expired threshold tracking entries
+                cleanup_ids.write().await.cleanup_expired_thresholds();
+            }
+        });
+    }
 
     // ── 12. Ready — wait for cancellation ───────────────────────────
     info!("agent ready, waiting for shutdown signal");

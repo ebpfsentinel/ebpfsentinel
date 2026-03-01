@@ -13,6 +13,7 @@ use ports::secondary::metrics_port::MetricsPort;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use crate::alert_event::AlertEvent;
 use crate::audit_service_impl::AuditAppService;
 
 /// Alert pipeline application service.
@@ -381,26 +382,30 @@ impl AlertPipeline {
         }
     }
 
-    /// Async run loop: consumes IDS alerts from the channel,
-    /// processes each one through the pipeline, and drains on cancellation.
-    pub async fn run(mut self, mut rx: mpsc::Receiver<IdsAlert>, cancel_token: CancellationToken) {
+    /// Async run loop: consumes alert events from the channel,
+    /// dispatches each one to the appropriate handler, and drains on cancellation.
+    pub async fn run(
+        mut self,
+        mut rx: mpsc::Receiver<AlertEvent>,
+        cancel_token: CancellationToken,
+    ) {
         let mut count: u64 = 0;
 
         loop {
             tokio::select! {
                 () = cancel_token.cancelled() => {
                     // Drain remaining alerts before exiting
-                    while let Ok(ids_alert) = rx.try_recv() {
+                    while let Ok(event) = rx.try_recv() {
                         count += 1;
-                        self.process_alert(&ids_alert).await;
+                        self.dispatch_alert(event).await;
                     }
                     break;
                 }
                 msg = rx.recv() => {
                     match msg {
-                        Some(ids_alert) => {
+                        Some(event) => {
                             count += 1;
-                            self.process_alert(&ids_alert).await;
+                            self.dispatch_alert(event).await;
                         }
                         None => break, // channel closed
                     }
@@ -409,6 +414,27 @@ impl AlertPipeline {
         }
 
         tracing::info!(total_alerts = count, "alert pipeline stopped");
+    }
+
+    async fn dispatch_alert(&mut self, event: AlertEvent) {
+        match event {
+            AlertEvent::Ids(ids_alert) => self.process_alert(&ids_alert).await,
+            AlertEvent::Dlp(dlp_alert) => self.process_dlp_alert(&dlp_alert).await,
+            AlertEvent::Ddos {
+                attack,
+                src_addr,
+                dst_addr,
+                is_ipv6,
+                src_port,
+                dst_port,
+                protocol,
+            } => {
+                self.process_ddos_alert(
+                    &attack, src_addr, dst_addr, is_ipv6, src_port, dst_port, protocol,
+                )
+                .await;
+            }
+        }
     }
 
     /// Hot-reload alert routes without resetting dedup/throttle state.
@@ -649,7 +675,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         // Send an alert before starting
-        tx.send(make_ids_alert("ids-001", Severity::High))
+        tx.send(AlertEvent::Ids(make_ids_alert("ids-001", Severity::High)))
             .await
             .unwrap();
 
@@ -666,7 +692,7 @@ mod tests {
         let metrics = Arc::new(TestMetrics::new());
         let pipeline = make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics));
 
-        let (tx, rx) = mpsc::channel(10);
+        let (tx, rx) = mpsc::channel::<AlertEvent>(10);
         let cancel = CancellationToken::new();
 
         // Drop sender to close channel
