@@ -98,6 +98,10 @@ Per-feature configuration examples are in [`config/examples/`](config/examples/)
 
 See [Compatibility](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/operations/compatibility.md) for the full matrix.
 
+## OSS vs Enterprise
+
+The open-source agent includes all security domains, APIs, CLI, authentication, and observability. Enterprise version are available, see [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for details.
+
 ## License
 
 GNU Affero General Public License v3.0 — see [LICENSE](../LICENSE).
