@@ -1,3 +1,12 @@
+# cargo-deny configuration — https://embarkstudios.github.io/cargo-deny/
+#
+# eBPF programs (crates/ebpf-programs/*) are excluded from the workspace
+# and therefore not checked by cargo deny. They require unsafe by nature
+# (raw memory access, BPF helpers).
+
+[graph]
+all-features = true
+
 [advisories]
 # Unmaintained crates: warn only for direct workspace dependencies
 unmaintained = "workspace"
@@ -28,3 +37,4 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+allow-git = []
