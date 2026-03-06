@@ -59,6 +59,7 @@ pub struct CreateRuleRequest {
 }
 
 #[derive(Serialize, ToSchema)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct RuleResponse {
     pub id: String,
     pub enabled: bool,
@@ -72,6 +73,47 @@ pub struct RuleResponse {
     pub scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vlan_id: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_port_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_port_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ct_states: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcp_flags: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icmp_type: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icmp_code: Option<u8>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub negate_src: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub negate_dst: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dscp_match: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dscp_mark: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_states: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_mac: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_mac: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub system: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_action: Option<String>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(v: &bool) -> bool {
+    !v
 }
 
 // ── Conversion helpers ──────────────────────────────────────────────
@@ -238,6 +280,70 @@ fn format_protocol(proto: Protocol) -> &'static str {
     }
 }
 
+fn format_conn_state(state: domain::firewall::entity::ConnState) -> String {
+    match state {
+        domain::firewall::entity::ConnState::New => "new".to_string(),
+        domain::firewall::entity::ConnState::Established => "established".to_string(),
+        domain::firewall::entity::ConnState::Related => "related".to_string(),
+        domain::firewall::entity::ConnState::Invalid => "invalid".to_string(),
+    }
+}
+
+fn format_tcp_flags(flags: domain::firewall::entity::TcpFlagsMatch) -> String {
+    use domain::firewall::entity::{
+        TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH, TCP_FLAG_RST, TCP_FLAG_SYN, TCP_FLAG_URG,
+    };
+    fn bits_to_str(bits: u8) -> String {
+        let mut s = String::new();
+        if bits & TCP_FLAG_FIN != 0 {
+            s.push('F');
+        }
+        if bits & TCP_FLAG_SYN != 0 {
+            s.push('S');
+        }
+        if bits & TCP_FLAG_RST != 0 {
+            s.push('R');
+        }
+        if bits & TCP_FLAG_PSH != 0 {
+            s.push('P');
+        }
+        if bits & TCP_FLAG_ACK != 0 {
+            s.push('A');
+        }
+        if bits & TCP_FLAG_URG != 0 {
+            s.push('U');
+        }
+        if s.is_empty() {
+            s.push('0');
+        }
+        s
+    }
+    format!(
+        "{}/{}",
+        bits_to_str(flags.match_bits),
+        bits_to_str(flags.mask_bits)
+    )
+}
+
+fn format_mac(mac: domain::firewall::entity::MacAddress) -> String {
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5]
+    )
+}
+
+fn format_route_action(ra: domain::firewall::entity::RouteAction) -> String {
+    match ra {
+        domain::firewall::entity::RouteAction::RouteTo { ifindex } => {
+            format!("route-to:{ifindex}")
+        }
+        domain::firewall::entity::RouteAction::ReplyTo => "reply-to".to_string(),
+        domain::firewall::entity::RouteAction::DupTo { ifindex } => {
+            format!("dup-to:{ifindex}")
+        }
+    }
+}
+
 fn format_scope(scope: &Scope) -> String {
     match scope {
         Scope::Global => "global".to_string(),
@@ -260,6 +366,27 @@ impl From<&FirewallRule> for RuleResponse {
             dst_port: rule.dst_port.map(format_port),
             scope: format_scope(&rule.scope),
             vlan_id: rule.vlan_id,
+            src_alias: rule.src_alias.clone(),
+            dst_alias: rule.dst_alias.clone(),
+            src_port_alias: rule.src_port_alias.clone(),
+            dst_port_alias: rule.dst_port_alias.clone(),
+            ct_states: rule
+                .ct_states
+                .as_ref()
+                .map(|s| s.iter().copied().map(format_conn_state).collect()),
+            tcp_flags: rule.tcp_flags.map(format_tcp_flags),
+            icmp_type: rule.icmp_type,
+            icmp_code: rule.icmp_code,
+            negate_src: rule.negate_src,
+            negate_dst: rule.negate_dst,
+            dscp_match: rule.dscp_match,
+            dscp_mark: rule.dscp_mark,
+            max_states: rule.max_states,
+            src_mac: rule.src_mac.map(format_mac),
+            dst_mac: rule.dst_mac.map(format_mac),
+            schedule: rule.schedule.clone(),
+            system: rule.system,
+            route_action: rule.route_action.map(format_route_action),
         }
     }
 }

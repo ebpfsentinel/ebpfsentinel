@@ -3,19 +3,26 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use super::error::ApiError;
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct AliasStatusResponse {
     pub alias_count: usize,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────
 
+/// `GET /api/v1/aliases/status` — alias service status.
+#[utoipa::path(
+    get, path = "/api/v1/aliases/status",
+    tag = "Aliases",
+    responses((status = 200, description = "Alias status", body = AliasStatusResponse))
+)]
 pub async fn alias_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AliasStatusResponse>, ApiError> {

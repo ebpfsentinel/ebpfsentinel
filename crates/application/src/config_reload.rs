@@ -7,6 +7,7 @@ use domain::audit::rule_change::ChangeActor;
 use domain::common::entity::DomainMode;
 use domain::conntrack::entity::ConnTrackSettings;
 use domain::ddos::entity::DdosPolicy;
+use domain::dlp::entity::DlpPattern;
 use domain::firewall::entity::FirewallRule;
 use domain::ids::entity::{IdsRule, SamplingMode};
 use domain::ips::entity::{IpsPolicy, WhitelistEntry};
@@ -20,6 +21,7 @@ use crate::alias_service_impl::AliasAppService;
 use crate::audit_service_impl::AuditAppService;
 use crate::conntrack_service_impl::ConnTrackAppService;
 use crate::ddos_service_impl::DdosAppService;
+use crate::dlp_service_impl::DlpAppService;
 use crate::firewall_service_impl::FirewallAppService;
 use crate::ids_service_impl::IdsAppService;
 use crate::ips_service_impl::IpsAppService;
@@ -28,6 +30,7 @@ use crate::lb_service_impl::LbAppService;
 use crate::nat_service_impl::NatAppService;
 use crate::ratelimit_service_impl::RateLimitAppService;
 use crate::routing_service_impl::RoutingAppService;
+use crate::schedule_service_impl::ScheduleService;
 use crate::threatintel_service_impl::ThreatIntelAppService;
 use crate::zone_service_impl::ZoneAppService;
 
@@ -45,11 +48,13 @@ pub struct ConfigReloadService {
     threatintel_service: Arc<RwLock<ThreatIntelAppService>>,
     audit_service: Arc<RwLock<AuditAppService>>,
     conntrack_service: Option<Arc<RwLock<ConnTrackAppService>>>,
+    dlp_service: Option<Arc<RwLock<DlpAppService>>>,
     nat_service: Option<Arc<RwLock<NatAppService>>>,
     alias_service: Option<Arc<RwLock<AliasAppService>>>,
     routing_service: Option<Arc<RwLock<RoutingAppService>>>,
     loadbalancer_service: Option<Arc<RwLock<LbAppService>>>,
     zone_service: Option<Arc<RwLock<ZoneAppService>>>,
+    schedule_service: Option<Arc<RwLock<ScheduleService>>>,
     metrics: Arc<dyn MetricsPort>,
     reload_mutex: Mutex<()>,
 }
@@ -77,11 +82,13 @@ impl ConfigReloadService {
             threatintel_service,
             audit_service,
             conntrack_service: None,
+            dlp_service: None,
             nat_service: None,
             alias_service: None,
             routing_service: None,
             loadbalancer_service: None,
             zone_service: None,
+            schedule_service: None,
             metrics,
             reload_mutex: Mutex::new(()),
         }
@@ -90,6 +97,11 @@ impl ConfigReloadService {
     /// Set the conntrack service for reload integration.
     pub fn set_conntrack_service(&mut self, svc: Arc<RwLock<ConnTrackAppService>>) {
         self.conntrack_service = Some(svc);
+    }
+
+    /// Set the DLP service for reload integration.
+    pub fn set_dlp_service(&mut self, svc: Arc<RwLock<DlpAppService>>) {
+        self.dlp_service = Some(svc);
     }
 
     /// Set the NAT service for reload integration.
@@ -117,6 +129,31 @@ impl ConfigReloadService {
         self.zone_service = Some(svc);
     }
 
+    /// Set the schedule service for reload integration.
+    pub fn set_schedule_service(&mut self, svc: Arc<RwLock<ScheduleService>>) {
+        self.schedule_service = Some(svc);
+    }
+
+    /// Reload schedule definitions and rule-schedule mappings.
+    pub async fn reload_schedules(
+        &self,
+        schedules: std::collections::HashMap<String, crate::schedule_service_impl::Schedule>,
+        rule_schedule: crate::schedule_service_impl::RuleScheduleMap,
+    ) -> Result<(), anyhow::Error> {
+        let Some(ref sched_svc) = self.schedule_service else {
+            return Ok(());
+        };
+        let _guard = self.reload_mutex.lock().await;
+
+        let mut svc = sched_svc.write().await;
+        let count = schedules.len();
+        svc.reload(schedules, rule_schedule);
+
+        self.metrics.record_config_reload("schedules", "success");
+        tracing::info!(count, "schedule configuration reloaded");
+        Ok(())
+    }
+
     /// Reload zone configuration.
     pub async fn reload_zones(
         &self,
@@ -141,6 +178,39 @@ impl ConfigReloadService {
             enabled,
             count = svc.zone_count(),
             "zone configuration reloaded"
+        );
+        Ok(())
+    }
+
+    /// Reload DLP patterns.
+    pub async fn reload_dlp(
+        &self,
+        patterns: Vec<DlpPattern>,
+        mode: DomainMode,
+        enabled: bool,
+    ) -> Result<(), anyhow::Error> {
+        let Some(ref dlp_svc) = self.dlp_service else {
+            return Ok(());
+        };
+        let _guard = self.reload_mutex.lock().await;
+
+        let mut svc = dlp_svc.write().await;
+        svc.set_enabled(enabled);
+        svc.set_mode(mode);
+
+        if enabled {
+            svc.reload_patterns(patterns)
+                .map_err(|e| anyhow::anyhow!("DLP reload failed: {e}"))?;
+        } else {
+            svc.reload_patterns(Vec::new())
+                .map_err(|e| anyhow::anyhow!("DLP reload failed: {e}"))?;
+        }
+
+        self.metrics.record_config_reload("dlp", "success");
+        tracing::info!(
+            enabled,
+            count = svc.pattern_count(),
+            "DLP configuration reloaded"
         );
         Ok(())
     }

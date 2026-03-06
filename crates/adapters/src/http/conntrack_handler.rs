@@ -5,19 +5,20 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::error::ApiError;
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ConnTrackStatusResponse {
     pub enabled: bool,
     pub connection_count: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ConnectionResponse {
     pub src_ip: String,
     pub dst_ip: String,
@@ -45,6 +46,12 @@ fn default_limit() -> usize {
 
 // ── Handlers ──────────────────────────────────────────────────────
 
+/// `GET /api/v1/conntrack/status` — connection tracking status.
+#[utoipa::path(
+    get, path = "/api/v1/conntrack/status",
+    tag = "ConnTrack",
+    responses((status = 200, description = "Conntrack status", body = ConnTrackStatusResponse))
+)]
 pub async fn conntrack_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ConnTrackStatusResponse>, ApiError> {
@@ -60,6 +67,12 @@ pub async fn conntrack_status(
     }))
 }
 
+/// `GET /api/v1/conntrack/connections` — list tracked connections.
+#[utoipa::path(
+    get, path = "/api/v1/conntrack/connections",
+    tag = "ConnTrack",
+    responses((status = 200, description = "Connection list", body = Vec<ConnectionResponse>))
+)]
 pub async fn list_connections(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListQuery>,
@@ -92,6 +105,12 @@ pub async fn list_connections(
     Ok(Json(result))
 }
 
+/// `POST /api/v1/conntrack/flush` — flush all tracked connections.
+#[utoipa::path(
+    post, path = "/api/v1/conntrack/flush",
+    tag = "ConnTrack",
+    responses((status = 200, description = "Connections flushed"))
+)]
 pub async fn flush_connections(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, ApiError> {

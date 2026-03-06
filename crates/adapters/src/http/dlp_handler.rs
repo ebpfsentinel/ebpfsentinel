@@ -3,20 +3,21 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use super::error::ApiError;
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct DlpStatusResponse {
     pub enabled: bool,
     pub mode: String,
     pub pattern_count: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct DlpPatternResponse {
     pub id: String,
     pub name: String,
@@ -28,6 +29,12 @@ pub struct DlpPatternResponse {
 
 // ── Handlers ──────────────────────────────────────────────────────
 
+/// `GET /api/v1/dlp/status` — DLP status.
+#[utoipa::path(
+    get, path = "/api/v1/dlp/status",
+    tag = "DLP",
+    responses((status = 200, description = "DLP status", body = DlpStatusResponse))
+)]
 pub async fn dlp_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<DlpStatusResponse>, ApiError> {
@@ -43,6 +50,12 @@ pub async fn dlp_status(
     }))
 }
 
+/// `GET /api/v1/dlp/patterns` — list DLP patterns.
+#[utoipa::path(
+    get, path = "/api/v1/dlp/patterns",
+    tag = "DLP",
+    responses((status = 200, description = "DLP patterns", body = Vec<DlpPatternResponse>))
+)]
 pub async fn list_dlp_patterns(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<DlpPatternResponse>>, ApiError> {

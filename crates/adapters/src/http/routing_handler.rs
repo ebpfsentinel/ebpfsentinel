@@ -3,19 +3,20 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use super::error::ApiError;
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RoutingStatusResponse {
     pub enabled: bool,
     pub gateway_count: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct GatewayResponse {
     pub id: u8,
     pub name: String,
@@ -28,6 +29,12 @@ pub struct GatewayResponse {
 
 // ── Handlers ──────────────────────────────────────────────────────
 
+/// `GET /api/v1/routing/status` — routing status.
+#[utoipa::path(
+    get, path = "/api/v1/routing/status",
+    tag = "Routing",
+    responses((status = 200, description = "Routing status", body = RoutingStatusResponse))
+)]
 pub async fn routing_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<RoutingStatusResponse>, ApiError> {
@@ -42,6 +49,12 @@ pub async fn routing_status(
     }))
 }
 
+/// `GET /api/v1/routing/gateways` — list routing gateways.
+#[utoipa::path(
+    get, path = "/api/v1/routing/gateways",
+    tag = "Routing",
+    responses((status = 200, description = "Gateway list", body = Vec<GatewayResponse>))
+)]
 pub async fn list_gateways(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<GatewayResponse>>, ApiError> {

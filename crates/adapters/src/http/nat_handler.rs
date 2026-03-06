@@ -3,19 +3,20 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use super::error::ApiError;
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct NatStatusResponse {
     pub enabled: bool,
     pub rule_count: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct NatRuleResponse {
     pub id: String,
     pub nat_type: String,
@@ -26,6 +27,12 @@ pub struct NatRuleResponse {
 
 // ── Handlers ──────────────────────────────────────────────────────
 
+/// `GET /api/v1/nat/status` — NAT status.
+#[utoipa::path(
+    get, path = "/api/v1/nat/status",
+    tag = "NAT",
+    responses((status = 200, description = "NAT status", body = NatStatusResponse))
+)]
 pub async fn nat_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<NatStatusResponse>, ApiError> {
@@ -40,6 +47,12 @@ pub async fn nat_status(
     }))
 }
 
+/// `GET /api/v1/nat/rules` — list NAT rules.
+#[utoipa::path(
+    get, path = "/api/v1/nat/rules",
+    tag = "NAT",
+    responses((status = 200, description = "NAT rules", body = Vec<NatRuleResponse>))
+)]
 pub async fn list_nat_rules(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<NatRuleResponse>>, ApiError> {

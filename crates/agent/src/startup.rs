@@ -751,11 +751,13 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
     );
     reload_service.set_conntrack_service(Arc::clone(&conntrack_svc));
+    reload_service.set_dlp_service(Arc::clone(&dlp_svc));
     reload_service.set_nat_service(Arc::clone(&nat_svc));
     reload_service.set_alias_service(Arc::clone(&alias_svc));
     reload_service.set_routing_service(Arc::clone(&routing_svc));
     reload_service.set_loadbalancer_service(Arc::clone(&lb_svc));
     reload_service.set_zone_service(Arc::clone(&zone_svc));
+    reload_service.set_schedule_service(Arc::clone(&schedule_svc));
     let reload_service = Arc::new(reload_service);
     // Clone auth provider for gRPC from the app state
     let grpc_auth: Option<Arc<dyn AuthProvider>> = app_state.auth_provider.clone();

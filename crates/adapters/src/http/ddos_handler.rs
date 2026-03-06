@@ -11,15 +11,16 @@ use domain::ddos::entity::{
     DdosAttackType, DdosMitigationAction, DdosMitigationStatus, DdosPolicy,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-use super::error::ApiError;
+use super::error::{ApiError, ErrorBody};
 use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 use super::validation::{MAX_ID_LENGTH, MAX_SHORT_STRING_LENGTH, validate_string_length};
 
 // ── Response DTOs ─────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct DdosStatusResponse {
     pub enabled: bool,
     pub active_attacks: usize,
@@ -27,7 +28,7 @@ pub struct DdosStatusResponse {
     pub policy_count: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct DdosAttackResponse {
     pub id: String,
     pub attack_type: String,
@@ -39,7 +40,7 @@ pub struct DdosAttackResponse {
     pub source_count: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct DdosPolicyResponse {
     pub id: String,
     pub attack_type: String,
@@ -64,7 +65,7 @@ impl DdosPolicyResponse {
 
 // ── Request DTOs ──────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateDdosPolicyRequest {
     pub id: String,
     pub attack_type: String,
@@ -98,6 +99,12 @@ fn default_limit() -> usize {
 
 // ── Handlers ──────────────────────────────────────────────────────
 
+/// `GET /api/v1/ddos/status` — `DDoS` protection status.
+#[utoipa::path(
+    get, path = "/api/v1/ddos/status",
+    tag = "DDoS",
+    responses((status = 200, description = "DDoS status", body = DdosStatusResponse))
+)]
 pub async fn ddos_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<DdosStatusResponse>, ApiError> {
@@ -114,6 +121,12 @@ pub async fn ddos_status(
     }))
 }
 
+/// `GET /api/v1/ddos/attacks` — list active `DDoS` attacks.
+#[utoipa::path(
+    get, path = "/api/v1/ddos/attacks",
+    tag = "DDoS",
+    responses((status = 200, description = "Active attacks", body = Vec<DdosAttackResponse>))
+)]
 pub async fn ddos_attacks(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<DdosAttackResponse>>, ApiError> {
@@ -139,6 +152,12 @@ pub async fn ddos_attacks(
     Ok(Json(attacks))
 }
 
+/// `GET /api/v1/ddos/attacks/history` — attack history.
+#[utoipa::path(
+    get, path = "/api/v1/ddos/attacks/history",
+    tag = "DDoS",
+    responses((status = 200, description = "Attack history", body = Vec<DdosAttackResponse>))
+)]
 pub async fn ddos_history(
     State(state): State<Arc<AppState>>,
     Query(query): Query<HistoryQuery>,
@@ -165,6 +184,12 @@ pub async fn ddos_history(
     Ok(Json(attacks))
 }
 
+/// `GET /api/v1/ddos/policies` — list `DDoS` policies.
+#[utoipa::path(
+    get, path = "/api/v1/ddos/policies",
+    tag = "DDoS",
+    responses((status = 200, description = "DDoS policies", body = Vec<DdosPolicyResponse>))
+)]
 pub async fn list_ddos_policies(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<DdosPolicyResponse>>, ApiError> {
@@ -181,6 +206,16 @@ pub async fn list_ddos_policies(
     Ok(Json(policies))
 }
 
+/// `POST /api/v1/ddos/policies` — create a `DDoS` policy.
+#[utoipa::path(
+    post, path = "/api/v1/ddos/policies",
+    tag = "DDoS",
+    request_body = CreateDdosPolicyRequest,
+    responses(
+        (status = 201, description = "Policy created", body = DdosPolicyResponse),
+        (status = 400, description = "Validation error", body = ErrorBody),
+    )
+)]
 pub async fn create_ddos_policy(
     State(state): State<Arc<AppState>>,
     claims: Option<Extension<JwtClaims>>,
@@ -219,6 +254,16 @@ pub async fn create_ddos_policy(
     ))
 }
 
+/// `DELETE /api/v1/ddos/policies/{id}` — delete a `DDoS` policy.
+#[utoipa::path(
+    delete, path = "/api/v1/ddos/policies/{id}",
+    tag = "DDoS",
+    params(("id" = String, Path, description = "Policy identifier")),
+    responses(
+        (status = 204, description = "Policy deleted"),
+        (status = 404, description = "Policy not found", body = ErrorBody),
+    )
+)]
 pub async fn delete_ddos_policy(
     State(state): State<Arc<AppState>>,
     claims: Option<Extension<JwtClaims>>,

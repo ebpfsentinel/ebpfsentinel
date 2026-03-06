@@ -197,6 +197,52 @@ async fn perform_reload(
         tracing::warn!(error = %e, "firewall config reload failed at application level");
     }
 
+    // Phase 3½: Schedule reload
+    {
+        use application::schedule_service_impl::{
+            Schedule, ScheduleEntry, parse_day, parse_time_range,
+        };
+
+        let mut schedules = std::collections::HashMap::new();
+        let mut rule_schedule = std::collections::HashMap::new();
+
+        for (id, sched_cfg) in &config.firewall.schedules {
+            let entries: Vec<ScheduleEntry> = sched_cfg
+                .entries
+                .iter()
+                .filter_map(|e| {
+                    let days: Vec<_> = e.days.iter().filter_map(|d| parse_day(d)).collect();
+                    let (start, end) = parse_time_range(&e.time)?;
+                    Some(ScheduleEntry {
+                        days,
+                        start_minutes: start,
+                        end_minutes: end,
+                    })
+                })
+                .collect();
+            schedules.insert(
+                id.clone(),
+                Schedule {
+                    id: id.clone(),
+                    entries,
+                },
+            );
+        }
+
+        for rule_cfg in &config.firewall.rules {
+            if let Some(ref sched_id) = rule_cfg.schedule {
+                rule_schedule.insert(rule_cfg.id.clone(), sched_id.clone());
+            }
+        }
+
+        if let Err(e) = reload_service
+            .reload_schedules(schedules, rule_schedule)
+            .await
+        {
+            tracing::warn!(error = %e, "schedule config reload failed at application level");
+        }
+    }
+
     // Phase 4: IDS reload
     let ids_rules = match config.ids_rules() {
         Ok(r) => r,
@@ -280,6 +326,28 @@ async fn perform_reload(
         .await
     {
         tracing::warn!(error = %e, "DDoS config reload failed at application level");
+    }
+
+    // Phase 6b½: DLP reload
+    let dlp_patterns = match config.dlp_patterns() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid DLP patterns");
+            return;
+        }
+    };
+    let dlp_mode = match config.dlp_mode() {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid DLP mode");
+            return;
+        }
+    };
+    if let Err(e) = reload_service
+        .reload_dlp(dlp_patterns, dlp_mode, config.dlp.enabled)
+        .await
+    {
+        tracing::warn!(error = %e, "DLP config reload failed at application level");
     }
 
     // Phase 6c: ConnTrack reload

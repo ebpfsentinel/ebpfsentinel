@@ -8,21 +8,22 @@ use axum::response::IntoResponse;
 use domain::auth::entity::JwtClaims;
 use domain::loadbalancer::entity::{LbAlgorithm, LbBackend, LbProtocol, LbService};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-use super::error::ApiError;
+use super::error::{ApiError, ErrorBody};
 use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 use super::validation::{MAX_ID_LENGTH, MAX_SHORT_STRING_LENGTH, validate_string_length};
 
 // ── Response DTOs ─────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct LbStatusResponse {
     pub enabled: bool,
     pub service_count: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct LbServiceResponse {
     pub id: String,
     pub name: String,
@@ -47,7 +48,7 @@ impl LbServiceResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct LbServiceDetailResponse {
     pub id: String,
     pub name: String,
@@ -58,7 +59,7 @@ pub struct LbServiceDetailResponse {
     pub backends: Vec<LbBackendResponse>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct LbBackendResponse {
     pub id: String,
     pub addr: String,
@@ -71,7 +72,7 @@ pub struct LbBackendResponse {
 
 // ── Request DTOs ──────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateLbServiceRequest {
     pub id: String,
     pub name: String,
@@ -84,7 +85,7 @@ pub struct CreateLbServiceRequest {
     pub enabled: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateLbBackendRequest {
     pub id: String,
     pub addr: String,
@@ -107,6 +108,12 @@ fn default_enabled() -> bool {
 
 // ── Handlers ──────────────────────────────────────────────────────
 
+/// `GET /api/v1/lb/status` — load balancer status.
+#[utoipa::path(
+    get, path = "/api/v1/lb/status",
+    tag = "Load Balancer",
+    responses((status = 200, description = "LB status", body = LbStatusResponse))
+)]
 pub async fn lb_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<LbStatusResponse>, ApiError> {
@@ -124,6 +131,12 @@ pub async fn lb_status(
     }))
 }
 
+/// `GET /api/v1/lb/services` — list LB services.
+#[utoipa::path(
+    get, path = "/api/v1/lb/services",
+    tag = "Load Balancer",
+    responses((status = 200, description = "LB services", body = Vec<LbServiceResponse>))
+)]
 pub async fn list_lb_services(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<LbServiceResponse>>, ApiError> {
@@ -143,6 +156,16 @@ pub async fn list_lb_services(
     Ok(Json(services))
 }
 
+/// `GET /api/v1/lb/services/{id}` — get LB service detail.
+#[utoipa::path(
+    get, path = "/api/v1/lb/services/{id}",
+    tag = "Load Balancer",
+    params(("id" = String, Path, description = "Service identifier")),
+    responses(
+        (status = 200, description = "Service detail", body = LbServiceDetailResponse),
+        (status = 404, description = "Not found", body = ErrorBody),
+    )
+)]
 pub async fn get_lb_service(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -203,6 +226,16 @@ pub async fn get_lb_service(
     }))
 }
 
+/// `POST /api/v1/lb/services` — create an LB service.
+#[utoipa::path(
+    post, path = "/api/v1/lb/services",
+    tag = "Load Balancer",
+    request_body = CreateLbServiceRequest,
+    responses(
+        (status = 201, description = "Service created", body = LbServiceResponse),
+        (status = 400, description = "Validation error", body = ErrorBody),
+    )
+)]
 pub async fn create_lb_service(
     State(state): State<Arc<AppState>>,
     claims: Option<Extension<JwtClaims>>,
@@ -244,6 +277,16 @@ pub async fn create_lb_service(
     ))
 }
 
+/// `DELETE /api/v1/lb/services/{id}` — delete an LB service.
+#[utoipa::path(
+    delete, path = "/api/v1/lb/services/{id}",
+    tag = "Load Balancer",
+    params(("id" = String, Path, description = "Service identifier")),
+    responses(
+        (status = 204, description = "Service deleted"),
+        (status = 404, description = "Not found", body = ErrorBody),
+    )
+)]
 pub async fn delete_lb_service(
     State(state): State<Arc<AppState>>,
     claims: Option<Extension<JwtClaims>>,

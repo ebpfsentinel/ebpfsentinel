@@ -23,12 +23,13 @@
 #   enabled  — Administrative enable flag (default: true)
 #
 # Fields (LbHealthCheckConfig):
-#   target             — Probe target address
-#   protocol           — "icmp" or "tcp" (default: "tcp")
-#   interval_secs      — Probe interval in seconds (default: 10)
-#   timeout_secs       — Probe timeout in seconds (default: 5)
-#   failure_threshold  — Failures before marking unhealthy (default: 3)
-#   recovery_threshold — Successes before marking healthy (default: 2)
+#   protocol              — "icmp" or "tcp" (default: "tcp")
+#   interval_secs         — Probe interval in seconds (default: 10)
+#   timeout_secs          — Probe timeout in seconds (default: 5)
+#   unhealthy_threshold   — Failures before marking unhealthy (default: 3)
+#                           (alias: failure_threshold)
+#   healthy_threshold     — Successes before marking healthy (default: 2)
+#                           (alias: recovery_threshold)
 #
 # Usage:
 #   sudo ebpfsentinel-agent --config config/examples/loadbalancer.yaml
@@ -68,12 +69,11 @@ loadbalancer:
           weight: 2
           enabled: true
       health_check:
-        target: "10.0.1.10"
         protocol: tcp
         interval_secs: 10
         timeout_secs: 5
-        failure_threshold: 3
-        recovery_threshold: 2
+        unhealthy_threshold: 3
+        healthy_threshold: 2
 
     # DNS load balancer — UDP round-robin
     - id: lb-dns
@@ -113,12 +113,11 @@ loadbalancer:
           port: 5432
           weight: 1
       health_check:
-        target: "10.0.3.10"
         protocol: tcp
         interval_secs: 5
         timeout_secs: 3
-        failure_threshold: 2
-        recovery_threshold: 2
+        unhealthy_threshold: 2
+        healthy_threshold: 2
 
 # ── Firewall (companion rules) ─────────────────────────────────────
 

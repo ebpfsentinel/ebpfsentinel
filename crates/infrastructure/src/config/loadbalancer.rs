@@ -73,11 +73,11 @@ pub struct LbHealthCheckConfig {
     pub timeout_secs: u64,
 
     /// Failures before marking unhealthy.
-    #[serde(default = "default_hc_threshold")]
+    #[serde(default = "default_hc_threshold", alias = "failure_threshold")]
     pub unhealthy_threshold: u32,
 
     /// Successes before marking healthy again.
-    #[serde(default = "default_hc_threshold")]
+    #[serde(default = "default_hc_threshold", alias = "recovery_threshold")]
     pub healthy_threshold: u32,
 }
 
