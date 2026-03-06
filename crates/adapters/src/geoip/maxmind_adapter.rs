@@ -152,10 +152,9 @@ impl MaxMindGeoIpAdapter {
         let opts = WithinOptions::default().skip_empty_values();
 
         // Iterate all IPv4 networks
-        if let Ok(iter) = reader.within(
-            ipnetwork::IpNetwork::V4("0.0.0.0/0".parse().unwrap()),
-            opts,
-        ) {
+        if let Ok(iter) =
+            reader.within(ipnetwork::IpNetwork::V4("0.0.0.0/0".parse().unwrap()), opts)
+        {
             for lookup_result in iter.flatten() {
                 if let Ok(Some(city)) = lookup_result.decode::<maxminddb::geoip2::City>()
                     && let Some(iso) = city.country.iso_code
@@ -172,10 +171,7 @@ impl MaxMindGeoIpAdapter {
         }
 
         // Iterate all IPv6 networks
-        if let Ok(iter) = reader.within(
-            ipnetwork::IpNetwork::V6("::/0".parse().unwrap()),
-            opts,
-        ) {
+        if let Ok(iter) = reader.within(ipnetwork::IpNetwork::V6("::/0".parse().unwrap()), opts) {
             for lookup_result in iter.flatten() {
                 if let Ok(Some(city)) = lookup_result.decode::<maxminddb::geoip2::City>()
                     && let Some(iso) = city.country.iso_code
