@@ -20,6 +20,7 @@ use application::nat_service_impl::NatAppService;
 use application::ratelimit_service_impl::RateLimitAppService;
 use application::routing_service_impl::RoutingAppService;
 use application::threatintel_service_impl::ThreatIntelAppService;
+use application::zone_service_impl::ZoneAppService;
 use infrastructure::config::AgentConfig;
 use infrastructure::metrics::AgentMetrics;
 use ports::secondary::alert_store::AlertStore;
@@ -47,6 +48,7 @@ pub struct AppState {
     pub nat_service: Option<Arc<RwLock<NatAppService>>>,
     pub alias_service: Option<Arc<RwLock<AliasAppService>>>,
     pub routing_service: Option<Arc<RwLock<RoutingAppService>>>,
+    pub zone_service: Option<Arc<RwLock<ZoneAppService>>>,
     pub loadbalancer_service: Option<Arc<RwLock<LbAppService>>>,
     pub dns_cache_service: Option<Arc<DnsCacheAppService>>,
     pub dns_blocklist_service: Option<Arc<DnsBlocklistAppService>>,
@@ -92,6 +94,7 @@ impl AppState {
             nat_service: None,
             alias_service: None,
             routing_service: None,
+            zone_service: None,
             loadbalancer_service: None,
             dns_cache_service: None,
             dns_blocklist_service: None,
@@ -151,6 +154,13 @@ impl AppState {
     #[must_use]
     pub fn with_routing_service(mut self, svc: Arc<RwLock<RoutingAppService>>) -> Self {
         self.routing_service = Some(svc);
+        self
+    }
+
+    /// Attach a zone service.
+    #[must_use]
+    pub fn with_zone_service(mut self, svc: Arc<RwLock<ZoneAppService>>) -> Self {
+        self.zone_service = Some(svc);
         self
     }
 

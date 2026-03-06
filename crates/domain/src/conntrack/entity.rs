@@ -181,7 +181,9 @@ impl ConnTrackSettings {
             enabled: u8::from(self.enabled),
             _pad: [0; 3],
             max_src_states: self.max_src_states,
-            tcp_established_timeout_ns: self.tcp_established_timeout_secs.saturating_mul(1_000_000_000),
+            tcp_established_timeout_ns: self
+                .tcp_established_timeout_secs
+                .saturating_mul(1_000_000_000),
             tcp_syn_timeout_ns: self.tcp_syn_timeout_secs.saturating_mul(1_000_000_000),
             tcp_fin_timeout_ns: self.tcp_fin_timeout_secs.saturating_mul(1_000_000_000),
             udp_timeout_ns: self.udp_timeout_secs.saturating_mul(1_000_000_000),

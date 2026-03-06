@@ -49,6 +49,7 @@ use super::ratelimit_handler::{
 use super::routing_handler::{list_gateways, routing_status};
 use super::state::AppState;
 use super::threatintel_handler::{list_feeds, list_iocs, threatintel_status};
+use super::zone_handler::{list_zone_policies, list_zones, zone_status};
 
 /// Build the main Axum router with all REST API routes.
 ///
@@ -127,7 +128,10 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
             .route("/api/v1/routing/gateways", get(list_gateways))
             .route("/api/v1/lb/status", get(lb_status))
             .route("/api/v1/lb/services", get(list_lb_services))
-            .route("/api/v1/lb/services/{id}", get(get_lb_service));
+            .route("/api/v1/lb/services/{id}", get(get_lb_service))
+            .route("/api/v1/zones/status", get(zone_status))
+            .route("/api/v1/zones", get(list_zones))
+            .route("/api/v1/zones/policies", get(list_zone_policies));
 
         // Write routes (rate limited: 60 req/min per IP)
         let write_routes = Router::new()

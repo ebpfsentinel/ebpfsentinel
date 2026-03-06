@@ -29,6 +29,7 @@ use crate::nat_service_impl::NatAppService;
 use crate::ratelimit_service_impl::RateLimitAppService;
 use crate::routing_service_impl::RoutingAppService;
 use crate::threatintel_service_impl::ThreatIntelAppService;
+use crate::zone_service_impl::ZoneAppService;
 
 /// Application-level service for hot-reloading configuration.
 ///
@@ -48,6 +49,7 @@ pub struct ConfigReloadService {
     alias_service: Option<Arc<RwLock<AliasAppService>>>,
     routing_service: Option<Arc<RwLock<RoutingAppService>>>,
     loadbalancer_service: Option<Arc<RwLock<LbAppService>>>,
+    zone_service: Option<Arc<RwLock<ZoneAppService>>>,
     metrics: Arc<dyn MetricsPort>,
     reload_mutex: Mutex<()>,
 }
@@ -79,6 +81,7 @@ impl ConfigReloadService {
             alias_service: None,
             routing_service: None,
             loadbalancer_service: None,
+            zone_service: None,
             metrics,
             reload_mutex: Mutex::new(()),
         }
@@ -107,6 +110,39 @@ impl ConfigReloadService {
     /// Set the load balancer service for reload integration.
     pub fn set_loadbalancer_service(&mut self, svc: Arc<RwLock<LbAppService>>) {
         self.loadbalancer_service = Some(svc);
+    }
+
+    /// Set the zone service for reload integration.
+    pub fn set_zone_service(&mut self, svc: Arc<RwLock<ZoneAppService>>) {
+        self.zone_service = Some(svc);
+    }
+
+    /// Reload zone configuration.
+    pub async fn reload_zones(
+        &self,
+        zone_config: domain::zone::entity::ZoneConfig,
+        enabled: bool,
+    ) -> Result<(), anyhow::Error> {
+        let Some(ref zone_svc) = self.zone_service else {
+            return Ok(());
+        };
+        let _guard = self.reload_mutex.lock().await;
+
+        let mut svc = zone_svc.write().await;
+        svc.set_enabled(enabled);
+
+        if enabled {
+            svc.reload(zone_config)
+                .map_err(|e| anyhow::anyhow!("zone reload failed: {e}"))?;
+        }
+
+        self.metrics.record_config_reload("zones", "success");
+        tracing::info!(
+            enabled,
+            count = svc.zone_count(),
+            "zone configuration reloaded"
+        );
+        Ok(())
     }
 
     /// Reload load balancer services.

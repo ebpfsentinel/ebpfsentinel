@@ -41,6 +41,7 @@ use application::retry::RetryConfig;
 use application::routing_service_impl::RoutingAppService;
 use application::schedule_service_impl::ScheduleService;
 use application::threatintel_service_impl::ThreatIntelAppService;
+use application::zone_service_impl::ZoneAppService;
 use domain::alert::circuit_breaker::CircuitBreaker;
 use domain::alert::engine::AlertRouter;
 use domain::alert::entity::Alert;
@@ -275,6 +276,18 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     }
     let nat_svc = Arc::new(RwLock::new(nat_svc));
     info!(enabled = config.nat.enabled, "NAT service initialized");
+
+    // ── 5c⅞a. Build Zone service ───────────────────────────────────
+    let mut zone_svc = ZoneAppService::new();
+    zone_svc.set_enabled(config.zones.enabled);
+    if config.zones.enabled
+        && let Ok(zone_cfg) = config.zone_config()
+        && let Err(e) = zone_svc.reload(zone_cfg)
+    {
+        warn!("Zone config reload failed (non-fatal): {e}");
+    }
+    let zone_svc = Arc::new(RwLock::new(zone_svc));
+    info!(enabled = config.zones.enabled, "Zone service initialized");
 
     // ── 5c⅞. Build GeoIP adapter (early, needed for alias + alert enrichment) ──
     let geoip_adapter: Option<Arc<adapters::geoip::MaxMindGeoIpAdapter>> =
@@ -673,7 +686,8 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         .with_nat_service(Arc::clone(&nat_svc))
         .with_alias_service(Arc::clone(&alias_svc))
         .with_routing_service(Arc::clone(&routing_svc))
-        .with_loadbalancer_service(Arc::clone(&lb_svc));
+        .with_loadbalancer_service(Arc::clone(&lb_svc))
+        .with_zone_service(Arc::clone(&zone_svc));
     let app_state = Arc::new(app_state);
 
     // ── 6. Create cancellation token ────────────────────────────────
@@ -741,6 +755,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     reload_service.set_alias_service(Arc::clone(&alias_svc));
     reload_service.set_routing_service(Arc::clone(&routing_svc));
     reload_service.set_loadbalancer_service(Arc::clone(&lb_svc));
+    reload_service.set_zone_service(Arc::clone(&zone_svc));
     let reload_service = Arc::new(reload_service);
     // Clone auth provider for gRPC from the app state
     let grpc_auth: Option<Arc<dyn AuthProvider>> = app_state.auth_provider.clone();

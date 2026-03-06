@@ -339,6 +339,15 @@ async fn perform_reload(
         tracing::warn!(error = %e, "routing config reload failed at application level");
     }
 
+    // Phase 6f¼: Zone reload
+    if let Ok(zone_cfg) = config.zone_config()
+        && let Err(e) = reload_service
+            .reload_zones(zone_cfg, config.zones.enabled)
+            .await
+    {
+        tracing::warn!(error = %e, "zone config reload failed at application level");
+    }
+
     // Phase 6f½: Load Balancer reload
     let lb_services = match config.lb_services() {
         Ok(s) => s,

@@ -27,6 +27,7 @@ pub mod state;
 pub mod threatintel_handler;
 pub mod tls;
 pub(crate) mod validation;
+pub mod zone_handler;
 
 pub use router::build_router;
 pub use server::run_http_server;
