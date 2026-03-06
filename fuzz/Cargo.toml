@@ -122,3 +122,18 @@ doc = false
 name = "fuzz_loadbalancer"
 path = "fuzz_targets/fuzz_loadbalancer.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_threatintel_engine"
+path = "fuzz_targets/fuzz_threatintel_engine.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ratelimit_tiers"
+path = "fuzz_targets/fuzz_ratelimit_tiers.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_conntrack_settings"
+path = "fuzz_targets/fuzz_conntrack_settings.rs"
+doc = false
