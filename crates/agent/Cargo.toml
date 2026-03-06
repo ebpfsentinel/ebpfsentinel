@@ -9,9 +9,6 @@ publish.workspace = true
 name = "ebpfsentinel-agent"
 path = "src/main.rs"
 
-[features]
-default = []
-enterprise = ["domain/enterprise", "application/enterprise", "infrastructure/enterprise"]
 
 [dependencies]
 domain = { workspace = true }

@@ -2,9 +2,7 @@ use regex::Regex;
 
 use crate::common::error::DomainError;
 
-#[cfg(not(feature = "enterprise"))]
-use super::entity::is_builtin_pattern_id;
-use super::entity::{DlpMatch, DlpPattern};
+use super::entity::{DlpMatch, DlpPattern, is_builtin_pattern_id};
 use super::error::DlpError;
 
 /// DLP engine: validates, stores, and manages DLP patterns.
@@ -26,10 +24,9 @@ impl DlpEngine {
     /// Add a single DLP pattern. Validates, checks for duplicates,
     /// and compiles the regex.
     ///
-    /// In OSS builds, only built-in patterns (prefixed `dlp-pci-`, `dlp-pii-`, `dlp-cred-`)
-    /// are accepted. Custom patterns require the `enterprise` feature.
+    /// Only built-in patterns (prefixed `dlp-pci-`, `dlp-pii-`, `dlp-cred-`)
+    /// are accepted.
     pub fn add_pattern(&mut self, pattern: DlpPattern) -> Result<(), DomainError> {
-        #[cfg(not(feature = "enterprise"))]
         if !is_builtin_pattern_id(&pattern.id.0) {
             return Err(DlpError::EnterpriseRequired {
                 reason: format!(
@@ -76,11 +73,10 @@ impl DlpEngine {
     /// Atomically replace all patterns. Validates all patterns and compiles
     /// all regexes before replacing. Rolls back on any error.
     ///
-    /// In OSS builds, only built-in patterns are accepted.
+    /// Only built-in patterns are accepted.
     pub fn reload(&mut self, patterns: Vec<DlpPattern>) -> Result<(), DomainError> {
         // Validate all patterns first
         for pattern in &patterns {
-            #[cfg(not(feature = "enterprise"))]
             if !is_builtin_pattern_id(&pattern.id.0) {
                 return Err(DlpError::EnterpriseRequired {
                     reason: format!(

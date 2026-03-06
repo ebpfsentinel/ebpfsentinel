@@ -231,35 +231,15 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
 
     // ── 5c¾. Build DLP service ──────────────────────────────────────
     let mut dlp_engine = DlpEngine::new();
-    #[cfg(feature = "enterprise")]
-    let dlp_patterns = {
-        let p = config.dlp_patterns()?;
-        let dlp_mode = config.dlp_mode()?;
-        if config.dlp.enabled {
-            dlp_engine.reload(p)?;
-        }
-        let mut dlp_svc =
-            DlpAppService::new(dlp_engine, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
-        dlp_svc.set_mode(dlp_mode)?;
-        dlp_svc.set_enabled(config.dlp.enabled);
-        let count = config.dlp.patterns.len();
-        (dlp_svc, count)
-    };
-    #[cfg(not(feature = "enterprise"))]
-    let dlp_patterns = {
-        // OSS: always load built-in patterns, alert mode only
-        let defaults = domain::dlp::entity::default_patterns();
-        let count = defaults.len();
-        if config.dlp.enabled {
-            dlp_engine.reload(defaults)?;
-        }
-        let mut dlp_svc =
-            DlpAppService::new(dlp_engine, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
-        dlp_svc.set_mode(domain::common::entity::DomainMode::Alert)?;
-        dlp_svc.set_enabled(config.dlp.enabled);
-        (dlp_svc, count)
-    };
-    let (dlp_svc, dlp_pattern_count) = dlp_patterns;
+    // Always load built-in patterns, alert mode only
+    let defaults = domain::dlp::entity::default_patterns();
+    let dlp_pattern_count = defaults.len();
+    if config.dlp.enabled {
+        dlp_engine.reload(defaults)?;
+    }
+    let mut dlp_svc = DlpAppService::new(dlp_engine, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
+    dlp_svc.set_mode(domain::common::entity::DomainMode::Alert)?;
+    dlp_svc.set_enabled(config.dlp.enabled);
     let dlp_svc = Arc::new(RwLock::new(dlp_svc));
     info!(
         pattern_count = dlp_pattern_count,

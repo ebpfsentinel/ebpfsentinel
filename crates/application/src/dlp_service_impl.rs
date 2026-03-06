@@ -4,7 +4,6 @@ use domain::common::entity::{DomainMode, RuleId};
 use domain::common::error::DomainError;
 use domain::dlp::engine::DlpEngine;
 use domain::dlp::entity::{DlpMatch, DlpPattern};
-#[cfg(not(feature = "enterprise"))]
 use domain::dlp::error::DlpError;
 use ports::secondary::metrics_port::MetricsPort;
 
@@ -35,10 +34,8 @@ impl DlpAppService {
 
     /// Set the DLP operating mode.
     ///
-    /// In OSS builds, only `Alert` mode is supported. `Block` mode requires
-    /// the `enterprise` feature.
+    /// Only `Alert` mode is supported. `Block` mode requires enterprise.
     pub fn set_mode(&mut self, mode: DomainMode) -> Result<(), DomainError> {
-        #[cfg(not(feature = "enterprise"))]
         if mode == DomainMode::Block {
             return Err(DlpError::EnterpriseRequired {
                 reason: "DLP block mode requires enterprise license; OSS supports alert mode only"
@@ -224,17 +221,8 @@ mod tests {
         assert!(!svc.enabled());
     }
 
-    #[cfg(feature = "enterprise")]
     #[test]
-    fn enterprise_block_mode_allowed() {
-        let (mut svc, _) = make_service();
-        svc.set_mode(DomainMode::Block).unwrap();
-        assert_eq!(svc.mode(), DomainMode::Block);
-    }
-
-    #[cfg(not(feature = "enterprise"))]
-    #[test]
-    fn oss_block_mode_rejected() {
+    fn block_mode_rejected() {
         let (mut svc, _) = make_service();
         assert!(svc.set_mode(DomainMode::Block).is_err());
         assert_eq!(svc.mode(), DomainMode::Alert);
