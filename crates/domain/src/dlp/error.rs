@@ -15,6 +15,9 @@ pub enum DlpError {
 
     #[error("invalid regex in pattern '{pattern}': {reason}")]
     InvalidRegex { pattern: String, reason: String },
+
+    #[error("enterprise feature required: {reason}")]
+    EnterpriseRequired { reason: String },
 }
 
 impl From<DlpError> for DomainError {
@@ -22,6 +25,7 @@ impl From<DlpError> for DomainError {
         match e {
             DlpError::DuplicatePattern { ref id } => DomainError::DuplicateRule(id.clone()),
             DlpError::PatternNotFound { ref id } => DomainError::RuleNotFound(id.clone()),
+            DlpError::EnterpriseRequired { .. } => DomainError::InvalidConfig(e.to_string()),
             other => DomainError::InvalidRule(other.to_string()),
         }
     }

@@ -76,6 +76,14 @@ impl DlpAlert {
     }
 }
 
+/// Built-in pattern ID prefixes (OSS-available categories).
+const BUILTIN_PREFIXES: &[&str] = &["dlp-pci-", "dlp-pii-", "dlp-cred-"];
+
+/// Check whether a pattern ID corresponds to a built-in pattern.
+pub fn is_builtin_pattern_id(id: &str) -> bool {
+    BUILTIN_PREFIXES.iter().any(|prefix| id.starts_with(prefix))
+}
+
 /// Return the predefined DLP patterns covering FR15:
 /// - PCI: Visa, Mastercard, Amex
 /// - PII: Email, SSN

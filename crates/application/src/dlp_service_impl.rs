@@ -4,6 +4,8 @@ use domain::common::entity::{DomainMode, RuleId};
 use domain::common::error::DomainError;
 use domain::dlp::engine::DlpEngine;
 use domain::dlp::entity::{DlpMatch, DlpPattern};
+#[cfg(not(feature = "enterprise"))]
+use domain::dlp::error::DlpError;
 use ports::secondary::metrics_port::MetricsPort;
 
 /// Application-level DLP service.
@@ -31,8 +33,22 @@ impl DlpAppService {
         self.mode
     }
 
-    pub fn set_mode(&mut self, mode: DomainMode) {
+    /// Set the DLP operating mode.
+    ///
+    /// In OSS builds, only `Alert` mode is supported. `Block` mode requires
+    /// the `enterprise` feature.
+    pub fn set_mode(&mut self, mode: DomainMode) -> Result<(), DomainError> {
+        #[cfg(not(feature = "enterprise"))]
+        if mode == DomainMode::Block {
+            return Err(DlpError::EnterpriseRequired {
+                reason: "DLP block mode requires enterprise license; OSS supports alert mode only"
+                    .to_string(),
+            }
+            .into());
+        }
+
         self.mode = mode;
+        Ok(())
     }
 
     pub fn enabled(&self) -> bool {
@@ -143,8 +159,8 @@ mod tests {
     #[test]
     fn add_and_list_patterns() {
         let (mut svc, metrics) = make_service();
-        svc.add_pattern(make_pattern("dlp-001")).unwrap();
-        svc.add_pattern(make_pattern("dlp-002")).unwrap();
+        svc.add_pattern(make_pattern("dlp-pci-001")).unwrap();
+        svc.add_pattern(make_pattern("dlp-pci-002")).unwrap();
         assert_eq!(svc.list_patterns().len(), 2);
         assert_eq!(svc.pattern_count(), 2);
         assert_eq!(metrics.rules_loaded.load(Ordering::Relaxed), 2);
@@ -154,16 +170,17 @@ mod tests {
     #[test]
     fn add_duplicate_fails() {
         let (mut svc, _) = make_service();
-        svc.add_pattern(make_pattern("dlp-001")).unwrap();
-        assert!(svc.add_pattern(make_pattern("dlp-001")).is_err());
+        svc.add_pattern(make_pattern("dlp-pci-001")).unwrap();
+        assert!(svc.add_pattern(make_pattern("dlp-pci-001")).is_err());
         assert_eq!(svc.pattern_count(), 1);
     }
 
     #[test]
     fn remove_pattern_succeeds() {
         let (mut svc, metrics) = make_service();
-        svc.add_pattern(make_pattern("dlp-001")).unwrap();
-        svc.remove_pattern(&RuleId("dlp-001".to_string())).unwrap();
+        svc.add_pattern(make_pattern("dlp-pci-001")).unwrap();
+        svc.remove_pattern(&RuleId("dlp-pci-001".to_string()))
+            .unwrap();
         assert_eq!(svc.pattern_count(), 0);
         assert_eq!(metrics.rules_loaded.load(Ordering::Relaxed), 0);
     }
@@ -177,18 +194,21 @@ mod tests {
     #[test]
     fn reload_replaces_all() {
         let (mut svc, metrics) = make_service();
-        svc.add_pattern(make_pattern("old")).unwrap();
-        svc.reload_patterns(vec![make_pattern("new-1"), make_pattern("new-2")])
-            .unwrap();
+        svc.add_pattern(make_pattern("dlp-pii-old")).unwrap();
+        svc.reload_patterns(vec![
+            make_pattern("dlp-pci-new1"),
+            make_pattern("dlp-pci-new2"),
+        ])
+        .unwrap();
         assert_eq!(svc.pattern_count(), 2);
-        assert_eq!(svc.list_patterns()[0].id.0, "new-1");
+        assert_eq!(svc.list_patterns()[0].id.0, "dlp-pci-new1");
         assert_eq!(metrics.rules_loaded.load(Ordering::Relaxed), 2);
     }
 
     #[test]
     fn scan_data_delegates() {
         let (mut svc, _) = make_service();
-        svc.add_pattern(make_pattern("dlp-001")).unwrap();
+        svc.add_pattern(make_pattern("dlp-pci-001")).unwrap();
         let matches = svc.scan_data(b"code 1234 here");
         assert_eq!(matches.len(), 1);
     }
@@ -198,9 +218,25 @@ mod tests {
         let (mut svc, _) = make_service();
         assert_eq!(svc.mode(), DomainMode::Alert);
         assert!(svc.enabled());
-        svc.set_mode(DomainMode::Block);
+        svc.set_mode(DomainMode::Alert).unwrap();
         svc.set_enabled(false);
-        assert_eq!(svc.mode(), DomainMode::Block);
+        assert_eq!(svc.mode(), DomainMode::Alert);
         assert!(!svc.enabled());
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    fn enterprise_block_mode_allowed() {
+        let (mut svc, _) = make_service();
+        svc.set_mode(DomainMode::Block).unwrap();
+        assert_eq!(svc.mode(), DomainMode::Block);
+    }
+
+    #[cfg(not(feature = "enterprise"))]
+    #[test]
+    fn oss_block_mode_rejected() {
+        let (mut svc, _) = make_service();
+        assert!(svc.set_mode(DomainMode::Block).is_err());
+        assert_eq!(svc.mode(), DomainMode::Alert);
     }
 }

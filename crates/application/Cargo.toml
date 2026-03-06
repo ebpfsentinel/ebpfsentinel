@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+enterprise = ["domain/enterprise"]
+
 [dependencies]
 domain = { workspace = true }
 ports = { workspace = true }

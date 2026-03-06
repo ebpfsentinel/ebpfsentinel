@@ -329,25 +329,45 @@ async fn perform_reload(
     }
 
     // Phase 6b½: DLP reload
-    let dlp_patterns = match config.dlp_patterns() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid DLP patterns");
-            return;
-        }
-    };
-    let dlp_mode = match config.dlp_mode() {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid DLP mode");
-            return;
-        }
-    };
-    if let Err(e) = reload_service
-        .reload_dlp(dlp_patterns, dlp_mode, config.dlp.enabled)
-        .await
+    //
+    // OSS: DLP hot-reload is disabled. Patterns are frozen at startup
+    // with built-in defaults. Enterprise unlocks custom patterns + hot-reload.
+    #[cfg(feature = "enterprise")]
     {
-        tracing::warn!(error = %e, "DLP config reload failed at application level");
+        let dlp_patterns = match config.dlp_patterns() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "config reload rejected: invalid DLP patterns");
+                return;
+            }
+        };
+        let dlp_mode = match config.dlp_mode() {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(error = %e, "config reload rejected: invalid DLP mode");
+                return;
+            }
+        };
+        if let Err(e) = reload_service
+            .reload_dlp(dlp_patterns, dlp_mode, config.dlp.enabled)
+            .await
+        {
+            tracing::warn!(error = %e, "DLP config reload failed at application level");
+        }
+    }
+    #[cfg(not(feature = "enterprise"))]
+    {
+        // OSS: only toggle enabled/disabled, keep alert mode and built-in patterns
+        if let Err(e) = reload_service
+            .reload_dlp(
+                domain::dlp::entity::default_patterns(),
+                domain::common::entity::DomainMode::Alert,
+                config.dlp.enabled,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "DLP config reload failed at application level");
+        }
     }
 
     // Phase 6c: ConnTrack reload

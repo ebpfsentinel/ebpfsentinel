@@ -333,6 +333,40 @@ impl AgentConfig {
             pattern_cfg.validate(idx)?;
         }
 
+        // OSS: reject custom patterns and block mode
+        #[cfg(not(feature = "enterprise"))]
+        {
+            use domain::dlp::entity::is_builtin_pattern_id;
+            for pattern_cfg in &self.dlp.patterns {
+                if !is_builtin_pattern_id(&pattern_cfg.id) {
+                    return Err(ConfigError::Validation {
+                        field: format!("dlp.patterns (id: {})", pattern_cfg.id),
+                        message: "custom DLP patterns require enterprise license; \
+                                  OSS supports built-in patterns only (dlp-pci-*, dlp-pii-*, dlp-cred-*)"
+                            .to_string(),
+                    });
+                }
+            }
+            if self.dlp.mode == "block" || self.dlp.mode == "enforce" {
+                return Err(ConfigError::Validation {
+                    field: "dlp.mode".to_string(),
+                    message: "DLP block/enforce mode requires enterprise license; \
+                              OSS supports alert mode only"
+                        .to_string(),
+                });
+            }
+            for pattern_cfg in &self.dlp.patterns {
+                if pattern_cfg.mode.as_deref() == Some("block")
+                    || pattern_cfg.mode.as_deref() == Some("enforce")
+                {
+                    return Err(ConfigError::Validation {
+                        field: format!("dlp.patterns[{}].mode", pattern_cfg.id),
+                        message: "per-pattern block mode requires enterprise license".to_string(),
+                    });
+                }
+            }
+        }
+
         // Validate ratelimit rules
         for (idx, rule_cfg) in self.ratelimit.rules.iter().enumerate() {
             rule_cfg.validate(idx)?;
@@ -1923,9 +1957,8 @@ agent:
   interfaces: [eth0]
 dlp:
   enabled: true
-  mode: block
   patterns:
-    - id: custom-001
+    - id: dlp-pci-001
       name: Internal ID
       regex: "INT-\\d{6}"
       severity: high
@@ -1933,7 +1966,7 @@ dlp:
 "#;
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.dlp.patterns.len(), 1);
-        assert_eq!(config.dlp.patterns[0].id, "custom-001");
+        assert_eq!(config.dlp.patterns[0].id, "dlp-pci-001");
         assert!(config.dlp.patterns[0].enabled);
     }
 
@@ -1945,7 +1978,7 @@ agent:
 dlp:
   mode: alert
   patterns:
-    - id: dlp-test
+    - id: dlp-pii-test
       name: Test
       regex: "\\btest\\b"
       severity: medium
@@ -1955,13 +1988,14 @@ dlp:
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let patterns = config.dlp_patterns().unwrap();
         assert_eq!(patterns.len(), 1);
-        assert_eq!(patterns[0].id.0, "dlp-test");
+        assert_eq!(patterns[0].id.0, "dlp-pii-test");
         assert_eq!(patterns[0].severity, Severity::Medium);
         assert_eq!(patterns[0].mode, DomainMode::Alert);
         assert_eq!(patterns[0].data_type, "custom");
         assert_eq!(patterns[0].description, "A test pattern");
     }
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn dlp_pattern_mode_override() {
         let yaml = r#"
@@ -1970,7 +2004,7 @@ agent:
 dlp:
   mode: alert
   patterns:
-    - id: dlp-block
+    - id: dlp-pci-block
       name: Blocked Pattern
       regex: "\\d+"
       severity: critical
@@ -1982,6 +2016,26 @@ dlp:
         assert_eq!(patterns[0].mode, DomainMode::Block);
     }
 
+    #[cfg(not(feature = "enterprise"))]
+    #[test]
+    fn dlp_pattern_mode_override_rejected_oss() {
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+dlp:
+  mode: alert
+  patterns:
+    - id: dlp-pci-block
+      name: Blocked Pattern
+      regex: "\\d+"
+      severity: critical
+      data_type: pci
+      mode: block
+"#;
+        assert!(AgentConfig::from_yaml(yaml).is_err());
+    }
+
+    #[cfg(feature = "enterprise")]
     #[test]
     fn dlp_mode_parsed() {
         let yaml = r"
@@ -1992,6 +2046,18 @@ dlp:
 ";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.dlp_mode().unwrap(), DomainMode::Block);
+    }
+
+    #[cfg(not(feature = "enterprise"))]
+    #[test]
+    fn dlp_block_mode_rejected_oss() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+dlp:
+  mode: block
+";
+        assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
     #[test]
@@ -2065,7 +2131,7 @@ agent:
   interfaces: [eth0]
 dlp:
   patterns:
-    - id: dlp-off
+    - id: dlp-pci-off
       name: Disabled
       regex: "\\d+"
       severity: low

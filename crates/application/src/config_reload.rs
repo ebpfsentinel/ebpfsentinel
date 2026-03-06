@@ -196,7 +196,8 @@ impl ConfigReloadService {
 
         let mut svc = dlp_svc.write().await;
         svc.set_enabled(enabled);
-        svc.set_mode(mode);
+        svc.set_mode(mode)
+            .map_err(|e| anyhow::anyhow!("DLP mode change rejected: {e}"))?;
 
         if enabled {
             svc.reload_patterns(patterns)
