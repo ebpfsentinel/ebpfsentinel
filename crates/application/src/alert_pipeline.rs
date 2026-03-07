@@ -865,6 +865,310 @@ mod tests {
         assert_eq!(sender.send_calls.load(Ordering::Relaxed), 1);
     }
 
+    // ── DDoS alert tests ───────────────────────────────────────────
+
+    fn make_ddos_attack() -> DdosAttack {
+        use domain::ddos::entity::DdosAttackType;
+        DdosAttack::new("atk-test-1".to_string(), DdosAttackType::SynFlood, 1_000_000_000)
+    }
+
+    #[tokio::test]
+    async fn ddos_alert_processed_and_metric_recorded() {
+        let metrics = Arc::new(TestMetrics::new());
+        let mut pipeline =
+            make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics));
+
+        pipeline
+            .process_ddos_alert(&make_ddos_attack(), [1, 0, 0, 0], [2, 0, 0, 0], false, 0, 80, 6)
+            .await;
+
+        assert_eq!(metrics.alert_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.last_component.lock().unwrap(), "ddos");
+    }
+
+    #[tokio::test]
+    async fn ddos_alert_dispatches_to_sender() {
+        let metrics = Arc::new(TestMetrics::new());
+        let sender = Arc::new(MockSender::new());
+        let mut pipeline =
+            make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics))
+                .with_log_sender(Arc::clone(&sender) as Arc<dyn AlertSender>);
+
+        pipeline
+            .process_ddos_alert(&make_ddos_attack(), [1, 0, 0, 0], [2, 0, 0, 0], false, 0, 80, 6)
+            .await;
+
+        assert_eq!(sender.send_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn ddos_alert_no_route_dropped() {
+        let metrics = Arc::new(TestMetrics::new());
+        let mut pipeline = make_pipeline(
+            vec![make_route("critical-only", Severity::Critical)],
+            Arc::clone(&metrics),
+        );
+
+        // IcmpFlood maps to Medium severity, which is below Critical
+        let attack = {
+            use domain::ddos::entity::DdosAttackType;
+            DdosAttack::new("atk-low".to_string(), DdosAttackType::IcmpFlood, 1_000_000_000)
+        };
+
+        pipeline
+            .process_ddos_alert(&attack, [1, 0, 0, 0], [2, 0, 0, 0], false, 0, 80, 6)
+            .await;
+
+        assert_eq!(metrics.alert_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.dropped_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.last_drop_reason.lock().unwrap(), "no_route");
+    }
+
+    // ── Alert store tests ─────────────────────────────────────────
+
+    struct MockAlertStore {
+        store_calls: AtomicU32,
+        fail: bool,
+    }
+
+    impl MockAlertStore {
+        fn new() -> Self {
+            Self {
+                store_calls: AtomicU32::new(0),
+                fail: false,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                store_calls: AtomicU32::new(0),
+                fail: true,
+            }
+        }
+    }
+
+    impl AlertStore for MockAlertStore {
+        fn store_alert(&self, _alert: &Alert) -> Result<(), domain::alert::error::AlertError> {
+            self.store_calls.fetch_add(1, Ordering::Relaxed);
+            if self.fail {
+                Err(domain::alert::error::AlertError::RoutingError(
+                    "store error".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn get_alert(
+            &self,
+            _id: &str,
+        ) -> Result<Option<Alert>, domain::alert::error::AlertError> {
+            Ok(None)
+        }
+
+        fn mark_false_positive(
+            &self,
+            _id: &str,
+        ) -> Result<bool, domain::alert::error::AlertError> {
+            Ok(false)
+        }
+
+        fn query_alerts(
+            &self,
+            _query: &domain::alert::query::AlertQuery,
+        ) -> Result<Vec<Alert>, domain::alert::error::AlertError> {
+            Ok(vec![])
+        }
+
+        fn alert_count(&self) -> Result<usize, domain::alert::error::AlertError> {
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn alert_stored_when_store_configured() {
+        let metrics = Arc::new(TestMetrics::new());
+        let store = Arc::new(MockAlertStore::new());
+        let mut pipeline =
+            make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics))
+                .with_alert_store(Arc::clone(&store) as Arc<dyn AlertStore>);
+
+        pipeline
+            .process_alert(&make_ids_alert("ids-001", Severity::High))
+            .await;
+
+        assert_eq!(store.store_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn alert_store_error_does_not_fail_pipeline() {
+        let metrics = Arc::new(TestMetrics::new());
+        let store = Arc::new(MockAlertStore::failing());
+        let mut pipeline =
+            make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics))
+                .with_alert_store(Arc::clone(&store) as Arc<dyn AlertStore>);
+
+        // Should not panic despite store error
+        pipeline
+            .process_alert(&make_ids_alert("ids-001", Severity::High))
+            .await;
+
+        assert_eq!(store.store_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.alert_calls.load(Ordering::Relaxed), 1);
+    }
+
+    // ── gRPC broadcast tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn alert_broadcast_to_stream() {
+        let metrics = Arc::new(TestMetrics::new());
+        let (tx, mut rx) = broadcast::channel::<Alert>(16);
+        let mut pipeline =
+            make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics))
+                .with_stream_sender(tx);
+
+        pipeline
+            .process_alert(&make_ids_alert("ids-001", Severity::High))
+            .await;
+
+        let received = rx.try_recv();
+        assert!(received.is_ok(), "should have received broadcast alert");
+        assert_eq!(received.unwrap().component, "ids");
+    }
+
+    #[tokio::test]
+    async fn alert_broadcast_no_receiver_ok() {
+        let metrics = Arc::new(TestMetrics::new());
+        let (tx, _) = broadcast::channel::<Alert>(16);
+        // Drop all receivers — send should not panic
+        let mut pipeline =
+            make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics))
+                .with_stream_sender(tx);
+
+        pipeline
+            .process_alert(&make_ids_alert("ids-001", Severity::High))
+            .await;
+
+        assert_eq!(metrics.alert_calls.load(Ordering::Relaxed), 1);
+    }
+
+    // ── Enricher tests ────────────────────────────────────────────
+
+    struct MockEnricher {
+        enrich_calls: AtomicU32,
+    }
+
+    impl MockEnricher {
+        fn new() -> Self {
+            Self {
+                enrich_calls: AtomicU32::new(0),
+            }
+        }
+    }
+
+    impl AlertEnrichmentPort for MockEnricher {
+        fn enrich_alert(&self, _alert: &mut Alert) {
+            self.enrich_calls.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn alert_enriched_when_enricher_configured() {
+        let metrics = Arc::new(TestMetrics::new());
+        let enricher = Arc::new(MockEnricher::new());
+        let mut pipeline =
+            make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics))
+                .with_enricher(Arc::clone(&enricher) as Arc<dyn AlertEnrichmentPort>);
+
+        pipeline
+            .process_alert(&make_ids_alert("ids-001", Severity::High))
+            .await;
+
+        assert_eq!(enricher.enrich_calls.load(Ordering::Relaxed), 1);
+    }
+
+    // ── reload_routes tests ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn reload_routes_updates_routing() {
+        let metrics = Arc::new(TestMetrics::new());
+        // Start with no routes matching Low severity
+        let mut pipeline = make_pipeline(
+            vec![make_route("critical-only", Severity::Critical)],
+            Arc::clone(&metrics),
+        );
+
+        // Low alert should be dropped
+        pipeline
+            .process_alert(&make_ids_alert("ids-001", Severity::Low))
+            .await;
+        assert_eq!(metrics.dropped_calls.load(Ordering::Relaxed), 1);
+
+        // Reload with a route that accepts Low severity
+        pipeline.reload_routes(vec![make_route("all", Severity::Low)]);
+
+        // Now the same alert should not be dropped
+        pipeline
+            .process_alert(&make_ids_alert("ids-002", Severity::Low))
+            .await;
+        assert_eq!(
+            metrics.dropped_calls.load(Ordering::Relaxed),
+            1,
+            "drop count should not increase after reload"
+        );
+    }
+
+    // ── Run loop dispatch tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn run_dispatches_dlp_alert() {
+        let metrics = Arc::new(TestMetrics::new());
+        let pipeline = make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics));
+
+        let (tx, rx) = mpsc::channel(100);
+        let cancel = CancellationToken::new();
+
+        tx.send(AlertEvent::Dlp(make_dlp_alert("dlp-pci-visa", Severity::Critical)))
+            .await
+            .unwrap();
+
+        // Cancel so `run` drains and exits
+        cancel.cancel();
+
+        pipeline.run(rx, cancel).await;
+
+        assert_eq!(metrics.alert_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.last_component.lock().unwrap(), "dlp");
+    }
+
+    #[tokio::test]
+    async fn run_dispatches_ddos_alert() {
+        let metrics = Arc::new(TestMetrics::new());
+        let pipeline = make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics));
+
+        let (tx, rx) = mpsc::channel(100);
+        let cancel = CancellationToken::new();
+
+        tx.send(AlertEvent::Ddos {
+            attack: make_ddos_attack(),
+            src_addr: [1, 0, 0, 0],
+            dst_addr: [2, 0, 0, 0],
+            is_ipv6: false,
+            src_port: 0,
+            dst_port: 80,
+            protocol: 6,
+        })
+        .await
+        .unwrap();
+
+        cancel.cancel();
+
+        pipeline.run(rx, cancel).await;
+
+        assert_eq!(metrics.alert_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.last_component.lock().unwrap(), "ddos");
+    }
+
     #[tokio::test]
     async fn multiple_routes_dispatch_to_senders() {
         let metrics = Arc::new(TestMetrics::new());

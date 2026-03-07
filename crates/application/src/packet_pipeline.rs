@@ -1520,4 +1520,294 @@ mod tests {
         assert_eq!(*metrics.last_component.lock().unwrap(), "loadbalancer");
         assert_eq!(*metrics.last_action.lock().unwrap(), "no_backend");
     }
+
+    // ── DDoS dispatch tests ──────────────────────────────────────
+
+    use crate::ddos_service_impl::DdosAppService;
+    use domain::ddos::engine::DdosEngine;
+
+    fn make_ddos_service() -> Arc<RwLock<DdosAppService>> {
+        let metrics: Arc<dyn MetricsPort> = Arc::new(TestMetrics::new());
+        Arc::new(RwLock::new(DdosAppService::new(DdosEngine::new(), metrics)))
+    }
+
+    #[tokio::test]
+    async fn ddos_syn_event_records_metric() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        let event = make_event(EVENT_TYPE_DDOS_SYN, 0);
+        dispatcher.dispatch_event(event).await;
+
+        assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.last_component.lock().unwrap(), "ddos");
+        assert_eq!(*metrics.last_action.lock().unwrap(), "drop");
+    }
+
+    #[tokio::test]
+    async fn ddos_event_without_service_does_nothing() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        // No ddos_service attached (default make_dispatcher sets it to None)
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        let event = make_event(EVENT_TYPE_DDOS_ICMP, 0);
+        dispatcher.dispatch_event(event).await;
+
+        // Metric is still recorded even without a service
+        assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.last_component.lock().unwrap(), "ddos");
+    }
+
+    #[tokio::test]
+    async fn ddos_event_with_service_processes() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let ddos = make_ddos_service();
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_ddos_service(Arc::clone(&ddos));
+
+        let event = make_event(EVENT_TYPE_DDOS_SYN, 0);
+        dispatcher.dispatch_event(event).await;
+
+        assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.last_component.lock().unwrap(), "ddos");
+    }
+
+    // ── Threatintel dispatch tests ───────────────────────────────
+
+    use domain::threatintel::entity::{Ioc, ThreatType};
+
+    #[tokio::test]
+    async fn threatintel_event_records_metric() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        let event = make_event(EVENT_TYPE_THREATINTEL, 0);
+        dispatcher.dispatch_event(event).await;
+
+        assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.last_component.lock().unwrap(), "threatintel");
+        assert_eq!(*metrics.last_action.lock().unwrap(), "pass");
+    }
+
+    #[tokio::test]
+    async fn threatintel_event_disabled_service_no_alert() {
+        let ids = make_service_with_rules(vec![]);
+        let ti = make_ti_service();
+        ti.write().await.set_enabled(false);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+
+        let dispatcher = EventDispatcher::new(
+            ids,
+            make_l7_service(),
+            Arc::clone(&ti),
+            make_audit_service(),
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            alert_tx,
+            None,
+        );
+
+        let event = make_event(EVENT_TYPE_THREATINTEL, 0);
+        dispatcher.dispatch_event(event).await;
+
+        assert!(alert_rx.try_recv().is_err());
+        // Metric is still recorded before the enabled check returns
+        assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn threatintel_event_with_matching_ioc_produces_alert() {
+        let ids = make_service_with_rules(vec![]);
+        let ti = make_ti_service();
+
+        // The src_addr in make_event is 0xC0A8_0001 = 192.168.0.1
+        let src_ip: IpAddr = "192.168.0.1".parse().unwrap();
+        ti.write()
+            .await
+            .add_ioc(Ioc {
+                ip: src_ip,
+                feed_id: "test-feed".to_string(),
+                confidence: 90,
+                threat_type: ThreatType::Malware,
+                last_seen: 0,
+                source_feed: "test".to_string(),
+            })
+            .unwrap();
+
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+
+        let dispatcher = EventDispatcher::new(
+            ids,
+            make_l7_service(),
+            Arc::clone(&ti),
+            make_audit_service(),
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            alert_tx,
+            None,
+        );
+
+        let event = make_event(EVENT_TYPE_THREATINTEL, 0);
+        dispatcher.dispatch_event(event).await;
+
+        let alert = alert_rx.try_recv().unwrap();
+        match alert {
+            AlertEvent::Ids(a) => {
+                assert!(a.rule_id.0.starts_with("ti-"));
+            }
+            _ => panic!("expected AlertEvent::Ids from threatintel"),
+        }
+    }
+
+    // ── DLP dispatch tests ───────────────────────────────────────
+
+    use crate::dlp_service_impl::DlpAppService;
+    use domain::dlp::engine::DlpEngine;
+    use domain::dlp::entity::DlpPattern;
+    use ebpf_common::dlp::DLP_MAX_EXCERPT;
+
+    fn make_dlp_event_with_data(data: &[u8]) -> DlpEvent {
+        let mut event = DlpEvent {
+            pid: 1000,
+            tgid: 2000,
+            timestamp_ns: 0,
+            data_len: data.len() as u32,
+            direction: 0,
+            _padding: [0; 3],
+            data_excerpt: [0u8; DLP_MAX_EXCERPT],
+        };
+        let copy_len = data.len().min(DLP_MAX_EXCERPT);
+        event.data_excerpt[..copy_len].copy_from_slice(&data[..copy_len]);
+        event
+    }
+
+    fn make_dlp_service_with_pattern() -> Arc<RwLock<DlpAppService>> {
+        let metrics: Arc<dyn MetricsPort> = Arc::new(TestMetrics::new());
+        let mut engine = DlpEngine::new();
+        engine
+            .add_pattern(DlpPattern {
+                id: RuleId("dlp-pci-001".to_string()),
+                name: "Credit Card".to_string(),
+                regex: r"\d{4}".to_string(),
+                severity: Severity::High,
+                mode: DomainMode::Alert,
+                data_type: "pci".to_string(),
+                description: String::new(),
+                enabled: true,
+            })
+            .unwrap();
+        Arc::new(RwLock::new(DlpAppService::new(engine, metrics)))
+    }
+
+    #[tokio::test]
+    async fn dlp_event_records_metric() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        let dlp_event = make_dlp_event_with_data(b"hello world");
+        dispatcher
+            .dispatch_agent_event(AgentEvent::Dlp(Box::new(dlp_event)))
+            .await;
+
+        // record_packet is called twice: once for "dlp"/"captured" in process_dlp_event,
+        // and once for observe_processing_duration via dispatch_agent_event.
+        // But record_packet records the last call which is "dlp"/"captured".
+        assert_eq!(*metrics.last_component.lock().unwrap(), "dlp");
+        assert_eq!(*metrics.last_action.lock().unwrap(), "captured");
+    }
+
+    #[tokio::test]
+    async fn dlp_event_without_service_no_panic() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        // No dlp_service attached (default make_dispatcher sets it to None)
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        let dlp_event = make_dlp_event_with_data(b"some data 1234");
+        dispatcher
+            .dispatch_agent_event(AgentEvent::Dlp(Box::new(dlp_event)))
+            .await;
+
+        // Metric recorded, no panic
+        assert_eq!(*metrics.last_component.lock().unwrap(), "dlp");
+        assert_eq!(*metrics.last_action.lock().unwrap(), "captured");
+    }
+
+    #[tokio::test]
+    async fn dlp_event_with_match_produces_alert() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dlp = make_dlp_service_with_pattern();
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_dlp_service(Arc::clone(&dlp));
+
+        // Data containing 4 consecutive digits should match the \d{4} pattern
+        let dlp_event = make_dlp_event_with_data(b"card number 1234 here");
+        dispatcher
+            .dispatch_agent_event(AgentEvent::Dlp(Box::new(dlp_event)))
+            .await;
+
+        let alert = alert_rx.try_recv().unwrap();
+        match alert {
+            AlertEvent::Dlp(a) => {
+                assert_eq!(a.pattern_id.0, "dlp-pci-001");
+                assert_eq!(a.pattern_name, "Credit Card");
+            }
+            _ => panic!("expected AlertEvent::Dlp"),
+        }
+    }
+
+    // ── LB unknown action test ───────────────────────────────────
+
+    #[tokio::test]
+    async fn lb_unknown_action_records_unknown() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        let mut event = make_event(EVENT_TYPE_LB, 0);
+        event.action = 255;
+        dispatcher.dispatch_event(event).await;
+
+        assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.last_component.lock().unwrap(), "loadbalancer");
+        assert_eq!(*metrics.last_action.lock().unwrap(), "unknown");
+    }
+
+    // ── Helper function tests ────────────────────────────────────
+
+    #[test]
+    fn action_label_all_values() {
+        assert_eq!(action_label(0), "pass");
+        assert_eq!(action_label(1), "drop");
+        assert_eq!(action_label(2), "log");
+        assert_eq!(action_label(99), "unknown");
+    }
+
+    #[test]
+    fn event_type_label_all_values() {
+        assert_eq!(event_type_label(EVENT_TYPE_FIREWALL), "firewall");
+        assert_eq!(event_type_label(EVENT_TYPE_IDS), "ids");
+        assert_eq!(event_type_label(EVENT_TYPE_RATELIMIT), "ratelimit");
+        assert_eq!(event_type_label(EVENT_TYPE_THREATINTEL), "threatintel");
+        assert_eq!(event_type_label(EVENT_TYPE_DDOS_SYN), "ddos");
+        assert_eq!(event_type_label(EVENT_TYPE_DDOS_ICMP), "ddos");
+        assert_eq!(event_type_label(EVENT_TYPE_DDOS_AMP), "ddos");
+        assert_eq!(event_type_label(EVENT_TYPE_DDOS_CONNTRACK), "ddos");
+        assert_eq!(event_type_label(EVENT_TYPE_LB), "lb");
+        assert_eq!(event_type_label(254), "unknown");
+    }
 }
