@@ -54,6 +54,15 @@ ports = { workspace = true, features = ["test-utils"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 base64 = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "storage"
+harness = false
+
+[[bench]]
+name = "grpc_serialization"
+harness = false
 
 [lints]
 workspace = true

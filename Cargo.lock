@@ -12,6 +12,7 @@ dependencies = [
  "aya",
  "aya-log",
  "base64",
+ "criterion",
  "domain",
  "ebpf-common",
  "flate2",
@@ -158,6 +159,7 @@ name = "application"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "criterion",
  "domain",
  "ebpf-common",
  "ports",
