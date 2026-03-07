@@ -400,3 +400,194 @@ fn default_dns_min_ttl() -> u64 {
 fn default_dns_purge_interval() -> u64 {
     30
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_dns_config() -> DnsConfig {
+        DnsConfig::default()
+    }
+
+    // ── Default config ─────────────────────────────────────────────
+
+    #[test]
+    fn default_config() {
+        let cfg = DnsConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.cache.max_entries, 100_000);
+        assert_eq!(cfg.cache.min_ttl_secs, 60);
+        assert_eq!(cfg.cache.purge_interval_secs, 30);
+        assert!(cfg.blocklist.domains.is_empty());
+        assert_eq!(cfg.blocklist.action, "block");
+        assert_eq!(cfg.blocklist.inject_target, "threatintel");
+    }
+
+    // ── DnsCacheConfig::validate ───────────────────────────────────
+
+    #[test]
+    fn cache_max_entries_too_low() {
+        let mut cfg = valid_dns_config();
+        cfg.cache.max_entries = 500;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("max_entries"), "error: {err}");
+    }
+
+    #[test]
+    fn cache_max_entries_too_high() {
+        let mut cfg = valid_dns_config();
+        cfg.cache.max_entries = 2_000_000;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("max_entries"), "error: {err}");
+    }
+
+    #[test]
+    fn cache_min_ttl_too_low() {
+        let mut cfg = valid_dns_config();
+        cfg.cache.min_ttl_secs = 5;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("min_ttl_secs"), "error: {err}");
+    }
+
+    #[test]
+    fn cache_purge_interval_too_low() {
+        let mut cfg = valid_dns_config();
+        cfg.cache.purge_interval_secs = 5;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("purge_interval"), "error: {err}");
+    }
+
+    #[test]
+    fn cache_valid_passes() {
+        let cfg = valid_dns_config();
+        assert!(cfg.validate().is_ok());
+    }
+
+    // ── ReputationSectionConfig::validate ──────────────────────────
+
+    #[test]
+    fn reputation_threshold_out_of_range() {
+        let mut cfg = valid_dns_config();
+        cfg.reputation.auto_block_threshold = 1.5;
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("auto_block_threshold"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn reputation_max_tracked_domains_out_of_range() {
+        let mut cfg = valid_dns_config();
+        cfg.reputation.max_tracked_domains = 500;
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("max_tracked_domains"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn reputation_auto_block_ttl_zero() {
+        let mut cfg = valid_dns_config();
+        cfg.reputation.auto_block_ttl_secs = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("auto_block_ttl"), "error: {err}");
+    }
+
+    #[test]
+    fn reputation_decay_half_life_zero() {
+        let mut cfg = valid_dns_config();
+        cfg.reputation.decay_half_life_hours = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("decay_half_life"), "error: {err}");
+    }
+
+    // ── DnsBlocklistSectionConfig::validate ────────────────────────
+
+    #[test]
+    fn blocklist_invalid_action() {
+        let mut cfg = valid_dns_config();
+        cfg.blocklist.action = "nuke".to_string();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("action"), "error: {err}");
+    }
+
+    #[test]
+    fn blocklist_invalid_inject_target() {
+        let mut cfg = valid_dns_config();
+        cfg.blocklist.inject_target = "nowhere".to_string();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("inject_target"), "error: {err}");
+    }
+
+    // ── DnsBlocklistFeedConfig::validate ───────────────────────────
+
+    #[test]
+    fn feed_empty_name() {
+        let mut cfg = valid_dns_config();
+        cfg.blocklist.feeds.push(DnsBlocklistFeedConfig {
+            name: String::new(),
+            url: "https://example.com/list.txt".to_string(),
+            format: "plaintext".to_string(),
+            refresh_interval_secs: 3600,
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("name"), "error: {err}");
+    }
+
+    #[test]
+    fn feed_invalid_format() {
+        let mut cfg = valid_dns_config();
+        cfg.blocklist.feeds.push(DnsBlocklistFeedConfig {
+            name: "test-feed".to_string(),
+            url: "https://example.com/list.txt".to_string(),
+            format: "csv".to_string(),
+            refresh_interval_secs: 3600,
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("format"), "error: {err}");
+    }
+
+    #[test]
+    fn feed_refresh_interval_too_low() {
+        let mut cfg = valid_dns_config();
+        cfg.blocklist.feeds.push(DnsBlocklistFeedConfig {
+            name: "test-feed".to_string(),
+            url: "https://example.com/list.txt".to_string(),
+            format: "plaintext".to_string(),
+            refresh_interval_secs: 10,
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("refresh_interval"), "error: {err}");
+    }
+
+    // ── to_domain_cache_config ─────────────────────────────────────
+
+    #[test]
+    fn to_domain_cache_config_correct() {
+        let cfg = valid_dns_config();
+        let domain = cfg.to_domain_cache_config();
+        assert_eq!(domain.max_entries, 100_000);
+        assert_eq!(domain.min_ttl_secs, 60);
+        assert_eq!(domain.purge_interval_secs, 30);
+    }
+
+    // ── to_domain_blocklist_config ─────────────────────────────────
+
+    #[test]
+    fn to_domain_blocklist_config_with_domain_pattern() {
+        let mut cfg = valid_dns_config();
+        cfg.blocklist.domains.push("*.evil.com".to_string());
+        let domain = cfg.to_domain_blocklist_config().unwrap();
+        assert_eq!(domain.patterns.len(), 1);
+        assert!(matches!(
+            domain.action,
+            domain::dns::entity::BlocklistAction::Block
+        ));
+        assert!(matches!(
+            domain.inject_target,
+            domain::dns::entity::InjectTarget::ThreatIntel
+        ));
+    }
+}

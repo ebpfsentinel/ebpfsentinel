@@ -188,3 +188,228 @@ fn parse_alert_destination(s: &str) -> Result<AlertDestination, ()> {
         _ => Err(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Deserialization tests ────────────────────────────────────────
+
+    #[test]
+    fn default_config_from_empty_yaml() {
+        let cfg: AlertingConfig = serde_yaml_ng::from_str("{}").unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.dedup_window_secs, 60);
+        assert_eq!(cfg.throttle_window_secs, 300);
+        assert_eq!(cfg.throttle_max, 100);
+        assert!(cfg.smtp.is_none());
+        assert_eq!(cfg.routes.len(), 1);
+        assert_eq!(cfg.routes[0].name, "default-log");
+        assert_eq!(cfg.routes[0].destination, "log");
+        assert_eq!(cfg.routes[0].min_severity, "low");
+    }
+
+    #[test]
+    fn webhook_route_deserializes() {
+        let yaml = r#"
+enabled: true
+routes:
+  - name: slack-hook
+    destination: webhook
+    min_severity: high
+    webhook_url: "https://hooks.example.com/alert"
+"#;
+        let cfg: AlertingConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(cfg.routes.len(), 1);
+        assert_eq!(cfg.routes[0].name, "slack-hook");
+        assert_eq!(cfg.routes[0].destination, "webhook");
+        assert_eq!(
+            cfg.routes[0].webhook_url.as_deref(),
+            Some("https://hooks.example.com/alert")
+        );
+    }
+
+    #[test]
+    fn email_route_with_smtp_deserializes() {
+        let yaml = r#"
+smtp:
+  host: smtp.example.com
+  port: 465
+  from_address: alerts@example.com
+  tls: true
+routes:
+  - name: ops-email
+    destination: email
+    min_severity: critical
+    email_to: ops@example.com
+"#;
+        let cfg: AlertingConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(cfg.smtp.is_some());
+        let smtp = cfg.smtp.as_ref().unwrap();
+        assert_eq!(smtp.host, "smtp.example.com");
+        assert_eq!(smtp.port, 465);
+        assert_eq!(cfg.routes[0].destination, "email");
+        assert_eq!(cfg.routes[0].email_to.as_deref(), Some("ops@example.com"));
+    }
+
+    // ── Validation tests ────────────────────────────────────────────
+
+    #[test]
+    fn validate_empty_name_is_error() {
+        let route = AlertRouteConfig {
+            name: String::new(),
+            destination: "log".to_string(),
+            min_severity: "low".to_string(),
+            event_types: None,
+            webhook_url: None,
+            email_to: None,
+            webhook_headers: None,
+        };
+        assert!(route.validate(0, false).is_err());
+    }
+
+    #[test]
+    fn validate_invalid_destination_is_error() {
+        let route = AlertRouteConfig {
+            name: "r1".to_string(),
+            destination: "carrier_pigeon".to_string(),
+            min_severity: "low".to_string(),
+            event_types: None,
+            webhook_url: None,
+            email_to: None,
+            webhook_headers: None,
+        };
+        assert!(route.validate(0, false).is_err());
+    }
+
+    #[test]
+    fn validate_invalid_severity_is_error() {
+        let route = AlertRouteConfig {
+            name: "r1".to_string(),
+            destination: "log".to_string(),
+            min_severity: "ultra".to_string(),
+            event_types: None,
+            webhook_url: None,
+            email_to: None,
+            webhook_headers: None,
+        };
+        assert!(route.validate(0, false).is_err());
+    }
+
+    #[test]
+    fn validate_webhook_without_url_is_error() {
+        let route = AlertRouteConfig {
+            name: "r1".to_string(),
+            destination: "webhook".to_string(),
+            min_severity: "low".to_string(),
+            event_types: None,
+            webhook_url: None,
+            email_to: None,
+            webhook_headers: None,
+        };
+        assert!(route.validate(0, false).is_err());
+    }
+
+    #[test]
+    fn validate_email_without_email_to_is_error() {
+        let route = AlertRouteConfig {
+            name: "r1".to_string(),
+            destination: "email".to_string(),
+            min_severity: "low".to_string(),
+            event_types: None,
+            webhook_url: None,
+            email_to: None,
+            webhook_headers: None,
+        };
+        assert!(route.validate(0, true).is_err());
+    }
+
+    #[test]
+    fn validate_email_without_smtp_is_error() {
+        let route = AlertRouteConfig {
+            name: "r1".to_string(),
+            destination: "email".to_string(),
+            min_severity: "low".to_string(),
+            event_types: None,
+            webhook_url: None,
+            email_to: Some("a@b.com".to_string()),
+            webhook_headers: None,
+        };
+        assert!(route.validate(0, false).is_err());
+    }
+
+    // ── to_domain_route tests ───────────────────────────────────────
+
+    #[test]
+    fn to_domain_log_route() {
+        let route = AlertRouteConfig {
+            name: "my-log".to_string(),
+            destination: "log".to_string(),
+            min_severity: "low".to_string(),
+            event_types: None,
+            webhook_url: None,
+            email_to: None,
+            webhook_headers: None,
+        };
+        let domain = route.to_domain_route().unwrap();
+        assert_eq!(domain.name, "my-log");
+        assert!(matches!(domain.destination, AlertDestination::Log));
+        assert_eq!(domain.min_severity, domain::common::entity::Severity::Low);
+    }
+
+    #[test]
+    fn to_domain_webhook_route() {
+        let route = AlertRouteConfig {
+            name: "wh".to_string(),
+            destination: "webhook".to_string(),
+            min_severity: "high".to_string(),
+            event_types: Some(vec!["ids".to_string()]),
+            webhook_url: Some("https://example.com/hook".to_string()),
+            email_to: None,
+            webhook_headers: None,
+        };
+        let domain = route.to_domain_route().unwrap();
+        assert!(matches!(
+            domain.destination,
+            AlertDestination::Webhook { ref url } if url == "https://example.com/hook"
+        ));
+        assert_eq!(domain.min_severity, domain::common::entity::Severity::High);
+        assert_eq!(domain.event_types, Some(vec!["ids".to_string()]));
+    }
+
+    #[test]
+    fn to_domain_email_route() {
+        let route = AlertRouteConfig {
+            name: "em".to_string(),
+            destination: "email".to_string(),
+            min_severity: "critical".to_string(),
+            event_types: None,
+            webhook_url: None,
+            email_to: Some("ops@co.com".to_string()),
+            webhook_headers: None,
+        };
+        let domain = route.to_domain_route().unwrap();
+        assert!(matches!(
+            domain.destination,
+            AlertDestination::Email { ref to } if to == "ops@co.com"
+        ));
+        assert_eq!(
+            domain.min_severity,
+            domain::common::entity::Severity::Critical
+        );
+    }
+
+    #[test]
+    fn to_domain_invalid_destination_is_error() {
+        let route = AlertRouteConfig {
+            name: "bad".to_string(),
+            destination: "fax".to_string(),
+            min_severity: "low".to_string(),
+            event_types: None,
+            webhook_url: None,
+            email_to: None,
+            webhook_headers: None,
+        };
+        assert!(route.to_domain_route().is_err());
+    }
+}

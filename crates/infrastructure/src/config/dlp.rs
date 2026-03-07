@@ -119,3 +119,122 @@ impl DlpPatternConfig {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use domain::common::entity::{DomainMode, Severity};
+
+    fn valid_pattern_config() -> DlpPatternConfig {
+        DlpPatternConfig {
+            id: "pat-1".to_string(),
+            name: "Credit Card".to_string(),
+            regex: r"\d{4}-\d{4}-\d{4}-\d{4}".to_string(),
+            severity: "high".to_string(),
+            data_type: "pci".to_string(),
+            mode: None,
+            description: Some("CC pattern".to_string()),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn default_config() {
+        let cfg = DlpConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.mode, "alert");
+        assert!(cfg.patterns.is_empty());
+    }
+
+    #[test]
+    fn valid_pattern_deserialization() {
+        let yaml = r#"
+id: pat-1
+name: Credit Card
+regex: '\d{4}-\d{4}-\d{4}-\d{4}'
+severity: high
+data_type: pci
+"#;
+        let pattern: DlpPatternConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(pattern.id, "pat-1");
+        assert_eq!(pattern.name, "Credit Card");
+        assert_eq!(pattern.data_type, "pci");
+        assert!(pattern.enabled); // default
+        assert!(pattern.mode.is_none()); // default
+    }
+
+    #[test]
+    fn validate_empty_id_error() {
+        let mut p = valid_pattern_config();
+        p.id = String::new();
+        let err = p.validate(0).unwrap_err();
+        assert!(err.to_string().contains("id"), "error: {err}");
+    }
+
+    #[test]
+    fn validate_empty_regex_error() {
+        let mut p = valid_pattern_config();
+        p.regex = String::new();
+        let err = p.validate(0).unwrap_err();
+        assert!(err.to_string().contains("regex"), "error: {err}");
+    }
+
+    #[test]
+    fn validate_empty_name_error() {
+        let mut p = valid_pattern_config();
+        p.name = String::new();
+        let err = p.validate(0).unwrap_err();
+        assert!(err.to_string().contains("name"), "error: {err}");
+    }
+
+    #[test]
+    fn validate_empty_data_type_error() {
+        let mut p = valid_pattern_config();
+        p.data_type = String::new();
+        let err = p.validate(0).unwrap_err();
+        assert!(err.to_string().contains("data_type"), "error: {err}");
+    }
+
+    #[test]
+    fn validate_invalid_severity_error() {
+        let mut p = valid_pattern_config();
+        p.severity = "banana".to_string();
+        let err = p.validate(0).unwrap_err();
+        assert!(err.to_string().contains("severity"), "error: {err}");
+    }
+
+    #[test]
+    fn validate_invalid_mode_error() {
+        let mut p = valid_pattern_config();
+        p.mode = Some("invalid_mode".to_string());
+        let err = p.validate(0).unwrap_err();
+        assert!(err.to_string().contains("mode"), "error: {err}");
+    }
+
+    #[test]
+    fn validate_valid_pattern_passes() {
+        let p = valid_pattern_config();
+        assert!(p.validate(0).is_ok());
+    }
+
+    #[test]
+    fn to_domain_pattern_global_mode_inheritance() {
+        let p = valid_pattern_config();
+        let domain = p.to_domain_pattern("alert").unwrap();
+        assert_eq!(domain.id.0, "pat-1");
+        assert_eq!(domain.name, "Credit Card");
+        assert_eq!(domain.severity, Severity::High);
+        assert_eq!(domain.mode, DomainMode::Alert);
+        assert_eq!(domain.data_type, "pci");
+        assert_eq!(domain.description, "CC pattern");
+        assert!(domain.enabled);
+    }
+
+    #[test]
+    fn to_domain_pattern_per_pattern_mode_override() {
+        let mut p = valid_pattern_config();
+        p.mode = Some("block".to_string());
+        let domain = p.to_domain_pattern("alert").unwrap();
+        assert_eq!(domain.mode, DomainMode::Block);
+    }
+}

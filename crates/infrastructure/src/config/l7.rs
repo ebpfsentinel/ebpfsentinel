@@ -228,3 +228,239 @@ fn parse_l7_protocol(s: &str) -> Result<(), ()> {
         _ => Err(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Default config ───────────────────────────────────────────────
+
+    #[test]
+    fn default_config() {
+        let cfg = L7Config::default();
+        assert!(!cfg.enabled);
+        assert!(cfg.ports.is_empty());
+        assert!(cfg.rules.is_empty());
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────
+
+    fn valid_http_rule() -> L7RuleConfig {
+        serde_yaml_ng::from_str(
+            r#"
+id: r1
+priority: 10
+action: deny
+protocol: http
+host: "*.example.com"
+"#,
+        )
+        .unwrap()
+    }
+
+    // ── validate() ───────────────────────────────────────────────────
+
+    #[test]
+    fn validate_empty_id_error() {
+        let mut rule = valid_http_rule();
+        rule.id = String::new();
+        let err = rule.validate(0).unwrap_err();
+        assert!(err.to_string().contains("rule ID must not be empty"));
+    }
+
+    #[test]
+    fn validate_invalid_action_error() {
+        let mut rule = valid_http_rule();
+        rule.action = "nuke".to_string();
+        let err = rule.validate(0).unwrap_err();
+        assert!(err.to_string().contains("nuke"));
+    }
+
+    #[test]
+    fn validate_invalid_protocol_error() {
+        let mut rule = valid_http_rule();
+        rule.protocol = "quic".to_string();
+        let err = rule.validate(0).unwrap_err();
+        assert!(err.to_string().contains("quic"));
+    }
+
+    #[test]
+    fn validate_invalid_src_ip_cidr_error() {
+        let mut rule = valid_http_rule();
+        rule.src_ip = Some("not-a-cidr".to_string());
+        let err = rule.validate(0).unwrap_err();
+        assert!(err.to_string().contains("not-a-cidr"));
+    }
+
+    #[test]
+    fn validate_valid_http_rule_passes() {
+        let rule = valid_http_rule();
+        rule.validate(0).unwrap();
+    }
+
+    // ── to_domain_rule() ─────────────────────────────────────────────
+
+    #[test]
+    fn to_domain_http_rule_with_host_pattern() {
+        let rule: L7RuleConfig = serde_yaml_ng::from_str(
+            r#"
+id: http1
+priority: 5
+action: allow
+protocol: http
+method: GET
+path: "/api/*"
+host: "*.example.com"
+content_type: application/json
+"#,
+        )
+        .unwrap();
+        let domain = rule.to_domain_rule().unwrap();
+        assert_eq!(domain.id.0, "http1");
+        assert_eq!(domain.priority, 5);
+        assert!(matches!(
+            domain.action,
+            domain::firewall::entity::FirewallAction::Allow
+        ));
+        match &domain.matcher {
+            L7Matcher::Http {
+                method,
+                path_pattern,
+                host_pattern,
+                content_type,
+            } => {
+                assert_eq!(method.as_deref(), Some("GET"));
+                assert_eq!(path_pattern.as_deref(), Some("/api/*"));
+                assert!(host_pattern.is_some());
+                assert_eq!(content_type.as_deref(), Some("application/json"));
+            }
+            _ => panic!("expected Http matcher"),
+        }
+    }
+
+    #[test]
+    fn to_domain_tls_rule_with_sni_pattern() {
+        let rule: L7RuleConfig = serde_yaml_ng::from_str(
+            r#"
+id: tls1
+priority: 1
+action: deny
+protocol: tls
+sni: "*.evil.com"
+"#,
+        )
+        .unwrap();
+        let domain = rule.to_domain_rule().unwrap();
+        match &domain.matcher {
+            L7Matcher::Tls { sni_pattern } => {
+                assert!(sni_pattern.is_some());
+            }
+            _ => panic!("expected Tls matcher"),
+        }
+    }
+
+    #[test]
+    fn to_domain_grpc_rule() {
+        let rule: L7RuleConfig = serde_yaml_ng::from_str(
+            r#"
+id: grpc1
+priority: 2
+action: allow
+protocol: grpc
+service: myservice
+grpc_method: MyMethod
+"#,
+        )
+        .unwrap();
+        let domain = rule.to_domain_rule().unwrap();
+        match &domain.matcher {
+            L7Matcher::Grpc {
+                service_pattern,
+                method_pattern,
+            } => {
+                assert_eq!(service_pattern.as_deref(), Some("myservice"));
+                assert_eq!(method_pattern.as_deref(), Some("MyMethod"));
+            }
+            _ => panic!("expected Grpc matcher"),
+        }
+    }
+
+    #[test]
+    fn to_domain_smtp_rule() {
+        let rule: L7RuleConfig = serde_yaml_ng::from_str(
+            r#"
+id: smtp1
+priority: 3
+action: log
+protocol: smtp
+command: EHLO
+"#,
+        )
+        .unwrap();
+        let domain = rule.to_domain_rule().unwrap();
+        match &domain.matcher {
+            L7Matcher::Smtp { command } => {
+                assert_eq!(command.as_deref(), Some("EHLO"));
+            }
+            _ => panic!("expected Smtp matcher"),
+        }
+    }
+
+    #[test]
+    fn to_domain_ftp_rule() {
+        let rule: L7RuleConfig = serde_yaml_ng::from_str(
+            r#"
+id: ftp1
+priority: 4
+action: deny
+protocol: ftp
+command: RETR
+"#,
+        )
+        .unwrap();
+        let domain = rule.to_domain_rule().unwrap();
+        match &domain.matcher {
+            L7Matcher::Ftp { command } => {
+                assert_eq!(command.as_deref(), Some("RETR"));
+            }
+            _ => panic!("expected Ftp matcher"),
+        }
+    }
+
+    #[test]
+    fn to_domain_smb_rule() {
+        let rule: L7RuleConfig = serde_yaml_ng::from_str(
+            r#"
+id: smb1
+priority: 5
+action: deny
+protocol: smb
+smb_command: 5
+is_smb2: true
+"#,
+        )
+        .unwrap();
+        let domain = rule.to_domain_rule().unwrap();
+        match &domain.matcher {
+            L7Matcher::Smb { command, is_smb2 } => {
+                assert_eq!(*command, Some(5));
+                assert_eq!(*is_smb2, Some(true));
+            }
+            _ => panic!("expected Smb matcher"),
+        }
+    }
+
+    #[test]
+    fn to_domain_invalid_protocol_error() {
+        let rule: L7RuleConfig = serde_yaml_ng::from_str(
+            r#"
+id: bad1
+priority: 1
+action: allow
+protocol: quic
+"#,
+        )
+        .unwrap();
+        assert!(rule.to_domain_rule().is_err());
+    }
+}

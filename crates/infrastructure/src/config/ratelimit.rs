@@ -314,3 +314,186 @@ fn parse_ratelimit_algorithm(s: &str) -> Result<RateLimitAlgorithm, ()> {
         _ => Err(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Default config ───────────────────────────────────────────────
+
+    #[test]
+    fn default_config() {
+        let cfg = RateLimitSectionConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.default_rate, 1000);
+        assert_eq!(cfg.default_burst, 2000);
+        assert_eq!(cfg.default_algorithm, "token_bucket");
+        assert!(cfg.rules.is_empty());
+        assert!(cfg.country_tiers.is_empty());
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────
+
+    fn valid_rule() -> RateLimitRuleConfig {
+        serde_yaml_ng::from_str(
+            r#"
+id: rl1
+rate: 500
+burst: 1000
+action: drop
+scope: source_ip
+algorithm: token_bucket
+"#,
+        )
+        .unwrap()
+    }
+
+    // ── RateLimitRuleConfig::validate() ──────────────────────────────
+
+    #[test]
+    fn validate_empty_id_error() {
+        let mut rule = valid_rule();
+        rule.id = String::new();
+        let err = rule.validate(0).unwrap_err();
+        assert!(err.to_string().contains("rule ID must not be empty"));
+    }
+
+    #[test]
+    fn validate_rate_zero_error() {
+        let mut rule = valid_rule();
+        rule.rate = 0;
+        let err = rule.validate(0).unwrap_err();
+        assert!(err.to_string().contains("rate must be > 0"));
+    }
+
+    #[test]
+    fn validate_burst_zero_error() {
+        let mut rule = valid_rule();
+        rule.burst = 0;
+        let err = rule.validate(0).unwrap_err();
+        assert!(err.to_string().contains("burst must be > 0"));
+    }
+
+    #[test]
+    fn validate_invalid_action_error() {
+        let mut rule = valid_rule();
+        rule.action = "explode".to_string();
+        let err = rule.validate(0).unwrap_err();
+        assert!(err.to_string().contains("explode"));
+    }
+
+    #[test]
+    fn validate_invalid_scope_error() {
+        let mut rule = valid_rule();
+        rule.scope = "per_subnet".to_string();
+        let err = rule.validate(0).unwrap_err();
+        assert!(err.to_string().contains("per_subnet"));
+    }
+
+    #[test]
+    fn validate_invalid_algorithm_error() {
+        let mut rule = valid_rule();
+        rule.algorithm = "magic".to_string();
+        let err = rule.validate(0).unwrap_err();
+        assert!(err.to_string().contains("magic"));
+    }
+
+    #[test]
+    fn validate_invalid_cidr_error() {
+        let mut rule = valid_rule();
+        rule.src_ip = Some("not-a-cidr".to_string());
+        let err = rule.validate(0).unwrap_err();
+        assert!(err.to_string().contains("not-a-cidr"));
+    }
+
+    #[test]
+    fn validate_valid_rule_passes() {
+        let rule = valid_rule();
+        rule.validate(0).unwrap();
+    }
+
+    // ── RateLimitRuleConfig::to_domain_policy() ──────────────────────
+
+    #[test]
+    fn to_domain_policy_correct_conversion() {
+        let rule: RateLimitRuleConfig = serde_yaml_ng::from_str(
+            r#"
+id: rl-test
+rate: 200
+burst: 400
+action: pass
+scope: global
+algorithm: sliding_window
+src_ip: "10.0.0.0/8"
+"#,
+        )
+        .unwrap();
+
+        let policy = rule.to_domain_policy().unwrap();
+        assert_eq!(policy.id.0, "rl-test");
+        assert_eq!(policy.rate, 200);
+        assert_eq!(policy.burst, 400);
+        assert!(matches!(policy.action, RateLimitAction::Pass));
+        assert!(matches!(policy.scope, RateLimitScope::Global));
+        assert!(matches!(
+            policy.algorithm,
+            RateLimitAlgorithm::SlidingWindow
+        ));
+        assert!(policy.src_ip.is_some());
+        assert!(policy.enabled);
+    }
+
+    // ── CountryTierConfigYaml::validate() ────────────────────────────
+
+    fn valid_tier() -> CountryTierConfigYaml {
+        serde_yaml_ng::from_str(
+            r#"
+tier_id: 1
+country_codes: ["US", "CA"]
+rate: 5000
+burst: 10000
+algorithm: token_bucket
+action: drop
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn tier_validate_tier_id_zero_error() {
+        let mut tier = valid_tier();
+        tier.tier_id = 0;
+        let err = tier.validate(0).unwrap_err();
+        assert!(err.to_string().contains("tier_id must be 1-15"));
+    }
+
+    #[test]
+    fn tier_validate_tier_id_16_error() {
+        let mut tier = valid_tier();
+        tier.tier_id = 16;
+        let err = tier.validate(0).unwrap_err();
+        assert!(err.to_string().contains("tier_id must be 1-15"));
+    }
+
+    #[test]
+    fn tier_validate_empty_country_codes_error() {
+        let mut tier = valid_tier();
+        tier.country_codes = Vec::new();
+        let err = tier.validate(0).unwrap_err();
+        assert!(err.to_string().contains("country_codes must not be empty"));
+    }
+
+    // ── CountryTierConfigYaml::to_domain_tier() ──────────────────────
+
+    #[test]
+    fn tier_to_domain_correct_conversion() {
+        let tier = valid_tier();
+        let domain = tier.to_domain_tier().unwrap();
+        assert_eq!(domain.tier_id, 1);
+        assert_eq!(domain.country_codes, vec!["US", "CA"]);
+        assert_eq!(domain.rate, 5000);
+        assert_eq!(domain.burst, 10000);
+        assert!(matches!(domain.algorithm, RateLimitAlgorithm::TokenBucket));
+        assert!(matches!(domain.action, RateLimitAction::Drop));
+    }
+}

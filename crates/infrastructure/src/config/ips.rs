@@ -187,3 +187,112 @@ impl IpsRuleConfig {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use domain::common::entity::{DomainMode, Severity};
+
+    fn valid_rule_config() -> IpsRuleConfig {
+        IpsRuleConfig {
+            id: "ips-1".to_string(),
+            description: Some("Test rule".to_string()),
+            severity: "high".to_string(),
+            mode: None,
+            protocol: "tcp".to_string(),
+            dst_port: Some(80),
+            pattern: None,
+            enabled: true,
+            threshold: None,
+        }
+    }
+
+    // ── Default config ─────────────────────────────────────────────
+
+    #[test]
+    fn default_config() {
+        let cfg = IpsConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.mode, "alert");
+        assert_eq!(cfg.max_blacklist_duration_secs, 3600);
+        assert_eq!(cfg.auto_blacklist_threshold, 3);
+        assert_eq!(cfg.max_blacklist_size, 10_000);
+    }
+
+    // ── IpsConfig::to_domain_policy ────────────────────────────────
+
+    #[test]
+    fn to_domain_policy_correct() {
+        let cfg = IpsConfig::default();
+        let policy = cfg.to_domain_policy();
+        assert_eq!(
+            policy.max_blacklist_duration,
+            std::time::Duration::from_secs(3600)
+        );
+        assert_eq!(policy.auto_blacklist_threshold, 3);
+        assert_eq!(policy.max_blacklist_size, 10_000);
+        assert!(policy.country_thresholds.is_none());
+    }
+
+    // ── IpsRuleConfig::validate_ips ────────────────────────────────
+
+    #[test]
+    fn validate_empty_id_error() {
+        let mut r = valid_rule_config();
+        r.id = String::new();
+        let err = r.validate_ips(0).unwrap_err();
+        assert!(err.to_string().contains("id"), "error: {err}");
+    }
+
+    #[test]
+    fn validate_invalid_severity_error() {
+        let mut r = valid_rule_config();
+        r.severity = "banana".to_string();
+        let err = r.validate_ips(0).unwrap_err();
+        assert!(err.to_string().contains("severity"), "error: {err}");
+    }
+
+    #[test]
+    fn validate_invalid_protocol_error() {
+        let mut r = valid_rule_config();
+        r.protocol = "ftp".to_string();
+        let err = r.validate_ips(0).unwrap_err();
+        assert!(err.to_string().contains("protocol"), "error: {err}");
+    }
+
+    #[test]
+    fn validate_invalid_mode_error() {
+        let mut r = valid_rule_config();
+        r.mode = Some("nope".to_string());
+        let err = r.validate_ips(0).unwrap_err();
+        assert!(err.to_string().contains("mode"), "error: {err}");
+    }
+
+    #[test]
+    fn validate_valid_rule_passes() {
+        let r = valid_rule_config();
+        assert!(r.validate_ips(0).is_ok());
+    }
+
+    // ── IpsRuleConfig::to_domain_rule ──────────────────────────────
+
+    #[test]
+    fn to_domain_rule_global_mode_inheritance() {
+        let r = valid_rule_config();
+        let domain = r.to_domain_rule("alert").unwrap();
+        assert_eq!(domain.id.0, "ips-1");
+        assert_eq!(domain.severity, Severity::High);
+        assert_eq!(domain.mode, DomainMode::Alert);
+        assert_eq!(domain.protocol, domain::common::entity::Protocol::Tcp);
+        assert_eq!(domain.dst_port, Some(80));
+        assert!(domain.enabled);
+    }
+
+    #[test]
+    fn to_domain_rule_per_rule_mode_override() {
+        let mut r = valid_rule_config();
+        r.mode = Some("block".to_string());
+        let domain = r.to_domain_rule("alert").unwrap();
+        assert_eq!(domain.mode, DomainMode::Block);
+    }
+}

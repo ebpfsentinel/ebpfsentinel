@@ -211,3 +211,166 @@ pub(super) fn parse_feed_format(s: &str) -> Result<FeedFormat, ()> {
         _ => Err(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Default config ───────────────────────────────────────────────
+
+    #[test]
+    fn default_config() {
+        let cfg = ThreatIntelConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.mode, "alert");
+        assert!(cfg.feeds.is_empty());
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────
+
+    fn valid_feed() -> ThreatIntelFeedConfig {
+        serde_yaml_ng::from_str(
+            r#"
+id: feed1
+name: Test Feed
+url: "https://example.com/feed.txt"
+format: plaintext
+refresh_interval_secs: 3600
+"#,
+        )
+        .unwrap()
+    }
+
+    // ── ThreatIntelFeedConfig::validate() ────────────────────────────
+
+    #[test]
+    fn validate_empty_id_error() {
+        let mut feed = valid_feed();
+        feed.id = String::new();
+        let err = feed.validate(0).unwrap_err();
+        assert!(err.to_string().contains("feed ID must not be empty"));
+    }
+
+    #[test]
+    fn validate_empty_name_error() {
+        let mut feed = valid_feed();
+        feed.name = String::new();
+        let err = feed.validate(0).unwrap_err();
+        assert!(err.to_string().contains("feed name must not be empty"));
+    }
+
+    #[test]
+    fn validate_empty_url_error() {
+        let mut feed = valid_feed();
+        feed.url = String::new();
+        let err = feed.validate(0).unwrap_err();
+        assert!(err.to_string().contains("feed URL must not be empty"));
+    }
+
+    #[test]
+    fn validate_non_http_url_error() {
+        let mut feed = valid_feed();
+        feed.url = "file:///etc/passwd".to_string();
+        let err = feed.validate(0).unwrap_err();
+        assert!(err.to_string().contains("http:// or https://"));
+    }
+
+    #[test]
+    fn validate_refresh_interval_zero_error() {
+        let mut feed = valid_feed();
+        feed.refresh_interval_secs = 0;
+        let err = feed.validate(0).unwrap_err();
+        assert!(err.to_string().contains("refresh interval must be > 0"));
+    }
+
+    #[test]
+    fn validate_invalid_format_error() {
+        let mut feed = valid_feed();
+        feed.format = "xml".to_string();
+        let err = feed.validate(0).unwrap_err();
+        assert!(err.to_string().contains("xml"));
+    }
+
+    #[test]
+    fn validate_invalid_default_action_error() {
+        let mut feed = valid_feed();
+        feed.default_action = Some("nuke".to_string());
+        let err = feed.validate(0).unwrap_err();
+        assert!(err.to_string().contains("nuke"));
+    }
+
+    #[test]
+    fn validate_valid_feed_passes() {
+        let feed = valid_feed();
+        feed.validate(0).unwrap();
+    }
+
+    // ── to_domain_feed_config() ──────────────────────────────────────
+
+    #[test]
+    fn to_domain_feed_config_with_field_mapping() {
+        let feed: ThreatIntelFeedConfig = serde_yaml_ng::from_str(
+            r##"
+id: csv-feed
+name: CSV Feed
+url: "https://example.com/feed.csv"
+format: csv
+ip_field: src_ip
+confidence_field: score
+category_field: cat
+separator: ";"
+comment_prefix: "#"
+skip_header: true
+min_confidence: 50
+"##,
+        )
+        .unwrap();
+
+        let domain = feed.to_domain_feed_config("alert").unwrap();
+        assert_eq!(domain.id, "csv-feed");
+        assert_eq!(domain.name, "CSV Feed");
+        assert_eq!(domain.url, "https://example.com/feed.csv");
+        assert!(matches!(domain.format, FeedFormat::Csv));
+        assert!(domain.enabled);
+        assert_eq!(domain.min_confidence, 50);
+
+        let mapping = domain.field_mapping.unwrap();
+        assert_eq!(mapping.ip_field, "src_ip");
+        assert_eq!(mapping.confidence_field.as_deref(), Some("score"));
+        assert_eq!(mapping.category_field.as_deref(), Some("cat"));
+        assert_eq!(mapping.separator, ';');
+        assert_eq!(mapping.comment_prefix.as_deref(), Some("#"));
+        assert!(mapping.skip_header);
+    }
+
+    #[test]
+    fn to_domain_feed_config_without_field_mapping() {
+        let feed = valid_feed();
+        let domain = feed.to_domain_feed_config("alert").unwrap();
+        assert!(domain.field_mapping.is_none());
+        assert_eq!(domain.refresh_interval_secs, 3600);
+        assert_eq!(domain.max_iocs, 500_000);
+    }
+
+    // ── parse_feed_format ────────────────────────────────────────────
+
+    #[test]
+    fn parse_feed_format_all_valid() {
+        assert!(matches!(parse_feed_format("csv"), Ok(FeedFormat::Csv)));
+        assert!(matches!(parse_feed_format("json"), Ok(FeedFormat::Json)));
+        assert!(matches!(parse_feed_format("stix"), Ok(FeedFormat::Stix)));
+        assert!(matches!(
+            parse_feed_format("plaintext"),
+            Ok(FeedFormat::Plaintext)
+        ));
+        assert!(matches!(
+            parse_feed_format("txt"),
+            Ok(FeedFormat::Plaintext)
+        ));
+        assert!(matches!(
+            parse_feed_format("text"),
+            Ok(FeedFormat::Plaintext)
+        ));
+        assert!(parse_feed_format("xml").is_err());
+    }
+}
