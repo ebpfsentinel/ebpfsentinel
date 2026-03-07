@@ -17,6 +17,18 @@ if [ -z "${EBPF_HOST_IP:-}" ]; then
     source "${PERF_HELPERS_DIR}/ebpf_helpers.bash"
 fi
 
+# ── Execution wrapper ──────────────────────────────────────────────
+# _perf_exec <command...>
+# In single-VM mode: runs command inside the test network namespace.
+# In 2-VM mode: runs command locally (attacker VM sends directly).
+_perf_exec() {
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        "$@"
+    else
+        ip netns exec "$EBPF_TEST_NS" "$@"
+    fi
+}
+
 # ── Throughput measurement ──────────────────────────────────────────
 
 # measure_tcp_throughput <dst_ip> <duration_secs> [streams]
@@ -27,8 +39,7 @@ measure_tcp_throughput() {
     local streams="${3:-4}"
 
     local result
-    result="$(ip netns exec "$EBPF_TEST_NS" \
-        iperf3 -c "$dst" -t "$duration" -P "$streams" --json 2>/dev/null)" || {
+    result="$(iperf3_from_ns "$dst" "$duration" "" -P "$streams" 2>/dev/null)" || {
         echo '{"bps": 0, "retransmits": 0, "error": "iperf3 failed"}'
         return 1
     }
@@ -47,8 +58,7 @@ measure_udp_throughput() {
     local duration="${2:-10}"
 
     local result
-    result="$(ip netns exec "$EBPF_TEST_NS" \
-        iperf3 -c "$dst" -t "$duration" -u -b 0 --json 2>/dev/null)" || {
+    result="$(iperf3_from_ns "$dst" "$duration" "-u" -b 0 2>/dev/null)" || {
         echo '{"bps": 0, "jitter_ms": 0, "loss_pct": 100, "error": "iperf3 failed"}'
         return 1
     }
@@ -70,8 +80,7 @@ measure_icmp_latency() {
     local count="${2:-100}"
 
     local result
-    result="$(ip netns exec "$EBPF_TEST_NS" \
-        ping -c "$count" -W 1 -i 0.01 "$dst" 2>/dev/null)" || {
+    result="$(_perf_exec ping -c "$count" -W 1 -i 0.01 "$dst" 2>/dev/null)" || {
         echo '{"min_us": 0, "avg_us": 0, "max_us": 0, "error": "ping failed"}'
         return 1
     }
@@ -108,8 +117,7 @@ measure_tcp_latency() {
     local count="${3:-100}"
 
     local result
-    result="$(ip netns exec "$EBPF_TEST_NS" \
-        hping3 -S -p "$port" -c "$count" -i u10000 "$dst" 2>&1)" || true
+    result="$(_perf_exec hping3 -S -p "$port" -c "$count" -i u10000 "$dst" 2>&1)" || true
 
     # Parse "round-trip min/avg/max = 0.1/0.2/0.3 ms"
     local rtt_line
@@ -142,8 +150,7 @@ measure_pps() {
     tmpfile="$(mktemp /tmp/ebpfsentinel-pps-XXXXXX)"
 
     # hping3 --flood sends as fast as possible; run in background, kill after duration
-    ip netns exec "$EBPF_TEST_NS" \
-        hping3 -S -p "$port" --flood -q "$dst" >"$tmpfile" 2>&1 &
+    _perf_exec hping3 -S -p "$port" --flood -q "$dst" >"$tmpfile" 2>&1 &
     local hping_pid=$!
 
     sleep "$duration"

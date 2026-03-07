@@ -13,7 +13,7 @@ find_project_root() {
         fi
         dir="$(dirname "$dir")"
     done
-    echo "/home/maxime/Github-perso/eBPFsentinel/ebpfsentinel"
+    echo "$(pwd)"
 }
 
 PROJECT_ROOT="${PROJECT_ROOT:-$(find_project_root)}"
