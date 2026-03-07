@@ -49,6 +49,7 @@ extendedKeyUsage = serverAuth
 [alt_names]
 DNS.1 = localhost
 IP.1 = 127.0.0.1
+IP.2 = 192.168.56.10
 EOF
 
 openssl req -newkey rsa:2048 -nodes \

@@ -87,10 +87,24 @@ teardown_file() {
       enabled: true
 RULES
 
+    # In 2VM mode, rewrite data paths and update the remote config
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        local remote_config="${_REMOTE_CONFIG_DIR}/$(basename "$PREPARED_CONFIG")"
+        local rewritten="/tmp/ebpfsentinel-2vm-reload-$$.yaml"
+        sed -e "s|/tmp/ebpfsentinel-test-data[^/]*|${_REMOTE_DATA_DIR}|g" \
+            "$PREPARED_CONFIG" > "$rewritten"
+        _agent_scp "$rewritten" "$remote_config"
+        rm -f "$rewritten"
+    fi
+
     # Send SIGHUP to trigger config reload
-    local pid
-    pid="$(cat "$AGENT_PID_FILE" 2>/dev/null)"
-    [ -n "$pid" ] && kill -HUP "$pid"
+    if type signal_agent &>/dev/null; then
+        signal_agent HUP
+    else
+        local pid
+        pid="$(cat "$AGENT_PID_FILE" 2>/dev/null)"
+        [ -n "$pid" ] && kill -HUP "$pid"
+    fi
 
     # Wait for reload to take effect
     sleep 3
@@ -116,10 +130,20 @@ RULES
     # Corrupt the config with invalid YAML
     echo ":::INVALID_YAML{{{{" >> "$PREPARED_CONFIG"
 
+    # In 2VM mode, update the remote config
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        local remote_config="${_REMOTE_CONFIG_DIR}/$(basename "$PREPARED_CONFIG")"
+        _agent_scp "$PREPARED_CONFIG" "$remote_config"
+    fi
+
     # Send SIGHUP with the corrupted config
-    local pid
-    pid="$(cat "$AGENT_PID_FILE" 2>/dev/null)"
-    [ -n "$pid" ] && kill -HUP "$pid"
+    if type signal_agent &>/dev/null; then
+        signal_agent HUP
+    else
+        local pid
+        pid="$(cat "$AGENT_PID_FILE" 2>/dev/null)"
+        [ -n "$pid" ] && kill -HUP "$pid"
+    fi
 
     # Wait for reload attempt
     sleep 2

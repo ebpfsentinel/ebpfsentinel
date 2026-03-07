@@ -16,6 +16,15 @@ setup_file() {
         bash "${SCRIPT_DIR}/generate-certs.sh" --out-dir "$CERT_DIR"
     fi
 
+    # In 2VM mode, copy certs to agent VM so it can use them
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        _agent_ssh_sudo mkdir -p "$CERT_DIR" 2>/dev/null || true
+        _agent_ssh_sudo chown vagrant:vagrant "$CERT_DIR" 2>/dev/null || true
+        for f in server.pem server-key.pem ca.pem; do
+            [ -f "${CERT_DIR}/$f" ] && _agent_scp "${CERT_DIR}/$f" "${CERT_DIR}/$f"
+        done
+    fi
+
     # Prepare TLS config from template
     export PREPARED_CONFIG="/tmp/ebpfsentinel-test-tls-$$.yaml"
     sed -e "s|__DATA_DIR__|${DATA_DIR}|g" \
@@ -30,34 +39,62 @@ setup_file() {
 
     # Kill stale agent from previous suites
     stop_agent 2>/dev/null || true
-    _kill_port_holders "${AGENT_TLS_PORT}" "${AGENT_GRPC_PORT}"
 
-    # Wait for ports to be fully freed
-    local port_wait=0
-    while { ss -tlnp 2>/dev/null | grep -qE ":(${AGENT_TLS_PORT}|${AGENT_GRPC_PORT}) "; } && [ "$port_wait" -lt 10 ]; do
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        # Must stop stale agent, start new one, but skip the HTTP health check
+        # because this agent listens on TLS only.
+        stop_agent 2>/dev/null || true
+        _agent_ssh_sudo mkdir -p "${_REMOTE_CONFIG_DIR}" "${_REMOTE_DATA_DIR}" 2>/dev/null || true
+        _agent_ssh_sudo chown vagrant:vagrant "${_REMOTE_CONFIG_DIR}" "${_REMOTE_DATA_DIR}" 2>/dev/null || true
+        local rewritten="/tmp/ebpfsentinel-2vm-tls-$$.yaml"
+        sed -e "s|/tmp/ebpfsentinel-test-data[^/]*|${_REMOTE_DATA_DIR}|g" \
+            "$PREPARED_CONFIG" > "$rewritten"
+        local remote_config="${_REMOTE_CONFIG_DIR}/$(basename "$PREPARED_CONFIG")"
+        _agent_scp "$rewritten" "$remote_config"
+        rm -f "$rewritten"
+        _agent_ssh_sudo bash -c \
+            "'nohup /usr/local/bin/ebpfsentinel-agent --config ${remote_config} >${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}'"
+        sleep 0.5
+        local remote_pid
+        remote_pid="$(_agent_ssh cat "${_REMOTE_PID_FILE}" 2>/dev/null)" || true
+        AGENT_PID="$remote_pid"
+        echo "$AGENT_PID" > "$AGENT_PID_FILE"
+        # Wait for TLS health check
+        wait_for_agent_tls "${TLS_URL}/healthz" "${CERT_DIR}/ca.pem" || {
+            echo "TLS agent failed health check on ${AGENT_HOST}. Remote log:" >&2
+            _agent_ssh cat "${_REMOTE_LOG_FILE}" 2>&1 | tail -20 >&2
+            return 1
+        }
+    else
+        _kill_port_holders "${AGENT_TLS_PORT}" "${AGENT_GRPC_PORT}"
+
+        # Wait for ports to be fully freed
+        local port_wait=0
+        while { ss -tlnp 2>/dev/null | grep -qE ":(${AGENT_TLS_PORT}|${AGENT_GRPC_PORT}) "; } && [ "$port_wait" -lt 10 ]; do
+            sleep 0.3
+            port_wait=$((port_wait + 1))
+        done
+
+        "$AGENT_BIN" --config "$PREPARED_CONFIG" \
+            >"$AGENT_LOG_FILE" 2>&1 &
+        AGENT_PID=$!
+        echo "$AGENT_PID" > "$AGENT_PID_FILE"
+
+        # Brief pause then verify the process is still alive
         sleep 0.3
-        port_wait=$((port_wait + 1))
-    done
+        if ! kill -0 "$AGENT_PID" 2>/dev/null; then
+            echo "TLS agent process exited immediately. Log tail:" >&2
+            tail -20 "$AGENT_LOG_FILE" >&2
+            return 1
+        fi
 
-    "$AGENT_BIN" --config "$PREPARED_CONFIG" \
-        >"$AGENT_LOG_FILE" 2>&1 &
-    AGENT_PID=$!
-    echo "$AGENT_PID" > "$AGENT_PID_FILE"
-
-    # Brief pause then verify the process is still alive
-    sleep 0.3
-    if ! kill -0 "$AGENT_PID" 2>/dev/null; then
-        echo "TLS agent process exited immediately. Log tail:" >&2
-        tail -20 "$AGENT_LOG_FILE" >&2
-        return 1
+        # Wait for agent to be healthy over TLS
+        wait_for_agent_tls "${TLS_URL}/healthz" "${CERT_DIR}/ca.pem" || {
+            echo "TLS agent failed to start. Log tail:" >&2
+            tail -20 "$AGENT_LOG_FILE" >&2
+            return 1
+        }
     fi
-
-    # Wait for agent to be healthy over TLS
-    wait_for_agent_tls "${TLS_URL}/healthz" "${CERT_DIR}/ca.pem" || {
-        echo "TLS agent failed to start. Log tail:" >&2
-        tail -20 "$AGENT_LOG_FILE" >&2
-        return 1
-    }
 }
 
 teardown_file() {

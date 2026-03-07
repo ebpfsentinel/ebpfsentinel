@@ -16,6 +16,13 @@ setup_file() {
         bash "${SCRIPT_DIR}/generate-jwt-keys.sh" --out-dir "$JWT_DIR"
     fi
 
+    # In 2VM mode, copy JWT public key to agent VM so it can verify tokens
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        _agent_ssh_sudo mkdir -p "$JWT_DIR" 2>/dev/null || true
+        _agent_ssh_sudo chown vagrant:vagrant "$JWT_DIR" 2>/dev/null || true
+        _agent_scp "${JWT_DIR}/jwt-public.pem" "${JWT_DIR}/jwt-public.pem"
+    fi
+
     # Prepare auth config from template
     export PREPARED_CONFIG="/tmp/ebpfsentinel-test-auth-$$.yaml"
     sed -e "s|__DATA_DIR__|${DATA_DIR}|g" \

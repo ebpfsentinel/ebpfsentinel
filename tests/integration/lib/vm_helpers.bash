@@ -88,6 +88,34 @@ require_ebpf_env() {
     fi
 }
 
+# require_tool — in 2VM mode, check tool availability on the agent VM
+# for privileged tools (bpftool, ip, tc), check on attacker for others
+require_tool() {
+    local tool="${1:?usage: require_tool <command>}"
+    case "$tool" in
+        bpftool|tc)
+            if ! _agent_ssh_sudo which "$tool" &>/dev/null; then
+                skip "${tool} not installed on agent VM"
+            fi
+            ;;
+        *)
+            if ! command -v "$tool" &>/dev/null; then
+                skip "${tool} not installed"
+            fi
+            ;;
+    esac
+}
+
+# ── Remote command wrappers ──────────────────────────────────────
+
+# bpftool — wrapper that runs bpftool on the agent VM via SSH
+bpftool() {
+    _agent_ssh_sudo bpftool "$@"
+}
+
+# Override EBPF_VETH_HOST to match the agent VM's private network interface
+EBPF_VETH_HOST="${EBPF_AGENT_INTERFACE}"
+
 # ── Network namespace (overrides — no-ops) ────────────────────────
 
 # create_test_netns — no-op in 2VM mode.
@@ -212,7 +240,7 @@ start_ebpf_agent() {
 
     # Rewrite local data paths to remote data paths in the config before SCP
     local rewritten_config="/tmp/ebpfsentinel-2vm-rewritten-$$.yaml"
-    sed -e "s|/tmp/ebpfsentinel-test-data-[0-9]*|${_REMOTE_DATA_DIR}|g" \
+    sed -e "s|/tmp/ebpfsentinel-test-data[^/]*|${_REMOTE_DATA_DIR}|g" \
         "$config_file" > "$rewritten_config"
 
     # Copy rewritten config file to agent VM

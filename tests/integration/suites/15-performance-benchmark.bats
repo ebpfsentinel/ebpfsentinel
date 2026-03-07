@@ -180,7 +180,11 @@ _report_set_str() {
 
     # Read VmRSS from /proc (in kB)
     local rss_kb
-    rss_kb="$(grep VmRSS "/proc/${pid}/status" 2>/dev/null | awk '{print $2}')" || skip "cannot read agent /proc"
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        rss_kb="$(_agent_ssh_sudo grep VmRSS "/proc/${pid}/status" 2>/dev/null | awk '{print $2}')" || skip "cannot read agent /proc on remote"
+    else
+        rss_kb="$(grep VmRSS "/proc/${pid}/status" 2>/dev/null | awk '{print $2}')" || skip "cannot read agent /proc"
+    fi
 
     _report_set "agent_rss_kb" "$rss_kb"
 
