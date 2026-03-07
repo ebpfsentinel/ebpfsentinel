@@ -58,3 +58,15 @@ harness = false
 [[bench]]
 name = "feed_parser"
 harness = false
+
+[[bench]]
+name = "dns_parser"
+harness = false
+
+[[bench]]
+name = "alias_resolver"
+harness = false
+
+[[bench]]
+name = "lb_engine"
+harness = false
