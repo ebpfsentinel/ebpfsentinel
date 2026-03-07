@@ -70,6 +70,7 @@ impl ThreatIntelAppService {
 
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        tracing::info!(enabled, "threat intel service toggled");
     }
 
     pub fn add_ioc(&mut self, mut ioc: Ioc) -> Result<(), DomainError> {
@@ -92,9 +93,11 @@ impl ThreatIntelAppService {
 
     pub fn reload_iocs(&mut self, iocs: Vec<Ioc>) -> Result<(), DomainError> {
         let iocs = self.apply_country_boosts(iocs);
+        let count = iocs.len();
         self.engine.reload(iocs)?;
         self.sync_ebpf_maps();
         self.update_metrics();
+        tracing::info!(count, "threat intel IOCs reloaded");
         Ok(())
     }
 
@@ -164,8 +167,9 @@ mod tests {
     use super::*;
     use domain::threatintel::entity::{FeedFormat, ThreatType};
     use ports::secondary::metrics_port::{
-        AlertMetrics, ConfigMetrics, DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics,
-        IpsMetrics, PacketMetrics, SystemMetrics,
+        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
+        DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics, IpsMetrics, LbMetrics,
+        PacketMetrics, RoutingMetrics, SystemMetrics,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -197,6 +201,12 @@ mod tests {
     impl SystemMetrics for TestMetrics {}
     impl ConfigMetrics for TestMetrics {}
     impl EventMetrics for TestMetrics {}
+    impl DlpMetrics for TestMetrics {}
+    impl DdosMetrics for TestMetrics {}
+    impl ConntrackMetrics for TestMetrics {}
+    impl RoutingMetrics for TestMetrics {}
+    impl AuditMetrics for TestMetrics {}
+    impl LbMetrics for TestMetrics {}
 
     fn make_ioc(ip: &str) -> Ioc {
         Ioc {

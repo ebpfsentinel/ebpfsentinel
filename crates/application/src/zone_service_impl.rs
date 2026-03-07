@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use domain::zone::entity::{Zone, ZoneConfig, ZonePair, ZonePolicy};
+use ports::secondary::metrics_port::MetricsPort;
 
 /// Application-level zone service.
 ///
@@ -8,6 +11,7 @@ use domain::zone::entity::{Zone, ZoneConfig, ZonePair, ZonePolicy};
 /// REST API layer.
 pub struct ZoneAppService {
     config: Option<ZoneConfig>,
+    metrics: Option<Arc<dyn MetricsPort>>,
     enabled: bool,
 }
 
@@ -21,8 +25,14 @@ impl ZoneAppService {
     pub fn new() -> Self {
         Self {
             config: None,
+            metrics: None,
             enabled: false,
         }
+    }
+
+    /// Set the metrics port for recording zone metrics.
+    pub fn set_metrics(&mut self, metrics: Arc<dyn MetricsPort>) {
+        self.metrics = Some(metrics);
     }
 
     pub fn enabled(&self) -> bool {
@@ -31,6 +41,7 @@ impl ZoneAppService {
 
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        tracing::info!(enabled, "zone service toggled");
     }
 
     /// Reload zone configuration. Validates and stores the config.
@@ -38,7 +49,16 @@ impl ZoneAppService {
         config
             .validate()
             .map_err(|e| domain::common::error::DomainError::InvalidConfig(e.to_string()))?;
+        let total = config.zones.len() + config.zone_policies.len();
         self.config = Some(config);
+        if let Some(ref m) = self.metrics {
+            m.set_rules_loaded("zones", total as u64);
+        }
+        tracing::info!(
+            zones = self.zone_count(),
+            policies = self.policy_count(),
+            "zone config reloaded"
+        );
         Ok(())
     }
 

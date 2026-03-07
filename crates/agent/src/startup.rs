@@ -280,6 +280,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
 
     // ── 5c⅞a. Build Zone service ───────────────────────────────────
     let mut zone_svc = ZoneAppService::new();
+    zone_svc.set_metrics(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     zone_svc.set_enabled(config.zones.enabled);
     if config.zones.enabled
         && let Ok(zone_cfg) = config.zone_config()
@@ -334,6 +335,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
 
     // ── 5c⅞½. Build Routing service ─────────────────────────────────
     let mut routing_svc = RoutingAppService::new();
+    routing_svc.set_metrics(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     routing_svc.set_enabled(config.routing.enabled);
     if config.routing.enabled {
         let gateways: Vec<_> = config
@@ -355,6 +357,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
 
     // ── 5c⅞¾. Build Schedule service ────────────────────────────────
     let mut schedule_svc = ScheduleService::new();
+    schedule_svc.set_metrics(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     if !config.firewall.schedules.is_empty() {
         use application::schedule_service_impl::{
             Schedule, ScheduleEntry, parse_day, parse_time_range,
@@ -423,6 +426,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     // ── 5e. Build audit service ───────────────────────────────────────
     let audit_sink: Arc<dyn AuditSink> = Arc::new(LogAuditSink);
     let mut audit_svc = AuditAppService::new(audit_sink);
+    audit_svc.set_metrics(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     audit_svc.set_enabled(config.audit.enabled);
 
     // Attach persistent audit store (redb) — graceful degradation on failure

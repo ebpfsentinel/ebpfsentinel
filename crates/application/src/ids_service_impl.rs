@@ -64,6 +64,7 @@ impl IdsAppService {
 
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        tracing::info!(enabled, "IDS service toggled");
     }
 
     pub fn add_rule(&mut self, rule: IdsRule) -> Result<(), DomainError> {
@@ -81,9 +82,11 @@ impl IdsAppService {
     }
 
     pub fn reload_rules(&mut self, rules: Vec<IdsRule>) -> Result<(), DomainError> {
+        let count = rules.len();
         self.engine.reload(rules)?;
         self.sync_ebpf_maps();
         self.update_metrics();
+        tracing::info!(count, "IDS rules reloaded");
         Ok(())
     }
 

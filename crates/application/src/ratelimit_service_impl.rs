@@ -140,9 +140,11 @@ impl RateLimitAppService {
 
     /// Reload all policies atomically.
     pub fn reload_policies(&mut self, policies: Vec<RateLimitPolicy>) -> Result<(), DomainError> {
+        let count = policies.len();
         self.engine.reload(policies)?;
         self.sync_ebpf_maps();
         self.update_metrics();
+        tracing::info!(count, "rate limit policies reloaded");
         Ok(())
     }
 
@@ -180,6 +182,7 @@ impl RateLimitAppService {
     /// Set the enabled state.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        tracing::info!(enabled, "rate limit service toggled");
     }
 
     /// Full-reload sync: push all engine policies to the eBPF config map.

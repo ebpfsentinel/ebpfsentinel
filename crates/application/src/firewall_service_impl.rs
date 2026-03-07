@@ -75,6 +75,7 @@ impl FirewallAppService {
     /// Set the enabled state.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        tracing::info!(enabled, "firewall service toggled");
     }
 
     /// Set the eBPF map port for kernel map synchronisation.
@@ -87,9 +88,15 @@ impl FirewallAppService {
 
     /// Add a firewall rule. Syncs to eBPF maps and updates metrics.
     pub fn add_rule(&mut self, rule: FirewallRule) -> Result<(), DomainError> {
+        let rule_id = rule.id.0.clone();
         self.engine.add_rule(rule)?;
         self.sync_ebpf_maps();
         self.update_metrics();
+        tracing::info!(
+            id = rule_id,
+            total = self.engine.rules().len(),
+            "firewall rule added"
+        );
         Ok(())
     }
 
@@ -106,6 +113,11 @@ impl FirewallAppService {
         self.engine.remove_rule(id)?;
         self.sync_ebpf_maps();
         self.update_metrics();
+        tracing::info!(
+            id = id.0,
+            total = self.engine.rules().len(),
+            "firewall rule removed"
+        );
         Ok(())
     }
 
@@ -117,10 +129,16 @@ impl FirewallAppService {
     /// Reload all rules atomically. Injects anti-lockout rules if enabled.
     pub fn reload_rules(&mut self, rules: Vec<FirewallRule>) -> Result<(), DomainError> {
         let mut all_rules = self.generate_anti_lockout_rules();
+        let user_count = rules.len();
         all_rules.extend(rules);
         self.engine.reload(all_rules)?;
         self.sync_ebpf_maps();
         self.update_metrics();
+        tracing::info!(
+            rules = user_count,
+            total = self.engine.rules().len(),
+            "firewall rules reloaded"
+        );
         Ok(())
     }
 

@@ -6,6 +6,7 @@ use domain::audit::query::AuditQuery;
 use domain::audit::rule_change::{ChangeActor, RuleChangeEntry};
 use ports::secondary::audit_sink::AuditSink;
 use ports::secondary::audit_store::AuditStore;
+use ports::secondary::metrics_port::MetricsPort;
 use ports::secondary::rule_change_store::RuleChangeStore;
 
 /// Application-layer audit service that delegates to a pluggable `AuditSink`
@@ -19,6 +20,7 @@ pub struct AuditAppService {
     sink: Arc<dyn AuditSink>,
     store: Option<Arc<dyn AuditStore>>,
     rule_change_store: Option<Arc<dyn RuleChangeStore>>,
+    metrics: Option<Arc<dyn MetricsPort>>,
     enabled: bool,
 }
 
@@ -28,8 +30,14 @@ impl AuditAppService {
             sink,
             store: None,
             rule_change_store: None,
+            metrics: None,
             enabled: true,
         }
+    }
+
+    /// Set the metrics port for recording audit metrics.
+    pub fn set_metrics(&mut self, metrics: Arc<dyn MetricsPort>) {
+        self.metrics = Some(metrics);
     }
 
     /// Attach a persistent audit store for query support.
@@ -52,6 +60,7 @@ impl AuditAppService {
 
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        tracing::info!(enabled, "audit service toggled");
     }
 
     /// Whether a persistent store is available for queries.
@@ -196,14 +205,25 @@ impl AuditAppService {
 
     /// Internal: write to both sink and store.
     fn write_entry(&self, entry: &AuditEntry) {
+        let mut failed = false;
         if let Err(e) = self.sink.write_entry(entry) {
             tracing::warn!(error = %e, "audit sink write failed");
+            failed = true;
         }
 
         if let Some(ref store) = self.store
             && let Err(e) = store.store_entry(entry)
         {
             tracing::warn!(error = %e, "audit store write failed");
+            failed = true;
+        }
+
+        if let Some(ref m) = self.metrics {
+            if failed {
+                m.record_audit_failure();
+            } else {
+                m.record_audit_event();
+            }
         }
     }
 }

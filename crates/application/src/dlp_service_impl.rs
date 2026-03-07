@@ -54,6 +54,7 @@ impl DlpAppService {
 
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        tracing::info!(enabled, "DLP service toggled");
     }
 
     pub fn add_pattern(&mut self, pattern: DlpPattern) -> Result<(), DomainError> {
@@ -69,8 +70,10 @@ impl DlpAppService {
     }
 
     pub fn reload_patterns(&mut self, patterns: Vec<DlpPattern>) -> Result<(), DomainError> {
+        let count = patterns.len();
         self.engine.reload(patterns)?;
         self.update_metrics();
+        tracing::info!(count, "DLP patterns reloaded");
         Ok(())
     }
 
@@ -83,7 +86,23 @@ impl DlpAppService {
     }
 
     pub fn scan_data(&self, data: &[u8]) -> Vec<DlpMatch> {
-        self.engine.scan_data(data)
+        let start = std::time::Instant::now();
+        let matches = self.engine.scan_data(data);
+        let elapsed = start.elapsed().as_secs_f64();
+        self.metrics.record_dlp_scan();
+        self.metrics.observe_dlp_scan_duration(elapsed);
+        let patterns = self.engine.patterns();
+        for m in &matches {
+            if let Some(pat) = patterns.get(m.pattern_index) {
+                self.metrics.record_dlp_match(&pat.id.0);
+            }
+        }
+        tracing::debug!(
+            match_count = matches.len(),
+            duration_ms = elapsed * 1000.0,
+            "DLP scan completed"
+        );
+        matches
     }
 
     fn update_metrics(&self) {
@@ -97,8 +116,9 @@ mod tests {
     use super::*;
     use domain::common::entity::Severity;
     use ports::secondary::metrics_port::{
-        AlertMetrics, ConfigMetrics, DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics,
-        IpsMetrics, PacketMetrics, SystemMetrics,
+        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
+        DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics, IpsMetrics, LbMetrics,
+        PacketMetrics, RoutingMetrics, SystemMetrics,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -130,6 +150,12 @@ mod tests {
     impl SystemMetrics for TestMetrics {}
     impl ConfigMetrics for TestMetrics {}
     impl EventMetrics for TestMetrics {}
+    impl DlpMetrics for TestMetrics {}
+    impl DdosMetrics for TestMetrics {}
+    impl ConntrackMetrics for TestMetrics {}
+    impl RoutingMetrics for TestMetrics {}
+    impl AuditMetrics for TestMetrics {}
+    impl LbMetrics for TestMetrics {}
 
     fn make_pattern(id: &str) -> DlpPattern {
         DlpPattern {

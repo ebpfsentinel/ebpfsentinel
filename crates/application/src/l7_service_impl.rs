@@ -77,8 +77,10 @@ impl L7AppService {
 
     /// Reload all L7 rules atomically.
     pub fn reload_rules(&mut self, rules: Vec<L7Rule>) -> Result<(), DomainError> {
+        let count = rules.len();
         self.engine.reload(rules)?;
         self.update_metrics();
+        tracing::info!(count, "L7 rules reloaded");
         Ok(())
     }
 
@@ -114,6 +116,7 @@ impl L7AppService {
     /// Set the enabled state.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        tracing::info!(enabled, "L7 service toggled");
     }
 
     fn update_metrics(&self) {

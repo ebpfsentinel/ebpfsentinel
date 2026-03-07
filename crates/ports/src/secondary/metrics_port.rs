@@ -118,6 +118,51 @@ pub trait EventMetrics: Send + Sync {
     fn record_event_dropped(&self, _reason: &str) {}
 }
 
+// ── DLP metrics ──────────────────────────────────────────────────
+
+pub trait DlpMetrics: Send + Sync {
+    fn record_dlp_scan(&self) {}
+    fn record_dlp_match(&self, _pattern_id: &str) {}
+    fn observe_dlp_scan_duration(&self, _duration_seconds: f64) {}
+}
+
+// ── DDoS metrics ─────────────────────────────────────────────────
+
+pub trait DdosMetrics: Send + Sync {
+    fn record_ddos_attack_detected(&self, _attack_type: &str) {}
+    fn set_ddos_attacks_active(&self, _count: u64) {}
+    fn record_ddos_mitigation(&self, _attack_type: &str) {}
+}
+
+// ── Connection tracking metrics ──────────────────────────────────
+
+pub trait ConntrackMetrics: Send + Sync {
+    fn set_conntrack_active(&self, _count: u64) {}
+    fn record_conntrack_expired(&self) {}
+}
+
+// ── Routing metrics ──────────────────────────────────────────────
+
+pub trait RoutingMetrics: Send + Sync {
+    fn set_routing_gateway_status(&self, _gateway: &str, _healthy: bool) {}
+    fn record_routing_failover(&self) {}
+    fn set_routing_gateways_total(&self, _count: u64) {}
+}
+
+// ── Audit metrics ────────────────────────────────────────────────
+
+pub trait AuditMetrics: Send + Sync {
+    fn record_audit_event(&self) {}
+    fn record_audit_failure(&self) {}
+}
+
+// ── Load balancer metrics ────────────────────────────────────────
+
+pub trait LbMetrics: Send + Sync {
+    fn record_lb_forwarded(&self) {}
+    fn set_lb_backends_healthy(&self, _service: &str, _count: u64) {}
+}
+
 // ── Composite super-trait ──────────────────────────────────────────
 
 /// Unified metrics port composing all domain-specific sub-traits.
@@ -135,6 +180,12 @@ pub trait MetricsPort:
     + SystemMetrics
     + ConfigMetrics
     + EventMetrics
+    + DlpMetrics
+    + DdosMetrics
+    + ConntrackMetrics
+    + RoutingMetrics
+    + AuditMetrics
+    + LbMetrics
 {
 }
 
@@ -150,6 +201,12 @@ impl<T> MetricsPort for T where
         + SystemMetrics
         + ConfigMetrics
         + EventMetrics
+        + DlpMetrics
+        + DdosMetrics
+        + ConntrackMetrics
+        + RoutingMetrics
+        + AuditMetrics
+        + LbMetrics
 {
 }
 
@@ -181,6 +238,21 @@ mod tests {
             port.set_dns_injected_ips(5);
             port.set_domain_reputation_high_risk(5);
             port.increment_domain_auto_blocked();
+            port.record_dlp_scan();
+            port.record_dlp_match("pci-001");
+            port.observe_dlp_scan_duration(0.001);
+            port.record_ddos_attack_detected("syn_flood");
+            port.set_ddos_attacks_active(2);
+            port.record_ddos_mitigation("syn_flood");
+            port.set_conntrack_active(100);
+            port.record_conntrack_expired();
+            port.set_routing_gateway_status("gw-1", true);
+            port.record_routing_failover();
+            port.set_routing_gateways_total(3);
+            port.record_audit_event();
+            port.record_audit_failure();
+            port.record_lb_forwarded();
+            port.set_lb_backends_healthy("web", 3);
         }
     }
 
@@ -197,6 +269,12 @@ mod tests {
         impl SystemMetrics for MinimalMock {}
         impl ConfigMetrics for MinimalMock {}
         impl EventMetrics for MinimalMock {}
+        impl DlpMetrics for MinimalMock {}
+        impl DdosMetrics for MinimalMock {}
+        impl ConntrackMetrics for MinimalMock {}
+        impl RoutingMetrics for MinimalMock {}
+        impl AuditMetrics for MinimalMock {}
+        impl LbMetrics for MinimalMock {}
 
         let mock = MinimalMock;
         let port: &dyn MetricsPort = &mock;

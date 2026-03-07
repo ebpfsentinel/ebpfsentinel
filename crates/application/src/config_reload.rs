@@ -845,8 +845,9 @@ mod tests {
     use domain::threatintel::engine::ThreatIntelEngine;
     use ports::secondary::audit_sink::AuditSink;
     use ports::secondary::metrics_port::{
-        AlertMetrics, ConfigMetrics, DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics,
-        IpsMetrics, PacketMetrics, SystemMetrics,
+        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
+        DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics, IpsMetrics, LbMetrics,
+        PacketMetrics, RoutingMetrics, SystemMetrics,
     };
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -881,6 +882,12 @@ mod tests {
         }
     }
     impl EventMetrics for TestMetrics {}
+    impl DlpMetrics for TestMetrics {}
+    impl DdosMetrics for TestMetrics {}
+    impl ConntrackMetrics for TestMetrics {}
+    impl RoutingMetrics for TestMetrics {}
+    impl AuditMetrics for TestMetrics {}
+    impl LbMetrics for TestMetrics {}
 
     fn make_fw_rule(id: &str, priority: u32) -> FirewallRule {
         FirewallRule {

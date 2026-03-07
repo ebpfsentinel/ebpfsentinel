@@ -165,12 +165,21 @@ impl EventDispatcher {
     }
 
     async fn dispatch_agent_event(&self, event: AgentEvent) {
+        let start = std::time::Instant::now();
+        let program = match &event {
+            AgentEvent::L4(pkt) => event_type_label(pkt.event_type),
+            AgentEvent::L7 { .. } => "l7",
+            AgentEvent::Dns { .. } => "dns",
+            AgentEvent::Dlp(_) => "dlp",
+        };
         match event {
             AgentEvent::L4(pkt) => self.dispatch_event(pkt).await,
             AgentEvent::L7 { header, payload } => self.process_l7_event(header, &payload).await,
             AgentEvent::Dns { header, payload } => self.process_dns_event(header, &payload),
             AgentEvent::Dlp(event) => self.process_dlp_event(&event).await,
         }
+        self.metrics
+            .observe_processing_duration(program, start.elapsed().as_secs_f64());
     }
 
     async fn dispatch_event(&self, event: PacketEvent) {
@@ -733,6 +742,21 @@ fn action_label(action: u8) -> &'static str {
     }
 }
 
+fn event_type_label(event_type: u8) -> &'static str {
+    match event_type {
+        EVENT_TYPE_FIREWALL => "firewall",
+        EVENT_TYPE_IDS => "ids",
+        EVENT_TYPE_RATELIMIT => "ratelimit",
+        EVENT_TYPE_THREATINTEL => "threatintel",
+        EVENT_TYPE_DDOS_SYN
+        | EVENT_TYPE_DDOS_ICMP
+        | EVENT_TYPE_DDOS_AMP
+        | EVENT_TYPE_DDOS_CONNTRACK => "ddos",
+        EVENT_TYPE_LB => "lb",
+        _ => "unknown",
+    }
+}
+
 use crate::addr_to_ip;
 
 #[cfg(test)]
@@ -747,8 +771,9 @@ mod tests {
     use domain::threatintel::engine::ThreatIntelEngine;
     use ebpf_common::event::{EVENT_TYPE_DLP, EVENT_TYPE_IDS, EVENT_TYPE_L7, EVENT_TYPE_RATELIMIT};
     use ports::secondary::metrics_port::{
-        AlertMetrics, ConfigMetrics, DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics,
-        IpsMetrics, PacketMetrics, SystemMetrics,
+        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
+        DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics, IpsMetrics, LbMetrics,
+        PacketMetrics, RoutingMetrics, SystemMetrics,
     };
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -795,6 +820,12 @@ mod tests {
             self.dropped_calls.fetch_add(1, Ordering::Relaxed);
         }
     }
+    impl DlpMetrics for TestMetrics {}
+    impl DdosMetrics for TestMetrics {}
+    impl ConntrackMetrics for TestMetrics {}
+    impl RoutingMetrics for TestMetrics {}
+    impl AuditMetrics for TestMetrics {}
+    impl LbMetrics for TestMetrics {}
 
     fn make_ids_rule(id: &str) -> IdsRule {
         IdsRule {

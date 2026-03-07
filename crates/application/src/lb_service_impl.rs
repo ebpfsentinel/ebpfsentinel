@@ -46,13 +46,16 @@ impl LbAppService {
     /// Set the enabled state.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        tracing::info!(enabled, "load balancer service toggled");
     }
 
     /// Reload all services atomically.
     pub fn reload_services(&mut self, services: Vec<LbService>) -> Result<(), DomainError> {
+        let count = services.len();
         self.engine.reload(services)?;
         self.sync_ebpf_maps();
         self.update_metrics();
+        tracing::info!(count, "load balancer services reloaded");
         Ok(())
     }
 

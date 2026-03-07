@@ -4,6 +4,7 @@ use std::sync::Arc;
 use domain::routing::entity::{Gateway, GatewayId, GatewayState, GatewayStatus};
 use domain::routing::error::RoutingError;
 use ports::secondary::geoip_port::GeoIpPort;
+use ports::secondary::metrics_port::MetricsPort;
 
 /// Application-level gateway monitoring and multi-WAN routing service.
 ///
@@ -12,6 +13,7 @@ use ports::secondary::geoip_port::GeoIpPort;
 pub struct RoutingAppService {
     gateways: HashMap<GatewayId, GatewayState>,
     geoip: Option<Arc<dyn GeoIpPort>>,
+    metrics: Option<Arc<dyn MetricsPort>>,
     enabled: bool,
 }
 
@@ -26,8 +28,14 @@ impl RoutingAppService {
         Self {
             gateways: HashMap::new(),
             geoip: None,
+            metrics: None,
             enabled: false,
         }
+    }
+
+    /// Set the metrics port for recording routing metrics.
+    pub fn set_metrics(&mut self, metrics: Arc<dyn MetricsPort>) {
+        self.metrics = Some(metrics);
     }
 
     pub fn enabled(&self) -> bool {
@@ -36,6 +44,7 @@ impl RoutingAppService {
 
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        tracing::info!(enabled, "routing service toggled");
     }
 
     /// Reload gateways from configuration.
@@ -57,6 +66,11 @@ impl RoutingAppService {
             new_map.insert(state.gateway.id, state);
         }
         self.gateways = new_map;
+        let count = self.gateways.len();
+        if let Some(ref m) = self.metrics {
+            m.set_routing_gateways_total(count as u64);
+        }
+        tracing::info!(count, "routing gateways reloaded");
         Ok(())
     }
 
@@ -71,7 +85,15 @@ impl RoutingAppService {
             .health_check
             .as_ref()
             .map_or(2, |hc| hc.recovery_threshold);
+        let was_down = state.status == GatewayStatus::Down;
         state.record_success(threshold);
+        if let Some(ref m) = self.metrics {
+            m.set_routing_gateway_status(&state.gateway.name, true);
+        }
+        if was_down && state.status != GatewayStatus::Down {
+            tracing::info!(gateway = %state.gateway.name, "gateway recovered");
+        }
+        tracing::debug!(gateway = %state.gateway.name, status = ?state.status, "probe success");
         Ok(())
     }
 
@@ -86,7 +108,16 @@ impl RoutingAppService {
             .health_check
             .as_ref()
             .map_or(3, |hc| hc.failure_threshold);
+        let was_up = state.status != GatewayStatus::Down;
         state.record_failure(threshold);
+        if was_up && state.status == GatewayStatus::Down {
+            if let Some(ref m) = self.metrics {
+                m.set_routing_gateway_status(&state.gateway.name, false);
+                m.record_routing_failover();
+            }
+            tracing::warn!(gateway = %state.gateway.name, "gateway went down, failover triggered");
+        }
+        tracing::debug!(gateway = %state.gateway.name, status = ?state.status, "probe failure");
         Ok(())
     }
 

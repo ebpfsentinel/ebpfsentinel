@@ -1,4 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use ports::secondary::metrics_port::MetricsPort;
 
 /// Day of week (0=Monday, 6=Sunday) matching `POSIX` `tm_wday` convention adjusted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -43,6 +46,7 @@ pub struct ScheduleService {
     rule_schedule: RuleScheduleMap,
     /// Currently active rule IDs (for edge-triggered reload detection).
     active_rules: HashSet<String>,
+    metrics: Option<Arc<dyn MetricsPort>>,
 }
 
 impl ScheduleService {
@@ -50,10 +54,25 @@ impl ScheduleService {
         Self::default()
     }
 
+    /// Set the metrics port for recording schedule metrics.
+    pub fn set_metrics(&mut self, metrics: Arc<dyn MetricsPort>) {
+        self.metrics = Some(metrics);
+    }
+
     /// Load schedules and rule-schedule mappings.
     pub fn reload(&mut self, schedules: HashMap<String, Schedule>, rule_schedule: RuleScheduleMap) {
+        let sched_count = schedules.len();
+        let rule_count = rule_schedule.len();
         self.schedules = schedules;
         self.rule_schedule = rule_schedule;
+        if let Some(ref m) = self.metrics {
+            m.set_rules_loaded("schedules", sched_count as u64);
+        }
+        tracing::info!(
+            schedules = sched_count,
+            rules = rule_count,
+            "schedules reloaded"
+        );
     }
 
     /// Evaluate all schedules against the given day and minutes.
@@ -73,6 +92,10 @@ impl ScheduleService {
         if new_active == self.active_rules {
             None
         } else {
+            tracing::info!(active = new_active.len(), "schedule active set changed");
+            if let Some(ref m) = self.metrics {
+                m.set_rules_loaded("schedule_active", new_active.len() as u64);
+            }
             self.active_rules.clone_from(&new_active);
             Some(new_active)
         }

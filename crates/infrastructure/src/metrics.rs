@@ -1,6 +1,7 @@
 use ports::secondary::metrics_port::{
-    AlertMetrics, ConfigMetrics, DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics,
-    IpsMetrics, PacketMetrics, SystemMetrics,
+    AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
+    DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics,
+    RoutingMetrics, SystemMetrics,
 };
 use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::counter::Counter;
@@ -67,6 +68,21 @@ pub struct BytesLabels {
     pub direction: String,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct AttackTypeLabels {
+    pub attack_type: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct GatewayLabels {
+    pub gateway: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct ServiceLabels {
+    pub service: String,
+}
+
 // ── Agent metrics registry ──────────────────────────────────────────
 
 /// Prometheus metrics registry for the agent.
@@ -100,6 +116,21 @@ pub struct AgentMetrics {
     pub domain_reputation_high_risk: Gauge,
     pub domain_auto_blocked_total: Counter,
     pub ids_domain_matches_total: Family<RuleIdLabels, Counter>,
+    pub dlp_scans_total: Counter,
+    pub dlp_matches_total: Family<RuleIdLabels, Counter>,
+    pub dlp_scan_duration_seconds: Histogram,
+    pub ddos_attacks_detected_total: Family<AttackTypeLabels, Counter>,
+    pub ddos_attacks_active: Gauge,
+    pub ddos_mitigations_total: Family<AttackTypeLabels, Counter>,
+    pub conntrack_active: Gauge,
+    pub conntrack_expired_total: Counter,
+    pub routing_gateway_status: Family<GatewayLabels, Gauge>,
+    pub routing_failovers_total: Counter,
+    pub routing_gateways_total: Gauge,
+    pub audit_events_total: Counter,
+    pub audit_failures_total: Counter,
+    pub lb_forwarded_total: Counter,
+    pub lb_backends_healthy: Family<ServiceLabels, Gauge>,
 }
 
 impl AgentMetrics {
@@ -281,6 +312,112 @@ impl AgentMetrics {
             ids_domain_matches_total.clone(),
         );
 
+        let dlp_scans_total = Counter::default();
+        registry.register(
+            "dlp_scans",
+            "Total DLP data scans performed",
+            dlp_scans_total.clone(),
+        );
+
+        let dlp_matches_total = Family::<RuleIdLabels, Counter>::default();
+        registry.register(
+            "dlp_matches",
+            "Total DLP pattern matches by pattern_id",
+            dlp_matches_total.clone(),
+        );
+
+        let dlp_scan_duration_seconds =
+            Histogram::new(exponential_buckets_range(0.000_01, 0.1, 10));
+        registry.register(
+            "dlp_scan_duration_seconds",
+            "DLP scan latency in seconds",
+            dlp_scan_duration_seconds.clone(),
+        );
+
+        let ddos_attacks_detected_total = Family::<AttackTypeLabels, Counter>::default();
+        registry.register(
+            "ddos_attacks_detected",
+            "Total DDoS attacks detected by type",
+            ddos_attacks_detected_total.clone(),
+        );
+
+        let ddos_attacks_active = Gauge::default();
+        registry.register(
+            "ddos_attacks_active",
+            "Current number of active DDoS attacks",
+            ddos_attacks_active.clone(),
+        );
+
+        let ddos_mitigations_total = Family::<AttackTypeLabels, Counter>::default();
+        registry.register(
+            "ddos_mitigations",
+            "Total DDoS mitigation actions by type",
+            ddos_mitigations_total.clone(),
+        );
+
+        let conntrack_active = Gauge::default();
+        registry.register(
+            "conntrack_active",
+            "Current number of active tracked connections",
+            conntrack_active.clone(),
+        );
+
+        let conntrack_expired_total = Counter::default();
+        registry.register(
+            "conntrack_expired",
+            "Total expired connection tracking entries",
+            conntrack_expired_total.clone(),
+        );
+
+        let routing_gateway_status = Family::<GatewayLabels, Gauge>::default();
+        registry.register(
+            "routing_gateway_status",
+            "Gateway health status (1=healthy, 0=unhealthy)",
+            routing_gateway_status.clone(),
+        );
+
+        let routing_failovers_total = Counter::default();
+        registry.register(
+            "routing_failovers",
+            "Total gateway failover events",
+            routing_failovers_total.clone(),
+        );
+
+        let routing_gateways_total = Gauge::default();
+        registry.register(
+            "routing_gateways",
+            "Total number of configured gateways",
+            routing_gateways_total.clone(),
+        );
+
+        let audit_events_total = Counter::default();
+        registry.register(
+            "audit_events",
+            "Total audit events recorded",
+            audit_events_total.clone(),
+        );
+
+        let audit_failures_total = Counter::default();
+        registry.register(
+            "audit_failures",
+            "Total audit write failures",
+            audit_failures_total.clone(),
+        );
+
+        let lb_forwarded_total = Counter::default();
+        registry.register(
+            "lb_forwarded",
+            "Total load-balanced packets forwarded",
+            lb_forwarded_total.clone(),
+        );
+
+        let lb_backends_healthy = Family::<ServiceLabels, Gauge>::default();
+        registry.register(
+            "lb_backends_healthy",
+            "Number of healthy backends per service",
+            lb_backends_healthy.clone(),
+        );
+
         Self {
             registry,
             packets_total,
@@ -307,6 +444,21 @@ impl AgentMetrics {
             domain_reputation_high_risk,
             domain_auto_blocked_total,
             ids_domain_matches_total,
+            dlp_scans_total,
+            dlp_matches_total,
+            dlp_scan_duration_seconds,
+            ddos_attacks_detected_total,
+            ddos_attacks_active,
+            ddos_mitigations_total,
+            conntrack_active,
+            conntrack_expired_total,
+            routing_gateway_status,
+            routing_failovers_total,
+            routing_gateways_total,
+            audit_events_total,
+            audit_failures_total,
+            lb_forwarded_total,
+            lb_backends_healthy,
         }
     }
 
@@ -505,6 +657,101 @@ impl EventMetrics for AgentMetrics {
                 reason: reason.to_string(),
             })
             .inc();
+    }
+}
+
+impl DlpMetrics for AgentMetrics {
+    fn record_dlp_scan(&self) {
+        self.dlp_scans_total.inc();
+    }
+
+    fn record_dlp_match(&self, pattern_id: &str) {
+        self.dlp_matches_total
+            .get_or_create(&RuleIdLabels {
+                rule_id: pattern_id.to_string(),
+            })
+            .inc();
+    }
+
+    fn observe_dlp_scan_duration(&self, duration_seconds: f64) {
+        self.dlp_scan_duration_seconds.observe(duration_seconds);
+    }
+}
+
+impl DdosMetrics for AgentMetrics {
+    fn record_ddos_attack_detected(&self, attack_type: &str) {
+        self.ddos_attacks_detected_total
+            .get_or_create(&AttackTypeLabels {
+                attack_type: attack_type.to_string(),
+            })
+            .inc();
+    }
+
+    fn set_ddos_attacks_active(&self, count: u64) {
+        self.ddos_attacks_active
+            .set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn record_ddos_mitigation(&self, attack_type: &str) {
+        self.ddos_mitigations_total
+            .get_or_create(&AttackTypeLabels {
+                attack_type: attack_type.to_string(),
+            })
+            .inc();
+    }
+}
+
+impl ConntrackMetrics for AgentMetrics {
+    fn set_conntrack_active(&self, count: u64) {
+        self.conntrack_active
+            .set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn record_conntrack_expired(&self) {
+        self.conntrack_expired_total.inc();
+    }
+}
+
+impl RoutingMetrics for AgentMetrics {
+    fn set_routing_gateway_status(&self, gateway: &str, healthy: bool) {
+        self.routing_gateway_status
+            .get_or_create(&GatewayLabels {
+                gateway: gateway.to_string(),
+            })
+            .set(i64::from(healthy));
+    }
+
+    fn record_routing_failover(&self) {
+        self.routing_failovers_total.inc();
+    }
+
+    fn set_routing_gateways_total(&self, count: u64) {
+        self.routing_gateways_total
+            .set(count.try_into().unwrap_or(i64::MAX));
+    }
+}
+
+impl AuditMetrics for AgentMetrics {
+    fn record_audit_event(&self) {
+        self.audit_events_total.inc();
+    }
+
+    fn record_audit_failure(&self) {
+        self.audit_failures_total.inc();
+    }
+}
+
+impl LbMetrics for AgentMetrics {
+    fn record_lb_forwarded(&self) {
+        self.lb_forwarded_total.inc();
+    }
+
+    fn set_lb_backends_healthy(&self, service: &str, count: u64) {
+        self.lb_backends_healthy
+            .get_or_create(&ServiceLabels {
+                service: service.to_string(),
+            })
+            .set(count.try_into().unwrap_or(i64::MAX));
     }
 }
 

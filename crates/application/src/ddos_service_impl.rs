@@ -57,10 +57,19 @@ impl DdosAppService {
             return false;
         }
         let src_country = self.resolve_country(event.src_addr, event.is_ipv6);
+        let prev_count = self.engine.active_attack_count();
         let changed = self
             .engine
             .process_event_with_country(event, src_country.as_deref());
         if changed {
+            let new_count = self.engine.active_attack_count();
+            if new_count > prev_count {
+                let attack_type = format!("{:?}", event.attack_type);
+                self.metrics.record_ddos_attack_detected(&attack_type);
+                tracing::info!(attack_type = %attack_type, active = new_count, "DDoS attack detected");
+            }
+            self.metrics
+                .set_ddos_attacks_active(self.engine.active_attack_count() as u64);
             self.update_metrics();
         }
         self.apply_pending_enforcements();
@@ -101,8 +110,10 @@ impl DdosAppService {
 
     /// Reload all policies atomically.
     pub fn reload_policies(&mut self, policies: Vec<DdosPolicy>) -> Result<(), DomainError> {
+        let count = policies.len();
         self.engine.reload(policies)?;
         self.update_metrics();
+        tracing::info!(count, "DDoS policies reloaded");
         Ok(())
     }
 
@@ -138,6 +149,7 @@ impl DdosAppService {
     /// Set the enabled state.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        tracing::info!(enabled, "DDoS service toggled");
     }
 
     /// Drain and apply pending enforcement actions from the engine.
@@ -166,6 +178,7 @@ impl DdosAppService {
                                     "DDoS auto-block: failed to inject CIDRs: {e}"
                                 );
                             } else {
+                                self.metrics.record_ddos_mitigation("block_country");
                                 tracing::info!(
                                     country = country_code,
                                     v4 = v4.len(),
@@ -190,6 +203,7 @@ impl DdosAppService {
                             "DDoS auto-unblock: failed to remove CIDRs: {e}"
                         );
                     } else {
+                        self.metrics.record_ddos_mitigation("unblock_country");
                         tracing::info!(
                             country = country_code,
                             "DDoS auto-unblock: removed CIDRs for country"
@@ -203,6 +217,8 @@ impl DdosAppService {
     fn update_metrics(&self) {
         self.metrics
             .set_rules_loaded("ddos", self.engine.policy_count() as u64);
+        self.metrics
+            .set_ddos_attacks_active(self.engine.active_attack_count() as u64);
     }
 
     fn resolve_country(&self, addr: [u32; 4], is_ipv6: bool) -> Option<String> {

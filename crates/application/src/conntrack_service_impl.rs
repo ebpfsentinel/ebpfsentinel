@@ -35,6 +35,7 @@ impl ConnTrackAppService {
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
         self.settings.enabled = enabled;
+        tracing::info!(enabled, "conntrack service toggled");
     }
 
     /// Set the eBPF map port for kernel map access.
@@ -46,6 +47,7 @@ impl ConnTrackAppService {
     pub fn reload_settings(&mut self, settings: ConnTrackSettings) -> Result<(), DomainError> {
         self.settings = settings;
         self.sync_ebpf_config();
+        tracing::info!("conntrack settings reloaded");
         Ok(())
     }
 
@@ -63,6 +65,8 @@ impl ConnTrackAppService {
             Some(ref mut port) => {
                 let count = port.flush_all()?;
                 self.metrics.set_rules_loaded("conntrack", 0);
+                self.metrics.set_conntrack_active(0);
+                tracing::info!(flushed = count, "conntrack table flushed");
                 Ok(count)
             }
             None => Ok(0),

@@ -36,6 +36,7 @@ impl NatAppService {
     /// Set the enabled state. Disabling sets rule counts to 0 in eBPF.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        tracing::info!(enabled, "NAT service toggled");
         if !enabled
             && let Some(ref mut port) = self.map_port
             && let Err(e) = port.set_enabled(false)
@@ -55,9 +56,11 @@ impl NatAppService {
             rule.validate()
                 .map_err(|e| DomainError::InvalidRule(e.to_string()))?;
         }
+        let count = rules.len();
         self.dnat_rules = rules;
         self.sync_ebpf_dnat();
         self.update_metrics();
+        tracing::info!(count, "DNAT rules reloaded");
         Ok(())
     }
 
@@ -67,9 +70,11 @@ impl NatAppService {
             rule.validate()
                 .map_err(|e| DomainError::InvalidRule(e.to_string()))?;
         }
+        let count = rules.len();
         self.snat_rules = rules;
         self.sync_ebpf_snat();
         self.update_metrics();
+        tracing::info!(count, "SNAT rules reloaded");
         Ok(())
     }
 
@@ -145,6 +150,10 @@ impl NatAppService {
     fn update_metrics(&self) {
         self.metrics
             .set_rules_loaded("nat", self.rule_count() as u64);
+        self.metrics
+            .set_rules_loaded("nat-dnat", self.dnat_rules.len() as u64);
+        self.metrics
+            .set_rules_loaded("nat-snat", self.snat_rules.len() as u64);
     }
 }
 

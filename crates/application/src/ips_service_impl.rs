@@ -63,6 +63,7 @@ impl IpsAppService {
 
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        tracing::info!(enabled, "IPS service toggled");
     }
 
     /// Check if a source IP is blacklisted. Returns `true` if the IP
@@ -103,6 +104,7 @@ impl IpsAppService {
             .add_to_blacklist(ip, reason, false, ttl)
             .map_err(DomainError::from)?;
         self.update_blacklist_metric();
+        tracing::info!(%ip, "IPS blacklist entry added");
         Ok(())
     }
 
@@ -112,6 +114,7 @@ impl IpsAppService {
             .remove_from_blacklist(&ip)
             .map_err(DomainError::from)?;
         self.update_blacklist_metric();
+        tracing::info!(%ip, "IPS blacklist entry removed");
         Ok(())
     }
 
@@ -124,6 +127,7 @@ impl IpsAppService {
     pub fn clear_blacklist(&mut self) {
         self.engine.clear_blacklist();
         self.update_blacklist_metric();
+        tracing::info!("IPS blacklist cleared");
     }
 
     /// Return the current blacklist size.
@@ -340,8 +344,9 @@ impl ports::secondary::ips_blacklist_port::IpsBlacklistPort for IpsBlacklistAdap
 mod tests {
     use super::*;
     use ports::secondary::metrics_port::{
-        AlertMetrics, ConfigMetrics, DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics,
-        IpsMetrics, PacketMetrics, SystemMetrics,
+        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
+        DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics, IpsMetrics, LbMetrics,
+        PacketMetrics, RoutingMetrics, SystemMetrics,
     };
     use std::net::Ipv4Addr;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -376,6 +381,12 @@ mod tests {
     impl SystemMetrics for TestMetrics {}
     impl ConfigMetrics for TestMetrics {}
     impl EventMetrics for TestMetrics {}
+    impl DlpMetrics for TestMetrics {}
+    impl DdosMetrics for TestMetrics {}
+    impl ConntrackMetrics for TestMetrics {}
+    impl RoutingMetrics for TestMetrics {}
+    impl AuditMetrics for TestMetrics {}
+    impl LbMetrics for TestMetrics {}
 
     fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
