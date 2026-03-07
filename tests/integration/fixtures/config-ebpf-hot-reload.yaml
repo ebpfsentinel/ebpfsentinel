@@ -1,0 +1,72 @@
+# config-ebpf-hot-reload.yaml — Hot-reload test config
+# Tests: SIGHUP config reload with firewall rules
+#
+# Initial state: 3 firewall rules
+#   - Allow TCP 22 (SSH)
+#   - Deny  TCP 4444
+#   - Allow any (catch-all)
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: pass
+  rules:
+    # Rule 1: Allow SSH
+    - id: fw-reload-allow-ssh
+      priority: 10
+      action: allow
+      protocol: tcp
+      dst_port: 22
+      scope: global
+      enabled: true
+
+    # Rule 2: Deny TCP 4444
+    - id: fw-reload-deny-4444
+      priority: 20
+      action: deny
+      protocol: tcp
+      dst_port: 4444
+      scope: global
+      enabled: true
+
+    # Rule 3: Allow any (catch-all)
+    - id: fw-reload-allow-any
+      priority: 100
+      action: allow
+      scope: global
+      enabled: true
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
