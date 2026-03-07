@@ -291,4 +291,52 @@ mod tests {
         engine.add_policy(make_policy("rl-002", 500, 1000)).unwrap();
         assert_eq!(engine.policy_count(), 2);
     }
+
+    // Property-based tests
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn valid_policy_always_accepted(
+                rate in 1u64..100_000,
+                burst in 1u64..100_000,
+            ) {
+                let mut engine = RateLimitEngine::new();
+                let policy = RateLimitPolicy {
+                    id: RuleId("prop-test".to_string()),
+                    scope: RateLimitScope::SourceIp,
+                    rate,
+                    burst,
+                    action: RateLimitAction::Drop,
+                    src_ip: None,
+                    enabled: true,
+                    algorithm: RateLimitAlgorithm::default(),
+                    country_codes: None,
+                };
+                let result = engine.add_policy(policy);
+                prop_assert!(result.is_ok());
+                prop_assert_eq!(engine.policy_count(), 1);
+            }
+
+            #[test]
+            fn zero_rate_policy_always_rejected(burst in 1u64..100_000) {
+                let mut engine = RateLimitEngine::new();
+                let policy = RateLimitPolicy {
+                    id: RuleId("prop-invalid".to_string()),
+                    scope: RateLimitScope::SourceIp,
+                    rate: 0,
+                    burst,
+                    action: RateLimitAction::Drop,
+                    src_ip: None,
+                    enabled: true,
+                    algorithm: RateLimitAlgorithm::default(),
+                    country_codes: None,
+                };
+                let result = engine.add_policy(policy);
+                prop_assert!(result.is_err());
+            }
+        }
+    }
 }

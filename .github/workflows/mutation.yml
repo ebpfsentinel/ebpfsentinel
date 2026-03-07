@@ -1,0 +1,62 @@
+name: Mutation Testing
+
+on:
+  schedule:
+    - cron: '0 4 * * 0' # Weekly on Sunday at 04:00 UTC
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Mutation testing on critical domain paths ──────────────────────
+  mutants:
+    name: Mutation testing
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@cargo-mutants
+      - name: Run mutation tests on domain crate
+        run: |
+          cargo mutants --package domain \
+            --file 'crates/domain/src/firewall/engine.rs' \
+            --file 'crates/domain/src/ids/engine.rs' \
+            --file 'crates/domain/src/dlp/engine.rs' \
+            --file 'crates/domain/src/alert/engine.rs' \
+            --file 'crates/domain/src/ips/engine.rs' \
+            --file 'crates/domain/src/ratelimit/engine.rs' \
+            --timeout 120 \
+            --jobs 4 \
+            2>&1 | tee mutants-output.txt
+      - name: Check mutation score
+        run: |
+          total=$(grep -oP 'tested: \K[0-9]+' mutants-output.txt | head -1 || echo 0)
+          killed=$(grep -oP 'killed: \K[0-9]+' mutants-output.txt | head -1 || echo 0)
+          if [ "$total" -gt 0 ]; then
+            score=$(echo "scale=1; $killed * 100 / $total" | bc -l)
+            echo "Mutation score: ${score}% (${killed}/${total})"
+            echo "## Mutation Testing" >> "$GITHUB_STEP_SUMMARY"
+            echo "Score: **${score}%** (${killed}/${total} mutants killed)" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$(echo "$score < 70" | bc -l)" = "1" ]; then
+              echo "::warning::Mutation score ${score}% is below 70% threshold"
+            fi
+          else
+            echo "No mutants tested"
+          fi
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: mutants.out/
+          retention-days: 30

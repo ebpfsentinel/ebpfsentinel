@@ -85,10 +85,8 @@ fn bench_alert_store(c: &mut Criterion) {
                         (store, dir, existing)
                     },
                     |(store, _dir, existing)| {
-                        let _ = store.store_alert(black_box(&make_alert(
-                            "new",
-                            existing as u64 + 1,
-                        )));
+                        let _ =
+                            store.store_alert(black_box(&make_alert("new", existing as u64 + 1)));
                     },
                     criterion::BatchSize::SmallInput,
                 );
@@ -155,5 +153,10 @@ fn bench_audit_store(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_alert_store, bench_alert_query, bench_audit_store);
+criterion_group!(
+    benches,
+    bench_alert_store,
+    bench_alert_query,
+    bench_audit_store
+);
 criterion_main!(benches);

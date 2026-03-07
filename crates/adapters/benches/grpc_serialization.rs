@@ -83,5 +83,9 @@ fn bench_alert_json_deserialize(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_alert_json_serialize, bench_alert_json_deserialize);
+criterion_group!(
+    benches,
+    bench_alert_json_serialize,
+    bench_alert_json_deserialize
+);
 criterion_main!(benches);

@@ -819,4 +819,90 @@ mod tests {
         };
         assert_eq!(engine.evaluate(&v6), Some(FirewallAction::Deny));
     }
+
+    // Property-based tests
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        // Strategy: generate valid `PacketInfo`
+        fn arb_packet_info() -> impl Strategy<Value = PacketInfo> {
+            (
+                prop::array::uniform4(any::<u32>()), // src_addr
+                prop::array::uniform4(any::<u32>()), // dst_addr
+                1u16..=65535u16,                     // src_port
+                1u16..=65535u16,                     // dst_port
+                prop_oneof![Just(Protocol::Tcp), Just(Protocol::Udp), Just(Protocol::Icmp)],
+                any::<bool>(), // is_ipv6
+            )
+                .prop_map(|(src_addr, dst_addr, src_port, dst_port, protocol, is_ipv6)| {
+                    PacketInfo {
+                        src_addr,
+                        dst_addr,
+                        src_port,
+                        dst_port,
+                        protocol,
+                        is_ipv6,
+                        interface: "eth0".to_string(),
+                        vlan_id: None,
+                    }
+                })
+        }
+
+        proptest! {
+            #[test]
+            fn adding_deny_rule_then_matching_packet_returns_deny(
+                priority in 1u32..1000,
+                dst_port in 1u16..=65535u16,
+            ) {
+                let mut engine = FirewallEngine::new();
+                let mut rule = make_rule("prop-deny-1", priority, FirewallAction::Deny);
+                rule.protocol = Protocol::Tcp;
+                rule.dst_port = Some(PortRange { start: dst_port, end: dst_port });
+                engine.add_rule(rule).unwrap();
+
+                let packet = PacketInfo {
+                    src_addr: [1, 0, 0, 0],
+                    dst_addr: [2, 0, 0, 0],
+                    src_port: 12345,
+                    dst_port,
+                    protocol: Protocol::Tcp,
+                    is_ipv6: false,
+                    interface: "eth0".to_string(),
+                    vlan_id: None,
+                };
+                prop_assert_eq!(engine.evaluate(&packet), Some(FirewallAction::Deny));
+            }
+
+            #[test]
+            fn no_matching_rule_returns_none(packet in arb_packet_info()) {
+                let engine = FirewallEngine::new();
+                prop_assert_eq!(engine.evaluate(&packet), None);
+            }
+
+            #[test]
+            fn disabled_rule_never_matches(
+                dst_port in 1u16..=65535u16,
+            ) {
+                let mut engine = FirewallEngine::new();
+                let mut rule = make_rule("prop-disabled-1", 10, FirewallAction::Deny);
+                rule.protocol = Protocol::Tcp;
+                rule.dst_port = Some(PortRange { start: dst_port, end: dst_port });
+                rule.enabled = false;
+                engine.add_rule(rule).unwrap();
+
+                let packet = PacketInfo {
+                    src_addr: [1, 0, 0, 0],
+                    dst_addr: [2, 0, 0, 0],
+                    src_port: 12345,
+                    dst_port,
+                    protocol: Protocol::Tcp,
+                    is_ipv6: false,
+                    interface: "eth0".to_string(),
+                    vlan_id: None,
+                };
+                prop_assert_eq!(engine.evaluate(&packet), None);
+            }
+        }
+    }
 }

@@ -64,5 +64,9 @@ harness = false
 name = "grpc_serialization"
 harness = false
 
+[[bench]]
+name = "ebpf_map_ops"
+harness = false
+
 [lints]
 workspace = true

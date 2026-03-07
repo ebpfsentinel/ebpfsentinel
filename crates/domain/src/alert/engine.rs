@@ -406,4 +406,73 @@ mod tests {
         let crit = make_alert("d", Severity::Critical);
         assert_eq!(router.process_alert(&crit).len(), 1);
     }
+
+    // Property-based tests
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn dedup_window_prevents_duplicate_alerts(
+                rule_id in "[a-z]{3}-[0-9]{3}",
+            ) {
+                let route = AlertRoute {
+                    name: "test".to_string(),
+                    destination: AlertDestination::Log,
+                    min_severity: Severity::Low,
+                    event_types: None,
+                };
+                let mut router = AlertRouter::new(
+                    vec![route],
+                    Duration::from_secs(60),
+                    Duration::from_secs(300),
+                    100,
+                );
+
+                let alert = Alert {
+                    id: format!("1000-{rule_id}"),
+                    timestamp_ns: 1_000_000_000,
+                    component: "ids".to_string(),
+                    severity: Severity::High,
+                    rule_id: RuleId(rule_id.clone()),
+                    action: DomainMode::Alert,
+                    src_addr: [1, 0, 0, 0],
+                    dst_addr: [2, 0, 0, 0],
+                    src_port: 12345,
+                    dst_port: 80,
+                    protocol: 6,
+                    is_ipv6: false,
+                    message: "test".to_string(),
+                    false_positive: false,
+                    src_domain: None,
+                    dst_domain: None,
+                    src_domain_score: None,
+                    dst_domain_score: None,
+                    src_geo: None,
+                    dst_geo: None,
+                    confidence: None,
+                    threat_type: None,
+                    data_type: None,
+                    pid: None,
+                    tgid: None,
+                    direction: None,
+                    matched_domain: None,
+                    attack_type: None,
+                    peak_pps: None,
+                    current_pps: None,
+                    mitigation_status: None,
+                    total_packets: None,
+                };
+
+                // First alert should match routes
+                let routes1 = router.process_alert(&alert);
+                prop_assert!(!routes1.is_empty(), "first alert should match routes");
+
+                // Same alert immediately should be deduped
+                let routes2 = router.process_alert(&alert);
+                prop_assert!(routes2.is_empty(), "duplicate alert should be deduped");
+            }
+        }
+    }
 }

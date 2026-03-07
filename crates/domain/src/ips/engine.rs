@@ -745,6 +745,55 @@ mod tests {
         assert!(!engine.is_blacklisted(addr));
     }
 
+    // Property-based tests
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn blacklisted_ip_is_always_detected(
+                a in 1u8..=254u8,
+                b in 0u8..=255u8,
+                c in 0u8..=255u8,
+                d in 1u8..=254u8,
+            ) {
+                let mut engine = IpsEngine::new(test_policy());
+                let addr = IpAddr::V4(Ipv4Addr::new(a, b, c, d));
+
+                engine.add_to_blacklist(
+                    addr,
+                    "proptest".to_string(),
+                    false,
+                    Duration::from_secs(60),
+                ).unwrap();
+                prop_assert!(engine.is_blacklisted(addr));
+            }
+
+            #[test]
+            fn whitelisted_ip_is_never_blacklisted(
+                a in 1u8..=254u8,
+                b in 0u8..=255u8,
+            ) {
+                let mut engine = IpsEngine::new(test_policy());
+                let addr = IpAddr::V4(Ipv4Addr::new(a, b, 0, 1));
+
+                engine.set_whitelist(vec![
+                    WhitelistEntry::new(
+                        IpAddr::V4(Ipv4Addr::new(a, b, 0, 0)),
+                        Some(16),
+                    ).unwrap(),
+                ]);
+
+                // Even after detection attempts, whitelisted IPs should not get blacklisted
+                let actions = engine.record_detection(addr);
+                prop_assert!(actions.is_empty());
+                prop_assert!(engine.is_whitelisted(addr));
+                prop_assert!(!engine.is_blacklisted(addr));
+            }
+        }
+    }
+
     // ── Subnet blocking tests ────────────────────────────────────
 
     #[test]
