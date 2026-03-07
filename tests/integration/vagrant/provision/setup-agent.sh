@@ -63,11 +63,14 @@ install_from_prebuilt() {
 build_from_source() {
     echo "=== Building eBPF programs ==="
     if rustup run nightly rustc --version &>/dev/null 2>&1; then
-        (cd "$PROJECT_DIR" && cargo xtask ebpf-build 2>/dev/null) || echo "eBPF build skipped (non-fatal)"
+        (cd "$PROJECT_DIR" && cargo xtask ebpf-build) || echo "eBPF build skipped (non-fatal)"
     fi
 
     echo "=== Building agent binary ==="
     (cd "$PROJECT_DIR" && cargo build --release --bin ebpfsentinel-agent)
+
+    # Install the freshly-built binary and eBPF programs
+    install_from_prebuilt
 }
 
 if [ "${EBPF_BUILD_FROM_SOURCE:-false}" = "true" ]; then
@@ -79,6 +82,15 @@ elif [ -x "${PROJECT_DIR}/target/release/ebpfsentinel-agent" ]; then
 else
     echo "No pre-built binary or Docker image found — building from source"
     build_from_source
+fi
+
+# ── Build Docker image for perf comparison tests ──────────────────
+echo "=== Building Docker image ==="
+if command -v docker &>/dev/null; then
+    (cd "$PROJECT_DIR" && sudo docker build -t ebpfsentinel-agent:latest .) || \
+        echo "  WARNING: Docker image build failed (non-fatal, perf comparison will be skipped)"
+else
+    echo "  WARNING: Docker not found — perf comparison tests will be skipped"
 fi
 
 # ── Start iperf3 server for performance tests ──────────────────────

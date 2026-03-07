@@ -129,6 +129,7 @@ LIMITS
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
         source "$HOME/.cargo/env"
         rustup toolchain install nightly --component rust-src
+        cargo +nightly install bpf-linker
       fi
     SHELL
 
