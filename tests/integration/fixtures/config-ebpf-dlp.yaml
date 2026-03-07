@@ -30,12 +30,12 @@ dlp:
   enabled: true
   mode: alert
   patterns:
-    - id: dlp-credit-card
+    - id: dlp-pci-card
       name: "Credit Card Number"
       regex: "\\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14})\\b"
       severity: high
       data_type: pci
-    - id: dlp-ssn
+    - id: dlp-pii-ssn
       name: "Social Security Number"
       regex: "\\b\\d{3}-\\d{2}-\\d{4}\\b"
       severity: critical
@@ -54,7 +54,7 @@ alerting:
   enabled: true
   dedup_window_secs: 5
   throttle_window_secs: 60
-  throttle_max_per_window: 1000
+  throttle_max: 1000
   routes: []
 
 audit:

@@ -28,7 +28,6 @@ dlp:
 
 ratelimit:
   enabled: false
-  mode: alert
 
 threatintel:
   enabled: false

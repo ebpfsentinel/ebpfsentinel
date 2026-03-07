@@ -64,7 +64,7 @@ alerting:
   enabled: true
   dedup_window_secs: 60
   throttle_window_secs: 300
-  throttle_max_per_window: 100
+  throttle_max: 100
   routes: []
 
 dns:

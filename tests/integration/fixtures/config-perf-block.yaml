@@ -95,7 +95,7 @@ alerting:
   enabled: true
   dedup_window_secs: 60
   throttle_window_secs: 300
-  throttle_max_per_window: 1000
+  throttle_max: 1000
   routes: []
 
 audit:
