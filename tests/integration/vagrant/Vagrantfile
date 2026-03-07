@@ -3,11 +3,18 @@
 #
 # Vagrantfile for eBPFsentinel integration testing.
 #
+# Defines two VMs:
+#   - agent:    runs the eBPF agent (builds, provisions, serves endpoints)
+#   - attacker: runs attack/test tools against the agent VM
+#
 # Usage:
-#   vagrant up        # Create and provision VM
-#   vagrant ssh       # SSH into VM
-#   vagrant halt      # Stop VM
-#   vagrant destroy   # Delete VM
+#   vagrant up                # Create and provision both VMs
+#   vagrant up agent          # Create agent VM only
+#   vagrant up attacker       # Create attacker VM only
+#   vagrant ssh agent         # SSH into agent VM
+#   vagrant ssh attacker      # SSH into attacker VM
+#   vagrant halt              # Stop both VMs
+#   vagrant destroy -f        # Delete both VMs
 #
 # Provider: VirtualBox (default) or VMware Workstation (vmware_desktop)
 # Base box: bento/ubuntu-24.04 (provisioned inline)
@@ -15,44 +22,51 @@
 VAGRANTFILE_API_VERSION = "2"
 
 Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
-  config.vm.hostname = "ebpfsentinel-test"
-  config.vm.box = "bento/ubuntu-24.04"
 
-  # VirtualBox provider (default)
-  config.vm.provider "virtualbox" do |vb|
-    vb.memory = 4096
-    vb.cpus = 4
-    vb.name = "eBPFsentinel Integration Test VM"
-    vb.gui = false
-    # Nested virtualization for Docker
-    vb.customize ["modifyvm", :id, "--nested-hw-virt", "on"]
-  end
+  # ============================================================
+  # Agent VM — primary, runs the eBPF security agent
+  # ============================================================
+  config.vm.define "agent", primary: true do |agent|
+    agent.vm.box = "bento/ubuntu-24.04"
+    agent.vm.hostname = "ebpf-agent"
 
-  # VMware Workstation provider (alternative)
-  config.vm.provider "vmware_desktop" do |v|
-    v.vmx["memsize"] = "4096"
-    v.vmx["numvcpus"] = "4"
-    v.vmx["displayname"] = "eBPFsentinel Integration Test VM"
-    v.gui = false
-    v.linked_clone = false
-  end
+    # Private network for inter-VM communication
+    agent.vm.network "private_network", ip: "192.168.56.10"
 
-  # Port forwards for direct host access to agent endpoints
-  config.vm.network "forwarded_port", guest: 18080, host: 18080, auto_correct: true
-  config.vm.network "forwarded_port", guest: 50151, host: 50151, auto_correct: true
-  config.vm.network "forwarded_port", guest: 19090, host: 19090, auto_correct: true
-  config.vm.network "forwarded_port", guest: 18443, host: 18443, auto_correct: true
+    # Port forwards for direct host access to agent endpoints
+    agent.vm.network "forwarded_port", guest: 18080, host: 18080, auto_correct: true
+    agent.vm.network "forwarded_port", guest: 50151, host: 50151, auto_correct: true
+    agent.vm.network "forwarded_port", guest: 19090, host: 19090, auto_correct: true
+    agent.vm.network "forwarded_port", guest: 18443, host: 18443, auto_correct: true
 
-  # Private network for host-to-VM performance testing
-  config.vm.network "private_network", ip: "192.168.56.10"
+    # Sync project directory into VM
+    agent.vm.synced_folder "../../../", "/home/vagrant/ebpfsentinel",
+      type: "rsync",
+      rsync__exclude: [".git/", "target/", "node_modules/", ".vagrant/"]
 
-  # Sync project directory into VM
-  config.vm.synced_folder "../../../", "/home/vagrant/ebpfsentinel",
-    type: "rsync",
-    rsync__exclude: [".git/", "target/", "node_modules/", ".vagrant/"]
+    # VirtualBox provider (default)
+    agent.vm.provider "virtualbox" do |vb|
+      vb.memory = 4096
+      vb.cpus = 4
+      vb.name = "eBPFsentinel Agent VM"
+      vb.gui = false
+      # Nested virtualization for Docker / eBPF
+      vb.customize ["modifyvm", :id, "--nested-hw-virt", "on"]
+    end
 
-  # Inline provisioning
-  config.vm.provision "shell", name: "base-packages", inline: <<-SHELL
+    # VMware Workstation provider (alternative)
+    agent.vm.provider "vmware_desktop" do |v|
+      v.vmx["memsize"] = "4096"
+      v.vmx["numvcpus"] = "4"
+      v.vmx["displayname"] = "eBPFsentinel Agent VM"
+      v.gui = false
+      v.linked_clone = false
+    end
+
+    # ----------------------------------------------------------
+    # Provisioner: base-packages
+    # ----------------------------------------------------------
+    agent.vm.provision "shell", name: "base-packages", inline: <<-SHELL
       set -euxo pipefail
       export DEBIAN_FRONTEND=noninteractive
 
@@ -60,12 +74,14 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
       apt-get install -y --no-install-recommends \
         build-essential pkg-config libssl-dev protobuf-compiler \
         linux-headers-$(uname -r) iproute2 tcpdump curl wget jq git \
-        ca-certificates gnupg lsb-release openssl net-tools \
-        apt-transport-https software-properties-common \
-        iperf3 hping3 nmap ncat stress-ng netcat-openbsd bc
+        ca-certificates openssl \
+        iperf3 hping3 ncat stress-ng bc
 
       # Install bpftool if available
       apt-get install -y --no-install-recommends linux-tools-$(uname -r) bpftool 2>/dev/null || true
+
+      # Start iperf3 server for bandwidth testing
+      systemctl enable --now iperf3 2>/dev/null || iperf3 -s -D
 
       # eBPF sysctl tuning
       cat >> /etc/sysctl.d/99-ebpfsentinel.conf <<SYSCTL
@@ -81,7 +97,10 @@ SYSCTL
 LIMITS
     SHELL
 
-    config.vm.provision "shell", name: "docker", inline: <<-SHELL
+    # ----------------------------------------------------------
+    # Provisioner: docker
+    # ----------------------------------------------------------
+    agent.vm.provision "shell", name: "docker", inline: <<-SHELL
       set -euxo pipefail
       export DEBIAN_FRONTEND=noninteractive
 
@@ -100,43 +119,10 @@ LIMITS
       fi
     SHELL
 
-    config.vm.provision "shell", name: "k8s-tools", inline: <<-SHELL
-      set -euxo pipefail
-      ARCH=$(dpkg --print-architecture)
-
-      if ! command -v minikube &>/dev/null; then
-        curl -LO "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-${ARCH}"
-        install -m 0755 "minikube-linux-${ARCH}" /usr/local/bin/minikube
-        rm -f "minikube-linux-${ARCH}"
-      fi
-
-      if ! command -v kubectl &>/dev/null; then
-        KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
-        curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
-        install -m 0755 kubectl /usr/local/bin/kubectl
-        rm -f kubectl
-      fi
-    SHELL
-
-    config.vm.provision "shell", name: "bats", inline: <<-SHELL
-      set -euxo pipefail
-
-      if ! command -v bats &>/dev/null; then
-        git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats-core
-        (cd /tmp/bats-core && ./install.sh /usr/local)
-        rm -rf /tmp/bats-core
-      fi
-
-      if ! command -v grpcurl &>/dev/null; then
-        ARCH=$(dpkg --print-architecture)
-        GRPCURL_VERSION="1.9.1"
-        [ "$ARCH" = "amd64" ] && GRPCURL_ARCH="x86_64" || GRPCURL_ARCH="$ARCH"
-        curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_${GRPCURL_ARCH}.tar.gz" | \
-          tar -xz -C /usr/local/bin grpcurl
-      fi
-    SHELL
-
-    config.vm.provision "shell", name: "rust", privileged: false, inline: <<-SHELL
+    # ----------------------------------------------------------
+    # Provisioner: rust (unprivileged)
+    # ----------------------------------------------------------
+    agent.vm.provision "shell", name: "rust", privileged: false, inline: <<-SHELL
       set -euxo pipefail
 
       if ! command -v rustc &>/dev/null; then
@@ -146,6 +132,93 @@ LIMITS
       fi
     SHELL
 
-  # Setup provisioner: generates certs, builds agent, prepares configs
-  config.vm.provision "shell", name: "setup", privileged: false, path: "provision/setup.sh"
+    # ----------------------------------------------------------
+    # Provisioner: ssh-access (enable password auth for attacker)
+    # ----------------------------------------------------------
+    agent.vm.provision "shell", name: "ssh-access", inline: <<-SHELL
+      set -euxo pipefail
+
+      # Set a known password for the vagrant user
+      echo "vagrant:vagrant" | chpasswd
+
+      # Enable password authentication in sshd
+      sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+      sed -i 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
+
+      # Restart sshd to apply changes
+      systemctl restart sshd
+    SHELL
+
+    # ----------------------------------------------------------
+    # Provisioner: setup (external script, unprivileged)
+    # ----------------------------------------------------------
+    agent.vm.provision "shell", name: "setup", privileged: false, path: "provision/setup-agent.sh"
+  end
+
+  # ============================================================
+  # Attacker VM — runs attack and test tools against the agent
+  # ============================================================
+  config.vm.define "attacker" do |attacker|
+    attacker.vm.box = "bento/ubuntu-24.04"
+    attacker.vm.hostname = "ebpf-attacker"
+
+    # Private network for inter-VM communication
+    attacker.vm.network "private_network", ip: "192.168.56.20"
+
+    # Sync project directory into VM (for test scripts)
+    attacker.vm.synced_folder "../../../", "/home/vagrant/ebpfsentinel",
+      type: "rsync",
+      rsync__exclude: [".git/", "target/", "node_modules/", ".vagrant/"]
+
+    # VirtualBox provider (default)
+    attacker.vm.provider "virtualbox" do |vb|
+      vb.memory = 2048
+      vb.cpus = 2
+      vb.name = "eBPFsentinel Attacker VM"
+      vb.gui = false
+    end
+
+    # VMware Workstation provider (alternative)
+    attacker.vm.provider "vmware_desktop" do |v|
+      v.vmx["memsize"] = "2048"
+      v.vmx["numvcpus"] = "2"
+      v.vmx["displayname"] = "eBPFsentinel Attacker VM"
+      v.gui = false
+      v.linked_clone = false
+    end
+
+    # ----------------------------------------------------------
+    # Provisioner: test-tools
+    # ----------------------------------------------------------
+    attacker.vm.provision "shell", name: "test-tools", inline: <<-SHELL
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      apt-get update
+      apt-get install -y --no-install-recommends \
+        curl jq iperf3 hping3 ncat nmap bc openssl \
+        sshpass stress-ng netcat-openbsd
+
+      # Install bats from source
+      if ! command -v bats &>/dev/null; then
+        git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats-core
+        (cd /tmp/bats-core && ./install.sh /usr/local)
+        rm -rf /tmp/bats-core
+      fi
+
+      # Install grpcurl
+      if ! command -v grpcurl &>/dev/null; then
+        ARCH=$(dpkg --print-architecture)
+        GRPCURL_VERSION="1.9.1"
+        [ "$ARCH" = "amd64" ] && GRPCURL_ARCH="x86_64" || GRPCURL_ARCH="$ARCH"
+        curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_${GRPCURL_ARCH}.tar.gz" | \
+          tar -xz -C /usr/local/bin grpcurl
+      fi
+    SHELL
+
+    # ----------------------------------------------------------
+    # Provisioner: setup (external script, unprivileged)
+    # ----------------------------------------------------------
+    attacker.vm.provision "shell", name: "setup", privileged: false, path: "provision/setup-attacker.sh"
+  end
 end

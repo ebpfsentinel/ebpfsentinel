@@ -6,8 +6,8 @@ End-to-end test suite for the eBPFsentinel agent. Covers agent lifecycle, REST/g
 
 ```
 tests/integration/
-├── Makefile                            # Test orchestration (21 targets)
-├── suites/                             # 23 BATS test suites (~183 tests)
+├── Makefile                            # Test orchestration (30+ targets)
+├── suites/                             # BATS test suites
 │   ├── 01-agent-lifecycle.bats
 │   ├── 02-rest-api-health.bats
 │   ├── ...
@@ -17,7 +17,8 @@ tests/integration/
 │   ├── constants.bash                  # Ports, paths, network constants
 │   ├── retry.bash                      # Exponential backoff retry
 │   ├── ebpf_helpers.bash               # Netns/veth, packet gen, eBPF guards
-│   └── perf_helpers.bash               # iperf3/hping3/hey measurement functions
+│   ├── perf_helpers.bash               # iperf3/hping3/hey measurement functions
+│   └── vm_helpers.bash                 # Cross-VM overrides for 2-VM topology
 ├── scripts/                            # Standalone utilities
 │   ├── start-agent.sh                  # Launch agent in background
 │   ├── stop-agent.sh                   # Graceful agent shutdown
@@ -26,6 +27,7 @@ tests/integration/
 │   ├── generate-certs.sh               # Self-signed CA + server cert
 │   ├── generate-jwt-keys.sh            # RSA keypair + test JWT tokens
 │   ├── run-in-vm.sh                    # Main test runner (suite discovery)
+│   ├── run-in-2vm.sh                   # 2-VM test runner (attacker -> agent)
 │   ├── perf-test-docker.sh             # Intra-VM performance tests
 │   ├── perf-test-vagrant.sh            # Binary vs Docker comparison (intra-VM)
 │   ├── perf-test-host-to-vm.sh         # Host-to-VM perf over VirtualBox
@@ -40,9 +42,11 @@ tests/integration/
 │   ├── health.proto                    # gRPC health check proto
 │   └── k8s/                            # Kubernetes manifests (DaemonSet)
 └── vagrant/                            # VM-based test environment
-    ├── Vagrantfile                     # VirtualBox/VMware VM definition
+    ├── Vagrantfile                     # 2-VM definition (agent + attacker)
     └── provision/
-        ├── setup.sh                    # Build agent, install certs/eBPF
+        ├── setup.sh                    # Legacy single-VM provisioner
+        ├── setup-agent.sh              # Agent VM: build/install agent, certs, iperf3
+        ├── setup-attacker.sh           # Attacker VM: SSH keys, test tools, env vars
         └── teardown.sh                 # Cleanup
 ```
 
@@ -214,9 +218,63 @@ All fixtures use `__PLACEHOLDER__` tokens substituted at runtime:
 | `config-perf-ratelimit-only.yaml` | Perf isolation -- ratelimit domain only                         |
 | `docker-compose-test.yml`         | Docker integration test compose (loopback, BTF mounts)          |
 
-## Vagrant VM
+## 2-VM Topology (Recommended)
 
-The test VM provides a reproducible environment with all dependencies pre-installed.
+The recommended way to run eBPF integration tests. Uses two VMs connected over a VirtualBox private network -- no root permissions needed on the developer machine.
+
+```
+Developer Machine (host)
+│
+├── make test-2vm          # Orchestrates everything
+│
+└── VirtualBox Private Network (192.168.56.0/24)
+    │
+    ├── Agent VM (192.168.56.10)          Attacker VM (192.168.56.20)
+    │   ├── ebpfsentinel-agent            ├── bats test runner
+    │   ├── eBPF programs (XDP/TC)        ├── hping3, ncat, iperf3
+    │   ├── iperf3 server (:5201)         ├── SSH access to agent VM
+    │   ├── Docker (for comparison)       └── grpcurl, curl, jq
+    │   └── 4 CPU / 4 GB RAM                 2 CPU / 2 GB RAM
+```
+
+### Quick Start (2-VM)
+
+```bash
+# First time: boot both VMs and run all suites
+make test-2vm
+
+# Run only eBPF scenario suites (11-14, 18-23)
+make test-2vm-ebpf
+
+# Run a single suite
+make test-2vm-suite SUITE=11
+
+# Binary vs Docker performance comparison
+make test-2vm-perf-comparison
+
+# Quick perf comparison (~10 min)
+make test-2vm-perf-comparison-quick
+
+# SSH into VMs for manual debugging
+make vagrant-ssh-agent
+make vagrant-ssh-attacker
+```
+
+### How It Works
+
+1. `vagrant up` provisions both VMs from a single Vagrantfile
+2. The **agent VM** installs the agent binary, generates TLS certs/JWT keys, starts iperf3
+3. The **attacker VM** generates an SSH key and copies it to the agent VM via `sshpass`
+4. Tests run on the attacker VM with `EBPF_2VM_MODE=true`, which causes `ebpf_helpers.bash` to source `vm_helpers.bash`
+5. `vm_helpers.bash` overrides `start_ebpf_agent` (SSH to agent VM), `create_test_netns` (no-op), and packet helpers (send directly over the network instead of through a netns)
+
+### Performance Comparison
+
+The `--perf-comparison` flag runs the performance benchmark twice on the agent VM: once with the native binary and once inside Docker. Results are saved to `/tmp/ebpfsentinel-2vm-perf-{binary,docker}.txt`.
+
+## Legacy Single-VM
+
+The single-VM setup is still available for simpler use cases.
 
 ```bash
 make vagrant-up            # Create and provision VM
@@ -252,6 +310,22 @@ make vagrant-destroy       # Delete VM
 | `test-ebpf-all`           | Suites 11-15                 | root, kernel >= 5.17 |
 | `test-ebpf-vm`            | eBPF suites in Vagrant VM    | Vagrant              |
 
+### 2-VM Topology
+
+| Target                          | Description                             | Requirements |
+| ------------------------------- | --------------------------------------- | ------------ |
+| `test-2vm`                      | Run all suites via 2-VM topology        | Vagrant      |
+| `test-2vm-suite SUITE=<num>`    | Run single suite in 2-VM mode           | Vagrant      |
+| `test-2vm-ebpf`                 | eBPF scenario suites only               | Vagrant      |
+| `test-2vm-perf`                 | Performance suites only                 | Vagrant      |
+| `test-2vm-perf-comparison`      | Binary vs Docker perf comparison        | Vagrant      |
+| `test-2vm-perf-comparison-quick`| Quick binary vs Docker comparison       | Vagrant      |
+| `vagrant-2vm-up`                | Start both VMs                          | Vagrant      |
+| `vagrant-2vm-halt`              | Stop both VMs                           | Vagrant      |
+| `vagrant-2vm-destroy`           | Destroy both VMs                        | Vagrant      |
+| `vagrant-ssh-agent`             | SSH into agent VM                       | Vagrant      |
+| `vagrant-ssh-attacker`          | SSH into attacker VM                    | Vagrant      |
+
 ### Performance Tests
 
 | Target                       | Description                       | Duration |
@@ -276,7 +350,7 @@ make vagrant-destroy       # Delete VM
 
 - **Template substitution** -- Fixture configs use `__PLACEHOLDER__` tokens replaced by `prepare_ebpf_config()` at runtime, enabling the same config templates for veth, Docker, and VM topologies.
 - **Skip guards** -- `require_root()`, `require_kernel()`, `require_tool()` functions skip tests gracefully on unsupported environments instead of failing.
-- **Dual launch strategy** -- eBPF tests try a local binary first, then fall back to `docker run --privileged` if no local build is available.
-- **Network isolation** -- eBPF scenario tests (11-15) create a dedicated network namespace with a veth pair (`10.200.0.0/24`), preventing interference with the host network.
+- **Triple launch strategy** -- eBPF tests try: (1) 2-VM mode via SSH when `EBPF_2VM_MODE=true`, (2) local binary, (3) `docker run --privileged` fallback.
+- **Network isolation** -- Single-VM mode uses a veth pair in a network namespace (`10.200.0.0/24`). 2-VM mode uses the VirtualBox private network (`192.168.56.0/24`) for real cross-host testing.
 - **JSON reports** -- Performance tests produce structured JSON reports (`/tmp/ebpfsentinel-*.json`) with metadata, per-phase measurements, threshold results, and a pass/fail verdict.
 - **Exponential backoff** -- Agent readiness checks use `retry()` with configurable backoff (0.2s to 10s) to handle variable startup times.

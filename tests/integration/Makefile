@@ -152,6 +152,57 @@ test-perf-host-to-vm: ## Host-to-VM perf test over VirtualBox private network
 test-perf-host-to-vm-quick: ## Quick host-to-VM perf test
 	bash $(SCRIPT_DIR)/perf-test-host-to-vm.sh --quick
 
+# ── 2-VM topology (agent + attacker VMs) ─────────────────────────
+
+.PHONY: vagrant-2vm-up
+vagrant-2vm-up: ## Start both agent and attacker VMs
+	cd $(VAGRANT_DIR) && vagrant up agent attacker
+
+.PHONY: vagrant-2vm-halt
+vagrant-2vm-halt: ## Stop both VMs
+	cd $(VAGRANT_DIR) && vagrant halt agent attacker
+
+.PHONY: vagrant-2vm-destroy
+vagrant-2vm-destroy: ## Destroy both VMs
+	cd $(VAGRANT_DIR) && vagrant destroy -f agent attacker
+
+.PHONY: vagrant-ssh-agent
+vagrant-ssh-agent: ## SSH into the agent VM
+	cd $(VAGRANT_DIR) && vagrant ssh agent
+
+.PHONY: vagrant-ssh-attacker
+vagrant-ssh-attacker: ## SSH into the attacker VM
+	cd $(VAGRANT_DIR) && vagrant ssh attacker
+
+.PHONY: test-2vm
+test-2vm: vagrant-2vm-up ## Run all suites via 2-VM topology
+	$(SCRIPT_DIR)/run-in-2vm.sh --skip-provision
+
+.PHONY: test-2vm-suite
+test-2vm-suite: ## Run single suite in 2-VM mode: make test-2vm-suite SUITE=11
+ifndef SUITE
+	$(error SUITE is required, e.g. make test-2vm-suite SUITE=11)
+endif
+	$(SCRIPT_DIR)/run-in-2vm.sh --skip-provision --suite $(SUITE)
+
+.PHONY: test-2vm-ebpf
+test-2vm-ebpf: vagrant-2vm-up ## Run eBPF scenario suites via 2-VM topology
+	$(SCRIPT_DIR)/run-in-2vm.sh --skip-provision --ebpf
+
+.PHONY: test-2vm-perf
+test-2vm-perf: vagrant-2vm-up ## Run performance suites via 2-VM topology
+	$(SCRIPT_DIR)/run-in-2vm.sh --skip-provision --performance
+
+.PHONY: test-2vm-perf-comparison
+test-2vm-perf-comparison: vagrant-2vm-up ## Binary vs Docker perf comparison in 2-VM
+	$(SCRIPT_DIR)/run-in-2vm.sh --skip-provision --perf-comparison
+
+.PHONY: test-2vm-perf-comparison-quick
+test-2vm-perf-comparison-quick: vagrant-2vm-up ## Quick binary vs Docker comparison
+	$(SCRIPT_DIR)/run-in-2vm.sh --skip-provision --perf-comparison --quick
+
+# ── Utilities ────────────────────────────────────────────────────
+
 .PHONY: prepare-docker-image
 prepare-docker-image: ## Save Docker image tar for VM injection
 	docker save -o $(PROJECT_ROOT)/ebpfsentinel-image.tar ebpfsentinel-agent:latest
@@ -179,7 +230,7 @@ clean: ## Remove temp files, stop any running agents
 	rm -rf /tmp/ebpfsentinel-perf-data-*
 
 .PHONY: nuke
-nuke: clean vagrant-destroy ## Destroy everything: VM, temp files
+nuke: clean vagrant-destroy ## Destroy everything: VMs, temp files
 
 # ── Help ───────────────────────────────────────────────────────────
 

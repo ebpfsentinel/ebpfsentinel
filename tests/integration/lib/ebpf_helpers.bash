@@ -423,3 +423,11 @@ wait_for_ebpf_loaded() {
     done
     return 1
 }
+
+# ── 2-VM mode override ────────────────────────────────────────────────
+# When EBPF_2VM_MODE=true (set by the attacker VM's .bashrc or Makefile),
+# source vm_helpers.bash which overrides netns, agent lifecycle, and
+# packet generation functions to work across the private network.
+if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+    source "${EBPF_HELPERS_DIR}/vm_helpers.bash"
+fi
