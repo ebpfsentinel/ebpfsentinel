@@ -126,6 +126,74 @@ impl AliasResolutionPort for AliasResolutionAdapter {
         Ok(ips)
     }
 
+    fn fetch_url_table_json(
+        &self,
+        url: &str,
+        json_path: &str,
+    ) -> Result<Vec<IpNetwork>, DomainError> {
+        let url = url.to_string();
+        let client = self.http_client.clone();
+
+        let body = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let response = client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| DomainError::EngineError(format!("HTTP fetch failed: {e}")))?;
+
+                if !response.status().is_success() {
+                    return Err(DomainError::EngineError(format!(
+                        "HTTP {} for {}",
+                        response.status(),
+                        url
+                    )));
+                }
+
+                response
+                    .text()
+                    .await
+                    .map_err(|e| DomainError::EngineError(format!("body read failed: {e}")))
+            })
+        })?;
+
+        let json: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| DomainError::EngineError(format!("JSON parse failed: {e}")))?;
+
+        let target = json.pointer(json_path).ok_or_else(|| {
+            DomainError::EngineError(format!("JSONPointer '{json_path}' not found in response"))
+        })?;
+
+        let mut ips = Vec::new();
+        match target {
+            serde_json::Value::Array(arr) => {
+                for val in arr {
+                    if let Some(s) = val.as_str() {
+                        if let Some(net) = parse_ip_network(s) {
+                            ips.push(net);
+                        } else {
+                            debug!(value = s, "skipping unparseable IP in JSON array");
+                        }
+                    }
+                }
+            }
+            serde_json::Value::String(s) => {
+                // Single value at path
+                if let Some(net) = parse_ip_network(s) {
+                    ips.push(net);
+                }
+            }
+            _ => {
+                return Err(DomainError::EngineError(format!(
+                    "JSONPointer '{json_path}' resolved to non-array/string type"
+                )));
+            }
+        }
+
+        debug!(url, json_path, count = ips.len(), "URL table JSON fetched");
+        Ok(ips)
+    }
+
     fn lookup_geoip(&self, country_codes: &[String]) -> Result<Vec<IpNetwork>, DomainError> {
         let Some(ref adapter) = self.geoip_adapter else {
             warn!(
@@ -135,6 +203,17 @@ impl AliasResolutionPort for AliasResolutionAdapter {
             return Ok(Vec::new());
         };
         Ok(adapter.networks_by_country(country_codes))
+    }
+
+    fn lookup_bgp_asn(&self, asn_numbers: &[u32]) -> Result<Vec<IpNetwork>, DomainError> {
+        let Some(ref adapter) = self.geoip_adapter else {
+            warn!(
+                asns = ?asn_numbers,
+                "BGP ASN lookup requested but no GeoIP adapter configured"
+            );
+            return Ok(Vec::new());
+        };
+        Ok(adapter.networks_by_asn(asn_numbers))
     }
 }
 

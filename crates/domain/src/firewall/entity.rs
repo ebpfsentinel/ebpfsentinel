@@ -119,7 +119,7 @@ pub fn ip_cidr(addr: u32, prefix_len: u8) -> IpNetwork {
     IpNetwork::V4 { addr, prefix_len }
 }
 
-fn cidr_match_v4(net_addr: u32, prefix_len: u8, ip: u32) -> bool {
+pub fn cidr_match_v4(net_addr: u32, prefix_len: u8, ip: u32) -> bool {
     if prefix_len == 0 {
         return true;
     }
@@ -130,7 +130,7 @@ fn cidr_match_v4(net_addr: u32, prefix_len: u8, ip: u32) -> bool {
     (net_addr & mask) == (ip & mask)
 }
 
-fn cidr_match_v6(net_addr: &[u8; 16], prefix_len: u8, ip: &[u8; 16]) -> bool {
+pub fn cidr_match_v6(net_addr: &[u8; 16], prefix_len: u8, ip: &[u8; 16]) -> bool {
     if prefix_len == 0 {
         return true;
     }
@@ -351,6 +351,12 @@ pub struct FirewallRule {
     /// Optional alias reference for destination port matching.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dst_port_alias: Option<String>,
+    /// Optional alias reference for source MAC matching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_mac_alias: Option<String>,
+    /// Optional alias reference for destination MAC matching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_mac_alias: Option<String>,
     /// Conntrack state filter (None = match any state).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ct_states: Option<Vec<ConnState>>,
@@ -1074,6 +1080,8 @@ mod tests {
             dst_alias: None,
             src_port_alias: None,
             dst_port_alias: None,
+            src_mac_alias: None,
+            dst_mac_alias: None,
             ct_states: None,
             tcp_flags: None,
             icmp_type: None,

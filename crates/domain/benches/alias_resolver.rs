@@ -16,7 +16,10 @@ fn ip_set_alias(id: &str, n_ips: usize) -> Alias {
         .collect();
     Alias {
         id: AliasId(id.to_string()),
-        kind: AliasKind::IpSet { values },
+        kind: AliasKind::IpSet {
+            values,
+            exclude: Vec::new(),
+        },
         description: None,
     }
 }
@@ -26,6 +29,7 @@ fn nested_alias(id: &str, refs: Vec<&str>) -> Alias {
         id: AliasId(id.to_string()),
         kind: AliasKind::Nested {
             aliases: refs.into_iter().map(String::from).collect(),
+            exclude: Vec::new(),
         },
         description: None,
     }

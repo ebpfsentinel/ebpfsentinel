@@ -52,6 +52,18 @@ pub struct AliasConfig {
     #[serde(default)]
     pub interfaces: Vec<String>,
 
+    /// Excluded CIDRs for `ip_set` and `nested` types.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+
+    /// `JSONPointer` path for `url_table_json` type.
+    #[serde(default)]
+    pub json_path: Option<String>,
+
+    /// ASN numbers for `bgp_asn` type.
+    #[serde(default)]
+    pub asn_numbers: Vec<u32>,
+
     /// Human-readable description.
     #[serde(default)]
     pub description: Option<String>,
@@ -86,6 +98,13 @@ impl AliasConfig {
                         message: format!("invalid CIDR: {e}"),
                     })?;
                 }
+                // Validate exclusions
+                for (i, exc) in self.exclude.iter().enumerate() {
+                    parse_cidr(exc).map_err(|e| ConfigError::Validation {
+                        field: format!("{prefix}.exclude[{i}]"),
+                        message: format!("invalid exclude CIDR: {e}"),
+                    })?;
+                }
             }
             "port_set" => {
                 if self.values.is_empty() {
@@ -101,6 +120,13 @@ impl AliasConfig {
                         field: format!("{prefix}.aliases"),
                         message: "nested alias must reference at least one alias".to_string(),
                     });
+                }
+                // Validate exclusions
+                for (i, exc) in self.exclude.iter().enumerate() {
+                    parse_cidr(exc).map_err(|e| ConfigError::Validation {
+                        field: format!("{prefix}.exclude[{i}]"),
+                        message: format!("invalid exclude CIDR: {e}"),
+                    })?;
                 }
             }
             "url_table" => {
@@ -157,13 +183,50 @@ impl AliasConfig {
                     });
                 }
             }
+            "mac_set" => {
+                if self.values.is_empty() {
+                    return Err(ConfigError::Validation {
+                        field: format!("{prefix}.values"),
+                        message: "mac_set alias must have at least one MAC address".to_string(),
+                    });
+                }
+            }
+            "url_table_json" => {
+                if self.url.as_deref().unwrap_or("").is_empty() {
+                    return Err(ConfigError::Validation {
+                        field: format!("{prefix}.url"),
+                        message: "url_table_json alias must have a URL".to_string(),
+                    });
+                }
+                if self.json_path.as_deref().unwrap_or("").is_empty() {
+                    return Err(ConfigError::Validation {
+                        field: format!("{prefix}.json_path"),
+                        message: "url_table_json alias must have a json_path".to_string(),
+                    });
+                }
+                if self.refresh_interval.unwrap_or(0) == 0 {
+                    return Err(ConfigError::Validation {
+                        field: format!("{prefix}.refresh_interval"),
+                        message: "refresh_interval must be > 0".to_string(),
+                    });
+                }
+            }
+            "bgp_asn" => {
+                if self.asn_numbers.is_empty() {
+                    return Err(ConfigError::Validation {
+                        field: format!("{prefix}.asn_numbers"),
+                        message: "bgp_asn alias must have at least one ASN".to_string(),
+                    });
+                }
+            }
+            "external" => {}
             other => {
                 return Err(ConfigError::InvalidValue {
                     field: format!("{prefix}.type"),
                     value: other.to_string(),
-                    expected:
-                        "ip_set, port_set, nested, url_table, geoip, dynamic_dns, interface_group"
-                            .to_string(),
+                    expected: "ip_set, port_set, nested, url_table, url_table_json, geoip, \
+                               dynamic_dns, interface_group, mac_set, bgp_asn, external"
+                        .to_string(),
                 });
             }
         }
@@ -175,50 +238,87 @@ impl AliasConfig {
     pub fn to_domain_alias(&self, name: &str) -> Result<Alias, ConfigError> {
         let prefix = format!("firewall.aliases.{name}");
 
-        let kind = match self.alias_type.as_str() {
-            "ip_set" => {
-                let mut ips = Vec::with_capacity(self.values.len());
-                for val in &self.values {
-                    let s = yaml_value_to_string(val);
-                    ips.push(parse_cidr(&s)?);
+        let kind =
+            match self.alias_type.as_str() {
+                "ip_set" => {
+                    let mut ips = Vec::with_capacity(self.values.len());
+                    for val in &self.values {
+                        let s = yaml_value_to_string(val);
+                        ips.push(parse_cidr(&s)?);
+                    }
+                    let mut exclude = Vec::with_capacity(self.exclude.len());
+                    for exc in &self.exclude {
+                        exclude.push(parse_cidr(exc)?);
+                    }
+                    AliasKind::IpSet {
+                        values: ips,
+                        exclude,
+                    }
                 }
-                AliasKind::IpSet { values: ips }
-            }
-            "port_set" => {
-                let mut ports = Vec::with_capacity(self.values.len());
-                for val in &self.values {
-                    let s = yaml_value_to_string(val);
-                    ports.push(parse_port_value(&s, &prefix)?);
+                "port_set" => {
+                    let mut ports = Vec::with_capacity(self.values.len());
+                    for val in &self.values {
+                        let s = yaml_value_to_string(val);
+                        ports.push(parse_port_value(&s, &prefix)?);
+                    }
+                    AliasKind::PortSet { values: ports }
                 }
-                AliasKind::PortSet { values: ports }
-            }
-            "nested" => AliasKind::Nested {
-                aliases: self.aliases.clone(),
-            },
-            "url_table" => AliasKind::UrlTable {
-                url: self.url.clone().unwrap_or_default(),
-                refresh_interval_secs: self.refresh_interval.unwrap_or(3600),
-            },
-            "geoip" => AliasKind::GeoIp {
-                country_codes: self.country_codes.clone(),
-            },
-            "dynamic_dns" => AliasKind::DynamicDns {
-                hostnames: self.hostnames.clone(),
-                refresh_interval_secs: self.refresh_interval.unwrap_or(300),
-            },
-            "interface_group" => AliasKind::InterfaceGroup {
-                interfaces: self.interfaces.clone(),
-            },
-            other => {
-                return Err(ConfigError::InvalidValue {
-                    field: format!("{prefix}.type"),
-                    value: other.to_string(),
-                    expected:
-                        "ip_set, port_set, nested, url_table, geoip, dynamic_dns, interface_group"
+                "nested" => {
+                    let mut exclude = Vec::with_capacity(self.exclude.len());
+                    for exc in &self.exclude {
+                        exclude.push(parse_cidr(exc)?);
+                    }
+                    AliasKind::Nested {
+                        aliases: self.aliases.clone(),
+                        exclude,
+                    }
+                }
+                "url_table" => AliasKind::UrlTable {
+                    url: self.url.clone().unwrap_or_default(),
+                    refresh_interval_secs: self.refresh_interval.unwrap_or(3600),
+                },
+                "geoip" => AliasKind::GeoIp {
+                    country_codes: self.country_codes.clone(),
+                },
+                "dynamic_dns" => AliasKind::DynamicDns {
+                    hostnames: self.hostnames.clone(),
+                    refresh_interval_secs: self.refresh_interval.unwrap_or(300),
+                },
+                "interface_group" => AliasKind::InterfaceGroup {
+                    interfaces: self.interfaces.clone(),
+                },
+                "mac_set" => {
+                    let mut macs = Vec::with_capacity(self.values.len());
+                    for val in &self.values {
+                        let s = yaml_value_to_string(val);
+                        macs.push(domain::firewall::entity::parse_mac_address(&s).map_err(
+                            |e| ConfigError::Validation {
+                                field: format!("{prefix}.values"),
+                                message: format!("invalid MAC address: {e}"),
+                            },
+                        )?);
+                    }
+                    AliasKind::MacSet { values: macs }
+                }
+                "url_table_json" => AliasKind::UrlTableJson {
+                    url: self.url.clone().unwrap_or_default(),
+                    json_path: self.json_path.clone().unwrap_or_default(),
+                    refresh_interval_secs: self.refresh_interval.unwrap_or(3600),
+                },
+                "bgp_asn" => AliasKind::BgpAsn {
+                    asn_numbers: self.asn_numbers.clone(),
+                },
+                "external" => AliasKind::External,
+                other => {
+                    return Err(ConfigError::InvalidValue {
+                        field: format!("{prefix}.type"),
+                        value: other.to_string(),
+                        expected: "ip_set, port_set, nested, url_table, url_table_json, geoip, \
+                               dynamic_dns, interface_group, mac_set, bgp_asn, external"
                             .to_string(),
-                });
-            }
-        };
+                    });
+                }
+            };
 
         Ok(Alias {
             id: AliasId(name.to_string()),
@@ -307,6 +407,9 @@ mod tests {
             country_codes: Vec::new(),
             hostnames: Vec::new(),
             interfaces: Vec::new(),
+            exclude: Vec::new(),
+            json_path: None,
+            asn_numbers: Vec::new(),
             description: None,
         }
     }
@@ -341,6 +444,9 @@ mod tests {
             country_codes: Vec::new(),
             hostnames: Vec::new(),
             interfaces: Vec::new(),
+            exclude: Vec::new(),
+            json_path: None,
+            asn_numbers: Vec::new(),
             description: None,
         };
         assert!(cfg.validate("combined").is_ok());
@@ -357,6 +463,9 @@ mod tests {
             country_codes: Vec::new(),
             hostnames: Vec::new(),
             interfaces: Vec::new(),
+            exclude: Vec::new(),
+            json_path: None,
+            asn_numbers: Vec::new(),
             description: None,
         };
         assert!(cfg.validate("bad").is_err());
@@ -373,6 +482,9 @@ mod tests {
             country_codes: Vec::new(),
             hostnames: Vec::new(),
             interfaces: Vec::new(),
+            exclude: Vec::new(),
+            json_path: None,
+            asn_numbers: Vec::new(),
             description: None,
         };
         assert!(cfg.validate("blocklist").is_ok());
@@ -389,6 +501,9 @@ mod tests {
             country_codes: Vec::new(),
             hostnames: Vec::new(),
             interfaces: Vec::new(),
+            exclude: Vec::new(),
+            json_path: None,
+            asn_numbers: Vec::new(),
             description: None,
         };
         assert!(cfg.validate("bad").is_err());
@@ -405,6 +520,9 @@ mod tests {
             country_codes: vec!["CN".to_string(), "RU".to_string()],
             hostnames: Vec::new(),
             interfaces: Vec::new(),
+            exclude: Vec::new(),
+            json_path: None,
+            asn_numbers: Vec::new(),
             description: None,
         };
         assert!(cfg.validate("blocked").is_ok());
@@ -421,6 +539,9 @@ mod tests {
             country_codes: vec!["china".to_string()],
             hostnames: Vec::new(),
             interfaces: Vec::new(),
+            exclude: Vec::new(),
+            json_path: None,
+            asn_numbers: Vec::new(),
             description: None,
         };
         assert!(cfg.validate("bad").is_err());
@@ -437,6 +558,9 @@ mod tests {
             country_codes: Vec::new(),
             hostnames: Vec::new(),
             interfaces: Vec::new(),
+            exclude: Vec::new(),
+            json_path: None,
+            asn_numbers: Vec::new(),
             description: None,
         };
         assert!(cfg.validate("bad").is_err());
@@ -446,7 +570,7 @@ mod tests {
     fn to_domain_ip_set() {
         let alias = ip_set_config().to_domain_alias("rfc1918").unwrap();
         assert_eq!(alias.id.0, "rfc1918");
-        assert!(matches!(alias.kind, AliasKind::IpSet { ref values } if values.len() == 2));
+        assert!(matches!(alias.kind, AliasKind::IpSet { ref values, .. } if values.len() == 2));
     }
 
     #[test]
@@ -463,6 +587,9 @@ mod tests {
             country_codes: Vec::new(),
             hostnames: Vec::new(),
             interfaces: Vec::new(),
+            exclude: Vec::new(),
+            json_path: None,
+            asn_numbers: Vec::new(),
             description: None,
         };
         let alias = cfg.to_domain_alias("http_ports").unwrap();
@@ -489,10 +616,13 @@ mod tests {
             country_codes: Vec::new(),
             hostnames: Vec::new(),
             interfaces: Vec::new(),
+            exclude: Vec::new(),
+            json_path: None,
+            asn_numbers: Vec::new(),
             description: None,
         };
         let alias = cfg.to_domain_alias("combined").unwrap();
-        assert!(matches!(alias.kind, AliasKind::Nested { ref aliases } if aliases.len() == 2));
+        assert!(matches!(alias.kind, AliasKind::Nested { ref aliases, .. } if aliases.len() == 2));
     }
 
     #[test]

@@ -107,6 +107,7 @@ use super::zone_handler;
         nat_handler::list_nat_rules,
         // Aliases
         alias_handler::alias_status,
+        alias_handler::set_external_alias_content,
         // Routing
         routing_handler::routing_status,
         routing_handler::list_gateways,
@@ -193,6 +194,7 @@ use super::zone_handler;
         nat_handler::NatRuleResponse,
         // Aliases
         alias_handler::AliasStatusResponse,
+        alias_handler::ExternalAliasContent,
         // Routing
         routing_handler::RoutingStatusResponse,
         routing_handler::GatewayResponse,

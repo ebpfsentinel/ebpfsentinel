@@ -8,7 +8,9 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use application::firewall_service_impl::FirewallAppService;
 use domain::common::entity::{Protocol, RuleId};
 use domain::firewall::engine::FirewallEngine;
-use domain::firewall::entity::{FirewallAction, FirewallRule, IpNetwork, PacketInfo, PortRange, Scope};
+use domain::firewall::entity::{
+    FirewallAction, FirewallRule, IpNetwork, PacketInfo, PortRange, Scope,
+};
 use ports::test_utils::NoopMetrics;
 
 // ---------------------------------------------------------------------------
@@ -35,6 +37,8 @@ fn make_rule(id: usize, priority: u32, action: FirewallAction) -> FirewallRule {
         dst_alias: None,
         src_port_alias: None,
         dst_port_alias: None,
+        src_mac_alias: None,
+        dst_mac_alias: None,
         ct_states: None,
         tcp_flags: None,
         icmp_type: None,

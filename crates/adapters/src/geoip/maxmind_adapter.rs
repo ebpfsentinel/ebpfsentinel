@@ -195,6 +195,58 @@ impl MaxMindGeoIpAdapter {
         );
         result
     }
+
+    /// Extract all CIDR networks from the ASN database for the given AS numbers.
+    pub fn networks_by_asn(&self, asn_numbers: &[u32]) -> Vec<IpNetwork> {
+        let Some(ref reader) = self.asn_reader else {
+            return Vec::new();
+        };
+        let asns: HashSet<u32> = asn_numbers.iter().copied().collect();
+        let mut result = Vec::new();
+        let opts = WithinOptions::default().skip_empty_values();
+
+        if let Ok(iter) =
+            reader.within(ipnetwork::IpNetwork::V4("0.0.0.0/0".parse().unwrap()), opts)
+        {
+            for lookup_result in iter.flatten() {
+                if let Ok(Some(asn_record)) = lookup_result.decode::<maxminddb::geoip2::Asn>()
+                    && let Some(asn_num) = asn_record.autonomous_system_number
+                    && asns.contains(&asn_num)
+                    && let Ok(net) = lookup_result.network()
+                    && let ipnetwork::IpNetwork::V4(net) = net
+                {
+                    result.push(IpNetwork::V4 {
+                        addr: u32::from(net.ip()),
+                        prefix_len: net.prefix(),
+                    });
+                }
+            }
+        }
+
+        if let Ok(iter) = reader.within(ipnetwork::IpNetwork::V6("::/0".parse().unwrap()), opts) {
+            for lookup_result in iter.flatten() {
+                if let Ok(Some(asn_record)) = lookup_result.decode::<maxminddb::geoip2::Asn>()
+                    && let Some(asn_num) = asn_record.autonomous_system_number
+                    && asns.contains(&asn_num)
+                    && let Ok(net) = lookup_result.network()
+                    && let ipnetwork::IpNetwork::V6(net) = net
+                {
+                    result.push(IpNetwork::V6 {
+                        addr: net.ip().octets(),
+                        prefix_len: net.prefix(),
+                    });
+                }
+            }
+        }
+
+        info!(
+            asns = ?asn_numbers,
+            v4 = result.iter().filter(|n| matches!(n, IpNetwork::V4 { .. })).count(),
+            v6 = result.iter().filter(|n| matches!(n, IpNetwork::V6 { .. })).count(),
+            "BGP ASN networks extracted"
+        );
+        result
+    }
 }
 
 impl GeoIpPort for MaxMindGeoIpAdapter {

@@ -79,6 +79,52 @@ impl AliasAppService {
             .map_err(|e| DomainError::InvalidRule(e.to_string()))
     }
 
+    /// Resolve an alias to MAC addresses (static resolution only).
+    pub fn resolve_macs(
+        &self,
+        alias_name: &str,
+    ) -> Result<Vec<domain::firewall::entity::MacAddress>, DomainError> {
+        self.resolver
+            .resolve_macs(alias_name)
+            .map_err(|e| DomainError::InvalidRule(e.to_string()))
+    }
+
+    /// Set external alias content (IPs pushed via API).
+    pub fn set_external_ips(
+        &mut self,
+        alias_name: &str,
+        ips: &[IpNetwork],
+    ) -> Result<(), DomainError> {
+        let alias = self
+            .resolver
+            .get(alias_name)
+            .ok_or_else(|| DomainError::RuleNotFound(alias_name.to_string()))?;
+
+        if !matches!(alias.kind, domain::alias::entity::AliasKind::External) {
+            return Err(DomainError::InvalidRule(format!(
+                "alias '{alias_name}' is not of type External"
+            )));
+        }
+
+        // Sync to eBPF IP set map
+        let set_id = self.get_or_assign_set_id(alias_name);
+        if let Some(ref mut ipset_port) = self.ipset_port {
+            let addrs: Vec<u32> = ips
+                .iter()
+                .filter_map(|ip| match ip {
+                    IpNetwork::V4 { addr, .. } => Some(*addr),
+                    IpNetwork::V6 { .. } => None,
+                })
+                .collect();
+            if let Err(e) = ipset_port.load_ipset_v4(set_id, &addrs) {
+                tracing::warn!(alias = alias_name, "failed to load external IP set: {e}");
+            }
+        }
+
+        self.update_metrics();
+        Ok(())
+    }
+
     /// Get or assign a `set_id` for an alias name (for eBPF IP set maps).
     pub fn get_or_assign_set_id(&mut self, alias_name: &str) -> u8 {
         if let Some(&id) = self.set_id_map.get(alias_name) {
@@ -102,7 +148,7 @@ impl AliasAppService {
         let mut refreshed = 0;
         let aliases = self.resolver.aliases().clone();
 
-        // Accumulate all GeoIP CIDRs across aliases for a single bulk load
+        // Accumulate all GeoIP/BGP ASN CIDRs across aliases for a single bulk load
         let mut all_geoip_v4_src: Vec<FirewallLpmEntryV4> = Vec::new();
         let mut all_geoip_v6_src: Vec<FirewallLpmEntryV6> = Vec::new();
 
@@ -112,9 +158,12 @@ impl AliasAppService {
                 continue;
             }
 
-            let is_geoip = matches!(&alias.kind, AliasKind::GeoIp { .. });
+            let is_lpm_alias = matches!(
+                &alias.kind,
+                AliasKind::GeoIp { .. } | AliasKind::BgpAsn { .. }
+            );
 
-            if is_geoip {
+            if is_lpm_alias {
                 // GeoIP CIDRs → LPM Trie maps (block inbound from country)
                 let (v4_entries, v6_entries) = convert_to_lpm_entries(&ips, ACTION_DROP);
                 all_geoip_v4_src.extend(v4_entries);
@@ -208,6 +257,22 @@ impl AliasAppService {
                     Vec::new()
                 }
             },
+            AliasKind::UrlTableJson { url, json_path, .. } => {
+                match port.fetch_url_table_json(url, json_path) {
+                    Ok(ips) => ips,
+                    Err(e) => {
+                        tracing::warn!(alias = %alias.id, "URL table JSON fetch failed: {e}");
+                        Vec::new()
+                    }
+                }
+            }
+            AliasKind::BgpAsn { asn_numbers } => match port.lookup_bgp_asn(asn_numbers) {
+                Ok(ips) => ips,
+                Err(e) => {
+                    tracing::warn!(alias = %alias.id, "BGP ASN lookup failed: {e}");
+                    Vec::new()
+                }
+            },
             _ => Vec::new(),
         }
     }
@@ -250,6 +315,7 @@ mod tests {
                     addr: 0xC0A8_0000,
                     prefix_len: 16,
                 }],
+                exclude: Vec::new(),
             },
             description: None,
         }
@@ -412,6 +478,13 @@ mod tests {
         fn fetch_url_table(&self, _url: &str) -> Result<Vec<IpNetwork>, DomainError> {
             Ok(Vec::new())
         }
+        fn fetch_url_table_json(
+            &self,
+            _url: &str,
+            _json_path: &str,
+        ) -> Result<Vec<IpNetwork>, DomainError> {
+            Ok(Vec::new())
+        }
         fn resolve_dns(&self, _hostname: &str) -> Result<Vec<IpNetwork>, DomainError> {
             Ok(Vec::new())
         }
@@ -426,6 +499,9 @@ mod tests {
                     prefix_len: 32,
                 },
             ])
+        }
+        fn lookup_bgp_asn(&self, _asns: &[u32]) -> Result<Vec<IpNetwork>, DomainError> {
+            Ok(Vec::new())
         }
     }
 

@@ -869,7 +869,11 @@ mod tests {
 
     fn make_ddos_attack() -> DdosAttack {
         use domain::ddos::entity::DdosAttackType;
-        DdosAttack::new("atk-test-1".to_string(), DdosAttackType::SynFlood, 1_000_000_000)
+        DdosAttack::new(
+            "atk-test-1".to_string(),
+            DdosAttackType::SynFlood,
+            1_000_000_000,
+        )
     }
 
     #[tokio::test]
@@ -879,7 +883,15 @@ mod tests {
             make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics));
 
         pipeline
-            .process_ddos_alert(&make_ddos_attack(), [1, 0, 0, 0], [2, 0, 0, 0], false, 0, 80, 6)
+            .process_ddos_alert(
+                &make_ddos_attack(),
+                [1, 0, 0, 0],
+                [2, 0, 0, 0],
+                false,
+                0,
+                80,
+                6,
+            )
             .await;
 
         assert_eq!(metrics.alert_calls.load(Ordering::Relaxed), 1);
@@ -895,7 +907,15 @@ mod tests {
                 .with_log_sender(Arc::clone(&sender) as Arc<dyn AlertSender>);
 
         pipeline
-            .process_ddos_alert(&make_ddos_attack(), [1, 0, 0, 0], [2, 0, 0, 0], false, 0, 80, 6)
+            .process_ddos_alert(
+                &make_ddos_attack(),
+                [1, 0, 0, 0],
+                [2, 0, 0, 0],
+                false,
+                0,
+                80,
+                6,
+            )
             .await;
 
         assert_eq!(sender.send_calls.load(Ordering::Relaxed), 1);
@@ -912,7 +932,11 @@ mod tests {
         // IcmpFlood maps to Medium severity, which is below Critical
         let attack = {
             use domain::ddos::entity::DdosAttackType;
-            DdosAttack::new("atk-low".to_string(), DdosAttackType::IcmpFlood, 1_000_000_000)
+            DdosAttack::new(
+                "atk-low".to_string(),
+                DdosAttackType::IcmpFlood,
+                1_000_000_000,
+            )
         };
 
         pipeline
@@ -959,17 +983,11 @@ mod tests {
             }
         }
 
-        fn get_alert(
-            &self,
-            _id: &str,
-        ) -> Result<Option<Alert>, domain::alert::error::AlertError> {
+        fn get_alert(&self, _id: &str) -> Result<Option<Alert>, domain::alert::error::AlertError> {
             Ok(None)
         }
 
-        fn mark_false_positive(
-            &self,
-            _id: &str,
-        ) -> Result<bool, domain::alert::error::AlertError> {
+        fn mark_false_positive(&self, _id: &str) -> Result<bool, domain::alert::error::AlertError> {
             Ok(false)
         }
 
@@ -1128,9 +1146,12 @@ mod tests {
         let (tx, rx) = mpsc::channel(100);
         let cancel = CancellationToken::new();
 
-        tx.send(AlertEvent::Dlp(make_dlp_alert("dlp-pci-visa", Severity::Critical)))
-            .await
-            .unwrap();
+        tx.send(AlertEvent::Dlp(make_dlp_alert(
+            "dlp-pci-visa",
+            Severity::Critical,
+        )))
+        .await
+        .unwrap();
 
         // Cancel so `run` drains and exits
         cancel.cancel();

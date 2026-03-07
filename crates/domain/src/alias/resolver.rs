@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::firewall::entity::{IpNetwork, PortRange};
+use crate::firewall::entity::{IpNetwork, MacAddress, PortRange};
 
 use super::entity::{Alias, AliasKind};
 use super::error::AliasError;
@@ -65,6 +65,12 @@ impl AliasResolver {
         self.resolve_ports_recursive(id, &mut visited)
     }
 
+    /// Resolve an alias to a flat list of MAC addresses.
+    pub fn resolve_macs(&self, id: &str) -> Result<Vec<MacAddress>, AliasError> {
+        let mut visited = HashSet::new();
+        self.resolve_macs_recursive(id, &mut visited)
+    }
+
     /// Get an alias by ID.
     pub fn get(&self, id: &str) -> Option<&Alias> {
         self.aliases.get(id)
@@ -92,24 +98,32 @@ impl AliasResolver {
             .ok_or_else(|| AliasError::NotFound { id: id.to_string() })?;
 
         match &alias.kind {
-            AliasKind::IpSet { values } => Ok(values.clone()),
-            AliasKind::Nested { aliases } => {
+            AliasKind::IpSet { values, exclude } => {
+                let ips = values.clone();
+                Ok(apply_exclusions(ips, exclude))
+            }
+            AliasKind::Nested { aliases, exclude } => {
                 let mut result = Vec::new();
                 for child_id in aliases {
                     let ips = self.resolve_ips_recursive(child_id, visited)?;
                     result.extend(ips);
                 }
-                Ok(result)
+                Ok(apply_exclusions(result, exclude))
             }
             AliasKind::UrlTable { .. }
+            | AliasKind::UrlTableJson { .. }
             | AliasKind::GeoIp { .. }
+            | AliasKind::BgpAsn { .. }
             | AliasKind::DynamicDns { .. }
-            | AliasKind::InterfaceGroup { .. } => {
+            | AliasKind::InterfaceGroup { .. }
+            | AliasKind::External => {
                 // These need external resolution — return empty for now,
                 // the adapter will populate them.
                 Ok(Vec::new())
             }
-            AliasKind::PortSet { .. } => Err(AliasError::NotIpSet { id: id.to_string() }),
+            AliasKind::PortSet { .. } | AliasKind::MacSet { .. } => {
+                Err(AliasError::NotIpSet { id: id.to_string() })
+            }
         }
     }
 
@@ -131,7 +145,7 @@ impl AliasResolver {
 
         match &alias.kind {
             AliasKind::PortSet { values } => Ok(values.clone()),
-            AliasKind::Nested { aliases } => {
+            AliasKind::Nested { aliases, .. } => {
                 let mut result = Vec::new();
                 for child_id in aliases {
                     let ports = self.resolve_ports_recursive(child_id, visited)?;
@@ -139,15 +153,67 @@ impl AliasResolver {
                 }
                 Ok(result)
             }
-            AliasKind::IpSet { .. }
-            | AliasKind::UrlTable { .. }
-            | AliasKind::GeoIp { .. }
-            | AliasKind::DynamicDns { .. }
-            | AliasKind::InterfaceGroup { .. } => {
-                Err(AliasError::NotPortSet { id: id.to_string() })
-            }
+            _ => Err(AliasError::NotPortSet { id: id.to_string() }),
         }
     }
+
+    fn resolve_macs_recursive(
+        &self,
+        id: &str,
+        visited: &mut HashSet<String>,
+    ) -> Result<Vec<MacAddress>, AliasError> {
+        if !visited.insert(id.to_string()) {
+            return Err(AliasError::CircularReference {
+                path: format!("{id} -> ... -> {id}"),
+            });
+        }
+
+        let alias = self
+            .aliases
+            .get(id)
+            .ok_or_else(|| AliasError::NotFound { id: id.to_string() })?;
+
+        match &alias.kind {
+            AliasKind::MacSet { values } => Ok(values.clone()),
+            AliasKind::Nested { aliases, .. } => {
+                let mut result = Vec::new();
+                for child_id in aliases {
+                    let macs = self.resolve_macs_recursive(child_id, visited)?;
+                    result.extend(macs);
+                }
+                Ok(result)
+            }
+            _ => Err(AliasError::NotMacSet { id: id.to_string() }),
+        }
+    }
+}
+
+/// Filter out IPs whose base address falls within any exclusion CIDR.
+fn apply_exclusions(ips: Vec<IpNetwork>, exclusions: &[IpNetwork]) -> Vec<IpNetwork> {
+    if exclusions.is_empty() {
+        return ips;
+    }
+    ips.into_iter()
+        .filter(|ip| {
+            !exclusions.iter().any(|exc| match (exc, ip) {
+                (
+                    IpNetwork::V4 {
+                        addr: exc_addr,
+                        prefix_len: exc_prefix,
+                    },
+                    IpNetwork::V4 { addr: ip_addr, .. },
+                ) => crate::firewall::entity::cidr_match_v4(*exc_addr, *exc_prefix, *ip_addr),
+                (
+                    IpNetwork::V6 {
+                        addr: exc_addr,
+                        prefix_len: exc_prefix,
+                    },
+                    IpNetwork::V6 { addr: ip_addr, .. },
+                ) => crate::firewall::entity::cidr_match_v6(exc_addr, *exc_prefix, ip_addr),
+                _ => false,
+            })
+        })
+        .collect()
 }
 
 impl Default for AliasResolver {
@@ -164,7 +230,10 @@ mod tests {
     fn ip_set_alias(id: &str, ips: Vec<IpNetwork>) -> Alias {
         Alias {
             id: AliasId(id.to_string()),
-            kind: AliasKind::IpSet { values: ips },
+            kind: AliasKind::IpSet {
+                values: ips,
+                exclude: Vec::new(),
+            },
             description: None,
         }
     }
@@ -182,6 +251,7 @@ mod tests {
             id: AliasId(id.to_string()),
             kind: AliasKind::Nested {
                 aliases: refs.into_iter().map(String::from).collect(),
+                exclude: Vec::new(),
             },
             description: None,
         }

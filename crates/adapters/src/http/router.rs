@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware;
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use utoipa::OpenApi;
@@ -18,7 +18,7 @@ const WRITE_RATE_LIMIT_BURST: u32 = 60;
 
 use super::agent_handler::agent_status;
 use super::alert_handler::{list_alerts, mark_false_positive};
-use super::alias_handler::alias_status;
+use super::alias_handler::{alias_status, set_external_alias_content};
 use super::audit_handler::{list_audit_logs, rule_history};
 use super::conntrack_handler::{conntrack_status, flush_connections, list_connections};
 use super::ddos_handler::{
@@ -124,6 +124,10 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
             .route("/api/v1/nat/status", get(nat_status))
             .route("/api/v1/nat/rules", get(list_nat_rules))
             .route("/api/v1/aliases/status", get(alias_status))
+            .route(
+                "/api/v1/aliases/{id}/content",
+                put(set_external_alias_content),
+            )
             .route("/api/v1/routing/status", get(routing_status))
             .route("/api/v1/routing/gateways", get(list_gateways))
             .route("/api/v1/lb/status", get(lb_status))

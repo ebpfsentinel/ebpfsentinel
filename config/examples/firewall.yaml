@@ -53,7 +53,8 @@ firewall:
   # ── Aliases ────────────────────────────────────────────────────────
   #
   # Named groups of IPs, CIDRs, or ports reusable across rules.
-  # Types: ip_set, port_set, nested, url_table, geoip, dynamic_dns
+  # Types: ip_set, port_set, nested, url_table, url_table_json,
+  #        geoip, dynamic_dns, mac_set, bgp_asn, external
   #
   # Small aliases are expanded inline into rule entries.
   # Large aliases (blocklists) use kernel IP set HashMap for O(1) lookup.
@@ -101,6 +102,37 @@ firewall:
     #   hostnames: ["vpn.example.com"]
     #   refresh_interval: 300
 
+    # IP set with exclusions — all RFC 1918 except a specific subnet
+    # rfc1918_except_lab:
+    #   type: ip_set
+    #   values: ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
+    #   exclude: ["10.0.5.0/24"]
+
+    # MAC address set — group known server NICs
+    # trusted_macs:
+    #   type: mac_set
+    #   values: ["aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66"]
+
+    # URL table (JSON) — fetch IPs from a JSON API with JSONPointer path
+    # abuseipdb_blocklist:
+    #   type: url_table_json
+    #   url: "https://api.example.com/blocklist.json"
+    #   json_path: "/data/ips"
+    #   refresh_interval: 3600
+
+    # BGP ASN — block all networks announced by specific AS numbers.
+    # Uses the MaxMind GeoLite2-ASN database (same as GeoIP lookup).
+    # Requires geoip.enabled: true with an ASN .mmdb database.
+    # bulletproof_hosters:
+    #   type: bgp_asn
+    #   asn_numbers: [4134, 4837]
+
+    # External — placeholder whose content is pushed via REST API.
+    # Use PUT /api/v1/aliases/{id}/content with {"ips": ["1.2.3.0/24"]}
+    # Useful for SOAR/orchestrator integration (Ansible, Terraform, etc.)
+    # soar_blocklist:
+    #   type: external
+
   # ── Rules ──────────────────────────────────────────────────────────
   #
   # Fields:
@@ -134,6 +166,8 @@ firewall:
   #   schedule           — Schedule name for time-based rule activation
   #   src_port_alias     — Source port set alias name
   #   dst_port_alias     — Destination port set alias name
+  #   src_mac_alias      — Source MAC set alias name
+  #   dst_mac_alias      — Destination MAC set alias name
   #
   # Maximum 4096 rules per address family (IPv4 / IPv6).
   # CIDR-only rules are automatically loaded into LPM Trie maps for O(log n) lookup.

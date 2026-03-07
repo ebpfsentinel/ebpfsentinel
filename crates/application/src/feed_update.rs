@@ -255,7 +255,10 @@ mod tests {
 
     // ── Helper: make a JSON feed config ────────────────────────────────
 
-    fn make_json_feed(id: &str, field_mapping: Option<domain::threatintel::entity::FieldMapping>) -> FeedConfig {
+    fn make_json_feed(
+        id: &str,
+        field_mapping: Option<domain::threatintel::entity::FieldMapping>,
+    ) -> FeedConfig {
         FeedConfig {
             id: id.to_string(),
             name: id.to_string(),
@@ -393,9 +396,12 @@ mod tests {
         let mut feed2 = make_feed("bad-json-feed", true);
         feed2.format = FeedFormat::Json;
 
-        let iocs =
-            fetch_all_feeds(&[feed1, feed2], &source, &(metrics.clone() as Arc<dyn MetricsPort>))
-                .await;
+        let iocs = fetch_all_feeds(
+            &[feed1, feed2],
+            &source,
+            &(metrics.clone() as Arc<dyn MetricsPort>),
+        )
+        .await;
 
         assert_eq!(iocs.len(), 2); // only from the successful feed
         assert_eq!(metrics.reload_success.load(Ordering::Relaxed), 1);

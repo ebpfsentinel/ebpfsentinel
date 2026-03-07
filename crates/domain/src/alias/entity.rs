@@ -86,12 +86,20 @@ impl std::fmt::Display for AliasId {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AliasKind {
-    /// Static set of IP addresses/CIDRs.
-    IpSet { values: Vec<IpNetwork> },
+    /// Static set of IP addresses/CIDRs with optional exclusions.
+    IpSet {
+        values: Vec<IpNetwork>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude: Vec<IpNetwork>,
+    },
     /// Static set of port ranges.
     PortSet { values: Vec<PortRange> },
-    /// References to other aliases (recursive).
-    Nested { aliases: Vec<String> },
+    /// References to other aliases (recursive) with optional exclusions.
+    Nested {
+        aliases: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude: Vec<IpNetwork>,
+    },
     /// HTTP URL returning a list of IPs (refreshed periodically).
     UrlTable {
         url: String,
@@ -106,6 +114,20 @@ pub enum AliasKind {
     },
     /// IPs of network interfaces by name.
     InterfaceGroup { interfaces: Vec<String> },
+    /// Static set of MAC addresses for L2 filtering.
+    MacSet {
+        values: Vec<crate::firewall::entity::MacAddress>,
+    },
+    /// HTTP URL returning IPs in JSON format with `JSONPointer` extraction.
+    UrlTableJson {
+        url: String,
+        json_path: String,
+        refresh_interval_secs: u64,
+    },
+    /// BGP AS numbers resolved to CIDR prefixes via `MaxMind` ASN database.
+    BgpAsn { asn_numbers: Vec<u32> },
+    /// Externally managed placeholder — content pushed via API.
+    External,
 }
 
 /// A named alias definition.
@@ -119,6 +141,7 @@ pub struct Alias {
 }
 
 impl Alias {
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), super::error::AliasError> {
         self.id
             .validate()
@@ -127,11 +150,17 @@ impl Alias {
             })?;
 
         match &self.kind {
-            AliasKind::IpSet { values } => {
+            AliasKind::IpSet { values, exclude } => {
                 for ip in values {
                     ip.validate()
                         .map_err(|e| super::error::AliasError::Invalid {
                             reason: e.to_string(),
+                        })?;
+                }
+                for ip in exclude {
+                    ip.validate()
+                        .map_err(|e| super::error::AliasError::Invalid {
+                            reason: format!("exclude: {e}"),
                         })?;
                 }
             }
@@ -144,11 +173,17 @@ impl Alias {
                         })?;
                 }
             }
-            AliasKind::Nested { aliases } => {
+            AliasKind::Nested { aliases, exclude } => {
                 if aliases.is_empty() {
                     return Err(super::error::AliasError::Invalid {
                         reason: "nested alias must reference at least one alias".to_string(),
                     });
+                }
+                for ip in exclude {
+                    ip.validate()
+                        .map_err(|e| super::error::AliasError::Invalid {
+                            reason: format!("exclude: {e}"),
+                        })?;
                 }
             }
             AliasKind::UrlTable {
@@ -202,6 +237,42 @@ impl Alias {
                     });
                 }
             }
+            AliasKind::MacSet { values } => {
+                if values.is_empty() {
+                    return Err(super::error::AliasError::Invalid {
+                        reason: "mac_set alias must have at least one MAC address".to_string(),
+                    });
+                }
+            }
+            AliasKind::UrlTableJson {
+                url,
+                json_path,
+                refresh_interval_secs,
+            } => {
+                if url.is_empty() {
+                    return Err(super::error::AliasError::Invalid {
+                        reason: "URL must not be empty".to_string(),
+                    });
+                }
+                if json_path.is_empty() {
+                    return Err(super::error::AliasError::Invalid {
+                        reason: "json_path must not be empty".to_string(),
+                    });
+                }
+                if *refresh_interval_secs == 0 {
+                    return Err(super::error::AliasError::Invalid {
+                        reason: "refresh interval must be > 0".to_string(),
+                    });
+                }
+            }
+            AliasKind::BgpAsn { asn_numbers } => {
+                if asn_numbers.is_empty() {
+                    return Err(super::error::AliasError::Invalid {
+                        reason: "bgp_asn alias must have at least one ASN".to_string(),
+                    });
+                }
+            }
+            AliasKind::External => {}
         }
 
         Ok(())
@@ -239,6 +310,7 @@ mod tests {
                     addr: 0xC0A8_0000,
                     prefix_len: 16,
                 }],
+                exclude: Vec::new(),
             },
             description: None,
         };
@@ -254,6 +326,7 @@ mod tests {
                     addr: 0,
                     prefix_len: 33,
                 }],
+                exclude: Vec::new(),
             },
             description: None,
         };
@@ -296,6 +369,7 @@ mod tests {
             id: AliasId("nested".to_string()),
             kind: AliasKind::Nested {
                 aliases: Vec::new(),
+                exclude: Vec::new(),
             },
             description: None,
         };
@@ -308,6 +382,7 @@ mod tests {
             id: AliasId("nested".to_string()),
             kind: AliasKind::Nested {
                 aliases: vec!["rfc1918".to_string()],
+                exclude: Vec::new(),
             },
             description: None,
         };

@@ -81,6 +81,8 @@ fn make_firewall_rule(i: usize) -> FirewallRule {
         dst_alias: None,
         src_port_alias: None,
         dst_port_alias: None,
+        src_mac_alias: None,
+        dst_mac_alias: None,
         ct_states: None,
         tcp_flags: None,
         icmp_type: None,

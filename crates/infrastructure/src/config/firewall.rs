@@ -175,6 +175,14 @@ pub struct FirewallRuleConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dst_port_alias: Option<String>,
 
+    /// Source MAC set alias name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_mac_alias: Option<String>,
+
+    /// Destination MAC set alias name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_mac_alias: Option<String>,
+
     /// Conntrack state filter (e.g. `[established, related]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<Vec<String>>,
@@ -405,6 +413,8 @@ impl FirewallRuleConfig {
             dst_alias: self.dst_alias.clone(),
             src_port_alias: self.src_port_alias.clone(),
             dst_port_alias: self.dst_port_alias.clone(),
+            src_mac_alias: self.src_mac_alias.clone(),
+            dst_mac_alias: self.dst_mac_alias.clone(),
             ct_states,
             tcp_flags,
             icmp_type,

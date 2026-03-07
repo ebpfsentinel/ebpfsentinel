@@ -22,6 +22,9 @@ pub enum AliasError {
     #[error("type mismatch: alias '{id}' is not a port set")]
     NotPortSet { id: String },
 
+    #[error("type mismatch: alias '{id}' is not a MAC set")]
+    NotMacSet { id: String },
+
     #[error("resolution failed: {reason}")]
     ResolutionFailed { reason: String },
 }

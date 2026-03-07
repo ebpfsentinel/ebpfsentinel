@@ -199,6 +199,8 @@ mod tests {
             dst_alias: None,
             src_port_alias: None,
             dst_port_alias: None,
+            src_mac_alias: None,
+            dst_mac_alias: None,
             ct_states: None,
             tcp_flags: None,
             icmp_type: None,
@@ -832,11 +834,15 @@ mod tests {
                 prop::array::uniform4(any::<u32>()), // dst_addr
                 1u16..=65535u16,                     // src_port
                 1u16..=65535u16,                     // dst_port
-                prop_oneof![Just(Protocol::Tcp), Just(Protocol::Udp), Just(Protocol::Icmp)],
+                prop_oneof![
+                    Just(Protocol::Tcp),
+                    Just(Protocol::Udp),
+                    Just(Protocol::Icmp)
+                ],
                 any::<bool>(), // is_ipv6
             )
-                .prop_map(|(src_addr, dst_addr, src_port, dst_port, protocol, is_ipv6)| {
-                    PacketInfo {
+                .prop_map(
+                    |(src_addr, dst_addr, src_port, dst_port, protocol, is_ipv6)| PacketInfo {
                         src_addr,
                         dst_addr,
                         src_port,
@@ -845,8 +851,8 @@ mod tests {
                         is_ipv6,
                         interface: "eth0".to_string(),
                         vlan_id: None,
-                    }
-                })
+                    },
+                )
         }
 
         proptest! {

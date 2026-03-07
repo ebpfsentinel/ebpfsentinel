@@ -164,7 +164,9 @@ fn bench_reputation_compute_score(c: &mut Criterion) {
         ReputationFactor::L7RuleMatch {
             rule_id: "rule-1".to_string(),
         },
-        ReputationFactor::FrequentQueries { rate_per_min: 100.0 },
+        ReputationFactor::FrequentQueries {
+            rate_per_min: 100.0,
+        },
         ReputationFactor::HighRiskCountry {
             country_code: "XX".to_string(),
         },
@@ -175,7 +177,9 @@ fn bench_reputation_compute_score(c: &mut Criterion) {
         ReputationFactor::L7RuleMatch {
             rule_id: "rule-2".to_string(),
         },
-        ReputationFactor::FrequentQueries { rate_per_min: 200.0 },
+        ReputationFactor::FrequentQueries {
+            rate_per_min: 200.0,
+        },
     ];
 
     for &n in &[1, 5, 10] {

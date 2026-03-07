@@ -13,11 +13,21 @@ pub trait AliasResolutionPort: Send + Sync {
     /// Fetch an IP list from a remote URL (e.g. Spamhaus DROP list).
     fn fetch_url_table(&self, url: &str) -> Result<Vec<IpNetwork>, DomainError>;
 
+    /// Fetch an IP list from a remote JSON URL using a `JSONPointer` path.
+    fn fetch_url_table_json(
+        &self,
+        url: &str,
+        json_path: &str,
+    ) -> Result<Vec<IpNetwork>, DomainError>;
+
     /// Resolve a hostname to its current IP addresses.
     fn resolve_dns(&self, hostname: &str) -> Result<Vec<IpNetwork>, DomainError>;
 
     /// Look up all IP networks for the given country codes (ISO 3166-1 alpha-2).
     fn lookup_geoip(&self, country_codes: &[String]) -> Result<Vec<IpNetwork>, DomainError>;
+
+    /// Look up all CIDR prefixes announced by the given AS numbers.
+    fn lookup_bgp_asn(&self, asn_numbers: &[u32]) -> Result<Vec<IpNetwork>, DomainError>;
 }
 
 #[cfg(test)]

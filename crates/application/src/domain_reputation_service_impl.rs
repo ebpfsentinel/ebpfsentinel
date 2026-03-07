@@ -174,14 +174,8 @@ mod tests {
     #[test]
     fn list_all_paginated() {
         let svc = make_service();
-        svc.update_reputation(
-            "a.com",
-            ReputationFactor::HighEntropy { entropy: 4.5 },
-        );
-        svc.update_reputation(
-            "b.com",
-            ReputationFactor::ShortTtl { avg_ttl: 5 },
-        );
+        svc.update_reputation("a.com", ReputationFactor::HighEntropy { entropy: 4.5 });
+        svc.update_reputation("b.com", ReputationFactor::ShortTtl { avg_ttl: 5 });
         let page0 = svc.list_all(0, 1);
         assert_eq!(page0.len(), 1);
         let page1 = svc.list_all(1, 1);
@@ -198,7 +192,9 @@ mod tests {
 
         svc.update_reputation(
             "tracked.com",
-            ReputationFactor::FrequentQueries { rate_per_min: 100.0 },
+            ReputationFactor::FrequentQueries {
+                rate_per_min: 100.0,
+            },
         );
         let stats = svc.stats();
         assert_eq!(stats.tracked_domains, 1);
