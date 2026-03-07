@@ -10,9 +10,12 @@
 
 FROM rust:bookworm AS builder
 
-# Install build dependencies: protoc (gRPC codegen) + nightly toolchain + BPF linker
+ARG TARGETARCH
+
+# Install build dependencies: protoc (gRPC codegen) + musl toolchain (static linking)
+# + nightly toolchain + BPF linker
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends protobuf-compiler && \
+    apt-get install -y --no-install-recommends protobuf-compiler musl-tools cmake && \
     rm -rf /var/lib/apt/lists/* && \
     rustup toolchain install nightly --no-self-update --component rust-src && \
     cargo +nightly install bpf-linker
@@ -29,25 +32,30 @@ COPY proto/ proto/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo xtask ebpf-build
 
-# Build userspace agent (stable, release mode — strip+LTO via profile.release)
+# Install musl target for the toolchain resolved by rust-toolchain.toml, then build
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo build --release --bin ebpfsentinel-agent
+    case "${TARGETARCH}" in \
+        arm64) MUSL_TARGET="aarch64-unknown-linux-musl" ;; \
+        *)     MUSL_TARGET="x86_64-unknown-linux-musl" ;; \
+    esac && \
+    rustup target add "${MUSL_TARGET}" && \
+    cargo build --release --target "${MUSL_TARGET}" --bin ebpfsentinel-agent && \
+    cp "/build/target/${MUSL_TARGET}/release/ebpfsentinel-agent" /build/ebpfsentinel-agent
 
 # ── Stage 2: Minimal runtime image ──────────────────────────────────
 #
-# distroless/cc: glibc + libgcc + ca-certificates
-# No shell, no package manager, no SUID binaries → minimal attack surface.
+# distroless/static: ca-certificates only — no libc, no shell, no package manager.
+# Requires a fully statically-linked binary (musl).
 
-FROM gcr.io/distroless/cc-debian12
+FROM gcr.io/distroless/static-debian13
 
 LABEL org.opencontainers.image.title="eBPFsentinel" \
     org.opencontainers.image.description="eBPF network security agent" \
     org.opencontainers.image.source="https://github.com/ebpfsentinel/ebpfsentinel" \
     org.opencontainers.image.licenses="AGPL-3.0-only"
 
-# Copy agent binary (stripped + LTO by cargo profile.release)
-COPY --from=builder /build/target/release/ebpfsentinel-agent \
-    /usr/local/bin/ebpfsentinel-agent
+# Copy agent binary (statically linked, stripped + LTO by cargo profile.release)
+COPY --from=builder /build/ebpfsentinel-agent /usr/local/bin/ebpfsentinel-agent
 
 # Copy ALL eBPF programs (auto-discovered — xtask copies them all here)
 COPY --from=builder /build/target/bpfel-unknown-none/release/ \
