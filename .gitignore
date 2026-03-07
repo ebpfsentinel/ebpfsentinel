@@ -39,3 +39,6 @@ credentials.json
 # IA
 CLAUDE.md
 .claude
+
+# Infra
+.vagrant
