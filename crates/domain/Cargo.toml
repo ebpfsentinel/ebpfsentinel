@@ -70,3 +70,11 @@ harness = false
 [[bench]]
 name = "lb_engine"
 harness = false
+
+[[bench]]
+name = "ddos_engine"
+harness = false
+
+[[bench]]
+name = "dns_engine"
+harness = false
