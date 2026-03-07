@@ -102,6 +102,12 @@ pub trait SystemMetrics: Send + Sync {
 
     /// Set the current process CPU usage as a percentage (0.0–100.0+).
     fn set_cpu_usage_percent(&self, _percent: f64) {}
+
+    /// Set the number of open file descriptors for the process.
+    fn set_open_fds(&self, _count: u64) {}
+
+    /// Set the number of threads in the process.
+    fn set_thread_count(&self, _count: u64) {}
 }
 
 // ── Configuration metrics ──────────────────────────────────────────

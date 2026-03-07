@@ -55,6 +55,14 @@ impl SystemMetricsCollector {
             self.prev_cpu_ticks = cpu_ticks;
             self.prev_total_ticks = total_ticks;
         }
+
+        if let Some(fd_count) = read_open_fds() {
+            self.metrics.set_open_fds(fd_count);
+        }
+
+        if let Some(threads) = read_thread_count() {
+            self.metrics.set_thread_count(threads);
+        }
     }
 }
 
@@ -116,6 +124,28 @@ fn parse_total_cpu_ticks(content: &str) -> Option<u64> {
         .filter_map(|s| s.parse::<u64>().ok())
         .sum();
     Some(total)
+}
+
+/// Count open file descriptors by listing `/proc/self/fd`.
+fn read_open_fds() -> Option<u64> {
+    let entries = std::fs::read_dir("/proc/self/fd").ok()?;
+    #[allow(clippy::cast_possible_truncation)]
+    let count = entries.count() as u64;
+    Some(count)
+}
+
+/// Read the thread count from `/proc/self/status` (`Threads:` line).
+fn read_thread_count() -> Option<u64> {
+    read_thread_count_from(&std::fs::read_to_string("/proc/self/status").ok()?)
+}
+
+fn read_thread_count_from(content: &str) -> Option<u64> {
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("Threads:") {
+            return rest.trim().parse().ok();
+        }
+    }
+    None
 }
 
 /// Convenience function to spawn the collection loop as a background task.
@@ -244,5 +274,30 @@ VmData:    80000 kB";
         // Second collect computes CPU delta
         collector.collect();
         // CPU percent may be 0.0 if interval is tiny, but should not panic
+    }
+
+    #[test]
+    fn parse_thread_count_from_status() {
+        let content = "\
+VmPeak:   123456 kB
+Threads:	4
+VmSize:   100000 kB";
+        assert_eq!(read_thread_count_from(content), Some(4));
+    }
+
+    #[test]
+    fn parse_thread_count_missing_returns_none() {
+        let content = "VmPeak:   123456 kB\nVmSize:   100000 kB\n";
+        assert!(read_thread_count_from(content).is_none());
+    }
+
+    #[test]
+    fn read_open_fds_returns_some_on_linux() {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        let fds = read_open_fds();
+        assert!(fds.is_some());
+        assert!(fds.unwrap() > 0, "process should have at least 1 open fd");
     }
 }

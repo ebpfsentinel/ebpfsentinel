@@ -107,6 +107,8 @@ pub struct AgentMetrics {
     pub false_positives_total: Family<RuleLabels, Counter>,
     pub memory_usage_bytes: Gauge,
     pub cpu_usage_percent: Gauge<f64, AtomicU64>,
+    pub open_fds: Gauge,
+    pub thread_count: Gauge,
     pub bytes_processed_total: Family<BytesLabels, Counter>,
     pub dns_cache_entries: Gauge,
     pub dns_cache_hits_total: Counter,
@@ -247,6 +249,20 @@ impl AgentMetrics {
             "cpu_usage_percent",
             "Process CPU usage percentage",
             cpu_usage_percent.clone(),
+        );
+
+        let open_fds = Gauge::default();
+        registry.register(
+            "open_fds",
+            "Number of open file descriptors for the process",
+            open_fds.clone(),
+        );
+
+        let thread_count = Gauge::default();
+        registry.register(
+            "thread_count",
+            "Number of threads in the process",
+            thread_count.clone(),
         );
 
         let bytes_processed_total = Family::<BytesLabels, Counter>::default();
@@ -435,6 +451,8 @@ impl AgentMetrics {
             false_positives_total,
             memory_usage_bytes,
             cpu_usage_percent,
+            open_fds,
+            thread_count,
             bytes_processed_total,
             dns_cache_entries,
             dns_cache_hits_total,
@@ -636,6 +654,14 @@ impl SystemMetrics for AgentMetrics {
 
     fn set_cpu_usage_percent(&self, percent: f64) {
         self.cpu_usage_percent.set(percent);
+    }
+
+    fn set_open_fds(&self, count: u64) {
+        self.open_fds.set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn set_thread_count(&self, count: u64) {
+        self.thread_count.set(count.try_into().unwrap_or(i64::MAX));
     }
 }
 

@@ -10,6 +10,7 @@ mod alias;
 mod audit;
 mod auth;
 mod common;
+mod conntrack;
 mod ddos;
 mod dlp;
 mod dns;
@@ -35,9 +36,10 @@ pub use alias::AliasConfig;
 pub use audit::AuditConfig;
 pub use auth::{ApiKeyConfig, AuthConfig, JwtConfig, OidcConfig};
 pub use common::{ConfigError, parse_cidr, parse_domain_mode};
+pub use conntrack::ConnTrackSectionConfig;
 pub use ddos::{
-    AmpPortConfig, AmpProtectionConfig, ConnTrackSectionConfig, DdosConfig, DdosPolicyConfig,
-    IcmpProtectionConfig, SynProtectionConfig,
+    AmpPortConfig, AmpProtectionConfig, DdosConfig, DdosPolicyConfig, IcmpProtectionConfig,
+    SynProtectionConfig,
 };
 pub use dlp::{DlpConfig, DlpPatternConfig};
 pub use dns::{
@@ -2597,5 +2599,156 @@ agent:
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let sanitized = config.sanitized();
         assert!(sanitized.alerting.smtp.is_none());
+    }
+
+    // ── YAML → domain round-trip integration tests ────────────────
+
+    #[test]
+    fn ddos_yaml_to_domain_policies() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+ddos:
+  enabled: true
+  policies:
+    - id: syn-1
+      attack_type: syn_flood
+      detection_threshold_pps: 5000
+      mitigation_action: block
+      auto_block_duration_secs: 600
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let policies = config.ddos_policies().unwrap();
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].id.0, "syn-1");
+        assert_eq!(
+            policies[0].attack_type,
+            domain::ddos::entity::DdosAttackType::SynFlood
+        );
+        assert_eq!(policies[0].detection_threshold_pps, 5000);
+        assert_eq!(
+            policies[0].mitigation_action,
+            domain::ddos::entity::DdosMitigationAction::Block
+        );
+        assert_eq!(policies[0].auto_block_duration_secs, 600);
+    }
+
+    #[test]
+    fn lb_yaml_to_domain_services() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+loadbalancer:
+  enabled: true
+  services:
+    - id: lb-web
+      name: web
+      listen_port: 80
+      algorithm: round_robin
+      backends:
+        - id: be-1
+          addr: 10.0.1.1
+          port: 8080
+          weight: 1
+        - id: be-2
+          addr: 10.0.1.2
+          port: 8080
+          weight: 2
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let services = config.lb_services().unwrap();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].name, "web");
+        assert_eq!(services[0].backends.len(), 2);
+        assert_eq!(services[0].backends[1].weight, 2);
+    }
+
+    #[test]
+    fn zone_yaml_to_domain_config() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+zones:
+  enabled: true
+  zones:
+    - id: internal
+      interfaces: [eth1, eth2]
+    - id: external
+      interfaces: [eth0]
+  policies:
+    - from: external
+      to: internal
+      policy: deny
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let zone_cfg = config.zone_config().unwrap();
+        assert_eq!(zone_cfg.zones.len(), 2);
+        assert_eq!(zone_cfg.zones[0].id, "internal");
+        assert_eq!(zone_cfg.zones[0].interfaces.len(), 2);
+        assert_eq!(zone_cfg.zone_policies.len(), 1);
+        assert_eq!(zone_cfg.zone_policies[0].from, "external");
+        assert_eq!(zone_cfg.zone_policies[0].to, "internal");
+    }
+
+    #[test]
+    fn conntrack_yaml_to_settings() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+conntrack:
+  enabled: true
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let settings = config.conntrack_settings();
+        assert!(settings.enabled);
+    }
+
+    #[test]
+    fn dns_yaml_to_domain_configs() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+dns:
+  cache:
+    max_entries: 5000
+  blocklist:
+    action: block
+    inject_target: threatintel
+    domains:
+      - '*.malware.example.com'
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let cache_cfg = config.dns_cache_config();
+        assert_eq!(cache_cfg.max_entries, 5000);
+
+        let blocklist_cfg = config.dns_blocklist_config().unwrap();
+        assert_eq!(blocklist_cfg.patterns.len(), 1);
+    }
+
+    #[test]
+    fn nat_yaml_to_domain_rules() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+nat:
+  enabled: true
+  dnat_rules:
+    - id: dnat-web
+      type: dnat
+      translated_addr: 192.168.1.10
+      translated_port: 8080
+  snat_rules:
+    - id: snat-out
+      type: snat
+      translated_addr: 10.0.0.1
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let dnat = config.nat_dnat_rules().unwrap();
+        assert_eq!(dnat.len(), 1);
+        assert_eq!(dnat[0].id.0, "dnat-web");
+
+        let snat = config.nat_snat_rules().unwrap();
+        assert_eq!(snat.len(), 1);
+        assert_eq!(snat[0].id.0, "snat-out");
     }
 }
