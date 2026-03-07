@@ -60,6 +60,7 @@ pub use routing::{GatewayConfig, HealthCheckConfig, RoutingConfig};
 pub use threatintel::{ThreatIntelConfig, ThreatIntelFeedConfig};
 pub use zone::{ZoneEntryConfig, ZonePairConfig, ZoneSectionConfig};
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use domain::alert::entity::AlertRoute;
@@ -150,6 +151,10 @@ pub struct AgentConfig {
 
     #[serde(default)]
     pub geoip: Option<GeoIpConfig>,
+
+    /// Top-level aliases shared across all domains (firewall, NAT, L7, etc.).
+    #[serde(default)]
+    pub aliases: HashMap<String, alias::AliasConfig>,
 }
 
 impl AgentConfig {
@@ -455,8 +460,12 @@ impl AgentConfig {
             route_cfg.validate(idx, smtp_present)?;
         }
 
-        // Validate aliases
-        check_limit("firewall.aliases", self.firewall.aliases.len(), MAX_ALIASES)?;
+        // Validate aliases (top-level + firewall.aliases for backward compat)
+        let total_aliases = self.aliases.len() + self.firewall.aliases.len();
+        check_limit("aliases", total_aliases, MAX_ALIASES)?;
+        for (name, alias_cfg) in &self.aliases {
+            alias_cfg.validate(name)?;
+        }
         for (name, alias_cfg) in &self.firewall.aliases {
             alias_cfg.validate(name)?;
         }
@@ -659,8 +668,14 @@ impl AgentConfig {
     }
 
     /// Convert alias configs to domain `Alias` entities.
+    ///
+    /// Merges top-level `aliases` with `firewall.aliases` (backward compat).
+    /// Top-level aliases take precedence on name conflicts.
     pub fn aliases(&self) -> Result<Vec<Alias>, ConfigError> {
-        alias::aliases_to_domain(&self.firewall.aliases)
+        let mut merged = self.firewall.aliases.clone();
+        // Top-level overrides firewall-level on conflict
+        merged.extend(self.aliases.clone());
+        alias::aliases_to_domain(&merged)
     }
 
     /// Convert NAT DNAT rule configs to domain `NatRule` entities.

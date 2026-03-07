@@ -106,6 +106,7 @@ mod tests {
             enabled: true,
             algorithm: RateLimitAlgorithm::default(),
             country_codes: None,
+            src_ip_alias: None,
         }
     }
 
@@ -314,6 +315,7 @@ mod tests {
                     enabled: true,
                     algorithm: RateLimitAlgorithm::default(),
                     country_codes: None,
+                    src_ip_alias: None,
                 };
                 let result = engine.add_policy(policy);
                 prop_assert!(result.is_ok());
@@ -333,6 +335,7 @@ mod tests {
                     enabled: true,
                     algorithm: RateLimitAlgorithm::default(),
                     country_codes: None,
+                    src_ip_alias: None,
                 };
                 let result = engine.add_policy(policy);
                 prop_assert!(result.is_err());

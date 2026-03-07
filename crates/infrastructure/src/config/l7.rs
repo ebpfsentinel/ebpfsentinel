@@ -64,6 +64,18 @@ pub struct L7RuleConfig {
     /// Destination country codes (ISO 3166-1 alpha-2) for country-based matching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dst_country_codes: Option<Vec<String>>,
+
+    /// Source IP alias reference (resolved from top-level or firewall aliases).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_ip_alias: Option<String>,
+
+    /// Destination IP alias reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_ip_alias: Option<String>,
+
+    /// Destination port alias reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_port_alias: Option<String>,
 }
 
 impl L7RuleConfig {
@@ -165,6 +177,9 @@ impl L7RuleConfig {
             enabled: self.enabled,
             src_country_codes: self.src_country_codes.clone(),
             dst_country_codes: self.dst_country_codes.clone(),
+            src_ip_alias: self.src_ip_alias.clone(),
+            dst_ip_alias: self.dst_ip_alias.clone(),
+            dst_port_alias: self.dst_port_alias.clone(),
         })
     }
 

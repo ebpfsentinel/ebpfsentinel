@@ -228,6 +228,7 @@ mod tests {
             enabled: true,
             algorithm: RateLimitAlgorithm::default(),
             country_codes: None,
+            src_ip_alias: None,
         }
     }
 

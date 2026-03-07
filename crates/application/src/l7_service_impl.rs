@@ -181,6 +181,9 @@ mod tests {
             enabled: true,
             src_country_codes: None,
             dst_country_codes: None,
+            src_ip_alias: None,
+            dst_ip_alias: None,
+            dst_port_alias: None,
         }
     }
 

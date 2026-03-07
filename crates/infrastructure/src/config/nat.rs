@@ -101,6 +101,14 @@ pub struct NatRuleConfig {
     /// Protocol to match (None = any).
     #[serde(default)]
     pub match_protocol: Option<String>,
+
+    /// Source IP alias reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_src_alias: Option<String>,
+
+    /// Destination IP alias reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_dst_alias: Option<String>,
 }
 
 fn default_priority() -> u32 {
@@ -315,6 +323,8 @@ impl NatRuleConfig {
             match_dst: self.match_dst.clone(),
             match_dst_port,
             match_protocol: self.match_protocol.clone(),
+            match_src_alias: self.match_src_alias.clone(),
+            match_dst_alias: self.match_dst_alias.clone(),
             enabled: self.enabled,
         })
     }
@@ -342,6 +352,8 @@ mod tests {
             match_dst: None,
             match_dst_port: None,
             match_protocol: None,
+            match_src_alias: None,
+            match_dst_alias: None,
         }
     }
 
@@ -390,6 +402,8 @@ mod tests {
             match_dst: None,
             match_dst_port: None,
             match_protocol: Some("tcp".to_string()),
+            match_src_alias: None,
+            match_dst_alias: None,
         };
         assert!(cfg.validate(0, "nat.dnat_rules").is_ok());
     }
@@ -413,6 +427,8 @@ mod tests {
             match_dst: None,
             match_dst_port: None,
             match_protocol: None,
+            match_src_alias: None,
+            match_dst_alias: None,
         };
         assert!(cfg.validate(0, "nat.snat_rules").is_err());
     }
@@ -450,6 +466,8 @@ mod tests {
             match_dst: None,
             match_dst_port: None,
             match_protocol: Some("tcp".to_string()),
+            match_src_alias: None,
+            match_dst_alias: None,
         };
         let rule = cfg.to_domain_rule().unwrap();
         assert!(matches!(

@@ -127,6 +127,15 @@ pub struct L7Rule {
     pub src_ip: Option<IpCidr>,
     pub dst_ip: Option<IpCidr>,
     pub dst_port: Option<PortRange>,
+    /// Optional alias reference for source IP matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_ip_alias: Option<String>,
+    /// Optional alias reference for destination IP matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_ip_alias: Option<String>,
+    /// Optional alias reference for destination port matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_port_alias: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub src_country_codes: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -349,6 +358,9 @@ mod tests {
             dst_port: None,
             src_country_codes: None,
             dst_country_codes: None,
+            src_ip_alias: None,
+            dst_ip_alias: None,
+            dst_port_alias: None,
             enabled: true,
         }
     }
@@ -543,6 +555,9 @@ mod tests {
             dst_port: None,
             src_country_codes: None,
             dst_country_codes: None,
+            src_ip_alias: None,
+            dst_ip_alias: None,
+            dst_port_alias: None,
             enabled: true,
         };
 
@@ -572,6 +587,9 @@ mod tests {
             dst_port: None,
             src_country_codes: None,
             dst_country_codes: None,
+            src_ip_alias: None,
+            dst_ip_alias: None,
+            dst_port_alias: None,
             enabled: true,
         };
 
@@ -601,6 +619,9 @@ mod tests {
             dst_port: None,
             src_country_codes: None,
             dst_country_codes: None,
+            src_ip_alias: None,
+            dst_ip_alias: None,
+            dst_port_alias: None,
             enabled: true,
         };
 
@@ -633,6 +654,9 @@ mod tests {
             dst_port: None,
             src_country_codes: None,
             dst_country_codes: None,
+            src_ip_alias: None,
+            dst_ip_alias: None,
+            dst_port_alias: None,
             enabled: true,
         };
 
@@ -737,6 +761,9 @@ mod tests {
             dst_port: None,
             src_country_codes: None,
             dst_country_codes: None,
+            src_ip_alias: None,
+            dst_ip_alias: None,
+            dst_port_alias: None,
             enabled: true,
         };
 
@@ -775,6 +802,9 @@ mod tests {
             dst_port: None,
             src_country_codes: None,
             dst_country_codes: None,
+            src_ip_alias: None,
+            dst_ip_alias: None,
+            dst_port_alias: None,
             enabled: true,
         };
 

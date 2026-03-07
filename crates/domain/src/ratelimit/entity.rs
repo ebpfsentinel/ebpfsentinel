@@ -62,6 +62,9 @@ pub struct RateLimitPolicy {
     /// Optional country code filter (userspace annotation only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub country_codes: Option<Vec<String>>,
+    /// Source IP alias reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_ip_alias: Option<String>,
 }
 
 impl RateLimitPolicy {
@@ -247,6 +250,7 @@ mod tests {
             enabled: true,
             algorithm: RateLimitAlgorithm::default(),
             country_codes: None,
+            src_ip_alias: None,
         }
     }
 

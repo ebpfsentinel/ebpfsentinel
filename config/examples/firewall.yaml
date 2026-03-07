@@ -29,6 +29,18 @@
 agent:
   interfaces: [eth0]
 
+# ── Top-level Aliases ──────────────────────────────────────────────
+# Aliases defined at the top level are shared across all domains:
+# firewall, L7, NAT, rate-limit, and IPS.
+# They are merged with firewall.aliases (top-level takes precedence).
+# This avoids duplicating alias definitions across multiple config sections.
+#
+# aliases:
+#   shared_blocklist:
+#     type: url_table
+#     url: "https://example.com/blocklist.txt"
+#     refresh_interval: 3600
+
 # ── Connection Tracking ──────────────────────────────────────────────
 # Required for stateful rules (ct_state matching) and NAT.
 

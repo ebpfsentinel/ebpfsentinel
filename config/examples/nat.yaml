@@ -35,6 +35,17 @@
 agent:
   interfaces: [eth0]
 
+# ── Top-level Aliases (shared across all domains) ────────────────────
+
+aliases:
+  lan_networks:
+    type: ip_set
+    values: ["192.168.0.0/16", "10.0.0.0/8"]
+
+  web_servers:
+    type: ip_set
+    values: ["10.0.1.10", "10.0.1.11", "10.0.1.12"]
+
 # ── Connection tracking (required for NAT) ─────────────────────────
 
 conntrack:
@@ -90,6 +101,13 @@ nat:
       external_addr: "203.0.113.50"
       internal_addr: "10.0.2.50"
 
+    # Masquerade using alias: match source from named alias group
+    - id: nat-masq-alias
+      type: masquerade
+      interface: eth0
+      match_src_alias: lan_networks
+      port_range: "10000-60000"
+
     # IPv6 SNAT: rewrite source to a specific IPv6 address for ULA traffic.
     # IPv6 rules use the same snat_rules list — address family is auto-detected.
     - id: nat-snat-ula
@@ -144,6 +162,15 @@ nat:
       ext_port: "3000-3010"
       internal_addr: "10.0.1.30"
       int_port: "8000-8010"
+      match_protocol: tcp
+
+    # DNAT using alias: forward traffic destined to web_servers alias
+    - id: nat-dnat-alias
+      type: dnat
+      translated_addr: "10.0.1.10"
+      translated_port: 80
+      match_dst_alias: web_servers
+      match_dst_port: 8080
       match_protocol: tcp
 
     # IPv6 DNAT: redirect public port 8080 to an internal IPv6 web server.

@@ -533,6 +533,8 @@ mod tests {
             match_dst: None,
             match_dst_port: None,
             match_protocol: None,
+            match_src_alias: None,
+            match_dst_alias: None,
             enabled: true,
         }
     }
@@ -552,6 +554,8 @@ mod tests {
                 end: 8080,
             }),
             match_protocol: Some("tcp".to_string()),
+            match_src_alias: None,
+            match_dst_alias: None,
             enabled: true,
         }
     }

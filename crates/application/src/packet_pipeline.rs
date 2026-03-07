@@ -1231,6 +1231,9 @@ mod tests {
             enabled: true,
             src_country_codes: None,
             dst_country_codes: None,
+            src_ip_alias: None,
+            dst_ip_alias: None,
+            dst_port_alias: None,
         }]);
         let metrics = Arc::new(TestMetrics::new());
         let (alert_tx, _alert_rx) = mpsc::channel(10);
@@ -1287,6 +1290,9 @@ mod tests {
             enabled: true,
             src_country_codes: None,
             dst_country_codes: None,
+            src_ip_alias: None,
+            dst_ip_alias: None,
+            dst_port_alias: None,
         }]);
         l7.write().await.set_enabled(false);
         let metrics = Arc::new(TestMetrics::new());

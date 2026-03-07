@@ -14,6 +14,20 @@
 agent:
   interfaces: [eth0]
 
+# ── Top-level Aliases (shared across all domains) ────────────────────
+# Aliases defined here are available in firewall, L7, NAT, rate-limit,
+# and IPS configurations. They are merged with firewall.aliases
+# (top-level takes precedence on conflict).
+
+aliases:
+  trusted_internal:
+    type: ip_set
+    values: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
+  http_ports:
+    type: port_set
+    values: [80, 443, 8080, 8443]
+
 l7:
   enabled: true
 
@@ -196,3 +210,19 @@ l7:
       action: log
       protocol: smb
       is_smb2: false
+
+    # ── Alias-based rules ───────────────────────────────────────────
+    # Allow HTTP from trusted internal networks (using top-level alias)
+    - id: l7-allow-internal-http
+      priority: 3
+      action: allow
+      protocol: http
+      src_ip_alias: trusted_internal
+      dst_port_alias: http_ports
+
+    # Block TLS to external destinations except from internal networks
+    - id: l7-block-external-tls
+      priority: 12
+      action: deny
+      protocol: tls
+      dst_ip_alias: trusted_internal

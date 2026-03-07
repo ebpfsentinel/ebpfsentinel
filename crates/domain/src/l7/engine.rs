@@ -164,6 +164,9 @@ mod tests {
             dst_port: None,
             src_country_codes: None,
             dst_country_codes: None,
+            src_ip_alias: None,
+            dst_ip_alias: None,
+            dst_port_alias: None,
             enabled: true,
         }
     }
@@ -409,6 +412,9 @@ mod tests {
             dst_port: None,
             src_country_codes: None,
             dst_country_codes: None,
+            src_ip_alias: None,
+            dst_ip_alias: None,
+            dst_port_alias: None,
             enabled: true,
         };
         engine.add_rule(rule).unwrap();
@@ -454,6 +460,9 @@ mod tests {
             dst_port: None,
             src_country_codes: None,
             dst_country_codes: None,
+            src_ip_alias: None,
+            dst_ip_alias: None,
+            dst_port_alias: None,
             enabled: true,
         };
         engine.add_rule(smtp_rule).unwrap();

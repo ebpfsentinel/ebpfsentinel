@@ -181,6 +181,10 @@ pub struct RateLimitRuleConfig {
     /// Optional country code filter (userspace annotation only).
     #[serde(default)]
     pub country_codes: Option<Vec<String>>,
+
+    /// Source IP alias reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_ip_alias: Option<String>,
 }
 
 fn default_ratelimit_action() -> String {
@@ -285,6 +289,7 @@ impl RateLimitRuleConfig {
             enabled: self.enabled,
             algorithm,
             country_codes: self.country_codes.clone(),
+            src_ip_alias: self.src_ip_alias.clone(),
         })
     }
 }

@@ -32,6 +32,10 @@ pub struct IpsConfig {
     #[serde(default)]
     pub whitelist: Vec<String>,
 
+    /// Alias names to include in the whitelist (resolved to IPs from top-level aliases).
+    #[serde(default)]
+    pub whitelist_aliases: Vec<String>,
+
     #[serde(default)]
     pub sampling: Option<SamplingConfig>,
 
@@ -62,6 +66,7 @@ impl Default for IpsConfig {
             auto_blacklist_threshold: default_auto_blacklist_threshold(),
             max_blacklist_size: default_max_blacklist_size(),
             whitelist: Vec::new(),
+            whitelist_aliases: Vec::new(),
             sampling: None,
             rules: Vec::new(),
             country_thresholds: None,

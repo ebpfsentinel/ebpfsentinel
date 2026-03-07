@@ -18,6 +18,7 @@ fn make_policy(id: usize, rate: u64, burst: u64) -> RateLimitPolicy {
         enabled: true,
         algorithm: RateLimitAlgorithm::default(),
         country_codes: None,
+        src_ip_alias: None,
     }
 }
 
