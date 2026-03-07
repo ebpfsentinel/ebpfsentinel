@@ -97,3 +97,110 @@ impl DomainReputationPort for DomainReputationAppService {
         engine.stats(now)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ports::test_utils::NoopMetrics;
+
+    fn make_service() -> DomainReputationAppService {
+        DomainReputationAppService::new(ReputationConfig::default(), Arc::new(NoopMetrics))
+    }
+
+    #[test]
+    fn get_reputation_returns_none_for_unknown() {
+        let svc = make_service();
+        assert!(svc.get_reputation("unknown.com").is_none());
+    }
+
+    #[test]
+    fn get_score_returns_none_for_unknown() {
+        let svc = make_service();
+        assert!(svc.get_score("unknown.com").is_none());
+    }
+
+    #[test]
+    fn update_then_get_reputation() {
+        let svc = make_service();
+        svc.update_reputation(
+            "bad.com",
+            ReputationFactor::BlocklistHit {
+                list_name: "test-list".to_string(),
+            },
+        );
+        let rep = svc.get_reputation("bad.com");
+        assert!(rep.is_some());
+        assert_eq!(rep.unwrap().domain, "bad.com");
+    }
+
+    #[test]
+    fn update_then_get_score() {
+        let svc = make_service();
+        svc.update_reputation(
+            "evil.com",
+            ReputationFactor::CtiMatch {
+                feed_name: "feed-1".to_string(),
+                threat_type: "malware".to_string(),
+            },
+        );
+        let score = svc.get_score("evil.com");
+        assert!(score.is_some());
+        assert!(score.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn list_high_risk_empty_initially() {
+        let svc = make_service();
+        assert!(svc.list_high_risk(0.5).is_empty());
+    }
+
+    #[test]
+    fn list_high_risk_after_update() {
+        let svc = make_service();
+        // Add multiple factors to push score high
+        for _ in 0..5 {
+            svc.update_reputation(
+                "malware.com",
+                ReputationFactor::BlocklistHit {
+                    list_name: "bl".to_string(),
+                },
+            );
+        }
+        let high = svc.list_high_risk(0.1);
+        assert!(!high.is_empty());
+        assert_eq!(high[0].0.domain, "malware.com");
+    }
+
+    #[test]
+    fn list_all_paginated() {
+        let svc = make_service();
+        svc.update_reputation(
+            "a.com",
+            ReputationFactor::HighEntropy { entropy: 4.5 },
+        );
+        svc.update_reputation(
+            "b.com",
+            ReputationFactor::ShortTtl { avg_ttl: 5 },
+        );
+        let page0 = svc.list_all(0, 1);
+        assert_eq!(page0.len(), 1);
+        let page1 = svc.list_all(1, 1);
+        assert_eq!(page1.len(), 1);
+        let all = svc.list_all(0, 100);
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn stats_reflects_tracked_domains() {
+        let svc = make_service();
+        let stats = svc.stats();
+        assert_eq!(stats.tracked_domains, 0);
+
+        svc.update_reputation(
+            "tracked.com",
+            ReputationFactor::FrequentQueries { rate_per_min: 100.0 },
+        );
+        let stats = svc.stats();
+        assert_eq!(stats.tracked_domains, 1);
+    }
+}
