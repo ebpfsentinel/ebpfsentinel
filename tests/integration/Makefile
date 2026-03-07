@@ -203,10 +203,17 @@ test-2vm-perf-comparison-quick: vagrant-2vm-up ## Quick binary vs Docker compari
 
 # ── Utilities ────────────────────────────────────────────────────
 
-.PHONY: prepare-docker-image
-prepare-docker-image: ## Save Docker image tar for VM injection
-	docker save -o $(PROJECT_ROOT)/ebpfsentinel-image.tar ebpfsentinel-agent:latest
-	@echo "Image saved to $(PROJECT_ROOT)/ebpfsentinel-image.tar"
+.PHONY: docker-push-agent
+docker-push-agent: ## Build Docker image on host and push to agent VM
+	bash $(SCRIPT_DIR)/push-docker-image.sh
+
+.PHONY: docker-push-agent-nocache
+docker-push-agent-nocache: ## Build (no cache) and push Docker image to agent VM
+	bash $(SCRIPT_DIR)/push-docker-image.sh --no-cache
+
+.PHONY: docker-push-agent-only
+docker-push-agent-only: ## Push existing Docker image to agent VM (skip build)
+	bash $(SCRIPT_DIR)/push-docker-image.sh --skip-build
 
 # ── Cleanup ────────────────────────────────────────────────────────
 

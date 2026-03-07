@@ -7,9 +7,9 @@
 #   - Priority-based first-match-wins
 #   - Default policy (pass)
 #
-# Network topology:
-#   Host: 10.200.0.1 (veth-ebpf0)
-#   NS:   10.200.0.2 (veth-ebpf1 inside ebpf-test-ns)
+# Network topology (placeholders substituted by prepare_ebpf_config):
+#   Host: __HOST_IP__  (veth-ebpf0 or agent VM eth1)
+#   NS:   __NS_IP__    (veth-ebpf1 or attacker VM)
 
 agent:
   interfaces:
@@ -26,14 +26,14 @@ firewall:
   mode: block
   default_policy: pass
   rules:
-    # Priority 5: Allow ICMP from 10.200.0.0/24 subnet (CIDR match)
+    # Priority 5: Allow ICMP from __WHITELIST_SUBNET__ subnet (CIDR match)
     # This tests CIDR subnet matching — any host in the /24 subnet can ping
     - id: fw-allow-icmp-subnet
       priority: 5
       action: allow
       protocol: icmp
-      src_ip: "10.200.0.0/24"
-      dst_ip: "10.200.0.1"
+      src_ip: "__WHITELIST_SUBNET__"
+      dst_ip: "__HOST_IP__"
       scope: global
       enabled: true
 
@@ -60,8 +60,8 @@ firewall:
       priority: 30
       action: log
       protocol: tcp
-      src_ip: "10.200.0.2"
-      dst_ip: "10.200.0.1"
+      src_ip: "__NS_IP__"
+      dst_ip: "__HOST_IP__"
       dst_port: 8888
       scope: global
       enabled: true

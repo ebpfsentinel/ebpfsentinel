@@ -73,8 +73,11 @@ teardown_file() {
     require_tool ncat
 
     # Start listener on port 4444 (reverse shell target)
-    timeout 30 ncat -l -k "$EBPF_HOST_IP" 4444 >/dev/null 2>&1 &
-    local listener_pid=$!
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        _agent_ssh_sudo bash -c "timeout 30 ncat -l -k 0.0.0.0 4444 >/dev/null 2>&1 &"
+    else
+        timeout 30 ncat -l -k "$EBPF_HOST_IP" 4444 >/dev/null 2>&1 &
+    fi
     sleep 0.5
 
     # Send enough connections to exceed auto_blacklist_threshold (3)
@@ -83,8 +86,10 @@ teardown_file() {
         sleep 0.5
     done
 
-    kill "$listener_pid" 2>/dev/null || true
-    wait "$listener_pid" 2>/dev/null || true
+    if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
+        kill %1 2>/dev/null || true
+        wait 2>/dev/null || true
+    fi
 
     # Wait for blacklist to be populated
     sleep 5

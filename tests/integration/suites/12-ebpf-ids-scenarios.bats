@@ -98,26 +98,24 @@ teardown_file() {
     require_root
     require_tool ncat
 
+    # In 2VM mode, port 22 is used by sshd — skip this test as the ongoing
+    # SSH control traffic between VMs pollutes IDS counters on port 22.
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        skip "SSH threshold test not applicable in 2VM mode (port 22 used by sshd)"
+    fi
+
     # Start SSH-like listener
     timeout 15 ncat -l "$EBPF_HOST_IP" 22 -k >/dev/null 2>&1 &
     sleep 0.5
 
-    # Send a single connection — well below threshold of 3.
-    # Note: each TCP connection generates multiple packets (SYN, ACK, data...)
-    # so 2+ connections can exceed the threshold at the packet level.
     send_tcp_from_ns "$EBPF_HOST_IP" 22 "SSH1" 1
     sleep 0.5
 
-    # Give time for processing
     sleep 3
 
     kill %1 2>/dev/null || true
     wait 2>/dev/null || true
 
-    # With threshold of 3 and only 1 connection, the SSH rule should
-    # produce at most a few packet-level events.  The threshold mechanism
-    # suppresses alerts once the count exceeds the configured limit,
-    # so verify the alert count is bounded (≤ threshold value).
     local body
     body="$(api_get /api/v1/alerts)"
     local ssh_alerts

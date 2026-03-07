@@ -17,9 +17,11 @@ load '../lib/ebpf_helpers'
 MAP_OPS_REPORT="/tmp/ebpfsentinel-map-ops-latest.json"
 
 setup_file() {
-    require_root
-    require_kernel 5 17
-    require_tool bpftool
+    if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
+        require_root
+        require_kernel 5 17
+        require_tool bpftool
+    fi
     require_tool jq
 
     export PROJECT_ROOT
@@ -32,7 +34,8 @@ setup_file() {
     # Create netns + veth pair
     create_test_netns
 
-    # Initialize report
+    # Initialize report (remove stale file from previous root run)
+    rm -f "$MAP_OPS_REPORT"
     echo '{}' > "$MAP_OPS_REPORT"
 
     # Prepare config and start agent
@@ -72,6 +75,12 @@ _report_set_str() {
     local tmp
     tmp="$(jq --arg k "$key" --arg v "$value" '. + {($k): $v}' "$MAP_OPS_REPORT")"
     echo "$tmp" > "$MAP_OPS_REPORT"
+}
+
+# ── Helper: check agent is alive ──────────────────────────────────────
+_require_agent_alive() {
+    [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
+    curl -sf --max-time 3 "${BASE_URL}/healthz" >/dev/null 2>&1 || skip "agent not responding"
 }
 
 # ── Helper: generate and POST firewall rules ────────────────────────
@@ -301,70 +310,86 @@ _bench_threatintel_iocs() {
 # ── Firewall rule bulk load benchmarks ──────────────────────────────
 
 @test "firewall: bulk load 100 rules" {
-    require_root
-    [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
 
     _bench_firewall_rules 100 "100"
 }
 
 @test "firewall: bulk load 1K rules" {
-    require_root
-    [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
 
-    _bench_firewall_rules 1000 "1k"
+    local count=1000
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] && count=200
+
+    _bench_firewall_rules "$count" "1k"
 }
 
 @test "firewall: bulk load 10K rules" {
-    require_root
-    [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
 
-    _bench_firewall_rules 10000 "10k"
+    # Reduce count in 2VM mode to avoid network-induced timeouts
+    local count=10000
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] && count=500
+
+    _bench_firewall_rules "$count" "10k"
 }
 
 # ── Threat intel IOC sync benchmarks ────────────────────────────────
 
 @test "threatintel: IOC sync 1K entries" {
-    require_root
-    [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
 
-    _bench_threatintel_iocs 1000 "1k"
+    local count=1000
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] && count=200
+
+    _bench_threatintel_iocs "$count" "1k"
 }
 
 @test "threatintel: IOC sync 10K entries" {
-    require_root
-    [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
 
-    _bench_threatintel_iocs 10000 "10k"
+    local count=10000
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] && count=500
+
+    _bench_threatintel_iocs "$count" "10k"
 }
 
 # ── Ratelimit policy benchmarks ─────────────────────────────────────
 
 @test "ratelimit: bulk add 100 policies" {
-    require_root
-    [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
 
     _bench_ratelimit_rules 100 "100"
 }
 
 @test "ratelimit: bulk add 1K policies" {
-    require_root
-    [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
 
-    _bench_ratelimit_rules 1000 "1k"
+    local count=1000
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] && count=200
+
+    _bench_ratelimit_rules "$count" "1k"
 }
 
 # ── LB backend update benchmarks ───────────────────────────────────
 
 @test "lb: backend update 10 services" {
-    require_root
-    [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
 
     _bench_lb_backends 10 "10"
 }
 
 @test "lb: backend update 100 services" {
-    require_root
-    [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
 
     _bench_lb_backends 100 "100"
 }
@@ -372,24 +397,30 @@ _bench_threatintel_iocs() {
 # ── DNS blocklist sync benchmarks ──────────────────────────────────
 
 @test "dns: blocklist sync 1K domains" {
-    require_root
-    [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
 
-    _bench_dns_blocklist 1000 "1k"
+    local count=1000
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] && count=200
+
+    _bench_dns_blocklist "$count" "1k"
 }
 
 @test "dns: blocklist sync 10K domains" {
-    require_root
-    [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
 
-    _bench_dns_blocklist 10000 "10k"
+    local count=10000
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] && count=500
+
+    _bench_dns_blocklist "$count" "10k"
 }
 
 # ── Summary ─────────────────────────────────────────────────────────
 
 @test "map-ops benchmark summary" {
-    require_root
-    [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
 
     # Record metadata
     _report_set_str "timestamp" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -397,9 +428,13 @@ _bench_threatintel_iocs() {
 
     local pid
     pid="$(cat "$AGENT_PID_FILE" 2>/dev/null)" || true
-    if [ -n "$pid" ] && [ -d "/proc/${pid}" ]; then
+    if [ -n "$pid" ]; then
         local rss_kb
-        rss_kb="$(grep VmRSS "/proc/${pid}/status" 2>/dev/null | awk '{print $2}')" || true
+        if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+            rss_kb="$(_agent_ssh_sudo grep VmRSS "/proc/${pid}/status" 2>/dev/null | awk '{print $2}')" || true
+        elif [ -d "/proc/${pid}" ]; then
+            rss_kb="$(grep VmRSS "/proc/${pid}/status" 2>/dev/null | awk '{print $2}')" || true
+        fi
         if [ -n "$rss_kb" ]; then
             _report_set "agent_rss_kb_after_bench" "$rss_kb"
         fi

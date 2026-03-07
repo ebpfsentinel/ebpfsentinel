@@ -10,9 +10,11 @@ load '../lib/ebpf_helpers'
 BENCHMARK_REPORT="/tmp/ebpfsentinel-benchmark-latest.json"
 
 setup_file() {
-    require_root
-    require_kernel 5 17
-    require_tool bpftool
+    if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
+        [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+        require_kernel 5 17
+        require_tool bpftool
+    fi
     require_tool iperf3
 
     export PROJECT_ROOT
@@ -25,7 +27,8 @@ setup_file() {
     # Create netns + veth pair
     create_test_netns
 
-    # Initialize benchmark report
+    # Initialize benchmark report (remove stale file from previous root run)
+    rm -f "$BENCHMARK_REPORT"
     echo '{}' > "$BENCHMARK_REPORT"
 
     # Start iperf3 server on the host side
@@ -69,7 +72,7 @@ _report_set_str() {
 # ── Baseline tests (no agent) ──────────────────────────────────────
 
 @test "baseline: TCP throughput (no agent)" {
-    require_root
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
     require_tool iperf3
 
     local result
@@ -83,7 +86,7 @@ _report_set_str() {
 }
 
 @test "baseline: UDP throughput (no agent)" {
-    require_root
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
     require_tool iperf3
 
     local result
@@ -97,7 +100,7 @@ _report_set_str() {
 }
 
 @test "baseline: resource usage snapshot" {
-    require_root
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
 
     local mem_total mem_available
     mem_total="$(grep MemTotal /proc/meminfo | awk '{print $2}')"
@@ -112,7 +115,7 @@ _report_set_str() {
 # ── Agent-loaded tests ──────────────────────────────────────────────
 
 @test "start agent with full eBPF stack" {
-    require_root
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
 
     PREPARED_CONFIG="$(prepare_ebpf_config "${FIXTURE_DIR}/config-ebpf-benchmark.yaml")"
     export PREPARED_CONFIG
@@ -125,7 +128,7 @@ _report_set_str() {
 }
 
 @test "with-agent: TCP throughput" {
-    require_root
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
     require_tool iperf3
 
     # Ensure agent is running
@@ -142,7 +145,7 @@ _report_set_str() {
 }
 
 @test "with-agent: UDP throughput" {
-    require_root
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
     require_tool iperf3
 
     [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
@@ -158,7 +161,7 @@ _report_set_str() {
 }
 
 @test "with-agent: resource usage snapshot" {
-    require_root
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
 
     [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
 
@@ -171,7 +174,7 @@ _report_set_str() {
 }
 
 @test "agent memory footprint under 256MB RSS" {
-    require_root
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
 
     [ -f "$AGENT_PID_FILE" ] || skip "agent not running"
 
@@ -193,7 +196,7 @@ _report_set_str() {
 }
 
 @test "throughput overhead summary (<20%)" {
-    require_root
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
 
     # Read baseline and agent values from report
     local baseline_tcp agent_tcp

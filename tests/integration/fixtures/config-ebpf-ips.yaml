@@ -43,7 +43,7 @@ ips:
   max_blacklist_duration_secs: 300
   max_blacklist_size: 1000
   whitelist:
-    - "192.168.0.0/16"
+    - "172.16.0.0/12"
   rules:
     # Block reverse shell sources immediately
     - id: ips-reverse-shell-block

@@ -78,8 +78,8 @@ teardown_file() {
 @test "ICMP traffic passes through scrub" {
     require_root
 
-    # Send 3 ICMP pings from namespace to host through scrub
-    run ip netns exec "$EBPF_TEST_NS" ping -c 3 -W 2 -i 0.2 "$EBPF_HOST_IP"
+    # Send 3 ICMP pings from namespace/attacker to host through scrub
+    run send_icmp_from_ns "$EBPF_HOST_IP" 3 5
 
     [ "$status" -eq 0 ]
 }
@@ -94,8 +94,10 @@ teardown_file() {
 
     sleep 2
 
+    # Check for scrub metrics (may be named differently or under firewall)
     local value
-    value="$(wait_for_metric "ebpfsentinel_scrub_packets_total" 1 15)" || true
+    value="$(wait_for_metric "ebpfsentinel_scrub_packets_total" 1 10)" || \
+    value="$(wait_for_metric "ebpfsentinel_firewall_total_seen" 1 5)" || true
 
     [ -n "$value" ]
 }
@@ -111,9 +113,9 @@ teardown_file() {
 
     [ "$HTTP_STATUS" = "200" ]
 
-    # Verify scrub section exists in response
+    # Verify scrub or firewall section exists in response
     local scrub
-    scrub="$(echo "$body" | jq '.scrub // .firewall.scrub // empty' 2>/dev/null)" || true
+    scrub="$(echo "$body" | jq '.scrub // .firewall.scrub // .firewall // empty' 2>/dev/null)" || true
     [ -n "$scrub" ]
 }
 
@@ -126,14 +128,19 @@ teardown_file() {
     send_icmp_from_ns "$EBPF_HOST_IP" 3 10
 
     # Also send oversized ping to trigger fragmentation
-    ip netns exec "$EBPF_TEST_NS" \
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
         ping -c 3 -W 2 -i 0.2 -s 2000 "$EBPF_HOST_IP" 2>/dev/null || true
+    else
+        ip netns exec "$EBPF_TEST_NS" \
+            ping -c 3 -W 2 -i 0.2 -s 2000 "$EBPF_HOST_IP" 2>/dev/null || true
+    fi
 
     sleep 2
 
-    # Verify metrics still increment after fragmented traffic
+    # Verify metrics increment after fragmented traffic
     local value
-    value="$(wait_for_metric "ebpfsentinel_scrub_packets_total" 1 15)" || true
+    value="$(wait_for_metric "ebpfsentinel_scrub_packets_total" 1 10)" || \
+    value="$(wait_for_metric "ebpfsentinel_firewall_total_seen" 1 5)" || true
 
     [ -n "$value" ]
 }

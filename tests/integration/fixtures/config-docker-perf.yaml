@@ -1,0 +1,66 @@
+# config-docker-perf.yaml — Docker performance/overhead test config
+# Uses eth1 (private network) for traffic measurement via iperf3
+# All features enabled to measure worst-case Docker overhead
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: warn
+  log_format: json
+  http_port: 18080
+  grpc_port: 50151
+  metrics_port: 19090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules:
+    - id: fw-docker-bench
+      priority: 10
+      action: deny
+      protocol: tcp
+      dst_port: 9999
+      scope: global
+      enabled: true
+
+ids:
+  enabled: true
+  mode: alert
+  rules:
+    - id: ids-docker-bench
+      description: "Docker benchmark IDS rule"
+      severity: medium
+      protocol: tcp
+      dst_port: 4444
+      enabled: true
+
+ratelimit:
+  enabled: true
+  default_rate: 100000
+  default_burst: 200000
+  default_algorithm: token_bucket
+  rules:
+    - id: rl-docker-bench
+      rate: 100000
+      burst: 200000
+      scope: global
+      algorithm: token_bucket
+      action: drop
+      enabled: true
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+threatintel:
+  enabled: false
+  mode: alert
+  feeds: []
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: false

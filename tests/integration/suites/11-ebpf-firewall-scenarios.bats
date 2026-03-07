@@ -78,12 +78,11 @@ teardown_file() {
 @test "ICMP from /24 subnet passes (CIDR allow P5 overrides deny P10)" {
     require_root
 
-    # P5 allows ICMP from 10.200.0.0/24 to 10.200.0.1
+    # P5 allows ICMP from whitelist subnet to host IP
     # P10 denies ALL ICMP (wildcard)
     # First-match-wins: P5 should match before P10
     local result
-    result="$(ip netns exec "$EBPF_TEST_NS" \
-        ping -c 3 -W 1 -i 0.2 "$EBPF_HOST_IP" 2>&1)" || true
+    result="$(send_icmp_from_ns "$EBPF_HOST_IP" 3 5 2>&1)" || true
 
     local received
     received="$(echo "$result" | grep -oP '\d+(?= received)')" || true
@@ -158,9 +157,15 @@ teardown_file() {
     require_root
 
     local status
-    status="$(ip netns exec "$EBPF_TEST_NS" \
-        curl -sf -o /dev/null -w '%{http_code}' \
-        --max-time 5 "http://${EBPF_HOST_IP}:18080/healthz" 2>/dev/null)" || true
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        # In 2VM mode, curl from attacker directly
+        status="$(curl -sf -o /dev/null -w '%{http_code}' \
+            --max-time 5 "http://${EBPF_HOST_IP}:18080/healthz" 2>/dev/null)" || true
+    else
+        status="$(ip netns exec "$EBPF_TEST_NS" \
+            curl -sf -o /dev/null -w '%{http_code}' \
+            --max-time 5 "http://${EBPF_HOST_IP}:18080/healthz" 2>/dev/null)" || true
+    fi
 
     [ "$status" = "200" ]
 }

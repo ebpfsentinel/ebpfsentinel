@@ -147,9 +147,9 @@ teardown_file() {
     # Persist alert_id for subsequent tests
     echo "$alert_id" > "$DATA_DIR/alert_id.txt"
 
-    # Mark as false positive
+    # Mark as false positive (endpoint uses POST, not PATCH)
     local patch_body
-    patch_body="$(api_patch "/api/v1/alerts/${alert_id}/false-positive" '{"false_positive": true}')"
+    patch_body="$(api_post "/api/v1/alerts/${alert_id}/false-positive" '{"false_positive": true}')"
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ]
@@ -162,16 +162,17 @@ teardown_file() {
     alert_id="$(cat "$DATA_DIR/alert_id.txt" 2>/dev/null)"
     [ -n "$alert_id" ] || skip "no alert_id from previous test"
 
+    # No GET /alerts/{id} endpoint — query the list and filter
     local body
-    body="$(api_get "/api/v1/alerts/${alert_id}")"
+    body="$(api_get '/api/v1/alerts?false_positive=true')"
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ]
 
-    local fp
-    fp="$(echo "$body" | jq -r '.false_positive' 2>/dev/null)" || true
+    local match
+    match="$(echo "$body" | jq -r "[.alerts[] | select(.id == \"${alert_id}\")] | length" 2>/dev/null)" || true
 
-    [ "$fp" = "true" ]
+    [ "${match:-0}" -ge 1 ]
 }
 
 @test "query with false_positive filter excludes FP" {

@@ -301,10 +301,15 @@ prepare_ebpf_config() {
 
     local whitelist_subnet="${WHITELIST_SUBNET:-10.200.0.0/24}"
 
+    local host_ip="${EBPF_HOST_IP:-10.200.0.1}"
+    local ns_ip="${EBPF_NS_IP:-10.200.0.2}"
+
     sed -e "s|__INTERFACE__|${EBPF_VETH_HOST}|g" \
         -e "s|__DATA_DIR__|${data_dir}|g" \
         -e "s|__EBPF_DIR__|${ebpf_dir}|g" \
         -e "s|__WHITELIST_SUBNET__|${whitelist_subnet}|g" \
+        -e "s|__HOST_IP__|${host_ip}|g" \
+        -e "s|__NS_IP__|${ns_ip}|g" \
         "$fixture" > "$output"
 
     echo "$output"

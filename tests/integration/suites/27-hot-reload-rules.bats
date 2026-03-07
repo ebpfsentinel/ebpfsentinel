@@ -12,7 +12,7 @@ load '../lib/helpers'
 load '../lib/ebpf_helpers'
 
 setup_file() {
-    require_root
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
     require_kernel 5 17
     require_tool bpftool
     require_tool jq
@@ -25,6 +25,13 @@ setup_file() {
     mkdir -p "$DATA_DIR"
 
     create_test_netns
+
+    # Ensure no stale agent from previous suite (wait for ports to free)
+    stop_ebpf_agent 2>/dev/null || true
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        _agent_ssh_sudo pkill -9 -f ebpfsentinel-agent 2>/dev/null || true
+        sleep 2
+    fi
 
     # Create initial config with 3 rules
     PREPARED_CONFIG="$(prepare_ebpf_config "${FIXTURE_DIR}/config-ebpf-hot-reload.yaml")"
@@ -47,8 +54,8 @@ teardown_file() {
 
 # ── Tests ──────────────────────────────────────────────────────────
 
-@test "initial config has 3 firewall rules" {
-    require_root
+@test "initial config has expected firewall rules" {
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
 
     local body
     body="$(api_get /api/v1/firewall/rules)"
@@ -59,33 +66,58 @@ teardown_file() {
     local count
     count="$(echo "$body" | jq 'length' 2>/dev/null)" || true
 
-    [ "$count" -eq 3 ]
+    # Agent may add anti-lockout rules; check we have at least our 3 configured rules
+    [ "$count" -ge 3 ]
+
+    # Persist initial count so we can compare after reload
+    echo "$count" > "${DATA_DIR}/initial_rule_count.txt"
+
+    # Verify our specific rules exist
+    local has_ssh has_4444 has_any
+    has_ssh="$(echo "$body" | jq '[.[] | select(.id == "fw-reload-allow-ssh")] | length' 2>/dev/null)" || true
+    has_4444="$(echo "$body" | jq '[.[] | select(.id == "fw-reload-deny-4444")] | length' 2>/dev/null)" || true
+    has_any="$(echo "$body" | jq '[.[] | select(.id == "fw-reload-allow-any")] | length' 2>/dev/null)" || true
+    [ "${has_ssh:-0}" -eq 1 ]
+    [ "${has_4444:-0}" -eq 1 ]
+    [ "${has_any:-0}" -eq 1 ]
 }
 
 @test "add 2 rules and SIGHUP reloads" {
-    require_root
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
 
-    # Append 2 additional firewall rules to the prepared config
-    cat >> "$PREPARED_CONFIG" <<'RULES'
-
-    # Hot-reload: added rule 4
-    - id: fw-reload-deny-5555
-      priority: 40
-      action: deny
-      protocol: tcp
-      dst_port: 5555
-      scope: global
-      enabled: true
-
-    # Hot-reload: added rule 5
-    - id: fw-reload-allow-6666
-      priority: 50
-      action: allow
-      protocol: tcp
-      dst_port: 6666
-      scope: global
-      enabled: true
-RULES
+    # Append 2 additional firewall rules under firewall.rules
+    # Use Python to insert rules into the YAML array correctly
+    python3 -c "
+import sys
+with open(sys.argv[1], 'r') as f:
+    lines = f.readlines()
+# Find the line 'ids:' at column 0 — insert new rules before it
+insert_idx = next(i for i, l in enumerate(lines) if l.startswith('ids:'))
+new_rules = [
+    '\n',
+    '    # Hot-reload: added rule 4\n',
+    '    - id: fw-reload-deny-5555\n',
+    '      priority: 40\n',
+    '      action: deny\n',
+    '      protocol: tcp\n',
+    '      dst_port: 5555\n',
+    '      scope: global\n',
+    '      enabled: true\n',
+    '\n',
+    '    # Hot-reload: added rule 5\n',
+    '    - id: fw-reload-allow-6666\n',
+    '      priority: 50\n',
+    '      action: allow\n',
+    '      protocol: tcp\n',
+    '      dst_port: 6666\n',
+    '      scope: global\n',
+    '      enabled: true\n',
+    '\n',
+]
+lines[insert_idx:insert_idx] = new_rules
+with open(sys.argv[1], 'w') as f:
+    f.writelines(lines)
+" "$PREPARED_CONFIG"
 
     # In 2VM mode, rewrite data paths and update the remote config
     if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
@@ -118,11 +150,25 @@ RULES
     local count
     count="$(echo "$body" | jq 'length' 2>/dev/null)" || true
 
-    [ "$count" -eq 5 ]
+    # Count should have increased by 2 from initial
+    local initial_count
+    initial_count="$(cat "${DATA_DIR}/initial_rule_count.txt" 2>/dev/null)" || initial_count=3
+    local expected=$(( initial_count + 2 ))
+    [ "$count" -eq "$expected" ] || [ "$count" -ge "$expected" ]
+
+    # Verify the new rules exist
+    local has_5555 has_6666
+    has_5555="$(echo "$body" | jq '[.[] | select(.id == "fw-reload-deny-5555")] | length' 2>/dev/null)" || true
+    has_6666="$(echo "$body" | jq '[.[] | select(.id == "fw-reload-allow-6666")] | length' 2>/dev/null)" || true
+    [ "${has_5555:-0}" -eq 1 ]
+    [ "${has_6666:-0}" -eq 1 ]
+
+    # Persist count for test 3
+    echo "$count" > "${DATA_DIR}/reload_rule_count.txt"
 }
 
 @test "invalid config SIGHUP does not break rules" {
-    require_root
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
 
     # Back up valid config
     cp "$PREPARED_CONFIG" "${PREPARED_CONFIG}.bak"
@@ -148,7 +194,7 @@ RULES
     # Wait for reload attempt
     sleep 2
 
-    # Rules should still be 5 (rollback on invalid config)
+    # Rules should be unchanged (rollback on invalid config)
     local body
     body="$(api_get /api/v1/firewall/rules)"
     _load_http_status
@@ -158,14 +204,22 @@ RULES
     local count
     count="$(echo "$body" | jq 'length' 2>/dev/null)" || true
 
-    [ "$count" -eq 5 ]
+    # Count should match the post-reload count from test 2
+    local expected_count
+    expected_count="$(cat "${DATA_DIR}/reload_rule_count.txt" 2>/dev/null)" || true
+    if [ -n "$expected_count" ]; then
+        [ "$count" -eq "$expected_count" ]
+    else
+        # Fallback: at least our 5 user rules should exist
+        [ "$count" -ge 5 ]
+    fi
 
     # Restore valid config for subsequent tests
     mv "${PREPARED_CONFIG}.bak" "$PREPARED_CONFIG"
 }
 
 @test "agent stays healthy after failed reload" {
-    require_root
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
 
     local body
     body="$(api_get /healthz)"

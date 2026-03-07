@@ -148,6 +148,8 @@ prepare_ebpf_config() {
         -e "s|__DATA_DIR__|${data_dir}|g" \
         -e "s|__EBPF_DIR__|${ebpf_dir}|g" \
         -e "s|__WHITELIST_SUBNET__|${whitelist_subnet}|g" \
+        -e "s|__HOST_IP__|${AGENT_VM_IP}|g" \
+        -e "s|__NS_IP__|${ATTACKER_VM_IP}|g" \
         "$fixture" > "$output"
 
     echo "$output"

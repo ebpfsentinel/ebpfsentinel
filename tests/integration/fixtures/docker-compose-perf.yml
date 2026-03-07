@@ -1,0 +1,35 @@
+# docker-compose-perf.yml — Performance/overhead test compose file
+#
+# Uses host networking + eth1 for cross-VM traffic measurement.
+# Requires: Linux kernel 5.17+ with BTF, Docker Engine.
+
+services:
+  agent:
+    image: ebpfsentinel:integration-test
+    container_name: ebpfsentinel-perf
+
+    network_mode: host
+    privileged: true
+
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+
+    volumes:
+      - /sys/kernel/btf:/sys/kernel/btf:ro
+      - /sys/fs/bpf:/sys/fs/bpf
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+      - ./config-docker-perf.yaml:/etc/ebpfsentinel/config.yaml:ro
+
+    healthcheck:
+      test: ["CMD", "ebpfsentinel-agent", "health", "--port", "18080"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "1"
