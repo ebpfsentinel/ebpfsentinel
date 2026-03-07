@@ -305,4 +305,148 @@ mod tests {
         let result = sender.send(&alert, &route).await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn successful_post_returns_ok() {
+        use axum::{Router, http::StatusCode, routing::post};
+
+        async fn handler_ok() -> StatusCode {
+            StatusCode::OK
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route("/webhook", post(handler_ok));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let url = format!("http://{addr}/webhook");
+        let metrics = Arc::new(TestMetrics::new());
+        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let sender = WebhookAlertSender::new(
+            cb,
+            fast_retry(),
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            "test-webhook".to_string(),
+        );
+
+        let alert = sample_alert();
+        let route = webhook_route(&url);
+
+        let result = sender.send(&alert, &route).await;
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn json_payload_contains_alert_fields() {
+        use axum::body::Bytes;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::{Router, routing::post};
+        use tokio::sync::Mutex as TokioMutex;
+
+        type SharedBody = Arc<TokioMutex<Option<Bytes>>>;
+
+        async fn capture_handler(State(store): State<SharedBody>, body: Bytes) -> StatusCode {
+            *store.lock().await = Some(body);
+            StatusCode::OK
+        }
+
+        let store: SharedBody = Arc::new(TokioMutex::new(None));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/webhook", post(capture_handler))
+            .with_state(Arc::clone(&store));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let url = format!("http://{addr}/webhook");
+        let metrics = Arc::new(TestMetrics::new());
+        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let sender = WebhookAlertSender::new(
+            cb,
+            fast_retry(),
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            "test-webhook".to_string(),
+        );
+
+        let alert = sample_alert();
+        let route = webhook_route(&url);
+
+        let result = sender.send(&alert, &route).await;
+        assert!(result.is_ok(), "send failed: {result:?}");
+
+        let captured = store.lock().await;
+        let body = captured.as_ref().expect("no body captured");
+        let json: serde_json::Value = serde_json::from_slice(body).expect("body is not valid JSON");
+
+        assert_eq!(json["id"], "1000000000-ids-001");
+        assert_eq!(json["severity"], "High");
+        assert_eq!(json["rule_id"], "ids-001");
+        assert_eq!(json["component"], "ids");
+        assert_eq!(json["message"], "SSH bruteforce detected");
+        assert_eq!(json["src_port"], 12345);
+        assert_eq!(json["dst_port"], 22);
+        assert_eq!(json["protocol"], 6);
+    }
+
+    #[tokio::test]
+    async fn http_5xx_returns_error() {
+        use axum::http::StatusCode;
+        use axum::{Router, routing::post};
+
+        async fn handler_500() -> StatusCode {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route("/webhook", post(handler_500));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let url = format!("http://{addr}/webhook");
+        let metrics = Arc::new(TestMetrics::new());
+        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let no_retry = RetryConfig {
+            max_retries: 0,
+            backoff_schedule: vec![],
+            timeout: Duration::from_secs(2),
+        };
+        let sender = WebhookAlertSender::new(
+            cb,
+            no_retry,
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            "test-webhook".to_string(),
+        );
+
+        let alert = sample_alert();
+        let route = webhook_route(&url);
+
+        let result = sender.send(&alert, &route).await;
+        assert!(result.is_err(), "expected Err for HTTP 500");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("500"), "error should mention 500, got: {err}");
+    }
+
+    #[test]
+    fn alert_serialization_round_trip() {
+        let alert = sample_alert();
+
+        let json = serde_json::to_string(&alert).expect("serialize failed");
+        let deserialized: Alert = serde_json::from_str(&json).expect("deserialize failed");
+
+        assert_eq!(alert.id, deserialized.id);
+        assert_eq!(alert.component, deserialized.component);
+        assert_eq!(alert.message, deserialized.message);
+        assert_eq!(alert.src_port, deserialized.src_port);
+        assert_eq!(alert.dst_port, deserialized.dst_port);
+        assert_eq!(alert.protocol, deserialized.protocol);
+        assert_eq!(alert.timestamp_ns, deserialized.timestamp_ns);
+        assert_eq!(alert.is_ipv6, deserialized.is_ipv6);
+    }
 }

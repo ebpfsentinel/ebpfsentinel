@@ -102,4 +102,58 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<LogAlertSender>();
     }
+
+    #[tokio::test]
+    async fn log_sender_returns_ok_for_any_severity() {
+        let sender = LogAlertSender;
+        let route = sample_route();
+        for severity in [
+            Severity::Low,
+            Severity::Medium,
+            Severity::High,
+            Severity::Critical,
+        ] {
+            let mut alert = sample_alert();
+            alert.severity = severity;
+            let result = sender.send(&alert, &route).await;
+            assert!(result.is_ok(), "failed for severity {severity:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn log_sender_handles_alert_with_optional_fields() {
+        let sender = LogAlertSender;
+        let route = sample_route();
+        let mut alert = sample_alert();
+        alert.src_domain = Some("src.example.com".to_string());
+        alert.dst_domain = Some("dst.example.com".to_string());
+        alert.confidence = Some(95);
+        alert.threat_type = Some("bruteforce".to_string());
+        alert.data_type = Some("credential".to_string());
+        alert.pid = Some(1234);
+        alert.tgid = Some(5678);
+        alert.direction = Some(0); // 0 = ingress
+        alert.matched_domain = Some("evil.example.com".to_string());
+        alert.attack_type = Some("syn_flood".to_string());
+        alert.peak_pps = Some(100_000);
+        alert.current_pps = Some(50_000);
+        alert.mitigation_status = Some("active".to_string());
+        alert.total_packets = Some(1_000_000);
+        let result = sender.send(&alert, &route).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn log_sender_handles_ipv6_alert() {
+        let sender = LogAlertSender;
+        let route = sample_route();
+        let mut alert = sample_alert();
+        alert.is_ipv6 = true;
+        // 2001:db8::1
+        alert.src_addr = [0x2001_0db8, 0, 0, 1];
+        // 2001:db8::2
+        alert.dst_addr = [0x2001_0db8, 0, 0, 2];
+        let result = sender.send(&alert, &route).await;
+        assert!(result.is_ok());
+    }
 }

@@ -315,6 +315,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn email_sender_construction_with_credentials() {
+        let metrics = Arc::new(TestMetrics::new());
+        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let result = EmailAlertSender::new(
+            "127.0.0.1",
+            587,
+            Some("user@example.com"),
+            Some("secret-password"),
+            false,
+            "alerts@example.com".to_string(),
+            cb,
+            RetryConfig::default(),
+            metrics as Arc<dyn MetricsPort>,
+            "email-cred-test".to_string(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn email_sender_construction_dangerous_no_tls() {
+        let metrics = Arc::new(TestMetrics::new());
+        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let result = EmailAlertSender::new(
+            "127.0.0.1",
+            25,
+            None,
+            None,
+            false,
+            "alerts@example.com".to_string(),
+            cb,
+            RetryConfig::default(),
+            metrics as Arc<dyn MetricsPort>,
+            "email-notls-test".to_string(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn email_subject_format() {
+        let alert = sample_alert();
+        let subject = format!(
+            "[eBPFsentinel] {:?} alert: {} ({})",
+            alert.severity, alert.rule_id, alert.component,
+        );
+        assert!(subject.contains("eBPFsentinel"), "missing eBPFsentinel");
+        assert!(subject.contains("High"), "missing severity");
+        assert!(subject.contains("ids-001"), "missing rule_id");
+        assert!(subject.contains("ids"), "missing component");
+    }
+
+    #[test]
+    fn email_body_is_valid_json() {
+        let alert = sample_alert();
+        let body = serde_json::to_string_pretty(&alert).expect("serialization must succeed");
+        assert!(body.contains("\"id\""), "missing id field");
+        assert!(body.contains("\"severity\""), "missing severity field");
+        assert!(body.contains("\"rule_id\""), "missing rule_id field");
+        assert!(body.contains("\"src_port\""), "missing src_port field");
+        assert!(body.contains("\"dst_port\""), "missing dst_port field");
+        assert!(body.contains("\"protocol\""), "missing protocol field");
+        assert!(body.contains("\"message\""), "missing message field");
+    }
+
+    #[test]
+    fn email_body_does_not_contain_raw_keys() {
+        let alert = sample_alert();
+        let body = serde_json::to_string_pretty(&alert).expect("serialization must succeed");
+        // Ensure no raw API key or secret key patterns leak into the body
+        assert!(!body.contains("api_key"), "body contains raw api_key");
+        assert!(!body.contains("secret_key"), "body contains raw secret_key");
+        assert!(!body.contains("password"), "body contains raw password");
+        assert!(!body.contains("token"), "body contains raw token");
+    }
+
+    #[tokio::test]
     async fn email_non_email_route_returns_error() {
         let metrics = Arc::new(TestMetrics::new());
         let cb = CircuitBreaker::new(5, Duration::from_secs(60));
