@@ -40,5 +40,15 @@ credentials.json
 CLAUDE.md
 .claude
 
+# Mutation testing
+mutants.out/
+
+# Coverage
+*.profraw
+*.profdata
+
+# Docker image export
+ebpfsentinel-image.tar
+
 # Infra
 .vagrant

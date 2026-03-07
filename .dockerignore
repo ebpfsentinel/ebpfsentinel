@@ -23,13 +23,21 @@ credentials.json
 # CI/CD
 .github/
 
-# Planning docs (not needed in image)
-../_bmad-output/
-
 # Test/bench/fuzz (not needed for production build)
 tests/
 benches/
 fuzz/
+
+# Mutation testing / coverage
+mutants.out/
+*.profraw
+*.profdata
+
+# Docker image export
+ebpfsentinel-image.tar
+
+# Infra
+.vagrant/
 
 # OS files
 .DS_Store
