@@ -55,7 +55,7 @@ Or with Docker:
 ```bash
 docker run --privileged --network host \
   -v ./config:/etc/ebpfsentinel \
-  ebpfsentinel
+  ebpfsentinel-agent:latest
 ```
 
 Minimal configuration — only the interface is required:
@@ -100,8 +100,8 @@ See [Compatibility](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/
 
 ## OSS vs Enterprise
 
-The open-source agent includes all security domains, APIs, CLI, authentication, and observability. Enterprise version are available, see [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for details.
+The open-source agent includes all security domains, APIs, CLI, authentication, and observability. An enterprise version is available, see [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for details.
 
 ## License
 
-GNU Affero General Public License v3.0 — see [LICENSE](../LICENSE).
+GNU Affero General Public License v3.0 — see [LICENSE](LICENSE).
