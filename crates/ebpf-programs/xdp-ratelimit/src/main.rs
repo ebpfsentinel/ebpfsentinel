@@ -15,7 +15,7 @@ use aya_log_ebpf::info;
 use core::mem;
 use ebpf_common::{
     ddos::{
-        AmpProtectConfig, AmpProtectKey, ConnTrackConfig, ConnTrackKey, ConnTrackValue,
+        AmpProtectConfig, AmpProtectKey, DdosConnTrackConfig, DdosConnTrackKey, DdosConnTrackValue,
         DdosSynConfig, FloodCounterKey, IcmpConfig, SynRateState, CONNTRACK_SUB_ACK_FLOOD,
         CONNTRACK_SUB_FIN_FLOOD, CONNTRACK_SUB_HALF_OPEN, CONNTRACK_SUB_RST_FLOOD,
         CONN_ESTABLISHED, CONN_NEW, DDOS_ACTION_DROP, DDOS_ACTION_SYNCOOKIE,
@@ -219,12 +219,12 @@ static DDOS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(DDOS_METRI
 
 /// Connection tracking configuration (single entry, index 0).
 #[map]
-static CONNTRACK_CONFIG: Array<ConnTrackConfig> = Array::with_max_entries(1, 0);
+static CONNTRACK_CONFIG: Array<DdosConnTrackConfig> = Array::with_max_entries(1, 0);
 
 /// Lightweight connection tracking table (per-CPU LRU).
 /// Tracks TCP connections with 3 states: NEW, ESTABLISHED, CLOSING.
 #[map]
-static CONN_TABLE: LruPerCpuHashMap<ConnTrackKey, ConnTrackValue> =
+static CONN_TABLE: LruPerCpuHashMap<DdosConnTrackKey, DdosConnTrackValue> =
     LruPerCpuHashMap::with_max_entries(131072, 0);
 
 /// Per-source half-open connection counter (per-CPU LRU).
@@ -384,7 +384,7 @@ fn process_ratelimit_v4(
 
     // ── Country-tier LPM lookup (before per-IP) ────────────────────
     let lpm_key = Key::new(32, src_ip.to_be_bytes());
-    if let Some(tier_val) = unsafe { RL_LPM_SRC_V4.get(&lpm_key) } {
+    if let Some(tier_val) = RL_LPM_SRC_V4.get(&lpm_key) {
         if let Some(tier_cfg) = RL_TIER_CONFIG.get(tier_val.tier_id as u32) {
             if tier_cfg.ns_per_token > 0 {
                 let key = RateLimitKey { src_ip };
@@ -473,7 +473,7 @@ fn process_ratelimit_v6(
     // ── Country-tier LPM lookup (IPv6, before per-IP) ──────────────
     let src_bytes = unsafe { (*ipv6hdr).src_addr };
     let lpm_key_v6 = Key::new(128, src_bytes);
-    if let Some(tier_val) = unsafe { RL_LPM_SRC_V6.get(&lpm_key_v6) } {
+    if let Some(tier_val) = RL_LPM_SRC_V6.get(&lpm_key_v6) {
         if let Some(tier_cfg) = RL_TIER_CONFIG.get(tier_val.tier_id as u32) {
             if tier_cfg.ns_per_token > 0 {
                 let key = RateLimitKey { src_ip: src_hash };
@@ -1067,7 +1067,7 @@ fn process_conntrack_v6(
 /// Shared between IPv4 and IPv6 paths.
 #[inline(always)]
 fn process_conntrack_tcp(
-    cfg: &ConnTrackConfig,
+    cfg: &DdosConnTrackConfig,
     tcp_flags: u8,
     src_ip: u32,
     dst_ip: u32,
@@ -1096,7 +1096,7 @@ fn process_conntrack_tcp(
             return Some(xdp_action::XDP_DROP);
         }
         // Remove connection entry on RST
-        let key = ConnTrackKey { src_ip, dst_ip, src_port, dst_port };
+        let key = DdosConnTrackKey { src_ip, dst_ip, src_port, dst_port };
         let _ = CONN_TABLE.remove(&key);
         return None;
     }
@@ -1112,7 +1112,7 @@ fn process_conntrack_tcp(
             return Some(xdp_action::XDP_DROP);
         }
         // Remove connection entry on FIN
-        let key = ConnTrackKey { src_ip, dst_ip, src_port, dst_port };
+        let key = DdosConnTrackKey { src_ip, dst_ip, src_port, dst_port };
         let _ = CONN_TABLE.remove(&key);
         return None;
     }
@@ -1138,8 +1138,8 @@ fn process_conntrack_tcp(
         }
 
         // Insert NEW connection
-        let key = ConnTrackKey { src_ip, dst_ip, src_port, dst_port };
-        let val = ConnTrackValue {
+        let key = DdosConnTrackKey { src_ip, dst_ip, src_port, dst_port };
+        let val = DdosConnTrackValue {
             state: CONN_NEW,
             _pad: [0; 7],
             first_seen_ns: now,
@@ -1152,9 +1152,9 @@ fn process_conntrack_tcp(
 
     // ── ACK: transition NEW→ESTABLISHED or detect ACK flood ─────
     if is_ack {
-        let key = ConnTrackKey { src_ip, dst_ip, src_port, dst_port };
+        let key = DdosConnTrackKey { src_ip, dst_ip, src_port, dst_port };
         // Also check reverse direction (server-side ACK)
-        let rev_key = ConnTrackKey {
+        let rev_key = DdosConnTrackKey {
             src_ip: dst_ip,
             dst_ip: src_ip,
             src_port: dst_port,
@@ -1208,7 +1208,7 @@ fn process_conntrack_tcp(
     }
 
     // Other TCP packets: update last_seen_ns if connection exists
-    let key = ConnTrackKey { src_ip, dst_ip, src_port, dst_port };
+    let key = DdosConnTrackKey { src_ip, dst_ip, src_port, dst_port };
     if let Some(entry) = CONN_TABLE.get_ptr_mut(&key) {
         let entry = unsafe { &mut *entry };
         entry.last_seen_ns = now;

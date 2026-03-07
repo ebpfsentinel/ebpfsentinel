@@ -54,7 +54,7 @@ pub struct DnsEvent {
 /// Fixed-size buffer for DNS events in the RingBuf: header + raw payload.
 /// Userspace extracts the DNS payload from bytes[48..48+dns_payload_len].
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DnsEventBuf {
     pub header: DnsEvent,
     pub payload: [u8; DNS_MAX_PAYLOAD],

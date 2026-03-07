@@ -95,7 +95,7 @@ pub struct AmpProtectConfig {
 /// Size: 32 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConnTrackConfig {
+pub struct DdosConnTrackConfig {
     /// 1 = connection tracking enabled, 0 = disabled.
     pub enabled: u8,
     pub _pad: [u8; 3],
@@ -117,7 +117,7 @@ pub struct ConnTrackConfig {
 /// Size: 12 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConnTrackKey {
+pub struct DdosConnTrackKey {
     pub src_ip: u32,
     pub dst_ip: u32,
     pub src_port: u16,
@@ -129,7 +129,7 @@ pub struct ConnTrackKey {
 /// Size: 24 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct ConnTrackValue {
+pub struct DdosConnTrackValue {
     /// Connection state: `CONN_NEW`, `CONN_ESTABLISHED`, `CONN_CLOSING`.
     pub state: u8,
     pub _pad: [u8; 7],
@@ -220,11 +220,11 @@ unsafe impl aya::Pod for AmpProtectKey {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for AmpProtectConfig {}
 #[cfg(feature = "userspace")]
-unsafe impl aya::Pod for ConnTrackConfig {}
+unsafe impl aya::Pod for DdosConnTrackConfig {}
 #[cfg(feature = "userspace")]
-unsafe impl aya::Pod for ConnTrackKey {}
+unsafe impl aya::Pod for DdosConnTrackKey {}
 #[cfg(feature = "userspace")]
-unsafe impl aya::Pod for ConnTrackValue {}
+unsafe impl aya::Pod for DdosConnTrackValue {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for FloodCounterKey {}
 
@@ -290,40 +290,40 @@ mod tests {
     }
 
     #[test]
-    fn conntrack_config_size() {
-        assert_eq!(mem::size_of::<ConnTrackConfig>(), 32);
+    fn ddos_conntrack_config_size() {
+        assert_eq!(mem::size_of::<DdosConnTrackConfig>(), 32);
     }
 
     #[test]
-    fn conntrack_config_alignment() {
-        assert_eq!(mem::align_of::<ConnTrackConfig>(), 8);
+    fn ddos_conntrack_config_alignment() {
+        assert_eq!(mem::align_of::<DdosConnTrackConfig>(), 8);
     }
 
     #[test]
-    fn conntrack_config_field_offsets() {
-        assert_eq!(mem::offset_of!(ConnTrackConfig, enabled), 0);
-        assert_eq!(mem::offset_of!(ConnTrackConfig, half_open_threshold), 4);
-        assert_eq!(mem::offset_of!(ConnTrackConfig, rst_threshold), 8);
-        assert_eq!(mem::offset_of!(ConnTrackConfig, fin_threshold), 12);
-        assert_eq!(mem::offset_of!(ConnTrackConfig, ack_threshold), 16);
-        assert_eq!(mem::offset_of!(ConnTrackConfig, timeout_ns), 24);
+    fn ddos_conntrack_config_field_offsets() {
+        assert_eq!(mem::offset_of!(DdosConnTrackConfig, enabled), 0);
+        assert_eq!(mem::offset_of!(DdosConnTrackConfig, half_open_threshold), 4);
+        assert_eq!(mem::offset_of!(DdosConnTrackConfig, rst_threshold), 8);
+        assert_eq!(mem::offset_of!(DdosConnTrackConfig, fin_threshold), 12);
+        assert_eq!(mem::offset_of!(DdosConnTrackConfig, ack_threshold), 16);
+        assert_eq!(mem::offset_of!(DdosConnTrackConfig, timeout_ns), 24);
     }
 
     #[test]
-    fn conntrack_key_size() {
-        assert_eq!(mem::size_of::<ConnTrackKey>(), 12);
+    fn ddos_conntrack_key_size() {
+        assert_eq!(mem::size_of::<DdosConnTrackKey>(), 12);
     }
 
     #[test]
-    fn conntrack_value_size() {
-        assert_eq!(mem::size_of::<ConnTrackValue>(), 24);
+    fn ddos_conntrack_value_size() {
+        assert_eq!(mem::size_of::<DdosConnTrackValue>(), 24);
     }
 
     #[test]
-    fn conntrack_value_field_offsets() {
-        assert_eq!(mem::offset_of!(ConnTrackValue, state), 0);
-        assert_eq!(mem::offset_of!(ConnTrackValue, first_seen_ns), 8);
-        assert_eq!(mem::offset_of!(ConnTrackValue, last_seen_ns), 16);
+    fn ddos_conntrack_value_field_offsets() {
+        assert_eq!(mem::offset_of!(DdosConnTrackValue, state), 0);
+        assert_eq!(mem::offset_of!(DdosConnTrackValue, first_seen_ns), 8);
+        assert_eq!(mem::offset_of!(DdosConnTrackValue, last_seen_ns), 16);
     }
 
     #[test]

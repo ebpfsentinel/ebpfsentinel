@@ -60,7 +60,7 @@ impl core::fmt::Debug for DlpEvent {
 /// Stored in the SSL_READ_ARGS HashMap keyed by pid_tgid.
 /// Size: 16 bytes (aligned to 8 bytes due to buf_ptr u64).
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SslReadArgs {
     /// User-space buffer pointer passed to SSL_read.
     pub buf_ptr: u64,
