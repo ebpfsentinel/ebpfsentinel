@@ -261,3 +261,10 @@ cleanup_test_env() {
     stop_agent 2>/dev/null || true
     rm -rf "$DATA_DIR"
 }
+
+# ── 2-VM mode override ────────────────────────────────────────────────
+# When EBPF_2VM_MODE=true, source vm_helpers.bash which overrides
+# start_agent/stop_agent to run the agent on the agent VM via SSH.
+if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+    source "${HELPERS_DIR}/vm_helpers.bash"
+fi

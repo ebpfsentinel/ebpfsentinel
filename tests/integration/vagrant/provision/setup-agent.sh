@@ -62,9 +62,7 @@ install_from_prebuilt() {
 
 build_from_source() {
     echo "=== Building eBPF programs ==="
-    if rustup run nightly rustc --version &>/dev/null 2>&1; then
-        (cd "$PROJECT_DIR" && cargo xtask ebpf-build) || echo "eBPF build skipped (non-fatal)"
-    fi
+    (cd "$PROJECT_DIR" && cargo xtask ebpf-build)
 
     echo "=== Building agent binary ==="
     (cd "$PROJECT_DIR" && cargo build --release --bin ebpfsentinel-agent)

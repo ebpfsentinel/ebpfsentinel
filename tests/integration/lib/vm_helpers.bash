@@ -127,6 +127,76 @@ prepare_ebpf_config() {
 
 # ── Agent lifecycle (overrides) ──────────────────────────────────
 
+# start_agent <config_file> [extra_args...]
+# Overrides helpers.bash start_agent to run the agent on the agent VM via SSH.
+start_agent() {
+    local config_file="${1:?usage: start_agent <config_file> [extra_args...]}"
+    shift
+
+    # Reuse start_ebpf_agent — in 2VM mode both do the same thing
+    start_ebpf_agent "$config_file" "$@"
+}
+
+# stop_agent — overrides helpers.bash stop_agent
+stop_agent() {
+    stop_ebpf_agent "$@"
+}
+
+# signal_agent <signal>
+# Sends a signal to the remote agent process.
+signal_agent() {
+    local sig="${1:?usage: signal_agent <signal>}"
+    local remote_pid
+    remote_pid="$(_agent_ssh cat "${_REMOTE_PID_FILE}" 2>/dev/null)" || true
+    if [ -z "$remote_pid" ] && [ -f "$AGENT_PID_FILE" ]; then
+        remote_pid="$(cat "$AGENT_PID_FILE" 2>/dev/null)"
+    fi
+    if [ -n "$remote_pid" ]; then
+        _agent_ssh_sudo kill "-${sig}" "$remote_pid" 2>/dev/null || true
+    fi
+}
+
+# wait_for_agent_exit [max_secs]
+# Waits for the remote agent process to exit.
+wait_for_agent_exit() {
+    local max="${1:-10}"
+    local remote_pid
+    remote_pid="$(cat "$AGENT_PID_FILE" 2>/dev/null)" || true
+    [ -z "$remote_pid" ] && return 0
+
+    local waited=0
+    while _agent_ssh_sudo kill -0 "$remote_pid" 2>/dev/null && [ "$waited" -lt "$max" ]; do
+        sleep 0.2
+        waited=$((waited + 1))
+    done
+    ! _agent_ssh_sudo kill -0 "$remote_pid" 2>/dev/null
+}
+
+# start_agent_expect_fail <config_file> [extra_args...]
+# Overrides helpers.bash — runs the agent on the agent VM, expects non-zero exit.
+start_agent_expect_fail() {
+    local config_file="${1:?usage: start_agent_expect_fail <config_file>}"
+    shift
+
+    # Copy config to agent VM
+    _agent_ssh_sudo mkdir -p "${_REMOTE_CONFIG_DIR}" 2>/dev/null || true
+    _agent_ssh_sudo chown vagrant:vagrant "${_REMOTE_CONFIG_DIR}" 2>/dev/null || true
+    local remote_config="${_REMOTE_CONFIG_DIR}/$(basename "$config_file")"
+    _agent_scp "$config_file" "$remote_config" 2>/dev/null || {
+        # If config doesn't exist locally (e.g. nonexistent file test), pass the path through
+        remote_config="$config_file"
+    }
+
+    local extra_args=""
+    for arg in "$@"; do
+        extra_args="${extra_args} $(printf '%q' "$arg")"
+    done
+
+    _agent_ssh_sudo /usr/local/bin/ebpfsentinel-agent --config "$remote_config" $extra_args 2>/dev/null
+    local exit_code=$?
+    return $exit_code
+}
+
 # start_ebpf_agent <config_file> [extra_args...]
 # Copies config to agent VM, starts the agent via SSH, waits for healthz.
 start_ebpf_agent() {
@@ -140,12 +210,19 @@ start_ebpf_agent() {
     _agent_ssh_sudo mkdir -p "${_REMOTE_CONFIG_DIR}" "${_REMOTE_DATA_DIR}" 2>/dev/null || true
     _agent_ssh_sudo chown vagrant:vagrant "${_REMOTE_CONFIG_DIR}" "${_REMOTE_DATA_DIR}" 2>/dev/null || true
 
-    # Copy config file to agent VM
+    # Rewrite local data paths to remote data paths in the config before SCP
+    local rewritten_config="/tmp/ebpfsentinel-2vm-rewritten-$$.yaml"
+    sed -e "s|/tmp/ebpfsentinel-test-data-[0-9]*|${_REMOTE_DATA_DIR}|g" \
+        "$config_file" > "$rewritten_config"
+
+    # Copy rewritten config file to agent VM
     local remote_config="${_REMOTE_CONFIG_DIR}/$(basename "$config_file")"
-    _agent_scp "$config_file" "$remote_config" || {
+    _agent_scp "$rewritten_config" "$remote_config" || {
+        rm -f "$rewritten_config"
         echo "Failed to scp config to agent VM" >&2
         return 1
     }
+    rm -f "$rewritten_config"
 
     # Build the extra args string (properly quoted)
     local extra_args=""

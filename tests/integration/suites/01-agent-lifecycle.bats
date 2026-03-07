@@ -70,26 +70,28 @@ teardown() {
 
 @test "graceful shutdown via SIGTERM completes in <5s" {
     start_agent "$PREPARED_CONFIG"
-    local pid
-    pid="$(cat "$AGENT_PID_FILE")"
 
     local start_time
     start_time="$(date +%s)"
-    kill -TERM "$pid"
 
-    # Wait for process to exit
-    local waited=0
-    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 10 ]; do
-        sleep 0.2
-        waited=$((waited + 1))
-    done
+    if type signal_agent &>/dev/null; then
+        signal_agent TERM
+        wait_for_agent_exit 10
+    else
+        local pid
+        pid="$(cat "$AGENT_PID_FILE")"
+        kill -TERM "$pid"
+        local waited=0
+        while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 10 ]; do
+            sleep 0.2
+            waited=$((waited + 1))
+        done
+        ! kill -0 "$pid" 2>/dev/null
+    fi
 
     local end_time
     end_time="$(date +%s)"
     local elapsed=$((end_time - start_time))
-
-    # Process should be gone
-    ! kill -0 "$pid" 2>/dev/null
 
     # Should complete within 5 seconds
     [ "$elapsed" -lt 6 ]
@@ -105,7 +107,11 @@ teardown() {
     pid_before="$(cat "$AGENT_PID_FILE")"
 
     # Send SIGHUP for config reload
-    kill -HUP "$pid_before"
+    if type signal_agent &>/dev/null; then
+        signal_agent HUP
+    else
+        kill -HUP "$pid_before"
+    fi
     sleep 2
 
     # PID should be the same (no restart)
