@@ -7,10 +7,11 @@ End-to-end test suite for the eBPFsentinel agent. Covers agent lifecycle, REST/g
 ```
 tests/integration/
 ├── Makefile                            # Test orchestration (30+ targets)
-├── suites/                             # BATS test suites
+├── suites/                             # BATS test suites (01-30)
 │   ├── 01-agent-lifecycle.bats
 │   ├── 02-rest-api-health.bats
 │   ├── ...
+│   └── 30-ebpf-map-operation-bench.bats
 ├── lib/                                # Shared bash helper libraries
 │   ├── helpers.bash                    # Core: agent start/stop, HTTP/gRPC wrappers
 │   ├── assertions.bash                 # Custom BATS assertions
@@ -22,12 +23,14 @@ tests/integration/
 ├── scripts/                            # Standalone utilities
 │   ├── start-agent.sh                  # Launch agent in background
 │   ├── stop-agent.sh                   # Graceful agent shutdown
-│   ├── wait-for-agent.sh               # Poll /healthz
-│   ├── wait-for-ready.sh               # Poll /readyz (eBPF loaded)
+│   ├── wait-for-agent.sh              # Poll /healthz
+│   ├── wait-for-ready.sh              # Poll /readyz (eBPF loaded)
 │   ├── generate-certs.sh               # Self-signed CA + server cert
 │   ├── generate-jwt-keys.sh            # RSA keypair + test JWT tokens
 │   ├── run-in-vm.sh                    # Main test runner (suite discovery)
 │   ├── run-in-2vm.sh                   # 2-VM test runner (attacker -> agent)
+│   ├── run-ebpf-docker.sh              # eBPF tests in privileged Docker
+│   ├── push-docker-image.sh            # Build + stream Docker image to agent VM
 │   ├── perf-test-docker.sh             # Intra-VM performance tests
 │   ├── perf-test-vagrant.sh            # Binary vs Docker comparison (intra-VM)
 │   ├── perf-test-host-to-vm.sh         # Host-to-VM perf over VirtualBox
@@ -35,10 +38,12 @@ tests/integration/
 ├── fixtures/                           # Config templates + test data
 │   ├── config-minimal.yaml
 │   ├── config-full.yaml
-│   ├── config-docker-test.yaml         # Docker integration test config
+│   ├── config-docker-test.yaml         # Docker smoke test config
+│   ├── config-docker-perf.yaml         # Docker overhead/stress test config
 │   ├── config-ebpf-*.yaml              # eBPF scenario configs
 │   ├── config-perf-*.yaml              # Performance test configs
-│   ├── docker-compose-test.yml         # Docker integration test compose
+│   ├── docker-compose-test.yml         # Docker smoke test compose
+│   ├── docker-compose-perf.yml         # Docker overhead test compose
 │   ├── health.proto                    # gRPC health check proto
 │   └── k8s/                            # Kubernetes manifests (DaemonSet)
 └── vagrant/                            # VM-based test environment
@@ -84,15 +89,15 @@ Run without root. Require the agent binary built (`cargo build --release`).
 | **05-grpc-streaming**    |     4 | gRPC health check, server reflection, event streaming subscription                                                                                                               |
 | **06-ebpf-programs**     |     3 | eBPF program loading and attachment to a veth interface (requires kernel >= 5.17)                                                                                                |
 | **07-authentication**    |    11 | JWT RS256 validation, OIDC JWKS endpoint, API key auth, role-based access control (admin/operator/viewer), token expiry, composite auth                                          |
-| **08-tls**               |     5 | HTTPS termination on port 18443, gRPC over TLS, self-signed certificate validation, mTLS                                                                                         |
-| **09-docker**            |     4 | Docker image build, `docker compose` deployment with health checks, healthz via agent CLI (requires kernel BTF)                                                                  |
+| **08-tls**               |     5 | HTTPS termination on port 8443, gRPC over TLS, self-signed certificate validation, mTLS                                                                                         |
+| **09-docker**            |    11 | Docker image build, compose deployment, healthz, baseline/Docker TCP throughput, ICMP latency, RSS/CPU overhead, API latency under load, memory stability, clean shutdown         |
 | **10-kubernetes**        |     5 | Minikube DaemonSet deployment, ConfigMap injection, RBAC, pod health (VM-only)                                                                                                   |
 | **16-rest-api-ddos**     |     9 | DDoS protection: status, attacks, history, policy CRUD, validation (invalid type, zero threshold, nonexistent delete)                                                            |
 | **17-rest-api-extended** |    26 | Extended domains: IDS, DLP, conntrack, NAT, routing, aliases, LB (CRUD + validation), operations (config, eBPF status, reload), IPS domain-blocks                               |
 
-### eBPF Scenario Tests (suites 11-14, 18-23)
+### eBPF Scenario Tests (suites 11-14, 18-24)
 
-Require **root** and **kernel >= 5.17**. Use isolated network namespaces with veth pairs (10.200.0.0/24) to test real eBPF packet processing.
+Require **root** and **kernel >= 5.17**. Use isolated network namespaces with veth pairs (10.200.0.0/24) to test real eBPF packet processing. In 2-VM mode, root is not required locally.
 
 | Suite                              | Tests | What it covers                                                                                                                                    |
 | ---------------------------------- | ----: | ------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -106,14 +111,28 @@ Require **root** and **kernel >= 5.17**. Use isolated network namespaces with ve
 | **21-ebpf-loadbalancer-scenarios** |     7 | Load balancer: XDP program attachment, service CRUD with eBPF map sync, backend detail, service deletion, metrics                                |
 | **22-ebpf-nat-scenarios**          |     5 | NAT: TC ingress/egress program attachment, status/rules API, conntrack co-dependency, metrics                                                    |
 | **23-ebpf-ddos-scenarios**         |     8 | DDoS/scrub: TC scrub program attachment, policy loading, ICMP/SYN flood detection, attack history, metrics                                       |
+| **24-ebpf-scrub-scenarios**        |     5 | Packet scrub: program attachment, metrics increment, fragmented packet handling, API access                                                      |
 
-### Performance Benchmark (suite 15)
+### End-to-End & Advanced Tests (suites 25-28)
 
-Requires **root**. Measures agent overhead on a veth pair using iperf3, hping3, and `/proc` sampling.
+Require **root** and **kernel >= 5.17** (or 2-VM mode).
 
-| Suite                        | Tests | What it covers                                                                                                                   |
-| ---------------------------- | ----: | -------------------------------------------------------------------------------------------------------------------------------- |
-| **15-performance-benchmark** |     9 | TCP/UDP throughput, ICMP latency, TCP SYN latency, packets-per-second, CPU/RSS overhead, eBPF map memory, JSON report generation |
+| Suite                          | Tests | What it covers                                                                                                |
+| ------------------------------ | ----: | ------------------------------------------------------------------------------------------------------------- |
+| **25-packet-accountability**   |     6 | Firewall packet counters: total_seen increments, total_seen >= passed + dropped, UDP/TCP delta accuracy       |
+| **26-alert-end-to-end**        |     7 | Alert pipeline: IDS alert generation, REST query, source/destination fields, count increment, false positive   |
+| **27-hot-reload-rules**        |     4 | Config hot-reload: initial rule count, SIGHUP adds rules, invalid config rollback, agent stays healthy        |
+| **28-ebpf-dlp-scenarios**      |     5 | DLP: program attachment, configuration API, metrics, pattern loading, mode verification                       |
+
+### Performance & Benchmark Suites (suites 15, 29-30)
+
+Require **root** and **kernel >= 5.17** (or 2-VM mode). Measure agent overhead using iperf3, hping3, and `/proc` sampling.
+
+| Suite                          | Tests | What it covers                                                                                                   |
+| ------------------------------ | ----: | ---------------------------------------------------------------------------------------------------------------- |
+| **15-performance-benchmark**   |     9 | TCP/UDP throughput, ICMP latency, TCP SYN latency, packets-per-second, CPU/RSS overhead, JSON report generation  |
+| **29-ebpf-feature-overhead**   |     8 | Per-feature overhead: baseline, then cumulative (firewall, +IDS, +ratelimit, +threatintel, +all), NFR2 threshold |
+| **30-ebpf-map-operation-bench**|    12 | Bulk API latency: firewall rules (100/1K/10K), threatintel IOCs, ratelimit policies, LB backends, DNS blocklist  |
 
 ## Performance Test Scripts
 
@@ -159,7 +178,7 @@ Host (192.168.56.1)                      Vagrant VM (192.168.56.10)
 ├── iperf3 -c 192.168.56.10 ──────────> iperf3 -s (port 5201)
 ├── hping3 -S 192.168.56.10 ──────────> agent XDP/TC on eth1
 ├── ping 192.168.56.10 ───────────────> agent
-├── hey http://192.168.56.10:18080 ───> agent REST API
+├── hey http://192.168.56.10:8080 ────> agent REST API
 ```
 
 **Phases:** Baseline, Alert mode (with CPU/RSS from VM), Block mode (port verification), API benchmarks, Soak test (optional).
@@ -193,30 +212,36 @@ All fixtures use `__PLACEHOLDER__` tokens substituted at runtime:
 | `__EBPF_DIR__`         | eBPF program directory path                                     |
 | `__WHITELIST_SUBNET__` | IPS whitelist CIDR (e.g., `10.200.0.0/24` or `192.168.56.0/24`) |
 
-| Config                            | Use case                                                        |
-| --------------------------------- | --------------------------------------------------------------- |
-| `config-minimal.yaml`             | Smoke tests -- firewall only on loopback                        |
-| `config-full.yaml`                | Full feature integration -- all domains enabled                 |
-| `config-invalid.yaml`             | Negative test -- malformed YAML                                 |
-| `config-auth-jwt.yaml`            | JWT/OIDC authentication tests                                   |
-| `config-tls.yaml`                 | TLS termination (port 18443)                                    |
-| `config-docker-test.yaml`         | Docker integration tests (loopback, minimal features)           |
-| `config-ebpf-benchmark.yaml`      | eBPF benchmark configuration                                    |
-| `config-ebpf-firewall.yaml`       | Firewall scenario tests (block mode, CIDR rules)                |
-| `config-ebpf-ids.yaml`            | IDS scenario tests (alert mode, threshold detection)            |
-| `config-ebpf-ips.yaml`            | IPS scenario tests (auto-blacklist, whitelist bypass)           |
-| `config-ebpf-ratelimit.yaml`      | Rate limit tests (token bucket, per-rule rates)                 |
-| `config-ebpf-threatintel.yaml`    | Threat intel scenario tests (IOC blocking, feeds)               |
-| `config-ebpf-conntrack.yaml`      | Connection tracking tests (state tracking, flush)               |
-| `config-ebpf-dns.yaml`            | DNS intelligence tests (cache, blocklist, reputation)           |
-| `config-ebpf-loadbalancer.yaml`   | Load balancer tests (XDP service CRUD, backend selection)       |
-| `config-ebpf-nat.yaml`            | NAT tests (SNAT/DNAT rules, conntrack co-dependency)            |
-| `config-ebpf-ddos.yaml`           | DDoS/scrub tests (flood detection, policy enforcement)          |
-| `config-perf-alert.yaml`          | Performance -- all domains, alert mode (observe only)           |
-| `config-perf-block.yaml`          | Performance -- all domains, block mode (ports 9999/7777 denied) |
-| `config-perf-firewall-only.yaml`  | Perf isolation -- firewall domain only                          |
-| `config-perf-ratelimit-only.yaml` | Perf isolation -- ratelimit domain only                         |
-| `docker-compose-test.yml`         | Docker integration test compose (loopback, BTF mounts)          |
+| Config                            | Use case                                                         |
+| --------------------------------- | ---------------------------------------------------------------- |
+| `config-minimal.yaml`             | Smoke tests -- firewall only on loopback                         |
+| `config-full.yaml`                | Full feature integration -- all domains enabled                  |
+| `config-invalid.yaml`             | Negative test -- malformed YAML (duplicate port)                 |
+| `config-auth-jwt.yaml`            | JWT/OIDC authentication tests                                    |
+| `config-tls.yaml`                 | TLS termination (port 8443)                                      |
+| `config-docker-test.yaml`         | Docker smoke tests (loopback, minimal features)                  |
+| `config-docker-perf.yaml`         | Docker overhead/stress tests (host networking)                   |
+| `config-ebpf-firewall.yaml`       | Firewall scenario tests (block mode, CIDR rules)                 |
+| `config-ebpf-ids.yaml`            | IDS scenario tests (alert mode, threshold detection)             |
+| `config-ebpf-ips.yaml`            | IPS scenario tests (auto-blacklist, whitelist bypass)            |
+| `config-ebpf-ratelimit.yaml`      | Rate limit tests (token bucket, per-rule rates)                  |
+| `config-ebpf-threatintel.yaml`    | Threat intel scenario tests (IOC blocking, feeds)                |
+| `config-ebpf-conntrack.yaml`      | Connection tracking tests (state tracking, flush)                |
+| `config-ebpf-dns.yaml`            | DNS intelligence tests (cache, blocklist, reputation)            |
+| `config-ebpf-loadbalancer.yaml`   | Load balancer tests (XDP service CRUD, backend selection)        |
+| `config-ebpf-nat.yaml`            | NAT tests (SNAT/DNAT rules, conntrack co-dependency)             |
+| `config-ebpf-ddos.yaml`           | DDoS/scrub tests (flood detection, policy enforcement)           |
+| `config-ebpf-scrub.yaml`          | Packet scrub tests (fragmentation, metrics)                      |
+| `config-ebpf-alert-e2e.yaml`      | Alert end-to-end pipeline tests                                  |
+| `config-ebpf-hot-reload.yaml`     | Hot-reload tests (SIGHUP with rule changes)                      |
+| `config-ebpf-dlp.yaml`            | DLP scenario tests (pattern matching, mode)                      |
+| `config-ebpf-benchmark.yaml`      | eBPF map operation benchmark config                              |
+| `config-perf-alert.yaml`          | Performance -- all domains, alert mode (observe only)            |
+| `config-perf-block.yaml`          | Performance -- all domains, block mode (ports 9999/7777 denied)  |
+| `config-perf-firewall-only.yaml`  | Perf isolation -- firewall domain only                           |
+| `config-perf-ratelimit-only.yaml` | Perf isolation -- ratelimit domain only                          |
+| `docker-compose-test.yml`         | Docker smoke test compose (loopback, BTF mounts)                 |
+| `docker-compose-perf.yml`         | Docker overhead test compose (host networking, privileged)       |
 
 ## 2-VM Topology (Recommended)
 
@@ -243,11 +268,20 @@ Developer Machine (host)
 # First time: boot both VMs and run all suites
 make test-2vm
 
-# Run only eBPF scenario suites (11-14, 18-23)
+# Run only eBPF scenario suites (11-14, 18-24)
 make test-2vm-ebpf
 
 # Run a single suite
 make test-2vm-suite SUITE=11
+
+# Build Docker image on host and push to agent VM
+make docker-push-agent
+
+# Build without cache and push
+make docker-push-agent-nocache
+
+# Push existing image only (skip build)
+make docker-push-agent-only
 
 # Binary vs Docker performance comparison
 make test-2vm-perf-comparison
@@ -267,6 +301,23 @@ make vagrant-ssh-attacker
 3. The **attacker VM** generates an SSH key and copies it to the agent VM via `sshpass`
 4. Tests run on the attacker VM with `EBPF_2VM_MODE=true`, which causes `ebpf_helpers.bash` to source `vm_helpers.bash`
 5. `vm_helpers.bash` overrides `start_ebpf_agent` (SSH to agent VM), `create_test_netns` (no-op), and packet helpers (send directly over the network instead of through a netns)
+
+### Docker Image Push
+
+The `push-docker-image.sh` script builds the Docker image on the host machine and streams it to the agent VM via SSH, avoiding slow in-VM builds:
+
+```bash
+# Build + push (~8 min build, ~5s transfer)
+bash scripts/push-docker-image.sh
+
+# Build without Docker cache
+bash scripts/push-docker-image.sh --no-cache
+
+# Push existing image (skip build)
+bash scripts/push-docker-image.sh --skip-build
+```
+
+Uses `docker save | gzip | ssh 'gunzip | docker load'` for efficient transfer.
 
 ### Performance Comparison
 
@@ -292,7 +343,7 @@ make vagrant-destroy       # Delete VM
 - NAT (eth0) -- default Vagrant connectivity
 - Host-only (eth1, 192.168.56.10) -- host-to-VM performance testing
 
-**Port forwards:** 18080 (HTTP), 50151 (gRPC), 19090 (metrics), 18443 (TLS)
+**Port forwards:** 8080 (HTTP), 50051 (gRPC), 9090 (metrics), 8443 (TLS)
 
 ## Makefile Targets
 
@@ -305,26 +356,34 @@ make vagrant-destroy       # Delete VM
 | `test-vm`                 | Run all suites in Vagrant VM | Vagrant              |
 | `test-suite SUITE=<name>` | Run a single suite           | agent binary         |
 | `test-k8s`                | Kubernetes suite only        | Minikube             |
-| `test-ebpf-scenarios`     | Suites 11-14, 18-23          | root, kernel >= 5.17 |
+| `test-ebpf-scenarios`     | Suites 11-14, 18-24          | root, kernel >= 5.17 |
 | `test-performance`        | Suite 15                     | root, kernel >= 5.17 |
 | `test-ebpf-all`           | Suites 11-15                 | root, kernel >= 5.17 |
 | `test-ebpf-vm`            | eBPF suites in Vagrant VM    | Vagrant              |
 
 ### 2-VM Topology
 
-| Target                          | Description                             | Requirements |
-| ------------------------------- | --------------------------------------- | ------------ |
-| `test-2vm`                      | Run all suites via 2-VM topology        | Vagrant      |
-| `test-2vm-suite SUITE=<num>`    | Run single suite in 2-VM mode           | Vagrant      |
-| `test-2vm-ebpf`                 | eBPF scenario suites only               | Vagrant      |
-| `test-2vm-perf`                 | Performance suites only                 | Vagrant      |
-| `test-2vm-perf-comparison`      | Binary vs Docker perf comparison        | Vagrant      |
-| `test-2vm-perf-comparison-quick`| Quick binary vs Docker comparison       | Vagrant      |
-| `vagrant-2vm-up`                | Start both VMs                          | Vagrant      |
-| `vagrant-2vm-halt`              | Stop both VMs                           | Vagrant      |
-| `vagrant-2vm-destroy`           | Destroy both VMs                        | Vagrant      |
-| `vagrant-ssh-agent`             | SSH into agent VM                       | Vagrant      |
-| `vagrant-ssh-attacker`          | SSH into attacker VM                    | Vagrant      |
+| Target                           | Description                             | Requirements |
+| -------------------------------- | --------------------------------------- | ------------ |
+| `test-2vm`                       | Run all suites via 2-VM topology        | Vagrant      |
+| `test-2vm-suite SUITE=<num>`     | Run single suite in 2-VM mode           | Vagrant      |
+| `test-2vm-ebpf`                  | eBPF scenario suites only               | Vagrant      |
+| `test-2vm-perf`                  | Performance suites only                 | Vagrant      |
+| `test-2vm-perf-comparison`       | Binary vs Docker perf comparison        | Vagrant      |
+| `test-2vm-perf-comparison-quick` | Quick binary vs Docker comparison       | Vagrant      |
+| `vagrant-2vm-up`                 | Start both VMs                          | Vagrant      |
+| `vagrant-2vm-halt`               | Stop both VMs                           | Vagrant      |
+| `vagrant-2vm-destroy`            | Destroy both VMs                        | Vagrant      |
+| `vagrant-ssh-agent`              | SSH into agent VM                       | Vagrant      |
+| `vagrant-ssh-attacker`           | SSH into attacker VM                    | Vagrant      |
+
+### Docker Image
+
+| Target                    | Description                                          | Requirements |
+| ------------------------- | ---------------------------------------------------- | ------------ |
+| `docker-push-agent`       | Build Docker image on host and push to agent VM      | Docker       |
+| `docker-push-agent-nocache`| Build (no cache) and push Docker image to agent VM  | Docker       |
+| `docker-push-agent-only`  | Push existing Docker image to agent VM (skip build)  | Docker       |
 
 ### Performance Tests
 
@@ -340,17 +399,17 @@ make vagrant-destroy       # Delete VM
 
 ### Utilities
 
-| Target                 | Description                            |
-| ---------------------- | -------------------------------------- |
-| `prepare-docker-image` | Save Docker image tar for VM injection |
-| `clean`                | Remove temp files, stop running agents |
-| `nuke`                 | Destroy VM + clean all artifacts       |
+| Target  | Description                            |
+| ------- | -------------------------------------- |
+| `clean` | Remove temp files, stop running agents |
+| `nuke`  | Destroy VM + clean all artifacts       |
 
 ## Design Patterns
 
 - **Template substitution** -- Fixture configs use `__PLACEHOLDER__` tokens replaced by `prepare_ebpf_config()` at runtime, enabling the same config templates for veth, Docker, and VM topologies.
-- **Skip guards** -- `require_root()`, `require_kernel()`, `require_tool()` functions skip tests gracefully on unsupported environments instead of failing.
+- **Skip guards** -- `require_root()`, `require_kernel()`, `require_tool()` functions skip tests gracefully on unsupported environments instead of failing. In 2-VM mode, `require_root` is bypassed since the agent runs remotely via SSH.
 - **Triple launch strategy** -- eBPF tests try: (1) 2-VM mode via SSH when `EBPF_2VM_MODE=true`, (2) local binary, (3) `docker run --privileged` fallback.
 - **Network isolation** -- Single-VM mode uses a veth pair in a network namespace (`10.200.0.0/24`). 2-VM mode uses the VirtualBox private network (`192.168.56.0/24`) for real cross-host testing.
 - **JSON reports** -- Performance tests produce structured JSON reports (`/tmp/ebpfsentinel-*.json`) with metadata, per-phase measurements, threshold results, and a pass/fail verdict.
 - **Exponential backoff** -- Agent readiness checks use `retry()` with configurable backoff (0.2s to 10s) to handle variable startup times.
+- **Agent health gating** -- Benchmark tests use `_require_agent_alive()` (curl-based health check) to skip gracefully if the agent crashes mid-suite, avoiding cascading failures.
