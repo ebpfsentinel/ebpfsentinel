@@ -136,6 +136,57 @@ Require **root** and **kernel >= 5.17** (or 2-VM mode). Measure agent overhead u
 
 ## Performance Test Scripts
 
+### Resource Matrix Benchmark (`benchmark-resource-matrix.sh`)
+
+Measures **CPU%** and **RSS** for each eBPF feature under different traffic volumes. Designed to be run on two VM sizes to compare how CPU vs RAM impacts performance.
+
+```bash
+# Run on current VM (auto-detects profile: "4vCPU-4GB", "8vCPU-8GB", etc.)
+./scripts/benchmark-resource-matrix.sh
+
+# Run in 2VM mode
+./scripts/benchmark-resource-matrix.sh --2vm
+
+# Custom duration and profile name
+./scripts/benchmark-resource-matrix.sh --2vm --duration 30 --profile "4vCPU-4GB"
+
+# Merge two profiles into a comparison table
+./scripts/benchmark-resource-matrix.sh --merge report-4vcpu.json report-8vcpu.json
+```
+
+**Features tested individually:** firewall, firewall+ids, firewall+ratelimit, firewall+threatintel, firewall+conntrack, all-features.
+
+**Traffic volumes:** idle (0), 100 Mbps (UDP), 1 Gbps (UDP).
+
+**Single profile output:**
+
+| Feature | Traffic | CPU % | RSS (MB) |
+|---------|---------|------:|---------:|
+| no-agent | idle | 0.0% | 0.0 |
+| firewall | idle | 0.3% | 24.5 |
+| firewall | 100mbps | 1.2% | 25.1 |
+| firewall | 1gbps | 4.8% | 26.0 |
+| all-features | 1gbps | 12.3% | 38.2 |
+
+**Merged comparison output (two VM profiles):**
+
+| Feature | Traffic | CPU % (4vCPU-4GB) | RSS MB (4vCPU-4GB) | CPU % (8vCPU-8GB) | RSS MB (8vCPU-8GB) |
+|---------|---------|-------------------|--------------------|-------------------|--------------------|
+| firewall | 1gbps | 4.8% | 26.0 | 2.1% | 25.8 |
+| all-features | 1gbps | 12.3% | 38.2 | 6.5% | 37.9 |
+
+*(Values above are examples — run the benchmark to get real numbers.)*
+
+**Makefile targets:**
+
+```bash
+make bench-resource-matrix          # Local mode
+make bench-resource-matrix-2vm      # 2VM mode
+make bench-resource-merge F1=report1.json F2=report2.json  # Merge
+```
+
+### Performance Test Scripts
+
 Three complementary performance test scripts measure agent overhead at different levels of realism.
 
 ### Intra-VM Tests (`perf-test-docker.sh`)
@@ -387,15 +438,23 @@ make vagrant-destroy       # Delete VM
 
 ### Performance Tests
 
-| Target                       | Description                       | Duration |
-| ---------------------------- | --------------------------------- | -------- |
-| `test-perf-docker`           | Full Docker perf test             | ~15 min  |
-| `test-perf-docker-quick`     | Quick Docker perf                 | ~3 min   |
-| `test-perf-docker-soak`      | Docker soak test (leak detection) | ~20 min  |
-| `test-perf-vagrant`          | Binary vs Docker comparison in VM | ~30 min  |
-| `test-perf-vagrant-quick`    | Quick binary vs Docker            | ~10 min  |
-| `test-perf-host-to-vm`       | Host-to-VM over VirtualBox        | ~30 min  |
-| `test-perf-host-to-vm-quick` | Quick host-to-VM                  | ~10 min  |
+| Target                       | Description                              | Duration |
+| ---------------------------- | ---------------------------------------- | -------- |
+| `test-perf-docker`           | Full Docker perf test                    | ~15 min  |
+| `test-perf-docker-quick`     | Quick Docker perf                        | ~3 min   |
+| `test-perf-docker-soak`      | Docker soak test (leak detection)        | ~20 min  |
+| `test-perf-vagrant`          | Binary vs Docker comparison in VM        | ~30 min  |
+| `test-perf-vagrant-quick`    | Quick binary vs Docker                   | ~10 min  |
+| `test-perf-host-to-vm`       | Host-to-VM over VirtualBox               | ~30 min  |
+| `test-perf-host-to-vm-quick` | Quick host-to-VM                         | ~10 min  |
+
+### Resource Matrix Benchmark
+
+| Target                        | Description                                          | Duration |
+| ----------------------------- | ---------------------------------------------------- | -------- |
+| `bench-resource-matrix`       | CPU/RSS per feature x volume (local)                 | ~10 min  |
+| `bench-resource-matrix-2vm`   | CPU/RSS per feature x volume (2VM)                   | ~10 min  |
+| `bench-resource-merge F1= F2=`| Merge two profiles into comparison table             | instant  |
 
 ### Utilities
 

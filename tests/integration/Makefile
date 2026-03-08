@@ -203,6 +203,18 @@ test-2vm-perf-comparison-quick: vagrant-2vm-up ## Quick binary vs Docker compari
 
 # ── Utilities ────────────────────────────────────────────────────
 
+.PHONY: sync-agent
+sync-agent: ## Sync local binary + Docker image to agent VM (no build)
+	bash $(SCRIPT_DIR)/sync-to-agent-vm.sh
+
+.PHONY: sync-agent-binary
+sync-agent-binary: ## Sync local binary only to agent VM
+	bash $(SCRIPT_DIR)/sync-to-agent-vm.sh --binary
+
+.PHONY: sync-agent-docker
+sync-agent-docker: ## Sync local Docker image only to agent VM
+	bash $(SCRIPT_DIR)/sync-to-agent-vm.sh --docker
+
 .PHONY: docker-push-agent
 docker-push-agent: ## Build Docker image on host and push to agent VM
 	bash $(SCRIPT_DIR)/push-docker-image.sh
@@ -214,6 +226,20 @@ docker-push-agent-nocache: ## Build (no cache) and push Docker image to agent VM
 .PHONY: docker-push-agent-only
 docker-push-agent-only: ## Push existing Docker image to agent VM (skip build)
 	bash $(SCRIPT_DIR)/push-docker-image.sh --skip-build
+
+# ── Resource Matrix Benchmark ──────────────────────────────────────
+
+.PHONY: bench-resource-matrix
+bench-resource-matrix: ## Run resource matrix benchmark (CPU/RSS per feature × volume)
+	bash $(SCRIPT_DIR)/benchmark-resource-matrix.sh
+
+.PHONY: bench-resource-matrix-2vm
+bench-resource-matrix-2vm: ## Run resource matrix benchmark in 2VM mode
+	bash $(SCRIPT_DIR)/benchmark-resource-matrix.sh --2vm
+
+.PHONY: bench-resource-merge
+bench-resource-merge: ## Merge two resource matrix reports: make bench-resource-merge F1=report1.json F2=report2.json
+	bash $(SCRIPT_DIR)/benchmark-resource-matrix.sh --merge $(F1) $(F2)
 
 # ── Cleanup ────────────────────────────────────────────────────────
 

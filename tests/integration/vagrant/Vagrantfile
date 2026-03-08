@@ -16,10 +16,20 @@
 #   vagrant halt              # Stop both VMs
 #   vagrant destroy -f        # Delete both VMs
 #
+# Environment variables:
+#   AGENT_VM_CPUS     Agent VM vCPUs (default: 2)
+#   AGENT_VM_MEMORY   Agent VM RAM in MB (default: 2048)
+#
 # Provider: VirtualBox (default) or VMware Workstation (vmware_desktop)
 # Base box: bento/ubuntu-24.04 (provisioned inline)
+#
+# Network: VMs communicate over a VirtualBox host-only network (192.168.56.0/24)
+# with MTU 9000, TCP BBR, and tuned buffers for maximum throughput.
 
 VAGRANTFILE_API_VERSION = "2"
+
+
+# Internal network name shared by both VMs (faster than host-only)
 
 Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 
@@ -34,10 +44,10 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     agent.vm.network "private_network", ip: "192.168.56.10"
 
     # Port forwards for direct host access to agent endpoints
-    agent.vm.network "forwarded_port", guest: 18080, host: 18080, auto_correct: true
-    agent.vm.network "forwarded_port", guest: 50151, host: 50151, auto_correct: true
-    agent.vm.network "forwarded_port", guest: 19090, host: 19090, auto_correct: true
-    agent.vm.network "forwarded_port", guest: 18443, host: 18443, auto_correct: true
+    agent.vm.network "forwarded_port", guest: 8080, host: 8080, auto_correct: true
+    agent.vm.network "forwarded_port", guest: 50051, host: 50051, auto_correct: true
+    agent.vm.network "forwarded_port", guest: 9090, host: 9090, auto_correct: true
+    agent.vm.network "forwarded_port", guest: 8443, host: 8443, auto_correct: true
 
     # Sync project directory into VM
     agent.vm.synced_folder "../../../", "/home/vagrant/ebpfsentinel",
@@ -46,8 +56,8 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 
     # VirtualBox provider (default)
     agent.vm.provider "virtualbox" do |vb|
-      vb.memory = 4096
-      vb.cpus = 4
+      vb.memory = ENV.fetch('AGENT_VM_MEMORY', '2048').to_i
+      vb.cpus = ENV.fetch('AGENT_VM_CPUS', '2').to_i
       vb.name = "eBPFsentinel Agent VM"
       vb.gui = false
       # Nested virtualization for Docker / eBPF
@@ -56,8 +66,8 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 
     # VMware Workstation provider (alternative)
     agent.vm.provider "vmware_desktop" do |v|
-      v.vmx["memsize"] = "4096"
-      v.vmx["numvcpus"] = "4"
+      v.vmx["memsize"] = ENV.fetch('AGENT_VM_MEMORY', '2048')
+      v.vmx["numvcpus"] = ENV.fetch('AGENT_VM_CPUS', '2')
       v.vmx["displayname"] = "eBPFsentinel Agent VM"
       v.gui = false
       v.linked_clone = false
@@ -95,6 +105,48 @@ SYSCTL
 *  soft  memlock  unlimited
 *  hard  memlock  unlimited
 LIMITS
+    SHELL
+
+    # ----------------------------------------------------------
+    # Provisioner: network-tuning (maximize inter-VM throughput)
+    # ----------------------------------------------------------
+    agent.vm.provision "shell", name: "network-tuning", inline: <<-SHELL
+      set -euxo pipefail
+
+      cat > /etc/sysctl.d/99-network-perf.conf <<SYSCTL
+# TCP buffer sizes (min, default, max) — 128 MB max
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_rmem=4096 87380 134217728
+net.ipv4.tcp_wmem=4096 65536 134217728
+
+# Increase network device backlog
+net.core.netdev_max_backlog=5000
+
+# Enable TCP BBR congestion control
+net.ipv4.tcp_congestion_control=bbr
+net.core.default_qdisc=fq
+SYSCTL
+      sysctl --system
+
+      # Set MTU 9000 (jumbo frames) on the internal network interface
+      # eth1 is the private_network interface
+      if ip link show eth1 &>/dev/null; then
+        ip link set eth1 mtu 9000
+        # Persist via netplan
+        NETPLAN_FILE=$(ls /etc/netplan/*.yaml 2>/dev/null | head -1)
+        if [ -n "$NETPLAN_FILE" ] && ! grep -q 'mtu: 9000' "$NETPLAN_FILE" 2>/dev/null; then
+          # Add MTU to eth1 config via a separate netplan file
+          cat > /etc/netplan/99-mtu.yaml <<NETPLAN
+network:
+  version: 2
+  ethernets:
+    eth1:
+      mtu: 9000
+NETPLAN
+          netplan apply 2>/dev/null || true
+        fi
+      fi
     SHELL
 
     # ----------------------------------------------------------
@@ -147,7 +199,7 @@ LIMITS
       sed -i 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
 
       # Restart sshd to apply changes
-      systemctl restart sshd
+      systemctl restart ssh || systemctl restart sshd
     SHELL
 
     # ----------------------------------------------------------
@@ -214,6 +266,37 @@ LIMITS
         [ "$ARCH" = "amd64" ] && GRPCURL_ARCH="x86_64" || GRPCURL_ARCH="$ARCH"
         curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_${GRPCURL_ARCH}.tar.gz" | \
           tar -xz -C /usr/local/bin grpcurl
+      fi
+    SHELL
+
+    # ----------------------------------------------------------
+    # Provisioner: network-tuning (match agent VM settings)
+    # ----------------------------------------------------------
+    attacker.vm.provision "shell", name: "network-tuning", inline: <<-SHELL
+      set -euxo pipefail
+
+      cat > /etc/sysctl.d/99-network-perf.conf <<SYSCTL
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_rmem=4096 87380 134217728
+net.ipv4.tcp_wmem=4096 65536 134217728
+net.core.netdev_max_backlog=5000
+net.ipv4.tcp_congestion_control=bbr
+net.core.default_qdisc=fq
+SYSCTL
+      sysctl --system
+
+      # Jumbo frames on internal network
+      if ip link show eth1 &>/dev/null; then
+        ip link set eth1 mtu 9000
+        cat > /etc/netplan/99-mtu.yaml <<NETPLAN
+network:
+  version: 2
+  ethernets:
+    eth1:
+      mtu: 9000
+NETPLAN
+        netplan apply 2>/dev/null || true
       fi
     SHELL
 
