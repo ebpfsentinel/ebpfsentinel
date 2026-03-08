@@ -17,10 +17,10 @@ CERT_DIR="${CERT_DIR:-/tmp/ebpfsentinel-test-certs}"
 JWT_DIR="${JWT_DIR:-/tmp/ebpfsentinel-test-jwt}"
 
 # ── Network ────────────────────────────────────────────────────────
-AGENT_HTTP_PORT="${AGENT_HTTP_PORT:-18080}"
-AGENT_GRPC_PORT="${AGENT_GRPC_PORT:-50151}"
-AGENT_METRICS_PORT="${AGENT_METRICS_PORT:-19090}"
-AGENT_TLS_PORT="${AGENT_TLS_PORT:-18443}"
+AGENT_HTTP_PORT="${AGENT_HTTP_PORT:-8080}"
+AGENT_GRPC_PORT="${AGENT_GRPC_PORT:-50051}"
+AGENT_METRICS_PORT="${AGENT_METRICS_PORT:-9090}"
+AGENT_TLS_PORT="${AGENT_TLS_PORT:-8443}"
 AGENT_HOST="${AGENT_HOST:-127.0.0.1}"
 
 # ── URLs ───────────────────────────────────────────────────────────

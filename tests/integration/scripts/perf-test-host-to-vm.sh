@@ -90,7 +90,7 @@ fi
 VM_IP="192.168.56.10"
 HOST_IP="192.168.56.1"
 WHITELIST_SUBNET="192.168.56.0/24"
-AGENT_HTTP_PORT=18080
+AGENT_HTTP_PORT=8080
 
 # ── Pass/Fail thresholds ──────────────────────────────────────────
 # VirtualBox host-only network: ~1-5 Gbps (much lower than veth ~200 Gbps)

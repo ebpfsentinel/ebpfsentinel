@@ -4,6 +4,6 @@
 agent:
   interfaces: []
   log_level: info
-  http_port: 18080
-  grpc_port: 18080
-  metrics_port: 19090
+  http_port: 8080
+  grpc_port: 8080
+  metrics_port: 9090

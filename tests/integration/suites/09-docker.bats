@@ -126,12 +126,12 @@ setup_file() {
 
     # Kill anything on our ports
     if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
-        _agent_ssh_sudo fuser -k 18080/tcp 2>/dev/null || true
-        _agent_ssh_sudo fuser -k 50151/tcp 2>/dev/null || true
-        _agent_ssh_sudo fuser -k 19090/tcp 2>/dev/null || true
+        _agent_ssh_sudo fuser -k 8080/tcp 2>/dev/null || true
+        _agent_ssh_sudo fuser -k 50051/tcp 2>/dev/null || true
+        _agent_ssh_sudo fuser -k 9090/tcp 2>/dev/null || true
     else
-        fuser -k 18080/tcp 2>/dev/null || true
-        fuser -k 50151/tcp 2>/dev/null || true
+        fuser -k 8080/tcp 2>/dev/null || true
+        fuser -k 50051/tcp 2>/dev/null || true
     fi
     sleep 1
 }
@@ -182,7 +182,7 @@ teardown_file() {
 @test "healthz accessible inside Docker container" {
     _docker_check
 
-    run _docker_cmd exec "$CONTAINER_NAME" /usr/local/bin/ebpfsentinel-agent health --port 18080
+    run _docker_cmd exec "$CONTAINER_NAME" /usr/local/bin/ebpfsentinel-agent health
     [ "$status" -eq 0 ]
 }
 
@@ -287,7 +287,7 @@ teardown_file() {
 
     # Generate some traffic to warm up
     send_icmp_from_ns "$EBPF_HOST_IP" 10 5 >/dev/null 2>&1
-    send_tcp_from_ns "$EBPF_HOST_IP" 18080 "WARMUP" 2 2>/dev/null || true
+    send_tcp_from_ns "$EBPF_HOST_IP" 8080 "WARMUP" 2 2>/dev/null || true
     sleep 2
 
     # Measure stats
@@ -324,7 +324,7 @@ teardown_file() {
     [ "$health" = "healthy" ] || skip "Docker agent not healthy"
 
     local api_host="${EBPF_HOST_IP:-127.0.0.1}"
-    local api_port=18080
+    local api_port=8080
 
     # Measure API latency for 50 sequential requests
     local total_ms=0 count=0 max_ms=0
@@ -373,7 +373,7 @@ teardown_file() {
 
     for i in $(seq 1 5); do
         send_icmp_from_ns "$EBPF_HOST_IP" 10 5 >/dev/null 2>&1
-        send_tcp_from_ns "$EBPF_HOST_IP" 18080 "STRESS_${i}" 2 2>/dev/null || true
+        send_tcp_from_ns "$EBPF_HOST_IP" 8080 "STRESS_${i}" 2 2>/dev/null || true
         sleep 1
     done
 

@@ -22,7 +22,7 @@ services:
       - ./config-docker-perf.yaml:/etc/ebpfsentinel/config.yaml:ro
 
     healthcheck:
-      test: ["CMD", "ebpfsentinel-agent", "health", "--port", "18080"]
+      test: ["CMD", "ebpfsentinel-agent", "health"]
       interval: 5s
       timeout: 5s
       retries: 6

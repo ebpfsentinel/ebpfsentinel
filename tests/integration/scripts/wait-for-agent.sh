@@ -7,7 +7,7 @@ set -euo pipefail
 
 PROTO="http"
 HOST="127.0.0.1"
-PORT="18080"
+PORT="8080"
 ENDPOINT="/healthz"
 MAX_ATTEMPTS="20"
 CA_CERT=""

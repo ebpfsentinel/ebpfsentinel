@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # wait-for-ready.sh — Poll agent readyz (eBPF loaded check)
 #
-# Usage: wait-for-ready.sh [--port 18080] [--host 127.0.0.1] [--max-attempts 30]
+# Usage: wait-for-ready.sh [--port 8080] [--host 127.0.0.1] [--max-attempts 30]
 set -euo pipefail
 
 HOST="127.0.0.1"
-PORT="18080"
+PORT="8080"
 MAX_ATTEMPTS="30"
 
 while [[ $# -gt 0 ]]; do

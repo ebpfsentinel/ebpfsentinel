@@ -153,18 +153,18 @@ teardown_file() {
 
 # ── Default policy (pass) ───────────────────────────────────────
 
-@test "allowed TCP:18080 passes via default policy (healthz reachable)" {
+@test "allowed TCP:8080 passes via default policy (healthz reachable)" {
     require_root
 
     local status
     if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
         # In 2VM mode, curl from attacker directly
         status="$(curl -sf -o /dev/null -w '%{http_code}' \
-            --max-time 5 "http://${EBPF_HOST_IP}:18080/healthz" 2>/dev/null)" || true
+            --max-time 5 "http://${EBPF_HOST_IP}:8080/healthz" 2>/dev/null)" || true
     else
         status="$(ip netns exec "$EBPF_TEST_NS" \
             curl -sf -o /dev/null -w '%{http_code}' \
-            --max-time 5 "http://${EBPF_HOST_IP}:18080/healthz" 2>/dev/null)" || true
+            --max-time 5 "http://${EBPF_HOST_IP}:8080/healthz" 2>/dev/null)" || true
     fi
 
     [ "$status" = "200" ]

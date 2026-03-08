@@ -118,9 +118,9 @@ agent:
     - __INTERFACE__
   bind_address: "0.0.0.0"
   log_level: warn
-  http_port: 18080
-  grpc_port: 50151
-  metrics_port: 19090
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
 
 firewall:
   enabled: ${enable_firewall}
