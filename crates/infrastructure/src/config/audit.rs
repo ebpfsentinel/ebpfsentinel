@@ -60,12 +60,12 @@ mod tests {
 
     #[test]
     fn yaml_with_custom_values() {
-        let yaml = r#"
+        let yaml = r"
 enabled: false
 retention_days: 365
 buffer_size: 50000
 storage_path: /tmp/audit.redb
-"#;
+";
         let cfg: AuditConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(!cfg.enabled);
         assert_eq!(cfg.retention_days, 365);

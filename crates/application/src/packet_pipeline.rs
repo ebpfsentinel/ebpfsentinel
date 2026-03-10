@@ -1685,7 +1685,8 @@ mod tests {
             pid: 1000,
             tgid: 2000,
             timestamp_ns: 0,
-            data_len: data.len() as u32,
+            #[allow(clippy::cast_possible_truncation)]
+            data_len: data.len() as u32, // DLP_MAX_EXCERPT is small, no truncation possible
             direction: 0,
             _padding: [0; 3],
             data_excerpt: [0u8; DLP_MAX_EXCERPT],

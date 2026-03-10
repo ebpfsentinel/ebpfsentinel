@@ -377,14 +377,14 @@ sni: "*.evil.com"
     #[test]
     fn to_domain_grpc_rule() {
         let rule: L7RuleConfig = serde_yaml_ng::from_str(
-            r#"
+            r"
 id: grpc1
 priority: 2
 action: allow
 protocol: grpc
 service: myservice
 grpc_method: MyMethod
-"#,
+",
         )
         .unwrap();
         let domain = rule.to_domain_rule().unwrap();
@@ -403,13 +403,13 @@ grpc_method: MyMethod
     #[test]
     fn to_domain_smtp_rule() {
         let rule: L7RuleConfig = serde_yaml_ng::from_str(
-            r#"
+            r"
 id: smtp1
 priority: 3
 action: log
 protocol: smtp
 command: EHLO
-"#,
+",
         )
         .unwrap();
         let domain = rule.to_domain_rule().unwrap();
@@ -424,13 +424,13 @@ command: EHLO
     #[test]
     fn to_domain_ftp_rule() {
         let rule: L7RuleConfig = serde_yaml_ng::from_str(
-            r#"
+            r"
 id: ftp1
 priority: 4
 action: deny
 protocol: ftp
 command: RETR
-"#,
+",
         )
         .unwrap();
         let domain = rule.to_domain_rule().unwrap();
@@ -445,14 +445,14 @@ command: RETR
     #[test]
     fn to_domain_smb_rule() {
         let rule: L7RuleConfig = serde_yaml_ng::from_str(
-            r#"
+            r"
 id: smb1
 priority: 5
 action: deny
 protocol: smb
 smb_command: 5
 is_smb2: true
-"#,
+",
         )
         .unwrap();
         let domain = rule.to_domain_rule().unwrap();
@@ -468,12 +468,12 @@ is_smb2: true
     #[test]
     fn to_domain_invalid_protocol_error() {
         let rule: L7RuleConfig = serde_yaml_ng::from_str(
-            r#"
+            r"
 id: bad1
 priority: 1
 action: allow
 protocol: quic
-"#,
+",
         )
         .unwrap();
         assert!(rule.to_domain_rule().is_err());

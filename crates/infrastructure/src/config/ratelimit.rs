@@ -341,14 +341,14 @@ mod tests {
 
     fn valid_rule() -> RateLimitRuleConfig {
         serde_yaml_ng::from_str(
-            r#"
+            r"
 id: rl1
 rate: 500
 burst: 1000
 action: drop
 scope: source_ip
 algorithm: token_bucket
-"#,
+",
         )
         .unwrap()
     }

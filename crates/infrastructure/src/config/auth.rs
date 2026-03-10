@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn yaml_with_api_keys() {
-        let yaml = r#"
+        let yaml = r"
 enabled: true
 api_keys:
   - name: admin-key
@@ -99,7 +99,7 @@ api_keys:
     role: admin
   - name: readonly
     key: sk-xyz789
-"#;
+";
         let cfg: AuthConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.api_keys.len(), 2);
@@ -110,11 +110,11 @@ api_keys:
 
     #[test]
     fn default_api_key_role_is_viewer() {
-        let yaml = r#"
+        let yaml = r"
 api_keys:
   - name: test
     key: sk-test
-"#;
+";
         let cfg: AuthConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(cfg.api_keys[0].role, "viewer");
     }
@@ -139,12 +139,12 @@ oidc:
 
     #[test]
     fn yaml_with_jwt() {
-        let yaml = r#"
+        let yaml = r"
 jwt:
   public_key_path: /etc/sentinel/pub.pem
   issuer: sentinel
   audience: api
-"#;
+";
         let cfg: AuthConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(cfg.jwt.public_key_path, "/etc/sentinel/pub.pem");
         assert_eq!(cfg.jwt.issuer.as_deref(), Some("sentinel"));

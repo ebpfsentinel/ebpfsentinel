@@ -49,7 +49,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .get(domain)
-                .map(|r| r.compute_score())
+                .map(DomainReputation::compute_score)
         }
 
         fn update_reputation(&self, domain: &str, factor: ReputationFactor) {
@@ -130,8 +130,8 @@ mod tests {
         assert!(store.get_score("unknown.com").is_none());
 
         store.update_reputation("bad.com", ReputationFactor::HighEntropy { entropy: 4.5 });
-        let score = store.get_score("bad.com").unwrap();
-        assert!(score > 0.0);
+        let rep_score = store.get_score("bad.com").unwrap();
+        assert!(rep_score > 0.0);
     }
 
     #[test]

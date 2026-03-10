@@ -46,7 +46,7 @@ fn bench_alert_json_serialize(c: &mut Criterion) {
 
     for &count in &[1, 10, 100] {
         let alerts: Vec<Alert> = (0..count)
-            .map(|i| make_alert(&format!("alert-{i}"), i as u64 * 1000))
+            .map(|i: i32| make_alert(&format!("alert-{i}"), u64::from(i.cast_unsigned()) * 1000))
             .collect();
 
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
@@ -66,8 +66,12 @@ fn bench_alert_json_deserialize(c: &mut Criterion) {
 
     for &count in &[1, 10, 100] {
         let jsons: Vec<String> = (0..count)
-            .map(|i| {
-                serde_json::to_string(&make_alert(&format!("alert-{i}"), i as u64 * 1000)).unwrap()
+            .map(|i: i32| {
+                serde_json::to_string(&make_alert(
+                    &format!("alert-{i}"),
+                    u64::from(i.cast_unsigned()) * 1000,
+                ))
+                .unwrap()
             })
             .collect();
 

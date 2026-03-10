@@ -148,13 +148,13 @@ mod tests {
 
     #[test]
     fn valid_pattern_deserialization() {
-        let yaml = r#"
+        let yaml = r"
 id: pat-1
 name: Credit Card
 regex: '\d{4}-\d{4}-\d{4}-\d{4}'
 severity: high
 data_type: pci
-"#;
+";
         let pattern: DlpPatternConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(pattern.id, "pat-1");
         assert_eq!(pattern.name, "Credit Card");

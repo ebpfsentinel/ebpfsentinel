@@ -42,7 +42,12 @@ fn bench_process_event(c: &mut Criterion) {
                     let mut engine = DdosEngine::new();
                     engine.add_policy(make_policy("syn-1", 1000)).unwrap();
                     let events: Vec<DdosEvent> = (0..n)
-                        .map(|i| make_event(i as u32, (i as u64 + 1) * 1_000_000))
+                        .map(|i: i32| {
+                            make_event(
+                                i.cast_unsigned(),
+                                (u64::from(i.cast_unsigned()) + 1) * 1_000_000,
+                            )
+                        })
                         .collect();
                     (engine, events)
                 },

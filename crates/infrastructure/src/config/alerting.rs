@@ -231,7 +231,7 @@ routes:
 
     #[test]
     fn email_route_with_smtp_deserializes() {
-        let yaml = r#"
+        let yaml = r"
 smtp:
   host: smtp.example.com
   port: 465
@@ -242,7 +242,7 @@ routes:
     destination: email
     min_severity: critical
     email_to: ops@example.com
-"#;
+";
         let cfg: AlertingConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(cfg.smtp.is_some());
         let smtp = cfg.smtp.as_ref().unwrap();

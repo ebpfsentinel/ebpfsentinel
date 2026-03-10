@@ -358,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn json_feed_empty_array() {
-        let json = r#"[]"#;
+        let json = r"[]";
         let source = MockSource {
             response: json.as_bytes().to_vec(),
             fail: false,

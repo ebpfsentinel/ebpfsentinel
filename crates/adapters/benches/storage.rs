@@ -77,16 +77,21 @@ fn bench_alert_store(c: &mut Criterion) {
                         let dir = TempDir::new().unwrap();
                         let path = dir.path().join("alerts.redb");
                         let store = RedbAlertStore::open(&path).unwrap();
-                        for i in 0..existing {
+                        for i in 0_i32..existing {
                             store
-                                .store_alert(&make_alert(&format!("pre-{i}"), i as u64))
+                                .store_alert(&make_alert(
+                                    &format!("pre-{i}"),
+                                    u64::from(i.cast_unsigned()),
+                                ))
                                 .unwrap();
                         }
                         (store, dir, existing)
                     },
-                    |(store, _dir, existing)| {
-                        let _ =
-                            store.store_alert(black_box(&make_alert("new", existing as u64 + 1)));
+                    |(store, _dir, existing): (RedbAlertStore, TempDir, i32)| {
+                        let _ = store.store_alert(black_box(&make_alert(
+                            "new",
+                            u64::from(existing.cast_unsigned()) + 1,
+                        )));
                     },
                     criterion::BatchSize::SmallInput,
                 );
@@ -104,9 +109,9 @@ fn bench_alert_query(c: &mut Criterion) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("alerts.redb");
         let store = RedbAlertStore::open(&path).unwrap();
-        for i in 0..n {
+        for i in 0_i32..n {
             store
-                .store_alert(&make_alert(&format!("a-{i}"), i as u64))
+                .store_alert(&make_alert(&format!("a-{i}"), u64::from(i.cast_unsigned())))
                 .unwrap();
         }
         let query = AlertQuery {
@@ -135,14 +140,17 @@ fn bench_audit_store(c: &mut Criterion) {
                         let dir = TempDir::new().unwrap();
                         let path = dir.path().join("audit.redb");
                         let store = RedbAuditStore::open(&path, 50_000).unwrap();
-                        for i in 0..existing {
-                            store.store_entry(&make_audit_entry(i as u64)).unwrap();
+                        for i in 0_i32..existing {
+                            store
+                                .store_entry(&make_audit_entry(u64::from(i.cast_unsigned())))
+                                .unwrap();
                         }
                         (store, dir, existing)
                     },
-                    |(store, _dir, existing)| {
-                        let _ =
-                            store.store_entry(black_box(&make_audit_entry(existing as u64 + 1)));
+                    |(store, _dir, existing): (RedbAuditStore, TempDir, i32)| {
+                        let _ = store.store_entry(black_box(&make_audit_entry(
+                            u64::from(existing.cast_unsigned()) + 1,
+                        )));
                     },
                     criterion::BatchSize::SmallInput,
                 );
