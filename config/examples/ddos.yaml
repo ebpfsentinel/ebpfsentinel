@@ -43,8 +43,13 @@ ddos:
   # ── SYN Flood Protection (eBPF-side) ──────────────────────────
   #
   # When the SYN rate exceeds the threshold, SYN cookie validation
-  # is activated in the XDP pipeline. Legitimate connections complete
-  # the handshake; spoofed SYNs are silently dropped.
+  # is activated in the XDP pipeline. The XDP program forges a
+  # SYN+ACK with an HMAC-based cookie (using a 32-byte secret set
+  # at agent startup) and replies via XDP_TX — no packet reaches
+  # the kernel TCP stack. Returning ACKs are validated against the
+  # cookie; valid ones are passed through, invalid ones are dropped.
+  # Legitimate connections complete the handshake; spoofed SYNs
+  # never consume server resources.
 
   syn_protection:
     enabled: true

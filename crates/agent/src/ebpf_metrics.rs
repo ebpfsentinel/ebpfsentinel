@@ -128,6 +128,9 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (2, "icmp_pass"),
             (3, "icmp_drop"),
             (14, "total_seen"),
+            (15, "syncookie_sent"),
+            (16, "syncookie_valid"),
+            (17, "syncookie_invalid"),
         ],
         "LB_METRICS" => &[
             (0, "forwarded"),

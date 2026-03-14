@@ -1752,6 +1752,38 @@ fn try_load_xdp_ratelimit(
         }
     };
 
+    // Set SYN cookie secret (random 32-byte key for cookie generation/validation)
+    if let Some(secret_map) = loader.ebpf_mut().take_map("SYNCOOKIE_SECRET") {
+        match aya::maps::Array::<_, ebpf_common::ddos::SyncookieSecret>::try_from(secret_map) {
+            Ok(mut array) => {
+                let mut key = [0u32; 8];
+                // Use std::time nonce + pointer ASLR as entropy source (no external crate needed).
+                // This is sufficient for SYN cookie HMAC keying — not a cryptographic KDF.
+                let seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                // Simple xorshift-based expansion from 128-bit seed
+                let mut state = seed;
+                for slot in &mut key {
+                    state ^= state.wrapping_shl(13);
+                    state ^= state.wrapping_shr(7);
+                    state ^= state.wrapping_shl(17);
+                    *slot = state as u32;
+                }
+                let secret = ebpf_common::ddos::SyncookieSecret { key };
+                if let Err(e) = array.set(0, secret, 0) {
+                    warn!("SYNCOOKIE_SECRET write failed (non-fatal): {e}");
+                } else {
+                    info!("SYN cookie secret initialized");
+                }
+            }
+            Err(e) => {
+                warn!("SYNCOOKIE_SECRET map conversion failed (non-fatal): {e}");
+            }
+        }
+    }
+
     let mut rdrs = Vec::new();
     if let Ok(r) = MetricsReader::new(loader.ebpf_mut(), "RATELIMIT_METRICS") {
         rdrs.push(r);

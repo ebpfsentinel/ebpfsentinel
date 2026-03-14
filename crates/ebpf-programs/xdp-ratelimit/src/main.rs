@@ -3,7 +3,7 @@
 
 use aya_ebpf::{
     bindings::xdp_action,
-    helpers::{bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
+    helpers::{bpf_get_smp_processor_id, bpf_ktime_get_boot_ns, bpf_xdp_adjust_tail},
     macros::{map, xdp},
     maps::{
         Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, RingBuf,
@@ -18,21 +18,23 @@ use ebpf_helpers::net::{
     PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4,
     u32_from_be_bytes,
 };
-use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
 use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
     ddos::{
         AmpProtectConfig, AmpProtectKey, DdosConnTrackConfig, DdosConnTrackKey, DdosConnTrackValue,
-        DdosSynConfig, FloodCounterKey, IcmpConfig, SynRateState, CONNTRACK_SUB_ACK_FLOOD,
-        CONNTRACK_SUB_FIN_FLOOD, CONNTRACK_SUB_HALF_OPEN, CONNTRACK_SUB_RST_FLOOD,
-        CONN_ESTABLISHED, CONN_NEW, DDOS_ACTION_DROP, DDOS_ACTION_SYNCOOKIE,
-        DDOS_METRIC_ACK_FLOOD_DROPS, DDOS_METRIC_AMP_DROPPED, DDOS_METRIC_AMP_PASSED,
-        DDOS_METRIC_CONN_TRACKED, DDOS_METRIC_COUNT, DDOS_METRIC_EVENTS_DROPPED,
-        DDOS_METRIC_FIN_FLOOD_DROPS, DDOS_METRIC_HALF_OPEN_DROPS, DDOS_METRIC_ICMP_DROPPED,
-        DDOS_METRIC_ICMP_PASSED, DDOS_METRIC_OVERSIZED_ICMP, DDOS_METRIC_RST_FLOOD_DROPS,
-        DDOS_METRIC_SYN_FLOOD_DROPS, DDOS_METRIC_SYN_RECEIVED, EVENT_TYPE_DDOS_AMP,
-        EVENT_TYPE_DDOS_CONNTRACK, EVENT_TYPE_DDOS_ICMP, EVENT_TYPE_DDOS_SYN, FLOOD_TYPE_ACK,
-        FLOOD_TYPE_FIN, FLOOD_TYPE_RST,
+        DdosSynConfig, FloodCounterKey, IcmpConfig, SyncookieSecret, SynRateState,
+        CONNTRACK_SUB_ACK_FLOOD, CONNTRACK_SUB_FIN_FLOOD, CONNTRACK_SUB_HALF_OPEN,
+        CONNTRACK_SUB_RST_FLOOD, CONN_ESTABLISHED, CONN_NEW, DDOS_ACTION_DROP,
+        DDOS_ACTION_SYNCOOKIE, DDOS_METRIC_ACK_FLOOD_DROPS, DDOS_METRIC_AMP_DROPPED,
+        DDOS_METRIC_AMP_PASSED, DDOS_METRIC_CONN_TRACKED, DDOS_METRIC_COUNT,
+        DDOS_METRIC_EVENTS_DROPPED, DDOS_METRIC_FIN_FLOOD_DROPS, DDOS_METRIC_HALF_OPEN_DROPS,
+        DDOS_METRIC_ICMP_DROPPED, DDOS_METRIC_ICMP_PASSED, DDOS_METRIC_OVERSIZED_ICMP,
+        DDOS_METRIC_RST_FLOOD_DROPS, DDOS_METRIC_SYN_FLOOD_DROPS, DDOS_METRIC_SYN_RECEIVED,
+        DDOS_METRIC_SYNCOOKIE_INVALID, DDOS_METRIC_SYNCOOKIE_SENT, DDOS_METRIC_SYNCOOKIE_VALID,
+        EVENT_TYPE_DDOS_AMP, EVENT_TYPE_DDOS_CONNTRACK, EVENT_TYPE_DDOS_ICMP,
+        EVENT_TYPE_DDOS_SYN, FLOOD_TYPE_ACK, FLOOD_TYPE_FIN, FLOOD_TYPE_RST,
+        SYNCOOKIE_MSS_TABLE,
     },
     event::{PacketEvent, EVENT_TYPE_RATELIMIT, FLAG_IPV6, FLAG_VLAN},
     ratelimit::{
@@ -191,9 +193,13 @@ static AMP_PROTECT_CONFIG: HashMap<AmpProtectKey, AmpProtectConfig> =
 static AMP_RATE_BUCKETS: LruPerCpuHashMap<u64, FixedWindowValue> =
     LruPerCpuHashMap::with_max_entries(65536, 0);
 
-/// DDoS-specific per-CPU metrics (14 indices, see `DDOS_METRIC_*` constants).
+/// DDoS-specific per-CPU metrics (see `DDOS_METRIC_*` constants).
 #[map]
 static DDOS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(DDOS_METRIC_COUNT, 0);
+
+/// SYN cookie secret key (32 bytes), set by userspace.
+#[map]
+static SYNCOOKIE_SECRET: Array<SyncookieSecret> = Array::with_max_entries(1, 0);
 
 // ── Connection Tracking Maps ─────────────────────────────────────────
 
@@ -321,9 +327,13 @@ fn process_ratelimit_v4(
         return process_icmp_v4(ctx, l4_offset, src_ip, dst_ip, flags, vlan_id);
     }
 
-    // ── DDoS: SYN flood detection ──────────────────────────────────
+    // ── DDoS: SYN cookie ACK validation + SYN flood detection ─────
     if protocol == PROTO_TCP {
-        if let Some(action) = check_syn_flood_v4(ctx, l4_offset, src_ip, dst_ip, flags, vlan_id) {
+        // If this is a bare ACK, check if it completes a SYN cookie handshake
+        if let Some(action) = validate_syncookie_ack_v4(ctx, l3_offset, l4_offset) {
+            return Ok(action);
+        }
+        if let Some(action) = check_syn_flood_v4(ctx, l3_offset, l4_offset, src_ip, dst_ip, flags, vlan_id) {
             return Ok(action);
         }
         // Connection tracking & flood detection (RST/FIN/ACK floods, half-open SYNs)
@@ -413,9 +423,13 @@ fn process_ratelimit_v6(
         return process_icmp_v6(ctx, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id);
     }
 
-    // ── DDoS: SYN flood detection (IPv6) ───────────────────────────
+    // ── DDoS: SYN cookie ACK validation + SYN flood detection (IPv6)
     if next_hdr == PROTO_TCP {
-        if let Some(action) = check_syn_flood_v6(ctx, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id) {
+        // If this is a bare ACK, check if it completes a SYN cookie handshake
+        if let Some(action) = validate_syncookie_ack_v6(ctx, l3_offset, l4_offset) {
+            return Ok(action);
+        }
+        if let Some(action) = check_syn_flood_v6(ctx, l3_offset, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id) {
             return Ok(action);
         }
         // Connection tracking & flood detection (IPv6)
@@ -549,9 +563,14 @@ fn read_l4_ports_raw(ctx: &XdpContext, l4_offset: usize, protocol: u8) -> (u16, 
 /// Check if a TCP packet is a SYN flood candidate (IPv4).
 /// Returns `Some(action)` if DDoS protection handled the packet, `None` to
 /// fall through to generic rate limiting.
+///
+/// When a SYN flood is detected, forges a SYN+ACK with a SYN cookie via
+/// `XDP_TX` instead of dropping. The client must complete the handshake
+/// with a valid ACK (validated by `validate_syncookie_ack_v4`).
 #[inline(always)]
 fn check_syn_flood_v4(
     ctx: &XdpContext,
+    l3_offset: usize,
     l4_offset: usize,
     src_ip: u32,
     dst_ip: u32,
@@ -585,11 +604,7 @@ fn check_syn_flood_v4(
         }
     }
 
-    // SYN flood protection: drop the SYN and emit event for userspace detection.
-    // NOTE: This does NOT generate actual SYN cookies. Full SYN+ACK forging
-    // via XDP_TX would require packet rewriting (swap MACs, swap IPs, build
-    // SYN+ACK TCP header with cookie). Future: implement when
-    // bpf_tcp_gen_syncookie is available in the aya-ebpf bindings.
+    // SYN flood detected: forge SYN+ACK with SYN cookie via XDP_TX.
     let src_addr = [src_ip, 0, 0, 0];
     let dst_addr = [dst_ip, 0, 0, 0];
     emit_ddos_event(
@@ -603,14 +618,25 @@ fn check_syn_flood_v4(
         flags,
         vlan_id,
     );
-    increment_ddos_metric(DDOS_METRIC_SYN_FLOOD_DROPS);
-    Some(xdp_action::XDP_DROP)
+
+    match send_syn_ack_cookie_v4(ctx, l3_offset, l4_offset) {
+        Ok(action) => {
+            increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_SENT);
+            Some(action)
+        }
+        Err(()) => {
+            increment_ddos_metric(DDOS_METRIC_SYN_FLOOD_DROPS);
+            Some(xdp_action::XDP_DROP)
+        }
+    }
 }
 
 /// Check if a TCP packet is a SYN flood candidate (IPv6).
+/// Forges a SYN+ACK with SYN cookie via `XDP_TX` when flood is detected.
 #[inline(always)]
 fn check_syn_flood_v6(
     ctx: &XdpContext,
+    l3_offset: usize,
     l4_offset: usize,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
@@ -654,8 +680,17 @@ fn check_syn_flood_v6(
         flags,
         vlan_id,
     );
-    increment_ddos_metric(DDOS_METRIC_SYN_FLOOD_DROPS);
-    Some(xdp_action::XDP_DROP)
+
+    match send_syn_ack_cookie_v6(ctx, l3_offset, l4_offset) {
+        Ok(action) => {
+            increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_SENT);
+            Some(action)
+        }
+        Err(()) => {
+            increment_ddos_metric(DDOS_METRIC_SYN_FLOOD_DROPS);
+            Some(xdp_action::XDP_DROP)
+        }
+    }
 }
 
 /// Check if the SYN rate for a source exceeds the configured threshold.
@@ -1212,6 +1247,600 @@ fn check_flood_rate(src_ip: u32, flood_type: u8, threshold: u64, now: u64) -> bo
         };
         let _ = FLOOD_COUNTERS.insert(&key, &new_val, 0);
         false
+    }
+}
+
+// ── SYN Cookie Helpers ──────────────────────────────────────────────
+
+/// FNV-1a hash of 4-tuple + timestamp counter + secret.
+/// Returns a 32-bit cookie value.
+#[inline(always)]
+fn syncookie_hash(
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    ts_counter: u32,
+    secret: &[u32; 8],
+) -> u32 {
+    let mut h: u32 = 0x811c_9dc5; // FNV offset basis
+    // Mix source IP
+    h ^= src_ip;
+    h = h.wrapping_mul(0x0100_0193); // FNV prime
+    // Mix dest IP
+    h ^= dst_ip;
+    h = h.wrapping_mul(0x0100_0193);
+    // Mix ports (combined as u32)
+    h ^= ((src_port as u32) << 16) | (dst_port as u32);
+    h = h.wrapping_mul(0x0100_0193);
+    // Mix timestamp counter
+    h ^= ts_counter;
+    h = h.wrapping_mul(0x0100_0193);
+    // Mix secret (8 u32 words)
+    let mut i = 0u32;
+    while i < 8 {
+        h ^= secret[i as usize];
+        h = h.wrapping_mul(0x0100_0193);
+        i += 1;
+    }
+    h
+}
+
+/// Build a SYN cookie: hash with MSS index in lower 3 bits.
+#[inline(always)]
+fn make_syncookie(
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    mss_idx: u8,
+    secret: &[u32; 8],
+) -> u32 {
+    let ts = (unsafe { bpf_ktime_get_boot_ns() } / 60_000_000_000) as u32; // minute counter
+    let hash = syncookie_hash(src_ip, dst_ip, src_port, dst_port, ts, secret);
+    (hash & 0xFFFF_FFF8) | ((mss_idx & 0x07) as u32)
+}
+
+/// Validate a cookie (check current minute and previous minute).
+#[inline(always)]
+fn validate_syncookie(
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    cookie: u32,
+    secret: &[u32; 8],
+) -> bool {
+    let mss_bits = cookie & 0x07;
+    let ts = (unsafe { bpf_ktime_get_boot_ns() } / 60_000_000_000) as u32;
+    // Check current minute
+    let h0 = syncookie_hash(src_ip, dst_ip, src_port, dst_port, ts, secret);
+    if (h0 & 0xFFFF_FFF8) | mss_bits == cookie {
+        return true;
+    }
+    // Check previous minute (for clock boundary)
+    let h1 = syncookie_hash(src_ip, dst_ip, src_port, dst_port, ts.wrapping_sub(1), secret);
+    (h1 & 0xFFFF_FFF8) | mss_bits == cookie
+}
+
+/// Parse TCP MSS option from SYN packet and return the MSS table index (0-7).
+#[inline(always)]
+fn parse_mss_index(ctx: &XdpContext, l4_offset: usize) -> u8 {
+    // Read data offset byte to find options length
+    let doff_ptr: *const u8 = match unsafe { ptr_at::<u8>(ctx, l4_offset + 12) } {
+        Ok(p) => p,
+        Err(_) => return 4, // default: 1460
+    };
+    let doff_byte = unsafe { *doff_ptr };
+    let tcp_hdr_len = ((doff_byte >> 4) as usize) * 4;
+    if tcp_hdr_len <= 20 {
+        return 4; // no options, default 1460
+    }
+
+    let opts_start = l4_offset + 20;
+    let opts_end = l4_offset + tcp_hdr_len;
+    let mut pos = opts_start;
+    let mut i = 0usize;
+    while i < 40 && pos < opts_end {
+        let kind_ptr: *const u8 = match unsafe { ptr_at::<u8>(ctx, pos) } {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        let kind = unsafe { *kind_ptr };
+        if kind == 0 {
+            break;
+        } // EOL
+        if kind == 1 {
+            pos += 1;
+            i += 1;
+            continue;
+        } // NOP
+        let len_ptr: *const u8 = match unsafe { ptr_at::<u8>(ctx, pos + 1) } {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        let opt_len = unsafe { *len_ptr };
+        if opt_len < 2 {
+            break;
+        }
+        if kind == 2 && opt_len == 4 && pos + 4 <= opts_end {
+            // MSS option
+            if let Ok(hi_ptr) = unsafe { ptr_at::<u8>(ctx, pos + 2) } {
+                if let Ok(lo_ptr) = unsafe { ptr_at::<u8>(ctx, pos + 3) } {
+                    let mss = ((unsafe { *hi_ptr } as u16) << 8) | (unsafe { *lo_ptr } as u16);
+                    // Find closest MSS table entry (largest entry <= mss)
+                    let mut best = 0u8;
+                    let mut j = 0u8;
+                    while j < 8 {
+                        if SYNCOOKIE_MSS_TABLE[j as usize] <= mss {
+                            best = j;
+                        }
+                        j += 1;
+                    }
+                    return best;
+                }
+            }
+        }
+        pos += opt_len as usize;
+        i += 1;
+    }
+    4 // default: 1460
+}
+
+// ── SYN Cookie: SYN+ACK Forging (IPv4) ─────────────────────────────
+
+/// Forge a SYN+ACK with SYN cookie and send via `XDP_TX` (IPv4).
+///
+/// Rewrites the incoming SYN packet in-place: swaps MACs, swaps IPs,
+/// sets seq=cookie, ack=in_seq+1, includes MSS option.
+#[inline(never)]
+fn send_syn_ack_cookie_v4(
+    ctx: &XdpContext,
+    l3_off: usize,
+    l4_off: usize,
+) -> Result<u32, ()> {
+    // 1. Read incoming packet fields BEFORE modifying anything
+    let iphdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_off)? };
+    let src_ip = u32_from_be_bytes(unsafe { (*iphdr).src_addr });
+    let dst_ip = u32_from_be_bytes(unsafe { (*iphdr).dst_addr });
+
+    let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off)? };
+    let in_seq = u32::from_be(unsafe { (*tcphdr).seq_num });
+    let in_src_port = unsafe { (*tcphdr).src_port }; // network byte order
+    let in_dst_port = unsafe { (*tcphdr).dst_port };
+    let src_port = u16::from_be(in_src_port);
+    let dst_port = u16::from_be(in_dst_port);
+
+    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
+    let in_src_mac = unsafe { (*ethhdr).src_addr };
+    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
+
+    // 2. Parse MSS from incoming SYN
+    let mss_idx = parse_mss_index(ctx, l4_off);
+
+    // 3. Get secret
+    let secret = match SYNCOOKIE_SECRET.get(0) {
+        Some(s) => s,
+        None => return Err(()),
+    };
+
+    // 4. Compute cookie
+    let cookie = make_syncookie(src_ip, dst_ip, src_port, dst_port, mss_idx, &secret.key);
+
+    // 5. Truncate to Eth + IP(IHL*4) + TCP(24 = 20 base + 4 MSS option)
+    let tcp_len = 24usize;
+    let desired_end = l4_off + tcp_len;
+    let current_len = ctx.data_end() - ctx.data();
+    let delta = desired_end as i32 - current_len as i32;
+    if delta != 0 {
+        let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
+        if ret != 0 {
+            return Err(());
+        }
+    }
+
+    // 6. Re-read pointers (all invalidated by adjust_tail)
+    // Swap Ethernet MACs
+    let eth_out: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
+    unsafe {
+        (*eth_out).dst_addr = in_src_mac;
+        (*eth_out).src_addr = in_dst_mac;
+    }
+
+    // 7. Swap IP addresses, update header
+    let iphdr_out: *mut Ipv4Hdr = unsafe { ptr_at_mut(ctx, l3_off)? };
+    let ip_hdr_len: usize;
+    unsafe {
+        let tmp = (*iphdr_out).src_addr;
+        (*iphdr_out).src_addr = (*iphdr_out).dst_addr;
+        (*iphdr_out).dst_addr = tmp;
+        // ihl() returns IHL in bytes already
+        ip_hdr_len = (*iphdr_out).ihl() as usize;
+        // Set total_len = IP header + TCP (24)
+        (*iphdr_out).set_tot_len((ip_hdr_len + tcp_len) as u16);
+        (*iphdr_out).ttl = 64;
+        (*iphdr_out).check = [0, 0];
+        let csum = compute_ipv4_csum(iphdr_out as *const u8, ip_hdr_len);
+        (*iphdr_out).set_checksum(csum);
+    }
+
+    // 8. Build TCP SYN+ACK with MSS option
+    let tcp_out: *mut u8 = unsafe { ptr_at_mut(ctx, l4_off)? };
+    // Verify we can write all 24 bytes
+    let _end_check: *const u8 = unsafe { ptr_at(ctx, l4_off + tcp_len - 1)? };
+
+    // Read new src/dst IP addresses for TCP checksum pseudo-header
+    let new_src_ip = unsafe { (*iphdr_out).src_addr };
+    let new_dst_ip = unsafe { (*iphdr_out).dst_addr };
+
+    unsafe {
+        // Swap ports: source = original dst, dest = original src
+        let port_ptr = tcp_out as *mut u16;
+        *port_ptr = in_dst_port;
+        *port_ptr.add(1) = in_src_port;
+
+        // Seq = cookie, Ack = in_seq + 1
+        let seq_ptr = tcp_out.add(4) as *mut u32;
+        *seq_ptr = cookie.to_be();
+        let ack_ptr = tcp_out.add(8) as *mut u32;
+        *ack_ptr = (in_seq + 1).to_be();
+
+        // Data offset = 6 (24 bytes), flags = SYN+ACK (0x12)
+        *tcp_out.add(12) = 0x60; // data offset = 6
+        *tcp_out.add(13) = 0x12; // SYN+ACK
+
+        // Window size = 65535
+        let win_ptr = tcp_out.add(14) as *mut u16;
+        *win_ptr = 65535u16.to_be();
+
+        // Checksum = 0 (will compute), Urgent pointer = 0
+        let csum_ptr = tcp_out.add(16) as *mut u16;
+        *csum_ptr = 0;
+        let urg_ptr = tcp_out.add(18) as *mut u16;
+        *urg_ptr = 0;
+
+        // MSS option: kind=2, len=4, MSS value
+        let mss_val = SYNCOOKIE_MSS_TABLE[mss_idx as usize];
+        *tcp_out.add(20) = 2; // kind
+        *tcp_out.add(21) = 4; // length
+        let mss_ptr = tcp_out.add(22) as *mut u16;
+        *mss_ptr = mss_val.to_be();
+
+        // Compute TCP checksum (returned in host order, write as big-endian)
+        let csum = compute_tcp_csum_v4(&new_src_ip, &new_dst_ip, tcp_out, tcp_len);
+        let csum_be = csum.to_be_bytes();
+        *tcp_out.add(16) = csum_be[0];
+        *tcp_out.add(17) = csum_be[1];
+    }
+
+    Ok(xdp_action::XDP_TX)
+}
+
+// ── SYN Cookie: SYN+ACK Forging (IPv6) ─────────────────────────────
+
+/// Forge a SYN+ACK with SYN cookie and send via `XDP_TX` (IPv6).
+#[inline(never)]
+fn send_syn_ack_cookie_v6(
+    ctx: &XdpContext,
+    l3_off: usize,
+    l4_off: usize,
+) -> Result<u32, ()> {
+    // 1. Read incoming packet fields
+    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_off)? };
+    let in_src_addr: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
+    let in_dst_addr: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
+
+    // For cookie hashing, XOR-fold IPv6 addresses to u32
+    let src_u32 = ipv6_addr_to_u32x4(&in_src_addr);
+    let src_ip_hash = src_u32[0] ^ src_u32[1] ^ src_u32[2] ^ src_u32[3];
+    let dst_u32 = ipv6_addr_to_u32x4(&in_dst_addr);
+    let dst_ip_hash = dst_u32[0] ^ dst_u32[1] ^ dst_u32[2] ^ dst_u32[3];
+
+    let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off)? };
+    let in_seq = u32::from_be(unsafe { (*tcphdr).seq_num });
+    let in_src_port = unsafe { (*tcphdr).src_port };
+    let in_dst_port = unsafe { (*tcphdr).dst_port };
+    let src_port = u16::from_be(in_src_port);
+    let dst_port = u16::from_be(in_dst_port);
+
+    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
+    let in_src_mac = unsafe { (*ethhdr).src_addr };
+    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
+
+    // 2. Parse MSS
+    let mss_idx = parse_mss_index(ctx, l4_off);
+
+    // 3. Get secret
+    let secret = match SYNCOOKIE_SECRET.get(0) {
+        Some(s) => s,
+        None => return Err(()),
+    };
+
+    // 4. Compute cookie
+    let cookie = make_syncookie(
+        src_ip_hash,
+        dst_ip_hash,
+        src_port,
+        dst_port,
+        mss_idx,
+        &secret.key,
+    );
+
+    // 5. Truncate to Eth + IPv6(40) + TCP(24)
+    let tcp_len = 24usize;
+    let desired_end = l4_off + tcp_len;
+    let current_len = ctx.data_end() - ctx.data();
+    let delta = desired_end as i32 - current_len as i32;
+    if delta != 0 {
+        let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
+        if ret != 0 {
+            return Err(());
+        }
+    }
+
+    // 6. Re-read pointers
+    let eth_out: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
+    unsafe {
+        (*eth_out).dst_addr = in_src_mac;
+        (*eth_out).src_addr = in_dst_mac;
+    }
+
+    // 7. Build IPv6 header
+    let ip6_out: *mut Ipv6Hdr = unsafe { ptr_at_mut(ctx, l3_off)? };
+    unsafe {
+        // Version=6, traffic class=0, flow label=0
+        (*ip6_out)._vtcfl = (6u32 << 28).to_be();
+        // Payload length = TCP header (24 bytes)
+        (*ip6_out)._payload_len = (tcp_len as u16).to_be();
+        (*ip6_out).next_hdr = PROTO_TCP;
+        (*ip6_out).hop_limit = 64;
+        // Swap src/dst addresses
+        (*ip6_out).src_addr = in_dst_addr;
+        (*ip6_out).dst_addr = in_src_addr;
+    }
+
+    // 8. Build TCP SYN+ACK with MSS option
+    let tcp_out: *mut u8 = unsafe { ptr_at_mut(ctx, l4_off)? };
+    let _end_check: *const u8 = unsafe { ptr_at(ctx, l4_off + tcp_len - 1)? };
+
+    unsafe {
+        // Swap ports
+        let port_ptr = tcp_out as *mut u16;
+        *port_ptr = in_dst_port;
+        *port_ptr.add(1) = in_src_port;
+
+        // Seq = cookie, Ack = in_seq + 1
+        let seq_ptr = tcp_out.add(4) as *mut u32;
+        *seq_ptr = cookie.to_be();
+        let ack_ptr = tcp_out.add(8) as *mut u32;
+        *ack_ptr = (in_seq + 1).to_be();
+
+        // Data offset = 6 (24 bytes), flags = SYN+ACK (0x12)
+        *tcp_out.add(12) = 0x60;
+        *tcp_out.add(13) = 0x12;
+
+        // Window size = 65535
+        let win_ptr = tcp_out.add(14) as *mut u16;
+        *win_ptr = 65535u16.to_be();
+
+        // Checksum = 0, Urgent pointer = 0
+        let csum_ptr = tcp_out.add(16) as *mut u16;
+        *csum_ptr = 0;
+        let urg_ptr = tcp_out.add(18) as *mut u16;
+        *urg_ptr = 0;
+
+        // MSS option
+        let mss_val = SYNCOOKIE_MSS_TABLE[mss_idx as usize];
+        *tcp_out.add(20) = 2;
+        *tcp_out.add(21) = 4;
+        let mss_ptr = tcp_out.add(22) as *mut u16;
+        *mss_ptr = mss_val.to_be();
+
+        // Compute TCP checksum with IPv6 pseudo-header (host order → big-endian)
+        let csum = compute_tcp_csum_v6(&in_dst_addr, &in_src_addr, tcp_out, tcp_len);
+        let csum_be = csum.to_be_bytes();
+        *tcp_out.add(16) = csum_be[0];
+        *tcp_out.add(17) = csum_be[1];
+    }
+
+    Ok(xdp_action::XDP_TX)
+}
+
+// ── SYN Cookie: ACK Validation ──────────────────────────────────────
+
+/// Check if an incoming ACK completes a SYN cookie handshake (IPv4).
+/// Returns `Some(XDP_PASS)` if valid, `None` if not a cookie ACK.
+#[inline(never)]
+fn validate_syncookie_ack_v4(
+    ctx: &XdpContext,
+    l3_off: usize,
+    l4_off: usize,
+) -> Option<u32> {
+    // Only check bare ACK (no SYN, no FIN, no RST)
+    let flags_ptr: *const u8 = unsafe { ptr_at::<u8>(ctx, l4_off + 13).ok()? };
+    let flags = unsafe { *flags_ptr };
+    if flags != TCP_FLAG_ACK {
+        return None;
+    } // Must be pure ACK
+
+    let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off).ok()? };
+    let ack_no = u32::from_be(unsafe { (*tcphdr).ack_num });
+    let cookie = ack_no.wrapping_sub(1); // cookie = ack - 1
+
+    let iphdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_off).ok()? };
+    let src_ip = u32_from_be_bytes(unsafe { (*iphdr).src_addr });
+    let dst_ip = u32_from_be_bytes(unsafe { (*iphdr).dst_addr });
+    let src_port = u16::from_be(unsafe { (*tcphdr).src_port });
+    let dst_port = u16::from_be(unsafe { (*tcphdr).dst_port });
+
+    let secret = SYNCOOKIE_SECRET.get(0)?;
+
+    if validate_syncookie(src_ip, dst_ip, src_port, dst_port, cookie, &secret.key) {
+        increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_VALID);
+        Some(xdp_action::XDP_PASS) // let it through to kernel
+    } else {
+        increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_INVALID);
+        None // not our cookie, continue normal processing
+    }
+}
+
+/// Check if an incoming ACK completes a SYN cookie handshake (IPv6).
+/// Returns `Some(XDP_PASS)` if valid, `None` if not a cookie ACK.
+#[inline(never)]
+fn validate_syncookie_ack_v6(
+    ctx: &XdpContext,
+    l3_off: usize,
+    l4_off: usize,
+) -> Option<u32> {
+    // Only check bare ACK
+    let flags_ptr: *const u8 = unsafe { ptr_at::<u8>(ctx, l4_off + 13).ok()? };
+    let flags = unsafe { *flags_ptr };
+    if flags != TCP_FLAG_ACK {
+        return None;
+    }
+
+    let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off).ok()? };
+    let ack_no = u32::from_be(unsafe { (*tcphdr).ack_num });
+    let cookie = ack_no.wrapping_sub(1);
+
+    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_off).ok()? };
+    let src_addr_bytes: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
+    let dst_addr_bytes: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
+
+    // XOR-fold for cookie validation (same as in forging)
+    let src_u32 = ipv6_addr_to_u32x4(&src_addr_bytes);
+    let src_ip_hash = src_u32[0] ^ src_u32[1] ^ src_u32[2] ^ src_u32[3];
+    let dst_u32 = ipv6_addr_to_u32x4(&dst_addr_bytes);
+    let dst_ip_hash = dst_u32[0] ^ dst_u32[1] ^ dst_u32[2] ^ dst_u32[3];
+
+    let src_port = u16::from_be(unsafe { (*tcphdr).src_port });
+    let dst_port = u16::from_be(unsafe { (*tcphdr).dst_port });
+
+    let secret = SYNCOOKIE_SECRET.get(0)?;
+
+    if validate_syncookie(
+        src_ip_hash,
+        dst_ip_hash,
+        src_port,
+        dst_port,
+        cookie,
+        &secret.key,
+    ) {
+        increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_VALID);
+        Some(xdp_action::XDP_PASS)
+    } else {
+        increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_INVALID);
+        None
+    }
+}
+
+// ── Checksum Helpers ────────────────────────────────────────────────
+
+/// Compute the IPv4 header checksum (ones' complement of the ones'
+/// complement sum of the header u16 words).
+///
+/// The checksum field in the header must be zeroed before calling.
+#[inline(always)]
+unsafe fn compute_ipv4_csum(hdr: *const u8, len: usize) -> u16 {
+    unsafe {
+        let mut sum: u32 = 0;
+        let mut i: usize = 0;
+        while i + 1 < len {
+            let word = ((*hdr.add(i) as u32) << 8) | (*hdr.add(i + 1) as u32);
+            sum += word;
+            i += 2;
+        }
+        // Fold 32-bit sum into 16 bits.
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+}
+
+/// Compute TCP checksum with IPv4 pseudo-header.
+///
+/// The checksum field in the TCP header must be zeroed before calling.
+/// Returns the checksum in host byte order.
+#[inline(always)]
+unsafe fn compute_tcp_csum_v4(
+    src_ip: &[u8; 4],
+    dst_ip: &[u8; 4],
+    tcp_hdr: *const u8,
+    tcp_len: usize,
+) -> u16 {
+    unsafe {
+        let mut sum: u32 = 0;
+
+        // Pseudo-header: src_ip (4 bytes) + dst_ip (4 bytes) + zero + proto + tcp_len
+        sum += ((src_ip[0] as u32) << 8) | (src_ip[1] as u32);
+        sum += ((src_ip[2] as u32) << 8) | (src_ip[3] as u32);
+        sum += ((dst_ip[0] as u32) << 8) | (dst_ip[1] as u32);
+        sum += ((dst_ip[2] as u32) << 8) | (dst_ip[3] as u32);
+        sum += PROTO_TCP as u32; // 0x0006
+        sum += tcp_len as u32;
+
+        // Sum TCP header bytes as 16-bit words.
+        let mut i: usize = 0;
+        while i + 1 < tcp_len {
+            let word = ((*tcp_hdr.add(i) as u32) << 8) | (*tcp_hdr.add(i + 1) as u32);
+            sum += word;
+            i += 2;
+        }
+        // Handle odd byte.
+        if i < tcp_len {
+            sum += (*tcp_hdr.add(i) as u32) << 8;
+        }
+
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+}
+
+/// Compute TCP checksum with IPv6 pseudo-header.
+///
+/// Returns the checksum in host byte order.
+#[inline(always)]
+unsafe fn compute_tcp_csum_v6(
+    src_ip: &[u8; 16],
+    dst_ip: &[u8; 16],
+    tcp_hdr: *const u8,
+    tcp_len: usize,
+) -> u16 {
+    unsafe {
+        let mut sum: u32 = 0;
+
+        // Pseudo-header: src (16) + dst (16) + upper-layer length (4) + zero(3) + next_hdr(1)
+        let mut i: usize = 0;
+        while i < 16 {
+            sum += ((src_ip[i] as u32) << 8) | (src_ip[i + 1] as u32);
+            i += 2;
+        }
+        i = 0;
+        while i < 16 {
+            sum += ((dst_ip[i] as u32) << 8) | (dst_ip[i + 1] as u32);
+            i += 2;
+        }
+        sum += tcp_len as u32; // Upper-layer packet length
+        sum += PROTO_TCP as u32; // Next header = 6
+
+        // Sum TCP header/data.
+        i = 0;
+        while i + 1 < tcp_len {
+            let word = ((*tcp_hdr.add(i) as u32) << 8) | (*tcp_hdr.add(i + 1) as u32);
+            sum += word;
+            i += 2;
+        }
+        if i < tcp_len {
+            sum += (*tcp_hdr.add(i) as u32) << 8;
+        }
+
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
     }
 }
 

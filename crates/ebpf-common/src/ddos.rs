@@ -40,6 +40,20 @@ pub struct SynRateState {
     pub window_start: u64,
 }
 
+// ── SYN Cookie Secret ────────────────────────────────────────────
+
+/// SYN cookie secret key (32 bytes), stored in Array map, set by userspace.
+///
+/// Size: 32 bytes (8 × u32), align 4.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SyncookieSecret {
+    pub key: [u32; 8],
+}
+
+/// Common MSS values for SYN cookie encoding (3-bit index to MSS value).
+pub const SYNCOOKIE_MSS_TABLE: [u16; 8] = [536, 1220, 1440, 1452, 1460, 4312, 8960, 65535];
+
 // ── ICMP Protection Config ───────────────────────────────────────
 
 /// Configuration for ICMP flood protection.
@@ -204,8 +218,14 @@ pub const DDOS_METRIC_FIN_FLOOD_DROPS: u32 = 12;
 pub const DDOS_METRIC_ACK_FLOOD_DROPS: u32 = 13;
 /// Metric index: total packets seen (unconditional, first instruction).
 pub const DDOS_METRIC_TOTAL_SEEN: u32 = 14;
+/// Metric index: SYN+ACK cookies forged and sent via `XDP_TX`.
+pub const DDOS_METRIC_SYNCOOKIE_SENT: u32 = 15;
+/// Metric index: ACKs with valid SYN cookies (handshake completed).
+pub const DDOS_METRIC_SYNCOOKIE_VALID: u32 = 16;
+/// Metric index: ACKs with invalid SYN cookies.
+pub const DDOS_METRIC_SYNCOOKIE_INVALID: u32 = 17;
 /// Total number of DDoS metric slots.
-pub const DDOS_METRIC_COUNT: u32 = 15;
+pub const DDOS_METRIC_COUNT: u32 = 18;
 
 // ── Pod impls ────────────────────────────────────────────────────
 
@@ -227,6 +247,8 @@ unsafe impl aya::Pod for DdosConnTrackKey {}
 unsafe impl aya::Pod for DdosConnTrackValue {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for FloodCounterKey {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for SyncookieSecret {}
 
 #[cfg(test)]
 mod tests {
@@ -340,6 +362,22 @@ mod tests {
     }
 
     #[test]
+    fn syncookie_secret_size() {
+        assert_eq!(mem::size_of::<SyncookieSecret>(), 32);
+    }
+
+    #[test]
+    fn syncookie_secret_alignment() {
+        assert_eq!(mem::align_of::<SyncookieSecret>(), 4);
+    }
+
+    #[test]
+    fn syncookie_mss_table_len() {
+        assert_eq!(SYNCOOKIE_MSS_TABLE.len(), 8);
+        assert_eq!(SYNCOOKIE_MSS_TABLE[4], 1460);
+    }
+
+    #[test]
     fn ddos_metric_indices() {
         assert_eq!(DDOS_METRIC_SYN_RECEIVED, 0);
         assert_eq!(DDOS_METRIC_SYN_FLOOD_DROPS, 1);
@@ -355,7 +393,11 @@ mod tests {
         assert_eq!(DDOS_METRIC_RST_FLOOD_DROPS, 11);
         assert_eq!(DDOS_METRIC_FIN_FLOOD_DROPS, 12);
         assert_eq!(DDOS_METRIC_ACK_FLOOD_DROPS, 13);
-        assert_eq!(DDOS_METRIC_COUNT, 15);
+        assert_eq!(DDOS_METRIC_TOTAL_SEEN, 14);
+        assert_eq!(DDOS_METRIC_SYNCOOKIE_SENT, 15);
+        assert_eq!(DDOS_METRIC_SYNCOOKIE_VALID, 16);
+        assert_eq!(DDOS_METRIC_SYNCOOKIE_INVALID, 17);
+        assert_eq!(DDOS_METRIC_COUNT, 18);
     }
 
     #[test]
