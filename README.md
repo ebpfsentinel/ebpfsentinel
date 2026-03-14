@@ -9,12 +9,12 @@ eBPFsentinel combines a stateful firewall, intrusion detection, rate limiting, t
 ### Network Security
 
 - **Stateful Firewall** — L3/L4 packet filtering with conntrack (packet + byte counters), CIDR matching, IP set aliases, GeoIP country blocking (LPM Trie), security zones, VLAN/QinQ 802.1ad filtering, schedule-based rules, IPv6 extension header parsing, and IPv4/IPv6 dual-stack
-- **NAT** — SNAT, DNAT, masquerade, port forwarding, 1:1 NAT with full packet rewriting (IPv4/IPv6)
+- **NAT** — SNAT, DNAT, masquerade, port forwarding, 1:1 NAT with full packet rewriting (IPv4/IPv6), and NPTv6 stateless prefix translation (RFC 6296)
 - **Rate Limiting** — Per-IP protection with 5 algorithms (token bucket, fixed window, sliding window, leaky bucket, SYN cookie) and per-country tiers via kernel-side LPM Trie lookup
 - **Traffic Shaping / QoS** — Dummynet-inspired pipes (bandwidth, delay, loss), WF2Q+ weighted queues, 5-tuple+DSCP classifiers with progressive wildcard matching, per-flow token bucket enforcement, FQ-CoDel integration
 - **DDoS Mitigation** — Detects and mitigates SYN flood, UDP amplification, ICMP/RST/FIN/ACK flood, and volumetric attacks with per-country detection thresholds and automatic country CIDR blocking via LPM maps
 - **L7 Firewall** — Application-layer filtering for HTTP, TLS/SNI, gRPC, SMTP, FTP, and SMB with GeoIP-based source/destination country matching
-- **Packet Scrubbing** — Kernel-side traffic normalization (TTL, MSS clamping, DF clearing, IP ID randomization)
+- **Packet Scrubbing** — Kernel-side traffic normalization (TTL/hop limit, MSS clamping, DF clearing, IP ID randomization, TCP flag scrubbing, ECN stripping, TOS/DSCP normalization, TCP timestamp removal)
 - **Multi-WAN Routing** — Policy-based gateway selection with ICMP/TCP health checks, failover, and geographic gateway preference (preferred_for_countries)
 - **L4 Load Balancer** — TCP/UDP/TLS passthrough load balancing with per-service round-robin, weighted, IP hash, and least-connections algorithms, Ethernet MAC swap for correct L2 forwarding
 
@@ -34,7 +34,7 @@ eBPFsentinel combines a stateful firewall, intrusion detection, rate limiting, t
 - **Alert Pipeline** with routing to email, webhook, and log sinks
 - **Audit Trail** with rule change history
 - **Hot Reload** — update configuration without restart (file watcher, SIGHUP, or API)
-- **CLI** with 12 domain subcommands covering all endpoints (firewall, ids, ratelimit, qos, threatintel, dlp, dns, nat, scrub, lb, conntrack, audit)
+- **CLI** with 13 domain subcommands covering all endpoints (firewall, ids, ratelimit, qos, threatintel, dlp, dns, nat, nptv6, scrub, lb, conntrack, audit)
 - **JWT/OIDC/API Key Authentication** with role-based access control
 - **TLS 1.3** for REST and gRPC
 
