@@ -4,23 +4,24 @@ High-performance network security agent powered by eBPF. Monitors, filters, and 
 
 ## What it does
 
-eBPFsentinel combines a stateful firewall, intrusion detection, rate limiting, and threat intelligence into a single agent that runs directly in the Linux kernel via eBPF — no kernel modules, no packet copies to userspace.
+eBPFsentinel combines a stateful firewall, intrusion detection, rate limiting, traffic shaping, and threat intelligence into a single agent that runs directly in the Linux kernel via eBPF — no kernel modules, no packet copies to userspace.
 
 ### Network Security
 
-- **Stateful Firewall** — L3/L4 packet filtering with conntrack, CIDR matching, IP set aliases, GeoIP country blocking (LPM Trie), security zones, VLAN filtering, schedule-based rules, and IPv4/IPv6 dual-stack
+- **Stateful Firewall** — L3/L4 packet filtering with conntrack (packet + byte counters), CIDR matching, IP set aliases, GeoIP country blocking (LPM Trie), security zones, VLAN/QinQ 802.1ad filtering, schedule-based rules, IPv6 extension header parsing, and IPv4/IPv6 dual-stack
 - **NAT** — SNAT, DNAT, masquerade, port forwarding, 1:1 NAT with full packet rewriting (IPv4/IPv6)
 - **Rate Limiting** — Per-IP protection with 5 algorithms (token bucket, fixed window, sliding window, leaky bucket, SYN cookie) and per-country tiers via kernel-side LPM Trie lookup
+- **Traffic Shaping / QoS** — Dummynet-inspired pipes (bandwidth, delay, loss), WF2Q+ weighted queues, 5-tuple+DSCP classifiers with progressive wildcard matching, per-flow token bucket enforcement, FQ-CoDel integration
 - **DDoS Mitigation** — Detects and mitigates SYN flood, UDP amplification, ICMP/RST/FIN/ACK flood, and volumetric attacks with per-country detection thresholds and automatic country CIDR blocking via LPM maps
 - **L7 Firewall** — Application-layer filtering for HTTP, TLS/SNI, gRPC, SMTP, FTP, and SMB with GeoIP-based source/destination country matching
 - **Packet Scrubbing** — Kernel-side traffic normalization (TTL, MSS clamping, DF clearing, IP ID randomization)
 - **Multi-WAN Routing** — Policy-based gateway selection with ICMP/TCP health checks, failover, and geographic gateway preference (preferred_for_countries)
-- **L4 Load Balancer** — TCP/UDP/TLS passthrough load balancing with round-robin, weighted, IP hash, and least-connections algorithms
+- **L4 Load Balancer** — TCP/UDP/TLS passthrough load balancing with per-service round-robin, weighted, IP hash, and least-connections algorithms, Ethernet MAC swap for correct L2 forwarding
 
 ### Threat Detection & Prevention
 
 - **IDS/IPS** — Intrusion detection and prevention with pattern matching, country-aware sampling, per-country detection thresholds, and automatic /24 subnet blocking for high-risk countries via LPM maps
-- **Threat Intelligence** — OSINT feed integration with IOC correlation, auto-blocking, and confidence boost for high-risk source countries
+- **Threat Intelligence** — OSINT feed integration with LRU hash IOC correlation, auto-blocking, and confidence boost for high-risk source countries
 - **GeoIP Blocking** — Country-based traffic blocking via MaxMind databases with O(log n) kernel-side LPM Trie lookup, automatic periodic refresh, and cross-domain enforcement (DDoS auto-block, IPS /24 injection, rate limit country tiers) via coordinated LPM maps
 - **DLP** — Data loss prevention scanning SSL/TLS traffic for sensitive data patterns (PCI, PII, credentials)
 - **DNS Intelligence** — Passive DNS capture, domain blocklists, behavioral reputation scoring with high-risk country factors, and DNS-based alert enrichment
@@ -33,7 +34,7 @@ eBPFsentinel combines a stateful firewall, intrusion detection, rate limiting, a
 - **Alert Pipeline** with routing to email, webhook, and log sinks
 - **Audit Trail** with rule change history
 - **Hot Reload** — update configuration without restart (file watcher, SIGHUP, or API)
-- **CLI** with 11 domain subcommands covering all endpoints
+- **CLI** with 12 domain subcommands covering all endpoints (firewall, ids, ratelimit, qos, threatintel, dlp, dns, nat, scrub, lb, conntrack, audit)
 - **JWT/OIDC/API Key Authentication** with role-based access control
 - **TLS 1.3** for REST and gRPC
 
