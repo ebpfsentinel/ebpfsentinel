@@ -105,6 +105,9 @@ use super::zone_handler;
         // NAT
         nat_handler::nat_status,
         nat_handler::list_nat_rules,
+        nat_handler::list_nptv6_rules,
+        nat_handler::create_nptv6_rule,
+        nat_handler::delete_nptv6_rule,
         // Aliases
         alias_handler::alias_status,
         alias_handler::set_external_alias_content,
@@ -192,6 +195,8 @@ use super::zone_handler;
         // NAT
         nat_handler::NatStatusResponse,
         nat_handler::NatRuleResponse,
+        nat_handler::NptV6RuleResponse,
+        nat_handler::CreateNptV6RuleRequest,
         // Aliases
         alias_handler::AliasStatusResponse,
         alias_handler::ExternalAliasContent,

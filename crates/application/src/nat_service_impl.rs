@@ -1,7 +1,8 @@
+use std::net::Ipv6Addr;
 use std::sync::Arc;
 
 use domain::common::error::DomainError;
-use domain::nat::entity::NatRule;
+use domain::nat::entity::{NatRule, NptV6Rule};
 use ports::secondary::metrics_port::MetricsPort;
 use ports::secondary::nat_map_port::NatMapPort;
 
@@ -12,6 +13,7 @@ use ports::secondary::nat_map_port::NatMapPort;
 pub struct NatAppService {
     dnat_rules: Vec<NatRule>,
     snat_rules: Vec<NatRule>,
+    nptv6_rules: Vec<NptV6Rule>,
     map_port: Option<Box<dyn NatMapPort + Send>>,
     metrics: Arc<dyn MetricsPort>,
     enabled: bool,
@@ -22,6 +24,7 @@ impl NatAppService {
         Self {
             dnat_rules: Vec::new(),
             snat_rules: Vec::new(),
+            nptv6_rules: Vec::new(),
             map_port: None,
             metrics,
             enabled: false,
@@ -88,9 +91,53 @@ impl NatAppService {
         &self.snat_rules
     }
 
+    /// List all `NPTv6` rules.
+    pub fn nptv6_rules(&self) -> &[NptV6Rule] {
+        &self.nptv6_rules
+    }
+
+    /// Reload `NPTv6` rules. Validates, computes adjustments, and syncs to eBPF.
+    pub fn reload_nptv6_rules(&mut self, rules: Vec<NptV6Rule>) -> Result<(), DomainError> {
+        for rule in &rules {
+            rule.validate()
+                .map_err(|e| DomainError::InvalidRule(e.to_string()))?;
+        }
+        let count = rules.len();
+        self.nptv6_rules = rules;
+        self.sync_ebpf_nptv6();
+        self.update_metrics();
+        tracing::info!(count, "NPTv6 rules reloaded");
+        Ok(())
+    }
+
+    /// Add a single `NPTv6` rule at runtime.
+    pub fn add_nptv6_rule(&mut self, rule: NptV6Rule) -> Result<(), DomainError> {
+        rule.validate()
+            .map_err(|e| DomainError::InvalidRule(e.to_string()))?;
+        if self.nptv6_rules.iter().any(|r| r.id == rule.id) {
+            return Err(DomainError::DuplicateRule(rule.id));
+        }
+        self.nptv6_rules.push(rule);
+        self.sync_ebpf_nptv6();
+        self.update_metrics();
+        Ok(())
+    }
+
+    /// Remove an `NPTv6` rule by ID.
+    pub fn remove_nptv6_rule(&mut self, id: &str) -> Result<(), DomainError> {
+        let before = self.nptv6_rules.len();
+        self.nptv6_rules.retain(|r| r.id != id);
+        if self.nptv6_rules.len() == before {
+            return Err(DomainError::RuleNotFound(id.to_string()));
+        }
+        self.sync_ebpf_nptv6();
+        self.update_metrics();
+        Ok(())
+    }
+
     /// Return the total number of active NAT rules.
     pub fn rule_count(&self) -> usize {
-        self.dnat_rules.len() + self.snat_rules.len()
+        self.dnat_rules.len() + self.snat_rules.len() + self.nptv6_rules.len()
     }
 
     fn sync_ebpf_dnat(&mut self) {
@@ -147,6 +194,23 @@ impl NatAppService {
         }
     }
 
+    fn sync_ebpf_nptv6(&mut self) {
+        let Some(ref mut port) = self.map_port else {
+            return;
+        };
+
+        let entries: Vec<ebpf_common::nat::NptV6RuleEntry> = self
+            .nptv6_rules
+            .iter()
+            .filter(|r| r.enabled)
+            .map(nptv6_rule_to_ebpf_entry)
+            .collect();
+
+        if let Err(e) = port.load_nptv6_rules(&entries) {
+            tracing::warn!("failed to load NPTv6 rules into eBPF: {e}");
+        }
+    }
+
     fn update_metrics(&self) {
         self.metrics
             .set_rules_loaded("nat", self.rule_count() as u64);
@@ -154,6 +218,8 @@ impl NatAppService {
             .set_rules_loaded("nat-dnat", self.dnat_rules.len() as u64);
         self.metrics
             .set_rules_loaded("nat-snat", self.snat_rules.len() as u64);
+        self.metrics
+            .set_rules_loaded("nat-nptv6", self.nptv6_rules.len() as u64);
     }
 }
 
@@ -509,6 +575,59 @@ fn prefix_to_ipv6_mask(prefix_len: u32) -> [u32; 4] {
     mask
 }
 
+/// Compute the `NPTv6` checksum adjustment per RFC 6296 section 3.1.
+///
+/// `adjustment = ones_complement_sum(external_prefix) - ones_complement_sum(internal_prefix)`
+///
+/// The result is a 16-bit value used by the eBPF program to adjust the
+/// IID (Interface Identifier) word for checksum-neutral translation.
+#[allow(clippy::cast_possible_truncation)]
+fn compute_nptv6_adjustment(internal: &Ipv6Addr, external: &Ipv6Addr, prefix_len: u8) -> u16 {
+    let int_sum = ones_complement_sum_ipv6(internal, prefix_len);
+    let ext_sum = ones_complement_sum_ipv6(external, prefix_len);
+    // Ones-complement subtraction: ext - int = ext + ~int
+    let diff = u32::from(ext_sum) + u32::from(!int_sum);
+    let folded = (diff & 0xFFFF) + (diff >> 16);
+    let folded = (folded & 0xFFFF) + (folded >> 16);
+    folded as u16
+}
+
+/// Ones-complement sum of the first `prefix_len` bits of an IPv6 address,
+/// computed as 16-bit words.
+#[allow(clippy::cast_possible_truncation)]
+fn ones_complement_sum_ipv6(addr: &Ipv6Addr, prefix_len: u8) -> u16 {
+    let octets = addr.octets();
+    let words = usize::from(prefix_len) / 16; // number of full 16-bit words
+    let mut sum: u32 = 0;
+    for i in 0..words {
+        let word = (u32::from(octets[i * 2]) << 8) | u32::from(octets[i * 2 + 1]);
+        sum += word;
+    }
+    // Fold carry
+    while sum > 0xFFFF {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    sum as u16
+}
+
+/// Convert a domain `NptV6Rule` to an eBPF `NptV6RuleEntry` with computed adjustment.
+fn nptv6_rule_to_ebpf_entry(rule: &NptV6Rule) -> ebpf_common::nat::NptV6RuleEntry {
+    let adjustment = compute_nptv6_adjustment(
+        &rule.internal_prefix,
+        &rule.external_prefix,
+        rule.prefix_len,
+    );
+
+    ebpf_common::nat::NptV6RuleEntry {
+        internal_prefix: ipv6_to_u32x4(&rule.internal_prefix),
+        external_prefix: ipv6_to_u32x4(&rule.external_prefix),
+        prefix_len: rule.prefix_len,
+        enabled: u8::from(rule.enabled),
+        adjustment,
+        _pad: [0; 4],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,5 +751,100 @@ mod tests {
         let (ip, mask) = parse_cidr_to_ip_mask("10.0.0.1").unwrap();
         assert_eq!(ip, u32::from(std::net::Ipv4Addr::new(10, 0, 0, 1)));
         assert_eq!(mask, 0xFFFF_FFFF);
+    }
+
+    // ── NPTv6 tests ────────────────────────────────────────────────
+
+    fn make_nptv6_rule(id: &str) -> NptV6Rule {
+        NptV6Rule {
+            id: id.to_string(),
+            enabled: true,
+            internal_prefix: "fd00:1::".parse().unwrap(),
+            external_prefix: "2001:db8:1::".parse().unwrap(),
+            prefix_len: 48,
+        }
+    }
+
+    #[test]
+    fn reload_nptv6_rules() {
+        let mut svc = make_service();
+        svc.reload_nptv6_rules(vec![make_nptv6_rule("nptv6-1")])
+            .unwrap();
+        assert_eq!(svc.nptv6_rules().len(), 1);
+        assert_eq!(svc.rule_count(), 1);
+    }
+
+    #[test]
+    fn add_nptv6_rule() {
+        let mut svc = make_service();
+        svc.add_nptv6_rule(make_nptv6_rule("nptv6-1")).unwrap();
+        assert_eq!(svc.nptv6_rules().len(), 1);
+    }
+
+    #[test]
+    fn add_nptv6_duplicate_rejected() {
+        let mut svc = make_service();
+        svc.add_nptv6_rule(make_nptv6_rule("nptv6-1")).unwrap();
+        assert!(svc.add_nptv6_rule(make_nptv6_rule("nptv6-1")).is_err());
+    }
+
+    #[test]
+    fn remove_nptv6_rule() {
+        let mut svc = make_service();
+        svc.add_nptv6_rule(make_nptv6_rule("nptv6-1")).unwrap();
+        svc.remove_nptv6_rule("nptv6-1").unwrap();
+        assert!(svc.nptv6_rules().is_empty());
+    }
+
+    #[test]
+    fn remove_nptv6_not_found() {
+        let mut svc = make_service();
+        assert!(svc.remove_nptv6_rule("nonexistent").is_err());
+    }
+
+    #[test]
+    fn nptv6_rule_to_entry() {
+        let rule = make_nptv6_rule("test");
+        let entry = nptv6_rule_to_ebpf_entry(&rule);
+        assert_eq!(entry.prefix_len, 48);
+        assert_eq!(entry.enabled, 1);
+        // Internal prefix fd00:0001:: -> [0xfd00_0001, 0, 0, 0]
+        assert_eq!(entry.internal_prefix[0], 0xfd00_0001);
+        // External prefix 2001:0db8:0001:: -> [0x2001_0db8, 0x0001_0000, 0, 0]
+        assert_eq!(entry.external_prefix[0], 0x2001_0db8);
+    }
+
+    #[test]
+    fn ones_complement_sum_ipv6_basic() {
+        // fd00:0001:: with /48 = 3 words: 0xfd00 + 0x0001 + 0x0000
+        let addr: Ipv6Addr = "fd00:1::".parse().unwrap();
+        let sum = ones_complement_sum_ipv6(&addr, 48);
+        assert_eq!(sum, 0xfd01);
+    }
+
+    #[test]
+    fn compute_nptv6_adjustment_basic() {
+        let internal: Ipv6Addr = "fd00:1::".parse().unwrap();
+        let external: Ipv6Addr = "2001:db8:1::".parse().unwrap();
+        let adj = compute_nptv6_adjustment(&internal, &external, 48);
+        // Should be a non-zero 16-bit value
+        assert_ne!(adj, 0);
+    }
+
+    #[test]
+    fn compute_nptv6_adjustment_same_prefix() {
+        let addr: Ipv6Addr = "2001:db8::".parse().unwrap();
+        let adj = compute_nptv6_adjustment(&addr, &addr, 48);
+        // Same prefix => adjustment should be 0 or 0xFFFF (ones-complement zero)
+        // ext_sum - int_sum = 0 in ones-complement, which is 0x0000 or 0xFFFF
+        assert!(adj == 0 || adj == 0xFFFF);
+    }
+
+    #[test]
+    fn nptv6_rule_count_included() {
+        let mut svc = make_service();
+        svc.reload_snat_rules(vec![make_snat_rule("s1")]).unwrap();
+        svc.reload_nptv6_rules(vec![make_nptv6_rule("n1")]).unwrap();
+        assert_eq!(svc.rule_count(), 2);
     }
 }

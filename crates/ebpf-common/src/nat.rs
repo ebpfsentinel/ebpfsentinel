@@ -17,6 +17,10 @@ pub const NAT_TYPE_DNAT: u8 = 2;
 pub const NAT_TYPE_MASQUERADE: u8 = 3;
 pub const NAT_TYPE_REDIRECT: u8 = 4;
 pub const NAT_TYPE_ONETOONE: u8 = 5;
+pub const NAT_TYPE_NPTV6: u8 = 6;
+
+/// Maximum NPTv6 (RFC 6296) prefix translation rules.
+pub const MAX_NPTV6_RULES: u32 = 64;
 
 // ── NAT metric indices ──────────────────────────────────────────────
 
@@ -27,6 +31,8 @@ pub const NAT_METRIC_PORT_ALLOC_FAIL: u32 = 3;
 pub const NAT_METRIC_ERRORS: u32 = 4;
 /// Metric index: total packets seen (unconditional, first instruction).
 pub const NAT_METRIC_TOTAL_SEEN: u32 = 5;
+/// Metric index: NPTv6 prefix translations applied.
+pub const NAT_METRIC_NPTV6_TRANSLATED: u32 = 6;
 pub const NAT_METRIC_COUNT: u32 = 8;
 
 // ── NAT match flags ─────────────────────────────────────────────────
@@ -110,6 +116,27 @@ pub struct NatRuleEntryV6 {
     pub nat_interface: u32,
 }
 
+// ── NPTv6 rule entry — 40 bytes ─────────────────────────────────────
+
+/// NPTv6 rule entry — stateless IPv6 prefix translation (RFC 6296).
+/// Bidirectional: egress rewrites src (internal->external),
+/// ingress rewrites dst (external->internal).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NptV6RuleEntry {
+    /// Internal (site-local) prefix, host byte order.
+    pub internal_prefix: [u32; 4],
+    /// External (provider) prefix, host byte order.
+    pub external_prefix: [u32; 4],
+    /// Prefix length (1-64).
+    pub prefix_len: u8,
+    /// 1 = enabled, 0 = disabled.
+    pub enabled: u8,
+    /// Pre-computed RFC 6296 checksum adjustment.
+    pub adjustment: u16,
+    pub _pad: [u8; 4],
+}
+
 // ── NAT port allocation key — 8 bytes ───────────────────────────────
 
 /// Key for NAT port allocation (LRU HashMap).
@@ -136,6 +163,8 @@ pub struct NatPortAllocValue {
 unsafe impl aya::Pod for NatRuleEntry {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for NatRuleEntryV6 {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for NptV6RuleEntry {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for NatPortAllocKey {}
 #[cfg(feature = "userspace")]
@@ -203,6 +232,26 @@ mod tests {
     }
 
     #[test]
+    fn nptv6_rule_entry_size() {
+        assert_eq!(mem::size_of::<NptV6RuleEntry>(), 40);
+    }
+
+    #[test]
+    fn nptv6_rule_entry_alignment() {
+        assert_eq!(mem::align_of::<NptV6RuleEntry>(), 4);
+    }
+
+    #[test]
+    fn nptv6_rule_entry_field_offsets() {
+        assert_eq!(mem::offset_of!(NptV6RuleEntry, internal_prefix), 0);
+        assert_eq!(mem::offset_of!(NptV6RuleEntry, external_prefix), 16);
+        assert_eq!(mem::offset_of!(NptV6RuleEntry, prefix_len), 32);
+        assert_eq!(mem::offset_of!(NptV6RuleEntry, enabled), 33);
+        assert_eq!(mem::offset_of!(NptV6RuleEntry, adjustment), 34);
+        assert_eq!(mem::offset_of!(NptV6RuleEntry, _pad), 36);
+    }
+
+    #[test]
     fn nat_port_alloc_key_size() {
         assert_eq!(mem::size_of::<NatPortAllocKey>(), 8);
     }
@@ -221,6 +270,7 @@ mod tests {
             NAT_TYPE_MASQUERADE,
             NAT_TYPE_REDIRECT,
             NAT_TYPE_ONETOONE,
+            NAT_TYPE_NPTV6,
         ];
         for (i, &a) in types.iter().enumerate() {
             for &b in &types[i + 1..] {

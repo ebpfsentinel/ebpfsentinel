@@ -399,6 +399,32 @@ pub struct LbBackendResponse {
     pub active_connections: u64,
 }
 
+// ── NAT ─────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct NatStatusResponse {
+    pub enabled: bool,
+    pub rule_count: usize,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct NatRuleResponse {
+    pub id: String,
+    pub nat_type: String,
+    pub direction: String,
+    pub priority: u32,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct NptV6RuleResponse {
+    pub id: String,
+    pub enabled: bool,
+    pub internal_prefix: String,
+    pub external_prefix: String,
+    pub prefix_len: u8,
+}
+
 #[derive(Deserialize)]
 struct ApiErrorBody {
     error: ApiErrorDetail,
@@ -1052,6 +1078,57 @@ impl ApiClient {
                 reqwest::Method::DELETE,
                 &format!("/api/v1/qos/classifiers/{id}"),
             )
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_delete(resp).await
+    }
+
+    // ── NAT ───────────────────────────────────────────────────────
+
+    pub async fn nat_status(&self) -> anyhow::Result<NatStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/nat/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn list_nat_rules(&self) -> anyhow::Result<Vec<NatRuleResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/nat/rules")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn list_nptv6_rules(&self) -> anyhow::Result<Vec<NptV6RuleResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/nat/nptv6")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn create_nptv6_rule(
+        &self,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<NptV6RuleResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/nat/nptv6")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn delete_nptv6_rule(&self, id: &str) -> anyhow::Result<()> {
+        let resp = self
+            .request(reqwest::Method::DELETE, &format!("/api/v1/nat/nptv6/{id}"))
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

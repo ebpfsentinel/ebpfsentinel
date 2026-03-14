@@ -1,10 +1,10 @@
 //! NAT configuration parsing.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
 use domain::common::entity::RuleId;
 use domain::firewall::entity::PortRange;
-use domain::nat::entity::{NatRule, NatType};
+use domain::nat::entity::{NatRule, NatType, NptV6Rule};
 use serde::{Deserialize, Serialize};
 
 use super::common::{ConfigError, default_true};
@@ -12,6 +12,9 @@ use super::firewall::PortRangeConfig;
 
 /// Maximum NAT rules per direction.
 pub(super) const MAX_NAT_RULES: usize = 256;
+
+/// Maximum `NPTv6` prefix translation rules.
+pub(super) const MAX_NPTV6_RULES: usize = 64;
 
 /// Full NAT configuration section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -24,6 +27,10 @@ pub struct NatConfig {
 
     #[serde(default)]
     pub dnat_rules: Vec<NatRuleConfig>,
+
+    /// `NPTv6` (RFC 6296) prefix translation rules.
+    #[serde(default)]
+    pub nptv6_rules: Vec<NptV6RuleConfig>,
 }
 
 impl NatConfig {
@@ -34,6 +41,9 @@ impl NatConfig {
         }
         for (idx, rule_cfg) in self.dnat_rules.iter().enumerate() {
             rule_cfg.validate(idx, "nat.dnat_rules")?;
+        }
+        for (idx, rule_cfg) in self.nptv6_rules.iter().enumerate() {
+            rule_cfg.validate(idx)?;
         }
         Ok(())
     }
@@ -113,6 +123,87 @@ pub struct NatRuleConfig {
 
 fn default_priority() -> u32 {
     100
+}
+
+/// YAML representation of an `NPTv6` (RFC 6296) prefix translation rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NptV6RuleConfig {
+    pub id: String,
+
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Internal (site-local) IPv6 prefix, e.g. `fd00:1::`.
+    pub internal_prefix: String,
+
+    /// External (provider) IPv6 prefix, e.g. `2001:db8:1::`.
+    pub external_prefix: String,
+
+    /// Prefix length in bits (1-64).
+    pub prefix_len: u8,
+}
+
+impl NptV6RuleConfig {
+    /// Validate this `NPTv6` rule config.
+    pub(super) fn validate(&self, idx: usize) -> Result<(), ConfigError> {
+        let prefix = format!("nat.nptv6_rules[{idx}]");
+
+        if self.id.is_empty() {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.id"),
+                message: "rule ID must not be empty".to_string(),
+            });
+        }
+
+        if self.prefix_len == 0 || self.prefix_len > 64 {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.prefix_len"),
+                message: format!("prefix_len must be 1..=64, got {}", self.prefix_len),
+            });
+        }
+
+        self.internal_prefix
+            .parse::<Ipv6Addr>()
+            .map_err(|e| ConfigError::Validation {
+                field: format!("{prefix}.internal_prefix"),
+                message: format!("invalid IPv6 address: {e}"),
+            })?;
+
+        self.external_prefix
+            .parse::<Ipv6Addr>()
+            .map_err(|e| ConfigError::Validation {
+                field: format!("{prefix}.external_prefix"),
+                message: format!("invalid IPv6 address: {e}"),
+            })?;
+
+        Ok(())
+    }
+
+    /// Convert to a domain `NptV6Rule`.
+    pub fn to_domain_rule(&self) -> Result<NptV6Rule, ConfigError> {
+        let internal_prefix: Ipv6Addr =
+            self.internal_prefix
+                .parse()
+                .map_err(|e| ConfigError::Validation {
+                    field: "internal_prefix".to_string(),
+                    message: format!("invalid IPv6: {e}"),
+                })?;
+        let external_prefix: Ipv6Addr =
+            self.external_prefix
+                .parse()
+                .map_err(|e| ConfigError::Validation {
+                    field: "external_prefix".to_string(),
+                    message: format!("invalid IPv6: {e}"),
+                })?;
+
+        Ok(NptV6Rule {
+            id: self.id.clone(),
+            enabled: self.enabled,
+            internal_prefix,
+            external_prefix,
+            prefix_len: self.prefix_len,
+        })
+    }
 }
 
 impl NatRuleConfig {
@@ -482,6 +573,7 @@ mod tests {
         assert!(!cfg.enabled);
         assert!(cfg.snat_rules.is_empty());
         assert!(cfg.dnat_rules.is_empty());
+        assert!(cfg.nptv6_rules.is_empty());
     }
 
     #[test]
@@ -500,5 +592,88 @@ dnat_rules: []
         assert!(cfg.enabled);
         assert_eq!(cfg.snat_rules.len(), 1);
         assert!(cfg.validate().is_ok());
+    }
+
+    // ── NPTv6 config tests ─────────────────────────────────────────
+
+    fn nptv6_config() -> NptV6RuleConfig {
+        NptV6RuleConfig {
+            id: "nptv6-1".to_string(),
+            enabled: true,
+            internal_prefix: "fd00:1::".to_string(),
+            external_prefix: "2001:db8:1::".to_string(),
+            prefix_len: 48,
+        }
+    }
+
+    #[test]
+    fn nptv6_validate_ok() {
+        assert!(nptv6_config().validate(0).is_ok());
+    }
+
+    #[test]
+    fn nptv6_validate_empty_id() {
+        let mut cfg = nptv6_config();
+        cfg.id = String::new();
+        assert!(nptv6_config().validate(0).is_ok());
+        cfg.id = String::new();
+        assert!(cfg.validate(0).is_err());
+    }
+
+    #[test]
+    fn nptv6_validate_prefix_len_zero() {
+        let mut cfg = nptv6_config();
+        cfg.prefix_len = 0;
+        assert!(cfg.validate(0).is_err());
+    }
+
+    #[test]
+    fn nptv6_validate_prefix_len_65() {
+        let mut cfg = nptv6_config();
+        cfg.prefix_len = 65;
+        assert!(cfg.validate(0).is_err());
+    }
+
+    #[test]
+    fn nptv6_validate_invalid_internal_prefix() {
+        let mut cfg = nptv6_config();
+        cfg.internal_prefix = "not-an-ip".to_string();
+        assert!(cfg.validate(0).is_err());
+    }
+
+    #[test]
+    fn nptv6_validate_invalid_external_prefix() {
+        let mut cfg = nptv6_config();
+        cfg.external_prefix = "not-an-ip".to_string();
+        assert!(cfg.validate(0).is_err());
+    }
+
+    #[test]
+    fn nptv6_to_domain_rule() {
+        let rule = nptv6_config().to_domain_rule().unwrap();
+        assert_eq!(rule.id, "nptv6-1");
+        assert_eq!(rule.prefix_len, 48);
+        assert!(rule.enabled);
+    }
+
+    #[test]
+    fn nptv6_yaml_roundtrip() {
+        let yaml = r#"
+enabled: true
+snat_rules: []
+dnat_rules: []
+nptv6_rules:
+  - id: nptv6-site1
+    enabled: true
+    internal_prefix: "fd00:1::"
+    external_prefix: "2001:db8:1::"
+    prefix_len: 48
+"#;
+        let cfg: NatConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(cfg.nptv6_rules.len(), 1);
+        assert!(cfg.validate().is_ok());
+        let rule = cfg.nptv6_rules[0].to_domain_rule().unwrap();
+        assert_eq!(rule.id, "nptv6-site1");
+        assert_eq!(rule.prefix_len, 48);
     }
 }

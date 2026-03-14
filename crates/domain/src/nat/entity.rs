@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
 use crate::common::entity::RuleId;
 use crate::firewall::entity::PortRange;
@@ -121,6 +121,42 @@ impl NatRule {
             });
         }
 
+        Ok(())
+    }
+}
+
+/// `NPTv6` prefix translation rule (RFC 6296).
+///
+/// Provides stateless, bidirectional IPv6-to-IPv6 prefix translation.
+/// Egress: internal prefix -> external prefix (source rewrite).
+/// Ingress: external prefix -> internal prefix (destination rewrite).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NptV6Rule {
+    /// Unique rule identifier.
+    pub id: String,
+    /// Whether this rule is active.
+    pub enabled: bool,
+    /// Internal (site-local) IPv6 prefix, e.g. `fd00:1::`.
+    pub internal_prefix: Ipv6Addr,
+    /// External (provider) IPv6 prefix, e.g. `2001:db8:1::`.
+    pub external_prefix: Ipv6Addr,
+    /// Prefix length in bits (1-64).
+    pub prefix_len: u8,
+}
+
+impl NptV6Rule {
+    /// Validate this `NPTv6` rule.
+    pub fn validate(&self) -> Result<(), NatError> {
+        if self.id.is_empty() {
+            return Err(NatError::InvalidRule {
+                reason: "NPTv6 rule ID must not be empty".to_string(),
+            });
+        }
+        if self.prefix_len == 0 || self.prefix_len > 64 {
+            return Err(NatError::InvalidRule {
+                reason: format!("NPTv6 prefix_len must be 1..=64, got {}", self.prefix_len),
+            });
+        }
         Ok(())
     }
 }
@@ -304,5 +340,56 @@ mod tests {
             end: 100,
         });
         assert!(rule.validate().is_err());
+    }
+
+    // ── NPTv6 tests ────────────────────────────────────────────────
+
+    fn make_nptv6_rule(id: &str) -> NptV6Rule {
+        NptV6Rule {
+            id: id.to_string(),
+            enabled: true,
+            internal_prefix: "fd00:1::".parse().unwrap(),
+            external_prefix: "2001:db8:1::".parse().unwrap(),
+            prefix_len: 48,
+        }
+    }
+
+    #[test]
+    fn nptv6_validate_ok() {
+        assert!(make_nptv6_rule("nptv6-1").validate().is_ok());
+    }
+
+    #[test]
+    fn nptv6_validate_empty_id() {
+        let rule = make_nptv6_rule("");
+        assert!(rule.validate().is_err());
+    }
+
+    #[test]
+    fn nptv6_validate_prefix_len_zero() {
+        let mut rule = make_nptv6_rule("nptv6-1");
+        rule.prefix_len = 0;
+        assert!(rule.validate().is_err());
+    }
+
+    #[test]
+    fn nptv6_validate_prefix_len_65() {
+        let mut rule = make_nptv6_rule("nptv6-1");
+        rule.prefix_len = 65;
+        assert!(rule.validate().is_err());
+    }
+
+    #[test]
+    fn nptv6_validate_prefix_len_64() {
+        let mut rule = make_nptv6_rule("nptv6-1");
+        rule.prefix_len = 64;
+        assert!(rule.validate().is_ok());
+    }
+
+    #[test]
+    fn nptv6_validate_prefix_len_1() {
+        let mut rule = make_nptv6_rule("nptv6-1");
+        rule.prefix_len = 1;
+        assert!(rule.validate().is_ok());
     }
 }

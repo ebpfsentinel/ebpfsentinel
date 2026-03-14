@@ -22,10 +22,12 @@ use ebpf_common::{
         CT_MAX_ENTRIES_V6, normalize_key_v4, normalize_key_v6,
     },
     nat::{
-        MAX_NAT_PORT_ALLOC, MAX_NAT_RULES, MAX_NAT_RULES_V6, NAT_MATCH_DST_IP, NAT_MATCH_PROTO,
+        MAX_NAT_PORT_ALLOC, MAX_NAT_RULES, MAX_NAT_RULES_V6, MAX_NPTV6_RULES,
+        NAT_MATCH_DST_IP, NAT_MATCH_PROTO,
         NAT_MATCH_SRC_IP, NAT_METRIC_COUNT, NAT_METRIC_ERRORS, NAT_METRIC_MASQ_APPLIED,
-        NAT_METRIC_SNAT_APPLIED, NAT_METRIC_TOTAL_SEEN, NAT_TYPE_MASQUERADE, NAT_TYPE_SNAT,
-        NatPortAllocKey, NatPortAllocValue, NatRuleEntry, NatRuleEntryV6,
+        NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_SNAT_APPLIED, NAT_METRIC_TOTAL_SEEN,
+        NAT_TYPE_MASQUERADE, NAT_TYPE_SNAT,
+        NatPortAllocKey, NatPortAllocValue, NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry,
     },
 };
 use network_types::{
@@ -80,6 +82,14 @@ static CT_TABLE_V6: LruHashMap<ConnKeyV6, ConnValueV6> =
 #[map]
 static NAT_PORT_ALLOC: LruHashMap<NatPortAllocKey, NatPortAllocValue> =
     LruHashMap::with_max_entries(MAX_NAT_PORT_ALLOC, 0);
+
+/// NPTv6 prefix translation rules (RFC 6296).
+#[map]
+static NPTV6_RULES: Array<NptV6RuleEntry> = Array::with_max_entries(MAX_NPTV6_RULES, 0);
+
+/// Number of active NPTv6 rules.
+#[map]
+static NPTV6_RULE_COUNT: Array<u32> = Array::with_max_entries(1, 0);
 
 /// Per-CPU NAT metrics.
 #[map]
@@ -353,6 +363,11 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
     let raw_protocol = unsafe { (*ipv6hdr).next_hdr };
 
+    // Check NPTv6 rules first (stateless, no conntrack needed).
+    if try_nptv6_egress(ctx, l3_offset, &src_addr)? {
+        return Ok(TC_ACT_OK);
+    }
+
     // Skip IPv6 extension headers to find the actual L4 protocol.
     let (protocol, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_protocol)
         .ok_or(())?;
@@ -448,6 +463,129 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     }
 
     Ok(TC_ACT_OK)
+}
+
+// ── NPTv6 (RFC 6296) egress helpers ─────────────────────────────────
+
+/// Ones-complement addition of two u16 values (with carry fold).
+#[inline(always)]
+fn ones_complement_add(a: u16, b: u16) -> u16 {
+    let sum = a as u32 + b as u32;
+    let folded = (sum & 0xFFFF) + (sum >> 16);
+    folded as u16
+}
+
+/// Build an IPv6 prefix mask from `prefix_len` (0-128) as `[u32; 4]`.
+#[inline(always)]
+fn prefix_to_mask(prefix_len: u8) -> [u32; 4] {
+    let mut mask = [0u32; 4];
+    let mut remaining = prefix_len as u32;
+    let mut i = 0usize;
+    while i < 4 {
+        if remaining >= 32 {
+            mask[i] = 0xFFFF_FFFF;
+            remaining -= 32;
+        } else if remaining > 0 {
+            mask[i] = !((1u32 << (32 - remaining)) - 1);
+            remaining = 0;
+        }
+        i += 1;
+    }
+    mask
+}
+
+/// Try NPTv6 prefix translation on egress (src rewrite: internal -> external).
+/// Returns `true` if a rule matched and translation was applied.
+#[inline(always)]
+fn try_nptv6_egress(ctx: &TcContext, l3_offset: usize, src_addr: &[u32; 4]) -> Result<bool, ()> {
+    let count = match NPTV6_RULE_COUNT.get(0) {
+        Some(&c) if c > 0 => {
+            if c > MAX_NPTV6_RULES { MAX_NPTV6_RULES } else { c }
+        }
+        _ => return Ok(false),
+    };
+
+    let mut i = 0u32;
+    while i < count {
+        if let Some(rule) = NPTV6_RULES.get(i) {
+            if rule.enabled != 0 {
+                let mask = prefix_to_mask(rule.prefix_len);
+                // Check if src matches internal_prefix.
+                let mut matches = true;
+                let mut j = 0usize;
+                while j < 4 {
+                    if (src_addr[j] & mask[j]) != (rule.internal_prefix[j] & mask[j]) {
+                        matches = false;
+                        break;
+                    }
+                    j += 1;
+                }
+                if matches {
+                    apply_nptv6_src(ctx, l3_offset, src_addr, rule)?;
+                    increment_metric(NAT_METRIC_NPTV6_TRANSLATED);
+                    return Ok(true);
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(false)
+}
+
+/// Apply NPTv6 source prefix translation (checksum-neutral per RFC 6296).
+#[inline(always)]
+fn apply_nptv6_src(
+    ctx: &TcContext,
+    l3_offset: usize,
+    src_addr: &[u32; 4],
+    rule: &NptV6RuleEntry,
+) -> Result<(), ()> {
+    let mask = prefix_to_mask(rule.prefix_len);
+
+    // Build new address: external_prefix | (src_addr & ~mask).
+    let mut new_addr = [0u32; 4];
+    let mut k = 0usize;
+    while k < 4 {
+        new_addr[k] = (rule.external_prefix[k] & mask[k]) | (src_addr[k] & !mask[k]);
+        k += 1;
+    }
+
+    // Apply checksum adjustment to the first 16-bit word after the prefix
+    // (RFC 6296 section 3.1).
+    let adj_word_idx = rule.prefix_len as usize / 16;
+    if adj_word_idx < 8 {
+        let u32_idx = adj_word_idx / 2;
+        let high = (adj_word_idx % 2) == 0;
+        let current_word = if high {
+            (new_addr[u32_idx] >> 16) as u16
+        } else {
+            new_addr[u32_idx] as u16
+        };
+        let adjusted = ones_complement_add(current_word, rule.adjustment);
+        if high {
+            new_addr[u32_idx] = ((adjusted as u32) << 16) | (new_addr[u32_idx] & 0xFFFF);
+        } else {
+            new_addr[u32_idx] = (new_addr[u32_idx] & 0xFFFF_0000) | (adjusted as u32);
+        }
+    }
+
+    // Write new source address (IPv6 src is at offset 8 from IPv6 header).
+    let src_off = (l3_offset + IPV6_SRC_OFFSET) as u32;
+    let new_bytes = u32x4_to_bytes(&new_addr);
+    let ret = unsafe {
+        bpf_skb_store_bytes(
+            ctx.skb.skb as *mut _,
+            src_off,
+            new_bytes.as_ptr() as *const _,
+            16,
+            BPF_F_RECOMPUTE_CSUM,
+        )
+    };
+    if ret != 0 {
+        return Err(());
+    }
+
+    Ok(())
 }
 
 /// Allocate a port from the rule's port range using a hash-based scheme.

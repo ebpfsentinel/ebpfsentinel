@@ -14,7 +14,8 @@ use anyhow::Result;
 use api_client::ApiClient;
 use cli::{
     AlertsCommand, AuditCommand, Command, DdosCommand, DnsCommand, DomainsCommand, FirewallCommand,
-    IpsCommand, L7Command, LbCommand, QosCommand, RatelimitCommand, ThreatintelCommand,
+    IpsCommand, L7Command, LbCommand, NatCommand, NptV6Command, QosCommand, RatelimitCommand,
+    ThreatintelCommand,
 };
 
 #[tokio::main]
@@ -251,6 +252,36 @@ async fn main() -> Result<()> {
                 QosCommand::DeleteClassifier { id } => {
                     commands::cmd_qos_delete_classifier(&client, &id).await
                 }
+            }
+        }
+
+        Some(Command::Nat(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                NatCommand::Status => commands::cmd_nat_status(&client, output).await,
+                NatCommand::Rules => commands::cmd_nat_rules(&client, output).await,
+                NatCommand::Nptv6(sub) => match sub {
+                    NptV6Command::List => commands::cmd_nat_nptv6_list(&client, output).await,
+                    NptV6Command::Create {
+                        id,
+                        internal_prefix,
+                        external_prefix,
+                        prefix_len,
+                    } => {
+                        commands::cmd_nat_nptv6_create(
+                            &client,
+                            &id,
+                            &internal_prefix,
+                            &external_prefix,
+                            prefix_len,
+                            output,
+                        )
+                        .await
+                    }
+                    NptV6Command::Delete { id } => {
+                        commands::cmd_nat_nptv6_delete(&client, &id).await
+                    }
+                },
             }
         }
 

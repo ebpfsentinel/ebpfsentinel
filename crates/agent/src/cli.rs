@@ -112,6 +112,9 @@ pub enum Command {
 
     /// `QoS` / traffic shaping: status, pipes, queues, classifiers
     Qos(DomainArgs<QosCommand>),
+
+    /// NAT: status, rules, `NPTv6` prefix translation
+    Nat(DomainArgs<NatCommand>),
 }
 
 /// Generic domain args: connection + subcommand.
@@ -423,6 +426,45 @@ pub enum DnsCommand {
     Blocklist,
     /// Flush the DNS cache
     Flush,
+}
+
+// ── NAT ──────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum NatCommand {
+    /// Show NAT status
+    Status,
+    /// List all NAT rules (DNAT + SNAT)
+    Rules,
+    /// `NPTv6` (RFC 6296) prefix translation management
+    #[command(subcommand)]
+    Nptv6(NptV6Command),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum NptV6Command {
+    /// List `NPTv6` prefix translation rules
+    List,
+    /// Create an `NPTv6` prefix translation rule
+    Create {
+        /// Rule ID
+        #[arg(long)]
+        id: String,
+        /// Internal (site-local) IPv6 prefix, e.g. `fd00:1::`
+        #[arg(long)]
+        internal_prefix: String,
+        /// External (provider) IPv6 prefix, e.g. `2001:db8:1::`
+        #[arg(long)]
+        external_prefix: String,
+        /// Prefix length in bits (1-64)
+        #[arg(long)]
+        prefix_len: u8,
+    },
+    /// Delete an `NPTv6` rule by ID
+    Delete {
+        /// Rule ID to delete
+        id: String,
+    },
 }
 
 pub fn parse() -> Cli {
@@ -1267,6 +1309,95 @@ mod tests {
                 _ => panic!("expected DeleteClassifier"),
             },
             _ => panic!("expected Qos command"),
+        }
+    }
+
+    // ── NAT ────────────────────────────────────────────────────────
+
+    #[test]
+    fn cli_nat_status() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "nat", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Nat(DomainArgs {
+                command: NatCommand::Status,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_nat_rules() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "nat", "rules"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Nat(DomainArgs {
+                command: NatCommand::Rules,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_nat_nptv6_list() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "nat", "nptv6", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Nat(DomainArgs {
+                command: NatCommand::Nptv6(NptV6Command::List),
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_nat_nptv6_create() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "nat",
+            "nptv6",
+            "create",
+            "--id",
+            "nptv6-1",
+            "--internal-prefix",
+            "fd00:1::",
+            "--external-prefix",
+            "2001:db8:1::",
+            "--prefix-len",
+            "48",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Nat(args)) => match args.command {
+                NatCommand::Nptv6(NptV6Command::Create {
+                    id,
+                    internal_prefix,
+                    external_prefix,
+                    prefix_len,
+                }) => {
+                    assert_eq!(id, "nptv6-1");
+                    assert_eq!(internal_prefix, "fd00:1::");
+                    assert_eq!(external_prefix, "2001:db8:1::");
+                    assert_eq!(prefix_len, 48);
+                }
+                _ => panic!("expected Nptv6 Create"),
+            },
+            _ => panic!("expected Nat command"),
+        }
+    }
+
+    #[test]
+    fn cli_nat_nptv6_delete() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "nat", "nptv6", "delete", "nptv6-1"])
+            .unwrap();
+        match cli.command {
+            Some(Command::Nat(args)) => match args.command {
+                NatCommand::Nptv6(NptV6Command::Delete { id }) => {
+                    assert_eq!(id, "nptv6-1");
+                }
+                _ => panic!("expected Nptv6 Delete"),
+            },
+            _ => panic!("expected Nat command"),
         }
     }
 }

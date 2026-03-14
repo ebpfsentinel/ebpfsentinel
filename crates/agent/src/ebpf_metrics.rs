@@ -105,6 +105,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (3, "port_alloc_fail"),
             (4, "errors"),
             (5, "total_seen"),
+            (6, "nptv6_translated"),
         ],
         "SCRUB_METRICS" => &[
             (0, "packets"),

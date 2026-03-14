@@ -55,7 +55,7 @@ pub use ids::{IdsConfig, IdsRuleConfig, SamplingConfig, ThresholdRuleConfig};
 pub use ips::{IpsConfig, IpsRuleConfig};
 pub use l7::{L7Config, L7RuleConfig};
 pub use loadbalancer::{LbBackendConfig, LbServiceConfig as LbServiceCfg, LoadBalancerConfig};
-pub use nat::{NatConfig, NatRuleConfig};
+pub use nat::{NatConfig, NatRuleConfig, NptV6RuleConfig};
 pub use qos::{QosClassifierConfig, QosPipeConfig, QosQueueConfig, QosSectionConfig};
 pub use ratelimit::{RateLimitRuleConfig, RateLimitSectionConfig};
 pub use routing::{GatewayConfig, HealthCheckConfig, RoutingConfig};
@@ -75,7 +75,7 @@ use domain::firewall::entity::FirewallRule;
 use domain::ids::entity::{IdsRule, SamplingMode};
 use domain::ips::entity::{IpsPolicy, WhitelistEntry};
 use domain::l7::entity::L7Rule;
-use domain::nat::entity::NatRule;
+use domain::nat::entity::{NatRule, NptV6Rule};
 use domain::ratelimit::entity::RateLimitPolicy;
 use domain::threatintel::entity::FeedConfig;
 use domain::zone::entity::ZoneConfig;
@@ -90,7 +90,7 @@ use common::{
 };
 use ddos::MAX_DDOS_POLICIES;
 use loadbalancer::MAX_LB_SERVICES;
-use nat::MAX_NAT_RULES;
+use nat::{MAX_NAT_RULES, MAX_NPTV6_RULES};
 use zone::MAX_ZONES;
 
 // ── Top-level config ───────────────────────────────────────────────
@@ -478,6 +478,11 @@ impl AgentConfig {
         // Validate NAT rules
         check_limit("nat.snat_rules", self.nat.snat_rules.len(), MAX_NAT_RULES)?;
         check_limit("nat.dnat_rules", self.nat.dnat_rules.len(), MAX_NAT_RULES)?;
+        check_limit(
+            "nat.nptv6_rules",
+            self.nat.nptv6_rules.len(),
+            MAX_NPTV6_RULES,
+        )?;
         self.nat.validate()?;
 
         // Validate zones
@@ -703,6 +708,15 @@ impl AgentConfig {
             .snat_rules
             .iter()
             .map(NatRuleConfig::to_domain_rule)
+            .collect()
+    }
+
+    /// Convert `NPTv6` rule configs to domain `NptV6Rule` entities.
+    pub fn nat_nptv6_rules(&self) -> Result<Vec<NptV6Rule>, ConfigError> {
+        self.nat
+            .nptv6_rules
+            .iter()
+            .map(NptV6RuleConfig::to_domain_rule)
             .collect()
     }
 

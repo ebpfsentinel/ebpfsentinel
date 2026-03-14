@@ -284,6 +284,10 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         if let Err(e) = nat_svc.reload_snat_rules(snat_rules) {
             warn!("NAT SNAT rules reload failed (non-fatal): {e}");
         }
+        let nptv6_rules = config.nat_nptv6_rules()?;
+        if let Err(e) = nat_svc.reload_nptv6_rules(nptv6_rules) {
+            warn!("NAT NPTv6 rules reload failed (non-fatal): {e}");
+        }
     }
     let nat_svc = Arc::new(RwLock::new(nat_svc));
     info!(enabled = config.nat.enabled, "NAT service initialized");
@@ -1120,8 +1124,10 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
                     // Re-sync rules to eBPF maps now that maps are wired
                     let dnat = config.nat_dnat_rules().unwrap_or_default();
                     let snat = config.nat_snat_rules().unwrap_or_default();
+                    let nptv6 = config.nat_nptv6_rules().unwrap_or_default();
                     let _ = svc.reload_dnat_rules(dnat);
                     let _ = svc.reload_snat_rules(snat);
+                    let _ = svc.reload_nptv6_rules(nptv6);
                 }
                 ebpf_state.add_loader(ingress_loader);
                 ebpf_state.add_loader(egress_loader);

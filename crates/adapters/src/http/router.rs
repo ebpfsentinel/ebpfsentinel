@@ -40,7 +40,9 @@ use super::lb_handler::{
 };
 use super::metrics_handler::metrics;
 use super::middleware::auth::jwt_auth_middleware;
-use super::nat_handler::{list_nat_rules, nat_status};
+use super::nat_handler::{
+    create_nptv6_rule, delete_nptv6_rule, list_nat_rules, list_nptv6_rules, nat_status,
+};
 use super::openapi::ApiDoc;
 use super::ops_handler::{get_config, get_ebpf_status, reload_config};
 use super::qos_handler::{
@@ -128,6 +130,11 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
             .route("/api/v1/dlp/patterns", get(list_dlp_patterns))
             .route("/api/v1/nat/status", get(nat_status))
             .route("/api/v1/nat/rules", get(list_nat_rules))
+            .route(
+                "/api/v1/nat/nptv6",
+                get(list_nptv6_rules).post(create_nptv6_rule),
+            )
+            .route("/api/v1/nat/nptv6/{id}", delete(delete_nptv6_rule))
             .route("/api/v1/aliases/status", get(alias_status))
             .route(
                 "/api/v1/aliases/{id}/content",

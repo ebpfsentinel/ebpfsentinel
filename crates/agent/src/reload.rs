@@ -366,8 +366,15 @@ async fn perform_reload(
             return;
         }
     };
+    let nptv6_rules = match config.nat_nptv6_rules() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid NAT NPTv6 rules");
+            return;
+        }
+    };
     if let Err(e) = reload_service
-        .reload_nat(dnat_rules, snat_rules, config.nat.enabled)
+        .reload_nat(dnat_rules, snat_rules, nptv6_rules, config.nat.enabled)
         .await
     {
         tracing::warn!(error = %e, "NAT config reload failed at application level");

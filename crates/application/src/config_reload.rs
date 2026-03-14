@@ -319,11 +319,12 @@ impl ConfigReloadService {
         Ok(())
     }
 
-    /// Reload NAT rules.
+    /// Reload NAT rules (DNAT, SNAT, and `NPTv6`).
     pub async fn reload_nat(
         &self,
         dnat_rules: Vec<NatRule>,
         snat_rules: Vec<NatRule>,
+        nptv6_rules: Vec<domain::nat::entity::NptV6Rule>,
         enabled: bool,
     ) -> Result<(), anyhow::Error> {
         let Some(ref nat_svc) = self.nat_service else {
@@ -339,11 +340,15 @@ impl ConfigReloadService {
                 .map_err(|e| anyhow::anyhow!("NAT DNAT reload failed: {e}"))?;
             svc.reload_snat_rules(snat_rules)
                 .map_err(|e| anyhow::anyhow!("NAT SNAT reload failed: {e}"))?;
+            svc.reload_nptv6_rules(nptv6_rules)
+                .map_err(|e| anyhow::anyhow!("NAT NPTv6 reload failed: {e}"))?;
         } else {
             svc.reload_dnat_rules(Vec::new())
                 .map_err(|e| anyhow::anyhow!("NAT DNAT reload failed: {e}"))?;
             svc.reload_snat_rules(Vec::new())
                 .map_err(|e| anyhow::anyhow!("NAT SNAT reload failed: {e}"))?;
+            svc.reload_nptv6_rules(Vec::new())
+                .map_err(|e| anyhow::anyhow!("NAT NPTv6 reload failed: {e}"))?;
         }
 
         self.metrics.record_config_reload("nat", "success");

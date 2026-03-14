@@ -182,6 +182,38 @@ nat:
       match_dst_port: 8080
       match_protocol: tcp
 
+  # ── NPTv6 (RFC 6296) prefix translation ─────────────────────────
+  #
+  # Stateless, bidirectional IPv6-to-IPv6 prefix mapping.
+  # Ingress: rewrites destination (external -> internal).
+  # Egress:  rewrites source (internal -> external).
+  #
+  # Unlike SNAT/DNAT, NPTv6 does not use conntrack — it is fully
+  # stateless and rewrites only the prefix portion of the IPv6 address,
+  # adjusting a single IID word for checksum neutrality (RFC 6296 §3.1).
+  #
+  # Fields:
+  #   id              — Unique rule identifier
+  #   enabled         — Whether this rule is active (default: true)
+  #   internal_prefix — Site-local IPv6 prefix (e.g. ULA)
+  #   external_prefix — Provider-assigned or globally-routable prefix
+  #   prefix_len      — Length of the prefix in bits (1-64)
+
+  nptv6_rules:
+    # Map ULA site prefix fd00:1::/48 to provider prefix 2001:db8:1::/48
+    - id: nptv6-site1
+      enabled: true
+      internal_prefix: "fd00:1::"
+      external_prefix: "2001:db8:1::"
+      prefix_len: 48
+
+    # Map a second ULA site to a different provider block
+    - id: nptv6-site2
+      enabled: true
+      internal_prefix: "fd00:2::"
+      external_prefix: "2001:db8:2::"
+      prefix_len: 48
+
 # ── Firewall (allow NATed traffic) ─────────────────────────────────
 
 firewall:

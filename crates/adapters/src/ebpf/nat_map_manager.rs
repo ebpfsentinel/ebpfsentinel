@@ -1,7 +1,7 @@
 use aya::Ebpf;
 use aya::maps::{Array, MapData};
 use domain::common::error::DomainError;
-use ebpf_common::nat::{NatRuleEntry, NatRuleEntryV6};
+use ebpf_common::nat::{NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry};
 use ports::secondary::nat_map_port::NatMapPort;
 use tracing::info;
 
@@ -21,10 +21,15 @@ pub struct NatMapManager {
     dnat_count_v6: Array<MapData, u32>,
     snat_rules_v6: Array<MapData, NatRuleEntryV6>,
     snat_count_v6: Array<MapData, u32>,
+    nptv6_rules_ingress: Array<MapData, NptV6RuleEntry>,
+    nptv6_count_ingress: Array<MapData, u32>,
+    nptv6_rules_egress: Array<MapData, NptV6RuleEntry>,
+    nptv6_count_egress: Array<MapData, u32>,
     cached_dnat_count: usize,
     cached_snat_count: usize,
     cached_dnat_count_v6: usize,
     cached_snat_count_v6: usize,
+    cached_nptv6_count: usize,
 }
 
 impl NatMapManager {
@@ -70,7 +75,28 @@ impl NatMapManager {
                 anyhow::anyhow!("map 'NAT_SNAT_RULE_COUNT_V6' not found in egress")
             })?)?;
 
-        info!("NAT maps acquired (DNAT/SNAT V4+V6 from ingress/egress)");
+        let nptv6_rules_ingress = Array::try_from(
+            ingress
+                .take_map("NPTV6_RULES")
+                .ok_or_else(|| anyhow::anyhow!("map 'NPTV6_RULES' not found in ingress"))?,
+        )?;
+        let nptv6_count_ingress = Array::try_from(
+            ingress
+                .take_map("NPTV6_RULE_COUNT")
+                .ok_or_else(|| anyhow::anyhow!("map 'NPTV6_RULE_COUNT' not found in ingress"))?,
+        )?;
+        let nptv6_rules_egress = Array::try_from(
+            egress
+                .take_map("NPTV6_RULES")
+                .ok_or_else(|| anyhow::anyhow!("map 'NPTV6_RULES' not found in egress"))?,
+        )?;
+        let nptv6_count_egress = Array::try_from(
+            egress
+                .take_map("NPTV6_RULE_COUNT")
+                .ok_or_else(|| anyhow::anyhow!("map 'NPTV6_RULE_COUNT' not found in egress"))?,
+        )?;
+
+        info!("NAT maps acquired (DNAT/SNAT V4+V6 + NPTv6 from ingress/egress)");
         Ok(Self {
             dnat_rules,
             dnat_count,
@@ -80,10 +106,15 @@ impl NatMapManager {
             dnat_count_v6,
             snat_rules_v6,
             snat_count_v6,
+            nptv6_rules_ingress,
+            nptv6_count_ingress,
+            nptv6_rules_egress,
+            nptv6_count_egress,
             cached_dnat_count: 0,
             cached_snat_count: 0,
             cached_dnat_count_v6: 0,
             cached_snat_count_v6: 0,
+            cached_nptv6_count: 0,
         })
     }
 }
@@ -187,6 +218,52 @@ impl NatMapPort for NatMapManager {
         Ok(())
     }
 
+    #[allow(clippy::cast_possible_truncation)]
+    fn load_nptv6_rules(&mut self, rules: &[NptV6RuleEntry]) -> Result<(), DomainError> {
+        let count = rules.len().min(ebpf_common::nat::MAX_NPTV6_RULES as usize);
+
+        // Ingress: count=0 -> write entries -> count=n
+        self.nptv6_count_ingress.set(0, 0u32, 0).map_err(|e| {
+            DomainError::EngineError(format!("set NPTv6 ingress count=0 failed: {e}"))
+        })?;
+        for (i, rule) in rules.iter().take(count).enumerate() {
+            self.nptv6_rules_ingress
+                .set(i as u32, *rule, 0)
+                .map_err(|e| {
+                    DomainError::EngineError(format!("set NPTv6 ingress rule[{i}] failed: {e}"))
+                })?;
+        }
+        self.nptv6_count_ingress
+            .set(0, count as u32, 0)
+            .map_err(|e| {
+                DomainError::EngineError(format!("set NPTv6 ingress count={count} failed: {e}"))
+            })?;
+
+        // Egress: count=0 -> write entries -> count=n
+        self.nptv6_count_egress.set(0, 0u32, 0).map_err(|e| {
+            DomainError::EngineError(format!("set NPTv6 egress count=0 failed: {e}"))
+        })?;
+        for (i, rule) in rules.iter().take(count).enumerate() {
+            self.nptv6_rules_egress
+                .set(i as u32, *rule, 0)
+                .map_err(|e| {
+                    DomainError::EngineError(format!("set NPTv6 egress rule[{i}] failed: {e}"))
+                })?;
+        }
+        self.nptv6_count_egress
+            .set(0, count as u32, 0)
+            .map_err(|e| {
+                DomainError::EngineError(format!("set NPTv6 egress count={count} failed: {e}"))
+            })?;
+
+        self.cached_nptv6_count = count;
+        info!(
+            count,
+            "NPTv6 rules loaded into eBPF arrays (ingress + egress)"
+        );
+        Ok(())
+    }
+
     fn set_enabled(&mut self, enabled: bool) -> Result<(), DomainError> {
         if !enabled {
             // Disable by setting all counts to 0
@@ -202,10 +279,17 @@ impl NatMapPort for NatMapManager {
             self.snat_count_v6
                 .set(0, 0u32, 0)
                 .map_err(|e| DomainError::EngineError(format!("disable SNAT V6 failed: {e}")))?;
+            self.nptv6_count_ingress.set(0, 0u32, 0).map_err(|e| {
+                DomainError::EngineError(format!("disable NPTv6 ingress failed: {e}"))
+            })?;
+            self.nptv6_count_egress.set(0, 0u32, 0).map_err(|e| {
+                DomainError::EngineError(format!("disable NPTv6 egress failed: {e}"))
+            })?;
             self.cached_dnat_count = 0;
             self.cached_snat_count = 0;
             self.cached_dnat_count_v6 = 0;
             self.cached_snat_count_v6 = 0;
+            self.cached_nptv6_count = 0;
             info!("NAT disabled (all rule counts set to 0)");
         }
         Ok(())
@@ -215,6 +299,7 @@ impl NatMapPort for NatMapManager {
         Ok(self.cached_dnat_count
             + self.cached_snat_count
             + self.cached_dnat_count_v6
-            + self.cached_snat_count_v6)
+            + self.cached_snat_count_v6
+            + self.cached_nptv6_count)
     }
 }

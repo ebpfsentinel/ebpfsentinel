@@ -1311,6 +1311,117 @@ fn format_uptime(seconds: u64) -> String {
     }
 }
 
+// ── NAT ─────────────────────────────────────────────────────────────
+
+pub async fn cmd_nat_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let status = client.nat_status().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!("NAT Status");
+    println!("  Enabled:    {}", yes_no(status.enabled));
+    println!("  Rule count: {}", status.rule_count);
+    Ok(())
+}
+
+pub async fn cmd_nat_rules(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let rules = client.list_nat_rules().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&rules)?);
+        return Ok(());
+    }
+
+    if rules.is_empty() {
+        println!("No NAT rules configured.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<20}  {:<12}  {:<8}  {:>8}  {:<7}",
+        "ID", "TYPE", "DIR", "PRIORITY", "ENABLED"
+    );
+    for r in &rules {
+        println!(
+            "{:<20}  {:<12}  {:<8}  {:>8}  {:<7}",
+            r.id,
+            r.nat_type,
+            r.direction,
+            r.priority,
+            yes_no(r.enabled)
+        );
+    }
+    Ok(())
+}
+
+pub async fn cmd_nat_nptv6_list(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let rules = client.list_nptv6_rules().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&rules)?);
+        return Ok(());
+    }
+
+    if rules.is_empty() {
+        println!("No NPTv6 rules configured.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<20}  {:<24}  {:<24}  {:>6}  {:<7}",
+        "ID", "INTERNAL", "EXTERNAL", "PREFIX", "ENABLED"
+    );
+    for r in &rules {
+        println!(
+            "{:<20}  {:<24}  {:<24}  {:>6}  {:<7}",
+            r.id,
+            r.internal_prefix,
+            r.external_prefix,
+            format!("/{}", r.prefix_len),
+            yes_no(r.enabled)
+        );
+    }
+    Ok(())
+}
+
+pub async fn cmd_nat_nptv6_create(
+    client: &ApiClient,
+    id: &str,
+    internal_prefix: &str,
+    external_prefix: &str,
+    prefix_len: u8,
+    output: OutputFormat,
+) -> Result<()> {
+    let body = serde_json::json!({
+        "id": id,
+        "enabled": true,
+        "internal_prefix": internal_prefix,
+        "external_prefix": external_prefix,
+        "prefix_len": prefix_len,
+    });
+    let rule = client.create_nptv6_rule(&body).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&rule)?);
+        return Ok(());
+    }
+
+    println!(
+        "NPTv6 rule created: {} ({} <-> {} /{})",
+        rule.id, rule.internal_prefix, rule.external_prefix, rule.prefix_len
+    );
+    Ok(())
+}
+
+pub async fn cmd_nat_nptv6_delete(client: &ApiClient, id: &str) -> Result<()> {
+    client.delete_nptv6_rule(id).await?;
+    println!("NPTv6 rule deleted: {id}");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1352,13 +1463,11 @@ mod tests {
 
     #[test]
     fn format_ip_localhost() {
-        // 127.0.0.1 = 0x7F000001 = 2130706433
         assert_eq!(format_ip(0x7F00_0001), "127.0.0.1");
     }
 
     #[test]
     fn format_ip_private() {
-        // 192.168.1.1 = 0xC0A80101
         assert_eq!(format_ip(0xC0A8_0101), "192.168.1.1");
     }
 }
