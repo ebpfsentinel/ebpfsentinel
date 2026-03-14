@@ -10,6 +10,12 @@ use aya_ebpf::{
 };
 use aya_ebpf_bindings::helpers::bpf_skb_load_bytes;
 use core::mem;
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_UDP,
+    VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
+};
+use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::increment_metric;
 use ebpf_common::dns::{
     DnsEvent, DnsEventBuf, DNS_DIRECTION_QUERY, DNS_DIRECTION_RESPONSE, DNS_MAX_PAYLOAD,
     DNS_METRIC_ERRORS, DNS_METRIC_EVENTS_DROPPED, DNS_METRIC_EVENTS_EMITTED,
@@ -23,34 +29,8 @@ use network_types::{
 };
 
 // ── Constants ───────────────────────────────────────────────────────
-
-const ETH_P_IP: u16 = 0x0800;
-const ETH_P_IPV6: u16 = 0x86DD;
-const ETH_P_8021Q: u16 = 0x8100;
-const VLAN_HDR_LEN: usize = 4;
-const IPV6_HDR_LEN: usize = 40;
-const PROTO_UDP: u8 = 17;
+// Network constants and header structs imported from ebpf_helpers.
 const DNS_PORT: u16 = 53;
-
-// ── Inline IPv6 / VLAN header types ─────────────────────────────────
-
-/// IPv6 fixed header (40 bytes).
-#[repr(C)]
-struct Ipv6Hdr {
-    _vtcfl: u32,
-    _payload_len: u16,
-    next_hdr: u8,
-    _hop_limit: u8,
-    src_addr: [u8; 16],
-    dst_addr: [u8; 16],
-}
-
-/// 802.1Q VLAN tag (4 bytes after EthHdr when ether_type == 0x8100).
-#[repr(C)]
-struct VlanHdr {
-    tci: u16,
-    ether_type: u16,
-}
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -82,29 +62,6 @@ pub fn tc_dns(ctx: TcContext) -> i32 {
     }
 }
 
-// ── Helpers: byte conversion ────────────────────────────────────────
-
-#[inline(always)]
-fn u32_from_be_bytes(b: [u8; 4]) -> u32 {
-    u32::from_be_bytes(b)
-}
-
-#[inline(always)]
-fn u16_from_be_bytes(b: [u8; 2]) -> u16 {
-    u16::from_be_bytes(b)
-}
-
-/// Convert a 16-byte IPv6 address to `[u32; 4]` in network byte order.
-#[inline(always)]
-fn ipv6_addr_to_u32x4(addr: &[u8; 16]) -> [u32; 4] {
-    [
-        u32_from_be_bytes([addr[0], addr[1], addr[2], addr[3]]),
-        u32_from_be_bytes([addr[4], addr[5], addr[6], addr[7]]),
-        u32_from_be_bytes([addr[8], addr[9], addr[10], addr[11]]),
-        u32_from_be_bytes([addr[12], addr[13], addr[14], addr[15]]),
-    ]
-}
-
 // ── Packet processing ───────────────────────────────────────────────
 
 #[inline(always)]
@@ -117,13 +74,21 @@ fn try_tc_dns(ctx: &TcContext) -> Result<i32, ()> {
     let mut flags: u8 = 0;
 
     // Check for 802.1Q VLAN tag
-    if ether_type == ETH_P_8021Q {
+    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
         let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
         let tci = u16::from_be(unsafe { (*vhdr).tci });
         vlan_id = tci & 0x0FFF;
         ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
         l3_offset += VLAN_HDR_LEN;
         flags |= FLAG_VLAN;
+
+        // QinQ: parse second VLAN tag if present
+        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
+            let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
+            vlan_id = u16::from_be(unsafe { (*vhdr2).tci }) & 0x0FFF;
+            ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
+            l3_offset += VLAN_HDR_LEN;
+        }
     }
 
     if ether_type == ETH_P_IP {
@@ -190,7 +155,11 @@ fn process_dns_v6(
     flags: u8,
 ) -> Result<i32, ()> {
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
-    let next_hdr = unsafe { (*ipv6hdr).next_hdr };
+    let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
+
+    // Skip IPv6 extension headers to find the actual L4 protocol.
+    let (next_hdr, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr)
+        .ok_or(())?;
 
     // DNS is UDP only
     if next_hdr != PROTO_UDP {
@@ -199,7 +168,6 @@ fn process_dns_v6(
 
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
-    let l4_offset = l3_offset + IPV6_HDR_LEN;
 
     // Parse UDP header
     let udphdr: *const UdpHdr = unsafe { ptr_at(ctx, l4_offset)? };
@@ -226,42 +194,21 @@ fn process_dns_v6(
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-/// Bounds-checked pointer access. Critical for eBPF verifier compliance:
-/// every memory access must be validated against data_end.
-#[inline(always)]
-unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> {
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let len = mem::size_of::<T>();
-    if start + offset + len > end {
-        return Err(());
-    }
-    Ok((start + offset) as *const T)
-}
+// ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::tc
 
 /// Increment a per-CPU DNS metric counter.
 #[inline(always)]
 fn increment_metric(index: u32) {
-    if let Some(counter) = DNS_METRICS.get_ptr_mut(index) {
-        unsafe {
-            *counter += 1;
-        }
-    }
+    increment_metric!(DNS_METRICS, index);
 }
 
-/// DNS_EVENTS RingBuf total size in bytes (must match map declaration).
-const DNS_RINGBUF_SIZE: u64 = 64 * 4096;
-
-/// Backpressure threshold: skip emission when >75% of DNS RingBuf is consumed.
-const DNS_BACKPRESSURE_THRESHOLD: u64 = DNS_RINGBUF_SIZE * 3 / 4;
-
-/// `BPF_RB_AVAIL_DATA` flag for `bpf_ringbuf_query`.
-const BPF_RB_AVAIL_DATA: u64 = 0;
+/// DNS backpressure threshold: 75% of 256 KB DNS ring buffer.
+const DNS_BACKPRESSURE_THRESHOLD: u64 = 64 * 4096 * 3 / 4;
 
 /// Returns `true` if the DNS_EVENTS RingBuf has backpressure (>75% full).
 #[inline(always)]
 fn dns_ringbuf_has_backpressure() -> bool {
-    DNS_EVENTS.query(BPF_RB_AVAIL_DATA) > DNS_BACKPRESSURE_THRESHOLD
+    ebpf_helpers::ringbuf_has_backpressure!(DNS_EVENTS, DNS_BACKPRESSURE_THRESHOLD)
 }
 
 /// Emit a DnsEventBuf to the DNS_EVENTS RingBuf. Skips emission under

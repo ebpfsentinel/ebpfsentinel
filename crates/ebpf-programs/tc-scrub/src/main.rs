@@ -9,7 +9,12 @@ use aya_ebpf::{
     programs::TcContext,
     EbpfContext,
 };
-use core::mem;
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
+    VLAN_HDR_LEN, VlanHdr,
+};
+use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::increment_metric;
 use ebpf_common::scrub::{
     ScrubFlags, SCRUB_METRIC_COUNT, SCRUB_METRIC_DF_CLEARED, SCRUB_METRIC_ERRORS,
     SCRUB_METRIC_HOP_FIXED, SCRUB_METRIC_IPID_RANDOMIZED, SCRUB_METRIC_MSS_CLAMPED,
@@ -18,13 +23,7 @@ use ebpf_common::scrub::{
 use network_types::{eth::EthHdr, ip::Ipv4Hdr};
 
 // ── Constants ───────────────────────────────────────────────────────
-
-const ETH_P_IP: u16 = 0x0800;
-const ETH_P_IPV6: u16 = 0x86DD;
-const ETH_P_8021Q: u16 = 0x8100;
-const VLAN_HDR_LEN: usize = 4;
-const IPV6_HDR_LEN: usize = 40;
-const PROTO_TCP: u8 = 6;
+// Network constants and header structs imported from ebpf_helpers.
 
 /// IPv4 flags field offset within Ipv4Hdr (frag_off contains flags + fragment offset).
 /// DF = bit 14 (0x4000 in network byte order).
@@ -42,25 +41,6 @@ const TCP_SYN: u8 = 0x02;
 
 /// Maximum TCP options bytes to scan (prevents unbounded loops).
 const MAX_TCP_OPT_SCAN: usize = 40;
-
-// ── Inline header types ─────────────────────────────────────────────
-
-#[repr(C)]
-struct VlanHdr {
-    _tci: u16,
-    ether_type: u16,
-}
-
-/// IPv6 fixed header (40 bytes).
-#[repr(C)]
-struct Ipv6Hdr {
-    _vtcfl: u32,
-    _payload_len: u16,
-    next_hdr: u8,
-    hop_limit: u8,
-    _src_addr: [u8; 16],
-    _dst_addr: [u8; 16],
-}
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -88,24 +68,11 @@ pub fn tc_scrub(mut ctx: TcContext) -> i32 {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-#[inline(always)]
-fn increment_metric(index: u32) {
-    if let Some(counter) = SCRUB_METRICS.get_ptr_mut(index) {
-        unsafe {
-            *counter += 1;
-        }
-    }
-}
+// ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::tc
 
 #[inline(always)]
-unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> {
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let len = mem::size_of::<T>();
-    if start + offset + len > end {
-        return Err(());
-    }
-    Ok((start + offset) as *const T)
+fn increment_metric(index: u32) {
+    increment_metric!(SCRUB_METRICS, index);
 }
 
 #[inline(always)]
@@ -127,10 +94,17 @@ fn try_tc_scrub(ctx: &mut TcContext) -> Result<i32, ()> {
     let mut l3_offset = EthHdr::LEN;
 
     // 802.1Q VLAN tag
-    if ether_type == ETH_P_8021Q {
+    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
         let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
         ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
         l3_offset += VLAN_HDR_LEN;
+
+        // QinQ: parse second VLAN tag if present
+        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
+            let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
+            ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
+            l3_offset += VLAN_HDR_LEN;
+        }
     }
 
     if ether_type == ETH_P_IP {
@@ -195,8 +169,11 @@ fn scrub_ipv4(ctx: &mut TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result
 #[inline(never)]
 fn scrub_ipv6(ctx: &mut TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result<(), ()> {
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
-    let protocol = unsafe { (*ipv6hdr).next_hdr };
-    let l4_offset = l3_offset + IPV6_HDR_LEN;
+    let raw_protocol = unsafe { (*ipv6hdr).next_hdr };
+
+    // Skip IPv6 extension headers to find the actual L4 protocol.
+    let (protocol, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_protocol)
+        .ok_or(())?;
 
     // ── Hop Limit normalization (IPv6 equivalent of TTL) ────────
     if cfg.min_hop_limit > 0 {
@@ -281,7 +258,7 @@ fn scrub_random_ip_id(
             ctx.as_ptr() as *mut _,
             csum_offset,
             old_id as u64,
-            new_id_be as u64,
+            new_id as u64,
             2,
         );
     }

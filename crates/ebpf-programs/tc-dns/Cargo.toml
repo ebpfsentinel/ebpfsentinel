@@ -7,6 +7,7 @@ edition = "2024"
 aya-ebpf = "0.1.1"
 aya-ebpf-bindings = "0.1.2"
 ebpf-common = { path = "../../ebpf-common", default-features = false }
+ebpf-helpers = { path = "../../ebpf-helpers" }
 network-types = "0.1.0"
 
 [[bin]]

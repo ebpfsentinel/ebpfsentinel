@@ -8,7 +8,12 @@ use aya_ebpf::{
     maps::{HashMap, PerCpuArray, RingBuf},
     programs::XdpContext,
 };
-use core::mem;
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
+    PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u32x4_to_ipv6_bytes,
+};
+use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
+use ebpf_helpers::{add_metric, increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
     event::{PacketEvent, FLAG_IPV6, FLAG_VLAN},
     loadbalancer::{
@@ -25,41 +30,14 @@ use network_types::{
 };
 
 // ── Constants ───────────────────────────────────────────────────────
-
-const ETH_P_IP: u16 = 0x0800;
-const ETH_P_IPV6: u16 = 0x86DD;
-const ETH_P_8021Q: u16 = 0x8100;
-const VLAN_HDR_LEN: usize = 4;
-const IPV6_HDR_LEN: usize = 40;
-const PROTO_TCP: u8 = 6;
-const PROTO_UDP: u8 = 17;
-
-const EVENTS_RINGBUF_SIZE: u64 = 256 * 4096;
-const BACKPRESSURE_THRESHOLD: u64 = EVENTS_RINGBUF_SIZE * 3 / 4;
-const BPF_RB_AVAIL_DATA: u64 = 0;
+// Network constants and header structs imported from ebpf_helpers.
 
 /// Maximum services.
 const MAX_SERVICES: u32 = 64;
 /// Maximum backends.
 const MAX_BACKENDS: u32 = 256;
 
-// ── Inline header types ─────────────────────────────────────────────
-
-#[repr(C)]
-struct Ipv6Hdr {
-    _vtcfl: u32,
-    _payload_len: u16,
-    next_hdr: u8,
-    _hop_limit: u8,
-    src_addr: [u8; 16],
-    dst_addr: [u8; 16],
-}
-
-#[repr(C)]
-struct VlanHdr {
-    tci: u16,
-    ether_type: u16,
-}
+// ── Inline program-specific header types ────────────────────────────
 
 #[repr(C)]
 struct TcpUdpHdr {
@@ -88,7 +66,7 @@ static LB_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(LB_METRIC_CO
 
 /// Shared event ring buffer.
 #[map]
-static EVENTS: RingBuf = RingBuf::with_byte_size(EVENTS_RINGBUF_SIZE as u32, 0);
+static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
 
 // ── Entry Point ─────────────────────────────────────────────────────
 
@@ -109,11 +87,19 @@ fn try_xdp_loadbalancer(ctx: &XdpContext) -> Result<u32, ()> {
     let mut vlan_id: u16 = 0;
 
     // Handle 802.1Q VLAN
-    if ether_type == ETH_P_8021Q {
+    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
         let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
         vlan_id = u16::from_be(unsafe { (*vhdr).tci }) & 0x0FFF;
         ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
         l3_offset += VLAN_HDR_LEN;
+
+        // QinQ: parse second VLAN tag if present
+        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
+            let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
+            vlan_id = u16::from_be(unsafe { (*vhdr2).tci }) & 0x0FFF;
+            ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
+            l3_offset += VLAN_HDR_LEN;
+        }
     }
 
     match ether_type {
@@ -160,8 +146,9 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     let src_addr = [u32::from_ne_bytes(src_addr_raw), 0, 0, 0];
     let dst_addr = [u32::from_ne_bytes(dst_addr_raw), 0, 0, 0];
 
-    // Select backend
-    let backend = match select_backend(svc_config, src_ip) {
+    // Select backend using per-service round-robin index
+    let svc_idx = service_key_index(&key);
+    let backend = match select_backend(svc_config, src_ip, svc_idx) {
         Some(b) => b,
         None => {
             increment_metric(LB_METRIC_PACKETS_NO_BACKEND);
@@ -212,6 +199,19 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
         new_dst_port,
     );
 
+    // Rewrite Ethernet header MACs for XDP_TX.
+    // Swap src/dst so the packet is sent back toward the router/gateway
+    // which will then forward it to the backend on the same L2 segment.
+    // NOTE: This works for same-subnet backends behind a gateway. For
+    // cross-subnet backends, userspace should populate a LB_NEIGH map
+    // with resolved next-hop MACs (not yet implemented).
+    let ethhdr_mut: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
+    unsafe {
+        let tmp = (*ethhdr_mut).src_addr;
+        (*ethhdr_mut).src_addr = (*ethhdr_mut).dst_addr;
+        (*ethhdr_mut).dst_addr = tmp;
+    }
+
     // Metrics + event
     increment_metric(LB_METRIC_PACKETS_FORWARDED);
     add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
@@ -235,8 +235,11 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
 #[inline(always)]
 fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, ()> {
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
-    let next_hdr = unsafe { (*ipv6hdr).next_hdr };
-    let l4_offset = l3_offset + IPV6_HDR_LEN;
+    let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
+
+    // Skip IPv6 extension headers to find the actual L4 protocol.
+    let (next_hdr, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr)
+        .ok_or(())?;
 
     if next_hdr != PROTO_TCP && next_hdr != PROTO_UDP {
         return Ok(xdp_action::XDP_PASS);
@@ -263,7 +266,8 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     let src_ip_folded = src_addr[0] ^ src_addr[1] ^ src_addr[2] ^ src_addr[3];
     let pkt_len = (ctx.data_end() - ctx.data()) as u64;
 
-    let backend = match select_backend(svc_config, src_ip_folded) {
+    let svc_idx = service_key_index(&key);
+    let backend = match select_backend(svc_config, src_ip_folded, svc_idx) {
         Some(b) => b,
         None => {
             increment_metric(LB_METRIC_PACKETS_NO_BACKEND);
@@ -321,6 +325,14 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
         update_l4_checksum_port_only(ctx, l4_offset, next_hdr, old_dst_port, new_dst_port);
     }
 
+    // Rewrite Ethernet header MACs for XDP_TX (same logic as IPv4 path).
+    let ethhdr_mut: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
+    unsafe {
+        let tmp = (*ethhdr_mut).src_addr;
+        (*ethhdr_mut).src_addr = (*ethhdr_mut).dst_addr;
+        (*ethhdr_mut).dst_addr = tmp;
+    }
+
     increment_metric(LB_METRIC_PACKETS_FORWARDED);
     add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
 
@@ -341,9 +353,10 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
 // ── Backend Selection ───────────────────────────────────────────────
 
 /// Select a healthy backend from the service config.
+/// `svc_index` is used to look up per-service round-robin state in `LB_RR_STATE`.
 /// Returns `None` if no healthy backend is available.
 #[inline(always)]
-fn select_backend(svc: &LbServiceConfig, src_ip: u32) -> Option<&LbBackendEntry> {
+fn select_backend(svc: &LbServiceConfig, src_ip: u32, svc_index: u32) -> Option<&LbBackendEntry> {
     let count = svc.backend_count as usize;
     if count == 0 {
         return None;
@@ -358,8 +371,8 @@ fn select_backend(svc: &LbServiceConfig, src_ip: u32) -> Option<&LbBackendEntry>
 
     let start_idx = match svc.algorithm {
         LB_ALG_ROUND_ROBIN => {
-            // Use per-CPU round-robin state (index 0 as default)
-            let rr_ptr = LB_RR_STATE.get_ptr_mut(0)?;
+            // Use per-service round-robin state indexed by svc_index
+            let rr_ptr = LB_RR_STATE.get_ptr_mut(svc_index)?;
             let rr = unsafe { *rr_ptr };
             unsafe {
                 *rr_ptr = rr.wrapping_add(1);
@@ -368,7 +381,7 @@ fn select_backend(svc: &LbServiceConfig, src_ip: u32) -> Option<&LbBackendEntry>
         }
         LB_ALG_IP_HASH => fnv1a(src_ip) as usize,
         LB_ALG_WEIGHTED => {
-            let rr_ptr = LB_RR_STATE.get_ptr_mut(0)?;
+            let rr_ptr = LB_RR_STATE.get_ptr_mut(svc_index)?;
             let rr = unsafe { *rr_ptr };
             unsafe {
                 *rr_ptr = rr.wrapping_add(1);
@@ -377,7 +390,7 @@ fn select_backend(svc: &LbServiceConfig, src_ip: u32) -> Option<&LbBackendEntry>
         }
         // LeastConn falls back to RoundRobin in eBPF
         _ => {
-            let rr_ptr = LB_RR_STATE.get_ptr_mut(0)?;
+            let rr_ptr = LB_RR_STATE.get_ptr_mut(svc_index)?;
             let rr = unsafe { *rr_ptr };
             unsafe {
                 *rr_ptr = rr.wrapping_add(1);
@@ -405,6 +418,15 @@ fn select_backend(svc: &LbServiceConfig, src_ip: u32) -> Option<&LbBackendEntry>
     }
 
     None
+}
+
+/// Derive a per-service index from a `LbServiceKey` for round-robin state lookup.
+/// Maps the (protocol, port) pair to an index in `0..MAX_SERVICES`.
+#[inline(always)]
+fn service_key_index(key: &LbServiceKey) -> u32 {
+    // Combine protocol and port into a u32, then hash to fit MAX_SERVICES
+    let combined = (key.protocol as u32) << 16 | (key.port as u32);
+    fnv1a(combined) % MAX_SERVICES
 }
 
 /// FNV-1a hash of a u32 value.
@@ -551,85 +573,25 @@ fn update_l4_checksum_v6_dnat(
     }
 }
 
-// ── Pointer Helpers ─────────────────────────────────────────────────
-
-#[inline(always)]
-unsafe fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
-    let start = ctx.data() as usize;
-    let end = ctx.data_end() as usize;
-    let len = mem::size_of::<T>();
-
-    if start + offset + len > end {
-        return Err(());
-    }
-
-    Ok((start + offset) as *const T)
-}
-
-#[inline(always)]
-unsafe fn ptr_at_mut<T>(ctx: &XdpContext, offset: usize) -> Result<*mut T, ()> {
-    let start = ctx.data() as usize;
-    let end = ctx.data_end() as usize;
-    let len = mem::size_of::<T>();
-
-    if start + offset + len > end {
-        return Err(());
-    }
-
-    Ok((start + offset) as *mut T)
-}
-
-// ── IPv6 Address Helpers ────────────────────────────────────────────
-
-#[inline(always)]
-fn ipv6_addr_to_u32x4(addr: &[u8; 16]) -> [u32; 4] {
-    [
-        u32::from_be_bytes([addr[0], addr[1], addr[2], addr[3]]),
-        u32::from_be_bytes([addr[4], addr[5], addr[6], addr[7]]),
-        u32::from_be_bytes([addr[8], addr[9], addr[10], addr[11]]),
-        u32::from_be_bytes([addr[12], addr[13], addr[14], addr[15]]),
-    ]
-}
-
-#[inline(always)]
-fn u32x4_to_ipv6_bytes(addr: &[u32; 4]) -> [u8; 16] {
-    let mut bytes = [0u8; 16];
-    let a = addr[0].to_be_bytes();
-    let b = addr[1].to_be_bytes();
-    let c = addr[2].to_be_bytes();
-    let d = addr[3].to_be_bytes();
-    bytes[0] = a[0]; bytes[1] = a[1]; bytes[2] = a[2]; bytes[3] = a[3];
-    bytes[4] = b[0]; bytes[5] = b[1]; bytes[6] = b[2]; bytes[7] = b[3];
-    bytes[8] = c[0]; bytes[9] = c[1]; bytes[10] = c[2]; bytes[11] = c[3];
-    bytes[12] = d[0]; bytes[13] = d[1]; bytes[14] = d[2]; bytes[15] = d[3];
-    bytes
-}
-
-// ── Metrics Helpers ─────────────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────────────
+// ptr_at, ptr_at_mut, skip_ipv6_ext_headers imported from ebpf_helpers::xdp
+// ipv6_addr_to_u32x4, u32x4_to_ipv6_bytes imported from ebpf_helpers::net
 
 #[inline(always)]
 fn increment_metric(index: u32) {
-    if let Some(counter) = LB_METRICS.get_ptr_mut(index) {
-        unsafe {
-            *counter += 1;
-        }
-    }
+    increment_metric!(LB_METRICS, index);
 }
 
 #[inline(always)]
 fn add_metric(index: u32, value: u64) {
-    if let Some(counter) = LB_METRICS.get_ptr_mut(index) {
-        unsafe {
-            *counter += value;
-        }
-    }
+    add_metric!(LB_METRICS, index, value);
 }
 
 // ── Event Emission ──────────────────────────────────────────────────
 
 #[inline(always)]
 fn ringbuf_has_backpressure() -> bool {
-    EVENTS.query(BPF_RB_AVAIL_DATA) > BACKPRESSURE_THRESHOLD
+    ringbuf_has_backpressure!(EVENTS)
 }
 
 #[inline(always)]

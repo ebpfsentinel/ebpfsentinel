@@ -3,12 +3,19 @@
 
 use aya_ebpf::{
     bindings::TC_ACT_OK,
-    helpers::{bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_skb_store_bytes},
+    cty::c_void,
+    helpers::{bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop, bpf_skb_store_bytes},
     macros::{classifier, map},
     maps::{Array, LruHashMap, PerCpuArray},
     programs::TcContext,
 };
-use core::mem;
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
+    PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, ipv6_mask_match, u16_from_be_bytes,
+    u32_from_be_bytes, u32x4_to_bytes,
+};
+use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::increment_metric;
 use ebpf_common::{
     conntrack::{
         ConnKey, ConnKeyV6, ConnValue, ConnValueV6, CT_FLAG_NAT_SRC, CT_MAX_ENTRIES_V4,
@@ -29,14 +36,7 @@ use network_types::{
 };
 
 // ── Constants ───────────────────────────────────────────────────────
-
-const ETH_P_IP: u16 = 0x0800;
-const ETH_P_IPV6: u16 = 0x86DD;
-const ETH_P_8021Q: u16 = 0x8100;
-const VLAN_HDR_LEN: usize = 4;
-const IPV6_HDR_LEN: usize = 40;
-const PROTO_TCP: u8 = 6;
-const PROTO_UDP: u8 = 17;
+// Network constants and header structs imported from ebpf_helpers.
 
 /// Offset of src_addr within Ipv4Hdr (standard IP header).
 const IPV4_SRC_OFFSET: usize = 12;
@@ -46,25 +46,6 @@ const IPV4_CSUM_OFFSET: usize = 10;
 const IPV6_SRC_OFFSET: usize = 8;
 
 const BPF_F_RECOMPUTE_CSUM: u64 = 1;
-
-// ── Inline header types ─────────────────────────────────────────────
-
-#[repr(C)]
-struct VlanHdr {
-    tci: u16,
-    ether_type: u16,
-}
-
-/// IPv6 fixed header (40 bytes).
-#[repr(C)]
-struct Ipv6Hdr {
-    _vtcfl: u32,
-    _payload_len: u16,
-    next_hdr: u8,
-    _hop_limit: u8,
-    src_addr: [u8; 16],
-    dst_addr: [u8; 16],
-}
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -118,45 +99,120 @@ pub fn tc_nat_egress(ctx: TcContext) -> i32 {
     }
 }
 
+// ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::tc
+
 #[inline(always)]
 fn increment_metric(index: u32) {
-    if let Some(counter) = NAT_METRICS.get_ptr_mut(index) {
-        unsafe {
-            *counter += 1;
+    increment_metric!(NAT_METRICS, index);
+}
+
+// ── bpf_loop context structs ────────────────────────────────────────
+
+/// Opaque context passed through `bpf_loop` to the IPv4 SNAT rule-scan callback.
+/// Kept small (~44 bytes) to stay well within the 512-byte eBPF stack limit.
+#[repr(C)]
+struct SnatScanCtx {
+    count: u32,
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    protocol: u8,
+    /// Result: translated source IP (0 = no match).
+    new_src_ip: u32,
+    /// Result: translated source port.
+    new_src_port: u16,
+    /// Result: NAT type of the matched rule.
+    nat_type: u8,
+    /// 1 if a rule matched, 0 otherwise.
+    matched: u8,
+}
+
+/// Opaque context passed through `bpf_loop` to the IPv6 SNAT rule-scan callback.
+/// ~60 bytes: src_addr(16) + dst_addr(16) + scalars + results.
+#[repr(C)]
+struct SnatScanCtxV6 {
+    count: u32,
+    src_addr: [u32; 4],
+    dst_addr: [u32; 4],
+    src_port: u16,
+    protocol: u8,
+    /// Result: translated source address.
+    new_src_addr: [u32; 4],
+    /// Result: translated source port.
+    new_src_port: u16,
+    /// Result: NAT type of the matched rule.
+    nat_type: u8,
+    /// 1 if a rule matched, 0 otherwise.
+    matched: u8,
+}
+
+// ── bpf_loop callbacks ─────────────────────────────────────────────
+
+/// Callback for `bpf_loop`: scan one IPv4 SNAT rule.
+/// Returns 0 to continue, 1 to stop (match found or index >= count).
+#[inline(never)]
+unsafe extern "C" fn scan_snat_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
+    let lctx = unsafe { &mut *(ctx as *mut SnatScanCtx) };
+    if index >= lctx.count {
+        return 1;
+    }
+    if let Some(rule) = NAT_SNAT_RULES.get(index) {
+        if match_snat_rule(rule, lctx.src_ip, lctx.dst_ip, lctx.protocol) {
+            let new_src_ip = rule.nat_addr;
+            // Skip rules with no translation address (unless masquerade).
+            if new_src_ip == 0 && rule.nat_type != NAT_TYPE_MASQUERADE {
+                return 0;
+            }
+            // For masquerade, userspace must pre-populate nat_addr with
+            // the interface IP. If not set, skip this rule.
+            if rule.nat_type == NAT_TYPE_MASQUERADE && new_src_ip == 0 {
+                return 0;
+            }
+
+            lctx.new_src_ip = new_src_ip;
+            lctx.new_src_port = if rule.nat_port_start != 0 {
+                allocate_port(lctx.src_ip, lctx.src_port, rule.nat_port_start, rule.nat_port_end)
+            } else {
+                lctx.src_port
+            };
+            lctx.nat_type = rule.nat_type;
+            lctx.matched = 1;
+            return 1;
         }
     }
+    0
 }
 
-#[inline(always)]
-fn u32_from_be_bytes(b: [u8; 4]) -> u32 {
-    u32::from_be_bytes(b)
-}
-
-#[inline(always)]
-fn u16_from_be_bytes(b: [u8; 2]) -> u16 {
-    u16::from_be_bytes(b)
-}
-
-#[inline(always)]
-unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> {
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let len = mem::size_of::<T>();
-    if start + offset + len > end {
-        return Err(());
+/// Callback for `bpf_loop`: scan one IPv6 SNAT rule.
+/// Returns 0 to continue, 1 to stop (match found or index >= count).
+#[inline(never)]
+unsafe extern "C" fn scan_snat_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
+    let lctx = unsafe { &mut *(ctx as *mut SnatScanCtxV6) };
+    if index >= lctx.count {
+        return 1;
     }
-    Ok((start + offset) as *const T)
-}
+    if let Some(rule) = NAT_SNAT_RULES_V6.get(index) {
+        if match_snat_rule_v6(rule, &lctx.src_addr, &lctx.dst_addr, lctx.protocol) {
+            let new_src_addr = rule.nat_addr;
+            if new_src_addr == [0; 4] && rule.nat_type != NAT_TYPE_MASQUERADE {
+                return 0;
+            }
+            if rule.nat_type == NAT_TYPE_MASQUERADE && new_src_addr == [0; 4] {
+                return 0;
+            }
 
-/// Convert 16 raw bytes to `[u32; 4]` (network byte order words).
-#[inline(always)]
-fn ipv6_addr_to_u32x4(bytes: &[u8; 16]) -> [u32; 4] {
-    [
-        u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-        u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
-        u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
-        u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
-    ]
+            lctx.new_src_addr = new_src_addr;
+            lctx.new_src_port = if rule.nat_port_start != 0 {
+                allocate_port_v6(&lctx.src_addr, lctx.src_port, rule.nat_port_start, rule.nat_port_end)
+            } else {
+                lctx.src_port
+            };
+            lctx.nat_type = rule.nat_type;
+            lctx.matched = 1;
+            return 1;
+        }
+    }
+    0
 }
 
 // ── Processing ──────────────────────────────────────────────────────
@@ -167,10 +223,17 @@ fn try_nat_egress(ctx: &TcContext) -> Result<i32, ()> {
     let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
     let mut l3_offset = EthHdr::LEN;
 
-    if ether_type == ETH_P_8021Q {
+    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
         let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
         ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
         l3_offset += VLAN_HDR_LEN;
+
+        // QinQ: parse second VLAN tag if present
+        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
+            let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
+            ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
+            l3_offset += VLAN_HDR_LEN;
+        }
     }
 
     if ether_type == ETH_P_IP {
@@ -224,69 +287,59 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         }
     }
 
-    // Scan SNAT rules for new connections.
+    // Scan SNAT rules for new connections via bpf_loop (kernel 5.17+).
+    // The verifier analyzes the callback body only once, avoiding
+    // complexity limits for large rule sets.
     let count = match NAT_SNAT_RULE_COUNT.get(0) {
         Some(&c) => c,
         None => return Ok(TC_ACT_OK),
     };
 
-    let max = if count > MAX_NAT_RULES { MAX_NAT_RULES } else { count };
-    let mut i = 0u32;
-    while i < max {
-        if let Some(rule) = NAT_SNAT_RULES.get(i) {
-            if match_snat_rule(rule, src_ip, dst_ip, protocol) {
-                let new_src_ip = rule.nat_addr;
-                if new_src_ip == 0 && rule.nat_type != NAT_TYPE_MASQUERADE {
-                    // No translation address configured, skip.
-                    i += 1;
-                    continue;
-                }
+    let mut scan_ctx = SnatScanCtx {
+        count: if count > MAX_NAT_RULES { MAX_NAT_RULES } else { count },
+        src_ip,
+        dst_ip,
+        src_port,
+        protocol,
+        new_src_ip: 0,
+        new_src_port: 0,
+        nat_type: 0,
+        matched: 0,
+    };
+    unsafe {
+        bpf_loop(
+            MAX_NAT_RULES,
+            scan_snat_rule_v4 as *mut c_void,
+            &mut scan_ctx as *mut SnatScanCtx as *mut c_void,
+            0,
+        );
+    }
 
-                // Allocate a translated port (or use original).
-                let new_src_port = if rule.nat_port_start != 0 {
-                    allocate_port(src_ip, src_port, rule.nat_port_start, rule.nat_port_end)
-                } else {
-                    src_port
-                };
+    if scan_ctx.matched != 0 {
+        let translated_ip = scan_ctx.new_src_ip;
+        let new_src_port = scan_ctx.new_src_port;
 
-                // For masquerade, use the configured nat_addr (set by userspace
-                // to the interface's IP). A full implementation would use
-                // bpf_fib_lookup to discover the egress IP, but that requires
-                // the full fib_lookup struct which is complex in eBPF.
-                let translated_ip = if rule.nat_type == NAT_TYPE_MASQUERADE && new_src_ip == 0 {
-                    // Masquerade fallback: userspace must pre-populate nat_addr
-                    // with the interface IP. If not set, skip this rule.
-                    i += 1;
-                    continue;
-                } else {
-                    new_src_ip
-                };
+        // Rewrite packet.
+        rewrite_src_ip(ctx, l3_offset, l4_offset, protocol, src_ip, translated_ip)?;
+        if new_src_port != src_port {
+            rewrite_src_port(ctx, l4_offset, protocol, src_port, new_src_port)?;
+        }
 
-                // Rewrite packet.
-                rewrite_src_ip(ctx, l3_offset, l4_offset, protocol, src_ip, translated_ip)?;
-                if new_src_port != src_port {
-                    rewrite_src_port(ctx, l4_offset, protocol, src_port, new_src_port)?;
-                }
-
-                // Store NAT mapping in conntrack.
-                if let Some(ct_entry) = CT_TABLE_V4.get_ptr_mut(&ct_key) {
-                    unsafe {
-                        (*ct_entry).nat_addr = translated_ip;
-                        (*ct_entry).nat_port = new_src_port;
-                        (*ct_entry).flags |= CT_FLAG_NAT_SRC;
-                        (*ct_entry).nat_type = NAT_TYPE_SNAT;
-                    }
-                }
-
-                if rule.nat_type == NAT_TYPE_MASQUERADE {
-                    increment_metric(NAT_METRIC_MASQ_APPLIED);
-                } else {
-                    increment_metric(NAT_METRIC_SNAT_APPLIED);
-                }
-                return Ok(TC_ACT_OK);
+        // Store NAT mapping in conntrack.
+        if let Some(ct_entry) = CT_TABLE_V4.get_ptr_mut(&ct_key) {
+            unsafe {
+                (*ct_entry).nat_addr = translated_ip;
+                (*ct_entry).nat_port = new_src_port;
+                (*ct_entry).flags |= CT_FLAG_NAT_SRC;
+                (*ct_entry).nat_type = NAT_TYPE_SNAT;
             }
         }
-        i += 1;
+
+        if scan_ctx.nat_type == NAT_TYPE_MASQUERADE {
+            increment_metric(NAT_METRIC_MASQ_APPLIED);
+        } else {
+            increment_metric(NAT_METRIC_SNAT_APPLIED);
+        }
     }
 
     Ok(TC_ACT_OK)
@@ -298,9 +351,11 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
-    let protocol = unsafe { (*ipv6hdr).next_hdr };
+    let raw_protocol = unsafe { (*ipv6hdr).next_hdr };
 
-    let l4_offset = l3_offset + IPV6_HDR_LEN;
+    // Skip IPv6 extension headers to find the actual L4 protocol.
+    let (protocol, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_protocol)
+        .ok_or(())?;
 
     let (src_port, dst_port) = match protocol {
         PROTO_TCP => {
@@ -341,63 +396,55 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         }
     }
 
-    // Scan IPv6 SNAT rules.
+    // Scan IPv6 SNAT rules via bpf_loop.
     let count = match NAT_SNAT_RULE_COUNT_V6.get(0) {
         Some(&c) => c,
         None => return Ok(TC_ACT_OK),
     };
 
-    let max = if count > MAX_NAT_RULES_V6 {
-        MAX_NAT_RULES_V6
-    } else {
-        count
+    let mut scan_ctx = SnatScanCtxV6 {
+        count: if count > MAX_NAT_RULES_V6 { MAX_NAT_RULES_V6 } else { count },
+        src_addr,
+        dst_addr,
+        src_port,
+        protocol,
+        new_src_addr: [0; 4],
+        new_src_port: 0,
+        nat_type: 0,
+        matched: 0,
     };
-    let mut i = 0u32;
-    while i < max {
-        if let Some(rule) = NAT_SNAT_RULES_V6.get(i) {
-            if match_snat_rule_v6(rule, &src_addr, &dst_addr, protocol) {
-                let new_src_addr = rule.nat_addr;
-                if new_src_addr == [0; 4] && rule.nat_type != NAT_TYPE_MASQUERADE {
-                    i += 1;
-                    continue;
-                }
+    unsafe {
+        bpf_loop(
+            MAX_NAT_RULES_V6,
+            scan_snat_rule_v6 as *mut c_void,
+            &mut scan_ctx as *mut SnatScanCtxV6 as *mut c_void,
+            0,
+        );
+    }
 
-                let new_src_port = if rule.nat_port_start != 0 {
-                    allocate_port_v6(&src_addr, src_port, rule.nat_port_start, rule.nat_port_end)
-                } else {
-                    src_port
-                };
+    if scan_ctx.matched != 0 {
+        let translated_addr = scan_ctx.new_src_addr;
+        let new_src_port = scan_ctx.new_src_port;
 
-                let translated_addr = if rule.nat_type == NAT_TYPE_MASQUERADE && new_src_addr == [0; 4] {
-                    i += 1;
-                    continue;
-                } else {
-                    new_src_addr
-                };
+        rewrite_src_ip_v6(ctx, ipv6_src_off, l4_csum_off, &src_addr, &translated_addr)?;
+        if new_src_port != src_port {
+            rewrite_src_port(ctx, l4_offset, protocol, src_port, new_src_port)?;
+        }
 
-                rewrite_src_ip_v6(ctx, ipv6_src_off, l4_csum_off, &src_addr, &translated_addr)?;
-                if new_src_port != src_port {
-                    rewrite_src_port(ctx, l4_offset, protocol, src_port, new_src_port)?;
-                }
-
-                if let Some(ct_entry) = CT_TABLE_V6.get_ptr_mut(&ct_key) {
-                    unsafe {
-                        (*ct_entry).nat_addr = translated_addr;
-                        (*ct_entry).nat_port = new_src_port;
-                        (*ct_entry).flags |= CT_FLAG_NAT_SRC;
-                        (*ct_entry).nat_type = NAT_TYPE_SNAT;
-                    }
-                }
-
-                if rule.nat_type == NAT_TYPE_MASQUERADE {
-                    increment_metric(NAT_METRIC_MASQ_APPLIED);
-                } else {
-                    increment_metric(NAT_METRIC_SNAT_APPLIED);
-                }
-                return Ok(TC_ACT_OK);
+        if let Some(ct_entry) = CT_TABLE_V6.get_ptr_mut(&ct_key) {
+            unsafe {
+                (*ct_entry).nat_addr = translated_addr;
+                (*ct_entry).nat_port = new_src_port;
+                (*ct_entry).flags |= CT_FLAG_NAT_SRC;
+                (*ct_entry).nat_type = NAT_TYPE_SNAT;
             }
         }
-        i += 1;
+
+        if scan_ctx.nat_type == NAT_TYPE_MASQUERADE {
+            increment_metric(NAT_METRIC_MASQ_APPLIED);
+        } else {
+            increment_metric(NAT_METRIC_SNAT_APPLIED);
+        }
     }
 
     Ok(TC_ACT_OK)
@@ -653,34 +700,7 @@ fn match_snat_rule_v6(
     true
 }
 
-/// Per-word masked comparison of IPv6 addresses.
-#[inline(always)]
-fn ipv6_mask_match(addr: &[u32; 4], match_addr: &[u32; 4], mask: &[u32; 4]) -> bool {
-    let mut w = 0usize;
-    while w < 4 {
-        if (addr[w] & mask[w]) != match_addr[w] {
-            return false;
-        }
-        w += 1;
-    }
-    true
-}
-
-/// Convert `[u32; 4]` to 16 bytes in network byte order.
-#[inline(always)]
-fn u32x4_to_bytes(words: &[u32; 4]) -> [u8; 16] {
-    let mut bytes = [0u8; 16];
-    let mut w = 0usize;
-    while w < 4 {
-        let b = words[w].to_be_bytes();
-        bytes[w * 4] = b[0];
-        bytes[w * 4 + 1] = b[1];
-        bytes[w * 4 + 2] = b[2];
-        bytes[w * 4 + 3] = b[3];
-        w += 1;
-    }
-    bytes
-}
+// ipv6_mask_match, u32x4_to_bytes imported from ebpf_helpers::net
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {

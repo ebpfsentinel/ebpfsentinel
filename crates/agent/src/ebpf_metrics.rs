@@ -118,7 +118,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
         ],
         "DDOS_METRICS" => &[
             (0, "syn_rcv"),
-            (1, "syncookies"),
+            (1, "syn_flood_drops"),
             (2, "icmp_pass"),
             (3, "icmp_drop"),
             (14, "total_seen"),

@@ -15,6 +15,13 @@ use aya_ebpf::{
     programs::XdpContext,
 };
 use core::mem;
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, IcmpHdr, Ipv6Hdr,
+    PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4,
+    u16_from_be_bytes, u32_from_be_bytes,
+};
+use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
     conntrack::{
         CT_SRC_COUNTER_MAX, CT_STATE_NEW, ConnKey, ConnKeyV6, ConnTrackConfig, ConnValue,
@@ -42,48 +49,9 @@ use network_types::{
     udp::UdpHdr,
 };
 
-// ── Constants ───────────────────────────────────────────────────────
-
-const ETH_P_IP: u16 = 0x0800;
-const ETH_P_IPV6: u16 = 0x86DD;
-const ETH_P_8021Q: u16 = 0x8100;
-const VLAN_HDR_LEN: usize = 4;
-const IPV6_HDR_LEN: usize = 40;
-const PROTO_TCP: u8 = 6;
-const PROTO_UDP: u8 = 17;
-const PROTO_ICMPV6: u8 = 58;
-
-// ── Inline ICMP header type ─────────────────────────────────────────
-
-/// ICMP fixed header (8 bytes: type, code, checksum, rest-of-header).
-/// We only need type + code for firewall matching.
-#[repr(C)]
-struct IcmpHdr {
-    r#type: u8,
-    code: u8,
-    _checksum: u16,
-    _rest: u32,
-}
-
-// ── Inline IPv6 / VLAN header types ─────────────────────────────────
-
-/// IPv6 fixed header (40 bytes).
-#[repr(C)]
-struct Ipv6Hdr {
-    _vtcfl: u32,
-    _payload_len: u16,
-    next_hdr: u8,
-    _hop_limit: u8,
-    src_addr: [u8; 16],
-    dst_addr: [u8; 16],
-}
-
-/// 802.1Q VLAN tag (4 bytes after EthHdr when ether_type == 0x8100).
-#[repr(C)]
-struct VlanHdr {
-    tci: u16,
-    ether_type: u16,
-}
+// ── Constants / types from ebpf-helpers ─────────────────────────────
+// Network constants, header structs, ptr_at, skip_ipv6_ext_headers,
+// byte helpers, and metric/ringbuf macros are imported from ebpf_helpers.
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -200,22 +168,40 @@ const METRIC_ERRORS: u32 = 2;
 const METRIC_EVENTS_DROPPED: u32 = 3;
 const METRIC_TOTAL_SEEN: u32 = 4;
 
-/// RingBuf total size in bytes (must match EVENTS map declaration).
-const EVENTS_RINGBUF_SIZE: u64 = 256 * 4096;
-
-/// Backpressure threshold: skip emission when >75% of RingBuf is consumed.
-const BACKPRESSURE_THRESHOLD: u64 = EVENTS_RINGBUF_SIZE * 3 / 4;
-
-/// `BPF_RB_AVAIL_DATA` flag for `bpf_ringbuf_query`.
-const BPF_RB_AVAIL_DATA: u64 = 0;
-
 /// Returns `true` if the EVENTS RingBuf has backpressure (>75% full).
 #[inline(always)]
 fn ringbuf_has_backpressure() -> bool {
-    EVENTS.query(BPF_RB_AVAIL_DATA) > BACKPRESSURE_THRESHOLD
+    ringbuf_has_backpressure!(EVENTS)
 }
 
 // ── bpf_loop context structs ─────────────────────────────────────────
+//
+// Stack budget analysis (eBPF limit: 512 bytes per stack frame):
+//
+// RuleScanCtx (IPv4):
+//   count(4) + src_ip(4) + dst_ip(4) + src_port(2) + dst_port(2) +
+//   protocol(1) + vlan_id(2) + ct_state(1) + tcp_flags(1) + icmp_type(1) +
+//   icmp_code(1) + dscp(1) + src_mac(6) + dst_mac(6) + matched_action(4) +
+//   matched_rule_idx(4) + matched_max_states(2)
+//   = ~46 bytes (with padding, ~48 bytes)
+//
+// RuleScanCtxV6 (IPv6):
+//   count(4) + src_addr(16) + dst_addr(16) + src_port(2) + dst_port(2) +
+//   protocol(1) + vlan_id(2) + ct_state(1) + tcp_flags(1) + icmp_type(1) +
+//   icmp_code(1) + dscp(1) + src_mac(6) + dst_mac(6) + matched_action(4) +
+//   matched_rule_idx(4) + matched_max_states(2)
+//   = ~70 bytes (with padding, ~72 bytes)
+//
+// Both are well within the 512-byte limit. Crucially, process_firewall_v4
+// and process_firewall_v6 are both #[inline(never)], so the V4 and V6
+// scan contexts never coexist on the same stack frame. The compiler gives
+// each function its own 512-byte budget:
+//   - process_firewall_v4: RuleScanCtx (~48 bytes) + locals (~60 bytes)
+//   - process_firewall_v6: RuleScanCtxV6 (~72 bytes) + locals (~80 bytes)
+//
+// The bpf_loop callbacks (scan_rule_v4, scan_rule_v6) are also
+// #[inline(never)], so their stack usage (pointer casts, map lookups) does
+// not accumulate with the caller's frame.
 
 /// Opaque context passed through `bpf_loop` to the IPv4 rule-scan callback.
 #[repr(C)]
@@ -393,29 +379,6 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
     action
 }
 
-// ── Helpers: byte conversion ────────────────────────────────────────
-
-#[inline(always)]
-fn u32_from_be_bytes(b: [u8; 4]) -> u32 {
-    u32::from_be_bytes(b)
-}
-
-#[inline(always)]
-fn u16_from_be_bytes(b: [u8; 2]) -> u16 {
-    u16::from_be_bytes(b)
-}
-
-/// Convert a 16-byte IPv6 address to `[u32; 4]` in network byte order.
-#[inline(always)]
-fn ipv6_addr_to_u32x4(addr: &[u8; 16]) -> [u32; 4] {
-    [
-        u32_from_be_bytes([addr[0], addr[1], addr[2], addr[3]]),
-        u32_from_be_bytes([addr[4], addr[5], addr[6], addr[7]]),
-        u32_from_be_bytes([addr[8], addr[9], addr[10], addr[11]]),
-        u32_from_be_bytes([addr[12], addr[13], addr[14], addr[15]]),
-    ]
-}
-
 /// Read the default policy from the map (0=pass, 1=drop).
 #[inline(always)]
 fn read_default_policy() -> u8 {
@@ -452,13 +415,21 @@ fn try_xdp_firewall(ctx: &XdpContext) -> Result<u32, ()> {
     let mut flags: u8 = 0;
 
     // Check for 802.1Q VLAN tag
-    if ether_type == ETH_P_8021Q {
+    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
         let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
         let tci = u16::from_be(unsafe { (*vhdr).tci });
         vlan_id = tci & 0x0FFF;
         ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
         l3_offset += VLAN_HDR_LEN;
         flags |= FLAG_VLAN;
+
+        // QinQ: parse second VLAN tag if present
+        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
+            let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
+            vlan_id = u16::from_be(unsafe { (*vhdr2).tci }) & 0x0FFF;
+            ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
+            l3_offset += VLAN_HDR_LEN;
+        }
     }
 
     if ether_type == ETH_P_IP {
@@ -472,6 +443,9 @@ fn try_xdp_firewall(ctx: &XdpContext) -> Result<u32, ()> {
 }
 
 /// IPv4 firewall processing: linear scan of FIREWALL_RULES array.
+///
+/// `#[inline(never)]` ensures this function gets its own stack frame
+/// (~48 bytes for `RuleScanCtx` + locals), separate from the IPv6 path.
 #[inline(never)]
 fn process_firewall_v4(
     ctx: &XdpContext,
@@ -952,6 +926,10 @@ fn lpm_lookup_v6(pkt_ctx: *const PacketCtx) -> i32 {
 }
 
 /// IPv6 firewall processing: linear scan of FIREWALL_RULES_V6 array.
+///
+/// `#[inline(never)]` is critical here: it gives this function its own
+/// 512-byte stack frame, preventing `RuleScanCtxV6` (~72 bytes) from
+/// accumulating with `RuleScanCtx` (~48 bytes) in `process_firewall_v4`.
 #[inline(never)]
 fn process_firewall_v6(
     ctx: &XdpContext,
@@ -965,13 +943,17 @@ fn process_firewall_v6(
     let dst_mac = unsafe { (*ethhdr).dst_addr };
 
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
-    let next_hdr = unsafe { (*ipv6hdr).next_hdr };
+    let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
 
     // Extract DSCP from IPv6 traffic class. The _vtcfl field is:
     // [version(4b)][traffic_class(8b)][flow_label(20b)] in network byte order.
     let vtcfl = u32::from_be(unsafe { (*ipv6hdr)._vtcfl });
     let traffic_class = ((vtcfl >> 20) & 0xFF) as u8;
     let dscp = traffic_class >> 2;
+
+    // Skip IPv6 extension headers to find the actual L4 protocol.
+    let (next_hdr, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr)
+        .ok_or(())?;
 
     // Populate per-CPU packet context early so IPv6 addresses live off-stack.
     let pkt_ctx = PKT_CTX.get_ptr_mut(0).ok_or(())?;
@@ -984,8 +966,6 @@ fn process_firewall_v6(
         (*pkt_ctx).vlan_id = vlan_id;
         (*pkt_ctx).protocol = next_hdr;
     }
-
-    let l4_offset = l3_offset + IPV6_HDR_LEN;
 
     // Parse L4 ports + TCP flags + ICMPv6 type/code
     let mut tcp_flags: u8 = 0;
@@ -1252,28 +1232,13 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
-
-/// Bounds-checked pointer access. Critical for eBPF verifier compliance:
-/// every memory access must be validated against data_end.
-#[inline(always)]
-unsafe fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let len = mem::size_of::<T>();
-    if start + offset + len > end {
-        return Err(());
-    }
-    Ok((start + offset) as *const T)
-}
+// ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::xdp
+// increment_metric! imported from ebpf_helpers
 
 /// Increment a per-CPU metric counter.
 #[inline(always)]
 fn increment_metric(index: u32) {
-    if let Some(counter) = FIREWALL_METRICS.get_ptr_mut(index) {
-        unsafe {
-            *counter += 1;
-        }
-    }
+    increment_metric!(FIREWALL_METRICS, index);
 }
 
 /// Prepend `XdpMetadata` to the packet's data_meta area so that TC programs

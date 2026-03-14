@@ -11,8 +11,15 @@ use aya_ebpf::{
     },
     programs::XdpContext,
 };
+#[cfg(debug_assertions)]
 use aya_log_ebpf::info;
-use core::mem;
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_ICMP,
+    PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4,
+    u32_from_be_bytes,
+};
+use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
     ddos::{
         AmpProtectConfig, AmpProtectKey, DdosConnTrackConfig, DdosConnTrackKey, DdosConnTrackValue,
@@ -23,7 +30,7 @@ use ebpf_common::{
         DDOS_METRIC_CONN_TRACKED, DDOS_METRIC_COUNT, DDOS_METRIC_EVENTS_DROPPED,
         DDOS_METRIC_FIN_FLOOD_DROPS, DDOS_METRIC_HALF_OPEN_DROPS, DDOS_METRIC_ICMP_DROPPED,
         DDOS_METRIC_ICMP_PASSED, DDOS_METRIC_OVERSIZED_ICMP, DDOS_METRIC_RST_FLOOD_DROPS,
-        DDOS_METRIC_SYNCOOKIES_SENT, DDOS_METRIC_SYN_RECEIVED, EVENT_TYPE_DDOS_AMP,
+        DDOS_METRIC_SYN_FLOOD_DROPS, DDOS_METRIC_SYN_RECEIVED, EVENT_TYPE_DDOS_AMP,
         EVENT_TYPE_DDOS_CONNTRACK, EVENT_TYPE_DDOS_ICMP, EVENT_TYPE_DDOS_SYN, FLOOD_TYPE_ACK,
         FLOOD_TYPE_FIN, FLOOD_TYPE_RST,
     },
@@ -41,16 +48,7 @@ use network_types::{
 };
 
 // ── Constants ───────────────────────────────────────────────────────
-
-const ETH_P_IP: u16 = 0x0800;
-const ETH_P_IPV6: u16 = 0x86DD;
-const ETH_P_8021Q: u16 = 0x8100;
-const VLAN_HDR_LEN: usize = 4;
-const IPV6_HDR_LEN: usize = 40;
-const PROTO_ICMP: u8 = 1;
-const PROTO_TCP: u8 = 6;
-const PROTO_UDP: u8 = 17;
-const PROTO_ICMPV6: u8 = 58;
+// Network constants and header structs imported from ebpf_helpers.
 
 /// ICMP Echo Request type (IPv4).
 const ICMP_ECHO_REQUEST: u8 = 8;
@@ -78,25 +76,7 @@ const SLOT_NS: u64 = WINDOW_NS / SLIDING_WINDOW_NUM_SLOTS as u64;
 /// Prevents overflow for very long idle periods.
 const LEAKY_MAX_ELAPSED_NS: u64 = 10 * NS_PER_SEC;
 
-// ── Inline IPv6 / VLAN header types ─────────────────────────────────
-
-/// IPv6 fixed header (40 bytes).
-#[repr(C)]
-struct Ipv6Hdr {
-    _vtcfl: u32,
-    _payload_len: u16,
-    next_hdr: u8,
-    _hop_limit: u8,
-    src_addr: [u8; 16],
-    dst_addr: [u8; 16],
-}
-
-/// 802.1Q VLAN tag (4 bytes after EthHdr when ether_type == 0x8100).
-#[repr(C)]
-struct VlanHdr {
-    tci: u16,
-    ether_type: u16,
-}
+// ── Inline program-specific header types ─────────────────────────────
 
 /// Inline TCP header for SYN detection (20 bytes minimum).
 #[repr(C)]
@@ -247,29 +227,16 @@ const METRIC_ERRORS: u32 = 2;
 const METRIC_EVENTS_DROPPED: u32 = 3;
 const METRIC_TOTAL_SEEN: u32 = 4;
 
-/// RingBuf total size in bytes (must match EVENTS map declaration).
-const EVENTS_RINGBUF_SIZE: u64 = 256 * 4096;
-
-/// Backpressure threshold: skip emission when >75% of RingBuf is consumed.
-const BACKPRESSURE_THRESHOLD: u64 = EVENTS_RINGBUF_SIZE * 3 / 4;
-
-/// `BPF_RB_AVAIL_DATA` flag for `bpf_ringbuf_query`.
-const BPF_RB_AVAIL_DATA: u64 = 0;
-
 /// Returns `true` if the EVENTS RingBuf has backpressure (>75% full).
 #[inline(always)]
 fn ringbuf_has_backpressure() -> bool {
-    EVENTS.query(BPF_RB_AVAIL_DATA) > BACKPRESSURE_THRESHOLD
+    ringbuf_has_backpressure!(EVENTS)
 }
 
 /// Increment a DDoS-specific per-CPU metric counter.
 #[inline(always)]
 fn increment_ddos_metric(index: u32) {
-    if let Some(counter) = DDOS_METRICS.get_ptr_mut(index) {
-        unsafe {
-            *counter += 1;
-        }
-    }
+    increment_metric!(DDOS_METRICS, index);
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
@@ -285,24 +252,6 @@ pub fn xdp_ratelimit(ctx: XdpContext) -> u32 {
             xdp_action::XDP_PASS
         }
     }
-}
-
-// ── Helpers: byte conversion ────────────────────────────────────────
-
-#[inline(always)]
-fn u32_from_be_bytes(b: [u8; 4]) -> u32 {
-    u32::from_be_bytes(b)
-}
-
-/// Convert a 16-byte IPv6 address to `[u32; 4]` in network byte order.
-#[inline(always)]
-fn ipv6_addr_to_u32x4(addr: &[u8; 16]) -> [u32; 4] {
-    [
-        u32_from_be_bytes([addr[0], addr[1], addr[2], addr[3]]),
-        u32_from_be_bytes([addr[4], addr[5], addr[6], addr[7]]),
-        u32_from_be_bytes([addr[8], addr[9], addr[10], addr[11]]),
-        u32_from_be_bytes([addr[12], addr[13], addr[14], addr[15]]),
-    ]
 }
 
 /// Hash an IPv6 source address to a u32 for rate limit bucket lookup.
@@ -324,13 +273,21 @@ fn try_xdp_ratelimit(ctx: &XdpContext) -> Result<u32, ()> {
     let mut flags: u8 = 0;
 
     // Check for 802.1Q VLAN tag
-    if ether_type == ETH_P_8021Q {
+    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
         let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
         let tci = u16::from_be(unsafe { (*vhdr).tci });
         vlan_id = tci & 0x0FFF;
         ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
         l3_offset += VLAN_HDR_LEN;
         flags |= FLAG_VLAN;
+
+        // QinQ: parse second VLAN tag if present
+        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
+            let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
+            vlan_id = u16::from_be(unsafe { (*vhdr2).tci }) & 0x0FFF;
+            ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
+            l3_offset += VLAN_HDR_LEN;
+        }
     }
 
     if ether_type == ETH_P_IP {
@@ -425,6 +382,7 @@ fn process_ratelimit_v4(
             &src_addr, &dst_addr, src_port, dst_port, protocol, flags, vlan_id,
         );
         increment_metric(METRIC_THROTTLED);
+        #[cfg(debug_assertions)]
         info!(ctx, "RATELIMIT {:i} throttled", src_ip);
         Ok(xdp_action::XDP_DROP)
     }
@@ -441,8 +399,11 @@ fn process_ratelimit_v6(
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
-    let next_hdr = unsafe { (*ipv6hdr).next_hdr };
-    let l4_offset = l3_offset + IPV6_HDR_LEN;
+    let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
+
+    // Skip IPv6 extension headers to find the actual L4 protocol.
+    let (next_hdr, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr)
+        .ok_or(())?;
 
     // Hash IPv6 src to u32 for rate limit bucket (avoids needing duplicate maps)
     let src_hash = hash_ipv6_src(&src_addr);
@@ -510,6 +471,7 @@ fn process_ratelimit_v6(
             &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
         );
         increment_metric(METRIC_THROTTLED);
+        #[cfg(debug_assertions)]
         info!(ctx, "RATELIMIT6 {:i} throttled", src_addr[0]);
         Ok(xdp_action::XDP_DROP)
     }
@@ -623,12 +585,11 @@ fn check_syn_flood_v4(
         }
     }
 
-    // SYN cookie protection: drop the SYN and emit event.
-    // NOTE: Full SYN+ACK forging via XDP_TX requires packet rewriting
-    // (swap MACs, swap IPs, build SYN+ACK TCP header with cookie).
-    // For now, we DROP the SYN and emit an event for userspace detection.
-    // Future: implement full XDP_TX SYN+ACK when bpf_tcp_gen_syncookie
-    // is available in the aya-ebpf bindings.
+    // SYN flood protection: drop the SYN and emit event for userspace detection.
+    // NOTE: This does NOT generate actual SYN cookies. Full SYN+ACK forging
+    // via XDP_TX would require packet rewriting (swap MACs, swap IPs, build
+    // SYN+ACK TCP header with cookie). Future: implement when
+    // bpf_tcp_gen_syncookie is available in the aya-ebpf bindings.
     let src_addr = [src_ip, 0, 0, 0];
     let dst_addr = [dst_ip, 0, 0, 0];
     emit_ddos_event(
@@ -642,7 +603,7 @@ fn check_syn_flood_v4(
         flags,
         vlan_id,
     );
-    increment_ddos_metric(DDOS_METRIC_SYNCOOKIES_SENT);
+    increment_ddos_metric(DDOS_METRIC_SYN_FLOOD_DROPS);
     Some(xdp_action::XDP_DROP)
 }
 
@@ -693,7 +654,7 @@ fn check_syn_flood_v6(
         flags,
         vlan_id,
     );
-    increment_ddos_metric(DDOS_METRIC_SYNCOOKIES_SENT);
+    increment_ddos_metric(DDOS_METRIC_SYN_FLOOD_DROPS);
     Some(xdp_action::XDP_DROP)
 }
 
@@ -1474,26 +1435,12 @@ fn check_leaky_bucket(key: &RateLimitKey, config: &RateLimitConfig, now: u64) ->
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-/// Bounds-checked pointer access for eBPF verifier compliance.
-#[inline(always)]
-unsafe fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let len = mem::size_of::<T>();
-    if start + offset + len > end {
-        return Err(());
-    }
-    Ok((start + offset) as *const T)
-}
+// ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::xdp
 
 /// Increment a per-CPU metric counter.
 #[inline(always)]
 fn increment_metric(index: u32) {
-    if let Some(counter) = RATELIMIT_METRICS.get_ptr_mut(index) {
-        unsafe {
-            *counter += 1;
-        }
-    }
+    increment_metric!(RATELIMIT_METRICS, index);
 }
 
 /// Emit a rate-limit event to the EVENTS RingBuf. Skips emission under

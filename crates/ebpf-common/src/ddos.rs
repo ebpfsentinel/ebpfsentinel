@@ -176,8 +176,8 @@ pub const CONNTRACK_SUB_ACK_FLOOD: u8 = 3;
 
 /// Metric index: SYN packets received.
 pub const DDOS_METRIC_SYN_RECEIVED: u32 = 0;
-/// Metric index: SYN cookies sent.
-pub const DDOS_METRIC_SYNCOOKIES_SENT: u32 = 1;
+/// Metric index: SYN flood drops (SYN packets dropped by flood protection).
+pub const DDOS_METRIC_SYN_FLOOD_DROPS: u32 = 1;
 /// Metric index: ICMP packets passed.
 pub const DDOS_METRIC_ICMP_PASSED: u32 = 2;
 /// Metric index: ICMP packets dropped.
@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn ddos_metric_indices() {
         assert_eq!(DDOS_METRIC_SYN_RECEIVED, 0);
-        assert_eq!(DDOS_METRIC_SYNCOOKIES_SENT, 1);
+        assert_eq!(DDOS_METRIC_SYN_FLOOD_DROPS, 1);
         assert_eq!(DDOS_METRIC_ICMP_PASSED, 2);
         assert_eq!(DDOS_METRIC_ICMP_DROPPED, 3);
         assert_eq!(DDOS_METRIC_AMP_PASSED, 4);

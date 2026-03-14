@@ -13,8 +13,14 @@ use aya_ebpf::{
     programs::TcContext,
 };
 use aya_ebpf_bindings::helpers::bpf_skb_load_bytes;
+#[cfg(debug_assertions)]
 use aya_log_ebpf::info;
-use core::mem;
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
+    PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
+};
+use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
     event::{
         PacketEvent, EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, FLAG_VLAN,
@@ -31,35 +37,9 @@ use network_types::{
     udp::UdpHdr,
 };
 
-// ── Constants ───────────────────────────────────────────────────────
-
-const ETH_P_IP: u16 = 0x0800;
-const ETH_P_IPV6: u16 = 0x86DD;
-const ETH_P_8021Q: u16 = 0x8100;
-const VLAN_HDR_LEN: usize = 4;
-const IPV6_HDR_LEN: usize = 40;
-const PROTO_TCP: u8 = 6;
-const PROTO_UDP: u8 = 17;
-
-// ── Inline IPv6 / VLAN header types ─────────────────────────────────
-
-/// IPv6 fixed header (40 bytes).
-#[repr(C)]
-struct Ipv6Hdr {
-    _vtcfl: u32,
-    _payload_len: u16,
-    next_hdr: u8,
-    _hop_limit: u8,
-    src_addr: [u8; 16],
-    dst_addr: [u8; 16],
-}
-
-/// 802.1Q VLAN tag (4 bytes after EthHdr when ether_type == 0x8100).
-#[repr(C)]
-struct VlanHdr {
-    tci: u16,
-    ether_type: u16,
-}
+// ── Constants / types from ebpf-helpers ─────────────────────────────
+// Network constants, header structs, ptr_at, skip_ipv6_ext_headers,
+// byte helpers, and metric/ringbuf macros are imported from ebpf_helpers.
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -107,19 +87,10 @@ const METRIC_ERRORS: u32 = 2;
 const METRIC_EVENTS_DROPPED: u32 = 3;
 const METRIC_TOTAL_SEEN: u32 = 4;
 
-/// RingBuf total size in bytes (must match EVENTS map declaration).
-const EVENTS_RINGBUF_SIZE: u64 = 256 * 4096;
-
-/// Backpressure threshold: skip emission when >75% of RingBuf is consumed.
-const BACKPRESSURE_THRESHOLD: u64 = EVENTS_RINGBUF_SIZE * 3 / 4;
-
-/// BPF_RB_AVAIL_DATA flag for `bpf_ringbuf_query`.
-const BPF_RB_AVAIL_DATA: u64 = 0;
-
 /// Returns `true` if the EVENTS RingBuf has backpressure (>75% full).
 #[inline(always)]
 fn ringbuf_has_backpressure() -> bool {
-    EVENTS.query(BPF_RB_AVAIL_DATA) > BACKPRESSURE_THRESHOLD
+    ringbuf_has_backpressure!(EVENTS)
 }
 
 /// Returns `true` if the event should be sampled out (i.e., skipped).
@@ -152,29 +123,6 @@ pub fn tc_ids(ctx: TcContext) -> i32 {
     }
 }
 
-// ── Helpers: byte conversion ────────────────────────────────────────
-
-#[inline(always)]
-fn u32_from_be_bytes(b: [u8; 4]) -> u32 {
-    u32::from_be_bytes(b)
-}
-
-#[inline(always)]
-fn u16_from_be_bytes(b: [u8; 2]) -> u16 {
-    u16::from_be_bytes(b)
-}
-
-/// Convert a 16-byte IPv6 address to `[u32; 4]` in network byte order.
-#[inline(always)]
-fn ipv6_addr_to_u32x4(addr: &[u8; 16]) -> [u32; 4] {
-    [
-        u32_from_be_bytes([addr[0], addr[1], addr[2], addr[3]]),
-        u32_from_be_bytes([addr[4], addr[5], addr[6], addr[7]]),
-        u32_from_be_bytes([addr[8], addr[9], addr[10], addr[11]]),
-        u32_from_be_bytes([addr[12], addr[13], addr[14], addr[15]]),
-    ]
-}
-
 // ── XDP metadata reading ────────────────────────────────────────────
 
 // ── Packet processing ───────────────────────────────────────────────
@@ -189,13 +137,21 @@ fn try_tc_ids(ctx: &TcContext) -> Result<i32, ()> {
     let mut flags: u8 = 0;
 
     // Check for 802.1Q VLAN tag
-    if ether_type == ETH_P_8021Q {
+    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
         let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
         let tci = u16::from_be(unsafe { (*vhdr).tci });
         vlan_id = tci & 0x0FFF;
         ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
         l3_offset += VLAN_HDR_LEN;
         flags |= FLAG_VLAN;
+
+        // QinQ: parse second VLAN tag if present
+        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
+            let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
+            vlan_id = u16::from_be(unsafe { (*vhdr2).tci }) & 0x0FFF;
+            ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
+            l3_offset += VLAN_HDR_LEN;
+        }
     }
 
     if ether_type == ETH_P_IP {
@@ -224,10 +180,13 @@ fn process_ids_v4(
     let ihl = unsafe { (*ipv4hdr).ihl() } as usize;
     let l4_offset = l3_offset + ihl;
 
-    // Parse L4 ports
+    // Parse L4 ports. For TCP, keep a reference to the header so we can
+    // reuse it for doff() in the L7 path (avoids a duplicate ptr_at).
+    let mut tcp_hdr_ptr: Option<*const TcpHdr> = None;
     let (src_port, dst_port) = match protocol {
         IpProto::Tcp => {
             let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_offset)? };
+            tcp_hdr_ptr = Some(tcphdr);
             (
                 u16_from_be_bytes(unsafe { (*tcphdr).source }),
                 u16_from_be_bytes(unsafe { (*tcphdr).dest }),
@@ -246,10 +205,10 @@ fn process_ids_v4(
     let src_addr = [src_ip, 0, 0, 0];
     let dst_addr = [dst_ip, 0, 0, 0];
 
-    // L7 payload capture (independent of IDS patterns)
-    if matches!(protocol, IpProto::Tcp) {
+    // L7 payload capture (independent of IDS patterns).
+    // Reuse the TCP header pointer from the port parse above.
+    if let Some(tcphdr) = tcp_hdr_ptr {
         if unsafe { L7_PORTS.get(&dst_port) }.is_some() {
-            let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_offset)? };
             let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
             let l7_offset = l4_offset + tcp_data_off;
             emit_l7_event(ctx, &src_addr, &dst_addr, src_port, dst_port, flags, vlan_id, l7_offset);
@@ -271,13 +230,18 @@ fn process_ids_v6(
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
-    let next_hdr = unsafe { (*ipv6hdr).next_hdr };
+    let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
 
-    let l4_offset = l3_offset + IPV6_HDR_LEN;
+    // Skip IPv6 extension headers to find the actual L4 protocol.
+    let (next_hdr, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr)
+        .ok_or(())?;
 
-    // Parse L4 ports
+    // Parse L4 ports. For TCP, keep a reference to the header so we can
+    // reuse it for doff() in the L7 path (avoids a duplicate ptr_at).
+    let mut tcp_hdr_ptr: Option<*const TcpHdr> = None;
     let (src_port, dst_port) = if next_hdr == PROTO_TCP {
         let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_offset)? };
+        tcp_hdr_ptr = Some(tcphdr);
         (
             u16_from_be_bytes(unsafe { (*tcphdr).source }),
             u16_from_be_bytes(unsafe { (*tcphdr).dest }),
@@ -292,10 +256,10 @@ fn process_ids_v6(
         (0u16, 0u16)
     };
 
-    // L7 payload capture for IPv6 TCP
-    if next_hdr == PROTO_TCP {
+    // L7 payload capture for IPv6 TCP.
+    // Reuse the TCP header pointer from the port parse above.
+    if let Some(tcphdr) = tcp_hdr_ptr {
         if unsafe { L7_PORTS.get(&dst_port) }.is_some() {
-            let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_offset)? };
             let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
             let l7_offset = l4_offset + tcp_data_off;
             emit_l7_event(ctx, &src_addr, &dst_addr, src_port, dst_port, flags, vlan_id, l7_offset);
@@ -309,7 +273,7 @@ fn process_ids_v6(
 /// IDS pattern lookup and action (shared by v4/v6 — key is port+protocol only).
 #[inline(always)]
 fn process_ids_pattern(
-    ctx: &TcContext,
+    _ctx: &TcContext,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
     src_port: u16,
@@ -340,38 +304,25 @@ fn process_ids_pattern(
     }
 
     if pattern.action == IDS_ACTION_DROP {
-        info!(ctx, "IDS DROP {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port);
+        #[cfg(debug_assertions)]
+        info!(_ctx, "IDS DROP {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port);
         increment_metric(METRIC_DROPPED);
         Ok(TC_ACT_SHOT)
     } else {
-        info!(ctx, "IDS ALERT {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port);
+        #[cfg(debug_assertions)]
+        info!(_ctx, "IDS ALERT {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port);
         Ok(TC_ACT_OK)
     }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-/// Bounds-checked pointer access. Critical for eBPF verifier compliance:
-/// every memory access must be validated against data_end.
-#[inline(always)]
-unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> {
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let len = mem::size_of::<T>();
-    if start + offset + len > end {
-        return Err(());
-    }
-    Ok((start + offset) as *const T)
-}
+// ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::tc
 
 /// Increment a per-CPU metric counter.
 #[inline(always)]
 fn increment_metric(index: u32) {
-    if let Some(counter) = IDS_METRICS.get_ptr_mut(index) {
-        unsafe {
-            *counter += 1;
-        }
-    }
+    increment_metric!(IDS_METRICS, index);
 }
 
 /// Emit a PacketEvent to the EVENTS RingBuf. Skips emission under

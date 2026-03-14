@@ -1,0 +1,13 @@
+[package]
+name = "ebpf-helpers"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+
+[dependencies]
+aya-ebpf = "0.1.1"
+ebpf-common = { path = "../ebpf-common", default-features = false }
+
+[lib]
+name = "ebpf_helpers"
+path = "src/lib.rs"

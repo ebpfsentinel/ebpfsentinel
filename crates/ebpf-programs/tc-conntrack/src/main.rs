@@ -8,7 +8,13 @@ use aya_ebpf::{
     maps::{Array, LruHashMap, PerCpuArray},
     programs::TcContext,
 };
-use core::mem;
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_ICMP,
+    PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4,
+    u16_from_be_bytes, u32_from_be_bytes,
+};
+use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::increment_metric;
 use ebpf_common::conntrack::{
     ConnKey, ConnKeyV6, ConnTrackConfig, ConnValue, ConnValueV6, CT_FLAG_ASSURED,
     CT_FLAG_SEEN_REPLY, CT_MAX_ENTRIES_V4, CT_MAX_ENTRIES_V6, CT_METRIC_COUNT, CT_METRIC_ERRORS,
@@ -19,42 +25,15 @@ use ebpf_common::conntrack::{
 };
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 
-// ── Constants ───────────────────────────────────────────────────────
-
-const ETH_P_IP: u16 = 0x0800;
-const ETH_P_IPV6: u16 = 0x86DD;
-const ETH_P_8021Q: u16 = 0x8100;
-const VLAN_HDR_LEN: usize = 4;
-const IPV6_HDR_LEN: usize = 40;
-const PROTO_TCP: u8 = 6;
-const PROTO_UDP: u8 = 17;
-const PROTO_ICMP: u8 = 1;
-const PROTO_ICMPV6: u8 = 58;
+// ── Constants / types from ebpf-helpers ─────────────────────────────
+// Network constants, header structs, ptr_at, skip_ipv6_ext_headers,
+// byte helpers, and metric macros are imported from ebpf_helpers.
 
 // TCP flags
 const TCP_SYN: u8 = 0x02;
 const TCP_ACK: u8 = 0x10;
 const TCP_FIN: u8 = 0x01;
 const TCP_RST: u8 = 0x04;
-
-// ── Inline header types ─────────────────────────────────────────────
-
-#[repr(C)]
-struct VlanHdr {
-    _tci: u16,
-    ether_type: u16,
-}
-
-/// IPv6 fixed header (40 bytes).
-#[repr(C)]
-struct Ipv6Hdr {
-    _vtcfl: u32,
-    _payload_len: u16,
-    next_hdr: u8,
-    _hop_limit: u8,
-    src_addr: [u8; 16],
-    dst_addr: [u8; 16],
-}
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -95,16 +74,6 @@ pub fn tc_conntrack(ctx: TcContext) -> i32 {
 // ── Helpers ─────────────────────────────────────────────────────────
 
 #[inline(always)]
-fn u32_from_be_bytes(b: [u8; 4]) -> u32 {
-    u32::from_be_bytes(b)
-}
-
-#[inline(always)]
-fn u16_from_be_bytes(b: [u8; 2]) -> u16 {
-    u16::from_be_bytes(b)
-}
-
-#[inline(always)]
 fn is_conntrack_enabled() -> bool {
     match CT_CONFIG.get(0) {
         Some(cfg) => cfg.enabled != 0,
@@ -112,24 +81,11 @@ fn is_conntrack_enabled() -> bool {
     }
 }
 
-#[inline(always)]
-fn increment_metric(index: u32) {
-    if let Some(counter) = CT_METRICS.get_ptr_mut(index) {
-        unsafe {
-            *counter += 1;
-        }
-    }
-}
+// ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::tc
 
 #[inline(always)]
-unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> {
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let len = mem::size_of::<T>();
-    if start + offset + len > end {
-        return Err(());
-    }
-    Ok((start + offset) as *const T)
+fn increment_metric(index: u32) {
+    increment_metric!(CT_METRICS, index);
 }
 
 /// Extract TCP flags byte from TcpHdr.
@@ -138,17 +94,6 @@ fn tcp_flags(th: &TcpHdr) -> u8 {
     // TCP flags are in the 14th byte of the header
     let bits = th._bitfield_1.get(0, 16);
     (bits >> 8) as u8
-}
-
-/// Convert 16 raw bytes to `[u32; 4]` (network byte order words).
-#[inline(always)]
-fn ipv6_addr_to_u32x4(bytes: &[u8; 16]) -> [u32; 4] {
-    [
-        u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-        u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
-        u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
-        u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
-    ]
 }
 
 // ── Packet processing ───────────────────────────────────────────────
@@ -164,10 +109,17 @@ fn try_tc_conntrack(ctx: &TcContext) -> Result<i32, ()> {
     let mut l3_offset = EthHdr::LEN;
 
     // 802.1Q VLAN tag
-    if ether_type == ETH_P_8021Q {
+    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
         let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
         ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
         l3_offset += VLAN_HDR_LEN;
+
+        // QinQ: parse second VLAN tag if present
+        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
+            let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
+            ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
+            l3_offset += VLAN_HDR_LEN;
+        }
     }
 
     if ether_type == ETH_P_IP {
@@ -221,6 +173,7 @@ fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     // Determine if this packet is in the "forward" direction (src is the
     // lower IP:port pair in the normalized key).
     let is_forward = ct_key.src_ip == src_ip && ct_key.src_port == src_port;
+    let pkt_len = (ctx.data_end() - ctx.data()) as u32;
 
     if let Some(entry) = CT_TABLE_V4.get_ptr_mut(&ct_key) {
         // Existing connection — update
@@ -231,8 +184,10 @@ fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
             // Update counters
             if is_forward {
                 (*entry).packets_fwd = (*entry).packets_fwd.wrapping_add(1);
+                (*entry).bytes_fwd = (*entry).bytes_fwd.wrapping_add(pkt_len);
             } else {
                 (*entry).packets_rev = (*entry).packets_rev.wrapping_add(1);
+                (*entry).bytes_rev = (*entry).bytes_rev.wrapping_add(pkt_len);
                 (*entry).flags |= CT_FLAG_SEEN_REPLY;
             }
 
@@ -266,7 +221,7 @@ fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
             _pad: 0,
             packets_fwd: 1,
             packets_rev: 0,
-            bytes_fwd: 0,
+            bytes_fwd: pkt_len,
             bytes_rev: 0,
             first_seen_ns: now,
             last_seen_ns: now,
@@ -288,9 +243,11 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
-    let protocol = unsafe { (*ipv6hdr).next_hdr };
+    let raw_protocol = unsafe { (*ipv6hdr).next_hdr };
 
-    let l4_offset = l3_offset + IPV6_HDR_LEN;
+    // Skip IPv6 extension headers to find the actual L4 protocol.
+    let (protocol, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_protocol)
+        .ok_or(())?;
 
     let (src_port, dst_port, tcp_flag_bits) = match protocol {
         PROTO_TCP => {
@@ -320,6 +277,7 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     increment_metric(CT_METRIC_LOOKUPS);
 
     let is_forward = ct_key.src_addr == src_addr && ct_key.src_port == src_port;
+    let pkt_len = (ctx.data_end() - ctx.data()) as u32;
 
     if let Some(entry) = CT_TABLE_V6.get_ptr_mut(&ct_key) {
         increment_metric(CT_METRIC_HITS);
@@ -328,8 +286,10 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
 
             if is_forward {
                 (*entry).packets_fwd = (*entry).packets_fwd.wrapping_add(1);
+                (*entry).bytes_fwd = (*entry).bytes_fwd.wrapping_add(pkt_len);
             } else {
                 (*entry).packets_rev = (*entry).packets_rev.wrapping_add(1);
+                (*entry).bytes_rev = (*entry).bytes_rev.wrapping_add(pkt_len);
                 (*entry).flags |= CT_FLAG_SEEN_REPLY;
             }
 
@@ -359,7 +319,7 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
             _pad: 0,
             packets_fwd: 1,
             packets_rev: 0,
-            bytes_fwd: 0,
+            bytes_fwd: pkt_len,
             bytes_rev: 0,
             first_seen_ns: now,
             last_seen_ns: now,
@@ -375,30 +335,33 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     Ok(TC_ACT_OK)
 }
 
-/// Advance the TCP state machine based on observed flags (IPv4).
+/// Shared TCP state machine logic for both IPv4 and IPv6 connections.
+///
+/// Operates on raw pointers to `state` and `flags` fields, which are at the
+/// same conceptual position in both `ConnValue` and `ConnValueV6`.
 #[inline(always)]
-unsafe fn advance_tcp_state(entry: *mut ConnValue, tcp_flags: u8, is_forward: bool) {
-    let state = unsafe { (*entry).state };
+unsafe fn advance_tcp_state_inner(state: *mut u8, flags: *mut u8, tcp_flags: u8, is_forward: bool) {
+    let current = unsafe { *state };
 
     if tcp_flags & TCP_RST != 0 {
-        unsafe { (*entry).state = CT_STATE_INVALID };
+        unsafe { *state = CT_STATE_INVALID };
         return;
     }
 
-    match state {
+    match current {
         CT_STATE_SYN_SENT => {
             if !is_forward && tcp_flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) {
                 unsafe {
-                    (*entry).state = CT_STATE_SYN_RECV;
-                    (*entry).flags |= CT_FLAG_SEEN_REPLY;
+                    *state = CT_STATE_SYN_RECV;
+                    *flags |= CT_FLAG_SEEN_REPLY;
                 }
             }
         }
         CT_STATE_SYN_RECV => {
             if is_forward && tcp_flags & TCP_ACK != 0 {
                 unsafe {
-                    (*entry).state = CT_STATE_ESTABLISHED;
-                    (*entry).flags |= CT_FLAG_ASSURED;
+                    *state = CT_STATE_ESTABLISHED;
+                    *flags |= CT_FLAG_ASSURED;
                 }
                 increment_metric(CT_METRIC_ESTABLISHED);
             }
@@ -406,74 +369,49 @@ unsafe fn advance_tcp_state(entry: *mut ConnValue, tcp_flags: u8, is_forward: bo
         CT_STATE_ESTABLISHED => {
             if tcp_flags & TCP_FIN != 0 {
                 if is_forward {
-                    unsafe { (*entry).state = CT_STATE_FIN_WAIT };
+                    unsafe { *state = CT_STATE_FIN_WAIT };
                 } else {
-                    unsafe { (*entry).state = CT_STATE_CLOSE_WAIT };
+                    unsafe { *state = CT_STATE_CLOSE_WAIT };
                 }
             }
         }
         CT_STATE_FIN_WAIT => {
             if !is_forward && tcp_flags & TCP_FIN != 0 {
-                unsafe { (*entry).state = CT_STATE_TIME_WAIT };
+                unsafe { *state = CT_STATE_TIME_WAIT };
             }
         }
         CT_STATE_CLOSE_WAIT => {
             if is_forward && tcp_flags & TCP_FIN != 0 {
-                unsafe { (*entry).state = CT_STATE_TIME_WAIT };
+                unsafe { *state = CT_STATE_TIME_WAIT };
             }
         }
         _ => {}
     }
 }
 
-/// Advance the TCP state machine for IPv6 connections.
-#[inline(never)]
-unsafe fn advance_tcp_state_v6(entry: *mut ConnValueV6, tcp_flags: u8, is_forward: bool) {
-    let state = unsafe { (*entry).state };
-
-    if tcp_flags & TCP_RST != 0 {
-        unsafe { (*entry).state = CT_STATE_INVALID };
-        return;
+/// Advance the TCP state machine based on observed flags (IPv4).
+#[inline(always)]
+unsafe fn advance_tcp_state(entry: *mut ConnValue, tcp_flags: u8, is_forward: bool) {
+    unsafe {
+        advance_tcp_state_inner(
+            &raw mut (*entry).state,
+            &raw mut (*entry).flags,
+            tcp_flags,
+            is_forward,
+        );
     }
+}
 
-    match state {
-        CT_STATE_SYN_SENT => {
-            if !is_forward && tcp_flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) {
-                unsafe {
-                    (*entry).state = CT_STATE_SYN_RECV;
-                    (*entry).flags |= CT_FLAG_SEEN_REPLY;
-                }
-            }
-        }
-        CT_STATE_SYN_RECV => {
-            if is_forward && tcp_flags & TCP_ACK != 0 {
-                unsafe {
-                    (*entry).state = CT_STATE_ESTABLISHED;
-                    (*entry).flags |= CT_FLAG_ASSURED;
-                }
-                increment_metric(CT_METRIC_ESTABLISHED);
-            }
-        }
-        CT_STATE_ESTABLISHED => {
-            if tcp_flags & TCP_FIN != 0 {
-                if is_forward {
-                    unsafe { (*entry).state = CT_STATE_FIN_WAIT };
-                } else {
-                    unsafe { (*entry).state = CT_STATE_CLOSE_WAIT };
-                }
-            }
-        }
-        CT_STATE_FIN_WAIT => {
-            if !is_forward && tcp_flags & TCP_FIN != 0 {
-                unsafe { (*entry).state = CT_STATE_TIME_WAIT };
-            }
-        }
-        CT_STATE_CLOSE_WAIT => {
-            if is_forward && tcp_flags & TCP_FIN != 0 {
-                unsafe { (*entry).state = CT_STATE_TIME_WAIT };
-            }
-        }
-        _ => {}
+/// Advance the TCP state machine for IPv6 connections.
+#[inline(always)]
+unsafe fn advance_tcp_state_v6(entry: *mut ConnValueV6, tcp_flags: u8, is_forward: bool) {
+    unsafe {
+        advance_tcp_state_inner(
+            &raw mut (*entry).state,
+            &raw mut (*entry).flags,
+            tcp_flags,
+            is_forward,
+        );
     }
 }
 

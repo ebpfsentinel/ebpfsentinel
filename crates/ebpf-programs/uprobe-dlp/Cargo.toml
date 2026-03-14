@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 aya-ebpf = "0.1.1"
 ebpf-common = { path = "../../ebpf-common", default-features = false }
+ebpf-helpers = { path = "../../ebpf-helpers" }
 
 [[bin]]
 name = "uprobe-dlp"

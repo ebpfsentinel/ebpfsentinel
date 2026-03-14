@@ -8,6 +8,7 @@ use aya_ebpf::{
     programs::{ProbeContext, RetProbeContext},
 };
 use core::ffi::c_void;
+use ebpf_helpers::increment_metric;
 use ebpf_common::dlp::{
     DlpEvent, SslReadArgs, DLP_DIRECTION_READ, DLP_DIRECTION_WRITE, DLP_MAX_EXCERPT,
     DLP_METRIC_ERRORS, DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_READ_EVENTS,
@@ -135,10 +136,36 @@ fn try_ssl_read_ret(ctx: &RetProbeContext) -> Result<(), ()> {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-/// Emit a DlpEvent to the EVENTS RingBuf. Reserves a slot, fills the
-/// header fields via raw pointer, zeros the payload, then copies user-space
-/// data using the raw `bpf_probe_read_user` helper (avoids constructing a
-/// slice from the uninitialised RingBuf memory).
+/// Emit a `DlpEvent` to the EVENTS `RingBuf`.
+///
+/// # RingBuf fixed-size reservation tradeoff
+///
+/// We always reserve `size_of::<DlpEvent>()` bytes, which includes a
+/// `DLP_MAX_EXCERPT` (4096) byte excerpt buffer, regardless of the actual
+/// `data_len`. This wastes ring buffer space when `data_len` is small, but
+/// is necessary because:
+///
+/// 1. **Verifier constraints**: `RingBuf::reserve` in aya-ebpf requires a
+///    compile-time type parameter (`reserve::<T>`). The eBPF verifier
+///    needs a statically-known reservation size to validate memory access
+///    bounds on the returned pointer.
+///
+/// 2. **`bpf_probe_read_user` length**: On kernel 6.17+ the verifier
+///    rejects variable-length arguments to `bpf_probe_read_user`. We must
+///    pass the compile-time constant `DLP_MAX_EXCERPT` as the read length.
+///
+/// 3. **No variable-size ring entries**: The BPF ring buffer does support
+///    `bpf_ringbuf_reserve` with a runtime size at the C API level, but
+///    the Rust/aya binding only exposes the typed `reserve::<T>()` API.
+///    Even with a raw helper call, the verifier would need to track the
+///    dynamic allocation size through all subsequent pointer arithmetic,
+///    which is fragile and version-dependent.
+///
+/// The `data_len` field in the event header tells userspace how many bytes
+/// of the excerpt are meaningful. When `data_len < DLP_MAX_EXCERPT`, only
+/// `data_len` bytes are copied from userspace (the read may partially
+/// fail, leaving the rest zero-initialized). The zero-init + short-read
+/// approach avoids leaking kernel memory while keeping the verifier happy.
 #[inline(always)]
 fn emit_dlp_event(user_buf: *const u8, data_len: u32, direction: u8) {
     if let Some(mut entry) = EVENTS.reserve::<DlpEvent>(0) {
@@ -158,14 +185,22 @@ fn emit_dlp_event(user_buf: *const u8, data_len: u32, direction: u8) {
             // memory to userspace.
             core::ptr::write_bytes((*ptr).data_excerpt.as_mut_ptr(), 0, DLP_MAX_EXCERPT);
 
-            // Call bpf_probe_read_user with a compile-time constant length
-            // (DLP_MAX_EXCERPT = 4096). The verifier on kernel 6.17+ rejects
-            // variable-length arguments. If the user buffer has fewer bytes,
-            // the helper returns an error and the pre-zeroed buffer remains
-            // intact — data_len records the actual payload length.
+            // Optimization: if data_len < DLP_MAX_EXCERPT, only attempt to
+            // read data_len bytes. This reduces the chance of faulting on
+            // unmapped pages beyond the user buffer. On failure (partial
+            // read or fault), the pre-zeroed buffer remains intact.
+            //
+            // We still must pass a compile-time-bounded length to satisfy
+            // the verifier. The `min` ensures we never exceed the buffer,
+            // and data_len is clamped by callers to the SSL buffer size.
+            let read_len = if data_len < DLP_MAX_EXCERPT as u32 {
+                data_len
+            } else {
+                DLP_MAX_EXCERPT as u32
+            };
             let _ = r#gen::bpf_probe_read_user(
                 (*ptr).data_excerpt.as_mut_ptr() as *mut c_void,
-                DLP_MAX_EXCERPT as u32,
+                read_len,
                 user_buf as *const c_void,
             );
         }
@@ -180,11 +215,7 @@ fn emit_dlp_event(user_buf: *const u8, data_len: u32, direction: u8) {
 /// Increment a per-CPU metric counter.
 #[inline(always)]
 fn increment_metric(index: u32) {
-    if let Some(counter) = DLP_METRICS.get_ptr_mut(index) {
-        unsafe {
-            *counter += 1;
-        }
-    }
+    increment_metric!(DLP_METRICS, index);
 }
 
 #[panic_handler]

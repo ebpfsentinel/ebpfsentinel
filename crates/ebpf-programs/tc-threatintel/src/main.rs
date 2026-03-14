@@ -8,11 +8,17 @@ use aya_ebpf::{
         bpf_get_smp_processor_id, bpf_ktime_get_boot_ns,
     },
     macros::{classifier, map},
-    maps::{Array, HashMap, PerCpuArray, RingBuf, bloom_filter::BloomFilter},
+    maps::{Array, LruHashMap, PerCpuArray, RingBuf, bloom_filter::BloomFilter},
     programs::TcContext,
 };
+#[cfg(debug_assertions)]
 use aya_log_ebpf::info;
-use core::mem;
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
+    PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
+};
+use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
     event::{
         EVENT_TYPE_THREATINTEL, FLAG_IPV6, FLAG_VLAN, PacketEvent,
@@ -31,48 +37,25 @@ use network_types::{
     udp::UdpHdr,
 };
 
-// ── Constants ───────────────────────────────────────────────────────
-
-const ETH_P_IP: u16 = 0x0800;
-const ETH_P_IPV6: u16 = 0x86DD;
-const ETH_P_8021Q: u16 = 0x8100;
-const VLAN_HDR_LEN: usize = 4;
-const IPV6_HDR_LEN: usize = 40;
-const PROTO_TCP: u8 = 6;
-const PROTO_UDP: u8 = 17;
-
-// ── Inline IPv6 / VLAN header types ─────────────────────────────────
-
-/// IPv6 fixed header (40 bytes).
-#[repr(C)]
-struct Ipv6Hdr {
-    _vtcfl: u32,
-    _payload_len: u16,
-    next_hdr: u8,
-    _hop_limit: u8,
-    src_addr: [u8; 16],
-    dst_addr: [u8; 16],
-}
-
-/// 802.1Q VLAN tag (4 bytes after EthHdr when ether_type == 0x8100).
-#[repr(C)]
-struct VlanHdr {
-    tci: u16,
-    ether_type: u16,
-}
+// ── Constants / types from ebpf-helpers ─────────────────────────────
+// Network constants, header structs, ptr_at, skip_ipv6_ext_headers,
+// byte helpers, and metric/ringbuf macros are imported from ebpf_helpers.
 
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// Threat intel IOC lookup: IPv4 address → action + feed metadata.
-/// Supports 1M+ entries (NFR22).
+/// Supports 1M+ entries (NFR22). Uses `LruHashMap` so that when the map is
+/// full the least-recently-used entry is evicted instead of silently
+/// dropping new inserts.
 #[map]
-static THREATINTEL_IOCS: HashMap<ThreatIntelKey, ThreatIntelValue> =
-    HashMap::with_max_entries(THREATINTEL_MAX_ENTRIES, 0);
+static THREATINTEL_IOCS: LruHashMap<ThreatIntelKey, ThreatIntelValue> =
+    LruHashMap::with_max_entries(THREATINTEL_MAX_ENTRIES, 0);
 
 /// Threat intel IOC lookup: IPv6 address → action + feed metadata.
+/// Uses `LruHashMap` for automatic LRU eviction on full maps.
 #[map]
-static THREATINTEL_IOCS_V6: HashMap<ThreatIntelKeyV6, ThreatIntelValue> =
-    HashMap::with_max_entries(THREATINTEL_MAX_ENTRIES, 0);
+static THREATINTEL_IOCS_V6: LruHashMap<ThreatIntelKeyV6, ThreatIntelValue> =
+    LruHashMap::with_max_entries(THREATINTEL_MAX_ENTRIES, 0);
 
 /// Bloom filter pre-check for IPv4 IOCs (kernel 5.16+).
 /// Eliminates ~98% of HashMap lookups for non-matching packets.
@@ -97,21 +80,10 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
 #[map]
 static CONFIG_FLAGS: Array<u32> = Array::with_max_entries(1, 0);
 
-// ── Backpressure constants ───────────────────────────────────────────
-
-/// RingBuf total size in bytes (must match EVENTS map declaration).
-const EVENTS_RINGBUF_SIZE: u64 = 256 * 4096;
-
-/// Backpressure threshold: skip emission when >75% of RingBuf is consumed.
-const BACKPRESSURE_THRESHOLD: u64 = EVENTS_RINGBUF_SIZE * 3 / 4;
-
-/// `BPF_RB_AVAIL_DATA` flag for `bpf_ringbuf_query`.
-const BPF_RB_AVAIL_DATA: u64 = 0;
-
 /// Returns `true` if the EVENTS RingBuf has backpressure (>75% full).
 #[inline(always)]
 fn ringbuf_has_backpressure() -> bool {
-    EVENTS.query(BPF_RB_AVAIL_DATA) > BACKPRESSURE_THRESHOLD
+    ringbuf_has_backpressure!(EVENTS)
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
@@ -128,29 +100,6 @@ pub fn tc_threatintel(ctx: TcContext) -> i32 {
             TC_ACT_OK
         }
     }
-}
-
-// ── Helpers: byte conversion ────────────────────────────────────────
-
-#[inline(always)]
-fn u32_from_be_bytes(b: [u8; 4]) -> u32 {
-    u32::from_be_bytes(b)
-}
-
-#[inline(always)]
-fn u16_from_be_bytes(b: [u8; 2]) -> u16 {
-    u16::from_be_bytes(b)
-}
-
-/// Convert a 16-byte IPv6 address to `[u32; 4]` in network byte order.
-#[inline(always)]
-fn ipv6_addr_to_u32x4(addr: &[u8; 16]) -> [u32; 4] {
-    [
-        u32_from_be_bytes([addr[0], addr[1], addr[2], addr[3]]),
-        u32_from_be_bytes([addr[4], addr[5], addr[6], addr[7]]),
-        u32_from_be_bytes([addr[8], addr[9], addr[10], addr[11]]),
-        u32_from_be_bytes([addr[12], addr[13], addr[14], addr[15]]),
-    ]
 }
 
 // ── Packet processing ───────────────────────────────────────────────
@@ -172,13 +121,21 @@ fn try_tc_threatintel(ctx: &TcContext) -> Result<i32, ()> {
     let mut pkt_flags: u8 = 0;
 
     // Check for 802.1Q VLAN tag
-    if ether_type == ETH_P_8021Q {
+    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
         let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
         let tci = u16::from_be(unsafe { (*vhdr).tci });
         vlan_id = tci & 0x0FFF;
         ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
         l3_offset += VLAN_HDR_LEN;
         pkt_flags |= FLAG_VLAN;
+
+        // QinQ: parse second VLAN tag if present
+        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
+            let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
+            vlan_id = u16::from_be(unsafe { (*vhdr2).tci }) & 0x0FFF;
+            ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
+            l3_offset += VLAN_HDR_LEN;
+        }
     }
 
     if ether_type == ETH_P_IP {
@@ -295,9 +252,11 @@ fn process_threatintel_v6(
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
-    let next_hdr = unsafe { (*ipv6hdr).next_hdr };
+    let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
 
-    let l4_offset = l3_offset + IPV6_HDR_LEN;
+    // Skip IPv6 extension headers to find the actual L4 protocol.
+    let (next_hdr, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr)
+        .ok_or(())?;
 
     // Parse L4 ports
     let (src_port, dst_port) = if next_hdr == PROTO_TCP {
@@ -366,7 +325,7 @@ fn process_threatintel_v6(
 /// Apply threat intel action (shared by v4/v6 paths).
 #[inline(always)]
 fn apply_threatintel_action(
-    ctx: &TcContext,
+    _ctx: &TcContext,
     matched: &ThreatIntelValue,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
@@ -382,15 +341,17 @@ fn apply_threatintel_action(
     );
 
     if matched.action == THREATINTEL_ACTION_DROP {
+        #[cfg(debug_assertions)]
         info!(
-            ctx,
+            _ctx,
             "THREATINTEL DROP {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port
         );
         increment_metric(THREATINTEL_METRIC_DROPPED);
         Ok(TC_ACT_SHOT)
     } else {
+        #[cfg(debug_assertions)]
         info!(
-            ctx,
+            _ctx,
             "THREATINTEL ALERT {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port
         );
         Ok(TC_ACT_OK)
@@ -399,27 +360,12 @@ fn apply_threatintel_action(
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-/// Bounds-checked pointer access. Critical for eBPF verifier compliance:
-/// every memory access must be validated against data_end.
-#[inline(always)]
-unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> {
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let len = mem::size_of::<T>();
-    if start + offset + len > end {
-        return Err(());
-    }
-    Ok((start + offset) as *const T)
-}
+// ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::tc
 
 /// Increment a per-CPU metric counter.
 #[inline(always)]
 fn increment_metric(index: u32) {
-    if let Some(counter) = THREATINTEL_METRICS.get_ptr_mut(index) {
-        unsafe {
-            *counter += 1;
-        }
-    }
+    increment_metric!(THREATINTEL_METRICS, index);
 }
 
 /// Emit a PacketEvent to the EVENTS RingBuf. Skips emission under

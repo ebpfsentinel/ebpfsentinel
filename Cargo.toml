@@ -13,6 +13,7 @@ members = [
 # eBPF program crates target bpfel-unknown-none (nightly) — excluded from default build
 # Build via: cargo xtask ebpf-build
 exclude = [
+    "crates/ebpf-helpers",
     "crates/ebpf-programs/xdp-firewall",
     "crates/ebpf-programs/xdp-ratelimit",
     "crates/ebpf-programs/xdp-loadbalancer",
