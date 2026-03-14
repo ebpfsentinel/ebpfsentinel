@@ -1,15 +1,13 @@
 # eBPFsentinel — Rate Limiting (DDoS Protection) Configuration Example
 # ====================================================================
 #
-# XDP-based rate limiting with five algorithms. Enforces per-IP or global
+# XDP-based rate limiting with four algorithms. Enforces per-IP or global
 # packet rate limits at wire speed using per-CPU lock-free hash maps
 # (PerCpuHashMap) for zero cross-CPU contention.
 #
 # Advanced features:
 #   - Per-CPU buckets: each CPU maintains independent counters (effective
 #     capacity = rate × num_cpus; acceptable for DDoS mitigation)
-#   - SYN cookie algorithm: kernel-side SYN+ACK generation via
-#     bpf_tcp_gen_syncookie for SYN flood mitigation without TCP stack
 #   - Kernel-side maintenance: bpf_timer for periodic bucket expiration
 #   - Adaptive backpressure: bpf_ringbuf_query skips events when >75% full
 #   - Suspend-aware timestamps: bpf_ktime_get_boot_ns for accurate timing
@@ -20,7 +18,17 @@
 # Full reference: config/ebpfsentinel.example.yaml
 
 agent:
-  interfaces: [eth0]
+  interfaces: [eth0, eth1, eth2, eth3]
+
+# ── Interface Groups ──────────────────────────────────────────────
+
+interface_groups:
+  lan:
+    interfaces: [eth0, eth1]
+  wan:
+    interfaces: [eth2]
+  dmz:
+    interfaces: [eth3]
 
 # ── Top-level Aliases (shared across all domains) ────────────────────
 
@@ -44,8 +52,7 @@ ratelimit:
   #   "fixed_window"    — Simple counter reset each window (can allow 2x burst at boundary)
   #   "sliding_window"  — Weighted hybrid of current + previous window (smoother than fixed)
   #   "leaky_bucket"    — Constant drain rate, queues excess (strict smoothing)
-  #   "syncookie"       — SYN flood protection: generates SYN+ACK cookies in XDP via
-  #                        bpf_tcp_gen_syncookie (TCP SYN packets only, others pass through)
+  # Note: SYN cookie protection has moved to the DDoS module (see ddos.yaml).
   default_algorithm: token_bucket
 
   # ── Rules ──────────────────────────────────────────────────────────
@@ -72,7 +79,7 @@ ratelimit:
       algorithm: token_bucket
       action: drop
 
-    # Stricter limit for traffic from external networks
+    # Stricter limit for traffic from external networks (WAN only)
     - id: rl-external-strict
       rate: 100
       burst: 200
@@ -80,6 +87,8 @@ ratelimit:
       scope: source_ip
       algorithm: sliding_window
       action: drop
+      interfaces: [wan]           # Apply only to the "wan" interface group (optional, default: all)
+      # interfaces: ["!lan"]      # Alternative: apply to all EXCEPT "lan" group (inversion)
 
     # Lenient limit for trusted internal network
     - id: rl-internal-lenient
@@ -174,15 +183,5 @@ ratelimit:
       algorithm: token_bucket
       action: drop
 
-    # ── SYN cookie protection ────────────────────────────────────
-    # SYN flood mitigation: responds to TCP SYN packets with
-    # SYN+ACK cookies generated in XDP (bpf_tcp_gen_syncookie).
-    # Non-SYN packets pass through unaffected. No state is kept
-    # for half-open connections — only completed handshakes reach
-    # the kernel TCP stack.
-    - id: rl-syncookie-protection
-      rate: 10000           # SYN rate threshold before cookie activation
-      burst: 20000
-      scope: global
-      algorithm: syncookie
-      action: drop
+    # Note: SYN cookie protection has moved to the DDoS module (see ddos.yaml).
+    # Use ddos.syn_protection for SYN flood mitigation.

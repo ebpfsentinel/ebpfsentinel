@@ -110,6 +110,7 @@ mod tests {
                 schedule: None,
                 system: false,
                 route_action: None,
+                group_mask: 0,
             })
             .unwrap();
 

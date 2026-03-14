@@ -402,6 +402,10 @@ pub struct FirewallRule {
     /// Policy routing action (route-to, reply-to, dup-to).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_action: Option<RouteAction>,
+    /// Interface group bitmask for multi-interface rule scoping.
+    /// 0 = floating (applies to all interfaces). Bit 31 = invert.
+    #[serde(default)]
+    pub group_mask: u32,
 }
 
 /// Connection state names for stateful rule matching.
@@ -633,6 +637,7 @@ impl FirewallRule {
             dscp_mark: self.dscp_mark.unwrap_or(0xFF),
             route_action: route_action_to_u8(self.route_action),
             route_ifindex: route_action_ifindex(self.route_action),
+            group_mask: self.group_mask,
         }
     }
 
@@ -778,6 +783,7 @@ impl FirewallRule {
             dscp_mark: self.dscp_mark.unwrap_or(0xFF),
             route_action: route_action_to_u8(self.route_action),
             route_ifindex: route_action_ifindex(self.route_action),
+            group_mask: self.group_mask,
         }
     }
 }
@@ -1099,6 +1105,7 @@ mod tests {
             schedule: None,
             system: false,
             route_action: None,
+            group_mask: 0,
         }
     }
 

@@ -11,9 +11,10 @@ use adapters::auth::jwt_provider::JwtAuthProvider;
 use adapters::auth::oidc_provider::{self, OidcAuthProvider};
 use adapters::ebpf::{
     ConfigFlagsManager, ConnTrackMapManager, DlpEventReader, DnsEventReader, EbpfLoader,
-    EbpfMapWriteAdapter, EventReader, FirewallMapManager, IdsMapManager, IpSetMapManager,
-    L7PortsManager, LpmCoordinator, MetricsReader, NatMapManager, RateLimitLpmManager,
-    RateLimitMapManager, ScrubConfigManager, SyncookieSecretManager, ThreatIntelMapManager,
+    EbpfMapWriteAdapter, EventReader, FirewallMapManager, IdsMapManager, InterfaceGroupsManager,
+    IpSetMapManager, L7PortsManager, LpmCoordinator, MetricsReader, NatMapManager,
+    RateLimitLpmManager, RateLimitMapManager, ScrubConfigManager, SyncookieSecretManager,
+    ThreatIntelMapManager,
 };
 use adapters::grpc::server::{GrpcTlsConfig, run_grpc_server};
 use adapters::http::tls::load_rustls_config;
@@ -823,6 +824,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     let mut ebpf_state = EbpfState::new();
     let mut ebpf_map_holder = crate::reload::EbpfMapHolder::new();
     let mut metrics_readers: Vec<MetricsReader> = Vec::new();
+    let mut iface_groups_mgr = InterfaceGroupsManager::new();
 
     // 10a. XDP Firewall
     let mut fw_loader: Option<EbpfLoader> = None;
@@ -858,7 +860,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     // 10b. XDP Rate Limiter
     let rl_ok = if config.ratelimit.enabled {
         match try_load_xdp_ratelimit(&ebpf_dir, &config, event_tx.clone()) {
-            Ok((rl_loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs)) => {
+            Ok((mut rl_loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs)) => {
                 metrics_readers.extend(rl_rdrs);
                 if let Some(rl_mgr) = rl_mgr_opt {
                     let mut svc = rl_svc.write().await;
@@ -901,6 +903,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
                         Err(e) => warn!("ratelimit fd retrieval failed: {e}"),
                     }
                 }
+                iface_groups_mgr.add_map(rl_loader.ebpf_mut());
                 ebpf_state.add_loader(rl_loader);
                 metrics.set_ebpf_program_status("xdp_ratelimit", true);
                 info!("eBPF xdp-ratelimit active");
@@ -958,6 +961,11 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         info!("alias IP set map wired from xdp-firewall");
     }
 
+    // Take INTERFACE_GROUPS map from xdp-firewall (before loader is moved)
+    if let Some(ref mut loader) = fw_loader {
+        iface_groups_mgr.add_map(loader.ebpf_mut());
+    }
+
     // Initial dynamic alias refresh (loads GeoIP CIDRs into LPM maps at startup)
     match alias_svc.write().await.refresh_dynamic() {
         Ok(n) if n > 0 => info!(count = n, "initial dynamic alias refresh completed"),
@@ -973,7 +981,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     // 10c. TC IDS
     let ids_ok = if config.ids.enabled {
         match try_load_tc_ids(&ebpf_dir, &config, event_tx.clone()) {
-            Ok((loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr)) => {
+            Ok((mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr)) => {
                 if let Some(ids_mgr) = ids_mgr_opt {
                     ids_svc.write().await.set_map_port(Box::new(ids_mgr));
                 }
@@ -986,6 +994,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
                 if let Some(rdr) = ids_rdr {
                     metrics_readers.push(rdr);
                 }
+                iface_groups_mgr.add_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 metrics.set_ebpf_program_status("tc_ids", true);
                 info!("eBPF tc-ids active");
@@ -1116,7 +1125,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     // 10h. TC NAT (ingress + egress)
     let nat_ok = if config.nat.enabled {
         match try_load_tc_nat(&ebpf_dir, &config) {
-            Ok((ingress_loader, egress_loader, nat_mgr, nat_rdrs)) => {
+            Ok((mut ingress_loader, mut egress_loader, nat_mgr, nat_rdrs)) => {
                 metrics_readers.extend(nat_rdrs);
                 {
                     let mut svc = nat_svc.write().await;
@@ -1142,6 +1151,8 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
                         }
                     }
                 }
+                iface_groups_mgr.add_map(ingress_loader.ebpf_mut());
+                iface_groups_mgr.add_map(egress_loader.ebpf_mut());
                 ebpf_state.add_loader(ingress_loader);
                 ebpf_state.add_loader(egress_loader);
                 metrics.set_ebpf_program_status("tc_nat_ingress", true);
@@ -1208,6 +1219,32 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         metrics.set_ebpf_program_status("xdp_loadbalancer", false);
         false
     };
+
+    // ── 10z. Populate INTERFACE_GROUPS maps across all loaded programs ──
+    {
+        let membership = config.interface_membership();
+        let memberships: Vec<(u32, u32)> = config
+            .agent
+            .interfaces
+            .iter()
+            .filter_map(|iface| {
+                let ifindex = get_ifindex(iface).ok()?;
+                let groups = membership.get(iface).copied().unwrap_or(0);
+                Some((ifindex, groups))
+            })
+            .collect();
+        if let Err(e) = iface_groups_mgr.set_interface_groups(&memberships) {
+            warn!("INTERFACE_GROUPS population failed (non-fatal): {e}");
+        } else if !memberships.is_empty() {
+            info!(
+                iface_count = memberships.len(),
+                map_count = iface_groups_mgr.map_count(),
+                "interface group memberships loaded into eBPF maps"
+            );
+        }
+    }
+    // Store the manager for config reload
+    ebpf_map_holder.iface_groups = Some(iface_groups_mgr);
 
     // Populate eBPF program status for ops endpoint
     {
@@ -1992,6 +2029,16 @@ pub(crate) fn build_config_flags(config: &AgentConfig) -> ebpf_common::config_fl
         conntrack_enabled: u8::from(config.conntrack.enabled),
         nat_enabled: u8::from(config.nat.enabled),
     }
+}
+
+/// Resolve the ifindex of a network interface by reading from sysfs.
+pub fn get_ifindex(iface: &str) -> Result<u32, anyhow::Error> {
+    let path = format!("/sys/class/net/{iface}/ifindex");
+    let s = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("failed to read ifindex for '{iface}': {e}"))?;
+    s.trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid ifindex for '{iface}': {e}"))
 }
 
 /// Convert ratelimit algorithm string to the eBPF u8 constant.

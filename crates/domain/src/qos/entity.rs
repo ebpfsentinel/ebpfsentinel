@@ -74,6 +74,9 @@ pub struct QosPipe {
     pub direction: QosDirection,
     /// Whether this pipe is enabled.
     pub enabled: bool,
+    /// Interface group bitmask for multi-interface rule scoping.
+    /// 0 = floating (applies to all interfaces). Bit 31 = invert.
+    pub group_mask: u32,
 }
 
 /// A `QoS` queue — scheduling unit attached to a pipe.
@@ -128,6 +131,9 @@ pub struct QosClassifier {
     pub match_rule: QosMatchRule,
     /// Priority (lower = matched first).
     pub priority: u32,
+    /// Interface group bitmask for multi-interface rule scoping.
+    /// 0 = floating (applies to all interfaces). Bit 31 = invert.
+    pub group_mask: u32,
 }
 
 #[cfg(test)]

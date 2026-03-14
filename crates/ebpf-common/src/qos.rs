@@ -50,7 +50,9 @@ pub struct QosPipeConfig {
     pub pipe_id: u8,
     /// Whether this pipe is enabled (1) or disabled (0).
     pub enabled: u8,
-    pub _padding: [u8; 4],
+    /// Interface group bitmask (0 = floating/all interfaces).
+    /// Bits 0-30: group membership, bit 31: invert flag.
+    pub group_mask: u32,
 }
 
 /// `QoS` queue configuration written by userspace, read by eBPF.
@@ -98,7 +100,7 @@ pub struct QosClassifierKey {
 ///
 /// Maps a classified flow to a queue and priority.
 ///
-/// Size: 4 bytes.
+/// Size: 8 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QosClassifierValue {
@@ -107,6 +109,9 @@ pub struct QosClassifierValue {
     /// Priority within the queue (lower = higher priority).
     pub priority: u8,
     pub _padding: [u8; 2],
+    /// Interface group bitmask (0 = floating/all interfaces).
+    /// Bits 0-30: group membership, bit 31: invert flag.
+    pub group_mask: u32,
 }
 
 /// Per-flow `QoS` state managed by the eBPF program.
@@ -180,12 +185,12 @@ mod tests {
 
     #[test]
     fn qos_classifier_value_size() {
-        assert_eq!(mem::size_of::<QosClassifierValue>(), 4);
+        assert_eq!(mem::size_of::<QosClassifierValue>(), 8);
     }
 
     #[test]
     fn qos_classifier_value_alignment() {
-        assert_eq!(mem::align_of::<QosClassifierValue>(), 1);
+        assert_eq!(mem::align_of::<QosClassifierValue>(), 4);
     }
 
     #[test]
@@ -208,7 +213,7 @@ mod tests {
         assert_eq!(mem::offset_of!(QosPipeConfig, loss_rate), 24);
         assert_eq!(mem::offset_of!(QosPipeConfig, pipe_id), 26);
         assert_eq!(mem::offset_of!(QosPipeConfig, enabled), 27);
-        assert_eq!(mem::offset_of!(QosPipeConfig, _padding), 28);
+        assert_eq!(mem::offset_of!(QosPipeConfig, group_mask), 28);
     }
 
     #[test]
@@ -236,6 +241,7 @@ mod tests {
         assert_eq!(mem::offset_of!(QosClassifierValue, queue_id), 0);
         assert_eq!(mem::offset_of!(QosClassifierValue, priority), 1);
         assert_eq!(mem::offset_of!(QosClassifierValue, _padding), 2);
+        assert_eq!(mem::offset_of!(QosClassifierValue, group_mask), 4);
     }
 
     #[test]

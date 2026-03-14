@@ -104,6 +104,10 @@ static XDP_PROG_ARRAY: ProgramArray = ProgramArray::with_max_entries(4, 0);
 /// Index of the ratelimit program in `XDP_PROG_ARRAY`.
 const PROG_IDX_RATELIMIT: u32 = 0;
 
+/// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
+#[map]
+static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
+
 /// LPM Trie for O(log n) IPv4 source CIDR matching (CIDR-only rules).
 #[map]
 static FW_LPM_SRC_V4: LpmTrie<[u8; 4], LpmValue> = LpmTrie::with_max_entries(MAX_LPM_RULES, 0);
@@ -176,6 +180,30 @@ fn ringbuf_has_backpressure() -> bool {
     ringbuf_has_backpressure!(EVENTS)
 }
 
+// ── Interface group helpers ──────────────────────────────────────────
+
+/// Get the interface group membership for the current packet's ingress interface.
+#[inline(always)]
+fn get_iface_groups(ctx: &XdpContext) -> u32 {
+    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    match unsafe { INTERFACE_GROUPS.get(&ifindex) } {
+        Some(&groups) => groups,
+        None => 0, // no group membership = floating rules only
+    }
+}
+
+/// Check if a rule's `group_mask` matches the interface's group membership.
+#[inline(always)]
+fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
+    let mask = rule_group_mask & 0x7FFF_FFFF;
+    if mask == 0 {
+        return true; // floating rule
+    }
+    let hit = (mask & iface_groups) != 0;
+    let invert = (rule_group_mask & 0x8000_0000) != 0;
+    hit != invert
+}
+
 // ── bpf_loop context structs ─────────────────────────────────────────
 //
 // Stack budget analysis (eBPF limit: 512 bytes per stack frame):
@@ -235,6 +263,8 @@ struct RuleScanCtx {
     matched_rule_idx: i32,
     /// Max states for the matched rule (0 = unlimited).
     matched_max_states: u16,
+    /// Interface group membership bitmask for the ingress interface.
+    iface_groups: u32,
 }
 
 /// Opaque context passed through `bpf_loop` to the IPv6 rule-scan callback.
@@ -267,6 +297,8 @@ struct RuleScanCtxV6 {
     matched_rule_idx: i32,
     /// Max states for the matched rule (0 = unlimited).
     matched_max_states: u16,
+    /// Interface group membership bitmask for the ingress interface.
+    iface_groups: u32,
 }
 
 /// Per-packet context stored in a `PerCpuArray` to keep addresses and
@@ -302,6 +334,10 @@ unsafe extern "C" fn scan_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
         return 1;
     }
     if let Some(rule) = FIREWALL_RULES.get(index) {
+        // Check interface group membership before evaluating rule fields.
+        if !group_matches(rule.group_mask, lctx.iface_groups) {
+            return 0; // group mismatch, continue to next rule
+        }
         if match_rule_v4(
             rule,
             lctx.src_ip,
@@ -335,6 +371,10 @@ unsafe extern "C" fn scan_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
         return 1;
     }
     if let Some(rule) = FIREWALL_RULES_V6.get(index) {
+        // Check interface group membership before evaluating rule fields.
+        if !group_matches(rule.group_mask, lctx.iface_groups) {
+            return 0; // group mismatch, continue to next rule
+        }
         if match_rule_v6(
             rule,
             &lctx.src_addr,
@@ -579,6 +619,8 @@ fn process_firewall_v4(
     // The scan context is on the stack (not a PerCpuArray map value) because
     // kernel 6.17+ requires the bpf_loop callback_ctx (R3) to be a stack
     // frame pointer, not a map_value pointer.
+    let iface_groups = get_iface_groups(ctx);
+
     let mut scan_ctx = RuleScanCtx {
         count,
         src_ip,
@@ -597,6 +639,7 @@ fn process_firewall_v4(
         matched_action: -1,
         matched_rule_idx: -1,
         matched_max_states: 0,
+        iface_groups,
     };
     unsafe {
         bpf_loop(
@@ -1042,6 +1085,8 @@ fn process_firewall_v6(
     // Scan V6 rules via bpf_loop (kernel 5.17+).
     // Stack-allocated context (kernel 6.17+ requires bpf_loop callback_ctx
     // to be a stack frame pointer, not a map_value pointer).
+    let iface_groups = get_iface_groups(ctx);
+
     let mut scan_ctx = RuleScanCtxV6 {
         count,
         src_addr,
@@ -1060,6 +1105,7 @@ fn process_firewall_v6(
         matched_action: -1,
         matched_rule_idx: -1,
         matched_max_states: 0,
+        iface_groups,
     };
     unsafe {
         bpf_loop(

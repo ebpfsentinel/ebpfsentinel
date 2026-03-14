@@ -77,13 +77,15 @@ pub struct NatRuleEntry {
     pub nat_port_end: u16,
     /// Interface index for masquerade.
     pub nat_interface: u32,
-    pub _pad2: [u8; 4],
+    /// Interface group bitmask (0 = floating/all interfaces).
+    /// Bits 0-30: group membership, bit 31: invert flag.
+    pub group_mask: u32,
 }
 
 /// Maximum NAT rules per direction (IPv6).
 pub const MAX_NAT_RULES_V6: u32 = 128;
 
-// ── NAT rule entry (IPv6) — 96 bytes ───────────────────────────────
+// ── NAT rule entry (IPv6) — 100 bytes ──────────────────────────────
 
 /// NAT rule for IPv6 traffic, stored in Array maps and scanned linearly.
 #[repr(C)]
@@ -116,6 +118,9 @@ pub struct NatRuleEntryV6 {
     pub nat_port_end: u16,
     /// Interface index for masquerade.
     pub nat_interface: u32,
+    /// Interface group bitmask (0 = floating/all interfaces).
+    /// Bits 0-30: group membership, bit 31: invert flag.
+    pub group_mask: u32,
 }
 
 // ── NPTv6 rule entry — 40 bytes ─────────────────────────────────────
@@ -136,7 +141,9 @@ pub struct NptV6RuleEntry {
     pub enabled: u8,
     /// Pre-computed RFC 6296 checksum adjustment.
     pub adjustment: u16,
-    pub _pad: [u8; 4],
+    /// Interface group bitmask (0 = floating/all interfaces).
+    /// Bits 0-30: group membership, bit 31: invert flag.
+    pub group_mask: u32,
 }
 
 // ── Hairpin NAT (NAT reflection) ─────────────────────────────────────
@@ -251,11 +258,12 @@ mod tests {
         assert_eq!(mem::offset_of!(NatRuleEntry, nat_port_start), 28);
         assert_eq!(mem::offset_of!(NatRuleEntry, nat_port_end), 30);
         assert_eq!(mem::offset_of!(NatRuleEntry, nat_interface), 32);
+        assert_eq!(mem::offset_of!(NatRuleEntry, group_mask), 36);
     }
 
     #[test]
     fn nat_rule_entry_v6_size() {
-        assert_eq!(mem::size_of::<NatRuleEntryV6>(), 96);
+        assert_eq!(mem::size_of::<NatRuleEntryV6>(), 100);
     }
 
     #[test]
@@ -278,6 +286,7 @@ mod tests {
         assert_eq!(mem::offset_of!(NatRuleEntryV6, nat_port_start), 88);
         assert_eq!(mem::offset_of!(NatRuleEntryV6, nat_port_end), 90);
         assert_eq!(mem::offset_of!(NatRuleEntryV6, nat_interface), 92);
+        assert_eq!(mem::offset_of!(NatRuleEntryV6, group_mask), 96);
     }
 
     #[test]
@@ -297,7 +306,7 @@ mod tests {
         assert_eq!(mem::offset_of!(NptV6RuleEntry, prefix_len), 32);
         assert_eq!(mem::offset_of!(NptV6RuleEntry, enabled), 33);
         assert_eq!(mem::offset_of!(NptV6RuleEntry, adjustment), 34);
-        assert_eq!(mem::offset_of!(NptV6RuleEntry, _pad), 36);
+        assert_eq!(mem::offset_of!(NptV6RuleEntry, group_mask), 36);
     }
 
     #[test]

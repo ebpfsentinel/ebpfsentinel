@@ -399,6 +399,7 @@ mod tests {
             country_thresholds: None,
             domain_pattern: None,
             domain_match_mode: None,
+            group_mask: 0,
         }
     }
 

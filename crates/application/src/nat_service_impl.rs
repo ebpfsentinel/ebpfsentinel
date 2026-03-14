@@ -260,7 +260,7 @@ fn nat_rule_to_ebpf_entry(rule: &NatRule) -> ebpf_common::nat::NatRuleEntry {
         nat_port_start: 0,
         nat_port_end: 0,
         nat_interface: 0,
-        _pad2: [0; 4],
+        group_mask: 0,
     };
 
     // Set match criteria
@@ -445,6 +445,7 @@ fn nat_rule_to_ebpf_entry_v6(rule: &NatRule) -> ebpf_common::nat::NatRuleEntryV6
         nat_port_start: 0,
         nat_port_end: 0,
         nat_interface: 0,
+        group_mask: 0,
     };
 
     // Set match criteria
@@ -635,7 +636,7 @@ fn nptv6_rule_to_ebpf_entry(rule: &NptV6Rule) -> ebpf_common::nat::NptV6RuleEntr
         prefix_len: rule.prefix_len,
         enabled: u8::from(rule.enabled),
         adjustment,
-        _pad: [0; 4],
+        group_mask: 0,
     }
 }
 
@@ -666,6 +667,7 @@ mod tests {
             match_src_alias: None,
             match_dst_alias: None,
             enabled: true,
+            group_mask: 0,
         }
     }
 
@@ -687,6 +689,7 @@ mod tests {
             match_src_alias: None,
             match_dst_alias: None,
             enabled: true,
+            group_mask: 0,
         }
     }
 
@@ -773,6 +776,7 @@ mod tests {
             internal_prefix: "fd00:1::".parse().unwrap(),
             external_prefix: "2001:db8:1::".parse().unwrap(),
             prefix_len: 48,
+            group_mask: 0,
         }
     }
 

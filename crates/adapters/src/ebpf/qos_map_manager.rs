@@ -69,7 +69,7 @@ impl QosMapManager {
             loss_rate,
             pipe_id: index,
             enabled: u8::from(pipe.enabled),
-            _padding: [0; 4],
+            group_mask: 0,
         }
     }
 
@@ -116,6 +116,7 @@ impl QosMapManager {
             #[allow(clippy::cast_possible_truncation)]
             priority: cls.priority.min(255) as u8,
             _padding: [0; 2],
+            group_mask: 0,
         };
         (key, value)
     }
@@ -195,7 +196,7 @@ impl QosMapManager {
             loss_rate: 0,
             pipe_id: 0,
             enabled: 0,
-            _padding: [0; 4],
+            group_mask: 0,
         };
         for i in 0..count {
             let _ = self.pipe_config.set(i, zero, 0);
@@ -310,6 +311,7 @@ mod tests {
             priority: 0,
             direction: domain::qos::entity::QosDirection::Egress,
             enabled: true,
+            group_mask: 0,
         };
         let config = QosMapManager::pipe_to_ebpf(&pipe, 0);
         assert_eq!(config.pipe_id, 0);
@@ -330,6 +332,7 @@ mod tests {
             priority: 0,
             direction: domain::qos::entity::QosDirection::Egress,
             enabled: true,
+            group_mask: 0,
         };
         let config = QosMapManager::pipe_to_ebpf(&pipe, 5);
         assert_eq!(config.bytes_per_ns, 0);
@@ -373,6 +376,7 @@ mod tests {
             direction: QosDirection::Egress,
             match_rule: QosMatchRule::default(),
             priority: 100,
+            group_mask: 0,
         };
         let (key, value) = QosMapManager::classifier_to_ebpf(&cls, 2);
         assert_eq!(key.src_ip, 0);
@@ -402,6 +406,7 @@ mod tests {
                 vlan_id: 0,
             },
             priority: 300,
+            group_mask: 0,
         };
         let (key, value) = QosMapManager::classifier_to_ebpf(&cls, 0);
         assert_eq!(key.src_ip, 0x0A00_0000);

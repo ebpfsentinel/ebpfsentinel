@@ -1,5 +1,5 @@
 use aya::Ebpf;
-use aya::maps::{Array, MapData};
+use aya::maps::{Array, HashMap, MapData};
 use ebpf_common::config_flags::ConfigFlags;
 use ebpf_common::ddos::SyncookieSecret;
 use ebpf_common::scrub::ScrubFlags;
@@ -98,5 +98,74 @@ impl SyncookieSecretManager {
             .map_err(|e| anyhow::anyhow!("SYNCOOKIE_SECRET set failed: {e}"))?;
         info!("SYN cookie secret initialized");
         Ok(())
+    }
+}
+
+/// Manages `INTERFACE_GROUPS` eBPF `HashMap` maps across multiple programs.
+///
+/// Each eBPF program that supports interface group scoping has an
+/// `INTERFACE_GROUPS` map (key = ifindex, value = group bitmask).
+/// This manager collects all such maps and provides a single method
+/// to update them atomically when interface group configuration changes.
+pub struct InterfaceGroupsManager {
+    maps: Vec<HashMap<MapData, u32, u32>>,
+}
+
+impl InterfaceGroupsManager {
+    /// Create a new, empty `InterfaceGroupsManager`.
+    pub fn new() -> Self {
+        Self { maps: Vec::new() }
+    }
+
+    /// Take the `INTERFACE_GROUPS` map from the loaded eBPF program and
+    /// register it for group membership updates. No-op if the map does
+    /// not exist in the program (e.g., programs that do not support groups).
+    pub fn add_map(&mut self, ebpf: &mut Ebpf) {
+        if let Some(map) = ebpf.take_map("INTERFACE_GROUPS") {
+            match HashMap::try_from(map) {
+                Ok(hm) => {
+                    self.maps.push(hm);
+                    info!("INTERFACE_GROUPS map acquired");
+                }
+                Err(e) => {
+                    tracing::warn!("INTERFACE_GROUPS map conversion failed: {e}");
+                }
+            }
+        }
+    }
+
+    /// Set interface group membership for all registered maps.
+    ///
+    /// `memberships` is a slice of `(ifindex, group_bitmask)` pairs.
+    /// Each map is updated with every pair (existing entries are overwritten).
+    pub fn set_interface_groups(
+        &mut self,
+        memberships: &[(u32, u32)],
+    ) -> Result<(), anyhow::Error> {
+        for map in &mut self.maps {
+            for &(ifindex, groups) in memberships {
+                map.insert(ifindex, groups, 0)
+                    .map_err(|e| anyhow::anyhow!("INTERFACE_GROUPS insert failed: {e}"))?;
+            }
+        }
+        if !memberships.is_empty() {
+            info!(
+                map_count = self.maps.len(),
+                iface_count = memberships.len(),
+                "INTERFACE_GROUPS updated"
+            );
+        }
+        Ok(())
+    }
+
+    /// Return the number of registered maps.
+    pub fn map_count(&self) -> usize {
+        self.maps.len()
+    }
+}
+
+impl Default for InterfaceGroupsManager {
+    fn default() -> Self {
+        Self::new()
     }
 }

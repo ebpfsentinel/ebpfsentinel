@@ -53,6 +53,10 @@ pub struct NatRule {
     /// Destination IP alias reference for match criteria.
     pub match_dst_alias: Option<String>,
     pub enabled: bool,
+    /// Interface group bitmask for multi-interface rule scoping.
+    /// 0 = floating (applies to all interfaces). Bit 31 = invert.
+    #[serde(default)]
+    pub group_mask: u32,
 }
 
 impl NatRule {
@@ -142,6 +146,10 @@ pub struct NptV6Rule {
     pub external_prefix: Ipv6Addr,
     /// Prefix length in bits (1-64).
     pub prefix_len: u8,
+    /// Interface group bitmask for multi-interface rule scoping.
+    /// 0 = floating (applies to all interfaces). Bit 31 = invert.
+    #[serde(default)]
+    pub group_mask: u32,
 }
 
 impl NptV6Rule {
@@ -180,6 +188,7 @@ mod tests {
             match_src_alias: None,
             match_dst_alias: None,
             enabled: true,
+            group_mask: 0,
         }
     }
 
@@ -220,6 +229,7 @@ mod tests {
             match_src_alias: None,
             match_dst_alias: None,
             enabled: true,
+            group_mask: 0,
         };
         assert!(rule.validate().is_ok());
     }
@@ -243,6 +253,7 @@ mod tests {
             match_src_alias: None,
             match_dst_alias: None,
             enabled: true,
+            group_mask: 0,
         };
         assert!(rule.validate().is_ok());
     }
@@ -263,6 +274,7 @@ mod tests {
             match_src_alias: None,
             match_dst_alias: None,
             enabled: true,
+            group_mask: 0,
         };
         assert!(rule.validate().is_ok());
     }
@@ -280,6 +292,7 @@ mod tests {
             match_src_alias: None,
             match_dst_alias: None,
             enabled: true,
+            group_mask: 0,
         };
         assert!(rule.validate().is_err());
     }
@@ -304,6 +317,7 @@ mod tests {
             match_src_alias: None,
             match_dst_alias: None,
             enabled: true,
+            group_mask: 0,
         };
         assert!(rule.validate().is_err());
     }
@@ -328,6 +342,7 @@ mod tests {
             match_src_alias: None,
             match_dst_alias: None,
             enabled: true,
+            group_mask: 0,
         };
         assert!(rule.validate().is_ok());
     }
@@ -351,6 +366,7 @@ mod tests {
             internal_prefix: "fd00:1::".parse().unwrap(),
             external_prefix: "2001:db8:1::".parse().unwrap(),
             prefix_len: 48,
+            group_mask: 0,
         }
     }
 

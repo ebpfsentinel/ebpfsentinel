@@ -120,7 +120,8 @@ fn build_default_config(rate: u64, burst: u64, algorithm: u8) -> RateLimitConfig
                 burst: 0,
                 action: ebpf_common::ratelimit::RATELIMIT_ACTION_DROP,
                 algorithm,
-                _padding: [0; 6],
+                _padding: [0; 2],
+                group_mask: 0,
             }
         }
         ebpf_common::ratelimit::ALGO_LEAKY_BUCKET => RateLimitConfig {
@@ -128,7 +129,8 @@ fn build_default_config(rate: u64, burst: u64, algorithm: u8) -> RateLimitConfig
             burst,
             action: ebpf_common::ratelimit::RATELIMIT_ACTION_DROP,
             algorithm,
-            _padding: [0; 6],
+            _padding: [0; 2],
+            group_mask: 0,
         },
         _ => {
             // ALGO_TOKEN_BUCKET or unknown → token bucket
@@ -137,7 +139,8 @@ fn build_default_config(rate: u64, burst: u64, algorithm: u8) -> RateLimitConfig
                 burst,
                 action: ebpf_common::ratelimit::RATELIMIT_ACTION_DROP,
                 algorithm: ALGO_TOKEN_BUCKET,
-                _padding: [0; 6],
+                _padding: [0; 2],
+                group_mask: 0,
             }
         }
     }

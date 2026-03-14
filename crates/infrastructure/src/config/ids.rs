@@ -265,6 +265,11 @@ pub struct IdsRuleConfig {
     /// Per-country threshold overrides (ISO 3166-1 alpha-2 → threshold config).
     #[serde(default)]
     pub country_thresholds: Option<std::collections::HashMap<String, ThresholdRuleConfig>>,
+
+    /// Interface groups this rule applies to. Empty = all (floating).
+    /// Prefix with "!" for inversion (e.g., `"!lan"` = all except lan).
+    #[serde(default)]
+    pub interfaces: Vec<String>,
 }
 
 fn default_protocol_any() -> String {
@@ -427,6 +432,7 @@ impl IdsRuleConfig {
             domain_pattern: self.domain_pattern.clone(),
             domain_match_mode,
             country_thresholds,
+            group_mask: 0,
         })
     }
 }
@@ -449,6 +455,7 @@ mod tests {
             domain_pattern: None,
             domain_match_mode: None,
             country_thresholds: None,
+            interfaces: Vec::new(),
         }
     }
 

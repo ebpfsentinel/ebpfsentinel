@@ -19,7 +19,19 @@
 # Full reference: config/ebpfsentinel.example.yaml
 
 agent:
-  interfaces: [eth0]
+  interfaces: [eth0, eth1, eth2, eth3]
+
+# ── Interface Groups ──────────────────────────────────────────────
+# Named groups of interfaces for multi-interface rule scoping.
+# Rules can target specific groups via the `interfaces` field.
+
+interface_groups:
+  lan:
+    interfaces: [eth0, eth1]
+  wan:
+    interfaces: [eth2]
+  dmz:
+    interfaces: [eth3]
 
 ids:
   enabled: true
@@ -89,6 +101,7 @@ ids:
       severity: high
       protocol: tcp
       dst_port: 22
+      interfaces: [wan]           # Apply only to the "wan" interface group (optional, default: all)
       threshold:
         type: threshold
         count: 5

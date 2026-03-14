@@ -56,7 +56,17 @@
 # Full reference: config/ebpfsentinel.example.yaml
 
 agent:
-  interfaces: [eth0]
+  interfaces: [eth0, eth1, eth2, eth3]
+
+# ── Interface Groups ──────────────────────────────────────────────
+
+interface_groups:
+  lan:
+    interfaces: [eth0, eth1]
+  wan:
+    interfaces: [eth2]
+  dmz:
+    interfaces: [eth3]
 
 # ── Traffic Shaping / QoS ────────────────────────────────────────────
 
@@ -76,6 +86,7 @@ qos:
       burst: "128kb"
       priority: 1
       direction: egress
+      interfaces: [wan]           # Apply only to the "wan" interface group (optional, default: all)
       enabled: true
 
     # VoIP priority pipe — reserved 10 Mbps with strict priority
@@ -151,6 +162,8 @@ qos:
     - id: cls-sip
       queue_id: queue-voip
       priority: 0
+      interfaces: [lan]           # Apply only to the "lan" interface group (optional, default: all)
+      # interfaces: ["!wan"]      # Alternative: apply to all EXCEPT "wan" group (inversion)
       match:
         protocol: udp
         dst_port: 5060

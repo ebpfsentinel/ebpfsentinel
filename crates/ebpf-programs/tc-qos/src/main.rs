@@ -60,6 +60,10 @@ static QOS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(QOS_METRIC_
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
 
+/// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
+#[map]
+static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
+
 // ── Constants ───────────────────────────────────────────────────────
 
 /// Action code for "shaped" (delayed/rate-limited but passed).
@@ -78,6 +82,30 @@ fn increment_qos_metric(index: u32) {
 #[inline(always)]
 fn ringbuf_bp() -> bool {
     ringbuf_has_backpressure!(EVENTS)
+}
+
+// ── Interface group helpers ──────────────────────────────────────────
+
+/// Get the interface group membership for the current packet's ingress interface.
+#[inline(always)]
+fn get_iface_groups(ctx: &TcContext) -> u32 {
+    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    match unsafe { INTERFACE_GROUPS.get(&ifindex) } {
+        Some(&groups) => groups,
+        None => 0,
+    }
+}
+
+/// Check if a rule's `group_mask` matches the interface's group membership.
+#[inline(always)]
+fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
+    let mask = rule_group_mask & 0x7FFF_FFFF;
+    if mask == 0 {
+        return true;
+    }
+    let hit = (mask & iface_groups) != 0;
+    let invert = (rule_group_mask & 0x8000_0000) != 0;
+    hit != invert
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
@@ -371,6 +399,12 @@ fn apply_qos(
         None => return Ok(TC_ACT_OK), // No matching rule -> pass
     };
 
+    // Check interface group membership for the classifier value.
+    let iface_groups = get_iface_groups(ctx);
+    if !group_matches(classifier_val.group_mask, iface_groups) {
+        return Ok(TC_ACT_OK); // group mismatch -> pass
+    }
+
     // Step 2: Get queue config -> pipe config
     let queue_id = classifier_val.queue_id as u32;
     let queue_cfg = match QOS_QUEUE_CONFIG.get(queue_id) {
@@ -389,6 +423,11 @@ fn apply_qos(
     };
 
     if pipe_cfg.enabled == 0 {
+        return Ok(TC_ACT_OK);
+    }
+
+    // Check interface group membership for the pipe.
+    if !group_matches(pipe_cfg.group_mask, iface_groups) {
         return Ok(TC_ACT_OK);
     }
 

@@ -245,6 +245,11 @@ pub struct FirewallRuleConfig {
     /// Schedule name for time-based activation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
+
+    /// Interface groups this rule applies to. Empty = all (floating).
+    /// Prefix with "!" for inversion (e.g., `"!lan"` = all except lan).
+    #[serde(default)]
+    pub interfaces: Vec<String>,
 }
 
 fn default_protocol() -> String {
@@ -443,6 +448,7 @@ impl FirewallRuleConfig {
             schedule: self.schedule.clone(),
             system: false,
             route_action: None,
+            group_mask: 0,
         })
     }
 }

@@ -8,6 +8,7 @@ pub mod dns;
 pub mod event;
 pub mod firewall;
 pub mod ids;
+pub mod interface_group;
 pub mod loadbalancer;
 pub mod nat;
 pub mod qos;

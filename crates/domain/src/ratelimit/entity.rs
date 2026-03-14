@@ -65,6 +65,10 @@ pub struct RateLimitPolicy {
     /// Source IP alias reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub src_ip_alias: Option<String>,
+    /// Interface group bitmask for multi-interface rule scoping.
+    /// 0 = floating (applies to all interfaces). Bit 31 = invert.
+    #[serde(default)]
+    pub group_mask: u32,
 }
 
 impl RateLimitPolicy {
@@ -138,7 +142,8 @@ impl RateLimitPolicy {
                     burst: self.burst,
                     action,
                     algorithm: ALGO_TOKEN_BUCKET,
-                    _padding: [0; 6],
+                    _padding: [0; 2],
+                    group_mask: 0,
                 }
             }
             RateLimitAlgorithm::FixedWindow => EbpfConfig {
@@ -146,21 +151,24 @@ impl RateLimitPolicy {
                 burst: 0,
                 action,
                 algorithm: ALGO_FIXED_WINDOW,
-                _padding: [0; 6],
+                _padding: [0; 2],
+                group_mask: 0,
             },
             RateLimitAlgorithm::SlidingWindow => EbpfConfig {
                 ns_per_token: self.rate,
                 burst: 0,
                 action,
                 algorithm: ALGO_SLIDING_WINDOW,
-                _padding: [0; 6],
+                _padding: [0; 2],
+                group_mask: 0,
             },
             RateLimitAlgorithm::LeakyBucket => EbpfConfig {
                 ns_per_token: self.rate,
                 burst: self.burst,
                 action,
                 algorithm: ALGO_LEAKY_BUCKET,
-                _padding: [0; 6],
+                _padding: [0; 2],
+                group_mask: 0,
             },
         }
     }
@@ -206,7 +214,8 @@ impl CountryTierConfig {
                     burst: self.burst,
                     action,
                     algorithm: ALGO_TOKEN_BUCKET,
-                    _padding: [0; 6],
+                    _padding: [0; 2],
+                    group_mask: 0,
                 }
             }
             RateLimitAlgorithm::FixedWindow => EbpfConfig {
@@ -214,21 +223,24 @@ impl CountryTierConfig {
                 burst: 0,
                 action,
                 algorithm: ALGO_FIXED_WINDOW,
-                _padding: [0; 6],
+                _padding: [0; 2],
+                group_mask: 0,
             },
             RateLimitAlgorithm::SlidingWindow => EbpfConfig {
                 ns_per_token: self.rate,
                 burst: 0,
                 action,
                 algorithm: ALGO_SLIDING_WINDOW,
-                _padding: [0; 6],
+                _padding: [0; 2],
+                group_mask: 0,
             },
             RateLimitAlgorithm::LeakyBucket => EbpfConfig {
                 ns_per_token: self.rate,
                 burst: self.burst,
                 action,
                 algorithm: ALGO_LEAKY_BUCKET,
-                _padding: [0; 6],
+                _padding: [0; 2],
+                group_mask: 0,
             },
         }
     }
@@ -251,6 +263,7 @@ mod tests {
             algorithm: RateLimitAlgorithm::default(),
             country_codes: None,
             src_ip_alias: None,
+            group_mask: 0,
         }
     }
 

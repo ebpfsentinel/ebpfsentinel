@@ -6,7 +6,7 @@ use aya_ebpf::{
     cty::c_void,
     helpers::{bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop, bpf_skb_store_bytes},
     macros::{classifier, map},
-    maps::{Array, LruHashMap, PerCpuArray},
+    maps::{Array, HashMap, LruHashMap, PerCpuArray},
     programs::TcContext,
 };
 
@@ -104,6 +104,10 @@ static NAT_HAIRPIN_CT: LruHashMap<ConnKey, HairpinCtValue> =
 #[map]
 static NAT_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(NAT_METRIC_COUNT, 0);
 
+/// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
+#[map]
+static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
+
 // ── Entry point ─────────────────────────────────────────────────────
 
 #[classifier]
@@ -125,6 +129,30 @@ fn increment_metric(index: u32) {
     increment_metric!(NAT_METRICS, index);
 }
 
+// ── Interface group helpers ──────────────────────────────────────────
+
+/// Get the interface group membership for the current packet's ingress interface.
+#[inline(always)]
+fn get_iface_groups(ctx: &TcContext) -> u32 {
+    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    match unsafe { INTERFACE_GROUPS.get(&ifindex) } {
+        Some(&groups) => groups,
+        None => 0,
+    }
+}
+
+/// Check if a rule's `group_mask` matches the interface's group membership.
+#[inline(always)]
+fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
+    let mask = rule_group_mask & 0x7FFF_FFFF;
+    if mask == 0 {
+        return true;
+    }
+    let hit = (mask & iface_groups) != 0;
+    let invert = (rule_group_mask & 0x8000_0000) != 0;
+    hit != invert
+}
+
 // ── bpf_loop context structs ────────────────────────────────────────
 
 /// Opaque context passed through `bpf_loop` to the IPv4 DNAT rule-scan callback.
@@ -144,6 +172,8 @@ struct DnatScanCtx {
     nat_type: u8,
     /// 1 if a rule matched, 0 otherwise.
     matched: u8,
+    /// Interface group membership bitmask for the ingress interface.
+    iface_groups: u32,
 }
 
 /// Opaque context passed through `bpf_loop` to the IPv6 DNAT rule-scan callback.
@@ -163,6 +193,8 @@ struct DnatScanCtxV6 {
     nat_type: u8,
     /// 1 if a rule matched, 0 otherwise.
     matched: u8,
+    /// Interface group membership bitmask for the ingress interface.
+    iface_groups: u32,
 }
 
 // ── bpf_loop callbacks ─────────────────────────────────────────────
@@ -176,6 +208,9 @@ unsafe extern "C" fn scan_dnat_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
         return 1;
     }
     if let Some(rule) = NAT_DNAT_RULES.get(index) {
+        if !group_matches(rule.group_mask, lctx.iface_groups) {
+            return 0; // group mismatch, continue to next rule
+        }
         if match_nat_rule(rule, lctx.src_ip, lctx.dst_ip, lctx.dst_port, lctx.protocol) {
             let new_dst_ip = match rule.nat_type {
                 NAT_TYPE_DNAT | NAT_TYPE_ONETOONE => rule.nat_addr,
@@ -205,6 +240,9 @@ unsafe extern "C" fn scan_dnat_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
         return 1;
     }
     if let Some(rule) = NAT_DNAT_RULES_V6.get(index) {
+        if !group_matches(rule.group_mask, lctx.iface_groups) {
+            return 0;
+        }
         if match_nat_rule_v6(rule, &lctx.src_addr, &lctx.dst_addr, lctx.dst_port, lctx.protocol) {
             let new_dst_addr = match rule.nat_type {
                 NAT_TYPE_DNAT | NAT_TYPE_ONETOONE => rule.nat_addr,
@@ -318,6 +356,8 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         None => return Ok(TC_ACT_OK),
     };
 
+    let iface_groups = get_iface_groups(ctx);
+
     let mut scan_ctx = DnatScanCtx {
         count: if count > MAX_NAT_RULES { MAX_NAT_RULES } else { count },
         src_ip,
@@ -328,6 +368,7 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         new_dst_port: 0,
         nat_type: 0,
         matched: 0,
+        iface_groups,
     };
     unsafe {
         bpf_loop(
@@ -465,6 +506,8 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         None => return Ok(TC_ACT_OK),
     };
 
+    let iface_groups = get_iface_groups(ctx);
+
     let mut scan_ctx = DnatScanCtxV6 {
         count: if count > MAX_NAT_RULES_V6 { MAX_NAT_RULES_V6 } else { count },
         src_addr,
@@ -475,6 +518,7 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         new_dst_port: 0,
         nat_type: 0,
         matched: 0,
+        iface_groups,
     };
     unsafe {
         bpf_loop(

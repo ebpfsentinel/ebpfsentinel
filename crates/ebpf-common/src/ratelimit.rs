@@ -86,7 +86,10 @@ pub struct RateLimitConfig {
     pub action: u8,
     /// Algorithm selector: `ALGO_TOKEN_BUCKET`, `ALGO_FIXED_WINDOW`, etc.
     pub algorithm: u8,
-    pub _padding: [u8; 6],
+    pub _padding: [u8; 2],
+    /// Interface group bitmask (0 = floating/all interfaces).
+    /// Bits 0-30: group membership, bit 31: invert flag.
+    pub group_mask: u32,
 }
 
 /// Fixed window bucket state. Size: 16 bytes.
@@ -214,6 +217,7 @@ mod tests {
         assert_eq!(mem::offset_of!(RateLimitConfig, burst), 8);
         assert_eq!(mem::offset_of!(RateLimitConfig, action), 16);
         assert_eq!(mem::offset_of!(RateLimitConfig, algorithm), 17);
+        assert_eq!(mem::offset_of!(RateLimitConfig, group_mask), 20);
     }
 
     #[test]
@@ -276,7 +280,8 @@ mod tests {
             burst: 2000,
             action: RATELIMIT_ACTION_DROP,
             algorithm: ALGO_TOKEN_BUCKET,
-            _padding: [0; 6],
+            _padding: [0; 2],
+            group_mask: 0,
         };
         assert_eq!(config.algorithm, 0);
     }

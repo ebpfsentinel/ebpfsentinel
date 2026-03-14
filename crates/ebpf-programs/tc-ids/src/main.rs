@@ -65,6 +65,10 @@ static CONFIG_FLAGS: Array<u32> = Array::with_max_entries(1, 0);
 #[map]
 static IDS_SAMPLING_CONFIG: Array<IdsSamplingConfig> = Array::with_max_entries(1, 0);
 
+/// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
+#[map]
+static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
+
 /// L7 port lookup: dst_port → enabled flag. When set, TCP packets to this port
 /// have their payload captured and sent to userspace for L7 protocol parsing.
 #[map]
@@ -105,6 +109,30 @@ fn should_skip_by_sampling() -> bool {
         }
     }
     false
+}
+
+// ── Interface group helpers ──────────────────────────────────────────
+
+/// Get the interface group membership for the current packet's ingress interface.
+#[inline(always)]
+fn get_iface_groups(ctx: &TcContext) -> u32 {
+    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    match unsafe { INTERFACE_GROUPS.get(&ifindex) } {
+        Some(&groups) => groups,
+        None => 0,
+    }
+}
+
+/// Check if a rule's `group_mask` matches the interface's group membership.
+#[inline(always)]
+fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
+    let mask = rule_group_mask & 0x7FFF_FFFF;
+    if mask == 0 {
+        return true;
+    }
+    let hit = (mask & iface_groups) != 0;
+    let invert = (rule_group_mask & 0x8000_0000) != 0;
+    hit != invert
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
@@ -292,6 +320,12 @@ fn process_ids_pattern(
         Some(p) => p,
         None => return Ok(TC_ACT_OK),
     };
+
+    // Check interface group membership before applying IDS action.
+    let iface_groups = get_iface_groups(_ctx);
+    if !group_matches(pattern.group_mask, iface_groups) {
+        return Ok(TC_ACT_OK); // group mismatch -> pass
+    }
 
     increment_metric(METRIC_MATCHED);
 

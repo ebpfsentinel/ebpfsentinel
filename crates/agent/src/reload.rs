@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use adapters::auth::jwt_provider::JwtAuthProvider;
 use adapters::auth::oidc_provider::{self, OidcAuthProvider};
-use adapters::ebpf::{ConfigFlagsManager, L7PortsManager};
+use adapters::ebpf::{ConfigFlagsManager, InterfaceGroupsManager, L7PortsManager};
 use application::config_reload::ConfigReloadService;
 use infrastructure::config::AgentConfig;
 use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
@@ -28,6 +28,8 @@ pub struct EbpfMapHolder {
     pub l7_ports: Option<L7PortsManager>,
     /// `CONFIG_FLAGS` managers from tc-ids and tc-threatintel.
     pub config_flags: Vec<ConfigFlagsManager>,
+    /// `INTERFACE_GROUPS` manager across all rule-based eBPF programs.
+    pub iface_groups: Option<InterfaceGroupsManager>,
 }
 
 impl EbpfMapHolder {
@@ -35,6 +37,7 @@ impl EbpfMapHolder {
         Self {
             l7_ports: None,
             config_flags: Vec::new(),
+            iface_groups: None,
         }
     }
 }
@@ -574,6 +577,30 @@ async fn perform_reload(
             count = ebpf_maps.config_flags.len(),
             "CONFIG_FLAGS reloaded across eBPF programs"
         );
+    }
+
+    // Re-sync INTERFACE_GROUPS maps on config reload.
+    if let Some(ref mut groups_mgr) = ebpf_maps.iface_groups {
+        let membership = config.interface_membership();
+        let memberships: Vec<(u32, u32)> = config
+            .agent
+            .interfaces
+            .iter()
+            .filter_map(|iface| {
+                let ifindex = crate::startup::get_ifindex(iface).ok()?;
+                let groups = membership.get(iface).copied().unwrap_or(0);
+                Some((ifindex, groups))
+            })
+            .collect();
+        if let Err(e) = groups_mgr.set_interface_groups(&memberships) {
+            tracing::warn!(error = %e, "INTERFACE_GROUPS reload failed");
+        } else if !memberships.is_empty() {
+            tracing::debug!(
+                iface_count = memberships.len(),
+                map_count = groups_mgr.map_count(),
+                "INTERFACE_GROUPS reloaded"
+            );
+        }
     }
 
     // Phase 7: Auth key/JWKS rotation

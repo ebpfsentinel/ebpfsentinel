@@ -128,7 +128,7 @@ pub struct PortSetKey {
     pub port: u16,
 }
 
-/// Array-based IPv4 firewall rule entry (56 bytes).
+/// Array-based IPv4 firewall rule entry (60 bytes).
 ///
 /// Stored in the `FIREWALL_RULES` `Array` map, indexed 0..count.
 /// Each field that is a wildcard has its corresponding `MATCH_*` flag unset
@@ -191,11 +191,14 @@ pub struct FirewallRuleEntry {
     pub route_action: u8,
     /// Target interface index for route-to / dup-to (0 = none).
     pub route_ifindex: u16,
+    /// Interface group bitmask (0 = floating/all interfaces).
+    /// Bits 0-30: group membership, bit 31: invert flag.
+    pub group_mask: u32,
 }
 
-/// Array-based IPv6 firewall rule entry (104 bytes).
+/// Array-based IPv6 firewall rule entry (108 bytes).
 ///
-/// Same semantics as `FirewallRuleEntry` but with 128-bit addresses
+/// Same semantics as [`FirewallRuleEntry`] but with 128-bit addresses
 /// stored as `[u32; 4]` in network byte order.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +258,9 @@ pub struct FirewallRuleEntryV6 {
     pub route_action: u8,
     /// Target interface index for route-to / dup-to (0 = none).
     pub route_ifindex: u16,
+    /// Interface group bitmask (0 = floating/all interfaces).
+    /// Bits 0-30: group membership, bit 31: invert flag.
+    pub group_mask: u32,
 }
 
 /// Value stored in firewall LPM Trie maps (action only, 4 bytes).
@@ -319,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_firewall_rule_entry_size() {
-        assert_eq!(mem::size_of::<FirewallRuleEntry>(), 56);
+        assert_eq!(mem::size_of::<FirewallRuleEntry>(), 60);
     }
 
     #[test]
@@ -357,13 +363,14 @@ mod tests {
         assert_eq!(mem::offset_of!(FirewallRuleEntry, dscp_mark), 52);
         assert_eq!(mem::offset_of!(FirewallRuleEntry, route_action), 53);
         assert_eq!(mem::offset_of!(FirewallRuleEntry, route_ifindex), 54);
+        assert_eq!(mem::offset_of!(FirewallRuleEntry, group_mask), 56);
     }
 
     // ── FirewallRuleEntryV6 ─────────────────────────────────────────
 
     #[test]
     fn test_firewall_rule_entry_v6_size() {
-        assert_eq!(mem::size_of::<FirewallRuleEntryV6>(), 104);
+        assert_eq!(mem::size_of::<FirewallRuleEntryV6>(), 108);
     }
 
     #[test]
@@ -401,6 +408,7 @@ mod tests {
         assert_eq!(mem::offset_of!(FirewallRuleEntryV6, dscp_mark), 100);
         assert_eq!(mem::offset_of!(FirewallRuleEntryV6, route_action), 101);
         assert_eq!(mem::offset_of!(FirewallRuleEntryV6, route_ifindex), 102);
+        assert_eq!(mem::offset_of!(FirewallRuleEntryV6, group_mask), 104);
     }
 
     // ── LpmValue ─────────────────────────────────────────────────────

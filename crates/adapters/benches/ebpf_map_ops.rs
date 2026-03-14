@@ -97,6 +97,7 @@ fn make_firewall_rule(i: usize) -> FirewallRule {
         schedule: None,
         system: false,
         route_action: None,
+        group_mask: 0,
     }
 }
 
@@ -213,7 +214,8 @@ fn ratelimit_policy_construction(c: &mut Criterion) {
                                 burst,
                                 action,
                                 algorithm,
-                                _padding: [0; 6],
+                                _padding: [0; 2],
+                                group_mask: 0,
                             },
                         )
                         .collect();

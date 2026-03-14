@@ -92,6 +92,11 @@ pub struct QosPipeConfig {
     /// Whether this pipe is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// Interface groups this pipe applies to. Empty = all (floating).
+    /// Prefix with "!" for inversion (e.g., `"!lan"` = all except lan).
+    #[serde(default)]
+    pub interfaces: Vec<String>,
 }
 
 // ── Queue config ────────────────────────────────────────────────────
@@ -128,6 +133,11 @@ pub struct QosClassifierConfig {
     /// Match rule for classifying traffic.
     #[serde(default)]
     pub match_rule: QosMatchConfig,
+
+    /// Interface groups this classifier applies to. Empty = all (floating).
+    /// Prefix with "!" for inversion (e.g., `"!lan"` = all except lan).
+    #[serde(default)]
+    pub interfaces: Vec<String>,
 }
 
 // ── Match config ────────────────────────────────────────────────────
@@ -446,6 +456,7 @@ impl QosPipeConfig {
             priority: self.priority,
             direction,
             enabled: self.enabled,
+            group_mask: 0,
         })
     }
 }
@@ -582,6 +593,7 @@ impl QosClassifierConfig {
                 dscp: self.match_rule.dscp.unwrap_or(0),
                 vlan_id: self.match_rule.vlan_id.unwrap_or(0),
             },
+            group_mask: 0,
         })
     }
 }

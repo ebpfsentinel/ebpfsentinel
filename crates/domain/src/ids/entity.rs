@@ -177,6 +177,10 @@ pub struct IdsRule {
     /// Per-country threshold overrides (ISO 3166-1 alpha-2 codes).
     #[serde(skip)]
     pub country_thresholds: Option<HashMap<String, ThresholdConfig>>,
+    /// Interface group bitmask for multi-interface rule scoping.
+    /// 0 = floating (applies to all interfaces). Bit 31 = invert.
+    #[serde(default)]
+    pub group_mask: u32,
 }
 
 impl IdsRule {
@@ -228,6 +232,7 @@ impl IdsRule {
             severity: self.severity.to_u8(),
             _padding: [0; 2],
             rule_id: rule_index,
+            group_mask: 0,
         }
     }
 }
@@ -331,6 +336,7 @@ mod tests {
             domain_pattern: None,
             domain_match_mode: None,
             country_thresholds: None,
+            group_mask: 0,
         }
     }
 

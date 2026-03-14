@@ -33,7 +33,17 @@
 # Full reference: config/ebpfsentinel.example.yaml
 
 agent:
-  interfaces: [eth0]
+  interfaces: [eth0, eth1, eth2, eth3]
+
+# ── Interface Groups ──────────────────────────────────────────────
+
+interface_groups:
+  lan:
+    interfaces: [eth0, eth1]
+  wan:
+    interfaces: [eth2]
+  dmz:
+    interfaces: [eth3]
 
 # ── Top-level Aliases (shared across all domains) ────────────────────
 
@@ -137,6 +147,7 @@ nat:
       translated_port: 80
       match_dst_port: 8080
       match_protocol: tcp
+      interfaces: [wan]           # Apply only to the "wan" interface group (optional, default: all)
 
     # Port forwarding: redirect public port 2222 to SSH on a jump host.
     - id: nat-pf-ssh

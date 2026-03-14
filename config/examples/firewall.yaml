@@ -27,7 +27,20 @@
 # Full reference: config/ebpfsentinel.example.yaml
 
 agent:
-  interfaces: [eth0]
+  interfaces: [eth0, eth1, eth2, eth3]
+
+# ── Interface Groups ──────────────────────────────────────────────
+# Named groups of interfaces for multi-interface rule scoping.
+# Rules can target specific groups via the `interfaces` field.
+# Use "!" prefix to invert (e.g., "!lan" = all except lan).
+
+interface_groups:
+  lan:
+    interfaces: [eth0, eth1]
+  wan:
+    interfaces: [eth2]
+  dmz:
+    interfaces: [eth3]
 
 # ── Top-level Aliases ──────────────────────────────────────────────
 # Aliases defined at the top level are shared across all domains:
@@ -423,6 +436,25 @@ firewall:
       dst_port: "80-443"
       state: [new]
       schedule: business_hours
+      scope: global
+
+    # ── Interface group scoping ────────────────────────────────────
+    # Allow HTTP only on LAN interfaces (eth0, eth1)
+    - id: fw-allow-http-lan-only
+      priority: 89
+      action: allow
+      protocol: tcp
+      dst_port: "80-443"
+      state: [new]
+      interfaces: [lan]
+      scope: global
+
+    # Deny all traffic on non-WAN interfaces (inverted match)
+    - id: fw-deny-except-wan
+      priority: 90
+      action: deny
+      protocol: any
+      interfaces: ["!wan"]
       scope: global
 
   # ── Schedules ──────────────────────────────────────────────────

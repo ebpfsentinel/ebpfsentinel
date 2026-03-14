@@ -53,6 +53,7 @@ fn make_rule(id: usize, priority: u32, action: FirewallAction) -> FirewallRule {
         schedule: None,
         system: false,
         route_action: None,
+        group_mask: 0,
     }
 }
 

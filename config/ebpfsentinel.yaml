@@ -21,6 +21,18 @@ agent:
   grpc_port: 50051
   metrics_port: 9090
 
+# ── Interface Groups ──────────────────────────────────────────────
+# Named groups of interfaces for multi-interface rule scoping.
+# Rules can target specific groups via the `interfaces` field.
+# Use "!" prefix to invert (e.g., "!lan" = all except lan).
+# interface_groups:
+#   lan:
+#     interfaces: [eth0, eth1]
+#   wan:
+#     interfaces: [eth2]
+#   dmz:
+#     interfaces: [eth3]
+
 firewall:
   enabled: true
 

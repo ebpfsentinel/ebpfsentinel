@@ -229,6 +229,7 @@ impl CreateRuleRequest {
             schedule: None,
             system: false,
             route_action: None,
+            group_mask: 0,
         })
     }
 }
@@ -670,6 +671,7 @@ mod tests {
             schedule: None,
             system: false,
             route_action: None,
+            group_mask: 0,
         };
         let resp = RuleResponse::from(&rule);
         assert_eq!(resp.id, "fw-001");

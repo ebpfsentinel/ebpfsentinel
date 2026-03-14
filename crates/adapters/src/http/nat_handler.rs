@@ -179,6 +179,7 @@ pub async fn create_nptv6_rule(
         internal_prefix,
         external_prefix,
         prefix_len: req.prefix_len,
+        group_mask: 0,
     };
 
     let mut svc = nat.write().await;

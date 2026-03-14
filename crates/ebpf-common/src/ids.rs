@@ -44,8 +44,8 @@ pub struct IdsPatternKey {
 }
 
 /// Value for the IDS_PATTERNS HashMap.
-/// Encodes the action, severity, and rule_id for matched packets.
-/// Size: 8 bytes (aligned to 4 bytes).
+/// Encodes the action, severity, rule_id, and group_mask for matched packets.
+/// Size: 12 bytes (aligned to 4 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdsPatternValue {
@@ -53,6 +53,9 @@ pub struct IdsPatternValue {
     pub severity: u8,
     pub _padding: [u8; 2],
     pub rule_id: u32,
+    /// Interface group bitmask (0 = floating/all interfaces).
+    /// Bits 0-30: group membership, bit 31: invert flag.
+    pub group_mask: u32,
 }
 
 // SAFETY: Both types are #[repr(C)], Copy, 'static, and contain only primitive types
@@ -79,12 +82,20 @@ mod tests {
 
     #[test]
     fn test_ids_pattern_value_size() {
-        assert_eq!(mem::size_of::<IdsPatternValue>(), 8);
+        assert_eq!(mem::size_of::<IdsPatternValue>(), 12);
     }
 
     #[test]
     fn test_ids_pattern_value_alignment() {
         assert_eq!(mem::align_of::<IdsPatternValue>(), 4);
+    }
+
+    #[test]
+    fn test_ids_pattern_value_field_offsets() {
+        assert_eq!(mem::offset_of!(IdsPatternValue, action), 0);
+        assert_eq!(mem::offset_of!(IdsPatternValue, severity), 1);
+        assert_eq!(mem::offset_of!(IdsPatternValue, rule_id), 4);
+        assert_eq!(mem::offset_of!(IdsPatternValue, group_mask), 8);
     }
 
     #[test]

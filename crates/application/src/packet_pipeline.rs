@@ -845,6 +845,7 @@ mod tests {
             domain_pattern: None,
             domain_match_mode: None,
             country_thresholds: None,
+            group_mask: 0,
         }
     }
 

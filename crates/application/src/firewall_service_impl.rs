@@ -237,6 +237,7 @@ impl FirewallAppService {
                     schedule: None,
                     system: true,
                     route_action: None,
+                    group_mask: 0,
                 });
             }
         }
@@ -334,6 +335,7 @@ mod tests {
             schedule: None,
             system: false,
             route_action: None,
+            group_mask: 0,
         }
     }
 

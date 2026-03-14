@@ -262,6 +262,7 @@ fn parse_request(req: CreateRateLimitRuleRequest) -> Result<RateLimitPolicy, Api
         algorithm,
         country_codes: None,
         src_ip_alias: None,
+        group_mask: 0,
     })
 }
 
@@ -464,6 +465,7 @@ mod tests {
             algorithm: RateLimitAlgorithm::TokenBucket,
             country_codes: None,
             src_ip_alias: None,
+            group_mask: 0,
         };
         let resp = RateLimitRuleResponse::from_policy(&policy);
         assert_eq!(resp.id, "rl-001");
@@ -489,6 +491,7 @@ mod tests {
             algorithm: RateLimitAlgorithm::LeakyBucket,
             country_codes: None,
             src_ip_alias: None,
+            group_mask: 0,
         };
         let resp = RateLimitRuleResponse::from_policy(&policy);
         assert_eq!(resp.algorithm, "leaky_bucket");

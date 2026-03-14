@@ -160,6 +160,25 @@ pub struct AgentConfig {
     /// Top-level aliases shared across all domains (firewall, NAT, L7, etc.).
     #[serde(default)]
     pub aliases: HashMap<String, alias::AliasConfig>,
+
+    /// Interface groups for multi-interface rule scoping.
+    /// Each group maps a name to a set of interfaces. Rules can target
+    /// specific groups via the `interfaces` field.
+    #[serde(default)]
+    pub interface_groups: HashMap<String, InterfaceGroupConfig>,
+}
+
+/// Maximum number of interface groups (bits 0-30 of `group_mask`).
+const MAX_INTERFACE_GROUPS: u32 = 31;
+
+/// Bit 31 of `group_mask`: invert the match.
+const GROUP_FLAG_INVERT: u32 = 0x8000_0000;
+
+/// Interface group configuration for multi-interface rule scoping.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InterfaceGroupConfig {
+    /// List of interface names in this group.
+    pub interfaces: Vec<String>,
 }
 
 impl AgentConfig {
@@ -516,6 +535,34 @@ impl AgentConfig {
             geoip_cfg.validate()?;
         }
 
+        // Validate interface groups
+        if self.interface_groups.len() > MAX_INTERFACE_GROUPS as usize {
+            return Err(ConfigError::Validation {
+                field: "interface_groups".to_string(),
+                message: format!(
+                    "too many interface groups: {} (max {})",
+                    self.interface_groups.len(),
+                    MAX_INTERFACE_GROUPS
+                ),
+            });
+        }
+        for (name, group_cfg) in &self.interface_groups {
+            if name.is_empty() {
+                return Err(ConfigError::Validation {
+                    field: "interface_groups".to_string(),
+                    message: "interface group name must not be empty".to_string(),
+                });
+            }
+            for iface in &group_cfg.interfaces {
+                if !self.agent.interfaces.contains(iface) {
+                    return Err(ConfigError::Validation {
+                        field: format!("interface_groups.{name}"),
+                        message: format!("interface '{iface}' is not in agent.interfaces"),
+                    });
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -775,6 +822,66 @@ impl AgentConfig {
     pub fn qos_classifiers(&self) -> Result<Vec<domain::qos::entity::QosClassifier>, ConfigError> {
         self.qos.to_domain_classifiers()
     }
+
+    /// Assign a bit position (0-30) to each group name (sorted alphabetically).
+    /// Returns mapping from group name to its single-bit bitmask.
+    pub fn interface_group_bitmasks(&self) -> HashMap<String, u32> {
+        let mut sorted: Vec<_> = self.interface_groups.keys().cloned().collect();
+        sorted.sort();
+        sorted
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| (name, 1u32 << i))
+            .collect()
+    }
+
+    /// Compute per-interface group membership bitmask.
+    /// Returns mapping from interface name to its combined group bitmask
+    /// (OR of all groups it belongs to).
+    pub fn interface_membership(&self) -> HashMap<String, u32> {
+        let bits = self.interface_group_bitmasks();
+        let mut membership: HashMap<String, u32> = HashMap::new();
+        for (group_name, group_cfg) in &self.interface_groups {
+            if let Some(&bit) = bits.get(group_name) {
+                for iface in &group_cfg.interfaces {
+                    *membership.entry(iface.clone()).or_insert(0) |= bit;
+                }
+            }
+        }
+        membership
+    }
+}
+
+/// Convert a list of interface group names (with optional "!" prefix for inversion)
+/// to a `group_mask` u32 (bit 31 = invert).
+#[allow(clippy::implicit_hasher)]
+pub fn parse_group_mask(
+    interfaces: &[String],
+    group_bits: &HashMap<String, u32>,
+) -> Result<u32, String> {
+    if interfaces.is_empty() {
+        return Ok(0); // floating rule
+    }
+    let mut mask = 0u32;
+    let mut invert = false;
+    for name in interfaces {
+        if let Some(stripped) = name.strip_prefix('!') {
+            invert = true;
+            if let Some(&bit) = group_bits.get(stripped) {
+                mask |= bit;
+            } else {
+                return Err(format!("unknown interface group: '{stripped}'"));
+            }
+        } else if let Some(&bit) = group_bits.get(name.as_str()) {
+            mask |= bit;
+        } else {
+            return Err(format!("unknown interface group: '{name}'"));
+        }
+    }
+    if invert {
+        mask |= GROUP_FLAG_INVERT;
+    }
+    Ok(mask)
 }
 
 // ── Agent info ─────────────────────────────────────────────────────
@@ -2811,5 +2918,133 @@ nat:
         let snat = config.nat_snat_rules().unwrap();
         assert_eq!(snat.len(), 1);
         assert_eq!(snat[0].id.0, "snat-out");
+    }
+
+    // ── Interface groups ────────────────────────────────────────────
+
+    #[test]
+    fn interface_groups_empty_by_default() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert!(config.interface_groups.is_empty());
+        assert!(config.interface_group_bitmasks().is_empty());
+        assert!(config.interface_membership().is_empty());
+    }
+
+    #[test]
+    fn interface_groups_bitmask_assignment() {
+        let yaml = r"
+agent:
+  interfaces: [eth0, eth1, eth2]
+interface_groups:
+  dmz:
+    interfaces: [eth2]
+  lan:
+    interfaces: [eth0, eth1]
+  wan:
+    interfaces: [eth0]
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let bits = config.interface_group_bitmasks();
+        // Sorted alphabetically: dmz=0, lan=1, wan=2
+        assert_eq!(bits["dmz"], 1);
+        assert_eq!(bits["lan"], 2);
+        assert_eq!(bits["wan"], 4);
+    }
+
+    #[test]
+    fn interface_membership_computed_correctly() {
+        let yaml = r"
+agent:
+  interfaces: [eth0, eth1, eth2]
+interface_groups:
+  dmz:
+    interfaces: [eth2]
+  lan:
+    interfaces: [eth0, eth1]
+  wan:
+    interfaces: [eth0]
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let membership = config.interface_membership();
+        let bits = config.interface_group_bitmasks();
+        // eth0 is in lan + wan
+        assert_eq!(membership["eth0"], bits["lan"] | bits["wan"]);
+        // eth1 is in lan only
+        assert_eq!(membership["eth1"], bits["lan"]);
+        // eth2 is in dmz only
+        assert_eq!(membership["eth2"], bits["dmz"]);
+    }
+
+    #[test]
+    fn interface_group_validation_unknown_interface() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+interface_groups:
+  lan:
+    interfaces: [eth0, eth1]
+";
+        assert!(AgentConfig::from_yaml(yaml).is_err());
+    }
+
+    #[test]
+    fn interface_group_validation_empty_name() {
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+interface_groups:
+  "":
+    interfaces: [eth0]
+"#;
+        assert!(AgentConfig::from_yaml(yaml).is_err());
+    }
+
+    #[test]
+    fn parse_group_mask_empty() {
+        let bits = HashMap::new();
+        assert_eq!(parse_group_mask(&[], &bits).unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_group_mask_single_group() {
+        let mut bits = HashMap::new();
+        bits.insert("lan".to_string(), 1u32);
+        bits.insert("wan".to_string(), 2u32);
+        let mask = parse_group_mask(&["lan".to_string()], &bits).unwrap();
+        assert_eq!(mask, 1);
+    }
+
+    #[test]
+    fn parse_group_mask_multiple_groups() {
+        let mut bits = HashMap::new();
+        bits.insert("lan".to_string(), 1u32);
+        bits.insert("wan".to_string(), 2u32);
+        let mask = parse_group_mask(&["lan".to_string(), "wan".to_string()], &bits).unwrap();
+        assert_eq!(mask, 3); // 1 | 2
+    }
+
+    #[test]
+    fn parse_group_mask_inverted() {
+        let mut bits = HashMap::new();
+        bits.insert("lan".to_string(), 1u32);
+        bits.insert("wan".to_string(), 2u32);
+        let mask = parse_group_mask(&["!lan".to_string()], &bits).unwrap();
+        assert_eq!(mask, 1 | GROUP_FLAG_INVERT);
+    }
+
+    #[test]
+    fn parse_group_mask_unknown_group() {
+        let bits = HashMap::new();
+        assert!(parse_group_mask(&["unknown".to_string()], &bits).is_err());
+    }
+
+    #[test]
+    fn parse_group_mask_unknown_inverted_group() {
+        let bits = HashMap::new();
+        assert!(parse_group_mask(&["!unknown".to_string()], &bits).is_err());
     }
 }

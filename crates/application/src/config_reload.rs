@@ -985,6 +985,7 @@ mod tests {
             schedule: None,
             system: false,
             route_action: None,
+            group_mask: 0,
         }
     }
 
@@ -1002,6 +1003,7 @@ mod tests {
             domain_pattern: None,
             domain_match_mode: None,
             country_thresholds: None,
+            group_mask: 0,
         }
     }
 
@@ -1371,6 +1373,7 @@ mod tests {
             domain_pattern: None,
             domain_match_mode: None,
             country_thresholds: None,
+            group_mask: 0,
         }
     }
 
@@ -1688,6 +1691,7 @@ mod tests {
             algorithm: RateLimitAlgorithm::default(),
             country_codes: None,
             src_ip_alias: None,
+            group_mask: 0,
         }
     }
 

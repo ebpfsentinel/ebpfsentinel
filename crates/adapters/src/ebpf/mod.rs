@@ -19,7 +19,9 @@ pub mod ratelimit_lpm_manager;
 pub mod ratelimit_map_manager;
 pub mod threatintel_map_manager;
 
-pub use config_flags_manager::{ConfigFlagsManager, ScrubConfigManager, SyncookieSecretManager};
+pub use config_flags_manager::{
+    ConfigFlagsManager, InterfaceGroupsManager, ScrubConfigManager, SyncookieSecretManager,
+};
 pub use conntrack_map_manager::ConnTrackMapManager;
 pub use dlp_event_reader::DlpEventReader;
 pub use dns_event_reader::DnsEventReader;

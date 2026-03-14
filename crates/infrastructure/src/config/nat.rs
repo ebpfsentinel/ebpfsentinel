@@ -240,6 +240,11 @@ pub struct NatRuleConfig {
     /// Destination IP alias reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_dst_alias: Option<String>,
+
+    /// Interface groups this rule applies to. Empty = all (floating).
+    /// Prefix with "!" for inversion (e.g., `"!lan"` = all except lan).
+    #[serde(default)]
+    pub interfaces: Vec<String>,
 }
 
 fn default_priority() -> u32 {
@@ -262,6 +267,11 @@ pub struct NptV6RuleConfig {
 
     /// Prefix length in bits (1-64).
     pub prefix_len: u8,
+
+    /// Interface groups this rule applies to. Empty = all (floating).
+    /// Prefix with "!" for inversion (e.g., `"!lan"` = all except lan).
+    #[serde(default)]
+    pub interfaces: Vec<String>,
 }
 
 impl NptV6RuleConfig {
@@ -323,6 +333,7 @@ impl NptV6RuleConfig {
             internal_prefix,
             external_prefix,
             prefix_len: self.prefix_len,
+            group_mask: 0,
         })
     }
 }
@@ -538,6 +549,7 @@ impl NatRuleConfig {
             match_src_alias: self.match_src_alias.clone(),
             match_dst_alias: self.match_dst_alias.clone(),
             enabled: self.enabled,
+            group_mask: 0,
         })
     }
 }
@@ -566,6 +578,7 @@ mod tests {
             match_protocol: None,
             match_src_alias: None,
             match_dst_alias: None,
+            interfaces: Vec::new(),
         }
     }
 
@@ -616,6 +629,7 @@ mod tests {
             match_protocol: Some("tcp".to_string()),
             match_src_alias: None,
             match_dst_alias: None,
+            interfaces: Vec::new(),
         };
         assert!(cfg.validate(0, "nat.dnat_rules").is_ok());
     }
@@ -641,6 +655,7 @@ mod tests {
             match_protocol: None,
             match_src_alias: None,
             match_dst_alias: None,
+            interfaces: Vec::new(),
         };
         assert!(cfg.validate(0, "nat.snat_rules").is_err());
     }
@@ -680,6 +695,7 @@ mod tests {
             match_protocol: Some("tcp".to_string()),
             match_src_alias: None,
             match_dst_alias: None,
+            interfaces: Vec::new(),
         };
         let rule = cfg.to_domain_rule().unwrap();
         assert!(matches!(
@@ -724,6 +740,7 @@ dnat_rules: []
             internal_prefix: "fd00:1::".to_string(),
             external_prefix: "2001:db8:1::".to_string(),
             prefix_len: 48,
+            interfaces: Vec::new(),
         }
     }
 

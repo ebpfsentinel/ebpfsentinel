@@ -239,10 +239,36 @@ fn ringbuf_has_backpressure() -> bool {
     ringbuf_has_backpressure!(EVENTS)
 }
 
+/// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
+#[map]
+static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
+
 /// Increment a DDoS-specific per-CPU metric counter.
 #[inline(always)]
 fn increment_ddos_metric(index: u32) {
     increment_metric!(DDOS_METRICS, index);
+}
+
+/// Get the interface group membership for the current packet's ingress interface.
+#[inline(always)]
+fn get_iface_groups(ctx: &XdpContext) -> u32 {
+    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    match unsafe { INTERFACE_GROUPS.get(&ifindex) } {
+        Some(&groups) => groups,
+        None => 0,
+    }
+}
+
+/// Check if a rule's `group_mask` matches the interface's group membership.
+#[inline(always)]
+fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
+    let mask = rule_group_mask & 0x7FFF_FFFF;
+    if mask == 0 {
+        return true;
+    }
+    let hit = (mask & iface_groups) != 0;
+    let invert = (rule_group_mask & 0x8000_0000) != 0;
+    hit != invert
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
@@ -377,6 +403,13 @@ fn process_ratelimit_v4(
     let key = RateLimitKey { src_ip };
     let config = lookup_config(&key)?;
 
+    // Check interface group membership before applying rate limit.
+    let iface_groups = get_iface_groups(ctx);
+    if !group_matches(config.group_mask, iface_groups) {
+        increment_metric(METRIC_PASSED);
+        return Ok(xdp_action::XDP_PASS);
+    }
+
     let now = unsafe { bpf_ktime_get_boot_ns() };
     let passed = dispatch_algorithm(&key, config, now);
 
@@ -471,6 +504,13 @@ fn process_ratelimit_v6(
     // ── Existing: generic rate limiting ────────────────────────────
     let key = RateLimitKey { src_ip: src_hash };
     let config = lookup_config(&key)?;
+
+    // Check interface group membership before applying rate limit.
+    let iface_groups = get_iface_groups(ctx);
+    if !group_matches(config.group_mask, iface_groups) {
+        increment_metric(METRIC_PASSED);
+        return Ok(xdp_action::XDP_PASS);
+    }
 
     let now = unsafe { bpf_ktime_get_boot_ns() };
     let passed = dispatch_algorithm(&key, config, now);

@@ -233,6 +233,7 @@ pub async fn create_qos_pipe(
         priority: 0,
         direction: QosDirection::Egress,
         enabled: true,
+        group_mask: 0,
     };
 
     let svc = state.qos_service()?;
@@ -440,6 +441,7 @@ pub async fn create_qos_classifier(
         direction,
         match_rule,
         priority: req.priority,
+        group_mask: 0,
     };
 
     let svc = state.qos_service()?;
@@ -497,6 +499,7 @@ mod tests {
             priority: 0,
             direction: QosDirection::Egress,
             enabled: true,
+            group_mask: 0,
         };
         let resp = QosPipeResponse::from_domain(&pipe);
         assert_eq!(resp.id, "p-1");
@@ -534,6 +537,7 @@ mod tests {
                 vlan_id: 0,
             },
             priority: 100,
+            group_mask: 0,
         };
         let resp = QosClassifierResponse::from_domain(&cls);
         assert_eq!(resp.id, "c-1");
