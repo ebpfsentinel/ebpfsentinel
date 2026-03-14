@@ -325,6 +325,7 @@ impl ConfigReloadService {
         dnat_rules: Vec<NatRule>,
         snat_rules: Vec<NatRule>,
         nptv6_rules: Vec<domain::nat::entity::NptV6Rule>,
+        hairpin_config: Option<ebpf_common::nat::HairpinConfig>,
         enabled: bool,
     ) -> Result<(), anyhow::Error> {
         let Some(ref nat_svc) = self.nat_service else {
@@ -349,6 +350,12 @@ impl ConfigReloadService {
                 .map_err(|e| anyhow::anyhow!("NAT SNAT reload failed: {e}"))?;
             svc.reload_nptv6_rules(Vec::new())
                 .map_err(|e| anyhow::anyhow!("NAT NPTv6 reload failed: {e}"))?;
+        }
+
+        // Load hairpin NAT config (always applied, respects its own enabled flag)
+        if let Some(ref hp_cfg) = hairpin_config {
+            svc.load_hairpin_config(hp_cfg)
+                .map_err(|e| anyhow::anyhow!("NAT hairpin config reload failed: {e}"))?;
         }
 
         self.metrics.record_config_reload("nat", "success");

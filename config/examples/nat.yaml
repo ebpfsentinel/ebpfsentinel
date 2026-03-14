@@ -182,6 +182,14 @@ nat:
       match_dst_port: 8080
       match_protocol: tcp
 
+  # Hairpin NAT (NAT reflection) — allows internal clients to access
+  # internal services via the external IP. The firewall applies DNAT +
+  # SNAT so return traffic routes back through tc-nat-ingress.
+  hairpin:
+    enabled: true
+    internal_subnet: "192.168.1.0/24"
+    hairpin_snat_ip: "192.168.1.1"
+
   # ── NPTv6 (RFC 6296) prefix translation ─────────────────────────
   #
   # Stateless, bidirectional IPv6-to-IPv6 prefix mapping.

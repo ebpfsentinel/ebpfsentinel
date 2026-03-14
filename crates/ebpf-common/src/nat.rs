@@ -33,6 +33,8 @@ pub const NAT_METRIC_ERRORS: u32 = 4;
 pub const NAT_METRIC_TOTAL_SEEN: u32 = 5;
 /// Metric index: NPTv6 prefix translations applied.
 pub const NAT_METRIC_NPTV6_TRANSLATED: u32 = 6;
+/// Metric index: hairpin NAT (NAT reflection) applied.
+pub const NAT_METRIC_HAIRPIN_APPLIED: u32 = 7;
 pub const NAT_METRIC_COUNT: u32 = 8;
 
 // ── NAT match flags ─────────────────────────────────────────────────
@@ -137,6 +139,49 @@ pub struct NptV6RuleEntry {
     pub _pad: [u8; 4],
 }
 
+// ── Hairpin NAT (NAT reflection) ─────────────────────────────────────
+
+/// Hairpin NAT configuration. 16 bytes, 4-byte aligned.
+///
+/// When a client on the internal subnet accesses the external (public) IP of
+/// the firewall for a service that is DNAT'd back to the same subnet, hairpin
+/// NAT rewrites the source to the firewall's internal IP so the reply goes
+/// through the firewall instead of being routed directly (which would be
+/// dropped as asymmetric).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HairpinConfig {
+    /// Internal subnet address (host byte order, pre-masked).
+    pub internal_subnet: u32,
+    /// Internal subnet mask (host byte order).
+    pub internal_mask: u32,
+    /// Firewall's internal IP for SNAT (host byte order).
+    pub hairpin_snat_ip: u32,
+    /// 1 = enabled, 0 = disabled.
+    pub enabled: u8,
+    pub _pad: [u8; 3],
+}
+
+/// Hairpin reverse-mapping value. 12 bytes.
+///
+/// Stored in the hairpin conntrack table so that return traffic from the
+/// internal server can be un-SNATed (restore original client src) and
+/// un-DNATed (restore external dst) before forwarding back to the client.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HairpinCtValue {
+    /// Original source IP before hairpin SNAT.
+    pub orig_src_ip: u32,
+    /// Original destination IP before DNAT (external IP).
+    pub orig_dst_ip: u32,
+    /// Original source port.
+    pub orig_src_port: u16,
+    pub _pad: u16,
+}
+
+/// Maximum hairpin conntrack entries.
+pub const MAX_HAIRPIN_CT: u32 = 16_384;
+
 // ── NAT port allocation key — 8 bytes ───────────────────────────────
 
 /// Key for NAT port allocation (LRU HashMap).
@@ -169,6 +214,10 @@ unsafe impl aya::Pod for NptV6RuleEntry {}
 unsafe impl aya::Pod for NatPortAllocKey {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for NatPortAllocValue {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for HairpinConfig {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for HairpinCtValue {}
 
 // ── Tests ────────────────────────────────────────────────────────────
 
@@ -277,6 +326,43 @@ mod tests {
                 assert_ne!(a, b, "NAT types {a} and {b} collide");
             }
         }
+    }
+
+    #[test]
+    fn hairpin_config_size() {
+        assert_eq!(mem::size_of::<HairpinConfig>(), 16);
+    }
+
+    #[test]
+    fn hairpin_config_alignment() {
+        assert_eq!(mem::align_of::<HairpinConfig>(), 4);
+    }
+
+    #[test]
+    fn hairpin_config_field_offsets() {
+        assert_eq!(mem::offset_of!(HairpinConfig, internal_subnet), 0);
+        assert_eq!(mem::offset_of!(HairpinConfig, internal_mask), 4);
+        assert_eq!(mem::offset_of!(HairpinConfig, hairpin_snat_ip), 8);
+        assert_eq!(mem::offset_of!(HairpinConfig, enabled), 12);
+        assert_eq!(mem::offset_of!(HairpinConfig, _pad), 13);
+    }
+
+    #[test]
+    fn hairpin_ct_value_size() {
+        assert_eq!(mem::size_of::<HairpinCtValue>(), 12);
+    }
+
+    #[test]
+    fn hairpin_ct_value_alignment() {
+        assert_eq!(mem::align_of::<HairpinCtValue>(), 4);
+    }
+
+    #[test]
+    fn hairpin_ct_value_field_offsets() {
+        assert_eq!(mem::offset_of!(HairpinCtValue, orig_src_ip), 0);
+        assert_eq!(mem::offset_of!(HairpinCtValue, orig_dst_ip), 4);
+        assert_eq!(mem::offset_of!(HairpinCtValue, orig_src_port), 8);
+        assert_eq!(mem::offset_of!(HairpinCtValue, _pad), 10);
     }
 
     #[test]

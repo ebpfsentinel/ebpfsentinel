@@ -373,8 +373,27 @@ async fn perform_reload(
             return;
         }
     };
+    let hairpin_cfg = match config.nat_hairpin_parsed() {
+        Ok((subnet, mask, snat_ip)) => Some(ebpf_common::nat::HairpinConfig {
+            internal_subnet: subnet,
+            internal_mask: mask,
+            hairpin_snat_ip: snat_ip,
+            enabled: u8::from(config.nat.hairpin.enabled),
+            _pad: [0; 3],
+        }),
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload: invalid hairpin NAT config, skipping");
+            None
+        }
+    };
     if let Err(e) = reload_service
-        .reload_nat(dnat_rules, snat_rules, nptv6_rules, config.nat.enabled)
+        .reload_nat(
+            dnat_rules,
+            snat_rules,
+            nptv6_rules,
+            hairpin_cfg,
+            config.nat.enabled,
+        )
         .await
     {
         tracing::warn!(error = %e, "NAT config reload failed at application level");

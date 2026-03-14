@@ -1128,6 +1128,19 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
                     let _ = svc.reload_dnat_rules(dnat);
                     let _ = svc.reload_snat_rules(snat);
                     let _ = svc.reload_nptv6_rules(nptv6);
+                    // Load hairpin NAT config
+                    if let Ok((subnet, mask, snat_ip)) = config.nat_hairpin_parsed() {
+                        let hp = ebpf_common::nat::HairpinConfig {
+                            internal_subnet: subnet,
+                            internal_mask: mask,
+                            hairpin_snat_ip: snat_ip,
+                            enabled: u8::from(config.nat.hairpin.enabled),
+                            _pad: [0; 3],
+                        };
+                        if let Err(e) = svc.load_hairpin_config(&hp) {
+                            tracing::warn!("hairpin NAT config load failed: {e}");
+                        }
+                    }
                 }
                 ebpf_state.add_loader(ingress_loader);
                 ebpf_state.add_loader(egress_loader);

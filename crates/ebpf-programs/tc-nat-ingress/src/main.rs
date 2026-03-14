@@ -9,6 +9,7 @@ use aya_ebpf::{
     maps::{Array, LruHashMap, PerCpuArray},
     programs::TcContext,
 };
+
 use ebpf_helpers::net::{
     ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
     PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, ipv6_mask_match, u16_from_be_bytes,
@@ -22,10 +23,11 @@ use ebpf_common::{
         CT_MAX_ENTRIES_V6, normalize_key_v4, normalize_key_v6,
     },
     nat::{
+        HairpinConfig, HairpinCtValue, MAX_HAIRPIN_CT,
         MAX_NAT_RULES, MAX_NAT_RULES_V6, MAX_NPTV6_RULES,
         NAT_MATCH_DST_IP, NAT_MATCH_DST_PORT, NAT_MATCH_PROTO,
         NAT_MATCH_SRC_IP, NAT_METRIC_COUNT, NAT_METRIC_DNAT_APPLIED, NAT_METRIC_ERRORS,
-        NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_TOTAL_SEEN,
+        NAT_METRIC_HAIRPIN_APPLIED, NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_TOTAL_SEEN,
         NAT_TYPE_DNAT, NAT_TYPE_ONETOONE, NAT_TYPE_REDIRECT,
         NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry,
     },
@@ -40,6 +42,8 @@ use network_types::{
 // ── Constants ───────────────────────────────────────────────────────
 // Network constants and header structs imported from ebpf_helpers.
 
+/// Offset of src_addr within Ipv4Hdr (standard IP header).
+const IPV4_SRC_OFFSET: usize = 12;
 /// Offset of dst_addr within Ipv4Hdr (standard IP header).
 const IPV4_DST_OFFSET: usize = 16;
 /// Offset of IP header checksum within Ipv4Hdr.
@@ -85,6 +89,16 @@ static NPTV6_RULES: Array<NptV6RuleEntry> = Array::with_max_entries(MAX_NPTV6_RU
 /// Number of active NPTv6 rules.
 #[map]
 static NPTV6_RULE_COUNT: Array<u32> = Array::with_max_entries(1, 0);
+
+/// Hairpin NAT configuration (single-element array).
+#[map]
+static NAT_HAIRPIN_CONFIG: Array<HairpinConfig> = Array::with_max_entries(1, 0);
+
+/// Hairpin NAT conntrack table (LRU): maps post-hairpin 5-tuple to original
+/// client info so return traffic can be un-SNATed and un-DNATed.
+#[map]
+static NAT_HAIRPIN_CT: LruHashMap<ConnKey, HairpinCtValue> =
+    LruHashMap::with_max_entries(MAX_HAIRPIN_CT, 0);
 
 /// Per-CPU NAT metrics.
 #[map]
@@ -269,6 +283,19 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         _ => return Ok(TC_ACT_OK),
     };
 
+    // Hairpin reverse path: check if this is return traffic from a
+    // hairpinned connection. If so, un-SNAT the destination back to the
+    // original client and un-DNAT the source back to the external IP.
+    let hp_key = normalize_key_v4(src_ip, dst_ip, src_port, dst_port, protocol);
+    if let Some(hp_val) = unsafe { NAT_HAIRPIN_CT.get(&hp_key) } {
+        // Return traffic: dst is the firewall SNAT IP -> restore to original client
+        rewrite_dst_ip(ctx, l3_offset, l4_offset, protocol, dst_ip, hp_val.orig_src_ip)?;
+        // Return traffic: src is the internal server -> restore to external IP
+        rewrite_src_ip(ctx, l3_offset, l4_offset, protocol, src_ip, hp_val.orig_dst_ip)?;
+        increment_metric(NAT_METRIC_HAIRPIN_APPLIED);
+        return Ok(TC_ACT_OK);
+    }
+
     // Check existing conntrack entry for cached NAT mapping.
     let ct_key = normalize_key_v4(src_ip, dst_ip, src_port, dst_port, protocol);
     if let Some(ct_entry) = unsafe { CT_TABLE_V4.get(&ct_key) } {
@@ -333,6 +360,44 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         }
 
         increment_metric(NAT_METRIC_DNAT_APPLIED);
+
+        // Hairpin forward path: if both the original source and the
+        // post-DNAT destination are on the internal subnet, we must SNAT
+        // the source to the firewall's internal IP. Otherwise the server
+        // would reply directly to the client (asymmetric routing) and
+        // the client would drop the unexpected source.
+        if let Some(hcfg) = NAT_HAIRPIN_CONFIG.get(0) {
+            if hcfg.enabled != 0 {
+                // IPs are already in host byte order (u32_from_be_bytes above).
+                // Config stores host-byte-order values, so compare directly.
+                if (src_ip & hcfg.internal_mask) == hcfg.internal_subnet
+                    && (new_dst_ip & hcfg.internal_mask) == hcfg.internal_subnet
+                {
+                    // SNAT: rewrite source to firewall internal IP.
+                    rewrite_src_ip(
+                        ctx, l3_offset, l4_offset, protocol,
+                        src_ip, hcfg.hairpin_snat_ip,
+                    )?;
+
+                    // Store reverse mapping so return traffic can be restored.
+                    // Key is the post-rewrite 5-tuple: (hairpin_snat_ip, new_dst_ip,
+                    // src_port, new_dst_port, protocol).
+                    let post_key = normalize_key_v4(
+                        hcfg.hairpin_snat_ip, new_dst_ip,
+                        src_port, new_dst_port, protocol,
+                    );
+                    let hp_val = HairpinCtValue {
+                        orig_src_ip: src_ip,
+                        orig_dst_ip: dst_ip, // pre-DNAT destination (external IP)
+                        orig_src_port: src_port,
+                        _pad: 0,
+                    };
+                    let _ = NAT_HAIRPIN_CT.insert(&post_key, &hp_val, 0);
+
+                    increment_metric(NAT_METRIC_HAIRPIN_APPLIED);
+                }
+            }
+        }
     }
 
     Ok(TC_ACT_OK)
@@ -505,6 +570,80 @@ fn rewrite_dst_ip(
             u32::from_be_bytes(old_be) as u64,
             u32::from_be_bytes(new_be) as u64,
             4,  // BPF_F_PSEUDO_HDR is 0x10, but 4 = size of the field
+        )
+    };
+    if ret != 0 {
+        return Err(());
+    }
+
+    Ok(())
+}
+
+/// Rewrite the source IP address in the IPv4 header and update checksums.
+///
+/// Mirrors `rewrite_dst_ip` but operates on the source address field
+/// (offset 12). Used by hairpin NAT to SNAT the client's source to the
+/// firewall's internal IP.
+#[inline(always)]
+fn rewrite_src_ip(
+    ctx: &TcContext,
+    l3_offset: usize,
+    l4_offset: usize,
+    protocol: u8,
+    old_ip: u32,
+    new_ip: u32,
+) -> Result<(), ()> {
+    if old_ip == new_ip {
+        return Ok(());
+    }
+
+    let old_be = old_ip.to_be_bytes();
+    let new_be = new_ip.to_be_bytes();
+
+    // Write new source IP into the packet.
+    let src_off = (l3_offset + IPV4_SRC_OFFSET) as u32;
+    let ret = unsafe {
+        bpf_skb_store_bytes(
+            ctx.skb.skb as *mut _,
+            src_off,
+            new_be.as_ptr() as *const _,
+            4,
+            BPF_F_RECOMPUTE_CSUM,
+        )
+    };
+    if ret != 0 {
+        return Err(());
+    }
+
+    // Update IP header checksum (incremental).
+    let ip_csum_off = (l3_offset + IPV4_CSUM_OFFSET) as u32;
+    let ret = unsafe {
+        bpf_l3_csum_replace(
+            ctx.skb.skb as *mut _,
+            ip_csum_off,
+            u32::from_be_bytes(old_be) as u64,
+            u32::from_be_bytes(new_be) as u64,
+            4,
+        )
+    };
+    if ret != 0 {
+        return Err(());
+    }
+
+    // Update L4 checksum (TCP/UDP pseudo-header includes IP addresses).
+    let l4_csum_off = match protocol {
+        PROTO_TCP => l4_offset + 16, // TCP checksum at offset 16
+        PROTO_UDP => l4_offset + 6,  // UDP checksum at offset 6
+        _ => return Ok(()),
+    } as u32;
+
+    let ret = unsafe {
+        bpf_l4_csum_replace(
+            ctx.skb.skb as *mut _,
+            l4_csum_off,
+            u32::from_be_bytes(old_be) as u64,
+            u32::from_be_bytes(new_be) as u64,
+            4,
         )
     };
     if ret != 0 {

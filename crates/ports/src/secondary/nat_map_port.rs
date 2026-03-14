@@ -1,5 +1,5 @@
 use domain::common::error::DomainError;
-use ebpf_common::nat::{NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry};
+use ebpf_common::nat::{HairpinConfig, NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry};
 
 /// Secondary port for NAT eBPF map operations.
 ///
@@ -22,6 +22,9 @@ pub trait NatMapPort: Send + Sync {
 
     /// Bulk-load `NPTv6` (RFC 6296) rules into both ingress and egress maps.
     fn load_nptv6_rules(&mut self, rules: &[NptV6RuleEntry]) -> Result<(), DomainError>;
+
+    /// Load hairpin NAT (NAT reflection) configuration into the eBPF map.
+    fn load_hairpin_config(&mut self, config: &HairpinConfig) -> Result<(), DomainError>;
 
     /// Enable or disable NAT processing globally.
     fn set_enabled(&mut self, enabled: bool) -> Result<(), DomainError>;

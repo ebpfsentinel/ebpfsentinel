@@ -55,7 +55,7 @@ pub use ids::{IdsConfig, IdsRuleConfig, SamplingConfig, ThresholdRuleConfig};
 pub use ips::{IpsConfig, IpsRuleConfig};
 pub use l7::{L7Config, L7RuleConfig};
 pub use loadbalancer::{LbBackendConfig, LbServiceConfig as LbServiceCfg, LoadBalancerConfig};
-pub use nat::{NatConfig, NatRuleConfig, NptV6RuleConfig};
+pub use nat::{HairpinNatConfig, NatConfig, NatRuleConfig, NptV6RuleConfig};
 pub use qos::{QosClassifierConfig, QosPipeConfig, QosQueueConfig, QosSectionConfig};
 pub use ratelimit::{RateLimitRuleConfig, RateLimitSectionConfig};
 pub use routing::{GatewayConfig, HealthCheckConfig, RoutingConfig};
@@ -718,6 +718,13 @@ impl AgentConfig {
             .iter()
             .map(NptV6RuleConfig::to_domain_rule)
             .collect()
+    }
+
+    /// Parse hairpin NAT config to `(subnet_ip, subnet_mask, snat_ip)` as host-order `u32`.
+    ///
+    /// Returns `(0, 0, 0)` when disabled.
+    pub fn nat_hairpin_parsed(&self) -> Result<(u32, u32, u32), ConfigError> {
+        self.nat.hairpin.to_parsed()
     }
 
     /// Convert zone section config to domain `ZoneConfig`.

@@ -1,6 +1,6 @@
 //! NAT configuration parsing.
 
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use domain::common::entity::RuleId;
 use domain::firewall::entity::PortRange;
@@ -31,6 +31,25 @@ pub struct NatConfig {
     /// `NPTv6` (RFC 6296) prefix translation rules.
     #[serde(default)]
     pub nptv6_rules: Vec<NptV6RuleConfig>,
+
+    /// Hairpin NAT (NAT reflection) configuration.
+    #[serde(default)]
+    pub hairpin: HairpinNatConfig,
+}
+
+/// Hairpin NAT (NAT reflection) configuration.
+///
+/// Allows internal clients to access internal services via the external IP.
+/// The firewall applies DNAT + SNAT so return traffic routes back through
+/// tc-nat-ingress instead of being routed directly (asymmetric routing).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HairpinNatConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Internal subnet CIDR (e.g., "192.168.1.0/24").
+    pub internal_subnet: Option<String>,
+    /// Firewall's internal IP for SNAT (e.g., "192.168.1.1").
+    pub hairpin_snat_ip: Option<String>,
 }
 
 impl NatConfig {
@@ -45,7 +64,109 @@ impl NatConfig {
         for (idx, rule_cfg) in self.nptv6_rules.iter().enumerate() {
             rule_cfg.validate(idx)?;
         }
+        self.hairpin.validate()?;
         Ok(())
+    }
+}
+
+impl HairpinNatConfig {
+    /// Validate the hairpin NAT config.
+    ///
+    /// When enabled, both `internal_subnet` (valid CIDR) and
+    /// `hairpin_snat_ip` (valid IPv4) must be present.
+    pub(super) fn validate(&self) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        let subnet_str =
+            self.internal_subnet
+                .as_deref()
+                .ok_or_else(|| ConfigError::Validation {
+                    field: "nat.hairpin.internal_subnet".to_string(),
+                    message: "required when hairpin NAT is enabled".to_string(),
+                })?;
+
+        // Must contain '/' for CIDR notation
+        let (ip_str, prefix_str) =
+            subnet_str
+                .split_once('/')
+                .ok_or_else(|| ConfigError::InvalidCidr {
+                    value: subnet_str.to_string(),
+                    reason: "expected CIDR notation (e.g. 192.168.1.0/24)".to_string(),
+                })?;
+
+        ip_str
+            .parse::<Ipv4Addr>()
+            .map_err(|e| ConfigError::InvalidCidr {
+                value: subnet_str.to_string(),
+                reason: format!("invalid IPv4 address: {e}"),
+            })?;
+
+        let prefix_len: u32 = prefix_str.parse().map_err(|e| ConfigError::InvalidCidr {
+            value: subnet_str.to_string(),
+            reason: format!("invalid prefix length: {e}"),
+        })?;
+
+        if prefix_len > 32 {
+            return Err(ConfigError::InvalidCidr {
+                value: subnet_str.to_string(),
+                reason: format!("prefix length must be 0..=32, got {prefix_len}"),
+            });
+        }
+
+        let snat_ip_str =
+            self.hairpin_snat_ip
+                .as_deref()
+                .ok_or_else(|| ConfigError::Validation {
+                    field: "nat.hairpin.hairpin_snat_ip".to_string(),
+                    message: "required when hairpin NAT is enabled".to_string(),
+                })?;
+
+        snat_ip_str
+            .parse::<Ipv4Addr>()
+            .map_err(|e| ConfigError::Validation {
+                field: "nat.hairpin.hairpin_snat_ip".to_string(),
+                message: format!("invalid IPv4 address: {e}"),
+            })?;
+
+        Ok(())
+    }
+
+    /// Parse to `(subnet_ip, subnet_mask, snat_ip)` as `u32` in host byte order.
+    ///
+    /// Returns `(0, 0, 0)` when disabled. Call after `validate()`.
+    pub fn to_parsed(&self) -> Result<(u32, u32, u32), ConfigError> {
+        if !self.enabled {
+            return Ok((0, 0, 0));
+        }
+
+        let subnet_str = self.internal_subnet.as_deref().unwrap_or("");
+        let (ip_str, prefix_str) = subnet_str.split_once('/').unwrap_or((subnet_str, "32"));
+
+        let ip: Ipv4Addr = ip_str.parse().map_err(|e| ConfigError::Validation {
+            field: "nat.hairpin.internal_subnet".to_string(),
+            message: format!("invalid IPv4: {e}"),
+        })?;
+
+        let prefix_len: u32 = prefix_str.parse().map_err(|e| ConfigError::Validation {
+            field: "nat.hairpin.internal_subnet".to_string(),
+            message: format!("invalid prefix length: {e}"),
+        })?;
+
+        let mask = if prefix_len == 0 {
+            0
+        } else {
+            !0u32 << (32 - prefix_len)
+        };
+
+        let snat_ip_str = self.hairpin_snat_ip.as_deref().unwrap_or("");
+        let snat_ip: Ipv4Addr = snat_ip_str.parse().map_err(|e| ConfigError::Validation {
+            field: "nat.hairpin.hairpin_snat_ip".to_string(),
+            message: format!("invalid IPv4: {e}"),
+        })?;
+
+        Ok((u32::from(ip), mask, u32::from(snat_ip)))
     }
 }
 
@@ -675,5 +796,113 @@ nptv6_rules:
         let rule = cfg.nptv6_rules[0].to_domain_rule().unwrap();
         assert_eq!(rule.id, "nptv6-site1");
         assert_eq!(rule.prefix_len, 48);
+    }
+
+    // ── Hairpin NAT config tests ─────────────────────────────────
+
+    #[test]
+    fn hairpin_disabled_validates() {
+        let cfg = HairpinNatConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn hairpin_enabled_ok() {
+        let cfg = HairpinNatConfig {
+            enabled: true,
+            internal_subnet: Some("192.168.1.0/24".to_string()),
+            hairpin_snat_ip: Some("192.168.1.1".to_string()),
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn hairpin_enabled_missing_subnet() {
+        let cfg = HairpinNatConfig {
+            enabled: true,
+            internal_subnet: None,
+            hairpin_snat_ip: Some("192.168.1.1".to_string()),
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn hairpin_enabled_missing_snat_ip() {
+        let cfg = HairpinNatConfig {
+            enabled: true,
+            internal_subnet: Some("192.168.1.0/24".to_string()),
+            hairpin_snat_ip: None,
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn hairpin_invalid_subnet() {
+        let cfg = HairpinNatConfig {
+            enabled: true,
+            internal_subnet: Some("not-a-cidr".to_string()),
+            hairpin_snat_ip: Some("192.168.1.1".to_string()),
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn hairpin_invalid_snat_ip() {
+        let cfg = HairpinNatConfig {
+            enabled: true,
+            internal_subnet: Some("192.168.1.0/24".to_string()),
+            hairpin_snat_ip: Some("not-an-ip".to_string()),
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn hairpin_to_parsed_disabled() {
+        let cfg = HairpinNatConfig::default();
+        let (subnet, mask, snat_ip) = cfg.to_parsed().unwrap();
+        assert_eq!(subnet, 0);
+        assert_eq!(mask, 0);
+        assert_eq!(snat_ip, 0);
+    }
+
+    #[test]
+    fn hairpin_to_parsed_enabled() {
+        let cfg = HairpinNatConfig {
+            enabled: true,
+            internal_subnet: Some("192.168.1.0/24".to_string()),
+            hairpin_snat_ip: Some("192.168.1.1".to_string()),
+        };
+        let (subnet, mask, snat_ip) = cfg.to_parsed().unwrap();
+        assert_eq!(subnet, u32::from(Ipv4Addr::new(192, 168, 1, 0)));
+        assert_eq!(mask, 0xFFFF_FF00);
+        assert_eq!(snat_ip, u32::from(Ipv4Addr::new(192, 168, 1, 1)));
+    }
+
+    #[test]
+    fn hairpin_yaml_roundtrip() {
+        let yaml = r#"
+enabled: true
+snat_rules: []
+dnat_rules: []
+hairpin:
+  enabled: true
+  internal_subnet: "192.168.1.0/24"
+  hairpin_snat_ip: "192.168.1.1"
+"#;
+        let cfg: NatConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(cfg.hairpin.enabled);
+        assert!(cfg.validate().is_ok());
+        let (subnet, _mask, _snat_ip) = cfg.hairpin.to_parsed().unwrap();
+        assert_ne!(subnet, 0);
+    }
+
+    #[test]
+    fn hairpin_prefix_len_33_rejected() {
+        let cfg = HairpinNatConfig {
+            enabled: true,
+            internal_subnet: Some("192.168.1.0/33".to_string()),
+            hairpin_snat_ip: Some("192.168.1.1".to_string()),
+        };
+        assert!(cfg.validate().is_err());
     }
 }

@@ -135,6 +135,17 @@ impl NatAppService {
         Ok(())
     }
 
+    /// Load hairpin NAT (NAT reflection) configuration into the eBPF map.
+    pub fn load_hairpin_config(
+        &mut self,
+        config: &ebpf_common::nat::HairpinConfig,
+    ) -> Result<(), DomainError> {
+        let Some(ref mut port) = self.map_port else {
+            return Ok(());
+        };
+        port.load_hairpin_config(config)
+    }
+
     /// Return the total number of active NAT rules.
     pub fn rule_count(&self) -> usize {
         self.dnat_rules.len() + self.snat_rules.len() + self.nptv6_rules.len()

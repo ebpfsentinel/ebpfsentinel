@@ -1,7 +1,7 @@
 use aya::Ebpf;
 use aya::maps::{Array, MapData};
 use domain::common::error::DomainError;
-use ebpf_common::nat::{NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry};
+use ebpf_common::nat::{HairpinConfig, NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry};
 use ports::secondary::nat_map_port::NatMapPort;
 use tracing::info;
 
@@ -25,6 +25,7 @@ pub struct NatMapManager {
     nptv6_count_ingress: Array<MapData, u32>,
     nptv6_rules_egress: Array<MapData, NptV6RuleEntry>,
     nptv6_count_egress: Array<MapData, u32>,
+    hairpin_config: Array<MapData, HairpinConfig>,
     cached_dnat_count: usize,
     cached_snat_count: usize,
     cached_dnat_count_v6: usize,
@@ -96,7 +97,12 @@ impl NatMapManager {
                 .ok_or_else(|| anyhow::anyhow!("map 'NPTV6_RULE_COUNT' not found in egress"))?,
         )?;
 
-        info!("NAT maps acquired (DNAT/SNAT V4+V6 + NPTv6 from ingress/egress)");
+        let hairpin_config =
+            Array::try_from(ingress.take_map("NAT_HAIRPIN_CONFIG").ok_or_else(|| {
+                anyhow::anyhow!("map 'NAT_HAIRPIN_CONFIG' not found in ingress")
+            })?)?;
+
+        info!("NAT maps acquired (DNAT/SNAT V4+V6 + NPTv6 + hairpin from ingress/egress)");
         Ok(Self {
             dnat_rules,
             dnat_count,
@@ -110,6 +116,7 @@ impl NatMapManager {
             nptv6_count_ingress,
             nptv6_rules_egress,
             nptv6_count_egress,
+            hairpin_config,
             cached_dnat_count: 0,
             cached_snat_count: 0,
             cached_dnat_count_v6: 0,
@@ -260,6 +267,17 @@ impl NatMapPort for NatMapManager {
         info!(
             count,
             "NPTv6 rules loaded into eBPF arrays (ingress + egress)"
+        );
+        Ok(())
+    }
+
+    fn load_hairpin_config(&mut self, config: &HairpinConfig) -> Result<(), DomainError> {
+        self.hairpin_config
+            .set(0, *config, 0)
+            .map_err(|e| DomainError::EngineError(format!("set NAT_HAIRPIN_CONFIG failed: {e}")))?;
+        info!(
+            enabled = config.enabled,
+            "Hairpin NAT config loaded into eBPF array"
         );
         Ok(())
     }

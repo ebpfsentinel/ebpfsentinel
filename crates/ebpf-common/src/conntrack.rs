@@ -43,6 +43,7 @@ pub const CT_FLAG_SEEN_REPLY: u8 = 0x01;
 pub const CT_FLAG_ASSURED: u8 = 0x02;
 pub const CT_FLAG_NAT_SRC: u8 = 0x04;
 pub const CT_FLAG_NAT_DST: u8 = 0x08;
+pub const CT_FLAG_NAT_HAIRPIN: u8 = 0x10;
 
 // ── Conntrack key (IPv4) — 16 bytes ─────────────────────────────────
 
@@ -508,6 +509,7 @@ mod tests {
             CT_FLAG_ASSURED,
             CT_FLAG_NAT_SRC,
             CT_FLAG_NAT_DST,
+            CT_FLAG_NAT_HAIRPIN,
         ];
         for (i, &a) in flags.iter().enumerate() {
             for &b in &flags[i + 1..] {
