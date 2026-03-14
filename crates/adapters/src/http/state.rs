@@ -17,6 +17,7 @@ use application::ips_service_impl::IpsAppService;
 use application::l7_service_impl::L7AppService;
 use application::lb_service_impl::LbAppService;
 use application::nat_service_impl::NatAppService;
+use application::qos_service_impl::QosAppService;
 use application::ratelimit_service_impl::RateLimitAppService;
 use application::routing_service_impl::RoutingAppService;
 use application::threatintel_service_impl::ThreatIntelAppService;
@@ -50,6 +51,7 @@ pub struct AppState {
     pub routing_service: Option<Arc<RwLock<RoutingAppService>>>,
     pub zone_service: Option<Arc<RwLock<ZoneAppService>>>,
     pub loadbalancer_service: Option<Arc<RwLock<LbAppService>>>,
+    pub qos_service: Option<Arc<RwLock<QosAppService>>>,
     pub dns_cache_service: Option<Arc<DnsCacheAppService>>,
     pub dns_blocklist_service: Option<Arc<DnsBlocklistAppService>>,
     pub domain_reputation_service: Option<Arc<DomainReputationAppService>>,
@@ -96,6 +98,7 @@ impl AppState {
             routing_service: None,
             zone_service: None,
             loadbalancer_service: None,
+            qos_service: None,
             dns_cache_service: None,
             dns_blocklist_service: None,
             domain_reputation_service: None,
@@ -169,6 +172,23 @@ impl AppState {
     pub fn with_loadbalancer_service(mut self, svc: Arc<RwLock<LbAppService>>) -> Self {
         self.loadbalancer_service = Some(svc);
         self
+    }
+
+    /// Attach a `QoS` / traffic shaping service.
+    #[must_use]
+    pub fn with_qos_service(mut self, svc: Arc<RwLock<QosAppService>>) -> Self {
+        self.qos_service = Some(svc);
+        self
+    }
+
+    /// Return a reference to the `QoS` service, or an API error if not available.
+    pub fn qos_service(&self) -> Result<&Arc<RwLock<QosAppService>>, super::error::ApiError> {
+        self.qos_service
+            .as_ref()
+            .ok_or(super::error::ApiError::NotFound {
+                code: "SERVICE_NOT_AVAILABLE",
+                message: "QoS service is not enabled".to_string(),
+            })
     }
 
     /// Attach DNS intelligence services.

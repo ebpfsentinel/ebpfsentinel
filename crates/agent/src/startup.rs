@@ -229,6 +229,16 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         "Load balancer engine initialized"
     );
 
+    // ── 5c⅝½. Build QoS service ──────────────────────────────────────
+    let qos_svc = {
+        let mut svc = application::qos_service_impl::QosAppService::new(
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>
+        );
+        svc.set_enabled(config.qos.enabled);
+        Arc::new(RwLock::new(svc))
+    };
+    info!(enabled = config.qos.enabled, "QoS service initialized");
+
     // ── 5c¾. Build DLP service ──────────────────────────────────────
     let mut dlp_engine = DlpEngine::new();
     // Always load built-in patterns, alert mode only
@@ -692,6 +702,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         .with_alias_service(Arc::clone(&alias_svc))
         .with_routing_service(Arc::clone(&routing_svc))
         .with_loadbalancer_service(Arc::clone(&lb_svc))
+        .with_qos_service(Arc::clone(&qos_svc))
         .with_zone_service(Arc::clone(&zone_svc));
     let app_state = Arc::new(app_state);
 
@@ -761,6 +772,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     reload_service.set_alias_service(Arc::clone(&alias_svc));
     reload_service.set_routing_service(Arc::clone(&routing_svc));
     reload_service.set_loadbalancer_service(Arc::clone(&lb_svc));
+    reload_service.set_qos_service(Arc::clone(&qos_svc));
     reload_service.set_zone_service(Arc::clone(&zone_svc));
     reload_service.set_schedule_service(Arc::clone(&schedule_svc));
     let reload_service = Arc::new(reload_service);

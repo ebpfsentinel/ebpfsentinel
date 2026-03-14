@@ -130,6 +130,15 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (3, "events_dropped"),
             (4, "total_seen"),
         ],
+        "QOS_METRICS" => &[
+            (0, "total_seen"),
+            (1, "shaped"),
+            (2, "dropped_loss"),
+            (3, "dropped_queue"),
+            (4, "delayed"),
+            (5, "errors"),
+            (6, "events_dropped"),
+        ],
         _ => &[(0, "index_0"), (1, "index_1"), (2, "errors")],
     }
 }

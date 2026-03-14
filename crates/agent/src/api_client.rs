@@ -324,6 +324,40 @@ pub struct DdosPolicyResponse {
     pub enabled: bool,
 }
 
+// ── QoS ─────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct QosStatusResponse {
+    pub enabled: bool,
+    pub scheduler: String,
+    pub pipe_count: usize,
+    pub queue_count: usize,
+    pub classifier_count: usize,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct QosPipeResponse {
+    pub id: String,
+    pub rate_bps: u64,
+    pub burst_bytes: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct QosQueueResponse {
+    pub id: String,
+    pub pipe_id: String,
+    pub weight: u32,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct QosClassifierResponse {
+    pub id: String,
+    pub queue_id: String,
+    pub direction: String,
+    pub priority: u32,
+    pub match_rule: serde_json::Value,
+}
+
 // ── Load Balancer ────────────────────────────────────────────────
 
 #[derive(Deserialize, Serialize)]
@@ -910,6 +944,113 @@ impl ApiClient {
             .request(
                 reqwest::Method::DELETE,
                 &format!("/api/v1/lb/services/{id}"),
+            )
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_delete(resp).await
+    }
+
+    // ── QoS ────────────────────────────────────────────────────────
+
+    pub async fn qos_status(&self) -> anyhow::Result<QosStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/qos/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn list_qos_pipes(&self) -> anyhow::Result<Vec<QosPipeResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/qos/pipes")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn create_qos_pipe(
+        &self,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<QosPipeResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/qos/pipes")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn delete_qos_pipe(&self, id: &str) -> anyhow::Result<()> {
+        let resp = self
+            .request(reqwest::Method::DELETE, &format!("/api/v1/qos/pipes/{id}"))
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_delete(resp).await
+    }
+
+    pub async fn list_qos_queues(&self) -> anyhow::Result<Vec<QosQueueResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/qos/queues")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn create_qos_queue(
+        &self,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<QosQueueResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/qos/queues")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn delete_qos_queue(&self, id: &str) -> anyhow::Result<()> {
+        let resp = self
+            .request(reqwest::Method::DELETE, &format!("/api/v1/qos/queues/{id}"))
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_delete(resp).await
+    }
+
+    pub async fn list_qos_classifiers(&self) -> anyhow::Result<Vec<QosClassifierResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/qos/classifiers")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn create_qos_classifier(
+        &self,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<QosClassifierResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/qos/classifiers")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn delete_qos_classifier(&self, id: &str) -> anyhow::Result<()> {
+        let resp = self
+            .request(
+                reqwest::Method::DELETE,
+                &format!("/api/v1/qos/classifiers/{id}"),
             )
             .send()
             .await

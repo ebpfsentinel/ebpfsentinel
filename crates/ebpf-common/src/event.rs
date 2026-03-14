@@ -7,6 +7,7 @@ pub const EVENT_TYPE_RATELIMIT: u8 = 4;
 pub const EVENT_TYPE_THREATINTEL: u8 = 5;
 pub const EVENT_TYPE_L7: u8 = 6;
 pub const EVENT_TYPE_DNS: u8 = 7;
+pub const EVENT_TYPE_QOS: u8 = 8;
 
 /// Maximum L7 payload bytes captured by eBPF and sent via RingBuf.
 pub const MAX_L7_PAYLOAD: usize = 512;
@@ -150,6 +151,7 @@ mod tests {
         assert_eq!(EVENT_TYPE_THREATINTEL, 5);
         assert_eq!(EVENT_TYPE_L7, 6);
         assert_eq!(EVENT_TYPE_DNS, 7);
+        assert_eq!(EVENT_TYPE_QOS, 8);
         assert_eq!(MAX_L7_PAYLOAD, 512);
     }
 

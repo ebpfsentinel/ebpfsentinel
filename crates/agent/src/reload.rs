@@ -423,6 +423,35 @@ async fn perform_reload(
         tracing::warn!(error = %e, "load balancer config reload failed at application level");
     }
 
+    // Phase 6f¾: QoS reload
+    let qos_pipes = match config.qos_pipes() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid QoS pipes");
+            return;
+        }
+    };
+    let qos_queues = match config.qos_queues() {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid QoS queues");
+            return;
+        }
+    };
+    let qos_classifiers = match config.qos_classifiers() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid QoS classifiers");
+            return;
+        }
+    };
+    if let Err(e) = reload_service
+        .reload_qos(qos_pipes, qos_queues, qos_classifiers, config.qos.enabled)
+        .await
+    {
+        tracing::warn!(error = %e, "QoS config reload failed at application level");
+    }
+
     // Phase 6g: IPS reload
     let ips_rules = match config.ips_rules() {
         Ok(r) => r,

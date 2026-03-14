@@ -13,6 +13,7 @@ const EBPF_PROGRAMS: &[&str] = &[
     "tc-conntrack",
     "tc-nat-ingress",
     "tc-nat-egress",
+    "tc-qos",
     "tc-scrub",
     "uprobe-dlp",
 ];

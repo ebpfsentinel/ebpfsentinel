@@ -43,6 +43,11 @@ use super::middleware::auth::jwt_auth_middleware;
 use super::nat_handler::{list_nat_rules, nat_status};
 use super::openapi::ApiDoc;
 use super::ops_handler::{get_config, get_ebpf_status, reload_config};
+use super::qos_handler::{
+    create_qos_classifier, create_qos_pipe, create_qos_queue, delete_qos_classifier,
+    delete_qos_pipe, delete_qos_queue, get_qos_status, list_qos_classifiers, list_qos_pipes,
+    list_qos_queues,
+};
 use super::ratelimit_handler::{
     create_ratelimit_rule, delete_ratelimit_rule, list_ratelimit_rules,
 };
@@ -135,7 +140,11 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
             .route("/api/v1/lb/services/{id}", get(get_lb_service))
             .route("/api/v1/zones/status", get(zone_status))
             .route("/api/v1/zones", get(list_zones))
-            .route("/api/v1/zones/policies", get(list_zone_policies));
+            .route("/api/v1/zones/policies", get(list_zone_policies))
+            .route("/api/v1/qos/status", get(get_qos_status))
+            .route("/api/v1/qos/pipes", get(list_qos_pipes))
+            .route("/api/v1/qos/queues", get(list_qos_queues))
+            .route("/api/v1/qos/classifiers", get(list_qos_classifiers));
 
         // Write routes (rate limited: 60 req/min per IP)
         let write_routes = Router::new()
@@ -165,6 +174,15 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
             )
             .route("/api/v1/lb/services", post(create_lb_service))
             .route("/api/v1/lb/services/{id}", delete(delete_lb_service))
+            .route("/api/v1/qos/pipes", post(create_qos_pipe))
+            .route("/api/v1/qos/pipes/{id}", delete(delete_qos_pipe))
+            .route("/api/v1/qos/queues", post(create_qos_queue))
+            .route("/api/v1/qos/queues/{id}", delete(delete_qos_queue))
+            .route("/api/v1/qos/classifiers", post(create_qos_classifier))
+            .route(
+                "/api/v1/qos/classifiers/{id}",
+                delete(delete_qos_classifier),
+            )
             .layer(GovernorLayer::new(governor_conf));
 
         let r = read_routes

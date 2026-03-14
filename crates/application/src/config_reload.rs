@@ -53,6 +53,7 @@ pub struct ConfigReloadService {
     alias_service: Option<Arc<RwLock<AliasAppService>>>,
     routing_service: Option<Arc<RwLock<RoutingAppService>>>,
     loadbalancer_service: Option<Arc<RwLock<LbAppService>>>,
+    qos_service: Option<Arc<RwLock<crate::qos_service_impl::QosAppService>>>,
     zone_service: Option<Arc<RwLock<ZoneAppService>>>,
     schedule_service: Option<Arc<RwLock<ScheduleService>>>,
     metrics: Arc<dyn MetricsPort>,
@@ -87,6 +88,7 @@ impl ConfigReloadService {
             alias_service: None,
             routing_service: None,
             loadbalancer_service: None,
+            qos_service: None,
             zone_service: None,
             schedule_service: None,
             metrics,
@@ -122,6 +124,11 @@ impl ConfigReloadService {
     /// Set the load balancer service for reload integration.
     pub fn set_loadbalancer_service(&mut self, svc: Arc<RwLock<LbAppService>>) {
         self.loadbalancer_service = Some(svc);
+    }
+
+    /// Set the `QoS` service for reload integration.
+    pub fn set_qos_service(&mut self, svc: Arc<RwLock<crate::qos_service_impl::QosAppService>>) {
+        self.qos_service = Some(svc);
     }
 
     /// Set the zone service for reload integration.
@@ -244,6 +251,50 @@ impl ConfigReloadService {
             count = svc.service_count(),
             "load balancer configuration reloaded"
         );
+        Ok(())
+    }
+
+    /// Reload `QoS` pipes, queues, and classifiers.
+    pub async fn reload_qos(
+        &self,
+        pipes: Vec<domain::qos::entity::QosPipe>,
+        queues: Vec<domain::qos::entity::QosQueue>,
+        classifiers: Vec<domain::qos::entity::QosClassifier>,
+        enabled: bool,
+    ) -> Result<(), anyhow::Error> {
+        let Some(ref qos_svc) = self.qos_service else {
+            return Ok(());
+        };
+        let _guard = self.reload_mutex.lock().await;
+
+        let mut svc = qos_svc.write().await;
+        svc.set_enabled(enabled);
+
+        if enabled {
+            svc.reload_pipes(pipes)
+                .map_err(|e| anyhow::anyhow!("QoS pipe reload failed: {e}"))?;
+            svc.reload_queues(queues)
+                .map_err(|e| anyhow::anyhow!("QoS queue reload failed: {e}"))?;
+            svc.reload_classifiers(classifiers)
+                .map_err(|e| anyhow::anyhow!("QoS classifier reload failed: {e}"))?;
+        } else {
+            svc.reload_pipes(Vec::new())
+                .map_err(|e| anyhow::anyhow!("QoS pipe reload failed: {e}"))?;
+            svc.reload_queues(Vec::new())
+                .map_err(|e| anyhow::anyhow!("QoS queue reload failed: {e}"))?;
+            svc.reload_classifiers(Vec::new())
+                .map_err(|e| anyhow::anyhow!("QoS classifier reload failed: {e}"))?;
+        }
+
+        self.metrics.record_config_reload("qos", "success");
+        tracing::info!(
+            enabled,
+            pipe_count = svc.pipes().len(),
+            queue_count = svc.queues().len(),
+            classifier_count = svc.classifiers().len(),
+            "QoS configuration reloaded"
+        );
+        drop(svc);
         Ok(())
     }
 

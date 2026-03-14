@@ -10,6 +10,7 @@ pub mod firewall;
 pub mod ids;
 pub mod loadbalancer;
 pub mod nat;
+pub mod qos;
 pub mod ratelimit;
 pub mod scrub;
 pub mod threatintel;

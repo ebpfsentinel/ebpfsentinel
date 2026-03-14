@@ -109,6 +109,9 @@ pub enum Command {
 
     /// Load balancer: status, services, backends
     Lb(DomainArgs<LbCommand>),
+
+    /// `QoS` / traffic shaping: status, pipes, queues, classifiers
+    Qos(DomainArgs<QosCommand>),
 }
 
 /// Generic domain args: connection + subcommand.
@@ -344,6 +347,53 @@ pub enum LbCommand {
     /// Delete a load balancer service by ID
     Delete {
         /// Service ID to delete
+        id: String,
+    },
+}
+
+// ── QoS ─────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum QosCommand {
+    /// Show `QoS` / traffic shaping status
+    Status,
+    /// List all `QoS` pipes
+    Pipes,
+    /// List all `QoS` queues
+    Queues,
+    /// List all `QoS` classifiers
+    Classifiers,
+    /// Add a new `QoS` pipe from inline JSON
+    AddPipe {
+        /// JSON pipe body
+        #[arg(long)]
+        json: String,
+    },
+    /// Delete a `QoS` pipe by ID
+    DeletePipe {
+        /// Pipe ID to delete
+        id: String,
+    },
+    /// Add a new `QoS` queue from inline JSON
+    AddQueue {
+        /// JSON queue body
+        #[arg(long)]
+        json: String,
+    },
+    /// Delete a `QoS` queue by ID
+    DeleteQueue {
+        /// Queue ID to delete
+        id: String,
+    },
+    /// Add a new `QoS` classifier from inline JSON
+    AddClassifier {
+        /// JSON classifier body
+        #[arg(long)]
+        json: String,
+    },
+    /// Delete a `QoS` classifier by ID
+    DeleteClassifier {
+        /// Classifier ID to delete
         id: String,
     },
 }
@@ -1073,6 +1123,150 @@ mod tests {
                 _ => panic!("expected Delete"),
             },
             _ => panic!("expected Lb command"),
+        }
+    }
+
+    #[test]
+    fn cli_qos_status() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "qos", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Qos(DomainArgs {
+                command: QosCommand::Status,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_qos_pipes() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "qos", "pipes"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Qos(DomainArgs {
+                command: QosCommand::Pipes,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_qos_queues() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "qos", "queues"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Qos(DomainArgs {
+                command: QosCommand::Queues,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_qos_classifiers() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "qos", "classifiers"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Qos(DomainArgs {
+                command: QosCommand::Classifiers,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_qos_add_pipe() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "qos",
+            "add-pipe",
+            "--json",
+            r#"{"id":"pipe-1","rate_bps":1000000}"#,
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Qos(args)) => match args.command {
+                QosCommand::AddPipe { json } => assert!(json.contains("pipe-1")),
+                _ => panic!("expected AddPipe"),
+            },
+            _ => panic!("expected Qos command"),
+        }
+    }
+
+    #[test]
+    fn cli_qos_delete_pipe() {
+        let cli =
+            Cli::try_parse_from(["ebpfsentinel-agent", "qos", "delete-pipe", "pipe-1"]).unwrap();
+        match cli.command {
+            Some(Command::Qos(args)) => match args.command {
+                QosCommand::DeletePipe { id } => assert_eq!(id, "pipe-1"),
+                _ => panic!("expected DeletePipe"),
+            },
+            _ => panic!("expected Qos command"),
+        }
+    }
+
+    #[test]
+    fn cli_qos_add_queue() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "qos",
+            "add-queue",
+            "--json",
+            r#"{"id":"q-1","pipe_id":"pipe-1","weight":50}"#,
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Qos(args)) => match args.command {
+                QosCommand::AddQueue { json } => assert!(json.contains("q-1")),
+                _ => panic!("expected AddQueue"),
+            },
+            _ => panic!("expected Qos command"),
+        }
+    }
+
+    #[test]
+    fn cli_qos_delete_queue() {
+        let cli =
+            Cli::try_parse_from(["ebpfsentinel-agent", "qos", "delete-queue", "q-1"]).unwrap();
+        match cli.command {
+            Some(Command::Qos(args)) => match args.command {
+                QosCommand::DeleteQueue { id } => assert_eq!(id, "q-1"),
+                _ => panic!("expected DeleteQueue"),
+            },
+            _ => panic!("expected Qos command"),
+        }
+    }
+
+    #[test]
+    fn cli_qos_add_classifier() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "qos",
+            "add-classifier",
+            "--json",
+            r#"{"id":"cls-1","queue_id":"q-1"}"#,
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Qos(args)) => match args.command {
+                QosCommand::AddClassifier { json } => assert!(json.contains("cls-1")),
+                _ => panic!("expected AddClassifier"),
+            },
+            _ => panic!("expected Qos command"),
+        }
+    }
+
+    #[test]
+    fn cli_qos_delete_classifier() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "qos", "delete-classifier", "cls-1"])
+            .unwrap();
+        match cli.command {
+            Some(Command::Qos(args)) => match args.command {
+                QosCommand::DeleteClassifier { id } => assert_eq!(id, "cls-1"),
+                _ => panic!("expected DeleteClassifier"),
+            },
+            _ => panic!("expected Qos command"),
         }
     }
 }

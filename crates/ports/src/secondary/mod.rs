@@ -19,6 +19,7 @@ pub mod loadbalancer_map_port;
 pub mod lpm_coordinator_port;
 pub mod metrics_port;
 pub mod nat_map_port;
+pub mod qos_map_port;
 pub mod ratelimit_lpm_port;
 pub mod ratelimit_map_port;
 pub mod rule_change_store;

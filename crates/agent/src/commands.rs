@@ -1100,6 +1100,182 @@ pub async fn cmd_lb_delete(client: &ApiClient, id: &str) -> Result<()> {
     Ok(())
 }
 
+// ── QoS ─────────────────────────────────────────────────────────────
+
+pub async fn cmd_qos_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let status = client.qos_status().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!("QoS / Traffic Shaping Status");
+    println!("  Enabled:          {}", yes_no(status.enabled));
+    println!("  Scheduler:        {}", status.scheduler);
+    println!("  Pipe count:       {}", status.pipe_count);
+    println!("  Queue count:      {}", status.queue_count);
+    println!("  Classifier count: {}", status.classifier_count);
+    Ok(())
+}
+
+pub async fn cmd_qos_pipes(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let pipes = client.list_qos_pipes().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&pipes)?);
+        return Ok(());
+    }
+
+    if pipes.is_empty() {
+        println!("No QoS pipes configured.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<16}  {:>14}  {:>14}",
+        "ID", "RATE (bps)", "BURST (bytes)"
+    );
+
+    for pipe in &pipes {
+        println!(
+            "{:<16}  {:>14}  {:>14}",
+            pipe.id, pipe.rate_bps, pipe.burst_bytes,
+        );
+    }
+
+    println!("\n{} pipe(s) total.", pipes.len());
+    Ok(())
+}
+
+pub async fn cmd_qos_queues(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let queues = client.list_qos_queues().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&queues)?);
+        return Ok(());
+    }
+
+    if queues.is_empty() {
+        println!("No QoS queues configured.");
+        return Ok(());
+    }
+
+    println!("{:<16}  {:<16}  {:>6}", "ID", "PIPE ID", "WEIGHT");
+
+    for queue in &queues {
+        println!(
+            "{:<16}  {:<16}  {:>6}",
+            queue.id, queue.pipe_id, queue.weight,
+        );
+    }
+
+    println!("\n{} queue(s) total.", queues.len());
+    Ok(())
+}
+
+pub async fn cmd_qos_classifiers(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let classifiers = client.list_qos_classifiers().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&classifiers)?);
+        return Ok(());
+    }
+
+    if classifiers.is_empty() {
+        println!("No QoS classifiers configured.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<16}  {:<16}  {:<8}  {:>4}",
+        "ID", "QUEUE ID", "DIR", "PRI"
+    );
+
+    for cls in &classifiers {
+        println!(
+            "{:<16}  {:<16}  {:<8}  {:>4}",
+            cls.id, cls.queue_id, cls.direction, cls.priority,
+        );
+    }
+
+    println!("\n{} classifier(s) total.", classifiers.len());
+    Ok(())
+}
+
+pub async fn cmd_qos_add_pipe(client: &ApiClient, json: &str, output: OutputFormat) -> Result<()> {
+    let body: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?;
+    let pipe = client.create_qos_pipe(&body).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&pipe)?);
+        return Ok(());
+    }
+
+    println!(
+        "QoS pipe created: {} (rate={}, burst={})",
+        pipe.id, pipe.rate_bps, pipe.burst_bytes
+    );
+    Ok(())
+}
+
+pub async fn cmd_qos_delete_pipe(client: &ApiClient, id: &str) -> Result<()> {
+    client.delete_qos_pipe(id).await?;
+    println!("QoS pipe deleted: {id}");
+    Ok(())
+}
+
+pub async fn cmd_qos_add_queue(client: &ApiClient, json: &str, output: OutputFormat) -> Result<()> {
+    let body: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?;
+    let queue = client.create_qos_queue(&body).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&queue)?);
+        return Ok(());
+    }
+
+    println!(
+        "QoS queue created: {} (pipe={}, weight={})",
+        queue.id, queue.pipe_id, queue.weight
+    );
+    Ok(())
+}
+
+pub async fn cmd_qos_delete_queue(client: &ApiClient, id: &str) -> Result<()> {
+    client.delete_qos_queue(id).await?;
+    println!("QoS queue deleted: {id}");
+    Ok(())
+}
+
+pub async fn cmd_qos_add_classifier(
+    client: &ApiClient,
+    json: &str,
+    output: OutputFormat,
+) -> Result<()> {
+    let body: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?;
+    let cls = client.create_qos_classifier(&body).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&cls)?);
+        return Ok(());
+    }
+
+    println!(
+        "QoS classifier created: {} (queue={}, direction={}, priority={})",
+        cls.id, cls.queue_id, cls.direction, cls.priority
+    );
+    Ok(())
+}
+
+pub async fn cmd_qos_delete_classifier(client: &ApiClient, id: &str) -> Result<()> {
+    client.delete_qos_classifier(id).await?;
+    println!("QoS classifier deleted: {id}");
+    Ok(())
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn truncate(s: &str, max: usize) -> String {

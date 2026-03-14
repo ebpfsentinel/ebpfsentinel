@@ -14,7 +14,7 @@ use anyhow::Result;
 use api_client::ApiClient;
 use cli::{
     AlertsCommand, AuditCommand, Command, DdosCommand, DnsCommand, DomainsCommand, FirewallCommand,
-    IpsCommand, L7Command, LbCommand, RatelimitCommand, ThreatintelCommand,
+    IpsCommand, L7Command, LbCommand, QosCommand, RatelimitCommand, ThreatintelCommand,
 };
 
 #[tokio::main]
@@ -225,6 +225,32 @@ async fn main() -> Result<()> {
                 LbCommand::Service { id } => commands::cmd_lb_service(&client, &id, output).await,
                 LbCommand::Add { json } => commands::cmd_lb_add(&client, &json, output).await,
                 LbCommand::Delete { id } => commands::cmd_lb_delete(&client, &id).await,
+            }
+        }
+
+        Some(Command::Qos(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                QosCommand::Status => commands::cmd_qos_status(&client, output).await,
+                QosCommand::Pipes => commands::cmd_qos_pipes(&client, output).await,
+                QosCommand::Queues => commands::cmd_qos_queues(&client, output).await,
+                QosCommand::Classifiers => commands::cmd_qos_classifiers(&client, output).await,
+                QosCommand::AddPipe { json } => {
+                    commands::cmd_qos_add_pipe(&client, &json, output).await
+                }
+                QosCommand::DeletePipe { id } => commands::cmd_qos_delete_pipe(&client, &id).await,
+                QosCommand::AddQueue { json } => {
+                    commands::cmd_qos_add_queue(&client, &json, output).await
+                }
+                QosCommand::DeleteQueue { id } => {
+                    commands::cmd_qos_delete_queue(&client, &id).await
+                }
+                QosCommand::AddClassifier { json } => {
+                    commands::cmd_qos_add_classifier(&client, &json, output).await
+                }
+                QosCommand::DeleteClassifier { id } => {
+                    commands::cmd_qos_delete_classifier(&client, &id).await
+                }
             }
         }
 

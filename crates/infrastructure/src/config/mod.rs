@@ -21,6 +21,7 @@ mod ips;
 mod l7;
 mod loadbalancer;
 mod nat;
+mod qos;
 mod ratelimit;
 mod routing;
 mod threatintel;
@@ -55,6 +56,7 @@ pub use ips::{IpsConfig, IpsRuleConfig};
 pub use l7::{L7Config, L7RuleConfig};
 pub use loadbalancer::{LbBackendConfig, LbServiceConfig as LbServiceCfg, LoadBalancerConfig};
 pub use nat::{NatConfig, NatRuleConfig};
+pub use qos::{QosClassifierConfig, QosPipeConfig, QosQueueConfig, QosSectionConfig};
 pub use ratelimit::{RateLimitRuleConfig, RateLimitSectionConfig};
 pub use routing::{GatewayConfig, HealthCheckConfig, RoutingConfig};
 pub use threatintel::{ThreatIntelConfig, ThreatIntelFeedConfig};
@@ -148,6 +150,9 @@ pub struct AgentConfig {
 
     #[serde(default)]
     pub loadbalancer: LoadBalancerConfig,
+
+    #[serde(default)]
+    pub qos: QosSectionConfig,
 
     #[serde(default)]
     pub geoip: Option<GeoIpConfig>,
@@ -494,6 +499,11 @@ impl AgentConfig {
             svc_cfg.validate(idx)?;
         }
 
+        // Validate QoS config
+        if self.qos.enabled {
+            self.qos.validate()?;
+        }
+
         // Validate GeoIP config
         if let Some(ref geoip_cfg) = self.geoip
             && geoip_cfg.enabled
@@ -728,6 +738,21 @@ impl AgentConfig {
             .iter()
             .map(loadbalancer::LbServiceConfig::to_domain_service)
             .collect()
+    }
+
+    /// Convert all `QoS` pipe configs to domain `QosPipe` entities.
+    pub fn qos_pipes(&self) -> Result<Vec<domain::qos::entity::QosPipe>, ConfigError> {
+        self.qos.to_domain_pipes()
+    }
+
+    /// Convert all `QoS` queue configs to domain `QosQueue` entities.
+    pub fn qos_queues(&self) -> Result<Vec<domain::qos::entity::QosQueue>, ConfigError> {
+        self.qos.to_domain_queues()
+    }
+
+    /// Convert all `QoS` classifier configs to domain `QosClassifier` entities.
+    pub fn qos_classifiers(&self) -> Result<Vec<domain::qos::entity::QosClassifier>, ConfigError> {
+        self.qos.to_domain_classifiers()
     }
 }
 

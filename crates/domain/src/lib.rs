@@ -15,6 +15,7 @@ pub mod ips;
 pub mod l7;
 pub mod loadbalancer;
 pub mod nat;
+pub mod qos;
 pub mod ratelimit;
 pub mod routing;
 pub mod threatintel;
