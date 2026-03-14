@@ -63,7 +63,6 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
 // ── Constants ───────────────────────────────────────────────────────
 
 /// Action code for "shaped" (delayed/rate-limited but passed).
-#[allow(dead_code)]
 const ACTION_SHAPED: u8 = 1;
 /// Action code for "dropped" by `QoS` policy.
 const ACTION_DROPPED: u8 = 2;
@@ -487,6 +486,10 @@ fn apply_qos(
     // For now, delay is accounted in metrics but not enforced in the datapath.
     if pipe_cfg.delay_ns > 0 {
         increment_qos_metric(QOS_METRIC_DELAYED);
+        emit_event(
+            src_addr, dst_addr, src_port, dst_port, protocol, ACTION_SHAPED, pipe_id, flags,
+            vlan_id,
+        );
     }
 
     // Mark as shaped if any shaping was applied
