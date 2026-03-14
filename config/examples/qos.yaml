@@ -1,0 +1,235 @@
+# eBPFsentinel — Traffic Shaping / QoS Configuration Example
+# =========================================================
+#
+# Dummynet-inspired QoS with pipes, queues, and classifiers.
+# Enforces bandwidth limits, delay, and packet loss via a TC egress
+# classifier with per-flow token bucket enforcement.
+#
+# Architecture:
+#   Classifiers → Queues → Pipes
+#
+#   - Pipes define bandwidth, delay, loss, and burst parameters
+#   - Queues attach to a pipe with a scheduling weight (WF2Q+)
+#   - Classifiers match traffic (5-tuple + DSCP) and assign it to a queue
+#
+# Bandwidth enforcement uses EDT (Earliest Departure Time) timestamps
+# when available, falling back to kernel-side token bucket drops.
+# Works best with the `fq` or `fq_codel` kernel qdisc on the interface.
+#
+# Fields (QosPipe):
+#   id         — Unique pipe identifier (required)
+#   bandwidth  — Max bandwidth ("100mbps", "1gbps", "500kbps", "1000bps")
+#   delay      — Added latency in milliseconds (default: 0)
+#   loss       — Packet loss percentage, 0.0–100.0 (default: 0.0)
+#   burst      — Token bucket burst size ("64kb", "1mb", "4096b")
+#   priority   — Pipe priority, lower = higher (default: 0)
+#   direction  — "egress", "ingress", or "both" (default: "egress")
+#   enabled    — Administrative enable flag (default: true)
+#
+# Fields (QosQueue):
+#   id         — Unique queue identifier (required)
+#   pipe_id    — Pipe this queue is attached to (required)
+#   weight     — WF2Q+ scheduling weight, 1–1000 (default: 100)
+#   enabled    — Administrative enable flag (default: true)
+#
+# Fields (QosClassifier):
+#   id         — Unique classifier identifier (required)
+#   queue_id   — Target queue (required)
+#   priority   — Match priority, lower = checked first (default: 0)
+#   match      — Traffic match criteria (all optional, omit = wildcard):
+#     src_ip     — Source CIDR ("10.0.0.0/8")
+#     dst_ip     — Destination CIDR ("192.168.1.0/24")
+#     src_port   — Source port
+#     dst_port   — Destination port
+#     protocol   — "tcp", "udp", "icmp", or protocol number
+#     dscp       — DSCP value 0–63 (e.g. 46 = EF, 34 = AF41)
+#     vlan_id    — VLAN ID
+#
+# Scheduler:
+#   "fifo"      — Simple FIFO per pipe (default)
+#   "wf2q"      — Weighted Fair Queuing between queues sharing a pipe
+#   "fq_codel"  — Fair Queuing + Controlled Delay (kernel qdisc, best for bufferbloat)
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/qos.yaml
+#
+# Full reference: config/ebpfsentinel.example.yaml
+
+agent:
+  interfaces: [eth0]
+
+# ── Traffic Shaping / QoS ────────────────────────────────────────────
+
+qos:
+  enabled: true
+  scheduler: fq_codel
+
+  # ── Pipes ──────────────────────────────────────────────────────────
+  # Each pipe is an independent shaper with its own bandwidth/delay/loss.
+
+  pipes:
+    # WAN uplink — shape outbound to match ISP speed (100 Mbps)
+    - id: pipe-wan
+      bandwidth: "100mbps"
+      delay: 0
+      loss: 0.0
+      burst: "128kb"
+      priority: 1
+      direction: egress
+      enabled: true
+
+    # VoIP priority pipe — reserved 10 Mbps with strict priority
+    - id: pipe-voip
+      bandwidth: "10mbps"
+      delay: 0
+      loss: 0.0
+      burst: "16kb"
+      priority: 0              # Highest priority
+      direction: both
+      enabled: true
+
+    # Bulk/background pipe — limited to 20 Mbps
+    - id: pipe-bulk
+      bandwidth: "20mbps"
+      delay: 0
+      loss: 0.0
+      burst: "256kb"
+      priority: 5
+      direction: egress
+      enabled: true
+
+    # WAN emulation — simulate a degraded link (for testing)
+    - id: pipe-wan-emulation
+      bandwidth: "10mbps"
+      delay: 50                # 50ms added latency
+      loss: 1.0                # 1% random packet loss
+      burst: "32kb"
+      priority: 10
+      direction: egress
+      enabled: false           # Disabled — for testing only
+
+  # ── Queues ─────────────────────────────────────────────────────────
+  # Queues group traffic sharing a pipe. Weight controls WF2Q+ fairness.
+
+  queues:
+    # Default queue on the WAN pipe — catch-all traffic
+    - id: queue-default
+      pipe_id: pipe-wan
+      weight: 100
+      enabled: true
+
+    # Interactive traffic (SSH, web browsing) — higher weight
+    - id: queue-interactive
+      pipe_id: pipe-wan
+      weight: 300
+      enabled: true
+
+    # VoIP queue — attached to the priority pipe
+    - id: queue-voip
+      pipe_id: pipe-voip
+      weight: 500
+      enabled: true
+
+    # Video conferencing — shares the VoIP pipe with lower weight
+    - id: queue-video
+      pipe_id: pipe-voip
+      weight: 200
+      enabled: true
+
+    # Bulk downloads, backups, updates
+    - id: queue-bulk
+      pipe_id: pipe-bulk
+      weight: 100
+      enabled: true
+
+  # ── Classifiers ────────────────────────────────────────────────────
+  # Match traffic and assign to queues. Lower priority = matched first.
+  # Unmatched traffic falls through to the default queue (no classifier needed).
+
+  classifiers:
+    # VoIP — SIP signaling (UDP 5060) and RTP (DSCP EF = 46)
+    - id: cls-sip
+      queue_id: queue-voip
+      priority: 0
+      match:
+        protocol: udp
+        dst_port: 5060
+
+    - id: cls-rtp
+      queue_id: queue-voip
+      priority: 1
+      match:
+        dscp: 46               # EF (Expedited Forwarding)
+
+    # Video conferencing — common ports
+    - id: cls-zoom
+      queue_id: queue-video
+      priority: 5
+      match:
+        protocol: udp
+        dst_port: 8801
+
+    - id: cls-teams
+      queue_id: queue-video
+      priority: 5
+      match:
+        protocol: udp
+        dst_port: 3478
+
+    # Interactive — SSH
+    - id: cls-ssh
+      queue_id: queue-interactive
+      priority: 10
+      match:
+        protocol: tcp
+        dst_port: 22
+
+    # Interactive — HTTPS (web browsing)
+    - id: cls-https
+      queue_id: queue-interactive
+      priority: 10
+      match:
+        protocol: tcp
+        dst_port: 443
+
+    # Interactive — HTTP
+    - id: cls-http
+      queue_id: queue-interactive
+      priority: 10
+      match:
+        protocol: tcp
+        dst_port: 80
+
+    # Bulk — large file transfers, backups (DSCP CS1 = 8)
+    - id: cls-bulk-dscp
+      queue_id: queue-bulk
+      priority: 50
+      match:
+        dscp: 8                # CS1 (Scavenger)
+
+    # Bulk — rsync traffic
+    - id: cls-rsync
+      queue_id: queue-bulk
+      priority: 50
+      match:
+        protocol: tcp
+        dst_port: 873
+
+    # Bulk — BitTorrent range (common ephemeral ports)
+    - id: cls-torrent
+      queue_id: queue-bulk
+      priority: 90
+      match:
+        protocol: tcp
+        dst_port: 6881
+
+    # Default catch-all — everything else goes to default queue
+    - id: cls-default
+      queue_id: queue-default
+      priority: 100
+      match: {}                # Empty match = wildcard (all traffic)
+
+# ── Firewall (companion rules) ───────────────────────────────────────
+
+firewall:
+  enabled: true

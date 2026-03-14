@@ -74,3 +74,6 @@ geoip:
 
 zones:
   enabled: false
+
+qos:
+  enabled: false
