@@ -13,7 +13,7 @@ use adapters::ebpf::{
     ConfigFlagsManager, ConnTrackMapManager, DlpEventReader, DnsEventReader, EbpfLoader,
     EbpfMapWriteAdapter, EventReader, FirewallMapManager, IdsMapManager, IpSetMapManager,
     L7PortsManager, LpmCoordinator, MetricsReader, NatMapManager, RateLimitLpmManager,
-    RateLimitMapManager, ScrubConfigManager, ThreatIntelMapManager,
+    RateLimitMapManager, ScrubConfigManager, SyncookieSecretManager, ThreatIntelMapManager,
 };
 use adapters::grpc::server::{GrpcTlsConfig, run_grpc_server};
 use adapters::http::tls::load_rustls_config;
@@ -1753,34 +1753,31 @@ fn try_load_xdp_ratelimit(
     };
 
     // Set SYN cookie secret (random 32-byte key for cookie generation/validation)
-    if let Some(secret_map) = loader.ebpf_mut().take_map("SYNCOOKIE_SECRET") {
-        match aya::maps::Array::<_, ebpf_common::ddos::SyncookieSecret>::try_from(secret_map) {
-            Ok(mut array) => {
-                let mut key = [0u32; 8];
-                // Use std::time nonce + pointer ASLR as entropy source (no external crate needed).
-                // This is sufficient for SYN cookie HMAC keying — not a cryptographic KDF.
-                let seed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos();
-                // Simple xorshift-based expansion from 128-bit seed
-                let mut state = seed;
-                for slot in &mut key {
-                    state ^= state.wrapping_shl(13);
-                    state ^= state.wrapping_shr(7);
-                    state ^= state.wrapping_shl(17);
+    match SyncookieSecretManager::new(loader.ebpf_mut()) {
+        Ok(mut mgr) => {
+            let mut key = [0u32; 8];
+            // Use std::time nonce + xorshift as entropy source (sufficient for SYN cookie keying)
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let mut state = seed;
+            for slot in &mut key {
+                state ^= state.wrapping_shl(13);
+                state ^= state.wrapping_shr(7);
+                state ^= state.wrapping_shl(17);
+                #[allow(clippy::cast_possible_truncation)]
+                {
                     *slot = state as u32;
                 }
-                let secret = ebpf_common::ddos::SyncookieSecret { key };
-                if let Err(e) = array.set(0, secret, 0) {
-                    warn!("SYNCOOKIE_SECRET write failed (non-fatal): {e}");
-                } else {
-                    info!("SYN cookie secret initialized");
-                }
             }
-            Err(e) => {
-                warn!("SYNCOOKIE_SECRET map conversion failed (non-fatal): {e}");
+            let secret = ebpf_common::ddos::SyncookieSecret { key };
+            if let Err(e) = mgr.set_secret(&secret) {
+                warn!("SYN cookie secret write failed (non-fatal): {e}");
             }
+        }
+        Err(e) => {
+            warn!("SYNCOOKIE_SECRET map not available (non-fatal): {e}");
         }
     }
 
