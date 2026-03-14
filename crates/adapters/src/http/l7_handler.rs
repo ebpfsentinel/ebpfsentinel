@@ -85,9 +85,10 @@ fn parse_action(s: &str) -> Result<FirewallAction, ApiError> {
         "allow" | "pass" => Ok(FirewallAction::Allow),
         "deny" | "drop" | "block" => Ok(FirewallAction::Deny),
         "log" => Ok(FirewallAction::Log),
+        "reject" | "reset" => Ok(FirewallAction::Reject),
         _ => Err(ApiError::BadRequest {
             code: "VALIDATION_ERROR",
-            message: format!("invalid action '{s}': expected allow|deny|log"),
+            message: format!("invalid action '{s}': expected allow|deny|log|reject"),
         }),
     }
 }
@@ -238,6 +239,7 @@ fn format_action(action: FirewallAction) -> &'static str {
         FirewallAction::Allow => "allow",
         FirewallAction::Deny => "deny",
         FirewallAction::Log => "log",
+        FirewallAction::Reject => "reject",
     }
 }
 
@@ -361,6 +363,8 @@ mod tests {
         assert!(matches!(parse_action("allow"), Ok(FirewallAction::Allow)));
         assert!(matches!(parse_action("deny"), Ok(FirewallAction::Deny)));
         assert!(matches!(parse_action("log"), Ok(FirewallAction::Log)));
+        assert!(matches!(parse_action("reject"), Ok(FirewallAction::Reject)));
+        assert!(matches!(parse_action("reset"), Ok(FirewallAction::Reject)));
         assert!(matches!(parse_action("BLOCK"), Ok(FirewallAction::Deny)));
     }
 

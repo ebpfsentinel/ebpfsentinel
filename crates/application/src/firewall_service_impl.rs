@@ -259,15 +259,16 @@ impl FirewallAppService {
         let mut v6_entries = Vec::new();
 
         for rule in rules {
-            // In alert mode: override deny -> log (observe without blocking)
-            let effective_rule =
-                if self.mode == DomainMode::Alert && rule.action == FirewallAction::Deny {
-                    let mut alert_rule = rule.clone();
-                    alert_rule.action = FirewallAction::Log;
-                    alert_rule
-                } else {
-                    rule.clone()
-                };
+            // In alert mode: override deny/reject -> log (observe without blocking)
+            let effective_rule = if self.mode == DomainMode::Alert
+                && (rule.action == FirewallAction::Deny || rule.action == FirewallAction::Reject)
+            {
+                let mut alert_rule = rule.clone();
+                alert_rule.action = FirewallAction::Log;
+                alert_rule
+            } else {
+                rule.clone()
+            };
 
             if effective_rule.is_v6() {
                 v6_entries.push(effective_rule.to_ebpf_entry_v6());

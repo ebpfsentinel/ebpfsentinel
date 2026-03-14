@@ -2,11 +2,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::entity::{Protocol, RuleId};
 use ebpf_common::firewall::{
-    ACTION_DROP, ACTION_LOG, ACTION_PASS, CT_MATCH_ESTABLISHED, CT_MATCH_INVALID, CT_MATCH_NEW,
-    CT_MATCH_RELATED, FirewallRuleEntry, FirewallRuleEntryV6, ICMP_WILDCARD, MATCH_CT_STATE,
-    MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MATCH2_DSCP,
-    MATCH2_DST_MAC, MATCH2_ICMP_CODE, MATCH2_ICMP_TYPE, MATCH2_NEGATE_DST, MATCH2_NEGATE_SRC,
-    MATCH2_SRC_MAC, MATCH2_TCP_FLAGS, ROUTE_ACTION_DUP_TO, ROUTE_ACTION_NONE,
+    ACTION_DROP, ACTION_LOG, ACTION_PASS, ACTION_REJECT, CT_MATCH_ESTABLISHED, CT_MATCH_INVALID,
+    CT_MATCH_NEW, CT_MATCH_RELATED, FirewallRuleEntry, FirewallRuleEntryV6, ICMP_WILDCARD,
+    MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT,
+    MATCH2_DSCP, MATCH2_DST_MAC, MATCH2_ICMP_CODE, MATCH2_ICMP_TYPE, MATCH2_NEGATE_DST,
+    MATCH2_NEGATE_SRC, MATCH2_SRC_MAC, MATCH2_TCP_FLAGS, ROUTE_ACTION_DUP_TO, ROUTE_ACTION_NONE,
     ROUTE_ACTION_REPLY_TO, ROUTE_ACTION_ROUTE_TO,
 };
 
@@ -19,6 +19,8 @@ pub enum FirewallAction {
     Allow,
     Deny,
     Log,
+    /// Reject: drop the packet and send TCP RST (for TCP) or ICMP Unreachable (for UDP).
+    Reject,
 }
 
 // ── Routing actions (Epic 29) ──────────────────────────────────────
@@ -786,6 +788,7 @@ fn action_to_u8(action: FirewallAction) -> u8 {
         FirewallAction::Allow => ACTION_PASS,
         FirewallAction::Deny => ACTION_DROP,
         FirewallAction::Log => ACTION_LOG,
+        FirewallAction::Reject => ACTION_REJECT,
     }
 }
 
@@ -1341,6 +1344,9 @@ mod tests {
 
         rule.action = FirewallAction::Log;
         assert_eq!(rule.to_ebpf_entry().action, ACTION_LOG);
+
+        rule.action = FirewallAction::Reject;
+        assert_eq!(rule.to_ebpf_entry().action, ACTION_REJECT);
     }
 
     // ── to_ebpf_entry_v6() tests ────────────────────────────────────

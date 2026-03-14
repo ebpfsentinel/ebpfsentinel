@@ -63,6 +63,7 @@ impl L7AppService {
                 FirewallAction::Allow => "allow",
                 FirewallAction::Deny => "deny",
                 FirewallAction::Log => "log",
+                FirewallAction::Reject => "reject",
             };
             self.metrics.record_packet("l7", action_label);
         }

@@ -476,9 +476,13 @@ impl EventDispatcher {
                 FirewallAction::Allow => "allow",
                 FirewallAction::Deny => "deny",
                 FirewallAction::Log => "log",
+                FirewallAction::Reject => "reject",
             };
 
-            if action == FirewallAction::Deny || action == FirewallAction::Log {
+            if action == FirewallAction::Deny
+                || action == FirewallAction::Log
+                || action == FirewallAction::Reject
+            {
                 tracing::info!(
                     src_ip = %header.src_ip(),
                     dst_ip = %header.dst_ip(),
@@ -499,7 +503,7 @@ impl EventDispatcher {
             }
 
             let audit_action = match action {
-                FirewallAction::Deny => AuditAction::Drop,
+                FirewallAction::Deny | FirewallAction::Reject => AuditAction::Drop,
                 _ => AuditAction::Pass,
             };
             let detail = format!("L7 {protocol_label} {action_label}");

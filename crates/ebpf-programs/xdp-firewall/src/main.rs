@@ -6,6 +6,7 @@ use aya_ebpf::{
     cty::c_void,
     helpers::{
         bpf_get_smp_processor_id, bpf_ktime_get_boot_ns, bpf_loop, bpf_xdp_adjust_meta,
+        bpf_xdp_adjust_tail,
     },
     macros::{map, xdp},
     maps::{
@@ -20,7 +21,7 @@ use ebpf_helpers::net::{
     PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4,
     u16_from_be_bytes, u32_from_be_bytes,
 };
-use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
 use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
     conntrack::{
@@ -33,7 +34,7 @@ use ebpf_common::{
         EVENT_TYPE_FIREWALL, FLAG_IPV6, FLAG_VLAN, META_FLAG_PRESENT, PacketEvent, XdpMetadata,
     },
     firewall::{
-        ACTION_DROP, ACTION_LOG, ACTION_PASS, CT_MATCH_ESTABLISHED, CT_MATCH_INVALID,
+        ACTION_DROP, ACTION_LOG, ACTION_PASS, ACTION_REJECT, CT_MATCH_ESTABLISHED, CT_MATCH_INVALID,
         CT_MATCH_NEW, CT_MATCH_RELATED, DEFAULT_POLICY_DROP, FirewallRuleEntry,
         FirewallRuleEntryV6, ICMP_WILDCARD, IpSetKeyV4, LpmValue, MATCH2_DSCP, MATCH2_DST_MAC, MATCH2_ICMP_CODE,
         MATCH2_ICMP_TYPE, MATCH2_NEGATE_DST, MATCH2_NEGATE_SRC, MATCH2_SRC_MAC,
@@ -76,9 +77,9 @@ static FIREWALL_RULE_COUNT_V6: Array<u32> = Array::with_max_entries(1, 0);
 #[map]
 static FIREWALL_DEFAULT_POLICY: Array<u8> = Array::with_max_entries(1, 0);
 
-/// Per-CPU packet counters. Index: 0=passed, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen.
+/// Per-CPU packet counters. Index: 0=passed, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen, 5=rejected.
 #[map]
-static FIREWALL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
+static FIREWALL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(6, 0);
 
 
 /// Per-CPU scratch buffer for packet context shared across action/event helpers.
@@ -167,6 +168,7 @@ const METRIC_DROPPED: u32 = 1;
 const METRIC_ERRORS: u32 = 2;
 const METRIC_EVENTS_DROPPED: u32 = 3;
 const METRIC_TOTAL_SEEN: u32 = 4;
+const METRIC_REJECTED: u32 = 5;
 
 /// Returns `true` if the EVENTS RingBuf has backpressure (>75% full).
 #[inline(always)]
@@ -284,6 +286,10 @@ struct PacketCtx {
     protocol: u8,
     flags: u8,
     vlan_id: u16,
+    /// Byte offset of L3 header from start of packet (for reject).
+    l3_offset: u16,
+    /// Byte offset of L4 header from start of packet (for reject).
+    l4_offset: u16,
 }
 
 // ── bpf_loop callbacks ──────────────────────────────────────────────
@@ -518,6 +524,8 @@ fn process_firewall_v4(
         (*pkt_ctx).protocol = protocol as u8;
         (*pkt_ctx).flags = flags;
         (*pkt_ctx).vlan_id = vlan_id;
+        (*pkt_ctx).l3_offset = l3_offset as u16;
+        (*pkt_ctx).l4_offset = l4_offset as u16;
     }
 
     // Phase 0: Overload blacklist fast-path check.
@@ -965,6 +973,8 @@ fn process_firewall_v6(
         (*pkt_ctx).flags = flags;
         (*pkt_ctx).vlan_id = vlan_id;
         (*pkt_ctx).protocol = next_hdr;
+        (*pkt_ctx).l3_offset = l3_offset as u16;
+        (*pkt_ctx).l4_offset = l4_offset as u16;
     }
 
     // Parse L4 ports + TCP flags + ICMPv6 type/code
@@ -1217,6 +1227,24 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
             increment_metric(METRIC_DROPPED);
             Ok(xdp_action::XDP_DROP)
         }
+        ACTION_REJECT => {
+            emit_event(ACTION_REJECT);
+            increment_metric(METRIC_REJECTED);
+            // Read offsets/protocol from per-CPU context.
+            let pkt = match PKT_CTX.get_ptr(0) {
+                Some(p) => p,
+                None => return Ok(xdp_action::XDP_DROP),
+            };
+            let protocol = unsafe { (*pkt).protocol };
+            let is_ipv6 = unsafe { ((*pkt).flags & FLAG_IPV6) != 0 };
+            let l3_off = unsafe { (*pkt).l3_offset as usize };
+            let l4_off = unsafe { (*pkt).l4_offset as usize };
+            // Try to send a reject response; fall back to DROP on failure.
+            match send_reject(ctx, protocol, is_ipv6, l3_off, l4_off) {
+                Ok(xdp_act) => Ok(xdp_act),
+                Err(()) => Ok(xdp_action::XDP_DROP),
+            }
+        }
         ACTION_LOG => {
             emit_event(ACTION_LOG);
             increment_metric(METRIC_PASSED);
@@ -1228,6 +1256,618 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
             write_xdp_metadata(ctx, ACTION_PASS, 0);
             Ok(xdp_action::XDP_PASS)
         }
+    }
+}
+
+// ── Reject helpers ──────────────────────────────────────────────────
+//
+// These functions construct and send TCP RST or ICMP/ICMPv6 Unreachable
+// packets in response to ACTION_REJECT rules. Each function is
+// #[inline(never)] to get its own 512-byte BPF stack frame.
+
+/// Dispatch reject response based on protocol and address family.
+#[inline(always)]
+fn send_reject(
+    ctx: &XdpContext,
+    protocol: u8,
+    is_ipv6: bool,
+    l3_off: usize,
+    l4_off: usize,
+) -> Result<u32, ()> {
+    if protocol == PROTO_TCP {
+        if is_ipv6 {
+            send_tcp_rst_v6(ctx, l3_off, l4_off)
+        } else {
+            send_tcp_rst_v4(ctx, l3_off, l4_off)
+        }
+    } else if is_ipv6 {
+        send_icmpv6_unreachable(ctx, l3_off, l4_off)
+    } else {
+        send_icmp_unreachable_v4(ctx, l3_off, l4_off)
+    }
+}
+
+/// Construct and send a TCP RST for an IPv4 packet.
+///
+/// Reads incoming TCP seq/ack/flags/ports, truncates the packet to
+/// Eth+IP+TCP (no payload/options), swaps addresses, and returns `XDP_TX`.
+#[inline(never)]
+fn send_tcp_rst_v4(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Result<u32, ()> {
+    // ── Step 1: Read incoming TCP fields BEFORE modifying anything ──
+    let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off)? };
+    let in_src_port = unsafe { (*tcphdr).source };
+    let in_dst_port = unsafe { (*tcphdr).dest };
+    let in_seq = unsafe { (*tcphdr).seq };
+    let in_ack_seq = unsafe { (*tcphdr).ack_seq };
+    // Raw TCP flags byte at offset 13.
+    let in_flags: u8 = unsafe { *(tcphdr as *const u8).add(13) };
+
+    let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_off)? };
+    let in_src_addr = unsafe { (*ipv4hdr).src_addr };
+    let in_dst_addr = unsafe { (*ipv4hdr).dst_addr };
+
+    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
+    let in_src_mac = unsafe { (*ethhdr).src_addr };
+    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
+
+    // ── Step 2: Truncate packet to Eth + IP(20) + TCP(20) ──
+    // Target size: l3_off + 20 (IP, no options) + 20 (TCP, no options).
+    let target_len = l3_off + 20 + 20;
+    let current_len = ctx.data_end() - ctx.data();
+    let delta = target_len as i32 - current_len as i32;
+    if delta != 0 {
+        let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
+        if ret != 0 {
+            return Err(());
+        }
+    }
+
+    // ── Step 3: Re-read ALL pointers after truncation ──
+    let eth: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
+    let ip: *mut Ipv4Hdr = unsafe { ptr_at_mut(ctx, l3_off)? };
+    let tcp: *mut TcpHdr = unsafe { ptr_at_mut(ctx, l3_off + 20)? };
+
+    // ── Step 4: Swap Ethernet MACs ──
+    unsafe {
+        (*eth).dst_addr = in_src_mac;
+        (*eth).src_addr = in_dst_mac;
+    }
+
+    // ── Step 5: Build IPv4 header ──
+    unsafe {
+        (*ip).set_vihl(4, 20); // version=4, IHL=20 bytes (5 words)
+        (*ip).tos = 0;
+        (*ip).set_tot_len(40); // 20 IP + 20 TCP
+        (*ip).set_id(0);
+        (*ip).set_frags(0x02, 0); // DF bit set, no fragment offset
+        (*ip).ttl = 64;
+        (*ip).proto = IpProto::Tcp;
+        // Swap src/dst
+        (*ip).src_addr = in_dst_addr;
+        (*ip).dst_addr = in_src_addr;
+        // Zero checksum before computing
+        (*ip).check = [0, 0];
+        let csum = compute_ipv4_csum(ip as *const u8, 20);
+        (*ip).set_checksum(csum);
+    }
+
+    // ── Step 6: Build TCP RST header ──
+    let tcp_flags_ack = in_flags & 0x10; // ACK bit
+    let tcp_flags_syn = in_flags & 0x02; // SYN bit
+    unsafe {
+        // Swap ports
+        (*tcp).source = in_dst_port;
+        (*tcp).dest = in_src_port;
+
+        if tcp_flags_ack != 0 {
+            // Incoming had ACK: RST only, seq = incoming ack_seq
+            (*tcp).seq = in_ack_seq;
+            (*tcp).ack_seq = [0, 0, 0, 0];
+            // flags byte at offset 13: RST=0x04
+            *(tcp as *mut u8).add(13) = 0x04;
+        } else {
+            // Incoming was SYN (no ACK): RST+ACK, seq=0, ack = seq+1
+            (*tcp).seq = [0, 0, 0, 0];
+            // Compute ack = in_seq + 1 (for SYN, payload_len = 0, SYN counts as 1)
+            let seq_val = u32::from_be_bytes(in_seq).wrapping_add(
+                if tcp_flags_syn != 0 { 1 } else { 0 },
+            );
+            (*tcp).ack_seq = seq_val.to_be_bytes();
+            // flags byte at offset 13: RST+ACK = 0x14
+            *(tcp as *mut u8).add(13) = 0x14;
+        }
+
+        // data offset = 5 (20 bytes), reserved bits = 0
+        // Byte 12 of TCP header: high nibble = data offset
+        *(tcp as *mut u8).add(12) = 0x50;
+        (*tcp).window = [0, 0];
+        (*tcp).urg_ptr = [0, 0];
+        (*tcp).check = [0, 0];
+
+        // Compute TCP checksum with pseudo-header.
+        let csum = compute_tcp_csum_v4(
+            &in_dst_addr, // new src (original dst)
+            &in_src_addr, // new dst (original src)
+            tcp as *const u8,
+            20,
+        );
+        let csum_be = csum.to_be_bytes();
+        (*tcp).check = csum_be;
+    }
+
+    Ok(xdp_action::XDP_TX)
+}
+
+/// Construct and send a TCP RST for an IPv6 packet.
+#[inline(never)]
+fn send_tcp_rst_v6(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Result<u32, ()> {
+    // ── Step 1: Read incoming TCP fields ──
+    let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off)? };
+    let in_src_port = unsafe { (*tcphdr).source };
+    let in_dst_port = unsafe { (*tcphdr).dest };
+    let in_seq = unsafe { (*tcphdr).seq };
+    let in_ack_seq = unsafe { (*tcphdr).ack_seq };
+    let in_flags: u8 = unsafe { *(tcphdr as *const u8).add(13) };
+
+    // Read IPv6 addresses using the inline Ipv6Hdr from ebpf_helpers::net.
+    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_off)? };
+    let in_src_addr: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
+    let in_dst_addr: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
+
+    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
+    let in_src_mac = unsafe { (*ethhdr).src_addr };
+    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
+
+    // ── Step 2: Truncate to Eth + IPv6(40) + TCP(20) ──
+    let target_len = l3_off + IPV6_HDR_LEN + 20;
+    let current_len = ctx.data_end() - ctx.data();
+    let delta = target_len as i32 - current_len as i32;
+    if delta != 0 {
+        let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
+        if ret != 0 {
+            return Err(());
+        }
+    }
+
+    // ── Step 3: Re-read pointers ──
+    let eth: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
+    let ip6: *mut Ipv6Hdr = unsafe { ptr_at_mut(ctx, l3_off)? };
+    let tcp: *mut TcpHdr = unsafe { ptr_at_mut(ctx, l3_off + IPV6_HDR_LEN)? };
+
+    // ── Step 4: Swap Ethernet MACs ──
+    unsafe {
+        (*eth).dst_addr = in_src_mac;
+        (*eth).src_addr = in_dst_mac;
+    }
+
+    // ── Step 5: Build IPv6 header ──
+    unsafe {
+        // Version=6, traffic class=0, flow label=0
+        (*ip6)._vtcfl = (6u32 << 28).to_be();
+        // Payload length = 20 (TCP header, no options)
+        (*ip6)._payload_len = 20u16.to_be();
+        (*ip6).next_hdr = PROTO_TCP;
+        (*ip6).hop_limit = 64;
+        // Swap src/dst
+        (*ip6).src_addr = in_dst_addr;
+        (*ip6).dst_addr = in_src_addr;
+    }
+
+    // ── Step 6: Build TCP RST header ──
+    let tcp_flags_ack = in_flags & 0x10;
+    let tcp_flags_syn = in_flags & 0x02;
+    unsafe {
+        (*tcp).source = in_dst_port;
+        (*tcp).dest = in_src_port;
+
+        if tcp_flags_ack != 0 {
+            (*tcp).seq = in_ack_seq;
+            (*tcp).ack_seq = [0, 0, 0, 0];
+            *(tcp as *mut u8).add(13) = 0x04; // RST
+        } else {
+            (*tcp).seq = [0, 0, 0, 0];
+            let seq_val = u32::from_be_bytes(in_seq).wrapping_add(
+                if tcp_flags_syn != 0 { 1 } else { 0 },
+            );
+            (*tcp).ack_seq = seq_val.to_be_bytes();
+            *(tcp as *mut u8).add(13) = 0x14; // RST+ACK
+        }
+
+        *(tcp as *mut u8).add(12) = 0x50; // data offset = 5
+        (*tcp).window = [0, 0];
+        (*tcp).urg_ptr = [0, 0];
+        (*tcp).check = [0, 0];
+
+        let csum = compute_tcp_csum_v6(&in_dst_addr, &in_src_addr, tcp as *const u8, 20);
+        (*tcp).check = csum.to_be_bytes();
+    }
+
+    Ok(xdp_action::XDP_TX)
+}
+
+/// Construct and send an ICMP Destination Unreachable (type=3, code=3)
+/// for a non-TCP IPv4 packet.
+///
+/// The ICMP error payload contains the original IPv4 header + first 8 bytes
+/// of the L4 header (as required by RFC 792).
+#[inline(never)]
+fn send_icmp_unreachable_v4(
+    ctx: &XdpContext,
+    l3_off: usize,
+    _l4_off: usize,
+) -> Result<u32, ()> {
+    // ── Step 1: Save original IP header + first 8 bytes of L4 ──
+    // We need 20 bytes of IP header + 8 bytes of L4 = 28 bytes total.
+    // Read them byte-by-byte to a stack buffer.
+    let mut saved: [u8; 28] = [0u8; 28];
+    let mut i: usize = 0;
+    while i < 28 {
+        let byte_ptr: *const u8 = unsafe { ptr_at(ctx, l3_off + i)? };
+        saved[i] = unsafe { *byte_ptr };
+        i += 1;
+    }
+
+    // Read original src/dst IPs and Ethernet MACs for the response.
+    let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_off)? };
+    let orig_src = unsafe { (*ipv4hdr).src_addr };
+    let orig_dst = unsafe { (*ipv4hdr).dst_addr };
+
+    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
+    let in_src_mac = unsafe { (*ethhdr).src_addr };
+    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
+
+    // ── Step 2: Truncate/resize to: l3_off + 20 (new IP) + 8 (ICMP hdr) + 28 (payload) ──
+    let target_len = l3_off + 20 + 8 + 28; // = l3_off + 56
+    let current_len = ctx.data_end() - ctx.data();
+    let delta = target_len as i32 - current_len as i32;
+    if delta != 0 {
+        let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
+        if ret != 0 {
+            return Err(());
+        }
+    }
+
+    // ── Step 3: Re-read pointers ──
+    let eth: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
+    let ip: *mut Ipv4Hdr = unsafe { ptr_at_mut(ctx, l3_off)? };
+    // ICMP header starts right after the new IPv4 header.
+    let icmp_off = l3_off + 20;
+    let icmp: *mut u8 = unsafe { ptr_at_mut(ctx, icmp_off)? };
+    // Verify we can write 36 bytes (8 ICMP header + 28 payload).
+    let _end_check: *const u8 = unsafe { ptr_at(ctx, icmp_off + 35)? };
+
+    // ── Step 4: Swap Ethernet MACs ──
+    unsafe {
+        (*eth).dst_addr = in_src_mac;
+        (*eth).src_addr = in_dst_mac;
+    }
+
+    // ── Step 5: Build new IPv4 header ──
+    unsafe {
+        (*ip).set_vihl(4, 20);
+        (*ip).tos = 0;
+        (*ip).set_tot_len(56); // 20 IP + 8 ICMP header + 28 payload
+        (*ip).set_id(0);
+        (*ip).set_frags(0, 0);
+        (*ip).ttl = 64;
+        (*ip).proto = IpProto::Icmp;
+        // Swap: our reply comes FROM original dst TO original src.
+        (*ip).src_addr = orig_dst;
+        (*ip).dst_addr = orig_src;
+        (*ip).check = [0, 0];
+        let csum = compute_ipv4_csum(ip as *const u8, 20);
+        (*ip).set_checksum(csum);
+    }
+
+    // ── Step 6: Build ICMP header ──
+    unsafe {
+        // Type 3 = Destination Unreachable, Code 3 = Port Unreachable
+        *icmp = 3;
+        *icmp.add(1) = 3;
+        // Checksum placeholder
+        *icmp.add(2) = 0;
+        *icmp.add(3) = 0;
+        // "Unused" / "Next-hop MTU" — zero for code 3
+        *icmp.add(4) = 0;
+        *icmp.add(5) = 0;
+        *icmp.add(6) = 0;
+        *icmp.add(7) = 0;
+    }
+
+    // ── Step 7: Write saved 28 bytes as ICMP payload ──
+    let payload: *mut u8 = unsafe { ptr_at_mut(ctx, icmp_off + 8)? };
+    let mut j: usize = 0;
+    while j < 28 {
+        unsafe { *payload.add(j) = saved[j] };
+        j += 1;
+    }
+
+    // ── Step 8: Compute ICMP checksum over 36 bytes ──
+    unsafe {
+        let csum = compute_icmp_csum(icmp, 36);
+        let csum_be = csum.to_be_bytes();
+        *icmp.add(2) = csum_be[0];
+        *icmp.add(3) = csum_be[1];
+    }
+
+    Ok(xdp_action::XDP_TX)
+}
+
+/// Construct and send an ICMPv6 Destination Unreachable (type=1, code=4)
+/// for a non-TCP IPv6 packet.
+///
+/// The ICMPv6 error payload contains as much of the original packet as
+/// possible: the 40-byte IPv6 header + first 8 bytes of L4 = 48 bytes.
+#[inline(never)]
+fn send_icmpv6_unreachable(
+    ctx: &XdpContext,
+    l3_off: usize,
+    _l4_off: usize,
+) -> Result<u32, ()> {
+    // ── Step 1: Save original IPv6 header (40 bytes) + first 8 bytes of L4 ──
+    let mut saved: [u8; 48] = [0u8; 48];
+    let mut i: usize = 0;
+    while i < 48 {
+        let byte_ptr: *const u8 = unsafe { ptr_at(ctx, l3_off + i)? };
+        saved[i] = unsafe { *byte_ptr };
+        i += 1;
+    }
+
+    // Read original addresses and MACs.
+    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_off)? };
+    let orig_src: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
+    let orig_dst: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
+
+    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
+    let in_src_mac = unsafe { (*ethhdr).src_addr };
+    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
+
+    // ── Step 2: Truncate to: l3_off + 40 (IPv6) + 8 (ICMPv6 hdr) + 48 (payload) ──
+    let target_len = l3_off + IPV6_HDR_LEN + 8 + 48; // = l3_off + 96
+    let current_len = ctx.data_end() - ctx.data();
+    let delta = target_len as i32 - current_len as i32;
+    if delta != 0 {
+        let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
+        if ret != 0 {
+            return Err(());
+        }
+    }
+
+    // ── Step 3: Re-read pointers ──
+    let eth: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
+    let ip6: *mut Ipv6Hdr = unsafe { ptr_at_mut(ctx, l3_off)? };
+    let icmp6_off = l3_off + IPV6_HDR_LEN;
+    let icmp6: *mut u8 = unsafe { ptr_at_mut(ctx, icmp6_off)? };
+    // Verify we can write 56 bytes (8 ICMPv6 header + 48 payload).
+    let _end_check: *const u8 = unsafe { ptr_at(ctx, icmp6_off + 55)? };
+
+    // ── Step 4: Swap Ethernet MACs ──
+    unsafe {
+        (*eth).dst_addr = in_src_mac;
+        (*eth).src_addr = in_dst_mac;
+    }
+
+    // ── Step 5: Build IPv6 header ──
+    unsafe {
+        (*ip6)._vtcfl = (6u32 << 28).to_be();
+        // Payload = ICMPv6 header (8) + payload (48) = 56
+        (*ip6)._payload_len = 56u16.to_be();
+        (*ip6).next_hdr = PROTO_ICMPV6;
+        (*ip6).hop_limit = 64;
+        (*ip6).src_addr = orig_dst;
+        (*ip6).dst_addr = orig_src;
+    }
+
+    // ── Step 6: Build ICMPv6 header ──
+    unsafe {
+        // Type 1 = Destination Unreachable, Code 4 = Port Unreachable
+        *icmp6 = 1;
+        *icmp6.add(1) = 4;
+        // Checksum placeholder
+        *icmp6.add(2) = 0;
+        *icmp6.add(3) = 0;
+        // Unused (must be zero)
+        *icmp6.add(4) = 0;
+        *icmp6.add(5) = 0;
+        *icmp6.add(6) = 0;
+        *icmp6.add(7) = 0;
+    }
+
+    // ── Step 7: Write saved 48 bytes as ICMPv6 payload ──
+    let payload: *mut u8 = unsafe { ptr_at_mut(ctx, icmp6_off + 8)? };
+    let mut j: usize = 0;
+    while j < 48 {
+        unsafe { *payload.add(j) = saved[j] };
+        j += 1;
+    }
+
+    // ── Step 8: Compute ICMPv6 checksum (includes pseudo-header) ──
+    unsafe {
+        let csum = compute_icmpv6_csum(&orig_dst, &orig_src, icmp6, 56);
+        let csum_be = csum.to_be_bytes();
+        *icmp6.add(2) = csum_be[0];
+        *icmp6.add(3) = csum_be[1];
+    }
+
+    Ok(xdp_action::XDP_TX)
+}
+
+// ── Checksum helpers ────────────────────────────────────────────────
+
+/// Compute the IPv4 header checksum (ones' complement of the ones'
+/// complement sum of the header u16 words).
+///
+/// The checksum field in the header must be zeroed before calling.
+#[inline(always)]
+unsafe fn compute_ipv4_csum(hdr: *const u8, len: usize) -> u16 {
+    unsafe {
+        let mut sum: u32 = 0;
+        let mut i: usize = 0;
+        while i + 1 < len {
+            let word = ((*hdr.add(i) as u32) << 8) | (*hdr.add(i + 1) as u32);
+            sum += word;
+            i += 2;
+        }
+        // Fold 32-bit sum into 16 bits.
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+}
+
+/// Compute TCP checksum with IPv4 pseudo-header.
+///
+/// The checksum field in the TCP header must be zeroed before calling.
+/// Returns the checksum in host byte order.
+#[inline(always)]
+unsafe fn compute_tcp_csum_v4(
+    src_ip: &[u8; 4],
+    dst_ip: &[u8; 4],
+    tcp_hdr: *const u8,
+    tcp_len: usize,
+) -> u16 {
+    unsafe {
+        let mut sum: u32 = 0;
+
+        // Pseudo-header: src_ip (4 bytes) + dst_ip (4 bytes) + zero + proto + tcp_len
+        sum += ((src_ip[0] as u32) << 8) | (src_ip[1] as u32);
+        sum += ((src_ip[2] as u32) << 8) | (src_ip[3] as u32);
+        sum += ((dst_ip[0] as u32) << 8) | (dst_ip[1] as u32);
+        sum += ((dst_ip[2] as u32) << 8) | (dst_ip[3] as u32);
+        sum += PROTO_TCP as u32; // 0x0006
+        sum += tcp_len as u32;
+
+        // Sum TCP header bytes as 16-bit words.
+        let mut i: usize = 0;
+        while i + 1 < tcp_len {
+            let word = ((*tcp_hdr.add(i) as u32) << 8) | (*tcp_hdr.add(i + 1) as u32);
+            sum += word;
+            i += 2;
+        }
+        // Handle odd byte (shouldn't happen for 20-byte TCP header).
+        if i < tcp_len {
+            sum += (*tcp_hdr.add(i) as u32) << 8;
+        }
+
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+}
+
+/// Compute TCP checksum with IPv6 pseudo-header.
+///
+/// Returns the checksum in host byte order.
+#[inline(always)]
+unsafe fn compute_tcp_csum_v6(
+    src_ip: &[u8; 16],
+    dst_ip: &[u8; 16],
+    tcp_hdr: *const u8,
+    tcp_len: usize,
+) -> u16 {
+    unsafe {
+        let mut sum: u32 = 0;
+
+        // Pseudo-header: src (16) + dst (16) + upper-layer length (4) + zero(3) + next_hdr(1)
+        let mut i: usize = 0;
+        while i < 16 {
+            sum += ((src_ip[i] as u32) << 8) | (src_ip[i + 1] as u32);
+            i += 2;
+        }
+        i = 0;
+        while i < 16 {
+            sum += ((dst_ip[i] as u32) << 8) | (dst_ip[i + 1] as u32);
+            i += 2;
+        }
+        sum += tcp_len as u32; // Upper-layer packet length
+        sum += PROTO_TCP as u32; // Next header = 6
+
+        // Sum TCP header/data.
+        i = 0;
+        while i + 1 < tcp_len {
+            let word = ((*tcp_hdr.add(i) as u32) << 8) | (*tcp_hdr.add(i + 1) as u32);
+            sum += word;
+            i += 2;
+        }
+        if i < tcp_len {
+            sum += (*tcp_hdr.add(i) as u32) << 8;
+        }
+
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+}
+
+/// Compute ICMP checksum (ones' complement sum over the ICMP message).
+///
+/// The checksum field must be zeroed before calling.
+/// Returns the checksum in host byte order.
+#[inline(always)]
+unsafe fn compute_icmp_csum(data: *const u8, len: usize) -> u16 {
+    unsafe {
+        let mut sum: u32 = 0;
+        let mut i: usize = 0;
+        while i + 1 < len {
+            let word = ((*data.add(i) as u32) << 8) | (*data.add(i + 1) as u32);
+            sum += word;
+            i += 2;
+        }
+        if i < len {
+            sum += (*data.add(i) as u32) << 8;
+        }
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+}
+
+/// Compute ICMPv6 checksum with IPv6 pseudo-header.
+///
+/// Returns the checksum in host byte order.
+#[inline(always)]
+unsafe fn compute_icmpv6_csum(
+    src_ip: &[u8; 16],
+    dst_ip: &[u8; 16],
+    icmpv6_data: *const u8,
+    icmpv6_len: usize,
+) -> u16 {
+    unsafe {
+        let mut sum: u32 = 0;
+
+        // Pseudo-header: src (16) + dst (16) + upper-layer length (4) + zero(3) + next_hdr(1)
+        let mut i: usize = 0;
+        while i < 16 {
+            sum += ((src_ip[i] as u32) << 8) | (src_ip[i + 1] as u32);
+            i += 2;
+        }
+        i = 0;
+        while i < 16 {
+            sum += ((dst_ip[i] as u32) << 8) | (dst_ip[i + 1] as u32);
+            i += 2;
+        }
+        sum += icmpv6_len as u32; // Upper-layer packet length
+        sum += PROTO_ICMPV6 as u32; // Next header = 58
+
+        // Sum ICMPv6 data.
+        i = 0;
+        while i + 1 < icmpv6_len {
+            let word = ((*icmpv6_data.add(i) as u32) << 8) | (*icmpv6_data.add(i + 1) as u32);
+            sum += word;
+            i += 2;
+        }
+        if i < icmpv6_len {
+            sum += (*icmpv6_data.add(i) as u32) << 8;
+        }
+
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
     }
 }
 

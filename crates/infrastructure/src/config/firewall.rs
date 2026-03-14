@@ -266,7 +266,7 @@ impl FirewallRuleConfig {
         parse_action(&self.action).map_err(|()| ConfigError::InvalidValue {
             field: format!("{prefix}.action"),
             value: self.action.clone(),
-            expected: "allow, deny, log".to_string(),
+            expected: "allow, deny, log, reject".to_string(),
         })?;
 
         parse_protocol(&self.protocol).map_err(|()| ConfigError::InvalidValue {
@@ -318,7 +318,7 @@ impl FirewallRuleConfig {
         let action = parse_action(&self.action).map_err(|()| ConfigError::InvalidValue {
             field: "action".to_string(),
             value: self.action.clone(),
-            expected: "allow, deny, log".to_string(),
+            expected: "allow, deny, log, reject".to_string(),
         })?;
 
         let protocol = parse_protocol(&self.protocol).map_err(|()| ConfigError::InvalidValue {

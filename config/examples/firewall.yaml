@@ -151,7 +151,9 @@ firewall:
   #   id         — Unique rule identifier (required, non-empty)
   #   enabled    — Whether this rule is active (default: true)
   #   priority   — Lower number = higher precedence; first match wins
-  #   action     — "allow", "deny", or "log" (pass + emit event)
+  #   action     — "allow", "deny", "log", or "reject"
+  #                "reject" drops the packet and sends TCP RST (for TCP)
+  #                or ICMP Destination Unreachable (for UDP)
   #   protocol   — "tcp", "udp", "icmp", or "any" (default: "any")
   #   src_ip     — Source CIDR filter; omit to match any source
   #   dst_ip     — Destination CIDR filter; omit to match any destination
@@ -239,6 +241,18 @@ firewall:
       protocol: tcp
       src_ip: "::/0"
       dst_port: 22
+      scope: global
+
+    # ── Reject example ───────────────────────────────────────────────
+    # Reject connections to closed admin port — sends TCP RST for TCP
+    # and ICMP Destination Unreachable (port unreachable) for UDP.
+    # This signals to the client that the port is explicitly closed,
+    # unlike "deny" which silently drops the packet.
+    - id: fw-reject-admin-port
+      priority: 23
+      action: reject
+      protocol: tcp
+      dst_port: 8443
       scope: global
 
     # ── IPv6 examples ────────────────────────────────────────────────

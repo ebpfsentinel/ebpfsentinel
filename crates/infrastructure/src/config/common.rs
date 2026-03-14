@@ -229,6 +229,7 @@ pub(super) fn parse_action(s: &str) -> Result<FirewallAction, ()> {
         "allow" | "pass" => Ok(FirewallAction::Allow),
         "deny" | "drop" | "block" => Ok(FirewallAction::Deny),
         "log" => Ok(FirewallAction::Log),
+        "reject" | "reset" => Ok(FirewallAction::Reject),
         _ => Err(()),
     }
 }
@@ -391,6 +392,9 @@ mod tests {
         assert_eq!(parse_action("drop").unwrap(), FirewallAction::Deny);
         assert_eq!(parse_action("block").unwrap(), FirewallAction::Deny);
         assert_eq!(parse_action("log").unwrap(), FirewallAction::Log);
+        assert_eq!(parse_action("reject").unwrap(), FirewallAction::Reject);
+        assert_eq!(parse_action("reset").unwrap(), FirewallAction::Reject);
+        assert_eq!(parse_action("REJECT").unwrap(), FirewallAction::Reject);
         assert_eq!(parse_action("ALLOW").unwrap(), FirewallAction::Allow);
         assert!(parse_action("invalid").is_err());
     }

@@ -2,6 +2,8 @@
 pub const ACTION_PASS: u8 = 0;
 pub const ACTION_DROP: u8 = 1;
 pub const ACTION_LOG: u8 = 2;
+/// Reject: drop the packet and send TCP RST (for TCP) or ICMP Unreachable (for UDP).
+pub const ACTION_REJECT: u8 = 3;
 
 /// Maximum number of firewall rules per address family (V4 / V6).
 ///
@@ -12,6 +14,23 @@ pub const MAX_FIREWALL_RULES: u32 = 4096;
 /// Default policy constants for `FIREWALL_DEFAULT_POLICY` map.
 pub const DEFAULT_POLICY_PASS: u8 = 0;
 pub const DEFAULT_POLICY_DROP: u8 = 1;
+
+// ── Firewall metric indices (FIREWALL_METRICS PerCpuArray) ──────
+
+/// Metric index: packets passed by firewall rules.
+pub const FIREWALL_METRIC_PASSED: u32 = 0;
+/// Metric index: packets dropped by firewall rules.
+pub const FIREWALL_METRIC_DROPPED: u32 = 1;
+/// Metric index: processing errors.
+pub const FIREWALL_METRIC_ERRORS: u32 = 2;
+/// Metric index: events dropped (ring buffer full).
+pub const FIREWALL_METRIC_EVENTS_DROPPED: u32 = 3;
+/// Metric index: total packets seen.
+pub const FIREWALL_METRIC_TOTAL_SEEN: u32 = 4;
+/// Metric index: packets rejected (TCP RST / ICMP Unreachable sent).
+pub const FIREWALL_METRIC_REJECTED: u32 = 5;
+/// Total number of firewall metric slots.
+pub const FIREWALL_METRIC_COUNT: u32 = 6;
 
 /// Maximum LPM Trie entries per map (4 maps: src/dst × v4/v6).
 ///
@@ -139,7 +158,7 @@ pub struct FirewallRuleEntry {
     pub match_flags: u8,
     /// 802.1Q VLAN ID filter (0 = match any, 1-4094 = exact).
     pub vlan_id: u16,
-    /// Action: `ACTION_PASS`, `ACTION_DROP`, or `ACTION_LOG`.
+    /// Action: `ACTION_PASS`, `ACTION_DROP`, `ACTION_LOG`, or `ACTION_REJECT`.
     pub action: u8,
     /// Bitmask of allowed conntrack states (CT_MATCH_*). 0 = ignore state.
     pub ct_state_mask: u8,
@@ -203,7 +222,7 @@ pub struct FirewallRuleEntryV6 {
     pub match_flags: u8,
     /// 802.1Q VLAN ID filter (0 = match any, 1-4094 = exact).
     pub vlan_id: u16,
-    /// Action: `ACTION_PASS`, `ACTION_DROP`, or `ACTION_LOG`.
+    /// Action: `ACTION_PASS`, `ACTION_DROP`, `ACTION_LOG`, or `ACTION_REJECT`.
     pub action: u8,
     /// Bitmask of allowed conntrack states (CT_MATCH_*). 0 = ignore state.
     pub ct_state_mask: u8,
@@ -245,7 +264,7 @@ pub struct FirewallRuleEntryV6 {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LpmValue {
-    /// Action: `ACTION_PASS`, `ACTION_DROP`, or `ACTION_LOG`.
+    /// Action: `ACTION_PASS`, `ACTION_DROP`, `ACTION_LOG`, or `ACTION_REJECT`.
     pub action: u8,
     /// Padding to 4 bytes.
     pub _padding: [u8; 3],
@@ -261,7 +280,7 @@ pub struct FirewallLpmEntryV4 {
     pub prefix_len: u32,
     /// IPv4 address in network byte order, pre-masked to prefix.
     pub addr: [u8; 4],
-    /// Action: `ACTION_PASS`, `ACTION_DROP`, or `ACTION_LOG`.
+    /// Action: `ACTION_PASS`, `ACTION_DROP`, `ACTION_LOG`, or `ACTION_REJECT`.
     pub action: u8,
 }
 
@@ -272,7 +291,7 @@ pub struct FirewallLpmEntryV6 {
     pub prefix_len: u32,
     /// IPv6 address in network byte order, pre-masked to prefix.
     pub addr: [u8; 16],
-    /// Action: `ACTION_PASS`, `ACTION_DROP`, or `ACTION_LOG`.
+    /// Action: `ACTION_PASS`, `ACTION_DROP`, `ACTION_LOG`, or `ACTION_REJECT`.
     pub action: u8,
 }
 
@@ -403,6 +422,18 @@ mod tests {
         assert_eq!(ACTION_PASS, 0);
         assert_eq!(ACTION_DROP, 1);
         assert_eq!(ACTION_LOG, 2);
+        assert_eq!(ACTION_REJECT, 3);
+    }
+
+    #[test]
+    fn test_firewall_metric_constants() {
+        assert_eq!(FIREWALL_METRIC_PASSED, 0);
+        assert_eq!(FIREWALL_METRIC_DROPPED, 1);
+        assert_eq!(FIREWALL_METRIC_ERRORS, 2);
+        assert_eq!(FIREWALL_METRIC_EVENTS_DROPPED, 3);
+        assert_eq!(FIREWALL_METRIC_TOTAL_SEEN, 4);
+        assert_eq!(FIREWALL_METRIC_REJECTED, 5);
+        assert_eq!(FIREWALL_METRIC_COUNT, 6);
     }
 
     #[test]
