@@ -21,7 +21,6 @@ firewall:
   rules: []
   scrub:
     enabled: true
-    reassemble_fragments: true
     min_ttl: 64
     max_mss: 1460
 

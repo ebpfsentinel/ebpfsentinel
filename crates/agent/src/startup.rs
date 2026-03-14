@@ -2044,7 +2044,12 @@ fn build_scrub_flags(config: &AgentConfig) -> ebpf_common::scrub::ScrubFlags {
         random_ip_id: u8::from(scrub.random_ip_id),
         max_mss: scrub.max_mss.unwrap_or(0),
         min_hop_limit: scrub.min_hop_limit.unwrap_or(0),
-        _pad: 0,
+        scrub_tcp_flags: u8::from(scrub.scrub_tcp_flags),
+        strip_ecn: u8::from(scrub.strip_ecn),
+        normalize_tos: u8::from(scrub.normalize_tos),
+        tos_value: scrub.tos_value.unwrap_or(0),
+        strip_tcp_timestamps: u8::from(scrub.strip_tcp_timestamps),
+        _pad: [0; 2],
     }
 }
 

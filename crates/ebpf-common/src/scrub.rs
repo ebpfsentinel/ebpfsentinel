@@ -21,7 +21,21 @@ pub struct ScrubFlags {
     pub max_mss: u16,
     /// Minimum IPv6 Hop Limit to enforce. 0 means no enforcement.
     pub min_hop_limit: u8,
-    pub _pad: u8,
+    /// Clear TCP reserved bits (NS/CWR/ECE) to prevent OS fingerprinting
+    /// and covert channels. CWR/ECE only cleared on non-SYN packets to
+    /// preserve ECN negotiation. (0 = no, 1 = yes).
+    pub scrub_tcp_flags: u8,
+    /// Clear ECN bits (2 LSBs) in IPv4 TOS / IPv6 Traffic Class (0 = no, 1 = yes).
+    pub strip_ecn: u8,
+    /// Normalize TOS/DSCP field to `tos_value` (0 = no, 1 = yes).
+    pub normalize_tos: u8,
+    /// Target TOS value when `normalize_tos` is enabled (default 0 = best effort).
+    pub tos_value: u8,
+    /// Remove TCP timestamp option (kind=8, len=10) by overwriting with NOP bytes.
+    /// Prevents OS fingerprinting via TCP timestamp analysis. (0 = no, 1 = yes).
+    pub strip_tcp_timestamps: u8,
+    /// Padding for 2-byte alignment.
+    pub _pad: [u8; 2],
 }
 
 impl ScrubFlags {
@@ -34,7 +48,12 @@ impl ScrubFlags {
             random_ip_id: 0,
             max_mss: 0,
             min_hop_limit: 0,
-            _pad: 0,
+            scrub_tcp_flags: 0,
+            strip_ecn: 0,
+            normalize_tos: 0,
+            tos_value: 0,
+            strip_tcp_timestamps: 0,
+            _pad: [0; 2],
         }
     }
 }
@@ -57,8 +76,16 @@ pub const SCRUB_METRIC_ERRORS: u32 = 5;
 pub const SCRUB_METRIC_HOP_FIXED: u32 = 6;
 /// Metric index: total packets seen (unconditional, first instruction).
 pub const SCRUB_METRIC_TOTAL_SEEN: u32 = 7;
+/// TCP reserved/CWR/ECE flags scrubbed.
+pub const SCRUB_METRIC_TCP_FLAGS_SCRUBBED: u32 = 8;
+/// ECN bits stripped from IP header.
+pub const SCRUB_METRIC_ECN_STRIPPED: u32 = 9;
+/// TOS/DSCP field normalized.
+pub const SCRUB_METRIC_TOS_NORMALIZED: u32 = 10;
+/// TCP timestamp options stripped.
+pub const SCRUB_METRIC_TCP_TS_STRIPPED: u32 = 11;
 /// Total metric slots.
-pub const SCRUB_METRIC_COUNT: u32 = 8;
+pub const SCRUB_METRIC_COUNT: u32 = 12;
 
 // ── Pod impl ────────────────────────────────────────────────────────
 
@@ -74,7 +101,7 @@ mod tests {
 
     #[test]
     fn scrub_flags_size() {
-        assert_eq!(mem::size_of::<ScrubFlags>(), 8);
+        assert_eq!(mem::size_of::<ScrubFlags>(), 14);
     }
 
     #[test]
@@ -90,6 +117,11 @@ mod tests {
         assert_eq!(mem::offset_of!(ScrubFlags, random_ip_id), 3);
         assert_eq!(mem::offset_of!(ScrubFlags, max_mss), 4);
         assert_eq!(mem::offset_of!(ScrubFlags, min_hop_limit), 6);
+        assert_eq!(mem::offset_of!(ScrubFlags, scrub_tcp_flags), 7);
+        assert_eq!(mem::offset_of!(ScrubFlags, strip_ecn), 8);
+        assert_eq!(mem::offset_of!(ScrubFlags, normalize_tos), 9);
+        assert_eq!(mem::offset_of!(ScrubFlags, tos_value), 10);
+        assert_eq!(mem::offset_of!(ScrubFlags, strip_tcp_timestamps), 11);
     }
 
     #[test]
@@ -100,6 +132,11 @@ mod tests {
         assert_eq!(flags.max_mss, 0);
         assert_eq!(flags.clear_df, 0);
         assert_eq!(flags.random_ip_id, 0);
+        assert_eq!(flags.scrub_tcp_flags, 0);
+        assert_eq!(flags.strip_ecn, 0);
+        assert_eq!(flags.normalize_tos, 0);
+        assert_eq!(flags.tos_value, 0);
+        assert_eq!(flags.strip_tcp_timestamps, 0);
     }
 
     #[test]
@@ -112,6 +149,11 @@ mod tests {
             SCRUB_METRIC_IPID_RANDOMIZED,
             SCRUB_METRIC_ERRORS,
             SCRUB_METRIC_HOP_FIXED,
+            SCRUB_METRIC_TOTAL_SEEN,
+            SCRUB_METRIC_TCP_FLAGS_SCRUBBED,
+            SCRUB_METRIC_ECN_STRIPPED,
+            SCRUB_METRIC_TOS_NORMALIZED,
+            SCRUB_METRIC_TCP_TS_STRIPPED,
         ];
         for (i, &a) in indices.iter().enumerate() {
             for &b in &indices[i + 1..] {

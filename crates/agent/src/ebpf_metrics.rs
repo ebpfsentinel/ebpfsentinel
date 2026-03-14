@@ -115,6 +115,10 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (5, "errors"),
             (6, "hop_fixed"),
             (7, "total_seen"),
+            (8, "tcp_flags_scrubbed"),
+            (9, "ecn_stripped"),
+            (10, "tos_normalized"),
+            (11, "tcp_ts_stripped"),
         ],
         "DDOS_METRICS" => &[
             (0, "syn_rcv"),

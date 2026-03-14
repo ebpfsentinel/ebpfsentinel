@@ -94,8 +94,6 @@ impl Default for AntiLockoutConfig {
 pub struct ScrubConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
-    pub reassemble_fragments: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_ttl: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,6 +105,22 @@ pub struct ScrubConfig {
     /// Minimum IPv6 Hop Limit to enforce. 0 or `None` means no enforcement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_hop_limit: Option<u8>,
+    /// Clear TCP reserved bits (NS/CWR/ECE) to prevent OS fingerprinting.
+    /// CWR/ECE only cleared on non-SYN packets to preserve ECN negotiation.
+    #[serde(default)]
+    pub scrub_tcp_flags: bool,
+    /// Clear ECN bits (2 LSBs) in IPv4 TOS / IPv6 Traffic Class.
+    #[serde(default)]
+    pub strip_ecn: bool,
+    /// Normalize TOS/DSCP field to a specific value.
+    #[serde(default)]
+    pub normalize_tos: bool,
+    /// Target TOS value for normalization (default 0 = best effort).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tos_value: Option<u8>,
+    /// Remove TCP timestamp option (kind=8, len=10) to prevent OS fingerprinting.
+    #[serde(default)]
+    pub strip_tcp_timestamps: bool,
 }
 
 // ── Schedule config (Epic 28) ───────────────────────────────────────

@@ -448,9 +448,13 @@ firewall:
 
   scrub:
     enabled: true
-    reassemble_fragments: true  # Reassemble IP fragments before inspection
     min_ttl: 1                  # Enforce minimum TTL (IPv4, drop TTL=0)
     min_hop_limit: 1            # Enforce minimum hop limit (IPv6, no checksum update needed)
     max_mss: 1460               # Clamp TCP MSS to prevent fragmentation (IPv4/IPv6)
     random_ip_id: true          # Randomize IP ID field (IPv4 only, anti-fingerprint)
     clear_df: false             # Clear Don't Fragment bit (IPv4 only)
+    scrub_tcp_flags: true       # Clear TCP reserved/NS/CWR/ECE bits (anti-fingerprint)
+    strip_ecn: false            # Clear ECN bits in IP TOS / IPv6 Traffic Class
+    normalize_tos: false        # Force TOS/DSCP to a specific value
+    # tos_value: 0              # Target TOS value when normalize_tos is enabled (default: 0)
+    strip_tcp_timestamps: true  # Remove TCP timestamp option (anti-fingerprint)
