@@ -119,6 +119,16 @@ setup_file() {
         sleep 1
     fi
 
+    # Build the Docker image if it doesn't exist
+    local exists
+    exists="$(_docker_cmd image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -cF "$DOCKER_IMAGE")" || true
+    if [ "${exists:-0}" -lt 1 ]; then
+        echo "# Building Docker image ${DOCKER_IMAGE}..." >&3
+        _docker_cmd build -t "$DOCKER_IMAGE" "${PROJECT_ROOT}" || {
+            echo "# Docker build failed — tests will be skipped" >&3
+        }
+    fi
+
     # Stop any existing agent binary AND Docker containers (we want a clean slate)
     stop_ebpf_agent 2>/dev/null || true
     _docker_cmd rm -f "$CONTAINER_NAME" 2>/dev/null || true
