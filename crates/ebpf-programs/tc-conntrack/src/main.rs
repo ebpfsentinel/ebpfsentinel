@@ -341,51 +341,49 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
 /// same conceptual position in both `ConnValue` and `ConnValueV6`.
 #[inline(always)]
 unsafe fn advance_tcp_state_inner(state: *mut u8, flags: *mut u8, tcp_flags: u8, is_forward: bool) {
-    let current = unsafe { *state };
+    unsafe {
+        let current = *state;
 
-    if tcp_flags & TCP_RST != 0 {
-        unsafe { *state = CT_STATE_INVALID };
-        return;
-    }
+        if tcp_flags & TCP_RST != 0 {
+            *state = CT_STATE_INVALID;
+            return;
+        }
 
-    match current {
-        CT_STATE_SYN_SENT => {
-            if !is_forward && tcp_flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) {
-                unsafe {
+        match current {
+            CT_STATE_SYN_SENT => {
+                if !is_forward && tcp_flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) {
                     *state = CT_STATE_SYN_RECV;
                     *flags |= CT_FLAG_SEEN_REPLY;
                 }
             }
-        }
-        CT_STATE_SYN_RECV => {
-            if is_forward && tcp_flags & TCP_ACK != 0 {
-                unsafe {
+            CT_STATE_SYN_RECV => {
+                if is_forward && tcp_flags & TCP_ACK != 0 {
                     *state = CT_STATE_ESTABLISHED;
                     *flags |= CT_FLAG_ASSURED;
-                }
-                increment_metric(CT_METRIC_ESTABLISHED);
-            }
-        }
-        CT_STATE_ESTABLISHED => {
-            if tcp_flags & TCP_FIN != 0 {
-                if is_forward {
-                    unsafe { *state = CT_STATE_FIN_WAIT };
-                } else {
-                    unsafe { *state = CT_STATE_CLOSE_WAIT };
+                    increment_metric(CT_METRIC_ESTABLISHED);
                 }
             }
-        }
-        CT_STATE_FIN_WAIT => {
-            if !is_forward && tcp_flags & TCP_FIN != 0 {
-                unsafe { *state = CT_STATE_TIME_WAIT };
+            CT_STATE_ESTABLISHED => {
+                if tcp_flags & TCP_FIN != 0 {
+                    if is_forward {
+                        *state = CT_STATE_FIN_WAIT;
+                    } else {
+                        *state = CT_STATE_CLOSE_WAIT;
+                    }
+                }
             }
-        }
-        CT_STATE_CLOSE_WAIT => {
-            if is_forward && tcp_flags & TCP_FIN != 0 {
-                unsafe { *state = CT_STATE_TIME_WAIT };
+            CT_STATE_FIN_WAIT => {
+                if !is_forward && tcp_flags & TCP_FIN != 0 {
+                    *state = CT_STATE_TIME_WAIT;
+                }
             }
+            CT_STATE_CLOSE_WAIT => {
+                if is_forward && tcp_flags & TCP_FIN != 0 {
+                    *state = CT_STATE_TIME_WAIT;
+                }
+            }
+            _ => {}
         }
-        _ => {}
     }
 }
 

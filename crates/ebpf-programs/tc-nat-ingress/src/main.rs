@@ -209,64 +209,68 @@ struct DnatScanCtxV6 {
 /// Returns 0 to continue, 1 to stop (match found or index >= count).
 #[inline(never)]
 unsafe extern "C" fn scan_dnat_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
-    let lctx = unsafe { &mut *(ctx as *mut DnatScanCtx) };
-    if index >= lctx.count {
-        return 1;
-    }
-    if let Some(rule) = NAT_DNAT_RULES.get(index) {
-        if !group_matches(rule.group_mask, lctx.iface_groups) {
-            return 0; // group mismatch, continue to next rule
-        }
-        if match_nat_rule(rule, lctx.src_ip, lctx.dst_ip, lctx.dst_port, lctx.protocol) {
-            let new_dst_ip = match rule.nat_type {
-                NAT_TYPE_DNAT | NAT_TYPE_ONETOONE => rule.nat_addr,
-                NAT_TYPE_REDIRECT => lctx.src_ip,
-                _ => return 0, // Unknown NAT type, continue scanning
-            };
-            lctx.new_dst_ip = new_dst_ip;
-            lctx.new_dst_port = if rule.nat_port_start != 0 {
-                rule.nat_port_start
-            } else {
-                lctx.dst_port
-            };
-            lctx.nat_type = rule.nat_type;
-            lctx.matched = 1;
+    unsafe {
+        let lctx = &mut *(ctx as *mut DnatScanCtx);
+        if index >= lctx.count {
             return 1;
         }
+        if let Some(rule) = NAT_DNAT_RULES.get(index) {
+            if !group_matches(rule.group_mask, lctx.iface_groups) {
+                return 0; // group mismatch, continue to next rule
+            }
+            if match_nat_rule(rule, lctx.src_ip, lctx.dst_ip, lctx.dst_port, lctx.protocol) {
+                let new_dst_ip = match rule.nat_type {
+                    NAT_TYPE_DNAT | NAT_TYPE_ONETOONE => rule.nat_addr,
+                    NAT_TYPE_REDIRECT => lctx.src_ip,
+                    _ => return 0, // Unknown NAT type, continue scanning
+                };
+                lctx.new_dst_ip = new_dst_ip;
+                lctx.new_dst_port = if rule.nat_port_start != 0 {
+                    rule.nat_port_start
+                } else {
+                    lctx.dst_port
+                };
+                lctx.nat_type = rule.nat_type;
+                lctx.matched = 1;
+                return 1;
+            }
+        }
+        0
     }
-    0
 }
 
 /// Callback for `bpf_loop`: scan one IPv6 DNAT rule.
 /// Returns 0 to continue, 1 to stop (match found or index >= count).
 #[inline(never)]
 unsafe extern "C" fn scan_dnat_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
-    let lctx = unsafe { &mut *(ctx as *mut DnatScanCtxV6) };
-    if index >= lctx.count {
-        return 1;
-    }
-    if let Some(rule) = NAT_DNAT_RULES_V6.get(index) {
-        if !group_matches(rule.group_mask, lctx.iface_groups) {
-            return 0;
-        }
-        if match_nat_rule_v6(rule, &lctx.src_addr, &lctx.dst_addr, lctx.dst_port, lctx.protocol) {
-            let new_dst_addr = match rule.nat_type {
-                NAT_TYPE_DNAT | NAT_TYPE_ONETOONE => rule.nat_addr,
-                NAT_TYPE_REDIRECT => lctx.src_addr,
-                _ => return 0,
-            };
-            lctx.new_dst_addr = new_dst_addr;
-            lctx.new_dst_port = if rule.nat_port_start != 0 {
-                rule.nat_port_start
-            } else {
-                lctx.dst_port
-            };
-            lctx.nat_type = rule.nat_type;
-            lctx.matched = 1;
+    unsafe {
+        let lctx = &mut *(ctx as *mut DnatScanCtxV6);
+        if index >= lctx.count {
             return 1;
         }
+        if let Some(rule) = NAT_DNAT_RULES_V6.get(index) {
+            if !group_matches(rule.group_mask, lctx.iface_groups) {
+                return 0;
+            }
+            if match_nat_rule_v6(rule, &lctx.src_addr, &lctx.dst_addr, lctx.dst_port, lctx.protocol) {
+                let new_dst_addr = match rule.nat_type {
+                    NAT_TYPE_DNAT | NAT_TYPE_ONETOONE => rule.nat_addr,
+                    NAT_TYPE_REDIRECT => lctx.src_addr,
+                    _ => return 0,
+                };
+                lctx.new_dst_addr = new_dst_addr;
+                lctx.new_dst_port = if rule.nat_port_start != 0 {
+                    rule.nat_port_start
+                } else {
+                    lctx.dst_port
+                };
+                lctx.nat_type = rule.nat_type;
+                lctx.matched = 1;
+                return 1;
+            }
+        }
+        0
     }
-    0
 }
 
 // ── Processing ──────────────────────────────────────────────────────

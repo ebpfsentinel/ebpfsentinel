@@ -352,75 +352,79 @@ struct PacketCtx {
 /// Callback for `bpf_loop`: scan one IPv4 firewall rule.
 /// Returns 0 to continue, 1 to stop (match found or index >= count).
 unsafe extern "C" fn scan_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
-    let lctx = unsafe { &mut *(ctx as *mut RuleScanCtx) };
-    if index >= lctx.count {
-        return 1;
-    }
-    if let Some(rule) = FIREWALL_RULES.get(index) {
-        // Check interface group membership before evaluating rule fields.
-        if !group_matches(rule.group_mask, lctx.iface_groups) {
-            return 0; // group mismatch, continue to next rule
-        }
-        if match_rule_v4(
-            rule,
-            lctx.src_ip,
-            lctx.dst_ip,
-            lctx.src_port,
-            lctx.dst_port,
-            lctx.protocol,
-            lctx.vlan_id,
-            lctx.ct_state,
-            lctx.tcp_flags,
-            lctx.icmp_type,
-            lctx.icmp_code,
-            lctx.dscp,
-            &lctx.src_mac,
-            &lctx.dst_mac,
-        ) {
-            lctx.matched_action = rule.action as i32;
-            lctx.matched_rule_idx = index as i32;
-            lctx.matched_max_states = rule.max_states;
+    unsafe {
+        let lctx = &mut *(ctx as *mut RuleScanCtx);
+        if index >= lctx.count {
             return 1;
         }
+        if let Some(rule) = FIREWALL_RULES.get(index) {
+            // Check interface group membership before evaluating rule fields.
+            if !group_matches(rule.group_mask, lctx.iface_groups) {
+                return 0; // group mismatch, continue to next rule
+            }
+            if match_rule_v4(
+                rule,
+                lctx.src_ip,
+                lctx.dst_ip,
+                lctx.src_port,
+                lctx.dst_port,
+                lctx.protocol,
+                lctx.vlan_id,
+                lctx.ct_state,
+                lctx.tcp_flags,
+                lctx.icmp_type,
+                lctx.icmp_code,
+                lctx.dscp,
+                &lctx.src_mac,
+                &lctx.dst_mac,
+            ) {
+                lctx.matched_action = rule.action as i32;
+                lctx.matched_rule_idx = index as i32;
+                lctx.matched_max_states = rule.max_states;
+                return 1;
+            }
+        }
+        0
     }
-    0
 }
 
 /// Callback for `bpf_loop`: scan one IPv6 firewall rule.
 /// Returns 0 to continue, 1 to stop (match found or index >= count).
 unsafe extern "C" fn scan_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
-    let lctx = unsafe { &mut *(ctx as *mut RuleScanCtxV6) };
-    if index >= lctx.count {
-        return 1;
-    }
-    if let Some(rule) = FIREWALL_RULES_V6.get(index) {
-        // Check interface group membership before evaluating rule fields.
-        if !group_matches(rule.group_mask, lctx.iface_groups) {
-            return 0; // group mismatch, continue to next rule
-        }
-        if match_rule_v6(
-            rule,
-            &lctx.src_addr,
-            &lctx.dst_addr,
-            lctx.src_port,
-            lctx.dst_port,
-            lctx.protocol,
-            lctx.vlan_id,
-            lctx.ct_state,
-            lctx.tcp_flags,
-            lctx.icmp_type,
-            lctx.icmp_code,
-            lctx.dscp,
-            &lctx.src_mac,
-            &lctx.dst_mac,
-        ) {
-            lctx.matched_action = rule.action as i32;
-            lctx.matched_rule_idx = index as i32;
-            lctx.matched_max_states = rule.max_states;
+    unsafe {
+        let lctx = &mut *(ctx as *mut RuleScanCtxV6);
+        if index >= lctx.count {
             return 1;
         }
+        if let Some(rule) = FIREWALL_RULES_V6.get(index) {
+            // Check interface group membership before evaluating rule fields.
+            if !group_matches(rule.group_mask, lctx.iface_groups) {
+                return 0; // group mismatch, continue to next rule
+            }
+            if match_rule_v6(
+                rule,
+                &lctx.src_addr,
+                &lctx.dst_addr,
+                lctx.src_port,
+                lctx.dst_port,
+                lctx.protocol,
+                lctx.vlan_id,
+                lctx.ct_state,
+                lctx.tcp_flags,
+                lctx.icmp_type,
+                lctx.icmp_code,
+                lctx.dscp,
+                &lctx.src_mac,
+                &lctx.dst_mac,
+            ) {
+                lctx.matched_action = rule.action as i32;
+                lctx.matched_rule_idx = index as i32;
+                lctx.matched_max_states = rule.max_states;
+                return 1;
+            }
+        }
+        0
     }
-    0
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
@@ -431,13 +435,11 @@ unsafe extern "C" fn scan_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
     // Drain pending config commands from userspace (best-effort, non-blocking).
     // This applies any pending rule changes atomically before packet processing.
-    unsafe {
-        CONFIG_RINGBUF.drain(
-            drain_config_cmd as *mut core::ffi::c_void,
-            core::ptr::null_mut(),
-            0,
-        );
-    }
+    CONFIG_RINGBUF.drain(
+        drain_config_cmd as *mut core::ffi::c_void,
+        core::ptr::null_mut(),
+        0,
+    );
 
     increment_metric(METRIC_TOTAL_SEEN);
     let action = match try_xdp_firewall(&ctx) {
@@ -2068,39 +2070,38 @@ unsafe extern "C" fn drain_config_cmd(
 ) -> i64 {
     use ebpf_common::config_cmd::*;
 
-    let cmd = &*(data as *const ConfigCommand);
+    unsafe {
+        let cmd = &*(data as *const ConfigCommand);
 
-    match cmd.cmd_type {
-        CMD_ADD_FW_RULE_5TUPLE => {
-            if cmd.payload_len >= 20 {
-                let key = &*(cmd.payload.as_ptr() as *const FwHashKey5Tuple);
-                let val = &*(cmd.payload.as_ptr().add(16) as *const FwHashValue);
-                let _ = FW_HASH_5TUPLE.insert(key, val, 0);
+        match cmd.cmd_type {
+            CMD_ADD_FW_RULE_5TUPLE => {
+                if cmd.payload_len >= 20 {
+                    let key = &*(cmd.payload.as_ptr() as *const FwHashKey5Tuple);
+                    let val = &*(cmd.payload.as_ptr().add(16) as *const FwHashValue);
+                    let _ = FW_HASH_5TUPLE.insert(key, val, 0);
+                }
             }
-        }
-        CMD_DEL_FW_RULE_5TUPLE => {
-            if cmd.payload_len >= 16 {
-                let key = &*(cmd.payload.as_ptr() as *const FwHashKey5Tuple);
-                let _ = FW_HASH_5TUPLE.remove(key);
+            CMD_DEL_FW_RULE_5TUPLE => {
+                if cmd.payload_len >= 16 {
+                    let key = &*(cmd.payload.as_ptr() as *const FwHashKey5Tuple);
+                    let _ = FW_HASH_5TUPLE.remove(key);
+                }
             }
-        }
-        CMD_ADD_FW_RULE_PORT => {
-            if cmd.payload_len >= 8 {
-                let key = &*(cmd.payload.as_ptr() as *const FwHashKeyPort);
-                let val = &*(cmd.payload.as_ptr().add(4) as *const FwHashValue);
-                let _ = FW_HASH_PORT.insert(key, val, 0);
+            CMD_ADD_FW_RULE_PORT => {
+                if cmd.payload_len >= 8 {
+                    let key = &*(cmd.payload.as_ptr() as *const FwHashKeyPort);
+                    let val = &*(cmd.payload.as_ptr().add(4) as *const FwHashValue);
+                    let _ = FW_HASH_PORT.insert(key, val, 0);
+                }
             }
-        }
-        CMD_DEL_FW_RULE_PORT => {
-            if cmd.payload_len >= 4 {
-                let key = &*(cmd.payload.as_ptr() as *const FwHashKeyPort);
-                let _ = FW_HASH_PORT.remove(key);
+            CMD_DEL_FW_RULE_PORT => {
+                if cmd.payload_len >= 4 {
+                    let key = &*(cmd.payload.as_ptr() as *const FwHashKeyPort);
+                    let _ = FW_HASH_PORT.remove(key);
+                }
             }
+            _ => {}
         }
-        // CMD_SET_DEFAULT_POLICY: Array maps are not writable from eBPF
-        // (bpf_map_update_elem is userspace-only for Array type).
-        // Default policy updates go through the existing userspace path.
-        _ => {}
     }
 
     0 // continue draining

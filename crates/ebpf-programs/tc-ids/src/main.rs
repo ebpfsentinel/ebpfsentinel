@@ -521,19 +521,21 @@ unsafe fn fill_l7_header(
     flags: u8,
     vlan_id: u16,
 ) {
-    header.timestamp_ns = bpf_ktime_get_boot_ns();
-    header.src_addr = *src_addr;
-    header.dst_addr = *dst_addr;
-    header.src_port = src_port;
-    header.dst_port = dst_port;
-    header.protocol = PROTO_TCP;
-    header.event_type = EVENT_TYPE_L7;
-    header.action = 0;
-    header.flags = flags;
-    header.rule_id = 0;
-    header.vlan_id = vlan_id;
-    header.cpu_id = bpf_get_smp_processor_id() as u16;
-    header.socket_cookie = 0;
+    unsafe {
+        header.timestamp_ns = bpf_ktime_get_boot_ns();
+        header.src_addr = *src_addr;
+        header.dst_addr = *dst_addr;
+        header.src_port = src_port;
+        header.dst_port = dst_port;
+        header.protocol = PROTO_TCP;
+        header.event_type = EVENT_TYPE_L7;
+        header.action = 0;
+        header.flags = flags;
+        header.rule_id = 0;
+        header.vlan_id = vlan_id;
+        header.cpu_id = bpf_get_smp_processor_id() as u16;
+        header.socket_cookie = 0;
+    }
 }
 
 #[panic_handler]

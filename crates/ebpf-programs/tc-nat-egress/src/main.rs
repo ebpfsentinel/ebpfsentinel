@@ -200,73 +200,77 @@ struct SnatScanCtxV6 {
 /// Returns 0 to continue, 1 to stop (match found or index >= count).
 #[inline(never)]
 unsafe extern "C" fn scan_snat_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
-    let lctx = unsafe { &mut *(ctx as *mut SnatScanCtx) };
-    if index >= lctx.count {
-        return 1;
-    }
-    if let Some(rule) = NAT_SNAT_RULES.get(index) {
-        if !group_matches(rule.group_mask, lctx.iface_groups) {
-            return 0;
-        }
-        if match_snat_rule(rule, lctx.src_ip, lctx.dst_ip, lctx.protocol) {
-            let new_src_ip = rule.nat_addr;
-            // Skip rules with no translation address (unless masquerade).
-            if new_src_ip == 0 && rule.nat_type != NAT_TYPE_MASQUERADE {
-                return 0;
-            }
-            // For masquerade, userspace must pre-populate nat_addr with
-            // the interface IP. If not set, skip this rule.
-            if rule.nat_type == NAT_TYPE_MASQUERADE && new_src_ip == 0 {
-                return 0;
-            }
-
-            lctx.new_src_ip = new_src_ip;
-            lctx.new_src_port = if rule.nat_port_start != 0 {
-                allocate_port(lctx.src_ip, lctx.src_port, rule.nat_port_start, rule.nat_port_end)
-            } else {
-                lctx.src_port
-            };
-            lctx.nat_type = rule.nat_type;
-            lctx.matched = 1;
+    unsafe {
+        let lctx = &mut *(ctx as *mut SnatScanCtx);
+        if index >= lctx.count {
             return 1;
         }
+        if let Some(rule) = NAT_SNAT_RULES.get(index) {
+            if !group_matches(rule.group_mask, lctx.iface_groups) {
+                return 0;
+            }
+            if match_snat_rule(rule, lctx.src_ip, lctx.dst_ip, lctx.protocol) {
+                let new_src_ip = rule.nat_addr;
+                // Skip rules with no translation address (unless masquerade).
+                if new_src_ip == 0 && rule.nat_type != NAT_TYPE_MASQUERADE {
+                    return 0;
+                }
+                // For masquerade, userspace must pre-populate nat_addr with
+                // the interface IP. If not set, skip this rule.
+                if rule.nat_type == NAT_TYPE_MASQUERADE && new_src_ip == 0 {
+                    return 0;
+                }
+
+                lctx.new_src_ip = new_src_ip;
+                lctx.new_src_port = if rule.nat_port_start != 0 {
+                    allocate_port(lctx.src_ip, lctx.src_port, rule.nat_port_start, rule.nat_port_end)
+                } else {
+                    lctx.src_port
+                };
+                lctx.nat_type = rule.nat_type;
+                lctx.matched = 1;
+                return 1;
+            }
+        }
+        0
     }
-    0
 }
 
 /// Callback for `bpf_loop`: scan one IPv6 SNAT rule.
 /// Returns 0 to continue, 1 to stop (match found or index >= count).
 #[inline(never)]
 unsafe extern "C" fn scan_snat_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
-    let lctx = unsafe { &mut *(ctx as *mut SnatScanCtxV6) };
-    if index >= lctx.count {
-        return 1;
-    }
-    if let Some(rule) = NAT_SNAT_RULES_V6.get(index) {
-        if !group_matches(rule.group_mask, lctx.iface_groups) {
-            return 0;
-        }
-        if match_snat_rule_v6(rule, &lctx.src_addr, &lctx.dst_addr, lctx.protocol) {
-            let new_src_addr = rule.nat_addr;
-            if new_src_addr == [0; 4] && rule.nat_type != NAT_TYPE_MASQUERADE {
-                return 0;
-            }
-            if rule.nat_type == NAT_TYPE_MASQUERADE && new_src_addr == [0; 4] {
-                return 0;
-            }
-
-            lctx.new_src_addr = new_src_addr;
-            lctx.new_src_port = if rule.nat_port_start != 0 {
-                allocate_port_v6(&lctx.src_addr, lctx.src_port, rule.nat_port_start, rule.nat_port_end)
-            } else {
-                lctx.src_port
-            };
-            lctx.nat_type = rule.nat_type;
-            lctx.matched = 1;
+    unsafe {
+        let lctx = &mut *(ctx as *mut SnatScanCtxV6);
+        if index >= lctx.count {
             return 1;
         }
+        if let Some(rule) = NAT_SNAT_RULES_V6.get(index) {
+            if !group_matches(rule.group_mask, lctx.iface_groups) {
+                return 0;
+            }
+            if match_snat_rule_v6(rule, &lctx.src_addr, &lctx.dst_addr, lctx.protocol) {
+                let new_src_addr = rule.nat_addr;
+                if new_src_addr == [0; 4] && rule.nat_type != NAT_TYPE_MASQUERADE {
+                    return 0;
+                }
+                if rule.nat_type == NAT_TYPE_MASQUERADE && new_src_addr == [0; 4] {
+                    return 0;
+                }
+
+                lctx.new_src_addr = new_src_addr;
+                lctx.new_src_port = if rule.nat_port_start != 0 {
+                    allocate_port_v6(&lctx.src_addr, lctx.src_port, rule.nat_port_start, rule.nat_port_end)
+                } else {
+                    lctx.src_port
+                };
+                lctx.nat_type = rule.nat_type;
+                lctx.matched = 1;
+                return 1;
+            }
+        }
+        0
     }
-    0
 }
 
 // ── Processing ──────────────────────────────────────────────────────

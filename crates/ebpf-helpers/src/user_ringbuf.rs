@@ -43,31 +43,19 @@ impl UserRingBuf {
 
     /// Drain all pending entries from the User RingBuf.
     ///
-    /// `callback_fn` is called once per entry with:
-    /// - `ctx`: user-provided context pointer (passed through)
-    /// - `data`: pointer to the entry data
-    /// - `data_sz`: size of the entry
-    ///
-    /// The callback must return 0 to continue draining or non-zero to stop.
-    ///
-    /// Returns the number of entries drained, or a negative error code.
-    ///
     /// # Safety
     ///
     /// The callback function pointer must be valid and compatible with the
     /// `bpf_user_ringbuf_drain` callback signature:
     /// `fn(ctx: *mut c_void, data: *mut c_void, data_sz: u64) -> i64`
-    pub unsafe fn drain(
+    pub fn drain(
         &self,
         callback_fn: *mut core::ffi::c_void,
         ctx: *mut core::ffi::c_void,
         flags: u64,
     ) -> i64 {
-        bpf_user_ringbuf_drain(
-            self.def.get() as *mut _,
-            callback_fn,
-            ctx,
-            flags,
-        )
+        unsafe {
+            bpf_user_ringbuf_drain(self.def.get() as *mut _, callback_fn, ctx, flags)
+        }
     }
 }
