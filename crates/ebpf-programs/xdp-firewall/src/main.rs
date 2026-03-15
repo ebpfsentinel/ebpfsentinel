@@ -2097,11 +2097,9 @@ unsafe extern "C" fn drain_config_cmd(
                 let _ = FW_HASH_PORT.remove(key);
             }
         }
-        CMD_SET_DEFAULT_POLICY => {
-            if cmd.payload_len >= 1 {
-                let _ = FIREWALL_DEFAULT_POLICY.set(0, cmd.payload[0], 0);
-            }
-        }
+        // CMD_SET_DEFAULT_POLICY: Array maps are not writable from eBPF
+        // (bpf_map_update_elem is userspace-only for Array type).
+        // Default policy updates go through the existing userspace path.
         _ => {}
     }
 

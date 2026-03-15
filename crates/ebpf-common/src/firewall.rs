@@ -109,7 +109,6 @@ pub struct IpSetKeyV4 {
     pub addr: u32,
 }
 
-
 // ── HashMap fast-path key types ─────────────────────────────────────
 
 /// Maximum entries in the 5-tuple exact-match HashMap.

@@ -42,7 +42,7 @@ fn default_weight() -> u16 {
 
 // ── Section config ──────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QosSectionConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -58,6 +58,18 @@ pub struct QosSectionConfig {
 
     #[serde(default)]
     pub classifiers: Vec<QosClassifierConfig>,
+}
+
+impl Default for QosSectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scheduler: default_scheduler(),
+            pipes: Vec::new(),
+            queues: Vec::new(),
+            classifiers: Vec::new(),
+        }
+    }
 }
 
 // ── Pipe config ─────────────────────────────────────────────────────

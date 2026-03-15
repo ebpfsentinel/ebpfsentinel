@@ -63,10 +63,11 @@ impl DlpEventReader {
                         data_excerpt: [0; DLP_MAX_EXCERPT],
                     };
                     // SAFETY: header fields are at known offsets, verified by length check.
+                    // Both DlpEvent and DlpEventSmall share identical header layout (24 bytes).
                     unsafe {
                         core::ptr::copy_nonoverlapping(
                             bytes.as_ptr(),
-                            &mut event as *mut DlpEvent as *mut u8,
+                            core::ptr::addr_of_mut!(event).cast::<u8>(),
                             header_size.min(bytes.len()),
                         );
                     }

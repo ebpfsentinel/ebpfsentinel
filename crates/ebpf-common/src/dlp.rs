@@ -179,12 +179,30 @@ mod tests {
     #[test]
     fn test_dlp_event_small_header_compatible() {
         // Verify header offsets are identical between DlpEvent and DlpEventSmall
-        assert_eq!(mem::offset_of!(DlpEvent, pid), mem::offset_of!(DlpEventSmall, pid));
-        assert_eq!(mem::offset_of!(DlpEvent, tgid), mem::offset_of!(DlpEventSmall, tgid));
-        assert_eq!(mem::offset_of!(DlpEvent, timestamp_ns), mem::offset_of!(DlpEventSmall, timestamp_ns));
-        assert_eq!(mem::offset_of!(DlpEvent, data_len), mem::offset_of!(DlpEventSmall, data_len));
-        assert_eq!(mem::offset_of!(DlpEvent, direction), mem::offset_of!(DlpEventSmall, direction));
-        assert_eq!(mem::offset_of!(DlpEvent, data_excerpt), mem::offset_of!(DlpEventSmall, data_excerpt));
+        assert_eq!(
+            mem::offset_of!(DlpEvent, pid),
+            mem::offset_of!(DlpEventSmall, pid)
+        );
+        assert_eq!(
+            mem::offset_of!(DlpEvent, tgid),
+            mem::offset_of!(DlpEventSmall, tgid)
+        );
+        assert_eq!(
+            mem::offset_of!(DlpEvent, timestamp_ns),
+            mem::offset_of!(DlpEventSmall, timestamp_ns)
+        );
+        assert_eq!(
+            mem::offset_of!(DlpEvent, data_len),
+            mem::offset_of!(DlpEventSmall, data_len)
+        );
+        assert_eq!(
+            mem::offset_of!(DlpEvent, direction),
+            mem::offset_of!(DlpEventSmall, direction)
+        );
+        assert_eq!(
+            mem::offset_of!(DlpEvent, data_excerpt),
+            mem::offset_of!(DlpEventSmall, data_excerpt)
+        );
     }
 
     #[test]

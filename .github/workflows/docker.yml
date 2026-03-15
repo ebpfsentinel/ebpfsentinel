@@ -1,6 +1,8 @@
 name: Docker
 
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
 env:
@@ -42,9 +44,33 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=
 
+      - uses: docker/setup-qemu-action@v3
+
+      - name: Stamp version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" Cargo.toml
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-common/Cargo.toml
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-helpers/Cargo.toml
+          # eBPF programs
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-programs/xdp-firewall/Cargo.toml
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-programs/xdp-ratelimit/Cargo.toml
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-programs/xdp-loadbalancer/Cargo.toml
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-programs/tc-conntrack/Cargo.toml
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-programs/tc-nat-ingress/Cargo.toml
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-programs/tc-nat-egress/Cargo.toml
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-programs/tc-ids/Cargo.toml
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-programs/tc-threatintel/Cargo.toml
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-programs/tc-dns/Cargo.toml
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-programs/tc-scrub/Cargo.toml
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-programs/tc-qos/Cargo.toml
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-programs/uprobe-dlp/Cargo.toml
+
       - uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

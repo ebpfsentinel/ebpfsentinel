@@ -144,13 +144,14 @@ dependencies = [
 
 [[package]]
 name = "ebpf-common"
-version = "0.1.0"
+version = "0.0.0-dev"
 
 [[package]]
 name = "ebpf-helpers"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "aya-ebpf",
+ "aya-ebpf-bindings",
  "ebpf-common",
 ]
 
@@ -307,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "tc-qos"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "aya-ebpf",
  "aya-ebpf-bindings",

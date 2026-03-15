@@ -29,6 +29,7 @@ jobs:
             .
             crates/ebpf-programs/xdp-firewall
             crates/ebpf-programs/xdp-ratelimit
+            crates/ebpf-programs/xdp-loadbalancer
             crates/ebpf-programs/tc-ids
             crates/ebpf-programs/tc-threatintel
             crates/ebpf-programs/tc-dns
@@ -36,6 +37,7 @@ jobs:
             crates/ebpf-programs/tc-nat-ingress
             crates/ebpf-programs/tc-nat-egress
             crates/ebpf-programs/tc-scrub
+            crates/ebpf-programs/tc-qos
             crates/ebpf-programs/uprobe-dlp
 
       - name: Install bpf-linker
@@ -58,6 +60,7 @@ jobs:
           path: |
             crates/ebpf-programs/xdp-firewall/target/bpfel-unknown-none/release/xdp-firewall
             crates/ebpf-programs/xdp-ratelimit/target/bpfel-unknown-none/release/xdp-ratelimit
+            crates/ebpf-programs/xdp-loadbalancer/target/bpfel-unknown-none/release/xdp-loadbalancer
             crates/ebpf-programs/tc-ids/target/bpfel-unknown-none/release/tc-ids
             crates/ebpf-programs/tc-threatintel/target/bpfel-unknown-none/release/tc-threatintel
             crates/ebpf-programs/tc-dns/target/bpfel-unknown-none/release/tc-dns
@@ -65,5 +68,6 @@ jobs:
             crates/ebpf-programs/tc-nat-ingress/target/bpfel-unknown-none/release/tc-nat-ingress
             crates/ebpf-programs/tc-nat-egress/target/bpfel-unknown-none/release/tc-nat-egress
             crates/ebpf-programs/tc-scrub/target/bpfel-unknown-none/release/tc-scrub
+            crates/ebpf-programs/tc-qos/target/bpfel-unknown-none/release/tc-qos
             crates/ebpf-programs/uprobe-dlp/target/bpfel-unknown-none/release/uprobe-dlp
           retention-days: 7

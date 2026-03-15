@@ -9,15 +9,9 @@ use tracing::{info, warn};
 /// applying rule changes atomically. This is used for incremental updates;
 /// bulk initial load still uses `bpf_map_update_elem` via the map managers.
 ///
-/// Note: aya 0.13.1 does not have a typed `UserRingBuf` API, so we use the
-/// regular `RingBuf` type for map acquisition (the kernel map type is correct
-/// because the eBPF program declares it as `BPF_MAP_TYPE_USER_RINGBUF`).
-/// Writing is done via `RingBuf::output()` which maps to `bpf_ringbuf_output`.
-///
-/// Actually, for User RingBuf, userspace writes are done via mmap, not
-/// `bpf_ringbuf_output` (which is kernel→userspace). The aya `RingBuf` API
-/// is read-only from userspace. For proper User RingBuf writes, we need
-/// raw fd access — this is a placeholder for future aya UserRingBuf support.
+/// Note: aya 0.13.1 does not have a typed `UserRingBuf` API. Userspace writes
+/// to a `UserRingBuf` require mmap-based access which aya does not yet expose.
+/// This is a placeholder for future aya `UserRingBuf` support.
 pub struct ConfigRingBufWriter {
     /// Map handle — kept alive to maintain the map reference.
     _map: Map,
@@ -26,22 +20,21 @@ pub struct ConfigRingBufWriter {
 impl ConfigRingBufWriter {
     /// Create a new writer by taking ownership of the `CONFIG_RINGBUF` map.
     ///
-    /// Returns `None` if the map is not found (program doesn't have User RingBuf).
+    /// Returns `None` if the map is not found (program doesn't have `UserRingBuf`).
     pub fn new(ebpf: &mut Ebpf) -> Option<Self> {
         let map = ebpf.take_map("CONFIG_RINGBUF")?;
-        info!("CONFIG_RINGBUF (User RingBuf) map acquired for config push");
+        info!("CONFIG_RINGBUF (UserRingBuf) map acquired for config push");
         Some(Self { _map: map })
     }
 
-    /// Push a config command to the User RingBuf.
+    /// Push a config command to the `UserRingBuf`.
     ///
-    /// Note: Full User RingBuf write support requires mmap-based access
+    /// Note: full `UserRingBuf` write support requires mmap-based access
     /// which is not yet available in aya 0.13.1. This is a placeholder.
-    /// For now, incremental rule updates still go through `bpf_map_update_elem`
-    /// via the existing map managers. The User RingBuf drain callback in the
-    /// eBPF program is wired and ready for when aya adds write support.
+    /// Incremental rule updates still go through `bpf_map_update_elem`
+    /// via the existing map managers.
     pub fn push_command(&mut self, _cmd: &ConfigCommand) -> Result<(), anyhow::Error> {
-        warn!("User RingBuf write not yet supported in aya 0.13.1 — command queued but not sent");
+        warn!("UserRingBuf write not yet supported in aya 0.13.1 — command queued but not sent");
         Ok(())
     }
 }

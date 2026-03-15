@@ -1,0 +1,30 @@
+[Unit]
+Description=eBPFsentinel Network Security Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ebpfsentinel-agent --config /etc/ebpfsentinel/config.yaml
+Restart=on-failure
+RestartSec=5s
+
+# eBPF requires BPF, NET_ADMIN, and SYS_ADMIN capabilities
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/ebpfsentinel
+PrivateTmp=yes
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+# Required for eBPF maps
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

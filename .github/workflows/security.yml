@@ -77,9 +77,14 @@ jobs:
       - name: Install cargo-cyclonedx
         run: cargo install cargo-cyclonedx
       - name: Generate SBOM
-        run: cargo cyclonedx --format json
+        run: cargo cyclonedx --format json --all
+      - name: Collect SBOM files
+        run: |
+          mkdir -p sbom-output
+          find . -name "*bom.cdx.json" -not -path "./sbom-output/*" -exec cp {} sbom-output/ \;
+          ls -la sbom-output/
       - uses: actions/upload-artifact@v4
         with:
           name: sbom-cyclonedx
-          path: ./*_bom.cdx.json
+          path: sbom-output/
           retention-days: 7

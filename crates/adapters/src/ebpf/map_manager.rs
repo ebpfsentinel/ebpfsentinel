@@ -3,8 +3,7 @@ use aya::maps::{Array, HashMap, MapData};
 use domain::common::error::DomainError;
 use ebpf_common::firewall::{
     FirewallRuleEntry, FirewallRuleEntryV6, FwHashKey5Tuple, FwHashKeyPort, FwHashValue,
-    MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT,
-    MAX_FIREWALL_RULES,
+    MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MAX_FIREWALL_RULES,
 };
 use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
 use tracing::info;
@@ -28,9 +27,9 @@ pub struct FirewallMapManager {
     rules_v6: Array<MapData, FirewallRuleEntryV6>,
     rule_count_v6: Array<MapData, u32>,
     default_policy: Array<MapData, u8>,
-    /// Fast-path: 5-tuple exact-match HashMap.
+    /// Fast-path: 5-tuple exact-match `HashMap`.
     hash_5tuple: Option<HashMap<MapData, FwHashKey5Tuple, FwHashValue>>,
-    /// Fast-path: protocol+port HashMap.
+    /// Fast-path: protocol+port `HashMap`.
     hash_port: Option<HashMap<MapData, FwHashKeyPort, FwHashValue>>,
     /// Cached counts for `rule_count()` without map reads.
     cached_v4_count: usize,
@@ -113,7 +112,8 @@ impl FirewallArrayMapPort for FirewallMapManager {
                 || rule.dst_set_id != 0;
 
             if !has_extended
-                && flags == (MATCH_SRC_IP | MATCH_DST_IP | MATCH_SRC_PORT | MATCH_DST_PORT | MATCH_PROTO)
+                && flags
+                    == (MATCH_SRC_IP | MATCH_DST_IP | MATCH_SRC_PORT | MATCH_DST_PORT | MATCH_PROTO)
                 && rule.src_port_start == rule.src_port_end
                 && rule.dst_port_start == rule.dst_port_end
                 && rule.src_mask == 0xFFFF_FFFF

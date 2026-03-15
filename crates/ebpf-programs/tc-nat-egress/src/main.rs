@@ -4,7 +4,7 @@
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     cty::c_void,
-    helpers::{bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop, bpf_skb_store_bytes},
+    helpers::{bpf_ktime_get_boot_ns, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop, bpf_skb_store_bytes},
     macros::{classifier, map},
     maps::{Array, HashMap, LruHashMap, PerCpuArray},
     programs::TcContext,
@@ -350,21 +350,26 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         _pad: 0,
     };
     if let Some(val) = unsafe { NAT_HASH_SNAT.get(&hash_key) } {
-        rewrite_src_addr(ctx, src_ip, val.nat_addr)?;
+        rewrite_src_ip(ctx, l3_offset, l4_offset, protocol, src_ip, val.nat_addr)?;
         if val.nat_port_start != 0 {
             rewrite_src_port(ctx, l4_offset, protocol, src_port, val.nat_port_start)?;
         }
+        let now = unsafe { bpf_ktime_get_boot_ns() };
         let ct_key = normalize_key_v4(val.nat_addr, dst_ip, val.nat_port_start.max(src_port), dst_port, protocol);
         let ct_val = ConnValue {
             state: 1,
             flags: CT_FLAG_NAT_SRC,
-            _pad: [0; 2],
+            nat_type: 1, // SNAT
+            _pad: 0,
+            packets_fwd: 1,
+            packets_rev: 0,
+            bytes_fwd: ctx.len() as u32,
+            bytes_rev: 0,
+            first_seen_ns: now,
+            last_seen_ns: now,
             nat_addr: val.nat_addr,
             nat_port: val.nat_port_start,
             _pad2: [0; 2],
-            pkt_count: 1,
-            byte_count: ctx.len() as u64,
-            last_seen_ns: unsafe { bpf_ktime_get_boot_ns() },
         };
         let _ = CT_TABLE_V4.insert(&ct_key, &ct_val, 0);
         increment_metric(NAT_METRIC_SNAT_APPLIED);

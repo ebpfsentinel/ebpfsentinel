@@ -8,7 +8,6 @@ use core::cell::UnsafeCell;
 
 use aya_ebpf::bindings::bpf_map_def;
 use aya_ebpf::bindings::bpf_map_type::BPF_MAP_TYPE_USER_RINGBUF;
-use aya_ebpf::maps::PinningType;
 use aya_ebpf_bindings::helpers::bpf_user_ringbuf_drain;
 
 /// A `BPF_MAP_TYPE_USER_RINGBUF` map for receiving config commands from userspace.
@@ -37,7 +36,7 @@ impl UserRingBuf {
                 max_entries: byte_size,
                 map_flags: flags,
                 id: 0,
-                pinning: PinningType::None as u32,
+                pinning: 0, // PinningType::None
             }),
         }
     }
