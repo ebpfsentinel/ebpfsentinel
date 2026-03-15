@@ -22,12 +22,13 @@ use ebpf_common::{
         CT_MAX_ENTRIES_V6, normalize_key_v4, normalize_key_v6,
     },
     nat::{
-        MAX_NAT_PORT_ALLOC, MAX_NAT_RULES, MAX_NAT_RULES_V6, MAX_NPTV6_RULES,
-        NAT_MATCH_DST_IP, NAT_MATCH_PROTO,
+        MAX_NAT_HASH_EXACT, MAX_NAT_PORT_ALLOC, MAX_NAT_RULES, MAX_NAT_RULES_V6,
+        MAX_NPTV6_RULES, NAT_MATCH_DST_IP, NAT_MATCH_PROTO,
         NAT_MATCH_SRC_IP, NAT_METRIC_COUNT, NAT_METRIC_ERRORS, NAT_METRIC_MASQ_APPLIED,
         NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_SNAT_APPLIED, NAT_METRIC_TOTAL_SEEN,
         NAT_TYPE_MASQUERADE, NAT_TYPE_SNAT,
-        NatPortAllocKey, NatPortAllocValue, NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry,
+        NatHashKeyExact, NatHashValue, NatPortAllocKey, NatPortAllocValue, NatRuleEntry,
+        NatRuleEntryV6, NptV6RuleEntry,
     },
 };
 use network_types::{
@@ -66,6 +67,11 @@ static NAT_SNAT_RULES_V6: Array<NatRuleEntryV6> = Array::with_max_entries(MAX_NA
 /// Number of active IPv6 SNAT rules.
 #[map]
 static NAT_SNAT_RULE_COUNT_V6: Array<u32> = Array::with_max_entries(1, 0);
+
+/// Fast-path: exact-match SNAT HashMap (proto, src_ip, src_port) → NAT action.
+#[map]
+static NAT_HASH_SNAT: HashMap<NatHashKeyExact, NatHashValue> =
+    HashMap::with_max_entries(MAX_NAT_HASH_EXACT, 0);
 
 /// Shared conntrack table (pinned, same as tc-conntrack).
 #[map]
@@ -333,6 +339,36 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
             increment_metric(NAT_METRIC_SNAT_APPLIED);
             return Ok(TC_ACT_OK);
         }
+    }
+
+    // Fast-path: exact-match SNAT HashMap lookup — O(1).
+    // Key uses (src_ip, src_port, protocol) for SNAT rules with exact match criteria.
+    let hash_key = NatHashKeyExact {
+        dst_ip: src_ip, // For SNAT, we key on source IP (the address being rewritten)
+        dst_port: src_port,
+        protocol,
+        _pad: 0,
+    };
+    if let Some(val) = unsafe { NAT_HASH_SNAT.get(&hash_key) } {
+        rewrite_src_addr(ctx, src_ip, val.nat_addr)?;
+        if val.nat_port_start != 0 {
+            rewrite_src_port(ctx, l4_offset, protocol, src_port, val.nat_port_start)?;
+        }
+        let ct_key = normalize_key_v4(val.nat_addr, dst_ip, val.nat_port_start.max(src_port), dst_port, protocol);
+        let ct_val = ConnValue {
+            state: 1,
+            flags: CT_FLAG_NAT_SRC,
+            _pad: [0; 2],
+            nat_addr: val.nat_addr,
+            nat_port: val.nat_port_start,
+            _pad2: [0; 2],
+            pkt_count: 1,
+            byte_count: ctx.len() as u64,
+            last_seen_ns: unsafe { bpf_ktime_get_boot_ns() },
+        };
+        let _ = CT_TABLE_V4.insert(&ct_key, &ct_val, 0);
+        increment_metric(NAT_METRIC_SNAT_APPLIED);
+        return Ok(TC_ACT_OK);
     }
 
     // Scan SNAT rules for new connections via bpf_loop (kernel 5.17+).

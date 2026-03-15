@@ -36,11 +36,12 @@ use ebpf_common::{
     firewall::{
         ACTION_DROP, ACTION_LOG, ACTION_PASS, ACTION_REJECT, CT_MATCH_ESTABLISHED, CT_MATCH_INVALID,
         CT_MATCH_NEW, CT_MATCH_RELATED, DEFAULT_POLICY_DROP, FirewallRuleEntry,
-        FirewallRuleEntryV6, ICMP_WILDCARD, IpSetKeyV4, LpmValue, MATCH2_DSCP, MATCH2_DST_MAC, MATCH2_ICMP_CODE,
+        FirewallRuleEntryV6, FwHashKey5Tuple, FwHashKeyPort, FwHashValue,
+        ICMP_WILDCARD, IpSetKeyV4, LpmValue, MATCH2_DSCP, MATCH2_DST_MAC, MATCH2_ICMP_CODE,
         MATCH2_ICMP_TYPE, MATCH2_NEGATE_DST, MATCH2_NEGATE_SRC, MATCH2_SRC_MAC,
         MATCH2_TCP_FLAGS, MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_DST_SET,
         MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MATCH_SRC_SET, MAX_FIREWALL_RULES,
-        MAX_IPSET_ENTRIES_V4, MAX_LPM_RULES,
+        MAX_FW_HASH_5TUPLE, MAX_FW_HASH_PORT, MAX_IPSET_ENTRIES_V4, MAX_LPM_RULES,
     },
 };
 use network_types::{
@@ -76,6 +77,19 @@ static FIREWALL_RULE_COUNT_V6: Array<u32> = Array::with_max_entries(1, 0);
 /// Default policy when no rule matches (0=pass, 1=drop).
 #[map]
 static FIREWALL_DEFAULT_POLICY: Array<u8> = Array::with_max_entries(1, 0);
+
+/// Fast-path: 5-tuple exact-match HashMap (proto, src_ip, dst_ip, src_port, dst_port) → action.
+/// Rules with exact values in all 5 fields (no wildcards, ranges, or extended flags) are
+/// placed here by userspace for O(1) lookup before the Array+bpf_loop scan.
+#[map]
+static FW_HASH_5TUPLE: HashMap<FwHashKey5Tuple, FwHashValue> =
+    HashMap::with_max_entries(MAX_FW_HASH_5TUPLE, 0);
+
+/// Fast-path: protocol+port HashMap (proto, dst_port) → action.
+/// Rules that match only on protocol and destination port (all other fields wildcard).
+#[map]
+static FW_HASH_PORT: HashMap<FwHashKeyPort, FwHashValue> =
+    HashMap::with_max_entries(MAX_FW_HASH_PORT, 0);
 
 /// Per-CPU packet counters. Index: 0=passed, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen, 5=rejected.
 #[map]
@@ -607,7 +621,30 @@ fn process_firewall_v4(
         return apply_action(ctx, val.action);
     }
 
-    // Phase 2: Linear scan for complex rules (port, protocol, VLAN).
+    // Phase 1b: 5-tuple exact-match HashMap lookup — O(1).
+    let hash_key_5t = FwHashKey5Tuple {
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        protocol: protocol as u8,
+        _pad: [0; 3],
+    };
+    if let Some(val) = unsafe { FW_HASH_5TUPLE.get(&hash_key_5t) } {
+        return apply_action(ctx, val.action);
+    }
+
+    // Phase 1c: protocol+port HashMap lookup — O(1).
+    let hash_key_port = FwHashKeyPort {
+        dst_port,
+        protocol: protocol as u8,
+        _pad: 0,
+    };
+    if let Some(val) = unsafe { FW_HASH_PORT.get(&hash_key_port) } {
+        return apply_action(ctx, val.action);
+    }
+
+    // Phase 2: Linear scan for complex rules (port ranges, VLAN, MAC, CT state).
     // Read rule count
     let count = match FIREWALL_RULE_COUNT.get(0) {
         Some(&c) => c,

@@ -24,12 +24,12 @@ use ebpf_common::{
     },
     nat::{
         HairpinConfig, HairpinCtValue, MAX_HAIRPIN_CT,
-        MAX_NAT_RULES, MAX_NAT_RULES_V6, MAX_NPTV6_RULES,
+        MAX_NAT_HASH_EXACT, MAX_NAT_RULES, MAX_NAT_RULES_V6, MAX_NPTV6_RULES,
         NAT_MATCH_DST_IP, NAT_MATCH_DST_PORT, NAT_MATCH_PROTO,
         NAT_MATCH_SRC_IP, NAT_METRIC_COUNT, NAT_METRIC_DNAT_APPLIED, NAT_METRIC_ERRORS,
         NAT_METRIC_HAIRPIN_APPLIED, NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_TOTAL_SEEN,
         NAT_TYPE_DNAT, NAT_TYPE_ONETOONE, NAT_TYPE_REDIRECT,
-        NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry,
+        NatHashKeyExact, NatHashValue, NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry,
     },
 };
 use network_types::{
@@ -71,6 +71,12 @@ static NAT_DNAT_RULES_V6: Array<NatRuleEntryV6> = Array::with_max_entries(MAX_NA
 /// Number of active IPv6 DNAT rules.
 #[map]
 static NAT_DNAT_RULE_COUNT_V6: Array<u32> = Array::with_max_entries(1, 0);
+
+/// Fast-path: exact-match DNAT HashMap (proto, dst_ip, dst_port) → NAT action.
+/// Checked before the Array+bpf_loop scan for O(1) lookup.
+#[map]
+static NAT_HASH_DNAT: HashMap<NatHashKeyExact, NatHashValue> =
+    HashMap::with_max_entries(MAX_NAT_HASH_EXACT, 0);
 
 /// Shared conntrack table (pinned, same as tc-conntrack).
 #[map]
@@ -346,6 +352,37 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
             increment_metric(NAT_METRIC_DNAT_APPLIED);
             return Ok(TC_ACT_OK);
         }
+    }
+
+    // Fast-path: exact-match DNAT HashMap lookup — O(1).
+    let hash_key = NatHashKeyExact {
+        dst_ip,
+        dst_port,
+        protocol,
+        _pad: 0,
+    };
+    if let Some(val) = unsafe { NAT_HASH_DNAT.get(&hash_key) } {
+        // Apply DNAT from HashMap hit
+        rewrite_dst_addr(ctx, dst_ip, val.nat_addr)?;
+        if val.nat_port_start != 0 {
+            rewrite_dst_port(ctx, l4_offset, protocol, dst_port, val.nat_port_start)?;
+        }
+        // Store conntrack entry for return traffic
+        let ct_key = normalize_key_v4(src_ip, val.nat_addr, src_port, val.nat_port_start.max(dst_port), protocol);
+        let ct_val = ConnValue {
+            state: 1,
+            flags: CT_FLAG_NAT_DST,
+            _pad: [0; 2],
+            nat_addr: val.nat_addr,
+            nat_port: val.nat_port_start,
+            _pad2: [0; 2],
+            pkt_count: 1,
+            byte_count: ctx.len() as u64,
+            last_seen_ns: unsafe { bpf_ktime_get_boot_ns() },
+        };
+        let _ = CT_TABLE_V4.insert(&ct_key, &ct_val, 0);
+        increment_metric(NAT_METRIC_DNAT_APPLIED);
+        return Ok(TC_ACT_OK);
     }
 
     // Scan DNAT rules for new connections via bpf_loop (kernel 5.17+).

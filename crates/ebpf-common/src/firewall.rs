@@ -110,6 +110,62 @@ pub struct IpSetKeyV4 {
 }
 
 
+// ── HashMap fast-path key types ─────────────────────────────────────
+
+/// Maximum entries in the 5-tuple exact-match HashMap.
+pub const MAX_FW_HASH_5TUPLE: u32 = 65_536;
+/// Maximum entries in the protocol+port HashMap.
+pub const MAX_FW_HASH_PORT: u32 = 16_384;
+
+/// Key for 5-tuple exact-match firewall HashMap lookup (O(1) fast path).
+///
+/// Rules that specify exact (proto, src_ip, dst_ip, src_port, dst_port)
+/// with no wildcards, ranges, or extended match flags are inserted here.
+///
+/// Size: 16 bytes (aligned to 4 bytes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FwHashKey5Tuple {
+    /// Source IPv4 address (host byte order).
+    pub src_ip: u32,
+    /// Destination IPv4 address (host byte order).
+    pub dst_ip: u32,
+    /// Source port.
+    pub src_port: u16,
+    /// Destination port.
+    pub dst_port: u16,
+    /// IP protocol (6=TCP, 17=UDP).
+    pub protocol: u8,
+    pub _pad: [u8; 3],
+}
+
+/// Key for protocol+destination-port firewall HashMap lookup.
+///
+/// Rules that specify only (proto, dst_port) with all other fields
+/// wildcarded are inserted here.
+///
+/// Size: 4 bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FwHashKeyPort {
+    /// Destination port.
+    pub dst_port: u16,
+    /// IP protocol (6=TCP, 17=UDP).
+    pub protocol: u8,
+    pub _pad: u8,
+}
+
+/// Value for fast-path firewall HashMaps.
+///
+/// Size: 4 bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FwHashValue {
+    /// Action: `ACTION_PASS`, `ACTION_DROP`, `ACTION_LOG`, or `ACTION_REJECT`.
+    pub action: u8,
+    pub _pad: [u8; 3],
+}
+
 /// Array-based IPv4 firewall rule entry (60 bytes).
 ///
 /// Stored in the `FIREWALL_RULES` `Array` map, indexed 0..count.
@@ -293,6 +349,12 @@ unsafe impl aya::Pod for FirewallRuleEntryV6 {}
 unsafe impl aya::Pod for LpmValue {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for IpSetKeyV4 {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for FwHashKey5Tuple {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for FwHashKeyPort {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for FwHashValue {}
 
 #[cfg(test)]
 mod tests {
@@ -492,5 +554,42 @@ mod tests {
     fn test_ipset_key_v4_field_offsets() {
         assert_eq!(mem::offset_of!(IpSetKeyV4, set_id), 0);
         assert_eq!(mem::offset_of!(IpSetKeyV4, addr), 4);
+    }
+
+    // ── HashMap fast-path types ─────────────────────────────────────
+
+    #[test]
+    fn test_fw_hash_key_5tuple_size() {
+        assert_eq!(mem::size_of::<FwHashKey5Tuple>(), 16);
+    }
+
+    #[test]
+    fn test_fw_hash_key_5tuple_alignment() {
+        assert_eq!(mem::align_of::<FwHashKey5Tuple>(), 4);
+    }
+
+    #[test]
+    fn test_fw_hash_key_5tuple_offsets() {
+        assert_eq!(mem::offset_of!(FwHashKey5Tuple, src_ip), 0);
+        assert_eq!(mem::offset_of!(FwHashKey5Tuple, dst_ip), 4);
+        assert_eq!(mem::offset_of!(FwHashKey5Tuple, src_port), 8);
+        assert_eq!(mem::offset_of!(FwHashKey5Tuple, dst_port), 10);
+        assert_eq!(mem::offset_of!(FwHashKey5Tuple, protocol), 12);
+    }
+
+    #[test]
+    fn test_fw_hash_key_port_size() {
+        assert_eq!(mem::size_of::<FwHashKeyPort>(), 4);
+    }
+
+    #[test]
+    fn test_fw_hash_key_port_offsets() {
+        assert_eq!(mem::offset_of!(FwHashKeyPort, dst_port), 0);
+        assert_eq!(mem::offset_of!(FwHashKeyPort, protocol), 2);
+    }
+
+    #[test]
+    fn test_fw_hash_value_size() {
+        assert_eq!(mem::size_of::<FwHashValue>(), 4);
     }
 }

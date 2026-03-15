@@ -1,7 +1,11 @@
 use aya::Ebpf;
-use aya::maps::{Array, MapData};
+use aya::maps::{Array, HashMap, MapData};
 use domain::common::error::DomainError;
-use ebpf_common::firewall::{FirewallRuleEntry, FirewallRuleEntryV6, MAX_FIREWALL_RULES};
+use ebpf_common::firewall::{
+    FirewallRuleEntry, FirewallRuleEntryV6, FwHashKey5Tuple, FwHashKeyPort, FwHashValue,
+    MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT,
+    MAX_FIREWALL_RULES,
+};
 use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
 use tracing::info;
 
@@ -24,6 +28,10 @@ pub struct FirewallMapManager {
     rules_v6: Array<MapData, FirewallRuleEntryV6>,
     rule_count_v6: Array<MapData, u32>,
     default_policy: Array<MapData, u8>,
+    /// Fast-path: 5-tuple exact-match HashMap.
+    hash_5tuple: Option<HashMap<MapData, FwHashKey5Tuple, FwHashValue>>,
+    /// Fast-path: protocol+port HashMap.
+    hash_port: Option<HashMap<MapData, FwHashKeyPort, FwHashValue>>,
     /// Cached counts for `rule_count()` without map reads.
     cached_v4_count: usize,
     cached_v6_count: usize,
@@ -57,6 +65,21 @@ impl FirewallMapManager {
                 .ok_or_else(|| anyhow::anyhow!("map 'FIREWALL_DEFAULT_POLICY' not found"))?,
         )?;
 
+        // Fast-path HashMap maps (optional — absent if program doesn't have them)
+        let hash_5tuple = ebpf
+            .take_map("FW_HASH_5TUPLE")
+            .and_then(|m| HashMap::try_from(m).ok());
+        let hash_port = ebpf
+            .take_map("FW_HASH_PORT")
+            .and_then(|m| HashMap::try_from(m).ok());
+
+        if hash_5tuple.is_some() {
+            info!("FW_HASH_5TUPLE fast-path map acquired");
+        }
+        if hash_port.is_some() {
+            info!("FW_HASH_PORT fast-path map acquired");
+        }
+
         info!("firewall array maps acquired (rules + default_policy)");
         Ok(Self {
             rules_v4,
@@ -64,6 +87,8 @@ impl FirewallMapManager {
             rules_v6,
             rule_count_v6,
             default_policy,
+            hash_5tuple,
+            hash_port,
             cached_v4_count: 0,
             cached_v6_count: 0,
         })
@@ -73,27 +98,94 @@ impl FirewallMapManager {
 impl FirewallArrayMapPort for FirewallMapManager {
     #[allow(clippy::cast_possible_truncation)] // count ≤ MAX_FIREWALL_RULES (4096)
     fn load_v4_rules(&mut self, rules: &[FirewallRuleEntry]) -> Result<(), DomainError> {
-        let count = rules.len().min(MAX_FIREWALL_RULES as usize);
+        // Classify rules into fast-path HashMaps vs array fallback.
+        let mut array_rules: Vec<FirewallRuleEntry> = Vec::new();
+        let mut hash_5tuple_count = 0u32;
+        let mut hash_port_count = 0u32;
 
-        // Step 1: Set count to 0 (atomic: XDP sees 0 rules during update)
+        for rule in rules {
+            let flags = rule.match_flags;
+            let has_extended = rule.match_flags2 != 0
+                || rule.vlan_id != 0
+                || rule.ct_state_mask != 0
+                || rule.group_mask != 0
+                || rule.src_set_id != 0
+                || rule.dst_set_id != 0;
+
+            if !has_extended
+                && flags == (MATCH_SRC_IP | MATCH_DST_IP | MATCH_SRC_PORT | MATCH_DST_PORT | MATCH_PROTO)
+                && rule.src_port_start == rule.src_port_end
+                && rule.dst_port_start == rule.dst_port_end
+                && rule.src_mask == 0xFFFF_FFFF
+                && rule.dst_mask == 0xFFFF_FFFF
+            {
+                // Exact 5-tuple match → fast-path HashMap
+                if let Some(ref mut map) = self.hash_5tuple {
+                    let key = FwHashKey5Tuple {
+                        src_ip: rule.src_ip,
+                        dst_ip: rule.dst_ip,
+                        src_port: rule.src_port_start,
+                        dst_port: rule.dst_port_start,
+                        protocol: rule.protocol,
+                        _pad: [0; 3],
+                    };
+                    let val = FwHashValue {
+                        action: rule.action,
+                        _pad: [0; 3],
+                    };
+                    let _ = map.insert(key, val, 0);
+                    hash_5tuple_count += 1;
+                    continue;
+                }
+            } else if !has_extended
+                && flags == (MATCH_DST_PORT | MATCH_PROTO)
+                && rule.dst_port_start == rule.dst_port_end
+            {
+                // Protocol+port match → fast-path HashMap
+                if let Some(ref mut map) = self.hash_port {
+                    let key = FwHashKeyPort {
+                        dst_port: rule.dst_port_start,
+                        protocol: rule.protocol,
+                        _pad: 0,
+                    };
+                    let val = FwHashValue {
+                        action: rule.action,
+                        _pad: [0; 3],
+                    };
+                    let _ = map.insert(key, val, 0);
+                    hash_port_count += 1;
+                    continue;
+                }
+            }
+
+            // Fallback: complex rule → array scan
+            array_rules.push(*rule);
+        }
+
+        // Load remaining rules into the array
+        let count = array_rules.len().min(MAX_FIREWALL_RULES as usize);
+
         self.rule_count_v4
             .set(0, 0u32, 0)
             .map_err(|e| DomainError::EngineError(format!("set V4 count=0 failed: {e}")))?;
 
-        // Step 2: Write entries
-        for (i, rule) in rules.iter().take(count).enumerate() {
+        for (i, rule) in array_rules.iter().take(count).enumerate() {
             self.rules_v4
                 .set(i as u32, *rule, 0)
                 .map_err(|e| DomainError::EngineError(format!("set V4 rule[{i}] failed: {e}")))?;
         }
 
-        // Step 3: Set count to n (atomic: XDP now sees all rules)
         self.rule_count_v4
             .set(0, count as u32, 0)
             .map_err(|e| DomainError::EngineError(format!("set V4 count={count} failed: {e}")))?;
 
-        self.cached_v4_count = count;
-        info!(count, "V4 firewall rules loaded into eBPF array");
+        self.cached_v4_count = count + hash_5tuple_count as usize + hash_port_count as usize;
+        info!(
+            array_count = count,
+            hash_5tuple = hash_5tuple_count,
+            hash_port = hash_port_count,
+            "V4 firewall rules loaded (multi-level)"
+        );
         Ok(())
     }
 
