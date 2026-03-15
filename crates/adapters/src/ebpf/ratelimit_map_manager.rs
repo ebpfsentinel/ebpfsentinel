@@ -9,8 +9,8 @@ use tracing::info;
 /// Manages the `RATELIMIT_CONFIG` eBPF `HashMap`.
 ///
 /// Provides typed wrappers around the raw eBPF map for loading and
-/// clearing rate limit configurations. The `RATELIMIT_BUCKETS` map
-/// (`LruHashMap`) is managed by the kernel; userspace only pushes config.
+/// clearing rate limit configurations. The `RL_BUCKETS` map
+/// (`LruPerCpuHashMap`) is managed by the kernel; userspace only pushes config.
 pub struct RateLimitMapManager {
     config_map: HashMap<MapData, RateLimitKey, RateLimitConfig>,
 }

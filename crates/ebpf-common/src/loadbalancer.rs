@@ -11,8 +11,15 @@ pub const LB_ALG_WEIGHTED: u8 = 1;
 pub const LB_ALG_IP_HASH: u8 = 2;
 pub const LB_ALG_LEAST_CONN: u8 = 3;
 
-/// Maximum backends per service.
+/// Maximum backends per service (legacy, used by `LbServiceConfig`).
 pub const LB_MAX_BACKENDS: usize = 16;
+
+/// Maximum backends per service (V2 two-level architecture).
+pub const LB_MAX_BACKENDS_V2: u32 = 256;
+/// Maximum LB services (V2).
+pub const MAX_LB_SERVICES: u32 = 4096;
+/// Maximum total backends in the `LB_BACKENDS` map (V2).
+pub const MAX_LB_BACKENDS_TOTAL: u32 = 65536;
 
 // ── Service Key ────────────────────────────────────────────────
 
@@ -46,6 +53,29 @@ pub struct LbServiceConfig {
     pub _pad: [u8; 2],
     /// Backend IDs indexed into `LB_BACKENDS` map.
     pub backend_ids: [u32; LB_MAX_BACKENDS],
+}
+
+// ── Service Config V2 (Two-Level) ──────────────────────────────
+
+/// Compact service config for the two-level LB architecture.
+///
+/// Backend IDs are no longer embedded — instead, `backend_start_id`
+/// points into the global `LB_BACKENDS` map. The eBPF program iterates
+/// `backend_start_id..backend_start_id + backend_count` to find a
+/// healthy backend.
+///
+/// Size: 8 bytes (vs 68 bytes for `LbServiceConfig`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LbServiceConfigV2 {
+    /// Balancing algorithm: `LB_ALG_ROUND_ROBIN`, etc.
+    pub algorithm: u8,
+    /// Number of active backends (0..=255).
+    pub backend_count: u8,
+    pub _pad: [u8; 2],
+    /// First backend ID in the global `LB_BACKENDS` map.
+    /// Backends are at IDs `backend_start_id..backend_start_id + backend_count`.
+    pub backend_start_id: u32,
 }
 
 // ── Backend Entry ──────────────────────────────────────────────
@@ -91,6 +121,8 @@ unsafe impl aya::Pod for LbServiceKey {}
 unsafe impl aya::Pod for LbServiceConfig {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for LbBackendEntry {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for LbServiceConfigV2 {}
 
 #[cfg(test)]
 mod tests {
@@ -151,6 +183,31 @@ mod tests {
         assert_eq!(mem::offset_of!(LbBackendEntry, healthy), 24);
         assert_eq!(mem::offset_of!(LbBackendEntry, is_ipv6), 25);
         assert_eq!(mem::offset_of!(LbBackendEntry, _pad), 26);
+    }
+
+    #[test]
+    fn lb_service_config_v2_size() {
+        assert_eq!(mem::size_of::<LbServiceConfigV2>(), 8);
+    }
+
+    #[test]
+    fn lb_service_config_v2_alignment() {
+        assert_eq!(mem::align_of::<LbServiceConfigV2>(), 4);
+    }
+
+    #[test]
+    fn lb_service_config_v2_offsets() {
+        assert_eq!(mem::offset_of!(LbServiceConfigV2, algorithm), 0);
+        assert_eq!(mem::offset_of!(LbServiceConfigV2, backend_count), 1);
+        assert_eq!(mem::offset_of!(LbServiceConfigV2, _pad), 2);
+        assert_eq!(mem::offset_of!(LbServiceConfigV2, backend_start_id), 4);
+    }
+
+    #[test]
+    fn lb_v2_capacity_constants() {
+        assert_eq!(LB_MAX_BACKENDS_V2, 256);
+        assert_eq!(MAX_LB_SERVICES, 4096);
+        assert_eq!(MAX_LB_BACKENDS_TOTAL, 65536);
     }
 
     #[test]

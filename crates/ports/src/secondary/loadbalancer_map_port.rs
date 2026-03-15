@@ -1,5 +1,5 @@
 use domain::common::error::DomainError;
-use ebpf_common::loadbalancer::{LbBackendEntry, LbServiceConfig, LbServiceKey};
+use ebpf_common::loadbalancer::{LbBackendEntry, LbServiceConfigV2, LbServiceKey};
 
 /// Secondary port for load balancer eBPF map operations.
 ///
@@ -10,7 +10,7 @@ pub trait LoadBalancerMapPort: Send + Sync {
     fn sync_service(
         &mut self,
         key: &LbServiceKey,
-        config: &LbServiceConfig,
+        config: &LbServiceConfigV2,
     ) -> Result<(), DomainError>;
 
     /// Remove a service entry from the `LB_SERVICES` map.

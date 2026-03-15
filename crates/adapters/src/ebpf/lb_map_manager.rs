@@ -1,7 +1,7 @@
 use aya::Ebpf;
 use aya::maps::{HashMap, MapData};
 use domain::common::error::DomainError;
-use ebpf_common::loadbalancer::{LbBackendEntry, LbServiceConfig, LbServiceKey};
+use ebpf_common::loadbalancer::{LbBackendEntry, LbServiceConfigV2, LbServiceKey};
 use ports::secondary::loadbalancer_map_port::LoadBalancerMapPort;
 use tracing::info;
 
@@ -11,7 +11,7 @@ use tracing::info;
 /// and backend entries. The `LB_RR_STATE` and `LB_METRICS` maps are managed
 /// by the kernel program; userspace only pushes config.
 pub struct LbMapManager {
-    services_map: HashMap<MapData, LbServiceKey, LbServiceConfig>,
+    services_map: HashMap<MapData, LbServiceKey, LbServiceConfigV2>,
     backends_map: HashMap<MapData, u32, LbBackendEntry>,
 }
 
@@ -40,7 +40,7 @@ impl LbMapManager {
     pub fn sync_service(
         &mut self,
         key: &LbServiceKey,
-        config: &LbServiceConfig,
+        config: &LbServiceConfigV2,
     ) -> Result<(), anyhow::Error> {
         self.services_map
             .insert(*key, *config, 0)
@@ -123,7 +123,7 @@ impl LoadBalancerMapPort for LbMapManager {
     fn sync_service(
         &mut self,
         key: &LbServiceKey,
-        config: &LbServiceConfig,
+        config: &LbServiceConfigV2,
     ) -> Result<(), DomainError> {
         self.sync_service(key, config)
             .map_err(|e| DomainError::EngineError(format!("lb service sync failed: {e}")))

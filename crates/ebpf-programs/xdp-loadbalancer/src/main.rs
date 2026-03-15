@@ -17,11 +17,11 @@ use ebpf_helpers::{add_metric, increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
     event::{PacketEvent, FLAG_IPV6, FLAG_VLAN},
     loadbalancer::{
-        LbBackendEntry, LbServiceConfig, LbServiceKey, LB_ACTION_FORWARD, LB_ACTION_NO_BACKEND,
-        LB_ALG_IP_HASH, LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED, LB_MAX_BACKENDS,
-        LB_METRIC_BYTES_FORWARDED, LB_METRIC_COUNT, LB_METRIC_EVENTS_DROPPED,
-        LB_METRIC_PACKETS_FORWARDED, LB_METRIC_PACKETS_NO_BACKEND, LB_METRIC_TOTAL_SEEN,
-        EVENT_TYPE_LB,
+        LbBackendEntry, LbServiceConfigV2, LbServiceKey, LB_ACTION_FORWARD,
+        LB_ACTION_NO_BACKEND, LB_ALG_IP_HASH, LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED,
+        LB_MAX_BACKENDS_V2, MAX_LB_BACKENDS_TOTAL, MAX_LB_SERVICES, LB_METRIC_BYTES_FORWARDED,
+        LB_METRIC_COUNT, LB_METRIC_EVENTS_DROPPED, LB_METRIC_PACKETS_FORWARDED,
+        LB_METRIC_PACKETS_NO_BACKEND, LB_METRIC_TOTAL_SEEN, EVENT_TYPE_LB,
     },
 };
 use network_types::{
@@ -32,10 +32,8 @@ use network_types::{
 // ── Constants ───────────────────────────────────────────────────────
 // Network constants and header structs imported from ebpf_helpers.
 
-/// Maximum services.
-const MAX_SERVICES: u32 = 64;
-/// Maximum backends.
-const MAX_BACKENDS: u32 = 256;
+/// Maximum backends per service (verifier bound for iteration).
+const MAX_BACKENDS_PER_SVC: usize = LB_MAX_BACKENDS_V2 as usize;
 
 // ── Inline program-specific header types ────────────────────────────
 
@@ -47,18 +45,19 @@ struct TcpUdpHdr {
 
 // ── eBPF Maps ───────────────────────────────────────────────────────
 
-/// Service lookup: (protocol, port) → service config.
+/// Service lookup: (protocol, port) → compact service config (V2).
 #[map]
-static LB_SERVICES: HashMap<LbServiceKey, LbServiceConfig> =
-    HashMap::with_max_entries(MAX_SERVICES, 0);
+static LB_SERVICES: HashMap<LbServiceKey, LbServiceConfigV2> =
+    HashMap::with_max_entries(MAX_LB_SERVICES, 0);
 
-/// Backend pool: backend_id → backend entry.
+/// Global backend pool: backend_id → backend entry.
 #[map]
-static LB_BACKENDS: HashMap<u32, LbBackendEntry> = HashMap::with_max_entries(MAX_BACKENDS, 0);
+static LB_BACKENDS: HashMap<u32, LbBackendEntry> =
+    HashMap::with_max_entries(MAX_LB_BACKENDS_TOTAL, 0);
 
-/// Per-service round-robin state (index 0..63).
+/// Per-service round-robin state (index 0..4095).
 #[map]
-static LB_RR_STATE: PerCpuArray<u32> = PerCpuArray::with_max_entries(MAX_SERVICES, 0);
+static LB_RR_STATE: PerCpuArray<u32> = PerCpuArray::with_max_entries(MAX_LB_SERVICES, 0);
 
 /// Per-CPU metrics.
 #[map]
@@ -352,26 +351,31 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
 
 // ── Backend Selection ───────────────────────────────────────────────
 
-/// Select a healthy backend from the service config.
-/// `svc_index` is used to look up per-service round-robin state in `LB_RR_STATE`.
-/// Returns `None` if no healthy backend is available.
+/// Select a healthy backend from the V2 service config.
+///
+/// Backends are stored globally in `LB_BACKENDS` at IDs
+/// `svc.backend_start_id..svc.backend_start_id + svc.backend_count`.
+/// The algorithm selects a starting offset, then probes linearly for a healthy backend.
 #[inline(always)]
-fn select_backend(svc: &LbServiceConfig, src_ip: u32, svc_index: u32) -> Option<&LbBackendEntry> {
+fn select_backend(
+    svc: &LbServiceConfigV2,
+    src_ip: u32,
+    svc_index: u32,
+) -> Option<&LbBackendEntry> {
     let count = svc.backend_count as usize;
     if count == 0 {
         return None;
     }
 
-    // Clamp to avoid out-of-bounds
-    let count = if count > LB_MAX_BACKENDS {
-        LB_MAX_BACKENDS
+    // Clamp to verifier-friendly bound
+    let count = if count > MAX_BACKENDS_PER_SVC {
+        MAX_BACKENDS_PER_SVC
     } else {
         count
     };
 
     let start_idx = match svc.algorithm {
         LB_ALG_ROUND_ROBIN => {
-            // Use per-service round-robin state indexed by svc_index
             let rr_ptr = LB_RR_STATE.get_ptr_mut(svc_index)?;
             let rr = unsafe { *rr_ptr };
             unsafe {
@@ -404,11 +408,11 @@ fn select_backend(svc: &LbServiceConfig, src_ip: u32, svc_index: u32) -> Option<
     while i < count {
         let idx = (start_idx + i) % count;
         // Bounds check for verifier
-        if idx >= LB_MAX_BACKENDS {
+        if idx >= MAX_BACKENDS_PER_SVC {
             i += 1;
             continue;
         }
-        let backend_id = svc.backend_ids[idx];
+        let backend_id = svc.backend_start_id + idx as u32;
         if let Some(be) = unsafe { LB_BACKENDS.get(&backend_id) } {
             if be.healthy == 1 {
                 return Some(be);
@@ -421,12 +425,11 @@ fn select_backend(svc: &LbServiceConfig, src_ip: u32, svc_index: u32) -> Option<
 }
 
 /// Derive a per-service index from a `LbServiceKey` for round-robin state lookup.
-/// Maps the (protocol, port) pair to an index in `0..MAX_SERVICES`.
+/// Maps the (protocol, port) pair to an index in `0..MAX_LB_SERVICES`.
 #[inline(always)]
 fn service_key_index(key: &LbServiceKey) -> u32 {
-    // Combine protocol and port into a u32, then hash to fit MAX_SERVICES
     let combined = (key.protocol as u32) << 16 | (key.port as u32);
-    fnv1a(combined) % MAX_SERVICES
+    fnv1a(combined) % MAX_LB_SERVICES
 }
 
 /// FNV-1a hash of a u32 value.

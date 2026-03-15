@@ -127,6 +127,65 @@ pub struct LeakyBucketValue {
     pub last_update_ns: u64,
 }
 
+/// Maximum bucket map entries (single consolidated map replacing 4 per-algorithm maps).
+pub const MAX_RL_BUCKET_ENTRIES: u32 = 262_144;
+
+/// Consolidated bucket union for all rate-limit algorithms.
+///
+/// Stores the discriminant (`algorithm`) and a data region large enough
+/// for the biggest variant (`SlidingWindowValue`, 56 bytes). The eBPF
+/// program casts `data` to the correct typed pointer based on `algorithm`.
+///
+/// Size: 64 bytes (aligned to 8 bytes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RateLimitBucketUnion {
+    /// Algorithm discriminant: `ALGO_TOKEN_BUCKET`, `ALGO_FIXED_WINDOW`, etc.
+    pub algorithm: u8,
+    pub _pad: [u8; 7],
+    /// Raw data region — reinterpreted as the correct value type.
+    /// Use [`Self::as_token_bucket`], [`Self::as_fixed_window`], etc.
+    pub data: [u64; 7],
+}
+
+impl RateLimitBucketUnion {
+    /// Create a new union bucket for token bucket algorithm.
+    pub const fn new_token_bucket(val: &RateLimitValue) -> Self {
+        let mut data = [0u64; 7];
+        data[0] = val.tokens;
+        data[1] = val.last_refill_ns;
+        Self {
+            algorithm: ALGO_TOKEN_BUCKET,
+            _pad: [0; 7],
+            data,
+        }
+    }
+
+    /// Create a new union bucket for fixed window algorithm.
+    pub const fn new_fixed_window(val: &FixedWindowValue) -> Self {
+        let mut data = [0u64; 7];
+        data[0] = val.pkt_count;
+        data[1] = val.window_start;
+        Self {
+            algorithm: ALGO_FIXED_WINDOW,
+            _pad: [0; 7],
+            data,
+        }
+    }
+
+    /// Create a new union bucket for leaky bucket algorithm.
+    pub const fn new_leaky_bucket(val: &LeakyBucketValue) -> Self {
+        let mut data = [0u64; 7];
+        data[0] = val.level;
+        data[1] = val.last_update_ns;
+        Self {
+            algorithm: ALGO_LEAKY_BUCKET,
+            _pad: [0; 7],
+            data,
+        }
+    }
+}
+
 // SAFETY: All types are #[repr(C)], Copy, 'static, and contain only primitive types
 // with explicit padding. Safe for zero-copy eBPF map operations via aya.
 #[cfg(feature = "userspace")]
@@ -145,6 +204,8 @@ unsafe impl aya::Pod for FixedWindowValue {}
 unsafe impl aya::Pod for SlidingWindowValue {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for LeakyBucketValue {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for RateLimitBucketUnion {}
 
 #[cfg(test)]
 mod tests {
@@ -269,6 +330,70 @@ mod tests {
     fn leaky_bucket_value_field_offsets() {
         assert_eq!(mem::offset_of!(LeakyBucketValue, level), 0);
         assert_eq!(mem::offset_of!(LeakyBucketValue, last_update_ns), 8);
+    }
+
+    #[test]
+    fn bucket_union_size() {
+        assert_eq!(mem::size_of::<RateLimitBucketUnion>(), 64);
+    }
+
+    #[test]
+    fn bucket_union_alignment() {
+        assert_eq!(mem::align_of::<RateLimitBucketUnion>(), 8);
+    }
+
+    #[test]
+    fn bucket_union_field_offsets() {
+        assert_eq!(mem::offset_of!(RateLimitBucketUnion, algorithm), 0);
+        assert_eq!(mem::offset_of!(RateLimitBucketUnion, _pad), 1);
+        assert_eq!(mem::offset_of!(RateLimitBucketUnion, data), 8);
+    }
+
+    #[test]
+    fn bucket_union_data_fits_all_variants() {
+        // data region (56 bytes) must fit the largest variant
+        let data_size = mem::size_of::<[u64; 7]>();
+        assert!(data_size >= mem::size_of::<RateLimitValue>());
+        assert!(data_size >= mem::size_of::<FixedWindowValue>());
+        assert!(data_size >= mem::size_of::<SlidingWindowValue>());
+        assert!(data_size >= mem::size_of::<LeakyBucketValue>());
+    }
+
+    #[test]
+    fn bucket_union_data_alignment_compatible() {
+        // data starts at offset 8, which must be compatible with all variant alignments
+        let data_offset = mem::offset_of!(RateLimitBucketUnion, data);
+        assert_eq!(data_offset % mem::align_of::<RateLimitValue>(), 0);
+        assert_eq!(data_offset % mem::align_of::<FixedWindowValue>(), 0);
+        assert_eq!(data_offset % mem::align_of::<SlidingWindowValue>(), 0);
+        assert_eq!(data_offset % mem::align_of::<LeakyBucketValue>(), 0);
+    }
+
+    #[test]
+    fn bucket_union_constructors() {
+        let tb = RateLimitBucketUnion::new_token_bucket(&RateLimitValue {
+            tokens: 42,
+            last_refill_ns: 100,
+        });
+        assert_eq!(tb.algorithm, ALGO_TOKEN_BUCKET);
+        assert_eq!(tb.data[0], 42);
+        assert_eq!(tb.data[1], 100);
+
+        let fw = RateLimitBucketUnion::new_fixed_window(&FixedWindowValue {
+            pkt_count: 10,
+            window_start: 200,
+        });
+        assert_eq!(fw.algorithm, ALGO_FIXED_WINDOW);
+        assert_eq!(fw.data[0], 10);
+        assert_eq!(fw.data[1], 200);
+
+        let lb = RateLimitBucketUnion::new_leaky_bucket(&LeakyBucketValue {
+            level: 5,
+            last_update_ns: 300,
+        });
+        assert_eq!(lb.algorithm, ALGO_LEAKY_BUCKET);
+        assert_eq!(lb.data[0], 5);
+        assert_eq!(lb.data[1], 300);
     }
 
     #[test]

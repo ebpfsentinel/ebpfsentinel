@@ -5,8 +5,8 @@ use domain::common::error::DomainError;
 use domain::loadbalancer::engine::LbEngine;
 use domain::loadbalancer::entity::{LbAlgorithm, LbBackend, LbProtocol, LbService};
 use ebpf_common::loadbalancer::{
-    LB_ALG_IP_HASH, LB_ALG_LEAST_CONN, LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED, LB_MAX_BACKENDS,
-    LbBackendEntry, LbServiceConfig, LbServiceKey,
+    LB_ALG_IP_HASH, LB_ALG_LEAST_CONN, LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED, LB_MAX_BACKENDS_V2,
+    LbBackendEntry, LbServiceConfigV2, LbServiceKey,
 };
 use ports::secondary::loadbalancer_map_port::LoadBalancerMapPort;
 use ports::secondary::metrics_port::MetricsPort;
@@ -138,28 +138,38 @@ impl LbAppService {
             return;
         }
 
-        // Sync all services and backends
+        // Sync all services and backends with globally unique backend IDs.
+        // Each service gets a slot (monotonic counter × 256), so backends
+        // for service N start at ID N*256.
+        let mut service_slot: u32 = 0;
         for service in self.engine.services() {
             if !service.enabled {
                 continue;
             }
 
+            let backend_start_id = service_slot.saturating_mul(LB_MAX_BACKENDS_V2);
             let key = service_to_ebpf_key(service);
-            let config = service_to_ebpf_config(service);
+            let config = service_to_ebpf_config(service, backend_start_id);
 
             if let Err(e) = port.sync_service(&key, &config) {
                 tracing::warn!(
                     service = %service.id,
                     "failed to sync LB service to eBPF: {e}"
                 );
+                service_slot += 1;
                 continue;
             }
 
-            // Sync backends
-            for (idx, backend) in service.backends.iter().enumerate() {
+            // Sync backends with globally unique IDs
+            for (idx, backend) in service
+                .backends
+                .iter()
+                .enumerate()
+                .take(LB_MAX_BACKENDS_V2 as usize)
+            {
                 let entry = backend_to_ebpf_entry(backend);
                 #[allow(clippy::cast_possible_truncation)]
-                let backend_id = idx as u32;
+                let backend_id = backend_start_id + idx as u32;
                 if let Err(e) = port.sync_backend(backend_id, &entry) {
                     tracing::warn!(
                         backend = %backend.id,
@@ -167,6 +177,8 @@ impl LbAppService {
                     );
                 }
             }
+
+            service_slot += 1;
         }
     }
 
@@ -190,7 +202,7 @@ fn service_to_ebpf_key(service: &LbService) -> LbServiceKey {
     }
 }
 
-fn service_to_ebpf_config(service: &LbService) -> LbServiceConfig {
+fn service_to_ebpf_config(service: &LbService, backend_start_id: u32) -> LbServiceConfigV2 {
     let algorithm = match service.algorithm {
         LbAlgorithm::RoundRobin => LB_ALG_ROUND_ROBIN,
         LbAlgorithm::Weighted => LB_ALG_WEIGHTED,
@@ -199,21 +211,13 @@ fn service_to_ebpf_config(service: &LbService) -> LbServiceConfig {
     };
 
     #[allow(clippy::cast_possible_truncation)]
-    let backend_count = service.backends.len().min(LB_MAX_BACKENDS) as u8;
+    let backend_count = service.backends.len().min(LB_MAX_BACKENDS_V2 as usize) as u8;
 
-    let mut backend_ids = [0u32; LB_MAX_BACKENDS];
-    for (i, _) in service.backends.iter().enumerate().take(LB_MAX_BACKENDS) {
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            backend_ids[i] = i as u32;
-        }
-    }
-
-    LbServiceConfig {
+    LbServiceConfigV2 {
         algorithm,
         backend_count,
         _pad: [0; 2],
-        backend_ids,
+        backend_start_id,
     }
 }
 
@@ -378,11 +382,10 @@ mod tests {
     #[test]
     fn service_to_ebpf_config_round_robin() {
         let svc = make_lb_service("svc-1", 443);
-        let config = service_to_ebpf_config(&svc);
+        let config = service_to_ebpf_config(&svc, 0);
         assert_eq!(config.algorithm, LB_ALG_ROUND_ROBIN);
         assert_eq!(config.backend_count, 2);
-        assert_eq!(config.backend_ids[0], 0);
-        assert_eq!(config.backend_ids[1], 1);
+        assert_eq!(config.backend_start_id, 0);
     }
 
     #[test]

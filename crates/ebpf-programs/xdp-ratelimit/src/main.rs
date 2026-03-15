@@ -38,10 +38,10 @@ use ebpf_common::{
     },
     event::{PacketEvent, EVENT_TYPE_RATELIMIT, FLAG_IPV6, FLAG_VLAN},
     ratelimit::{
-        FixedWindowValue, LeakyBucketValue, RateLimitConfig, RateLimitKey, RateLimitTierValue,
-        RateLimitValue, SlidingWindowValue, ALGO_FIXED_WINDOW, ALGO_LEAKY_BUCKET,
-        ALGO_SLIDING_WINDOW, MAX_RL_LPM_ENTRIES, MAX_RL_TIERS, RATELIMIT_ACTION_DROP,
-        SLIDING_WINDOW_NUM_SLOTS,
+        FixedWindowValue, LeakyBucketValue, RateLimitBucketUnion, RateLimitConfig, RateLimitKey,
+        RateLimitTierValue, RateLimitValue, SlidingWindowValue, ALGO_FIXED_WINDOW,
+        ALGO_LEAKY_BUCKET, ALGO_SLIDING_WINDOW, ALGO_TOKEN_BUCKET, MAX_RL_BUCKET_ENTRIES,
+        MAX_RL_LPM_ENTRIES, MAX_RL_TIERS, RATELIMIT_ACTION_DROP, SLIDING_WINDOW_NUM_SLOTS,
     },
 };
 use network_types::{
@@ -115,27 +115,13 @@ struct IcmpHdr {
 static RATELIMIT_CONFIG: HashMap<RateLimitKey, RateLimitConfig> =
     HashMap::with_max_entries(10240, 0);
 
-/// Per-source-IP token bucket state. Per-CPU LRU eliminates cross-CPU
-/// contention; each CPU maintains independent counters (effective rate
-/// scales with CPU count — acceptable for DDoS mitigation).
+/// Consolidated per-source-IP bucket state for all algorithms.
+/// Per-CPU LRU eliminates cross-CPU contention; each CPU maintains
+/// independent counters (effective rate scales with CPU count).
+/// Replaces 4 separate per-algorithm maps with a single discriminated union.
 #[map]
-static RATELIMIT_BUCKETS: LruPerCpuHashMap<RateLimitKey, RateLimitValue> =
-    LruPerCpuHashMap::with_max_entries(65536, 0);
-
-/// Per-source-IP fixed window state (per-CPU).
-#[map]
-static FIXED_WINDOW_BUCKETS: LruPerCpuHashMap<RateLimitKey, FixedWindowValue> =
-    LruPerCpuHashMap::with_max_entries(65536, 0);
-
-/// Per-source-IP sliding window state (per-CPU).
-#[map]
-static SLIDING_WINDOW_BUCKETS: LruPerCpuHashMap<RateLimitKey, SlidingWindowValue> =
-    LruPerCpuHashMap::with_max_entries(65536, 0);
-
-/// Per-source-IP leaky bucket state (per-CPU).
-#[map]
-static LEAKY_BUCKET_BUCKETS: LruPerCpuHashMap<RateLimitKey, LeakyBucketValue> =
-    LruPerCpuHashMap::with_max_entries(65536, 0);
+static RL_BUCKETS: LruPerCpuHashMap<RateLimitKey, RateLimitBucketUnion> =
+    LruPerCpuHashMap::with_max_entries(MAX_RL_BUCKET_ENTRIES, 0);
 
 /// Per-CPU counters. Index: 0=passed, 1=throttled, 2=errors, 3=events_dropped, 4=total_seen.
 #[map]
@@ -1933,15 +1919,27 @@ fn emit_ddos_event(
 /// Returns `true` if packet should pass, `false` if throttled.
 #[inline(always)]
 fn check_token_bucket(key: &RateLimitKey, config: &RateLimitConfig, now: u64) -> bool {
-    if let Some(bucket) = RATELIMIT_BUCKETS.get_ptr_mut(key) {
-        let bucket = unsafe { &mut *bucket };
+    if let Some(union_ptr) = RL_BUCKETS.get_ptr_mut(key) {
+        let union_bucket = unsafe { &mut *union_ptr };
+        // If algorithm changed, treat as new bucket
+        if union_bucket.algorithm != ALGO_TOKEN_BUCKET {
+            let val = RateLimitValue {
+                tokens: config.burst.saturating_sub(1),
+                last_refill_ns: now,
+            };
+            let new_bucket = RateLimitBucketUnion::new_token_bucket(&val);
+            let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+            return true;
+        }
+        let bucket = unsafe { &mut *(union_bucket.data.as_mut_ptr() as *mut RateLimitValue) };
         token_bucket_check(bucket, config, now)
     } else {
-        let new_bucket = RateLimitValue {
+        let val = RateLimitValue {
             tokens: config.burst.saturating_sub(1),
             last_refill_ns: now,
         };
-        let _ = RATELIMIT_BUCKETS.insert(key, &new_bucket, 0);
+        let new_bucket = RateLimitBucketUnion::new_token_bucket(&val);
+        let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
         true
     }
 }
@@ -1971,8 +1969,18 @@ fn token_bucket_check(bucket: &mut RateLimitValue, config: &RateLimitConfig, now
 fn check_fixed_window(key: &RateLimitKey, config: &RateLimitConfig, now: u64) -> bool {
     let limit = config.ns_per_token;
 
-    if let Some(bucket) = FIXED_WINDOW_BUCKETS.get_ptr_mut(key) {
-        let bucket = unsafe { &mut *bucket };
+    if let Some(union_ptr) = RL_BUCKETS.get_ptr_mut(key) {
+        let union_bucket = unsafe { &mut *union_ptr };
+        if union_bucket.algorithm != ALGO_FIXED_WINDOW {
+            let val = FixedWindowValue {
+                pkt_count: 1,
+                window_start: now,
+            };
+            let new_bucket = RateLimitBucketUnion::new_fixed_window(&val);
+            let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+            return true;
+        }
+        let bucket = unsafe { &mut *(union_bucket.data.as_mut_ptr() as *mut FixedWindowValue) };
 
         if now.saturating_sub(bucket.window_start) >= WINDOW_NS {
             bucket.pkt_count = 1;
@@ -1986,11 +1994,12 @@ fn check_fixed_window(key: &RateLimitKey, config: &RateLimitConfig, now: u64) ->
         bucket.pkt_count += 1;
         true
     } else {
-        let new_val = FixedWindowValue {
+        let val = FixedWindowValue {
             pkt_count: 1,
             window_start: now,
         };
-        let _ = FIXED_WINDOW_BUCKETS.insert(key, &new_val, 0);
+        let new_bucket = RateLimitBucketUnion::new_fixed_window(&val);
+        let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
         true
     }
 }
@@ -2001,8 +2010,35 @@ fn check_fixed_window(key: &RateLimitKey, config: &RateLimitConfig, now: u64) ->
 fn check_sliding_window(key: &RateLimitKey, config: &RateLimitConfig, now: u64) -> bool {
     let max_packets = config.ns_per_token;
 
-    if let Some(bucket) = SLIDING_WINDOW_BUCKETS.get_ptr_mut(key) {
-        let bucket = unsafe { &mut *bucket };
+    if let Some(union_ptr) = RL_BUCKETS.get_ptr_mut(key) {
+        let union_bucket = unsafe { &mut *union_ptr };
+        if union_bucket.algorithm != ALGO_SLIDING_WINDOW {
+            let mut sw = SlidingWindowValue {
+                slots: [0; SLIDING_WINDOW_NUM_SLOTS],
+                current_slot: 0,
+                _pad: 0,
+                slot_start_ns: now,
+                window_total: 1,
+            };
+            sw.slots[0] = 1;
+            let mut new_bucket = RateLimitBucketUnion {
+                algorithm: ALGO_SLIDING_WINDOW,
+                _pad: [0; 7],
+                data: [0u64; 7],
+            };
+            // SAFETY: SlidingWindowValue is 56 bytes, fits in data (56 bytes), aligned to 8.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    &sw as *const SlidingWindowValue as *const u8,
+                    new_bucket.data.as_mut_ptr() as *mut u8,
+                    core::mem::size_of::<SlidingWindowValue>(),
+                );
+            }
+            let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+            return true;
+        }
+        let bucket =
+            unsafe { &mut *(union_bucket.data.as_mut_ptr() as *mut SlidingWindowValue) };
         sliding_window_update(bucket, now);
 
         if bucket.window_total >= max_packets {
@@ -2016,15 +2052,27 @@ fn check_sliding_window(key: &RateLimitKey, config: &RateLimitConfig, now: u64) 
         bucket.window_total += 1;
         true
     } else {
-        let mut new_val = SlidingWindowValue {
+        let mut sw = SlidingWindowValue {
             slots: [0; SLIDING_WINDOW_NUM_SLOTS],
             current_slot: 0,
             _pad: 0,
             slot_start_ns: now,
             window_total: 1,
         };
-        new_val.slots[0] = 1;
-        let _ = SLIDING_WINDOW_BUCKETS.insert(key, &new_val, 0);
+        sw.slots[0] = 1;
+        let mut new_bucket = RateLimitBucketUnion {
+            algorithm: ALGO_SLIDING_WINDOW,
+            _pad: [0; 7],
+            data: [0u64; 7],
+        };
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                &sw as *const SlidingWindowValue as *const u8,
+                new_bucket.data.as_mut_ptr() as *mut u8,
+                core::mem::size_of::<SlidingWindowValue>(),
+            );
+        }
+        let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
         true
     }
 }
@@ -2074,8 +2122,18 @@ fn check_leaky_bucket(key: &RateLimitKey, config: &RateLimitConfig, now: u64) ->
     let drain_rate = config.ns_per_token;
     let capacity = config.burst;
 
-    if let Some(bucket) = LEAKY_BUCKET_BUCKETS.get_ptr_mut(key) {
-        let bucket = unsafe { &mut *bucket };
+    if let Some(union_ptr) = RL_BUCKETS.get_ptr_mut(key) {
+        let union_bucket = unsafe { &mut *union_ptr };
+        if union_bucket.algorithm != ALGO_LEAKY_BUCKET {
+            let val = LeakyBucketValue {
+                level: 1,
+                last_update_ns: now,
+            };
+            let new_bucket = RateLimitBucketUnion::new_leaky_bucket(&val);
+            let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+            return true;
+        }
+        let bucket = unsafe { &mut *(union_bucket.data.as_mut_ptr() as *mut LeakyBucketValue) };
 
         let elapsed_ns = now.saturating_sub(bucket.last_update_ns);
 
@@ -2093,11 +2151,12 @@ fn check_leaky_bucket(key: &RateLimitKey, config: &RateLimitConfig, now: u64) ->
         bucket.level += 1;
         true
     } else {
-        let new_val = LeakyBucketValue {
+        let val = LeakyBucketValue {
             level: 1,
             last_update_ns: now,
         };
-        let _ = LEAKY_BUCKET_BUCKETS.insert(key, &new_val, 0);
+        let new_bucket = RateLimitBucketUnion::new_leaky_bucket(&val);
+        let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
         true
     }
 }
