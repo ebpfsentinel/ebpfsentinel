@@ -24,7 +24,7 @@ use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
     event::{
         PacketEvent, EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, FLAG_VLAN,
-        MAX_L7_PAYLOAD,
+        MAX_L7_PAYLOAD, SMALL_L7_PAYLOAD,
     },
     ids::{
         IdsSamplingConfig, IdsPatternKey, IdsPatternValue, IDS_ACTION_DROP, IDS_SAMPLING_RANDOM,
@@ -74,9 +74,16 @@ static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
 #[map]
 static L7_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(64, 0);
 
-/// Fixed-size buffer for L7 events: PacketEvent header + raw payload.
-/// Submitted as a single RingBuf entry; userspace extracts payload from
-/// bytes[64..] (everything after the 64-byte PacketEvent header).
+/// Small L7 event buffer (192 bytes): header + 128 bytes payload.
+/// Used when TCP payload ≤ 128 bytes — saves 67% RingBuf space vs full buffer.
+#[repr(C)]
+struct L7EventSmall {
+    header: PacketEvent,
+    payload: [u8; SMALL_L7_PAYLOAD],
+}
+
+/// Full L7 event buffer (576 bytes): header + 512 bytes payload.
+/// Used when TCP payload > 128 bytes.
 #[repr(C)]
 struct L7EventBuf {
     header: PacketEvent,
@@ -401,8 +408,13 @@ fn emit_event(
 }
 
 /// Emit an L7 event: PacketEvent header + raw payload bytes from the packet.
-/// Reserves a fixed-size L7EventBuf in the RingBuf, fills the header, and
-/// copies up to MAX_L7_PAYLOAD bytes of TCP payload starting at `l7_offset`.
+///
+/// Uses tiered RingBuf reservation to minimize bandwidth:
+/// - Packets with ≤ 128 bytes of TCP payload → `L7EventSmall` (192 bytes, saves 67%)
+/// - Packets with > 128 bytes → `L7EventBuf` (576 bytes, full capture)
+///
+/// Both tiers use compile-time constant lengths for `bpf_skb_load_bytes`
+/// (required by the eBPF verifier on kernel 6.1+).
 #[inline(always)]
 fn emit_l7_event(
     ctx: &TcContext,
@@ -418,34 +430,73 @@ fn emit_l7_event(
         increment_metric(METRIC_EVENTS_DROPPED);
         return;
     }
+
+    // Calculate available TCP payload length
+    let pkt_len = ctx.len() as usize;
+    let payload_avail = pkt_len.saturating_sub(l7_offset);
+
+    if payload_avail <= SMALL_L7_PAYLOAD {
+        // Small tier: reserve 192 bytes instead of 576
+        emit_l7_small(ctx, src_addr, dst_addr, src_port, dst_port, flags, vlan_id, l7_offset);
+    } else {
+        // Full tier: reserve 576 bytes
+        emit_l7_full(ctx, src_addr, dst_addr, src_port, dst_port, flags, vlan_id, l7_offset);
+    }
+}
+
+/// Small L7 event (192 bytes): for packets with ≤ 128 bytes TCP payload.
+#[inline(always)]
+fn emit_l7_small(
+    ctx: &TcContext,
+    src_addr: &[u32; 4],
+    dst_addr: &[u32; 4],
+    src_port: u16,
+    dst_port: u16,
+    flags: u8,
+    vlan_id: u16,
+    l7_offset: usize,
+) {
+    if let Some(mut entry) = EVENTS.reserve::<L7EventSmall>(0) {
+        let ptr = entry.as_mut_ptr();
+        unsafe {
+            fill_l7_header(
+                &mut (*ptr).header,
+                src_addr, dst_addr, src_port, dst_port, flags, vlan_id,
+            );
+            core::ptr::write_bytes((*ptr).payload.as_mut_ptr(), 0, SMALL_L7_PAYLOAD);
+            let _ = bpf_skb_load_bytes(
+                ctx.skb.skb as *const _,
+                l7_offset as u32,
+                (*ptr).payload.as_mut_ptr() as *mut _,
+                SMALL_L7_PAYLOAD as u32,
+            );
+        }
+        entry.submit(0);
+    } else {
+        increment_metric(METRIC_EVENTS_DROPPED);
+    }
+}
+
+/// Full L7 event (576 bytes): for packets with > 128 bytes TCP payload.
+#[inline(always)]
+fn emit_l7_full(
+    ctx: &TcContext,
+    src_addr: &[u32; 4],
+    dst_addr: &[u32; 4],
+    src_port: u16,
+    dst_port: u16,
+    flags: u8,
+    vlan_id: u16,
+    l7_offset: usize,
+) {
     if let Some(mut entry) = EVENTS.reserve::<L7EventBuf>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
-            // Fill header
-            (*ptr).header.timestamp_ns = bpf_ktime_get_boot_ns();
-            (*ptr).header.src_addr = *src_addr;
-            (*ptr).header.dst_addr = *dst_addr;
-            (*ptr).header.src_port = src_port;
-            (*ptr).header.dst_port = dst_port;
-            (*ptr).header.protocol = PROTO_TCP;
-            (*ptr).header.event_type = EVENT_TYPE_L7;
-            (*ptr).header.action = 0;
-            (*ptr).header.flags = flags;
-            (*ptr).header.rule_id = 0;
-            (*ptr).header.vlan_id = vlan_id;
-            (*ptr).header.cpu_id = bpf_get_smp_processor_id() as u16;
-            (*ptr).header.socket_cookie = 0;
-
-            // Zero payload buffer so bytes beyond the actual L7 payload
-            // are deterministic even if bpf_skb_load_bytes copies less.
+            fill_l7_header(
+                &mut (*ptr).header,
+                src_addr, dst_addr, src_port, dst_port, flags, vlan_id,
+            );
             core::ptr::write_bytes((*ptr).payload.as_mut_ptr(), 0, MAX_L7_PAYLOAD);
-
-            // Call bpf_skb_load_bytes directly with a compile-time constant
-            // length (MAX_L7_PAYLOAD = 512). The verifier on kernel 6.17+
-            // rejects variable-length copies from packet data. With a
-            // constant length the verifier sees R4=512 (fixed). If the
-            // packet has fewer bytes, bpf_skb_load_bytes returns an error
-            // and the pre-zeroed buffer remains intact.
             let _ = bpf_skb_load_bytes(
                 ctx.skb.skb as *const _,
                 l7_offset as u32,
@@ -457,6 +508,32 @@ fn emit_l7_event(
     } else {
         increment_metric(METRIC_EVENTS_DROPPED);
     }
+}
+
+/// Fill the L7 event header fields (shared by both tiers).
+#[inline(always)]
+unsafe fn fill_l7_header(
+    header: &mut PacketEvent,
+    src_addr: &[u32; 4],
+    dst_addr: &[u32; 4],
+    src_port: u16,
+    dst_port: u16,
+    flags: u8,
+    vlan_id: u16,
+) {
+    header.timestamp_ns = bpf_ktime_get_boot_ns();
+    header.src_addr = *src_addr;
+    header.dst_addr = *dst_addr;
+    header.src_port = src_port;
+    header.dst_port = dst_port;
+    header.protocol = PROTO_TCP;
+    header.event_type = EVENT_TYPE_L7;
+    header.action = 0;
+    header.flags = flags;
+    header.rule_id = 0;
+    header.vlan_id = vlan_id;
+    header.cpu_id = bpf_get_smp_processor_id() as u16;
+    header.socket_cookie = 0;
 }
 
 #[panic_handler]

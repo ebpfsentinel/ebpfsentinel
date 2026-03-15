@@ -12,6 +12,11 @@ pub const EVENT_TYPE_QOS: u8 = 8;
 /// Maximum L7 payload bytes captured by eBPF and sent via RingBuf.
 pub const MAX_L7_PAYLOAD: usize = 512;
 
+/// Small L7 payload tier (128 bytes) — covers HTTP method lines, TLS record
+/// headers, SSH banners, and most protocol signatures. Used when the packet's
+/// TCP payload is ≤ 128 bytes, saving 384 bytes per RingBuf entry (67%).
+pub const SMALL_L7_PAYLOAD: usize = 128;
+
 /// Flag bit: packet is IPv6 (otherwise IPv4).
 pub const FLAG_IPV6: u8 = 0x01;
 /// Flag bit: packet had an 802.1Q VLAN tag.
@@ -153,6 +158,8 @@ mod tests {
         assert_eq!(EVENT_TYPE_DNS, 7);
         assert_eq!(EVENT_TYPE_QOS, 8);
         assert_eq!(MAX_L7_PAYLOAD, 512);
+        assert_eq!(SMALL_L7_PAYLOAD, 128);
+        assert!(SMALL_L7_PAYLOAD < MAX_L7_PAYLOAD);
     }
 
     #[test]

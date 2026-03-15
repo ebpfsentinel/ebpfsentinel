@@ -10,9 +10,9 @@ use aya_ebpf::{
 use core::ffi::c_void;
 use ebpf_helpers::increment_metric;
 use ebpf_common::dlp::{
-    DlpEvent, SslReadArgs, DLP_DIRECTION_READ, DLP_DIRECTION_WRITE, DLP_MAX_EXCERPT,
-    DLP_METRIC_ERRORS, DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_READ_EVENTS,
-    DLP_METRIC_TOTAL_SEEN, DLP_METRIC_WRITE_EVENTS,
+    DlpEvent, DlpEventSmall, SslReadArgs, DLP_DIRECTION_READ, DLP_DIRECTION_WRITE,
+    DLP_MAX_EXCERPT, DLP_METRIC_ERRORS, DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_READ_EVENTS,
+    DLP_METRIC_TOTAL_SEEN, DLP_METRIC_WRITE_EVENTS, DLP_SMALL_EXCERPT,
 };
 
 // ── Maps ────────────────────────────────────────────────────────────
@@ -162,37 +162,63 @@ fn try_ssl_read_ret(ctx: &RetProbeContext) -> Result<(), ()> {
 ///    which is fragile and version-dependent.
 ///
 /// The `data_len` field in the event header tells userspace how many bytes
-/// of the excerpt are meaningful. When `data_len < DLP_MAX_EXCERPT`, only
-/// `data_len` bytes are copied from userspace (the read may partially
-/// fail, leaving the rest zero-initialized). The zero-init + short-read
-/// approach avoids leaking kernel memory while keeping the verifier happy.
+/// Emit a DLP event with tiered RingBuf reservation:
+/// - `data_len ≤ 256` → `DlpEventSmall` (280 bytes, saves ~94%)
+/// - `data_len > 256`  → `DlpEvent` (4120 bytes, full capture)
 #[inline(always)]
 fn emit_dlp_event(user_buf: *const u8, data_len: u32, direction: u8) {
-    if let Some(mut entry) = EVENTS.reserve::<DlpEvent>(0) {
+    if data_len <= DLP_SMALL_EXCERPT as u32 {
+        emit_dlp_small(user_buf, data_len, direction);
+    } else {
+        emit_dlp_full(user_buf, data_len, direction);
+    }
+}
+
+/// Small DLP event (280 bytes): for SSL payloads ≤ 256 bytes.
+#[inline(always)]
+fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
+    if let Some(mut entry) = EVENTS.reserve::<DlpEventSmall>(0) {
         let ptr = entry.as_mut_ptr();
         let pid_tgid = bpf_get_current_pid_tgid();
-
         unsafe {
-            // Fill header fields.
             (*ptr).pid = pid_tgid as u32;
             (*ptr).tgid = (pid_tgid >> 32) as u32;
             (*ptr).timestamp_ns = bpf_ktime_get_boot_ns();
             (*ptr).data_len = data_len;
             (*ptr).direction = direction;
             (*ptr)._padding = [0; 3];
+            core::ptr::write_bytes((*ptr).data_excerpt.as_mut_ptr(), 0, DLP_SMALL_EXCERPT);
+            let read_len = if data_len < DLP_SMALL_EXCERPT as u32 {
+                data_len
+            } else {
+                DLP_SMALL_EXCERPT as u32
+            };
+            let _ = r#gen::bpf_probe_read_user(
+                (*ptr).data_excerpt.as_mut_ptr() as *mut c_void,
+                read_len,
+                user_buf as *const c_void,
+            );
+        }
+        entry.submit(0);
+    } else {
+        increment_metric(DLP_METRIC_EVENTS_DROPPED);
+    }
+}
 
-            // Zero the entire excerpt buffer to prevent leaking uninitialised
-            // memory to userspace.
+/// Full DLP event (4120 bytes): for SSL payloads > 256 bytes.
+#[inline(always)]
+fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8) {
+    if let Some(mut entry) = EVENTS.reserve::<DlpEvent>(0) {
+        let ptr = entry.as_mut_ptr();
+        let pid_tgid = bpf_get_current_pid_tgid();
+        unsafe {
+            (*ptr).pid = pid_tgid as u32;
+            (*ptr).tgid = (pid_tgid >> 32) as u32;
+            (*ptr).timestamp_ns = bpf_ktime_get_boot_ns();
+            (*ptr).data_len = data_len;
+            (*ptr).direction = direction;
+            (*ptr)._padding = [0; 3];
             core::ptr::write_bytes((*ptr).data_excerpt.as_mut_ptr(), 0, DLP_MAX_EXCERPT);
-
-            // Optimization: if data_len < DLP_MAX_EXCERPT, only attempt to
-            // read data_len bytes. This reduces the chance of faulting on
-            // unmapped pages beyond the user buffer. On failure (partial
-            // read or fault), the pre-zeroed buffer remains intact.
-            //
-            // We still must pass a compile-time-bounded length to satisfy
-            // the verifier. The `min` ensures we never exceed the buffer,
-            // and data_len is clamped by callers to the SSL buffer size.
             let read_len = if data_len < DLP_MAX_EXCERPT as u32 {
                 data_len
             } else {
@@ -204,10 +230,8 @@ fn emit_dlp_event(user_buf: *const u8, data_len: u32, direction: u8) {
                 user_buf as *const c_void,
             );
         }
-
         entry.submit(0);
     } else {
-        // RingBuf full — drop event, increment counter.
         increment_metric(DLP_METRIC_EVENTS_DROPPED);
     }
 }

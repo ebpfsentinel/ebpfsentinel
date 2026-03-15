@@ -3,6 +3,11 @@
 /// Maximum bytes of plaintext captured per SSL_write/SSL_read call.
 pub const DLP_MAX_EXCERPT: usize = 4096;
 
+/// Small DLP excerpt tier (256 bytes) — covers most HTTP request/response
+/// headers, JSON API payloads, and PCI/PII pattern matches. Used when
+/// `data_len ≤ 256`, saving ~94% RingBuf space vs full 4K buffer.
+pub const DLP_SMALL_EXCERPT: usize = 256;
+
 /// Direction: data was written (SSL_write).
 pub const DLP_DIRECTION_WRITE: u8 = 0;
 /// Direction: data was read (SSL_read).
@@ -55,6 +60,36 @@ impl core::fmt::Debug for DlpEvent {
             .finish_non_exhaustive()
     }
 }
+
+/// Small DLP event (280 bytes): header + 256 bytes excerpt.
+/// Used when `data_len ≤ 256`, saving ~94% RingBuf space.
+/// Size: 280 bytes (aligned to 8 bytes).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DlpEventSmall {
+    pub pid: u32,
+    pub tgid: u32,
+    pub timestamp_ns: u64,
+    pub data_len: u32,
+    pub direction: u8,
+    pub _padding: [u8; 3],
+    pub data_excerpt: [u8; DLP_SMALL_EXCERPT],
+}
+
+impl core::fmt::Debug for DlpEventSmall {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DlpEventSmall")
+            .field("pid", &self.pid)
+            .field("tgid", &self.tgid)
+            .field("timestamp_ns", &self.timestamp_ns)
+            .field("data_len", &self.data_len)
+            .field("direction", &self.direction)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for DlpEventSmall {}
 
 /// Per-task context saved at SSL_read entry, consumed at SSL_read return.
 /// Stored in the SSL_READ_ARGS HashMap keyed by pid_tgid.
@@ -118,6 +153,44 @@ mod tests {
         assert_eq!(mem::offset_of!(SslReadArgs, buf_ptr), 0);
         assert_eq!(mem::offset_of!(SslReadArgs, buf_len), 8);
         assert_eq!(mem::offset_of!(SslReadArgs, _padding), 12);
+    }
+
+    #[test]
+    fn test_dlp_event_small_size() {
+        assert_eq!(mem::size_of::<DlpEventSmall>(), 280);
+    }
+
+    #[test]
+    fn test_dlp_event_small_alignment() {
+        assert_eq!(mem::align_of::<DlpEventSmall>(), 8);
+    }
+
+    #[test]
+    fn test_dlp_event_small_field_offsets() {
+        // Header layout must match DlpEvent exactly
+        assert_eq!(mem::offset_of!(DlpEventSmall, pid), 0);
+        assert_eq!(mem::offset_of!(DlpEventSmall, tgid), 4);
+        assert_eq!(mem::offset_of!(DlpEventSmall, timestamp_ns), 8);
+        assert_eq!(mem::offset_of!(DlpEventSmall, data_len), 16);
+        assert_eq!(mem::offset_of!(DlpEventSmall, direction), 20);
+        assert_eq!(mem::offset_of!(DlpEventSmall, data_excerpt), 24);
+    }
+
+    #[test]
+    fn test_dlp_event_small_header_compatible() {
+        // Verify header offsets are identical between DlpEvent and DlpEventSmall
+        assert_eq!(mem::offset_of!(DlpEvent, pid), mem::offset_of!(DlpEventSmall, pid));
+        assert_eq!(mem::offset_of!(DlpEvent, tgid), mem::offset_of!(DlpEventSmall, tgid));
+        assert_eq!(mem::offset_of!(DlpEvent, timestamp_ns), mem::offset_of!(DlpEventSmall, timestamp_ns));
+        assert_eq!(mem::offset_of!(DlpEvent, data_len), mem::offset_of!(DlpEventSmall, data_len));
+        assert_eq!(mem::offset_of!(DlpEvent, direction), mem::offset_of!(DlpEventSmall, direction));
+        assert_eq!(mem::offset_of!(DlpEvent, data_excerpt), mem::offset_of!(DlpEventSmall, data_excerpt));
+    }
+
+    #[test]
+    fn test_small_excerpt_constant() {
+        assert_eq!(DLP_SMALL_EXCERPT, 256);
+        assert!(DLP_SMALL_EXCERPT < DLP_MAX_EXCERPT);
     }
 
     #[test]

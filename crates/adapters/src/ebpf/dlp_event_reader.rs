@@ -3,7 +3,7 @@
 use application::packet_pipeline::AgentEvent;
 use aya::Ebpf;
 use aya::maps::{MapData, RingBuf};
-use ebpf_common::dlp::DlpEvent;
+use ebpf_common::dlp::{DLP_MAX_EXCERPT, DlpEvent};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
@@ -46,13 +46,34 @@ impl DlpEventReader {
             };
 
             let rb = guard.get_inner_mut();
+            let header_size = 24_usize; // pid(4) + tgid(4) + timestamp_ns(8) + data_len(4) + direction(1) + padding(3)
             while let Some(item) = rb.next() {
                 let bytes: &[u8] = &item;
-                if bytes.len() >= std::mem::size_of::<DlpEvent>() {
-                    // SAFETY: DlpEvent is #[repr(C)] with known layout (4120 bytes).
-                    // The kernel writes this exact layout. We verify the length above.
-                    let event =
-                        unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<DlpEvent>()) };
+                // Accept both small (280 bytes) and full (4120 bytes) DLP events.
+                // Both share the same header layout; only the excerpt buffer size differs.
+                // We reconstruct a full DlpEvent with zero-padded excerpt for uniform handling.
+                if bytes.len() >= header_size {
+                    let mut event = DlpEvent {
+                        pid: 0,
+                        tgid: 0,
+                        timestamp_ns: 0,
+                        data_len: 0,
+                        direction: 0,
+                        _padding: [0; 3],
+                        data_excerpt: [0; DLP_MAX_EXCERPT],
+                    };
+                    // SAFETY: header fields are at known offsets, verified by length check.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            bytes.as_ptr(),
+                            &mut event as *mut DlpEvent as *mut u8,
+                            header_size.min(bytes.len()),
+                        );
+                    }
+                    // Copy available excerpt data (may be 256 or 4096 bytes)
+                    let excerpt_bytes = &bytes[header_size..];
+                    let copy_len = excerpt_bytes.len().min(DLP_MAX_EXCERPT);
+                    event.data_excerpt[..copy_len].copy_from_slice(&excerpt_bytes[..copy_len]);
 
                     if tx.try_send(AgentEvent::Dlp(Box::new(event))).is_err() {
                         debug!("DLP event channel full, dropping event");
