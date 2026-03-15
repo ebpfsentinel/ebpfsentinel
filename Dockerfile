@@ -3,36 +3,12 @@
 # Build:  docker build -t ebpfsentinel .
 # Run:    docker run --privileged --network host -v ./config:/etc/ebpfsentinel ebpfsentinel
 #
-# Multi-arch:
-#   docker buildx build --platform linux/amd64,linux/arm64 -t ebpfsentinel .
+# eBPF programs must be pre-built before docker build:
+#   cargo xtask ebpf-build
+#
+# The CI workflow handles this automatically (build-ebpf job → build-images job).
 
-# ── Stage 1: Build eBPF programs (always on amd64 — output is arch-independent) ──
-
-FROM --platform=linux/amd64 rust:bookworm AS ebpf-builder
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends llvm-dev && \
-    rm -rf /var/lib/apt/lists/* && \
-    rustup toolchain install nightly --no-self-update --component rust-src && \
-    if ! command -v llvm-config >/dev/null 2>&1; then \
-        LLC=$(ls /usr/bin/llvm-config-* 2>/dev/null | sort -V | tail -1); \
-        [ -n "$LLC" ] && ln -sf "$LLC" /usr/bin/llvm-config; \
-    fi && \
-    cargo +nightly install bpf-linker
-
-WORKDIR /build
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-COPY .cargo/ .cargo/
-COPY crates/ crates/
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo xtask ebpf-build && \
-    mkdir -p /build/ebpf-out && \
-    find crates/ebpf-programs/*/target/bpfel-unknown-none/release \
-      -maxdepth 1 -type f ! -name '*.d' ! -name '*.fingerprint' \
-      -exec cp {} /build/ebpf-out/ \;
-
-# ── Stage 2: Build userspace agent (native arch) ─────────────────────
+# ── Stage 1: Build userspace agent ───────────────────────────────────
 
 FROM rust:bookworm AS agent-builder
 
@@ -48,10 +24,6 @@ COPY .cargo/ .cargo/
 COPY crates/ crates/
 COPY proto/ proto/
 
-# Copy pre-built eBPF programs so include_bytes!() macros resolve
-COPY --from=ebpf-builder /build/ebpf-out/ /build/ebpf-out/
-COPY --from=ebpf-builder /build/crates/ebpf-programs/ /build/crates/ebpf-programs/
-
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     case "${TARGETARCH}" in \
         arm64) MUSL_TARGET="aarch64-unknown-linux-musl" ;; \
@@ -61,7 +33,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --target "${MUSL_TARGET}" --bin ebpfsentinel-agent && \
     cp "/build/target/${MUSL_TARGET}/release/ebpfsentinel-agent" /build/ebpfsentinel-agent
 
-# ── Stage 3: Minimal runtime image ──────────────────────────────────
+# ── Stage 2: Minimal runtime image ──────────────────────────────────
 #
 # distroless/static: ca-certificates only — no libc, no shell, no package manager.
 # Requires a fully statically-linked binary (musl).
@@ -74,7 +46,10 @@ LABEL org.opencontainers.image.title="eBPFsentinel" \
     org.opencontainers.image.licenses="AGPL-3.0-only"
 
 COPY --from=agent-builder /build/ebpfsentinel-agent /usr/local/bin/ebpfsentinel-agent
-COPY --from=ebpf-builder /build/ebpf-out/ /usr/local/lib/ebpfsentinel/
+
+# Copy pre-built eBPF programs (built by CI or `cargo xtask ebpf-build`)
+COPY ebpf-out/ /usr/local/lib/ebpfsentinel/
+
 COPY config/ebpfsentinel.yaml /etc/ebpfsentinel/config.yaml
 
 ENV EBPF_PROGRAM_DIR=/usr/local/lib/ebpfsentinel

@@ -56,10 +56,56 @@ jobs:
         run: |
           echo "name_lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
-  # ── Build per-platform images ─────────────────────────────────────
+  # ── Build eBPF programs once on amd64 (output is arch-independent) ─
+  build-ebpf:
+    name: Build eBPF
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ebpf-docker
+
+      - name: Install llvm-dev and bpf-linker
+        run: |
+          sudo apt-get update && sudo apt-get install -y llvm-dev
+          if ! command -v llvm-config &>/dev/null; then
+            LLC=$(ls /usr/bin/llvm-config-* 2>/dev/null | sort -V | tail -1)
+            [ -n "$LLC" ] && sudo ln -sf "$LLC" /usr/bin/llvm-config
+          fi
+          cargo +nightly install bpf-linker
+
+      - name: Stamp version
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          find . -name Cargo.toml -exec grep -l '0.0.0-dev' {} + \
+            | xargs sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/"
+
+      - name: Build eBPF programs
+        run: |
+          cargo xtask ebpf-build
+          mkdir -p ebpf-out
+          find crates/ebpf-programs/*/target/bpfel-unknown-none/release \
+            -maxdepth 1 -type f ! -name '*.d' ! -name '*.fingerprint' \
+            -exec cp {} ebpf-out/ \;
+          ls -la ebpf-out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ebpf-programs
+          path: ebpf-out/
+          retention-days: 1
+
+  # ── Build per-platform Docker images ──────────────────────────────
   build-images:
     name: Build (${{ matrix.platform }})
-    needs: prepare
+    needs: [prepare, build-ebpf]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -74,6 +120,11 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ebpf-programs
+          path: ebpf-out/
 
       - uses: docker/login-action@v3
         with:
