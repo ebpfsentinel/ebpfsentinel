@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      force_version:
+        description: "Force a specific version (optional, format: YYYY.M.X)"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -12,9 +18,63 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ── Prepare: resolve version and create tag if needed ─────────────
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            # Triggered by tag push — use it directly
+            VERSION="${GITHUB_REF_NAME#v}"
+          elif [ -n "${{ github.event.inputs.force_version }}" ]; then
+            # Manual dispatch with forced version
+            VERSION="${{ github.event.inputs.force_version }}"
+            if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[1-9][0-9]?\.[0-9]+$'; then
+              echo "::error::Invalid version format: $VERSION (expected YYYY.M.X)"
+              exit 1
+            fi
+          else
+            # Manual dispatch without version — auto-increment CalVer
+            git fetch --tags
+            YEAR=$(date +'%Y')
+            MONTH=$(date +'%-m')
+            LATEST_TAG=$(git tag -l "v${YEAR}.${MONTH}.*" | sort -V | tail -n 1)
+            if [ -z "$LATEST_TAG" ]; then
+              VERSION="${YEAR}.${MONTH}.1"
+            else
+              PATCH=$(echo "$LATEST_TAG" | sed "s/^v${YEAR}\.${MONTH}\.\([0-9]*\).*/\1/")
+              VERSION="${YEAR}.${MONTH}.$((PATCH + 1))"
+            fi
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION}"
+
+      - name: Create and push tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          git tag "${TAG}"
+          git push origin "${TAG}"
+          echo "Created tag: ${TAG}"
+
   # ── Build release artifacts (multi-arch) ──────────────────────────
   build-release:
     name: Build (${{ matrix.arch }})
+    needs: prepare
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -41,20 +101,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-${{ matrix.arch }}
-          workspaces: |
-            .
-            crates/ebpf-programs/xdp-firewall
-            crates/ebpf-programs/xdp-ratelimit
-            crates/ebpf-programs/xdp-loadbalancer
-            crates/ebpf-programs/tc-ids
-            crates/ebpf-programs/tc-threatintel
-            crates/ebpf-programs/tc-dns
-            crates/ebpf-programs/tc-conntrack
-            crates/ebpf-programs/tc-nat-ingress
-            crates/ebpf-programs/tc-nat-egress
-            crates/ebpf-programs/tc-scrub
-            crates/ebpf-programs/tc-qos
-            crates/ebpf-programs/uprobe-dlp
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler ${{ matrix.musl_pkg }} llvm-dev
@@ -69,20 +115,12 @@ jobs:
           cargo +nightly install bpf-linker
           bpf-linker --version
 
-      - name: Stamp version from tag
+      - name: Stamp version
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${{ needs.prepare.outputs.version }}"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
-          echo "Stamping version: ${VERSION}"
-          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" Cargo.toml
-          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-common/Cargo.toml
-          sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" crates/ebpf-helpers/Cargo.toml
-          for prog in xdp-firewall xdp-ratelimit xdp-loadbalancer \
-                      tc-conntrack tc-nat-ingress tc-nat-egress \
-                      tc-ids tc-threatintel tc-dns tc-scrub tc-qos \
-                      uprobe-dlp; do
-            sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/" "crates/ebpf-programs/${prog}/Cargo.toml"
-          done
+          find . -name Cargo.toml -exec grep -l '0.0.0-dev' {} + \
+            | xargs sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/"
 
       - name: Build eBPF programs
         run: cargo xtask ebpf-build
@@ -92,7 +130,6 @@ jobs:
 
       - name: Create release tarball
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
           STAGING="ebpfsentinel-${VERSION}-linux-${{ matrix.arch }}"
           mkdir -p "${STAGING}/ebpf"
           cp "target/${{ matrix.target }}/release/ebpfsentinel-agent" "${STAGING}/"
@@ -101,15 +138,9 @@ jobs:
           cp dist/install.sh "${STAGING}/"
           cp LICENSE "${STAGING}/" 2>/dev/null || true
           cp CHANGELOG.md "${STAGING}/" 2>/dev/null || true
-          # eBPF programs are arch-independent (bpfel target)
-          for prog in xdp-firewall xdp-ratelimit xdp-loadbalancer \
-                      tc-conntrack tc-nat-ingress tc-nat-egress \
-                      tc-ids tc-threatintel tc-dns tc-scrub tc-qos \
-                      uprobe-dlp; do
-            find "crates/ebpf-programs/${prog}/target" -name "${prog}" -type f \
-              -path "*/bpfel-unknown-none/release/*" \
-              -exec cp {} "${STAGING}/ebpf/" \; 2>/dev/null || true
-          done
+          find crates/ebpf-programs/*/target/bpfel-unknown-none/release \
+            -maxdepth 1 -type f ! -name '*.d' ! -name '*.fingerprint' \
+            -exec cp {} "${STAGING}/ebpf/" \; 2>/dev/null || true
           tar czf "${STAGING}.tar.gz" "${STAGING}"
           echo "TARBALL=${STAGING}.tar.gz" >> "$GITHUB_ENV"
 
@@ -123,9 +154,11 @@ jobs:
   create-release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: build-release
+    needs: [prepare, build-release]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
@@ -134,7 +167,7 @@ jobs:
 
       - name: Extract release notes from CHANGELOG
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${{ needs.prepare.outputs.version }}"
           if [ -f CHANGELOG.md ]; then
             NOTES=$(awk -v ver="$VERSION" '
               /^## / { if (found) exit; if (index($0, ver)) found=1; next }
@@ -142,7 +175,7 @@ jobs:
             ' CHANGELOG.md)
           fi
           if [ -z "$NOTES" ]; then
-            NOTES="Release ${GITHUB_REF_NAME}"
+            NOTES="Release ${{ needs.prepare.outputs.tag }}"
           fi
           echo "$NOTES" > release-notes.md
 
@@ -150,7 +183,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          gh release create "${TAG}" artifacts/*.tar.gz \
-            --title "eBPFsentinel ${TAG}" \
+          gh release create "${{ needs.prepare.outputs.tag }}" artifacts/*.tar.gz \
+            --title "eBPFsentinel ${{ needs.prepare.outputs.tag }}" \
             --notes-file release-notes.md
+
+  # ── Build & push Docker image ────────────────────────────────────
+  docker:
+    name: Docker Image
+    needs: create-release
+    uses: ./.github/workflows/docker.yml
