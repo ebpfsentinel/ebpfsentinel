@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use super::common::{ConfigError, default_true};
 
-/// Maximum number of LB services.
-pub(super) const MAX_LB_SERVICES: usize = 64;
+/// Maximum number of LB services (matches eBPF `MAX_LB_SERVICES` capacity).
+pub(super) const MAX_LB_SERVICES: usize = 4096;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LoadBalancerConfig {
