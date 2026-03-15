@@ -821,6 +821,10 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
 
     // ── 10. Load eBPF programs (each with graceful degradation) ────
     let ebpf_dir = resolve_ebpf_program_dir(&config);
+
+    // Clean up stale pinned maps from a previous crash (if any)
+    EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
+
     let mut ebpf_state = EbpfState::new();
     let mut ebpf_map_holder = crate::reload::EbpfMapHolder::new();
     let mut metrics_readers: Vec<MetricsReader> = Vec::new();
@@ -1631,6 +1635,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
 
     info!("shutdown phase 4: detaching eBPF programs");
     drop(ebpf_state);
+    EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
 
     info!("shutdown phase 5: draining events and alerts");
     drop(event_tx); // close event channel so dispatcher sees channel closed
@@ -1711,7 +1716,8 @@ fn try_load_xdp_firewall(
     use infrastructure::config::DefaultPolicy;
 
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-firewall")?;
-    let mut loader = EbpfLoader::load(&program_bytes)?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
         loader.attach_xdp(iface)?;
@@ -1770,7 +1776,8 @@ fn try_load_xdp_ratelimit(
     event_tx: mpsc::Sender<AgentEvent>,
 ) -> anyhow::Result<XdpRatelimitResult> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-ratelimit")?;
-    let mut loader = EbpfLoader::load(&program_bytes)?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
         loader.attach_xdp_program("xdp_ratelimit", iface)?;
@@ -1861,7 +1868,8 @@ fn try_load_tc_ids(
     event_tx: mpsc::Sender<AgentEvent>,
 ) -> anyhow::Result<TcIdsResult> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-ids")?;
-    let mut loader = EbpfLoader::load(&program_bytes)?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
         loader.attach_tc_program("tc_ids", iface)?;
@@ -1934,7 +1942,8 @@ fn try_load_tc_threatintel(
     event_tx: mpsc::Sender<AgentEvent>,
 ) -> anyhow::Result<TcThreatIntelResult> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-threatintel")?;
-    let mut loader = EbpfLoader::load(&program_bytes)?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
         loader.attach_tc_program("tc_threatintel", iface)?;
@@ -1979,7 +1988,8 @@ fn try_load_tc_dns(
     event_tx: mpsc::Sender<AgentEvent>,
 ) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-dns")?;
-    let mut loader = EbpfLoader::load(&program_bytes)?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
         loader.attach_tc_program("tc_dns", iface)?;
@@ -2000,7 +2010,8 @@ fn try_load_uprobe_dlp(
     event_tx: mpsc::Sender<AgentEvent>,
 ) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "uprobe-dlp")?;
-    let mut loader = EbpfLoader::load(&program_bytes)?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     // Default SSL library target (OpenSSL)
     let ssl_target = "libssl.so.3";
@@ -2058,7 +2069,8 @@ fn try_load_tc_conntrack(
     event_tx: mpsc::Sender<AgentEvent>,
 ) -> anyhow::Result<(EbpfLoader, ConnTrackMapManager, Option<MetricsReader>)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-conntrack")?;
-    let mut loader = EbpfLoader::load(&program_bytes)?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
         loader.attach_tc_program("tc_conntrack", iface)?;
@@ -2079,14 +2091,16 @@ fn try_load_tc_nat(
     config: &AgentConfig,
 ) -> anyhow::Result<(EbpfLoader, EbpfLoader, NatMapManager, Vec<MetricsReader>)> {
     let ingress_bytes = read_ebpf_program(ebpf_dir, "tc-nat-ingress")?;
-    let mut ingress_loader = EbpfLoader::load(&ingress_bytes)?;
+    let mut ingress_loader =
+        EbpfLoader::load_with_pin_path(&ingress_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
         ingress_loader.attach_tc_program("tc_nat_ingress", iface)?;
     }
 
     let egress_bytes = read_ebpf_program(ebpf_dir, "tc-nat-egress")?;
-    let mut egress_loader = EbpfLoader::load(&egress_bytes)?;
+    let mut egress_loader =
+        EbpfLoader::load_with_pin_path(&egress_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
         egress_loader.attach_tc_program("tc_nat_egress", iface)?;
@@ -2110,7 +2124,8 @@ fn try_load_tc_scrub(
     config: &AgentConfig,
 ) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-scrub")?;
-    let mut loader = EbpfLoader::load(&program_bytes)?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
         loader.attach_tc_program("tc_scrub", iface)?;
@@ -2188,7 +2203,8 @@ fn try_load_xdp_loadbalancer(
     Option<MetricsReader>,
 )> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-loadbalancer")?;
-    let mut loader = EbpfLoader::load(&program_bytes)?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
         loader.attach_xdp_program("xdp_loadbalancer", iface)?;

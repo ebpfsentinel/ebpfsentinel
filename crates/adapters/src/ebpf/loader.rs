@@ -1,9 +1,14 @@
+use std::path::Path;
+
 use aya::{
-    Ebpf,
+    Ebpf, EbpfLoader as AyaEbpfLoader,
     maps::ProgramArray,
     programs::{ProgramFd, SchedClassifier, TcAttachType, UProbe, Xdp, XdpFlags, tc},
 };
 use tracing::{info, warn};
+
+/// Default BPF filesystem pin path for shared maps.
+pub const DEFAULT_BPF_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel";
 
 /// Loads and attaches eBPF programs (XDP, TC, uprobe).
 ///
@@ -28,6 +33,51 @@ impl EbpfLoader {
 
         info!("eBPF program loaded successfully");
         Ok(Self { ebpf })
+    }
+
+    /// Load an eBPF program with map pinning enabled.
+    ///
+    /// Maps with matching names across programs will be shared via the
+    /// BPF filesystem. The first program to load creates and pins the map;
+    /// subsequent programs reuse the pinned map automatically.
+    ///
+    /// This enables CT_TABLE_V4/V6 and INTERFACE_GROUPS to be shared
+    /// across tc-conntrack, xdp-firewall, tc-nat-ingress, tc-nat-egress.
+    pub fn load_with_pin_path(
+        program_bytes: &[u8],
+        pin_path: &str,
+    ) -> Result<Self, anyhow::Error> {
+        // Ensure pin directory exists
+        let path = Path::new(pin_path);
+        if !path.exists() {
+            std::fs::create_dir_all(path)?;
+            info!(pin_path, "created BPF pin directory");
+        }
+
+        let mut ebpf = AyaEbpfLoader::new()
+            .map_pin_path(pin_path)
+            .load(program_bytes)?;
+
+        if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
+            warn!("eBPF logger init failed (non-fatal): {e}");
+        }
+
+        info!(pin_path, "eBPF program loaded with map pinning");
+        Ok(Self { ebpf })
+    }
+
+    /// Clean up pinned maps from the BPF filesystem.
+    ///
+    /// Should be called on agent shutdown to avoid stale pins.
+    pub fn cleanup_pin_path(pin_path: &str) {
+        let path = Path::new(pin_path);
+        if path.exists() {
+            if let Err(e) = std::fs::remove_dir_all(path) {
+                warn!(pin_path, error = %e, "failed to clean up BPF pin directory");
+            } else {
+                info!(pin_path, "cleaned up BPF pin directory");
+            }
+        }
     }
 
     /// Attach the XDP firewall program to the given network interface.

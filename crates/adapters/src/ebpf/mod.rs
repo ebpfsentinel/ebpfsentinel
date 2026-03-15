@@ -32,7 +32,7 @@ pub use ids_map_manager::IdsMapManager;
 pub use ipset_map_manager::IpSetMapManager;
 pub use l7_ports_manager::L7PortsManager;
 pub use lb_map_manager::LbMapManager;
-pub use loader::EbpfLoader;
+pub use loader::{DEFAULT_BPF_PIN_PATH, EbpfLoader};
 pub use lpm_coordinator::LpmCoordinator;
 pub use map_manager::FirewallMapManager;
 pub use metrics_reader::MetricsReader;
