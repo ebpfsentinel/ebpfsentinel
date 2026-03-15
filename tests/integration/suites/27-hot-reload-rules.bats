@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 27-hot-reload-rules.bats — Configuration hot-reload tests
-# Requires: root, kernel >= 5.17, bpftool, jq
+# Requires: root, kernel >= 6.1, bpftool, jq
 #
 # Tests hot-reload of firewall rules via SIGHUP:
 #   1. Verify initial rule count

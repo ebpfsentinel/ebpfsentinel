@@ -4,7 +4,7 @@
 
 | Requirement | Version | Purpose |
 |-------------|---------|---------|
-| Linux kernel | 5.17+ with BTF | eBPF program loading |
+| Linux kernel | 6.1+ with BTF | eBPF program loading |
 | Rust stable | 1.93+ | Userspace crates |
 | Rust nightly | latest | eBPF kernel programs (`bpfel-unknown-none`) |
 | `bpftool` | any | eBPF program inspection |

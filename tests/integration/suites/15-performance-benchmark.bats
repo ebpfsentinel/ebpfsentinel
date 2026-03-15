@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 15-performance-benchmark.bats — Performance benchmarks (throughput + resource usage)
-# Requires: root, kernel >= 5.17, bpftool, iperf3
+# Requires: root, kernel >= 6.1, bpftool, iperf3
 #
 # Outputs JSON report to /tmp/ebpfsentinel-benchmark-latest.json
 

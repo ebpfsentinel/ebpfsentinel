@@ -1,7 +1,7 @@
 # docker-compose-perf.yml — Performance/overhead test compose file
 #
 # Uses host networking + eth1 for cross-VM traffic measurement.
-# Requires: Linux kernel 5.17+ with BTF, Docker Engine.
+# Requires: Linux kernel 6.1+ with BTF, Docker Engine.
 
 services:
   agent:

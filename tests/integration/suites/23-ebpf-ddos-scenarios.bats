@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 23-ebpf-ddos-scenarios.bats — DDoS/scrub eBPF scenario tests
-# Requires: root, kernel >= 5.17, bpftool, ncat
+# Requires: root, kernel >= 6.1, bpftool, ncat
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

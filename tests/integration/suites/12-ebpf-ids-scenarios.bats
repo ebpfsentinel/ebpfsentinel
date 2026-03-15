@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 12-ebpf-ids-scenarios.bats — IDS eBPF detection scenario tests
-# Requires: root, kernel >= 5.17, bpftool, ncat
+# Requires: root, kernel >= 6.1, bpftool, ncat
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

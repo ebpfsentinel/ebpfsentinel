@@ -64,7 +64,7 @@ make test
 # Run a single suite
 make test-suite SUITE=01-agent-lifecycle
 
-# Run eBPF scenario tests (requires root + kernel >= 5.17)
+# Run eBPF scenario tests (requires root + kernel >= 6.1)
 make test-ebpf-scenarios
 
 # Quick performance test
@@ -87,7 +87,7 @@ Run without root. Require the agent binary built (`cargo build --release`).
 | **03-rest-api-firewall** |     8 | Firewall rule CRUD via REST: create, read, update, delete, priority ordering, bulk operations                                                                                    |
 | **04-rest-api-domains**  |    23 | Domain-specific REST APIs: IPS blacklist, rate limit config, threat intel feeds, alerting routes, L7 inspection, DNS cache/blocklist, domain reputation |
 | **05-grpc-streaming**    |     4 | gRPC health check, server reflection, event streaming subscription                                                                                                               |
-| **06-ebpf-programs**     |     3 | eBPF program loading and attachment to a veth interface (requires kernel >= 5.17)                                                                                                |
+| **06-ebpf-programs**     |     3 | eBPF program loading and attachment to a veth interface (requires kernel >= 6.1)                                                                                                |
 | **07-authentication**    |    11 | JWT RS256 validation, OIDC JWKS endpoint, API key auth, role-based access control (admin/operator/viewer), token expiry, composite auth                                          |
 | **08-tls**               |     5 | HTTPS termination on port 8443, gRPC over TLS, self-signed certificate validation, mTLS                                                                                         |
 | **09-docker**            |    11 | Docker image build, compose deployment, healthz, baseline/Docker TCP throughput, ICMP latency, RSS/CPU overhead, API latency under load, memory stability, clean shutdown         |
@@ -97,7 +97,7 @@ Run without root. Require the agent binary built (`cargo build --release`).
 
 ### eBPF Scenario Tests (suites 11-14, 18-24)
 
-Require **root** and **kernel >= 5.17**. Use isolated network namespaces with veth pairs (10.200.0.0/24) to test real eBPF packet processing. In 2-VM mode, root is not required locally.
+Require **root** and **kernel >= 6.1**. Use isolated network namespaces with veth pairs (10.200.0.0/24) to test real eBPF packet processing. In 2-VM mode, root is not required locally.
 
 | Suite                              | Tests | What it covers                                                                                                                                    |
 | ---------------------------------- | ----: | ------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -115,7 +115,7 @@ Require **root** and **kernel >= 5.17**. Use isolated network namespaces with ve
 
 ### End-to-End & Advanced Tests (suites 25-28)
 
-Require **root** and **kernel >= 5.17** (or 2-VM mode).
+Require **root** and **kernel >= 6.1** (or 2-VM mode).
 
 | Suite                          | Tests | What it covers                                                                                                |
 | ------------------------------ | ----: | ------------------------------------------------------------------------------------------------------------- |
@@ -126,7 +126,7 @@ Require **root** and **kernel >= 5.17** (or 2-VM mode).
 
 ### Performance & Benchmark Suites (suites 15, 29-30)
 
-Require **root** and **kernel >= 5.17** (or 2-VM mode). Measure agent overhead using iperf3, hping3, and `/proc` sampling.
+Require **root** and **kernel >= 6.1** (or 2-VM mode). Measure agent overhead using iperf3, hping3, and `/proc` sampling.
 
 | Suite                          | Tests | What it covers                                                                                                   |
 | ------------------------------ | ----: | ---------------------------------------------------------------------------------------------------------------- |
@@ -407,9 +407,9 @@ make vagrant-destroy       # Delete VM
 | `test-vm`                 | Run all suites in Vagrant VM | Vagrant              |
 | `test-suite SUITE=<name>` | Run a single suite           | agent binary         |
 | `test-k8s`                | Kubernetes suite only        | Minikube             |
-| `test-ebpf-scenarios`     | Suites 11-14, 18-24          | root, kernel >= 5.17 |
-| `test-performance`        | Suite 15                     | root, kernel >= 5.17 |
-| `test-ebpf-all`           | Suites 11-15                 | root, kernel >= 5.17 |
+| `test-ebpf-scenarios`     | Suites 11-14, 18-24          | root, kernel >= 6.1 |
+| `test-performance`        | Suite 15                     | root, kernel >= 6.1 |
+| `test-ebpf-all`           | Suites 11-15                 | root, kernel >= 6.1 |
 | `test-ebpf-vm`            | eBPF suites in Vagrant VM    | Vagrant              |
 
 ### 2-VM Topology

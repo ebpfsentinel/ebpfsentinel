@@ -35,7 +35,7 @@ pub struct LbServiceKey {
 /// Value for the `LB_SERVICES` `HashMap`.
 /// Written by userspace, read by eBPF.
 ///
-/// Size: 72 bytes.
+/// Size: 68 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LbServiceConfig {

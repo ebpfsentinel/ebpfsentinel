@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 25-packet-accountability.bats — Packet processing accountability tests
-# Requires: root, kernel >= 5.17, bpftool, ncat
+# Requires: root, kernel >= 6.1, bpftool, ncat
 #
 # Validates that every packet entering an eBPF program is accounted for:
 #   1. total_seen counter increments for every packet (no silent drops)

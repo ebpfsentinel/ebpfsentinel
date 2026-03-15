@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 14-ebpf-ratelimit-scenarios.bats — Rate limiting eBPF scenario tests
-# Requires: root, kernel >= 5.17, bpftool, ncat, hping3
+# Requires: root, kernel >= 6.1, bpftool, ncat, hping3
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

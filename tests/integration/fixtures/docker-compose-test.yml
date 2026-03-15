@@ -1,7 +1,7 @@
 # docker-compose-test.yml — Integration test compose file
 #
 # Uses loopback interface and minimal config for CI/test environments.
-# Requires: Linux kernel 5.17+ with BTF, Docker Engine (not Desktop).
+# Requires: Linux kernel 6.1+ with BTF, Docker Engine (not Desktop).
 
 services:
   agent:

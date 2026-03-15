@@ -40,7 +40,7 @@ eBPFsentinel combines a stateful firewall, intrusion detection, rate limiting, t
 
 ## Quick start
 
-**Requirements:** Linux kernel 5.17+ with BTF, Rust stable + nightly
+**Requirements:** Linux kernel 6.1+ with BTF, Rust stable + nightly
 
 ```bash
 # Build
@@ -92,8 +92,8 @@ Per-feature configuration examples are in [`config/examples/`](config/examples/)
 
 ## Compatibility
 
-- **OS:** Linux only (kernel 5.17+ with BTF)
-- **Distros:** Debian 12+, Ubuntu 22.04+, RHEL 9+, Fedora 37+, Alpine 3.18+, Arch, NixOS, Talos
+- **OS:** Linux only (kernel 6.1+ with BTF)
+- **Distros:** Debian 12+, Ubuntu 24.04+ (or 22.04 HWE), RHEL 9.4+, Fedora 37+, Alpine 3.18+, Arch, NixOS, Talos
 - **Arch:** x86_64 (primary), aarch64 (cross-tested)
 - **Runtime:** Docker, Podman, Kubernetes (DaemonSet), Nomad
 

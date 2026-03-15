@@ -6,7 +6,7 @@
 #   docker compose down         # stop agent
 #
 # Prerequisites:
-#   - Linux kernel 5.17+ with BTF support
+#   - Linux kernel 6.1+ with BTF support
 #   - Docker with host networking support
 #
 # Hot-reload: edit config/ebpfsentinel.yaml while running — the agent

@@ -7,7 +7,7 @@ pub const ACTION_REJECT: u8 = 3;
 
 /// Maximum number of firewall rules per address family (V4 / V6).
 ///
-/// Requires kernel 5.17+ (`bpf_loop` helper) for the XDP firewall to iterate
+/// Requires kernel 6.1+ (`bpf_loop` helper) for the XDP firewall to iterate
 /// over this many rules without hitting verifier complexity limits.
 pub const MAX_FIREWALL_RULES: u32 = 4096;
 
@@ -99,8 +99,6 @@ pub const CT_MATCH_INVALID: u8 = 0x08;
 
 /// Maximum entries per IP set HashMap.
 pub const MAX_IPSET_ENTRIES_V4: u32 = 65_536;
-pub const MAX_IPSET_ENTRIES_V6: u32 = 16_384;
-pub const MAX_PORTSET_ENTRIES: u32 = 8_192;
 
 /// Key for IPv4 IP set lookup (set_id + address).
 #[repr(C)]
@@ -111,22 +109,6 @@ pub struct IpSetKeyV4 {
     pub addr: u32,
 }
 
-/// Key for IPv6 IP set lookup (set_id + address).
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IpSetKeyV6 {
-    pub set_id: u16,
-    pub _pad: [u8; 2],
-    pub addr: [u32; 4],
-}
-
-/// Key for port set lookup (set_id + port).
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PortSetKey {
-    pub set_id: u16,
-    pub port: u16,
-}
 
 /// Array-based IPv4 firewall rule entry (60 bytes).
 ///
@@ -311,10 +293,6 @@ unsafe impl aya::Pod for FirewallRuleEntryV6 {}
 unsafe impl aya::Pod for LpmValue {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for IpSetKeyV4 {}
-#[cfg(feature = "userspace")]
-unsafe impl aya::Pod for IpSetKeyV6 {}
-#[cfg(feature = "userspace")]
-unsafe impl aya::Pod for PortSetKey {}
 
 #[cfg(test)]
 mod tests {
@@ -511,24 +489,8 @@ mod tests {
     }
 
     #[test]
-    fn test_ipset_key_v6_size() {
-        assert_eq!(mem::size_of::<IpSetKeyV6>(), 20);
-    }
-
-    #[test]
-    fn test_portset_key_size() {
-        assert_eq!(mem::size_of::<PortSetKey>(), 4);
-    }
-
-    #[test]
     fn test_ipset_key_v4_field_offsets() {
         assert_eq!(mem::offset_of!(IpSetKeyV4, set_id), 0);
         assert_eq!(mem::offset_of!(IpSetKeyV4, addr), 4);
-    }
-
-    #[test]
-    fn test_ipset_key_v6_field_offsets() {
-        assert_eq!(mem::offset_of!(IpSetKeyV6, set_id), 0);
-        assert_eq!(mem::offset_of!(IpSetKeyV6, addr), 4);
     }
 }

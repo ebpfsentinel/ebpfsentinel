@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # 09-docker.bats — Docker build, deployment, and overhead tests
 #
-# Requires: Docker Engine on native Linux with kernel 5.17+ and BTF.
+# Requires: Docker Engine on native Linux with kernel 6.1+ and BTF.
 #
 # Tests:
 #   1. Image exists / build succeeds

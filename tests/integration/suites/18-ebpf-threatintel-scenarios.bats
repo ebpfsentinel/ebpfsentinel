@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 18-ebpf-threatintel-scenarios.bats — Threat intel eBPF scenario tests
-# Requires: root, kernel >= 5.17, bpftool, ncat
+# Requires: root, kernel >= 6.1, bpftool, ncat
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

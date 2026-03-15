@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 26-ebpf-dlp-scenarios.bats — DLP (uprobe-dlp) eBPF scenario tests
-# Requires: root, kernel >= 5.17, bpftool
+# Requires: root, kernel >= 6.1, bpftool
 #
 # Tests DLP program with:
 #   - Program attachment and health checks

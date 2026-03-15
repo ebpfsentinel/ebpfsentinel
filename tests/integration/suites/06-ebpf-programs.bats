@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 06-ebpf-programs.bats — eBPF program loading and attachment tests
-# Requires: CAP_BPF or root, kernel >= 5.17, bpftool, ip
+# Requires: CAP_BPF or root, kernel >= 6.1, bpftool, ip
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

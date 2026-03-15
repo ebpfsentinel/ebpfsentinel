@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 30-ebpf-map-operation-bench.bats — eBPF map operation benchmarks at scale
-# Requires: root, kernel >= 5.17, bpftool, jq
+# Requires: root, kernel >= 6.1, bpftool, jq
 #
 # Measures bulk REST API operation latencies for eBPF-backed domains:
 #   - Firewall rule bulk load (100 / 1K / 10K)
