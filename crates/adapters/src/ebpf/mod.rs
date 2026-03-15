@@ -1,4 +1,5 @@
 pub mod config_flags_manager;
+pub mod config_ringbuf_writer;
 pub mod conntrack_map_manager;
 pub mod dlp_event_reader;
 pub mod dns_event_reader;

@@ -21,4 +21,5 @@ pub mod metrics;
 pub mod net;
 pub mod ringbuf;
 pub mod tc;
+pub mod user_ringbuf;
 pub mod xdp;

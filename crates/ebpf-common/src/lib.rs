@@ -1,5 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod config_cmd;
 pub mod config_flags;
 pub mod conntrack;
 pub mod ddos;
