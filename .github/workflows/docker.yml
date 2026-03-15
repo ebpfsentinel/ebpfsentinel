@@ -34,7 +34,8 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="dev-$(git rev-parse --short HEAD)"
+            # Use semver-compatible pre-release format for dev builds
+            VERSION="0.0.0-dev.$(git rev-parse --short HEAD)"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved version: ${VERSION}"
