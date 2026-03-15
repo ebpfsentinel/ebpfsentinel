@@ -143,6 +143,8 @@ jobs:
     name: Docker Image
     needs: prepare
     uses: ./.github/workflows/docker.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
 
   # ── Tag + GitHub Release (only after tarballs AND Docker succeed) ──
   publish:

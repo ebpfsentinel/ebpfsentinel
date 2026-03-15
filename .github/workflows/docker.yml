@@ -2,7 +2,17 @@ name: Docker
 
 on:
   workflow_call:
+    inputs:
+      version:
+        description: "Version to build (e.g. 2026.3.1). If empty, auto-resolves from git."
+        required: false
+        type: string
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g. 2026.3.1). If empty, auto-resolves from git."
+        required: false
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -31,10 +41,11 @@ jobs:
       - name: Resolve version
         id: version
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            # Use semver-compatible pre-release format for dev builds
             VERSION="0.0.0-dev.$(git rev-parse --short HEAD)"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -49,16 +60,18 @@ jobs:
   build-images:
     name: Build (${{ matrix.platform }})
     needs: prepare
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - linux/amd64
-          - linux/arm64
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -74,8 +87,6 @@ jobs:
           platform: ${{ matrix.platform }}
 
       - uses: docker/setup-buildx-action@v3
-        with:
-          platforms: ${{ matrix.platform }}
 
       - name: Stamp version in Cargo.toml
         run: |
