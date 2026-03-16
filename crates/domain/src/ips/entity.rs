@@ -3,6 +3,8 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use super::error::IpsError;
 
 /// An entry in the IPS blacklist. Tracks when the IP was blacklisted,
@@ -74,7 +76,7 @@ pub enum EnforcementAction {
 /// Whitelisted IPs bypass IPS blacklisting and detection counting.
 /// Fields are private to enforce validation invariants; use [`WhitelistEntry::new`]
 /// or [`FromStr`] to construct.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WhitelistEntry {
     ip: IpAddr,
     cidr_prefix: Option<u8>,
