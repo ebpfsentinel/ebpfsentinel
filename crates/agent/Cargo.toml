@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+name = "ebpfsentinel_agent"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ebpfsentinel-agent"
 path = "src/main.rs"
