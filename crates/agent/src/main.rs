@@ -3,11 +3,6 @@
 mod api_client;
 mod cli;
 mod commands;
-mod ebpf_metrics;
-mod reload;
-mod schedule_eval;
-mod shutdown;
-mod startup;
 
 use anyhow::Result;
 
@@ -286,6 +281,13 @@ async fn main() -> Result<()> {
         }
 
         // No subcommand = run the agent daemon
-        None => startup::run(&cli).await,
+        None => {
+            ebpfsentinel_agent::startup::run(
+                &cli.config,
+                cli.log_level,
+                cli.log_format,
+            )
+            .await
+        }
     }
 }

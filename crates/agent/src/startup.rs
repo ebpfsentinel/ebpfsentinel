@@ -72,18 +72,24 @@ use ports::secondary::rule_change_store::RuleChangeStore;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{info, warn};
 
-use crate::cli::Cli;
+use infrastructure::config::{LogFormat, LogLevel};
 
 /// Run the agent startup sequence and block until shutdown.
+///
+/// `log_level_override` and `log_format_override` take precedence over config file values.
 #[allow(clippy::too_many_lines, clippy::similar_names)] // startup is inherently sequential and long
-pub async fn run(cli: &Cli) -> anyhow::Result<()> {
+pub async fn run(
+    config_path: &str,
+    log_level_override: Option<LogLevel>,
+    log_format_override: Option<LogFormat>,
+) -> anyhow::Result<()> {
     // ── 1. Load config ──────────────────────────────────────────────
-    let config = AgentConfig::load(Path::new(&cli.config))?;
+    let config = AgentConfig::load(Path::new(config_path))?;
 
     // ── 2. Initialize logging ───────────────────────────────────────
     // CLI flags take precedence over config file
-    let log_level = cli.log_level.unwrap_or(config.agent.log_level);
-    let log_format = cli.log_format.unwrap_or(config.agent.log_format);
+    let log_level = log_level_override.unwrap_or(config.agent.log_level);
+    let log_format = log_format_override.unwrap_or(config.agent.log_format);
     init_logging(log_level, log_format)?;
 
     // Service root span — fields appear in every subsequent log entry
@@ -96,7 +102,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     .entered();
 
     info!(
-        config_path = %cli.config,
+        config_path,
         log_level = log_level.as_str(),
         log_format = log_format.as_str(),
         "eBPFsentinel agent starting"
@@ -1268,7 +1274,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
 
     // ── 10½. Spawn config hot-reload task (after eBPF loading for EbpfMapHolder) ──
     let reload_handle = crate::reload::spawn_reload_task(
-        cli.config.clone(),
+        config_path.to_string(),
         reload_service,
         auth_handle,
         cancel_token.clone(),

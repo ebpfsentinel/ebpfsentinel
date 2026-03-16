@@ -32,6 +32,12 @@ pub struct EbpfMapHolder {
     pub iface_groups: Option<InterfaceGroupsManager>,
 }
 
+impl Default for EbpfMapHolder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EbpfMapHolder {
     pub fn new() -> Self {
         Self {
