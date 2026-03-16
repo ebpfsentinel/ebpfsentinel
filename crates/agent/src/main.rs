@@ -281,13 +281,6 @@ async fn main() -> Result<()> {
         }
 
         // No subcommand = run the agent daemon
-        None => {
-            ebpfsentinel_agent::startup::run(
-                &cli.config,
-                cli.log_level,
-                cli.log_format,
-            )
-            .await
-        }
+        None => ebpfsentinel_agent::startup::run(&cli.config, cli.log_level, cli.log_format).await,
     }
 }
