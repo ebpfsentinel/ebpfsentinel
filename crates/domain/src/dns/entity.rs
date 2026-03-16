@@ -1,6 +1,8 @@
 use std::fmt;
 use std::net::IpAddr;
 
+use serde::{Deserialize, Serialize};
+
 /// DNS record type codes (RFC 1035 + extensions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DnsRecordType {
@@ -118,7 +120,7 @@ pub enum DnsPacket {
 // ── Domain blocklist entities ──────────────────────────────────────
 
 /// A domain pattern for blocklist matching.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DomainPattern {
     /// Exact domain match (case-insensitive).
     Exact(String),
@@ -192,7 +194,7 @@ impl fmt::Display for DomainPattern {
 }
 
 /// Action to take when a domain matches the blocklist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlocklistAction {
     /// Drop traffic to resolved IPs at kernel level.
     Block,
@@ -213,7 +215,7 @@ impl fmt::Display for BlocklistAction {
 }
 
 /// Target eBPF map for IP injection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InjectTarget {
     /// Inject into the threat intelligence IOC map.
     ThreatIntel,
@@ -254,7 +256,7 @@ impl InjectedIpEntry {
 }
 
 /// Configuration for domain blocklist enforcement.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainBlocklistConfig {
     pub patterns: Vec<DomainPattern>,
     pub action: BlocklistAction,
