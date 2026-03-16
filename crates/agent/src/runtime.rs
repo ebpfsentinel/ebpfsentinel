@@ -1,8 +1,12 @@
 //! Reusable OSS agent runtime — service handles and lifecycle control.
+//!
+//! Provides [`ServiceHandles`] + [`build_services`] for creating all OSS
+//! services, and [`load_ebpf_programs`] + [`EbpfLoadResult`] for attaching
+//! eBPF programs with full map wiring.
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use application::alias_service_impl::AliasAppService;
 use application::audit_service_impl::AuditAppService;
@@ -422,4 +426,362 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         metrics,
         ebpf_loaded,
     })
+}
+
+// ── eBPF lifecycle ──────────────────────────────────────────────
+
+use adapters::ebpf::{EbpfLoader, InterfaceGroupsManager, MetricsReader};
+use application::packet_pipeline::AgentEvent;
+use tokio::sync::mpsc;
+
+use crate::reload::EbpfMapHolder;
+use crate::startup::{self, EbpfState};
+
+/// Result of loading all eBPF programs.
+pub struct EbpfLoadResult {
+    /// eBPF loaders — dropping this detaches all programs.
+    pub state: EbpfState,
+    /// Map managers needed for config hot-reload.
+    pub map_holder: EbpfMapHolder,
+    /// Per-program kernel metrics readers.
+    pub metrics_readers: Vec<MetricsReader>,
+    /// Per-program load status.
+    pub program_status: std::collections::HashMap<String, bool>,
+    /// Receive end of the event channel (for the event dispatcher).
+    pub event_rx: mpsc::Receiver<AgentEvent>,
+}
+
+/// Load and attach all eBPF programs, wiring map managers to services.
+///
+/// Returns an [`EbpfLoadResult`] whose `state` field must be kept alive
+/// for the programs to remain attached. Dropping it detaches everything.
+///
+/// # Errors
+///
+/// Individual program failures are non-fatal (graceful degradation).
+/// Returns `Err` only if a critical setup step fails.
+#[allow(clippy::too_many_lines)]
+pub async fn load_ebpf_programs(
+    config: &AgentConfig,
+    services: &ServiceHandles,
+) -> anyhow::Result<EbpfLoadResult> {
+    let ebpf_dir = startup::resolve_ebpf_program_dir(config);
+    EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
+
+    let mut ebpf_state = EbpfState::new();
+    let mut ebpf_map_holder = EbpfMapHolder::new();
+    let mut metrics_readers: Vec<MetricsReader> = Vec::new();
+    let mut iface_groups_mgr = InterfaceGroupsManager::new();
+    let mut program_status = std::collections::HashMap::new();
+
+    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(4096);
+
+    let domain_rules = config.firewall_rules().unwrap_or_default();
+
+    // ── XDP Firewall ────────────────────────────────────────────
+    let mut fw_loader: Option<EbpfLoader> = None;
+    let fw_ok = if config.firewall.enabled {
+        match startup::try_load_xdp_firewall(&ebpf_dir, config, &domain_rules, event_tx.clone()) {
+            Ok((loader, map_manager, fw_metrics_rdr)) => {
+                let mut svc = services.firewall_svc.write().await;
+                svc.set_map_port(Box::new(map_manager));
+                if let Some(rdr) = fw_metrics_rdr {
+                    metrics_readers.push(rdr);
+                }
+                services
+                    .metrics
+                    .set_ebpf_program_status("xdp_firewall", true);
+                services.ebpf_loaded.store(true, Ordering::Relaxed);
+                fw_loader = Some(loader);
+                true
+            }
+            Err(e) => {
+                warn!("xdp-firewall load failed (degraded mode): {e}");
+                services
+                    .metrics
+                    .set_ebpf_program_status("xdp_firewall", false);
+                false
+            }
+        }
+    } else {
+        false
+    };
+    program_status.insert("xdp_firewall".to_string(), fw_ok);
+
+    // ── XDP Rate Limiter ────────────────────────────────────────
+    let rl_ok = if config.ratelimit.enabled {
+        match startup::try_load_xdp_ratelimit(&ebpf_dir, config, event_tx.clone()) {
+            Ok((mut rl_loader, rl_mgr_opt, _rl_lpm_opt, rl_rdrs)) => {
+                metrics_readers.extend(rl_rdrs);
+                if let Some(rl_mgr) = rl_mgr_opt {
+                    let mut svc = services.rl_svc.write().await;
+                    let default_algo =
+                        startup::parse_algorithm_byte(&config.ratelimit.default_algorithm);
+                    svc.set_defaults(
+                        config.ratelimit.default_rate,
+                        config.ratelimit.default_burst,
+                        default_algo,
+                    );
+                    svc.set_map_port(Box::new(rl_mgr));
+                }
+                // Wire tail-call: firewall → ratelimit
+                if let Some(ref mut fw) = fw_loader
+                    && let Ok(rl_fd) = rl_loader.xdp_program_fd("xdp_ratelimit")
+                {
+                    let _ = fw.set_tail_call_target("XDP_PROG_ARRAY", 0, &rl_fd);
+                }
+                iface_groups_mgr.add_map(rl_loader.ebpf_mut());
+                ebpf_state.add_loader(rl_loader);
+                true
+            }
+            Err(e) => {
+                warn!("xdp-ratelimit load failed (degraded mode): {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    program_status.insert("xdp_ratelimit".to_string(), rl_ok);
+
+    // Take INTERFACE_GROUPS from xdp-firewall before moving loader
+    if let Some(ref mut loader) = fw_loader {
+        iface_groups_mgr.add_map(loader.ebpf_mut());
+    }
+    if let Some(loader) = fw_loader {
+        ebpf_state.add_loader(loader);
+    }
+
+    // ── TC IDS ──────────────────────────────────────────────────
+    let ids_ok = if config.ids.enabled {
+        match startup::try_load_tc_ids(&ebpf_dir, config, event_tx.clone()) {
+            Ok((mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr)) => {
+                if let Some(ids_mgr) = ids_mgr_opt {
+                    services
+                        .ids_svc
+                        .write()
+                        .await
+                        .set_map_port(Box::new(ids_mgr));
+                }
+                if let Some(l7_mgr) = l7_mgr_opt {
+                    ebpf_map_holder.l7_ports = Some(l7_mgr);
+                }
+                if let Some(cfg_mgr) = cfg_mgr_opt {
+                    ebpf_map_holder.config_flags.push(cfg_mgr);
+                }
+                if let Some(rdr) = ids_rdr {
+                    metrics_readers.push(rdr);
+                }
+                iface_groups_mgr.add_map(loader.ebpf_mut());
+                ebpf_state.add_loader(loader);
+                true
+            }
+            Err(e) => {
+                warn!("tc-ids load failed (degraded mode): {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    program_status.insert("tc_ids".to_string(), ids_ok);
+
+    // ── TC Threat Intel ─────────────────────────────────────────
+    let ti_ok = if config.threatintel.enabled {
+        match startup::try_load_tc_threatintel(&ebpf_dir, config, event_tx.clone()) {
+            Ok((loader, ti_mgr_opt, cfg_mgr_opt, ti_rdr)) => {
+                if let Some(rdr) = ti_rdr {
+                    metrics_readers.push(rdr);
+                }
+                if let Some(ti_mgr) = ti_mgr_opt {
+                    services.ti_svc.write().await.set_map_port(Box::new(ti_mgr));
+                }
+                if let Some(cfg_mgr) = cfg_mgr_opt {
+                    ebpf_map_holder.config_flags.push(cfg_mgr);
+                }
+                ebpf_state.add_loader(loader);
+                true
+            }
+            Err(e) => {
+                warn!("tc-threatintel load failed (degraded mode): {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    program_status.insert("tc_threatintel".to_string(), ti_ok);
+
+    // ── TC DNS ──────────────────────────────────────────────────
+    let dns_ok = if config.dns.enabled {
+        match startup::try_load_tc_dns(&ebpf_dir, config, event_tx.clone()) {
+            Ok((loader, dns_rdr)) => {
+                if let Some(rdr) = dns_rdr {
+                    metrics_readers.push(rdr);
+                }
+                ebpf_state.add_loader(loader);
+                true
+            }
+            Err(e) => {
+                warn!("tc-dns load failed (degraded mode): {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    program_status.insert("tc_dns".to_string(), dns_ok);
+
+    // ── Uprobe DLP ──────────────────────────────────────────────
+    let dlp_ok = if config.dlp.enabled {
+        match startup::try_load_uprobe_dlp(&ebpf_dir, config, event_tx.clone()) {
+            Ok((loader, dlp_rdr)) => {
+                if let Some(rdr) = dlp_rdr {
+                    metrics_readers.push(rdr);
+                }
+                ebpf_state.add_loader(loader);
+                true
+            }
+            Err(e) => {
+                warn!("uprobe-dlp load failed (degraded mode): {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    program_status.insert("uprobe_dlp".to_string(), dlp_ok);
+
+    // ── TC ConnTrack ────────────────────────────────────────────
+    let ct_ok = if config.conntrack.enabled {
+        match startup::try_load_tc_conntrack(&ebpf_dir, config, event_tx.clone()) {
+            Ok((loader, ct_mgr, ct_rdr)) => {
+                services
+                    .conntrack_svc
+                    .write()
+                    .await
+                    .set_map_port(Box::new(ct_mgr));
+                if let Some(rdr) = ct_rdr {
+                    metrics_readers.push(rdr);
+                }
+                ebpf_state.add_loader(loader);
+                true
+            }
+            Err(e) => {
+                warn!("tc-conntrack load failed (degraded mode): {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    program_status.insert("tc_conntrack".to_string(), ct_ok);
+
+    // ── TC NAT ──────────────────────────────────────────────────
+    let nat_ok = if config.nat.enabled {
+        match startup::try_load_tc_nat(&ebpf_dir, config) {
+            Ok((mut ingress_loader, mut egress_loader, nat_mgr, nat_rdrs)) => {
+                metrics_readers.extend(nat_rdrs);
+                services
+                    .nat_svc
+                    .write()
+                    .await
+                    .set_map_port(Box::new(nat_mgr));
+                iface_groups_mgr.add_map(ingress_loader.ebpf_mut());
+                iface_groups_mgr.add_map(egress_loader.ebpf_mut());
+                ebpf_state.add_loader(ingress_loader);
+                ebpf_state.add_loader(egress_loader);
+                true
+            }
+            Err(e) => {
+                warn!("tc-nat load failed (degraded mode): {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    program_status.insert("tc_nat_ingress".to_string(), nat_ok);
+    program_status.insert("tc_nat_egress".to_string(), nat_ok);
+
+    // ── TC Scrub ────────────────────────────────────────────────
+    let scrub_ok = if config.firewall.scrub.enabled {
+        match startup::try_load_tc_scrub(&ebpf_dir, config) {
+            Ok((loader, scrub_rdr)) => {
+                if let Some(rdr) = scrub_rdr {
+                    metrics_readers.push(rdr);
+                }
+                ebpf_state.add_loader(loader);
+                true
+            }
+            Err(e) => {
+                warn!("tc-scrub load failed (degraded mode): {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    program_status.insert("tc_scrub".to_string(), scrub_ok);
+
+    // ── XDP Load Balancer ───────────────────────────────────────
+    let lb_ok = if config.loadbalancer.enabled {
+        match startup::try_load_xdp_loadbalancer(&ebpf_dir, config, event_tx.clone()) {
+            Ok((loader, lb_mgr, lb_metrics_rdr)) => {
+                services.lb_svc.write().await.set_map_port(Box::new(lb_mgr));
+                if let Some(rdr) = lb_metrics_rdr {
+                    metrics_readers.push(rdr);
+                }
+                ebpf_state.add_loader(loader);
+                true
+            }
+            Err(e) => {
+                warn!("xdp-loadbalancer load failed (degraded mode): {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    program_status.insert("xdp_loadbalancer".to_string(), lb_ok);
+
+    // ── Populate interface groups across all programs ────────────
+    {
+        let membership = config.interface_membership();
+        let memberships: Vec<(u32, u32)> = config
+            .agent
+            .interfaces
+            .iter()
+            .filter_map(|iface| {
+                let ifindex = startup::get_ifindex(iface).ok()?;
+                let groups = membership.get(iface).copied().unwrap_or(0);
+                Some((ifindex, groups))
+            })
+            .collect();
+        if let Err(e) = iface_groups_mgr.set_interface_groups(&memberships) {
+            warn!("INTERFACE_GROUPS population failed (non-fatal): {e}");
+        }
+    }
+    ebpf_map_holder.iface_groups = Some(iface_groups_mgr);
+
+    info!(
+        program_count = ebpf_state.loaders.len(),
+        "eBPF programs loaded via load_ebpf_programs()"
+    );
+
+    Ok(EbpfLoadResult {
+        state: ebpf_state,
+        map_holder: ebpf_map_holder,
+        metrics_readers,
+        program_status,
+        event_rx,
+    })
+}
+
+/// Detach all eBPF programs and clean up pinned maps.
+pub fn detach_ebpf(state: EbpfState) {
+    let count = state.loaders.len();
+    drop(state);
+    EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
+    info!(program_count = count, "eBPF programs detached");
 }

@@ -1656,18 +1656,24 @@ pub async fn run(
 /// Holds eBPF resources that must live for the duration of the agent.
 ///
 /// When dropped, all loaders are dropped and their eBPF programs are detached.
-struct EbpfState {
-    loaders: Vec<EbpfLoader>,
+pub struct EbpfState {
+    pub loaders: Vec<EbpfLoader>,
+}
+
+impl Default for EbpfState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EbpfState {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             loaders: Vec::new(),
         }
     }
 
-    fn add_loader(&mut self, loader: EbpfLoader) {
+    pub fn add_loader(&mut self, loader: EbpfLoader) {
         self.loaders.push(loader);
     }
 }
@@ -1677,7 +1683,7 @@ impl EbpfState {
 /// Precedence: `EBPF_PROGRAM_DIR` env var > `agent.ebpf_program_dir` config
 /// > production default (`/usr/local/lib/ebpfsentinel`)
 /// > dev fallback (`target/bpfel-unknown-none/release`).
-fn resolve_ebpf_program_dir(config: &AgentConfig) -> String {
+pub fn resolve_ebpf_program_dir(config: &AgentConfig) -> String {
     use infrastructure::constants::{DEFAULT_EBPF_PROGRAM_DIR, DEFAULT_EBPF_PROGRAM_DIR_DEV};
 
     // 1. Env var (highest priority, set in Dockerfile / systemd unit)
@@ -1703,7 +1709,7 @@ fn resolve_ebpf_program_dir(config: &AgentConfig) -> String {
 }
 
 /// Read a single eBPF program binary from the program directory.
-fn read_ebpf_program(dir: &str, name: &str) -> anyhow::Result<Vec<u8>> {
+pub fn read_ebpf_program(dir: &str, name: &str) -> anyhow::Result<Vec<u8>> {
     let path = Path::new(dir).join(name);
     std::fs::read(&path)
         .map_err(|e| anyhow::anyhow!("failed to read eBPF program '{}': {e}", path.display()))
@@ -1712,7 +1718,7 @@ fn read_ebpf_program(dir: &str, name: &str) -> anyhow::Result<Vec<u8>> {
 // ── Per-program load functions ───────────────────────────────────────
 
 /// Load the XDP firewall program: attach XDP, populate rules, start event reader.
-fn try_load_xdp_firewall(
+pub fn try_load_xdp_firewall(
     ebpf_dir: &str,
     config: &AgentConfig,
     domain_rules: &[FirewallRule],
@@ -1768,7 +1774,7 @@ fn try_load_xdp_firewall(
 }
 
 /// Load result for xdp-ratelimit: loader, map manager, LPM manager, metrics readers.
-type XdpRatelimitResult = (
+pub type XdpRatelimitResult = (
     EbpfLoader,
     Option<RateLimitMapManager>,
     Option<RateLimitLpmManager>,
@@ -1776,7 +1782,7 @@ type XdpRatelimitResult = (
 );
 
 /// Load the XDP rate limiter program: attach XDP, populate policies, start event reader.
-fn try_load_xdp_ratelimit(
+pub fn try_load_xdp_ratelimit(
     ebpf_dir: &str,
     config: &AgentConfig,
     event_tx: mpsc::Sender<AgentEvent>,
@@ -1859,7 +1865,7 @@ fn try_load_xdp_ratelimit(
 }
 
 /// IDS program load result: loader, IDS map manager, L7 ports manager, config flags manager, metrics reader.
-type TcIdsResult = (
+pub type TcIdsResult = (
     EbpfLoader,
     Option<IdsMapManager>,
     Option<L7PortsManager>,
@@ -1868,7 +1874,7 @@ type TcIdsResult = (
 );
 
 /// Load the TC IDS program: attach TC ingress, set up maps, start event reader.
-fn try_load_tc_ids(
+pub fn try_load_tc_ids(
     ebpf_dir: &str,
     config: &AgentConfig,
     event_tx: mpsc::Sender<AgentEvent>,
@@ -1935,14 +1941,14 @@ fn try_load_tc_ids(
 
 /// Load the TC threat intel program: attach TC ingress, set up maps, start event reader.
 /// Threat intel program load result.
-type TcThreatIntelResult = (
+pub type TcThreatIntelResult = (
     EbpfLoader,
     Option<ThreatIntelMapManager>,
     Option<ConfigFlagsManager>,
     Option<MetricsReader>,
 );
 
-fn try_load_tc_threatintel(
+pub fn try_load_tc_threatintel(
     ebpf_dir: &str,
     config: &AgentConfig,
     event_tx: mpsc::Sender<AgentEvent>,
@@ -1988,7 +1994,7 @@ fn try_load_tc_threatintel(
 }
 
 /// Load the TC DNS program: attach TC ingress, start DNS event reader.
-fn try_load_tc_dns(
+pub fn try_load_tc_dns(
     ebpf_dir: &str,
     config: &AgentConfig,
     event_tx: mpsc::Sender<AgentEvent>,
@@ -2010,7 +2016,7 @@ fn try_load_tc_dns(
 }
 
 /// Load the uprobe DLP program: attach uprobes to SSL functions, start DLP event reader.
-fn try_load_uprobe_dlp(
+pub fn try_load_uprobe_dlp(
     ebpf_dir: &str,
     _config: &AgentConfig,
     event_tx: mpsc::Sender<AgentEvent>,
@@ -2035,7 +2041,7 @@ fn try_load_uprobe_dlp(
 }
 
 /// Build `ConfigFlags` from the agent config for eBPF programs.
-pub(crate) fn build_config_flags(config: &AgentConfig) -> ebpf_common::config_flags::ConfigFlags {
+pub fn build_config_flags(config: &AgentConfig) -> ebpf_common::config_flags::ConfigFlags {
     ebpf_common::config_flags::ConfigFlags {
         firewall_enabled: u8::from(config.firewall.enabled),
         ids_enabled: u8::from(config.ids.enabled),
@@ -2059,7 +2065,7 @@ pub fn get_ifindex(iface: &str) -> Result<u32, anyhow::Error> {
 }
 
 /// Convert ratelimit algorithm string to the eBPF u8 constant.
-fn parse_algorithm_byte(algorithm: &str) -> u8 {
+pub fn parse_algorithm_byte(algorithm: &str) -> u8 {
     match algorithm.to_lowercase().as_str() {
         "fixed_window" | "fixedwindow" => ebpf_common::ratelimit::ALGO_FIXED_WINDOW,
         "sliding_window" | "slidingwindow" => ebpf_common::ratelimit::ALGO_SLIDING_WINDOW,
@@ -2069,7 +2075,7 @@ fn parse_algorithm_byte(algorithm: &str) -> u8 {
 }
 
 /// Load the TC conntrack program: attach TC ingress, create map manager, start event reader.
-fn try_load_tc_conntrack(
+pub fn try_load_tc_conntrack(
     ebpf_dir: &str,
     config: &AgentConfig,
     event_tx: mpsc::Sender<AgentEvent>,
@@ -2092,7 +2098,7 @@ fn try_load_tc_conntrack(
 }
 
 /// Load the TC NAT programs (ingress + egress): attach TC, create map manager.
-fn try_load_tc_nat(
+pub fn try_load_tc_nat(
     ebpf_dir: &str,
     config: &AgentConfig,
 ) -> anyhow::Result<(EbpfLoader, EbpfLoader, NatMapManager, Vec<MetricsReader>)> {
@@ -2125,7 +2131,7 @@ fn try_load_tc_nat(
 }
 
 /// Load the TC scrub program: attach TC ingress, write scrub config to eBPF map.
-fn try_load_tc_scrub(
+pub fn try_load_tc_scrub(
     ebpf_dir: &str,
     config: &AgentConfig,
 ) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>)> {
@@ -2151,7 +2157,7 @@ fn try_load_tc_scrub(
 }
 
 /// Build `ScrubFlags` from the agent config's scrub section.
-fn build_scrub_flags(config: &AgentConfig) -> ebpf_common::scrub::ScrubFlags {
+pub fn build_scrub_flags(config: &AgentConfig) -> ebpf_common::scrub::ScrubFlags {
     let scrub = &config.firewall.scrub;
     ebpf_common::scrub::ScrubFlags {
         enabled: u8::from(scrub.enabled),
@@ -2174,7 +2180,7 @@ fn build_scrub_flags(config: &AgentConfig) -> ebpf_common::scrub::ScrubFlags {
 /// Only handles the `File` mode synchronously. `Url` and `MaxMindAccount`
 /// modes require async downloads and are not supported at startup (they
 /// will log a warning and return an error).
-fn build_geoip_adapter(
+pub fn build_geoip_adapter(
     cfg: &infrastructure::config::GeoIpConfig,
 ) -> anyhow::Result<adapters::geoip::MaxMindGeoIpAdapter> {
     match &cfg.source {
@@ -2199,7 +2205,7 @@ fn build_geoip_adapter(
 }
 
 /// Load and attach the XDP load balancer program.
-fn try_load_xdp_loadbalancer(
+pub fn try_load_xdp_loadbalancer(
     ebpf_dir: &str,
     config: &AgentConfig,
     event_tx: mpsc::Sender<AgentEvent>,
