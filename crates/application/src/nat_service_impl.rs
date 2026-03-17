@@ -261,6 +261,7 @@ fn nat_rule_to_ebpf_entry(rule: &NatRule) -> ebpf_common::nat::NatRuleEntry {
         nat_port_end: 0,
         nat_interface: 0,
         group_mask: 0,
+        tenant_id: 0,
     };
 
     // Set match criteria
@@ -446,6 +447,7 @@ fn nat_rule_to_ebpf_entry_v6(rule: &NatRule) -> ebpf_common::nat::NatRuleEntryV6
         nat_port_end: 0,
         nat_interface: 0,
         group_mask: 0,
+        tenant_id: 0,
     };
 
     // Set match criteria
@@ -637,6 +639,7 @@ fn nptv6_rule_to_ebpf_entry(rule: &NptV6Rule) -> ebpf_common::nat::NptV6RuleEntr
         enabled: u8::from(rule.enabled),
         adjustment,
         group_mask: 0,
+        tenant_id: 0,
     }
 }
 

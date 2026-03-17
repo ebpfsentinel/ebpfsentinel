@@ -144,6 +144,7 @@ impl RateLimitPolicy {
                     algorithm: ALGO_TOKEN_BUCKET,
                     _padding: [0; 2],
                     group_mask: 0,
+                    tenant_id: 0,
                 }
             }
             RateLimitAlgorithm::FixedWindow => EbpfConfig {
@@ -153,6 +154,7 @@ impl RateLimitPolicy {
                 algorithm: ALGO_FIXED_WINDOW,
                 _padding: [0; 2],
                 group_mask: 0,
+                tenant_id: 0,
             },
             RateLimitAlgorithm::SlidingWindow => EbpfConfig {
                 ns_per_token: self.rate,
@@ -161,6 +163,7 @@ impl RateLimitPolicy {
                 algorithm: ALGO_SLIDING_WINDOW,
                 _padding: [0; 2],
                 group_mask: 0,
+                tenant_id: 0,
             },
             RateLimitAlgorithm::LeakyBucket => EbpfConfig {
                 ns_per_token: self.rate,
@@ -169,6 +172,7 @@ impl RateLimitPolicy {
                 algorithm: ALGO_LEAKY_BUCKET,
                 _padding: [0; 2],
                 group_mask: 0,
+                tenant_id: 0,
             },
         }
     }
@@ -216,6 +220,7 @@ impl CountryTierConfig {
                     algorithm: ALGO_TOKEN_BUCKET,
                     _padding: [0; 2],
                     group_mask: 0,
+                    tenant_id: 0,
                 }
             }
             RateLimitAlgorithm::FixedWindow => EbpfConfig {
@@ -225,6 +230,7 @@ impl CountryTierConfig {
                 algorithm: ALGO_FIXED_WINDOW,
                 _padding: [0; 2],
                 group_mask: 0,
+                tenant_id: 0,
             },
             RateLimitAlgorithm::SlidingWindow => EbpfConfig {
                 ns_per_token: self.rate,
@@ -233,6 +239,7 @@ impl CountryTierConfig {
                 algorithm: ALGO_SLIDING_WINDOW,
                 _padding: [0; 2],
                 group_mask: 0,
+                tenant_id: 0,
             },
             RateLimitAlgorithm::LeakyBucket => EbpfConfig {
                 ns_per_token: self.rate,
@@ -241,6 +248,7 @@ impl CountryTierConfig {
                 algorithm: ALGO_LEAKY_BUCKET,
                 _padding: [0; 2],
                 group_mask: 0,
+                tenant_id: 0,
             },
         }
     }

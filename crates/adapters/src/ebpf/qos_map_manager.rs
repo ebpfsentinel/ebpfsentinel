@@ -70,6 +70,7 @@ impl QosMapManager {
             pipe_id: index,
             enabled: u8::from(pipe.enabled),
             group_mask: 0,
+            tenant_id: 0,
         }
     }
 
@@ -117,6 +118,7 @@ impl QosMapManager {
             priority: cls.priority.min(255) as u8,
             _padding: [0; 2],
             group_mask: 0,
+            tenant_id: 0,
         };
         (key, value)
     }
@@ -197,6 +199,7 @@ impl QosMapManager {
             pipe_id: 0,
             enabled: 0,
             group_mask: 0,
+            tenant_id: 0,
         };
         for i in 0..count {
             let _ = self.pipe_config.set(i, zero, 0);

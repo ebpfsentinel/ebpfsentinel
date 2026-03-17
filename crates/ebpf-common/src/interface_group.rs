@@ -12,6 +12,15 @@ pub const GROUP_FLAG_INVERT: u32 = 0x8000_0000;
 /// Mask for group bits only (bits 0-30).
 pub const GROUP_BITS_MASK: u32 = 0x7FFF_FFFF;
 
+/// Check if a rule's `tenant_id` matches the packet's tenant context.
+/// Returns true if the rule should apply to this tenant.
+/// `rule_tenant_id = 0` means floating rule, always matches.
+/// `pkt_tenant_id = 0` means unassigned traffic, only matches floating rules.
+#[inline(always)]
+pub fn tenant_matches(rule_tenant_id: u32, pkt_tenant_id: u32) -> bool {
+    rule_tenant_id == 0 || rule_tenant_id == pkt_tenant_id
+}
+
 /// Check if a rule's group_mask matches the interface's group membership.
 /// Returns true if the rule should apply to this interface.
 /// `group_mask = 0` → floating rule, always matches.
@@ -29,6 +38,31 @@ pub fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tenant_floating_matches_any() {
+        assert!(tenant_matches(0, 0));
+        assert!(tenant_matches(0, 1));
+        assert!(tenant_matches(0, 42));
+    }
+
+    #[test]
+    fn tenant_exact_match() {
+        assert!(tenant_matches(1, 1));
+        assert!(tenant_matches(42, 42));
+    }
+
+    #[test]
+    fn tenant_mismatch() {
+        assert!(!tenant_matches(1, 2));
+        assert!(!tenant_matches(42, 1));
+    }
+
+    #[test]
+    fn tenant_nonzero_vs_unassigned() {
+        // Non-floating rule does not match unassigned (0) traffic
+        assert!(!tenant_matches(1, 0));
+    }
 
     #[test]
     fn floating_rule_matches_everything() {

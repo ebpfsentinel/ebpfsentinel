@@ -15,5 +15,6 @@ pub mod nat;
 pub mod qos;
 pub mod ratelimit;
 pub mod scrub;
+pub mod tenant;
 pub mod threatintel;
 pub mod zone;

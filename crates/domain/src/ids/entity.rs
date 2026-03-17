@@ -233,6 +233,7 @@ impl IdsRule {
             _padding: [0; 2],
             rule_id: rule_index,
             group_mask: 0,
+            tenant_id: 0,
         }
     }
 }

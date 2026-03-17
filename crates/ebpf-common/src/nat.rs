@@ -127,6 +127,8 @@ pub struct NatRuleEntry {
     /// Interface group bitmask (0 = floating/all interfaces).
     /// Bits 0-30: group membership, bit 31: invert flag.
     pub group_mask: u32,
+    /// Tenant ID (0 = floating rule, applies to all tenants).
+    pub tenant_id: u32,
 }
 
 /// Maximum NAT rules per direction (IPv6).
@@ -168,6 +170,8 @@ pub struct NatRuleEntryV6 {
     /// Interface group bitmask (0 = floating/all interfaces).
     /// Bits 0-30: group membership, bit 31: invert flag.
     pub group_mask: u32,
+    /// Tenant ID (0 = floating rule, applies to all tenants).
+    pub tenant_id: u32,
 }
 
 // ── NPTv6 rule entry — 40 bytes ─────────────────────────────────────
@@ -191,6 +195,8 @@ pub struct NptV6RuleEntry {
     /// Interface group bitmask (0 = floating/all interfaces).
     /// Bits 0-30: group membership, bit 31: invert flag.
     pub group_mask: u32,
+    /// Tenant ID (0 = floating rule, applies to all tenants).
+    pub tenant_id: u32,
 }
 
 // ── Hairpin NAT (NAT reflection) ─────────────────────────────────────
@@ -286,7 +292,7 @@ mod tests {
 
     #[test]
     fn nat_rule_entry_size() {
-        assert_eq!(mem::size_of::<NatRuleEntry>(), 40);
+        assert_eq!(mem::size_of::<NatRuleEntry>(), 44);
     }
 
     #[test]
@@ -310,11 +316,12 @@ mod tests {
         assert_eq!(mem::offset_of!(NatRuleEntry, nat_port_end), 30);
         assert_eq!(mem::offset_of!(NatRuleEntry, nat_interface), 32);
         assert_eq!(mem::offset_of!(NatRuleEntry, group_mask), 36);
+        assert_eq!(mem::offset_of!(NatRuleEntry, tenant_id), 40);
     }
 
     #[test]
     fn nat_rule_entry_v6_size() {
-        assert_eq!(mem::size_of::<NatRuleEntryV6>(), 100);
+        assert_eq!(mem::size_of::<NatRuleEntryV6>(), 104);
     }
 
     #[test]
@@ -338,11 +345,12 @@ mod tests {
         assert_eq!(mem::offset_of!(NatRuleEntryV6, nat_port_end), 90);
         assert_eq!(mem::offset_of!(NatRuleEntryV6, nat_interface), 92);
         assert_eq!(mem::offset_of!(NatRuleEntryV6, group_mask), 96);
+        assert_eq!(mem::offset_of!(NatRuleEntryV6, tenant_id), 100);
     }
 
     #[test]
     fn nptv6_rule_entry_size() {
-        assert_eq!(mem::size_of::<NptV6RuleEntry>(), 40);
+        assert_eq!(mem::size_of::<NptV6RuleEntry>(), 44);
     }
 
     #[test]
@@ -358,6 +366,7 @@ mod tests {
         assert_eq!(mem::offset_of!(NptV6RuleEntry, enabled), 33);
         assert_eq!(mem::offset_of!(NptV6RuleEntry, adjustment), 34);
         assert_eq!(mem::offset_of!(NptV6RuleEntry, group_mask), 36);
+        assert_eq!(mem::offset_of!(NptV6RuleEntry, tenant_id), 40);
     }
 
     #[test]

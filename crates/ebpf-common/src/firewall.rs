@@ -231,9 +231,11 @@ pub struct FirewallRuleEntry {
     /// Interface group bitmask (0 = floating/all interfaces).
     /// Bits 0-30: group membership, bit 31: invert flag.
     pub group_mask: u32,
+    /// Tenant ID (0 = floating rule, applies to all tenants).
+    pub tenant_id: u32,
 }
 
-/// Array-based IPv6 firewall rule entry (108 bytes).
+/// Array-based IPv6 firewall rule entry (112 bytes).
 ///
 /// Same semantics as [`FirewallRuleEntry`] but with 128-bit addresses
 /// stored as `[u32; 4]` in network byte order.
@@ -298,6 +300,8 @@ pub struct FirewallRuleEntryV6 {
     /// Interface group bitmask (0 = floating/all interfaces).
     /// Bits 0-30: group membership, bit 31: invert flag.
     pub group_mask: u32,
+    /// Tenant ID (0 = floating rule, applies to all tenants).
+    pub tenant_id: u32,
 }
 
 /// Value stored in firewall LPM Trie maps (action only, 4 bytes).
@@ -364,7 +368,7 @@ mod tests {
 
     #[test]
     fn test_firewall_rule_entry_size() {
-        assert_eq!(mem::size_of::<FirewallRuleEntry>(), 60);
+        assert_eq!(mem::size_of::<FirewallRuleEntry>(), 64);
     }
 
     #[test]
@@ -403,13 +407,14 @@ mod tests {
         assert_eq!(mem::offset_of!(FirewallRuleEntry, route_action), 53);
         assert_eq!(mem::offset_of!(FirewallRuleEntry, route_ifindex), 54);
         assert_eq!(mem::offset_of!(FirewallRuleEntry, group_mask), 56);
+        assert_eq!(mem::offset_of!(FirewallRuleEntry, tenant_id), 60);
     }
 
     // ── FirewallRuleEntryV6 ─────────────────────────────────────────
 
     #[test]
     fn test_firewall_rule_entry_v6_size() {
-        assert_eq!(mem::size_of::<FirewallRuleEntryV6>(), 108);
+        assert_eq!(mem::size_of::<FirewallRuleEntryV6>(), 112);
     }
 
     #[test]
@@ -448,6 +453,7 @@ mod tests {
         assert_eq!(mem::offset_of!(FirewallRuleEntryV6, route_action), 101);
         assert_eq!(mem::offset_of!(FirewallRuleEntryV6, route_ifindex), 102);
         assert_eq!(mem::offset_of!(FirewallRuleEntryV6, group_mask), 104);
+        assert_eq!(mem::offset_of!(FirewallRuleEntryV6, tenant_id), 108);
     }
 
     // ── LpmValue ─────────────────────────────────────────────────────

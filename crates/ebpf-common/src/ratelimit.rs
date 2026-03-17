@@ -90,6 +90,8 @@ pub struct RateLimitConfig {
     /// Interface group bitmask (0 = floating/all interfaces).
     /// Bits 0-30: group membership, bit 31: invert flag.
     pub group_mask: u32,
+    /// Tenant ID (0 = floating rule, applies to all tenants).
+    pub tenant_id: u32,
 }
 
 /// Fixed window bucket state. Size: 16 bytes.
@@ -229,7 +231,7 @@ mod tests {
 
     #[test]
     fn ratelimit_config_size() {
-        assert_eq!(mem::size_of::<RateLimitConfig>(), 24);
+        assert_eq!(mem::size_of::<RateLimitConfig>(), 32);
     }
 
     #[test]
@@ -279,6 +281,7 @@ mod tests {
         assert_eq!(mem::offset_of!(RateLimitConfig, action), 16);
         assert_eq!(mem::offset_of!(RateLimitConfig, algorithm), 17);
         assert_eq!(mem::offset_of!(RateLimitConfig, group_mask), 20);
+        assert_eq!(mem::offset_of!(RateLimitConfig, tenant_id), 24);
     }
 
     #[test]
@@ -407,6 +410,7 @@ mod tests {
             algorithm: ALGO_TOKEN_BUCKET,
             _padding: [0; 2],
             group_mask: 0,
+            tenant_id: 0,
         };
         assert_eq!(config.algorithm, 0);
     }

@@ -638,6 +638,7 @@ impl FirewallRule {
             route_action: route_action_to_u8(self.route_action),
             route_ifindex: route_action_ifindex(self.route_action),
             group_mask: self.group_mask,
+            tenant_id: 0,
         }
     }
 
@@ -784,6 +785,7 @@ impl FirewallRule {
             route_action: route_action_to_u8(self.route_action),
             route_ifindex: route_action_ifindex(self.route_action),
             group_mask: self.group_mask,
+            tenant_id: 0,
         }
     }
 }

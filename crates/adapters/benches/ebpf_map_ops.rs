@@ -216,6 +216,7 @@ fn ratelimit_policy_construction(c: &mut Criterion) {
                                 algorithm,
                                 _padding: [0; 2],
                                 group_mask: 0,
+                                tenant_id: 0,
                             },
                         )
                         .collect();

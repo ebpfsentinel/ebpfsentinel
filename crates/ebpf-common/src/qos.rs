@@ -53,6 +53,8 @@ pub struct QosPipeConfig {
     /// Interface group bitmask (0 = floating/all interfaces).
     /// Bits 0-30: group membership, bit 31: invert flag.
     pub group_mask: u32,
+    /// Tenant ID (0 = floating rule, applies to all tenants).
+    pub tenant_id: u32,
 }
 
 /// `QoS` queue configuration written by userspace, read by eBPF.
@@ -112,6 +114,8 @@ pub struct QosClassifierValue {
     /// Interface group bitmask (0 = floating/all interfaces).
     /// Bits 0-30: group membership, bit 31: invert flag.
     pub group_mask: u32,
+    /// Tenant ID (0 = floating rule, applies to all tenants).
+    pub tenant_id: u32,
 }
 
 /// Per-flow `QoS` state managed by the eBPF program.
@@ -155,7 +159,7 @@ mod tests {
 
     #[test]
     fn qos_pipe_config_size() {
-        assert_eq!(mem::size_of::<QosPipeConfig>(), 32);
+        assert_eq!(mem::size_of::<QosPipeConfig>(), 40);
     }
 
     #[test]
@@ -185,7 +189,7 @@ mod tests {
 
     #[test]
     fn qos_classifier_value_size() {
-        assert_eq!(mem::size_of::<QosClassifierValue>(), 8);
+        assert_eq!(mem::size_of::<QosClassifierValue>(), 12);
     }
 
     #[test]
@@ -214,6 +218,7 @@ mod tests {
         assert_eq!(mem::offset_of!(QosPipeConfig, pipe_id), 26);
         assert_eq!(mem::offset_of!(QosPipeConfig, enabled), 27);
         assert_eq!(mem::offset_of!(QosPipeConfig, group_mask), 28);
+        assert_eq!(mem::offset_of!(QosPipeConfig, tenant_id), 32);
     }
 
     #[test]
@@ -242,6 +247,7 @@ mod tests {
         assert_eq!(mem::offset_of!(QosClassifierValue, priority), 1);
         assert_eq!(mem::offset_of!(QosClassifierValue, _padding), 2);
         assert_eq!(mem::offset_of!(QosClassifierValue, group_mask), 4);
+        assert_eq!(mem::offset_of!(QosClassifierValue, tenant_id), 8);
     }
 
     #[test]

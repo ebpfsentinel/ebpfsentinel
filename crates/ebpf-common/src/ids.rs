@@ -56,6 +56,8 @@ pub struct IdsPatternValue {
     /// Interface group bitmask (0 = floating/all interfaces).
     /// Bits 0-30: group membership, bit 31: invert flag.
     pub group_mask: u32,
+    /// Tenant ID (0 = floating rule, applies to all tenants).
+    pub tenant_id: u32,
 }
 
 // SAFETY: Both types are #[repr(C)], Copy, 'static, and contain only primitive types
@@ -82,7 +84,7 @@ mod tests {
 
     #[test]
     fn test_ids_pattern_value_size() {
-        assert_eq!(mem::size_of::<IdsPatternValue>(), 12);
+        assert_eq!(mem::size_of::<IdsPatternValue>(), 16);
     }
 
     #[test]
@@ -96,6 +98,7 @@ mod tests {
         assert_eq!(mem::offset_of!(IdsPatternValue, severity), 1);
         assert_eq!(mem::offset_of!(IdsPatternValue, rule_id), 4);
         assert_eq!(mem::offset_of!(IdsPatternValue, group_mask), 8);
+        assert_eq!(mem::offset_of!(IdsPatternValue, tenant_id), 12);
     }
 
     #[test]
