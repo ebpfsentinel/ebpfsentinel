@@ -105,6 +105,10 @@ static NAT_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(NAT_METRIC_
 #[map]
 static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
 
+/// Tenant resolution: VLAN ID -> tenant_id.
+#[map]
+static TENANT_VLAN_MAP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+
 // ── Entry point ─────────────────────────────────────────────────────
 
 #[classifier]
@@ -150,6 +154,27 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
     hit != invert
 }
 
+/// Resolve the tenant ID for the current packet using VLAN and interface signals.
+/// Priority: VLAN-based > interface-based > default (0).
+#[inline(always)]
+unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16) -> u32 {
+    unsafe {
+        // Priority 1: VLAN-based (if packet has VLAN tag)
+        if vlan_id != 0 {
+            let vlan_key = vlan_id as u32;
+            if let Some(&tid) = TENANT_VLAN_MAP.get(&vlan_key) {
+                return tid;
+            }
+        }
+        // Priority 2: Interface-based
+        if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+            return tid;
+        }
+        // Default tenant
+        0
+    }
+}
+
 // ── bpf_loop context structs ────────────────────────────────────────
 
 /// Opaque context passed through `bpf_loop` to the IPv4 SNAT rule-scan callback.
@@ -171,6 +196,8 @@ struct SnatScanCtx {
     matched: u8,
     /// Interface group membership bitmask for the ingress interface.
     iface_groups: u32,
+    /// Resolved tenant ID for the current packet.
+    tenant_id: u32,
 }
 
 /// Opaque context passed through `bpf_loop` to the IPv6 SNAT rule-scan callback.
@@ -192,6 +219,8 @@ struct SnatScanCtxV6 {
     matched: u8,
     /// Interface group membership bitmask for the ingress interface.
     iface_groups: u32,
+    /// Resolved tenant ID for the current packet.
+    tenant_id: u32,
 }
 
 // ── bpf_loop callbacks ─────────────────────────────────────────────
@@ -208,6 +237,9 @@ unsafe extern "C" fn scan_snat_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
         if let Some(rule) = NAT_SNAT_RULES.get(index) {
             if !group_matches(rule.group_mask, lctx.iface_groups) {
                 return 0;
+            }
+            if rule.tenant_id != 0 && rule.tenant_id != lctx.tenant_id {
+                return 0; // tenant mismatch, continue to next rule
             }
             if match_snat_rule(rule, lctx.src_ip, lctx.dst_ip, lctx.protocol) {
                 let new_src_ip = rule.nat_addr;
@@ -249,6 +281,9 @@ unsafe extern "C" fn scan_snat_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
             if !group_matches(rule.group_mask, lctx.iface_groups) {
                 return 0;
             }
+            if rule.tenant_id != 0 && rule.tenant_id != lctx.tenant_id {
+                return 0; // tenant mismatch, continue to next rule
+            }
             if match_snat_rule_v6(rule, &lctx.src_addr, &lctx.dst_addr, lctx.protocol) {
                 let new_src_addr = rule.nat_addr;
                 if new_src_addr == [0; 4] && rule.nat_type != NAT_TYPE_MASQUERADE {
@@ -280,31 +315,35 @@ fn try_nat_egress(ctx: &TcContext) -> Result<i32, ()> {
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
     let mut l3_offset = EthHdr::LEN;
+    let mut vlan_id: u16 = 0;
 
     if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
         let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
+        let tci = u16::from_be(unsafe { (*vhdr).tci });
+        vlan_id = tci & 0x0FFF;
         ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
         l3_offset += VLAN_HDR_LEN;
 
         // QinQ: parse second VLAN tag if present
         if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
             let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
+            vlan_id = u16::from_be(unsafe { (*vhdr2).tci }) & 0x0FFF;
             ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
             l3_offset += VLAN_HDR_LEN;
         }
     }
 
     if ether_type == ETH_P_IP {
-        process_snat_v4(ctx, l3_offset)
+        process_snat_v4(ctx, l3_offset, vlan_id)
     } else if ether_type == ETH_P_IPV6 {
-        process_snat_v6(ctx, l3_offset)
+        process_snat_v6(ctx, l3_offset, vlan_id)
     } else {
         Ok(TC_ACT_OK)
     }
 }
 
 #[inline(always)]
-fn process_snat_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
+fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i32, ()> {
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });
     let dst_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).dst_addr });
@@ -389,6 +428,8 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     };
 
     let iface_groups = get_iface_groups(ctx);
+    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id) };
 
     let mut scan_ctx = SnatScanCtx {
         count: if count > MAX_NAT_RULES { MAX_NAT_RULES } else { count },
@@ -401,6 +442,7 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         nat_type: 0,
         matched: 0,
         iface_groups,
+        tenant_id,
     };
     unsafe {
         bpf_loop(
@@ -443,7 +485,7 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
 
 /// IPv6 SNAT processing.
 #[inline(never)]
-fn process_snat_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
+fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i32, ()> {
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
@@ -504,6 +546,8 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     };
 
     let iface_groups = get_iface_groups(ctx);
+    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id) };
 
     let mut scan_ctx = SnatScanCtxV6 {
         count: if count > MAX_NAT_RULES_V6 { MAX_NAT_RULES_V6 } else { count },
@@ -516,6 +560,7 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         nat_type: 0,
         matched: 0,
         iface_groups,
+        tenant_id,
     };
     unsafe {
         bpf_loop(

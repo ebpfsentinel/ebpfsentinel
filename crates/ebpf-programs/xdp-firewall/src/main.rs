@@ -131,6 +131,10 @@ const PROG_IDX_RATELIMIT: u32 = 0;
 #[map]
 static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
 
+/// Tenant resolution: VLAN ID -> tenant_id.
+#[map]
+static TENANT_VLAN_MAP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+
 /// LPM Trie for O(log n) IPv4 source CIDR matching (CIDR-only rules).
 #[map]
 static FW_LPM_SRC_V4: LpmTrie<[u8; 4], LpmValue> = LpmTrie::with_max_entries(MAX_LPM_RULES, 0);
@@ -227,6 +231,27 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
     hit != invert
 }
 
+/// Resolve the tenant ID for the current packet using VLAN and interface signals.
+/// Priority: VLAN-based > interface-based > default (0).
+#[inline(always)]
+unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16) -> u32 {
+    unsafe {
+        // Priority 1: VLAN-based (if packet has VLAN tag)
+        if vlan_id != 0 {
+            let vlan_key = vlan_id as u32;
+            if let Some(&tid) = TENANT_VLAN_MAP.get(&vlan_key) {
+                return tid;
+            }
+        }
+        // Priority 2: Interface-based
+        if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+            return tid;
+        }
+        // Default tenant
+        0
+    }
+}
+
 // ── bpf_loop context structs ─────────────────────────────────────────
 //
 // Stack budget analysis (eBPF limit: 512 bytes per stack frame):
@@ -288,6 +313,8 @@ struct RuleScanCtx {
     matched_max_states: u16,
     /// Interface group membership bitmask for the ingress interface.
     iface_groups: u32,
+    /// Resolved tenant ID for the current packet.
+    tenant_id: u32,
 }
 
 /// Opaque context passed through `bpf_loop` to the IPv6 rule-scan callback.
@@ -322,6 +349,8 @@ struct RuleScanCtxV6 {
     matched_max_states: u16,
     /// Interface group membership bitmask for the ingress interface.
     iface_groups: u32,
+    /// Resolved tenant ID for the current packet.
+    tenant_id: u32,
 }
 
 /// Per-packet context stored in a `PerCpuArray` to keep addresses and
@@ -362,6 +391,9 @@ unsafe extern "C" fn scan_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
             if !group_matches(rule.group_mask, lctx.iface_groups) {
                 return 0; // group mismatch, continue to next rule
             }
+            if rule.tenant_id != 0 && rule.tenant_id != lctx.tenant_id {
+                return 0; // tenant mismatch, continue to next rule
+            }
             if match_rule_v4(
                 rule,
                 lctx.src_ip,
@@ -400,6 +432,9 @@ unsafe extern "C" fn scan_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
             // Check interface group membership before evaluating rule fields.
             if !group_matches(rule.group_mask, lctx.iface_groups) {
                 return 0; // group mismatch, continue to next rule
+            }
+            if rule.tenant_id != 0 && rule.tenant_id != lctx.tenant_id {
+                return 0; // tenant mismatch, continue to next rule
             }
             if match_rule_v6(
                 rule,
@@ -678,6 +713,8 @@ fn process_firewall_v4(
     // kernel 6.17+ requires the bpf_loop callback_ctx (R3) to be a stack
     // frame pointer, not a map_value pointer.
     let iface_groups = get_iface_groups(ctx);
+    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id) };
 
     let mut scan_ctx = RuleScanCtx {
         count,
@@ -698,6 +735,7 @@ fn process_firewall_v4(
         matched_rule_idx: -1,
         matched_max_states: 0,
         iface_groups,
+        tenant_id,
     };
     unsafe {
         bpf_loop(
@@ -1144,6 +1182,8 @@ fn process_firewall_v6(
     // Stack-allocated context (kernel 6.17+ requires bpf_loop callback_ctx
     // to be a stack frame pointer, not a map_value pointer).
     let iface_groups = get_iface_groups(ctx);
+    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id) };
 
     let mut scan_ctx = RuleScanCtxV6 {
         count,
@@ -1164,6 +1204,7 @@ fn process_firewall_v6(
         matched_rule_idx: -1,
         matched_max_states: 0,
         iface_groups,
+        tenant_id,
     };
     unsafe {
         bpf_loop(

@@ -12,16 +12,16 @@ use aya_ebpf::{
 #[cfg(debug_assertions)]
 use aya_log_ebpf::info;
 use ebpf_common::{
-    event::{PacketEvent, EVENT_TYPE_QOS, FLAG_IPV6, FLAG_VLAN},
+    event::{EVENT_TYPE_QOS, FLAG_IPV6, FLAG_VLAN, PacketEvent},
     qos::{
-        QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig, QosQueueConfig,
         QOS_METRIC_COUNT, QOS_METRIC_DELAYED, QOS_METRIC_DROPPED_LOSS, QOS_METRIC_DROPPED_QUEUE,
         QOS_METRIC_ERRORS, QOS_METRIC_EVENTS_DROPPED, QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN,
+        QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig, QosQueueConfig,
     },
 };
 use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
-    PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
+    VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
 };
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
@@ -63,6 +63,10 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
 /// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
 #[map]
 static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
+
+/// Tenant resolution: VLAN ID -> tenant_id.
+#[map]
+static TENANT_VLAN_MAP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
 
 // ── Constants ───────────────────────────────────────────────────────
 
@@ -106,6 +110,27 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
     let hit = (mask & iface_groups) != 0;
     let invert = (rule_group_mask & 0x8000_0000) != 0;
     hit != invert
+}
+
+/// Resolve the tenant ID for the current packet using VLAN and interface signals.
+/// Priority: VLAN-based > interface-based > default (0).
+#[inline(always)]
+unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16) -> u32 {
+    unsafe {
+        // Priority 1: VLAN-based (if packet has VLAN tag)
+        if vlan_id != 0 {
+            let vlan_key = vlan_id as u32;
+            if let Some(&tid) = TENANT_VLAN_MAP.get(&vlan_key) {
+                return tid;
+            }
+        }
+        // Priority 2: Interface-based
+        if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+            return tid;
+        }
+        // Default tenant
+        0
+    }
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
@@ -163,12 +188,7 @@ fn try_tc_qos(ctx: &TcContext) -> Result<i32, ()> {
 
 /// IPv4 `QoS` processing path.
 #[inline(always)]
-fn process_qos_v4(
-    ctx: &TcContext,
-    l3_offset: usize,
-    vlan_id: u16,
-    flags: u8,
-) -> Result<i32, ()> {
+fn process_qos_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) -> Result<i32, ()> {
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });
     let dst_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).dst_addr });
@@ -219,12 +239,7 @@ fn process_qos_v4(
 
 /// IPv6 `QoS` processing path.
 #[inline(always)]
-fn process_qos_v6(
-    ctx: &TcContext,
-    l3_offset: usize,
-    vlan_id: u16,
-    flags: u8,
-) -> Result<i32, ()> {
+fn process_qos_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) -> Result<i32, ()> {
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_raw = unsafe { (*ipv6hdr).src_addr };
     let dst_raw = unsafe { (*ipv6hdr).dst_addr };
@@ -405,6 +420,13 @@ fn apply_qos(
         return Ok(TC_ACT_OK); // group mismatch -> pass
     }
 
+    // Check tenant isolation for the classifier.
+    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id) };
+    if classifier_val.tenant_id != 0 && classifier_val.tenant_id != tenant_id {
+        return Ok(TC_ACT_OK); // tenant mismatch -> pass
+    }
+
     // Step 2: Get queue config -> pipe config
     let queue_id = classifier_val.queue_id as u32;
     let queue_cfg = match QOS_QUEUE_CONFIG.get(queue_id) {
@@ -429,6 +451,11 @@ fn apply_qos(
     // Check interface group membership for the pipe.
     if !group_matches(pipe_cfg.group_mask, iface_groups) {
         return Ok(TC_ACT_OK);
+    }
+
+    // Check tenant isolation for the pipe.
+    if pipe_cfg.tenant_id != 0 && pipe_cfg.tenant_id != tenant_id {
+        return Ok(TC_ACT_OK); // tenant mismatch -> pass
     }
 
     // Step 3: Loss emulation — random drop
@@ -526,7 +553,14 @@ fn apply_qos(
     if pipe_cfg.delay_ns > 0 {
         increment_qos_metric(QOS_METRIC_DELAYED);
         emit_event(
-            src_addr, dst_addr, src_port, dst_port, protocol, ACTION_SHAPED, pipe_id, flags,
+            src_addr,
+            dst_addr,
+            src_port,
+            dst_port,
+            protocol,
+            ACTION_SHAPED,
+            pipe_id,
+            flags,
             vlan_id,
         );
     }

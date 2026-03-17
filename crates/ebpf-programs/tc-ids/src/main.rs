@@ -69,6 +69,10 @@ static IDS_SAMPLING_CONFIG: Array<IdsSamplingConfig> = Array::with_max_entries(1
 #[map]
 static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
 
+/// Tenant resolution: VLAN ID -> tenant_id.
+#[map]
+static TENANT_VLAN_MAP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+
 /// L7 port lookup: dst_port → enabled flag. When set, TCP packets to this port
 /// have their payload captured and sent to userspace for L7 protocol parsing.
 #[map]
@@ -140,6 +144,27 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
     let hit = (mask & iface_groups) != 0;
     let invert = (rule_group_mask & 0x8000_0000) != 0;
     hit != invert
+}
+
+/// Resolve the tenant ID for the current packet using VLAN and interface signals.
+/// Priority: VLAN-based > interface-based > default (0).
+#[inline(always)]
+unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16) -> u32 {
+    unsafe {
+        // Priority 1: VLAN-based (if packet has VLAN tag)
+        if vlan_id != 0 {
+            let vlan_key = vlan_id as u32;
+            if let Some(&tid) = TENANT_VLAN_MAP.get(&vlan_key) {
+                return tid;
+            }
+        }
+        // Priority 2: Interface-based
+        if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+            return tid;
+        }
+        // Default tenant
+        0
+    }
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
@@ -332,6 +357,13 @@ fn process_ids_pattern(
     let iface_groups = get_iface_groups(_ctx);
     if !group_matches(pattern.group_mask, iface_groups) {
         return Ok(TC_ACT_OK); // group mismatch -> pass
+    }
+
+    // Check tenant isolation.
+    let ifindex = unsafe { (*_ctx.skb.skb).ifindex };
+    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id) };
+    if pattern.tenant_id != 0 && pattern.tenant_id != tenant_id {
+        return Ok(TC_ACT_OK); // tenant mismatch -> pass
     }
 
     increment_metric(METRIC_MATCHED);
