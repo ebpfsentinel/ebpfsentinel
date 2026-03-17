@@ -18,6 +18,7 @@ pub mod nat_map_manager;
 pub mod qos_map_manager;
 pub mod ratelimit_lpm_manager;
 pub mod ratelimit_map_manager;
+pub mod tenant_vlan_map_manager;
 pub mod threatintel_map_manager;
 
 pub use config_flags_manager::{
@@ -41,4 +42,5 @@ pub use nat_map_manager::NatMapManager;
 pub use qos_map_manager::QosMapManager;
 pub use ratelimit_lpm_manager::RateLimitLpmManager;
 pub use ratelimit_map_manager::RateLimitMapManager;
+pub use tenant_vlan_map_manager::TenantVlanMapManager;
 pub use threatintel_map_manager::ThreatIntelMapManager;

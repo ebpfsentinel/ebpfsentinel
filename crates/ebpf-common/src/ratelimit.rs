@@ -188,8 +188,34 @@ impl RateLimitBucketUnion {
     }
 }
 
+/// Per-tenant aggregate rate limit bucket (future use).
+///
+/// When populated via a `TENANT_RATE_LIMIT` eBPF `HashMap<u32, TenantRateLimitBucket>`,
+/// this provides aggregate bandwidth limiting per tenant (e.g., tenant A <= X Gbps).
+/// The key is the `tenant_id` (u32).
+///
+/// **Note**: This struct is defined for forward compatibility. Aggregate per-tenant
+/// rate limiting in eBPF requires a separate `TENANT_RATE_LIMIT` map and verifier-friendly
+/// logic, which is planned as a future enhancement. Currently, per-tenant rate limiting
+/// is achieved through rule-level `tenant_id` matching (each `RateLimitConfig` has a
+/// `tenant_id` field, so rules for tenant A only apply to tenant A's traffic).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct TenantRateLimitBucket {
+    /// Current token count (bytes).
+    pub tokens: u64,
+    /// Last refill timestamp from `bpf_ktime_get_ns()`.
+    pub last_refill_ns: u64,
+    /// Maximum sustained rate in bytes per second.
+    pub rate_bytes_per_sec: u64,
+    /// Maximum burst size in bytes.
+    pub burst_bytes: u64,
+}
+
 // SAFETY: All types are #[repr(C)], Copy, 'static, and contain only primitive types
 // with explicit padding. Safe for zero-copy eBPF map operations via aya.
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for TenantRateLimitBucket {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for RateLimitTierValue {}
 #[cfg(feature = "userspace")]
@@ -213,6 +239,27 @@ unsafe impl aya::Pod for RateLimitBucketUnion {}
 mod tests {
     use super::*;
     use core::mem;
+
+    #[test]
+    fn tenant_rate_limit_bucket_size() {
+        assert_eq!(mem::size_of::<TenantRateLimitBucket>(), 32);
+    }
+
+    #[test]
+    fn tenant_rate_limit_bucket_alignment() {
+        assert_eq!(mem::align_of::<TenantRateLimitBucket>(), 8);
+    }
+
+    #[test]
+    fn tenant_rate_limit_bucket_field_offsets() {
+        assert_eq!(mem::offset_of!(TenantRateLimitBucket, tokens), 0);
+        assert_eq!(mem::offset_of!(TenantRateLimitBucket, last_refill_ns), 8);
+        assert_eq!(
+            mem::offset_of!(TenantRateLimitBucket, rate_bytes_per_sec),
+            16
+        );
+        assert_eq!(mem::offset_of!(TenantRateLimitBucket, burst_bytes), 24);
+    }
 
     #[test]
     fn ratelimit_tier_value_size() {
