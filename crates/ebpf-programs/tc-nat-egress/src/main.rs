@@ -6,7 +6,7 @@ use aya_ebpf::{
     cty::c_void,
     helpers::{bpf_ktime_get_boot_ns, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop, bpf_skb_store_bytes},
     macros::{classifier, map},
-    maps::{Array, HashMap, LruHashMap, PerCpuArray},
+    maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, lpm_trie::Key},
     programs::TcContext,
 };
 use ebpf_helpers::net::{
@@ -30,6 +30,7 @@ use ebpf_common::{
         NatHashKeyExact, NatHashValue, NatPortAllocKey, NatPortAllocValue, NatRuleEntry,
         NatRuleEntryV6, NptV6RuleEntry,
     },
+    tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
 use network_types::{
     eth::EthHdr,
@@ -109,6 +110,16 @@ static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
 #[map]
 static TENANT_VLAN_MAP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
 
+/// LPM trie for subnet-based tenant resolution (IPv4).
+#[map]
+static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32> =
+    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_LPM_ENTRIES, 0);
+
+/// LPM trie for subnet-based tenant resolution (IPv6).
+#[map]
+static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
+    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_V6_LPM_ENTRIES, 0);
+
 // ── Entry point ─────────────────────────────────────────────────────
 
 #[classifier]
@@ -154,10 +165,10 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
     hit != invert
 }
 
-/// Resolve the tenant ID for the current packet using VLAN and interface signals.
-/// Priority: VLAN-based > interface-based > default (0).
+/// Resolve the tenant ID for the current packet.
+/// Priority: VLAN-based > interface-based > subnet (LPM) > default (0).
 #[inline(always)]
-unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16) -> u32 {
+unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
     unsafe {
         // Priority 1: VLAN-based (if packet has VLAN tag)
         if vlan_id != 0 {
@@ -168,6 +179,40 @@ unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16) -> u32 {
         }
         // Priority 2: Interface-based
         if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+            return tid;
+        }
+        // Priority 3: Subnet-based (LPM trie on src_ip)
+        if src_ip != 0 {
+            let key = Key::new(32, src_ip.to_be_bytes());
+            if let Some(&tid) = TENANT_SUBNET_V4.get(&key) {
+                return tid;
+            }
+        }
+        // Default tenant
+        0
+    }
+}
+
+/// Resolve the tenant ID for an IPv6 packet.
+/// Priority: VLAN-based > interface-based > subnet V6 (LPM) > default (0).
+#[inline(always)]
+unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) -> u32 {
+    unsafe {
+        // Priority 1: VLAN-based (if packet has VLAN tag)
+        if vlan_id != 0 {
+            let vlan_key = vlan_id as u32;
+            if let Some(&tid) = TENANT_VLAN_MAP.get(&vlan_key) {
+                return tid;
+            }
+        }
+        // Priority 2: Interface-based
+        if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+            return tid;
+        }
+        // Priority 3: Subnet-based (LPM trie on IPv6 src_addr)
+        let addr_bytes: [u8; 16] = core::mem::transmute(*src_addr);
+        let key = Key::new(128, addr_bytes);
+        if let Some(&tid) = TENANT_SUBNET_V6.get(&key) {
             return tid;
         }
         // Default tenant
@@ -429,7 +474,7 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
 
     let iface_groups = get_iface_groups(ctx);
     let ifindex = unsafe { (*ctx.skb.skb).ifindex };
-    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id) };
+    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) };
 
     let mut scan_ctx = SnatScanCtx {
         count: if count > MAX_NAT_RULES { MAX_NAT_RULES } else { count },
@@ -547,7 +592,7 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
 
     let iface_groups = get_iface_groups(ctx);
     let ifindex = unsafe { (*ctx.skb.skb).ifindex };
-    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id) };
+    let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr) };
 
     let mut scan_ctx = SnatScanCtxV6 {
         count: if count > MAX_NAT_RULES_V6 { MAX_NAT_RULES_V6 } else { count },

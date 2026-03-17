@@ -6,7 +6,7 @@ use aya_ebpf::{
     bindings::TC_ACT_SHOT,
     helpers::{bpf_get_prandom_u32, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
     macros::{classifier, map},
-    maps::{Array, HashMap, LruPerCpuHashMap, PerCpuArray, RingBuf},
+    maps::{Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
     programs::TcContext,
 };
 #[cfg(debug_assertions)]
@@ -18,6 +18,7 @@ use ebpf_common::{
         QOS_METRIC_ERRORS, QOS_METRIC_EVENTS_DROPPED, QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN,
         QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig, QosQueueConfig,
     },
+    tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
 use ebpf_helpers::net::{
     ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
@@ -68,6 +69,16 @@ static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
 #[map]
 static TENANT_VLAN_MAP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
 
+/// LPM trie for subnet-based tenant resolution (IPv4).
+#[map]
+static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32> =
+    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_LPM_ENTRIES, 0);
+
+/// LPM trie for subnet-based tenant resolution (IPv6).
+#[map]
+static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
+    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_V6_LPM_ENTRIES, 0);
+
 // ── Constants ───────────────────────────────────────────────────────
 
 /// Action code for "shaped" (delayed/rate-limited but passed).
@@ -112,10 +123,10 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
     hit != invert
 }
 
-/// Resolve the tenant ID for the current packet using VLAN and interface signals.
-/// Priority: VLAN-based > interface-based > default (0).
+/// Resolve the tenant ID for the current packet.
+/// Priority: VLAN-based > interface-based > subnet (LPM) > default (0).
 #[inline(always)]
-unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16) -> u32 {
+unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
     unsafe {
         // Priority 1: VLAN-based (if packet has VLAN tag)
         if vlan_id != 0 {
@@ -126,6 +137,40 @@ unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16) -> u32 {
         }
         // Priority 2: Interface-based
         if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+            return tid;
+        }
+        // Priority 3: Subnet-based (LPM trie on src_ip)
+        if src_ip != 0 {
+            let key = Key::new(32, src_ip.to_be_bytes());
+            if let Some(&tid) = TENANT_SUBNET_V4.get(&key) {
+                return tid;
+            }
+        }
+        // Default tenant
+        0
+    }
+}
+
+/// Resolve the tenant ID for an IPv6 packet.
+/// Priority: VLAN-based > interface-based > subnet V6 (LPM) > default (0).
+#[inline(always)]
+unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) -> u32 {
+    unsafe {
+        // Priority 1: VLAN-based (if packet has VLAN tag)
+        if vlan_id != 0 {
+            let vlan_key = vlan_id as u32;
+            if let Some(&tid) = TENANT_VLAN_MAP.get(&vlan_key) {
+                return tid;
+            }
+        }
+        // Priority 2: Interface-based
+        if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+            return tid;
+        }
+        // Priority 3: Subnet-based (LPM trie on IPv6 src_addr)
+        let addr_bytes: [u8; 16] = core::mem::transmute(*src_addr);
+        let key = Key::new(128, addr_bytes);
+        if let Some(&tid) = TENANT_SUBNET_V6.get(&key) {
             return tid;
         }
         // Default tenant
@@ -422,7 +467,11 @@ fn apply_qos(
 
     // Check tenant isolation for the classifier.
     let ifindex = unsafe { (*ctx.skb.skb).ifindex };
-    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id) };
+    let tenant_id = if (flags & FLAG_IPV6) != 0 {
+        unsafe { resolve_tenant_id_v6(ifindex, vlan_id, src_addr) }
+    } else {
+        unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) }
+    };
     if classifier_val.tenant_id != 0 && classifier_val.tenant_id != tenant_id {
         return Ok(TC_ACT_OK); // tenant mismatch -> pass
     }

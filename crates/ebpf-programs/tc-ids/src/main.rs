@@ -9,7 +9,7 @@ use aya_ebpf::{
         bpf_ktime_get_boot_ns,
     },
     macros::{classifier, map},
-    maps::{Array, HashMap, PerCpuArray, RingBuf},
+    maps::{Array, HashMap, LpmTrie, PerCpuArray, RingBuf, lpm_trie::Key},
     programs::TcContext,
 };
 use aya_ebpf_bindings::helpers::bpf_skb_load_bytes;
@@ -29,6 +29,7 @@ use ebpf_common::{
     ids::{
         IdsSamplingConfig, IdsPatternKey, IdsPatternValue, IDS_ACTION_DROP, IDS_SAMPLING_RANDOM,
     },
+    tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
 use network_types::{
     eth::EthHdr,
@@ -72,6 +73,16 @@ static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
 /// Tenant resolution: VLAN ID -> tenant_id.
 #[map]
 static TENANT_VLAN_MAP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+
+/// LPM trie for subnet-based tenant resolution (IPv4).
+#[map]
+static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32> =
+    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_LPM_ENTRIES, 0);
+
+/// LPM trie for subnet-based tenant resolution (IPv6).
+#[map]
+static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
+    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_V6_LPM_ENTRIES, 0);
 
 /// L7 port lookup: dst_port → enabled flag. When set, TCP packets to this port
 /// have their payload captured and sent to userspace for L7 protocol parsing.
@@ -146,10 +157,10 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
     hit != invert
 }
 
-/// Resolve the tenant ID for the current packet using VLAN and interface signals.
-/// Priority: VLAN-based > interface-based > default (0).
+/// Resolve the tenant ID for the current packet.
+/// Priority: VLAN-based > interface-based > subnet (LPM) > default (0).
 #[inline(always)]
-unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16) -> u32 {
+unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
     unsafe {
         // Priority 1: VLAN-based (if packet has VLAN tag)
         if vlan_id != 0 {
@@ -160,6 +171,40 @@ unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16) -> u32 {
         }
         // Priority 2: Interface-based
         if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+            return tid;
+        }
+        // Priority 3: Subnet-based (LPM trie on src_ip)
+        if src_ip != 0 {
+            let key = Key::new(32, src_ip.to_be_bytes());
+            if let Some(&tid) = TENANT_SUBNET_V4.get(&key) {
+                return tid;
+            }
+        }
+        // Default tenant
+        0
+    }
+}
+
+/// Resolve the tenant ID for an IPv6 packet.
+/// Priority: VLAN-based > interface-based > subnet V6 (LPM) > default (0).
+#[inline(always)]
+unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) -> u32 {
+    unsafe {
+        // Priority 1: VLAN-based (if packet has VLAN tag)
+        if vlan_id != 0 {
+            let vlan_key = vlan_id as u32;
+            if let Some(&tid) = TENANT_VLAN_MAP.get(&vlan_key) {
+                return tid;
+            }
+        }
+        // Priority 2: Interface-based
+        if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+            return tid;
+        }
+        // Priority 3: Subnet-based (LPM trie on IPv6 src_addr)
+        let addr_bytes: [u8; 16] = core::mem::transmute(*src_addr);
+        let key = Key::new(128, addr_bytes);
+        if let Some(&tid) = TENANT_SUBNET_V6.get(&key) {
             return tid;
         }
         // Default tenant
@@ -361,7 +406,11 @@ fn process_ids_pattern(
 
     // Check tenant isolation.
     let ifindex = unsafe { (*_ctx.skb.skb).ifindex };
-    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id) };
+    let tenant_id = if (flags & FLAG_IPV6) != 0 {
+        unsafe { resolve_tenant_id_v6(ifindex, vlan_id, src_addr) }
+    } else {
+        unsafe { resolve_tenant_id(ifindex, vlan_id, src_addr[0]) }
+    };
     if pattern.tenant_id != 0 && pattern.tenant_id != tenant_id {
         return Ok(TC_ACT_OK); // tenant mismatch -> pass
     }

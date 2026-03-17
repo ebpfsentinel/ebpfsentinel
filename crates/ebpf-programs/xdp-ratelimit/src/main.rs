@@ -43,6 +43,7 @@ use ebpf_common::{
         ALGO_LEAKY_BUCKET, ALGO_SLIDING_WINDOW, ALGO_TOKEN_BUCKET, MAX_RL_BUCKET_ENTRIES,
         MAX_RL_LPM_ENTRIES, MAX_RL_TIERS, RATELIMIT_ACTION_DROP, SLIDING_WINDOW_NUM_SLOTS,
     },
+    tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
 use network_types::{
     eth::EthHdr,
@@ -233,6 +234,16 @@ static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
 #[map]
 static TENANT_VLAN_MAP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
 
+/// LPM trie for subnet-based tenant resolution (IPv4).
+#[map]
+static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32> =
+    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_LPM_ENTRIES, 0);
+
+/// LPM trie for subnet-based tenant resolution (IPv6).
+#[map]
+static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
+    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_V6_LPM_ENTRIES, 0);
+
 /// Increment a DDoS-specific per-CPU metric counter.
 #[inline(always)]
 fn increment_ddos_metric(index: u32) {
@@ -261,10 +272,10 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
     hit != invert
 }
 
-/// Resolve the tenant ID for the current packet using VLAN and interface signals.
-/// Priority: VLAN-based > interface-based > default (0).
+/// Resolve the tenant ID for the current packet.
+/// Priority: VLAN-based > interface-based > subnet (LPM) > default (0).
 #[inline(always)]
-unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16) -> u32 {
+unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
     unsafe {
         // Priority 1: VLAN-based (if packet has VLAN tag)
         if vlan_id != 0 {
@@ -275,6 +286,40 @@ unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16) -> u32 {
         }
         // Priority 2: Interface-based
         if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+            return tid;
+        }
+        // Priority 3: Subnet-based (LPM trie on src_ip)
+        if src_ip != 0 {
+            let key = Key::new(32, src_ip.to_be_bytes());
+            if let Some(&tid) = TENANT_SUBNET_V4.get(&key) {
+                return tid;
+            }
+        }
+        // Default tenant
+        0
+    }
+}
+
+/// Resolve the tenant ID for an IPv6 packet.
+/// Priority: VLAN-based > interface-based > subnet V6 (LPM) > default (0).
+#[inline(always)]
+unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) -> u32 {
+    unsafe {
+        // Priority 1: VLAN-based (if packet has VLAN tag)
+        if vlan_id != 0 {
+            let vlan_key = vlan_id as u32;
+            if let Some(&tid) = TENANT_VLAN_MAP.get(&vlan_key) {
+                return tid;
+            }
+        }
+        // Priority 2: Interface-based
+        if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+            return tid;
+        }
+        // Priority 3: Subnet-based (LPM trie on IPv6 src_addr)
+        let addr_bytes: [u8; 16] = core::mem::transmute(*src_addr);
+        let key = Key::new(128, addr_bytes);
+        if let Some(&tid) = TENANT_SUBNET_V6.get(&key) {
             return tid;
         }
         // Default tenant
@@ -423,7 +468,7 @@ fn process_ratelimit_v4(
 
     // Check tenant isolation.
     let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
-    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id) };
+    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) };
     if config.tenant_id != 0 && config.tenant_id != tenant_id {
         increment_metric(METRIC_PASSED);
         return Ok(xdp_action::XDP_PASS);
@@ -533,7 +578,7 @@ fn process_ratelimit_v6(
 
     // Check tenant isolation.
     let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
-    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id) };
+    let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr) };
     if config.tenant_id != 0 && config.tenant_id != tenant_id {
         increment_metric(METRIC_PASSED);
         return Ok(xdp_action::XDP_PASS);

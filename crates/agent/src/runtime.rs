@@ -430,7 +430,9 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
 
 // ── eBPF lifecycle ──────────────────────────────────────────────
 
-use adapters::ebpf::{EbpfLoader, InterfaceGroupsManager, MetricsReader, TenantVlanMapManager};
+use adapters::ebpf::{
+    EbpfLoader, InterfaceGroupsManager, MetricsReader, TenantSubnetMapManager, TenantVlanMapManager,
+};
 use application::packet_pipeline::AgentEvent;
 use tokio::sync::mpsc;
 
@@ -454,6 +456,11 @@ pub struct EbpfLoadResult {
     /// Enterprise callers can populate this with `(vlan_id, tenant_id)` pairs
     /// after loading to wire multi-tenant VLAN identification.
     pub tenant_vlan_mgr: TenantVlanMapManager,
+    /// Manager for `TENANT_SUBNET_V4` LPM trie maps across all loaded programs.
+    ///
+    /// Enterprise callers can populate this with `(ip, prefix_len, tenant_id)`
+    /// tuples after loading to wire subnet-based tenant identification.
+    pub tenant_subnet_mgr: TenantSubnetMapManager,
 }
 
 /// Load and attach all eBPF programs, wiring map managers to services.
@@ -478,6 +485,7 @@ pub async fn load_ebpf_programs(
     let mut metrics_readers: Vec<MetricsReader> = Vec::new();
     let mut iface_groups_mgr = InterfaceGroupsManager::new();
     let mut tenant_vlan_mgr = TenantVlanMapManager::new();
+    let mut tenant_subnet_mgr = TenantSubnetMapManager::new();
     let mut program_status = std::collections::HashMap::new();
 
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(4096);
@@ -538,6 +546,8 @@ pub async fn load_ebpf_programs(
                 }
                 iface_groups_mgr.add_map(rl_loader.ebpf_mut());
                 tenant_vlan_mgr.add_map(rl_loader.ebpf_mut());
+                tenant_subnet_mgr.add_map(rl_loader.ebpf_mut());
+                tenant_subnet_mgr.add_v6_map(rl_loader.ebpf_mut());
                 ebpf_state.add_loader(rl_loader);
                 true
             }
@@ -551,10 +561,12 @@ pub async fn load_ebpf_programs(
     };
     program_status.insert("xdp_ratelimit".to_string(), rl_ok);
 
-    // Take INTERFACE_GROUPS and TENANT_VLAN_MAP from xdp-firewall before moving loader
+    // Take INTERFACE_GROUPS and tenant maps from xdp-firewall before moving loader
     if let Some(ref mut loader) = fw_loader {
         iface_groups_mgr.add_map(loader.ebpf_mut());
         tenant_vlan_mgr.add_map(loader.ebpf_mut());
+        tenant_subnet_mgr.add_map(loader.ebpf_mut());
+        tenant_subnet_mgr.add_v6_map(loader.ebpf_mut());
     }
     if let Some(loader) = fw_loader {
         ebpf_state.add_loader(loader);
@@ -582,6 +594,8 @@ pub async fn load_ebpf_programs(
                 }
                 iface_groups_mgr.add_map(loader.ebpf_mut());
                 tenant_vlan_mgr.add_map(loader.ebpf_mut());
+                tenant_subnet_mgr.add_map(loader.ebpf_mut());
+                tenant_subnet_mgr.add_v6_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 true
             }
@@ -704,6 +718,10 @@ pub async fn load_ebpf_programs(
                 iface_groups_mgr.add_map(egress_loader.ebpf_mut());
                 tenant_vlan_mgr.add_map(ingress_loader.ebpf_mut());
                 tenant_vlan_mgr.add_map(egress_loader.ebpf_mut());
+                tenant_subnet_mgr.add_map(ingress_loader.ebpf_mut());
+                tenant_subnet_mgr.add_v6_map(ingress_loader.ebpf_mut());
+                tenant_subnet_mgr.add_map(egress_loader.ebpf_mut());
+                tenant_subnet_mgr.add_v6_map(egress_loader.ebpf_mut());
                 ebpf_state.add_loader(ingress_loader);
                 ebpf_state.add_loader(egress_loader);
                 true
@@ -793,6 +811,7 @@ pub async fn load_ebpf_programs(
         program_status,
         event_rx,
         tenant_vlan_mgr,
+        tenant_subnet_mgr,
     })
 }
 

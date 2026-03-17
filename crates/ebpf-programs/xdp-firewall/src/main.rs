@@ -43,6 +43,7 @@ use ebpf_common::{
         MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MATCH_SRC_SET, MAX_FIREWALL_RULES,
         MAX_FW_HASH_5TUPLE, MAX_FW_HASH_PORT, MAX_IPSET_ENTRIES_V4, MAX_LPM_RULES,
     },
+    tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
 use network_types::{
     eth::EthHdr,
@@ -134,6 +135,18 @@ static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
 /// Tenant resolution: VLAN ID -> tenant_id.
 #[map]
 static TENANT_VLAN_MAP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+
+/// LPM trie for subnet-based tenant resolution (IPv4).
+/// Key = `[u8; 4]` (network byte order), Value = `tenant_id`.
+#[map]
+static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32> =
+    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_LPM_ENTRIES, 0);
+
+/// LPM trie for subnet-based tenant resolution (IPv6).
+/// Key = `[u8; 16]` (network byte order), Value = `tenant_id`.
+#[map]
+static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
+    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_V6_LPM_ENTRIES, 0);
 
 /// LPM Trie for O(log n) IPv4 source CIDR matching (CIDR-only rules).
 #[map]
@@ -231,10 +244,10 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
     hit != invert
 }
 
-/// Resolve the tenant ID for the current packet using VLAN and interface signals.
-/// Priority: VLAN-based > interface-based > default (0).
+/// Resolve the tenant ID for the current packet.
+/// Priority: VLAN-based > interface-based > subnet (LPM) > default (0).
 #[inline(always)]
-unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16) -> u32 {
+unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
     unsafe {
         // Priority 1: VLAN-based (if packet has VLAN tag)
         if vlan_id != 0 {
@@ -245,6 +258,40 @@ unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16) -> u32 {
         }
         // Priority 2: Interface-based
         if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+            return tid;
+        }
+        // Priority 3: Subnet-based (LPM trie on src_ip)
+        if src_ip != 0 {
+            let key = Key::new(32, src_ip.to_be_bytes());
+            if let Some(&tid) = TENANT_SUBNET_V4.get(&key) {
+                return tid;
+            }
+        }
+        // Default tenant
+        0
+    }
+}
+
+/// Resolve the tenant ID for an IPv6 packet.
+/// Priority: VLAN-based > interface-based > subnet V6 (LPM) > default (0).
+#[inline(always)]
+unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) -> u32 {
+    unsafe {
+        // Priority 1: VLAN-based (if packet has VLAN tag)
+        if vlan_id != 0 {
+            let vlan_key = vlan_id as u32;
+            if let Some(&tid) = TENANT_VLAN_MAP.get(&vlan_key) {
+                return tid;
+            }
+        }
+        // Priority 2: Interface-based
+        if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+            return tid;
+        }
+        // Priority 3: Subnet-based (LPM trie on IPv6 src_addr)
+        let addr_bytes: [u8; 16] = core::mem::transmute(*src_addr);
+        let key = Key::new(128, addr_bytes);
+        if let Some(&tid) = TENANT_SUBNET_V6.get(&key) {
             return tid;
         }
         // Default tenant
@@ -714,7 +761,7 @@ fn process_firewall_v4(
     // frame pointer, not a map_value pointer.
     let iface_groups = get_iface_groups(ctx);
     let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
-    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id) };
+    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) };
 
     let mut scan_ctx = RuleScanCtx {
         count,
@@ -1183,7 +1230,7 @@ fn process_firewall_v6(
     // to be a stack frame pointer, not a map_value pointer).
     let iface_groups = get_iface_groups(ctx);
     let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
-    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id) };
+    let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr) };
 
     let mut scan_ctx = RuleScanCtxV6 {
         count,
