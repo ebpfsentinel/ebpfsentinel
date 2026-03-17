@@ -430,7 +430,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
 
 // ── eBPF lifecycle ──────────────────────────────────────────────
 
-use adapters::ebpf::{EbpfLoader, InterfaceGroupsManager, MetricsReader};
+use adapters::ebpf::{EbpfLoader, InterfaceGroupsManager, MetricsReader, TenantVlanMapManager};
 use application::packet_pipeline::AgentEvent;
 use tokio::sync::mpsc;
 
@@ -449,6 +449,11 @@ pub struct EbpfLoadResult {
     pub program_status: std::collections::HashMap<String, bool>,
     /// Receive end of the event channel (for the event dispatcher).
     pub event_rx: mpsc::Receiver<AgentEvent>,
+    /// Manager for `TENANT_VLAN_MAP` maps across all loaded programs.
+    ///
+    /// Enterprise callers can populate this with `(vlan_id, tenant_id)` pairs
+    /// after loading to wire multi-tenant VLAN identification.
+    pub tenant_vlan_mgr: TenantVlanMapManager,
 }
 
 /// Load and attach all eBPF programs, wiring map managers to services.
@@ -472,6 +477,7 @@ pub async fn load_ebpf_programs(
     let mut ebpf_map_holder = EbpfMapHolder::new();
     let mut metrics_readers: Vec<MetricsReader> = Vec::new();
     let mut iface_groups_mgr = InterfaceGroupsManager::new();
+    let mut tenant_vlan_mgr = TenantVlanMapManager::new();
     let mut program_status = std::collections::HashMap::new();
 
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(4096);
@@ -531,6 +537,7 @@ pub async fn load_ebpf_programs(
                     let _ = fw.set_tail_call_target("XDP_PROG_ARRAY", 0, &rl_fd);
                 }
                 iface_groups_mgr.add_map(rl_loader.ebpf_mut());
+                tenant_vlan_mgr.add_map(rl_loader.ebpf_mut());
                 ebpf_state.add_loader(rl_loader);
                 true
             }
@@ -544,9 +551,10 @@ pub async fn load_ebpf_programs(
     };
     program_status.insert("xdp_ratelimit".to_string(), rl_ok);
 
-    // Take INTERFACE_GROUPS from xdp-firewall before moving loader
+    // Take INTERFACE_GROUPS and TENANT_VLAN_MAP from xdp-firewall before moving loader
     if let Some(ref mut loader) = fw_loader {
         iface_groups_mgr.add_map(loader.ebpf_mut());
+        tenant_vlan_mgr.add_map(loader.ebpf_mut());
     }
     if let Some(loader) = fw_loader {
         ebpf_state.add_loader(loader);
@@ -573,6 +581,7 @@ pub async fn load_ebpf_programs(
                     metrics_readers.push(rdr);
                 }
                 iface_groups_mgr.add_map(loader.ebpf_mut());
+                tenant_vlan_mgr.add_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 true
             }
@@ -589,7 +598,7 @@ pub async fn load_ebpf_programs(
     // ── TC Threat Intel ─────────────────────────────────────────
     let ti_ok = if config.threatintel.enabled {
         match startup::try_load_tc_threatintel(&ebpf_dir, config, event_tx.clone()) {
-            Ok((loader, ti_mgr_opt, cfg_mgr_opt, ti_rdr)) => {
+            Ok((mut loader, ti_mgr_opt, cfg_mgr_opt, ti_rdr)) => {
                 if let Some(rdr) = ti_rdr {
                     metrics_readers.push(rdr);
                 }
@@ -599,6 +608,7 @@ pub async fn load_ebpf_programs(
                 if let Some(cfg_mgr) = cfg_mgr_opt {
                     ebpf_map_holder.config_flags.push(cfg_mgr);
                 }
+                tenant_vlan_mgr.add_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 true
             }
@@ -615,10 +625,11 @@ pub async fn load_ebpf_programs(
     // ── TC DNS ──────────────────────────────────────────────────
     let dns_ok = if config.dns.enabled {
         match startup::try_load_tc_dns(&ebpf_dir, config, event_tx.clone()) {
-            Ok((loader, dns_rdr)) => {
+            Ok((mut loader, dns_rdr)) => {
                 if let Some(rdr) = dns_rdr {
                     metrics_readers.push(rdr);
                 }
+                tenant_vlan_mgr.add_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 true
             }
@@ -635,10 +646,11 @@ pub async fn load_ebpf_programs(
     // ── Uprobe DLP ──────────────────────────────────────────────
     let dlp_ok = if config.dlp.enabled {
         match startup::try_load_uprobe_dlp(&ebpf_dir, config, event_tx.clone()) {
-            Ok((loader, dlp_rdr)) => {
+            Ok((mut loader, dlp_rdr)) => {
                 if let Some(rdr) = dlp_rdr {
                     metrics_readers.push(rdr);
                 }
+                tenant_vlan_mgr.add_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 true
             }
@@ -655,7 +667,7 @@ pub async fn load_ebpf_programs(
     // ── TC ConnTrack ────────────────────────────────────────────
     let ct_ok = if config.conntrack.enabled {
         match startup::try_load_tc_conntrack(&ebpf_dir, config, event_tx.clone()) {
-            Ok((loader, ct_mgr, ct_rdr)) => {
+            Ok((mut loader, ct_mgr, ct_rdr)) => {
                 services
                     .conntrack_svc
                     .write()
@@ -664,6 +676,7 @@ pub async fn load_ebpf_programs(
                 if let Some(rdr) = ct_rdr {
                     metrics_readers.push(rdr);
                 }
+                tenant_vlan_mgr.add_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 true
             }
@@ -689,6 +702,8 @@ pub async fn load_ebpf_programs(
                     .set_map_port(Box::new(nat_mgr));
                 iface_groups_mgr.add_map(ingress_loader.ebpf_mut());
                 iface_groups_mgr.add_map(egress_loader.ebpf_mut());
+                tenant_vlan_mgr.add_map(ingress_loader.ebpf_mut());
+                tenant_vlan_mgr.add_map(egress_loader.ebpf_mut());
                 ebpf_state.add_loader(ingress_loader);
                 ebpf_state.add_loader(egress_loader);
                 true
@@ -707,10 +722,11 @@ pub async fn load_ebpf_programs(
     // ── TC Scrub ────────────────────────────────────────────────
     let scrub_ok = if config.firewall.scrub.enabled {
         match startup::try_load_tc_scrub(&ebpf_dir, config) {
-            Ok((loader, scrub_rdr)) => {
+            Ok((mut loader, scrub_rdr)) => {
                 if let Some(rdr) = scrub_rdr {
                     metrics_readers.push(rdr);
                 }
+                tenant_vlan_mgr.add_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 true
             }
@@ -727,11 +743,12 @@ pub async fn load_ebpf_programs(
     // ── XDP Load Balancer ───────────────────────────────────────
     let lb_ok = if config.loadbalancer.enabled {
         match startup::try_load_xdp_loadbalancer(&ebpf_dir, config, event_tx.clone()) {
-            Ok((loader, lb_mgr, lb_metrics_rdr)) => {
+            Ok((mut loader, lb_mgr, lb_metrics_rdr)) => {
                 services.lb_svc.write().await.set_map_port(Box::new(lb_mgr));
                 if let Some(rdr) = lb_metrics_rdr {
                     metrics_readers.push(rdr);
                 }
+                tenant_vlan_mgr.add_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 true
             }
@@ -775,6 +792,7 @@ pub async fn load_ebpf_programs(
         metrics_readers,
         program_status,
         event_rx,
+        tenant_vlan_mgr,
     })
 }
 
