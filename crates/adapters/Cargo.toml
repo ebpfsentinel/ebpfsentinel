@@ -45,6 +45,9 @@ maxminddb = { workspace = true }
 ipnetwork = "0.21"
 flate2 = { workspace = true }
 tar = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }

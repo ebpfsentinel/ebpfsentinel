@@ -1446,6 +1446,31 @@ pub async fn run(
         );
     }
 
+    // OTLP sender (if otlp config present and otlp routes exist)
+    let has_otlp_routes = config
+        .alerting
+        .routes
+        .iter()
+        .any(|r| r.destination.eq_ignore_ascii_case("otlp"));
+    if has_otlp_routes {
+        if let Some(ref otlp_cfg) = config.alerting.otlp {
+            let otlp_sender = adapters::alert::otlp_sender::OtlpAlertSender::new(
+                &otlp_cfg.endpoint,
+                &otlp_cfg.protocol,
+                std::time::Duration::from_millis(otlp_cfg.timeout_ms),
+                Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            )?;
+            alert_pipeline = alert_pipeline.with_otlp_sender(Arc::new(otlp_sender));
+            info!(
+                endpoint = %otlp_cfg.endpoint,
+                protocol = %otlp_cfg.protocol,
+                "OTLP alert sender initialized"
+            );
+        } else {
+            tracing::warn!("OTLP route configured but no [alerting.otlp] config — skipping");
+        }
+    }
+
     info!(
         route_count = config.alerting.routes.len(),
         dedup_window_secs = config.alerting.dedup_window_secs,

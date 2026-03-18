@@ -22,8 +22,32 @@ pub struct AlertingConfig {
     #[serde(default)]
     pub smtp: Option<SmtpConfig>,
 
+    #[serde(default)]
+    pub otlp: Option<OtlpExportConfig>,
+
     #[serde(default = "default_alerting_routes")]
     pub routes: Vec<AlertRouteConfig>,
+}
+
+/// OTLP export configuration for alert delivery via OpenTelemetry Protocol.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OtlpExportConfig {
+    /// OTLP collector endpoint (e.g. `http://otel-collector:4317`).
+    pub endpoint: String,
+    /// Transport protocol: `grpc` (default) or `http`.
+    #[serde(default = "default_otlp_protocol")]
+    pub protocol: String,
+    /// Export timeout in milliseconds.
+    #[serde(default = "default_otlp_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_otlp_protocol() -> String {
+    "grpc".to_string()
+}
+
+fn default_otlp_timeout_ms() -> u64 {
+    5000
 }
 
 /// SMTP server configuration for email alert delivery.
@@ -74,6 +98,7 @@ impl Default for AlertingConfig {
             throttle_window_secs: default_throttle_window(),
             throttle_max: default_throttle_max(),
             smtp: None,
+            otlp: None,
             routes: default_alerting_routes(),
         }
     }
@@ -110,7 +135,7 @@ impl AlertRouteConfig {
         parse_alert_destination(&self.destination).map_err(|()| ConfigError::InvalidValue {
             field: format!("{prefix}.destination"),
             value: self.destination.clone(),
-            expected: "log, email, webhook".to_string(),
+            expected: "log, email, webhook, otlp".to_string(),
         })?;
 
         parse_severity(&self.min_severity).map_err(|()| ConfigError::InvalidValue {
@@ -162,11 +187,14 @@ impl AlertRouteConfig {
             "webhook" => AlertDestination::Webhook {
                 url: self.webhook_url.clone().unwrap_or_default(),
             },
+            "otlp" => AlertDestination::Otlp {
+                endpoint: String::new(),
+            },
             _ => {
                 return Err(ConfigError::InvalidValue {
                     field: "destination".to_string(),
                     value: self.destination.clone(),
-                    expected: "log, email, webhook".to_string(),
+                    expected: "log, email, webhook, otlp".to_string(),
                 });
             }
         };
@@ -185,6 +213,9 @@ fn parse_alert_destination(s: &str) -> Result<AlertDestination, ()> {
         "log" => Ok(AlertDestination::Log),
         "email" => Ok(AlertDestination::Email { to: String::new() }),
         "webhook" => Ok(AlertDestination::Webhook { url: String::new() }),
+        "otlp" => Ok(AlertDestination::Otlp {
+            endpoint: String::new(),
+        }),
         _ => Err(()),
     }
 }

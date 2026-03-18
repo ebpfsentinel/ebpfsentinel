@@ -28,6 +28,7 @@ pub struct AlertPipeline {
     log_sender: Option<Arc<dyn AlertSender>>,
     webhook_sender: Option<Arc<dyn AlertSender>>,
     email_sender: Option<Arc<dyn AlertSender>>,
+    otlp_sender: Option<Arc<dyn AlertSender>>,
     /// Optional broadcast sender for gRPC alert streaming.
     /// Non-blocking: sends are best-effort (dropped if no receivers or lagged).
     stream_tx: Option<broadcast::Sender<Alert>>,
@@ -50,6 +51,7 @@ impl AlertPipeline {
             log_sender: None,
             webhook_sender: None,
             email_sender: None,
+            otlp_sender: None,
             stream_tx: None,
             alert_store: None,
             enricher: None,
@@ -92,6 +94,12 @@ impl AlertPipeline {
     #[must_use]
     pub fn with_email_sender(mut self, sender: Arc<dyn AlertSender>) -> Self {
         self.email_sender = Some(sender);
+        self
+    }
+
+    #[must_use]
+    pub fn with_otlp_sender(mut self, sender: Arc<dyn AlertSender>) -> Self {
+        self.otlp_sender = Some(sender);
         self
     }
 
@@ -155,6 +163,7 @@ impl AlertPipeline {
                 AlertDestination::Log => self.log_sender.as_ref(),
                 AlertDestination::Webhook { .. } => self.webhook_sender.as_ref(),
                 AlertDestination::Email { .. } => self.email_sender.as_ref(),
+                AlertDestination::Otlp { .. } => self.otlp_sender.as_ref(),
             };
 
             if let Some(sender) = sender {
@@ -262,6 +271,7 @@ impl AlertPipeline {
                 AlertDestination::Log => self.log_sender.as_ref(),
                 AlertDestination::Webhook { .. } => self.webhook_sender.as_ref(),
                 AlertDestination::Email { .. } => self.email_sender.as_ref(),
+                AlertDestination::Otlp { .. } => self.otlp_sender.as_ref(),
             };
 
             if let Some(sender) = sender {
@@ -369,6 +379,7 @@ impl AlertPipeline {
                 AlertDestination::Log => self.log_sender.as_ref(),
                 AlertDestination::Webhook { .. } => self.webhook_sender.as_ref(),
                 AlertDestination::Email { .. } => self.email_sender.as_ref(),
+                AlertDestination::Otlp { .. } => self.otlp_sender.as_ref(),
             };
 
             if let Some(sender) = sender {
