@@ -78,6 +78,7 @@ mod tests {
             current_pps: None,
             mitigation_status: None,
             total_packets: None,
+            mitre_attack: None,
         }
     }
 

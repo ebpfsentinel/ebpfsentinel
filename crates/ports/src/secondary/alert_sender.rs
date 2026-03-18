@@ -81,6 +81,7 @@ mod tests {
             current_pps: None,
             mitigation_status: None,
             total_packets: None,
+            mitre_attack: None,
         };
         let _route = AlertRoute {
             name: "test".to_string(),

@@ -45,6 +45,7 @@ fn make_alert(id: &str, ts: u64) -> Alert {
         current_pps: None,
         mitigation_status: None,
         total_packets: None,
+        mitre_attack: None,
     }
 }
 

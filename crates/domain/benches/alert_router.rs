@@ -42,6 +42,7 @@ fn make_alert(id: usize, severity: Severity) -> Alert {
         current_pps: None,
         mitigation_status: None,
         total_packets: None,
+        mitre_attack: None,
     }
 }
 

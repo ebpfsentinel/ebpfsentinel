@@ -42,6 +42,18 @@ fn alert_to_event(alert: &Alert) -> proto::AlertEvent {
         current_pps: alert.current_pps.unwrap_or(0),
         mitigation_status: alert.mitigation_status.clone().unwrap_or_default(),
         total_packets: alert.total_packets.unwrap_or(0),
+        mitre_technique_id: alert
+            .mitre_attack
+            .as_ref()
+            .map_or_else(String::new, |m| m.technique_id.clone()),
+        mitre_technique_name: alert
+            .mitre_attack
+            .as_ref()
+            .map_or_else(String::new, |m| m.technique_name.clone()),
+        mitre_tactic: alert
+            .mitre_attack
+            .as_ref()
+            .map_or_else(String::new, |m| m.tactic.clone()),
     }
 }
 
@@ -172,6 +184,7 @@ mod tests {
             current_pps: None,
             mitigation_status: None,
             total_packets: None,
+            mitre_attack: None,
         }
     }
 

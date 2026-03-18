@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::alert::mitre::{self, MitreAttackInfo, MitreContext};
 use crate::common::entity::{DomainMode, RuleId, Severity};
 use crate::ddos::entity::DdosAttack;
 use crate::dlp::entity::DlpAlert;
@@ -87,6 +88,9 @@ pub struct Alert {
     /// `DDoS`: total packets in attack.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_packets: Option<u64>,
+    /// MITRE ATT&CK technique mapping for this alert.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mitre_attack: Option<MitreAttackInfo>,
 }
 
 impl Alert {
@@ -125,6 +129,7 @@ impl Alert {
             current_pps: None,
             mitigation_status: None,
             total_packets: None,
+            mitre_attack: Some(mitre::lookup(&MitreContext::Ids)),
         }
     }
 
@@ -165,6 +170,7 @@ impl Alert {
             current_pps: None,
             mitigation_status: None,
             total_packets: None,
+            mitre_attack: Some(mitre::lookup(&MitreContext::Dlp(&dlp.data_type))),
         }
     }
 
@@ -203,6 +209,7 @@ impl Alert {
             current_pps: None,
             mitigation_status: None,
             total_packets: None,
+            mitre_attack: Some(mitre::lookup(&MitreContext::ThreatIntel(ti.threat_type))),
         }
     }
 
@@ -256,6 +263,7 @@ impl Alert {
             current_pps: Some(attack.current_pps),
             mitigation_status: Some(format!("{:?}", attack.mitigation_status)),
             total_packets: Some(attack.total_packets),
+            mitre_attack: Some(mitre::lookup(&MitreContext::Ddos(attack.attack_type))),
         }
     }
 

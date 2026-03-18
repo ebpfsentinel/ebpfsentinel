@@ -86,4 +86,10 @@ message AlertEvent {
   string mitigation_status = 29;
   // DDoS: total packets in attack (0 if absent).
   uint64 total_packets = 30;
+  // MITRE ATT&CK technique ID (e.g. "T1071", "T1499.001"). Empty if absent.
+  string mitre_technique_id = 33;
+  // MITRE ATT&CK technique name (e.g. "Application Layer Protocol"). Empty if absent.
+  string mitre_technique_name = 34;
+  // MITRE ATT&CK tactic in kebab-case (e.g. "command-and-control"). Empty if absent.
+  string mitre_tactic = 35;
 }

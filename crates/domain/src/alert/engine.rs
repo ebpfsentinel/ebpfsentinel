@@ -167,6 +167,7 @@ mod tests {
             current_pps: None,
             mitigation_status: None,
             total_packets: None,
+            mitre_attack: None,
         }
     }
 
@@ -463,6 +464,7 @@ mod tests {
                     current_pps: None,
                     mitigation_status: None,
                     total_packets: None,
+                    mitre_attack: None,
                 };
 
                 // First alert should match routes
