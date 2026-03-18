@@ -138,6 +138,9 @@ fuzz_target!(|data: &[u8]| {
             total_packets: None,
             mitre_attack: None,
             ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
         };
 
         let _ = router.process_alert(&alert);
@@ -190,6 +193,9 @@ fuzz_target!(|data: &[u8]| {
             total_packets: None,
             mitre_attack: None,
             ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
         };
         let _ = router.process_alert(&alert);
     }

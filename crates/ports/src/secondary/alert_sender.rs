@@ -83,6 +83,9 @@ mod tests {
             total_packets: None,
             mitre_attack: None,
             ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
         };
         let _route = AlertRoute {
             name: "test".to_string(),

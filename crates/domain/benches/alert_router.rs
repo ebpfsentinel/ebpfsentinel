@@ -44,6 +44,9 @@ fn make_alert(id: usize, severity: Severity) -> Alert {
         total_packets: None,
         mitre_attack: None,
         ja4_fingerprint: None,
+        ml_anomaly_score: None,
+        ml_top_feature: None,
+        ml_engine: None,
     }
 }
 

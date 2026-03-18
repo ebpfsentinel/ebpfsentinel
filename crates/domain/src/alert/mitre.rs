@@ -38,6 +38,25 @@ pub enum DnsMitreReason {
     Reputation,
 }
 
+/// ML anomaly type for MITRE mapping (feature-driven classification).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MlAnomalyType {
+    /// `packet_rate` or `byte_rate` drift — volumetric anomaly.
+    TrafficVolumeDrift,
+    /// `tcp_ratio`/`udp_ratio`/`icmp_ratio`/`other_ratio` drift — protocol tunneling.
+    ProtocolRatioDrift,
+    /// `port_entropy` spike — port scanning.
+    PortEntropySpike,
+    /// `unique_src_ips` spike — distributed source anomaly.
+    SourceDiversitySpike,
+    /// `unique_dst_ports` spike — lateral movement / service discovery.
+    DestPortDiversitySpike,
+    /// `avg_payload_size` or `std_payload_size` spike — data staging.
+    PayloadSizeAnomaly,
+    /// `connection_count` spike — brute force / worm propagation.
+    ConnectionCountSpike,
+}
+
 /// Context passed to [`lookup`] to select the correct ATT&CK technique.
 pub enum MitreContext<'a> {
     Ids {
@@ -51,6 +70,7 @@ pub enum MitreContext<'a> {
     Ddos(DdosAttackType),
     Dns(DnsMitreReason),
     PacketSecurity(PacketSecurityMitreContext),
+    MlAnomaly(MlAnomalyType),
 }
 
 /// Return the ATT&CK technique for the given alert context.
@@ -82,6 +102,8 @@ pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
         },
 
         MitreContext::PacketSecurity(ctx) => lookup_packet_security(ctx),
+
+        MitreContext::MlAnomaly(anomaly_type) => lookup_ml_anomaly(*anomaly_type),
 
         MitreContext::Dns(reason) => match reason {
             DnsMitreReason::BlocklistOrEncrypted => info("T1071.004", "DNS", "command-and-control"),
@@ -219,14 +241,104 @@ pub struct CoverageReport {
 }
 
 /// Static coverage table — all technique mappings the agent can produce.
+/// Map ML anomaly feature type to the most relevant ATT&CK technique.
+fn lookup_ml_anomaly(anomaly_type: MlAnomalyType) -> MitreAttackInfo {
+    match anomaly_type {
+        MlAnomalyType::TrafficVolumeDrift => info("T1498.001", "Direct Network Flood", "impact"),
+        MlAnomalyType::ProtocolRatioDrift => {
+            info("T1572", "Protocol Tunneling", "command-and-control")
+        }
+        MlAnomalyType::PortEntropySpike => info("T1046", "Network Service Scanning", "discovery"),
+        MlAnomalyType::SourceDiversitySpike => info("T1090", "Proxy", "command-and-control"),
+        MlAnomalyType::DestPortDiversitySpike => {
+            info("T1570", "Lateral Tool Transfer", "lateral-movement")
+        }
+        MlAnomalyType::PayloadSizeAnomaly => info("T1074", "Data Staged", "collection"),
+        MlAnomalyType::ConnectionCountSpike => info("T1110", "Brute Force", "credential-access"),
+    }
+}
+
+/// Map a feature index (from `FeatureVector::as_model_input()` order) to an `MlAnomalyType`.
+///
+/// Feature order: `packet_rate`(0), `byte_rate`(1), `tcp_ratio`(2), `udp_ratio`(3),
+/// `icmp_ratio`(4), `other_ratio`(5), `port_entropy`(6), `unique_src_ips`(7),
+/// `unique_dst_ports`(8), `avg_payload_size`(9), `std_payload_size`(10), `connection_count`(11)
+pub fn feature_index_to_ml_anomaly_type(feature_idx: usize) -> MlAnomalyType {
+    match feature_idx {
+        2..=5 => MlAnomalyType::ProtocolRatioDrift,
+        6 => MlAnomalyType::PortEntropySpike,
+        7 => MlAnomalyType::SourceDiversitySpike,
+        8 => MlAnomalyType::DestPortDiversitySpike,
+        9 | 10 => MlAnomalyType::PayloadSizeAnomaly,
+        11 => MlAnomalyType::ConnectionCountSpike,
+        // 0 (packet_rate), 1 (byte_rate), and unknown indices
+        _ => MlAnomalyType::TrafficVolumeDrift,
+    }
+}
+
 fn all_coverage_entries() -> Vec<CoverageEntry> {
-    let mut entries = Vec::with_capacity(36);
+    let mut entries = Vec::with_capacity(43);
     entries.extend(firewall_ips_coverage_entries());
     entries.extend(ratelimit_coverage_entries());
     entries.extend(l7_coverage_entries());
     entries.extend(detection_coverage_entries());
     entries.extend(ddos_coverage_entries());
+    entries.extend(ml_anomaly_coverage_entries());
     entries
+}
+
+fn ml_anomaly_coverage_entries() -> Vec<CoverageEntry> {
+    vec![
+        entry(
+            "ml-anomaly",
+            "T1498.001",
+            "Direct Network Flood",
+            "impact",
+            "ML: traffic volume drift (packet/byte rate)",
+        ),
+        entry(
+            "ml-anomaly",
+            "T1572",
+            "Protocol Tunneling",
+            "command-and-control",
+            "ML: protocol ratio drift (TCP/UDP/ICMP)",
+        ),
+        entry(
+            "ml-anomaly",
+            "T1046",
+            "Network Service Scanning",
+            "discovery",
+            "ML: port entropy spike",
+        ),
+        entry(
+            "ml-anomaly",
+            "T1090",
+            "Proxy",
+            "command-and-control",
+            "ML: source IP diversity spike",
+        ),
+        entry(
+            "ml-anomaly",
+            "T1570",
+            "Lateral Tool Transfer",
+            "lateral-movement",
+            "ML: destination port diversity spike",
+        ),
+        entry(
+            "ml-anomaly",
+            "T1074",
+            "Data Staged",
+            "collection",
+            "ML: payload size anomaly",
+        ),
+        entry(
+            "ml-anomaly",
+            "T1110",
+            "Brute Force",
+            "credential-access",
+            "ML: connection count spike",
+        ),
+    ]
 }
 
 fn firewall_ips_coverage_entries() -> Vec<CoverageEntry> {
@@ -1053,5 +1165,134 @@ mod tests {
     fn coverage_report_case_insensitive() {
         let report = coverage_report(&["IDS", "DLP"]);
         assert_eq!(report.total_techniques, 10); // 7 IDS + 3 DLP
+    }
+
+    #[test]
+    fn ml_anomaly_traffic_volume_drift() {
+        let info = lookup(&MitreContext::MlAnomaly(MlAnomalyType::TrafficVolumeDrift));
+        assert_eq!(info.technique_id, "T1498.001");
+        assert_eq!(info.tactic, "impact");
+    }
+
+    #[test]
+    fn ml_anomaly_protocol_tunneling() {
+        let info = lookup(&MitreContext::MlAnomaly(MlAnomalyType::ProtocolRatioDrift));
+        assert_eq!(info.technique_id, "T1572");
+        assert_eq!(info.tactic, "command-and-control");
+    }
+
+    #[test]
+    fn ml_anomaly_port_scanning() {
+        let info = lookup(&MitreContext::MlAnomaly(MlAnomalyType::PortEntropySpike));
+        assert_eq!(info.technique_id, "T1046");
+        assert_eq!(info.tactic, "discovery");
+    }
+
+    #[test]
+    fn ml_anomaly_brute_force() {
+        let info = lookup(&MitreContext::MlAnomaly(
+            MlAnomalyType::ConnectionCountSpike,
+        ));
+        assert_eq!(info.technique_id, "T1110");
+        assert_eq!(info.tactic, "credential-access");
+    }
+
+    #[test]
+    fn ml_anomaly_data_staging() {
+        let info = lookup(&MitreContext::MlAnomaly(MlAnomalyType::PayloadSizeAnomaly));
+        assert_eq!(info.technique_id, "T1074");
+        assert_eq!(info.tactic, "collection");
+    }
+
+    #[test]
+    fn ml_anomaly_lateral_movement() {
+        let info = lookup(&MitreContext::MlAnomaly(
+            MlAnomalyType::DestPortDiversitySpike,
+        ));
+        assert_eq!(info.technique_id, "T1570");
+        assert_eq!(info.tactic, "lateral-movement");
+    }
+
+    #[test]
+    fn ml_anomaly_proxy_detection() {
+        let info = lookup(&MitreContext::MlAnomaly(
+            MlAnomalyType::SourceDiversitySpike,
+        ));
+        assert_eq!(info.technique_id, "T1090");
+        assert_eq!(info.tactic, "command-and-control");
+    }
+
+    #[test]
+    fn feature_index_mapping_complete() {
+        // packet_rate, byte_rate → traffic volume
+        assert_eq!(
+            feature_index_to_ml_anomaly_type(0),
+            MlAnomalyType::TrafficVolumeDrift
+        );
+        assert_eq!(
+            feature_index_to_ml_anomaly_type(1),
+            MlAnomalyType::TrafficVolumeDrift
+        );
+        // protocol ratios → protocol drift
+        assert_eq!(
+            feature_index_to_ml_anomaly_type(2),
+            MlAnomalyType::ProtocolRatioDrift
+        );
+        assert_eq!(
+            feature_index_to_ml_anomaly_type(5),
+            MlAnomalyType::ProtocolRatioDrift
+        );
+        // port_entropy → scanning
+        assert_eq!(
+            feature_index_to_ml_anomaly_type(6),
+            MlAnomalyType::PortEntropySpike
+        );
+        // unique_src_ips → source diversity
+        assert_eq!(
+            feature_index_to_ml_anomaly_type(7),
+            MlAnomalyType::SourceDiversitySpike
+        );
+        // unique_dst_ports → dest diversity
+        assert_eq!(
+            feature_index_to_ml_anomaly_type(8),
+            MlAnomalyType::DestPortDiversitySpike
+        );
+        // payload sizes → payload anomaly
+        assert_eq!(
+            feature_index_to_ml_anomaly_type(9),
+            MlAnomalyType::PayloadSizeAnomaly
+        );
+        assert_eq!(
+            feature_index_to_ml_anomaly_type(10),
+            MlAnomalyType::PayloadSizeAnomaly
+        );
+        // connection_count → brute force
+        assert_eq!(
+            feature_index_to_ml_anomaly_type(11),
+            MlAnomalyType::ConnectionCountSpike
+        );
+        // unknown → default (traffic volume)
+        assert_eq!(
+            feature_index_to_ml_anomaly_type(99),
+            MlAnomalyType::TrafficVolumeDrift
+        );
+    }
+
+    #[test]
+    fn ml_anomaly_in_coverage_report() {
+        let report = coverage_report(&["ml-anomaly"]);
+        assert_eq!(report.total_techniques, 7);
+        let technique_ids: Vec<&str> = report
+            .techniques
+            .iter()
+            .map(|t| t.technique_id.as_str())
+            .collect();
+        assert!(technique_ids.contains(&"T1498.001"));
+        assert!(technique_ids.contains(&"T1572"));
+        assert!(technique_ids.contains(&"T1046"));
+        assert!(technique_ids.contains(&"T1090"));
+        assert!(technique_ids.contains(&"T1570"));
+        assert!(technique_ids.contains(&"T1074"));
+        assert!(technique_ids.contains(&"T1110"));
     }
 }

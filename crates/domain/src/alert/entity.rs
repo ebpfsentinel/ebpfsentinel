@@ -124,6 +124,15 @@ pub struct Alert {
     /// JA4 TLS `ClientHello` fingerprint (enriched from L7 cache).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ja4_fingerprint: Option<String>,
+    /// ML anomaly: composite anomaly score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ml_anomaly_score: Option<f64>,
+    /// ML anomaly: top contributing feature name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ml_top_feature: Option<String>,
+    /// ML anomaly: detection engine (baseline, ewma, fused).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ml_engine: Option<String>,
 }
 
 impl Alert {
@@ -166,6 +175,9 @@ impl Alert {
                 dst_port: ids.dst_port,
             })),
             ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
         }
     }
 
@@ -208,6 +220,9 @@ impl Alert {
             total_packets: None,
             mitre_attack: Some(mitre::lookup(&MitreContext::Dlp(&dlp.data_type))),
             ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
         }
     }
 
@@ -251,6 +266,9 @@ impl Alert {
                 dst_port: ti.dst_port,
             })),
             ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
         }
     }
 
@@ -306,6 +324,9 @@ impl Alert {
             total_packets: Some(attack.total_packets),
             mitre_attack: Some(mitre::lookup(&MitreContext::Ddos(attack.attack_type))),
             ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
         }
     }
 
@@ -361,6 +382,9 @@ impl Alert {
             total_packets: None,
             mitre_attack: Some(mitre::lookup(&mitre_context)),
             ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
         }
     }
 
@@ -423,6 +447,66 @@ impl Alert {
             total_packets: None,
             mitre_attack: Some(mitre::lookup(&mitre_context)),
             ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+        }
+    }
+
+    /// Create a domain alert from an ML anomaly detection.
+    ///
+    /// `anomaly_type` determines the MITRE technique mapping.
+    /// `engine` is `"baseline"`, `"ewma"`, or `"fused"`.
+    pub fn from_ml_anomaly(
+        anomaly_id: &str,
+        severity: Severity,
+        score: f64,
+        top_feature_idx: usize,
+        top_feature_name: &str,
+        engine: &str,
+        timestamp_ns: u64,
+    ) -> Self {
+        let anomaly_type = mitre::feature_index_to_ml_anomaly_type(top_feature_idx);
+        Self {
+            id: format!("{timestamp_ns}-ml-{anomaly_id}"),
+            timestamp_ns,
+            component: "ml-anomaly".to_string(),
+            severity,
+            rule_id: RuleId(format!("ml-{anomaly_type:?}")),
+            action: DomainMode::Alert,
+            src_addr: [0; 4],
+            dst_addr: [0; 4],
+            src_port: 0,
+            dst_port: 0,
+            protocol: 0,
+            is_ipv6: false,
+            message: format!(
+                "ML anomaly detected (engine={engine}, score={score:.2}, top_feature={top_feature_name})"
+            ),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: None,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: Some(mitre::lookup(&MitreContext::MlAnomaly(anomaly_type))),
+            ja4_fingerprint: None,
+            ml_anomaly_score: Some(score),
+            ml_top_feature: Some(top_feature_name.to_string()),
+            ml_engine: Some(engine.to_string()),
         }
     }
 
