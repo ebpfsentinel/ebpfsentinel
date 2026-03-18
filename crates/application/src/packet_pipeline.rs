@@ -8,7 +8,8 @@ use domain::firewall::entity::FirewallAction;
 use domain::ids::entity::IdsAlert;
 
 use crate::alert_event::AlertEvent;
-use domain::l7::entity::DetectedProtocol;
+use domain::l7::entity::{DetectedProtocol, ParsedProtocol};
+use domain::l7::ja4::{self, FingerprintCache, FlowKey};
 use domain::l7::parser::{detect_protocol, parse_payload};
 use domain::threatintel::entity::ThreatIntelAlert;
 use ebpf_common::ddos::{
@@ -71,6 +72,7 @@ pub struct EventDispatcher {
     dlp_service: Option<Arc<RwLock<DlpAppService>>>,
     ddos_service: Option<Arc<RwLock<DdosAppService>>>,
     dns_blocklist_svc: Option<Arc<DnsBlocklistAppService>>,
+    fingerprint_cache: Arc<std::sync::RwLock<FingerprintCache>>,
 }
 
 impl EventDispatcher {
@@ -96,7 +98,16 @@ impl EventDispatcher {
             dlp_service: None,
             ddos_service: None,
             dns_blocklist_svc: None,
+            fingerprint_cache: Arc::new(std::sync::RwLock::new(FingerprintCache::new(
+                10_000,
+                std::time::Duration::from_secs(300),
+            ))),
         }
+    }
+
+    /// Return a shared reference to the JA4 fingerprint cache.
+    pub fn fingerprint_cache(&self) -> Arc<std::sync::RwLock<FingerprintCache>> {
+        Arc::clone(&self.fingerprint_cache)
     }
 
     /// Set the DNS cache service for processing DNS events.
@@ -465,6 +476,21 @@ impl EventDispatcher {
         };
 
         let parsed = parse_payload(payload);
+
+        // Compute and cache JA4 fingerprint for TLS connections
+        if let ParsedProtocol::Tls(ref tls_hello) = parsed {
+            let fp = ja4::compute_ja4(tls_hello);
+            self.metrics.record_fingerprint_seen(&fp.ja4);
+            let flow_key = FlowKey {
+                src_addr: header.src_addr,
+                src_port: header.src_port,
+                dst_addr: header.dst_addr,
+                dst_port: header.dst_port,
+            };
+            if let Ok(mut cache) = self.fingerprint_cache.write() {
+                cache.insert(flow_key, fp);
+            }
+        }
 
         // Evaluate L7 rules against parsed content
         let l7_svc = self.l7_service.read().await;

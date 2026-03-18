@@ -3,17 +3,19 @@ use std::sync::Arc;
 
 use domain::alert::entity::Alert;
 use domain::alias::entity::GeoIpInfo;
+use domain::l7::ja4::{FingerprintCache, FlowKey};
 use ports::secondary::alert_enrichment_port::AlertEnrichmentPort;
 use ports::secondary::dns_cache_port::DnsCachePort;
 use ports::secondary::domain_reputation_port::DomainReputationPort;
 use ports::secondary::geoip_port::GeoIpPort;
 
 /// Alert enricher that adds DNS reverse-lookup data, reputation scores,
-/// and `GeoIP` location info.
+/// `GeoIP` location info, and JA4 fingerprints.
 pub struct DnsAlertEnricher {
     dns_cache: Arc<dyn DnsCachePort>,
     reputation: Option<Arc<dyn DomainReputationPort>>,
     geoip: Option<Arc<dyn GeoIpPort>>,
+    fingerprint_cache: Option<Arc<std::sync::RwLock<FingerprintCache>>>,
 }
 
 impl DnsAlertEnricher {
@@ -25,6 +27,7 @@ impl DnsAlertEnricher {
             dns_cache,
             reputation,
             geoip: None,
+            fingerprint_cache: None,
         }
     }
 
@@ -32,6 +35,16 @@ impl DnsAlertEnricher {
     #[must_use]
     pub fn with_geoip(mut self, geoip: Arc<dyn GeoIpPort>) -> Self {
         self.geoip = Some(geoip);
+        self
+    }
+
+    /// Add a JA4 fingerprint cache for TLS fingerprint enrichment.
+    #[must_use]
+    pub fn with_fingerprint_cache(
+        mut self,
+        cache: Arc<std::sync::RwLock<FingerprintCache>>,
+    ) -> Self {
+        self.fingerprint_cache = Some(cache);
         self
     }
 }
@@ -59,6 +72,21 @@ impl AlertEnrichmentPort for DnsAlertEnricher {
                     alert.dst_domain_score = rep_port.get_score(&domain);
                 }
                 alert.dst_domain = Some(domain);
+            }
+        }
+
+        // JA4 fingerprint enrichment
+        if let Some(ref fp_cache) = self.fingerprint_cache
+            && let Ok(cache) = fp_cache.read()
+        {
+            let flow_key = FlowKey {
+                src_addr: alert.src_addr,
+                src_port: alert.src_port,
+                dst_addr: alert.dst_addr,
+                dst_port: alert.dst_port,
+            };
+            if let Some(fp) = cache.get(&flow_key) {
+                alert.ja4_fingerprint = Some(fp.ja4.clone());
             }
         }
 

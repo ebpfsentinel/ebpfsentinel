@@ -61,6 +61,7 @@ pub struct AppState {
     pub config: Arc<RwLock<AgentConfig>>,
     pub reload_trigger: mpsc::Sender<()>,
     pub ebpf_program_status: Arc<RwLock<HashMap<String, bool>>>,
+    pub fingerprint_cache: Option<Arc<std::sync::RwLock<domain::l7::ja4::FingerprintCache>>>,
 }
 
 impl AppState {
@@ -108,7 +109,18 @@ impl AppState {
             config,
             reload_trigger,
             ebpf_program_status,
+            fingerprint_cache: None,
         }
+    }
+
+    /// Attach a JA4 fingerprint cache.
+    #[must_use]
+    pub fn with_fingerprint_cache(
+        mut self,
+        cache: Arc<std::sync::RwLock<domain::l7::ja4::FingerprintCache>>,
+    ) -> Self {
+        self.fingerprint_cache = Some(cache);
+        self
     }
 
     /// Attach an IDS service.

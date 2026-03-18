@@ -27,13 +27,16 @@ pub struct FingerprintSummaryResponse {
     )
 )]
 pub async fn fingerprint_summary(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Json<FingerprintSummaryResponse> {
-    // The fingerprint cache lives in EventDispatcher (application layer),
-    // not directly accessible from AppState. Return static info for now —
-    // will be wired when EventDispatcher exposes cache stats via a port.
+    let cached_count = state
+        .fingerprint_cache
+        .as_ref()
+        .and_then(|c| c.read().ok())
+        .map_or(0, |c| c.len());
+
     Json(FingerprintSummaryResponse {
-        cached_count: 0,
+        cached_count,
         max_size: 10_000,
         ttl_seconds: 300,
     })

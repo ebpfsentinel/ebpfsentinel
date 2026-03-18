@@ -165,6 +165,8 @@ pub struct AlertResponse {
     pub src_geo: Option<String>,
     #[serde(default)]
     pub dst_geo: Option<String>,
+    #[serde(default)]
+    pub ja4_fingerprint: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
