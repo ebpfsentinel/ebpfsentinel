@@ -10,6 +10,7 @@ publish.workspace = true
 thiserror = { workspace = true }
 serde = { workspace = true }
 regex = { workspace = true }
+sha2 = { workspace = true }
 ebpf-common = { workspace = true }
 
 [dev-dependencies]
