@@ -12,6 +12,16 @@ use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::server::TlsStream;
 
+/// Install the PQ-aware [`CryptoProvider`] as the process-wide default.
+///
+/// Call once at startup (before any rustls/reqwest client is created) so that
+/// outbound TLS connections also use PQ hybrid key exchange.
+pub fn install_pq_provider(pq_mode: PqMode) {
+    let provider = build_crypto_provider(pq_mode);
+    let _ = provider.install_default();
+    tracing::info!(?pq_mode, "PQ CryptoProvider installed for outbound TLS");
+}
+
 /// Load a rustls [`ServerConfig`] with PQ-hybrid key exchange support.
 ///
 /// Key exchange group preference depends on `pq_mode`:
@@ -24,8 +34,6 @@ pub fn load_rustls_config(
     pq_mode: PqMode,
 ) -> anyhow::Result<Arc<ServerConfig>> {
     let provider = build_crypto_provider(pq_mode);
-    // Install as default (ignore if already installed).
-    let _ = provider.clone().install_default();
 
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert_path)
         .map_err(|e| anyhow::anyhow!("failed to read TLS cert at '{}': {e}", cert_path.display()))?
@@ -72,6 +80,19 @@ fn build_crypto_provider(pq_mode: PqMode) -> tokio_rustls::rustls::crypto::Crypt
     };
 
     provider
+}
+
+/// Build a [`reqwest::Client`] with PQ-hybrid TLS and sensible defaults.
+///
+/// Uses `reqwest`'s built-in root certificate handling; the custom
+/// [`CryptoProvider`] overrides only key exchange groups.
+pub fn build_pq_http_client() -> reqwest::Client {
+    // Provider is already installed globally by `install_pq_provider()` at startup.
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("ebpfsentinel-agent/1.0")
+        .build()
+        .expect("failed to build PQ HTTP client")
 }
 
 /// A TCP listener that performs TLS handshakes on accepted connections.
@@ -132,6 +153,15 @@ mod tests {
         assert_eq!(provider.kx_groups[0].name(), NamedGroup::X25519MLKEM768);
         assert_eq!(provider.kx_groups[1].name(), NamedGroup::X25519);
         assert_eq!(provider.kx_groups[2].name(), NamedGroup::secp256r1);
+    }
+
+    #[test]
+    fn build_pq_http_client_succeeds() {
+        // Install a provider first (tests may run in any order)
+        install_pq_provider(PqMode::Prefer);
+        let client = build_pq_http_client();
+        // Just verify the client is created without panic
+        drop(client);
     }
 
     #[test]

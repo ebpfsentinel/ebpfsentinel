@@ -728,6 +728,10 @@ pub async fn run(
     );
 
     // ── 6b. Load TLS configuration ─────────────────────────────────
+    // Install the PQ-aware CryptoProvider for all outbound TLS (reqwest, lettre)
+    // even when server-side TLS is disabled.
+    adapters::http::tls::install_pq_provider(config.agent.tls.pq_mode);
+
     let tls_config = if config.agent.tls.enabled {
         let rustls_cfg = load_rustls_config(
             Path::new(&config.agent.tls.cert_path),
