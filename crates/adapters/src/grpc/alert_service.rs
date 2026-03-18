@@ -54,6 +54,7 @@ fn alert_to_event(alert: &Alert) -> proto::AlertEvent {
             .mitre_attack
             .as_ref()
             .map_or_else(String::new, |m| m.tactic.clone()),
+        ja4_fingerprint: alert.ja4_fingerprint.clone().unwrap_or_default(),
     }
 }
 
@@ -211,6 +212,7 @@ mod tests {
             mitigation_status: None,
             total_packets: None,
             mitre_attack: None,
+            ja4_fingerprint: None,
         }
     }
 

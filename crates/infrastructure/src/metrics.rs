@@ -783,6 +783,8 @@ impl LbMetrics for AgentMetrics {
     }
 }
 
+impl ports::secondary::metrics_port::FingerprintMetrics for AgentMetrics {}
+
 // MetricsPort is automatically implemented via the blanket impl
 // since AgentMetrics implements all sub-traits.
 

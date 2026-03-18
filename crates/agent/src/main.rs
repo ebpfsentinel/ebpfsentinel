@@ -8,9 +8,9 @@ use anyhow::Result;
 
 use api_client::ApiClient;
 use cli::{
-    AlertsCommand, AuditCommand, Command, DdosCommand, DnsCommand, DomainsCommand, FirewallCommand,
-    IpsCommand, L7Command, LbCommand, MitreCommand, NatCommand, NptV6Command, QosCommand,
-    RatelimitCommand, ThreatintelCommand,
+    AlertsCommand, AuditCommand, Command, DdosCommand, DnsCommand, DomainsCommand,
+    FingerprintsCommand, FirewallCommand, IpsCommand, L7Command, LbCommand, MitreCommand,
+    NatCommand, NptV6Command, QosCommand, RatelimitCommand, ThreatintelCommand,
 };
 
 #[tokio::main]
@@ -288,6 +288,15 @@ async fn main() -> Result<()> {
             let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
             match args.command {
                 MitreCommand::Coverage => commands::cmd_mitre_coverage(&client, output).await,
+            }
+        }
+
+        Some(Command::Fingerprints(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                FingerprintsCommand::Summary => {
+                    commands::cmd_fingerprints_summary(&client, output).await
+                }
             }
         }
 

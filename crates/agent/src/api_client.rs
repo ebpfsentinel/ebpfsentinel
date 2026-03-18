@@ -198,6 +198,13 @@ pub struct MitreTacticSummary {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct FingerprintSummaryResponse {
+    pub cached_count: usize,
+    pub max_size: usize,
+    pub ttl_seconds: u64,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct AuditLogResponse {
     pub entries: Vec<AuditEntryResponse>,
     pub total: u64,
@@ -760,6 +767,17 @@ impl ApiClient {
     pub async fn mitre_coverage(&self) -> anyhow::Result<MitreCoverageResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/mitre/coverage")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── Fingerprints ──────────────────────────────────────────────────
+
+    pub async fn fingerprint_summary(&self) -> anyhow::Result<FingerprintSummaryResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/fingerprints/summary")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

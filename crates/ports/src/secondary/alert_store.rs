@@ -123,6 +123,7 @@ mod tests {
             mitigation_status: None,
             total_packets: None,
             mitre_attack: None,
+            ja4_fingerprint: None,
         }
     }
 

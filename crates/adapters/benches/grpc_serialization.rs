@@ -39,6 +39,7 @@ fn make_alert(id: &str, ts: u64) -> Alert {
         mitigation_status: None,
         total_packets: None,
         mitre_attack: None,
+        ja4_fingerprint: None,
     }
 }
 

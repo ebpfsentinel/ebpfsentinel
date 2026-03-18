@@ -118,6 +118,9 @@ pub enum Command {
 
     /// MITRE ATT&CK: coverage matrix
     Mitre(DomainArgs<MitreCommand>),
+
+    /// TLS fingerprints: JA4+ cache and analysis
+    Fingerprints(DomainArgs<FingerprintsCommand>),
 }
 
 /// Generic domain args: connection + subcommand.
@@ -257,6 +260,14 @@ pub enum AlertsCommand {
 pub enum MitreCommand {
     /// Show MITRE ATT&CK coverage matrix for active features
     Coverage,
+}
+
+// ── Fingerprints ────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum FingerprintsCommand {
+    /// Show JA4+ fingerprint cache summary
+    Summary,
 }
 
 // ── Audit ───────────────────────────────────────────────────────────────

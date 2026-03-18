@@ -117,8 +117,8 @@ mod tests {
     use domain::common::entity::Severity;
     use ports::secondary::metrics_port::{
         AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
-        DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics, IpsMetrics, LbMetrics,
-        PacketMetrics, RoutingMetrics, SystemMetrics,
+        DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics, IpsMetrics,
+        LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -156,6 +156,7 @@ mod tests {
     impl RoutingMetrics for TestMetrics {}
     impl AuditMetrics for TestMetrics {}
     impl LbMetrics for TestMetrics {}
+    impl FingerprintMetrics for TestMetrics {}
 
     fn make_pattern(id: &str) -> DlpPattern {
         DlpPattern {

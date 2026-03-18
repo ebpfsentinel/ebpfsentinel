@@ -135,6 +135,9 @@ pub struct AlertResponse {
     /// MITRE ATT&CK tactic in kebab-case.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mitre_tactic: Option<String>,
+    /// JA4 TLS `ClientHello` fingerprint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ja4_fingerprint: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -256,6 +259,7 @@ pub async fn list_alerts(
             mitre_technique_id: a.mitre_attack.as_ref().map(|m| m.technique_id.clone()),
             mitre_technique_name: a.mitre_attack.as_ref().map(|m| m.technique_name.clone()),
             mitre_tactic: a.mitre_attack.map(|m| m.tactic),
+            ja4_fingerprint: a.ja4_fingerprint,
         })
         .collect();
 
@@ -387,6 +391,7 @@ mod tests {
             mitre_technique_id: None,
             mitre_technique_name: None,
             mitre_tactic: None,
+            ja4_fingerprint: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "test-001");

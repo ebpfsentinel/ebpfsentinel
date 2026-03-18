@@ -96,4 +96,6 @@ message AlertEvent {
   string mitre_technique_name = 34;
   // MITRE ATT&CK tactic in kebab-case (e.g. "command-and-control"). Empty if absent.
   string mitre_tactic = 35;
+  // JA4 TLS ClientHello fingerprint (e.g. "t13d1516h2_8daaf6152771_02713d6af862"). Empty if absent.
+  string ja4_fingerprint = 36;
 }

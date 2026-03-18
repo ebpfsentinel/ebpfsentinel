@@ -12,6 +12,7 @@ use super::dlp_handler;
 use super::dns_handler;
 use super::domain_handler;
 use super::error;
+use super::fingerprint_handler;
 use super::firewall_handler;
 use super::health_handler;
 use super::ids_handler;
@@ -127,6 +128,8 @@ use super::zone_handler;
         zone_handler::list_zone_policies,
         // MITRE ATT&CK
         mitre_handler::mitre_coverage,
+        // Fingerprints
+        fingerprint_handler::fingerprint_summary,
     ),
     components(schemas(
         // Error
@@ -221,6 +224,8 @@ use super::zone_handler;
         mitre_handler::MitreCoverageResponse,
         mitre_handler::TechniqueEntry,
         mitre_handler::TacticSummary,
+        // Fingerprints
+        fingerprint_handler::FingerprintSummaryResponse,
     )),
     tags(
         (name = "Health", description = "Liveness and readiness probes"),
@@ -246,6 +251,7 @@ use super::zone_handler;
         (name = "Load Balancer", description = "L4 load balancer service management"),
         (name = "Zones", description = "Security zone configuration and policies"),
         (name = "MITRE ATT&CK", description = "MITRE ATT&CK coverage and technique mapping"),
+        (name = "Fingerprints", description = "JA4+ TLS fingerprint cache and analysis"),
     )
 )]
 pub struct ApiDoc;

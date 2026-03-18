@@ -137,6 +137,7 @@ fuzz_target!(|data: &[u8]| {
             mitigation_status: None,
             total_packets: None,
             mitre_attack: None,
+            ja4_fingerprint: None,
         };
 
         let _ = router.process_alert(&alert);
@@ -188,6 +189,7 @@ fuzz_target!(|data: &[u8]| {
             mitigation_status: None,
             total_packets: None,
             mitre_attack: None,
+            ja4_fingerprint: None,
         };
         let _ = router.process_alert(&alert);
     }

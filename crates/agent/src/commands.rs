@@ -572,6 +572,24 @@ pub async fn cmd_mitre_coverage(client: &ApiClient, output: OutputFormat) -> Res
     Ok(())
 }
 
+// ── Fingerprints ────────────────────────────────────────────────────
+
+pub async fn cmd_fingerprints_summary(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.fingerprint_summary().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("JA4+ Fingerprint Cache");
+    println!("  Cached entries:  {}", resp.cached_count);
+    println!("  Max size:        {}", resp.max_size);
+    println!("  TTL:             {}s", resp.ttl_seconds);
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_audit_logs(
     client: &ApiClient,

@@ -478,8 +478,8 @@ mod tests {
     use ports::secondary::audit_sink::AuditSink;
     use ports::secondary::metrics_port::{
         AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
-        DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics, IpsMetrics, LbMetrics,
-        PacketMetrics, RoutingMetrics, SystemMetrics,
+        DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics, IpsMetrics,
+        LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
     };
     use std::future::Future;
     use std::pin::Pin;
@@ -531,6 +531,7 @@ mod tests {
     impl RoutingMetrics for TestMetrics {}
     impl AuditMetrics for TestMetrics {}
     impl LbMetrics for TestMetrics {}
+    impl FingerprintMetrics for TestMetrics {}
 
     fn make_ids_alert(rule_id: &str, severity: Severity) -> IdsAlert {
         IdsAlert {

@@ -776,8 +776,8 @@ mod tests {
     use ebpf_common::event::{EVENT_TYPE_DLP, EVENT_TYPE_IDS, EVENT_TYPE_L7, EVENT_TYPE_RATELIMIT};
     use ports::secondary::metrics_port::{
         AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
-        DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics, IpsMetrics, LbMetrics,
-        PacketMetrics, RoutingMetrics, SystemMetrics,
+        DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics, IpsMetrics,
+        LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
     };
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -830,6 +830,7 @@ mod tests {
     impl RoutingMetrics for TestMetrics {}
     impl AuditMetrics for TestMetrics {}
     impl LbMetrics for TestMetrics {}
+    impl FingerprintMetrics for TestMetrics {}
 
     fn make_ids_rule(id: &str) -> IdsRule {
         IdsRule {

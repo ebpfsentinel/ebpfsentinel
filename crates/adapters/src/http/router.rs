@@ -28,6 +28,7 @@ use super::ddos_handler::{
 use super::dlp_handler::{dlp_status, list_dlp_patterns};
 use super::dns_handler::{dns_stats, flush_dns_cache, list_dns_blocklist, list_dns_cache};
 use super::domain_handler::{add_to_blocklist, list_domain_reputations, remove_from_blocklist};
+use super::fingerprint_handler::fingerprint_summary;
 use super::firewall_handler::{create_rule, delete_rule, list_rules};
 use super::health_handler::{healthz, readyz};
 use super::ids_handler::{ids_status, list_ids_rules};
@@ -153,7 +154,8 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
             .route("/api/v1/qos/pipes", get(list_qos_pipes))
             .route("/api/v1/qos/queues", get(list_qos_queues))
             .route("/api/v1/qos/classifiers", get(list_qos_classifiers))
-            .route("/api/v1/mitre/coverage", get(mitre_coverage));
+            .route("/api/v1/mitre/coverage", get(mitre_coverage))
+            .route("/api/v1/fingerprints/summary", get(fingerprint_summary));
 
         // Write routes (rate limited: 60 req/min per IP)
         let write_routes = Router::new()

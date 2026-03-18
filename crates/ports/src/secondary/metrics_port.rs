@@ -169,6 +169,13 @@ pub trait LbMetrics: Send + Sync {
     fn set_lb_backends_healthy(&self, _service: &str, _count: u64) {}
 }
 
+// ── Fingerprint metrics ──────────────────────────────────────────
+
+pub trait FingerprintMetrics: Send + Sync {
+    /// Record a JA4 fingerprint seen for a given hash.
+    fn record_fingerprint_seen(&self, _ja4: &str) {}
+}
+
 // ── Composite super-trait ──────────────────────────────────────────
 
 /// Unified metrics port composing all domain-specific sub-traits.
@@ -192,6 +199,7 @@ pub trait MetricsPort:
     + RoutingMetrics
     + AuditMetrics
     + LbMetrics
+    + FingerprintMetrics
 {
 }
 
@@ -213,6 +221,7 @@ impl<T> MetricsPort for T where
         + RoutingMetrics
         + AuditMetrics
         + LbMetrics
+        + FingerprintMetrics
 {
 }
 
@@ -259,6 +268,7 @@ mod tests {
             port.record_audit_failure();
             port.record_lb_forwarded();
             port.set_lb_backends_healthy("web", 3);
+            port.record_fingerprint_seen("t13d0305h2_abc_def");
         }
     }
 
@@ -281,6 +291,7 @@ mod tests {
         impl RoutingMetrics for MinimalMock {}
         impl AuditMetrics for MinimalMock {}
         impl LbMetrics for MinimalMock {}
+        impl FingerprintMetrics for MinimalMock {}
 
         let mock = MinimalMock;
         let port: &dyn MetricsPort = &mock;

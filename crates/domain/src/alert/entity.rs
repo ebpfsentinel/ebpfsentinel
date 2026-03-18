@@ -91,6 +91,9 @@ pub struct Alert {
     /// MITRE ATT&CK technique mapping for this alert.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mitre_attack: Option<MitreAttackInfo>,
+    /// JA4 TLS `ClientHello` fingerprint (enriched from L7 cache).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ja4_fingerprint: Option<String>,
 }
 
 impl Alert {
@@ -130,6 +133,7 @@ impl Alert {
             mitigation_status: None,
             total_packets: None,
             mitre_attack: Some(mitre::lookup(&MitreContext::Ids)),
+            ja4_fingerprint: None,
         }
     }
 
@@ -171,6 +175,7 @@ impl Alert {
             mitigation_status: None,
             total_packets: None,
             mitre_attack: Some(mitre::lookup(&MitreContext::Dlp(&dlp.data_type))),
+            ja4_fingerprint: None,
         }
     }
 
@@ -210,6 +215,7 @@ impl Alert {
             mitigation_status: None,
             total_packets: None,
             mitre_attack: Some(mitre::lookup(&MitreContext::ThreatIntel(ti.threat_type))),
+            ja4_fingerprint: None,
         }
     }
 
@@ -264,6 +270,7 @@ impl Alert {
             mitigation_status: Some(format!("{:?}", attack.mitigation_status)),
             total_packets: Some(attack.total_packets),
             mitre_attack: Some(mitre::lookup(&MitreContext::Ddos(attack.attack_type))),
+            ja4_fingerprint: None,
         }
     }
 
