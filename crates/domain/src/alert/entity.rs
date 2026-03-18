@@ -8,6 +8,35 @@ use crate::dns::entity::{DnsAlert, DnsAlertReason};
 use crate::ids::entity::IdsAlert;
 use crate::threatintel::entity::ThreatIntelAlert;
 
+/// Component type for packet-level security alerts (firewall, ratelimit, L7, IPS).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketAlertComponent {
+    Firewall,
+    Ratelimit,
+    L7,
+    Ips,
+}
+
+/// A security alert from a packet-level enforcement decision.
+///
+/// Shared by firewall (deny/reject), rate limiting (drop), L7 content
+/// filtering (deny/reject), and IPS auto-blacklisting.
+#[derive(Debug, Clone)]
+pub struct PacketSecurityAlert {
+    pub component: PacketAlertComponent,
+    pub src_addr: [u32; 4],
+    pub dst_addr: [u32; 4],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub protocol: u8,
+    pub is_ipv6: bool,
+    pub timestamp_ns: u64,
+    pub rule_id: String,
+    pub action_label: String,
+    pub severity: Severity,
+    pub detail: String,
+}
+
 /// Full-context alert with all FR30 fields.
 ///
 /// Contains complete packet context (IPs, ports, protocol), matched rule
@@ -330,6 +359,71 @@ impl Alert {
         }
     }
 
+    /// Create an alert from a packet-level security event (firewall, ratelimit, L7, IPS).
+    pub fn from_packet_security_alert(psa: &PacketSecurityAlert) -> Self {
+        let component_str = match psa.component {
+            PacketAlertComponent::Firewall => "firewall",
+            PacketAlertComponent::Ratelimit => "ratelimit",
+            PacketAlertComponent::L7 => "l7",
+            PacketAlertComponent::Ips => "ips",
+        };
+        let mode = match psa.action_label.as_str() {
+            "drop" | "deny" | "reject" | "blacklist" => DomainMode::Block,
+            _ => DomainMode::Alert,
+        };
+        let rule_id = RuleId(psa.rule_id.clone());
+        let mitre_context = match psa.component {
+            PacketAlertComponent::Firewall => {
+                MitreContext::PacketSecurity(mitre::PacketSecurityMitreReason::Firewall)
+            }
+            PacketAlertComponent::Ratelimit => {
+                MitreContext::PacketSecurity(mitre::PacketSecurityMitreReason::Ratelimit)
+            }
+            PacketAlertComponent::L7 => {
+                MitreContext::PacketSecurity(mitre::PacketSecurityMitreReason::L7)
+            }
+            PacketAlertComponent::Ips => {
+                MitreContext::PacketSecurity(mitre::PacketSecurityMitreReason::Ips)
+            }
+        };
+        Self {
+            id: Self::generate_id(psa.timestamp_ns, &rule_id),
+            timestamp_ns: psa.timestamp_ns,
+            component: component_str.to_string(),
+            severity: psa.severity,
+            rule_id,
+            action: mode,
+            src_addr: psa.src_addr,
+            dst_addr: psa.dst_addr,
+            src_port: psa.src_port,
+            dst_port: psa.dst_port,
+            protocol: psa.protocol,
+            is_ipv6: psa.is_ipv6,
+            message: psa.detail.clone(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: None,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: Some(mitre::lookup(&mitre_context)),
+            ja4_fingerprint: None,
+        }
+    }
+
     /// Returns the source IPv4 address (first element of `src_addr`).
     pub fn src_ip(&self) -> u32 {
         self.src_addr[0]
@@ -604,5 +698,70 @@ mod tests {
             alert.mitre_attack.as_ref().unwrap().technique_id,
             "T1071.004"
         );
+    }
+
+    // ── Packet Security Alert tests ──────────────────────────────────
+
+    fn sample_psa(component: PacketAlertComponent, action: &str) -> PacketSecurityAlert {
+        PacketSecurityAlert {
+            component,
+            src_addr: [0xC0A8_0001, 0, 0, 0],
+            dst_addr: [0x0A00_0001, 0, 0, 0],
+            src_port: 54321,
+            dst_port: 443,
+            protocol: 6,
+            is_ipv6: false,
+            timestamp_ns: 7_000_000_000,
+            rule_id: "test-rule".to_string(),
+            action_label: action.to_string(),
+            severity: Severity::Medium,
+            detail: "test detail".to_string(),
+        }
+    }
+
+    #[test]
+    fn alert_from_firewall_psa() {
+        let psa = sample_psa(PacketAlertComponent::Firewall, "deny");
+        let alert = Alert::from_packet_security_alert(&psa);
+
+        assert_eq!(alert.component, "firewall");
+        assert_eq!(alert.severity, Severity::Medium);
+        assert_eq!(alert.action, DomainMode::Block);
+        assert_eq!(alert.src_ip(), 0xC0A8_0001);
+        assert_eq!(alert.dst_ip(), 0x0A00_0001);
+        assert_eq!(alert.src_port, 54321);
+        assert_eq!(alert.dst_port, 443);
+        assert_eq!(alert.protocol, 6);
+        assert_eq!(alert.mitre_attack.as_ref().unwrap().technique_id, "T1190");
+    }
+
+    #[test]
+    fn alert_from_ratelimit_psa() {
+        let psa = sample_psa(PacketAlertComponent::Ratelimit, "drop");
+        let alert = Alert::from_packet_security_alert(&psa);
+
+        assert_eq!(alert.component, "ratelimit");
+        assert_eq!(alert.action, DomainMode::Block);
+        assert_eq!(alert.mitre_attack.as_ref().unwrap().technique_id, "T1498");
+    }
+
+    #[test]
+    fn alert_from_l7_psa() {
+        let psa = sample_psa(PacketAlertComponent::L7, "reject");
+        let alert = Alert::from_packet_security_alert(&psa);
+
+        assert_eq!(alert.component, "l7");
+        assert_eq!(alert.action, DomainMode::Block);
+        assert_eq!(alert.mitre_attack.as_ref().unwrap().technique_id, "T1071");
+    }
+
+    #[test]
+    fn alert_from_ips_psa() {
+        let psa = sample_psa(PacketAlertComponent::Ips, "blacklist");
+        let alert = Alert::from_packet_security_alert(&psa);
+
+        assert_eq!(alert.component, "ips");
+        assert_eq!(alert.action, DomainMode::Block);
+        assert_eq!(alert.mitre_attack.as_ref().unwrap().technique_id, "T1110");
     }
 }

@@ -38,13 +38,13 @@ impl L7AppService {
     /// Evaluate a parsed L7 event against all loaded rules.
     ///
     /// Resolves source and destination countries via the `GeoIP` port
-    /// for country-based rule matching. Returns the action of the
+    /// for country-based rule matching. Returns the action and rule ID of the
     /// first matching rule, or `None`.
     pub fn evaluate(
         &self,
         header: &PacketEvent,
         parsed: &ParsedProtocol,
-    ) -> Option<FirewallAction> {
+    ) -> Option<(FirewallAction, RuleId)> {
         if !self.enabled {
             return None;
         }
@@ -67,7 +67,7 @@ impl L7AppService {
             };
             self.metrics.record_packet("l7", action_label);
         }
-        result.map(|(_, rule)| rule.action)
+        result.map(|(_, rule)| (rule.action, rule.id.clone()))
     }
 
     fn resolve_country(&self, addr: [u32; 4], is_ipv6: bool) -> Option<String> {
@@ -189,12 +189,14 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_match_returns_action() {
+    fn evaluate_match_returns_action_and_rule_id() {
         let mut svc = make_service();
         svc.add_rule(make_deny_rule()).unwrap();
 
         let result = svc.evaluate(&make_header(), &make_http_parsed());
-        assert_eq!(result, Some(FirewallAction::Deny));
+        let (action, rule_id) = result.unwrap();
+        assert_eq!(action, FirewallAction::Deny);
+        assert_eq!(rule_id.0, "l7-001");
     }
 
     #[test]

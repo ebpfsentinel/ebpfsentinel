@@ -205,76 +205,9 @@ impl EventDispatcher {
 
     async fn dispatch_event(&self, event: PacketEvent) {
         match event.event_type {
-            EVENT_TYPE_FIREWALL => {
-                let action = action_label(event.action);
-                self.metrics.record_packet("firewall", action);
-                tracing::debug!(
-                    src_ip = %event.src_ip(),
-                    dst_ip = %event.dst_ip(),
-                    src_port = event.src_port,
-                    dst_port = event.dst_port,
-                    protocol = event.protocol,
-                    action = event.action,
-                    rule_id = event.rule_id,
-                    "firewall event"
-                );
-
-                let audit_action = if event.action == 1 {
-                    AuditAction::Drop
-                } else {
-                    AuditAction::Pass
-                };
-                let detail = format!("firewall {action} rule_id={}", event.rule_id);
-                self.audit_service.read().await.record_security_decision(
-                    AuditComponent::Firewall,
-                    audit_action,
-                    event.timestamp_ns,
-                    event.src_addr,
-                    event.dst_addr,
-                    event.is_ipv6(),
-                    event.src_port,
-                    event.dst_port,
-                    event.protocol,
-                    &event.rule_id.to_string(),
-                    &detail,
-                );
-            }
-            EVENT_TYPE_IDS => {
-                self.process_ids_event(event).await;
-            }
-            EVENT_TYPE_RATELIMIT => {
-                let action = action_label(event.action);
-                self.metrics.record_packet("ratelimit", action);
-                tracing::debug!(
-                    src_ip = %event.src_ip(),
-                    dst_ip = %event.dst_ip(),
-                    src_port = event.src_port,
-                    dst_port = event.dst_port,
-                    protocol = event.protocol,
-                    action = event.action,
-                    "ratelimit event"
-                );
-
-                let audit_action = if event.action == 1 {
-                    AuditAction::RateExceeded
-                } else {
-                    AuditAction::Pass
-                };
-                let detail = format!("ratelimit {action}");
-                self.audit_service.read().await.record_security_decision(
-                    AuditComponent::Ratelimit,
-                    audit_action,
-                    event.timestamp_ns,
-                    event.src_addr,
-                    event.dst_addr,
-                    event.is_ipv6(),
-                    event.src_port,
-                    event.dst_port,
-                    event.protocol,
-                    "",
-                    &detail,
-                );
-            }
+            EVENT_TYPE_FIREWALL => self.process_firewall_event(event).await,
+            EVENT_TYPE_IDS => self.process_ids_event(event).await,
+            EVENT_TYPE_RATELIMIT => self.process_ratelimit_event(event).await,
             EVENT_TYPE_THREATINTEL => {
                 self.process_threatintel_event(event).await;
             }
@@ -291,6 +224,95 @@ impl EventDispatcher {
                 tracing::debug!(event_type = other, "unhandled event type");
                 self.metrics.record_packet("unknown", "unknown");
             }
+        }
+    }
+
+    async fn process_firewall_event(&self, event: PacketEvent) {
+        let action = action_label(event.action);
+        self.metrics.record_packet("firewall", action);
+        tracing::debug!(
+            src_ip = %event.src_ip(),
+            dst_ip = %event.dst_ip(),
+            src_port = event.src_port,
+            dst_port = event.dst_port,
+            protocol = event.protocol,
+            action = event.action,
+            rule_id = event.rule_id,
+            "firewall event"
+        );
+
+        let audit_action = if event.action == 1 {
+            AuditAction::Drop
+        } else {
+            AuditAction::Pass
+        };
+        let detail = format!("firewall {action} rule_id={}", event.rule_id);
+        self.audit_service.read().await.record_security_decision(
+            AuditComponent::Firewall,
+            audit_action,
+            event.timestamp_ns,
+            event.src_addr,
+            event.dst_addr,
+            event.is_ipv6(),
+            event.src_port,
+            event.dst_port,
+            event.protocol,
+            &event.rule_id.to_string(),
+            &detail,
+        );
+
+        if event.action == 1 {
+            self.emit_packet_security_alert(
+                domain::alert::entity::PacketAlertComponent::Firewall,
+                &event,
+                &event.rule_id.to_string(),
+                action,
+                &detail,
+            );
+        }
+    }
+
+    async fn process_ratelimit_event(&self, event: PacketEvent) {
+        let action = action_label(event.action);
+        self.metrics.record_packet("ratelimit", action);
+        tracing::debug!(
+            src_ip = %event.src_ip(),
+            dst_ip = %event.dst_ip(),
+            src_port = event.src_port,
+            dst_port = event.dst_port,
+            protocol = event.protocol,
+            action = event.action,
+            "ratelimit event"
+        );
+
+        let audit_action = if event.action == 1 {
+            AuditAction::RateExceeded
+        } else {
+            AuditAction::Pass
+        };
+        let detail = format!("ratelimit {action}");
+        self.audit_service.read().await.record_security_decision(
+            AuditComponent::Ratelimit,
+            audit_action,
+            event.timestamp_ns,
+            event.src_addr,
+            event.dst_addr,
+            event.is_ipv6(),
+            event.src_port,
+            event.dst_port,
+            event.protocol,
+            "",
+            &detail,
+        );
+
+        if event.action == 1 {
+            self.emit_packet_security_alert(
+                domain::alert::entity::PacketAlertComponent::Ratelimit,
+                &event,
+                "",
+                action,
+                &detail,
+            );
         }
     }
 
@@ -371,7 +393,19 @@ impl EventDispatcher {
         if let Some(ref ips_svc) = self.ips_service {
             let src_ip = addr_to_ip(event.src_addr, event.is_ipv6());
             let mut svc = ips_svc.write().await;
-            svc.record_detection(src_ip);
+            let actions = svc.record_detection(src_ip);
+
+            // Emit alert when IPS auto-blacklists an IP
+            if !actions.is_empty() {
+                let detail = format!("IPS auto-blacklist: {src_ip}");
+                self.emit_packet_security_alert(
+                    domain::alert::entity::PacketAlertComponent::Ips,
+                    &event,
+                    &format!("ips-blacklist:{src_ip}"),
+                    "blacklist",
+                    &detail,
+                );
+            }
         }
     }
 
@@ -507,10 +541,10 @@ impl EventDispatcher {
 
         // Evaluate L7 rules against parsed content
         let l7_svc = self.l7_service.read().await;
-        let l7_action = l7_svc.evaluate(&header, &parsed);
+        let l7_result = l7_svc.evaluate(&header, &parsed);
         drop(l7_svc);
 
-        if let Some(action) = l7_action {
+        if let Some((action, rule_id)) = l7_result {
             let action_label = match action {
                 FirewallAction::Allow => "allow",
                 FirewallAction::Deny => "deny",
@@ -529,6 +563,7 @@ impl EventDispatcher {
                     dst_port = header.dst_port,
                     l7_protocol = protocol_label,
                     action = action_label,
+                    rule_id = %rule_id,
                     "L7 rule matched"
                 );
             } else {
@@ -545,7 +580,7 @@ impl EventDispatcher {
                 FirewallAction::Deny | FirewallAction::Reject => AuditAction::Drop,
                 _ => AuditAction::Pass,
             };
-            let detail = format!("L7 {protocol_label} {action_label}");
+            let detail = format!("L7 {protocol_label} {action_label} rule={rule_id}");
             self.audit_service.read().await.record_security_decision(
                 AuditComponent::L7,
                 audit_action,
@@ -556,9 +591,20 @@ impl EventDispatcher {
                 header.src_port,
                 header.dst_port,
                 header.protocol,
-                "",
+                &rule_id.0,
                 &detail,
             );
+
+            // Emit alert for L7 deny/reject
+            if action == FirewallAction::Deny || action == FirewallAction::Reject {
+                self.emit_packet_security_alert(
+                    domain::alert::entity::PacketAlertComponent::L7,
+                    &header,
+                    &rule_id.0,
+                    action_label,
+                    &detail,
+                );
+            }
 
             self.metrics.record_packet("l7", action_label);
         } else {
@@ -570,6 +616,37 @@ impl EventDispatcher {
             );
             self.metrics.record_packet("l7", protocol_label);
         }
+    }
+
+    fn emit_packet_security_alert(
+        &self,
+        component: domain::alert::entity::PacketAlertComponent,
+        event: &PacketEvent,
+        rule_id: &str,
+        action_label: &str,
+        detail: &str,
+    ) {
+        let severity = match component {
+            domain::alert::entity::PacketAlertComponent::Ips => {
+                domain::common::entity::Severity::High
+            }
+            _ => domain::common::entity::Severity::Medium,
+        };
+        let psa = domain::alert::entity::PacketSecurityAlert {
+            component,
+            src_addr: event.src_addr,
+            dst_addr: event.dst_addr,
+            src_port: event.src_port,
+            dst_port: event.dst_port,
+            protocol: event.protocol,
+            is_ipv6: event.is_ipv6(),
+            timestamp_ns: event.timestamp_ns,
+            rule_id: rule_id.to_string(),
+            action_label: action_label.to_string(),
+            severity,
+            detail: detail.to_string(),
+        };
+        let _ = self.alert_tx.try_send(AlertEvent::PacketSecurity(psa));
     }
 
     fn check_encrypted_dns(

@@ -14,6 +14,14 @@ pub struct MitreAttackInfo {
     pub tactic: String,
 }
 
+/// Sub-reason for packet-level security MITRE mapping.
+pub enum PacketSecurityMitreReason {
+    Firewall,
+    Ratelimit,
+    L7,
+    Ips,
+}
+
 /// Sub-reason for DNS MITRE mapping.
 pub enum DnsMitreReason {
     /// Blocklist match or encrypted DNS detection.
@@ -29,6 +37,7 @@ pub enum MitreContext<'a> {
     Dlp(&'a str),
     Ddos(DdosAttackType),
     Dns(DnsMitreReason),
+    PacketSecurity(PacketSecurityMitreReason),
 }
 
 /// Return the ATT&CK technique for the given alert context.
@@ -61,6 +70,21 @@ pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
             ),
             // "pci" and all other data types default to T1041
             _ => info("T1041", "Exfiltration Over C2 Channel", "exfiltration"),
+        },
+
+        MitreContext::PacketSecurity(reason) => match reason {
+            PacketSecurityMitreReason::Firewall => info(
+                "T1190",
+                "Exploit Public-Facing Application",
+                "initial-access",
+            ),
+            PacketSecurityMitreReason::Ratelimit => {
+                info("T1498", "Network Denial of Service", "impact")
+            }
+            PacketSecurityMitreReason::L7 => {
+                info("T1071", "Application Layer Protocol", "command-and-control")
+            }
+            PacketSecurityMitreReason::Ips => info("T1110", "Brute Force", "credential-access"),
         },
 
         MitreContext::Dns(reason) => match reason {
@@ -114,10 +138,44 @@ pub struct CoverageReport {
 
 /// Static coverage table — all technique mappings the agent can produce.
 fn all_coverage_entries() -> Vec<CoverageEntry> {
-    let mut entries = Vec::with_capacity(15);
+    let mut entries = Vec::with_capacity(19);
+    entries.extend(packet_security_coverage_entries());
     entries.extend(detection_coverage_entries());
     entries.extend(ddos_coverage_entries());
     entries
+}
+
+fn packet_security_coverage_entries() -> Vec<CoverageEntry> {
+    vec![
+        entry(
+            "firewall",
+            "T1190",
+            "Exploit Public-Facing Application",
+            "initial-access",
+            "Firewall deny/reject",
+        ),
+        entry(
+            "ratelimit",
+            "T1498",
+            "Network Denial of Service",
+            "impact",
+            "Rate limit exceeded",
+        ),
+        entry(
+            "l7",
+            "T1071",
+            "Application Layer Protocol",
+            "command-and-control",
+            "L7 content-based deny",
+        ),
+        entry(
+            "ips",
+            "T1110",
+            "Brute Force",
+            "credential-access",
+            "IPS auto-blacklist threshold",
+        ),
+    ]
 }
 
 fn detection_coverage_entries() -> Vec<CoverageEntry> {
@@ -379,6 +437,55 @@ mod tests {
     }
 
     #[test]
+    fn firewall_maps_to_t1190() {
+        let info = lookup(&MitreContext::PacketSecurity(
+            PacketSecurityMitreReason::Firewall,
+        ));
+        assert_eq!(info.technique_id, "T1190");
+        assert_eq!(info.tactic, "initial-access");
+    }
+
+    #[test]
+    fn ratelimit_maps_to_t1498() {
+        let info = lookup(&MitreContext::PacketSecurity(
+            PacketSecurityMitreReason::Ratelimit,
+        ));
+        assert_eq!(info.technique_id, "T1498");
+        assert_eq!(info.tactic, "impact");
+    }
+
+    #[test]
+    fn l7_maps_to_t1071() {
+        let info = lookup(&MitreContext::PacketSecurity(PacketSecurityMitreReason::L7));
+        assert_eq!(info.technique_id, "T1071");
+        assert_eq!(info.tactic, "command-and-control");
+    }
+
+    #[test]
+    fn ips_maps_to_t1110() {
+        let info = lookup(&MitreContext::PacketSecurity(
+            PacketSecurityMitreReason::Ips,
+        ));
+        assert_eq!(info.technique_id, "T1110");
+        assert_eq!(info.tactic, "credential-access");
+    }
+
+    #[test]
+    fn coverage_report_packet_security_components() {
+        let report = coverage_report(&["firewall", "ratelimit", "l7", "ips"]);
+        assert_eq!(report.total_techniques, 4);
+        let ids: Vec<&str> = report
+            .techniques
+            .iter()
+            .map(|t| t.technique_id.as_str())
+            .collect();
+        assert!(ids.contains(&"T1190"));
+        assert!(ids.contains(&"T1498"));
+        assert!(ids.contains(&"T1071"));
+        assert!(ids.contains(&"T1110"));
+    }
+
+    #[test]
     fn dns_blocklist_maps_to_t1071_004() {
         let info = lookup(&MitreContext::Dns(DnsMitreReason::BlocklistOrEncrypted));
         assert_eq!(info.technique_id, "T1071.004");
@@ -448,9 +555,19 @@ mod tests {
 
     #[test]
     fn coverage_report_all_components() {
-        let report = coverage_report(&["ids", "threatintel", "dlp", "ddos", "dns"]);
+        let report = coverage_report(&[
+            "ids",
+            "threatintel",
+            "dlp",
+            "ddos",
+            "dns",
+            "firewall",
+            "ratelimit",
+            "l7",
+            "ips",
+        ]);
         assert_eq!(report.attack_version, "v18");
-        assert_eq!(report.total_techniques, 15);
+        assert_eq!(report.total_techniques, 19);
         assert!(!report.by_tactic.is_empty());
     }
 
@@ -473,14 +590,25 @@ mod tests {
 
     #[test]
     fn coverage_report_tactic_grouping() {
-        let report = coverage_report(&["ids", "threatintel", "dlp", "ddos", "dns"]);
+        let report = coverage_report(&[
+            "ids",
+            "threatintel",
+            "dlp",
+            "ddos",
+            "dns",
+            "firewall",
+            "ratelimit",
+            "l7",
+            "ips",
+        ]);
         let impact = report
             .by_tactic
             .iter()
             .find(|t| t.tactic == "impact")
             .unwrap();
-        assert_eq!(impact.covered_techniques, 5);
-        assert_eq!(impact.components, vec!["ddos"]);
+        assert_eq!(impact.covered_techniques, 6);
+        assert!(impact.components.contains(&"ratelimit".to_string()));
+        assert!(impact.components.contains(&"ddos".to_string()));
     }
 
     #[test]

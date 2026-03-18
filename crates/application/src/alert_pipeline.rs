@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use domain::alert::engine::AlertRouter;
+use domain::alert::entity::PacketSecurityAlert;
 use domain::alert::entity::{Alert, AlertDestination};
 use domain::audit::entity::{AuditAction, AuditComponent};
 use domain::ddos::entity::DdosAttack;
@@ -409,6 +410,62 @@ impl AlertPipeline {
         }
     }
 
+    /// Process a packet-level security alert (firewall, ratelimit, L7, IPS).
+    pub async fn process_packet_security_alert(&mut self, psa: &PacketSecurityAlert) {
+        let mut alert = Alert::from_packet_security_alert(psa);
+
+        if let Some(ref enricher) = self.enricher {
+            enricher.enrich_alert(&mut alert);
+        }
+
+        let severity_str = severity_label(alert.severity);
+        let technique_id = alert
+            .mitre_attack
+            .as_ref()
+            .map_or("", |m| m.technique_id.as_str());
+        self.metrics
+            .record_alert(&alert.component, severity_str, technique_id);
+        self.metrics
+            .record_alert_by_rule(&alert.component, &alert.rule_id.0);
+
+        if let Some(ref store) = self.alert_store
+            && let Err(e) = store.store_alert(&alert)
+        {
+            tracing::warn!(alert_id = %alert.id, error = %e, "failed to store {} alert", alert.component);
+        }
+
+        if let Some(ref tx) = self.stream_tx {
+            let _ = tx.send(alert.clone());
+        }
+
+        let matched_routes = self.router.process_alert(&alert);
+        if matched_routes.is_empty() {
+            self.metrics.record_alert_dropped("no_route");
+            return;
+        }
+
+        for (idx, route) in &matched_routes {
+            let sender = match &route.destination {
+                AlertDestination::Log => self.log_sender.as_ref(),
+                AlertDestination::Webhook { .. } => self.webhook_sender.as_ref(),
+                AlertDestination::Email { .. } => self.email_sender.as_ref(),
+                AlertDestination::Otlp => self.otlp_sender.as_ref(),
+            };
+
+            if let Some(sender) = sender
+                && let Err(e) = sender.send(&alert, route).await
+            {
+                tracing::warn!(
+                    alert_id = %alert.id,
+                    route_name = %route.name,
+                    route_index = idx,
+                    error = %e,
+                    "{} alert send failed", alert.component
+                );
+            }
+        }
+    }
+
     /// Process a single DNS alert: convert to domain Alert, record metric,
     /// pass through router, and dispatch to matching senders.
     pub async fn process_dns_alert(&mut self, dns_alert: &DnsAlert) {
@@ -559,6 +616,9 @@ impl AlertPipeline {
                 .await;
             }
             AlertEvent::Dns(dns_alert) => self.process_dns_alert(&dns_alert).await,
+            AlertEvent::PacketSecurity(psa) => {
+                self.process_packet_security_alert(&psa).await;
+            }
         }
     }
 
