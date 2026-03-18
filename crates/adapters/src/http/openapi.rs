@@ -24,6 +24,7 @@ use super::mitre_handler;
 use super::nat_handler;
 use super::ops_handler;
 use super::ratelimit_handler;
+use super::response_handler;
 use super::routing_handler;
 use super::threatintel_handler;
 use super::zone_handler;
@@ -130,6 +131,10 @@ use super::zone_handler;
         mitre_handler::mitre_coverage,
         // Fingerprints
         fingerprint_handler::fingerprint_summary,
+        // Responses
+        response_handler::create_response_action,
+        response_handler::list_response_actions,
+        response_handler::revoke_response_action,
     ),
     components(schemas(
         // Error
@@ -226,6 +231,10 @@ use super::zone_handler;
         mitre_handler::TacticSummary,
         // Fingerprints
         fingerprint_handler::FingerprintSummaryResponse,
+        // Responses
+        response_handler::CreateResponseRequest,
+        response_handler::ResponseActionResponse,
+        response_handler::ResponseListResponse,
     )),
     tags(
         (name = "Health", description = "Liveness and readiness probes"),
@@ -252,6 +261,7 @@ use super::zone_handler;
         (name = "Zones", description = "Security zone configuration and policies"),
         (name = "MITRE ATT&CK", description = "MITRE ATT&CK coverage and technique mapping"),
         (name = "Fingerprints", description = "JA4+ TLS fingerprint cache and analysis"),
+        (name = "Responses", description = "Manual time-bounded response actions (block/throttle with TTL)"),
     )
 )]
 pub struct ApiDoc;

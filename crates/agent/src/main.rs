@@ -10,7 +10,7 @@ use api_client::ApiClient;
 use cli::{
     AlertsCommand, AuditCommand, Command, DdosCommand, DnsCommand, DomainsCommand,
     FingerprintsCommand, FirewallCommand, IpsCommand, L7Command, LbCommand, MitreCommand,
-    NatCommand, NptV6Command, QosCommand, RatelimitCommand, ThreatintelCommand,
+    NatCommand, NptV6Command, QosCommand, RatelimitCommand, ResponsesCommand, ThreatintelCommand,
 };
 
 #[tokio::main]
@@ -288,6 +288,27 @@ async fn main() -> Result<()> {
             let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
             match args.command {
                 MitreCommand::Coverage => commands::cmd_mitre_coverage(&client, output).await,
+            }
+        }
+
+        Some(Command::Responses(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                ResponsesCommand::List => commands::cmd_responses_list(&client, output).await,
+                ResponsesCommand::Create {
+                    action,
+                    target,
+                    ttl,
+                    rate_pps,
+                } => {
+                    commands::cmd_responses_create(
+                        &client, &action, &target, &ttl, rate_pps, output,
+                    )
+                    .await
+                }
+                ResponsesCommand::Revoke { id } => {
+                    commands::cmd_responses_revoke(&client, &id, output).await
+                }
             }
         }
 

@@ -632,6 +632,12 @@ pub async fn run(
         app_state = app_state.with_auth_provider(provider, config.auth.metrics_auth_required);
     }
 
+    // Wire response engine for manual TTL actions
+    let response_engine = Arc::new(RwLock::new(
+        domain::response::engine::ResponseEngine::new(86400), // max TTL: 24h
+    ));
+    app_state = app_state.with_response_engine(Arc::clone(&response_engine));
+
     // ── 5b. Wire DNS intelligence and domain reputation services ────
     let mut dns_blocklist_ref: Option<Arc<DnsBlocklistAppService>> = None;
     let mut dns_cache_svc_concrete: Option<Arc<DnsCacheAppService>> = None;

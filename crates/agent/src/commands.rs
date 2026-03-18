@@ -572,6 +572,69 @@ pub async fn cmd_mitre_coverage(client: &ApiClient, output: OutputFormat) -> Res
     Ok(())
 }
 
+// ── Responses ───────────────────────────────────────────────────────
+
+pub async fn cmd_responses_list(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.list_responses().await?;
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+    if resp.actions.is_empty() {
+        println!("No active response actions.");
+        return Ok(());
+    }
+    println!(
+        "{:<20}  {:<12}  {:<18}  {:>8}  {:>10}  {:<7}",
+        "ID", "ACTION", "TARGET", "TTL", "REMAINING", "REVOKED"
+    );
+    for a in &resp.actions {
+        println!(
+            "{:<20}  {:<12}  {:<18}  {:>7}s  {:>9}s  {:<7}",
+            a.id, a.action_type, a.target, a.ttl_secs, a.remaining_secs, a.revoked,
+        );
+    }
+    println!("\n{} active action(s).", resp.active_count);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn cmd_responses_create(
+    client: &ApiClient,
+    action: &str,
+    target: &str,
+    ttl: &str,
+    rate_pps: Option<u64>,
+    output: OutputFormat,
+) -> Result<()> {
+    let resp = client
+        .create_response(action, target, ttl, rate_pps)
+        .await?;
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+    } else {
+        println!(
+            "Response action created: {} → {} {} (TTL: {}s, rule: {})",
+            resp.id, resp.action_type, resp.target, resp.ttl_secs, resp.rule_id,
+        );
+    }
+    Ok(())
+}
+
+pub async fn cmd_responses_revoke(
+    client: &ApiClient,
+    id: &str,
+    output: OutputFormat,
+) -> Result<()> {
+    let resp = client.revoke_response(id).await?;
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+    } else {
+        println!("Response action {} revoked.", resp.id);
+    }
+    Ok(())
+}
+
 // ── Fingerprints ────────────────────────────────────────────────────
 
 pub async fn cmd_fingerprints_summary(client: &ApiClient, output: OutputFormat) -> Result<()> {

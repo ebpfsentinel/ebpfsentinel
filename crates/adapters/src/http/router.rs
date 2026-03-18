@@ -55,6 +55,9 @@ use super::qos_handler::{
 use super::ratelimit_handler::{
     create_ratelimit_rule, delete_ratelimit_rule, list_ratelimit_rules,
 };
+use super::response_handler::{
+    create_response_action, list_response_actions, revoke_response_action,
+};
 use super::routing_handler::{list_gateways, routing_status};
 use super::state::AppState;
 use super::threatintel_handler::{list_feeds, list_iocs, threatintel_status};
@@ -155,7 +158,8 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
             .route("/api/v1/qos/queues", get(list_qos_queues))
             .route("/api/v1/qos/classifiers", get(list_qos_classifiers))
             .route("/api/v1/mitre/coverage", get(mitre_coverage))
-            .route("/api/v1/fingerprints/summary", get(fingerprint_summary));
+            .route("/api/v1/fingerprints/summary", get(fingerprint_summary))
+            .route("/api/v1/responses", get(list_response_actions));
 
         // Write routes (rate limited: 60 req/min per IP)
         let write_routes = Router::new()
@@ -194,6 +198,8 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
                 "/api/v1/qos/classifiers/{id}",
                 delete(delete_qos_classifier),
             )
+            .route("/api/v1/responses/manual", post(create_response_action))
+            .route("/api/v1/responses/{id}", delete(revoke_response_action))
             .layer(GovernorLayer::new(governor_conf));
 
         let r = read_routes

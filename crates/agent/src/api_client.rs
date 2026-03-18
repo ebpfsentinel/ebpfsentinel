@@ -199,6 +199,36 @@ pub struct MitreTacticSummary {
     pub components: Vec<String>,
 }
 
+// ── Response Actions ────────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct ResponseActionResponse {
+    pub id: String,
+    pub action_type: String,
+    pub target: String,
+    pub ttl_secs: u64,
+    pub remaining_secs: u64,
+    pub rule_id: String,
+    #[serde(default)]
+    pub rate_pps: Option<u64>,
+    pub revoked: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ResponseListResponse {
+    pub actions: Vec<ResponseActionResponse>,
+    pub active_count: usize,
+}
+
+#[derive(Serialize)]
+struct CreateResponseBody {
+    action: String,
+    target: String,
+    ttl: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rate_pps: Option<u64>,
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct FingerprintSummaryResponse {
     pub cached_count: usize,
@@ -769,6 +799,48 @@ impl ApiClient {
     pub async fn mitre_coverage(&self) -> anyhow::Result<MitreCoverageResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/mitre/coverage")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── Responses ─────────────────────────────────────────────────────
+
+    pub async fn list_responses(&self) -> anyhow::Result<ResponseListResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/responses")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn create_response(
+        &self,
+        action: &str,
+        target: &str,
+        ttl: &str,
+        rate_pps: Option<u64>,
+    ) -> anyhow::Result<ResponseActionResponse> {
+        let body = CreateResponseBody {
+            action: action.to_string(),
+            target: target.to_string(),
+            ttl: ttl.to_string(),
+            rate_pps,
+        };
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/responses/manual")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn revoke_response(&self, id: &str) -> anyhow::Result<ResponseActionResponse> {
+        let resp = self
+            .request(reqwest::Method::DELETE, &format!("/api/v1/responses/{id}"))
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

@@ -121,6 +121,9 @@ pub enum Command {
 
     /// TLS fingerprints: JA4+ cache and analysis
     Fingerprints(DomainArgs<FingerprintsCommand>),
+
+    /// Manual response actions: block/throttle with TTL
+    Responses(DomainArgs<ResponsesCommand>),
 }
 
 /// Generic domain args: connection + subcommand.
@@ -268,6 +271,34 @@ pub enum MitreCommand {
 pub enum FingerprintsCommand {
     /// Show JA4+ fingerprint cache summary
     Summary,
+}
+
+// ── Responses ───────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum ResponsesCommand {
+    /// List active response actions
+    List,
+    /// Create a time-bounded block or throttle
+    Create {
+        /// Action type: `block_ip` or `throttle_ip`
+        #[arg(long)]
+        action: String,
+        /// Target IP or CIDR
+        #[arg(long)]
+        target: String,
+        /// TTL duration (e.g. 1h, 30m, 3600s)
+        #[arg(long)]
+        ttl: String,
+        /// Rate limit in pps (for `throttle_ip`)
+        #[arg(long)]
+        rate_pps: Option<u64>,
+    },
+    /// Revoke a response action early
+    Revoke {
+        /// Response action ID
+        id: String,
+    },
 }
 
 // ── Audit ───────────────────────────────────────────────────────────────

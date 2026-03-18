@@ -62,6 +62,7 @@ pub struct AppState {
     pub reload_trigger: mpsc::Sender<()>,
     pub ebpf_program_status: Arc<RwLock<HashMap<String, bool>>>,
     pub fingerprint_cache: Option<Arc<std::sync::RwLock<domain::l7::ja4::FingerprintCache>>>,
+    pub response_engine: Option<Arc<RwLock<domain::response::engine::ResponseEngine>>>,
 }
 
 impl AppState {
@@ -110,7 +111,18 @@ impl AppState {
             reload_trigger,
             ebpf_program_status,
             fingerprint_cache: None,
+            response_engine: None,
         }
+    }
+
+    /// Attach a response engine for manual TTL actions.
+    #[must_use]
+    pub fn with_response_engine(
+        mut self,
+        engine: Arc<RwLock<domain::response::engine::ResponseEngine>>,
+    ) -> Self {
+        self.response_engine = Some(engine);
+        self
     }
 
     /// Attach a JA4 fingerprint cache.
