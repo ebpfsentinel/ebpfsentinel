@@ -187,9 +187,7 @@ impl AlertRouteConfig {
             "webhook" => AlertDestination::Webhook {
                 url: self.webhook_url.clone().unwrap_or_default(),
             },
-            "otlp" => AlertDestination::Otlp {
-                endpoint: String::new(),
-            },
+            "otlp" => AlertDestination::Otlp,
             _ => {
                 return Err(ConfigError::InvalidValue {
                     field: "destination".to_string(),
@@ -213,9 +211,7 @@ fn parse_alert_destination(s: &str) -> Result<AlertDestination, ()> {
         "log" => Ok(AlertDestination::Log),
         "email" => Ok(AlertDestination::Email { to: String::new() }),
         "webhook" => Ok(AlertDestination::Webhook { url: String::new() }),
-        "otlp" => Ok(AlertDestination::Otlp {
-            endpoint: String::new(),
-        }),
+        "otlp" => Ok(AlertDestination::Otlp),
         _ => Err(()),
     }
 }
@@ -442,7 +438,7 @@ routes:
             webhook_headers: None,
         };
         let domain = route.to_domain_route().unwrap();
-        assert!(matches!(domain.destination, AlertDestination::Otlp { .. }));
+        assert!(matches!(domain.destination, AlertDestination::Otlp));
     }
 
     #[test]

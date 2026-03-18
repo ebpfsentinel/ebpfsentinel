@@ -163,7 +163,7 @@ impl AlertPipeline {
                 AlertDestination::Log => self.log_sender.as_ref(),
                 AlertDestination::Webhook { .. } => self.webhook_sender.as_ref(),
                 AlertDestination::Email { .. } => self.email_sender.as_ref(),
-                AlertDestination::Otlp { .. } => self.otlp_sender.as_ref(),
+                AlertDestination::Otlp => self.otlp_sender.as_ref(),
             };
 
             if let Some(sender) = sender {
@@ -271,7 +271,7 @@ impl AlertPipeline {
                 AlertDestination::Log => self.log_sender.as_ref(),
                 AlertDestination::Webhook { .. } => self.webhook_sender.as_ref(),
                 AlertDestination::Email { .. } => self.email_sender.as_ref(),
-                AlertDestination::Otlp { .. } => self.otlp_sender.as_ref(),
+                AlertDestination::Otlp => self.otlp_sender.as_ref(),
             };
 
             if let Some(sender) = sender {
@@ -379,7 +379,7 @@ impl AlertPipeline {
                 AlertDestination::Log => self.log_sender.as_ref(),
                 AlertDestination::Webhook { .. } => self.webhook_sender.as_ref(),
                 AlertDestination::Email { .. } => self.email_sender.as_ref(),
-                AlertDestination::Otlp { .. } => self.otlp_sender.as_ref(),
+                AlertDestination::Otlp => self.otlp_sender.as_ref(),
             };
 
             if let Some(sender) = sender {

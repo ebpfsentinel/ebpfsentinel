@@ -295,7 +295,7 @@ impl Alert {
 pub enum AlertDestination {
     Email { to: String },
     Webhook { url: String },
-    Otlp { endpoint: String },
+    Otlp,
     Log,
 }
 
