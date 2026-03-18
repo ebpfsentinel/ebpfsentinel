@@ -938,6 +938,27 @@ pub struct TlsConfig {
     /// Path to the PEM-encoded private key.
     #[serde(default)]
     pub key_path: String,
+
+    /// Post-quantum key exchange mode: `prefer` (default), `require`, or `disable`.
+    ///
+    /// - `prefer`: offer `X25519MLKEM768` first, fall back to classical.
+    /// - `require`: reject clients without PQ hybrid key exchange.
+    /// - `disable`: classical-only (`X25519`, `SECP256R1`).
+    #[serde(default)]
+    pub pq_mode: PqMode,
+}
+
+/// Post-quantum TLS key exchange policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PqMode {
+    /// Prefer PQ hybrid, fall back to classical (default).
+    #[default]
+    Prefer,
+    /// Require PQ hybrid — reject clients without support.
+    Require,
+    /// Classical only — no PQ key exchange offered.
+    Disable,
 }
 
 fn default_log_level() -> LogLevel {
@@ -2709,6 +2730,49 @@ agent:
         assert!(config.agent.tls.enabled);
         assert_eq!(config.agent.tls.cert_path, "/etc/tls/cert.pem");
         assert_eq!(config.agent.tls.key_path, "/etc/tls/key.pem");
+        assert_eq!(config.agent.tls.pq_mode, PqMode::Prefer);
+    }
+
+    #[test]
+    fn tls_pq_mode_require() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+  tls:
+    enabled: true
+    cert_path: /etc/tls/cert.pem
+    key_path: /etc/tls/key.pem
+    pq_mode: require
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.agent.tls.pq_mode, PqMode::Require);
+    }
+
+    #[test]
+    fn tls_pq_mode_disable() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+  tls:
+    enabled: true
+    cert_path: /etc/tls/cert.pem
+    key_path: /etc/tls/key.pem
+    pq_mode: disable
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.agent.tls.pq_mode, PqMode::Disable);
+    }
+
+    #[test]
+    fn tls_pq_mode_defaults_to_prefer() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+  tls:
+    enabled: false
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.agent.tls.pq_mode, PqMode::Prefer);
     }
 
     #[test]

@@ -732,10 +732,12 @@ pub async fn run(
         let rustls_cfg = load_rustls_config(
             Path::new(&config.agent.tls.cert_path),
             Path::new(&config.agent.tls.key_path),
+            config.agent.tls.pq_mode,
         )?;
         info!(
             cert_path = %config.agent.tls.cert_path,
             key_path = %config.agent.tls.key_path,
+            pq_mode = ?config.agent.tls.pq_mode,
             "TLS enabled for HTTP and gRPC servers"
         );
         Some(rustls_cfg)
