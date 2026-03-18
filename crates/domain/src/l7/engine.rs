@@ -429,6 +429,7 @@ mod tests {
         // TLS parsed should match
         let tls_parsed = ParsedProtocol::Tls(TlsClientHello {
             sni: Some("evil.com".to_string()),
+            ..Default::default()
         });
         assert!(engine.evaluate(&make_header(), &tls_parsed).is_some());
     }

@@ -113,6 +113,7 @@ fn bench_evaluate(c: &mut Criterion) {
         let header = make_header();
         let tls_parsed = ParsedProtocol::Tls(TlsClientHello {
             sni: Some("safe.example.com".to_string()),
+            ..Default::default()
         });
 
         group.bench_function("tls_100_rules_miss", |b| {

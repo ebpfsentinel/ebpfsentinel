@@ -34,10 +34,27 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
 }
 
-/// Parsed TLS `ClientHello` with optional SNI extension.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Parsed TLS `ClientHello` with SNI and JA4+ fingerprint fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TlsClientHello {
+    /// Server Name Indication (extension 0x0000).
     pub sni: Option<String>,
+    /// TLS record-layer version (e.g. 0x0303 = TLS 1.2).
+    pub record_version: u16,
+    /// `ClientHello` handshake version (e.g. 0x0303 = TLS 1.2).
+    pub handshake_version: u16,
+    /// Cipher suite values in the order sent by the client.
+    pub cipher_suites: Vec<u16>,
+    /// Extension type IDs in the order they appear.
+    pub extension_types: Vec<u16>,
+    /// Supported groups / named curves (extension 0x000A).
+    pub supported_groups: Vec<u16>,
+    /// Signature algorithms (extension 0x000D).
+    pub signature_algorithms: Vec<u16>,
+    /// ALPN protocol names (extension 0x0010).
+    pub alpn_protocols: Vec<String>,
+    /// Supported TLS versions (extension 0x002B). Highest = negotiated for TLS 1.3+.
+    pub supported_versions: Vec<u16>,
 }
 
 /// Parsed gRPC request path (extracted from HTTP/2 framing).
@@ -563,15 +580,20 @@ mod tests {
 
         let parsed = ParsedProtocol::Tls(TlsClientHello {
             sni: Some("malware.example.com".to_string()),
+            ..Default::default()
         });
         assert!(rule.matches_l7(&parsed));
 
         let parsed_other = ParsedProtocol::Tls(TlsClientHello {
             sni: Some("safe.example.com".to_string()),
+            ..Default::default()
         });
         assert!(!rule.matches_l7(&parsed_other));
 
-        let parsed_none = ParsedProtocol::Tls(TlsClientHello { sni: None });
+        let parsed_none = ParsedProtocol::Tls(TlsClientHello {
+            sni: None,
+            ..Default::default()
+        });
         assert!(!rule.matches_l7(&parsed_none));
     }
 
@@ -595,10 +617,14 @@ mod tests {
 
         let parsed = ParsedProtocol::Tls(TlsClientHello {
             sni: Some("anything.com".to_string()),
+            ..Default::default()
         });
         assert!(rule.matches_l7(&parsed));
 
-        let parsed_none = ParsedProtocol::Tls(TlsClientHello { sni: None });
+        let parsed_none = ParsedProtocol::Tls(TlsClientHello {
+            sni: None,
+            ..Default::default()
+        });
         assert!(rule.matches_l7(&parsed_none));
     }
 
@@ -734,6 +760,7 @@ mod tests {
 
         let parsed = ParsedProtocol::Tls(TlsClientHello {
             sni: Some("example.com".to_string()),
+            ..Default::default()
         });
         assert!(!rule.matches_l7(&parsed));
     }
