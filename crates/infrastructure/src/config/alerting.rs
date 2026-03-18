@@ -431,6 +431,56 @@ routes:
     }
 
     #[test]
+    fn to_domain_otlp_route() {
+        let route = AlertRouteConfig {
+            name: "otlp-export".to_string(),
+            destination: "otlp".to_string(),
+            min_severity: "low".to_string(),
+            event_types: None,
+            webhook_url: None,
+            email_to: None,
+            webhook_headers: None,
+        };
+        let domain = route.to_domain_route().unwrap();
+        assert!(matches!(domain.destination, AlertDestination::Otlp { .. }));
+    }
+
+    #[test]
+    fn otlp_config_deserialization() {
+        let yaml = r"
+enabled: true
+otlp:
+  endpoint: http://otel-collector:4317
+  protocol: grpc
+  timeout_ms: 3000
+routes:
+  - name: otlp-all
+    destination: otlp
+    min_severity: low
+";
+        let config: AlertingConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let otlp = config.otlp.unwrap();
+        assert_eq!(otlp.endpoint, "http://otel-collector:4317");
+        assert_eq!(otlp.protocol, "grpc");
+        assert_eq!(otlp.timeout_ms, 3000);
+        assert_eq!(config.routes[0].destination, "otlp");
+    }
+
+    #[test]
+    fn otlp_config_defaults() {
+        let yaml = r"
+enabled: true
+otlp:
+  endpoint: http://localhost:4317
+routes: []
+";
+        let config: AlertingConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let otlp = config.otlp.unwrap();
+        assert_eq!(otlp.protocol, "grpc");
+        assert_eq!(otlp.timeout_ms, 5000);
+    }
+
+    #[test]
     fn to_domain_invalid_destination_is_error() {
         let route = AlertRouteConfig {
             name: "bad".to_string(),

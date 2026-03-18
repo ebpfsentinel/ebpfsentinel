@@ -1313,7 +1313,8 @@ pub async fn run(
     )
     .with_ips_service(Arc::clone(&ips_svc))
     .with_ddos_service(Arc::clone(&ddos_svc))
-    .with_dlp_service(Arc::clone(&dlp_svc));
+    .with_dlp_service(Arc::clone(&dlp_svc))
+    .with_doh_resolvers(&config.dns.doh_resolvers);
     // Wire DNS services into the dispatcher for DNS response processing
     let dispatcher = if let Some(ref svc) = dns_cache_svc_concrete {
         dispatcher.with_dns_cache_svc(Arc::clone(svc))

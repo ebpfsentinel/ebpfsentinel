@@ -22,6 +22,10 @@ pub struct DnsConfig {
 
     #[serde(default)]
     pub reputation: ReputationSectionConfig,
+
+    /// Additional `DoH` resolver domains for encrypted DNS detection (Story 29.8).
+    #[serde(default)]
+    pub doh_resolvers: Vec<String>,
 }
 
 impl Default for DnsConfig {
@@ -31,6 +35,7 @@ impl Default for DnsConfig {
             cache: DnsCacheConfig::default(),
             blocklist: DnsBlocklistSectionConfig::default(),
             reputation: ReputationSectionConfig::default(),
+            doh_resolvers: Vec::new(),
         }
     }
 }

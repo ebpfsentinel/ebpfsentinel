@@ -104,7 +104,7 @@ impl EventDispatcher {
                 10_000,
                 std::time::Duration::from_secs(300),
             ))),
-            encrypted_dns_detector: EncryptedDnsDetector::new(),
+            encrypted_dns_detector: EncryptedDnsDetector::default(),
         }
     }
 
@@ -124,6 +124,13 @@ impl EventDispatcher {
     #[must_use]
     pub fn with_ips_service(mut self, svc: Arc<RwLock<IpsAppService>>) -> Self {
         self.ips_service = Some(svc);
+        self
+    }
+
+    /// Add custom `DoH` resolver domains for encrypted DNS detection.
+    #[must_use]
+    pub fn with_doh_resolvers(mut self, resolvers: &[String]) -> Self {
+        self.encrypted_dns_detector.add_custom_resolvers(resolvers);
         self
     }
 
@@ -495,20 +502,7 @@ impl EventDispatcher {
             }
 
             // Detect encrypted DNS (DoH/DoT)
-            if let Some(detection) = self.encrypted_dns_detector.detect(
-                tls_hello.sni.as_deref(),
-                header.dst_port,
-                header.src_addr,
-                header.dst_addr,
-            ) {
-                tracing::info!(
-                    protocol = ?detection.protocol,
-                    resolver = %detection.resolver,
-                    src_ip = %header.src_ip(),
-                    dst_port = header.dst_port,
-                    "encrypted DNS detected"
-                );
-            }
+            self.check_encrypted_dns(tls_hello, &header);
         }
 
         // Evaluate L7 rules against parsed content
@@ -575,6 +569,33 @@ impl EventDispatcher {
                 "L7 event — no rule matched"
             );
             self.metrics.record_packet("l7", protocol_label);
+        }
+    }
+
+    fn check_encrypted_dns(
+        &self,
+        tls_hello: &domain::l7::entity::TlsClientHello,
+        header: &PacketEvent,
+    ) {
+        if let Some(detection) = self.encrypted_dns_detector.detect(
+            tls_hello.sni.as_deref(),
+            header.dst_port,
+            header.src_addr,
+            header.dst_addr,
+        ) {
+            let proto_label = match detection.protocol {
+                domain::dns::encrypted_dns::EncryptedDnsProtocol::Doh => "doh",
+                domain::dns::encrypted_dns::EncryptedDnsProtocol::Dot => "dot",
+            };
+            self.metrics
+                .record_encrypted_dns(proto_label, &detection.resolver);
+            tracing::info!(
+                protocol = proto_label,
+                resolver = %detection.resolver,
+                src_ip = %header.src_ip(),
+                dst_port = header.dst_port,
+                "encrypted DNS detected"
+            );
         }
     }
 

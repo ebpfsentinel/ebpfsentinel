@@ -79,6 +79,9 @@ pub trait DnsMetrics: Send + Sync {
 
     /// Set the number of IPs currently injected from DNS blocklist.
     fn set_dns_injected_ips(&self, _count: u64) {}
+
+    /// Record an encrypted DNS detection (`DoH` or `DoT`).
+    fn record_encrypted_dns(&self, _protocol: &str, _resolver: &str) {}
 }
 
 // ── Domain reputation metrics ──────────────────────────────────────
