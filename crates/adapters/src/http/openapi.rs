@@ -19,6 +19,7 @@ use super::ips_handler;
 use super::l7_handler;
 use super::lb_handler;
 use super::metrics_handler;
+use super::mitre_handler;
 use super::nat_handler;
 use super::ops_handler;
 use super::ratelimit_handler;
@@ -124,6 +125,8 @@ use super::zone_handler;
         zone_handler::zone_status,
         zone_handler::list_zones,
         zone_handler::list_zone_policies,
+        // MITRE ATT&CK
+        mitre_handler::mitre_coverage,
     ),
     components(schemas(
         // Error
@@ -214,6 +217,10 @@ use super::zone_handler;
         zone_handler::ZoneStatusResponse,
         zone_handler::ZoneResponse,
         zone_handler::ZonePolicyResponse,
+        // MITRE ATT&CK
+        mitre_handler::MitreCoverageResponse,
+        mitre_handler::TechniqueEntry,
+        mitre_handler::TacticSummary,
     )),
     tags(
         (name = "Health", description = "Liveness and readiness probes"),
@@ -238,6 +245,7 @@ use super::zone_handler;
         (name = "Routing", description = "Policy routing and gateway management"),
         (name = "Load Balancer", description = "L4 load balancer service management"),
         (name = "Zones", description = "Security zone configuration and policies"),
+        (name = "MITRE ATT&CK", description = "MITRE ATT&CK coverage and technique mapping"),
     )
 )]
 pub struct ApiDoc;
