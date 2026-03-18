@@ -68,6 +68,190 @@ pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
     }
 }
 
+/// A single entry in the coverage matrix.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoverageEntry {
+    pub component: String,
+    pub technique_id: String,
+    pub technique_name: String,
+    pub tactic: String,
+    /// Human-readable description of what triggers this mapping.
+    pub description: String,
+}
+
+/// Per-tactic coverage summary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TacticCoverage {
+    pub tactic: String,
+    pub covered_techniques: usize,
+    pub components: Vec<String>,
+}
+
+/// Full MITRE ATT&CK coverage report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoverageReport {
+    pub attack_version: String,
+    pub total_techniques: usize,
+    pub techniques: Vec<CoverageEntry>,
+    pub by_tactic: Vec<TacticCoverage>,
+}
+
+/// Static coverage table — all technique mappings the agent can produce.
+fn all_coverage_entries() -> Vec<CoverageEntry> {
+    vec![
+        entry(
+            "ids",
+            "T1071",
+            "Application Layer Protocol",
+            "command-and-control",
+            "IDS signature match",
+        ),
+        entry(
+            "threatintel",
+            "T1071.001",
+            "Web Protocols",
+            "command-and-control",
+            "IOC hit: malware or C2",
+        ),
+        entry(
+            "threatintel",
+            "T1595",
+            "Active Scanning",
+            "reconnaissance",
+            "IOC hit: scanner",
+        ),
+        entry(
+            "threatintel",
+            "T1566",
+            "Phishing",
+            "initial-access",
+            "IOC hit: spam source",
+        ),
+        entry(
+            "threatintel",
+            "T1568",
+            "Dynamic Resolution",
+            "command-and-control",
+            "IOC hit: other threat type",
+        ),
+        entry(
+            "dlp",
+            "T1041",
+            "Exfiltration Over C2 Channel",
+            "exfiltration",
+            "DLP match: PCI or generic",
+        ),
+        entry(
+            "dlp",
+            "T1048",
+            "Exfiltration Over Alternative Protocol",
+            "exfiltration",
+            "DLP match: PII",
+        ),
+        entry(
+            "dlp",
+            "T1048.003",
+            "Exfiltration Over Unencrypted Non-C2 Protocol",
+            "exfiltration",
+            "DLP match: credentials",
+        ),
+        entry(
+            "ddos",
+            "T1499.001",
+            "OS Exhaustion Flood",
+            "impact",
+            "SYN flood detected",
+        ),
+        entry(
+            "ddos",
+            "T1498.002",
+            "Reflection Amplification",
+            "impact",
+            "UDP amplification detected",
+        ),
+        entry(
+            "ddos",
+            "T1498",
+            "Network Denial of Service",
+            "impact",
+            "ICMP flood detected",
+        ),
+        entry(
+            "ddos",
+            "T1499",
+            "Endpoint Denial of Service",
+            "impact",
+            "RST/FIN/ACK flood detected",
+        ),
+        entry(
+            "ddos",
+            "T1498.001",
+            "Direct Network Flood",
+            "impact",
+            "Volumetric attack detected",
+        ),
+    ]
+}
+
+/// Build a coverage report filtered to the given active components.
+pub fn coverage_report(active_components: &[&str]) -> CoverageReport {
+    let all = all_coverage_entries();
+    let techniques: Vec<CoverageEntry> = all
+        .into_iter()
+        .filter(|e| {
+            active_components
+                .iter()
+                .any(|c| e.component.eq_ignore_ascii_case(c))
+        })
+        .collect();
+
+    // Group by tactic
+    let mut tactic_map: std::collections::BTreeMap<String, (usize, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for t in &techniques {
+        let entry = tactic_map
+            .entry(t.tactic.clone())
+            .or_insert_with(|| (0, Vec::new()));
+        entry.0 += 1;
+        if !entry.1.contains(&t.component) {
+            entry.1.push(t.component.clone());
+        }
+    }
+
+    let by_tactic: Vec<TacticCoverage> = tactic_map
+        .into_iter()
+        .map(|(tactic, (count, components))| TacticCoverage {
+            tactic,
+            covered_techniques: count,
+            components,
+        })
+        .collect();
+
+    let total = techniques.len();
+    CoverageReport {
+        attack_version: MITRE_ATTACK_VERSION.to_string(),
+        total_techniques: total,
+        techniques,
+        by_tactic,
+    }
+}
+
+fn entry(
+    component: &'static str,
+    id: &'static str,
+    name: &'static str,
+    tactic: &'static str,
+    description: &'static str,
+) -> CoverageEntry {
+    CoverageEntry {
+        component: component.to_string(),
+        technique_id: id.to_string(),
+        technique_name: name.to_string(),
+        tactic: tactic.to_string(),
+        description: description.to_string(),
+    }
+}
+
 fn info(id: &'static str, name: &'static str, tactic: &'static str) -> MitreAttackInfo {
     MitreAttackInfo {
         technique_id: id.to_string(),
@@ -188,5 +372,48 @@ mod tests {
     fn ddos_volumetric() {
         let info = lookup(&MitreContext::Ddos(DdosAttackType::Volumetric));
         assert_eq!(info.technique_id, "T1498.001");
+    }
+
+    #[test]
+    fn coverage_report_all_components() {
+        let report = coverage_report(&["ids", "threatintel", "dlp", "ddos"]);
+        assert_eq!(report.attack_version, "v18");
+        assert_eq!(report.total_techniques, 13);
+        assert!(!report.by_tactic.is_empty());
+    }
+
+    #[test]
+    fn coverage_report_single_component() {
+        let report = coverage_report(&["dlp"]);
+        assert_eq!(report.total_techniques, 3);
+        assert!(report.techniques.iter().all(|t| t.component == "dlp"));
+        assert_eq!(report.by_tactic.len(), 1);
+        assert_eq!(report.by_tactic[0].tactic, "exfiltration");
+    }
+
+    #[test]
+    fn coverage_report_no_components() {
+        let report = coverage_report(&[]);
+        assert_eq!(report.total_techniques, 0);
+        assert!(report.techniques.is_empty());
+        assert!(report.by_tactic.is_empty());
+    }
+
+    #[test]
+    fn coverage_report_tactic_grouping() {
+        let report = coverage_report(&["ids", "threatintel", "dlp", "ddos"]);
+        let impact = report
+            .by_tactic
+            .iter()
+            .find(|t| t.tactic == "impact")
+            .unwrap();
+        assert_eq!(impact.covered_techniques, 5);
+        assert_eq!(impact.components, vec!["ddos"]);
+    }
+
+    #[test]
+    fn coverage_report_case_insensitive() {
+        let report = coverage_report(&["IDS", "DLP"]);
+        assert_eq!(report.total_techniques, 4); // 1 IDS + 3 DLP
     }
 }

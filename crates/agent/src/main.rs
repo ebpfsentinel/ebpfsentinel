@@ -9,8 +9,8 @@ use anyhow::Result;
 use api_client::ApiClient;
 use cli::{
     AlertsCommand, AuditCommand, Command, DdosCommand, DnsCommand, DomainsCommand, FirewallCommand,
-    IpsCommand, L7Command, LbCommand, NatCommand, NptV6Command, QosCommand, RatelimitCommand,
-    ThreatintelCommand,
+    IpsCommand, L7Command, LbCommand, MitreCommand, NatCommand, NptV6Command, QosCommand,
+    RatelimitCommand, ThreatintelCommand,
 };
 
 #[tokio::main]
@@ -281,6 +281,13 @@ async fn main() -> Result<()> {
                         commands::cmd_nat_nptv6_delete(&client, &id).await
                     }
                 },
+            }
+        }
+
+        Some(Command::Mitre(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                MitreCommand::Coverage => commands::cmd_mitre_coverage(&client, output).await,
             }
         }
 

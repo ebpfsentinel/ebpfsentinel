@@ -16,6 +16,7 @@ pub mod l7_handler;
 pub mod lb_handler;
 pub mod metrics_handler;
 pub mod middleware;
+pub mod mitre_handler;
 pub mod nat_handler;
 pub mod openapi;
 pub mod ops_handler;

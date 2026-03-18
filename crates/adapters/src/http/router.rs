@@ -40,6 +40,7 @@ use super::lb_handler::{
 };
 use super::metrics_handler::metrics;
 use super::middleware::auth::jwt_auth_middleware;
+use super::mitre_handler::mitre_coverage;
 use super::nat_handler::{
     create_nptv6_rule, delete_nptv6_rule, list_nat_rules, list_nptv6_rules, nat_status,
 };
@@ -151,7 +152,8 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
             .route("/api/v1/qos/status", get(get_qos_status))
             .route("/api/v1/qos/pipes", get(list_qos_pipes))
             .route("/api/v1/qos/queues", get(list_qos_queues))
-            .route("/api/v1/qos/classifiers", get(list_qos_classifiers));
+            .route("/api/v1/qos/classifiers", get(list_qos_classifiers))
+            .route("/api/v1/mitre/coverage", get(mitre_coverage));
 
         // Write routes (rate limited: 60 req/min per IP)
         let write_routes = Router::new()

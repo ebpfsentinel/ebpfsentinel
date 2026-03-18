@@ -174,6 +174,30 @@ pub struct FalsePositiveResponse {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct MitreCoverageResponse {
+    pub attack_version: String,
+    pub total_techniques: usize,
+    pub techniques: Vec<MitreTechniqueEntry>,
+    pub by_tactic: Vec<MitreTacticSummary>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct MitreTechniqueEntry {
+    pub component: String,
+    pub technique_id: String,
+    pub technique_name: String,
+    pub tactic: String,
+    pub description: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct MitreTacticSummary {
+    pub tactic: String,
+    pub covered_techniques: usize,
+    pub components: Vec<String>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct AuditLogResponse {
     pub entries: Vec<AuditEntryResponse>,
     pub total: u64,
@@ -725,6 +749,17 @@ impl ApiClient {
                 reqwest::Method::POST,
                 &format!("/api/v1/alerts/{id}/false-positive"),
             )
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── MITRE ATT&CK ──────────────────────────────────────────────────
+
+    pub async fn mitre_coverage(&self) -> anyhow::Result<MitreCoverageResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/mitre/coverage")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

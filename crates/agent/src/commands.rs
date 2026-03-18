@@ -534,6 +534,44 @@ pub async fn cmd_alerts_mark_fp(client: &ApiClient, id: &str, output: OutputForm
 
 // ── Audit ───────────────────────────────────────────────────────────────
 
+// ── MITRE ATT&CK ────────────────────────────────────────────────────
+
+pub async fn cmd_mitre_coverage(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.mitre_coverage().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("MITRE ATT&CK Coverage ({})", resp.attack_version);
+    println!("Total techniques covered: {}\n", resp.total_techniques);
+
+    println!(
+        "{:<12}  {:<12}  {:<55}  {:<22}  DESCRIPTION",
+        "COMPONENT", "TECHNIQUE", "NAME", "TACTIC"
+    );
+
+    for t in &resp.techniques {
+        println!(
+            "{:<12}  {:<12}  {:<55}  {:<22}  {}",
+            t.component, t.technique_id, t.technique_name, t.tactic, t.description,
+        );
+    }
+
+    println!("\n── Coverage by tactic ──");
+    for t in &resp.by_tactic {
+        println!(
+            "  {:<22}  {} technique(s)  [{}]",
+            t.tactic,
+            t.covered_techniques,
+            t.components.join(", "),
+        );
+    }
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_audit_logs(
     client: &ApiClient,

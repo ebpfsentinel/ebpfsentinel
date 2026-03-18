@@ -115,6 +115,9 @@ pub enum Command {
 
     /// NAT: status, rules, `NPTv6` prefix translation
     Nat(DomainArgs<NatCommand>),
+
+    /// MITRE ATT&CK: coverage matrix
+    Mitre(DomainArgs<MitreCommand>),
 }
 
 /// Generic domain args: connection + subcommand.
@@ -246,6 +249,14 @@ pub enum AlertsCommand {
         /// Alert ID to mark
         id: String,
     },
+}
+
+// ── MITRE ATT&CK ────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum MitreCommand {
+    /// Show MITRE ATT&CK coverage matrix for active features
+    Coverage,
 }
 
 // ── Audit ───────────────────────────────────────────────────────────────
@@ -804,6 +815,18 @@ mod tests {
             },
             _ => panic!("expected Alerts command"),
         }
+    }
+
+    #[test]
+    fn cli_mitre_coverage() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "mitre", "coverage"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Mitre(DomainArgs {
+                command: MitreCommand::Coverage,
+                ..
+            }))
+        ));
     }
 
     #[test]
