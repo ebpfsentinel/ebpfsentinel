@@ -2,10 +2,14 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use domain::dns::entity::ReputationConfig;
+use domain::common::entity::Severity;
+use domain::dns::entity::{DnsAlert, DnsAlertReason, ReputationConfig};
 use ports::secondary::dns_cache_port::DnsCachePort;
 use ports::secondary::ips_blacklist_port::IpsBlacklistPort;
 use ports::secondary::metrics_port::MetricsPort;
+use tokio::sync::mpsc;
+
+use crate::alert_event::AlertEvent;
 
 /// Reputation enforcement service: auto-blocks domains via the IPS
 /// blacklist when their reputation score exceeds a threshold.
@@ -20,6 +24,7 @@ pub struct ReputationEnforcementService {
     blocked_domains: Mutex<HashSet<String>>,
     threshold: f64,
     ttl: Duration,
+    alert_tx: Option<mpsc::Sender<AlertEvent>>,
 }
 
 impl ReputationEnforcementService {
@@ -36,7 +41,15 @@ impl ReputationEnforcementService {
             blocked_domains: Mutex::new(HashSet::new()),
             threshold: config.auto_block_threshold,
             ttl: Duration::from_secs(config.auto_block_ttl_secs),
+            alert_tx: None,
         }
+    }
+
+    /// Set the alert channel for emitting DNS reputation alerts.
+    #[must_use]
+    pub fn with_alert_tx(mut self, tx: mpsc::Sender<AlertEvent>) -> Self {
+        self.alert_tx = Some(tx);
+        self
     }
 
     /// Called after a domain's reputation score changes.
@@ -48,7 +61,7 @@ impl ReputationEnforcementService {
         let domain_lower = domain.to_lowercase();
 
         if score >= self.threshold {
-            self.block_domain(&domain_lower);
+            self.block_domain(&domain_lower, score);
         } else {
             self.unblock_domain(&domain_lower);
         }
@@ -62,7 +75,7 @@ impl ReputationEnforcementService {
             .len()
     }
 
-    fn block_domain(&self, domain: &str) {
+    fn block_domain(&self, domain: &str, score: f64) {
         let entry = self.dns_cache.lookup_domain(domain);
         let ips = entry.map(|e| e.ips).unwrap_or_default();
 
@@ -104,6 +117,23 @@ impl ReputationEnforcementService {
                     ip_count = ips.len(),
                     "reputation auto-block: injected IPs into IPS blacklist"
                 );
+
+                // Emit DNS reputation alert
+                if let Some(ref tx) = self.alert_tx {
+                    let now_ns = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                        * 1_000_000_000;
+                    let dns_alert = DnsAlert {
+                        domain: domain.to_string(),
+                        resolved_ips: ips.clone(),
+                        reason: DnsAlertReason::Reputation { score },
+                        severity: Severity::High,
+                        timestamp_ns: now_ns,
+                    };
+                    let _ = tx.try_send(AlertEvent::Dns(dns_alert));
+                }
             }
         }
     }

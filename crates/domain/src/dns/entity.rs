@@ -117,6 +117,29 @@ pub enum DnsPacket {
     Response(DnsResponse),
 }
 
+// ── DNS alert entities ────────────────────────────────────────────
+
+/// A DNS security alert emitted by blocklist, reputation, or encrypted DNS detection.
+#[derive(Debug, Clone)]
+pub struct DnsAlert {
+    pub domain: String,
+    pub resolved_ips: Vec<IpAddr>,
+    pub reason: DnsAlertReason,
+    pub severity: crate::common::entity::Severity,
+    pub timestamp_ns: u64,
+}
+
+/// Reason a DNS alert was triggered.
+#[derive(Debug, Clone)]
+pub enum DnsAlertReason {
+    /// Domain matched a blocklist pattern.
+    Blocklist { pattern: String },
+    /// Domain exceeded the reputation score threshold.
+    Reputation { score: f64 },
+    /// Encrypted DNS (DoH/DoT) traffic detected.
+    EncryptedDns { protocol: String, resolver: String },
+}
+
 // ── Domain blocklist entities ──────────────────────────────────────
 
 /// A domain pattern for blocklist matching.

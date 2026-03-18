@@ -14,12 +14,21 @@ pub struct MitreAttackInfo {
     pub tactic: String,
 }
 
+/// Sub-reason for DNS MITRE mapping.
+pub enum DnsMitreReason {
+    /// Blocklist match or encrypted DNS detection.
+    BlocklistOrEncrypted,
+    /// Reputation-based auto-block.
+    Reputation,
+}
+
 /// Context passed to [`lookup`] to select the correct ATT&CK technique.
 pub enum MitreContext<'a> {
     Ids,
     ThreatIntel(ThreatType),
     Dlp(&'a str),
     Ddos(DdosAttackType),
+    Dns(DnsMitreReason),
 }
 
 /// Return the ATT&CK technique for the given alert context.
@@ -52,6 +61,13 @@ pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
             ),
             // "pci" and all other data types default to T1041
             _ => info("T1041", "Exfiltration Over C2 Channel", "exfiltration"),
+        },
+
+        MitreContext::Dns(reason) => match reason {
+            DnsMitreReason::BlocklistOrEncrypted => info("T1071.004", "DNS", "command-and-control"),
+            DnsMitreReason::Reputation => {
+                info("T1568", "Dynamic Resolution", "command-and-control")
+            }
         },
 
         MitreContext::Ddos(attack_type) => match attack_type {
@@ -98,6 +114,13 @@ pub struct CoverageReport {
 
 /// Static coverage table — all technique mappings the agent can produce.
 fn all_coverage_entries() -> Vec<CoverageEntry> {
+    let mut entries = Vec::with_capacity(15);
+    entries.extend(detection_coverage_entries());
+    entries.extend(ddos_coverage_entries());
+    entries
+}
+
+fn detection_coverage_entries() -> Vec<CoverageEntry> {
     vec![
         entry(
             "ids",
@@ -155,6 +178,25 @@ fn all_coverage_entries() -> Vec<CoverageEntry> {
             "exfiltration",
             "DLP match: credentials",
         ),
+        entry(
+            "dns",
+            "T1071.004",
+            "DNS",
+            "command-and-control",
+            "DNS blocklist match or encrypted DNS detection",
+        ),
+        entry(
+            "dns",
+            "T1568",
+            "Dynamic Resolution",
+            "command-and-control",
+            "DNS reputation auto-block",
+        ),
+    ]
+}
+
+fn ddos_coverage_entries() -> Vec<CoverageEntry> {
+    vec![
         entry(
             "ddos",
             "T1499.001",
@@ -337,6 +379,36 @@ mod tests {
     }
 
     #[test]
+    fn dns_blocklist_maps_to_t1071_004() {
+        let info = lookup(&MitreContext::Dns(DnsMitreReason::BlocklistOrEncrypted));
+        assert_eq!(info.technique_id, "T1071.004");
+        assert_eq!(info.technique_name, "DNS");
+        assert_eq!(info.tactic, "command-and-control");
+    }
+
+    #[test]
+    fn dns_reputation_maps_to_t1568() {
+        let info = lookup(&MitreContext::Dns(DnsMitreReason::Reputation));
+        assert_eq!(info.technique_id, "T1568");
+        assert_eq!(info.technique_name, "Dynamic Resolution");
+        assert_eq!(info.tactic, "command-and-control");
+    }
+
+    #[test]
+    fn coverage_report_dns_component() {
+        let report = coverage_report(&["dns"]);
+        assert_eq!(report.total_techniques, 2);
+        assert!(report.techniques.iter().all(|t| t.component == "dns"));
+        let technique_ids: Vec<&str> = report
+            .techniques
+            .iter()
+            .map(|t| t.technique_id.as_str())
+            .collect();
+        assert!(technique_ids.contains(&"T1071.004"));
+        assert!(technique_ids.contains(&"T1568"));
+    }
+
+    #[test]
     fn ddos_syn_flood() {
         let info = lookup(&MitreContext::Ddos(DdosAttackType::SynFlood));
         assert_eq!(info.technique_id, "T1499.001");
@@ -376,9 +448,9 @@ mod tests {
 
     #[test]
     fn coverage_report_all_components() {
-        let report = coverage_report(&["ids", "threatintel", "dlp", "ddos"]);
+        let report = coverage_report(&["ids", "threatintel", "dlp", "ddos", "dns"]);
         assert_eq!(report.attack_version, "v18");
-        assert_eq!(report.total_techniques, 13);
+        assert_eq!(report.total_techniques, 15);
         assert!(!report.by_tactic.is_empty());
     }
 
@@ -401,7 +473,7 @@ mod tests {
 
     #[test]
     fn coverage_report_tactic_grouping() {
-        let report = coverage_report(&["ids", "threatintel", "dlp", "ddos"]);
+        let report = coverage_report(&["ids", "threatintel", "dlp", "ddos", "dns"]);
         let impact = report
             .by_tactic
             .iter()

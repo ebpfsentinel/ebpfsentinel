@@ -1,11 +1,12 @@
 use domain::ddos::entity::DdosAttack;
 use domain::dlp::entity::DlpAlert;
+use domain::dns::entity::DnsAlert;
 use domain::ids::entity::IdsAlert;
 
 /// Unified alert event type for the alert pipeline channel.
 ///
 /// Replaces the previous `mpsc::Sender<IdsAlert>` with a polymorphic
-/// envelope so that DLP and `DDoS` alerts also flow through the same channel.
+/// envelope so that DLP, `DDoS`, and DNS alerts also flow through the same channel.
 pub enum AlertEvent {
     Ids(IdsAlert),
     Dlp(DlpAlert),
@@ -18,4 +19,5 @@ pub enum AlertEvent {
         dst_port: u16,
         protocol: u8,
     },
+    Dns(DnsAlert),
 }

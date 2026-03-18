@@ -5,6 +5,7 @@ use domain::alert::entity::{Alert, AlertDestination};
 use domain::audit::entity::{AuditAction, AuditComponent};
 use domain::ddos::entity::DdosAttack;
 use domain::dlp::entity::DlpAlert;
+use domain::dns::entity::{DnsAlert, DnsAlertReason};
 use domain::ids::entity::IdsAlert;
 use ports::secondary::alert_enrichment_port::AlertEnrichmentPort;
 use ports::secondary::alert_sender::AlertSender;
@@ -408,6 +409,103 @@ impl AlertPipeline {
         }
     }
 
+    /// Process a single DNS alert: convert to domain Alert, record metric,
+    /// pass through router, and dispatch to matching senders.
+    pub async fn process_dns_alert(&mut self, dns_alert: &DnsAlert) {
+        let description = match &dns_alert.reason {
+            DnsAlertReason::Blocklist { pattern } => {
+                format!(
+                    "DNS blocklist match: domain {} matched pattern {}",
+                    dns_alert.domain, pattern,
+                )
+            }
+            DnsAlertReason::Reputation { score } => {
+                format!(
+                    "DNS reputation auto-block: domain {} score {score:.2}",
+                    dns_alert.domain,
+                )
+            }
+            DnsAlertReason::EncryptedDns { protocol, resolver } => {
+                format!("Encrypted DNS detected: {protocol} to resolver {resolver}",)
+            }
+        };
+        let mut alert = Alert::from_dns_alert(dns_alert, &description);
+
+        // Enrich with domain context (best-effort)
+        if let Some(ref enricher) = self.enricher {
+            enricher.enrich_alert(&mut alert);
+        }
+
+        // Record alert metrics
+        let severity_str = severity_label(alert.severity);
+        let technique_id = alert
+            .mitre_attack
+            .as_ref()
+            .map_or("", |m| m.technique_id.as_str());
+        self.metrics
+            .record_alert(&alert.component, severity_str, technique_id);
+        self.metrics
+            .record_alert_by_rule(&alert.component, &alert.rule_id.0);
+
+        // Persist alert to store (best-effort)
+        if let Some(ref store) = self.alert_store
+            && let Err(e) = store.store_alert(&alert)
+        {
+            tracing::warn!(alert_id = %alert.id, error = %e, "failed to store DNS alert");
+        }
+
+        // Broadcast to gRPC stream subscribers (best-effort, non-blocking)
+        if let Some(ref tx) = self.stream_tx {
+            let _ = tx.send(alert.clone());
+        }
+
+        // Pass through router (dedup, throttle, route matching)
+        let matched_routes = self.router.process_alert(&alert);
+
+        if matched_routes.is_empty() {
+            self.metrics.record_alert_dropped("no_route");
+            tracing::debug!(
+                rule_id = %alert.rule_id,
+                severity = severity_str,
+                "DNS alert dropped: no matching route or dedup/throttle"
+            );
+            return;
+        }
+
+        // Dispatch to each matched route's sender
+        for (idx, route) in &matched_routes {
+            let sender = match &route.destination {
+                AlertDestination::Log => self.log_sender.as_ref(),
+                AlertDestination::Webhook { .. } => self.webhook_sender.as_ref(),
+                AlertDestination::Email { .. } => self.email_sender.as_ref(),
+                AlertDestination::Otlp => self.otlp_sender.as_ref(),
+            };
+
+            if let Some(sender) = sender {
+                if let Err(e) = sender.send(&alert, route).await {
+                    tracing::warn!(
+                        alert_id = %alert.id,
+                        route_name = %route.name,
+                        route_index = idx,
+                        error = %e,
+                        "DNS alert send failed"
+                    );
+                }
+            } else {
+                tracing::info!(
+                    alert_id = %alert.id,
+                    rule_id = %alert.rule_id,
+                    severity = severity_str,
+                    route_name = %route.name,
+                    route_index = idx,
+                    domain = %dns_alert.domain,
+                    action = %alert.action,
+                    "DNS alert routed (no sender configured)"
+                );
+            }
+        }
+    }
+
     /// Async run loop: consumes alert events from the channel,
     /// dispatches each one to the appropriate handler, and drains on cancellation.
     pub async fn run(
@@ -460,6 +558,7 @@ impl AlertPipeline {
                 )
                 .await;
             }
+            AlertEvent::Dns(dns_alert) => self.process_dns_alert(&dns_alert).await,
         }
     }
 

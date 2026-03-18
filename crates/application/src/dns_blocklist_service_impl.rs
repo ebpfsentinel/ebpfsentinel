@@ -1,15 +1,20 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use domain::common::entity::Severity;
 use domain::dns::blocklist::DomainBlocklistEngine;
 use domain::dns::entity::{
-    BlocklistAction, DomainBlocklistConfig, DomainBlocklistStats, InjectTarget, ReputationFactor,
+    BlocklistAction, DnsAlert, DnsAlertReason, DomainBlocklistConfig, DomainBlocklistStats,
+    InjectTarget, ReputationFactor,
 };
 use ports::secondary::domain_reputation_port::DomainReputationPort;
 use ports::secondary::ebpf_map_write_port::{EbpfMapWritePort, IocMetadata};
 use ports::secondary::geoip_port::GeoIpPort;
 use ports::secondary::ips_blacklist_port::IpsBlacklistPort;
 use ports::secondary::metrics_port::MetricsPort;
+use tokio::sync::mpsc;
+
+use crate::alert_event::AlertEvent;
 
 /// Application-level DNS blocklist service.
 ///
@@ -24,6 +29,7 @@ pub struct DnsBlocklistAppService {
     high_risk_countries: RwLock<Vec<String>>,
     metrics: Arc<dyn MetricsPort>,
     cleanup_interval: Duration,
+    alert_tx: Option<mpsc::Sender<AlertEvent>>,
 }
 
 impl DnsBlocklistAppService {
@@ -41,6 +47,7 @@ impl DnsBlocklistAppService {
             reputation_port: RwLock::new(None),
             high_risk_countries: RwLock::new(Vec::new()),
             metrics,
+            alert_tx: None,
         }
     }
 
@@ -59,6 +66,13 @@ impl DnsBlocklistAppService {
     #[must_use]
     pub fn with_ips_port(mut self, port: Arc<dyn IpsBlacklistPort>) -> Self {
         self.ips_port = Some(port);
+        self
+    }
+
+    /// Set the alert channel for emitting DNS blocklist alerts.
+    #[must_use]
+    pub fn with_alert_tx(mut self, tx: mpsc::Sender<AlertEvent>) -> Self {
+        self.alert_tx = Some(tx);
         self
     }
 
@@ -110,10 +124,12 @@ impl DnsBlocklistAppService {
         let delta = engine.on_blocked_resolution(domain, resolved_ips, ttl_secs, now_ns);
         let action = bm.action;
         let inject_target = bm.inject_target;
+        let pattern_str = bm.pattern.to_string();
         let injected_count = engine.injected_ip_count();
         drop(engine);
 
         self.metrics.increment_dns_blocked_domains();
+        self.emit_blocklist_alert(domain, resolved_ips, action, &pattern_str, now_ns);
 
         if inject_target == InjectTarget::Ips {
             // Route to IPS blacklist
@@ -203,6 +219,34 @@ impl DnsBlocklistAppService {
 
         // GeoIP reputation: check resolved IPs against high-risk countries
         self.check_geoip_reputation(domain, resolved_ips);
+    }
+
+    /// Emit a DNS blocklist alert to the alert pipeline (if configured).
+    fn emit_blocklist_alert(
+        &self,
+        domain: &str,
+        resolved_ips: &[std::net::IpAddr],
+        action: BlocklistAction,
+        pattern: &str,
+        now_ns: u64,
+    ) {
+        if let Some(ref tx) = self.alert_tx {
+            let severity = match action {
+                BlocklistAction::Block => Severity::High,
+                BlocklistAction::Alert => Severity::Medium,
+                BlocklistAction::Log => Severity::Low,
+            };
+            let dns_alert = DnsAlert {
+                domain: domain.to_string(),
+                resolved_ips: resolved_ips.to_vec(),
+                reason: DnsAlertReason::Blocklist {
+                    pattern: pattern.to_string(),
+                },
+                severity,
+                timestamp_ns: now_ns,
+            };
+            let _ = tx.try_send(AlertEvent::Dns(dns_alert));
+        }
     }
 
     /// Check resolved IPs for high-risk country codes and inject reputation factors.

@@ -4,6 +4,7 @@ use crate::alert::mitre::{self, MitreAttackInfo, MitreContext};
 use crate::common::entity::{DomainMode, RuleId, Severity};
 use crate::ddos::entity::DdosAttack;
 use crate::dlp::entity::DlpAlert;
+use crate::dns::entity::{DnsAlert, DnsAlertReason};
 use crate::ids::entity::IdsAlert;
 use crate::threatintel::entity::ThreatIntelAlert;
 
@@ -274,6 +275,61 @@ impl Alert {
         }
     }
 
+    /// Create a domain alert from a DNS security event (blocklist, reputation, encrypted DNS).
+    pub fn from_dns_alert(dns: &DnsAlert, description: &str) -> Self {
+        let mitre_context = match &dns.reason {
+            DnsAlertReason::Blocklist { .. } | DnsAlertReason::EncryptedDns { .. } => {
+                MitreContext::Dns(mitre::DnsMitreReason::BlocklistOrEncrypted)
+            }
+            DnsAlertReason::Reputation { .. } => {
+                MitreContext::Dns(mitre::DnsMitreReason::Reputation)
+            }
+        };
+        let rule_id = match &dns.reason {
+            DnsAlertReason::Blocklist { pattern } => RuleId(format!("dns-blocklist:{pattern}")),
+            DnsAlertReason::Reputation { score } => RuleId(format!("dns-reputation:{score:.2}")),
+            DnsAlertReason::EncryptedDns { protocol, resolver } => {
+                RuleId(format!("dns-encrypted:{protocol}:{resolver}"))
+            }
+        };
+        Self {
+            id: Self::generate_id(dns.timestamp_ns, &rule_id),
+            timestamp_ns: dns.timestamp_ns,
+            component: "dns".to_string(),
+            severity: dns.severity,
+            rule_id,
+            action: DomainMode::Alert,
+            src_addr: [0; 4],
+            dst_addr: [0; 4],
+            src_port: 0,
+            dst_port: 0,
+            protocol: 0,
+            is_ipv6: false,
+            message: description.to_string(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: None,
+            direction: None,
+            matched_domain: Some(dns.domain.clone()),
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: Some(mitre::lookup(&mitre_context)),
+            ja4_fingerprint: None,
+        }
+    }
+
     /// Returns the source IPv4 address (first element of `src_addr`).
     pub fn src_ip(&self) -> u32 {
         self.src_addr[0]
@@ -476,5 +532,77 @@ mod tests {
         ti.mode = DomainMode::Block;
         let alert = Alert::from_threatintel_alert(&ti, "Blocked");
         assert_eq!(alert.action, DomainMode::Block);
+    }
+
+    // ── DNS Alert tests ──────────────────────────────────────────────
+
+    fn sample_dns_blocklist_alert() -> crate::dns::entity::DnsAlert {
+        crate::dns::entity::DnsAlert {
+            domain: "evil.com".to_string(),
+            resolved_ips: vec!["1.2.3.4".parse().unwrap()],
+            reason: DnsAlertReason::Blocklist {
+                pattern: "evil.com".to_string(),
+            },
+            severity: Severity::High,
+            timestamp_ns: 4_000_000_000,
+        }
+    }
+
+    #[test]
+    fn alert_from_dns_alert_blocklist() {
+        let dns = sample_dns_blocklist_alert();
+        let alert = Alert::from_dns_alert(&dns, "DNS blocklist match: evil.com");
+
+        assert_eq!(alert.component, "dns");
+        assert_eq!(alert.severity, Severity::High);
+        assert_eq!(alert.action, DomainMode::Alert);
+        assert_eq!(alert.matched_domain, Some("evil.com".to_string()));
+        assert_eq!(alert.timestamp_ns, 4_000_000_000);
+        assert!(alert.rule_id.0.contains("dns-blocklist:evil.com"));
+        assert!(alert.mitre_attack.is_some());
+        assert_eq!(
+            alert.mitre_attack.as_ref().unwrap().technique_id,
+            "T1071.004"
+        );
+    }
+
+    #[test]
+    fn alert_from_dns_alert_reputation() {
+        let dns = crate::dns::entity::DnsAlert {
+            domain: "suspicious.com".to_string(),
+            resolved_ips: vec![],
+            reason: DnsAlertReason::Reputation { score: 0.92 },
+            severity: Severity::High,
+            timestamp_ns: 5_000_000_000,
+        };
+        let alert = Alert::from_dns_alert(&dns, "reputation auto-block");
+
+        assert_eq!(alert.component, "dns");
+        assert_eq!(alert.matched_domain, Some("suspicious.com".to_string()));
+        assert!(alert.rule_id.0.contains("dns-reputation:0.92"));
+        assert_eq!(alert.mitre_attack.as_ref().unwrap().technique_id, "T1568");
+    }
+
+    #[test]
+    fn alert_from_dns_alert_encrypted_dns() {
+        let dns = crate::dns::entity::DnsAlert {
+            domain: "dns.google".to_string(),
+            resolved_ips: vec![],
+            reason: DnsAlertReason::EncryptedDns {
+                protocol: "doh".to_string(),
+                resolver: "dns.google".to_string(),
+            },
+            severity: Severity::Medium,
+            timestamp_ns: 6_000_000_000,
+        };
+        let alert = Alert::from_dns_alert(&dns, "encrypted DNS detected");
+
+        assert_eq!(alert.component, "dns");
+        assert_eq!(alert.severity, Severity::Medium);
+        assert!(alert.rule_id.0.contains("dns-encrypted:doh:dns.google"));
+        assert_eq!(
+            alert.mitre_attack.as_ref().unwrap().technique_id,
+            "T1071.004"
+        );
     }
 }

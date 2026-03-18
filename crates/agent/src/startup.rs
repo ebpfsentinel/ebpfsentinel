@@ -644,6 +644,10 @@ pub async fn run(
     ));
     app_state = app_state.with_response_engine(Arc::clone(&response_engine));
 
+    // Create alert channel early so DNS services can emit alerts
+    let (alert_tx, alert_rx) =
+        mpsc::channel::<application::alert_event::AlertEvent>(ALERT_CHANNEL_CAPACITY);
+
     // ── 5b. Wire DNS intelligence and domain reputation services ────
     let mut dns_blocklist_ref: Option<Arc<DnsBlocklistAppService>> = None;
     let mut dns_cache_svc_concrete: Option<Arc<DnsCacheAppService>> = None;
@@ -664,7 +668,8 @@ pub async fn run(
                 blocklist_config,
                 None, // eBPF map writer — wired after tc-threatintel loads
                 Arc::clone(&metrics) as Arc<dyn MetricsPort>,
-            );
+            )
+            .with_alert_tx(alert_tx.clone());
             // Wire IPS blacklist adapter when inject_target is "ips"
             let dns_blocklist_svc = if config.dns.blocklist.inject_target == "ips" {
                 let adapter = Arc::new(IpsBlacklistAdapter::new(Arc::clone(&ips_svc)));
@@ -698,7 +703,8 @@ pub async fn run(
                             ips_adapter
                                 as Arc<dyn ports::secondary::ips_blacklist_port::IpsBlacklistPort>,
                             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
-                        ),
+                        )
+                        .with_alert_tx(alert_tx.clone()),
                     );
                     rep_svc = rep_svc.with_enforcement(enforcement);
                     tracing::info!(
@@ -838,10 +844,8 @@ pub async fn run(
         }
     });
 
-    // ── 9. Create event + alert channels ──────────────────────────────
+    // ── 9. Create event channel ─────────────────────────────────────
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
-    let (alert_tx, alert_rx) =
-        mpsc::channel::<application::alert_event::AlertEvent>(ALERT_CHANNEL_CAPACITY);
 
     // ── 10. Load eBPF programs (each with graceful degradation) ────
     let ebpf_dir = resolve_ebpf_program_dir(&config);

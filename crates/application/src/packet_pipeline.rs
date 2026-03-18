@@ -596,6 +596,19 @@ impl EventDispatcher {
                 dst_port = header.dst_port,
                 "encrypted DNS detected"
             );
+
+            // Emit DNS alert for encrypted DNS detection
+            let dns_alert = domain::dns::entity::DnsAlert {
+                domain: detection.resolver.clone(),
+                resolved_ips: Vec::new(),
+                reason: domain::dns::entity::DnsAlertReason::EncryptedDns {
+                    protocol: proto_label.to_string(),
+                    resolver: detection.resolver,
+                },
+                severity: domain::common::entity::Severity::Medium,
+                timestamp_ns: header.timestamp_ns,
+            };
+            let _ = self.alert_tx.try_send(AlertEvent::Dns(dns_alert));
         }
     }
 
