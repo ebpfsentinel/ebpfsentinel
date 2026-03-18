@@ -75,19 +75,19 @@ dns:
       - name: steven-black-hosts
         url: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
         format: hosts
-        refresh_interval_secs: 86400     # Daily
+        refresh_interval_secs: 86400 # Daily
 
       # Abuse.ch URLhaus domain blocklist
       - name: urlhaus-domains
         url: "https://urlhaus.abuse.ch/downloads/hostfile/"
         format: hosts
-        refresh_interval_secs: 3600      # Hourly
+        refresh_interval_secs: 3600 # Hourly
 
       # Custom internal blocklist
       - name: internal-blocklist
         url: "https://security.internal.example.com/blocked-domains.txt"
         format: plaintext
-        refresh_interval_secs: 300       # Every 5 minutes
+        refresh_interval_secs: 300 # Every 5 minutes
 
   # ── Domain reputation scoring ──────────────────────────────────────
   # Behavioral scoring engine that tracks domain reputation over time.
@@ -110,7 +110,7 @@ dns:
 
     # TTL (seconds) for auto-blocked domains. After this period,
     # the domain is unblocked and must re-accumulate to be blocked again.
-    auto_block_ttl_secs: 7200          # 2 hours
+    auto_block_ttl_secs: 7200 # 2 hours
 
     # Score decay half-life in hours. Older signals lose weight over time,
     # allowing domains to recover reputation. Must be >= 1.
@@ -122,3 +122,11 @@ dns:
     # HighRiskCountry reputation factor (weight 0.4), accelerating
     # their path toward the auto-block threshold.
     high_risk_countries: [RU, CN, KP, IR]
+
+  # ── Encrypted DNS detection (DoH/DoT) ────────────────────────────
+  # Additional DoH resolver domains for encrypted DNS detection.
+  # Built-in resolvers are always active (dns.google, cloudflare-dns.com, etc.).
+  # Add your internal/corporate DoH resolvers here.
+  # doh_resolvers:
+  #   - internal-doh.corp.local
+  #   - doh.custom-resolver.example.com

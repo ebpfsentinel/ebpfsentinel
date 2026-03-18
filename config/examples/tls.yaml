@@ -34,3 +34,14 @@ agent:
     enabled: true
     cert_path: /etc/ebpfsentinel/server.crt
     key_path: /etc/ebpfsentinel/server.key
+
+    # ── Post-Quantum Key Exchange ──────────────────────────────────
+    #
+    # Controls X25519MLKEM768 hybrid key exchange for TLS 1.3.
+    # Applies to both inbound (HTTP/gRPC) and outbound (webhooks, CTI, SMTP) TLS.
+    #
+    # Values:
+    #   prefer  — Offer PQ hybrid first, fall back to classical (default)
+    #   require — Reject clients without PQ support (gov/high-security)
+    #   disable — Classical only (X25519, secp256r1)
+    pq_mode: prefer
