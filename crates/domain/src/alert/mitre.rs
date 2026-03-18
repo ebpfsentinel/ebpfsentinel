@@ -57,6 +57,17 @@ pub enum MlAnomalyType {
     ConnectionCountSpike,
 }
 
+/// Sub-reason for AI security MITRE mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiSecurityMitreReason {
+    /// Shadow AI usage detected (data exfiltration to cloud AI services).
+    ShadowAi,
+    /// AI-aware DLP match (sensitive data sent to AI provider).
+    AiDlp,
+    /// Large payload exfiltration to AI provider.
+    DataExfiltration,
+}
+
 /// Context passed to [`lookup`] to select the correct ATT&CK technique.
 pub enum MitreContext<'a> {
     Ids {
@@ -71,6 +82,8 @@ pub enum MitreContext<'a> {
     Dns(DnsMitreReason),
     PacketSecurity(PacketSecurityMitreContext),
     MlAnomaly(MlAnomalyType),
+    AiSecurity(AiSecurityMitreReason),
+    EncryptedDnsPolicy,
 }
 
 /// Return the ATT&CK technique for the given alert context.
@@ -111,6 +124,24 @@ pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
                 info("T1568", "Dynamic Resolution", "command-and-control")
             }
         },
+
+        MitreContext::AiSecurity(reason) => match reason {
+            AiSecurityMitreReason::ShadowAi => {
+                info("T1567.002", "Exfiltration to Cloud Storage", "exfiltration")
+            }
+            AiSecurityMitreReason::AiDlp => info(
+                "T1048",
+                "Exfiltration Over Alternative Protocol",
+                "exfiltration",
+            ),
+            AiSecurityMitreReason::DataExfiltration => info(
+                "T1048.001",
+                "Exfiltration Over Symmetric Encrypted Non-C2 Protocol",
+                "exfiltration",
+            ),
+        },
+
+        MitreContext::EncryptedDnsPolicy => info("T1071.004", "DNS", "command-and-control"),
 
         MitreContext::Ddos(attack_type) => match attack_type {
             DdosAttackType::SynFlood => info("T1499.001", "OS Exhaustion Flood", "impact"),
@@ -277,14 +308,48 @@ pub fn feature_index_to_ml_anomaly_type(feature_idx: usize) -> MlAnomalyType {
 }
 
 fn all_coverage_entries() -> Vec<CoverageEntry> {
-    let mut entries = Vec::with_capacity(43);
+    let mut entries = Vec::with_capacity(47);
     entries.extend(firewall_ips_coverage_entries());
     entries.extend(ratelimit_coverage_entries());
     entries.extend(l7_coverage_entries());
     entries.extend(detection_coverage_entries());
     entries.extend(ddos_coverage_entries());
     entries.extend(ml_anomaly_coverage_entries());
+    entries.extend(ai_security_coverage_entries());
     entries
+}
+
+fn ai_security_coverage_entries() -> Vec<CoverageEntry> {
+    vec![
+        entry(
+            "ai-security",
+            "T1567.002",
+            "Exfiltration to Cloud Storage",
+            "exfiltration",
+            "Shadow AI: unauthorized AI provider usage",
+        ),
+        entry(
+            "ai-security",
+            "T1048",
+            "Exfiltration Over Alternative Protocol",
+            "exfiltration",
+            "AI-aware DLP: sensitive data sent to AI provider",
+        ),
+        entry(
+            "ai-security",
+            "T1048.001",
+            "Exfiltration Over Symmetric Encrypted Non-C2 Protocol",
+            "exfiltration",
+            "AI exfiltration: large payload to AI provider",
+        ),
+        entry(
+            "ai-security",
+            "T1071.004",
+            "DNS",
+            "command-and-control",
+            "Encrypted DNS policy violation",
+        ),
+    ]
 }
 
 fn ml_anomaly_coverage_entries() -> Vec<CoverageEntry> {
@@ -1115,9 +1180,10 @@ mod tests {
             "ratelimit",
             "l7",
             "ips",
+            "ai-security",
         ]);
         assert_eq!(report.attack_version, "v18");
-        assert_eq!(report.total_techniques, 43);
+        assert_eq!(report.total_techniques, 47);
         assert!(!report.by_tactic.is_empty());
     }
 
@@ -1294,5 +1360,50 @@ mod tests {
         assert!(technique_ids.contains(&"T1570"));
         assert!(technique_ids.contains(&"T1074"));
         assert!(technique_ids.contains(&"T1110"));
+    }
+
+    #[test]
+    fn ai_security_shadow_ai_maps_to_t1567_002() {
+        let info = lookup(&MitreContext::AiSecurity(AiSecurityMitreReason::ShadowAi));
+        assert_eq!(info.technique_id, "T1567.002");
+        assert_eq!(info.tactic, "exfiltration");
+    }
+
+    #[test]
+    fn ai_security_ai_dlp_maps_to_t1048() {
+        let info = lookup(&MitreContext::AiSecurity(AiSecurityMitreReason::AiDlp));
+        assert_eq!(info.technique_id, "T1048");
+        assert_eq!(info.tactic, "exfiltration");
+    }
+
+    #[test]
+    fn ai_security_exfiltration_maps_to_t1048_001() {
+        let info = lookup(&MitreContext::AiSecurity(
+            AiSecurityMitreReason::DataExfiltration,
+        ));
+        assert_eq!(info.technique_id, "T1048.001");
+        assert_eq!(info.tactic, "exfiltration");
+    }
+
+    #[test]
+    fn encrypted_dns_policy_maps_to_t1071_004() {
+        let info = lookup(&MitreContext::EncryptedDnsPolicy);
+        assert_eq!(info.technique_id, "T1071.004");
+        assert_eq!(info.tactic, "command-and-control");
+    }
+
+    #[test]
+    fn ai_security_coverage_report() {
+        let report = coverage_report(&["ai-security"]);
+        assert_eq!(report.total_techniques, 4);
+        let technique_ids: Vec<&str> = report
+            .techniques
+            .iter()
+            .map(|t| t.technique_id.as_str())
+            .collect();
+        assert!(technique_ids.contains(&"T1567.002"));
+        assert!(technique_ids.contains(&"T1048"));
+        assert!(technique_ids.contains(&"T1048.001"));
+        assert!(technique_ids.contains(&"T1071.004"));
     }
 }

@@ -133,6 +133,18 @@ pub struct Alert {
     /// ML anomaly: detection engine (baseline, ewma, fused).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ml_engine: Option<String>,
+    /// AI security: provider name (e.g. "Anthropic").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_provider: Option<String>,
+    /// AI security: SNI from TLS `ClientHello`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_sni: Option<String>,
+    /// AI security: bytes sent to AI provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_bytes_sent: Option<u64>,
+    /// AI security: exfiltration detection type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_exfil_type: Option<String>,
 }
 
 impl Alert {
@@ -178,6 +190,10 @@ impl Alert {
             ml_anomaly_score: None,
             ml_top_feature: None,
             ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
         }
     }
 
@@ -223,6 +239,10 @@ impl Alert {
             ml_anomaly_score: None,
             ml_top_feature: None,
             ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
         }
     }
 
@@ -269,6 +289,10 @@ impl Alert {
             ml_anomaly_score: None,
             ml_top_feature: None,
             ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
         }
     }
 
@@ -327,6 +351,10 @@ impl Alert {
             ml_anomaly_score: None,
             ml_top_feature: None,
             ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
         }
     }
 
@@ -385,6 +413,10 @@ impl Alert {
             ml_anomaly_score: None,
             ml_top_feature: None,
             ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
         }
     }
 
@@ -450,6 +482,10 @@ impl Alert {
             ml_anomaly_score: None,
             ml_top_feature: None,
             ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
         }
     }
 
@@ -507,6 +543,80 @@ impl Alert {
             ml_anomaly_score: Some(score),
             ml_top_feature: Some(top_feature_name.to_string()),
             ml_engine: Some(engine.to_string()),
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+        }
+    }
+
+    /// Create a domain alert from an AI security detection.
+    ///
+    /// Used by the enterprise AI security service for shadow AI, AI DLP,
+    /// exfiltration, and encrypted DNS policy violations.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_ai_security(
+        component: &str,
+        rule_id: &str,
+        severity: Severity,
+        action: DomainMode,
+        src_addr: [u32; 4],
+        dst_addr: [u32; 4],
+        src_port: u16,
+        dst_port: u16,
+        protocol: u8,
+        is_ipv6: bool,
+        message: &str,
+        timestamp_ns: u64,
+        mitre_context: &MitreContext<'_>,
+        ai_provider: Option<&str>,
+        ai_sni: Option<&str>,
+        ai_bytes_sent: Option<u64>,
+        ai_exfil_type: Option<&str>,
+    ) -> Self {
+        let rid = RuleId(rule_id.to_string());
+        Self {
+            id: Self::generate_id(timestamp_ns, &rid),
+            timestamp_ns,
+            component: component.to_string(),
+            severity,
+            rule_id: rid,
+            action,
+            src_addr,
+            dst_addr,
+            src_port,
+            dst_port,
+            protocol,
+            is_ipv6,
+            message: message.to_string(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: None,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: Some(mitre::lookup(mitre_context)),
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: ai_provider.map(str::to_string),
+            ai_sni: ai_sni.map(str::to_string),
+            ai_bytes_sent,
+            ai_exfil_type: ai_exfil_type.map(str::to_string),
         }
     }
 

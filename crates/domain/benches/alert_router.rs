@@ -47,6 +47,10 @@ fn make_alert(id: usize, severity: Severity) -> Alert {
         ml_anomaly_score: None,
         ml_top_feature: None,
         ml_engine: None,
+        ai_provider: None,
+        ai_sni: None,
+        ai_bytes_sent: None,
+        ai_exfil_type: None,
     }
 }
 
