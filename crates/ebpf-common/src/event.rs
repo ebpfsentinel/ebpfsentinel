@@ -21,6 +21,8 @@ pub const SMALL_L7_PAYLOAD: usize = 128;
 pub const FLAG_IPV6: u8 = 0x01;
 /// Flag bit: packet had an 802.1Q VLAN tag.
 pub const FLAG_VLAN: u8 = 0x02;
+/// Flag bit: DNS event captured over TCP (payload has 2-byte length prefix).
+pub const FLAG_TCP: u8 = 0x04;
 
 /// XDP-to-TC metadata passed via `bpf_xdp_adjust_meta`.
 ///
@@ -54,6 +56,12 @@ pub const fn is_ipv6(flags: u8) -> bool {
 #[inline]
 pub const fn has_vlan(flags: u8) -> bool {
     flags & FLAG_VLAN != 0
+}
+
+/// Returns `true` if the DNS event was captured over TCP.
+#[inline]
+pub const fn is_tcp(flags: u8) -> bool {
+    flags & FLAG_TCP != 0
 }
 
 /// Packet event emitted from eBPF programs to userspace via RingBuf.
@@ -166,6 +174,7 @@ mod tests {
     fn test_flag_constants() {
         assert_eq!(FLAG_IPV6, 0x01);
         assert_eq!(FLAG_VLAN, 0x02);
+        assert_eq!(FLAG_TCP, 0x04);
     }
 
     #[test]
@@ -176,6 +185,10 @@ mod tests {
         assert!(!has_vlan(0));
         assert!(has_vlan(FLAG_VLAN));
         assert!(has_vlan(FLAG_IPV6 | FLAG_VLAN));
+        assert!(!is_tcp(0));
+        assert!(is_tcp(FLAG_TCP));
+        assert!(is_tcp(FLAG_TCP | FLAG_IPV6));
+        assert!(!is_tcp(FLAG_IPV6 | FLAG_VLAN));
     }
 
     #[test]

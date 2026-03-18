@@ -690,17 +690,20 @@ impl EventDispatcher {
     }
 
     fn process_dns_event(&self, header: DnsEvent, payload: &[u8]) {
+        let is_tcp = ebpf_common::event::is_tcp(header.flags);
         let direction = if header.direction == ebpf_common::dns::DNS_DIRECTION_RESPONSE {
             "response"
         } else {
             "query"
         };
+        let transport = if is_tcp { "tcp" } else { "udp" };
 
         self.metrics.record_packet("dns", direction);
 
         tracing::debug!(
             dns_payload_len = header.dns_payload_len,
             direction,
+            transport,
             "DNS event received"
         );
 

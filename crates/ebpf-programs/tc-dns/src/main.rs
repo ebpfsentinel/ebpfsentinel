@@ -11,8 +11,8 @@ use aya_ebpf::{
 use aya_ebpf_bindings::helpers::bpf_skb_load_bytes;
 use core::mem;
 use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_UDP,
-    VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
+    PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
 };
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::increment_metric;
@@ -21,10 +21,11 @@ use ebpf_common::dns::{
     DNS_METRIC_ERRORS, DNS_METRIC_EVENTS_DROPPED, DNS_METRIC_EVENTS_EMITTED,
     DNS_METRIC_PACKETS_INSPECTED, DNS_METRIC_TOTAL_SEEN,
 };
-use ebpf_common::event::{FLAG_IPV6, FLAG_VLAN};
+use ebpf_common::event::{FLAG_IPV6, FLAG_TCP, FLAG_VLAN};
 use network_types::{
     eth::EthHdr,
     ip::{IpProto, Ipv4Hdr},
+    tcp::TcpHdr,
     udp::UdpHdr,
 };
 
@@ -47,7 +48,7 @@ static DNS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
 
 // ── Entry point ─────────────────────────────────────────────────────
 
-/// TC classifier entry point. Captures DNS packets (UDP port 53) and
+/// TC classifier entry point. Captures DNS packets (UDP/TCP port 53) and
 /// emits them to the DNS_EVENTS RingBuf. Always returns TC_ACT_OK
 /// (passthrough — observation only, no blocking).
 #[classifier]
@@ -100,7 +101,7 @@ fn try_tc_dns(ctx: &TcContext) -> Result<i32, ()> {
     }
 }
 
-/// IPv4 DNS processing path.
+/// IPv4 DNS processing path (UDP and TCP port 53).
 #[inline(always)]
 fn process_dns_v4(
     ctx: &TcContext,
@@ -111,20 +112,26 @@ fn process_dns_v4(
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let protocol = unsafe { (*ipv4hdr).proto };
 
-    // DNS is UDP only (TCP DNS is out of scope for this story)
-    if protocol != IpProto::Udp {
-        return Ok(TC_ACT_OK);
-    }
-
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });
     let dst_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).dst_addr });
     let ihl = unsafe { (*ipv4hdr).ihl() } as usize;
     let l4_offset = l3_offset + ihl;
 
-    // Parse UDP header
-    let udphdr: *const UdpHdr = unsafe { ptr_at(ctx, l4_offset)? };
-    let src_port = u16_from_be_bytes(unsafe { (*udphdr).src });
-    let dst_port = u16_from_be_bytes(unsafe { (*udphdr).dst });
+    let (src_port, dst_port, dns_offset, tcp_flag) = if protocol == IpProto::Udp {
+        let udphdr: *const UdpHdr = unsafe { ptr_at(ctx, l4_offset)? };
+        let sp = u16_from_be_bytes(unsafe { (*udphdr).src });
+        let dp = u16_from_be_bytes(unsafe { (*udphdr).dst });
+        (sp, dp, l4_offset + mem::size_of::<UdpHdr>(), 0u8)
+    } else if protocol == IpProto::Tcp {
+        let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_offset)? };
+        let sp = u16_from_be_bytes(unsafe { (*tcphdr).source });
+        let dp = u16_from_be_bytes(unsafe { (*tcphdr).dest });
+        let data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
+        // TCP DNS: skip TCP header + 2-byte DNS length prefix
+        (sp, dp, l4_offset + data_off + 2, FLAG_TCP)
+    } else {
+        return Ok(TC_ACT_OK);
+    };
 
     // Check if this is a DNS packet (port 53)
     let direction = if dst_port == DNS_PORT {
@@ -139,14 +146,21 @@ fn process_dns_v4(
 
     let src_addr = [src_ip, 0, 0, 0];
     let dst_addr = [dst_ip, 0, 0, 0];
-    let dns_offset = l4_offset + mem::size_of::<UdpHdr>();
 
-    emit_dns_event(ctx, &src_addr, &dst_addr, flags, vlan_id, direction, dns_offset);
+    emit_dns_event(
+        ctx,
+        &src_addr,
+        &dst_addr,
+        flags | tcp_flag,
+        vlan_id,
+        direction,
+        dns_offset,
+    );
 
     Ok(TC_ACT_OK)
 }
 
-/// IPv6 DNS processing path.
+/// IPv6 DNS processing path (UDP and TCP port 53).
 #[inline(always)]
 fn process_dns_v6(
     ctx: &TcContext,
@@ -161,18 +175,23 @@ fn process_dns_v6(
     let (next_hdr, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr)
         .ok_or(())?;
 
-    // DNS is UDP only
-    if next_hdr != PROTO_UDP {
-        return Ok(TC_ACT_OK);
-    }
-
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
 
-    // Parse UDP header
-    let udphdr: *const UdpHdr = unsafe { ptr_at(ctx, l4_offset)? };
-    let src_port = u16_from_be_bytes(unsafe { (*udphdr).src });
-    let dst_port = u16_from_be_bytes(unsafe { (*udphdr).dst });
+    let (src_port, dst_port, dns_offset, tcp_flag) = if next_hdr == PROTO_UDP {
+        let udphdr: *const UdpHdr = unsafe { ptr_at(ctx, l4_offset)? };
+        let sp = u16_from_be_bytes(unsafe { (*udphdr).src });
+        let dp = u16_from_be_bytes(unsafe { (*udphdr).dst });
+        (sp, dp, l4_offset + mem::size_of::<UdpHdr>(), 0u8)
+    } else if next_hdr == PROTO_TCP {
+        let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_offset)? };
+        let sp = u16_from_be_bytes(unsafe { (*tcphdr).source });
+        let dp = u16_from_be_bytes(unsafe { (*tcphdr).dest });
+        let data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
+        (sp, dp, l4_offset + data_off + 2, FLAG_TCP)
+    } else {
+        return Ok(TC_ACT_OK);
+    };
 
     // Check if this is a DNS packet (port 53)
     let direction = if dst_port == DNS_PORT {
@@ -185,9 +204,15 @@ fn process_dns_v6(
 
     increment_metric(DNS_METRIC_PACKETS_INSPECTED);
 
-    let dns_offset = l4_offset + mem::size_of::<UdpHdr>();
-
-    emit_dns_event(ctx, &src_addr, &dst_addr, flags, vlan_id, direction, dns_offset);
+    emit_dns_event(
+        ctx,
+        &src_addr,
+        &dst_addr,
+        flags | tcp_flag,
+        vlan_id,
+        direction,
+        dns_offset,
+    );
 
     Ok(TC_ACT_OK)
 }

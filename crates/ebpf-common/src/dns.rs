@@ -45,7 +45,7 @@ pub struct DnsEvent {
     pub dns_payload_offset: u16,
     /// `DNS_DIRECTION_QUERY` (0) or `DNS_DIRECTION_RESPONSE` (1).
     pub direction: u8,
-    /// Bit flags: `FLAG_IPV6` (0x01), `FLAG_VLAN` (0x02).
+    /// Bit flags: `FLAG_IPV6` (0x01), `FLAG_VLAN` (0x02), `FLAG_TCP` (0x04).
     pub flags: u8,
     /// 802.1Q VLAN ID (0 = no VLAN).
     pub vlan_id: u16,
