@@ -85,19 +85,6 @@ pub fn build_crypto_provider(pq_mode: PqMode) -> tokio_rustls::rustls::crypto::C
     provider
 }
 
-/// Build a [`reqwest::Client`] with PQ-hybrid TLS and sensible defaults.
-///
-/// Uses `reqwest`'s built-in root certificate handling; the custom
-/// [`CryptoProvider`] overrides only key exchange groups.
-pub fn build_pq_http_client() -> reqwest::Client {
-    // Provider is already installed globally by `install_pq_provider()` at startup.
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent("ebpfsentinel-agent/1.0")
-        .build()
-        .expect("failed to build PQ HTTP client")
-}
-
 /// A TCP listener that performs TLS handshakes on accepted connections.
 ///
 /// Implements [`axum::serve::Listener`] so it can be used as a drop-in
@@ -159,12 +146,10 @@ mod tests {
     }
 
     #[test]
-    fn build_pq_http_client_succeeds() {
-        // Install a provider first (tests may run in any order)
+    fn install_pq_provider_does_not_panic() {
         install_pq_provider(PqMode::Prefer);
-        let client = build_pq_http_client();
-        // Just verify the client is created without panic
-        drop(client);
+        // Second call should be harmless (already installed)
+        install_pq_provider(PqMode::Require);
     }
 
     #[test]
