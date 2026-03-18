@@ -14,12 +14,20 @@ pub struct MitreAttackInfo {
     pub tactic: String,
 }
 
-/// Sub-reason for packet-level security MITRE mapping.
-pub enum PacketSecurityMitreReason {
+/// Component type for packet-level security MITRE mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketSecurityComponent {
     Firewall,
     Ratelimit,
     L7,
     Ips,
+}
+
+/// Context for port-aware MITRE mapping on packet-level security alerts.
+pub struct PacketSecurityMitreContext {
+    pub component: PacketSecurityComponent,
+    pub dst_port: u16,
+    pub protocol: u8,
 }
 
 /// Sub-reason for DNS MITRE mapping.
@@ -32,12 +40,17 @@ pub enum DnsMitreReason {
 
 /// Context passed to [`lookup`] to select the correct ATT&CK technique.
 pub enum MitreContext<'a> {
-    Ids,
-    ThreatIntel(ThreatType),
+    Ids {
+        dst_port: u16,
+    },
+    ThreatIntel {
+        threat_type: ThreatType,
+        dst_port: u16,
+    },
     Dlp(&'a str),
     Ddos(DdosAttackType),
     Dns(DnsMitreReason),
-    PacketSecurity(PacketSecurityMitreReason),
+    PacketSecurity(PacketSecurityMitreContext),
 }
 
 /// Return the ATT&CK technique for the given alert context.
@@ -46,16 +59,12 @@ pub enum MitreContext<'a> {
 /// returned [`MitreAttackInfo`] is built from `&'static str` literals.
 pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
     match ctx {
-        MitreContext::Ids => info("T1071", "Application Layer Protocol", "command-and-control"),
+        MitreContext::Ids { dst_port } => lookup_ids(*dst_port),
 
-        MitreContext::ThreatIntel(tt) => match tt {
-            ThreatType::Malware | ThreatType::C2 => {
-                info("T1071.001", "Web Protocols", "command-and-control")
-            }
-            ThreatType::Scanner => info("T1595", "Active Scanning", "reconnaissance"),
-            ThreatType::Spam => info("T1566", "Phishing", "initial-access"),
-            ThreatType::Other => info("T1568", "Dynamic Resolution", "command-and-control"),
-        },
+        MitreContext::ThreatIntel {
+            threat_type,
+            dst_port,
+        } => lookup_threatintel(*threat_type, *dst_port),
 
         MitreContext::Dlp(data_type) => match *data_type {
             "pii" => info(
@@ -72,20 +81,7 @@ pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
             _ => info("T1041", "Exfiltration Over C2 Channel", "exfiltration"),
         },
 
-        MitreContext::PacketSecurity(reason) => match reason {
-            PacketSecurityMitreReason::Firewall => info(
-                "T1190",
-                "Exploit Public-Facing Application",
-                "initial-access",
-            ),
-            PacketSecurityMitreReason::Ratelimit => {
-                info("T1498", "Network Denial of Service", "impact")
-            }
-            PacketSecurityMitreReason::L7 => {
-                info("T1071", "Application Layer Protocol", "command-and-control")
-            }
-            PacketSecurityMitreReason::Ips => info("T1110", "Brute Force", "credential-access"),
-        },
+        MitreContext::PacketSecurity(ctx) => lookup_packet_security(ctx),
 
         MitreContext::Dns(reason) => match reason {
             DnsMitreReason::BlocklistOrEncrypted => info("T1071.004", "DNS", "command-and-control"),
@@ -104,6 +100,92 @@ pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
                 info("T1499", "Endpoint Denial of Service", "impact")
             }
             DdosAttackType::Volumetric => info("T1498.001", "Direct Network Flood", "impact"),
+        },
+    }
+}
+
+/// Port-aware MITRE mapping for IDS signature matches.
+///
+/// An IDS alert on port 22 (SSH) indicates different attacker behavior
+/// than one on port 443 (HTTPS) or port 53 (DNS tunneling).
+fn lookup_ids(dst_port: u16) -> MitreAttackInfo {
+    match dst_port {
+        22 => info("T1021.004", "SSH", "lateral-movement"),
+        23 => info("T1021", "Remote Services", "lateral-movement"),
+        25 | 587 | 465 => info("T1071.003", "Mail Protocols", "command-and-control"),
+        53 => info("T1071.004", "DNS", "command-and-control"),
+        80 | 443 | 8080 | 8443 => info("T1071.001", "Web Protocols", "command-and-control"),
+        3389 => info("T1021.001", "Remote Desktop Protocol", "lateral-movement"),
+        445 | 139 => info("T1021.002", "SMB/Windows Admin Shares", "lateral-movement"),
+        21 => info(
+            "T1071.002",
+            "File Transfer Protocols",
+            "command-and-control",
+        ),
+        _ => info("T1071", "Application Layer Protocol", "command-and-control"),
+    }
+}
+
+/// Port-aware MITRE mapping for threat intelligence IOC matches.
+///
+/// Combines the IOC threat type with destination port for precision.
+/// Malware/C2 on HTTPS is different from a scanner hitting SSH.
+fn lookup_threatintel(threat_type: ThreatType, dst_port: u16) -> MitreAttackInfo {
+    match threat_type {
+        ThreatType::Malware | ThreatType::C2 => match dst_port {
+            53 => info("T1071.004", "DNS", "command-and-control"),
+            25 | 587 | 465 => info("T1071.003", "Mail Protocols", "command-and-control"),
+            _ => info("T1071.001", "Web Protocols", "command-and-control"),
+        },
+        ThreatType::Scanner => match dst_port {
+            22 | 3389 => info("T1110", "Brute Force", "credential-access"),
+            _ => info("T1595", "Active Scanning", "reconnaissance"),
+        },
+        ThreatType::Spam => info("T1566", "Phishing", "initial-access"),
+        ThreatType::Other => match dst_port {
+            53 => info("T1071.004", "DNS", "command-and-control"),
+            _ => info("T1568", "Dynamic Resolution", "command-and-control"),
+        },
+    }
+}
+
+/// Port-aware MITRE mapping for packet-level security alerts.
+///
+/// The same firewall deny on port 22 (SSH brute force) and port 443 (web exploit)
+/// should produce different techniques. Uses `dst_port` + `component` to select.
+fn lookup_packet_security(ctx: &PacketSecurityMitreContext) -> MitreAttackInfo {
+    match ctx.component {
+        PacketSecurityComponent::Firewall | PacketSecurityComponent::Ips => match ctx.dst_port {
+            22 => info("T1110.001", "Password Guessing", "credential-access"),
+            23 => info("T1021", "Remote Services", "lateral-movement"),
+            25 | 587 | 465 => info("T1071.003", "Mail Protocols", "command-and-control"),
+            53 => info("T1071.004", "DNS", "command-and-control"),
+            80 | 443 | 8080 | 8443 | 3306 | 5432 | 1433 | 27017 | 6379 => info(
+                "T1190",
+                "Exploit Public-Facing Application",
+                "initial-access",
+            ),
+            3389 => info("T1021.001", "Remote Desktop Protocol", "lateral-movement"),
+            445 | 139 => info("T1021.002", "SMB/Windows Admin Shares", "lateral-movement"),
+            5900..=5999 => info("T1021.005", "VNC", "lateral-movement"),
+            _ => info("T1046", "Network Service Scanning", "discovery"),
+        },
+        PacketSecurityComponent::Ratelimit => match ctx.dst_port {
+            22 => info("T1110", "Brute Force", "credential-access"),
+            80 | 443 | 8080 | 8443 => info("T1499.002", "Service Exhaustion Flood", "impact"),
+            _ => info("T1498", "Network Denial of Service", "impact"),
+        },
+        PacketSecurityComponent::L7 => match ctx.dst_port {
+            25 | 587 | 465 => info("T1071.003", "Mail Protocols", "command-and-control"),
+            53 => info("T1071.004", "DNS", "command-and-control"),
+            80 | 443 | 8080 | 8443 => info("T1071.001", "Web Protocols", "command-and-control"),
+            21 => info(
+                "T1071.002",
+                "File Transfer Protocols",
+                "command-and-control",
+            ),
+            445 | 139 => info("T1021.002", "SMB/Windows Admin Shares", "lateral-movement"),
+            _ => info("T1071", "Application Layer Protocol", "command-and-control"),
         },
     }
 }
@@ -138,61 +220,247 @@ pub struct CoverageReport {
 
 /// Static coverage table — all technique mappings the agent can produce.
 fn all_coverage_entries() -> Vec<CoverageEntry> {
-    let mut entries = Vec::with_capacity(19);
-    entries.extend(packet_security_coverage_entries());
+    let mut entries = Vec::with_capacity(36);
+    entries.extend(firewall_ips_coverage_entries());
+    entries.extend(ratelimit_coverage_entries());
+    entries.extend(l7_coverage_entries());
     entries.extend(detection_coverage_entries());
     entries.extend(ddos_coverage_entries());
     entries
 }
 
-fn packet_security_coverage_entries() -> Vec<CoverageEntry> {
+fn firewall_ips_coverage_entries() -> Vec<CoverageEntry> {
     vec![
+        entry(
+            "firewall",
+            "T1110.001",
+            "Password Guessing",
+            "credential-access",
+            "Firewall deny on SSH (22)",
+        ),
+        entry(
+            "firewall",
+            "T1021",
+            "Remote Services",
+            "lateral-movement",
+            "Firewall deny on Telnet (23)",
+        ),
+        entry(
+            "firewall",
+            "T1071.003",
+            "Mail Protocols",
+            "command-and-control",
+            "Firewall deny on SMTP (25/587)",
+        ),
+        entry(
+            "firewall",
+            "T1071.004",
+            "DNS",
+            "command-and-control",
+            "Firewall deny on DNS (53)",
+        ),
         entry(
             "firewall",
             "T1190",
             "Exploit Public-Facing Application",
             "initial-access",
-            "Firewall deny/reject",
+            "Firewall deny on HTTP/DB ports",
+        ),
+        entry(
+            "firewall",
+            "T1021.001",
+            "Remote Desktop Protocol",
+            "lateral-movement",
+            "Firewall deny on RDP (3389)",
+        ),
+        entry(
+            "firewall",
+            "T1021.002",
+            "SMB/Windows Admin Shares",
+            "lateral-movement",
+            "Firewall deny on SMB (445)",
+        ),
+        entry(
+            "firewall",
+            "T1046",
+            "Network Service Scanning",
+            "discovery",
+            "Firewall deny on other ports",
+        ),
+        entry(
+            "ips",
+            "T1110.001",
+            "Password Guessing",
+            "credential-access",
+            "IPS auto-blacklist on SSH (22)",
+        ),
+        entry(
+            "ips",
+            "T1190",
+            "Exploit Public-Facing Application",
+            "initial-access",
+            "IPS auto-blacklist on HTTP/DB",
+        ),
+        entry(
+            "ips",
+            "T1046",
+            "Network Service Scanning",
+            "discovery",
+            "IPS auto-blacklist on other ports",
+        ),
+    ]
+}
+
+fn ratelimit_coverage_entries() -> Vec<CoverageEntry> {
+    vec![
+        entry(
+            "ratelimit",
+            "T1110",
+            "Brute Force",
+            "credential-access",
+            "Rate limit exceeded on SSH (22)",
+        ),
+        entry(
+            "ratelimit",
+            "T1499.002",
+            "Service Exhaustion Flood",
+            "impact",
+            "Rate limit exceeded on HTTP",
         ),
         entry(
             "ratelimit",
             "T1498",
             "Network Denial of Service",
             "impact",
-            "Rate limit exceeded",
+            "Rate limit exceeded on other ports",
+        ),
+    ]
+}
+
+fn l7_coverage_entries() -> Vec<CoverageEntry> {
+    vec![
+        entry(
+            "l7",
+            "T1071.001",
+            "Web Protocols",
+            "command-and-control",
+            "L7 deny on HTTP/HTTPS",
+        ),
+        entry(
+            "l7",
+            "T1071.002",
+            "File Transfer Protocols",
+            "command-and-control",
+            "L7 deny on FTP",
+        ),
+        entry(
+            "l7",
+            "T1071.003",
+            "Mail Protocols",
+            "command-and-control",
+            "L7 deny on SMTP",
+        ),
+        entry(
+            "l7",
+            "T1021.002",
+            "SMB/Windows Admin Shares",
+            "lateral-movement",
+            "L7 deny on SMB",
         ),
         entry(
             "l7",
             "T1071",
             "Application Layer Protocol",
             "command-and-control",
-            "L7 content-based deny",
-        ),
-        entry(
-            "ips",
-            "T1110",
-            "Brute Force",
-            "credential-access",
-            "IPS auto-blacklist threshold",
+            "L7 deny on other protocols",
         ),
     ]
 }
 
 fn detection_coverage_entries() -> Vec<CoverageEntry> {
+    let mut entries = Vec::with_capacity(22);
+    entries.extend(ids_coverage_entries());
+    entries.extend(threatintel_coverage_entries());
+    entries.extend(dlp_dns_coverage_entries());
+    entries
+}
+
+fn ids_coverage_entries() -> Vec<CoverageEntry> {
     vec![
+        entry(
+            "ids",
+            "T1021.004",
+            "SSH",
+            "lateral-movement",
+            "IDS match on SSH (22)",
+        ),
+        entry(
+            "ids",
+            "T1071.001",
+            "Web Protocols",
+            "command-and-control",
+            "IDS match on HTTP/HTTPS",
+        ),
+        entry(
+            "ids",
+            "T1071.003",
+            "Mail Protocols",
+            "command-and-control",
+            "IDS match on SMTP",
+        ),
+        entry(
+            "ids",
+            "T1071.004",
+            "DNS",
+            "command-and-control",
+            "IDS match on DNS (53)",
+        ),
+        entry(
+            "ids",
+            "T1021.001",
+            "Remote Desktop Protocol",
+            "lateral-movement",
+            "IDS match on RDP (3389)",
+        ),
+        entry(
+            "ids",
+            "T1021.002",
+            "SMB/Windows Admin Shares",
+            "lateral-movement",
+            "IDS match on SMB (445)",
+        ),
         entry(
             "ids",
             "T1071",
             "Application Layer Protocol",
             "command-and-control",
-            "IDS signature match",
+            "IDS match on other ports",
         ),
+    ]
+}
+
+fn threatintel_coverage_entries() -> Vec<CoverageEntry> {
+    vec![
         entry(
             "threatintel",
             "T1071.001",
             "Web Protocols",
             "command-and-control",
-            "IOC hit: malware or C2",
+            "IOC hit: malware/C2 on HTTP",
+        ),
+        entry(
+            "threatintel",
+            "T1071.003",
+            "Mail Protocols",
+            "command-and-control",
+            "IOC hit: C2 on SMTP",
+        ),
+        entry(
+            "threatintel",
+            "T1071.004",
+            "DNS",
+            "command-and-control",
+            "IOC hit: malware/C2 on DNS",
         ),
         entry(
             "threatintel",
@@ -200,6 +468,13 @@ fn detection_coverage_entries() -> Vec<CoverageEntry> {
             "Active Scanning",
             "reconnaissance",
             "IOC hit: scanner",
+        ),
+        entry(
+            "threatintel",
+            "T1110",
+            "Brute Force",
+            "credential-access",
+            "IOC hit: scanner on SSH/RDP",
         ),
         entry(
             "threatintel",
@@ -215,6 +490,11 @@ fn detection_coverage_entries() -> Vec<CoverageEntry> {
             "command-and-control",
             "IOC hit: other threat type",
         ),
+    ]
+}
+
+fn dlp_dns_coverage_entries() -> Vec<CoverageEntry> {
+    vec![
         entry(
             "dlp",
             "T1041",
@@ -370,43 +650,92 @@ mod tests {
     }
 
     #[test]
-    fn ids_maps_to_t1071() {
-        let info = lookup(&MitreContext::Ids);
-        assert_eq!(info.technique_id, "T1071");
-        assert_eq!(info.technique_name, "Application Layer Protocol");
+    fn ids_ssh_maps_to_lateral_movement() {
+        let info = lookup(&MitreContext::Ids { dst_port: 22 });
+        assert_eq!(info.technique_id, "T1021.004");
+        assert_eq!(info.tactic, "lateral-movement");
+    }
+
+    #[test]
+    fn ids_http_maps_to_web_protocols() {
+        let info = lookup(&MitreContext::Ids { dst_port: 443 });
+        assert_eq!(info.technique_id, "T1071.001");
         assert_eq!(info.tactic, "command-and-control");
     }
 
     #[test]
-    fn threatintel_malware() {
-        let info = lookup(&MitreContext::ThreatIntel(ThreatType::Malware));
+    fn ids_dns_maps_to_dns() {
+        let info = lookup(&MitreContext::Ids { dst_port: 53 });
+        assert_eq!(info.technique_id, "T1071.004");
+    }
+
+    #[test]
+    fn ids_unknown_port_maps_to_generic() {
+        let info = lookup(&MitreContext::Ids { dst_port: 9999 });
+        assert_eq!(info.technique_id, "T1071");
+    }
+
+    #[test]
+    fn ids_rdp_maps_to_rdp() {
+        let info = lookup(&MitreContext::Ids { dst_port: 3389 });
+        assert_eq!(info.technique_id, "T1021.001");
+    }
+
+    #[test]
+    fn threatintel_malware_http() {
+        let info = lookup(&MitreContext::ThreatIntel {
+            threat_type: ThreatType::Malware,
+            dst_port: 443,
+        });
         assert_eq!(info.technique_id, "T1071.001");
         assert_eq!(info.technique_name, "Web Protocols");
     }
 
     #[test]
-    fn threatintel_c2() {
-        let info = lookup(&MitreContext::ThreatIntel(ThreatType::C2));
-        assert_eq!(info.technique_id, "T1071.001");
+    fn threatintel_c2_dns() {
+        let info = lookup(&MitreContext::ThreatIntel {
+            threat_type: ThreatType::C2,
+            dst_port: 53,
+        });
+        assert_eq!(info.technique_id, "T1071.004");
     }
 
     #[test]
-    fn threatintel_scanner() {
-        let info = lookup(&MitreContext::ThreatIntel(ThreatType::Scanner));
+    fn threatintel_scanner_ssh() {
+        let info = lookup(&MitreContext::ThreatIntel {
+            threat_type: ThreatType::Scanner,
+            dst_port: 22,
+        });
+        assert_eq!(info.technique_id, "T1110");
+        assert_eq!(info.tactic, "credential-access");
+    }
+
+    #[test]
+    fn threatintel_scanner_generic() {
+        let info = lookup(&MitreContext::ThreatIntel {
+            threat_type: ThreatType::Scanner,
+            dst_port: 8080,
+        });
         assert_eq!(info.technique_id, "T1595");
         assert_eq!(info.tactic, "reconnaissance");
     }
 
     #[test]
     fn threatintel_spam() {
-        let info = lookup(&MitreContext::ThreatIntel(ThreatType::Spam));
+        let info = lookup(&MitreContext::ThreatIntel {
+            threat_type: ThreatType::Spam,
+            dst_port: 25,
+        });
         assert_eq!(info.technique_id, "T1566");
         assert_eq!(info.tactic, "initial-access");
     }
 
     #[test]
     fn threatintel_other() {
-        let info = lookup(&MitreContext::ThreatIntel(ThreatType::Other));
+        let info = lookup(&MitreContext::ThreatIntel {
+            threat_type: ThreatType::Other,
+            dst_port: 443,
+        });
         assert_eq!(info.technique_id, "T1568");
     }
 
@@ -436,53 +765,162 @@ mod tests {
         assert_eq!(info.tactic, "exfiltration");
     }
 
+    fn psa(component: PacketSecurityComponent, port: u16) -> PacketSecurityMitreContext {
+        PacketSecurityMitreContext {
+            component,
+            dst_port: port,
+            protocol: 6,
+        }
+    }
+
     #[test]
-    fn firewall_maps_to_t1190() {
-        let info = lookup(&MitreContext::PacketSecurity(
-            PacketSecurityMitreReason::Firewall,
-        ));
+    fn firewall_ssh_maps_to_password_guessing() {
+        let info = lookup(&MitreContext::PacketSecurity(psa(
+            PacketSecurityComponent::Firewall,
+            22,
+        )));
+        assert_eq!(info.technique_id, "T1110.001");
+        assert_eq!(info.tactic, "credential-access");
+    }
+
+    #[test]
+    fn firewall_http_maps_to_exploit() {
+        let info = lookup(&MitreContext::PacketSecurity(psa(
+            PacketSecurityComponent::Firewall,
+            443,
+        )));
         assert_eq!(info.technique_id, "T1190");
         assert_eq!(info.tactic, "initial-access");
     }
 
     #[test]
-    fn ratelimit_maps_to_t1498() {
-        let info = lookup(&MitreContext::PacketSecurity(
-            PacketSecurityMitreReason::Ratelimit,
-        ));
-        assert_eq!(info.technique_id, "T1498");
-        assert_eq!(info.tactic, "impact");
+    fn firewall_rdp_maps_to_remote_desktop() {
+        let info = lookup(&MitreContext::PacketSecurity(psa(
+            PacketSecurityComponent::Firewall,
+            3389,
+        )));
+        assert_eq!(info.technique_id, "T1021.001");
+        assert_eq!(info.tactic, "lateral-movement");
     }
 
     #[test]
-    fn l7_maps_to_t1071() {
-        let info = lookup(&MitreContext::PacketSecurity(PacketSecurityMitreReason::L7));
-        assert_eq!(info.technique_id, "T1071");
-        assert_eq!(info.tactic, "command-and-control");
+    fn firewall_smb_maps_to_smb() {
+        let info = lookup(&MitreContext::PacketSecurity(psa(
+            PacketSecurityComponent::Firewall,
+            445,
+        )));
+        assert_eq!(info.technique_id, "T1021.002");
     }
 
     #[test]
-    fn ips_maps_to_t1110() {
-        let info = lookup(&MitreContext::PacketSecurity(
-            PacketSecurityMitreReason::Ips,
-        ));
+    fn firewall_unknown_port_maps_to_scanning() {
+        let info = lookup(&MitreContext::PacketSecurity(psa(
+            PacketSecurityComponent::Firewall,
+            9999,
+        )));
+        assert_eq!(info.technique_id, "T1046");
+        assert_eq!(info.tactic, "discovery");
+    }
+
+    #[test]
+    fn firewall_db_port_maps_to_exploit() {
+        for port in [3306, 5432, 1433, 27017, 6379] {
+            let info = lookup(&MitreContext::PacketSecurity(psa(
+                PacketSecurityComponent::Firewall,
+                port,
+            )));
+            assert_eq!(info.technique_id, "T1190", "port {port}");
+        }
+    }
+
+    #[test]
+    fn ips_ssh_maps_to_password_guessing() {
+        let info = lookup(&MitreContext::PacketSecurity(psa(
+            PacketSecurityComponent::Ips,
+            22,
+        )));
+        assert_eq!(info.technique_id, "T1110.001");
+    }
+
+    #[test]
+    fn ratelimit_ssh_maps_to_brute_force() {
+        let info = lookup(&MitreContext::PacketSecurity(psa(
+            PacketSecurityComponent::Ratelimit,
+            22,
+        )));
         assert_eq!(info.technique_id, "T1110");
         assert_eq!(info.tactic, "credential-access");
     }
 
     #[test]
+    fn ratelimit_http_maps_to_service_exhaustion() {
+        let info = lookup(&MitreContext::PacketSecurity(psa(
+            PacketSecurityComponent::Ratelimit,
+            80,
+        )));
+        assert_eq!(info.technique_id, "T1499.002");
+        assert_eq!(info.tactic, "impact");
+    }
+
+    #[test]
+    fn ratelimit_other_maps_to_network_dos() {
+        let info = lookup(&MitreContext::PacketSecurity(psa(
+            PacketSecurityComponent::Ratelimit,
+            12345,
+        )));
+        assert_eq!(info.technique_id, "T1498");
+    }
+
+    #[test]
+    fn l7_http_maps_to_web_protocols() {
+        let info = lookup(&MitreContext::PacketSecurity(psa(
+            PacketSecurityComponent::L7,
+            443,
+        )));
+        assert_eq!(info.technique_id, "T1071.001");
+        assert_eq!(info.tactic, "command-and-control");
+    }
+
+    #[test]
+    fn l7_ftp_maps_to_file_transfer() {
+        let info = lookup(&MitreContext::PacketSecurity(psa(
+            PacketSecurityComponent::L7,
+            21,
+        )));
+        assert_eq!(info.technique_id, "T1071.002");
+    }
+
+    #[test]
+    fn l7_smtp_maps_to_mail() {
+        let info = lookup(&MitreContext::PacketSecurity(psa(
+            PacketSecurityComponent::L7,
+            25,
+        )));
+        assert_eq!(info.technique_id, "T1071.003");
+    }
+
+    #[test]
+    fn l7_smb_maps_to_smb() {
+        let info = lookup(&MitreContext::PacketSecurity(psa(
+            PacketSecurityComponent::L7,
+            445,
+        )));
+        assert_eq!(info.technique_id, "T1021.002");
+    }
+
+    #[test]
+    fn l7_unknown_maps_to_generic_app_layer() {
+        let info = lookup(&MitreContext::PacketSecurity(psa(
+            PacketSecurityComponent::L7,
+            9999,
+        )));
+        assert_eq!(info.technique_id, "T1071");
+    }
+
+    #[test]
     fn coverage_report_packet_security_components() {
         let report = coverage_report(&["firewall", "ratelimit", "l7", "ips"]);
-        assert_eq!(report.total_techniques, 4);
-        let ids: Vec<&str> = report
-            .techniques
-            .iter()
-            .map(|t| t.technique_id.as_str())
-            .collect();
-        assert!(ids.contains(&"T1190"));
-        assert!(ids.contains(&"T1498"));
-        assert!(ids.contains(&"T1071"));
-        assert!(ids.contains(&"T1110"));
+        assert_eq!(report.total_techniques, 19);
     }
 
     #[test]
@@ -567,7 +1005,7 @@ mod tests {
             "ips",
         ]);
         assert_eq!(report.attack_version, "v18");
-        assert_eq!(report.total_techniques, 19);
+        assert_eq!(report.total_techniques, 43);
         assert!(!report.by_tactic.is_empty());
     }
 
@@ -606,7 +1044,7 @@ mod tests {
             .iter()
             .find(|t| t.tactic == "impact")
             .unwrap();
-        assert_eq!(impact.covered_techniques, 6);
+        assert_eq!(impact.covered_techniques, 7);
         assert!(impact.components.contains(&"ratelimit".to_string()));
         assert!(impact.components.contains(&"ddos".to_string()));
     }
@@ -614,6 +1052,6 @@ mod tests {
     #[test]
     fn coverage_report_case_insensitive() {
         let report = coverage_report(&["IDS", "DLP"]);
-        assert_eq!(report.total_techniques, 4); // 1 IDS + 3 DLP
+        assert_eq!(report.total_techniques, 10); // 7 IDS + 3 DLP
     }
 }

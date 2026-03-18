@@ -162,7 +162,9 @@ impl Alert {
             current_pps: None,
             mitigation_status: None,
             total_packets: None,
-            mitre_attack: Some(mitre::lookup(&MitreContext::Ids)),
+            mitre_attack: Some(mitre::lookup(&MitreContext::Ids {
+                dst_port: ids.dst_port,
+            })),
             ja4_fingerprint: None,
         }
     }
@@ -244,7 +246,10 @@ impl Alert {
             current_pps: None,
             mitigation_status: None,
             total_packets: None,
-            mitre_attack: Some(mitre::lookup(&MitreContext::ThreatIntel(ti.threat_type))),
+            mitre_attack: Some(mitre::lookup(&MitreContext::ThreatIntel {
+                threat_type: ti.threat_type,
+                dst_port: ti.dst_port,
+            })),
             ja4_fingerprint: None,
         }
     }
@@ -372,20 +377,17 @@ impl Alert {
             _ => DomainMode::Alert,
         };
         let rule_id = RuleId(psa.rule_id.clone());
-        let mitre_context = match psa.component {
-            PacketAlertComponent::Firewall => {
-                MitreContext::PacketSecurity(mitre::PacketSecurityMitreReason::Firewall)
-            }
-            PacketAlertComponent::Ratelimit => {
-                MitreContext::PacketSecurity(mitre::PacketSecurityMitreReason::Ratelimit)
-            }
-            PacketAlertComponent::L7 => {
-                MitreContext::PacketSecurity(mitre::PacketSecurityMitreReason::L7)
-            }
-            PacketAlertComponent::Ips => {
-                MitreContext::PacketSecurity(mitre::PacketSecurityMitreReason::Ips)
-            }
+        let mitre_component = match psa.component {
+            PacketAlertComponent::Firewall => mitre::PacketSecurityComponent::Firewall,
+            PacketAlertComponent::Ratelimit => mitre::PacketSecurityComponent::Ratelimit,
+            PacketAlertComponent::L7 => mitre::PacketSecurityComponent::L7,
+            PacketAlertComponent::Ips => mitre::PacketSecurityComponent::Ips,
         };
+        let mitre_context = MitreContext::PacketSecurity(mitre::PacketSecurityMitreContext {
+            component: mitre_component,
+            dst_port: psa.dst_port,
+            protocol: psa.protocol,
+        });
         Self {
             id: Self::generate_id(psa.timestamp_ns, &rule_id),
             timestamp_ns: psa.timestamp_ns,
@@ -742,7 +744,11 @@ mod tests {
 
         assert_eq!(alert.component, "ratelimit");
         assert_eq!(alert.action, DomainMode::Block);
-        assert_eq!(alert.mitre_attack.as_ref().unwrap().technique_id, "T1498");
+        // dst_port=443 → T1499.002 (Service Exhaustion Flood)
+        assert_eq!(
+            alert.mitre_attack.as_ref().unwrap().technique_id,
+            "T1499.002"
+        );
     }
 
     #[test]
@@ -752,7 +758,11 @@ mod tests {
 
         assert_eq!(alert.component, "l7");
         assert_eq!(alert.action, DomainMode::Block);
-        assert_eq!(alert.mitre_attack.as_ref().unwrap().technique_id, "T1071");
+        // dst_port=443 → T1071.001 (Web Protocols)
+        assert_eq!(
+            alert.mitre_attack.as_ref().unwrap().technique_id,
+            "T1071.001"
+        );
     }
 
     #[test]
@@ -762,6 +772,21 @@ mod tests {
 
         assert_eq!(alert.component, "ips");
         assert_eq!(alert.action, DomainMode::Block);
-        assert_eq!(alert.mitre_attack.as_ref().unwrap().technique_id, "T1110");
+        // dst_port=443 → T1190 (Exploit Public-Facing Application)
+        assert_eq!(alert.mitre_attack.as_ref().unwrap().technique_id, "T1190");
+    }
+
+    #[test]
+    fn alert_from_ips_ssh_psa() {
+        let mut psa = sample_psa(PacketAlertComponent::Ips, "blacklist");
+        psa.dst_port = 22;
+        let alert = Alert::from_packet_security_alert(&psa);
+
+        assert_eq!(alert.component, "ips");
+        // dst_port=22 → T1110.001 (Password Guessing)
+        assert_eq!(
+            alert.mitre_attack.as_ref().unwrap().technique_id,
+            "T1110.001"
+        );
     }
 }
