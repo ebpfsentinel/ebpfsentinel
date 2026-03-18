@@ -632,6 +632,12 @@ pub async fn run(
         app_state = app_state.with_auth_provider(provider, config.auth.metrics_auth_required);
     }
 
+    // Wire capture engine for manual packet capture
+    let capture_engine = Arc::new(RwLock::new(
+        domain::capture::engine::CaptureEngine::new(300), // max duration: 5 min
+    ));
+    app_state = app_state.with_capture_engine(Arc::clone(&capture_engine));
+
     // Wire response engine for manual TTL actions
     let response_engine = Arc::new(RwLock::new(
         domain::response::engine::ResponseEngine::new(86400), // max TTL: 24h

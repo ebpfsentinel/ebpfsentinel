@@ -229,6 +229,35 @@ struct CreateResponseBody {
     rate_pps: Option<u64>,
 }
 
+// ── Captures ────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct CaptureResponse {
+    pub id: String,
+    pub filter: String,
+    pub duration_secs: u64,
+    pub snap_length: u32,
+    pub output_path: String,
+    pub interface: String,
+    pub status: String,
+    pub file_size_bytes: u64,
+    pub packets_captured: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct CaptureListResponse {
+    pub captures: Vec<CaptureResponse>,
+}
+
+#[derive(Serialize)]
+struct StartCaptureBody {
+    filter: String,
+    duration_seconds: u64,
+    snap_length: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interface: Option<String>,
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct FingerprintSummaryResponse {
     pub cached_count: usize,
@@ -799,6 +828,48 @@ impl ApiClient {
     pub async fn mitre_coverage(&self) -> anyhow::Result<MitreCoverageResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/mitre/coverage")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── Captures ──────────────────────────────────────────────────────
+
+    pub async fn start_capture(
+        &self,
+        filter: &str,
+        duration_secs: u64,
+        snap_length: u32,
+        interface: Option<&str>,
+    ) -> anyhow::Result<CaptureResponse> {
+        let body = StartCaptureBody {
+            filter: filter.to_string(),
+            duration_seconds: duration_secs,
+            snap_length,
+            interface: interface.map(String::from),
+        };
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/captures/manual")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn stop_capture(&self, id: &str) -> anyhow::Result<CaptureResponse> {
+        let resp = self
+            .request(reqwest::Method::DELETE, &format!("/api/v1/captures/{id}"))
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn list_captures(&self) -> anyhow::Result<CaptureListResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/captures")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

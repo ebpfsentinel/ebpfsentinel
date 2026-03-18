@@ -572,6 +572,84 @@ pub async fn cmd_mitre_coverage(client: &ApiClient, output: OutputFormat) -> Res
     Ok(())
 }
 
+// ── Captures ────────────────────────────────────────────────────────
+
+pub async fn cmd_capture_start(
+    client: &ApiClient,
+    filter: &str,
+    duration: &str,
+    snap_length: u32,
+    interface: Option<&str>,
+    output: OutputFormat,
+) -> Result<()> {
+    let duration_secs = parse_duration_secs(duration)?;
+    let resp = client
+        .start_capture(filter, duration_secs, snap_length, interface)
+        .await?;
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+    } else {
+        println!(
+            "Capture started: {} (filter: {}, duration: {}s, output: {})",
+            resp.id, resp.filter, resp.duration_secs, resp.output_path,
+        );
+    }
+    Ok(())
+}
+
+pub async fn cmd_capture_stop(client: &ApiClient, id: &str, output: OutputFormat) -> Result<()> {
+    let resp = client.stop_capture(id).await?;
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+    } else {
+        println!("Capture {} stopped.", resp.id);
+    }
+    Ok(())
+}
+
+pub async fn cmd_capture_list(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.list_captures().await?;
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+    if resp.captures.is_empty() {
+        println!("No capture sessions.");
+        return Ok(());
+    }
+    println!(
+        "{:<20}  {:<8}  {:<30}  {:>8}  {:>10}  OUTPUT",
+        "ID", "STATUS", "FILTER", "DURATION", "SIZE"
+    );
+    for c in &resp.captures {
+        println!(
+            "{:<20}  {:<8}  {:<30}  {:>7}s  {:>9}B  {}",
+            c.id,
+            c.status,
+            truncate(&c.filter, 30),
+            c.duration_secs,
+            c.file_size_bytes,
+            c.output_path,
+        );
+    }
+    Ok(())
+}
+
+fn parse_duration_secs(s: &str) -> Result<u64> {
+    let s = s.trim();
+    let (num, mult) = if let Some(n) = s.strip_suffix('s') {
+        (n, 1u64)
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n, 60)
+    } else {
+        (s, 1)
+    };
+    let val: u64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid duration: {s}"))?;
+    Ok(val * mult)
+}
+
 // ── Responses ───────────────────────────────────────────────────────
 
 pub async fn cmd_responses_list(client: &ApiClient, output: OutputFormat) -> Result<()> {

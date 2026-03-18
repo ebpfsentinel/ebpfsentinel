@@ -124,6 +124,9 @@ pub enum Command {
 
     /// Manual response actions: block/throttle with TTL
     Responses(DomainArgs<ResponsesCommand>),
+
+    /// Manual packet capture (pcap)
+    Capture(DomainArgs<CaptureCommand>),
 }
 
 /// Generic domain args: connection + subcommand.
@@ -271,6 +274,34 @@ pub enum MitreCommand {
 pub enum FingerprintsCommand {
     /// Show JA4+ fingerprint cache summary
     Summary,
+}
+
+// ── Capture ─────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum CaptureCommand {
+    /// Start a time-bounded packet capture
+    Start {
+        /// BPF filter expression (e.g. "host 1.2.3.4 and port 443")
+        #[arg(long)]
+        filter: String,
+        /// Capture duration (e.g. 60s, 5m)
+        #[arg(long, default_value = "60s")]
+        duration: String,
+        /// Snap length in bytes
+        #[arg(long, default_value_t = 1500)]
+        snap_length: u32,
+        /// Network interface
+        #[arg(long)]
+        interface: Option<String>,
+    },
+    /// Stop a running capture
+    Stop {
+        /// Capture session ID
+        id: String,
+    },
+    /// List all capture sessions
+    List,
 }
 
 // ── Responses ───────────────────────────────────────────────────────────

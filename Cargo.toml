@@ -108,6 +108,9 @@ maxminddb = "0.27.3"
 flate2 = "1"
 tar = "0.4"
 
+# Packet capture
+pcap = "2.4"
+
 # Regex
 regex = "1"
 

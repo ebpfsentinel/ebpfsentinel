@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use api_client::ApiClient;
 use cli::{
-    AlertsCommand, AuditCommand, Command, DdosCommand, DnsCommand, DomainsCommand,
+    AlertsCommand, AuditCommand, CaptureCommand, Command, DdosCommand, DnsCommand, DomainsCommand,
     FingerprintsCommand, FirewallCommand, IpsCommand, L7Command, LbCommand, MitreCommand,
     NatCommand, NptV6Command, QosCommand, RatelimitCommand, ResponsesCommand, ThreatintelCommand,
 };
@@ -288,6 +288,32 @@ async fn main() -> Result<()> {
             let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
             match args.command {
                 MitreCommand::Coverage => commands::cmd_mitre_coverage(&client, output).await,
+            }
+        }
+
+        Some(Command::Capture(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                CaptureCommand::Start {
+                    filter,
+                    duration,
+                    snap_length,
+                    interface,
+                } => {
+                    commands::cmd_capture_start(
+                        &client,
+                        &filter,
+                        &duration,
+                        snap_length,
+                        interface.as_deref(),
+                        output,
+                    )
+                    .await
+                }
+                CaptureCommand::Stop { id } => {
+                    commands::cmd_capture_stop(&client, &id, output).await
+                }
+                CaptureCommand::List => commands::cmd_capture_list(&client, output).await,
             }
         }
 

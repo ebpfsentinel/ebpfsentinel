@@ -20,6 +20,7 @@ use super::agent_handler::agent_status;
 use super::alert_handler::{list_alerts, mark_false_positive};
 use super::alias_handler::{alias_status, set_external_alias_content};
 use super::audit_handler::{list_audit_logs, rule_history};
+use super::capture_handler::{list_captures, start_capture, stop_capture};
 use super::conntrack_handler::{conntrack_status, flush_connections, list_connections};
 use super::ddos_handler::{
     create_ddos_policy, ddos_attacks, ddos_history, ddos_status, delete_ddos_policy,
@@ -159,7 +160,8 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
             .route("/api/v1/qos/classifiers", get(list_qos_classifiers))
             .route("/api/v1/mitre/coverage", get(mitre_coverage))
             .route("/api/v1/fingerprints/summary", get(fingerprint_summary))
-            .route("/api/v1/responses", get(list_response_actions));
+            .route("/api/v1/responses", get(list_response_actions))
+            .route("/api/v1/captures", get(list_captures));
 
         // Write routes (rate limited: 60 req/min per IP)
         let write_routes = Router::new()
@@ -200,6 +202,8 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
             )
             .route("/api/v1/responses/manual", post(create_response_action))
             .route("/api/v1/responses/{id}", delete(revoke_response_action))
+            .route("/api/v1/captures/manual", post(start_capture))
+            .route("/api/v1/captures/{id}", delete(stop_capture))
             .layer(GovernorLayer::new(governor_conf));
 
         let r = read_routes

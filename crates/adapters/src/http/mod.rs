@@ -2,6 +2,7 @@ pub mod agent_handler;
 pub mod alert_handler;
 pub mod alias_handler;
 pub mod audit_handler;
+pub mod capture_handler;
 pub mod conntrack_handler;
 pub mod ddos_handler;
 pub mod dlp_handler;

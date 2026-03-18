@@ -63,6 +63,7 @@ pub struct AppState {
     pub ebpf_program_status: Arc<RwLock<HashMap<String, bool>>>,
     pub fingerprint_cache: Option<Arc<std::sync::RwLock<domain::l7::ja4::FingerprintCache>>>,
     pub response_engine: Option<Arc<RwLock<domain::response::engine::ResponseEngine>>>,
+    pub capture_engine: Option<Arc<RwLock<domain::capture::engine::CaptureEngine>>>,
 }
 
 impl AppState {
@@ -112,7 +113,18 @@ impl AppState {
             ebpf_program_status,
             fingerprint_cache: None,
             response_engine: None,
+            capture_engine: None,
         }
+    }
+
+    /// Attach a capture engine for manual packet capture.
+    #[must_use]
+    pub fn with_capture_engine(
+        mut self,
+        engine: Arc<RwLock<domain::capture::engine::CaptureEngine>>,
+    ) -> Self {
+        self.capture_engine = Some(engine);
+        self
     }
 
     /// Attach a response engine for manual TTL actions.

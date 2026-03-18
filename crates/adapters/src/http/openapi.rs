@@ -6,6 +6,7 @@ use super::agent_handler;
 use super::alert_handler;
 use super::alias_handler;
 use super::audit_handler;
+use super::capture_handler;
 use super::conntrack_handler;
 use super::ddos_handler;
 use super::dlp_handler;
@@ -131,6 +132,10 @@ use super::zone_handler;
         mitre_handler::mitre_coverage,
         // Fingerprints
         fingerprint_handler::fingerprint_summary,
+        // Captures
+        capture_handler::start_capture,
+        capture_handler::list_captures,
+        capture_handler::stop_capture,
         // Responses
         response_handler::create_response_action,
         response_handler::list_response_actions,
@@ -231,6 +236,10 @@ use super::zone_handler;
         mitre_handler::TacticSummary,
         // Fingerprints
         fingerprint_handler::FingerprintSummaryResponse,
+        // Captures
+        capture_handler::StartCaptureRequest,
+        capture_handler::CaptureResponse,
+        capture_handler::CaptureListResponse,
         // Responses
         response_handler::CreateResponseRequest,
         response_handler::ResponseActionResponse,
@@ -261,6 +270,7 @@ use super::zone_handler;
         (name = "Zones", description = "Security zone configuration and policies"),
         (name = "MITRE ATT&CK", description = "MITRE ATT&CK coverage and technique mapping"),
         (name = "Fingerprints", description = "JA4+ TLS fingerprint cache and analysis"),
+        (name = "Captures", description = "Manual packet capture (pcap)"),
         (name = "Responses", description = "Manual time-bounded response actions (block/throttle with TTL)"),
     )
 )]
