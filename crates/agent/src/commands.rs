@@ -445,12 +445,14 @@ pub async fn cmd_alerts_list(
     client: &ApiClient,
     component: Option<&str>,
     severity: Option<&str>,
+    tactic: Option<&str>,
+    technique: Option<&str>,
     limit: u64,
     offset: u64,
     output: OutputFormat,
 ) -> Result<()> {
     let resp = client
-        .list_alerts(component, severity, limit, offset)
+        .list_alerts(component, severity, tactic, technique, limit, offset)
         .await?;
 
     if output == OutputFormat::Json {

@@ -16,6 +16,10 @@ pub struct AlertQuery {
     pub rule_id: Option<String>,
     /// Filter by false-positive flag.
     pub false_positive: Option<bool>,
+    /// Filter by MITRE ATT&CK tactic (kebab-case, e.g. "exfiltration").
+    pub tactic: Option<String>,
+    /// Filter by MITRE ATT&CK technique ID (e.g. "T1041").
+    pub technique: Option<String>,
     /// Maximum number of entries to return.
     pub limit: usize,
     /// Number of entries to skip.
@@ -55,6 +59,18 @@ impl AlertQuery {
         {
             return false;
         }
+        if let Some(ref tactic) = self.tactic {
+            match &alert.mitre_attack {
+                Some(m) if m.tactic.eq_ignore_ascii_case(tactic) => {}
+                _ => return false,
+            }
+        }
+        if let Some(ref technique) = self.technique {
+            match &alert.mitre_attack {
+                Some(m) if m.technique_id.eq_ignore_ascii_case(technique) => {}
+                _ => return false,
+            }
+        }
         true
     }
 }
@@ -63,6 +79,8 @@ impl AlertQuery {
 mod tests {
     use super::*;
     use crate::common::entity::{DomainMode, RuleId};
+
+    use crate::alert::mitre::MitreAttackInfo;
 
     fn make_alert(component: &str, severity: Severity, rule_id: &str, fp: bool) -> Alert {
         Alert {
@@ -209,5 +227,69 @@ mod tests {
         assert!(!q.matches(&make_alert("dlp", Severity::High, "dlp-001", false)));
         assert!(!q.matches(&make_alert("ids", Severity::Low, "ids-001", false)));
         assert!(!q.matches(&make_alert("ids", Severity::High, "ids-001", true)));
+    }
+
+    fn make_alert_with_mitre(tactic: &str, technique_id: &str) -> Alert {
+        let mut a = make_alert("ids", Severity::High, "ids-001", false);
+        a.mitre_attack = Some(MitreAttackInfo {
+            technique_id: technique_id.to_string(),
+            technique_name: "test".to_string(),
+            tactic: tactic.to_string(),
+        });
+        a
+    }
+
+    #[test]
+    fn tactic_filter() {
+        let q = AlertQuery {
+            tactic: Some("exfiltration".to_string()),
+            ..Default::default()
+        };
+        assert!(q.matches(&make_alert_with_mitre("exfiltration", "T1041")));
+        assert!(!q.matches(&make_alert_with_mitre("impact", "T1499")));
+        // No mitre_attack → no match
+        assert!(!q.matches(&make_alert("ids", Severity::High, "ids-001", false)));
+    }
+
+    #[test]
+    fn tactic_filter_case_insensitive() {
+        let q = AlertQuery {
+            tactic: Some("EXFILTRATION".to_string()),
+            ..Default::default()
+        };
+        assert!(q.matches(&make_alert_with_mitre("exfiltration", "T1041")));
+    }
+
+    #[test]
+    fn technique_filter() {
+        let q = AlertQuery {
+            technique: Some("T1041".to_string()),
+            ..Default::default()
+        };
+        assert!(q.matches(&make_alert_with_mitre("exfiltration", "T1041")));
+        assert!(!q.matches(&make_alert_with_mitre("exfiltration", "T1048")));
+        // No mitre_attack → no match
+        assert!(!q.matches(&make_alert("ids", Severity::High, "ids-001", false)));
+    }
+
+    #[test]
+    fn technique_filter_case_insensitive() {
+        let q = AlertQuery {
+            technique: Some("t1041".to_string()),
+            ..Default::default()
+        };
+        assert!(q.matches(&make_alert_with_mitre("exfiltration", "T1041")));
+    }
+
+    #[test]
+    fn combined_tactic_and_technique() {
+        let q = AlertQuery {
+            tactic: Some("exfiltration".to_string()),
+            technique: Some("T1041".to_string()),
+            ..Default::default()
+        };
+        assert!(q.matches(&make_alert_with_mitre("exfiltration", "T1041")));
+        assert!(!q.matches(&make_alert_with_mitre("exfiltration", "T1048")));
+        assert!(!q.matches(&make_alert_with_mitre("impact", "T1041")));
     }
 }

@@ -14,6 +14,10 @@ message StreamAlertsRequest {
   string min_severity = 1;
   // Optional component filter (e.g. "ids", "dlp", "threatintel"). Empty = all components.
   string component = 2;
+  // Optional MITRE ATT&CK tactic filter (e.g. "exfiltration"). Empty = all tactics.
+  string mitre_tactic = 3;
+  // Optional MITRE ATT&CK technique ID filter (e.g. "T1041"). Empty = all techniques.
+  string mitre_technique_id = 4;
 }
 
 // A single alert event streamed to the client.

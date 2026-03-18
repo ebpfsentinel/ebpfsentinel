@@ -108,10 +108,22 @@ impl AlertStreamService for AlertStreamServiceImpl {
         } else {
             Some(req.component.to_lowercase())
         };
+        let tactic_filter = if req.mitre_tactic.is_empty() {
+            None
+        } else {
+            Some(req.mitre_tactic.to_lowercase())
+        };
+        let technique_filter = if req.mitre_technique_id.is_empty() {
+            None
+        } else {
+            Some(req.mitre_technique_id.to_uppercase())
+        };
 
         tracing::info!(
             min_severity = %req.min_severity,
             component = %req.component,
+            mitre_tactic = %req.mitre_tactic,
+            mitre_technique_id = %req.mitre_technique_id,
             "gRPC client subscribed to alert stream"
         );
 
@@ -130,6 +142,20 @@ impl AlertStreamService for AlertStreamServiceImpl {
                         && alert.component.to_lowercase() != *comp
                     {
                         return None;
+                    }
+                    // Apply MITRE ATT&CK tactic filter
+                    if let Some(ref tactic) = tactic_filter {
+                        match &alert.mitre_attack {
+                            Some(m) if m.tactic.to_lowercase() == *tactic => {}
+                            _ => return None,
+                        }
+                    }
+                    // Apply MITRE ATT&CK technique filter
+                    if let Some(ref technique) = technique_filter {
+                        match &alert.mitre_attack {
+                            Some(m) if m.technique_id.to_uppercase() == *technique => {}
+                            _ => return None,
+                        }
                     }
                     Some(Ok(alert_to_event(&alert)))
                 }
@@ -238,6 +264,8 @@ mod tests {
         let request = Request::new(proto::StreamAlertsRequest {
             min_severity: String::new(),
             component: String::new(),
+            mitre_tactic: String::new(),
+            mitre_technique_id: String::new(),
         });
 
         let response = svc.stream_alerts(request).await.unwrap();
@@ -260,6 +288,8 @@ mod tests {
         let request = Request::new(proto::StreamAlertsRequest {
             min_severity: "high".to_string(),
             component: String::new(),
+            mitre_tactic: String::new(),
+            mitre_technique_id: String::new(),
         });
 
         let response = svc.stream_alerts(request).await.unwrap();
@@ -284,6 +314,8 @@ mod tests {
         let request = Request::new(proto::StreamAlertsRequest {
             min_severity: String::new(),
             component: "dlp".to_string(),
+            mitre_tactic: String::new(),
+            mitre_technique_id: String::new(),
         });
 
         let response = svc.stream_alerts(request).await.unwrap();

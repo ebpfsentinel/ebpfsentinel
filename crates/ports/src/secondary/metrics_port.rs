@@ -32,8 +32,8 @@ pub trait FirewallMetrics: Send + Sync {
 // ── Alert pipeline metrics ─────────────────────────────────────────
 
 pub trait AlertMetrics: Send + Sync {
-    /// Record an alert produced by a component with given severity.
-    fn record_alert(&self, _component: &str, _severity: &str) {}
+    /// Record an alert produced by a component with given severity and ATT&CK technique.
+    fn record_alert(&self, _component: &str, _severity: &str, _technique_id: &str) {}
 
     /// Record an alert dropped (dedup, throttle, backpressure, etc.).
     fn record_alert_dropped(&self, _reason: &str) {}
@@ -227,7 +227,7 @@ mod tests {
             port.record_packet("eth0", "pass");
             port.set_rules_loaded("firewall", 10);
             port.record_config_reload("firewall", "success");
-            port.record_alert("ids", "high");
+            port.record_alert("ids", "high", "T1071");
             port.record_alert_dropped("dedup");
             port.record_circuit_state("webhook", 0);
             port.set_ips_blacklist_size(10);

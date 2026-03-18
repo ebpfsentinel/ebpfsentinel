@@ -688,10 +688,13 @@ impl ApiClient {
 
     // ── Alerts ──────────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn list_alerts(
         &self,
         component: Option<&str>,
         severity: Option<&str>,
+        tactic: Option<&str>,
+        technique: Option<&str>,
         limit: u64,
         offset: u64,
     ) -> anyhow::Result<AlertListResponse> {
@@ -702,6 +705,12 @@ impl ApiClient {
         }
         if let Some(s) = severity {
             req = req.query(&[("min_severity", s)]);
+        }
+        if let Some(t) = tactic {
+            req = req.query(&[("tactic", t)]);
+        }
+        if let Some(t) = technique {
+            req = req.query(&[("technique", t)]);
         }
         let resp = req
             .send()

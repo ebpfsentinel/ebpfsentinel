@@ -32,6 +32,10 @@ pub struct AlertQueryParams {
     pub from: Option<u64>,
     /// End of time range (nanoseconds since epoch, inclusive).
     pub to: Option<u64>,
+    /// Filter by MITRE ATT&CK tactic (e.g. "exfiltration", "impact").
+    pub tactic: Option<String>,
+    /// Filter by MITRE ATT&CK technique ID (e.g. "T1041").
+    pub technique: Option<String>,
     /// Maximum entries to return (default 100, max 1000).
     pub limit: Option<usize>,
     /// Number of entries to skip (default 0).
@@ -200,6 +204,8 @@ pub async fn list_alerts(
         min_severity,
         rule_id: params.rule_id,
         false_positive: params.false_positive,
+        tactic: params.tactic,
+        technique: params.technique,
         limit,
         offset,
     };

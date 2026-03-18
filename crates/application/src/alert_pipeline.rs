@@ -115,7 +115,12 @@ impl AlertPipeline {
 
         // Record alert metrics
         let severity_str = severity_label(alert.severity);
-        self.metrics.record_alert(&alert.component, severity_str);
+        let technique_id = alert
+            .mitre_attack
+            .as_ref()
+            .map_or("", |m| m.technique_id.as_str());
+        self.metrics
+            .record_alert(&alert.component, severity_str, technique_id);
         self.metrics
             .record_alert_by_rule(&alert.component, &alert.rule_id.0);
 
@@ -217,7 +222,12 @@ impl AlertPipeline {
 
         // Record alert metrics
         let severity_str = severity_label(alert.severity);
-        self.metrics.record_alert(&alert.component, severity_str);
+        let technique_id = alert
+            .mitre_attack
+            .as_ref()
+            .map_or("", |m| m.technique_id.as_str());
+        self.metrics
+            .record_alert(&alert.component, severity_str, technique_id);
         self.metrics
             .record_alert_by_rule(&alert.component, &alert.rule_id.0);
 
@@ -319,7 +329,12 @@ impl AlertPipeline {
 
         // Record alert metrics
         let severity_str = severity_label(alert.severity);
-        self.metrics.record_alert(&alert.component, severity_str);
+        let technique_id = alert
+            .mitre_attack
+            .as_ref()
+            .map_or("", |m| m.technique_id.as_str());
+        self.metrics
+            .record_alert(&alert.component, severity_str, technique_id);
         self.metrics
             .record_alert_by_rule(&alert.component, &alert.rule_id.0);
 
@@ -494,7 +509,7 @@ mod tests {
     impl PacketMetrics for TestMetrics {}
     impl FirewallMetrics for TestMetrics {}
     impl AlertMetrics for TestMetrics {
-        fn record_alert(&self, component: &str, severity: &str) {
+        fn record_alert(&self, component: &str, severity: &str, _technique_id: &str) {
             self.alert_calls.fetch_add(1, Ordering::Relaxed);
             *self.last_component.lock().unwrap() = component.to_string();
             *self.last_severity.lock().unwrap() = severity.to_string();

@@ -228,6 +228,12 @@ pub enum AlertsCommand {
         /// Filter by minimum severity (low, medium, high, critical)
         #[arg(long)]
         severity: Option<String>,
+        /// Filter by MITRE ATT&CK tactic (e.g. exfiltration, impact)
+        #[arg(long)]
+        tactic: Option<String>,
+        /// Filter by MITRE ATT&CK technique ID (e.g. T1041)
+        #[arg(long)]
+        technique: Option<String>,
         /// Maximum number of results
         #[arg(long, default_value_t = 100)]
         limit: u64,
@@ -756,13 +762,43 @@ mod tests {
                 AlertsCommand::List {
                     component,
                     severity,
+                    tactic,
+                    technique,
                     limit,
                     offset,
                 } => {
                     assert_eq!(component.as_deref(), Some("ids"));
                     assert_eq!(severity.as_deref(), Some("high"));
+                    assert!(tactic.is_none());
+                    assert!(technique.is_none());
                     assert_eq!(limit, 50);
                     assert_eq!(offset, 0);
+                }
+                AlertsCommand::MarkFp { .. } => panic!("expected List"),
+            },
+            _ => panic!("expected Alerts command"),
+        }
+    }
+
+    #[test]
+    fn cli_alerts_list_with_mitre_filters() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "alerts",
+            "list",
+            "--tactic",
+            "exfiltration",
+            "--technique",
+            "T1041",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Alerts(args)) => match args.command {
+                AlertsCommand::List {
+                    tactic, technique, ..
+                } => {
+                    assert_eq!(tactic.as_deref(), Some("exfiltration"));
+                    assert_eq!(technique.as_deref(), Some("T1041"));
                 }
                 AlertsCommand::MarkFp { .. } => panic!("expected List"),
             },

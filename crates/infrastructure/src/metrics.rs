@@ -44,6 +44,7 @@ pub struct ReloadLabels {
 pub struct AlertLabels {
     pub component: String,
     pub severity: String,
+    pub technique_id: String,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -544,11 +545,12 @@ impl FirewallMetrics for AgentMetrics {
 }
 
 impl AlertMetrics for AgentMetrics {
-    fn record_alert(&self, component: &str, severity: &str) {
+    fn record_alert(&self, component: &str, severity: &str, technique_id: &str) {
         self.alerts_total
             .get_or_create(&AlertLabels {
                 component: component.to_string(),
                 severity: severity.to_string(),
+                technique_id: technique_id.to_string(),
             })
             .inc();
     }
@@ -863,7 +865,7 @@ mod tests {
         port.record_event_dropped("parse_error");
         port.observe_processing_duration("xdp_firewall", 0.001);
         port.record_config_reload("firewall", "success");
-        port.record_alert("ids", "high");
+        port.record_alert("ids", "high", "T1071");
         port.record_alert_dropped("dedup");
         port.record_circuit_state("webhook", 0);
         port.set_ips_blacklist_size(5);
@@ -878,14 +880,16 @@ mod tests {
     #[test]
     fn alert_counter_increments() {
         let metrics = AgentMetrics::new();
-        metrics.record_alert("ids", "high");
-        metrics.record_alert("ids", "critical");
+        metrics.record_alert("ids", "high", "T1071");
+        metrics.record_alert("ids", "critical", "T1041");
 
         let encoded = metrics.encode();
         assert!(encoded.contains("ebpfsentinel_alerts"));
         assert!(encoded.contains("component=\"ids\""));
         assert!(encoded.contains("severity=\"high\""));
         assert!(encoded.contains("severity=\"critical\""));
+        assert!(encoded.contains("technique_id=\"T1071\""));
+        assert!(encoded.contains("technique_id=\"T1041\""));
     }
 
     #[test]

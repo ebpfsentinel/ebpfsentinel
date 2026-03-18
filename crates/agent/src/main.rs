@@ -102,6 +102,8 @@ async fn main() -> Result<()> {
                 AlertsCommand::List {
                     component,
                     severity,
+                    tactic,
+                    technique,
                     limit,
                     offset,
                 } => {
@@ -109,6 +111,8 @@ async fn main() -> Result<()> {
                         &client,
                         component.as_deref(),
                         severity.as_deref(),
+                        tactic.as_deref(),
+                        technique.as_deref(),
                         limit,
                         offset,
                         output,
