@@ -66,7 +66,10 @@ pub fn load_rustls_config(
 }
 
 /// Build a [`CryptoProvider`] with key exchange groups ordered by PQ mode.
-fn build_crypto_provider(pq_mode: PqMode) -> tokio_rustls::rustls::crypto::CryptoProvider {
+///
+/// Public so that the enterprise crate can build mTLS `ServerConfig`/`ClientConfig`
+/// for HA replication and multi-cluster federation with the same PQ settings.
+pub fn build_crypto_provider(pq_mode: PqMode) -> tokio_rustls::rustls::crypto::CryptoProvider {
     let mut provider = aws_lc_rs::default_provider();
 
     provider.kx_groups = match pq_mode {
