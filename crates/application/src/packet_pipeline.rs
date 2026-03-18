@@ -8,6 +8,7 @@ use domain::firewall::entity::FirewallAction;
 use domain::ids::entity::IdsAlert;
 
 use crate::alert_event::AlertEvent;
+use domain::dns::encrypted_dns::EncryptedDnsDetector;
 use domain::l7::entity::{DetectedProtocol, ParsedProtocol};
 use domain::l7::ja4::{self, FingerprintCache, FlowKey};
 use domain::l7::parser::{detect_protocol, parse_payload};
@@ -73,6 +74,7 @@ pub struct EventDispatcher {
     ddos_service: Option<Arc<RwLock<DdosAppService>>>,
     dns_blocklist_svc: Option<Arc<DnsBlocklistAppService>>,
     fingerprint_cache: Arc<std::sync::RwLock<FingerprintCache>>,
+    encrypted_dns_detector: EncryptedDnsDetector,
 }
 
 impl EventDispatcher {
@@ -102,6 +104,7 @@ impl EventDispatcher {
                 10_000,
                 std::time::Duration::from_secs(300),
             ))),
+            encrypted_dns_detector: EncryptedDnsDetector::new(),
         }
     }
 
@@ -489,6 +492,22 @@ impl EventDispatcher {
             };
             if let Ok(mut cache) = self.fingerprint_cache.write() {
                 cache.insert(flow_key, fp);
+            }
+
+            // Detect encrypted DNS (DoH/DoT)
+            if let Some(detection) = self.encrypted_dns_detector.detect(
+                tls_hello.sni.as_deref(),
+                header.dst_port,
+                header.src_addr,
+                header.dst_addr,
+            ) {
+                tracing::info!(
+                    protocol = ?detection.protocol,
+                    resolver = %detection.resolver,
+                    src_ip = %header.src_ip(),
+                    dst_port = header.dst_port,
+                    "encrypted DNS detected"
+                );
             }
         }
 
