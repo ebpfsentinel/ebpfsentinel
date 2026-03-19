@@ -91,7 +91,7 @@ jobs:
           shared-key: release-${{ matrix.arch }}
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler ${{ matrix.musl_pkg }} llvm-dev
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev ${{ matrix.musl_pkg }} llvm-dev
 
       - name: Install bpf-linker
         run: |
