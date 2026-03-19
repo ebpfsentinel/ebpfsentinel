@@ -68,6 +68,19 @@ pub enum AiSecurityMitreReason {
     DataExfiltration,
 }
 
+/// Sub-reason for TLS intelligence MITRE mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsIntelligenceMitreReason {
+    /// JA4 fingerprint matches known C2/malware tool.
+    ThreatMatch,
+    /// Rare TLS fingerprint behavior anomaly.
+    BehaviorAnomaly,
+    /// Weak or deprecated cipher/protocol usage.
+    WeakCrypto,
+    /// Connection not using post-quantum key exchange.
+    PqcNonCompliant,
+}
+
 /// Context passed to [`lookup`] to select the correct ATT&CK technique.
 pub enum MitreContext<'a> {
     Ids {
@@ -84,6 +97,7 @@ pub enum MitreContext<'a> {
     MlAnomaly(MlAnomalyType),
     AiSecurity(AiSecurityMitreReason),
     EncryptedDnsPolicy,
+    TlsIntelligence(TlsIntelligenceMitreReason),
 }
 
 /// Return the ATT&CK technique for the given alert context.
@@ -142,6 +156,27 @@ pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
         },
 
         MitreContext::EncryptedDnsPolicy => info("T1071.004", "DNS", "command-and-control"),
+
+        MitreContext::TlsIntelligence(reason) => match reason {
+            TlsIntelligenceMitreReason::ThreatMatch => info(
+                "T1573.002",
+                "Encrypted Channel: Asymmetric Cryptography",
+                "command-and-control",
+            ),
+            TlsIntelligenceMitreReason::BehaviorAnomaly => {
+                info("T1071.001", "Web Protocols", "command-and-control")
+            }
+            TlsIntelligenceMitreReason::WeakCrypto => info(
+                "T1573.001",
+                "Encrypted Channel: Symmetric Cryptography",
+                "command-and-control",
+            ),
+            TlsIntelligenceMitreReason::PqcNonCompliant => info(
+                "T1600.001",
+                "Weaken Encryption: Reduce Key Space",
+                "defense-evasion",
+            ),
+        },
 
         MitreContext::Ddos(attack_type) => match attack_type {
             DdosAttackType::SynFlood => info("T1499.001", "OS Exhaustion Flood", "impact"),
@@ -308,7 +343,7 @@ pub fn feature_index_to_ml_anomaly_type(feature_idx: usize) -> MlAnomalyType {
 }
 
 fn all_coverage_entries() -> Vec<CoverageEntry> {
-    let mut entries = Vec::with_capacity(47);
+    let mut entries = Vec::with_capacity(51);
     entries.extend(firewall_ips_coverage_entries());
     entries.extend(ratelimit_coverage_entries());
     entries.extend(l7_coverage_entries());
@@ -316,6 +351,7 @@ fn all_coverage_entries() -> Vec<CoverageEntry> {
     entries.extend(ddos_coverage_entries());
     entries.extend(ml_anomaly_coverage_entries());
     entries.extend(ai_security_coverage_entries());
+    entries.extend(tls_intelligence_coverage_entries());
     entries
 }
 
@@ -348,6 +384,39 @@ fn ai_security_coverage_entries() -> Vec<CoverageEntry> {
             "DNS",
             "command-and-control",
             "Encrypted DNS policy violation",
+        ),
+    ]
+}
+
+fn tls_intelligence_coverage_entries() -> Vec<CoverageEntry> {
+    vec![
+        entry(
+            "tls-intelligence",
+            "T1573.002",
+            "Encrypted Channel: Asymmetric Cryptography",
+            "command-and-control",
+            "JA4 fingerprint matches known C2/malware tool",
+        ),
+        entry(
+            "tls-intelligence",
+            "T1071.001",
+            "Web Protocols",
+            "command-and-control",
+            "Rare TLS fingerprint behavior anomaly",
+        ),
+        entry(
+            "tls-intelligence",
+            "T1573.001",
+            "Encrypted Channel: Symmetric Cryptography",
+            "command-and-control",
+            "Weak or deprecated cipher/protocol usage",
+        ),
+        entry(
+            "tls-intelligence",
+            "T1600.001",
+            "Weaken Encryption: Reduce Key Space",
+            "defense-evasion",
+            "Connection not using post-quantum key exchange",
         ),
     ]
 }
@@ -1405,5 +1474,56 @@ mod tests {
         assert!(technique_ids.contains(&"T1048"));
         assert!(technique_ids.contains(&"T1048.001"));
         assert!(technique_ids.contains(&"T1071.004"));
+    }
+
+    #[test]
+    fn tls_intelligence_threat_match_maps_to_t1573_002() {
+        let info = lookup(&MitreContext::TlsIntelligence(
+            TlsIntelligenceMitreReason::ThreatMatch,
+        ));
+        assert_eq!(info.technique_id, "T1573.002");
+        assert_eq!(info.tactic, "command-and-control");
+    }
+
+    #[test]
+    fn tls_intelligence_behavior_anomaly_maps_to_t1071_001() {
+        let info = lookup(&MitreContext::TlsIntelligence(
+            TlsIntelligenceMitreReason::BehaviorAnomaly,
+        ));
+        assert_eq!(info.technique_id, "T1071.001");
+        assert_eq!(info.tactic, "command-and-control");
+    }
+
+    #[test]
+    fn tls_intelligence_weak_crypto_maps_to_t1573_001() {
+        let info = lookup(&MitreContext::TlsIntelligence(
+            TlsIntelligenceMitreReason::WeakCrypto,
+        ));
+        assert_eq!(info.technique_id, "T1573.001");
+        assert_eq!(info.tactic, "command-and-control");
+    }
+
+    #[test]
+    fn tls_intelligence_pqc_non_compliant_maps_to_t1600_001() {
+        let info = lookup(&MitreContext::TlsIntelligence(
+            TlsIntelligenceMitreReason::PqcNonCompliant,
+        ));
+        assert_eq!(info.technique_id, "T1600.001");
+        assert_eq!(info.tactic, "defense-evasion");
+    }
+
+    #[test]
+    fn tls_intelligence_coverage_report() {
+        let report = coverage_report(&["tls-intelligence"]);
+        assert_eq!(report.total_techniques, 4);
+        let technique_ids: Vec<&str> = report
+            .techniques
+            .iter()
+            .map(|t| t.technique_id.as_str())
+            .collect();
+        assert!(technique_ids.contains(&"T1573.002"));
+        assert!(technique_ids.contains(&"T1071.001"));
+        assert!(technique_ids.contains(&"T1573.001"));
+        assert!(technique_ids.contains(&"T1600.001"));
     }
 }

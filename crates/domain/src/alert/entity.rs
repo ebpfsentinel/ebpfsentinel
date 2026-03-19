@@ -145,6 +145,12 @@ pub struct Alert {
     /// AI security: exfiltration detection type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_exfil_type: Option<String>,
+    /// TLS intelligence: threat category (C2, Malware, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_threat_category: Option<String>,
+    /// TLS intelligence: PQC compliance status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_pqc_status: Option<String>,
 }
 
 impl Alert {
@@ -194,6 +200,8 @@ impl Alert {
             ai_sni: None,
             ai_bytes_sent: None,
             ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
         }
     }
 
@@ -243,6 +251,8 @@ impl Alert {
             ai_sni: None,
             ai_bytes_sent: None,
             ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
         }
     }
 
@@ -293,6 +303,8 @@ impl Alert {
             ai_sni: None,
             ai_bytes_sent: None,
             ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
         }
     }
 
@@ -355,6 +367,8 @@ impl Alert {
             ai_sni: None,
             ai_bytes_sent: None,
             ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
         }
     }
 
@@ -417,6 +431,8 @@ impl Alert {
             ai_sni: None,
             ai_bytes_sent: None,
             ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
         }
     }
 
@@ -486,6 +502,8 @@ impl Alert {
             ai_sni: None,
             ai_bytes_sent: None,
             ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
         }
     }
 
@@ -547,6 +565,8 @@ impl Alert {
             ai_sni: None,
             ai_bytes_sent: None,
             ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
         }
     }
 
@@ -617,6 +637,8 @@ impl Alert {
             ai_sni: ai_sni.map(str::to_string),
             ai_bytes_sent,
             ai_exfil_type: ai_exfil_type.map(str::to_string),
+            tls_threat_category: None,
+            tls_pqc_status: None,
         }
     }
 

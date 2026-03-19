@@ -196,6 +196,8 @@ mod tests {
             ai_sni: None,
             ai_bytes_sent: None,
             ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
         }
     }
 
