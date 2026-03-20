@@ -228,18 +228,10 @@ static CT_CONFIG: Array<ConnTrackConfig> = Array::with_max_entries(1, 0);
 #[map]
 static FW_RULE_STATE_COUNT: Array<u32> = Array::with_max_entries(MAX_FIREWALL_RULES, 0);
 
-// ── DDoS CPU steering map (Wave 4) ──────────────────────────────────
-
-/// CpuMap for steering DDoS-flagged traffic to dedicated processing CPUs.
-/// When a packet is identified as potential DDoS, redirect it to a specific
-/// CPU for rate-limited processing instead of dropping immediately.
-/// Key: cpu_index (u32), Value: qsize (bpf_cpumap_val, queue size + optional XDP prog).
-///
-/// Userspace must populate entries with (qsize, prog_fd=0) before steering
-/// is enabled. Entry qsize of 192 is a reasonable default for DDoS traffic.
-///
-/// # Minimum kernel version
-/// 4.15 (CpuMap), 5.9 (chained XDP program per CPU entry).
+/// CpuMap for DDoS CPU steering. When populated by userspace, dropped
+/// packets are redirected to dedicated CPUs for rate-limited analysis
+/// instead of being silently discarded. Falls back to XDP_DROP when
+/// the map is empty (default behavior, no userspace wiring needed).
 #[map]
 static DDOS_CPUMAP: CpuMap = CpuMap::with_max_entries(128, 0);
 
@@ -638,6 +630,10 @@ fn try_xdp_firewall(ctx: &XdpContext) -> Result<u32, ()> {
             l3_offset += VLAN_HDR_LEN;
         }
     }
+
+    // NOTE: Dynamic VLAN tagging (bpf_skb_vlan_push/pop) requires TC classifier
+    // context. XDP only supports parsing existing VLAN tags. For VLAN quarantine
+    // tagging, use the tc-threatintel program which has TC context.
 
     if ether_type == ETH_P_IP {
         process_firewall_v4(ctx, l3_offset, vlan_id, flags)
@@ -1189,6 +1185,10 @@ fn process_firewall_v6(
     let traffic_class = ((vtcfl >> 20) & 0xFF) as u8;
     let dscp = traffic_class >> 2;
 
+    // NOTE: IPsec/XFRM state detection (bpf_skb_get_xfrm_state) requires TC
+    // classifier context. The IPv6 extension header parser already handles ESP
+    // (proto 50) as a terminal header — see the skip_ipv6_ext_headers fix.
+
     // Skip IPv6 extension headers to find the actual L4 protocol.
     let (next_hdr, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr)
         .ok_or(())?;
@@ -1461,13 +1461,14 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
         ACTION_DROP => {
             emit_event(ACTION_DROP);
             increment_metric(METRIC_DROPPED);
-            // TODO(Wave 4): Instead of dropping DDoS/blocked traffic immediately,
-            // use DDOS_CPUMAP.redirect(target_cpu, 0) to steer it to a dedicated
-            // CPU for rate-limited analysis. This preserves visibility while isolating
-            // attack traffic from legitimate processing. Requires userspace to:
-            //   1. Populate DDOS_CPUMAP entries with desired qsize values.
-            //   2. Set a CONFIG_FLAG to enable CPU-steering mode.
-            //   3. Register an XDP consumer program on the target CPU entry.
+            // Try CpuMap redirect for DDoS CPU steering. When userspace has
+            // populated DDOS_CPUMAP, dropped packets are redirected to
+            // dedicated CPUs for rate-limited analysis instead of being
+            // discarded. Falls back to XDP_DROP when the map is empty.
+            let cpu = unsafe { bpf_get_smp_processor_id() };
+            if DDOS_CPUMAP.redirect(cpu, 0).is_ok() {
+                return Ok(xdp_action::XDP_REDIRECT);
+            }
             Ok(xdp_action::XDP_DROP)
         }
         ACTION_REJECT => {

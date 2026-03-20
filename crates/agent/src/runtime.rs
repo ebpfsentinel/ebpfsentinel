@@ -431,7 +431,8 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
 // ── eBPF lifecycle ──────────────────────────────────────────────
 
 use adapters::ebpf::{
-    EbpfLoader, InterfaceGroupsManager, MetricsReader, TenantSubnetMapManager, TenantVlanMapManager,
+    EbpfLoader, IdsMirrorMapManager, InterfaceGroupsManager, MetricsReader,
+    TenantSubnetMapManager, TenantVlanMapManager,
 };
 use application::packet_pipeline::AgentEvent;
 use tokio::sync::mpsc;
@@ -461,6 +462,12 @@ pub struct EbpfLoadResult {
     /// Enterprise callers can populate this with `(ip, prefix_len, tenant_id)`
     /// tuples after loading to wire subnet-based tenant identification.
     pub tenant_subnet_mgr: TenantSubnetMapManager,
+    /// Manager for the `IDS_MIRROR_CONFIG` map in `tc-ids`.
+    ///
+    /// Present only when `tc-ids` was loaded successfully. Enterprise callers
+    /// use this to enable/disable forensic packet mirroring at runtime without
+    /// reloading the eBPF program.
+    pub ids_mirror_mgr: Option<IdsMirrorMapManager>,
 }
 
 /// Load and attach all eBPF programs, wiring map managers to services.
@@ -487,6 +494,7 @@ pub async fn load_ebpf_programs(
     let mut tenant_vlan_mgr = TenantVlanMapManager::new();
     let mut tenant_subnet_mgr = TenantSubnetMapManager::new();
     let mut program_status = std::collections::HashMap::new();
+    let mut ids_mirror_mgr: Option<IdsMirrorMapManager> = None;
 
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(4096);
 
@@ -592,6 +600,10 @@ pub async fn load_ebpf_programs(
                 if let Some(rdr) = ids_rdr {
                     metrics_readers.push(rdr);
                 }
+                // Take IDS_MIRROR_CONFIG before consuming the loader.
+                // Enterprise callers use this to enable/disable forensic
+                // packet mirroring at runtime without reloading tc-ids.
+                ids_mirror_mgr = IdsMirrorMapManager::new(loader.ebpf_mut());
                 iface_groups_mgr.add_map(loader.ebpf_mut());
                 tenant_vlan_mgr.add_map(loader.ebpf_mut());
                 tenant_subnet_mgr.add_map(loader.ebpf_mut());
@@ -812,6 +824,7 @@ pub async fn load_ebpf_programs(
         event_rx,
         tenant_vlan_mgr,
         tenant_subnet_mgr,
+        ids_mirror_mgr,
     })
 }
 

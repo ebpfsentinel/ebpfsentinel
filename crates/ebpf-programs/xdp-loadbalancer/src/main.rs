@@ -33,6 +33,14 @@ use network_types::{
 // ── Constants ───────────────────────────────────────────────────────
 // Network constants and header structs imported from ebpf_helpers.
 
+// NOTE: bpf_skb_get/set_tunnel_key (v4.3, TC context) enables tunnel
+// encapsulation metadata for VXLAN/GRE backends. XDP-level tunneling
+// requires bpf_skb_adjust_room + manual header construction.
+
+// NOTE: bpf_sk_select_reuseport (v4.19) enables socket-level load
+// balancing via SO_REUSEPORT. Alternative to XDP-level DNAT for
+// localhost services. Requires BPF_PROG_TYPE_SK_REUSEPORT program.
+
 /// Maximum backends per service (verifier bound for iteration).
 const MAX_BACKENDS_PER_SVC: usize = LB_MAX_BACKENDS_V2 as usize;
 
@@ -65,11 +73,9 @@ static LB_RR_STATE: PerCpuArray<u32> = PerCpuArray::with_max_entries(MAX_LB_SERV
 static LB_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(LB_METRIC_COUNT, 0);
 
 /// DevMap for high-performance XDP redirect to backend interfaces.
-/// Populated by userspace with backend interface indices.
-/// Key: backend_index (u32), Value: ifindex (u32) + optional chained XDP prog.
-///
-/// # Minimum kernel version
-/// 4.14 (DevMap), 5.4 (chained XDP program support in DevMap values).
+/// Userspace populates this with backend ifindex values. When an entry
+/// exists for the selected backend, `redirect` is used instead of XDP_TX.
+/// Falls back to MAC swap + XDP_TX when the DevMap entry is absent.
 #[map]
 static LB_DEVMAP: DevMap = DevMap::with_max_entries(256, 0);
 
@@ -157,7 +163,7 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
 
     // Select backend using per-service round-robin index
     let svc_idx = service_key_index(&key);
-    let backend = match select_backend(svc_config, src_ip, svc_idx) {
+    let (backend_id, backend) = match select_backend(svc_config, src_ip, svc_idx) {
         Some(b) => b,
         None => {
             increment_metric(LB_METRIC_PACKETS_NO_BACKEND);
@@ -208,26 +214,6 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
         new_dst_port,
     );
 
-    // Rewrite Ethernet header MACs for XDP_TX.
-    // Swap src/dst so the packet is sent back toward the router/gateway
-    // which will then forward it to the backend on the same L2 segment.
-    // NOTE: This works for same-subnet backends behind a gateway. For
-    // cross-subnet backends, userspace should populate a LB_NEIGH map
-    // with resolved next-hop MACs (not yet implemented).
-    //
-    // TODO(Wave 4): Use bpf_redirect_map(&LB_DEVMAP, backend_ifindex, 0)
-    // for wire-speed forwarding instead of XDP_TX when LB_DEVMAP is populated.
-    // This avoids the MAC swap + XDP_TX pattern and directly forwards to
-    // the backend's network interface at native XDP speed (no re-entry into
-    // the driver's receive path). Requires userspace to populate LB_DEVMAP
-    // with the backend's ifindex before enabling redirect mode.
-    let ethhdr_mut: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
-    unsafe {
-        let tmp = (*ethhdr_mut).src_addr;
-        (*ethhdr_mut).src_addr = (*ethhdr_mut).dst_addr;
-        (*ethhdr_mut).dst_addr = tmp;
-    }
-
     // Metrics + event
     increment_metric(LB_METRIC_PACKETS_FORWARDED);
     add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
@@ -244,21 +230,34 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     );
 
     // Check MTU before forwarding to avoid silent fragmentation.
-    // ifindex 0 = current interface; delta 0 = no size change from encap.
     let mut mtu: u32 = 0;
     let mtu_ret = unsafe {
         bpf_check_mtu(
             ctx.ctx as *mut _,
-            0,           // ifindex 0 = current interface
+            0,
             &mut mtu as *mut u32,
-            0,           // delta: no encapsulation size change
-            0,           // flags
+            0,
+            0,
         )
     };
     if mtu_ret != 0 {
-        // Packet exceeds output MTU — drop rather than cause silent fragmentation.
         increment_metric(LB_METRIC_MTU_EXCEEDED);
         return Ok(xdp_action::XDP_DROP);
+    }
+
+    // Try DevMap redirect first (wire-speed forwarding to backend interface).
+    // If userspace has populated LB_DEVMAP[backend_id] with the backend's
+    // ifindex, redirect directly. Otherwise fall back to MAC swap + XDP_TX.
+    if LB_DEVMAP.redirect(backend_id, 0).is_ok() {
+        return Ok(xdp_action::XDP_REDIRECT);
+    }
+
+    // Fallback: MAC swap + XDP_TX (same-subnet backends behind a gateway)
+    let ethhdr_mut: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
+    unsafe {
+        let tmp = (*ethhdr_mut).src_addr;
+        (*ethhdr_mut).src_addr = (*ethhdr_mut).dst_addr;
+        (*ethhdr_mut).dst_addr = tmp;
     }
 
     Ok(xdp_action::XDP_TX)
@@ -301,7 +300,7 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     let pkt_len = (ctx.data_end() - ctx.data()) as u64;
 
     let svc_idx = service_key_index(&key);
-    let backend = match select_backend(svc_config, src_ip_folded, svc_idx) {
+    let (backend_id, backend) = match select_backend(svc_config, src_ip_folded, svc_idx) {
         Some(b) => b,
         None => {
             increment_metric(LB_METRIC_PACKETS_NO_BACKEND);
@@ -359,16 +358,6 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
         update_l4_checksum_port_only(ctx, l4_offset, next_hdr, old_dst_port, new_dst_port);
     }
 
-    // Rewrite Ethernet header MACs for XDP_TX (same logic as IPv4 path).
-    // TODO(Wave 4): Use LB_DEVMAP.redirect(backend_ifindex, 0) here as well
-    // once DevMap-based forwarding is enabled (see IPv4 path TODO above).
-    let ethhdr_mut: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
-    unsafe {
-        let tmp = (*ethhdr_mut).src_addr;
-        (*ethhdr_mut).src_addr = (*ethhdr_mut).dst_addr;
-        (*ethhdr_mut).dst_addr = tmp;
-    }
-
     increment_metric(LB_METRIC_PACKETS_FORWARDED);
     add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
 
@@ -383,22 +372,26 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
         vlan_id,
     );
 
-    // Check MTU before forwarding to avoid silent fragmentation.
-    // ifindex 0 = current interface; delta 0 = no size change from encap.
+    // Check MTU before forwarding
     let mut mtu: u32 = 0;
     let mtu_ret = unsafe {
-        bpf_check_mtu(
-            ctx.ctx as *mut _,
-            0,           // ifindex 0 = current interface
-            &mut mtu as *mut u32,
-            0,           // delta: no encapsulation size change
-            0,           // flags
-        )
+        bpf_check_mtu(ctx.ctx as *mut _, 0, &mut mtu as *mut u32, 0, 0)
     };
     if mtu_ret != 0 {
-        // Packet exceeds output MTU — drop rather than cause silent fragmentation.
         increment_metric(LB_METRIC_MTU_EXCEEDED);
         return Ok(xdp_action::XDP_DROP);
+    }
+
+    // DevMap redirect first, MAC swap + XDP_TX fallback
+    if LB_DEVMAP.redirect(backend_id, 0).is_ok() {
+        return Ok(xdp_action::XDP_REDIRECT);
+    }
+
+    let ethhdr_mut: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
+    unsafe {
+        let tmp = (*ethhdr_mut).src_addr;
+        (*ethhdr_mut).src_addr = (*ethhdr_mut).dst_addr;
+        (*ethhdr_mut).dst_addr = tmp;
     }
 
     Ok(xdp_action::XDP_TX)
@@ -416,7 +409,7 @@ fn select_backend(
     svc: &LbServiceConfigV2,
     src_ip: u32,
     svc_index: u32,
-) -> Option<&LbBackendEntry> {
+) -> Option<(u32, &LbBackendEntry)> {
     let count = svc.backend_count as usize;
     if count == 0 {
         return None;
@@ -470,7 +463,7 @@ fn select_backend(
         let backend_id = svc.backend_start_id + idx as u32;
         if let Some(be) = unsafe { LB_BACKENDS.get(&backend_id) } {
             if be.healthy == 1 {
-                return Some(be);
+                return Some((backend_id, be));
             }
         }
         i += 1;

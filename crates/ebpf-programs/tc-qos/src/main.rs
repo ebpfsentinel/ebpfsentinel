@@ -10,7 +10,7 @@ use aya_ebpf::{
     programs::TcContext,
 };
 use aya_ebpf_bindings::bindings::_bindgen_ty_28::BPF_SKB_TSTAMP_DELIVERY_MONO;
-use aya_ebpf_bindings::helpers::{bpf_skb_ecn_set_ce, bpf_skb_set_tstamp};
+use aya_ebpf_bindings::helpers::{bpf_get_socket_cookie, bpf_skb_ecn_set_ce, bpf_skb_set_tstamp};
 #[cfg(debug_assertions)]
 use aya_log_ebpf::info;
 use ebpf_common::{
@@ -34,6 +34,10 @@ use network_types::{
     tcp::TcpHdr,
     udp::UdpHdr,
 };
+
+// NOTE: BPF_MAP_TYPE_QUEUE with bpf_map_push/pop_elem (v4.20) enables
+// proper packet queuing for QoS scheduling. Current implementation uses
+// token bucket + EDT timestamps without explicit queuing.
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -515,6 +519,7 @@ fn apply_qos(
         if rand < u32::from(pipe_cfg.loss_rate) {
             increment_qos_metric(QOS_METRIC_DROPPED_LOSS);
             emit_event(
+                ctx,
                 src_addr,
                 dst_addr,
                 src_port,
@@ -589,6 +594,7 @@ fn apply_qos(
         if should_drop {
             increment_qos_metric(QOS_METRIC_DROPPED_QUEUE);
             emit_event(
+                ctx,
                 src_addr,
                 dst_addr,
                 src_port,
@@ -648,6 +654,7 @@ fn apply_qos(
 
         increment_qos_metric(QOS_METRIC_DELAYED);
         emit_event(
+            ctx,
             src_addr,
             dst_addr,
             src_port,
@@ -674,6 +681,7 @@ fn apply_qos(
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn emit_event(
+    ctx: &TcContext,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
     src_port: u16,
@@ -703,7 +711,8 @@ fn emit_event(
             (*ptr).rule_id = rule_id;
             (*ptr).vlan_id = vlan_id;
             (*ptr).cpu_id = bpf_get_smp_processor_id() as u16;
-            (*ptr).socket_cookie = 0;
+            // Populate socket cookie for TC context (not available in XDP).
+            (*ptr).socket_cookie = unsafe { bpf_get_socket_cookie(ctx.skb.skb as *mut _) };
         }
         entry.submit(0);
     } else {

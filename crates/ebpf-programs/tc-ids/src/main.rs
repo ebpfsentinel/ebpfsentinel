@@ -12,7 +12,7 @@ use aya_ebpf::{
     maps::{Array, HashMap, LpmTrie, PerCpuArray, RingBuf, lpm_trie::Key},
     programs::TcContext,
 };
-use aya_ebpf_bindings::helpers::{bpf_skb_load_bytes, bpf_skb_pull_data};
+use aya_ebpf_bindings::helpers::{bpf_clone_redirect, bpf_get_socket_cookie, bpf_skb_load_bytes, bpf_skb_pull_data};
 #[cfg(debug_assertions)]
 use aya_log_ebpf::info;
 use ebpf_helpers::net::{
@@ -88,6 +88,11 @@ static CONFIG_FLAGS: Array<u32> = Array::with_max_entries(1, 0);
 /// Mode + rate_threshold control event emission probability.
 #[map]
 static IDS_SAMPLING_CONFIG: Array<IdsSamplingConfig> = Array::with_max_entries(1, 0);
+
+/// Mirror interface config: index 0 = target ifindex, index 1 = enabled (1/0).
+/// Populated by enterprise forensics module.
+#[map]
+static IDS_MIRROR_CONFIG: Array<u32> = Array::with_max_entries(2, 0);
 
 /// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
 #[map]
@@ -455,7 +460,7 @@ fn process_ids_pattern(
     // but always enforce the drop action for IPS mode.
     if !should_skip_by_sampling() {
         emit_event(
-            src_addr, dst_addr, src_port, dst_port, protocol, pattern, flags, vlan_id,
+            _ctx, src_addr, dst_addr, src_port, dst_port, protocol, pattern, flags, vlan_id,
         );
     }
 
@@ -486,6 +491,7 @@ fn increment_metric(index: u32) {
 /// events_dropped metric — never block the hot path.
 #[inline(always)]
 fn emit_event(
+    ctx: &TcContext,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
     src_port: u16,
@@ -514,11 +520,30 @@ fn emit_event(
             (*ptr).rule_id = pattern.rule_id;
             (*ptr).vlan_id = vlan_id;
             (*ptr).cpu_id = bpf_get_smp_processor_id() as u16;
-            (*ptr).socket_cookie = 0;
+            // Populate socket cookie for TC context (not available in XDP).
+            (*ptr).socket_cookie = unsafe { bpf_get_socket_cookie(ctx.skb.skb as *mut _) };
         }
         entry.submit(0);
     } else {
         increment_metric(METRIC_EVENTS_DROPPED);
+    }
+
+    // Packet mirroring for forensics (enterprise feature, controlled by config map)
+    if let Some(mirror_enabled) = IDS_MIRROR_CONFIG.get(1) {
+        if unsafe { *mirror_enabled } == 1 {
+            if let Some(ifindex) = IDS_MIRROR_CONFIG.get(0) {
+                let target_ifindex = unsafe { *ifindex };
+                if target_ifindex > 0 {
+                    unsafe {
+                        bpf_clone_redirect(
+                            ctx.skb.skb as *mut _,
+                            target_ifindex,
+                            0, // flags: 0 = redirect ingress
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -575,6 +600,7 @@ fn emit_l7_small(
         let ptr = entry.as_mut_ptr();
         unsafe {
             fill_l7_header(
+                ctx,
                 &mut (*ptr).header,
                 src_addr, dst_addr, src_port, dst_port, flags, vlan_id,
             );
@@ -608,6 +634,7 @@ fn emit_l7_full(
         let ptr = entry.as_mut_ptr();
         unsafe {
             fill_l7_header(
+                ctx,
                 &mut (*ptr).header,
                 src_addr, dst_addr, src_port, dst_port, flags, vlan_id,
             );
@@ -628,6 +655,7 @@ fn emit_l7_full(
 /// Fill the L7 event header fields (shared by both tiers).
 #[inline(always)]
 unsafe fn fill_l7_header(
+    ctx: &TcContext,
     header: &mut PacketEvent,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
@@ -649,7 +677,8 @@ unsafe fn fill_l7_header(
         header.rule_id = 0;
         header.vlan_id = vlan_id;
         header.cpu_id = bpf_get_smp_processor_id() as u16;
-        header.socket_cookie = 0;
+        // Populate socket cookie for TC context (not available in XDP).
+        header.socket_cookie = unsafe { bpf_get_socket_cookie(ctx.skb.skb as *mut _) };
     }
 }
 

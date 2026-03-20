@@ -43,6 +43,10 @@ use network_types::{
 // ── Constants ───────────────────────────────────────────────────────
 // Network constants and header structs imported from ebpf_helpers.
 
+// NOTE: bpf_skb_change_proto (v4.8) enables IPv4↔IPv6 protocol translation
+// (NAT64/NAT46). Not currently used — our NAT operates within the same
+// address family. Available for future cross-AF NAT implementation.
+
 /// Offset of src_addr within Ipv4Hdr (standard IP header).
 const IPV4_SRC_OFFSET: usize = 12;
 /// Offset of dst_addr within Ipv4Hdr (standard IP header).

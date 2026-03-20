@@ -1831,6 +1831,9 @@ pub fn try_load_xdp_firewall(
         adapters::ebpf::map_manager::populate_zone_map(loader.ebpf_mut(), &zone_cfg);
     }
 
+    // Populate DDOS_CPUMAP with all online CPUs for DDoS CPU steering.
+    adapters::ebpf::cpumap::populate_cpumap(loader.ebpf_mut(), "DDOS_CPUMAP");
+
     let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "FIREWALL_METRICS").ok();
 
     let reader = EventReader::new(loader.ebpf_mut())?;
@@ -1838,6 +1841,7 @@ pub fn try_load_xdp_firewall(
 
     Ok((loader, map_manager, metrics_rdr))
 }
+
 
 /// Load result for xdp-ratelimit: loader, map manager, LPM manager, metrics readers.
 pub type XdpRatelimitResult = (

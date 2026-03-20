@@ -29,6 +29,9 @@ use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 // Network constants, header structs, ptr_at, skip_ipv6_ext_headers,
 // byte helpers, and metric macros are imported from ebpf_helpers.
 
+// NOTE: bpf_skb_under_cgroup (v4.8) can check cgroup membership for
+// per-container conntrack isolation. Complementary to bpf_get_netns_cookie.
+
 // TCP flags
 const TCP_SYN: u8 = 0x02;
 const TCP_ACK: u8 = 0x10;
@@ -244,6 +247,10 @@ fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         } else {
             // Existing connection — update
             increment_metric(CT_METRIC_HITS);
+            // Enrich with socket UID for process-aware visibility.
+            // bpf_sk_lookup_tcp returns a reference to the socket struct.
+            // Only available in TC context (not XDP).
+            // TODO: Store UID in ConnValue when the struct is extended.
             unsafe {
                 (*entry).last_seen_ns = now;
 

@@ -11,6 +11,7 @@ use aya_ebpf::{
     maps::{Array, LruHashMap, PerCpuArray, RingBuf, bloom_filter::BloomFilter},
     programs::TcContext,
 };
+use aya_ebpf_bindings::helpers::bpf_get_socket_cookie;
 #[cfg(debug_assertions)]
 use aya_log_ebpf::info;
 use ebpf_helpers::net::{
@@ -337,7 +338,7 @@ fn apply_threatintel_action(
 ) -> Result<i32, ()> {
     increment_metric(THREATINTEL_METRIC_MATCHED);
     emit_event(
-        src_addr, dst_addr, src_port, dst_port, protocol, matched, flags, vlan_id,
+        _ctx, src_addr, dst_addr, src_port, dst_port, protocol, matched, flags, vlan_id,
     );
 
     if matched.action == THREATINTEL_ACTION_DROP {
@@ -373,6 +374,7 @@ fn increment_metric(index: u32) {
 /// events_dropped metric — never block the hot path.
 #[inline(always)]
 fn emit_event(
+    ctx: &TcContext,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
     src_port: u16,
@@ -401,7 +403,8 @@ fn emit_event(
             (*ptr).rule_id = matched.feed_id as u32;
             (*ptr).vlan_id = vlan_id;
             (*ptr).cpu_id = bpf_get_smp_processor_id() as u16;
-            (*ptr).socket_cookie = 0;
+            // Populate socket cookie for TC context (not available in XDP).
+            (*ptr).socket_cookie = unsafe { bpf_get_socket_cookie(ctx.skb.skb as *mut _) };
         }
         entry.submit(0);
     } else {
