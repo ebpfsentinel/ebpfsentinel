@@ -699,12 +699,6 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
 // updates after address/port changes.  These are the right helpers for
 // single-field rewrites.
 //
-// TODO(Wave 3): For multi-field rewrites (e.g., both src and dst addr change
-// in the same packet), `bpf_csum_diff` can compute the one's-complement
-// difference across an arbitrary byte range more efficiently:
-//   bpf_csum_diff(old_buf, len, new_buf, len, seed) -> i64
-// The result is then fed into `bpf_l3_csum_replace`/`bpf_l4_csum_replace`
-// with BPF_F_MARK_MANGLED_0 to handle the zero-checksum edge case.
 
 /// Rewrite the destination IP address in the IPv4 header and update checksums.
 #[inline(always)]

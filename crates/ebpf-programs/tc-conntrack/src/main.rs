@@ -250,7 +250,7 @@ fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
             // Enrich with socket UID for process-aware visibility.
             // bpf_sk_lookup_tcp returns a reference to the socket struct.
             // Only available in TC context (not XDP).
-            // TODO: Store UID in ConnValue when the struct is extended.
+            // NOTE: UID storage requires ConnValue ABI change + aya kfunc support (bpf_sk_lookup_tcp).
             unsafe {
                 (*entry).last_seen_ns = now;
 

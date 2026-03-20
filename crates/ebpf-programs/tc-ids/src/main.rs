@@ -63,7 +63,7 @@ use network_types::{
 //   - Full packet (not truncated like RingBuf events)
 //   - Bidirectional (can re-inject modified packets)
 //
-// TODO(Wave 6): Implement when DPI exceeds eBPF verifier limits.
+// NOTE(future): XskMap for AF_XDP zero-copy DPI — requires kernel 4.18+ and aya XskMap wiring.
 
 // ── Maps ────────────────────────────────────────────────────────────
 

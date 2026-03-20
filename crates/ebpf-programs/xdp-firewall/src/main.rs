@@ -81,7 +81,7 @@ use network_types::{
 // aya-ebpf support: aya::maps::HashMap can be used as outer map.
 // Inner maps are created by userspace and inserted as values.
 //
-// TODO(Wave 6): Implement when multi-tenancy requires atomic rule swaps.
+// NOTE(future): HASH_OF_MAPS for per-tenant rule tables — requires aya map-in-map API.
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -119,9 +119,10 @@ static FW_HASH_5TUPLE: HashMap<FwHashKey5Tuple, FwHashValue> =
 static FW_HASH_PORT: HashMap<FwHashKeyPort, FwHashValue> =
     HashMap::with_max_entries(MAX_FW_HASH_PORT, 0);
 
-// NOTE: User RingBuf (BPF_MAP_TYPE_USER_RINGBUF, type 31) requires kernel 6.2+.
-// Removed for 6.1+ compatibility. Config push uses bpf_map_update_elem via
-// the existing map managers until aya exposes the userspace mmap API.
+// NOTE: User RingBuf (BPF_MAP_TYPE_USER_RINGBUF, type 31) is available since
+// kernel 6.1, but aya 0.13.1 does not support loading this map type (returns
+// "Unsupported map type found 31"). Removed until aya exposes UserRingBuf
+// userspace API. Config push uses bpf_map_update_elem via map managers.
 // See: known limitation "User RingBuf config push" in CHANGELOG.md.
 
 /// Per-CPU packet counters. Index: 0=passed, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen, 5=rejected.
@@ -288,7 +289,7 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
 /// // Network namespace cookie can be used for container-level tenant identification
 /// // without relying on LPM subnet matching. Available via:
 /// //   let ns_cookie = unsafe { bpf_get_netns_cookie(ctx.ctx as *mut _) };
-/// // TODO: Wire ns_cookie into tenant matching when namespace-based tenancy is enabled
+/// // NOTE(future): Wire ns_cookie into tenant matching when namespace-based tenancy is enabled
 /// ```
 #[inline(always)]
 unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {

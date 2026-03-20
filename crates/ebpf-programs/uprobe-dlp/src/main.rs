@@ -39,7 +39,7 @@ use ebpf_common::dlp::{
 //   2. Update cumulative stats
 //   3. Alert if thresholds exceeded (e.g., >100KB PII data on one connection)
 //
-// TODO(Wave 6): Implement when per-connection DLP tracking is needed.
+// NOTE(future): SK_STORAGE for per-connection DLP context — requires aya kfunc support.
 
 // ── Maps ────────────────────────────────────────────────────────────
 
