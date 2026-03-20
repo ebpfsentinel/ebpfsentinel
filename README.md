@@ -4,39 +4,105 @@ High-performance network security agent powered by eBPF. Monitors, filters, and 
 
 ## What it does
 
-eBPFsentinel combines a stateful firewall, intrusion detection, rate limiting, traffic shaping, and threat intelligence into a single agent that runs directly in the Linux kernel via eBPF — no kernel modules, no packet copies to userspace.
+> **One agent. All layers.** Replaces iptables + Suricata + tc + ipset + fail2ban
+> with a single Rust binary that enforces security at kernel speed (XDP/TC).
+> No sidecar, no kernel module, no C code.
 
-### Network Security
+### Network Security & Control
 
-- **Stateful Firewall** — L3/L4 packet filtering with conntrack (packet + byte counters), CIDR matching, IP set aliases, GeoIP country blocking (LPM Trie), security zones, VLAN/QinQ 802.1ad filtering, schedule-based rules, IPv6 extension header parsing, and IPv4/IPv6 dual-stack
-- **NAT** — SNAT, DNAT, masquerade, port forwarding, 1:1 NAT with full packet rewriting (IPv4/IPv6), NPTv6 stateless prefix translation (RFC 6296), and hairpin NAT (NAT reflection)
-- **Rate Limiting** — Per-IP protection with 4 algorithms (token bucket, fixed window, sliding window, leaky bucket) and per-country tiers via kernel-side LPM Trie lookup
-- **Traffic Shaping / QoS** — Dummynet-inspired pipes (bandwidth, delay, loss), WF2Q+ weighted queues, 5-tuple+DSCP classifiers with progressive wildcard matching, per-flow token bucket enforcement, FQ-CoDel integration
-- **DDoS Mitigation** — Detects and mitigates SYN flood (XDP SYN cookies via XDP_TX), UDP amplification, ICMP/RST/FIN/ACK flood, and volumetric attacks with per-country detection thresholds and automatic country CIDR blocking via LPM maps
-- **L7 Firewall** — Application-layer filtering for HTTP, TLS/SNI, gRPC, SMTP, FTP, and SMB with GeoIP-based source/destination country matching
-- **Packet Scrubbing** — Kernel-side traffic normalization (TTL/hop limit, MSS clamping, DF clearing, IP ID randomization, TCP flag scrubbing, ECN stripping, TOS/DSCP normalization, TCP timestamp removal)
-- **Multi-WAN Routing** — Policy-based gateway selection with ICMP/TCP health checks, failover, and geographic gateway preference (preferred_for_countries)
-- **L4 Load Balancer** — TCP/UDP/TLS passthrough load balancing with per-service round-robin, weighted, IP hash, and least-connections algorithms, Ethernet MAC swap for correct L2 forwarding
+| Feature | What it does |
+|---------|-------------|
+| **DDoS Mitigation** | XDP-speed SYN cookie validation, UDP/ICMP/TCP flood detection, volumetric attack mitigation, per-country thresholds, automatic CIDR blocking — drops attacks before they reach the TCP stack |
+| **Stateful Firewall** | L3/L4 kernel-side filtering with connection tracking, GeoIP blocking, security zones, VLAN/QinQ support, schedule-based rules, full IPv4/IPv6 dual-stack |
+| **L7 Filtering** | Protocol-aware rules for HTTP, TLS/SNI, gRPC, SMTP, FTP, SMB with GeoIP source/destination matching |
+| **L4 Load Balancer** | TCP/UDP/TLS passthrough with round-robin, weighted, IP hash, and least-connections algorithms |
+| **Traffic Shaping** | Bandwidth limits, delay/loss simulation, weighted fair queuing, per-flow token buckets, EDT pacing, FQ-CoDel AQM |
+| **Rate Limiting** | Four algorithms (token bucket, fixed window, sliding window, leaky bucket), kernel-side per-country tiers |
+| **NAT** | SNAT, DNAT, masquerade, port forwarding, 1:1 NAT, NPTv6 prefix translation, hairpin NAT |
+| **Traffic Normalization** | TTL normalization, MSS clamping, TCP flag/timestamp scrubbing, IP ID randomization, DF/ECN/DSCP rewriting |
+| **Policy Routing** | Multi-gateway selection with ICMP/TCP health checks, automatic failover, geographic preference |
 
-### Threat Detection & Prevention
+### Threat Detection & Response
 
-- **IDS/IPS** — Intrusion detection and prevention with pattern matching, country-aware sampling, per-country detection thresholds, and automatic /24 subnet blocking for high-risk countries via LPM maps
-- **Threat Intelligence** — OSINT feed integration with LRU hash IOC correlation, auto-blocking, and confidence boost for high-risk source countries
-- **GeoIP Blocking** — Country-based traffic blocking via MaxMind databases with O(log n) kernel-side LPM Trie lookup, automatic periodic refresh, and cross-domain enforcement (DDoS auto-block, IPS /24 injection, rate limit country tiers) via coordinated LPM maps
-- **DLP** — Data loss prevention scanning SSL/TLS traffic for sensitive data patterns (PCI, PII, credentials)
-- **DNS Intelligence** — Passive DNS capture, domain blocklists, behavioral reputation scoring with high-risk country factors, and DNS-based alert enrichment
+| Feature | What it does |
+|---------|-------------|
+| **IDS / IPS** | Kernel-side pattern matching with automatic blocking — detects and blocks, not just alerts |
+| **Threat Intelligence** | Plug any OSINT feed (STIX, CSV, JSON) — real-time IOC matching, auto-blocking, no vendor lock-in |
+| **DLP** | Inspects TLS traffic for PCI card numbers, PII, and credential patterns via uprobe interception |
+| **DNS Security** | Passive DNS capture, domain blocklists, behavioral reputation scoring, DNS-enriched alerts |
+| **MITRE ATT&CK Mapping** | Every alert tagged with tactic + technique ID — ready for SOC dashboards and SIEM correlation |
+| **GeoIP Enforcement** | MaxMind-backed country resolution shared across all engines: DDoS auto-block, IPS subnet injection, rate-limit tiers, L7 filtering |
 
 ### Operations
 
-- **REST API** with OpenAPI 3.0 and Swagger UI
-- **gRPC Streaming** for real-time alert subscriptions
+- **REST API** with OpenAPI 3.0, Swagger UI, and SecurityScheme
+- **gRPC Streaming** for real-time alert subscriptions with severity, component, and MITRE ATT&CK filters
 - **Prometheus Metrics** with per-domain counters, histograms, kernel-side eBPF counters, and system-level tracking
 - **Alert Pipeline** with routing to email, webhook, and log sinks
 - **Audit Trail** with rule change history
 - **Hot Reload** — update configuration without restart (file watcher, SIGHUP, or API)
 - **CLI** with 13 domain subcommands covering all endpoints (firewall, ids, ratelimit, qos, threatintel, dlp, dns, nat, nptv6, scrub, lb, conntrack, audit)
-- **JWT/OIDC/API Key Authentication** with role-based access control
-- **TLS 1.3** for REST and gRPC
+- **JWT/OIDC/API Key Authentication** with role-based access control (Admin, Operator, Viewer)
+- **TLS 1.3** for REST and gRPC (rustls + aws_lc_rs)
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph kernel["Linux Kernel"]
+        direction LR
+        subgraph xdp["XDP (L3)"]
+            fw[xdp-firewall]
+            rl[xdp-ratelimit]
+            lb[xdp-loadbalancer]
+        end
+        subgraph tc["TC (L4/L7)"]
+            ids[tc-ids]
+            ti[tc-threatintel]
+            dns[tc-dns]
+            ct[tc-conntrack]
+            qos[tc-qos]
+            scrub[tc-scrub]
+            nat_i[tc-nat-ingress]
+            nat_e[tc-nat-egress]
+        end
+        uprobe[uprobe-dlp]
+    end
+
+    packets(("Packets")) --> xdp
+    packets --> tc
+
+    subgraph agent["Userspace Agent (Rust)"]
+        direction LR
+        subgraph domain["Domain Engines"]
+            de["Pure business logic\n(zero deps)"]
+        end
+        subgraph app["Application Services"]
+            as["Use cases\n& orchestration"]
+        end
+        subgraph adapters["Adapters"]
+            ebpf_a["eBPF maps\n& events"]
+            http["REST API\n(Axum)"]
+            grpc["gRPC\n(tonic)"]
+            store["Storage\n(redb)"]
+        end
+    end
+
+    xdp -- "RingBuf / Maps" --> ebpf_a
+    tc -- "RingBuf / Maps" --> ebpf_a
+    uprobe -- "RingBuf" --> ebpf_a
+
+    ebpf_a --> as
+    as --> de
+    http --> as
+    grpc --> as
+    store --> as
+
+    cli(("CLI")) --> http
+    swagger(("Swagger UI")) --> http
+    prom(("Prometheus")) --> http
+    alerts(("Alert clients")) --> grpc
+```
 
 ## Quick start
 
@@ -56,7 +122,7 @@ Or with Docker:
 ```bash
 docker run --privileged --network host \
   -v ./config:/etc/ebpfsentinel \
-  ebpfsentinel-agent:latest
+  ghcr.io/ebpfsentinel/ebpfsentinel:latest
 ```
 
 Minimal configuration — only the interface is required:
@@ -101,7 +167,7 @@ See [Compatibility](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/
 
 ## OSS vs Enterprise
 
-The open-source agent includes all security domains, APIs, CLI, authentication, and observability. An enterprise version is available, see [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for details.
+The open-source agent includes all security domains, APIs, CLI, authentication, and observability. An enterprise version adds ML anomaly detection, multi-tenancy, DLP, SIEM integration, compliance reporting, HA clustering, multi-cluster federation, RBAC, air-gap support, analytics dashboards, and AI/LLM security. See [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for details.
 
 ## License
 
