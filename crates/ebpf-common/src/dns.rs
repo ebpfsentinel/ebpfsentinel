@@ -20,6 +20,8 @@ pub const DNS_METRIC_ERRORS: u32 = 2;
 pub const DNS_METRIC_EVENTS_DROPPED: u32 = 3;
 /// Metric index: total packets seen (unconditional, first instruction).
 pub const DNS_METRIC_TOTAL_SEEN: u32 = 4;
+/// Total number of DNS metric slots (one past the last index).
+pub const DNS_METRIC_COUNT: u32 = 5;
 
 /// DNS event header emitted from the tc-dns eBPF program to userspace
 /// via the DNS_EVENTS RingBuf.
@@ -122,6 +124,14 @@ mod tests {
         assert_eq!(DNS_METRIC_EVENTS_EMITTED, 1);
         assert_eq!(DNS_METRIC_ERRORS, 2);
         assert_eq!(DNS_METRIC_EVENTS_DROPPED, 3);
+        assert_eq!(DNS_METRIC_TOTAL_SEEN, 4);
+        assert_eq!(DNS_METRIC_COUNT, 5);
+    }
+
+    #[test]
+    fn dns_metric_count_covers_all() {
+        // DNS_METRIC_COUNT must be one past the last index
+        const _: () = assert!(DNS_METRIC_TOTAL_SEEN < DNS_METRIC_COUNT);
     }
 
     #[test]

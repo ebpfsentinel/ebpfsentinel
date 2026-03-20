@@ -20,6 +20,8 @@ pub const THREATINTEL_METRIC_ERRORS: u32 = 2;
 pub const THREATINTEL_METRIC_EVENTS_DROPPED: u32 = 3;
 /// Metric index: total packets seen (unconditional, first instruction).
 pub const THREATINTEL_METRIC_TOTAL_SEEN: u32 = 4;
+/// Total number of threat intel metric slots (one past the last index).
+pub const THREATINTEL_METRIC_COUNT: u32 = 5;
 
 /// Key for the `THREATINTEL_IOCS` `HashMap` (IPv4).
 /// Matches on a single IPv4 address (network byte-order u32).
@@ -127,6 +129,7 @@ mod tests {
             THREATINTEL_METRIC_DROPPED,
             THREATINTEL_METRIC_ERRORS,
             THREATINTEL_METRIC_EVENTS_DROPPED,
+            THREATINTEL_METRIC_TOTAL_SEEN,
         ];
         for (i, a) in indices.iter().enumerate() {
             for (j, b) in indices.iter().enumerate() {
@@ -135,5 +138,16 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn threatintel_metric_count_is_correct() {
+        assert_eq!(THREATINTEL_METRIC_COUNT, 5);
+    }
+
+    #[test]
+    fn threatintel_metric_count_covers_all() {
+        // THREATINTEL_METRIC_COUNT must be one past the last index
+        const _: () = assert!(THREATINTEL_METRIC_TOTAL_SEEN < THREATINTEL_METRIC_COUNT);
     }
 }

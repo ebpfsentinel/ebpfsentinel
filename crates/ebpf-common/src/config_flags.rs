@@ -32,4 +32,16 @@ mod tests {
     fn test_config_flags_alignment() {
         assert_eq!(mem::align_of::<ConfigFlags>(), 1);
     }
+
+    #[test]
+    fn test_config_flags_field_offsets() {
+        assert_eq!(mem::offset_of!(ConfigFlags, firewall_enabled), 0);
+        assert_eq!(mem::offset_of!(ConfigFlags, ids_enabled), 1);
+        assert_eq!(mem::offset_of!(ConfigFlags, ips_enabled), 2);
+        assert_eq!(mem::offset_of!(ConfigFlags, dlp_enabled), 3);
+        assert_eq!(mem::offset_of!(ConfigFlags, ratelimit_enabled), 4);
+        assert_eq!(mem::offset_of!(ConfigFlags, threatintel_enabled), 5);
+        assert_eq!(mem::offset_of!(ConfigFlags, conntrack_enabled), 6);
+        assert_eq!(mem::offset_of!(ConfigFlags, nat_enabled), 7);
+    }
 }

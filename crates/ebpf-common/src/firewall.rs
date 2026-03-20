@@ -165,7 +165,7 @@ pub struct FwHashValue {
     pub _pad: [u8; 3],
 }
 
-/// Array-based IPv4 firewall rule entry (60 bytes).
+/// Array-based IPv4 firewall rule entry (64 bytes).
 ///
 /// Stored in the `FIREWALL_RULES` `Array` map, indexed 0..count.
 /// Each field that is a wildcard has its corresponding `MATCH_*` flag unset

@@ -145,6 +145,7 @@ impl RateLimitPolicy {
                     _padding: [0; 2],
                     group_mask: 0,
                     tenant_id: 0,
+                    _pad2: [0; 4],
                 }
             }
             RateLimitAlgorithm::FixedWindow => EbpfConfig {
@@ -155,6 +156,7 @@ impl RateLimitPolicy {
                 _padding: [0; 2],
                 group_mask: 0,
                 tenant_id: 0,
+                _pad2: [0; 4],
             },
             RateLimitAlgorithm::SlidingWindow => EbpfConfig {
                 ns_per_token: self.rate,
@@ -164,6 +166,7 @@ impl RateLimitPolicy {
                 _padding: [0; 2],
                 group_mask: 0,
                 tenant_id: 0,
+                _pad2: [0; 4],
             },
             RateLimitAlgorithm::LeakyBucket => EbpfConfig {
                 ns_per_token: self.rate,
@@ -173,6 +176,7 @@ impl RateLimitPolicy {
                 _padding: [0; 2],
                 group_mask: 0,
                 tenant_id: 0,
+                _pad2: [0; 4],
             },
         }
     }
@@ -221,6 +225,7 @@ impl CountryTierConfig {
                     _padding: [0; 2],
                     group_mask: 0,
                     tenant_id: 0,
+                    _pad2: [0; 4],
                 }
             }
             RateLimitAlgorithm::FixedWindow => EbpfConfig {
@@ -231,6 +236,7 @@ impl CountryTierConfig {
                 _padding: [0; 2],
                 group_mask: 0,
                 tenant_id: 0,
+                _pad2: [0; 4],
             },
             RateLimitAlgorithm::SlidingWindow => EbpfConfig {
                 ns_per_token: self.rate,
@@ -240,6 +246,7 @@ impl CountryTierConfig {
                 _padding: [0; 2],
                 group_mask: 0,
                 tenant_id: 0,
+                _pad2: [0; 4],
             },
             RateLimitAlgorithm::LeakyBucket => EbpfConfig {
                 ns_per_token: self.rate,
@@ -249,6 +256,7 @@ impl CountryTierConfig {
                 _padding: [0; 2],
                 group_mask: 0,
                 tenant_id: 0,
+                _pad2: [0; 4],
             },
         }
     }

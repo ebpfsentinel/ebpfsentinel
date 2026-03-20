@@ -45,7 +45,7 @@ pub struct IdsPatternKey {
 
 /// Value for the IDS_PATTERNS HashMap.
 /// Encodes the action, severity, rule_id, and group_mask for matched packets.
-/// Size: 12 bytes (aligned to 4 bytes).
+/// Size: 16 bytes (aligned to 4 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdsPatternValue {

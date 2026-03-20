@@ -33,7 +33,7 @@ pub const QOS_METRIC_COUNT: u32 = 7;
 /// Models a dummynet-style pipe: bandwidth limit, propagation delay, and
 /// random packet loss.
 ///
-/// Size: 32 bytes (aligned to 8 bytes due to u64 fields).
+/// Size: 40 bytes (aligned to 8 bytes due to u64 fields).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct QosPipeConfig {
@@ -55,6 +55,8 @@ pub struct QosPipeConfig {
     pub group_mask: u32,
     /// Tenant ID (0 = floating rule, applies to all tenants).
     pub tenant_id: u32,
+    /// Explicit trailing padding to reach 8-byte alignment (40 bytes total).
+    pub _pad: [u8; 4],
 }
 
 /// `QoS` queue configuration written by userspace, read by eBPF.
@@ -102,7 +104,7 @@ pub struct QosClassifierKey {
 ///
 /// Maps a classified flow to a queue and priority.
 ///
-/// Size: 8 bytes.
+/// Size: 12 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QosClassifierValue {
@@ -222,6 +224,7 @@ mod tests {
         assert_eq!(mem::offset_of!(QosPipeConfig, enabled), 27);
         assert_eq!(mem::offset_of!(QosPipeConfig, group_mask), 28);
         assert_eq!(mem::offset_of!(QosPipeConfig, tenant_id), 32);
+        assert_eq!(mem::offset_of!(QosPipeConfig, _pad), 36);
     }
 
     #[test]

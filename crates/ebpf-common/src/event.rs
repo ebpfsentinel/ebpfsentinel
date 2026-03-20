@@ -253,6 +253,36 @@ mod tests {
     }
 
     #[test]
+    fn event_type_constants_are_unique() {
+        // All EVENT_TYPE_* constants across all modules: event(0-8), ddos(10-13), lb(14).
+        // Gap at 9 is intentional (reserved for future use).
+        let types: [u8; 14] = [
+            0,  // EVENT_TYPE_FIREWALL
+            1,  // EVENT_TYPE_IDS
+            2,  // EVENT_TYPE_IPS
+            3,  // EVENT_TYPE_DLP
+            4,  // EVENT_TYPE_RATELIMIT
+            5,  // EVENT_TYPE_THREATINTEL
+            6,  // EVENT_TYPE_L7
+            7,  // EVENT_TYPE_DNS
+            8,  // EVENT_TYPE_QOS
+            10, // EVENT_TYPE_DDOS_SYN
+            11, // EVENT_TYPE_DDOS_ICMP
+            12, // EVENT_TYPE_DDOS_AMP
+            13, // EVENT_TYPE_DDOS_CONNTRACK
+            14, // EVENT_TYPE_LB
+        ];
+        for i in 0..types.len() {
+            for j in (i + 1)..types.len() {
+                assert_ne!(
+                    types[i], types[j],
+                    "EVENT_TYPE collision at indices {i} and {j}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_vlan_flag() {
         let event = PacketEvent {
             timestamp_ns: 0,

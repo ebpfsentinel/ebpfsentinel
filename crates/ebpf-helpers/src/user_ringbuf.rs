@@ -45,17 +45,17 @@ impl UserRingBuf {
     ///
     /// # Safety
     ///
-    /// The callback function pointer must be valid and compatible with the
+    /// `callback_fn` must be a valid function pointer compatible with the
     /// `bpf_user_ringbuf_drain` callback signature:
-    /// `fn(ctx: *mut c_void, data: *mut c_void, data_sz: u64) -> i64`
-    pub fn drain(
+    /// `fn(ctx: *mut c_void, data: *mut c_void, data_sz: u64) -> i64`.
+    /// The pointer is passed directly to a kernel helper; passing an invalid
+    /// or mismatched pointer will cause undefined behaviour in the eBPF VM.
+    pub unsafe fn drain(
         &self,
         callback_fn: *mut core::ffi::c_void,
         ctx: *mut core::ffi::c_void,
         flags: u64,
     ) -> i64 {
-        unsafe {
-            bpf_user_ringbuf_drain(self.def.get() as *mut _, callback_fn, ctx, flags)
-        }
+        unsafe { bpf_user_ringbuf_drain(self.def.get() as *mut _, callback_fn, ctx, flags) }
     }
 }

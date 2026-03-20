@@ -91,7 +91,7 @@ pub struct NatHashValue {
     pub nat_interface: u32,
 }
 
-// ── NAT rule entry — 40 bytes ───────────────────────────────────────
+// ── NAT rule entry — 44 bytes ───────────────────────────────────────
 
 /// NAT rule stored in Array maps, scanned linearly.
 #[repr(C)]

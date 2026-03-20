@@ -1417,8 +1417,11 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
             };
             let protocol = unsafe { (*pkt).protocol };
             let is_ipv6 = unsafe { ((*pkt).flags & FLAG_IPV6) != 0 };
-            let l3_off = unsafe { (*pkt).l3_offset as usize };
-            let l4_off = unsafe { (*pkt).l4_offset as usize };
+            // Clamp offsets read from scratch buffer so the eBPF verifier can
+            // prove bounded packet arithmetic in the reject helpers.
+            // Max l3_off: ETH(14) + 2×VLAN(8) = 22; max l4_off: 22 + IHL(60) = 82.
+            let l3_off = unsafe { (*pkt).l3_offset as usize } & 0x3F; // max 63
+            let l4_off = unsafe { (*pkt).l4_offset as usize } & 0x7F; // max 127
             // Try to send a reject response; fall back to DROP on failure.
             match send_reject(ctx, protocol, is_ipv6, l3_off, l4_off) {
                 Ok(xdp_act) => Ok(xdp_act),
@@ -1473,22 +1476,24 @@ fn send_reject(
 /// Eth+IP+TCP (no payload/options), swaps addresses, and returns `XDP_TX`.
 #[inline(never)]
 fn send_tcp_rst_v4(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Result<u32, ()> {
-    // ── Step 1: Read incoming TCP fields BEFORE modifying anything ──
-    let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off)? };
-    let in_src_port = unsafe { (*tcphdr).source };
-    let in_dst_port = unsafe { (*tcphdr).dest };
-    let in_seq = unsafe { (*tcphdr).seq };
-    let in_ack_seq = unsafe { (*tcphdr).ack_seq };
-    // Raw TCP flags byte at offset 13.
-    let in_flags: u8 = unsafe { *(tcphdr as *const u8).add(13) };
+    // ── Step 1: Read incoming fields BEFORE modifying anything ──
+    // Order matters for the eBPF verifier: each ptr_at establishes a bounds
+    // check, and the verifier only tracks the most recent one. Read in order
+    // of increasing offset so the last (largest) check covers all prior accesses.
+    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
+    let in_src_mac = unsafe { (*ethhdr).src_addr };
+    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
 
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_off)? };
     let in_src_addr = unsafe { (*ipv4hdr).src_addr };
     let in_dst_addr = unsafe { (*ipv4hdr).dst_addr };
 
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let in_src_mac = unsafe { (*ethhdr).src_addr };
-    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
+    let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off)? };
+    let in_src_port = unsafe { (*tcphdr).source };
+    let in_dst_port = unsafe { (*tcphdr).dest };
+    let in_seq = unsafe { (*tcphdr).seq };
+    let in_ack_seq = unsafe { (*tcphdr).ack_seq };
+    let in_flags: u8 = unsafe { *(tcphdr as *const u8).add(13) };
 
     // ── Step 2: Truncate packet to Eth + IP(20) + TCP(20) ──
     // Target size: l3_off + 20 (IP, no options) + 20 (TCP, no options).
@@ -1581,22 +1586,21 @@ fn send_tcp_rst_v4(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Result<u32
 /// Construct and send a TCP RST for an IPv6 packet.
 #[inline(never)]
 fn send_tcp_rst_v6(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Result<u32, ()> {
-    // ── Step 1: Read incoming TCP fields ──
+    // ── Step 1: Read incoming fields (ascending offset for verifier) ──
+    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
+    let in_src_mac = unsafe { (*ethhdr).src_addr };
+    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
+
+    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_off)? };
+    let in_src_addr: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
+    let in_dst_addr: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
+
     let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off)? };
     let in_src_port = unsafe { (*tcphdr).source };
     let in_dst_port = unsafe { (*tcphdr).dest };
     let in_seq = unsafe { (*tcphdr).seq };
     let in_ack_seq = unsafe { (*tcphdr).ack_seq };
     let in_flags: u8 = unsafe { *(tcphdr as *const u8).add(13) };
-
-    // Read IPv6 addresses using the inline Ipv6Hdr from ebpf_helpers::net.
-    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_off)? };
-    let in_src_addr: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
-    let in_dst_addr: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
-
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let in_src_mac = unsafe { (*ethhdr).src_addr };
-    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
 
     // ── Step 2: Truncate to Eth + IPv6(40) + TCP(20) ──
     let target_len = l3_off + IPV6_HDR_LEN + 20;
@@ -1687,14 +1691,14 @@ fn send_icmp_unreachable_v4(
         i += 1;
     }
 
-    // Read original src/dst IPs and Ethernet MACs for the response.
-    let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_off)? };
-    let orig_src = unsafe { (*ipv4hdr).src_addr };
-    let orig_dst = unsafe { (*ipv4hdr).dst_addr };
-
+    // Read Ethernet MACs first, then IP (ascending offset for verifier).
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let in_src_mac = unsafe { (*ethhdr).src_addr };
     let in_dst_mac = unsafe { (*ethhdr).dst_addr };
+
+    let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_off)? };
+    let orig_src = unsafe { (*ipv4hdr).src_addr };
+    let orig_dst = unsafe { (*ipv4hdr).dst_addr };
 
     // ── Step 2: Truncate/resize to: l3_off + 20 (new IP) + 8 (ICMP hdr) + 28 (payload) ──
     let target_len = l3_off + 20 + 8 + 28; // = l3_off + 56
@@ -1793,14 +1797,14 @@ fn send_icmpv6_unreachable(
         i += 1;
     }
 
-    // Read original addresses and MACs.
-    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_off)? };
-    let orig_src: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
-    let orig_dst: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
-
+    // Read Ethernet first, then IPv6 (ascending offset for verifier).
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let in_src_mac = unsafe { (*ethhdr).src_addr };
     let in_dst_mac = unsafe { (*ethhdr).dst_addr };
+
+    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_off)? };
+    let orig_src: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
+    let orig_dst: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
 
     // ── Step 2: Truncate to: l3_off + 40 (IPv6) + 8 (ICMPv6 hdr) + 48 (payload) ──
     let target_len = l3_off + IPV6_HDR_LEN + 8 + 48; // = l3_off + 96

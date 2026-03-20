@@ -17,9 +17,9 @@ use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::increment_metric;
 use ebpf_common::conntrack::{
     ConnKey, ConnKeyV6, ConnTrackConfig, ConnValue, ConnValueV6, CT_FLAG_ASSURED,
-    CT_FLAG_SEEN_REPLY, CT_MAX_ENTRIES_V4, CT_MAX_ENTRIES_V6, CT_METRIC_COUNT, CT_METRIC_ERRORS,
-    CT_METRIC_ESTABLISHED, CT_METRIC_HITS, CT_METRIC_INVALID, CT_METRIC_LOOKUPS, CT_METRIC_NEW,
-    CT_METRIC_TOTAL_SEEN,
+    CT_FLAG_SEEN_REPLY, CT_MAX_ENTRIES_V4, CT_MAX_ENTRIES_V6, CT_METRIC_CLOSED, CT_METRIC_COUNT,
+    CT_METRIC_ERRORS, CT_METRIC_ESTABLISHED, CT_METRIC_HITS, CT_METRIC_INVALID, CT_METRIC_LOOKUPS,
+    CT_METRIC_NEW, CT_METRIC_TOTAL_SEEN,
     CT_STATE_CLOSE_WAIT, CT_STATE_ESTABLISHED, CT_STATE_FIN_WAIT, CT_STATE_INVALID, CT_STATE_NEW,
     CT_STATE_SYN_RECV, CT_STATE_SYN_SENT, CT_STATE_TIME_WAIT, normalize_key_v4, normalize_key_v6,
 };
@@ -39,12 +39,24 @@ const TCP_RST: u8 = 0x04;
 
 /// IPv4 connection tracking table (LRU for automatic eviction).
 /// Pinned at /sys/fs/bpf/ebpfsentinel/ct_table_v4 for sharing.
+///
+/// # Race conditions (F5)
+/// LRU maps in eBPF are CPU-local in the kernel's per-CPU hash implementation.
+/// On RSS-enabled NICs, all packets of a given 5-tuple are steered to the same
+/// CPU queue, making per-flow entries effectively CPU-private and race-free in
+/// the common case. Multi-queue rebalancing (rare, triggered by NIC reset or
+/// `ethtool -X` reconfiguration) can cause two CPUs to operate on the same
+/// logical flow simultaneously; byte/packet counters may then undercount by a
+/// small amount. This trade-off is acceptable because the counters are used for
+/// monitoring only — not for admission control or billing decisions. Userspace
+/// GC reads are protected by the map's internal spinlock.
 #[map]
 static CT_TABLE_V4: LruHashMap<ConnKey, ConnValue> =
     LruHashMap::with_max_entries(CT_MAX_ENTRIES_V4, 0);
 
 /// IPv6 connection tracking table.
 /// Pinned at /sys/fs/bpf/ebpfsentinel/ct_table_v6 for sharing.
+/// (See CT_TABLE_V4 for the race-condition trade-off rationale.)
 #[map]
 static CT_TABLE_V6: LruHashMap<ConnKeyV6, ConnValueV6> =
     LruHashMap::with_max_entries(CT_MAX_ENTRIES_V6, 0);
@@ -140,6 +152,11 @@ fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     let protocol = unsafe { (*ipv4hdr).proto } as u8;
 
     let ihl = unsafe { (*ipv4hdr).ihl() } as usize;
+    // F2: Reject crafted packets with IHL < 5 words (20 bytes); they would
+    // cause the L4 header pointer to land inside the IP header itself.
+    if ihl < 20 {
+        return Ok(TC_ACT_OK);
+    }
     let l4_offset = l3_offset + ihl;
 
     // Parse L4 ports and TCP flags
@@ -161,7 +178,16 @@ fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
                 0u8,
             )
         }
-        PROTO_ICMP => (0u16, 0u16, 0u8),
+        // F6: Use ICMP type and code as pseudo-ports so distinct ICMP flows
+        // (e.g. echo vs. unreachable) get separate conntrack entries instead
+        // of collapsing onto a single (0,0) key.
+        PROTO_ICMP => {
+            let icmp_type_ptr: *const u8 = unsafe { ptr_at(ctx, l4_offset)? };
+            let icmp_code_ptr: *const u8 = unsafe { ptr_at(ctx, l4_offset + 1)? };
+            let icmp_type = unsafe { *icmp_type_ptr } as u16;
+            let icmp_code = unsafe { *icmp_code_ptr } as u16;
+            (icmp_type, icmp_code, 0u8)
+        }
         _ => return Ok(TC_ACT_OK),
     };
 
@@ -267,7 +293,14 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
                 0u8,
             )
         }
-        PROTO_ICMPV6 => (0u16, 0u16, 0u8),
+        // F6: Use ICMPv6 type and code as pseudo-ports (same rationale as IPv4 ICMP).
+        PROTO_ICMPV6 => {
+            let icmp_type_ptr: *const u8 = unsafe { ptr_at(ctx, l4_offset)? };
+            let icmp_code_ptr: *const u8 = unsafe { ptr_at(ctx, l4_offset + 1)? };
+            let icmp_type = unsafe { *icmp_type_ptr } as u16;
+            let icmp_code = unsafe { *icmp_code_ptr } as u16;
+            (icmp_type, icmp_code, 0u8)
+        }
         _ => return Ok(TC_ACT_OK),
     };
 
@@ -339,21 +372,47 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
 ///
 /// Operates on raw pointers to `state` and `flags` fields, which are at the
 /// same conceptual position in both `ConnValue` and `ConnValueV6`.
+///
+/// # Timeout enforcement (F3)
+/// Timeout enforcement is intentionally deferred to the userspace GC daemon,
+/// which periodically scans conntrack entries and removes stale ones using
+/// `last_seen_ns` relative to the configured per-protocol timeouts in
+/// `ConnTrackConfig`. The LRU map provides a hard backstop by evicting the
+/// least-recently-used entry when the table is full.
+///
+/// # Race conditions (F5)
+/// All mutations of a conntrack entry happen via `get_ptr_mut`, which returns
+/// a CPU-local pointer in eBPF's per-CPU hash model. On multi-queue NICs with
+/// RSS, the kernel routes all packets of a given flow to the same CPU/queue,
+/// so the same entry is effectively CPU-private for the lifetime of a flow.
+/// Counters (`packets_fwd`, `bytes_fwd`, etc.) may undercount marginally if
+/// RSS reassigns a flow mid-stream (e.g., after NIC reset or queue resize),
+/// which is acceptable given the monitoring-only nature of these counters.
 #[inline(always)]
 unsafe fn advance_tcp_state_inner(state: *mut u8, flags: *mut u8, tcp_flags: u8, is_forward: bool) {
     unsafe {
         let current = *state;
 
         if tcp_flags & TCP_RST != 0 {
+            // F7: RST resets the connection — count it as closed.
             *state = CT_STATE_INVALID;
+            increment_metric(CT_METRIC_CLOSED);
             return;
         }
 
         match current {
             CT_STATE_SYN_SENT => {
                 if !is_forward && tcp_flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) {
+                    // Normal three-way handshake: server replied SYN+ACK.
                     *state = CT_STATE_SYN_RECV;
                     *flags |= CT_FLAG_SEEN_REPLY;
+                }
+                // F4: Simultaneous open — reverse SYN without ACK means the
+                // peer also sent a SYN before receiving ours (RFC 793 §3.4).
+                // Transition to SYN_RECV so the subsequent ACKs complete the
+                // handshake through the normal CT_STATE_SYN_RECV arm.
+                if !is_forward && (tcp_flags & TCP_SYN != 0) && (tcp_flags & TCP_ACK == 0) {
+                    *state = CT_STATE_SYN_RECV;
                 }
             }
             CT_STATE_SYN_RECV => {
@@ -374,12 +433,16 @@ unsafe fn advance_tcp_state_inner(state: *mut u8, flags: *mut u8, tcp_flags: u8,
             }
             CT_STATE_FIN_WAIT => {
                 if !is_forward && tcp_flags & TCP_FIN != 0 {
+                    // F7: Both sides have FINed — connection is closing.
                     *state = CT_STATE_TIME_WAIT;
+                    increment_metric(CT_METRIC_CLOSED);
                 }
             }
             CT_STATE_CLOSE_WAIT => {
                 if is_forward && tcp_flags & TCP_FIN != 0 {
+                    // F7: Both sides have FINed — connection is closing.
                     *state = CT_STATE_TIME_WAIT;
+                    increment_metric(CT_METRIC_CLOSED);
                 }
             }
             _ => {}

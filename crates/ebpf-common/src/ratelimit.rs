@@ -64,7 +64,7 @@ pub struct RateLimitValue {
 
 /// Per-source-IP rate limit configuration.
 /// Written by userspace, read by eBPF.
-/// Size: 24 bytes (aligned to 8 bytes due to u64 fields).
+/// Size: 32 bytes (aligned to 8 bytes due to u64 fields).
 ///
 /// Field reinterpretation per algorithm:
 /// - Token Bucket: `ns_per_token = 1e9/rate`, `burst = max_tokens`
@@ -92,6 +92,8 @@ pub struct RateLimitConfig {
     pub group_mask: u32,
     /// Tenant ID (0 = floating rule, applies to all tenants).
     pub tenant_id: u32,
+    /// Explicit trailing padding to reach 8-byte alignment (32 bytes total).
+    pub _pad2: [u8; 4],
 }
 
 /// Fixed window bucket state. Size: 16 bytes.
@@ -329,6 +331,7 @@ mod tests {
         assert_eq!(mem::offset_of!(RateLimitConfig, algorithm), 17);
         assert_eq!(mem::offset_of!(RateLimitConfig, group_mask), 20);
         assert_eq!(mem::offset_of!(RateLimitConfig, tenant_id), 24);
+        assert_eq!(mem::offset_of!(RateLimitConfig, _pad2), 28);
     }
 
     #[test]
@@ -458,6 +461,7 @@ mod tests {
             _padding: [0; 2],
             group_mask: 0,
             tenant_id: 0,
+            _pad2: [0; 4],
         };
         assert_eq!(config.algorithm, 0);
     }

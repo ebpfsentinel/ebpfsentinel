@@ -23,6 +23,8 @@ pub const DLP_METRIC_ERRORS: u32 = 2;
 pub const DLP_METRIC_EVENTS_DROPPED: u32 = 3;
 /// Metric index: total probe invocations (unconditional, first thing in each probe).
 pub const DLP_METRIC_TOTAL_SEEN: u32 = 4;
+/// Total number of DLP metric slots (one past the last index).
+pub const DLP_METRIC_COUNT: u32 = 5;
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -223,5 +225,13 @@ mod tests {
         assert_eq!(DLP_METRIC_READ_EVENTS, 1);
         assert_eq!(DLP_METRIC_ERRORS, 2);
         assert_eq!(DLP_METRIC_EVENTS_DROPPED, 3);
+        assert_eq!(DLP_METRIC_TOTAL_SEEN, 4);
+        assert_eq!(DLP_METRIC_COUNT, 5);
+    }
+
+    #[test]
+    fn dlp_metric_count_covers_all() {
+        // DLP_METRIC_COUNT must be one past the last index
+        const _: () = assert!(DLP_METRIC_TOTAL_SEEN < DLP_METRIC_COUNT);
     }
 }
