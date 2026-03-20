@@ -98,7 +98,7 @@ flowchart TB
     grpc --> as
     store --> as
 
-    cli(("  CLI  ")) --> http
+    cli(("CLI")) --> http
     swagger(("Swagger UI")) --> http
     prom(("Prometheus")) --> http
     alerts(("Alert clients")) --> grpc
