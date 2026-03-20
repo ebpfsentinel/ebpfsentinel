@@ -204,4 +204,16 @@ impl EbpfLoader {
     pub fn ebpf_mut(&mut self) -> &mut Ebpf {
         &mut self.ebpf
     }
+
+    // TODO(W1-S3): BPF_MAP_FREEZE for read-only config maps.
+    //
+    // After populating static config maps at startup (e.g. SYNCOOKIE_SECRET, AMP_PROTECT_CONFIG,
+    // RL_TIER_CONFIG), call `BPF_MAP_FREEZE` via `libc::syscall(SYS_bpf, BPF_MAP_FREEZE, ...)` to
+    // prevent any subsequent writes — this hardens against userspace-side map tampering after init.
+    //
+    // Blocked by: aya 0.13.1 does not expose a `Map::freeze()` method. The underlying kernel
+    // syscall is available since Linux 5.2 (BPF_MAP_FREEZE cmd). When aya adds freeze support,
+    // wire it here after each static map population. Maps that receive runtime updates
+    // (CONFIG_FLAGS, CT_CONFIG, DDOS_SYN_CONFIG, ICMP_CONFIG, QOS_PIPE_CONFIG, etc.) must NOT
+    // be frozen — only truly write-once maps are candidates.
 }

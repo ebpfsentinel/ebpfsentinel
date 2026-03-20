@@ -10,7 +10,7 @@ use aya_ebpf::{
     programs::TcContext,
 };
 use aya_ebpf_bindings::bindings::_bindgen_ty_28::BPF_SKB_TSTAMP_DELIVERY_MONO;
-use aya_ebpf_bindings::helpers::bpf_skb_set_tstamp;
+use aya_ebpf_bindings::helpers::{bpf_skb_ecn_set_ce, bpf_skb_set_tstamp};
 #[cfg(debug_assertions)]
 use aya_log_ebpf::info;
 use ebpf_common::{
@@ -559,6 +559,13 @@ fn apply_qos(
                 // Check if we can consume tokens
                 if state.tokens >= pkt_len {
                     state.tokens -= pkt_len;
+                    // ECN Congestion Experienced: when token bucket is below 25% of burst,
+                    // mark the packet with CE to signal the sender to slow down proactively.
+                    // This provides early congestion signalling without dropping the packet,
+                    // allowing TCP to reduce its window before the queue overflows.
+                    if state.tokens < pipe_cfg.burst_bytes / 4 {
+                        unsafe { bpf_skb_ecn_set_ce(ctx.skb.skb) };
+                    }
                     false
                 } else {
                     true // over bandwidth

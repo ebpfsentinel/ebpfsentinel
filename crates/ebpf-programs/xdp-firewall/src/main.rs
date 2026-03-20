@@ -56,6 +56,14 @@ use network_types::{
 // Network constants, header structs, ptr_at, skip_ipv6_ext_headers,
 // byte helpers, and metric/ringbuf macros are imported from ebpf_helpers.
 
+// ── Per-user firewall capability note ───────────────────────────────
+// `bpf_get_socket_uid()` is available in TC classifier context for per-user
+// firewall rules.  In XDP context, socket metadata is not yet populated by
+// the kernel.  For process-aware (UID-based) firewall enforcement, consider a
+// TC classifier companion program that uses `bpf_get_socket_uid()` and writes
+// the UID into the XDP metadata area via `bpf_xdp_adjust_meta`, which this
+// program can then read after the TC pass.
+
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// IPv4 firewall rules (array, indexed 0..count, priority order).
@@ -242,6 +250,20 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
 
 /// Resolve the tenant ID for the current packet.
 /// Priority: VLAN-based > interface-based > subnet (LPM) > default (0).
+///
+/// # Network namespace cookie (future)
+/// `bpf_get_netns_cookie` provides a stable per-namespace u64 identifier that
+/// can serve as a kernel-level container boundary for tenant isolation, without
+/// relying on VLAN tags or LPM subnet matching.  Available in XDP context since
+/// kernel 5.14.  Wire it into tenant matching when namespace-based tenancy is
+/// enabled:
+///
+/// ```ignore
+/// // Network namespace cookie can be used for container-level tenant identification
+/// // without relying on LPM subnet matching. Available via:
+/// //   let ns_cookie = unsafe { bpf_get_netns_cookie(ctx.ctx as *mut _) };
+/// // TODO: Wire ns_cookie into tenant matching when namespace-based tenancy is enabled
+/// ```
 #[inline(always)]
 unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
     unsafe {

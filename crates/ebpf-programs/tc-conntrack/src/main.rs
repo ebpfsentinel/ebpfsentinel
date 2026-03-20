@@ -40,6 +40,11 @@ const TCP_RST: u8 = 0x04;
 /// IPv4 connection tracking table (LRU for automatic eviction).
 /// Pinned at /sys/fs/bpf/ebpfsentinel/ct_table_v4 for sharing.
 ///
+/// Flag `2` = `BPF_F_NO_COMMON_LRU`: enables per-CPU LRU lists instead of the
+/// shared global LRU list. This eliminates cross-CPU spinlock contention on the
+/// LRU eviction path at the cost of slightly less accurate LRU ordering across
+/// CPUs — an acceptable trade-off for high-throughput per-flow workloads.
+///
 /// # Race conditions (F5)
 /// LRU maps in eBPF are CPU-local in the kernel's per-CPU hash implementation.
 /// On RSS-enabled NICs, all packets of a given 5-tuple are steered to the same
@@ -52,14 +57,14 @@ const TCP_RST: u8 = 0x04;
 /// GC reads are protected by the map's internal spinlock.
 #[map]
 static CT_TABLE_V4: LruHashMap<ConnKey, ConnValue> =
-    LruHashMap::with_max_entries(CT_MAX_ENTRIES_V4, 0);
+    LruHashMap::with_max_entries(CT_MAX_ENTRIES_V4, 2); // 2 = BPF_F_NO_COMMON_LRU
 
 /// IPv6 connection tracking table.
 /// Pinned at /sys/fs/bpf/ebpfsentinel/ct_table_v6 for sharing.
-/// (See CT_TABLE_V4 for the race-condition trade-off rationale.)
+/// (See CT_TABLE_V4 for the race-condition and BPF_F_NO_COMMON_LRU rationale.)
 #[map]
 static CT_TABLE_V6: LruHashMap<ConnKeyV6, ConnValueV6> =
-    LruHashMap::with_max_entries(CT_MAX_ENTRIES_V6, 0);
+    LruHashMap::with_max_entries(CT_MAX_ENTRIES_V6, 2); // 2 = BPF_F_NO_COMMON_LRU
 
 /// Conntrack configuration (timeouts, enable flag).
 #[map]
@@ -379,6 +384,18 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
 /// `last_seen_ns` relative to the configured per-protocol timeouts in
 /// `ConnTrackConfig`. The LRU map provides a hard backstop by evicting the
 /// least-recently-used entry when the table is full.
+///
+/// # In-kernel periodic cleanup (Wave 3 / future)
+/// `bpf_for_each_map_elem` can iterate all CT entries for periodic stale-entry
+/// cleanup directly in the kernel, avoiding the userspace GC round-trip.  It
+/// is best invoked from a `bpf_timer` callback rather than on every packet
+/// (per-packet iteration would be prohibitively expensive):
+///
+/// ```ignore
+/// // bpf_for_each_map_elem(map, callback, ctx, flags)
+/// // Called once per timer tick; callback deletes entries whose
+/// // last_seen_ns + timeout_ns < bpf_ktime_get_boot_ns().
+/// ```
 ///
 /// # Race conditions (F5)
 /// All mutations of a conntrack entry happen via `get_ptr_mut`, which returns

@@ -12,7 +12,7 @@ use aya_ebpf::{
     maps::{Array, HashMap, LpmTrie, PerCpuArray, RingBuf, lpm_trie::Key},
     programs::TcContext,
 };
-use aya_ebpf_bindings::helpers::bpf_skb_load_bytes;
+use aya_ebpf_bindings::helpers::{bpf_skb_load_bytes, bpf_skb_pull_data};
 #[cfg(debug_assertions)]
 use aya_log_ebpf::info;
 use ebpf_helpers::net::{
@@ -316,6 +316,14 @@ fn process_ids_v4(
         if unsafe { L7_PORTS.get(&dst_port) }.is_some() {
             let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
             let l7_offset = l4_offset + tcp_data_off;
+            // Linearize the SKB before DPI: multi-fragment packets (e.g. GRO aggregates,
+            // jumbo frames) may have payload spread across non-contiguous memory regions.
+            // bpf_skb_pull_data forces the kernel to linearize up to skb->len bytes so
+            // that bpf_skb_load_bytes can read the full payload in a single call.
+            // The return value is intentionally ignored — if linearization fails the
+            // bpf_skb_load_bytes call below will read whatever is already available.
+            let skb_len = ctx.data_end() - ctx.data();
+            unsafe { bpf_skb_pull_data(ctx.skb.skb, skb_len as u32) };
             emit_l7_event(ctx, &src_addr, &dst_addr, src_port, dst_port, flags, vlan_id, l7_offset);
         }
     }
@@ -367,6 +375,9 @@ fn process_ids_v6(
         if unsafe { L7_PORTS.get(&dst_port) }.is_some() {
             let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
             let l7_offset = l4_offset + tcp_data_off;
+            // Linearize the SKB before DPI (see IPv4 path for full rationale).
+            let skb_len = ctx.data_end() - ctx.data();
+            unsafe { bpf_skb_pull_data(ctx.skb.skb, skb_len as u32) };
             emit_l7_event(ctx, &src_addr, &dst_addr, src_port, dst_port, flags, vlan_id, l7_offset);
         }
     }

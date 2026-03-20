@@ -280,6 +280,7 @@ name = "xdp-loadbalancer"
 version = "0.0.0-dev"
 dependencies = [
  "aya-ebpf",
+ "aya-ebpf-bindings",
  "ebpf-common",
  "ebpf-helpers",
  "network-types",

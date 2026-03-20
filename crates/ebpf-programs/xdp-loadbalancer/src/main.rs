@@ -3,7 +3,7 @@
 
 use aya_ebpf::{
     bindings::xdp_action,
-    helpers::{bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
+    helpers::{bpf_check_mtu, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
     macros::{map, xdp},
     maps::{HashMap, PerCpuArray, RingBuf},
     programs::XdpContext,
@@ -20,8 +20,9 @@ use ebpf_common::{
         LbBackendEntry, LbServiceConfigV2, LbServiceKey, LB_ACTION_FORWARD,
         LB_ACTION_NO_BACKEND, LB_ALG_IP_HASH, LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED,
         LB_MAX_BACKENDS_V2, MAX_LB_BACKENDS_TOTAL, MAX_LB_SERVICES, LB_METRIC_BYTES_FORWARDED,
-        LB_METRIC_COUNT, LB_METRIC_EVENTS_DROPPED, LB_METRIC_PACKETS_FORWARDED,
-        LB_METRIC_PACKETS_NO_BACKEND, LB_METRIC_TOTAL_SEEN, EVENT_TYPE_LB,
+        LB_METRIC_COUNT, LB_METRIC_EVENTS_DROPPED, LB_METRIC_MTU_EXCEEDED,
+        LB_METRIC_PACKETS_FORWARDED, LB_METRIC_PACKETS_NO_BACKEND, LB_METRIC_TOTAL_SEEN,
+        EVENT_TYPE_LB,
     },
 };
 use network_types::{
@@ -226,6 +227,24 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
         vlan_id,
     );
 
+    // Check MTU before forwarding to avoid silent fragmentation.
+    // ifindex 0 = current interface; delta 0 = no size change from encap.
+    let mut mtu: u32 = 0;
+    let mtu_ret = unsafe {
+        bpf_check_mtu(
+            ctx.ctx as *mut _,
+            0,           // ifindex 0 = current interface
+            &mut mtu as *mut u32,
+            0,           // delta: no encapsulation size change
+            0,           // flags
+        )
+    };
+    if mtu_ret != 0 {
+        // Packet exceeds output MTU — drop rather than cause silent fragmentation.
+        increment_metric(LB_METRIC_MTU_EXCEEDED);
+        return Ok(xdp_action::XDP_DROP);
+    }
+
     Ok(xdp_action::XDP_TX)
 }
 
@@ -345,6 +364,24 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
         FLAG_IPV6,
         vlan_id,
     );
+
+    // Check MTU before forwarding to avoid silent fragmentation.
+    // ifindex 0 = current interface; delta 0 = no size change from encap.
+    let mut mtu: u32 = 0;
+    let mtu_ret = unsafe {
+        bpf_check_mtu(
+            ctx.ctx as *mut _,
+            0,           // ifindex 0 = current interface
+            &mut mtu as *mut u32,
+            0,           // delta: no encapsulation size change
+            0,           // flags
+        )
+    };
+    if mtu_ret != 0 {
+        // Packet exceeds output MTU — drop rather than cause silent fragmentation.
+        increment_metric(LB_METRIC_MTU_EXCEEDED);
+        return Ok(xdp_action::XDP_DROP);
+    }
 
     Ok(xdp_action::XDP_TX)
 }

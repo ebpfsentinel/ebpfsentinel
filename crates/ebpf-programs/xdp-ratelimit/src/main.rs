@@ -11,6 +11,12 @@ use aya_ebpf::{
     },
     programs::XdpContext,
 };
+// bpf_ktime_get_coarse_ns: ~10x faster than bpf_ktime_get_boot_ns by reading
+// the coarse-grained kernel clock (CLOCK_MONOTONIC_COARSE, ~1-4ms precision).
+// Sufficient for rate limiting (window checks, token bucket refill) where
+// sub-millisecond precision is not required. Syncookie generation and event
+// timestamps continue to use bpf_ktime_get_boot_ns for monotonic accuracy.
+use aya_ebpf_bindings::helpers::bpf_ktime_get_coarse_ns;
 #[cfg(debug_assertions)]
 use aya_log_ebpf::info;
 use ebpf_helpers::net::{
@@ -437,7 +443,7 @@ fn process_ratelimit_v4(
         if let Some(tier_cfg) = RL_TIER_CONFIG.get(tier_val.tier_id as u32) {
             if tier_cfg.ns_per_token > 0 {
                 let key = RateLimitKey { src_ip };
-                let now = unsafe { bpf_ktime_get_boot_ns() };
+                let now = unsafe { bpf_ktime_get_coarse_ns() };
                 let passed = dispatch_algorithm(&key, tier_cfg, now);
                 if passed {
                     increment_metric(METRIC_PASSED);
@@ -474,7 +480,7 @@ fn process_ratelimit_v4(
         return Ok(xdp_action::XDP_PASS);
     }
 
-    let now = unsafe { bpf_ktime_get_boot_ns() };
+    let now = unsafe { bpf_ktime_get_coarse_ns() };
     let passed = dispatch_algorithm(&key, config, now);
 
     if passed {
@@ -549,7 +555,7 @@ fn process_ratelimit_v6(
         if let Some(tier_cfg) = RL_TIER_CONFIG.get(tier_val.tier_id as u32) {
             if tier_cfg.ns_per_token > 0 {
                 let key = RateLimitKey { src_ip: src_hash };
-                let now = unsafe { bpf_ktime_get_boot_ns() };
+                let now = unsafe { bpf_ktime_get_coarse_ns() };
                 let passed = dispatch_algorithm(&key, tier_cfg, now);
                 if passed {
                     increment_metric(METRIC_PASSED);
@@ -584,7 +590,7 @@ fn process_ratelimit_v6(
         return Ok(xdp_action::XDP_PASS);
     }
 
-    let now = unsafe { bpf_ktime_get_boot_ns() };
+    let now = unsafe { bpf_ktime_get_coarse_ns() };
     let passed = dispatch_algorithm(&key, config, now);
 
     if passed {
@@ -709,7 +715,7 @@ fn check_syn_flood_v4(
 
     // Threshold mode: only activate when SYN rate exceeds threshold
     if cfg.threshold_mode != 0 {
-        let now = unsafe { bpf_ktime_get_boot_ns() };
+        let now = unsafe { bpf_ktime_get_coarse_ns() };
         let key = RateLimitKey { src_ip };
         if !syn_rate_exceeds_threshold(&key, cfg.threshold_pps, now) {
             return None; // Below threshold — let kernel handle normally
@@ -774,7 +780,7 @@ fn check_syn_flood_v6(
     let dst_port = u16::from_be(unsafe { (*tcphdr).dst_port });
 
     if cfg.threshold_mode != 0 {
-        let now = unsafe { bpf_ktime_get_boot_ns() };
+        let now = unsafe { bpf_ktime_get_coarse_ns() };
         let key = RateLimitKey { src_ip: src_hash };
         if !syn_rate_exceeds_threshold(&key, cfg.threshold_pps, now) {
             return None;
@@ -882,7 +888,7 @@ fn process_icmp_v4(
     }
 
     // Per-source rate limiting for ICMP echo
-    let now = unsafe { bpf_ktime_get_boot_ns() };
+    let now = unsafe { bpf_ktime_get_coarse_ns() };
     let key = RateLimitKey { src_ip };
     if icmp_rate_check(&key, cfg.max_pps as u64, now) {
         increment_ddos_metric(DDOS_METRIC_ICMP_PASSED);
@@ -946,7 +952,7 @@ fn process_icmp_v6(
         return Ok(xdp_action::XDP_DROP);
     }
 
-    let now = unsafe { bpf_ktime_get_boot_ns() };
+    let now = unsafe { bpf_ktime_get_coarse_ns() };
     let key = RateLimitKey { src_ip: src_hash };
     if icmp_rate_check(&key, cfg.max_pps as u64, now) {
         increment_ddos_metric(DDOS_METRIC_ICMP_PASSED);
@@ -1017,7 +1023,7 @@ fn check_udp_amplification(
 
     // Per-source-per-port rate limiting
     let bucket_key = amp_bucket_key(src_ip, src_port);
-    let now = unsafe { bpf_ktime_get_boot_ns() };
+    let now = unsafe { bpf_ktime_get_coarse_ns() };
 
     if amp_rate_check(bucket_key, amp_cfg.max_pps as u64, now) {
         increment_ddos_metric(DDOS_METRIC_AMP_PASSED);
@@ -1061,7 +1067,7 @@ fn check_udp_amp_v6(
     }
 
     let bucket_key = amp_bucket_key(src_hash, src_port);
-    let now = unsafe { bpf_ktime_get_boot_ns() };
+    let now = unsafe { bpf_ktime_get_coarse_ns() };
 
     if amp_rate_check(bucket_key, amp_cfg.max_pps as u64, now) {
         increment_ddos_metric(DDOS_METRIC_AMP_PASSED);
@@ -1129,7 +1135,7 @@ fn process_conntrack_v4(
     let tcp_flags = unsafe { (*tcphdr).flags };
     let src_port = u16::from_be(unsafe { (*tcphdr).src_port });
     let dst_port = u16::from_be(unsafe { (*tcphdr).dst_port });
-    let now = unsafe { bpf_ktime_get_boot_ns() };
+    let now = unsafe { bpf_ktime_get_coarse_ns() };
 
     let src_addr = [src_ip, 0, 0, 0];
     let dst_addr = [dst_ip, 0, 0, 0];
@@ -1160,7 +1166,7 @@ fn process_conntrack_v6(
     let tcp_flags = unsafe { (*tcphdr).flags };
     let src_port = u16::from_be(unsafe { (*tcphdr).src_port });
     let dst_port = u16::from_be(unsafe { (*tcphdr).dst_port });
-    let now = unsafe { bpf_ktime_get_boot_ns() };
+    let now = unsafe { bpf_ktime_get_coarse_ns() };
 
     // Use XOR-hashed src for IPv6 (same approach as rate limiting)
     let dst_hash = hash_ipv6_src(dst_addr);

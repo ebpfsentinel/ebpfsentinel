@@ -343,6 +343,7 @@ name = "xdp-ratelimit"
 version = "0.0.0-dev"
 dependencies = [
  "aya-ebpf",
+ "aya-ebpf-bindings",
  "aya-log-ebpf",
  "ebpf-common",
  "ebpf-helpers",
