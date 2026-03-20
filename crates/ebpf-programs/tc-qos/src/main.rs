@@ -9,6 +9,8 @@ use aya_ebpf::{
     maps::{Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
     programs::TcContext,
 };
+use aya_ebpf_bindings::bindings::_bindgen_ty_28::BPF_SKB_TSTAMP_DELIVERY_MONO;
+use aya_ebpf_bindings::helpers::bpf_skb_set_tstamp;
 #[cfg(debug_assertions)]
 use aya_log_ebpf::info;
 use ebpf_common::{
@@ -567,6 +569,7 @@ fn apply_qos(
                 let new_state = QosFlowState {
                     tokens: pipe_cfg.burst_bytes.saturating_sub(pkt_len),
                     last_refill_ns: now_ns,
+                    last_edt_ns: 0,
                     pipe_id: pipe_id as u8,
                     queue_id: queue_id as u8,
                     _padding: [0; 6],
@@ -593,13 +596,49 @@ fn apply_qos(
         }
     }
 
-    // Step 5: Delay / EDT pacing
-    // TODO: Implement EDT (Earliest Departure Time) pacing via skb->tstamp.
-    // aya-ebpf does not currently expose bpf_skb_set_tstamp or direct
-    // skb->tstamp write access. When it becomes available, set:
-    //   skb->tstamp = max(now_ns, prev_edt) + delay_ns + pkt_len / bytes_per_ns
-    // For now, delay is accounted in metrics but not enforced in the datapath.
+    // Step 5: EDT (Earliest Departure Time) pacing via bpf_skb_set_tstamp.
+    // Sets skb->tstamp = max(now, prev_edt) + delay_ns so the kernel queuing
+    // discipline (fq) spaces packets according to the configured delay.
     if pipe_cfg.delay_ns > 0 {
+        let now_ns_edt = unsafe { bpf_ktime_get_boot_ns() };
+        let fh_edt = flow_hash(src_ip, dst_ip, src_port, dst_port, protocol);
+
+        let edt = match QOS_FLOW_STATE.get_ptr_mut(&fh_edt) {
+            Some(state_ptr) => {
+                let state = unsafe { &mut *state_ptr };
+                let base = if state.last_edt_ns > now_ns_edt {
+                    state.last_edt_ns
+                } else {
+                    now_ns_edt
+                };
+                let departure = base.saturating_add(pipe_cfg.delay_ns);
+                state.last_edt_ns = departure;
+                departure
+            }
+            None => {
+                // No flow state yet (delay-only pipe without bandwidth shaping).
+                let departure = now_ns_edt.saturating_add(pipe_cfg.delay_ns);
+                let new_state = QosFlowState {
+                    tokens: 0,
+                    last_refill_ns: now_ns_edt,
+                    last_edt_ns: departure,
+                    pipe_id: pipe_id as u8,
+                    queue_id: queue_id as u8,
+                    _padding: [0; 6],
+                };
+                let _ = QOS_FLOW_STATE.insert(&fh_edt, &new_state, 0);
+                departure
+            }
+        };
+
+        unsafe {
+            bpf_skb_set_tstamp(
+                ctx.skb.skb,
+                edt,
+                BPF_SKB_TSTAMP_DELIVERY_MONO,
+            );
+        }
+
         increment_qos_metric(QOS_METRIC_DELAYED);
         emit_event(
             src_addr,

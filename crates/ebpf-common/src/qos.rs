@@ -120,9 +120,9 @@ pub struct QosClassifierValue {
 
 /// Per-flow `QoS` state managed by the eBPF program.
 ///
-/// Tracks token bucket state for bandwidth enforcement.
+/// Tracks token bucket state for bandwidth enforcement and EDT pacing.
 ///
-/// Size: 24 bytes (aligned to 8 bytes due to u64 fields).
+/// Size: 32 bytes (aligned to 8 bytes due to u64 fields).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct QosFlowState {
@@ -130,6 +130,9 @@ pub struct QosFlowState {
     pub tokens: u64,
     /// Last token refill timestamp from `bpf_ktime_get_ns()`.
     pub last_refill_ns: u64,
+    /// Earliest departure time for next packet (monotonic ns).
+    /// Used by EDT pacing to space out packets according to `delay_ns`.
+    pub last_edt_ns: u64,
     /// Pipe this flow is using.
     pub pipe_id: u8,
     /// Queue this flow is assigned to.
@@ -199,7 +202,7 @@ mod tests {
 
     #[test]
     fn qos_flow_state_size() {
-        assert_eq!(mem::size_of::<QosFlowState>(), 24);
+        assert_eq!(mem::size_of::<QosFlowState>(), 32);
     }
 
     #[test]
@@ -254,9 +257,10 @@ mod tests {
     fn qos_flow_state_field_offsets() {
         assert_eq!(mem::offset_of!(QosFlowState, tokens), 0);
         assert_eq!(mem::offset_of!(QosFlowState, last_refill_ns), 8);
-        assert_eq!(mem::offset_of!(QosFlowState, pipe_id), 16);
-        assert_eq!(mem::offset_of!(QosFlowState, queue_id), 17);
-        assert_eq!(mem::offset_of!(QosFlowState, _padding), 18);
+        assert_eq!(mem::offset_of!(QosFlowState, last_edt_ns), 16);
+        assert_eq!(mem::offset_of!(QosFlowState, pipe_id), 24);
+        assert_eq!(mem::offset_of!(QosFlowState, queue_id), 25);
+        assert_eq!(mem::offset_of!(QosFlowState, _padding), 26);
     }
 
     // ── Constant tests ───────────────────────────────────────────────
