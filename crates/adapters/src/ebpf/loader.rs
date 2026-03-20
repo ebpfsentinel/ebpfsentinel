@@ -205,6 +205,40 @@ impl EbpfLoader {
         &mut self.ebpf
     }
 
+    // ── Zero-downtime program swap via BPF_LINK_UPDATE (kernel 5.7+) ────
+    //
+    // Current approach: detach old program, attach new program. This creates
+    // a brief window where no eBPF program is processing packets.
+    //
+    // Upgrade: BPF_LINK_UPDATE atomically replaces the program attached to
+    // a link without any gap. Packets are processed by the old program until
+    // the exact moment the new program takes over.
+    //
+    // aya 0.13.1: Link::update() is not exposed. Use raw syscall:
+    //   bpf(BPF_LINK_UPDATE, &bpf_attr { link_update: { link_fd, new_prog_fd, ... } })
+    //
+    // Requires storing link FDs after initial attachment (currently discarded).
+    //
+    // TODO(Wave 7): Store link FDs and implement atomic program replacement.
+
+    // ── eBPF program unit testing via BPF_PROG_TEST_RUN (kernel 4.12+) ──
+    //
+    // Run loaded eBPF programs with synthetic packet data without attaching
+    // to a real network interface. Useful for:
+    //   - Verifying packet classification logic
+    //   - Testing rule matching
+    //   - Benchmarking per-packet processing time
+    //
+    // Usage:
+    //   let test_pkt = build_syn_packet(src_ip, dst_ip, src_port, dst_port);
+    //   let result = prog.test_run(test_pkt, repeat=1000, ctx_in=None)?;
+    //   assert_eq!(result.return_val, XDP_DROP); // or TC_ACT_OK etc.
+    //   println!("Duration: {}ns per packet", result.duration / 1000);
+    //
+    // aya 0.13.1: Program::test_run() is available.
+    //
+    // TODO(Wave 7): Add eBPF unit test suite using test_run with crafted packets.
+
     // TODO(W1-S3): BPF_MAP_FREEZE for read-only config maps.
     //
     // After populating static config maps at startup (e.g. SYNCOOKIE_SECRET, AMP_PROTECT_CONFIG,

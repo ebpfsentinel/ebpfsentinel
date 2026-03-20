@@ -122,6 +122,21 @@ impl ThreatIntelMapManager {
         Ok(())
     }
 
+    // ── Batch map operations (kernel 5.6+) ──────────────────────────────
+    //
+    // aya 0.13.1 does not expose BPF_MAP_UPDATE_BATCH. When available,
+    // batch operations can load thousands of IOCs 10-100x faster:
+    //
+    //   let keys: Vec<ThreatIntelKey> = iocs.iter().map(|i| i.to_key()).collect();
+    //   let values: Vec<ThreatIntelValue> = iocs.iter().map(|i| i.to_value()).collect();
+    //   map.update_batch(&keys, &values, MapFlags::ANY)?;
+    //
+    // For now, sequential insert is used. The batch syscall can be called
+    // directly via libc::syscall(SYS_bpf, BPF_MAP_UPDATE_BATCH, ...) but
+    // requires manual struct layout matching the kernel's bpf_attr union.
+    //
+    // TODO(Wave 7): Implement raw batch syscall or wait for aya 0.14+ support.
+
     /// Atomically reload all IOCs: clear existing, then insert all new IOCs.
     ///
     /// Partitions IOCs by IP version: V4 goes to `THREATINTEL_IOCS`,

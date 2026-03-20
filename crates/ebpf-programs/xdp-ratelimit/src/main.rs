@@ -1505,6 +1505,31 @@ fn parse_mss_index(ctx: &XdpContext, l4_offset: usize) -> u8 {
     4 // default: 1460
 }
 
+// ── SYN Cookie helpers (kernel 5.18+) ───────────────────────────────
+//
+// The kernel provides standard-compliant SYN cookie helpers that can replace
+// custom implementations:
+//
+// Generation (XDP path, responds with SYN+ACK containing cookie):
+//   bpf_tcp_raw_gen_syncookie_ipv4(iph, iph_len, tcph, th_len) -> __s64
+//   bpf_tcp_raw_gen_syncookie_ipv6(ip6h, iph_len, tcph, th_len) -> __s64
+//   Returns: cookie value on success, negative error on failure
+//
+// Validation (XDP path, verifies ACK contains valid cookie):
+//   bpf_tcp_raw_check_syncookie_ipv4(iph, tcph) -> __s64
+//   bpf_tcp_raw_check_syncookie_ipv6(ip6h, tcph) -> __s64
+//   Returns: 0 on valid cookie, negative on invalid
+//
+// Advantages over custom implementation:
+//   - Standard TCP options negotiation (MSS, window scale, SACK, timestamps)
+//   - Kernel-managed secret rotation
+//   - Interoperable with Linux TCP stack
+//
+// Current implementation uses a custom SYN cookie algorithm for compatibility
+// with kernels older than 5.18 and for explicit control over the cookie format.
+// Migration to kernel helpers would improve TCP option support and reduce
+// maintenance burden at the cost of a minimum kernel version bump to 5.18.
+
 // ── SYN Cookie: SYN+ACK Forging (IPv4) ─────────────────────────────
 
 /// Forge a SYN+ACK with SYN cookie and send via `XDP_TX` (IPv4).

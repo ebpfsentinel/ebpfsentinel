@@ -90,11 +90,22 @@ pub fn tc_conntrack(ctx: TcContext) -> i32 {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+/// Select the appropriate timeout in nanoseconds based on protocol and
+/// connection state.  Returns 0 if the config entry is missing (disabled).
 #[inline(always)]
-fn is_conntrack_enabled() -> bool {
-    match CT_CONFIG.get(0) {
-        Some(cfg) => cfg.enabled != 0,
-        None => false,
+fn select_timeout(state: u8, protocol: u8, config: &ConnTrackConfig) -> u64 {
+    match protocol {
+        PROTO_UDP => config.udp_timeout_ns,
+        PROTO_ICMP | PROTO_ICMPV6 => config.icmp_timeout_ns,
+        PROTO_TCP => match state {
+            CT_STATE_SYN_SENT | CT_STATE_SYN_RECV => config.tcp_syn_timeout_ns,
+            CT_STATE_ESTABLISHED => config.tcp_established_timeout_ns,
+            CT_STATE_FIN_WAIT | CT_STATE_CLOSE_WAIT | CT_STATE_TIME_WAIT => {
+                config.tcp_fin_timeout_ns
+            }
+            _ => config.tcp_established_timeout_ns,
+        },
+        _ => config.tcp_established_timeout_ns,
     }
 }
 
@@ -117,10 +128,8 @@ fn tcp_flags(th: &TcpHdr) -> u8 {
 
 #[inline(always)]
 fn try_tc_conntrack(ctx: &TcContext) -> Result<i32, ()> {
-    if !is_conntrack_enabled() {
-        return Ok(TC_ACT_OK);
-    }
-
+    // Per-protocol handlers read the full config and check the enabled flag
+    // themselves so they can also access timeout values in one map lookup.
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
     let mut l3_offset = EthHdr::LEN;
@@ -151,6 +160,16 @@ fn try_tc_conntrack(ctx: &TcContext) -> Result<i32, ()> {
 /// IPv4 connection tracking: lookup/insert/update state machine.
 #[inline(always)]
 fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
+    // Read the full config once — needed for timeout values.
+    let ct_config = match CT_CONFIG.get(0) {
+        Some(cfg) => cfg,
+        None => return Ok(TC_ACT_OK),
+    };
+
+    if ct_config.enabled == 0 {
+        return Ok(TC_ACT_OK);
+    }
+
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });
     let dst_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).dst_addr });
@@ -206,32 +225,53 @@ fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     let is_forward = ct_key.src_ip == src_ip && ct_key.src_port == src_port;
     let pkt_len = (ctx.data_end() - ctx.data()) as u32;
 
+    // Whether we need to insert a fresh entry (set to true when a stale entry
+    // is lazily evicted, causing the packet to be treated as a new connection).
+    let mut insert_new = false;
+
     if let Some(entry) = CT_TABLE_V4.get_ptr_mut(&ct_key) {
-        // Existing connection — update
-        increment_metric(CT_METRIC_HITS);
-        unsafe {
-            (*entry).last_seen_ns = now;
+        // Lazy timeout eviction: check whether this entry has expired before
+        // updating it.  Stale entries are deleted on access so the LRU
+        // backstop remains accurate and the next packet creates a fresh entry.
+        let (entry_state, elapsed) = unsafe { ((*entry).state, now.saturating_sub((*entry).last_seen_ns)) };
+        let timeout = select_timeout(entry_state, protocol, ct_config);
 
-            // Update counters
-            if is_forward {
-                (*entry).packets_fwd = (*entry).packets_fwd.wrapping_add(1);
-                (*entry).bytes_fwd = (*entry).bytes_fwd.wrapping_add(pkt_len);
-            } else {
-                (*entry).packets_rev = (*entry).packets_rev.wrapping_add(1);
-                (*entry).bytes_rev = (*entry).bytes_rev.wrapping_add(pkt_len);
-                (*entry).flags |= CT_FLAG_SEEN_REPLY;
-            }
+        if timeout > 0 && elapsed > timeout {
+            // Entry is stale — evict and treat this packet as a new connection.
+            let _ = CT_TABLE_V4.remove(&ct_key);
+            increment_metric(CT_METRIC_CLOSED);
+            insert_new = true;
+        } else {
+            // Existing connection — update
+            increment_metric(CT_METRIC_HITS);
+            unsafe {
+                (*entry).last_seen_ns = now;
 
-            // TCP state machine
-            if protocol == PROTO_TCP {
-                advance_tcp_state(entry, tcp_flag_bits, is_forward);
-            } else if protocol == PROTO_UDP && (*entry).flags & CT_FLAG_SEEN_REPLY != 0 {
-                // UDP "stream": bidirectional traffic seen
-                (*entry).state = CT_STATE_ESTABLISHED;
-                (*entry).flags |= CT_FLAG_ASSURED;
+                // Update counters
+                if is_forward {
+                    (*entry).packets_fwd = (*entry).packets_fwd.wrapping_add(1);
+                    (*entry).bytes_fwd = (*entry).bytes_fwd.wrapping_add(pkt_len);
+                } else {
+                    (*entry).packets_rev = (*entry).packets_rev.wrapping_add(1);
+                    (*entry).bytes_rev = (*entry).bytes_rev.wrapping_add(pkt_len);
+                    (*entry).flags |= CT_FLAG_SEEN_REPLY;
+                }
+
+                // TCP state machine
+                if protocol == PROTO_TCP {
+                    advance_tcp_state(entry, tcp_flag_bits, is_forward);
+                } else if protocol == PROTO_UDP && (*entry).flags & CT_FLAG_SEEN_REPLY != 0 {
+                    // UDP "stream": bidirectional traffic seen
+                    (*entry).state = CT_STATE_ESTABLISHED;
+                    (*entry).flags |= CT_FLAG_ASSURED;
+                }
             }
         }
     } else {
+        insert_new = true;
+    }
+
+    if insert_new {
         // New connection — insert
         let state = if protocol == PROTO_TCP {
             // Only create entry on SYN
@@ -271,6 +311,16 @@ fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
 /// IPv6 connection tracking: lookup/insert/update state machine.
 #[inline(never)]
 fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
+    // Read the full config once — needed for timeout values.
+    let ct_config = match CT_CONFIG.get(0) {
+        Some(cfg) => cfg,
+        None => return Ok(TC_ACT_OK),
+    };
+
+    if ct_config.enabled == 0 {
+        return Ok(TC_ACT_OK);
+    }
+
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
@@ -317,28 +367,49 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     let is_forward = ct_key.src_addr == src_addr && ct_key.src_port == src_port;
     let pkt_len = (ctx.data_end() - ctx.data()) as u32;
 
+    // Whether we need to insert a fresh entry (set to true when a stale entry
+    // is lazily evicted, causing the packet to be treated as a new connection).
+    let mut insert_new = false;
+
     if let Some(entry) = CT_TABLE_V6.get_ptr_mut(&ct_key) {
-        increment_metric(CT_METRIC_HITS);
-        unsafe {
-            (*entry).last_seen_ns = now;
+        // Lazy timeout eviction: check whether this entry has expired before
+        // updating it.  Stale entries are deleted on access so the LRU
+        // backstop remains accurate and the next packet creates a fresh entry.
+        let (entry_state, elapsed) = unsafe { ((*entry).state, now.saturating_sub((*entry).last_seen_ns)) };
+        let timeout = select_timeout(entry_state, protocol, ct_config);
 
-            if is_forward {
-                (*entry).packets_fwd = (*entry).packets_fwd.wrapping_add(1);
-                (*entry).bytes_fwd = (*entry).bytes_fwd.wrapping_add(pkt_len);
-            } else {
-                (*entry).packets_rev = (*entry).packets_rev.wrapping_add(1);
-                (*entry).bytes_rev = (*entry).bytes_rev.wrapping_add(pkt_len);
-                (*entry).flags |= CT_FLAG_SEEN_REPLY;
-            }
+        if timeout > 0 && elapsed > timeout {
+            // Entry is stale — evict and treat this packet as a new connection.
+            let _ = CT_TABLE_V6.remove(&ct_key);
+            increment_metric(CT_METRIC_CLOSED);
+            insert_new = true;
+        } else {
+            increment_metric(CT_METRIC_HITS);
+            unsafe {
+                (*entry).last_seen_ns = now;
 
-            if protocol == PROTO_TCP {
-                advance_tcp_state_v6(entry, tcp_flag_bits, is_forward);
-            } else if protocol == PROTO_UDP && (*entry).flags & CT_FLAG_SEEN_REPLY != 0 {
-                (*entry).state = CT_STATE_ESTABLISHED;
-                (*entry).flags |= CT_FLAG_ASSURED;
+                if is_forward {
+                    (*entry).packets_fwd = (*entry).packets_fwd.wrapping_add(1);
+                    (*entry).bytes_fwd = (*entry).bytes_fwd.wrapping_add(pkt_len);
+                } else {
+                    (*entry).packets_rev = (*entry).packets_rev.wrapping_add(1);
+                    (*entry).bytes_rev = (*entry).bytes_rev.wrapping_add(pkt_len);
+                    (*entry).flags |= CT_FLAG_SEEN_REPLY;
+                }
+
+                if protocol == PROTO_TCP {
+                    advance_tcp_state_v6(entry, tcp_flag_bits, is_forward);
+                } else if protocol == PROTO_UDP && (*entry).flags & CT_FLAG_SEEN_REPLY != 0 {
+                    (*entry).state = CT_STATE_ESTABLISHED;
+                    (*entry).flags |= CT_FLAG_ASSURED;
+                }
             }
         }
     } else {
+        insert_new = true;
+    }
+
+    if insert_new {
         let state = if protocol == PROTO_TCP {
             if tcp_flag_bits & TCP_SYN != 0 && tcp_flag_bits & TCP_ACK == 0 {
                 CT_STATE_SYN_SENT
@@ -378,24 +449,16 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
 /// Operates on raw pointers to `state` and `flags` fields, which are at the
 /// same conceptual position in both `ConnValue` and `ConnValueV6`.
 ///
-/// # Timeout enforcement (F3)
-/// Timeout enforcement is intentionally deferred to the userspace GC daemon,
-/// which periodically scans conntrack entries and removes stale ones using
-/// `last_seen_ns` relative to the configured per-protocol timeouts in
-/// `ConnTrackConfig`. The LRU map provides a hard backstop by evicting the
-/// least-recently-used entry when the table is full.
-///
-/// # In-kernel periodic cleanup (Wave 3 / future)
-/// `bpf_for_each_map_elem` can iterate all CT entries for periodic stale-entry
-/// cleanup directly in the kernel, avoiding the userspace GC round-trip.  It
-/// is best invoked from a `bpf_timer` callback rather than on every packet
-/// (per-packet iteration would be prohibitively expensive):
-///
-/// ```ignore
-/// // bpf_for_each_map_elem(map, callback, ctx, flags)
-/// // Called once per timer tick; callback deletes entries whose
-/// // last_seen_ns + timeout_ns < bpf_ktime_get_boot_ns().
-/// ```
+/// # Timeout enforcement (F3 / Wave 3)
+/// Lazy eviction is performed on every lookup: `process_conntrack_v4` and
+/// `process_conntrack_v6` compare `last_seen_ns` against `now - timeout_ns`
+/// (selected by `select_timeout`) before updating an existing entry.  Stale
+/// entries are deleted via `CT_TABLE_V{4,6}.remove` and the arriving packet
+/// is treated as a new connection.  The `LruHashMap` (with
+/// `BPF_F_NO_COMMON_LRU`) still provides a hard backstop, evicting the
+/// least-recently-used entry when the table fills.  Userspace GC remains as a
+/// belt-and-suspenders cleanup pass for long-idle entries that never receive
+/// another packet to trigger lazy eviction.
 ///
 /// # Race conditions (F5)
 /// All mutations of a conntrack entry happen via `get_ptr_mut`, which returns

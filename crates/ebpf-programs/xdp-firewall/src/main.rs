@@ -10,7 +10,7 @@ use aya_ebpf::{
     },
     macros::{map, xdp},
     maps::{
-        Array, HashMap, LruHashMap, PerCpuArray, ProgramArray, RingBuf,
+        Array, CpuMap, HashMap, LruHashMap, PerCpuArray, ProgramArray, RingBuf,
         lpm_trie::{Key, LpmTrie},
     },
     programs::XdpContext,
@@ -63,6 +63,25 @@ use network_types::{
 // TC classifier companion program that uses `bpf_get_socket_uid()` and writes
 // the UID into the XDP metadata area via `bpf_xdp_adjust_meta`, which this
 // program can then read after the TC pass.
+
+// ── Multi-tenancy via HASH_OF_MAPS (kernel 4.12+) ──────────────────
+//
+// Current approach: single shared rule maps with tenant_id field per entry.
+// Upgrade path: BPF_MAP_TYPE_HASH_OF_MAPS enables per-tenant rule tables.
+//
+// Architecture:
+//   TENANT_RULE_MAPS: HashMap<tenant_id, inner_map_fd>
+//   Each inner map is a complete rule table for one tenant.
+//
+// Benefits:
+//   - Atomic per-tenant rule table swap (replace inner map FD)
+//   - No cross-tenant interference during rule updates
+//   - Natural isolation — one tenant's lookup never touches another's data
+//
+// aya-ebpf support: aya::maps::HashMap can be used as outer map.
+// Inner maps are created by userspace and inserted as values.
+//
+// TODO(Wave 6): Implement when multi-tenancy requires atomic rule swaps.
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -208,6 +227,21 @@ static CT_CONFIG: Array<ConnTrackConfig> = Array::with_max_entries(1, 0);
 /// Tracks how many active connections were admitted by each rule.
 #[map]
 static FW_RULE_STATE_COUNT: Array<u32> = Array::with_max_entries(MAX_FIREWALL_RULES, 0);
+
+// ── DDoS CPU steering map (Wave 4) ──────────────────────────────────
+
+/// CpuMap for steering DDoS-flagged traffic to dedicated processing CPUs.
+/// When a packet is identified as potential DDoS, redirect it to a specific
+/// CPU for rate-limited processing instead of dropping immediately.
+/// Key: cpu_index (u32), Value: qsize (bpf_cpumap_val, queue size + optional XDP prog).
+///
+/// Userspace must populate entries with (qsize, prog_fd=0) before steering
+/// is enabled. Entry qsize of 192 is a reasonable default for DDoS traffic.
+///
+/// # Minimum kernel version
+/// 4.15 (CpuMap), 5.9 (chained XDP program per CPU entry).
+#[map]
+static DDOS_CPUMAP: CpuMap = CpuMap::with_max_entries(128, 0);
 
 // ── Metric indices ──────────────────────────────────────────────────
 
@@ -1427,6 +1461,13 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
         ACTION_DROP => {
             emit_event(ACTION_DROP);
             increment_metric(METRIC_DROPPED);
+            // TODO(Wave 4): Instead of dropping DDoS/blocked traffic immediately,
+            // use DDOS_CPUMAP.redirect(target_cpu, 0) to steer it to a dedicated
+            // CPU for rate-limited analysis. This preserves visibility while isolating
+            // attack traffic from legitimate processing. Requires userspace to:
+            //   1. Populate DDOS_CPUMAP entries with desired qsize values.
+            //   2. Set a CONFIG_FLAG to enable CPU-steering mode.
+            //   3. Register an XDP consumer program on the target CPU entry.
             Ok(xdp_action::XDP_DROP)
         }
         ACTION_REJECT => {

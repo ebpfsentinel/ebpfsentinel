@@ -5,7 +5,7 @@ use aya_ebpf::{
     bindings::xdp_action,
     helpers::{bpf_check_mtu, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
     macros::{map, xdp},
-    maps::{HashMap, PerCpuArray, RingBuf},
+    maps::{DevMap, HashMap, PerCpuArray, RingBuf},
     programs::XdpContext,
 };
 use ebpf_helpers::net::{
@@ -63,6 +63,15 @@ static LB_RR_STATE: PerCpuArray<u32> = PerCpuArray::with_max_entries(MAX_LB_SERV
 /// Per-CPU metrics.
 #[map]
 static LB_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(LB_METRIC_COUNT, 0);
+
+/// DevMap for high-performance XDP redirect to backend interfaces.
+/// Populated by userspace with backend interface indices.
+/// Key: backend_index (u32), Value: ifindex (u32) + optional chained XDP prog.
+///
+/// # Minimum kernel version
+/// 4.14 (DevMap), 5.4 (chained XDP program support in DevMap values).
+#[map]
+static LB_DEVMAP: DevMap = DevMap::with_max_entries(256, 0);
 
 /// Shared event ring buffer.
 #[map]
@@ -205,6 +214,13 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     // NOTE: This works for same-subnet backends behind a gateway. For
     // cross-subnet backends, userspace should populate a LB_NEIGH map
     // with resolved next-hop MACs (not yet implemented).
+    //
+    // TODO(Wave 4): Use bpf_redirect_map(&LB_DEVMAP, backend_ifindex, 0)
+    // for wire-speed forwarding instead of XDP_TX when LB_DEVMAP is populated.
+    // This avoids the MAC swap + XDP_TX pattern and directly forwards to
+    // the backend's network interface at native XDP speed (no re-entry into
+    // the driver's receive path). Requires userspace to populate LB_DEVMAP
+    // with the backend's ifindex before enabling redirect mode.
     let ethhdr_mut: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
     unsafe {
         let tmp = (*ethhdr_mut).src_addr;
@@ -344,6 +360,8 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     }
 
     // Rewrite Ethernet header MACs for XDP_TX (same logic as IPv4 path).
+    // TODO(Wave 4): Use LB_DEVMAP.redirect(backend_ifindex, 0) here as well
+    // once DevMap-based forwarding is enabled (see IPv4 path TODO above).
     let ethhdr_mut: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
     unsafe {
         let tmp = (*ethhdr_mut).src_addr;

@@ -42,6 +42,29 @@ use network_types::{
 // Network constants, header structs, ptr_at, skip_ipv6_ext_headers,
 // byte helpers, and metric/ringbuf macros are imported from ebpf_helpers.
 
+// ── AF_XDP zero-copy DPI path via XSKMAP (kernel 4.18+) ────────────
+//
+// For packets requiring deep inspection that exceeds eBPF complexity limits
+// (e.g., reassembled TCP streams, complex regex), forward to userspace via
+// AF_XDP instead of copying through RingBuf.
+//
+// Architecture:
+//   #[map]
+//   static IDS_XSKMAP: aya_ebpf::maps::XskMap = XskMap::with_max_entries(64, 0);
+//
+// On suspicious packet detection:
+//   1. Basic eBPF-side checks (port, flags, sampling)
+//   2. If complex inspection needed → bpf_redirect_map(&IDS_XSKMAP, queue_id, 0)
+//   3. Userspace AF_XDP socket receives packet at wire speed (zero-copy)
+//   4. Full regex/DPI in userspace with complete TCP reassembly
+//
+// Benefits vs RingBuf:
+//   - Zero-copy (no kernel→user memcpy)
+//   - Full packet (not truncated like RingBuf events)
+//   - Bidirectional (can re-inject modified packets)
+//
+// TODO(Wave 6): Implement when DPI exceeds eBPF verifier limits.
+
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// IDS pattern lookup: port+protocol → action + rule metadata.
