@@ -92,14 +92,10 @@ static FW_HASH_5TUPLE: HashMap<FwHashKey5Tuple, FwHashValue> =
 static FW_HASH_PORT: HashMap<FwHashKeyPort, FwHashValue> =
     HashMap::with_max_entries(MAX_FW_HASH_PORT, 0);
 
-/// User RingBuf for receiving config commands from userspace.
-/// Drained at program entry to apply pending rule changes atomically.
-#[map]
-static CONFIG_RINGBUF: ebpf_helpers::user_ringbuf::UserRingBuf =
-    ebpf_helpers::user_ringbuf::UserRingBuf::with_byte_size(
-        ebpf_common::config_cmd::CONFIG_RINGBUF_SIZE,
-        0,
-    );
+// NOTE: User RingBuf (BPF_MAP_TYPE_USER_RINGBUF, type 31) requires kernel 6.2+.
+// Removed for 6.1+ compatibility. Config push uses bpf_map_update_elem via
+// the existing map managers until aya exposes the userspace mmap API.
+// See: known limitation "User RingBuf config push" in CHANGELOG.md.
 
 /// Per-CPU packet counters. Index: 0=passed, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen, 5=rejected.
 #[map]
@@ -515,14 +511,6 @@ unsafe extern "C" fn scan_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
 /// (NFR15: default-to-pass on internal error).
 #[xdp]
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
-    // Drain pending config commands from userspace (best-effort, non-blocking).
-    // This applies any pending rule changes atomically before packet processing.
-    CONFIG_RINGBUF.drain(
-        drain_config_cmd as *mut core::ffi::c_void,
-        core::ptr::null_mut(),
-        0,
-    );
-
     increment_metric(METRIC_TOTAL_SEEN);
     let action = match try_xdp_firewall(&ctx) {
         Ok(action) => action,
@@ -2139,60 +2127,6 @@ fn emit_event(action: u8) {
     } else {
         increment_metric(METRIC_EVENTS_DROPPED);
     }
-}
-
-// ── User RingBuf config command drain callback ──────────────────────
-
-/// Callback for `bpf_user_ringbuf_drain`: process one config command.
-///
-/// Dispatches on `cmd_type` to add/remove rules from fast-path HashMaps
-/// or update the default policy. Returns 0 to continue draining.
-///
-/// # Safety
-///
-/// Called by the kernel with validated pointers.
-unsafe extern "C" fn drain_config_cmd(
-    _ctx: *mut core::ffi::c_void,
-    data: *mut core::ffi::c_void,
-    _data_sz: u64,
-) -> i64 {
-    use ebpf_common::config_cmd::*;
-
-    unsafe {
-        let cmd = &*(data as *const ConfigCommand);
-
-        match cmd.cmd_type {
-            CMD_ADD_FW_RULE_5TUPLE => {
-                if cmd.payload_len >= 20 {
-                    let key = &*(cmd.payload.as_ptr() as *const FwHashKey5Tuple);
-                    let val = &*(cmd.payload.as_ptr().add(16) as *const FwHashValue);
-                    let _ = FW_HASH_5TUPLE.insert(key, val, 0);
-                }
-            }
-            CMD_DEL_FW_RULE_5TUPLE => {
-                if cmd.payload_len >= 16 {
-                    let key = &*(cmd.payload.as_ptr() as *const FwHashKey5Tuple);
-                    let _ = FW_HASH_5TUPLE.remove(key);
-                }
-            }
-            CMD_ADD_FW_RULE_PORT => {
-                if cmd.payload_len >= 8 {
-                    let key = &*(cmd.payload.as_ptr() as *const FwHashKeyPort);
-                    let val = &*(cmd.payload.as_ptr().add(4) as *const FwHashValue);
-                    let _ = FW_HASH_PORT.insert(key, val, 0);
-                }
-            }
-            CMD_DEL_FW_RULE_PORT => {
-                if cmd.payload_len >= 4 {
-                    let key = &*(cmd.payload.as_ptr() as *const FwHashKeyPort);
-                    let _ = FW_HASH_PORT.remove(key);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    0 // continue draining
 }
 
 #[panic_handler]

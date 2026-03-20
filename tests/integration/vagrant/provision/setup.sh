@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
-# setup.sh — Vagrant provisioner: generate certs/keys, install agent, prepare configs
+# setup.sh — Single-VM provisioner (alternative to 2-VM setup)
+#
+# Runs on the agent VM only. Builds from source, generates certs/keys,
+# prepares configs, installs BATS. Agent runs locally on loopback.
+#
+# Usage (from Vagrantfile or direct):
+#   PROVISION_MODE=fast bash provision/setup.sh
 set -euxo pipefail
+
+PROVISION_MODE="${PROVISION_MODE:-fast}"
 
 PROJECT_DIR="/home/vagrant/ebpfsentinel"
 INTEGRATION_DIR="${PROJECT_DIR}/tests/integration"
@@ -9,9 +17,9 @@ JWT_DIR="/tmp/ebpfsentinel-test-jwt"
 DATA_DIR="/tmp/ebpfsentinel-test-data"
 AGENT_INSTALL_DIR="/usr/local/bin"
 EBPF_INSTALL_DIR="/usr/local/lib/ebpfsentinel"
-IMAGE_TAR="${PROJECT_DIR}/ebpfsentinel-image.tar"
 
-export PATH="${HOME}/.cargo/bin:${PATH}"
+export PATH="${HOME}/.cargo/env:${HOME}/.cargo/bin:${PATH}"
+source "${HOME}/.cargo/env" 2>/dev/null || true
 
 # ── Generate TLS certificates ─────────────────────────────────────
 echo "=== Generating TLS certificates ==="
@@ -21,69 +29,46 @@ bash "${INTEGRATION_DIR}/scripts/generate-certs.sh" --out-dir "$CERT_DIR"
 echo "=== Generating JWT keys and tokens ==="
 bash "${INTEGRATION_DIR}/scripts/generate-jwt-keys.sh" --out-dir "$JWT_DIR"
 
-# ── Install agent binary ─────────────────────────────────────────
-# Priority:
-#   1. Docker image extraction (fastest — pre-built image tar)
-#   2. Pre-built binary from synced target/ directory
-#   3. Build from source (slowest, opt-in via EBPF_BUILD_FROM_SOURCE=true)
-
-install_from_docker_image() {
-    echo "=== Extracting agent from Docker image ==="
-    sudo docker load -i "$IMAGE_TAR"
-
-    local container_id
-    container_id="$(sudo docker create ebpfsentinel-agent:latest true)"
-
-    sudo mkdir -p "$EBPF_INSTALL_DIR"
-    sudo docker cp "${container_id}:/usr/local/bin/ebpfsentinel-agent" "${AGENT_INSTALL_DIR}/ebpfsentinel-agent"
-    sudo docker cp "${container_id}:/usr/local/lib/ebpfsentinel/." "${EBPF_INSTALL_DIR}/" 2>/dev/null || true
-    sudo chmod +x "${AGENT_INSTALL_DIR}/ebpfsentinel-agent"
-
-    sudo docker rm "$container_id" >/dev/null
-    echo "  Installed agent from Docker image"
-}
-
-install_from_prebuilt() {
-    echo "=== Using pre-built agent binary ==="
-    local src="${PROJECT_DIR}/target/release/ebpfsentinel-agent"
-    sudo cp "$src" "${AGENT_INSTALL_DIR}/ebpfsentinel-agent"
-    sudo chmod +x "${AGENT_INSTALL_DIR}/ebpfsentinel-agent"
-
-    # Copy eBPF programs if present
-    local ebpf_src="${PROJECT_DIR}/target/bpfel-unknown-none/release"
-    if [ -d "$ebpf_src" ]; then
-        sudo mkdir -p "$EBPF_INSTALL_DIR"
-        sudo cp -r "${ebpf_src}/." "${EBPF_INSTALL_DIR}/"
-    fi
-    echo "  Installed agent from pre-built binary"
-}
-
-build_from_source() {
-    echo "=== Building eBPF programs ==="
-    if rustup run nightly rustc --version &>/dev/null 2>&1; then
-        (cd "$PROJECT_DIR" && cargo xtask ebpf-build 2>/dev/null) || echo "eBPF build skipped (non-fatal)"
-    fi
-
-    echo "=== Building agent binary ==="
-    (cd "$PROJECT_DIR" && cargo build --release --bin ebpfsentinel-agent)
-}
-
-if [ "${EBPF_BUILD_FROM_SOURCE:-false}" = "true" ]; then
-    build_from_source
-elif [ -f "$IMAGE_TAR" ] && command -v docker &>/dev/null; then
-    install_from_docker_image
-elif [ -x "${PROJECT_DIR}/target/release/ebpfsentinel-agent" ]; then
-    install_from_prebuilt
-else
-    echo "No pre-built binary or Docker image found — building from source"
-    build_from_source
+# ── Install BATS ──────────────────────────────────────────────────
+echo "=== Installing BATS ==="
+if ! command -v bats &>/dev/null; then
+    git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats-core
+    sudo /tmp/bats-core/install.sh /usr/local
+    rm -rf /tmp/bats-core
 fi
 
-# ── Prepare runtime configs from templates ─────────────────────────
+# ── Build from source ─────────────────────────────────────────────
+echo "=== Building from source ==="
+
+echo "  Building eBPF programs..."
+(cd "$PROJECT_DIR" && cargo xtask ebpf-build)
+
+echo "  Building agent binary..."
+(cd "$PROJECT_DIR" && cargo build --release --bin ebpfsentinel-agent)
+
+# Install
+sudo cp "${PROJECT_DIR}/target/release/ebpfsentinel-agent" "${AGENT_INSTALL_DIR}/ebpfsentinel-agent"
+sudo chmod +x "${AGENT_INSTALL_DIR}/ebpfsentinel-agent"
+
+local_ebpf="${PROJECT_DIR}/target/bpfel-unknown-none/release"
+if [ -d "$local_ebpf" ]; then
+    sudo mkdir -p "$EBPF_INSTALL_DIR"
+    sudo cp -r "${local_ebpf}/." "${EBPF_INSTALL_DIR}/"
+fi
+
+# Docker image (full mode only)
+if [ "$PROVISION_MODE" = "full" ] && command -v docker &>/dev/null; then
+    echo "  Building Docker image..."
+    (cd "$PROJECT_DIR" && sudo docker build -t ebpfsentinel-agent:latest .) || \
+        echo "  WARNING: Docker image build failed (non-fatal)"
+fi
+
+# ── Prepare runtime configs ───────────────────────────────────────
 echo "=== Preparing config files ==="
 mkdir -p "$DATA_DIR"
 
 for template in "${INTEGRATION_DIR}/fixtures/"config-*.yaml; do
+    [ -f "$template" ] || continue
     basename="$(basename "$template")"
     dest="/tmp/ebpfsentinel-prepared-${basename}"
 
@@ -93,10 +78,13 @@ for template in "${INTEGRATION_DIR}/fixtures/"config-*.yaml; do
         -e "s|__JWT_PUBKEY__|${JWT_DIR}/jwt-public.pem|g" \
         -e "s|__INTERFACE__|lo|g" \
         "$template" > "$dest"
-
-    echo "  Prepared: ${dest}"
 done
 
+# Copy STIX fixtures
+if [ -d "${INTEGRATION_DIR}/fixtures/stix" ]; then
+    cp -r "${INTEGRATION_DIR}/fixtures/stix" "${DATA_DIR}/stix"
+fi
+
 echo ""
-echo "=== Setup complete ==="
-echo "Run tests with: cd ${INTEGRATION_DIR} && bats --timing suites/"
+echo "=== Setup complete (single-VM mode) ==="
+echo "  Run tests: cd ${INTEGRATION_DIR} && sudo bats --timing suites/"

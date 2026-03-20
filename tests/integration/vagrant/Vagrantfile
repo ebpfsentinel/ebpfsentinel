@@ -39,6 +39,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   config.vm.define "agent", primary: true do |agent|
     agent.vm.box = "bento/ubuntu-24.04"
     agent.vm.hostname = "ebpf-agent"
+    agent.vm.boot_timeout = 600
 
     # Private network for inter-VM communication
     agent.vm.network "private_network", ip: "192.168.56.10"
@@ -205,7 +206,8 @@ NETPLAN
     # ----------------------------------------------------------
     # Provisioner: setup (external script, unprivileged)
     # ----------------------------------------------------------
-    agent.vm.provision "shell", name: "setup", privileged: false, path: "provision/setup-agent.sh"
+    agent.vm.provision "shell", name: "setup", privileged: false, path: "provision/setup-agent.sh",
+      env: { "PROVISION_MODE" => ENV.fetch('PROVISION_MODE', 'fast') }
   end
 
   # ============================================================

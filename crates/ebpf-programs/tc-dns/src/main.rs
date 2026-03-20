@@ -126,9 +126,17 @@ fn process_dns_v4(
         let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_offset)? };
         let sp = u16_from_be_bytes(unsafe { (*tcphdr).source });
         let dp = u16_from_be_bytes(unsafe { (*tcphdr).dest });
-        let data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
+        // Compute TCP data offset with explicit mask to satisfy the eBPF verifier.
+        // Use core::ptr::read_volatile to prevent the compiler from optimizing away
+        // the & 0x3C mask (the verifier needs it to prove bounded packet arithmetic).
+        let raw_doff = unsafe { (*tcphdr).doff() } as usize;
+        let raw_doff = unsafe { core::ptr::read_volatile(&raw_doff) };
+        let data_off = (raw_doff << 2) & 0x3C;
+        let dns_off = l4_offset + data_off + 2;
+        // Bounds-check the computed offset to satisfy the verifier
+        let _: *const u8 = unsafe { ptr_at(ctx, dns_off)? };
         // TCP DNS: skip TCP header + 2-byte DNS length prefix
-        (sp, dp, l4_offset + data_off + 2, FLAG_TCP)
+        (sp, dp, dns_off, FLAG_TCP)
     } else {
         return Ok(TC_ACT_OK);
     };
@@ -187,8 +195,10 @@ fn process_dns_v6(
         let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_offset)? };
         let sp = u16_from_be_bytes(unsafe { (*tcphdr).source });
         let dp = u16_from_be_bytes(unsafe { (*tcphdr).dest });
-        let data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
-        (sp, dp, l4_offset + data_off + 2, FLAG_TCP)
+        let data_off = ((unsafe { (*tcphdr).doff() } as usize) << 2) & 0x3C;
+        let dns_off = l4_offset + data_off + 2;
+        let _: *const u8 = unsafe { ptr_at(ctx, dns_off)? };
+        (sp, dp, dns_off, FLAG_TCP)
     } else {
         return Ok(TC_ACT_OK);
     };
