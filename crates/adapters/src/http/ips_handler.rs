@@ -61,7 +61,14 @@ pub struct PatchRuleModeRequest {
 #[utoipa::path(
     get, path = "/api/v1/ips/rules",
     tag = "IPS",
-    responses((status = 200, description = "List of IPS rules", body = Vec<IpsRuleResponse>))
+    responses((status = 200, description = "List of IPS rules", body = Vec<IpsRuleResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_ips_rules(State(state): State<Arc<AppState>>) -> Json<Vec<IpsRuleResponse>> {
     let svc = state.ips_service.read().await;
@@ -94,6 +101,12 @@ pub async fn list_ips_rules(State(state): State<Arc<AppState>>) -> Json<Vec<IpsR
         (status = 200, description = "Rule updated", body = IpsRuleResponse),
         (status = 400, description = "Invalid mode", body = ErrorBody),
         (status = 404, description = "Rule not found", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn patch_ips_rule_mode(
@@ -182,7 +195,14 @@ pub async fn patch_ips_rule_mode(
 #[utoipa::path(
     get, path = "/api/v1/ips/blacklist",
     tag = "IPS",
-    responses((status = 200, description = "Current blacklist entries", body = Vec<BlacklistEntryResponse>))
+    responses((status = 200, description = "Current blacklist entries", body = Vec<BlacklistEntryResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_ips_blacklist(
     State(state): State<Arc<AppState>>,
@@ -209,7 +229,14 @@ pub async fn list_ips_blacklist(
 #[utoipa::path(
     get, path = "/api/v1/ips/domain-blocks",
     tag = "IPS",
-    responses((status = 200, description = "Domain-based IPS blocks", body = Vec<DomainBlockResponse>))
+    responses((status = 200, description = "Domain-based IPS blocks", body = Vec<DomainBlockResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_ips_domain_blocks(
     State(state): State<Arc<AppState>>,

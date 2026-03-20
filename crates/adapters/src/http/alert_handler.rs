@@ -182,6 +182,12 @@ fn severity_label(s: Severity) -> &'static str {
     responses(
         (status = 200, description = "Paginated alerts", body = AlertListResponse),
         (status = 503, description = "Alert store not configured", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn list_alerts(
@@ -279,6 +285,12 @@ pub async fn list_alerts(
     responses(
         (status = 200, description = "Alert marked as false positive", body = FalsePositiveResponse),
         (status = 404, description = "Alert not found", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn mark_false_positive(

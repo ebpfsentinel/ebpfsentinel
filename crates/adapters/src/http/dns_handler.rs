@@ -8,7 +8,7 @@ use ports::secondary::dns_cache_port::DnsCachePort;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-use super::error::ApiError;
+use super::error::{ApiError, ErrorBody};
 use super::state::AppState;
 
 // ── Query parameters ────────────────────────────────────────────────
@@ -124,6 +124,12 @@ fn get_dns_services(
     responses(
         (status = 200, description = "DNS cache entries", body = DnsCacheListResponse),
         (status = 503, description = "DNS not enabled"),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn list_dns_cache(
@@ -204,6 +210,12 @@ pub async fn list_dns_cache(
     responses(
         (status = 200, description = "DNS statistics", body = DnsStatsResponse),
         (status = 503, description = "DNS not enabled"),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn dns_stats(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
@@ -238,6 +250,12 @@ pub async fn dns_stats(State(state): State<Arc<AppState>>) -> Result<impl IntoRe
     responses(
         (status = 200, description = "Blocklist rules", body = Vec<BlocklistRuleResponse>),
         (status = 503, description = "DNS not enabled"),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn list_dns_blocklist(
@@ -264,6 +282,12 @@ pub async fn list_dns_blocklist(
     responses(
         (status = 200, description = "Cache flushed", body = DnsFlushResponse),
         (status = 503, description = "DNS not enabled"),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn flush_dns_cache(

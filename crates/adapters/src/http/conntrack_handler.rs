@@ -7,7 +7,7 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use super::error::ApiError;
+use super::error::{ApiError, ErrorBody};
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
@@ -50,7 +50,14 @@ fn default_limit() -> usize {
 #[utoipa::path(
     get, path = "/api/v1/conntrack/status",
     tag = "ConnTrack",
-    responses((status = 200, description = "Conntrack status", body = ConnTrackStatusResponse))
+    responses((status = 200, description = "Conntrack status", body = ConnTrackStatusResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn conntrack_status(
     State(state): State<Arc<AppState>>,
@@ -71,7 +78,14 @@ pub async fn conntrack_status(
 #[utoipa::path(
     get, path = "/api/v1/conntrack/connections",
     tag = "ConnTrack",
-    responses((status = 200, description = "Connection list", body = Vec<ConnectionResponse>))
+    responses((status = 200, description = "Connection list", body = Vec<ConnectionResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_connections(
     State(state): State<Arc<AppState>>,
@@ -109,7 +123,14 @@ pub async fn list_connections(
 #[utoipa::path(
     post, path = "/api/v1/conntrack/flush",
     tag = "ConnTrack",
-    responses((status = 200, description = "Connections flushed"))
+    responses((status = 200, description = "Connections flushed"),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn flush_connections(
     State(state): State<Arc<AppState>>,

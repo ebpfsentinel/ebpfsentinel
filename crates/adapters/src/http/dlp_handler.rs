@@ -5,7 +5,7 @@ use axum::extract::State;
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use super::error::ApiError;
+use super::error::{ApiError, ErrorBody};
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
@@ -33,7 +33,14 @@ pub struct DlpPatternResponse {
 #[utoipa::path(
     get, path = "/api/v1/dlp/status",
     tag = "DLP",
-    responses((status = 200, description = "DLP status", body = DlpStatusResponse))
+    responses((status = 200, description = "DLP status", body = DlpStatusResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn dlp_status(
     State(state): State<Arc<AppState>>,
@@ -54,7 +61,14 @@ pub async fn dlp_status(
 #[utoipa::path(
     get, path = "/api/v1/dlp/patterns",
     tag = "DLP",
-    responses((status = 200, description = "DLP patterns", body = Vec<DlpPatternResponse>))
+    responses((status = 200, description = "DLP patterns", body = Vec<DlpPatternResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_dlp_patterns(
     State(state): State<Arc<AppState>>,

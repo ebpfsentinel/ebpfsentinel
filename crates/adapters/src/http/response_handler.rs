@@ -7,7 +7,7 @@ use domain::response::entity::{ResponseAction, ResponseActionType};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use super::error::ApiError;
+use super::error::{ApiError, ErrorBody};
 use super::state::AppState;
 
 // ── Request/Response DTOs ────────────────────────────────────────────
@@ -54,6 +54,12 @@ pub struct ResponseListResponse {
     responses(
         (status = 201, description = "Response action created", body = ResponseActionResponse),
         (status = 400, description = "Invalid request"),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn create_response_action(
@@ -132,6 +138,12 @@ pub async fn create_response_action(
     tag = "Responses",
     responses(
         (status = 200, description = "Active response actions", body = ResponseListResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn list_response_actions(
@@ -171,6 +183,12 @@ pub async fn list_response_actions(
     responses(
         (status = 200, description = "Action revoked", body = ResponseActionResponse),
         (status = 404, description = "Action not found"),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn revoke_response_action(

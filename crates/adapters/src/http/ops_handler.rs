@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use super::error::ErrorBody;
 use super::state::AppState;
 
 // ── Response types ────────────────────────────────────────────────
@@ -36,6 +37,12 @@ pub struct EbpfStatusResponse {
     responses(
         (status = 200, description = "Reload triggered successfully", body = ReloadResponse),
         (status = 500, description = "Failed to trigger reload", body = ReloadResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn reload_config(
@@ -65,6 +72,12 @@ pub async fn reload_config(
     tag = "Operations",
     responses(
         (status = 200, description = "Current sanitized configuration"),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -81,6 +94,12 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<serde_json::
     tag = "Operations",
     responses(
         (status = 200, description = "eBPF program status", body = EbpfStatusResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn get_ebpf_status(State(state): State<Arc<AppState>>) -> Json<EbpfStatusResponse> {

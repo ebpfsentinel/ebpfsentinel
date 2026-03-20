@@ -264,7 +264,14 @@ impl From<&L7Rule> for L7RuleResponse {
 #[utoipa::path(
     get, path = "/api/v1/firewall/l7-rules",
     tag = "L7 Firewall",
-    responses((status = 200, description = "List of L7 rules", body = Vec<L7RuleResponse>))
+    responses((status = 200, description = "List of L7 rules", body = Vec<L7RuleResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_l7_rules(State(state): State<Arc<AppState>>) -> Json<Vec<L7RuleResponse>> {
     let svc = state.l7_service.read().await;
@@ -281,6 +288,12 @@ pub async fn list_l7_rules(State(state): State<Arc<AppState>>) -> Json<Vec<L7Rul
         (status = 201, description = "L7 rule created", body = L7RuleResponse),
         (status = 400, description = "Validation error", body = ErrorBody),
         (status = 409, description = "Duplicate rule", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn create_l7_rule(
@@ -317,6 +330,12 @@ pub async fn create_l7_rule(
     responses(
         (status = 204, description = "Rule deleted"),
         (status = 404, description = "Rule not found", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn delete_l7_rule(

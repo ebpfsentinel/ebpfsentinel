@@ -5,6 +5,7 @@ use axum::extract::State;
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use super::error::ErrorBody;
 use super::state::AppState;
 
 // ── Response DTOs ───────────────────────────────────────────────────
@@ -44,7 +45,14 @@ pub struct FeedResponse {
 #[utoipa::path(
     get, path = "/api/v1/threatintel/status",
     tag = "Threat Intelligence",
-    responses((status = 200, description = "Threat intel subsystem status", body = ThreatIntelStatusResponse))
+    responses((status = 200, description = "Threat intel subsystem status", body = ThreatIntelStatusResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn threatintel_status(
     State(state): State<Arc<AppState>>,
@@ -62,7 +70,14 @@ pub async fn threatintel_status(
 #[utoipa::path(
     get, path = "/api/v1/threatintel/iocs",
     tag = "Threat Intelligence",
-    responses((status = 200, description = "List of loaded IOCs", body = Vec<IocResponse>))
+    responses((status = 200, description = "List of loaded IOCs", body = Vec<IocResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_iocs(State(state): State<Arc<AppState>>) -> Json<Vec<IocResponse>> {
     let svc = state.threatintel_service.read().await;
@@ -84,7 +99,14 @@ pub async fn list_iocs(State(state): State<Arc<AppState>>) -> Json<Vec<IocRespon
 #[utoipa::path(
     get, path = "/api/v1/threatintel/feeds",
     tag = "Threat Intelligence",
-    responses((status = 200, description = "List of configured feeds", body = Vec<FeedResponse>))
+    responses((status = 200, description = "List of configured feeds", body = Vec<FeedResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_feeds(State(state): State<Arc<AppState>>) -> Json<Vec<FeedResponse>> {
     let svc = state.threatintel_service.read().await;

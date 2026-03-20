@@ -6,6 +6,7 @@ use axum::extract::State;
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use super::error::ErrorBody;
 use super::state::AppState;
 
 #[derive(Serialize, ToSchema)]
@@ -24,6 +25,12 @@ pub struct AgentStatusResponse {
     tag = "Agent",
     responses(
         (status = 200, description = "Current agent status", body = AgentStatusResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn agent_status(State(state): State<Arc<AppState>>) -> Json<AgentStatusResponse> {

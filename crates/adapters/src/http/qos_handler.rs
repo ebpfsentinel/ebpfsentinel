@@ -168,7 +168,14 @@ impl QosClassifierResponse {
 #[utoipa::path(
     get, path = "/api/v1/qos/status",
     tag = "QoS",
-    responses((status = 200, description = "QoS status", body = QosStatusResponse))
+    responses((status = 200, description = "QoS status", body = QosStatusResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn get_qos_status(
     State(state): State<Arc<AppState>>,
@@ -188,7 +195,14 @@ pub async fn get_qos_status(
 #[utoipa::path(
     get, path = "/api/v1/qos/pipes",
     tag = "QoS",
-    responses((status = 200, description = "List of QoS pipes", body = Vec<QosPipeResponse>))
+    responses((status = 200, description = "List of QoS pipes", body = Vec<QosPipeResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_qos_pipes(
     State(state): State<Arc<AppState>>,
@@ -212,6 +226,12 @@ pub async fn list_qos_pipes(
         (status = 201, description = "Pipe created", body = QosPipeResponse),
         (status = 400, description = "Validation error", body = ErrorBody),
         (status = 409, description = "Duplicate pipe", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn create_qos_pipe(
@@ -257,6 +277,12 @@ pub async fn create_qos_pipe(
     responses(
         (status = 204, description = "Pipe deleted"),
         (status = 404, description = "Pipe not found", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn delete_qos_pipe(
@@ -280,7 +306,14 @@ pub async fn delete_qos_pipe(
 #[utoipa::path(
     get, path = "/api/v1/qos/queues",
     tag = "QoS",
-    responses((status = 200, description = "List of QoS queues", body = Vec<QosQueueResponse>))
+    responses((status = 200, description = "List of QoS queues", body = Vec<QosQueueResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_qos_queues(
     State(state): State<Arc<AppState>>,
@@ -304,6 +337,12 @@ pub async fn list_qos_queues(
         (status = 201, description = "Queue created", body = QosQueueResponse),
         (status = 400, description = "Validation error", body = ErrorBody),
         (status = 409, description = "Duplicate queue", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn create_qos_queue(
@@ -345,6 +384,12 @@ pub async fn create_qos_queue(
     responses(
         (status = 204, description = "Queue deleted"),
         (status = 404, description = "Queue not found", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn delete_qos_queue(
@@ -368,7 +413,14 @@ pub async fn delete_qos_queue(
 #[utoipa::path(
     get, path = "/api/v1/qos/classifiers",
     tag = "QoS",
-    responses((status = 200, description = "List of QoS classifiers", body = Vec<QosClassifierResponse>))
+    responses((status = 200, description = "List of QoS classifiers", body = Vec<QosClassifierResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_qos_classifiers(
     State(state): State<Arc<AppState>>,
@@ -392,6 +444,12 @@ pub async fn list_qos_classifiers(
         (status = 201, description = "Classifier created", body = QosClassifierResponse),
         (status = 400, description = "Validation error", body = ErrorBody),
         (status = 409, description = "Duplicate classifier", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn create_qos_classifier(
@@ -465,6 +523,12 @@ pub async fn create_qos_classifier(
     responses(
         (status = 204, description = "Classifier deleted"),
         (status = 404, description = "Classifier not found", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn delete_qos_classifier(

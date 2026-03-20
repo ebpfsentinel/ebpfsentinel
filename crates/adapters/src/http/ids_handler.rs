@@ -5,7 +5,7 @@ use axum::extract::State;
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use super::error::ApiError;
+use super::error::{ApiError, ErrorBody};
 use super::state::AppState;
 
 // ── Response DTOs ───────────────────────────────────────────────────
@@ -38,6 +38,12 @@ pub struct IdsRuleResponse {
     responses(
         (status = 200, description = "IDS status", body = IdsStatusResponse),
         (status = 404, description = "IDS not available"),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn ids_status(
@@ -62,6 +68,12 @@ pub async fn ids_status(
     responses(
         (status = 200, description = "List of IDS rules", body = Vec<IdsRuleResponse>),
         (status = 404, description = "IDS not available"),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn list_ids_rules(

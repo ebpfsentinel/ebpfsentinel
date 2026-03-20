@@ -103,7 +103,14 @@ fn default_limit() -> usize {
 #[utoipa::path(
     get, path = "/api/v1/ddos/status",
     tag = "DDoS",
-    responses((status = 200, description = "DDoS status", body = DdosStatusResponse))
+    responses((status = 200, description = "DDoS status", body = DdosStatusResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn ddos_status(
     State(state): State<Arc<AppState>>,
@@ -125,7 +132,14 @@ pub async fn ddos_status(
 #[utoipa::path(
     get, path = "/api/v1/ddos/attacks",
     tag = "DDoS",
-    responses((status = 200, description = "Active attacks", body = Vec<DdosAttackResponse>))
+    responses((status = 200, description = "Active attacks", body = Vec<DdosAttackResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn ddos_attacks(
     State(state): State<Arc<AppState>>,
@@ -156,7 +170,14 @@ pub async fn ddos_attacks(
 #[utoipa::path(
     get, path = "/api/v1/ddos/attacks/history",
     tag = "DDoS",
-    responses((status = 200, description = "Attack history", body = Vec<DdosAttackResponse>))
+    responses((status = 200, description = "Attack history", body = Vec<DdosAttackResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn ddos_history(
     State(state): State<Arc<AppState>>,
@@ -188,7 +209,14 @@ pub async fn ddos_history(
 #[utoipa::path(
     get, path = "/api/v1/ddos/policies",
     tag = "DDoS",
-    responses((status = 200, description = "DDoS policies", body = Vec<DdosPolicyResponse>))
+    responses((status = 200, description = "DDoS policies", body = Vec<DdosPolicyResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_ddos_policies(
     State(state): State<Arc<AppState>>,
@@ -214,6 +242,12 @@ pub async fn list_ddos_policies(
     responses(
         (status = 201, description = "Policy created", body = DdosPolicyResponse),
         (status = 400, description = "Validation error", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn create_ddos_policy(
@@ -262,6 +296,12 @@ pub async fn create_ddos_policy(
     responses(
         (status = 204, description = "Policy deleted"),
         (status = 404, description = "Policy not found", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn delete_ddos_policy(

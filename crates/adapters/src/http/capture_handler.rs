@@ -7,7 +7,7 @@ use domain::capture::entity::{CaptureSession, CaptureStatus};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use super::error::ApiError;
+use super::error::{ApiError, ErrorBody};
 use super::state::AppState;
 
 // ── DTOs ─────────────────────────────────────────────────────────────
@@ -58,6 +58,12 @@ pub struct CaptureListResponse {
     responses(
         (status = 201, description = "Capture started", body = CaptureResponse),
         (status = 409, description = "Another capture is already running"),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn start_capture(
@@ -138,6 +144,12 @@ pub async fn start_capture(
     tag = "Captures",
     responses(
         (status = 200, description = "Capture sessions", body = CaptureListResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn list_captures(
@@ -164,6 +176,12 @@ pub async fn list_captures(
     responses(
         (status = 200, description = "Capture stopped", body = CaptureResponse),
         (status = 404, description = "Capture not found"),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn stop_capture(

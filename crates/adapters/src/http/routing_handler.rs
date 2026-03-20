@@ -5,7 +5,7 @@ use axum::extract::State;
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use super::error::ApiError;
+use super::error::{ApiError, ErrorBody};
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
@@ -33,7 +33,14 @@ pub struct GatewayResponse {
 #[utoipa::path(
     get, path = "/api/v1/routing/status",
     tag = "Routing",
-    responses((status = 200, description = "Routing status", body = RoutingStatusResponse))
+    responses((status = 200, description = "Routing status", body = RoutingStatusResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn routing_status(
     State(state): State<Arc<AppState>>,
@@ -53,7 +60,14 @@ pub async fn routing_status(
 #[utoipa::path(
     get, path = "/api/v1/routing/gateways",
     tag = "Routing",
-    responses((status = 200, description = "Gateway list", body = Vec<GatewayResponse>))
+    responses((status = 200, description = "Gateway list", body = Vec<GatewayResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_gateways(
     State(state): State<Arc<AppState>>,

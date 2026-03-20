@@ -80,6 +80,12 @@ pub struct BlocklistRemoveResponse {
     responses(
         (status = 200, description = "Domain reputations", body = DomainReputationListResponse),
         (status = 503, description = "Domain reputation not enabled", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn list_domain_reputations(
@@ -156,6 +162,12 @@ pub async fn list_domain_reputations(
         (status = 200, description = "Domain added to blocklist", body = BlocklistAddResponse),
         (status = 400, description = "Invalid domain pattern", body = ErrorBody),
         (status = 503, description = "DNS blocklist not enabled", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn add_to_blocklist(
@@ -197,6 +209,12 @@ pub async fn add_to_blocklist(
         (status = 200, description = "Domain removed from blocklist", body = BlocklistRemoveResponse),
         (status = 404, description = "Domain not found in blocklist", body = ErrorBody),
         (status = 503, description = "DNS blocklist not enabled", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn remove_from_blocklist(

@@ -6,6 +6,7 @@ use domain::alert::mitre;
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use super::error::ErrorBody;
 use super::state::AppState;
 
 /// MITRE ATT&CK coverage response.
@@ -45,6 +46,12 @@ pub struct TacticSummary {
     tag = "MITRE ATT&CK",
     responses(
         (status = 200, description = "Coverage matrix of covered ATT&CK techniques", body = MitreCoverageResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn mitre_coverage(State(state): State<Arc<AppState>>) -> Json<MitreCoverageResponse> {

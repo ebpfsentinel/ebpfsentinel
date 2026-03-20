@@ -112,7 +112,14 @@ fn default_enabled() -> bool {
 #[utoipa::path(
     get, path = "/api/v1/lb/status",
     tag = "Load Balancer",
-    responses((status = 200, description = "LB status", body = LbStatusResponse))
+    responses((status = 200, description = "LB status", body = LbStatusResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn lb_status(
     State(state): State<Arc<AppState>>,
@@ -135,7 +142,14 @@ pub async fn lb_status(
 #[utoipa::path(
     get, path = "/api/v1/lb/services",
     tag = "Load Balancer",
-    responses((status = 200, description = "LB services", body = Vec<LbServiceResponse>))
+    responses((status = 200, description = "LB services", body = Vec<LbServiceResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_lb_services(
     State(state): State<Arc<AppState>>,
@@ -164,6 +178,12 @@ pub async fn list_lb_services(
     responses(
         (status = 200, description = "Service detail", body = LbServiceDetailResponse),
         (status = 404, description = "Not found", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn get_lb_service(
@@ -234,6 +254,12 @@ pub async fn get_lb_service(
     responses(
         (status = 201, description = "Service created", body = LbServiceResponse),
         (status = 400, description = "Validation error", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn create_lb_service(
@@ -285,6 +311,12 @@ pub async fn create_lb_service(
     responses(
         (status = 204, description = "Service deleted"),
         (status = 404, description = "Not found", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn delete_lb_service(

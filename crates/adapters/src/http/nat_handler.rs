@@ -5,7 +5,7 @@ use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use super::error::ApiError;
+use super::error::{ApiError, ErrorBody};
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
@@ -31,7 +31,14 @@ pub struct NatRuleResponse {
 #[utoipa::path(
     get, path = "/api/v1/nat/status",
     tag = "NAT",
-    responses((status = 200, description = "NAT status", body = NatStatusResponse))
+    responses((status = 200, description = "NAT status", body = NatStatusResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn nat_status(
     State(state): State<Arc<AppState>>,
@@ -51,7 +58,14 @@ pub async fn nat_status(
 #[utoipa::path(
     get, path = "/api/v1/nat/rules",
     tag = "NAT",
-    responses((status = 200, description = "NAT rules", body = Vec<NatRuleResponse>))
+    responses((status = 200, description = "NAT rules", body = Vec<NatRuleResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_nat_rules(
     State(state): State<Arc<AppState>>,
@@ -115,7 +129,14 @@ fn default_true() -> bool {
 #[utoipa::path(
     get, path = "/api/v1/nat/nptv6",
     tag = "NAT",
-    responses((status = 200, description = "NPTv6 rules", body = Vec<NptV6RuleResponse>))
+    responses((status = 200, description = "NPTv6 rules", body = Vec<NptV6RuleResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_nptv6_rules(
     State(state): State<Arc<AppState>>,
@@ -147,6 +168,12 @@ pub async fn list_nptv6_rules(
     responses(
         (status = 201, description = "NPTv6 rule created", body = NptV6RuleResponse),
         (status = 400, description = "Invalid rule"),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn create_nptv6_rule(
@@ -205,6 +232,12 @@ pub async fn create_nptv6_rule(
     responses(
         (status = 204, description = "NPTv6 rule deleted"),
         (status = 404, description = "Rule not found"),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn delete_nptv6_rule(

@@ -5,7 +5,7 @@ use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use super::error::ApiError;
+use super::error::{ApiError, ErrorBody};
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
@@ -28,7 +28,14 @@ pub struct ExternalAliasContent {
 #[utoipa::path(
     get, path = "/api/v1/aliases/status",
     tag = "Aliases",
-    responses((status = 200, description = "Alias status", body = AliasStatusResponse))
+    responses((status = 200, description = "Alias status", body = AliasStatusResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn alias_status(
     State(state): State<Arc<AppState>>,
@@ -52,6 +59,12 @@ pub async fn alias_status(
         (status = 200, description = "Content loaded"),
         (status = 404, description = "Alias not found"),
         (status = 400, description = "Invalid content or alias is not External"),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn set_external_alias_content(

@@ -404,6 +404,12 @@ impl From<&FirewallRule> for RuleResponse {
     tag = "Firewall",
     responses(
         (status = 200, description = "List of firewall rules", body = Vec<RuleResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn list_rules(State(state): State<Arc<AppState>>) -> Json<Vec<RuleResponse>> {
@@ -421,6 +427,12 @@ pub async fn list_rules(State(state): State<Arc<AppState>>) -> Json<Vec<RuleResp
         (status = 201, description = "Rule created", body = RuleResponse),
         (status = 400, description = "Validation error", body = ErrorBody),
         (status = 409, description = "Duplicate rule", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn create_rule(
@@ -458,6 +470,12 @@ pub async fn create_rule(
     responses(
         (status = 204, description = "Rule deleted"),
         (status = 404, description = "Rule not found", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn delete_rule(

@@ -5,7 +5,7 @@ use axum::extract::State;
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use super::error::ApiError;
+use super::error::{ApiError, ErrorBody};
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
@@ -44,7 +44,14 @@ fn format_zone_policy(policy: domain::zone::entity::ZonePolicy) -> &'static str 
 #[utoipa::path(
     get, path = "/api/v1/zones/status",
     tag = "Zones",
-    responses((status = 200, description = "Zone status", body = ZoneStatusResponse))
+    responses((status = 200, description = "Zone status", body = ZoneStatusResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn zone_status(
     State(state): State<Arc<AppState>>,
@@ -65,7 +72,14 @@ pub async fn zone_status(
 #[utoipa::path(
     get, path = "/api/v1/zones",
     tag = "Zones",
-    responses((status = 200, description = "Zone list", body = Vec<ZoneResponse>))
+    responses((status = 200, description = "Zone list", body = Vec<ZoneResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_zones(
     State(state): State<Arc<AppState>>,
@@ -91,7 +105,14 @@ pub async fn list_zones(
 #[utoipa::path(
     get, path = "/api/v1/zones/policies",
     tag = "Zones",
-    responses((status = 200, description = "Zone policies", body = Vec<ZonePolicyResponse>))
+    responses((status = 200, description = "Zone policies", body = Vec<ZonePolicyResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
 )]
 pub async fn list_zone_policies(
     State(state): State<Arc<AppState>>,

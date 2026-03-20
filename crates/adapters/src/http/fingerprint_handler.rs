@@ -5,6 +5,7 @@ use axum::extract::State;
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use super::error::ErrorBody;
 use super::state::AppState;
 
 /// Response for `GET /api/v1/fingerprints/summary`.
@@ -24,6 +25,12 @@ pub struct FingerprintSummaryResponse {
     tag = "Fingerprints",
     responses(
         (status = 200, description = "Fingerprint cache summary", body = FingerprintSummaryResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
     )
 )]
 pub async fn fingerprint_summary(
