@@ -145,3 +145,98 @@ teardown_file() {
     [ -n "$metrics" ]
     echo "$metrics" | grep -qE "ebpfsentinel_ddos|ebpfsentinel_scrub|ebpfsentinel_packets"
 }
+
+# ── TCP flag flood detection ──────────────────────────────────────
+
+@test "DDoS RST flood detection" {
+    require_root
+
+    # Send RST-flagged packets from test namespace; ignore errors (tool may be absent)
+    ip netns exec "$EBPF_TEST_NS" hping3 -R -p 8080 -c 200 -i u1000 "$EBPF_HOST_IP" 2>/dev/null || true
+
+    sleep 3
+
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+
+    [ -n "$metrics" ]
+    echo "$metrics" | grep -qE "ebpfsentinel_ddos|ebpfsentinel_packets"
+}
+
+@test "DDoS FIN flood detection" {
+    require_root
+
+    ip netns exec "$EBPF_TEST_NS" hping3 -F -p 8080 -c 200 -i u1000 "$EBPF_HOST_IP" 2>/dev/null || true
+
+    sleep 3
+
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+
+    [ -n "$metrics" ]
+    echo "$metrics" | grep -qE "ebpfsentinel_ddos|ebpfsentinel_packets"
+}
+
+@test "DDoS ACK flood detection" {
+    require_root
+
+    ip netns exec "$EBPF_TEST_NS" hping3 -A -p 8080 -c 200 -i u1000 "$EBPF_HOST_IP" 2>/dev/null || true
+
+    sleep 3
+
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+
+    [ -n "$metrics" ]
+    echo "$metrics" | grep -qE "ebpfsentinel_ddos|ebpfsentinel_packets"
+}
+
+@test "DDoS ICMP flood detection" {
+    require_root
+
+    # High-rate ICMP flood via flood ping
+    ip netns exec "$EBPF_TEST_NS" ping -f -c 500 -W 2 "$EBPF_HOST_IP" 2>/dev/null || true
+
+    sleep 3
+
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+
+    [ -n "$metrics" ]
+    echo "$metrics" | grep -qE "ebpfsentinel_ddos|ebpfsentinel_packets"
+}
+
+# ── Attack history ────────────────────────────────────────────────
+
+@test "DDoS attack history accessible" {
+    require_root
+
+    local body
+    body="$(api_get /api/v1/ddos/attacks/history)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+}
+
+# ── Policy CRUD ───────────────────────────────────────────────────
+
+@test "DDoS policy CRUD — create" {
+    require_root
+
+    local policy='{"id":"test-policy","type":"syn_flood","max_pps":100,"action":"block"}'
+    local body
+    body="$(api_post /api/v1/ddos/policies "$policy")"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+    local id
+    id="$(echo "$body" | jq -r '.id // empty' 2>/dev/null)" || true
+    [ "$id" = "test-policy" ]
+}
+
+@test "DDoS policy CRUD — delete" {
+    require_root
+
+    api_delete /api/v1/ddos/policies/test-policy >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ]
+}

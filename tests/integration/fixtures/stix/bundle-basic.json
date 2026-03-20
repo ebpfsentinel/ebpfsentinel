@@ -1,0 +1,63 @@
+{
+  "type": "bundle",
+  "id": "bundle--test-001",
+  "objects": [
+    {
+      "type": "indicator",
+      "id": "indicator--1",
+      "pattern": "[ipv4-addr:value = '198.51.100.1']",
+      "pattern_type": "stix",
+      "valid_from": "2024-01-01T00:00:00Z",
+      "confidence": 85,
+      "indicator_types": ["malicious-activity"]
+    },
+    {
+      "type": "indicator",
+      "id": "indicator--2",
+      "pattern": "[domain-name:value = 'evil.example.com']",
+      "pattern_type": "stix",
+      "valid_from": "2024-06-01T00:00:00Z",
+      "confidence": 70,
+      "indicator_types": ["command-and-control"]
+    },
+    {
+      "type": "indicator",
+      "id": "indicator--3",
+      "pattern": "[url:value = 'http://malware.test/payload.exe']",
+      "pattern_type": "stix",
+      "valid_from": "2024-01-01T00:00:00Z",
+      "confidence": 90
+    },
+    {
+      "type": "indicator",
+      "id": "indicator--expired",
+      "pattern": "[ipv4-addr:value = '203.0.113.50']",
+      "pattern_type": "stix",
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_until": "2020-06-01T00:00:00Z"
+    },
+    {
+      "type": "malware",
+      "id": "malware--1",
+      "name": "EvilBot",
+      "is_family": false
+    },
+    {
+      "type": "relationship",
+      "id": "relationship--1",
+      "relationship_type": "indicates",
+      "source_ref": "indicator--1",
+      "target_ref": "malware--1"
+    },
+    {
+      "type": "ipv4-addr",
+      "id": "ipv4-addr--1",
+      "value": "192.0.2.42"
+    },
+    {
+      "type": "domain-name",
+      "id": "domain-name--1",
+      "value": "phishing.example.org"
+    }
+  ]
+}

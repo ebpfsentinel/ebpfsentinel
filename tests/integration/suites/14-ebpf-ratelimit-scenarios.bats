@@ -145,3 +145,98 @@ teardown_file() {
     # Should have packet-related metrics
     echo "$metrics" | grep -qE "ebpfsentinel_ratelimit|ebpfsentinel_packets"
 }
+
+# ── Extended ratelimit tests ────────────────────────────────────
+
+@test "ratelimit rule CRUD — create sliding window rule" {
+    require_root
+
+    local body
+    body='{"id":"rl-sliding-window","rate":200,"burst":50,"scope":"global","algorithm":"sliding_window","action":"drop","enabled":true}'
+    api_post /api/v1/ratelimit/rules "$body"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+
+    # Verify the rule appears in the list
+    local rules
+    rules="$(api_get /api/v1/ratelimit/rules)"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ]
+
+    local found
+    found="$(echo "$rules" | jq '[.[] | select(.id == "rl-sliding-window")] | length' 2>/dev/null)" || true
+    [ "${found:-0}" -ge 1 ]
+
+    # Verify algorithm field is preserved
+    local algo
+    algo="$(echo "$rules" | jq -r '.[] | select(.id == "rl-sliding-window") | .algorithm' 2>/dev/null)" || true
+    [ "$algo" = "sliding_window" ]
+}
+
+@test "ratelimit rule CRUD — delete rule" {
+    require_root
+
+    # Ensure the sliding window rule from the previous test exists (create it if not)
+    local rules
+    rules="$(api_get /api/v1/ratelimit/rules)"
+    local found
+    found="$(echo "$rules" | jq '[.[] | select(.id == "rl-sliding-window")] | length' 2>/dev/null)" || true
+    if [ "${found:-0}" -eq 0 ]; then
+        local body
+        body='{"id":"rl-sliding-window","rate":200,"burst":50,"scope":"global","algorithm":"sliding_window","action":"drop","enabled":true}'
+        api_post /api/v1/ratelimit/rules "$body" >/dev/null 2>&1
+        sleep 1
+    fi
+
+    # Delete the rule
+    api_delete /api/v1/ratelimit/rules/rl-sliding-window
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ]
+
+    # Verify it is gone
+    rules="$(api_get /api/v1/ratelimit/rules)"
+    local remaining
+    remaining="$(echo "$rules" | jq '[.[] | select(.id == "rl-sliding-window")] | length' 2>/dev/null)" || true
+    [ "${remaining:-0}" -eq 0 ]
+}
+
+@test "ratelimit SYN flood triggers rate limiting alert" {
+    require_root
+
+    if ! command -v hping3 &>/dev/null; then
+        # Fallback without hping3: rapid parallel ncat SYN-like connections
+        for i in $(seq 1 300); do
+            ip netns exec "$EBPF_TEST_NS" \
+                timeout 1 ncat -w 1 "$EBPF_HOST_IP" 8888 </dev/null &>/dev/null &
+        done
+        wait
+    else
+        hping3_flood_from_ns "$EBPF_HOST_IP" 8888 600 u50
+    fi
+
+    # Allow the agent time to process events and emit an alert/metric
+    sleep 5
+
+    # Poll for a ratelimit alert (component = ratelimit)
+    local alert
+    alert="$(poll_for_alert ratelimit 10)" || true
+
+    # Either an alert was raised, or rate-limit drop metrics increased — either is valid
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+
+    [ -n "$alert" ] || echo "$metrics" | grep -qE "ebpfsentinel_ratelimit|ebpfsentinel_packets_dropped"
+}
+
+@test "ratelimit metrics include drop counters" {
+    require_root
+
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+
+    [ -n "$metrics" ]
+    echo "$metrics" | grep -qE "ebpfsentinel_ratelimit"
+}

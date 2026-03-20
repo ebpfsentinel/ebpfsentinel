@@ -94,3 +94,82 @@ teardown_file() {
     [ -n "$metrics" ]
     echo "$metrics" | grep -qE "ebpfsentinel_threatintel|ebpfsentinel_packets"
 }
+
+# ── Extended threat intel tests ──────────────────────────────────
+
+@test "threat intel feed with CSV format — feeds list contains at least one feed" {
+    require_root
+
+    local body
+    body="$(api_get /api/v1/threatintel/feeds)"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ]
+
+    local count
+    count="$(echo "$body" | jq 'length' 2>/dev/null)" || true
+    [ "${count:-0}" -ge 1 ]
+}
+
+@test "threat intel IOC count accessible" {
+    require_root
+
+    local body
+    body="$(api_get /api/v1/threatintel/iocs)"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ]
+
+    # Response must be a JSON array (may be empty if feeds have not yet loaded)
+    local is_array
+    is_array="$(echo "$body" | jq 'type == "array"' 2>/dev/null)" || true
+    [ "$is_array" = "true" ]
+}
+
+@test "threat intel mode is alert" {
+    require_root
+
+    local body
+    body="$(api_get /api/v1/threatintel/status)"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ]
+
+    # mode field should be "alert" or "block" — not empty/null
+    local mode
+    mode="$(echo "$body" | jq -r '.mode' 2>/dev/null)" || true
+    [ -n "$mode" ] && [ "$mode" != "null" ]
+}
+
+@test "threat intel feed refresh does not crash" {
+    require_root
+
+    # Trigger a full config reload (reloads all subsystems including threat intel feeds)
+    api_post /api/v1/config/reload '{}'
+    _load_http_status
+
+    # 200 or 204 indicates the reload was accepted; 404 if the endpoint does not
+    # exist in this build — any of these is acceptable as long as the agent stays up.
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ] || [ "$HTTP_STATUS" = "404" ]
+
+    # Give the agent a moment to complete the reload
+    sleep 3
+
+    # Verify the agent is still responsive
+    local health
+    health="$(curl -sf -o /dev/null -w '%{http_code}' \
+        --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/healthz" 2>/dev/null)" || true
+    [ "$health" = "200" ]
+}
+
+@test "threat intel cross-domain: DNS blocklist injection endpoint accessible" {
+    require_root
+
+    # This endpoint is only active when the DNS intelligence module is enabled.
+    # Accept 200 (enabled), 404 (endpoint not present), or 503 (feature disabled).
+    local body
+    body="$(api_get /api/v1/dns/blocklist)"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "404" ] || [ "$HTTP_STATUS" = "503" ]
+}

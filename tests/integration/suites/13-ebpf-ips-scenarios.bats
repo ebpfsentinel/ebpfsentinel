@@ -173,3 +173,45 @@ teardown_file() {
         skip "no blacklist entries to check TTL on"
     fi
 }
+
+# ── Extended IPS tests ──────────────────────────────────────────
+
+@test "IPS domain blocks list accessible" {
+    require_root
+
+    local body
+    body="$(api_get /api/v1/ips/domain-blocks)"
+    _load_http_status
+
+    # 200 if domain blocking is enabled; 404/503 acceptable if the feature is
+    # not enabled in the test fixture — either way the agent must not crash.
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "404" ] || [ "$HTTP_STATUS" = "503" ]
+}
+
+@test "IPS rule mode override via API" {
+    require_root
+
+    # Retrieve the current list of IPS rules to get a valid rule id
+    local rules
+    rules="$(api_get /api/v1/ips/rules)"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ]
+
+    local rule_id
+    rule_id="$(echo "$rules" | jq -r '.[0].id' 2>/dev/null)" || true
+
+    if [ -z "$rule_id" ] || [ "$rule_id" = "null" ]; then
+        skip "no IPS rules available to patch"
+    fi
+
+    # Toggle the first rule to alert mode and verify the response
+    local patch_resp
+    patch_resp="$(api_patch "/api/v1/ips/rules/${rule_id}" '{"mode":"alert"}')"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ]
+
+    # Restore original mode (best-effort)
+    api_patch "/api/v1/ips/rules/${rule_id}" '{"mode":"block"}' >/dev/null 2>&1 || true
+}

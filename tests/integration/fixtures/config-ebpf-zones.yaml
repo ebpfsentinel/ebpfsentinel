@@ -1,0 +1,67 @@
+# config-ebpf-zones.yaml — Zone management eBPF scenario test config
+# Network topology:
+#   Host: 10.200.0.1 (veth-ebpf0)
+#   NS:   10.200.0.2 (veth-ebpf1 inside ebpf-test-ns)
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+zones:
+  enabled: true
+  zones:
+    - id: internal
+      interfaces:
+        - __INTERFACE__
+      default_policy: allow
+    - id: external
+      interfaces:
+        - dummy0
+      default_policy: deny
+  policies:
+    - from: internal
+      to: external
+      policy: allow
+    - from: external
+      to: internal
+      policy: deny
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

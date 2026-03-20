@@ -427,6 +427,17 @@ impl DnsBlocklistAppService {
         engine.add_pattern(raw).map_err(|e| e.to_string())
     }
 
+    /// Add a domain pattern with a source tag for bulk cleanup.
+    pub fn add_pattern_with_source(&self, raw: &str, source: Option<String>) -> Result<(), String> {
+        let mut engine = self
+            .engine
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        engine
+            .add_pattern_with_source(raw, source)
+            .map_err(|e| e.to_string())
+    }
+
     /// Remove a domain pattern from the runtime blocklist.
     pub fn remove_pattern(&self, raw: &str) -> Result<(), String> {
         let mut engine = self

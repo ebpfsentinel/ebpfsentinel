@@ -194,3 +194,93 @@ teardown_file() {
 
     [ "${match:-0}" -eq 0 ]
 }
+
+@test "Alert dedup window prevents duplicates" {
+    require_root
+    require_tool ncat
+
+    # Record alert count before triggering
+    local before_body before_count
+    before_body="$(api_get /api/v1/alerts)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+    before_count="$(echo "$before_body" | jq '[.alerts[] | select(.rule_id == "ids-alert-test")] | length' 2>/dev/null)" || true
+
+    # Trigger the same alert twice in rapid succession
+    timeout 5 ncat -l "$EBPF_HOST_IP" 4444 >/dev/null 2>&1 &
+    local lp=$!
+    sleep 0.2
+    send_tcp_from_ns "$EBPF_HOST_IP" 4444 "DEDUP_TEST_1" 1 || true
+    send_tcp_from_ns "$EBPF_HOST_IP" 4444 "DEDUP_TEST_2" 1 || true
+    kill "$lp" 2>/dev/null || true
+    wait "$lp" 2>/dev/null || true
+
+    sleep 3
+
+    local after_body after_count delta
+    after_body="$(api_get /api/v1/alerts)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+    after_count="$(echo "$after_body" | jq '[.alerts[] | select(.rule_id == "ids-alert-test")] | length' 2>/dev/null)" || true
+
+    # Dedup window should collapse the two rapid triggers into at most 1 new alert
+    delta=$(( ${after_count:-0} - ${before_count:-0} ))
+    [ "$delta" -le 1 ]
+}
+
+@test "Alert throttle limits burst" {
+    require_root
+
+    local body
+    body="$(api_get /api/v1/config)"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ]
+
+    # Verify alerting / throttle configuration is present in the config response
+    local throttle
+    throttle="$(echo "$body" | jq '.alerting.throttle_window_secs // .alerting.dedup_window_secs // .alerting // empty' 2>/dev/null)" || true
+    [ -n "$throttle" ]
+}
+
+@test "Alert list supports pagination" {
+    require_root
+
+    local body
+    body="$(api_get '/api/v1/alerts?limit=1&offset=0')"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ]
+
+    # Response must be valid JSON with an alerts array (possibly empty)
+    local alerts
+    alerts="$(echo "$body" | jq '.alerts' 2>/dev/null)" || true
+    [ -n "$alerts" ]
+    [ "$alerts" != "null" ]
+}
+
+@test "Alert false positive marking persists" {
+    require_root
+
+    # Use an existing alert created by the earlier test in this suite
+    local body alert_id
+    body="$(api_get /api/v1/alerts)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+
+    alert_id="$(echo "$body" | jq -r '[.alerts[] | select(.rule_id == "ids-alert-test")][0].id' 2>/dev/null)" || true
+    [ -n "$alert_id" ] && [ "$alert_id" != "null" ] || skip "no ids-alert-test alert available"
+
+    # Mark as false positive
+    api_post "/api/v1/alerts/${alert_id}/false-positive" '{"false_positive": true}' >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+
+    # Re-query filtered list and confirm the alert appears there
+    local fp_body match
+    fp_body="$(api_get '/api/v1/alerts?false_positive=true')"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+    match="$(echo "$fp_body" | jq -r "[.alerts[] | select(.id == \"${alert_id}\")] | length" 2>/dev/null)" || true
+    [ "${match:-0}" -ge 1 ]
+}

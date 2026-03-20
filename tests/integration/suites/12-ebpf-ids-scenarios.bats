@@ -166,3 +166,40 @@ teardown_file() {
     # Check for IDS-related metrics
     echo "$metrics" | grep -qE "ebpfsentinel_ids|ebpfsentinel_alerts|ebpfsentinel_packets"
 }
+
+# ── Extended IDS tests ──────────────────────────────────────────
+
+@test "IDS rules list accessible" {
+    require_root
+
+    local body
+    body="$(api_get /api/v1/ids/rules)"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ]
+}
+
+@test "IDS status shows sampling config" {
+    require_root
+
+    local body
+    body="$(api_get /api/v1/ids/status)"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ]
+
+    # Status should include some sampling-related field (sample_rate, sampling, or similar)
+    local has_sampling
+    has_sampling="$(echo "$body" | jq 'has("sample_rate") or has("sampling") or has("sampling_rate") or has("enabled")' 2>/dev/null)" || true
+    [ "$has_sampling" = "true" ]
+}
+
+@test "IDS metrics include detection counters" {
+    require_root
+
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+
+    [ -n "$metrics" ]
+    echo "$metrics" | grep -qE "ebpfsentinel_ids"
+}

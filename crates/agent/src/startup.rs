@@ -1505,6 +1505,7 @@ pub async fn run(
         let feed_ti_svc = Arc::clone(&ti_svc);
         let feed_metrics = Arc::clone(&metrics) as Arc<dyn MetricsPort>;
         let feed_cancel = cancel_token.clone();
+        let feed_dns_blocklist = dns_blocklist_ref.clone();
         // Use the minimum refresh interval across all enabled feeds (floor: 60s).
         let refresh_secs = config
             .threatintel
@@ -1525,13 +1526,22 @@ pub async fn run(
             // Initial fetch at startup
             {
                 let feeds = feed_ti_svc.read().await.list_feeds().to_vec();
-                let iocs =
-                    application::feed_update::fetch_all_feeds(&feeds, &fetcher, &feed_metrics)
+                let result =
+                    application::feed_update::fetch_all_feeds_v2(&feeds, &fetcher, &feed_metrics)
                         .await;
-                if !iocs.is_empty()
-                    && let Err(e) = feed_ti_svc.write().await.reload_iocs(iocs)
+                if !result.iocs.is_empty()
+                    && let Err(e) = feed_ti_svc.write().await.reload_iocs(result.iocs)
                 {
                     warn!("initial feed IOC reload failed: {e}");
+                }
+                // Distribute STIX domains to DNS blocklist
+                if let Some(ref bl_svc) = feed_dns_blocklist {
+                    for domain in &result.domains {
+                        let source_tag = domain.source.clone();
+                        if let Err(e) = bl_svc.add_pattern_with_source(&domain.domain, source_tag) {
+                            tracing::debug!(domain = %domain.domain, error = %e, "domain blocklist inject skipped");
+                        }
+                    }
                 }
             }
 
@@ -1543,13 +1553,21 @@ pub async fn run(
                     _ = interval.tick() => {}
                 }
                 let feeds = feed_ti_svc.read().await.list_feeds().to_vec();
-                let iocs =
-                    application::feed_update::fetch_all_feeds(&feeds, &fetcher, &feed_metrics)
+                let result =
+                    application::feed_update::fetch_all_feeds_v2(&feeds, &fetcher, &feed_metrics)
                         .await;
-                if !iocs.is_empty()
-                    && let Err(e) = feed_ti_svc.write().await.reload_iocs(iocs)
+                if !result.iocs.is_empty()
+                    && let Err(e) = feed_ti_svc.write().await.reload_iocs(result.iocs)
                 {
                     warn!("periodic feed IOC reload failed: {e}");
+                }
+                if let Some(ref bl_svc) = feed_dns_blocklist {
+                    for domain in &result.domains {
+                        let source_tag = domain.source.clone();
+                        if let Err(e) = bl_svc.add_pattern_with_source(&domain.domain, source_tag) {
+                            tracing::debug!(domain = %domain.domain, error = %e, "domain blocklist inject skipped");
+                        }
+                    }
                 }
             }
         }))

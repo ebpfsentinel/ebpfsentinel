@@ -1,0 +1,67 @@
+# config-ebpf-l7.yaml — L7 inspection eBPF scenario test config
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+ddos:
+  enabled: false
+
+l7:
+  enabled: true
+  rules:
+    - id: l7-test-deny-admin
+      priority: 10
+      action: deny
+      protocol: http
+      path: "/admin"
+      enabled: true
+    - id: l7-test-allow-api
+      priority: 20
+      action: allow
+      protocol: http
+      path: "/api"
+      enabled: true
+    - id: l7-test-deny-malware-sni
+      priority: 10
+      action: deny
+      protocol: tls
+      sni: "*.malware.com"
+      enabled: true
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

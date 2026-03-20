@@ -82,7 +82,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 
       apt-get update
       apt-get install -y --no-install-recommends \
-        build-essential pkg-config libssl-dev protobuf-compiler \
+        build-essential pkg-config libssl-dev libpcap-dev protobuf-compiler llvm-dev \
         linux-headers-$(uname -r) iproute2 tcpdump curl wget jq git \
         ca-certificates openssl \
         iperf3 hping3 ncat stress-ng bc

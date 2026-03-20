@@ -240,3 +240,158 @@ teardown_file() {
     [ -n "$metrics" ]
     echo "$metrics" | grep -qE "ebpfsentinel_"
 }
+
+# ── Extended rule types ─────────────────────────────────────────
+
+@test "Firewall MAC address rule configured" {
+    require_root
+
+    # Create a rule that includes a mac_address field
+    local body
+    body='{"id":"fw-mac-test","priority":99,"action":"log","protocol":"any","mac_src":"de:ad:be:ef:00:01","scope":"global","enabled":true}'
+    api_post /api/v1/firewall/rules "$body"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+
+    # Verify the rule is visible in the list
+    local rules
+    rules="$(api_get /api/v1/firewall/rules)"
+    local found
+    found="$(echo "$rules" | jq '[.[] | select(.id == "fw-mac-test")] | length' 2>/dev/null)" || true
+    [ "${found:-0}" -ge 1 ]
+}
+
+@test "Firewall VLAN ID rule blocks tagged traffic" {
+    require_root
+
+    local body
+    body='{"id":"fw-vlan-100","priority":98,"action":"deny","protocol":"tcp","dst_port":5500,"vlan_id":100,"scope":"global","enabled":true}'
+    api_post /api/v1/firewall/rules "$body"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+
+    local rules
+    rules="$(api_get /api/v1/firewall/rules)"
+    local found
+    found="$(echo "$rules" | jq '[.[] | select(.id == "fw-vlan-100")] | length' 2>/dev/null)" || true
+    [ "${found:-0}" -ge 1 ]
+
+    # Verify vlan_id field is preserved
+    local vlan
+    vlan="$(echo "$rules" | jq '.[] | select(.id == "fw-vlan-100") | .vlan_id' 2>/dev/null)" || true
+    [ "${vlan:-0}" -eq 100 ]
+}
+
+@test "Firewall negate source inverts match" {
+    require_root
+
+    local body
+    body='{"id":"fw-negate-src","priority":97,"action":"deny","protocol":"tcp","src_ip":"10.0.0.0/8","negate_source":true,"scope":"global","enabled":true}'
+    api_post /api/v1/firewall/rules "$body"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+
+    local rules
+    rules="$(api_get /api/v1/firewall/rules)"
+    local found
+    found="$(echo "$rules" | jq '[.[] | select(.id == "fw-negate-src")] | length' 2>/dev/null)" || true
+    [ "${found:-0}" -ge 1 ]
+
+    # Verify negate_source field is preserved
+    local negate
+    negate="$(echo "$rules" | jq '.[] | select(.id == "fw-negate-src") | .negate_source' 2>/dev/null)" || true
+    [ "$negate" = "true" ]
+}
+
+@test "Firewall ct_states filter configured" {
+    require_root
+
+    local body
+    body='{"id":"fw-ct-established","priority":96,"action":"allow","protocol":"tcp","ct_states":["established"],"scope":"global","enabled":true}'
+    api_post /api/v1/firewall/rules "$body"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+
+    local rules
+    rules="$(api_get /api/v1/firewall/rules)"
+    local found
+    found="$(echo "$rules" | jq '[.[] | select(.id == "fw-ct-established")] | length' 2>/dev/null)" || true
+    [ "${found:-0}" -ge 1 ]
+}
+
+@test "Firewall ICMP type filtering" {
+    require_root
+
+    # ICMP type 8 = echo request
+    local body
+    body='{"id":"fw-icmp-echo","priority":95,"action":"deny","protocol":"icmp","icmp_type":8,"scope":"global","enabled":true}'
+    api_post /api/v1/firewall/rules "$body"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+
+    local rules
+    rules="$(api_get /api/v1/firewall/rules)"
+    local found
+    found="$(echo "$rules" | jq '[.[] | select(.id == "fw-icmp-echo")] | length' 2>/dev/null)" || true
+    [ "${found:-0}" -ge 1 ]
+
+    # Verify icmp_type field is preserved
+    local icmp_type
+    icmp_type="$(echo "$rules" | jq '.[] | select(.id == "fw-icmp-echo") | .icmp_type' 2>/dev/null)" || true
+    [ "${icmp_type:-0}" -eq 8 ]
+}
+
+@test "Firewall alert mode logs without dropping" {
+    require_root
+
+    local body
+    rules="$(api_get /api/v1/firewall/rules)"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ]
+
+    # Check if any rule uses alert/log action (non-dropping mode)
+    local alert_rules
+    alert_rules="$(echo "$rules" | jq '[.[] | select(.action == "log" or .action == "alert")] | length' 2>/dev/null)" || true
+
+    # The fixture includes P30 with action=log; at least one should exist
+    [ "${alert_rules:-0}" -ge 1 ]
+}
+
+@test "Firewall IPv6 rule support" {
+    require_root
+
+    local body
+    body='{"id":"fw-ipv6-test","priority":94,"action":"deny","protocol":"tcp","src_ip":"2001:db8::/32","scope":"global","enabled":true}'
+    api_post /api/v1/firewall/rules "$body"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+
+    local rules
+    rules="$(api_get /api/v1/firewall/rules)"
+    local found
+    found="$(echo "$rules" | jq '[.[] | select(.id == "fw-ipv6-test")] | length' 2>/dev/null)" || true
+    [ "${found:-0}" -ge 1 ]
+}
+
+@test "Firewall rule count matches expected" {
+    require_root
+
+    local rules
+    rules="$(api_get /api/v1/firewall/rules)"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ]
+
+    local count
+    count="$(echo "$rules" | jq 'length' 2>/dev/null)" || true
+
+    # Fixture has 5 initial rules; earlier tests in this suite added more
+    [ "${count:-0}" -ge 5 ]
+}

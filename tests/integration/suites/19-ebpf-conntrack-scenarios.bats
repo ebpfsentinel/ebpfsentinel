@@ -128,3 +128,51 @@ teardown_file() {
     [ -n "$metrics" ]
     echo "$metrics" | grep -qE "ebpfsentinel_conntrack|ebpfsentinel_packets"
 }
+
+@test "Conntrack max connections configurable" {
+    require_root
+
+    local body
+    body="$(api_get /api/v1/conntrack/status)"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ]
+
+    # Verify the status response includes capacity/limit fields
+    local max_connections
+    max_connections="$(echo "$body" | jq -r '.max_connections // .capacity // .limit // empty' 2>/dev/null)" || true
+    [ -n "$max_connections" ]
+    [ "$max_connections" != "null" ]
+}
+
+@test "Conntrack flush clears connections" {
+    require_root
+
+    # Establish at least one tracked connection first
+    send_tcp_from_ns "$EBPF_HOST_IP" 9876 "CT_PRE_FLUSH" 2 || true
+    sleep 1
+
+    local body
+    body="$(api_post /api/v1/conntrack/flush '{}')"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ]
+
+    # After flush the active connection count should be zero or reduced
+    local status_body count
+    status_body="$(api_get /api/v1/conntrack/status)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+    count="$(echo "$status_body" | jq -r '.connection_count' 2>/dev/null)" || true
+    [ "${count:-0}" -eq 0 ]
+}
+
+@test "Conntrack metrics include state counters" {
+    require_root
+
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+
+    [ -n "$metrics" ]
+    echo "$metrics" | grep -q "ebpfsentinel_conntrack"
+}

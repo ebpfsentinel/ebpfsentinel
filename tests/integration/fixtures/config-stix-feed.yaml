@@ -1,0 +1,36 @@
+# config-stix-feed.yaml — STIX 2.1 feed parsing integration test config
+# Tests: STIX bundle parsing, IOC loading, domain propagation, expired indicator filtering
+# This config does NOT require eBPF — it is a userspace-only test.
+
+agent:
+  interfaces:
+    - lo
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+
+threatintel:
+  enabled: true
+  mode: alert
+  feeds:
+    - id: test-stix
+      name: Test STIX Feed
+      url: "http://127.0.0.1:18888/bundle-basic.json"
+      format: stix
+      refresh_interval_secs: 30
+      min_confidence: 0
+
+dns:
+  enabled: true
+  blocklist:
+    action: alert
+
+alerting:
+  enabled: true
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

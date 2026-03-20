@@ -99,3 +99,61 @@ teardown_file() {
     [ -n "$metrics" ]
     echo "$metrics" | grep -qE "ebpfsentinel_nat|ebpfsentinel_conntrack|ebpfsentinel_packets"
 }
+
+# ── Additional NAT API tests ──────────────────────────────────────
+
+@test "NAT status returns enabled" {
+    require_root
+
+    local body
+    body="$(api_get /api/v1/nat/status)"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ]
+    local enabled
+    enabled="$(echo "$body" | jq -r '.enabled' 2>/dev/null)" || true
+    [ "$enabled" = "true" ]
+}
+
+@test "NAT rules list accessible" {
+    require_root
+
+    local body
+    body="$(api_get /api/v1/nat/rules)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+}
+
+# ── NPTv6 CRUD ───────────────────────────────────────────────────
+
+@test "NPTv6 rule CRUD — create" {
+    require_root
+
+    local rule='{"id":"nptv6-test","internal_prefix":"fd00::/48","external_prefix":"2001:db8::/48"}'
+    local body
+    body="$(api_post /api/v1/nat/nptv6 "$rule")"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+    local id
+    id="$(echo "$body" | jq -r '.id // empty' 2>/dev/null)" || true
+    [ "$id" = "nptv6-test" ]
+}
+
+@test "NPTv6 rule CRUD — delete" {
+    require_root
+
+    api_delete /api/v1/nat/nptv6/nptv6-test >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ]
+}
+
+@test "NAT metrics present" {
+    require_root
+
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+
+    [ -n "$metrics" ]
+    echo "$metrics" | grep -q "ebpfsentinel_nat"
+}

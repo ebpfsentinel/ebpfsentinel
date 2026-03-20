@@ -1,0 +1,77 @@
+# config-ebpf-geoip.yaml — GeoIP enrichment + country firewall scenario test config
+# Note: GeoIP tests skip gracefully if the mmdb file is not present.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules:
+    - id: fw-test-country-deny-kp
+      action: deny
+      src_country_codes:
+        - "KP"
+      priority: 10
+      enabled: true
+    - id: fw-test-country-deny-cu
+      action: deny
+      src_country_codes:
+        - "CU"
+      priority: 20
+      enabled: true
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: true
+  rules:
+    - id: rl-test-country
+      rate: 100
+      burst: 200
+      scope: source_ip
+      action: drop
+
+threatintel:
+  enabled: false
+
+ddos:
+  enabled: true
+  syn_flood:
+    enabled: true
+    max_pps: 500
+
+l7:
+  enabled: false
+
+geoip:
+  enabled: true
+  source:
+    mode: file
+    city_path: __DATA_DIR__/GeoLite2-City.mmdb
+    asn_path: __DATA_DIR__/GeoLite2-ASN.mmdb
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
