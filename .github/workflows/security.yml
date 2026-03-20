@@ -65,6 +65,35 @@ jobs:
           echo "=== Unsafe code usage ==="
           grep -rn "unsafe " crates/ --include="*.rs" | grep -v "//.*unsafe" | grep -v "forbid\|deny\|allow" || echo "No unsafe blocks found"
 
+  # ── Miri: UB detection on shared eBPF types ─────────────────────
+  miri:
+    name: Miri (ebpf-common)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: Run Miri on ebpf-common
+        run: cargo +nightly miri test -p ebpf-common
+        env:
+          MIRIFLAGS: -Zmiri-tree-borrows
+
+  # ── cargo-careful: extra UB checks on userspace crates ─────────
+  careful:
+    name: Careful Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev
+      - name: Install cargo-careful
+        run: cargo +nightly install cargo-careful
+      - name: Run tests with extra UB checks
+        run: cargo +nightly careful test --workspace --exclude ebpf-common
+
   # ── SBOM generation ──────────────────────────────────────────────
   sbom:
     name: SBOM (CycloneDX)
