@@ -11,6 +11,8 @@ use super::error::DnsError;
 /// injected IPs for lifecycle management (TTL expiry + grace period).
 pub struct DomainBlocklistEngine {
     patterns: Vec<DomainPattern>,
+    /// Source tags parallel to `patterns` (e.g. `"stix:feed-id"` for CTI-injected patterns).
+    pattern_sources: Vec<Option<String>>,
     action: BlocklistAction,
     inject_target: InjectTarget,
     grace_period_secs: u64,
@@ -26,6 +28,7 @@ impl DomainBlocklistEngine {
     pub fn new(config: DomainBlocklistConfig) -> Self {
         let pattern_count = config.patterns.len();
         Self {
+            pattern_sources: vec![None; pattern_count],
             patterns: config.patterns,
             action: config.action,
             inject_target: config.inject_target,
@@ -193,6 +196,16 @@ impl DomainBlocklistEngine {
     /// Add a domain pattern to the runtime blocklist.
     /// Returns an error if the pattern is already present or invalid.
     pub fn add_pattern(&mut self, raw: &str) -> Result<(), DnsError> {
+        self.add_pattern_with_source(raw, None)
+    }
+
+    /// Add a domain pattern with an optional source tag (e.g. `"stix:feed-id"`).
+    /// The source tag enables bulk removal via [`remove_patterns_by_source`].
+    pub fn add_pattern_with_source(
+        &mut self,
+        raw: &str,
+        source: Option<String>,
+    ) -> Result<(), DnsError> {
         let pattern = DomainPattern::parse(raw)?;
         if self
             .patterns
@@ -202,6 +215,7 @@ impl DomainBlocklistEngine {
             return Err(DnsError::DuplicatePattern(raw.to_string()));
         }
         self.patterns.push(pattern);
+        self.pattern_sources.push(source);
         self.pattern_match_counts.push(0);
         Ok(())
     }
@@ -215,8 +229,28 @@ impl DomainBlocklistEngine {
             .position(|p| p.to_string() == raw)
             .ok_or_else(|| DnsError::PatternNotFound(raw.to_string()))?;
         self.patterns.remove(pos);
+        self.pattern_sources.remove(pos);
         self.pattern_match_counts.remove(pos);
         Ok(())
+    }
+
+    /// Remove all patterns injected from a given source (e.g. `"stix:feed-id"`).
+    /// Used to clean up CTI-injected patterns before a feed refresh.
+    /// Returns the number of patterns removed.
+    pub fn remove_patterns_by_source(&mut self, source: &str) -> usize {
+        let mut removed = 0;
+        let mut i = 0;
+        while i < self.pattern_sources.len() {
+            if self.pattern_sources[i].as_deref() == Some(source) {
+                self.patterns.remove(i);
+                self.pattern_sources.remove(i);
+                self.pattern_match_counts.remove(i);
+                removed += 1;
+            } else {
+                i += 1;
+            }
+        }
+        removed
     }
 }
 
@@ -488,5 +522,52 @@ mod tests {
         assert_eq!(engine.pattern_count(), 2);
         engine.remove_pattern("*.phishing.com").unwrap();
         assert_eq!(engine.pattern_count(), 1);
+    }
+
+    #[test]
+    fn add_pattern_with_source_tag() {
+        let mut engine = make_engine();
+        engine
+            .add_pattern_with_source("malware.test", Some("stix:feed-1".to_string()))
+            .unwrap();
+        assert_eq!(engine.pattern_count(), 2);
+    }
+
+    #[test]
+    fn remove_patterns_by_source_cleans_tagged() {
+        let mut engine = make_engine();
+        engine
+            .add_pattern_with_source("a.test", Some("stix:feed-1".to_string()))
+            .unwrap();
+        engine
+            .add_pattern_with_source("b.test", Some("stix:feed-1".to_string()))
+            .unwrap();
+        engine
+            .add_pattern_with_source("c.test", Some("stix:feed-2".to_string()))
+            .unwrap();
+        assert_eq!(engine.pattern_count(), 4); // 1 initial + 3 added
+
+        let removed = engine.remove_patterns_by_source("stix:feed-1");
+        assert_eq!(removed, 2);
+        assert_eq!(engine.pattern_count(), 2); // initial + feed-2
+    }
+
+    #[test]
+    fn remove_patterns_by_source_preserves_untagged() {
+        let mut engine = make_engine();
+        engine.add_pattern("manual.com").unwrap();
+        engine
+            .add_pattern_with_source("stix.test", Some("stix:x".to_string()))
+            .unwrap();
+        assert_eq!(engine.pattern_count(), 3);
+
+        engine.remove_patterns_by_source("stix:x");
+        assert_eq!(engine.pattern_count(), 2); // initial + manual
+    }
+
+    #[test]
+    fn remove_patterns_by_source_nonexistent_returns_zero() {
+        let mut engine = make_engine();
+        assert_eq!(engine.remove_patterns_by_source("stix:nope"), 0);
     }
 }

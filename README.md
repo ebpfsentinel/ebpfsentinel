@@ -27,7 +27,7 @@ High-performance network security agent powered by eBPF. Monitors, filters, and 
 | Feature | What it does |
 |---------|-------------|
 | **IDS / IPS** | Kernel-side pattern matching with automatic blocking — detects and blocks, not just alerts |
-| **Threat Intelligence** | Plug any OSINT feed (STIX, CSV, JSON) — real-time IOC matching, auto-blocking, no vendor lock-in |
+| **Threat Intelligence** | Plug any OSINT feed (CSV, JSON, plaintext, STIX 2.1) — real-time IOC matching, auto-blocking, no vendor lock-in |
 | **DLP** | Inspects TLS traffic for PCI card numbers, PII, and credential patterns via uprobe interception |
 | **DNS Security** | Passive DNS capture, domain blocklists, behavioral reputation scoring, DNS-enriched alerts |
 | **MITRE ATT&CK Mapping** | Every alert tagged with tactic + technique ID — ready for SOC dashboards and SIEM correlation |

@@ -120,6 +120,41 @@ impl ThreatIntelAlert {
     }
 }
 
+// ── Multi-type CTI indicators (STIX) ────────────────────────────────
+
+/// Parsed CTI indicators from a multi-type feed (STIX 2.1).
+/// Groups indicators by target engine for downstream distribution.
+#[derive(Debug, Clone, Default)]
+pub struct CtiIndicators {
+    /// IP-based IOCs for the threat intel engine.
+    pub iocs: Vec<Ioc>,
+    /// Malicious domain names for the DNS blocklist and reputation engines.
+    pub domains: Vec<CtiDomain>,
+    /// Malicious URLs for the L7 firewall engine.
+    pub urls: Vec<CtiUrl>,
+}
+
+/// A domain indicator extracted from a CTI feed.
+#[derive(Debug, Clone)]
+pub struct CtiDomain {
+    pub domain: String,
+    pub feed_id: String,
+    pub confidence: u8,
+    pub threat_type: ThreatType,
+    /// STIX indicator source (e.g. `"stix:feed-id"`) for bulk cleanup on refresh.
+    pub source: Option<String>,
+}
+
+/// A URL indicator extracted from a CTI feed.
+#[derive(Debug, Clone)]
+pub struct CtiUrl {
+    pub url: String,
+    pub feed_id: String,
+    pub confidence: u8,
+    pub threat_type: ThreatType,
+    pub source: Option<String>,
+}
+
 // ── Feed format ─────────────────────────────────────────────────────
 
 /// Feed format — defines HOW to parse, not WHO publishes.

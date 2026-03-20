@@ -1,5 +1,5 @@
 use crate::common::error::DomainError;
-use crate::threatintel::entity::{FeedConfig, FeedFormat, Ioc, ThreatType};
+use crate::threatintel::entity::{CtiIndicators, FeedConfig, FeedFormat, Ioc, ThreatType};
 use std::net::IpAddr;
 
 /// Parse raw feed data into IOCs based on the feed configuration.
@@ -21,7 +21,7 @@ pub fn parse_feed(
         FeedFormat::Json => json_parser(&text, config)?,
         FeedFormat::Stix => {
             return Err(DomainError::EngineError(
-                "STIX feed parsing not yet implemented".to_string(),
+                "Use parse_stix_feed() for STIX 2.1 bundles".to_string(),
             ));
         }
     };
@@ -186,6 +186,135 @@ pub fn parse_threat_type(s: &str) -> ThreatType {
         "spam" | "spammer" => ThreatType::Spam,
         _ => ThreatType::Other,
     }
+}
+
+// ── STIX 2.1 support ────────────────────────────────────────────────
+
+/// Parse a STIX 2.1 bundle into multi-type CTI indicators.
+///
+/// JSON deserialization is delegated to the caller via `stix_parser` callback
+/// to keep `serde_json` out of the domain crate's production dependencies.
+/// Domain-pure extraction logic (pattern parsing, type mapping) lives here.
+pub fn parse_stix_feed(
+    data: &[u8],
+    config: &FeedConfig,
+    stix_parser: impl FnOnce(&str, &FeedConfig) -> Result<CtiIndicators, DomainError>,
+) -> Result<CtiIndicators, DomainError> {
+    let text = String::from_utf8_lossy(data);
+    let mut indicators = stix_parser(&text, config)?;
+
+    // Apply min_confidence filter and max_iocs limit to each type
+    indicators
+        .iocs
+        .retain(|i| i.confidence >= config.min_confidence);
+    indicators.iocs.truncate(config.max_iocs);
+    indicators
+        .domains
+        .retain(|d| d.confidence >= config.min_confidence);
+    indicators.domains.truncate(config.max_iocs);
+    indicators
+        .urls
+        .retain(|u| u.confidence >= config.min_confidence);
+    indicators.urls.truncate(config.max_iocs);
+
+    Ok(indicators)
+}
+
+/// Extract IP addresses from a STIX 2.1 indicator pattern.
+///
+/// Supports simple equality patterns:
+/// - `[ipv4-addr:value = '1.2.3.4']`
+/// - `[ipv6-addr:value = '2001:db8::1']`
+/// - Compound patterns with AND/OR containing multiple IP comparisons
+///
+/// Skips CIDR notation and unsupported pattern types.
+pub fn extract_ips_from_stix_pattern(pattern: &str) -> Vec<IpAddr> {
+    extract_stix_pattern_values(pattern, &["ipv4-addr:value", "ipv6-addr:value"])
+        .into_iter()
+        .filter(|v| !v.contains('/'))
+        .filter_map(|v| v.parse::<IpAddr>().ok())
+        .collect()
+}
+
+/// Extract domain names from a STIX 2.1 indicator pattern.
+///
+/// Supports: `[domain-name:value = 'evil.com']`
+pub fn extract_domains_from_stix_pattern(pattern: &str) -> Vec<String> {
+    extract_stix_pattern_values(pattern, &["domain-name:value"])
+        .into_iter()
+        .filter(|v| !v.is_empty() && v.contains('.'))
+        .map(|v| v.to_lowercase())
+        .collect()
+}
+
+/// Extract URLs from a STIX 2.1 indicator pattern.
+///
+/// Supports: `[url:value = 'http://evil.com/malware.exe']`
+pub fn extract_urls_from_stix_pattern(pattern: &str) -> Vec<String> {
+    extract_stix_pattern_values(pattern, &["url:value"])
+        .into_iter()
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+        .collect()
+}
+
+/// Generic extractor for STIX pattern values matching given property names.
+/// Finds all `property = 'value'` pairs in the pattern.
+fn extract_stix_pattern_values<'a>(pattern: &'a str, properties: &[&str]) -> Vec<&'a str> {
+    let mut values = Vec::new();
+    let mut remaining = pattern;
+
+    loop {
+        // Find the earliest matching property
+        let best = properties
+            .iter()
+            .filter_map(|prop| remaining.find(prop).map(|pos| (pos, prop.len())))
+            .min_by_key(|(pos, _)| *pos);
+
+        let (start, prop_len) = match best {
+            Some(v) => v,
+            None => break,
+        };
+
+        remaining = &remaining[start + prop_len..];
+
+        // Find `= 'value'` after the property name
+        let eq_pos = match remaining.find('=') {
+            Some(p) => p,
+            None => continue,
+        };
+        let after_eq = &remaining[eq_pos + 1..];
+        let q1 = match after_eq.find('\'') {
+            Some(p) => p,
+            None => continue,
+        };
+        let after_q1 = &after_eq[q1 + 1..];
+        let q2 = match after_q1.find('\'') {
+            Some(p) => p,
+            None => continue,
+        };
+
+        values.push(&after_q1[..q2]);
+        remaining = &after_q1[q2 + 1..];
+    }
+
+    values
+}
+
+/// Map STIX 2.1 `indicator_types` to domain `ThreatType`.
+///
+/// Uses the first matching type from the list (STIX allows multiple).
+pub fn map_stix_indicator_types(types: &[&str]) -> ThreatType {
+    for t in types {
+        match t.to_lowercase().as_str() {
+            "malicious-activity" | "malware" => return ThreatType::Malware,
+            "command-and-control" | "botnet" => return ThreatType::C2,
+            "compromised" | "anomalous-activity" => return ThreatType::Scanner,
+            "unwanted" => return ThreatType::Spam,
+            _ => {}
+        }
+    }
+    ThreatType::Other
 }
 
 #[cfg(test)]
@@ -444,14 +573,195 @@ mod tests {
         assert_eq!(iocs.len(), 2);
     }
 
-    // ── STIX deferred ───────────────────────────────────────────────
+    // ── STIX parse_feed redirects to error ────────────────────────
 
     #[test]
-    fn stix_returns_error() {
+    fn stix_via_parse_feed_returns_error() {
         let mut config = plaintext_config();
         config.format = FeedFormat::Stix;
         let result = parse_feed(b"", &config, no_json);
         assert!(result.is_err());
+    }
+
+    // ── STIX pattern extraction ─────────────────────────────────────
+
+    #[test]
+    fn stix_pattern_single_ipv4() {
+        let ips = extract_ips_from_stix_pattern("[ipv4-addr:value = '1.2.3.4']");
+        assert_eq!(ips, vec!["1.2.3.4".parse::<IpAddr>().unwrap()]);
+    }
+
+    #[test]
+    fn stix_pattern_single_ipv6() {
+        let ips = extract_ips_from_stix_pattern("[ipv6-addr:value = '2001:db8::1']");
+        assert_eq!(ips, vec!["2001:db8::1".parse::<IpAddr>().unwrap()]);
+    }
+
+    #[test]
+    fn stix_pattern_compound_and() {
+        let ips = extract_ips_from_stix_pattern(
+            "[ipv4-addr:value = '1.2.3.4'] AND [ipv4-addr:value = '5.6.7.8']",
+        );
+        assert_eq!(ips.len(), 2);
+    }
+
+    #[test]
+    fn stix_pattern_compound_or() {
+        let ips = extract_ips_from_stix_pattern(
+            "[ipv4-addr:value = '10.0.0.1'] OR [ipv6-addr:value = '::1']",
+        );
+        assert_eq!(ips.len(), 2);
+    }
+
+    #[test]
+    fn stix_pattern_cidr_skipped() {
+        let ips = extract_ips_from_stix_pattern("[ipv4-addr:value = '198.51.100.0/24']");
+        assert!(ips.is_empty());
+    }
+
+    #[test]
+    fn stix_pattern_empty_string() {
+        assert!(extract_ips_from_stix_pattern("").is_empty());
+    }
+
+    #[test]
+    fn stix_pattern_no_ip_type() {
+        assert!(extract_ips_from_stix_pattern("[file:name = 'malware.exe']").is_empty());
+    }
+
+    #[test]
+    fn stix_pattern_malformed_quotes() {
+        assert!(extract_ips_from_stix_pattern("[ipv4-addr:value = '1.2.3.4]").is_empty());
+    }
+
+    #[test]
+    fn stix_pattern_domain_extraction() {
+        let domains = extract_domains_from_stix_pattern("[domain-name:value = 'evil.com']");
+        assert_eq!(domains, vec!["evil.com"]);
+    }
+
+    #[test]
+    fn stix_pattern_domain_compound() {
+        let domains = extract_domains_from_stix_pattern(
+            "[domain-name:value = 'a.com'] OR [domain-name:value = 'b.org']",
+        );
+        assert_eq!(domains, vec!["a.com", "b.org"]);
+    }
+
+    #[test]
+    fn stix_pattern_domain_no_dot_skipped() {
+        let domains = extract_domains_from_stix_pattern("[domain-name:value = 'localhost']");
+        assert!(domains.is_empty());
+    }
+
+    #[test]
+    fn stix_pattern_url_extraction() {
+        let urls = extract_urls_from_stix_pattern("[url:value = 'http://evil.com/malware.exe']");
+        assert_eq!(urls, vec!["http://evil.com/malware.exe"]);
+    }
+
+    #[test]
+    fn stix_pattern_mixed_types() {
+        let pattern = "[ipv4-addr:value = '1.2.3.4'] AND [domain-name:value = 'evil.com']";
+        assert_eq!(extract_ips_from_stix_pattern(pattern).len(), 1);
+        assert_eq!(extract_domains_from_stix_pattern(pattern).len(), 1);
+    }
+
+    // ── STIX indicator type mapping ─────────────────────────────────
+
+    #[test]
+    fn stix_type_malicious_activity() {
+        assert_eq!(
+            map_stix_indicator_types(&["malicious-activity"]),
+            ThreatType::Malware
+        );
+    }
+
+    #[test]
+    fn stix_type_c2() {
+        assert_eq!(
+            map_stix_indicator_types(&["command-and-control"]),
+            ThreatType::C2
+        );
+    }
+
+    #[test]
+    fn stix_type_unknown_fallback() {
+        assert_eq!(
+            map_stix_indicator_types(&["attribution"]),
+            ThreatType::Other
+        );
+    }
+
+    #[test]
+    fn stix_type_empty_list() {
+        assert_eq!(map_stix_indicator_types(&[]), ThreatType::Other);
+    }
+
+    #[test]
+    fn stix_type_first_match_wins() {
+        assert_eq!(
+            map_stix_indicator_types(&["benign", "command-and-control"]),
+            ThreatType::C2
+        );
+    }
+
+    // ── parse_stix_feed integration ─────────────────────────────────
+
+    #[test]
+    fn parse_stix_feed_applies_filters() {
+        use crate::threatintel::entity::{CtiDomain, CtiIndicators};
+
+        let mut config = plaintext_config();
+        config.format = FeedFormat::Stix;
+        config.min_confidence = 50;
+        config.max_iocs = 1;
+
+        let result = parse_stix_feed(b"ignored", &config, |_, cfg| {
+            Ok(CtiIndicators {
+                iocs: vec![
+                    Ioc {
+                        ip: "1.2.3.4".parse().unwrap(),
+                        feed_id: cfg.id.clone(),
+                        confidence: 80,
+                        threat_type: ThreatType::Malware,
+                        last_seen: 0,
+                        source_feed: cfg.name.clone(),
+                    },
+                    Ioc {
+                        ip: "5.6.7.8".parse().unwrap(),
+                        feed_id: cfg.id.clone(),
+                        confidence: 90,
+                        threat_type: ThreatType::C2,
+                        last_seen: 0,
+                        source_feed: cfg.name.clone(),
+                    },
+                ],
+                domains: vec![
+                    CtiDomain {
+                        domain: "low.com".into(),
+                        feed_id: cfg.id.clone(),
+                        confidence: 30,
+                        threat_type: ThreatType::Other,
+                        source: None,
+                    },
+                    CtiDomain {
+                        domain: "high.com".into(),
+                        feed_id: cfg.id.clone(),
+                        confidence: 90,
+                        threat_type: ThreatType::Malware,
+                        source: None,
+                    },
+                ],
+                urls: vec![],
+            })
+        })
+        .unwrap();
+
+        // min_confidence=50 filters out low.com (30), max_iocs=1 truncates iocs to 1
+        assert_eq!(result.iocs.len(), 1);
+        assert_eq!(result.domains.len(), 1);
+        assert_eq!(result.domains[0].domain, "high.com");
     }
 
     // ── Threat type parsing ─────────────────────────────────────────
