@@ -1,0 +1,44 @@
+name: Setup Rust Build
+description: Checkout, install Rust toolchain with cache, and install system dependencies
+
+inputs:
+  toolchain-components:
+    description: "Comma-separated list of rustup components (e.g. clippy,llvm-tools-preview)"
+    required: false
+    default: ""
+  install-nightly:
+    description: "Also install nightly toolchain with rust-src"
+    required: false
+    default: "false"
+  cache-shared-key:
+    description: "Shared key for Swatinem/rust-cache"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+      if: inputs.toolchain-components == ''
+
+    - uses: dtolnay/rust-toolchain@stable
+      if: inputs.toolchain-components != ''
+      with:
+        components: ${{ inputs.toolchain-components }}
+
+    - uses: dtolnay/rust-toolchain@nightly
+      if: inputs.install-nightly == 'true'
+      with:
+        components: rust-src
+
+    - uses: Swatinem/rust-cache@v2
+      if: inputs.cache-shared-key == ''
+
+    - uses: Swatinem/rust-cache@v2
+      if: inputs.cache-shared-key != ''
+      with:
+        shared-key: ${{ inputs.cache-shared-key }}
+
+    - name: Install system dependencies
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev

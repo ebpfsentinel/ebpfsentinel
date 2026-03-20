@@ -1,0 +1,17 @@
+name: Install bpf-linker
+description: Install LLVM dev libraries and bpf-linker for building eBPF programs
+
+runs:
+  using: composite
+  steps:
+    - name: Install llvm-dev and bpf-linker
+      shell: bash
+      run: |
+        sudo apt-get update && sudo apt-get install -y llvm-dev
+        if ! command -v llvm-config &>/dev/null; then
+          LLC=$(ls /usr/bin/llvm-config-* 2>/dev/null | sort -V | tail -1)
+          [ -n "$LLC" ] && sudo ln -sf "$LLC" /usr/bin/llvm-config
+        fi
+        llvm-config --version
+        cargo +nightly install bpf-linker
+        bpf-linker --version

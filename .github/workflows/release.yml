@@ -91,29 +91,33 @@ jobs:
           shared-key: release-${{ matrix.arch }}
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev ${{ matrix.musl_pkg }} llvm-dev
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler ${{ matrix.musl_pkg }} llvm-dev flex bison wget cmake
 
-      - name: Install bpf-linker
+      - name: Build static libpcap (musl)
         run: |
-          if ! command -v llvm-config &>/dev/null; then
-            LLC=$(ls /usr/bin/llvm-config-* 2>/dev/null | sort -V | tail -1)
-            [ -n "$LLC" ] && sudo ln -sf "$LLC" /usr/bin/llvm-config
-          fi
-          llvm-config --version
-          cargo +nightly install bpf-linker
-          bpf-linker --version
+          PCAP_VERSION=1.10.6
+          wget -qO- "https://www.tcpdump.org/release/libpcap-${PCAP_VERSION}.tar.xz" | tar xJ
+          cd "libpcap-${PCAP_VERSION}"
+          CC=musl-gcc ./configure --disable-shared --prefix=/usr/local/musl
+          make -j"$(nproc)"
+          sudo make install
 
-      - name: Stamp version
-        run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
-          find . -name Cargo.toml -exec grep -l '0.0.0-dev' {} + \
-            | xargs sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/"
+      - uses: ./.github/actions/install-bpf-linker
+
+      - uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ needs.prepare.outputs.version }}
+
+      - name: Export VERSION env var
+        run: echo "VERSION=${{ needs.prepare.outputs.version }}" >> "$GITHUB_ENV"
 
       - name: Build eBPF programs
         run: cargo xtask ebpf-build
 
       - name: Build release binary
+        env:
+          LIBPCAP_LIBDIR: /usr/local/musl/lib
+          RUSTFLAGS: "-L native=/usr/local/musl/lib"
         run: cargo build --release --target ${{ matrix.target }} --bin ebpfsentinel-agent
 
       - name: Create release tarball

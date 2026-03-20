@@ -20,30 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: ./.github/actions/setup-rust-build
         with:
-          components: rust-src
+          install-nightly: "true"
 
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev
-
-      - name: Install bpf-linker
-        run: |
-          # Install LLVM dev libraries required by bpf-linker
-          sudo apt-get install -y llvm-dev
-          # Ensure llvm-config is available (runners may only have llvm-config-NN)
-          if ! command -v llvm-config &>/dev/null; then
-            LLC=$(ls /usr/bin/llvm-config-* 2>/dev/null | sort -V | tail -1)
-            [ -n "$LLC" ] && sudo ln -sf "$LLC" /usr/bin/llvm-config
-          fi
-          llvm-config --version
-          cargo +nightly install bpf-linker
-          bpf-linker --version
+      - uses: ./.github/actions/install-bpf-linker
 
       - name: Build eBPF programs
         run: cargo xtask ebpf-build
@@ -75,11 +56,7 @@ jobs:
       - name: Make agent executable
         run: chmod +x target/release/ebpfsentinel-agent
 
-      - name: Install BATS
-        run: |
-          git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats-core
-          sudo /tmp/bats-core/install.sh /usr/local
-          rm -rf /tmp/bats-core
+      - uses: ./.github/actions/install-bats
 
       - name: Install grpcurl
         run: |
@@ -134,11 +111,7 @@ jobs:
       - name: Make agent executable
         run: chmod +x target/release/ebpfsentinel-agent
 
-      - name: Install BATS
-        run: |
-          git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats-core
-          sudo /tmp/bats-core/install.sh /usr/local
-          rm -rf /tmp/bats-core
+      - uses: ./.github/actions/install-bats
 
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y jq
@@ -176,11 +149,7 @@ jobs:
       - name: Make agent executable
         run: chmod +x target/release/ebpfsentinel-agent
 
-      - name: Install BATS
-        run: |
-          git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats-core
-          sudo /tmp/bats-core/install.sh /usr/local
-          rm -rf /tmp/bats-core
+      - uses: ./.github/actions/install-bats
 
       - name: Install tools
         run: |

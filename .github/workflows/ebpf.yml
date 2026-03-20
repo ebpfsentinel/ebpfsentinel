@@ -40,16 +40,7 @@ jobs:
             crates/ebpf-programs/tc-qos
             crates/ebpf-programs/uprobe-dlp
 
-      - name: Install bpf-linker
-        run: |
-          sudo apt-get update && sudo apt-get install -y llvm-dev
-          if ! command -v llvm-config &>/dev/null; then
-            LLC=$(ls /usr/bin/llvm-config-* 2>/dev/null | sort -V | tail -1)
-            [ -n "$LLC" ] && sudo ln -sf "$LLC" /usr/bin/llvm-config
-          fi
-          llvm-config --version
-          cargo +nightly install bpf-linker
-          bpf-linker --version
+      - uses: ./.github/actions/install-bpf-linker
 
       - name: Build all eBPF kernel programs
         run: cargo xtask ebpf-build

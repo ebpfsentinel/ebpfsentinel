@@ -72,20 +72,11 @@ jobs:
         with:
           shared-key: ebpf-docker
 
-      - name: Install llvm-dev and bpf-linker
-        run: |
-          sudo apt-get update && sudo apt-get install -y llvm-dev
-          if ! command -v llvm-config &>/dev/null; then
-            LLC=$(ls /usr/bin/llvm-config-* 2>/dev/null | sort -V | tail -1)
-            [ -n "$LLC" ] && sudo ln -sf "$LLC" /usr/bin/llvm-config
-          fi
-          cargo +nightly install bpf-linker
+      - uses: ./.github/actions/install-bpf-linker
 
-      - name: Stamp version
-        run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          find . -name Cargo.toml -exec grep -l '0.0.0-dev' {} + \
-            | xargs sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/"
+      - uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ needs.prepare.outputs.version }}
 
       - name: Build eBPF programs
         run: |
@@ -139,11 +130,9 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Stamp version in Cargo.toml
-        run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          find . -name Cargo.toml -exec grep -l '0.0.0-dev' {} + \
-            | xargs sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/"
+      - uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ needs.prepare.outputs.version }}
 
       - name: Generate metadata
         id: meta

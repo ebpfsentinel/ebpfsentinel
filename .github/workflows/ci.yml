@@ -31,12 +31,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust-build
         with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev
+          toolchain-components: clippy
       - run: cargo clippy -- -D warnings
 
   # ── Unit tests ────────────────────────────────────────────────────
@@ -45,10 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev
+      - uses: ./.github/actions/setup-rust-build
       - run: cargo test
 
   # ── Dependency audit (license, advisories, bans) ─────────────────
@@ -59,16 +53,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
 
-  # ── Vulnerability scan (Cargo.lock) ─────────────────────────────
-  audit:
-    name: Cargo Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
   # ── Code coverage ────────────────────────────────────────────────
   coverage:
     name: Coverage
@@ -76,12 +60,9 @@ jobs:
     needs: [test]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust-build
         with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev
+          toolchain-components: llvm-tools-preview
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage
@@ -131,10 +112,7 @@ jobs:
     needs: [fmt, clippy, test]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev
+      - uses: ./.github/actions/setup-rust-build
       - run: cargo build --release --bin ebpfsentinel-agent
       - uses: actions/upload-artifact@v4
         with:

@@ -1,0 +1,17 @@
+name: Stamp Version
+description: Replace 0.0.0-dev version placeholder in all Cargo.toml files
+
+inputs:
+  version:
+    description: "Version string to stamp (e.g. 2026.3.1)"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Stamp version in Cargo.toml files
+      shell: bash
+      run: |
+        VERSION="${{ inputs.version }}"
+        find . -name Cargo.toml -exec grep -l '0.0.0-dev' {} + \
+          | xargs sed -i "s/^version = \"0.0.0-dev\"/version = \"${VERSION}\"/"

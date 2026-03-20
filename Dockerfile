@@ -15,8 +15,18 @@ FROM rust:bookworm AS agent-builder
 ARG TARGETARCH
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends protobuf-compiler musl-tools cmake && \
+    apt-get install -y --no-install-recommends \
+        protobuf-compiler musl-tools cmake flex bison wget && \
     rm -rf /var/lib/apt/lists/*
+
+# Build static libpcap against musl for fully static linking
+RUN PCAP_VERSION=1.10.6 && \
+    wget -qO- "https://www.tcpdump.org/release/libpcap-${PCAP_VERSION}.tar.xz" | tar xJ && \
+    cd "libpcap-${PCAP_VERSION}" && \
+    CC=musl-gcc ./configure --disable-shared --prefix=/usr/local/musl && \
+    make -j"$(nproc)" && \
+    make install && \
+    cd .. && rm -rf "libpcap-${PCAP_VERSION}"
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml deny.toml ./
@@ -24,12 +34,15 @@ COPY .cargo/ .cargo/
 COPY crates/ crates/
 COPY proto/ proto/
 
+ENV LIBPCAP_LIBDIR=/usr/local/musl/lib
+
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     case "${TARGETARCH}" in \
         arm64) MUSL_TARGET="aarch64-unknown-linux-musl" ;; \
         *)     MUSL_TARGET="x86_64-unknown-linux-musl" ;; \
     esac && \
     rustup target add "${MUSL_TARGET}" && \
+    RUSTFLAGS="-L native=/usr/local/musl/lib" \
     cargo build --release --target "${MUSL_TARGET}" --bin ebpfsentinel-agent && \
     cp "/build/target/${MUSL_TARGET}/release/ebpfsentinel-agent" /build/ebpfsentinel-agent
 
