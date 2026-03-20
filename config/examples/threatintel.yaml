@@ -7,9 +7,12 @@
 #   1. Bloom filter pre-check (O(1), zero false negatives)
 #   2. Full HashMap lookup only on Bloom filter hit
 #
-# Feeds are SOURCE-AGNOSTIC: any HTTP/HTTPS endpoint serving IPs in
-# plaintext, CSV, or JSON works through field mappings — no provider-
-# specific code. Just configure id, url, format, and field mapping.
+# Feeds are SOURCE-AGNOSTIC: any HTTP/HTTPS endpoint serving indicators
+# in plaintext, CSV, JSON, or STIX 2.1 works through field mappings —
+# no provider-specific code. Just configure id, url, format, and field
+# mapping. STIX feeds automatically distribute indicators to the
+# appropriate engines (IPs → threat intel, domains → DNS blocklist,
+# URLs → L7 firewall).
 #
 # Cross-domain integration:
 #   - DNS blocklist → threat intel: blocked domain IPs are auto-injected
@@ -56,7 +59,7 @@ threatintel:
   #
   # Required fields: id, name, url
   # Optional fields (with defaults):
-  #   format                — "plaintext" (also: "csv", "json")
+  #   format                — "plaintext" (also: "csv", "json", "stix")
   #   enabled               — true
   #   refresh_interval_secs — 3600 (1 hour)
   #   max_iocs              — 500000
@@ -154,6 +157,36 @@ threatintel:
       refresh_interval_secs: 3600
       auth_header: "X-OTX-API-KEY: your-otx-api-key-here"
       max_iocs: 100000              # Limit to 100K IOCs from this feed
+
+    # ── STIX 2.1 feed ─────────────────────────────────────────────
+    #
+    # Format: STIX 2.1 bundle ({"type": "bundle", "objects": [...]}).
+    # Multi-type extraction — a single STIX feed populates multiple engines:
+    #   - ipv4-addr / ipv6-addr indicators → threat intel eBPF maps
+    #   - domain-name indicators → DNS blocklist + domain reputation
+    #   - url indicators → L7 firewall rules (HTTP host+path blocking)
+    #   - relationship objects → enrich threat type (indicator→malware = Malware)
+    #
+    # Expired indicators (valid_until in the past) are automatically skipped.
+    # Domain patterns are tagged with "stix:<feed-id>" for bulk cleanup on refresh.
+    #
+    # Works with MISP, OpenCTI, TAXII 2.1 collections, or any STIX bundle endpoint.
+
+    - id: misp-stix
+      name: MISP Threat Sharing (STIX 2.1)
+      url: https://misp.internal.corp/feeds/stix2.1/bundle.json
+      format: stix
+      min_confidence: 40
+      refresh_interval_secs: 1800  # Every 30 minutes
+      auth_header: "Authorization: Bearer your-misp-api-key"
+
+    # - id: opencti-stix
+    #   name: OpenCTI STIX Feed
+    #   url: https://opencti.internal.corp/api/stix2/bundle
+    #   format: stix
+    #   min_confidence: 50
+    #   refresh_interval_secs: 3600
+    #   auth_header: "Authorization: Bearer your-opencti-token"
 
     # ── Internal / custom feed ────────────────────────────────────
     #
