@@ -890,6 +890,7 @@ pub async fn run(
     };
 
     // 10b. XDP Rate Limiter
+    let mut lb_pre_loaded = false;
     let rl_ok = if config.ratelimit.enabled {
         match try_load_xdp_ratelimit(&ebpf_dir, &config, event_tx.clone(), fw_ok) {
             Ok((mut rl_loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs)) => {
@@ -944,6 +945,41 @@ pub async fn run(
                     }
                     Err(e) => {
                         warn!("xdp-ratelimit-syncookie load failed (syncookie falls back to DROP): {e}");
+                    }
+                }
+                // Wire tail-call: ratelimit → loadbalancer (slot 1). Best-effort.
+                // Must happen before rl_loader is moved into ebpf_state.
+                // When ratelimit returns XDP_PASS, it tail-calls to the LB so
+                // the LB can DNAT service traffic. Without this, PASS goes
+                // directly to the kernel, bypassing the LB entirely.
+                if config.loadbalancer.enabled {
+                    match try_load_xdp_loadbalancer(&ebpf_dir, &config, event_tx.clone(), true) {
+                        Ok((lb_loader_early, lb_mgr, lb_metrics_rdr)) => {
+                            lb_svc.write().await.set_map_port(Box::new(lb_mgr));
+                            if let Some(rdr) = lb_metrics_rdr {
+                                metrics_readers.push(rdr);
+                            }
+                            if let Ok(lb_fd) = lb_loader_early.xdp_program_fd("xdp_loadbalancer") {
+                                if let Err(e) = rl_loader.set_tail_call_target("RL_PROG_ARRAY", 1, &lb_fd) {
+                                    warn!("ratelimit → LB tail-call wiring failed: {e}");
+                                } else {
+                                    info!("XDP tail-call: ratelimit → loadbalancer wired (RL slot 1)");
+                                }
+                            }
+                            // Also wire into firewall (slot 2) for the no-ratelimit fallback path.
+                            if let Some(ref mut fw) = fw_loader {
+                                if let Ok(lb_fd) = lb_loader_early.xdp_program_fd("xdp_loadbalancer") {
+                                    let _ = fw.set_tail_call_target("XDP_PROG_ARRAY", 2, &lb_fd);
+                                }
+                            }
+                            ebpf_state.add_loader(lb_loader_early);
+                            metrics.set_ebpf_program_status("xdp_loadbalancer", true);
+                            info!("eBPF xdp-loadbalancer active (via ratelimit chain)");
+                            lb_pre_loaded = true;
+                        }
+                        Err(e) => {
+                            warn!("LB pre-load for RL chain failed (non-fatal): {e}");
+                        }
                     }
                 }
                 ebpf_state.add_loader(rl_loader);
@@ -1028,6 +1064,33 @@ pub async fn run(
         Ok(n) if n > 0 => info!(count = n, "initial dynamic alias refresh completed"),
         Ok(_) => {}
         Err(e) => warn!("initial dynamic alias refresh failed: {e}"),
+    }
+
+    // Wire FW → LB (slot 2) when ratelimit is NOT active but LB + FW are.
+    // When ratelimit IS active, the RL→LB wiring was already done above.
+    if fw_ok && !rl_ok && config.loadbalancer.enabled && !lb_pre_loaded {
+        if let Some(ref mut fw) = fw_loader {
+            match try_load_xdp_loadbalancer(&ebpf_dir, &config, event_tx.clone(), true) {
+                Ok((lb_loader, lb_mgr, lb_metrics_rdr)) => {
+                    lb_svc.write().await.set_map_port(Box::new(lb_mgr));
+                    if let Some(rdr) = lb_metrics_rdr {
+                        metrics_readers.push(rdr);
+                    }
+                    if let Ok(lb_fd) = lb_loader.xdp_program_fd("xdp_loadbalancer") {
+                        if let Err(e) = fw.set_tail_call_target("XDP_PROG_ARRAY", 2, &lb_fd) {
+                            warn!("firewall → LB tail-call wiring failed: {e}");
+                        } else {
+                            info!("XDP tail-call: firewall → loadbalancer wired (FW slot 2)");
+                        }
+                    }
+                    ebpf_state.add_loader(lb_loader);
+                    metrics.set_ebpf_program_status("xdp_loadbalancer", true);
+                    lb_pre_loaded = true;
+                    info!("eBPF xdp-loadbalancer active (via firewall chain)");
+                }
+                Err(e) => warn!("LB load for FW chain failed: {e}"),
+            }
+        }
     }
 
     // Move firewall loader into eBPF state (after tail-call wiring)
@@ -1254,14 +1317,23 @@ pub async fn run(
     };
 
     // 10k. XDP Load Balancer
-    let lb_ok = if config.loadbalancer.enabled {
-        match try_load_xdp_loadbalancer(&ebpf_dir, &config, event_tx.clone()) {
-            Ok((loader, lb_mgr, lb_metrics_rdr)) => {
+    // The LB can run standalone (attached to interface) or as a tail-call
+    // target in the chain: firewall → ratelimit → loadbalancer.
+    // When firewall is active, LB is wired at FW slot 2 (fallback when
+    // ratelimit is absent) AND the ratelimit chain also tail-calls LB on PASS.
+    let xdp_chain_active = fw_ok || rl_ok;
+    let lb_ok = if lb_pre_loaded {
+        // LB was already loaded and wired during the ratelimit block.
+        true
+    } else if config.loadbalancer.enabled {
+        match try_load_xdp_loadbalancer(&ebpf_dir, &config, event_tx.clone(), xdp_chain_active) {
+            Ok((lb_loader, lb_mgr, lb_metrics_rdr)) => {
                 lb_svc.write().await.set_map_port(Box::new(lb_mgr));
                 if let Some(rdr) = lb_metrics_rdr {
                     metrics_readers.push(rdr);
                 }
-                ebpf_state.add_loader(loader);
+                // FW→LB wiring (slot 2) already done during pre-load or not needed.
+                ebpf_state.add_loader(lb_loader);
                 metrics.set_ebpf_program_status("xdp_loadbalancer", true);
                 info!("eBPF xdp-loadbalancer active");
                 true
@@ -2348,11 +2420,17 @@ pub fn build_geoip_adapter(
     }
 }
 
-/// Load and attach the XDP load balancer program.
+/// Load the XDP load balancer program.
+///
+/// When `xdp_chain_active` is true (firewall or ratelimit is on the same
+/// interfaces), the LB is loaded without attaching — it will be invoked
+/// via tail-call from the upstream program. When false, it attaches
+/// directly to the interfaces (standalone mode).
 pub fn try_load_xdp_loadbalancer(
     ebpf_dir: &str,
     config: &AgentConfig,
     event_tx: mpsc::Sender<AgentEvent>,
+    xdp_chain_active: bool,
 ) -> anyhow::Result<(
     EbpfLoader,
     adapters::ebpf::LbMapManager,
@@ -2362,8 +2440,15 @@ pub fn try_load_xdp_loadbalancer(
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
-    for iface in &config.agent.interfaces {
-        loader.attach_xdp_program("xdp_loadbalancer", iface)?;
+    if xdp_chain_active {
+        // Another XDP program owns the interface — load only (tail-call target).
+        loader.load_xdp_program("xdp_loadbalancer")?;
+        info!("xdp-loadbalancer loaded as tail-call target (XDP chain active)");
+    } else {
+        // Standalone mode — attach directly.
+        for iface in &config.agent.interfaces {
+            loader.attach_xdp_program("xdp_loadbalancer", iface)?;
+        }
     }
 
     let lb_mgr = adapters::ebpf::LbMapManager::new(loader.ebpf_mut())?;

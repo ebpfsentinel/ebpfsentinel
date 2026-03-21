@@ -772,7 +772,7 @@ pub async fn load_ebpf_programs(
 
     // ── XDP Load Balancer ───────────────────────────────────────
     let lb_ok = if config.loadbalancer.enabled {
-        match startup::try_load_xdp_loadbalancer(&ebpf_dir, config, event_tx.clone()) {
+        match startup::try_load_xdp_loadbalancer(&ebpf_dir, config, event_tx.clone(), fw_ok || rl_ok) {
             Ok((mut loader, lb_mgr, lb_metrics_rdr)) => {
                 services.lb_svc.write().await.set_map_port(Box::new(lb_mgr));
                 if let Some(rdr) = lb_metrics_rdr {

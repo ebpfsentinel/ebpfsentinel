@@ -206,6 +206,8 @@ static SYNCOOKIE_CTX: PerCpuArray<SyncookieCtx> = PerCpuArray::with_max_entries(
 static RL_PROG_ARRAY: ProgramArray = ProgramArray::with_max_entries(4, 0);
 
 const PROG_IDX_SYNCOOKIE: u32 = 0;
+/// Index of the loadbalancer in `RL_PROG_ARRAY`.
+const PROG_IDX_LOADBALANCER: u32 = 1;
 
 /// Sentinel value returned by `check_syn_flood_v4/v6` to signal the
 /// entry point to tail-call into `xdp-ratelimit-syncookie`.
@@ -373,6 +375,13 @@ pub fn xdp_ratelimit(ctx: XdpContext) -> u32 {
             let _ = RL_PROG_ARRAY.tail_call(&ctx, PROG_IDX_SYNCOOKIE);
         }
         return xdp_action::XDP_DROP;
+    }
+    // Chain: on PASS, tail-call to loadbalancer (slot 1).
+    // No-op if LB is not loaded (slot empty).
+    if action == xdp_action::XDP_PASS {
+        unsafe {
+            let _ = RL_PROG_ARRAY.tail_call(&ctx, PROG_IDX_LOADBALANCER);
+        }
     }
     action
 }

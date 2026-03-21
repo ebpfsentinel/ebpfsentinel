@@ -152,6 +152,8 @@ static XDP_PROG_ARRAY: ProgramArray = ProgramArray::with_max_entries(4, 0);
 const PROG_IDX_RATELIMIT: u32 = 0;
 /// Index of the reject program in `XDP_PROG_ARRAY`.
 const PROG_IDX_REJECT: u32 = 1;
+/// Index of the loadbalancer program in `XDP_PROG_ARRAY`.
+const PROG_IDX_LOADBALANCER: u32 = 2;
 
 /// Sentinel value returned by `apply_action` to signal the entry point
 /// to tail-call into `xdp-firewall-reject`. Not a real XDP action.
@@ -565,8 +567,14 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         return xdp_action::XDP_DROP;
     }
     if action == xdp_action::XDP_PASS {
+        // Chain: ratelimit (slot 0) → if empty, loadbalancer (slot 2).
+        // If ratelimit is loaded, it tail-calls LB itself on PASS.
         unsafe {
             let _ = XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_RATELIMIT);
+        }
+        // Ratelimit not loaded — try loadbalancer directly.
+        unsafe {
+            let _ = XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_LOADBALANCER);
         }
     }
     action

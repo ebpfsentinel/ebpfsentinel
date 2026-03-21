@@ -14,7 +14,7 @@ use ebpf_helpers::net::{
     PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u32x4_to_ipv6_bytes,
 };
 use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
-use ebpf_helpers::{add_metric, increment_metric, ringbuf_has_backpressure};
+use ebpf_helpers::{add_metric, copy_16b_asm, copy_mac_asm, increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
     event::{PacketEvent, FLAG_IPV6, FLAG_VLAN},
     loadbalancer::{
@@ -253,12 +253,15 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
         return Ok(xdp_action::XDP_REDIRECT);
     }
 
-    // Fallback: MAC swap + XDP_TX (same-subnet backends behind a gateway)
+    // Fallback: MAC swap + XDP_TX (same-subnet backends behind a gateway).
+    // Use copy_mac_asm! to prevent LLVM memcpy outlining with packet pointers.
     let ethhdr_mut: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
+    let mut tmp_mac = [0u8; 6];
     unsafe {
-        let tmp = (*ethhdr_mut).src_addr;
-        (*ethhdr_mut).src_addr = (*ethhdr_mut).dst_addr;
-        (*ethhdr_mut).dst_addr = tmp;
+        let p = ethhdr_mut as *mut u8;
+        copy_mac_asm!(tmp_mac.as_mut_ptr(), p);       // tmp = dst
+        copy_mac_asm!(p, p.add(6));                    // dst = src
+        copy_mac_asm!(p.add(6), tmp_mac.as_ptr());    // src = tmp
     }
 
     Ok(xdp_action::XDP_TX)
@@ -323,15 +326,20 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     let ipv6hdr_mut: *mut Ipv6Hdr = unsafe { ptr_at_mut(ctx, l3_offset)? };
     let l4hdr_mut: *mut TcpUdpHdr = unsafe { ptr_at_mut(ctx, l4_offset)? };
 
-    let old_dst_addr = unsafe { (*ipv6hdr_mut).dst_addr };
+    let mut old_dst_addr = [0u8; 16];
+    unsafe {
+        let src = (ipv6hdr_mut as *const u8).add(24);
+        copy_16b_asm!(old_dst_addr.as_mut_ptr(), src);
+    }
     let old_dst_port = unsafe { (*l4hdr_mut).dst_port };
     let new_dst_port = backend.port.to_be();
 
     if backend.is_ipv6 == 1 {
-        // Rewrite 128-bit destination address
+        // Rewrite 128-bit destination address via inline asm to avoid memcpy.
         let new_addr = u32x4_to_ipv6_bytes(&backend.addr_v6);
         unsafe {
-            (*ipv6hdr_mut).dst_addr = new_addr;
+            let dst = (ipv6hdr_mut as *mut u8).add(24); // dst_addr offset in Ipv6Hdr
+            copy_16b_asm!(dst, new_addr.as_ptr());
         }
 
         unsafe {
@@ -389,10 +397,12 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     }
 
     let ethhdr_mut: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
+    let mut tmp_mac = [0u8; 6];
     unsafe {
-        let tmp = (*ethhdr_mut).src_addr;
-        (*ethhdr_mut).src_addr = (*ethhdr_mut).dst_addr;
-        (*ethhdr_mut).dst_addr = tmp;
+        let p = ethhdr_mut as *mut u8;
+        copy_mac_asm!(tmp_mac.as_mut_ptr(), p);
+        copy_mac_asm!(p, p.add(6));
+        copy_mac_asm!(p.add(6), tmp_mac.as_ptr());
     }
 
     Ok(xdp_action::XDP_TX)
