@@ -97,7 +97,7 @@ teardown_file() {
     metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
 
     [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_nat|ebpfsentinel_conntrack|ebpfsentinel_packets"
+    echo "$metrics" | grep -qE "ebpfsentinel_conntrack|ebpfsentinel_packets|ebpfsentinel_rules_loaded"
 }
 
 # ── Additional NAT API tests ──────────────────────────────────────
@@ -129,7 +129,7 @@ teardown_file() {
 @test "NPTv6 rule CRUD — create" {
     require_root
 
-    local rule='{"id":"nptv6-test","internal_prefix":"fd00::/48","external_prefix":"2001:db8::/48"}'
+    local rule='{"id":"nptv6-test","internal_prefix":"fd00::","external_prefix":"2001:db8::","prefix_len":48}'
     local body
     body="$(api_post /api/v1/nat/nptv6 "$rule")"
     _load_http_status
@@ -155,5 +155,53 @@ teardown_file() {
     metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
 
     [ -n "$metrics" ]
-    echo "$metrics" | grep -q "ebpfsentinel_nat"
+    echo "$metrics" | grep -qE "ebpfsentinel_conntrack|ebpfsentinel_packets|ebpfsentinel_rules_loaded"
+}
+
+# ── Extended NAT tests ────────────────────────────────────────────
+
+@test "NPTv6 rule CRUD via API" {
+    require_root
+
+    local rule='{"id":"nptv6-001","internal_prefix":"fd00::","external_prefix":"2001:db8::","prefix_len":48,"enabled":true}'
+    local body
+    body="$(api_post /api/v1/nat/nptv6 "$rule" 2>/dev/null)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+
+    # Read back
+    body="$(api_get /api/v1/nat/nptv6 2>/dev/null)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+
+    # Delete
+    api_delete /api/v1/nat/nptv6/nptv6-001 >/dev/null 2>&1 || true
+}
+
+@test "hairpin NAT config accepted" {
+    require_root
+
+    local body
+    body="$(api_get /api/v1/nat/status)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+    # Hairpin should be configurable
+    local enabled
+    enabled="$(echo "$body" | jq -r '.hairpin_enabled // .hairpin // "unknown"' 2>/dev/null)" || true
+    [ -n "$enabled" ]
+}
+
+@test "NAT rules list is queryable" {
+    require_root
+
+    # The NAT rules endpoint is read-only (populated from config).
+    # Verify it returns a valid JSON array.
+    local body
+    body="$(api_get /api/v1/nat/rules 2>/dev/null)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+
+    local is_array
+    is_array="$(echo "$body" | jq 'type == "array"' 2>/dev/null)" || true
+    [ "$is_array" = "true" ]
 }

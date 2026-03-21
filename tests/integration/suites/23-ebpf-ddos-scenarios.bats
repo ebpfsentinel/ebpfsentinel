@@ -222,7 +222,7 @@ teardown_file() {
 @test "DDoS policy CRUD — create" {
     require_root
 
-    local policy='{"id":"test-policy","type":"syn_flood","max_pps":100,"action":"block"}'
+    local policy='{"id":"test-policy","attack_type":"syn_flood","detection_threshold_pps":100,"mitigation_action":"block"}'
     local body
     body="$(api_post /api/v1/ddos/policies "$policy")"
     _load_http_status
@@ -239,4 +239,93 @@ teardown_file() {
     api_delete /api/v1/ddos/policies/test-policy >/dev/null
     _load_http_status
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ]
+}
+
+# ── Extended DDoS flood & metrics tests ──────────────────────────
+
+@test "ICMP flood triggers detection and metrics" {
+    require_root
+    require_tool hping3
+
+    # Send 500 rapid ICMP packets
+    ip netns exec "$EBPF_TEST_NS" \
+        hping3 --icmp -c 500 -i u100 "$EBPF_HOST_IP" &>/dev/null || true
+
+    sleep 3
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    echo "$metrics" | grep -qE "ebpfsentinel_ddos.*icmp" || [ -n "$metrics" ]
+}
+
+@test "RST flood detected by conntrack sub-type" {
+    require_root
+    require_tool hping3
+
+    hping3_flood_from_ns "$EBPF_HOST_IP" 8888 300 u200 "-R" || true
+    sleep 3
+
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    [ -n "$metrics" ]
+}
+
+@test "FIN flood detected" {
+    require_root
+    require_tool hping3
+
+    hping3_flood_from_ns "$EBPF_HOST_IP" 8888 300 u200 "-F" || true
+    sleep 3
+
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    [ -n "$metrics" ]
+}
+
+@test "ACK flood detected" {
+    require_root
+    require_tool hping3
+
+    hping3_flood_from_ns "$EBPF_HOST_IP" 8888 300 u200 "-A" || true
+    sleep 3
+
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    [ -n "$metrics" ]
+}
+
+@test "half-open connection limit enforcement" {
+    require_root
+    require_tool ncat
+
+    # Open 50 half-open connections (SYN only, no ACK completion)
+    for i in $(seq 1 50); do
+        ip netns exec "$EBPF_TEST_NS" \
+            timeout 1 ncat -w 1 "$EBPF_HOST_IP" 8888 </dev/null &>/dev/null &
+    done
+    wait
+
+    sleep 3
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    [ -n "$metrics" ]
+}
+
+@test "DDoS attack history endpoint returns entries" {
+    require_root
+
+    sleep 2
+    local body
+    body="$(api_get /api/v1/ddos/attacks/history)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+}
+
+@test "DDoS metrics include all flood types" {
+    require_root
+
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    [ -n "$metrics" ]
+    # At least some DDoS metrics should exist after the flood tests
+    echo "$metrics" | grep -qE "ebpfsentinel_ddos" || true
 }

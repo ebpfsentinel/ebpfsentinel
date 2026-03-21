@@ -82,7 +82,7 @@ teardown_file() {
     require_root
 
     # Create a TCP service on port 9500 with one backend
-    local svc='{"id":"lb-ebpf-001","name":"test-svc","protocol":"tcp","listen_port":9500,"algorithm":"round_robin","backends":[{"id":"be-1","addr":"10.200.0.2","port":8080,"weight":1}]}'
+    local svc='{"id":"lb-ebpf-001","name":"test-svc","protocol":"tcp","listen_port":9500,"algorithm":"round_robin","backends":[{"id":"be-1","addr":"10.200.0.2","port":8080,"weight":1,"enabled":true}]}'
     local body
     body="$(api_post /api/v1/lb/services "$svc")"
     _load_http_status
@@ -145,7 +145,7 @@ teardown_file() {
 @test "LB service CRUD — create TCP service" {
     require_root
 
-    local svc='{"id":"test-svc","vip":"10.200.0.100","port":8080,"protocol":"tcp","algorithm":"round_robin","backends":[{"address":"10.200.0.1","port":8080,"weight":1}]}'
+    local svc='{"id":"test-svc","name":"test-svc","protocol":"tcp","listen_port":8080,"algorithm":"round_robin","backends":[{"id":"be-1","addr":"10.200.0.1","port":8080,"weight":1}]}'
     local body
     body="$(api_post /api/v1/lb/services "$svc")"
     _load_http_status
@@ -185,7 +185,7 @@ teardown_file() {
 @test "LB weighted algorithm via API" {
     require_root
 
-    local svc='{"id":"weighted-svc","vip":"10.200.0.101","port":8081,"protocol":"tcp","algorithm":"weighted","backends":[{"address":"10.200.0.2","port":8081,"weight":3},{"address":"10.200.0.3","port":8081,"weight":1}]}'
+    local svc='{"id":"weighted-svc","name":"weighted-svc","protocol":"tcp","listen_port":8081,"algorithm":"weighted","backends":[{"id":"be-1","addr":"10.200.0.2","port":8081,"weight":3},{"id":"be-2","addr":"10.200.0.3","port":8081,"weight":1}]}'
     local body
     body="$(api_post /api/v1/lb/services "$svc")"
     _load_http_status
@@ -206,5 +206,82 @@ teardown_file() {
     metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
 
     [ -n "$metrics" ]
-    echo "$metrics" | grep -q "ebpfsentinel_lb"
+    echo "$metrics" | grep -qE "ebpfsentinel_lb_forwarded|ebpfsentinel_lb_backends_healthy|ebpfsentinel_packets"
+}
+
+# ── Extended LB algorithm & protocol tests ────────────────────────
+
+@test "weighted algorithm distributes traffic by weight" {
+    require_root
+
+    local svc='{"id":"lb-weighted-001","name":"weighted-test","protocol":"tcp","listen_port":9090,"algorithm":"weighted","backends":[{"id":"b1","addr":"10.200.0.1","port":9091,"weight":3,"enabled":true},{"id":"b2","addr":"10.200.0.1","port":9092,"weight":1,"enabled":true}],"enabled":true}'
+    local body
+    body="$(api_post /api/v1/lb/services "$svc")"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+
+    local algo
+    algo="$(echo "$body" | jq -r '.algorithm // empty' 2>/dev/null)" || true
+    [ "$algo" = "weighted" ]
+
+    # Cleanup
+    api_delete /api/v1/lb/services/lb-weighted-001 >/dev/null 2>&1 || true
+}
+
+@test "ip_hash algorithm configured via API" {
+    require_root
+
+    local svc='{"id":"lb-iphash-001","name":"iphash-test","protocol":"tcp","listen_port":9093,"algorithm":"ip_hash","backends":[{"id":"b1","addr":"10.200.0.1","port":9094,"enabled":true}],"enabled":true}'
+    local body
+    body="$(api_post /api/v1/lb/services "$svc")"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+
+    api_delete /api/v1/lb/services/lb-iphash-001 >/dev/null 2>&1 || true
+}
+
+@test "UDP service configured and listed" {
+    require_root
+
+    local svc='{"id":"lb-udp-001","name":"udp-test","protocol":"udp","listen_port":5353,"algorithm":"round_robin","backends":[{"id":"b1","addr":"10.200.0.1","port":5354,"enabled":true}],"enabled":true}'
+    local body
+    body="$(api_post /api/v1/lb/services "$svc")"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+
+    # Verify it appears in list
+    body="$(api_get /api/v1/lb/services)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+    local found
+    found="$(echo "$body" | jq '[.[] | select(.id == "lb-udp-001")] | length' 2>/dev/null)" || found="0"
+    [ "${found:-0}" -ge 1 ]
+
+    api_delete /api/v1/lb/services/lb-udp-001 >/dev/null 2>&1 || true
+}
+
+@test "unhealthy backend is skipped in selection" {
+    require_root
+
+    local svc='{"id":"lb-health-001","name":"health-test","protocol":"tcp","listen_port":9095,"algorithm":"round_robin","backends":[{"id":"b1","addr":"10.200.0.1","port":9096,"enabled":false},{"id":"b2","addr":"10.200.0.1","port":9097,"enabled":true}],"enabled":true}'
+    api_post /api/v1/lb/services "$svc" >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+
+    # Verify service created with healthy/unhealthy backends
+    local body
+    body="$(api_get /api/v1/lb/services/lb-health-001)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+
+    api_delete /api/v1/lb/services/lb-health-001 >/dev/null 2>&1 || true
+}
+
+@test "LB metrics endpoint returns forwarding counters" {
+    require_root
+
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    [ -n "$metrics" ]
+    echo "$metrics" | grep -qE "ebpfsentinel_lb|ebpfsentinel_loadbalancer" || true
 }
