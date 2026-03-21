@@ -38,7 +38,8 @@ High-performance network security agent powered by eBPF. Monitors, filters, and 
 - **REST API** with OpenAPI 3.0, Swagger UI, and SecurityScheme
 - **gRPC Streaming** for real-time alert subscriptions with severity, component, and MITRE ATT&CK filters
 - **Prometheus Metrics** with per-domain counters, histograms, kernel-side eBPF counters, and system-level tracking
-- **Alert Pipeline** with routing to email, webhook, and log sinks
+- **OTLP Export** — alerts as OpenTelemetry Logs (gRPC or HTTP) to any OTLP-compatible collector (Grafana, Datadog, Elastic, etc.)
+- **Alert Pipeline** with routing to email, webhook, log, and OTLP sinks
 - **Audit Trail** with rule change history
 - **Hot Reload** — update configuration without restart (file watcher, SIGHUP, or API)
 - **CLI** with 13 domain subcommands covering all endpoints (firewall, ids, ratelimit, qos, threatintel, dlp, dns, nat, nptv6, scrub, lb, conntrack, audit)
@@ -49,28 +50,41 @@ High-performance network security agent powered by eBPF. Monitors, filters, and 
 
 ```mermaid
 flowchart TB
-    subgraph kernel["Linux Kernel"]
-        direction LR
-        subgraph xdp["XDP (L3)"]
-            fw[xdp-firewall]
-            rl[xdp-ratelimit]
-            lb[xdp-loadbalancer]
+    subgraph kernel["Linux Kernel (14 eBPF programs)"]
+        direction TB
+        subgraph xdp["XDP — wire-speed packet processing"]
+            fw["xdp-firewall\n(stateful L3/L4)"]
+            fw_rej["xdp-firewall-reject\n(TCP RST / ICMP)"]
+            rl["xdp-ratelimit\n(DDoS / rate limit)"]
+            rl_sc["xdp-ratelimit-syncookie\n(SYN cookie forge)"]
+            lb["xdp-loadbalancer\n(L4 DNAT)"]
         end
-        subgraph tc["TC (L4/L7)"]
-            ids[tc-ids]
-            ti[tc-threatintel]
-            dns[tc-dns]
+        subgraph tc["TC — deep packet inspection & rewriting"]
             ct[tc-conntrack]
-            qos[tc-qos]
             scrub[tc-scrub]
             nat_i[tc-nat-ingress]
             nat_e[tc-nat-egress]
+            ids[tc-ids]
+            ti[tc-threatintel]
+            dns[tc-dns]
+            qos[tc-qos]
         end
-        uprobe[uprobe-dlp]
+        uprobe["uprobe-dlp\n(SSL/TLS intercept)"]
     end
 
-    packets(("Packets")) --> xdp
-    packets --> tc
+    packets(("Packets")) --> fw
+
+    fw -- "PASS → slot 0" --> rl
+    fw -- "REJECT → slot 1" --> fw_rej
+    fw -- "PASS (no RL) → slot 2" --> lb
+    rl -- "SYN flood → slot 0" --> rl_sc
+    rl -- "PASS → slot 1" --> lb
+    fw_rej -- "XDP_TX" --> packets
+    rl_sc -- "XDP_TX" --> packets
+    lb -- "XDP_TX / REDIRECT" --> packets
+
+    fw -- "XDP_PASS" --> tc
+    tc --- uprobe
 
     subgraph agent["Userspace Agent (Rust)"]
         direction LR
@@ -85,6 +99,7 @@ flowchart TB
             http["REST API\n(Axum)"]
             grpc["gRPC\n(tonic)"]
             store["Storage\n(redb)"]
+            otlp["OTLP exporter\n(logs/traces)"]
         end
     end
 
@@ -102,6 +117,8 @@ flowchart TB
     swagger(("Swagger UI")) --> http
     prom(("Prometheus")) --> http
     alerts(("Alert clients")) --> grpc
+    otel(("OTLP collector")) --> otlp
+    otlp --> as
 ```
 
 ## Quick start
