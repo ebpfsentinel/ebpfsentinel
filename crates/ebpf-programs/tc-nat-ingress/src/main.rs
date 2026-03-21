@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![cfg_attr(target_arch = "bpf", feature(asm_experimental_arch))]
 
 use aya_ebpf::{
     bindings::TC_ACT_OK,

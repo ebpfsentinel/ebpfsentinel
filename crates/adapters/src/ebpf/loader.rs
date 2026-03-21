@@ -5,7 +5,7 @@ use aya::{
     maps::ProgramArray,
     programs::{ProgramFd, SchedClassifier, TcAttachType, UProbe, Xdp, XdpFlags, tc},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Default BPF filesystem pin path for shared maps.
 pub const DEFAULT_BPF_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel";
@@ -104,16 +104,18 @@ impl EbpfLoader {
 
     /// Attach a TC (Traffic Control) classifier program to the given interface.
     ///
-    /// Adds a `clsact` qdisc (best-effort, may already exist) and attaches the
-    /// program on the ingress path.
+    /// On kernel >= 6.6, uses TCX (link-based attach with priority ordering,
+    /// no qdisc needed). On older kernels, falls back to clsact qdisc +
+    /// netlink attach. Aya handles the detection automatically.
     pub fn attach_tc_program(
         &mut self,
         program_name: &str,
         interface: &str,
     ) -> Result<(), anyhow::Error> {
-        // Add clsact qdisc (idempotent — ignore "already exists" errors)
+        // clsact qdisc is only needed for legacy netlink attach (kernel < 6.6).
+        // TCX (kernel >= 6.6) doesn't use qdiscs. Best-effort, ignore errors.
         if let Err(e) = tc::qdisc_add_clsact(interface) {
-            warn!(interface, error = %e, "qdisc_add_clsact failed (may already exist)");
+            debug!(interface, error = %e, "qdisc_add_clsact skipped (TCX or already exists)");
         }
 
         let program: &mut SchedClassifier = self
@@ -123,6 +125,9 @@ impl EbpfLoader {
             .try_into()?;
 
         program.load()?;
+        // Aya auto-detects kernel version:
+        // >= 6.6: uses TCX (BPF_TCX_INGRESS link, priority ordering)
+        // <  6.6: uses netlink (legacy clsact qdisc attach)
         program.attach(interface, TcAttachType::Ingress)?;
         info!(program_name, interface, "TC program attached (ingress)");
         Ok(())

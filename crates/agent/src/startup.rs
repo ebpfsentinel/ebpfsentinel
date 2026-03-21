@@ -1842,7 +1842,6 @@ pub fn try_load_xdp_firewall(
     Ok((loader, map_manager, metrics_rdr))
 }
 
-
 /// Load result for xdp-ratelimit: loader, map manager, LPM manager, metrics readers.
 pub type XdpRatelimitResult = (
     EbpfLoader,
@@ -1851,7 +1850,6 @@ pub type XdpRatelimitResult = (
     Vec<MetricsReader>,
 );
 
-/// Load the XDP rate limiter program: attach XDP, populate policies, start event reader.
 pub fn try_load_xdp_ratelimit(
     ebpf_dir: &str,
     config: &AgentConfig,
@@ -2098,9 +2096,9 @@ pub fn try_load_uprobe_dlp(
     // Default SSL library target (OpenSSL)
     let ssl_target = "libssl.so.3";
 
-    loader.attach_uprobe("uprobe_ssl_write", "SSL_write", ssl_target, false)?;
-    loader.attach_uprobe("uprobe_ssl_read_entry", "SSL_read", ssl_target, false)?;
-    loader.attach_uprobe("uretprobe_ssl_read", "SSL_read", ssl_target, true)?;
+    loader.attach_uprobe("ssl_write", "SSL_write", ssl_target, false)?;
+    loader.attach_uprobe("ssl_read_entry", "SSL_read", ssl_target, false)?;
+    loader.attach_uprobe("ssl_read_ret", "SSL_read", ssl_target, true)?;
 
     let dlp_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "DLP_METRICS").ok();
 

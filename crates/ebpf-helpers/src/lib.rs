@@ -16,6 +16,7 @@
 //!   macro.
 
 #![no_std]
+#![cfg_attr(target_arch = "bpf", feature(asm_experimental_arch))]
 
 pub mod metrics;
 pub mod net;
@@ -23,3 +24,16 @@ pub mod ringbuf;
 pub mod tc;
 pub mod user_ringbuf;
 pub mod xdp;
+
+/// Compiler barrier: prevents LLVM from reordering memory accesses across this
+/// point. Insert after any BPF helper that invalidates packet pointers
+/// (`bpf_xdp_adjust_tail`, `bpf_skb_store_bytes`, `bpf_skb_pull_data`, etc.)
+/// so that subsequent reads of `data`/`data_end` are not hoisted before the
+/// helper call. Equivalent to C's `asm volatile("" ::: "memory")`.
+#[inline(always)]
+pub unsafe fn barrier() {
+    #[cfg(target_arch = "bpf")]
+    unsafe {
+        core::arch::asm!("", options(nostack, preserves_flags));
+    }
+}

@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![cfg_attr(target_arch = "bpf", feature(asm_experimental_arch))]
 
 use aya_ebpf::{
     bindings::TC_ACT_OK,
@@ -521,7 +522,7 @@ fn emit_event(
             (*ptr).vlan_id = vlan_id;
             (*ptr).cpu_id = bpf_get_smp_processor_id() as u16;
             // Populate socket cookie for TC context (not available in XDP).
-            (*ptr).socket_cookie = unsafe { bpf_get_socket_cookie(ctx.skb.skb as *mut _) };
+            (*ptr).socket_cookie = bpf_get_socket_cookie(ctx.skb.skb as *mut _);
         }
         entry.submit(0);
     } else {
@@ -530,9 +531,9 @@ fn emit_event(
 
     // Packet mirroring for forensics (enterprise feature, controlled by config map)
     if let Some(mirror_enabled) = IDS_MIRROR_CONFIG.get(1) {
-        if unsafe { *mirror_enabled } == 1 {
+        if *mirror_enabled == 1 {
             if let Some(ifindex) = IDS_MIRROR_CONFIG.get(0) {
-                let target_ifindex = unsafe { *ifindex };
+                let target_ifindex = *ifindex;
                 if target_ifindex > 0 {
                     unsafe {
                         bpf_clone_redirect(
@@ -678,7 +679,7 @@ unsafe fn fill_l7_header(
         header.vlan_id = vlan_id;
         header.cpu_id = bpf_get_smp_processor_id() as u16;
         // Populate socket cookie for TC context (not available in XDP).
-        header.socket_cookie = unsafe { bpf_get_socket_cookie(ctx.skb.skb as *mut _) };
+        header.socket_cookie = bpf_get_socket_cookie(ctx.skb.skb as *mut _);
     }
 }
 

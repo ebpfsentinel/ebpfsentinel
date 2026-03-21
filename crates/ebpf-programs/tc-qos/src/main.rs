@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![cfg_attr(target_arch = "bpf", feature(asm_experimental_arch))]
 
 use aya_ebpf::{
     bindings::TC_ACT_OK,
@@ -712,7 +713,7 @@ fn emit_event(
             (*ptr).vlan_id = vlan_id;
             (*ptr).cpu_id = bpf_get_smp_processor_id() as u16;
             // Populate socket cookie for TC context (not available in XDP).
-            (*ptr).socket_cookie = unsafe { bpf_get_socket_cookie(ctx.skb.skb as *mut _) };
+            (*ptr).socket_cookie = bpf_get_socket_cookie(ctx.skb.skb as *mut _);
         }
         entry.submit(0);
     } else {
