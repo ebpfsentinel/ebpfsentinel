@@ -5,17 +5,15 @@
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
-    helpers::{bpf_get_prandom_u32, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
+    helpers::{bpf_get_prandom_u32, bpf_ktime_get_boot_ns},
     macros::{classifier, map},
     maps::{Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
     programs::TcContext,
 };
 use aya_ebpf_bindings::bindings::_bindgen_ty_28::BPF_SKB_TSTAMP_DELIVERY_MONO;
-use aya_ebpf_bindings::helpers::{bpf_get_socket_cookie, bpf_skb_ecn_set_ce, bpf_skb_set_tstamp};
-#[cfg(debug_assertions)]
-use aya_log_ebpf::info;
+use aya_ebpf_bindings::helpers::{bpf_skb_ecn_set_ce, bpf_skb_set_tstamp};
 use ebpf_common::{
-    event::{EVENT_TYPE_QOS, FLAG_IPV6, FLAG_VLAN, PacketEvent},
+    event::{EVENT_TYPE_QOS, FLAG_IPV6, FLAG_VLAN},
     qos::{
         QOS_METRIC_COUNT, QOS_METRIC_DELAYED, QOS_METRIC_DROPPED_LOSS, QOS_METRIC_DROPPED_QUEUE,
         QOS_METRIC_ERRORS, QOS_METRIC_EVENTS_DROPPED, QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN,
@@ -28,7 +26,7 @@ use ebpf_helpers::net::{
     VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
 };
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
-use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
+use ebpf_helpers::{emit_packet_event, increment_metric};
 use network_types::{
     eth::EthHdr,
     ip::{IpProto, Ipv4Hdr},
@@ -98,12 +96,6 @@ const ACTION_DROPPED: u8 = 2;
 #[inline(always)]
 fn increment_qos_metric(index: u32) {
     increment_metric!(QOS_METRICS, index);
-}
-
-/// Returns `true` if the EVENTS RingBuf has backpressure (>75% full).
-#[inline(always)]
-fn ringbuf_bp() -> bool {
-    ringbuf_has_backpressure!(EVENTS)
 }
 
 // ── Interface group helpers ──────────────────────────────────────────
@@ -519,18 +511,11 @@ fn apply_qos(
         let rand = unsafe { bpf_get_prandom_u32() } % 10000;
         if rand < u32::from(pipe_cfg.loss_rate) {
             increment_qos_metric(QOS_METRIC_DROPPED_LOSS);
-            emit_event(
-                ctx,
-                src_addr,
-                dst_addr,
-                src_port,
-                dst_port,
-                protocol,
-                ACTION_DROPPED,
-                pipe_id,
-                flags,
-                vlan_id,
-            );
+            (|| {
+                emit_packet_event!(EVENTS, QOS_METRICS, QOS_METRIC_EVENTS_DROPPED,
+                    src_addr, dst_addr, src_port, dst_port, protocol,
+                    EVENT_TYPE_QOS, ACTION_DROPPED, pipe_id, flags, vlan_id; tc ctx);
+            })();
             return Ok(TC_ACT_SHOT);
         }
     }
@@ -594,18 +579,11 @@ fn apply_qos(
 
         if should_drop {
             increment_qos_metric(QOS_METRIC_DROPPED_QUEUE);
-            emit_event(
-                ctx,
-                src_addr,
-                dst_addr,
-                src_port,
-                dst_port,
-                protocol,
-                ACTION_DROPPED,
-                pipe_id,
-                flags,
-                vlan_id,
-            );
+            (|| {
+                emit_packet_event!(EVENTS, QOS_METRICS, QOS_METRIC_EVENTS_DROPPED,
+                    src_addr, dst_addr, src_port, dst_port, protocol,
+                    EVENT_TYPE_QOS, ACTION_DROPPED, pipe_id, flags, vlan_id; tc ctx);
+            })();
             return Ok(TC_ACT_SHOT);
         }
     }
@@ -654,71 +632,17 @@ fn apply_qos(
         }
 
         increment_qos_metric(QOS_METRIC_DELAYED);
-        emit_event(
-            ctx,
-            src_addr,
-            dst_addr,
-            src_port,
-            dst_port,
-            protocol,
-            ACTION_SHAPED,
-            pipe_id,
-            flags,
-            vlan_id,
-        );
+        (|| {
+            emit_packet_event!(EVENTS, QOS_METRICS, QOS_METRIC_EVENTS_DROPPED,
+                src_addr, dst_addr, src_port, dst_port, protocol,
+                EVENT_TYPE_QOS, ACTION_SHAPED, pipe_id, flags, vlan_id; tc ctx);
+        })();
     }
 
     // Mark as shaped if any shaping was applied
     increment_qos_metric(QOS_METRIC_SHAPED);
 
     Ok(TC_ACT_OK)
-}
-
-// ── Event emission ──────────────────────────────────────────────────
-
-/// Emit a `PacketEvent` to the EVENTS RingBuf. Skips emission under
-/// backpressure (>75% full). If the buffer is full, increments the
-/// events-dropped metric.
-#[inline(always)]
-#[allow(clippy::too_many_arguments)]
-fn emit_event(
-    ctx: &TcContext,
-    src_addr: &[u32; 4],
-    dst_addr: &[u32; 4],
-    src_port: u16,
-    dst_port: u16,
-    protocol: u8,
-    action: u8,
-    rule_id: u32,
-    flags: u8,
-    vlan_id: u16,
-) {
-    if ringbuf_bp() {
-        increment_qos_metric(QOS_METRIC_EVENTS_DROPPED);
-        return;
-    }
-    if let Some(mut entry) = EVENTS.reserve::<PacketEvent>(0) {
-        let ptr = entry.as_mut_ptr();
-        unsafe {
-            (*ptr).timestamp_ns = bpf_ktime_get_boot_ns();
-            (*ptr).src_addr = *src_addr;
-            (*ptr).dst_addr = *dst_addr;
-            (*ptr).src_port = src_port;
-            (*ptr).dst_port = dst_port;
-            (*ptr).protocol = protocol;
-            (*ptr).event_type = EVENT_TYPE_QOS;
-            (*ptr).action = action;
-            (*ptr).flags = flags;
-            (*ptr).rule_id = rule_id;
-            (*ptr).vlan_id = vlan_id;
-            (*ptr).cpu_id = bpf_get_smp_processor_id() as u16;
-            // Populate socket cookie for TC context (not available in XDP).
-            (*ptr).socket_cookie = bpf_get_socket_cookie(ctx.skb.skb as *mut _);
-        }
-        entry.submit(0);
-    } else {
-        increment_qos_metric(QOS_METRIC_EVENTS_DROPPED);
-    }
 }
 
 #[cfg(not(test))]

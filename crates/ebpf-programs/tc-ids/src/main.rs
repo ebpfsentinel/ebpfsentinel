@@ -21,7 +21,7 @@ use ebpf_helpers::net::{
     PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
 };
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
-use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
+use ebpf_helpers::{emit_packet_event, increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
     event::{
         PacketEvent, EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, FLAG_VLAN,
@@ -460,9 +460,29 @@ fn process_ids_pattern(
     // Kernel-side sampling: skip event emission probabilistically,
     // but always enforce the drop action for IPS mode.
     if !should_skip_by_sampling() {
-        emit_event(
-            _ctx, src_addr, dst_addr, src_port, dst_port, protocol, pattern, flags, vlan_id,
-        );
+        (|| {
+            emit_packet_event!(EVENTS, IDS_METRICS, METRIC_EVENTS_DROPPED,
+                src_addr, dst_addr, src_port, dst_port, protocol,
+                EVENT_TYPE_IDS, pattern.action, pattern.rule_id, flags, vlan_id; tc _ctx);
+        })();
+
+        // Packet mirroring for forensics (enterprise feature, controlled by config map)
+        if let Some(mirror_enabled) = IDS_MIRROR_CONFIG.get(1) {
+            if *mirror_enabled == 1 {
+                if let Some(ifindex) = IDS_MIRROR_CONFIG.get(0) {
+                    let target_ifindex = *ifindex;
+                    if target_ifindex > 0 {
+                        unsafe {
+                            bpf_clone_redirect(
+                                _ctx.skb.skb as *mut _,
+                                target_ifindex,
+                                0, // flags: 0 = redirect ingress
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if pattern.action == IDS_ACTION_DROP {
@@ -485,67 +505,6 @@ fn process_ids_pattern(
 #[inline(always)]
 fn increment_metric(index: u32) {
     increment_metric!(IDS_METRICS, index);
-}
-
-/// Emit a PacketEvent to the EVENTS RingBuf. Skips emission under
-/// backpressure (>75% full). If the buffer is full, increment the
-/// events_dropped metric — never block the hot path.
-#[inline(always)]
-fn emit_event(
-    ctx: &TcContext,
-    src_addr: &[u32; 4],
-    dst_addr: &[u32; 4],
-    src_port: u16,
-    dst_port: u16,
-    protocol: u8,
-    pattern: &IdsPatternValue,
-    flags: u8,
-    vlan_id: u16,
-) {
-    if ringbuf_has_backpressure() {
-        increment_metric(METRIC_EVENTS_DROPPED);
-        return;
-    }
-    if let Some(mut entry) = EVENTS.reserve::<PacketEvent>(0) {
-        let ptr = entry.as_mut_ptr();
-        unsafe {
-            (*ptr).timestamp_ns = bpf_ktime_get_boot_ns();
-            (*ptr).src_addr = *src_addr;
-            (*ptr).dst_addr = *dst_addr;
-            (*ptr).src_port = src_port;
-            (*ptr).dst_port = dst_port;
-            (*ptr).protocol = protocol;
-            (*ptr).event_type = EVENT_TYPE_IDS;
-            (*ptr).action = pattern.action;
-            (*ptr).flags = flags;
-            (*ptr).rule_id = pattern.rule_id;
-            (*ptr).vlan_id = vlan_id;
-            (*ptr).cpu_id = bpf_get_smp_processor_id() as u16;
-            // Populate socket cookie for TC context (not available in XDP).
-            (*ptr).socket_cookie = bpf_get_socket_cookie(ctx.skb.skb as *mut _);
-        }
-        entry.submit(0);
-    } else {
-        increment_metric(METRIC_EVENTS_DROPPED);
-    }
-
-    // Packet mirroring for forensics (enterprise feature, controlled by config map)
-    if let Some(mirror_enabled) = IDS_MIRROR_CONFIG.get(1) {
-        if *mirror_enabled == 1 {
-            if let Some(ifindex) = IDS_MIRROR_CONFIG.get(0) {
-                let target_ifindex = *ifindex;
-                if target_ifindex > 0 {
-                    unsafe {
-                        bpf_clone_redirect(
-                            ctx.skb.skb as *mut _,
-                            target_ifindex,
-                            0, // flags: 0 = redirect ingress
-                        );
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// Emit an L7 event: PacketEvent header + raw payload bytes from the packet.

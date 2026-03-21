@@ -5,14 +5,10 @@
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
-    helpers::{
-        bpf_get_smp_processor_id, bpf_ktime_get_boot_ns,
-    },
     macros::{classifier, map},
     maps::{Array, LruHashMap, PerCpuArray, RingBuf, bloom_filter::BloomFilter},
     programs::TcContext,
 };
-use aya_ebpf_bindings::helpers::bpf_get_socket_cookie;
 #[cfg(debug_assertions)]
 use aya_log_ebpf::info;
 use ebpf_helpers::net::{
@@ -20,10 +16,10 @@ use ebpf_helpers::net::{
     PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
 };
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
-use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
+use ebpf_helpers::{emit_packet_event, increment_metric};
 use ebpf_common::{
     event::{
-        EVENT_TYPE_THREATINTEL, FLAG_IPV6, FLAG_VLAN, PacketEvent,
+        EVENT_TYPE_THREATINTEL, FLAG_IPV6, FLAG_VLAN,
     },
     threatintel::{
         THREATINTEL_ACTION_DROP, THREATINTEL_MAX_ENTRIES, THREATINTEL_METRIC_DROPPED,
@@ -81,12 +77,6 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
 /// Feature enable/disable flags (shared across programs).
 #[map]
 static CONFIG_FLAGS: Array<u32> = Array::with_max_entries(1, 0);
-
-/// Returns `true` if the EVENTS RingBuf has backpressure (>75% full).
-#[inline(always)]
-fn ringbuf_has_backpressure() -> bool {
-    ringbuf_has_backpressure!(EVENTS)
-}
 
 // ── Entry point ─────────────────────────────────────────────────────
 
@@ -338,9 +328,11 @@ fn apply_threatintel_action(
     vlan_id: u16,
 ) -> Result<i32, ()> {
     increment_metric(THREATINTEL_METRIC_MATCHED);
-    emit_event(
-        _ctx, src_addr, dst_addr, src_port, dst_port, protocol, matched, flags, vlan_id,
-    );
+    (|| {
+        emit_packet_event!(EVENTS, THREATINTEL_METRICS, THREATINTEL_METRIC_EVENTS_DROPPED,
+            src_addr, dst_addr, src_port, dst_port, protocol,
+            EVENT_TYPE_THREATINTEL, matched.action, matched.feed_id as u32, flags, vlan_id; tc _ctx);
+    })();
 
     if matched.action == THREATINTEL_ACTION_DROP {
         #[cfg(debug_assertions)]
@@ -368,49 +360,6 @@ fn apply_threatintel_action(
 #[inline(always)]
 fn increment_metric(index: u32) {
     increment_metric!(THREATINTEL_METRICS, index);
-}
-
-/// Emit a PacketEvent to the EVENTS RingBuf. Skips emission under
-/// backpressure (>75% full). If the buffer is full, increment the
-/// events_dropped metric — never block the hot path.
-#[inline(always)]
-fn emit_event(
-    ctx: &TcContext,
-    src_addr: &[u32; 4],
-    dst_addr: &[u32; 4],
-    src_port: u16,
-    dst_port: u16,
-    protocol: u8,
-    matched: &ThreatIntelValue,
-    flags: u8,
-    vlan_id: u16,
-) {
-    if ringbuf_has_backpressure() {
-        increment_metric(THREATINTEL_METRIC_EVENTS_DROPPED);
-        return;
-    }
-    if let Some(mut entry) = EVENTS.reserve::<PacketEvent>(0) {
-        let ptr = entry.as_mut_ptr();
-        unsafe {
-            (*ptr).timestamp_ns = bpf_ktime_get_boot_ns();
-            (*ptr).src_addr = *src_addr;
-            (*ptr).dst_addr = *dst_addr;
-            (*ptr).src_port = src_port;
-            (*ptr).dst_port = dst_port;
-            (*ptr).protocol = protocol;
-            (*ptr).event_type = EVENT_TYPE_THREATINTEL;
-            (*ptr).action = matched.action;
-            (*ptr).flags = flags;
-            (*ptr).rule_id = matched.feed_id as u32;
-            (*ptr).vlan_id = vlan_id;
-            (*ptr).cpu_id = bpf_get_smp_processor_id() as u16;
-            // Populate socket cookie for TC context (not available in XDP).
-            (*ptr).socket_cookie = bpf_get_socket_cookie(ctx.skb.skb as *mut _);
-        }
-        entry.submit(0);
-    } else {
-        increment_metric(THREATINTEL_METRIC_EVENTS_DROPPED);
-    }
 }
 
 #[panic_handler]

@@ -12,8 +12,8 @@ use aya_ebpf::{
 };
 use ebpf_helpers::net::{
     ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
-    PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, ipv6_mask_match, u16_from_be_bytes,
-    u32_from_be_bytes, u32x4_to_bytes,
+    PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, ipv6_mask_match, ones_complement_add,
+    prefix_to_mask, u16_from_be_bytes, u32_from_be_bytes, u32x4_to_bytes,
 };
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::increment_metric;
@@ -646,33 +646,6 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
 }
 
 // ── NPTv6 (RFC 6296) egress helpers ─────────────────────────────────
-
-/// Ones-complement addition of two u16 values (with carry fold).
-#[inline(always)]
-fn ones_complement_add(a: u16, b: u16) -> u16 {
-    let sum = a as u32 + b as u32;
-    let folded = (sum & 0xFFFF) + (sum >> 16);
-    folded as u16
-}
-
-/// Build an IPv6 prefix mask from `prefix_len` (0-128) as `[u32; 4]`.
-#[inline(always)]
-fn prefix_to_mask(prefix_len: u8) -> [u32; 4] {
-    let mut mask = [0u32; 4];
-    let mut remaining = prefix_len as u32;
-    let mut i = 0usize;
-    while i < 4 {
-        if remaining >= 32 {
-            mask[i] = 0xFFFF_FFFF;
-            remaining -= 32;
-        } else if remaining > 0 {
-            mask[i] = !((1u32 << (32 - remaining)) - 1);
-            remaining = 0;
-        }
-        i += 1;
-    }
-    mask
-}
 
 /// Try NPTv6 prefix translation on egress (src rewrite: internal -> external).
 /// Returns `true` if a rule matched and translation was applied.

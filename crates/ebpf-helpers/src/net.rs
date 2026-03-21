@@ -115,3 +115,34 @@ pub fn ipv6_mask_match(addr: &[u32; 4], match_addr: &[u32; 4], mask: &[u32; 4]) 
     }
     true
 }
+
+// ── NPTv6 helpers ─────────────────────────────────────────────────
+
+/// Ones' complement addition of two 16-bit values (RFC 1071).
+/// Used by NPTv6 prefix translation for checksum-neutral address mapping.
+#[inline(always)]
+pub fn ones_complement_add(a: u16, b: u16) -> u16 {
+    let sum = a as u32 + b as u32;
+    let folded = (sum & 0xFFFF) + (sum >> 16);
+    folded as u16
+}
+
+/// Build an IPv6 prefix mask from `prefix_len` (0-128) as `[u32; 4]`.
+/// Each u32 is in host byte order. Bounded loop (max 4 iterations).
+#[inline(always)]
+pub fn prefix_to_mask(prefix_len: u8) -> [u32; 4] {
+    let mut mask = [0u32; 4];
+    let mut remaining = prefix_len as u32;
+    let mut i = 0usize;
+    while i < 4 {
+        if remaining >= 32 {
+            mask[i] = 0xFFFF_FFFF;
+            remaining -= 32;
+        } else if remaining > 0 {
+            mask[i] = !((1u32 << (32 - remaining)) - 1);
+            remaining = 0;
+        }
+        i += 1;
+    }
+    mask
+}
