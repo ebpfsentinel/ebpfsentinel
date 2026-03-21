@@ -2307,8 +2307,11 @@ pub fn try_load_tc_conntrack(
     let ct_mgr = ConnTrackMapManager::new(loader.ebpf_mut())?;
     let ct_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "CT_METRICS").ok();
 
-    let reader = EventReader::new(loader.ebpf_mut())?;
-    tokio::spawn(async move { reader.run(event_tx).await });
+    // tc-conntrack has no EVENTS RingBuf (pure state tracking, no events).
+    // EventReader is optional — skip if the map doesn't exist.
+    if let Ok(reader) = EventReader::new(loader.ebpf_mut()) {
+        tokio::spawn(async move { reader.run(event_tx).await });
+    }
 
     Ok((loader, ct_mgr, ct_metrics_rdr))
 }

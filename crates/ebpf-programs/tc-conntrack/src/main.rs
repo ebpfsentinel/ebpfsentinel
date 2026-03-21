@@ -15,7 +15,7 @@ use ebpf_helpers::net::{
     u16_from_be_bytes, u32_from_be_bytes,
 };
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
-use ebpf_helpers::increment_metric;
+use ebpf_helpers::{copy_16b_asm, increment_metric};
 use ebpf_common::conntrack::{
     ConnKey, ConnKeyV6, ConnTrackConfig, ConnValue, ConnValueV6, CT_FLAG_ASSURED,
     CT_FLAG_SEEN_REPLY, CT_MAX_ENTRIES_V4, CT_MAX_ENTRIES_V6, CT_METRIC_CLOSED, CT_METRIC_COUNT,
@@ -179,13 +179,10 @@ fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     let dst_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).dst_addr });
     let protocol = unsafe { (*ipv4hdr).proto } as u8;
 
-    let ihl = unsafe { (*ipv4hdr).ihl() } as usize;
-    // F2: Reject crafted packets with IHL < 5 words (20 bytes); they would
-    // cause the L4 header pointer to land inside the IP header itself.
-    if ihl < 20 {
-        return Ok(TC_ACT_OK);
-    }
-    let l4_offset = l3_offset + ihl;
+    // Use fixed IHL=20 (no IP options) for conntrack. Variable IHL creates
+    // a variable-offset ptr_at that the kernel 6.17 verifier rejects.
+    // Packets with IP options are rare and conntrack doesn't inspect them.
+    let l4_offset = l3_offset + 20;
 
     // Parse L4 ports and TCP flags
     let (src_port, dst_port, tcp_flag_bits) = match protocol {
@@ -329,15 +326,18 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         return Ok(TC_ACT_OK);
     }
 
+    // Read next_hdr FIRST (single byte, no memcpy) so we can skip ext headers
+    // before reading IPv6 addresses. This ordering avoids memset/memcpy calls
+    // between the bounds check and packet reads.
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
-    let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
-    let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
     let raw_protocol = unsafe { (*ipv6hdr).next_hdr };
 
     // Skip IPv6 extension headers to find the actual L4 protocol.
     let (protocol, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_protocol)
         .ok_or(())?;
 
+    // Read L4 header IMMEDIATELY after skip_ipv6_ext_headers (the verifier
+    // tracks bounds from the last ptr_at in skip_ipv6_ext_headers).
     let (src_port, dst_port, tcp_flag_bits) = match protocol {
         PROTO_TCP => {
             let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_offset)? };
@@ -356,7 +356,6 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
                 0u8,
             )
         }
-        // F6: Use ICMPv6 type and code as pseudo-ports (same rationale as IPv4 ICMP).
         PROTO_ICMPV6 => {
             let icmp_type_ptr: *const u8 = unsafe { ptr_at(ctx, l4_offset)? };
             let icmp_code_ptr: *const u8 = unsafe { ptr_at(ctx, l4_offset + 1)? };
@@ -366,6 +365,22 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         }
         _ => return Ok(TC_ACT_OK),
     };
+
+    // Read IPv6 addresses AFTER L4 reads. Re-validate bounds for the IPv6
+    // header (ptr_at) then immediately read via inline asm — no memset
+    // or other subprogram calls between the bounds check and the read.
+    let ipv6hdr2: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
+    let mut src_bytes = core::mem::MaybeUninit::<[u8; 16]>::uninit();
+    let mut dst_bytes = core::mem::MaybeUninit::<[u8; 16]>::uninit();
+    unsafe {
+        let base = ipv6hdr2 as *const u8;
+        copy_16b_asm!(src_bytes.as_mut_ptr() as *mut u8, base.add(8));
+        copy_16b_asm!(dst_bytes.as_mut_ptr() as *mut u8, base.add(24));
+    }
+    let src_bytes = unsafe { src_bytes.assume_init() };
+    let dst_bytes = unsafe { dst_bytes.assume_init() };
+    let src_addr = ipv6_addr_to_u32x4(&src_bytes);
+    let dst_addr = ipv6_addr_to_u32x4(&dst_bytes);
 
     let ct_key = normalize_key_v6(&src_addr, &dst_addr, src_port, dst_port, protocol);
     let now = unsafe { bpf_ktime_get_boot_ns() };

@@ -388,7 +388,9 @@ fn try_nat_egress(ctx: &TcContext) -> Result<i32, ()> {
     }
 }
 
-#[inline(always)]
+// #[inline(never)] gives IPv4 its own stack frame, preventing the combined v4+v6
+// stack from exceeding 512 bytes.
+#[inline(never)]
 fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i32, ()> {
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });

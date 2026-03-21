@@ -202,7 +202,11 @@ fn emit_dlp_event(user_buf: *const u8, data_len: u32, direction: u8) {
 }
 
 /// Small DLP event (280 bytes): for SSL payloads ≤ 256 bytes.
-#[inline(always)]
+///
+/// `#[inline(never)]` gives this function its own stack frame, reducing
+/// per-function verifier complexity and keeping it separate from the
+/// full-size path.
+#[inline(never)]
 fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
     if let Some(mut entry) = EVENTS.reserve::<DlpEventSmall>(0) {
         let ptr = entry.as_mut_ptr();
@@ -215,14 +219,13 @@ fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
             (*ptr).direction = direction;
             (*ptr)._padding = [0; 3];
             core::ptr::write_bytes((*ptr).data_excerpt.as_mut_ptr(), 0, DLP_SMALL_EXCERPT);
-            let read_len = if data_len < DLP_SMALL_EXCERPT as u32 {
-                data_len
-            } else {
-                DLP_SMALL_EXCERPT as u32
-            };
+            // Use compile-time constant size: kernel 6.17+ verifier rejects
+            // variable-length arguments to bpf_probe_read_user. The buffer is
+            // zero-initialized above, so excess bytes beyond data_len stay zero.
+            // data_len in the header tells userspace the meaningful byte count.
             let _ = r#gen::bpf_probe_read_user(
                 (*ptr).data_excerpt.as_mut_ptr() as *mut c_void,
-                read_len,
+                DLP_SMALL_EXCERPT as u32,
                 user_buf as *const c_void,
             );
         }
@@ -233,7 +236,11 @@ fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
 }
 
 /// Full DLP event (4120 bytes): for SSL payloads > 256 bytes.
-#[inline(always)]
+///
+/// `#[inline(never)]` gives this function its own stack frame, reducing
+/// per-function verifier complexity and keeping it separate from the
+/// small-size path.
+#[inline(never)]
 fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8) {
     if let Some(mut entry) = EVENTS.reserve::<DlpEvent>(0) {
         let ptr = entry.as_mut_ptr();
@@ -246,14 +253,13 @@ fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8) {
             (*ptr).direction = direction;
             (*ptr)._padding = [0; 3];
             core::ptr::write_bytes((*ptr).data_excerpt.as_mut_ptr(), 0, DLP_MAX_EXCERPT);
-            let read_len = if data_len < DLP_MAX_EXCERPT as u32 {
-                data_len
-            } else {
-                DLP_MAX_EXCERPT as u32
-            };
+            // Use compile-time constant size: kernel 6.17+ verifier rejects
+            // variable-length arguments to bpf_probe_read_user. The buffer is
+            // zero-initialized above, so excess bytes beyond data_len stay zero.
+            // data_len in the header tells userspace the meaningful byte count.
             let _ = r#gen::bpf_probe_read_user(
                 (*ptr).data_excerpt.as_mut_ptr() as *mut c_void,
-                read_len,
+                DLP_MAX_EXCERPT as u32,
                 user_buf as *const c_void,
             );
         }

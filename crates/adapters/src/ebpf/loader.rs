@@ -204,6 +204,10 @@ impl EbpfLoader {
 
     /// Wire a tail-call: insert `target_fd` at `index` in the named
     /// `ProgramArray` map owned by this loader.
+    ///
+    /// Uses `map_mut` (borrow) instead of `take_map` (consume) so the same
+    /// ProgramArray can be wired multiple times (e.g. slot 0 → syncookie,
+    /// slot 1 → loadbalancer).
     pub fn set_tail_call_target(
         &mut self,
         map_name: &str,
@@ -212,7 +216,7 @@ impl EbpfLoader {
     ) -> Result<(), anyhow::Error> {
         let map = self
             .ebpf
-            .take_map(map_name)
+            .map_mut(map_name)
             .ok_or_else(|| anyhow::anyhow!("map '{map_name}' not found"))?;
         let mut prog_array = ProgramArray::try_from(map)?;
         prog_array.set(index, target_fd, 0)?;
