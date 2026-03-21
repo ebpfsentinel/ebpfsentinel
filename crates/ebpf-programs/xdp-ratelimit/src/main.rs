@@ -227,6 +227,70 @@ const METRIC_ERRORS: u32 = 2;
 const METRIC_EVENTS_DROPPED: u32 = 3;
 const METRIC_TOTAL_SEEN: u32 = 4;
 
+/// Read 6 bytes from a packet pointer into a stack array using BPF inline
+/// assembly. Uses 3x u16 loads to avoid stack alignment issues and prevent
+/// LLVM from outlining into a memcpy subprogram.
+macro_rules! read_mac_asm {
+    ($dst:expr, $src:expr) => {
+        core::arch::asm!(
+            "{tmp1} = *(u16 *)({src} + 0)",
+            "*(u16 *)({dst} + 0) = {tmp1}",
+            "{tmp2} = *(u16 *)({src} + 2)",
+            "*(u16 *)({dst} + 2) = {tmp2}",
+            "{tmp3} = *(u16 *)({src} + 4)",
+            "*(u16 *)({dst} + 4) = {tmp3}",
+            src = in(reg) $src,
+            dst = in(reg) $dst,
+            tmp1 = out(reg) _,
+            tmp2 = out(reg) _,
+            tmp3 = out(reg) _,
+            options(nostack, preserves_flags)
+        )
+    };
+}
+
+/// Write 6 bytes from a stack array to a packet pointer using BPF inline
+/// assembly. Uses 3x u16 stores to avoid LLVM memcpy outlining.
+macro_rules! write_mac_asm {
+    ($dst:expr, $src:expr) => {
+        core::arch::asm!(
+            "{tmp1} = *(u16 *)({src} + 0)",
+            "*(u16 *)({dst} + 0) = {tmp1}",
+            "{tmp2} = *(u16 *)({src} + 2)",
+            "*(u16 *)({dst} + 2) = {tmp2}",
+            "{tmp3} = *(u16 *)({src} + 4)",
+            "*(u16 *)({dst} + 4) = {tmp3}",
+            src = in(reg) $src,
+            dst = in(reg) $dst,
+            tmp1 = out(reg) _,
+            tmp2 = out(reg) _,
+            tmp3 = out(reg) _,
+            options(nostack, preserves_flags)
+        )
+    };
+}
+
+/// Copy 16 bytes (IPv6 address) via inline asm using 8x u16 loads/stores.
+macro_rules! copy_16b_asm {
+    ($dst:expr, $src:expr) => {
+        core::arch::asm!(
+            "{t1} = *(u16 *)({src} + 0)",  "*(u16 *)({dst} + 0) = {t1}",
+            "{t2} = *(u16 *)({src} + 2)",  "*(u16 *)({dst} + 2) = {t2}",
+            "{t1} = *(u16 *)({src} + 4)",  "*(u16 *)({dst} + 4) = {t1}",
+            "{t2} = *(u16 *)({src} + 6)",  "*(u16 *)({dst} + 6) = {t2}",
+            "{t1} = *(u16 *)({src} + 8)",  "*(u16 *)({dst} + 8) = {t1}",
+            "{t2} = *(u16 *)({src} + 10)", "*(u16 *)({dst} + 10) = {t2}",
+            "{t1} = *(u16 *)({src} + 12)", "*(u16 *)({dst} + 12) = {t1}",
+            "{t2} = *(u16 *)({src} + 14)", "*(u16 *)({dst} + 14) = {t2}",
+            src = in(reg) $src,
+            dst = in(reg) $dst,
+            t1 = out(reg) _,
+            t2 = out(reg) _,
+            options(nostack, preserves_flags)
+        )
+    };
+}
+
 /// Returns `true` if the EVENTS RingBuf has backpressure (>75% full).
 #[inline(always)]
 fn ringbuf_has_backpressure() -> bool {
@@ -738,16 +802,12 @@ fn check_syn_flood_v4(
         vlan_id,
     );
 
-    match send_syn_ack_cookie_v4(ctx, l3_offset, l4_offset) {
-        Ok(action) => {
-            increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_SENT);
-            Some(action)
-        }
-        Err(()) => {
-            increment_ddos_metric(DDOS_METRIC_SYN_FLOOD_DROPS);
-            Some(xdp_action::XDP_DROP)
-        }
-    }
+    // SYN cookie forging (XDP_TX) disabled: kernel 6.17 combined stack
+    // limit (512 bytes total) is exceeded by main body (424) + syncookie
+    // subprogram (256+). Falls back to DROP. Re-enable when syncookie
+    // is split into a tail-called program with its own stack budget.
+    increment_ddos_metric(DDOS_METRIC_SYN_FLOOD_DROPS);
+    Some(xdp_action::XDP_DROP)
 }
 
 /// Check if a TCP packet is a SYN flood candidate (IPv6).
@@ -800,16 +860,9 @@ fn check_syn_flood_v6(
         vlan_id,
     );
 
-    match send_syn_ack_cookie_v6(ctx, l3_offset, l4_offset) {
-        Ok(action) => {
-            increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_SENT);
-            Some(action)
-        }
-        Err(()) => {
-            increment_ddos_metric(DDOS_METRIC_SYN_FLOOD_DROPS);
-            Some(xdp_action::XDP_DROP)
-        }
-    }
+    // SYN cookie forging disabled (same stack limit as v4).
+    increment_ddos_metric(DDOS_METRIC_SYN_FLOOD_DROPS);
+    Some(xdp_action::XDP_DROP)
 }
 
 /// Check if the SYN rate for a source exceeds the configured threshold.
@@ -1443,8 +1496,21 @@ fn validate_syncookie(
 }
 
 /// Parse TCP MSS option from SYN packet and return the MSS table index (0-7).
+///
+/// On kernel 6.17+, the BPF verifier rejects variable-offset packet access
+/// in the TCP options parsing loop (`pkt + var_off` with r=0). As a
+/// workaround, return the default MSS index (1460 bytes) which is correct
+/// for the vast majority of connections.
+// TODO: re-enable once the verifier supports variable-offset pkt access
 #[inline(always)]
-fn parse_mss_index(ctx: &XdpContext, l4_offset: usize) -> u8 {
+fn parse_mss_index(_ctx: &XdpContext, _l4_offset: usize) -> u8 {
+    4 // 1460 bytes — default MSS
+}
+
+/// Original TCP options parser (disabled: kernel 6.17 variable-offset verifier issue).
+#[allow(dead_code)]
+#[inline(always)]
+fn parse_mss_index_full(ctx: &XdpContext, l4_offset: usize) -> u8 {
     // Read data offset byte to find options length
     let doff_ptr: *const u8 = match unsafe { ptr_at::<u8>(ctx, l4_offset + 12) } {
         Ok(p) => p,
@@ -1542,33 +1608,43 @@ fn send_syn_ack_cookie_v4(
     ctx: &XdpContext,
     l3_off: usize,
     l4_off: usize,
+    mss_idx: u8,
 ) -> Result<u32, ()> {
-    // 1. Read incoming packet fields BEFORE modifying anything
+    // Read MACs FIRST — immediately after ptr_at so the verifier sees
+    // the bounds proof and the packet access in the same register state.
+    // Reading other headers first causes LLVM to spill and reload ctx.data,
+    // which loses the bounds proof (R2=pkt(r=0) instead of r=14).
+    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
+    let mut in_src_mac = core::mem::MaybeUninit::<[u8; 6]>::uninit();
+    let mut in_dst_mac = core::mem::MaybeUninit::<[u8; 6]>::uninit();
+    unsafe {
+        let p = ethhdr as *const u8;
+        read_mac_asm!(in_dst_mac.as_mut_ptr() as *mut u8, p);
+        read_mac_asm!(in_src_mac.as_mut_ptr() as *mut u8, p.add(6));
+    }
+    let in_src_mac = unsafe { in_src_mac.assume_init() };
+    let in_dst_mac = unsafe { in_dst_mac.assume_init() };
+
+    // Now read IP and TCP headers
     let iphdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_off)? };
     let src_ip = u32_from_be_bytes(unsafe { (*iphdr).src_addr });
     let dst_ip = u32_from_be_bytes(unsafe { (*iphdr).dst_addr });
 
     let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off)? };
     let in_seq = u32::from_be(unsafe { (*tcphdr).seq_num });
-    let in_src_port = unsafe { (*tcphdr).src_port }; // network byte order
+    let in_src_port = unsafe { (*tcphdr).src_port };
     let in_dst_port = unsafe { (*tcphdr).dst_port };
     let src_port = u16::from_be(in_src_port);
     let dst_port = u16::from_be(in_dst_port);
 
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let in_src_mac = unsafe { (*ethhdr).src_addr };
-    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
-
-    // 2. Parse MSS from incoming SYN
-    let mss_idx = parse_mss_index(ctx, l4_off);
-
-    // 3. Get secret
+    // 2. Get secret (mss_idx passed from caller to avoid variable-offset
+    // packet access in this subprogram)
     let secret = match SYNCOOKIE_SECRET.get(0) {
         Some(s) => s,
         None => return Err(()),
     };
 
-    // 4. Compute cookie
+    // 3. Compute cookie
     let cookie = make_syncookie(src_ip, dst_ip, src_port, dst_port, mss_idx, &secret.key);
 
     // 5. Truncate to Eth + IP(IHL*4) + TCP(24 = 20 base + 4 MSS option)
@@ -1584,11 +1660,12 @@ fn send_syn_ack_cookie_v4(
     }
 
     // 6. Re-read pointers (all invalidated by adjust_tail)
-    // Swap Ethernet MACs
+    // Swap Ethernet MACs via inline asm to avoid memcpy subprogram
     let eth_out: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
     unsafe {
-        (*eth_out).dst_addr = in_src_mac;
-        (*eth_out).src_addr = in_dst_mac;
+        let p = eth_out as *mut u8;
+        write_mac_asm!(p, in_src_mac.as_ptr());          // dst_addr = in_src_mac
+        write_mac_asm!(p.add(6), in_dst_mac.as_ptr());   // src_addr = in_dst_mac
     }
 
     // 7. Swap IP addresses, update header
@@ -1598,8 +1675,13 @@ fn send_syn_ack_cookie_v4(
         let tmp = (*iphdr_out).src_addr;
         (*iphdr_out).src_addr = (*iphdr_out).dst_addr;
         (*iphdr_out).dst_addr = tmp;
-        // ihl() returns IHL in bytes already
-        ip_hdr_len = (*iphdr_out).ihl() as usize;
+        // Force IHL=5 (20 bytes, no IP options) — we're building a new
+        // SYN+ACK, not forwarding the original. Variable IHL causes the
+        // verifier to explore paths beyond the proved bounds (r=34).
+        ip_hdr_len = 20;
+        // Set version=4, IHL=5 (0x45)
+        let ver_ihl_ptr = iphdr_out as *mut u8;
+        *ver_ihl_ptr = 0x45;
         // Set total_len = IP header + TCP (24)
         (*iphdr_out).set_tot_len((ip_hdr_len + tcp_len) as u16);
         (*iphdr_out).ttl = 64;
@@ -1668,13 +1750,33 @@ fn send_syn_ack_cookie_v6(
     ctx: &XdpContext,
     l3_off: usize,
     l4_off: usize,
+    mss_idx: u8,
 ) -> Result<u32, ()> {
-    // 1. Read incoming packet fields
-    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_off)? };
-    let in_src_addr: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
-    let in_dst_addr: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
+    // Read MACs FIRST — bounds proof must be used immediately before
+    // LLVM spills the register and reloads ctx.data (losing r=14 → r=0).
+    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
+    let mut in_src_mac = core::mem::MaybeUninit::<[u8; 6]>::uninit();
+    let mut in_dst_mac = core::mem::MaybeUninit::<[u8; 6]>::uninit();
+    unsafe {
+        let p = ethhdr as *const u8;
+        read_mac_asm!(in_dst_mac.as_mut_ptr() as *mut u8, p);
+        read_mac_asm!(in_src_mac.as_mut_ptr() as *mut u8, p.add(6));
+    }
+    let in_src_mac = unsafe { in_src_mac.assume_init() };
+    let in_dst_mac = unsafe { in_dst_mac.assume_init() };
 
-    // For cookie hashing, XOR-fold IPv6 addresses to u32
+    // Read IPv6 header — inline asm reads immediately after bounds check
+    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_off)? };
+    let mut in_src_addr = core::mem::MaybeUninit::<[u8; 16]>::uninit();
+    let mut in_dst_addr = core::mem::MaybeUninit::<[u8; 16]>::uninit();
+    unsafe {
+        let base = ipv6hdr as *const u8;
+        copy_16b_asm!(in_src_addr.as_mut_ptr() as *mut u8, base.add(8));
+        copy_16b_asm!(in_dst_addr.as_mut_ptr() as *mut u8, base.add(24));
+    }
+    let in_src_addr = unsafe { in_src_addr.assume_init() };
+    let in_dst_addr = unsafe { in_dst_addr.assume_init() };
+
     let src_u32 = ipv6_addr_to_u32x4(&in_src_addr);
     let src_ip_hash = src_u32[0] ^ src_u32[1] ^ src_u32[2] ^ src_u32[3];
     let dst_u32 = ipv6_addr_to_u32x4(&in_dst_addr);
@@ -1687,14 +1789,7 @@ fn send_syn_ack_cookie_v6(
     let src_port = u16::from_be(in_src_port);
     let dst_port = u16::from_be(in_dst_port);
 
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let in_src_mac = unsafe { (*ethhdr).src_addr };
-    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
-
-    // 2. Parse MSS
-    let mss_idx = parse_mss_index(ctx, l4_off);
-
-    // 3. Get secret
+    // 2. Get secret (mss_idx passed from caller)
     let secret = match SYNCOOKIE_SECRET.get(0) {
         Some(s) => s,
         None => return Err(()),
@@ -1722,11 +1817,12 @@ fn send_syn_ack_cookie_v6(
         }
     }
 
-    // 6. Re-read pointers
+    // 6. Re-read pointers — swap MACs via inline asm
     let eth_out: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
     unsafe {
-        (*eth_out).dst_addr = in_src_mac;
-        (*eth_out).src_addr = in_dst_mac;
+        let p = eth_out as *mut u8;
+        write_mac_asm!(p, in_src_mac.as_ptr());          // dst_addr = in_src_mac
+        write_mac_asm!(p.add(6), in_dst_mac.as_ptr());   // src_addr = in_dst_mac
     }
 
     // 7. Build IPv6 header
@@ -1738,9 +1834,10 @@ fn send_syn_ack_cookie_v6(
         (*ip6_out)._payload_len = (tcp_len as u16).to_be();
         (*ip6_out).next_hdr = PROTO_TCP;
         (*ip6_out).hop_limit = 64;
-        // Swap src/dst addresses
-        (*ip6_out).src_addr = in_dst_addr;
-        (*ip6_out).dst_addr = in_src_addr;
+        // Swap src/dst addresses via inline asm
+        let base = ip6_out as *mut u8;
+        copy_16b_asm!(base.add(8), in_dst_addr.as_ptr());   // src_addr = in_dst
+        copy_16b_asm!(base.add(24), in_src_addr.as_ptr());  // dst_addr = in_src
     }
 
     // 8. Build TCP SYN+ACK with MSS option
@@ -1794,7 +1891,7 @@ fn send_syn_ack_cookie_v6(
 
 /// Check if an incoming ACK completes a SYN cookie handshake (IPv4).
 /// Returns `Some(XDP_PASS)` if valid, `None` if not a cookie ACK.
-#[inline(never)]
+#[inline(always)]
 fn validate_syncookie_ack_v4(
     ctx: &XdpContext,
     l3_off: usize,
@@ -1830,7 +1927,7 @@ fn validate_syncookie_ack_v4(
 
 /// Check if an incoming ACK completes a SYN cookie handshake (IPv6).
 /// Returns `Some(XDP_PASS)` if valid, `None` if not a cookie ACK.
-#[inline(never)]
+#[inline(always)]
 fn validate_syncookie_ack_v6(
     ctx: &XdpContext,
     l3_off: usize,
@@ -1895,9 +1992,13 @@ unsafe fn compute_ipv4_csum(hdr: *const u8, len: usize) -> u16 {
             i += 2;
         }
         // Fold 32-bit sum into 16 bits.
-        while (sum >> 16) != 0 {
-            sum = (sum & 0xFFFF) + (sum >> 16);
-        }
+        // Fixed 3-iteration fold (no while loop — the verifier can't prove
+        // loop termination, causing 1M+ instruction state explosion).
+        // 3 iterations is mathematically sufficient: max sum after adding
+        // all u16 words fits in 32 bits, each fold halves the overflow.
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        sum = (sum & 0xFFFF) + (sum >> 16);
         !(sum as u16)
     }
 }
@@ -1936,9 +2037,13 @@ unsafe fn compute_tcp_csum_v4(
             sum += (*tcp_hdr.add(i) as u32) << 8;
         }
 
-        while (sum >> 16) != 0 {
-            sum = (sum & 0xFFFF) + (sum >> 16);
-        }
+        // Fixed 3-iteration fold (no while loop — the verifier can't prove
+        // loop termination, causing 1M+ instruction state explosion).
+        // 3 iterations is mathematically sufficient: max sum after adding
+        // all u16 words fits in 32 bits, each fold halves the overflow.
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        sum = (sum & 0xFFFF) + (sum >> 16);
         !(sum as u16)
     }
 }
@@ -1981,9 +2086,13 @@ unsafe fn compute_tcp_csum_v6(
             sum += (*tcp_hdr.add(i) as u32) << 8;
         }
 
-        while (sum >> 16) != 0 {
-            sum = (sum & 0xFFFF) + (sum >> 16);
-        }
+        // Fixed 3-iteration fold (no while loop — the verifier can't prove
+        // loop termination, causing 1M+ instruction state explosion).
+        // 3 iterations is mathematically sufficient: max sum after adding
+        // all u16 words fits in 32 bits, each fold halves the overflow.
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        sum = (sum & 0xFFFF) + (sum >> 16);
         !(sum as u16)
     }
 }
@@ -2066,6 +2175,12 @@ fn check_token_bucket(key: &RateLimitKey, config: &RateLimitConfig, now: u64) ->
 #[inline(always)]
 fn token_bucket_check(bucket: &mut RateLimitValue, config: &RateLimitConfig, now: u64) -> bool {
     let elapsed = now.saturating_sub(bucket.last_refill_ns);
+    // Guard against divide-by-zero: Rust emits panic_const_div_by_zero
+    // which the BPF linker places at address 0 (overlapping the entry
+    // wrapper), causing the verifier to follow a recursive call path.
+    if config.ns_per_token == 0 {
+        return false;
+    }
     let new_tokens = elapsed / config.ns_per_token;
 
     if new_tokens > 0 {

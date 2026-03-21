@@ -250,6 +250,30 @@ fn ringbuf_has_backpressure() -> bool {
     ringbuf_has_backpressure!(EVENTS)
 }
 
+/// Read 6 bytes from a packet pointer into a stack array using BPF inline
+/// assembly. Uses 3x u16 loads/stores (not u32+u16) because the BPF
+/// verifier enforces stack alignment: [u8; 6] arrays may land at offsets
+/// that are only 2-byte aligned, making u32 stores fail with
+/// "misaligned stack access".
+macro_rules! read_mac_asm {
+    ($dst:expr, $src:expr) => {
+        core::arch::asm!(
+            "{tmp1} = *(u16 *)({src} + 0)",
+            "*(u16 *)({dst} + 0) = {tmp1}",
+            "{tmp2} = *(u16 *)({src} + 2)",
+            "*(u16 *)({dst} + 2) = {tmp2}",
+            "{tmp3} = *(u16 *)({src} + 4)",
+            "*(u16 *)({dst} + 4) = {tmp3}",
+            src = in(reg) $src,
+            dst = in(reg) $dst,
+            tmp1 = out(reg) _,
+            tmp2 = out(reg) _,
+            tmp3 = out(reg) _,
+            options(nostack, preserves_flags)
+        )
+    };
+}
+
 // ── Interface group helpers ──────────────────────────────────────────
 
 /// Get the interface group membership for the current packet's ingress interface.
@@ -656,10 +680,16 @@ fn process_firewall_v4(
     vlan_id: u16,
     flags: u8,
 ) -> Result<u32, ()> {
-    // Extract Ethernet MAC addresses (always available, parsed before L3).
+    // Read MACs via inline asm (u32+u16 loads). LLVM cannot outline these
+    // into memcpy, and the bounds proof from ptr_at stays in this frame.
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let src_mac = unsafe { (*ethhdr).src_addr };
-    let dst_mac = unsafe { (*ethhdr).dst_addr };
+    let mut dst_mac = [0u8; 6];
+    let mut src_mac = [0u8; 6];
+    unsafe {
+        let p = ethhdr as *const u8;
+        read_mac_asm!(dst_mac.as_mut_ptr(), p);
+        read_mac_asm!(src_mac.as_mut_ptr(), p.add(6));
+    }
 
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });
@@ -816,14 +846,16 @@ fn process_firewall_v4(
         icmp_type,
         icmp_code,
         dscp,
-        src_mac,
-        dst_mac,
+        src_mac: [0; 6],
+        dst_mac: [0; 6],
         matched_action: -1,
         matched_rule_idx: -1,
         matched_max_states: 0,
         iface_groups,
         tenant_id,
     };
+    scan_ctx.src_mac = src_mac;
+    scan_ctx.dst_mac = dst_mac;
     unsafe {
         bpf_loop(
             MAX_FIREWALL_RULES,
@@ -1162,10 +1194,14 @@ fn process_firewall_v6(
     vlan_id: u16,
     flags: u8,
 ) -> Result<u32, ()> {
-    // Extract Ethernet MAC addresses (always available, parsed before L3).
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let src_mac = unsafe { (*ethhdr).src_addr };
-    let dst_mac = unsafe { (*ethhdr).dst_addr };
+    let mut dst_mac = [0u8; 6];
+    let mut src_mac = [0u8; 6];
+    unsafe {
+        let p = ethhdr as *const u8;
+        read_mac_asm!(dst_mac.as_mut_ptr(), p);
+        read_mac_asm!(src_mac.as_mut_ptr(), p.add(6));
+    }
 
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
@@ -1280,14 +1316,16 @@ fn process_firewall_v6(
         icmp_type,
         icmp_code,
         dscp,
-        src_mac,
-        dst_mac,
+        src_mac: [0; 6],
+        dst_mac: [0; 6],
         matched_action: -1,
         matched_rule_idx: -1,
         matched_max_states: 0,
         iface_groups,
         tenant_id,
     };
+    scan_ctx.src_mac = src_mac;
+    scan_ctx.dst_mac = dst_mac;
     unsafe {
         bpf_loop(
             MAX_FIREWALL_RULES,
@@ -1458,20 +1496,12 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
             Ok(xdp_action::XDP_DROP)
         }
         ACTION_REJECT => {
+            // REJECT disabled: kernel 6.17 verifier rejects packet writes
+            // in subprograms (memcpy with pkt pointer). Falls back to DROP.
+            // Re-enable when aya supports bpf_dynptr_from_xdp kfuncs.
             emit_event(ACTION_REJECT);
-            increment_metric(METRIC_REJECTED);
-            let pkt = match PKT_CTX.get_ptr(0) {
-                Some(p) => p,
-                None => return Ok(xdp_action::XDP_DROP),
-            };
-            let protocol = unsafe { (*pkt).protocol };
-            let is_ipv6 = unsafe { ((*pkt).flags & FLAG_IPV6) != 0 };
-            let l3_off = unsafe { (*pkt).l3_offset as usize } & 0x3F;
-            let l4_off = unsafe { (*pkt).l4_offset as usize } & 0x7F;
-            match send_reject(ctx, protocol, is_ipv6, l3_off, l4_off) {
-                Ok(xdp_act) => Ok(xdp_act),
-                Err(()) => Ok(xdp_action::XDP_DROP),
-            }
+            increment_metric(METRIC_DROPPED);
+            Ok(xdp_action::XDP_DROP)
         }
         ACTION_LOG => {
             emit_event(ACTION_LOG);
