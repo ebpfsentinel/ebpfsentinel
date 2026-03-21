@@ -2232,6 +2232,15 @@ pub fn try_load_tc_dns(
 }
 
 /// Load the uprobe DLP program: attach uprobes to SSL functions, start DLP event reader.
+/// Known SSL/TLS library candidates for uprobe attachment.
+/// Checked in order: OpenSSL 3, OpenSSL 1.1, generic libssl, BoringSSL.
+const SSL_LIBRARY_CANDIDATES: &[&str] = &[
+    "libssl.so.3",     // OpenSSL 3.x (Debian 12+, Ubuntu 22.04+, Fedora 36+)
+    "libssl.so.1.1",   // OpenSSL 1.1.x (Debian 11, Ubuntu 20.04, CentOS 8)
+    "libssl.so",       // Generic symlink (some distros)
+    "libboringssl.so", // BoringSSL (Google services, Envoy proxy)
+];
+
 pub fn try_load_uprobe_dlp(
     ebpf_dir: &str,
     _config: &AgentConfig,
@@ -2241,19 +2250,82 @@ pub fn try_load_uprobe_dlp(
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
-    // Default SSL library target (OpenSSL)
-    let ssl_target = "libssl.so.3";
+    // Probe for a usable SSL library on the system (full path needed for aya).
+    let ssl_path = find_ssl_library_path();
+    let ssl_path = match ssl_path {
+        Some(path) => {
+            info!(library = %path, "SSL library found for DLP uprobe");
+            path
+        }
+        None => {
+            anyhow::bail!(
+                "no SSL library found on system (tried: {}). \
+                 DLP uprobe requires OpenSSL or BoringSSL. \
+                 Install libssl-dev or equivalent package.",
+                SSL_LIBRARY_CANDIDATES.join(", ")
+            );
+        }
+    };
 
-    loader.attach_uprobe("ssl_write", "SSL_write", ssl_target, false)?;
-    loader.attach_uprobe("ssl_read_entry", "SSL_read", ssl_target, false)?;
-    loader.attach_uprobe("ssl_read_ret", "SSL_read", ssl_target, true)?;
+    loader.attach_uprobe("ssl_write", "SSL_write", &ssl_path, false)?;
+    loader.attach_uprobe("ssl_read_entry", "SSL_read", &ssl_path, false)?;
+    loader.attach_uprobe("ssl_read_ret", "SSL_read", &ssl_path, true)?;
 
     let dlp_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "DLP_METRICS").ok();
 
     let reader = DlpEventReader::new(loader.ebpf_mut())?;
     tokio::spawn(async move { reader.run(event_tx).await });
 
+    info!(library = %ssl_path, "uprobe-dlp attached");
     Ok((loader, dlp_metrics_rdr))
+}
+
+/// Search for a usable SSL/TLS shared library on the system.
+///
+/// Parses `ldconfig -p` to extract the full path for each candidate,
+/// then falls back to common library directories. Returns the absolute
+/// path to the first library found, which aya needs for uprobe attach.
+fn find_ssl_library_path() -> Option<String> {
+    use std::process::Command;
+
+    // Try ldconfig -p first (most reliable — gives full paths)
+    if let Ok(output) = Command::new("ldconfig").arg("-p").output() {
+        let cache = String::from_utf8_lossy(&output.stdout);
+        for candidate in SSL_LIBRARY_CANDIDATES {
+            // ldconfig format: "libssl.so.3 (libc6,x86-64) => /lib/x86_64-linux-gnu/libssl.so.3"
+            for line in cache.lines() {
+                if line.contains(candidate) {
+                    if let Some(path) = line.split("=> ").nth(1) {
+                        let path = path.trim();
+                        if std::path::Path::new(path).exists() {
+                            return Some(path.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: check common paths directly
+    let search_dirs = [
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib/aarch64-linux-gnu",
+        "/usr/lib64",
+        "/usr/lib",
+        "/lib/x86_64-linux-gnu",
+        "/lib64",
+        "/lib",
+    ];
+    for candidate in SSL_LIBRARY_CANDIDATES {
+        for dir in &search_dirs {
+            let path = format!("{dir}/{candidate}");
+            if std::path::Path::new(&path).exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    None
 }
 
 /// Build `ConfigFlags` from the agent config for eBPF programs.
