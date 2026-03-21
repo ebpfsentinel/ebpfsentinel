@@ -952,6 +952,21 @@ pub async fn run(
         false
     };
 
+    // Wire tail-call: firewall → reject (slot 1). Best-effort: if the reject
+    // program fails to load, REJECT rules fall back to DROP silently (the
+    // ProgramArray slot stays empty and tail_call is a no-op).
+    if let Some(ref mut fw) = fw_loader {
+        match try_load_xdp_firewall_reject(&ebpf_dir, fw) {
+            Ok(reject_loader) => {
+                ebpf_state.add_loader(reject_loader);
+                info!("XDP tail-call: firewall → reject wired (slot 1)");
+            }
+            Err(e) => {
+                warn!("xdp-firewall-reject load failed (REJECT falls back to DROP): {e}");
+            }
+        }
+    }
+
     // Wire LpmCoordinator from xdp-firewall to alias, ddos, ips services (take LPM maps BEFORE others)
     if geoip_adapter.is_some()
         && let Some(ref mut loader) = fw_loader
@@ -1840,6 +1855,30 @@ pub fn try_load_xdp_firewall(
     tokio::spawn(async move { reader.run(event_tx).await });
 
     Ok((loader, map_manager, metrics_rdr))
+}
+
+/// Load the xdp-firewall-reject program and wire it as a tail-call target.
+///
+/// The reject program is loaded with the same pin path so that `PKT_CTX` and
+/// `FIREWALL_METRICS` maps are shared with xdp-firewall. It is loaded but NOT
+/// attached to any interface — it is invoked only via tail-call from
+/// xdp-firewall (ProgramArray slot 1).
+pub fn try_load_xdp_firewall_reject(
+    ebpf_dir: &str,
+    fw_loader: &mut EbpfLoader,
+) -> anyhow::Result<EbpfLoader> {
+    let program_bytes = read_ebpf_program(ebpf_dir, "xdp-firewall-reject")?;
+    let mut reject_loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+
+    // Load the XDP program (verifier check) but don't attach to an interface.
+    reject_loader.load_xdp_program("xdp_firewall_reject")?;
+
+    // Wire into firewall's ProgramArray at slot 1.
+    let reject_fd = reject_loader.xdp_program_fd("xdp_firewall_reject")?;
+    fw_loader.set_tail_call_target("XDP_PROG_ARRAY", 1, &reject_fd)?;
+
+    Ok(reject_loader)
 }
 
 /// Load result for xdp-ratelimit: loader, map manager, LPM manager, metrics readers.

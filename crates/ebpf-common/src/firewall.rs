@@ -32,6 +32,35 @@ pub const FIREWALL_METRIC_REJECTED: u32 = 5;
 /// Total number of firewall metric slots.
 pub const FIREWALL_METRIC_COUNT: u32 = 6;
 
+// ── Per-packet context (shared between xdp-firewall and xdp-firewall-reject) ──
+
+/// Per-packet context stored in a `PerCpuArray` map to keep addresses and
+/// metadata off the 512-byte BPF stack. Populated once per packet by
+/// `xdp-firewall`, consumed by `xdp-firewall` (events, actions) and
+/// `xdp-firewall-reject` (TCP RST / ICMP Unreachable forging via tail call).
+/// Shared between programs via BPF filesystem pinning.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PacketCtx {
+    pub src_addr: [u32; 4],
+    pub dst_addr: [u32; 4],
+    /// Raw IPv6 source bytes (network order) for LPM trie lookup.
+    /// Unused in the IPv4 path.
+    pub src_bytes_v6: [u8; 16],
+    /// Raw IPv6 destination bytes (network order) for LPM trie lookup.
+    /// Unused in the IPv4 path.
+    pub dst_bytes_v6: [u8; 16],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub protocol: u8,
+    pub flags: u8,
+    pub vlan_id: u16,
+    /// Byte offset of L3 header from start of packet (for reject).
+    pub l3_offset: u16,
+    /// Byte offset of L4 header from start of packet (for reject).
+    pub l4_offset: u16,
+}
+
 /// Maximum LPM Trie entries per map (4 maps: src/dst × v4/v6).
 ///
 /// A single country (e.g. CN ≈ 8 000 CIDRs, US ≈ 70 000) may require tens

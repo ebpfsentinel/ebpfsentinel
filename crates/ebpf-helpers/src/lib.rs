@@ -18,6 +18,8 @@
 #![no_std]
 #![cfg_attr(target_arch = "bpf", feature(asm_experimental_arch))]
 
+pub mod asm;
+pub mod checksum;
 pub mod metrics;
 pub mod net;
 pub mod ringbuf;

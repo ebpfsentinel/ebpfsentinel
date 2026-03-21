@@ -7,7 +7,6 @@ use aya_ebpf::{
     cty::c_void,
     helpers::{
         bpf_get_smp_processor_id, bpf_ktime_get_boot_ns, bpf_loop, bpf_xdp_adjust_meta,
-        bpf_xdp_adjust_tail,
     },
     macros::{map, xdp},
     maps::{
@@ -35,7 +34,7 @@ use ebpf_common::{
         MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MATCH_SRC_SET, MATCH2_DSCP, MATCH2_DST_MAC,
         MATCH2_ICMP_CODE, MATCH2_ICMP_TYPE, MATCH2_NEGATE_DST, MATCH2_NEGATE_SRC, MATCH2_SRC_MAC,
         MATCH2_TCP_FLAGS, MAX_FIREWALL_RULES, MAX_FW_HASH_5TUPLE, MAX_FW_HASH_PORT,
-        MAX_IPSET_ENTRIES_V4, MAX_LPM_RULES,
+        MAX_IPSET_ENTRIES_V4, MAX_LPM_RULES, PacketCtx,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
@@ -44,8 +43,8 @@ use ebpf_helpers::net::{
     PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes,
     u32_from_be_bytes,
 };
-use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
-use ebpf_helpers::{barrier, increment_metric, ringbuf_has_backpressure};
+use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::{copy_mac_asm, increment_metric, ringbuf_has_backpressure};
 use network_types::{
     eth::EthHdr,
     ip::{IpProto, Ipv4Hdr},
@@ -151,6 +150,12 @@ static XDP_PROG_ARRAY: ProgramArray = ProgramArray::with_max_entries(4, 0);
 
 /// Index of the ratelimit program in `XDP_PROG_ARRAY`.
 const PROG_IDX_RATELIMIT: u32 = 0;
+/// Index of the reject program in `XDP_PROG_ARRAY`.
+const PROG_IDX_REJECT: u32 = 1;
+
+/// Sentinel value returned by `apply_action` to signal the entry point
+/// to tail-call into `xdp-firewall-reject`. Not a real XDP action.
+const XDP_ACTION_REJECT: u32 = 0xFF;
 
 /// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
 #[map]
@@ -250,29 +255,6 @@ fn ringbuf_has_backpressure() -> bool {
     ringbuf_has_backpressure!(EVENTS)
 }
 
-/// Read 6 bytes from a packet pointer into a stack array using BPF inline
-/// assembly. Uses 3x u16 loads/stores (not u32+u16) because the BPF
-/// verifier enforces stack alignment: [u8; 6] arrays may land at offsets
-/// that are only 2-byte aligned, making u32 stores fail with
-/// "misaligned stack access".
-macro_rules! read_mac_asm {
-    ($dst:expr, $src:expr) => {
-        core::arch::asm!(
-            "{tmp1} = *(u16 *)({src} + 0)",
-            "*(u16 *)({dst} + 0) = {tmp1}",
-            "{tmp2} = *(u16 *)({src} + 2)",
-            "*(u16 *)({dst} + 2) = {tmp2}",
-            "{tmp3} = *(u16 *)({src} + 4)",
-            "*(u16 *)({dst} + 4) = {tmp3}",
-            src = in(reg) $src,
-            dst = in(reg) $dst,
-            tmp1 = out(reg) _,
-            tmp2 = out(reg) _,
-            tmp3 = out(reg) _,
-            options(nostack, preserves_flags)
-        )
-    };
-}
 
 // ── Interface group helpers ──────────────────────────────────────────
 
@@ -468,28 +450,7 @@ struct RuleScanCtxV6 {
     tenant_id: u32,
 }
 
-/// Per-packet context stored in a `PerCpuArray` to keep addresses and
-/// metadata off the 512-byte BPF stack. Populated once per packet,
-/// consumed by `apply_action`, `apply_default_policy`, and `emit_event`.
-#[repr(C)]
-struct PacketCtx {
-    src_addr: [u32; 4],
-    dst_addr: [u32; 4],
-    /// Raw IPv6 source bytes (network order) for LPM trie lookup.
-    /// Unused in the IPv4 path.
-    src_bytes_v6: [u8; 16],
-    /// Raw IPv6 destination bytes (network order) for LPM trie lookup.
-    dst_bytes_v6: [u8; 16],
-    src_port: u16,
-    dst_port: u16,
-    protocol: u8,
-    flags: u8,
-    vlan_id: u16,
-    /// Byte offset of L3 header from start of packet (for reject).
-    l3_offset: u16,
-    /// Byte offset of L4 header from start of packet (for reject).
-    l4_offset: u16,
-}
+// PacketCtx imported from ebpf_common::firewall (shared with xdp-firewall-reject).
 
 // ── bpf_loop callbacks ──────────────────────────────────────────────
 
@@ -591,9 +552,18 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
             xdp_action::XDP_PASS
         }
     };
-    // tail_call must happen in the XDP entry point (not subprogs) to
+    // Tail calls must happen in the XDP entry point (not subprogs) to
     // satisfy kernel 6.17+ verifier: "tail_call is only allowed in
     // functions that return 'int'".
+    if action == XDP_ACTION_REJECT {
+        // Reject via tail-call to xdp-firewall-reject (slot 1).
+        // PKT_CTX is already populated by process_firewall_v4/v6.
+        // Falls back to DROP if the reject program is not loaded.
+        unsafe {
+            let _ = XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_REJECT);
+        }
+        return xdp_action::XDP_DROP;
+    }
     if action == xdp_action::XDP_PASS {
         unsafe {
             let _ = XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_RATELIMIT);
@@ -687,8 +657,8 @@ fn process_firewall_v4(
     let mut src_mac = [0u8; 6];
     unsafe {
         let p = ethhdr as *const u8;
-        read_mac_asm!(dst_mac.as_mut_ptr(), p);
-        read_mac_asm!(src_mac.as_mut_ptr(), p.add(6));
+        copy_mac_asm!(dst_mac.as_mut_ptr(), p);
+        copy_mac_asm!(src_mac.as_mut_ptr(), p.add(6));
     }
 
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
@@ -1199,8 +1169,8 @@ fn process_firewall_v6(
     let mut src_mac = [0u8; 6];
     unsafe {
         let p = ethhdr as *const u8;
-        read_mac_asm!(dst_mac.as_mut_ptr(), p);
-        read_mac_asm!(src_mac.as_mut_ptr(), p.add(6));
+        copy_mac_asm!(dst_mac.as_mut_ptr(), p);
+        copy_mac_asm!(src_mac.as_mut_ptr(), p.add(6));
     }
 
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
@@ -1496,12 +1466,11 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
             Ok(xdp_action::XDP_DROP)
         }
         ACTION_REJECT => {
-            // REJECT disabled: kernel 6.17 verifier rejects packet writes
-            // in subprograms (memcpy with pkt pointer). Falls back to DROP.
-            // Re-enable when aya supports bpf_dynptr_from_xdp kfuncs.
             emit_event(ACTION_REJECT);
-            increment_metric(METRIC_DROPPED);
-            Ok(xdp_action::XDP_DROP)
+            increment_metric(METRIC_REJECTED);
+            // Return sentinel — the entry point will tail-call to
+            // xdp-firewall-reject which has its own 512B stack.
+            Ok(XDP_ACTION_REJECT)
         }
         ACTION_LOG => {
             emit_event(ACTION_LOG);
@@ -1517,555 +1486,13 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
     }
 }
 
+// ── Reject logic moved to xdp-firewall-reject (tail-called, slot 1) ──
+// Removed: send_reject, send_tcp_rst_v4/v6, send_icmp_unreachable_v4,
+// send_icmpv6_unreachable, compute_*_csum (now in ebpf-helpers/checksum.rs).
+// See crates/ebpf-programs/xdp-firewall-reject/src/main.rs.
+
 // ── Reject helpers ──────────────────────────────────────────────────
-//
-// TCP RST and ICMP/ICMPv6 Unreachable construction for ACTION_REJECT.
-// Post-truncation pointer derivation uses ptr_at_mut for the largest
-// offset, then pointer subtraction for smaller offsets to satisfy
-// the eBPF verifier's packet pointer tracking.
-
-/// Dispatch reject response based on protocol and address family.
-#[inline(always)]
-fn send_reject(
-    ctx: &XdpContext,
-    protocol: u8,
-    is_ipv6: bool,
-    l3_off: usize,
-    l4_off: usize,
-) -> Result<u32, ()> {
-    if protocol == PROTO_TCP {
-        if is_ipv6 {
-            send_tcp_rst_v6(ctx, l3_off, l4_off)
-        } else {
-            send_tcp_rst_v4(ctx, l3_off, l4_off)
-        }
-    } else if is_ipv6 {
-        send_icmpv6_unreachable(ctx, l3_off, l4_off)
-    } else {
-        send_icmp_unreachable_v4(ctx, l3_off, l4_off)
-    }
-}
-
-/// Construct and send a TCP RST for an IPv4 packet.
-///
-/// Reads incoming TCP seq/ack/flags/ports, truncates the packet to
-/// Eth+IP+TCP (no payload/options), swaps addresses, and returns `XDP_TX`.
-#[inline(never)]
-fn send_tcp_rst_v4(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Result<u32, ()> {
-    // ── Step 1: Read incoming fields BEFORE modifying anything ──
-    // Order matters for the eBPF verifier: each ptr_at establishes a bounds
-    // check, and the verifier only tracks the most recent one. Read in order
-    // of increasing offset so the last (largest) check covers all prior accesses.
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let in_src_mac = unsafe { (*ethhdr).src_addr };
-    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
-
-    let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_off)? };
-    let in_src_addr = unsafe { (*ipv4hdr).src_addr };
-    let in_dst_addr = unsafe { (*ipv4hdr).dst_addr };
-
-    let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off)? };
-    let in_src_port = unsafe { (*tcphdr).source };
-    let in_dst_port = unsafe { (*tcphdr).dest };
-    let in_seq = unsafe { (*tcphdr).seq };
-    let in_ack_seq = unsafe { (*tcphdr).ack_seq };
-    let in_flags: u8 = unsafe { *(tcphdr as *const u8).add(13) };
-
-    // ── Step 2: Truncate packet to Eth + IP(20) + TCP(20) ──
-    // Target size: l3_off + 20 (IP, no options) + 20 (TCP, no options).
-    let target_len = l3_off + 20 + 20;
-    let current_len = ctx.data_end() - ctx.data();
-    let delta = target_len as i32 - current_len as i32;
-    if delta != 0 {
-        let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
-        if ret != 0 {
-            return Err(());
-        }
-    }
-    unsafe { barrier() };
-
-    // ── Step 3: Re-derive pointers after truncation ──
-    let eth: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
-    let ip: *mut Ipv4Hdr = unsafe { ptr_at_mut(ctx, l3_off)? };
-    let tcp: *mut TcpHdr = unsafe { ptr_at_mut(ctx, l3_off + 20)? };
-
-    // ── Step 4: Swap Ethernet MACs ──
-    unsafe { (*eth).dst_addr = in_src_mac; (*eth).src_addr = in_dst_mac; }
-
-    // ── Step 5: Build IPv4 header ──
-    unsafe {
-        (*ip).set_vihl(4, 20); // version=4, IHL=20 bytes (5 words)
-        (*ip).tos = 0;
-        (*ip).set_tot_len(40); // 20 IP + 20 TCP
-        (*ip).set_id(0);
-        (*ip).set_frags(0x02, 0); // DF bit set, no fragment offset
-        (*ip).ttl = 64;
-        (*ip).proto = IpProto::Tcp;
-        // Swap src/dst
-        (*ip).src_addr = in_dst_addr;
-        (*ip).dst_addr = in_src_addr;
-        // Zero checksum before computing
-        (*ip).check = [0, 0];
-        let csum = compute_ipv4_csum(ip as *const u8, 20);
-        (*ip).set_checksum(csum);
-    }
-
-    // ── Step 6: Build TCP RST header ──
-    let tcp_flags_ack = in_flags & 0x10; // ACK bit
-    let tcp_flags_syn = in_flags & 0x02; // SYN bit
-    unsafe {
-        // Swap ports
-        (*tcp).source = in_dst_port;
-        (*tcp).dest = in_src_port;
-
-        if tcp_flags_ack != 0 {
-            // Incoming had ACK: RST only, seq = incoming ack_seq
-            (*tcp).seq = in_ack_seq;
-            (*tcp).ack_seq = [0, 0, 0, 0];
-            // flags byte at offset 13: RST=0x04
-            *(tcp as *mut u8).add(13) = 0x04;
-        } else {
-            // Incoming was SYN (no ACK): RST+ACK, seq=0, ack = seq+1
-            (*tcp).seq = [0, 0, 0, 0];
-            // Compute ack = in_seq + 1 (for SYN, payload_len = 0, SYN counts as 1)
-            let seq_val =
-                u32::from_be_bytes(in_seq).wrapping_add(if tcp_flags_syn != 0 { 1 } else { 0 });
-            (*tcp).ack_seq = seq_val.to_be_bytes();
-            // flags byte at offset 13: RST+ACK = 0x14
-            *(tcp as *mut u8).add(13) = 0x14;
-        }
-
-        // data offset = 5 (20 bytes), reserved bits = 0
-        // Byte 12 of TCP header: high nibble = data offset
-        *(tcp as *mut u8).add(12) = 0x50;
-        (*tcp).window = [0, 0];
-        (*tcp).urg_ptr = [0, 0];
-        (*tcp).check = [0, 0];
-
-        // Compute TCP checksum with pseudo-header.
-        let csum = compute_tcp_csum_v4(
-            &in_dst_addr, // new src (original dst)
-            &in_src_addr, // new dst (original src)
-            tcp as *const u8,
-            20,
-        );
-        let csum_be = csum.to_be_bytes();
-        (*tcp).check = csum_be;
-    }
-
-    Ok(xdp_action::XDP_TX)
-}
-
-/// Construct and send a TCP RST for an IPv6 packet.
-#[inline(never)]
-fn send_tcp_rst_v6(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Result<u32, ()> {
-    // ── Step 1: Read incoming fields (ascending offset for verifier) ──
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let in_src_mac = unsafe { (*ethhdr).src_addr };
-    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
-
-    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_off)? };
-    let in_src_addr: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
-    let in_dst_addr: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
-
-    let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off)? };
-    let in_src_port = unsafe { (*tcphdr).source };
-    let in_dst_port = unsafe { (*tcphdr).dest };
-    let in_seq = unsafe { (*tcphdr).seq };
-    let in_ack_seq = unsafe { (*tcphdr).ack_seq };
-    let in_flags: u8 = unsafe { *(tcphdr as *const u8).add(13) };
-
-    // ── Step 2: Truncate to Eth + IPv6(40) + TCP(20) ──
-    let target_len = l3_off + IPV6_HDR_LEN + 20;
-    let current_len = ctx.data_end() - ctx.data();
-    let delta = target_len as i32 - current_len as i32;
-    if delta != 0 {
-        let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
-        if ret != 0 {
-            return Err(());
-        }
-    }
-    unsafe { barrier() };
-
-    // ── Step 3+4: Re-derive pointers (ptr_at_mut + immediate write) ──
-    let eth: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
-    unsafe { (*eth).dst_addr = in_src_mac; (*eth).src_addr = in_dst_mac; }
-    let ip6: *mut Ipv6Hdr = unsafe { ptr_at_mut(ctx, l3_off)? };
-    let tcp: *mut TcpHdr = unsafe { ptr_at_mut(ctx, l3_off + IPV6_HDR_LEN)? };
-
-    // ── Step 5: Build IPv6 header ──
-    unsafe {
-        // Version=6, traffic class=0, flow label=0
-        (*ip6)._vtcfl = (6u32 << 28).to_be();
-        // Payload length = 20 (TCP header, no options)
-        (*ip6)._payload_len = 20u16.to_be();
-        (*ip6).next_hdr = PROTO_TCP;
-        (*ip6).hop_limit = 64;
-        // Swap src/dst
-        (*ip6).src_addr = in_dst_addr;
-        (*ip6).dst_addr = in_src_addr;
-    }
-
-    // ── Step 6: Build TCP RST header ──
-    let tcp_flags_ack = in_flags & 0x10;
-    let tcp_flags_syn = in_flags & 0x02;
-    unsafe {
-        (*tcp).source = in_dst_port;
-        (*tcp).dest = in_src_port;
-
-        if tcp_flags_ack != 0 {
-            (*tcp).seq = in_ack_seq;
-            (*tcp).ack_seq = [0, 0, 0, 0];
-            *(tcp as *mut u8).add(13) = 0x04; // RST
-        } else {
-            (*tcp).seq = [0, 0, 0, 0];
-            let seq_val =
-                u32::from_be_bytes(in_seq).wrapping_add(if tcp_flags_syn != 0 { 1 } else { 0 });
-            (*tcp).ack_seq = seq_val.to_be_bytes();
-            *(tcp as *mut u8).add(13) = 0x14; // RST+ACK
-        }
-
-        *(tcp as *mut u8).add(12) = 0x50; // data offset = 5
-        (*tcp).window = [0, 0];
-        (*tcp).urg_ptr = [0, 0];
-        (*tcp).check = [0, 0];
-
-        let csum = compute_tcp_csum_v6(&in_dst_addr, &in_src_addr, tcp as *const u8, 20);
-        (*tcp).check = csum.to_be_bytes();
-    }
-
-    Ok(xdp_action::XDP_TX)
-}
-
-/// Construct and send an ICMP Destination Unreachable (type=3, code=3)
-/// for a non-TCP IPv4 packet.
-///
-/// The ICMP error payload contains the original IPv4 header + first 8 bytes
-/// of the L4 header (as required by RFC 792).
-#[inline(never)]
-fn send_icmp_unreachable_v4(ctx: &XdpContext, l3_off: usize, _l4_off: usize) -> Result<u32, ()> {
-    // ── Step 1: Save original IP header + first 8 bytes of L4 ──
-    // Read 28 bytes from l3_off using a single bounds-checked base pointer
-    // (avoids ptr_at per iteration which creates unbounded pkt pointers).
-    let mut saved: [u8; 28] = [0u8; 28];
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let base = start + l3_off;
-    if base + 28 > end {
-        return Err(());
-    }
-    let base_ptr = base as *const u8;
-    let mut i: usize = 0;
-    while i < 28 {
-        saved[i] = unsafe { *base_ptr.add(i) };
-        i += 1;
-    }
-
-    // Read Ethernet MACs and IP addresses using ptr_at (ascending offset).
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let in_src_mac = unsafe { (*ethhdr).src_addr };
-    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
-
-    let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_off)? };
-    let orig_src = unsafe { (*ipv4hdr).src_addr };
-    let orig_dst = unsafe { (*ipv4hdr).dst_addr };
-
-    // ── Step 2: Truncate/resize to: l3_off + 20 (new IP) + 8 (ICMP hdr) + 28 (payload) ──
-    let target_len = l3_off + 20 + 8 + 28; // = l3_off + 56
-    let current_len = ctx.data_end() - ctx.data();
-    let delta = target_len as i32 - current_len as i32;
-    if delta != 0 {
-        let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
-        if ret != 0 {
-            return Err(());
-        }
-    }
-    unsafe { barrier() };
-
-    // ── Step 3: Re-derive pointers after truncation ──
-    let icmp_off = l3_off + 20;
-    let eth: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
-    let ip: *mut Ipv4Hdr = unsafe { ptr_at_mut(ctx, l3_off)? };
-    let _end: *const u8 = unsafe { ptr_at(ctx, icmp_off + 35)? };
-    let icmp: *mut u8 = unsafe { ptr_at_mut(ctx, icmp_off)? };
-
-    // ── Step 4: Swap Ethernet MACs ──
-    unsafe { (*eth).dst_addr = in_src_mac; (*eth).src_addr = in_dst_mac; }
-
-    // ── Step 5: Build new IPv4 header ──
-    unsafe {
-        (*ip).set_vihl(4, 20);
-        (*ip).tos = 0;
-        (*ip).set_tot_len(56); // 20 IP + 8 ICMP header + 28 payload
-        (*ip).set_id(0);
-        (*ip).set_frags(0, 0);
-        (*ip).ttl = 64;
-        (*ip).proto = IpProto::Icmp;
-        // Swap: our reply comes FROM original dst TO original src.
-        (*ip).src_addr = orig_dst;
-        (*ip).dst_addr = orig_src;
-        (*ip).check = [0, 0];
-        let csum = compute_ipv4_csum(ip as *const u8, 20);
-        (*ip).set_checksum(csum);
-    }
-
-    // ── Step 6: Build ICMP header ──
-    unsafe {
-        // Type 3 = Destination Unreachable, Code 3 = Port Unreachable
-        *icmp = 3;
-        *icmp.add(1) = 3;
-        // Checksum placeholder
-        *icmp.add(2) = 0;
-        *icmp.add(3) = 0;
-        // "Unused" / "Next-hop MTU" — zero for code 3
-        *icmp.add(4) = 0;
-        *icmp.add(5) = 0;
-        *icmp.add(6) = 0;
-        *icmp.add(7) = 0;
-    }
-
-    // ── Step 7: Write saved 28 bytes as ICMP payload (at icmp + 8) ──
-    let mut j: usize = 0;
-    while j < 28 {
-        unsafe { *icmp.add(8 + j) = saved[j] };
-        j += 1;
-    }
-
-    // ── Step 8: Compute ICMP checksum over 36 bytes ──
-    unsafe {
-        let csum = compute_icmp_csum(icmp, 36);
-        let csum_be = csum.to_be_bytes();
-        *icmp.add(2) = csum_be[0];
-        *icmp.add(3) = csum_be[1];
-    }
-
-    Ok(xdp_action::XDP_TX)
-}
-
-/// Construct and send an ICMPv6 Destination Unreachable (type=1, code=4)
-/// for a non-TCP IPv6 packet.
-///
-/// The ICMPv6 error payload contains as much of the original packet as
-/// possible: the 40-byte IPv6 header + first 8 bytes of L4 = 48 bytes.
-#[inline(never)]
-fn send_icmpv6_unreachable(ctx: &XdpContext, l3_off: usize, _l4_off: usize) -> Result<u32, ()> {
-    // ── Step 1: Save original IPv6 header (40 bytes) + first 8 bytes of L4 ──
-    let mut saved: [u8; 48] = [0u8; 48];
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let base = start + l3_off;
-    if base + 48 > end {
-        return Err(());
-    }
-    let base_ptr = base as *const u8;
-    let mut i: usize = 0;
-    while i < 48 {
-        saved[i] = unsafe { *base_ptr.add(i) };
-        i += 1;
-    }
-
-    // Read Ethernet first, then IPv6 (ascending offset for verifier).
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let in_src_mac = unsafe { (*ethhdr).src_addr };
-    let in_dst_mac = unsafe { (*ethhdr).dst_addr };
-
-    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_off)? };
-    let orig_src: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
-    let orig_dst: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
-
-    // ── Step 2: Truncate to: l3_off + 40 (IPv6) + 8 (ICMPv6 hdr) + 48 (payload) ──
-    let target_len = l3_off + IPV6_HDR_LEN + 8 + 48; // = l3_off + 96
-    let current_len = ctx.data_end() - ctx.data();
-    let delta = target_len as i32 - current_len as i32;
-    if delta != 0 {
-        let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
-        if ret != 0 {
-            return Err(());
-        }
-    }
-    unsafe { barrier() };
-
-    // ── Step 3: Re-derive pointers after truncation ──
-    let icmp6_off = l3_off + IPV6_HDR_LEN;
-    let eth: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
-    let ip6: *mut Ipv6Hdr = unsafe { ptr_at_mut(ctx, l3_off)? };
-    let _end: *const u8 = unsafe { ptr_at(ctx, icmp6_off + 55)? };
-    let icmp6: *mut u8 = unsafe { ptr_at_mut(ctx, icmp6_off)? };
-
-    // ── Step 4: Swap Ethernet MACs ──
-    unsafe { (*eth).dst_addr = in_src_mac; (*eth).src_addr = in_dst_mac; }
-
-    // ── Step 5: Build IPv6 header ──
-    unsafe {
-        (*ip6)._vtcfl = (6u32 << 28).to_be();
-        // Payload = ICMPv6 header (8) + payload (48) = 56
-        (*ip6)._payload_len = 56u16.to_be();
-        (*ip6).next_hdr = PROTO_ICMPV6;
-        (*ip6).hop_limit = 64;
-        (*ip6).src_addr = orig_dst;
-        (*ip6).dst_addr = orig_src;
-    }
-
-    // ── Step 6: Build ICMPv6 header ──
-    unsafe {
-        // Type 1 = Destination Unreachable, Code 4 = Port Unreachable
-        *icmp6 = 1;
-        *icmp6.add(1) = 4;
-        // Checksum placeholder
-        *icmp6.add(2) = 0;
-        *icmp6.add(3) = 0;
-        // Unused (must be zero)
-        *icmp6.add(4) = 0;
-        *icmp6.add(5) = 0;
-        *icmp6.add(6) = 0;
-        *icmp6.add(7) = 0;
-    }
-
-    // ── Step 7: Write saved 48 bytes as ICMPv6 payload (at icmp6 + 8) ──
-    let mut j: usize = 0;
-    while j < 48 {
-        unsafe { *icmp6.add(8 + j) = saved[j] };
-        j += 1;
-    }
-
-    // ── Step 8: Compute ICMPv6 checksum (includes pseudo-header) ──
-    unsafe {
-        let csum = compute_icmpv6_csum(&orig_dst, &orig_src, icmp6, 56);
-        let csum_be = csum.to_be_bytes();
-        *icmp6.add(2) = csum_be[0];
-        *icmp6.add(3) = csum_be[1];
-    }
-
-    Ok(xdp_action::XDP_TX)
-}
-
-// ── Checksum helpers ────────────────────────────────────────────────
-
-/// Compute the IPv4 header checksum (ones' complement of the ones'
-/// complement sum of the header u16 words).
-///
-/// The checksum field in the header must be zeroed before calling.
-/// IPv4 header checksum — always 20 bytes (5 words), no options in our RST/ICMP.
-/// Fixed iteration count to satisfy the eBPF verifier.
-#[inline(always)]
-unsafe fn compute_ipv4_csum(hdr: *const u8, _len: usize) -> u16 {
-    unsafe {
-        let mut sum: u32 = 0;
-        // Exactly 10 iterations for a 20-byte IP header (no options)
-        let mut i: usize = 0;
-        while i < 20 {
-            sum += ((*hdr.add(i) as u32) << 8) | (*hdr.add(i + 1) as u32);
-            i += 2;
-        }
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        !(sum as u16)
-    }
-}
-
-/// Compute TCP checksum with IPv4 pseudo-header.
-///
-/// The checksum field in the TCP header must be zeroed before calling.
-/// Returns the checksum in host byte order.
-/// TCP checksum with IPv4 pseudo-header — fixed 20-byte TCP header (RST, no options).
-#[inline(always)]
-unsafe fn compute_tcp_csum_v4(
-    src_ip: &[u8; 4],
-    dst_ip: &[u8; 4],
-    tcp_hdr: *const u8,
-    _tcp_len: usize,
-) -> u16 {
-    unsafe {
-        let mut sum: u32 = 0;
-        sum += ((src_ip[0] as u32) << 8) | (src_ip[1] as u32);
-        sum += ((src_ip[2] as u32) << 8) | (src_ip[3] as u32);
-        sum += ((dst_ip[0] as u32) << 8) | (dst_ip[1] as u32);
-        sum += ((dst_ip[2] as u32) << 8) | (dst_ip[3] as u32);
-        sum += PROTO_TCP as u32;
-        sum += 20u32; // fixed TCP header length
-        // Exactly 10 iterations for 20-byte TCP header
-        let mut i: usize = 0;
-        while i < 20 {
-            sum += ((*tcp_hdr.add(i) as u32) << 8) | (*tcp_hdr.add(i + 1) as u32);
-            i += 2;
-        }
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        !(sum as u16)
-    }
-}
-
-/// Compute TCP checksum with IPv6 pseudo-header.
-///
-/// Returns the checksum in host byte order.
-#[inline(always)]
-unsafe fn compute_tcp_csum_v6(
-    src_ip: &[u8; 16],
-    dst_ip: &[u8; 16],
-    tcp_hdr: *const u8,
-    _tcp_len: usize,
-) -> u16 {
-    unsafe {
-        let mut sum: u32 = 0;
-        // Pseudo-header: src (16) + dst (16)
-        let mut i: usize = 0;
-        while i < 16 { sum += ((src_ip[i] as u32) << 8) | (src_ip[i + 1] as u32); i += 2; }
-        i = 0;
-        while i < 16 { sum += ((dst_ip[i] as u32) << 8) | (dst_ip[i + 1] as u32); i += 2; }
-        sum += 20u32; // fixed TCP len
-        sum += PROTO_TCP as u32;
-        // Fixed 10 iterations for 20-byte TCP header
-        i = 0;
-        while i < 20 { sum += ((*tcp_hdr.add(i) as u32) << 8) | (*tcp_hdr.add(i + 1) as u32); i += 2; }
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        !(sum as u16)
-    }
-}
-
-/// Compute ICMP checksum (ones' complement sum over the ICMP message).
-///
-/// The checksum field must be zeroed before calling.
-/// Returns the checksum in host byte order.
-#[inline(always)]
-/// ICMP checksum — fixed 36 bytes (8 ICMP header + 28 original packet).
-unsafe fn compute_icmp_csum(data: *const u8, _len: usize) -> u16 {
-    unsafe {
-        let mut sum: u32 = 0;
-        let mut i: usize = 0;
-        while i < 36 { sum += ((*data.add(i) as u32) << 8) | (*data.add(i + 1) as u32); i += 2; }
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        !(sum as u16)
-    }
-}
-
-/// Compute ICMPv6 checksum with IPv6 pseudo-header.
-///
-/// Returns the checksum in host byte order.
-#[inline(always)]
-unsafe fn compute_icmpv6_csum(
-    src_ip: &[u8; 16],
-    dst_ip: &[u8; 16],
-    icmpv6_data: *const u8,
-    _icmpv6_len: usize,
-) -> u16 {
-    unsafe {
-        let mut sum: u32 = 0;
-        let mut i: usize = 0;
-        while i < 16 { sum += ((src_ip[i] as u32) << 8) | (src_ip[i + 1] as u32); i += 2; }
-        i = 0;
-        while i < 16 { sum += ((dst_ip[i] as u32) << 8) | (dst_ip[i + 1] as u32); i += 2; }
-        sum += 56u32; // fixed ICMPv6 len
-        sum += PROTO_ICMPV6 as u32;
-        // Fixed 28 iterations for 56-byte ICMPv6 message
-        i = 0;
-        while i < 56 { sum += ((*icmpv6_data.add(i) as u32) << 8) | (*icmpv6_data.add(i + 1) as u32); i += 2; }
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        !(sum as u16)
-    }
-}
+// (moved to xdp-firewall-reject)
 
 // ── Helpers ─────────────────────────────────────────────────────────
 // ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::xdp

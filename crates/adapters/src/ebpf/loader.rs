@@ -102,6 +102,23 @@ impl EbpfLoader {
         Ok(())
     }
 
+    /// Load a named XDP program without attaching it to any interface.
+    ///
+    /// Used for tail-call targets that are invoked via `ProgramArray`
+    /// from another XDP program (e.g. `xdp-firewall-reject` called from
+    /// `xdp-firewall`).
+    pub fn load_xdp_program(&mut self, program_name: &str) -> Result<(), anyhow::Error> {
+        let program: &mut Xdp = self
+            .ebpf
+            .program_mut(program_name)
+            .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found in eBPF object"))?
+            .try_into()?;
+
+        program.load()?;
+        info!(program_name, "XDP program loaded (tail-call target, no attach)");
+        Ok(())
+    }
+
     /// Attach a TC (Traffic Control) classifier program to the given interface.
     ///
     /// On kernel >= 6.6, uses TCX (link-based attach with priority ordering,
