@@ -1,0 +1,15 @@
+[package]
+name = "xdp-ratelimit-syncookie"
+version = "0.0.0-dev"
+edition = "2024"
+
+[dependencies]
+aya-ebpf = "0.1.1"
+aya-ebpf-bindings = "0.1.1"
+ebpf-common = { path = "../../ebpf-common", default-features = false }
+ebpf-helpers = { path = "../../ebpf-helpers" }
+network-types = "0.1.0"
+
+[[bin]]
+name = "xdp-ratelimit-syncookie"
+path = "src/main.rs"

@@ -891,7 +891,7 @@ pub async fn run(
 
     // 10b. XDP Rate Limiter
     let rl_ok = if config.ratelimit.enabled {
-        match try_load_xdp_ratelimit(&ebpf_dir, &config, event_tx.clone()) {
+        match try_load_xdp_ratelimit(&ebpf_dir, &config, event_tx.clone(), fw_ok) {
             Ok((mut rl_loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs)) => {
                 metrics_readers.extend(rl_rdrs);
                 if let Some(rl_mgr) = rl_mgr_opt {
@@ -936,6 +936,16 @@ pub async fn run(
                     }
                 }
                 iface_groups_mgr.add_map(rl_loader.ebpf_mut());
+                // Wire tail-call: ratelimit → syncookie (slot 0). Best-effort.
+                match try_load_xdp_ratelimit_syncookie(&ebpf_dir, &mut rl_loader) {
+                    Ok(sc_loader) => {
+                        ebpf_state.add_loader(sc_loader);
+                        info!("XDP tail-call: ratelimit → syncookie wired (slot 0)");
+                    }
+                    Err(e) => {
+                        warn!("xdp-ratelimit-syncookie load failed (syncookie falls back to DROP): {e}");
+                    }
+                }
                 ebpf_state.add_loader(rl_loader);
                 metrics.set_ebpf_program_status("xdp_ratelimit", true);
                 info!("eBPF xdp-ratelimit active");
@@ -1889,17 +1899,44 @@ pub type XdpRatelimitResult = (
     Vec<MetricsReader>,
 );
 
+/// Load the xdp-ratelimit-syncookie program and wire it as a tail-call target.
+///
+/// Shared maps: `SYNCOOKIE_CTX`, `SYNCOOKIE_SECRET`, `DDOS_METRICS`.
+/// Loaded but NOT attached — invoked via tail-call from xdp-ratelimit (RL_PROG_ARRAY slot 0).
+pub fn try_load_xdp_ratelimit_syncookie(
+    ebpf_dir: &str,
+    rl_loader: &mut EbpfLoader,
+) -> anyhow::Result<EbpfLoader> {
+    let program_bytes = read_ebpf_program(ebpf_dir, "xdp-ratelimit-syncookie")?;
+    let mut sc_loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    sc_loader.load_xdp_program("xdp_ratelimit_syncookie")?;
+    let sc_fd = sc_loader.xdp_program_fd("xdp_ratelimit_syncookie")?;
+    rl_loader.set_tail_call_target("RL_PROG_ARRAY", 0, &sc_fd)?;
+    Ok(sc_loader)
+}
+
 pub fn try_load_xdp_ratelimit(
     ebpf_dir: &str,
     config: &AgentConfig,
     event_tx: mpsc::Sender<AgentEvent>,
+    firewall_active: bool,
 ) -> anyhow::Result<XdpRatelimitResult> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-ratelimit")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
-    for iface in &config.agent.interfaces {
-        loader.attach_xdp_program("xdp_ratelimit", iface)?;
+    if firewall_active {
+        // Firewall is active: load the program (verifier check) but do NOT
+        // attach to any interface. The firewall tail-calls into ratelimit
+        // via XDP_PROG_ARRAY slot 0.
+        loader.load_xdp_program("xdp_ratelimit")?;
+        info!("xdp-ratelimit loaded as tail-call target (firewall active)");
+    } else {
+        // Standalone mode: attach directly to the interface.
+        for iface in &config.agent.interfaces {
+            loader.attach_xdp_program("xdp_ratelimit", iface)?;
+        }
     }
 
     let rl_mgr_opt = match RateLimitMapManager::new(loader.ebpf_mut()) {

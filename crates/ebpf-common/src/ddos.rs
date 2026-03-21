@@ -54,6 +54,33 @@ pub struct SyncookieSecret {
 /// Common MSS values for SYN cookie encoding (3-bit index to MSS value).
 pub const SYNCOOKIE_MSS_TABLE: [u16; 8] = [536, 1220, 1440, 1452, 1460, 4312, 8960, 65535];
 
+/// Per-CPU context passed from `xdp-ratelimit` to `xdp-ratelimit-syncookie`
+/// via a shared `PerCpuArray` map. Contains all packet fields needed to
+/// forge the SYN+ACK response without re-reading from the packet.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SyncookieCtx {
+    /// Source IP (u32 for IPv4, XOR-folded hash for IPv6).
+    pub src_ip: u32,
+    /// Destination IP (u32 for IPv4, XOR-folded hash for IPv6).
+    pub dst_ip: u32,
+    /// Source port (host byte order).
+    pub src_port: u16,
+    /// Destination port (host byte order).
+    pub dst_port: u16,
+    /// Incoming TCP sequence number (host byte order).
+    pub in_seq: u32,
+    /// Source port (network byte order, for header write).
+    pub in_src_port_be: u16,
+    /// Destination port (network byte order, for header write).
+    pub in_dst_port_be: u16,
+    /// MSS table index (0-7).
+    pub mss_idx: u8,
+    /// Flags: FLAG_IPV6 if IPv6 packet.
+    pub flags: u8,
+    pub _pad: [u8; 2],
+}
+
 // ── ICMP Protection Config ───────────────────────────────────────
 
 /// Configuration for ICMP flood protection.

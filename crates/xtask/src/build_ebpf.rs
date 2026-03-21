@@ -7,6 +7,7 @@ const EBPF_PROGRAMS: &[&str] = &[
     "xdp-firewall",
     "xdp-firewall-reject",
     "xdp-ratelimit",
+    "xdp-ratelimit-syncookie",
     "xdp-loadbalancer",
     "tc-dns",
     "tc-ids",

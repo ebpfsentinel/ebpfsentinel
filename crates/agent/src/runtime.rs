@@ -532,7 +532,7 @@ pub async fn load_ebpf_programs(
 
     // ── XDP Rate Limiter ────────────────────────────────────────
     let rl_ok = if config.ratelimit.enabled {
-        match startup::try_load_xdp_ratelimit(&ebpf_dir, config, event_tx.clone()) {
+        match startup::try_load_xdp_ratelimit(&ebpf_dir, config, event_tx.clone(), fw_ok) {
             Ok((mut rl_loader, rl_mgr_opt, _rl_lpm_opt, rl_rdrs)) => {
                 metrics_readers.extend(rl_rdrs);
                 if let Some(rl_mgr) = rl_mgr_opt {
