@@ -94,9 +94,13 @@ declare -a FEATURE_FLAGS=(
 )
 
 # Traffic volumes (label → iperf3 args)
-# max-bandwidth: no rate cap, iperf3 sends as fast as the link allows
-declare -a VOLUME_LABELS=("idle" "100mbps" "1gbps" "max-bandwidth")
-declare -a VOLUME_IPERF_ARGS=("" "-b 100M" "-b 1G" "")
+# Capped at 5 Gbps to stay in the reliable measurement zone.
+# Above ~5 Gbps on VirtualBox, the baseline CPU dominates and the eBPF
+# signal is lost in measurement noise.
+declare -a VOLUME_LABELS=("idle" "100mbps" "500mbps" "1gbps" "5gbps")
+declare -a VOLUME_IPERF_ARGS=("" "-b 100M" "-b 500M" "-b 1G" "-b 5G")
+# Number of runs per measurement — averaged to reduce variance
+RUNS_PER_MEASURE="${RUNS_PER_MEASURE:-3}"
 
 # ── Parse arguments ────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -182,10 +186,56 @@ if [ -z "$OUTPUT" ]; then
     OUTPUT="/tmp/ebpfsentinel-resource-matrix-${PROFILE}.json"
 fi
 
+# ── Local mode: create veth pair + netns for realistic eBPF benchmarking ──
+BENCH_NS="ebpf-bench-ns"
+BENCH_VETH_HOST="veth-bench0"
+BENCH_VETH_NS="veth-bench1"
+BENCH_HOST_IP="10.201.0.1"
+BENCH_NS_IP="10.201.0.2"
+
+if [ "$MODE_2VM" != true ]; then
+    # Ensure EBPF_PROGRAM_DIR is set for local agent
+    export EBPF_PROGRAM_DIR="${EBPF_PROGRAM_DIR:-$(find_project_root 2>/dev/null)/target/bpfel-unknown-none/release}"
+    # Find project root
+    _find_root() {
+        local dir="$INTEGRATION_DIR"
+        while [ "$dir" != "/" ]; do
+            [ -f "$dir/Cargo.toml" ] && echo "$dir" && return
+            dir="$(dirname "$dir")"
+        done
+        echo "$INTEGRATION_DIR/../.."
+    }
+    PROJECT_ROOT="$(_find_root)"
+    export EBPF_PROGRAM_DIR="${EBPF_PROGRAM_DIR:-${PROJECT_ROOT}/target/bpfel-unknown-none/release}"
+
+    echo "--- Setting up veth pair + netns for local benchmarking ---"
+    ip netns del "$BENCH_NS" 2>/dev/null || true
+    ip link del "$BENCH_VETH_HOST" 2>/dev/null || true
+    ip netns add "$BENCH_NS"
+    ip link add "$BENCH_VETH_HOST" type veth peer name "$BENCH_VETH_NS"
+    ip link set "$BENCH_VETH_NS" netns "$BENCH_NS"
+    ip addr add "${BENCH_HOST_IP}/24" dev "$BENCH_VETH_HOST"
+    ip link set "$BENCH_VETH_HOST" up
+    ip netns exec "$BENCH_NS" ip addr add "${BENCH_NS_IP}/24" dev "$BENCH_VETH_NS"
+    ip netns exec "$BENCH_NS" ip link set "$BENCH_VETH_NS" up
+    ip netns exec "$BENCH_NS" ip link set lo up
+
+    # Override defaults for local mode
+    EBPF_VETH_HOST="$BENCH_VETH_HOST"
+    EBPF_HOST_IP="$BENCH_HOST_IP"
+    EBPF_NS_IP="$BENCH_NS_IP"
+
+    _cleanup_bench_ns() {
+        ip netns del "$BENCH_NS" 2>/dev/null || true
+        ip link del "$BENCH_VETH_HOST" 2>/dev/null || true
+    }
+    trap _cleanup_bench_ns EXIT
+fi
+
 echo "=== eBPFsentinel Resource Matrix Benchmark ==="
 echo "Profile:  ${PROFILE}"
 echo "Duration: ${DURATION}s per measurement"
-echo "Mode:     $([ "$MODE_2VM" = true ] && echo "2VM (agent: ${AGENT_VM_IP})" || echo "local")"
+echo "Mode:     $([ "$MODE_2VM" = true ] && echo "2VM (agent: ${AGENT_VM_IP})" || echo "local (veth: ${BENCH_VETH_HOST})")"
 echo "Output:   ${OUTPUT}"
 echo ""
 
@@ -210,7 +260,7 @@ _make_config() {
     done
 
     local iface="eth1"
-    [ "$MODE_2VM" != true ] && iface="${EBPF_VETH_HOST:-lo}"
+    [ "$MODE_2VM" != true ] && iface="${EBPF_VETH_HOST:-${BENCH_VETH_HOST:-lo}}"
 
     local config_file="/tmp/ebpfsentinel-bench-config-$$.yaml"
     cat > "$config_file" <<EOF
@@ -340,7 +390,9 @@ _start_agent() {
         sudo pkill -9 -f ebpfsentinel-agent 2>/dev/null || true
         sleep 1
 
-        sudo nohup /usr/local/bin/ebpfsentinel-agent --config "$config_file" > "$REMOTE_LOG" 2>&1 &
+        local agent_bin="${AGENT_BIN:-/usr/local/bin/ebpfsentinel-agent}"
+        [ ! -x "$agent_bin" ] && agent_bin="${PROJECT_ROOT:-/home/vagrant/ebpfsentinel}/target/release/ebpfsentinel-agent"
+        sudo EBPF_PROGRAM_DIR="${EBPF_PROGRAM_DIR:-}" nohup "$agent_bin" --config "$config_file" > "$REMOTE_LOG" 2>&1 &
         AGENT_PID=$!
         echo "$AGENT_PID" > "$REMOTE_PID_FILE"
 
@@ -372,83 +424,134 @@ _stop_agent() {
 }
 
 # ── CPU + RSS measurement ──────────────────────────────────────────
-# CPU: system-wide /proc/stat delta (captures kernel softirq from eBPF)
-#   CPU% = delta(user+nice+system+irq+softirq) / delta(total) * 100
-# RSS: per-process /proc/PID/status VmRSS
+# Measures the eBPF + agent overhead by comparing system-wide CPU with
+# and without the agent at the same traffic volume.
+#
+# Method: (system CPU% with agent) - (system CPU% without agent at same volume)
+# This isolates the agent + eBPF cost from iperf3/kernel networking overhead.
+#
+# System CPU: /proc/stat delta (user+nice+system+irq+softirq) / total
+#   → captures eBPF softirq work AND agent userspace work
+# RSS: per-process /proc/PID/status VmRSS (agent process only)
+
+_run_on_agent() {
+    if [ "$MODE_2VM" = true ]; then
+        _ssh_cmd "$@" 2>/dev/null || true
+    else
+        eval "$@" 2>/dev/null || true
+    fi
+}
+
+_run_on_agent_sudo() {
+    if [ "$MODE_2VM" = true ]; then
+        _ssh_sudo "$@" 2>/dev/null || true
+    else
+        sudo bash -c "$*" 2>/dev/null || true
+    fi
+}
 
 _read_system_cpu() {
     # Returns: user nice system idle iowait irq softirq steal (8 fields)
-    if [ "$MODE_2VM" = true ]; then
-        _ssh_cmd "head -1 /proc/stat" 2>/dev/null | awk '{print $2,$3,$4,$5,$6,$7,$8,$9}'
-    else
-        head -1 /proc/stat | awk '{print $2,$3,$4,$5,$6,$7,$8,$9}'
-    fi
+    _run_on_agent "head -1 /proc/stat | awk '{print \$2,\$3,\$4,\$5,\$6,\$7,\$8,\$9}'" || echo "0 0 0 0 0 0 0 0"
 }
 
 _read_rss_kb() {
     local pid="$1"
-    if [ "$MODE_2VM" = true ]; then
-        _ssh_sudo grep VmRSS "/proc/${pid}/status" 2>/dev/null | awk '{print $2}'
+    _run_on_agent_sudo "grep VmRSS /proc/${pid}/status | awk '{print \$2}'" || echo "0"
+}
+
+_compute_cpu_pct() {
+    # Compute CPU% from before/after /proc/stat readings
+    local b_user="$1" b_nice="$2" b_sys="$3" b_idle="$4" b_iowait="$5" b_irq="$6" b_softirq="$7" b_steal="$8"
+    local a_user="$9" a_nice="${10}" a_sys="${11}" a_idle="${12}" a_iowait="${13}" a_irq="${14}" a_softirq="${15}" a_steal="${16}"
+
+    local d_busy=$(( (a_user - b_user) + (a_nice - b_nice) + (a_sys - b_sys) + (a_irq - b_irq) + (a_softirq - b_softirq) ))
+    local d_idle=$(( (a_idle - b_idle) + (a_iowait - b_iowait) + (a_steal - b_steal) ))
+    local d_total=$(( d_busy + d_idle ))
+    [ "$d_total" -eq 0 ] && d_total=1
+
+    LC_ALL=C awk "BEGIN {printf \"%.1f\", ${d_busy} * 100.0 / ${d_total}}" || echo "0.0"
+}
+
+_generate_traffic() {
+    local vol_idx="$1"
+    local vol_args="${VOLUME_IPERF_ARGS[$vol_idx]}"
+    local vol_label="${VOLUME_LABELS[$vol_idx]}"
+
+    local target_ip="$AGENT_VM_IP"
+    [ "$MODE_2VM" != true ] && target_ip="${BENCH_HOST_IP:-10.201.0.1}"
+
+    if [ "$vol_label" = "idle" ]; then
+        sleep "$DURATION"
     else
-        sudo grep VmRSS "/proc/${pid}/status" 2>/dev/null | awk '{print $2}'
+        if [ "$MODE_2VM" = true ]; then
+            ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+                "vagrant@${ATTACKER_VM_IP:-192.168.56.20}" \
+                "iperf3 -c $target_ip -t $DURATION ${vol_args:-} --json" >/dev/null 2>&1 || true
+        elif [ -n "${BENCH_NS:-}" ]; then
+            ip netns exec "$BENCH_NS" iperf3 -c "$target_ip" -t "$DURATION" ${vol_args:-} --json >/dev/null 2>&1 || true
+        else
+            iperf3 -c "$target_ip" -t "$DURATION" ${vol_args:-} --json >/dev/null 2>&1 || true
+        fi
     fi
 }
 
+# Baseline system CPU% per volume (populated during no-agent measurement)
+declare -a BASELINE_CPU_PCT=("0.0" "0.0" "0.0" "0.0" "0.0")
+ATTACKER_VM_IP="${EBPF_ATTACKER_VM:-192.168.56.20}"
+
+# Measure system CPU% for a single run at a given traffic volume.
+_measure_single_run() {
+    local vol_idx="$1"
+
+    local cpu_before cpu_after
+    cpu_before="$(_read_system_cpu)"
+    local -a before; read -ra before <<< "$cpu_before"
+
+    _generate_traffic "$vol_idx"
+
+    cpu_after="$(_read_system_cpu)"
+    local -a after; read -ra after <<< "$cpu_after"
+
+    _compute_cpu_pct "${before[@]}" "${after[@]}"
+}
+
 _measure_resources() {
-    # $1 = agent PID, $2 = traffic volume index
+    # $1 = agent PID (0 for no-agent), $2 = traffic volume index
     local pid="$1"
     local vol_idx="$2"
-    local vol_args="${VOLUME_IPERF_ARGS[$vol_idx]}"
+    local runs="${RUNS_PER_MEASURE:-3}"
+    local total_pct=0 r=0
 
-    local target_ip="$AGENT_VM_IP"
-    [ "$MODE_2VM" != true ] && target_ip="${EBPF_HOST_IP:-10.200.0.1}"
+    # Average over multiple runs to reduce variance
+    while [ "$r" -lt "$runs" ]; do
+        local pct
+        pct="$(_measure_single_run "$vol_idx")"
+        total_pct="$(LC_ALL=C awk "BEGIN {printf \"%.1f\", ${total_pct} + ${pct}}")"
+        r=$((r + 1))
+    done
 
-    # Read system-wide CPU counters before
-    local cpu_before
-    cpu_before="$(_read_system_cpu)"
-    read -r b_user b_nice b_sys b_idle b_iowait b_irq b_softirq b_steal <<< "$cpu_before"
+    local avg_pct
+    avg_pct="$(LC_ALL=C awk "BEGIN {printf \"%.1f\", ${total_pct} / ${runs}}")"
 
-    # Generate traffic (or idle)
-    local vol_label="${VOLUME_LABELS[$vol_idx]}"
-    if [ "$vol_label" = "idle" ]; then
-        sleep "$DURATION"
-    elif [ -n "$vol_args" ]; then
-        iperf3 -c "$target_ip" -t "$DURATION" $vol_args --json >/dev/null 2>&1 || true
-    else
-        # max-bandwidth: no rate cap
-        iperf3 -c "$target_ip" -t "$DURATION" --json >/dev/null 2>&1 || true
+    if [ "$pid" = "0" ] || [ -z "$pid" ]; then
+        BASELINE_CPU_PCT[$vol_idx]="$avg_pct"
+        echo "0.0|0.0|0"
+        return
     fi
 
-    # Read system-wide CPU counters after
-    local cpu_after
-    cpu_after="$(_read_system_cpu)"
-    read -r a_user a_nice a_sys a_idle a_iowait a_irq a_softirq a_steal <<< "$cpu_after"
+    # eBPF + agent cost = avg system CPU% - baseline CPU% at same volume
+    local baseline="${BASELINE_CPU_PCT[$vol_idx]:-0.0}"
+    local ebpf_cost
+    ebpf_cost="$(LC_ALL=C awk "BEGIN {v = ${avg_pct} - ${baseline}; if (v < 0) v = 0; printf \"%.1f\", v}")" || ebpf_cost="0.0"
 
-    # Compute CPU% = delta_busy / delta_total * 100
-    # busy = user + nice + system + irq + softirq (captures eBPF softirq work)
-    local d_user=$(( a_user - b_user ))
-    local d_nice=$(( a_nice - b_nice ))
-    local d_sys=$(( a_sys - b_sys ))
-    local d_idle=$(( a_idle - b_idle ))
-    local d_iowait=$(( a_iowait - b_iowait ))
-    local d_irq=$(( a_irq - b_irq ))
-    local d_softirq=$(( a_softirq - b_softirq ))
-    local d_steal=$(( a_steal - b_steal ))
-
-    local d_busy=$(( d_user + d_nice + d_sys + d_irq + d_softirq ))
-    local d_total=$(( d_busy + d_idle + d_iowait + d_steal ))
-    [ "$d_total" -eq 0 ] && d_total=1
-
-    local cpu_pct
-    cpu_pct="$(LC_ALL=C awk "BEGIN {printf \"%.1f\", ${d_busy} * 100.0 / ${d_total}}")" || cpu_pct="0.0"
-
-    # Read RSS
+    # RSS (agent process only)
     local rss_kb
     rss_kb="$(_read_rss_kb "$pid")" || rss_kb=0
     local rss_mb
     rss_mb="$(LC_ALL=C awk "BEGIN {printf \"%.1f\", ${rss_kb:-0} / 1024.0}")" || rss_mb="0.0"
 
-    echo "${cpu_pct}|${rss_mb}|${rss_kb}"
+    echo "${ebpf_cost}|${rss_mb}|${rss_kb}"
 }
 
 # ── iperf3 server management ──────────────────────────────────────
@@ -456,11 +559,11 @@ _start_iperf_server() {
     if [ "$MODE_2VM" = true ]; then
         _ssh_sudo pkill -f "iperf3 -s" 2>/dev/null || true
         sleep 0.5
-        _ssh_sudo bash -c "'iperf3 -s -D --pidfile /tmp/iperf3-bench-matrix.pid'" 2>/dev/null || true
+        _ssh_sudo bash -c "'iperf3 -s -B ${AGENT_VM_IP} -D --pidfile /tmp/iperf3-bench-matrix.pid'" 2>/dev/null || true
     else
         pkill -f "iperf3 -s" 2>/dev/null || true
         sleep 0.5
-        iperf3 -s -B "${EBPF_HOST_IP:-10.200.0.1}" -D --pidfile /tmp/iperf3-bench-matrix.pid 2>/dev/null || true
+        iperf3 -s -B "${BENCH_HOST_IP:-10.201.0.1}" -D --pidfile /tmp/iperf3-bench-matrix.pid 2>/dev/null || true
     fi
     sleep 1
 }
@@ -518,30 +621,23 @@ for feat_idx in $(seq 0 $(( total_features - 1 ))); do
     echo "=== Feature: ${feat_label} ==="
 
     if [ "$feat_label" = "no-agent" ]; then
-        # Measure system without agent at each volume
+        # Measure softirq baseline WITHOUT agent at each traffic volume.
+        # This baseline is subtracted from agent measurements to isolate
+        # the eBPF-only overhead.
         _stop_agent 2>/dev/null || true
 
         for vol_idx in $(seq 0 $(( total_volumes - 1 ))); do
             vol_label="${VOLUME_LABELS[$vol_idx]}"
-            vol_args="${VOLUME_IPERF_ARGS[$vol_idx]}"
-            echo "  Volume: ${vol_label}..."
+            echo "  Volume: ${vol_label} (baseline)..."
 
-            local_target="$AGENT_VM_IP"
-            [ "$MODE_2VM" != true ] && local_target="${EBPF_HOST_IP:-10.200.0.1}"
+            _measure_resources "0" "$vol_idx" >/dev/null
 
-            if [ "$vol_label" = "idle" ]; then
-                sleep "$DURATION"
-            elif [ -n "$vol_args" ]; then
-                iperf3 -c "$local_target" -t "$DURATION" $vol_args --json >/dev/null 2>&1 || true
-            else
-                iperf3 -c "$local_target" -t "$DURATION" --json >/dev/null 2>&1 || true
-            fi
-
-            # Record as 0% CPU, 0 RSS (no agent)
-            tmp="$(jq --arg f "$feat_label" --arg v "$vol_label" \
-                '.measurements += [{"feature":$f,"volume":$v,"cpu_pct":"0.0","rss_mb":"0.0","rss_kb":0}]' "$OUTPUT")"
+            # Record baseline CPU% for reference
+            bl="${BASELINE_CPU_PCT[$vol_idx]}"
+            tmp="$(jq --arg f "$feat_label" --arg v "$vol_label" --arg cpu "$bl" \
+                '.measurements += [{"feature":$f,"volume":$v,"cpu_pct":$cpu,"rss_mb":"0.0","rss_kb":0}]' "$OUTPUT")"
             echo "$tmp" > "$OUTPUT"
-            echo "    CPU: 0.0% (no agent), RSS: 0.0 MB"
+            echo "    Baseline system CPU: ${bl}% (subtracted from agent measurements)"
         done
         continue
     fi
@@ -609,8 +705,9 @@ echo ""
 echo ""
 echo "## Resource Consumption — ${PROFILE}"
 echo ""
-echo "> CPU% = system-wide busy (user+sys+irq+softirq) / total — includes eBPF softirq overhead."
-echo "> Compare each feature row against 'no-agent' at the same traffic volume for true eBPF cost."
+echo "> CPU% = (system CPU with agent) − (baseline system CPU at same volume, no agent)."
+echo "> Each measurement averaged over ${RUNS_PER_MEASURE} runs to reduce variance."
+echo "> Isolates agent + eBPF overhead only — excludes iperf3, kernel networking, etc."
 echo "> max-bandwidth = ~${MAX_BW_GBPS} Gbps (measured link maximum, no rate cap)."
 echo ""
 echo "| Feature | Traffic | CPU % | RSS (MB) |"
