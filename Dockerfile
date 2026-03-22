@@ -16,7 +16,7 @@ ARG TARGETARCH
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        protobuf-compiler musl-tools cmake flex bison wget && \
+        protobuf-compiler musl-tools cmake flex bison wget linux-libc-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Build static libpcap against musl for fully static linking
