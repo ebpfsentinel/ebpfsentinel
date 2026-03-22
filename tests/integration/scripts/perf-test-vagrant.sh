@@ -122,7 +122,11 @@ vm_extract_ebpf_programs() {
         EBPF_DIR=/usr/local/lib/ebpfsentinel
         CID=$(docker create ebpfsentinel:latest true)
         sudo mkdir -p "$EBPF_DIR"
-        for prog in xdp-firewall xdp-ratelimit tc-ids tc-threatintel uprobe-dlp; do
+        for prog in xdp-firewall xdp-firewall-reject xdp-ratelimit xdp-ratelimit-syncookie \
+                    xdp-loadbalancer \
+                    tc-ids tc-threatintel tc-conntrack tc-dns tc-nat-ingress tc-nat-egress \
+                    tc-qos tc-scrub \
+                    uprobe-dlp; do
             sudo docker cp "${CID}:${EBPF_DIR}/${prog}" "${EBPF_DIR}/${prog}" 2>/dev/null && \
                 echo "  Extracted: ${prog}" || \
                 echo "  Skipped:  ${prog} (not in image)"
