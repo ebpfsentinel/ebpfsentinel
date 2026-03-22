@@ -62,7 +62,7 @@ mod tests {
             filter: "host 1.2.3.4".to_string(),
             duration_secs: 60,
             snap_length: 1500,
-            output_path: "/tmp/capture.pcap".to_string(),
+            output_path: "/var/lib/ebpfsentinel/captures/capture.pcap".to_string(),
             interface: "eth0".to_string(),
             status: CaptureStatus::Running,
             started_at_ns: 1_000_000_000,

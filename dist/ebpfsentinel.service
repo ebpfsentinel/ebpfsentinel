@@ -10,7 +10,8 @@ Restart=on-failure
 RestartSec=5s
 
 # eBPF requires BPF, NET_ADMIN, and SYS_ADMIN capabilities
-AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN
+# CAP_NET_RAW is required for pcap packet capture (POST /api/v1/captures/manual)
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW
 
 # Security hardening
 NoNewPrivileges=yes

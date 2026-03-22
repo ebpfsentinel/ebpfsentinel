@@ -86,7 +86,7 @@ pub async fn start_capture(
 
     let id = format!("cap-{}", now_ns / 1_000_000);
     let interface = req.interface.unwrap_or_else(|| "any".to_string());
-    let output_path = format!("/tmp/ebpfsentinel-{id}.pcap");
+    let output_path = format!("/var/lib/ebpfsentinel/captures/{id}.pcap");
 
     let session = CaptureSession {
         id: id.clone(),
@@ -335,7 +335,7 @@ mod tests {
             filter: "host 1.2.3.4".to_string(),
             duration_secs: 60,
             snap_length: 1500,
-            output_path: "/tmp/cap.pcap".to_string(),
+            output_path: "/var/lib/ebpfsentinel/captures/cap.pcap".to_string(),
             interface: "eth0".to_string(),
             status: "running".to_string(),
             file_size_bytes: 0,

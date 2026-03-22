@@ -30,6 +30,14 @@ if [[ ! -f /sys/kernel/btf/vmlinux ]]; then
   exit 1
 fi
 
+# Check for libpcap (optional — only needed for manual packet capture)
+if ! ldconfig -p 2>/dev/null | grep -q libpcap; then
+  echo "Warning: libpcap not found. Packet capture (POST /api/v1/captures/manual) will not work." >&2
+  echo "         Install with: apt-get install libpcap0.8 (Debian/Ubuntu) or dnf install libpcap (RHEL/Fedora)." >&2
+  echo "         This is optional — all other features work without it." >&2
+  echo ""
+fi
+
 # ── Determine source directory ────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,9 +65,10 @@ else
   echo "Configuration already exists at ${INSTALL_ETC}/config.yaml, skipping."
 fi
 
-# ── Create state directory ────────────────────────────────────────
+# ── Create state directories ─────────────────────────────────────
 
 mkdir -p "${INSTALL_VAR}"
+mkdir -p "${INSTALL_VAR}/captures"
 
 # ── Install systemd unit ──────────────────────────────────────────
 
