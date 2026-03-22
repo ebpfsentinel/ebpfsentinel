@@ -90,7 +90,10 @@ impl LbMapManager {
                     }
                 }
                 None => {
-                    debug!(backend_id, "no ifindex resolved for backend (fallback to XDP_TX)");
+                    debug!(
+                        backend_id,
+                        "no ifindex resolved for backend (fallback to XDP_TX)"
+                    );
                 }
             }
         }

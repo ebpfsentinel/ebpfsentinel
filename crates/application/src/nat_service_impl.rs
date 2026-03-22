@@ -53,6 +53,11 @@ impl NatAppService {
         self.map_port = Some(port);
     }
 
+    /// Clear the eBPF map port (program unloaded).
+    pub fn clear_map_port(&mut self) {
+        self.map_port = None;
+    }
+
     /// Reload DNAT rules. Validates and syncs to eBPF.
     pub fn reload_dnat_rules(&mut self, rules: Vec<NatRule>) -> Result<(), DomainError> {
         for rule in &rules {

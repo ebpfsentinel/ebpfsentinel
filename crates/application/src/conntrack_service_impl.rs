@@ -43,6 +43,11 @@ impl ConnTrackAppService {
         self.map_port = Some(port);
     }
 
+    /// Clear the eBPF map port (program unloaded).
+    pub fn clear_map_port(&mut self) {
+        self.map_port = None;
+    }
+
     /// Reload conntrack settings and sync to eBPF.
     pub fn reload_settings(&mut self, settings: ConnTrackSettings) -> Result<(), DomainError> {
         self.settings = settings;

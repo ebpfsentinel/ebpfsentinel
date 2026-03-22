@@ -6,6 +6,7 @@ use aya::maps::{MapData, RingBuf};
 use ebpf_common::dns::DnsEvent;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 /// Reads DNS events from the eBPF `DNS_EVENTS` `RingBuf`.
@@ -30,15 +31,26 @@ impl DnsEventReader {
     }
 
     /// Run the DNS event reader loop, sending parsed events to `tx`.
-    pub async fn run(self, tx: mpsc::Sender<AgentEvent>) {
+    ///
+    /// Exits when the `cancel` token is triggered, the `RingBuf` errors, or
+    /// the runtime shuts down.
+    pub async fn run(self, tx: mpsc::Sender<AgentEvent>, cancel: CancellationToken) {
         let mut async_fd = self.ring_buf;
 
         loop {
-            let mut guard = match async_fd.readable_mut().await {
-                Ok(guard) => guard,
-                Err(e) => {
-                    error!("DNS RingBuf readable error: {e}");
+            let mut guard = tokio::select! {
+                () = cancel.cancelled() => {
+                    info!("DNS event reader cancelled");
                     break;
+                }
+                result = async_fd.readable_mut() => {
+                    match result {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            error!("DNS RingBuf readable error: {e}");
+                            break;
+                        }
+                    }
                 }
             };
 

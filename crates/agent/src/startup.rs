@@ -70,6 +70,7 @@ use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
 use ports::secondary::metrics_port::{FirewallMetrics, MetricsPort};
 use ports::secondary::rule_change_store::RuleChangeStore;
 use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use infrastructure::config::{LogFormat, LogLevel};
@@ -861,8 +862,12 @@ pub async fn run(
     // 10a. XDP Firewall
     let mut fw_loader: Option<EbpfLoader> = None;
     let fw_ok = if config.firewall.enabled {
-        match try_load_xdp_firewall(&ebpf_dir, &config, &domain_rules, event_tx.clone()) {
-            Ok((loader, map_manager, fw_metrics_rdr)) => {
+        match try_load_xdp_firewall(&ebpf_dir, &config, &domain_rules) {
+            Ok((loader, map_manager, fw_metrics_rdr, reader)) => {
+                let event_tx_clone = event_tx.clone();
+                tokio::spawn(
+                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                );
                 let mut svc = firewall_svc.write().await;
                 svc.set_map_port(Box::new(map_manager));
                 if let Some(rdr) = fw_metrics_rdr {
@@ -892,8 +897,12 @@ pub async fn run(
     // 10b. XDP Rate Limiter
     let mut lb_pre_loaded = false;
     let rl_ok = if config.ratelimit.enabled {
-        match try_load_xdp_ratelimit(&ebpf_dir, &config, event_tx.clone(), fw_ok) {
-            Ok((mut rl_loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs)) => {
+        match try_load_xdp_ratelimit(&ebpf_dir, &config, fw_ok) {
+            Ok((mut rl_loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs, reader)) => {
+                let event_tx_clone = event_tx.clone();
+                tokio::spawn(
+                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                );
                 metrics_readers.extend(rl_rdrs);
                 if let Some(rl_mgr) = rl_mgr_opt {
                     let mut svc = rl_svc.write().await;
@@ -944,7 +953,9 @@ pub async fn run(
                         info!("XDP tail-call: ratelimit → syncookie wired (slot 0)");
                     }
                     Err(e) => {
-                        warn!("xdp-ratelimit-syncookie load failed (syncookie falls back to DROP): {e}");
+                        warn!(
+                            "xdp-ratelimit-syncookie load failed (syncookie falls back to DROP): {e}"
+                        );
                     }
                 }
                 // Wire tail-call: ratelimit → loadbalancer (slot 1). Best-effort.
@@ -953,22 +964,34 @@ pub async fn run(
                 // the LB can DNAT service traffic. Without this, PASS goes
                 // directly to the kernel, bypassing the LB entirely.
                 if config.loadbalancer.enabled {
-                    match try_load_xdp_loadbalancer(&ebpf_dir, &config, event_tx.clone(), true) {
-                        Ok((lb_loader_early, lb_mgr, lb_metrics_rdr)) => {
+                    match try_load_xdp_loadbalancer(&ebpf_dir, &config, true) {
+                        Ok((lb_loader_early, lb_mgr, lb_metrics_rdr, lb_reader)) => {
+                            let event_tx_clone = event_tx.clone();
+                            tokio::spawn(async move {
+                                lb_reader
+                                    .run(event_tx_clone, CancellationToken::new())
+                                    .await
+                            });
                             lb_svc.write().await.set_map_port(Box::new(lb_mgr));
                             if let Some(rdr) = lb_metrics_rdr {
                                 metrics_readers.push(rdr);
                             }
                             if let Ok(lb_fd) = lb_loader_early.xdp_program_fd("xdp_loadbalancer") {
-                                if let Err(e) = rl_loader.set_tail_call_target("RL_PROG_ARRAY", 1, &lb_fd) {
+                                if let Err(e) =
+                                    rl_loader.set_tail_call_target("RL_PROG_ARRAY", 1, &lb_fd)
+                                {
                                     warn!("ratelimit → LB tail-call wiring failed: {e}");
                                 } else {
-                                    info!("XDP tail-call: ratelimit → loadbalancer wired (RL slot 1)");
+                                    info!(
+                                        "XDP tail-call: ratelimit → loadbalancer wired (RL slot 1)"
+                                    );
                                 }
                             }
                             // Also wire into firewall (slot 2) for the no-ratelimit fallback path.
                             if let Some(ref mut fw) = fw_loader {
-                                if let Ok(lb_fd) = lb_loader_early.xdp_program_fd("xdp_loadbalancer") {
+                                if let Ok(lb_fd) =
+                                    lb_loader_early.xdp_program_fd("xdp_loadbalancer")
+                                {
                                     let _ = fw.set_tail_call_target("XDP_PROG_ARRAY", 2, &lb_fd);
                                 }
                             }
@@ -1070,8 +1093,14 @@ pub async fn run(
     // When ratelimit IS active, the RL→LB wiring was already done above.
     if fw_ok && !rl_ok && config.loadbalancer.enabled && !lb_pre_loaded {
         if let Some(ref mut fw) = fw_loader {
-            match try_load_xdp_loadbalancer(&ebpf_dir, &config, event_tx.clone(), true) {
-                Ok((lb_loader, lb_mgr, lb_metrics_rdr)) => {
+            match try_load_xdp_loadbalancer(&ebpf_dir, &config, true) {
+                Ok((lb_loader, lb_mgr, lb_metrics_rdr, lb_reader)) => {
+                    let event_tx_clone = event_tx.clone();
+                    tokio::spawn(async move {
+                        lb_reader
+                            .run(event_tx_clone, CancellationToken::new())
+                            .await
+                    });
                     lb_svc.write().await.set_map_port(Box::new(lb_mgr));
                     if let Some(rdr) = lb_metrics_rdr {
                         metrics_readers.push(rdr);
@@ -1100,8 +1129,12 @@ pub async fn run(
 
     // 10c. TC IDS
     let ids_ok = if config.ids.enabled {
-        match try_load_tc_ids(&ebpf_dir, &config, event_tx.clone()) {
-            Ok((mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr)) => {
+        match try_load_tc_ids(&ebpf_dir, &config) {
+            Ok((mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr, reader)) => {
+                let event_tx_clone = event_tx.clone();
+                tokio::spawn(
+                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                );
                 if let Some(ids_mgr) = ids_mgr_opt {
                     ids_svc.write().await.set_map_port(Box::new(ids_mgr));
                 }
@@ -1133,8 +1166,12 @@ pub async fn run(
 
     // 10d. TC Threat Intel
     let ti_ok = if config.threatintel.enabled {
-        match try_load_tc_threatintel(&ebpf_dir, &config, event_tx.clone()) {
-            Ok((loader, ti_mgr_opt, cfg_mgr_opt, ti_rdr)) => {
+        match try_load_tc_threatintel(&ebpf_dir, &config) {
+            Ok((loader, ti_mgr_opt, cfg_mgr_opt, ti_rdr, reader)) => {
+                let event_tx_clone = event_tx.clone();
+                tokio::spawn(
+                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                );
                 if let Some(rdr) = ti_rdr {
                     metrics_readers.push(rdr);
                 }
@@ -1174,8 +1211,12 @@ pub async fn run(
 
     // 10e. TC DNS
     let dns_ok = if config.dns.enabled {
-        match try_load_tc_dns(&ebpf_dir, &config, event_tx.clone()) {
-            Ok((loader, dns_rdr)) => {
+        match try_load_tc_dns(&ebpf_dir, &config) {
+            Ok((loader, dns_rdr, reader)) => {
+                let event_tx_clone = event_tx.clone();
+                tokio::spawn(
+                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                );
                 if let Some(rdr) = dns_rdr {
                     metrics_readers.push(rdr);
                 }
@@ -1197,8 +1238,12 @@ pub async fn run(
 
     // 10f. Uprobe DLP
     let dlp_ok = if config.dlp.enabled {
-        match try_load_uprobe_dlp(&ebpf_dir, &config, event_tx.clone()) {
-            Ok((loader, dlp_rdr)) => {
+        match try_load_uprobe_dlp(&ebpf_dir, &config) {
+            Ok((loader, dlp_rdr, reader)) => {
+                let event_tx_clone = event_tx.clone();
+                tokio::spawn(
+                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                );
                 if let Some(rdr) = dlp_rdr {
                     metrics_readers.push(rdr);
                 }
@@ -1220,8 +1265,14 @@ pub async fn run(
 
     // 10g. TC ConnTrack
     let ct_ok = if config.conntrack.enabled {
-        match try_load_tc_conntrack(&ebpf_dir, &config, event_tx.clone()) {
-            Ok((loader, ct_mgr, ct_rdr)) => {
+        match try_load_tc_conntrack(&ebpf_dir, &config) {
+            Ok((loader, ct_mgr, ct_rdr, opt_reader)) => {
+                if let Some(reader) = opt_reader {
+                    let event_tx_clone = event_tx.clone();
+                    tokio::spawn(async move {
+                        reader.run(event_tx_clone, CancellationToken::new()).await
+                    });
+                }
                 conntrack_svc.write().await.set_map_port(Box::new(ct_mgr));
                 if let Some(rdr) = ct_rdr {
                     metrics_readers.push(rdr);
@@ -1326,8 +1377,14 @@ pub async fn run(
         // LB was already loaded and wired during the ratelimit block.
         true
     } else if config.loadbalancer.enabled {
-        match try_load_xdp_loadbalancer(&ebpf_dir, &config, event_tx.clone(), xdp_chain_active) {
-            Ok((lb_loader, lb_mgr, lb_metrics_rdr)) => {
+        match try_load_xdp_loadbalancer(&ebpf_dir, &config, xdp_chain_active) {
+            Ok((lb_loader, lb_mgr, lb_metrics_rdr, lb_reader)) => {
+                let event_tx_clone = event_tx.clone();
+                tokio::spawn(async move {
+                    lb_reader
+                        .run(event_tx_clone, CancellationToken::new())
+                        .await
+                });
                 lb_svc.write().await.set_map_port(Box::new(lb_mgr));
                 if let Some(rdr) = lb_metrics_rdr {
                     metrics_readers.push(rdr);
@@ -1391,7 +1448,77 @@ pub async fn run(
         status.insert("xdp_loadbalancer".to_string(), lb_ok);
     }
 
-    // ── 10½. Spawn config hot-reload task (after eBPF loading for EbpfMapHolder) ──
+    // ── 10½. Build EbpfProgramManager from loaded state ──────────────
+    let ebpf_manager = {
+        let mut mgr = crate::ebpf_lifecycle::EbpfProgramManager::new(
+            event_tx.clone(),
+            Arc::new(crate::runtime::ServiceHandles {
+                firewall_svc: Arc::clone(&firewall_svc),
+                ids_svc: Arc::clone(&ids_svc),
+                ips_svc: Arc::clone(&ips_svc),
+                rl_svc: Arc::clone(&rl_svc),
+                ti_svc: Arc::clone(&ti_svc),
+                dns_blocklist_svc: dns_blocklist_ref.clone(),
+                l7_svc: Arc::clone(&l7_svc),
+                ddos_svc: Arc::clone(&ddos_svc),
+                dlp_svc: Arc::clone(&dlp_svc),
+                conntrack_svc: Arc::clone(&conntrack_svc),
+                nat_svc: Arc::clone(&nat_svc),
+                lb_svc: Arc::clone(&lb_svc),
+                qos_svc: Arc::clone(&qos_svc),
+                zone_svc: Arc::clone(&zone_svc),
+                alias_svc: Arc::clone(&alias_svc),
+                routing_svc: Arc::clone(&routing_svc),
+                schedule_svc: Arc::clone(&schedule_svc),
+                audit_svc: Arc::clone(&audit_svc),
+                dns_cache_svc: dns_cache_svc_concrete.clone(),
+                metrics: Arc::clone(&metrics),
+                ebpf_loaded: Arc::clone(&ebpf_loaded),
+            }),
+            ebpf_dir.clone(),
+        );
+        // Mark startup-loaded programs so hot-reload doesn't try to re-load them.
+        // The actual loaders are kept alive in ebpf_state (moved below).
+        if fw_ok {
+            mgr.mark_startup_loaded("xdp_firewall");
+        }
+        if rl_ok {
+            mgr.mark_startup_loaded("xdp_ratelimit");
+        }
+        if ids_ok {
+            mgr.mark_startup_loaded("tc_ids");
+        }
+        if ti_ok {
+            mgr.mark_startup_loaded("tc_threatintel");
+        }
+        if dns_ok {
+            mgr.mark_startup_loaded("tc_dns");
+        }
+        if dlp_ok {
+            mgr.mark_startup_loaded("uprobe_dlp");
+        }
+        if ct_ok {
+            mgr.mark_startup_loaded("tc_conntrack");
+        }
+        if nat_ok {
+            mgr.mark_startup_loaded("tc_nat");
+        }
+        if scrub_ok {
+            mgr.mark_startup_loaded("tc_scrub");
+        }
+        if lb_ok {
+            mgr.mark_startup_loaded("xdp_loadbalancer");
+        }
+        // Move map holder fields into the manager
+        mgr.config_flags = ebpf_map_holder.config_flags;
+        mgr.l7_ports = ebpf_map_holder.l7_ports;
+        if let Some(ig) = ebpf_map_holder.iface_groups {
+            mgr.iface_groups = ig;
+        }
+        Arc::new(tokio::sync::Mutex::new(mgr))
+    };
+
+    // Spawn config hot-reload task
     let reload_handle = crate::reload::spawn_reload_task(
         config_path.to_string(),
         reload_service,
@@ -1399,7 +1526,7 @@ pub async fn run(
         cancel_token.clone(),
         reload_trigger_rx,
         Arc::clone(&shared_config),
-        ebpf_map_holder,
+        Arc::clone(&ebpf_manager),
     );
 
     // ── 11. Spawn event dispatcher (replaces flat event consumer) ───
@@ -1681,9 +1808,10 @@ pub async fn run(
         );
         let kr_cancel = cancel_token.clone();
         let kr_metrics = Arc::clone(&metrics) as Arc<dyn MetricsPort>;
+        let shared_readers = Arc::new(RwLock::new(metrics_readers));
         tokio::spawn(async move {
             crate::ebpf_metrics::run_kernel_metrics_loop(
-                metrics_readers,
+                shared_readers,
                 kr_metrics,
                 Duration::from_secs(10),
                 kr_cancel,
@@ -1803,8 +1931,8 @@ pub async fn run(
     let _ = tokio::time::timeout(Duration::from_secs(1), reload_handle).await;
 
     info!("shutdown phase 4: detaching eBPF programs");
-    drop(ebpf_state);
-    EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
+    ebpf_manager.lock().await.detach_all().await;
+    drop(ebpf_state); // Drop startup loaders (detaches legacy programs)
 
     info!("shutdown phase 5: draining events and alerts");
     drop(event_tx); // close event channel so dispatcher sees channel closed
@@ -1880,13 +2008,17 @@ pub fn read_ebpf_program(dir: &str, name: &str) -> anyhow::Result<Vec<u8>> {
 
 // ── Per-program load functions ───────────────────────────────────────
 
-/// Load the XDP firewall program: attach XDP, populate rules, start event reader.
+/// Load the XDP firewall program: attach XDP, populate rules, create event reader.
 pub fn try_load_xdp_firewall(
     ebpf_dir: &str,
     config: &AgentConfig,
     domain_rules: &[FirewallRule],
-    event_tx: mpsc::Sender<AgentEvent>,
-) -> anyhow::Result<(EbpfLoader, FirewallMapManager, Option<MetricsReader>)> {
+) -> anyhow::Result<(
+    EbpfLoader,
+    FirewallMapManager,
+    Option<MetricsReader>,
+    EventReader,
+)> {
     use ebpf_common::firewall::{DEFAULT_POLICY_DROP, DEFAULT_POLICY_PASS};
     use infrastructure::config::DefaultPolicy;
 
@@ -1934,9 +2066,8 @@ pub fn try_load_xdp_firewall(
     let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "FIREWALL_METRICS").ok();
 
     let reader = EventReader::new(loader.ebpf_mut())?;
-    tokio::spawn(async move { reader.run(event_tx).await });
 
-    Ok((loader, map_manager, metrics_rdr))
+    Ok((loader, map_manager, metrics_rdr, reader))
 }
 
 /// Load the xdp-firewall-reject program and wire it as a tail-call target.
@@ -1963,12 +2094,13 @@ pub fn try_load_xdp_firewall_reject(
     Ok(reject_loader)
 }
 
-/// Load result for xdp-ratelimit: loader, map manager, LPM manager, metrics readers.
+/// Load result for xdp-ratelimit: loader, map manager, LPM manager, metrics readers, event reader.
 pub type XdpRatelimitResult = (
     EbpfLoader,
     Option<RateLimitMapManager>,
     Option<RateLimitLpmManager>,
     Vec<MetricsReader>,
+    EventReader,
 );
 
 /// Load the xdp-ratelimit-syncookie program and wire it as a tail-call target.
@@ -1991,7 +2123,6 @@ pub fn try_load_xdp_ratelimit_syncookie(
 pub fn try_load_xdp_ratelimit(
     ebpf_dir: &str,
     config: &AgentConfig,
-    event_tx: mpsc::Sender<AgentEvent>,
     firewall_active: bool,
 ) -> anyhow::Result<XdpRatelimitResult> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-ratelimit")?;
@@ -2075,26 +2206,22 @@ pub fn try_load_xdp_ratelimit(
     }
 
     let reader = EventReader::new(loader.ebpf_mut())?;
-    tokio::spawn(async move { reader.run(event_tx).await });
 
-    Ok((loader, rl_mgr_opt, rl_lpm_opt, rdrs))
+    Ok((loader, rl_mgr_opt, rl_lpm_opt, rdrs, reader))
 }
 
-/// IDS program load result: loader, IDS map manager, L7 ports manager, config flags manager, metrics reader.
+/// IDS program load result: loader, IDS map manager, L7 ports manager, config flags manager, metrics reader, event reader.
 pub type TcIdsResult = (
     EbpfLoader,
     Option<IdsMapManager>,
     Option<L7PortsManager>,
     Option<ConfigFlagsManager>,
     Option<MetricsReader>,
+    EventReader,
 );
 
-/// Load the TC IDS program: attach TC ingress, set up maps, start event reader.
-pub fn try_load_tc_ids(
-    ebpf_dir: &str,
-    config: &AgentConfig,
-    event_tx: mpsc::Sender<AgentEvent>,
-) -> anyhow::Result<TcIdsResult> {
+/// Load the TC IDS program: attach TC ingress, set up maps, create event reader.
+pub fn try_load_tc_ids(ebpf_dir: &str, config: &AgentConfig) -> anyhow::Result<TcIdsResult> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-ids")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
@@ -2144,7 +2271,6 @@ pub fn try_load_tc_ids(
     let ids_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "IDS_METRICS").ok();
 
     let reader = EventReader::new(loader.ebpf_mut())?;
-    tokio::spawn(async move { reader.run(event_tx).await });
 
     Ok((
         loader,
@@ -2152,22 +2278,23 @@ pub fn try_load_tc_ids(
         l7_mgr_opt,
         cfg_mgr_opt,
         ids_metrics_rdr,
+        reader,
     ))
 }
 
-/// Load the TC threat intel program: attach TC ingress, set up maps, start event reader.
+/// Load the TC threat intel program: attach TC ingress, set up maps, create event reader.
 /// Threat intel program load result.
 pub type TcThreatIntelResult = (
     EbpfLoader,
     Option<ThreatIntelMapManager>,
     Option<ConfigFlagsManager>,
     Option<MetricsReader>,
+    EventReader,
 );
 
 pub fn try_load_tc_threatintel(
     ebpf_dir: &str,
     config: &AgentConfig,
-    event_tx: mpsc::Sender<AgentEvent>,
 ) -> anyhow::Result<TcThreatIntelResult> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-threatintel")?;
     let mut loader =
@@ -2204,17 +2331,15 @@ pub fn try_load_tc_threatintel(
     let ti_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "THREATINTEL_METRICS").ok();
 
     let reader = EventReader::new(loader.ebpf_mut())?;
-    tokio::spawn(async move { reader.run(event_tx).await });
 
-    Ok((loader, ti_mgr_opt, cfg_mgr_opt, ti_metrics_rdr))
+    Ok((loader, ti_mgr_opt, cfg_mgr_opt, ti_metrics_rdr, reader))
 }
 
-/// Load the TC DNS program: attach TC ingress, start DNS event reader.
+/// Load the TC DNS program: attach TC ingress, create DNS event reader.
 pub fn try_load_tc_dns(
     ebpf_dir: &str,
     config: &AgentConfig,
-    event_tx: mpsc::Sender<AgentEvent>,
-) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>)> {
+) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>, DnsEventReader)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-dns")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
@@ -2226,9 +2351,8 @@ pub fn try_load_tc_dns(
     let dns_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "DNS_METRICS").ok();
 
     let reader = DnsEventReader::new(loader.ebpf_mut())?;
-    tokio::spawn(async move { reader.run(event_tx).await });
 
-    Ok((loader, dns_metrics_rdr))
+    Ok((loader, dns_metrics_rdr, reader))
 }
 
 /// Load the uprobe DLP program: attach uprobes to SSL functions, start DLP event reader.
@@ -2244,8 +2368,7 @@ const SSL_LIBRARY_CANDIDATES: &[&str] = &[
 pub fn try_load_uprobe_dlp(
     ebpf_dir: &str,
     _config: &AgentConfig,
-    event_tx: mpsc::Sender<AgentEvent>,
-) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>)> {
+) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>, DlpEventReader)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "uprobe-dlp")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
@@ -2274,10 +2397,9 @@ pub fn try_load_uprobe_dlp(
     let dlp_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "DLP_METRICS").ok();
 
     let reader = DlpEventReader::new(loader.ebpf_mut())?;
-    tokio::spawn(async move { reader.run(event_tx).await });
 
     info!(library = %ssl_path, "uprobe-dlp attached");
-    Ok((loader, dlp_metrics_rdr))
+    Ok((loader, dlp_metrics_rdr, reader))
 }
 
 /// Search for a usable SSL/TLS shared library on the system.
@@ -2362,12 +2484,16 @@ pub fn parse_algorithm_byte(algorithm: &str) -> u8 {
     }
 }
 
-/// Load the TC conntrack program: attach TC ingress, create map manager, start event reader.
+/// Load the TC conntrack program: attach TC ingress, create map manager, create event reader.
 pub fn try_load_tc_conntrack(
     ebpf_dir: &str,
     config: &AgentConfig,
-    event_tx: mpsc::Sender<AgentEvent>,
-) -> anyhow::Result<(EbpfLoader, ConnTrackMapManager, Option<MetricsReader>)> {
+) -> anyhow::Result<(
+    EbpfLoader,
+    ConnTrackMapManager,
+    Option<MetricsReader>,
+    Option<EventReader>,
+)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-conntrack")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
@@ -2381,11 +2507,9 @@ pub fn try_load_tc_conntrack(
 
     // tc-conntrack has no EVENTS RingBuf (pure state tracking, no events).
     // EventReader is optional — skip if the map doesn't exist.
-    if let Ok(reader) = EventReader::new(loader.ebpf_mut()) {
-        tokio::spawn(async move { reader.run(event_tx).await });
-    }
+    let opt_reader = EventReader::new(loader.ebpf_mut()).ok();
 
-    Ok((loader, ct_mgr, ct_metrics_rdr))
+    Ok((loader, ct_mgr, ct_metrics_rdr, opt_reader))
 }
 
 /// Load the TC NAT programs (ingress + egress): attach TC, create map manager.
@@ -2504,12 +2628,12 @@ pub fn build_geoip_adapter(
 pub fn try_load_xdp_loadbalancer(
     ebpf_dir: &str,
     config: &AgentConfig,
-    event_tx: mpsc::Sender<AgentEvent>,
     xdp_chain_active: bool,
 ) -> anyhow::Result<(
     EbpfLoader,
     adapters::ebpf::LbMapManager,
     Option<MetricsReader>,
+    EventReader,
 )> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-loadbalancer")?;
     let mut loader =
@@ -2533,7 +2657,6 @@ pub fn try_load_xdp_loadbalancer(
 
     // EventReader for LB events from RingBuf
     let reader = EventReader::new(loader.ebpf_mut())?;
-    tokio::spawn(async move { reader.run(event_tx).await });
 
-    Ok((loader, lb_mgr, metrics_rdr))
+    Ok((loader, lb_mgr, metrics_rdr, reader))
 }

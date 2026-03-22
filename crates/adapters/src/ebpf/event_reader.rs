@@ -6,6 +6,7 @@ use aya::maps::{MapData, RingBuf};
 use ebpf_common::event::{EVENT_TYPE_L7, PacketEvent};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 /// Reads packet events from the eBPF EVENTS `RingBuf`.
@@ -33,17 +34,26 @@ impl EventReader {
     /// Run the event reader loop, sending parsed events to `tx`.
     ///
     /// This is a long-running async task. It exits when the `RingBuf`
-    /// encounters an unrecoverable error or the runtime shuts down.
-    pub async fn run(self, tx: mpsc::Sender<AgentEvent>) {
+    /// encounters an unrecoverable error, the `cancel` token is triggered,
+    /// or the runtime shuts down.
+    pub async fn run(self, tx: mpsc::Sender<AgentEvent>, cancel: CancellationToken) {
         let mut async_fd = self.ring_buf;
 
         loop {
-            // Wait for kernel to signal data available
-            let mut guard = match async_fd.readable_mut().await {
-                Ok(guard) => guard,
-                Err(e) => {
-                    error!("RingBuf readable error: {e}");
+            // Wait for kernel to signal data available, or cancellation
+            let mut guard = tokio::select! {
+                () = cancel.cancelled() => {
+                    info!("event reader cancelled");
                     break;
+                }
+                result = async_fd.readable_mut() => {
+                    match result {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            error!("RingBuf readable error: {e}");
+                            break;
+                        }
+                    }
                 }
             };
 

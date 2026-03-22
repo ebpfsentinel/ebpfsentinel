@@ -32,5 +32,9 @@ pub fn populate_cpumap(ebpf: &mut Ebpf, map_name: &str) {
             populated += 1;
         }
     }
-    info!(map_name, cpus = populated, "CpuMap populated for CPU steering");
+    info!(
+        map_name,
+        cpus = populated,
+        "CpuMap populated for CPU steering"
+    );
 }

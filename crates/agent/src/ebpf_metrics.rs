@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use adapters::ebpf::MetricsReader;
 use ports::secondary::metrics_port::MetricsPort;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 /// Periodically read eBPF `PerCpuArray` metrics maps and record values
@@ -11,8 +12,11 @@ use tokio_util::sync::CancellationToken;
 /// Each `MetricsReader` owns a single `*_METRICS` map. We read a fixed
 /// set of indices per map (4 by default: matched, dropped, errors, events dropped)
 /// and expose them as Prometheus counters via `record_packet`.
+///
+/// Accepts a shared `Arc<RwLock<Vec<MetricsReader>>>` so that readers
+/// can be added/removed dynamically as eBPF programs are loaded/unloaded.
 pub async fn run_kernel_metrics_loop(
-    readers: Vec<MetricsReader>,
+    readers: Arc<RwLock<Vec<MetricsReader>>>,
     metrics: Arc<dyn MetricsPort>,
     interval: Duration,
     cancel: CancellationToken,
@@ -27,7 +31,8 @@ pub async fn run_kernel_metrics_loop(
             _ = ticker.tick() => {}
         }
 
-        for reader in &readers {
+        let readers_lock = readers.read().await;
+        for reader in readers_lock.iter() {
             let map_name = reader.map_name();
             // Read common indices: 0=matched/passed, 1=dropped, 2=errors, 3=events_dropped
             // Each map may have more indices, but these 4 are universal.

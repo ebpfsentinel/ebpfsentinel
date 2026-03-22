@@ -50,6 +50,11 @@ impl RateLimitAppService {
         self.sync_ebpf_maps();
     }
 
+    /// Clear the eBPF map port (program unloaded).
+    pub fn clear_map_port(&mut self) {
+        self.map_port = None;
+    }
+
     /// Set the `GeoIP` port for country resolution.
     pub fn set_geoip_port(&mut self, port: Arc<dyn GeoIpPort>) {
         self.geoip = Some(port);

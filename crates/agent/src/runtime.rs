@@ -431,11 +431,12 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
 // ── eBPF lifecycle ──────────────────────────────────────────────
 
 use adapters::ebpf::{
-    EbpfLoader, IdsMirrorMapManager, InterfaceGroupsManager, MetricsReader,
-    TenantSubnetMapManager, TenantVlanMapManager,
+    EbpfLoader, IdsMirrorMapManager, InterfaceGroupsManager, MetricsReader, TenantSubnetMapManager,
+    TenantVlanMapManager,
 };
 use application::packet_pipeline::AgentEvent;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::reload::EbpfMapHolder;
 use crate::startup::{self, EbpfState};
@@ -503,8 +504,12 @@ pub async fn load_ebpf_programs(
     // ── XDP Firewall ────────────────────────────────────────────
     let mut fw_loader: Option<EbpfLoader> = None;
     let fw_ok = if config.firewall.enabled {
-        match startup::try_load_xdp_firewall(&ebpf_dir, config, &domain_rules, event_tx.clone()) {
-            Ok((loader, map_manager, fw_metrics_rdr)) => {
+        match startup::try_load_xdp_firewall(&ebpf_dir, config, &domain_rules) {
+            Ok((loader, map_manager, fw_metrics_rdr, reader)) => {
+                let event_tx_clone = event_tx.clone();
+                tokio::spawn(
+                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                );
                 let mut svc = services.firewall_svc.write().await;
                 svc.set_map_port(Box::new(map_manager));
                 if let Some(rdr) = fw_metrics_rdr {
@@ -532,8 +537,12 @@ pub async fn load_ebpf_programs(
 
     // ── XDP Rate Limiter ────────────────────────────────────────
     let rl_ok = if config.ratelimit.enabled {
-        match startup::try_load_xdp_ratelimit(&ebpf_dir, config, event_tx.clone(), fw_ok) {
-            Ok((mut rl_loader, rl_mgr_opt, _rl_lpm_opt, rl_rdrs)) => {
+        match startup::try_load_xdp_ratelimit(&ebpf_dir, config, fw_ok) {
+            Ok((mut rl_loader, rl_mgr_opt, _rl_lpm_opt, rl_rdrs, reader)) => {
+                let event_tx_clone = event_tx.clone();
+                tokio::spawn(
+                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                );
                 metrics_readers.extend(rl_rdrs);
                 if let Some(rl_mgr) = rl_mgr_opt {
                     let mut svc = services.rl_svc.write().await;
@@ -582,8 +591,12 @@ pub async fn load_ebpf_programs(
 
     // ── TC IDS ──────────────────────────────────────────────────
     let ids_ok = if config.ids.enabled {
-        match startup::try_load_tc_ids(&ebpf_dir, config, event_tx.clone()) {
-            Ok((mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr)) => {
+        match startup::try_load_tc_ids(&ebpf_dir, config) {
+            Ok((mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr, reader)) => {
+                let event_tx_clone = event_tx.clone();
+                tokio::spawn(
+                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                );
                 if let Some(ids_mgr) = ids_mgr_opt {
                     services
                         .ids_svc
@@ -623,8 +636,12 @@ pub async fn load_ebpf_programs(
 
     // ── TC Threat Intel ─────────────────────────────────────────
     let ti_ok = if config.threatintel.enabled {
-        match startup::try_load_tc_threatintel(&ebpf_dir, config, event_tx.clone()) {
-            Ok((mut loader, ti_mgr_opt, cfg_mgr_opt, ti_rdr)) => {
+        match startup::try_load_tc_threatintel(&ebpf_dir, config) {
+            Ok((mut loader, ti_mgr_opt, cfg_mgr_opt, ti_rdr, reader)) => {
+                let event_tx_clone = event_tx.clone();
+                tokio::spawn(
+                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                );
                 if let Some(rdr) = ti_rdr {
                     metrics_readers.push(rdr);
                 }
@@ -650,8 +667,12 @@ pub async fn load_ebpf_programs(
 
     // ── TC DNS ──────────────────────────────────────────────────
     let dns_ok = if config.dns.enabled {
-        match startup::try_load_tc_dns(&ebpf_dir, config, event_tx.clone()) {
-            Ok((mut loader, dns_rdr)) => {
+        match startup::try_load_tc_dns(&ebpf_dir, config) {
+            Ok((mut loader, dns_rdr, reader)) => {
+                let event_tx_clone = event_tx.clone();
+                tokio::spawn(
+                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                );
                 if let Some(rdr) = dns_rdr {
                     metrics_readers.push(rdr);
                 }
@@ -671,8 +692,12 @@ pub async fn load_ebpf_programs(
 
     // ── Uprobe DLP ──────────────────────────────────────────────
     let dlp_ok = if config.dlp.enabled {
-        match startup::try_load_uprobe_dlp(&ebpf_dir, config, event_tx.clone()) {
-            Ok((mut loader, dlp_rdr)) => {
+        match startup::try_load_uprobe_dlp(&ebpf_dir, config) {
+            Ok((mut loader, dlp_rdr, reader)) => {
+                let event_tx_clone = event_tx.clone();
+                tokio::spawn(
+                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                );
                 if let Some(rdr) = dlp_rdr {
                     metrics_readers.push(rdr);
                 }
@@ -692,8 +717,14 @@ pub async fn load_ebpf_programs(
 
     // ── TC ConnTrack ────────────────────────────────────────────
     let ct_ok = if config.conntrack.enabled {
-        match startup::try_load_tc_conntrack(&ebpf_dir, config, event_tx.clone()) {
-            Ok((mut loader, ct_mgr, ct_rdr)) => {
+        match startup::try_load_tc_conntrack(&ebpf_dir, config) {
+            Ok((mut loader, ct_mgr, ct_rdr, opt_reader)) => {
+                if let Some(reader) = opt_reader {
+                    let event_tx_clone = event_tx.clone();
+                    tokio::spawn(async move {
+                        reader.run(event_tx_clone, CancellationToken::new()).await
+                    });
+                }
                 services
                     .conntrack_svc
                     .write()
@@ -772,8 +803,12 @@ pub async fn load_ebpf_programs(
 
     // ── XDP Load Balancer ───────────────────────────────────────
     let lb_ok = if config.loadbalancer.enabled {
-        match startup::try_load_xdp_loadbalancer(&ebpf_dir, config, event_tx.clone(), fw_ok || rl_ok) {
-            Ok((mut loader, lb_mgr, lb_metrics_rdr)) => {
+        match startup::try_load_xdp_loadbalancer(&ebpf_dir, config, fw_ok || rl_ok) {
+            Ok((mut loader, lb_mgr, lb_metrics_rdr, reader)) => {
+                let event_tx_clone = event_tx.clone();
+                tokio::spawn(
+                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                );
                 services.lb_svc.write().await.set_map_port(Box::new(lb_mgr));
                 if let Some(rdr) = lb_metrics_rdr {
                     metrics_readers.push(rdr);

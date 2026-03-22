@@ -115,7 +115,10 @@ impl EbpfLoader {
             .try_into()?;
 
         program.load()?;
-        info!(program_name, "XDP program loaded (tail-call target, no attach)");
+        info!(
+            program_name,
+            "XDP program loaded (tail-call target, no attach)"
+        );
         Ok(())
     }
 
@@ -221,6 +224,25 @@ impl EbpfLoader {
         let mut prog_array = ProgramArray::try_from(map)?;
         prog_array.set(index, target_fd, 0)?;
         info!(map_name, index, "tail-call target set in ProgramArray");
+        Ok(())
+    }
+
+    /// Clear a tail-call slot in the named `ProgramArray`.
+    ///
+    /// After clearing, a tail-call to this index becomes a no-op (the eBPF
+    /// `bpf_tail_call` helper returns without jumping).
+    pub fn clear_tail_call_target(
+        &mut self,
+        map_name: &str,
+        index: u32,
+    ) -> Result<(), anyhow::Error> {
+        let map = self
+            .ebpf
+            .map_mut(map_name)
+            .ok_or_else(|| anyhow::anyhow!("map '{map_name}' not found"))?;
+        let mut prog_array = ProgramArray::try_from(map)?;
+        prog_array.clear_index(&index)?;
+        info!(map_name, index, "tail-call slot cleared in ProgramArray");
         Ok(())
     }
 

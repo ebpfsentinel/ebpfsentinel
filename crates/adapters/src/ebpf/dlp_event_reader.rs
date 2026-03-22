@@ -6,6 +6,7 @@ use aya::maps::{MapData, RingBuf};
 use ebpf_common::dlp::{DLP_MAX_EXCERPT, DlpEvent};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 /// Reads DLP events from the eBPF `EVENTS` `RingBuf` of the uprobe-dlp program.
@@ -33,15 +34,26 @@ impl DlpEventReader {
     }
 
     /// Run the DLP event reader loop, sending parsed events to `tx`.
-    pub async fn run(self, tx: mpsc::Sender<AgentEvent>) {
+    ///
+    /// Exits when the `cancel` token is triggered, the `RingBuf` errors, or
+    /// the runtime shuts down.
+    pub async fn run(self, tx: mpsc::Sender<AgentEvent>, cancel: CancellationToken) {
         let mut async_fd = self.ring_buf;
 
         loop {
-            let mut guard = match async_fd.readable_mut().await {
-                Ok(guard) => guard,
-                Err(e) => {
-                    error!("DLP RingBuf readable error: {e}");
+            let mut guard = tokio::select! {
+                () = cancel.cancelled() => {
+                    info!("DLP event reader cancelled");
                     break;
+                }
+                result = async_fd.readable_mut() => {
+                    match result {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            error!("DLP RingBuf readable error: {e}");
+                            break;
+                        }
+                    }
                 }
             };
 

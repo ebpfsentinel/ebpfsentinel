@@ -4,12 +4,15 @@ use std::time::Duration;
 
 use adapters::auth::jwt_provider::JwtAuthProvider;
 use adapters::auth::oidc_provider::{self, OidcAuthProvider};
-use adapters::ebpf::{ConfigFlagsManager, InterfaceGroupsManager, L7PortsManager};
 use application::config_reload::ConfigReloadService;
 use infrastructure::config::AgentConfig;
 use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
+
+use adapters::ebpf::{ConfigFlagsManager, InterfaceGroupsManager, L7PortsManager};
+
+use crate::ebpf_lifecycle::{EbpfProgramManager, program_config_map, xdp_config_map};
 
 /// Typed handle so the reload task knows which auth provider variant to refresh.
 pub enum AuthProviderHandle {
@@ -19,16 +22,11 @@ pub enum AuthProviderHandle {
     ApiKeyOnly,
 }
 
-/// Holds eBPF map managers that need re-sync on config hot-reload.
-///
-/// These managers are created during eBPF program loading in startup and
-/// passed to the reload task so that config changes propagate to kernel maps.
+/// Temporary data-transfer struct used during startup to collect eBPF map
+/// managers before they are moved into the [`EbpfProgramManager`].
 pub struct EbpfMapHolder {
-    /// L7 ports manager from tc-ids (re-syncs `L7_PORTS` map).
     pub l7_ports: Option<L7PortsManager>,
-    /// `CONFIG_FLAGS` managers from tc-ids and tc-threatintel.
     pub config_flags: Vec<ConfigFlagsManager>,
-    /// `INTERFACE_GROUPS` manager across all rule-based eBPF programs.
     pub iface_groups: Option<InterfaceGroupsManager>,
 }
 
@@ -61,7 +59,7 @@ pub fn spawn_reload_task(
     cancel_token: CancellationToken,
     mut api_trigger: mpsc::Receiver<()>,
     shared_config: Arc<RwLock<AgentConfig>>,
-    mut ebpf_maps: EbpfMapHolder,
+    ebpf_manager: Arc<Mutex<EbpfProgramManager>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Channel for file watcher events → async task
@@ -155,7 +153,7 @@ pub fn spawn_reload_task(
                 &reload_service,
                 auth_handle.as_ref(),
                 &shared_config,
-                &mut ebpf_maps,
+                &ebpf_manager,
             )
             .await;
         }
@@ -169,7 +167,7 @@ async fn perform_reload(
     reload_service: &ConfigReloadService,
     auth_handle: Option<&AuthProviderHandle>,
     shared_config: &RwLock<AgentConfig>,
-    ebpf_maps: &mut EbpfMapHolder,
+    ebpf_manager: &Mutex<EbpfProgramManager>,
 ) {
     // Phase 1: serde deserialization
     let config = match AgentConfig::load(Path::new(config_path)) {
@@ -563,30 +561,21 @@ async fn perform_reload(
         tracing::warn!(error = %e, "threat intel config reload failed");
     }
 
-    // Phase 6i: Re-sync eBPF kernel maps (L7_PORTS, CONFIG_FLAGS)
-    if let Some(ref mut l7_mgr) = ebpf_maps.l7_ports {
-        let ports = config.l7_ports();
-        if let Err(e) = l7_mgr.set_ports(&ports) {
-            tracing::warn!(error = %e, "L7_PORTS reload failed");
-        } else {
-            tracing::debug!(port_count = ports.len(), "L7_PORTS reloaded");
-        }
-    }
-    let flags = crate::startup::build_config_flags(&config);
-    for cfg_mgr in &mut ebpf_maps.config_flags {
-        if let Err(e) = cfg_mgr.set_flags(&flags) {
-            tracing::warn!(error = %e, "CONFIG_FLAGS reload failed");
-        }
-    }
-    if !ebpf_maps.config_flags.is_empty() {
-        tracing::debug!(
-            count = ebpf_maps.config_flags.len(),
-            "CONFIG_FLAGS reloaded across eBPF programs"
-        );
-    }
+    // Phase 6i: Re-sync eBPF kernel maps (L7_PORTS, CONFIG_FLAGS, INTERFACE_GROUPS)
+    {
+        let mut mgr = ebpf_manager.lock().await;
 
-    // Re-sync INTERFACE_GROUPS maps on config reload.
-    if let Some(ref mut groups_mgr) = ebpf_maps.iface_groups {
+        if let Some(ref mut l7_mgr) = mgr.l7_ports {
+            let ports = config.l7_ports();
+            if let Err(e) = l7_mgr.set_ports(&ports) {
+                tracing::warn!(error = %e, "L7_PORTS reload failed");
+            } else {
+                tracing::debug!(port_count = ports.len(), "L7_PORTS reloaded");
+            }
+        }
+
+        mgr.sync_config_flags(&config);
+
         let membership = config.interface_membership();
         let memberships: Vec<(u32, u32)> = config
             .agent
@@ -598,12 +587,12 @@ async fn perform_reload(
                 Some((ifindex, groups))
             })
             .collect();
-        if let Err(e) = groups_mgr.set_interface_groups(&memberships) {
+        if let Err(e) = mgr.iface_groups.set_interface_groups(&memberships) {
             tracing::warn!(error = %e, "INTERFACE_GROUPS reload failed");
         } else if !memberships.is_empty() {
             tracing::debug!(
                 iface_count = memberships.len(),
-                map_count = groups_mgr.map_count(),
+                map_count = mgr.iface_groups.map_count(),
                 "INTERFACE_GROUPS reloaded"
             );
         }
@@ -668,6 +657,72 @@ async fn perform_reload(
         }
     }
 
-    // Phase 8: Update shared config for ops endpoints
+    // Phase 9: eBPF program lifecycle — load/unload programs based on enabled flags
+    {
+        let mut mgr = ebpf_manager.lock().await;
+
+        // 9a. Category A: independent TC/uprobe programs
+        for (program_name, config_enabled) in program_config_map(&config) {
+            let currently_loaded = mgr.is_loaded(program_name);
+            match (currently_loaded, config_enabled) {
+                (false, true) => {
+                    if let Err(e) = mgr.enable_program(program_name, &config).await {
+                        tracing::warn!(
+                            program = program_name,
+                            error = %e,
+                            "eBPF program hot-load failed"
+                        );
+                    }
+                }
+                (true, false) => {
+                    if let Err(e) = mgr.disable_program(program_name).await {
+                        tracing::warn!(
+                            program = program_name,
+                            error = %e,
+                            "eBPF program hot-unload failed"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 9b. Category B: XDP chain programs
+        let mut xdp_changed = false;
+        for (program_name, config_enabled) in xdp_config_map(&config) {
+            let currently_loaded = mgr.is_loaded(program_name);
+            match (currently_loaded, config_enabled) {
+                (false, true) => {
+                    if let Err(e) = mgr.enable_xdp_program(program_name, &config).await {
+                        tracing::warn!(
+                            program = program_name,
+                            error = %e,
+                            "XDP program hot-load failed"
+                        );
+                    } else {
+                        xdp_changed = true;
+                    }
+                }
+                (true, false) => {
+                    if let Err(e) = mgr.disable_xdp_program(program_name, &config).await {
+                        tracing::warn!(
+                            program = program_name,
+                            error = %e,
+                            "XDP program hot-unload failed"
+                        );
+                    } else {
+                        xdp_changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if xdp_changed {
+            tracing::info!("XDP chain topology changed, tail-calls rewired");
+        }
+    }
+
+    // Phase 10: Update shared config for ops endpoints
     *shared_config.write().await = config;
 }

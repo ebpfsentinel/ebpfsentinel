@@ -86,6 +86,11 @@ impl FirewallAppService {
         self.map_port = Some(port);
     }
 
+    /// Clear the eBPF map port (program unloaded).
+    pub fn clear_map_port(&mut self) {
+        self.map_port = None;
+    }
+
     /// Add a firewall rule. Syncs to eBPF maps and updates metrics.
     pub fn add_rule(&mut self, rule: FirewallRule) -> Result<(), DomainError> {
         let rule_id = rule.id.0.clone();

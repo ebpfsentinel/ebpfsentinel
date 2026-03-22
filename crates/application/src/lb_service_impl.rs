@@ -38,6 +38,11 @@ impl LbAppService {
         self.sync_ebpf_maps();
     }
 
+    /// Clear the eBPF map port (program unloaded).
+    pub fn clear_map_port(&mut self) {
+        self.map_port = None;
+    }
+
     /// Return whether the load balancer is enabled.
     pub fn enabled(&self) -> bool {
         self.enabled
