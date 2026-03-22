@@ -14,12 +14,12 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-# Check kernel version >= 6.1
+# Check kernel version >= 6.6
 KERNEL_VERSION=$(uname -r | cut -d. -f1-2)
 KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
 KERNEL_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
-if [[ "$KERNEL_MAJOR" -lt 6 ]] || { [[ "$KERNEL_MAJOR" -eq 6 ]] && [[ "$KERNEL_MINOR" -lt 1 ]]; }; then
-  echo "Error: kernel >= 6.1 is required (found $(uname -r))." >&2
+if [[ "$KERNEL_MAJOR" -lt 6 ]] || { [[ "$KERNEL_MAJOR" -eq 6 ]] && [[ "$KERNEL_MINOR" -lt 6 ]]; }; then
+  echo "Error: kernel >= 6.6 is required (found $(uname -r))." >&2
   exit 1
 fi
 
