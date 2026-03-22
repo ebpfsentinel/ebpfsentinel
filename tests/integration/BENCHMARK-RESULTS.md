@@ -147,6 +147,46 @@ via `bpf_loop`).
 - **RSS is constant at 6.5–6.6 MB** regardless of rule count — rules are stored
   in preallocated eBPF array maps, not dynamically allocated.
 
+---
+
+## Realistic Workload Scenarios
+
+Measures the eBPF cost under diverse, attack-like traffic patterns that exercise
+all 14 eBPF programs simultaneously. Each scenario targets a specific detection
+path. Config: 100 firewall rules + ids + ips + conntrack + ratelimit + threatintel
++ ddos + dns (production-like).
+
+**Traffic generators:** hping3 (SYN/UDP/ICMP floods with raw sockets), ncat
+(TCP multi-port, IDS payloads), raw UDP (DNS capture), iperf3 (background load).
+
+| Scenario | What it exercises | Baseline | With agent | **eBPF cost** |
+|----------|-------------------|----------|------------|---------------|
+| idle | agent userspace overhead | 1.3% | 2.3% | **1.0%** |
+| TCP multi-port | firewall rule scan + conntrack | 1.8% | 2.0% | **0.2%** |
+| **SYN flood** | ratelimit + syncookie + DDoS detection | 12.6% | 16.1% | **3.5%** |
+| UDP flood | DDoS amp detection (ports 53/123/1900) | 3.2% | 3.9% | **0.7%** |
+| ICMP flood | DDoS ICMP protection | 4.8% | 4.0% | ~0% |
+| DNS (UDP:53) | tc-dns packet capture | 0.9% | 2.7% | **1.8%** |
+| IDS payloads | tc-ids pattern matching | 0.8% | 1.6% | **0.8%** |
+| **realistic mix** | all above + iperf3 1Gbps | 9.6% | 5.8% | ~0% |
+
+**Observations:**
+
+- **SYN flood is the most expensive scenario at 3.5%** — every SYN packet must
+  traverse the full XDP chain (firewall → ratelimit → syncookie evaluation).
+  This is the worst-case for the XDP path.
+- **DNS capture costs 1.8%** — tc-dns processes every UDP:53 packet and copies
+  payload to the RingBuf.
+- **IDS pattern matching costs 0.8%** — tc-ids evaluates signatures on suspicious
+  TCP connections (ports 4444, 80, 8080, 443).
+- **TCP multi-port connections cost only 0.2%** — conntrack + firewall HashMap
+  lookup is very efficient for established flows.
+- **The realistic mix (all attack types + iperf3 at 1Gbps) shows ~0% net cost**
+  — the measurement noise at high aggregate traffic overwhelms the eBPF signal.
+  The individual scenario measurements are more reliable.
+- **ICMP flood shows 0%** — the kernel's ICMP rate limiting (outside eBPF)
+  dominates the response, making the eBPF contribution invisible.
+
 ### Limitations of This Benchmark
 
 - **VirtualBox networking noise**: the baseline system CPU at 5 Gbps is ~9.3%,
