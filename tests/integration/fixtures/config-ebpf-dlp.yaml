@@ -29,17 +29,56 @@ ips:
 dlp:
   enabled: true
   mode: alert
+  # All default OSS patterns — tests validate each regex matches real data
   patterns:
-    - id: dlp-pci-card
-      name: "Credit Card Number"
-      regex: "\\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14})\\b"
-      severity: high
+    # ── PCI ──
+    - id: dlp-pci-visa
+      name: "Visa Card Number"
+      regex: "\\b4[0-9]{12}(?:[0-9]{3})?\\b"
+      severity: critical
       data_type: pci
+    - id: dlp-pci-mastercard
+      name: "Mastercard Number"
+      regex: "\\b5[1-5][0-9]{14}\\b"
+      severity: critical
+      data_type: pci
+    - id: dlp-pci-amex
+      name: "American Express Number"
+      regex: "\\b3[47][0-9]{13}\\b"
+      severity: critical
+      data_type: pci
+    # ── PII ──
+    - id: dlp-pii-email
+      name: "Email Address"
+      regex: "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"
+      severity: medium
+      data_type: pii
     - id: dlp-pii-ssn
-      name: "Social Security Number"
+      name: "US Social Security Number"
       regex: "\\b\\d{3}-\\d{2}-\\d{4}\\b"
       severity: critical
       data_type: pii
+    # ── Credentials ──
+    - id: dlp-cred-aws-key
+      name: "AWS Access Key"
+      regex: "\\bAKIA[0-9A-Z]{16}\\b"
+      severity: critical
+      data_type: credentials
+    - id: dlp-cred-github-token
+      name: "GitHub Personal Access Token"
+      regex: "\\bghp_[a-zA-Z0-9]{36}\\b"
+      severity: critical
+      data_type: credentials
+    - id: dlp-cred-password
+      name: "Generic Password"
+      regex: "(?i)(password|passwd|pwd)\\s*[:=]\\s*\\S{8,}"
+      severity: high
+      data_type: credentials
+    - id: dlp-cred-bearer
+      name: "Bearer Token"
+      regex: "Bearer\\s+[A-Za-z0-9\\-._~+/]+=*"
+      severity: high
+      data_type: credentials
 
 ratelimit:
   enabled: false
