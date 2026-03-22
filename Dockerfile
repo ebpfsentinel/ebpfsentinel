@@ -65,6 +65,8 @@ COPY ebpf-out/ /usr/local/lib/ebpfsentinel/
 
 COPY config/ebpfsentinel.yaml /etc/ebpfsentinel/config.yaml
 
+RUN mkdir -p /var/lib/ebpfsentinel/captures
+
 ENV EBPF_PROGRAM_DIR=/usr/local/lib/ebpfsentinel
 
 EXPOSE 8080 50051 9090

@@ -6,7 +6,7 @@
 #   docker compose down         # stop agent
 #
 # Prerequisites:
-#   - Linux kernel 6.1+ with BTF support
+#   - Linux kernel 6.6+ with BTF support
 #   - Docker with host networking support
 #
 # Hot-reload: edit config/ebpfsentinel.yaml while running — the agent
@@ -29,7 +29,7 @@ services:
     #   - BPF
     #   - NET_ADMIN
     #   - SYS_ADMIN
-    #   - PERFMON
+    #   - NET_RAW
 
     # Defense-in-depth: read-only root prevents writes to container filesystem
     # even under privileged mode (no dropped binaries, no modified libraries).
@@ -43,6 +43,8 @@ services:
       - ./config/ebpfsentinel.yaml:/etc/ebpfsentinel/config.yaml
       # Persistent data: audit logs, alerts, rule change history (redb)
       - ebpfsentinel-data:/data
+      # Packet captures (POST /api/v1/captures/manual)
+      - ebpfsentinel-captures:/var/lib/ebpfsentinel/captures
       # eBPF filesystem — required for map pinning
       - /sys/fs/bpf:/sys/fs/bpf
       # Debug filesystem — required for eBPF tracing
@@ -66,4 +68,6 @@ services:
 
 volumes:
   ebpfsentinel-data:
+    driver: local
+  ebpfsentinel-captures:
     driver: local
