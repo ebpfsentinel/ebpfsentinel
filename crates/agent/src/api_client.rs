@@ -145,11 +145,15 @@ pub struct AlertResponse {
     pub severity: String,
     pub rule_id: String,
     pub action: String,
-    pub src_ip: u32,
-    pub dst_ip: u32,
-    pub src_port: u32,
-    pub dst_port: u32,
-    pub protocol: u32,
+    /// Source address: `[v4, 0, 0, 0]` for IPv4, full 128-bit for IPv6.
+    pub src_addr: Vec<u32>,
+    /// Destination address (same encoding).
+    pub dst_addr: Vec<u32>,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub protocol: u8,
+    #[serde(default)]
+    pub is_ipv6: bool,
     pub message: String,
     #[serde(default)]
     pub false_positive: bool,
@@ -167,6 +171,35 @@ pub struct AlertResponse {
     pub dst_geo: Option<String>,
     #[serde(default)]
     pub ja4_fingerprint: Option<String>,
+}
+
+impl AlertResponse {
+    /// Format source IP as string.
+    pub fn src_ip_str(&self) -> String {
+        addr_to_string(&self.src_addr, self.is_ipv6)
+    }
+    /// Format destination IP as string.
+    pub fn dst_ip_str(&self) -> String {
+        addr_to_string(&self.dst_addr, self.is_ipv6)
+    }
+}
+
+/// Convert a `[u32; 4]`-style address to a human-readable IP string.
+fn addr_to_string(addr: &[u32], is_ipv6: bool) -> String {
+    if is_ipv6 {
+        let mut bytes = [0u8; 16];
+        for (i, &word) in addr.iter().take(4).enumerate() {
+            bytes[i * 4..(i + 1) * 4].copy_from_slice(&word.to_be_bytes());
+        }
+        std::net::Ipv6Addr::from(bytes).to_string()
+    } else {
+        let v4 = addr.first().copied().unwrap_or(0);
+        if v4 == 0 {
+            "-".to_string()
+        } else {
+            std::net::Ipv4Addr::from(v4).to_string()
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]

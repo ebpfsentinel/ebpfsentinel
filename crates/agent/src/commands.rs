@@ -476,8 +476,8 @@ pub async fn cmd_alerts_list(
             alert.severity,
             alert.rule_id,
             alert.action,
-            format_ip(alert.src_ip),
-            format_ip(alert.dst_ip),
+            alert.src_ip_str(),
+            alert.dst_ip_str(),
             alert.src_port,
             alert.dst_port,
             if alert.false_positive { "yes" } else { "no" },
@@ -1711,12 +1711,208 @@ pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Re
                     "  {:<10}  {:<8}  {:<18}  {:<18}  {}",
                     a.component,
                     a.severity,
-                    format_ip(a.src_ip),
-                    format_ip(a.dst_ip),
+                    a.src_ip_str(),
+                    a.dst_ip_str(),
                     truncate(&a.message, 40),
                 );
             }
         }
+    }
+
+    Ok(())
+}
+
+// ── Investigate ─────────────────────────────────────────────────────
+
+pub async fn cmd_investigate(
+    client: &ApiClient,
+    ip: &str,
+    alert_limit: u64,
+    output: OutputFormat,
+) -> Result<()> {
+    let target: std::net::IpAddr = ip
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid IP address: {ip}"))?;
+    let target_str = target.to_string();
+
+    // Fetch all data sources in parallel
+    let (alerts_res, conns_res, dns_res, blacklist_res, iocs_res) = tokio::join!(
+        client.list_alerts(None, None, None, None, alert_limit, 0),
+        client.list_connections(2000),
+        client.dns_cache(None, Some(&target_str), 0, 50),
+        client.list_ips_blacklist(),
+        client.list_iocs(),
+    );
+
+    // Build target address as [u32; 4] for alert matching (IPv4 and IPv6)
+    let target_addr: [u32; 4] = match target {
+        std::net::IpAddr::V4(v4) => [u32::from(v4), 0, 0, 0],
+        std::net::IpAddr::V6(v6) => {
+            let octets = v6.octets();
+            [
+                u32::from_be_bytes([octets[0], octets[1], octets[2], octets[3]]),
+                u32::from_be_bytes([octets[4], octets[5], octets[6], octets[7]]),
+                u32::from_be_bytes([octets[8], octets[9], octets[10], octets[11]]),
+                u32::from_be_bytes([octets[12], octets[13], octets[14], octets[15]]),
+            ]
+        }
+    };
+
+    // Filter alerts where target is source or destination
+    let matched_alerts: Vec<_> = alerts_res
+        .as_ref()
+        .ok()
+        .map(|a| {
+            a.alerts
+                .iter()
+                .filter(|a| {
+                    a.src_addr.as_slice() == target_addr || a.dst_addr.as_slice() == target_addr
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    // Filter connections by IP
+    let conns = conns_res.ok().unwrap_or_default();
+    let matched_conns: Vec<_> = conns
+        .iter()
+        .filter(|c| c.src_ip == target_str || c.dst_ip == target_str)
+        .collect();
+
+    // DNS reverse lookup
+    let dns_entries = dns_res.ok();
+
+    // Blacklist check
+    let blacklist = blacklist_res.ok().unwrap_or_default();
+    let bl_entry = blacklist.iter().find(|e| e.ip == target_str);
+
+    // IOC matches
+    let iocs = iocs_res.ok().unwrap_or_default();
+    let matched_iocs: Vec<_> = iocs.iter().filter(|i| i.ip == target_str).collect();
+
+    if output == OutputFormat::Json {
+        let json = serde_json::json!({
+            "ip": target_str,
+            "blacklisted": bl_entry.is_some(),
+            "blacklist_entry": bl_entry,
+            "ioc_matches": matched_iocs,
+            "alert_count": matched_alerts.len(),
+            "alerts": matched_alerts,
+            "connection_count": matched_conns.len(),
+            "connections": matched_conns,
+            "dns": dns_entries,
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+
+    // ── Header ──
+    let bl_status = if let Some(entry) = bl_entry {
+        format!(
+            "YES ({}, {}s left)",
+            truncate(&entry.reason, 30),
+            entry.ttl_remaining_secs
+        )
+    } else {
+        "no".to_string()
+    };
+    let ioc_status = if matched_iocs.is_empty() {
+        "none".to_string()
+    } else {
+        format!("{} match(es)", matched_iocs.len())
+    };
+
+    println!();
+    println!(
+        "  IP: {}  |  Blacklisted: {}  |  IOC: {}",
+        target_str, bl_status, ioc_status
+    );
+    println!();
+
+    // ── Alerts ──
+    println!("  Alerts: {} matching", matched_alerts.len());
+    if !matched_alerts.is_empty() {
+        println!(
+            "  {:<10}  {:<8}  {:<6}  {:<18}  {:<18}  {}",
+            "COMPONENT", "SEVERITY", "ACTION", "SOURCE", "DESTINATION", "MESSAGE"
+        );
+        for a in matched_alerts.iter().take(20) {
+            println!(
+                "  {:<10}  {:<8}  {:<6}  {:<18}  {:<18}  {}",
+                a.component,
+                a.severity,
+                a.action,
+                a.src_ip_str(),
+                a.dst_ip_str(),
+                truncate(&a.message, 45),
+            );
+        }
+        if matched_alerts.len() > 20 {
+            println!("  ... and {} more", matched_alerts.len() - 20);
+        }
+    }
+    println!();
+
+    // ── Connections ──
+    println!("  Connections: {} active", matched_conns.len());
+    if !matched_conns.is_empty() {
+        println!(
+            "  {:<22} {:>5}  {:<22} {:>5}  {:<5}  {:<6}  {:>10}",
+            "SOURCE", "PORT", "DESTINATION", "PORT", "PROTO", "STATE", "BYTES"
+        );
+        for c in matched_conns.iter().take(20) {
+            let proto = match c.protocol {
+                6 => "TCP",
+                17 => "UDP",
+                1 => "ICMP",
+                _ => "?",
+            };
+            let total = (c.bytes_fwd as u64) + (c.bytes_rev as u64);
+            println!(
+                "  {:<22} {:>5}  {:<22} {:>5}  {:<5}  {:<6}  {:>10}",
+                truncate(&c.src_ip, 22),
+                c.src_port,
+                truncate(&c.dst_ip, 22),
+                c.dst_port,
+                proto,
+                truncate(&c.state, 6),
+                format_bytes(total),
+            );
+        }
+    }
+    println!();
+
+    // ── DNS ──
+    if let Some(ref dns) = dns_entries {
+        if !dns.entries.is_empty() {
+            println!("  DNS Reverse Lookups:");
+            for e in &dns.entries {
+                let blocked = if e.is_blocked { " [BLOCKED]" } else { "" };
+                println!(
+                    "    {} -> {} (queries: {}){}",
+                    e.domain,
+                    e.ips.join(", "),
+                    e.query_count,
+                    blocked
+                );
+            }
+            println!();
+        }
+    }
+
+    // ── IOCs ──
+    if !matched_iocs.is_empty() {
+        println!("  Threat Intel IOC Matches:");
+        for ioc in &matched_iocs {
+            println!(
+                "    {} (type: {}, feed: {}, confidence: {})",
+                ioc.ip,
+                ioc.threat_type,
+                truncate(&ioc.source_feed, 20),
+                ioc.confidence,
+            );
+        }
+        println!();
     }
 
     Ok(())

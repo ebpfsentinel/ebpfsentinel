@@ -101,6 +101,19 @@ pub enum Command {
         limit: usize,
     },
 
+    /// Investigate an IP — correlate alerts, connections, DNS, blacklist, and fingerprints
+    Investigate {
+        #[command(flatten)]
+        conn: ConnectionArgs,
+
+        /// IP address to investigate
+        ip: String,
+
+        /// Max alerts to fetch
+        #[arg(long, default_value_t = 100)]
+        alert_limit: u64,
+    },
+
     /// Manage firewall L3/L4 rules
     Firewall(DomainArgs<FirewallCommand>),
 
