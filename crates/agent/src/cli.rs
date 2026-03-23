@@ -77,6 +77,24 @@ pub enum Command {
         conn: ConnectionArgs,
     },
 
+    /// Watch alerts in real-time (like tail -f for security events)
+    Watch {
+        #[command(flatten)]
+        conn: ConnectionArgs,
+
+        /// Poll interval in seconds
+        #[arg(short, long, default_value_t = 2)]
+        interval: u64,
+
+        /// Filter by component (ids, ddos, dns, dlp, etc.)
+        #[arg(long)]
+        component: Option<String>,
+
+        /// Filter by minimum severity (low, medium, high, critical)
+        #[arg(long)]
+        severity: Option<String>,
+    },
+
     /// Top talkers — live view of most active connections by traffic volume
     Top {
         #[command(flatten)]

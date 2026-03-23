@@ -40,6 +40,16 @@ async fn main() -> Result<()> {
             commands::cmd_metrics(&client).await
         }
 
+        Some(Command::Watch {
+            conn,
+            interval,
+            component,
+            severity,
+        }) => {
+            let client = ApiClient::new(&conn.host, conn.port, cli.token);
+            commands::cmd_watch(&client, interval, component.as_deref(), severity.as_deref()).await
+        }
+
         Some(Command::Top { conn, limit, sort }) => {
             let client = ApiClient::new(&conn.host, conn.port, cli.token);
             commands::cmd_top(&client, limit, &sort, output).await

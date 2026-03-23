@@ -1545,6 +1545,83 @@ pub async fn cmd_qos_delete_classifier(client: &ApiClient, id: &str) -> Result<(
     Ok(())
 }
 
+// ── Watch ───────────────────────────────────────────────────────────
+
+pub async fn cmd_watch(
+    client: &ApiClient,
+    interval_secs: u64,
+    component: Option<&str>,
+    severity: Option<&str>,
+) -> Result<()> {
+    use std::collections::HashSet;
+
+    let interval = std::time::Duration::from_secs(interval_secs.max(1));
+    let mut seen: HashSet<String> = HashSet::new();
+
+    // Seed with existing alerts so we only show new ones
+    if let Ok(resp) = client
+        .list_alerts(component, severity, None, None, 100, 0)
+        .await
+    {
+        for a in &resp.alerts {
+            seen.insert(a.id.clone());
+        }
+    }
+
+    let filter_desc = match (component, severity) {
+        (Some(c), Some(s)) => format!(" (component={c}, severity>={s})"),
+        (Some(c), None) => format!(" (component={c})"),
+        (None, Some(s)) => format!(" (severity>={s})"),
+        _ => String::new(),
+    };
+    eprintln!(
+        "Watching alerts{filter_desc} — poll every {interval_secs}s. Press Ctrl+C to stop.\n"
+    );
+
+    loop {
+        tokio::time::sleep(interval).await;
+
+        let resp = match client
+            .list_alerts(component, severity, None, None, 50, 0)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  [error] {e}");
+                continue;
+            }
+        };
+
+        // Show alerts we haven't seen yet (newest first in API, reverse to print oldest first)
+        let mut new_alerts: Vec<_> = resp
+            .alerts
+            .iter()
+            .filter(|a| !seen.contains(&a.id))
+            .collect();
+        new_alerts.reverse();
+
+        for a in &new_alerts {
+            seen.insert(a.id.clone());
+
+            let sev_colored = match a.severity.as_str() {
+                "critical" => format!("\x1b[91m{:<8}\x1b[0m", a.severity),
+                "high" => format!("\x1b[93m{:<8}\x1b[0m", a.severity),
+                "medium" => format!("\x1b[33m{:<8}\x1b[0m", a.severity),
+                _ => format!("{:<8}", a.severity),
+            };
+
+            println!(
+                "  {:<10}  {}  {:<18} -> {:<18}  {}",
+                a.component,
+                sev_colored,
+                a.src_ip_str(),
+                a.dst_ip_str(),
+                truncate(&a.message, 50),
+            );
+        }
+    }
+}
+
 // ── Top Talkers ─────────────────────────────────────────────────────
 
 pub async fn cmd_top(
@@ -1770,10 +1847,8 @@ pub async fn cmd_score(client: &ApiClient, alert_limit: u64, output: OutputForma
     }
 
     // ── Blacklist score (0-2) ──
-    let mut blacklist_score: f64 = 0.0;
     let blacklist_count = blacklist_res.as_ref().map(|b| b.len()).unwrap_or(0);
-    // 1+ blocked IP = 0.5, 5+ = 1.0, 20+ = 2.0
-    blacklist_score = match blacklist_count {
+    let blacklist_score: f64 = match blacklist_count {
         0 => 0.0,
         1..=4 => 0.5,
         5..=19 => 1.0,
@@ -1781,10 +1856,8 @@ pub async fn cmd_score(client: &ApiClient, alert_limit: u64, output: OutputForma
     };
 
     // ── Threat intel score (0-2) ──
-    let mut ti_score: f64 = 0.0;
     let ioc_count = iocs_res.as_ref().map(|i| i.len()).unwrap_or(0);
-    // IOC matches: 1+ = 0.5, 10+ = 1.0, 50+ = 2.0
-    ti_score = match ioc_count {
+    let ti_score: f64 = match ioc_count {
         0 => 0.0,
         1..=9 => 0.5,
         10..=49 => 1.0,
