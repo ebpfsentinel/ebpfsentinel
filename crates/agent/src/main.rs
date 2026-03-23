@@ -50,6 +50,11 @@ async fn main() -> Result<()> {
             commands::cmd_flows(&client, limit, output).await
         }
 
+        Some(Command::Score { conn, alert_limit }) => {
+            let client = ApiClient::new(&conn.host, conn.port, cli.token);
+            commands::cmd_score(&client, alert_limit, output).await
+        }
+
         Some(Command::Investigate {
             conn,
             ip,

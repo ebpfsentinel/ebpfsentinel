@@ -1721,6 +1721,153 @@ fn subnet_of(ip: &str) -> String {
     }
 }
 
+// ── Risk Score ──────────────────────────────────────────────────────
+
+pub async fn cmd_score(client: &ApiClient, alert_limit: u64, output: OutputFormat) -> Result<()> {
+    // Fetch all scoring inputs in parallel
+    let (alerts_res, ddos_res, blacklist_res, iocs_res, conntrack_res) = tokio::join!(
+        client.list_alerts(None, None, None, None, alert_limit, 0),
+        client.ddos_status(),
+        client.list_ips_blacklist(),
+        client.list_iocs(),
+        client.conntrack_status(),
+    );
+
+    // ── Alert severity score (0-3) ──
+    let mut alert_score: f64 = 0.0;
+    let mut critical = 0u64;
+    let mut high = 0u64;
+    let mut medium = 0u64;
+    let mut low = 0u64;
+    if let Ok(ref resp) = alerts_res {
+        for a in &resp.alerts {
+            match a.severity.as_str() {
+                "critical" => critical += 1,
+                "high" => high += 1,
+                "medium" => medium += 1,
+                _ => low += 1,
+            }
+        }
+        // Weighted: critical=4, high=2, medium=1, low=0.25
+        let weighted =
+            (critical as f64 * 4.0) + (high as f64 * 2.0) + (medium as f64) + (low as f64 * 0.25);
+        // Normalize: 0 alerts → 0, 50+ weighted → 3.0
+        alert_score = (weighted / 50.0).min(1.0) * 3.0;
+    }
+
+    // ── DDoS score (0-2) ──
+    let mut ddos_score: f64 = 0.0;
+    let mut active_attacks = 0usize;
+    let mut total_mitigated = 0u64;
+    if let Ok(ref d) = ddos_res {
+        active_attacks = d.active_attacks;
+        total_mitigated = d.total_mitigated;
+        if d.active_attacks > 0 {
+            ddos_score = 2.0;
+        } else if d.total_mitigated > 10 {
+            ddos_score = 0.5;
+        }
+    }
+
+    // ── Blacklist score (0-2) ──
+    let mut blacklist_score: f64 = 0.0;
+    let blacklist_count = blacklist_res.as_ref().map(|b| b.len()).unwrap_or(0);
+    // 1+ blocked IP = 0.5, 5+ = 1.0, 20+ = 2.0
+    blacklist_score = match blacklist_count {
+        0 => 0.0,
+        1..=4 => 0.5,
+        5..=19 => 1.0,
+        _ => 2.0,
+    };
+
+    // ── Threat intel score (0-2) ──
+    let mut ti_score: f64 = 0.0;
+    let ioc_count = iocs_res.as_ref().map(|i| i.len()).unwrap_or(0);
+    // IOC matches: 1+ = 0.5, 10+ = 1.0, 50+ = 2.0
+    ti_score = match ioc_count {
+        0 => 0.0,
+        1..=9 => 0.5,
+        10..=49 => 1.0,
+        _ => 2.0,
+    };
+
+    // ── Connection anomaly score (0-1) ──
+    let mut conn_score: f64 = 0.0;
+    let conn_count = conntrack_res
+        .as_ref()
+        .map(|c| c.connection_count)
+        .unwrap_or(0);
+    // Very rough heuristic: >10k connections = suspicious
+    if conn_count > 10_000 {
+        conn_score = 1.0;
+    } else if conn_count > 5_000 {
+        conn_score = 0.5;
+    }
+
+    let total_score = alert_score + ddos_score + blacklist_score + ti_score + conn_score;
+    // Clamp to 10.0
+    let final_score = total_score.min(10.0);
+
+    let label = match final_score as u32 {
+        0..=2 => "Low",
+        3..=5 => "Medium",
+        6..=7 => "High",
+        _ => "Critical",
+    };
+
+    if output == OutputFormat::Json {
+        let json = serde_json::json!({
+            "score": (final_score * 10.0).round() / 10.0,
+            "label": label,
+            "factors": {
+                "alerts": (alert_score * 10.0).round() / 10.0,
+                "ddos": ddos_score,
+                "blacklist": blacklist_score,
+                "threat_intel": ti_score,
+                "connections": conn_score,
+            },
+            "details": {
+                "alert_count": { "critical": critical, "high": high, "medium": medium, "low": low },
+                "ddos_active": active_attacks,
+                "ddos_mitigated": total_mitigated,
+                "blacklisted_ips": blacklist_count,
+                "ioc_matches": ioc_count,
+                "active_connections": conn_count,
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+
+    println!();
+    println!("  Network Risk Score: {:.1} / 10 ({})", final_score, label);
+    println!();
+    println!("  Contributing Factors:");
+    println!(
+        "    Alerts          {:.1}  ({} critical, {} high, {} medium, {} low)",
+        alert_score, critical, high, medium, low
+    );
+    println!(
+        "    DDoS            {:.1}  ({} active, {} mitigated total)",
+        ddos_score, active_attacks, total_mitigated
+    );
+    println!(
+        "    Blacklist       {:.1}  ({} IPs blocked)",
+        blacklist_score, blacklist_count
+    );
+    println!(
+        "    Threat Intel    {:.1}  ({} IOC matches)",
+        ti_score, ioc_count
+    );
+    println!(
+        "    Connections     {:.1}  ({} active)",
+        conn_score, conn_count
+    );
+    println!();
+
+    Ok(())
+}
+
 // ── Enhanced Status ─────────────────────────────────────────────────
 
 pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Result<()> {

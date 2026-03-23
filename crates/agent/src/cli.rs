@@ -101,6 +101,16 @@ pub enum Command {
         limit: usize,
     },
 
+    /// Network risk score — single 0-10 metric summarizing security posture
+    Score {
+        #[command(flatten)]
+        conn: ConnectionArgs,
+
+        /// Max alerts to analyze for scoring
+        #[arg(long, default_value_t = 200)]
+        alert_limit: u64,
+    },
+
     /// Investigate an IP — correlate alerts, connections, DNS, blacklist, and fingerprints
     Investigate {
         #[command(flatten)]
