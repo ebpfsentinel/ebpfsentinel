@@ -347,12 +347,14 @@ fn process_ids_v4(
             let l7_offset = l4_offset + tcp_data_off;
             // Linearize the SKB before DPI: multi-fragment packets (e.g. GRO aggregates,
             // jumbo frames) may have payload spread across non-contiguous memory regions.
-            // bpf_skb_pull_data forces the kernel to linearize up to skb->len bytes so
-            // that bpf_skb_load_bytes can read the full payload in a single call.
+            // bpf_skb_pull_data forces the kernel to linearize up to the requested length
+            // so that bpf_skb_load_bytes can read the full payload in a single call.
+            // Use ctx.len() (full SKB length including fragments) instead of
+            // data_end - data (linear buffer only) to cover jumbo frames.
             // The return value is intentionally ignored — if linearization fails the
             // bpf_skb_load_bytes call below will read whatever is already available.
-            let skb_len = ctx.data_end() - ctx.data();
-            unsafe { bpf_skb_pull_data(ctx.skb.skb, skb_len as u32) };
+            let skb_len = ctx.len();
+            unsafe { bpf_skb_pull_data(ctx.skb.skb, skb_len) };
             emit_l7_event(ctx, &src_addr, &dst_addr, src_port, dst_port, flags, vlan_id, l7_offset);
         }
     }
@@ -405,8 +407,9 @@ fn process_ids_v6(
             let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
             let l7_offset = l4_offset + tcp_data_off;
             // Linearize the SKB before DPI (see IPv4 path for full rationale).
-            let skb_len = ctx.data_end() - ctx.data();
-            unsafe { bpf_skb_pull_data(ctx.skb.skb, skb_len as u32) };
+            // Use ctx.len() for full SKB length including jumbo frame fragments.
+            let skb_len = ctx.len();
+            unsafe { bpf_skb_pull_data(ctx.skb.skb, skb_len) };
             emit_l7_event(ctx, &src_addr, &dst_addr, src_port, dst_port, flags, vlan_id, l7_offset);
         }
     }

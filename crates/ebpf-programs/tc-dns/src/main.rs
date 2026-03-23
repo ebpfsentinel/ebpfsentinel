@@ -9,7 +9,7 @@ use aya_ebpf::{
     maps::{PerCpuArray, RingBuf},
     programs::TcContext,
 };
-use aya_ebpf_bindings::helpers::bpf_skb_load_bytes;
+use aya_ebpf_bindings::helpers::{bpf_skb_load_bytes, bpf_skb_pull_data};
 use core::mem;
 use ebpf_helpers::net::{
     ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
@@ -274,21 +274,26 @@ fn emit_dns_event(
         increment_metric(DNS_METRIC_EVENTS_DROPPED);
         return;
     }
-    // Calculate DNS payload length before reserving ringbuf entry
-    let pkt_start = ctx.data() + dns_offset;
-    let pkt_end = ctx.data_end();
+    // Calculate DNS payload length using the full SKB length (ctx.len())
+    // instead of the linear buffer (data_end - data). This ensures jumbo
+    // frames and GRO-aggregated DNS responses are measured correctly.
+    let total_len = ctx.len() as usize;
 
     // No DNS payload available — nothing to emit
-    if pkt_start >= pkt_end {
+    if dns_offset >= total_len {
         return;
     }
 
-    let available = pkt_end - pkt_start;
+    let available = total_len - dns_offset;
     let payload_len: usize = if available > DNS_MAX_PAYLOAD {
         DNS_MAX_PAYLOAD
     } else {
         available
     };
+
+    // Linearize the SKB so bpf_skb_load_bytes can access fragments
+    // (jumbo frames, GRO aggregates). Ignored if already linear.
+    unsafe { bpf_skb_pull_data(ctx.skb.skb, ctx.len()) };
 
     if let Some(mut entry) = DNS_EVENTS.reserve::<DnsEventBuf>(0) {
         let ptr = entry.as_mut_ptr();
