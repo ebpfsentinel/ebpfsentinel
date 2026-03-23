@@ -384,6 +384,42 @@ pub struct BlocklistRemoveResponse {
     pub removed: bool,
 }
 
+// ── Connection Tracking ──────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct ConnTrackStatusResponse {
+    pub enabled: bool,
+    pub connection_count: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ConnectionResponse {
+    pub src_ip: String,
+    pub dst_ip: String,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub protocol: u8,
+    pub state: String,
+    pub packets_fwd: u32,
+    pub packets_rev: u32,
+    pub bytes_fwd: u32,
+    pub bytes_rev: u32,
+}
+
+// ── eBPF Status ─────────────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct EbpfStatusResponse {
+    pub programs: Vec<EbpfProgramStatus>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct EbpfProgramStatus {
+    pub name: String,
+    pub loaded: bool,
+    pub hook: String,
+}
+
 // ── DDoS Protection ─────────────────────────────────────────────────
 
 #[derive(Deserialize, Serialize)]
@@ -1024,6 +1060,38 @@ impl ApiClient {
                 reqwest::Method::DELETE,
                 &format!("/api/v1/domains/blocklist/{domain}"),
             )
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── Connection Tracking ─────────────────────────────────────────
+
+    pub async fn conntrack_status(&self) -> anyhow::Result<ConnTrackStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/conntrack/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn list_connections(&self, limit: usize) -> anyhow::Result<Vec<ConnectionResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/conntrack/connections")
+            .query(&[("limit", limit.to_string())])
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── eBPF Status ──────────────────────────────────────────────────
+
+    pub async fn ebpf_status(&self) -> anyhow::Result<EbpfStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ebpf/status")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

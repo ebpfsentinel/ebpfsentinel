@@ -77,6 +77,30 @@ pub enum Command {
         conn: ConnectionArgs,
     },
 
+    /// Top talkers — live view of most active connections by traffic volume
+    Top {
+        #[command(flatten)]
+        conn: ConnectionArgs,
+
+        /// Number of entries to display
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+
+        /// Sort by: bytes (default), packets, or alerts
+        #[arg(short, long, default_value = "bytes")]
+        sort: String,
+    },
+
+    /// Network flows — aggregated connection map from conntrack
+    Flows {
+        #[command(flatten)]
+        conn: ConnectionArgs,
+
+        /// Maximum connections to fetch for aggregation
+        #[arg(short = 'n', long, default_value_t = 1000)]
+        limit: usize,
+    },
+
     /// Manage firewall L3/L4 rules
     Firewall(DomainArgs<FirewallCommand>),
 

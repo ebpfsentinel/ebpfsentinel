@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
 
         Some(Command::Status { conn }) => {
             let client = ApiClient::new(&conn.host, conn.port, cli.token);
-            commands::cmd_status(&client, output).await
+            commands::cmd_status_enhanced(&client, output).await
         }
 
         Some(Command::Health { conn }) => {
@@ -38,6 +38,16 @@ async fn main() -> Result<()> {
         Some(Command::Metrics { conn }) => {
             let client = ApiClient::new(&conn.host, conn.port, cli.token);
             commands::cmd_metrics(&client).await
+        }
+
+        Some(Command::Top { conn, limit, sort }) => {
+            let client = ApiClient::new(&conn.host, conn.port, cli.token);
+            commands::cmd_top(&client, limit, &sort, output).await
+        }
+
+        Some(Command::Flows { conn, limit }) => {
+            let client = ApiClient::new(&conn.host, conn.port, cli.token);
+            commands::cmd_flows(&client, limit, output).await
         }
 
         Some(Command::Firewall(args)) => {

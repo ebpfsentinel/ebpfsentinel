@@ -35,27 +35,6 @@ pub async fn cmd_metrics(client: &ApiClient) -> Result<()> {
     Ok(())
 }
 
-// ── Agent Status ────────────────────────────────────────────────────────
-
-pub async fn cmd_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
-    let status = client.get_status().await?;
-
-    if output == OutputFormat::Json {
-        println!("{}", serde_json::to_string_pretty(&status)?);
-        return Ok(());
-    }
-
-    let uptime = format_uptime(status.uptime_seconds);
-    let ebpf = if status.ebpf_loaded { "yes" } else { "no" };
-
-    println!("eBPFsentinel Agent Status");
-    println!("  Version:      {}", status.version);
-    println!("  Uptime:       {uptime}");
-    println!("  eBPF loaded:  {ebpf}");
-    println!("  Rule count:   {}", status.rule_count);
-    Ok(())
-}
-
 // ── Firewall ────────────────────────────────────────────────────────────
 
 pub async fn cmd_firewall_list(client: &ApiClient, output: OutputFormat) -> Result<()> {
@@ -1473,6 +1452,287 @@ pub async fn cmd_qos_delete_classifier(client: &ApiClient, id: &str) -> Result<(
     client.delete_qos_classifier(id).await?;
     println!("QoS classifier deleted: {id}");
     Ok(())
+}
+
+// ── Top Talkers ─────────────────────────────────────────────────────
+
+pub async fn cmd_top(
+    client: &ApiClient,
+    limit: usize,
+    sort: &str,
+    output: OutputFormat,
+) -> Result<()> {
+    let mut conns = client.list_connections(limit.max(500)).await?;
+
+    if output == OutputFormat::Json {
+        conns.truncate(limit);
+        println!("{}", serde_json::to_string_pretty(&conns)?);
+        return Ok(());
+    }
+
+    // Sort by requested field (descending)
+    match sort {
+        "packets" => conns.sort_by(|a, b| {
+            let ta = (a.packets_fwd as u64) + (a.packets_rev as u64);
+            let tb = (b.packets_fwd as u64) + (b.packets_rev as u64);
+            tb.cmp(&ta)
+        }),
+        _ => conns.sort_by(|a, b| {
+            let ta = (a.bytes_fwd as u64) + (a.bytes_rev as u64);
+            let tb = (b.bytes_fwd as u64) + (b.bytes_rev as u64);
+            tb.cmp(&ta)
+        }),
+    }
+
+    conns.truncate(limit);
+
+    if conns.is_empty() {
+        println!("No active connections.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<22} {:>5}  {:<22} {:>5}  {:<5}  {:<6}  {:>10}  {:>10}",
+        "SOURCE", "PORT", "DESTINATION", "PORT", "PROTO", "STATE", "BYTES", "PACKETS"
+    );
+    println!("{}", "-".repeat(100));
+
+    for c in &conns {
+        let total_bytes = (c.bytes_fwd as u64) + (c.bytes_rev as u64);
+        let total_pkts = (c.packets_fwd as u64) + (c.packets_rev as u64);
+        let proto = match c.protocol {
+            6 => "TCP",
+            17 => "UDP",
+            1 => "ICMP",
+            58 => "ICMPv6",
+            _ => "OTHER",
+        };
+        println!(
+            "{:<22} {:>5}  {:<22} {:>5}  {:<5}  {:<6}  {:>10}  {:>10}",
+            truncate(&c.src_ip, 22),
+            c.src_port,
+            truncate(&c.dst_ip, 22),
+            c.dst_port,
+            proto,
+            truncate(&c.state, 6),
+            format_bytes(total_bytes),
+            total_pkts,
+        );
+    }
+
+    println!("\n{} connection(s) shown (sorted by {sort}).", conns.len());
+    Ok(())
+}
+
+// ── Flows ───────────────────────────────────────────────────────────
+
+pub async fn cmd_flows(client: &ApiClient, limit: usize, output: OutputFormat) -> Result<()> {
+    use std::collections::HashMap;
+
+    let conns = client.list_connections(limit).await?;
+
+    // Aggregate by (src_subnet, dst_subnet, dst_port, protocol)
+    // Use /24 for IPv4, /48 for IPv6
+    let mut agg: HashMap<String, FlowAgg> = HashMap::new();
+    for c in &conns {
+        let src_net = subnet_of(&c.src_ip);
+        let dst_net = subnet_of(&c.dst_ip);
+        let proto = match c.protocol {
+            6 => "TCP",
+            17 => "UDP",
+            1 => "ICMP",
+            58 => "ICMPv6",
+            _ => "OTHER",
+        };
+        let key = format!("{src_net} -> {dst_net}:{} ({proto})", c.dst_port);
+        let entry = agg.entry(key).or_insert(FlowAgg {
+            flows: 0,
+            bytes: 0,
+            packets: 0,
+        });
+        entry.flows += 1;
+        entry.bytes += (c.bytes_fwd as u64) + (c.bytes_rev as u64);
+        entry.packets += (c.packets_fwd as u64) + (c.packets_rev as u64);
+    }
+
+    let mut sorted: Vec<(String, FlowAgg)> = agg.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.bytes.cmp(&a.1.bytes));
+
+    if output == OutputFormat::Json {
+        let json_flows: Vec<serde_json::Value> = sorted
+            .iter()
+            .map(|(k, v)| {
+                serde_json::json!({
+                    "flow": k,
+                    "connections": v.flows,
+                    "bytes": v.bytes,
+                    "packets": v.packets,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json_flows)?);
+        return Ok(());
+    }
+
+    if sorted.is_empty() {
+        println!("No active flows.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<60} {:>6}  {:>10}  {:>10}",
+        "FLOW", "CONNS", "BYTES", "PACKETS"
+    );
+    println!("{}", "-".repeat(92));
+
+    for (key, agg) in &sorted {
+        println!(
+            "{:<60} {:>6}  {:>10}  {:>10}",
+            truncate(key, 60),
+            agg.flows,
+            format_bytes(agg.bytes),
+            agg.packets,
+        );
+    }
+
+    println!(
+        "\n{} aggregated flow(s) from {} connection(s).",
+        sorted.len(),
+        conns.len()
+    );
+    Ok(())
+}
+
+struct FlowAgg {
+    flows: u64,
+    bytes: u64,
+    packets: u64,
+}
+
+/// Extract /24 subnet for IPv4 or /48 for IPv6.
+fn subnet_of(ip: &str) -> String {
+    if ip.contains(':') {
+        // IPv6: keep first 3 groups (rough /48)
+        let parts: Vec<&str> = ip.split(':').collect();
+        if parts.len() >= 3 {
+            format!("{}:{}:{}::/48", parts[0], parts[1], parts[2])
+        } else {
+            format!("{ip}/48")
+        }
+    } else {
+        // IPv4: /24
+        let parts: Vec<&str> = ip.split('.').collect();
+        if parts.len() == 4 {
+            format!("{}.{}.{}.0/24", parts[0], parts[1], parts[2])
+        } else {
+            ip.to_string()
+        }
+    }
+}
+
+// ── Enhanced Status ─────────────────────────────────────────────────
+
+pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    // Fetch all data sources in parallel
+    let (status, ebpf, alerts, conntrack, ddos) = tokio::join!(
+        client.get_status(),
+        client.ebpf_status(),
+        client.list_alerts(None, None, None, None, 5, 0),
+        client.conntrack_status(),
+        client.ddos_status(),
+    );
+
+    let status = status?;
+
+    if output == OutputFormat::Json {
+        let combined = serde_json::json!({
+            "agent": status,
+            "ebpf": ebpf.ok(),
+            "alerts": alerts.ok(),
+            "conntrack": conntrack.ok(),
+            "ddos": ddos.ok(),
+        });
+        println!("{}", serde_json::to_string_pretty(&combined)?);
+        return Ok(());
+    }
+
+    let uptime = format_uptime(status.uptime_seconds);
+
+    println!(
+        "eBPFsentinel v{} -- up {} -- {} rules loaded\n",
+        status.version, uptime, status.rule_count
+    );
+
+    // eBPF programs
+    if let Ok(ebpf) = ebpf {
+        let loaded = ebpf.programs.iter().filter(|p| p.loaded).count();
+        let total = ebpf.programs.len();
+        print!("  Programs  {loaded}/{total} loaded   ");
+        for p in &ebpf.programs {
+            if p.loaded {
+                print!(" {} \u{2713}", p.name);
+            }
+        }
+        println!("\n");
+    }
+
+    // Connection tracking
+    if let Ok(ct) = conntrack {
+        println!("  Conntrack  {} active connections", ct.connection_count);
+    }
+
+    // DDoS
+    if let Ok(d) = ddos {
+        if d.active_attacks > 0 {
+            println!(
+                "  DDoS       {} active attack(s), {} mitigated total",
+                d.active_attacks, d.total_mitigated
+            );
+        } else {
+            println!(
+                "  DDoS       no active attacks ({} mitigated total)",
+                d.total_mitigated
+            );
+        }
+    }
+
+    // Recent alerts
+    if let Ok(al) = alerts {
+        println!("\n  Recent Alerts ({} total)", al.total);
+        if al.alerts.is_empty() {
+            println!("  (none)");
+        } else {
+            println!(
+                "  {:<10}  {:<8}  {:<18}  {:<18}  {}",
+                "COMPONENT", "SEVERITY", "SOURCE", "DESTINATION", "MESSAGE"
+            );
+            for a in &al.alerts {
+                println!(
+                    "  {:<10}  {:<8}  {:<18}  {:<18}  {}",
+                    a.component,
+                    a.severity,
+                    format_ip(a.src_ip),
+                    format_ip(a.dst_ip),
+                    truncate(&a.message, 40),
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Format byte count to human-readable (K/M/G).
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
