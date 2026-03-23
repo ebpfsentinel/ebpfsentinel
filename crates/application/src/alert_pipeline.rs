@@ -41,6 +41,16 @@ pub struct AlertPipeline {
     enricher: Option<Arc<dyn AlertEnrichmentPort>>,
     /// Optional simple auto-response evaluator (OSS).
     auto_response: Option<AutoResponseHandler>,
+    /// Optional auto-capture trigger (OSS).
+    auto_capture: Option<AutoCaptureHandler>,
+}
+
+/// Auto-capture trigger: starts a PCAP capture when a high-severity alert fires.
+pub struct AutoCaptureHandler {
+    policy: domain::capture::entity::AutoCapturePolicy,
+    capture_engine: Arc<RwLock<domain::capture::engine::CaptureEngine>>,
+    /// Channel to send capture requests to the spawner (adapters layer).
+    capture_tx: mpsc::Sender<domain::capture::entity::AutoCaptureRequest>,
 }
 
 /// Simple auto-response: evaluates alerts against severity-based policies
@@ -68,6 +78,7 @@ impl AlertPipeline {
             alert_store: None,
             enricher: None,
             auto_response: None,
+            auto_capture: None,
         }
     }
 
@@ -89,6 +100,30 @@ impl AlertPipeline {
     #[must_use]
     pub fn with_enricher(mut self, enricher: Arc<dyn AlertEnrichmentPort>) -> Self {
         self.enricher = Some(enricher);
+        self
+    }
+
+    /// Attach an auto-capture handler (OSS).
+    /// Captures are triggered via an `mpsc` channel — the receiver spawns the
+    /// actual pcap task in the adapters layer.
+    #[must_use]
+    pub fn with_auto_capture(
+        mut self,
+        policy: domain::capture::entity::AutoCapturePolicy,
+        capture_engine: Arc<RwLock<domain::capture::engine::CaptureEngine>>,
+        capture_tx: mpsc::Sender<domain::capture::entity::AutoCaptureRequest>,
+    ) -> Self {
+        tracing::info!(
+            policy = %policy.name,
+            min_severity = ?policy.min_severity,
+            duration_secs = policy.duration_secs,
+            "auto-capture enabled (OSS)"
+        );
+        self.auto_capture = Some(AutoCaptureHandler {
+            policy,
+            capture_engine,
+            capture_tx,
+        });
         self
     }
 
@@ -179,6 +214,7 @@ impl AlertPipeline {
 
         // Auto-response: evaluate and enforce if policies match
         self.evaluate_auto_response(&alert).await;
+        self.evaluate_auto_capture(&alert).await;
 
         // Pass through router (dedup, throttle, route matching)
         let matched_routes = self.router.process_alert(&alert);
@@ -290,6 +326,7 @@ impl AlertPipeline {
 
         // Auto-response: evaluate and enforce if policies match
         self.evaluate_auto_response(&alert).await;
+        self.evaluate_auto_capture(&alert).await;
 
         // Pass through router (dedup, throttle, route matching)
         let matched_routes = self.router.process_alert(&alert);
@@ -401,6 +438,7 @@ impl AlertPipeline {
 
         // Auto-response: evaluate and enforce if policies match
         self.evaluate_auto_response(&alert).await;
+        self.evaluate_auto_capture(&alert).await;
 
         // Pass through router (dedup, throttle, route matching)
         let matched_routes = self.router.process_alert(&alert);
@@ -479,6 +517,7 @@ impl AlertPipeline {
         }
 
         self.evaluate_auto_response(&alert).await;
+        self.evaluate_auto_capture(&alert).await;
 
         let matched_routes = self.router.process_alert(&alert);
         if matched_routes.is_empty() {
@@ -730,6 +769,104 @@ impl AlertPipeline {
             // Only first matching policy applies (no stacking)
             break;
         }
+    }
+
+    /// Evaluate an alert against auto-capture policy.
+    /// If it matches and no capture is running, start one with a BPF filter
+    /// derived from the alert's source/destination IPs.
+    async fn evaluate_auto_capture(&self, alert: &domain::alert::entity::Alert) {
+        let Some(ref handler) = self.auto_capture else {
+            return;
+        };
+        let policy = &handler.policy;
+
+        // Check severity
+        if alert.severity.to_u8() < policy.min_severity.to_u8() {
+            return;
+        }
+        // Check component filter
+        if !policy.components.is_empty()
+            && !policy
+                .components
+                .iter()
+                .any(|c| alert.component.eq_ignore_ascii_case(c))
+        {
+            return;
+        }
+        // Check if a capture is already running
+        if handler.capture_engine.read().await.has_active() {
+            tracing::debug!(
+                alert_id = %alert.id,
+                "auto-capture: skipped (another capture is active)"
+            );
+            return;
+        }
+
+        // Build BPF filter from alert context
+        let src_ip = if alert.is_ipv6 {
+            let bytes: [u8; 16] = {
+                let mut b = [0u8; 16];
+                for (i, &word) in alert.src_addr.iter().enumerate() {
+                    b[i * 4..(i + 1) * 4].copy_from_slice(&word.to_be_bytes());
+                }
+                b
+            };
+            std::net::IpAddr::from(bytes).to_string()
+        } else {
+            std::net::IpAddr::from(std::net::Ipv4Addr::from(alert.src_addr[0])).to_string()
+        };
+        let filter = format!("host {src_ip}");
+
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let cap_id = format!("auto-{}", now_ns / 1_000_000);
+        let output_path = format!("/var/lib/ebpfsentinel/captures/{cap_id}.pcap");
+
+        let session = domain::capture::entity::CaptureSession {
+            id: cap_id.clone(),
+            filter: filter.clone(),
+            duration_secs: policy.duration_secs,
+            snap_length: policy.snap_length,
+            output_path,
+            interface: policy.interface.clone(),
+            status: domain::capture::entity::CaptureStatus::Running,
+            started_at_ns: now_ns,
+            file_size_bytes: 0,
+            packets_captured: 0,
+        };
+
+        // Register in engine
+        {
+            let mut engine = handler.capture_engine.write().await;
+            if let Err(e) = engine.start(session.clone()) {
+                tracing::debug!(alert_id = %alert.id, error = %e, "auto-capture: registration failed");
+                return;
+            }
+        }
+
+        // Send to capture spawner (adapters layer)
+        let req = domain::capture::entity::AutoCaptureRequest { session };
+        if let Err(e) = handler.capture_tx.try_send(req) {
+            tracing::warn!(
+                capture_id = %cap_id,
+                error = %e,
+                "auto-capture: failed to send to spawner"
+            );
+            handler.capture_engine.write().await.fail(&cap_id);
+            return;
+        }
+
+        tracing::info!(
+            capture_id = %cap_id,
+            alert_id = %alert.id,
+            severity = ?alert.severity,
+            component = %alert.component,
+            filter = %filter,
+            duration_secs = policy.duration_secs,
+            "auto-capture: started"
+        );
     }
 
     /// Hot-reload alert routes without resetting dedup/throttle state.

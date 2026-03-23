@@ -211,7 +211,7 @@ pub async fn stop_capture(
 ///
 /// Spawned on a blocking thread via `tokio::task::spawn_blocking` because
 /// libpcap's `next_packet()` blocks.
-async fn run_pcap_capture(
+pub async fn run_pcap_capture(
     id: String,
     interface: String,
     filter: String,

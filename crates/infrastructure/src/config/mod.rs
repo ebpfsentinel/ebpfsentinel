@@ -172,6 +172,12 @@ pub struct AgentConfig {
     /// SOAR webhooks, cooldowns, and full audit trail.
     #[serde(default)]
     pub auto_response: AutoResponseConfig,
+
+    /// Auto-capture: start a PCAP when a high-severity alert fires.
+    /// 1 capture at a time, max 60s. Enterprise adds ring buffer, multi-capture,
+    /// flow timeline, and forensics API.
+    #[serde(default)]
+    pub auto_capture: AutoCaptureConfig,
 }
 
 /// Maximum number of interface groups (bits 0-30 of `group_mask`).
@@ -605,6 +611,18 @@ impl AgentConfig {
             }
         }
 
+        // Validate auto-capture
+        if self.auto_capture.enabled && self.auto_capture.duration_secs > MAX_AUTO_CAPTURE_DURATION
+        {
+            return Err(ConfigError::Validation {
+                field: "auto_capture.duration_secs".to_string(),
+                message: format!(
+                    "OSS auto-capture max duration is {MAX_AUTO_CAPTURE_DURATION}s (got {}s)",
+                    self.auto_capture.duration_secs
+                ),
+            });
+        }
+
         Ok(())
     }
 
@@ -925,6 +943,50 @@ pub fn parse_group_mask(
     }
     Ok(mask)
 }
+
+// ── Auto-capture ──────────────────────────────────────────────────
+
+/// Auto-capture configuration: start a PCAP capture when a high-severity
+/// alert fires. OSS is limited to 1 policy. Enterprise adds ring buffer
+/// captures, multi-capture, flow timeline, and forensics API.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AutoCaptureConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Minimum severity to trigger auto-capture.
+    #[serde(default = "default_capture_min_severity")]
+    pub min_severity: String,
+
+    /// Optional component filter (empty = all).
+    #[serde(default)]
+    pub components: Vec<String>,
+
+    /// Capture duration in seconds (max 60 in OSS).
+    #[serde(default = "default_capture_duration")]
+    pub duration_secs: u64,
+
+    /// Snap length in bytes.
+    #[serde(default = "default_capture_snap_length")]
+    pub snap_length: u32,
+
+    /// Interface to capture on (default: first agent interface).
+    #[serde(default)]
+    pub interface: Option<String>,
+}
+
+fn default_capture_min_severity() -> String {
+    "high".to_string()
+}
+fn default_capture_duration() -> u64 {
+    30
+}
+fn default_capture_snap_length() -> u32 {
+    1500
+}
+
+/// Maximum auto-capture duration in OSS (seconds).
+pub const MAX_AUTO_CAPTURE_DURATION: u64 = 60;
 
 // ── Auto-response ──────────────────────────────────────────────────
 

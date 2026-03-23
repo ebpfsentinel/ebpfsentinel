@@ -1636,6 +1636,66 @@ pub async fn run(
         alert_pipeline = alert_pipeline.with_auto_response(policies, Arc::clone(&ips_svc));
     }
 
+    // Wire simple auto-capture (OSS)
+    if config.auto_capture.enabled {
+        let iface = config
+            .auto_capture
+            .interface
+            .clone()
+            .unwrap_or_else(|| config.agent.interfaces[0].clone());
+        let min_severity = match config.auto_capture.min_severity.as_str() {
+            "low" => domain::common::entity::Severity::Low,
+            "medium" => domain::common::entity::Severity::Medium,
+            "critical" => domain::common::entity::Severity::Critical,
+            _ => domain::common::entity::Severity::High,
+        };
+        let policy = domain::capture::entity::AutoCapturePolicy {
+            name: "auto-capture".to_string(),
+            min_severity,
+            components: config.auto_capture.components.clone(),
+            duration_secs: config.auto_capture.duration_secs,
+            snap_length: config.auto_capture.snap_length,
+            interface: iface,
+        };
+
+        let (capture_tx, mut capture_rx) =
+            tokio::sync::mpsc::channel::<domain::capture::entity::AutoCaptureRequest>(4);
+
+        alert_pipeline =
+            alert_pipeline.with_auto_capture(policy, Arc::clone(&capture_engine), capture_tx);
+
+        // Spawn capture receiver — bridges application → adapters layer.
+        let cap_engine_clone = Arc::clone(&capture_engine);
+        tokio::spawn(async move {
+            while let Some(req) = capture_rx.recv().await {
+                let s = req.session;
+                #[cfg(feature = "pcap-capture")]
+                {
+                    let engine = Arc::clone(&cap_engine_clone);
+                    tokio::spawn(adapters::http::capture_handler::run_pcap_capture(
+                        s.id,
+                        s.interface,
+                        s.filter,
+                        s.duration_secs,
+                        s.snap_length,
+                        s.output_path,
+                        engine,
+                    ));
+                }
+                #[cfg(not(feature = "pcap-capture"))]
+                {
+                    tracing::warn!(
+                        capture_id = %s.id,
+                        "auto-capture: pcap-capture feature not enabled"
+                    );
+                    cap_engine_clone.write().await.fail(&s.id);
+                }
+            }
+        });
+
+        info!("auto-capture wired");
+    }
+
     // Wire GeoIP to domain services
     if let Some(ref geoip) = geoip_port {
         ddos_svc.write().await.set_geoip_port(Arc::clone(geoip));

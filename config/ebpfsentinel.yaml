@@ -46,6 +46,18 @@ agent:
 #       action: block
 #       ttl_secs: 1800
 
+# ── Auto-Capture (OSS) ────────────────────────────────────────────
+# Start a PCAP capture when a high-severity alert fires.
+# 1 capture at a time, max 60s duration. Enterprise adds ring buffer,
+# multi-capture, flow timeline, and forensics API.
+# auto_capture:
+#   enabled: true
+#   min_severity: high           # low, medium, high, critical
+#   components: []               # empty = all components
+#   duration_secs: 30            # max 60s in OSS
+#   snap_length: 1500
+#   interface: eth0              # default: first agent interface
+
 # ── Interface Groups ──────────────────────────────────────────────
 # Named groups of interfaces for multi-interface rule scoping.
 # Rules can target specific groups via the `interfaces` field.

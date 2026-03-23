@@ -39,6 +39,26 @@ pub struct CaptureSession {
     pub packets_captured: u64,
 }
 
+// ── Auto-capture policy (OSS) ────────────────────────────────────
+
+/// A simple severity-based auto-capture policy.
+/// When an alert matches, a short packet capture is started automatically.
+#[derive(Debug, Clone)]
+pub struct AutoCapturePolicy {
+    pub name: String,
+    pub min_severity: crate::common::entity::Severity,
+    pub components: Vec<String>,
+    pub duration_secs: u64,
+    pub snap_length: u32,
+    pub interface: String,
+}
+
+/// Request sent from the alert pipeline to the capture spawner.
+#[derive(Debug, Clone)]
+pub struct AutoCaptureRequest {
+    pub session: CaptureSession,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
