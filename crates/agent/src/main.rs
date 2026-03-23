@@ -141,6 +141,9 @@ async fn main() -> Result<()> {
                 AlertsCommand::MarkFp { id } => {
                     commands::cmd_alerts_mark_fp(&client, &id, output).await
                 }
+                AlertsCommand::Stats { limit } => {
+                    commands::cmd_alerts_stats(&client, limit, output).await
+                }
             }
         }
 

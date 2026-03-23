@@ -295,6 +295,12 @@ pub enum AlertsCommand {
         /// Alert ID to mark
         id: String,
     },
+    /// Alert statistics: top sources, top rules, severity distribution
+    Stats {
+        /// Maximum alerts to analyze
+        #[arg(long, default_value_t = 500)]
+        limit: u64,
+    },
 }
 
 // ── MITRE ATT&CK ────────────────────────────────────────────────────────
@@ -895,7 +901,7 @@ mod tests {
                     assert_eq!(limit, 50);
                     assert_eq!(offset, 0);
                 }
-                AlertsCommand::MarkFp { .. } => panic!("expected List"),
+                _ => panic!("expected List"),
             },
             _ => panic!("expected Alerts command"),
         }
@@ -921,7 +927,7 @@ mod tests {
                     assert_eq!(tactic.as_deref(), Some("exfiltration"));
                     assert_eq!(technique.as_deref(), Some("T1041"));
                 }
-                AlertsCommand::MarkFp { .. } => panic!("expected List"),
+                _ => panic!("expected List"),
             },
             _ => panic!("expected Alerts command"),
         }
@@ -946,7 +952,7 @@ mod tests {
         match cli.command {
             Some(Command::Alerts(args)) => match args.command {
                 AlertsCommand::MarkFp { id } => assert_eq!(id, "alert-001"),
-                AlertsCommand::List { .. } => panic!("expected MarkFp"),
+                _ => panic!("expected MarkFp"),
             },
             _ => panic!("expected Alerts command"),
         }

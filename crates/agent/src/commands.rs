@@ -511,6 +511,97 @@ pub async fn cmd_alerts_mark_fp(client: &ApiClient, id: &str, output: OutputForm
     Ok(())
 }
 
+// ── Alert Stats ─────────────────────────────────────────────────────────
+
+pub async fn cmd_alerts_stats(client: &ApiClient, limit: u64, output: OutputFormat) -> Result<()> {
+    use std::collections::HashMap;
+
+    let resp = client.list_alerts(None, None, None, None, limit, 0).await?;
+    let alerts = &resp.alerts;
+
+    // Severity distribution
+    let mut by_severity: HashMap<&str, u64> = HashMap::new();
+    // Component distribution
+    let mut by_component: HashMap<&str, u64> = HashMap::new();
+    // Top source IPs
+    let mut by_src: HashMap<String, u64> = HashMap::new();
+    // Top rules
+    let mut by_rule: HashMap<&str, (&str, u64)> = HashMap::new();
+
+    for a in alerts {
+        *by_severity.entry(a.severity.as_str()).or_default() += 1;
+        *by_component.entry(a.component.as_str()).or_default() += 1;
+        *by_src.entry(a.src_ip_str()).or_default() += 1;
+        let entry = by_rule
+            .entry(a.rule_id.as_str())
+            .or_insert((a.severity.as_str(), 0));
+        entry.1 += 1;
+    }
+
+    if output == OutputFormat::Json {
+        let json = serde_json::json!({
+            "total": resp.total,
+            "analyzed": alerts.len(),
+            "by_severity": by_severity,
+            "by_component": by_component,
+            "top_sources": by_src,
+            "top_rules": by_rule.iter().map(|(k, (sev, cnt))| {
+                serde_json::json!({"rule_id": k, "severity": sev, "count": cnt})
+            }).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+
+    let total = resp.total;
+    let critical = by_severity.get("critical").copied().unwrap_or(0);
+    let high = by_severity.get("high").copied().unwrap_or(0);
+    let medium = by_severity.get("medium").copied().unwrap_or(0);
+    let low = by_severity.get("low").copied().unwrap_or(0);
+
+    println!();
+    println!(
+        "  Alerts: {} total ({} critical, {} high, {} medium, {} low)",
+        total, critical, high, medium, low
+    );
+    println!();
+
+    // Top sources
+    let mut src_sorted: Vec<_> = by_src.iter().collect();
+    src_sorted.sort_by(|a, b| b.1.cmp(a.1));
+    println!("  Top Sources              Alerts");
+    println!("  {}", "-".repeat(40));
+    for (ip, count) in src_sorted.iter().take(10) {
+        println!("  {:<24} {:>6}", truncate(ip, 24), count);
+    }
+    println!();
+
+    // Top rules
+    let mut rule_sorted: Vec<_> = by_rule.iter().collect();
+    rule_sorted.sort_by(|a, b| (b.1).1.cmp(&(a.1).1));
+    println!("  Top Rules                Alerts  Severity");
+    println!("  {}", "-".repeat(50));
+    for (rule, (severity, count)) in rule_sorted.iter().take(10) {
+        println!("  {:<24} {:>6}  {}", truncate(rule, 24), count, severity);
+    }
+    println!();
+
+    // Component distribution
+    let mut comp_sorted: Vec<_> = by_component.iter().collect();
+    comp_sorted.sort_by(|a, b| b.1.cmp(a.1));
+    let max_count = comp_sorted.first().map(|&(_, &c)| c).unwrap_or(1);
+    println!("  Components               Alerts");
+    println!("  {}", "-".repeat(50));
+    for &(comp, &count) in &comp_sorted {
+        let bar_len = ((count as f64 / max_count as f64) * 20.0) as usize;
+        let bar: String = "\u{2588}".repeat(bar_len);
+        println!("  {:<12} {:>6}  {}", comp, count, bar);
+    }
+    println!();
+
+    Ok(())
+}
+
 // ── Audit ───────────────────────────────────────────────────────────────
 
 // ── MITRE ATT&CK ────────────────────────────────────────────────────
