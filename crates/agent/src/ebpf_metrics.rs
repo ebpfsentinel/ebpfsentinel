@@ -71,8 +71,17 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (3, "events_dropped"),
             (4, "total_seen"),
             (5, "rejected"),
+            (6, "mtu_exceeded"),
         ],
-        "RATELIMIT_METRICS" | "IDS_METRICS" | "THREATINTEL_METRICS" => &[
+        "RATELIMIT_METRICS" => &[
+            (0, "matched"),
+            (1, "dropped"),
+            (2, "errors"),
+            (3, "events_dropped"),
+            (4, "total_seen"),
+            (5, "mtu_exceeded"),
+        ],
+        "IDS_METRICS" | "THREATINTEL_METRICS" => &[
             (0, "matched"),
             (1, "dropped"),
             (2, "errors"),
@@ -143,6 +152,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (2, "bytes_forwarded"),
             (3, "events_dropped"),
             (4, "total_seen"),
+            (5, "mtu_exceeded"),
         ],
         "QOS_METRICS" => &[
             (0, "total_seen"),

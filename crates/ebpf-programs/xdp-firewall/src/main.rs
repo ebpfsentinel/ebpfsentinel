@@ -6,7 +6,8 @@ use aya_ebpf::{
     bindings::xdp_action,
     cty::c_void,
     helpers::{
-        bpf_get_smp_processor_id, bpf_ktime_get_boot_ns, bpf_loop, bpf_xdp_adjust_meta,
+        bpf_check_mtu, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns, bpf_loop,
+        bpf_xdp_adjust_meta,
     },
     macros::{map, xdp},
     maps::{
@@ -127,7 +128,7 @@ static FW_HASH_PORT: HashMap<FwHashKeyPort, FwHashValue> =
 
 /// Per-CPU packet counters. Index: 0=passed, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen, 5=rejected.
 #[map]
-static FIREWALL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(6, 0);
+static FIREWALL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(7, 0);
 
 /// Per-CPU scratch buffer for packet context shared across action/event helpers.
 /// Avoids passing 8+ arguments through inlined functions that would blow
@@ -250,6 +251,7 @@ const METRIC_ERRORS: u32 = 2;
 const METRIC_EVENTS_DROPPED: u32 = 3;
 const METRIC_TOTAL_SEEN: u32 = 4;
 const METRIC_REJECTED: u32 = 5;
+const METRIC_MTU_EXCEEDED: u32 = 6;
 
 /// Returns `true` if the EVENTS RingBuf has backpressure (>75% full).
 #[inline(always)]
@@ -567,6 +569,13 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         return xdp_action::XDP_DROP;
     }
     if action == xdp_action::XDP_PASS {
+        // Check MTU before passing — drop oversized packets early.
+        let mut mtu: u32 = 0;
+        let mtu_ret = unsafe { bpf_check_mtu(ctx.ctx as *mut _, 0, &mut mtu as *mut u32, 0, 0) };
+        if mtu_ret != 0 {
+            increment_metric(METRIC_MTU_EXCEEDED);
+            return xdp_action::XDP_DROP;
+        }
         // Chain: ratelimit (slot 0) → if empty, loadbalancer (slot 2).
         // If ratelimit is loaded, it tail-calls LB itself on PASS.
         unsafe {

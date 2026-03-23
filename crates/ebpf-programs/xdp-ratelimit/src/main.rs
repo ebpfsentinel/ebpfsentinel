@@ -4,7 +4,7 @@
 
 use aya_ebpf::{
     bindings::xdp_action,
-    helpers::{bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
+    helpers::{bpf_check_mtu, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
     macros::{map, xdp},
     maps::{
         Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, ProgramArray, RingBuf,
@@ -133,7 +133,7 @@ static RL_BUCKETS: LruPerCpuHashMap<RateLimitKey, RateLimitBucketUnion> =
 
 /// Per-CPU counters. Index: 0=passed, 1=throttled, 2=errors, 3=events_dropped, 4=total_seen.
 #[map]
-static RATELIMIT_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
+static RATELIMIT_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(6, 0);
 
 /// Shared kernel→userspace event ring buffer (1 MB).
 #[map]
@@ -244,6 +244,7 @@ const METRIC_THROTTLED: u32 = 1;
 const METRIC_ERRORS: u32 = 2;
 const METRIC_EVENTS_DROPPED: u32 = 3;
 const METRIC_TOTAL_SEEN: u32 = 4;
+const METRIC_MTU_EXCEEDED: u32 = 5;
 
 // Local asm macros removed — using ebpf_helpers::copy_mac_asm! and copy_16b_asm!.
 
@@ -376,9 +377,15 @@ pub fn xdp_ratelimit(ctx: XdpContext) -> u32 {
         }
         return xdp_action::XDP_DROP;
     }
-    // Chain: on PASS, tail-call to loadbalancer (slot 1).
-    // No-op if LB is not loaded (slot empty).
+    // Chain: on PASS, check MTU then tail-call to loadbalancer (slot 1).
     if action == xdp_action::XDP_PASS {
+        let mut mtu: u32 = 0;
+        let mtu_ret = unsafe { bpf_check_mtu(ctx.ctx as *mut _, 0, &mut mtu as *mut u32, 0, 0) };
+        if mtu_ret != 0 {
+            increment_metric(METRIC_MTU_EXCEEDED);
+            return xdp_action::XDP_DROP;
+        }
+        // No-op if LB is not loaded (slot empty).
         unsafe {
             let _ = RL_PROG_ARRAY.tail_call(&ctx, PROG_IDX_LOADBALANCER);
         }
