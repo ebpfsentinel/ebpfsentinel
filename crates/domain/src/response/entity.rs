@@ -46,6 +46,19 @@ impl ResponseAction {
     }
 }
 
+// ── Simple auto-response (OSS) ──────────────────────────────────────
+
+/// A simple severity-based auto-response policy.
+#[derive(Debug, Clone)]
+pub struct SimpleResponsePolicy {
+    pub name: String,
+    pub min_severity: crate::common::entity::Severity,
+    pub components: Vec<String>,
+    pub action: ResponseActionType,
+    pub ttl_secs: u64,
+    pub rate_pps: Option<u64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::alert_event::AlertEvent;
 use crate::audit_service_impl::AuditAppService;
+use crate::ips_service_impl::IpsAppService;
 
 /// Alert pipeline application service.
 ///
@@ -38,6 +39,15 @@ pub struct AlertPipeline {
     alert_store: Option<Arc<dyn AlertStore>>,
     /// Optional enricher for adding domain context to alerts.
     enricher: Option<Arc<dyn AlertEnrichmentPort>>,
+    /// Optional simple auto-response evaluator (OSS).
+    auto_response: Option<AutoResponseHandler>,
+}
+
+/// Simple auto-response: evaluates alerts against severity-based policies
+/// and enforces block/throttle via the IPS blacklist.
+pub struct AutoResponseHandler {
+    policies: Vec<domain::response::entity::SimpleResponsePolicy>,
+    ips_service: Arc<RwLock<IpsAppService>>,
 }
 
 impl AlertPipeline {
@@ -57,6 +67,7 @@ impl AlertPipeline {
             stream_tx: None,
             alert_store: None,
             enricher: None,
+            auto_response: None,
         }
     }
 
@@ -78,6 +89,26 @@ impl AlertPipeline {
     #[must_use]
     pub fn with_enricher(mut self, enricher: Arc<dyn AlertEnrichmentPort>) -> Self {
         self.enricher = Some(enricher);
+        self
+    }
+
+    /// Attach a simple auto-response handler (OSS).
+    #[must_use]
+    pub fn with_auto_response(
+        mut self,
+        policies: Vec<domain::response::entity::SimpleResponsePolicy>,
+        ips_service: Arc<RwLock<IpsAppService>>,
+    ) -> Self {
+        if !policies.is_empty() {
+            tracing::info!(
+                policy_count = policies.len(),
+                "auto-response enabled (OSS simple mode)"
+            );
+            self.auto_response = Some(AutoResponseHandler {
+                policies,
+                ips_service,
+            });
+        }
         self
     }
 
@@ -145,6 +176,9 @@ impl AlertPipeline {
         if let Some(ref tx) = self.stream_tx {
             let _ = tx.send(alert.clone());
         }
+
+        // Auto-response: evaluate and enforce if policies match
+        self.evaluate_auto_response(&alert).await;
 
         // Pass through router (dedup, throttle, route matching)
         let matched_routes = self.router.process_alert(&alert);
@@ -254,6 +288,9 @@ impl AlertPipeline {
             let _ = tx.send(alert.clone());
         }
 
+        // Auto-response: evaluate and enforce if policies match
+        self.evaluate_auto_response(&alert).await;
+
         // Pass through router (dedup, throttle, route matching)
         let matched_routes = self.router.process_alert(&alert);
 
@@ -362,6 +399,9 @@ impl AlertPipeline {
             let _ = tx.send(alert.clone());
         }
 
+        // Auto-response: evaluate and enforce if policies match
+        self.evaluate_auto_response(&alert).await;
+
         // Pass through router (dedup, throttle, route matching)
         let matched_routes = self.router.process_alert(&alert);
 
@@ -437,6 +477,8 @@ impl AlertPipeline {
         if let Some(ref tx) = self.stream_tx {
             let _ = tx.send(alert.clone());
         }
+
+        self.evaluate_auto_response(&alert).await;
 
         let matched_routes = self.router.process_alert(&alert);
         if matched_routes.is_empty() {
@@ -619,6 +661,74 @@ impl AlertPipeline {
             AlertEvent::PacketSecurity(psa) => {
                 self.process_packet_security_alert(&psa).await;
             }
+        }
+    }
+
+    /// Evaluate an alert against simple auto-response policies.
+    /// If a policy matches, enforce block/throttle via IPS blacklist.
+    async fn evaluate_auto_response(&self, alert: &domain::alert::entity::Alert) {
+        let Some(ref handler) = self.auto_response else {
+            return;
+        };
+
+        for policy in &handler.policies {
+            // Check severity
+            if alert.severity.to_u8() < policy.min_severity.to_u8() {
+                continue;
+            }
+            // Check component filter
+            if !policy.components.is_empty()
+                && !policy
+                    .components
+                    .iter()
+                    .any(|c| alert.component.eq_ignore_ascii_case(c))
+            {
+                continue;
+            }
+            // Extract source IP
+            let src_ip = if alert.is_ipv6 {
+                let bytes: [u8; 16] = {
+                    let mut b = [0u8; 16];
+                    for (i, &word) in alert.src_addr.iter().enumerate() {
+                        b[i * 4..(i + 1) * 4].copy_from_slice(&word.to_be_bytes());
+                    }
+                    b
+                };
+                std::net::IpAddr::from(bytes)
+            } else {
+                std::net::IpAddr::from(std::net::Ipv4Addr::from(alert.src_addr[0]))
+            };
+
+            let reason = format!("auto-response:{} alert={}", policy.name, alert.id);
+            let ttl = std::time::Duration::from_secs(policy.ttl_secs);
+
+            let mut ips = handler.ips_service.write().await;
+            match ips.add_to_blacklist(src_ip, reason.clone(), ttl) {
+                Ok(()) => {
+                    tracing::info!(
+                        policy = %policy.name,
+                        alert_id = %alert.id,
+                        src_ip = %src_ip,
+                        action = ?policy.action,
+                        ttl_secs = policy.ttl_secs,
+                        severity = ?alert.severity,
+                        component = %alert.component,
+                        "auto-response: enforced"
+                    );
+                    self.metrics.record_auto_response(&policy.name);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        policy = %policy.name,
+                        alert_id = %alert.id,
+                        src_ip = %src_ip,
+                        error = %e,
+                        "auto-response: enforcement failed"
+                    );
+                }
+            }
+            // Only first matching policy applies (no stacking)
+            break;
         }
     }
 

@@ -166,6 +166,12 @@ pub struct AgentConfig {
     /// specific groups via the `interfaces` field.
     #[serde(default)]
     pub interface_groups: HashMap<String, InterfaceGroupConfig>,
+
+    /// Simple auto-response: automatic block/throttle on high-severity alerts.
+    /// Limited to 3 policies. Enterprise adds unlimited policies, MITRE matching,
+    /// SOAR webhooks, cooldowns, and full audit trail.
+    #[serde(default)]
+    pub auto_response: AutoResponseConfig,
 }
 
 /// Maximum number of interface groups (bits 0-30 of `group_mask`).
@@ -563,6 +569,42 @@ impl AgentConfig {
             }
         }
 
+        // Validate auto-response policies
+        if self.auto_response.enabled
+            && self.auto_response.policies.len() > MAX_AUTO_RESPONSE_POLICIES
+        {
+            return Err(ConfigError::Validation {
+                field: "auto_response.policies".to_string(),
+                message: format!(
+                    "OSS supports at most {MAX_AUTO_RESPONSE_POLICIES} auto-response policies (found {}). \
+                     Upgrade to Enterprise for unlimited policies.",
+                    self.auto_response.policies.len()
+                ),
+            });
+        }
+        for (i, policy) in self.auto_response.policies.iter().enumerate() {
+            let valid_severities = ["low", "medium", "high", "critical"];
+            if !valid_severities.contains(&policy.min_severity.as_str()) {
+                return Err(ConfigError::Validation {
+                    field: format!("auto_response.policies[{i}].min_severity"),
+                    message: format!(
+                        "invalid severity '{}', expected one of: low, medium, high, critical",
+                        policy.min_severity
+                    ),
+                });
+            }
+            let valid_actions = ["block", "throttle"];
+            if !valid_actions.contains(&policy.action.as_str()) {
+                return Err(ConfigError::Validation {
+                    field: format!("auto_response.policies[{i}].action"),
+                    message: format!(
+                        "invalid action '{}', expected one of: block, throttle",
+                        policy.action
+                    ),
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -883,6 +925,66 @@ pub fn parse_group_mask(
     }
     Ok(mask)
 }
+
+// ── Auto-response ──────────────────────────────────────────────────
+
+/// Simple auto-response configuration (OSS).
+///
+/// Automatically blocks or throttles source IPs when alerts match
+/// severity-based policies. Limited to 3 policies. Enterprise adds
+/// MITRE tactic matching, SOAR webhooks, cooldowns, and audit trail.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AutoResponseConfig {
+    /// Enable auto-response. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Policies (max 3 in OSS). Each policy matches alerts by minimum
+    /// severity and optional component filter, then executes block or throttle.
+    #[serde(default)]
+    pub policies: Vec<AutoResponsePolicyConfig>,
+}
+
+/// A single auto-response policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoResponsePolicyConfig {
+    /// Policy name (for logging).
+    pub name: String,
+
+    /// Minimum severity to trigger: low, medium, high, critical.
+    #[serde(default = "default_min_severity")]
+    pub min_severity: String,
+
+    /// Component filter (e.g. ["ids", "ddos"]).
+    /// If empty, matches all components.
+    #[serde(default)]
+    pub components: Vec<String>,
+
+    /// Action: "block" or "throttle".
+    #[serde(default = "default_response_action")]
+    pub action: String,
+
+    /// TTL for the response action in seconds.
+    #[serde(default = "default_response_ttl")]
+    pub ttl_secs: u64,
+
+    /// Rate limit in pps (only for "throttle" action).
+    #[serde(default)]
+    pub rate_pps: Option<u64>,
+}
+
+fn default_min_severity() -> String {
+    "high".to_string()
+}
+fn default_response_action() -> String {
+    "block".to_string()
+}
+fn default_response_ttl() -> u64 {
+    3600
+}
+
+/// Maximum number of auto-response policies in OSS.
+pub const MAX_AUTO_RESPONSE_POLICIES: usize = 3;
 
 // ── Agent info ─────────────────────────────────────────────────────
 

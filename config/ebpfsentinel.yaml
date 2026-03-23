@@ -29,6 +29,23 @@ agent:
   grpc_port: 50051
   metrics_port: 9090
 
+# ── Auto-Response (OSS) ───────────────────────────────────────────
+# Automatic block/throttle on high-severity alerts.
+# Max 3 policies in OSS. Enterprise adds unlimited policies, MITRE
+# tactic matching, SOAR webhooks, cooldowns, and full audit trail.
+# auto_response:
+#   enabled: true
+#   policies:
+#     - name: block-critical
+#       min_severity: critical    # low, medium, high, critical
+#       action: block             # block or throttle
+#       ttl_secs: 3600            # 1 hour
+#     - name: block-ids-ddos-high
+#       min_severity: high
+#       components: [ids, ddos]   # optional filter (empty = all components)
+#       action: block
+#       ttl_secs: 1800
+
 # ── Interface Groups ──────────────────────────────────────────────
 # Named groups of interfaces for multi-interface rule scoping.
 # Rules can target specific groups via the `interfaces` field.

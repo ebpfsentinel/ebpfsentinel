@@ -60,6 +60,9 @@ pub trait IpsMetrics: Send + Sync {
 
     /// Increment the IPS blocks counter.
     fn record_ips_block(&self) {}
+
+    /// Increment the auto-response counter for a given policy.
+    fn record_auto_response(&self, _policy_name: &str) {}
 }
 
 // ── DNS metrics ────────────────────────────────────────────────────

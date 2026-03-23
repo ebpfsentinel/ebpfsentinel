@@ -1601,6 +1601,41 @@ pub async fn run(
         info!("DNS alert enricher initialized");
     }
 
+    // Wire simple auto-response (OSS)
+    if config.auto_response.enabled && !config.auto_response.policies.is_empty() {
+        let policies: Vec<domain::response::entity::SimpleResponsePolicy> = config
+            .auto_response
+            .policies
+            .iter()
+            .map(|p| {
+                let min_severity = match p.min_severity.as_str() {
+                    "low" => domain::common::entity::Severity::Low,
+                    "medium" => domain::common::entity::Severity::Medium,
+                    "critical" => domain::common::entity::Severity::Critical,
+                    _ => domain::common::entity::Severity::High,
+                };
+                let action = if p.action == "throttle" {
+                    domain::response::entity::ResponseActionType::ThrottleIp
+                } else {
+                    domain::response::entity::ResponseActionType::BlockIp
+                };
+                domain::response::entity::SimpleResponsePolicy {
+                    name: p.name.clone(),
+                    min_severity,
+                    components: p.components.clone(),
+                    action,
+                    ttl_secs: p.ttl_secs,
+                    rate_pps: p.rate_pps,
+                }
+            })
+            .collect();
+        info!(
+            policy_count = policies.len(),
+            "auto-response policies loaded"
+        );
+        alert_pipeline = alert_pipeline.with_auto_response(policies, Arc::clone(&ips_svc));
+    }
+
     // Wire GeoIP to domain services
     if let Some(ref geoip) = geoip_port {
         ddos_svc.write().await.set_geoip_port(Arc::clone(geoip));
