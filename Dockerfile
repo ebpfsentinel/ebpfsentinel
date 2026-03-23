@@ -51,7 +51,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     rustup target add "${MUSL_TARGET}" && \
     RUSTFLAGS="-L native=/usr/local/musl/lib" \
     cargo build --release --target "${MUSL_TARGET}" --bin ebpfsentinel-agent && \
-    cp "/build/target/${MUSL_TARGET}/release/ebpfsentinel-agent" /build/ebpfsentinel-agent
+    cp "/build/target/${MUSL_TARGET}/release/ebpfsentinel-agent" /build/ebpfsentinel-agent && \
+    mkdir -p /build/captures-dir
 
 # ── Stage 2: Minimal runtime image ──────────────────────────────────
 #
@@ -72,7 +73,8 @@ COPY ebpf-out/ /usr/local/lib/ebpfsentinel/
 
 COPY config/ebpfsentinel.yaml /etc/ebpfsentinel/config.yaml
 
-RUN mkdir -p /var/lib/ebpfsentinel/captures
+# distroless has no shell — create the directory in the builder stage and COPY it.
+COPY --from=agent-builder /build/captures-dir /var/lib/ebpfsentinel/captures
 
 ENV EBPF_PROGRAM_DIR=/usr/local/lib/ebpfsentinel
 
