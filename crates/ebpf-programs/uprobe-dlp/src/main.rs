@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![cfg_attr(target_arch = "bpf", feature(asm_experimental_arch))]
 
 use aya_ebpf::{
     helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_boot_ns, r#gen},
