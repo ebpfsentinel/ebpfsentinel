@@ -25,7 +25,7 @@ use ebpf_helpers::checksum::{
     compute_icmp_csum, compute_icmpv6_csum, compute_ipv4_csum, compute_tcp_csum_v4,
     compute_tcp_csum_v6,
 };
-use ebpf_helpers::net::{IPV6_HDR_LEN, Ipv6Hdr, PROTO_ICMPV6, PROTO_TCP};
+use ebpf_helpers::net::{Ipv6Hdr, PROTO_ICMPV6, PROTO_TCP};
 use ebpf_helpers::xdp::{ptr_at, ptr_at_mut};
 use ebpf_helpers::{barrier, copy_mac_asm};
 use network_types::{

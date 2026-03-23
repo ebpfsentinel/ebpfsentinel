@@ -28,7 +28,7 @@ unsafe fn sum_bytes(ptr: *const u8, count: usize) -> u32 {
     let mut sum: u32 = 0;
     let mut i: usize = 0;
     while i < count {
-        sum += ((*ptr.add(i) as u32) << 8) | (*ptr.add(i + 1) as u32);
+        sum += unsafe { ((*ptr.add(i) as u32) << 8) | (*ptr.add(i + 1) as u32) };
         i += 2;
     }
     sum
@@ -42,7 +42,7 @@ unsafe fn sum_bytes(ptr: *const u8, count: usize) -> u32 {
 /// `hdr` must point to at least 20 valid bytes.
 #[inline(always)]
 pub unsafe fn compute_ipv4_csum(hdr: *const u8) -> u16 {
-    fold32(sum_bytes(hdr, 20))
+    fold32(unsafe { sum_bytes(hdr, 20) })
 }
 
 /// Compute TCP checksum with IPv4 pseudo-header (20-byte TCP, no options).
@@ -58,14 +58,13 @@ pub unsafe fn compute_tcp_csum_v4(
     tcp_hdr: *const u8,
 ) -> u16 {
     let mut sum: u32 = 0;
-    // Pseudo-header: src IP + dst IP + zero + proto + TCP length
     sum += ((src_ip[0] as u32) << 8) | (src_ip[1] as u32);
     sum += ((src_ip[2] as u32) << 8) | (src_ip[3] as u32);
     sum += ((dst_ip[0] as u32) << 8) | (dst_ip[1] as u32);
     sum += ((dst_ip[2] as u32) << 8) | (dst_ip[3] as u32);
     sum += PROTO_TCP as u32;
-    sum += 20u32; // fixed TCP header length
-    sum += sum_bytes(tcp_hdr, 20);
+    sum += 20u32;
+    sum += unsafe { sum_bytes(tcp_hdr, 20) };
     fold32(sum)
 }
 
@@ -86,7 +85,7 @@ pub unsafe fn compute_tcp_csum_v4_24(
     sum += ((dst_ip[2] as u32) << 8) | (dst_ip[3] as u32);
     sum += PROTO_TCP as u32;
     sum += 24u32;
-    sum += sum_bytes(tcp_hdr, 24);
+    sum += unsafe { sum_bytes(tcp_hdr, 24) };
     fold32(sum)
 }
 
@@ -101,11 +100,13 @@ pub unsafe fn compute_tcp_csum_v6(
     tcp_hdr: *const u8,
 ) -> u16 {
     let mut sum: u32 = 0;
-    sum += sum_bytes(src_ip.as_ptr(), 16);
-    sum += sum_bytes(dst_ip.as_ptr(), 16);
-    sum += 20u32; // fixed TCP len
-    sum += PROTO_TCP as u32;
-    sum += sum_bytes(tcp_hdr, 20);
+    unsafe {
+        sum += sum_bytes(src_ip.as_ptr(), 16);
+        sum += sum_bytes(dst_ip.as_ptr(), 16);
+        sum += 20u32;
+        sum += PROTO_TCP as u32;
+        sum += sum_bytes(tcp_hdr, 20);
+    }
     fold32(sum)
 }
 
@@ -120,11 +121,13 @@ pub unsafe fn compute_tcp_csum_v6_24(
     tcp_hdr: *const u8,
 ) -> u16 {
     let mut sum: u32 = 0;
-    sum += sum_bytes(src_ip.as_ptr(), 16);
-    sum += sum_bytes(dst_ip.as_ptr(), 16);
-    sum += 24u32;
-    sum += PROTO_TCP as u32;
-    sum += sum_bytes(tcp_hdr, 24);
+    unsafe {
+        sum += sum_bytes(src_ip.as_ptr(), 16);
+        sum += sum_bytes(dst_ip.as_ptr(), 16);
+        sum += 24u32;
+        sum += PROTO_TCP as u32;
+        sum += sum_bytes(tcp_hdr, 24);
+    }
     fold32(sum)
 }
 
@@ -136,7 +139,7 @@ pub unsafe fn compute_tcp_csum_v6_24(
 /// `data` must point to at least 36 valid bytes.
 #[inline(always)]
 pub unsafe fn compute_icmp_csum(data: *const u8) -> u16 {
-    fold32(sum_bytes(data, 36))
+    fold32(unsafe { sum_bytes(data, 36) })
 }
 
 /// Compute ICMPv6 checksum with IPv6 pseudo-header (56 bytes: 8 header + 48 payload).
@@ -150,10 +153,12 @@ pub unsafe fn compute_icmpv6_csum(
     icmpv6_data: *const u8,
 ) -> u16 {
     let mut sum: u32 = 0;
-    sum += sum_bytes(src_ip.as_ptr(), 16);
-    sum += sum_bytes(dst_ip.as_ptr(), 16);
-    sum += 56u32; // fixed ICMPv6 message len
-    sum += PROTO_ICMPV6 as u32;
-    sum += sum_bytes(icmpv6_data, 56);
+    unsafe {
+        sum += sum_bytes(src_ip.as_ptr(), 16);
+        sum += sum_bytes(dst_ip.as_ptr(), 16);
+        sum += 56u32;
+        sum += PROTO_ICMPV6 as u32;
+        sum += sum_bytes(icmpv6_data, 56);
+    }
     fold32(sum)
 }

@@ -190,8 +190,8 @@ fn send_syn_ack_v4(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
         (*ip).set_frags(0x02, 0); // DF
         (*ip).ttl = 64;
         (*ip).proto = network_types::ip::IpProto::Tcp;
-        (*ip).src_addr = unsafe { core::mem::transmute(dst_ip.to_be()) };
-        (*ip).dst_addr = unsafe { core::mem::transmute(src_ip.to_be()) };
+        (*ip).src_addr = dst_ip.to_be().to_ne_bytes();
+        (*ip).dst_addr = src_ip.to_be().to_ne_bytes();
         (*ip).check = [0, 0];
         let csum = compute_ipv4_csum(ip as *const u8);
         (*ip).set_checksum(csum);

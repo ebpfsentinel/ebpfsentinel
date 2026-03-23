@@ -26,7 +26,7 @@ use ebpf_helpers::net::{
     u32_from_be_bytes,
 };
 use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
-use ebpf_helpers::{copy_16b_asm, copy_mac_asm, increment_metric, ringbuf_has_backpressure};
+use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
     ddos::{
         AmpProtectConfig, AmpProtectKey, DdosConnTrackConfig, DdosConnTrackKey, DdosConnTrackValue,
@@ -37,11 +37,10 @@ use ebpf_common::{
         DDOS_METRIC_AMP_PASSED, DDOS_METRIC_CONN_TRACKED, DDOS_METRIC_COUNT,
         DDOS_METRIC_EVENTS_DROPPED, DDOS_METRIC_FIN_FLOOD_DROPS, DDOS_METRIC_HALF_OPEN_DROPS,
         DDOS_METRIC_ICMP_DROPPED, DDOS_METRIC_ICMP_PASSED, DDOS_METRIC_OVERSIZED_ICMP,
-        DDOS_METRIC_RST_FLOOD_DROPS, DDOS_METRIC_SYN_FLOOD_DROPS, DDOS_METRIC_SYN_RECEIVED,
-        DDOS_METRIC_SYNCOOKIE_INVALID, DDOS_METRIC_SYNCOOKIE_SENT, DDOS_METRIC_SYNCOOKIE_VALID,
+        DDOS_METRIC_RST_FLOOD_DROPS, DDOS_METRIC_SYN_RECEIVED,
+        DDOS_METRIC_SYNCOOKIE_INVALID, DDOS_METRIC_SYNCOOKIE_VALID,
         EVENT_TYPE_DDOS_AMP, EVENT_TYPE_DDOS_CONNTRACK, EVENT_TYPE_DDOS_ICMP,
         EVENT_TYPE_DDOS_SYN, FLOOD_TYPE_ACK, FLOOD_TYPE_FIN, FLOOD_TYPE_RST,
-        SYNCOOKIE_MSS_TABLE,
     },
     event::{PacketEvent, EVENT_TYPE_RATELIMIT, FLAG_IPV6, FLAG_VLAN},
     ratelimit::{
@@ -733,7 +732,7 @@ fn read_l4_ports_raw(ctx: &XdpContext, l4_offset: usize, protocol: u8) -> (u16, 
 #[inline(always)]
 fn check_syn_flood_v4(
     ctx: &XdpContext,
-    l3_offset: usize,
+    _l3_offset: usize,
     l4_offset: usize,
     src_ip: u32,
     dst_ip: u32,
@@ -806,7 +805,7 @@ fn check_syn_flood_v4(
 #[inline(always)]
 fn check_syn_flood_v6(
     ctx: &XdpContext,
-    l3_offset: usize,
+    _l3_offset: usize,
     l4_offset: usize,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
@@ -1463,6 +1462,7 @@ fn syncookie_hash(
 }
 
 /// Build a SYN cookie: hash with MSS index in lower 3 bits.
+#[allow(dead_code)]
 #[inline(always)]
 fn make_syncookie(
     src_ip: u32,
@@ -1506,6 +1506,7 @@ fn validate_syncookie(
 /// workaround, return the default MSS index (1460 bytes) which is correct
 /// for the vast majority of connections.
 // TODO: re-enable once the verifier supports variable-offset pkt access
+#[allow(dead_code)]
 #[inline(always)]
 fn parse_mss_index(_ctx: &XdpContext, _l4_offset: usize) -> u8 {
     4 // 1460 bytes — default MSS
