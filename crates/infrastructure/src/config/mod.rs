@@ -922,6 +922,12 @@ pub struct AgentInfo {
     /// Env `EBPF_PROGRAM_DIR` takes precedence, then this field, then defaults.
     #[serde(default)]
     pub ebpf_program_dir: Option<String>,
+
+    /// XDP attachment mode: auto, native, generic, or offloaded.
+    /// `auto` (default) lets the kernel pick the best available mode.
+    /// If the requested mode is unsupported, falls back to auto with a warning.
+    #[serde(default)]
+    pub xdp_mode: XdpMode,
 }
 
 /// TLS configuration for HTTP and gRPC servers (NFR9).
@@ -946,6 +952,38 @@ pub struct TlsConfig {
     /// - `disable`: classical-only (`X25519`, `SECP256R1`).
     #[serde(default)]
     pub pq_mode: PqMode,
+}
+
+/// XDP attachment mode for kernel programs.
+///
+/// Controls how XDP programs are attached to network interfaces:
+/// - `auto`: let the kernel pick the best mode (native → generic fallback)
+/// - `native`: force driver-mode XDP (fastest, requires driver support)
+/// - `generic`: force SKB-mode XDP (universal, slower)
+/// - `offloaded`: hardware offload to `SmartNIC` (requires NIC support)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum XdpMode {
+    /// Let the kernel pick the best available mode (default).
+    #[default]
+    Auto,
+    /// Force driver-mode XDP. Falls back to best available if unsupported.
+    Native,
+    /// Force generic/SKB-mode XDP. Always works but slower.
+    Generic,
+    /// Hardware offload to `SmartNIC`. Falls back to best available if unsupported.
+    Offloaded,
+}
+
+impl XdpMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Native => "native",
+            Self::Generic => "generic",
+            Self::Offloaded => "offloaded",
+        }
+    }
 }
 
 /// Post-quantum TLS key exchange policy.

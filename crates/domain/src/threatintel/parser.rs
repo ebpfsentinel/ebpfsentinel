@@ -243,7 +243,7 @@ pub fn extract_domains_from_stix_pattern(pattern: &str) -> Vec<String> {
     extract_stix_pattern_values(pattern, &["domain-name:value"])
         .into_iter()
         .filter(|v| !v.is_empty() && v.contains('.'))
-        .map(|v| v.to_lowercase())
+        .map(str::to_lowercase)
         .collect()
 }
 
@@ -254,7 +254,7 @@ pub fn extract_urls_from_stix_pattern(pattern: &str) -> Vec<String> {
     extract_stix_pattern_values(pattern, &["url:value"])
         .into_iter()
         .filter(|v| !v.is_empty())
-        .map(|v| v.to_string())
+        .map(ToOwned::to_owned)
         .collect()
 }
 
@@ -271,27 +271,23 @@ fn extract_stix_pattern_values<'a>(pattern: &'a str, properties: &[&str]) -> Vec
             .filter_map(|prop| remaining.find(prop).map(|pos| (pos, prop.len())))
             .min_by_key(|(pos, _)| *pos);
 
-        let (start, prop_len) = match best {
-            Some(v) => v,
-            None => break,
+        let Some((start, prop_len)) = best else {
+            break;
         };
 
         remaining = &remaining[start + prop_len..];
 
         // Find `= 'value'` after the property name
-        let eq_pos = match remaining.find('=') {
-            Some(p) => p,
-            None => continue,
+        let Some(eq_pos) = remaining.find('=') else {
+            continue;
         };
         let after_eq = &remaining[eq_pos + 1..];
-        let q1 = match after_eq.find('\'') {
-            Some(p) => p,
-            None => continue,
+        let Some(q1) = after_eq.find('\'') else {
+            continue;
         };
         let after_q1 = &after_eq[q1 + 1..];
-        let q2 = match after_q1.find('\'') {
-            Some(p) => p,
-            None => continue,
+        let Some(q2) = after_q1.find('\'') else {
+            continue;
         };
 
         values.push(&after_q1[..q2]);

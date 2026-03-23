@@ -106,6 +106,8 @@ pub async fn run(
         config_path,
         log_level = log_level.as_str(),
         log_format = log_format.as_str(),
+        xdp_mode = config.agent.xdp_mode.as_str(),
+        interfaces = ?config.agent.interfaces,
         "eBPFsentinel agent starting"
     );
 
@@ -2026,8 +2028,9 @@ pub fn try_load_xdp_firewall(
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
+    let xdp_flags = adapters::ebpf::xdp_mode_to_flags(config.agent.xdp_mode);
     for iface in &config.agent.interfaces {
-        loader.attach_xdp(iface)?;
+        loader.attach_xdp(iface, xdp_flags)?;
     }
 
     let mut map_manager = FirewallMapManager::new(loader.ebpf_mut())?;
@@ -2137,8 +2140,9 @@ pub fn try_load_xdp_ratelimit(
         info!("xdp-ratelimit loaded as tail-call target (firewall active)");
     } else {
         // Standalone mode: attach directly to the interface.
+        let xdp_flags = adapters::ebpf::xdp_mode_to_flags(config.agent.xdp_mode);
         for iface in &config.agent.interfaces {
-            loader.attach_xdp_program("xdp_ratelimit", iface)?;
+            loader.attach_xdp_program("xdp_ratelimit", iface, xdp_flags)?;
         }
     }
 
@@ -2645,8 +2649,9 @@ pub fn try_load_xdp_loadbalancer(
         info!("xdp-loadbalancer loaded as tail-call target (XDP chain active)");
     } else {
         // Standalone mode — attach directly.
+        let xdp_flags = adapters::ebpf::xdp_mode_to_flags(config.agent.xdp_mode);
         for iface in &config.agent.interfaces {
-            loader.attach_xdp_program("xdp_loadbalancer", iface)?;
+            loader.attach_xdp_program("xdp_loadbalancer", iface, xdp_flags)?;
         }
     }
 

@@ -15,6 +15,14 @@ agent:
   # Serve the Swagger UI at /swagger-ui (useful for development/debugging).
   swagger_ui: false
 
+  # XDP attachment mode: auto, native, generic, or offloaded.
+  # auto (default): kernel picks best available (native → generic fallback).
+  # native: driver-mode XDP (fastest, requires driver support — e.g. virtio_net, mlx5, i40e).
+  # generic: SKB-mode XDP (universal but slower — packets allocated as sk_buff first).
+  # offloaded: hardware offload to SmartNIC (requires NIC support — e.g. Netronome NFP).
+  # If the requested mode is unsupported, falls back to auto with a warning.
+  xdp_mode: auto
+
   log_level: info
   log_format: json
   http_port: 8080

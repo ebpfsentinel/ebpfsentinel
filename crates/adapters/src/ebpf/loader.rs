@@ -80,15 +80,20 @@ impl EbpfLoader {
     /// Attach the XDP firewall program to the given network interface.
     ///
     /// Backward-compatible wrapper around `attach_xdp_program("xdp_firewall", ...)`.
-    pub fn attach_xdp(&mut self, interface: &str) -> Result<(), anyhow::Error> {
-        self.attach_xdp_program("xdp_firewall", interface)
+    pub fn attach_xdp(&mut self, interface: &str, flags: XdpFlags) -> Result<(), anyhow::Error> {
+        self.attach_xdp_program("xdp_firewall", interface, flags)
     }
 
     /// Attach a named XDP program to the given network interface.
+    ///
+    /// Attempts the requested `flags` mode first. If attachment fails and the
+    /// mode is not already auto (default), falls back to `XdpFlags::default()`
+    /// (kernel picks best available) and logs a warning.
     pub fn attach_xdp_program(
         &mut self,
         program_name: &str,
         interface: &str,
+        flags: XdpFlags,
     ) -> Result<(), anyhow::Error> {
         let program: &mut Xdp = self
             .ebpf
@@ -97,9 +102,38 @@ impl EbpfLoader {
             .try_into()?;
 
         program.load()?;
-        program.attach(interface, XdpFlags::default())?;
-        info!(program_name, interface, "XDP program attached");
-        Ok(())
+
+        let mode_label = xdp_flags_label(flags);
+        match program.attach(interface, flags) {
+            Ok(_) => {
+                info!(
+                    program_name,
+                    interface,
+                    mode = mode_label,
+                    "XDP program attached"
+                );
+                Ok(())
+            }
+            Err(e) if flags.bits() != XdpFlags::default().bits() => {
+                warn!(
+                    program_name,
+                    interface,
+                    requested_mode = mode_label,
+                    error = %e,
+                    "XDP attach failed with requested mode, falling back to auto"
+                );
+                program.attach(interface, XdpFlags::default())?;
+                let fallback_label = xdp_flags_label(XdpFlags::default());
+                info!(
+                    program_name,
+                    interface,
+                    mode = fallback_label,
+                    "XDP program attached (fallback from {mode_label})"
+                );
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Load a named XDP program without attaching it to any interface.
@@ -298,4 +332,29 @@ impl EbpfLoader {
     // wire it here after each static map population. Maps that receive runtime updates
     // (CONFIG_FLAGS, CT_CONFIG, DDOS_SYN_CONFIG, ICMP_CONFIG, QOS_PIPE_CONFIG, etc.) must NOT
     // be frozen — only truly write-once maps are candidates.
+}
+
+/// Human-readable label for XDP attachment flags.
+fn xdp_flags_label(flags: XdpFlags) -> &'static str {
+    let bits = flags.bits();
+    if bits == XdpFlags::DRV_MODE.bits() {
+        "native"
+    } else if bits == XdpFlags::SKB_MODE.bits() {
+        "generic"
+    } else if bits == XdpFlags::HW_MODE.bits() {
+        "offloaded"
+    } else {
+        "auto"
+    }
+}
+
+/// Convert an [`infrastructure::config::XdpMode`] value to [`aya::programs::XdpFlags`].
+pub fn xdp_mode_to_flags(mode: infrastructure::config::XdpMode) -> XdpFlags {
+    use infrastructure::config::XdpMode;
+    match mode {
+        XdpMode::Auto => XdpFlags::default(),
+        XdpMode::Native => XdpFlags::DRV_MODE,
+        XdpMode::Generic => XdpFlags::SKB_MODE,
+        XdpMode::Offloaded => XdpFlags::HW_MODE,
+    }
 }
