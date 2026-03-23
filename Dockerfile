@@ -19,6 +19,13 @@ RUN apt-get update && \
         protobuf-compiler musl-tools cmake flex bison wget linux-libc-dev && \
     rm -rf /var/lib/apt/lists/*
 
+# Symlink Linux kernel headers into musl's include path so libpcap finds them
+RUN MUSL_INC="$(find /usr/include -maxdepth 1 -name '*-linux-musl*' -type d | head -1)" && \
+    ln -s /usr/include/linux "$MUSL_INC/linux" && \
+    ln -s /usr/include/asm-generic "$MUSL_INC/asm-generic" && \
+    ln -s /usr/include/$(uname -m)-linux-gnu/asm "$MUSL_INC/asm" && \
+    ln -s /usr/include/mtd "$MUSL_INC/mtd"
+
 # Build static libpcap against musl for fully static linking
 RUN PCAP_VERSION=1.10.6 && \
     wget -qO- "https://www.tcpdump.org/release/libpcap-${PCAP_VERSION}.tar.xz" | tar xJ && \
