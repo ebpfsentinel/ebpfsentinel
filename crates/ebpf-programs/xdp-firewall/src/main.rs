@@ -578,6 +578,12 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         }
         // Chain: ratelimit (slot 0) → if empty, loadbalancer (slot 2).
         // If ratelimit is loaded, it tail-calls LB itself on PASS.
+        //
+        // SAFETY: if ratelimit is loaded between these two tail_calls
+        // (hot-reload race), the next packet will take the correct path.
+        // Each individual packet is processed atomically — no packet sees
+        // a partial chain. The worst case is one packet skipping ratelimit
+        // or LB during the reload window (microseconds).
         unsafe {
             let _ = XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_RATELIMIT);
         }
@@ -1053,6 +1059,9 @@ fn check_connection_limits(src_ip: u32, rule_idx: i32, max_rule_states: u16) -> 
                         flags: counter.flags | SRC_COUNTER_FLAG_OVERLOADED,
                         _pad: [0; 7],
                     };
+                    // Insert may fail if map is full — acceptable: the overload
+                    // flag is best-effort. The packet is still dropped below.
+                    // No logging available in eBPF context.
                     let _ = CT_SRC_COUNTERS.insert(&src_ip, &overloaded, 0);
                     // Add to overload IP set for fast-path rejection.
                     let ipset_key = IpSetKeyV4 {

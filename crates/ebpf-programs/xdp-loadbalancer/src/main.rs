@@ -157,7 +157,7 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     let src_addr_raw = unsafe { (*ipv4hdr).src_addr };
     let dst_addr_raw = unsafe { (*ipv4hdr).dst_addr };
     let src_ip = u32::from_be_bytes(src_addr_raw);
-    let pkt_len = (ctx.data_end() - ctx.data()) as u64;
+    let pkt_len = ctx.data_end().saturating_sub(ctx.data()) as u64;
 
     let src_addr = [u32::from_ne_bytes(src_addr_raw), 0, 0, 0];
     let dst_addr = [u32::from_ne_bytes(dst_addr_raw), 0, 0, 0];
@@ -301,7 +301,7 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
 
     // For IP hash, XOR-fold IPv6 src to u32
     let src_ip_folded = src_addr[0] ^ src_addr[1] ^ src_addr[2] ^ src_addr[3];
-    let pkt_len = (ctx.data_end() - ctx.data()) as u64;
+    let pkt_len = ctx.data_end().saturating_sub(ctx.data()) as u64;
 
     let svc_idx = service_key_index(&key);
     let (backend_id, backend) = match select_backend(svc_config, src_ip_folded, svc_idx) {

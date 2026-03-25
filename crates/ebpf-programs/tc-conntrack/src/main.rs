@@ -224,7 +224,7 @@ fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     // Determine if this packet is in the "forward" direction (src is the
     // lower IP:port pair in the normalized key).
     let is_forward = ct_key.src_ip == src_ip && ct_key.src_port == src_port;
-    let pkt_len = (ctx.data_end() - ctx.data()) as u32;
+    let pkt_len = ctx.data_end().saturating_sub(ctx.data()) as u32;
 
     // Whether we need to insert a fresh entry (set to true when a stale entry
     // is lazily evicted, causing the packet to be treated as a new connection).
@@ -388,7 +388,7 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     increment_metric(CT_METRIC_LOOKUPS);
 
     let is_forward = ct_key.src_addr == src_addr && ct_key.src_port == src_port;
-    let pkt_len = (ctx.data_end() - ctx.data()) as u32;
+    let pkt_len = ctx.data_end().saturating_sub(ctx.data()) as u32;
 
     // Whether we need to insert a fresh entry (set to true when a stale entry
     // is lazily evicted, causing the packet to be treated as a new connection).

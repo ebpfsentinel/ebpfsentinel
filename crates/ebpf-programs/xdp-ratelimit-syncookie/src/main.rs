@@ -155,7 +155,7 @@ fn send_syn_ack_v4(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
 
     // Truncate to fixed Eth(14) + IP(20) + TCP(24) = 58 bytes.
     const PKT_LEN: usize = 14 + 20 + 24;
-    let current_len = ctx.data_end() - ctx.data();
+    let current_len = ctx.data_end().saturating_sub(ctx.data());
     let delta = PKT_LEN as i32 - current_len as i32;
     if delta != 0 {
         let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
@@ -276,7 +276,7 @@ fn send_syn_ack_v6(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
 
     // Truncate to fixed Eth(14) + IPv6(40) + TCP(24) = 78 bytes.
     const PKT_LEN: usize = 14 + IPV6_HDR_LEN + 24;
-    let current_len = ctx.data_end() - ctx.data();
+    let current_len = ctx.data_end().saturating_sub(ctx.data());
     let delta = PKT_LEN as i32 - current_len as i32;
     if delta != 0 {
         let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };

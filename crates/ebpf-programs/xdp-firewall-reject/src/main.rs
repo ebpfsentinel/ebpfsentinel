@@ -143,7 +143,7 @@ fn send_tcp_rst_v4(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Result<u32
     // Step 2: Truncate to fixed Eth(14) + IP(20) + TCP(20) = 54 bytes.
     // VLAN tag (if any) is stripped — the response is a clean packet.
     const RST4_LEN: usize = 14 + 20 + 20;
-    let current_len = ctx.data_end() - ctx.data();
+    let current_len = ctx.data_end().saturating_sub(ctx.data());
     let delta = RST4_LEN as i32 - current_len as i32;
     if delta != 0 {
         let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
@@ -237,7 +237,7 @@ fn send_tcp_rst_v6(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Result<u32
 
     // Step 2: Truncate to fixed Eth(14) + IPv6(40) + TCP(20) = 74 bytes.
     const RST6_LEN: usize = 14 + 40 + 20;
-    let current_len = ctx.data_end() - ctx.data();
+    let current_len = ctx.data_end().saturating_sub(ctx.data());
     let delta = RST6_LEN as i32 - current_len as i32;
     if delta != 0 {
         let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
@@ -339,7 +339,7 @@ fn send_icmp_unreachable_v4(
 
     // Step 2: Truncate to fixed Eth(14) + IP(20) + ICMP(8) + payload(28) = 70.
     const ICMP4_LEN: usize = 14 + 20 + 8 + 28;
-    let current_len = ctx.data_end() - ctx.data();
+    let current_len = ctx.data_end().saturating_sub(ctx.data());
     let delta = ICMP4_LEN as i32 - current_len as i32;
     if delta != 0 {
         let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
@@ -452,7 +452,7 @@ fn send_icmpv6_unreachable(
 
     // Step 2: Truncate to fixed Eth(14) + IPv6(40) + ICMPv6(8) + payload(48) = 110.
     const ICMP6_LEN: usize = 14 + 40 + 8 + 48;
-    let current_len = ctx.data_end() - ctx.data();
+    let current_len = ctx.data_end().saturating_sub(ctx.data());
     let delta = ICMP6_LEN as i32 - current_len as i32;
     if delta != 0 {
         let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };

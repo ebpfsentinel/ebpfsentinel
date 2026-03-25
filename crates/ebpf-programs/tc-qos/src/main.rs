@@ -523,7 +523,7 @@ fn apply_qos(
     if pipe_cfg.bytes_per_ns > 0 {
         let now_ns = unsafe { bpf_ktime_get_boot_ns() };
         let fh = flow_hash(src_ip, dst_ip, src_port, dst_port, protocol);
-        let pkt_len = (ctx.data_end() - ctx.data()) as u64;
+        let pkt_len = ctx.data_end().saturating_sub(ctx.data()) as u64;
 
         let should_drop = match QOS_FLOW_STATE.get_ptr_mut(&fh) {
             Some(state_ptr) => {

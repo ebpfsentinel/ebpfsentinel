@@ -4,7 +4,7 @@
 use aya_ebpf::{
     helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_boot_ns, r#gen},
     macros::{map, uprobe, uretprobe},
-    maps::{HashMap, PerCpuArray, RingBuf},
+    maps::{LruHashMap, PerCpuArray, RingBuf},
     programs::{ProbeContext, RetProbeContext},
 };
 use core::ffi::c_void;
@@ -48,8 +48,10 @@ use ebpf_common::dlp::{
 static EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 4096, 0);
 
 /// Per-task context: saves SSL_read entry arguments for the uretprobe.
+/// Uses LRU eviction so entries from crashed processes (SIGKILL during
+/// SSL_read) are automatically reclaimed when the map is full.
 #[map]
-static SSL_READ_ARGS: HashMap<u64, SslReadArgs> = HashMap::with_max_entries(10240, 0);
+static SSL_READ_ARGS: LruHashMap<u64, SslReadArgs> = LruHashMap::with_max_entries(10240, 0);
 
 /// Per-CPU DLP counters: write_events, read_events, errors, events_dropped, total_seen.
 #[map]
