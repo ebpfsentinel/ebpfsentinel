@@ -1,0 +1,32 @@
+eBPFsentinel has been deployed as a DaemonSet.
+
+  Namespace: {{ .Release.Namespace }}
+  Interfaces: {{ .Values.agent.interfaces | toJson }}
+
+Verify the agent is running on all nodes:
+
+  kubectl -n {{ .Release.Namespace }} get pods -o wide
+
+Check agent logs:
+
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "ebpfsentinel.name" . }} --tail=20
+
+Access the REST API (from within the cluster):
+
+  curl http://{{ include "ebpfsentinel.fullname" . }}.{{ .Release.Namespace }}:{{ .Values.agent.httpPort }}/healthz
+
+Prometheus metrics:
+
+  http://{{ include "ebpfsentinel.fullname" . }}.{{ .Release.Namespace }}:{{ .Values.agent.metricsPort }}/metrics
+{{- if .Values.metrics.serviceMonitor.enabled }}
+
+  ServiceMonitor created — Prometheus will auto-discover metrics.
+{{- end }}
+{{- if .Values.daemonset.hostPID }}
+
+  hostPID is ENABLED — DLP has full visibility into all node processes.
+{{- else }}
+
+  hostPID is DISABLED — DLP only sees agent pod processes.
+  Enable with: --set daemonset.hostPID=true
+{{- end }}

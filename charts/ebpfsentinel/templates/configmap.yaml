@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ebpfsentinel.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ebpfsentinel.labels" . | nindent 4 }}
+  {{- with (include "ebpfsentinel.annotations" .) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+data:
+  config.yaml: |
+    {{- if .Values.configOverride }}
+    {{ .Values.configOverride | nindent 4 }}
+    {{- else }}
+    agent:
+      interfaces: {{ .Values.agent.interfaces | toJson }}
+      bind_address: {{ .Values.agent.bindAddress | quote }}
+      http_port: {{ .Values.agent.httpPort }}
+      grpc_port: {{ .Values.agent.grpcPort }}
+      metrics_port: {{ .Values.agent.metricsPort }}
+      log_level: {{ .Values.agent.logLevel }}
+      log_format: {{ .Values.agent.logFormat }}
+      swagger_ui: {{ .Values.agent.swaggerUi }}
+      xdp_mode: {{ .Values.agent.xdpMode }}
+      event_workers: {{ .Values.agent.eventWorkers }}
+    firewall:
+      enabled: {{ .Values.firewall.enabled }}
+    ids:
+      enabled: {{ .Values.ids.enabled }}
+    ips:
+      enabled: {{ .Values.ips.enabled }}
+    dlp:
+      enabled: {{ .Values.dlp.enabled }}
+    ratelimit:
+      enabled: {{ .Values.ratelimit.enabled }}
+    threatintel:
+      enabled: {{ .Values.threatintel.enabled }}
+    dns:
+      enabled: {{ .Values.dns.enabled }}
+    alerting:
+      enabled: {{ .Values.alerting.enabled }}
+    audit:
+      enabled: {{ .Values.audit.enabled }}
+    auth:
+      enabled: {{ .Values.auth.enabled }}
+    conntrack:
+      enabled: {{ .Values.conntrack.enabled }}
+    ddos:
+      enabled: {{ .Values.ddos.enabled }}
+    l7:
+      enabled: {{ .Values.l7.enabled }}
+    nat:
+      enabled: {{ .Values.nat.enabled }}
+    routing:
+      enabled: {{ .Values.routing.enabled }}
+    loadbalancer:
+      enabled: {{ .Values.loadbalancer.enabled }}
+    geoip:
+      enabled: {{ .Values.geoip.enabled }}
+    zones:
+      enabled: {{ .Values.zones.enabled }}
+    qos:
+      enabled: {{ .Values.qos.enabled }}
+    {{- end }}

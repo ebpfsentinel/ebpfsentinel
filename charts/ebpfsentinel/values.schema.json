@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["image", "agent"],
+  "properties": {
+    "nameOverride": {
+      "type": "string",
+      "description": "Override the chart name used in resource names"
+    },
+    "fullnameOverride": {
+      "type": "string",
+      "description": "Override the full resource name"
+    },
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" }
+        }
+      }
+    },
+    "commonLabels": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "commonAnnotations": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "agent": {
+      "type": "object",
+      "required": ["interfaces"],
+      "properties": {
+        "interfaces": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" },
+          "description": "Host NICs to attach eBPF programs (REQUIRED)"
+        },
+        "bindAddress": { "type": "string", "default": "0.0.0.0" },
+        "httpPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "grpcPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "metricsPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "logLevel": {
+          "type": "string",
+          "enum": ["trace", "debug", "info", "warn", "error"]
+        },
+        "logFormat": {
+          "type": "string",
+          "enum": ["json", "text"]
+        },
+        "swaggerUi": { "type": "boolean" },
+        "xdpMode": {
+          "type": "string",
+          "enum": ["auto", "native", "generic", "offloaded"]
+        },
+        "eventWorkers": { "type": "integer", "minimum": 1, "maximum": 64 }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "daemonset": {
+      "type": "object",
+      "properties": {
+        "hostPID": { "type": "boolean" },
+        "updateStrategy": { "type": "object" },
+        "minReadySeconds": { "type": "integer", "minimum": 0 },
+        "revisionHistoryLimit": { "type": "integer", "minimum": 0 },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 },
+        "priorityClassName": { "type": "string" },
+        "resources": {
+          "type": "object",
+          "properties": {
+            "requests": { "type": "object" },
+            "limits": { "type": "object" }
+          }
+        },
+        "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "podLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+        "podAnnotations": { "type": "object", "additionalProperties": { "type": "string" } },
+        "extraEnv": { "type": "array" },
+        "extraVolumeMounts": { "type": "array" },
+        "extraVolumes": { "type": "array" },
+        "extraContainers": { "type": "array" },
+        "initContainers": { "type": "array" }
+      }
+    },
+    "firewall": { "$ref": "#/$defs/domainToggle" },
+    "ids": { "$ref": "#/$defs/domainToggle" },
+    "ips": { "$ref": "#/$defs/domainToggle" },
+    "dlp": { "$ref": "#/$defs/domainToggle" },
+    "ratelimit": { "$ref": "#/$defs/domainToggle" },
+    "threatintel": { "$ref": "#/$defs/domainToggle" },
+    "dns": { "$ref": "#/$defs/domainToggle" },
+    "alerting": { "$ref": "#/$defs/domainToggle" },
+    "audit": { "$ref": "#/$defs/domainToggle" },
+    "auth": { "$ref": "#/$defs/domainToggle" },
+    "conntrack": { "$ref": "#/$defs/domainToggle" },
+    "ddos": { "$ref": "#/$defs/domainToggle" },
+    "l7": { "$ref": "#/$defs/domainToggle" },
+    "nat": { "$ref": "#/$defs/domainToggle" },
+    "routing": { "$ref": "#/$defs/domainToggle" },
+    "loadbalancer": { "$ref": "#/$defs/domainToggle" },
+    "geoip": { "$ref": "#/$defs/domainToggle" },
+    "zones": { "$ref": "#/$defs/domainToggle" },
+    "qos": { "$ref": "#/$defs/domainToggle" },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "serviceMonitor": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "interval": { "type": "string", "pattern": "^[0-9]+[smh]$" },
+            "labels": { "type": "object", "additionalProperties": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "configOverride": { "type": "string" }
+  },
+  "$defs": {
+    "domainToggle": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    }
+  }
+}

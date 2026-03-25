@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "ebpfsentinel.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ebpfsentinel.labels" . | nindent 4 }}
+  {{- with (include "ebpfsentinel.annotations" .) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "ebpfsentinel.selectorLabels" . | nindent 6 }}
+  {{- with .Values.daemonset.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  minReadySeconds: {{ .Values.daemonset.minReadySeconds }}
+  revisionHistoryLimit: {{ .Values.daemonset.revisionHistoryLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "ebpfsentinel.selectorLabels" . | nindent 8 }}
+        {{- with .Values.daemonset.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.commonLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.agent.metricsPort | quote }}
+        {{- with .Values.daemonset.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      hostNetwork: true
+      hostPID: {{ .Values.daemonset.hostPID }}
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: {{ include "ebpfsentinel.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.daemonset.priorityClassName }}
+      priorityClassName: {{ .Values.daemonset.priorityClassName | quote }}
+      {{- end }}
+      {{- with .Values.daemonset.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: agent
+          image: {{ include "ebpfsentinel.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            privileged: true
+          args:
+            - "--config"
+            - "/etc/ebpfsentinel/config.yaml"
+          ports:
+            - containerPort: {{ .Values.agent.httpPort }}
+              name: http
+              protocol: TCP
+            - containerPort: {{ .Values.agent.grpcPort }}
+              name: grpc
+              protocol: TCP
+            - containerPort: {{ .Values.agent.metricsPort }}
+              name: metrics
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          {{- with .Values.daemonset.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.daemonset.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ebpfsentinel
+              readOnly: true
+            - name: bpf
+              mountPath: /sys/fs/bpf
+            - name: debug
+              mountPath: /sys/kernel/debug
+              readOnly: true
+            {{- with .Values.daemonset.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        {{- with .Values.daemonset.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.daemonset.terminationGracePeriodSeconds }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "ebpfsentinel.fullname" . }}-config
+        - name: bpf
+          hostPath:
+            path: /sys/fs/bpf
+        - name: debug
+          hostPath:
+            path: /sys/kernel/debug
+        {{- with .Values.daemonset.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.daemonset.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.daemonset.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.daemonset.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

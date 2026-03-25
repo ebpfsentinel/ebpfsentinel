@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ebpfsentinel.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ebpfsentinel.labels" . | nindent 4 }}
+  {{- with (include "ebpfsentinel.annotations" .) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  clusterIP: None  # headless — each node is its own endpoint
+  selector:
+    {{- include "ebpfsentinel.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.agent.httpPort }}
+      targetPort: http
+      protocol: TCP
+    - name: grpc
+      port: {{ .Values.agent.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+    - name: metrics
+      port: {{ .Values.agent.metricsPort }}
+      targetPort: metrics
+      protocol: TCP

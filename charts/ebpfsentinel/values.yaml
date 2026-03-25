@@ -1,0 +1,197 @@
+# eBPFsentinel Helm chart — default values
+#
+# Deploys one agent per node as a DaemonSet with hostNetwork access.
+# Minimal required config: set agent.interfaces to your host NIC.
+
+# -- Override the chart name used in resource names
+nameOverride: ""
+# -- Override the full resource name (disables auto-generated name)
+fullnameOverride: ""
+
+# -- Container image
+image:
+  # -- Image repository
+  repository: ghcr.io/ebpfsentinel/ebpfsentinel
+  # -- Image tag (defaults to Chart appVersion)
+  tag: ""
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+
+# -- Image pull secrets for private registries
+imagePullSecrets: []
+
+# -- Labels added to all resources
+commonLabels: {}
+# -- Annotations added to all resources
+commonAnnotations: {}
+
+# -- Agent configuration (generates config.yaml)
+agent:
+  # -- Network interfaces to attach eBPF programs to (REQUIRED)
+  interfaces:
+    - eth0
+  # -- Listen address for HTTP/gRPC/metrics
+  bindAddress: "0.0.0.0"
+  # -- REST API port
+  httpPort: 8080
+  # -- gRPC streaming port
+  grpcPort: 50051
+  # -- Prometheus metrics port
+  metricsPort: 9090
+  # -- Log level (trace, debug, info, warn, error)
+  logLevel: info
+  # -- Log format (json, text)
+  logFormat: json
+  # -- Enable Swagger UI at /swagger-ui
+  swaggerUi: false
+  # -- XDP attach mode (auto, native, generic, offloaded)
+  xdpMode: auto
+  # -- Parallel event dispatch workers
+  eventWorkers: 4
+
+# -- Service account configuration
+serviceAccount:
+  # -- Create a dedicated ServiceAccount
+  create: true
+  # -- ServiceAccount name (auto-generated if empty)
+  name: ""
+  # -- Annotations on the ServiceAccount (e.g., IAM role for GeoIP download)
+  annotations: {}
+
+# -- DaemonSet configuration
+daemonset:
+  # -- Enable hostPID for full DLP uprobe coverage on all node processes
+  hostPID: false
+  # -- DaemonSet update strategy
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  # -- Minimum seconds a pod must be ready before considered available
+  minReadySeconds: 0
+  # -- Number of old ReplicaSets to retain
+  revisionHistoryLimit: 10
+  # -- Grace period for pod termination (seconds)
+  terminationGracePeriodSeconds: 30
+  # -- Pod priority class name
+  priorityClassName: ""
+  # -- Resource requests and limits
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "1000m"
+  # -- Node selector
+  nodeSelector: {}
+  # -- Tolerations (default: schedule on all nodes including control-plane)
+  tolerations:
+    - operator: Exists
+  # -- Affinity rules
+  affinity: {}
+  # -- Extra labels on DaemonSet pods
+  podLabels: {}
+  # -- Extra annotations on DaemonSet pods
+  podAnnotations: {}
+  # -- Extra environment variables
+  extraEnv: []
+  # -- Extra volume mounts (e.g., GeoIP database, TLS certs)
+  extraVolumeMounts: []
+  # -- Extra volumes
+  extraVolumes: []
+  # -- Extra containers (sidecars)
+  extraContainers: []
+  # -- Init containers
+  initContainers: []
+
+# -- Security domain toggles (maps to config.yaml sections)
+firewall:
+  # -- Enable stateful L3/L4 firewall
+  enabled: true
+
+ids:
+  # -- Enable Intrusion Detection System
+  enabled: true
+
+ips:
+  # -- Enable Intrusion Prevention (auto-blacklist)
+  enabled: true
+
+dlp:
+  # -- Enable Data Loss Prevention (SSL/TLS uprobe)
+  enabled: true
+
+ratelimit:
+  # -- Enable rate limiting (4 algorithms)
+  enabled: true
+
+threatintel:
+  # -- Enable threat intelligence (OSINT feeds)
+  enabled: true
+
+dns:
+  # -- Enable DNS intelligence + blocklists
+  enabled: true
+
+alerting:
+  # -- Enable alert routing (email, webhook, OTLP)
+  enabled: false
+
+audit:
+  # -- Enable audit trail
+  enabled: false
+
+auth:
+  # -- Enable JWT/OIDC/API key authentication
+  enabled: false
+
+conntrack:
+  # -- Enable connection tracking
+  enabled: false
+
+ddos:
+  # -- Enable DDoS mitigation (SYN cookie, flood detection)
+  enabled: false
+
+l7:
+  # -- Enable L7 protocol filtering (HTTP, TLS/SNI, gRPC)
+  enabled: false
+
+nat:
+  # -- Enable NAT / NPTv6
+  enabled: false
+
+routing:
+  # -- Enable multi-WAN policy routing
+  enabled: false
+
+loadbalancer:
+  # -- Enable L4 load balancer
+  enabled: false
+
+geoip:
+  # -- Enable GeoIP enrichment (MaxMind)
+  enabled: false
+
+zones:
+  # -- Enable security zones
+  enabled: false
+
+qos:
+  # -- Enable QoS / traffic shaping
+  enabled: false
+
+# -- Prometheus metrics
+metrics:
+  serviceMonitor:
+    # -- Create a Prometheus ServiceMonitor
+    enabled: false
+    # -- Scrape interval
+    interval: 15s
+    # -- Extra labels on the ServiceMonitor (e.g., release: kube-prometheus-stack)
+    labels: {}
+
+# -- Override the entire config.yaml content.
+# When set, all agent.* and domain toggles above are ignored.
+configOverride: ""

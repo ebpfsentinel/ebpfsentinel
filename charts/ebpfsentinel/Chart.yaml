@@ -1,0 +1,22 @@
+apiVersion: v2
+name: ebpfsentinel
+description: eBPF-native Network Detection & Response (NDR) platform for Linux
+type: application
+version: 0.1.0
+appVersion: "0.0.0-dev"
+home: https://github.com/ebpfsentinel/ebpfsentinel
+sources:
+  - https://github.com/ebpfsentinel/ebpfsentinel
+maintainers:
+  - name: ebpfsentinel
+    url: https://github.com/ebpfsentinel
+keywords:
+  - ebpf
+  - ndr
+  - firewall
+  - ids
+  - ips
+  - ddos
+  - dlp
+  - network-security
+icon: https://raw.githubusercontent.com/ebpfsentinel/ebpfsentinel/main/docs/logo.svg
