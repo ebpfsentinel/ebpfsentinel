@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use application::retry::{RetryConfig, retry_with_backoff};
 use domain::alert::circuit_breaker::CircuitBreaker;
@@ -70,7 +70,7 @@ impl AlertSender for EmailAlertSender {
         Box::pin(async move {
             // 1. Check circuit breaker
             {
-                let mut cb = self.circuit_breaker.lock().unwrap();
+                let mut cb = self.circuit_breaker.lock().unwrap_or_else(PoisonError::into_inner);
                 if !cb.can_attempt() {
                     self.metrics
                         .record_circuit_state(&self.destination_name, cb.state().as_u8());
@@ -128,7 +128,7 @@ impl AlertSender for EmailAlertSender {
             .await;
 
             // 5. Record success/failure in circuit breaker and update metric
-            let mut cb = self.circuit_breaker.lock().unwrap();
+            let mut cb = self.circuit_breaker.lock().unwrap_or_else(PoisonError::into_inner);
             match &result {
                 Ok(()) => cb.record_success(),
                 Err(_) => cb.record_failure(),

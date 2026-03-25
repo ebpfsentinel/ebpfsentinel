@@ -1,4 +1,4 @@
-use std::sync::RwLock;
+use std::sync::{PoisonError, RwLock};
 
 use domain::auth::entity::JwtClaims;
 use domain::auth::error::AuthError;
@@ -55,7 +55,7 @@ impl JwtAuthProvider {
         let mut key = self
             .decoding_key
             .write()
-            .expect("decoding key lock poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         *key = new_key;
         Ok(())
     }
@@ -70,7 +70,7 @@ impl AuthProvider for JwtAuthProvider {
         let key = self
             .decoding_key
             .read()
-            .expect("decoding key lock poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
 
         let token_data: TokenData<JwtClaims> = jsonwebtoken::decode(token, &key, &self.validation)
             .map_err(|e| match e.kind() {

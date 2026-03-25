@@ -1,4 +1,4 @@
-use std::sync::RwLock;
+use std::sync::{PoisonError, RwLock};
 
 use domain::auth::entity::JwtClaims;
 use domain::auth::error::AuthError;
@@ -49,7 +49,7 @@ impl OidcAuthProvider {
 
     /// Atomically replace the cached JWKS (for periodic key rotation).
     pub fn rotate_keys(&self, jwk_set: JwkSet) {
-        let mut keys = self.jwk_set.write().expect("JWKS lock poisoned");
+        let mut keys = self.jwk_set.write().unwrap_or_else(PoisonError::into_inner);
         *keys = jwk_set;
     }
 }
@@ -70,7 +70,7 @@ impl AuthProvider for OidcAuthProvider {
             .ok_or_else(|| AuthError::TokenInvalid("token missing 'kid' header".to_string()))?;
 
         // Find the matching JWK in the cached set
-        let jwk_set = self.jwk_set.read().expect("JWKS lock poisoned");
+        let jwk_set = self.jwk_set.read().unwrap_or_else(PoisonError::into_inner);
 
         let jwk = jwk_set
             .keys
