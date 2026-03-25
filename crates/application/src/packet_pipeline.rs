@@ -279,7 +279,7 @@ impl EventDispatcher {
                 () = cancel_token.cancelled() => {
                     while let Ok(event) = rx.try_recv() {
                         count += 1;
-                        self.dispatch_agent_event(event);
+                        self.dispatch_worker_event(id, event);
                     }
                     break;
                 }
@@ -287,7 +287,7 @@ impl EventDispatcher {
                     match msg {
                         Some(event) => {
                             count += 1;
-                            self.dispatch_agent_event(event);
+                            self.dispatch_worker_event(id, event);
                         }
                         None => break,
                     }
@@ -296,6 +296,15 @@ impl EventDispatcher {
         }
 
         tracing::debug!(worker_id = id, total_events = count, "event worker stopped");
+    }
+
+    /// Dispatch with per-worker metrics instrumentation.
+    fn dispatch_worker_event(&self, worker_id: usize, event: AgentEvent) {
+        let start = std::time::Instant::now();
+        self.dispatch_agent_event(event);
+        self.metrics.record_worker_event(worker_id);
+        self.metrics
+            .observe_worker_duration(worker_id, start.elapsed().as_secs_f64());
     }
 
     /// Deterministic worker selection based on source address.

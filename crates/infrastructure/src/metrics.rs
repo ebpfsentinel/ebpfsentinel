@@ -80,6 +80,11 @@ pub struct GatewayLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct WorkerLabels {
+    pub worker_id: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct ServiceLabels {
     pub service: String,
 }
@@ -134,6 +139,8 @@ pub struct AgentMetrics {
     pub audit_failures_total: Counter,
     pub lb_forwarded_total: Counter,
     pub lb_backends_healthy: Family<ServiceLabels, Gauge>,
+    pub worker_events_total: Family<WorkerLabels, Counter>,
+    pub worker_processing_duration: Family<WorkerLabels, Histogram>,
 }
 
 impl AgentMetrics {
@@ -435,6 +442,23 @@ impl AgentMetrics {
             lb_backends_healthy.clone(),
         );
 
+        let worker_events_total = Family::<WorkerLabels, Counter>::default();
+        registry.register(
+            "worker_events",
+            "Events processed per dispatch worker",
+            worker_events_total.clone(),
+        );
+
+        let worker_processing_duration =
+            Family::<WorkerLabels, Histogram>::new_with_constructor(|| {
+                Histogram::new(exponential_buckets_range(0.000_001, 0.1, 16))
+            });
+        registry.register(
+            "worker_processing_duration_seconds",
+            "Event processing duration per dispatch worker",
+            worker_processing_duration.clone(),
+        );
+
         Self {
             registry,
             packets_total,
@@ -478,6 +502,8 @@ impl AgentMetrics {
             audit_failures_total,
             lb_forwarded_total,
             lb_backends_healthy,
+            worker_events_total,
+            worker_processing_duration,
         }
     }
 
@@ -686,6 +712,22 @@ impl EventMetrics for AgentMetrics {
             })
             .inc();
     }
+
+    fn record_worker_event(&self, worker_id: usize) {
+        self.worker_events_total
+            .get_or_create(&WorkerLabels {
+                worker_id: worker_id.to_string(),
+            })
+            .inc();
+    }
+
+    fn observe_worker_duration(&self, worker_id: usize, duration_seconds: f64) {
+        self.worker_processing_duration
+            .get_or_create(&WorkerLabels {
+                worker_id: worker_id.to_string(),
+            })
+            .observe(duration_seconds);
+    }
 }
 
 impl DlpMetrics for AgentMetrics {
@@ -854,6 +896,22 @@ mod tests {
         let encoded = metrics.encode();
         assert!(encoded.contains("ebpfsentinel_events_dropped"));
         assert!(encoded.contains("reason=\"channel_full\""));
+    }
+
+    #[test]
+    fn worker_metrics() {
+        let metrics = AgentMetrics::new();
+        metrics.record_worker_event(0);
+        metrics.record_worker_event(0);
+        metrics.record_worker_event(1);
+        metrics.observe_worker_duration(0, 0.000_042);
+        metrics.observe_worker_duration(1, 0.000_078);
+
+        let encoded = metrics.encode();
+        assert!(encoded.contains("ebpfsentinel_worker_events"));
+        assert!(encoded.contains("worker_id=\"0\""));
+        assert!(encoded.contains("worker_id=\"1\""));
+        assert!(encoded.contains("ebpfsentinel_worker_processing_duration_seconds"));
     }
 
     #[test]

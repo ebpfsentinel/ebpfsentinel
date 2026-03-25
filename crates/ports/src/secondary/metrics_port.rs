@@ -128,6 +128,10 @@ pub trait ConfigMetrics: Send + Sync {
 pub trait EventMetrics: Send + Sync {
     /// Record a dropped event with a reason label.
     fn record_event_dropped(&self, _reason: &str) {}
+    /// Record an event processed by a specific dispatch worker.
+    fn record_worker_event(&self, _worker_id: usize) {}
+    /// Observe event processing duration for a specific worker.
+    fn observe_worker_duration(&self, _worker_id: usize, _duration_seconds: f64) {}
 }
 
 // ── DLP metrics ──────────────────────────────────────────────────
