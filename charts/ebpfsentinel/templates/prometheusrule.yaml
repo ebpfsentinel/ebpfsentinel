@@ -1,0 +1,95 @@
+{{- if .Values.metrics.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "ebpfsentinel.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ebpfsentinel.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with (include "ebpfsentinel.annotations" .) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  groups:
+    - name: ebpfsentinel.rules
+      {{- if .Values.metrics.prometheusRule.rules }}
+      rules:
+        {{- toYaml .Values.metrics.prometheusRule.rules | nindent 8 }}
+      {{- else }}
+      rules:
+        - alert: EbpfsentinelAgentDown
+          expr: up{job=~".*ebpfsentinel.*"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "eBPFsentinel agent is down on {{ "{{ $labels.instance }}" }}"
+            description: "Agent has been unreachable for more than 2 minutes."
+
+        - alert: EbpfsentinelHighEventDropRate
+          expr: rate(ebpfsentinel_events_dropped_total[5m]) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High event drop rate on {{ "{{ $labels.instance }}" }}"
+            description: "Dropping {{ "{{ $value | humanize }}" }} events/sec (reason: {{ "{{ $labels.reason }}" }})."
+
+        - alert: EbpfsentinelHighAlertRate
+          expr: rate(ebpfsentinel_alerts_total[5m]) > 50
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High alert rate on {{ "{{ $labels.instance }}" }}"
+            description: "{{ "{{ $value | humanize }}" }} alerts/sec from {{ "{{ $labels.component }}" }} ({{ "{{ $labels.severity }}" }})."
+
+        - alert: EbpfsentinelConfigReloadFailure
+          expr: increase(ebpfsentinel_rules_reloads_total{result="failure"}[10m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Config reload failed on {{ "{{ $labels.instance }}" }}"
+            description: "Component {{ "{{ $labels.component }}" }} failed to reload."
+
+        - alert: EbpfsentinelHighMemoryUsage
+          expr: ebpfsentinel_memory_usage_bytes > 400 * 1024 * 1024
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High memory usage on {{ "{{ $labels.instance }}" }}"
+            description: "Agent using {{ "{{ $value | humanizeBytes }}" }} (threshold: 400 MiB)."
+
+        - alert: EbpfsentinelEbpfProgramDown
+          expr: ebpfsentinel_ebpf_program_status == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "eBPF program {{ "{{ $labels.program }}" }} is not loaded on {{ "{{ $labels.instance }}" }}"
+            description: "Program has been unloaded for more than 1 minute."
+
+        - alert: EbpfsentinelCircuitBreakerOpen
+          expr: ebpfsentinel_alert_sender_circuit_state > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Alert sender circuit breaker open on {{ "{{ $labels.instance }}" }}"
+            description: "Destination {{ "{{ $labels.destination }}" }} circuit breaker is open."
+
+        - alert: EbpfsentinelDdosAttackActive
+          expr: ebpfsentinel_ddos_attacks_active > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Active DDoS attack detected on {{ "{{ $labels.instance }}" }}"
+            description: "{{ "{{ $value }}" }} active DDoS attack(s) being mitigated."
+      {{- end }}
+{{- end }}

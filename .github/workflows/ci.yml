@@ -105,6 +105,18 @@ jobs:
           path: lcov.info
           retention-days: 30
 
+  # ── Helm chart lint ───────────────────────────────────────────────
+  helm-lint:
+    name: Helm Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.0.3
+      - run: helm lint charts/ebpfsentinel
+      - run: helm template test charts/ebpfsentinel --namespace ebpfsentinel > /dev/null
+
   # ── Build release binary ──────────────────────────────────────────
   build:
     name: Build

@@ -191,6 +191,13 @@ metrics:
     interval: 15s
     # -- Extra labels on the ServiceMonitor (e.g., release: kube-prometheus-stack)
     labels: {}
+  prometheusRule:
+    # -- Create a PrometheusRule with built-in alerting rules
+    enabled: false
+    # -- Extra labels on the PrometheusRule
+    labels: {}
+    # -- Override the default rules (when empty, built-in rules are used)
+    rules: []
 
 # -- Override the entire config.yaml content.
 # When set, all agent.* and domain toggles above are ignored.
