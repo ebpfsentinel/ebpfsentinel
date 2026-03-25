@@ -217,7 +217,12 @@ impl AlertPipeline {
         self.evaluate_auto_capture(&alert).await;
 
         // Pass through router (dedup, throttle, route matching)
-        let matched_routes = self.router.process_alert(&alert);
+        let matched_routes: Vec<_> = self
+            .router
+            .process_alert(&alert)
+            .into_iter()
+            .map(|(i, r)| (i, r.clone()))
+            .collect();
 
         if matched_routes.is_empty() {
             self.metrics.record_alert_dropped("no_route");
@@ -229,43 +234,7 @@ impl AlertPipeline {
             return;
         }
 
-        // Dispatch to each matched route's sender
-        for (idx, route) in &matched_routes {
-            let sender = match &route.destination {
-                AlertDestination::Log => self.log_sender.as_ref(),
-                AlertDestination::Webhook { .. } => self.webhook_sender.as_ref(),
-                AlertDestination::Email { .. } => self.email_sender.as_ref(),
-                AlertDestination::Otlp => self.otlp_sender.as_ref(),
-            };
-
-            if let Some(sender) = sender {
-                if let Err(e) = sender.send(&alert, route).await {
-                    tracing::warn!(
-                        alert_id = %alert.id,
-                        route_name = %route.name,
-                        route_index = idx,
-                        error = %e,
-                        "alert send failed"
-                    );
-                }
-            } else {
-                // No sender configured for this destination type — log only
-                tracing::info!(
-                    alert_id = %alert.id,
-                    rule_id = %alert.rule_id,
-                    severity = severity_str,
-                    route_name = %route.name,
-                    route_index = idx,
-                    src_ip = %alert.src_ip(),
-                    dst_ip = %alert.dst_ip(),
-                    src_port = alert.src_port,
-                    dst_port = alert.dst_port,
-                    protocol = alert.protocol,
-                    action = %alert.action,
-                    "alert routed (no sender configured)"
-                );
-            }
-        }
+        self.send_to_destinations(&alert, matched_routes).await;
     }
 
     /// Process a single DLP alert: convert to domain Alert, record metric,
@@ -329,7 +298,12 @@ impl AlertPipeline {
         self.evaluate_auto_capture(&alert).await;
 
         // Pass through router (dedup, throttle, route matching)
-        let matched_routes = self.router.process_alert(&alert);
+        let matched_routes: Vec<_> = self
+            .router
+            .process_alert(&alert)
+            .into_iter()
+            .map(|(i, r)| (i, r.clone()))
+            .collect();
 
         if matched_routes.is_empty() {
             self.metrics.record_alert_dropped("no_route");
@@ -341,39 +315,7 @@ impl AlertPipeline {
             return;
         }
 
-        // Dispatch to each matched route's sender
-        for (idx, route) in &matched_routes {
-            let sender = match &route.destination {
-                AlertDestination::Log => self.log_sender.as_ref(),
-                AlertDestination::Webhook { .. } => self.webhook_sender.as_ref(),
-                AlertDestination::Email { .. } => self.email_sender.as_ref(),
-                AlertDestination::Otlp => self.otlp_sender.as_ref(),
-            };
-
-            if let Some(sender) = sender {
-                if let Err(e) = sender.send(&alert, route).await {
-                    tracing::warn!(
-                        alert_id = %alert.id,
-                        route_name = %route.name,
-                        route_index = idx,
-                        error = %e,
-                        "DLP alert send failed"
-                    );
-                }
-            } else {
-                tracing::info!(
-                    alert_id = %alert.id,
-                    pattern_id = %alert.rule_id,
-                    severity = severity_str,
-                    route_name = %route.name,
-                    route_index = idx,
-                    pid = dlp_alert.pid,
-                    data_type = %dlp_alert.data_type,
-                    action = %alert.action,
-                    "DLP alert routed (no sender configured)"
-                );
-            }
-        }
+        self.send_to_destinations(&alert, matched_routes).await;
     }
 
     /// Process a `DDoS` attack state change: convert to domain Alert, record metric,
@@ -441,7 +383,12 @@ impl AlertPipeline {
         self.evaluate_auto_capture(&alert).await;
 
         // Pass through router (dedup, throttle, route matching)
-        let matched_routes = self.router.process_alert(&alert);
+        let matched_routes: Vec<_> = self
+            .router
+            .process_alert(&alert)
+            .into_iter()
+            .map(|(i, r)| (i, r.clone()))
+            .collect();
 
         if matched_routes.is_empty() {
             self.metrics.record_alert_dropped("no_route");
@@ -453,39 +400,7 @@ impl AlertPipeline {
             return;
         }
 
-        // Dispatch to each matched route's sender
-        for (idx, route) in &matched_routes {
-            let sender = match &route.destination {
-                AlertDestination::Log => self.log_sender.as_ref(),
-                AlertDestination::Webhook { .. } => self.webhook_sender.as_ref(),
-                AlertDestination::Email { .. } => self.email_sender.as_ref(),
-                AlertDestination::Otlp => self.otlp_sender.as_ref(),
-            };
-
-            if let Some(sender) = sender {
-                if let Err(e) = sender.send(&alert, route).await {
-                    tracing::warn!(
-                        alert_id = %alert.id,
-                        route_name = %route.name,
-                        route_index = idx,
-                        error = %e,
-                        "DDoS alert send failed"
-                    );
-                }
-            } else {
-                tracing::info!(
-                    alert_id = %alert.id,
-                    attack_id = %alert.rule_id,
-                    severity = severity_str,
-                    route_name = %route.name,
-                    route_index = idx,
-                    attack_type = ?attack.attack_type,
-                    peak_pps = attack.peak_pps,
-                    action = %alert.action,
-                    "DDoS alert routed (no sender configured)"
-                );
-            }
-        }
+        self.send_to_destinations(&alert, matched_routes).await;
     }
 
     /// Process a packet-level security alert (firewall, ratelimit, L7, IPS).
@@ -519,32 +434,18 @@ impl AlertPipeline {
         self.evaluate_auto_response(&alert).await;
         self.evaluate_auto_capture(&alert).await;
 
-        let matched_routes = self.router.process_alert(&alert);
+        let matched_routes: Vec<_> = self
+            .router
+            .process_alert(&alert)
+            .into_iter()
+            .map(|(i, r)| (i, r.clone()))
+            .collect();
         if matched_routes.is_empty() {
             self.metrics.record_alert_dropped("no_route");
             return;
         }
 
-        for (idx, route) in &matched_routes {
-            let sender = match &route.destination {
-                AlertDestination::Log => self.log_sender.as_ref(),
-                AlertDestination::Webhook { .. } => self.webhook_sender.as_ref(),
-                AlertDestination::Email { .. } => self.email_sender.as_ref(),
-                AlertDestination::Otlp => self.otlp_sender.as_ref(),
-            };
-
-            if let Some(sender) = sender
-                && let Err(e) = sender.send(&alert, route).await
-            {
-                tracing::warn!(
-                    alert_id = %alert.id,
-                    route_name = %route.name,
-                    route_index = idx,
-                    error = %e,
-                    "{} alert send failed", alert.component
-                );
-            }
-        }
+        self.send_to_destinations(&alert, matched_routes).await;
     }
 
     /// Process a single DNS alert: convert to domain Alert, record metric,
@@ -598,7 +499,12 @@ impl AlertPipeline {
         }
 
         // Pass through router (dedup, throttle, route matching)
-        let matched_routes = self.router.process_alert(&alert);
+        let matched_routes: Vec<_> = self
+            .router
+            .process_alert(&alert)
+            .into_iter()
+            .map(|(i, r)| (i, r.clone()))
+            .collect();
 
         if matched_routes.is_empty() {
             self.metrics.record_alert_dropped("no_route");
@@ -610,38 +516,7 @@ impl AlertPipeline {
             return;
         }
 
-        // Dispatch to each matched route's sender
-        for (idx, route) in &matched_routes {
-            let sender = match &route.destination {
-                AlertDestination::Log => self.log_sender.as_ref(),
-                AlertDestination::Webhook { .. } => self.webhook_sender.as_ref(),
-                AlertDestination::Email { .. } => self.email_sender.as_ref(),
-                AlertDestination::Otlp => self.otlp_sender.as_ref(),
-            };
-
-            if let Some(sender) = sender {
-                if let Err(e) = sender.send(&alert, route).await {
-                    tracing::warn!(
-                        alert_id = %alert.id,
-                        route_name = %route.name,
-                        route_index = idx,
-                        error = %e,
-                        "DNS alert send failed"
-                    );
-                }
-            } else {
-                tracing::info!(
-                    alert_id = %alert.id,
-                    rule_id = %alert.rule_id,
-                    severity = severity_str,
-                    route_name = %route.name,
-                    route_index = idx,
-                    domain = %dns_alert.domain,
-                    action = %alert.action,
-                    "DNS alert routed (no sender configured)"
-                );
-            }
-        }
+        self.send_to_destinations(&alert, matched_routes).await;
     }
 
     /// Async run loop: consumes alert events from the channel,
@@ -872,6 +747,50 @@ impl AlertPipeline {
     /// Hot-reload alert routes without resetting dedup/throttle state.
     pub fn reload_routes(&mut self, routes: Vec<domain::alert::entity::AlertRoute>) {
         self.router.reload_routes(routes);
+    }
+
+    /// Resolve the sender for a given destination type.
+    fn sender_for(&self, dest: &AlertDestination) -> Option<&Arc<dyn AlertSender>> {
+        match dest {
+            AlertDestination::Log => self.log_sender.as_ref(),
+            AlertDestination::Webhook { .. } => self.webhook_sender.as_ref(),
+            AlertDestination::Email { .. } => self.email_sender.as_ref(),
+            AlertDestination::Otlp => self.otlp_sender.as_ref(),
+        }
+    }
+
+    /// Dispatch an alert to all matched route senders **concurrently**.
+    ///
+    /// Routes are cloned from the router result so that the mutable borrow
+    /// on `self.router` (for dedup/throttle state) is released before we
+    /// access the immutable senders.
+    async fn send_to_destinations(
+        &self,
+        alert: &Alert,
+        matched_routes: Vec<(usize, domain::alert::entity::AlertRoute)>,
+    ) {
+        let futures: Vec<_> = matched_routes
+            .iter()
+            .filter_map(|(idx, route)| {
+                self.sender_for(&route.destination).map(|sender| {
+                    let idx = *idx;
+                    let route_name = route.name.clone();
+                    async move {
+                        if let Err(e) = sender.send(alert, route).await {
+                            tracing::warn!(
+                                alert_id = %alert.id,
+                                route_name = %route_name,
+                                route_index = idx,
+                                error = %e,
+                                "alert send failed"
+                            );
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        futures_util::future::join_all(futures).await;
     }
 }
 
