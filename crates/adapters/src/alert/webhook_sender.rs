@@ -44,7 +44,10 @@ impl AlertSender for WebhookAlertSender {
         Box::pin(async move {
             // 1. Check circuit breaker
             {
-                let mut cb = self.circuit_breaker.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut cb = self
+                    .circuit_breaker
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
                 if !cb.can_attempt() {
                     self.metrics
                         .record_circuit_state(&self.destination_name, cb.state().as_u8());
@@ -98,7 +101,10 @@ impl AlertSender for WebhookAlertSender {
             .await;
 
             // 5. Record success/failure in circuit breaker and update metric
-            let mut cb = self.circuit_breaker.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut cb = self
+                .circuit_breaker
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             match &result {
                 Ok(()) => cb.record_success(),
                 Err(_) => cb.record_failure(),

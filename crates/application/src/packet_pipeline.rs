@@ -60,6 +60,12 @@ pub enum AgentEvent {
 /// Consumes `PacketEvent`s from the event channel, dispatches IDS events
 /// to the IDS engine for evaluation, and forwards resulting alerts to the
 /// alert channel. Uses `tokio::select!` for cancellation awareness.
+///
+/// Supports parallel dispatch via [`run_parallel`](Self::run_parallel):
+/// a distributor task hashes each event's source address and routes it to
+/// one of N worker tasks, preserving per-source ordering while scaling
+/// across cores.
+#[derive(Clone)]
 pub struct EventDispatcher {
     ids_service: Arc<RwLock<IdsAppService>>,
     l7_service: Arc<RwLock<L7AppService>>,
@@ -183,6 +189,132 @@ impl EventDispatcher {
         }
 
         tracing::info!(total_events = count, "event dispatcher stopped");
+    }
+
+    /// Parallel event loop. Spawns `num_workers` worker tasks and a
+    /// distributor that hashes each event's source address to a worker
+    /// channel, preserving per-source ordering.
+    ///
+    /// Falls back to single-threaded [`run`](Self::run) when `num_workers <= 1`.
+    pub async fn run_parallel(
+        self,
+        num_workers: usize,
+        rx: mpsc::Receiver<AgentEvent>,
+        cancel_token: CancellationToken,
+    ) {
+        if num_workers <= 1 {
+            return self.run(rx, cancel_token).await;
+        }
+
+        let channel_size = 4096;
+        let mut worker_txs = Vec::with_capacity(num_workers);
+        let mut handles = Vec::with_capacity(num_workers);
+
+        for id in 0..num_workers {
+            let (tx, worker_rx) = mpsc::channel::<AgentEvent>(channel_size);
+            worker_txs.push(tx);
+
+            let worker = self.clone();
+            let token = cancel_token.clone();
+            handles.push(tokio::spawn(async move {
+                worker.run_worker(id, worker_rx, token).await;
+            }));
+        }
+
+        // Distributor: read from main channel, hash src_addr, send to worker
+        Self::distribute(rx, worker_txs, num_workers, cancel_token.clone()).await;
+
+        // Wait for all workers to finish draining
+        for handle in handles {
+            let _ = handle.await;
+        }
+
+        tracing::info!(num_workers, "parallel event dispatcher stopped");
+    }
+
+    async fn distribute(
+        mut rx: mpsc::Receiver<AgentEvent>,
+        worker_txs: Vec<mpsc::Sender<AgentEvent>>,
+        num_workers: usize,
+        cancel_token: CancellationToken,
+    ) {
+        loop {
+            tokio::select! {
+                () = cancel_token.cancelled() => {
+                    // Drain remaining events
+                    while let Ok(event) = rx.try_recv() {
+                        let idx = Self::worker_index(&event, num_workers);
+                        let _ = worker_txs[idx].send(event).await;
+                    }
+                    // Drop senders to signal workers to finish
+                    drop(worker_txs);
+                    break;
+                }
+                msg = rx.recv() => {
+                    if let Some(event) = msg {
+                        let idx = Self::worker_index(&event, num_workers);
+                        if worker_txs[idx].send(event).await.is_err() {
+                            break; // worker gone
+                        }
+                    } else {
+                        drop(worker_txs);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_worker(
+        self,
+        id: usize,
+        mut rx: mpsc::Receiver<AgentEvent>,
+        cancel_token: CancellationToken,
+    ) {
+        let mut count: u64 = 0;
+
+        loop {
+            tokio::select! {
+                () = cancel_token.cancelled() => {
+                    while let Ok(event) = rx.try_recv() {
+                        count += 1;
+                        self.dispatch_agent_event(event).await;
+                    }
+                    break;
+                }
+                msg = rx.recv() => {
+                    match msg {
+                        Some(event) => {
+                            count += 1;
+                            self.dispatch_agent_event(event).await;
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        tracing::debug!(worker_id = id, total_events = count, "event worker stopped");
+    }
+
+    /// Deterministic worker selection based on source address.
+    /// Events from the same source always go to the same worker,
+    /// preserving per-source ordering. XOR-folds all 4 address words
+    /// for good distribution across both IPv4 and IPv6.
+    fn worker_index(event: &AgentEvent, num_workers: usize) -> usize {
+        let hash = match event {
+            AgentEvent::L4(pkt) => {
+                pkt.src_addr[0] ^ pkt.src_addr[1] ^ pkt.src_addr[2] ^ pkt.src_addr[3]
+            }
+            AgentEvent::L7 { header, .. } => {
+                header.src_addr[0] ^ header.src_addr[1] ^ header.src_addr[2] ^ header.src_addr[3]
+            }
+            AgentEvent::Dns { header, .. } => {
+                header.src_addr[0] ^ header.src_addr[1] ^ header.src_addr[2] ^ header.src_addr[3]
+            }
+            AgentEvent::Dlp(ev) => ev.pid ^ ev.tgid,
+        };
+        hash as usize % num_workers
     }
 
     async fn dispatch_agent_event(&self, event: AgentEvent) {

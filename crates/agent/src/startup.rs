@@ -1557,8 +1557,11 @@ pub async fn run(
         dispatcher
     };
     let dispatcher_cancel = cancel_token.clone();
+    let event_workers = config.agent.event_workers;
     let dispatcher_handle = tokio::spawn(async move {
-        dispatcher.run(event_rx, dispatcher_cancel).await;
+        dispatcher
+            .run_parallel(event_workers, event_rx, dispatcher_cancel)
+            .await;
     });
 
     // ── 11b. Build AlertRouter and spawn AlertPipeline ──────────────

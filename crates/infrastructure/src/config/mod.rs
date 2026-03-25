@@ -1092,6 +1092,13 @@ pub struct AgentInfo {
     /// If the requested mode is unsupported, falls back to auto with a warning.
     #[serde(default)]
     pub xdp_mode: XdpMode,
+
+    /// Number of parallel event dispatcher workers.
+    /// Each worker processes events from a deterministic subset of sources
+    /// (partitioned by source address), preserving per-source ordering.
+    /// Set to 1 for single-threaded dispatch. Defaults to 4.
+    #[serde(default = "default_event_workers")]
+    pub event_workers: usize,
 }
 
 /// TLS configuration for HTTP and gRPC servers (NFR9).
@@ -1177,6 +1184,9 @@ fn default_grpc_port() -> u16 {
 }
 fn default_metrics_port() -> u16 {
     DEFAULT_METRICS_PORT
+}
+fn default_event_workers() -> usize {
+    4
 }
 fn default_bind_address() -> String {
     "127.0.0.1".to_string()

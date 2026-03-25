@@ -79,6 +79,7 @@ const KNOWN_DOH_RESOLVERS: &[&str] = &[
 const DOT_PORT: u16 = 853;
 
 /// Detector for encrypted DNS traffic (`DoH`/`DoT`).
+#[derive(Clone)]
 pub struct EncryptedDnsDetector {
     doh_domains: Vec<String>,
 }
