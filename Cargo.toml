@@ -116,6 +116,9 @@ pcap = "2.4"
 # Regex
 regex = "1"
 
+# Async utilities
+futures-util = "0.3"
+
 # Error handling
 thiserror = "2"
 anyhow = "1"

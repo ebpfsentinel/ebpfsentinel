@@ -13,9 +13,9 @@ use domain::threatintel::parser::{
 use ports::secondary::feed_source::FeedSource;
 use ports::secondary::metrics_port::MetricsPort;
 
-/// Fetch and parse all enabled feeds, returning a merged IOC list.
+/// Fetch and parse all enabled feeds **concurrently**, returning a merged IOC list.
 ///
-/// Each feed is fetched independently. Failed feeds are logged and skipped
+/// All feeds are fetched in parallel. Failed feeds are logged and skipped
 /// (partial success: remaining feeds still load). IOC deduplication is
 /// handled downstream by the engine's `reload()`.
 pub async fn fetch_all_feeds(
@@ -23,14 +23,20 @@ pub async fn fetch_all_feeds(
     source: &dyn FeedSource,
     metrics: &Arc<dyn MetricsPort>,
 ) -> Vec<Ioc> {
+    let futures: Vec<_> = feeds
+        .iter()
+        .filter(|f| f.enabled)
+        .map(|feed| async move {
+            let result = fetch_single_feed(feed, source).await;
+            (feed, result)
+        })
+        .collect();
+
+    let results = futures_util::future::join_all(futures).await;
+
     let mut all_iocs = Vec::new();
-
-    for feed in feeds {
-        if !feed.enabled {
-            continue;
-        }
-
-        match fetch_single_feed(feed, source).await {
+    for (feed, result) in results {
+        match result {
             Ok(iocs) => {
                 tracing::info!(
                     feed_id = %feed.id,
@@ -74,7 +80,7 @@ pub struct FeedUpdateResult {
     pub urls: Vec<CtiUrl>,
 }
 
-/// Fetch and parse all enabled feeds, returning multi-type indicators.
+/// Fetch and parse all enabled feeds **concurrently**, returning multi-type indicators.
 ///
 /// STIX feeds produce IPs, domains, and URLs. Legacy feeds (CSV, JSON,
 /// plaintext) produce IPs only. Failed feeds are logged and skipped.
@@ -83,14 +89,20 @@ pub async fn fetch_all_feeds_v2(
     source: &dyn FeedSource,
     metrics: &Arc<dyn MetricsPort>,
 ) -> FeedUpdateResult {
+    let futures: Vec<_> = feeds
+        .iter()
+        .filter(|f| f.enabled)
+        .map(|feed| async move {
+            let raw_data = source.fetch_feed(feed).await;
+            (feed, raw_data)
+        })
+        .collect();
+
+    let fetched = futures_util::future::join_all(futures).await;
+
     let mut result = FeedUpdateResult::default();
-
-    for feed in feeds {
-        if !feed.enabled {
-            continue;
-        }
-
-        let raw_data = match source.fetch_feed(feed).await {
+    for (feed, raw_data) in fetched {
+        let raw_data = match raw_data {
             Ok(data) => data,
             Err(e) => {
                 tracing::warn!(feed_id = %feed.id, error = %e, "feed download failed, skipping");

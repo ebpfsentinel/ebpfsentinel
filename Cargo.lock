@@ -166,6 +166,7 @@ dependencies = [
  "criterion",
  "domain",
  "ebpf-common",
+ "futures-util",
  "ports",
  "serde_json",
  "tokio",
