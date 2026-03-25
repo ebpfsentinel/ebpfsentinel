@@ -8,8 +8,9 @@ use crate::cli::OutputFormat;
 // ── Health ──────────────────────────────────────────────────────────────
 
 pub async fn cmd_health(client: &ApiClient, output: OutputFormat) -> Result<()> {
-    let health = client.healthz().await?;
-    let ready = client.readyz().await?;
+    let (health, ready) = tokio::join!(client.healthz(), client.readyz());
+    let health = health?;
+    let ready = ready?;
 
     if output == OutputFormat::Json {
         let combined = serde_json::json!({
