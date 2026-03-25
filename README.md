@@ -1,12 +1,8 @@
 # eBPFsentinel
 
-High-performance network security agent powered by eBPF. Monitors, filters, and protects network traffic at wire speed with near-zero overhead. Written entirely in Rust.
+Kernel-native **Network Detection & Response (NDR)** platform for Linux. One Rust binary replaces your firewall, IDS/IPS, DDoS mitigation, DLP, and 10+ other network security tools — all running inside the Linux kernel via eBPF at wire speed. Not an endpoint agent — a **network agent** that runs where your traffic flows.
 
 ## What it does
-
-> **One agent. All layers.** Replaces iptables + Suricata + tc + ipset + fail2ban
-> with a single Rust binary that enforces security at kernel speed (XDP/TC).
-> No sidecar, no kernel module, no C code.
 
 ### Network Security & Control
 
