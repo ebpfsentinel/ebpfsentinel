@@ -62,6 +62,7 @@ pub async fn run_kernel_metrics_loop(
 }
 
 /// Return (index, label) pairs for the standard metric indices of a given map.
+#[allow(clippy::too_many_lines)]
 fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
     match map_name {
         "FIREWALL_METRICS" => &[

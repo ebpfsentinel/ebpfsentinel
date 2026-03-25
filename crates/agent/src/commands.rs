@@ -562,8 +562,7 @@ pub async fn cmd_alerts_stats(client: &ApiClient, limit: u64, output: OutputForm
 
     println!();
     println!(
-        "  Alerts: {} total ({} critical, {} high, {} medium, {} low)",
-        total, critical, high, medium, low
+        "  Alerts: {total} total ({critical} critical, {high} high, {medium} medium, {low} low)"
     );
     println!();
 
@@ -590,13 +589,18 @@ pub async fn cmd_alerts_stats(client: &ApiClient, limit: u64, output: OutputForm
     // Component distribution
     let mut comp_sorted: Vec<_> = by_component.iter().collect();
     comp_sorted.sort_by(|a, b| b.1.cmp(a.1));
-    let max_count = comp_sorted.first().map(|&(_, &c)| c).unwrap_or(1);
+    let max_count = comp_sorted.first().map_or(1, |&(_, &c)| c);
     println!("  Components               Alerts");
     println!("  {}", "-".repeat(50));
     for &(comp, &count) in &comp_sorted {
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         let bar_len = ((count as f64 / max_count as f64) * 20.0) as usize;
         let bar: String = "\u{2588}".repeat(bar_len);
-        println!("  {:<12} {:>6}  {}", comp, count, bar);
+        println!("  {comp:<12} {count:>6}  {bar}");
     }
     println!();
 
@@ -1642,13 +1646,13 @@ pub async fn cmd_top(
     // Sort by requested field (descending)
     match sort {
         "packets" => conns.sort_by(|a, b| {
-            let ta = (a.packets_fwd as u64) + (a.packets_rev as u64);
-            let tb = (b.packets_fwd as u64) + (b.packets_rev as u64);
+            let ta = u64::from(a.packets_fwd) + u64::from(a.packets_rev);
+            let tb = u64::from(b.packets_fwd) + u64::from(b.packets_rev);
             tb.cmp(&ta)
         }),
         _ => conns.sort_by(|a, b| {
-            let ta = (a.bytes_fwd as u64) + (a.bytes_rev as u64);
-            let tb = (b.bytes_fwd as u64) + (b.bytes_rev as u64);
+            let ta = u64::from(a.bytes_fwd) + u64::from(a.bytes_rev);
+            let tb = u64::from(b.bytes_fwd) + u64::from(b.bytes_rev);
             tb.cmp(&ta)
         }),
     }
@@ -1667,8 +1671,8 @@ pub async fn cmd_top(
     println!("{}", "-".repeat(100));
 
     for c in &conns {
-        let total_bytes = (c.bytes_fwd as u64) + (c.bytes_rev as u64);
-        let total_pkts = (c.packets_fwd as u64) + (c.packets_rev as u64);
+        let total_bytes = u64::from(c.bytes_fwd) + u64::from(c.bytes_rev);
+        let total_pkts = u64::from(c.packets_fwd) + u64::from(c.packets_rev);
         let proto = match c.protocol {
             6 => "TCP",
             17 => "UDP",
@@ -1720,8 +1724,8 @@ pub async fn cmd_flows(client: &ApiClient, limit: usize, output: OutputFormat) -
             packets: 0,
         });
         entry.flows += 1;
-        entry.bytes += (c.bytes_fwd as u64) + (c.bytes_rev as u64);
-        entry.packets += (c.packets_fwd as u64) + (c.packets_rev as u64);
+        entry.bytes += u64::from(c.bytes_fwd) + u64::from(c.bytes_rev);
+        entry.packets += u64::from(c.packets_fwd) + u64::from(c.packets_rev);
     }
 
     let mut sorted: Vec<(String, FlowAgg)> = agg.into_iter().collect();
@@ -1801,6 +1805,7 @@ fn subnet_of(ip: &str) -> String {
 
 // ── Risk Score ──────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 pub async fn cmd_score(client: &ApiClient, alert_limit: u64, output: OutputFormat) -> Result<()> {
     // Fetch all scoring inputs in parallel
     let (alerts_res, ddos_res, blacklist_res, iocs_res, conntrack_res) = tokio::join!(
@@ -1827,6 +1832,7 @@ pub async fn cmd_score(client: &ApiClient, alert_limit: u64, output: OutputForma
             }
         }
         // Weighted: critical=4, high=2, medium=1, low=0.25
+        #[allow(clippy::cast_precision_loss)]
         let weighted =
             (critical as f64 * 4.0) + (high as f64 * 2.0) + (medium as f64) + (low as f64 * 0.25);
         // Normalize: 0 alerts → 0, 50+ weighted → 3.0
@@ -1848,7 +1854,7 @@ pub async fn cmd_score(client: &ApiClient, alert_limit: u64, output: OutputForma
     }
 
     // ── Blacklist score (0-2) ──
-    let blacklist_count = blacklist_res.as_ref().map(|b| b.len()).unwrap_or(0);
+    let blacklist_count = blacklist_res.as_ref().map_or(0, std::vec::Vec::len);
     let blacklist_score: f64 = match blacklist_count {
         0 => 0.0,
         1..=4 => 0.5,
@@ -1857,7 +1863,7 @@ pub async fn cmd_score(client: &ApiClient, alert_limit: u64, output: OutputForma
     };
 
     // ── Threat intel score (0-2) ──
-    let ioc_count = iocs_res.as_ref().map(|i| i.len()).unwrap_or(0);
+    let ioc_count = iocs_res.as_ref().map_or(0, std::vec::Vec::len);
     let ti_score: f64 = match ioc_count {
         0 => 0.0,
         1..=9 => 0.5,
@@ -1882,6 +1888,7 @@ pub async fn cmd_score(client: &ApiClient, alert_limit: u64, output: OutputForma
     // Clamp to 10.0
     let final_score = total_score.min(10.0);
 
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let label = match final_score as u32 {
         0..=2 => "Low",
         3..=5 => "Medium",
@@ -1914,29 +1921,18 @@ pub async fn cmd_score(client: &ApiClient, alert_limit: u64, output: OutputForma
     }
 
     println!();
-    println!("  Network Risk Score: {:.1} / 10 ({})", final_score, label);
+    println!("  Network Risk Score: {final_score:.1} / 10 ({label})");
     println!();
     println!("  Contributing Factors:");
     println!(
-        "    Alerts          {:.1}  ({} critical, {} high, {} medium, {} low)",
-        alert_score, critical, high, medium, low
+        "    Alerts          {alert_score:.1}  ({critical} critical, {high} high, {medium} medium, {low} low)"
     );
     println!(
-        "    DDoS            {:.1}  ({} active, {} mitigated total)",
-        ddos_score, active_attacks, total_mitigated
+        "    DDoS            {ddos_score:.1}  ({active_attacks} active, {total_mitigated} mitigated total)"
     );
-    println!(
-        "    Blacklist       {:.1}  ({} IPs blocked)",
-        blacklist_score, blacklist_count
-    );
-    println!(
-        "    Threat Intel    {:.1}  ({} IOC matches)",
-        ti_score, ioc_count
-    );
-    println!(
-        "    Connections     {:.1}  ({} active)",
-        conn_score, conn_count
-    );
+    println!("    Blacklist       {blacklist_score:.1}  ({blacklist_count} IPs blocked)");
+    println!("    Threat Intel    {ti_score:.1}  ({ioc_count} IOC matches)");
+    println!("    Connections     {conn_score:.1}  ({conn_count} active)");
     println!();
 
     Ok(())
@@ -2015,8 +2011,8 @@ pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Re
             println!("  (none)");
         } else {
             println!(
-                "  {:<10}  {:<8}  {:<18}  {:<18}  {}",
-                "COMPONENT", "SEVERITY", "SOURCE", "DESTINATION", "MESSAGE"
+                "  {:<10}  {:<8}  {:<18}  {:<18}  MESSAGE",
+                "COMPONENT", "SEVERITY", "SOURCE", "DESTINATION"
             );
             for a in &al.alerts {
                 println!(
@@ -2036,6 +2032,7 @@ pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Re
 
 // ── Investigate ─────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 pub async fn cmd_investigate(
     client: &ApiClient,
     ip: &str,
@@ -2135,18 +2132,15 @@ pub async fn cmd_investigate(
     };
 
     println!();
-    println!(
-        "  IP: {}  |  Blacklisted: {}  |  IOC: {}",
-        target_str, bl_status, ioc_status
-    );
+    println!("  IP: {target_str}  |  Blacklisted: {bl_status}  |  IOC: {ioc_status}");
     println!();
 
     // ── Alerts ──
     println!("  Alerts: {} matching", matched_alerts.len());
     if !matched_alerts.is_empty() {
         println!(
-            "  {:<10}  {:<8}  {:<6}  {:<18}  {:<18}  {}",
-            "COMPONENT", "SEVERITY", "ACTION", "SOURCE", "DESTINATION", "MESSAGE"
+            "  {:<10}  {:<8}  {:<6}  {:<18}  {:<18}  MESSAGE",
+            "COMPONENT", "SEVERITY", "ACTION", "SOURCE", "DESTINATION"
         );
         for a in matched_alerts.iter().take(20) {
             println!(
@@ -2179,7 +2173,7 @@ pub async fn cmd_investigate(
                 1 => "ICMP",
                 _ => "?",
             };
-            let total = (c.bytes_fwd as u64) + (c.bytes_rev as u64);
+            let total = u64::from(c.bytes_fwd) + u64::from(c.bytes_rev);
             println!(
                 "  {:<22} {:>5}  {:<22} {:>5}  {:<5}  {:<6}  {:>10}",
                 truncate(&c.src_ip, 22),
@@ -2195,21 +2189,20 @@ pub async fn cmd_investigate(
     println!();
 
     // ── DNS ──
-    if let Some(ref dns) = dns_entries {
-        if !dns.entries.is_empty() {
-            println!("  DNS Reverse Lookups:");
-            for e in &dns.entries {
-                let blocked = if e.is_blocked { " [BLOCKED]" } else { "" };
-                println!(
-                    "    {} -> {} (queries: {}){}",
-                    e.domain,
-                    e.ips.join(", "),
-                    e.query_count,
-                    blocked
-                );
-            }
-            println!();
+    if let Some(ref dns) = dns_entries
+        && !dns.entries.is_empty()
+    {
+        println!("  DNS Reverse Lookups:");
+        for e in &dns.entries {
+            let blocked = if e.is_blocked { " [BLOCKED]" } else { "" };
+            println!(
+                "    {} -> {} (queries: {}){blocked}",
+                e.domain,
+                e.ips.join(", "),
+                e.query_count,
+            );
         }
+        println!();
     }
 
     // ── IOCs ──
@@ -2231,6 +2224,7 @@ pub async fn cmd_investigate(
 }
 
 /// Format byte count to human-readable (K/M/G).
+#[allow(clippy::cast_precision_loss)]
 fn format_bytes(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
         format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)

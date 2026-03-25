@@ -693,6 +693,7 @@ impl AlertPipeline {
         };
         let filter = format!("host {src_ip}");
 
+        #[allow(clippy::cast_possible_truncation)]
         let now_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

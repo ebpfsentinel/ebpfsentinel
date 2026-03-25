@@ -723,7 +723,7 @@ pub async fn load_ebpf_programs(
                 if let Some(reader) = opt_reader {
                     let event_tx_clone = event_tx.clone();
                     tokio::spawn(async move {
-                        reader.run(event_tx_clone, CancellationToken::new()).await
+                        reader.run(event_tx_clone, CancellationToken::new()).await;
                     });
                 }
                 services

@@ -2,17 +2,14 @@ use aya::Ebpf;
 use aya::maps::CpuMap;
 use tracing::{debug, info};
 
-/// Populate a CpuMap with all online CPUs for packet steering.
+/// Populate a `CpuMap` with all online CPUs for packet steering.
 /// Each entry gets a default queue size of 192 packets.
 /// If the map is not found or cannot be converted, this is a no-op
-/// (graceful degradation — eBPF programs fall back to XDP_DROP).
+/// (graceful degradation — eBPF programs fall back to `XDP_DROP`).
 pub fn populate_cpumap(ebpf: &mut Ebpf, map_name: &str) {
-    let map = match ebpf.map_mut(map_name) {
-        Some(m) => m,
-        None => {
-            debug!(map_name, "CpuMap not found (non-fatal)");
-            return;
-        }
+    let Some(map) = ebpf.map_mut(map_name) else {
+        debug!(map_name, "CpuMap not found (non-fatal)");
+        return;
     };
     let mut cpumap: CpuMap<_> = match CpuMap::try_from(map) {
         Ok(m) => m,
@@ -23,7 +20,11 @@ pub fn populate_cpumap(ebpf: &mut Ebpf, map_name: &str) {
     };
 
     let num_cpus = std::thread::available_parallelism()
-        .map(|n| n.get() as u32)
+        .map(|n| {
+            #[allow(clippy::cast_possible_truncation)]
+            let cpus = n.get() as u32;
+            cpus
+        })
         .unwrap_or(4);
     let queue_size = 192u32;
     let mut populated = 0u32;

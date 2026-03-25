@@ -169,9 +169,8 @@ fn parse_stix_json(text: &str, config: &FeedConfig) -> Result<CtiIndicators, Dom
         )));
     }
 
-    let objects = match parsed.get("objects").and_then(|v| v.as_array()) {
-        Some(arr) => arr,
-        None => return Ok(CtiIndicators::default()),
+    let Some(objects) = parsed.get("objects").and_then(|v| v.as_array()) else {
+        return Ok(CtiIndicators::default());
     };
 
     let source_tag = format!("stix:{}", config.id);
@@ -230,120 +229,154 @@ fn parse_stix_json(text: &str, config: &FeedConfig) -> Result<CtiIndicators, Dom
 
         match obj_type {
             "indicator" => {
-                // Check temporal validity
-                if let Some(valid_until) = obj.get("valid_until").and_then(|v| v.as_str()) {
-                    if let Some(until_secs) = parse_iso8601_epoch_secs(valid_until) {
-                        if until_secs < now_secs {
-                            continue; // expired
-                        }
-                    }
-                }
-
-                let confidence = obj
-                    .get("confidence")
-                    .and_then(|v| v.as_u64())
-                    .map_or(100, |v| v.min(100) as u8);
-
-                // Determine threat type from indicator_types + relationship enrichment
-                let indicator_types: Vec<&str> = obj
-                    .get("indicator_types")
-                    .and_then(|v| v.as_array())
-                    .map_or_else(Vec::new, |arr| {
-                        arr.iter().filter_map(|v| v.as_str()).collect()
-                    });
-                let mut threat_type = map_stix_indicator_types(&indicator_types);
-                // Relationship enrichment overrides (more specific)
-                if let Some(&rel_type) = relationship_enrichment.get(obj_id) {
-                    threat_type = rel_type;
-                }
-
-                let last_seen = obj
-                    .get("valid_from")
-                    .and_then(|v| v.as_str())
-                    .and_then(parse_iso8601_epoch_secs)
-                    .map(|s| s * 1_000_000_000)
-                    .unwrap_or(0);
-
-                let pattern = obj.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-
-                // Extract IPs
-                for ip in extract_ips_from_stix_pattern(pattern) {
-                    result.iocs.push(Ioc {
-                        ip,
-                        feed_id: config.id.clone(),
-                        confidence,
-                        threat_type,
-                        last_seen,
-                        source_feed: config.name.clone(),
-                    });
-                }
-
-                // Extract domains
-                for domain in extract_domains_from_stix_pattern(pattern) {
-                    result.domains.push(CtiDomain {
-                        domain,
-                        feed_id: config.id.clone(),
-                        confidence,
-                        threat_type,
-                        source: Some(source_tag.clone()),
-                    });
-                }
-
-                // Extract URLs
-                for url in extract_urls_from_stix_pattern(pattern) {
-                    result.urls.push(CtiUrl {
-                        url,
-                        feed_id: config.id.clone(),
-                        confidence,
-                        threat_type,
-                        source: Some(source_tag.clone()),
-                    });
-                }
+                extract_stix_indicator(
+                    obj,
+                    obj_id,
+                    now_secs,
+                    &relationship_enrichment,
+                    config,
+                    &source_tag,
+                    &mut result,
+                );
             }
-            // Direct SCOs (no pattern wrapper)
-            "ipv4-addr" | "ipv6-addr" => {
-                if let Some(value) = obj.get("value").and_then(|v| v.as_str()) {
-                    if let Ok(ip) = value.parse::<IpAddr>() {
-                        result.iocs.push(Ioc {
-                            ip,
-                            feed_id: config.id.clone(),
-                            confidence: 50, // SCOs without relationship context are less reliable
-                            threat_type: ThreatType::Other,
-                            last_seen: 0,
-                            source_feed: config.name.clone(),
-                        });
-                    }
-                }
-            }
-            "domain-name" => {
-                if let Some(value) = obj.get("value").and_then(|v| v.as_str()) {
-                    if value.contains('.') {
-                        result.domains.push(CtiDomain {
-                            domain: value.to_lowercase(),
-                            feed_id: config.id.clone(),
-                            confidence: 50,
-                            threat_type: ThreatType::Other,
-                            source: Some(source_tag.clone()),
-                        });
-                    }
-                }
-            }
-            "url" => {
-                if let Some(value) = obj.get("value").and_then(|v| v.as_str()) {
-                    result.urls.push(CtiUrl {
-                        url: value.to_string(),
-                        feed_id: config.id.clone(),
-                        confidence: 50,
-                        threat_type: ThreatType::Other,
-                        source: Some(source_tag.clone()),
-                    });
-                }
+            "ipv4-addr" | "ipv6-addr" | "domain-name" | "url" => {
+                extract_stix_sco(obj, obj_type, config, &source_tag, &mut result);
             }
             _ => {} // skip unknown types
         }
     }
 
     Ok(result)
+}
+
+/// Extract indicators from a STIX `indicator` SDO into `CtiIndicators`.
+fn extract_stix_indicator(
+    obj: &serde_json::Value,
+    obj_id: &str,
+    now_secs: u64,
+    relationship_enrichment: &std::collections::HashMap<&str, ThreatType>,
+    config: &FeedConfig,
+    source_tag: &str,
+    result: &mut CtiIndicators,
+) {
+    // Check temporal validity
+    if let Some(valid_until) = obj.get("valid_until").and_then(|v| v.as_str())
+        && let Some(until_secs) = parse_iso8601_epoch_secs(valid_until)
+        && until_secs < now_secs
+    {
+        return; // expired
+    }
+
+    let confidence = obj
+        .get("confidence")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(100, |v| v.min(100) as u8);
+
+    // Determine threat type from indicator_types + relationship enrichment
+    let indicator_types: Vec<&str> = obj
+        .get("indicator_types")
+        .and_then(|v| v.as_array())
+        .map_or_else(Vec::new, |arr| {
+            arr.iter().filter_map(|v| v.as_str()).collect()
+        });
+    let mut threat_type = map_stix_indicator_types(&indicator_types);
+    // Relationship enrichment overrides (more specific)
+    if let Some(&rel_type) = relationship_enrichment.get(obj_id) {
+        threat_type = rel_type;
+    }
+
+    let last_seen = obj
+        .get("valid_from")
+        .and_then(|v| v.as_str())
+        .and_then(parse_iso8601_epoch_secs)
+        .map_or(0, |s| s * 1_000_000_000);
+
+    let pattern = obj.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Extract IPs
+    for ip in extract_ips_from_stix_pattern(pattern) {
+        result.iocs.push(Ioc {
+            ip,
+            feed_id: config.id.clone(),
+            confidence,
+            threat_type,
+            last_seen,
+            source_feed: config.name.clone(),
+        });
+    }
+
+    // Extract domains
+    for domain in extract_domains_from_stix_pattern(pattern) {
+        result.domains.push(CtiDomain {
+            domain,
+            feed_id: config.id.clone(),
+            confidence,
+            threat_type,
+            source: Some(source_tag.to_string()),
+        });
+    }
+
+    // Extract URLs
+    for url in extract_urls_from_stix_pattern(pattern) {
+        result.urls.push(CtiUrl {
+            url,
+            feed_id: config.id.clone(),
+            confidence,
+            threat_type,
+            source: Some(source_tag.to_string()),
+        });
+    }
+}
+
+/// Extract indicators from a direct STIX SCO (`ipv4-addr`, `ipv6-addr`, `domain-name`, `url`).
+fn extract_stix_sco(
+    obj: &serde_json::Value,
+    obj_type: &str,
+    config: &FeedConfig,
+    source_tag: &str,
+    result: &mut CtiIndicators,
+) {
+    match obj_type {
+        "ipv4-addr" | "ipv6-addr" => {
+            if let Some(value) = obj.get("value").and_then(|v| v.as_str())
+                && let Ok(ip) = value.parse::<IpAddr>()
+            {
+                result.iocs.push(Ioc {
+                    ip,
+                    feed_id: config.id.clone(),
+                    confidence: 50, // SCOs without relationship context are less reliable
+                    threat_type: ThreatType::Other,
+                    last_seen: 0,
+                    source_feed: config.name.clone(),
+                });
+            }
+        }
+        "domain-name" => {
+            if let Some(value) = obj.get("value").and_then(|v| v.as_str())
+                && value.contains('.')
+            {
+                result.domains.push(CtiDomain {
+                    domain: value.to_lowercase(),
+                    feed_id: config.id.clone(),
+                    confidence: 50,
+                    threat_type: ThreatType::Other,
+                    source: Some(source_tag.to_string()),
+                });
+            }
+        }
+        "url" => {
+            if let Some(value) = obj.get("value").and_then(|v| v.as_str()) {
+                result.urls.push(CtiUrl {
+                    url: value.to_string(),
+                    feed_id: config.id.clone(),
+                    confidence: 50,
+                    threat_type: ThreatType::Other,
+                    source: Some(source_tag.to_string()),
+                });
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Parse a subset of ISO 8601 timestamps to epoch seconds.
@@ -370,7 +403,7 @@ fn parse_iso8601_epoch_secs(s: &str) -> Option<u64> {
 
 /// Days from Unix epoch (1970-01-01) for a given civil date.
 fn days_from_civil(year: u64, month: u64, day: u64) -> Option<u64> {
-    if month < 1 || month > 12 || day < 1 || day > 31 || year < 1970 {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || year < 1970 {
         return None;
     }
     // Algorithm from Howard Hinnant
@@ -380,9 +413,9 @@ fn days_from_civil(year: u64, month: u64, day: u64) -> Option<u64> {
     let m = if month > 2 { month - 3 } else { month + 9 };
     let doy = (153 * m + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146097 + doe;
+    let days = era * 146_097 + doe;
     // Unix epoch offset: 1970-01-01 = day 719468 from civil epoch
-    days.checked_sub(719468)
+    days.checked_sub(719_468)
 }
 
 /// Build an L7 firewall rule from a STIX URL indicator.

@@ -94,7 +94,7 @@ impl EbpfProgramManager {
     /// Used for programs loaded by the legacy startup path whose loaders are
     /// kept alive separately in `EbpfState`. Prevents Phase 9 from trying to
     /// re-load them.
-    /// Mark a program as loaded during startup (loader kept alive in EbpfState).
+    /// Mark a program as loaded during startup (loader kept alive in `EbpfState`).
     pub fn mark_startup_loaded(&mut self, name: &str) {
         self.startup_loaded.insert(name.to_string());
     }
@@ -528,7 +528,7 @@ impl EbpfProgramManager {
     ///
     /// loadbalancer (root, standalone)
     /// ```
-    pub async fn rewire_xdp_chain(&mut self, _config: &AgentConfig) -> anyhow::Result<()> {
+    pub fn rewire_xdp_chain(&mut self, _config: &AgentConfig) -> anyhow::Result<()> {
         let fw_loaded = self.is_loaded("xdp_firewall");
         let rl_loaded = self.is_loaded("xdp_ratelimit");
         let lb_loaded = self.is_loaded("xdp_loadbalancer");
@@ -568,10 +568,8 @@ impl EbpfProgramManager {
                     .set_tail_call_target("XDP_PROG_ARRAY", 2, &lb_fd)?;
                 info!("XDP chain: firewall → loadbalancer wired (slot 2)");
             }
-        } else if fw_loaded {
-            if let Some(fw) = self.programs.get_mut("xdp_firewall") {
-                let _ = fw.loader.clear_tail_call_target("XDP_PROG_ARRAY", 2);
-            }
+        } else if fw_loaded && let Some(fw) = self.programs.get_mut("xdp_firewall") {
+            let _ = fw.loader.clear_tail_call_target("XDP_PROG_ARRAY", 2);
         }
 
         // Wire ratelimit → loadbalancer (RL slot 1)
@@ -587,16 +585,15 @@ impl EbpfProgramManager {
                 rl.loader.set_tail_call_target("RL_PROG_ARRAY", 1, &lb_fd)?;
                 info!("XDP chain: ratelimit → loadbalancer wired (RL slot 1)");
             }
-        } else if rl_loaded {
-            if let Some(rl) = self.programs.get_mut("xdp_ratelimit") {
-                let _ = rl.loader.clear_tail_call_target("RL_PROG_ARRAY", 1);
-            }
+        } else if rl_loaded && let Some(rl) = self.programs.get_mut("xdp_ratelimit") {
+            let _ = rl.loader.clear_tail_call_target("RL_PROG_ARRAY", 1);
         }
 
         Ok(())
     }
 
     /// Enable an XDP program and rewire the chain.
+    #[allow(clippy::too_many_lines)]
     pub async fn enable_xdp_program(
         &mut self,
         name: &str,
@@ -764,7 +761,7 @@ impl EbpfProgramManager {
         }
 
         // Rewire the tail-call chain after any XDP program change
-        self.rewire_xdp_chain(config).await?;
+        self.rewire_xdp_chain(config)?;
         Ok(())
     }
 
@@ -820,7 +817,7 @@ impl EbpfProgramManager {
         info!(program = name, "XDP program disabled");
 
         // Rewire the tail-call chain after removal
-        self.rewire_xdp_chain(config).await?;
+        self.rewire_xdp_chain(config)?;
         Ok(())
     }
 }

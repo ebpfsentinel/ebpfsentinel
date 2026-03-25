@@ -973,7 +973,7 @@ pub async fn run(
                             tokio::spawn(async move {
                                 lb_reader
                                     .run(event_tx_clone, CancellationToken::new())
-                                    .await
+                                    .await;
                             });
                             lb_svc.write().await.set_map_port(Box::new(lb_mgr));
                             if let Some(rdr) = lb_metrics_rdr {
@@ -991,12 +991,11 @@ pub async fn run(
                                 }
                             }
                             // Also wire into firewall (slot 2) for the no-ratelimit fallback path.
-                            if let Some(ref mut fw) = fw_loader {
-                                if let Ok(lb_fd) =
+                            if let Some(ref mut fw) = fw_loader
+                                && let Ok(lb_fd) =
                                     lb_loader_early.xdp_program_fd("xdp_loadbalancer")
-                                {
-                                    let _ = fw.set_tail_call_target("XDP_PROG_ARRAY", 2, &lb_fd);
-                                }
+                            {
+                                let _ = fw.set_tail_call_target("XDP_PROG_ARRAY", 2, &lb_fd);
                             }
                             ebpf_state.add_loader(lb_loader_early);
                             metrics.set_ebpf_program_status("xdp_loadbalancer", true);
@@ -1093,34 +1092,37 @@ pub async fn run(
 
     // Wire FW → LB (slot 2) when ratelimit is NOT active but LB + FW are.
     // When ratelimit IS active, the RL→LB wiring was already done above.
-    if fw_ok && !rl_ok && config.loadbalancer.enabled && !lb_pre_loaded {
-        if let Some(ref mut fw) = fw_loader {
-            match try_load_xdp_loadbalancer(&ebpf_dir, &config, true) {
-                Ok((lb_loader, lb_mgr, lb_metrics_rdr, lb_reader)) => {
-                    let event_tx_clone = event_tx.clone();
-                    tokio::spawn(async move {
-                        lb_reader
-                            .run(event_tx_clone, CancellationToken::new())
-                            .await
-                    });
-                    lb_svc.write().await.set_map_port(Box::new(lb_mgr));
-                    if let Some(rdr) = lb_metrics_rdr {
-                        metrics_readers.push(rdr);
-                    }
-                    if let Ok(lb_fd) = lb_loader.xdp_program_fd("xdp_loadbalancer") {
-                        if let Err(e) = fw.set_tail_call_target("XDP_PROG_ARRAY", 2, &lb_fd) {
-                            warn!("firewall → LB tail-call wiring failed: {e}");
-                        } else {
-                            info!("XDP tail-call: firewall → loadbalancer wired (FW slot 2)");
-                        }
-                    }
-                    ebpf_state.add_loader(lb_loader);
-                    metrics.set_ebpf_program_status("xdp_loadbalancer", true);
-                    lb_pre_loaded = true;
-                    info!("eBPF xdp-loadbalancer active (via firewall chain)");
+    if fw_ok
+        && !rl_ok
+        && config.loadbalancer.enabled
+        && !lb_pre_loaded
+        && let Some(ref mut fw) = fw_loader
+    {
+        match try_load_xdp_loadbalancer(&ebpf_dir, &config, true) {
+            Ok((lb_loader, lb_mgr, lb_metrics_rdr, lb_reader)) => {
+                let event_tx_clone = event_tx.clone();
+                tokio::spawn(async move {
+                    lb_reader
+                        .run(event_tx_clone, CancellationToken::new())
+                        .await;
+                });
+                lb_svc.write().await.set_map_port(Box::new(lb_mgr));
+                if let Some(rdr) = lb_metrics_rdr {
+                    metrics_readers.push(rdr);
                 }
-                Err(e) => warn!("LB load for FW chain failed: {e}"),
+                if let Ok(lb_fd) = lb_loader.xdp_program_fd("xdp_loadbalancer") {
+                    if let Err(e) = fw.set_tail_call_target("XDP_PROG_ARRAY", 2, &lb_fd) {
+                        warn!("firewall → LB tail-call wiring failed: {e}");
+                    } else {
+                        info!("XDP tail-call: firewall → loadbalancer wired (FW slot 2)");
+                    }
+                }
+                ebpf_state.add_loader(lb_loader);
+                metrics.set_ebpf_program_status("xdp_loadbalancer", true);
+                lb_pre_loaded = true;
+                info!("eBPF xdp-loadbalancer active (via firewall chain)");
             }
+            Err(e) => warn!("LB load for FW chain failed: {e}"),
         }
     }
 
@@ -1280,7 +1282,7 @@ pub async fn run(
                 if let Some(reader) = opt_reader {
                     let event_tx_clone = event_tx.clone();
                     tokio::spawn(async move {
-                        reader.run(event_tx_clone, CancellationToken::new()).await
+                        reader.run(event_tx_clone, CancellationToken::new()).await;
                     });
                 }
                 conntrack_svc.write().await.set_map_port(Box::new(ct_mgr));
@@ -1393,7 +1395,7 @@ pub async fn run(
                 tokio::spawn(async move {
                     lb_reader
                         .run(event_tx_clone, CancellationToken::new())
-                        .await
+                        .await;
                 });
                 lb_svc.write().await.set_map_port(Box::new(lb_mgr));
                 if let Some(rdr) = lb_metrics_rdr {
@@ -2208,7 +2210,7 @@ pub fn try_load_xdp_firewall(
 /// The reject program is loaded with the same pin path so that `PKT_CTX` and
 /// `FIREWALL_METRICS` maps are shared with xdp-firewall. It is loaded but NOT
 /// attached to any interface — it is invoked only via tail-call from
-/// xdp-firewall (ProgramArray slot 1).
+/// xdp-firewall (`ProgramArray` slot 1).
 pub fn try_load_xdp_firewall_reject(
     ebpf_dir: &str,
     fw_loader: &mut EbpfLoader,
@@ -2239,7 +2241,7 @@ pub type XdpRatelimitResult = (
 /// Load the xdp-ratelimit-syncookie program and wire it as a tail-call target.
 ///
 /// Shared maps: `SYNCOOKIE_CTX`, `SYNCOOKIE_SECRET`, `DDOS_METRICS`.
-/// Loaded but NOT attached — invoked via tail-call from xdp-ratelimit (RL_PROG_ARRAY slot 0).
+/// Loaded but NOT attached — invoked via tail-call from xdp-ratelimit (`RL_PROG_ARRAY` slot 0).
 pub fn try_load_xdp_ratelimit_syncookie(
     ebpf_dir: &str,
     rl_loader: &mut EbpfLoader,
@@ -2491,7 +2493,7 @@ pub fn try_load_tc_dns(
 
 /// Load the uprobe DLP program: attach uprobes to SSL functions, start DLP event reader.
 /// Known SSL/TLS library candidates for uprobe attachment.
-/// Checked in order: OpenSSL 3, OpenSSL 1.1, generic libssl, BoringSSL.
+/// Checked in order: OpenSSL 3, OpenSSL 1.1, generic libssl, `BoringSSL`.
 const SSL_LIBRARY_CANDIDATES: &[&str] = &[
     "libssl.so.3",     // OpenSSL 3.x (Debian 12+, Ubuntu 22.04+, Fedora 36+)
     "libssl.so.1.1",   // OpenSSL 1.1.x (Debian 11, Ubuntu 20.04, CentOS 8)
@@ -2550,12 +2552,12 @@ fn find_ssl_library_path() -> Option<String> {
         for candidate in SSL_LIBRARY_CANDIDATES {
             // ldconfig format: "libssl.so.3 (libc6,x86-64) => /lib/x86_64-linux-gnu/libssl.so.3"
             for line in cache.lines() {
-                if line.contains(candidate) {
-                    if let Some(path) = line.split("=> ").nth(1) {
-                        let path = path.trim();
-                        if std::path::Path::new(path).exists() {
-                            return Some(path.to_string());
-                        }
+                if line.contains(candidate)
+                    && let Some(path) = line.split("=> ").nth(1)
+                {
+                    let path = path.trim();
+                    if std::path::Path::new(path).exists() {
+                        return Some(path.to_string());
                     }
                 }
             }

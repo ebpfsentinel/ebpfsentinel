@@ -13,9 +13,9 @@ use tracing::{debug, info};
 pub struct LbMapManager {
     services_map: HashMap<MapData, LbServiceKey, LbServiceConfigV2>,
     backends_map: HashMap<MapData, u32, LbBackendEntry>,
-    /// DevMap for XDP redirect to backend interfaces.
+    /// `DevMap` for XDP redirect to backend interfaces.
     /// When populated, the eBPF program uses `redirect()` for wire-speed
-    /// forwarding instead of MAC swap + XDP_TX.
+    /// forwarding instead of MAC swap + `XDP_TX`.
     devmap: Option<DevMap<MapData>>,
 }
 
@@ -70,7 +70,7 @@ impl LbMapManager {
     }
 
     /// Insert or update a backend entry.
-    /// Also populates the DevMap with the backend's resolved ifindex if available.
+    /// Also populates the `DevMap` with the backend's resolved ifindex if available.
     pub fn sync_backend(
         &mut self,
         backend_id: u32,
@@ -101,7 +101,7 @@ impl LbMapManager {
         Ok(())
     }
 
-    /// Remove a backend entry and its DevMap redirect.
+    /// Remove a backend entry and its `DevMap` redirect.
     pub fn remove_backend(&mut self, backend_id: u32) -> Result<(), anyhow::Error> {
         self.backends_map
             .remove(&backend_id)

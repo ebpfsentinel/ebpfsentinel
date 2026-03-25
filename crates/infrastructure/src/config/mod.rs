@@ -1017,7 +1017,7 @@ pub struct AutoResponsePolicyConfig {
     #[serde(default = "default_min_severity")]
     pub min_severity: String,
 
-    /// Component filter (e.g. ["ids", "ddos"]).
+    /// Component filter (e.g. [`ids`, `ddos`]).
     /// If empty, matches all components.
     #[serde(default)]
     pub components: Vec<String>,

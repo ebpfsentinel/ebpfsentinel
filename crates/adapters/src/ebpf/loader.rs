@@ -243,7 +243,7 @@ impl EbpfLoader {
     /// `ProgramArray` map owned by this loader.
     ///
     /// Uses `map_mut` (borrow) instead of `take_map` (consume) so the same
-    /// ProgramArray can be wired multiple times (e.g. slot 0 → syncookie,
+    /// `ProgramArray` can be wired multiple times (e.g. slot 0 → syncookie,
     /// slot 1 → loadbalancer).
     pub fn set_tail_call_target(
         &mut self,
