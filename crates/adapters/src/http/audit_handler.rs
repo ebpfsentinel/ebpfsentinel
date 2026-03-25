@@ -95,7 +95,7 @@ pub async fn list_audit_logs(
         offset,
     };
 
-    let svc = state.audit_service.read().await;
+    let svc = &state.audit_service;
 
     if !svc.has_store() {
         return Err(ApiError::ServiceUnavailable {
@@ -192,7 +192,7 @@ pub async fn rule_history(
         .unwrap_or(HISTORY_DEFAULT_LIMIT)
         .min(HISTORY_MAX_LIMIT);
 
-    let svc = state.audit_service.read().await;
+    let svc = &state.audit_service;
 
     if !svc.has_rule_change_store() {
         return Err(ApiError::ServiceUnavailable {

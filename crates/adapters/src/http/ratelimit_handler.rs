@@ -141,7 +141,7 @@ pub async fn create_ratelimit_rule(
 
     tracing::info!(rule_id = %rule_id, "ratelimit rule created via API");
 
-    state.audit_service.read().await.record_rule_change(
+    state.audit_service.record_rule_change(
         domain::audit::entity::AuditComponent::Ratelimit,
         domain::audit::entity::AuditAction::RuleAdded,
         domain::audit::rule_change::ChangeActor::Api,
@@ -195,7 +195,7 @@ pub async fn delete_ratelimit_rule(
 
     tracing::info!(rule_id = %id, "ratelimit rule deleted via API");
 
-    state.audit_service.read().await.record_rule_change(
+    state.audit_service.record_rule_change(
         domain::audit::entity::AuditComponent::Ratelimit,
         domain::audit::entity::AuditAction::RuleRemoved,
         domain::audit::rule_change::ChangeActor::Api,

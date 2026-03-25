@@ -12,6 +12,7 @@ use crate::threatintel::error::ThreatIntelError;
 ///
 /// This engine is source-agnostic — it doesn't know about feed providers,
 /// only about validated IOC entries.
+#[derive(Clone)]
 pub struct ThreatIntelEngine {
     iocs: HashMap<IpAddr, Ioc>,
     max_capacity: usize,

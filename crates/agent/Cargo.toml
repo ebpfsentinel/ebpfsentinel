@@ -27,6 +27,7 @@ infrastructure = { workspace = true }
 ebpf-common = { workspace = true }
 
 tokio = { workspace = true }
+arc-swap = { workspace = true }
 clap = { workspace = true }
 reqwest = { workspace = true }
 anyhow = { workspace = true }

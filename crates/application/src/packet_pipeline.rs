@@ -8,6 +8,7 @@ use domain::firewall::entity::FirewallAction;
 use domain::ids::entity::IdsAlert;
 
 use crate::alert_event::AlertEvent;
+use arc_swap::ArcSwap;
 use domain::dns::encrypted_dns::EncryptedDnsDetector;
 use domain::l7::entity::{DetectedProtocol, ParsedProtocol};
 use domain::l7::ja4::{self, FingerprintCache, FlowKey};
@@ -24,7 +25,7 @@ use ebpf_common::event::{
 use ebpf_common::loadbalancer::{EVENT_TYPE_LB, LB_ACTION_FORWARD, LB_ACTION_NO_BACKEND};
 use ports::secondary::dns_cache_port::DnsCachePort;
 use ports::secondary::metrics_port::MetricsPort;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit_service_impl::AuditAppService;
@@ -67,28 +68,28 @@ pub enum AgentEvent {
 /// across cores.
 #[derive(Clone)]
 pub struct EventDispatcher {
-    ids_service: Arc<RwLock<IdsAppService>>,
-    l7_service: Arc<RwLock<L7AppService>>,
-    threatintel_service: Arc<RwLock<ThreatIntelAppService>>,
-    audit_service: Arc<RwLock<AuditAppService>>,
+    ids_service: Arc<ArcSwap<IdsAppService>>,
+    l7_service: Arc<ArcSwap<L7AppService>>,
+    threatintel_service: Arc<ArcSwap<ThreatIntelAppService>>,
+    audit_service: Arc<AuditAppService>,
     metrics: Arc<dyn MetricsPort>,
     alert_tx: mpsc::Sender<AlertEvent>,
     dns_cache: Option<Arc<dyn DnsCachePort>>,
     dns_cache_svc: Option<Arc<DnsCacheAppService>>,
-    ips_service: Option<Arc<RwLock<IpsAppService>>>,
-    dlp_service: Option<Arc<RwLock<DlpAppService>>>,
-    ddos_service: Option<Arc<RwLock<DdosAppService>>>,
+    ips_service: Option<Arc<ArcSwap<IpsAppService>>>,
+    dlp_service: Option<Arc<ArcSwap<DlpAppService>>>,
+    ddos_service: Option<Arc<ArcSwap<DdosAppService>>>,
     dns_blocklist_svc: Option<Arc<DnsBlocklistAppService>>,
-    fingerprint_cache: Arc<std::sync::RwLock<FingerprintCache>>,
+    fingerprint_cache: Arc<FingerprintCache>,
     encrypted_dns_detector: EncryptedDnsDetector,
 }
 
 impl EventDispatcher {
     pub fn new(
-        ids_service: Arc<RwLock<IdsAppService>>,
-        l7_service: Arc<RwLock<L7AppService>>,
-        threatintel_service: Arc<RwLock<ThreatIntelAppService>>,
-        audit_service: Arc<RwLock<AuditAppService>>,
+        ids_service: Arc<ArcSwap<IdsAppService>>,
+        l7_service: Arc<ArcSwap<L7AppService>>,
+        threatintel_service: Arc<ArcSwap<ThreatIntelAppService>>,
+        audit_service: Arc<AuditAppService>,
         metrics: Arc<dyn MetricsPort>,
         alert_tx: mpsc::Sender<AlertEvent>,
         dns_cache: Option<Arc<dyn DnsCachePort>>,
@@ -106,16 +107,16 @@ impl EventDispatcher {
             dlp_service: None,
             ddos_service: None,
             dns_blocklist_svc: None,
-            fingerprint_cache: Arc::new(std::sync::RwLock::new(FingerprintCache::new(
+            fingerprint_cache: Arc::new(FingerprintCache::new(
                 10_000,
                 std::time::Duration::from_secs(300),
-            ))),
+            )),
             encrypted_dns_detector: EncryptedDnsDetector::default(),
         }
     }
 
     /// Return a shared reference to the JA4 fingerprint cache.
-    pub fn fingerprint_cache(&self) -> Arc<std::sync::RwLock<FingerprintCache>> {
+    pub fn fingerprint_cache(&self) -> Arc<FingerprintCache> {
         Arc::clone(&self.fingerprint_cache)
     }
 
@@ -128,7 +129,7 @@ impl EventDispatcher {
 
     /// Set the IPS service for auto-blacklisting on IDS detections.
     #[must_use]
-    pub fn with_ips_service(mut self, svc: Arc<RwLock<IpsAppService>>) -> Self {
+    pub fn with_ips_service(mut self, svc: Arc<ArcSwap<IpsAppService>>) -> Self {
         self.ips_service = Some(svc);
         self
     }
@@ -142,14 +143,14 @@ impl EventDispatcher {
 
     /// Set the DLP service for processing DLP events.
     #[must_use]
-    pub fn with_dlp_service(mut self, svc: Arc<RwLock<DlpAppService>>) -> Self {
+    pub fn with_dlp_service(mut self, svc: Arc<ArcSwap<DlpAppService>>) -> Self {
         self.dlp_service = Some(svc);
         self
     }
 
     /// Set the `DDoS` service for processing `DDoS` events.
     #[must_use]
-    pub fn with_ddos_service(mut self, svc: Arc<RwLock<DdosAppService>>) -> Self {
+    pub fn with_ddos_service(mut self, svc: Arc<ArcSwap<DdosAppService>>) -> Self {
         self.ddos_service = Some(svc);
         self
     }
@@ -172,7 +173,7 @@ impl EventDispatcher {
                     // Drain remaining events before exiting
                     while let Ok(event) = rx.try_recv() {
                         count += 1;
-                        self.dispatch_agent_event(event).await;
+                        self.dispatch_agent_event(event);
                     }
                     break;
                 }
@@ -180,7 +181,7 @@ impl EventDispatcher {
                     match msg {
                         Some(event) => {
                             count += 1;
-                            self.dispatch_agent_event(event).await;
+                            self.dispatch_agent_event(event);
                         }
                         None => break, // channel closed
                     }
@@ -278,7 +279,7 @@ impl EventDispatcher {
                 () = cancel_token.cancelled() => {
                     while let Ok(event) = rx.try_recv() {
                         count += 1;
-                        self.dispatch_agent_event(event).await;
+                        self.dispatch_agent_event(event);
                     }
                     break;
                 }
@@ -286,7 +287,7 @@ impl EventDispatcher {
                     match msg {
                         Some(event) => {
                             count += 1;
-                            self.dispatch_agent_event(event).await;
+                            self.dispatch_agent_event(event);
                         }
                         None => break,
                     }
@@ -317,7 +318,7 @@ impl EventDispatcher {
         hash as usize % num_workers
     }
 
-    async fn dispatch_agent_event(&self, event: AgentEvent) {
+    fn dispatch_agent_event(&self, event: AgentEvent) {
         let start = std::time::Instant::now();
         let program = match &event {
             AgentEvent::L4(pkt) => event_type_label(pkt.event_type),
@@ -326,28 +327,28 @@ impl EventDispatcher {
             AgentEvent::Dlp(_) => "dlp",
         };
         match event {
-            AgentEvent::L4(pkt) => self.dispatch_event(pkt).await,
-            AgentEvent::L7 { header, payload } => self.process_l7_event(header, &payload).await,
+            AgentEvent::L4(pkt) => self.dispatch_event(pkt),
+            AgentEvent::L7 { header, payload } => self.process_l7_event(header, &payload),
             AgentEvent::Dns { header, payload } => self.process_dns_event(header, &payload),
-            AgentEvent::Dlp(event) => self.process_dlp_event(&event).await,
+            AgentEvent::Dlp(event) => self.process_dlp_event(&event),
         }
         self.metrics
             .observe_processing_duration(program, start.elapsed().as_secs_f64());
     }
 
-    async fn dispatch_event(&self, event: PacketEvent) {
+    fn dispatch_event(&self, event: PacketEvent) {
         match event.event_type {
-            EVENT_TYPE_FIREWALL => self.process_firewall_event(event).await,
-            EVENT_TYPE_IDS => self.process_ids_event(event).await,
-            EVENT_TYPE_RATELIMIT => self.process_ratelimit_event(event).await,
+            EVENT_TYPE_FIREWALL => self.process_firewall_event(event),
+            EVENT_TYPE_IDS => self.process_ids_event(event),
+            EVENT_TYPE_RATELIMIT => self.process_ratelimit_event(event),
             EVENT_TYPE_THREATINTEL => {
-                self.process_threatintel_event(event).await;
+                self.process_threatintel_event(event);
             }
             EVENT_TYPE_DDOS_SYN
             | EVENT_TYPE_DDOS_ICMP
             | EVENT_TYPE_DDOS_AMP
             | EVENT_TYPE_DDOS_CONNTRACK => {
-                self.process_ddos_event(event).await;
+                self.process_ddos_event(event);
             }
             EVENT_TYPE_LB => {
                 self.process_lb_event(&event);
@@ -359,7 +360,7 @@ impl EventDispatcher {
         }
     }
 
-    async fn process_firewall_event(&self, event: PacketEvent) {
+    fn process_firewall_event(&self, event: PacketEvent) {
         let action = action_label(event.action);
         self.metrics.record_packet("firewall", action);
         tracing::debug!(
@@ -379,7 +380,7 @@ impl EventDispatcher {
             AuditAction::Pass
         };
         let detail = format!("firewall {action} rule_id={}", event.rule_id);
-        self.audit_service.read().await.record_security_decision(
+        self.audit_service.record_security_decision(
             AuditComponent::Firewall,
             audit_action,
             event.timestamp_ns,
@@ -404,7 +405,7 @@ impl EventDispatcher {
         }
     }
 
-    async fn process_ratelimit_event(&self, event: PacketEvent) {
+    fn process_ratelimit_event(&self, event: PacketEvent) {
         let action = action_label(event.action);
         self.metrics.record_packet("ratelimit", action);
         tracing::debug!(
@@ -423,7 +424,7 @@ impl EventDispatcher {
             AuditAction::Pass
         };
         let detail = format!("ratelimit {action}");
-        self.audit_service.read().await.record_security_decision(
+        self.audit_service.record_security_decision(
             AuditComponent::Ratelimit,
             audit_action,
             event.timestamp_ns,
@@ -448,7 +449,7 @@ impl EventDispatcher {
         }
     }
 
-    async fn process_ids_event(&self, event: PacketEvent) {
+    fn process_ids_event(&self, event: PacketEvent) {
         let action = action_label(event.action);
         self.metrics.record_packet("ids", action);
 
@@ -462,9 +463,9 @@ impl EventDispatcher {
             })
             .unwrap_or_default();
 
-        // First pass: read-only evaluation (fast path, shared lock)
-        let (rule_clone, threshold, alert, detail, src_country) = {
-            let svc = self.ids_service.read().await;
+        // Evaluate and threshold check (all methods are now &self via interior mutability)
+        let (_rule_clone, alert, detail, _src_country) = {
+            let svc = self.ids_service.load();
 
             if !svc.enabled() {
                 return;
@@ -487,23 +488,23 @@ impl EventDispatcher {
             alert.matched_domain = matched_domain;
             let rule_clone = rule.clone();
             let threshold = rule.threshold.clone();
-            (rule_clone, threshold, alert, detail, src_country)
-        };
 
-        // Second pass: threshold check with country-aware overrides
-        if threshold.is_some() {
-            let mut svc = self.ids_service.write().await;
-            if !svc.check_threshold_with_country(
-                &rule_clone,
-                event.src_addr[0],
-                event.dst_addr[0],
-                src_country.as_deref(),
-            ) {
+            // Threshold check with country-aware overrides (now &self, no write lock needed)
+            if threshold.is_some()
+                && !svc.check_threshold_with_country(
+                    &rule_clone,
+                    event.src_addr[0],
+                    event.dst_addr[0],
+                    src_country.as_deref(),
+                )
+            {
                 return; // Suppressed by threshold
             }
-        }
 
-        self.audit_service.read().await.record_security_decision(
+            (rule_clone, alert, detail, src_country)
+        };
+
+        self.audit_service.record_security_decision(
             AuditComponent::Ids,
             AuditAction::Alert,
             event.timestamp_ns,
@@ -524,7 +525,7 @@ impl EventDispatcher {
         // Feed detection into IPS for auto-blacklisting
         if let Some(ref ips_svc) = self.ips_service {
             let src_ip = addr_to_ip(event.src_addr, event.is_ipv6());
-            let mut svc = ips_svc.write().await;
+            let svc = ips_svc.load();
             let actions = svc.record_detection(src_ip);
 
             // Emit alert when IPS auto-blacklists an IP
@@ -541,11 +542,11 @@ impl EventDispatcher {
         }
     }
 
-    async fn process_threatintel_event(&self, event: PacketEvent) {
+    fn process_threatintel_event(&self, event: PacketEvent) {
         let action = action_label(event.action);
         self.metrics.record_packet("threatintel", action);
 
-        let svc = self.threatintel_service.read().await;
+        let svc = self.threatintel_service.load();
 
         if !svc.enabled() {
             return;
@@ -620,7 +621,7 @@ impl EventDispatcher {
             "threat intel IOC matched feed={} confidence={}",
             ti_alert.feed_id, ti_alert.confidence
         );
-        self.audit_service.read().await.record_security_decision(
+        self.audit_service.record_security_decision(
             AuditComponent::Threatintel,
             AuditAction::Alert,
             event.timestamp_ns,
@@ -639,7 +640,7 @@ impl EventDispatcher {
         }
     }
 
-    async fn process_l7_event(&self, header: PacketEvent, payload: &[u8]) {
+    fn process_l7_event(&self, header: PacketEvent, payload: &[u8]) {
         let protocol = detect_protocol(payload);
         let protocol_label = match protocol {
             DetectedProtocol::Http => "http",
@@ -663,16 +664,14 @@ impl EventDispatcher {
                 dst_addr: header.dst_addr,
                 dst_port: header.dst_port,
             };
-            if let Ok(mut cache) = self.fingerprint_cache.write() {
-                cache.insert(flow_key, fp);
-            }
+            self.fingerprint_cache.insert(flow_key, fp);
 
             // Detect encrypted DNS (DoH/DoT)
             self.check_encrypted_dns(tls_hello, &header);
         }
 
         // Evaluate L7 rules against parsed content
-        let l7_svc = self.l7_service.read().await;
+        let l7_svc = self.l7_service.load();
         let l7_result = l7_svc.evaluate(&header, &parsed);
         drop(l7_svc);
 
@@ -713,7 +712,7 @@ impl EventDispatcher {
                 _ => AuditAction::Pass,
             };
             let detail = format!("L7 {protocol_label} {action_label} rule={rule_id}");
-            self.audit_service.read().await.record_security_decision(
+            self.audit_service.record_security_decision(
                 AuditComponent::L7,
                 audit_action,
                 header.timestamp_ns,
@@ -888,7 +887,7 @@ impl EventDispatcher {
         }
     }
 
-    async fn process_dlp_event(&self, event: &DlpEvent) {
+    fn process_dlp_event(&self, event: &DlpEvent) {
         self.metrics.record_packet("dlp", "captured");
 
         let direction = if event.direction == ebpf_common::dlp::DLP_DIRECTION_READ {
@@ -906,7 +905,7 @@ impl EventDispatcher {
         );
 
         if let Some(ref dlp_svc) = self.dlp_service {
-            let svc = dlp_svc.read().await;
+            let svc = dlp_svc.load();
             if !svc.enabled() {
                 return;
             }
@@ -935,7 +934,7 @@ impl EventDispatcher {
         }
     }
 
-    async fn process_ddos_event(&self, event: PacketEvent) {
+    fn process_ddos_event(&self, event: PacketEvent) {
         self.metrics.record_packet("ddos", "drop");
 
         let Some(ref ddos_service) = self.ddos_service else {
@@ -957,10 +956,8 @@ impl EventDispatcher {
             is_ipv6: event.is_ipv6(),
         };
 
-        let changed = {
-            let mut svc = ddos_service.write().await;
-            svc.process_event(&ddos_event)
-        };
+        let svc = ddos_service.load();
+        let changed = svc.process_event(&ddos_event);
 
         if changed {
             tracing::info!(
@@ -971,7 +968,6 @@ impl EventDispatcher {
             );
 
             // Find the most recent matching attack and send an alert
-            let svc = ddos_service.read().await;
             if let Some(attack) = svc
                 .active_attacks()
                 .iter()
@@ -993,7 +989,7 @@ impl EventDispatcher {
             }
         }
 
-        self.audit_service.read().await.record_security_decision(
+        self.audit_service.record_security_decision(
             AuditComponent::Ratelimit,
             AuditAction::Drop,
             event.timestamp_ns,
@@ -1159,23 +1155,28 @@ mod tests {
         }
     }
 
-    fn make_service_with_rules(rules: Vec<IdsRule>) -> Arc<RwLock<IdsAppService>> {
+    fn make_service_with_rules(rules: Vec<IdsRule>) -> Arc<ArcSwap<IdsAppService>> {
         let mut engine = IdsEngine::new();
         for rule in rules {
             engine.add_rule(rule).unwrap();
         }
         let metrics: Arc<dyn MetricsPort> = Arc::new(TestMetrics::new());
-        Arc::new(RwLock::new(IdsAppService::new(engine, None, metrics)))
+        Arc::new(ArcSwap::from_pointee(IdsAppService::new(
+            engine, None, metrics,
+        )))
     }
 
-    fn make_l7_service() -> Arc<RwLock<L7AppService>> {
+    fn make_l7_service() -> Arc<ArcSwap<L7AppService>> {
         let metrics: Arc<dyn MetricsPort> = Arc::new(TestMetrics::new());
-        Arc::new(RwLock::new(L7AppService::new(L7Engine::new(), metrics)))
+        Arc::new(ArcSwap::from_pointee(L7AppService::new(
+            L7Engine::new(),
+            metrics,
+        )))
     }
 
-    fn make_ti_service() -> Arc<RwLock<ThreatIntelAppService>> {
+    fn make_ti_service() -> Arc<ArcSwap<ThreatIntelAppService>> {
         let metrics: Arc<dyn MetricsPort> = Arc::new(TestMetrics::new());
-        Arc::new(RwLock::new(ThreatIntelAppService::new(
+        Arc::new(ArcSwap::from_pointee(ThreatIntelAppService::new(
             ThreatIntelEngine::new(1_000_000),
             metrics,
             vec![],
@@ -1189,22 +1190,22 @@ mod tests {
         }
     }
 
-    fn make_audit_service() -> Arc<RwLock<AuditAppService>> {
+    fn make_audit_service() -> Arc<AuditAppService> {
         let sink: Arc<dyn AuditSink> = Arc::new(NoopAuditSink);
-        Arc::new(RwLock::new(AuditAppService::new(sink)))
+        Arc::new(AuditAppService::new(sink))
     }
 
-    fn make_l7_service_with_rules(rules: Vec<L7Rule>) -> Arc<RwLock<L7AppService>> {
+    fn make_l7_service_with_rules(rules: Vec<L7Rule>) -> Arc<ArcSwap<L7AppService>> {
         let mut engine = L7Engine::new();
         for rule in rules {
             engine.add_rule(rule).unwrap();
         }
         let metrics: Arc<dyn MetricsPort> = Arc::new(TestMetrics::new());
-        Arc::new(RwLock::new(L7AppService::new(engine, metrics)))
+        Arc::new(ArcSwap::from_pointee(L7AppService::new(engine, metrics)))
     }
 
     fn make_dispatcher(
-        ids_service: Arc<RwLock<IdsAppService>>,
+        ids_service: Arc<ArcSwap<IdsAppService>>,
         metrics: Arc<TestMetrics>,
         alert_tx: mpsc::Sender<AlertEvent>,
     ) -> EventDispatcher {
@@ -1228,8 +1229,8 @@ mod tests {
     }
 
     fn make_dispatcher_with_l7(
-        ids_service: Arc<RwLock<IdsAppService>>,
-        l7_service: Arc<RwLock<L7AppService>>,
+        ids_service: Arc<ArcSwap<IdsAppService>>,
+        l7_service: Arc<ArcSwap<L7AppService>>,
         metrics: Arc<TestMetrics>,
         alert_tx: mpsc::Sender<AlertEvent>,
     ) -> EventDispatcher {
@@ -1251,9 +1252,7 @@ mod tests {
         let (alert_tx, _alert_rx) = mpsc::channel(10);
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
 
-        dispatcher
-            .dispatch_event(make_event(EVENT_TYPE_FIREWALL, 0))
-            .await;
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_FIREWALL, 0));
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "firewall");
@@ -1267,9 +1266,7 @@ mod tests {
         let (alert_tx, mut alert_rx) = mpsc::channel(10);
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
 
-        dispatcher
-            .dispatch_event(make_event(EVENT_TYPE_IDS, 0))
-            .await;
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 0));
 
         let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
         assert_eq!(alert.rule_id.0, "ids-001");
@@ -1286,9 +1283,7 @@ mod tests {
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
 
         // rule_id=99 → out of range
-        dispatcher
-            .dispatch_event(make_event(EVENT_TYPE_IDS, 99))
-            .await;
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 99));
 
         assert!(alert_rx.try_recv().is_err());
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
@@ -1297,14 +1292,16 @@ mod tests {
     #[tokio::test]
     async fn ids_event_with_disabled_service_produces_no_alert() {
         let ids = make_service_with_rules(vec![make_ids_rule("ids-001")]);
-        ids.write().await.set_enabled(false);
+        {
+            let mut svc = (**ids.load()).clone();
+            svc.set_enabled(false);
+            ids.store(Arc::new(svc));
+        }
         let metrics = Arc::new(TestMetrics::new());
         let (alert_tx, mut alert_rx) = mpsc::channel(10);
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
 
-        dispatcher
-            .dispatch_event(make_event(EVENT_TYPE_IDS, 0))
-            .await;
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 0));
 
         assert!(alert_rx.try_recv().is_err());
     }
@@ -1316,9 +1313,7 @@ mod tests {
         let (alert_tx, _alert_rx) = mpsc::channel(10);
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
 
-        dispatcher
-            .dispatch_event(make_event(EVENT_TYPE_DLP, 0))
-            .await;
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_DLP, 0));
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "unknown");
@@ -1333,13 +1328,9 @@ mod tests {
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
 
         // Fill the channel
-        dispatcher
-            .dispatch_event(make_event(EVENT_TYPE_IDS, 0))
-            .await;
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 0));
         // This should trigger backpressure
-        dispatcher
-            .dispatch_event(make_event(EVENT_TYPE_IDS, 0))
-            .await;
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 0));
 
         assert_eq!(metrics.dropped_calls.load(Ordering::Relaxed), 1);
     }
@@ -1403,12 +1394,12 @@ mod tests {
         // action=1 (drop)
         let mut event = make_event(EVENT_TYPE_FIREWALL, 0);
         event.action = 1;
-        dispatcher.dispatch_event(event).await;
+        dispatcher.dispatch_event(event);
         assert_eq!(*metrics.last_action.lock().unwrap(), "drop");
 
         // action=2 (log)
         event.action = 2;
-        dispatcher.dispatch_event(event).await;
+        dispatcher.dispatch_event(event);
         assert_eq!(*metrics.last_action.lock().unwrap(), "log");
     }
 
@@ -1421,7 +1412,7 @@ mod tests {
 
         let mut event = make_event(EVENT_TYPE_RATELIMIT, 0);
         event.action = 1; // drop (throttled)
-        dispatcher.dispatch_event(event).await;
+        dispatcher.dispatch_event(event);
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "ratelimit");
@@ -1436,7 +1427,7 @@ mod tests {
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
 
         let event = make_event(EVENT_TYPE_RATELIMIT, 0); // action=0 (pass)
-        dispatcher.dispatch_event(event).await;
+        dispatcher.dispatch_event(event);
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "ratelimit");
@@ -1455,9 +1446,7 @@ mod tests {
         let header = make_event(EVENT_TYPE_L7, 0);
         let payload = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec();
 
-        dispatcher
-            .dispatch_agent_event(AgentEvent::L7 { header, payload })
-            .await;
+        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
@@ -1474,9 +1463,7 @@ mod tests {
         let header = make_event(EVENT_TYPE_L7, 0);
         let payload = vec![0x01, 0x02, 0x03, 0x04];
 
-        dispatcher
-            .dispatch_agent_event(AgentEvent::L7 { header, payload })
-            .await;
+        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
@@ -1539,9 +1526,7 @@ mod tests {
 
         let header = make_event(EVENT_TYPE_L7, 0);
         let payload = b"DELETE /admin HTTP/1.1\r\nHost: evil.com\r\n\r\n".to_vec();
-        dispatcher
-            .dispatch_agent_event(AgentEvent::L7 { header, payload })
-            .await;
+        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
 
         // The L7 service records "deny" metric internally
         assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
@@ -1559,9 +1544,7 @@ mod tests {
 
         let header = make_event(EVENT_TYPE_L7, 0);
         let payload = b"GET /safe HTTP/1.1\r\nHost: ok.com\r\n\r\n".to_vec();
-        dispatcher
-            .dispatch_agent_event(AgentEvent::L7 { header, payload })
-            .await;
+        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
 
         // No rule matched → dispatcher records protocol label
         assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
@@ -1591,7 +1574,11 @@ mod tests {
             dst_ip_alias: None,
             dst_port_alias: None,
         }]);
-        l7.write().await.set_enabled(false);
+        {
+            let mut svc = (**l7.load()).clone();
+            svc.set_enabled(false);
+            l7.store(Arc::new(svc));
+        }
         let metrics = Arc::new(TestMetrics::new());
         let (alert_tx, _alert_rx) = mpsc::channel(10);
         let dispatcher =
@@ -1599,9 +1586,7 @@ mod tests {
 
         let header = make_event(EVENT_TYPE_L7, 0);
         let payload = b"DELETE /admin HTTP/1.1\r\nHost: evil.com\r\n\r\n".to_vec();
-        dispatcher
-            .dispatch_agent_event(AgentEvent::L7 { header, payload })
-            .await;
+        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
 
         // Service disabled → no deny, just protocol metric
         assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
@@ -1672,7 +1657,7 @@ mod tests {
     }
 
     fn make_dispatcher_with_dns(
-        ids_service: Arc<RwLock<IdsAppService>>,
+        ids_service: Arc<ArcSwap<IdsAppService>>,
         metrics: Arc<TestMetrics>,
         alert_tx: mpsc::Sender<AlertEvent>,
         dns_cache: Arc<dyn DnsCachePort>,
@@ -1708,9 +1693,7 @@ mod tests {
         let dispatcher =
             make_dispatcher_with_dns(Arc::clone(&ids), Arc::clone(&metrics), alert_tx, dns);
 
-        dispatcher
-            .dispatch_event(make_event(EVENT_TYPE_IDS, 0))
-            .await;
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 0));
 
         let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
         assert_eq!(alert.rule_id.0, "ids-dom-1");
@@ -1733,9 +1716,7 @@ mod tests {
         let dispatcher =
             make_dispatcher_with_dns(Arc::clone(&ids), Arc::clone(&metrics), alert_tx, dns);
 
-        dispatcher
-            .dispatch_event(make_event(EVENT_TYPE_IDS, 0))
-            .await;
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 0));
 
         // Domain rule should not match — no alert
         assert!(alert_rx.try_recv().is_err());
@@ -1754,9 +1735,7 @@ mod tests {
         let dispatcher =
             make_dispatcher_with_dns(Arc::clone(&ids), Arc::clone(&metrics), alert_tx, dns);
 
-        dispatcher
-            .dispatch_event(make_event(EVENT_TYPE_IDS, 0))
-            .await;
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 0));
 
         let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
         assert_eq!(alert.rule_id.0, "ids-001");
@@ -1777,15 +1756,11 @@ mod tests {
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
 
         // Event for rule index 0 (domain rule) — should NOT match
-        dispatcher
-            .dispatch_event(make_event(EVENT_TYPE_IDS, 0))
-            .await;
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 0));
         assert!(alert_rx.try_recv().is_err());
 
         // Event for rule index 1 (IP-only rule) — should match
-        dispatcher
-            .dispatch_event(make_event(EVENT_TYPE_IDS, 1))
-            .await;
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 1));
         let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
         assert_eq!(alert.rule_id.0, "ids-002");
     }
@@ -1801,7 +1776,7 @@ mod tests {
 
         let mut event = make_event(EVENT_TYPE_LB, 0);
         event.action = LB_ACTION_FORWARD;
-        dispatcher.dispatch_event(event).await;
+        dispatcher.dispatch_event(event);
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "loadbalancer");
@@ -1817,7 +1792,7 @@ mod tests {
 
         let mut event = make_event(EVENT_TYPE_LB, 0);
         event.action = LB_ACTION_NO_BACKEND;
-        dispatcher.dispatch_event(event).await;
+        dispatcher.dispatch_event(event);
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "loadbalancer");
@@ -1829,9 +1804,12 @@ mod tests {
     use crate::ddos_service_impl::DdosAppService;
     use domain::ddos::engine::DdosEngine;
 
-    fn make_ddos_service() -> Arc<RwLock<DdosAppService>> {
+    fn make_ddos_service() -> Arc<ArcSwap<DdosAppService>> {
         let metrics: Arc<dyn MetricsPort> = Arc::new(TestMetrics::new());
-        Arc::new(RwLock::new(DdosAppService::new(DdosEngine::new(), metrics)))
+        Arc::new(ArcSwap::from_pointee(DdosAppService::new(
+            DdosEngine::new(),
+            metrics,
+        )))
     }
 
     #[tokio::test]
@@ -1842,7 +1820,7 @@ mod tests {
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
 
         let event = make_event(EVENT_TYPE_DDOS_SYN, 0);
-        dispatcher.dispatch_event(event).await;
+        dispatcher.dispatch_event(event);
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "ddos");
@@ -1858,7 +1836,7 @@ mod tests {
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
 
         let event = make_event(EVENT_TYPE_DDOS_ICMP, 0);
-        dispatcher.dispatch_event(event).await;
+        dispatcher.dispatch_event(event);
 
         // Metric is still recorded even without a service
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
@@ -1875,7 +1853,7 @@ mod tests {
             .with_ddos_service(Arc::clone(&ddos));
 
         let event = make_event(EVENT_TYPE_DDOS_SYN, 0);
-        dispatcher.dispatch_event(event).await;
+        dispatcher.dispatch_event(event);
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "ddos");
@@ -1893,7 +1871,7 @@ mod tests {
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
 
         let event = make_event(EVENT_TYPE_THREATINTEL, 0);
-        dispatcher.dispatch_event(event).await;
+        dispatcher.dispatch_event(event);
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "threatintel");
@@ -1904,7 +1882,11 @@ mod tests {
     async fn threatintel_event_disabled_service_no_alert() {
         let ids = make_service_with_rules(vec![]);
         let ti = make_ti_service();
-        ti.write().await.set_enabled(false);
+        {
+            let mut svc = (**ti.load()).clone();
+            svc.set_enabled(false);
+            ti.store(Arc::new(svc));
+        }
         let metrics = Arc::new(TestMetrics::new());
         let (alert_tx, mut alert_rx) = mpsc::channel(10);
 
@@ -1919,7 +1901,7 @@ mod tests {
         );
 
         let event = make_event(EVENT_TYPE_THREATINTEL, 0);
-        dispatcher.dispatch_event(event).await;
+        dispatcher.dispatch_event(event);
 
         assert!(alert_rx.try_recv().is_err());
         // Metric is still recorded before the enabled check returns
@@ -1933,9 +1915,9 @@ mod tests {
 
         // The src_addr in make_event is 0xC0A8_0001 = 192.168.0.1
         let src_ip: IpAddr = "192.168.0.1".parse().unwrap();
-        ti.write()
-            .await
-            .add_ioc(Ioc {
+        {
+            let mut svc = (**ti.load()).clone();
+            svc.add_ioc(Ioc {
                 ip: src_ip,
                 feed_id: "test-feed".to_string(),
                 confidence: 90,
@@ -1944,6 +1926,8 @@ mod tests {
                 source_feed: "test".to_string(),
             })
             .unwrap();
+            ti.store(Arc::new(svc));
+        }
 
         let metrics = Arc::new(TestMetrics::new());
         let (alert_tx, mut alert_rx) = mpsc::channel(10);
@@ -1959,7 +1943,7 @@ mod tests {
         );
 
         let event = make_event(EVENT_TYPE_THREATINTEL, 0);
-        dispatcher.dispatch_event(event).await;
+        dispatcher.dispatch_event(event);
 
         let alert = alert_rx.try_recv().unwrap();
         match alert {
@@ -1993,7 +1977,7 @@ mod tests {
         event
     }
 
-    fn make_dlp_service_with_pattern() -> Arc<RwLock<DlpAppService>> {
+    fn make_dlp_service_with_pattern() -> Arc<ArcSwap<DlpAppService>> {
         let metrics: Arc<dyn MetricsPort> = Arc::new(TestMetrics::new());
         let mut engine = DlpEngine::new();
         engine
@@ -2008,7 +1992,7 @@ mod tests {
                 enabled: true,
             })
             .unwrap();
-        Arc::new(RwLock::new(DlpAppService::new(engine, metrics)))
+        Arc::new(ArcSwap::from_pointee(DlpAppService::new(engine, metrics)))
     }
 
     #[tokio::test]
@@ -2019,9 +2003,7 @@ mod tests {
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
 
         let dlp_event = make_dlp_event_with_data(b"hello world");
-        dispatcher
-            .dispatch_agent_event(AgentEvent::Dlp(Box::new(dlp_event)))
-            .await;
+        dispatcher.dispatch_agent_event(AgentEvent::Dlp(Box::new(dlp_event)));
 
         // record_packet is called twice: once for "dlp"/"captured" in process_dlp_event,
         // and once for observe_processing_duration via dispatch_agent_event.
@@ -2039,9 +2021,7 @@ mod tests {
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
 
         let dlp_event = make_dlp_event_with_data(b"some data 1234");
-        dispatcher
-            .dispatch_agent_event(AgentEvent::Dlp(Box::new(dlp_event)))
-            .await;
+        dispatcher.dispatch_agent_event(AgentEvent::Dlp(Box::new(dlp_event)));
 
         // Metric recorded, no panic
         assert_eq!(*metrics.last_component.lock().unwrap(), "dlp");
@@ -2059,9 +2039,7 @@ mod tests {
 
         // Data containing 4 consecutive digits should match the \d{4} pattern
         let dlp_event = make_dlp_event_with_data(b"card number 1234 here");
-        dispatcher
-            .dispatch_agent_event(AgentEvent::Dlp(Box::new(dlp_event)))
-            .await;
+        dispatcher.dispatch_agent_event(AgentEvent::Dlp(Box::new(dlp_event)));
 
         let alert = alert_rx.try_recv().unwrap();
         match alert {
@@ -2084,7 +2062,7 @@ mod tests {
 
         let mut event = make_event(EVENT_TYPE_LB, 0);
         event.action = 255;
-        dispatcher.dispatch_event(event).await;
+        dispatcher.dispatch_event(event);
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "loadbalancer");

@@ -15,7 +15,8 @@ use ports::secondary::metrics_port::MetricsPort;
 /// Application-level IPS service.
 ///
 /// Orchestrates the IPS domain engine (blacklist + detection counting)
-/// and metrics updates. Designed to be wrapped in `RwLock` for shared access.
+/// and metrics updates. Designed to be wrapped in `ArcSwap` for lock-free reads.
+#[derive(Clone)]
 pub struct IpsAppService {
     engine: IpsEngine,
     rules: Vec<IdsRule>,
@@ -68,7 +69,7 @@ impl IpsAppService {
 
     /// Check if a source IP is blacklisted. Returns `true` if the IP
     /// is actively blocked by the IPS blacklist.
-    pub fn is_blacklisted(&mut self, ip: IpAddr) -> bool {
+    pub fn is_blacklisted(&self, ip: IpAddr) -> bool {
         self.engine.is_blacklisted(ip)
     }
 
@@ -78,7 +79,7 @@ impl IpsAppService {
     /// In `Alert` mode, the detection is still counted and the blacklist
     /// entry is created, but the caller should not enforce the action
     /// (observation only).
-    pub fn record_detection(&mut self, ip: IpAddr) -> Vec<EnforcementAction> {
+    pub fn record_detection(&self, ip: IpAddr) -> Vec<EnforcementAction> {
         let src_country = self.resolve_country(&ip);
         let actions = self
             .engine
@@ -95,7 +96,7 @@ impl IpsAppService {
 
     /// Manually add an IP to the blacklist.
     pub fn add_to_blacklist(
-        &mut self,
+        &self,
         ip: IpAddr,
         reason: String,
         ttl: Duration,
@@ -109,7 +110,7 @@ impl IpsAppService {
     }
 
     /// Remove an IP from the blacklist.
-    pub fn remove_from_blacklist(&mut self, ip: IpAddr) -> Result<(), DomainError> {
+    pub fn remove_from_blacklist(&self, ip: IpAddr) -> Result<(), DomainError> {
         self.engine
             .remove_from_blacklist(&ip)
             .map_err(DomainError::from)?;
@@ -124,7 +125,7 @@ impl IpsAppService {
     }
 
     /// Remove all entries from the blacklist.
-    pub fn clear_blacklist(&mut self) {
+    pub fn clear_blacklist(&self) {
         self.engine.clear_blacklist();
         self.update_blacklist_metric();
         tracing::info!("IPS blacklist cleared");
@@ -137,7 +138,7 @@ impl IpsAppService {
 
     /// Run periodic cleanup of expired entries. Returns enforcement actions
     /// for the map updater to remove entries from the eBPF map.
-    pub fn cleanup_expired(&mut self) -> Vec<EnforcementAction> {
+    pub fn cleanup_expired(&self) -> Vec<EnforcementAction> {
         let actions = self.engine.cleanup_expired();
         if !actions.is_empty() {
             self.update_blacklist_metric();
@@ -301,18 +302,17 @@ impl IpsAppService {
 
 /// Thread-safe wrapper implementing `IpsBlacklistPort` for use by the
 /// DNS blocklist service. Delegates to the shared `IpsAppService` behind
-/// a `tokio::sync::RwLock` so that the same IPS state is used by the
-/// main pipeline and the DNS blocklist injection path.
+/// an `ArcSwap` so that the same IPS state is used by the main pipeline
+/// and the DNS blocklist injection path.
 ///
-/// Uses `try_write()` since the DNS blocklist service calls these methods
-/// synchronously from async context. IPS operations are fast (in-memory
-/// `HashMap`), so contention is extremely unlikely.
+/// Uses `load()` for lock-free access. IPS `add_to_blacklist` and
+/// `remove_from_blacklist` are now `&self` (interior mutability in the engine).
 pub struct IpsBlacklistAdapter {
-    inner: Arc<tokio::sync::RwLock<IpsAppService>>,
+    inner: Arc<arc_swap::ArcSwap<IpsAppService>>,
 }
 
 impl IpsBlacklistAdapter {
-    pub fn new(service: Arc<tokio::sync::RwLock<IpsAppService>>) -> Self {
+    pub fn new(service: Arc<arc_swap::ArcSwap<IpsAppService>>) -> Self {
         Self { inner: service }
     }
 }
@@ -324,18 +324,12 @@ impl ports::secondary::ips_blacklist_port::IpsBlacklistPort for IpsBlacklistAdap
         reason: String,
         ttl: Duration,
     ) -> Result<(), DomainError> {
-        let mut svc = self
-            .inner
-            .try_write()
-            .map_err(|_| DomainError::EngineError("IPS service lock contention".to_string()))?;
+        let svc = self.inner.load();
         svc.add_to_blacklist(ip, reason, ttl)
     }
 
     fn remove_from_blacklist(&self, ip: &IpAddr) -> Result<(), DomainError> {
-        let mut svc = self
-            .inner
-            .try_write()
-            .map_err(|_| DomainError::EngineError("IPS service lock contention".to_string()))?;
+        let svc = self.inner.load();
         svc.remove_from_blacklist(*ip)
     }
 }

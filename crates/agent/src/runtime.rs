@@ -24,6 +24,7 @@ use application::routing_service_impl::RoutingAppService;
 use application::schedule_service_impl::ScheduleService;
 use application::threatintel_service_impl::ThreatIntelAppService;
 use application::zone_service_impl::ZoneAppService;
+use arc_swap::ArcSwap;
 use domain::dlp::engine::DlpEngine;
 use domain::firewall::engine::FirewallEngine;
 use domain::ids::engine::IdsEngine;
@@ -46,16 +47,16 @@ use tracing::{info, warn};
 pub struct ServiceHandles {
     // ── Core security services (replicated in HA) ─────────────────
     pub firewall_svc: Arc<RwLock<FirewallAppService>>,
-    pub ids_svc: Arc<RwLock<IdsAppService>>,
-    pub ips_svc: Arc<RwLock<IpsAppService>>,
+    pub ids_svc: Arc<ArcSwap<IdsAppService>>,
+    pub ips_svc: Arc<ArcSwap<IpsAppService>>,
     pub rl_svc: Arc<RwLock<RateLimitAppService>>,
-    pub ti_svc: Arc<RwLock<ThreatIntelAppService>>,
+    pub ti_svc: Arc<ArcSwap<ThreatIntelAppService>>,
     pub dns_blocklist_svc: Option<Arc<DnsBlocklistAppService>>,
 
     // ── Additional services ──────────────────────────────────────
-    pub l7_svc: Arc<RwLock<L7AppService>>,
-    pub ddos_svc: Arc<RwLock<application::ddos_service_impl::DdosAppService>>,
-    pub dlp_svc: Arc<RwLock<DlpAppService>>,
+    pub l7_svc: Arc<ArcSwap<L7AppService>>,
+    pub ddos_svc: Arc<ArcSwap<application::ddos_service_impl::DdosAppService>>,
+    pub dlp_svc: Arc<ArcSwap<DlpAppService>>,
     pub conntrack_svc: Arc<RwLock<ConnTrackAppService>>,
     pub nat_svc: Arc<RwLock<NatAppService>>,
     pub lb_svc: Arc<RwLock<application::lb_service_impl::LbAppService>>,
@@ -64,7 +65,7 @@ pub struct ServiceHandles {
     pub alias_svc: Arc<RwLock<AliasAppService>>,
     pub routing_svc: Arc<RwLock<RoutingAppService>>,
     pub schedule_svc: Arc<RwLock<ScheduleService>>,
-    pub audit_svc: Arc<RwLock<AuditAppService>>,
+    pub audit_svc: Arc<AuditAppService>,
 
     // ── DNS services (optional) ──────────────────────────────────
     pub dns_cache_svc: Option<Arc<DnsCacheAppService>>,
@@ -121,7 +122,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     );
     ids_svc.set_mode(ids_mode);
     ids_svc.set_enabled(config.ids.enabled);
-    let ids_svc = Arc::new(RwLock::new(ids_svc));
+    let ids_svc = Arc::new(ArcSwap::from_pointee(ids_svc));
     info!(
         enabled = config.ids.enabled,
         mode = ids_mode.as_str(),
@@ -141,7 +142,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     ips_svc.set_enabled(config.ips.enabled);
     ips_svc.reload_whitelist(ips_whitelist);
     ips_svc.reload_rules(ips_rules)?;
-    let ips_svc = Arc::new(RwLock::new(ips_svc));
+    let ips_svc = Arc::new(ArcSwap::from_pointee(ips_svc));
 
     // ── L7 ───────────────────────────────────────────────────────
     let l7_domain_rules = config.l7_rules()?;
@@ -151,7 +152,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     }
     let mut l7_svc = L7AppService::new(l7_engine, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     l7_svc.set_enabled(config.l7.enabled);
-    let l7_svc = Arc::new(RwLock::new(l7_svc));
+    let l7_svc = Arc::new(ArcSwap::from_pointee(l7_svc));
 
     // ── Rate Limit ───────────────────────────────────────────────
     let rl_policies = config.ratelimit_policies()?;
@@ -175,7 +176,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
     );
     ddos_svc.set_enabled(config.ddos.enabled);
-    let ddos_svc = Arc::new(RwLock::new(ddos_svc));
+    let ddos_svc = Arc::new(ArcSwap::from_pointee(ddos_svc));
 
     // ── Load Balancer ────────────────────────────────────────────
     let lb_services_cfg = config.lb_services()?;
@@ -206,7 +207,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     let mut dlp_svc = DlpAppService::new(dlp_engine, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     dlp_svc.set_mode(domain::common::entity::DomainMode::Alert)?;
     dlp_svc.set_enabled(config.dlp.enabled);
-    let dlp_svc = Arc::new(RwLock::new(dlp_svc));
+    let dlp_svc = Arc::new(ArcSwap::from_pointee(dlp_svc));
 
     // ── ConnTrack ────────────────────────────────────────────────
     let ct_settings = config.conntrack_settings();
@@ -335,7 +336,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     );
     ti_svc.set_mode(ti_mode);
     ti_svc.set_enabled(config.threatintel.enabled);
-    let ti_svc = Arc::new(RwLock::new(ti_svc));
+    let ti_svc = Arc::new(ArcSwap::from_pointee(ti_svc));
 
     // ── Audit ────────────────────────────────────────────────────
     let audit_sink: Arc<dyn ports::secondary::audit_sink::AuditSink> =
@@ -369,7 +370,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
             warn!(error = %e, "rule change store unavailable");
         }
     }
-    let audit_svc = Arc::new(RwLock::new(audit_svc));
+    let audit_svc = Arc::new(audit_svc);
 
     // ── DNS services (conditional) ───────────────────────────────
     let (dns_cache_svc, dns_blocklist_svc) = if config.dns.enabled {
@@ -598,11 +599,9 @@ pub async fn load_ebpf_programs(
                     async move { reader.run(event_tx_clone, CancellationToken::new()).await },
                 );
                 if let Some(ids_mgr) = ids_mgr_opt {
-                    services
-                        .ids_svc
-                        .write()
-                        .await
-                        .set_map_port(Box::new(ids_mgr));
+                    let mut svc = (**services.ids_svc.load()).clone();
+                    svc.set_map_port(Box::new(ids_mgr));
+                    services.ids_svc.store(Arc::new(svc));
                 }
                 if let Some(l7_mgr) = l7_mgr_opt {
                     ebpf_map_holder.l7_ports = Some(l7_mgr);
@@ -646,7 +645,9 @@ pub async fn load_ebpf_programs(
                     metrics_readers.push(rdr);
                 }
                 if let Some(ti_mgr) = ti_mgr_opt {
-                    services.ti_svc.write().await.set_map_port(Box::new(ti_mgr));
+                    let mut svc = (**services.ti_svc.load()).clone();
+                    svc.set_map_port(Box::new(ti_mgr));
+                    services.ti_svc.store(Arc::new(svc));
                 }
                 if let Some(cfg_mgr) = cfg_mgr_opt {
                     ebpf_map_holder.config_flags.push(cfg_mgr);

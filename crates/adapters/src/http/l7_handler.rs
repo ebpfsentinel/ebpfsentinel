@@ -274,7 +274,7 @@ impl From<&L7Rule> for L7RuleResponse {
     )
 )]
 pub async fn list_l7_rules(State(state): State<Arc<AppState>>) -> Json<Vec<L7RuleResponse>> {
-    let svc = state.l7_service.read().await;
+    let svc = state.l7_service.load();
     let rules: Vec<L7RuleResponse> = svc.rules().iter().map(L7RuleResponse::from).collect();
     Json(rules)
 }
@@ -308,9 +308,13 @@ pub async fn create_l7_rule(
     let response = L7RuleResponse::from(&rule);
     let rule_id = rule.id.0.clone();
     let after_json = serde_json::to_string(&rule).ok();
-    state.l7_service.write().await.add_rule(rule)?;
+    {
+        let mut svc = (**state.l7_service.load()).clone();
+        svc.add_rule(rule)?;
+        state.l7_service.store(Arc::new(svc));
+    }
 
-    state.audit_service.read().await.record_rule_change(
+    state.audit_service.record_rule_change(
         domain::audit::entity::AuditComponent::L7,
         domain::audit::entity::AuditAction::RuleAdded,
         domain::audit::rule_change::ChangeActor::Api,
@@ -348,20 +352,20 @@ pub async fn delete_l7_rule(
     }
     // Capture before snapshot for audit trail
     let before_json = {
-        let svc = state.l7_service.read().await;
+        let svc = state.l7_service.load();
         svc.rules()
             .iter()
             .find(|r| r.id.0 == id)
             .and_then(|r| serde_json::to_string(r).ok())
     };
 
-    state
-        .l7_service
-        .write()
-        .await
-        .remove_rule(&RuleId(id.clone()))?;
+    {
+        let mut svc = (**state.l7_service.load()).clone();
+        svc.remove_rule(&RuleId(id.clone()))?;
+        state.l7_service.store(Arc::new(svc));
+    }
 
-    state.audit_service.read().await.record_rule_change(
+    state.audit_service.record_rule_change(
         domain::audit::entity::AuditComponent::L7,
         domain::audit::entity::AuditAction::RuleRemoved,
         domain::audit::rule_change::ChangeActor::Api,

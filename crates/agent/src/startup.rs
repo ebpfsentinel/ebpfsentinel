@@ -43,6 +43,7 @@ use application::routing_service_impl::RoutingAppService;
 use application::schedule_service_impl::ScheduleService;
 use application::threatintel_service_impl::ThreatIntelAppService;
 use application::zone_service_impl::ZoneAppService;
+use arc_swap::ArcSwap;
 use domain::alert::circuit_breaker::CircuitBreaker;
 use domain::alert::engine::AlertRouter;
 use domain::alert::entity::Alert;
@@ -156,7 +157,7 @@ pub async fn run(
     );
     ids_svc.set_mode(ids_mode);
     ids_svc.set_enabled(config.ids.enabled);
-    let ids_svc = Arc::new(RwLock::new(ids_svc));
+    let ids_svc = Arc::new(ArcSwap::from_pointee(ids_svc));
 
     let ips_mode = config.ips_mode()?;
     let ips_policy = config.ips_policy();
@@ -170,7 +171,7 @@ pub async fn run(
     ips_svc.set_enabled(config.ips.enabled);
     ips_svc.reload_whitelist(ips_whitelist);
     ips_svc.reload_rules(ips_rules)?;
-    let ips_svc = Arc::new(RwLock::new(ips_svc));
+    let ips_svc = Arc::new(ArcSwap::from_pointee(ips_svc));
 
     // ── 5b. Build L7 service ────────────────────────────────────────
     let l7_domain_rules = config.l7_rules()?;
@@ -180,7 +181,7 @@ pub async fn run(
     }
     let mut l7_svc = L7AppService::new(l7_engine, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     l7_svc.set_enabled(config.l7.enabled);
-    let l7_svc = Arc::new(RwLock::new(l7_svc));
+    let l7_svc = Arc::new(ArcSwap::from_pointee(l7_svc));
     info!(
         rule_count = l7_domain_rules.len(),
         enabled = config.l7.enabled,
@@ -214,7 +215,7 @@ pub async fn run(
         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
     );
     ddos_svc.set_enabled(config.ddos.enabled);
-    let ddos_svc = Arc::new(RwLock::new(ddos_svc));
+    let ddos_svc = Arc::new(ArcSwap::from_pointee(ddos_svc));
     info!(
         policy_count = ddos_policies.len(),
         enabled = config.ddos.enabled,
@@ -260,7 +261,7 @@ pub async fn run(
     let mut dlp_svc = DlpAppService::new(dlp_engine, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     dlp_svc.set_mode(domain::common::entity::DomainMode::Alert)?;
     dlp_svc.set_enabled(config.dlp.enabled);
-    let dlp_svc = Arc::new(RwLock::new(dlp_svc));
+    let dlp_svc = Arc::new(ArcSwap::from_pointee(dlp_svc));
     info!(
         pattern_count = dlp_pattern_count,
         enabled = config.dlp.enabled,
@@ -440,7 +441,7 @@ pub async fn run(
     );
     ti_svc.set_mode(ti_mode);
     ti_svc.set_enabled(config.threatintel.enabled);
-    let ti_svc = Arc::new(RwLock::new(ti_svc));
+    let ti_svc = Arc::new(ArcSwap::from_pointee(ti_svc));
     info!(
         enabled = config.threatintel.enabled,
         mode = ti_mode.as_str(),
@@ -495,7 +496,7 @@ pub async fn run(
         }
     }
 
-    let audit_svc = Arc::new(RwLock::new(audit_svc));
+    let audit_svc = Arc::new(audit_svc);
     info!(enabled = config.audit.enabled, "audit service initialized");
 
     // Attach alert store (redb) — graceful degradation on failure
@@ -1051,18 +1052,17 @@ pub async fn run(
                     .write()
                     .await
                     .set_lpm_coordinator(Arc::clone(&coordinator));
-                ddos_svc
-                    .write()
-                    .await
-                    .set_lpm_coordinator(Arc::clone(&coordinator));
-                ddos_svc
-                    .write()
-                    .await
-                    .set_alias_resolution(Arc::clone(&alias_resolver));
-                ips_svc
-                    .write()
-                    .await
-                    .set_lpm_coordinator(Arc::clone(&coordinator));
+                {
+                    let mut svc = (**ddos_svc.load()).clone();
+                    svc.set_lpm_coordinator(Arc::clone(&coordinator));
+                    svc.set_alias_resolution(Arc::clone(&alias_resolver));
+                    ddos_svc.store(Arc::new(svc));
+                }
+                {
+                    let mut svc = (**ips_svc.load()).clone();
+                    svc.set_lpm_coordinator(Arc::clone(&coordinator));
+                    ips_svc.store(Arc::new(svc));
+                }
                 info!("LPM coordinator wired to alias, DDoS, IPS services");
             }
             Err(e) => {
@@ -1138,7 +1138,11 @@ pub async fn run(
                     async move { reader.run(event_tx_clone, CancellationToken::new()).await },
                 );
                 if let Some(ids_mgr) = ids_mgr_opt {
-                    ids_svc.write().await.set_map_port(Box::new(ids_mgr));
+                    {
+                        let mut svc = (**ids_svc.load()).clone();
+                        svc.set_map_port(Box::new(ids_mgr));
+                        ids_svc.store(Arc::new(svc));
+                    }
                 }
                 if let Some(l7_mgr) = l7_mgr_opt {
                     ebpf_map_holder.l7_ports = Some(l7_mgr);
@@ -1180,7 +1184,11 @@ pub async fn run(
                 if let Some(ti_mgr) = ti_mgr_opt {
                     // Extract shared map handles before moving manager to service
                     let (v4, v6, bv4, bv6) = ti_mgr.shared_handles();
-                    ti_svc.write().await.set_map_port(Box::new(ti_mgr));
+                    {
+                        let mut svc = (**ti_svc.load()).clone();
+                        svc.set_map_port(Box::new(ti_mgr));
+                        ti_svc.store(Arc::new(svc));
+                    }
 
                     // Wire EbpfMapWriteAdapter to DNS blocklist service
                     if let Some(ref blocklist) = dns_blocklist_ref {
@@ -1701,11 +1709,31 @@ pub async fn run(
 
     // Wire GeoIP to domain services
     if let Some(ref geoip) = geoip_port {
-        ddos_svc.write().await.set_geoip_port(Arc::clone(geoip));
-        ips_svc.write().await.set_geoip_port(Arc::clone(geoip));
-        ids_svc.write().await.set_geoip_port(Arc::clone(geoip));
-        l7_svc.write().await.set_geoip_port(Arc::clone(geoip));
-        ti_svc.write().await.set_geoip_port(Arc::clone(geoip));
+        {
+            let mut svc = (**ddos_svc.load()).clone();
+            svc.set_geoip_port(Arc::clone(geoip));
+            ddos_svc.store(Arc::new(svc));
+        }
+        {
+            let mut svc = (**ips_svc.load()).clone();
+            svc.set_geoip_port(Arc::clone(geoip));
+            ips_svc.store(Arc::new(svc));
+        }
+        {
+            let mut svc = (**ids_svc.load()).clone();
+            svc.set_geoip_port(Arc::clone(geoip));
+            ids_svc.store(Arc::new(svc));
+        }
+        {
+            let mut svc = (**l7_svc.load()).clone();
+            svc.set_geoip_port(Arc::clone(geoip));
+            l7_svc.store(Arc::new(svc));
+        }
+        {
+            let mut svc = (**ti_svc.load()).clone();
+            svc.set_geoip_port(Arc::clone(geoip));
+            ti_svc.store(Arc::new(svc));
+        }
         rl_svc.write().await.set_geoip_port(Arc::clone(geoip));
         routing_svc.write().await.set_geoip_port(Arc::clone(geoip));
         info!("GeoIP wired to DDoS, IPS, IDS, L7, ThreatIntel, RateLimit, Routing");
@@ -1713,11 +1741,9 @@ pub async fn run(
 
     // Wire ThreatIntel country confidence boost from config
     if let Some(ref boost) = config.threatintel.country_confidence_boost {
-        ti_svc
-            .write()
-            .await
-            .engine_mut()
-            .set_country_confidence_boost(boost.clone());
+        let mut svc = (**ti_svc.load()).clone();
+        svc.engine_mut().set_country_confidence_boost(boost.clone());
+        ti_svc.store(Arc::new(svc));
     }
 
     // Wire DNS blocklist GeoIP reputation
@@ -1849,14 +1875,17 @@ pub async fn run(
         Some(tokio::spawn(async move {
             // Initial fetch at startup
             {
-                let feeds = feed_ti_svc.read().await.list_feeds().to_vec();
+                let feeds = feed_ti_svc.load().list_feeds().to_vec();
                 let result =
                     application::feed_update::fetch_all_feeds_v2(&feeds, &fetcher, &feed_metrics)
                         .await;
-                if !result.iocs.is_empty()
-                    && let Err(e) = feed_ti_svc.write().await.reload_iocs(result.iocs)
-                {
-                    warn!("initial feed IOC reload failed: {e}");
+                if !result.iocs.is_empty() {
+                    let mut svc = (**feed_ti_svc.load()).clone();
+                    if let Err(e) = svc.reload_iocs(result.iocs) {
+                        warn!("initial feed IOC reload failed: {e}");
+                    } else {
+                        feed_ti_svc.store(Arc::new(svc));
+                    }
                 }
                 // Distribute STIX domains to DNS blocklist
                 if let Some(ref bl_svc) = feed_dns_blocklist {
@@ -1876,14 +1905,17 @@ pub async fn run(
                     () = feed_cancel.cancelled() => break,
                     _ = interval.tick() => {}
                 }
-                let feeds = feed_ti_svc.read().await.list_feeds().to_vec();
+                let feeds = feed_ti_svc.load().list_feeds().to_vec();
                 let result =
                     application::feed_update::fetch_all_feeds_v2(&feeds, &fetcher, &feed_metrics)
                         .await;
-                if !result.iocs.is_empty()
-                    && let Err(e) = feed_ti_svc.write().await.reload_iocs(result.iocs)
-                {
-                    warn!("periodic feed IOC reload failed: {e}");
+                if !result.iocs.is_empty() {
+                    let mut svc = (**feed_ti_svc.load()).clone();
+                    if let Err(e) = svc.reload_iocs(result.iocs) {
+                        warn!("periodic feed IOC reload failed: {e}");
+                    } else {
+                        feed_ti_svc.store(Arc::new(svc));
+                    }
                 }
                 if let Some(ref bl_svc) = feed_dns_blocklist {
                     for domain in &result.domains {
@@ -1966,7 +1998,7 @@ pub async fn run(
                     _ = interval.tick() => {}
                 }
                 // IPS: remove expired blacklist entries
-                let actions = cleanup_ips.write().await.cleanup_expired();
+                let actions = cleanup_ips.load().cleanup_expired();
                 if !actions.is_empty() {
                     tracing::info!(
                         expired_count = actions.len(),
@@ -1974,7 +2006,7 @@ pub async fn run(
                     );
                 }
                 // IDS: remove expired threshold tracking entries
-                cleanup_ids.write().await.cleanup_expired_thresholds();
+                cleanup_ids.load().cleanup_expired_thresholds();
             }
         });
     }

@@ -339,8 +339,7 @@ pub async fn mark_false_positive(
             .record_false_positive(&alert.component, &alert.rule_id.0);
 
         // Record audit entry for the FP marking.
-        let audit_svc = state.audit_service.read().await;
-        audit_svc.record_security_decision(
+        state.audit_service.record_security_decision(
             AuditComponent::parse_name(&alert.component),
             AuditAction::FalsePositive,
             alert.timestamp_ns,

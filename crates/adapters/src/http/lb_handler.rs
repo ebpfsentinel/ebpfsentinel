@@ -288,7 +288,7 @@ pub async fn create_lb_service(
 
     tracing::info!(rule_id = %rule_id, "LB service created via API");
 
-    state.audit_service.read().await.record_rule_change(
+    state.audit_service.record_rule_change(
         domain::audit::entity::AuditComponent::Loadbalancer,
         domain::audit::entity::AuditAction::RuleAdded,
         domain::audit::rule_change::ChangeActor::Api,
@@ -350,7 +350,7 @@ pub async fn delete_lb_service(
 
     tracing::info!(rule_id = %id, "LB service deleted via API");
 
-    state.audit_service.read().await.record_rule_change(
+    state.audit_service.record_rule_change(
         domain::audit::entity::AuditComponent::Loadbalancer,
         domain::audit::entity::AuditAction::RuleRemoved,
         domain::audit::rule_change::ChangeActor::Api,

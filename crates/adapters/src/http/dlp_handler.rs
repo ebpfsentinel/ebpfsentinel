@@ -49,7 +49,7 @@ pub async fn dlp_status(
         code: "SERVICE_NOT_AVAILABLE",
         message: "DLP not enabled".to_string(),
     })?;
-    let svc = dlp.read().await;
+    let svc = dlp.load();
     Ok(Json(DlpStatusResponse {
         enabled: svc.enabled(),
         mode: svc.mode().as_str().to_string(),
@@ -77,7 +77,7 @@ pub async fn list_dlp_patterns(
         code: "SERVICE_NOT_AVAILABLE",
         message: "DLP not enabled".to_string(),
     })?;
-    let svc = dlp.read().await;
+    let svc = dlp.load();
     let patterns: Vec<DlpPatternResponse> = svc
         .list_patterns()
         .iter()

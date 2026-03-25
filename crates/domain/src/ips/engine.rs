@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::ids::entity::SamplingMode;
@@ -23,38 +24,42 @@ fn mask_v6_to_48(ip: std::net::Ipv6Addr) -> std::net::Ipv6Addr {
 /// threshold-based auto-blacklisting, and TTL-based expiration.
 ///
 /// The blacklist is ephemeral (lost on restart) by design.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IpsEngine {
-    blacklist: HashMap<IpAddr, BlacklistEntry>,
-    detection_counts: HashMap<IpAddr, (u32, Instant)>,
+    blacklist: Arc<Mutex<HashMap<IpAddr, BlacklistEntry>>>,
+    detection_counts: Arc<Mutex<HashMap<IpAddr, (u32, Instant)>>>,
     whitelist: Vec<WhitelistEntry>,
     policy: IpsPolicy,
     sampling: SamplingMode,
     /// Active /24 (v4) or /48 (v6) subnet blocks with expiry tracking.
-    subnet_blocks: HashMap<(IpAddr, u8), Instant>,
+    subnet_blocks: Arc<Mutex<HashMap<(IpAddr, u8), Instant>>>,
 }
 
 impl IpsEngine {
     pub fn new(policy: IpsPolicy) -> Self {
         Self {
-            blacklist: HashMap::new(),
-            detection_counts: HashMap::new(),
+            blacklist: Arc::new(Mutex::new(HashMap::new())),
+            detection_counts: Arc::new(Mutex::new(HashMap::new())),
             whitelist: Vec::new(),
             policy,
             sampling: SamplingMode::default(),
-            subnet_blocks: HashMap::new(),
+            subnet_blocks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Check if an IP is currently blacklisted. Whitelisted IPs always
     /// return `false`. Expired entries are auto-removed and return `false`.
-    pub fn is_blacklisted(&mut self, ip: IpAddr) -> bool {
+    pub fn is_blacklisted(&self, ip: IpAddr) -> bool {
         if self.is_whitelisted(ip) {
             return false;
         }
-        if let Some(entry) = self.blacklist.get(&ip) {
+        let mut blacklist = self
+            .blacklist
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(entry) = blacklist.get(&ip) {
             if entry.is_expired() {
-                self.blacklist.remove(&ip);
+                blacklist.remove(&ip);
                 return false;
             }
             return true;
@@ -65,7 +70,7 @@ impl IpsEngine {
     /// Record a detection event for the given IP.
     ///
     /// Delegates to [`record_detection_with_country`] with `None`.
-    pub fn record_detection(&mut self, ip: IpAddr) -> Vec<EnforcementAction> {
+    pub fn record_detection(&self, ip: IpAddr) -> Vec<EnforcementAction> {
         self.record_detection_with_country(ip, None)
     }
 
@@ -81,7 +86,7 @@ impl IpsEngine {
     /// Detection counts reset if the time since the first detection in
     /// the current window exceeds `max_blacklist_duration`.
     pub fn record_detection_with_country(
-        &mut self,
+        &self,
         ip: IpAddr,
         src_country: Option<&str>,
     ) -> Vec<EnforcementAction> {
@@ -89,7 +94,13 @@ impl IpsEngine {
             return Vec::new();
         }
         let now = Instant::now();
-        let (count, first_seen) = self.detection_counts.entry(ip).or_insert((0, now));
+
+        let mut detection_counts = self
+            .detection_counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        let (count, first_seen) = detection_counts.entry(ip).or_insert((0, now));
 
         // Reset window if expired
         if now.duration_since(*first_seen) >= self.policy.max_blacklist_duration {
@@ -110,7 +121,9 @@ impl IpsEngine {
 
         if *count >= threshold {
             // Remove from detection counts since we're blacklisting
-            self.detection_counts.remove(&ip);
+            detection_counts.remove(&ip);
+            // Drop the detection_counts lock before calling add_to_blacklist
+            drop(detection_counts);
 
             // Auto-blacklist (ignore error if already blacklisted or full)
             let _ = self.add_to_blacklist(
@@ -136,8 +149,11 @@ impl IpsEngine {
                     IpAddr::V6(v6) => (IpAddr::V6(mask_v6_to_48(v6)), 48),
                 };
                 let key = (subnet_addr, prefix_len);
-                if let std::collections::hash_map::Entry::Vacant(e) = self.subnet_blocks.entry(key)
-                {
+                let mut subnet_blocks = self
+                    .subnet_blocks
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if let std::collections::hash_map::Entry::Vacant(e) = subnet_blocks.entry(key) {
                     e.insert(now);
                     actions.push(EnforcementAction::BlockSubnet {
                         addr: subnet_addr,
@@ -157,7 +173,7 @@ impl IpsEngine {
     /// Returns an error if the IP is whitelisted, already blacklisted, or
     /// the blacklist is full.
     pub fn add_to_blacklist(
-        &mut self,
+        &self,
         ip: IpAddr,
         reason: String,
         auto_generated: bool,
@@ -166,15 +182,19 @@ impl IpsEngine {
         if self.is_whitelisted(ip) {
             return Err(IpsError::Whitelisted { ip: ip.to_string() });
         }
-        if self.blacklist.contains_key(&ip) {
+        let mut blacklist = self
+            .blacklist
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if blacklist.contains_key(&ip) {
             return Err(IpsError::AlreadyBlacklisted { ip: ip.to_string() });
         }
-        if self.blacklist.len() >= self.policy.max_blacklist_size {
+        if blacklist.len() >= self.policy.max_blacklist_size {
             return Err(IpsError::BlacklistFull);
         }
 
         let now = Instant::now();
-        self.blacklist.insert(
+        blacklist.insert(
             ip,
             BlacklistEntry {
                 ip,
@@ -190,34 +210,53 @@ impl IpsEngine {
     }
 
     /// Remove an IP from the blacklist.
-    pub fn remove_from_blacklist(&mut self, ip: &IpAddr) -> Result<(), IpsError> {
-        if self.blacklist.remove(ip).is_none() {
+    pub fn remove_from_blacklist(&self, ip: &IpAddr) -> Result<(), IpsError> {
+        let mut blacklist = self
+            .blacklist
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if blacklist.remove(ip).is_none() {
             return Err(IpsError::NotBlacklisted { ip: ip.to_string() });
         }
         Ok(())
     }
 
-    /// Read-only access to the blacklist entries.
-    pub fn blacklist_entries(&self) -> &HashMap<IpAddr, BlacklistEntry> {
-        &self.blacklist
+    /// Read-only snapshot of the blacklist entries.
+    pub fn blacklist_entries(&self) -> HashMap<IpAddr, BlacklistEntry> {
+        self.blacklist
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Current number of blacklisted IPs.
     pub fn blacklist_size(&self) -> usize {
-        self.blacklist.len()
+        self.blacklist
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     /// Remove all blacklist entries.
-    pub fn clear_blacklist(&mut self) {
-        self.blacklist.clear();
-        self.detection_counts.clear();
+    pub fn clear_blacklist(&self) {
+        self.blacklist
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.detection_counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
     }
 
     /// Scan for and remove expired entries. Returns `UnblacklistIp` and
     /// `UnblockSubnet` actions for each removed entry.
-    pub fn cleanup_expired(&mut self) -> Vec<EnforcementAction> {
-        let expired_ips: Vec<IpAddr> = self
+    pub fn cleanup_expired(&self) -> Vec<EnforcementAction> {
+        let mut blacklist = self
             .blacklist
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let expired_ips: Vec<IpAddr> = blacklist
             .iter()
             .filter(|(_, entry)| entry.is_expired())
             .map(|(ip, _)| *ip)
@@ -225,20 +264,24 @@ impl IpsEngine {
 
         let mut actions = Vec::with_capacity(expired_ips.len());
         for ip in expired_ips {
-            self.blacklist.remove(&ip);
+            blacklist.remove(&ip);
             actions.push(EnforcementAction::UnblacklistIp { ip });
         }
+        drop(blacklist);
 
         // Expire subnet blocks (same TTL as max_blacklist_duration)
-        let expired_subnets: Vec<(IpAddr, u8)> = self
+        let mut subnet_blocks = self
             .subnet_blocks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let expired_subnets: Vec<(IpAddr, u8)> = subnet_blocks
             .iter()
             .filter(|(_, added_at)| added_at.elapsed() >= self.policy.max_blacklist_duration)
             .map(|(&(addr, prefix), _)| (addr, prefix))
             .collect();
 
         for (addr, prefix_len) in expired_subnets {
-            self.subnet_blocks.remove(&(addr, prefix_len));
+            subnet_blocks.remove(&(addr, prefix_len));
             actions.push(EnforcementAction::UnblockSubnet { addr, prefix_len });
         }
 

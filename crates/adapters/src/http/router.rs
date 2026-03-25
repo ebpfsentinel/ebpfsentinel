@@ -279,11 +279,11 @@ mod tests {
             Arc::new(AgentMetrics::new()),
             Arc::new(AtomicBool::new(false)),
             Arc::new(tokio::sync::RwLock::new(fw_svc)),
-            Arc::new(tokio::sync::RwLock::new(ips_svc)),
-            Arc::new(tokio::sync::RwLock::new(l7_svc)),
+            Arc::new(arc_swap::ArcSwap::from_pointee(ips_svc)),
+            Arc::new(arc_swap::ArcSwap::from_pointee(l7_svc)),
             Arc::new(tokio::sync::RwLock::new(rl_svc)),
-            Arc::new(tokio::sync::RwLock::new(ti_svc)),
-            Arc::new(tokio::sync::RwLock::new(audit_svc)),
+            Arc::new(arc_swap::ArcSwap::from_pointee(ti_svc)),
+            Arc::new(audit_svc),
             Arc::new(tokio::sync::RwLock::new(
                 infrastructure::config::AgentConfig::from_yaml("agent:\n  interfaces: [eth0]")
                     .unwrap(),

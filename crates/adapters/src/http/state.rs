@@ -22,6 +22,7 @@ use application::ratelimit_service_impl::RateLimitAppService;
 use application::routing_service_impl::RoutingAppService;
 use application::threatintel_service_impl::ThreatIntelAppService;
 use application::zone_service_impl::ZoneAppService;
+use arc_swap::ArcSwap;
 use infrastructure::config::AgentConfig;
 use infrastructure::metrics::AgentMetrics;
 use ports::secondary::alert_store::AlertStore;
@@ -37,15 +38,15 @@ pub struct AppState {
     pub start_time: Instant,
     pub version: &'static str,
     pub firewall_service: Arc<RwLock<FirewallAppService>>,
-    pub ips_service: Arc<RwLock<IpsAppService>>,
-    pub l7_service: Arc<RwLock<L7AppService>>,
+    pub ips_service: Arc<ArcSwap<IpsAppService>>,
+    pub l7_service: Arc<ArcSwap<L7AppService>>,
     pub ratelimit_service: Arc<RwLock<RateLimitAppService>>,
-    pub threatintel_service: Arc<RwLock<ThreatIntelAppService>>,
-    pub audit_service: Arc<RwLock<AuditAppService>>,
-    pub ids_service: Option<Arc<RwLock<IdsAppService>>>,
+    pub threatintel_service: Arc<ArcSwap<ThreatIntelAppService>>,
+    pub audit_service: Arc<AuditAppService>,
+    pub ids_service: Option<Arc<ArcSwap<IdsAppService>>>,
     pub conntrack_service: Option<Arc<RwLock<ConnTrackAppService>>>,
-    pub ddos_service: Option<Arc<RwLock<DdosAppService>>>,
-    pub dlp_service: Option<Arc<RwLock<DlpAppService>>>,
+    pub ddos_service: Option<Arc<ArcSwap<DdosAppService>>>,
+    pub dlp_service: Option<Arc<ArcSwap<DlpAppService>>>,
     pub nat_service: Option<Arc<RwLock<NatAppService>>>,
     pub alias_service: Option<Arc<RwLock<AliasAppService>>>,
     pub routing_service: Option<Arc<RwLock<RoutingAppService>>>,
@@ -61,7 +62,7 @@ pub struct AppState {
     pub config: Arc<RwLock<AgentConfig>>,
     pub reload_trigger: mpsc::Sender<()>,
     pub ebpf_program_status: Arc<RwLock<HashMap<String, bool>>>,
-    pub fingerprint_cache: Option<Arc<std::sync::RwLock<domain::l7::ja4::FingerprintCache>>>,
+    pub fingerprint_cache: Option<Arc<domain::l7::ja4::FingerprintCache>>,
     pub response_engine: Option<Arc<RwLock<domain::response::engine::ResponseEngine>>>,
     pub capture_engine: Option<Arc<RwLock<domain::capture::engine::CaptureEngine>>>,
 }
@@ -72,11 +73,11 @@ impl AppState {
         metrics: Arc<AgentMetrics>,
         ebpf_loaded: Arc<AtomicBool>,
         firewall_service: Arc<RwLock<FirewallAppService>>,
-        ips_service: Arc<RwLock<IpsAppService>>,
-        l7_service: Arc<RwLock<L7AppService>>,
+        ips_service: Arc<ArcSwap<IpsAppService>>,
+        l7_service: Arc<ArcSwap<L7AppService>>,
         ratelimit_service: Arc<RwLock<RateLimitAppService>>,
-        threatintel_service: Arc<RwLock<ThreatIntelAppService>>,
-        audit_service: Arc<RwLock<AuditAppService>>,
+        threatintel_service: Arc<ArcSwap<ThreatIntelAppService>>,
+        audit_service: Arc<AuditAppService>,
         config: Arc<RwLock<AgentConfig>>,
         reload_trigger: mpsc::Sender<()>,
         ebpf_program_status: Arc<RwLock<HashMap<String, bool>>>,
@@ -139,17 +140,14 @@ impl AppState {
 
     /// Attach a JA4 fingerprint cache.
     #[must_use]
-    pub fn with_fingerprint_cache(
-        mut self,
-        cache: Arc<std::sync::RwLock<domain::l7::ja4::FingerprintCache>>,
-    ) -> Self {
+    pub fn with_fingerprint_cache(mut self, cache: Arc<domain::l7::ja4::FingerprintCache>) -> Self {
         self.fingerprint_cache = Some(cache);
         self
     }
 
     /// Attach an IDS service.
     #[must_use]
-    pub fn with_ids_service(mut self, svc: Arc<RwLock<IdsAppService>>) -> Self {
+    pub fn with_ids_service(mut self, svc: Arc<ArcSwap<IdsAppService>>) -> Self {
         self.ids_service = Some(svc);
         self
     }
@@ -163,14 +161,14 @@ impl AppState {
 
     /// Attach a `DDoS` protection service.
     #[must_use]
-    pub fn with_ddos_service(mut self, svc: Arc<RwLock<DdosAppService>>) -> Self {
+    pub fn with_ddos_service(mut self, svc: Arc<ArcSwap<DdosAppService>>) -> Self {
         self.ddos_service = Some(svc);
         self
     }
 
     /// Attach a DLP service.
     #[must_use]
-    pub fn with_dlp_service(mut self, svc: Arc<RwLock<DlpAppService>>) -> Self {
+    pub fn with_dlp_service(mut self, svc: Arc<ArcSwap<DlpAppService>>) -> Self {
         self.dlp_service = Some(svc);
         self
     }
@@ -309,11 +307,11 @@ mod tests {
             metrics,
             ebpf,
             Arc::new(RwLock::new(fw_svc)),
-            Arc::new(RwLock::new(ips_svc)),
-            Arc::new(RwLock::new(l7_svc)),
+            Arc::new(ArcSwap::from_pointee(ips_svc)),
+            Arc::new(ArcSwap::from_pointee(l7_svc)),
             Arc::new(RwLock::new(rl_svc)),
-            Arc::new(RwLock::new(ti_svc)),
-            Arc::new(RwLock::new(audit_svc)),
+            Arc::new(ArcSwap::from_pointee(ti_svc)),
+            Arc::new(audit_svc),
             Arc::new(RwLock::new(
                 AgentConfig::from_yaml("agent:\n  interfaces: [eth0]").unwrap(),
             )),

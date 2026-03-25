@@ -174,10 +174,14 @@ impl EbpfProgramManager {
         // Clear map ports from services
         match name {
             "tc_ids" => {
-                self.services.ids_svc.write().await.clear_map_port();
+                let mut svc = (**self.services.ids_svc.load()).clone();
+                svc.clear_map_port();
+                self.services.ids_svc.store(Arc::new(svc));
             }
             "tc_threatintel" => {
-                self.services.ti_svc.write().await.clear_map_port();
+                let mut svc = (**self.services.ti_svc.load()).clone();
+                svc.clear_map_port();
+                self.services.ti_svc.store(Arc::new(svc));
             }
             "tc_conntrack" => {
                 self.services.conntrack_svc.write().await.clear_map_port();
@@ -238,11 +242,11 @@ impl EbpfProgramManager {
         let jh = tokio::spawn(async move { reader.run(tx, c).await });
 
         if let Some(ids_mgr) = ids_mgr_opt {
-            self.services
-                .ids_svc
-                .write()
-                .await
-                .set_map_port(Box::new(ids_mgr));
+            {
+                let mut svc = (**self.services.ids_svc.load()).clone();
+                svc.set_map_port(Box::new(ids_mgr));
+                self.services.ids_svc.store(Arc::new(svc));
+            }
         }
         if let Some(l7_mgr) = l7_mgr_opt {
             self.l7_ports = Some(l7_mgr);
@@ -287,11 +291,9 @@ impl EbpfProgramManager {
         let jh = tokio::spawn(async move { reader.run(tx, c).await });
 
         if let Some(ti_mgr) = ti_mgr_opt {
-            self.services
-                .ti_svc
-                .write()
-                .await
-                .set_map_port(Box::new(ti_mgr));
+            let mut svc = (**self.services.ti_svc.load()).clone();
+            svc.set_map_port(Box::new(ti_mgr));
+            self.services.ti_svc.store(Arc::new(svc));
         }
         if let Some(cfg_mgr) = cfg_mgr_opt {
             self.config_flags.push(cfg_mgr);

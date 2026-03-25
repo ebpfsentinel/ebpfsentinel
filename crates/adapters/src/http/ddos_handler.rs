@@ -119,7 +119,7 @@ pub async fn ddos_status(
         code: "SERVICE_NOT_AVAILABLE",
         message: "DDoS protection not enabled".to_string(),
     })?;
-    let svc = ddos.read().await;
+    let svc = ddos.load();
     Ok(Json(DdosStatusResponse {
         enabled: svc.enabled(),
         active_attacks: svc.active_attack_count(),
@@ -148,7 +148,7 @@ pub async fn ddos_attacks(
         code: "SERVICE_NOT_AVAILABLE",
         message: "DDoS protection not enabled".to_string(),
     })?;
-    let svc = ddos.read().await;
+    let svc = ddos.load();
     let attacks: Vec<DdosAttackResponse> = svc
         .active_attacks()
         .iter()
@@ -187,7 +187,7 @@ pub async fn ddos_history(
         code: "SERVICE_NOT_AVAILABLE",
         message: "DDoS protection not enabled".to_string(),
     })?;
-    let svc = ddos.read().await;
+    let svc = ddos.load();
     let attacks: Vec<DdosAttackResponse> = svc
         .attack_history(query.limit)
         .iter()
@@ -225,7 +225,7 @@ pub async fn list_ddos_policies(
         code: "SERVICE_NOT_AVAILABLE",
         message: "DDoS protection not enabled".to_string(),
     })?;
-    let svc = ddos.read().await;
+    let svc = ddos.load();
     let policies: Vec<DdosPolicyResponse> = svc
         .policies()
         .iter()
@@ -267,13 +267,13 @@ pub async fn create_ddos_policy(
         code: "SERVICE_NOT_AVAILABLE",
         message: "DDoS protection not enabled".to_string(),
     })?;
-    let mut svc = ddos.write().await;
+    let mut svc = (**ddos.load()).clone();
     svc.add_policy(policy.clone())?;
-    drop(svc);
+    ddos.store(Arc::new(svc));
 
     tracing::info!(rule_id = %rule_id, "DDoS policy created via API");
 
-    state.audit_service.read().await.record_rule_change(
+    state.audit_service.record_rule_change(
         domain::audit::entity::AuditComponent::Ddos,
         domain::audit::entity::AuditAction::RuleAdded,
         domain::audit::rule_change::ChangeActor::Api,
@@ -319,20 +319,20 @@ pub async fn delete_ddos_policy(
     })?;
 
     let before_json = {
-        let svc = ddos.read().await;
+        let svc = ddos.load();
         svc.policies()
             .iter()
             .find(|p| p.id.0 == id)
             .and_then(|p| serde_json::to_string(p).ok())
     };
 
-    let mut svc = ddos.write().await;
+    let mut svc = (**ddos.load()).clone();
     svc.remove_policy(&RuleId(id.clone()))?;
-    drop(svc);
+    ddos.store(Arc::new(svc));
 
     tracing::info!(rule_id = %id, "DDoS policy deleted via API");
 
-    state.audit_service.read().await.record_rule_change(
+    state.audit_service.record_rule_change(
         domain::audit::entity::AuditComponent::Ddos,
         domain::audit::entity::AuditAction::RuleRemoved,
         domain::audit::rule_change::ChangeActor::Api,

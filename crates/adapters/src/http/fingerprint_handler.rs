@@ -36,11 +36,7 @@ pub struct FingerprintSummaryResponse {
 pub async fn fingerprint_summary(
     State(state): State<Arc<AppState>>,
 ) -> Json<FingerprintSummaryResponse> {
-    let cached_count = state
-        .fingerprint_cache
-        .as_ref()
-        .and_then(|c| c.read().ok())
-        .map_or(0, |c| c.len());
+    let cached_count = state.fingerprint_cache.as_ref().map_or(0, |c| c.len());
 
     Json(FingerprintSummaryResponse {
         cached_count,

@@ -13,6 +13,7 @@ infrastructure = { workspace = true }
 ebpf-common = { workspace = true, features = ["userspace"] }
 
 anyhow = { workspace = true }
+arc-swap = { workspace = true }
 jsonwebtoken = { workspace = true }
 aya = { workspace = true }
 aya-log = { workspace = true }

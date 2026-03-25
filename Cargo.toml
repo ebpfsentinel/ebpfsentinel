@@ -118,6 +118,7 @@ regex = "1"
 
 # Async utilities
 futures-util = "0.3"
+arc-swap = "1"
 
 # Error handling
 thiserror = "2"

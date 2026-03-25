@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::common::entity::RuleId;
 use crate::common::error::DomainError;
@@ -22,40 +24,51 @@ const MAX_HISTORY: usize = 100;
 ///
 /// Processes events from the eBPF pipeline, classifies attacks, tracks their
 /// lifecycle, and manages mitigation policies.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone)]
 pub struct DdosEngine {
     policies: Vec<DdosPolicy>,
-    active_attacks: Vec<DdosAttack>,
-    history: Vec<DdosAttack>,
-    total_mitigated: u64,
-    next_attack_id: u64,
+    active_attacks: Arc<Mutex<Vec<DdosAttack>>>,
+    history: Arc<Mutex<Vec<DdosAttack>>>,
+    total_mitigated: Arc<AtomicU64>,
+    next_attack_id: Arc<AtomicU64>,
     /// Countries currently blocked via LPM enforcement.
-    blocked_countries: HashSet<String>,
+    blocked_countries: Arc<Mutex<HashSet<String>>>,
     /// Queue of enforcement actions to be drained by the application layer.
-    pending_enforcements: Vec<DdosEnforcementAction>,
+    pending_enforcements: Arc<Mutex<Vec<DdosEnforcementAction>>>,
+}
+
+impl Default for DdosEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DdosEngine {
     pub fn new() -> Self {
         Self {
             policies: Vec::new(),
-            active_attacks: Vec::new(),
-            history: Vec::new(),
-            total_mitigated: 0,
-            next_attack_id: 1,
-            blocked_countries: HashSet::new(),
-            pending_enforcements: Vec::new(),
+            active_attacks: Arc::new(Mutex::new(Vec::new())),
+            history: Arc::new(Mutex::new(Vec::new())),
+            total_mitigated: Arc::new(AtomicU64::new(0)),
+            next_attack_id: Arc::new(AtomicU64::new(1)),
+            blocked_countries: Arc::new(Mutex::new(HashSet::new())),
+            pending_enforcements: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// Drain all pending enforcement actions.
-    pub fn take_pending_enforcements(&mut self) -> Vec<DdosEnforcementAction> {
-        std::mem::take(&mut self.pending_enforcements)
+    pub fn take_pending_enforcements(&self) -> Vec<DdosEnforcementAction> {
+        std::mem::take(
+            &mut *self
+                .pending_enforcements
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
     }
 
     /// Process a `DDoS` event from the eBPF pipeline.
     /// Returns `true` if an attack state changed (for alerting).
-    pub fn process_event(&mut self, event: &DdosEvent) -> bool {
+    pub fn process_event(&self, event: &DdosEvent) -> bool {
         self.process_event_with_country(event, None)
     }
 
@@ -63,11 +76,7 @@ impl DdosEngine {
     ///
     /// When `src_country` matches a key in the policy's `country_thresholds`,
     /// that per-country value is used instead of `detection_threshold_pps`.
-    pub fn process_event_with_country(
-        &mut self,
-        event: &DdosEvent,
-        src_country: Option<&str>,
-    ) -> bool {
+    pub fn process_event_with_country(&self, event: &DdosEvent, src_country: Option<&str>) -> bool {
         // Find matching policy for this attack type
         let policy_idx = self
             .policies
@@ -87,41 +96,48 @@ impl DdosEngine {
             })
             .unwrap_or(self.policies[policy_idx].detection_threshold_pps);
 
-        // Find or create attack tracker for this type
-        let attack_idx = self
+        let mut active_attacks = self
             .active_attacks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        // Find or create attack tracker for this type
+        let attack_idx = active_attacks
             .iter()
             .position(|a| a.attack_type == event.attack_type && !a.is_expired());
 
         if let Some(idx) = attack_idx {
-            self.active_attacks[idx].record_event(event.timestamp_ns);
+            active_attacks[idx].record_event(event.timestamp_ns);
 
             // Check for state transition
-            let old_status = self.active_attacks[idx].mitigation_status;
-            self.active_attacks[idx].update_status(threshold);
-            let new_status = self.active_attacks[idx].mitigation_status;
+            let old_status = active_attacks[idx].mitigation_status;
+            active_attacks[idx].update_status(threshold);
+            let new_status = active_attacks[idx].mitigation_status;
 
             // Emit BlockCountry on transition to Active with Block policy
             if old_status != DdosMitigationStatus::Active
                 && new_status == DdosMitigationStatus::Active
             {
-                self.maybe_emit_block_country(idx);
+                self.maybe_emit_block_country_locked(&active_attacks, idx);
             }
 
             if new_status == DdosMitigationStatus::Expired {
-                let expired = self.active_attacks.remove(idx);
-                self.total_mitigated += 1;
+                let expired = active_attacks.remove(idx);
+                self.total_mitigated.fetch_add(1, Ordering::Relaxed);
+                drop(active_attacks);
                 self.push_history(expired);
                 return true;
             }
 
             old_status != new_status
-        } else if self.active_attacks.len() < MAX_ACTIVE_ATTACKS {
-            let id = format!("ddos-{}", self.next_attack_id);
-            self.next_attack_id += 1;
+        } else if active_attacks.len() < MAX_ACTIVE_ATTACKS {
+            let id = format!(
+                "ddos-{}",
+                self.next_attack_id.fetch_add(1, Ordering::Relaxed)
+            );
             let mut attack = DdosAttack::new(id, event.attack_type, event.timestamp_ns);
             attack.src_country = src_country.map(String::from);
-            self.active_attacks.push(attack);
+            active_attacks.push(attack);
             true
         } else {
             false // At capacity
@@ -129,9 +145,14 @@ impl DdosEngine {
     }
 
     /// Periodic tick — call once per second to update attack statuses.
-    pub fn tick(&mut self) {
+    pub fn tick(&self) {
+        let mut active_attacks = self
+            .active_attacks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
         let mut expired_indices = Vec::new();
-        for (idx, attack) in self.active_attacks.iter_mut().enumerate() {
+        for (idx, attack) in active_attacks.iter_mut().enumerate() {
             let threshold = self
                 .policies
                 .iter()
@@ -155,48 +176,70 @@ impl DdosEngine {
             }
         }
 
+        let mut blocked_countries = self
+            .blocked_countries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut pending_enforcements = self
+            .pending_enforcements
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
         // Remove expired attacks (reverse order to preserve indices)
+        let mut expired_attacks = Vec::new();
         for idx in expired_indices.into_iter().rev() {
-            let expired = self.active_attacks.remove(idx);
-            self.total_mitigated += 1;
+            let expired = active_attacks.remove(idx);
+            self.total_mitigated.fetch_add(1, Ordering::Relaxed);
 
             // Emit UnblockCountry if this was the last active attack for that country
             if let Some(ref cc) = expired.src_country {
-                let still_active = self
-                    .active_attacks
+                let still_active = active_attacks
                     .iter()
                     .any(|a| a.src_country.as_deref() == Some(cc) && a.is_active());
-                if !still_active && self.blocked_countries.remove(cc) {
-                    self.pending_enforcements
-                        .push(DdosEnforcementAction::UnblockCountry {
-                            country_code: cc.clone(),
-                        });
+                if !still_active && blocked_countries.remove(cc) {
+                    pending_enforcements.push(DdosEnforcementAction::UnblockCountry {
+                        country_code: cc.clone(),
+                    });
                 }
             }
 
+            expired_attacks.push(expired);
+        }
+        drop(active_attacks);
+        drop(blocked_countries);
+        drop(pending_enforcements);
+
+        for expired in expired_attacks {
             self.push_history(expired);
         }
     }
 
-    /// Return all active (non-expired) attacks.
-    pub fn active_attacks(&self) -> &[DdosAttack] {
-        &self.active_attacks
+    /// Return a snapshot of all active (non-expired) attacks.
+    pub fn active_attacks(&self) -> Vec<DdosAttack> {
+        self.active_attacks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Return the number of active attacks.
     pub fn active_attack_count(&self) -> usize {
-        self.active_attacks.len()
+        self.active_attacks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     /// Return total number of attacks that reached Mitigated or Expired.
     pub fn total_mitigated(&self) -> u64 {
-        self.total_mitigated
+        self.total_mitigated.load(Ordering::Relaxed)
     }
 
     /// Return recent attack history (most recent first).
-    pub fn attack_history(&self, limit: usize) -> &[DdosAttack] {
-        let start = self.history.len().saturating_sub(limit);
-        &self.history[start..]
+    pub fn attack_history(&self, limit: usize) -> Vec<DdosAttack> {
+        let history = self.history.lock().unwrap_or_else(PoisonError::into_inner);
+        let start = history.len().saturating_sub(limit);
+        history[start..].to_vec()
     }
 
     // ── Policy Management ─────────────────────────────────────────
@@ -262,12 +305,13 @@ impl DdosEngine {
     // ── Private ───────────────────────────────────────────────────
 
     /// Emit `BlockCountry` if the attack has a country and the policy uses Block.
-    fn maybe_emit_block_country(&mut self, attack_idx: usize) {
-        let Some(ref cc) = self.active_attacks[attack_idx].src_country else {
+    /// Called from contexts where the caller already holds the `active_attacks` lock.
+    fn maybe_emit_block_country_locked(&self, active_attacks: &[DdosAttack], attack_idx: usize) {
+        let Some(ref cc) = active_attacks[attack_idx].src_country else {
             return;
         };
         // Check the policy's mitigation action
-        let attack_type = self.active_attacks[attack_idx].attack_type;
+        let attack_type = active_attacks[attack_idx].attack_type;
         let is_block = self.policies.iter().any(|p| {
             p.enabled
                 && p.attack_type == attack_type
@@ -277,23 +321,40 @@ impl DdosEngine {
             return;
         }
         // Only block if not already blocked
-        if self.blocked_countries.insert(cc.clone()) {
+        let mut blocked = self
+            .blocked_countries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if blocked.insert(cc.clone()) {
             self.pending_enforcements
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
                 .push(DdosEnforcementAction::BlockCountry {
                     country_code: cc.clone(),
                 });
         }
     }
 
+    /// Public variant for tests that need direct access.
+    #[cfg(test)]
+    fn maybe_emit_block_country(&self, attack_idx: usize) {
+        let active_attacks = self
+            .active_attacks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.maybe_emit_block_country_locked(&active_attacks, attack_idx);
+    }
+
     fn sort_policies(&mut self) {
         self.policies.sort_by(|a, b| a.id.0.cmp(&b.id.0));
     }
 
-    fn push_history(&mut self, attack: DdosAttack) {
-        if self.history.len() >= MAX_HISTORY {
-            self.history.remove(0);
+    fn push_history(&self, attack: DdosAttack) {
+        let mut history = self.history.lock().unwrap_or_else(PoisonError::into_inner);
+        if history.len() >= MAX_HISTORY {
+            history.remove(0);
         }
-        self.history.push(attack);
+        history.push(attack);
     }
 }
 
@@ -515,10 +576,11 @@ mod tests {
 
         // Drive to Active (3 seconds above threshold)
         for i in 1..=3 {
-            engine.active_attacks[0].current_pps = 100;
-            engine.active_attacks[0].update_status(1);
+            let mut attacks = engine.active_attacks.lock().unwrap();
+            attacks[0].current_pps = 100;
+            attacks[0].update_status(1);
             if i >= 3 {
-                assert!(engine.active_attacks[0].is_active());
+                assert!(attacks[0].is_active());
             }
         }
         // Manually call the enforcement check as the transition happened via update_status
@@ -546,18 +608,26 @@ mod tests {
         // Create attack with country and make it active
         let event = make_event(DdosAttackType::SynFlood, 1_000_000_000);
         engine.process_event_with_country(&event, Some("RU"));
-        engine.active_attacks[0].src_country = Some("RU".to_string());
 
-        // Force to active + blocked
-        engine.active_attacks[0].mitigation_status = DdosMitigationStatus::Active;
-        engine.blocked_countries.insert("RU".to_string());
+        {
+            let mut attacks = engine.active_attacks.lock().unwrap();
+            attacks[0].src_country = Some("RU".to_string());
 
-        // Force to expired
-        engine.active_attacks[0].mitigation_status = DdosMitigationStatus::Mitigated;
-        engine.active_attacks[0].consecutive_below = 300;
-        engine.active_attacks[0].current_pps = 0;
-        engine.active_attacks[0].update_status(1);
-        assert!(engine.active_attacks[0].is_expired());
+            // Force to active + blocked
+            attacks[0].mitigation_status = DdosMitigationStatus::Active;
+            engine
+                .blocked_countries
+                .lock()
+                .unwrap()
+                .insert("RU".to_string());
+
+            // Force to expired
+            attacks[0].mitigation_status = DdosMitigationStatus::Mitigated;
+            attacks[0].consecutive_below = 300;
+            attacks[0].current_pps = 0;
+            attacks[0].update_status(1);
+            assert!(attacks[0].is_expired());
+        }
 
         // tick() should move it to history and emit UnblockCountry
         engine.tick();
@@ -580,12 +650,19 @@ mod tests {
             .unwrap();
 
         // Simulate two attacks from same country
-        engine.blocked_countries.insert("CN".to_string());
+        engine
+            .blocked_countries
+            .lock()
+            .unwrap()
+            .insert("CN".to_string());
 
         let event = make_event(DdosAttackType::SynFlood, 1_000_000_000);
         engine.process_event_with_country(&event, Some("CN"));
-        engine.active_attacks[0].src_country = Some("CN".to_string());
-        engine.active_attacks[0].mitigation_status = DdosMitigationStatus::Active;
+        {
+            let mut attacks = engine.active_attacks.lock().unwrap();
+            attacks[0].src_country = Some("CN".to_string());
+            attacks[0].mitigation_status = DdosMitigationStatus::Active;
+        }
 
         // Should not emit BlockCountry since already blocked
         engine.maybe_emit_block_country(0);
@@ -603,8 +680,11 @@ mod tests {
 
         let event = make_event(DdosAttackType::SynFlood, 1_000_000_000);
         engine.process_event_with_country(&event, Some("RU"));
-        engine.active_attacks[0].src_country = Some("RU".to_string());
-        engine.active_attacks[0].mitigation_status = DdosMitigationStatus::Active;
+        {
+            let mut attacks = engine.active_attacks.lock().unwrap();
+            attacks[0].src_country = Some("RU".to_string());
+            attacks[0].mitigation_status = DdosMitigationStatus::Active;
+        }
 
         engine.maybe_emit_block_country(0);
         let enforcements = engine.take_pending_enforcements();
@@ -630,8 +710,11 @@ mod tests {
         assert_eq!(engine.active_attack_count(), 1);
 
         // Force PPS above country threshold (1) but below global (5000)
-        engine.active_attacks[0].current_pps = 50;
-        engine.active_attacks[0].mitigation_status = DdosMitigationStatus::Detecting;
+        {
+            let mut attacks = engine.active_attacks.lock().unwrap();
+            attacks[0].current_pps = 50;
+            attacks[0].mitigation_status = DdosMitigationStatus::Detecting;
+        }
 
         // tick() should use threshold=1 for CN, so 50 pps is above it
         engine.tick();

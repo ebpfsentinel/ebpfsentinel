@@ -133,11 +133,11 @@ mod tests {
                 None,
                 Arc::clone(&noop),
             ))),
-            Arc::new(tokio::sync::RwLock::new(IpsAppService::new(
+            Arc::new(arc_swap::ArcSwap::from_pointee(IpsAppService::new(
                 IpsEngine::default(),
                 Arc::clone(&noop),
             ))),
-            Arc::new(tokio::sync::RwLock::new(L7AppService::new(
+            Arc::new(arc_swap::ArcSwap::from_pointee(L7AppService::new(
                 L7Engine::new(),
                 Arc::clone(&noop),
             ))),
@@ -145,14 +145,14 @@ mod tests {
                 RateLimitEngine::new(),
                 Arc::clone(&noop),
             ))),
-            Arc::new(tokio::sync::RwLock::new(ThreatIntelAppService::new(
+            Arc::new(arc_swap::ArcSwap::from_pointee(ThreatIntelAppService::new(
                 ThreatIntelEngine::new(1_000_000),
                 Arc::clone(&noop),
                 vec![],
             ))),
-            Arc::new(tokio::sync::RwLock::new(AuditAppService::new(
-                Arc::new(NoopSink) as Arc<dyn AuditSink>,
-            ))),
+            Arc::new(AuditAppService::new(
+                Arc::new(NoopSink) as Arc<dyn AuditSink>
+            )),
             Arc::new(tokio::sync::RwLock::new(
                 infrastructure::config::AgentConfig::from_yaml("agent:\n  interfaces: [eth0]")
                     .unwrap(),

@@ -71,7 +71,7 @@ pub struct PatchRuleModeRequest {
     )
 )]
 pub async fn list_ips_rules(State(state): State<Arc<AppState>>) -> Json<Vec<IpsRuleResponse>> {
-    let svc = state.ips_service.read().await;
+    let svc = state.ips_service.load();
     let rules: Vec<IpsRuleResponse> = svc
         .list_rules()
         .iter()
@@ -125,14 +125,14 @@ pub async fn patch_ips_rule_mode(
 
     // Capture before snapshot for audit trail
     let before_json = {
-        let svc = state.ips_service.read().await;
+        let svc = state.ips_service.load();
         svc.list_rules()
             .iter()
             .find(|r| r.id.0 == id)
             .and_then(|r| serde_json::to_string(r).ok())
     };
 
-    let mut svc = state.ips_service.write().await;
+    let mut svc = (**state.ips_service.load()).clone();
     let old_mode = svc.update_rule_mode(&id, new_mode)?;
 
     if old_mode != new_mode {
@@ -169,10 +169,10 @@ pub async fn patch_ips_rule_mode(
         .iter()
         .find(|r| r.id.0 == id)
         .and_then(|r| serde_json::to_string(r).ok());
-    drop(svc);
+    state.ips_service.store(Arc::new(svc));
 
     if old_mode != new_mode {
-        state.audit_service.read().await.record_rule_change(
+        state.audit_service.record_rule_change(
             domain::audit::entity::AuditComponent::Ips,
             domain::audit::entity::AuditAction::RuleUpdated,
             domain::audit::rule_change::ChangeActor::Api,
@@ -207,7 +207,7 @@ pub async fn patch_ips_rule_mode(
 pub async fn list_ips_blacklist(
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<BlacklistEntryResponse>> {
-    let svc = state.ips_service.read().await;
+    let svc = state.ips_service.load();
     let entries: Vec<BlacklistEntryResponse> = svc
         .list_blacklist()
         .iter()
@@ -241,7 +241,7 @@ pub async fn list_ips_blacklist(
 pub async fn list_ips_domain_blocks(
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<DomainBlockResponse>> {
-    let svc = state.ips_service.read().await;
+    let svc = state.ips_service.load();
     let entries: Vec<DomainBlockResponse> = svc
         .list_blacklist()
         .iter()

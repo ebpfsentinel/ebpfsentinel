@@ -53,7 +53,7 @@ pub async fn ids_status(
         code: "SERVICE_NOT_AVAILABLE",
         message: "IDS service is not enabled".to_string(),
     })?;
-    let svc = svc_arc.read().await;
+    let svc = svc_arc.load();
     Ok(Json(IdsStatusResponse {
         enabled: svc.enabled(),
         mode: format!("{:?}", svc.mode()),
@@ -83,7 +83,7 @@ pub async fn list_ids_rules(
         code: "SERVICE_NOT_AVAILABLE",
         message: "IDS service is not enabled".to_string(),
     })?;
-    let svc = svc_arc.read().await;
+    let svc = svc_arc.load();
     let rules: Vec<IdsRuleResponse> = svc
         .list_rules()
         .iter()

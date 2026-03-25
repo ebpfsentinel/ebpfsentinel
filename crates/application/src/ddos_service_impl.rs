@@ -13,7 +13,8 @@ use ports::secondary::metrics_port::MetricsPort;
 /// Application-level `DDoS` detection and mitigation service.
 ///
 /// Orchestrates the `DDoS` domain engine, metrics updates, and periodic ticks.
-/// Designed to be wrapped in `RwLock` for shared access.
+/// Designed to be wrapped in `ArcSwap` for lock-free reads.
+#[derive(Clone)]
 pub struct DdosAppService {
     engine: DdosEngine,
     metrics: Arc<dyn MetricsPort>,
@@ -52,7 +53,7 @@ impl DdosAppService {
 
     /// Process a `DDoS` event from the eBPF pipeline.
     /// Returns `true` if an attack state changed (for alerting).
-    pub fn process_event(&mut self, event: &DdosEvent) -> bool {
+    pub fn process_event(&self, event: &DdosEvent) -> bool {
         if !self.enabled {
             return false;
         }
@@ -77,7 +78,7 @@ impl DdosAppService {
     }
 
     /// Periodic tick — call once per second to update attack statuses.
-    pub fn tick(&mut self) {
+    pub fn tick(&self) {
         if !self.enabled {
             return;
         }
@@ -86,8 +87,8 @@ impl DdosAppService {
         self.apply_pending_enforcements();
     }
 
-    /// Return all active (non-expired) attacks.
-    pub fn active_attacks(&self) -> &[DdosAttack] {
+    /// Return a snapshot of all active (non-expired) attacks.
+    pub fn active_attacks(&self) -> Vec<DdosAttack> {
         self.engine.active_attacks()
     }
 
@@ -102,7 +103,7 @@ impl DdosAppService {
     }
 
     /// Return recent attack history (most recent first).
-    pub fn attack_history(&self, limit: usize) -> &[DdosAttack] {
+    pub fn attack_history(&self, limit: usize) -> Vec<DdosAttack> {
         self.engine.attack_history(limit)
     }
 
@@ -153,7 +154,7 @@ impl DdosAppService {
     }
 
     /// Drain and apply pending enforcement actions from the engine.
-    fn apply_pending_enforcements(&mut self) {
+    fn apply_pending_enforcements(&self) {
         let enforcements = self.engine.take_pending_enforcements();
         if enforcements.is_empty() {
             return;

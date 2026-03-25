@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use domain::alert::engine::AlertRouter;
 use domain::alert::entity::PacketSecurityAlert;
 use domain::alert::entity::{Alert, AlertDestination};
@@ -27,7 +28,7 @@ use crate::ips_service_impl::IpsAppService;
 pub struct AlertPipeline {
     router: AlertRouter,
     metrics: Arc<dyn MetricsPort>,
-    audit_service: Arc<RwLock<AuditAppService>>,
+    audit_service: Arc<AuditAppService>,
     log_sender: Option<Arc<dyn AlertSender>>,
     webhook_sender: Option<Arc<dyn AlertSender>>,
     email_sender: Option<Arc<dyn AlertSender>>,
@@ -57,14 +58,14 @@ pub struct AutoCaptureHandler {
 /// and enforces block/throttle via the IPS blacklist.
 pub struct AutoResponseHandler {
     policies: Vec<domain::response::entity::SimpleResponsePolicy>,
-    ips_service: Arc<RwLock<IpsAppService>>,
+    ips_service: Arc<ArcSwap<IpsAppService>>,
 }
 
 impl AlertPipeline {
     pub fn new(
         router: AlertRouter,
         metrics: Arc<dyn MetricsPort>,
-        audit_service: Arc<RwLock<AuditAppService>>,
+        audit_service: Arc<AuditAppService>,
     ) -> Self {
         Self {
             router,
@@ -132,7 +133,7 @@ impl AlertPipeline {
     pub fn with_auto_response(
         mut self,
         policies: Vec<domain::response::entity::SimpleResponsePolicy>,
-        ips_service: Arc<RwLock<IpsAppService>>,
+        ips_service: Arc<ArcSwap<IpsAppService>>,
     ) -> Self {
         if !policies.is_empty() {
             tracing::info!(
@@ -213,7 +214,7 @@ impl AlertPipeline {
         }
 
         // Auto-response: evaluate and enforce if policies match
-        self.evaluate_auto_response(&alert).await;
+        self.evaluate_auto_response(&alert);
         self.evaluate_auto_capture(&alert).await;
 
         // Pass through router (dedup, throttle, route matching)
@@ -256,7 +257,7 @@ impl AlertPipeline {
             "DLP {} ({}) pid={}",
             dlp_alert.pattern_name, dlp_alert.data_type, dlp_alert.pid,
         );
-        self.audit_service.read().await.record_security_decision(
+        self.audit_service.record_security_decision(
             AuditComponent::Dlp,
             AuditAction::PolicyViolation,
             dlp_alert.timestamp_ns,
@@ -294,7 +295,7 @@ impl AlertPipeline {
         }
 
         // Auto-response: evaluate and enforce if policies match
-        self.evaluate_auto_response(&alert).await;
+        self.evaluate_auto_response(&alert);
         self.evaluate_auto_capture(&alert).await;
 
         // Pass through router (dedup, throttle, route matching)
@@ -379,7 +380,7 @@ impl AlertPipeline {
         }
 
         // Auto-response: evaluate and enforce if policies match
-        self.evaluate_auto_response(&alert).await;
+        self.evaluate_auto_response(&alert);
         self.evaluate_auto_capture(&alert).await;
 
         // Pass through router (dedup, throttle, route matching)
@@ -431,7 +432,7 @@ impl AlertPipeline {
             let _ = tx.send(alert.clone());
         }
 
-        self.evaluate_auto_response(&alert).await;
+        self.evaluate_auto_response(&alert);
         self.evaluate_auto_capture(&alert).await;
 
         let matched_routes: Vec<_> = self
@@ -580,7 +581,7 @@ impl AlertPipeline {
 
     /// Evaluate an alert against simple auto-response policies.
     /// If a policy matches, enforce block/throttle via IPS blacklist.
-    async fn evaluate_auto_response(&self, alert: &domain::alert::entity::Alert) {
+    fn evaluate_auto_response(&self, alert: &domain::alert::entity::Alert) {
         let Some(ref handler) = self.auto_response else {
             return;
         };
@@ -616,7 +617,7 @@ impl AlertPipeline {
             let reason = format!("auto-response:{} alert={}", policy.name, alert.id);
             let ttl = std::time::Duration::from_secs(policy.ttl_secs);
 
-            let mut ips = handler.ips_service.write().await;
+            let ips = handler.ips_service.load();
             match ips.add_to_blacklist(src_ip, reason.clone(), ttl) {
                 Ok(()) => {
                     tracing::info!(
@@ -902,9 +903,9 @@ mod tests {
         }
     }
 
-    fn make_audit_service() -> Arc<RwLock<AuditAppService>> {
+    fn make_audit_service() -> Arc<AuditAppService> {
         let sink: Arc<dyn AuditSink> = Arc::new(NoopAuditSink);
-        Arc::new(RwLock::new(AuditAppService::new(sink)))
+        Arc::new(AuditAppService::new(sink))
     }
 
     #[allow(clippy::similar_names)]

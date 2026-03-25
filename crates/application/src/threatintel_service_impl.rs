@@ -1,5 +1,5 @@
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use domain::common::entity::DomainMode;
 use domain::common::error::DomainError;
@@ -9,13 +9,19 @@ use ports::secondary::geoip_port::GeoIpPort;
 use ports::secondary::metrics_port::MetricsPort;
 use ports::secondary::threatintel_map_port::ThreatIntelMapPort;
 
+/// Shared handle to the eBPF map port, behind `Arc<Mutex<..>>` so the
+/// service can be cheaply cloned (required by the `ArcSwap` pattern)
+/// while the map port remains shared across clones.
+type SharedMapPort = Arc<Mutex<Box<dyn ThreatIntelMapPort + Send>>>;
+
 /// Application-level threat intelligence service.
 ///
 /// Wraps the domain engine with metrics updates, feed configuration,
 /// and optional eBPF map synchronization.
+#[derive(Clone)]
 pub struct ThreatIntelAppService {
     engine: ThreatIntelEngine,
-    map_port: Option<Box<dyn ThreatIntelMapPort + Send>>,
+    map_port: Option<SharedMapPort>,
     geoip: Option<Arc<dyn GeoIpPort>>,
     metrics: Arc<dyn MetricsPort>,
     feeds: Vec<FeedConfig>,
@@ -42,7 +48,7 @@ impl ThreatIntelAppService {
 
     /// Set the eBPF map port and perform an initial sync.
     pub fn set_map_port(&mut self, port: Box<dyn ThreatIntelMapPort + Send>) {
-        self.map_port = Some(port);
+        self.map_port = Some(Arc::new(Mutex::new(port)));
         self.sync_ebpf_maps();
     }
 
@@ -148,13 +154,18 @@ impl ThreatIntelAppService {
     ///
     /// In `Alert` mode, IOCs are loaded with `block_mode = false`
     /// (observation only — traffic is not dropped).
-    fn sync_ebpf_maps(&mut self) {
-        let Some(ref mut map) = self.map_port else {
+    fn sync_ebpf_maps(&self) {
+        let Some(ref map_port) = self.map_port else {
             return;
         };
 
         let block_mode = self.mode != DomainMode::Alert;
         let iocs: Vec<Ioc> = self.engine.all_iocs().cloned().collect();
+
+        let Ok(mut map) = map_port.lock() else {
+            tracing::warn!("threat intel map port lock poisoned, skipping eBPF sync");
+            return;
+        };
 
         if let Err(e) = map.load_all_iocs(&iocs, block_mode) {
             tracing::warn!("failed to sync threat intel IOCs to eBPF maps: {e}");

@@ -12,7 +12,8 @@ use ports::secondary::metrics_port::MetricsPort;
 /// Application-level L7 firewall service.
 ///
 /// Orchestrates the L7 domain engine and metrics updates.
-/// Designed to be wrapped in `RwLock` for shared access.
+/// Designed to be wrapped in `ArcSwap` for lock-free reads.
+#[derive(Clone)]
 pub struct L7AppService {
     engine: L7Engine,
     metrics: Arc<dyn MetricsPort>,

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use regex::Regex;
@@ -21,7 +22,7 @@ struct ThresholdState {
 
 /// A pre-compiled domain matcher for a single IDS rule.
 /// Compiled once at rule load time, used per-packet in userspace.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum CompiledDomainMatcher {
     /// Case-insensitive exact match (lowercased at compile time).
     Exact(String),
@@ -44,13 +45,13 @@ impl CompiledDomainMatcher {
 
 /// IDS engine: validates, stores, and manages IDS rules.
 /// Regex patterns are compiled at rule load time (not per-packet).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IdsEngine {
     rules: Vec<IdsRule>,
     compiled_patterns: Vec<Option<Regex>>,
     compiled_domain_patterns: Vec<Option<CompiledDomainMatcher>>,
     sampling: SamplingMode,
-    threshold_tracker: HashMap<(RuleId, u64), ThresholdState>,
+    threshold_tracker: Arc<Mutex<HashMap<(RuleId, u64), ThresholdState>>>,
 }
 
 impl IdsEngine {
@@ -60,7 +61,7 @@ impl IdsEngine {
             compiled_patterns: Vec::new(),
             compiled_domain_patterns: Vec::new(),
             sampling: SamplingMode::default(),
-            threshold_tracker: HashMap::new(),
+            threshold_tracker: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -129,7 +130,10 @@ impl IdsEngine {
         self.rules = rules;
         self.compiled_patterns = compiled;
         self.compiled_domain_patterns = domain_compiled;
-        self.threshold_tracker.clear();
+        self.threshold_tracker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         Ok(())
     }
 
@@ -224,7 +228,7 @@ impl IdsEngine {
     ///
     /// If the rule has no threshold config, always returns `true`.
     pub fn check_threshold(
-        &mut self,
+        &self,
         rule_id: &RuleId,
         threshold: &super::entity::ThresholdConfig,
         src_ip: u32,
@@ -234,8 +238,12 @@ impl IdsEngine {
         let now = Instant::now();
         let window = std::time::Duration::from_secs(threshold.window_secs);
 
-        let state = self
+        let mut tracker = self
             .threshold_tracker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        let state = tracker
             .entry((rule_id.clone(), track_key))
             .or_insert_with(|| ThresholdState {
                 count: 0,
@@ -279,7 +287,7 @@ impl IdsEngine {
     /// key, that per-country [`ThresholdConfig`] is used instead of the
     /// default rule threshold.
     pub fn check_threshold_with_country(
-        &mut self,
+        &self,
         rule: &IdsRule,
         src_ip: u32,
         dst_ip: u32,
@@ -298,19 +306,23 @@ impl IdsEngine {
     }
 
     /// Remove expired threshold entries to prevent unbounded memory growth.
-    pub fn cleanup_expired_thresholds(&mut self) {
+    pub fn cleanup_expired_thresholds(&self) {
         let now = Instant::now();
-        self.threshold_tracker.retain(|(rule_id, _), state| {
-            // Look up the rule to find its window; if the rule is gone, remove the entry
-            let Some(rule) = self.rules.iter().find(|r| r.id == *rule_id) else {
-                return false;
-            };
-            let Some(ref threshold) = rule.threshold else {
-                return false;
-            };
-            let window = std::time::Duration::from_secs(threshold.window_secs);
-            now.duration_since(state.window_start) < window
-        });
+        let rules = &self.rules;
+        self.threshold_tracker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|(rule_id, _), state| {
+                // Look up the rule to find its window; if the rule is gone, remove the entry
+                let Some(rule) = rules.iter().find(|r| r.id == *rule_id) else {
+                    return false;
+                };
+                let Some(ref threshold) = rule.threshold else {
+                    return false;
+                };
+                let window = std::time::Duration::from_secs(threshold.window_secs);
+                now.duration_since(state.window_start) < window
+            });
     }
 }
 

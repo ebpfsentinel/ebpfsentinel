@@ -450,7 +450,7 @@ pub async fn create_rule(
     let after_json = serde_json::to_string(&rule).ok();
     state.firewall_service.write().await.add_rule(rule)?;
 
-    state.audit_service.read().await.record_rule_change(
+    state.audit_service.record_rule_change(
         domain::audit::entity::AuditComponent::Firewall,
         domain::audit::entity::AuditAction::RuleAdded,
         domain::audit::rule_change::ChangeActor::Api,
@@ -506,7 +506,7 @@ pub async fn delete_rule(
         .await
         .remove_rule(&RuleId(id.clone()))?;
 
-    state.audit_service.read().await.record_rule_change(
+    state.audit_service.record_rule_change(
         domain::audit::entity::AuditComponent::Firewall,
         domain::audit::entity::AuditAction::RuleRemoved,
         domain::audit::rule_change::ChangeActor::Api,

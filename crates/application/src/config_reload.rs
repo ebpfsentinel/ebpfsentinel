@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use domain::alias::entity::Alias;
 use domain::audit::entity::{AuditAction, AuditComponent};
 use domain::audit::rule_change::ChangeActor;
@@ -40,15 +41,15 @@ use crate::zone_service_impl::ZoneAppService;
 /// metrics recording, and structured logging.
 pub struct ConfigReloadService {
     firewall_service: Arc<RwLock<FirewallAppService>>,
-    ids_service: Arc<RwLock<IdsAppService>>,
-    ips_service: Arc<RwLock<IpsAppService>>,
-    l7_service: Arc<RwLock<L7AppService>>,
+    ids_service: Arc<ArcSwap<IdsAppService>>,
+    ips_service: Arc<ArcSwap<IpsAppService>>,
+    l7_service: Arc<ArcSwap<L7AppService>>,
     ratelimit_service: Arc<RwLock<RateLimitAppService>>,
-    ddos_service: Arc<RwLock<DdosAppService>>,
-    threatintel_service: Arc<RwLock<ThreatIntelAppService>>,
-    audit_service: Arc<RwLock<AuditAppService>>,
+    ddos_service: Arc<ArcSwap<DdosAppService>>,
+    threatintel_service: Arc<ArcSwap<ThreatIntelAppService>>,
+    audit_service: Arc<AuditAppService>,
     conntrack_service: Option<Arc<RwLock<ConnTrackAppService>>>,
-    dlp_service: Option<Arc<RwLock<DlpAppService>>>,
+    dlp_service: Option<Arc<ArcSwap<DlpAppService>>>,
     nat_service: Option<Arc<RwLock<NatAppService>>>,
     alias_service: Option<Arc<RwLock<AliasAppService>>>,
     routing_service: Option<Arc<RwLock<RoutingAppService>>>,
@@ -64,13 +65,13 @@ impl ConfigReloadService {
     #[allow(clippy::similar_names, clippy::too_many_arguments)]
     pub fn new(
         firewall_service: Arc<RwLock<FirewallAppService>>,
-        ids_service: Arc<RwLock<IdsAppService>>,
-        ips_service: Arc<RwLock<IpsAppService>>,
-        l7_service: Arc<RwLock<L7AppService>>,
+        ids_service: Arc<ArcSwap<IdsAppService>>,
+        ips_service: Arc<ArcSwap<IpsAppService>>,
+        l7_service: Arc<ArcSwap<L7AppService>>,
         ratelimit_service: Arc<RwLock<RateLimitAppService>>,
-        ddos_service: Arc<RwLock<DdosAppService>>,
-        threatintel_service: Arc<RwLock<ThreatIntelAppService>>,
-        audit_service: Arc<RwLock<AuditAppService>>,
+        ddos_service: Arc<ArcSwap<DdosAppService>>,
+        threatintel_service: Arc<ArcSwap<ThreatIntelAppService>>,
+        audit_service: Arc<AuditAppService>,
         metrics: Arc<dyn MetricsPort>,
     ) -> Self {
         Self {
@@ -102,7 +103,7 @@ impl ConfigReloadService {
     }
 
     /// Set the DLP service for reload integration.
-    pub fn set_dlp_service(&mut self, svc: Arc<RwLock<DlpAppService>>) {
+    pub fn set_dlp_service(&mut self, svc: Arc<ArcSwap<DlpAppService>>) {
         self.dlp_service = Some(svc);
     }
 
@@ -201,7 +202,7 @@ impl ConfigReloadService {
         };
         let _guard = self.reload_mutex.lock().await;
 
-        let mut svc = dlp_svc.write().await;
+        let mut svc = (**dlp_svc.load()).clone();
         svc.set_enabled(enabled);
         svc.set_mode(mode)
             .map_err(|e| anyhow::anyhow!("DLP mode change rejected: {e}"))?;
@@ -220,6 +221,7 @@ impl ConfigReloadService {
             count = svc.pattern_count(),
             "DLP configuration reloaded"
         );
+        dlp_svc.store(Arc::new(svc));
         Ok(())
     }
 
@@ -453,15 +455,14 @@ impl ConfigReloadService {
                     mode = mode.as_str(),
                     "firewall configuration reloaded successfully"
                 );
-                let audit_svc = self.audit_service.read().await;
-                audit_svc.record_config_change(
+                self.audit_service.record_config_change(
                     AuditAction::ConfigChanged,
                     &format!(
                         "firewall reloaded: {rule_count} rules, mode={}",
                         mode.as_str()
                     ),
                 );
-                audit_svc.record_rule_change(
+                self.audit_service.record_rule_change(
                     AuditComponent::Firewall,
                     AuditAction::RuleUpdated,
                     ChangeActor::ConfigReload,
@@ -472,7 +473,6 @@ impl ConfigReloadService {
                         mode.as_str()
                     )),
                 );
-                drop(audit_svc);
                 Ok(())
             }
             Err(e) => {
@@ -494,7 +494,7 @@ impl ConfigReloadService {
     ) -> Result<(), anyhow::Error> {
         let _guard = self.reload_mutex.lock().await;
 
-        let mut svc = self.ids_service.write().await;
+        let mut svc = (**self.ids_service.load()).clone();
 
         let old_mode = svc.mode();
         if old_mode != mode {
@@ -515,7 +515,7 @@ impl ConfigReloadService {
 
         match svc.reload_rules(effective_rules) {
             Ok(()) => {
-                drop(svc);
+                self.ids_service.store(Arc::new(svc));
                 self.metrics.record_config_reload("ids", "success");
                 tracing::info!(
                     rule_count = rule_count,
@@ -523,12 +523,11 @@ impl ConfigReloadService {
                     mode = mode.as_str(),
                     "IDS configuration reloaded successfully"
                 );
-                let audit_svc = self.audit_service.read().await;
-                audit_svc.record_config_change(
+                self.audit_service.record_config_change(
                     AuditAction::ConfigChanged,
                     &format!("ids reloaded: {rule_count} rules, mode={}", mode.as_str()),
                 );
-                audit_svc.record_rule_change(
+                self.audit_service.record_rule_change(
                     AuditComponent::Ids,
                     AuditAction::RuleUpdated,
                     ChangeActor::ConfigReload,
@@ -539,11 +538,9 @@ impl ConfigReloadService {
                         mode.as_str()
                     )),
                 );
-                drop(audit_svc);
                 Ok(())
             }
             Err(e) => {
-                drop(svc);
                 self.metrics.record_config_reload("ids", "failure");
                 tracing::warn!(error = %e, "IDS configuration reload failed");
                 Err(anyhow::anyhow!("IDS reload failed: {e}"))
@@ -568,7 +565,7 @@ impl ConfigReloadService {
     ) -> Result<(), anyhow::Error> {
         let _guard = self.reload_mutex.lock().await;
 
-        let mut svc = self.ips_service.write().await;
+        let mut svc = (**self.ips_service.load()).clone();
 
         // Collect per-rule mode changes before replacing rules
         let rule_mode_changes: Vec<_> = rules
@@ -617,7 +614,7 @@ impl ConfigReloadService {
                 svc.reload_whitelist(whitelist);
                 svc.set_sampling(sampling);
 
-                drop(svc);
+                self.ips_service.store(Arc::new(svc));
                 self.metrics.record_config_reload("ips", "success");
                 tracing::info!(
                     rule_count = rule_count,
@@ -625,12 +622,11 @@ impl ConfigReloadService {
                     mode = mode.as_str(),
                     "IPS configuration reloaded successfully"
                 );
-                let audit_svc = self.audit_service.read().await;
-                audit_svc.record_config_change(
+                self.audit_service.record_config_change(
                     AuditAction::ConfigChanged,
                     &format!("ips reloaded: {rule_count} rules, mode={}", mode.as_str()),
                 );
-                audit_svc.record_rule_change(
+                self.audit_service.record_rule_change(
                     AuditComponent::Ips,
                     AuditAction::RuleUpdated,
                     ChangeActor::ConfigReload,
@@ -641,11 +637,9 @@ impl ConfigReloadService {
                         mode.as_str()
                     )),
                 );
-                drop(audit_svc);
                 Ok(())
             }
             Err(e) => {
-                drop(svc);
                 self.metrics.record_config_reload("ips", "failure");
                 tracing::warn!(error = %e, "IPS configuration reload failed");
                 Err(anyhow::anyhow!("IPS reload failed: {e}"))
@@ -657,7 +651,7 @@ impl ConfigReloadService {
     pub async fn reload_l7(&self, rules: Vec<L7Rule>, enabled: bool) -> Result<(), anyhow::Error> {
         let _guard = self.reload_mutex.lock().await;
 
-        let mut svc = self.l7_service.write().await;
+        let mut svc = (**self.l7_service.load()).clone();
 
         svc.set_enabled(enabled);
 
@@ -666,19 +660,18 @@ impl ConfigReloadService {
 
         match svc.reload_rules(effective_rules) {
             Ok(()) => {
-                drop(svc);
+                self.l7_service.store(Arc::new(svc));
                 self.metrics.record_config_reload("l7", "success");
                 tracing::info!(
                     rule_count = rule_count,
                     enabled = enabled,
                     "L7 configuration reloaded successfully"
                 );
-                let audit_svc = self.audit_service.read().await;
-                audit_svc.record_config_change(
+                self.audit_service.record_config_change(
                     AuditAction::ConfigChanged,
                     &format!("l7 reloaded: {rule_count} rules"),
                 );
-                audit_svc.record_rule_change(
+                self.audit_service.record_rule_change(
                     AuditComponent::L7,
                     AuditAction::RuleUpdated,
                     ChangeActor::ConfigReload,
@@ -686,11 +679,9 @@ impl ConfigReloadService {
                     None,
                     Some(format!("{{\"rule_count\":{rule_count}}}")),
                 );
-                drop(audit_svc);
                 Ok(())
             }
             Err(e) => {
-                drop(svc);
                 self.metrics.record_config_reload("l7", "failure");
                 tracing::warn!(error = %e, "L7 configuration reload failed");
                 Err(anyhow::anyhow!("L7 reload failed: {e}"))
@@ -722,12 +713,11 @@ impl ConfigReloadService {
                     enabled = enabled,
                     "ratelimit configuration reloaded successfully"
                 );
-                let audit_svc = self.audit_service.read().await;
-                audit_svc.record_config_change(
+                self.audit_service.record_config_change(
                     AuditAction::ConfigChanged,
                     &format!("ratelimit reloaded: {policy_count} policies"),
                 );
-                audit_svc.record_rule_change(
+                self.audit_service.record_rule_change(
                     AuditComponent::Ratelimit,
                     AuditAction::RuleUpdated,
                     ChangeActor::ConfigReload,
@@ -735,7 +725,6 @@ impl ConfigReloadService {
                     None,
                     Some(format!("{{\"policy_count\":{policy_count}}}")),
                 );
-                drop(audit_svc);
                 Ok(())
             }
             Err(e) => {
@@ -784,7 +773,7 @@ impl ConfigReloadService {
     ) -> Result<(), anyhow::Error> {
         let _guard = self.reload_mutex.lock().await;
 
-        let mut svc = self.ddos_service.write().await;
+        let mut svc = (**self.ddos_service.load()).clone();
 
         svc.set_enabled(enabled);
 
@@ -793,19 +782,18 @@ impl ConfigReloadService {
 
         match svc.reload_policies(effective_policies) {
             Ok(()) => {
-                drop(svc);
+                self.ddos_service.store(Arc::new(svc));
                 self.metrics.record_config_reload("ddos", "success");
                 tracing::info!(
                     policy_count = policy_count,
                     enabled = enabled,
                     "DDoS configuration reloaded successfully"
                 );
-                let audit_svc = self.audit_service.read().await;
-                audit_svc.record_config_change(
+                self.audit_service.record_config_change(
                     AuditAction::ConfigChanged,
                     &format!("ddos reloaded: {policy_count} policies"),
                 );
-                audit_svc.record_rule_change(
+                self.audit_service.record_rule_change(
                     AuditComponent::Ddos,
                     AuditAction::RuleUpdated,
                     ChangeActor::ConfigReload,
@@ -813,11 +801,9 @@ impl ConfigReloadService {
                     None,
                     Some(format!("{{\"policy_count\":{policy_count}}}")),
                 );
-                drop(audit_svc);
                 Ok(())
             }
             Err(e) => {
-                drop(svc);
                 self.metrics.record_config_reload("ddos", "failure");
                 tracing::warn!(error = %e, "DDoS configuration reload failed");
                 Err(anyhow::anyhow!("ddos reload failed: {e}"))
@@ -835,7 +821,7 @@ impl ConfigReloadService {
     ) -> Result<(), anyhow::Error> {
         let _guard = self.reload_mutex.lock().await;
 
-        let mut svc = self.threatintel_service.write().await;
+        let mut svc = (**self.threatintel_service.load()).clone();
 
         let old_mode = svc.mode();
         if old_mode != mode {
@@ -853,28 +839,26 @@ impl ConfigReloadService {
         svc.set_country_confidence_boost(country_confidence_boost);
 
         if !enabled && let Err(e) = svc.reload_iocs(Vec::new()) {
-            drop(svc);
             self.metrics.record_config_reload("threatintel", "failure");
             tracing::warn!(error = %e, "threat intel clear failed");
             return Err(anyhow::anyhow!("threatintel reload failed: {e}"));
         }
 
-        drop(svc);
+        self.threatintel_service.store(Arc::new(svc));
         self.metrics.record_config_reload("threatintel", "success");
         tracing::info!(
             enabled = enabled,
             mode = mode.as_str(),
             "threat intel configuration reloaded successfully"
         );
-        let audit_svc = self.audit_service.read().await;
-        audit_svc.record_config_change(
+        self.audit_service.record_config_change(
             AuditAction::ConfigChanged,
             &format!(
                 "threatintel reloaded: enabled={enabled}, mode={}",
                 mode.as_str()
             ),
         );
-        audit_svc.record_rule_change(
+        self.audit_service.record_rule_change(
             AuditComponent::Threatintel,
             AuditAction::RuleUpdated,
             ChangeActor::ConfigReload,
@@ -885,7 +869,6 @@ impl ConfigReloadService {
                 mode.as_str()
             )),
         );
-        drop(audit_svc);
         Ok(())
     }
 }
@@ -1018,13 +1001,13 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn make_services() -> (
         Arc<RwLock<FirewallAppService>>,
-        Arc<RwLock<IdsAppService>>,
-        Arc<RwLock<IpsAppService>>,
-        Arc<RwLock<L7AppService>>,
+        Arc<ArcSwap<IdsAppService>>,
+        Arc<ArcSwap<IpsAppService>>,
+        Arc<ArcSwap<L7AppService>>,
         Arc<RwLock<RateLimitAppService>>,
-        Arc<RwLock<DdosAppService>>,
-        Arc<RwLock<ThreatIntelAppService>>,
-        Arc<RwLock<AuditAppService>>,
+        Arc<ArcSwap<DdosAppService>>,
+        Arc<ArcSwap<ThreatIntelAppService>>,
+        Arc<AuditAppService>,
         Arc<TestMetrics>,
     ) {
         let metrics = Arc::new(TestMetrics::new());
@@ -1068,13 +1051,13 @@ mod tests {
         let audit_svc = AuditAppService::new(audit_sink);
         (
             Arc::new(RwLock::new(fw_svc)),
-            Arc::new(RwLock::new(ids_svc)),
-            Arc::new(RwLock::new(ips_svc)),
-            Arc::new(RwLock::new(l7_svc)),
+            Arc::new(ArcSwap::from_pointee(ids_svc)),
+            Arc::new(ArcSwap::from_pointee(ips_svc)),
+            Arc::new(ArcSwap::from_pointee(l7_svc)),
             Arc::new(RwLock::new(rl_svc)),
-            Arc::new(RwLock::new(ddos_svc)),
-            Arc::new(RwLock::new(ti_svc)),
-            Arc::new(RwLock::new(audit_svc)),
+            Arc::new(ArcSwap::from_pointee(ddos_svc)),
+            Arc::new(ArcSwap::from_pointee(ti_svc)),
+            Arc::new(audit_svc),
             metrics,
         )
     }
@@ -1249,7 +1232,7 @@ mod tests {
             .await
             .unwrap();
 
-        let svc = ids_svc.read().await;
+        let svc = ids_svc.load();
         assert_eq!(svc.rule_count(), 2);
         assert_eq!(metrics.success_count.load(Ordering::Relaxed), 1);
     }
@@ -1279,7 +1262,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(ids_svc.read().await.rule_count(), 1);
+        assert_eq!(ids_svc.load().rule_count(), 1);
 
         reload
             .reload_ids(
@@ -1290,7 +1273,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(ids_svc.read().await.rule_count(), 0);
+        assert_eq!(ids_svc.load().rule_count(), 0);
     }
 
     #[tokio::test]
@@ -1344,7 +1327,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(ids_svc.read().await.mode(), DomainMode::Alert);
+        assert_eq!(ids_svc.load().mode(), DomainMode::Alert);
 
         reload
             .reload_ids(
@@ -1355,7 +1338,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(ids_svc.read().await.mode(), DomainMode::Block);
+        assert_eq!(ids_svc.load().mode(), DomainMode::Block);
     }
 
     // ── IPS reload tests ───────────────────────────────────────────
@@ -1407,7 +1390,7 @@ mod tests {
             .await
             .unwrap();
 
-        let svc = ips_svc.read().await;
+        let svc = ips_svc.load();
         assert_eq!(svc.rule_count(), 1);
         assert_eq!(svc.mode(), DomainMode::Block);
         assert_eq!(metrics.success_count.load(Ordering::Relaxed), 1);
@@ -1440,7 +1423,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(ips_svc.read().await.rule_count(), 1);
+        assert_eq!(ips_svc.load().rule_count(), 1);
 
         reload
             .reload_ips(
@@ -1453,7 +1436,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(ips_svc.read().await.rule_count(), 0);
+        assert_eq!(ips_svc.load().rule_count(), 0);
     }
 
     #[tokio::test]
@@ -1522,7 +1505,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(ips_svc.read().await.mode(), DomainMode::Alert);
+        assert_eq!(ips_svc.load().mode(), DomainMode::Alert);
 
         reload
             .reload_ips(
@@ -1535,7 +1518,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(ips_svc.read().await.mode(), DomainMode::Block);
+        assert_eq!(ips_svc.load().mode(), DomainMode::Block);
     }
 
     #[tokio::test]
@@ -1620,7 +1603,7 @@ mod tests {
         let rules = vec![make_l7_rule("l7-001", 10), make_l7_rule("l7-002", 20)];
         reload.reload_l7(rules, true).await.unwrap();
 
-        let svc = l7_svc.read().await;
+        let svc = l7_svc.load();
         assert_eq!(svc.rule_count(), 2);
         assert_eq!(metrics.success_count.load(Ordering::Relaxed), 1);
     }
@@ -1645,13 +1628,13 @@ mod tests {
             .reload_l7(vec![make_l7_rule("l7-001", 10)], true)
             .await
             .unwrap();
-        assert_eq!(l7_svc.read().await.rule_count(), 1);
+        assert_eq!(l7_svc.load().rule_count(), 1);
 
         reload
             .reload_l7(vec![make_l7_rule("l7-001", 10)], false)
             .await
             .unwrap();
-        assert_eq!(l7_svc.read().await.rule_count(), 0);
+        assert_eq!(l7_svc.load().rule_count(), 0);
     }
 
     #[tokio::test]

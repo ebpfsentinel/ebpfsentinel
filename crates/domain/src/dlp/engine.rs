@@ -7,7 +7,7 @@ use super::error::DlpError;
 
 /// DLP engine: validates, stores, and manages DLP patterns.
 /// Regex patterns are compiled at pattern load time (not per-scan).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DlpEngine {
     patterns: Vec<DlpPattern>,
     compiled_patterns: Vec<Regex>,

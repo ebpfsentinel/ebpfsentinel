@@ -9,7 +9,7 @@ use super::error::L7Error;
 ///
 /// Rules are stored sorted by ascending priority (lowest number = highest priority).
 /// Evaluation returns the first matching enabled rule.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct L7Engine {
     rules: Vec<L7Rule>,
 }

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use domain::common::entity::{DomainMode, RuleId};
 use domain::common::error::DomainError;
@@ -10,13 +10,19 @@ use ports::secondary::geoip_port::GeoIpPort;
 use ports::secondary::ids_map_port::IdsMapPort;
 use ports::secondary::metrics_port::MetricsPort;
 
+/// Shared handle to the eBPF map port, behind `Arc<Mutex<..>>` so the
+/// service can be cheaply cloned (required by the `ArcSwap` pattern)
+/// while the map port remains shared across clones.
+type SharedIdsMapPort = Arc<Mutex<Box<dyn IdsMapPort + Send>>>;
+
 /// Application-level IDS service.
 ///
 /// Orchestrates the domain engine, optional eBPF map sync, and metrics updates.
-/// Designed to be wrapped in `RwLock` for shared access from HTTP handlers.
+/// Designed to be wrapped in `ArcSwap` for lock-free reads.
+#[derive(Clone)]
 pub struct IdsAppService {
     engine: IdsEngine,
-    map_port: Option<Box<dyn IdsMapPort + Send>>,
+    map_port: Option<SharedIdsMapPort>,
     metrics: Arc<dyn MetricsPort>,
     mode: DomainMode,
     enabled: bool,
@@ -31,7 +37,7 @@ impl IdsAppService {
     ) -> Self {
         Self {
             engine,
-            map_port,
+            map_port: map_port.map(|p| Arc::new(Mutex::new(p))),
             metrics,
             mode: DomainMode::default(),
             enabled: true,
@@ -46,7 +52,7 @@ impl IdsAppService {
 
     /// Set the eBPF map port and perform an initial sync.
     pub fn set_map_port(&mut self, port: Box<dyn IdsMapPort + Send>) {
-        self.map_port = Some(port);
+        self.map_port = Some(Arc::new(Mutex::new(port)));
         self.sync_ebpf_maps();
     }
 
@@ -129,7 +135,7 @@ impl IdsAppService {
     /// Check whether an alert should be emitted after a rule match,
     /// based on the rule's threshold config. Returns `true` to emit.
     pub fn check_threshold(
-        &mut self,
+        &self,
         rule_id: &RuleId,
         threshold: &ThresholdConfig,
         src_ip: u32,
@@ -142,7 +148,7 @@ impl IdsAppService {
     /// Country-aware threshold check. Uses per-country threshold overrides
     /// from the rule when available.
     pub fn check_threshold_with_country(
-        &mut self,
+        &self,
         rule: &IdsRule,
         src_ip: u32,
         dst_ip: u32,
@@ -160,7 +166,7 @@ impl IdsAppService {
     }
 
     /// Remove expired threshold tracking entries.
-    pub fn cleanup_expired_thresholds(&mut self) {
+    pub fn cleanup_expired_thresholds(&self) {
         self.engine.cleanup_expired_thresholds();
     }
 
@@ -168,8 +174,13 @@ impl IdsAppService {
     ///
     /// In `Alert` mode, all actions are overridden to `IDS_ACTION_ALERT`
     /// (observation only — no traffic dropped).
-    fn sync_ebpf_maps(&mut self) {
-        let Some(ref mut map) = self.map_port else {
+    fn sync_ebpf_maps(&self) {
+        let Some(ref map_port) = self.map_port else {
+            return;
+        };
+
+        let Ok(mut map) = map_port.lock() else {
+            tracing::warn!("IDS map port lock poisoned, skipping eBPF sync");
             return;
         };
 

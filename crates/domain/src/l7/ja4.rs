@@ -158,8 +158,11 @@ struct CacheEntry {
 }
 
 /// LRU-ish fingerprint cache with configurable TTL and max size.
+///
+/// Uses interior mutability (`Mutex`) so all methods take `&self`.
+/// Safe to share via `Arc<FingerprintCache>` without an external lock.
 pub struct FingerprintCache {
-    entries: HashMap<FlowKey, CacheEntry>,
+    entries: std::sync::Mutex<HashMap<FlowKey, CacheEntry>>,
     max_size: usize,
     ttl: Duration,
 }
@@ -167,27 +170,35 @@ pub struct FingerprintCache {
 impl FingerprintCache {
     pub fn new(max_size: usize, ttl: Duration) -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: std::sync::Mutex::new(HashMap::new()),
             max_size,
             ttl,
         }
     }
 
-    /// Look up a cached fingerprint. Returns `None` if absent or expired.
-    pub fn get(&self, key: &FlowKey) -> Option<&Ja4Fingerprint> {
-        let entry = self.entries.get(key)?;
+    /// Look up a cached fingerprint. Returns a clone; `None` if absent or expired.
+    pub fn get(&self, key: &FlowKey) -> Option<Ja4Fingerprint> {
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = entries.get(key)?;
         if entry.inserted_at.elapsed() > self.ttl {
             return None;
         }
-        Some(&entry.fingerprint)
+        Some(entry.fingerprint.clone())
     }
 
     /// Insert a fingerprint. Evicts oldest entries if cache is full.
-    pub fn insert(&mut self, key: FlowKey, fingerprint: Ja4Fingerprint) {
-        if self.entries.len() >= self.max_size {
-            self.evict_expired_or_oldest();
+    pub fn insert(&self, key: FlowKey, fingerprint: Ja4Fingerprint) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if entries.len() >= self.max_size {
+            Self::evict_expired_or_oldest(&mut entries, self.ttl, self.max_size);
         }
-        self.entries.insert(
+        entries.insert(
             key,
             CacheEntry {
                 fingerprint,
@@ -198,28 +209,34 @@ impl FingerprintCache {
 
     /// Number of entries currently cached.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     /// Whether the cache is empty.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
     }
 
-    fn evict_expired_or_oldest(&mut self) {
-        // First pass: remove expired entries
-        self.entries
-            .retain(|_, entry| entry.inserted_at.elapsed() <= self.ttl);
+    fn evict_expired_or_oldest(
+        entries: &mut HashMap<FlowKey, CacheEntry>,
+        ttl: Duration,
+        max_size: usize,
+    ) {
+        entries.retain(|_, entry| entry.inserted_at.elapsed() <= ttl);
 
-        // If still at capacity, remove the oldest entry
-        if self.entries.len() >= self.max_size
-            && let Some(oldest_key) = self
-                .entries
+        if entries.len() >= max_size
+            && let Some(oldest_key) = entries
                 .iter()
                 .min_by_key(|(_, e)| e.inserted_at)
                 .map(|(k, _)| k.clone())
         {
-            self.entries.remove(&oldest_key);
+            entries.remove(&oldest_key);
         }
     }
 }
@@ -363,11 +380,11 @@ mod tests {
 
     #[test]
     fn cache_insert_and_get() {
-        let mut cache = FingerprintCache::new(100, Duration::from_secs(300));
+        let cache = FingerprintCache::new(100, Duration::from_secs(300));
         let fp = compute_ja4(&make_hello());
         let key = make_flow_key(12345);
         cache.insert(key.clone(), fp.clone());
-        assert_eq!(cache.get(&key), Some(&fp));
+        assert_eq!(cache.get(&key), Some(fp));
         assert_eq!(cache.len(), 1);
     }
 
@@ -380,7 +397,7 @@ mod tests {
 
     #[test]
     fn cache_evicts_at_capacity() {
-        let mut cache = FingerprintCache::new(2, Duration::from_secs(300));
+        let cache = FingerprintCache::new(2, Duration::from_secs(300));
         let fp = compute_ja4(&make_hello());
         cache.insert(make_flow_key(1), fp.clone());
         cache.insert(make_flow_key(2), fp.clone());

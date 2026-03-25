@@ -11,6 +11,7 @@ use ports::secondary::metrics_port::MetricsPort;
 ///
 /// Orchestrates the domain engine and metrics updates.
 /// Unlike IDS, DLP is purely userspace — no eBPF map synchronization needed.
+#[derive(Clone)]
 pub struct DlpAppService {
     engine: DlpEngine,
     metrics: Arc<dyn MetricsPort>,

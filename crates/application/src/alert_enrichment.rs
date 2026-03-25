@@ -15,7 +15,7 @@ pub struct DnsAlertEnricher {
     dns_cache: Arc<dyn DnsCachePort>,
     reputation: Option<Arc<dyn DomainReputationPort>>,
     geoip: Option<Arc<dyn GeoIpPort>>,
-    fingerprint_cache: Option<Arc<std::sync::RwLock<FingerprintCache>>>,
+    fingerprint_cache: Option<Arc<FingerprintCache>>,
 }
 
 impl DnsAlertEnricher {
@@ -40,10 +40,7 @@ impl DnsAlertEnricher {
 
     /// Add a JA4 fingerprint cache for TLS fingerprint enrichment.
     #[must_use]
-    pub fn with_fingerprint_cache(
-        mut self,
-        cache: Arc<std::sync::RwLock<FingerprintCache>>,
-    ) -> Self {
+    pub fn with_fingerprint_cache(mut self, cache: Arc<FingerprintCache>) -> Self {
         self.fingerprint_cache = Some(cache);
         self
     }
@@ -76,16 +73,14 @@ impl AlertEnrichmentPort for DnsAlertEnricher {
         }
 
         // JA4 fingerprint enrichment
-        if let Some(ref fp_cache) = self.fingerprint_cache
-            && let Ok(cache) = fp_cache.read()
-        {
+        if let Some(ref fp_cache) = self.fingerprint_cache {
             let flow_key = FlowKey {
                 src_addr: alert.src_addr,
                 src_port: alert.src_port,
                 dst_addr: alert.dst_addr,
                 dst_port: alert.dst_port,
             };
-            if let Some(fp) = cache.get(&flow_key) {
+            if let Some(fp) = fp_cache.get(&flow_key) {
                 alert.ja4_fingerprint = Some(fp.ja4.clone());
             }
         }

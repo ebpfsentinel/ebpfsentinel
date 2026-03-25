@@ -57,7 +57,7 @@ pub struct FeedResponse {
 pub async fn threatintel_status(
     State(state): State<Arc<AppState>>,
 ) -> Json<ThreatIntelStatusResponse> {
-    let svc = state.threatintel_service.read().await;
+    let svc = state.threatintel_service.load();
     Json(ThreatIntelStatusResponse {
         enabled: svc.enabled(),
         mode: svc.mode().as_str().to_string(),
@@ -80,7 +80,7 @@ pub async fn threatintel_status(
     )
 )]
 pub async fn list_iocs(State(state): State<Arc<AppState>>) -> Json<Vec<IocResponse>> {
-    let svc = state.threatintel_service.read().await;
+    let svc = state.threatintel_service.load();
     let iocs: Vec<IocResponse> = svc
         .engine()
         .all_iocs()
@@ -109,7 +109,7 @@ pub async fn list_iocs(State(state): State<Arc<AppState>>) -> Json<Vec<IocRespon
     )
 )]
 pub async fn list_feeds(State(state): State<Arc<AppState>>) -> Json<Vec<FeedResponse>> {
-    let svc = state.threatintel_service.read().await;
+    let svc = state.threatintel_service.load();
     let feeds: Vec<FeedResponse> = svc
         .list_feeds()
         .iter()
