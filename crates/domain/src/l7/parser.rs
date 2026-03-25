@@ -1359,4 +1359,52 @@ mod tests {
     fn parse_payload_unknown() {
         assert_eq!(parse_payload(b"\x01\x02\x03"), ParsedProtocol::Unknown);
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Arbitrary bytes must never panic any L7 parser.
+            #[test]
+            fn parse_payload_never_panics(data in proptest::collection::vec(any::<u8>(), 0..4096)) {
+                let _ = parse_payload(&data);
+            }
+
+            #[test]
+            fn detect_protocol_never_panics(data in proptest::collection::vec(any::<u8>(), 0..2048)) {
+                let _ = detect_protocol(&data);
+            }
+
+            #[test]
+            fn parse_http_never_panics(data in proptest::collection::vec(any::<u8>(), 0..4096)) {
+                let _ = parse_http(&data);
+            }
+
+            #[test]
+            fn parse_tls_never_panics(data in proptest::collection::vec(any::<u8>(), 0..4096)) {
+                let _ = parse_tls_client_hello(&data);
+            }
+
+            #[test]
+            fn parse_grpc_never_panics(data in proptest::collection::vec(any::<u8>(), 0..2048)) {
+                let _ = parse_grpc(&data);
+            }
+
+            #[test]
+            fn parse_smtp_never_panics(data in proptest::collection::vec(any::<u8>(), 0..1024)) {
+                let _ = parse_smtp(&data);
+            }
+
+            #[test]
+            fn parse_ftp_never_panics(data in proptest::collection::vec(any::<u8>(), 0..1024)) {
+                let _ = parse_ftp(&data);
+            }
+
+            #[test]
+            fn parse_smb_never_panics(data in proptest::collection::vec(any::<u8>(), 0..1024)) {
+                let _ = parse_smb(&data);
+            }
+        }
+    }
 }

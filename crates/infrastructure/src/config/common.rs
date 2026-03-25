@@ -431,4 +431,76 @@ mod tests {
     fn parse_domain_mode_invalid() {
         assert!(parse_domain_mode("invalid").is_err());
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Arbitrary strings must never panic — only Ok or Err.
+            #[test]
+            fn cidr_parser_never_panics(s in ".*") {
+                let _ = parse_cidr(&s);
+            }
+
+            /// Valid IPv4 CIDR always parses successfully.
+            #[test]
+            fn cidr_v4_valid_round_trip(
+                a in 0u8..=255,
+                b in 0u8..=255,
+                c in 0u8..=255,
+                d in 0u8..=255,
+                prefix in 0u8..=32,
+            ) {
+                let input = format!("{a}.{b}.{c}.{d}/{prefix}");
+                let result = parse_cidr(&input);
+                prop_assert!(result.is_ok(), "failed to parse valid CIDR: {input}");
+                if let Ok(IpNetwork::V4 { addr, prefix_len }) = result {
+                    prop_assert_eq!(prefix_len, prefix);
+                    let expected = u32::from_be_bytes([a, b, c, d]);
+                    prop_assert_eq!(addr, expected);
+                }
+            }
+
+            /// Valid IPv4 host (no prefix) always parses with /32.
+            #[test]
+            fn cidr_v4_host_round_trip(
+                a in 0u8..=255,
+                b in 0u8..=255,
+                c in 0u8..=255,
+                d in 0u8..=255,
+            ) {
+                let input = format!("{a}.{b}.{c}.{d}");
+                let result = parse_cidr(&input);
+                prop_assert!(result.is_ok());
+                if let Ok(IpNetwork::V4 { prefix_len, .. }) = result {
+                    prop_assert_eq!(prefix_len, 32);
+                }
+            }
+
+            /// Valid IPv6 CIDR always parses successfully.
+            #[test]
+            fn cidr_v6_valid_round_trip(prefix in 0u8..=128) {
+                let input = format!("2001:db8::1/{prefix}");
+                let result = parse_cidr(&input);
+                prop_assert!(result.is_ok(), "failed to parse valid IPv6 CIDR: {input}");
+                if let Ok(IpNetwork::V6 { prefix_len, .. }) = result {
+                    prop_assert_eq!(prefix_len, prefix);
+                }
+            }
+
+            /// Invalid prefix lengths are rejected.
+            #[test]
+            fn cidr_v4_rejects_large_prefix(prefix in 33u8..=255) {
+                let input = format!("10.0.0.0/{prefix}");
+                prop_assert!(parse_cidr(&input).is_err());
+            }
+
+            #[test]
+            fn cidr_v6_rejects_large_prefix(prefix in 129u8..=255) {
+                let input = format!("::1/{prefix}");
+                prop_assert!(parse_cidr(&input).is_err());
+            }
+        }
+    }
 }

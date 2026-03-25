@@ -795,4 +795,55 @@ mod tests {
         let err = parse_dns_packet(&payload, TEST_ADDR, TEST_TS).unwrap_err();
         assert!(matches!(err, DnsError::MalformedPacket(_)));
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Arbitrary bytes must never panic — only Ok or Err.
+            #[test]
+            fn dns_parser_never_panics(data in proptest::collection::vec(any::<u8>(), 0..2048)) {
+                let _ = parse_dns_packet(
+                    &data,
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    1_000_000,
+                );
+            }
+
+            /// Valid DNS header (12 bytes) with random trailing bytes.
+            #[test]
+            fn dns_parser_with_header_never_panics(
+                txid in any::<u16>(),
+                flags in any::<u16>(),
+                qdcount in 0u16..20,
+                ancount in 0u16..20,
+                tail in proptest::collection::vec(any::<u8>(), 0..512),
+            ) {
+                let mut payload = Vec::with_capacity(12 + tail.len());
+                payload.extend_from_slice(&txid.to_be_bytes());
+                payload.extend_from_slice(&flags.to_be_bytes());
+                payload.extend_from_slice(&qdcount.to_be_bytes());
+                payload.extend_from_slice(&ancount.to_be_bytes());
+                payload.extend_from_slice(&0u16.to_be_bytes()); // nscount
+                payload.extend_from_slice(&0u16.to_be_bytes()); // arcount
+                payload.extend_from_slice(&tail);
+                let _ = parse_dns_packet(
+                    &payload,
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    1_000_000,
+                );
+            }
+
+            /// IPv6 source address variant.
+            #[test]
+            fn dns_parser_ipv6_src_never_panics(data in proptest::collection::vec(any::<u8>(), 0..1024)) {
+                let _ = parse_dns_packet(
+                    &data,
+                    IpAddr::V6(Ipv6Addr::LOCALHOST),
+                    u64::MAX,
+                );
+            }
+        }
+    }
 }

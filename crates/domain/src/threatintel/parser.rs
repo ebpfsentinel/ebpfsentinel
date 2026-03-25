@@ -771,4 +771,82 @@ mod tests {
         assert_eq!(parse_threat_type("spam"), ThreatType::Spam);
         assert_eq!(parse_threat_type("unknown"), ThreatType::Other);
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Arbitrary STIX patterns must never panic.
+            #[test]
+            fn stix_ip_extractor_never_panics(pattern in ".*") {
+                let _ = extract_ips_from_stix_pattern(&pattern);
+            }
+
+            #[test]
+            fn stix_domain_extractor_never_panics(pattern in ".*") {
+                let _ = extract_domains_from_stix_pattern(&pattern);
+            }
+
+            #[test]
+            fn stix_url_extractor_never_panics(pattern in ".*") {
+                let _ = extract_urls_from_stix_pattern(&pattern);
+            }
+
+            /// Valid-looking STIX patterns with random IPs.
+            #[test]
+            fn stix_ip_round_trip(
+                a in 0u8..=255,
+                b in 0u8..=255,
+                c in 0u8..=255,
+                d in 0u8..=255,
+            ) {
+                let pattern = format!("[ipv4-addr:value = '{a}.{b}.{c}.{d}']");
+                let ips = extract_ips_from_stix_pattern(&pattern);
+                prop_assert_eq!(ips.len(), 1);
+                prop_assert_eq!(
+                    ips[0],
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d))
+                );
+            }
+
+            /// Compound patterns with random connectors.
+            #[test]
+            fn stix_compound_never_panics(
+                ip1 in "[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}",
+                ip2 in "[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}",
+                connector in prop_oneof!["AND", "OR", "FOLLOWEDBY", ""],
+            ) {
+                let pattern = format!(
+                    "[ipv4-addr:value = '{ip1}'] {connector} [ipv4-addr:value = '{ip2}']"
+                );
+                let _ = extract_ips_from_stix_pattern(&pattern);
+            }
+
+            /// Arbitrary bytes as plaintext feed lines never panic.
+            #[test]
+            fn plaintext_feed_never_panics(data in proptest::collection::vec(any::<u8>(), 0..4096)) {
+                let config = FeedConfig {
+                    id: "fuzz".into(),
+                    name: "fuzz".into(),
+                    url: "http://localhost".into(),
+                    format: FeedFormat::Plaintext,
+                    enabled: true,
+                    refresh_interval_secs: 3600,
+                    min_confidence: 0,
+                    max_iocs: 10_000,
+                    default_action: None,
+                    field_mapping: None,
+                    auth_header: None,
+                };
+                let _ = parse_feed(&data, &config, |_, _| Ok(vec![]));
+            }
+
+            /// parse_threat_type never panics on any string.
+            #[test]
+            fn threat_type_never_panics(s in ".*") {
+                let _ = parse_threat_type(&s);
+            }
+        }
+    }
 }
