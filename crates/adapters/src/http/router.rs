@@ -17,6 +17,11 @@ const MAX_BODY_SIZE: usize = 64 * 1024;
 const WRITE_RATE_LIMIT_PER_SECOND: u64 = 1;
 const WRITE_RATE_LIMIT_BURST: u32 = 60;
 
+/// Rate limit for read endpoints: 200 requests per 60 seconds per IP.
+/// Prevents enumeration and resource exhaustion on list queries.
+const READ_RATE_LIMIT_PER_SECOND: u64 = 4;
+const READ_RATE_LIMIT_BURST: u32 = 200;
+
 use super::agent_handler::agent_status;
 use super::alert_handler::{list_alerts, mark_false_positive};
 use super::alias_handler::{alias_status, set_external_alias_content};
@@ -93,14 +98,22 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
 
     // Group 3: Protected API routes — split into read and write
     //
-    // Write routes get an additional per-IP rate limit (60 req/min).
-    // Read routes have no rate limit.
-    let governor_conf = Arc::new(
+    // Write routes: strict rate limit (60 req/min per IP).
+    // Read routes: lighter rate limit (200 req/min per IP) to prevent
+    // enumeration and brute-force on auth-protected endpoints.
+    let write_governor = Arc::new(
         GovernorConfigBuilder::default()
             .per_second(WRITE_RATE_LIMIT_PER_SECOND)
             .burst_size(WRITE_RATE_LIMIT_BURST)
             .finish()
-            .expect("governor config should build"),
+            .expect("write governor config should build"),
+    );
+    let read_governor = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(READ_RATE_LIMIT_PER_SECOND)
+            .burst_size(READ_RATE_LIMIT_BURST)
+            .finish()
+            .expect("read governor config should build"),
     );
 
     let api_routes = {
@@ -162,7 +175,8 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
             .route("/api/v1/mitre/coverage", get(mitre_coverage))
             .route("/api/v1/fingerprints/summary", get(fingerprint_summary))
             .route("/api/v1/responses", get(list_response_actions))
-            .route("/api/v1/captures", get(list_captures));
+            .route("/api/v1/captures", get(list_captures))
+            .layer(GovernorLayer::new(read_governor));
 
         // Write routes (rate limited: 60 req/min per IP)
         let write_routes = Router::new()
@@ -205,7 +219,7 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
             .route("/api/v1/responses/{id}", delete(revoke_response_action))
             .route("/api/v1/captures/manual", post(start_capture))
             .route("/api/v1/captures/{id}", delete(stop_capture))
-            .layer(GovernorLayer::new(governor_conf));
+            .layer(GovernorLayer::new(write_governor));
 
         let r = read_routes
             .merge(write_routes)
@@ -229,10 +243,21 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
         router
     };
 
-    // CORS: allow Grafana dashboards, monitoring UIs, and CLI tools to query
-    // the API cross-origin. Auth is still enforced per-request via JWT/API key.
+    // CORS: when auth is enabled, allow any origin (token-protected).
+    // When auth is disabled, restrict to localhost to prevent cross-origin
+    // access from untrusted browsers.
+    let allow_origin = if state.auth_provider.is_some() {
+        AllowOrigin::any()
+    } else {
+        AllowOrigin::predicate(|origin, _| {
+            let o = origin.as_bytes();
+            o.starts_with(b"http://127.0.0.1")
+                || o.starts_with(b"http://localhost")
+                || o.starts_with(b"http://[::1]")
+        })
+    };
     let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::any())
+        .allow_origin(allow_origin)
         .allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,

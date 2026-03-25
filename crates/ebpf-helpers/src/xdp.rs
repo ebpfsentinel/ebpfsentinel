@@ -73,10 +73,16 @@ pub fn skip_ipv6_ext_headers(
                     let hdr_len_byte = unsafe { *hdr_ptr.add(1) };
                     let clamped = (hdr_len_byte & 0x1F) as usize;
                     if next_hdr == 51 {
+                        // AH header: length in 4-byte units, max (31+2)*4 = 132
                         pos += (clamped + 2) * 4;
                     } else {
+                        // Other ext headers: length in 8-byte units, max (31+1)*8 = 256
                         pos += (clamped + 1) * 8;
                     }
+                }
+                // Bounds check after each header advancement
+                if pos > end {
+                    return None;
                 }
             }
             _ => break,

@@ -452,14 +452,23 @@ impl AgentConfig {
                 });
             }
 
-            // Validate OIDC JWKS URL scheme
-            if let Some(ref oidc) = self.auth.oidc
-                && !oidc.jwks_url.starts_with("https://")
-            {
-                tracing::warn!(
-                    jwks_url = %oidc.jwks_url,
-                    "OIDC JWKS URL does not use HTTPS — tokens may be fetched over an insecure channel"
-                );
+            // Validate OIDC JWKS URL scheme — block non-HTTP schemes (SSRF prevention)
+            if let Some(ref oidc) = self.auth.oidc {
+                if !oidc.jwks_url.starts_with("http://") && !oidc.jwks_url.starts_with("https://") {
+                    return Err(ConfigError::Validation {
+                        field: "auth.oidc.jwks_url".to_string(),
+                        message: format!(
+                            "JWKS URL must use http:// or https:// scheme, got '{}'",
+                            oidc.jwks_url
+                        ),
+                    });
+                }
+                if !oidc.jwks_url.starts_with("https://") {
+                    tracing::warn!(
+                        jwks_url = %oidc.jwks_url,
+                        "OIDC JWKS URL does not use HTTPS — tokens may be fetched over an insecure channel"
+                    );
+                }
             }
 
             // Validate API key entries

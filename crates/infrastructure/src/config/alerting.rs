@@ -144,12 +144,25 @@ impl AlertRouteConfig {
             expected: "low, medium, high, critical".to_string(),
         })?;
 
-        // Webhook routes require a webhook_url
-        if self.destination.eq_ignore_ascii_case("webhook") && self.webhook_url.is_none() {
-            return Err(ConfigError::Validation {
-                field: format!("{prefix}.webhook_url"),
-                message: "webhook route requires a webhook_url".to_string(),
-            });
+        // Webhook routes require a webhook_url with http(s) scheme
+        if self.destination.eq_ignore_ascii_case("webhook") {
+            match &self.webhook_url {
+                None => {
+                    return Err(ConfigError::Validation {
+                        field: format!("{prefix}.webhook_url"),
+                        message: "webhook route requires a webhook_url".to_string(),
+                    });
+                }
+                Some(url) if !url.starts_with("http://") && !url.starts_with("https://") => {
+                    return Err(ConfigError::Validation {
+                        field: format!("{prefix}.webhook_url"),
+                        message: format!(
+                            "webhook URL must use http:// or https:// scheme, got '{url}'"
+                        ),
+                    });
+                }
+                _ => {}
+            }
         }
 
         // Email routes require an email_to and smtp config
