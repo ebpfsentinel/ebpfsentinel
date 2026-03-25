@@ -56,7 +56,7 @@ tokio-rustls = "0.26"
 axum = "0.8"
 http-body-util = "0.1"
 tower = "0.5"
-tower-http = "0.6"
+tower-http = { version = "0.6", features = ["cors"] }
 tower_governor = "0.8"
 
 # gRPC

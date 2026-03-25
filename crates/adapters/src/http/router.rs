@@ -6,6 +6,7 @@ use axum::middleware;
 use axum::routing::{delete, get, patch, post, put};
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -228,7 +229,27 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
         router
     };
 
-    router.with_state(state)
+    // CORS: allow Grafana dashboards, monitoring UIs, and CLI tools to query
+    // the API cross-origin. Auth is still enforced per-request via JWT/API key.
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::any())
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+            axum::http::Method::OPTIONS,
+        ])
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::HeaderName::from_static("x-api-key"),
+        ])
+        .expose_headers([axum::http::header::CONTENT_TYPE])
+        .max_age(std::time::Duration::from_secs(3600));
+
+    router.layer(cors).with_state(state)
 }
 
 #[cfg(test)]
