@@ -188,6 +188,39 @@ pub(super) fn reject_if_world_readable(_path: &Path, _label: &str) -> Result<(),
     Ok(())
 }
 
+/// Allowed parent directories for TLS/JWT key file paths.
+///
+/// Prevents path traversal attacks where an attacker controlling the config
+/// could point `cert_path`/`key_path` at sensitive system files.
+const ALLOWED_KEY_PREFIXES: &[&str] = &[
+    "/etc/ebpfsentinel/",
+    "/etc/ssl/",
+    "/etc/tls/",
+    "/etc/pki/",
+    "/var/lib/ebpfsentinel/",
+    "/run/secrets/",
+    "/tmp/",
+];
+
+/// Validate that a key/cert file path is under an allowed directory.
+pub(super) fn validate_key_path(path: &str, field: &str) -> Result<(), ConfigError> {
+    if ALLOWED_KEY_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+    {
+        return Ok(());
+    }
+
+    Err(ConfigError::Validation {
+        field: field.to_string(),
+        message: format!(
+            "path '{path}' is not under an allowed directory — \
+             accepted prefixes: /etc/ebpfsentinel/, /etc/ssl/, /etc/tls/, \
+             /etc/pki/, /var/lib/ebpfsentinel/, /run/secrets/, /tmp/"
+        ),
+    })
+}
+
 /// Enforce a maximum count on a config collection.
 pub(super) fn check_limit(field: &str, count: usize, max: usize) -> Result<(), ConfigError> {
     if count > max {

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -18,8 +18,8 @@ pub struct AuthConfig {
     #[serde(default)]
     pub api_keys: Vec<ApiKeyConfig>,
 
-    /// Whether `/metrics` requires authentication (default: false).
-    #[serde(default)]
+    /// Whether `/metrics` requires authentication (default: true).
+    #[serde(default = "default_metrics_auth")]
     pub metrics_auth_required: bool,
 }
 
@@ -38,6 +38,22 @@ pub struct ApiKeyConfig {
     /// Optional namespace scoping (unrestricted when empty).
     #[serde(default)]
     pub namespaces: Vec<String>,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            jwt: JwtConfig::default(),
+            oidc: None,
+            api_keys: Vec::new(),
+            metrics_auth_required: true,
+        }
+    }
+}
+
+fn default_metrics_auth() -> bool {
+    true
 }
 
 fn default_api_key_role() -> String {
@@ -86,7 +102,7 @@ mod tests {
         assert!(cfg.jwt.audience.is_none());
         assert!(cfg.oidc.is_none());
         assert!(cfg.api_keys.is_empty());
-        assert!(!cfg.metrics_auth_required);
+        assert!(cfg.metrics_auth_required);
     }
 
     #[test]
@@ -156,7 +172,7 @@ jwt:
         let yaml = r#"
 enabled: true
 jwt:
-  public_key_path: /keys/pub.pem
+  public_key_path: /etc/ebpfsentinel/pub.pem
   issuer: myissuer
 oidc:
   jwks_url: "https://auth.example.com/jwks"
@@ -170,7 +186,7 @@ metrics_auth_required: true
 "#;
         let cfg: AuthConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(cfg.enabled);
-        assert_eq!(cfg.jwt.public_key_path, "/keys/pub.pem");
+        assert_eq!(cfg.jwt.public_key_path, "/etc/ebpfsentinel/pub.pem");
         assert_eq!(cfg.jwt.issuer.as_deref(), Some("myissuer"));
         assert!(cfg.oidc.is_some());
         assert_eq!(cfg.api_keys.len(), 1);

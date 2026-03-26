@@ -86,7 +86,7 @@ use alias::MAX_ALIASES;
 use common::{
     MAX_ALERTING_ROUTES, MAX_DLP_PATTERNS, MAX_FIREWALL_RULES, MAX_IDS_RULES, MAX_IPS_RULES,
     MAX_L7_RULES, MAX_RATELIMIT_RULES, MAX_THREATINTEL_FEEDS, check_limit,
-    parse_domain_mode as pdm, reject_if_world_readable,
+    parse_domain_mode as pdm, reject_if_world_readable, validate_key_path,
 };
 use ddos::MAX_DDOS_POLICIES;
 use loadbalancer::MAX_LB_SERVICES;
@@ -329,6 +329,13 @@ impl AgentConfig {
                     message: "TLS is enabled but key_path is not set".to_string(),
                 });
             }
+            validate_key_path(&self.agent.tls.cert_path, "agent.tls.cert_path")?;
+            validate_key_path(&self.agent.tls.key_path, "agent.tls.key_path")?;
+        }
+
+        // Validate JWT key path
+        if self.auth.enabled && !self.auth.jwt.public_key_path.is_empty() {
+            validate_key_path(&self.auth.jwt.public_key_path, "auth.jwt.public_key_path")?;
         }
 
         // Validate firewall rules
@@ -2689,7 +2696,7 @@ agent:
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert!(!config.auth.enabled);
         assert!(config.auth.jwt.public_key_path.is_empty());
-        assert!(!config.auth.metrics_auth_required);
+        assert!(config.auth.metrics_auth_required);
         assert!(config.auth.jwt.issuer.is_none());
         assert!(config.auth.jwt.audience.is_none());
     }
@@ -2780,7 +2787,7 @@ agent:
 auth:
   enabled: true
   jwt:
-    public_key_path: /some/key.pem
+    public_key_path: /etc/ebpfsentinel/key.pem
   oidc:
     jwks_url: https://kubernetes.default.svc/openid/v1/jwks
 ";
