@@ -50,6 +50,15 @@ services:
       # Debug filesystem — required for eBPF tracing
       - /sys/kernel/debug:/sys/kernel/debug:ro
 
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2"
+        reservations:
+          memory: 256M
+          cpus: "0.5"
+
     restart: unless-stopped
 
     # Uses the agent's built-in CLI health check (no curl needed)

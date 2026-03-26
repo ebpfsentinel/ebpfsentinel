@@ -182,6 +182,15 @@ qos:
   # -- Enable QoS / traffic shaping
   enabled: false
 
+# -- Network policy (restricts pod-to-pod traffic)
+networkPolicy:
+  # -- Create a NetworkPolicy
+  enabled: false
+  # -- Extra ingress rules (added to the defaults: API + gRPC + metrics ports)
+  extraIngress: []
+  # -- Extra egress rules (added to the default: DNS egress)
+  extraEgress: []
+
 # -- Prometheus metrics
 metrics:
   serviceMonitor:
