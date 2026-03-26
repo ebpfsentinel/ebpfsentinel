@@ -61,8 +61,12 @@ jobs:
       - name: Install grpcurl
         run: |
           GRPCURL_VERSION="1.9.1"
-          curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" | \
-            sudo tar -xz -C /usr/local/bin grpcurl
+          GRPCURL_SHA256="588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214"
+          curl -sSL -o /tmp/grpcurl.tar.gz \
+            "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz"
+          echo "${GRPCURL_SHA256}  /tmp/grpcurl.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/grpcurl.tar.gz -C /usr/local/bin grpcurl
+          rm -f /tmp/grpcurl.tar.gz
 
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y jq openssl

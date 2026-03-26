@@ -28,7 +28,10 @@ RUN MUSL_INC="$(find /usr/include -maxdepth 1 -name '*-linux-musl*' -type d | he
 
 # Build static libpcap against musl for fully static linking
 RUN PCAP_VERSION=1.10.6 && \
-    wget -qO- "https://www.tcpdump.org/release/libpcap-${PCAP_VERSION}.tar.xz" | tar xJ && \
+    PCAP_SHA256="ec97d1206bdd19cb6bdd043eaa9f0037aa732262ec68e070fd7c7b5f834d5dfc" && \
+    wget -qO /tmp/libpcap.tar.xz "https://www.tcpdump.org/release/libpcap-${PCAP_VERSION}.tar.xz" && \
+    echo "${PCAP_SHA256}  /tmp/libpcap.tar.xz" | sha256sum -c - && \
+    tar xJf /tmp/libpcap.tar.xz && rm -f /tmp/libpcap.tar.xz && \
     cd "libpcap-${PCAP_VERSION}" && \
     CC=musl-gcc ./configure --disable-shared --prefix=/usr/local/musl && \
     make -j"$(nproc)" && \
