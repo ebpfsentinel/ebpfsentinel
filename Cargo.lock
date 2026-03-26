@@ -22,6 +22,7 @@ dependencies = [
  "ipnetwork",
  "jsonwebtoken",
  "lettre",
+ "libc",
  "maxminddb",
  "opentelemetry",
  "opentelemetry-otlp",

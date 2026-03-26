@@ -85,6 +85,9 @@ pub async fn run(
     log_level_override: Option<LogLevel>,
     log_format_override: Option<LogFormat>,
 ) -> anyhow::Result<()> {
+    // ── 0. Restrict file creation permissions ─────────────────────
+    adapters::system::set_restrictive_umask();
+
     // ── 1. Load config ──────────────────────────────────────────────
     let config = AgentConfig::load(Path::new(config_path))?;
 

@@ -9,4 +9,5 @@ pub mod geoip;
 pub mod grpc;
 pub mod http;
 pub mod storage;
+pub mod system;
 pub mod threatintel;
