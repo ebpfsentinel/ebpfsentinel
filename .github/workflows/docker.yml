@@ -91,7 +91,7 @@ jobs:
         with:
           name: ebpf-programs
           path: ebpf-out/
-          retention-days: 1
+          retention-days: 7
 
   # ── Build per-platform Docker images ──────────────────────────────
   build-images:

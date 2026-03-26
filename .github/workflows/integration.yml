@@ -40,7 +40,7 @@ jobs:
         with:
           name: ebpfsentinel-agent
           path: target/release/ebpfsentinel-agent
-          retention-days: 1
+          retention-days: 7
 
   # ── API integration tests (suites 01-05 + 07) ───────────────────
   test-api:

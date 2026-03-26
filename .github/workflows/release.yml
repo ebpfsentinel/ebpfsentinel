@@ -145,7 +145,7 @@ jobs:
         with:
           name: release-${{ matrix.arch }}
           path: ${{ env.TARBALL }}
-          retention-days: 5
+          retention-days: 30
 
   # ── Build Docker images (multi-arch) ──────────────────────────────
   docker:
