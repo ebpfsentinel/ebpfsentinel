@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use domain::alert::entity::Alert;
 use ports::secondary::auth_provider::AuthProvider;
@@ -52,7 +53,12 @@ pub async fn run_grpc_server(
     // Alert streaming service
     let alert_service = AlertStreamServiceImpl::new(alert_tx);
 
-    let mut builder = Server::builder();
+    let mut builder = Server::builder()
+        .timeout(Duration::from_secs(30))
+        .tcp_keepalive(Some(Duration::from_secs(60)))
+        .http2_keepalive_interval(Some(Duration::from_secs(30)))
+        .http2_keepalive_timeout(Some(Duration::from_secs(10)))
+        .concurrency_limit_per_connection(64);
 
     // Configure TLS when enabled
     if let Some(tls) = tls_config {

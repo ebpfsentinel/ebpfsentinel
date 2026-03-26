@@ -856,6 +856,7 @@ pub async fn run(
 
     // ── 10. Load eBPF programs (each with graceful degradation) ────
     check_ebpf_privileges()?;
+    check_kernel_version()?;
     let ebpf_dir = resolve_ebpf_program_dir(&config);
 
     // Clean up stale pinned maps from a previous crash (if any)
@@ -2085,6 +2086,8 @@ pub async fn run(
 /// Holds eBPF resources that must live for the duration of the agent.
 ///
 /// When dropped, all loaders are dropped and their eBPF programs are detached.
+/// On kernel >= 6.6 (TCX), TC link FDs auto-close even on SIGKILL, so programs
+/// do not persist after a crash. Pinned maps are cleaned up as defense-in-depth.
 pub struct EbpfState {
     pub loaders: Vec<EbpfLoader>,
 }
@@ -2092,6 +2095,15 @@ pub struct EbpfState {
 impl Default for EbpfState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for EbpfState {
+    fn drop(&mut self) {
+        // Loaders are dropped first (aya detaches programs via link FDs).
+        // Then clean up any pinned maps left on the BPF filesystem.
+        self.loaders.clear();
+        EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
     }
 }
 
@@ -2146,6 +2158,39 @@ fn check_ebpf_privileges() -> anyhow::Result<()> {
     Err(anyhow::anyhow!(
         "insufficient privileges to load eBPF programs — \
          run as root or grant CAP_BPF + CAP_NET_ADMIN capabilities"
+    ))
+}
+
+/// Verify the kernel version is >= 6.6 (required for TCX link-based TC attach).
+///
+/// TCX (kernel 6.6+) provides link-based TC program attachment: programs auto-detach
+/// when the owning FD is closed, even on crash (SIGKILL). Older kernels use netlink-based
+/// attach where TC programs persist in the qdisc after the agent exits.
+fn check_kernel_version() -> anyhow::Result<()> {
+    const MIN_MAJOR: u32 = 6;
+    const MIN_MINOR: u32 = 6;
+
+    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map_err(|e| anyhow::anyhow!("cannot read kernel version: {e}"))?;
+
+    let version = release.trim();
+    let mut parts = version.split(|c: char| !c.is_ascii_digit());
+    let major = parts
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    let minor = parts
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+
+    if major > MIN_MAJOR || (major == MIN_MAJOR && minor >= MIN_MINOR) {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "kernel {version} is too old — eBPFsentinel requires kernel >= {MIN_MAJOR}.{MIN_MINOR} \
+         (TCX link-based TC attach)"
     ))
 }
 
