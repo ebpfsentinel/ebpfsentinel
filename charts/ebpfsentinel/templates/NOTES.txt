@@ -30,3 +30,38 @@ Prometheus metrics:
   hostPID is DISABLED — DLP only sees agent pod processes.
   Enable with: --set daemonset.hostPID=true
 {{- end }}
+
+Secrets management (TLS certs, JWT keys, API keys):
+
+  Option A — Kubernetes Secrets (mount via extraVolumes/extraVolumeMounts):
+
+    kubectl create secret tls ebpfsentinel-tls --cert=cert.pem --key=key.pem
+    helm upgrade {{ .Release.Name }} ... \
+      --set 'daemonset.extraVolumes[0].name=tls' \
+      --set 'daemonset.extraVolumes[0].secret.secretName=ebpfsentinel-tls' \
+      --set 'daemonset.extraVolumeMounts[0].name=tls' \
+      --set 'daemonset.extraVolumeMounts[0].mountPath=/etc/ebpfsentinel/tls' \
+      --set 'daemonset.extraVolumeMounts[0].readOnly=true'
+
+  Option B — External Secrets Operator:
+
+    apiVersion: external-secrets.io/v1beta1
+    kind: ExternalSecret
+    metadata:
+      name: ebpfsentinel-tls
+    spec:
+      secretStoreRef:
+        name: vault-backend    # or aws-secretsmanager, gcp-secretmanager
+        kind: ClusterSecretStore
+      target:
+        name: ebpfsentinel-tls
+      data:
+        - secretKey: tls.crt
+          remoteRef: { key: ebpfsentinel/tls-cert }
+        - secretKey: tls.key
+          remoteRef: { key: ebpfsentinel/tls-key }
+
+  Option C — Sealed Secrets (GitOps):
+
+    kubeseal --format yaml < secret.yaml > sealed-secret.yaml
+    # Commit sealed-secret.yaml to Git — decrypted at deploy time by the controller.

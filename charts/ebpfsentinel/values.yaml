@@ -75,6 +75,14 @@ daemonset:
   terminationGracePeriodSeconds: 30
   # -- Pod priority class name
   priorityClassName: ""
+  # -- Container security context
+  securityContext:
+    privileged: true
+    # Alternative: fine-grained capabilities (requires kernel 5.8+)
+    # privileged: false
+    # capabilities:
+    #   add: [BPF, NET_ADMIN, SYS_ADMIN, NET_RAW, PERFMON]
+    #   drop: [ALL]
   # -- Resource requests and limits
   resources:
     requests:
@@ -181,6 +189,13 @@ zones:
 qos:
   # -- Enable QoS / traffic shaping
   enabled: false
+
+# -- Pod disruption budget (protects against voluntary evictions)
+podDisruptionBudget:
+  # -- Create a PodDisruptionBudget
+  enabled: false
+  # -- Maximum number of pods that can be unavailable during voluntary disruptions
+  maxUnavailable: 1
 
 # -- Network policy (restricts pod-to-pod traffic)
 networkPolicy:

@@ -58,7 +58,7 @@ spec:
           image: {{ include "ebpfsentinel.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
-            privileged: true
+            {{- toYaml .Values.daemonset.securityContext | nindent 12 }}
           args:
             - "--config"
             - "/etc/ebpfsentinel/config.yaml"
