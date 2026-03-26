@@ -121,8 +121,9 @@ teardown_file() {
 
 @test "HTTPS API works with CA cert" {
     local body
-    body="$(curl -s --max-time "$HTTP_TIMEOUT" \
-        --cacert "${CERT_DIR}/ca.pem" "${TLS_URL}/api/v1/agent/status")"
+    body="$(api_get /api/v1/agent/status --cacert "${CERT_DIR}/ca.pem")"
+    _load_http_status
+    assert_http_status "200" "$HTTP_STATUS"
     local version
     version="$(echo "$body" | jq -r '.version' 2>/dev/null)" || true
     [ -n "$version" ] && [ "$version" != "null" ]
