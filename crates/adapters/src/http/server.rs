@@ -21,7 +21,7 @@ pub async fn run_http_server(
     tls_config: Option<Arc<ServerConfig>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
-    let router = build_router(state, swagger_ui);
+    let router = build_router(state, swagger_ui, tls_config.is_some());
     let listener = tokio::net::TcpListener::bind(format!("{bind_address}:{port}")).await?;
 
     if let Some(tls) = tls_config {

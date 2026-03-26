@@ -86,7 +86,7 @@ use alias::MAX_ALIASES;
 use common::{
     MAX_ALERTING_ROUTES, MAX_DLP_PATTERNS, MAX_FIREWALL_RULES, MAX_IDS_RULES, MAX_IPS_RULES,
     MAX_L7_RULES, MAX_RATELIMIT_RULES, MAX_THREATINTEL_FEEDS, check_limit,
-    parse_domain_mode as pdm, warn_if_world_readable,
+    parse_domain_mode as pdm, reject_if_world_readable,
 };
 use ddos::MAX_DDOS_POLICIES;
 use loadbalancer::MAX_LB_SERVICES;
@@ -200,21 +200,21 @@ impl AgentConfig {
     /// (permissions more permissive than 0o640), since config may
     /// contain sensitive values like auth headers and API keys.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        warn_if_world_readable(path, "config file");
+        reject_if_world_readable(path, "config file")?;
         let content = std::fs::read_to_string(path)?;
         let config = Self::from_yaml(&content)?;
 
-        // Warn if TLS key file is world-readable
+        // Reject if TLS key file is world-readable
         if config.agent.tls.enabled && !config.agent.tls.key_path.is_empty() {
-            warn_if_world_readable(Path::new(&config.agent.tls.key_path), "TLS private key");
+            reject_if_world_readable(Path::new(&config.agent.tls.key_path), "TLS private key")?;
         }
 
-        // Warn if JWT key file is world-readable
+        // Reject if JWT key file is world-readable
         if config.auth.enabled && !config.auth.jwt.public_key_path.is_empty() {
-            warn_if_world_readable(
+            reject_if_world_readable(
                 Path::new(&config.auth.jwt.public_key_path),
                 "JWT public key",
-            );
+            )?;
         }
 
         Ok(config)

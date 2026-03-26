@@ -2,8 +2,6 @@
 
 use std::path::Path;
 
-use tracing::warn;
-
 use domain::common::entity::{DomainMode, Protocol, Severity};
 use domain::firewall::entity::{FirewallAction, IpNetwork};
 
@@ -162,29 +160,32 @@ fn parse_cidr_v6(s: &str) -> Result<IpNetwork, ConfigError> {
     })
 }
 
-/// Log a warning if a file is world-readable (Unix only).
+/// Reject a file that is world-readable (Unix only).
 ///
 /// Security best practice: config files containing secrets (API keys,
 /// auth headers, TLS keys) should be readable only by the owner
 /// and group (mode 0640 or stricter).
 #[cfg(unix)]
-pub(super) fn warn_if_world_readable(path: &Path, label: &str) {
+pub(super) fn reject_if_world_readable(path: &Path, label: &str) -> Result<(), ConfigError> {
     use std::os::unix::fs::PermissionsExt;
     if let Ok(metadata) = std::fs::metadata(path) {
         let mode = metadata.permissions().mode();
         if mode & 0o004 != 0 {
-            warn!(
-                path = %path.display(),
-                mode = format!("{mode:04o}"),
-                "{label} is world-readable — consider chmod 640 or stricter",
-            );
+            return Err(ConfigError::Validation {
+                field: label.to_string(),
+                message: format!(
+                    "{} is world-readable (mode {mode:04o}) — chmod 640 or stricter",
+                    path.display()
+                ),
+            });
         }
     }
+    Ok(())
 }
 
 #[cfg(not(unix))]
-pub(super) fn warn_if_world_readable(_path: &Path, _label: &str) {
-    // File permission checks not available on non-Unix platforms.
+pub(super) fn reject_if_world_readable(_path: &Path, _label: &str) -> Result<(), ConfigError> {
+    Ok(())
 }
 
 /// Enforce a maximum count on a config collection.

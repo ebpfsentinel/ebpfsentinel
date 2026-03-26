@@ -852,6 +852,7 @@ pub async fn run(
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
 
     // ── 10. Load eBPF programs (each with graceful degradation) ────
+    check_ebpf_privileges()?;
     let ebpf_dir = resolve_ebpf_program_dir(&config);
 
     // Clean up stale pinned maps from a previous crash (if any)
@@ -2101,6 +2102,48 @@ impl EbpfState {
     pub fn add_loader(&mut self, loader: EbpfLoader) {
         self.loaders.push(loader);
     }
+}
+
+/// Verify the process has sufficient privileges to load eBPF programs.
+///
+/// Checks for root (UID 0) or the required Linux capabilities
+/// (`CAP_BPF` + `CAP_NET_ADMIN`, or `CAP_SYS_ADMIN`).
+/// Fails fast with a clear error instead of waiting for cryptic kernel errors.
+fn check_ebpf_privileges() -> anyhow::Result<()> {
+    const CAP_NET_ADMIN: u64 = 1 << 12;
+    const CAP_SYS_ADMIN: u64 = 1 << 21;
+    const CAP_BPF: u64 = 1 << 39;
+
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|e| anyhow::anyhow!("cannot read /proc/self/status: {e}"))?;
+
+    // Check if running as root
+    let is_root = status
+        .lines()
+        .any(|line| line.starts_with("Uid:") && line.split_whitespace().nth(1) == Some("0"));
+    if is_root {
+        return Ok(());
+    }
+
+    // Check effective capabilities for CAP_BPF(39)+CAP_NET_ADMIN(12) or CAP_SYS_ADMIN(21)
+    let cap_eff = status
+        .lines()
+        .find(|line| line.starts_with("CapEff:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+        .unwrap_or(0);
+
+    let has_sys_admin = cap_eff & CAP_SYS_ADMIN != 0;
+    let has_bpf_and_net = cap_eff & CAP_BPF != 0 && cap_eff & CAP_NET_ADMIN != 0;
+
+    if has_sys_admin || has_bpf_and_net {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "insufficient privileges to load eBPF programs — \
+         run as root or grant CAP_BPF + CAP_NET_ADMIN capabilities"
+    ))
 }
 
 /// Resolve the directory containing compiled eBPF program binaries.

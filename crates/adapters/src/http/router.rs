@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::http::header::HeaderValue;
 use axum::middleware;
+use axum::response::Response;
 use axum::routing::{delete, get, patch, post, put};
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
@@ -77,7 +79,7 @@ use super::zone_handler::{list_zone_policies, list_zones, zone_status};
 /// 2. **Metrics** (conditional auth): `/metrics` — auth only when configured
 /// 3. **API** (protected): `/api/v1/*` — auth when provider is present
 #[allow(clippy::too_many_lines)]
-pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
+pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -> Router {
     // Group 1: Public routes — never require auth (K8s probes)
     let public_routes = Router::new()
         .route("/healthz", get(healthz))
@@ -274,7 +276,56 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool) -> Router {
         .expose_headers([axum::http::header::CONTENT_TYPE])
         .max_age(std::time::Duration::from_secs(3600));
 
-    router.layer(cors).with_state(state)
+    let router = router.layer(cors);
+
+    // Security response headers — applied to every response.
+    let router = if tls_enabled {
+        router.layer(middleware::map_response(security_headers_with_hsts))
+    } else {
+        router.layer(middleware::map_response(security_headers))
+    };
+
+    router.with_state(state)
+}
+
+/// Security headers added to every HTTP response.
+async fn security_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        axum::http::HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    response
+}
+
+/// Security headers with HSTS — only when TLS is enabled.
+async fn security_headers_with_hsts(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        axum::http::HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    headers.insert(
+        axum::http::header::STRICT_TRANSPORT_SECURITY,
+        HeaderValue::from_static("max-age=63072000; includeSubDomains"),
+    );
+    response
 }
 
 #[cfg(test)]
@@ -337,6 +388,6 @@ mod tests {
             reload_tx,
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         ));
-        let _router = build_router(state, true);
+        let _router = build_router(state, true, false);
     }
 }
