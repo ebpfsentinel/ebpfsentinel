@@ -5,6 +5,9 @@ on:
     - cron: "0 5 * * *" # Daily at 05:00 UTC
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings

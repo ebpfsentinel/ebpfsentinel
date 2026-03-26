@@ -11,10 +11,6 @@ on:
         required: false
         type: string
 
-permissions:
-  contents: write
-  packages: write
-
 env:
   CARGO_TERM_COLOR: always
 
@@ -23,6 +19,8 @@ jobs:
   prepare:
     name: Prepare
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
@@ -66,6 +64,8 @@ jobs:
     name: Build (${{ matrix.arch }})
     needs: prepare
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -160,6 +160,8 @@ jobs:
     name: Publish Release
     runs-on: ubuntu-latest
     needs: [prepare, build-release, docker]
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
