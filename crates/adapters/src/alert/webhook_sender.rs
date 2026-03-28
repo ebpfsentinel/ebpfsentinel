@@ -10,12 +10,17 @@ use ports::secondary::alert_sender::AlertSender;
 use ports::secondary::metrics_port::MetricsPort;
 
 /// Alert sender that POSTs alert JSON to a webhook URL.
+///
+/// Validates webhook URLs against SSRF (rejects private/loopback/link-local IPs).
 pub struct WebhookAlertSender {
     client: reqwest::Client,
     circuit_breaker: Mutex<CircuitBreaker>,
     retry_config: RetryConfig,
     metrics: Arc<dyn MetricsPort>,
     destination_name: String,
+    /// Skip SSRF validation (test-only).
+    #[cfg(test)]
+    skip_url_validation: bool,
 }
 
 impl WebhookAlertSender {
@@ -31,8 +36,80 @@ impl WebhookAlertSender {
             retry_config,
             metrics,
             destination_name,
+            #[cfg(test)]
+            skip_url_validation: false,
         }
     }
+}
+
+/// Validate webhook URL: must be http(s), must not target private/loopback/link-local addresses.
+fn validate_webhook_url(url: &str) -> Result<(), DomainError> {
+    let rest = if let Some(r) = url.strip_prefix("https://") {
+        r
+    } else if let Some(r) = url.strip_prefix("http://") {
+        r
+    } else {
+        return Err(DomainError::EngineError(
+            "webhook URL must use http:// or https:// scheme".to_string(),
+        ));
+    };
+
+    // Extract host (strip path, query, userinfo, port)
+    let host_port = rest.split('/').next().unwrap_or(rest);
+    let host_port = host_port.split('?').next().unwrap_or(host_port);
+    let host_port = host_port.rsplit_once('@').map_or(host_port, |(_, hp)| hp);
+
+    let host = if let Some(bracketed) = host_port.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or(bracketed)
+    } else {
+        host_port.rsplit_once(':').map_or(host_port, |(h, _)| h)
+    };
+
+    if host.is_empty() {
+        return Err(DomainError::EngineError(
+            "webhook URL has empty host".to_string(),
+        ));
+    }
+
+    let host_lower = host.to_ascii_lowercase();
+    if host_lower == "localhost"
+        || host_lower == "metadata.google.internal"
+        || host_lower.ends_with(".internal")
+    {
+        return Err(DomainError::EngineError(
+            "webhook URL must not target localhost or metadata endpoints".to_string(),
+        ));
+    }
+
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if ip.is_loopback() || ip.is_unspecified() {
+            return Err(DomainError::EngineError(
+                "webhook URL must not target loopback or unspecified addresses".to_string(),
+            ));
+        }
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                if v4.is_private()
+                    || v4.is_link_local()
+                    || (v4.octets()[0] == 169 && v4.octets()[1] == 254)
+                {
+                    return Err(DomainError::EngineError(
+                        "webhook URL must not target private or link-local addresses".to_string(),
+                    ));
+                }
+            }
+            std::net::IpAddr::V6(v6) => {
+                let first = v6.segments()[0];
+                if (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80 {
+                    return Err(DomainError::EngineError(
+                        "webhook URL must not target private or link-local addresses".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 impl AlertSender for WebhookAlertSender {
@@ -58,9 +135,17 @@ impl AlertSender for WebhookAlertSender {
                 }
             }
 
-            // 2. Extract webhook URL from route destination
+            // 2. Extract and validate webhook URL from route destination
             let url = match &route.destination {
-                AlertDestination::Webhook { url } => url.clone(),
+                AlertDestination::Webhook { url } => {
+                    #[cfg(test)]
+                    if !self.skip_url_validation {
+                        validate_webhook_url(url)?;
+                    }
+                    #[cfg(not(test))]
+                    validate_webhook_url(url)?;
+                    url.clone()
+                }
                 _ => {
                     return Err(DomainError::EngineError(
                         "webhook sender received non-webhook route".to_string(),
@@ -236,12 +321,13 @@ mod tests {
     async fn circuit_breaker_opens_after_threshold() {
         let metrics = Arc::new(TestMetrics::new());
         let cb = CircuitBreaker::new(2, Duration::from_secs(60));
-        let sender = WebhookAlertSender::new(
+        let mut sender = WebhookAlertSender::new(
             cb,
             fast_retry(),
             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
             "test-webhook".to_string(),
         );
+        sender.skip_url_validation = true;
 
         let alert = sample_alert();
         let route = webhook_route("http://127.0.0.1:1/unreachable");
@@ -262,12 +348,13 @@ mod tests {
     async fn circuit_blocks_when_open() {
         let metrics = Arc::new(TestMetrics::new());
         let cb = CircuitBreaker::new(1, Duration::from_secs(60));
-        let sender = WebhookAlertSender::new(
+        let mut sender = WebhookAlertSender::new(
             cb,
             fast_retry(),
             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
             "test-webhook".to_string(),
         );
+        sender.skip_url_validation = true;
 
         let alert = sample_alert();
         let route = webhook_route("http://127.0.0.1:1/unreachable");
@@ -286,12 +373,13 @@ mod tests {
     async fn metric_updated_on_send() {
         let metrics = Arc::new(TestMetrics::new());
         let cb = CircuitBreaker::new(5, Duration::from_secs(60));
-        let sender = WebhookAlertSender::new(
+        let mut sender = WebhookAlertSender::new(
             cb,
             fast_retry(),
             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
             "test-webhook".to_string(),
         );
+        sender.skip_url_validation = true;
 
         let alert = sample_alert();
         let route = webhook_route("http://127.0.0.1:1/unreachable");
@@ -342,12 +430,13 @@ mod tests {
         let url = format!("http://{addr}/webhook");
         let metrics = Arc::new(TestMetrics::new());
         let cb = CircuitBreaker::new(5, Duration::from_secs(60));
-        let sender = WebhookAlertSender::new(
+        let mut sender = WebhookAlertSender::new(
             cb,
             fast_retry(),
             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
             "test-webhook".to_string(),
         );
+        sender.skip_url_validation = true;
 
         let alert = sample_alert();
         let route = webhook_route(&url);
@@ -384,12 +473,13 @@ mod tests {
         let url = format!("http://{addr}/webhook");
         let metrics = Arc::new(TestMetrics::new());
         let cb = CircuitBreaker::new(5, Duration::from_secs(60));
-        let sender = WebhookAlertSender::new(
+        let mut sender = WebhookAlertSender::new(
             cb,
             fast_retry(),
             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
             "test-webhook".to_string(),
         );
+        sender.skip_url_validation = true;
 
         let alert = sample_alert();
         let route = webhook_route(&url);
@@ -435,12 +525,13 @@ mod tests {
             backoff_schedule: vec![],
             timeout: Duration::from_secs(2),
         };
-        let sender = WebhookAlertSender::new(
+        let mut sender = WebhookAlertSender::new(
             cb,
             no_retry,
             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
             "test-webhook".to_string(),
         );
+        sender.skip_url_validation = true;
 
         let alert = sample_alert();
         let route = webhook_route(&url);
@@ -466,5 +557,39 @@ mod tests {
         assert_eq!(alert.protocol, deserialized.protocol);
         assert_eq!(alert.timestamp_ns, deserialized.timestamp_ns);
         assert_eq!(alert.is_ipv6, deserialized.is_ipv6);
+    }
+
+    // ── Webhook URL SSRF validation ──────────────────────────────────
+
+    #[test]
+    fn webhook_url_accepts_public_https() {
+        assert!(validate_webhook_url("https://hooks.slack.com/services/abc").is_ok());
+    }
+
+    #[test]
+    fn webhook_url_rejects_loopback() {
+        assert!(validate_webhook_url("http://127.0.0.1/hook").is_err());
+    }
+
+    #[test]
+    fn webhook_url_rejects_private_rfc1918() {
+        assert!(validate_webhook_url("http://10.0.0.1/hook").is_err());
+        assert!(validate_webhook_url("http://172.16.0.1/hook").is_err());
+        assert!(validate_webhook_url("http://192.168.1.1/hook").is_err());
+    }
+
+    #[test]
+    fn webhook_url_rejects_link_local() {
+        assert!(validate_webhook_url("http://169.254.169.254/latest/meta-data/").is_err());
+    }
+
+    #[test]
+    fn webhook_url_rejects_localhost() {
+        assert!(validate_webhook_url("http://localhost/hook").is_err());
+    }
+
+    #[test]
+    fn webhook_url_rejects_ftp_scheme() {
+        assert!(validate_webhook_url("ftp://example.com/hook").is_err());
     }
 }
