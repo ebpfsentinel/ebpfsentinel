@@ -881,599 +881,620 @@ pub async fn run(
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
 
     // ── 10. Load eBPF programs (each with graceful degradation) ────
-    check_ebpf_privileges()?;
-    check_kernel_version()?;
+    //
+    // Privilege and kernel checks are non-fatal: the agent continues in
+    // API-only mode (ebpf_loaded=false) so REST/gRPC endpoints remain
+    // accessible for management even without eBPF capabilities.
+    let ebpf_capable = match check_ebpf_privileges().and_then(|()| check_kernel_version()) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::error!(error = %e, "eBPF unavailable — running in API-only mode");
+            false
+        }
+    };
     let ebpf_dir = resolve_ebpf_program_dir(&config);
-
-    // Clean up stale pinned maps from a previous crash (if any)
-    EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
 
     let mut ebpf_state = EbpfState::new();
     let mut ebpf_map_holder = crate::reload::EbpfMapHolder::new();
     let mut metrics_readers: Vec<MetricsReader> = Vec::new();
     let mut iface_groups_mgr = InterfaceGroupsManager::new();
 
-    // 10a. XDP Firewall
+    // These flags track which eBPF programs loaded successfully.
+    // Default to false when eBPF is unavailable (API-only mode).
+    let (mut fw_ok, mut rl_ok, mut lb_pre_loaded) = (false, false, false);
+    let (mut ids_ok, mut ti_ok, mut dns_ok, mut dlp_ok) = (false, false, false, false);
+    let (mut ct_ok, mut nat_ok, mut scrub_ok, mut lb_ok) = (false, false, false, false);
     let mut fw_loader: Option<EbpfLoader> = None;
-    let fw_ok = if config.firewall.enabled {
-        match try_load_xdp_firewall(&ebpf_dir, &config, &domain_rules) {
-            Ok((loader, map_manager, fw_metrics_rdr, reader)) => {
-                let event_tx_clone = event_tx.clone();
-                tokio::spawn(
-                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
-                );
-                let mut svc = firewall_svc.write().await;
-                svc.set_map_port(Box::new(map_manager));
-                if let Some(rdr) = fw_metrics_rdr {
-                    metrics_readers.push(rdr);
-                }
-                metrics.set_ebpf_program_status("xdp_firewall", true);
-                ebpf_loaded.store(true, Ordering::Relaxed);
-                info!(
-                    interfaces = ?config.agent.interfaces,
-                    mode = firewall_mode.as_str(),
-                    "eBPF xdp-firewall active"
-                );
-                fw_loader = Some(loader);
-                true
-            }
-            Err(e) => {
-                warn!("xdp-firewall load failed (degraded mode): {e}");
-                metrics.set_ebpf_program_status("xdp_firewall", false);
-                false
-            }
-        }
-    } else {
-        metrics.set_ebpf_program_status("xdp_firewall", false);
-        false
-    };
 
-    // 10b. XDP Rate Limiter
-    let mut lb_pre_loaded = false;
-    let rl_ok = if config.ratelimit.enabled {
-        match try_load_xdp_ratelimit(&ebpf_dir, &config, fw_ok) {
-            Ok((mut rl_loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs, reader)) => {
-                let event_tx_clone = event_tx.clone();
-                tokio::spawn(
-                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
-                );
-                metrics_readers.extend(rl_rdrs);
-                if let Some(rl_mgr) = rl_mgr_opt {
-                    let mut svc = rl_svc.write().await;
-                    let default_algo = parse_algorithm_byte(&config.ratelimit.default_algorithm);
-                    svc.set_defaults(
-                        config.ratelimit.default_rate,
-                        config.ratelimit.default_burst,
-                        default_algo,
-                    );
-                    svc.set_map_port(Box::new(rl_mgr));
-                }
-                if let Some(rl_lpm) = rl_lpm_opt {
-                    let mut svc = rl_svc.write().await;
-                    svc.set_lpm_port(Box::new(rl_lpm));
-                    svc.set_alias_resolution(Arc::clone(&alias_resolver));
-                    // Load initial country tiers
-                    if let Ok(tiers) = config.ratelimit_country_tiers()
-                        && !tiers.is_empty()
-                    {
-                        if let Err(e) = svc.reload_country_tiers(&tiers) {
-                            warn!("initial country tier load failed (non-fatal): {e}");
-                        } else {
-                            info!(
-                                count = tiers.len(),
-                                "initial country-tier rate limits loaded"
-                            );
-                        }
-                    }
-                }
-                // Wire tail-call: firewall → ratelimit (if both loaded).
-                if let Some(ref mut fw) = fw_loader {
-                    match rl_loader.xdp_program_fd("xdp_ratelimit") {
-                        Ok(rl_fd) => {
-                            if let Err(e) = fw.set_tail_call_target("XDP_PROG_ARRAY", 0, &rl_fd) {
-                                warn!("tail-call wiring failed (non-fatal): {e}");
-                            } else {
-                                info!("XDP tail-call: firewall → ratelimit wired");
-                            }
-                        }
-                        Err(e) => warn!("ratelimit fd retrieval failed: {e}"),
-                    }
-                }
-                iface_groups_mgr.add_map(rl_loader.ebpf_mut());
-                // Wire tail-call: ratelimit → syncookie (slot 0). Best-effort.
-                match try_load_xdp_ratelimit_syncookie(&ebpf_dir, &mut rl_loader) {
-                    Ok(sc_loader) => {
-                        ebpf_state.add_loader(sc_loader);
-                        info!("XDP tail-call: ratelimit → syncookie wired (slot 0)");
-                    }
-                    Err(e) => {
-                        warn!(
-                            "xdp-ratelimit-syncookie load failed (syncookie falls back to DROP): {e}"
-                        );
-                    }
-                }
-                // Wire tail-call: ratelimit → loadbalancer (slot 1). Best-effort.
-                // Must happen before rl_loader is moved into ebpf_state.
-                // When ratelimit returns XDP_PASS, it tail-calls to the LB so
-                // the LB can DNAT service traffic. Without this, PASS goes
-                // directly to the kernel, bypassing the LB entirely.
-                if config.loadbalancer.enabled {
-                    match try_load_xdp_loadbalancer(&ebpf_dir, &config, true) {
-                        Ok((lb_loader_early, lb_mgr, lb_metrics_rdr, lb_reader)) => {
-                            let event_tx_clone = event_tx.clone();
-                            tokio::spawn(async move {
-                                lb_reader
-                                    .run(event_tx_clone, CancellationToken::new())
-                                    .await;
-                            });
-                            lb_svc.write().await.set_map_port(Box::new(lb_mgr));
-                            if let Some(rdr) = lb_metrics_rdr {
-                                metrics_readers.push(rdr);
-                            }
-                            if let Ok(lb_fd) = lb_loader_early.xdp_program_fd("xdp_loadbalancer") {
-                                if let Err(e) =
-                                    rl_loader.set_tail_call_target("RL_PROG_ARRAY", 1, &lb_fd)
-                                {
-                                    warn!("ratelimit → LB tail-call wiring failed: {e}");
-                                } else {
-                                    info!(
-                                        "XDP tail-call: ratelimit → loadbalancer wired (RL slot 1)"
-                                    );
-                                }
-                            }
-                            // Also wire into firewall (slot 2) for the no-ratelimit fallback path.
-                            if let Some(ref mut fw) = fw_loader
-                                && let Ok(lb_fd) =
-                                    lb_loader_early.xdp_program_fd("xdp_loadbalancer")
-                            {
-                                let _ = fw.set_tail_call_target("XDP_PROG_ARRAY", 2, &lb_fd);
-                            }
-                            ebpf_state.add_loader(lb_loader_early);
-                            metrics.set_ebpf_program_status("xdp_loadbalancer", true);
-                            info!("eBPF xdp-loadbalancer active (via ratelimit chain)");
-                            lb_pre_loaded = true;
-                        }
-                        Err(e) => {
-                            warn!("LB pre-load for RL chain failed (non-fatal): {e}");
-                        }
-                    }
-                }
-                ebpf_state.add_loader(rl_loader);
-                metrics.set_ebpf_program_status("xdp_ratelimit", true);
-                info!("eBPF xdp-ratelimit active");
-                true
-            }
-            Err(e) => {
-                warn!("xdp-ratelimit load failed (degraded mode): {e}");
-                metrics.set_ebpf_program_status("xdp_ratelimit", false);
-                false
-            }
-        }
-    } else {
-        metrics.set_ebpf_program_status("xdp_ratelimit", false);
-        false
-    };
+    if ebpf_capable {
+        // Clean up stale pinned maps from a previous crash (if any)
+        EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
 
-    // Wire tail-call: firewall → reject (slot 1). Best-effort: if the reject
-    // program fails to load, REJECT rules fall back to DROP silently (the
-    // ProgramArray slot stays empty and tail_call is a no-op).
-    if let Some(ref mut fw) = fw_loader {
-        match try_load_xdp_firewall_reject(&ebpf_dir, fw) {
-            Ok(reject_loader) => {
-                ebpf_state.add_loader(reject_loader);
-                info!("XDP tail-call: firewall → reject wired (slot 1)");
-            }
-            Err(e) => {
-                warn!("xdp-firewall-reject load failed (REJECT falls back to DROP): {e}");
-            }
-        }
-    }
-
-    // Wire LpmCoordinator from xdp-firewall to alias, ddos, ips services (take LPM maps BEFORE others)
-    if geoip_adapter.is_some()
-        && let Some(ref mut loader) = fw_loader
-    {
-        match LpmCoordinator::new(loader.ebpf_mut()) {
-            Ok(coordinator) => {
-                let coordinator: Arc<
-                    dyn ports::secondary::lpm_coordinator_port::LpmCoordinatorPort,
-                > = Arc::new(coordinator);
-                alias_svc
-                    .write()
-                    .await
-                    .set_lpm_coordinator(Arc::clone(&coordinator));
-                {
-                    let mut svc = (**ddos_svc.load()).clone();
-                    svc.set_lpm_coordinator(Arc::clone(&coordinator));
-                    svc.set_alias_resolution(Arc::clone(&alias_resolver));
-                    ddos_svc.store(Arc::new(svc));
-                }
-                {
-                    let mut svc = (**ips_svc.load()).clone();
-                    svc.set_lpm_coordinator(Arc::clone(&coordinator));
-                    ips_svc.store(Arc::new(svc));
-                }
-                info!("LPM coordinator wired to alias, DDoS, IPS services");
-            }
-            Err(e) => {
-                warn!("LPM coordinator maps not available (non-fatal): {e}");
-            }
-        }
-    }
-
-    // Wire IpSetMapManager from xdp-firewall to alias service (best-effort, before move)
-    if let Some(ref mut loader) = fw_loader
-        && let Ok(ipset_mgr) = IpSetMapManager::new(loader.ebpf_mut())
-    {
-        alias_svc.write().await.set_ipset_port(Box::new(ipset_mgr));
-        info!("alias IP set map wired from xdp-firewall");
-    }
-
-    // Take INTERFACE_GROUPS map from xdp-firewall (before loader is moved)
-    if let Some(ref mut loader) = fw_loader {
-        iface_groups_mgr.add_map(loader.ebpf_mut());
-    }
-
-    // Initial dynamic alias refresh (loads GeoIP CIDRs into LPM maps at startup)
-    match alias_svc.write().await.refresh_dynamic() {
-        Ok(n) if n > 0 => info!(count = n, "initial dynamic alias refresh completed"),
-        Ok(_) => {}
-        Err(e) => warn!("initial dynamic alias refresh failed: {e}"),
-    }
-
-    // Wire FW → LB (slot 2) when ratelimit is NOT active but LB + FW are.
-    // When ratelimit IS active, the RL→LB wiring was already done above.
-    if fw_ok
-        && !rl_ok
-        && config.loadbalancer.enabled
-        && !lb_pre_loaded
-        && let Some(ref mut fw) = fw_loader
-    {
-        match try_load_xdp_loadbalancer(&ebpf_dir, &config, true) {
-            Ok((lb_loader, lb_mgr, lb_metrics_rdr, lb_reader)) => {
-                let event_tx_clone = event_tx.clone();
-                tokio::spawn(async move {
-                    lb_reader
-                        .run(event_tx_clone, CancellationToken::new())
-                        .await;
-                });
-                lb_svc.write().await.set_map_port(Box::new(lb_mgr));
-                if let Some(rdr) = lb_metrics_rdr {
-                    metrics_readers.push(rdr);
-                }
-                if let Ok(lb_fd) = lb_loader.xdp_program_fd("xdp_loadbalancer") {
-                    if let Err(e) = fw.set_tail_call_target("XDP_PROG_ARRAY", 2, &lb_fd) {
-                        warn!("firewall → LB tail-call wiring failed: {e}");
-                    } else {
-                        info!("XDP tail-call: firewall → loadbalancer wired (FW slot 2)");
-                    }
-                }
-                ebpf_state.add_loader(lb_loader);
-                metrics.set_ebpf_program_status("xdp_loadbalancer", true);
-                lb_pre_loaded = true;
-                info!("eBPF xdp-loadbalancer active (via firewall chain)");
-            }
-            Err(e) => warn!("LB load for FW chain failed: {e}"),
-        }
-    }
-
-    // Move firewall loader into eBPF state (after tail-call wiring)
-    if let Some(loader) = fw_loader {
-        ebpf_state.add_loader(loader);
-    }
-
-    // 10c. TC IDS
-    let ids_ok = if config.ids.enabled {
-        match try_load_tc_ids(&ebpf_dir, &config) {
-            Ok((mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr, reader)) => {
-                let event_tx_clone = event_tx.clone();
-                tokio::spawn(
-                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
-                );
-                if let Some(ids_mgr) = ids_mgr_opt {
-                    {
-                        let mut svc = (**ids_svc.load()).clone();
-                        svc.set_map_port(Box::new(ids_mgr));
-                        ids_svc.store(Arc::new(svc));
-                    }
-                }
-                if let Some(l7_mgr) = l7_mgr_opt {
-                    ebpf_map_holder.l7_ports = Some(l7_mgr);
-                }
-                if let Some(cfg_mgr) = cfg_mgr_opt {
-                    ebpf_map_holder.config_flags.push(cfg_mgr);
-                }
-                if let Some(rdr) = ids_rdr {
-                    metrics_readers.push(rdr);
-                }
-                iface_groups_mgr.add_map(loader.ebpf_mut());
-                ebpf_state.add_loader(loader);
-                metrics.set_ebpf_program_status("tc_ids", true);
-                info!("eBPF tc-ids active");
-                true
-            }
-            Err(e) => {
-                warn!("tc-ids load failed (degraded mode): {e}");
-                metrics.set_ebpf_program_status("tc_ids", false);
-                false
-            }
-        }
-    } else {
-        metrics.set_ebpf_program_status("tc_ids", false);
-        false
-    };
-
-    // 10d. TC Threat Intel
-    let ti_ok = if config.threatintel.enabled {
-        match try_load_tc_threatintel(&ebpf_dir, &config) {
-            Ok((loader, ti_mgr_opt, cfg_mgr_opt, ti_rdr, reader)) => {
-                let event_tx_clone = event_tx.clone();
-                tokio::spawn(
-                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
-                );
-                if let Some(rdr) = ti_rdr {
-                    metrics_readers.push(rdr);
-                }
-                if let Some(ti_mgr) = ti_mgr_opt {
-                    // Extract shared map handles before moving manager to service
-                    let (v4, v6, bv4, bv6) = ti_mgr.shared_handles();
-                    {
-                        let mut svc = (**ti_svc.load()).clone();
-                        svc.set_map_port(Box::new(ti_mgr));
-                        ti_svc.store(Arc::new(svc));
-                    }
-
-                    // Wire EbpfMapWriteAdapter to DNS blocklist service
-                    if let Some(ref blocklist) = dns_blocklist_ref {
-                        let writer = Arc::new(EbpfMapWriteAdapter::new(v4, v6, bv4, bv6));
-                        blocklist.set_map_writer(
-                            writer
-                                as Arc<dyn ports::secondary::ebpf_map_write_port::EbpfMapWritePort>,
-                        );
-                        info!("EbpfMapWriteAdapter wired to DNS blocklist service");
-                    }
-                }
-                if let Some(cfg_mgr) = cfg_mgr_opt {
-                    ebpf_map_holder.config_flags.push(cfg_mgr);
-                }
-                ebpf_state.add_loader(loader);
-                metrics.set_ebpf_program_status("tc_threatintel", true);
-                info!("eBPF tc-threatintel active");
-                true
-            }
-            Err(e) => {
-                warn!("tc-threatintel load failed (degraded mode): {e}");
-                metrics.set_ebpf_program_status("tc_threatintel", false);
-                false
-            }
-        }
-    } else {
-        metrics.set_ebpf_program_status("tc_threatintel", false);
-        false
-    };
-
-    // 10e. TC DNS
-    let dns_ok = if config.dns.enabled {
-        match try_load_tc_dns(&ebpf_dir, &config) {
-            Ok((loader, dns_rdr, reader)) => {
-                let event_tx_clone = event_tx.clone();
-                tokio::spawn(
-                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
-                );
-                if let Some(rdr) = dns_rdr {
-                    metrics_readers.push(rdr);
-                }
-                ebpf_state.add_loader(loader);
-                metrics.set_ebpf_program_status("tc_dns", true);
-                info!("eBPF tc-dns active");
-                true
-            }
-            Err(e) => {
-                warn!("tc-dns load failed (degraded mode): {e}");
-                metrics.set_ebpf_program_status("tc_dns", false);
-                false
-            }
-        }
-    } else {
-        metrics.set_ebpf_program_status("tc_dns", false);
-        false
-    };
-
-    // 10f. Uprobe DLP
-    let dlp_ok = if config.dlp.enabled {
-        match try_load_uprobe_dlp(&ebpf_dir, &config) {
-            Ok((loader, dlp_rdr, reader)) => {
-                let event_tx_clone = event_tx.clone();
-                tokio::spawn(
-                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
-                );
-                if let Some(rdr) = dlp_rdr {
-                    metrics_readers.push(rdr);
-                }
-                ebpf_state.add_loader(loader);
-                metrics.set_ebpf_program_status("uprobe_dlp", true);
-                info!("eBPF uprobe-dlp active");
-                true
-            }
-            Err(e) => {
-                warn!("uprobe-dlp load failed (degraded mode): {e}");
-                metrics.set_ebpf_program_status("uprobe_dlp", false);
-                false
-            }
-        }
-    } else {
-        metrics.set_ebpf_program_status("uprobe_dlp", false);
-        false
-    };
-
-    // 10g. TC ConnTrack
-    let ct_ok = if config.conntrack.enabled {
-        match try_load_tc_conntrack(&ebpf_dir, &config) {
-            Ok((loader, ct_mgr, ct_rdr, opt_reader)) => {
-                if let Some(reader) = opt_reader {
+        // 10a. XDP Firewall
+        fw_ok = if config.firewall.enabled {
+            match try_load_xdp_firewall(&ebpf_dir, &config, &domain_rules) {
+                Ok((loader, map_manager, fw_metrics_rdr, reader)) => {
                     let event_tx_clone = event_tx.clone();
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, CancellationToken::new()).await;
                     });
+                    let mut svc = firewall_svc.write().await;
+                    svc.set_map_port(Box::new(map_manager));
+                    if let Some(rdr) = fw_metrics_rdr {
+                        metrics_readers.push(rdr);
+                    }
+                    metrics.set_ebpf_program_status("xdp_firewall", true);
+                    ebpf_loaded.store(true, Ordering::Relaxed);
+                    info!(
+                        interfaces = ?config.agent.interfaces,
+                        mode = firewall_mode.as_str(),
+                        "eBPF xdp-firewall active"
+                    );
+                    fw_loader = Some(loader);
+                    true
                 }
-                conntrack_svc.write().await.set_map_port(Box::new(ct_mgr));
-                if let Some(rdr) = ct_rdr {
-                    metrics_readers.push(rdr);
+                Err(e) => {
+                    warn!("xdp-firewall load failed (degraded mode): {e}");
+                    metrics.set_ebpf_program_status("xdp_firewall", false);
+                    false
                 }
-                ebpf_state.add_loader(loader);
-                metrics.set_ebpf_program_status("tc_conntrack", true);
-                info!("eBPF tc-conntrack active");
-                true
             }
-            Err(e) => {
-                warn!("tc-conntrack load failed (degraded mode): {e}");
-                metrics.set_ebpf_program_status("tc_conntrack", false);
-                false
-            }
-        }
-    } else {
-        metrics.set_ebpf_program_status("tc_conntrack", false);
-        false
-    };
+        } else {
+            metrics.set_ebpf_program_status("xdp_firewall", false);
+            false
+        };
 
-    // 10h. TC NAT (ingress + egress)
-    let nat_ok = if config.nat.enabled {
-        match try_load_tc_nat(&ebpf_dir, &config) {
-            Ok((mut ingress_loader, mut egress_loader, nat_mgr, nat_rdrs)) => {
-                metrics_readers.extend(nat_rdrs);
-                {
-                    let mut svc = nat_svc.write().await;
-                    svc.set_map_port(Box::new(nat_mgr));
-                    // Re-sync rules to eBPF maps now that maps are wired
-                    let dnat = config.nat_dnat_rules().unwrap_or_default();
-                    let snat = config.nat_snat_rules().unwrap_or_default();
-                    let nptv6 = config.nat_nptv6_rules().unwrap_or_default();
-                    let _ = svc.reload_dnat_rules(dnat);
-                    let _ = svc.reload_snat_rules(snat);
-                    let _ = svc.reload_nptv6_rules(nptv6);
-                    // Load hairpin NAT config
-                    if let Ok((subnet, mask, snat_ip)) = config.nat_hairpin_parsed() {
-                        let hp = ebpf_common::nat::HairpinConfig {
-                            internal_subnet: subnet,
-                            internal_mask: mask,
-                            hairpin_snat_ip: snat_ip,
-                            enabled: u8::from(config.nat.hairpin.enabled),
-                            _pad: [0; 3],
-                        };
-                        if let Err(e) = svc.load_hairpin_config(&hp) {
-                            tracing::warn!("hairpin NAT config load failed: {e}");
+        // 10b. XDP Rate Limiter
+        rl_ok = if config.ratelimit.enabled {
+            match try_load_xdp_ratelimit(&ebpf_dir, &config, fw_ok) {
+                Ok((mut rl_loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs, reader)) => {
+                    let event_tx_clone = event_tx.clone();
+                    tokio::spawn(async move {
+                        reader.run(event_tx_clone, CancellationToken::new()).await;
+                    });
+                    metrics_readers.extend(rl_rdrs);
+                    if let Some(rl_mgr) = rl_mgr_opt {
+                        let mut svc = rl_svc.write().await;
+                        let default_algo =
+                            parse_algorithm_byte(&config.ratelimit.default_algorithm);
+                        svc.set_defaults(
+                            config.ratelimit.default_rate,
+                            config.ratelimit.default_burst,
+                            default_algo,
+                        );
+                        svc.set_map_port(Box::new(rl_mgr));
+                    }
+                    if let Some(rl_lpm) = rl_lpm_opt {
+                        let mut svc = rl_svc.write().await;
+                        svc.set_lpm_port(Box::new(rl_lpm));
+                        svc.set_alias_resolution(Arc::clone(&alias_resolver));
+                        // Load initial country tiers
+                        if let Ok(tiers) = config.ratelimit_country_tiers()
+                            && !tiers.is_empty()
+                        {
+                            if let Err(e) = svc.reload_country_tiers(&tiers) {
+                                warn!("initial country tier load failed (non-fatal): {e}");
+                            } else {
+                                info!(
+                                    count = tiers.len(),
+                                    "initial country-tier rate limits loaded"
+                                );
+                            }
                         }
                     }
+                    // Wire tail-call: firewall → ratelimit (if both loaded).
+                    if let Some(ref mut fw) = fw_loader {
+                        match rl_loader.xdp_program_fd("xdp_ratelimit") {
+                            Ok(rl_fd) => {
+                                if let Err(e) = fw.set_tail_call_target("XDP_PROG_ARRAY", 0, &rl_fd)
+                                {
+                                    warn!("tail-call wiring failed (non-fatal): {e}");
+                                } else {
+                                    info!("XDP tail-call: firewall → ratelimit wired");
+                                }
+                            }
+                            Err(e) => warn!("ratelimit fd retrieval failed: {e}"),
+                        }
+                    }
+                    iface_groups_mgr.add_map(rl_loader.ebpf_mut());
+                    // Wire tail-call: ratelimit → syncookie (slot 0). Best-effort.
+                    match try_load_xdp_ratelimit_syncookie(&ebpf_dir, &mut rl_loader) {
+                        Ok(sc_loader) => {
+                            ebpf_state.add_loader(sc_loader);
+                            info!("XDP tail-call: ratelimit → syncookie wired (slot 0)");
+                        }
+                        Err(e) => {
+                            warn!(
+                                "xdp-ratelimit-syncookie load failed (syncookie falls back to DROP): {e}"
+                            );
+                        }
+                    }
+                    // Wire tail-call: ratelimit → loadbalancer (slot 1). Best-effort.
+                    // Must happen before rl_loader is moved into ebpf_state.
+                    // When ratelimit returns XDP_PASS, it tail-calls to the LB so
+                    // the LB can DNAT service traffic. Without this, PASS goes
+                    // directly to the kernel, bypassing the LB entirely.
+                    if config.loadbalancer.enabled {
+                        match try_load_xdp_loadbalancer(&ebpf_dir, &config, true) {
+                            Ok((lb_loader_early, lb_mgr, lb_metrics_rdr, lb_reader)) => {
+                                let event_tx_clone = event_tx.clone();
+                                tokio::spawn(async move {
+                                    lb_reader
+                                        .run(event_tx_clone, CancellationToken::new())
+                                        .await;
+                                });
+                                lb_svc.write().await.set_map_port(Box::new(lb_mgr));
+                                if let Some(rdr) = lb_metrics_rdr {
+                                    metrics_readers.push(rdr);
+                                }
+                                if let Ok(lb_fd) =
+                                    lb_loader_early.xdp_program_fd("xdp_loadbalancer")
+                                {
+                                    if let Err(e) =
+                                        rl_loader.set_tail_call_target("RL_PROG_ARRAY", 1, &lb_fd)
+                                    {
+                                        warn!("ratelimit → LB tail-call wiring failed: {e}");
+                                    } else {
+                                        info!(
+                                            "XDP tail-call: ratelimit → loadbalancer wired (RL slot 1)"
+                                        );
+                                    }
+                                }
+                                // Also wire into firewall (slot 2) for the no-ratelimit fallback path.
+                                if let Some(ref mut fw) = fw_loader
+                                    && let Ok(lb_fd) =
+                                        lb_loader_early.xdp_program_fd("xdp_loadbalancer")
+                                {
+                                    let _ = fw.set_tail_call_target("XDP_PROG_ARRAY", 2, &lb_fd);
+                                }
+                                ebpf_state.add_loader(lb_loader_early);
+                                metrics.set_ebpf_program_status("xdp_loadbalancer", true);
+                                info!("eBPF xdp-loadbalancer active (via ratelimit chain)");
+                                lb_pre_loaded = true;
+                            }
+                            Err(e) => {
+                                warn!("LB pre-load for RL chain failed (non-fatal): {e}");
+                            }
+                        }
+                    }
+                    ebpf_state.add_loader(rl_loader);
+                    metrics.set_ebpf_program_status("xdp_ratelimit", true);
+                    info!("eBPF xdp-ratelimit active");
+                    true
                 }
-                iface_groups_mgr.add_map(ingress_loader.ebpf_mut());
-                iface_groups_mgr.add_map(egress_loader.ebpf_mut());
-                ebpf_state.add_loader(ingress_loader);
-                ebpf_state.add_loader(egress_loader);
-                metrics.set_ebpf_program_status("tc_nat_ingress", true);
-                metrics.set_ebpf_program_status("tc_nat_egress", true);
-                info!("eBPF tc-nat-ingress + tc-nat-egress active");
-                true
-            }
-            Err(e) => {
-                warn!("tc-nat load failed (degraded mode): {e}");
-                metrics.set_ebpf_program_status("tc_nat_ingress", false);
-                metrics.set_ebpf_program_status("tc_nat_egress", false);
-                false
-            }
-        }
-    } else {
-        metrics.set_ebpf_program_status("tc_nat_ingress", false);
-        metrics.set_ebpf_program_status("tc_nat_egress", false);
-        false
-    };
-
-    // 10i. TC Scrub
-    let scrub_ok = if config.firewall.scrub.enabled {
-        match try_load_tc_scrub(&ebpf_dir, &config) {
-            Ok((loader, scrub_rdr)) => {
-                if let Some(rdr) = scrub_rdr {
-                    metrics_readers.push(rdr);
+                Err(e) => {
+                    warn!("xdp-ratelimit load failed (degraded mode): {e}");
+                    metrics.set_ebpf_program_status("xdp_ratelimit", false);
+                    false
                 }
-                ebpf_state.add_loader(loader);
-                metrics.set_ebpf_program_status("tc_scrub", true);
-                info!("eBPF tc-scrub active");
-                true
             }
-            Err(e) => {
-                warn!("tc-scrub load failed (degraded mode): {e}");
-                metrics.set_ebpf_program_status("tc_scrub", false);
-                false
-            }
-        }
-    } else {
-        metrics.set_ebpf_program_status("tc_scrub", false);
-        false
-    };
+        } else {
+            metrics.set_ebpf_program_status("xdp_ratelimit", false);
+            false
+        };
 
-    // 10k. XDP Load Balancer
-    // The LB can run standalone (attached to interface) or as a tail-call
-    // target in the chain: firewall → ratelimit → loadbalancer.
-    // When firewall is active, LB is wired at FW slot 2 (fallback when
-    // ratelimit is absent) AND the ratelimit chain also tail-calls LB on PASS.
-    let xdp_chain_active = fw_ok || rl_ok;
-    let lb_ok = if lb_pre_loaded {
-        // LB was already loaded and wired during the ratelimit block.
-        true
-    } else if config.loadbalancer.enabled {
-        match try_load_xdp_loadbalancer(&ebpf_dir, &config, xdp_chain_active) {
-            Ok((lb_loader, lb_mgr, lb_metrics_rdr, lb_reader)) => {
-                let event_tx_clone = event_tx.clone();
-                tokio::spawn(async move {
-                    lb_reader
-                        .run(event_tx_clone, CancellationToken::new())
-                        .await;
-                });
-                lb_svc.write().await.set_map_port(Box::new(lb_mgr));
-                if let Some(rdr) = lb_metrics_rdr {
-                    metrics_readers.push(rdr);
+        // Wire tail-call: firewall → reject (slot 1). Best-effort: if the reject
+        // program fails to load, REJECT rules fall back to DROP silently (the
+        // ProgramArray slot stays empty and tail_call is a no-op).
+        if let Some(ref mut fw) = fw_loader {
+            match try_load_xdp_firewall_reject(&ebpf_dir, fw) {
+                Ok(reject_loader) => {
+                    ebpf_state.add_loader(reject_loader);
+                    info!("XDP tail-call: firewall → reject wired (slot 1)");
                 }
-                // FW→LB wiring (slot 2) already done during pre-load or not needed.
-                ebpf_state.add_loader(lb_loader);
-                metrics.set_ebpf_program_status("xdp_loadbalancer", true);
-                info!("eBPF xdp-loadbalancer active");
-                true
-            }
-            Err(e) => {
-                warn!("xdp-loadbalancer load failed (degraded mode): {e}");
-                metrics.set_ebpf_program_status("xdp_loadbalancer", false);
-                false
+                Err(e) => {
+                    warn!("xdp-firewall-reject load failed (REJECT falls back to DROP): {e}");
+                }
             }
         }
-    } else {
-        metrics.set_ebpf_program_status("xdp_loadbalancer", false);
-        false
-    };
 
-    // ── 10z. Populate INTERFACE_GROUPS maps across all loaded programs ──
-    {
-        let membership = config.interface_membership();
-        let memberships: Vec<(u32, u32)> = config
-            .agent
-            .interfaces
-            .iter()
-            .filter_map(|iface| {
-                let ifindex = get_ifindex(iface).ok()?;
-                let groups = membership.get(iface).copied().unwrap_or(0);
-                Some((ifindex, groups))
-            })
-            .collect();
-        if let Err(e) = iface_groups_mgr.set_interface_groups(&memberships) {
-            warn!("INTERFACE_GROUPS population failed (non-fatal): {e}");
-        } else if !memberships.is_empty() {
-            info!(
-                iface_count = memberships.len(),
-                map_count = iface_groups_mgr.map_count(),
-                "interface group memberships loaded into eBPF maps"
-            );
+        // Wire LpmCoordinator from xdp-firewall to alias, ddos, ips services (take LPM maps BEFORE others)
+        if geoip_adapter.is_some()
+            && let Some(ref mut loader) = fw_loader
+        {
+            match LpmCoordinator::new(loader.ebpf_mut()) {
+                Ok(coordinator) => {
+                    let coordinator: Arc<
+                        dyn ports::secondary::lpm_coordinator_port::LpmCoordinatorPort,
+                    > = Arc::new(coordinator);
+                    alias_svc
+                        .write()
+                        .await
+                        .set_lpm_coordinator(Arc::clone(&coordinator));
+                    {
+                        let mut svc = (**ddos_svc.load()).clone();
+                        svc.set_lpm_coordinator(Arc::clone(&coordinator));
+                        svc.set_alias_resolution(Arc::clone(&alias_resolver));
+                        ddos_svc.store(Arc::new(svc));
+                    }
+                    {
+                        let mut svc = (**ips_svc.load()).clone();
+                        svc.set_lpm_coordinator(Arc::clone(&coordinator));
+                        ips_svc.store(Arc::new(svc));
+                    }
+                    info!("LPM coordinator wired to alias, DDoS, IPS services");
+                }
+                Err(e) => {
+                    warn!("LPM coordinator maps not available (non-fatal): {e}");
+                }
+            }
         }
-    }
-    // Store the manager for config reload
-    ebpf_map_holder.iface_groups = Some(iface_groups_mgr);
+
+        // Wire IpSetMapManager from xdp-firewall to alias service (best-effort, before move)
+        if let Some(ref mut loader) = fw_loader
+            && let Ok(ipset_mgr) = IpSetMapManager::new(loader.ebpf_mut())
+        {
+            alias_svc.write().await.set_ipset_port(Box::new(ipset_mgr));
+            info!("alias IP set map wired from xdp-firewall");
+        }
+
+        // Take INTERFACE_GROUPS map from xdp-firewall (before loader is moved)
+        if let Some(ref mut loader) = fw_loader {
+            iface_groups_mgr.add_map(loader.ebpf_mut());
+        }
+
+        // Initial dynamic alias refresh (loads GeoIP CIDRs into LPM maps at startup)
+        match alias_svc.write().await.refresh_dynamic() {
+            Ok(n) if n > 0 => info!(count = n, "initial dynamic alias refresh completed"),
+            Ok(_) => {}
+            Err(e) => warn!("initial dynamic alias refresh failed: {e}"),
+        }
+
+        // Wire FW → LB (slot 2) when ratelimit is NOT active but LB + FW are.
+        // When ratelimit IS active, the RL→LB wiring was already done above.
+        if fw_ok
+            && !rl_ok
+            && config.loadbalancer.enabled
+            && !lb_pre_loaded
+            && let Some(ref mut fw) = fw_loader
+        {
+            match try_load_xdp_loadbalancer(&ebpf_dir, &config, true) {
+                Ok((lb_loader, lb_mgr, lb_metrics_rdr, lb_reader)) => {
+                    let event_tx_clone = event_tx.clone();
+                    tokio::spawn(async move {
+                        lb_reader
+                            .run(event_tx_clone, CancellationToken::new())
+                            .await;
+                    });
+                    lb_svc.write().await.set_map_port(Box::new(lb_mgr));
+                    if let Some(rdr) = lb_metrics_rdr {
+                        metrics_readers.push(rdr);
+                    }
+                    if let Ok(lb_fd) = lb_loader.xdp_program_fd("xdp_loadbalancer") {
+                        if let Err(e) = fw.set_tail_call_target("XDP_PROG_ARRAY", 2, &lb_fd) {
+                            warn!("firewall → LB tail-call wiring failed: {e}");
+                        } else {
+                            info!("XDP tail-call: firewall → loadbalancer wired (FW slot 2)");
+                        }
+                    }
+                    ebpf_state.add_loader(lb_loader);
+                    metrics.set_ebpf_program_status("xdp_loadbalancer", true);
+                    lb_pre_loaded = true;
+                    info!("eBPF xdp-loadbalancer active (via firewall chain)");
+                }
+                Err(e) => warn!("LB load for FW chain failed: {e}"),
+            }
+        }
+
+        // Move firewall loader into eBPF state (after tail-call wiring)
+        if let Some(loader) = fw_loader {
+            ebpf_state.add_loader(loader);
+        }
+
+        // 10c. TC IDS
+        ids_ok = if config.ids.enabled {
+            match try_load_tc_ids(&ebpf_dir, &config) {
+                Ok((mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr, reader)) => {
+                    let event_tx_clone = event_tx.clone();
+                    tokio::spawn(async move {
+                        reader.run(event_tx_clone, CancellationToken::new()).await;
+                    });
+                    if let Some(ids_mgr) = ids_mgr_opt {
+                        {
+                            let mut svc = (**ids_svc.load()).clone();
+                            svc.set_map_port(Box::new(ids_mgr));
+                            ids_svc.store(Arc::new(svc));
+                        }
+                    }
+                    if let Some(l7_mgr) = l7_mgr_opt {
+                        ebpf_map_holder.l7_ports = Some(l7_mgr);
+                    }
+                    if let Some(cfg_mgr) = cfg_mgr_opt {
+                        ebpf_map_holder.config_flags.push(cfg_mgr);
+                    }
+                    if let Some(rdr) = ids_rdr {
+                        metrics_readers.push(rdr);
+                    }
+                    iface_groups_mgr.add_map(loader.ebpf_mut());
+                    ebpf_state.add_loader(loader);
+                    metrics.set_ebpf_program_status("tc_ids", true);
+                    info!("eBPF tc-ids active");
+                    true
+                }
+                Err(e) => {
+                    warn!("tc-ids load failed (degraded mode): {e}");
+                    metrics.set_ebpf_program_status("tc_ids", false);
+                    false
+                }
+            }
+        } else {
+            metrics.set_ebpf_program_status("tc_ids", false);
+            false
+        };
+
+        // 10d. TC Threat Intel
+        ti_ok =
+            if config.threatintel.enabled {
+                match try_load_tc_threatintel(&ebpf_dir, &config) {
+                    Ok((loader, ti_mgr_opt, cfg_mgr_opt, ti_rdr, reader)) => {
+                        let event_tx_clone = event_tx.clone();
+                        tokio::spawn(async move {
+                            reader.run(event_tx_clone, CancellationToken::new()).await;
+                        });
+                        if let Some(rdr) = ti_rdr {
+                            metrics_readers.push(rdr);
+                        }
+                        if let Some(ti_mgr) = ti_mgr_opt {
+                            // Extract shared map handles before moving manager to service
+                            let (v4, v6, bv4, bv6) = ti_mgr.shared_handles();
+                            {
+                                let mut svc = (**ti_svc.load()).clone();
+                                svc.set_map_port(Box::new(ti_mgr));
+                                ti_svc.store(Arc::new(svc));
+                            }
+
+                            // Wire EbpfMapWriteAdapter to DNS blocklist service
+                            if let Some(ref blocklist) = dns_blocklist_ref {
+                                let writer = Arc::new(EbpfMapWriteAdapter::new(v4, v6, bv4, bv6));
+                                blocklist.set_map_writer(
+                            writer
+                                as Arc<dyn ports::secondary::ebpf_map_write_port::EbpfMapWritePort>,
+                        );
+                                info!("EbpfMapWriteAdapter wired to DNS blocklist service");
+                            }
+                        }
+                        if let Some(cfg_mgr) = cfg_mgr_opt {
+                            ebpf_map_holder.config_flags.push(cfg_mgr);
+                        }
+                        ebpf_state.add_loader(loader);
+                        metrics.set_ebpf_program_status("tc_threatintel", true);
+                        info!("eBPF tc-threatintel active");
+                        true
+                    }
+                    Err(e) => {
+                        warn!("tc-threatintel load failed (degraded mode): {e}");
+                        metrics.set_ebpf_program_status("tc_threatintel", false);
+                        false
+                    }
+                }
+            } else {
+                metrics.set_ebpf_program_status("tc_threatintel", false);
+                false
+            };
+
+        // 10e. TC DNS
+        dns_ok = if config.dns.enabled {
+            match try_load_tc_dns(&ebpf_dir, &config) {
+                Ok((loader, dns_rdr, reader)) => {
+                    let event_tx_clone = event_tx.clone();
+                    tokio::spawn(async move {
+                        reader.run(event_tx_clone, CancellationToken::new()).await;
+                    });
+                    if let Some(rdr) = dns_rdr {
+                        metrics_readers.push(rdr);
+                    }
+                    ebpf_state.add_loader(loader);
+                    metrics.set_ebpf_program_status("tc_dns", true);
+                    info!("eBPF tc-dns active");
+                    true
+                }
+                Err(e) => {
+                    warn!("tc-dns load failed (degraded mode): {e}");
+                    metrics.set_ebpf_program_status("tc_dns", false);
+                    false
+                }
+            }
+        } else {
+            metrics.set_ebpf_program_status("tc_dns", false);
+            false
+        };
+
+        // 10f. Uprobe DLP
+        dlp_ok = if config.dlp.enabled {
+            match try_load_uprobe_dlp(&ebpf_dir, &config) {
+                Ok((loader, dlp_rdr, reader)) => {
+                    let event_tx_clone = event_tx.clone();
+                    tokio::spawn(async move {
+                        reader.run(event_tx_clone, CancellationToken::new()).await;
+                    });
+                    if let Some(rdr) = dlp_rdr {
+                        metrics_readers.push(rdr);
+                    }
+                    ebpf_state.add_loader(loader);
+                    metrics.set_ebpf_program_status("uprobe_dlp", true);
+                    info!("eBPF uprobe-dlp active");
+                    true
+                }
+                Err(e) => {
+                    warn!("uprobe-dlp load failed (degraded mode): {e}");
+                    metrics.set_ebpf_program_status("uprobe_dlp", false);
+                    false
+                }
+            }
+        } else {
+            metrics.set_ebpf_program_status("uprobe_dlp", false);
+            false
+        };
+
+        // 10g. TC ConnTrack
+        ct_ok = if config.conntrack.enabled {
+            match try_load_tc_conntrack(&ebpf_dir, &config) {
+                Ok((loader, ct_mgr, ct_rdr, opt_reader)) => {
+                    if let Some(reader) = opt_reader {
+                        let event_tx_clone = event_tx.clone();
+                        tokio::spawn(async move {
+                            reader.run(event_tx_clone, CancellationToken::new()).await;
+                        });
+                    }
+                    conntrack_svc.write().await.set_map_port(Box::new(ct_mgr));
+                    if let Some(rdr) = ct_rdr {
+                        metrics_readers.push(rdr);
+                    }
+                    ebpf_state.add_loader(loader);
+                    metrics.set_ebpf_program_status("tc_conntrack", true);
+                    info!("eBPF tc-conntrack active");
+                    true
+                }
+                Err(e) => {
+                    warn!("tc-conntrack load failed (degraded mode): {e}");
+                    metrics.set_ebpf_program_status("tc_conntrack", false);
+                    false
+                }
+            }
+        } else {
+            metrics.set_ebpf_program_status("tc_conntrack", false);
+            false
+        };
+
+        // 10h. TC NAT (ingress + egress)
+        nat_ok = if config.nat.enabled {
+            match try_load_tc_nat(&ebpf_dir, &config) {
+                Ok((mut ingress_loader, mut egress_loader, nat_mgr, nat_rdrs)) => {
+                    metrics_readers.extend(nat_rdrs);
+                    {
+                        let mut svc = nat_svc.write().await;
+                        svc.set_map_port(Box::new(nat_mgr));
+                        // Re-sync rules to eBPF maps now that maps are wired
+                        let dnat = config.nat_dnat_rules().unwrap_or_default();
+                        let snat = config.nat_snat_rules().unwrap_or_default();
+                        let nptv6 = config.nat_nptv6_rules().unwrap_or_default();
+                        let _ = svc.reload_dnat_rules(dnat);
+                        let _ = svc.reload_snat_rules(snat);
+                        let _ = svc.reload_nptv6_rules(nptv6);
+                        // Load hairpin NAT config
+                        if let Ok((subnet, mask, snat_ip)) = config.nat_hairpin_parsed() {
+                            let hp = ebpf_common::nat::HairpinConfig {
+                                internal_subnet: subnet,
+                                internal_mask: mask,
+                                hairpin_snat_ip: snat_ip,
+                                enabled: u8::from(config.nat.hairpin.enabled),
+                                _pad: [0; 3],
+                            };
+                            if let Err(e) = svc.load_hairpin_config(&hp) {
+                                tracing::warn!("hairpin NAT config load failed: {e}");
+                            }
+                        }
+                    }
+                    iface_groups_mgr.add_map(ingress_loader.ebpf_mut());
+                    iface_groups_mgr.add_map(egress_loader.ebpf_mut());
+                    ebpf_state.add_loader(ingress_loader);
+                    ebpf_state.add_loader(egress_loader);
+                    metrics.set_ebpf_program_status("tc_nat_ingress", true);
+                    metrics.set_ebpf_program_status("tc_nat_egress", true);
+                    info!("eBPF tc-nat-ingress + tc-nat-egress active");
+                    true
+                }
+                Err(e) => {
+                    warn!("tc-nat load failed (degraded mode): {e}");
+                    metrics.set_ebpf_program_status("tc_nat_ingress", false);
+                    metrics.set_ebpf_program_status("tc_nat_egress", false);
+                    false
+                }
+            }
+        } else {
+            metrics.set_ebpf_program_status("tc_nat_ingress", false);
+            metrics.set_ebpf_program_status("tc_nat_egress", false);
+            false
+        };
+
+        // 10i. TC Scrub
+        scrub_ok = if config.firewall.scrub.enabled {
+            match try_load_tc_scrub(&ebpf_dir, &config) {
+                Ok((loader, scrub_rdr)) => {
+                    if let Some(rdr) = scrub_rdr {
+                        metrics_readers.push(rdr);
+                    }
+                    ebpf_state.add_loader(loader);
+                    metrics.set_ebpf_program_status("tc_scrub", true);
+                    info!("eBPF tc-scrub active");
+                    true
+                }
+                Err(e) => {
+                    warn!("tc-scrub load failed (degraded mode): {e}");
+                    metrics.set_ebpf_program_status("tc_scrub", false);
+                    false
+                }
+            }
+        } else {
+            metrics.set_ebpf_program_status("tc_scrub", false);
+            false
+        };
+
+        // 10k. XDP Load Balancer
+        // The LB can run standalone (attached to interface) or as a tail-call
+        // target in the chain: firewall → ratelimit → loadbalancer.
+        // When firewall is active, LB is wired at FW slot 2 (fallback when
+        // ratelimit is absent) AND the ratelimit chain also tail-calls LB on PASS.
+        let xdp_chain_active = fw_ok || rl_ok;
+        lb_ok = if lb_pre_loaded {
+            // LB was already loaded and wired during the ratelimit block.
+            true
+        } else if config.loadbalancer.enabled {
+            match try_load_xdp_loadbalancer(&ebpf_dir, &config, xdp_chain_active) {
+                Ok((lb_loader, lb_mgr, lb_metrics_rdr, lb_reader)) => {
+                    let event_tx_clone = event_tx.clone();
+                    tokio::spawn(async move {
+                        lb_reader
+                            .run(event_tx_clone, CancellationToken::new())
+                            .await;
+                    });
+                    lb_svc.write().await.set_map_port(Box::new(lb_mgr));
+                    if let Some(rdr) = lb_metrics_rdr {
+                        metrics_readers.push(rdr);
+                    }
+                    // FW→LB wiring (slot 2) already done during pre-load or not needed.
+                    ebpf_state.add_loader(lb_loader);
+                    metrics.set_ebpf_program_status("xdp_loadbalancer", true);
+                    info!("eBPF xdp-loadbalancer active");
+                    true
+                }
+                Err(e) => {
+                    warn!("xdp-loadbalancer load failed (degraded mode): {e}");
+                    metrics.set_ebpf_program_status("xdp_loadbalancer", false);
+                    false
+                }
+            }
+        } else {
+            metrics.set_ebpf_program_status("xdp_loadbalancer", false);
+            false
+        };
+
+        // ── 10z. Populate INTERFACE_GROUPS maps across all loaded programs ──
+        {
+            let membership = config.interface_membership();
+            let memberships: Vec<(u32, u32)> = config
+                .agent
+                .interfaces
+                .iter()
+                .filter_map(|iface| {
+                    let ifindex = get_ifindex(iface).ok()?;
+                    let groups = membership.get(iface).copied().unwrap_or(0);
+                    Some((ifindex, groups))
+                })
+                .collect();
+            if let Err(e) = iface_groups_mgr.set_interface_groups(&memberships) {
+                warn!("INTERFACE_GROUPS population failed (non-fatal): {e}");
+            } else if !memberships.is_empty() {
+                info!(
+                    iface_count = memberships.len(),
+                    map_count = iface_groups_mgr.map_count(),
+                    "interface group memberships loaded into eBPF maps"
+                );
+            }
+        }
+        // Store the manager for config reload
+        ebpf_map_holder.iface_groups = Some(iface_groups_mgr);
+    } // end if ebpf_capable
 
     // Populate eBPF program status for ops endpoint
     {
