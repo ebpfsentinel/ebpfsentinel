@@ -33,6 +33,12 @@ allow = [
 multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
+# opentelemetry-otlp 0.31 depends on reqwest 0.12 via opentelemetry-http;
+# our workspace uses reqwest 0.13 directly. Tracked upstream — cannot resolve
+# until OpenTelemetry Rust migrates to reqwest 0.13.
+skip = [
+    { crate = "reqwest@0.12", reason = "transitive via opentelemetry-http" },
+]
 
 [sources]
 unknown-registry = "deny"
