@@ -29,6 +29,18 @@ agent:
   grpc_port: 50051
   metrics_port: 9090
 
+  # TLS for HTTP and gRPC listeners. Disabled by default (plaintext).
+  # tls:
+  #   enabled: true
+  #   cert_path: /etc/ebpfsentinel/tls/tls.crt
+  #   key_path: /etc/ebpfsentinel/tls/tls.key
+  #   pq_mode: prefer        # prefer | require | disable (post-quantum hybrid X25519MLKEM768)
+  #   allow_tls12: false      # default: TLS 1.3 only. Set true for legacy clients.
+
+  # gRPC reflection — disabled by default (prevents unauthenticated API schema enumeration).
+  # Enable only for development/debugging.
+  grpc_reflection: false
+
 # ── Auto-Response (OSS) ───────────────────────────────────────────
 # Automatic block/throttle on high-severity alerts.
 # Max 3 policies in OSS. Enterprise adds unlimited policies, MITRE

@@ -785,6 +785,7 @@ pub async fn run(
             Path::new(&config.agent.tls.cert_path),
             Path::new(&config.agent.tls.key_path),
             config.agent.tls.pq_mode,
+            config.agent.tls.allow_tls12,
         )?;
         info!(
             cert_path = %config.agent.tls.cert_path,

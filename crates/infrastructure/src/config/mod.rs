@@ -1157,6 +1157,13 @@ pub struct TlsConfig {
     /// - `disable`: classical-only (`X25519`, `SECP256R1`).
     #[serde(default)]
     pub pq_mode: PqMode,
+
+    /// Allow TLS 1.2 in addition to TLS 1.3. Default: `false` (TLS 1.3 only).
+    ///
+    /// Enable only if clients (reverse proxies, monitoring tools) do not
+    /// support TLS 1.3. Note: PQ hybrid key exchange requires TLS 1.3.
+    #[serde(default)]
+    pub allow_tls12: bool,
 }
 
 /// XDP attachment mode for kernel programs.

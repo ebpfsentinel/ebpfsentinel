@@ -32,6 +32,7 @@ pub fn load_rustls_config(
     cert_path: &Path,
     key_path: &Path,
     pq_mode: PqMode,
+    allow_tls12: bool,
 ) -> anyhow::Result<Arc<ServerConfig>> {
     let provider = build_crypto_provider(pq_mode);
 
@@ -54,8 +55,18 @@ pub fn load_rustls_config(
         )
     })?;
 
+    let versions: Vec<&'static tokio_rustls::rustls::SupportedProtocolVersion> = if allow_tls12 {
+        tracing::warn!("TLS 1.2 enabled — consider upgrading clients to TLS 1.3");
+        vec![
+            &tokio_rustls::rustls::version::TLS13,
+            &tokio_rustls::rustls::version::TLS12,
+        ]
+    } else {
+        vec![&tokio_rustls::rustls::version::TLS13]
+    };
+
     let config = ServerConfig::builder_with_provider(Arc::new(provider))
-        .with_safe_default_protocol_versions()?
+        .with_protocol_versions(&versions)?
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| anyhow::anyhow!("invalid TLS certificate/key pair: {e}"))?;
