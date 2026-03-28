@@ -94,6 +94,35 @@ jobs:
       - name: Run tests with extra UB checks
         run: cargo +nightly careful test --workspace --exclude ebpf-common
 
+  # ── Fuzz testing (critical parsers) ──────────────────────────────
+  fuzz:
+    name: Fuzz Critical Parsers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      - name: Fuzz DNS parser
+        run: cargo +nightly fuzz run fuzz_dns_parser -- -max_len=4096 -max_total_time=30
+      - name: Fuzz L7 parsers
+        run: cargo +nightly fuzz run fuzz_l7_parsers -- -max_len=2048 -max_total_time=30
+      - name: Fuzz feed parser
+        run: cargo +nightly fuzz run fuzz_feed_parser -- -max_len=8192 -max_total_time=30
+      - name: Fuzz config
+        run: cargo +nightly fuzz run fuzz_config -- -max_len=8192 -max_total_time=30
+      - name: Fuzz packet event
+        run: cargo +nightly fuzz run fuzz_packet_event -- -max_len=256 -max_total_time=15
+      - name: Fuzz DLP scan
+        run: cargo +nightly fuzz run fuzz_dlp_scan -- -max_len=4096 -max_total_time=15
+      - name: Fuzz auth
+        run: cargo +nightly fuzz run fuzz_auth -- -max_len=2048 -max_total_time=15
+      - name: Fuzz firewall
+        run: cargo +nightly fuzz run fuzz_firewall -- -max_len=1024 -max_total_time=15
+
   # ── SBOM generation ──────────────────────────────────────────────
   sbom:
     name: SBOM (CycloneDX)
