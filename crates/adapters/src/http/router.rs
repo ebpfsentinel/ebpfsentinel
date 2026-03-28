@@ -90,9 +90,19 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz));
 
-    // Group 2: Metrics route — conditionally protected
+    // Group 2: Metrics route — rate-limited and conditionally auth-protected.
+    // Rate limiting is always applied (even without auth) to prevent scraping DoS.
     let metrics_routes = {
-        let r = Router::new().route("/metrics", get(metrics));
+        let metrics_governor = Arc::new(
+            GovernorConfigBuilder::default()
+                .per_second(2)
+                .burst_size(10)
+                .finish()
+                .expect("metrics governor config should build"),
+        );
+        let r = Router::new()
+            .route("/metrics", get(metrics))
+            .layer(GovernorLayer::new(metrics_governor));
         if state.auth_provider.is_some() && state.metrics_auth_required {
             r.layer(middleware::from_fn_with_state(
                 Arc::clone(&state),
