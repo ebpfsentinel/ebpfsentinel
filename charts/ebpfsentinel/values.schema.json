@@ -66,7 +66,18 @@
           "type": "string",
           "enum": ["auto", "native", "generic", "offloaded"]
         },
-        "eventWorkers": { "type": "integer", "minimum": 1, "maximum": 64 }
+        "eventWorkers": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "grpcReflection": { "type": "boolean" },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "certPath": { "type": "string" },
+            "keyPath": { "type": "string" },
+            "pqMode": { "type": "string", "enum": ["prefer", "require", "disable"] },
+            "allowTls12": { "type": "boolean" }
+          }
+        }
       }
     },
     "serviceAccount": {
@@ -143,6 +154,10 @@
     "geoip": { "$ref": "#/$defs/domainToggle" },
     "zones": { "$ref": "#/$defs/domainToggle" },
     "qos": { "$ref": "#/$defs/domainToggle" },
+    "auto_response": { "type": "object" },
+    "auto_capture": { "type": "object" },
+    "aliases": { "type": "object" },
+    "interface_groups": { "type": "object" },
     "metrics": {
       "type": "object",
       "properties": {
