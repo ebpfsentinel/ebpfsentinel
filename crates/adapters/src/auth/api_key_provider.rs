@@ -72,12 +72,19 @@ impl AuthProvider for ApiKeyAuthProvider {
             return Err(AuthError::TokenMissing);
         }
 
-        // Hash the incoming token before lookup — constant-time w.r.t. key value
         let hashed = hash_key(token);
-        let entry = self
-            .keys
-            .get(&hashed)
-            .ok_or_else(|| AuthError::TokenInvalid("invalid API key".to_string()))?;
+
+        // Constant-time scan: iterate ALL entries to prevent timing side-channels.
+        // API key sets are small (typically <100), so O(n) is acceptable.
+        let mut matched: Option<&ApiKeyEntry> = None;
+        for (stored_hash, entry) in &self.keys {
+            if constant_time_eq(stored_hash.as_bytes(), hashed.as_bytes()) {
+                matched = Some(entry);
+            }
+        }
+
+        let entry =
+            matched.ok_or_else(|| AuthError::TokenInvalid("invalid API key".to_string()))?;
 
         Ok(JwtClaims {
             sub: entry.name.clone(),
@@ -89,6 +96,19 @@ impl AuthProvider for ApiKeyAuthProvider {
             namespaces: entry.namespaces.clone(),
         })
     }
+}
+
+/// Constant-time byte comparison. Returns `true` iff `a == b`.
+/// Always compares all bytes to prevent timing side-channels.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 #[cfg(test)]
