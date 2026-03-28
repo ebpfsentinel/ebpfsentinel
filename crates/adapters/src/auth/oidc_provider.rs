@@ -1,4 +1,5 @@
 use std::sync::{PoisonError, RwLock};
+use std::time::Duration;
 
 use domain::auth::entity::JwtClaims;
 use domain::auth::error::AuthError;
@@ -92,8 +93,19 @@ impl AuthProvider for OidcAuthProvider {
 }
 
 /// Fetch a JWKS from a remote URL.
+///
+/// Enforces HTTPS-only and a 10-second timeout to prevent MITM attacks
+/// and hanging on unresponsive identity providers.
 pub async fn fetch_jwks(url: &str) -> Result<JwkSet, AuthError> {
-    let resp = reqwest::get(url)
+    let client = reqwest::Client::builder()
+        .https_only(true)
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| AuthError::KeyLoadFailed(format!("JWKS HTTP client error: {e}")))?;
+
+    let resp = client
+        .get(url)
+        .send()
         .await
         .map_err(|e| AuthError::KeyLoadFailed(format!("JWKS fetch failed: {e}")))?;
 

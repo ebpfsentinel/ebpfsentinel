@@ -7,7 +7,8 @@ use ports::secondary::auth_provider::AuthProvider;
 /// Composite authentication provider that tries multiple providers in order.
 ///
 /// Used when both a token-based provider (JWT/OIDC) and API keys are configured.
-/// The first provider to succeed wins; if all fail, the last error is returned.
+/// The first provider to succeed wins; if all fail, a generic error is returned
+/// to avoid leaking which provider was tried last.
 pub struct CompositeAuthProvider {
     providers: Vec<Arc<dyn AuthProvider>>,
 }
@@ -28,14 +29,13 @@ impl CompositeAuthProvider {
 
 impl AuthProvider for CompositeAuthProvider {
     fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
-        let mut last_err = AuthError::TokenMissing;
         for provider in &self.providers {
-            match provider.validate_token(token) {
-                Ok(claims) => return Ok(claims),
-                Err(e) => last_err = e,
+            if let Ok(claims) = provider.validate_token(token) {
+                return Ok(claims);
             }
         }
-        Err(last_err)
+        // Return a generic error to avoid leaking provider-specific details.
+        Err(AuthError::TokenInvalid("authentication failed".to_string()))
     }
 }
 
@@ -88,12 +88,13 @@ mod tests {
     }
 
     #[test]
-    fn all_fail_returns_last_error() {
+    fn all_fail_returns_generic_error() {
         let composite = CompositeAuthProvider::new(vec![
             Arc::new(FailProvider) as Arc<dyn AuthProvider>,
             Arc::new(FailProvider),
         ]);
         let err = composite.validate_token("any").unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)));
+        assert_eq!(err.to_string(), "invalid token: authentication failed");
     }
 }
