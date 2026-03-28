@@ -230,6 +230,17 @@ fn resolve_ifindex_for_ip(addr_v4: u32, is_ipv6: bool) -> Option<u32> {
         .find(|(key, _)| *key == "dev")
         .map(|(_, val)| val)?;
 
+    // Validate interface name to prevent path traversal (kernel limit: IFNAMSIZ-1 = 15,
+    // allowed chars: alphanumeric, underscore, hyphen, dot, colon).
+    if dev_name.is_empty()
+        || dev_name.len() > 15
+        || !dev_name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.' || b == b':')
+    {
+        return None;
+    }
+
     // Resolve interface name to ifindex
     let ifindex_str = std::fs::read_to_string(format!("/sys/class/net/{dev_name}/ifindex")).ok()?;
     ifindex_str.trim().parse::<u32>().ok()
