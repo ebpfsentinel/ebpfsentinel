@@ -520,9 +520,10 @@ pub async fn run(
     };
 
     // ── 5f. Initialize auth provider (JWT, OIDC, and/or API keys) ────
-    let (auth_handle, auth_provider): (
+    let (auth_handle, auth_provider, revocation_handle): (
         Option<crate::reload::AuthProviderHandle>,
         Option<Arc<dyn AuthProvider>>,
+        Option<adapters::auth::revocation::RevocationHandle>,
     ) = if config.auth.enabled {
         // Build token-based provider (JWT or OIDC) if configured
         let (token_handle, token_provider): (
@@ -626,10 +627,16 @@ pub async fn run(
             }
         };
 
+        // Wrap the final provider with token revocation support.
+        let revocable = adapters::auth::revocation::RevocableAuthProvider::new(final_provider);
+        let revocation_handle = revocable.revocation_handle();
+        let final_provider = Arc::new(revocable) as Arc<dyn AuthProvider>;
+        info!("token revocation enabled");
+
         let handle = token_handle.unwrap_or(crate::reload::AuthProviderHandle::ApiKeyOnly);
-        (Some(handle), Some(final_provider))
+        (Some(handle), Some(final_provider), Some(revocation_handle))
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     // Shared config, reload trigger, and eBPF program status for ops endpoints
@@ -655,7 +662,11 @@ pub async fn run(
         app_state = app_state.with_alert_store(Arc::clone(store));
     }
     if let Some(provider) = auth_provider {
-        app_state = app_state.with_auth_provider(provider, config.auth.metrics_auth_required);
+        app_state = app_state.with_auth_provider(
+            provider,
+            revocation_handle,
+            config.auth.metrics_auth_required,
+        );
     }
 
     // Wire capture engine for manual packet capture

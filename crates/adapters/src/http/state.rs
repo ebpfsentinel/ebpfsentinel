@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+use crate::auth::revocation::RevocationHandle;
 use application::alias_service_impl::AliasAppService;
 use application::audit_service_impl::AuditAppService;
 use application::conntrack_service_impl::ConnTrackAppService;
@@ -58,6 +59,7 @@ pub struct AppState {
     pub domain_reputation_service: Option<Arc<DomainReputationAppService>>,
     pub alert_store: Option<Arc<dyn AlertStore>>,
     pub auth_provider: Option<Arc<dyn AuthProvider>>,
+    pub revocation_handle: Option<RevocationHandle>,
     pub metrics_auth_required: bool,
     pub config: Arc<RwLock<AgentConfig>>,
     pub reload_trigger: mpsc::Sender<()>,
@@ -108,6 +110,7 @@ impl AppState {
             domain_reputation_service: None,
             alert_store: None,
             auth_provider: None,
+            revocation_handle: None,
             metrics_auth_required: false,
             config,
             reload_trigger,
@@ -251,14 +254,16 @@ impl AppState {
         self
     }
 
-    /// Attach a JWT auth provider and configure metrics auth.
+    /// Attach an auth provider with optional token revocation and configure metrics auth.
     #[must_use]
     pub fn with_auth_provider(
         mut self,
         provider: Arc<dyn AuthProvider>,
+        revocation_handle: Option<RevocationHandle>,
         metrics_auth_required: bool,
     ) -> Self {
         self.auth_provider = Some(provider);
+        self.revocation_handle = revocation_handle;
         self.metrics_auth_required = metrics_auth_required;
         self
     }
