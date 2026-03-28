@@ -24,6 +24,11 @@ const WRITE_RATE_LIMIT_BURST: u32 = 60;
 const READ_RATE_LIMIT_PER_SECOND: u64 = 4;
 const READ_RATE_LIMIT_BURST: u32 = 200;
 
+/// Auth-specific rate limit: 10 requests per second per IP, burst 30.
+/// Applied as an extra layer when auth is enabled to mitigate brute-force attacks.
+const AUTH_RATE_LIMIT_PER_SECOND: u64 = 10;
+const AUTH_RATE_LIMIT_BURST: u32 = 30;
+
 use super::agent_handler::agent_status;
 use super::alert_handler::{list_alerts, mark_false_positive};
 use super::alias_handler::{alias_status, set_external_alias_content};
@@ -228,10 +233,19 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
             .layer(DefaultBodyLimit::max(MAX_BODY_SIZE));
 
         if state.auth_provider.is_some() {
+            // Stricter per-IP rate limit when auth is enabled to mitigate brute-force.
+            let auth_governor = Arc::new(
+                GovernorConfigBuilder::default()
+                    .per_second(AUTH_RATE_LIMIT_PER_SECOND)
+                    .burst_size(AUTH_RATE_LIMIT_BURST)
+                    .finish()
+                    .expect("auth governor config should build"),
+            );
             r.layer(middleware::from_fn_with_state(
                 Arc::clone(&state),
                 jwt_auth_middleware,
             ))
+            .layer(GovernorLayer::new(auth_governor))
         } else {
             r
         }
@@ -245,19 +259,19 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
         router
     };
 
-    // CORS: when auth is enabled, allow any origin (token-protected).
-    // When auth is disabled, restrict to localhost to prevent cross-origin
-    // access from untrusted browsers.
-    let allow_origin = if state.auth_provider.is_some() {
-        AllowOrigin::any()
-    } else {
-        AllowOrigin::predicate(|origin, _| {
-            let o = origin.as_bytes();
-            o.starts_with(b"http://127.0.0.1")
-                || o.starts_with(b"http://localhost")
-                || o.starts_with(b"http://[::1]")
-        })
-    };
+    // CORS: restrict origins to localhost variants regardless of auth state.
+    // Even with token-based auth, `AllowOrigin::any()` is unnecessarily broad
+    // and could facilitate CSRF-like attacks if tokens are leaked. Operators
+    // who need cross-origin access from a dashboard should deploy a reverse proxy.
+    let allow_origin = AllowOrigin::predicate(|origin, _| {
+        let o = origin.as_bytes();
+        o.starts_with(b"http://127.0.0.1")
+            || o.starts_with(b"http://localhost")
+            || o.starts_with(b"http://[::1]")
+            || o.starts_with(b"https://127.0.0.1")
+            || o.starts_with(b"https://localhost")
+            || o.starts_with(b"https://[::1]")
+    });
     let cors = CorsLayer::new()
         .allow_origin(allow_origin)
         .allow_methods([

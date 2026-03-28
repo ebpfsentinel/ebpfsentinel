@@ -87,7 +87,10 @@ impl RevocationHandle {
 
     /// Number of revoked entries.
     pub fn len(&self) -> usize {
-        self.revoked.read().unwrap_or_else(PoisonError::into_inner).len()
+        self.revoked
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     /// Whether the revocation list is empty.
