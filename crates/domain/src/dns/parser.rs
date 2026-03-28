@@ -316,7 +316,7 @@ fn parse_name(payload: &[u8], start_offset: usize) -> Result<(String, usize), Dn
             }
 
             pointer_hops += 1;
-            if pointer_hops > MAX_POINTER_HOPS {
+            if pointer_hops >= MAX_POINTER_HOPS {
                 return Err(DnsError::CompressionLoop);
             }
 
