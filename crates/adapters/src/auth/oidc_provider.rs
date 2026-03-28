@@ -34,6 +34,7 @@ impl OidcAuthProvider {
     ) -> Result<Self, AuthError> {
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_required_spec_claims(&["sub", "exp"]);
+        validation.leeway = 0; // Explicit: reject expired tokens with zero tolerance
 
         if let Some(iss) = issuer {
             validation.set_issuer(&[iss]);
