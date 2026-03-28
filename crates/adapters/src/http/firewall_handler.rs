@@ -144,17 +144,60 @@ fn parse_protocol(s: &str) -> Result<Protocol, ApiError> {
     }
 }
 
-fn parse_scope(s: &str) -> Scope {
+fn parse_scope(s: &str) -> Result<Scope, ApiError> {
     if s.eq_ignore_ascii_case("global") {
-        Scope::Global
+        Ok(Scope::Global)
     } else if let Some(iface) = s.strip_prefix("interface:") {
-        Scope::Interface(iface.to_string())
+        validate_interface_name(iface)?;
+        Ok(Scope::Interface(iface.to_string()))
     } else if let Some(ns) = s.strip_prefix("namespace:") {
-        Scope::Namespace(ns.to_string())
+        validate_namespace_name(ns)?;
+        Ok(Scope::Namespace(ns.to_string()))
     } else {
         // Default: treat as interface name
-        Scope::Interface(s.to_string())
+        validate_interface_name(s)?;
+        Ok(Scope::Interface(s.to_string()))
     }
+}
+
+/// Validate Linux interface name: max 15 chars (IFNAMSIZ-1), alphanumeric + `_-.:`.
+fn validate_interface_name(name: &str) -> Result<(), ApiError> {
+    if name.is_empty() || name.len() > 15 {
+        return Err(ApiError::BadRequest {
+            code: "VALIDATION_ERROR",
+            message: format!("interface name must be 1-15 characters, got '{name}'"),
+        });
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.' || b == b':')
+    {
+        return Err(ApiError::BadRequest {
+            code: "VALIDATION_ERROR",
+            message: format!("interface name contains invalid characters: '{name}'"),
+        });
+    }
+    Ok(())
+}
+
+/// Validate K8s namespace name: max 63 chars, lowercase alphanumeric + `-`.
+fn validate_namespace_name(name: &str) -> Result<(), ApiError> {
+    if name.is_empty() || name.len() > 63 {
+        return Err(ApiError::BadRequest {
+            code: "VALIDATION_ERROR",
+            message: format!("namespace must be 1-63 characters, got '{name}'"),
+        });
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(ApiError::BadRequest {
+            code: "VALIDATION_ERROR",
+            message: format!("namespace contains invalid characters: '{name}'"),
+        });
+    }
+    Ok(())
 }
 
 impl CreateRuleRequest {
@@ -195,7 +238,7 @@ impl CreateRuleRequest {
 
         let src_port = self.src_port.map(|p| PortRange { start: p, end: p });
         let dst_port = self.dst_port.map(|p| PortRange { start: p, end: p });
-        let scope = parse_scope(&self.scope);
+        let scope = parse_scope(&self.scope)?;
 
         Ok(FirewallRule {
             id: RuleId(self.id),
@@ -441,7 +484,7 @@ pub async fn create_rule(
     Json(req): Json<CreateRuleRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     if let Some(Extension(ref claims)) = claims {
-        let scope = parse_scope(&req.scope);
+        let scope = parse_scope(&req.scope)?;
         require_namespace_write(claims, &scope)?;
     }
     let rule = req.into_domain_rule()?;
@@ -552,11 +595,36 @@ mod tests {
 
     #[test]
     fn parse_scope_variants() {
-        assert!(matches!(parse_scope("global"), Scope::Global));
-        assert!(matches!(parse_scope("interface:eth0"), Scope::Interface(_)));
-        assert!(matches!(parse_scope("namespace:prod"), Scope::Namespace(_)));
+        assert!(matches!(parse_scope("global"), Ok(Scope::Global)));
+        assert!(matches!(
+            parse_scope("interface:eth0"),
+            Ok(Scope::Interface(_))
+        ));
+        assert!(matches!(
+            parse_scope("namespace:prod"),
+            Ok(Scope::Namespace(_))
+        ));
         // Bare name → Interface
-        assert!(matches!(parse_scope("wlan0"), Scope::Interface(_)));
+        assert!(matches!(parse_scope("wlan0"), Ok(Scope::Interface(_))));
+    }
+
+    #[test]
+    fn parse_scope_rejects_path_traversal() {
+        assert!(parse_scope("interface:../../../etc").is_err());
+        assert!(parse_scope("namespace:../../etc").is_err());
+        assert!(parse_scope("../etc").is_err());
+    }
+
+    #[test]
+    fn parse_scope_rejects_overlong_interface() {
+        assert!(parse_scope("interface:this_is_way_too_long_name").is_err());
+    }
+
+    #[test]
+    fn parse_scope_rejects_invalid_namespace_chars() {
+        assert!(parse_scope("namespace:UPPER").is_err());
+        assert!(parse_scope("namespace:has space").is_err());
+        assert!(parse_scope("namespace:has_underscore").is_err());
     }
 
     #[test]
