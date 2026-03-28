@@ -18,6 +18,11 @@ pub struct AuthConfig {
     #[serde(default)]
     pub api_keys: Vec<ApiKeyConfig>,
 
+    /// Salt for API key hashing. If omitted, a random 32-byte salt is generated
+    /// at startup. Set this explicitly to ensure stable hashes across restarts.
+    #[serde(default)]
+    pub api_key_salt: Option<String>,
+
     /// Whether `/metrics` requires authentication (default: true).
     #[serde(default = "default_metrics_auth")]
     pub metrics_auth_required: bool,
@@ -47,6 +52,7 @@ impl Default for AuthConfig {
             jwt: JwtConfig::default(),
             oidc: None,
             api_keys: Vec::new(),
+            api_key_salt: None,
             metrics_auth_required: true,
         }
     }

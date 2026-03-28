@@ -149,4 +149,18 @@ mod tests {
         // Should succeed via Bearer, not api-key
         assert!(interceptor(req).is_ok());
     }
+
+    #[test]
+    fn authorization_metadata_is_case_insensitive() {
+        // HTTP/2 metadata keys are normalized to lowercase by tonic/http,
+        // so "Authorization" inserted as "authorization" is matched correctly.
+        let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
+        let mut req = Request::new(());
+        // tonic normalizes to lowercase internally
+        req.metadata_mut().insert(
+            "authorization",
+            MetadataValue::from_static("Bearer valid-token"),
+        );
+        assert!(interceptor(req).is_ok());
+    }
 }

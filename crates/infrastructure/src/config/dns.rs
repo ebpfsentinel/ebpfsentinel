@@ -118,6 +118,15 @@ impl ReputationSectionConfig {
                 message: "must be >= 1".to_string(),
             });
         }
+        if self.high_risk_countries.len() > 250 {
+            return Err(ConfigError::Validation {
+                field: "dns.reputation.high_risk_countries".to_string(),
+                message: format!(
+                    "too many country codes: {} (max 250)",
+                    self.high_risk_countries.len()
+                ),
+            });
+        }
         Ok(())
     }
 

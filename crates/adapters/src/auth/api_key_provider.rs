@@ -16,16 +16,21 @@ struct ApiKeyEntry {
 
 /// Static API key authentication provider.
 ///
-/// Keys are stored as SHA-256 hashes to prevent timing side-channel attacks
-/// and to avoid keeping plaintext secrets in memory after construction.
+/// Keys are stored as salted SHA-256 hashes to prevent timing side-channel
+/// attacks and to avoid keeping plaintext secrets in memory after construction.
 pub struct ApiKeyAuthProvider {
-    /// Map from hex-encoded SHA-256 hash of the key to its metadata.
+    /// Map from hex-encoded salted SHA-256 hash of the key to its metadata.
     keys: HashMap<String, ApiKeyEntry>,
+    /// Salt used for hashing (must be the same for lookup as for construction).
+    salt: Vec<u8>,
 }
 
-/// Compute the hex-encoded SHA-256 hash of a key.
-fn hash_key(key: &str) -> String {
-    let digest = Sha256::digest(key.as_bytes());
+/// Compute the hex-encoded salted SHA-256 hash of a key: `H(salt || key)`.
+fn hash_key_with_salt(salt: &[u8], key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(salt);
+    hasher.update(key.as_bytes());
+    let digest = hasher.finalize();
     let mut hex = String::with_capacity(64);
     for byte in digest {
         let _ = write!(hex, "{byte:02x}");
@@ -42,13 +47,15 @@ impl std::fmt::Debug for ApiKeyAuthProvider {
 }
 
 impl ApiKeyAuthProvider {
-    /// Create a provider from a list of `(name, key, role, namespaces)` tuples.
+    /// Create a provider from a list of `(name, key, role, namespaces)` tuples
+    /// and a salt for hashing.
     ///
-    /// Keys are immediately hashed with SHA-256; the plaintext is not retained.
-    pub fn new(entries: Vec<(String, String, String, Vec<String>)>) -> Self {
+    /// Keys are immediately hashed with salted SHA-256; the plaintext is not retained.
+    pub fn new(entries: Vec<(String, String, String, Vec<String>)>, salt: &[u8]) -> Self {
+        let salt = salt.to_vec();
         let mut keys = HashMap::with_capacity(entries.len());
         for (name, key, role, namespaces) in entries {
-            let hashed = hash_key(&key);
+            let hashed = hash_key_with_salt(&salt, &key);
             keys.insert(
                 hashed,
                 ApiKeyEntry {
@@ -62,7 +69,7 @@ impl ApiKeyAuthProvider {
                 },
             );
         }
-        Self { keys }
+        Self { keys, salt }
     }
 }
 
@@ -72,7 +79,7 @@ impl AuthProvider for ApiKeyAuthProvider {
             return Err(AuthError::TokenMissing);
         }
 
-        let hashed = hash_key(token);
+        let hashed = hash_key_with_salt(&self.salt, token);
 
         // Constant-time scan: iterate ALL entries to prevent timing side-channels.
         // API key sets are small (typically <100), so O(n) is acceptable.
@@ -115,27 +122,32 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    const TEST_SALT: &[u8] = b"test-salt-for-unit-tests";
+
     fn make_provider() -> ApiKeyAuthProvider {
-        ApiKeyAuthProvider::new(vec![
-            (
-                "admin-key".to_string(),
-                "sk-admin-secret".to_string(),
-                "admin".to_string(),
-                vec![],
-            ),
-            (
-                "viewer-key".to_string(),
-                "sk-viewer-secret".to_string(),
-                "viewer".to_string(),
-                vec![],
-            ),
-            (
-                "ops-prod".to_string(),
-                "sk-ops-prod".to_string(),
-                "operator".to_string(),
-                vec!["prod".to_string(), "staging".to_string()],
-            ),
-        ])
+        ApiKeyAuthProvider::new(
+            vec![
+                (
+                    "admin-key".to_string(),
+                    "sk-admin-secret".to_string(),
+                    "admin".to_string(),
+                    vec![],
+                ),
+                (
+                    "viewer-key".to_string(),
+                    "sk-viewer-secret".to_string(),
+                    "viewer".to_string(),
+                    vec![],
+                ),
+                (
+                    "ops-prod".to_string(),
+                    "sk-ops-prod".to_string(),
+                    "operator".to_string(),
+                    vec!["prod".to_string(), "staging".to_string()],
+                ),
+            ],
+            TEST_SALT,
+        )
     }
 
     #[test]
@@ -192,23 +204,23 @@ mod tests {
         let provider = make_provider();
         // Keys should be stored as hashes, not plaintext
         assert!(!provider.keys.contains_key("sk-admin-secret"));
-        // But the hash should be present
-        let expected_hash = hash_key("sk-admin-secret");
+        // But the salted hash should be present
+        let expected_hash = hash_key_with_salt(TEST_SALT, "sk-admin-secret");
         assert!(provider.keys.contains_key(&expected_hash));
     }
 
     #[test]
     fn hash_key_is_deterministic() {
-        let h1 = hash_key("test-key");
-        let h2 = hash_key("test-key");
+        let h1 = hash_key_with_salt(TEST_SALT, "test-key");
+        let h2 = hash_key_with_salt(TEST_SALT, "test-key");
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64); // SHA-256 hex = 64 chars
     }
 
     #[test]
     fn different_keys_produce_different_hashes() {
-        let h1 = hash_key("key-a");
-        let h2 = hash_key("key-b");
+        let h1 = hash_key_with_salt(TEST_SALT, "key-a");
+        let h2 = hash_key_with_salt(TEST_SALT, "key-b");
         assert_ne!(h1, h2);
     }
 }

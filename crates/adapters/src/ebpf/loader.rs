@@ -233,10 +233,11 @@ impl EbpfLoader {
             .program(program_name)
             .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found"))?
             .try_into()?;
-        program
+        let fd = program
             .fd()
-            .map(|fd| fd.try_clone().unwrap())
-            .map_err(|e| anyhow::anyhow!("program '{program_name}' fd unavailable: {e}"))
+            .map_err(|e| anyhow::anyhow!("program '{program_name}' fd unavailable: {e}"))?;
+        fd.try_clone()
+            .map_err(|e| anyhow::anyhow!("program '{program_name}' fd clone failed: {e}"))
     }
 
     /// Wire a tail-call: insert `target_fd` at `index` in the named

@@ -9,6 +9,9 @@ use super::common::{
     validate_regex,
 };
 
+/// Maximum number of country codes in sampling config (ISO 3166-1 has ~249).
+const MAX_COUNTRY_CODES: usize = 250;
+
 // ── Sampling config ───────────────────────────────────────────────
 
 /// Event sampling configuration for IDS/IPS.
@@ -60,6 +63,17 @@ impl SamplingConfig {
                     return Err(ConfigError::Validation {
                         field: format!("{prefix}.sampling"),
                         message: "rates must be between 0.0 and 1.0".to_string(),
+                    });
+                }
+                if let Some(ref countries) = self.high_risk_countries
+                    && countries.len() > MAX_COUNTRY_CODES
+                {
+                    return Err(ConfigError::Validation {
+                        field: format!("{prefix}.sampling.high_risk_countries"),
+                        message: format!(
+                            "too many country codes: {} (max {MAX_COUNTRY_CODES})",
+                            countries.len()
+                        ),
                     });
                 }
                 Ok(())

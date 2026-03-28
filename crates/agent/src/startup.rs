@@ -581,10 +581,29 @@ pub async fn run(
                     )
                 })
                 .collect();
+            // Use configured salt or generate a random one for this process lifetime.
+            let salt = config.auth.api_key_salt.as_deref().map_or_else(
+                || {
+                    use sha2::{Digest, Sha256};
+                    // Derive a per-process salt from high-resolution timestamp + PID.
+                    let mut h = Sha256::new();
+                    h.update(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos()
+                            .to_le_bytes(),
+                    );
+                    h.update(std::process::id().to_le_bytes());
+                    info!("no api_key_salt configured, using ephemeral salt (keys will re-hash on restart)");
+                    h.finalize().to_vec()
+                },
+                |s| s.as_bytes().to_vec(),
+            );
             info!(key_count = entries.len(), "API key authentication enabled");
             Some(
                 Arc::new(adapters::auth::api_key_provider::ApiKeyAuthProvider::new(
-                    entries,
+                    entries, &salt,
                 )) as Arc<dyn AuthProvider>,
             )
         };
