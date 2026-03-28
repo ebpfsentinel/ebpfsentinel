@@ -36,13 +36,18 @@ pub async fn jwt_auth_middleware(
 ///
 /// Checks `Authorization: Bearer <token>` first, then `X-API-Key: <key>`.
 fn extract_token(request: &Request) -> Result<&str, ApiError> {
-    // Try Bearer token first
+    // Try Bearer token first — must look like a JWT (3 dot-separated parts).
     if let Some(auth_header) = request
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         && let Some(token) = auth_header.strip_prefix("Bearer ")
     {
+        if token.is_empty() || token.matches('.').count() != 2 {
+            return Err(ApiError::Unauthorized {
+                message: "malformed Bearer token".to_string(),
+            });
+        }
         return Ok(token);
     }
 
@@ -210,7 +215,7 @@ mod tests {
         let router = build_test_router(state);
         let req = HttpRequest::builder()
             .uri("/protected")
-            .header("Authorization", "Bearer bad-token")
+            .header("Authorization", "Bearer bad.token.here")
             .body(Body::empty())
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
@@ -227,7 +232,7 @@ mod tests {
         let router = build_test_router(state);
         let req = HttpRequest::builder()
             .uri("/protected")
-            .header("Authorization", "Bearer valid-token")
+            .header("Authorization", "Bearer header.payload.signature")
             .body(Body::empty())
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
@@ -253,7 +258,7 @@ mod tests {
             .with_state(state);
         let req = HttpRequest::builder()
             .uri("/check-claims")
-            .header("Authorization", "Bearer valid-token")
+            .header("Authorization", "Bearer header.payload.signature")
             .body(Body::empty())
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
@@ -300,14 +305,14 @@ mod tests {
             .with_state(state);
         let req = HttpRequest::builder()
             .uri("/check-claims")
-            .header("Authorization", "Bearer jwt-token")
+            .header("Authorization", "Bearer jwt.token.here")
             .header("X-API-Key", "sk-api-key")
             .body(Body::empty())
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         // AlwaysOkProvider returns "test-user" for any token — the key point is
-        // that Bearer was used (the token passed to validate_token is "jwt-token",
+        // that Bearer was used (the token passed to validate_token is "jwt.token.here",
         // not "sk-api-key"), verified by the 200 response.
     }
 

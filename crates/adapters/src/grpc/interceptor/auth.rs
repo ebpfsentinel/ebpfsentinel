@@ -28,15 +28,22 @@ pub fn make_jwt_interceptor(
 }
 
 /// Extract a token from gRPC metadata: Bearer header first, then x-api-key.
+///
+/// Bearer tokens must look like a JWT (3 dot-separated parts); malformed
+/// tokens are rejected early without hitting the provider.
 fn extract_token(request: &Request<()>) -> Option<&str> {
-    // Try Bearer token
+    // Try Bearer token — must be a valid JWT structure
     if let Some(bearer) = request
         .metadata()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
     {
-        return Some(bearer);
+        if !bearer.is_empty() && bearer.matches('.').count() == 2 {
+            return Some(bearer);
+        }
+        // Malformed Bearer → fall through (caller returns Unauthenticated)
+        return None;
     }
     // Fall back to x-api-key
     request
@@ -80,7 +87,7 @@ mod tests {
         let mut req = Request::new(());
         req.metadata_mut().insert(
             "authorization",
-            MetadataValue::from_static("Bearer valid-token"),
+            MetadataValue::from_static("Bearer header.payload.signature"),
         );
         assert!(interceptor(req).is_ok());
     }
@@ -99,7 +106,7 @@ mod tests {
         let mut req = Request::new(());
         req.metadata_mut().insert(
             "authorization",
-            MetadataValue::from_static("Bearer bad-token"),
+            MetadataValue::from_static("Bearer bad.token.here"),
         );
         let status = interceptor(req).unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
@@ -142,7 +149,7 @@ mod tests {
         let mut req = Request::new(());
         req.metadata_mut().insert(
             "authorization",
-            MetadataValue::from_static("Bearer valid-token"),
+            MetadataValue::from_static("Bearer header.payload.signature"),
         );
         req.metadata_mut()
             .insert("x-api-key", MetadataValue::from_static("sk-key"));
@@ -159,7 +166,7 @@ mod tests {
         // tonic normalizes to lowercase internally
         req.metadata_mut().insert(
             "authorization",
-            MetadataValue::from_static("Bearer valid-token"),
+            MetadataValue::from_static("Bearer header.payload.signature"),
         );
         assert!(interceptor(req).is_ok());
     }
