@@ -18,22 +18,25 @@ pub struct GrpcTlsConfig {
     pub key_pem: Vec<u8>,
 }
 
-/// Run the gRPC server on the given port with health checks and reflection.
+/// Run the gRPC server on the given port with health checks and optional reflection.
 ///
 /// The server exposes:
 /// - `AlertStreamService` for real-time alert streaming
 /// - `grpc.health.v1.Health` for K8s liveness/readiness probes
-/// - gRPC reflection for service discovery and debugging (NFR32)
+/// - gRPC reflection for service discovery and debugging (NFR32) — only when
+///   `enable_reflection` is `true`. Disabled by default in production to prevent
+///   unauthenticated API schema enumeration.
 ///
 /// When `tls_config` is `Some`, the server terminates TLS (NFR9).
 /// When `auth_provider` is `Some`, the `AlertStreamService` is wrapped with
-/// a JWT interceptor. Health and reflection services are always unauthenticated.
+/// a JWT interceptor. Health service is always unauthenticated.
 pub async fn run_grpc_server(
     alert_tx: broadcast::Sender<Alert>,
     bind_address: &str,
     port: u16,
     auth_provider: Option<Arc<dyn AuthProvider>>,
     tls_config: Option<GrpcTlsConfig>,
+    enable_reflection: bool,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let addr: SocketAddr = format!("{bind_address}:{port}").parse()?;
@@ -43,12 +46,6 @@ pub async fn run_grpc_server(
     health_reporter
         .set_serving::<AlertStreamServiceServer<AlertStreamServiceImpl>>()
         .await;
-
-    // Reflection service for service discovery (NFR32)
-    let reflection_service = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(super::proto::FILE_DESCRIPTOR_SET)
-        .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
-        .build_v1()?;
 
     // Alert streaming service
     let alert_service = AlertStreamServiceImpl::new(alert_tx);
@@ -72,9 +69,17 @@ pub async fn run_grpc_server(
         tracing::info!(port, "gRPC server listening");
     }
 
-    let mut router = builder
-        .add_service(health_service)
-        .add_service(reflection_service);
+    let mut router = builder.add_service(health_service);
+
+    // Reflection service for service discovery (NFR32) — only when explicitly enabled
+    if enable_reflection {
+        let reflection_service = tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(super::proto::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
+            .build_v1()?;
+        router = router.add_service(reflection_service);
+        tracing::info!("gRPC reflection enabled");
+    }
 
     // Wrap AlertStreamService with auth interceptor when configured
     router = if let Some(provider) = auth_provider {

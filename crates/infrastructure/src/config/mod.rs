@@ -1111,6 +1111,11 @@ pub struct AgentInfo {
     #[serde(default)]
     pub swagger_ui: bool,
 
+    /// Enable gRPC reflection service. Disabled by default to prevent
+    /// unauthenticated API schema enumeration in production.
+    #[serde(default)]
+    pub grpc_reflection: bool,
+
     /// Directory containing compiled eBPF program binaries.
     /// Env `EBPF_PROGRAM_DIR` takes precedence, then this field, then defaults.
     #[serde(default)]

@@ -836,6 +836,7 @@ pub async fn run(
     } else {
         None
     };
+    let grpc_reflection = config.agent.grpc_reflection;
     let grpc_handle = tokio::spawn(async move {
         if let Err(e) = run_grpc_server(
             grpc_stream_tx,
@@ -843,6 +844,7 @@ pub async fn run(
             grpc_port,
             grpc_auth,
             grpc_tls,
+            grpc_reflection,
             grpc_shutdown.cancelled_owned(),
         )
         .await

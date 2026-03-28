@@ -3,7 +3,11 @@ use std::sync::Arc;
 use ports::secondary::auth_provider::AuthProvider;
 use tonic::{Request, Status};
 
-/// Create a tonic interceptor that validates JWT Bearer tokens.
+/// Create a tonic interceptor that validates Bearer tokens or API keys.
+///
+/// Extraction order (matching HTTP middleware parity):
+/// 1. `authorization` metadata with `Bearer <token>` prefix
+/// 2. `x-api-key` metadata (raw key value)
 ///
 /// The returned function can be used with `ServiceServer::with_interceptor()`.
 /// Health and reflection services should NOT use this interceptor.
@@ -11,14 +15,9 @@ pub fn make_jwt_interceptor(
     provider: Arc<dyn AuthProvider>,
 ) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone {
     move |request: Request<()>| {
-        let token = request
-            .metadata()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .ok_or_else(|| {
-                Status::unauthenticated("authentication required: no Bearer token provided")
-            })?;
+        let token = extract_token(&request).ok_or_else(|| {
+            Status::unauthenticated("authentication required: provide Bearer token or x-api-key")
+        })?;
 
         provider
             .validate_token(token)
@@ -26,6 +25,24 @@ pub fn make_jwt_interceptor(
 
         Ok(request)
     }
+}
+
+/// Extract a token from gRPC metadata: Bearer header first, then x-api-key.
+fn extract_token(request: &Request<()>) -> Option<&str> {
+    // Try Bearer token
+    if let Some(bearer) = request
+        .metadata()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        return Some(bearer);
+    }
+    // Fall back to x-api-key
+    request
+        .metadata()
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
 }
 
 #[cfg(test)]
@@ -89,7 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn reject_non_bearer() {
+    fn reject_non_bearer_without_api_key() {
         let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
         let mut req = Request::new(());
         req.metadata_mut().insert(
@@ -98,5 +115,38 @@ mod tests {
         );
         let status = interceptor(req).unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn accept_valid_api_key() {
+        let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
+        let mut req = Request::new(());
+        req.metadata_mut()
+            .insert("x-api-key", MetadataValue::from_static("sk-valid-key"));
+        assert!(interceptor(req).is_ok());
+    }
+
+    #[test]
+    fn reject_invalid_api_key() {
+        let interceptor = make_jwt_interceptor(Arc::new(AlwaysFailProvider));
+        let mut req = Request::new(());
+        req.metadata_mut()
+            .insert("x-api-key", MetadataValue::from_static("sk-bad-key"));
+        let status = interceptor(req).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn bearer_takes_precedence_over_api_key() {
+        let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
+        let mut req = Request::new(());
+        req.metadata_mut().insert(
+            "authorization",
+            MetadataValue::from_static("Bearer valid-token"),
+        );
+        req.metadata_mut()
+            .insert("x-api-key", MetadataValue::from_static("sk-key"));
+        // Should succeed via Bearer, not api-key
+        assert!(interceptor(req).is_ok());
     }
 }
