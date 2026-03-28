@@ -41,6 +41,10 @@ impl EmailAlertSender {
                 .map_err(|e| DomainError::EngineError(format!("SMTP relay error: {e}")))?
                 .port(smtp_port)
         } else {
+            tracing::warn!(
+                smtp_host,
+                "SMTP TLS disabled — credentials and alerts sent in plaintext, vulnerable to interception"
+            );
             AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(smtp_host).port(smtp_port)
         };
 
