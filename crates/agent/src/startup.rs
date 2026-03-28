@@ -582,22 +582,15 @@ pub async fn run(
                     )
                 })
                 .collect();
-            // Use configured salt or generate a random one for this process lifetime.
+            // Use configured salt or read 32 random bytes from /dev/urandom.
             let salt = config.auth.api_key_salt.as_deref().map_or_else(
                 || {
-                    use sha2::{Digest, Sha256};
-                    // Derive a per-process salt from high-resolution timestamp + PID.
-                    let mut h = Sha256::new();
-                    h.update(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_nanos()
-                            .to_le_bytes(),
-                    );
-                    h.update(std::process::id().to_le_bytes());
-                    info!("no api_key_salt configured, using ephemeral salt (keys will re-hash on restart)");
-                    h.finalize().to_vec()
+                    let mut buf = vec![0u8; 32];
+                    std::fs::File::open("/dev/urandom")
+                        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf))
+                        .expect("/dev/urandom should be readable");
+                    info!("no api_key_salt configured, using random 32-byte ephemeral salt");
+                    buf
                 },
                 |s| s.as_bytes().to_vec(),
             );
