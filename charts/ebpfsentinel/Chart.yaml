@@ -12,6 +12,7 @@ maintainers:
     url: https://github.com/ebpfsentinel
 keywords:
   - ebpf
+  - xdp
   - ndr
   - firewall
   - ids
@@ -19,4 +20,18 @@ keywords:
   - ddos
   - dlp
   - network-security
-icon: https://raw.githubusercontent.com/ebpfsentinel/ebpfsentinel/main/docs/logo.svg
+  - threat-intelligence
+  - dns
+  - rate-limiting
+  - qos
+  - nat
+  - loadbalancer
+  - tls
+  - post-quantum
+  - packet-capture
+  - conntrack
+  - mitre-attack
+  - geoip
+  - sni-filtering
+  - security-zones
+  - policy-routing

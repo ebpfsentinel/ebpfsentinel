@@ -14,6 +14,21 @@ Check agent logs:
 Access the REST API (from within the cluster):
 
   curl http://{{ include "ebpfsentinel.fullname" . }}.{{ .Release.Namespace }}:{{ .Values.agent.httpPort }}/healthz
+{{- if .Values.agent.tls.enabled }}
+
+TLS is ENABLED:
+
+  curl --cacert ca.pem https://{{ include "ebpfsentinel.fullname" . }}.{{ .Release.Namespace }}:{{ .Values.agent.httpPort }}/healthz
+  PQ mode: {{ .Values.agent.tls.pqMode }}
+  TLS 1.2: {{ if .Values.agent.tls.allowTls12 }}allowed{{ else }}disabled (TLS 1.3 only){{ end }}
+{{- end }}
+
+gRPC streaming (alerts):
+
+  {{ include "ebpfsentinel.fullname" . }}.{{ .Release.Namespace }}:{{ .Values.agent.grpcPort }}
+{{- if .Values.agent.grpcReflection }}
+  gRPC reflection is ENABLED (disable in production with agent.grpcReflection=false)
+{{- end }}
 
 Prometheus metrics:
 
@@ -29,6 +44,25 @@ Prometheus metrics:
 
   hostPID is DISABLED — DLP only sees agent pod processes.
   Enable with: --set daemonset.hostPID=true
+{{- end }}
+{{- if .Values.auto_response.enabled }}
+
+Auto-response is ENABLED — the agent will automatically block/throttle
+source IPs matching severity-based policies.
+{{- end }}
+{{- if .Values.auto_capture.enabled }}
+
+Auto-capture is ENABLED — the agent will start PCAP captures
+when high-severity alerts fire.
+{{- end }}
+
+Security context:
+{{- if .Values.daemonset.securityContext.privileged }}
+  WARNING: Running in privileged mode. Consider switching to fine-grained
+  capabilities for better security:
+    daemonset.securityContext.capabilities.add=[BPF,NET_ADMIN,SYS_ADMIN,NET_RAW]
+{{- else }}
+  Using fine-grained capabilities (recommended).
 {{- end }}
 
 Secrets management (TLS certs, JWT keys, API keys):

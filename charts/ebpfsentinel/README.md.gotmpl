@@ -6,7 +6,7 @@
 
 ## Overview
 
-Deploys [eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel) — a kernel-native **Network Detection & Response (NDR)** platform — as a Kubernetes DaemonSet. One privileged agent per node, attached to host network interfaces via eBPF (XDP/TC).
+Deploys [eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel) — a kernel-native **Network Detection & Response (NDR)** platform — as a Kubernetes DaemonSet. One agent per node with fine-grained capabilities (`CAP_BPF`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, `CAP_NET_RAW`), attached to host network interfaces via eBPF (XDP/TC).
 
 ## Edition: OSS (AGPL-3.0)
 
@@ -48,10 +48,10 @@ See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/m
 | Requirement | Reason |
 |-------------|--------|
 | `hostNetwork: true` | XDP/TC programs attach to host interfaces, not pod veth |
-| `privileged: true` | eBPF program loading requires `CAP_BPF` + `CAP_NET_ADMIN` + `CAP_SYS_ADMIN` |
+| `CAP_BPF` + `CAP_NET_ADMIN` + `CAP_SYS_ADMIN` + `CAP_NET_RAW` | eBPF program loading and network access (default). Fallback: `privileged: true` for kernels without `CAP_BPF` |
 | `/sys/fs/bpf` mount | BPF filesystem for map pinning |
 | `/sys/kernel/debug` mount | eBPF tracing (debugfs) |
-| Kernel 6.6+ with BTF | CO-RE eBPF requires BTF type information |
+| Kernel 6.6+ with BTF | CO-RE eBPF requires BTF type information (TCX link-based TC attach) |
 
 ### Feature Limitations in Kubernetes
 
@@ -131,6 +131,34 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
   --set agent.interfaces='{eth0}' \
   --set daemonset.hostPID=true \
   --set dlp.enabled=true
+```
+
+### TLS with post-quantum key exchange
+
+```bash
+helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
+  --namespace ebpfsentinel --create-namespace \
+  --set agent.interfaces='{eth0}' \
+  --set agent.tls.enabled=true \
+  --set agent.tls.certPath=/etc/ebpfsentinel/tls/tls.crt \
+  --set agent.tls.keyPath=/etc/ebpfsentinel/tls/tls.key \
+  --set agent.tls.pqMode=prefer \
+  --set 'daemonset.extraVolumes[0].name=tls-certs' \
+  --set 'daemonset.extraVolumes[0].secret.secretName=ebpfsentinel-tls' \
+  --set 'daemonset.extraVolumeMounts[0].name=tls-certs' \
+  --set 'daemonset.extraVolumeMounts[0].mountPath=/etc/ebpfsentinel/tls' \
+  --set 'daemonset.extraVolumeMounts[0].readOnly=true'
+```
+
+### Auto-response and auto-capture
+
+```bash
+helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
+  --namespace ebpfsentinel --create-namespace \
+  --set agent.interfaces='{eth0}' \
+  --set auto_response.enabled=true \
+  --set auto_capture.enabled=true \
+  --set-file configOverride=my-response-config.yaml
 ```
 
 ### Custom config (bypass values.yaml)
