@@ -184,9 +184,13 @@ impl AuthProvider for JwtAuthProvider {
             .unwrap_or_else(PoisonError::into_inner);
 
         let token_data: TokenData<JwtClaims> = jsonwebtoken::decode(token, &key, &self.validation)
-            .map_err(|e| match e.kind() {
-                jsonwebtoken::errors::ErrorKind::ExpiredSignature => AuthError::TokenExpired,
-                _ => AuthError::TokenInvalid(e.to_string()),
+            .map_err(|e| {
+                if matches!(e.kind(), jsonwebtoken::errors::ErrorKind::ExpiredSignature) {
+                    AuthError::TokenExpired
+                } else {
+                    tracing::debug!(error = %e, "JWT token validation failed");
+                    AuthError::TokenInvalid("invalid token".to_string())
+                }
             })?;
 
         Ok(token_data.claims)

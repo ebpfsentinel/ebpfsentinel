@@ -61,14 +61,18 @@ impl AuthProvider for OidcAuthProvider {
             return Err(AuthError::TokenMissing);
         }
 
-        // Decode the JWT header to extract the `kid`
-        let header = decode_header(token)
-            .map_err(|e| AuthError::TokenInvalid(format!("invalid JWT header: {e}")))?;
+        // Decode the JWT header to extract the `kid`.
+        // Detailed errors are logged server-side; clients receive a generic message
+        // to prevent authentication infrastructure enumeration.
+        let header = decode_header(token).map_err(|e| {
+            tracing::debug!(error = %e, "OIDC token header decode failed");
+            AuthError::TokenInvalid("invalid token".to_string())
+        })?;
 
-        let kid = header
-            .kid
-            .as_ref()
-            .ok_or_else(|| AuthError::TokenInvalid("token missing 'kid' header".to_string()))?;
+        let kid = header.kid.as_ref().ok_or_else(|| {
+            tracing::debug!("OIDC token missing kid header");
+            AuthError::TokenInvalid("invalid token".to_string())
+        })?;
 
         // Find the matching JWK in the cached set
         let jwk_set = self.jwk_set.read().unwrap_or_else(PoisonError::into_inner);
@@ -77,15 +81,24 @@ impl AuthProvider for OidcAuthProvider {
             .keys
             .iter()
             .find(|k| k.common.key_id.as_deref() == Some(kid.as_str()))
-            .ok_or_else(|| AuthError::TokenInvalid(format!("no JWK found for kid '{kid}'")))?;
+            .ok_or_else(|| {
+                tracing::debug!(kid, "OIDC no JWK found for kid");
+                AuthError::TokenInvalid("invalid token".to_string())
+            })?;
 
-        let decoding_key = DecodingKey::from_jwk(jwk)
-            .map_err(|e| AuthError::TokenInvalid(format!("invalid JWK: {e}")))?;
+        let decoding_key = DecodingKey::from_jwk(jwk).map_err(|e| {
+            tracing::debug!(error = %e, "OIDC JWK decode failed");
+            AuthError::TokenInvalid("invalid token".to_string())
+        })?;
 
         let token_data: TokenData<JwtClaims> = decode(token, &decoding_key, &self.validation)
-            .map_err(|e| match e.kind() {
-                jsonwebtoken::errors::ErrorKind::ExpiredSignature => AuthError::TokenExpired,
-                _ => AuthError::TokenInvalid(e.to_string()),
+            .map_err(|e| {
+                if matches!(e.kind(), jsonwebtoken::errors::ErrorKind::ExpiredSignature) {
+                    AuthError::TokenExpired
+                } else {
+                    tracing::debug!(error = %e, "OIDC token validation failed");
+                    AuthError::TokenInvalid("invalid token".to_string())
+                }
             })?;
 
         Ok(token_data.claims)
@@ -305,7 +318,7 @@ mod tests {
         let token = sign_token_with_kid(&claims, "unknown-kid");
         let err = provider.validate_token(&token).unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
-        assert!(err.to_string().contains("unknown-kid"));
+        assert!(err.to_string().contains("invalid token"));
     }
 
     #[test]
@@ -381,6 +394,6 @@ mod tests {
 
         let err = provider.validate_token(&token).unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
-        assert!(err.to_string().contains("kid"));
+        assert!(err.to_string().contains("invalid token"));
     }
 }
