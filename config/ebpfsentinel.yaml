@@ -111,6 +111,9 @@ alerting:
 audit:
   enabled: false
 
+# Authentication. When disabled, /metrics is unauthenticated — rely on
+# network isolation (K8s NetworkPolicy, firewall rules) to restrict access.
+# When enabled, /metrics requires a token by default (metrics_auth_required).
 auth:
   enabled: false
 
