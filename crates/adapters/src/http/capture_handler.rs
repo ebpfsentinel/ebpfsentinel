@@ -9,6 +9,10 @@ use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
 use super::state::AppState;
+use super::validation::validate_string_length;
+
+/// Maximum BPF filter expression length.
+const MAX_BPF_FILTER_LENGTH: usize = 2048;
 
 // ── DTOs ─────────────────────────────────────────────────────────────
 
@@ -86,6 +90,41 @@ pub async fn start_capture(
 
     let id = format!("cap-{}", now_ns / 1_000_000);
     let interface = req.interface.unwrap_or_else(|| "any".to_string());
+
+    // Validate BPF filter length
+    validate_string_length("filter", &req.filter, MAX_BPF_FILTER_LENGTH)?;
+
+    // Validate BPF filter: reject control characters (NUL, CR, LF, etc.)
+    if req
+        .filter
+        .bytes()
+        .any(|b| b.is_ascii_control() && b != b' ')
+    {
+        return Err(ApiError::BadRequest {
+            code: "VALIDATION_ERROR",
+            message: "BPF filter contains invalid control characters".to_string(),
+        });
+    }
+
+    // Validate interface name (same rules as firewall scope validation)
+    if interface != "any" {
+        if interface.is_empty() || interface.len() > 15 {
+            return Err(ApiError::BadRequest {
+                code: "VALIDATION_ERROR",
+                message: format!("interface name must be 1-15 characters, got '{interface}'"),
+            });
+        }
+        if !interface
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.' || b == b':')
+        {
+            return Err(ApiError::BadRequest {
+                code: "VALIDATION_ERROR",
+                message: format!("interface name contains invalid characters: '{interface}'"),
+            });
+        }
+    }
+
     let output_path = format!("/var/lib/ebpfsentinel/captures/{id}.pcap");
 
     let session = CaptureSession {
@@ -280,8 +319,13 @@ fn pcap_capture_blocking(
         .map_err(|e| (id.to_string(), format!("capture open failed: {e}")))?;
 
     if !filter.is_empty() {
-        cap.filter(filter, true)
-            .map_err(|e| (id.to_string(), format!("BPF filter error: {e}")))?;
+        cap.filter(filter, true).map_err(|e| {
+            tracing::debug!(error = %e, "BPF filter compilation failed");
+            (
+                id.to_string(),
+                "BPF filter compilation failed — check filter syntax".to_string(),
+            )
+        })?;
     }
 
     let mut savefile = cap
