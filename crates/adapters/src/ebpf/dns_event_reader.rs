@@ -65,11 +65,12 @@ impl DnsEventReader {
                         unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<DnsEvent>()) };
 
                     let payload_len = header.dns_payload_len as usize;
-                    let payload_end = header_size + payload_len;
-                    let payload = if payload_end <= bytes.len() {
+                    let payload = if let Some(payload_end) = header_size.checked_add(payload_len)
+                        && payload_end <= bytes.len()
+                    {
                         bytes[header_size..payload_end].to_vec()
                     } else {
-                        // Partial payload — take what we have
+                        // Overflow or partial payload — take what we have
                         bytes[header_size..].to_vec()
                     };
 
