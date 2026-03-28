@@ -44,10 +44,14 @@ impl JwtClaims {
 
     /// Check whether the claims grant access to the given namespace.
     ///
-    /// Returns `true` if `namespaces` is `None` (unrestricted) or contains `ns`.
+    /// - `None` → no namespaces granted (deny all — secure default).
+    /// - `Some(list)` → access granted if `ns` is in the list.
+    ///
+    /// Admin role bypasses this check entirely in the RBAC middleware,
+    /// so `None` only restricts Operator tokens without explicit namespaces.
     pub fn has_namespace(&self, ns: &str) -> bool {
         match &self.namespaces {
-            None => true,
+            None => false,
             Some(list) => list.iter().any(|n| n == ns),
         }
     }
@@ -103,10 +107,10 @@ mod tests {
     }
 
     #[test]
-    fn has_namespace_unrestricted_when_none() {
+    fn has_namespace_denied_when_none() {
         let json = r#"{"sub":"svc","exp":1}"#;
         let claims: JwtClaims = serde_json::from_str(json).unwrap();
-        assert!(claims.has_namespace("anything"));
+        assert!(!claims.has_namespace("anything"));
     }
 
     #[test]
