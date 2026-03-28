@@ -589,7 +589,7 @@ pub async fn run(
                     std::fs::File::open("/dev/urandom")
                         .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf))
                         .expect("/dev/urandom should be readable");
-                    info!("no api_key_salt configured, using random 32-byte ephemeral salt");
+                    warn!("no api_key_salt configured — using ephemeral salt, API keys will invalidate on restart");
                     buf
                 },
                 |s| s.as_bytes().to_vec(),
