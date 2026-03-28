@@ -70,6 +70,9 @@ start_agent() {
     # Ensure data directory exists
     mkdir -p "$DATA_DIR"
 
+    # Config must not be world-readable (agent enforces strict permissions)
+    chmod 640 "$config_file"
+
     "$AGENT_BIN" --config "$config_file" "$@" \
         >"$AGENT_LOG_FILE" 2>&1 &
     AGENT_PID=$!
