@@ -1,5 +1,6 @@
 use std::sync::{PoisonError, RwLock};
 
+use base64::Engine as _;
 use domain::auth::entity::JwtClaims;
 use domain::auth::error::AuthError;
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation};
@@ -22,13 +23,119 @@ impl std::fmt::Debug for JwtAuthProvider {
     }
 }
 
+/// Minimum RSA key size in bits. Keys smaller than 2048 bits are
+/// considered insecure and rejected at construction time.
+const MIN_RSA_KEY_BITS: usize = 2048;
+
+/// Validate that a PEM-encoded RSA public key is at least `MIN_RSA_KEY_BITS`.
+///
+/// Parses the PEM/DER `SubjectPublicKeyInfo` to extract the RSA modulus length.
+fn validate_rsa_key_size(pem_bytes: &[u8]) -> Result<(), AuthError> {
+    let pem_str = std::str::from_utf8(pem_bytes)
+        .map_err(|_| AuthError::KeyLoadFailed("PEM is not valid UTF-8".to_string()))?;
+
+    // Strip PEM header/footer and decode base64
+    let b64: String = pem_str
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect();
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(&b64)
+        .map_err(|e| AuthError::KeyLoadFailed(format!("PEM base64 decode failed: {e}")))?;
+
+    // Parse SubjectPublicKeyInfo → BIT STRING → SEQUENCE { INTEGER(n), INTEGER(e) }
+    let modulus_bytes = extract_rsa_modulus_len(&der).ok_or_else(|| {
+        AuthError::KeyLoadFailed("failed to parse RSA public key DER".to_string())
+    })?;
+    let key_bits = modulus_bytes * 8;
+
+    if key_bits < MIN_RSA_KEY_BITS {
+        return Err(AuthError::KeyLoadFailed(format!(
+            "RSA key too small: {key_bits} bits (minimum {MIN_RSA_KEY_BITS})"
+        )));
+    }
+    Ok(())
+}
+
+/// Extract RSA modulus byte-length from a DER-encoded `SubjectPublicKeyInfo`.
+fn extract_rsa_modulus_len(der: &[u8]) -> Option<usize> {
+    // SEQUENCE (SubjectPublicKeyInfo)
+    let (spki_content, _) = parse_der_seq(der)?;
+    // Skip AlgorithmIdentifier SEQUENCE
+    let (_, rest) = parse_der_seq(spki_content)?;
+    // BIT STRING containing RSA public key
+    let bs_content = parse_der_bitstring(rest)?;
+    // SEQUENCE { INTEGER(n), INTEGER(e) }
+    let (rsa_seq, _) = parse_der_seq(bs_content)?;
+    // First INTEGER is the modulus
+    let (_, n_len) = parse_der_integer(rsa_seq)?;
+    Some(n_len)
+}
+
+/// Parse a DER SEQUENCE tag, return (content, rest).
+fn parse_der_seq(data: &[u8]) -> Option<(&[u8], &[u8])> {
+    if data.first()? != &0x30 {
+        return None;
+    }
+    let (len, offset) = parse_der_len(&data[1..])?;
+    let content = data.get(1 + offset..1 + offset + len)?;
+    let rest = data.get(1 + offset + len..)?;
+    Some((content, rest))
+}
+
+/// Parse a DER BIT STRING tag, return inner content (skip unused-bits byte).
+fn parse_der_bitstring(data: &[u8]) -> Option<&[u8]> {
+    if data.first()? != &0x03 {
+        return None;
+    }
+    let (len, offset) = parse_der_len(&data[1..])?;
+    // First byte of BIT STRING content is unused-bits count (should be 0)
+    data.get(1 + offset + 1..1 + offset + len)
+}
+
+/// Parse a DER INTEGER tag, return (rest, byte length without leading zero).
+fn parse_der_integer(data: &[u8]) -> Option<(&[u8], usize)> {
+    if data.first()? != &0x02 {
+        return None;
+    }
+    let (len, offset) = parse_der_len(&data[1..])?;
+    let int_bytes = data.get(1 + offset..1 + offset + len)?;
+    let rest = data.get(1 + offset + len..)?;
+    // Strip leading zero (sign byte for positive integers)
+    let stripped_len = if !int_bytes.is_empty() && int_bytes[0] == 0 {
+        len - 1
+    } else {
+        len
+    };
+    Some((rest, stripped_len))
+}
+
+/// Parse DER length encoding, return (length, bytes consumed).
+fn parse_der_len(data: &[u8]) -> Option<(usize, usize)> {
+    let first = *data.first()?;
+    if first & 0x80 == 0 {
+        Some((first as usize, 1))
+    } else {
+        let num_bytes = (first & 0x7F) as usize;
+        let mut len = 0usize;
+        for i in 0..num_bytes {
+            len = (len << 8) | (*data.get(1 + i)?) as usize;
+        }
+        Some((len, 1 + num_bytes))
+    }
+}
+
 impl JwtAuthProvider {
     /// Create a new provider from PEM-encoded RSA public key bytes.
+    ///
+    /// Rejects keys smaller than 2048 bits.
     pub fn new(
         pem_bytes: &[u8],
         issuer: Option<&str>,
         audience: Option<&str>,
     ) -> Result<Self, AuthError> {
+        validate_rsa_key_size(pem_bytes)?;
+
         let decoding_key = DecodingKey::from_rsa_pem(pem_bytes)
             .map_err(|e| AuthError::KeyLoadFailed(e.to_string()))?;
 
@@ -49,7 +156,11 @@ impl JwtAuthProvider {
     }
 
     /// Atomically replace the decoding key (for config-reload key rotation).
+    ///
+    /// Rejects keys smaller than 2048 bits.
     pub fn rotate_key(&self, pem_bytes: &[u8]) -> Result<(), AuthError> {
+        validate_rsa_key_size(pem_bytes)?;
+
         let new_key = DecodingKey::from_rsa_pem(pem_bytes)
             .map_err(|e| AuthError::KeyLoadFailed(e.to_string()))?;
         let mut key = self
@@ -234,5 +345,27 @@ mod tests {
     fn invalid_pem_fails_construction() {
         let err = JwtAuthProvider::new(b"not a PEM", None, None).unwrap_err();
         assert!(matches!(err, AuthError::KeyLoadFailed(_)), "got: {err}");
+    }
+
+    #[test]
+    fn rsa_key_size_validation_accepts_2048() {
+        // The test fixture is a 2048-bit key
+        assert!(validate_rsa_key_size(TEST_RSA_PUBLIC_KEY).is_ok());
+    }
+
+    #[test]
+    fn rsa_key_size_validation_reports_bits() {
+        let key_bits = {
+            let pem_str = std::str::from_utf8(TEST_RSA_PUBLIC_KEY).unwrap();
+            let b64: String = pem_str
+                .lines()
+                .filter(|l| !l.starts_with("-----"))
+                .collect();
+            let der = base64::engine::general_purpose::STANDARD
+                .decode(&b64)
+                .unwrap();
+            extract_rsa_modulus_len(&der).unwrap() * 8
+        };
+        assert_eq!(key_bits, 2048);
     }
 }

@@ -51,6 +51,7 @@ pcap = { workspace = true, optional = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
+base64 = { workspace = true }
 
 [features]
 default = []
