@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, RwLock};
 
 use domain::auth::entity::JwtClaims;
 use domain::auth::error::AuthError;
@@ -51,7 +51,10 @@ impl AuthProvider for RevocableAuthProvider {
         let claims = self.inner.validate_token(token)?;
 
         let key = revocation_key(&claims);
-        let revoked = self.revoked.read().unwrap_or_else(PoisonError::into_inner);
+        let revoked = self.revoked.read().map_err(|e| {
+            tracing::error!("revocation list RwLock poisoned: {e}");
+            AuthError::TokenInvalid("internal auth error".to_string())
+        })?;
         if revoked.contains(&key) {
             return Err(AuthError::TokenInvalid(
                 "token has been revoked".to_string(),
@@ -74,14 +77,20 @@ impl RevocationHandle {
     /// Revoke all tokens issued to `subject` at or before `issued_at`.
     pub fn revoke(&self, subject: &str, issued_at: u64) {
         let key = format!("{subject}:{issued_at}");
-        let mut set = self.revoked.write().unwrap_or_else(PoisonError::into_inner);
+        let mut set = self.revoked.write().unwrap_or_else(|e| {
+            tracing::error!("revocation list RwLock poisoned on revoke: {e}");
+            e.into_inner()
+        });
         set.insert(key);
     }
 
     /// Remove a revocation entry.
     pub fn unrevoke(&self, subject: &str, issued_at: u64) {
         let key = format!("{subject}:{issued_at}");
-        let mut set = self.revoked.write().unwrap_or_else(PoisonError::into_inner);
+        let mut set = self.revoked.write().unwrap_or_else(|e| {
+            tracing::error!("revocation list RwLock poisoned on unrevoke: {e}");
+            e.into_inner()
+        });
         set.remove(&key);
     }
 
@@ -89,7 +98,10 @@ impl RevocationHandle {
     pub fn len(&self) -> usize {
         self.revoked
             .read()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(|e| {
+                tracing::error!("revocation list RwLock poisoned on len: {e}");
+                e.into_inner()
+            })
             .len()
     }
 
@@ -100,7 +112,10 @@ impl RevocationHandle {
 
     /// Clear all revocations.
     pub fn clear(&self) {
-        let mut set = self.revoked.write().unwrap_or_else(PoisonError::into_inner);
+        let mut set = self.revoked.write().unwrap_or_else(|e| {
+            tracing::error!("revocation list RwLock poisoned on clear: {e}");
+            e.into_inner()
+        });
         set.clear();
     }
 }

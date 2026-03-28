@@ -1,4 +1,4 @@
-use std::sync::{PoisonError, RwLock};
+use std::sync::RwLock;
 
 use base64::Engine as _;
 use domain::auth::entity::JwtClaims;
@@ -164,10 +164,10 @@ impl JwtAuthProvider {
 
         let new_key = DecodingKey::from_rsa_pem(pem_bytes)
             .map_err(|e| AuthError::KeyLoadFailed(e.to_string()))?;
-        let mut key = self
-            .decoding_key
-            .write()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut key = self.decoding_key.write().map_err(|e| {
+            tracing::error!("JWT decoding key RwLock poisoned: {e}");
+            AuthError::KeyLoadFailed("internal auth state corrupted".to_string())
+        })?;
         *key = new_key;
         Ok(())
     }
@@ -179,10 +179,10 @@ impl AuthProvider for JwtAuthProvider {
             return Err(AuthError::TokenMissing);
         }
 
-        let key = self
-            .decoding_key
-            .read()
-            .unwrap_or_else(PoisonError::into_inner);
+        let key = self.decoding_key.read().map_err(|e| {
+            tracing::error!("JWT decoding key RwLock poisoned: {e}");
+            AuthError::TokenInvalid("internal auth error".to_string())
+        })?;
 
         let token_data: TokenData<JwtClaims> = jsonwebtoken::decode(token, &key, &self.validation)
             .map_err(|e| {
