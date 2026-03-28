@@ -13,6 +13,10 @@ use domain::threatintel::parser::{
 use ports::secondary::feed_source::FeedSource;
 use ports::secondary::metrics_port::MetricsPort;
 
+/// Maximum nesting depth for JSON feed data. Prevents stack exhaustion
+/// from maliciously crafted deeply-nested payloads.
+const MAX_JSON_DEPTH: usize = 64;
+
 /// Fetch and parse all enabled feeds **concurrently**, returning a merged IOC list.
 ///
 /// All feeds are fetched in parallel. Failed feeds are logged and skipped
@@ -148,6 +152,30 @@ pub async fn fetch_all_feeds_v2(
     result
 }
 
+// ── JSON depth guard ──────────────────────────────────────────────────
+
+/// Check that a parsed JSON value does not exceed `max_depth` nesting levels.
+/// Returns `Err` if the depth is exceeded.
+fn check_json_depth(value: &serde_json::Value, max_depth: usize) -> Result<(), DomainError> {
+    fn walk(v: &serde_json::Value, depth: usize, max: usize) -> bool {
+        if depth > max {
+            return false;
+        }
+        match v {
+            serde_json::Value::Array(arr) => arr.iter().all(|item| walk(item, depth + 1, max)),
+            serde_json::Value::Object(obj) => obj.values().all(|val| walk(val, depth + 1, max)),
+            _ => true,
+        }
+    }
+    if walk(value, 0, max_depth) {
+        Ok(())
+    } else {
+        Err(DomainError::EngineError(format!(
+            "JSON nesting exceeds maximum depth of {max_depth}"
+        )))
+    }
+}
+
 // ── STIX 2.1 JSON parser ──────────────────────────────────────────────
 
 /// Parse a STIX 2.1 bundle JSON into `CtiIndicators`.
@@ -161,6 +189,7 @@ pub async fn fetch_all_feeds_v2(
 fn parse_stix_json(text: &str, config: &FeedConfig) -> Result<CtiIndicators, DomainError> {
     let parsed: serde_json::Value = serde_json::from_str(text)
         .map_err(|e| DomainError::EngineError(format!("STIX JSON parse error: {e}")))?;
+    check_json_depth(&parsed, MAX_JSON_DEPTH)?;
 
     let bundle_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
     if bundle_type != "bundle" {
@@ -475,6 +504,7 @@ fn parse_json_feed(text: &str, config: &FeedConfig) -> Result<Vec<Ioc>, DomainEr
 
     let parsed: serde_json::Value = serde_json::from_str(text)
         .map_err(|e| DomainError::EngineError(format!("JSON parse error: {e}")))?;
+    check_json_depth(&parsed, MAX_JSON_DEPTH)?;
 
     let items = match &parsed {
         serde_json::Value::Array(arr) => arr.as_slice(),
@@ -1267,5 +1297,35 @@ mod tests {
             source: None,
         };
         assert!(build_l7_rule_from_url(&url, 100).is_none());
+    }
+
+    // ── JSON depth guard ──────────────────────────────────────────────
+
+    #[test]
+    fn check_json_depth_accepts_shallow() {
+        let val: serde_json::Value =
+            serde_json::from_str(r#"{"a": {"b": [1, 2, {"c": 3}]}}"#).unwrap();
+        assert!(check_json_depth(&val, 64).is_ok());
+    }
+
+    #[test]
+    fn check_json_depth_rejects_deep_nesting() {
+        // Build a 70-level nested object: {"a":{"a":{"a":...}}}
+        let mut json = "0".to_string();
+        for _ in 0..70 {
+            json = format!(r#"{{"a":{json}}}"#);
+        }
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(check_json_depth(&val, 64).is_err());
+    }
+
+    #[test]
+    fn check_json_depth_accepts_at_boundary() {
+        let mut json = "0".to_string();
+        for _ in 0..64 {
+            json = format!(r#"{{"a":{json}}}"#);
+        }
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(check_json_depth(&val, 64).is_ok());
     }
 }

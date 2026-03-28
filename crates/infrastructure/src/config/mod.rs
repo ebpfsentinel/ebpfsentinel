@@ -220,8 +220,21 @@ impl AgentConfig {
         Ok(config)
     }
 
+    /// Maximum config YAML size (10 MiB). Prevents `DoS` via oversized payloads.
+    const MAX_YAML_SIZE: usize = 10 * 1024 * 1024;
+
     /// Parse config from a YAML string.
     pub fn from_yaml(yaml: &str) -> Result<Self, ConfigError> {
+        if yaml.len() > Self::MAX_YAML_SIZE {
+            return Err(ConfigError::Validation {
+                field: "config".to_string(),
+                message: format!(
+                    "YAML input too large: {} bytes (max {} bytes)",
+                    yaml.len(),
+                    Self::MAX_YAML_SIZE
+                ),
+            });
+        }
         let config: Self = serde_yaml_ng::from_str(yaml)?;
         config.validate()?;
         Ok(config)
