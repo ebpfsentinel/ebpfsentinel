@@ -151,6 +151,9 @@ jobs:
   docker:
     name: Docker Image
     needs: prepare
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/docker.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
