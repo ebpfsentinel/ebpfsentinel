@@ -10,6 +10,8 @@ agent:
 
   # IP address to bind HTTP/gRPC/metrics listeners to.
   # Use "0.0.0.0" to listen on all interfaces, "127.0.0.1" for localhost only.
+  # Note: with Docker network_mode: host, this controls the actual host bind
+  # address — "127.0.0.1" means only local access, even in a container.
   bind_address: "127.0.0.1"
 
   # Serve the Swagger UI at /swagger-ui (useful for development/debugging).

@@ -18,7 +18,10 @@ services:
     image: ebpfsentinel:latest
     container_name: ebpfsentinel
 
-    # XDP programs attach to host network interfaces directly
+    # XDP programs attach to host network interfaces directly.
+    # WARNING: with network_mode: host the container shares the host's network
+    # namespace. bind_address in config controls which host IP the agent listens
+    # on — "127.0.0.1" is localhost-only, "0.0.0.0" exposes on all interfaces.
     network_mode: host
 
     # eBPF requires elevated privileges.
