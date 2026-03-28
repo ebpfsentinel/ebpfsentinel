@@ -253,6 +253,7 @@ start_ebpf_agent() {
         return 1
     }
     rm -f "$rewritten_config"
+    _agent_ssh_sudo chmod 640 "$remote_config" 2>/dev/null || true
 
     # Build the extra args string (properly quoted)
     local extra_args=""

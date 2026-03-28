@@ -209,6 +209,9 @@ start_ebpf_agent() {
 
     mkdir -p "$DATA_DIR"
 
+    # Config must not be world-readable (agent enforces strict permissions)
+    chmod 640 "$config_file"
+
     # ── Strategy 1: local binary with local eBPF programs ──
     if [ "${FORCE_DOCKER:-false}" != "true" ] && _has_local_ebpf; then
         EBPF_AGENT_VIA_DOCKER="false"

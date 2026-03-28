@@ -92,6 +92,7 @@ setup_file() {
         local perf_config="/tmp/ebpfsentinel-docker-perf-config-$$.yaml"
         local iface="${EBPF_AGENT_INTERFACE:-eth1}"
         sed "s|__INTERFACE__|${iface}|g" "${fixtures_dir}/config-docker-perf.yaml" > "$perf_config"
+        chmod 640 "$perf_config"
 
         _agent_scp "$perf_config" "${_REMOTE_COMPOSE_DIR}/config-docker-perf.yaml"
         _agent_scp "$PERF_COMPOSE" "${_REMOTE_COMPOSE_DIR}/docker-compose-perf.yml"
@@ -110,6 +111,7 @@ setup_file() {
         local iface="${EBPF_VETH_HOST:-lo}"
         sed "s|__INTERFACE__|${iface}|g" \
             "${PROJECT_ROOT}/tests/integration/fixtures/config-docker-perf.yaml" > "$perf_config"
+        chmod 640 "$perf_config"
         # Override compose to use the substituted config
         cp "$PERF_COMPOSE" "/tmp/docker-compose-perf-$$.yml"
         sed -i "s|./config-docker-perf.yaml|${perf_config}|g" "/tmp/docker-compose-perf-$$.yml"

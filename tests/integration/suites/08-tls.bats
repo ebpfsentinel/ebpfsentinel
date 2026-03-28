@@ -31,6 +31,7 @@ setup_file() {
         -e "s|__CERT_PATH__|${CERT_DIR}/server.pem|g" \
         -e "s|__KEY_PATH__|${CERT_DIR}/server-key.pem|g" \
         "${FIXTURE_DIR}/config-tls.yaml" > "$PREPARED_CONFIG"
+    chmod 640 "$PREPARED_CONFIG"
 
     # Override ports for TLS suite
     export AGENT_HTTP_PORT="${AGENT_TLS_PORT}"
