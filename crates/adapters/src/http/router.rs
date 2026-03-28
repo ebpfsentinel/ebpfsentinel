@@ -263,14 +263,14 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
     // Even with token-based auth, `AllowOrigin::any()` is unnecessarily broad
     // and could facilitate CSRF-like attacks if tokens are leaked. Operators
     // who need cross-origin access from a dashboard should deploy a reverse proxy.
+    //
+    // Uses exact host matching (not prefix) to prevent bypass via subdomains
+    // like `http://localhost.attacker.com`.
     let allow_origin = AllowOrigin::predicate(|origin, _| {
-        let o = origin.as_bytes();
-        o.starts_with(b"http://127.0.0.1")
-            || o.starts_with(b"http://localhost")
-            || o.starts_with(b"http://[::1]")
-            || o.starts_with(b"https://127.0.0.1")
-            || o.starts_with(b"https://localhost")
-            || o.starts_with(b"https://[::1]")
+        let Ok(o) = origin.to_str() else {
+            return false;
+        };
+        is_localhost_origin(o)
     });
     let cors = CorsLayer::new()
         .allow_origin(allow_origin)
@@ -300,6 +300,36 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
     };
 
     router.with_state(state)
+}
+
+/// Check whether an Origin header value refers to a localhost address.
+///
+/// Accepts `scheme://host` or `scheme://host:port` where host is one of
+/// `127.0.0.1`, `localhost`, or `[::1]`. Rejects subdomains like
+/// `localhost.attacker.com` by requiring the host to end at `:` or EOL.
+fn is_localhost_origin(origin: &str) -> bool {
+    // Allowed hosts — after stripping the scheme, the remainder must be
+    // exactly one of these OR one of these followed by `:<port>`.
+    const ALLOWED_HOSTS: &[&str] = &["127.0.0.1", "localhost", "[::1]"];
+
+    let host_port = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .unwrap_or("");
+
+    if host_port.is_empty() {
+        return false;
+    }
+
+    // Split host from optional port. For IPv6 brackets, find `]:` as separator.
+    let host = if host_port.starts_with('[') {
+        // IPv6: [::1] or [::1]:8080
+        host_port.find("]:").map_or(host_port, |i| &host_port[..=i])
+    } else {
+        host_port.rfind(':').map_or(host_port, |i| &host_port[..i])
+    };
+
+    ALLOWED_HOSTS.contains(&host)
 }
 
 /// Security headers added to every HTTP response.
@@ -403,5 +433,54 @@ mod tests {
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         ));
         let _router = build_router(state, true, false);
+    }
+
+    // ── CORS localhost origin validation ─────────────────────────────
+
+    #[test]
+    fn cors_accepts_localhost_http() {
+        assert!(is_localhost_origin("http://localhost"));
+        assert!(is_localhost_origin("http://localhost:8080"));
+        assert!(is_localhost_origin("http://127.0.0.1"));
+        assert!(is_localhost_origin("http://127.0.0.1:9090"));
+        assert!(is_localhost_origin("http://[::1]"));
+        assert!(is_localhost_origin("http://[::1]:3000"));
+    }
+
+    #[test]
+    fn cors_accepts_localhost_https() {
+        assert!(is_localhost_origin("https://localhost"));
+        assert!(is_localhost_origin("https://localhost:8443"));
+        assert!(is_localhost_origin("https://127.0.0.1"));
+        assert!(is_localhost_origin("https://[::1]"));
+    }
+
+    #[test]
+    fn cors_rejects_subdomain_bypass() {
+        assert!(!is_localhost_origin("http://localhost.attacker.com"));
+        assert!(!is_localhost_origin("http://localhost.evil.com:8080"));
+        assert!(!is_localhost_origin("https://localhost-admin.com"));
+    }
+
+    #[test]
+    fn cors_rejects_ip_prefix_bypass() {
+        assert!(!is_localhost_origin("http://127.0.0.1.attacker.com"));
+        assert!(!is_localhost_origin("http://127.0.0.100"));
+        assert!(!is_localhost_origin("http://127.0.0.1x"));
+    }
+
+    #[test]
+    fn cors_rejects_external_origins() {
+        assert!(!is_localhost_origin("http://example.com"));
+        assert!(!is_localhost_origin("https://attacker.com"));
+        assert!(!is_localhost_origin("http://192.168.1.1:8080"));
+    }
+
+    #[test]
+    fn cors_rejects_empty_and_invalid() {
+        assert!(!is_localhost_origin(""));
+        assert!(!is_localhost_origin("ftp://localhost"));
+        assert!(!is_localhost_origin("localhost"));
+        assert!(!is_localhost_origin("http://"));
     }
 }
