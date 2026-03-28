@@ -22,14 +22,17 @@ services:
     network_mode: host
 
     # eBPF requires elevated privileges.
-    # Option A (simple): full privileges
-    privileged: true
-    # Option B (fine-grained, kernel 5.8+): uncomment below, comment privileged
-    # cap_add:
-    #   - BPF
-    #   - NET_ADMIN
-    #   - SYS_ADMIN
-    #   - NET_RAW
+    # Default: fine-grained capabilities (least privilege, kernel 5.8+).
+    # If your kernel lacks CAP_BPF support, uncomment privileged: true below.
+    cap_add:
+      - BPF
+      - NET_ADMIN
+      - SYS_ADMIN
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
+    # Fallback for older kernels without CAP_BPF:
+    # privileged: true
 
     # Defense-in-depth: read-only root prevents writes to container filesystem
     # even under privileged mode (no dropped binaries, no modified libraries).
