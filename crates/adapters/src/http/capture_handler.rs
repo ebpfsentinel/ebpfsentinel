@@ -89,6 +89,8 @@ pub async fn start_capture(
         .unwrap_or(u64::MAX);
 
     let id = format!("cap-{}", now_ns / 1_000_000);
+    // Defensive: ID is server-generated but verify it is path-safe (alphanumeric + hyphen)
+    debug_assert!(id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
     let interface = req.interface.unwrap_or_else(|| "any".to_string());
 
     // Validate BPF filter length
