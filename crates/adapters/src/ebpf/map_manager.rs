@@ -94,9 +94,33 @@ impl FirewallMapManager {
     }
 }
 
+impl FirewallMapManager {
+    /// Flush fast-path `HashMap` entries before reload.
+    ///
+    /// eBPF `HashMap` maps don't have a bulk-clear API, so we drain all existing keys.
+    /// This prevents stale 5-tuple/port rules from persisting across reloads.
+    fn clear_hash_maps(&mut self) {
+        if let Some(ref mut map) = self.hash_5tuple {
+            let keys: Vec<FwHashKey5Tuple> = map.keys().filter_map(Result::ok).collect();
+            for key in &keys {
+                let _ = map.remove(key);
+            }
+        }
+        if let Some(ref mut map) = self.hash_port {
+            let keys: Vec<FwHashKeyPort> = map.keys().filter_map(Result::ok).collect();
+            for key in &keys {
+                let _ = map.remove(key);
+            }
+        }
+    }
+}
+
 impl FirewallArrayMapPort for FirewallMapManager {
     #[allow(clippy::cast_possible_truncation)] // count ≤ MAX_FIREWALL_RULES (4096)
     fn load_v4_rules(&mut self, rules: &[FirewallRuleEntry]) -> Result<(), DomainError> {
+        // Flush fast-path HashMaps before reload to remove stale entries.
+        self.clear_hash_maps();
+
         // Classify rules into fast-path HashMaps vs array fallback.
         let mut array_rules: Vec<FirewallRuleEntry> = Vec::new();
         let mut hash_5tuple_count = 0u32;
