@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use application::retry::{RetryConfig, retry_with_backoff};
 use domain::alert::circuit_breaker::CircuitBreaker;
@@ -8,6 +8,7 @@ use domain::alert::entity::{Alert, AlertDestination, AlertRoute};
 use domain::common::error::DomainError;
 use ports::secondary::alert_sender::AlertSender;
 use ports::secondary::metrics_port::MetricsPort;
+use tokio::sync::Mutex;
 
 /// Alert sender that POSTs alert JSON to a webhook URL.
 ///
@@ -122,10 +123,7 @@ impl AlertSender for WebhookAlertSender {
         Box::pin(async move {
             // 1. Check circuit breaker
             {
-                let mut cb = self
-                    .circuit_breaker
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
+                let mut cb = self.circuit_breaker.lock().await;
                 if !cb.can_attempt() {
                     self.metrics
                         .record_circuit_state(&self.destination_name, cb.state().as_u8());
@@ -187,10 +185,7 @@ impl AlertSender for WebhookAlertSender {
             .await;
 
             // 5. Record success/failure in circuit breaker and update metric
-            let mut cb = self
-                .circuit_breaker
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut cb = self.circuit_breaker.lock().await;
             match &result {
                 Ok(()) => cb.record_success(),
                 Err(_) => cb.record_failure(),
@@ -338,7 +333,7 @@ mod tests {
         // Second attempt: will fail — opens circuit
         let _ = sender.send(&alert, &route).await;
 
-        let cb_guard = sender.circuit_breaker.lock().unwrap();
+        let cb_guard = sender.circuit_breaker.lock().await;
         assert_eq!(
             cb_guard.state(),
             domain::alert::circuit_breaker::CircuitState::Open
