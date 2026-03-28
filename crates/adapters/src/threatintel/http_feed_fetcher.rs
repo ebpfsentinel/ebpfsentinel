@@ -19,11 +19,12 @@ pub struct HttpFeedFetcher {
 }
 
 impl HttpFeedFetcher {
-    /// Create a new fetcher with default settings (30s timeout).
+    /// Create a new fetcher with default settings (30s timeout, no redirects).
     pub fn new() -> Result<Self, DomainError> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("ebpfsentinel-agent/0.1")
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| DomainError::EngineError(format!("HTTP client init failed: {e}")))?;
 
@@ -38,11 +39,25 @@ impl HttpFeedFetcher {
     async fn do_fetch(&self, config: &FeedConfig) -> Result<Vec<u8>, DomainError> {
         let mut request = self.client.get(&config.url);
 
-        // Apply optional auth header
+        // Apply optional auth header (validated at config load; re-check with typed API)
         if let Some(ref auth) = config.auth_header
             && let Some((name, value)) = auth.split_once(':')
         {
-            request = request.header(name.trim(), value.trim());
+            let header_name = reqwest::header::HeaderName::from_bytes(name.trim().as_bytes())
+                .map_err(|e| {
+                    DomainError::EngineError(format!(
+                        "feed '{}' auth header name invalid: {e}",
+                        config.id
+                    ))
+                })?;
+            let header_value =
+                reqwest::header::HeaderValue::from_str(value.trim()).map_err(|e| {
+                    DomainError::EngineError(format!(
+                        "feed '{}' auth header value invalid: {e}",
+                        config.id
+                    ))
+                })?;
+            request = request.header(header_name, header_value);
         }
 
         let mut response = request.send().await.map_err(|e| {

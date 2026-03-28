@@ -279,11 +279,109 @@ impl FeedConfig {
         if self.url.is_empty() {
             return Err("feed url must not be empty");
         }
+        Self::validate_url(&self.url)?;
         if self.refresh_interval_secs == 0 {
             return Err("refresh_interval_secs must be > 0");
         }
         if self.max_iocs == 0 {
             return Err("max_iocs must be > 0");
+        }
+        if let Some(ref auth) = self.auth_header {
+            Self::validate_auth_header(auth)?;
+        }
+        Ok(())
+    }
+
+    /// Validate feed URL: must be http(s), must not target private/loopback/link-local addresses.
+    fn validate_url(url: &str) -> Result<(), &'static str> {
+        // Scheme check
+        let rest = if let Some(r) = url.strip_prefix("https://") {
+            r
+        } else if let Some(r) = url.strip_prefix("http://") {
+            r
+        } else {
+            return Err("feed url must use http:// or https:// scheme");
+        };
+
+        // Extract host (strip path, query, fragment, userinfo, port)
+        let host_port = rest.split('/').next().unwrap_or(rest);
+        let host_port = host_port.split('?').next().unwrap_or(host_port);
+        let host_port = host_port.split('#').next().unwrap_or(host_port);
+        // Strip userinfo (user:pass@host)
+        let host_port = host_port.rsplit_once('@').map_or(host_port, |(_, hp)| hp);
+
+        // Extract host, handling IPv6 brackets and port
+        let host = if let Some(bracketed) = host_port.strip_prefix('[') {
+            // IPv6: [::1]:port
+            bracketed.split(']').next().unwrap_or(bracketed)
+        } else {
+            // IPv4 or hostname: strip trailing :port
+            host_port.rsplit_once(':').map_or(host_port, |(h, _)| h)
+        };
+
+        if host.is_empty() {
+            return Err("feed url has empty host");
+        }
+
+        // Block well-known dangerous hostnames
+        let host_lower = host.to_ascii_lowercase();
+        if host_lower == "localhost"
+            || host_lower == "metadata.google.internal"
+            || host_lower.ends_with(".internal")
+        {
+            return Err("feed url must not target localhost or metadata endpoints");
+        }
+
+        // If host parses as an IP address, reject private/loopback/link-local ranges
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            if ip.is_loopback() {
+                return Err("feed url must not target loopback addresses");
+            }
+            if ip.is_unspecified() {
+                return Err("feed url must not target unspecified addresses");
+            }
+            match ip {
+                std::net::IpAddr::V4(v4) => {
+                    if v4.is_private()
+                        || v4.is_link_local()
+                        || v4.octets()[0] == 169 && v4.octets()[1] == 254
+                    {
+                        return Err("feed url must not target private or link-local addresses");
+                    }
+                }
+                std::net::IpAddr::V6(v6) => {
+                    // Reject ULA (fc00::/7) and link-local (fe80::/10)
+                    let first = v6.segments()[0];
+                    if (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80 {
+                        return Err("feed url must not target private or link-local addresses");
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate auth header: must contain `:`, name/value must not contain CR/LF/NUL.
+    fn validate_auth_header(header: &str) -> Result<(), &'static str> {
+        let Some((name, value)) = header.split_once(':') else {
+            return Err("auth_header must be in 'Name: value' format");
+        };
+        let name = name.trim();
+        let value = value.trim();
+        if name.is_empty() {
+            return Err("auth_header name must not be empty");
+        }
+        // RFC 7230: header name is a token (visible ASCII, no delimiters)
+        if !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+        {
+            return Err("auth_header name contains invalid characters");
+        }
+        // Reject CR, LF, NUL in value (prevents header injection / CRLF attacks)
+        if value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
+            return Err("auth_header value contains forbidden characters (CR/LF/NUL)");
         }
         Ok(())
     }
@@ -419,6 +517,120 @@ mod tests {
         let mut f = make_feed();
         f.max_iocs = 0;
         assert!(f.validate().is_err());
+    }
+
+    // ── URL validation (SSRF prevention) ────────────────────────────
+
+    #[test]
+    fn feed_url_rejects_non_http_scheme() {
+        let mut f = make_feed();
+        f.url = "ftp://example.com/feed.csv".to_string();
+        assert_eq!(
+            f.validate().unwrap_err(),
+            "feed url must use http:// or https:// scheme"
+        );
+    }
+
+    #[test]
+    fn feed_url_rejects_loopback() {
+        let mut f = make_feed();
+        f.url = "http://127.0.0.1/feed.csv".to_string();
+        assert_eq!(
+            f.validate().unwrap_err(),
+            "feed url must not target loopback addresses"
+        );
+    }
+
+    #[test]
+    fn feed_url_rejects_localhost() {
+        let mut f = make_feed();
+        f.url = "http://localhost/feed.csv".to_string();
+        assert_eq!(
+            f.validate().unwrap_err(),
+            "feed url must not target localhost or metadata endpoints"
+        );
+    }
+
+    #[test]
+    fn feed_url_rejects_private_rfc1918() {
+        for addr in ["10.0.0.1", "172.16.0.1", "192.168.1.1"] {
+            let mut f = make_feed();
+            f.url = format!("http://{addr}/feed.csv");
+            assert!(f.validate().is_err(), "should reject private IP {addr}");
+        }
+    }
+
+    #[test]
+    fn feed_url_rejects_link_local() {
+        let mut f = make_feed();
+        f.url = "http://169.254.169.254/latest/meta-data/".to_string();
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn feed_url_rejects_ipv6_loopback() {
+        let mut f = make_feed();
+        f.url = "http://[::1]/feed.csv".to_string();
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn feed_url_rejects_metadata_internal() {
+        let mut f = make_feed();
+        f.url = "http://metadata.google.internal/computeMetadata/v1/".to_string();
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn feed_url_accepts_public_https() {
+        let f = make_feed(); // url is https://example.com/iocs.csv
+        assert!(f.validate().is_ok());
+    }
+
+    #[test]
+    fn feed_url_accepts_public_ip() {
+        let mut f = make_feed();
+        f.url = "https://1.2.3.4/feed.csv".to_string();
+        assert!(f.validate().is_ok());
+    }
+
+    // ── Auth header validation (CRLF injection prevention) ──────────
+
+    #[test]
+    fn auth_header_valid() {
+        let mut f = make_feed();
+        f.auth_header = Some("X-OTX-API-KEY: abc123".to_string());
+        assert!(f.validate().is_ok());
+    }
+
+    #[test]
+    fn auth_header_rejects_crlf_in_value() {
+        let mut f = make_feed();
+        f.auth_header = Some("Authorization: Bearer token\r\nX-Injected: evil".to_string());
+        assert_eq!(
+            f.validate().unwrap_err(),
+            "auth_header value contains forbidden characters (CR/LF/NUL)"
+        );
+    }
+
+    #[test]
+    fn auth_header_rejects_missing_colon() {
+        let mut f = make_feed();
+        f.auth_header = Some("NoColonHere".to_string());
+        assert_eq!(
+            f.validate().unwrap_err(),
+            "auth_header must be in 'Name: value' format"
+        );
+    }
+
+    #[test]
+    fn auth_header_rejects_invalid_name_chars() {
+        let mut f = make_feed();
+        f.auth_header = Some("Bad Header: value".to_string());
+        assert_eq!(
+            f.validate().unwrap_err(),
+            "auth_header name contains invalid characters"
+        );
     }
 
     // ── FieldMapping ────────────────────────────────────────────────
