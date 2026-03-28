@@ -17,13 +17,34 @@ pub struct DlpPattern {
     pub enabled: bool,
 }
 
+/// Maximum regex source length (4 KiB) to reject unreasonably large patterns early.
+const MAX_REGEX_SOURCE_LEN: usize = 4096;
+
+/// Maximum compiled regex size (10 MiB) — matches engine limit.
+const REGEX_SIZE_LIMIT: usize = 10 * (1 << 20);
+
+/// Maximum regex nesting depth — matches engine limit.
+const REGEX_NEST_LIMIT: u32 = 200;
+
 impl DlpPattern {
     /// Validate pattern fields.
+    ///
+    /// Pre-compiles the regex with size and nesting limits to reject invalid
+    /// or denial-of-service patterns at config load time rather than at runtime.
     pub fn validate(&self) -> Result<(), &'static str> {
         self.id.validate()?;
         if self.regex.is_empty() {
             return Err("regex must not be empty");
         }
+        if self.regex.len() > MAX_REGEX_SOURCE_LEN {
+            return Err("regex source exceeds maximum length (4 KiB)");
+        }
+        // Pre-compile with bounded limits to catch invalid/dangerous patterns early.
+        regex::RegexBuilder::new(&self.regex)
+            .size_limit(REGEX_SIZE_LIMIT)
+            .nest_limit(REGEX_NEST_LIMIT)
+            .build()
+            .map_err(|_| "regex failed to compile (invalid or too complex)")?;
         if self.data_type.is_empty() {
             return Err("data_type must not be empty");
         }
@@ -244,6 +265,26 @@ mod tests {
         let mut p = sample_pattern();
         p.data_type = String::new();
         assert_eq!(p.validate(), Err("data_type must not be empty"));
+    }
+
+    #[test]
+    fn validate_invalid_regex_rejected() {
+        let mut p = sample_pattern();
+        p.regex = r"[unclosed".to_string();
+        assert_eq!(
+            p.validate(),
+            Err("regex failed to compile (invalid or too complex)")
+        );
+    }
+
+    #[test]
+    fn validate_overlong_regex_rejected() {
+        let mut p = sample_pattern();
+        p.regex = "a".repeat(MAX_REGEX_SOURCE_LEN + 1);
+        assert_eq!(
+            p.validate(),
+            Err("regex source exceeds maximum length (4 KiB)")
+        );
     }
 
     // ── DlpAlert from_event ──────────────────────────────────────
