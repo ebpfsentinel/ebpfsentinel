@@ -340,6 +340,9 @@ impl FeedConfig {
             if ip.is_unspecified() {
                 return Err("feed url must not target unspecified addresses");
             }
+            if ip.is_multicast() {
+                return Err("feed url must not target multicast addresses");
+            }
             match ip {
                 std::net::IpAddr::V4(v4) => {
                     if v4.is_private()

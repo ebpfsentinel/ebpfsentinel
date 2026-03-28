@@ -82,9 +82,10 @@ fn validate_webhook_url(url: &str) -> Result<(), DomainError> {
     }
 
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if ip.is_loopback() || ip.is_unspecified() {
+        if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
             return Err(DomainError::EngineError(
-                "webhook URL must not target loopback or unspecified addresses".to_string(),
+                "webhook URL must not target loopback, unspecified, or multicast addresses"
+                    .to_string(),
             ));
         }
         match ip {
