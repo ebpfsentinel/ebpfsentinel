@@ -12,11 +12,17 @@ Kernel-native **Network Detection & Response (NDR)** platform for Linux. One Rus
 | **Stateful Firewall** | L3/L4 kernel-side filtering with connection tracking, GeoIP blocking, security zones, VLAN/QinQ support, schedule-based rules, full IPv4/IPv6 dual-stack |
 | **L7 Filtering** | Protocol-aware rules for HTTP, TLS/SNI, gRPC, SMTP, FTP, SMB with GeoIP source/destination matching |
 | **L4 Load Balancer** | TCP/UDP/TLS passthrough with round-robin, weighted, IP hash, and least-connections algorithms |
-| **Traffic Shaping** | Bandwidth limits, delay/loss simulation, weighted fair queuing, per-flow token buckets, EDT pacing, FQ-CoDel AQM |
+| **Traffic Shaping (QoS)** | Bandwidth limits, delay/loss simulation, weighted fair queuing, per-flow token buckets, EDT pacing, FQ-CoDel AQM |
 | **Rate Limiting** | Four algorithms (token bucket, fixed window, sliding window, leaky bucket), kernel-side per-country tiers |
 | **NAT** | SNAT, DNAT, masquerade, port forwarding, 1:1 NAT, NPTv6 prefix translation, hairpin NAT |
+| **Connection Tracking** | Kernel-side TCP/UDP/ICMP state machine, bidirectional flow tracking, timeout policies, flood thresholds |
 | **Traffic Normalization** | TTL normalization, MSS clamping, TCP flag/timestamp scrubbing, IP ID randomization, DF/ECN/DSCP rewriting |
 | **Policy Routing** | Multi-gateway selection with ICMP/TCP health checks, automatic failover, geographic preference |
+| **Zone Segmentation** | Network zones with inter-zone isolation policies — DMZ, LAN, WAN with per-zone rule scoping |
+| **Interface Groups** | Named groups of interfaces for multi-NIC rule scoping with bitmask matching and inversion (`!group`) |
+| **IP/Port Aliases** | Named alias objects (host, network, GeoIP, dynamic DNS) reusable across firewall, IPS, and DDoS rules |
+| **VLAN / QinQ** | 802.1Q and 802.1ad double-tagging support across firewall, IDS, threat intel, and rate limiting |
+| **IPv6 Dual-Stack** | Full parity across all engines: separate V4/V6 maps, 128-bit addresses, NDP-aware, NPTv6 |
 
 ### Threat Detection & Response
 
@@ -27,20 +33,26 @@ Kernel-native **Network Detection & Response (NDR)** platform for Linux. One Rus
 | **DLP** | Inspects TLS traffic for PCI card numbers, PII, and credential patterns via uprobe interception |
 | **DNS Security** | Passive DNS capture, domain blocklists, behavioral reputation scoring, DNS-enriched alerts |
 | **MITRE ATT&CK Mapping** | Every alert tagged with tactic + technique ID — ready for SOC dashboards and SIEM correlation |
+| **JA4+ Fingerprinting** | TLS client fingerprinting for detecting C2, malware, and anomalous connections |
 | **GeoIP Enforcement** | MaxMind-backed country resolution shared across all engines: DDoS auto-block, IPS subnet injection, rate-limit tiers, L7 filtering |
+| **Automated Response** | Response policies with conditions (severity, component) and actions (block IP, webhook, alert escalation) |
 
 ### Operations
 
-- **REST API** with OpenAPI 3.0, Swagger UI, and SecurityScheme
-- **gRPC Streaming** for real-time alert subscriptions with severity, component, and MITRE ATT&CK filters
-- **Prometheus Metrics** with per-domain counters, histograms, kernel-side eBPF counters, and system-level tracking
-- **OTLP Export** — alerts as OpenTelemetry Logs (gRPC or HTTP) to any OTLP-compatible collector (Grafana, Datadog, Elastic, etc.)
-- **Alert Pipeline** with routing to email, webhook, log, and OTLP sinks
-- **Audit Trail** with rule change history
-- **Hot Reload** — update configuration without restart (file watcher, SIGHUP, or API)
-- **CLI** with 13 domain subcommands covering all endpoints (firewall, ids, ratelimit, qos, threatintel, dlp, dns, nat, nptv6, scrub, lb, conntrack, audit)
-- **JWT/OIDC/API Key Authentication** with role-based access control (Admin, Operator, Viewer)
-- **TLS 1.3** for REST and gRPC (rustls + aws_lc_rs)
+| Feature | What it does |
+|---------|-------------|
+| **Hot Reload** | Update rules, modes, and enabled flags without restart. Dynamically loads/unloads eBPF kernel programs when features are toggled. XDP tail-call chain auto-rewires. Triggered by file watcher, SIGHUP, or API |
+| **REST API** | OpenAPI 3.0 with Swagger UI and SecurityScheme — all domains covered |
+| **gRPC Streaming** | Real-time alert subscriptions with severity, component, and MITRE ATT&CK filters |
+| **Prometheus Metrics** | Per-domain counters, histograms, kernel-side eBPF counters, and system-level tracking |
+| **OTLP Export** | Alerts as OpenTelemetry Logs (gRPC or HTTP) to any OTLP-compatible collector |
+| **Alert Pipeline** | Routing to email, webhook, log, and OTLP sinks with deduplication and throttling |
+| **Audit Trail** | Rule change history with before/after diff, actor tracking, and persistent storage |
+| **Packet Capture** | Ring-buffer based packet capture with BPF filters for forensic analysis |
+| **CLI** | 18+ domain subcommands covering all endpoints with `--output table\|json` and `--token` auth |
+| **Authentication** | JWT (RS256), OIDC (JWKS auto-refresh), and API keys with role-based access (Admin, Operator, Viewer) |
+| **TLS 1.3** | REST and gRPC endpoints secured with rustls + aws_lc_rs, post-quantum ready (X25519MLKEM768) |
+| **Binary Integrity** | SHA-256 + Ed25519 self-verification of the agent binary at startup |
 
 ## Architecture
 
@@ -158,6 +170,7 @@ Full documentation is available at [ebpfsentinel/ebpfsentinel-docs](https://gith
 | [Configuration](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/configuration/overview.md) | YAML reference for all sections |
 | [Architecture](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/architecture/overview.md) | Hexagonal/DDD design, eBPF pipeline, data flow |
 | [Kernel Reference](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/kernel/overview.md) | eBPF programs, maps, helpers, pipeline |
+| [Hot Reload](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/operations/hot-reload.md) | Dynamic eBPF program loading/unloading |
 | [REST API](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/api-reference/rest-api.md) | All endpoints with request/response formats |
 | [gRPC API](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/api-reference/grpc-api.md) | Alert streaming service |
 | [CLI Reference](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/cli-reference/index.md) | All commands and options |
@@ -180,7 +193,7 @@ See [Compatibility](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/
 
 ## OSS vs Enterprise
 
-The open-source agent includes all security domains, APIs, CLI, authentication, and observability. An enterprise version adds ML anomaly detection, multi-tenancy, DLP, SIEM integration, compliance reporting, HA clustering, multi-cluster federation, RBAC, air-gap support, analytics dashboards, and AI/LLM security. See [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for details.
+The open-source agent includes all security domains, APIs, CLI, authentication, and observability. An enterprise version adds ML anomaly detection, multi-tenancy, advanced DLP, SIEM integration, compliance reporting, HA clustering, multi-cluster federation, advanced RBAC, air-gap support, analytics dashboards, fleet management, AI/LLM security, TLS intelligence, network forensics, and automated response orchestration. See [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for details.
 
 ## License
 
