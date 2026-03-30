@@ -9,6 +9,7 @@ agent:
   log_format: json
   http_port: 8080
   grpc_port: 50051
+  grpc_reflection: true
   metrics_port: 9090
   swagger_ui: true
 
