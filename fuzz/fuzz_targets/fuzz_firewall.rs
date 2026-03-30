@@ -113,6 +113,7 @@ fuzz_target!(|data: &[u8]| {
             schedule: None,
             system: false,
             route_action: None,
+            group_mask: 0,
         };
         rules.push(rule);
     }
