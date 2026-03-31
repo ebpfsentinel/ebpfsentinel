@@ -15,12 +15,15 @@ setup_file() {
     if [ ! -f "${JWT_DIR}/jwt-public.pem" ]; then
         bash "${SCRIPT_DIR}/generate-jwt-keys.sh" --out-dir "$JWT_DIR"
     fi
+    # Agent enforces strict permissions on the public key
+    chmod 640 "${JWT_DIR}/jwt-public.pem"
 
     # In 2VM mode, copy JWT public key to agent VM so it can verify tokens
     if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
         _agent_ssh_sudo mkdir -p "$JWT_DIR" 2>/dev/null || true
         _agent_ssh_sudo chown vagrant:vagrant "$JWT_DIR" 2>/dev/null || true
         _agent_scp "${JWT_DIR}/jwt-public.pem" "${JWT_DIR}/jwt-public.pem"
+        _agent_ssh_sudo chmod 640 "${JWT_DIR}/jwt-public.pem" 2>/dev/null || true
     fi
 
     # Prepare auth config from template

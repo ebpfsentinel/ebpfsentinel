@@ -27,6 +27,8 @@ echo "Generating JWT keypair and tokens in ${OUT_DIR}..."
 # ── RSA keypair ────────────────────────────────────────────────────
 openssl genrsa -out "${OUT_DIR}/jwt-private.pem" 2048 2>/dev/null
 openssl rsa -in "${OUT_DIR}/jwt-private.pem" -pubout -out "${OUT_DIR}/jwt-public.pem" 2>/dev/null
+chmod 600 "${OUT_DIR}/jwt-private.pem"
+chmod 640 "${OUT_DIR}/jwt-public.pem"
 
 # ── Helper: create signed JWT ──────────────────────────────────────
 # Uses openssl + base64 to create RS256 JWTs without external dependencies.
