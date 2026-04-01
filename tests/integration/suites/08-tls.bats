@@ -3,6 +3,10 @@
 
 load '../lib/helpers'
 
+# Override BASE_URL at file scope so api_get uses the TLS endpoint.
+# (setup_file exports don't propagate to test subprocesses in bats-core)
+BASE_URL="${TLS_URL}"
+
 setup_file() {
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"
@@ -33,10 +37,8 @@ setup_file() {
         "${FIXTURE_DIR}/config-tls.yaml" > "$PREPARED_CONFIG"
     chmod 640 "$PREPARED_CONFIG"
 
-    # Override ports for TLS suite
+    # Override HTTP port for TLS suite (used by stop_agent / port helpers)
     export AGENT_HTTP_PORT="${AGENT_TLS_PORT}"
-    export BASE_URL="https://${AGENT_HOST}:${AGENT_TLS_PORT}"
-    export TLS_URL="https://${AGENT_HOST}:${AGENT_TLS_PORT}"
 
     # Kill stale agent from previous suites
     stop_agent 2>/dev/null || true
