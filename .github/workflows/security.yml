@@ -21,7 +21,7 @@ jobs:
     name: Cargo Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install cargo-audit
         run: cargo install cargo-audit@0.22.1
       - name: Run cargo audit
@@ -40,7 +40,7 @@ jobs:
     name: Unsafe Code Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Verify forbid(unsafe_code) in pure-logic crates
         run: |
@@ -70,7 +70,7 @@ jobs:
     name: Miri (ebpf-common)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
@@ -84,7 +84,7 @@ jobs:
     name: Careful Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
@@ -99,7 +99,7 @@ jobs:
     name: Fuzz Critical Parsers
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
@@ -128,7 +128,7 @@ jobs:
     name: SBOM (CycloneDX)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-cyclonedx
         run: cargo install cargo-cyclonedx
@@ -139,7 +139,7 @@ jobs:
           mkdir -p sbom-output
           find . -name "*.cdx.json" -not -path "./sbom-output/*" -exec cp {} sbom-output/ \;
           ls -la sbom-output/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom-cyclonedx
           path: sbom-output/

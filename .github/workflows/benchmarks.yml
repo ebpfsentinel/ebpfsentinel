@@ -23,7 +23,7 @@ jobs:
     name: Compile benchmarks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [bench-compile]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -46,14 +46,14 @@ jobs:
         run: cargo bench -p domain -- --output-format bencher 2>&1 | tee bench-output.txt
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: criterion-reports
           path: target/criterion/
           retention-days: 30
 
       - name: Upload raw output
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: bench-output
           path: bench-output.txt

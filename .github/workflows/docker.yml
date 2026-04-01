@@ -34,7 +34,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       name_lower: ${{ steps.repo.outputs.name_lower }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -62,7 +62,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -87,7 +87,7 @@ jobs:
             -exec cp {} ebpf-out/ \;
           ls -la ebpf-out/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ebpf-programs
           path: ebpf-out/
@@ -110,9 +110,9 @@ jobs:
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ebpf-programs
           path: ebpf-out/
