@@ -489,6 +489,17 @@ pub async fn load_ebpf_programs(
     let ebpf_dir = startup::resolve_ebpf_program_dir(config);
     EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
 
+    // ── BPF Token detection (kernel 6.9+) ──────────────────────────
+    let bpf_token = if config.agent.bpf_token_path.is_empty() {
+        tracing::info!("BPF token detection disabled by configuration");
+        adapters::ebpf::BpfTokenState::Unavailable
+    } else {
+        adapters::ebpf::detect_bpf_token(&config.agent.bpf_token_path)
+    };
+    services
+        .metrics
+        .set_ebpf_program_status("bpf_token", bpf_token.is_available());
+
     let mut ebpf_state = EbpfState::new();
     let mut ebpf_map_holder = EbpfMapHolder::new();
     let mut metrics_readers: Vec<MetricsReader> = Vec::new();

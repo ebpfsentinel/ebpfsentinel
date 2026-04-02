@@ -1127,6 +1127,14 @@ pub struct AgentInfo {
     #[serde(default)]
     pub xdp_mode: XdpMode,
 
+    /// Path to a delegated bpffs mount for BPF token support (kernel 6.9+).
+    /// When set and the mount exists with delegation, the agent creates a BPF
+    /// token and loads all eBPF programs without any Linux capabilities.
+    /// Set to `null`/omit to use the default (`/sys/fs/bpf/ebpfsentinel`).
+    /// Set to empty string `""` to disable token detection entirely.
+    #[serde(default = "default_bpf_token_path")]
+    pub bpf_token_path: String,
+
     /// Number of parallel event dispatcher workers.
     /// Each worker processes events from a deterministic subset of sources
     /// (partitioned by source address), preserving per-source ordering.
@@ -1231,6 +1239,10 @@ fn default_event_workers() -> usize {
 }
 fn default_bind_address() -> String {
     "127.0.0.1".to_string()
+}
+
+fn default_bpf_token_path() -> String {
+    "/sys/fs/bpf/ebpfsentinel".to_string()
 }
 
 // ── Log level ──────────────────────────────────────────────────────

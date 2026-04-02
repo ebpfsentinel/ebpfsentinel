@@ -1,0 +1,14 @@
+[Unit]
+Description=eBPFsentinel BPF Token Setup (delegated bpffs mount)
+Documentation=https://docs.ebpfsentinel.io/operations/deployment/
+Before=ebpfsentinel.service
+ConditionKernelVersion=>=6.9
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/ebpfsentinel/ebpfsentinel-token-setup.sh /sys/fs/bpf/ebpfsentinel
+ExecStop=/bin/umount /sys/fs/bpf/ebpfsentinel
+
+[Install]
+WantedBy=multi-user.target

@@ -158,3 +158,9 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+
+# ── Local Aya patch: BPF token support (kernel 6.9+) ──────────────
+# Adds token_fd propagation to bpf_create_map, bpf_load_program, bpf_load_btf.
+# Remove this patch when upstream Aya merges PR #990.
+[patch.crates-io]
+aya = { path = "crates/aya-patched" }

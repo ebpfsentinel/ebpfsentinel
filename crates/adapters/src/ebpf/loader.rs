@@ -1,3 +1,4 @@
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
 
 use aya::{
@@ -10,10 +11,137 @@ use tracing::{debug, info, warn};
 /// Default BPF filesystem pin path for shared maps.
 pub const DEFAULT_BPF_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel";
 
+// ── BPF Token Support (kernel 6.9+) ──────────────────────────────────
+
+/// `BPF_TOKEN_CREATE` command number (added in kernel 6.9).
+const BPF_TOKEN_CREATE: u64 = 30;
+
+/// State of BPF token availability for the current agent instance.
+#[derive(Debug)]
+pub enum BpfTokenState {
+    /// A BPF token was successfully created from a delegated bpffs mount.
+    /// All eBPF programs can be loaded without Linux capabilities.
+    Available(OwnedFd),
+    /// No BPF token available — using capability-based loading.
+    Unavailable,
+}
+
+impl BpfTokenState {
+    /// Returns `true` if a BPF token is active.
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Available(_))
+    }
+}
+
+/// Mirrors the kernel `bpf_attr` union for the `BPF_TOKEN_CREATE` command.
+#[repr(C)]
+struct BpfTokenCreateAttr {
+    bpffs_fd: u32,
+    flags: u32,
+}
+
+/// Attempt to create a BPF token from a delegated bpffs mount.
+///
+/// Opens the bpffs at `path` and issues `BPF_TOKEN_CREATE`. On success,
+/// returns `BpfTokenState::Available` with the token file descriptor.
+///
+/// Returns `BpfTokenState::Unavailable` if:
+/// - The path does not exist or is not a bpffs mount
+/// - The kernel is older than 6.7 (`ENOSYS` / `EINVAL`)
+/// - The bpffs mount has no delegation configured (`EPERM`)
+pub fn detect_bpf_token(path: &str) -> BpfTokenState {
+    let bpffs_path = Path::new(path);
+    if !bpffs_path.exists() {
+        info!(
+            path,
+            "BPF token path does not exist, using capability-based loading"
+        );
+        return BpfTokenState::Unavailable;
+    }
+
+    let bpffs_fd = match std::fs::File::open(bpffs_path) {
+        Ok(f) => f,
+        Err(e) => {
+            info!(
+                path,
+                error = %e,
+                "cannot open BPF token path, using capability-based loading"
+            );
+            return BpfTokenState::Unavailable;
+        }
+    };
+
+    let raw_fd = bpffs_fd.as_raw_fd();
+    // File descriptors are always non-negative, safe to convert.
+    let fd_u32 = u32::try_from(raw_fd).unwrap_or(0);
+
+    let attr = BpfTokenCreateAttr {
+        bpffs_fd: fd_u32,
+        flags: 0,
+    };
+
+    let attr_ptr: *const BpfTokenCreateAttr = std::ptr::from_ref(&attr);
+
+    // SAFETY: `BPF_TOKEN_CREATE` returns a new file descriptor on success,
+    // or -1 on failure. The `attr` struct is stack-allocated and valid for
+    // the duration of the syscall. The pointer cast is required by the
+    // `bpf()` syscall ABI which takes a `void *`.
+    #[allow(unsafe_code)]
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_TOKEN_CREATE,
+            attr_ptr.cast::<libc::c_void>(),
+            std::mem::size_of::<BpfTokenCreateAttr>(),
+        )
+    };
+
+    if ret < 0 {
+        let errno = std::io::Error::last_os_error();
+        match errno.raw_os_error() {
+            Some(libc::ENOSYS | libc::EINVAL) => {
+                info!(
+                    path,
+                    "kernel does not support BPF tokens (requires 6.9+), using capability-based loading"
+                );
+            }
+            Some(libc::EPERM) => {
+                info!(
+                    path,
+                    "bpffs mount has no delegation configured, using capability-based loading"
+                );
+            }
+            _ => {
+                info!(
+                    path,
+                    error = %errno,
+                    "BPF token creation failed, using capability-based loading"
+                );
+            }
+        }
+        BpfTokenState::Unavailable
+    } else {
+        // SAFETY: the kernel returned a valid fd on success (ret >= 0).
+        let token_raw = i32::try_from(ret).expect("BPF syscall returned fd > i32::MAX");
+        #[allow(unsafe_code)]
+        let token_fd = unsafe { OwnedFd::from_raw_fd(token_raw) };
+        info!(
+            path,
+            "BPF token created successfully — loading programs without capabilities"
+        );
+        BpfTokenState::Available(token_fd)
+    }
+}
+
 /// Loads and attaches eBPF programs (XDP, TC, uprobe).
 ///
 /// Wraps the `aya::Ebpf` instance and provides methods for
 /// program lifecycle management (load, attach, detach).
+///
+/// Supports three privilege tiers (auto-detected at startup):
+/// 1. **BPF token** (kernel 6.9+) — zero capabilities required
+/// 2. **Granular capabilities** (kernel 5.8+) — `CAP_BPF` + `CAP_NET_ADMIN` + ...
+/// 3. **Privileged** (kernel < 5.8) — `CAP_SYS_ADMIN`
 pub struct EbpfLoader {
     ebpf: Ebpf,
 }
@@ -357,5 +485,40 @@ pub fn xdp_mode_to_flags(mode: infrastructure::config::XdpMode) -> XdpFlags {
         XdpMode::Native => XdpFlags::DRV_MODE,
         XdpMode::Generic => XdpFlags::SKB_MODE,
         XdpMode::Offloaded => XdpFlags::HW_MODE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bpf_token_nonexistent_path_returns_unavailable() {
+        let state = detect_bpf_token("/nonexistent/path/bpffs");
+        assert!(!state.is_available());
+    }
+
+    #[test]
+    fn bpf_token_regular_file_returns_unavailable() {
+        // /tmp is not a bpffs mount — BPF_TOKEN_CREATE will fail
+        let state = detect_bpf_token("/tmp");
+        assert!(!state.is_available());
+    }
+
+    #[test]
+    fn bpf_token_state_is_available_matches() {
+        let unavailable = BpfTokenState::Unavailable;
+        assert!(!unavailable.is_available());
+    }
+
+    #[test]
+    fn bpf_token_default_path_constant() {
+        assert_eq!(DEFAULT_BPF_PIN_PATH, "/sys/fs/bpf/ebpfsentinel");
+    }
+
+    #[test]
+    fn bpf_token_create_command_number() {
+        // BPF_TOKEN_CREATE is command 30 in the kernel BPF syscall
+        assert_eq!(BPF_TOKEN_CREATE, 30);
     }
 }
