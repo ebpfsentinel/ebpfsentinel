@@ -24,15 +24,16 @@ pub async fn run_http_server(
     let router = build_router(state, swagger_ui, tls_config.is_some());
     let listener = tokio::net::TcpListener::bind(format!("{bind_address}:{port}")).await?;
 
+    let app = router.into_make_service_with_connect_info::<SocketAddr>();
+
     if let Some(tls) = tls_config {
         let tls_listener = TlsListener::new(listener, tls);
         tracing::info!(%bind_address, port, "HTTPS API server listening");
-        axum::serve(tls_listener, router)
+        axum::serve(tls_listener, app)
             .with_graceful_shutdown(shutdown)
             .await?;
     } else {
         tracing::info!(%bind_address, port, "HTTP API server listening");
-        let app = router.into_make_service_with_connect_info::<SocketAddr>();
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown)
             .await?;
