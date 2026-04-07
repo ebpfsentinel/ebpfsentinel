@@ -2,6 +2,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::extract::ConnectInfo;
 use tokio_rustls::rustls::ServerConfig;
 
 use super::router::build_router;
@@ -25,7 +26,12 @@ pub async fn run_http_server(
     let listener = tokio::net::TcpListener::bind(format!("{bind_address}:{port}")).await?;
 
     if let Some(tls) = tls_config {
+        // Axum's `Connected` trait is only implemented for `TcpListener`, not
+        // custom listeners (orphan rule). We use `into_make_service()` and inject
+        // `ConnectInfo<SocketAddr>` manually via a middleware so that
+        // `tower_governor::PeerIpKeyExtractor` can find the client IP.
         let tls_listener = TlsListener::new(listener, tls);
+        let router = router.layer(axum::middleware::from_fn(inject_connect_info));
         tracing::info!(%bind_address, port, "HTTPS API server listening");
         axum::serve(tls_listener, router.into_make_service())
             .with_graceful_shutdown(shutdown)
@@ -41,4 +47,18 @@ pub async fn run_http_server(
     }
 
     Ok(())
+}
+
+/// Middleware that extracts the peer `SocketAddr` from the request extensions
+/// (set by axum's `serve` from `Listener::Addr`) and inserts it as
+/// `ConnectInfo<SocketAddr>` so that `tower_governor` and other extractors
+/// can find the client IP.
+async fn inject_connect_info(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if let Some(addr) = req.extensions().get::<SocketAddr>().copied() {
+        req.extensions_mut().insert(ConnectInfo(addr));
+    }
+    next.run(req).await
 }
