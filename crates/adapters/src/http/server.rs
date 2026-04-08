@@ -7,7 +7,7 @@ use tokio_rustls::rustls::ServerConfig;
 
 use super::router::build_router;
 use super::state::AppState;
-use super::tls::TlsListener;
+use super::tls::{TlsConnectInfo, TlsListener};
 
 /// Run the REST API HTTP server on the given bind address and port.
 ///
@@ -26,16 +26,21 @@ pub async fn run_http_server(
     let listener = tokio::net::TcpListener::bind(format!("{bind_address}:{port}")).await?;
 
     if let Some(tls) = tls_config {
-        // Axum's `Connected` trait is only implemented for `TcpListener`, not
-        // custom listeners (orphan rule). We use `into_make_service()` and inject
-        // `ConnectInfo<SocketAddr>` manually via a middleware so that
-        // `tower_governor::PeerIpKeyExtractor` can find the client IP.
+        // Axum only implements `Connected<IncomingStream<TcpListener>>` for
+        // `SocketAddr`. The orphan rule prevents us from implementing it for
+        // our custom `TlsListener`. We use `TlsConnectInfo` (newtype) for the
+        // `Connected` impl and a middleware to convert it back to
+        // `ConnectInfo<SocketAddr>` so `tower_governor::PeerIpKeyExtractor`
+        // can extract the client IP.
         let tls_listener = TlsListener::new(listener, tls);
-        let router = router.layer(axum::middleware::from_fn(inject_connect_info));
+        let router = router.layer(axum::middleware::from_fn(tls_connect_info_to_socket_addr));
         tracing::info!(%bind_address, port, "HTTPS API server listening");
-        axum::serve(tls_listener, router.into_make_service())
-            .with_graceful_shutdown(shutdown)
-            .await?;
+        axum::serve(
+            tls_listener,
+            router.into_make_service_with_connect_info::<TlsConnectInfo>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await?;
     } else {
         tracing::info!(%bind_address, port, "HTTP API server listening");
         axum::serve(
@@ -49,16 +54,17 @@ pub async fn run_http_server(
     Ok(())
 }
 
-/// Middleware that extracts the peer `SocketAddr` from the request extensions
-/// (set by axum's `serve` from `Listener::Addr`) and inserts it as
-/// `ConnectInfo<SocketAddr>` so that `tower_governor` and other extractors
-/// can find the client IP.
-async fn inject_connect_info(
+/// Converts `ConnectInfo<TlsConnectInfo>` into `ConnectInfo<SocketAddr>`.
+///
+/// `tower_governor::PeerIpKeyExtractor` specifically looks for
+/// `ConnectInfo<SocketAddr>` in request extensions. Without this conversion,
+/// rate-limited endpoints return 500 when served over TLS.
+async fn tls_connect_info_to_socket_addr(
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    if let Some(addr) = req.extensions().get::<SocketAddr>().copied() {
-        req.extensions_mut().insert(ConnectInfo(addr));
+    if let Some(tls_info) = req.extensions().get::<ConnectInfo<TlsConnectInfo>>().copied() {
+        req.extensions_mut().insert(ConnectInfo(tls_info.0 .0));
     }
     next.run(req).await
 }

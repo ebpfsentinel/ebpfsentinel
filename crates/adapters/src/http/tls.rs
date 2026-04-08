@@ -96,6 +96,25 @@ pub fn build_crypto_provider(pq_mode: PqMode) -> tokio_rustls::rustls::crypto::C
     provider
 }
 
+/// Newtype around [`SocketAddr`] that lets us implement
+/// [`Connected`](axum::extract::connect_info::Connected) for [`TlsListener`]
+/// without hitting the orphan rule.
+///
+/// A middleware in `server.rs` converts `ConnectInfo<TlsConnectInfo>` into
+/// `ConnectInfo<SocketAddr>` before request processing so that
+/// `tower_governor::PeerIpKeyExtractor` (which looks for
+/// `ConnectInfo<SocketAddr>`) keeps working.
+#[derive(Debug, Clone, Copy)]
+pub struct TlsConnectInfo(pub SocketAddr);
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TlsListener>>
+    for TlsConnectInfo
+{
+    fn connect_info(target: axum::serve::IncomingStream<'_, TlsListener>) -> Self {
+        Self(*target.remote_addr())
+    }
+}
+
 /// A TCP listener that performs TLS handshakes on accepted connections.
 ///
 /// Implements [`axum::serve::Listener`] so it can be used as a drop-in
