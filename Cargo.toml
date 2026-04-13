@@ -116,6 +116,9 @@ pcap = "2.4"
 # Regex
 regex = "1"
 
+# LRU cache
+lru = "0.12"
+
 # Async utilities
 futures-util = "0.3"
 arc-swap = "1"

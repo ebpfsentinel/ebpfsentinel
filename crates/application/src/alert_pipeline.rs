@@ -818,6 +818,7 @@ mod tests {
         AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
         DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics, IpsMetrics,
         LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
+        ContainerMetrics,
     };
     use std::future::Future;
     use std::pin::Pin;
@@ -870,6 +871,7 @@ mod tests {
     impl AuditMetrics for TestMetrics {}
     impl LbMetrics for TestMetrics {}
     impl FingerprintMetrics for TestMetrics {}
+    impl ContainerMetrics for TestMetrics {}
 
     fn make_ids_alert(rule_id: &str, severity: Severity) -> IdsAlert {
         IdsAlert {
@@ -885,6 +887,7 @@ mod tests {
             rule_index: 0,
             timestamp_ns: 1_000_000_000,
             matched_domain: None,
+            container: None,
         }
     }
 
@@ -1170,6 +1173,7 @@ mod tests {
             direction: 0,
             redacted_excerpt: "[REDACTED:pci]".to_string(),
             timestamp_ns: 2_000_000_000,
+            container: None,
         }
     }
 

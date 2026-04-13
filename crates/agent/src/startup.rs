@@ -1593,6 +1593,27 @@ pub async fn run(
         Arc::clone(&ebpf_manager),
     );
 
+    // ── 10d. Build container resolver ───────────────────────────────
+    let container_resolver = if config.container.resolver.enabled {
+        let proc_resolver = Arc::new(
+            adapters::container::ProcContainerResolver::new(&config.container.resolver.proc_path),
+        )
+            as Arc<dyn domain::container::engine::CgroupReader>;
+        let engine = domain::container::engine::ContainerResolverEngine::new(
+            proc_resolver,
+            config.container.resolver.cache_size,
+        );
+        info!(
+            cache_size = config.container.resolver.cache_size,
+            proc_path = %config.container.resolver.proc_path,
+            "Container resolver initialized"
+        );
+        Some(Arc::new(engine))
+    } else {
+        info!("Container resolver disabled via config");
+        None
+    };
+
     // ── 11. Spawn event dispatcher (replaces flat event consumer) ───
     let dispatcher = EventDispatcher::new(
         Arc::clone(&ids_svc),
@@ -1615,6 +1636,11 @@ pub async fn run(
     };
     let dispatcher = if let Some(ref svc) = dns_blocklist_ref {
         dispatcher.with_dns_blocklist_svc(Arc::clone(svc))
+    } else {
+        dispatcher
+    };
+    let dispatcher = if let Some(ref resolver) = container_resolver {
+        dispatcher.with_container_resolver(Arc::clone(resolver))
     } else {
         dispatcher
     };

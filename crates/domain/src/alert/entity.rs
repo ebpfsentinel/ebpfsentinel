@@ -151,6 +151,9 @@ pub struct Alert {
     /// TLS intelligence: PQC compliance status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_pqc_status: Option<String>,
+    /// Container context resolved from the event's `cgroup_id` (if any).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<crate::container::entity::ContainerInfo>,
 }
 
 impl Alert {
@@ -202,6 +205,7 @@ impl Alert {
             ai_exfil_type: None,
             tls_threat_category: None,
             tls_pqc_status: None,
+            container: ids.container.clone(),
         }
     }
 
@@ -253,6 +257,7 @@ impl Alert {
             ai_exfil_type: None,
             tls_threat_category: None,
             tls_pqc_status: None,
+            container: dlp.container.clone(),
         }
     }
 
@@ -305,6 +310,7 @@ impl Alert {
             ai_exfil_type: None,
             tls_threat_category: None,
             tls_pqc_status: None,
+            container: ti.container.clone(),
         }
     }
 
@@ -369,6 +375,7 @@ impl Alert {
             ai_exfil_type: None,
             tls_threat_category: None,
             tls_pqc_status: None,
+            container: None,
         }
     }
 
@@ -433,6 +440,7 @@ impl Alert {
             ai_exfil_type: None,
             tls_threat_category: None,
             tls_pqc_status: None,
+            container: dns.container.clone(),
         }
     }
 
@@ -504,6 +512,7 @@ impl Alert {
             ai_exfil_type: None,
             tls_threat_category: None,
             tls_pqc_status: None,
+            container: None,
         }
     }
 
@@ -567,6 +576,7 @@ impl Alert {
             ai_exfil_type: None,
             tls_threat_category: None,
             tls_pqc_status: None,
+            container: None,
         }
     }
 
@@ -639,6 +649,7 @@ impl Alert {
             ai_exfil_type: ai_exfil_type.map(str::to_string),
             tls_threat_category: None,
             tls_pqc_status: None,
+            container: None,
         }
     }
 
@@ -696,6 +707,7 @@ mod tests {
             direction: 0,
             redacted_excerpt: "[REDACTED:pci]".to_string(),
             timestamp_ns: 2_000_000_000,
+            container: None,
         }
     }
 
@@ -713,6 +725,7 @@ mod tests {
             rule_index: 0,
             timestamp_ns: 1_000_000_000,
             matched_domain: None,
+            container: None,
         }
     }
 
@@ -817,6 +830,7 @@ mod tests {
             protocol: 6,
             is_ipv6: false,
             timestamp_ns: 3_000_000_000,
+            container: None,
         }
     }
 
@@ -857,6 +871,7 @@ mod tests {
             },
             severity: Severity::High,
             timestamp_ns: 4_000_000_000,
+            container: None,
         }
     }
 
@@ -886,6 +901,7 @@ mod tests {
             reason: DnsAlertReason::Reputation { score: 0.92 },
             severity: Severity::High,
             timestamp_ns: 5_000_000_000,
+            container: None,
         };
         let alert = Alert::from_dns_alert(&dns, "reputation auto-block");
 
@@ -906,6 +922,7 @@ mod tests {
             },
             severity: Severity::Medium,
             timestamp_ns: 6_000_000_000,
+            container: None,
         };
         let alert = Alert::from_dns_alert(&dns, "encrypted DNS detected");
 

@@ -141,6 +141,9 @@ pub struct AgentMetrics {
     pub lb_backends_healthy: Family<ServiceLabels, Gauge>,
     pub worker_events_total: Family<WorkerLabels, Counter>,
     pub worker_processing_duration: Family<WorkerLabels, Histogram>,
+    pub container_resolver_cache_hits_total: Counter,
+    pub container_resolver_cache_misses_total: Counter,
+    pub container_resolver_errors_total: Counter,
 }
 
 impl AgentMetrics {
@@ -459,6 +462,27 @@ impl AgentMetrics {
             worker_processing_duration.clone(),
         );
 
+        let container_resolver_cache_hits_total = Counter::default();
+        registry.register(
+            "container_resolver_cache_hits",
+            "Container resolver cache hits",
+            container_resolver_cache_hits_total.clone(),
+        );
+
+        let container_resolver_cache_misses_total = Counter::default();
+        registry.register(
+            "container_resolver_cache_misses",
+            "Container resolver cache misses (proc reads)",
+            container_resolver_cache_misses_total.clone(),
+        );
+
+        let container_resolver_errors_total = Counter::default();
+        registry.register(
+            "container_resolver_errors",
+            "Container resolver read errors from /proc",
+            container_resolver_errors_total.clone(),
+        );
+
         Self {
             registry,
             packets_total,
@@ -504,6 +528,9 @@ impl AgentMetrics {
             lb_backends_healthy,
             worker_events_total,
             worker_processing_duration,
+            container_resolver_cache_hits_total,
+            container_resolver_cache_misses_total,
+            container_resolver_errors_total,
         }
     }
 
@@ -826,6 +853,20 @@ impl LbMetrics for AgentMetrics {
 }
 
 impl ports::secondary::metrics_port::FingerprintMetrics for AgentMetrics {}
+
+impl ports::secondary::metrics_port::ContainerMetrics for AgentMetrics {
+    fn record_container_cache_hit(&self) {
+        self.container_resolver_cache_hits_total.inc();
+    }
+
+    fn record_container_cache_miss(&self) {
+        self.container_resolver_cache_misses_total.inc();
+    }
+
+    fn record_container_resolver_error(&self) {
+        self.container_resolver_errors_total.inc();
+    }
+}
 
 // MetricsPort is automatically implemented via the blanket impl
 // since AgentMetrics implements all sub-traits.

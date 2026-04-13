@@ -82,6 +82,7 @@ pub struct EventDispatcher {
     dns_blocklist_svc: Option<Arc<DnsBlocklistAppService>>,
     fingerprint_cache: Arc<FingerprintCache>,
     encrypted_dns_detector: EncryptedDnsDetector,
+    container_resolver: Option<Arc<domain::container::engine::ContainerResolverEngine>>,
 }
 
 impl EventDispatcher {
@@ -112,7 +113,40 @@ impl EventDispatcher {
                 std::time::Duration::from_secs(300),
             )),
             encrypted_dns_detector: EncryptedDnsDetector::default(),
+            container_resolver: None,
         }
+    }
+
+    /// Inject the container resolver engine. When present, alerts carry
+    /// container context derived from their `cgroup_id`.
+    #[must_use]
+    pub fn with_container_resolver(
+        mut self,
+        resolver: Arc<domain::container::engine::ContainerResolverEngine>,
+    ) -> Self {
+        self.container_resolver = Some(resolver);
+        self
+    }
+
+    fn resolve_container(
+        &self,
+        pid: u32,
+        cgroup_id: u64,
+    ) -> Option<domain::container::entity::ContainerInfo> {
+        let resolver = self.container_resolver.as_ref()?;
+        let (info, outcome) = resolver.resolve(pid, cgroup_id);
+        match outcome {
+            domain::container::engine::ResolveOutcome::CacheHit => {
+                self.metrics.record_container_cache_hit();
+            }
+            domain::container::engine::ResolveOutcome::CacheMiss => {
+                self.metrics.record_container_cache_miss();
+            }
+            domain::container::engine::ResolveOutcome::ReadError => {
+                self.metrics.record_container_resolver_error();
+            }
+        }
+        Some(info)
     }
 
     /// Return a shared reference to the JA4 fingerprint cache.
@@ -593,6 +627,7 @@ impl EventDispatcher {
             dst_port: event.dst_port,
             protocol: event.protocol,
             timestamp_ns: event.timestamp_ns,
+            container: None,
         };
 
         // Reuse the IDS alert channel — AlertPipeline handles both IDS and ThreatIntel.
@@ -614,6 +649,7 @@ impl EventDispatcher {
             rule_index: 0,
             timestamp_ns: event.timestamp_ns,
             matched_domain: None,
+            container: None,
         };
 
         tracing::info!(
@@ -824,6 +860,7 @@ impl EventDispatcher {
                 },
                 severity: domain::common::entity::Severity::Medium,
                 timestamp_ns: header.timestamp_ns,
+                container: None,
             };
             let _ = self.alert_tx.try_send(AlertEvent::Dns(dns_alert));
         }
@@ -930,10 +967,12 @@ impl EventDispatcher {
                 );
                 self.metrics.record_packet("dlp", "alert");
 
+                let container_info = self.resolve_container(event.pid, event.cgroup_id);
                 let patterns = svc.list_patterns();
                 for m in &matches {
                     if let Some(pattern) = patterns.get(m.pattern_index) {
-                        let dlp_alert = DlpAlert::from_event(event, pattern);
+                        let mut dlp_alert = DlpAlert::from_event(event, pattern);
+                        dlp_alert.container.clone_from(&container_info);
                         if self.alert_tx.try_send(AlertEvent::Dlp(dlp_alert)).is_err() {
                             self.metrics.record_event_dropped("alert_channel_full");
                         }
@@ -1074,6 +1113,7 @@ mod tests {
         AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
         DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics, IpsMetrics,
         LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
+        ContainerMetrics,
     };
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1127,6 +1167,7 @@ mod tests {
     impl AuditMetrics for TestMetrics {}
     impl LbMetrics for TestMetrics {}
     impl FingerprintMetrics for TestMetrics {}
+    impl ContainerMetrics for TestMetrics {}
 
     fn make_ids_rule(id: &str) -> IdsRule {
         IdsRule {

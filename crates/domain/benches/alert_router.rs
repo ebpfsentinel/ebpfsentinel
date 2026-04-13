@@ -53,6 +53,7 @@ fn make_alert(id: usize, severity: Severity) -> Alert {
         ai_exfil_type: None,
         tls_threat_category: None,
         tls_pqc_status: None,
+        container: None,
     }
 }
 

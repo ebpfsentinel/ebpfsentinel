@@ -154,6 +154,7 @@ mod tests {
         AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
         DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics, IpsMetrics,
         LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
+        ContainerMetrics,
     };
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
@@ -203,6 +204,7 @@ mod tests {
             ai_exfil_type: None,
             tls_threat_category: None,
             tls_pqc_status: None,
+            container: None,
         }
     }
 
@@ -249,6 +251,7 @@ mod tests {
     impl AuditMetrics for TestMetrics {}
     impl LbMetrics for TestMetrics {}
     impl FingerprintMetrics for TestMetrics {}
+    impl ContainerMetrics for TestMetrics {}
 
     #[tokio::test]
     async fn email_sender_construction() {

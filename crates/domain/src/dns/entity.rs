@@ -127,6 +127,8 @@ pub struct DnsAlert {
     pub reason: DnsAlertReason,
     pub severity: crate::common::entity::Severity,
     pub timestamp_ns: u64,
+    /// Container context resolved from the event's `cgroup_id` (if any).
+    pub container: Option<crate::container::entity::ContainerInfo>,
 }
 
 /// Reason a DNS alert was triggered.

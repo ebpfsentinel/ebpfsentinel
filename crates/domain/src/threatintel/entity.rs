@@ -106,6 +106,9 @@ pub struct ThreatIntelAlert {
     /// `true` if the addresses are IPv6.
     pub is_ipv6: bool,
     pub timestamp_ns: u64,
+    /// Container context resolved from the event's `cgroup_id` (if any).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<crate::container::entity::ContainerInfo>,
 }
 
 impl ThreatIntelAlert {

@@ -186,6 +186,19 @@ pub trait FingerprintMetrics: Send + Sync {
     fn record_fingerprint_seen(&self, _ja4: &str) {}
 }
 
+// ── Container resolver metrics ──────────────────────────────────────
+
+pub trait ContainerMetrics: Send + Sync {
+    /// Increment the container resolver cache hit counter.
+    fn record_container_cache_hit(&self) {}
+
+    /// Increment the container resolver cache miss counter.
+    fn record_container_cache_miss(&self) {}
+
+    /// Increment the container resolver read-error counter.
+    fn record_container_resolver_error(&self) {}
+}
+
 // ── Composite super-trait ──────────────────────────────────────────
 
 /// Unified metrics port composing all domain-specific sub-traits.
@@ -210,6 +223,7 @@ pub trait MetricsPort:
     + AuditMetrics
     + LbMetrics
     + FingerprintMetrics
+    + ContainerMetrics
 {
 }
 
@@ -232,6 +246,7 @@ impl<T> MetricsPort for T where
         + AuditMetrics
         + LbMetrics
         + FingerprintMetrics
+        + ContainerMetrics
 {
 }
 
@@ -302,6 +317,7 @@ mod tests {
         impl AuditMetrics for MinimalMock {}
         impl LbMetrics for MinimalMock {}
         impl FingerprintMetrics for MinimalMock {}
+        impl ContainerMetrics for MinimalMock {}
 
         let mock = MinimalMock;
         let port: &dyn MetricsPort = &mock;

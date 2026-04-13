@@ -244,6 +244,7 @@ impl DnsBlocklistAppService {
                 },
                 severity,
                 timestamp_ns: now_ns,
+                container: None,
             };
             let _ = tx.try_send(AlertEvent::Dns(dns_alert));
         }

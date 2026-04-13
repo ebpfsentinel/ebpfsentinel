@@ -563,6 +563,7 @@ mod tests {
         AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
         DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics, IpsMetrics,
         LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
+        ContainerMetrics,
     };
     use std::future::Future;
     use std::pin::Pin;
@@ -628,6 +629,7 @@ mod tests {
     impl AuditMetrics for TestMetrics {}
     impl LbMetrics for TestMetrics {}
     impl FingerprintMetrics for TestMetrics {}
+    impl ContainerMetrics for TestMetrics {}
 
     fn make_feed(id: &str, enabled: bool) -> FeedConfig {
         FeedConfig {

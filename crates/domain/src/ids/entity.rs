@@ -259,6 +259,8 @@ pub struct IdsAlert {
     pub timestamp_ns: u64,
     /// Domain that matched a domain-aware rule (if any).
     pub matched_domain: Option<String>,
+    /// Container context resolved from the event's `cgroup_id` (if any).
+    pub container: Option<crate::container::entity::ContainerInfo>,
 }
 
 impl IdsAlert {
@@ -277,6 +279,7 @@ impl IdsAlert {
             rule_index: event.rule_id,
             timestamp_ns: event.timestamp_ns,
             matched_domain: None,
+            container: None,
         }
     }
 

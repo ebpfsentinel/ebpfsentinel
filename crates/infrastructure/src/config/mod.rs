@@ -11,6 +11,7 @@ mod audit;
 mod auth;
 mod common;
 mod conntrack;
+mod container;
 mod ddos;
 mod dlp;
 mod dns;
@@ -38,6 +39,7 @@ pub use audit::AuditConfig;
 pub use auth::{ApiKeyConfig, AuthConfig, JwtConfig, OidcConfig};
 pub use common::{ConfigError, parse_cidr, parse_domain_mode};
 pub use conntrack::ConnTrackSectionConfig;
+pub use container::{ContainerConfig, ResolverConfig as ContainerResolverConfig};
 pub use ddos::{
     AmpPortConfig, AmpProtectionConfig, DdosConfig, DdosPolicyConfig, IcmpProtectionConfig,
     SynProtectionConfig,
@@ -138,6 +140,9 @@ pub struct AgentConfig {
 
     #[serde(default)]
     pub conntrack: ConnTrackSectionConfig,
+
+    #[serde(default)]
+    pub container: ContainerConfig,
 
     #[serde(default)]
     pub nat: NatConfig,
@@ -327,6 +332,9 @@ impl AgentConfig {
             self.alerting.routes.len(),
             MAX_ALERTING_ROUTES,
         )?;
+
+        // Validate container resolver config
+        self.container.validate()?;
 
         // Validate TLS config
         if self.agent.tls.enabled {

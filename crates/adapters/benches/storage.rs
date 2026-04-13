@@ -56,6 +56,7 @@ fn make_alert(id: &str, ts: u64) -> Alert {
         ai_exfil_type: None,
         tls_threat_category: None,
         tls_pqc_status: None,
+        container: None,
     }
 }
 

@@ -131,6 +131,7 @@ impl ReputationEnforcementService {
                         reason: DnsAlertReason::Reputation { score },
                         severity: Severity::High,
                         timestamp_ns: now_ns,
+                        container: None,
                     };
                     let _ = tx.try_send(AlertEvent::Dns(dns_alert));
                 }

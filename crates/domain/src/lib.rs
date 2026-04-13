@@ -6,6 +6,7 @@ pub mod audit;
 pub mod auth;
 pub mod capture;
 pub mod common;
+pub mod container;
 pub mod conntrack;
 pub mod ddos;
 pub mod dlp;

@@ -4,6 +4,7 @@ pub mod alert;
 pub mod alias;
 pub mod audit;
 pub mod auth;
+pub mod container;
 pub mod ebpf;
 pub mod geoip;
 pub mod grpc;

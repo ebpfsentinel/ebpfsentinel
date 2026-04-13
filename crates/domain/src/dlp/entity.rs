@@ -76,6 +76,8 @@ pub struct DlpAlert {
     /// Always `[REDACTED:{data_type}]` — never the actual matched content.
     pub redacted_excerpt: String,
     pub timestamp_ns: u64,
+    /// Container context resolved from the event's `cgroup_id` (if any).
+    pub container: Option<crate::container::entity::ContainerInfo>,
 }
 
 impl DlpAlert {
@@ -93,6 +95,7 @@ impl DlpAlert {
             direction: event.direction,
             redacted_excerpt: format!("[REDACTED:{}]", pattern.data_type),
             timestamp_ns: event.timestamp_ns,
+            container: None,
         }
     }
 }
