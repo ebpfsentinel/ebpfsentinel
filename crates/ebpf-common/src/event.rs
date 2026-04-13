@@ -71,7 +71,7 @@ pub const fn is_tcp(flags: u8) -> bool {
 /// - IPv4: `[v4_addr, 0, 0, 0]`
 /// - IPv6: full 128-bit address in network order
 ///
-/// Size: 64 bytes (aligned to 8 bytes due to `timestamp_ns` u64).
+/// Size: 72 bytes (aligned to 8 bytes due to `timestamp_ns` u64).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PacketEvent {
@@ -94,6 +94,11 @@ pub struct PacketEvent {
     /// 0 = not available (e.g. XDP programs, non-TCP/UDP traffic).
     /// Correlates events across the same connection.
     pub socket_cookie: u64,
+    /// cgroup v2 ID from `bpf_get_current_cgroup_id`.
+    /// 0 = not available (XDP programs, softirq context without process,
+    /// or cgroup v1 host). Userspace resolves non-zero values to container
+    /// / pod metadata via `/sys/fs/cgroup`.
+    pub cgroup_id: u64,
 }
 
 // SAFETY: Both types are #[repr(C)], Copy, 'static, and contain only primitive
@@ -136,7 +141,7 @@ mod tests {
 
     #[test]
     fn test_packet_event_size() {
-        assert_eq!(mem::size_of::<PacketEvent>(), 64);
+        assert_eq!(mem::size_of::<PacketEvent>(), 72);
     }
 
     #[test]
@@ -206,6 +211,7 @@ mod tests {
         assert_eq!(mem::offset_of!(PacketEvent, vlan_id), 52);
         assert_eq!(mem::offset_of!(PacketEvent, cpu_id), 54);
         assert_eq!(mem::offset_of!(PacketEvent, socket_cookie), 56);
+        assert_eq!(mem::offset_of!(PacketEvent, cgroup_id), 64);
     }
 
     #[test]
@@ -224,6 +230,7 @@ mod tests {
             vlan_id: 0,
             cpu_id: 0,
             socket_cookie: 0,
+            cgroup_id: 0,
         };
         assert_eq!(event.src_ip(), 0xC0A8_0001);
         assert_eq!(event.dst_ip(), 0x0A00_0001);
@@ -247,6 +254,7 @@ mod tests {
             vlan_id: 0,
             cpu_id: 0,
             socket_cookie: 0,
+            cgroup_id: 0,
         };
         assert!(event.is_ipv6());
         assert!(!event.has_vlan());
@@ -298,6 +306,7 @@ mod tests {
             vlan_id: 100,
             cpu_id: 0,
             socket_cookie: 0,
+            cgroup_id: 0,
         };
         assert!(!event.is_ipv6());
         assert!(event.has_vlan());

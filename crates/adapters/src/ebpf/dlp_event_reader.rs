@@ -58,10 +58,11 @@ impl DlpEventReader {
             };
 
             let rb = guard.get_inner_mut();
-            let header_size = 24_usize; // pid(4) + tgid(4) + timestamp_ns(8) + data_len(4) + direction(1) + padding(3)
+            // pid(4) + tgid(4) + timestamp_ns(8) + cgroup_id(8) + data_len(4) + direction(1) + padding(3)
+            let header_size = 32_usize;
             while let Some(item) = rb.next() {
                 let bytes: &[u8] = &item;
-                // Accept both small (280 bytes) and full (4120 bytes) DLP events.
+                // Accept both small (288 bytes) and full (4128 bytes) DLP events.
                 // Both share the same header layout; only the excerpt buffer size differs.
                 // We reconstruct a full DlpEvent with zero-padded excerpt for uniform handling.
                 if bytes.len() >= header_size {
@@ -69,13 +70,14 @@ impl DlpEventReader {
                         pid: 0,
                         tgid: 0,
                         timestamp_ns: 0,
+                        cgroup_id: 0,
                         data_len: 0,
                         direction: 0,
                         _padding: [0; 3],
                         data_excerpt: [0; DLP_MAX_EXCERPT],
                     };
                     // SAFETY: header fields are at known offsets, verified by length check.
-                    // Both DlpEvent and DlpEventSmall share identical header layout (24 bytes).
+                    // Both DlpEvent and DlpEventSmall share identical header layout (32 bytes).
                     unsafe {
                         core::ptr::copy_nonoverlapping(
                             bytes.as_ptr(),

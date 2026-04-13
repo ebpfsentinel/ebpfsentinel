@@ -55,6 +55,10 @@ macro_rules! emit_packet_event {
                 (*ptr).cpu_id = aya_ebpf::helpers::bpf_get_smp_processor_id() as u16;
                 (*ptr).socket_cookie =
                     aya_ebpf::helpers::bpf_get_socket_cookie($ctx.skb.skb as *mut _);
+                // Valid only when current task owns the skb (egress).
+                // Ingress softirq has no process context, so this returns
+                // 0 and userspace falls back to /proc parsing.
+                (*ptr).cgroup_id = aya_ebpf::helpers::bpf_get_current_cgroup_id();
             }
             entry.submit(0);
         } else {
@@ -62,7 +66,7 @@ macro_rules! emit_packet_event {
         }
     }};
 
-    // XDP variant: no socket_cookie
+    // XDP variant: no socket_cookie, cgroup_id unavailable in XDP context
     ($ringbuf:expr, $metrics:expr, $metric_dropped:expr,
      $src_addr:expr, $dst_addr:expr, $src_port:expr, $dst_port:expr,
      $protocol:expr, $event_type:expr, $action:expr, $rule_id:expr,
@@ -87,6 +91,8 @@ macro_rules! emit_packet_event {
                 (*ptr).vlan_id = $vlan_id;
                 (*ptr).cpu_id = aya_ebpf::helpers::bpf_get_smp_processor_id() as u16;
                 (*ptr).socket_cookie = 0;
+                // XDP runs before any task context; cgroup_id is always 0.
+                (*ptr).cgroup_id = 0;
             }
             entry.submit(0);
         } else {

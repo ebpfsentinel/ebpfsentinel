@@ -232,6 +232,7 @@ mod tests {
             pid: 1234,
             tgid: 5678,
             timestamp_ns: 1_000_000_000,
+            cgroup_id: 0,
             data_len: 100,
             direction: DLP_DIRECTION_WRITE,
             _padding: [0; 3],

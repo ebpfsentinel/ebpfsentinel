@@ -34,7 +34,7 @@ pub const DNS_METRIC_COUNT: u32 = 5;
 /// - IPv4: `[v4_addr, 0, 0, 0]`
 /// - IPv6: full 128-bit address in network order
 ///
-/// Size: 48 bytes (aligned to 8 bytes due to `timestamp_ns` u64).
+/// Size: 64 bytes (aligned to 8 bytes due to `timestamp_ns`/`cgroup_id` u64).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DnsEvent {
@@ -43,7 +43,7 @@ pub struct DnsEvent {
     pub dst_addr: [u32; 4],
     /// Number of valid DNS payload bytes following this header.
     pub dns_payload_len: u16,
-    /// Offset from the start of this struct to the payload (always 48).
+    /// Offset from the start of this struct to the payload (always 64).
     pub dns_payload_offset: u16,
     /// `DNS_DIRECTION_QUERY` (0) or `DNS_DIRECTION_RESPONSE` (1).
     pub direction: u8,
@@ -51,6 +51,12 @@ pub struct DnsEvent {
     pub flags: u8,
     /// 802.1Q VLAN ID (0 = no VLAN).
     pub vlan_id: u16,
+    /// Explicit padding so `cgroup_id` is 8-byte aligned.
+    pub _padding: [u8; 8],
+    /// cgroup v2 ID from `bpf_get_current_cgroup_id`.
+    /// 0 = not available. TC programs run in softirq context, so this is
+    /// only populated for egress packets where the sending task is current.
+    pub cgroup_id: u64,
 }
 
 /// Fixed-size buffer for DNS events in the RingBuf: header + raw payload.
@@ -71,7 +77,7 @@ unsafe impl aya::Pod for DnsEventBuf {}
 
 impl DnsEvent {
     /// Size of the DnsEvent header in bytes (payload offset).
-    pub const HEADER_SIZE: u16 = 48;
+    pub const HEADER_SIZE: u16 = 64;
 }
 
 #[cfg(test)]
@@ -81,7 +87,7 @@ mod tests {
 
     #[test]
     fn test_dns_event_size() {
-        assert_eq!(mem::size_of::<DnsEvent>(), 48);
+        assert_eq!(mem::size_of::<DnsEvent>(), 64);
     }
 
     #[test]
@@ -91,8 +97,8 @@ mod tests {
 
     #[test]
     fn test_dns_event_buf_size() {
-        assert_eq!(mem::size_of::<DnsEventBuf>(), 48 + DNS_MAX_PAYLOAD);
-        assert_eq!(mem::size_of::<DnsEventBuf>(), 560);
+        assert_eq!(mem::size_of::<DnsEventBuf>(), 64 + DNS_MAX_PAYLOAD);
+        assert_eq!(mem::size_of::<DnsEventBuf>(), 576);
     }
 
     #[test]
@@ -105,6 +111,7 @@ mod tests {
         assert_eq!(mem::offset_of!(DnsEvent, direction), 44);
         assert_eq!(mem::offset_of!(DnsEvent, flags), 45);
         assert_eq!(mem::offset_of!(DnsEvent, vlan_id), 46);
+        assert_eq!(mem::offset_of!(DnsEvent, cgroup_id), 56);
     }
 
     #[test]

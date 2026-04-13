@@ -98,8 +98,8 @@ mod tests {
 
     #[test]
     fn packet_event_byte_parsing() {
-        // Construct known bytes matching the PacketEvent layout (64 bytes)
-        let mut bytes = [0u8; 64];
+        // Construct known bytes matching the PacketEvent layout (72 bytes)
+        let mut bytes = [0u8; 72];
 
         // timestamp_ns at offset 0 (u64 LE)
         let ts: u64 = 1_000_000_000;
@@ -150,6 +150,10 @@ mod tests {
         let cookie: u64 = 0xDEAD_BEEF_CAFE_BABE;
         bytes[56..64].copy_from_slice(&cookie.to_ne_bytes());
 
+        // cgroup_id at offset 64 (u64)
+        let cgroup_id: u64 = 0x1234_5678_9ABC_DEF0;
+        bytes[64..72].copy_from_slice(&cgroup_id.to_ne_bytes());
+
         // Parse the event
         let event: PacketEvent =
             unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<PacketEvent>()) };
@@ -165,11 +169,12 @@ mod tests {
         assert_eq!(event.rule_id, 42);
         assert_eq!(event.vlan_id, 0);
         assert_eq!(event.socket_cookie, 0xDEAD_BEEF_CAFE_BABE);
+        assert_eq!(event.cgroup_id, 0x1234_5678_9ABC_DEF0);
     }
 
     #[test]
-    fn packet_event_size_is_64_bytes() {
-        assert_eq!(std::mem::size_of::<PacketEvent>(), 64);
+    fn packet_event_size_is_72_bytes() {
+        assert_eq!(std::mem::size_of::<PacketEvent>(), 72);
     }
 
     #[test]

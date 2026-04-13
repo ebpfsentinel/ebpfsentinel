@@ -1160,6 +1160,7 @@ mod tests {
             vlan_id: 0,
             cpu_id: 0,
             socket_cookie: 0,
+            cgroup_id: 0,
             rule_id,
         }
     }
@@ -1975,6 +1976,7 @@ mod tests {
             pid: 1000,
             tgid: 2000,
             timestamp_ns: 0,
+            cgroup_id: 0,
             #[allow(clippy::cast_possible_truncation)]
             data_len: data.len() as u32, // DLP_MAX_EXCERPT is small, no truncation possible
             direction: 0,

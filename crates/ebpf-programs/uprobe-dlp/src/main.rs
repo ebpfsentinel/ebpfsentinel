@@ -2,7 +2,7 @@
 #![no_main]
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_boot_ns, r#gen},
+    helpers::{bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_ktime_get_boot_ns, r#gen},
     macros::{map, uprobe, uretprobe},
     maps::{LruHashMap, PerCpuArray, RingBuf},
     programs::{ProbeContext, RetProbeContext},
@@ -216,6 +216,9 @@ fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
             (*ptr).pid = pid_tgid as u32;
             (*ptr).tgid = (pid_tgid >> 32) as u32;
             (*ptr).timestamp_ns = bpf_ktime_get_boot_ns();
+            // Uprobes always run in process context, so cgroup_id is
+            // reliably populated on cgroup v2 systems.
+            (*ptr).cgroup_id = bpf_get_current_cgroup_id();
             (*ptr).data_len = data_len;
             (*ptr).direction = direction;
             (*ptr)._padding = [0; 3];
@@ -250,6 +253,7 @@ fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8) {
             (*ptr).pid = pid_tgid as u32;
             (*ptr).tgid = (pid_tgid >> 32) as u32;
             (*ptr).timestamp_ns = bpf_ktime_get_boot_ns();
+            (*ptr).cgroup_id = bpf_get_current_cgroup_id();
             (*ptr).data_len = data_len;
             (*ptr).direction = direction;
             (*ptr)._padding = [0; 3];

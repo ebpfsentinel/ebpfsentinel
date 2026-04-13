@@ -3,7 +3,7 @@
 
 use aya_ebpf::{
     bindings::TC_ACT_OK,
-    helpers::bpf_ktime_get_boot_ns,
+    helpers::{bpf_get_current_cgroup_id, bpf_ktime_get_boot_ns},
     macros::{classifier, map},
     maps::{PerCpuArray, RingBuf},
     programs::TcContext,
@@ -306,6 +306,10 @@ fn emit_dns_event(
             (*ptr).header.direction = direction;
             (*ptr).header.flags = flags;
             (*ptr).header.vlan_id = vlan_id;
+            (*ptr).header._padding = [0; 8];
+            // Valid on egress queries where the current task owns the
+            // skb; 0 on ingress softirq (DNS responses).
+            (*ptr).header.cgroup_id = bpf_get_current_cgroup_id();
 
             // Zero payload buffer so bytes beyond the actual DNS
             // payload are deterministic even if load_bytes copies less.

@@ -5,7 +5,7 @@ use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
     helpers::{
-        bpf_get_prandom_u32, bpf_get_smp_processor_id,
+        bpf_get_current_cgroup_id, bpf_get_prandom_u32, bpf_get_smp_processor_id,
         bpf_ktime_get_boot_ns,
     },
     macros::{classifier, map},
@@ -641,6 +641,9 @@ unsafe fn fill_l7_header(
         header.cpu_id = bpf_get_smp_processor_id() as u16;
         // Populate socket cookie for TC context (not available in XDP).
         header.socket_cookie = bpf_get_socket_cookie(ctx.skb.skb as *mut _);
+        // Valid on egress where current task owns skb; 0 on ingress
+        // softirq, userspace falls back to /proc parsing.
+        header.cgroup_id = bpf_get_current_cgroup_id();
     }
 }
 

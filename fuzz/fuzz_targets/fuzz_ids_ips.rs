@@ -100,6 +100,7 @@ fuzz_target!(|data: &[u8]| {
                 vlan_id: 0,
                 cpu_id: 0,
                 socket_cookie: 0,
+                cgroup_id: 0,
             };
 
             // Exercise event evaluation (index lookup + sampling).
