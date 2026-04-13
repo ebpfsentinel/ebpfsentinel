@@ -37,7 +37,7 @@ credentials.json
 !crates/adapters/tests/fixtures/*.pem
 
 # IA
-CLAUDE.md
+CLAUDE.*
 .claude
 
 # Mutation testing
