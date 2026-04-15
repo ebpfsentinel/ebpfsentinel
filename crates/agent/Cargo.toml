@@ -15,8 +15,9 @@ path = "src/main.rs"
 
 
 [features]
-default = ["pcap-capture"]
+default = ["pcap-capture", "kubernetes"]
 pcap-capture = ["adapters/pcap-capture"]
+kubernetes = ["adapters/kubernetes", "dep:k8s-openapi"]
 
 [dependencies]
 domain = { workspace = true }
@@ -37,6 +38,7 @@ serde_json = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 tokio-util = { workspace = true }
+k8s-openapi = { workspace = true, features = ["v1_31"], optional = true }
 
 [lints]
 workspace = true

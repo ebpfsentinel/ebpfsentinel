@@ -35,6 +35,9 @@ pub struct ContainerConfig {
 
     #[serde(default)]
     pub docker: DockerEnricherConfig,
+
+    #[serde(default)]
+    pub kubernetes: KubernetesEnricherConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +92,23 @@ impl Default for DockerEnricherConfig {
             timeout_ms: default_docker_timeout_ms(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct KubernetesEnricherConfig {
+    /// Enables the Kubernetes pod metadata enricher.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Explicit node name. Empty = auto-detect from `EBPFSENTINEL_NODE_NAME`,
+    /// `HOSTNAME`, then `/proc/sys/kernel/hostname`.
+    #[serde(default)]
+    pub node_name: String,
+
+    /// Optional label selector (`k=v` pairs) applied to the pod watcher.
+    /// When empty, all pods on the node are cached.
+    #[serde(default)]
+    pub label_filter: Vec<String>,
 }
 
 impl ContainerConfig {

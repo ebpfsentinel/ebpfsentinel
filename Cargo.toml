@@ -120,6 +120,10 @@ regex = "1"
 # LRU cache
 lru = "0.16"
 
+# Kubernetes (optional, behind `kubernetes` feature in adapters)
+kube = { version = "3.1", default-features = false, features = ["client", "runtime", "rustls-tls"] }
+k8s-openapi = "0.27"
+
 # Async utilities
 futures-util = "0.3"
 arc-swap = "1"

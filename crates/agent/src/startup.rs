@@ -1644,6 +1644,46 @@ pub async fn run(
         None
     };
 
+    // ── 10f. Build Kubernetes enricher (optional, auto-detected) ────
+    #[cfg(feature = "kubernetes")]
+    let kubernetes_enricher: Option<
+        Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>,
+    > = if config.container.kubernetes.enabled {
+        if !adapters::container::is_running_in_kubernetes() {
+            info!("kubernetes.enabled=true but no KUBERNETES_SERVICE_HOST — enricher disabled");
+            None
+        } else if let Some(client) = adapters::container::try_build_client().await {
+            let cache = Arc::new(adapters::container::PodCache::new());
+            let enricher = adapters::container::KubernetesEnricher::with_cache(Arc::clone(&cache));
+            let metrics_handle = enricher.metrics();
+            let node_name = if config.container.kubernetes.node_name.is_empty() {
+                adapters::container::resolve_node_name()
+            } else {
+                config.container.kubernetes.node_name.clone()
+            };
+            let _watcher = adapters::container::spawn_pod_watcher(
+                client,
+                node_name.clone(),
+                cache,
+                metrics_handle,
+            );
+            info!(
+                node = %node_name,
+                "Kubernetes metadata enricher initialized"
+            );
+            Some(Arc::new(enricher) as _)
+        } else {
+            warn!("kubernetes enricher failed to build kube client — disabled");
+            None
+        }
+    } else {
+        None
+    };
+    #[cfg(not(feature = "kubernetes"))]
+    let kubernetes_enricher: Option<
+        Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>,
+    > = None;
+
     // ── 11. Spawn event dispatcher (replaces flat event consumer) ───
     let dispatcher = EventDispatcher::new(
         Arc::clone(&ids_svc),
@@ -1698,6 +1738,9 @@ pub async fn run(
     .with_stream_sender(alert_stream_tx);
     if let Some(store) = alert_store {
         alert_pipeline = alert_pipeline.with_alert_store(store);
+    }
+    if let Some(enricher) = kubernetes_enricher.clone() {
+        alert_pipeline = alert_pipeline.with_metadata_enricher(enricher);
     }
     if let Some(enricher) = docker_enricher.clone() {
         alert_pipeline = alert_pipeline.with_metadata_enricher(enricher);

@@ -108,6 +108,16 @@ pub struct KubernetesMetadata {
     pub namespace: String,
     pub container_name: String,
     pub labels: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub service_account: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_name: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub node_name: String,
 }
 
 /// Full container context attached to an event: the cgroup-derived
