@@ -149,6 +149,51 @@ pub enum NfNatManipType {
     Dst = 1,
 }
 
+/// `enum xdp_rss_hash_type` bitfield values from `include/net/xdp.h`.
+/// The kernel returns a bitwise OR of L3 / L4 protocol bits combined
+/// with the type-specific aliases below. `bpf_xdp_metadata_rx_hash`
+/// fills these bits in the `rss_type` out-parameter so the BPF
+/// program can pick the right rate-limit / load-balancer key.
+pub mod xdp_rss_hash_type {
+    /// Layer 3: IPv4
+    pub const L3_IPV4: u32 = 1 << 0;
+    /// Layer 3: IPv6
+    pub const L3_IPV6: u32 = 1 << 1;
+    /// Layer 3: dynamic header (e.g. tunnel)
+    pub const L3_DYNHDR: u32 = 1 << 2;
+    /// Layer 4: any
+    pub const L4: u32 = 1 << 3;
+    /// Layer 4: TCP
+    pub const L4_TCP: u32 = 1 << 4;
+    /// Layer 4: UDP
+    pub const L4_UDP: u32 = 1 << 5;
+    /// Layer 4: SCTP
+    pub const L4_SCTP: u32 = 1 << 6;
+    /// Layer 4: IPsec ESP/AH
+    pub const L4_IPSEC: u32 = 1 << 7;
+    /// Layer 4: ICMP
+    pub const L4_ICMP: u32 = 1 << 8;
+
+    /// Composite alias: no RSS hashing performed by the NIC.
+    pub const TYPE_NONE: u32 = 0;
+    /// Composite alias: L2-only frame hashing (same as `TYPE_NONE`).
+    pub const TYPE_L2: u32 = TYPE_NONE;
+    /// Composite alias: L3 IPv4 hashing.
+    pub const TYPE_L3_IPV4: u32 = L3_IPV4;
+    /// Composite alias: L3 IPv6 hashing.
+    pub const TYPE_L3_IPV6: u32 = L3_IPV6;
+    /// Composite alias: any L4 hashing flavour.
+    pub const TYPE_L4_ANY: u32 = L4;
+    /// Composite alias: L4 IPv4 + TCP hashing.
+    pub const TYPE_L4_IPV4_TCP: u32 = L3_IPV4 | L4 | L4_TCP;
+    /// Composite alias: L4 IPv4 + UDP hashing.
+    pub const TYPE_L4_IPV4_UDP: u32 = L3_IPV4 | L4 | L4_UDP;
+    /// Composite alias: L4 IPv6 + TCP hashing.
+    pub const TYPE_L4_IPV6_TCP: u32 = L3_IPV6 | L4 | L4_TCP;
+    /// Composite alias: L4 IPv6 + UDP hashing.
+    pub const TYPE_L4_IPV6_UDP: u32 = L3_IPV6 | L4 | L4_UDP;
+}
+
 /// `IPS_*` status bit definitions from `include/uapi/linux/netfilter/nf_conntrack_common.h`.
 /// Only the subset eBPFsentinel touches is exposed here.
 pub mod ips_status {
@@ -311,6 +356,22 @@ unsafe extern "C" {
         vlan_proto: *mut u16,
         vlan_tci: *mut u16,
     ) -> i32;
+
+    /// Read the NIC-computed RSS hash for the current XDP frame and
+    /// the corresponding `xdp_rss_hash_type` bitmask. Kernel 6.3.
+    /// Returns `0` on success, `-EOPNOTSUPP` when the driver lacks
+    /// hardware RSS metadata.
+    pub fn bpf_xdp_metadata_rx_hash(
+        ctx: *const core::ffi::c_void,
+        hash: *mut u32,
+        rss_type: *mut u32,
+    ) -> i32;
+
+    /// Read the hardware RX timestamp (nanoseconds since boot) for
+    /// the current XDP frame. Kernel 6.3. Returns `0` on success,
+    /// `-EOPNOTSUPP` when the driver lacks hardware timestamping.
+    pub fn bpf_xdp_metadata_rx_timestamp(ctx: *const core::ffi::c_void, timestamp: *mut u64)
+    -> i32;
 
     /// Look up the `xfrm_state` matching the packet. Kernel 6.8.
     /// `KF_ACQUIRE | KF_RET_NULL` — pair with
@@ -573,6 +634,90 @@ pub mod host_stubs {
         ENOTSUP_NEG
     }
 
+    // ── XDP RX hash + timestamp host stubs (kernel 6.3) ──
+
+    use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
+
+    /// Next observation written by tests via [`host_set_next_xdp_hash`].
+    static HOST_NEXT_XDP_HASH: AtomicU32 = AtomicU32::new(0);
+    /// Next RSS-type bitmask written by tests via
+    /// [`host_set_next_xdp_rss_type`].
+    static HOST_NEXT_XDP_RSS_TYPE: AtomicU32 = AtomicU32::new(0);
+    /// Injected error for the next `bpf_xdp_metadata_rx_hash` call.
+    /// `0` → success.
+    static HOST_NEXT_XDP_HASH_ERROR: AtomicI32 = AtomicI32::new(0);
+    /// Next timestamp returned by the timestamp stub.
+    static HOST_NEXT_XDP_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
+    /// Injected error for the next `bpf_xdp_metadata_rx_timestamp`
+    /// call. `0` → success.
+    static HOST_NEXT_XDP_TIMESTAMP_ERROR: AtomicI32 = AtomicI32::new(0);
+
+    /// Test helper: set the hash + RSS type the next `rx_hash` call
+    /// will report. Cleared after consumption.
+    pub fn host_set_next_xdp_hash(hash: u32, rss_type: u32) {
+        HOST_NEXT_XDP_HASH.store(hash, Ordering::SeqCst);
+        HOST_NEXT_XDP_RSS_TYPE.store(rss_type, Ordering::SeqCst);
+    }
+
+    /// Test helper: inject an error for the next `rx_hash` call.
+    pub fn host_set_next_xdp_hash_error(errno: i32) {
+        HOST_NEXT_XDP_HASH_ERROR.store(errno, Ordering::SeqCst);
+    }
+
+    /// Test helper: set the timestamp the next `rx_timestamp` call
+    /// will report.
+    pub fn host_set_next_xdp_timestamp(ts: u64) {
+        HOST_NEXT_XDP_TIMESTAMP.store(ts, Ordering::SeqCst);
+    }
+
+    /// Test helper: inject an error for the next `rx_timestamp`
+    /// call.
+    pub fn host_set_next_xdp_timestamp_error(errno: i32) {
+        HOST_NEXT_XDP_TIMESTAMP_ERROR.store(errno, Ordering::SeqCst);
+    }
+
+    /// Reset every XDP metadata observation atomic so consecutive
+    /// tests do not leak state.
+    pub fn host_reset_xdp_metadata_state() {
+        HOST_NEXT_XDP_HASH.store(0, Ordering::SeqCst);
+        HOST_NEXT_XDP_RSS_TYPE.store(0, Ordering::SeqCst);
+        HOST_NEXT_XDP_HASH_ERROR.store(0, Ordering::SeqCst);
+        HOST_NEXT_XDP_TIMESTAMP.store(0, Ordering::SeqCst);
+        HOST_NEXT_XDP_TIMESTAMP_ERROR.store(0, Ordering::SeqCst);
+    }
+
+    pub unsafe fn bpf_xdp_metadata_rx_hash(
+        _ctx: *const core::ffi::c_void,
+        hash: *mut u32,
+        rss_type: *mut u32,
+    ) -> i32 {
+        let err = HOST_NEXT_XDP_HASH_ERROR.swap(0, Ordering::SeqCst);
+        if err != 0 {
+            return err;
+        }
+        if !hash.is_null() {
+            unsafe { *hash = HOST_NEXT_XDP_HASH.load(Ordering::SeqCst) };
+        }
+        if !rss_type.is_null() {
+            unsafe { *rss_type = HOST_NEXT_XDP_RSS_TYPE.load(Ordering::SeqCst) };
+        }
+        0
+    }
+
+    pub unsafe fn bpf_xdp_metadata_rx_timestamp(
+        _ctx: *const core::ffi::c_void,
+        timestamp: *mut u64,
+    ) -> i32 {
+        let err = HOST_NEXT_XDP_TIMESTAMP_ERROR.swap(0, Ordering::SeqCst);
+        if err != 0 {
+            return err;
+        }
+        if !timestamp.is_null() {
+            unsafe { *timestamp = HOST_NEXT_XDP_TIMESTAMP.load(Ordering::SeqCst) };
+        }
+        0
+    }
+
     pub unsafe fn bpf_xdp_get_xfrm_state(
         _ctx: *mut core::ffi::c_void,
         _opts: *mut bpf_xfrm_state_opts,
@@ -782,7 +927,7 @@ pub mod host_stubs {
     // ── Conntrack stubs (kernel 5.18) ──
 
     use super::{BpfCtOpts, nf_conn};
-    use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+    use core::sync::atomic::AtomicUsize;
 
     /// Sentinel pointer returned by the host stub for successful CT
     /// lookups. Points at a fixed static so tests can observe that
@@ -1108,6 +1253,55 @@ pub unsafe fn xdp_rx_vlan_tag(ctx: *const core::ffi::c_void) -> Option<(u16, u16
         return None;
     }
     Some((proto, tci))
+}
+
+/// NIC-computed RSS hash + corresponding `xdp_rss_hash_type`
+/// bitmask for the current XDP frame. Returns `None` when the
+/// driver lacks hardware RSS metadata.
+///
+/// The returned `(hash, rss_type)` tuple lets `xdp-ratelimit` use
+/// the hash directly as a bucket key (skipping a CPU FNV pass)
+/// and `xdp-loadbalancer` re-use it as the Maglev consistent-hash
+/// seed.
+///
+/// # Safety
+/// `ctx` must point to a live `xdp_md` owned by the current XDP
+/// program invocation.
+#[inline(always)]
+#[must_use]
+pub unsafe fn xdp_rx_hash(ctx: *const core::ffi::c_void) -> Option<(u32, u32)> {
+    let mut hash: u32 = 0;
+    let mut rss_type: u32 = 0;
+    #[cfg(target_arch = "bpf")]
+    let rc = unsafe { bpf_xdp_metadata_rx_hash(ctx, &raw mut hash, &raw mut rss_type) };
+    #[cfg(not(target_arch = "bpf"))]
+    let rc = unsafe { host_stubs::bpf_xdp_metadata_rx_hash(ctx, &raw mut hash, &raw mut rss_type) };
+    if rc != 0 {
+        return None;
+    }
+    Some((hash, rss_type))
+}
+
+/// Hardware RX timestamp (nanoseconds since boot) for the current
+/// XDP frame. Returns `None` when the driver lacks hardware
+/// timestamping. Used by E17 beaconing detection to record arrival
+/// times with zero CPU jitter.
+///
+/// # Safety
+/// `ctx` must point to a live `xdp_md` owned by the current XDP
+/// program invocation.
+#[inline(always)]
+#[must_use]
+pub unsafe fn xdp_rx_timestamp(ctx: *const core::ffi::c_void) -> Option<u64> {
+    let mut ts: u64 = 0;
+    #[cfg(target_arch = "bpf")]
+    let rc = unsafe { bpf_xdp_metadata_rx_timestamp(ctx, &raw mut ts) };
+    #[cfg(not(target_arch = "bpf"))]
+    let rc = unsafe { host_stubs::bpf_xdp_metadata_rx_timestamp(ctx, &raw mut ts) };
+    if rc != 0 {
+        return None;
+    }
+    Some(ts)
 }
 
 /// Look up the `xfrm_state` for the packet and hand it to `f`; the
@@ -2405,5 +2599,83 @@ mod tests {
         assert!(killed);
         assert_eq!(host_stubs::host_last_live_status(), Some(ips_status::DYING));
         assert_eq!(host_stubs::host_ct_live_count(), 0);
+    }
+
+    // ── XDP RX hash + timestamp tests ────────────────────────────
+
+    #[test]
+    fn xdp_rss_hash_type_constants_match_kernel() {
+        assert_eq!(xdp_rss_hash_type::L3_IPV4, 1);
+        assert_eq!(xdp_rss_hash_type::L3_IPV6, 2);
+        assert_eq!(xdp_rss_hash_type::L4, 8);
+        assert_eq!(xdp_rss_hash_type::L4_TCP, 16);
+        assert_eq!(xdp_rss_hash_type::L4_UDP, 32);
+        assert_eq!(
+            xdp_rss_hash_type::TYPE_L4_IPV4_TCP,
+            xdp_rss_hash_type::L3_IPV4 | xdp_rss_hash_type::L4 | xdp_rss_hash_type::L4_TCP
+        );
+        assert_eq!(
+            xdp_rss_hash_type::TYPE_L4_IPV6_UDP,
+            xdp_rss_hash_type::L3_IPV6 | xdp_rss_hash_type::L4 | xdp_rss_hash_type::L4_UDP
+        );
+        assert_eq!(xdp_rss_hash_type::TYPE_NONE, 0);
+        assert_eq!(xdp_rss_hash_type::TYPE_L2, xdp_rss_hash_type::TYPE_NONE);
+    }
+
+    #[test]
+    fn xdp_rx_hash_returns_injected_value() {
+        host_stubs::host_reset_xdp_metadata_state();
+        host_stubs::host_set_next_xdp_hash(0xDEAD_BEEF, xdp_rss_hash_type::TYPE_L4_IPV4_TCP);
+        let out = unsafe { xdp_rx_hash(core::ptr::null()) };
+        assert_eq!(
+            out,
+            Some((0xDEAD_BEEF, xdp_rss_hash_type::TYPE_L4_IPV4_TCP))
+        );
+    }
+
+    #[test]
+    fn xdp_rx_hash_returns_none_on_eopnotsupp() {
+        host_stubs::host_reset_xdp_metadata_state();
+        host_stubs::host_set_next_xdp_hash_error(-95);
+        let out = unsafe { xdp_rx_hash(core::ptr::null()) };
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn xdp_rx_hash_clears_error_after_consumption() {
+        host_stubs::host_reset_xdp_metadata_state();
+        host_stubs::host_set_next_xdp_hash_error(-95);
+        // First call swallows the error.
+        let _ = unsafe { xdp_rx_hash(core::ptr::null()) };
+        // Second call must not still report failure.
+        host_stubs::host_set_next_xdp_hash(7, xdp_rss_hash_type::TYPE_L3_IPV4);
+        let out = unsafe { xdp_rx_hash(core::ptr::null()) };
+        assert_eq!(out, Some((7, xdp_rss_hash_type::TYPE_L3_IPV4)));
+    }
+
+    #[test]
+    fn xdp_rx_timestamp_returns_injected_value() {
+        host_stubs::host_reset_xdp_metadata_state();
+        host_stubs::host_set_next_xdp_timestamp(1_700_000_000_000_000_000);
+        let out = unsafe { xdp_rx_timestamp(core::ptr::null()) };
+        assert_eq!(out, Some(1_700_000_000_000_000_000));
+    }
+
+    #[test]
+    fn xdp_rx_timestamp_returns_none_on_eopnotsupp() {
+        host_stubs::host_reset_xdp_metadata_state();
+        host_stubs::host_set_next_xdp_timestamp_error(-95);
+        let out = unsafe { xdp_rx_timestamp(core::ptr::null()) };
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn xdp_rx_timestamp_clears_error_after_consumption() {
+        host_stubs::host_reset_xdp_metadata_state();
+        host_stubs::host_set_next_xdp_timestamp_error(-95);
+        let _ = unsafe { xdp_rx_timestamp(core::ptr::null()) };
+        host_stubs::host_set_next_xdp_timestamp(42);
+        let out = unsafe { xdp_rx_timestamp(core::ptr::null()) };
+        assert_eq!(out, Some(42));
     }
 }
