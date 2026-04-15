@@ -76,9 +76,14 @@ static IDS_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue> =
 #[map]
 static IDS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
 
-/// Shared kernel→userspace event ring buffer (1 MB).
+/// Shared kernel→userspace event ring buffer (4 MB).
+///
+/// Bumped from 1 MiB to 4 MiB alongside the L7 payload capture bump to
+/// 2048 B — larger events would otherwise cause frequent backpressure
+/// drops. The extra 3 MiB of kernel memory is acceptable on any
+/// modern deployment.
 #[map]
-static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
+static EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 4096, 0);
 
 /// Feature enable/disable flags (shared across programs).
 #[map]
@@ -117,16 +122,17 @@ static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
 #[map]
 static L7_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(64, 0);
 
-/// Small L7 event buffer (192 bytes): header + 128 bytes payload.
-/// Used when TCP payload ≤ 128 bytes — saves 67% RingBuf space vs full buffer.
+/// Small L7 event buffer: `PacketEvent` header + `SMALL_L7_PAYLOAD` bytes
+/// of payload (512 B). Used when TCP payload ≤ 512 bytes — saves ~75%
+/// RingBuf space vs the full buffer.
 #[repr(C)]
 struct L7EventSmall {
     header: PacketEvent,
     payload: [u8; SMALL_L7_PAYLOAD],
 }
 
-/// Full L7 event buffer (576 bytes): header + 512 bytes payload.
-/// Used when TCP payload > 128 bytes.
+/// Full L7 event buffer: `PacketEvent` header + `MAX_L7_PAYLOAD` bytes
+/// of payload (2 KiB). Used when TCP payload > `SMALL_L7_PAYLOAD`.
 #[repr(C)]
 struct L7EventBuf {
     header: PacketEvent,
@@ -141,10 +147,14 @@ const METRIC_ERRORS: u32 = 2;
 const METRIC_EVENTS_DROPPED: u32 = 3;
 const METRIC_TOTAL_SEEN: u32 = 4;
 
+/// 75% threshold for the 4 MiB EVENTS ring buffer. Must stay in sync
+/// with the `RingBuf::with_byte_size` call above.
+const IDS_EVENTS_BACKPRESSURE_THRESHOLD: u64 = (1024 * 4096) * 3 / 4;
+
 /// Returns `true` if the EVENTS RingBuf has backpressure (>75% full).
 #[inline(always)]
 fn ringbuf_has_backpressure() -> bool {
-    ringbuf_has_backpressure!(EVENTS)
+    ringbuf_has_backpressure!(EVENTS, IDS_EVENTS_BACKPRESSURE_THRESHOLD)
 }
 
 /// Returns `true` if the event should be sampled out (i.e., skipped).

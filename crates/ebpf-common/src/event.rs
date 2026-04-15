@@ -10,12 +10,17 @@ pub const EVENT_TYPE_DNS: u8 = 7;
 pub const EVENT_TYPE_QOS: u8 = 8;
 
 /// Maximum L7 payload bytes captured by eBPF and sent via RingBuf.
-pub const MAX_L7_PAYLOAD: usize = 512;
+///
+/// 2 KiB covers full HTTP/1.1 request headers, TLS ClientHello with all
+/// common extensions (SNI + ALPN + supported_groups + signature_algorithms),
+/// gRPC HEADERS frames, and most database query statements. See
+/// `docs/kernel/limits.md` for the full rationale.
+pub const MAX_L7_PAYLOAD: usize = 2048;
 
-/// Small L7 payload tier (128 bytes) — covers HTTP method lines, TLS record
+/// Small L7 payload tier (512 bytes) — covers HTTP method lines, TLS record
 /// headers, SSH banners, and most protocol signatures. Used when the packet's
-/// TCP payload is ≤ 128 bytes, saving 384 bytes per RingBuf entry (67%).
-pub const SMALL_L7_PAYLOAD: usize = 128;
+/// TCP payload is ≤ 512 bytes, saving 1 536 bytes per RingBuf entry (75%).
+pub const SMALL_L7_PAYLOAD: usize = 512;
 
 /// Flag bit: packet is IPv6 (otherwise IPv4).
 pub const FLAG_IPV6: u8 = 0x01;
@@ -170,8 +175,8 @@ mod tests {
         assert_eq!(EVENT_TYPE_L7, 6);
         assert_eq!(EVENT_TYPE_DNS, 7);
         assert_eq!(EVENT_TYPE_QOS, 8);
-        assert_eq!(MAX_L7_PAYLOAD, 512);
-        assert_eq!(SMALL_L7_PAYLOAD, 128);
+        assert_eq!(MAX_L7_PAYLOAD, 2048);
+        assert_eq!(SMALL_L7_PAYLOAD, 512);
         assert!(SMALL_L7_PAYLOAD < MAX_L7_PAYLOAD);
     }
 
