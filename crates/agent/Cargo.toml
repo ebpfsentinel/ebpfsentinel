@@ -40,5 +40,8 @@ notify-debouncer-mini = { workspace = true }
 tokio-util = { workspace = true }
 k8s-openapi = { workspace = true, features = ["v1_31"], optional = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

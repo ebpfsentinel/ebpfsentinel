@@ -880,12 +880,23 @@ pub async fn run(
     // ── 9. Create event channel ─────────────────────────────────────
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
 
-    // ── 10. Load eBPF programs (each with graceful degradation) ────
+    // ── 10. Load eBPF programs ─────────────────────────────────────
     //
-    // Privilege and kernel checks are non-fatal: the agent continues in
-    // API-only mode (ebpf_loaded=false) so REST/gRPC endpoints remain
-    // accessible for management even without eBPF capabilities.
-    let ebpf_capable = match check_ebpf_privileges().and_then(|()| check_kernel_version()) {
+    // Kernel version is MANDATORY: 6.9+ is required unconditionally.
+    // No "API-only" fallback when the kernel is too old — every eBPF
+    // program depends on kfuncs introduced in 6.4 → 6.9 and the
+    // verifier rejects them at load time on older kernels. The
+    // correct remediation is upgrading the host kernel; running the
+    // agent as a pure HTTP frontend on a 6.8 host gives operators a
+    // false sense of coverage, so we refuse to boot.
+    //
+    // The privilege check stays soft: an unprivileged caller can
+    // still run the agent in API-only mode (REST/gRPC endpoints
+    // live, no eBPF attach). The three BPF loading modes
+    // (token / capabilities / privileged) all still work, but only
+    // on top of a 6.9+ kernel.
+    check_kernel_version()?;
+    let ebpf_capable = match check_ebpf_privileges() {
         Ok(()) => true,
         Err(e) => {
             tracing::error!(error = %e, "eBPF unavailable — running in API-only mode");
@@ -2410,17 +2421,41 @@ fn check_ebpf_privileges() -> anyhow::Result<()> {
     ))
 }
 
-/// Verify the kernel version is >= 6.6 (required for TCX link-based TC attach).
+/// Verify the kernel version is **>= 6.9**.
 ///
-/// TCX (kernel 6.6+) provides link-based TC program attachment: programs auto-detach
-/// when the owning FD is closed, even on crash (SIGKILL). Older kernels use netlink-based
-/// attach where TC programs persist in the qdisc after the agent exits.
+/// The 6.9 floor is mandatory — there is **no graceful fallback on
+/// older kernels**. The agent relies on the following kernel features
+/// across every eBPF program:
+///
+/// - `BPF_TOKEN_CREATE` + `BPF_F_TOKEN_FD` (6.9) — container-aware
+///   least-privilege loading
+/// - `BPF_MAP_TYPE_ARENA` + `bpf_arena_alloc_pages` (6.9) — mmap'd
+///   zero-copy maps
+/// - `bpf_task_get_cgroup1` kfunc (6.8) — cgroup1 inode enrichment
+/// - `bpf_xdp_metadata_rx_vlan_tag` / `bpf_xdp_get_xfrm_state` /
+///   `bpf_iter_css_task` kfuncs (6.7 / 6.8)
+/// - netfilter conntrack lookup / alloc / NAT delegation kfuncs
+///   (5.18 / 6.0 / 6.1) consumed via `ebpf_helpers::kfuncs`
+/// - dynptr skb / xdp slice helpers (6.4 / 6.5)
+///
+/// A kernel that fails this check **cannot** run the agent in a
+/// degraded mode — the eBPF verifier rejects every program at load
+/// time because the kfuncs are not present in `vmlinux` BTF. The
+/// correct response is to upgrade the kernel. The three BPF loading
+/// modes (token / capabilities / privileged) all still work, but
+/// only on top of a 6.9+ kernel.
 fn check_kernel_version() -> anyhow::Result<()> {
-    const MIN_MAJOR: u32 = 6;
-    const MIN_MINOR: u32 = 6;
+    check_kernel_version_from(std::path::Path::new("/proc/sys/kernel/osrelease"))
+}
 
-    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
-        .map_err(|e| anyhow::anyhow!("cannot read kernel version: {e}"))?;
+/// Mandatory kernel minimum: **6.9**. Exposed as a const so tests
+/// and docs cite a single source of truth.
+pub const MIN_KERNEL_MAJOR: u32 = 6;
+pub const MIN_KERNEL_MINOR: u32 = 9;
+
+fn check_kernel_version_from(path: &std::path::Path) -> anyhow::Result<()> {
+    let release = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("cannot read kernel version from {}: {e}", path.display()))?;
 
     let version = release.trim();
     let mut parts = version.split(|c: char| !c.is_ascii_digit());
@@ -2433,14 +2468,89 @@ fn check_kernel_version() -> anyhow::Result<()> {
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(0);
 
-    if major > MIN_MAJOR || (major == MIN_MAJOR && minor >= MIN_MINOR) {
+    if major > MIN_KERNEL_MAJOR || (major == MIN_KERNEL_MAJOR && minor >= MIN_KERNEL_MINOR) {
         return Ok(());
     }
 
     Err(anyhow::anyhow!(
-        "kernel {version} is too old — eBPFsentinel requires kernel >= {MIN_MAJOR}.{MIN_MINOR} \
-         (TCX link-based TC attach)"
+        "kernel {version} is below the mandatory minimum {MIN_KERNEL_MAJOR}.{MIN_KERNEL_MINOR} — \
+         eBPFsentinel refuses to start. Required features: BPF token delegation, \
+         BPF_MAP_TYPE_ARENA, cgroup1 kfunc, XDP metadata kfuncs, netfilter conntrack \
+         kfuncs, dynptr helpers. No fallback path exists — upgrade the host kernel \
+         to 6.9+ and restart the agent."
     ))
+}
+
+#[cfg(test)]
+mod kernel_version_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_osrelease(dir: &tempfile::TempDir, contents: &str) -> std::path::PathBuf {
+        let p = dir.path().join("osrelease");
+        let mut f = std::fs::File::create(&p).expect("create osrelease stub");
+        f.write_all(contents.as_bytes()).expect("write osrelease");
+        p
+    }
+
+    #[test]
+    fn accepts_kernel_6_9_exact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_osrelease(&tmp, "6.9.0-060900-generic\n");
+        assert!(check_kernel_version_from(&p).is_ok());
+    }
+
+    #[test]
+    fn accepts_kernel_6_10() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_osrelease(&tmp, "6.10.4-generic\n");
+        assert!(check_kernel_version_from(&p).is_ok());
+    }
+
+    #[test]
+    fn accepts_kernel_7_0() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_osrelease(&tmp, "7.0.0-experimental\n");
+        assert!(check_kernel_version_from(&p).is_ok());
+    }
+
+    #[test]
+    fn rejects_kernel_6_8() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_osrelease(&tmp, "6.8.0-ubuntu-24.04\n");
+        let err = check_kernel_version_from(&p).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("below the mandatory minimum 6.9"));
+        assert!(msg.contains("No fallback path exists"));
+    }
+
+    #[test]
+    fn rejects_kernel_6_6() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_osrelease(&tmp, "6.6.0\n");
+        assert!(check_kernel_version_from(&p).is_err());
+    }
+
+    #[test]
+    fn rejects_kernel_5_15() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_osrelease(&tmp, "5.15.149-generic\n");
+        assert!(check_kernel_version_from(&p).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_osrelease_path() {
+        let bogus = std::path::Path::new("/nonexistent/kernel/osrelease");
+        assert!(check_kernel_version_from(bogus).is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_osrelease(&tmp, "not-a-version\n");
+        // parse yields (0, 0) → below minimum → Err
+        assert!(check_kernel_version_from(&p).is_err());
+    }
 }
 
 /// Resolve the directory containing compiled eBPF program binaries.
