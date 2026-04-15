@@ -12,6 +12,9 @@
 //! |-------|--------|---------------|
 //! | `bpf_task_get_cgroup1` | 6.8 | `struct cgroup *(*)(struct task_struct *task, int hierarchy_id) __ksym;` |
 //! | `bpf_cgroup_release`   | 6.5 | `void(*)(struct cgroup *cgrp) __ksym;` |
+//! | `bpf_cgroup_from_id`   | 6.5 | `struct cgroup *(*)(u64 cgroup_id) __ksym;` |
+//! | `bpf_cgroup_ancestor`  | 6.0 | `struct cgroup *(*)(struct cgroup *cgrp, int ancestor_level) __ksym;` |
+//! | `bpf_cgroup_acquire`   | 6.0 | `struct cgroup *(*)(struct cgroup *cgrp) __ksym;` |
 //! | `bpf_xdp_metadata_rx_vlan_tag` | 6.8 | `int(*)(const struct xdp_md *ctx, __be16 *vlan_proto, u16 *vlan_tci) __ksym;` |
 //! | `bpf_xdp_get_xfrm_state`       | 6.8 | `struct xfrm_state *(*)(struct xdp_md *ctx, struct bpf_xfrm_state_opts *opts, u32 opts__sz) __ksym;` |
 //! | `bpf_xdp_xfrm_state_release`   | 6.8 | `void(*)(struct xfrm_state *x) __ksym;` |
@@ -397,6 +400,27 @@ unsafe extern "C" {
     /// [`bpf_task_get_cgroup1`]. Kernel 6.5+.
     pub fn bpf_cgroup_release(cgrp: *mut cgroup);
 
+    /// Look up a `struct cgroup*` by its 64-bit kernfs id. Kernel
+    /// 6.5+. `KF_ACQUIRE | KF_RET_NULL` — pair every non-null
+    /// return with [`bpf_cgroup_release`]. The id matches the value
+    /// produced by `bpf_get_current_cgroup_id()` and the
+    /// `cgroup.id` field exposed via `cgroup_id` skb metadata.
+    pub fn bpf_cgroup_from_id(cgroup_id: u64) -> *mut cgroup;
+
+    /// Walk the cgroup ancestor chain and return the ancestor at
+    /// `ancestor_level` (0 = root, increasing towards `cgrp`).
+    /// Returns null when `ancestor_level` exceeds the cgroup depth.
+    /// Kernel 6.0+. `KF_ACQUIRE | KF_RCU | KF_RET_NULL` — pair the
+    /// non-null return with [`bpf_cgroup_release`].
+    pub fn bpf_cgroup_ancestor(cgrp: *mut cgroup, ancestor_level: i32) -> *mut cgroup;
+
+    /// Bump the refcount on an existing cgroup pointer so the
+    /// caller can hold it past the lifetime of the original
+    /// reference. Kernel 6.0+. `KF_ACQUIRE | KF_RCU` — every
+    /// successful call must be balanced with
+    /// [`bpf_cgroup_release`].
+    pub fn bpf_cgroup_acquire(cgrp: *mut cgroup) -> *mut cgroup;
+
     /// Read the hardware-stripped VLAN tag for the current XDP frame.
     /// Kernel 6.8. Returns `0` on success, negative errno otherwise.
     pub fn bpf_xdp_metadata_rx_vlan_tag(
@@ -703,7 +727,114 @@ pub mod host_stubs {
         core::ptr::null_mut()
     }
 
-    pub unsafe fn bpf_cgroup_release(_cgrp: *mut cgroup) {}
+    // ── Kernel 6.0/6.5 cgroup resolver host stubs ──
+
+    /// Sentinel pointer returned by every successful cgroup
+    /// acquisition (`from_id`, `ancestor`, `acquire`). Tests only
+    /// observe pointer non-null-ness so the same sentinel covers
+    /// every path.
+    static HOST_CGROUP_SENTINEL: u8 = 0;
+    /// Outstanding (acquired-but-not-released) cgroup refs.
+    pub(super) static HOST_CGROUP_LIVE: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    /// Test injection: when non-zero, the next `bpf_cgroup_from_id`
+    /// call returns null instead of acquiring a ref.
+    static HOST_NEXT_CGROUP_FROM_ID_FAIL: core::sync::atomic::AtomicI32 =
+        core::sync::atomic::AtomicI32::new(0);
+    /// Last `cgroup_id` argument observed by `bpf_cgroup_from_id`.
+    static HOST_LAST_CGROUP_ID: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    /// Test injection: when non-zero, the next `bpf_cgroup_ancestor`
+    /// call returns null.
+    static HOST_NEXT_CGROUP_ANCESTOR_FAIL: core::sync::atomic::AtomicI32 =
+        core::sync::atomic::AtomicI32::new(0);
+    /// Last `ancestor_level` observed by `bpf_cgroup_ancestor`,
+    /// `i32::MIN` when nothing has been recorded.
+    static HOST_LAST_ANCESTOR_LEVEL: core::sync::atomic::AtomicI32 =
+        core::sync::atomic::AtomicI32::new(i32::MIN);
+
+    fn host_cgroup_sentinel_ptr() -> *mut cgroup {
+        let p: *const u8 = &raw const HOST_CGROUP_SENTINEL;
+        p.cast_mut().cast::<cgroup>()
+    }
+
+    /// Test helper: outstanding cgroup ref count after wrapper use.
+    /// Tests assert `0` to prove acquire/release pairing.
+    #[must_use]
+    pub fn host_cgroup_live_count() -> usize {
+        HOST_CGROUP_LIVE.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Test helper: force the next `cgroup_from_id` call to fail.
+    pub fn host_set_next_cgroup_from_id_fail() {
+        HOST_NEXT_CGROUP_FROM_ID_FAIL.store(1, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test helper: force the next `cgroup_ancestor` call to fail.
+    pub fn host_set_next_cgroup_ancestor_fail() {
+        HOST_NEXT_CGROUP_ANCESTOR_FAIL.store(1, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Read the last `cgroup_id` passed to `bpf_cgroup_from_id`.
+    #[must_use]
+    pub fn host_last_cgroup_id() -> u64 {
+        HOST_LAST_CGROUP_ID.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Read the last `ancestor_level` passed to
+    /// `bpf_cgroup_ancestor`, `None` when nothing observed.
+    #[must_use]
+    pub fn host_last_ancestor_level() -> Option<i32> {
+        let v = HOST_LAST_ANCESTOR_LEVEL.load(core::sync::atomic::Ordering::SeqCst);
+        if v == i32::MIN { None } else { Some(v) }
+    }
+
+    /// Reset every cgroup observation atomic.
+    pub fn host_reset_cgroup_state() {
+        HOST_CGROUP_LIVE.store(0, core::sync::atomic::Ordering::SeqCst);
+        HOST_NEXT_CGROUP_FROM_ID_FAIL.store(0, core::sync::atomic::Ordering::SeqCst);
+        HOST_LAST_CGROUP_ID.store(0, core::sync::atomic::Ordering::SeqCst);
+        HOST_NEXT_CGROUP_ANCESTOR_FAIL.store(0, core::sync::atomic::Ordering::SeqCst);
+        HOST_LAST_ANCESTOR_LEVEL.store(i32::MIN, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub unsafe fn bpf_cgroup_from_id(cgroup_id: u64) -> *mut cgroup {
+        HOST_LAST_CGROUP_ID.store(cgroup_id, core::sync::atomic::Ordering::SeqCst);
+        let fail = HOST_NEXT_CGROUP_FROM_ID_FAIL.swap(0, core::sync::atomic::Ordering::SeqCst);
+        if fail != 0 {
+            return core::ptr::null_mut();
+        }
+        HOST_CGROUP_LIVE.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        host_cgroup_sentinel_ptr()
+    }
+
+    pub unsafe fn bpf_cgroup_ancestor(_cgrp: *mut cgroup, ancestor_level: i32) -> *mut cgroup {
+        HOST_LAST_ANCESTOR_LEVEL.store(ancestor_level, core::sync::atomic::Ordering::SeqCst);
+        let fail = HOST_NEXT_CGROUP_ANCESTOR_FAIL.swap(0, core::sync::atomic::Ordering::SeqCst);
+        if fail != 0 {
+            return core::ptr::null_mut();
+        }
+        HOST_CGROUP_LIVE.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        host_cgroup_sentinel_ptr()
+    }
+
+    pub unsafe fn bpf_cgroup_acquire(cgrp: *mut cgroup) -> *mut cgroup {
+        if cgrp.is_null() {
+            return core::ptr::null_mut();
+        }
+        HOST_CGROUP_LIVE.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        host_cgroup_sentinel_ptr()
+    }
+
+    pub unsafe fn bpf_cgroup_release(cgrp: *mut cgroup) {
+        if cgrp.is_null() {
+            return;
+        }
+        let prev = HOST_CGROUP_LIVE.load(core::sync::atomic::Ordering::SeqCst);
+        if prev > 0 {
+            HOST_CGROUP_LIVE.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
 
     /// `-ENOTSUP` hardcoded (95 on Linux) so the host build does not
     /// drag in a `libc` dependency.
@@ -1491,6 +1622,116 @@ where
     #[cfg(not(target_arch = "bpf"))]
     unsafe {
         host_stubs::bpf_cgroup_release(cgrp);
+    }
+    Some(result)
+}
+
+/// Look up a cgroup by 64-bit kernfs id and hand it to `f`. The
+/// reference is released automatically when `f` returns. Returns
+/// `None` when the kernel cannot resolve the id (cgroup pruned,
+/// wrong namespace).
+///
+/// Used by the in-kernel container resolver to skip the
+/// userspace `/proc/<pid>/cgroup` round-trip on the hot packet
+/// path: the eBPF program reads the skb-attached `cgroup_id` and
+/// resolves it to a cgroup pointer here.
+///
+/// # Safety
+/// Must be called from a BPF program context (or test build). The
+/// kernel rejects calls outside an RCU read-side region in newer
+/// kernels — wrap in [`with_rcu_read_lock`] when in doubt.
+#[inline(always)]
+pub unsafe fn with_cgroup_from_id<F, R>(cgroup_id: u64, f: F) -> Option<R>
+where
+    F: FnOnce(*mut cgroup) -> R,
+{
+    #[cfg(target_arch = "bpf")]
+    let cgrp = unsafe { bpf_cgroup_from_id(cgroup_id) };
+    #[cfg(not(target_arch = "bpf"))]
+    let cgrp = unsafe { host_stubs::bpf_cgroup_from_id(cgroup_id) };
+    if cgrp.is_null() {
+        return None;
+    }
+    let result = f(cgrp);
+    #[cfg(target_arch = "bpf")]
+    unsafe {
+        bpf_cgroup_release(cgrp);
+    }
+    #[cfg(not(target_arch = "bpf"))]
+    unsafe {
+        host_stubs::bpf_cgroup_release(cgrp);
+    }
+    Some(result)
+}
+
+/// Walk to the cgroup ancestor at `level` (0 = root) and hand the
+/// pointer to `f`. The acquired ancestor reference is released
+/// automatically when `f` returns. Returns `None` when the cgroup
+/// chain is shallower than `level`.
+///
+/// Used by the tenant-isolation policy to map a leaf container
+/// cgroup to the parent slice that owns it (e.g. matching every
+/// pod under a Kubernetes namespace cgroup).
+///
+/// # Safety
+/// `cgrp` must be a live `*mut cgroup` obtained from another
+/// cgroup kfunc (e.g. [`with_cgroup_from_id`]) or
+/// [`with_task_cgroup1`].
+#[inline(always)]
+pub unsafe fn with_cgroup_ancestor<F, R>(cgrp: *mut cgroup, level: i32, f: F) -> Option<R>
+where
+    F: FnOnce(*mut cgroup) -> R,
+{
+    #[cfg(target_arch = "bpf")]
+    let anc = unsafe { bpf_cgroup_ancestor(cgrp, level) };
+    #[cfg(not(target_arch = "bpf"))]
+    let anc = unsafe { host_stubs::bpf_cgroup_ancestor(cgrp, level) };
+    if anc.is_null() {
+        return None;
+    }
+    let result = f(anc);
+    #[cfg(target_arch = "bpf")]
+    unsafe {
+        bpf_cgroup_release(anc);
+    }
+    #[cfg(not(target_arch = "bpf"))]
+    unsafe {
+        host_stubs::bpf_cgroup_release(anc);
+    }
+    Some(result)
+}
+
+/// Bump the refcount on `cgrp` and pass the freshly-acquired
+/// pointer to `f`. Used when the caller wants to hold the cgroup
+/// past the lifetime of the original (RCU-bound) reference. The
+/// new reference is released automatically when `f` returns.
+///
+/// # Safety
+/// `cgrp` must be a live `*mut cgroup` obtained from another
+/// cgroup kfunc.
+#[inline(always)]
+pub unsafe fn with_cgroup_acquired<F, R>(cgrp: *mut cgroup, f: F) -> Option<R>
+where
+    F: FnOnce(*mut cgroup) -> R,
+{
+    if cgrp.is_null() {
+        return None;
+    }
+    #[cfg(target_arch = "bpf")]
+    let acquired = unsafe { bpf_cgroup_acquire(cgrp) };
+    #[cfg(not(target_arch = "bpf"))]
+    let acquired = unsafe { host_stubs::bpf_cgroup_acquire(cgrp) };
+    if acquired.is_null() {
+        return None;
+    }
+    let result = f(acquired);
+    #[cfg(target_arch = "bpf")]
+    unsafe {
+        bpf_cgroup_release(acquired);
+    }
+    #[cfg(not(target_arch = "bpf"))]
+    unsafe {
+        host_stubs::bpf_cgroup_release(acquired);
     }
     Some(result)
 }
@@ -3153,5 +3394,85 @@ mod tests {
         host_stubs::host_set_next_fou_encap(original.sport, original.dport);
         let echoed = unsafe { skb_get_fou_encap(core::ptr::null_mut()) };
         assert_eq!(echoed, Some(original));
+    }
+
+    // ── Cgroup resolver tests ──────────────────────────────────
+
+    #[test]
+    fn with_cgroup_from_id_success_pairs_acquire_and_release() {
+        host_stubs::host_reset_cgroup_state();
+        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
+        let seen = unsafe { with_cgroup_from_id(0xDEAD_BEEF_CAFE_BABE, |cgrp| !cgrp.is_null()) };
+        assert_eq!(seen, Some(true));
+        assert_eq!(host_stubs::host_last_cgroup_id(), 0xDEAD_BEEF_CAFE_BABE);
+        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
+    }
+
+    #[test]
+    fn with_cgroup_from_id_failure_returns_none() {
+        host_stubs::host_reset_cgroup_state();
+        host_stubs::host_set_next_cgroup_from_id_fail();
+        let seen = unsafe { with_cgroup_from_id(42, |_| ()) };
+        assert!(seen.is_none());
+        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
+    }
+
+    #[test]
+    fn with_cgroup_ancestor_walks_to_requested_level() {
+        host_stubs::host_reset_cgroup_state();
+        let outer = unsafe {
+            with_cgroup_from_id(7, |leaf| {
+                let inner = with_cgroup_ancestor(leaf, 1, |anc| !anc.is_null());
+                assert_eq!(inner, Some(true));
+                assert_eq!(host_stubs::host_last_ancestor_level(), Some(1));
+                // Ancestor was already released inside its closure; only
+                // the outer leaf reference is still live.
+                assert_eq!(host_stubs::host_cgroup_live_count(), 1);
+                inner
+            })
+        };
+        assert_eq!(outer, Some(Some(true)));
+        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
+    }
+
+    #[test]
+    fn with_cgroup_ancestor_failure_returns_none() {
+        host_stubs::host_reset_cgroup_state();
+        host_stubs::host_set_next_cgroup_ancestor_fail();
+        let seen = unsafe { with_cgroup_from_id(1, |leaf| with_cgroup_ancestor(leaf, 99, |_| ())) };
+        // Outer cgroup_from_id succeeded, inner ancestor failed.
+        assert_eq!(seen, Some(None));
+        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
+    }
+
+    #[test]
+    fn with_cgroup_acquired_increments_then_releases() {
+        host_stubs::host_reset_cgroup_state();
+        let outer = unsafe {
+            with_cgroup_from_id(3, |leaf| {
+                assert_eq!(host_stubs::host_cgroup_live_count(), 1);
+                with_cgroup_acquired(leaf, |dup| {
+                    assert!(!dup.is_null());
+                    assert_eq!(host_stubs::host_cgroup_live_count(), 2);
+                })
+            })
+        };
+        assert_eq!(outer, Some(Some(())));
+        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
+    }
+
+    #[test]
+    fn with_cgroup_acquired_rejects_null_input() {
+        host_stubs::host_reset_cgroup_state();
+        let r = unsafe { with_cgroup_acquired(core::ptr::null_mut(), |_| ()) };
+        assert!(r.is_none());
+        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
+    }
+
+    #[test]
+    fn cgroup_release_is_noop_on_null() {
+        host_stubs::host_reset_cgroup_state();
+        unsafe { host_stubs::bpf_cgroup_release(core::ptr::null_mut()) };
+        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
     }
 }
