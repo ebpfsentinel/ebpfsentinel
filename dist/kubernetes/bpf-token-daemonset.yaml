@@ -1,0 +1,101 @@
+# BPF token-delegated DaemonSet — kernel 6.9+ required.
+#
+# The init container mounts a delegated bpffs at /host/sys/fs/bpf/ebpfsentinel,
+# then the main container runs with zero Linux capabilities aside
+# from CAP_NET_RAW for pcap-based manual captures. The agent picks
+# up the delegated mount via agent.bpf_token.bpffs_path and creates
+# a BPF_TOKEN_CREATE fd at startup that scopes its eBPF syscalls.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ebpfsentinel
+  namespace: ebpfsentinel
+  labels:
+    app.kubernetes.io/name: ebpfsentinel
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: security
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ebpfsentinel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ebpfsentinel
+    spec:
+      hostNetwork: true
+      hostPID: true
+      serviceAccountName: ebpfsentinel
+      initContainers:
+        - name: bpf-token-setup
+          image: ebpfsentinel-agent:latest
+          command: ["/usr/local/bin/ebpfsentinel-token-setup.sh"]
+          args: ["/host/sys/fs/bpf/ebpfsentinel"]
+          securityContext:
+            privileged: true   # needed for bpffs mount, dropped for main container
+          volumeMounts:
+            - name: host-bpf
+              mountPath: /host/sys/fs/bpf
+              mountPropagation: Bidirectional
+      containers:
+        - name: agent
+          image: ebpfsentinel-agent:latest
+          args:
+            - --config
+            - /etc/ebpfsentinel/config.yaml
+          securityContext:
+            # No privileged, no CAP_BPF — token takes over.
+            privileged: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_RAW   # pcap capture only
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 2
+              memory: 1Gi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ebpfsentinel
+              readOnly: true
+            - name: host-bpf
+              mountPath: /sys/fs/bpf
+              readOnly: true
+            - name: host-proc
+              mountPath: /host/proc
+              readOnly: true
+          env:
+            - name: EBPF_BPF_TOKEN_PATH
+              value: /sys/fs/bpf/ebpfsentinel
+      volumes:
+        - name: config
+          configMap:
+            name: ebpfsentinel-config
+        - name: host-bpf
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory
+        - name: host-proc
+          hostPath:
+            path: /proc
+            type: Directory
+---
+# Config stanza operators should include in their ConfigMap:
+#
+# data:
+#   config.yaml: |
+#     agent:
+#       interfaces: [eth0]
+#       bpf_token:
+#         enabled: true
+#         bpffs_path: /sys/fs/bpf/ebpfsentinel
+#         fallback_allow_capabilities: false   # strict: refuse to start on pre-6.9 kernels
+#     firewall:
+#       enabled: true

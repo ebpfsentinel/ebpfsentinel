@@ -72,7 +72,7 @@ use ports::secondary::metrics_port::{FirewallMetrics, MetricsPort};
 use ports::secondary::rule_change_store::RuleChangeStore;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use infrastructure::config::{LogFormat, LogLevel};
 
@@ -894,7 +894,44 @@ pub async fn run(
     };
     let ebpf_dir = resolve_ebpf_program_dir(&config);
 
+    // Bootstrap the BPF loading mode (token / capabilities / privileged).
+    // Runs before any program load so the loader can attach the token
+    // fd when one is obtained, and so the Prometheus gauge is set
+    // before eBPF attachment races with the metrics scrape.
+    let bpf_token_cfg = &config.agent.bpf_token;
+    let bpf_policy = adapters::ebpf::BpfTokenPolicy::from_config(
+        bpf_token_cfg.enabled,
+        bpf_token_cfg.bpffs_path.clone(),
+        bpf_token_cfg.fallback_allow_capabilities,
+    );
+    let bpf_handle = if ebpf_capable {
+        match adapters::ebpf::bootstrap_bpf(&bpf_policy) {
+            Ok(h) => {
+                info!(
+                    mode = h.mode.as_str(),
+                    kernel = h.kernel.version_string(),
+                    reason = h.reason,
+                    "BPF loading mode selected"
+                );
+                Some(h)
+            }
+            Err(e) => {
+                error!(error = %e, "BPF token bootstrap failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let bpf_mode = bpf_handle
+        .as_ref()
+        .map_or(adapters::ebpf::BpfLoadingMode::Privileged, |h| h.mode);
+    metrics.set_bpf_loading_mode(bpf_mode.metric_value(), bpf_mode.as_str());
+
     let mut ebpf_state = EbpfState::new();
+    if let Some(handle) = bpf_handle {
+        ebpf_state.attach_bpf_handle(handle);
+    }
     let mut ebpf_map_holder = crate::reload::EbpfMapHolder::new();
     let mut metrics_readers: Vec<MetricsReader> = Vec::new();
     let mut iface_groups_mgr = InterfaceGroupsManager::new();
@@ -2293,6 +2330,10 @@ pub async fn run(
 /// do not persist after a crash. Pinned maps are cleaned up as defense-in-depth.
 pub struct EbpfState {
     pub loaders: Vec<EbpfLoader>,
+    /// BPF token + bpffs fds kept alive for the lifetime of the
+    /// process. Dropping them would invalidate any programs loaded
+    /// through the token.
+    pub bpf_handle: Option<adapters::ebpf::BpfLoadingHandle>,
 }
 
 impl Default for EbpfState {
@@ -2314,11 +2355,16 @@ impl EbpfState {
     pub fn new() -> Self {
         Self {
             loaders: Vec::new(),
+            bpf_handle: None,
         }
     }
 
     pub fn add_loader(&mut self, loader: EbpfLoader) {
         self.loaders.push(loader);
+    }
+
+    pub fn attach_bpf_handle(&mut self, handle: adapters::ebpf::BpfLoadingHandle) {
+        self.bpf_handle = Some(handle);
     }
 }
 

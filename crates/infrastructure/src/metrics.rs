@@ -25,6 +25,11 @@ pub struct ReasonLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct BpfLoadingModeLabels {
+    pub mode: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct ComponentLabels {
     pub component: String,
 }
@@ -144,6 +149,11 @@ pub struct AgentMetrics {
     pub container_resolver_cache_hits_total: Counter,
     pub container_resolver_cache_misses_total: Counter,
     pub container_resolver_errors_total: Counter,
+    /// BPF loading mode chosen at startup:
+    /// `2 = token delegation`, `1 = capabilities`, `0 = privileged`.
+    /// The `mode` label carries the textual value for at-a-glance
+    /// dashboards.
+    pub bpf_token_used: Family<BpfLoadingModeLabels, Gauge>,
 }
 
 impl AgentMetrics {
@@ -483,6 +493,13 @@ impl AgentMetrics {
             container_resolver_errors_total.clone(),
         );
 
+        let bpf_token_used = Family::<BpfLoadingModeLabels, Gauge>::default();
+        registry.register(
+            "bpf_token_used",
+            "Selected BPF loading mode (2=token, 1=capabilities, 0=privileged)",
+            bpf_token_used.clone(),
+        );
+
         Self {
             registry,
             packets_total,
@@ -531,7 +548,17 @@ impl AgentMetrics {
             container_resolver_cache_hits_total,
             container_resolver_cache_misses_total,
             container_resolver_errors_total,
+            bpf_token_used,
         }
+    }
+
+    /// Record the BPF loading mode chosen at startup.
+    pub fn set_bpf_loading_mode(&self, value: i64, mode: &str) {
+        self.bpf_token_used
+            .get_or_create(&BpfLoadingModeLabels {
+                mode: mode.to_string(),
+            })
+            .set(value);
     }
 
     /// Encode all registered metrics to `OpenMetrics` text format.

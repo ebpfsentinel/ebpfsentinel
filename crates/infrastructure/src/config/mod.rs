@@ -1150,6 +1150,57 @@ pub struct AgentInfo {
     /// Set to 1 for single-threaded dispatch. Defaults to 4.
     #[serde(default = "default_event_workers")]
     pub event_workers: usize,
+
+    /// BPF token delegation settings (kernel 6.9+). When enabled, the
+    /// agent creates a token fd via `BPF_TOKEN_CREATE` against a
+    /// delegated bpffs mount and uses it to load programs without
+    /// requiring `CAP_BPF` in the process. On older kernels the block
+    /// is silently ignored and the agent falls back to capability- or
+    /// privilege-based loading.
+    #[serde(default)]
+    pub bpf_token: BpfTokenConfig,
+}
+
+/// BPF token delegation configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BpfTokenConfig {
+    /// When `true` the agent will attempt to create a BPF token at
+    /// startup. The host kernel must be >= 6.9 and the configured
+    /// `bpffs_path` must be a bpffs mount with the `delegate_*` mount
+    /// options set. Defaults to `false` so existing deployments keep
+    /// their current capability-based loading path.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Filesystem path of the delegated bpffs mount. Used as the
+    /// `bpffs_fd` argument of `BPF_TOKEN_CREATE`. Typically
+    /// `/sys/fs/bpf/ebpfsentinel`.
+    #[serde(default = "default_bpf_token_path")]
+    pub bpffs_path: String,
+
+    /// When `true` and token creation fails, the agent falls back to
+    /// capability-based loading (`CAP_BPF` + `CAP_NET_ADMIN`) instead
+    /// of refusing to start. Recommended for staged rollouts.
+    #[serde(default = "default_true")]
+    pub fallback_allow_capabilities: bool,
+}
+
+impl Default for BpfTokenConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bpffs_path: default_bpf_token_path(),
+            fallback_allow_capabilities: true,
+        }
+    }
+}
+
+fn default_bpf_token_path() -> String {
+    "/sys/fs/bpf/ebpfsentinel".into()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// TLS configuration for HTTP and gRPC servers (NFR9).

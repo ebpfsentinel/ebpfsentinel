@@ -25,6 +25,7 @@ pub mod ratelimit_map_manager;
 pub mod tenant_subnet_map_manager;
 pub mod tenant_vlan_map_manager;
 pub mod threatintel_map_manager;
+pub mod token_bootstrap;
 
 pub use bpf_token::{
     BPF_F_TOKEN_FD, BpfTokenError, TokenCreateAttr, create_enterprise_token, create_token,
@@ -56,3 +57,7 @@ pub use ratelimit_map_manager::RateLimitMapManager;
 pub use tenant_subnet_map_manager::TenantSubnetMapManager;
 pub use tenant_vlan_map_manager::TenantVlanMapManager;
 pub use threatintel_map_manager::ThreatIntelMapManager;
+pub use token_bootstrap::{
+    BootstrapError, BpfLoadingHandle, BpfLoadingMode, BpfTokenPolicy, bootstrap as bootstrap_bpf,
+    bootstrap_with_kernel,
+};
