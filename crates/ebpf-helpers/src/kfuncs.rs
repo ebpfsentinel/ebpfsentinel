@@ -1,4 +1,4 @@
-//! Kfunc bindings for kernel 6.7 → 6.9 features used by the eBPF
+//! Kfunc bindings for kernel 5.18 → 6.9 features used by the eBPF
 //! programs.
 //!
 //! aya-ebpf 0.13 has no native kfunc infrastructure (see upstream
@@ -8,21 +8,48 @@
 //!
 //! All declarations follow the kernel BTF signatures:
 //!
-//! | Kfunc | Kernel | BTF signature |
-//! |-------|--------|---------------|
-//! | `bpf_task_get_cgroup1` | 6.8 | `struct cgroup *(*)(struct task_struct *task, int hierarchy_id) __ksym;` |
-//! | `bpf_cgroup_release`   | 6.5 | `void(*)(struct cgroup *cgrp) __ksym;` |
-//! | `bpf_cgroup_from_id`   | 6.5 | `struct cgroup *(*)(u64 cgroup_id) __ksym;` |
-//! | `bpf_cgroup_ancestor`  | 6.0 | `struct cgroup *(*)(struct cgroup *cgrp, int ancestor_level) __ksym;` |
-//! | `bpf_cgroup_acquire`   | 6.0 | `struct cgroup *(*)(struct cgroup *cgrp) __ksym;` |
-//! | `bpf_xdp_metadata_rx_vlan_tag` | 6.8 | `int(*)(const struct xdp_md *ctx, __be16 *vlan_proto, u16 *vlan_tci) __ksym;` |
-//! | `bpf_xdp_get_xfrm_state`       | 6.8 | `struct xfrm_state *(*)(struct xdp_md *ctx, struct bpf_xfrm_state_opts *opts, u32 opts__sz) __ksym;` |
-//! | `bpf_xdp_xfrm_state_release`   | 6.8 | `void(*)(struct xfrm_state *x) __ksym;` |
-//! | `bpf_skb_get_xfrm_info`        | 6.2 | `int(*)(struct __sk_buff *skb, struct bpf_xfrm_info *to) __ksym;` |
-//! | `bpf_skb_set_xfrm_info`        | 6.2 | `int(*)(struct __sk_buff *skb, const struct bpf_xfrm_info *from) __ksym;` |
-//! | `bpf_skb_get_fou_encap`        | 6.4 | `int(*)(struct __sk_buff *skb, struct bpf_fou_encap *encap) __ksym;` |
-//! | `bpf_skb_set_fou_encap`        | 6.4 | `int(*)(struct __sk_buff *skb, struct bpf_fou_encap *encap, int type) __ksym;` |
-//! | `bpf_iter_css_task_new` / `_next` / `_destroy` | 6.7 | `int(*)(struct bpf_iter_css_task *it, struct cgroup_subsys_state *css, unsigned int flags) __ksym;` … |
+//! | Kfunc                                          | Kernel | BTF signature                                                                                                                                    |
+//! |------------------------------------------------|--------|--------------------------------------------------------------------------------------------------------------------------------------------------|
+//! | `bpf_skb_ct_lookup`                            | 5.18   | `struct nf_conn *(*)(struct __sk_buff *skb, struct bpf_sock_tuple *tuple, u32 tuple__sz, struct bpf_ct_opts *opts, u32 opts__sz) __ksym;`        |
+//! | `bpf_xdp_ct_lookup`                            | 5.18   | `struct nf_conn *(*)(struct xdp_md *xdp, struct bpf_sock_tuple *tuple, u32 tuple__sz, struct bpf_ct_opts *opts, u32 opts__sz) __ksym;`           |
+//! | `bpf_ct_release`                               | 5.18   | `void(*)(struct nf_conn *nfct) __ksym;`                                                                                                          |
+//! | `bpf_skb_ct_alloc`                             | 6.0    | `struct nf_conn___init *(*)(struct __sk_buff *skb, struct bpf_sock_tuple *tuple, u32 tuple__sz, struct bpf_ct_opts *opts, u32 opts__sz) __ksym;` |
+//! | `bpf_xdp_ct_alloc`                             | 6.0    | `struct nf_conn___init *(*)(struct xdp_md *xdp, struct bpf_sock_tuple *tuple, u32 tuple__sz, struct bpf_ct_opts *opts, u32 opts__sz) __ksym;`    |
+//! | `bpf_ct_insert_entry`                          | 6.0    | `struct nf_conn *(*)(struct nf_conn___init *nfct_i) __ksym;`                                                                                     |
+//! | `bpf_ct_set_timeout`                           | 6.0    | `void(*)(struct nf_conn___init *nfct_i, u32 timeout) __ksym;`                                                                                    |
+//! | `bpf_ct_change_timeout`                        | 6.0    | `int(*)(struct nf_conn *nfct, u32 timeout) __ksym;`                                                                                              |
+//! | `bpf_ct_set_status`                            | 6.0    | `int(*)(const struct nf_conn___init *nfct_i, u32 status) __ksym;`                                                                                |
+//! | `bpf_ct_change_status`                         | 6.0    | `int(*)(struct nf_conn *nfct, u32 status) __ksym;`                                                                                               |
+//! | `bpf_ct_set_nat_info`                          | 6.1    | `int(*)(struct nf_conn___init *nfct_i, union nf_inet_addr *addr, int port, enum nf_nat_manip_type manip) __ksym;`                                |
+//! | `bpf_cgroup_ancestor`                          | 6.0    | `struct cgroup *(*)(struct cgroup *cgrp, int ancestor_level) __ksym;`                                                                            |
+//! | `bpf_cgroup_acquire`                           | 6.0    | `struct cgroup *(*)(struct cgroup *cgrp) __ksym;`                                                                                                |
+//! | `bpf_task_under_cgroup`                        | 6.1    | `long(*)(struct task_struct *task, struct cgroup *ancestor) __ksym;`                                                                             |
+//! | `bpf_rcu_read_lock`                            | 6.2    | `void(*)(void) __ksym;`                                                                                                                          |
+//! | `bpf_rcu_read_unlock`                          | 6.2    | `void(*)(void) __ksym;`                                                                                                                          |
+//! | `bpf_rdonly_cast`                              | 6.2    | `void *(*)(const void *obj__ign, u32 btf_id__k) __ksym;`                                                                                         |
+//! | `bpf_cast_to_kern_ctx`                         | 6.2    | `void *(*)(void *obj) __ksym;`                                                                                                                   |
+//! | `bpf_skb_get_xfrm_info`                        | 6.2    | `int(*)(struct __sk_buff *skb, struct bpf_xfrm_info *to) __ksym;`                                                                                |
+//! | `bpf_skb_set_xfrm_info`                        | 6.2    | `int(*)(struct __sk_buff *skb, const struct bpf_xfrm_info *from) __ksym;`                                                                        |
+//! | `bpf_xdp_metadata_rx_hash`                     | 6.3    | `int(*)(const struct xdp_md *ctx, u32 *hash, u32 *rss_type) __ksym;`                                                                             |
+//! | `bpf_xdp_metadata_rx_timestamp`                | 6.3    | `int(*)(const struct xdp_md *ctx, u64 *timestamp) __ksym;`                                                                                       |
+//! | `bpf_dynptr_from_skb`                          | 6.4    | `int(*)(struct __sk_buff *skb, u64 flags, struct bpf_dynptr *ptr__uninit) __ksym;`                                                               |
+//! | `bpf_dynptr_from_xdp`                          | 6.4    | `int(*)(struct xdp_md *xdp, u64 flags, struct bpf_dynptr *ptr__uninit) __ksym;`                                                                  |
+//! | `bpf_dynptr_slice`                             | 6.4    | `void *(*)(const struct bpf_dynptr *p, u32 offset, void *buffer__opt, u32 buffer__szk) __ksym;`                                                  |
+//! | `bpf_dynptr_slice_rdwr`                        | 6.4    | `void *(*)(const struct bpf_dynptr *p, u32 offset, void *buffer__opt, u32 buffer__szk) __ksym;`                                                  |
+//! | `bpf_skb_get_fou_encap`                        | 6.4    | `int(*)(struct __sk_buff *skb, struct bpf_fou_encap *encap) __ksym;`                                                                             |
+//! | `bpf_skb_set_fou_encap`                        | 6.4    | `int(*)(struct __sk_buff *skb, struct bpf_fou_encap *encap, int type) __ksym;`                                                                   |
+//! | `bpf_dynptr_adjust`                            | 6.5    | `int(*)(const struct bpf_dynptr *p, u32 start, u32 end) __ksym;`                                                                                 |
+//! | `bpf_dynptr_size`                              | 6.5    | `u32(*)(const struct bpf_dynptr *p) __ksym;`                                                                                                     |
+//! | `bpf_dynptr_is_null`                           | 6.5    | `bool(*)(const struct bpf_dynptr *p) __ksym;`                                                                                                    |
+//! | `bpf_dynptr_clone`                             | 6.5    | `int(*)(const struct bpf_dynptr *src, struct bpf_dynptr *clone__uninit) __ksym;`                                                                 |
+//! | `bpf_cgroup_release`                           | 6.5    | `void(*)(struct cgroup *cgrp) __ksym;`                                                                                                           |
+//! | `bpf_cgroup_from_id`                           | 6.5    | `struct cgroup *(*)(u64 cgroup_id) __ksym;`                                                                                                      |
+//! | `bpf_iter_css_task_new` / `_next` / `_destroy` | 6.7    | `int(*)(struct bpf_iter_css_task *it, struct cgroup_subsys_state *css, unsigned int flags) __ksym;`                                              |
+//! | `bpf_iter_css_new` / `_next` / `_destroy`      | 6.7    | `int(*)(struct bpf_iter_css *it, struct cgroup_subsys_state *start, unsigned int flags) __ksym;`                                                 |
+//! | `bpf_task_get_cgroup1`                         | 6.8    | `struct cgroup *(*)(struct task_struct *task, int hierarchy_id) __ksym;`                                                                         |
+//! | `bpf_xdp_metadata_rx_vlan_tag`                 | 6.8    | `int(*)(const struct xdp_md *ctx, __be16 *vlan_proto, u16 *vlan_tci) __ksym;`                                                                    |
+//! | `bpf_xdp_get_xfrm_state`                       | 6.8    | `struct xfrm_state *(*)(struct xdp_md *ctx, struct bpf_xfrm_state_opts *opts, u32 opts__sz) __ksym;`                                             |
+//! | `bpf_xdp_xfrm_state_release`                   | 6.8    | `void(*)(struct xfrm_state *x) __ksym;`                                                                                                          |
 //!
 //! Kfuncs annotated with `KF_ACQUIRE | KF_RET_NULL` (notably
 //! `bpf_task_get_cgroup1` and `bpf_xdp_get_xfrm_state`) must pair
@@ -420,6 +447,13 @@ unsafe extern "C" {
     /// successful call must be balanced with
     /// [`bpf_cgroup_release`].
     pub fn bpf_cgroup_acquire(cgrp: *mut cgroup) -> *mut cgroup;
+
+    /// Test whether `task` is a descendant of `ancestor` in the
+    /// cgroup tree. Kernel 6.1+. Returns `1` when `task` lives
+    /// under `ancestor` (or equals it), `0` otherwise. `KF_RCU` on
+    /// both arguments — must be called inside an RCU read-side
+    /// critical section opened by [`bpf_rcu_read_lock`].
+    pub fn bpf_task_under_cgroup(task: *mut task_struct, ancestor: *mut cgroup) -> i64;
 
     /// Read the hardware-stripped VLAN tag for the current XDP frame.
     /// Kernel 6.8. Returns `0` on success, negative errno otherwise.
@@ -834,6 +868,44 @@ pub mod host_stubs {
         if prev > 0 {
             HOST_CGROUP_LIVE.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
         }
+    }
+
+    /// Test injection: when set, the next `bpf_task_under_cgroup`
+    /// call returns this value. `0` = not under cgroup, `1` = is
+    /// under cgroup.
+    static HOST_NEXT_TASK_UNDER_CGROUP: core::sync::atomic::AtomicI64 =
+        core::sync::atomic::AtomicI64::new(0);
+    /// Sticky flag tracking whether the last `task_under_cgroup`
+    /// call was actually invoked. Tests assert this to prove the
+    /// safe wrapper actually delegates to the kfunc rather than
+    /// short-circuiting on null pointers.
+    static HOST_TASK_UNDER_CGROUP_INVOKED: core::sync::atomic::AtomicI32 =
+        core::sync::atomic::AtomicI32::new(0);
+
+    /// Test helper: queue the verdict (0 or 1) returned by the next
+    /// `bpf_task_under_cgroup` call. Persists across consecutive
+    /// calls until rewritten or reset.
+    pub fn host_set_next_task_under_cgroup(verdict: i64) {
+        HOST_NEXT_TASK_UNDER_CGROUP.store(verdict, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test helper: did the last `task_under_cgroup` wrapper call
+    /// actually reach the kfunc? Reset on read.
+    #[must_use]
+    pub fn host_take_task_under_cgroup_invoked() -> bool {
+        HOST_TASK_UNDER_CGROUP_INVOKED.swap(0, core::sync::atomic::Ordering::SeqCst) != 0
+    }
+
+    /// Reset the `task_under_cgroup` injection state so consecutive
+    /// tests do not bleed.
+    pub fn host_reset_task_under_cgroup_state() {
+        HOST_NEXT_TASK_UNDER_CGROUP.store(0, core::sync::atomic::Ordering::SeqCst);
+        HOST_TASK_UNDER_CGROUP_INVOKED.store(0, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub unsafe fn bpf_task_under_cgroup(_task: *mut task_struct, _ancestor: *mut cgroup) -> i64 {
+        HOST_TASK_UNDER_CGROUP_INVOKED.store(1, core::sync::atomic::Ordering::SeqCst);
+        HOST_NEXT_TASK_UNDER_CGROUP.load(core::sync::atomic::Ordering::SeqCst)
     }
 
     /// `-ENOTSUP` hardcoded (95 on Linux) so the host build does not
@@ -1734,6 +1806,45 @@ where
         host_stubs::bpf_cgroup_release(acquired);
     }
     Some(result)
+}
+
+/// Test whether `task` is a descendant of `ancestor` in the
+/// cgroup tree. Returns `true` when the task lives in (or equals)
+/// the `ancestor` cgroup. The kfunc requires both arguments to be
+/// RCU-protected, so this wrapper opens an RCU read-side critical
+/// section internally — the caller does not need to wrap it in
+/// [`with_rcu_read_lock`].
+///
+/// Used by the per-tenant eBPF enforcement path: an L7 policy
+/// program looks up the destination task's container cgroup
+/// (via [`with_cgroup_from_id`]) and then asks whether the
+/// current `bpf_get_current_task_btf()` belongs to the same
+/// tenant slice without ever leaving kernel space.
+///
+/// Returns `false` when either pointer is null instead of
+/// invoking the kfunc — keeps the verifier happy on cgroup
+/// resolution misses.
+///
+/// # Safety
+/// `task` must be a valid `*mut task_struct` obtained from
+/// `bpf_get_current_task_btf()` (kernel 5.11+) or a similar
+/// helper. `ancestor` must be a live `*mut cgroup` from another
+/// cgroup kfunc.
+#[inline(always)]
+#[must_use]
+pub unsafe fn task_under_cgroup(task: *mut task_struct, ancestor: *mut cgroup) -> bool {
+    if task.is_null() || ancestor.is_null() {
+        return false;
+    }
+    unsafe {
+        with_rcu_read_lock(|| {
+            #[cfg(target_arch = "bpf")]
+            let v = bpf_task_under_cgroup(task, ancestor);
+            #[cfg(not(target_arch = "bpf"))]
+            let v = host_stubs::bpf_task_under_cgroup(task, ancestor);
+            v != 0
+        })
+    }
 }
 
 /// Read the hardware-offloaded VLAN tag for the current XDP frame.
@@ -3473,6 +3584,73 @@ mod tests {
     fn cgroup_release_is_noop_on_null() {
         host_stubs::host_reset_cgroup_state();
         unsafe { host_stubs::bpf_cgroup_release(core::ptr::null_mut()) };
+        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
+    }
+
+    // ── task_under_cgroup tests ───────────────────────────────
+
+    #[test]
+    fn task_under_cgroup_returns_false_on_null_task() {
+        host_stubs::host_reset_task_under_cgroup_state();
+        host_stubs::host_set_next_task_under_cgroup(1);
+        let mut ancestor_storage: u8 = 0;
+        let ancestor: *mut cgroup = (&raw mut ancestor_storage).cast();
+        let r = unsafe { task_under_cgroup(core::ptr::null_mut(), ancestor) };
+        assert!(!r);
+        // Wrapper must short-circuit: kfunc never invoked.
+        assert!(!host_stubs::host_take_task_under_cgroup_invoked());
+    }
+
+    #[test]
+    fn task_under_cgroup_returns_false_on_null_ancestor() {
+        host_stubs::host_reset_task_under_cgroup_state();
+        host_stubs::host_set_next_task_under_cgroup(1);
+        let mut task_storage: u8 = 0;
+        let task: *mut task_struct = (&raw mut task_storage).cast();
+        let r = unsafe { task_under_cgroup(task, core::ptr::null_mut()) };
+        assert!(!r);
+        assert!(!host_stubs::host_take_task_under_cgroup_invoked());
+    }
+
+    #[test]
+    fn task_under_cgroup_returns_true_when_kfunc_reports_one() {
+        host_stubs::host_reset_task_under_cgroup_state();
+        host_stubs::host_set_next_task_under_cgroup(1);
+        let mut task_storage: u8 = 0;
+        let mut ancestor_storage: u8 = 0;
+        let task: *mut task_struct = (&raw mut task_storage).cast();
+        let ancestor: *mut cgroup = (&raw mut ancestor_storage).cast();
+        let r = unsafe { task_under_cgroup(task, ancestor) };
+        assert!(r);
+        assert!(host_stubs::host_take_task_under_cgroup_invoked());
+    }
+
+    #[test]
+    fn task_under_cgroup_returns_false_when_kfunc_reports_zero() {
+        host_stubs::host_reset_task_under_cgroup_state();
+        host_stubs::host_set_next_task_under_cgroup(0);
+        let mut task_storage: u8 = 0;
+        let mut ancestor_storage: u8 = 0;
+        let task: *mut task_struct = (&raw mut task_storage).cast();
+        let ancestor: *mut cgroup = (&raw mut ancestor_storage).cast();
+        let r = unsafe { task_under_cgroup(task, ancestor) };
+        assert!(!r);
+        assert!(host_stubs::host_take_task_under_cgroup_invoked());
+    }
+
+    #[test]
+    fn task_under_cgroup_composes_with_cgroup_from_id() {
+        // End-to-end: resolve cgroup by id, then test current task
+        // membership. Mirrors the per-tenant L7 enforcement path.
+        host_stubs::host_reset_cgroup_state();
+        host_stubs::host_reset_task_under_cgroup_state();
+        host_stubs::host_set_next_task_under_cgroup(1);
+        let mut task_storage: u8 = 0;
+        let task: *mut task_struct = (&raw mut task_storage).cast();
+        let allowed =
+            unsafe { with_cgroup_from_id(0xCAFE, |slice| task_under_cgroup(task, slice)) };
+        assert_eq!(allowed, Some(true));
+        assert!(host_stubs::host_take_task_under_cgroup_invoked());
         assert_eq!(host_stubs::host_cgroup_live_count(), 0);
     }
 }
