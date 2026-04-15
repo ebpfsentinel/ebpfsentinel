@@ -97,6 +97,58 @@ pub struct nf_conn {
     _unused: [u8; 0],
 }
 
+/// Opaque kernel `struct nf_conn___init` — refcount-tagged
+/// subtype returned by the `bpf_{skb,xdp}_ct_alloc` kfuncs, kernel
+/// 6.0+. The verifier distinguishes it from [`nf_conn`] by BTF type
+/// id so that only "not yet inserted" objects can be configured
+/// with `bpf_ct_set_*` helpers. `bpf_ct_release` accepts both — the
+/// safe wrapper's [`CtBuilder::drop`] relies on that to release
+/// un-inserted builders.
+#[repr(C)]
+pub struct nf_conn_init {
+    _unused: [u8; 0],
+}
+
+/// `union nf_inet_addr` — 16 bytes, matches both IPv4 `__be32`
+/// inside the `ip` arm and IPv6 `__be32[4]` inside the `ip6` arm.
+/// We expose a single `[u32; 4]` field and let the helpers below
+/// pick the right arm based on the caller's intent.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NfInetAddr {
+    pub addr: [u32; 4],
+}
+
+impl NfInetAddr {
+    /// Build an IPv4-tagged union from a `__be32` address. The
+    /// other three words are zeroed so the kernel never reads
+    /// uninitialised memory.
+    #[must_use]
+    pub const fn v4(addr_be: u32) -> Self {
+        Self {
+            addr: [addr_be, 0, 0, 0],
+        }
+    }
+
+    /// Build an IPv6-tagged union from four `__be32` words.
+    #[must_use]
+    pub const fn v6(addr_be: [u32; 4]) -> Self {
+        Self { addr: addr_be }
+    }
+}
+
+/// `enum nf_nat_manip_type` — selects whether the NAT rewrite
+/// applies to the source tuple or the destination tuple.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NfNatManipType {
+    /// `NF_NAT_MANIP_SRC` — SNAT, rewrite source address + port.
+    Src = 0,
+    /// `NF_NAT_MANIP_DST` — DNAT, rewrite destination address +
+    /// port.
+    Dst = 1,
+}
+
 /// `bpf_sock_tuple` flavour — picks which union arm the caller
 /// populated. The kernel consults `tuple__sz` to pick the arm at
 /// runtime, but the type-safety of the Rust wrapper uses this enum
@@ -406,8 +458,68 @@ unsafe extern "C" {
 
     /// Release an `nf_conn*` acquired from `bpf_skb_ct_lookup`,
     /// `bpf_xdp_ct_lookup`, or one of the `_alloc` / `insert_entry`
-    /// kfuncs. `KF_RELEASE`.
+    /// kfuncs. `KF_RELEASE`. Also accepts `nf_conn___init*` from
+    /// the alloc kfuncs — the refcount layout is shared.
     pub fn bpf_ct_release(nfct: *mut nf_conn);
+
+    // ── Kernel 6.0/6.1 conntrack allocate + NAT delegation ─────
+    //
+    // Alloc returns an `nf_conn___init*` tagged by BTF as
+    // "allocated but not yet inserted". The caller configures it
+    // via `bpf_ct_set_timeout/set_status/set_nat_info`, then either
+    // commits it with `bpf_ct_insert_entry` (which transfers
+    // ownership to a live `nf_conn*`) or drops it via
+    // `bpf_ct_release`.
+
+    /// Allocate a new conntrack entry for the skb tuple. Kernel
+    /// 6.0. Returns `null` on failure, with `opts.error` set.
+    pub fn bpf_skb_ct_alloc(
+        skb: *mut core::ffi::c_void,
+        tuple: *mut core::ffi::c_void,
+        tuple_sz: u32,
+        opts: *mut BpfCtOpts,
+        opts_sz: u32,
+    ) -> *mut nf_conn_init;
+
+    /// XDP variant of [`bpf_skb_ct_alloc`]. Kernel 6.0.
+    pub fn bpf_xdp_ct_alloc(
+        xdp: *mut core::ffi::c_void,
+        tuple: *mut core::ffi::c_void,
+        tuple_sz: u32,
+        opts: *mut BpfCtOpts,
+        opts_sz: u32,
+    ) -> *mut nf_conn_init;
+
+    /// Commit an allocated `nf_conn___init` into the kernel
+    /// conntrack table. Consumes the `___init` reference and
+    /// returns a live `nf_conn*` on success (still KF_ACQUIRE —
+    /// must be released by the caller). Kernel 6.0.
+    pub fn bpf_ct_insert_entry(nfct_i: *mut nf_conn_init) -> *mut nf_conn;
+
+    /// Set the initial timeout (seconds) for an allocated
+    /// conntrack entry. Kernel 6.0.
+    pub fn bpf_ct_set_timeout(nfct_i: *mut nf_conn_init, timeout: u32);
+
+    /// Update the timeout on an already-inserted conntrack entry.
+    /// Kernel 6.0.
+    pub fn bpf_ct_change_timeout(nfct: *mut nf_conn, timeout: u32) -> i32;
+
+    /// Set the initial status bitmask (`IPS_*`) on an allocated
+    /// conntrack entry. Kernel 6.0.
+    pub fn bpf_ct_set_status(nfct_i: *const nf_conn_init, status: u32) -> i32;
+
+    /// Update the status bitmask on an already-inserted conntrack
+    /// entry. Kernel 6.0.
+    pub fn bpf_ct_change_status(nfct: *mut nf_conn, status: u32) -> i32;
+
+    /// Configure the NAT rewrite info on an allocated conntrack
+    /// entry before it is inserted. Kernel 6.1.
+    pub fn bpf_ct_set_nat_info(
+        nfct_i: *mut nf_conn_init,
+        addr: *mut NfInetAddr,
+        port: i32,
+        manip: i32,
+    ) -> i32;
 }
 
 // ── Host-target stubs ────────────────────────────────────────────
@@ -715,6 +827,205 @@ pub mod host_stubs {
 
     pub unsafe fn bpf_ct_release(_nfct: *mut nf_conn) {
         HOST_CT_LIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    // ── CT allocate + NAT delegation stubs (kernel 6.0/6.1) ──
+
+    use super::{NfInetAddr, NfNatManipType, nf_conn_init};
+
+    /// Sentinel for allocated ___init refs, distinct from the
+    /// lookup sentinel so tests can observe which side is live.
+    static HOST_NF_CONN_INIT_SENTINEL: u8 = 0;
+    /// Count of outstanding `nf_conn___init` refs (builders that
+    /// have not been inserted or dropped yet).
+    static HOST_CT_INIT_LIVE: AtomicUsize = AtomicUsize::new(0);
+    /// Injected alloc error. Non-zero → next alloc returns null
+    /// and writes the error code to `opts.error`.
+    static HOST_CT_ALLOC_ERROR: AtomicI32 = AtomicI32::new(0);
+    /// Injected insert error. Non-zero → insert returns null.
+    static HOST_CT_INSERT_ERROR: AtomicI32 = AtomicI32::new(0);
+    /// Last observed NAT set: (manip_type_as_i32, port, addr[0]).
+    static HOST_LAST_NAT_MANIP: AtomicI32 = AtomicI32::new(-1);
+    static HOST_LAST_NAT_PORT: AtomicI32 = AtomicI32::new(-1);
+    static HOST_LAST_NAT_ADDR0: AtomicI32 = AtomicI32::new(0);
+    /// Last observed timeout written to an `___init` entry.
+    static HOST_LAST_INIT_TIMEOUT: AtomicI32 = AtomicI32::new(-1);
+    /// Last observed status bitmask written to an `___init`
+    /// entry.
+    static HOST_LAST_INIT_STATUS: AtomicI32 = AtomicI32::new(-1);
+    /// Last observed timeout on a live entry (change_timeout).
+    static HOST_LAST_LIVE_TIMEOUT: AtomicI32 = AtomicI32::new(-1);
+    /// Last observed status on a live entry (change_status).
+    static HOST_LAST_LIVE_STATUS: AtomicI32 = AtomicI32::new(-1);
+
+    pub fn host_set_next_ct_alloc_error(errno: i32) {
+        HOST_CT_ALLOC_ERROR.store(errno, Ordering::SeqCst);
+    }
+
+    pub fn host_set_next_ct_insert_error(errno: i32) {
+        HOST_CT_INSERT_ERROR.store(errno, Ordering::SeqCst);
+    }
+
+    #[must_use]
+    pub fn host_ct_init_live_count() -> usize {
+        HOST_CT_INIT_LIVE.load(Ordering::SeqCst)
+    }
+
+    #[must_use]
+    pub fn host_last_nat_manip() -> Option<NfNatManipType> {
+        match HOST_LAST_NAT_MANIP.load(Ordering::SeqCst) {
+            0 => Some(NfNatManipType::Src),
+            1 => Some(NfNatManipType::Dst),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn host_last_nat_port() -> Option<i32> {
+        let v = HOST_LAST_NAT_PORT.load(Ordering::SeqCst);
+        if v < 0 { None } else { Some(v) }
+    }
+
+    #[must_use]
+    pub fn host_last_nat_addr0() -> u32 {
+        HOST_LAST_NAT_ADDR0.load(Ordering::SeqCst) as u32
+    }
+
+    #[must_use]
+    pub fn host_last_init_timeout() -> Option<u32> {
+        let v = HOST_LAST_INIT_TIMEOUT.load(Ordering::SeqCst);
+        if v < 0 { None } else { Some(v as u32) }
+    }
+
+    #[must_use]
+    pub fn host_last_init_status() -> Option<u32> {
+        let v = HOST_LAST_INIT_STATUS.load(Ordering::SeqCst);
+        if v < 0 { None } else { Some(v as u32) }
+    }
+
+    #[must_use]
+    pub fn host_last_live_timeout() -> Option<u32> {
+        let v = HOST_LAST_LIVE_TIMEOUT.load(Ordering::SeqCst);
+        if v < 0 { None } else { Some(v as u32) }
+    }
+
+    #[must_use]
+    pub fn host_last_live_status() -> Option<u32> {
+        let v = HOST_LAST_LIVE_STATUS.load(Ordering::SeqCst);
+        if v < 0 { None } else { Some(v as u32) }
+    }
+
+    /// Reset every host-side observation counter so consecutive
+    /// tests do not bleed into each other.
+    pub fn host_reset_ct_state() {
+        HOST_CT_LIVE.store(0, Ordering::SeqCst);
+        HOST_CT_INIT_LIVE.store(0, Ordering::SeqCst);
+        HOST_CT_NEXT_ERROR.store(0, Ordering::SeqCst);
+        HOST_CT_ALLOC_ERROR.store(0, Ordering::SeqCst);
+        HOST_CT_INSERT_ERROR.store(0, Ordering::SeqCst);
+        HOST_LAST_NAT_MANIP.store(-1, Ordering::SeqCst);
+        HOST_LAST_NAT_PORT.store(-1, Ordering::SeqCst);
+        HOST_LAST_NAT_ADDR0.store(0, Ordering::SeqCst);
+        HOST_LAST_INIT_TIMEOUT.store(-1, Ordering::SeqCst);
+        HOST_LAST_INIT_STATUS.store(-1, Ordering::SeqCst);
+        HOST_LAST_LIVE_TIMEOUT.store(-1, Ordering::SeqCst);
+        HOST_LAST_LIVE_STATUS.store(-1, Ordering::SeqCst);
+    }
+
+    unsafe fn host_ct_alloc_impl(opts: *mut BpfCtOpts) -> *mut nf_conn_init {
+        let err = HOST_CT_ALLOC_ERROR.swap(0, Ordering::SeqCst);
+        if err != 0 {
+            if !opts.is_null() {
+                unsafe { (*opts).error = err };
+            }
+            return core::ptr::null_mut();
+        }
+        HOST_CT_INIT_LIVE.fetch_add(1, Ordering::SeqCst);
+        let sentinel: *const u8 = &raw const HOST_NF_CONN_INIT_SENTINEL;
+        sentinel.cast_mut().cast::<nf_conn_init>()
+    }
+
+    pub unsafe fn bpf_skb_ct_alloc(
+        _skb: *mut core::ffi::c_void,
+        _tuple: *mut core::ffi::c_void,
+        _tuple_sz: u32,
+        opts: *mut BpfCtOpts,
+        _opts_sz: u32,
+    ) -> *mut nf_conn_init {
+        unsafe { host_ct_alloc_impl(opts) }
+    }
+
+    pub unsafe fn bpf_xdp_ct_alloc(
+        _xdp: *mut core::ffi::c_void,
+        _tuple: *mut core::ffi::c_void,
+        _tuple_sz: u32,
+        opts: *mut BpfCtOpts,
+        _opts_sz: u32,
+    ) -> *mut nf_conn_init {
+        unsafe { host_ct_alloc_impl(opts) }
+    }
+
+    pub unsafe fn bpf_ct_insert_entry(_nfct_i: *mut nf_conn_init) -> *mut nf_conn {
+        let err = HOST_CT_INSERT_ERROR.swap(0, Ordering::SeqCst);
+        if err != 0 {
+            // insert kept the ___init alive (insert failed), but
+            // kernel semantics say insert consumes the ___init
+            // even on failure. Model that here.
+            HOST_CT_INIT_LIVE.fetch_sub(1, Ordering::SeqCst);
+            return core::ptr::null_mut();
+        }
+        // Transfer: drop one ___init ref, spawn one live nf_conn.
+        HOST_CT_INIT_LIVE.fetch_sub(1, Ordering::SeqCst);
+        HOST_CT_LIVE.fetch_add(1, Ordering::SeqCst);
+        let sentinel: *const u8 = &raw const HOST_NF_CONN_SENTINEL;
+        sentinel.cast_mut().cast::<nf_conn>()
+    }
+
+    pub unsafe fn bpf_ct_set_timeout(_nfct_i: *mut nf_conn_init, timeout: u32) {
+        #[allow(clippy::cast_possible_wrap)]
+        HOST_LAST_INIT_TIMEOUT.store(timeout as i32, Ordering::SeqCst);
+    }
+
+    pub unsafe fn bpf_ct_change_timeout(_nfct: *mut nf_conn, timeout: u32) -> i32 {
+        #[allow(clippy::cast_possible_wrap)]
+        HOST_LAST_LIVE_TIMEOUT.store(timeout as i32, Ordering::SeqCst);
+        0
+    }
+
+    pub unsafe fn bpf_ct_set_status(_nfct_i: *const nf_conn_init, status: u32) -> i32 {
+        #[allow(clippy::cast_possible_wrap)]
+        HOST_LAST_INIT_STATUS.store(status as i32, Ordering::SeqCst);
+        0
+    }
+
+    pub unsafe fn bpf_ct_change_status(_nfct: *mut nf_conn, status: u32) -> i32 {
+        #[allow(clippy::cast_possible_wrap)]
+        HOST_LAST_LIVE_STATUS.store(status as i32, Ordering::SeqCst);
+        0
+    }
+
+    pub unsafe fn bpf_ct_set_nat_info(
+        _nfct_i: *mut nf_conn_init,
+        addr: *mut NfInetAddr,
+        port: i32,
+        manip: i32,
+    ) -> i32 {
+        HOST_LAST_NAT_MANIP.store(manip, Ordering::SeqCst);
+        HOST_LAST_NAT_PORT.store(port, Ordering::SeqCst);
+        if !addr.is_null() {
+            #[allow(clippy::cast_possible_wrap)]
+            HOST_LAST_NAT_ADDR0.store(unsafe { (*addr).addr[0] as i32 }, Ordering::SeqCst);
+        }
+        0
+    }
+
+    /// Host-only helper: release an un-inserted `nf_conn___init`.
+    /// The real kernel uses `bpf_ct_release` for both subtypes, but
+    /// the host stub bookkeeping separates the two counters for
+    /// test assertions so the builder `Drop` routes through this
+    /// when it never called `insert_entry`.
+    pub unsafe fn host_release_ct_init(_ptr: *mut nf_conn_init) {
+        HOST_CT_INIT_LIVE.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -1318,6 +1629,230 @@ where
     Some(result)
 }
 
+// ── Conntrack allocate / NAT delegation safe wrappers ─────────
+//
+// `CtBuilder` owns a `*mut nf_conn___init` acquired from one of
+// the `_alloc` kfuncs. Methods configure timeout, status, and NAT
+// rewrite info. Dropping the builder without calling `insert` or
+// `release` releases the `___init` entry via `bpf_ct_release`,
+// which the kernel accepts on both subtypes. Calling `insert`
+// consumes the builder and returns a live `*mut nf_conn` on
+// success — the caller takes over the release duty and usually
+// runs it through one of the `ct_change_*` helpers before calling
+// [`ct_release`].
+
+/// Builder holding a freshly allocated `nf_conn___init` reference.
+pub struct CtBuilder {
+    inner: *mut nf_conn_init,
+}
+
+impl CtBuilder {
+    /// Allocate a new conntrack entry from a TC skb tuple.
+    ///
+    /// # Safety
+    /// `skb` must be a live `__sk_buff*` owned by the current TC
+    /// program invocation.
+    #[inline(always)]
+    pub unsafe fn from_skb(
+        skb: *mut core::ffi::c_void,
+        mut tuple: CtTuple,
+        opts: &mut BpfCtOpts,
+    ) -> Option<Self> {
+        let tuple_sz = tuple.family().tuple_size();
+        #[allow(clippy::cast_possible_truncation)]
+        let opts_sz = core::mem::size_of::<BpfCtOpts>() as u32;
+        let tuple_ptr = tuple.as_ptr();
+        #[cfg(target_arch = "bpf")]
+        let p = unsafe { bpf_skb_ct_alloc(skb, tuple_ptr, tuple_sz, opts as *mut _, opts_sz) };
+        #[cfg(not(target_arch = "bpf"))]
+        let p = unsafe {
+            host_stubs::bpf_skb_ct_alloc(skb, tuple_ptr, tuple_sz, opts as *mut _, opts_sz)
+        };
+        if p.is_null() {
+            None
+        } else {
+            Some(Self { inner: p })
+        }
+    }
+
+    /// XDP variant of [`Self::from_skb`].
+    ///
+    /// # Safety
+    /// `xdp` must be a live `xdp_md*` owned by the current XDP
+    /// program invocation.
+    #[inline(always)]
+    pub unsafe fn from_xdp(
+        xdp: *mut core::ffi::c_void,
+        mut tuple: CtTuple,
+        opts: &mut BpfCtOpts,
+    ) -> Option<Self> {
+        let tuple_sz = tuple.family().tuple_size();
+        #[allow(clippy::cast_possible_truncation)]
+        let opts_sz = core::mem::size_of::<BpfCtOpts>() as u32;
+        let tuple_ptr = tuple.as_ptr();
+        #[cfg(target_arch = "bpf")]
+        let p = unsafe { bpf_xdp_ct_alloc(xdp, tuple_ptr, tuple_sz, opts as *mut _, opts_sz) };
+        #[cfg(not(target_arch = "bpf"))]
+        let p = unsafe {
+            host_stubs::bpf_xdp_ct_alloc(xdp, tuple_ptr, tuple_sz, opts as *mut _, opts_sz)
+        };
+        if p.is_null() {
+            None
+        } else {
+            Some(Self { inner: p })
+        }
+    }
+
+    /// Raw pointer to the underlying `nf_conn___init`. Intended for
+    /// kfunc calls only — keep it inside the BPF program scope.
+    #[inline(always)]
+    #[must_use]
+    pub fn as_raw(&self) -> *mut nf_conn_init {
+        self.inner
+    }
+
+    /// Set the initial timeout (seconds) on the allocated entry.
+    #[inline(always)]
+    pub fn set_timeout(&mut self, seconds: u32) {
+        #[cfg(target_arch = "bpf")]
+        unsafe {
+            bpf_ct_set_timeout(self.inner, seconds);
+        }
+        #[cfg(not(target_arch = "bpf"))]
+        unsafe {
+            host_stubs::bpf_ct_set_timeout(self.inner, seconds);
+        }
+    }
+
+    /// Set the initial `IPS_*` status bitmask. Returns `false` on
+    /// kernel-reported failure.
+    #[inline(always)]
+    pub fn set_status(&mut self, status: u32) -> bool {
+        #[cfg(target_arch = "bpf")]
+        let rc = unsafe { bpf_ct_set_status(self.inner, status) };
+        #[cfg(not(target_arch = "bpf"))]
+        let rc = unsafe { host_stubs::bpf_ct_set_status(self.inner, status) };
+        rc == 0
+    }
+
+    /// Configure NAT rewrite info for this entry.
+    #[inline(always)]
+    pub fn set_nat_info(&mut self, mut addr: NfInetAddr, port: u16, manip: NfNatManipType) -> bool {
+        #[cfg(target_arch = "bpf")]
+        let rc = unsafe {
+            bpf_ct_set_nat_info(self.inner, &raw mut addr, i32::from(port), manip as i32)
+        };
+        #[cfg(not(target_arch = "bpf"))]
+        let rc = unsafe {
+            host_stubs::bpf_ct_set_nat_info(
+                self.inner,
+                &raw mut addr,
+                i32::from(port),
+                manip as i32,
+            )
+        };
+        rc == 0
+    }
+
+    /// Commit the builder into the kernel conntrack table,
+    /// consuming `self`. On success returns a live `*mut nf_conn`
+    /// the caller is responsible for releasing via [`ct_release`].
+    /// On failure returns `Err(errno)` — the kernel consumes the
+    /// `___init` reference either way, matching `bpf_ct_insert_entry`
+    /// semantics.
+    #[inline(always)]
+    pub fn insert(self) -> Result<CtEntry, i32> {
+        let raw = self.inner;
+        // Suppress the Drop release; `insert_entry` owns the
+        // lifetime from here on.
+        let _suppress = core::mem::ManuallyDrop::new(self);
+        #[cfg(target_arch = "bpf")]
+        let p = unsafe { bpf_ct_insert_entry(raw) };
+        #[cfg(not(target_arch = "bpf"))]
+        let p = unsafe { host_stubs::bpf_ct_insert_entry(raw) };
+        if p.is_null() {
+            Err(-1)
+        } else {
+            Ok(CtEntry { inner: p })
+        }
+    }
+}
+
+impl Drop for CtBuilder {
+    fn drop(&mut self) {
+        if self.inner.is_null() {
+            return;
+        }
+        #[cfg(target_arch = "bpf")]
+        unsafe {
+            // Kernel accepts the `___init` subtype on the shared
+            // release kfunc because the two share a refcount.
+            bpf_ct_release(self.inner.cast::<nf_conn>());
+        }
+        #[cfg(not(target_arch = "bpf"))]
+        unsafe {
+            // Host builds split the counters so tests can assert
+            // that un-inserted builders release the `___init`
+            // counter rather than the live one.
+            host_stubs::host_release_ct_init(self.inner);
+        }
+    }
+}
+
+/// Owned live conntrack entry returned by [`CtBuilder::insert`] or
+/// caught from a lookup wrapper. Release happens automatically on
+/// drop via `bpf_ct_release`.
+pub struct CtEntry {
+    inner: *mut nf_conn,
+}
+
+impl CtEntry {
+    /// Raw pointer to the underlying `nf_conn`.
+    #[inline(always)]
+    #[must_use]
+    pub fn as_raw(&self) -> *mut nf_conn {
+        self.inner
+    }
+
+    /// Update the timeout (seconds) on a live entry.
+    #[inline(always)]
+    pub fn change_timeout(&mut self, seconds: u32) -> bool {
+        #[cfg(target_arch = "bpf")]
+        let rc = unsafe { bpf_ct_change_timeout(self.inner, seconds) };
+        #[cfg(not(target_arch = "bpf"))]
+        let rc = unsafe { host_stubs::bpf_ct_change_timeout(self.inner, seconds) };
+        rc == 0
+    }
+
+    /// Update the `IPS_*` status bitmask on a live entry. Combined
+    /// with `IPS_DYING`, acts as a "terminate this flow" primitive
+    /// for IDS verdicts.
+    #[inline(always)]
+    pub fn change_status(&mut self, status: u32) -> bool {
+        #[cfg(target_arch = "bpf")]
+        let rc = unsafe { bpf_ct_change_status(self.inner, status) };
+        #[cfg(not(target_arch = "bpf"))]
+        let rc = unsafe { host_stubs::bpf_ct_change_status(self.inner, status) };
+        rc == 0
+    }
+}
+
+impl Drop for CtEntry {
+    fn drop(&mut self) {
+        if self.inner.is_null() {
+            return;
+        }
+        #[cfg(target_arch = "bpf")]
+        unsafe {
+            bpf_ct_release(self.inner);
+        }
+        #[cfg(not(target_arch = "bpf"))]
+        unsafe {
+            host_stubs::bpf_ct_release(self.inner);
+        }
+    }
+}
+
 #[cfg(all(test, not(target_arch = "bpf")))]
 mod tests {
     use super::*;
@@ -1603,5 +2138,134 @@ mod tests {
         let seen = unsafe { with_xdp_ct_lookup(core::ptr::null_mut(), tuple, &mut opts, |_| ()) };
         assert!(seen.is_none());
         assert_eq!(opts.error, -16);
+    }
+
+    // ── CT alloc / NAT delegation tests ───────────────────────────
+
+    #[test]
+    fn nf_inet_addr_helpers_pack_correctly() {
+        let v4 = NfInetAddr::v4(0xDEAD_BEEF);
+        assert_eq!(v4.addr, [0xDEAD_BEEF, 0, 0, 0]);
+        let v6 = NfInetAddr::v6([1, 2, 3, 4]);
+        assert_eq!(v6.addr, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn nf_nat_manip_type_discriminants_match_kernel() {
+        assert_eq!(NfNatManipType::Src as i32, 0);
+        assert_eq!(NfNatManipType::Dst as i32, 1);
+    }
+
+    #[test]
+    fn ct_builder_drop_releases_init_ref() {
+        host_stubs::host_reset_ct_state();
+        {
+            let tuple = CtTuple::v4(0, 0, 0, 0);
+            let mut opts = BpfCtOpts::tcp();
+            let _builder =
+                unsafe { CtBuilder::from_skb(core::ptr::null_mut(), tuple, &mut opts).unwrap() };
+            assert_eq!(host_stubs::host_ct_init_live_count(), 1);
+        }
+        assert_eq!(host_stubs::host_ct_init_live_count(), 0);
+    }
+
+    #[test]
+    fn ct_builder_alloc_failure_returns_none() {
+        host_stubs::host_reset_ct_state();
+        host_stubs::host_set_next_ct_alloc_error(-12); // -ENOMEM
+        let tuple = CtTuple::v4(0, 0, 0, 0);
+        let mut opts = BpfCtOpts::tcp();
+        let builder = unsafe { CtBuilder::from_skb(core::ptr::null_mut(), tuple, &mut opts) };
+        assert!(builder.is_none());
+        assert_eq!(opts.error, -12);
+        assert_eq!(host_stubs::host_ct_init_live_count(), 0);
+    }
+
+    #[test]
+    fn ct_builder_set_timeout_and_status_propagate() {
+        host_stubs::host_reset_ct_state();
+        let tuple = CtTuple::v4(0, 0, 0, 0);
+        let mut opts = BpfCtOpts::tcp();
+        let mut builder =
+            unsafe { CtBuilder::from_skb(core::ptr::null_mut(), tuple, &mut opts).unwrap() };
+        builder.set_timeout(120);
+        assert!(builder.set_status(0x08 /* IPS_CONFIRMED */));
+        assert_eq!(host_stubs::host_last_init_timeout(), Some(120));
+        assert_eq!(host_stubs::host_last_init_status(), Some(0x08));
+    }
+
+    #[test]
+    fn ct_builder_set_nat_info_captures_manip_addr_port() {
+        host_stubs::host_reset_ct_state();
+        let tuple = CtTuple::v4(0, 0, 0, 0);
+        let mut opts = BpfCtOpts::tcp();
+        let mut builder =
+            unsafe { CtBuilder::from_skb(core::ptr::null_mut(), tuple, &mut opts).unwrap() };
+        let addr = NfInetAddr::v4(0xC0A8_0001);
+        assert!(builder.set_nat_info(addr, 8080, NfNatManipType::Dst));
+        assert_eq!(host_stubs::host_last_nat_manip(), Some(NfNatManipType::Dst));
+        assert_eq!(host_stubs::host_last_nat_port(), Some(8080));
+        assert_eq!(host_stubs::host_last_nat_addr0(), 0xC0A8_0001);
+    }
+
+    #[test]
+    fn ct_builder_insert_transfers_ownership() {
+        host_stubs::host_reset_ct_state();
+        let tuple = CtTuple::v4(0, 0, 0, 0);
+        let mut opts = BpfCtOpts::tcp();
+        let builder =
+            unsafe { CtBuilder::from_skb(core::ptr::null_mut(), tuple, &mut opts).unwrap() };
+        assert_eq!(host_stubs::host_ct_init_live_count(), 1);
+        let entry = builder.insert().expect("insert must succeed");
+        assert_eq!(host_stubs::host_ct_init_live_count(), 0);
+        assert_eq!(host_stubs::host_ct_live_count(), 1);
+        drop(entry);
+        assert_eq!(host_stubs::host_ct_live_count(), 0);
+    }
+
+    #[test]
+    fn ct_builder_insert_failure_consumes_init_ref() {
+        host_stubs::host_reset_ct_state();
+        host_stubs::host_set_next_ct_insert_error(-22);
+        let tuple = CtTuple::v4(0, 0, 0, 0);
+        let mut opts = BpfCtOpts::tcp();
+        let builder =
+            unsafe { CtBuilder::from_skb(core::ptr::null_mut(), tuple, &mut opts).unwrap() };
+        let err = match builder.insert() {
+            Ok(_) => panic!("insert must fail when -EINVAL is injected"),
+            Err(e) => e,
+        };
+        assert_ne!(err, 0);
+        assert_eq!(host_stubs::host_ct_init_live_count(), 0);
+        assert_eq!(host_stubs::host_ct_live_count(), 0);
+    }
+
+    #[test]
+    fn ct_entry_change_timeout_and_status_propagate() {
+        host_stubs::host_reset_ct_state();
+        let tuple = CtTuple::v4(0, 0, 0, 0);
+        let mut opts = BpfCtOpts::tcp();
+        let builder =
+            unsafe { CtBuilder::from_skb(core::ptr::null_mut(), tuple, &mut opts).unwrap() };
+        let mut entry = builder.insert().unwrap();
+        assert!(entry.change_timeout(600));
+        assert!(entry.change_status(0x0200 /* IPS_DYING */));
+        assert_eq!(host_stubs::host_last_live_timeout(), Some(600));
+        assert_eq!(host_stubs::host_last_live_status(), Some(0x0200));
+        drop(entry);
+        assert_eq!(host_stubs::host_ct_live_count(), 0);
+    }
+
+    #[test]
+    fn xdp_ct_builder_drop_releases_init_ref() {
+        host_stubs::host_reset_ct_state();
+        {
+            let tuple = CtTuple::v6([0; 4], [0; 4], 0, 0);
+            let mut opts = BpfCtOpts::udp();
+            let _builder =
+                unsafe { CtBuilder::from_xdp(core::ptr::null_mut(), tuple, &mut opts).unwrap() };
+            assert_eq!(host_stubs::host_ct_init_live_count(), 1);
+        }
+        assert_eq!(host_stubs::host_ct_init_live_count(), 0);
     }
 }
