@@ -52,11 +52,7 @@ pub unsafe fn compute_ipv4_csum(hdr: *const u8) -> u16 {
 /// # Safety
 /// `tcp_hdr` must point to at least 20 valid bytes.
 #[inline(always)]
-pub unsafe fn compute_tcp_csum_v4(
-    src_ip: &[u8; 4],
-    dst_ip: &[u8; 4],
-    tcp_hdr: *const u8,
-) -> u16 {
+pub unsafe fn compute_tcp_csum_v4(src_ip: &[u8; 4], dst_ip: &[u8; 4], tcp_hdr: *const u8) -> u16 {
     let mut sum: u32 = 0;
     sum += ((src_ip[0] as u32) << 8) | (src_ip[1] as u32);
     sum += ((src_ip[2] as u32) << 8) | (src_ip[3] as u32);
@@ -94,11 +90,7 @@ pub unsafe fn compute_tcp_csum_v4_24(
 /// # Safety
 /// `tcp_hdr` must point to at least 20 valid bytes.
 #[inline(always)]
-pub unsafe fn compute_tcp_csum_v6(
-    src_ip: &[u8; 16],
-    dst_ip: &[u8; 16],
-    tcp_hdr: *const u8,
-) -> u16 {
+pub unsafe fn compute_tcp_csum_v6(src_ip: &[u8; 16], dst_ip: &[u8; 16], tcp_hdr: *const u8) -> u16 {
     let mut sum: u32 = 0;
     unsafe {
         sum += sum_bytes(src_ip.as_ptr(), 16);

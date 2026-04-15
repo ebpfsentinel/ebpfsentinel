@@ -158,6 +158,40 @@ unsafe extern "C" {
 
     /// `bpf_iter_css_destroy` — destroy the iterator.
     pub fn bpf_iter_css_destroy(it: *mut bpf_iter_css);
+
+    // ── Kernel 6.2 RCU + cast plumbing ─────────────────────────
+    //
+    // These four kfuncs are the prerequisite plumbing for every
+    // other kfunc binding in this module that dereferences
+    // RCU-protected kernel fields or re-types opaque pointers as
+    // PTR_TO_BTF_ID. Kernel 6.2+.
+
+    /// Begin a BPF RCU read-side critical section. Must be paired
+    /// with [`bpf_rcu_read_unlock`] on every control-flow path.
+    /// Required before dereferencing RCU-protected kernel fields
+    /// such as `task->cgroups`, `nf_conn->ct_general`, etc.
+    pub fn bpf_rcu_read_lock();
+
+    /// End a BPF RCU read-side critical section opened via
+    /// [`bpf_rcu_read_lock`].
+    pub fn bpf_rcu_read_unlock();
+
+    /// Re-type an opaque kernel pointer as a read-only
+    /// `PTR_TO_BTF_ID` value identified by `btf_id__k`. Lets the
+    /// verifier accept direct field reads on structs such as
+    /// `nf_conn`, `task_struct`, `sock`, that are otherwise
+    /// inaccessible from BPF. Returns a pointer the verifier
+    /// treats as read-only; writes are rejected at load time.
+    pub fn bpf_rdonly_cast(
+        obj__ign: *const core::ffi::c_void,
+        btf_id__k: u32,
+    ) -> *mut core::ffi::c_void;
+
+    /// Cast a program context pointer (`struct __sk_buff*`,
+    /// `struct xdp_md*`, …) back to its kernel-internal type
+    /// (`struct sk_buff*`, `struct xdp_buff*`, …) so it can be
+    /// handed to kfuncs that take kernel-native context types.
+    pub fn bpf_cast_to_kern_ctx(obj: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
 }
 
 // ── Host-target stubs ────────────────────────────────────────────
@@ -175,10 +209,7 @@ pub mod host_stubs {
         task_struct, xfrm_state,
     };
 
-    pub unsafe fn bpf_task_get_cgroup1(
-        _task: *mut task_struct,
-        _hierarchy_id: i32,
-    ) -> *mut cgroup {
+    pub unsafe fn bpf_task_get_cgroup1(_task: *mut task_struct, _hierarchy_id: i32) -> *mut cgroup {
         core::ptr::null_mut()
     }
 
@@ -233,6 +264,25 @@ pub mod host_stubs {
     }
 
     pub unsafe fn bpf_iter_css_destroy(_it: *mut bpf_iter_css) {}
+
+    // ── Kernel 6.2 plumbing stubs ──
+
+    pub unsafe fn bpf_rcu_read_lock() {}
+
+    pub unsafe fn bpf_rcu_read_unlock() {}
+
+    pub unsafe fn bpf_rdonly_cast(
+        obj: *const core::ffi::c_void,
+        _btf_id: u32,
+    ) -> *mut core::ffi::c_void {
+        // Host builds leave the pointer identity — unit tests that
+        // pass a non-null ctx can still observe the sentinel back.
+        obj.cast_mut()
+    }
+
+    pub unsafe fn bpf_cast_to_kern_ctx(obj: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
+        obj
+    }
 }
 
 // ── Safe wrappers ────────────────────────────────────────────────
@@ -333,6 +383,90 @@ where
     Some(result)
 }
 
+/// Run `f` inside a BPF RCU read-side critical section. Every path
+/// out of `f` is guaranteed to call `bpf_rcu_read_unlock`, which is
+/// what the verifier enforces for RCU-protected dereferences.
+///
+/// # Safety
+/// The closure must not call helpers / kfuncs that sleep or break
+/// the RCU invariant. Callers are responsible for keeping the BPF
+/// program inside the verifier's RCU rules (no nested locks, no
+/// sleepable helpers).
+#[inline(always)]
+pub unsafe fn with_rcu_read_lock<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    #[cfg(target_arch = "bpf")]
+    unsafe {
+        bpf_rcu_read_lock();
+    }
+    #[cfg(not(target_arch = "bpf"))]
+    unsafe {
+        host_stubs::bpf_rcu_read_lock();
+    }
+    let result = f();
+    #[cfg(target_arch = "bpf")]
+    unsafe {
+        bpf_rcu_read_unlock();
+    }
+    #[cfg(not(target_arch = "bpf"))]
+    unsafe {
+        host_stubs::bpf_rcu_read_unlock();
+    }
+    result
+}
+
+/// Re-type an opaque kernel pointer as a read-only `PTR_TO_BTF_ID`
+/// of the supplied `btf_id`. The returned pointer is only valid for
+/// direct field reads from BPF — writes are rejected at load time.
+///
+/// Returns `None` when the input is null, so callers get a safe
+/// option-type instead of a dangling pointer.
+///
+/// # Safety
+/// `obj` must point to a live kernel object of the type identified
+/// by `btf_id`. The caller is responsible for supplying a `btf_id`
+/// that matches the actual kernel struct — the verifier will reject
+/// the program at load time if the type does not exist.
+#[inline(always)]
+#[must_use]
+pub unsafe fn rdonly_cast(
+    obj: *const core::ffi::c_void,
+    btf_id: u32,
+) -> Option<*mut core::ffi::c_void> {
+    if obj.is_null() {
+        return None;
+    }
+    #[cfg(target_arch = "bpf")]
+    let out = unsafe { bpf_rdonly_cast(obj, btf_id) };
+    #[cfg(not(target_arch = "bpf"))]
+    let out = unsafe { host_stubs::bpf_rdonly_cast(obj, btf_id) };
+    if out.is_null() { None } else { Some(out) }
+}
+
+/// Cast a program context pointer (`__sk_buff*` / `xdp_md*`) to its
+/// kernel-internal type (`sk_buff*` / `xdp_buff*`) for kfuncs that
+/// require the native kernel struct.
+///
+/// Returns `None` when the input is null.
+///
+/// # Safety
+/// `ctx` must be a live program context pointer owned by the current
+/// BPF program invocation.
+#[inline(always)]
+#[must_use]
+pub unsafe fn cast_to_kern_ctx(ctx: *mut core::ffi::c_void) -> Option<*mut core::ffi::c_void> {
+    if ctx.is_null() {
+        return None;
+    }
+    #[cfg(target_arch = "bpf")]
+    let out = unsafe { bpf_cast_to_kern_ctx(ctx) };
+    #[cfg(not(target_arch = "bpf"))]
+    let out = unsafe { host_stubs::bpf_cast_to_kern_ctx(ctx) };
+    if out.is_null() { None } else { Some(out) }
+}
+
 #[cfg(all(test, not(target_arch = "bpf")))]
 mod tests {
     use super::*;
@@ -365,5 +499,50 @@ mod tests {
     fn host_stub_with_task_cgroup1_returns_none() {
         let r = unsafe { with_task_cgroup1::<_, ()>(core::ptr::null_mut(), |_| ()) };
         assert!(r.is_none());
+    }
+
+    #[test]
+    fn with_rcu_read_lock_returns_closure_value() {
+        let out = unsafe { with_rcu_read_lock(|| 42_u32) };
+        assert_eq!(out, 42);
+    }
+
+    #[test]
+    fn with_rcu_read_lock_runs_closure_exactly_once() {
+        let mut counter = 0_u32;
+        unsafe {
+            with_rcu_read_lock(|| {
+                counter += 1;
+            });
+        }
+        assert_eq!(counter, 1);
+    }
+
+    #[test]
+    fn rdonly_cast_rejects_null_input() {
+        let out = unsafe { rdonly_cast(core::ptr::null(), 0) };
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn rdonly_cast_forwards_non_null_pointer() {
+        let sentinel: u32 = 0xDEAD_BEEF;
+        let ptr: *const core::ffi::c_void = (&raw const sentinel).cast();
+        let out = unsafe { rdonly_cast(ptr, 0xABCD) };
+        assert!(out.is_some());
+    }
+
+    #[test]
+    fn cast_to_kern_ctx_rejects_null() {
+        let out = unsafe { cast_to_kern_ctx(core::ptr::null_mut()) };
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn cast_to_kern_ctx_forwards_non_null() {
+        let mut sentinel: u64 = 0;
+        let ptr: *mut core::ffi::c_void = (&raw mut sentinel).cast();
+        let out = unsafe { cast_to_kern_ctx(ptr) };
+        assert!(out.is_some());
     }
 }
