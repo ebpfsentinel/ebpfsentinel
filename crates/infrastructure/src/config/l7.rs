@@ -19,7 +19,7 @@ pub struct L7Config {
     #[serde(default)]
     pub rules: Vec<L7RuleConfig>,
 
-    /// Userspace TCP stream reassembly (E18-OSS-3).
+    /// Userspace TCP stream reassembly.
     #[serde(default)]
     pub reassembly: ReassemblyConfig,
 }

@@ -1915,7 +1915,7 @@ mod tests {
         }
     }
 
-    // ── E18.1 additional protocols ────────────────────────────────
+    // ── Additional text protocols ────────────────────────────────
 
     #[test]
     fn detect_ssh_banner() {

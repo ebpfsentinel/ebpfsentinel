@@ -83,8 +83,8 @@ pub struct EventDispatcher {
     fingerprint_cache: Arc<FingerprintCache>,
     encrypted_dns_detector: EncryptedDnsDetector,
     container_resolver: Option<Arc<domain::container::engine::ContainerResolverEngine>>,
-    /// Optional TCP stream reassembler (E18-OSS-3). When present, L7
-    /// events are merged per flow before being handed to `parse_payload`.
+    /// Optional TCP stream reassembler. When present, L7 events are
+    /// merged per flow before being handed to `parse_payload`.
     stream_reassembler: Option<Arc<domain::l7::reassembler::StreamReassembler>>,
     /// Optional extended L7 parser registered by the enterprise edition
     /// (MQTT / AMQP / NATS / Cassandra). Consulted only when the OSS
