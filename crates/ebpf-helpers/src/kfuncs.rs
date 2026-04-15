@@ -15,6 +15,10 @@
 //! | `bpf_xdp_metadata_rx_vlan_tag` | 6.8 | `int(*)(const struct xdp_md *ctx, __be16 *vlan_proto, u16 *vlan_tci) __ksym;` |
 //! | `bpf_xdp_get_xfrm_state`       | 6.8 | `struct xfrm_state *(*)(struct xdp_md *ctx, struct bpf_xfrm_state_opts *opts, u32 opts__sz) __ksym;` |
 //! | `bpf_xdp_xfrm_state_release`   | 6.8 | `void(*)(struct xfrm_state *x) __ksym;` |
+//! | `bpf_skb_get_xfrm_info`        | 6.2 | `int(*)(struct __sk_buff *skb, struct bpf_xfrm_info *to) __ksym;` |
+//! | `bpf_skb_set_xfrm_info`        | 6.2 | `int(*)(struct __sk_buff *skb, const struct bpf_xfrm_info *from) __ksym;` |
+//! | `bpf_skb_get_fou_encap`        | 6.4 | `int(*)(struct __sk_buff *skb, struct bpf_fou_encap *encap) __ksym;` |
+//! | `bpf_skb_set_fou_encap`        | 6.4 | `int(*)(struct __sk_buff *skb, struct bpf_fou_encap *encap, int type) __ksym;` |
 //! | `bpf_iter_css_task_new` / `_next` / `_destroy` | 6.7 | `int(*)(struct bpf_iter_css_task *it, struct cgroup_subsys_state *css, unsigned int flags) __ksym;` … |
 //!
 //! Kfuncs annotated with `KF_ACQUIRE | KF_RET_NULL` (notably
@@ -147,6 +151,50 @@ pub enum NfNatManipType {
     /// `NF_NAT_MANIP_DST` — DNAT, rewrite destination address +
     /// port.
     Dst = 1,
+}
+
+/// `struct bpf_xfrm_info` from `include/uapi/linux/bpf.h`. Stable
+/// layout from kernel 6.2 — 8 bytes, used by
+/// `bpf_skb_{get,set}_xfrm_info` to steer a TC skb towards a
+/// specific `xfrm` interface (`if_id`) on a given `link`. Setting it
+/// effectively pushes the packet into a virtual `xfrmi` device the
+/// kernel then encrypts via the IPsec policy attached to that
+/// interface.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BpfXfrmInfo {
+    /// Numeric identifier of the target `xfrm` interface (matches
+    /// `ip xfrm interface` `if_id`).
+    pub if_id: u32,
+    /// `oif` link index (`0` = unconstrained, otherwise a specific
+    /// netdev `ifindex`).
+    pub link: i32,
+}
+
+/// `struct bpf_fou_encap` from `include/uapi/linux/bpf.h`. 4 bytes,
+/// network byte order, kernel 6.4+. Used by
+/// `bpf_skb_{get,set}_fou_encap` to attach FOU (Foo-over-UDP) or GUE
+/// (Generic UDP Encapsulation) encapsulation parameters to a TC
+/// egress skb so cloud-overlay tunnels can be built without leaving
+/// the kernel.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BpfFouEncap {
+    /// Source UDP port (network byte order).
+    pub sport: u16,
+    /// Destination UDP port (network byte order).
+    pub dport: u16,
+}
+
+/// `enum bpf_fou_encap_type` selecting the encap flavour passed to
+/// [`skb_set_fou_encap`]. Kernel 6.4+.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FouEncapType {
+    /// `FOU_BPF_ENCAP_FOU` — plain Foo-over-UDP.
+    Fou = 0,
+    /// `FOU_BPF_ENCAP_GUE` — Generic UDP Encapsulation.
+    Gue = 1,
 }
 
 /// `enum xdp_rss_hash_type` bitfield values from `include/net/xdp.h`.
@@ -598,6 +646,41 @@ unsafe extern "C" {
         addr: *mut NfInetAddr,
         port: i32,
         manip: i32,
+    ) -> i32;
+
+    // ── Kernel 6.2 IPsec interface steering ────────────────────
+    //
+    // `bpf_skb_{get,set}_xfrm_info` query / install the `xfrm`
+    // interface metadata on a TC skb so the kernel routes the
+    // packet through the matching `xfrmi` virtual device for
+    // IPsec encapsulation.
+
+    /// Read the `xfrm` interface info attached to a TC skb. Kernel
+    /// 6.2+. Returns `0` on success, negative errno (typically
+    /// `-EINVAL`) when no metadata is present.
+    pub fn bpf_skb_get_xfrm_info(skb: *mut core::ffi::c_void, to: *mut BpfXfrmInfo) -> i32;
+
+    /// Install the `xfrm` interface info on a TC skb. Kernel 6.2+.
+    /// Returns `0` on success, negative errno otherwise.
+    pub fn bpf_skb_set_xfrm_info(skb: *mut core::ffi::c_void, from: *const BpfXfrmInfo) -> i32;
+
+    // ── Kernel 6.4 FOU/GUE overlay encapsulation ───────────────
+    //
+    // `bpf_skb_{get,set}_fou_encap` query / install Foo-over-UDP
+    // (or GUE) encapsulation parameters on a TC egress skb. Used
+    // to build cloud-overlay tunnels without leaving the kernel.
+
+    /// Read the FOU encap parameters attached to a TC skb. Kernel
+    /// 6.4+. Returns `0` on success, negative errno otherwise.
+    pub fn bpf_skb_get_fou_encap(skb: *mut core::ffi::c_void, encap: *mut BpfFouEncap) -> i32;
+
+    /// Install FOU or GUE encap parameters on a TC skb. `type_` is
+    /// the `bpf_fou_encap_type` discriminant. Kernel 6.4+. Returns
+    /// `0` on success, negative errno otherwise.
+    pub fn bpf_skb_set_fou_encap(
+        skb: *mut core::ffi::c_void,
+        encap: *mut BpfFouEncap,
+        type_: i32,
     ) -> i32;
 }
 
@@ -1189,6 +1272,184 @@ pub mod host_stubs {
     /// when it never called `insert_entry`.
     pub unsafe fn host_release_ct_init(_ptr: *mut nf_conn_init) {
         HOST_CT_INIT_LIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    // ── Kernel 6.2 xfrm + 6.4 fou encap host stubs ──
+
+    use super::{BpfFouEncap, BpfXfrmInfo};
+
+    /// Sentinel returned by `host_last_xfrm_info_*` when nothing has
+    /// been observed. Picked far above any plausible `if_id` so a
+    /// real test write is never confused with the unset state.
+    const XFRM_LINK_UNSET: i32 = i32::MIN;
+
+    static HOST_LAST_XFRM_IF_ID: AtomicU32 = AtomicU32::new(0);
+    static HOST_LAST_XFRM_LINK: AtomicI32 = AtomicI32::new(XFRM_LINK_UNSET);
+    static HOST_NEXT_XFRM_IF_ID: AtomicU32 = AtomicU32::new(0);
+    static HOST_NEXT_XFRM_LINK: AtomicI32 = AtomicI32::new(0);
+    static HOST_NEXT_XFRM_GET_ERROR: AtomicI32 = AtomicI32::new(0);
+    static HOST_NEXT_XFRM_SET_ERROR: AtomicI32 = AtomicI32::new(0);
+
+    static HOST_LAST_FOU_SPORT: AtomicU32 = AtomicU32::new(0);
+    static HOST_LAST_FOU_DPORT: AtomicU32 = AtomicU32::new(0);
+    static HOST_LAST_FOU_TYPE: AtomicI32 = AtomicI32::new(-1);
+    static HOST_NEXT_FOU_SPORT: AtomicU32 = AtomicU32::new(0);
+    static HOST_NEXT_FOU_DPORT: AtomicU32 = AtomicU32::new(0);
+    static HOST_NEXT_FOU_GET_ERROR: AtomicI32 = AtomicI32::new(0);
+    static HOST_NEXT_FOU_SET_ERROR: AtomicI32 = AtomicI32::new(0);
+
+    /// Test helper: queue the `BpfXfrmInfo` returned by the next
+    /// `skb_get_xfrm_info` call.
+    pub fn host_set_next_xfrm_info(if_id: u32, link: i32) {
+        HOST_NEXT_XFRM_IF_ID.store(if_id, Ordering::SeqCst);
+        HOST_NEXT_XFRM_LINK.store(link, Ordering::SeqCst);
+    }
+
+    /// Test helper: inject an error for the next `skb_get_xfrm_info`
+    /// call. Cleared after consumption.
+    pub fn host_set_next_xfrm_get_error(errno: i32) {
+        HOST_NEXT_XFRM_GET_ERROR.store(errno, Ordering::SeqCst);
+    }
+
+    /// Test helper: inject an error for the next `skb_set_xfrm_info`
+    /// call.
+    pub fn host_set_next_xfrm_set_error(errno: i32) {
+        HOST_NEXT_XFRM_SET_ERROR.store(errno, Ordering::SeqCst);
+    }
+
+    /// Read the last `(if_id, link)` pair written by a successful
+    /// `skb_set_xfrm_info` call, `None` when nothing has been
+    /// observed since the last reset.
+    #[must_use]
+    pub fn host_last_xfrm_info() -> Option<(u32, i32)> {
+        let link = HOST_LAST_XFRM_LINK.load(Ordering::SeqCst);
+        if link == XFRM_LINK_UNSET {
+            None
+        } else {
+            Some((HOST_LAST_XFRM_IF_ID.load(Ordering::SeqCst), link))
+        }
+    }
+
+    /// Test helper: queue the `BpfFouEncap` returned by the next
+    /// `skb_get_fou_encap` call.
+    pub fn host_set_next_fou_encap(sport: u16, dport: u16) {
+        HOST_NEXT_FOU_SPORT.store(u32::from(sport), Ordering::SeqCst);
+        HOST_NEXT_FOU_DPORT.store(u32::from(dport), Ordering::SeqCst);
+    }
+
+    /// Test helper: inject an error for the next `skb_get_fou_encap`
+    /// call.
+    pub fn host_set_next_fou_get_error(errno: i32) {
+        HOST_NEXT_FOU_GET_ERROR.store(errno, Ordering::SeqCst);
+    }
+
+    /// Test helper: inject an error for the next `skb_set_fou_encap`
+    /// call.
+    pub fn host_set_next_fou_set_error(errno: i32) {
+        HOST_NEXT_FOU_SET_ERROR.store(errno, Ordering::SeqCst);
+    }
+
+    /// Read the last `(sport, dport, type)` triple written by a
+    /// successful `skb_set_fou_encap` call, `None` when nothing has
+    /// been observed since the last reset.
+    #[must_use]
+    pub fn host_last_fou_encap() -> Option<(u16, u16, i32)> {
+        let ty = HOST_LAST_FOU_TYPE.load(Ordering::SeqCst);
+        if ty < 0 {
+            None
+        } else {
+            #[allow(clippy::cast_possible_truncation)]
+            let sport = HOST_LAST_FOU_SPORT.load(Ordering::SeqCst) as u16;
+            #[allow(clippy::cast_possible_truncation)]
+            let dport = HOST_LAST_FOU_DPORT.load(Ordering::SeqCst) as u16;
+            Some((sport, dport, ty))
+        }
+    }
+
+    /// Reset every xfrm + fou observation atomic so consecutive
+    /// tests do not bleed state.
+    pub fn host_reset_xfrm_fou_state() {
+        HOST_LAST_XFRM_IF_ID.store(0, Ordering::SeqCst);
+        HOST_LAST_XFRM_LINK.store(XFRM_LINK_UNSET, Ordering::SeqCst);
+        HOST_NEXT_XFRM_IF_ID.store(0, Ordering::SeqCst);
+        HOST_NEXT_XFRM_LINK.store(0, Ordering::SeqCst);
+        HOST_NEXT_XFRM_GET_ERROR.store(0, Ordering::SeqCst);
+        HOST_NEXT_XFRM_SET_ERROR.store(0, Ordering::SeqCst);
+        HOST_LAST_FOU_SPORT.store(0, Ordering::SeqCst);
+        HOST_LAST_FOU_DPORT.store(0, Ordering::SeqCst);
+        HOST_LAST_FOU_TYPE.store(-1, Ordering::SeqCst);
+        HOST_NEXT_FOU_SPORT.store(0, Ordering::SeqCst);
+        HOST_NEXT_FOU_DPORT.store(0, Ordering::SeqCst);
+        HOST_NEXT_FOU_GET_ERROR.store(0, Ordering::SeqCst);
+        HOST_NEXT_FOU_SET_ERROR.store(0, Ordering::SeqCst);
+    }
+
+    pub unsafe fn bpf_skb_get_xfrm_info(_skb: *mut core::ffi::c_void, to: *mut BpfXfrmInfo) -> i32 {
+        let err = HOST_NEXT_XFRM_GET_ERROR.swap(0, Ordering::SeqCst);
+        if err != 0 {
+            return err;
+        }
+        if !to.is_null() {
+            unsafe {
+                (*to).if_id = HOST_NEXT_XFRM_IF_ID.load(Ordering::SeqCst);
+                (*to).link = HOST_NEXT_XFRM_LINK.load(Ordering::SeqCst);
+            }
+        }
+        0
+    }
+
+    pub unsafe fn bpf_skb_set_xfrm_info(
+        _skb: *mut core::ffi::c_void,
+        from: *const BpfXfrmInfo,
+    ) -> i32 {
+        let err = HOST_NEXT_XFRM_SET_ERROR.swap(0, Ordering::SeqCst);
+        if err != 0 {
+            return err;
+        }
+        if !from.is_null() {
+            unsafe {
+                HOST_LAST_XFRM_IF_ID.store((*from).if_id, Ordering::SeqCst);
+                HOST_LAST_XFRM_LINK.store((*from).link, Ordering::SeqCst);
+            }
+        }
+        0
+    }
+
+    pub unsafe fn bpf_skb_get_fou_encap(
+        _skb: *mut core::ffi::c_void,
+        encap: *mut BpfFouEncap,
+    ) -> i32 {
+        let err = HOST_NEXT_FOU_GET_ERROR.swap(0, Ordering::SeqCst);
+        if err != 0 {
+            return err;
+        }
+        if !encap.is_null() {
+            #[allow(clippy::cast_possible_truncation)]
+            unsafe {
+                (*encap).sport = HOST_NEXT_FOU_SPORT.load(Ordering::SeqCst) as u16;
+                (*encap).dport = HOST_NEXT_FOU_DPORT.load(Ordering::SeqCst) as u16;
+            }
+        }
+        0
+    }
+
+    pub unsafe fn bpf_skb_set_fou_encap(
+        _skb: *mut core::ffi::c_void,
+        encap: *mut BpfFouEncap,
+        type_: i32,
+    ) -> i32 {
+        let err = HOST_NEXT_FOU_SET_ERROR.swap(0, Ordering::SeqCst);
+        if err != 0 {
+            return err;
+        }
+        if !encap.is_null() {
+            unsafe {
+                HOST_LAST_FOU_SPORT.store(u32::from((*encap).sport), Ordering::SeqCst);
+                HOST_LAST_FOU_DPORT.store(u32::from((*encap).dport), Ordering::SeqCst);
+            }
+            HOST_LAST_FOU_TYPE.store(type_, Ordering::SeqCst);
+        }
+        0
     }
 }
 
@@ -2124,6 +2385,86 @@ impl Drop for CtEntry {
     }
 }
 
+/// Read the `xfrm` interface metadata currently attached to the TC
+/// skb. Returns `None` when the kernel reports no metadata
+/// (typically `-EINVAL` because the packet has not crossed an
+/// `xfrmi` device yet).
+///
+/// # Safety
+/// `skb` must point to a live `__sk_buff` owned by the current TC
+/// program invocation.
+#[inline(always)]
+#[must_use]
+pub unsafe fn skb_get_xfrm_info(skb: *mut core::ffi::c_void) -> Option<BpfXfrmInfo> {
+    let mut info = BpfXfrmInfo::default();
+    #[cfg(target_arch = "bpf")]
+    let rc = unsafe { bpf_skb_get_xfrm_info(skb, &raw mut info) };
+    #[cfg(not(target_arch = "bpf"))]
+    let rc = unsafe { host_stubs::bpf_skb_get_xfrm_info(skb, &raw mut info) };
+    if rc != 0 {
+        return None;
+    }
+    Some(info)
+}
+
+/// Steer the TC skb through a specific `xfrm` interface. Returns
+/// `true` on success. Used by IPsec-aware tc-nat to push traffic
+/// into the matching `xfrmi` device for transparent encryption.
+///
+/// # Safety
+/// `skb` must point to a live `__sk_buff` owned by the current TC
+/// program invocation.
+#[inline(always)]
+pub unsafe fn skb_set_xfrm_info(skb: *mut core::ffi::c_void, info: &BpfXfrmInfo) -> bool {
+    #[cfg(target_arch = "bpf")]
+    let rc = unsafe { bpf_skb_set_xfrm_info(skb, info as *const _) };
+    #[cfg(not(target_arch = "bpf"))]
+    let rc = unsafe { host_stubs::bpf_skb_set_xfrm_info(skb, info as *const _) };
+    rc == 0
+}
+
+/// Read the FOU/GUE encapsulation parameters currently attached to
+/// the TC skb. Returns `None` when no encap metadata is present.
+///
+/// # Safety
+/// `skb` must point to a live `__sk_buff` owned by the current TC
+/// program invocation.
+#[inline(always)]
+#[must_use]
+pub unsafe fn skb_get_fou_encap(skb: *mut core::ffi::c_void) -> Option<BpfFouEncap> {
+    let mut encap = BpfFouEncap::default();
+    #[cfg(target_arch = "bpf")]
+    let rc = unsafe { bpf_skb_get_fou_encap(skb, &raw mut encap) };
+    #[cfg(not(target_arch = "bpf"))]
+    let rc = unsafe { host_stubs::bpf_skb_get_fou_encap(skb, &raw mut encap) };
+    if rc != 0 {
+        return None;
+    }
+    Some(encap)
+}
+
+/// Install FOU or GUE encapsulation parameters on the TC skb so the
+/// kernel pushes the packet into a cloud-overlay tunnel without
+/// leaving kernel space. Returns `true` on success.
+///
+/// # Safety
+/// `skb` must point to a live `__sk_buff` owned by the current TC
+/// program invocation.
+#[inline(always)]
+pub unsafe fn skb_set_fou_encap(
+    skb: *mut core::ffi::c_void,
+    encap: &BpfFouEncap,
+    encap_type: FouEncapType,
+) -> bool {
+    let mut encap_copy = *encap;
+    let ty = encap_type as i32;
+    #[cfg(target_arch = "bpf")]
+    let rc = unsafe { bpf_skb_set_fou_encap(skb, &raw mut encap_copy, ty) };
+    #[cfg(not(target_arch = "bpf"))]
+    let rc = unsafe { host_stubs::bpf_skb_set_fou_encap(skb, &raw mut encap_copy, ty) };
+    rc == 0
+}
+
 #[cfg(all(test, not(target_arch = "bpf")))]
 mod tests {
     use super::*;
@@ -2677,5 +3018,140 @@ mod tests {
         host_stubs::host_set_next_xdp_timestamp(42);
         let out = unsafe { xdp_rx_timestamp(core::ptr::null()) };
         assert_eq!(out, Some(42));
+    }
+
+    // ── xfrm + FOU/GUE encap tests ──────────────────────────────
+
+    #[test]
+    fn xfrm_info_layout_is_8_bytes() {
+        // u32 if_id + i32 link → 8 bytes packed, no trailing pad.
+        assert_eq!(core::mem::size_of::<BpfXfrmInfo>(), 8);
+        assert_eq!(core::mem::align_of::<BpfXfrmInfo>(), 4);
+    }
+
+    #[test]
+    fn fou_encap_layout_is_4_bytes() {
+        // __be16 sport + __be16 dport → 4 bytes.
+        assert_eq!(core::mem::size_of::<BpfFouEncap>(), 4);
+        assert_eq!(core::mem::align_of::<BpfFouEncap>(), 2);
+    }
+
+    #[test]
+    fn fou_encap_type_discriminants_match_kernel() {
+        assert_eq!(FouEncapType::Fou as i32, 0);
+        assert_eq!(FouEncapType::Gue as i32, 1);
+    }
+
+    #[test]
+    fn skb_get_xfrm_info_returns_injected_value() {
+        host_stubs::host_reset_xfrm_fou_state();
+        host_stubs::host_set_next_xfrm_info(42, 7);
+        let info = unsafe { skb_get_xfrm_info(core::ptr::null_mut()) };
+        assert_eq!(info, Some(BpfXfrmInfo { if_id: 42, link: 7 }));
+    }
+
+    #[test]
+    fn skb_get_xfrm_info_returns_none_on_einval() {
+        host_stubs::host_reset_xfrm_fou_state();
+        host_stubs::host_set_next_xfrm_get_error(-22);
+        let info = unsafe { skb_get_xfrm_info(core::ptr::null_mut()) };
+        assert!(info.is_none());
+    }
+
+    #[test]
+    fn skb_set_xfrm_info_records_last_value() {
+        host_stubs::host_reset_xfrm_fou_state();
+        let info = BpfXfrmInfo {
+            if_id: 100,
+            link: 3,
+        };
+        let ok = unsafe { skb_set_xfrm_info(core::ptr::null_mut(), &info) };
+        assert!(ok);
+        assert_eq!(host_stubs::host_last_xfrm_info(), Some((100, 3)));
+    }
+
+    #[test]
+    fn skb_set_xfrm_info_returns_false_on_error() {
+        host_stubs::host_reset_xfrm_fou_state();
+        host_stubs::host_set_next_xfrm_set_error(-1);
+        let info = BpfXfrmInfo::default();
+        let ok = unsafe { skb_set_xfrm_info(core::ptr::null_mut(), &info) };
+        assert!(!ok);
+        assert_eq!(host_stubs::host_last_xfrm_info(), None);
+    }
+
+    #[test]
+    fn xfrm_info_get_set_roundtrip_preserves_values() {
+        host_stubs::host_reset_xfrm_fou_state();
+        let original = BpfXfrmInfo {
+            if_id: 555,
+            link: -1,
+        };
+        assert!(unsafe { skb_set_xfrm_info(core::ptr::null_mut(), &original) });
+        // Feed the same pair back through the get path so the
+        // wrapper's read side is exercised end-to-end.
+        host_stubs::host_set_next_xfrm_info(original.if_id, original.link);
+        let echoed = unsafe { skb_get_xfrm_info(core::ptr::null_mut()) };
+        assert_eq!(echoed, Some(original));
+    }
+
+    #[test]
+    fn skb_get_fou_encap_returns_injected_value() {
+        host_stubs::host_reset_xfrm_fou_state();
+        host_stubs::host_set_next_fou_encap(0x1234, 0x5678);
+        let encap = unsafe { skb_get_fou_encap(core::ptr::null_mut()) };
+        assert_eq!(
+            encap,
+            Some(BpfFouEncap {
+                sport: 0x1234,
+                dport: 0x5678,
+            })
+        );
+    }
+
+    #[test]
+    fn skb_get_fou_encap_returns_none_on_error() {
+        host_stubs::host_reset_xfrm_fou_state();
+        host_stubs::host_set_next_fou_get_error(-95);
+        let encap = unsafe { skb_get_fou_encap(core::ptr::null_mut()) };
+        assert!(encap.is_none());
+    }
+
+    #[test]
+    fn skb_set_fou_encap_records_ports_and_type() {
+        host_stubs::host_reset_xfrm_fou_state();
+        let encap = BpfFouEncap {
+            sport: 0xAAAA,
+            dport: 0xBBBB,
+        };
+        let ok = unsafe { skb_set_fou_encap(core::ptr::null_mut(), &encap, FouEncapType::Gue) };
+        assert!(ok);
+        assert_eq!(
+            host_stubs::host_last_fou_encap(),
+            Some((0xAAAA, 0xBBBB, FouEncapType::Gue as i32))
+        );
+    }
+
+    #[test]
+    fn skb_set_fou_encap_returns_false_on_error() {
+        host_stubs::host_reset_xfrm_fou_state();
+        host_stubs::host_set_next_fou_set_error(-1);
+        let encap = BpfFouEncap::default();
+        let ok = unsafe { skb_set_fou_encap(core::ptr::null_mut(), &encap, FouEncapType::Fou) };
+        assert!(!ok);
+        assert_eq!(host_stubs::host_last_fou_encap(), None);
+    }
+
+    #[test]
+    fn fou_encap_get_set_roundtrip_preserves_values() {
+        host_stubs::host_reset_xfrm_fou_state();
+        let original = BpfFouEncap {
+            sport: 4789,
+            dport: 6081,
+        };
+        assert!(unsafe { skb_set_fou_encap(core::ptr::null_mut(), &original, FouEncapType::Fou) });
+        host_stubs::host_set_next_fou_encap(original.sport, original.dport);
+        let echoed = unsafe { skb_get_fou_encap(core::ptr::null_mut()) };
+        assert_eq!(echoed, Some(original));
     }
 }
