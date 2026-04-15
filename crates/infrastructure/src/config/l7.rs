@@ -18,6 +18,106 @@ pub struct L7Config {
 
     #[serde(default)]
     pub rules: Vec<L7RuleConfig>,
+
+    /// Userspace TCP stream reassembly (E18-OSS-3).
+    #[serde(default)]
+    pub reassembly: ReassemblyConfig,
+}
+
+/// Userspace L7 stream reassembly configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReassemblyConfig {
+    /// Enables per-flow reassembly. When `false`, each `PacketEvent`
+    /// payload is parsed independently (legacy behaviour).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Maximum number of tracked flows; oldest flow is evicted on overflow.
+    #[serde(default = "default_reassembly_max_flows")]
+    pub max_flows: usize,
+
+    /// Maximum bytes retained per flow.
+    #[serde(default = "default_reassembly_max_buffer_per_flow")]
+    pub max_buffer_per_flow: usize,
+
+    /// Idle timeout in seconds. Flows not seeing new bytes for this
+    /// long are flushed to the parser on the next sweep.
+    #[serde(default = "default_reassembly_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+
+    /// Sweep interval in seconds for the flush-expired background task.
+    #[serde(default = "default_reassembly_sweep_interval_secs")]
+    pub sweep_interval_secs: u64,
+}
+
+impl Default for ReassemblyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_flows: default_reassembly_max_flows(),
+            max_buffer_per_flow: default_reassembly_max_buffer_per_flow(),
+            idle_timeout_secs: default_reassembly_idle_timeout_secs(),
+            sweep_interval_secs: default_reassembly_sweep_interval_secs(),
+        }
+    }
+}
+
+impl ReassemblyConfig {
+    pub(super) fn validate(&self) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.max_flows == 0 {
+            return Err(ConfigError::Validation {
+                field: "l7.reassembly.max_flows".into(),
+                message: "must be at least 1".into(),
+            });
+        }
+        if self.max_buffer_per_flow == 0 {
+            return Err(ConfigError::Validation {
+                field: "l7.reassembly.max_buffer_per_flow".into(),
+                message: "must be at least 1".into(),
+            });
+        }
+        if self.idle_timeout_secs == 0 {
+            return Err(ConfigError::Validation {
+                field: "l7.reassembly.idle_timeout_secs".into(),
+                message: "must be at least 1 second".into(),
+            });
+        }
+        if self.sweep_interval_secs == 0 {
+            return Err(ConfigError::Validation {
+                field: "l7.reassembly.sweep_interval_secs".into(),
+                message: "must be at least 1 second".into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Convert to the domain-layer [`domain::l7::reassembler::ReassemblerConfig`].
+    pub fn to_domain(&self) -> domain::l7::reassembler::ReassemblerConfig {
+        domain::l7::reassembler::ReassemblerConfig {
+            max_flows: self.max_flows,
+            max_buffer_per_flow: self.max_buffer_per_flow,
+            idle_timeout_ns: self.idle_timeout_secs.saturating_mul(1_000_000_000),
+        }
+    }
+}
+
+fn default_reassembly_max_flows() -> usize {
+    1_000
+}
+
+fn default_reassembly_max_buffer_per_flow() -> usize {
+    16 * 1024
+}
+
+fn default_reassembly_idle_timeout_secs() -> u64 {
+    5
+}
+
+fn default_reassembly_sweep_interval_secs() -> u64 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

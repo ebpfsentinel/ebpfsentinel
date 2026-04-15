@@ -1714,6 +1714,60 @@ pub async fn run(
     } else {
         dispatcher
     };
+
+    // ── 10g. Build L7 stream reassembler (optional) ─────────────────
+    let stream_reassembler: Option<Arc<domain::l7::reassembler::StreamReassembler>> =
+        if config.l7.reassembly.enabled {
+            let reassembler = Arc::new(
+                domain::l7::reassembler::StreamReassembler::new(
+                    config.l7.reassembly.to_domain(),
+                ),
+            );
+            info!(
+                max_flows = config.l7.reassembly.max_flows,
+                max_buffer_per_flow = config.l7.reassembly.max_buffer_per_flow,
+                idle_timeout_secs = config.l7.reassembly.idle_timeout_secs,
+                sweep_interval_secs = config.l7.reassembly.sweep_interval_secs,
+                "L7 stream reassembler enabled"
+            );
+            Some(reassembler)
+        } else {
+            None
+        };
+    let dispatcher = if let Some(ref reassembler) = stream_reassembler {
+        dispatcher.with_stream_reassembler(Arc::clone(reassembler))
+    } else {
+        dispatcher
+    };
+
+    // Periodic sweep task: flush flows that went idle past the
+    // configured timeout so their partial buffers can still be parsed.
+    if let Some(ref reassembler) = stream_reassembler {
+        let sweep_handle = Arc::clone(reassembler);
+        let sweep_interval =
+            Duration::from_secs(config.l7.reassembly.sweep_interval_secs.max(1));
+        let sweep_cancel = cancel_token.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(sweep_interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    () = sweep_cancel.cancelled() => break,
+                    _ = ticker.tick() => {
+                        let now_ns = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(0);
+                        let flushed = sweep_handle.flush_expired(now_ns);
+                        if !flushed.is_empty() {
+                            tracing::debug!(count = flushed.len(), "l7 reassembler flushed idle flows");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     let dispatcher_cancel = cancel_token.clone();
     let event_workers = config.agent.event_workers;
     let dispatcher_handle = tokio::spawn(async move {

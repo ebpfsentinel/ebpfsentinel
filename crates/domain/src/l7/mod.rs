@@ -4,3 +4,4 @@ pub mod entity;
 pub mod error;
 pub mod ja4;
 pub mod parser;
+pub mod reassembler;

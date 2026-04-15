@@ -83,6 +83,9 @@ pub struct EventDispatcher {
     fingerprint_cache: Arc<FingerprintCache>,
     encrypted_dns_detector: EncryptedDnsDetector,
     container_resolver: Option<Arc<domain::container::engine::ContainerResolverEngine>>,
+    /// Optional TCP stream reassembler (E18-OSS-3). When present, L7
+    /// events are merged per flow before being handed to `parse_payload`.
+    stream_reassembler: Option<Arc<domain::l7::reassembler::StreamReassembler>>,
 }
 
 impl EventDispatcher {
@@ -114,7 +117,28 @@ impl EventDispatcher {
             )),
             encrypted_dns_detector: EncryptedDnsDetector::default(),
             container_resolver: None,
+            stream_reassembler: None,
         }
+    }
+
+    /// Inject a TCP stream reassembler. When present, L7 events from
+    /// the same flow are accumulated until a protocol boundary is
+    /// detected (HTTP Content-Length) or the idle timeout fires.
+    #[must_use]
+    pub fn with_stream_reassembler(
+        mut self,
+        reassembler: Arc<domain::l7::reassembler::StreamReassembler>,
+    ) -> Self {
+        self.stream_reassembler = Some(reassembler);
+        self
+    }
+
+    /// Return the shared reassembler handle so startup can wire the
+    /// periodic flush sweep.
+    pub fn stream_reassembler(
+        &self,
+    ) -> Option<Arc<domain::l7::reassembler::StreamReassembler>> {
+        self.stream_reassembler.as_ref().map(Arc::clone)
     }
 
     /// Inject the container resolver engine. When present, alerts carry
@@ -686,6 +710,33 @@ impl EventDispatcher {
     }
 
     fn process_l7_event(&self, header: PacketEvent, payload: &[u8]) {
+        // If reassembly is enabled, accumulate fragments per flow. The
+        // first full message emitted by the reassembler replaces the
+        // raw payload slice for downstream protocol parsing.
+        let reassembled_buf: Vec<u8>;
+        let payload: &[u8] = if let Some(ref reassembler) = self.stream_reassembler {
+            let flow = domain::l7::reassembler::FlowId::new(
+                header.src_addr,
+                header.dst_addr,
+                header.src_port,
+                header.dst_port,
+                header.is_ipv6(),
+            );
+            match reassembler.ingest(flow, payload, header.timestamp_ns) {
+                domain::l7::reassembler::Ingest::Complete(bytes) => {
+                    reassembled_buf = bytes;
+                    &reassembled_buf
+                }
+                domain::l7::reassembler::Ingest::Pending => {
+                    // Still buffered — wait for more fragments or a
+                    // periodic `flush_expired` sweep.
+                    return;
+                }
+            }
+        } else {
+            payload
+        };
+
         let protocol = detect_protocol(payload);
         let protocol_label = match protocol {
             DetectedProtocol::Http => "http",

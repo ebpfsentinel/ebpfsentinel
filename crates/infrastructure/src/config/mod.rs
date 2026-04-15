@@ -464,6 +464,9 @@ impl AgentConfig {
             self.l7.ports.iter().copied().collect();
         check_limit("l7.ports", unique_l7_ports.len(), MAX_L7_PORTS)?;
 
+        // Validate L7 stream reassembly tunables (E18-OSS-3).
+        self.l7.reassembly.validate()?;
+
         // Validate auth config
         if self.auth.enabled {
             let has_jwt = !self.auth.jwt.public_key_path.is_empty();
