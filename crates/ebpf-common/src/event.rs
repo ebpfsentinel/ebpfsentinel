@@ -22,6 +22,14 @@ pub const MAX_L7_PAYLOAD: usize = 2048;
 /// TCP payload is ≤ 512 bytes, saving 1 536 bytes per RingBuf entry (75%).
 pub const SMALL_L7_PAYLOAD: usize = 512;
 
+/// Maximum number of destination ports tracked by the `L7_PORTS` HashMap
+/// in the `tc-ids` eBPF program.
+///
+/// Each entry is ~64 B (HashMap overhead), so the kernel-side footprint
+/// is ~16 KiB — negligible, and the lookup is O(1) regardless of the
+/// entry count.
+pub const MAX_L7_PORTS: u32 = 256;
+
 /// Flag bit: packet is IPv6 (otherwise IPv4).
 pub const FLAG_IPV6: u8 = 0x01;
 /// Flag bit: packet had an 802.1Q VLAN tag.

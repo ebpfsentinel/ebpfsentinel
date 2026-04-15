@@ -87,7 +87,7 @@ use crate::constants::{DEFAULT_GRPC_PORT, DEFAULT_HTTP_PORT, DEFAULT_METRICS_POR
 use alias::MAX_ALIASES;
 use common::{
     MAX_ALERTING_ROUTES, MAX_DLP_PATTERNS, MAX_FIREWALL_RULES, MAX_IDS_RULES, MAX_IPS_RULES,
-    MAX_L7_RULES, MAX_RATELIMIT_RULES, MAX_THREATINTEL_FEEDS, check_limit,
+    MAX_L7_PORTS, MAX_L7_RULES, MAX_RATELIMIT_RULES, MAX_THREATINTEL_FEEDS, check_limit,
     parse_domain_mode as pdm, reject_if_world_readable, validate_key_path,
 };
 use ddos::MAX_DDOS_POLICIES;
@@ -457,6 +457,12 @@ impl AgentConfig {
         for (idx, rule_cfg) in self.l7.rules.iter().enumerate() {
             rule_cfg.validate(idx)?;
         }
+
+        // Validate L7 inspection ports count against the kernel map capacity.
+        // Dedup first so a config with repeated ports does not trip the limit.
+        let unique_l7_ports: std::collections::BTreeSet<u16> =
+            self.l7.ports.iter().copied().collect();
+        check_limit("l7.ports", unique_l7_ports.len(), MAX_L7_PORTS)?;
 
         // Validate auth config
         if self.auth.enabled {
@@ -2087,6 +2093,45 @@ l7:
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let ports = config.l7_ports();
         assert_eq!(ports, vec![80, 443, 8080]);
+    }
+
+    #[test]
+    fn l7_ports_validate_accepts_max_capacity() {
+        let ports: Vec<String> = (1..=MAX_L7_PORTS).map(|p| p.to_string()).collect();
+        let yaml = format!(
+            "agent:\n  interfaces: [eth0]\nl7:\n  ports: [{}]\n",
+            ports.join(", ")
+        );
+        let config = AgentConfig::from_yaml(&yaml).unwrap();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.l7_ports().len(), MAX_L7_PORTS);
+    }
+
+    #[test]
+    fn l7_ports_validate_rejects_over_capacity() {
+        let ports: Vec<String> = (1..=(MAX_L7_PORTS + 1)).map(|p| p.to_string()).collect();
+        let yaml = format!(
+            "agent:\n  interfaces: [eth0]\nl7:\n  ports: [{}]\n",
+            ports.join(", ")
+        );
+        let err = AgentConfig::from_yaml(&yaml).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Validation { ref field, .. } if field == "l7.ports"),
+            "unexpected error variant: {err:?}"
+        );
+    }
+
+    #[test]
+    fn l7_ports_validate_dedupes_before_limit_check() {
+        // Duplicate entries must not trip the cap — only unique ports count.
+        let mut ports: Vec<String> = (1..=MAX_L7_PORTS).map(|p| p.to_string()).collect();
+        ports.extend((1..=MAX_L7_PORTS).map(|p| p.to_string()));
+        let yaml = format!(
+            "agent:\n  interfaces: [eth0]\nl7:\n  ports: [{}]\n",
+            ports.join(", ")
+        );
+        let config = AgentConfig::from_yaml(&yaml).unwrap();
+        assert!(config.validate().is_ok());
     }
 
     #[test]

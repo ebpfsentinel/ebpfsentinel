@@ -24,7 +24,7 @@ use ebpf_helpers::{emit_packet_event, increment_metric, ringbuf_has_backpressure
 use ebpf_common::{
     event::{
         PacketEvent, EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, FLAG_VLAN,
-        MAX_L7_PAYLOAD, SMALL_L7_PAYLOAD,
+        MAX_L7_PAYLOAD, MAX_L7_PORTS, SMALL_L7_PAYLOAD,
     },
     ids::{
         IdsSamplingConfig, IdsPatternKey, IdsPatternValue, IDS_ACTION_DROP, IDS_SAMPLING_RANDOM,
@@ -117,10 +117,12 @@ static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32> =
 static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
     LpmTrie::with_max_entries(MAX_TENANT_SUBNET_V6_LPM_ENTRIES, 0);
 
-/// L7 port lookup: dst_port → enabled flag. When set, TCP packets to this port
-/// have their payload captured and sent to userspace for L7 protocol parsing.
+/// L7 port lookup: dst_port → enabled flag. When set, TCP packets to this
+/// port have their payload captured and sent to userspace for L7 protocol
+/// parsing. Capacity is `MAX_L7_PORTS` (256) — enough to cover databases,
+/// message brokers, caches, and custom services concurrently.
 #[map]
-static L7_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(64, 0);
+static L7_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(MAX_L7_PORTS, 0);
 
 /// Small L7 event buffer: `PacketEvent` header + `SMALL_L7_PAYLOAD` bytes
 /// of payload (512 B). Used when TCP payload ≤ 512 bytes — saves ~75%

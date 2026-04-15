@@ -18,6 +18,9 @@ pub(super) const MAX_IDS_RULES: usize = 50_000;
 pub(super) const MAX_IPS_RULES: usize = 50_000;
 /// Maximum L7 rules.
 pub(super) const MAX_L7_RULES: usize = 10_000;
+/// Maximum L7 inspection ports (must match `ebpf_common::event::MAX_L7_PORTS`
+/// and the `L7_PORTS` HashMap capacity in `tc-ids`).
+pub(super) const MAX_L7_PORTS: usize = 256;
 /// Maximum DLP patterns.
 pub(super) const MAX_DLP_PATTERNS: usize = 1_000;
 /// Maximum threat intel feeds.
