@@ -697,6 +697,11 @@ fn emit_event(
         (*ptr).vlan_id = vlan_id;
         (*ptr).cpu_id = bpf_get_smp_processor_id() as u16;
         (*ptr).socket_cookie = 0;
+        (*ptr).cgroup_id = 0;
+        (*ptr).cgroup1_id = 0;
+        (*ptr).rss_hash = 0;
+        (*ptr).rss_hash_type = 0;
+        (*ptr).rx_hw_timestamp_ns = 0;
         event.submit(0);
     }
 }

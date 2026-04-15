@@ -1,7 +1,7 @@
 //! Optional L7 protocol parser extension point.
 //!
 //! The OSS `domain::l7::parser` ships built-in detection for HTTP, TLS,
-//! gRPC, SMTP, FTP, SMB, SSH, Redis, MySQL, PostgreSQL, DNS-over-TCP,
+//! gRPC, SMTP, FTP, SMB, SSH, Redis, `MySQL`, `PostgreSQL`, DNS-over-TCP,
 //! IMAP, and POP3. The enterprise edition implements this trait to add
 //! coverage for message brokers (MQTT, AMQP, NATS) and distributed
 //! databases (Cassandra) without polluting the OSS enum surface.

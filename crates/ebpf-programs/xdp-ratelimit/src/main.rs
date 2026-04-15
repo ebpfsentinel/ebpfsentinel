@@ -1628,6 +1628,11 @@ fn emit_ddos_event(
             (*ptr).vlan_id = vlan_id;
             (*ptr).cpu_id = bpf_get_smp_processor_id() as u16;
             (*ptr).socket_cookie = 0;
+            (*ptr).cgroup_id = 0;
+            (*ptr).cgroup1_id = 0;
+            (*ptr).rss_hash = 0;
+            (*ptr).rss_hash_type = 0;
+            (*ptr).rx_hw_timestamp_ns = 0;
         }
         entry.submit(0);
     } else {
@@ -1931,6 +1936,11 @@ fn emit_ratelimit_event(
             (*ptr).vlan_id = vlan_id;
             (*ptr).cpu_id = bpf_get_smp_processor_id() as u16;
             (*ptr).socket_cookie = 0; // Not available in XDP context
+            (*ptr).cgroup_id = 0;
+            (*ptr).cgroup1_id = 0;
+            (*ptr).rss_hash = 0;
+            (*ptr).rss_hash_type = 0;
+            (*ptr).rx_hw_timestamp_ns = 0;
         }
         entry.submit(0);
     } else {

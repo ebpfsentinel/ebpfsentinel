@@ -110,15 +110,15 @@ pub struct RedisCommand {
     pub arg_count: u32,
 }
 
-/// Parsed MySQL COM_QUERY packet.
+/// Parsed `MySQL` `COM_QUERY` packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MySqlQuery {
     pub command: u8,
-    /// SQL statement text when `command == 0x03` (COM_QUERY), empty otherwise.
+    /// SQL statement text when `command == 0x03` (`COM_QUERY`), empty otherwise.
     pub query: String,
 }
 
-/// Parsed PostgreSQL front-end message (Simple Query or startup).
+/// Parsed `PostgreSQL` front-end message (Simple Query or startup).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostgresQuery {
     /// Message type byte (`Q`, `P`, `B`, …). `0` for startup messages.
@@ -219,7 +219,7 @@ pub enum L7Matcher {
         key_pattern: Option<String>,
     },
     MySql {
-        /// Expected MySQL command byte (e.g. `0x03` for COM_QUERY).
+        /// Expected `MySQL` command byte (e.g. `0x03` for `COM_QUERY`).
         command: Option<u8>,
         /// Case-insensitive substring against the SQL statement.
         query_pattern: Option<String>,
@@ -358,6 +358,7 @@ impl L7Rule {
     ///
     /// Returns `true` if the protocol variant matches and all specified
     /// patterns match (case-insensitive substring).
+    #[allow(clippy::too_many_lines)]
     pub fn matches_l7(&self, parsed: &ParsedProtocol) -> bool {
         match (&self.matcher, parsed) {
             (
@@ -562,6 +563,9 @@ mod tests {
             socket_cookie: 0,
             cgroup_id: 0,
             cgroup1_id: 0,
+            rss_hash: 0,
+            rss_hash_type: 0,
+            rx_hw_timestamp_ns: 0,
         }
     }
 

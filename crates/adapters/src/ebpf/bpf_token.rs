@@ -133,7 +133,7 @@ pub fn create_token(attr: &TokenCreateAttr) -> Result<OwnedFd, BpfTokenError> {
         allowed_progs: attr.allowed_progs,
         allowed_attachs: attr.allowed_attachs,
     };
-    let attr_ptr: *const BpfAttrTokenCreate = &kernel_attr;
+    let attr_ptr: *const BpfAttrTokenCreate = &raw const kernel_attr;
     #[allow(clippy::cast_possible_truncation)]
     let size = mem::size_of::<BpfAttrTokenCreate>() as u32;
 

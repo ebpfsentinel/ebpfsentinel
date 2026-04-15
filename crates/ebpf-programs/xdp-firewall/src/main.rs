@@ -44,6 +44,7 @@ use ebpf_helpers::net::{
     PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes,
     u32_from_be_bytes,
 };
+use ebpf_helpers::kfuncs::{xdp_rx_hash, xdp_rx_timestamp};
 use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{copy_mac_asm, increment_metric, ringbuf_has_backpressure};
 use network_types::{
@@ -609,7 +610,7 @@ fn read_default_policy() -> u8 {
 fn apply_default_policy(ctx: &XdpContext) -> Result<u32, ()> {
     let policy = read_default_policy();
     if policy == DEFAULT_POLICY_DROP {
-        emit_event(ACTION_DROP);
+        emit_event(ctx, ACTION_DROP);
         increment_metric(METRIC_DROPPED);
         Ok(xdp_action::XDP_DROP)
     } else {
@@ -869,7 +870,7 @@ fn process_firewall_v4(
         {
             if !check_connection_limits(src_ip, matched_rule_idx, matched_max_states) {
                 // Connection limit exceeded → DROP.
-                emit_event(ACTION_DROP);
+                emit_event(ctx, ACTION_DROP);
                 increment_metric(METRIC_DROPPED);
                 return Ok(xdp_action::XDP_DROP);
             }
@@ -1342,7 +1343,7 @@ fn process_firewall_v6(
             && (ct_state == CT_STATE_NEW || ct_state == 0xFF)
         {
             if !check_connection_limits(src_addr[0], matched_rule_idx, matched_max_states) {
-                emit_event(ACTION_DROP);
+                emit_event(ctx, ACTION_DROP);
                 increment_metric(METRIC_DROPPED);
                 return Ok(xdp_action::XDP_DROP);
             }
@@ -1479,7 +1480,7 @@ fn match_rule_v6(
 fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
     match action {
         ACTION_DROP => {
-            emit_event(ACTION_DROP);
+            emit_event(ctx, ACTION_DROP);
             increment_metric(METRIC_DROPPED);
             // Try CpuMap redirect for DDoS CPU steering. When userspace has
             // populated DDOS_CPUMAP, dropped packets are redirected to
@@ -1492,14 +1493,14 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
             Ok(xdp_action::XDP_DROP)
         }
         ACTION_REJECT => {
-            emit_event(ACTION_REJECT);
+            emit_event(ctx, ACTION_REJECT);
             increment_metric(METRIC_REJECTED);
             // Return sentinel — the entry point will tail-call to
             // xdp-firewall-reject which has its own 512B stack.
             Ok(XDP_ACTION_REJECT)
         }
         ACTION_LOG => {
-            emit_event(ACTION_LOG);
+            emit_event(ctx, ACTION_LOG);
             increment_metric(METRIC_PASSED);
             write_xdp_metadata(ctx, ACTION_LOG, 0);
             Ok(xdp_action::XDP_PASS)
@@ -1568,8 +1569,15 @@ fn write_xdp_metadata(ctx: &XdpContext, action: u8, rule_id: u32) {
 /// from the `PKT_CTX` per-CPU scratch buffer (must be populated before
 /// calling). Skips emission under backpressure (>75% full). If the
 /// buffer is full, increment the events_dropped metric.
+///
+/// Uses the kernel 6.3+ `bpf_xdp_metadata_rx_hash` and
+/// `bpf_xdp_metadata_rx_timestamp` kfuncs to attach hardware-offloaded
+/// RSS hash and RX timestamps when the underlying NIC driver supports
+/// them. Drivers without metadata offload return `-EOPNOTSUPP` and the
+/// fields stay 0 — userspace consumers gate on
+/// `PacketEvent::has_hw_rss_hash` / `has_hw_timestamp`.
 #[inline(always)]
-fn emit_event(action: u8) {
+fn emit_event(ctx: &XdpContext, action: u8) {
     if ringbuf_has_backpressure() {
         increment_metric(METRIC_EVENTS_DROPPED);
         return;
@@ -1578,6 +1586,8 @@ fn emit_event(action: u8) {
         Some(p) => p,
         None => return,
     };
+    let (rss_hash, rss_hash_type) = unsafe { xdp_rx_hash(ctx.ctx.cast()) }.unwrap_or((0, 0));
+    let rx_hw_ts = unsafe { xdp_rx_timestamp(ctx.ctx.cast()) }.unwrap_or(0);
     if let Some(mut entry) = EVENTS.reserve::<PacketEvent>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
@@ -1594,6 +1604,11 @@ fn emit_event(action: u8) {
             (*ptr).vlan_id = (*pkt).vlan_id;
             (*ptr).cpu_id = bpf_get_smp_processor_id() as u16;
             (*ptr).socket_cookie = 0; // Not available in XDP context
+            (*ptr).cgroup_id = 0; // No process context in XDP softirq
+            (*ptr).cgroup1_id = 0;
+            (*ptr).rss_hash = rss_hash;
+            (*ptr).rss_hash_type = rss_hash_type;
+            (*ptr).rx_hw_timestamp_ns = rx_hw_ts;
         }
         entry.submit(0);
     } else {

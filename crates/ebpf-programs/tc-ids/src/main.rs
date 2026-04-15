@@ -656,6 +656,12 @@ unsafe fn fill_l7_header(
         // Valid on egress where current task owns skb; 0 on ingress
         // softirq, userspace falls back to /proc parsing.
         header.cgroup_id = bpf_get_current_cgroup_id();
+        header.cgroup1_id = 0;
+        // RSS hash + RX timestamp are XDP-only metadata, populated by
+        // xdp-firewall on the ingress path. TC programs leave them at 0.
+        header.rss_hash = 0;
+        header.rss_hash_type = 0;
+        header.rx_hw_timestamp_ns = 0;
     }
 }
 

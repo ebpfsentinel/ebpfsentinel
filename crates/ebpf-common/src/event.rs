@@ -84,7 +84,7 @@ pub const fn is_tcp(flags: u8) -> bool {
 /// - IPv4: `[v4_addr, 0, 0, 0]`
 /// - IPv6: full 128-bit address in network order
 ///
-/// Size: 80 bytes (aligned to 8 bytes due to `timestamp_ns` u64).
+/// Size: 96 bytes (aligned to 8 bytes due to `timestamp_ns` u64).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PacketEvent {
@@ -118,6 +118,23 @@ pub struct PacketEvent {
     /// as a secondary key when the cgroup v2 hierarchy is not the
     /// authoritative one (legacy Docker, RHEL 7 compat mode).
     pub cgroup1_id: u64,
+    /// NIC-computed RSS hash from the `bpf_xdp_metadata_rx_hash`
+    /// kfunc (kernel 6.3+). 0 when the driver lacks hardware RSS or
+    /// the program ran in a TC context. Userspace consumers can reuse
+    /// this as a flow key without recomputing FNV/Maglev hashes.
+    pub rss_hash: u32,
+    /// `xdp_rss_hash_type` bitmask paired with [`Self::rss_hash`].
+    /// Reports which header layers participated in the NIC hash
+    /// (L3-only, L4 IPv4 TCP, L4 IPv6 UDP, …) so the consumer can
+    /// pick the right bias when feeding load-balancing or anomaly
+    /// detection.
+    pub rss_hash_type: u32,
+    /// Hardware RX timestamp (nanoseconds since boot) from the
+    /// `bpf_xdp_metadata_rx_timestamp` kfunc (kernel 6.3+). 0 when
+    /// the driver lacks hardware timestamping or the program ran in
+    /// a TC context. Used by beaconing/jitter detectors to record
+    /// arrival times with sub-microsecond precision.
+    pub rx_hw_timestamp_ns: u64,
 }
 
 // SAFETY: Both types are #[repr(C)], Copy, 'static, and contain only primitive
@@ -151,6 +168,21 @@ impl PacketEvent {
     pub const fn has_vlan(&self) -> bool {
         has_vlan(self.flags)
     }
+
+    /// Returns `true` when the NIC populated [`Self::rss_hash`] /
+    /// [`Self::rss_hash_type`] via `bpf_xdp_metadata_rx_hash`.
+    #[inline]
+    pub const fn has_hw_rss_hash(&self) -> bool {
+        self.rss_hash != 0 || self.rss_hash_type != 0
+    }
+
+    /// Returns `true` when the NIC populated
+    /// [`Self::rx_hw_timestamp_ns`] via
+    /// `bpf_xdp_metadata_rx_timestamp`.
+    #[inline]
+    pub const fn has_hw_timestamp(&self) -> bool {
+        self.rx_hw_timestamp_ns != 0
+    }
 }
 
 #[cfg(test)]
@@ -160,7 +192,7 @@ mod tests {
 
     #[test]
     fn test_packet_event_size() {
-        assert_eq!(mem::size_of::<PacketEvent>(), 80);
+        assert_eq!(mem::size_of::<PacketEvent>(), 96);
     }
 
     #[test]
@@ -232,7 +264,10 @@ mod tests {
         assert_eq!(mem::offset_of!(PacketEvent, socket_cookie), 56);
         assert_eq!(mem::offset_of!(PacketEvent, cgroup_id), 64);
         assert_eq!(mem::offset_of!(PacketEvent, cgroup1_id), 72);
-        assert_eq!(mem::size_of::<PacketEvent>(), 80);
+        assert_eq!(mem::offset_of!(PacketEvent, rss_hash), 80);
+        assert_eq!(mem::offset_of!(PacketEvent, rss_hash_type), 84);
+        assert_eq!(mem::offset_of!(PacketEvent, rx_hw_timestamp_ns), 88);
+        assert_eq!(mem::size_of::<PacketEvent>(), 96);
     }
 
     #[test]
@@ -253,6 +288,9 @@ mod tests {
             socket_cookie: 0,
             cgroup_id: 0,
             cgroup1_id: 0,
+            rss_hash: 0,
+            rss_hash_type: 0,
+            rx_hw_timestamp_ns: 0,
         };
         assert_eq!(event.src_ip(), 0xC0A8_0001);
         assert_eq!(event.dst_ip(), 0x0A00_0001);
@@ -278,6 +316,9 @@ mod tests {
             socket_cookie: 0,
             cgroup_id: 0,
             cgroup1_id: 0,
+            rss_hash: 0,
+            rss_hash_type: 0,
+            rx_hw_timestamp_ns: 0,
         };
         assert!(event.is_ipv6());
         assert!(!event.has_vlan());
@@ -331,6 +372,9 @@ mod tests {
             socket_cookie: 0,
             cgroup_id: 0,
             cgroup1_id: 0,
+            rss_hash: 0,
+            rss_hash_type: 0,
+            rx_hw_timestamp_ns: 0,
         };
         assert!(!event.is_ipv6());
         assert!(event.has_vlan());

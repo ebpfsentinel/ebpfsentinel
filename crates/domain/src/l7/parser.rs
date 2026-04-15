@@ -1,7 +1,7 @@
 use super::entity::{
-    DetectedProtocol, DnsTcpMessage, FtpCommand, GrpcRequest, HttpRequest, ImapCommand,
-    MySqlQuery, ParsedProtocol, Pop3Command, PostgresQuery, RedisCommand, SmbHeader, SmtpCommand,
-    SshBanner, TlsClientHello,
+    DetectedProtocol, DnsTcpMessage, FtpCommand, GrpcRequest, HttpRequest, ImapCommand, MySqlQuery,
+    ParsedProtocol, Pop3Command, PostgresQuery, RedisCommand, SmbHeader, SmtpCommand, SshBanner,
+    TlsClientHello,
 };
 use super::error::L7Error;
 
@@ -133,10 +133,10 @@ fn is_imap(payload: &[u8]) -> bool {
         return false;
     }
     // Tag is typically alphanumeric (e.g. "a001", "tag42").
-    if !tag.iter().all(|b| b.is_ascii_alphanumeric()) {
+    if !tag.iter().all(u8::is_ascii_alphanumeric) {
         return false;
     }
-    IMAP_COMMANDS.iter().any(|c| *c == cmd)
+    IMAP_COMMANDS.contains(&cmd)
 }
 
 /// POP3 detection is anchored on server responses (`+OK` / `-ERR`).
@@ -199,13 +199,13 @@ fn is_postgres(payload: &[u8]) -> bool {
     // Front-end Simple Query: `Q` + u32 length + null-terminated string.
     if payload.len() >= 5 && payload[0] == b'Q' {
         let len = u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]);
-        return len >= 5 && len <= 64 * 1024;
+        return (5..=64 * 1024).contains(&len);
     }
     // StartupMessage: u32 length + u32 protocol version (0x00030000 for v3.0).
     if payload.len() >= 8 {
         let len = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
         let ver = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
-        if ver == 0x0003_0000 && len >= 8 && len <= 64 * 1024 {
+        if ver == 0x0003_0000 && (8..=64 * 1024).contains(&len) {
             return true;
         }
     }
@@ -218,7 +218,7 @@ fn is_dns_tcp(payload: &[u8]) -> bool {
         return false;
     }
     let len = u16::from_be_bytes([payload[0], payload[1]]) as usize;
-    if len < 12 || len > 512 {
+    if !(12..=512).contains(&len) {
         return false;
     }
     // QR bit + Z reserved = 0, OPCODE <= 5.
@@ -916,7 +916,10 @@ pub fn parse_smb(payload: &[u8]) -> Result<SmbHeader, L7Error> {
 /// Parse an SSH banner line (`SSH-<proto>-<software>\r\n`).
 pub fn parse_ssh(payload: &[u8]) -> Result<SshBanner, L7Error> {
     // Banner is ASCII; cap at 255 B (RFC 4253 §4.2).
-    let end = payload.iter().position(|&b| b == b'\n').unwrap_or(payload.len());
+    let end = payload
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(payload.len());
     let line = &payload[..end];
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     let text = core::str::from_utf8(line).map_err(|_| L7Error::InvalidFormat {
@@ -956,6 +959,7 @@ pub fn parse_redis(payload: &[u8]) -> Result<RedisCommand, L7Error> {
         });
     }
     let mut idx = 1;
+    #[allow(clippy::cast_possible_truncation)]
     let arg_count = read_decimal_until_crlf(payload, &mut idx)? as u32;
     if arg_count == 0 {
         return Ok(RedisCommand {
@@ -1010,6 +1014,7 @@ fn read_bulk_string(bytes: &[u8], idx: &mut usize) -> Result<String, L7Error> {
         });
     }
     *idx += 1;
+    #[allow(clippy::cast_possible_truncation)]
     let len = read_decimal_until_crlf(bytes, idx)? as usize;
     if *idx + len + 2 > bytes.len() {
         return Err(L7Error::InvalidFormat {
@@ -1030,12 +1035,15 @@ fn read_bulk_string(bytes: &[u8], idx: &mut usize) -> Result<String, L7Error> {
 
 // ── MySQL parser ──────────────────────────────────────────────────
 
-/// Parse a MySQL COM_QUERY packet (command byte 0x03) or a handshake
-/// response. Only the command byte and, for COM_QUERY, the SQL text
+/// Parse a `MySQL` `COM_QUERY` packet (command byte 0x03) or a handshake
+/// response. Only the command byte and, for `COM_QUERY`, the SQL text
 /// are extracted.
 pub fn parse_mysql(payload: &[u8]) -> Result<MySqlQuery, L7Error> {
     if payload.len() < 5 {
-        return Err(L7Error::InsufficientData { needed: 5, got: payload.len() });
+        return Err(L7Error::InsufficientData {
+            needed: 5,
+            got: payload.len(),
+        });
     }
     let len = u32::from_le_bytes([payload[0], payload[1], payload[2], 0]) as usize;
     let command = payload[4];
@@ -1054,7 +1062,7 @@ pub fn parse_mysql(payload: &[u8]) -> Result<MySqlQuery, L7Error> {
 
 // ── PostgreSQL parser ─────────────────────────────────────────────
 
-/// Parse a PostgreSQL Simple Query (`Q`) or StartupMessage.
+/// Parse a `PostgreSQL` Simple Query (`Q`) or `StartupMessage`.
 pub fn parse_postgres(payload: &[u8]) -> Result<PostgresQuery, L7Error> {
     if payload.is_empty() {
         return Err(L7Error::InsufficientData { needed: 1, got: 0 });
@@ -1062,7 +1070,10 @@ pub fn parse_postgres(payload: &[u8]) -> Result<PostgresQuery, L7Error> {
     // Simple Query: first byte `Q`.
     if payload[0] == b'Q' {
         if payload.len() < 5 {
-            return Err(L7Error::InsufficientData { needed: 5, got: payload.len() });
+            return Err(L7Error::InsufficientData {
+                needed: 5,
+                got: payload.len(),
+            });
         }
         let len = u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]) as usize;
         let body_end = (4 + len).min(payload.len());
@@ -1102,7 +1113,10 @@ pub fn parse_postgres(payload: &[u8]) -> Result<PostgresQuery, L7Error> {
 /// Parse a DNS-over-TCP message header and extract the first QNAME.
 pub fn parse_dns_tcp(payload: &[u8]) -> Result<DnsTcpMessage, L7Error> {
     if payload.len() < 14 {
-        return Err(L7Error::InsufficientData { needed: 14, got: payload.len() });
+        return Err(L7Error::InsufficientData {
+            needed: 14,
+            got: payload.len(),
+        });
     }
     // Skip the 2-byte length prefix; operate on the remaining wire message.
     let msg = &payload[2..];
@@ -1140,20 +1154,28 @@ fn read_dns_qname(bytes: &[u8]) -> Result<String, L7Error> {
             });
         }
         if i + 1 + len > bytes.len() {
-            return Err(L7Error::InsufficientData { needed: i + 1 + len, got: bytes.len() });
+            return Err(L7Error::InsufficientData {
+                needed: i + 1 + len,
+                got: bytes.len(),
+            });
         }
         if !out.is_empty() {
             out.push('.');
         }
         out.push_str(
-            core::str::from_utf8(&bytes[i + 1..i + 1 + len]).map_err(|_| L7Error::InvalidFormat {
-                protocol: "DNS",
-                detail: "non-ascii label".to_string(),
+            core::str::from_utf8(&bytes[i + 1..i + 1 + len]).map_err(|_| {
+                L7Error::InvalidFormat {
+                    protocol: "DNS",
+                    detail: "non-ascii label".to_string(),
+                }
             })?,
         );
         i += 1 + len;
     }
-    Err(L7Error::InsufficientData { needed: bytes.len() + 1, got: bytes.len() })
+    Err(L7Error::InsufficientData {
+        needed: bytes.len() + 1,
+        got: bytes.len(),
+    })
 }
 
 // ── IMAP parser ───────────────────────────────────────────────────
@@ -1163,7 +1185,10 @@ fn read_dns_qname(bytes: &[u8]) -> Result<String, L7Error> {
 /// Handles both client tagged commands (`a001 LOGIN user pass`) and
 /// server untagged responses (`* OK Dovecot ready`).
 pub fn parse_imap(payload: &[u8]) -> Result<ImapCommand, L7Error> {
-    let end = payload.iter().position(|&b| b == b'\n').unwrap_or(payload.len());
+    let end = payload
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(payload.len());
     let line = &payload[..end];
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     let text = core::str::from_utf8(line).map_err(|_| L7Error::InvalidFormat {
@@ -1180,7 +1205,11 @@ pub fn parse_imap(payload: &[u8]) -> Result<ImapCommand, L7Error> {
         .to_string();
     let command = parts.next().unwrap_or("").to_ascii_uppercase();
     let params = parts.next().unwrap_or("").to_string();
-    Ok(ImapCommand { tag, command, params })
+    Ok(ImapCommand {
+        tag,
+        command,
+        params,
+    })
 }
 
 // ── POP3 parser ───────────────────────────────────────────────────
@@ -1191,7 +1220,10 @@ pub fn parse_imap(payload: &[u8]) -> Result<ImapCommand, L7Error> {
 /// equal to `+OK` or `-ERR`. Client commands drop the argument list into
 /// `params` unchanged.
 pub fn parse_pop3(payload: &[u8]) -> Result<Pop3Command, L7Error> {
-    let end = payload.iter().position(|&b| b == b'\n').unwrap_or(payload.len());
+    let end = payload
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(payload.len());
     let line = &payload[..end];
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     let text = core::str::from_utf8(line).map_err(|_| L7Error::InvalidFormat {

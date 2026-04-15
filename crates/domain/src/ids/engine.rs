@@ -620,6 +620,9 @@ mod tests {
             socket_cookie: 0,
             cgroup_id: 0,
             cgroup1_id: 0,
+            rss_hash: 0,
+            rss_hash_type: 0,
+            rx_hw_timestamp_ns: 0,
         }
     }
 

@@ -19,6 +19,7 @@ pub const MIN_KERNEL_MINOR: u32 = 9;
 
 /// Snapshot of kernel capabilities relevant to the eBPF loader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct KernelFeatures {
     pub major: u32,
     pub minor: u32,

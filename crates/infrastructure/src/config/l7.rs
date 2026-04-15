@@ -336,7 +336,11 @@ impl L7RuleConfig {
                 key_pattern: self.path.clone(),
             }),
             "mysql" => Ok(L7Matcher::MySql {
-                command: self.smb_command.map(|v| v as u8),
+                command: self.smb_command.map(|v| {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let b = v as u8;
+                    b
+                }),
                 query_pattern: self.path.clone(),
             }),
             "postgres" => Ok(L7Matcher::Postgres {

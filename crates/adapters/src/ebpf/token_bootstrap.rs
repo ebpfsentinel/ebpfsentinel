@@ -3,14 +3,13 @@
 //! Runs at agent startup and decides which BPF loading mode the
 //! process will use:
 //!
-//! - `Token`         — kernel 6.9+ `BPF_TOKEN_CREATE` against a
-//!                     delegated bpffs mount; the process drops
-//!                     `CAP_BPF` / `CAP_NET_ADMIN` as soon as the
-//!                     token fd is obtained.
-//! - `Capabilities`  — kernel 5.8+ fine-grained capabilities
-//!                     (`CAP_BPF` + `CAP_NET_ADMIN` + `CAP_PERFMON`).
-//! - `Privileged`    — legacy fallback for kernels without
-//!                     `CAP_BPF` (< 5.8).
+//! - `Token` — kernel 6.9+ `BPF_TOKEN_CREATE` against a delegated
+//!   bpffs mount; the process drops `CAP_BPF` / `CAP_NET_ADMIN` as
+//!   soon as the token fd is obtained.
+//! - `Capabilities` — kernel 5.8+ fine-grained capabilities
+//!   (`CAP_BPF` + `CAP_NET_ADMIN` + `CAP_PERFMON`).
+//! - `Privileged` — legacy fallback for kernels without `CAP_BPF`
+//!   (< 5.8).
 //!
 //! The caller provides the desired configuration; this module probes
 //! the kernel, attempts the preferred path, and on failure falls back
@@ -100,6 +99,7 @@ impl std::fmt::Debug for BpfLoadingHandle {
             .field("kernel", &self.kernel.version_string())
             .field("reason", &self.reason)
             .field("token_fd_present", &self.token_fd.is_some())
+            .field("bpffs_fd_present", &self.bpffs_fd.is_some())
             .finish()
     }
 }
@@ -164,7 +164,7 @@ pub fn bootstrap_with_kernel(
             if policy.fallback_allow_capabilities {
                 Ok(handle_capabilities(
                     kernel,
-                    &format!("token creation failed: {err}; falling back to capabilities"),
+                    format!("token creation failed: {err}; falling back to capabilities"),
                 ))
             } else {
                 Err(BootstrapError::TokenRequired { source: err })

@@ -1,6 +1,6 @@
 //! TCP stream reassembly for L7 protocol parsing.
 //!
-//! eBPF captures at most `MAX_L7_PAYLOAD` bytes per RingBuf event, so large
+//! eBPF captures at most `MAX_L7_PAYLOAD` bytes per `RingBuf` event, so large
 //! HTTP POST bodies, multi-frame gRPC messages, and multi-packet SQL queries
 //! arrive in pieces. `StreamReassembler` stitches them back together in
 //! userspace before handing the reconstructed buffer to [`parse_payload`].
@@ -158,10 +158,9 @@ impl StreamReassembler {
         // Check HTTP Content-Length completion after the update.
         if let Some(buf) = lock.peek(&flow)
             && http_is_complete(&buf.bytes)
+            && let Some(entry) = lock.pop(&flow)
         {
-            if let Some(entry) = lock.pop(&flow) {
-                return Ingest::Complete(entry.bytes);
-            }
+            return Ingest::Complete(entry.bytes);
         }
 
         Ingest::Pending
@@ -255,7 +254,13 @@ mod tests {
     use super::*;
 
     fn flow(port: u16) -> FlowId {
-        FlowId::new([0xC0A8_0001, 0, 0, 0], [0x0A00_0001, 0, 0, 0], 12345, port, false)
+        FlowId::new(
+            [0xC0A8_0001, 0, 0, 0],
+            [0x0A00_0001, 0, 0, 0],
+            12345,
+            port,
+            false,
+        )
     }
 
     #[test]

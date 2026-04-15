@@ -134,10 +134,7 @@ impl EventDispatcher {
         mut self,
         parser: Arc<dyn ports::secondary::l7_extended_parser_port::L7ExtendedParser>,
     ) -> Self {
-        tracing::info!(
-            extension = parser.name(),
-            "extended L7 parser registered"
-        );
+        tracing::info!(extension = parser.name(), "extended L7 parser registered");
         self.extended_l7_parser = Some(parser);
         self
     }
@@ -156,9 +153,7 @@ impl EventDispatcher {
 
     /// Return the shared reassembler handle so startup can wire the
     /// periodic flush sweep.
-    pub fn stream_reassembler(
-        &self,
-    ) -> Option<Arc<domain::l7::reassembler::StreamReassembler>> {
+    pub fn stream_reassembler(&self) -> Option<Arc<domain::l7::reassembler::StreamReassembler>> {
         self.stream_reassembler.as_ref().map(Arc::clone)
     }
 
@@ -739,6 +734,7 @@ impl EventDispatcher {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn process_l7_event(&self, header: PacketEvent, payload: &[u8]) {
         // If reassembly is enabled, accumulate fragments per flow. The
         // first full message emitted by the reassembler replaces the
@@ -1208,9 +1204,9 @@ mod tests {
     use domain::threatintel::engine::ThreatIntelEngine;
     use ebpf_common::event::{EVENT_TYPE_DLP, EVENT_TYPE_IDS, EVENT_TYPE_L7, EVENT_TYPE_RATELIMIT};
     use ports::secondary::metrics_port::{
-        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, CtMetrics, DdosMetrics,
-        DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics,
-        IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
+        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, CtMetrics,
+        DdosMetrics, DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics,
+        FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
     };
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1301,6 +1297,9 @@ mod tests {
             socket_cookie: 0,
             cgroup_id: 0,
             cgroup1_id: 0,
+            rss_hash: 0,
+            rss_hash_type: 0,
+            rx_hw_timestamp_ns: 0,
             rule_id,
         }
     }
