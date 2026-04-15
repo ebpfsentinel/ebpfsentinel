@@ -151,10 +151,9 @@ mod tests {
     use super::*;
     use domain::common::entity::{DomainMode, RuleId, Severity};
     use ports::secondary::metrics_port::{
-        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
-        DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics, IpsMetrics,
-        LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
-        ContainerMetrics,
+        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, DdosMetrics,
+        DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics,
+        IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
     };
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
@@ -205,6 +204,7 @@ mod tests {
             tls_threat_category: None,
             tls_pqc_status: None,
             container: None,
+            container_metadata: None,
         }
     }
 

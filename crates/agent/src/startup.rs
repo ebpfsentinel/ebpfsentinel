@@ -1595,10 +1595,9 @@ pub async fn run(
 
     // ── 10d. Build container resolver ───────────────────────────────
     let container_resolver = if config.container.resolver.enabled {
-        let proc_resolver = Arc::new(
-            adapters::container::ProcContainerResolver::new(&config.container.resolver.proc_path),
-        )
-            as Arc<dyn domain::container::engine::CgroupReader>;
+        let proc_resolver = Arc::new(adapters::container::ProcContainerResolver::new(
+            &config.container.resolver.proc_path,
+        )) as Arc<dyn domain::container::engine::CgroupReader>;
         let engine = domain::container::engine::ContainerResolverEngine::new(
             proc_resolver,
             config.container.resolver.cache_size,
@@ -1611,6 +1610,37 @@ pub async fn run(
         Some(Arc::new(engine))
     } else {
         info!("Container resolver disabled via config");
+        None
+    };
+
+    // ── 10e. Build Docker metadata enricher (optional) ──────────────
+    let docker_enricher: Option<
+        Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>,
+    > = if config.container.docker.enabled {
+        let socket_path = std::path::Path::new(&config.container.docker.socket);
+        if !socket_path.exists() {
+            warn!(
+                socket = %config.container.docker.socket,
+                "Docker socket not found — enricher will stay dormant until it appears"
+            );
+        }
+        let client = adapters::container::DockerClient::new(
+            &config.container.docker.socket,
+            config.container.docker.timeout_ms,
+        );
+        let cache = adapters::container::DockerCache::new(
+            config.container.docker.cache_size,
+            Duration::from_secs(config.container.docker.cache_ttl_seconds),
+        );
+        let enricher = adapters::container::DockerEnricher::new(client, cache);
+        info!(
+            socket = %config.container.docker.socket,
+            cache_size = config.container.docker.cache_size,
+            cache_ttl_seconds = config.container.docker.cache_ttl_seconds,
+            "Docker metadata enricher initialized"
+        );
+        Some(Arc::new(enricher) as _)
+    } else {
         None
     };
 
@@ -1668,6 +1698,9 @@ pub async fn run(
     .with_stream_sender(alert_stream_tx);
     if let Some(store) = alert_store {
         alert_pipeline = alert_pipeline.with_alert_store(store);
+    }
+    if let Some(enricher) = docker_enricher.clone() {
+        alert_pipeline = alert_pipeline.with_metadata_enricher(enricher);
     }
 
     // Cast the already-built GeoIP adapter to the GeoIpPort trait for alert enrichment

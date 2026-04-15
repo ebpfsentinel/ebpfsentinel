@@ -1110,10 +1110,9 @@ mod tests {
     use domain::threatintel::engine::ThreatIntelEngine;
     use ebpf_common::event::{EVENT_TYPE_DLP, EVENT_TYPE_IDS, EVENT_TYPE_L7, EVENT_TYPE_RATELIMIT};
     use ports::secondary::metrics_port::{
-        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
-        DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics, IpsMetrics,
-        LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
-        ContainerMetrics,
+        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, DdosMetrics,
+        DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics,
+        IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
     };
     use std::sync::atomic::{AtomicU32, Ordering};
 

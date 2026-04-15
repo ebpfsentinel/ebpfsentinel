@@ -90,6 +90,7 @@ mod tests {
             tls_threat_category: None,
             tls_pqc_status: None,
             container: None,
+            container_metadata: None,
         }
     }
 

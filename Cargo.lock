@@ -9,6 +9,7 @@ dependencies = [
  "anyhow",
  "application",
  "arc-swap",
+ "async-trait",
  "axum",
  "aya",
  "aya-log",
@@ -23,6 +24,7 @@ dependencies = [
  "jsonwebtoken",
  "lettre",
  "libc",
+ "lru",
  "maxminddb",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -2170,6 +2172,7 @@ checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 name = "ports"
 version = "0.0.0-dev"
 dependencies = [
+ "async-trait",
  "domain",
  "ebpf-common",
 ]

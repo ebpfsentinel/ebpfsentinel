@@ -338,10 +338,9 @@ impl ports::secondary::ips_blacklist_port::IpsBlacklistPort for IpsBlacklistAdap
 mod tests {
     use super::*;
     use ports::secondary::metrics_port::{
-        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
-        DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics, IpsMetrics,
-        LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
-        ContainerMetrics,
+        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, DdosMetrics,
+        DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics,
+        IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
     };
     use std::net::Ipv4Addr;
     use std::sync::atomic::{AtomicU64, Ordering};

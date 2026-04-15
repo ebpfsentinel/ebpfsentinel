@@ -12,6 +12,7 @@ use domain::ids::entity::IdsAlert;
 use ports::secondary::alert_enrichment_port::AlertEnrichmentPort;
 use ports::secondary::alert_sender::AlertSender;
 use ports::secondary::alert_store::AlertStore;
+use ports::secondary::metadata_enricher_port::MetadataEnricher;
 use ports::secondary::metrics_port::MetricsPort;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -40,6 +41,8 @@ pub struct AlertPipeline {
     alert_store: Option<Arc<dyn AlertStore>>,
     /// Optional enricher for adding domain context to alerts.
     enricher: Option<Arc<dyn AlertEnrichmentPort>>,
+    /// Optional metadata enrichers (Docker, Kubernetes...) evaluated in order.
+    metadata_enrichers: Vec<Arc<dyn MetadataEnricher>>,
     /// Optional simple auto-response evaluator (OSS).
     auto_response: Option<AutoResponseHandler>,
     /// Optional auto-capture trigger (OSS).
@@ -78,8 +81,43 @@ impl AlertPipeline {
             stream_tx: None,
             alert_store: None,
             enricher: None,
+            metadata_enrichers: Vec::new(),
             auto_response: None,
             auto_capture: None,
+        }
+    }
+
+    /// Register a [`MetadataEnricher`]. Enrichers are consulted in registration
+    /// order; the first one that returns `Some(..)` wins.
+    #[must_use]
+    pub fn with_metadata_enricher(mut self, enricher: Arc<dyn MetadataEnricher>) -> Self {
+        tracing::info!(enricher = enricher.name(), "metadata enricher registered");
+        self.metadata_enrichers.push(enricher);
+        self
+    }
+
+    async fn apply_metadata_enrichers(&self, alert: &mut Alert) {
+        if self.metadata_enrichers.is_empty() {
+            return;
+        }
+        let Some(info) = alert.container.as_ref() else {
+            return;
+        };
+        for enricher in &self.metadata_enrichers {
+            match enricher.enrich(info).await {
+                Ok(Some(metadata)) => {
+                    alert.container_metadata = Some(metadata);
+                    return;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::debug!(
+                        enricher = enricher.name(),
+                        error = %err,
+                        "metadata enricher failed"
+                    );
+                }
+            }
         }
     }
 
@@ -190,6 +228,8 @@ impl AlertPipeline {
             enricher.enrich_alert(&mut alert);
         }
 
+        self.apply_metadata_enrichers(&mut alert).await;
+
         // Record alert metrics
         let severity_str = severity_label(alert.severity);
         let technique_id = alert
@@ -251,6 +291,8 @@ impl AlertPipeline {
         if let Some(ref enricher) = self.enricher {
             enricher.enrich_alert(&mut alert);
         }
+
+        self.apply_metadata_enrichers(&mut alert).await;
 
         // Record audit entry for DLP violation
         let audit_detail = format!(
@@ -356,6 +398,8 @@ impl AlertPipeline {
             enricher.enrich_alert(&mut alert);
         }
 
+        self.apply_metadata_enrichers(&mut alert).await;
+
         // Record alert metrics
         let severity_str = severity_label(alert.severity);
         let technique_id = alert
@@ -411,6 +455,8 @@ impl AlertPipeline {
         if let Some(ref enricher) = self.enricher {
             enricher.enrich_alert(&mut alert);
         }
+
+        self.apply_metadata_enrichers(&mut alert).await;
 
         let severity_str = severity_label(alert.severity);
         let technique_id = alert
@@ -475,6 +521,8 @@ impl AlertPipeline {
         if let Some(ref enricher) = self.enricher {
             enricher.enrich_alert(&mut alert);
         }
+
+        self.apply_metadata_enrichers(&mut alert).await;
 
         // Record alert metrics
         let severity_str = severity_label(alert.severity);
@@ -815,10 +863,9 @@ mod tests {
     use domain::common::error::DomainError;
     use ports::secondary::audit_sink::AuditSink;
     use ports::secondary::metrics_port::{
-        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
-        DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics, IpsMetrics,
-        LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
-        ContainerMetrics,
+        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, DdosMetrics,
+        DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics,
+        IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
     };
     use std::future::Future;
     use std::pin::Pin;

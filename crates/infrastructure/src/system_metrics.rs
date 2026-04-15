@@ -162,10 +162,9 @@ pub fn spawn_collection_loop(
 mod tests {
     use super::*;
     use ports::secondary::metrics_port::{
-        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
-        DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics, IpsMetrics,
-        LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
-        ContainerMetrics,
+        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, DdosMetrics,
+        DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics,
+        IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
 

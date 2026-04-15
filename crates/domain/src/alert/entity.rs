@@ -154,6 +154,11 @@ pub struct Alert {
     /// Container context resolved from the event's `cgroup_id` (if any).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<crate::container::entity::ContainerInfo>,
+    /// Enricher metadata attached to [`Self::container`] (Docker inspect,
+    /// Kubernetes API, ...). Populated by a [`MetadataEnricher`] after the
+    /// container resolver produces [`ContainerInfo`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_metadata: Option<crate::container::entity::ContainerMetadata>,
 }
 
 impl Alert {
@@ -206,6 +211,7 @@ impl Alert {
             tls_threat_category: None,
             tls_pqc_status: None,
             container: ids.container.clone(),
+            container_metadata: None,
         }
     }
 
@@ -258,6 +264,7 @@ impl Alert {
             tls_threat_category: None,
             tls_pqc_status: None,
             container: dlp.container.clone(),
+            container_metadata: None,
         }
     }
 
@@ -311,6 +318,7 @@ impl Alert {
             tls_threat_category: None,
             tls_pqc_status: None,
             container: ti.container.clone(),
+            container_metadata: None,
         }
     }
 
@@ -376,6 +384,7 @@ impl Alert {
             tls_threat_category: None,
             tls_pqc_status: None,
             container: None,
+            container_metadata: None,
         }
     }
 
@@ -441,6 +450,7 @@ impl Alert {
             tls_threat_category: None,
             tls_pqc_status: None,
             container: dns.container.clone(),
+            container_metadata: None,
         }
     }
 
@@ -513,6 +523,7 @@ impl Alert {
             tls_threat_category: None,
             tls_pqc_status: None,
             container: None,
+            container_metadata: None,
         }
     }
 
@@ -577,6 +588,7 @@ impl Alert {
             tls_threat_category: None,
             tls_pqc_status: None,
             container: None,
+            container_metadata: None,
         }
     }
 
@@ -650,6 +662,7 @@ impl Alert {
             tls_threat_category: None,
             tls_pqc_status: None,
             container: None,
+            container_metadata: None,
         }
     }
 

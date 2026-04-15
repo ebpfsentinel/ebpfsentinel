@@ -11,6 +11,7 @@ test-utils = []
 [dependencies]
 domain = { workspace = true }
 ebpf-common = { workspace = true }
+async-trait = { workspace = true }
 
 [lints]
 workspace = true

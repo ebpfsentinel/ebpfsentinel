@@ -63,8 +63,12 @@ async fn tls_connect_info_to_socket_addr(
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    if let Some(tls_info) = req.extensions().get::<ConnectInfo<TlsConnectInfo>>().copied() {
-        req.extensions_mut().insert(ConnectInfo(tls_info.0 .0));
+    if let Some(tls_info) = req
+        .extensions()
+        .get::<ConnectInfo<TlsConnectInfo>>()
+        .copied()
+    {
+        req.extensions_mut().insert(ConnectInfo(tls_info.0.0));
     }
     next.run(req).await
 }

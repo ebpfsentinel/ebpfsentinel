@@ -96,6 +96,10 @@ pub struct DockerMetadata {
     pub name: String,
     pub image: String,
     pub labels: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
