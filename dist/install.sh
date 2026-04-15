@@ -14,12 +14,19 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-# Check kernel version >= 6.6
+# Check kernel version >= 6.9
+# Kernel 6.9 is required for:
+#   - BPF token delegation (BPF_TOKEN_CREATE, BPF_F_TOKEN_FD)
+#   - BPF_MAP_TYPE_ARENA mmap'd zero-copy map
+#   - kfuncs bpf_task_get_cgroup1, bpf_xdp_metadata_rx_vlan_tag,
+#     bpf_xdp_get_xfrm_state, bpf_iter_css_task (kernel 6.7–6.8)
 KERNEL_VERSION=$(uname -r | cut -d. -f1-2)
 KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
 KERNEL_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
-if [[ "$KERNEL_MAJOR" -lt 6 ]] || { [[ "$KERNEL_MAJOR" -eq 6 ]] && [[ "$KERNEL_MINOR" -lt 6 ]]; }; then
-  echo "Error: kernel >= 6.6 is required (found $(uname -r))." >&2
+if [[ "$KERNEL_MAJOR" -lt 6 ]] || { [[ "$KERNEL_MAJOR" -eq 6 ]] && [[ "$KERNEL_MINOR" -lt 9 ]]; }; then
+  echo "Error: kernel >= 6.9 is required (found $(uname -r))." >&2
+  echo "       Container-aware least-privilege (BPF token) and cgroup1" >&2
+  echo "       enrichment require kernel 6.9 or later." >&2
   exit 1
 fi
 

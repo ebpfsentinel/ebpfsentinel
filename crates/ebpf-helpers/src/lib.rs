@@ -21,6 +21,7 @@
 pub mod asm;
 pub mod checksum;
 pub mod event;
+pub mod kfuncs;
 pub mod metrics;
 pub mod net;
 pub mod ringbuf;

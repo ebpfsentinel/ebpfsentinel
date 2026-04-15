@@ -49,6 +49,7 @@ fn make_event(rule_id: u32) -> PacketEvent {
         cpu_id: 0,
         socket_cookie: 0,
         cgroup_id: 0,
+            cgroup1_id: 0,
     }
 }
 

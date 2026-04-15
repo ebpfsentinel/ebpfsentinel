@@ -34,12 +34,7 @@ use domain::container::error::ContainerError;
 use ports::secondary::metadata_enricher_port::{MetadataEnricher, NamespaceHook};
 
 /// Prefixes used by the CRI in `containerID` strings.
-const CRI_PREFIXES: &[&str] = &[
-    "containerd://",
-    "cri-o://",
-    "docker://",
-    "crio://",
-];
+const CRI_PREFIXES: &[&str] = &["containerd://", "cri-o://", "docker://", "crio://"];
 
 /// Cached pod metadata. `Arc`-wrapped so the reverse index can share it
 /// without cloning strings on every lookup.
@@ -69,7 +64,11 @@ impl PodInfo {
                 .get(container_id)
                 .cloned()
                 .unwrap_or_default(),
-            labels: self.labels.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            labels: self
+                .labels
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             annotations: self
                 .annotations
                 .iter()
@@ -168,7 +167,10 @@ pub fn pod_info_from(pod: &Pod) -> Option<PodInfo> {
         .unwrap_or_default();
     let node_name = spec.and_then(|s| s.node_name.clone()).unwrap_or_default();
 
-    let owner = metadata.owner_references.as_ref().and_then(|refs| refs.first());
+    let owner = metadata
+        .owner_references
+        .as_ref()
+        .and_then(|refs| refs.first());
     let owner_kind = owner.map(|o| o.kind.clone());
     let owner_name = owner.map(|o| o.name.clone());
 
@@ -294,9 +296,7 @@ impl KubernetesEnricher {
     fn is_k8s_runtime(runtime: ContainerRuntime) -> bool {
         matches!(
             runtime,
-            ContainerRuntime::Containerd
-                | ContainerRuntime::CriO
-                | ContainerRuntime::Docker
+            ContainerRuntime::Containerd | ContainerRuntime::CriO | ContainerRuntime::Docker
         )
     }
 }
@@ -325,9 +325,7 @@ impl MetadataEnricher for KubernetesEnricher {
         if !Self::is_k8s_runtime(*runtime) {
             return Ok(None);
         }
-        self.metrics
-            .lookups_total
-            .fetch_add(1, Ordering::Relaxed);
+        self.metrics.lookups_total.fetch_add(1, Ordering::Relaxed);
         let Some(pod) = self.cache.get(container_id).await else {
             self.metrics.misses_total.fetch_add(1, Ordering::Relaxed);
             return Ok(None);
@@ -395,9 +393,7 @@ pub fn spawn_pod_watcher(
                 }
                 Ok(Event::Init | Event::InitDone) => {}
                 Err(err) => {
-                    metrics
-                        .api_errors_total
-                        .fetch_add(1, Ordering::Relaxed);
+                    metrics.api_errors_total.fetch_add(1, Ordering::Relaxed);
                     warn!(error = %err, "kube pod watcher error, backing off 5s");
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
@@ -410,18 +406,10 @@ pub fn spawn_pod_watcher(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_openapi::api::core::v1::{
-        ContainerStatus, Pod, PodSpec, PodStatus,
-    };
+    use k8s_openapi::api::core::v1::{ContainerStatus, Pod, PodSpec, PodStatus};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 
-    fn pod(
-        uid: &str,
-        name: &str,
-        namespace: &str,
-        node: &str,
-        containers: &[(&str, &str)],
-    ) -> Pod {
+    fn pod(uid: &str, name: &str, namespace: &str, node: &str, containers: &[(&str, &str)]) -> Pod {
         Pod {
             metadata: ObjectMeta {
                 uid: Some(uid.into()),
@@ -518,10 +506,7 @@ mod tests {
             "app",
             "prod",
             "node-b",
-            &[
-                ("app", "containerd://c1"),
-                ("sidecar", "containerd://c2"),
-            ],
+            &[("app", "containerd://c1"), ("sidecar", "containerd://c2")],
         );
         cache.upsert(pod_info_from(&p).unwrap()).await;
         assert!(cache.get("c1").await.is_some());
@@ -618,10 +603,7 @@ mod tests {
             pid: 1,
         };
         assert!(e.enrich(&info).await.unwrap().is_none());
-        assert_eq!(
-            e.metrics.misses_total.load(Ordering::Relaxed),
-            1
-        );
+        assert_eq!(e.metrics.misses_total.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -640,13 +622,7 @@ mod tests {
         let hook = Arc::new(CaptureHook(Arc::clone(&captured)));
 
         let cache = Arc::new(PodCache::new());
-        let p = pod(
-            "uid-1",
-            "app",
-            "prod",
-            "n",
-            &[("app", "containerd://abc")],
-        );
+        let p = pod("uid-1", "app", "prod", "n", &[("app", "containerd://abc")]);
         cache.upsert(pod_info_from(&p).unwrap()).await;
         let e = KubernetesEnricher::with_cache(cache);
         e.set_namespace_hook(hook).await;

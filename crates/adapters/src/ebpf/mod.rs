@@ -1,3 +1,4 @@
+pub mod bpf_token;
 pub mod config_flags_manager;
 pub mod config_ringbuf_writer;
 pub mod conntrack_map_manager;
@@ -10,6 +11,7 @@ pub mod geoip_lpm_manager;
 pub mod ids_map_manager;
 pub mod ids_mirror_map_manager;
 pub mod ipset_map_manager;
+pub mod kernel_probe;
 pub mod l7_ports_manager;
 pub mod lb_map_manager;
 pub mod loader;
@@ -24,6 +26,10 @@ pub mod tenant_subnet_map_manager;
 pub mod tenant_vlan_map_manager;
 pub mod threatintel_map_manager;
 
+pub use bpf_token::{
+    BPF_F_TOKEN_FD, BpfTokenError, TokenCreateAttr, create_enterprise_token, create_token,
+    open_bpffs_dir,
+};
 pub use config_flags_manager::{
     ConfigFlagsManager, InterfaceGroupsManager, ScrubConfigManager, SyncookieSecretManager,
 };
@@ -36,6 +42,7 @@ pub use geoip_lpm_manager::GeoIpLpmManager;
 pub use ids_map_manager::IdsMapManager;
 pub use ids_mirror_map_manager::IdsMirrorMapManager;
 pub use ipset_map_manager::IpSetMapManager;
+pub use kernel_probe::{KernelFeatures, KernelProbeError, probe as probe_kernel_features};
 pub use l7_ports_manager::L7PortsManager;
 pub use lb_map_manager::LbMapManager;
 pub use loader::{DEFAULT_BPF_PIN_PATH, EbpfLoader, xdp_mode_to_flags};

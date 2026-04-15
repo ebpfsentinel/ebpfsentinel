@@ -173,8 +173,10 @@ mod tests {
     }
 
     #[test]
-    fn packet_event_size_is_72_bytes() {
-        assert_eq!(std::mem::size_of::<PacketEvent>(), 72);
+    fn packet_event_size_is_80_bytes() {
+        // 72-byte layout grew to 80 when `cgroup1_id` was appended
+        // for kernel 6.8 `bpf_task_get_cgroup1` support.
+        assert_eq!(std::mem::size_of::<PacketEvent>(), 80);
     }
 
     #[test]

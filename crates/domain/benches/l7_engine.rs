@@ -55,6 +55,7 @@ fn make_header() -> PacketEvent {
         cpu_id: 0,
         socket_cookie: 0,
         cgroup_id: 0,
+            cgroup1_id: 0,
     }
 }
 
