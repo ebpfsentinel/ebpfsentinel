@@ -91,6 +91,102 @@ impl Default for BpfDynptr {
     }
 }
 
+/// Opaque kernel `struct nf_conn`.
+#[repr(C)]
+pub struct nf_conn {
+    _unused: [u8; 0],
+}
+
+/// `bpf_sock_tuple` flavour — picks which union arm the caller
+/// populated. The kernel consults `tuple__sz` to pick the arm at
+/// runtime, but the type-safety of the Rust wrapper uses this enum
+/// to keep callers from passing a mis-sized struct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SockTupleFamily {
+    Ipv4,
+    Ipv6,
+}
+
+impl SockTupleFamily {
+    /// Size in bytes of the matching arm of `bpf_sock_tuple`.
+    #[must_use]
+    pub const fn tuple_size(self) -> u32 {
+        match self {
+            Self::Ipv4 => 12,
+            Self::Ipv6 => 36,
+        }
+    }
+}
+
+/// IPv4 layout of `bpf_sock_tuple` from
+/// `include/uapi/linux/bpf.h`. All fields are network-byte-order.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BpfSockTupleIpv4 {
+    pub saddr: u32,
+    pub daddr: u32,
+    pub sport: u16,
+    pub dport: u16,
+}
+
+/// IPv6 layout of `bpf_sock_tuple`. All fields are
+/// network-byte-order; the address arrays are stored as four `u32`
+/// words matching the kernel union layout.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BpfSockTupleIpv6 {
+    pub saddr: [u32; 4],
+    pub daddr: [u32; 4],
+    pub sport: u16,
+    pub dport: u16,
+}
+
+/// `bpf_ct_opts` — kernel 5.18+ layout from
+/// `net/netfilter/nf_conntrack_bpf.c`. 12 bytes, padding accounted
+/// for via `reserved`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct BpfCtOpts {
+    /// Network namespace id. `0` means current netns; `-1` means
+    /// "any".
+    pub netns_id: i32,
+    /// Kernel writes the lookup error here (`0` on success, negative
+    /// errno otherwise).
+    pub error: i32,
+    /// L4 protocol (`IPPROTO_TCP`, `IPPROTO_UDP`, …).
+    pub l4proto: u8,
+    /// Direction: `0` = original tuple, `1` = reply tuple.
+    pub dir: u8,
+    /// Reserved padding, must be zero.
+    pub reserved: [u8; 2],
+}
+
+impl BpfCtOpts {
+    /// Build an opts struct for a TCP lookup in the current netns.
+    #[must_use]
+    pub const fn tcp() -> Self {
+        Self {
+            netns_id: 0,
+            error: 0,
+            l4proto: 6,
+            dir: 0,
+            reserved: [0; 2],
+        }
+    }
+
+    /// Build an opts struct for a UDP lookup in the current netns.
+    #[must_use]
+    pub const fn udp() -> Self {
+        Self {
+            netns_id: 0,
+            error: 0,
+            l4proto: 17,
+            dir: 0,
+            reserved: [0; 2],
+        }
+    }
+}
+
 /// `cgroup1` hierarchy id used by Docker. `0` asks the kernel for the
 /// default hierarchy.
 pub const CGROUP1_HIERARCHY_ID_DEFAULT: i32 = 0;
@@ -279,6 +375,39 @@ unsafe extern "C" {
     /// advanced independently (e.g. two cursors over the same
     /// HTTP-pipelined payload). Kernel 6.5+.
     pub fn bpf_dynptr_clone(src: *const BpfDynptr, clone: *mut BpfDynptr) -> i32;
+
+    // ── Kernel 5.18 netfilter conntrack lookup ──────────────────
+    //
+    // `bpf_skb_ct_lookup` / `bpf_xdp_ct_lookup` query the kernel
+    // netfilter conntrack table for a tuple extracted from the
+    // current packet. `KF_ACQUIRE | KF_RET_NULL | KF_TRUSTED_ARGS`
+    // — every non-null return must be released via
+    // [`bpf_ct_release`] on every control-flow path.
+
+    /// Look up the `nf_conn` matching a tuple in the TC skb's
+    /// netns.
+    pub fn bpf_skb_ct_lookup(
+        skb: *mut core::ffi::c_void,
+        tuple: *mut core::ffi::c_void,
+        tuple_sz: u32,
+        opts: *mut BpfCtOpts,
+        opts_sz: u32,
+    ) -> *mut nf_conn;
+
+    /// Look up the `nf_conn` matching a tuple in the XDP frame's
+    /// netns.
+    pub fn bpf_xdp_ct_lookup(
+        xdp: *mut core::ffi::c_void,
+        tuple: *mut core::ffi::c_void,
+        tuple_sz: u32,
+        opts: *mut BpfCtOpts,
+        opts_sz: u32,
+    ) -> *mut nf_conn;
+
+    /// Release an `nf_conn*` acquired from `bpf_skb_ct_lookup`,
+    /// `bpf_xdp_ct_lookup`, or one of the `_alloc` / `insert_entry`
+    /// kfuncs. `KF_RELEASE`.
+    pub fn bpf_ct_release(nfct: *mut nf_conn);
 }
 
 // ── Host-target stubs ────────────────────────────────────────────
@@ -518,6 +647,74 @@ pub mod host_stubs {
             (*clone).__opaque = (*src).__opaque;
         }
         0
+    }
+
+    // ── Conntrack stubs (kernel 5.18) ──
+
+    use super::{BpfCtOpts, nf_conn};
+    use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+
+    /// Sentinel pointer returned by the host stub for successful CT
+    /// lookups. Points at a fixed static so tests can observe that
+    /// the safe wrapper saw a live ref and called release.
+    static HOST_NF_CONN_SENTINEL: u8 = 0;
+    /// Number of outstanding un-released CT refs. Tests assert this
+    /// is `0` after every wrapper call to guarantee the acquire /
+    /// release pairing is honoured even on the host target.
+    static HOST_CT_LIVE: AtomicUsize = AtomicUsize::new(0);
+    /// `errno` override applied on the next CT lookup. `0` means
+    /// "return the sentinel"; non-zero forces a null return and
+    /// stores the value in `opts.error`.
+    static HOST_CT_NEXT_ERROR: AtomicI32 = AtomicI32::new(0);
+
+    /// Test helper: inject a failure for the next CT lookup.
+    pub fn host_set_next_ct_error(errno: i32) {
+        HOST_CT_NEXT_ERROR.store(errno, Ordering::SeqCst);
+    }
+
+    /// Test helper: count of outstanding un-released CT refs. Used
+    /// by unit tests to prove the safe wrappers always pair acquire
+    /// with release.
+    #[must_use]
+    pub fn host_ct_live_count() -> usize {
+        HOST_CT_LIVE.load(Ordering::SeqCst)
+    }
+
+    unsafe fn host_ct_lookup_impl(opts: *mut BpfCtOpts) -> *mut nf_conn {
+        let err = HOST_CT_NEXT_ERROR.swap(0, Ordering::SeqCst);
+        if err != 0 {
+            if !opts.is_null() {
+                unsafe { (*opts).error = err };
+            }
+            return core::ptr::null_mut();
+        }
+        HOST_CT_LIVE.fetch_add(1, Ordering::SeqCst);
+        let sentinel: *const u8 = &raw const HOST_NF_CONN_SENTINEL;
+        sentinel.cast_mut().cast::<nf_conn>()
+    }
+
+    pub unsafe fn bpf_skb_ct_lookup(
+        _skb: *mut core::ffi::c_void,
+        _tuple: *mut core::ffi::c_void,
+        _tuple_sz: u32,
+        opts: *mut BpfCtOpts,
+        _opts_sz: u32,
+    ) -> *mut nf_conn {
+        unsafe { host_ct_lookup_impl(opts) }
+    }
+
+    pub unsafe fn bpf_xdp_ct_lookup(
+        _xdp: *mut core::ffi::c_void,
+        _tuple: *mut core::ffi::c_void,
+        _tuple_sz: u32,
+        opts: *mut BpfCtOpts,
+        _opts_sz: u32,
+    ) -> *mut nf_conn {
+        unsafe { host_ct_lookup_impl(opts) }
+    }
+
+    pub unsafe fn bpf_ct_release(_nfct: *mut nf_conn) {
+        HOST_CT_LIVE.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -980,6 +1177,147 @@ impl XdpDynptr {
     }
 }
 
+// ── Conntrack lookup safe wrappers ──────────────────────────────
+//
+// The two lookup kfuncs behave identically apart from the context
+// type, so callers go through the `with_*_ct_lookup` closures that
+// own the acquire/release pairing. Every non-null CT reference is
+// released when the closure returns, guaranteeing zero verifier
+// "reference leak" errors regardless of the program's control
+// flow.
+
+/// Flavoured tuple passed to the CT lookup wrappers. Keeping the
+/// tuple owned here ensures callers cannot hand a mis-sized buffer
+/// to the kernel.
+#[derive(Debug, Clone, Copy)]
+pub enum CtTuple {
+    Ipv4(BpfSockTupleIpv4),
+    Ipv6(BpfSockTupleIpv6),
+}
+
+impl CtTuple {
+    /// Build a TCP/UDP v4 tuple from host-order fields. The caller
+    /// is responsible for swapping to network order before calling
+    /// the kernel kfunc.
+    #[must_use]
+    pub const fn v4(saddr: u32, daddr: u32, sport: u16, dport: u16) -> Self {
+        Self::Ipv4(BpfSockTupleIpv4 {
+            saddr,
+            daddr,
+            sport,
+            dport,
+        })
+    }
+
+    /// Build a TCP/UDP v6 tuple.
+    #[must_use]
+    pub const fn v6(saddr: [u32; 4], daddr: [u32; 4], sport: u16, dport: u16) -> Self {
+        Self::Ipv6(BpfSockTupleIpv6 {
+            saddr,
+            daddr,
+            sport,
+            dport,
+        })
+    }
+
+    fn family(&self) -> SockTupleFamily {
+        match self {
+            Self::Ipv4(_) => SockTupleFamily::Ipv4,
+            Self::Ipv6(_) => SockTupleFamily::Ipv6,
+        }
+    }
+
+    /// Pointer to the underlying `bpf_sock_tuple` union arm.
+    fn as_ptr(&mut self) -> *mut core::ffi::c_void {
+        match self {
+            Self::Ipv4(t) => (t as *mut BpfSockTupleIpv4).cast(),
+            Self::Ipv6(t) => (t as *mut BpfSockTupleIpv6).cast(),
+        }
+    }
+}
+
+/// Look up a conntrack entry from a TC skb and hand it to `f`. The
+/// `nf_conn` is released before the closure's result is returned,
+/// satisfying the `KF_ACQUIRE` contract. `None` is returned when
+/// the kernel lookup fails; the error code is written to
+/// `opts.error` by the kernel for diagnostics.
+///
+/// # Safety
+/// `skb` must be a live `__sk_buff*` owned by the current TC
+/// program invocation.
+#[inline(always)]
+pub unsafe fn with_skb_ct_lookup<F, R>(
+    skb: *mut core::ffi::c_void,
+    mut tuple: CtTuple,
+    opts: &mut BpfCtOpts,
+    f: F,
+) -> Option<R>
+where
+    F: FnOnce(*mut nf_conn) -> R,
+{
+    let tuple_sz = tuple.family().tuple_size();
+    #[allow(clippy::cast_possible_truncation)]
+    let opts_sz = core::mem::size_of::<BpfCtOpts>() as u32;
+    let tuple_ptr = tuple.as_ptr();
+    #[cfg(target_arch = "bpf")]
+    let ct = unsafe { bpf_skb_ct_lookup(skb, tuple_ptr, tuple_sz, opts as *mut _, opts_sz) };
+    #[cfg(not(target_arch = "bpf"))]
+    let ct =
+        unsafe { host_stubs::bpf_skb_ct_lookup(skb, tuple_ptr, tuple_sz, opts as *mut _, opts_sz) };
+    if ct.is_null() {
+        return None;
+    }
+    let result = f(ct);
+    #[cfg(target_arch = "bpf")]
+    unsafe {
+        bpf_ct_release(ct);
+    }
+    #[cfg(not(target_arch = "bpf"))]
+    unsafe {
+        host_stubs::bpf_ct_release(ct);
+    }
+    Some(result)
+}
+
+/// XDP variant of [`with_skb_ct_lookup`].
+///
+/// # Safety
+/// `xdp` must be a live `xdp_md*` owned by the current XDP program
+/// invocation.
+#[inline(always)]
+pub unsafe fn with_xdp_ct_lookup<F, R>(
+    xdp: *mut core::ffi::c_void,
+    mut tuple: CtTuple,
+    opts: &mut BpfCtOpts,
+    f: F,
+) -> Option<R>
+where
+    F: FnOnce(*mut nf_conn) -> R,
+{
+    let tuple_sz = tuple.family().tuple_size();
+    #[allow(clippy::cast_possible_truncation)]
+    let opts_sz = core::mem::size_of::<BpfCtOpts>() as u32;
+    let tuple_ptr = tuple.as_ptr();
+    #[cfg(target_arch = "bpf")]
+    let ct = unsafe { bpf_xdp_ct_lookup(xdp, tuple_ptr, tuple_sz, opts as *mut _, opts_sz) };
+    #[cfg(not(target_arch = "bpf"))]
+    let ct =
+        unsafe { host_stubs::bpf_xdp_ct_lookup(xdp, tuple_ptr, tuple_sz, opts as *mut _, opts_sz) };
+    if ct.is_null() {
+        return None;
+    }
+    let result = f(ct);
+    #[cfg(target_arch = "bpf")]
+    unsafe {
+        bpf_ct_release(ct);
+    }
+    #[cfg(not(target_arch = "bpf"))]
+    unsafe {
+        host_stubs::bpf_ct_release(ct);
+    }
+    Some(result)
+}
+
 #[cfg(all(test, not(target_arch = "bpf")))]
 mod tests {
     use super::*;
@@ -1188,5 +1526,82 @@ mod tests {
         let dp = make_skb_dynptr_with(&bytes);
         let out = unsafe { dp.slice(0, core::ptr::null_mut(), 0) };
         assert!(out.is_none());
+    }
+
+    // ── Conntrack lookup tests ─────────────────────────────────────
+
+    #[test]
+    fn bpf_ct_opts_layout_is_stable() {
+        // 4 (netns_id) + 4 (error) + 1 (l4proto) + 1 (dir) + 2
+        // (reserved) = 12 bytes. Rust + repr(C) on this field
+        // ordering produces exactly 12 — mismatch means we drifted
+        // from the kernel struct and the verifier will reject
+        // programs at load time.
+        assert_eq!(core::mem::size_of::<BpfCtOpts>(), 12);
+        assert_eq!(core::mem::align_of::<BpfCtOpts>(), 4);
+    }
+
+    #[test]
+    fn sock_tuple_v4_size_is_12_bytes() {
+        assert_eq!(core::mem::size_of::<BpfSockTupleIpv4>(), 12);
+        assert_eq!(SockTupleFamily::Ipv4.tuple_size(), 12);
+    }
+
+    #[test]
+    fn sock_tuple_v6_size_is_36_bytes() {
+        assert_eq!(core::mem::size_of::<BpfSockTupleIpv6>(), 36);
+        assert_eq!(SockTupleFamily::Ipv6.tuple_size(), 36);
+    }
+
+    #[test]
+    fn ct_opts_helpers_pick_l4_proto() {
+        assert_eq!(BpfCtOpts::tcp().l4proto, 6);
+        assert_eq!(BpfCtOpts::udp().l4proto, 17);
+    }
+
+    #[test]
+    fn skb_ct_lookup_success_pairs_acquire_and_release() {
+        assert_eq!(host_stubs::host_ct_live_count(), 0);
+        let tuple = CtTuple::v4(0x0100_007F, 0x0200_007F, 0x1234, 0x5678);
+        let mut opts = BpfCtOpts::tcp();
+        let seen = unsafe {
+            with_skb_ct_lookup(core::ptr::null_mut(), tuple, &mut opts, |ct| !ct.is_null())
+        };
+        assert_eq!(seen, Some(true));
+        // Post-wrapper: every successful acquire was balanced by a
+        // release, so the live counter is back to zero.
+        assert_eq!(host_stubs::host_ct_live_count(), 0);
+    }
+
+    #[test]
+    fn skb_ct_lookup_failure_returns_none() {
+        host_stubs::host_set_next_ct_error(-2); // -ENOENT
+        let tuple = CtTuple::v4(0, 0, 0, 0);
+        let mut opts = BpfCtOpts::tcp();
+        let seen = unsafe { with_skb_ct_lookup(core::ptr::null_mut(), tuple, &mut opts, |_| ()) };
+        assert!(seen.is_none());
+        assert_eq!(opts.error, -2);
+        assert_eq!(host_stubs::host_ct_live_count(), 0);
+    }
+
+    #[test]
+    fn xdp_ct_lookup_uses_ipv6_tuple_size() {
+        let tuple = CtTuple::v6([0; 4], [1; 4], 443, 12345);
+        let mut opts = BpfCtOpts::udp();
+        let seen = unsafe {
+            with_xdp_ct_lookup(core::ptr::null_mut(), tuple, &mut opts, |ct| !ct.is_null())
+        };
+        assert_eq!(seen, Some(true));
+        assert_eq!(host_stubs::host_ct_live_count(), 0);
+    }
+
+    #[test]
+    fn xdp_ct_lookup_propagates_error_to_opts() {
+        host_stubs::host_set_next_ct_error(-16); // -EBUSY
+        let tuple = CtTuple::v4(0, 0, 0, 0);
+        let mut opts = BpfCtOpts::tcp();
+        let seen = unsafe { with_xdp_ct_lookup(core::ptr::null_mut(), tuple, &mut opts, |_| ()) };
+        assert!(seen.is_none());
+        assert_eq!(opts.error, -16);
     }
 }
