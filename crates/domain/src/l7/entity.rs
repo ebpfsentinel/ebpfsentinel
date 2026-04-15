@@ -18,6 +18,13 @@ pub enum DetectedProtocol {
     Smtp,
     Ftp,
     Smb,
+    Ssh,
+    Redis,
+    MySql,
+    Postgres,
+    DnsTcp,
+    Imap,
+    Pop3,
     Unknown,
 }
 
@@ -85,6 +92,70 @@ pub struct SmbHeader {
     pub is_smb2: bool,
 }
 
+/// Parsed SSH banner line (`SSH-<proto_version>-<software>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshBanner {
+    pub protocol_version: String,
+    pub software: String,
+}
+
+/// Parsed Redis RESP command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedisCommand {
+    /// Uppercased command verb (`GET`, `SET`, `DEL`, `KEYS`, …).
+    pub command: String,
+    /// Optional first argument (usually the key).
+    pub key: Option<String>,
+    /// Number of arguments in the RESP array (including the command).
+    pub arg_count: u32,
+}
+
+/// Parsed MySQL COM_QUERY packet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MySqlQuery {
+    pub command: u8,
+    /// SQL statement text when `command == 0x03` (COM_QUERY), empty otherwise.
+    pub query: String,
+}
+
+/// Parsed PostgreSQL front-end message (Simple Query or startup).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresQuery {
+    /// Message type byte (`Q`, `P`, `B`, …). `0` for startup messages.
+    pub message_type: u8,
+    /// Statement text for Simple Query / Parse, empty otherwise.
+    pub query: String,
+}
+
+/// Parsed DNS-over-TCP message metadata (reuses the DNS wire format).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnsTcpMessage {
+    pub question_count: u16,
+    pub answer_count: u16,
+    pub is_response: bool,
+    /// First question name when present.
+    pub qname: Option<String>,
+}
+
+/// Parsed IMAP command line or untagged server response.
+///
+/// Clients send `<tag> <COMMAND> [args]\r\n`; servers start untagged
+/// responses with `*` and OK/BAD/NO lines with the same tag as the
+/// request being answered. We keep the tag so rules can target either.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImapCommand {
+    pub tag: String,
+    pub command: String,
+    pub params: String,
+}
+
+/// Parsed POP3 command line or `+OK` / `-ERR` server response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pop3Command {
+    pub command: String,
+    pub params: String,
+}
+
 /// Result of parsing an L7 payload — one variant per supported protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedProtocol {
@@ -94,6 +165,13 @@ pub enum ParsedProtocol {
     Smtp(SmtpCommand),
     Ftp(FtpCommand),
     Smb(SmbHeader),
+    Ssh(SshBanner),
+    Redis(RedisCommand),
+    MySql(MySqlQuery),
+    Postgres(PostgresQuery),
+    DnsTcp(DnsTcpMessage),
+    Imap(ImapCommand),
+    Pop3(Pop3Command),
     Unknown,
 }
 
@@ -128,6 +206,41 @@ pub enum L7Matcher {
     Smb {
         command: Option<u16>,
         is_smb2: Option<bool>,
+    },
+    Ssh {
+        /// Case-insensitive substring against the software banner
+        /// (e.g. `OpenSSH_9.6`).
+        software_pattern: Option<String>,
+    },
+    Redis {
+        /// Exact command verb (case-insensitive).
+        command: Option<String>,
+        /// Case-insensitive substring against the first argument.
+        key_pattern: Option<String>,
+    },
+    MySql {
+        /// Expected MySQL command byte (e.g. `0x03` for COM_QUERY).
+        command: Option<u8>,
+        /// Case-insensitive substring against the SQL statement.
+        query_pattern: Option<String>,
+    },
+    Postgres {
+        /// Expected front-end message type byte (e.g. `b'Q'`).
+        message_type: Option<u8>,
+        /// Case-insensitive substring against the SQL statement.
+        query_pattern: Option<String>,
+    },
+    DnsTcp {
+        /// Case-insensitive substring against the first QNAME.
+        qname_pattern: Option<String>,
+    },
+    Imap {
+        /// Exact command verb (case-insensitive).
+        command: Option<String>,
+    },
+    Pop3 {
+        /// Exact command verb (case-insensitive).
+        command: Option<String>,
     },
 }
 
@@ -301,6 +414,56 @@ impl L7Rule {
                     return false;
                 }
                 true
+            }
+            (L7Matcher::Ssh { software_pattern }, ParsedProtocol::Ssh(banner)) => {
+                matches_opt_substr_ci(software_pattern.as_deref(), &banner.software)
+            }
+            (
+                L7Matcher::Redis {
+                    command,
+                    key_pattern,
+                },
+                ParsedProtocol::Redis(cmd),
+            ) => {
+                matches_opt_ci(command.as_deref(), &cmd.command)
+                    && matches_opt_opt_substr_ci(key_pattern.as_deref(), cmd.key.as_deref())
+            }
+            (
+                L7Matcher::MySql {
+                    command,
+                    query_pattern,
+                },
+                ParsedProtocol::MySql(q),
+            ) => {
+                if let Some(expected) = command
+                    && *expected != q.command
+                {
+                    return false;
+                }
+                matches_opt_substr_ci(query_pattern.as_deref(), &q.query)
+            }
+            (
+                L7Matcher::Postgres {
+                    message_type,
+                    query_pattern,
+                },
+                ParsedProtocol::Postgres(q),
+            ) => {
+                if let Some(expected) = message_type
+                    && *expected != q.message_type
+                {
+                    return false;
+                }
+                matches_opt_substr_ci(query_pattern.as_deref(), &q.query)
+            }
+            (L7Matcher::DnsTcp { qname_pattern }, ParsedProtocol::DnsTcp(msg)) => {
+                matches_opt_opt_substr_ci(qname_pattern.as_deref(), msg.qname.as_deref())
+            }
+            (L7Matcher::Imap { command }, ParsedProtocol::Imap(cmd)) => {
+                matches_opt_ci(command.as_deref(), &cmd.command)
+            }
+            (L7Matcher::Pop3 { command }, ParsedProtocol::Pop3(cmd)) => {
+                matches_opt_ci(command.as_deref(), &cmd.command)
             }
             _ => false,
         }

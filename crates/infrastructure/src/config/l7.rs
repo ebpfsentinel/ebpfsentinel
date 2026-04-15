@@ -328,10 +328,36 @@ impl L7RuleConfig {
                 command: self.smb_command,
                 is_smb2: self.is_smb2,
             }),
+            "ssh" => Ok(L7Matcher::Ssh {
+                software_pattern: self.service.clone(),
+            }),
+            "redis" => Ok(L7Matcher::Redis {
+                command: self.command.clone(),
+                key_pattern: self.path.clone(),
+            }),
+            "mysql" => Ok(L7Matcher::MySql {
+                command: self.smb_command.map(|v| v as u8),
+                query_pattern: self.path.clone(),
+            }),
+            "postgres" => Ok(L7Matcher::Postgres {
+                message_type: self.command.as_deref().and_then(|s| s.bytes().next()),
+                query_pattern: self.path.clone(),
+            }),
+            "dns-tcp" => Ok(L7Matcher::DnsTcp {
+                qname_pattern: self.host.clone(),
+            }),
+            "imap" => Ok(L7Matcher::Imap {
+                command: self.command.clone(),
+            }),
+            "pop3" => Ok(L7Matcher::Pop3 {
+                command: self.command.clone(),
+            }),
             other => Err(ConfigError::InvalidValue {
                 field: "protocol".to_string(),
                 value: other.to_string(),
-                expected: "http, tls, grpc, smtp, ftp, smb".to_string(),
+                expected: "http, tls, grpc, smtp, ftp, smb, ssh, redis, mysql, postgres, \
+                           dns-tcp, imap, pop3"
+                    .to_string(),
             }),
         }
     }
@@ -339,7 +365,8 @@ impl L7RuleConfig {
 
 fn parse_l7_protocol(s: &str) -> Result<(), ()> {
     match s.to_lowercase().as_str() {
-        "http" | "tls" | "grpc" | "smtp" | "ftp" | "smb" => Ok(()),
+        "http" | "tls" | "grpc" | "smtp" | "ftp" | "smb" | "ssh" | "redis" | "mysql"
+        | "postgres" | "dns-tcp" | "imap" | "pop3" => Ok(()),
         _ => Err(()),
     }
 }

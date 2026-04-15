@@ -86,6 +86,11 @@ pub struct EventDispatcher {
     /// Optional TCP stream reassembler (E18-OSS-3). When present, L7
     /// events are merged per flow before being handed to `parse_payload`.
     stream_reassembler: Option<Arc<domain::l7::reassembler::StreamReassembler>>,
+    /// Optional extended L7 parser registered by the enterprise edition
+    /// (MQTT / AMQP / NATS / Cassandra). Consulted only when the OSS
+    /// detector returned [`DetectedProtocol::Unknown`].
+    extended_l7_parser:
+        Option<Arc<dyn ports::secondary::l7_extended_parser_port::L7ExtendedParser>>,
 }
 
 impl EventDispatcher {
@@ -118,7 +123,23 @@ impl EventDispatcher {
             encrypted_dns_detector: EncryptedDnsDetector::default(),
             container_resolver: None,
             stream_reassembler: None,
+            extended_l7_parser: None,
         }
+    }
+
+    /// Inject an extended L7 parser. The dispatcher consults it whenever
+    /// the built-in detector returns `DetectedProtocol::Unknown`.
+    #[must_use]
+    pub fn with_extended_l7_parser(
+        mut self,
+        parser: Arc<dyn ports::secondary::l7_extended_parser_port::L7ExtendedParser>,
+    ) -> Self {
+        tracing::info!(
+            extension = parser.name(),
+            "extended L7 parser registered"
+        );
+        self.extended_l7_parser = Some(parser);
+        self
     }
 
     /// Inject a TCP stream reassembler. When present, L7 events from
@@ -738,15 +759,32 @@ impl EventDispatcher {
         };
 
         let protocol = detect_protocol(payload);
-        let protocol_label = match protocol {
+        let mut protocol_label = match protocol {
             DetectedProtocol::Http => "http",
             DetectedProtocol::Tls => "tls",
             DetectedProtocol::Grpc => "grpc",
             DetectedProtocol::Smtp => "smtp",
             DetectedProtocol::Ftp => "ftp",
             DetectedProtocol::Smb => "smb",
+            DetectedProtocol::Ssh => "ssh",
+            DetectedProtocol::Redis => "redis",
+            DetectedProtocol::MySql => "mysql",
+            DetectedProtocol::Postgres => "postgres",
+            DetectedProtocol::DnsTcp => "dns-tcp",
+            DetectedProtocol::Imap => "imap",
+            DetectedProtocol::Pop3 => "pop3",
             DetectedProtocol::Unknown => "unknown",
         };
+
+        // Consult the optional extended L7 parser (enterprise protocols
+        // like MQTT / AMQP / NATS / Cassandra). When the built-in
+        // detector returned Unknown, fall back to the extension label.
+        if protocol == DetectedProtocol::Unknown
+            && let Some(ref parser) = self.extended_l7_parser
+            && let Some(label) = parser.detect_label(payload)
+        {
+            protocol_label = label;
+        }
 
         let parsed = parse_payload(payload);
 

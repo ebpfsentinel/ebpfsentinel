@@ -1,6 +1,7 @@
 use super::entity::{
-    DetectedProtocol, FtpCommand, GrpcRequest, HttpRequest, ParsedProtocol, SmbHeader, SmtpCommand,
-    TlsClientHello,
+    DetectedProtocol, DnsTcpMessage, FtpCommand, GrpcRequest, HttpRequest, ImapCommand,
+    MySqlQuery, ParsedProtocol, Pop3Command, PostgresQuery, RedisCommand, SmbHeader, SmtpCommand,
+    SshBanner, TlsClientHello,
 };
 use super::error::L7Error;
 
@@ -49,7 +50,181 @@ pub fn detect_protocol(payload: &[u8]) -> DetectedProtocol {
         return DetectedProtocol::Http;
     }
 
+    // SSH: `SSH-2.0-...` banner
+    if is_ssh(payload) {
+        return DetectedProtocol::Ssh;
+    }
+
+    // Redis RESP: `*<count>\r\n$<len>\r\n...`
+    if is_redis(payload) {
+        return DetectedProtocol::Redis;
+    }
+
+    // PostgreSQL: `Q` Simple Query or StartupMessage. Checked before
+    // MySQL because a postgres "Q"-prefixed packet can accidentally
+    // satisfy the MySQL length/command heuristic.
+    if is_postgres(payload) {
+        return DetectedProtocol::Postgres;
+    }
+
+    // MySQL: 3-byte little-endian length + sequence id + command byte
+    if is_mysql(payload) {
+        return DetectedProtocol::MySql;
+    }
+
+    // DNS-over-TCP: 2-byte length prefix + DNS header (12 bytes)
+    if is_dns_tcp(payload) {
+        return DetectedProtocol::DnsTcp;
+    }
+
+    // IMAP: "<tag> <COMMAND>" or "* OK"/"* BAD" untagged response
+    if is_imap(payload) {
+        return DetectedProtocol::Imap;
+    }
+
+    // POP3: "+OK" / "-ERR" response or "<COMMAND>" request
+    if is_pop3(payload) {
+        return DetectedProtocol::Pop3;
+    }
+
     DetectedProtocol::Unknown
+}
+
+/// IMAP commands we look for in the second token. Case-insensitive.
+const IMAP_COMMANDS: &[&[u8]] = &[
+    b"CAPABILITY",
+    b"LOGIN",
+    b"AUTHENTICATE",
+    b"SELECT",
+    b"EXAMINE",
+    b"LIST",
+    b"LSUB",
+    b"FETCH",
+    b"STORE",
+    b"SEARCH",
+    b"UID",
+    b"STATUS",
+    b"APPEND",
+    b"EXPUNGE",
+    b"NOOP",
+    b"LOGOUT",
+    b"STARTTLS",
+];
+
+fn is_imap(payload: &[u8]) -> bool {
+    if payload.is_empty() {
+        return false;
+    }
+    let upper: Vec<u8> = payload.iter().map(u8::to_ascii_uppercase).collect();
+    // Server untagged response: "* OK", "* BAD", "* NO", "* BYE", "* PREAUTH".
+    if upper.len() >= 5 && upper.starts_with(b"* ") {
+        let rest = &upper[2..];
+        for status in [b"OK" as &[u8], b"NO", b"BAD", b"BYE", b"PREAUTH"] {
+            if rest.starts_with(status) {
+                return true;
+            }
+        }
+    }
+    // Client tagged command: "<tag> <COMMAND> ..."
+    let mut parts = upper.splitn(3, |&b| b == b' ');
+    let tag = parts.next().unwrap_or(&[]);
+    let cmd = parts.next().unwrap_or(&[]);
+    if tag.is_empty() || cmd.is_empty() {
+        return false;
+    }
+    // Tag is typically alphanumeric (e.g. "a001", "tag42").
+    if !tag.iter().all(|b| b.is_ascii_alphanumeric()) {
+        return false;
+    }
+    IMAP_COMMANDS.iter().any(|c| *c == cmd)
+}
+
+/// POP3 detection is anchored on server responses (`+OK` / `-ERR`).
+///
+/// Client commands like `USER`, `PASS`, `LIST`, `QUIT`, `NOOP`, `RSET`
+/// collide with FTP, so detecting the request side from raw bytes alone
+/// is unreliable. The L7 dispatcher disambiguates by destination port
+/// (110 / 995) when needed; here we keep the byte-based detector
+/// conservative.
+fn is_pop3(payload: &[u8]) -> bool {
+    if payload.len() < 3 {
+        return false;
+    }
+    let head: Vec<u8> = payload.iter().take(4).map(u8::to_ascii_uppercase).collect();
+    head.starts_with(b"+OK") || head.starts_with(b"-ERR")
+}
+
+fn is_ssh(payload: &[u8]) -> bool {
+    payload.len() >= 4 && payload.starts_with(b"SSH-")
+}
+
+fn is_redis(payload: &[u8]) -> bool {
+    // Array-bulk: `*N\r\n$L\r\n...` — minimum 8 bytes.
+    if payload.len() < 8 || payload[0] != b'*' {
+        return false;
+    }
+    // Digits before the first \r\n, then `$` then digits.
+    let mut i = 1;
+    while i < payload.len() && payload[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == 1 || i + 4 > payload.len() || &payload[i..i + 2] != b"\r\n" {
+        return false;
+    }
+    payload[i + 2] == b'$'
+}
+
+fn is_mysql(payload: &[u8]) -> bool {
+    // MySQL packet: 3-byte length (LE) + 1-byte seq + payload.
+    // We consider it MySQL when the length is plausible (<= 16 MiB) and
+    // the command byte is a known COM_ value (<= 0x1F covers the common set).
+    if payload.len() < 5 {
+        return false;
+    }
+    let len = u32::from_le_bytes([payload[0], payload[1], payload[2], 0]) as usize;
+    if len == 0 || len > 16 * 1024 * 1024 {
+        return false;
+    }
+    let seq = payload[3];
+    // COM_QUERY (0x03), COM_INIT_DB (0x02), COM_FIELD_LIST (0x04),
+    // COM_PING (0x0E), COM_QUIT (0x01), handshake (0x0A).
+    let cmd = payload[4];
+    seq == 0 && matches!(cmd, 0x01 | 0x02 | 0x03 | 0x04 | 0x0E | 0x0A)
+}
+
+fn is_postgres(payload: &[u8]) -> bool {
+    if payload.is_empty() {
+        return false;
+    }
+    // Front-end Simple Query: `Q` + u32 length + null-terminated string.
+    if payload.len() >= 5 && payload[0] == b'Q' {
+        let len = u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]);
+        return len >= 5 && len <= 64 * 1024;
+    }
+    // StartupMessage: u32 length + u32 protocol version (0x00030000 for v3.0).
+    if payload.len() >= 8 {
+        let len = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+        let ver = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
+        if ver == 0x0003_0000 && len >= 8 && len <= 64 * 1024 {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_dns_tcp(payload: &[u8]) -> bool {
+    // 2-byte length prefix + 12-byte DNS header.
+    if payload.len() < 14 {
+        return false;
+    }
+    let len = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+    if len < 12 || len > 512 {
+        return false;
+    }
+    // QR bit + Z reserved = 0, OPCODE <= 5.
+    let flags_hi = payload[4];
+    let opcode = (flags_hi >> 3) & 0x0F;
+    opcode <= 5
 }
 
 fn starts_with_http_method(payload: &[u8]) -> bool {
@@ -151,6 +326,34 @@ pub fn parse_payload(payload: &[u8]) -> ParsedProtocol {
         },
         DetectedProtocol::Smb => match parse_smb(payload) {
             Ok(hdr) => ParsedProtocol::Smb(hdr),
+            Err(_) => ParsedProtocol::Unknown,
+        },
+        DetectedProtocol::Ssh => match parse_ssh(payload) {
+            Ok(banner) => ParsedProtocol::Ssh(banner),
+            Err(_) => ParsedProtocol::Unknown,
+        },
+        DetectedProtocol::Redis => match parse_redis(payload) {
+            Ok(cmd) => ParsedProtocol::Redis(cmd),
+            Err(_) => ParsedProtocol::Unknown,
+        },
+        DetectedProtocol::MySql => match parse_mysql(payload) {
+            Ok(q) => ParsedProtocol::MySql(q),
+            Err(_) => ParsedProtocol::Unknown,
+        },
+        DetectedProtocol::Postgres => match parse_postgres(payload) {
+            Ok(q) => ParsedProtocol::Postgres(q),
+            Err(_) => ParsedProtocol::Unknown,
+        },
+        DetectedProtocol::DnsTcp => match parse_dns_tcp(payload) {
+            Ok(msg) => ParsedProtocol::DnsTcp(msg),
+            Err(_) => ParsedProtocol::Unknown,
+        },
+        DetectedProtocol::Imap => match parse_imap(payload) {
+            Ok(cmd) => ParsedProtocol::Imap(cmd),
+            Err(_) => ParsedProtocol::Unknown,
+        },
+        DetectedProtocol::Pop3 => match parse_pop3(payload) {
+            Ok(cmd) => ParsedProtocol::Pop3(cmd),
             Err(_) => ParsedProtocol::Unknown,
         },
         DetectedProtocol::Unknown => ParsedProtocol::Unknown,
@@ -706,6 +909,310 @@ pub fn parse_smb(payload: &[u8]) -> Result<SmbHeader, L7Error> {
             ),
         })
     }
+}
+
+// ── SSH parser ────────────────────────────────────────────────────
+
+/// Parse an SSH banner line (`SSH-<proto>-<software>\r\n`).
+pub fn parse_ssh(payload: &[u8]) -> Result<SshBanner, L7Error> {
+    // Banner is ASCII; cap at 255 B (RFC 4253 §4.2).
+    let end = payload.iter().position(|&b| b == b'\n').unwrap_or(payload.len());
+    let line = &payload[..end];
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let text = core::str::from_utf8(line).map_err(|_| L7Error::InvalidFormat {
+        protocol: "SSH",
+        detail: "banner is not valid UTF-8".to_string(),
+    })?;
+    let rest = text.strip_prefix("SSH-").ok_or(L7Error::InvalidFormat {
+        protocol: "SSH",
+        detail: "missing SSH- prefix".to_string(),
+    })?;
+    let mut parts = rest.splitn(2, '-');
+    let protocol_version = parts
+        .next()
+        .ok_or(L7Error::InvalidFormat {
+            protocol: "SSH",
+            detail: "missing protocol version".to_string(),
+        })?
+        .to_string();
+    let software = parts.next().unwrap_or("").to_string();
+    Ok(SshBanner {
+        protocol_version,
+        software,
+    })
+}
+
+// ── Redis RESP parser ─────────────────────────────────────────────
+
+/// Parse the leading RESP array of a Redis pipeline.
+///
+/// Only the first array (the command) is decoded — subsequent pipelined
+/// commands are ignored to keep this helper O(n) in payload length.
+pub fn parse_redis(payload: &[u8]) -> Result<RedisCommand, L7Error> {
+    if payload.first() != Some(&b'*') {
+        return Err(L7Error::InvalidFormat {
+            protocol: "Redis",
+            detail: "missing RESP array marker".to_string(),
+        });
+    }
+    let mut idx = 1;
+    let arg_count = read_decimal_until_crlf(payload, &mut idx)? as u32;
+    if arg_count == 0 {
+        return Ok(RedisCommand {
+            command: String::new(),
+            key: None,
+            arg_count: 0,
+        });
+    }
+    let command = read_bulk_string(payload, &mut idx)?.to_ascii_uppercase();
+    let key = if arg_count >= 2 {
+        Some(read_bulk_string(payload, &mut idx)?)
+    } else {
+        None
+    };
+    Ok(RedisCommand {
+        command,
+        key,
+        arg_count,
+    })
+}
+
+fn read_decimal_until_crlf(bytes: &[u8], idx: &mut usize) -> Result<u64, L7Error> {
+    let start = *idx;
+    while *idx < bytes.len() && bytes[*idx].is_ascii_digit() {
+        *idx += 1;
+    }
+    if start == *idx || *idx + 2 > bytes.len() || bytes[*idx] != b'\r' || bytes[*idx + 1] != b'\n' {
+        return Err(L7Error::InvalidFormat {
+            protocol: "Redis",
+            detail: "malformed integer".to_string(),
+        });
+    }
+    let value = core::str::from_utf8(&bytes[start..*idx])
+        .map_err(|_| L7Error::InvalidFormat {
+            protocol: "Redis",
+            detail: "non-ascii integer".to_string(),
+        })?
+        .parse::<u64>()
+        .map_err(|_| L7Error::InvalidFormat {
+            protocol: "Redis",
+            detail: "integer overflow".to_string(),
+        })?;
+    *idx += 2;
+    Ok(value)
+}
+
+fn read_bulk_string(bytes: &[u8], idx: &mut usize) -> Result<String, L7Error> {
+    if *idx >= bytes.len() || bytes[*idx] != b'$' {
+        return Err(L7Error::InvalidFormat {
+            protocol: "Redis",
+            detail: "expected bulk marker".to_string(),
+        });
+    }
+    *idx += 1;
+    let len = read_decimal_until_crlf(bytes, idx)? as usize;
+    if *idx + len + 2 > bytes.len() {
+        return Err(L7Error::InvalidFormat {
+            protocol: "Redis",
+            detail: "bulk string truncated".to_string(),
+        });
+    }
+    let slice = &bytes[*idx..*idx + len];
+    let s = core::str::from_utf8(slice)
+        .map_err(|_| L7Error::InvalidFormat {
+            protocol: "Redis",
+            detail: "non-utf8 bulk string".to_string(),
+        })?
+        .to_string();
+    *idx += len + 2; // skip trailing CRLF
+    Ok(s)
+}
+
+// ── MySQL parser ──────────────────────────────────────────────────
+
+/// Parse a MySQL COM_QUERY packet (command byte 0x03) or a handshake
+/// response. Only the command byte and, for COM_QUERY, the SQL text
+/// are extracted.
+pub fn parse_mysql(payload: &[u8]) -> Result<MySqlQuery, L7Error> {
+    if payload.len() < 5 {
+        return Err(L7Error::InsufficientData { needed: 5, got: payload.len() });
+    }
+    let len = u32::from_le_bytes([payload[0], payload[1], payload[2], 0]) as usize;
+    let command = payload[4];
+    let body_start = 5;
+    let body_end = (body_start + len.saturating_sub(1)).min(payload.len());
+    let query = if command == 0x03 {
+        core::str::from_utf8(&payload[body_start..body_end])
+            .unwrap_or("")
+            .trim_end_matches('\0')
+            .to_string()
+    } else {
+        String::new()
+    };
+    Ok(MySqlQuery { command, query })
+}
+
+// ── PostgreSQL parser ─────────────────────────────────────────────
+
+/// Parse a PostgreSQL Simple Query (`Q`) or StartupMessage.
+pub fn parse_postgres(payload: &[u8]) -> Result<PostgresQuery, L7Error> {
+    if payload.is_empty() {
+        return Err(L7Error::InsufficientData { needed: 1, got: 0 });
+    }
+    // Simple Query: first byte `Q`.
+    if payload[0] == b'Q' {
+        if payload.len() < 5 {
+            return Err(L7Error::InsufficientData { needed: 5, got: payload.len() });
+        }
+        let len = u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]) as usize;
+        let body_end = (4 + len).min(payload.len());
+        if body_end <= 5 {
+            return Ok(PostgresQuery {
+                message_type: b'Q',
+                query: String::new(),
+            });
+        }
+        let query = core::str::from_utf8(&payload[5..body_end])
+            .unwrap_or("")
+            .trim_end_matches('\0')
+            .to_string();
+        return Ok(PostgresQuery {
+            message_type: b'Q',
+            query,
+        });
+    }
+    // StartupMessage: u32 length + u32 protocol + null-terminated key/value pairs.
+    if payload.len() >= 8 {
+        let ver = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
+        if ver == 0x0003_0000 {
+            return Ok(PostgresQuery {
+                message_type: 0,
+                query: String::new(),
+            });
+        }
+    }
+    Err(L7Error::InvalidFormat {
+        protocol: "PostgreSQL",
+        detail: "unrecognised message type".to_string(),
+    })
+}
+
+// ── DNS-over-TCP parser ───────────────────────────────────────────
+
+/// Parse a DNS-over-TCP message header and extract the first QNAME.
+pub fn parse_dns_tcp(payload: &[u8]) -> Result<DnsTcpMessage, L7Error> {
+    if payload.len() < 14 {
+        return Err(L7Error::InsufficientData { needed: 14, got: payload.len() });
+    }
+    // Skip the 2-byte length prefix; operate on the remaining wire message.
+    let msg = &payload[2..];
+    let flags_hi = msg[2];
+    let is_response = (flags_hi & 0x80) != 0;
+    let qdcount = u16::from_be_bytes([msg[4], msg[5]]);
+    let ancount = u16::from_be_bytes([msg[6], msg[7]]);
+    let qname = if qdcount > 0 {
+        read_dns_qname(&msg[12..]).ok()
+    } else {
+        None
+    };
+    Ok(DnsTcpMessage {
+        question_count: qdcount,
+        answer_count: ancount,
+        is_response,
+        qname,
+    })
+}
+
+fn read_dns_qname(bytes: &[u8]) -> Result<String, L7Error> {
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let len = bytes[i] as usize;
+        if len == 0 {
+            return Ok(out);
+        }
+        // Reject compression pointers and oversized labels — this is the
+        // first question, so they should never appear.
+        if len & 0xC0 != 0 || len > 63 {
+            return Err(L7Error::InvalidFormat {
+                protocol: "DNS",
+                detail: "invalid label length".to_string(),
+            });
+        }
+        if i + 1 + len > bytes.len() {
+            return Err(L7Error::InsufficientData { needed: i + 1 + len, got: bytes.len() });
+        }
+        if !out.is_empty() {
+            out.push('.');
+        }
+        out.push_str(
+            core::str::from_utf8(&bytes[i + 1..i + 1 + len]).map_err(|_| L7Error::InvalidFormat {
+                protocol: "DNS",
+                detail: "non-ascii label".to_string(),
+            })?,
+        );
+        i += 1 + len;
+    }
+    Err(L7Error::InsufficientData { needed: bytes.len() + 1, got: bytes.len() })
+}
+
+// ── IMAP parser ───────────────────────────────────────────────────
+
+/// Parse a single IMAP line into [`ImapCommand`].
+///
+/// Handles both client tagged commands (`a001 LOGIN user pass`) and
+/// server untagged responses (`* OK Dovecot ready`).
+pub fn parse_imap(payload: &[u8]) -> Result<ImapCommand, L7Error> {
+    let end = payload.iter().position(|&b| b == b'\n').unwrap_or(payload.len());
+    let line = &payload[..end];
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let text = core::str::from_utf8(line).map_err(|_| L7Error::InvalidFormat {
+        protocol: "IMAP",
+        detail: "non-utf8 line".to_string(),
+    })?;
+    let mut parts = text.splitn(3, ' ');
+    let tag = parts
+        .next()
+        .ok_or(L7Error::InvalidFormat {
+            protocol: "IMAP",
+            detail: "missing tag".to_string(),
+        })?
+        .to_string();
+    let command = parts.next().unwrap_or("").to_ascii_uppercase();
+    let params = parts.next().unwrap_or("").to_string();
+    Ok(ImapCommand { tag, command, params })
+}
+
+// ── POP3 parser ───────────────────────────────────────────────────
+
+/// Parse a POP3 command or server response line.
+///
+/// Server responses (`+OK ...`, `-ERR ...`) are returned with `command`
+/// equal to `+OK` or `-ERR`. Client commands drop the argument list into
+/// `params` unchanged.
+pub fn parse_pop3(payload: &[u8]) -> Result<Pop3Command, L7Error> {
+    let end = payload.iter().position(|&b| b == b'\n').unwrap_or(payload.len());
+    let line = &payload[..end];
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let text = core::str::from_utf8(line).map_err(|_| L7Error::InvalidFormat {
+        protocol: "POP3",
+        detail: "non-utf8 line".to_string(),
+    })?;
+    let mut parts = text.splitn(2, ' ');
+    let verb = parts
+        .next()
+        .ok_or(L7Error::InvalidFormat {
+            protocol: "POP3",
+            detail: "empty line".to_string(),
+        })?
+        .to_string();
+    let params = parts.next().unwrap_or("").to_string();
+    let command = if verb.starts_with('+') || verb.starts_with('-') {
+        verb
+    } else {
+        verb.to_ascii_uppercase()
+    };
+    Ok(Pop3Command { command, params })
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -1406,5 +1913,240 @@ mod tests {
                 let _ = parse_smb(&data);
             }
         }
+    }
+
+    // ── E18.1 additional protocols ────────────────────────────────
+
+    #[test]
+    fn detect_ssh_banner() {
+        assert_eq!(
+            detect_protocol(b"SSH-2.0-OpenSSH_9.6p1\r\n"),
+            DetectedProtocol::Ssh
+        );
+    }
+
+    #[test]
+    fn parse_ssh_banner_extracts_software() {
+        let banner = parse_ssh(b"SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.4\r\n").unwrap();
+        assert_eq!(banner.protocol_version, "2.0");
+        assert!(banner.software.contains("OpenSSH_9.6"));
+    }
+
+    #[test]
+    fn parse_ssh_rejects_missing_prefix() {
+        assert!(parse_ssh(b"PLAIN TEXT").is_err());
+    }
+
+    #[test]
+    fn detect_redis_array_marker() {
+        assert_eq!(
+            detect_protocol(b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"),
+            DetectedProtocol::Redis
+        );
+    }
+
+    #[test]
+    fn parse_redis_extracts_command_and_key() {
+        let cmd = parse_redis(b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n").unwrap();
+        assert_eq!(cmd.command, "SET");
+        assert_eq!(cmd.key.as_deref(), Some("foo"));
+        assert_eq!(cmd.arg_count, 3);
+    }
+
+    #[test]
+    fn parse_redis_uppercases_command() {
+        let cmd = parse_redis(b"*2\r\n$3\r\nget\r\n$3\r\nfoo\r\n").unwrap();
+        assert_eq!(cmd.command, "GET");
+    }
+
+    #[test]
+    fn parse_redis_single_arg_has_no_key() {
+        let cmd = parse_redis(b"*1\r\n$4\r\nPING\r\n").unwrap();
+        assert_eq!(cmd.command, "PING");
+        assert!(cmd.key.is_none());
+    }
+
+    #[test]
+    fn parse_redis_rejects_malformed_array() {
+        assert!(parse_redis(b"*\r\n").is_err());
+    }
+
+    #[test]
+    fn detect_mysql_com_query_packet() {
+        let pkt = &[0x04, 0x00, 0x00, 0x00, 0x03, b's', b'e', b'l'];
+        assert_eq!(detect_protocol(pkt), DetectedProtocol::MySql);
+    }
+
+    #[test]
+    fn parse_mysql_extracts_query_text() {
+        // body = 1-byte command + "SELECT 1 FROM x" (15 bytes) = 16 bytes
+        let pkt = b"\x10\x00\x00\x00\x03SELECT 1 FROM x";
+        let q = parse_mysql(pkt).unwrap();
+        assert_eq!(q.command, 0x03);
+        assert_eq!(q.query, "SELECT 1 FROM x");
+    }
+
+    #[test]
+    fn parse_mysql_handshake_has_empty_query() {
+        let pkt = b"\x01\x00\x00\x00\x0a";
+        let q = parse_mysql(pkt).unwrap();
+        assert_eq!(q.command, 0x0a);
+        assert!(q.query.is_empty());
+    }
+
+    #[test]
+    fn detect_postgres_simple_query() {
+        let body = b"SELECT 1;\0";
+        let len: u32 = 4 + body.len() as u32;
+        let mut pkt = vec![b'Q'];
+        pkt.extend_from_slice(&len.to_be_bytes());
+        pkt.extend_from_slice(body);
+        assert_eq!(detect_protocol(&pkt), DetectedProtocol::Postgres);
+    }
+
+    #[test]
+    fn parse_postgres_simple_query_extracts_sql() {
+        let body = b"SELECT 1;\0";
+        let len: u32 = 4 + body.len() as u32;
+        let mut pkt = vec![b'Q'];
+        pkt.extend_from_slice(&len.to_be_bytes());
+        pkt.extend_from_slice(body);
+        let q = parse_postgres(&pkt).unwrap();
+        assert_eq!(q.message_type, b'Q');
+        assert_eq!(q.query, "SELECT 1;");
+    }
+
+    #[test]
+    fn parse_postgres_startup_message() {
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(&16u32.to_be_bytes());
+        pkt.extend_from_slice(&0x0003_0000u32.to_be_bytes());
+        pkt.extend_from_slice(b"user\0bob\0");
+        let q = parse_postgres(&pkt).unwrap();
+        assert_eq!(q.message_type, 0);
+    }
+
+    #[test]
+    fn detect_dns_tcp_query() {
+        let mut pkt = vec![0x00, 0x1c];
+        let header = [
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        pkt.extend_from_slice(&header);
+        pkt.push(1);
+        pkt.push(b'x');
+        pkt.push(0);
+        pkt.extend_from_slice(&[0, 1, 0, 1]);
+        assert_eq!(detect_protocol(&pkt), DetectedProtocol::DnsTcp);
+    }
+
+    #[test]
+    fn parse_dns_tcp_extracts_qname() {
+        let mut pkt = vec![0x00, 0x22];
+        pkt.extend_from_slice(&[
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]);
+        pkt.push(7);
+        pkt.extend_from_slice(b"example");
+        pkt.push(3);
+        pkt.extend_from_slice(b"com");
+        pkt.push(0);
+        pkt.extend_from_slice(&[0, 1, 0, 1]);
+        let msg = parse_dns_tcp(&pkt).unwrap();
+        assert_eq!(msg.qname.as_deref(), Some("example.com"));
+        assert_eq!(msg.question_count, 1);
+        assert!(!msg.is_response);
+    }
+
+    #[test]
+    fn parse_dns_tcp_response_flag_set() {
+        let mut pkt = vec![0x00, 0x1c];
+        pkt.extend_from_slice(&[
+            0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        ]);
+        pkt.push(1);
+        pkt.push(b'x');
+        pkt.push(0);
+        pkt.extend_from_slice(&[0, 1, 0, 1]);
+        let msg = parse_dns_tcp(&pkt).unwrap();
+        assert!(msg.is_response);
+    }
+
+    // ── IMAP ──────────────────────────────────────────────────────
+
+    #[test]
+    fn detect_imap_client_login() {
+        assert_eq!(
+            detect_protocol(b"a001 LOGIN alice secret\r\n"),
+            DetectedProtocol::Imap
+        );
+    }
+
+    #[test]
+    fn detect_imap_server_greeting() {
+        assert_eq!(
+            detect_protocol(b"* OK [CAPABILITY IMAP4rev1] Dovecot ready.\r\n"),
+            DetectedProtocol::Imap
+        );
+    }
+
+    #[test]
+    fn parse_imap_client_command() {
+        let cmd = parse_imap(b"a001 LOGIN alice secret\r\n").unwrap();
+        assert_eq!(cmd.tag, "a001");
+        assert_eq!(cmd.command, "LOGIN");
+        assert!(cmd.params.contains("alice"));
+    }
+
+    #[test]
+    fn parse_imap_server_response() {
+        let cmd = parse_imap(b"* OK Dovecot ready.\r\n").unwrap();
+        assert_eq!(cmd.tag, "*");
+        assert_eq!(cmd.command, "OK");
+    }
+
+    #[test]
+    fn detect_imap_rejects_plain_text() {
+        assert_ne!(
+            detect_protocol(b"plain text no command\r\n"),
+            DetectedProtocol::Imap
+        );
+    }
+
+    // ── POP3 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn detect_pop3_server_greeting() {
+        assert_eq!(
+            detect_protocol(b"+OK POP3 server ready\r\n"),
+            DetectedProtocol::Pop3
+        );
+    }
+
+    #[test]
+    fn detect_pop3_err_response() {
+        assert_eq!(
+            detect_protocol(b"-ERR invalid command\r\n"),
+            DetectedProtocol::Pop3
+        );
+    }
+
+    #[test]
+    fn parse_pop3_ok_response() {
+        let cmd = parse_pop3(b"+OK 2 messages\r\n").unwrap();
+        assert_eq!(cmd.command, "+OK");
+        assert_eq!(cmd.params, "2 messages");
+    }
+
+    #[test]
+    fn parse_pop3_user_command() {
+        let cmd = parse_pop3(b"USER bob\r\n").unwrap();
+        assert_eq!(cmd.command, "USER");
+        assert_eq!(cmd.params, "bob");
+    }
+
+    #[test]
+    fn parse_pop3_rejects_empty() {
+        assert!(parse_pop3(b"").is_err() || parse_pop3(b"").unwrap().command.is_empty());
     }
 }
