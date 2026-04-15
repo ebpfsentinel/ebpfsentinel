@@ -183,7 +183,7 @@ mod tests {
     use super::*;
     use domain::threatintel::entity::{FeedFormat, ThreatType};
     use ports::secondary::metrics_port::{
-        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, DdosMetrics,
+        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, CtMetrics, DdosMetrics,
         DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics,
         IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
     };
@@ -225,6 +225,7 @@ mod tests {
     impl LbMetrics for TestMetrics {}
     impl FingerprintMetrics for TestMetrics {}
     impl ContainerMetrics for TestMetrics {}
+    impl CtMetrics for TestMetrics {}
 
     fn make_ioc(ip: &str) -> Ioc {
         Ioc {

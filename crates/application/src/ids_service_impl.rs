@@ -165,6 +165,16 @@ impl IdsAppService {
         geoip.lookup(&ip).and_then(|info| info.country_code)
     }
 
+    /// Record that the IDS verdict terminated a live flow via the
+    /// kernel netfilter conntrack path (`bpf_ct_change_status` with
+    /// the `IPS_DYING` bit). The actual kernel-side kill happens in
+    /// the tc-ids eBPF program; this hook increments the paired
+    /// Prometheus counter so operators can observe the enforcement
+    /// rate of block-mode policies.
+    pub fn record_flow_killed_via_ct(&self) {
+        self.metrics.record_ids_ct_dying();
+    }
+
     /// Remove expired threshold tracking entries.
     pub fn cleanup_expired_thresholds(&self) {
         self.engine.cleanup_expired_thresholds();
@@ -298,5 +308,55 @@ mod tests {
         svc.set_enabled(false);
         assert_eq!(svc.mode(), DomainMode::Block);
         assert!(!svc.enabled());
+    }
+
+    #[test]
+    fn record_flow_killed_via_ct_increments_counter() {
+        use ports::secondary::metrics_port::{
+            AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics,
+            CtMetrics, DdosMetrics, DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics,
+            FingerprintMetrics, FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics,
+            RoutingMetrics, SystemMetrics,
+        };
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        struct CountingMetrics {
+            ct_dying: AtomicU64,
+        }
+
+        impl PacketMetrics for CountingMetrics {}
+        impl FirewallMetrics for CountingMetrics {}
+        impl AlertMetrics for CountingMetrics {}
+        impl IpsMetrics for CountingMetrics {}
+        impl DnsMetrics for CountingMetrics {}
+        impl DomainMetrics for CountingMetrics {}
+        impl SystemMetrics for CountingMetrics {}
+        impl ConfigMetrics for CountingMetrics {}
+        impl EventMetrics for CountingMetrics {}
+        impl DlpMetrics for CountingMetrics {}
+        impl DdosMetrics for CountingMetrics {}
+        impl ConntrackMetrics for CountingMetrics {}
+        impl RoutingMetrics for CountingMetrics {}
+        impl AuditMetrics for CountingMetrics {}
+        impl LbMetrics for CountingMetrics {}
+        impl FingerprintMetrics for CountingMetrics {}
+        impl ContainerMetrics for CountingMetrics {}
+        impl CtMetrics for CountingMetrics {
+            fn record_ids_ct_dying(&self) {
+                self.ct_dying.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let metrics = Arc::new(CountingMetrics {
+            ct_dying: AtomicU64::new(0),
+        });
+        let svc = IdsAppService::new(
+            IdsEngine::new(),
+            None,
+            metrics.clone() as Arc<dyn MetricsPort>,
+        );
+        svc.record_flow_killed_via_ct();
+        svc.record_flow_killed_via_ct();
+        assert_eq!(metrics.ct_dying.load(Ordering::SeqCst), 2);
     }
 }

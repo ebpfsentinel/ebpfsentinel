@@ -199,6 +199,17 @@ pub trait ContainerMetrics: Send + Sync {
     fn record_container_resolver_error(&self) {}
 }
 
+// ── Netfilter conntrack metrics ────────────────────────────────────
+
+/// Metrics emitted by the kernel netfilter conntrack delegation
+/// path. Today the only consumer is the IDS kill-flow primitive,
+/// but this trait will grow as more CT kfuncs land.
+pub trait CtMetrics: Send + Sync {
+    /// Increment the `ids_ct_dying_total` counter — a flow was
+    /// marked `IPS_DYING` by the IDS verdict pipeline.
+    fn record_ids_ct_dying(&self) {}
+}
+
 // ── Composite super-trait ──────────────────────────────────────────
 
 /// Unified metrics port composing all domain-specific sub-traits.
@@ -224,6 +235,7 @@ pub trait MetricsPort:
     + LbMetrics
     + FingerprintMetrics
     + ContainerMetrics
+    + CtMetrics
 {
 }
 
@@ -247,6 +259,7 @@ impl<T> MetricsPort for T where
         + LbMetrics
         + FingerprintMetrics
         + ContainerMetrics
+        + CtMetrics
 {
 }
 
@@ -318,6 +331,7 @@ mod tests {
         impl LbMetrics for MinimalMock {}
         impl FingerprintMetrics for MinimalMock {}
         impl ContainerMetrics for MinimalMock {}
+        impl CtMetrics for MinimalMock {}
 
         let mock = MinimalMock;
         let port: &dyn MetricsPort = &mock;

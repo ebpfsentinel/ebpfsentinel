@@ -149,6 +149,24 @@ pub enum NfNatManipType {
     Dst = 1,
 }
 
+/// `IPS_*` status bit definitions from `include/uapi/linux/netfilter/nf_conntrack_common.h`.
+/// Only the subset eBPFsentinel touches is exposed here.
+pub mod ips_status {
+    /// This is an expected connection (created by nfct helpers).
+    pub const EXPECTED: u32 = 0x0001;
+    /// Connection has seen traffic in reply direction.
+    pub const SEEN_REPLY: u32 = 0x0002;
+    /// Connection is confirmed (seen by CT helpers and accepted).
+    pub const CONFIRMED: u32 = 0x0008;
+    /// Connection is being destroyed — packets are dropped and no
+    /// new additions are accepted. Setting this bit on a live
+    /// `nf_conn` is the "terminate flow" primitive that IDS
+    /// verdicts use to kill misbehaving connections.
+    pub const DYING: u32 = 0x0200;
+    /// Connection has been assured and will not time out early.
+    pub const ASSURED: u32 = 0x0004;
+}
+
 /// `bpf_sock_tuple` flavour — picks which union arm the caller
 /// populated. The kernel consults `tuple__sz` to pick the arm at
 /// runtime, but the type-safety of the Rust wrapper uses this enum
@@ -1835,6 +1853,65 @@ impl CtEntry {
         let rc = unsafe { host_stubs::bpf_ct_change_status(self.inner, status) };
         rc == 0
     }
+
+    /// Mark the flow as dying so the kernel drops subsequent
+    /// packets. Equivalent to `change_status(ips_status::DYING)` —
+    /// provided as a named method so call sites explicitly document
+    /// the IDS verdict semantics.
+    #[inline(always)]
+    pub fn mark_dying(&mut self) -> bool {
+        self.change_status(ips_status::DYING)
+    }
+}
+
+/// Look up a conntrack entry from a TC skb, mark it as dying, then
+/// release it. Packages the three-step kernel dance into a single
+/// call so `tc-ids` can terminate a flow verdict in one line. The
+/// return value reports whether a matching entry was found and
+/// successfully marked; lookups that fail surface via `opts.error`.
+///
+/// # Safety
+/// `skb` must be a live `__sk_buff*` owned by the current TC
+/// program invocation.
+#[inline(always)]
+pub unsafe fn kill_flow_via_skb_ct(
+    skb: *mut core::ffi::c_void,
+    tuple: CtTuple,
+    opts: &mut BpfCtOpts,
+) -> bool {
+    unsafe {
+        with_skb_ct_lookup(skb, tuple, opts, |ct| {
+            let mut entry = CtEntry { inner: ct };
+            let ok = entry.change_status(ips_status::DYING);
+            // Leak the wrapper so Drop doesn't run — the outer
+            // `with_skb_ct_lookup` already releases via the kfunc.
+            core::mem::forget(entry);
+            ok
+        })
+        .unwrap_or(false)
+    }
+}
+
+/// XDP variant of [`kill_flow_via_skb_ct`].
+///
+/// # Safety
+/// `xdp` must be a live `xdp_md*` owned by the current XDP program
+/// invocation.
+#[inline(always)]
+pub unsafe fn kill_flow_via_xdp_ct(
+    xdp: *mut core::ffi::c_void,
+    tuple: CtTuple,
+    opts: &mut BpfCtOpts,
+) -> bool {
+    unsafe {
+        with_xdp_ct_lookup(xdp, tuple, opts, |ct| {
+            let mut entry = CtEntry { inner: ct };
+            let ok = entry.change_status(ips_status::DYING);
+            core::mem::forget(entry);
+            ok
+        })
+        .unwrap_or(false)
+    }
 }
 
 impl Drop for CtEntry {
@@ -2267,5 +2344,66 @@ mod tests {
             assert_eq!(host_stubs::host_ct_init_live_count(), 1);
         }
         assert_eq!(host_stubs::host_ct_init_live_count(), 0);
+    }
+
+    // ── IDS kill-flow-via-CT tests ────────────────────────────────
+
+    #[test]
+    fn ips_status_constants_match_kernel() {
+        assert_eq!(ips_status::EXPECTED, 0x0001);
+        assert_eq!(ips_status::SEEN_REPLY, 0x0002);
+        assert_eq!(ips_status::ASSURED, 0x0004);
+        assert_eq!(ips_status::CONFIRMED, 0x0008);
+        assert_eq!(ips_status::DYING, 0x0200);
+    }
+
+    #[test]
+    fn ct_entry_mark_dying_sets_ips_dying_status() {
+        host_stubs::host_reset_ct_state();
+        let tuple = CtTuple::v4(0, 0, 0, 0);
+        let mut opts = BpfCtOpts::tcp();
+        let builder =
+            unsafe { CtBuilder::from_skb(core::ptr::null_mut(), tuple, &mut opts).unwrap() };
+        let mut entry = builder.insert().unwrap();
+        assert!(entry.mark_dying());
+        assert_eq!(host_stubs::host_last_live_status(), Some(ips_status::DYING));
+        drop(entry);
+        assert_eq!(host_stubs::host_ct_live_count(), 0);
+    }
+
+    #[test]
+    fn kill_flow_via_skb_ct_marks_dying_and_releases() {
+        host_stubs::host_reset_ct_state();
+        let tuple = CtTuple::v4(0x0100_007F, 0x0200_007F, 443, 12345);
+        let mut opts = BpfCtOpts::tcp();
+        let killed = unsafe { kill_flow_via_skb_ct(core::ptr::null_mut(), tuple, &mut opts) };
+        assert!(killed);
+        assert_eq!(host_stubs::host_last_live_status(), Some(ips_status::DYING));
+        // Lookup + release balanced even though we called
+        // change_status inside.
+        assert_eq!(host_stubs::host_ct_live_count(), 0);
+    }
+
+    #[test]
+    fn kill_flow_via_skb_ct_returns_false_on_lookup_miss() {
+        host_stubs::host_reset_ct_state();
+        host_stubs::host_set_next_ct_error(-2); // -ENOENT
+        let tuple = CtTuple::v4(0, 0, 0, 0);
+        let mut opts = BpfCtOpts::tcp();
+        let killed = unsafe { kill_flow_via_skb_ct(core::ptr::null_mut(), tuple, &mut opts) };
+        assert!(!killed);
+        // status should not have been touched.
+        assert_eq!(host_stubs::host_last_live_status(), None);
+    }
+
+    #[test]
+    fn kill_flow_via_xdp_ct_marks_dying() {
+        host_stubs::host_reset_ct_state();
+        let tuple = CtTuple::v6([0; 4], [1; 4], 80, 33333);
+        let mut opts = BpfCtOpts::tcp();
+        let killed = unsafe { kill_flow_via_xdp_ct(core::ptr::null_mut(), tuple, &mut opts) };
+        assert!(killed);
+        assert_eq!(host_stubs::host_last_live_status(), Some(ips_status::DYING));
+        assert_eq!(host_stubs::host_ct_live_count(), 0);
     }
 }

@@ -1,7 +1,7 @@
 use crate::secondary::metrics_port::{
-    AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, DdosMetrics,
-    DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics,
-    IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
+    AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, CtMetrics,
+    DdosMetrics, DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics,
+    FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
 };
 
 /// No-op implementation of all metrics sub-traits for use in tests.
@@ -26,3 +26,4 @@ impl AuditMetrics for NoopMetrics {}
 impl LbMetrics for NoopMetrics {}
 impl FingerprintMetrics for NoopMetrics {}
 impl ContainerMetrics for NoopMetrics {}
+impl CtMetrics for NoopMetrics {}

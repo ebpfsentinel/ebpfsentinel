@@ -589,6 +589,15 @@ impl EventDispatcher {
                 return; // Suppressed by threshold
             }
 
+            // Block-mode IDS verdicts mark the matching conntrack
+            // entry `IPS_DYING` via `bpf_ct_change_status` on the
+            // kernel side (tc-ids program). Record the verdict on
+            // the userspace counter so the enforcement rate is
+            // observable alongside the alert-mode rate.
+            if svc.mode() == DomainMode::Block {
+                svc.record_flow_killed_via_ct();
+            }
+
             (rule_clone, alert, detail, src_country)
         };
 
@@ -1199,7 +1208,7 @@ mod tests {
     use domain::threatintel::engine::ThreatIntelEngine;
     use ebpf_common::event::{EVENT_TYPE_DLP, EVENT_TYPE_IDS, EVENT_TYPE_L7, EVENT_TYPE_RATELIMIT};
     use ports::secondary::metrics_port::{
-        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, DdosMetrics,
+        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, CtMetrics, DdosMetrics,
         DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics,
         IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
     };
@@ -1256,6 +1265,7 @@ mod tests {
     impl LbMetrics for TestMetrics {}
     impl FingerprintMetrics for TestMetrics {}
     impl ContainerMetrics for TestMetrics {}
+    impl CtMetrics for TestMetrics {}
 
     fn make_ids_rule(id: &str) -> IdsRule {
         IdsRule {

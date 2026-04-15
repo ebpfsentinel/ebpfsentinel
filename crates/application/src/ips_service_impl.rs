@@ -338,7 +338,7 @@ impl ports::secondary::ips_blacklist_port::IpsBlacklistPort for IpsBlacklistAdap
 mod tests {
     use super::*;
     use ports::secondary::metrics_port::{
-        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, DdosMetrics,
+        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, CtMetrics, DdosMetrics,
         DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics, FirewallMetrics,
         IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
     };
@@ -383,6 +383,7 @@ mod tests {
     impl LbMetrics for TestMetrics {}
     impl FingerprintMetrics for TestMetrics {}
     impl ContainerMetrics for TestMetrics {}
+    impl CtMetrics for TestMetrics {}
 
     fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))

@@ -149,6 +149,10 @@ pub struct AgentMetrics {
     pub container_resolver_cache_hits_total: Counter,
     pub container_resolver_cache_misses_total: Counter,
     pub container_resolver_errors_total: Counter,
+    /// IDS flow-kill counter — times the IDS pipeline decided to
+    /// mark a conntrack entry `IPS_DYING` to terminate a live flow
+    /// following a block-mode rule match.
+    pub ids_ct_dying_total: Counter,
     /// BPF loading mode chosen at startup:
     /// `2 = token delegation`, `1 = capabilities`, `0 = privileged`.
     /// The `mode` label carries the textual value for at-a-glance
@@ -493,6 +497,13 @@ impl AgentMetrics {
             container_resolver_errors_total.clone(),
         );
 
+        let ids_ct_dying_total = Counter::default();
+        registry.register(
+            "ids_ct_dying_total",
+            "IDS verdict pipeline marked a conntrack entry IPS_DYING (flow kill)",
+            ids_ct_dying_total.clone(),
+        );
+
         let bpf_token_used = Family::<BpfLoadingModeLabels, Gauge>::default();
         registry.register(
             "bpf_token_used",
@@ -548,6 +559,7 @@ impl AgentMetrics {
             container_resolver_cache_hits_total,
             container_resolver_cache_misses_total,
             container_resolver_errors_total,
+            ids_ct_dying_total,
             bpf_token_used,
         }
     }
@@ -892,6 +904,12 @@ impl ports::secondary::metrics_port::ContainerMetrics for AgentMetrics {
 
     fn record_container_resolver_error(&self) {
         self.container_resolver_errors_total.inc();
+    }
+}
+
+impl ports::secondary::metrics_port::CtMetrics for AgentMetrics {
+    fn record_ids_ct_dying(&self) {
+        self.ids_ct_dying_total.inc();
     }
 }
 
