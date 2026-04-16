@@ -79,6 +79,8 @@ pub enum TlsIntelligenceMitreReason {
     WeakCrypto,
     /// Connection not using post-quantum key exchange.
     PqcNonCompliant,
+    /// Cipher suite or TLS version downgrade to a previously unseen weak profile.
+    CipherDowngrade,
 }
 
 /// Context passed to [`lookup`] to select the correct ATT&CK technique.
@@ -166,7 +168,8 @@ pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
             TlsIntelligenceMitreReason::BehaviorAnomaly => {
                 info("T1071.001", "Web Protocols", "command-and-control")
             }
-            TlsIntelligenceMitreReason::WeakCrypto => info(
+            TlsIntelligenceMitreReason::WeakCrypto
+            | TlsIntelligenceMitreReason::CipherDowngrade => info(
                 "T1573.001",
                 "Encrypted Channel: Symmetric Cryptography",
                 "command-and-control",
@@ -417,6 +420,13 @@ fn tls_intelligence_coverage_entries() -> Vec<CoverageEntry> {
             "Weaken Encryption: Reduce Key Space",
             "defense-evasion",
             "Connection not using post-quantum key exchange",
+        ),
+        entry(
+            "tls-intelligence",
+            "T1573.001",
+            "Encrypted Channel: Symmetric Cryptography",
+            "command-and-control",
+            "Cipher suite or TLS version downgrade detected",
         ),
     ]
 }
@@ -1504,6 +1514,15 @@ mod tests {
     }
 
     #[test]
+    fn tls_intelligence_cipher_downgrade_maps_to_t1573_001() {
+        let info = lookup(&MitreContext::TlsIntelligence(
+            TlsIntelligenceMitreReason::CipherDowngrade,
+        ));
+        assert_eq!(info.technique_id, "T1573.001");
+        assert_eq!(info.tactic, "command-and-control");
+    }
+
+    #[test]
     fn tls_intelligence_pqc_non_compliant_maps_to_t1600_001() {
         let info = lookup(&MitreContext::TlsIntelligence(
             TlsIntelligenceMitreReason::PqcNonCompliant,
@@ -1515,7 +1534,7 @@ mod tests {
     #[test]
     fn tls_intelligence_coverage_report() {
         let report = coverage_report(&["tls-intelligence"]);
-        assert_eq!(report.total_techniques, 4);
+        assert_eq!(report.total_techniques, 5);
         let technique_ids: Vec<&str> = report
             .techniques
             .iter()
