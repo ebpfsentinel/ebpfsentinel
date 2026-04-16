@@ -796,6 +796,34 @@ pub async fn run(
         cancel_token.clone(),
     );
 
+    // ── 6b. Create arena shared memory bus ──────────────────────────
+    // Arena maps provide mmap'd shared memory for zero-copy data
+    // exchange between userspace components. Created here, consumed
+    // by metrics reader and event reader below. Gracefully skipped
+    // if the kernel lacks arena support.
+    let arena_metrics = adapters::ebpf::arena::ArenaMap::create(1, "metrics_arena").ok();
+    let arena_events = adapters::ebpf::arena::ArenaMap::create(4, "events_arena").ok();
+
+    if arena_metrics.is_some() {
+        info!("arena metrics bus created (1 page, 512 counters via mmap)");
+    }
+    if arena_events.is_some() {
+        info!("arena events bus created (4 pages, zero-copy event fan-out)");
+    }
+
+    // Spawn arena event reader if events arena is available.
+    if let Some(events_arena) = arena_events {
+        let reader = adapters::ebpf::arena_event_reader::ArenaEventReader::new(events_arena);
+        let (arena_tx, _arena_rx) = tokio::sync::mpsc::channel(256);
+        let arena_cancel = cancel_token.clone();
+        tokio::spawn(async move {
+            reader
+                .run(arena_tx, Duration::from_millis(100), arena_cancel)
+                .await;
+        });
+        info!("arena event reader started (100ms poll)");
+    }
+
     // ── 6c. Spawn conntrack event poller ─────────────────────────────
     if let Some(ref tx) = conntrack_event_tx {
         let nf_port = adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new();
