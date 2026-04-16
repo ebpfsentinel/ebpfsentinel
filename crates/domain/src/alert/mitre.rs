@@ -85,6 +85,8 @@ pub enum TlsIntelligenceMitreReason {
     SniCertMismatch,
     /// TLS session ticket reused across multiple destinations — lateral movement.
     SessionResumeAnomaly,
+    /// TLS fingerprint deviates from container peer group baseline.
+    PeerGroupAnomaly,
 }
 
 /// Context passed to [`lookup`] to select the correct ATT&CK technique.
@@ -169,7 +171,8 @@ pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
                 "Encrypted Channel: Asymmetric Cryptography",
                 "command-and-control",
             ),
-            TlsIntelligenceMitreReason::BehaviorAnomaly => {
+            TlsIntelligenceMitreReason::BehaviorAnomaly
+            | TlsIntelligenceMitreReason::PeerGroupAnomaly => {
                 info("T1071.001", "Web Protocols", "command-and-control")
             }
             TlsIntelligenceMitreReason::WeakCrypto
@@ -453,6 +456,13 @@ fn tls_intelligence_coverage_entries() -> Vec<CoverageEntry> {
             "Use Alternate Authentication Material",
             "defense-evasion",
             "TLS session ticket reused across multiple destinations",
+        ),
+        entry(
+            "tls-intelligence",
+            "T1071.001",
+            "Web Protocols",
+            "command-and-control",
+            "TLS fingerprint deviates from container peer group baseline",
         ),
     ]
 }
@@ -1576,9 +1586,18 @@ mod tests {
     }
 
     #[test]
+    fn tls_intelligence_peer_group_anomaly_maps_to_t1071_001() {
+        let info = lookup(&MitreContext::TlsIntelligence(
+            TlsIntelligenceMitreReason::PeerGroupAnomaly,
+        ));
+        assert_eq!(info.technique_id, "T1071.001");
+        assert_eq!(info.tactic, "command-and-control");
+    }
+
+    #[test]
     fn tls_intelligence_coverage_report() {
         let report = coverage_report(&["tls-intelligence"]);
-        assert_eq!(report.total_techniques, 7);
+        assert_eq!(report.total_techniques, 8);
         let technique_ids: Vec<&str> = report
             .techniques
             .iter()
