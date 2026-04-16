@@ -155,6 +155,12 @@ pub trait DdosMetrics: Send + Sync {
 pub trait ConntrackMetrics: Send + Sync {
     fn set_conntrack_active(&self, _count: u64) {}
     fn record_conntrack_expired(&self) {}
+    /// Set the total kernel netfilter CT kfunc lookup count.
+    fn set_conntrack_kfunc_lookups(&self, _count: u64) {}
+    /// Set the kernel netfilter CT kfunc hit count.
+    fn set_conntrack_kfunc_hits(&self, _count: u64) {}
+    /// Set the kernel netfilter CT kfunc miss count.
+    fn set_conntrack_kfunc_misses(&self, _count: u64) {}
 }
 
 // ── Routing metrics ──────────────────────────────────────────────

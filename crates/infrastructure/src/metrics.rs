@@ -137,6 +137,9 @@ pub struct AgentMetrics {
     pub ddos_mitigations_total: Family<AttackTypeLabels, Counter>,
     pub conntrack_active: Gauge,
     pub conntrack_expired_total: Counter,
+    pub conntrack_kfunc_lookups: Gauge,
+    pub conntrack_kfunc_hits: Gauge,
+    pub conntrack_kfunc_misses: Gauge,
     pub routing_gateway_status: Family<GatewayLabels, Gauge>,
     pub routing_failovers_total: Counter,
     pub routing_gateways_total: Gauge,
@@ -410,6 +413,25 @@ impl AgentMetrics {
             conntrack_expired_total.clone(),
         );
 
+        let conntrack_kfunc_lookups = Gauge::default();
+        registry.register(
+            "conntrack_kfunc_lookups",
+            "Kernel netfilter CT kfunc lookup attempts from BPF",
+            conntrack_kfunc_lookups.clone(),
+        );
+        let conntrack_kfunc_hits = Gauge::default();
+        registry.register(
+            "conntrack_kfunc_hits",
+            "Kernel netfilter CT kfunc lookup hits from BPF",
+            conntrack_kfunc_hits.clone(),
+        );
+        let conntrack_kfunc_misses = Gauge::default();
+        registry.register(
+            "conntrack_kfunc_misses",
+            "Kernel netfilter CT kfunc lookup misses from BPF",
+            conntrack_kfunc_misses.clone(),
+        );
+
         let routing_gateway_status = Family::<GatewayLabels, Gauge>::default();
         registry.register(
             "routing_gateway_status",
@@ -547,6 +569,9 @@ impl AgentMetrics {
             ddos_mitigations_total,
             conntrack_active,
             conntrack_expired_total,
+            conntrack_kfunc_lookups,
+            conntrack_kfunc_hits,
+            conntrack_kfunc_misses,
             routing_gateway_status,
             routing_failovers_total,
             routing_gateways_total,
@@ -845,6 +870,21 @@ impl ConntrackMetrics for AgentMetrics {
 
     fn record_conntrack_expired(&self) {
         self.conntrack_expired_total.inc();
+    }
+
+    fn set_conntrack_kfunc_lookups(&self, count: u64) {
+        self.conntrack_kfunc_lookups
+            .set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn set_conntrack_kfunc_hits(&self, count: u64) {
+        self.conntrack_kfunc_hits
+            .set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn set_conntrack_kfunc_misses(&self, count: u64) {
+        self.conntrack_kfunc_misses
+            .set(count.try_into().unwrap_or(i64::MAX));
     }
 }
 

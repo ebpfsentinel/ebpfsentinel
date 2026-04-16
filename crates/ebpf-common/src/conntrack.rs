@@ -23,7 +23,13 @@ pub const CT_METRIC_LOOKUPS: u32 = 6;
 pub const CT_METRIC_HITS: u32 = 7;
 /// Metric index: total packets seen (unconditional, first instruction).
 pub const CT_METRIC_TOTAL_SEEN: u32 = 8;
-pub const CT_METRIC_COUNT: u32 = 9;
+/// Kernel netfilter CT lookup attempted via `bpf_skb_ct_lookup` kfunc.
+pub const CT_METRIC_KFUNC_LOOKUPS: u32 = 9;
+/// Kernel netfilter CT lookup returned a live `nf_conn` (hit).
+pub const CT_METRIC_KFUNC_HITS: u32 = 10;
+/// Kernel netfilter CT lookup returned null (miss).
+pub const CT_METRIC_KFUNC_MISSES: u32 = 11;
+pub const CT_METRIC_COUNT: u32 = 12;
 
 // ── Connection states ────────────────────────────────────────────────
 

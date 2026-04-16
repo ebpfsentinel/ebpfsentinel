@@ -14,12 +14,14 @@ use ebpf_helpers::net::{
     PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4,
     u16_from_be_bytes, u32_from_be_bytes,
 };
+use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, with_skb_ct_lookup};
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{copy_16b_asm, increment_metric};
 use ebpf_common::conntrack::{
     ConnKey, ConnKeyV6, ConnTrackConfig, ConnValue, ConnValueV6, CT_FLAG_ASSURED,
     CT_FLAG_SEEN_REPLY, CT_MAX_ENTRIES_V4, CT_MAX_ENTRIES_V6, CT_METRIC_CLOSED, CT_METRIC_COUNT,
-    CT_METRIC_ERRORS, CT_METRIC_ESTABLISHED, CT_METRIC_HITS, CT_METRIC_INVALID, CT_METRIC_LOOKUPS,
+    CT_METRIC_ERRORS, CT_METRIC_ESTABLISHED, CT_METRIC_HITS, CT_METRIC_INVALID,
+    CT_METRIC_KFUNC_HITS, CT_METRIC_KFUNC_LOOKUPS, CT_METRIC_KFUNC_MISSES, CT_METRIC_LOOKUPS,
     CT_METRIC_NEW, CT_METRIC_TOTAL_SEEN,
     CT_STATE_CLOSE_WAIT, CT_STATE_ESTABLISHED, CT_STATE_FIN_WAIT, CT_STATE_INVALID, CT_STATE_NEW,
     CT_STATE_SYN_RECV, CT_STATE_SYN_SENT, CT_STATE_TIME_WAIT, normalize_key_v4, normalize_key_v6,
@@ -310,7 +312,44 @@ fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         increment_metric(CT_METRIC_NEW);
     }
 
+    // Kernel netfilter enrichment: query the authoritative CT table via
+    // bpf_skb_ct_lookup. The result is unused today — this call warms
+    // the kernel CT cache and proves the kfunc path is callable on real
+    // traffic. The hit/miss metrics let userspace verify parity between
+    // the BPF shadow and kernel netfilter.
+    let ct_opts_proto = if protocol == PROTO_TCP { 6u8 } else { protocol };
+    kfunc_ct_probe_v4(ctx, src_ip, dst_ip, src_port, dst_port, ct_opts_proto);
+
     Ok(TC_ACT_OK)
+}
+
+/// Probe the kernel netfilter CT table for an IPv4 flow. Increments
+/// kfunc hit/miss metrics. The `nf_conn` reference is released
+/// automatically by the `with_skb_ct_lookup` closure.
+#[inline(always)]
+fn kfunc_ct_probe_v4(
+    ctx: &TcContext,
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    l4proto: u8,
+) {
+    increment_metric(CT_METRIC_KFUNC_LOOKUPS);
+    let tuple = CtTuple::v4(src_ip, dst_ip, src_port, dst_port);
+    let mut opts = if l4proto == PROTO_TCP as u8 {
+        BpfCtOpts::tcp()
+    } else {
+        BpfCtOpts::udp()
+    };
+    let found = unsafe {
+        with_skb_ct_lookup(ctx.skb.skb as *mut _, tuple, &mut opts, |_ct| true)
+    };
+    if found == Some(true) {
+        increment_metric(CT_METRIC_KFUNC_HITS);
+    } else {
+        increment_metric(CT_METRIC_KFUNC_MISSES);
+    }
 }
 
 /// IPv6 connection tracking: lookup/insert/update state machine.
@@ -464,7 +503,37 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         increment_metric(CT_METRIC_NEW);
     }
 
+    // Kernel netfilter enrichment for IPv6.
+    kfunc_ct_probe_v6(ctx, &src_addr, &dst_addr, src_port, dst_port, protocol);
+
     Ok(TC_ACT_OK)
+}
+
+/// Probe the kernel netfilter CT table for an IPv6 flow.
+#[inline(always)]
+fn kfunc_ct_probe_v6(
+    ctx: &TcContext,
+    src_addr: &[u32; 4],
+    dst_addr: &[u32; 4],
+    src_port: u16,
+    dst_port: u16,
+    l4proto: u8,
+) {
+    increment_metric(CT_METRIC_KFUNC_LOOKUPS);
+    let tuple = CtTuple::v6(*src_addr, *dst_addr, src_port, dst_port);
+    let mut opts = if l4proto == PROTO_TCP {
+        BpfCtOpts::tcp()
+    } else {
+        BpfCtOpts::udp()
+    };
+    let found = unsafe {
+        with_skb_ct_lookup(ctx.skb.skb as *mut _, tuple, &mut opts, |_ct| true)
+    };
+    if found == Some(true) {
+        increment_metric(CT_METRIC_KFUNC_HITS);
+    } else {
+        increment_metric(CT_METRIC_KFUNC_MISSES);
+    }
 }
 
 /// Shared TCP state machine logic for both IPv4 and IPv6 connections.
