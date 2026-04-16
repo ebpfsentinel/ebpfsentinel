@@ -20,6 +20,31 @@ use aya_ebpf::{
 use aya_ebpf_bindings::helpers::bpf_ktime_get_coarse_ns;
 #[cfg(debug_assertions)]
 use aya_log_ebpf::info;
+use ebpf_common::{
+    ddos::{
+        AmpProtectConfig, AmpProtectKey, CONN_ESTABLISHED, CONN_NEW, CONNTRACK_SUB_ACK_FLOOD,
+        CONNTRACK_SUB_FIN_FLOOD, CONNTRACK_SUB_HALF_OPEN, CONNTRACK_SUB_RST_FLOOD,
+        DDOS_ACTION_DROP, DDOS_ACTION_SYNCOOKIE, DDOS_METRIC_ACK_FLOOD_DROPS,
+        DDOS_METRIC_AMP_DROPPED, DDOS_METRIC_AMP_PASSED, DDOS_METRIC_CONN_TRACKED,
+        DDOS_METRIC_COUNT, DDOS_METRIC_EVENTS_DROPPED, DDOS_METRIC_FIN_FLOOD_DROPS,
+        DDOS_METRIC_HALF_OPEN_DROPS, DDOS_METRIC_ICMP_DROPPED, DDOS_METRIC_ICMP_PASSED,
+        DDOS_METRIC_OVERSIZED_ICMP, DDOS_METRIC_RST_FLOOD_DROPS, DDOS_METRIC_SYN_RECEIVED,
+        DDOS_METRIC_SYNCOOKIE_INVALID, DDOS_METRIC_SYNCOOKIE_VALID, DdosConnTrackConfig,
+        DdosConnTrackKey, DdosConnTrackValue, DdosSynConfig, EVENT_TYPE_DDOS_AMP,
+        EVENT_TYPE_DDOS_CONNTRACK, EVENT_TYPE_DDOS_ICMP, EVENT_TYPE_DDOS_SYN, FLOOD_TYPE_ACK,
+        FLOOD_TYPE_FIN, FLOOD_TYPE_RST, FloodCounterKey, IcmpConfig, SynRateState, SyncookieCtx,
+        SyncookieSecret,
+    },
+    event::{EVENT_TYPE_RATELIMIT, FLAG_IPV6, FLAG_VLAN, PacketEvent},
+    ratelimit::{
+        ALGO_FIXED_WINDOW, ALGO_LEAKY_BUCKET, ALGO_SLIDING_WINDOW, ALGO_TOKEN_BUCKET,
+        FixedWindowValue, LeakyBucketValue, MAX_RL_BUCKET_ENTRIES, MAX_RL_LPM_ENTRIES,
+        MAX_RL_TIERS, RATELIMIT_ACTION_DROP, RateLimitBucketUnion, RateLimitConfig, RateLimitKey,
+        RateLimitTierValue, RateLimitValue, SLIDING_WINDOW_NUM_SLOTS, SlidingWindowValue,
+    },
+    tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
+};
+use ebpf_helpers::kfuncs::{xdp_rx_hash, xdp_rx_timestamp};
 use ebpf_helpers::net::{
     ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_ICMP,
     PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4,
@@ -27,34 +52,7 @@ use ebpf_helpers::net::{
 };
 use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
-use ebpf_common::{
-    ddos::{
-        AmpProtectConfig, AmpProtectKey, DdosConnTrackConfig, DdosConnTrackKey, DdosConnTrackValue,
-        DdosSynConfig, FloodCounterKey, IcmpConfig, SyncookieCtx, SyncookieSecret, SynRateState,
-        CONNTRACK_SUB_ACK_FLOOD, CONNTRACK_SUB_FIN_FLOOD, CONNTRACK_SUB_HALF_OPEN,
-        CONNTRACK_SUB_RST_FLOOD, CONN_ESTABLISHED, CONN_NEW, DDOS_ACTION_DROP,
-        DDOS_ACTION_SYNCOOKIE, DDOS_METRIC_ACK_FLOOD_DROPS, DDOS_METRIC_AMP_DROPPED,
-        DDOS_METRIC_AMP_PASSED, DDOS_METRIC_CONN_TRACKED, DDOS_METRIC_COUNT,
-        DDOS_METRIC_EVENTS_DROPPED, DDOS_METRIC_FIN_FLOOD_DROPS, DDOS_METRIC_HALF_OPEN_DROPS,
-        DDOS_METRIC_ICMP_DROPPED, DDOS_METRIC_ICMP_PASSED, DDOS_METRIC_OVERSIZED_ICMP,
-        DDOS_METRIC_RST_FLOOD_DROPS, DDOS_METRIC_SYN_RECEIVED,
-        DDOS_METRIC_SYNCOOKIE_INVALID, DDOS_METRIC_SYNCOOKIE_VALID,
-        EVENT_TYPE_DDOS_AMP, EVENT_TYPE_DDOS_CONNTRACK, EVENT_TYPE_DDOS_ICMP,
-        EVENT_TYPE_DDOS_SYN, FLOOD_TYPE_ACK, FLOOD_TYPE_FIN, FLOOD_TYPE_RST,
-    },
-    event::{PacketEvent, EVENT_TYPE_RATELIMIT, FLAG_IPV6, FLAG_VLAN},
-    ratelimit::{
-        FixedWindowValue, LeakyBucketValue, RateLimitBucketUnion, RateLimitConfig, RateLimitKey,
-        RateLimitTierValue, RateLimitValue, SlidingWindowValue, ALGO_FIXED_WINDOW,
-        ALGO_LEAKY_BUCKET, ALGO_SLIDING_WINDOW, ALGO_TOKEN_BUCKET, MAX_RL_BUCKET_ENTRIES,
-        MAX_RL_LPM_ENTRIES, MAX_RL_TIERS, RATELIMIT_ACTION_DROP, SLIDING_WINDOW_NUM_SLOTS,
-    },
-    tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
-};
-use network_types::{
-    eth::EthHdr,
-    ip::Ipv4Hdr,
-};
+use network_types::{eth::EthHdr, ip::Ipv4Hdr};
 
 // ── Constants ───────────────────────────────────────────────────────
 // Network constants and header structs imported from ebpf_helpers.
@@ -465,7 +463,9 @@ fn process_ratelimit_v4(
         if let Some(action) = validate_syncookie_ack_v4(ctx, l3_offset, l4_offset) {
             return Ok(action);
         }
-        if let Some(action) = check_syn_flood_v4(ctx, l3_offset, l4_offset, src_ip, dst_ip, flags, vlan_id) {
+        if let Some(action) =
+            check_syn_flood_v4(ctx, l3_offset, l4_offset, src_ip, dst_ip, flags, vlan_id)
+        {
             return Ok(action);
         }
         // Connection tracking & flood detection (RST/FIN/ACK floods, half-open SYNs)
@@ -476,7 +476,9 @@ fn process_ratelimit_v4(
 
     // ── DDoS: UDP amplification protection ─────────────────────────
     if protocol == PROTO_UDP {
-        if let Some(action) = check_udp_amplification(ctx, l4_offset, src_ip, dst_ip, flags, vlan_id) {
+        if let Some(action) =
+            check_udp_amplification(ctx, l4_offset, src_ip, dst_ip, flags, vlan_id)
+        {
             return Ok(action);
         }
     }
@@ -497,7 +499,7 @@ fn process_ratelimit_v4(
                 let dst_addr = [dst_ip, 0, 0, 0];
                 let (src_port, dst_port) = read_l4_ports_v4(ctx, l4_offset);
                 emit_ratelimit_event(
-                    &src_addr, &dst_addr, src_port, dst_port, protocol, flags, vlan_id,
+                    ctx, &src_addr, &dst_addr, src_port, dst_port, protocol, flags, vlan_id,
                 );
                 increment_metric(METRIC_THROTTLED);
                 return Ok(xdp_action::XDP_DROP);
@@ -536,7 +538,7 @@ fn process_ratelimit_v4(
         let (src_port, dst_port) = read_l4_ports_v4(ctx, l4_offset);
 
         emit_ratelimit_event(
-            &src_addr, &dst_addr, src_port, dst_port, protocol, flags, vlan_id,
+            ctx, &src_addr, &dst_addr, src_port, dst_port, protocol, flags, vlan_id,
         );
         increment_metric(METRIC_THROTTLED);
         #[cfg(debug_assertions)]
@@ -559,15 +561,17 @@ fn process_ratelimit_v6(
     let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
 
     // Skip IPv6 extension headers to find the actual L4 protocol.
-    let (next_hdr, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr)
-        .ok_or(())?;
+    let (next_hdr, l4_offset) =
+        skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr).ok_or(())?;
 
     // Hash IPv6 src to u32 for rate limit bucket (avoids needing duplicate maps)
     let src_hash = hash_ipv6_src(&src_addr);
 
     // ── DDoS: ICMPv6 flood protection ──────────────────────────────
     if next_hdr == PROTO_ICMPV6 {
-        return process_icmp_v6(ctx, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id);
+        return process_icmp_v6(
+            ctx, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id,
+        );
     }
 
     // ── DDoS: SYN cookie ACK validation + SYN flood detection (IPv6)
@@ -576,18 +580,24 @@ fn process_ratelimit_v6(
         if let Some(action) = validate_syncookie_ack_v6(ctx, l3_offset, l4_offset) {
             return Ok(action);
         }
-        if let Some(action) = check_syn_flood_v6(ctx, l3_offset, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id) {
+        if let Some(action) = check_syn_flood_v6(
+            ctx, l3_offset, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id,
+        ) {
             return Ok(action);
         }
         // Connection tracking & flood detection (IPv6)
-        if let Some(action) = process_conntrack_v6(ctx, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id) {
+        if let Some(action) = process_conntrack_v6(
+            ctx, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id,
+        ) {
             return Ok(action);
         }
     }
 
     // ── DDoS: UDP amplification (IPv6) ─────────────────────────────
     if next_hdr == PROTO_UDP {
-        if let Some(action) = check_udp_amp_v6(ctx, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id) {
+        if let Some(action) = check_udp_amp_v6(
+            ctx, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id,
+        ) {
             return Ok(action);
         }
     }
@@ -607,7 +617,7 @@ fn process_ratelimit_v6(
                 }
                 let (src_port, dst_port) = read_l4_ports_raw(ctx, l4_offset, next_hdr);
                 emit_ratelimit_event(
-                    &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
+                    ctx, &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
                 );
                 increment_metric(METRIC_THROTTLED);
                 return Ok(xdp_action::XDP_DROP);
@@ -644,7 +654,7 @@ fn process_ratelimit_v6(
         let (src_port, dst_port) = read_l4_ports_raw(ctx, l4_offset, next_hdr);
 
         emit_ratelimit_event(
-            &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
+            ctx, &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
         );
         increment_metric(METRIC_THROTTLED);
         #[cfg(debug_assertions)]
@@ -770,6 +780,7 @@ fn check_syn_flood_v4(
     let src_addr = [src_ip, 0, 0, 0];
     let dst_addr = [dst_ip, 0, 0, 0];
     emit_ddos_event(
+        ctx,
         &src_addr,
         &dst_addr,
         src_port,
@@ -839,6 +850,7 @@ fn check_syn_flood_v6(
     }
 
     emit_ddos_event(
+        ctx,
         src_addr,
         dst_addr,
         src_port,
@@ -937,8 +949,16 @@ fn process_icmp_v4(
         let src_addr = [src_ip, 0, 0, 0];
         let dst_addr = [dst_ip, 0, 0, 0];
         emit_ddos_event(
-            &src_addr, &dst_addr, 0, 0, PROTO_ICMP,
-            EVENT_TYPE_DDOS_ICMP, DDOS_ACTION_DROP, flags, vlan_id,
+            ctx,
+            &src_addr,
+            &dst_addr,
+            0,
+            0,
+            PROTO_ICMP,
+            EVENT_TYPE_DDOS_ICMP,
+            DDOS_ACTION_DROP,
+            flags,
+            vlan_id,
         );
         increment_ddos_metric(DDOS_METRIC_OVERSIZED_ICMP);
         return Ok(xdp_action::XDP_DROP);
@@ -954,8 +974,16 @@ fn process_icmp_v4(
         let src_addr = [src_ip, 0, 0, 0];
         let dst_addr = [dst_ip, 0, 0, 0];
         emit_ddos_event(
-            &src_addr, &dst_addr, 0, 0, PROTO_ICMP,
-            EVENT_TYPE_DDOS_ICMP, DDOS_ACTION_DROP, flags, vlan_id,
+            ctx,
+            &src_addr,
+            &dst_addr,
+            0,
+            0,
+            PROTO_ICMP,
+            EVENT_TYPE_DDOS_ICMP,
+            DDOS_ACTION_DROP,
+            flags,
+            vlan_id,
         );
         increment_ddos_metric(DDOS_METRIC_ICMP_DROPPED);
         Ok(xdp_action::XDP_DROP)
@@ -1002,8 +1030,16 @@ fn process_icmp_v6(
     let payload_len = pkt_end.saturating_sub(pkt_start + payload_start);
     if payload_len > cfg.max_payload_size as usize {
         emit_ddos_event(
-            src_addr, dst_addr, 0, 0, PROTO_ICMPV6,
-            EVENT_TYPE_DDOS_ICMP, DDOS_ACTION_DROP, flags, vlan_id,
+            ctx,
+            src_addr,
+            dst_addr,
+            0,
+            0,
+            PROTO_ICMPV6,
+            EVENT_TYPE_DDOS_ICMP,
+            DDOS_ACTION_DROP,
+            flags,
+            vlan_id,
         );
         increment_ddos_metric(DDOS_METRIC_OVERSIZED_ICMP);
         return Ok(xdp_action::XDP_DROP);
@@ -1016,8 +1052,16 @@ fn process_icmp_v6(
         Ok(xdp_action::XDP_PASS)
     } else {
         emit_ddos_event(
-            src_addr, dst_addr, 0, 0, PROTO_ICMPV6,
-            EVENT_TYPE_DDOS_ICMP, DDOS_ACTION_DROP, flags, vlan_id,
+            ctx,
+            src_addr,
+            dst_addr,
+            0,
+            0,
+            PROTO_ICMPV6,
+            EVENT_TYPE_DDOS_ICMP,
+            DDOS_ACTION_DROP,
+            flags,
+            vlan_id,
         );
         increment_ddos_metric(DDOS_METRIC_ICMP_DROPPED);
         Ok(xdp_action::XDP_DROP)
@@ -1089,8 +1133,16 @@ fn check_udp_amplification(
         let src_addr = [src_ip, 0, 0, 0];
         let dst_addr = [dst_ip, 0, 0, 0];
         emit_ddos_event(
-            &src_addr, &dst_addr, src_port, dst_port, PROTO_UDP,
-            EVENT_TYPE_DDOS_AMP, DDOS_ACTION_DROP, flags, vlan_id,
+            ctx,
+            &src_addr,
+            &dst_addr,
+            src_port,
+            dst_port,
+            PROTO_UDP,
+            EVENT_TYPE_DDOS_AMP,
+            DDOS_ACTION_DROP,
+            flags,
+            vlan_id,
         );
         increment_ddos_metric(DDOS_METRIC_AMP_DROPPED);
         Some(xdp_action::XDP_DROP)
@@ -1131,8 +1183,16 @@ fn check_udp_amp_v6(
         None
     } else {
         emit_ddos_event(
-            src_addr, dst_addr, src_port, dst_port, PROTO_UDP,
-            EVENT_TYPE_DDOS_AMP, DDOS_ACTION_DROP, flags, vlan_id,
+            ctx,
+            src_addr,
+            dst_addr,
+            src_port,
+            dst_port,
+            PROTO_UDP,
+            EVENT_TYPE_DDOS_AMP,
+            DDOS_ACTION_DROP,
+            flags,
+            vlan_id,
         );
         increment_ddos_metric(DDOS_METRIC_AMP_DROPPED);
         Some(xdp_action::XDP_DROP)
@@ -1198,8 +1258,8 @@ fn process_conntrack_v4(
     let dst_addr = [dst_ip, 0, 0, 0];
 
     process_conntrack_tcp(
-        cfg, tcp_flags, src_ip, dst_ip, src_port, dst_port, now,
-        &src_addr, &dst_addr, PROTO_TCP, flags, vlan_id,
+        ctx, cfg, tcp_flags, src_ip, dst_ip, src_port, dst_port, now, &src_addr, &dst_addr,
+        PROTO_TCP, flags, vlan_id,
     )
 }
 
@@ -1229,8 +1289,8 @@ fn process_conntrack_v6(
     let dst_hash = hash_ipv6_src(dst_addr);
 
     process_conntrack_tcp(
-        cfg, tcp_flags, src_hash, dst_hash, src_port, dst_port, now,
-        src_addr, dst_addr, PROTO_TCP, flags, vlan_id,
+        ctx, cfg, tcp_flags, src_hash, dst_hash, src_port, dst_port, now, src_addr, dst_addr,
+        PROTO_TCP, flags, vlan_id,
     )
 }
 
@@ -1238,6 +1298,7 @@ fn process_conntrack_v6(
 /// Shared between IPv4 and IPv6 paths.
 #[inline(always)]
 fn process_conntrack_tcp(
+    ctx: &XdpContext,
     cfg: &DdosConnTrackConfig,
     tcp_flags: u8,
     src_ip: u32,
@@ -1260,14 +1321,27 @@ fn process_conntrack_tcp(
     if is_rst {
         if check_flood_rate(src_ip, FLOOD_TYPE_RST, cfg.rst_threshold as u64, now) {
             emit_ddos_event(
-                src_addr, dst_addr, src_port, dst_port, protocol,
-                EVENT_TYPE_DDOS_CONNTRACK, CONNTRACK_SUB_RST_FLOOD, flags, vlan_id,
+                ctx,
+                src_addr,
+                dst_addr,
+                src_port,
+                dst_port,
+                protocol,
+                EVENT_TYPE_DDOS_CONNTRACK,
+                CONNTRACK_SUB_RST_FLOOD,
+                flags,
+                vlan_id,
             );
             increment_ddos_metric(DDOS_METRIC_RST_FLOOD_DROPS);
             return Some(xdp_action::XDP_DROP);
         }
         // Remove connection entry on RST
-        let key = DdosConnTrackKey { src_ip, dst_ip, src_port, dst_port };
+        let key = DdosConnTrackKey {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+        };
         let _ = CONN_TABLE.remove(&key);
         return None;
     }
@@ -1276,14 +1350,27 @@ fn process_conntrack_tcp(
     if is_fin {
         if check_flood_rate(src_ip, FLOOD_TYPE_FIN, cfg.fin_threshold as u64, now) {
             emit_ddos_event(
-                src_addr, dst_addr, src_port, dst_port, protocol,
-                EVENT_TYPE_DDOS_CONNTRACK, CONNTRACK_SUB_FIN_FLOOD, flags, vlan_id,
+                ctx,
+                src_addr,
+                dst_addr,
+                src_port,
+                dst_port,
+                protocol,
+                EVENT_TYPE_DDOS_CONNTRACK,
+                CONNTRACK_SUB_FIN_FLOOD,
+                flags,
+                vlan_id,
             );
             increment_ddos_metric(DDOS_METRIC_FIN_FLOOD_DROPS);
             return Some(xdp_action::XDP_DROP);
         }
         // Remove connection entry on FIN
-        let key = DdosConnTrackKey { src_ip, dst_ip, src_port, dst_port };
+        let key = DdosConnTrackKey {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+        };
         let _ = CONN_TABLE.remove(&key);
         return None;
     }
@@ -1296,8 +1383,16 @@ fn process_conntrack_tcp(
             if *count >= cfg.half_open_threshold as u64 {
                 // Too many half-open connections from this source
                 emit_ddos_event(
-                    src_addr, dst_addr, src_port, dst_port, protocol,
-                    EVENT_TYPE_DDOS_CONNTRACK, CONNTRACK_SUB_HALF_OPEN, flags, vlan_id,
+                    ctx,
+                    src_addr,
+                    dst_addr,
+                    src_port,
+                    dst_port,
+                    protocol,
+                    EVENT_TYPE_DDOS_CONNTRACK,
+                    CONNTRACK_SUB_HALF_OPEN,
+                    flags,
+                    vlan_id,
                 );
                 increment_ddos_metric(DDOS_METRIC_HALF_OPEN_DROPS);
                 return Some(xdp_action::XDP_DROP);
@@ -1309,7 +1404,12 @@ fn process_conntrack_tcp(
         }
 
         // Insert NEW connection
-        let key = DdosConnTrackKey { src_ip, dst_ip, src_port, dst_port };
+        let key = DdosConnTrackKey {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+        };
         let val = DdosConnTrackValue {
             state: CONN_NEW,
             _pad: [0; 7],
@@ -1323,7 +1423,12 @@ fn process_conntrack_tcp(
 
     // ── ACK: transition NEW→ESTABLISHED or detect ACK flood ─────
     if is_ack {
-        let key = DdosConnTrackKey { src_ip, dst_ip, src_port, dst_port };
+        let key = DdosConnTrackKey {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+        };
         // Also check reverse direction (server-side ACK)
         let rev_key = DdosConnTrackKey {
             src_ip: dst_ip,
@@ -1366,8 +1471,16 @@ fn process_conntrack_tcp(
                 // ACK to non-existent connection — potential ACK flood
                 if check_flood_rate(src_ip, FLOOD_TYPE_ACK, cfg.ack_threshold as u64, now) {
                     emit_ddos_event(
-                        src_addr, dst_addr, src_port, dst_port, protocol,
-                        EVENT_TYPE_DDOS_CONNTRACK, CONNTRACK_SUB_ACK_FLOOD, flags, vlan_id,
+                        ctx,
+                        src_addr,
+                        dst_addr,
+                        src_port,
+                        dst_port,
+                        protocol,
+                        EVENT_TYPE_DDOS_CONNTRACK,
+                        CONNTRACK_SUB_ACK_FLOOD,
+                        flags,
+                        vlan_id,
                     );
                     increment_ddos_metric(DDOS_METRIC_ACK_FLOOD_DROPS);
                     return Some(xdp_action::XDP_DROP);
@@ -1379,7 +1492,12 @@ fn process_conntrack_tcp(
     }
 
     // Other TCP packets: update last_seen_ns if connection exists
-    let key = DdosConnTrackKey { src_ip, dst_ip, src_port, dst_port };
+    let key = DdosConnTrackKey {
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+    };
     if let Some(entry) = CONN_TABLE.get_ptr_mut(&key) {
         let entry = unsafe { &mut *entry };
         entry.last_seen_ns = now;
@@ -1495,7 +1613,14 @@ fn validate_syncookie(
         return true;
     }
     // Check previous minute (for clock boundary)
-    let h1 = syncookie_hash(src_ip, dst_ip, src_port, dst_port, ts.wrapping_sub(1), secret);
+    let h1 = syncookie_hash(
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        ts.wrapping_sub(1),
+        secret,
+    );
     (h1 & 0xFFFF_FFF8) | mss_bits == cookie
 }
 
@@ -1519,11 +1644,7 @@ fn parse_mss_index(_ctx: &XdpContext, _l4_offset: usize) -> u8 {
 /// Check if an incoming ACK completes a SYN cookie handshake (IPv4).
 /// Returns `Some(XDP_PASS)` if valid, `None` if not a cookie ACK.
 #[inline(always)]
-fn validate_syncookie_ack_v4(
-    ctx: &XdpContext,
-    l3_off: usize,
-    l4_off: usize,
-) -> Option<u32> {
+fn validate_syncookie_ack_v4(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Option<u32> {
     let flags_ptr: *const u8 = unsafe { ptr_at::<u8>(ctx, l4_off + 13).ok()? };
     let flags = unsafe { *flags_ptr };
     if flags != TCP_FLAG_ACK {
@@ -1554,11 +1675,7 @@ fn validate_syncookie_ack_v4(
 /// Check if an incoming ACK completes a SYN cookie handshake (IPv6).
 /// Returns `Some(XDP_PASS)` if valid, `None` if not a cookie ACK.
 #[inline(always)]
-fn validate_syncookie_ack_v6(
-    ctx: &XdpContext,
-    l3_off: usize,
-    l4_off: usize,
-) -> Option<u32> {
+fn validate_syncookie_ack_v6(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Option<u32> {
     let flags_ptr: *const u8 = unsafe { ptr_at::<u8>(ctx, l4_off + 13).ok()? };
     let flags = unsafe { *flags_ptr };
     if flags != TCP_FLAG_ACK {
@@ -1583,7 +1700,14 @@ fn validate_syncookie_ack_v6(
 
     let secret = SYNCOOKIE_SECRET.get(0)?;
 
-    if validate_syncookie(src_ip_hash, dst_ip_hash, src_port, dst_port, cookie, &secret.key) {
+    if validate_syncookie(
+        src_ip_hash,
+        dst_ip_hash,
+        src_port,
+        dst_port,
+        cookie,
+        &secret.key,
+    ) {
         increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_VALID);
         Some(xdp_action::XDP_PASS)
     } else {
@@ -1598,6 +1722,7 @@ fn validate_syncookie_ack_v6(
 /// Sampled during floods to avoid overwhelming the ring buffer.
 #[inline(always)]
 fn emit_ddos_event(
+    ctx: &XdpContext,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
     src_port: u16,
@@ -1612,6 +1737,8 @@ fn emit_ddos_event(
         increment_ddos_metric(DDOS_METRIC_EVENTS_DROPPED);
         return;
     }
+    let (rss_hash, rss_hash_type) = unsafe { xdp_rx_hash(ctx.ctx.cast()) }.unwrap_or((0, 0));
+    let rx_hw_ts = unsafe { xdp_rx_timestamp(ctx.ctx.cast()) }.unwrap_or(0);
     if let Some(mut entry) = EVENTS.reserve::<PacketEvent>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
@@ -1630,9 +1757,9 @@ fn emit_ddos_event(
             (*ptr).socket_cookie = 0;
             (*ptr).cgroup_id = 0;
             (*ptr).cgroup1_id = 0;
-            (*ptr).rss_hash = 0;
-            (*ptr).rss_hash_type = 0;
-            (*ptr).rx_hw_timestamp_ns = 0;
+            (*ptr).rss_hash = rss_hash;
+            (*ptr).rss_hash_type = rss_hash_type;
+            (*ptr).rx_hw_timestamp_ns = rx_hw_ts;
         }
         entry.submit(0);
     } else {
@@ -1770,8 +1897,7 @@ fn check_sliding_window(key: &RateLimitKey, config: &RateLimitConfig, now: u64) 
             let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
             return true;
         }
-        let bucket =
-            unsafe { &mut *(union_bucket.data.as_mut_ptr() as *mut SlidingWindowValue) };
+        let bucket = unsafe { &mut *(union_bucket.data.as_mut_ptr() as *mut SlidingWindowValue) };
         sliding_window_update(bucket, now);
 
         if bucket.window_total >= max_packets {
@@ -1836,8 +1962,9 @@ fn sliding_window_update(bucket: &mut SlidingWindowValue, now: u64) {
         let next_slot =
             (bucket.current_slot + 1 + cleared as u32) as usize % SLIDING_WINDOW_NUM_SLOTS;
         if next_slot < SLIDING_WINDOW_NUM_SLOTS {
-            bucket.window_total =
-                bucket.window_total.saturating_sub(bucket.slots[next_slot] as u64);
+            bucket.window_total = bucket
+                .window_total
+                .saturating_sub(bucket.slots[next_slot] as u64);
             bucket.slots[next_slot] = 0;
         }
         cleared += 1;
@@ -1908,6 +2035,7 @@ fn increment_metric(index: u32) {
 /// backpressure (>75% full).
 #[inline(always)]
 fn emit_ratelimit_event(
+    ctx: &XdpContext,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
     src_port: u16,
@@ -1920,6 +2048,8 @@ fn emit_ratelimit_event(
         increment_metric(METRIC_EVENTS_DROPPED);
         return;
     }
+    let (rss_hash, rss_hash_type) = unsafe { xdp_rx_hash(ctx.ctx.cast()) }.unwrap_or((0, 0));
+    let rx_hw_ts = unsafe { xdp_rx_timestamp(ctx.ctx.cast()) }.unwrap_or(0);
     if let Some(mut entry) = EVENTS.reserve::<PacketEvent>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
@@ -1935,12 +2065,12 @@ fn emit_ratelimit_event(
             (*ptr).rule_id = 0;
             (*ptr).vlan_id = vlan_id;
             (*ptr).cpu_id = bpf_get_smp_processor_id() as u16;
-            (*ptr).socket_cookie = 0; // Not available in XDP context
+            (*ptr).socket_cookie = 0;
             (*ptr).cgroup_id = 0;
             (*ptr).cgroup1_id = 0;
-            (*ptr).rss_hash = 0;
-            (*ptr).rss_hash_type = 0;
-            (*ptr).rx_hw_timestamp_ns = 0;
+            (*ptr).rss_hash = rss_hash;
+            (*ptr).rss_hash_type = rss_hash_type;
+            (*ptr).rx_hw_timestamp_ns = rx_hw_ts;
         }
         entry.submit(0);
     } else {
