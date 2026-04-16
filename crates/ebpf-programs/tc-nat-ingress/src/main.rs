@@ -19,10 +19,7 @@ use ebpf_helpers::kfuncs::{BpfCtOpts, CtBuilder, CtTuple, NfInetAddr, NfNatManip
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::increment_metric;
 use ebpf_common::{
-    conntrack::{
-        ConnKey, ConnKeyV6, ConnValue, ConnValueV6, CT_FLAG_NAT_DST, CT_MAX_ENTRIES_V4,
-        CT_MAX_ENTRIES_V6, normalize_key_v4, normalize_key_v6,
-    },
+    conntrack::{ConnKey, normalize_key_v4, normalize_key_v6},
     nat::{
         HairpinConfig, HairpinCtValue, MAX_HAIRPIN_CT,
         MAX_NAT_HASH_EXACT, MAX_NAT_RULES, MAX_NAT_RULES_V6, MAX_NPTV6_RULES,
@@ -85,15 +82,9 @@ static NAT_DNAT_RULE_COUNT_V6: Array<u32> = Array::with_max_entries(1, 0);
 static NAT_HASH_DNAT: HashMap<NatHashKeyExact, NatHashValue> =
     HashMap::with_max_entries(MAX_NAT_HASH_EXACT, 0);
 
-/// Shared conntrack table (pinned, same as tc-conntrack).
-#[map]
-static CT_TABLE_V4: LruHashMap<ConnKey, ConnValue> =
-    LruHashMap::with_max_entries(CT_MAX_ENTRIES_V4, 0);
-
-/// Shared IPv6 conntrack table.
-#[map]
-static CT_TABLE_V6: LruHashMap<ConnKeyV6, ConnValueV6> =
-    LruHashMap::with_max_entries(CT_MAX_ENTRIES_V6, 0);
+// CT_TABLE_V4/V6 shadow maps removed — kernel netfilter is the
+// authoritative CT source. NAT info delegated via bpf_ct_set_nat_info
+// (e30-5). Cached NAT fast-path removed; hash-exact + rule scan remain.
 
 /// NPTv6 prefix translation rules (RFC 6296).
 #[map]
@@ -444,20 +435,6 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         return Ok(TC_ACT_OK);
     }
 
-    // Check existing conntrack entry for cached NAT mapping.
-    let ct_key = normalize_key_v4(src_ip, dst_ip, src_port, dst_port, protocol);
-    if let Some(ct_entry) = unsafe { CT_TABLE_V4.get(&ct_key) } {
-        if ct_entry.flags & CT_FLAG_NAT_DST != 0 && ct_entry.nat_addr != 0 {
-            // Apply cached DNAT: rewrite destination IP (and port if set).
-            rewrite_dst_ip(ctx, l3_offset, l4_offset, protocol, dst_ip, ct_entry.nat_addr)?;
-            if ct_entry.nat_port != 0 {
-                rewrite_dst_port(ctx, l4_offset, protocol, dst_port, ct_entry.nat_port)?;
-            }
-            increment_metric(NAT_METRIC_DNAT_APPLIED);
-            return Ok(TC_ACT_OK);
-        }
-    }
-
     // Fast-path: exact-match DNAT HashMap lookup — O(1).
     let hash_key = NatHashKeyExact {
         dst_ip,
@@ -471,25 +448,7 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         if val.nat_port_start != 0 {
             rewrite_dst_port(ctx, l4_offset, protocol, dst_port, val.nat_port_start)?;
         }
-        // Store conntrack entry for return traffic
-        let now = unsafe { bpf_ktime_get_boot_ns() };
-        let ct_key = normalize_key_v4(src_ip, val.nat_addr, src_port, val.nat_port_start.max(dst_port), protocol);
-        let ct_val = ConnValue {
-            state: 1,
-            flags: CT_FLAG_NAT_DST,
-            nat_type: 2, // DNAT
-            _pad: 0,
-            packets_fwd: 1,
-            packets_rev: 0,
-            bytes_fwd: ctx.len() as u32,
-            bytes_rev: 0,
-            first_seen_ns: now,
-            last_seen_ns: now,
-            nat_addr: val.nat_addr,
-            nat_port: val.nat_port_start,
-            _pad2: [0; 2],
-        };
-        let _ = CT_TABLE_V4.insert(&ct_key, &ct_val, 0);
+        // NAT info delegated to kernel CT via bpf_ct_set_nat_info.
         increment_metric(NAT_METRIC_DNAT_APPLIED);
         kfunc_delegate_nat_v4(
             ctx, src_ip, dst_ip, src_port, dst_port, protocol,
@@ -550,16 +509,8 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
             rewrite_dst_port(ctx, l4_offset, protocol, dst_port, new_dst_port)?;
         }
 
-        // Update conntrack entry with NAT mapping so subsequent
-        // packets of this connection use the cached path.
-        if let Some(ct_entry) = CT_TABLE_V4.get_ptr_mut(&ct_key) {
-            unsafe {
-                (*ct_entry).nat_addr = new_dst_ip;
-                (*ct_entry).nat_port = new_dst_port;
-                (*ct_entry).flags |= CT_FLAG_NAT_DST;
-                (*ct_entry).nat_type = NAT_TYPE_DNAT;
-            }
-        }
+        // NAT info delegated to kernel CT via kfunc_delegate_nat_v4
+        // below — no shadow write needed.
 
         increment_metric(NAT_METRIC_DNAT_APPLIED);
 
@@ -658,17 +609,6 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         _ => 0u32,
     };
 
-    if let Some(ct_entry) = unsafe { CT_TABLE_V6.get(&ct_key) } {
-        if ct_entry.flags & CT_FLAG_NAT_DST != 0 && ct_entry.nat_addr != [0; 4] {
-            rewrite_dst_ip_v6(ctx, ipv6_dst_off, l4_csum_off, &dst_addr, &ct_entry.nat_addr)?;
-            if ct_entry.nat_port != 0 {
-                rewrite_dst_port(ctx, l4_offset, protocol, dst_port, ct_entry.nat_port)?;
-            }
-            increment_metric(NAT_METRIC_DNAT_APPLIED);
-            return Ok(TC_ACT_OK);
-        }
-    }
-
     // Scan IPv6 DNAT rules via bpf_loop.
     let count = match NAT_DNAT_RULE_COUNT_V6.get(0) {
         Some(&c) => c,
@@ -714,14 +654,7 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
             rewrite_dst_port(ctx, l4_offset, protocol, dst_port, new_dst_port)?;
         }
 
-        if let Some(ct_entry) = CT_TABLE_V6.get_ptr_mut(&ct_key) {
-            unsafe {
-                (*ct_entry).nat_addr = new_dst_addr;
-                (*ct_entry).nat_port = new_dst_port;
-                (*ct_entry).flags |= CT_FLAG_NAT_DST;
-                (*ct_entry).nat_type = NAT_TYPE_DNAT;
-            }
-        }
+        // NAT info delegated to kernel CT via kfunc_delegate_nat_v6.
 
         increment_metric(NAT_METRIC_DNAT_APPLIED);
 

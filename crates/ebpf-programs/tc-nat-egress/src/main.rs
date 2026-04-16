@@ -21,10 +21,7 @@ use ebpf_helpers::kfuncs::{
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::increment_metric;
 use ebpf_common::{
-    conntrack::{
-        ConnKey, ConnKeyV6, ConnValue, ConnValueV6, CT_FLAG_NAT_SRC, CT_MAX_ENTRIES_V4,
-        CT_MAX_ENTRIES_V6, normalize_key_v4, normalize_key_v6,
-    },
+    conntrack::normalize_key_v6,
     nat::{
         MAX_NAT_HASH_EXACT, MAX_NAT_PORT_ALLOC, MAX_NAT_RULES, MAX_NAT_RULES_V6,
         MAX_NPTV6_RULES, NAT_MATCH_DST_IP, NAT_MATCH_PROTO,
@@ -81,15 +78,8 @@ static NAT_SNAT_RULE_COUNT_V6: Array<u32> = Array::with_max_entries(1, 0);
 static NAT_HASH_SNAT: HashMap<NatHashKeyExact, NatHashValue> =
     HashMap::with_max_entries(MAX_NAT_HASH_EXACT, 0);
 
-/// Shared conntrack table (pinned, same as tc-conntrack).
-#[map]
-static CT_TABLE_V4: LruHashMap<ConnKey, ConnValue> =
-    LruHashMap::with_max_entries(CT_MAX_ENTRIES_V4, 0);
-
-/// Shared IPv6 conntrack table.
-#[map]
-static CT_TABLE_V6: LruHashMap<ConnKeyV6, ConnValueV6> =
-    LruHashMap::with_max_entries(CT_MAX_ENTRIES_V6, 0);
+// CT_TABLE_V4/V6 shadow maps removed — kernel netfilter is the sole
+// CT source. NAT info delegated via bpf_ct_set_nat_info (e30-5).
 
 /// NAT port allocation table (LRU): tracks which translated port is
 /// assigned for each original (addr, port) pair.
@@ -438,20 +428,6 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         _ => return Ok(TC_ACT_OK),
     };
 
-    // Check existing conntrack entry for cached SNAT mapping.
-    let ct_key = normalize_key_v4(src_ip, dst_ip, src_port, dst_port, protocol);
-    if let Some(ct_entry) = unsafe { CT_TABLE_V4.get(&ct_key) } {
-        if ct_entry.flags & CT_FLAG_NAT_SRC != 0 && ct_entry.nat_addr != 0 {
-            // Apply cached SNAT: rewrite source IP (and port if set).
-            rewrite_src_ip(ctx, l3_offset, l4_offset, protocol, src_ip, ct_entry.nat_addr)?;
-            if ct_entry.nat_port != 0 && ct_entry.nat_port != src_port {
-                rewrite_src_port(ctx, l4_offset, protocol, src_port, ct_entry.nat_port)?;
-            }
-            increment_metric(NAT_METRIC_SNAT_APPLIED);
-            return Ok(TC_ACT_OK);
-        }
-    }
-
     // Fast-path: exact-match SNAT HashMap lookup — O(1).
     // Key uses (src_ip, src_port, protocol) for SNAT rules with exact match criteria.
     let hash_key = NatHashKeyExact {
@@ -465,24 +441,6 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         if val.nat_port_start != 0 {
             rewrite_src_port(ctx, l4_offset, protocol, src_port, val.nat_port_start)?;
         }
-        let now = unsafe { bpf_ktime_get_boot_ns() };
-        let ct_key = normalize_key_v4(val.nat_addr, dst_ip, val.nat_port_start.max(src_port), dst_port, protocol);
-        let ct_val = ConnValue {
-            state: 1,
-            flags: CT_FLAG_NAT_SRC,
-            nat_type: 1, // SNAT
-            _pad: 0,
-            packets_fwd: 1,
-            packets_rev: 0,
-            bytes_fwd: ctx.len() as u32,
-            bytes_rev: 0,
-            first_seen_ns: now,
-            last_seen_ns: now,
-            nat_addr: val.nat_addr,
-            nat_port: val.nat_port_start,
-            _pad2: [0; 2],
-        };
-        let _ = CT_TABLE_V4.insert(&ct_key, &ct_val, 0);
         increment_metric(NAT_METRIC_SNAT_APPLIED);
         kfunc_delegate_nat_v4(
             ctx, src_ip, dst_ip, src_port, dst_port, protocol,
@@ -540,15 +498,7 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
             rewrite_src_port(ctx, l4_offset, protocol, src_port, new_src_port)?;
         }
 
-        // Store NAT mapping in conntrack.
-        if let Some(ct_entry) = CT_TABLE_V4.get_ptr_mut(&ct_key) {
-            unsafe {
-                (*ct_entry).nat_addr = translated_ip;
-                (*ct_entry).nat_port = new_src_port;
-                (*ct_entry).flags |= CT_FLAG_NAT_SRC;
-                (*ct_entry).nat_type = NAT_TYPE_SNAT;
-            }
-        }
+        // NAT info delegated to kernel CT via kfunc_delegate_nat_v4.
 
         if scan_ctx.nat_type == NAT_TYPE_MASQUERADE {
             increment_metric(NAT_METRIC_MASQ_APPLIED);
@@ -641,17 +591,6 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
 
     // Check existing conntrack entry for cached SNAT mapping.
     let ct_key = normalize_key_v6(&src_addr, &dst_addr, src_port, dst_port, protocol);
-    if let Some(ct_entry) = unsafe { CT_TABLE_V6.get(&ct_key) } {
-        if ct_entry.flags & CT_FLAG_NAT_SRC != 0 && ct_entry.nat_addr != [0; 4] {
-            rewrite_src_ip_v6(ctx, ipv6_src_off, l4_csum_off, &src_addr, &ct_entry.nat_addr)?;
-            if ct_entry.nat_port != 0 && ct_entry.nat_port != src_port {
-                rewrite_src_port(ctx, l4_offset, protocol, src_port, ct_entry.nat_port)?;
-            }
-            increment_metric(NAT_METRIC_SNAT_APPLIED);
-            return Ok(TC_ACT_OK);
-        }
-    }
-
     // Scan IPv6 SNAT rules via bpf_loop.
     let count = match NAT_SNAT_RULE_COUNT_V6.get(0) {
         Some(&c) => c,
@@ -693,14 +632,7 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
             rewrite_src_port(ctx, l4_offset, protocol, src_port, new_src_port)?;
         }
 
-        if let Some(ct_entry) = CT_TABLE_V6.get_ptr_mut(&ct_key) {
-            unsafe {
-                (*ct_entry).nat_addr = translated_addr;
-                (*ct_entry).nat_port = new_src_port;
-                (*ct_entry).flags |= CT_FLAG_NAT_SRC;
-                (*ct_entry).nat_type = NAT_TYPE_SNAT;
-            }
-        }
+        // NAT info delegated to kernel CT via kfunc_delegate_nat_v6.
 
         if scan_ctx.nat_type == NAT_TYPE_MASQUERADE {
             increment_metric(NAT_METRIC_MASQ_APPLIED);
