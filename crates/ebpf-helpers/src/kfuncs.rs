@@ -78,22 +78,7 @@ pub struct cgroup {
 }
 
 #[repr(C)]
-pub struct cgroup_subsys_state {
-    _unused: [u8; 0],
-}
-
-#[repr(C)]
 pub struct xfrm_state {
-    _unused: [u8; 0],
-}
-
-#[repr(C)]
-pub struct bpf_iter_css_task {
-    _unused: [u8; 0],
-}
-
-#[repr(C)]
-pub struct bpf_iter_css {
     _unused: [u8; 0],
 }
 
@@ -380,21 +365,6 @@ impl BpfCtOpts {
     }
 }
 
-/// `cgroup1` hierarchy id used by Docker. `0` asks the kernel for the
-/// default hierarchy.
-pub const CGROUP1_HIERARCHY_ID_DEFAULT: i32 = 0;
-
-/// Flags for `bpf_iter_css_new` — see `include/uapi/linux/bpf.h`.
-#[repr(u32)]
-pub enum CssIterFlags {
-    /// Pre-order descendant walk.
-    DescendantsPre = 0,
-    /// Post-order descendant walk.
-    DescendantsPost = 1,
-    /// Walk up the ancestor chain.
-    AncestorsUp = 2,
-}
-
 /// Options struct passed to `bpf_xdp_get_xfrm_state` — stable layout
 /// from kernel 6.8 `include/uapi/linux/bpf.h` (`bpf_xfrm_state_opts`).
 #[repr(C)]
@@ -418,43 +388,6 @@ pub struct bpf_xfrm_state_opts {
 
 #[cfg(target_arch = "bpf")]
 unsafe extern "C" {
-    /// Return the `struct cgroup*` for the cgroup1 hierarchy the task
-    /// belongs to. Kernel 6.8. `KF_ACQUIRE | KF_RCU | KF_RET_NULL` —
-    /// pair every non-null return with [`bpf_cgroup_release`].
-    pub fn bpf_task_get_cgroup1(task: *mut task_struct, hierarchy_id: i32) -> *mut cgroup;
-
-    /// Release a cgroup pointer obtained from
-    /// [`bpf_task_get_cgroup1`]. Kernel 6.5+.
-    pub fn bpf_cgroup_release(cgrp: *mut cgroup);
-
-    /// Look up a `struct cgroup*` by its 64-bit kernfs id. Kernel
-    /// 6.5+. `KF_ACQUIRE | KF_RET_NULL` — pair every non-null
-    /// return with [`bpf_cgroup_release`]. The id matches the value
-    /// produced by `bpf_get_current_cgroup_id()` and the
-    /// `cgroup.id` field exposed via `cgroup_id` skb metadata.
-    pub fn bpf_cgroup_from_id(cgroup_id: u64) -> *mut cgroup;
-
-    /// Walk the cgroup ancestor chain and return the ancestor at
-    /// `ancestor_level` (0 = root, increasing towards `cgrp`).
-    /// Returns null when `ancestor_level` exceeds the cgroup depth.
-    /// Kernel 6.0+. `KF_ACQUIRE | KF_RCU | KF_RET_NULL` — pair the
-    /// non-null return with [`bpf_cgroup_release`].
-    pub fn bpf_cgroup_ancestor(cgrp: *mut cgroup, ancestor_level: i32) -> *mut cgroup;
-
-    /// Bump the refcount on an existing cgroup pointer so the
-    /// caller can hold it past the lifetime of the original
-    /// reference. Kernel 6.0+. `KF_ACQUIRE | KF_RCU` — every
-    /// successful call must be balanced with
-    /// [`bpf_cgroup_release`].
-    pub fn bpf_cgroup_acquire(cgrp: *mut cgroup) -> *mut cgroup;
-
-    /// Test whether `task` is a descendant of `ancestor` in the
-    /// cgroup tree. Kernel 6.1+. Returns `1` when `task` lives
-    /// under `ancestor` (or equals it), `0` otherwise. `KF_RCU` on
-    /// both arguments — must be called inside an RCU read-side
-    /// critical section opened by [`bpf_rcu_read_lock`].
-    pub fn bpf_task_under_cgroup(task: *mut task_struct, ancestor: *mut cgroup) -> i64;
-
     /// Read the hardware-stripped VLAN tag for the current XDP frame.
     /// Kernel 6.8. Returns `0` on success, negative errno otherwise.
     pub fn bpf_xdp_metadata_rx_vlan_tag(
@@ -492,84 +425,12 @@ unsafe extern "C" {
     /// [`bpf_xdp_get_xfrm_state`].
     pub fn bpf_xdp_xfrm_state_release(x: *mut xfrm_state);
 
-    /// `bpf_iter_css_task_new` — start iterating tasks attached to a
-    /// cgroup subsystem state. Kernel 6.7.
-    pub fn bpf_iter_css_task_new(
-        it: *mut bpf_iter_css_task,
-        css: *mut cgroup_subsys_state,
-        flags: u32,
-    ) -> i32;
-
-    /// `bpf_iter_css_task_next` — advance iterator, returns next task
-    /// or null.
-    pub fn bpf_iter_css_task_next(it: *mut bpf_iter_css_task) -> *mut task_struct;
-
-    /// `bpf_iter_css_task_destroy` — destroy the iterator.
-    pub fn bpf_iter_css_task_destroy(it: *mut bpf_iter_css_task);
-
-    /// `bpf_iter_css_new` — iterate the cgroup tree rooted at `start`.
-    pub fn bpf_iter_css_new(
-        it: *mut bpf_iter_css,
-        start: *mut cgroup_subsys_state,
-        flags: u32,
-    ) -> i32;
-
-    /// `bpf_iter_css_next` — next cgroup css or null.
-    pub fn bpf_iter_css_next(it: *mut bpf_iter_css) -> *mut cgroup_subsys_state;
-
-    /// `bpf_iter_css_destroy` — destroy the iterator.
-    pub fn bpf_iter_css_destroy(it: *mut bpf_iter_css);
-
-    // ── Kernel 6.2 RCU + cast plumbing ─────────────────────────
-    //
-    // These four kfuncs are the prerequisite plumbing for every
-    // other kfunc binding in this module that dereferences
-    // RCU-protected kernel fields or re-types opaque pointers as
-    // PTR_TO_BTF_ID. Kernel 6.2+.
-
-    /// Begin a BPF RCU read-side critical section. Must be paired
-    /// with [`bpf_rcu_read_unlock`] on every control-flow path.
-    /// Required before dereferencing RCU-protected kernel fields
-    /// such as `task->cgroups`, `nf_conn->ct_general`, etc.
-    pub fn bpf_rcu_read_lock();
-
-    /// End a BPF RCU read-side critical section opened via
-    /// [`bpf_rcu_read_lock`].
-    pub fn bpf_rcu_read_unlock();
-
-    /// Re-type an opaque kernel pointer as a read-only
-    /// `PTR_TO_BTF_ID` value identified by `btf_id__k`. Lets the
-    /// verifier accept direct field reads on structs such as
-    /// `nf_conn`, `task_struct`, `sock`, that are otherwise
-    /// inaccessible from BPF. Returns a pointer the verifier
-    /// treats as read-only; writes are rejected at load time.
-    pub fn bpf_rdonly_cast(
-        obj__ign: *const core::ffi::c_void,
-        btf_id__k: u32,
-    ) -> *mut core::ffi::c_void;
-
-    /// Cast a program context pointer (`struct __sk_buff*`,
-    /// `struct xdp_md*`, …) back to its kernel-internal type
-    /// (`struct sk_buff*`, `struct xdp_buff*`, …) so it can be
-    /// handed to kfuncs that take kernel-native context types.
-    pub fn bpf_cast_to_kern_ctx(obj: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
-
     // ── Kernel 6.4 dynptr constructors ────────────────────────
-    //
-    // dynptrs abstract packet memory regardless of whether the
-    // underlying skb is linear, paged, or an XDP_FRAGS buffer. The
-    // `__uninit` suffix on the output pointer signals the verifier
-    // that the target is a stack-allocated dynptr which the kernel
-    // will initialise on success.
 
     /// Initialise a dynptr over a TC skb. `flags` is reserved and
     /// must be `0`. Kernel 6.4+. Returns `0` on success, negative
     /// errno otherwise.
     pub fn bpf_dynptr_from_skb(skb: *mut core::ffi::c_void, flags: u64, ptr: *mut BpfDynptr)
-    -> i32;
-
-    /// Initialise a dynptr over an XDP frame. Kernel 6.4+.
-    pub fn bpf_dynptr_from_xdp(xdp: *mut core::ffi::c_void, flags: u64, ptr: *mut BpfDynptr)
     -> i32;
 
     /// Return a read-only pointer to `buffer__szk` bytes at `offset`
@@ -728,10 +589,6 @@ unsafe extern "C" {
     // (or GUE) encapsulation parameters on a TC egress skb. Used
     // to build cloud-overlay tunnels without leaving the kernel.
 
-    /// Read the FOU encap parameters attached to a TC skb. Kernel
-    /// 6.4+. Returns `0` on success, negative errno otherwise.
-    pub fn bpf_skb_get_fou_encap(skb: *mut core::ffi::c_void, encap: *mut BpfFouEncap) -> i32;
-
     /// Install FOU or GUE encap parameters on a TC skb. `type_` is
     /// the `bpf_fou_encap_type` discriminant. Kernel 6.4+. Returns
     /// `0` on success, negative errno otherwise.
@@ -752,161 +609,7 @@ unsafe extern "C" {
 #[cfg(not(target_arch = "bpf"))]
 #[allow(clippy::missing_safety_doc)]
 pub mod host_stubs {
-    use super::{
-        bpf_iter_css, bpf_iter_css_task, bpf_xfrm_state_opts, cgroup, cgroup_subsys_state,
-        task_struct, xfrm_state,
-    };
-
-    pub unsafe fn bpf_task_get_cgroup1(_task: *mut task_struct, _hierarchy_id: i32) -> *mut cgroup {
-        core::ptr::null_mut()
-    }
-
-    // ── Kernel 6.0/6.5 cgroup resolver host stubs ──
-
-    /// Sentinel pointer returned by every successful cgroup
-    /// acquisition (`from_id`, `ancestor`, `acquire`). Tests only
-    /// observe pointer non-null-ness so the same sentinel covers
-    /// every path.
-    static HOST_CGROUP_SENTINEL: u8 = 0;
-    /// Outstanding (acquired-but-not-released) cgroup refs.
-    pub(super) static HOST_CGROUP_LIVE: core::sync::atomic::AtomicUsize =
-        core::sync::atomic::AtomicUsize::new(0);
-    /// Test injection: when non-zero, the next `bpf_cgroup_from_id`
-    /// call returns null instead of acquiring a ref.
-    static HOST_NEXT_CGROUP_FROM_ID_FAIL: core::sync::atomic::AtomicI32 =
-        core::sync::atomic::AtomicI32::new(0);
-    /// Last `cgroup_id` argument observed by `bpf_cgroup_from_id`.
-    static HOST_LAST_CGROUP_ID: core::sync::atomic::AtomicU64 =
-        core::sync::atomic::AtomicU64::new(0);
-    /// Test injection: when non-zero, the next `bpf_cgroup_ancestor`
-    /// call returns null.
-    static HOST_NEXT_CGROUP_ANCESTOR_FAIL: core::sync::atomic::AtomicI32 =
-        core::sync::atomic::AtomicI32::new(0);
-    /// Last `ancestor_level` observed by `bpf_cgroup_ancestor`,
-    /// `i32::MIN` when nothing has been recorded.
-    static HOST_LAST_ANCESTOR_LEVEL: core::sync::atomic::AtomicI32 =
-        core::sync::atomic::AtomicI32::new(i32::MIN);
-
-    fn host_cgroup_sentinel_ptr() -> *mut cgroup {
-        let p: *const u8 = &raw const HOST_CGROUP_SENTINEL;
-        p.cast_mut().cast::<cgroup>()
-    }
-
-    /// Test helper: outstanding cgroup ref count after wrapper use.
-    /// Tests assert `0` to prove acquire/release pairing.
-    #[must_use]
-    pub fn host_cgroup_live_count() -> usize {
-        HOST_CGROUP_LIVE.load(core::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// Test helper: force the next `cgroup_from_id` call to fail.
-    pub fn host_set_next_cgroup_from_id_fail() {
-        HOST_NEXT_CGROUP_FROM_ID_FAIL.store(1, core::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Test helper: force the next `cgroup_ancestor` call to fail.
-    pub fn host_set_next_cgroup_ancestor_fail() {
-        HOST_NEXT_CGROUP_ANCESTOR_FAIL.store(1, core::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Read the last `cgroup_id` passed to `bpf_cgroup_from_id`.
-    #[must_use]
-    pub fn host_last_cgroup_id() -> u64 {
-        HOST_LAST_CGROUP_ID.load(core::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// Read the last `ancestor_level` passed to
-    /// `bpf_cgroup_ancestor`, `None` when nothing observed.
-    #[must_use]
-    pub fn host_last_ancestor_level() -> Option<i32> {
-        let v = HOST_LAST_ANCESTOR_LEVEL.load(core::sync::atomic::Ordering::SeqCst);
-        if v == i32::MIN { None } else { Some(v) }
-    }
-
-    /// Reset every cgroup observation atomic.
-    pub fn host_reset_cgroup_state() {
-        HOST_CGROUP_LIVE.store(0, core::sync::atomic::Ordering::SeqCst);
-        HOST_NEXT_CGROUP_FROM_ID_FAIL.store(0, core::sync::atomic::Ordering::SeqCst);
-        HOST_LAST_CGROUP_ID.store(0, core::sync::atomic::Ordering::SeqCst);
-        HOST_NEXT_CGROUP_ANCESTOR_FAIL.store(0, core::sync::atomic::Ordering::SeqCst);
-        HOST_LAST_ANCESTOR_LEVEL.store(i32::MIN, core::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub unsafe fn bpf_cgroup_from_id(cgroup_id: u64) -> *mut cgroup {
-        HOST_LAST_CGROUP_ID.store(cgroup_id, core::sync::atomic::Ordering::SeqCst);
-        let fail = HOST_NEXT_CGROUP_FROM_ID_FAIL.swap(0, core::sync::atomic::Ordering::SeqCst);
-        if fail != 0 {
-            return core::ptr::null_mut();
-        }
-        HOST_CGROUP_LIVE.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
-        host_cgroup_sentinel_ptr()
-    }
-
-    pub unsafe fn bpf_cgroup_ancestor(_cgrp: *mut cgroup, ancestor_level: i32) -> *mut cgroup {
-        HOST_LAST_ANCESTOR_LEVEL.store(ancestor_level, core::sync::atomic::Ordering::SeqCst);
-        let fail = HOST_NEXT_CGROUP_ANCESTOR_FAIL.swap(0, core::sync::atomic::Ordering::SeqCst);
-        if fail != 0 {
-            return core::ptr::null_mut();
-        }
-        HOST_CGROUP_LIVE.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
-        host_cgroup_sentinel_ptr()
-    }
-
-    pub unsafe fn bpf_cgroup_acquire(cgrp: *mut cgroup) -> *mut cgroup {
-        if cgrp.is_null() {
-            return core::ptr::null_mut();
-        }
-        HOST_CGROUP_LIVE.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
-        host_cgroup_sentinel_ptr()
-    }
-
-    pub unsafe fn bpf_cgroup_release(cgrp: *mut cgroup) {
-        if cgrp.is_null() {
-            return;
-        }
-        let prev = HOST_CGROUP_LIVE.load(core::sync::atomic::Ordering::SeqCst);
-        if prev > 0 {
-            HOST_CGROUP_LIVE.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
-    /// Test injection: when set, the next `bpf_task_under_cgroup`
-    /// call returns this value. `0` = not under cgroup, `1` = is
-    /// under cgroup.
-    static HOST_NEXT_TASK_UNDER_CGROUP: core::sync::atomic::AtomicI64 =
-        core::sync::atomic::AtomicI64::new(0);
-    /// Sticky flag tracking whether the last `task_under_cgroup`
-    /// call was actually invoked. Tests assert this to prove the
-    /// safe wrapper actually delegates to the kfunc rather than
-    /// short-circuiting on null pointers.
-    static HOST_TASK_UNDER_CGROUP_INVOKED: core::sync::atomic::AtomicI32 =
-        core::sync::atomic::AtomicI32::new(0);
-
-    /// Test helper: queue the verdict (0 or 1) returned by the next
-    /// `bpf_task_under_cgroup` call. Persists across consecutive
-    /// calls until rewritten or reset.
-    pub fn host_set_next_task_under_cgroup(verdict: i64) {
-        HOST_NEXT_TASK_UNDER_CGROUP.store(verdict, core::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Test helper: did the last `task_under_cgroup` wrapper call
-    /// actually reach the kfunc? Reset on read.
-    #[must_use]
-    pub fn host_take_task_under_cgroup_invoked() -> bool {
-        HOST_TASK_UNDER_CGROUP_INVOKED.swap(0, core::sync::atomic::Ordering::SeqCst) != 0
-    }
-
-    /// Reset the `task_under_cgroup` injection state so consecutive
-    /// tests do not bleed.
-    pub fn host_reset_task_under_cgroup_state() {
-        HOST_NEXT_TASK_UNDER_CGROUP.store(0, core::sync::atomic::Ordering::SeqCst);
-        HOST_TASK_UNDER_CGROUP_INVOKED.store(0, core::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub unsafe fn bpf_task_under_cgroup(_task: *mut task_struct, _ancestor: *mut cgroup) -> i64 {
-        HOST_TASK_UNDER_CGROUP_INVOKED.store(1, core::sync::atomic::Ordering::SeqCst);
-        HOST_NEXT_TASK_UNDER_CGROUP.load(core::sync::atomic::Ordering::SeqCst)
-    }
+    use super::{bpf_xfrm_state_opts, xfrm_state};
 
     /// `-ENOTSUP` hardcoded (95 on Linux) so the host build does not
     /// drag in a `libc` dependency.
@@ -1014,53 +717,6 @@ pub mod host_stubs {
 
     pub unsafe fn bpf_xdp_xfrm_state_release(_x: *mut xfrm_state) {}
 
-    pub unsafe fn bpf_iter_css_task_new(
-        _it: *mut bpf_iter_css_task,
-        _css: *mut cgroup_subsys_state,
-        _flags: u32,
-    ) -> i32 {
-        ENOTSUP_NEG
-    }
-
-    pub unsafe fn bpf_iter_css_task_next(_it: *mut bpf_iter_css_task) -> *mut task_struct {
-        core::ptr::null_mut()
-    }
-
-    pub unsafe fn bpf_iter_css_task_destroy(_it: *mut bpf_iter_css_task) {}
-
-    pub unsafe fn bpf_iter_css_new(
-        _it: *mut bpf_iter_css,
-        _start: *mut cgroup_subsys_state,
-        _flags: u32,
-    ) -> i32 {
-        ENOTSUP_NEG
-    }
-
-    pub unsafe fn bpf_iter_css_next(_it: *mut bpf_iter_css) -> *mut cgroup_subsys_state {
-        core::ptr::null_mut()
-    }
-
-    pub unsafe fn bpf_iter_css_destroy(_it: *mut bpf_iter_css) {}
-
-    // ── Kernel 6.2 plumbing stubs ──
-
-    pub unsafe fn bpf_rcu_read_lock() {}
-
-    pub unsafe fn bpf_rcu_read_unlock() {}
-
-    pub unsafe fn bpf_rdonly_cast(
-        obj: *const core::ffi::c_void,
-        _btf_id: u32,
-    ) -> *mut core::ffi::c_void {
-        // Host builds leave the pointer identity — unit tests that
-        // pass a non-null ctx can still observe the sentinel back.
-        obj.cast_mut()
-    }
-
-    pub unsafe fn bpf_cast_to_kern_ctx(obj: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
-        obj
-    }
-
     // ── Kernel 6.4/6.5 dynptr stubs ──
 
     use super::BpfDynptr;
@@ -1136,14 +792,6 @@ pub mod host_stubs {
     ) -> i32 {
         // Host builds never observe a real skb. Tests drive the
         // dynptr directly via [`install_host_dynptr`].
-        0
-    }
-
-    pub unsafe fn bpf_dynptr_from_xdp(
-        _xdp: *mut core::ffi::c_void,
-        _flags: u64,
-        _ptr: *mut BpfDynptr,
-    ) -> i32 {
         0
     }
 
@@ -1618,24 +1266,6 @@ pub mod host_stubs {
         0
     }
 
-    pub unsafe fn bpf_skb_get_fou_encap(
-        _skb: *mut core::ffi::c_void,
-        encap: *mut BpfFouEncap,
-    ) -> i32 {
-        let err = HOST_NEXT_FOU_GET_ERROR.swap(0, Ordering::SeqCst);
-        if err != 0 {
-            return err;
-        }
-        if !encap.is_null() {
-            #[allow(clippy::cast_possible_truncation)]
-            unsafe {
-                (*encap).sport = HOST_NEXT_FOU_SPORT.load(Ordering::SeqCst) as u16;
-                (*encap).dport = HOST_NEXT_FOU_DPORT.load(Ordering::SeqCst) as u16;
-            }
-        }
-        0
-    }
-
     pub unsafe fn bpf_skb_set_fou_encap(
         _skb: *mut core::ffi::c_void,
         encap: *mut BpfFouEncap,
@@ -1662,190 +1292,6 @@ pub mod host_stubs {
 // verifier so that the programs cannot accidentally leak a reference.
 // On the BPF target they call the real kfuncs; on the host target
 // they call the no-op stubs so domain-level unit tests keep running.
-
-/// Run `f` with the cgroup1 pointer of the given task. The pointer is
-/// released automatically when `f` returns, satisfying `KF_ACQUIRE`.
-///
-/// Returns `None` when the task has no cgroup1 membership (e.g. on a
-/// cgroupv2-only host) or when running in a non-BPF test build.
-///
-/// # Safety
-/// `task` must be a valid pointer obtained from a BPF helper such as
-/// `bpf_get_current_task_btf()` (kernel 5.11+). Calling with an
-/// arbitrary pointer is undefined behaviour.
-#[inline(always)]
-pub unsafe fn with_task_cgroup1<F, R>(task: *mut task_struct, f: F) -> Option<R>
-where
-    F: FnOnce(*mut cgroup) -> R,
-{
-    #[cfg(target_arch = "bpf")]
-    let cgrp = unsafe { bpf_task_get_cgroup1(task, CGROUP1_HIERARCHY_ID_DEFAULT) };
-    #[cfg(not(target_arch = "bpf"))]
-    let cgrp = unsafe { host_stubs::bpf_task_get_cgroup1(task, CGROUP1_HIERARCHY_ID_DEFAULT) };
-
-    if cgrp.is_null() {
-        return None;
-    }
-    let result = f(cgrp);
-    #[cfg(target_arch = "bpf")]
-    unsafe {
-        bpf_cgroup_release(cgrp);
-    }
-    #[cfg(not(target_arch = "bpf"))]
-    unsafe {
-        host_stubs::bpf_cgroup_release(cgrp);
-    }
-    Some(result)
-}
-
-/// Look up a cgroup by 64-bit kernfs id and hand it to `f`. The
-/// reference is released automatically when `f` returns. Returns
-/// `None` when the kernel cannot resolve the id (cgroup pruned,
-/// wrong namespace).
-///
-/// Used by the in-kernel container resolver to skip the
-/// userspace `/proc/<pid>/cgroup` round-trip on the hot packet
-/// path: the eBPF program reads the skb-attached `cgroup_id` and
-/// resolves it to a cgroup pointer here.
-///
-/// # Safety
-/// Must be called from a BPF program context (or test build). The
-/// kernel rejects calls outside an RCU read-side region in newer
-/// kernels — wrap in [`with_rcu_read_lock`] when in doubt.
-#[inline(always)]
-pub unsafe fn with_cgroup_from_id<F, R>(cgroup_id: u64, f: F) -> Option<R>
-where
-    F: FnOnce(*mut cgroup) -> R,
-{
-    #[cfg(target_arch = "bpf")]
-    let cgrp = unsafe { bpf_cgroup_from_id(cgroup_id) };
-    #[cfg(not(target_arch = "bpf"))]
-    let cgrp = unsafe { host_stubs::bpf_cgroup_from_id(cgroup_id) };
-    if cgrp.is_null() {
-        return None;
-    }
-    let result = f(cgrp);
-    #[cfg(target_arch = "bpf")]
-    unsafe {
-        bpf_cgroup_release(cgrp);
-    }
-    #[cfg(not(target_arch = "bpf"))]
-    unsafe {
-        host_stubs::bpf_cgroup_release(cgrp);
-    }
-    Some(result)
-}
-
-/// Walk to the cgroup ancestor at `level` (0 = root) and hand the
-/// pointer to `f`. The acquired ancestor reference is released
-/// automatically when `f` returns. Returns `None` when the cgroup
-/// chain is shallower than `level`.
-///
-/// Used by the tenant-isolation policy to map a leaf container
-/// cgroup to the parent slice that owns it (e.g. matching every
-/// pod under a Kubernetes namespace cgroup).
-///
-/// # Safety
-/// `cgrp` must be a live `*mut cgroup` obtained from another
-/// cgroup kfunc (e.g. [`with_cgroup_from_id`]) or
-/// [`with_task_cgroup1`].
-#[inline(always)]
-pub unsafe fn with_cgroup_ancestor<F, R>(cgrp: *mut cgroup, level: i32, f: F) -> Option<R>
-where
-    F: FnOnce(*mut cgroup) -> R,
-{
-    #[cfg(target_arch = "bpf")]
-    let anc = unsafe { bpf_cgroup_ancestor(cgrp, level) };
-    #[cfg(not(target_arch = "bpf"))]
-    let anc = unsafe { host_stubs::bpf_cgroup_ancestor(cgrp, level) };
-    if anc.is_null() {
-        return None;
-    }
-    let result = f(anc);
-    #[cfg(target_arch = "bpf")]
-    unsafe {
-        bpf_cgroup_release(anc);
-    }
-    #[cfg(not(target_arch = "bpf"))]
-    unsafe {
-        host_stubs::bpf_cgroup_release(anc);
-    }
-    Some(result)
-}
-
-/// Bump the refcount on `cgrp` and pass the freshly-acquired
-/// pointer to `f`. Used when the caller wants to hold the cgroup
-/// past the lifetime of the original (RCU-bound) reference. The
-/// new reference is released automatically when `f` returns.
-///
-/// # Safety
-/// `cgrp` must be a live `*mut cgroup` obtained from another
-/// cgroup kfunc.
-#[inline(always)]
-pub unsafe fn with_cgroup_acquired<F, R>(cgrp: *mut cgroup, f: F) -> Option<R>
-where
-    F: FnOnce(*mut cgroup) -> R,
-{
-    if cgrp.is_null() {
-        return None;
-    }
-    #[cfg(target_arch = "bpf")]
-    let acquired = unsafe { bpf_cgroup_acquire(cgrp) };
-    #[cfg(not(target_arch = "bpf"))]
-    let acquired = unsafe { host_stubs::bpf_cgroup_acquire(cgrp) };
-    if acquired.is_null() {
-        return None;
-    }
-    let result = f(acquired);
-    #[cfg(target_arch = "bpf")]
-    unsafe {
-        bpf_cgroup_release(acquired);
-    }
-    #[cfg(not(target_arch = "bpf"))]
-    unsafe {
-        host_stubs::bpf_cgroup_release(acquired);
-    }
-    Some(result)
-}
-
-/// Test whether `task` is a descendant of `ancestor` in the
-/// cgroup tree. Returns `true` when the task lives in (or equals)
-/// the `ancestor` cgroup. The kfunc requires both arguments to be
-/// RCU-protected, so this wrapper opens an RCU read-side critical
-/// section internally — the caller does not need to wrap it in
-/// [`with_rcu_read_lock`].
-///
-/// Used by the per-tenant eBPF enforcement path: an L7 policy
-/// program looks up the destination task's container cgroup
-/// (via [`with_cgroup_from_id`]) and then asks whether the
-/// current `bpf_get_current_task_btf()` belongs to the same
-/// tenant slice without ever leaving kernel space.
-///
-/// Returns `false` when either pointer is null instead of
-/// invoking the kfunc — keeps the verifier happy on cgroup
-/// resolution misses.
-///
-/// # Safety
-/// `task` must be a valid `*mut task_struct` obtained from
-/// `bpf_get_current_task_btf()` (kernel 5.11+) or a similar
-/// helper. `ancestor` must be a live `*mut cgroup` from another
-/// cgroup kfunc.
-#[inline(always)]
-#[must_use]
-pub unsafe fn task_under_cgroup(task: *mut task_struct, ancestor: *mut cgroup) -> bool {
-    if task.is_null() || ancestor.is_null() {
-        return false;
-    }
-    unsafe {
-        with_rcu_read_lock(|| {
-            #[cfg(target_arch = "bpf")]
-            let v = bpf_task_under_cgroup(task, ancestor);
-            #[cfg(not(target_arch = "bpf"))]
-            let v = host_stubs::bpf_task_under_cgroup(task, ancestor);
-            v != 0
-        })
-    }
-}
 
 /// Read the hardware-offloaded VLAN tag for the current XDP frame.
 /// Returns `(proto, tci)` on success, `None` when the NIC driver
@@ -1950,90 +1396,6 @@ where
         host_stubs::bpf_xdp_xfrm_state_release(x);
     }
     Some(result)
-}
-
-/// Run `f` inside a BPF RCU read-side critical section. Every path
-/// out of `f` is guaranteed to call `bpf_rcu_read_unlock`, which is
-/// what the verifier enforces for RCU-protected dereferences.
-///
-/// # Safety
-/// The closure must not call helpers / kfuncs that sleep or break
-/// the RCU invariant. Callers are responsible for keeping the BPF
-/// program inside the verifier's RCU rules (no nested locks, no
-/// sleepable helpers).
-#[inline(always)]
-pub unsafe fn with_rcu_read_lock<F, R>(f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    #[cfg(target_arch = "bpf")]
-    unsafe {
-        bpf_rcu_read_lock();
-    }
-    #[cfg(not(target_arch = "bpf"))]
-    unsafe {
-        host_stubs::bpf_rcu_read_lock();
-    }
-    let result = f();
-    #[cfg(target_arch = "bpf")]
-    unsafe {
-        bpf_rcu_read_unlock();
-    }
-    #[cfg(not(target_arch = "bpf"))]
-    unsafe {
-        host_stubs::bpf_rcu_read_unlock();
-    }
-    result
-}
-
-/// Re-type an opaque kernel pointer as a read-only `PTR_TO_BTF_ID`
-/// of the supplied `btf_id`. The returned pointer is only valid for
-/// direct field reads from BPF — writes are rejected at load time.
-///
-/// Returns `None` when the input is null, so callers get a safe
-/// option-type instead of a dangling pointer.
-///
-/// # Safety
-/// `obj` must point to a live kernel object of the type identified
-/// by `btf_id`. The caller is responsible for supplying a `btf_id`
-/// that matches the actual kernel struct — the verifier will reject
-/// the program at load time if the type does not exist.
-#[inline(always)]
-#[must_use]
-pub unsafe fn rdonly_cast(
-    obj: *const core::ffi::c_void,
-    btf_id: u32,
-) -> Option<*mut core::ffi::c_void> {
-    if obj.is_null() {
-        return None;
-    }
-    #[cfg(target_arch = "bpf")]
-    let out = unsafe { bpf_rdonly_cast(obj, btf_id) };
-    #[cfg(not(target_arch = "bpf"))]
-    let out = unsafe { host_stubs::bpf_rdonly_cast(obj, btf_id) };
-    if out.is_null() { None } else { Some(out) }
-}
-
-/// Cast a program context pointer (`__sk_buff*` / `xdp_md*`) to its
-/// kernel-internal type (`sk_buff*` / `xdp_buff*`) for kfuncs that
-/// require the native kernel struct.
-///
-/// Returns `None` when the input is null.
-///
-/// # Safety
-/// `ctx` must be a live program context pointer owned by the current
-/// BPF program invocation.
-#[inline(always)]
-#[must_use]
-pub unsafe fn cast_to_kern_ctx(ctx: *mut core::ffi::c_void) -> Option<*mut core::ffi::c_void> {
-    if ctx.is_null() {
-        return None;
-    }
-    #[cfg(target_arch = "bpf")]
-    let out = unsafe { bpf_cast_to_kern_ctx(ctx) };
-    #[cfg(not(target_arch = "bpf"))]
-    let out = unsafe { host_stubs::bpf_cast_to_kern_ctx(ctx) };
-    if out.is_null() { None } else { Some(out) }
 }
 
 // ── Dynptr safe wrappers ─────────────────────────────────────────
@@ -2185,130 +1547,6 @@ impl SkbDynptr {
         let sz = core::mem::size_of::<T>() as u32;
         let ptr = unsafe { self.slice(offset, buf.as_mut_ptr().cast(), sz)? };
         // SAFETY: `slice` populated `sz` bytes at `buf`.
-        Some(unsafe { core::ptr::read_unaligned(ptr.cast::<T>()) })
-    }
-}
-
-/// Dynptr over an XDP frame. Same surface as [`SkbDynptr`] — the
-/// two are separate types so the caller cannot accidentally pass a
-/// skb dynptr to an XDP kfunc or vice versa.
-#[repr(transparent)]
-pub struct XdpDynptr {
-    inner: BpfDynptr,
-}
-
-impl XdpDynptr {
-    /// Initialise a dynptr over the given `xdp_md` pointer.
-    ///
-    /// # Safety
-    /// `xdp` must be a live `xdp_md*` owned by the current XDP
-    /// program invocation.
-    #[inline(always)]
-    pub unsafe fn from_xdp(xdp: *mut core::ffi::c_void) -> Option<Self> {
-        let mut inner = BpfDynptr::uninit();
-        #[cfg(target_arch = "bpf")]
-        let rc = unsafe { bpf_dynptr_from_xdp(xdp, 0, &raw mut inner) };
-        #[cfg(not(target_arch = "bpf"))]
-        let rc = unsafe { host_stubs::bpf_dynptr_from_xdp(xdp, 0, &raw mut inner) };
-        if rc != 0 { None } else { Some(Self { inner }) }
-    }
-
-    #[inline(always)]
-    #[must_use]
-    pub fn as_raw(&self) -> *const BpfDynptr {
-        &raw const self.inner
-    }
-
-    #[inline(always)]
-    pub fn as_raw_mut(&mut self) -> *mut BpfDynptr {
-        &raw mut self.inner
-    }
-
-    /// # Safety
-    /// `buffer` must point to at least `buffer_sz` writable bytes.
-    #[inline(always)]
-    pub unsafe fn slice(
-        &self,
-        offset: u32,
-        buffer: *mut core::ffi::c_void,
-        buffer_sz: u32,
-    ) -> Option<*const core::ffi::c_void> {
-        #[cfg(target_arch = "bpf")]
-        let out = unsafe { bpf_dynptr_slice(self.as_raw(), offset, buffer, buffer_sz) };
-        #[cfg(not(target_arch = "bpf"))]
-        let out = unsafe { host_stubs::bpf_dynptr_slice(self.as_raw(), offset, buffer, buffer_sz) };
-        if out.is_null() { None } else { Some(out) }
-    }
-
-    /// # Safety
-    /// `buffer` must point to at least `buffer_sz` writable bytes.
-    #[inline(always)]
-    pub unsafe fn slice_rdwr(
-        &self,
-        offset: u32,
-        buffer: *mut core::ffi::c_void,
-        buffer_sz: u32,
-    ) -> Option<*mut core::ffi::c_void> {
-        #[cfg(target_arch = "bpf")]
-        let out = unsafe { bpf_dynptr_slice_rdwr(self.as_raw(), offset, buffer, buffer_sz) };
-        #[cfg(not(target_arch = "bpf"))]
-        let out =
-            unsafe { host_stubs::bpf_dynptr_slice_rdwr(self.as_raw(), offset, buffer, buffer_sz) };
-        if out.is_null() { None } else { Some(out) }
-    }
-
-    #[inline(always)]
-    pub fn adjust(&mut self, start: u32, end: u32) -> bool {
-        #[cfg(target_arch = "bpf")]
-        let rc = unsafe { bpf_dynptr_adjust(self.as_raw(), start, end) };
-        #[cfg(not(target_arch = "bpf"))]
-        let rc = unsafe { host_stubs::bpf_dynptr_adjust(self.as_raw(), start, end) };
-        rc == 0
-    }
-
-    #[inline(always)]
-    #[must_use]
-    pub fn size(&self) -> u32 {
-        #[cfg(target_arch = "bpf")]
-        let sz = unsafe { bpf_dynptr_size(self.as_raw()) };
-        #[cfg(not(target_arch = "bpf"))]
-        let sz = unsafe { host_stubs::bpf_dynptr_size(self.as_raw()) };
-        sz
-    }
-
-    #[inline(always)]
-    #[must_use]
-    pub fn is_null(&self) -> bool {
-        #[cfg(target_arch = "bpf")]
-        let b = unsafe { bpf_dynptr_is_null(self.as_raw()) };
-        #[cfg(not(target_arch = "bpf"))]
-        let b = unsafe { host_stubs::bpf_dynptr_is_null(self.as_raw()) };
-        b
-    }
-
-    #[inline(always)]
-    #[must_use]
-    pub fn clone_dynptr(&self) -> Option<Self> {
-        let mut dst = BpfDynptr::uninit();
-        #[cfg(target_arch = "bpf")]
-        let rc = unsafe { bpf_dynptr_clone(self.as_raw(), &raw mut dst) };
-        #[cfg(not(target_arch = "bpf"))]
-        let rc = unsafe { host_stubs::bpf_dynptr_clone(self.as_raw(), &raw mut dst) };
-        if rc != 0 {
-            None
-        } else {
-            Some(Self { inner: dst })
-        }
-    }
-
-    /// # Safety
-    /// `T` must be `#[repr(C)]` + `Copy` and correctly modelled.
-    #[inline(always)]
-    pub unsafe fn read<T: Copy>(&self, offset: u32) -> Option<T> {
-        let mut buf = core::mem::MaybeUninit::<T>::uninit();
-        #[allow(clippy::cast_possible_truncation)]
-        let sz = core::mem::size_of::<T>() as u32;
-        let ptr = unsafe { self.slice(offset, buf.as_mut_ptr().cast(), sz)? };
         Some(unsafe { core::ptr::read_unaligned(ptr.cast::<T>()) })
     }
 }
@@ -2775,26 +2013,6 @@ pub unsafe fn skb_set_xfrm_info(skb: *mut core::ffi::c_void, info: &BpfXfrmInfo)
     rc == 0
 }
 
-/// Read the FOU/GUE encapsulation parameters currently attached to
-/// the TC skb. Returns `None` when no encap metadata is present.
-///
-/// # Safety
-/// `skb` must point to a live `__sk_buff` owned by the current TC
-/// program invocation.
-#[inline(always)]
-#[must_use]
-pub unsafe fn skb_get_fou_encap(skb: *mut core::ffi::c_void) -> Option<BpfFouEncap> {
-    let mut encap = BpfFouEncap::default();
-    #[cfg(target_arch = "bpf")]
-    let rc = unsafe { bpf_skb_get_fou_encap(skb, &raw mut encap) };
-    #[cfg(not(target_arch = "bpf"))]
-    let rc = unsafe { host_stubs::bpf_skb_get_fou_encap(skb, &raw mut encap) };
-    if rc != 0 {
-        return None;
-    }
-    Some(encap)
-}
-
 /// Install FOU or GUE encapsulation parameters on the TC skb so the
 /// kernel pushes the packet into a cloud-overlay tunnel without
 /// leaving kernel space. Returns `true` on success.
@@ -2822,13 +2040,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn css_iter_flags_are_stable() {
-        assert_eq!(CssIterFlags::DescendantsPre as u32, 0);
-        assert_eq!(CssIterFlags::DescendantsPost as u32, 1);
-        assert_eq!(CssIterFlags::AncestorsUp as u32, 2);
-    }
-
-    #[test]
     fn xfrm_state_opts_layout_is_stable() {
         // Size check guards against accidental drift when bumping the
         // struct fields. Kernel 6.8 `bpf_xfrm_state_opts` adds
@@ -2845,71 +2056,10 @@ mod tests {
         assert!(rc.is_none());
     }
 
-    #[test]
-    fn host_stub_with_task_cgroup1_returns_none() {
-        let r = unsafe { with_task_cgroup1::<_, ()>(core::ptr::null_mut(), |_| ()) };
-        assert!(r.is_none());
-    }
-
-    #[test]
-    fn with_rcu_read_lock_returns_closure_value() {
-        let out = unsafe { with_rcu_read_lock(|| 42_u32) };
-        assert_eq!(out, 42);
-    }
-
-    #[test]
-    fn with_rcu_read_lock_runs_closure_exactly_once() {
-        let mut counter = 0_u32;
-        unsafe {
-            with_rcu_read_lock(|| {
-                counter += 1;
-            });
-        }
-        assert_eq!(counter, 1);
-    }
-
-    #[test]
-    fn rdonly_cast_rejects_null_input() {
-        let out = unsafe { rdonly_cast(core::ptr::null(), 0) };
-        assert!(out.is_none());
-    }
-
-    #[test]
-    fn rdonly_cast_forwards_non_null_pointer() {
-        let sentinel: u32 = 0xDEAD_BEEF;
-        let ptr: *const core::ffi::c_void = (&raw const sentinel).cast();
-        let out = unsafe { rdonly_cast(ptr, 0xABCD) };
-        assert!(out.is_some());
-    }
-
-    #[test]
-    fn cast_to_kern_ctx_rejects_null() {
-        let out = unsafe { cast_to_kern_ctx(core::ptr::null_mut()) };
-        assert!(out.is_none());
-    }
-
-    #[test]
-    fn cast_to_kern_ctx_forwards_non_null() {
-        let mut sentinel: u64 = 0;
-        let ptr: *mut core::ffi::c_void = (&raw mut sentinel).cast();
-        let out = unsafe { cast_to_kern_ctx(ptr) };
-        assert!(out.is_some());
-    }
-
     // ── Dynptr tests ─────────────────────────────────────────────
 
     fn make_skb_dynptr_with(bytes: &[u8]) -> SkbDynptr {
         let mut dyn_ptr = SkbDynptr {
-            inner: BpfDynptr::uninit(),
-        };
-        unsafe {
-            host_stubs::install_host_dynptr(dyn_ptr.as_raw_mut(), bytes);
-        }
-        dyn_ptr
-    }
-
-    fn make_xdp_dynptr_with(bytes: &[u8]) -> XdpDynptr {
-        let mut dyn_ptr = XdpDynptr {
             inner: BpfDynptr::uninit(),
         };
         unsafe {
@@ -2985,25 +2135,6 @@ mod tests {
     }
 
     #[test]
-    fn xdp_dynptr_read_respects_adjust() {
-        let bytes: [u8; 8] = [0, 0, 0, 0, 0xAA, 0xBB, 0xCC, 0xDD];
-        let mut dp = make_xdp_dynptr_with(&bytes);
-        assert!(dp.adjust(4, 8));
-        let val: u8 = unsafe { dp.read::<u8>(0).unwrap() };
-        assert_eq!(val, 0xAA);
-        assert_eq!(dp.size(), 4);
-    }
-
-    #[test]
-    fn xdp_dynptr_clone_preserves_window() {
-        let bytes = [0u8; 20];
-        let mut dp = make_xdp_dynptr_with(&bytes);
-        assert!(dp.adjust(5, 15));
-        let clone = dp.clone_dynptr().unwrap();
-        assert_eq!(clone.size(), dp.size());
-    }
-
-    #[test]
     fn skb_dynptr_from_null_skb_returns_some_on_host() {
         // Host stub always succeeds so the safe wrapper returns
         // an initialised (but empty) dynptr. Real kernel path
@@ -3011,12 +2142,6 @@ mod tests {
         let dp = unsafe { SkbDynptr::from_skb(core::ptr::null_mut()) };
         assert!(dp.is_some());
         assert!(dp.unwrap().is_null());
-    }
-
-    #[test]
-    fn xdp_dynptr_from_null_xdp_returns_some_on_host() {
-        let dp = unsafe { XdpDynptr::from_xdp(core::ptr::null_mut()) };
-        assert!(dp.is_some());
     }
 
     #[test]
@@ -3448,28 +2573,6 @@ mod tests {
     }
 
     #[test]
-    fn skb_get_fou_encap_returns_injected_value() {
-        host_stubs::host_reset_xfrm_fou_state();
-        host_stubs::host_set_next_fou_encap(0x1234, 0x5678);
-        let encap = unsafe { skb_get_fou_encap(core::ptr::null_mut()) };
-        assert_eq!(
-            encap,
-            Some(BpfFouEncap {
-                sport: 0x1234,
-                dport: 0x5678,
-            })
-        );
-    }
-
-    #[test]
-    fn skb_get_fou_encap_returns_none_on_error() {
-        host_stubs::host_reset_xfrm_fou_state();
-        host_stubs::host_set_next_fou_get_error(-95);
-        let encap = unsafe { skb_get_fou_encap(core::ptr::null_mut()) };
-        assert!(encap.is_none());
-    }
-
-    #[test]
     fn skb_set_fou_encap_records_ports_and_type() {
         host_stubs::host_reset_xfrm_fou_state();
         let encap = BpfFouEncap {
@@ -3492,165 +2595,5 @@ mod tests {
         let ok = unsafe { skb_set_fou_encap(core::ptr::null_mut(), &encap, FouEncapType::Fou) };
         assert!(!ok);
         assert_eq!(host_stubs::host_last_fou_encap(), None);
-    }
-
-    #[test]
-    fn fou_encap_get_set_roundtrip_preserves_values() {
-        host_stubs::host_reset_xfrm_fou_state();
-        let original = BpfFouEncap {
-            sport: 4789,
-            dport: 6081,
-        };
-        assert!(unsafe { skb_set_fou_encap(core::ptr::null_mut(), &original, FouEncapType::Fou) });
-        host_stubs::host_set_next_fou_encap(original.sport, original.dport);
-        let echoed = unsafe { skb_get_fou_encap(core::ptr::null_mut()) };
-        assert_eq!(echoed, Some(original));
-    }
-
-    // ── Cgroup resolver tests ──────────────────────────────────
-
-    #[test]
-    fn with_cgroup_from_id_success_pairs_acquire_and_release() {
-        host_stubs::host_reset_cgroup_state();
-        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
-        let seen = unsafe { with_cgroup_from_id(0xDEAD_BEEF_CAFE_BABE, |cgrp| !cgrp.is_null()) };
-        assert_eq!(seen, Some(true));
-        assert_eq!(host_stubs::host_last_cgroup_id(), 0xDEAD_BEEF_CAFE_BABE);
-        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
-    }
-
-    #[test]
-    fn with_cgroup_from_id_failure_returns_none() {
-        host_stubs::host_reset_cgroup_state();
-        host_stubs::host_set_next_cgroup_from_id_fail();
-        let seen = unsafe { with_cgroup_from_id(42, |_| ()) };
-        assert!(seen.is_none());
-        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
-    }
-
-    #[test]
-    fn with_cgroup_ancestor_walks_to_requested_level() {
-        host_stubs::host_reset_cgroup_state();
-        let outer = unsafe {
-            with_cgroup_from_id(7, |leaf| {
-                let inner = with_cgroup_ancestor(leaf, 1, |anc| !anc.is_null());
-                assert_eq!(inner, Some(true));
-                assert_eq!(host_stubs::host_last_ancestor_level(), Some(1));
-                // Ancestor was already released inside its closure; only
-                // the outer leaf reference is still live.
-                assert_eq!(host_stubs::host_cgroup_live_count(), 1);
-                inner
-            })
-        };
-        assert_eq!(outer, Some(Some(true)));
-        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
-    }
-
-    #[test]
-    fn with_cgroup_ancestor_failure_returns_none() {
-        host_stubs::host_reset_cgroup_state();
-        host_stubs::host_set_next_cgroup_ancestor_fail();
-        let seen = unsafe { with_cgroup_from_id(1, |leaf| with_cgroup_ancestor(leaf, 99, |_| ())) };
-        // Outer cgroup_from_id succeeded, inner ancestor failed.
-        assert_eq!(seen, Some(None));
-        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
-    }
-
-    #[test]
-    fn with_cgroup_acquired_increments_then_releases() {
-        host_stubs::host_reset_cgroup_state();
-        let outer = unsafe {
-            with_cgroup_from_id(3, |leaf| {
-                assert_eq!(host_stubs::host_cgroup_live_count(), 1);
-                with_cgroup_acquired(leaf, |dup| {
-                    assert!(!dup.is_null());
-                    assert_eq!(host_stubs::host_cgroup_live_count(), 2);
-                })
-            })
-        };
-        assert_eq!(outer, Some(Some(())));
-        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
-    }
-
-    #[test]
-    fn with_cgroup_acquired_rejects_null_input() {
-        host_stubs::host_reset_cgroup_state();
-        let r = unsafe { with_cgroup_acquired(core::ptr::null_mut(), |_| ()) };
-        assert!(r.is_none());
-        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
-    }
-
-    #[test]
-    fn cgroup_release_is_noop_on_null() {
-        host_stubs::host_reset_cgroup_state();
-        unsafe { host_stubs::bpf_cgroup_release(core::ptr::null_mut()) };
-        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
-    }
-
-    // ── task_under_cgroup tests ───────────────────────────────
-
-    #[test]
-    fn task_under_cgroup_returns_false_on_null_task() {
-        host_stubs::host_reset_task_under_cgroup_state();
-        host_stubs::host_set_next_task_under_cgroup(1);
-        let mut ancestor_storage: u8 = 0;
-        let ancestor: *mut cgroup = (&raw mut ancestor_storage).cast();
-        let r = unsafe { task_under_cgroup(core::ptr::null_mut(), ancestor) };
-        assert!(!r);
-        // Wrapper must short-circuit: kfunc never invoked.
-        assert!(!host_stubs::host_take_task_under_cgroup_invoked());
-    }
-
-    #[test]
-    fn task_under_cgroup_returns_false_on_null_ancestor() {
-        host_stubs::host_reset_task_under_cgroup_state();
-        host_stubs::host_set_next_task_under_cgroup(1);
-        let mut task_storage: u8 = 0;
-        let task: *mut task_struct = (&raw mut task_storage).cast();
-        let r = unsafe { task_under_cgroup(task, core::ptr::null_mut()) };
-        assert!(!r);
-        assert!(!host_stubs::host_take_task_under_cgroup_invoked());
-    }
-
-    #[test]
-    fn task_under_cgroup_returns_true_when_kfunc_reports_one() {
-        host_stubs::host_reset_task_under_cgroup_state();
-        host_stubs::host_set_next_task_under_cgroup(1);
-        let mut task_storage: u8 = 0;
-        let mut ancestor_storage: u8 = 0;
-        let task: *mut task_struct = (&raw mut task_storage).cast();
-        let ancestor: *mut cgroup = (&raw mut ancestor_storage).cast();
-        let r = unsafe { task_under_cgroup(task, ancestor) };
-        assert!(r);
-        assert!(host_stubs::host_take_task_under_cgroup_invoked());
-    }
-
-    #[test]
-    fn task_under_cgroup_returns_false_when_kfunc_reports_zero() {
-        host_stubs::host_reset_task_under_cgroup_state();
-        host_stubs::host_set_next_task_under_cgroup(0);
-        let mut task_storage: u8 = 0;
-        let mut ancestor_storage: u8 = 0;
-        let task: *mut task_struct = (&raw mut task_storage).cast();
-        let ancestor: *mut cgroup = (&raw mut ancestor_storage).cast();
-        let r = unsafe { task_under_cgroup(task, ancestor) };
-        assert!(!r);
-        assert!(host_stubs::host_take_task_under_cgroup_invoked());
-    }
-
-    #[test]
-    fn task_under_cgroup_composes_with_cgroup_from_id() {
-        // End-to-end: resolve cgroup by id, then test current task
-        // membership. Mirrors the per-tenant L7 enforcement path.
-        host_stubs::host_reset_cgroup_state();
-        host_stubs::host_reset_task_under_cgroup_state();
-        host_stubs::host_set_next_task_under_cgroup(1);
-        let mut task_storage: u8 = 0;
-        let task: *mut task_struct = (&raw mut task_storage).cast();
-        let allowed =
-            unsafe { with_cgroup_from_id(0xCAFE, |slice| task_under_cgroup(task, slice)) };
-        assert_eq!(allowed, Some(true));
-        assert!(host_stubs::host_take_task_under_cgroup_invoked());
-        assert_eq!(host_stubs::host_cgroup_live_count(), 0);
     }
 }
