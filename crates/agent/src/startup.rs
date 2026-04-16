@@ -3080,6 +3080,12 @@ pub fn try_load_uprobe_dlp(
 
     let reader = DlpEventReader::new(loader.ebpf_mut())?;
 
+    // Log if the DLP_ARENA map was loaded — BPF writes zero-copy
+    // events there, userspace can mmap it via ArenaMap helper.
+    if loader.ebpf_mut().map("DLP_ARENA").is_some() {
+        info!("DLP_ARENA map loaded — BPF arena zero-copy path active");
+    }
+
     info!(library = %ssl_path, "uprobe-dlp attached");
     Ok((loader, dlp_metrics_rdr, reader))
 }

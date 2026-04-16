@@ -18,6 +18,7 @@
 #![no_std]
 #![cfg_attr(target_arch = "bpf", feature(asm_experimental_arch))]
 
+pub mod arena_map;
 pub mod asm;
 pub mod checksum;
 pub mod event;

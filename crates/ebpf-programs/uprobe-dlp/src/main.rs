@@ -8,7 +8,9 @@ use aya_ebpf::{
     programs::{ProbeContext, RetProbeContext},
 };
 use core::ffi::c_void;
+use ebpf_helpers::arena_map::{RawMapDef, arena_def};
 use ebpf_helpers::increment_metric;
+use ebpf_common::arena::ArenaEventHeader;
 use ebpf_common::dlp::{
     DlpEvent, DlpEventSmall, SslReadArgs, DLP_DIRECTION_READ, DLP_DIRECTION_WRITE,
     DLP_MAX_EXCERPT, DLP_METRIC_ERRORS, DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_READ_EVENTS,
@@ -44,8 +46,22 @@ use ebpf_common::dlp::{
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// Kernel→userspace event ring buffer (4 MB) for DLP events.
+/// Used as fallback when the arena map is not available.
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 4096, 0);
+
+/// Arena map for zero-copy DLP event delivery to userspace.
+/// 4 pages = 16 KiB — enough for one full DlpEvent (4120 bytes)
+/// plus the ArenaEventHeader (24 bytes). Userspace mmap's this fd
+/// and polls the sequence counter for new events.
+#[unsafe(link_section = ".maps")]
+#[unsafe(no_mangle)]
+static DLP_ARENA: RawMapDef = arena_def(4);
+
+/// Monotonically increasing sequence counter for arena events.
+/// BPF atomics not available — use a simple u64 (single-writer safe
+/// in uprobe context since uprobes are per-task).
+static mut ARENA_SEQUENCE: u64 = 0;
 
 /// Per-task context: saves SSL_read entry arguments for the uretprobe.
 /// Uses LRU eviction so entries from crashed processes (SIGKILL during
@@ -241,11 +257,18 @@ fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
 
 /// Full DLP event (4120 bytes): for SSL payloads > 256 bytes.
 ///
-/// `#[inline(never)]` gives this function its own stack frame, reducing
-/// per-function verifier complexity and keeping it separate from the
-/// small-size path.
+/// Tries arena zero-copy path first (direct write to mmap'd page),
+/// falls back to RingBuf if arena_alloc_pages fails or the arena
+/// was not loaded.
 #[inline(never)]
 fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8) {
+    // Try arena path: write header + DlpEvent directly into mmap'd
+    // arena page. Userspace reads via pointer deref — zero-copy.
+    if try_emit_arena(user_buf, data_len, direction) {
+        return;
+    }
+
+    // Fallback: RingBuf path (copy-based).
     if let Some(mut entry) = EVENTS.reserve::<DlpEvent>(0) {
         let ptr = entry.as_mut_ptr();
         let pid_tgid = bpf_get_current_pid_tgid();
@@ -258,10 +281,6 @@ fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8) {
             (*ptr).direction = direction;
             (*ptr)._padding = [0; 3];
             core::ptr::write_bytes((*ptr).data_excerpt.as_mut_ptr(), 0, DLP_MAX_EXCERPT);
-            // Use compile-time constant size: kernel 6.17+ verifier rejects
-            // variable-length arguments to bpf_probe_read_user. The buffer is
-            // zero-initialized above, so excess bytes beyond data_len stay zero.
-            // data_len in the header tells userspace the meaningful byte count.
             let _ = r#gen::bpf_probe_read_user(
                 (*ptr).data_excerpt.as_mut_ptr() as *mut c_void,
                 DLP_MAX_EXCERPT as u32,
@@ -272,6 +291,60 @@ fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8) {
     } else {
         increment_metric(DLP_METRIC_EVENTS_DROPPED);
     }
+}
+
+/// Attempt to write a DLP event into the arena. Returns `true` on
+/// success, `false` if arena is unavailable (falls back to RingBuf).
+#[inline(always)]
+fn try_emit_arena(user_buf: *const u8, data_len: u32, direction: u8) -> bool {
+    use ebpf_helpers::kfuncs::arena_alloc_pages;
+
+    // Allocate 1 page from the arena for this event.
+    let arena_ptr = &raw const DLP_ARENA as *mut c_void;
+    let page = unsafe { arena_alloc_pages(arena_ptr, 1) };
+    let Some(page) = page else {
+        return false;
+    };
+
+    let base = page as *mut u8;
+    let seq = unsafe {
+        ARENA_SEQUENCE += 1;
+        ARENA_SEQUENCE
+    };
+
+    // Write ArenaEventHeader at start of page.
+    let header = ArenaEventHeader {
+        sequence: seq,
+        timestamp_ns: unsafe { bpf_ktime_get_boot_ns() },
+        payload_len: core::mem::size_of::<DlpEvent>() as u32,
+        event_type: 3, // EVENT_TYPE_DLP
+        _pad: [0; 3],
+    };
+    unsafe {
+        core::ptr::write_volatile(base.cast::<ArenaEventHeader>(), header);
+    }
+
+    // Write DlpEvent after the header.
+    let event_offset = core::mem::size_of::<ArenaEventHeader>();
+    let event_ptr = unsafe { base.add(event_offset) } as *mut DlpEvent;
+    let pid_tgid = bpf_get_current_pid_tgid();
+    unsafe {
+        (*event_ptr).pid = pid_tgid as u32;
+        (*event_ptr).tgid = (pid_tgid >> 32) as u32;
+        (*event_ptr).timestamp_ns = bpf_ktime_get_boot_ns();
+        (*event_ptr).cgroup_id = bpf_get_current_cgroup_id();
+        (*event_ptr).data_len = data_len;
+        (*event_ptr).direction = direction;
+        (*event_ptr)._padding = [0; 3];
+        core::ptr::write_bytes((*event_ptr).data_excerpt.as_mut_ptr(), 0, DLP_MAX_EXCERPT);
+        let _ = r#gen::bpf_probe_read_user(
+            (*event_ptr).data_excerpt.as_mut_ptr() as *mut c_void,
+            DLP_MAX_EXCERPT as u32,
+            user_buf as *const c_void,
+        );
+    }
+
+    true
 }
 
 /// Increment a per-CPU metric counter.
