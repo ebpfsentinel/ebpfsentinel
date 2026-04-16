@@ -73,9 +73,9 @@ use network_types::{
 static IDS_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue> =
     HashMap::with_max_entries(10240, 0);
 
-/// Per-CPU packet counters. Index: 0=matched, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen.
+/// Per-CPU packet counters. Index: 0=matched, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen, 5=cgroup_tenant_resolved.
 #[map]
-static IDS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
+static IDS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(6, 0);
 
 /// Shared kernel→userspace event ring buffer (4 MB).
 ///
@@ -118,6 +118,13 @@ static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32> =
 static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
     LpmTrie::with_max_entries(MAX_TENANT_SUBNET_V6_LPM_ENTRIES, 0);
 
+/// Cgroup-based tenant resolution: cgroup v2 id → tenant_id.
+/// Populated by userspace from the container resolver. Used as the
+/// lowest-priority fallback (after VLAN, interface, subnet) — only
+/// meaningful on egress where the current task owns the skb.
+#[map]
+static TENANT_CGROUP_MAP: HashMap<u64, u32> = HashMap::with_max_entries(4096, 0);
+
 /// L7 port lookup: dst_port → enabled flag. When set, TCP packets to this
 /// port have their payload captured and sent to userspace for L7 protocol
 /// parsing. Capacity is `MAX_L7_PORTS` (256) — enough to cover databases,
@@ -149,6 +156,8 @@ const METRIC_DROPPED: u32 = 1;
 const METRIC_ERRORS: u32 = 2;
 const METRIC_EVENTS_DROPPED: u32 = 3;
 const METRIC_TOTAL_SEEN: u32 = 4;
+/// Tenant resolved via cgroup_id → TENANT_CGROUP_MAP lookup.
+const METRIC_CGROUP_TENANT_RESOLVED: u32 = 5;
 
 /// 75% threshold for the 4 MiB EVENTS ring buffer. Must stay in sync
 /// with the `RingBuf::with_byte_size` call above.
@@ -221,6 +230,14 @@ unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
                 return tid;
             }
         }
+        // Priority 4: Cgroup-based (egress only — cgroup_id is 0 in softirq)
+        let cgroup_id = bpf_get_current_cgroup_id();
+        if cgroup_id != 0 {
+            if let Some(&tid) = TENANT_CGROUP_MAP.get(&cgroup_id) {
+                increment_metric(METRIC_CGROUP_TENANT_RESOLVED);
+                return tid;
+            }
+        }
         // Default tenant
         0
     }
@@ -247,6 +264,14 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) 
         let key = Key::new(128, addr_bytes);
         if let Some(&tid) = TENANT_SUBNET_V6.get(&key) {
             return tid;
+        }
+        // Priority 4: Cgroup-based (egress only)
+        let cgroup_id = bpf_get_current_cgroup_id();
+        if cgroup_id != 0 {
+            if let Some(&tid) = TENANT_CGROUP_MAP.get(&cgroup_id) {
+                increment_metric(METRIC_CGROUP_TENANT_RESOLVED);
+                return tid;
+            }
         }
         // Default tenant
         0
