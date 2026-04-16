@@ -8,55 +8,44 @@
 //!
 //! All declarations follow the kernel BTF signatures:
 //!
-//! | Kfunc                                          | Kernel | BTF signature                                                                                                                                    |
-//! |------------------------------------------------|--------|--------------------------------------------------------------------------------------------------------------------------------------------------|
-//! | `bpf_skb_ct_lookup`                            | 5.18   | `struct nf_conn *(*)(struct __sk_buff *skb, struct bpf_sock_tuple *tuple, u32 tuple__sz, struct bpf_ct_opts *opts, u32 opts__sz) __ksym;`        |
-//! | `bpf_xdp_ct_lookup`                            | 5.18   | `struct nf_conn *(*)(struct xdp_md *xdp, struct bpf_sock_tuple *tuple, u32 tuple__sz, struct bpf_ct_opts *opts, u32 opts__sz) __ksym;`           |
-//! | `bpf_ct_release`                               | 5.18   | `void(*)(struct nf_conn *nfct) __ksym;`                                                                                                          |
-//! | `bpf_skb_ct_alloc`                             | 6.0    | `struct nf_conn___init *(*)(struct __sk_buff *skb, struct bpf_sock_tuple *tuple, u32 tuple__sz, struct bpf_ct_opts *opts, u32 opts__sz) __ksym;` |
-//! | `bpf_xdp_ct_alloc`                             | 6.0    | `struct nf_conn___init *(*)(struct xdp_md *xdp, struct bpf_sock_tuple *tuple, u32 tuple__sz, struct bpf_ct_opts *opts, u32 opts__sz) __ksym;`    |
-//! | `bpf_ct_insert_entry`                          | 6.0    | `struct nf_conn *(*)(struct nf_conn___init *nfct_i) __ksym;`                                                                                     |
-//! | `bpf_ct_set_timeout`                           | 6.0    | `void(*)(struct nf_conn___init *nfct_i, u32 timeout) __ksym;`                                                                                    |
-//! | `bpf_ct_change_timeout`                        | 6.0    | `int(*)(struct nf_conn *nfct, u32 timeout) __ksym;`                                                                                              |
-//! | `bpf_ct_set_status`                            | 6.0    | `int(*)(const struct nf_conn___init *nfct_i, u32 status) __ksym;`                                                                                |
-//! | `bpf_ct_change_status`                         | 6.0    | `int(*)(struct nf_conn *nfct, u32 status) __ksym;`                                                                                               |
-//! | `bpf_ct_set_nat_info`                          | 6.1    | `int(*)(struct nf_conn___init *nfct_i, union nf_inet_addr *addr, int port, enum nf_nat_manip_type manip) __ksym;`                                |
-//! | `bpf_cgroup_ancestor`                          | 6.0    | `struct cgroup *(*)(struct cgroup *cgrp, int ancestor_level) __ksym;`                                                                            |
-//! | `bpf_cgroup_acquire`                           | 6.0    | `struct cgroup *(*)(struct cgroup *cgrp) __ksym;`                                                                                                |
-//! | `bpf_task_under_cgroup`                        | 6.1    | `long(*)(struct task_struct *task, struct cgroup *ancestor) __ksym;`                                                                             |
-//! | `bpf_rcu_read_lock`                            | 6.2    | `void(*)(void) __ksym;`                                                                                                                          |
-//! | `bpf_rcu_read_unlock`                          | 6.2    | `void(*)(void) __ksym;`                                                                                                                          |
-//! | `bpf_rdonly_cast`                              | 6.2    | `void *(*)(const void *obj__ign, u32 btf_id__k) __ksym;`                                                                                         |
-//! | `bpf_cast_to_kern_ctx`                         | 6.2    | `void *(*)(void *obj) __ksym;`                                                                                                                   |
-//! | `bpf_skb_get_xfrm_info`                        | 6.2    | `int(*)(struct __sk_buff *skb, struct bpf_xfrm_info *to) __ksym;`                                                                                |
-//! | `bpf_skb_set_xfrm_info`                        | 6.2    | `int(*)(struct __sk_buff *skb, const struct bpf_xfrm_info *from) __ksym;`                                                                        |
-//! | `bpf_xdp_metadata_rx_hash`                     | 6.3    | `int(*)(const struct xdp_md *ctx, u32 *hash, u32 *rss_type) __ksym;`                                                                             |
-//! | `bpf_xdp_metadata_rx_timestamp`                | 6.3    | `int(*)(const struct xdp_md *ctx, u64 *timestamp) __ksym;`                                                                                       |
-//! | `bpf_dynptr_from_skb`                          | 6.4    | `int(*)(struct __sk_buff *skb, u64 flags, struct bpf_dynptr *ptr__uninit) __ksym;`                                                               |
-//! | `bpf_dynptr_from_xdp`                          | 6.4    | `int(*)(struct xdp_md *xdp, u64 flags, struct bpf_dynptr *ptr__uninit) __ksym;`                                                                  |
-//! | `bpf_dynptr_slice`                             | 6.4    | `void *(*)(const struct bpf_dynptr *p, u32 offset, void *buffer__opt, u32 buffer__szk) __ksym;`                                                  |
-//! | `bpf_dynptr_slice_rdwr`                        | 6.4    | `void *(*)(const struct bpf_dynptr *p, u32 offset, void *buffer__opt, u32 buffer__szk) __ksym;`                                                  |
-//! | `bpf_skb_get_fou_encap`                        | 6.4    | `int(*)(struct __sk_buff *skb, struct bpf_fou_encap *encap) __ksym;`                                                                             |
-//! | `bpf_skb_set_fou_encap`                        | 6.4    | `int(*)(struct __sk_buff *skb, struct bpf_fou_encap *encap, int type) __ksym;`                                                                   |
-//! | `bpf_dynptr_adjust`                            | 6.5    | `int(*)(const struct bpf_dynptr *p, u32 start, u32 end) __ksym;`                                                                                 |
-//! | `bpf_dynptr_size`                              | 6.5    | `u32(*)(const struct bpf_dynptr *p) __ksym;`                                                                                                     |
-//! | `bpf_dynptr_is_null`                           | 6.5    | `bool(*)(const struct bpf_dynptr *p) __ksym;`                                                                                                    |
-//! | `bpf_dynptr_clone`                             | 6.5    | `int(*)(const struct bpf_dynptr *src, struct bpf_dynptr *clone__uninit) __ksym;`                                                                 |
-//! | `bpf_cgroup_release`                           | 6.5    | `void(*)(struct cgroup *cgrp) __ksym;`                                                                                                           |
-//! | `bpf_cgroup_from_id`                           | 6.5    | `struct cgroup *(*)(u64 cgroup_id) __ksym;`                                                                                                      |
-//! | `bpf_iter_css_task_new` / `_next` / `_destroy` | 6.7    | `int(*)(struct bpf_iter_css_task *it, struct cgroup_subsys_state *css, unsigned int flags) __ksym;`                                              |
-//! | `bpf_iter_css_new` / `_next` / `_destroy`      | 6.7    | `int(*)(struct bpf_iter_css *it, struct cgroup_subsys_state *start, unsigned int flags) __ksym;`                                                 |
-//! | `bpf_task_get_cgroup1`                         | 6.8    | `struct cgroup *(*)(struct task_struct *task, int hierarchy_id) __ksym;`                                                                         |
-//! | `bpf_xdp_metadata_rx_vlan_tag`                 | 6.8    | `int(*)(const struct xdp_md *ctx, __be16 *vlan_proto, u16 *vlan_tci) __ksym;`                                                                    |
-//! | `bpf_xdp_get_xfrm_state`                       | 6.8    | `struct xfrm_state *(*)(struct xdp_md *ctx, struct bpf_xfrm_state_opts *opts, u32 opts__sz) __ksym;`                                             |
-//! | `bpf_xdp_xfrm_state_release`                   | 6.8    | `void(*)(struct xfrm_state *x) __ksym;`                                                                                                          |
+//! | Kfunc                           | Kernel | BTF signature                                                                                                                                    |
+//! |---------------------------------|--------|--------------------------------------------------------------------------------------------------------------------------------------------------|
+//! | `bpf_skb_ct_lookup`             | 5.18   | `struct nf_conn *(*)(struct __sk_buff *skb, struct bpf_sock_tuple *tuple, u32 tuple__sz, struct bpf_ct_opts *opts, u32 opts__sz) __ksym;`        |
+//! | `bpf_xdp_ct_lookup`             | 5.18   | `struct nf_conn *(*)(struct xdp_md *xdp, struct bpf_sock_tuple *tuple, u32 tuple__sz, struct bpf_ct_opts *opts, u32 opts__sz) __ksym;`           |
+//! | `bpf_ct_release`                | 5.18   | `void(*)(struct nf_conn *nfct) __ksym;`                                                                                                          |
+//! | `bpf_skb_ct_alloc`              | 6.0    | `struct nf_conn___init *(*)(struct __sk_buff *skb, struct bpf_sock_tuple *tuple, u32 tuple__sz, struct bpf_ct_opts *opts, u32 opts__sz) __ksym;` |
+//! | `bpf_xdp_ct_alloc`              | 6.0    | `struct nf_conn___init *(*)(struct xdp_md *xdp, struct bpf_sock_tuple *tuple, u32 tuple__sz, struct bpf_ct_opts *opts, u32 opts__sz) __ksym;`    |
+//! | `bpf_ct_insert_entry`           | 6.0    | `struct nf_conn *(*)(struct nf_conn___init *nfct_i) __ksym;`                                                                                     |
+//! | `bpf_ct_set_timeout`            | 6.0    | `void(*)(struct nf_conn___init *nfct_i, u32 timeout) __ksym;`                                                                                    |
+//! | `bpf_ct_change_timeout`         | 6.0    | `int(*)(struct nf_conn *nfct, u32 timeout) __ksym;`                                                                                              |
+//! | `bpf_ct_set_status`             | 6.0    | `int(*)(const struct nf_conn___init *nfct_i, u32 status) __ksym;`                                                                                |
+//! | `bpf_ct_change_status`          | 6.0    | `int(*)(struct nf_conn *nfct, u32 status) __ksym;`                                                                                               |
+//! | `bpf_ct_set_nat_info`           | 6.1    | `int(*)(struct nf_conn___init *nfct_i, union nf_inet_addr *addr, int port, enum nf_nat_manip_type manip) __ksym;`                                |
+//! | `bpf_skb_get_xfrm_info`         | 6.2    | `int(*)(struct __sk_buff *skb, struct bpf_xfrm_info *to) __ksym;`                                                                                |
+//! | `bpf_skb_set_xfrm_info`         | 6.2    | `int(*)(struct __sk_buff *skb, const struct bpf_xfrm_info *from) __ksym;`                                                                        |
+//! | `bpf_xdp_metadata_rx_hash`      | 6.3    | `int(*)(const struct xdp_md *ctx, u32 *hash, u32 *rss_type) __ksym;`                                                                             |
+//! | `bpf_xdp_metadata_rx_timestamp` | 6.3    | `int(*)(const struct xdp_md *ctx, u64 *timestamp) __ksym;`                                                                                       |
+//! | `bpf_dynptr_from_skb`           | 6.4    | `int(*)(struct __sk_buff *skb, u64 flags, struct bpf_dynptr *ptr__uninit) __ksym;`                                                               |
+//! | `bpf_dynptr_from_xdp`           | 6.4    | `int(*)(struct xdp_md *xdp, u64 flags, struct bpf_dynptr *ptr__uninit) __ksym;`                                                                  |
+//! | `bpf_dynptr_slice`              | 6.4    | `void *(*)(const struct bpf_dynptr *p, u32 offset, void *buffer__opt, u32 buffer__szk) __ksym;`                                                  |
+//! | `bpf_dynptr_slice_rdwr`         | 6.4    | `void *(*)(const struct bpf_dynptr *p, u32 offset, void *buffer__opt, u32 buffer__szk) __ksym;`                                                  |
+//! | `bpf_skb_get_fou_encap`         | 6.4    | `int(*)(struct __sk_buff *skb, struct bpf_fou_encap *encap) __ksym;`                                                                             |
+//! | `bpf_skb_set_fou_encap`         | 6.4    | `int(*)(struct __sk_buff *skb, struct bpf_fou_encap *encap, int type) __ksym;`                                                                   |
+//! | `bpf_dynptr_adjust`             | 6.5    | `int(*)(const struct bpf_dynptr *p, u32 start, u32 end) __ksym;`                                                                                 |
+//! | `bpf_dynptr_size`               | 6.5    | `u32(*)(const struct bpf_dynptr *p) __ksym;`                                                                                                     |
+//! | `bpf_dynptr_is_null`            | 6.5    | `bool(*)(const struct bpf_dynptr *p) __ksym;`                                                                                                    |
+//! | `bpf_dynptr_clone`              | 6.5    | `int(*)(const struct bpf_dynptr *src, struct bpf_dynptr *clone__uninit) __ksym;`                                                                 |
+//! | `bpf_xdp_metadata_rx_vlan_tag`  | 6.8    | `int(*)(const struct xdp_md *ctx, __be16 *vlan_proto, u16 *vlan_tci) __ksym;`                                                                    |
+//! | `bpf_xdp_get_xfrm_state`        | 6.8    | `struct xfrm_state *(*)(struct xdp_md *ctx, struct bpf_xfrm_state_opts *opts, u32 opts__sz) __ksym;`                                             |
+//! | `bpf_xdp_xfrm_state_release`    | 6.8    | `void(*)(struct xfrm_state *x) __ksym;`                                                                                                          |
+//! | `bpf_arena_alloc_pages`         | 6.9    | `void *(*)(void *arena, void *addr__ign, u32 page_cnt, int node_id) __ksym;`                                                                     |
+//! | `bpf_arena_free_pages`          | 6.9    | `void(*)(void *arena, void *ptr, u32 page_cnt) __ksym;`                                                                                          |
 //!
 //! Kfuncs annotated with `KF_ACQUIRE | KF_RET_NULL` (notably
-//! `bpf_task_get_cgroup1` and `bpf_xdp_get_xfrm_state`) must pair
-//! every successful call with a release kfunc on every program path,
-//! or the verifier will reject the program with a reference leak
-//! error. The safe wrappers in this module enforce the pairing via
-//! `Drop`-like helper closures.
+//! `bpf_xdp_get_xfrm_state`) must pair every successful call with a
+//! release kfunc on every program path, or the verifier will reject
+//! the program with a reference leak error. The safe wrappers in this
+//! module enforce the pairing via `Drop`-like helper closures.
 //!
 //! The kernel side is gated behind `#[cfg(target_arch = "bpf")]` so
 //! userspace builds ignore the extern declarations (they would
