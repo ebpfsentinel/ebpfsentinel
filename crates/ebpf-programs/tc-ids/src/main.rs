@@ -19,9 +19,12 @@ use ebpf_helpers::net::{
     ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
     PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
 };
+use core::ffi::c_void;
+use ebpf_helpers::arena_map::{RawMapDef, arena_def};
 use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, SkbDynptr, kill_flow_via_skb_ct, skb_get_fou_encap};
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{emit_packet_event, increment_metric, ringbuf_has_backpressure};
+use ebpf_common::arena::ArenaEventHeader;
 use ebpf_common::{
     event::{
         PacketEvent, EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, FLAG_VLAN,
@@ -131,6 +134,19 @@ static TENANT_CGROUP_MAP: HashMap<u64, u32> = HashMap::with_max_entries(4096, 0)
 /// message brokers, caches, and custom services concurrently.
 #[map]
 static L7_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(MAX_L7_PORTS, 0);
+
+/// Arena map for zero-copy L7 event delivery to userspace.
+/// 4 pages = 16 KiB — enough for one full `L7EventBuf` (2144 bytes)
+/// plus the `ArenaEventHeader` (24 bytes). Userspace mmap's this fd
+/// and polls the sequence counter for new events.
+#[unsafe(link_section = ".maps")]
+#[unsafe(no_mangle)]
+static IDS_ARENA: RawMapDef = arena_def(4);
+
+/// Monotonically increasing sequence counter for arena events.
+/// BPF atomics not available — use a simple u64 (single-writer safe
+/// in TC classifier context since invocations are per-CPU serialized).
+static mut ARENA_SEQUENCE: u64 = 0;
 
 /// Small L7 event buffer: `PacketEvent` header + `SMALL_L7_PAYLOAD` bytes
 /// of payload (512 B). Used when TCP payload ≤ 512 bytes — saves ~75%
@@ -657,7 +673,11 @@ fn emit_l7_small(
     }
 }
 
-/// Full L7 event (576 bytes): for packets with > 128 bytes TCP payload.
+/// Full L7 event (2144 bytes): for packets with > 512 bytes TCP payload.
+///
+/// Tries arena zero-copy path first (direct write to mmap'd page),
+/// falls back to `RingBuf` if `arena_alloc_pages` fails or the arena
+/// was not loaded.
 #[inline(always)]
 fn emit_l7_full(
     ctx: &TcContext,
@@ -669,6 +689,13 @@ fn emit_l7_full(
     vlan_id: u16,
     l7_offset: usize,
 ) {
+    // Try arena path: write header + L7EventBuf directly into mmap'd
+    // arena page. Userspace reads via pointer deref — zero-copy.
+    if try_emit_arena_l7(ctx, src_addr, dst_addr, src_port, dst_port, flags, vlan_id, l7_offset) {
+        return;
+    }
+
+    // Fallback: RingBuf path (copy-based).
     if let Some(mut entry) = EVENTS.reserve::<L7EventBuf>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
@@ -689,6 +716,67 @@ fn emit_l7_full(
     } else {
         increment_metric(METRIC_EVENTS_DROPPED);
     }
+}
+
+/// Attempt to write an L7 event into the arena. Returns `true` on
+/// success, `false` if arena is unavailable (falls back to `RingBuf`).
+#[inline(always)]
+fn try_emit_arena_l7(
+    ctx: &TcContext,
+    src_addr: &[u32; 4],
+    dst_addr: &[u32; 4],
+    src_port: u16,
+    dst_port: u16,
+    flags: u8,
+    vlan_id: u16,
+    l7_offset: usize,
+) -> bool {
+    use ebpf_helpers::kfuncs::arena_alloc_pages;
+
+    // Allocate 1 page from the arena for this event.
+    let arena_ptr = &raw const IDS_ARENA as *mut c_void;
+    let page = unsafe { arena_alloc_pages(arena_ptr, 1) };
+    let Some(page) = page else {
+        return false;
+    };
+
+    let base = page as *mut u8;
+    let seq = unsafe {
+        ARENA_SEQUENCE += 1;
+        ARENA_SEQUENCE
+    };
+
+    // Write ArenaEventHeader at start of page.
+    let header = ArenaEventHeader {
+        sequence: seq,
+        timestamp_ns: unsafe { bpf_ktime_get_boot_ns() },
+        payload_len: core::mem::size_of::<L7EventBuf>() as u32,
+        event_type: EVENT_TYPE_L7,
+        _pad: [0; 3],
+    };
+    unsafe {
+        core::ptr::write_volatile(base.cast::<ArenaEventHeader>(), header);
+    }
+
+    // Write L7EventBuf after the header.
+    let event_offset = core::mem::size_of::<ArenaEventHeader>();
+    let event_ptr = unsafe { base.add(event_offset) } as *mut L7EventBuf;
+    unsafe {
+        fill_l7_header(
+            ctx,
+            &mut (*event_ptr).header,
+            src_addr, dst_addr, src_port, dst_port, flags, vlan_id,
+        );
+        core::ptr::write_bytes((*event_ptr).payload.as_mut_ptr(), 0, MAX_L7_PAYLOAD);
+        let _ = bpf_skb_load_bytes(
+            ctx.skb.skb as *const _,
+            l7_offset as u32,
+            (*event_ptr).payload.as_mut_ptr() as *mut _,
+            MAX_L7_PAYLOAD as u32,
+        );
+    }
+
+    true
 }
 
 /// Fill the L7 event header fields (shared by both tiers).
