@@ -586,11 +586,23 @@ fn emit_l7_event(
         return;
     }
 
-    // Use SkbDynptr to get the full packet size. This also validates
-    // the kfunc path is callable from a TC classifier context.
-    let pkt_len = unsafe { SkbDynptr::from_skb(ctx.skb.skb as *mut _) }
-        .map(|dp| dp.size() as usize)
-        .unwrap_or(ctx.len() as usize);
+    // Use SkbDynptr to get the full packet size and read the first
+    // 4 bytes of the L7 payload via adjust + read. This validates
+    // the dynptr adjust/read path in TC context and provides a
+    // protocol magic number for pre-classification (e.g. 0x16030x
+    // for TLS, "HTTP" for HTTP/1.x, 0x505249 for HTTP/2 preface).
+    let (pkt_len, _l7_magic) = unsafe { SkbDynptr::from_skb(ctx.skb.skb as *mut _) }
+        .map(|mut dp| {
+            let total = dp.size() as usize;
+            let magic: u32 = if l7_offset < total {
+                dp.adjust(l7_offset as u32, dp.size());
+                unsafe { dp.read::<u32>(0) }.unwrap_or(0)
+            } else {
+                0
+            };
+            (total, magic)
+        })
+        .unwrap_or((ctx.len() as usize, 0));
     let payload_avail = pkt_len.saturating_sub(l7_offset);
 
     if payload_avail <= SMALL_L7_PAYLOAD {
