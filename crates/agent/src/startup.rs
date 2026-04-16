@@ -836,6 +836,24 @@ pub async fn run(
         None
     };
 
+    // ── 6d. Spawn netkit device watcher (Kubernetes hot-plug) ────
+    if config.agent.attach_mode != infrastructure::config::AttachMode::Tc {
+        let nk_cancel = cancel_token.clone();
+        tokio::spawn(async move {
+            adapters::ebpf::netkit_discovery::watch_netkit_devices(
+                Box::new(|iface| {
+                    info!(
+                        "netkit hot-plug: new device {iface} — restart agent to attach BPF programs"
+                    );
+                }),
+                std::time::Duration::from_secs(5),
+                nk_cancel,
+            )
+            .await;
+        });
+        info!("netkit device watcher started (5s poll)");
+    }
+
     // ── 7. Spawn HTTP API server ──────────────────────────────────
     let http_port = config.agent.http_port;
     let http_bind = config.agent.bind_address.clone();
@@ -2858,7 +2876,7 @@ pub fn try_load_tc_ids(ebpf_dir: &str, config: &AgentConfig) -> anyhow::Result<T
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
-        loader.attach_tc_program("tc_ids", iface)?;
+        attach_tc_auto(&mut loader, "tc_ids", iface, config.agent.attach_mode)?;
     }
 
     // IDS map manager (best-effort: non-fatal if maps not present)
@@ -2932,7 +2950,12 @@ pub fn try_load_tc_threatintel(
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
-        loader.attach_tc_program("tc_threatintel", iface)?;
+        attach_tc_auto(
+            &mut loader,
+            "tc_threatintel",
+            iface,
+            config.agent.attach_mode,
+        )?;
     }
 
     let ti_mgr_opt = match ThreatIntelMapManager::new(loader.ebpf_mut()) {
@@ -2976,7 +2999,7 @@ pub fn try_load_tc_dns(
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
-        loader.attach_tc_program("tc_dns", iface)?;
+        attach_tc_auto(&mut loader, "tc_dns", iface, config.agent.attach_mode)?;
     }
 
     let dns_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "DNS_METRICS").ok();
@@ -3130,7 +3153,7 @@ pub fn try_load_tc_conntrack(
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
-        loader.attach_tc_program("tc_conntrack", iface)?;
+        attach_tc_auto(&mut loader, "tc_conntrack", iface, config.agent.attach_mode)?;
     }
 
     let ct_mgr = ConnTrackMapManager::new(loader.ebpf_mut())?;
@@ -3218,7 +3241,12 @@ pub fn try_load_tc_nat(
         EbpfLoader::load_with_pin_path(&ingress_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
-        ingress_loader.attach_tc_program("tc_nat_ingress", iface)?;
+        attach_tc_auto(
+            &mut ingress_loader,
+            "tc_nat_ingress",
+            iface,
+            config.agent.attach_mode,
+        )?;
     }
 
     let egress_bytes = read_ebpf_program(ebpf_dir, "tc-nat-egress")?;
@@ -3226,7 +3254,12 @@ pub fn try_load_tc_nat(
         EbpfLoader::load_with_pin_path(&egress_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
-        egress_loader.attach_tc_program("tc_nat_egress", iface)?;
+        attach_tc_auto(
+            &mut egress_loader,
+            "tc_nat_egress",
+            iface,
+            config.agent.attach_mode,
+        )?;
     }
 
     let nat_mgr =
@@ -3251,7 +3284,7 @@ pub fn try_load_tc_scrub(
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
     for iface in &config.agent.interfaces {
-        loader.attach_tc_program("tc_scrub", iface)?;
+        attach_tc_auto(&mut loader, "tc_scrub", iface, config.agent.attach_mode)?;
     }
 
     // Write scrub config to the SCRUB_CONFIG eBPF Array map
@@ -3356,4 +3389,42 @@ pub fn try_load_xdp_loadbalancer(
     let reader = EventReader::new(loader.ebpf_mut())?;
 
     Ok((loader, lb_mgr, metrics_rdr, reader))
+}
+
+/// Attach a TC program to an interface, dispatching based on
+/// [`AttachMode`]. Auto mode tries netkit first for netkit devices,
+/// falls back to TC clsact.
+fn attach_tc_auto(
+    loader: &mut adapters::ebpf::loader::EbpfLoader,
+    program_name: &str,
+    iface: &str,
+    mode: infrastructure::config::AttachMode,
+) -> anyhow::Result<()> {
+    use infrastructure::config::AttachMode;
+
+    match mode {
+        AttachMode::Netkit => {
+            loader.attach_tc_via_netkit(program_name, iface)?;
+        }
+        AttachMode::Tc => {
+            loader.attach_tc_program(program_name, iface)?;
+        }
+        AttachMode::Auto => {
+            if adapters::ebpf::netkit::is_netkit_device(iface) {
+                match loader.attach_tc_via_netkit(program_name, iface) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        warn!(
+                            program_name, iface, error = %e,
+                            "netkit attach failed, falling back to TC"
+                        );
+                        loader.attach_tc_program(program_name, iface)?;
+                    }
+                }
+            } else {
+                loader.attach_tc_program(program_name, iface)?;
+            }
+        }
+    }
+    Ok(())
 }
