@@ -46,7 +46,7 @@ use ebpf_helpers::net::{
 use aya_ebpf_bindings::helpers::bpf_probe_read_kernel;
 use ebpf_helpers::kfuncs::{
     BpfCtOpts, CtTuple, bpf_xfrm_state_opts, kill_flow_via_xdp_ct, with_xdp_ct_lookup,
-    with_xdp_xfrm_state, xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag,
+    with_xdp_xfrm_state, xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag, XdpDynptr,
 };
 use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{copy_mac_asm, increment_metric, ringbuf_has_backpressure};
@@ -1697,6 +1697,11 @@ fn emit_event(ctx: &XdpContext, action: u8) {
         Some(p) => p,
         None => return,
     };
+    // XdpDynptr validates the kfunc path from XDP context and
+    // provides the full frame size including multi-buffer fragments.
+    let _xdp_frame_size = unsafe { XdpDynptr::from_xdp(ctx.ctx as *mut _) }
+        .map(|dp| dp.size())
+        .unwrap_or(0);
     let (rss_hash, rss_hash_type) = unsafe { xdp_rx_hash(ctx.ctx.cast()) }.unwrap_or((0, 0));
     let rx_hw_ts = unsafe { xdp_rx_timestamp(ctx.ctx.cast()) }.unwrap_or(0);
     if let Some(mut entry) = EVENTS.reserve::<PacketEvent>(0) {

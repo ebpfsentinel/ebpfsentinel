@@ -433,6 +433,10 @@ unsafe extern "C" {
     pub fn bpf_dynptr_from_skb(skb: *mut core::ffi::c_void, flags: u64, ptr: *mut BpfDynptr)
     -> i32;
 
+    /// Initialise a dynptr over an XDP frame. Kernel 6.4+.
+    pub fn bpf_dynptr_from_xdp(xdp: *mut core::ffi::c_void, flags: u64, ptr: *mut BpfDynptr)
+    -> i32;
+
     /// Return a read-only pointer to `buffer__szk` bytes at `offset`
     /// inside the dynptr. If the window lies on a contiguous region
     /// the kernel returns a direct pointer; otherwise it copies the
@@ -588,6 +592,10 @@ unsafe extern "C" {
     // `bpf_skb_{get,set}_fou_encap` query / install Foo-over-UDP
     // (or GUE) encapsulation parameters on a TC egress skb. Used
     // to build cloud-overlay tunnels without leaving the kernel.
+
+    /// Read the FOU encap parameters attached to a TC skb. Kernel
+    /// 6.4+. Returns `0` on success, negative errno otherwise.
+    pub fn bpf_skb_get_fou_encap(skb: *mut core::ffi::c_void, encap: *mut BpfFouEncap) -> i32;
 
     /// Install FOU or GUE encap parameters on a TC skb. `type_` is
     /// the `bpf_fou_encap_type` discriminant. Kernel 6.4+. Returns
@@ -792,6 +800,14 @@ pub mod host_stubs {
     ) -> i32 {
         // Host builds never observe a real skb. Tests drive the
         // dynptr directly via [`install_host_dynptr`].
+        0
+    }
+
+    pub unsafe fn bpf_dynptr_from_xdp(
+        _xdp: *mut core::ffi::c_void,
+        _flags: u64,
+        _ptr: *mut BpfDynptr,
+    ) -> i32 {
         0
     }
 
@@ -1266,6 +1282,24 @@ pub mod host_stubs {
         0
     }
 
+    pub unsafe fn bpf_skb_get_fou_encap(
+        _skb: *mut core::ffi::c_void,
+        encap: *mut BpfFouEncap,
+    ) -> i32 {
+        let err = HOST_NEXT_FOU_GET_ERROR.swap(0, Ordering::SeqCst);
+        if err != 0 {
+            return err;
+        }
+        if !encap.is_null() {
+            #[allow(clippy::cast_possible_truncation)]
+            unsafe {
+                (*encap).sport = HOST_NEXT_FOU_SPORT.load(Ordering::SeqCst) as u16;
+                (*encap).dport = HOST_NEXT_FOU_DPORT.load(Ordering::SeqCst) as u16;
+            }
+        }
+        0
+    }
+
     pub unsafe fn bpf_skb_set_fou_encap(
         _skb: *mut core::ffi::c_void,
         encap: *mut BpfFouEncap,
@@ -1549,6 +1583,59 @@ impl SkbDynptr {
         // SAFETY: `slice` populated `sz` bytes at `buf`.
         Some(unsafe { core::ptr::read_unaligned(ptr.cast::<T>()) })
     }
+}
+
+/// Dynptr over an XDP frame. Same API surface as [`SkbDynptr`].
+#[repr(transparent)]
+pub struct XdpDynptr {
+    inner: BpfDynptr,
+}
+
+impl XdpDynptr {
+    /// Initialise a dynptr over the given `xdp_md` pointer.
+    ///
+    /// # Safety
+    /// `xdp` must be a live `xdp_md*` owned by the current XDP
+    /// program invocation.
+    #[inline(always)]
+    pub unsafe fn from_xdp(xdp: *mut core::ffi::c_void) -> Option<Self> {
+        let mut inner = BpfDynptr::uninit();
+        #[cfg(target_arch = "bpf")]
+        let rc = unsafe { bpf_dynptr_from_xdp(xdp, 0, &raw mut inner) };
+        #[cfg(not(target_arch = "bpf"))]
+        let rc = unsafe { host_stubs::bpf_dynptr_from_xdp(xdp, 0, &raw mut inner) };
+        if rc != 0 { None } else { Some(Self { inner }) }
+    }
+
+    #[inline(always)]
+    #[must_use]
+    pub fn size(&self) -> u32 {
+        #[cfg(target_arch = "bpf")]
+        let sz = unsafe { bpf_dynptr_size(&raw const self.inner) };
+        #[cfg(not(target_arch = "bpf"))]
+        let sz = unsafe { host_stubs::bpf_dynptr_size(&raw const self.inner) };
+        sz
+    }
+}
+
+/// Read FOU/GUE encapsulation parameters attached to a TC skb.
+/// Returns `None` when no encap metadata is present.
+///
+/// # Safety
+/// `skb` must point to a live `__sk_buff` owned by the current TC
+/// program invocation.
+#[inline(always)]
+#[must_use]
+pub unsafe fn skb_get_fou_encap(skb: *mut core::ffi::c_void) -> Option<BpfFouEncap> {
+    let mut encap = BpfFouEncap::default();
+    #[cfg(target_arch = "bpf")]
+    let rc = unsafe { bpf_skb_get_fou_encap(skb, &raw mut encap) };
+    #[cfg(not(target_arch = "bpf"))]
+    let rc = unsafe { host_stubs::bpf_skb_get_fou_encap(skb, &raw mut encap) };
+    if rc != 0 {
+        return None;
+    }
+    Some(encap)
 }
 
 // ── Conntrack lookup safe wrappers ──────────────────────────────

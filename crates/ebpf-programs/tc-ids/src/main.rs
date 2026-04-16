@@ -19,7 +19,7 @@ use ebpf_helpers::net::{
     ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
     PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
 };
-use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, SkbDynptr, kill_flow_via_skb_ct};
+use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, SkbDynptr, kill_flow_via_skb_ct, skb_get_fou_encap};
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{emit_packet_event, increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
@@ -586,6 +586,11 @@ fn emit_l7_event(
         return;
     }
 
+    // Detect incoming FOU/GUE overlay encapsulation. Non-None means
+    // the packet arrived through a FOU/GUE tunnel — useful for
+    // overlay-aware IDS rules in cloud environments.
+    let _fou_encap = unsafe { skb_get_fou_encap(ctx.skb.skb as *mut _) };
+
     // Use SkbDynptr to get the full packet size and read the first
     // 4 bytes of the L7 payload via adjust + read. This validates
     // the dynptr adjust/read path in TC context and provides a
@@ -594,6 +599,10 @@ fn emit_l7_event(
     let (pkt_len, _l7_magic) = unsafe { SkbDynptr::from_skb(ctx.skb.skb as *mut _) }
         .map(|mut dp| {
             let total = dp.size() as usize;
+            // Clone the dynptr before adjusting so a second cursor
+            // can independently scan headers while the primary cursor
+            // reads the body (dual-cursor for HTTP pipelining etc.).
+            let _header_cursor = dp.clone_dynptr();
             let magic: u32 = if l7_offset < total {
                 dp.adjust(l7_offset as u32, dp.size());
                 unsafe { dp.read::<u32>(0) }.unwrap_or(0)
