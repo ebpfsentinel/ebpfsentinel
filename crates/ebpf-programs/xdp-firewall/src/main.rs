@@ -44,7 +44,9 @@ use ebpf_helpers::net::{
     PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes,
     u32_from_be_bytes,
 };
-use ebpf_helpers::kfuncs::{xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag};
+use ebpf_helpers::kfuncs::{
+    BpfCtOpts, CtTuple, kill_flow_via_xdp_ct, xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag,
+};
 use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{copy_mac_asm, increment_metric, ringbuf_has_backpressure};
 use network_types::{
@@ -1491,6 +1493,24 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
         ACTION_DROP => {
             emit_event(ctx, ACTION_DROP);
             increment_metric(METRIC_DROPPED);
+
+            // Mark the kernel netfilter CT entry as DYING so the rest
+            // of this flow is dropped by netfilter without re-matching
+            // firewall rules on every subsequent packet.
+            if let Some(pkt) = PKT_CTX.get_ptr(0) {
+                let (s, d, sp, dp, proto) = unsafe {
+                    ((*pkt).src_addr, (*pkt).dst_addr, (*pkt).src_port,
+                     (*pkt).dst_port, (*pkt).protocol)
+                };
+                let tuple = if (*unsafe { &*pkt }).flags & FLAG_IPV6 != 0 {
+                    CtTuple::v6(s, d, sp, dp)
+                } else {
+                    CtTuple::v4(s[0], d[0], sp, dp)
+                };
+                let mut opts = if proto == PROTO_TCP { BpfCtOpts::tcp() } else { BpfCtOpts::udp() };
+                unsafe { kill_flow_via_xdp_ct(ctx.ctx as *mut _, tuple, &mut opts) };
+            }
+
             // Try CpuMap redirect for DDoS CPU steering. When userspace has
             // populated DDOS_CPUMAP, dropped packets are redirected to
             // dedicated CPUs for rate-limited analysis instead of being
