@@ -4,9 +4,8 @@
 //!
 //! Netkit (kernel 6.7+) replaces veth pairs for container networking.
 //! BPF programs attach natively via `BPF_LINK_CREATE` with
-//! `BPF_NETKIT_PRIMARY` (ingress) or `BPF_NETKIT_PEER` (egress),
-//! eliminating the TC qdisc overhead. Cilium uses netkit by default
-//! since 1.16.
+//! `BPF_NETKIT_PRIMARY` (ingress), eliminating the TC qdisc overhead.
+//! Cilium uses netkit by default since 1.16.
 //!
 //! This module provides:
 //! - `is_netkit_device(iface)` — detect netkit interfaces
@@ -26,8 +25,6 @@ const BPF_LINK_CREATE: u32 = 28;
 
 /// `BPF_NETKIT_PRIMARY` attach type — ingress side of the netkit pair.
 pub const BPF_NETKIT_PRIMARY: u32 = 54;
-/// `BPF_NETKIT_PEER` attach type — egress (peer) side of the netkit pair.
-pub const BPF_NETKIT_PEER: u32 = 55;
 
 /// Subset of `union bpf_attr` for `BPF_LINK_CREATE`.
 #[repr(C)]
@@ -160,6 +157,86 @@ fn iface_to_ifindex(iface: &str) -> Result<u32, NetkitError> {
         })
 }
 
+/// Registry of loaded TC program FDs for netkit hot-plug attachment.
+///
+/// When a new netkit device appears at runtime (e.g. Kubernetes pod
+/// creation), the watcher callback uses this registry to attach all
+/// configured TC programs to the new interface without restarting
+/// the agent.
+///
+/// Safety: the stored `RawFd` values are valid as long as the
+/// `EbpfState` that owns the underlying `EbpfLoader` instances is
+/// alive. The agent shutdown sequence cancels the watcher before
+/// dropping `EbpfState`.
+pub struct NetkitHotPlugRegistry {
+    /// `(program_name, program_fd)` for each loaded TC program.
+    programs: Vec<(String, std::os::fd::RawFd)>,
+    /// Link FDs for hot-plugged attachments. Dropping detaches.
+    links: std::sync::Mutex<Vec<OwnedFd>>,
+}
+
+impl Default for NetkitHotPlugRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NetkitHotPlugRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self {
+            programs: Vec::new(),
+            links: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Register a loaded TC program for hot-plug attachment.
+    pub fn register(&mut self, program_name: String, fd: std::os::fd::RawFd) {
+        self.programs.push((program_name, fd));
+    }
+
+    /// Attach all registered programs to a netkit interface.
+    /// Logs pod context from the namespace scan for correlation.
+    /// Logs warnings on individual failures but continues.
+    pub fn attach_all(&self, iface: &str, new_pods: &[super::netkit_discovery::PodContext]) {
+        for ctx in new_pods {
+            info!(
+                iface,
+                pod_pid = ctx.pid,
+                ns_inode = ctx.ns_inode,
+                "hot-plug: new pod namespace detected alongside netkit device"
+            );
+        }
+
+        for (name, fd) in &self.programs {
+            match netkit_attach_by_name(*fd, iface, BPF_NETKIT_PRIMARY) {
+                Ok(link_fd) => {
+                    info!(program = %name, iface, "hot-plug: TC program attached via netkit");
+                    if let Ok(mut links) = self.links.lock() {
+                        links.push(link_fd);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        program = %name, iface, error = %e,
+                        "hot-plug: failed to attach TC program via netkit"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Number of registered programs.
+    pub fn program_count(&self) -> usize {
+        self.programs.len()
+    }
+
+    /// Number of active hot-plugged links.
+    pub fn link_count(&self) -> usize {
+        self.links.lock().map_or(0, |l| l.len())
+    }
+}
+
 /// Errors from netkit operations.
 #[derive(Debug, thiserror::Error)]
 pub enum NetkitError {
@@ -214,5 +291,30 @@ mod tests {
     fn bpf_attr_link_create_size() {
         // Must be large enough for kernel to parse the netkit fields.
         assert!(std::mem::size_of::<BpfAttrLinkCreate>() >= 20);
+    }
+
+    #[test]
+    fn hotplug_registry_starts_empty() {
+        let reg = NetkitHotPlugRegistry::new();
+        assert_eq!(reg.program_count(), 0);
+        assert_eq!(reg.link_count(), 0);
+    }
+
+    #[test]
+    fn hotplug_registry_registers_programs() {
+        let mut reg = NetkitHotPlugRegistry::new();
+        reg.register("tc_ids".to_string(), 42);
+        reg.register("tc_dns".to_string(), 43);
+        assert_eq!(reg.program_count(), 2);
+    }
+
+    #[test]
+    fn hotplug_attach_all_on_non_netkit_device_warns() {
+        let mut reg = NetkitHotPlugRegistry::new();
+        // fd -1 is invalid — attach will fail gracefully.
+        reg.register("tc_ids".to_string(), -1);
+        // Should not panic, just log warnings.
+        reg.attach_all("lo", &[]);
+        assert_eq!(reg.link_count(), 0);
     }
 }

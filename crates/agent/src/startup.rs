@@ -864,23 +864,8 @@ pub async fn run(
         None
     };
 
-    // ── 6d. Spawn netkit device watcher (Kubernetes hot-plug) ────
-    if config.agent.attach_mode != infrastructure::config::AttachMode::Tc {
-        let nk_cancel = cancel_token.clone();
-        tokio::spawn(async move {
-            adapters::ebpf::netkit_discovery::watch_netkit_devices(
-                Box::new(|iface| {
-                    info!(
-                        "netkit hot-plug: new device {iface} — restart agent to attach BPF programs"
-                    );
-                }),
-                std::time::Duration::from_secs(5),
-                nk_cancel,
-            )
-            .await;
-        });
-        info!("netkit device watcher started (5s poll)");
-    }
+    // ── 6d. Netkit hot-plug watcher is spawned after eBPF loading (section 10½) ──
+    // so program FDs are available for dynamic attachment.
 
     // ── 7. Spawn HTTP API server ──────────────────────────────────
     let http_port = config.agent.http_port;
@@ -1644,7 +1629,53 @@ pub async fn run(
         status.insert("xdp_loadbalancer".to_string(), lb_ok);
     }
 
-    // ── 10½. Build EbpfProgramManager from loaded state ──────────────
+    // ── 10½a. Build netkit hot-plug registry + spawn watcher ─────────
+    if config.agent.attach_mode != infrastructure::config::AttachMode::Tc && ebpf_capable {
+        let tc_program_names = [
+            ("tc_ids", ids_ok),
+            ("tc_threatintel", ti_ok),
+            ("tc_dns", dns_ok),
+            ("tc_conntrack", ct_ok),
+            ("tc_nat_ingress", nat_ok),
+            ("tc_nat_egress", nat_ok),
+            ("tc_scrub", scrub_ok),
+        ];
+
+        let mut registry = adapters::ebpf::netkit::NetkitHotPlugRegistry::new();
+
+        for loader in &ebpf_state.loaders {
+            for &(name, ok) in &tc_program_names {
+                if ok && let Some(fd) = loader.program_fd(name) {
+                    registry.register(name.to_string(), fd);
+                }
+            }
+        }
+
+        let registered = registry.program_count();
+        if registered > 0 {
+            let registry = Arc::new(registry);
+            let nk_cancel = cancel_token.clone();
+            let nk_registry = Arc::clone(&registry);
+            tokio::spawn(async move {
+                adapters::ebpf::netkit_discovery::watch_netkit_devices(
+                    Box::new(move |iface, new_pods| {
+                        nk_registry.attach_all(iface, new_pods);
+                    }),
+                    std::time::Duration::from_secs(5),
+                    nk_cancel,
+                )
+                .await;
+            });
+            info!(
+                programs = registered,
+                "netkit hot-plug watcher started (5s poll, auto-attach enabled)"
+            );
+        } else {
+            info!("netkit hot-plug watcher skipped (no TC programs loaded)");
+        }
+    }
+
+    // ── 10½b. Build EbpfProgramManager from loaded state ──────────────
     let ebpf_manager = {
         let mut mgr = crate::ebpf_lifecycle::EbpfProgramManager::new(
             event_tx.clone(),

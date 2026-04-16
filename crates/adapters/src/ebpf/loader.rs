@@ -323,6 +323,15 @@ impl EbpfLoader {
         &mut self.ebpf
     }
 
+    /// Get the raw fd of a loaded program by name.
+    ///
+    /// Returns `None` if the program is not found or not loaded.
+    /// The returned fd is valid as long as this `EbpfLoader` is alive.
+    pub fn program_fd(&self, program_name: &str) -> Option<RawFd> {
+        let program: &SchedClassifier = self.ebpf.program(program_name)?.try_into().ok()?;
+        Some(program.fd().ok()?.as_fd().as_raw_fd())
+    }
+
     // ── Zero-downtime program swap via BPF_LINK_UPDATE (kernel 5.7+) ────
     //
     // Current approach: detach old program, attach new program. This creates
