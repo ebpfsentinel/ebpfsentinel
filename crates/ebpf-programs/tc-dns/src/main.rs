@@ -8,7 +8,7 @@ use aya_ebpf::{
     maps::{PerCpuArray, RingBuf},
     programs::TcContext,
 };
-use aya_ebpf_bindings::helpers::{bpf_skb_load_bytes, bpf_skb_pull_data};
+use aya_ebpf_bindings::helpers::bpf_skb_load_bytes;
 use core::mem;
 use ebpf_helpers::net::{
     ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
@@ -290,9 +290,8 @@ fn emit_dns_event(
         available
     };
 
-    // Linearize the SKB so bpf_skb_load_bytes can access fragments
-    // (jumbo frames, GRO aggregates). Ignored if already linear.
-    unsafe { bpf_skb_pull_data(ctx.skb.skb, ctx.len()) };
+    // bpf_skb_load_bytes handles fragmented packets natively (via
+    // skb_header_pointer), so linearization is unnecessary.
 
     if let Some(mut entry) = DNS_EVENTS.reserve::<DnsEventBuf>(0) {
         let ptr = entry.as_mut_ptr();
