@@ -13,6 +13,7 @@ use ebpf_helpers::net::{
     ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
     PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u32x4_to_ipv6_bytes,
 };
+use ebpf_helpers::kfuncs::{xdp_rx_hash, xdp_rx_timestamp};
 use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
 use ebpf_helpers::{add_metric, copy_16b_asm, copy_mac_asm, increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
@@ -164,11 +165,12 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
 
     // Select backend using per-service round-robin index
     let svc_idx = service_key_index(&key);
-    let (backend_id, backend) = match select_backend(svc_config, src_ip, svc_idx) {
+    let (backend_id, backend) = match select_backend(ctx, svc_config, src_ip, svc_idx) {
         Some(b) => b,
         None => {
             increment_metric(LB_METRIC_PACKETS_NO_BACKEND);
             emit_event(
+                ctx,
                 &src_addr,
                 &dst_addr,
                 src_port,
@@ -220,6 +222,7 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
 
     emit_event(
+        ctx,
         &src_addr,
         &dst_addr,
         src_port,
@@ -304,11 +307,12 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     let pkt_len = ctx.data_end().saturating_sub(ctx.data()) as u64;
 
     let svc_idx = service_key_index(&key);
-    let (backend_id, backend) = match select_backend(svc_config, src_ip_folded, svc_idx) {
+    let (backend_id, backend) = match select_backend(ctx, svc_config, src_ip_folded, svc_idx) {
         Some(b) => b,
         None => {
             increment_metric(LB_METRIC_PACKETS_NO_BACKEND);
             emit_event(
+                ctx,
                 &src_addr,
                 &dst_addr,
                 src_port,
@@ -371,6 +375,7 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
 
     emit_event(
+        ctx,
         &src_addr,
         &dst_addr,
         src_port,
@@ -416,11 +421,12 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
 /// `svc.backend_start_id..svc.backend_start_id + svc.backend_count`.
 /// The algorithm selects a starting offset, then probes linearly for a healthy backend.
 #[inline(always)]
-fn select_backend(
-    svc: &LbServiceConfigV2,
+fn select_backend<'a>(
+    ctx: &XdpContext,
+    svc: &'a LbServiceConfigV2,
     src_ip: u32,
     svc_index: u32,
-) -> Option<(u32, &LbBackendEntry)> {
+) -> Option<(u32, &'a LbBackendEntry)> {
     let count = svc.backend_count as usize;
     if count == 0 {
         return None;
@@ -442,7 +448,14 @@ fn select_backend(
             }
             rr as usize
         }
-        LB_ALG_IP_HASH => fnv1a(src_ip) as usize,
+        // Prefer NIC RSS hash when available (hardware-computed,
+        // better distribution, zero CPU cost). Fall back to
+        // software FNV-1a when the driver lacks RSS metadata.
+        LB_ALG_IP_HASH => {
+            unsafe { xdp_rx_hash(ctx.ctx.cast()) }
+                .map(|(h, _)| h as usize)
+                .unwrap_or_else(|| fnv1a(src_ip) as usize)
+        }
         LB_ALG_WEIGHTED => {
             let rr_ptr = LB_RR_STATE.get_ptr_mut(svc_index)?;
             let rr = unsafe { *rr_ptr };
@@ -658,6 +671,7 @@ fn ringbuf_has_backpressure() -> bool {
 
 #[inline(always)]
 fn emit_event(
+    ctx: &XdpContext,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
     src_port: u16,
@@ -699,9 +713,10 @@ fn emit_event(
         (*ptr).socket_cookie = 0;
         (*ptr).cgroup_id = 0;
         (*ptr).cgroup1_id = 0;
-        (*ptr).rss_hash = 0;
-        (*ptr).rss_hash_type = 0;
-        (*ptr).rx_hw_timestamp_ns = 0;
+        let (rss_h, rss_t) = xdp_rx_hash(ctx.ctx.cast()).unwrap_or((0, 0));
+        (*ptr).rss_hash = rss_h;
+        (*ptr).rss_hash_type = rss_t;
+        (*ptr).rx_hw_timestamp_ns = xdp_rx_timestamp(ctx.ctx.cast()).unwrap_or(0);
         event.submit(0);
     }
 }
