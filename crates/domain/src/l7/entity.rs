@@ -64,6 +64,19 @@ pub struct TlsClientHello {
     pub supported_versions: Vec<u16>,
 }
 
+/// Parsed TLS `ServerHello` with JA4S fingerprint fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TlsServerHello {
+    /// Selected cipher suite.
+    pub selected_cipher: u16,
+    /// Selected protocol version.
+    pub selected_version: u16,
+    /// Extension type IDs in the order they appear.
+    pub extensions: Vec<u16>,
+    /// Selected named group (from `KeyShare` or `ServerKeyExchange`).
+    pub selected_group: Option<u16>,
+}
+
 /// Parsed gRPC request path (extracted from HTTP/2 framing).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrpcRequest {

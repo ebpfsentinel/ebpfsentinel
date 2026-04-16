@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::entity::TlsClientHello;
+use super::entity::{TlsClientHello, TlsServerHello};
 
 /// JA4 fingerprint for a TLS `ClientHello`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +32,51 @@ pub fn compute_ja4(hello: &TlsClientHello) -> Ja4Fingerprint {
         ja4_a,
         ja4_b,
         ja4_c,
+    }
+}
+
+/// JA4S fingerprint for a TLS `ServerHello`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ja4sFingerprint {
+    /// Full JA4S hash: `{a}_{b}_{c}`.
+    pub ja4s: String,
+    /// Section a: `t{version}{ext_count:02}`.
+    pub ja4s_a: String,
+    /// Section b: selected cipher as 4 hex chars.
+    pub ja4s_b: String,
+    /// Section c: truncated SHA-256 of sorted extensions.
+    pub ja4s_c: String,
+}
+
+/// Compute the JA4S fingerprint from a parsed `TlsServerHello`.
+pub fn compute_ja4s(hello: &TlsServerHello) -> Ja4sFingerprint {
+    // Section a: t{version}{ext_count:02}
+    let version = tls_version_str(hello.selected_version);
+    let ext_count = hello.extensions.len().min(99);
+    let ja4s_a = format!("t{version}{ext_count:02}");
+
+    // Section b: selected cipher as 4 hex chars
+    let ja4s_b = format!("{:04x}", hello.selected_cipher);
+
+    // Section c: SHA-256(sorted extensions), truncated to 12 hex chars
+    let mut sorted_ext = hello.extensions.clone();
+    sorted_ext.sort_unstable();
+    let ext_csv = sorted_ext.iter().fold(String::new(), |mut acc, &ext| {
+        if !acc.is_empty() {
+            acc.push(',');
+        }
+        let _ = write!(acc, "{ext:04x}");
+        acc
+    });
+    let ja4s_c = sha256_12(&ext_csv);
+
+    let ja4s = format!("{ja4s_a}_{ja4s_b}_{ja4s_c}");
+
+    Ja4sFingerprint {
+        ja4s,
+        ja4s_a,
+        ja4s_b,
+        ja4s_c,
     }
 }
 
@@ -365,6 +410,65 @@ mod tests {
         assert_eq!(tls_version_str(0x0302), "11");
         assert_eq!(tls_version_str(0x0301), "10");
         assert_eq!(tls_version_str(0x0300), "00");
+    }
+
+    // ── JA4S tests ──────────────────────────────────────────────────
+
+    fn make_server_hello() -> TlsServerHello {
+        TlsServerHello {
+            selected_cipher: 0x1301,
+            selected_version: 0x0304,
+            extensions: vec![0x002B, 0x0033], // supported_versions + key_share
+            selected_group: Some(0x001D),
+        }
+    }
+
+    #[test]
+    fn ja4s_section_a_format() {
+        let hello = make_server_hello();
+        let fp = compute_ja4s(&hello);
+        // t (TCP) + 13 (TLS 1.3) + 02 (2 extensions)
+        assert_eq!(fp.ja4s_a, "t1302");
+    }
+
+    #[test]
+    fn ja4s_section_b_cipher_hex() {
+        let hello = make_server_hello();
+        let fp = compute_ja4s(&hello);
+        assert_eq!(fp.ja4s_b, "1301");
+    }
+
+    #[test]
+    fn ja4s_section_c_is_12_hex() {
+        let hello = make_server_hello();
+        let fp = compute_ja4s(&hello);
+        assert_eq!(fp.ja4s_c.len(), 12);
+        assert!(fp.ja4s_c.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn ja4s_full_format() {
+        let hello = make_server_hello();
+        let fp = compute_ja4s(&hello);
+        let parts: Vec<&str> = fp.ja4s.split('_').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], fp.ja4s_a);
+        assert_eq!(parts[1], fp.ja4s_b);
+        assert_eq!(parts[2], fp.ja4s_c);
+    }
+
+    #[test]
+    fn ja4s_deterministic() {
+        let hello = make_server_hello();
+        assert_eq!(compute_ja4s(&hello), compute_ja4s(&hello));
+    }
+
+    #[test]
+    fn ja4s_different_cipher_different_hash() {
+        let hello1 = make_server_hello();
+        let mut hello2 = make_server_hello();
+        hello2.selected_cipher = 0x1302;
+        assert_ne!(compute_ja4s(&hello1).ja4s_b, compute_ja4s(&hello2).ja4s_b);
     }
 
     // ── Cache tests ──────────────────────────────────────────────────
