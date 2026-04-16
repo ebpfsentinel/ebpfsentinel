@@ -3127,11 +3127,76 @@ pub fn try_load_tc_conntrack(
     let ct_mgr = ConnTrackMapManager::new(loader.ebpf_mut())?;
     let ct_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "CT_METRICS").ok();
 
+    // Resolve nf_conn field offsets from vmlinux BTF and push to the
+    // CT_NF_CONN_OFFSETS array map so tc-conntrack can read kernel CT
+    // fields via bpf_probe_read_kernel at the correct offsets.
+    if let Ok(offsets) = resolve_nf_conn_offsets() {
+        if let Err(e) =
+            adapters::ebpf::conntrack_map_manager::push_nf_conn_offsets(loader.ebpf_mut(), offsets)
+        {
+            warn!("failed to push nf_conn offsets to BPF: {e}");
+        } else {
+            info!(
+                status_offset = offsets.status_offset,
+                mark_offset = offsets.mark_offset,
+                "nf_conn BTF offsets resolved and pushed to BPF"
+            );
+        }
+    } else {
+        warn!("failed to resolve nf_conn BTF offsets — kernel CT field reads disabled");
+    }
+
     // tc-conntrack has no EVENTS RingBuf (pure state tracking, no events).
     // EventReader is optional — skip if the map doesn't exist.
     let opt_reader = EventReader::new(loader.ebpf_mut()).ok();
 
     Ok((loader, ct_mgr, ct_metrics_rdr, opt_reader))
+}
+
+/// Resolve `nf_conn.status` and `nf_conn.mark` field offsets from the
+/// running kernel's vmlinux BTF. Uses `bpftool btf dump -j` to parse
+/// the type info rather than linking against libbpf.
+fn resolve_nf_conn_offsets() -> anyhow::Result<ebpf_common::conntrack::NfConnOffsets> {
+    let output = std::process::Command::new("bpftool")
+        .args(["btf", "dump", "file", "/sys/kernel/btf/vmlinux", "-j"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("bpftool not found: {e}"))?;
+    if !output.status.success() {
+        anyhow::bail!("bpftool btf dump failed");
+    }
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let types = json["types"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("no types array in BTF dump"))?;
+
+    for t in types {
+        if t["name"].as_str() == Some("nf_conn") && t["kind"].as_str() == Some("STRUCT") {
+            let members = t["members"]
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("no members in nf_conn"))?;
+            let mut status_offset: Option<u32> = None;
+            let mut mark_offset: Option<u32> = None;
+            for m in members {
+                let name = m["name"].as_str().unwrap_or("");
+                #[allow(clippy::cast_possible_truncation)]
+                let offset_bytes = (m["bits_offset"].as_u64().unwrap_or(0) / 8) as u32;
+                match name {
+                    "status" => status_offset = Some(offset_bytes),
+                    "mark" => mark_offset = Some(offset_bytes),
+                    _ => {}
+                }
+            }
+            return Ok(ebpf_common::conntrack::NfConnOffsets {
+                status_offset: status_offset
+                    .ok_or_else(|| anyhow::anyhow!("nf_conn.status not found in BTF"))?,
+                mark_offset: mark_offset
+                    .ok_or_else(|| anyhow::anyhow!("nf_conn.mark not found in BTF"))?,
+                valid: 1,
+                _pad: 0,
+            });
+        }
+    }
+    anyhow::bail!("struct nf_conn not found in vmlinux BTF")
 }
 
 /// Load the TC NAT programs (ingress + egress): attach TC, create map manager.

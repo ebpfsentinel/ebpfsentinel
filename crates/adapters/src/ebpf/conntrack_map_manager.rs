@@ -143,6 +143,21 @@ fn u32x4_to_ipv6_bytes(words: &[u32; 4]) -> [u8; 16] {
     bytes
 }
 
+/// Push runtime-resolved `nf_conn` BTF offsets into the
+/// `CT_NF_CONN_OFFSETS` BPF array map so `tc-conntrack` can read
+/// kernel CT fields via `bpf_probe_read_kernel`.
+pub fn push_nf_conn_offsets(
+    ebpf: &mut aya::Ebpf,
+    offsets: ebpf_common::conntrack::NfConnOffsets,
+) -> Result<(), anyhow::Error> {
+    let map = ebpf
+        .map_mut("CT_NF_CONN_OFFSETS")
+        .ok_or_else(|| anyhow::anyhow!("CT_NF_CONN_OFFSETS map not found"))?;
+    let mut arr = aya::maps::Array::<_, ebpf_common::conntrack::NfConnOffsets>::try_from(map)?;
+    arr.set(0, offsets, 0)?;
+    Ok(())
+}
+
 fn conn_from_v6(key: &ConnKeyV6, val: &ConnValueV6) -> Connection {
     let src_ip = Ipv6Addr::from(u32x4_to_ipv6_bytes(&key.src_addr)).to_string();
     let dst_ip = Ipv6Addr::from(u32x4_to_ipv6_bytes(&key.dst_addr)).to_string();

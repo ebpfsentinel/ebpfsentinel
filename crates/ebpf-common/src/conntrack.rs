@@ -3,6 +3,24 @@
 //! Used by: tc-conntrack (state update), xdp-firewall (fast-path read),
 //! tc-nat-ingress/egress (NAT integration), and userspace monitoring.
 
+/// Runtime-resolved `nf_conn` field offsets pushed from userspace
+/// after parsing vmlinux BTF. Used by `bpf_probe_read_kernel` to
+/// read kernel CT fields portably across kernel configs.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NfConnOffsets {
+    /// Byte offset of `nf_conn.status` (`unsigned long`).
+    pub status_offset: u32,
+    /// Byte offset of `nf_conn.mark` (`u32`).
+    pub mark_offset: u32,
+    /// 1 = offsets resolved and valid, 0 = not yet populated.
+    pub valid: u32,
+    pub _pad: u32,
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for NfConnOffsets {}
+
 /// Maximum conntrack table entries (IPv4).
 pub const CT_MAX_ENTRIES_V4: u32 = 262_144;
 
