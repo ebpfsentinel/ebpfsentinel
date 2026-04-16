@@ -25,6 +25,7 @@ pub mod map_manager;
 pub mod metrics_reader;
 pub mod nat_map_manager;
 pub mod netkit;
+pub mod netkit_discovery;
 pub mod qos_map_manager;
 pub mod ratelimit_lpm_manager;
 pub mod ratelimit_map_manager;
