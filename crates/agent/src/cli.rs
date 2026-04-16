@@ -142,6 +142,15 @@ pub enum Command {
         alert_limit: u64,
     },
 
+    /// Connection tracking — live flow events and status
+    Conntrack {
+        #[command(subcommand)]
+        action: ConntrackAction,
+
+        #[command(flatten)]
+        conn: ConnectionArgs,
+    },
+
     /// Manage firewall L3/L4 rules
     Firewall(DomainArgs<FirewallCommand>),
 
@@ -202,6 +211,26 @@ pub struct DomainArgs<T: Subcommand> {
 
     #[command(subcommand)]
     pub command: T,
+}
+
+// ── Conntrack ──────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum ConntrackAction {
+    /// Watch conntrack flow events in real-time (new / update / destroy)
+    Watch {
+        /// Poll interval in seconds for the SSE stream reconnect
+        #[arg(short, long, default_value_t = 2)]
+        interval: u64,
+    },
+    /// List current connections from the kernel conntrack table
+    List {
+        /// Maximum connections to display
+        #[arg(short = 'n', long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Show conntrack status (enabled, connection count)
+    Status,
 }
 
 // ── Firewall ────────────────────────────────────────────────────────────

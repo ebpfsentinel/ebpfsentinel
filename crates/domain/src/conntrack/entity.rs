@@ -84,6 +84,44 @@ pub struct Connection {
     pub last_seen_ns: u64,
 }
 
+/// Type of conntrack lifecycle event detected by the snapshot-diff
+/// poller that compares successive reads of `/proc/net/nf_conntrack`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConntrackEventType {
+    /// Flow appeared since the last snapshot.
+    New,
+    /// Flow existed before but its state or counters changed.
+    Update,
+    /// Flow disappeared since the last snapshot (kernel evicted or
+    /// timed out).
+    Destroy,
+}
+
+impl ConntrackEventType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Update => "update",
+            Self::Destroy => "destroy",
+        }
+    }
+}
+
+impl std::fmt::Display for ConntrackEventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Conntrack lifecycle event emitted by the snapshot-diff poller.
+/// Wraps a [`Connection`] with its lifecycle type so consumers can
+/// react to flow creation, state changes, and teardown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConntrackEvent {
+    pub event_type: ConntrackEventType,
+    pub connection: Connection,
+}
+
 /// Conntrack configuration (domain-level).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnTrackSettings {

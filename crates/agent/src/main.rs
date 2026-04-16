@@ -74,6 +74,21 @@ async fn main() -> Result<()> {
             commands::cmd_investigate(&client, &ip, alert_limit, output).await
         }
 
+        Some(Command::Conntrack { action, conn }) => {
+            let client = ApiClient::new(&conn.host, conn.port, cli.token);
+            match action {
+                cli::ConntrackAction::Watch { interval } => {
+                    commands::cmd_conntrack_watch(&client, interval).await
+                }
+                cli::ConntrackAction::List { limit } => {
+                    commands::cmd_conntrack_list(&client, limit, output).await
+                }
+                cli::ConntrackAction::Status => {
+                    commands::cmd_conntrack_status(&client, output).await
+                }
+            }
+        }
+
         Some(Command::Firewall(args)) => {
             let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
             match args.command {

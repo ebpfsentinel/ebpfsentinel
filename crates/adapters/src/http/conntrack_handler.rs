@@ -1,10 +1,14 @@
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use serde::{Deserialize, Serialize};
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
@@ -148,6 +152,35 @@ pub async fn flush_connections(
         StatusCode::OK,
         Json(serde_json::json!({ "flushed": count })),
     ))
+}
+
+/// `GET /api/v1/conntrack/events` — Server-Sent Events stream of
+/// conntrack lifecycle events (new / update / destroy).
+///
+/// The poller diffs `/proc/net/nf_conntrack` snapshots every 2 s and
+/// pushes changes into a broadcast channel. Each SSE client receives
+/// a copy. Lagged clients silently skip missed events.
+pub async fn conntrack_events(
+    State(state): State<Arc<AppState>>,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let tx = state
+        .conntrack_event_tx
+        .as_ref()
+        .ok_or(ApiError::NotFound {
+            code: "SERVICE_NOT_AVAILABLE",
+            message: "Conntrack event stream not enabled".to_string(),
+        })?;
+    let rx = tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|item| match item {
+        Ok(evt) => {
+            let json = serde_json::to_string(&evt).unwrap_or_default();
+            Some(Ok(Event::default()
+                .event(evt.event_type.as_str())
+                .data(json)))
+        }
+        Err(_) => None, // lagged — skip
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 #[cfg(test)]

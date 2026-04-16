@@ -283,12 +283,20 @@ pub async fn run(
     // Inject the kernel netfilter conntrack reader so REST /conntrack
     // endpoints return the kernel's authoritative view (coherent with
     // `conntrack -L`) instead of the BPF shadow.
-    if adapters::netfilter::conntrack::is_proc_conntrack_available() {
+    let nf_ct_available = adapters::netfilter::conntrack::is_proc_conntrack_available();
+    let conntrack_event_tx = if nf_ct_available {
         ct_svc.set_netfilter_port(Box::new(
             adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new(),
         ));
         info!("kernel netfilter conntrack reader injected via /proc/net/nf_conntrack");
-    }
+        // Broadcast channel created now; poller spawned later after
+        // cancel_token exists (see section 6c below).
+        let (tx, _) =
+            tokio::sync::broadcast::channel::<domain::conntrack::entity::ConntrackEvent>(256);
+        Some(tx)
+    } else {
+        None
+    };
     let conntrack_svc = Arc::new(RwLock::new(ct_svc));
     info!(
         enabled = config.conntrack.enabled,
@@ -761,11 +769,15 @@ pub async fn run(
             None
         };
 
-    let app_state = app_state
+    let mut app_state = app_state
         .with_ids_service(Arc::clone(&ids_svc))
         .with_ddos_service(Arc::clone(&ddos_svc))
         .with_dlp_service(Arc::clone(&dlp_svc))
-        .with_conntrack_service(Arc::clone(&conntrack_svc))
+        .with_conntrack_service(Arc::clone(&conntrack_svc));
+    if let Some(ref tx) = conntrack_event_tx {
+        app_state = app_state.with_conntrack_event_tx(tx.clone());
+    }
+    let app_state = app_state
         .with_nat_service(Arc::clone(&nat_svc))
         .with_alias_service(Arc::clone(&alias_svc))
         .with_routing_service(Arc::clone(&routing_svc))
@@ -783,6 +795,23 @@ pub async fn run(
         Duration::from_secs(5),
         cancel_token.clone(),
     );
+
+    // ── 6c. Spawn conntrack event poller ─────────────────────────────
+    if let Some(ref tx) = conntrack_event_tx {
+        let nf_port = adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new();
+        let poller_tx = tx.clone();
+        let poller_cancel = cancel_token.clone();
+        tokio::spawn(async move {
+            adapters::netfilter::event_stream::run_conntrack_event_poller(
+                nf_port,
+                poller_tx,
+                std::time::Duration::from_secs(2),
+                poller_cancel,
+            )
+            .await;
+        });
+        info!("conntrack event poller started (2s interval)");
+    }
 
     // ── 6b. Load TLS configuration ─────────────────────────────────
     // Install the PQ-aware CryptoProvider for all outbound TLS (reqwest, lettre)

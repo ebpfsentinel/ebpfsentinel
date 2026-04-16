@@ -34,7 +34,9 @@ use super::alert_handler::{list_alerts, mark_false_positive};
 use super::alias_handler::{alias_status, set_external_alias_content};
 use super::audit_handler::{list_audit_logs, rule_history};
 use super::capture_handler::{list_captures, start_capture, stop_capture};
-use super::conntrack_handler::{conntrack_status, flush_connections, list_connections};
+use super::conntrack_handler::{
+    conntrack_events, conntrack_status, flush_connections, list_connections,
+};
 use super::ddos_handler::{
     create_ddos_policy, ddos_attacks, ddos_history, ddos_status, delete_ddos_policy,
     list_ddos_policies,
@@ -163,6 +165,7 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
             .route("/api/v1/ddos/policies", get(list_ddos_policies))
             .route("/api/v1/conntrack/status", get(conntrack_status))
             .route("/api/v1/conntrack/connections", get(list_connections))
+            .route("/api/v1/conntrack/events", get(conntrack_events))
             .route("/api/v1/dlp/status", get(dlp_status))
             .route("/api/v1/dlp/patterns", get(list_dlp_patterns))
             .route("/api/v1/nat/status", get(nat_status))

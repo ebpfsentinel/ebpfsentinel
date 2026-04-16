@@ -1776,6 +1776,89 @@ pub async fn cmd_flows(client: &ApiClient, limit: usize, output: OutputFormat) -
     Ok(())
 }
 
+// ── Conntrack ──────────────────────────────────────────────────────────
+
+pub async fn cmd_conntrack_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.conntrack_status().await?;
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+    } else {
+        println!(
+            "enabled: {}\nconnections: {}",
+            resp.enabled, resp.connection_count
+        );
+    }
+    Ok(())
+}
+
+pub async fn cmd_conntrack_list(
+    client: &ApiClient,
+    limit: usize,
+    output: OutputFormat,
+) -> Result<()> {
+    let conns = client.list_connections(limit).await?;
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&conns)?);
+    } else {
+        println!(
+            "{:<16} {:<16} {:>6} {:>6} {:>5} {:>12} {:>12} {:>12}",
+            "SRC", "DST", "SPORT", "DPORT", "PROTO", "STATE", "PKT_FWD", "PKT_REV"
+        );
+        for c in &conns {
+            println!(
+                "{:<16} {:<16} {:>6} {:>6} {:>5} {:>12} {:>12} {:>12}",
+                c.src_ip,
+                c.dst_ip,
+                c.src_port,
+                c.dst_port,
+                c.protocol,
+                c.state,
+                c.packets_fwd,
+                c.packets_rev,
+            );
+        }
+        println!("total: {}", conns.len());
+    }
+    Ok(())
+}
+
+pub async fn cmd_conntrack_watch(client: &ApiClient, interval: u64) -> Result<()> {
+    // Poll /api/v1/conntrack/connections periodically and show diffs.
+    // SSE requires EventSource which isn't in reqwest — use polling as
+    // fallback (matches the existing cmd_watch pattern for alerts).
+    let mut prev_keys = std::collections::HashSet::new();
+
+    loop {
+        let conns = client.list_connections(10_000).await?;
+        let mut curr_keys = std::collections::HashSet::new();
+        for c in &conns {
+            let key = format!(
+                "{}:{}-{}:{}/{}",
+                c.src_ip, c.src_port, c.dst_ip, c.dst_port, c.protocol,
+            );
+            if !prev_keys.contains(&key) {
+                println!("[NEW] {} {} state={}", chrono_or_now(), key, c.state,);
+            }
+            curr_keys.insert(key);
+        }
+        for old_key in &prev_keys {
+            if !curr_keys.contains(old_key) {
+                println!("[DESTROY] {} {old_key}", chrono_or_now());
+            }
+        }
+        prev_keys = curr_keys;
+        tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+    }
+}
+
+fn chrono_or_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => format!("{:.3}", d.as_secs_f64()),
+        Err(_) => "0".to_string(),
+    }
+}
+
 struct FlowAgg {
     flows: u64,
     bytes: u64,
@@ -2415,6 +2498,14 @@ mod tests {
     #[test]
     fn yes_no_false() {
         assert_eq!(yes_no(false), "no");
+    }
+
+    #[test]
+    fn conntrack_event_type_display() {
+        use domain::conntrack::entity::ConntrackEventType;
+        assert_eq!(ConntrackEventType::New.as_str(), "new");
+        assert_eq!(ConntrackEventType::Update.as_str(), "update");
+        assert_eq!(ConntrackEventType::Destroy.as_str(), "destroy");
     }
 
     #[test]

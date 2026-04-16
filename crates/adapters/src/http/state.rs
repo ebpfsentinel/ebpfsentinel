@@ -24,11 +24,12 @@ use application::routing_service_impl::RoutingAppService;
 use application::threatintel_service_impl::ThreatIntelAppService;
 use application::zone_service_impl::ZoneAppService;
 use arc_swap::ArcSwap;
+use domain::conntrack::entity::ConntrackEvent;
 use infrastructure::config::AgentConfig;
 use infrastructure::metrics::AgentMetrics;
 use ports::secondary::alert_store::AlertStore;
 use ports::secondary::auth_provider::AuthProvider;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
 /// Shared application state for the REST API server.
 ///
@@ -67,6 +68,9 @@ pub struct AppState {
     pub fingerprint_cache: Option<Arc<domain::l7::ja4::FingerprintCache>>,
     pub response_engine: Option<Arc<RwLock<domain::response::engine::ResponseEngine>>>,
     pub capture_engine: Option<Arc<RwLock<domain::capture::engine::CaptureEngine>>>,
+    /// Broadcast sender for conntrack lifecycle events. SSE clients
+    /// subscribe by calling `tx.subscribe()`.
+    pub conntrack_event_tx: Option<broadcast::Sender<ConntrackEvent>>,
 }
 
 impl AppState {
@@ -118,6 +122,7 @@ impl AppState {
             fingerprint_cache: None,
             response_engine: None,
             capture_engine: None,
+            conntrack_event_tx: None,
         }
     }
 
@@ -159,6 +164,13 @@ impl AppState {
     #[must_use]
     pub fn with_conntrack_service(mut self, svc: Arc<RwLock<ConnTrackAppService>>) -> Self {
         self.conntrack_service = Some(svc);
+        self
+    }
+
+    /// Attach a conntrack event broadcast sender for SSE streaming.
+    #[must_use]
+    pub fn with_conntrack_event_tx(mut self, tx: broadcast::Sender<ConntrackEvent>) -> Self {
+        self.conntrack_event_tx = Some(tx);
         self
     }
 
