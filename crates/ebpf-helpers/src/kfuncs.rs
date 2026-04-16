@@ -605,6 +605,28 @@ unsafe extern "C" {
         encap: *mut BpfFouEncap,
         type_: i32,
     ) -> i32;
+
+    // ── Kernel 6.9 arena allocation ─────────────────────────────
+
+    /// Allocate `page_cnt` pages from the BPF arena map. Returns a
+    /// pointer into the arena's address space. `addr__ign` is
+    /// reserved (pass null). `node_id` selects NUMA node (-1 = any).
+    /// `flags` is reserved (pass 0). Kernel 6.9+.
+    pub fn bpf_arena_alloc_pages(
+        p__map: *mut core::ffi::c_void,
+        addr__ign: *mut core::ffi::c_void,
+        page_cnt: u32,
+        node_id: i32,
+        flags: u64,
+    ) -> *mut core::ffi::c_void;
+
+    /// Free `page_cnt` pages starting at `ptr__ign` back to the
+    /// arena map. Kernel 6.9+.
+    pub fn bpf_arena_free_pages(
+        p__map: *mut core::ffi::c_void,
+        ptr__ign: *mut core::ffi::c_void,
+        page_cnt: u32,
+    );
 }
 
 // ── Host-target stubs ────────────────────────────────────────────
@@ -1317,6 +1339,44 @@ pub mod host_stubs {
             HOST_LAST_FOU_TYPE.store(type_, Ordering::SeqCst);
         }
         0
+    }
+
+    // ── Arena allocation stubs ──
+
+    /// Tracks pages allocated via the host stub (for test assertions).
+    static HOST_ARENA_ALLOCATED_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+    /// Test helper: read the total pages allocated via the arena stub.
+    #[must_use]
+    pub fn host_arena_allocated_pages() -> usize {
+        HOST_ARENA_ALLOCATED_PAGES.load(Ordering::SeqCst)
+    }
+
+    /// Reset arena stub state.
+    pub fn host_reset_arena_state() {
+        HOST_ARENA_ALLOCATED_PAGES.store(0, Ordering::SeqCst);
+    }
+
+    pub unsafe fn bpf_arena_alloc_pages(
+        _p__map: *mut core::ffi::c_void,
+        _addr__ign: *mut core::ffi::c_void,
+        page_cnt: u32,
+        _node_id: i32,
+        _flags: u64,
+    ) -> *mut core::ffi::c_void {
+        HOST_ARENA_ALLOCATED_PAGES.fetch_add(page_cnt as usize, Ordering::SeqCst);
+        // Return a non-null sentinel so callers see success.
+        // In real BPF this returns a pointer into the arena address space.
+        page_cnt as usize as *mut core::ffi::c_void
+    }
+
+    pub unsafe fn bpf_arena_free_pages(
+        _p__map: *mut core::ffi::c_void,
+        _ptr__ign: *mut core::ffi::c_void,
+        page_cnt: u32,
+    ) {
+        let prev = HOST_ARENA_ALLOCATED_PAGES.load(Ordering::SeqCst);
+        HOST_ARENA_ALLOCATED_PAGES.store(prev.saturating_sub(page_cnt as usize), Ordering::SeqCst);
     }
 }
 
@@ -2122,6 +2182,51 @@ pub unsafe fn skb_set_fou_encap(
     rc == 0
 }
 
+/// Allocate `page_count` pages from a BPF arena map. Returns a
+/// pointer into the arena's shared address space, or `None` on
+/// failure. The arena must have been created with
+/// `BPF_MAP_TYPE_ARENA`. Kernel 6.9+.
+///
+/// # Safety
+/// `map_ptr` must be a valid pointer to an arena map fd obtained
+/// from the BPF program's map definitions.
+#[inline(always)]
+#[must_use]
+pub unsafe fn arena_alloc_pages(
+    map_ptr: *mut core::ffi::c_void,
+    page_count: u32,
+) -> Option<*mut core::ffi::c_void> {
+    #[cfg(target_arch = "bpf")]
+    let ptr = unsafe { bpf_arena_alloc_pages(map_ptr, core::ptr::null_mut(), page_count, -1, 0) };
+    #[cfg(not(target_arch = "bpf"))]
+    let ptr = unsafe {
+        host_stubs::bpf_arena_alloc_pages(map_ptr, core::ptr::null_mut(), page_count, -1, 0)
+    };
+    if ptr.is_null() { None } else { Some(ptr) }
+}
+
+/// Free `page_count` pages starting at `ptr` back to the arena map.
+/// Kernel 6.9+.
+///
+/// # Safety
+/// `map_ptr` must be a valid arena map pointer. `ptr` must have been
+/// returned by a prior `arena_alloc_pages` call on the same arena.
+#[inline(always)]
+pub unsafe fn arena_free_pages(
+    map_ptr: *mut core::ffi::c_void,
+    ptr: *mut core::ffi::c_void,
+    page_count: u32,
+) {
+    #[cfg(target_arch = "bpf")]
+    unsafe {
+        bpf_arena_free_pages(map_ptr, ptr, page_count);
+    }
+    #[cfg(not(target_arch = "bpf"))]
+    unsafe {
+        host_stubs::bpf_arena_free_pages(map_ptr, ptr, page_count);
+    }
+}
+
 #[cfg(all(test, not(target_arch = "bpf")))]
 mod tests {
     use super::*;
@@ -2682,5 +2787,32 @@ mod tests {
         let ok = unsafe { skb_set_fou_encap(core::ptr::null_mut(), &encap, FouEncapType::Fou) };
         assert!(!ok);
         assert_eq!(host_stubs::host_last_fou_encap(), None);
+    }
+
+    // ── Arena allocation tests ─────────────────────────────────
+
+    #[test]
+    fn arena_alloc_returns_non_null_on_host() {
+        host_stubs::host_reset_arena_state();
+        let ptr = unsafe { arena_alloc_pages(core::ptr::null_mut(), 4) };
+        assert!(ptr.is_some());
+        assert_eq!(host_stubs::host_arena_allocated_pages(), 4);
+    }
+
+    #[test]
+    fn arena_free_decrements_counter() {
+        host_stubs::host_reset_arena_state();
+        let ptr = unsafe { arena_alloc_pages(core::ptr::null_mut(), 8) };
+        assert_eq!(host_stubs::host_arena_allocated_pages(), 8);
+        unsafe { arena_free_pages(core::ptr::null_mut(), ptr.unwrap(), 3) };
+        assert_eq!(host_stubs::host_arena_allocated_pages(), 5);
+    }
+
+    #[test]
+    fn arena_alloc_free_roundtrip_returns_to_zero() {
+        host_stubs::host_reset_arena_state();
+        let ptr = unsafe { arena_alloc_pages(core::ptr::null_mut(), 2) };
+        unsafe { arena_free_pages(core::ptr::null_mut(), ptr.unwrap(), 2) };
+        assert_eq!(host_stubs::host_arena_allocated_pages(), 0);
     }
 }
