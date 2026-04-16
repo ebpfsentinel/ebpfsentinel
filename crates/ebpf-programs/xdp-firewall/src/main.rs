@@ -11,7 +11,7 @@ use aya_ebpf::{
     },
     macros::{map, xdp},
     maps::{
-        Array, CpuMap, HashMap, LruHashMap, PerCpuArray, ProgramArray, RingBuf,
+        Array, CpuMap, HashMap, PerCpuArray, ProgramArray, RingBuf,
         lpm_trie::{Key, LpmTrie},
     },
     programs::XdpContext,
@@ -19,10 +19,9 @@ use aya_ebpf::{
 use core::mem;
 use ebpf_common::{
     conntrack::{
-        CT_MAX_ENTRIES_V4, CT_MAX_ENTRIES_V6, CT_SRC_COUNTER_MAX, CT_STATE_ESTABLISHED,
-        CT_STATE_NEW, CT_STATE_RELATED, ConnKey, ConnKeyV6, ConnTrackConfig, ConnValue,
-        ConnValueV6, OVERLOAD_SET_ID, SRC_COUNTER_FLAG_OVERLOADED, SrcStateCounter,
-        normalize_key_v4, normalize_key_v6,
+        CT_SRC_COUNTER_MAX, CT_STATE_ESTABLISHED, CT_STATE_NEW, CT_STATE_RELATED,
+        ConnTrackConfig, NfConnOffsets,
+        OVERLOAD_SET_ID, SRC_COUNTER_FLAG_OVERLOADED, SrcStateCounter,
     },
     event::{
         EVENT_TYPE_FIREWALL, FLAG_IPV6, FLAG_VLAN, META_FLAG_PRESENT, PacketEvent, XdpMetadata,
@@ -44,9 +43,10 @@ use ebpf_helpers::net::{
     PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes,
     u32_from_be_bytes,
 };
+use aya_ebpf_bindings::helpers::bpf_probe_read_kernel;
 use ebpf_helpers::kfuncs::{
-    BpfCtOpts, CtTuple, bpf_xfrm_state_opts, kill_flow_via_xdp_ct, with_xdp_xfrm_state,
-    xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag,
+    BpfCtOpts, CtTuple, bpf_xfrm_state_opts, kill_flow_via_xdp_ct, with_xdp_ct_lookup,
+    with_xdp_xfrm_state, xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag,
 };
 use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{copy_mac_asm, increment_metric, ringbuf_has_backpressure};
@@ -200,19 +200,12 @@ static FW_LPM_SRC_V6: LpmTrie<[u8; 16], LpmValue> = LpmTrie::with_max_entries(MA
 #[map]
 static FW_LPM_DST_V6: LpmTrie<[u8; 16], LpmValue> = LpmTrie::with_max_entries(MAX_LPM_RULES, 0);
 
-// ── Conntrack fast-path maps (read-only, shared via pinning) ────────
+// ── Kernel CT offsets (populated by userspace from vmlinux BTF) ──────
 
-/// Shared conntrack table for ESTABLISHED bypass (read-only in XDP).
-/// Pinned at /sys/fs/bpf/ebpfsentinel/ct_table_v4, written by tc-conntrack.
+/// Runtime-resolved `nf_conn` field offsets for `bpf_probe_read_kernel`.
+/// Single entry at index 0, populated at agent startup.
 #[map]
-static CT_TABLE_V4: LruHashMap<ConnKey, ConnValue> =
-    LruHashMap::with_max_entries(CT_MAX_ENTRIES_V4, 0);
-
-/// Shared conntrack table for IPv6 ESTABLISHED bypass (read-only in XDP).
-/// Pinned at /sys/fs/bpf/ebpfsentinel/ct_table_v6, written by tc-conntrack.
-#[map]
-static CT_TABLE_V6: LruHashMap<ConnKeyV6, ConnValueV6> =
-    LruHashMap::with_max_entries(CT_MAX_ENTRIES_V6, 0);
+static CT_NF_CONN_OFFSETS: Array<NfConnOffsets> = Array::with_max_entries(1, 0);
 
 // ── IP Set maps ─────────────────────────────────────────────────────
 
@@ -804,18 +797,16 @@ fn process_firewall_v4(
     // Phase 0: Conntrack lookup.
     // Look up the connection state once; used for fast-path bypass and
     // ct_state_mask matching during the rule scan.
-    let ct_key = normalize_key_v4(src_ip, dst_ip, src_port, dst_port, protocol as u8);
-    let ct_state: u8 = if let Some(ct) = unsafe { CT_TABLE_V4.get(&ct_key) } {
-        // Fast-path bypass: ESTABLISHED/RELATED skip rule evaluation entirely.
-        if ct.state == CT_STATE_ESTABLISHED || ct.state == CT_STATE_RELATED {
-            increment_metric(METRIC_PASSED);
-            write_xdp_metadata(ctx, ACTION_PASS, 0);
-            return Ok(xdp_action::XDP_PASS);
-        }
-        ct.state
-    } else {
-        0xFF // No conntrack entry — treated as "unknown"
-    };
+    // Phase 0: Kernel CT lookup via bpf_xdp_ct_lookup kfunc.
+    // Reads nf_conn->status via bpf_probe_read_kernel at runtime
+    // BTF-resolved offsets. Replaces the CT_TABLE_V4 shadow map.
+    let ct_state: u8 = kernel_ct_lookup_v4(ctx, src_ip, dst_ip, src_port, dst_port, protocol as u8);
+    if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
+        // Fast-path bypass: ESTABLISHED/RELATED skip rule evaluation.
+        increment_metric(METRIC_PASSED);
+        write_xdp_metadata(ctx, ACTION_PASS, 0);
+        return Ok(xdp_action::XDP_PASS);
+    }
 
     // Phase 1: LPM Trie lookup — O(log n) for CIDR-only rules.
     // Keys use network byte order for correct prefix matching.
@@ -1183,21 +1174,83 @@ fn ct_state_to_bitmask(state: u8) -> u8 {
     }
 }
 
-/// Perform IPv6 conntrack lookup. Returns the connection state, or 0xFF if
-/// no entry exists.
-#[inline(never)]
+/// Perform IPv6 conntrack lookup via kernel CT. Returns the connection
+/// state, or 0xFF if no entry exists.
+#[inline(always)]
 fn conntrack_lookup_v6(
+    ctx: &XdpContext,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
     src_port: u16,
     dst_port: u16,
     next_hdr: u8,
 ) -> u8 {
-    let ct_key_v6 = normalize_key_v6(src_addr, dst_addr, src_port, dst_port, next_hdr);
-    if let Some(ct) = unsafe { CT_TABLE_V6.get(&ct_key_v6) } {
-        ct.state
+    let tuple = CtTuple::v6(*src_addr, *dst_addr, src_port, dst_port);
+    let mut opts = if next_hdr == PROTO_TCP { BpfCtOpts::tcp() } else { BpfCtOpts::udp() };
+    unsafe {
+        with_xdp_ct_lookup(ctx.ctx as *mut _, tuple, &mut opts, |ct| {
+            read_kernel_ct_state(ct)
+        })
+    }
+    .unwrap_or(0xFF)
+}
+
+/// IPv4 kernel CT lookup via `bpf_xdp_ct_lookup` + `bpf_probe_read_kernel`.
+#[inline(always)]
+fn kernel_ct_lookup_v4(
+    ctx: &XdpContext,
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+) -> u8 {
+    let tuple = CtTuple::v4(src_ip, dst_ip, src_port, dst_port);
+    let mut opts = if protocol == PROTO_TCP { BpfCtOpts::tcp() } else { BpfCtOpts::udp() };
+    unsafe {
+        with_xdp_ct_lookup(ctx.ctx as *mut _, tuple, &mut opts, |ct| {
+            read_kernel_ct_state(ct)
+        })
+    }
+    .unwrap_or(0xFF)
+}
+
+/// Read `nf_conn->status` via `bpf_probe_read_kernel` at runtime
+/// BTF-resolved offset. Maps kernel `IPS_*` status bits to domain
+/// `CT_STATE_*` constants used by the firewall rule matcher.
+#[inline(always)]
+fn read_kernel_ct_state(ct: *mut ebpf_helpers::kfuncs::nf_conn) -> u8 {
+    let offsets = match CT_NF_CONN_OFFSETS.get(0) {
+        Some(o) if o.valid != 0 => o,
+        _ => return 0xFF, // offsets not populated
+    };
+    let base = ct as *const u8;
+    let mut status: u64 = 0;
+    unsafe {
+        let _ = bpf_probe_read_kernel(
+            &raw mut status as *mut core::ffi::c_void,
+            core::mem::size_of::<u64>() as u32,
+            base.add(offsets.status_offset as usize) as *const core::ffi::c_void,
+        );
+    }
+    // Map kernel IPS_* flags → domain CT_STATE_* constants.
+    // IPS_DYING (0x0200) → INVALID
+    // IPS_EXPECTED (0x0001) → RELATED
+    // IPS_CONFIRMED (0x0008) or IPS_SEEN_REPLY (0x0002) → ESTABLISHED
+    // otherwise → NEW
+    const IPS_EXPECTED: u64 = 0x0001;
+    const IPS_SEEN_REPLY: u64 = 0x0002;
+    const IPS_CONFIRMED: u64 = 0x0008;
+    const IPS_DYING: u64 = 0x0200;
+
+    if status & IPS_DYING != 0 {
+        3 // CT_STATE_INVALID
+    } else if status & IPS_EXPECTED != 0 {
+        CT_STATE_RELATED
+    } else if status & (IPS_CONFIRMED | IPS_SEEN_REPLY) != 0 {
+        CT_STATE_ESTABLISHED
     } else {
-        0xFF
+        CT_STATE_NEW
     }
 }
 
@@ -1312,7 +1365,7 @@ fn process_firewall_v6(
     // Phase 0: Conntrack lookup (IPv6).
     // Look up the connection state once; used for fast-path bypass and
     // ct_state_mask matching during the rule scan.
-    let ct_state: u8 = conntrack_lookup_v6(&src_addr, &dst_addr, src_port, dst_port, next_hdr);
+    let ct_state: u8 = conntrack_lookup_v6(ctx, &src_addr, &dst_addr, src_port, dst_port, next_hdr);
     if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
         increment_metric(METRIC_PASSED);
         write_xdp_metadata(ctx, ACTION_PASS, 0);

@@ -2653,6 +2653,15 @@ pub fn try_load_xdp_firewall(
 
     let mut map_manager = FirewallMapManager::new(loader.ebpf_mut())?;
 
+    // Push nf_conn BTF offsets to xdp-firewall so it can read kernel
+    // CT status via bpf_probe_read_kernel (replaces CT_TABLE shadow).
+    if let Ok(offsets) = resolve_nf_conn_offsets()
+        && let Err(e) =
+            adapters::ebpf::conntrack_map_manager::push_nf_conn_offsets(loader.ebpf_mut(), offsets)
+    {
+        warn!("xdp-firewall: nf_conn offset push failed: {e}");
+    }
+
     let policy_byte = match config.firewall.default_policy {
         DefaultPolicy::Drop => DEFAULT_POLICY_DROP,
         DefaultPolicy::Pass => DEFAULT_POLICY_PASS,
