@@ -41,7 +41,11 @@ pub const NAT_METRIC_KFUNC_DELEGATED: u32 = 8;
 /// Kernel CT NAT delegation failed (alloc error or insert error);
 /// the manual packet rewrite still applied.
 pub const NAT_METRIC_KFUNC_FALLBACK: u32 = 9;
-pub const NAT_METRIC_COUNT: u32 = 10;
+/// Packets steered to an IPsec `xfrmi` device via `skb_set_xfrm_info`.
+pub const NAT_METRIC_XFRM_STEERED: u32 = 10;
+/// Packets wrapped with FOU/GUE encapsulation via `skb_set_fou_encap`.
+pub const NAT_METRIC_FOU_ENCAP: u32 = 11;
+pub const NAT_METRIC_COUNT: u32 = 12;
 
 // ── NAT match flags ─────────────────────────────────────────────────
 
@@ -135,6 +139,19 @@ pub struct NatRuleEntry {
     pub group_mask: u32,
     /// Tenant ID (0 = floating rule, applies to all tenants).
     pub tenant_id: u32,
+    /// IPsec `xfrm` interface id for steering matched egress traffic
+    /// through a specific `xfrmi` device. 0 = disabled.
+    pub xfrm_if_id: u32,
+    /// IPsec `xfrm` link index. 0 = unconstrained.
+    pub xfrm_link: i32,
+    /// FOU/GUE source UDP port (network byte order). 0 = disabled.
+    pub fou_sport: u16,
+    /// FOU/GUE destination UDP port (network byte order). 0 = disabled.
+    pub fou_dport: u16,
+    /// FOU/GUE encap type: 0 = FOU, 1 = GUE. Only used when
+    /// `fou_dport != 0`.
+    pub fou_type: u8,
+    pub _pad2: [u8; 3],
 }
 
 /// Maximum NAT rules per direction (IPv6).
@@ -178,6 +195,17 @@ pub struct NatRuleEntryV6 {
     pub group_mask: u32,
     /// Tenant ID (0 = floating rule, applies to all tenants).
     pub tenant_id: u32,
+    /// IPsec `xfrm` interface id. 0 = disabled.
+    pub xfrm_if_id: u32,
+    /// IPsec `xfrm` link index. 0 = unconstrained.
+    pub xfrm_link: i32,
+    /// FOU/GUE source UDP port. 0 = disabled.
+    pub fou_sport: u16,
+    /// FOU/GUE destination UDP port. 0 = disabled.
+    pub fou_dport: u16,
+    /// FOU/GUE encap type: 0 = FOU, 1 = GUE.
+    pub fou_type: u8,
+    pub _pad2: [u8; 3],
 }
 
 // ── NPTv6 rule entry — 40 bytes ─────────────────────────────────────
@@ -298,7 +326,7 @@ mod tests {
 
     #[test]
     fn nat_rule_entry_size() {
-        assert_eq!(mem::size_of::<NatRuleEntry>(), 44);
+        assert_eq!(mem::size_of::<NatRuleEntry>(), 60);
     }
 
     #[test]
@@ -327,7 +355,7 @@ mod tests {
 
     #[test]
     fn nat_rule_entry_v6_size() {
-        assert_eq!(mem::size_of::<NatRuleEntryV6>(), 104);
+        assert_eq!(mem::size_of::<NatRuleEntryV6>(), 120);
     }
 
     #[test]

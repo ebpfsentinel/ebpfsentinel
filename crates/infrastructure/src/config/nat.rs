@@ -550,6 +550,11 @@ impl NatRuleConfig {
             match_dst_alias: self.match_dst_alias.clone(),
             enabled: self.enabled,
             group_mask: 0,
+            xfrm_if_id: 0,
+            xfrm_link: 0,
+            fou_sport: 0,
+            fou_dport: 0,
+            fou_type: 0,
         })
     }
 }

@@ -57,6 +57,23 @@ pub struct NatRule {
     /// 0 = floating (applies to all interfaces). Bit 31 = invert.
     #[serde(default)]
     pub group_mask: u32,
+    /// `IPsec` `xfrm` interface id for steering egress traffic through
+    /// a specific `xfrmi` virtual device. 0 = disabled.
+    #[serde(default)]
+    pub xfrm_if_id: u32,
+    /// `IPsec` `xfrm` link index. 0 = unconstrained.
+    #[serde(default)]
+    pub xfrm_link: i32,
+    /// FOU/GUE source UDP port (network byte order). 0 = disabled.
+    #[serde(default)]
+    pub fou_sport: u16,
+    /// FOU/GUE destination UDP port (network byte order). 0 = disabled.
+    #[serde(default)]
+    pub fou_dport: u16,
+    /// FOU/GUE encap type: 0 = FOU, 1 = GUE. Ignored when `fou_dport`
+    /// is 0.
+    #[serde(default)]
+    pub fou_type: u8,
 }
 
 impl NatRule {
@@ -189,6 +206,11 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            xfrm_if_id: 0,
+            xfrm_link: 0,
+            fou_sport: 0,
+            fou_dport: 0,
+            fou_type: 0,
         }
     }
 
@@ -230,6 +252,11 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            xfrm_if_id: 0,
+            xfrm_link: 0,
+            fou_sport: 0,
+            fou_dport: 0,
+            fou_type: 0,
         };
         assert!(rule.validate().is_ok());
     }
@@ -254,6 +281,11 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            xfrm_if_id: 0,
+            xfrm_link: 0,
+            fou_sport: 0,
+            fou_dport: 0,
+            fou_type: 0,
         };
         assert!(rule.validate().is_ok());
     }
@@ -275,6 +307,11 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            xfrm_if_id: 0,
+            xfrm_link: 0,
+            fou_sport: 0,
+            fou_dport: 0,
+            fou_type: 0,
         };
         assert!(rule.validate().is_ok());
     }
@@ -293,6 +330,11 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            xfrm_if_id: 0,
+            xfrm_link: 0,
+            fou_sport: 0,
+            fou_dport: 0,
+            fou_type: 0,
         };
         assert!(rule.validate().is_err());
     }
@@ -318,6 +360,11 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            xfrm_if_id: 0,
+            xfrm_link: 0,
+            fou_sport: 0,
+            fou_dport: 0,
+            fou_type: 0,
         };
         assert!(rule.validate().is_err());
     }
@@ -343,6 +390,11 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            xfrm_if_id: 0,
+            xfrm_link: 0,
+            fou_sport: 0,
+            fou_dport: 0,
+            fou_type: 0,
         };
         assert!(rule.validate().is_ok());
     }

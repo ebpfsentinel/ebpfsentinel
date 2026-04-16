@@ -267,6 +267,12 @@ fn nat_rule_to_ebpf_entry(rule: &NatRule) -> ebpf_common::nat::NatRuleEntry {
         nat_interface: 0,
         group_mask: 0,
         tenant_id: 0,
+        xfrm_if_id: 0,
+        xfrm_link: 0,
+        fou_sport: 0,
+        fou_dport: 0,
+        fou_type: 0,
+        _pad2: [0; 3],
     };
 
     // Set match criteria
@@ -369,6 +375,14 @@ fn nat_rule_to_ebpf_entry(rule: &NatRule) -> ebpf_common::nat::NatRuleEntry {
         }
     }
 
+    // Copy IPsec steering + FOU/GUE overlay fields from domain rule.
+    entry.group_mask = rule.group_mask;
+    entry.xfrm_if_id = rule.xfrm_if_id;
+    entry.xfrm_link = rule.xfrm_link;
+    entry.fou_sport = rule.fou_sport;
+    entry.fou_dport = rule.fou_dport;
+    entry.fou_type = rule.fou_type;
+
     entry
 }
 
@@ -453,6 +467,12 @@ fn nat_rule_to_ebpf_entry_v6(rule: &NatRule) -> ebpf_common::nat::NatRuleEntryV6
         nat_interface: 0,
         group_mask: 0,
         tenant_id: 0,
+        xfrm_if_id: 0,
+        xfrm_link: 0,
+        fou_sport: 0,
+        fou_dport: 0,
+        fou_type: 0,
+        _pad2: [0; 3],
     };
 
     // Set match criteria
@@ -676,6 +696,11 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            xfrm_if_id: 0,
+            xfrm_link: 0,
+            fou_sport: 0,
+            fou_dport: 0,
+            fou_type: 0,
         }
     }
 
@@ -698,6 +723,11 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            xfrm_if_id: 0,
+            xfrm_link: 0,
+            fou_sport: 0,
+            fou_dport: 0,
+            fou_type: 0,
         }
     }
 

@@ -14,7 +14,10 @@ use ebpf_helpers::net::{
     PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, ipv6_mask_match, ones_complement_add,
     prefix_to_mask, u16_from_be_bytes, u32_from_be_bytes, u32x4_to_bytes,
 };
-use ebpf_helpers::kfuncs::{BpfCtOpts, CtBuilder, CtTuple, NfInetAddr, NfNatManipType};
+use ebpf_helpers::kfuncs::{
+    BpfCtOpts, BpfFouEncap, BpfXfrmInfo, CtBuilder, CtTuple, FouEncapType, NfInetAddr,
+    NfNatManipType, skb_set_fou_encap, skb_set_xfrm_info,
+};
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::increment_metric;
 use ebpf_common::{
@@ -26,9 +29,10 @@ use ebpf_common::{
         MAX_NAT_HASH_EXACT, MAX_NAT_PORT_ALLOC, MAX_NAT_RULES, MAX_NAT_RULES_V6,
         MAX_NPTV6_RULES, NAT_MATCH_DST_IP, NAT_MATCH_PROTO,
         NAT_MATCH_SRC_IP, NAT_METRIC_COUNT, NAT_METRIC_ERRORS,
-        NAT_METRIC_KFUNC_DELEGATED, NAT_METRIC_KFUNC_FALLBACK,
-        NAT_METRIC_MASQ_APPLIED, NAT_METRIC_NPTV6_TRANSLATED,
-        NAT_METRIC_SNAT_APPLIED, NAT_METRIC_TOTAL_SEEN,
+        NAT_METRIC_FOU_ENCAP, NAT_METRIC_KFUNC_DELEGATED,
+        NAT_METRIC_KFUNC_FALLBACK, NAT_METRIC_MASQ_APPLIED,
+        NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_SNAT_APPLIED,
+        NAT_METRIC_TOTAL_SEEN, NAT_METRIC_XFRM_STEERED,
         NAT_TYPE_MASQUERADE, NAT_TYPE_SNAT,
         NatHashKeyExact, NatHashValue, NatPortAllocKey, NatPortAllocValue, NatRuleEntry,
         NatRuleEntryV6, NptV6RuleEntry,
@@ -226,7 +230,6 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) 
 // ── bpf_loop context structs ────────────────────────────────────────
 
 /// Opaque context passed through `bpf_loop` to the IPv4 SNAT rule-scan callback.
-/// Kept small (~44 bytes) to stay well within the 512-byte eBPF stack limit.
 #[repr(C)]
 struct SnatScanCtx {
     count: u32,
@@ -246,6 +249,16 @@ struct SnatScanCtx {
     iface_groups: u32,
     /// Resolved tenant ID for the current packet.
     tenant_id: u32,
+    /// IPsec xfrm interface id from the matched rule.
+    xfrm_if_id: u32,
+    /// IPsec xfrm link from the matched rule.
+    xfrm_link: i32,
+    /// FOU/GUE sport from the matched rule.
+    fou_sport: u16,
+    /// FOU/GUE dport from the matched rule.
+    fou_dport: u16,
+    /// FOU/GUE type from the matched rule.
+    fou_type: u8,
 }
 
 /// Opaque context passed through `bpf_loop` to the IPv6 SNAT rule-scan callback.
@@ -308,6 +321,11 @@ unsafe extern "C" fn scan_snat_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
                     lctx.src_port
                 };
                 lctx.nat_type = rule.nat_type;
+                lctx.xfrm_if_id = rule.xfrm_if_id;
+                lctx.xfrm_link = rule.xfrm_link;
+                lctx.fou_sport = rule.fou_sport;
+                lctx.fou_dport = rule.fou_dport;
+                lctx.fou_type = rule.fou_type;
                 lctx.matched = 1;
                 return 1;
             }
@@ -497,6 +515,11 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         matched: 0,
         iface_groups,
         tenant_id,
+        xfrm_if_id: 0,
+        xfrm_link: 0,
+        fou_sport: 0,
+        fou_dport: 0,
+        fou_type: 0,
     };
     unsafe {
         bpf_loop(
@@ -537,9 +560,40 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
             ctx, src_ip, dst_ip, src_port, dst_port, protocol,
             translated_ip, new_src_port, NfNatManipType::Src,
         );
+
+        // IPsec steering: push matched traffic through an xfrmi device.
+        apply_xfrm_and_fou(ctx, &scan_ctx);
     }
 
     Ok(TC_ACT_OK)
+}
+
+/// Apply IPsec steering and/or FOU/GUE encap from a matched SNAT rule.
+#[inline(always)]
+fn apply_xfrm_and_fou(ctx: &TcContext, scan: &SnatScanCtx) {
+    if scan.xfrm_if_id != 0 {
+        let info = BpfXfrmInfo {
+            if_id: scan.xfrm_if_id,
+            link: scan.xfrm_link,
+        };
+        if unsafe { skb_set_xfrm_info(ctx.skb.skb as *mut _, &info) } {
+            increment_metric(NAT_METRIC_XFRM_STEERED);
+        }
+    }
+    if scan.fou_dport != 0 {
+        let encap = BpfFouEncap {
+            sport: scan.fou_sport,
+            dport: scan.fou_dport,
+        };
+        let encap_type = if scan.fou_type == 1 {
+            FouEncapType::Gue
+        } else {
+            FouEncapType::Fou
+        };
+        if unsafe { skb_set_fou_encap(ctx.skb.skb as *mut _, &encap, encap_type) } {
+            increment_metric(NAT_METRIC_FOU_ENCAP);
+        }
+    }
 }
 
 /// IPv6 SNAT processing.
