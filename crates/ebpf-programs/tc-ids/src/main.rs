@@ -19,6 +19,7 @@ use ebpf_helpers::net::{
     ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
     PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
 };
+use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, kill_flow_via_skb_ct};
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{emit_packet_event, increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
@@ -502,6 +503,25 @@ fn process_ids_pattern(
     if pattern.action == IDS_ACTION_DROP {
         #[cfg(debug_assertions)]
         info!(_ctx, "IDS DROP {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port);
+
+        // Mark the kernel netfilter conntrack entry as DYING so the
+        // next packet of this flow is dropped by netfilter without a
+        // userspace round-trip. The userspace IdsAppService counter
+        // (ids_ct_dying_total) is incremented by the packet pipeline.
+        let tuple = if (flags & FLAG_IPV6) != 0 {
+            CtTuple::v6(*src_addr, *dst_addr, src_port, dst_port)
+        } else {
+            CtTuple::v4(src_addr[0], dst_addr[0], src_port, dst_port)
+        };
+        let mut opts = if protocol == PROTO_TCP {
+            BpfCtOpts::tcp()
+        } else {
+            BpfCtOpts::udp()
+        };
+        unsafe {
+            kill_flow_via_skb_ct(_ctx.skb.skb as *mut _, tuple, &mut opts);
+        }
+
         increment_metric(METRIC_DROPPED);
         Ok(TC_ACT_SHOT)
     } else {
