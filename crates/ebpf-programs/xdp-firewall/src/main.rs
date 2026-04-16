@@ -45,7 +45,8 @@ use ebpf_helpers::net::{
     u32_from_be_bytes,
 };
 use ebpf_helpers::kfuncs::{
-    BpfCtOpts, CtTuple, kill_flow_via_xdp_ct, xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag,
+    BpfCtOpts, CtTuple, bpf_xfrm_state_opts, kill_flow_via_xdp_ct, with_xdp_xfrm_state,
+    xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag,
 };
 use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{copy_mac_asm, increment_metric, ringbuf_has_backpressure};
@@ -742,6 +743,34 @@ fn process_firewall_v4(
         }
         _ => (0u16, 0u16),
     };
+
+    // ESP/AH IPsec detection via bpf_xdp_get_xfrm_state kfunc.
+    // When the packet is ESP (proto 50) or AH (proto 51), parse the
+    // SPI from the L4 header and look up the xfrm_state in the SAD.
+    // A successful lookup means the packet is IPsec-protected.
+    if protocol == IpProto::Esp || protocol == IpProto::Ah {
+        if let Ok(spi_ptr) = unsafe { ptr_at::<u32>(ctx, l4_offset) } {
+            let spi = u32::from_be(unsafe { *spi_ptr });
+            let mut opts = bpf_xfrm_state_opts {
+                error: 0,
+                netns_id: 0,
+                mark: 0,
+                daddr: [0u8; 16],
+                spi,
+                proto: protocol as u8,
+                family: 2, // AF_INET
+                reserved: 0,
+            };
+            // Write dst IP into daddr (first 4 bytes, network order).
+            let dst_be = unsafe { (*ipv4hdr).dst_addr };
+            opts.daddr[..4].copy_from_slice(&dst_be);
+            let _ipsec_hit = unsafe {
+                with_xdp_xfrm_state(ctx.ctx as *mut _, &mut opts, |_xs| true)
+            };
+            // TODO(future): surface _ipsec_hit via PacketEvent or
+            // firewall rule matcher for IPsec-aware allow/deny.
+        }
+    }
 
     let src_addr = [src_ip, 0, 0, 0];
     let dst_addr = [dst_ip, 0, 0, 0];
