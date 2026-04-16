@@ -240,4 +240,45 @@ mod tests {
         // Either Ok or Err — both are valid, no panic.
         let _ = result;
     }
+
+    #[test]
+    fn arena_proof_of_concept_userspace_roundtrip() {
+        // End-to-end proof: create arena → write ArenaEventHeader
+        // → read it back. This validates the userspace side of the
+        // zero-copy path. The BPF side (writing from a TC/XDP
+        // program) can only be tested on a real kernel with CAP_BPF.
+        let arena = match ArenaMap::create(1, "poc") {
+            Ok(a) => a,
+            Err(_) => {
+                // No CAP_BPF — skip gracefully (CI).
+                eprintln!("arena_proof_of_concept: skipped (no CAP_BPF)");
+                return;
+            }
+        };
+
+        assert!(arena.size() >= 4096);
+        assert!(!arena.as_ptr().is_null());
+
+        // Write an ArenaEventHeader at offset 0.
+        let header = ebpf_common::arena::ArenaEventHeader {
+            sequence: 42,
+            timestamp_ns: 1_700_000_000_000_000_000,
+            payload_len: 128,
+            event_type: 3, // EVENT_TYPE_DLP
+            _pad: [0; 3],
+        };
+        unsafe { arena.write_at(0, header) };
+
+        // Read it back — zero-copy, same mmap'd page.
+        let read_back: ebpf_common::arena::ArenaEventHeader = unsafe { arena.read_at(0) };
+        assert_eq!(read_back.sequence, 42);
+        assert_eq!(read_back.timestamp_ns, 1_700_000_000_000_000_000);
+        assert_eq!(read_back.payload_len, 128);
+        assert_eq!(read_back.event_type, 3);
+
+        // Write a u64 counter at offset 4096-8 (end of page).
+        unsafe { arena.write_at(4096 - 8, 0xDEAD_BEEF_CAFE_BABEu64) };
+        let val: u64 = unsafe { arena.read_at(4096 - 8) };
+        assert_eq!(val, 0xDEAD_BEEF_CAFE_BABE);
+    }
 }
