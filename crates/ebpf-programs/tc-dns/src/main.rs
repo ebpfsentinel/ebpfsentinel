@@ -9,7 +9,10 @@ use aya_ebpf::{
     programs::TcContext,
 };
 use aya_ebpf_bindings::helpers::bpf_skb_load_bytes;
+use core::ffi::c_void;
 use core::mem;
+use ebpf_helpers::arena_map::{RawMapDef, arena_def};
+use ebpf_common::arena::ArenaEventHeader;
 use ebpf_helpers::net::{
     ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
     PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
@@ -45,6 +48,16 @@ static DNS_EVENTS: RingBuf = RingBuf::with_byte_size(64 * 4096, 0);
 /// 2=errors, 3=events_dropped, 4=total_seen.
 #[map]
 static DNS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
+
+/// Arena map for zero-copy DNS event delivery to userspace.
+/// 4 pages = 16 KiB — enough for one `DnsEventBuf` (584 bytes)
+/// plus `ArenaEventHeader` (24 bytes).
+#[unsafe(link_section = ".maps")]
+#[unsafe(no_mangle)]
+static DNS_ARENA: RawMapDef = arena_def(4);
+
+/// Monotonically increasing sequence counter for arena events.
+static mut ARENA_SEQUENCE: u64 = 0;
 
 // ── Entry point ─────────────────────────────────────────────────────
 
@@ -293,6 +306,13 @@ fn emit_dns_event(
     // bpf_skb_load_bytes handles fragmented packets natively (via
     // skb_header_pointer), so linearization is unnecessary.
 
+    // Try arena zero-copy path first.
+    if try_emit_arena_dns(ctx, src_addr, dst_addr, flags, vlan_id, direction, dns_offset, payload_len) {
+        increment_metric(DNS_METRIC_EVENTS_EMITTED);
+        return;
+    }
+
+    // Fallback: RingBuf path (copy-based).
     if let Some(mut entry) = DNS_EVENTS.reserve::<DnsEventBuf>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
@@ -336,6 +356,70 @@ fn emit_dns_event(
     } else {
         increment_metric(DNS_METRIC_EVENTS_DROPPED);
     }
+}
+
+/// Attempt to write a DNS event into the arena. Returns `true` on
+/// success, `false` if arena is unavailable (falls back to `RingBuf`).
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn try_emit_arena_dns(
+    ctx: &TcContext,
+    src_addr: &[u32; 4],
+    dst_addr: &[u32; 4],
+    flags: u8,
+    vlan_id: u16,
+    direction: u8,
+    dns_offset: usize,
+    payload_len: usize,
+) -> bool {
+    use ebpf_helpers::kfuncs::arena_alloc_pages;
+
+    let arena_ptr = &raw const DNS_ARENA as *mut c_void;
+    let page = unsafe { arena_alloc_pages(arena_ptr, 1) };
+    let Some(page) = page else {
+        return false;
+    };
+
+    let base = page as *mut u8;
+    let seq = unsafe {
+        ARENA_SEQUENCE += 1;
+        ARENA_SEQUENCE
+    };
+
+    let header = ArenaEventHeader {
+        sequence: seq,
+        timestamp_ns: unsafe { bpf_ktime_get_boot_ns() },
+        payload_len: mem::size_of::<DnsEventBuf>() as u32,
+        event_type: 7, // EVENT_TYPE_DNS
+        _pad: [0; 3],
+    };
+    unsafe {
+        core::ptr::write_volatile(base.cast::<ArenaEventHeader>(), header);
+    }
+
+    let event_offset = mem::size_of::<ArenaEventHeader>();
+    let event_ptr = unsafe { base.add(event_offset) } as *mut DnsEventBuf;
+    unsafe {
+        (*event_ptr).header.timestamp_ns = bpf_ktime_get_boot_ns();
+        (*event_ptr).header.src_addr = *src_addr;
+        (*event_ptr).header.dst_addr = *dst_addr;
+        (*event_ptr).header.dns_payload_len = payload_len as u16;
+        (*event_ptr).header.dns_payload_offset = DnsEvent::HEADER_SIZE;
+        (*event_ptr).header.direction = direction;
+        (*event_ptr).header.flags = flags;
+        (*event_ptr).header.vlan_id = vlan_id;
+        (*event_ptr).header._padding = [0; 8];
+        (*event_ptr).header.cgroup_id = bpf_get_current_cgroup_id();
+        core::ptr::write_bytes((*event_ptr).payload.as_mut_ptr(), 0, DNS_MAX_PAYLOAD);
+        let _ = bpf_skb_load_bytes(
+            ctx.skb.skb as *const _,
+            dns_offset as u32,
+            (*event_ptr).payload.as_mut_ptr() as *mut _,
+            DNS_MAX_PAYLOAD as u32,
+        );
+    }
+
+    true
 }
 
 #[panic_handler]

@@ -12,6 +12,9 @@ use aya_ebpf::{
     },
     programs::XdpContext,
 };
+use core::ffi::c_void;
+use ebpf_helpers::arena_map::{RawMapDef, arena_def};
+use ebpf_common::arena::ArenaEventHeader;
 // bpf_ktime_get_coarse_ns: ~10x faster than bpf_ktime_get_boot_ns by reading
 // the coarse-grained kernel clock (CLOCK_MONOTONIC_COARSE, ~1-4ms precision).
 // Sufficient for rate limiting (window checks, token bucket refill) where
@@ -135,6 +138,17 @@ static RATELIMIT_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(6, 0)
 /// Shared kernel→userspace event ring buffer (1 MB).
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
+
+/// Arena map for zero-copy `PacketEvent` delivery to userspace.
+/// 4 pages = 16 KiB — enough for `PacketEvent` (96 bytes) plus
+/// `ArenaEventHeader` (24 bytes). Critical under DDoS bursts where
+/// `RingBuf` backpressure drops events.
+#[unsafe(link_section = ".maps")]
+#[unsafe(no_mangle)]
+static RL_ARENA: RawMapDef = arena_def(4);
+
+/// Monotonically increasing sequence counter for arena events.
+static mut ARENA_SEQUENCE: u64 = 0;
 
 // ── Country-Tier LPM Maps ──────────────────────────────────────────
 
@@ -2031,8 +2045,8 @@ fn increment_metric(index: u32) {
     increment_metric!(RATELIMIT_METRICS, index);
 }
 
-/// Emit a rate-limit event to the EVENTS RingBuf. Skips emission under
-/// backpressure (>75% full).
+/// Emit a rate-limit event. Tries arena zero-copy first, falls back
+/// to `RingBuf`. Skips emission under backpressure (>75% full).
 #[inline(always)]
 fn emit_ratelimit_event(
     ctx: &XdpContext,
@@ -2048,6 +2062,13 @@ fn emit_ratelimit_event(
         increment_metric(METRIC_EVENTS_DROPPED);
         return;
     }
+
+    // Try arena first — critical under DDoS bursts.
+    if try_emit_arena_rl(src_addr, dst_addr, src_port, dst_port, protocol, flags, vlan_id) {
+        return;
+    }
+
+    // Fallback: RingBuf.
     let (rss_hash, rss_hash_type) = unsafe { xdp_rx_hash(ctx.ctx.cast()) }.unwrap_or((0, 0));
     let rx_hw_ts = unsafe { xdp_rx_timestamp(ctx.ctx.cast()) }.unwrap_or(0);
     if let Some(mut entry) = EVENTS.reserve::<PacketEvent>(0) {
@@ -2076,6 +2097,68 @@ fn emit_ratelimit_event(
     } else {
         increment_metric(METRIC_EVENTS_DROPPED);
     }
+}
+
+/// Write a `PacketEvent` into the arena. Returns `true` on success.
+#[inline(always)]
+fn try_emit_arena_rl(
+    src_addr: &[u32; 4],
+    dst_addr: &[u32; 4],
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    flags: u8,
+    vlan_id: u16,
+) -> bool {
+    use ebpf_helpers::kfuncs::arena_alloc_pages;
+
+    let arena_ptr = &raw const RL_ARENA as *mut c_void;
+    let page = unsafe { arena_alloc_pages(arena_ptr, 1) };
+    let Some(page) = page else {
+        return false;
+    };
+
+    let base = page as *mut u8;
+    let seq = unsafe {
+        ARENA_SEQUENCE += 1;
+        ARENA_SEQUENCE
+    };
+
+    let header = ArenaEventHeader {
+        sequence: seq,
+        timestamp_ns: unsafe { bpf_ktime_get_boot_ns() },
+        payload_len: core::mem::size_of::<PacketEvent>() as u32,
+        event_type: EVENT_TYPE_RATELIMIT,
+        _pad: [0; 3],
+    };
+    unsafe {
+        core::ptr::write_volatile(base.cast::<ArenaEventHeader>(), header);
+    }
+
+    let event_offset = core::mem::size_of::<ArenaEventHeader>();
+    let event_ptr = unsafe { base.add(event_offset) } as *mut PacketEvent;
+    unsafe {
+        (*event_ptr).timestamp_ns = bpf_ktime_get_boot_ns();
+        (*event_ptr).src_addr = *src_addr;
+        (*event_ptr).dst_addr = *dst_addr;
+        (*event_ptr).src_port = src_port;
+        (*event_ptr).dst_port = dst_port;
+        (*event_ptr).protocol = protocol;
+        (*event_ptr).event_type = EVENT_TYPE_RATELIMIT;
+        (*event_ptr).action = RATELIMIT_ACTION_DROP;
+        (*event_ptr).flags = flags;
+        (*event_ptr).rule_id = 0;
+        (*event_ptr).vlan_id = vlan_id;
+        (*event_ptr).cpu_id = bpf_get_smp_processor_id() as u16;
+        (*event_ptr).socket_cookie = 0;
+        (*event_ptr).cgroup_id = 0;
+        (*event_ptr).cgroup1_id = 0;
+        (*event_ptr).rss_hash = 0;
+        (*event_ptr).rss_hash_type = 0;
+        (*event_ptr).rx_hw_timestamp_ns = 0;
+    }
+
+    true
 }
 
 #[panic_handler]
