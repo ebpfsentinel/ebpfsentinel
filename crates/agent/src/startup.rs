@@ -280,6 +280,15 @@ pub async fn run(
     {
         warn!("conntrack settings reload failed (non-fatal): {e}");
     }
+    // Inject the kernel netfilter conntrack reader so REST /conntrack
+    // endpoints return the kernel's authoritative view (coherent with
+    // `conntrack -L`) instead of the BPF shadow.
+    if adapters::netfilter::conntrack::is_proc_conntrack_available() {
+        ct_svc.set_netfilter_port(Box::new(
+            adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new(),
+        ));
+        info!("kernel netfilter conntrack reader injected via /proc/net/nf_conntrack");
+    }
     let conntrack_svc = Arc::new(RwLock::new(ct_svc));
     info!(
         enabled = config.conntrack.enabled,

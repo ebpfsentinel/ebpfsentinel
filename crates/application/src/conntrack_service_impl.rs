@@ -9,9 +9,19 @@ use ports::secondary::metrics_port::MetricsPort;
 ///
 /// Orchestrates conntrack configuration and eBPF map access.
 /// Designed to be wrapped in `RwLock` for shared access from HTTP handlers.
+///
+/// When a `netfilter_port` is injected (reading kernel netfilter via
+/// `/proc/net/nf_conntrack`), `get_connections` and `connection_count`
+/// prefer it as the authoritative source of truth — coherent with
+/// `conntrack -L` and any firewall tooling on the host. The BPF
+/// `map_port` remains for shadow-table config sync and as a fallback
+/// when the netfilter port is unavailable.
 pub struct ConnTrackAppService {
     settings: ConnTrackSettings,
     map_port: Option<Box<dyn ConnTrackMapPort + Send>>,
+    /// Kernel netfilter reader (via `/proc/net/nf_conntrack`). When
+    /// present, takes priority over `map_port` for read operations.
+    netfilter_port: Option<Box<dyn ConnTrackMapPort + Send>>,
     metrics: Arc<dyn MetricsPort>,
     enabled: bool,
 }
@@ -21,6 +31,7 @@ impl ConnTrackAppService {
         Self {
             settings: ConnTrackSettings::default(),
             map_port: None,
+            netfilter_port: None,
             metrics,
             enabled: false,
         }
@@ -48,6 +59,14 @@ impl ConnTrackAppService {
         self.map_port = None;
     }
 
+    /// Inject a kernel netfilter port that reads the authoritative
+    /// conntrack table via `/proc/net/nf_conntrack`. When set, read
+    /// operations (`get_connections`, `connection_count`) prefer this
+    /// port over the BPF shadow.
+    pub fn set_netfilter_port(&mut self, port: Box<dyn ConnTrackMapPort + Send>) {
+        self.netfilter_port = Some(port);
+    }
+
     /// Reload conntrack settings and sync to eBPF.
     pub fn reload_settings(&mut self, settings: ConnTrackSettings) -> Result<(), DomainError> {
         self.settings = settings;
@@ -56,44 +75,66 @@ impl ConnTrackAppService {
         Ok(())
     }
 
-    /// Get active connections, up to `limit`.
+    /// Get active connections, up to `limit`. Prefers the kernel
+    /// netfilter port when available (authoritative), falls back to
+    /// the BPF shadow.
     pub fn get_connections(&self, limit: usize) -> Result<Vec<Connection>, DomainError> {
+        if let Some(ref nf) = self.netfilter_port {
+            return nf.get_connections(limit);
+        }
         match self.map_port {
             Some(ref port) => port.get_connections(limit),
             None => Ok(Vec::new()),
         }
     }
 
-    /// Flush all connections. Returns the count removed.
+    /// Flush all connections. Flushes both kernel netfilter (via
+    /// `conntrack -F`) and BPF shadow when both ports are present.
     pub fn flush_all(&mut self) -> Result<u64, DomainError> {
-        match self.map_port {
-            Some(ref mut port) => {
-                let count = port.flush_all()?;
-                self.metrics.set_rules_loaded("conntrack", 0);
-                self.metrics.set_conntrack_active(0);
-                tracing::info!(flushed = count, "conntrack table flushed");
-                Ok(count)
-            }
-            None => Ok(0),
+        // Prefer netfilter flush (kernel ground truth).
+        let count = if let Some(ref mut nf) = self.netfilter_port {
+            nf.flush_all()?
+        } else if let Some(ref mut port) = self.map_port {
+            port.flush_all()?
+        } else {
+            return Ok(0);
+        };
+        // Also flush BPF shadow if netfilter port did the primary flush.
+        if self.netfilter_port.is_some()
+            && let Some(ref mut port) = self.map_port
+        {
+            let _ = port.flush_all();
         }
+        self.metrics.set_rules_loaded("conntrack", 0);
+        self.metrics.set_conntrack_active(0);
+        tracing::info!(flushed = count, "conntrack table flushed");
+        Ok(count)
     }
 
-    /// Return the current connection count.
+    /// Return the current connection count. Prefers kernel netfilter
+    /// when available.
     pub fn connection_count(&self) -> Result<u64, DomainError> {
+        if let Some(ref nf) = self.netfilter_port {
+            return nf.connection_count();
+        }
         match self.map_port {
             Some(ref port) => port.connection_count(),
             None => Ok(0),
         }
     }
 
-    /// Sync current settings to the eBPF `CT_CONFIG` map.
+    /// Sync current settings to both the eBPF `CT_CONFIG` map and
+    /// kernel netfilter sysctl timeouts.
     fn sync_ebpf_config(&mut self) {
-        let Some(ref mut port) = self.map_port else {
-            return;
-        };
-
-        if let Err(e) = port.set_config(&self.settings) {
+        if let Some(ref mut port) = self.map_port
+            && let Err(e) = port.set_config(&self.settings)
+        {
             tracing::warn!("failed to sync conntrack config to eBPF: {e}");
+        }
+        if let Some(ref mut nf) = self.netfilter_port
+            && let Err(e) = nf.set_config(&self.settings)
+        {
+            tracing::warn!("failed to sync conntrack config to kernel sysctl: {e}");
         }
     }
 }
