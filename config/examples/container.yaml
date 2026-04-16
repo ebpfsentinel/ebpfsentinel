@@ -1,0 +1,73 @@
+# eBPFsentinel — Container Awareness Configuration Example
+# =========================================================
+#
+# Enriches alerts and events with container/pod identity:
+#   - Container Resolver: cgroup_id → container ID via /proc scanning
+#   - Docker Enricher: container name, image, labels via Docker API
+#   - Kubernetes Enricher: pod name, namespace, labels via K8s API
+#
+# All three components are independent and can be enabled separately.
+#
+# Requirements:
+#   - Container Resolver: read access to /proc (bind-mount when containerized)
+#   - Docker Enricher: Docker socket access (bind-mount /var/run/docker.sock)
+#   - Kubernetes Enricher: ServiceAccount with pods get/list/watch
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/container.yaml
+
+agent:
+  interfaces: [eth0]
+  attach_mode: auto            # netkit for K8s pods (Cilium), TC for standard
+
+# ── Container Awareness ────────────────────────────────────────────
+
+container:
+  # Cgroup-based container resolution (always available, no deps).
+  resolver:
+    enabled: true
+    cache_size: 4096           # Max cached cgroup → container mappings
+    proc_path: /host/proc      # Use /host/proc when running in a container
+
+  # Docker metadata enrichment (requires socket access).
+  docker:
+    enabled: true
+    socket: /var/run/docker.sock
+    cache_size: 1024
+    cache_ttl_seconds: 300
+    timeout_ms: 2000
+
+  # Kubernetes pod metadata enrichment (requires in-cluster SA).
+  kubernetes:
+    enabled: true
+    # node_name: auto          # Auto-detected from NODE_NAME env or hostname
+    label_filter: []           # Empty = enrich all pods
+
+# ── Example: DLP with pod context ─────────────────────────────────
+#
+# DLP events carry cgroup_id from bpf_get_current_cgroup_id().
+# The container resolver maps cgroup_id → pod, and the K8s enricher
+# adds name/namespace/labels to every DLP alert.
+
+dlp:
+  enabled: true
+
+# ── Example: IDS with container-aware alerts ──────────────────────
+
+ids:
+  mode: alert
+  rules:
+    - id: detect-reverse-shell
+      pattern: "(?i)(bash\\s+-i|/dev/tcp/|nc\\s+-e)"
+      severity: critical
+      description: "Reverse shell attempt"
+
+conntrack:
+  enabled: true
+
+alerting:
+  routes:
+    - name: container-alerts
+      destination: webhook
+      min_severity: high
+      webhook_url: "https://hooks.example.com/container-soc"
