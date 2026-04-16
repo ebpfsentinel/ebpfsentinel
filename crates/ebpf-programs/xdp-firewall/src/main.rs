@@ -44,7 +44,7 @@ use ebpf_helpers::net::{
     PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes,
     u32_from_be_bytes,
 };
-use ebpf_helpers::kfuncs::{xdp_rx_hash, xdp_rx_timestamp};
+use ebpf_helpers::kfuncs::{xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag};
 use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{copy_mac_asm, increment_metric, ringbuf_has_backpressure};
 use network_types::{
@@ -649,9 +649,18 @@ fn try_xdp_firewall(ctx: &XdpContext) -> Result<u32, ()> {
         }
     }
 
-    // NOTE: Dynamic VLAN tagging (bpf_skb_vlan_push/pop) requires TC classifier
-    // context. XDP only supports parsing existing VLAN tags. For VLAN quarantine
-    // tagging, use the tc-threatintel program which has TC context.
+    // Hardware VLAN offload: when the NIC strips the 802.1Q tag before
+    // delivering the frame, the manual parser above sees no VLAN header.
+    // The bpf_xdp_metadata_rx_vlan_tag kfunc (kernel 6.8+) recovers
+    // the stripped tag from NIC metadata.
+    if vlan_id == 0 {
+        if let Some((_proto, tci)) = unsafe { xdp_rx_vlan_tag(ctx.ctx.cast()) } {
+            vlan_id = tci & 0x0FFF;
+            if vlan_id != 0 {
+                flags |= FLAG_VLAN;
+            }
+        }
+    }
 
     if ether_type == ETH_P_IP {
         process_firewall_v4(ctx, l3_offset, vlan_id, flags)
