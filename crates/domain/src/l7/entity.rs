@@ -62,6 +62,8 @@ pub struct TlsClientHello {
     pub alpn_protocols: Vec<String>,
     /// Supported TLS versions (extension 0x002B). Highest = negotiated for TLS 1.3+.
     pub supported_versions: Vec<u16>,
+    /// Session ID from `ClientHello` (0-32 bytes). Used for session resumption tracking.
+    pub session_id: Option<Vec<u8>>,
 }
 
 /// Parsed TLS `ServerHello` with JA4S fingerprint fields.

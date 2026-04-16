@@ -83,6 +83,8 @@ pub enum TlsIntelligenceMitreReason {
     CipherDowngrade,
     /// SNI does not match server certificate CN or SAN — potential MITM.
     SniCertMismatch,
+    /// TLS session ticket reused across multiple destinations — lateral movement.
+    SessionResumeAnomaly,
 }
 
 /// Context passed to [`lookup`] to select the correct ATT&CK technique.
@@ -179,6 +181,11 @@ pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
             TlsIntelligenceMitreReason::SniCertMismatch => {
                 info("T1557", "Adversary-in-the-Middle", "credential-access")
             }
+            TlsIntelligenceMitreReason::SessionResumeAnomaly => info(
+                "T1550",
+                "Use Alternate Authentication Material",
+                "defense-evasion",
+            ),
             TlsIntelligenceMitreReason::PqcNonCompliant => info(
                 "T1600.001",
                 "Weaken Encryption: Reduce Key Space",
@@ -439,6 +446,13 @@ fn tls_intelligence_coverage_entries() -> Vec<CoverageEntry> {
             "Adversary-in-the-Middle",
             "credential-access",
             "SNI does not match server certificate CN/SAN",
+        ),
+        entry(
+            "tls-intelligence",
+            "T1550",
+            "Use Alternate Authentication Material",
+            "defense-evasion",
+            "TLS session ticket reused across multiple destinations",
         ),
     ]
 }
@@ -1553,9 +1567,18 @@ mod tests {
     }
 
     #[test]
+    fn tls_intelligence_session_resume_maps_to_t1550() {
+        let info = lookup(&MitreContext::TlsIntelligence(
+            TlsIntelligenceMitreReason::SessionResumeAnomaly,
+        ));
+        assert_eq!(info.technique_id, "T1550");
+        assert_eq!(info.tactic, "defense-evasion");
+    }
+
+    #[test]
     fn tls_intelligence_coverage_report() {
         let report = coverage_report(&["tls-intelligence"]);
-        assert_eq!(report.total_techniques, 6);
+        assert_eq!(report.total_techniques, 7);
         let technique_ids: Vec<&str> = report
             .techniques
             .iter()

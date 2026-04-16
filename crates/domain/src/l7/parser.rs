@@ -453,6 +453,7 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, L7Error>
         signature_algorithms: Vec::new(),
         alpn_protocols: Vec::new(),
         supported_versions: Vec::new(),
+        session_id: None,
     };
 
     // Session ID: length(1) + data
@@ -460,6 +461,11 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, L7Error>
         return Ok(empty_result());
     }
     let session_id_len = hs[pos] as usize;
+    let session_id = if session_id_len > 0 && pos + 1 + session_id_len <= hs.len() {
+        Some(hs[pos + 1..pos + 1 + session_id_len].to_vec())
+    } else {
+        None
+    };
     pos += 1 + session_id_len;
 
     // Cipher suites: length(2) + data
@@ -511,6 +517,7 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, L7Error>
         signature_algorithms: ext_fields.signature_algorithms,
         alpn_protocols: ext_fields.alpn_protocols,
         supported_versions: ext_fields.supported_versions,
+        session_id,
     })
 }
 

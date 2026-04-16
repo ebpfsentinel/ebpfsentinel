@@ -301,6 +301,7 @@ mod tests {
             signature_algorithms: vec![0x0403, 0x0804],
             alpn_protocols: vec!["h2".to_string(), "http/1.1".to_string()],
             supported_versions: vec![0x0304, 0x0303],
+            session_id: None,
         }
     }
 
