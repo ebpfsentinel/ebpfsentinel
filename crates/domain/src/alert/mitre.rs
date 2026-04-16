@@ -81,6 +81,8 @@ pub enum TlsIntelligenceMitreReason {
     PqcNonCompliant,
     /// Cipher suite or TLS version downgrade to a previously unseen weak profile.
     CipherDowngrade,
+    /// SNI does not match server certificate CN or SAN — potential MITM.
+    SniCertMismatch,
 }
 
 /// Context passed to [`lookup`] to select the correct ATT&CK technique.
@@ -174,6 +176,9 @@ pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
                 "Encrypted Channel: Symmetric Cryptography",
                 "command-and-control",
             ),
+            TlsIntelligenceMitreReason::SniCertMismatch => {
+                info("T1557", "Adversary-in-the-Middle", "credential-access")
+            }
             TlsIntelligenceMitreReason::PqcNonCompliant => info(
                 "T1600.001",
                 "Weaken Encryption: Reduce Key Space",
@@ -427,6 +432,13 @@ fn tls_intelligence_coverage_entries() -> Vec<CoverageEntry> {
             "Encrypted Channel: Symmetric Cryptography",
             "command-and-control",
             "Cipher suite or TLS version downgrade detected",
+        ),
+        entry(
+            "tls-intelligence",
+            "T1557",
+            "Adversary-in-the-Middle",
+            "credential-access",
+            "SNI does not match server certificate CN/SAN",
         ),
     ]
 }
@@ -1532,9 +1544,18 @@ mod tests {
     }
 
     #[test]
+    fn tls_intelligence_sni_cert_mismatch_maps_to_t1557() {
+        let info = lookup(&MitreContext::TlsIntelligence(
+            TlsIntelligenceMitreReason::SniCertMismatch,
+        ));
+        assert_eq!(info.technique_id, "T1557");
+        assert_eq!(info.tactic, "credential-access");
+    }
+
+    #[test]
     fn tls_intelligence_coverage_report() {
         let report = coverage_report(&["tls-intelligence"]);
-        assert_eq!(report.total_techniques, 5);
+        assert_eq!(report.total_techniques, 6);
         let technique_ids: Vec<&str> = report
             .techniques
             .iter()
