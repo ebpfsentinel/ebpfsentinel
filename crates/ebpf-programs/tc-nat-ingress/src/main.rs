@@ -15,6 +15,7 @@ use ebpf_helpers::net::{
     PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, ipv6_mask_match, ones_complement_add,
     prefix_to_mask, u16_from_be_bytes, u32_from_be_bytes, u32x4_to_bytes,
 };
+use ebpf_helpers::kfuncs::{BpfCtOpts, CtBuilder, CtTuple, NfInetAddr, NfNatManipType};
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::increment_metric;
 use ebpf_common::{
@@ -27,7 +28,8 @@ use ebpf_common::{
         MAX_NAT_HASH_EXACT, MAX_NAT_RULES, MAX_NAT_RULES_V6, MAX_NPTV6_RULES,
         NAT_MATCH_DST_IP, NAT_MATCH_DST_PORT, NAT_MATCH_PROTO,
         NAT_MATCH_SRC_IP, NAT_METRIC_COUNT, NAT_METRIC_DNAT_APPLIED, NAT_METRIC_ERRORS,
-        NAT_METRIC_HAIRPIN_APPLIED, NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_TOTAL_SEEN,
+        NAT_METRIC_HAIRPIN_APPLIED, NAT_METRIC_KFUNC_DELEGATED, NAT_METRIC_KFUNC_FALLBACK,
+        NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_TOTAL_SEEN,
         NAT_TYPE_DNAT, NAT_TYPE_ONETOONE, NAT_TYPE_REDIRECT,
         NatHashKeyExact, NatHashValue, NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry,
     },
@@ -481,6 +483,10 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         };
         let _ = CT_TABLE_V4.insert(&ct_key, &ct_val, 0);
         increment_metric(NAT_METRIC_DNAT_APPLIED);
+        kfunc_delegate_nat_v4(
+            ctx, src_ip, dst_ip, src_port, dst_port, protocol,
+            val.nat_addr, val.nat_port_start, NfNatManipType::Dst,
+        );
         return Ok(TC_ACT_OK);
     }
 
@@ -540,6 +546,14 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         }
 
         increment_metric(NAT_METRIC_DNAT_APPLIED);
+
+        // Delegate NAT info to kernel netfilter so `conntrack -L` shows
+        // the DNAT mapping and any nf_nat-aware tooling can track it.
+        kfunc_delegate_nat_v4(
+            ctx,
+            src_ip, dst_ip, src_port, dst_port, protocol,
+            new_dst_ip, new_dst_port, NfNatManipType::Dst,
+        );
 
         // Hairpin forward path: if both the original source and the
         // post-DNAT destination are on the internal subnet, we must SNAT
@@ -690,6 +704,11 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         }
 
         increment_metric(NAT_METRIC_DNAT_APPLIED);
+
+        kfunc_delegate_nat_v6(
+            ctx, &src_addr, &dst_addr, src_port, dst_port, protocol,
+            &new_dst_addr, new_dst_port, NfNatManipType::Dst,
+        );
     }
 
     Ok(TC_ACT_OK)
@@ -1113,6 +1132,72 @@ fn match_nat_rule_v6(
 }
 
 // ipv6_mask_match, u32x4_to_bytes imported from ebpf_helpers::net
+
+/// Delegate NAT info to kernel netfilter via `bpf_ct_set_nat_info`
+/// so `conntrack -L` reflects the DNAT mapping. The manual packet
+/// rewrite already happened; this call is purely for CT coherence.
+#[inline(always)]
+fn kfunc_delegate_nat_v4(
+    ctx: &TcContext,
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    nat_addr: u32,
+    nat_port: u16,
+    manip: NfNatManipType,
+) {
+    let tuple = CtTuple::v4(src_ip, dst_ip, src_port, dst_port);
+    let mut opts = if protocol == PROTO_TCP {
+        BpfCtOpts::tcp()
+    } else {
+        BpfCtOpts::udp()
+    };
+    let builder = unsafe { CtBuilder::from_skb(ctx.skb.skb as *mut _, tuple, &mut opts) };
+    let Some(mut builder) = builder else {
+        increment_metric(NAT_METRIC_KFUNC_FALLBACK);
+        return;
+    };
+    let addr = NfInetAddr::v4(nat_addr);
+    builder.set_nat_info(addr, nat_port, manip);
+    match builder.insert() {
+        Ok(_entry) => increment_metric(NAT_METRIC_KFUNC_DELEGATED),
+        Err(_) => increment_metric(NAT_METRIC_KFUNC_FALLBACK),
+    }
+}
+
+/// IPv6 variant of [`kfunc_delegate_nat_v4`].
+#[inline(always)]
+fn kfunc_delegate_nat_v6(
+    ctx: &TcContext,
+    src_addr: &[u32; 4],
+    dst_addr: &[u32; 4],
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    nat_addr: &[u32; 4],
+    nat_port: u16,
+    manip: NfNatManipType,
+) {
+    let tuple = CtTuple::v6(*src_addr, *dst_addr, src_port, dst_port);
+    let mut opts = if protocol == PROTO_TCP {
+        BpfCtOpts::tcp()
+    } else {
+        BpfCtOpts::udp()
+    };
+    let builder = unsafe { CtBuilder::from_skb(ctx.skb.skb as *mut _, tuple, &mut opts) };
+    let Some(mut builder) = builder else {
+        increment_metric(NAT_METRIC_KFUNC_FALLBACK);
+        return;
+    };
+    let addr = NfInetAddr::v6(*nat_addr);
+    builder.set_nat_info(addr, nat_port, manip);
+    match builder.insert() {
+        Ok(_entry) => increment_metric(NAT_METRIC_KFUNC_DELEGATED),
+        Err(_) => increment_metric(NAT_METRIC_KFUNC_FALLBACK),
+    }
+}
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {

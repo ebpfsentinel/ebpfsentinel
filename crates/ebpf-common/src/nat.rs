@@ -35,7 +35,13 @@ pub const NAT_METRIC_TOTAL_SEEN: u32 = 5;
 pub const NAT_METRIC_NPTV6_TRANSLATED: u32 = 6;
 /// Metric index: hairpin NAT (NAT reflection) applied.
 pub const NAT_METRIC_HAIRPIN_APPLIED: u32 = 7;
-pub const NAT_METRIC_COUNT: u32 = 8;
+/// NAT info successfully delegated to kernel netfilter via
+/// `bpf_ct_set_nat_info` kfunc.
+pub const NAT_METRIC_KFUNC_DELEGATED: u32 = 8;
+/// Kernel CT NAT delegation failed (alloc error or insert error);
+/// the manual packet rewrite still applied.
+pub const NAT_METRIC_KFUNC_FALLBACK: u32 = 9;
+pub const NAT_METRIC_COUNT: u32 = 10;
 
 // ── NAT match flags ─────────────────────────────────────────────────
 
