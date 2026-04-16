@@ -15,7 +15,7 @@ use ebpf_helpers::net::{
     PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, ipv6_mask_match, ones_complement_add,
     prefix_to_mask, u16_from_be_bytes, u32_from_be_bytes, u32x4_to_bytes,
 };
-use ebpf_helpers::kfuncs::{BpfCtOpts, CtBuilder, CtTuple, NfInetAddr, NfNatManipType};
+use ebpf_helpers::kfuncs::{BpfCtOpts, CtBuilder, CtTuple, NfInetAddr, NfNatManipType, skb_get_xfrm_info};
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::increment_metric;
 use ebpf_common::{
@@ -26,7 +26,7 @@ use ebpf_common::{
     nat::{
         HairpinConfig, HairpinCtValue, MAX_HAIRPIN_CT,
         MAX_NAT_HASH_EXACT, MAX_NAT_RULES, MAX_NAT_RULES_V6, MAX_NPTV6_RULES,
-        NAT_MATCH_DST_IP, NAT_MATCH_DST_PORT, NAT_MATCH_PROTO,
+        NAT_MATCH_DST_IP, NAT_MATCH_DST_PORT, NAT_MATCH_PROTO, NAT_MATCH_XFRM,
         NAT_MATCH_SRC_IP, NAT_METRIC_COUNT, NAT_METRIC_DNAT_APPLIED, NAT_METRIC_ERRORS,
         NAT_METRIC_HAIRPIN_APPLIED, NAT_METRIC_KFUNC_DELEGATED, NAT_METRIC_KFUNC_FALLBACK,
         NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_TOTAL_SEEN,
@@ -258,6 +258,8 @@ struct DnatScanCtx {
     iface_groups: u32,
     /// Resolved tenant ID for the current packet.
     tenant_id: u32,
+    /// IPsec xfrm interface id from the incoming packet (0 = not IPsec).
+    xfrm_if_id: u32,
 }
 
 /// Opaque context passed through `bpf_loop` to the IPv6 DNAT rule-scan callback.
@@ -281,6 +283,8 @@ struct DnatScanCtxV6 {
     iface_groups: u32,
     /// Resolved tenant ID for the current packet.
     tenant_id: u32,
+    /// IPsec xfrm interface id from the incoming packet (0 = not IPsec).
+    xfrm_if_id: u32,
 }
 
 // ── bpf_loop callbacks ─────────────────────────────────────────────
@@ -301,7 +305,7 @@ unsafe extern "C" fn scan_dnat_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
             if rule.tenant_id != 0 && rule.tenant_id != lctx.tenant_id {
                 return 0; // tenant mismatch, continue to next rule
             }
-            if match_nat_rule(rule, lctx.src_ip, lctx.dst_ip, lctx.dst_port, lctx.protocol) {
+            if match_nat_rule(rule, lctx.src_ip, lctx.dst_ip, lctx.dst_port, lctx.protocol, lctx.xfrm_if_id) {
                 let new_dst_ip = match rule.nat_type {
                     NAT_TYPE_DNAT | NAT_TYPE_ONETOONE => rule.nat_addr,
                     NAT_TYPE_REDIRECT => lctx.src_ip,
@@ -337,6 +341,10 @@ unsafe extern "C" fn scan_dnat_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
             }
             if rule.tenant_id != 0 && rule.tenant_id != lctx.tenant_id {
                 return 0; // tenant mismatch, continue to next rule
+            }
+            // IPsec tunnel match check (inline to avoid >5 fn params in BPF).
+            if (rule.match_flags & NAT_MATCH_XFRM) != 0 && rule.xfrm_if_id != lctx.xfrm_if_id {
+                return 0;
             }
             if match_nat_rule_v6(rule, &lctx.src_addr, &lctx.dst_addr, lctx.dst_port, lctx.protocol) {
                 let new_dst_addr = match rule.nat_type {
@@ -502,6 +510,13 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
     let ifindex = unsafe { (*ctx.skb.skb).ifindex };
     let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) };
 
+    // Read IPsec xfrm interface metadata from the incoming packet.
+    // Non-zero xfrm_if_id means the packet arrived through an xfrmi
+    // device — NAT rules with NAT_MATCH_XFRM can match on the tunnel.
+    let xfrm_if_id = unsafe { skb_get_xfrm_info(ctx.skb.skb as *mut _) }
+        .map(|info| info.if_id)
+        .unwrap_or(0);
+
     let mut scan_ctx = DnatScanCtx {
         count: if count > MAX_NAT_RULES { MAX_NAT_RULES } else { count },
         src_ip,
@@ -514,6 +529,7 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         matched: 0,
         iface_groups,
         tenant_id,
+        xfrm_if_id,
     };
     unsafe {
         bpf_loop(
@@ -662,6 +678,9 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
     let iface_groups = get_iface_groups(ctx);
     let ifindex = unsafe { (*ctx.skb.skb).ifindex };
     let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr) };
+    let xfrm_if_id = unsafe { skb_get_xfrm_info(ctx.skb.skb as *mut _) }
+        .map(|info| info.if_id)
+        .unwrap_or(0);
 
     let mut scan_ctx = DnatScanCtxV6 {
         count: if count > MAX_NAT_RULES_V6 { MAX_NAT_RULES_V6 } else { count },
@@ -675,6 +694,7 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         matched: 0,
         iface_groups,
         tenant_id,
+        xfrm_if_id,
     };
     unsafe {
         bpf_loop(
@@ -1081,6 +1101,7 @@ fn match_nat_rule(
     dst_ip: u32,
     dst_port: u16,
     protocol: u8,
+    xfrm_if_id: u32,
 ) -> bool {
     let flags = rule.match_flags;
 
@@ -1096,6 +1117,11 @@ fn match_nat_rule(
     if (flags & NAT_MATCH_DST_PORT) != 0
         && (dst_port < rule.match_dst_port_start || dst_port > rule.match_dst_port_end)
     {
+        return false;
+    }
+    // IPsec tunnel match: rule.xfrm_if_id == 0 means "any tunnel or
+    // no tunnel". Non-zero means "only packets from this xfrmi device".
+    if (flags & NAT_MATCH_XFRM) != 0 && rule.xfrm_if_id != xfrm_if_id {
         return false;
     }
 

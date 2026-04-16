@@ -53,6 +53,9 @@ pub const NAT_MATCH_SRC_IP: u8 = 0x01;
 pub const NAT_MATCH_DST_IP: u8 = 0x02;
 pub const NAT_MATCH_DST_PORT: u8 = 0x04;
 pub const NAT_MATCH_PROTO: u8 = 0x08;
+/// Match only packets arriving through a specific IPsec `xfrmi`
+/// device (identified by `NatRuleEntry.xfrm_if_id`).
+pub const NAT_MATCH_XFRM: u8 = 0x10;
 
 // ── NAT HashMap fast-path types ─────────────────────────────────────
 
