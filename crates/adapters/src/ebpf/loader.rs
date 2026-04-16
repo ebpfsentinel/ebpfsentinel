@@ -1,3 +1,4 @@
+use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::path::Path;
 
 use aya::{
@@ -16,6 +17,8 @@ pub const DEFAULT_BPF_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel";
 /// program lifecycle management (load, attach, detach).
 pub struct EbpfLoader {
     ebpf: Ebpf,
+    /// Owned link fds for netkit attachments. Dropping these detaches.
+    netkit_links: Vec<OwnedFd>,
 }
 
 impl EbpfLoader {
@@ -32,7 +35,10 @@ impl EbpfLoader {
         }
 
         info!("eBPF program loaded successfully");
-        Ok(Self { ebpf })
+        Ok(Self {
+            ebpf,
+            netkit_links: Vec::new(),
+        })
     }
 
     /// Load an eBPF program with map pinning enabled.
@@ -60,7 +66,10 @@ impl EbpfLoader {
         }
 
         info!(pin_path, "eBPF program loaded with map pinning");
-        Ok(Self { ebpf })
+        Ok(Self {
+            ebpf,
+            netkit_links: Vec::new(),
+        })
     }
 
     /// Clean up pinned maps from the BPF filesystem.
@@ -184,6 +193,32 @@ impl EbpfLoader {
         // <  6.6: uses netlink (legacy clsact qdisc attach)
         program.attach(interface, TcAttachType::Ingress)?;
         info!(program_name, interface, "TC program attached (ingress)");
+        Ok(())
+    }
+
+    /// Attach a TC program to a netkit interface via `BPF_LINK_CREATE`.
+    /// The program must already be loaded. Returns the link fd (owned
+    /// by this loader for lifetime management).
+    pub fn attach_tc_via_netkit(
+        &mut self,
+        program_name: &str,
+        interface: &str,
+    ) -> Result<(), anyhow::Error> {
+        use super::netkit::{BPF_NETKIT_PRIMARY, netkit_attach_by_name};
+
+        let program: &mut aya::programs::SchedClassifier = self
+            .ebpf
+            .program_mut(program_name)
+            .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found"))?
+            .try_into()?;
+
+        program.load()?;
+        let prog_fd: RawFd = program.fd()?.as_fd().as_raw_fd();
+        let link_fd = netkit_attach_by_name(prog_fd, interface, BPF_NETKIT_PRIMARY)?;
+        // Store the link fd to keep the attachment alive.
+        // When EbpfLoader is dropped, the link fd closes and detaches.
+        self.netkit_links.push(link_fd);
+        info!(program_name, interface, "TC program attached via netkit");
         Ok(())
     }
 

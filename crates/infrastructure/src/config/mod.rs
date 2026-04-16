@@ -1144,6 +1144,12 @@ pub struct AgentInfo {
     #[serde(default)]
     pub xdp_mode: XdpMode,
 
+    /// TC program attach mode: auto, tc, or netkit.
+    /// `auto` (default) uses netkit for netkit interfaces (Kubernetes
+    /// pods with Cilium), falls back to TC clsact for standard interfaces.
+    #[serde(default)]
+    pub attach_mode: AttachMode,
+
     /// Number of parallel event dispatcher workers.
     /// Each worker processes events from a deterministic subset of sources
     /// (partitioned by source address), preserving per-source ordering.
@@ -1264,6 +1270,20 @@ impl XdpMode {
             Self::Offloaded => "offloaded",
         }
     }
+}
+
+/// TC program attach mode for network interfaces.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachMode {
+    /// Auto-detect: use netkit if the interface is a netkit device,
+    /// otherwise fall back to TC clsact qdisc (default).
+    #[default]
+    Auto,
+    /// Force TC clsact qdisc attach (legacy, always works).
+    Tc,
+    /// Force netkit attach. Fails if the interface is not netkit.
+    Netkit,
 }
 
 /// Post-quantum TLS key exchange policy.
