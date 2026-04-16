@@ -1,4 +1,5 @@
 pub mod arena;
+pub mod arena_event_reader;
 pub mod bpf_token;
 pub mod config_flags_manager;
 pub mod config_ringbuf_writer;
