@@ -12,7 +12,10 @@ use aya_ebpf_bindings::helpers::bpf_skb_load_bytes;
 use core::ffi::c_void;
 use core::mem;
 use ebpf_helpers::arena_map::{RawMapDef, arena_def};
-use ebpf_common::arena::ArenaEventHeader;
+use ebpf_common::arena::{
+    ArenaEventHeader, DNS_ARENA_FIXED_VA, DNS_ARENA_PAGES, DNS_SLOT_COUNT, DNS_WRITE_SEQ_OFFSET,
+    dns_slot_offset,
+};
 use ebpf_helpers::net::{
     ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
     PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
@@ -50,11 +53,16 @@ static DNS_EVENTS: RingBuf = RingBuf::with_byte_size(64 * 4096, 0);
 static DNS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
 
 /// Arena map for zero-copy DNS event delivery to userspace.
-/// 4 pages = 16 KiB — enough for one `DnsEventBuf` (584 bytes)
-/// plus `ArenaEventHeader` (24 bytes).
+/// Sized by `DNS_ARENA_PAGES` (16 pages = 64 KiB) — ~102 slots of
+/// one `DnsEventBuf` (576 B) each. The BPF program allocates those
+/// pages once at `DNS_ARENA_FIXED_VA` so userspace's
+/// `mmap(MAP_FIXED_NOREPLACE)` shares the same pointer space.
 #[unsafe(link_section = ".maps")]
 #[unsafe(no_mangle)]
-static DNS_ARENA: RawMapDef = arena_def(4);
+static DNS_ARENA: RawMapDef = arena_def(DNS_ARENA_PAGES);
+
+/// Cached arena base pointer, set on first successful allocation.
+static mut ARENA_BASE: u64 = 0;
 
 /// Monotonically increasing sequence counter for arena events.
 static mut ARENA_SEQUENCE: u64 = 0;
@@ -358,8 +366,14 @@ fn emit_dns_event(
     }
 }
 
-/// Attempt to write a DNS event into the arena. Returns `true` on
-/// success, `false` if arena is unavailable (falls back to `RingBuf`).
+/// Attempt to write a DNS event into the arena ring. Returns `true`
+/// on success, `false` if arena allocation fails (falls back to
+/// `RingBuf`).
+///
+/// Layout: arena pages are allocated once at `DNS_ARENA_FIXED_VA` so
+/// the userspace mmap shares the same address space. Each event
+/// writes the slot body first, then publishes the new sequence to
+/// the ring header so userspace observes a complete record.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn try_emit_arena_dns(
@@ -372,33 +386,49 @@ fn try_emit_arena_dns(
     dns_offset: usize,
     payload_len: usize,
 ) -> bool {
-    use ebpf_helpers::kfuncs::arena_alloc_pages;
+    use ebpf_helpers::kfuncs::arena_alloc_pages_at;
 
     let arena_ptr = &raw const DNS_ARENA as *mut c_void;
-    let page = unsafe { arena_alloc_pages(arena_ptr, 1) };
-    let Some(page) = page else {
-        return false;
+
+    // Lazy init: anchor the arena at DNS_ARENA_FIXED_VA on first call.
+    let base = unsafe {
+        let cached = core::ptr::read_volatile(&raw const ARENA_BASE);
+        if cached != 0 {
+            cached as *mut u8
+        } else {
+            let allocated = arena_alloc_pages_at(
+                arena_ptr,
+                DNS_ARENA_FIXED_VA as *mut c_void,
+                DNS_ARENA_PAGES,
+            );
+            match allocated {
+                Some(ptr) => {
+                    core::ptr::write_volatile(&raw mut ARENA_BASE, ptr as u64);
+                    ptr as *mut u8
+                }
+                None => {
+                    let now = core::ptr::read_volatile(&raw const ARENA_BASE);
+                    if now != 0 {
+                        now as *mut u8
+                    } else {
+                        return false;
+                    }
+                }
+            }
+        }
     };
 
-    let base = page as *mut u8;
     let seq = unsafe {
         ARENA_SEQUENCE += 1;
         ARENA_SEQUENCE
     };
+    let slot_idx = ((seq - 1) as usize) % DNS_SLOT_COUNT;
+    let slot_offset = dns_slot_offset(slot_idx);
+    let slot_ptr = unsafe { base.add(slot_offset) };
 
-    let header = ArenaEventHeader {
-        sequence: seq,
-        timestamp_ns: unsafe { bpf_ktime_get_boot_ns() },
-        payload_len: mem::size_of::<DnsEventBuf>() as u32,
-        event_type: 7, // EVENT_TYPE_DNS
-        _pad: [0; 3],
-    };
-    unsafe {
-        core::ptr::write_volatile(base.cast::<ArenaEventHeader>(), header);
-    }
-
-    let event_offset = mem::size_of::<ArenaEventHeader>();
-    let event_ptr = unsafe { base.add(event_offset) } as *mut DnsEventBuf;
+    // Slot body: DnsEventBuf (header + raw DNS payload).
+    let event_ptr = unsafe { slot_ptr.add(mem::size_of::<ArenaEventHeader>()) }
+        as *mut DnsEventBuf;
     unsafe {
         (*event_ptr).header.timestamp_ns = bpf_ktime_get_boot_ns();
         (*event_ptr).header.src_addr = *src_addr;
@@ -417,6 +447,25 @@ fn try_emit_arena_dns(
             (*event_ptr).payload.as_mut_ptr() as *mut _,
             DNS_MAX_PAYLOAD as u32,
         );
+    }
+
+    // Slot header written *after* the body so userspace can detect
+    // torn slots.
+    let header = ArenaEventHeader {
+        sequence: seq,
+        timestamp_ns: unsafe { bpf_ktime_get_boot_ns() },
+        payload_len: mem::size_of::<DnsEventBuf>() as u32,
+        event_type: 7, // EVENT_TYPE_DNS
+        _pad: [0; 3],
+    };
+    unsafe {
+        core::ptr::write_volatile(slot_ptr.cast::<ArenaEventHeader>(), header);
+    }
+
+    // Publish: bump the global write_seq so userspace knows a new
+    // slot is ready.
+    unsafe {
+        core::ptr::write_volatile(base.add(DNS_WRITE_SEQ_OFFSET).cast::<u64>(), seq);
     }
 
     true

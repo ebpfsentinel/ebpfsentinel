@@ -17,8 +17,6 @@ use aya_ebpf::{
     programs::XdpContext,
 };
 use core::mem;
-use ebpf_helpers::arena_map::{RawMapDef, arena_def};
-use ebpf_common::arena::ArenaEventHeader;
 use ebpf_common::{
     conntrack::{
         CT_SRC_COUNTER_MAX, CT_STATE_ESTABLISHED, CT_STATE_NEW, CT_STATE_RELATED,
@@ -145,16 +143,6 @@ static PKT_CTX: PerCpuArray<PacketCtx> = PerCpuArray::with_max_entries(1, 0);
 /// Shared kernel->userspace event ring buffer (1 MB).
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
-
-/// Arena map for zero-copy `PacketEvent` delivery to userspace.
-/// 4 pages = 16 KiB — enough for `PacketEvent` (96 bytes) plus
-/// `ArenaEventHeader` (24 bytes).
-#[unsafe(link_section = ".maps")]
-#[unsafe(no_mangle)]
-static FW_ARENA: RawMapDef = arena_def(4);
-
-/// Monotonically increasing sequence counter for arena events.
-static mut ARENA_SEQUENCE: u64 = 0;
 
 /// Feature enable/disable flags (shared across programs).
 #[map]
@@ -1710,12 +1698,6 @@ fn emit_event(ctx: &XdpContext, action: u8) {
         None => return,
     };
 
-    // Try arena zero-copy path first.
-    if try_emit_arena_fw(pkt, action) {
-        return;
-    }
-
-    // Fallback: RingBuf.
     // XdpDynptr validates the kfunc path from XDP context and
     // provides the full frame size including multi-buffer fragments.
     let _xdp_frame_size = unsafe { XdpDynptr::from_xdp(ctx.ctx as *mut _) }
@@ -1749,61 +1731,6 @@ fn emit_event(ctx: &XdpContext, action: u8) {
     } else {
         increment_metric(METRIC_EVENTS_DROPPED);
     }
-}
-
-/// Write a firewall `PacketEvent` into the arena. Reads packet fields
-/// from `PKT_CTX`. Returns `true` on success.
-#[inline(always)]
-fn try_emit_arena_fw(pkt: *const PacketCtx, action: u8) -> bool {
-    use ebpf_helpers::kfuncs::arena_alloc_pages;
-
-    let arena_ptr = &raw const FW_ARENA as *mut c_void;
-    let page = unsafe { arena_alloc_pages(arena_ptr, 1) };
-    let Some(page) = page else {
-        return false;
-    };
-
-    let base = page as *mut u8;
-    let seq = unsafe {
-        ARENA_SEQUENCE += 1;
-        ARENA_SEQUENCE
-    };
-
-    let header = ArenaEventHeader {
-        sequence: seq,
-        timestamp_ns: unsafe { bpf_ktime_get_boot_ns() },
-        payload_len: mem::size_of::<PacketEvent>() as u32,
-        event_type: EVENT_TYPE_FIREWALL,
-        _pad: [0; 3],
-    };
-    unsafe {
-        core::ptr::write_volatile(base.cast::<ArenaEventHeader>(), header);
-    }
-
-    let event_offset = mem::size_of::<ArenaEventHeader>();
-    let event_ptr = unsafe { base.add(event_offset) } as *mut PacketEvent;
-    unsafe {
-        (*event_ptr).timestamp_ns = bpf_ktime_get_boot_ns();
-        (*event_ptr).src_addr = (*pkt).src_addr;
-        (*event_ptr).dst_addr = (*pkt).dst_addr;
-        (*event_ptr).src_port = (*pkt).src_port;
-        (*event_ptr).dst_port = (*pkt).dst_port;
-        (*event_ptr).protocol = (*pkt).protocol;
-        (*event_ptr).event_type = EVENT_TYPE_FIREWALL;
-        (*event_ptr).action = action;
-        (*event_ptr).flags = (*pkt).flags;
-        (*event_ptr).rule_id = 0;
-        (*event_ptr).vlan_id = (*pkt).vlan_id;
-        (*event_ptr).cpu_id = bpf_get_smp_processor_id() as u16;
-        (*event_ptr).socket_cookie = 0;
-        (*event_ptr).cgroup_id = 0;
-        (*event_ptr).cgroup1_id = 0;
-        (*event_ptr).rss_hash = 0;
-        (*event_ptr).rss_hash_type = 0;
-        (*event_ptr).rx_hw_timestamp_ns = 0;
-    }
-
-    true
 }
 
 #[panic_handler]

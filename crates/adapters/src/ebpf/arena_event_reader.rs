@@ -19,9 +19,13 @@ use aya::Ebpf;
 use aya::maps::Map;
 use ebpf_common::arena::{
     ARENA_EVENT_HEADER_SIZE, ArenaEventHeader, DLP_ARENA_FIXED_VA, DLP_ARENA_PAGES, DLP_SLOT_COUNT,
-    DLP_WRITE_SEQ_OFFSET, dlp_slot_offset,
+    DLP_WRITE_SEQ_OFFSET, DNS_ARENA_FIXED_VA, DNS_ARENA_PAGES, DNS_SLOT_COUNT,
+    DNS_WRITE_SEQ_OFFSET, IDS_ARENA_FIXED_VA, IDS_ARENA_PAGES, IDS_SLOT_COUNT,
+    IDS_WRITE_SEQ_OFFSET, dlp_slot_offset, dns_slot_offset, ids_slot_offset,
 };
 use ebpf_common::dlp::{DLP_MAX_EXCERPT, DLP_SMALL_EXCERPT, DlpEvent, DlpEventSmall};
+use ebpf_common::dns::{DNS_MAX_PAYLOAD, DnsEvent};
+use ebpf_common::event::{MAX_L7_PAYLOAD, PacketEvent};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
@@ -257,6 +261,279 @@ pub fn mmap_dlp_arena(ebpf: &mut Ebpf) -> Option<DlpArenaReader> {
     }
 }
 
+/// Raw body stored in each IDS arena slot — a `PacketEvent` header
+/// followed by the full L7 payload. Mirrors `L7EventBuf` in the
+/// `tc-ids` BPF program.
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct IdsArenaBody {
+    header: PacketEvent,
+    payload: [u8; MAX_L7_PAYLOAD],
+}
+
+/// Reader for the IDS arena ring layout written by the `tc-ids`
+/// BPF program. Layout mirrors DLP: 64 B ring header (with
+/// `write_seq` at offset 0) then `IDS_SLOT_COUNT` fixed slots of
+/// `ArenaEventHeader` + `L7EventBuf`. Drained events are forwarded
+/// as `AgentEvent::L7`.
+pub struct IdsArenaReader {
+    arena: ArenaMap,
+    last_sequence: u64,
+}
+
+impl IdsArenaReader {
+    /// Wrap an IDS arena. Captures the current `write_seq` so replays
+    /// after an agent restart are avoided.
+    #[must_use]
+    pub fn new(arena: ArenaMap) -> Self {
+        // SAFETY: write_seq lives at offset 0 of the mmap'd arena.
+        let initial = unsafe { arena.read_at::<u64>(IDS_WRITE_SEQ_OFFSET) };
+        Self {
+            arena,
+            last_sequence: initial,
+        }
+    }
+
+    /// Drain newly-published slots into a vector of `AgentEvent::L7`.
+    pub fn drain(&mut self) -> Vec<AgentEvent> {
+        // SAFETY: write_seq is a u64 at offset 0 of the arena.
+        let write_seq = unsafe { self.arena.read_at::<u64>(IDS_WRITE_SEQ_OFFSET) };
+        if write_seq <= self.last_sequence {
+            return Vec::new();
+        }
+
+        let lag = write_seq.saturating_sub(self.last_sequence);
+        let drained = lag.min(IDS_SLOT_COUNT as u64);
+        let start_seq = write_seq - drained + 1;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let mut out = Vec::with_capacity(drained as usize);
+        for seq in start_seq..=write_seq {
+            #[allow(clippy::cast_possible_truncation)]
+            let slot_idx = ((seq - 1) as usize) % IDS_SLOT_COUNT;
+            let slot_offset = ids_slot_offset(slot_idx);
+
+            // SAFETY: slot bounds guaranteed by IDS_SLOT_COUNT sizing.
+            let header: ArenaEventHeader = unsafe { self.arena.read_at(slot_offset) };
+            if header.sequence != seq {
+                continue;
+            }
+            // SAFETY: body sits right after the slot header.
+            let body: IdsArenaBody =
+                unsafe { self.arena.read_at(slot_offset + ARENA_EVENT_HEADER_SIZE) };
+            out.push(AgentEvent::L7 {
+                header: body.header,
+                payload: body.payload.to_vec(),
+            });
+        }
+
+        self.last_sequence = write_seq;
+        out
+    }
+
+    /// Long-running poll loop mirroring `DlpArenaReader::run`.
+    pub async fn run(
+        mut self,
+        tx: mpsc::Sender<AgentEvent>,
+        poll_interval: Duration,
+        cancel: CancellationToken,
+    ) {
+        let mut ticker = tokio::time::interval(poll_interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        debug!(
+            poll_ms = poll_interval.as_millis(),
+            "IDS arena reader started"
+        );
+
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    debug!("IDS arena reader cancelled");
+                    break;
+                }
+                _ = ticker.tick() => {
+                    for event in self.drain() {
+                        trace!("IDS arena event drained");
+                        if tx.try_send(event).is_err() {
+                            debug!("IDS arena event channel full, dropping");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Adopt the BPF-loaded `IDS_ARENA` map fd from the supplied
+/// `aya::Ebpf` instance, mmap it at `IDS_ARENA_FIXED_VA`, and wrap
+/// the result in an `IdsArenaReader`. Returns `None` when the map
+/// is missing or the kernel rejects the fixed VA.
+#[must_use]
+pub fn mmap_ids_arena(ebpf: &mut Ebpf) -> Option<IdsArenaReader> {
+    let map = ebpf.map("IDS_ARENA")?;
+    let map_data = match map {
+        Map::Unsupported(md) => md,
+        other => {
+            warn!(
+                kind = ?core::mem::discriminant(other),
+                "IDS_ARENA loaded as a typed aya map; expected Unsupported(MapData)"
+            );
+            return None;
+        }
+    };
+
+    let fd = map_data.fd().as_fd();
+    match ArenaMap::from_aya_fd(fd, IDS_ARENA_PAGES, IDS_ARENA_FIXED_VA) {
+        Ok(arena) => {
+            info!(
+                fixed_va = format_args!("{IDS_ARENA_FIXED_VA:#x}"),
+                pages = IDS_ARENA_PAGES,
+                "IDS_ARENA mmap'd; BPF arena zero-copy delivery active"
+            );
+            Some(IdsArenaReader::new(arena))
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "IDS_ARENA mmap failed; falling back to RingBuf-only delivery"
+            );
+            None
+        }
+    }
+}
+
+/// Raw body stored in each DNS arena slot — mirrors `DnsEventBuf` in
+/// the `tc-dns` BPF program.
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct DnsArenaBody {
+    header: DnsEvent,
+    payload: [u8; DNS_MAX_PAYLOAD],
+}
+
+/// Reader for the DNS arena ring layout written by the `tc-dns`
+/// BPF program. Drained events are forwarded as `AgentEvent::Dns`.
+pub struct DnsArenaReader {
+    arena: ArenaMap,
+    last_sequence: u64,
+}
+
+impl DnsArenaReader {
+    #[must_use]
+    pub fn new(arena: ArenaMap) -> Self {
+        // SAFETY: write_seq at offset 0 of the mmap'd arena.
+        let initial = unsafe { arena.read_at::<u64>(DNS_WRITE_SEQ_OFFSET) };
+        Self {
+            arena,
+            last_sequence: initial,
+        }
+    }
+
+    pub fn drain(&mut self) -> Vec<AgentEvent> {
+        // SAFETY: write_seq at offset 0 of the arena.
+        let write_seq = unsafe { self.arena.read_at::<u64>(DNS_WRITE_SEQ_OFFSET) };
+        if write_seq <= self.last_sequence {
+            return Vec::new();
+        }
+
+        let lag = write_seq.saturating_sub(self.last_sequence);
+        let drained = lag.min(DNS_SLOT_COUNT as u64);
+        let start_seq = write_seq - drained + 1;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let mut out = Vec::with_capacity(drained as usize);
+        for seq in start_seq..=write_seq {
+            #[allow(clippy::cast_possible_truncation)]
+            let slot_idx = ((seq - 1) as usize) % DNS_SLOT_COUNT;
+            let slot_offset = dns_slot_offset(slot_idx);
+
+            // SAFETY: slot bounds guaranteed by DNS_SLOT_COUNT sizing.
+            let header: ArenaEventHeader = unsafe { self.arena.read_at(slot_offset) };
+            if header.sequence != seq {
+                continue;
+            }
+            // SAFETY: body sits right after the slot header.
+            let body: DnsArenaBody =
+                unsafe { self.arena.read_at(slot_offset + ARENA_EVENT_HEADER_SIZE) };
+            let payload_len = (body.header.dns_payload_len as usize).min(DNS_MAX_PAYLOAD);
+            out.push(AgentEvent::Dns {
+                header: body.header,
+                payload: body.payload[..payload_len].to_vec(),
+            });
+        }
+
+        self.last_sequence = write_seq;
+        out
+    }
+
+    pub async fn run(
+        mut self,
+        tx: mpsc::Sender<AgentEvent>,
+        poll_interval: Duration,
+        cancel: CancellationToken,
+    ) {
+        let mut ticker = tokio::time::interval(poll_interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        debug!(
+            poll_ms = poll_interval.as_millis(),
+            "DNS arena reader started"
+        );
+
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    debug!("DNS arena reader cancelled");
+                    break;
+                }
+                _ = ticker.tick() => {
+                    for event in self.drain() {
+                        trace!("DNS arena event drained");
+                        if tx.try_send(event).is_err() {
+                            debug!("DNS arena event channel full, dropping");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Adopt the BPF-loaded `DNS_ARENA` map fd, mmap it at
+/// `DNS_ARENA_FIXED_VA`, and wrap the result in a `DnsArenaReader`.
+#[must_use]
+pub fn mmap_dns_arena(ebpf: &mut Ebpf) -> Option<DnsArenaReader> {
+    let map = ebpf.map("DNS_ARENA")?;
+    let map_data = match map {
+        Map::Unsupported(md) => md,
+        other => {
+            warn!(
+                kind = ?core::mem::discriminant(other),
+                "DNS_ARENA loaded as a typed aya map; expected Unsupported(MapData)"
+            );
+            return None;
+        }
+    };
+
+    let fd = map_data.fd().as_fd();
+    match ArenaMap::from_aya_fd(fd, DNS_ARENA_PAGES, DNS_ARENA_FIXED_VA) {
+        Ok(arena) => {
+            info!(
+                fixed_va = format_args!("{DNS_ARENA_FIXED_VA:#x}"),
+                pages = DNS_ARENA_PAGES,
+                "DNS_ARENA mmap'd; BPF arena zero-copy delivery active"
+            );
+            Some(DnsArenaReader::new(arena))
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "DNS_ARENA mmap failed; falling back to RingBuf-only delivery"
+            );
+            None
+        }
+    }
+}
+
 /// Promote a 288 B `DlpEventSmall` into the full 4128 B `DlpEvent`
 /// shape used by the rest of the agent pipeline. The trailing
 /// excerpt bytes are zero-padded.
@@ -457,5 +734,199 @@ mod tests {
         // Tail is zero-padded.
         assert_eq!(full.data_excerpt[DLP_SMALL_EXCERPT], 0);
         assert_eq!(full.data_excerpt[DLP_MAX_EXCERPT - 1], 0);
+    }
+
+    fn fake_ids_body(marker: u8) -> IdsArenaBody {
+        let header = PacketEvent {
+            timestamp_ns: 0,
+            src_addr: [0; 4],
+            dst_addr: [0; 4],
+            src_port: u16::from(marker),
+            dst_port: u16::from(marker).wrapping_add(1),
+            protocol: 6,
+            event_type: 6,
+            action: 0,
+            flags: 0,
+            rule_id: 0,
+            vlan_id: 0,
+            cpu_id: 0,
+            socket_cookie: 0,
+            cgroup_id: 0,
+            cgroup1_id: 0,
+            rss_hash: 0,
+            rss_hash_type: 0,
+            rx_hw_timestamp_ns: 0,
+        };
+        let mut payload = [0u8; MAX_L7_PAYLOAD];
+        payload[0] = marker;
+        payload[MAX_L7_PAYLOAD - 1] = marker.wrapping_add(0xAA);
+        IdsArenaBody { header, payload }
+    }
+
+    fn write_ids_slot(arena: &ArenaMap, seq: u64, marker: u8) {
+        #[allow(clippy::cast_possible_truncation)]
+        let slot_idx = ((seq - 1) as usize) % IDS_SLOT_COUNT;
+        let off = ids_slot_offset(slot_idx);
+        unsafe { arena.write_at(off + ARENA_EVENT_HEADER_SIZE, fake_ids_body(marker)) };
+        let header = ArenaEventHeader {
+            sequence: seq,
+            timestamp_ns: 100,
+            payload_len: core::mem::size_of::<IdsArenaBody>() as u32,
+            event_type: 6,
+            _pad: [0; 3],
+        };
+        unsafe { arena.write_at(off, header) };
+    }
+
+    #[test]
+    fn ids_arena_reader_drains_new_events() {
+        let arena = match ArenaMap::create(IDS_ARENA_PAGES, "ids_new") {
+            Ok(a) => a,
+            Err(_) => {
+                eprintln!("skip: no CAP_BPF");
+                return;
+            }
+        };
+
+        let mut reader = IdsArenaReader::new(arena);
+
+        write_ids_slot(&reader.arena, 1, 0x11);
+        write_ids_slot(&reader.arena, 2, 0x22);
+        unsafe { reader.arena.write_at::<u64>(IDS_WRITE_SEQ_OFFSET, 2) };
+
+        let drained = reader.drain();
+        assert_eq!(drained.len(), 2);
+        for (i, event) in drained.iter().enumerate() {
+            let marker = if i == 0 { 0x11 } else { 0x22 };
+            match event {
+                AgentEvent::L7 { header, payload } => {
+                    assert_eq!(header.src_port, u16::from(marker));
+                    assert_eq!(payload[0], marker);
+                    assert_eq!(payload.len(), MAX_L7_PAYLOAD);
+                }
+                _ => panic!("expected AgentEvent::L7"),
+            }
+        }
+
+        assert!(reader.drain().is_empty());
+    }
+
+    #[test]
+    fn ids_arena_reader_skips_torn_slot() {
+        let arena = match ArenaMap::create(IDS_ARENA_PAGES, "ids_torn") {
+            Ok(a) => a,
+            Err(_) => {
+                eprintln!("skip: no CAP_BPF");
+                return;
+            }
+        };
+
+        let mut reader = IdsArenaReader::new(arena);
+        write_ids_slot(&reader.arena, 99, 0x99);
+        unsafe { reader.arena.write_at::<u64>(IDS_WRITE_SEQ_OFFSET, 1) };
+
+        assert!(reader.drain().is_empty(), "torn slot must be skipped");
+    }
+
+    fn fake_dns_body(marker: u8, dns_len: u16) -> DnsArenaBody {
+        let mut header = DnsEvent {
+            timestamp_ns: 0,
+            src_addr: [0; 4],
+            dst_addr: [0; 4],
+            dns_payload_len: dns_len,
+            dns_payload_offset: DnsEvent::HEADER_SIZE,
+            direction: 0,
+            flags: 0,
+            vlan_id: 0,
+            _padding: [0; 8],
+            cgroup_id: 0,
+        };
+        header.src_addr[0] = u32::from(marker);
+        let mut payload = [0u8; DNS_MAX_PAYLOAD];
+        payload[0] = marker;
+        payload[(dns_len as usize)
+            .saturating_sub(1)
+            .min(DNS_MAX_PAYLOAD - 1)] = marker ^ 0xFF;
+        DnsArenaBody { header, payload }
+    }
+
+    fn write_dns_slot(arena: &ArenaMap, seq: u64, marker: u8, dns_len: u16) {
+        #[allow(clippy::cast_possible_truncation)]
+        let slot_idx = ((seq - 1) as usize) % DNS_SLOT_COUNT;
+        let off = dns_slot_offset(slot_idx);
+        unsafe {
+            arena.write_at(
+                off + ARENA_EVENT_HEADER_SIZE,
+                fake_dns_body(marker, dns_len),
+            )
+        };
+        let header = ArenaEventHeader {
+            sequence: seq,
+            timestamp_ns: 100,
+            payload_len: core::mem::size_of::<DnsArenaBody>() as u32,
+            event_type: 7,
+            _pad: [0; 3],
+        };
+        unsafe { arena.write_at(off, header) };
+    }
+
+    #[test]
+    fn dns_arena_reader_drains_new_events() {
+        let arena = match ArenaMap::create(DNS_ARENA_PAGES, "dns_new") {
+            Ok(a) => a,
+            Err(_) => {
+                eprintln!("skip: no CAP_BPF");
+                return;
+            }
+        };
+
+        let mut reader = DnsArenaReader::new(arena);
+
+        write_dns_slot(&reader.arena, 1, 0xAA, 32);
+        write_dns_slot(&reader.arena, 2, 0xBB, 128);
+        unsafe { reader.arena.write_at::<u64>(DNS_WRITE_SEQ_OFFSET, 2) };
+
+        let drained = reader.drain();
+        assert_eq!(drained.len(), 2);
+        match &drained[0] {
+            AgentEvent::Dns { header, payload } => {
+                assert_eq!(header.src_addr[0], 0xAA);
+                assert_eq!(payload.len(), 32);
+                assert_eq!(payload[0], 0xAA);
+            }
+            _ => panic!("expected AgentEvent::Dns"),
+        }
+        match &drained[1] {
+            AgentEvent::Dns { header, payload } => {
+                assert_eq!(header.src_addr[0], 0xBB);
+                assert_eq!(payload.len(), 128);
+                assert_eq!(payload[0], 0xBB);
+            }
+            _ => panic!("expected AgentEvent::Dns"),
+        }
+
+        assert!(reader.drain().is_empty());
+    }
+
+    #[test]
+    fn dns_arena_reader_clamps_payload_len() {
+        let arena = match ArenaMap::create(DNS_ARENA_PAGES, "dns_clamp") {
+            Ok(a) => a,
+            Err(_) => {
+                eprintln!("skip: no CAP_BPF");
+                return;
+            }
+        };
+
+        let mut reader = DnsArenaReader::new(arena);
+        // Overreport dns_payload_len — reader must clamp to DNS_MAX_PAYLOAD.
+        write_dns_slot(&reader.arena, 1, 0xCD, 0xFFFF);
+        unsafe { reader.arena.write_at::<u64>(DNS_WRITE_SEQ_OFFSET, 1) };
+
+        let drained = reader.drain();
+        match &drained[0] {
+            AgentEvent::Dns { payload, .. } => assert_eq!(payload.len(), DNS_MAX_PAYLOAD),
+            _ => panic!("expected AgentEvent::Dns"),
+        }
     }
 }

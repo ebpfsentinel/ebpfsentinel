@@ -104,6 +104,91 @@ pub mod arena {
         DLP_RING_HEADER_SIZE + slot_idx * DLP_SLOT_SIZE
     }
 
+    // -----------------------------------------------------------------
+    // IDS arena ring layout.
+    //
+    // IDS_ARENA holds full-size L7 events (PacketEvent + 2048 B payload
+    // = 2144 B). The ring is sized for bursts: 32 pages = 128 KiB →
+    // ~58 slots. Each slot carries one `ArenaEventHeader` + one
+    // `L7EventBuf`. The fixed VA sits 1 TiB above the DLP arena to keep
+    // the two mappings from colliding.
+    // -----------------------------------------------------------------
+
+    /// Number of pages reserved for the IDS arena map.
+    pub const IDS_ARENA_PAGES: u32 = 32;
+
+    /// Total IDS arena size in bytes.
+    pub const IDS_ARENA_SIZE: usize = IDS_ARENA_PAGES as usize * 4096;
+
+    /// Fixed virtual address for the IDS arena — 17 TiB.
+    pub const IDS_ARENA_FIXED_VA: usize = 0x1100_0000_0000;
+
+    /// Bytes reserved at the start of the IDS arena for the ring header.
+    pub const IDS_RING_HEADER_SIZE: usize = 64;
+
+    /// Bytes per IDS ring slot (24 B `ArenaEventHeader` + 2144 B
+    /// `L7EventBuf` = 2168 B, padded to 2176 B for 64 B alignment).
+    pub const IDS_SLOT_SIZE: usize = 2176;
+
+    /// Payload bytes stored per IDS slot (`L7EventBuf` = `PacketEvent`
+    /// 96 B + `MAX_L7_PAYLOAD` 2048 B).
+    pub const IDS_SLOT_PAYLOAD: usize = 2144;
+
+    /// Number of slots in the IDS ring.
+    pub const IDS_SLOT_COUNT: usize = (IDS_ARENA_SIZE - IDS_RING_HEADER_SIZE) / IDS_SLOT_SIZE;
+
+    /// Byte offset of the `write_seq` counter within the IDS arena.
+    pub const IDS_WRITE_SEQ_OFFSET: usize = 0;
+
+    /// Byte offset of IDS slot `i` from arena base.
+    #[inline]
+    #[must_use]
+    pub const fn ids_slot_offset(slot_idx: usize) -> usize {
+        IDS_RING_HEADER_SIZE + slot_idx * IDS_SLOT_SIZE
+    }
+
+    // -----------------------------------------------------------------
+    // DNS arena ring layout.
+    //
+    // DNS_ARENA holds full DNS events (DnsEvent 64 B + 512 B payload
+    // = 576 B; packed into `DnsEventBuf` 576 B). 16 pages = 64 KiB
+    // yields ~102 slots, enough for DNS bursts without lapping between
+    // 50 ms poll ticks. Fixed VA sits 2 TiB above the DLP arena.
+    // -----------------------------------------------------------------
+
+    /// Number of pages reserved for the DNS arena map.
+    pub const DNS_ARENA_PAGES: u32 = 16;
+
+    /// Total DNS arena size in bytes.
+    pub const DNS_ARENA_SIZE: usize = DNS_ARENA_PAGES as usize * 4096;
+
+    /// Fixed virtual address for the DNS arena — 18 TiB.
+    pub const DNS_ARENA_FIXED_VA: usize = 0x1200_0000_0000;
+
+    /// Bytes reserved at the start of the DNS arena for the ring header.
+    pub const DNS_RING_HEADER_SIZE: usize = 64;
+
+    /// Bytes per DNS ring slot (24 B `ArenaEventHeader` + 576 B
+    /// `DnsEventBuf` = 600 B, padded to 640 B for 64 B alignment).
+    pub const DNS_SLOT_SIZE: usize = 640;
+
+    /// Payload bytes stored per DNS slot (`DnsEventBuf` = 64 B header
+    /// + 512 B payload).
+    pub const DNS_SLOT_PAYLOAD: usize = 576;
+
+    /// Number of slots in the DNS ring.
+    pub const DNS_SLOT_COUNT: usize = (DNS_ARENA_SIZE - DNS_RING_HEADER_SIZE) / DNS_SLOT_SIZE;
+
+    /// Byte offset of the `write_seq` counter within the DNS arena.
+    pub const DNS_WRITE_SEQ_OFFSET: usize = 0;
+
+    /// Byte offset of DNS slot `i` from arena base.
+    #[inline]
+    #[must_use]
+    pub const fn dns_slot_offset(slot_idx: usize) -> usize {
+        DNS_RING_HEADER_SIZE + slot_idx * DNS_SLOT_SIZE
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -136,5 +221,31 @@ pub mod arena {
             assert_eq!(DLP_WRITE_SEQ_OFFSET, 0);
             assert!(core::mem::size_of::<u64>() <= DLP_RING_HEADER_SIZE);
         }
+
+        // IDS arena ring is sized to fit a whole number of slots with
+        // enough capacity for realistic burst depths.
+        const _: () = {
+            let last_slot_end = ids_slot_offset(IDS_SLOT_COUNT - 1) + IDS_SLOT_SIZE;
+            assert!(last_slot_end <= IDS_ARENA_SIZE);
+            assert!(IDS_SLOT_COUNT >= 50);
+            assert!(ARENA_EVENT_HEADER_SIZE + IDS_SLOT_PAYLOAD <= IDS_SLOT_SIZE);
+        };
+
+        // DNS arena ring sized likewise, with a smaller payload but
+        // higher expected burst count.
+        const _: () = {
+            let last_slot_end = dns_slot_offset(DNS_SLOT_COUNT - 1) + DNS_SLOT_SIZE;
+            assert!(last_slot_end <= DNS_ARENA_SIZE);
+            assert!(DNS_SLOT_COUNT >= 90);
+            assert!(ARENA_EVENT_HEADER_SIZE + DNS_SLOT_PAYLOAD <= DNS_SLOT_SIZE);
+        };
+
+        // Each arena uses a distinct fixed VA so mmap regions never
+        // collide in userspace.
+        const _: () = {
+            assert!(DLP_ARENA_FIXED_VA != IDS_ARENA_FIXED_VA);
+            assert!(DLP_ARENA_FIXED_VA != DNS_ARENA_FIXED_VA);
+            assert!(IDS_ARENA_FIXED_VA != DNS_ARENA_FIXED_VA);
+        };
     }
 }

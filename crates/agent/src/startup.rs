@@ -1284,11 +1284,29 @@ pub async fn run(
         // 10c. TC IDS
         ids_ok = if config.ids.enabled {
             match try_load_tc_ids(&ebpf_dir, &config) {
-                Ok((mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr, reader)) => {
+                Ok((
+                    mut loader,
+                    ids_mgr_opt,
+                    l7_mgr_opt,
+                    cfg_mgr_opt,
+                    ids_rdr,
+                    reader,
+                    arena_reader,
+                )) => {
                     let event_tx_clone = event_tx.clone();
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, CancellationToken::new()).await;
                     });
+                    if let Some(arena) = arena_reader {
+                        let arena_tx = event_tx.clone();
+                        let arena_cancel = cancel_token.clone();
+                        tokio::spawn(async move {
+                            arena
+                                .run(arena_tx, std::time::Duration::from_millis(50), arena_cancel)
+                                .await;
+                        });
+                        info!("IDS arena reader started (50ms poll)");
+                    }
                     if let Some(ids_mgr) = ids_mgr_opt {
                         {
                             let mut svc = (**ids_svc.load()).clone();
@@ -1375,11 +1393,21 @@ pub async fn run(
         // 10e. TC DNS
         dns_ok = if config.dns.enabled {
             match try_load_tc_dns(&ebpf_dir, &config) {
-                Ok((loader, dns_rdr, reader)) => {
+                Ok((loader, dns_rdr, reader, arena_reader)) => {
                     let event_tx_clone = event_tx.clone();
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, CancellationToken::new()).await;
                     });
+                    if let Some(arena) = arena_reader {
+                        let arena_tx = event_tx.clone();
+                        let arena_cancel = cancel_token.clone();
+                        tokio::spawn(async move {
+                            arena
+                                .run(arena_tx, std::time::Duration::from_millis(50), arena_cancel)
+                                .await;
+                        });
+                        info!("DNS arena reader started (50ms poll)");
+                    }
                     if let Some(rdr) = dns_rdr {
                         metrics_readers.push(rdr);
                     }
@@ -2911,7 +2939,7 @@ pub fn try_load_xdp_ratelimit(
     Ok((loader, rl_mgr_opt, rl_lpm_opt, rdrs, reader))
 }
 
-/// IDS program load result: loader, IDS map manager, L7 ports manager, config flags manager, metrics reader, event reader.
+/// IDS program load result: loader, IDS map manager, L7 ports manager, config flags manager, metrics reader, event reader, optional arena reader.
 pub type TcIdsResult = (
     EbpfLoader,
     Option<IdsMapManager>,
@@ -2919,6 +2947,7 @@ pub type TcIdsResult = (
     Option<ConfigFlagsManager>,
     Option<MetricsReader>,
     EventReader,
+    Option<adapters::ebpf::arena_event_reader::IdsArenaReader>,
 );
 
 /// Load the TC IDS program: attach TC ingress, set up maps, create event reader.
@@ -2973,6 +3002,11 @@ pub fn try_load_tc_ids(ebpf_dir: &str, config: &AgentConfig) -> anyhow::Result<T
 
     let reader = EventReader::new(loader.ebpf_mut())?;
 
+    // Adopt the IDS_ARENA map fd loaded by aya, mmap it at the fixed
+    // VA the BPF program will allocate from, and wrap it in an
+    // IdsArenaReader so userspace can drain zero-copy L7 events.
+    let arena_reader = adapters::ebpf::arena_event_reader::mmap_ids_arena(loader.ebpf_mut());
+
     Ok((
         loader,
         ids_mgr_opt,
@@ -2980,6 +3014,7 @@ pub fn try_load_tc_ids(ebpf_dir: &str, config: &AgentConfig) -> anyhow::Result<T
         cfg_mgr_opt,
         ids_metrics_rdr,
         reader,
+        arena_reader,
     ))
 }
 
@@ -3045,7 +3080,12 @@ pub fn try_load_tc_threatintel(
 pub fn try_load_tc_dns(
     ebpf_dir: &str,
     config: &AgentConfig,
-) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>, DnsEventReader)> {
+) -> anyhow::Result<(
+    EbpfLoader,
+    Option<MetricsReader>,
+    DnsEventReader,
+    Option<adapters::ebpf::arena_event_reader::DnsArenaReader>,
+)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-dns")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
@@ -3058,7 +3098,11 @@ pub fn try_load_tc_dns(
 
     let reader = DnsEventReader::new(loader.ebpf_mut())?;
 
-    Ok((loader, dns_metrics_rdr, reader))
+    // Adopt the DNS_ARENA map fd; mmap it at DNS_ARENA_FIXED_VA so
+    // zero-copy DNS event drainage can run alongside the RingBuf.
+    let arena_reader = adapters::ebpf::arena_event_reader::mmap_dns_arena(loader.ebpf_mut());
+
+    Ok((loader, dns_metrics_rdr, reader, arena_reader))
 }
 
 /// Load the uprobe DLP program: attach uprobes to SSL functions, start DLP event reader.

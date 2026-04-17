@@ -24,7 +24,10 @@ use ebpf_helpers::arena_map::{RawMapDef, arena_def};
 use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, SkbDynptr, kill_flow_via_skb_ct, skb_get_fou_encap};
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{emit_packet_event, increment_metric, ringbuf_has_backpressure};
-use ebpf_common::arena::ArenaEventHeader;
+use ebpf_common::arena::{
+    ArenaEventHeader, IDS_ARENA_FIXED_VA, IDS_ARENA_PAGES, IDS_SLOT_COUNT, IDS_WRITE_SEQ_OFFSET,
+    ids_slot_offset,
+};
 use ebpf_common::{
     event::{
         PacketEvent, EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, FLAG_VLAN,
@@ -136,12 +139,19 @@ static TENANT_CGROUP_MAP: HashMap<u64, u32> = HashMap::with_max_entries(4096, 0)
 static L7_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(MAX_L7_PORTS, 0);
 
 /// Arena map for zero-copy L7 event delivery to userspace.
-/// 4 pages = 16 KiB — enough for one full `L7EventBuf` (2144 bytes)
-/// plus the `ArenaEventHeader` (24 bytes). Userspace mmap's this fd
-/// and polls the sequence counter for new events.
+/// Sized by `IDS_ARENA_PAGES` (32 pages = 128 KiB) — enough for
+/// ~58 `L7EventBuf` slots. The BPF program allocates those pages
+/// once at `IDS_ARENA_FIXED_VA` so userspace's
+/// `mmap(MAP_FIXED_NOREPLACE)` at the same address shares the same
+/// pointer space and reads slot contents zero-copy.
 #[unsafe(link_section = ".maps")]
 #[unsafe(no_mangle)]
-static IDS_ARENA: RawMapDef = arena_def(4);
+static IDS_ARENA: RawMapDef = arena_def(IDS_ARENA_PAGES);
+
+/// Cached arena base pointer, set on first successful allocation.
+/// Stored as `u64` because BPF lacks `AtomicPtr` and the sentinel
+/// value 0 marks "not allocated yet".
+static mut ARENA_BASE: u64 = 0;
 
 /// Monotonically increasing sequence counter for arena events.
 /// BPF atomics not available — use a simple u64 (single-writer safe
@@ -718,8 +728,14 @@ fn emit_l7_full(
     }
 }
 
-/// Attempt to write an L7 event into the arena. Returns `true` on
-/// success, `false` if arena is unavailable (falls back to `RingBuf`).
+/// Attempt to write an L7 event into the arena ring. Returns `true`
+/// on success, `false` if arena allocation fails (falls back to
+/// `RingBuf`).
+///
+/// Layout: arena pages are allocated once at `IDS_ARENA_FIXED_VA` so
+/// the userspace mmap shares the same address space. Each event
+/// writes the slot body first, then publishes the new sequence to
+/// the ring header so userspace observes a complete record.
 #[inline(always)]
 fn try_emit_arena_l7(
     ctx: &TcContext,
@@ -731,36 +747,49 @@ fn try_emit_arena_l7(
     vlan_id: u16,
     l7_offset: usize,
 ) -> bool {
-    use ebpf_helpers::kfuncs::arena_alloc_pages;
+    use ebpf_helpers::kfuncs::arena_alloc_pages_at;
 
-    // Allocate 1 page from the arena for this event.
     let arena_ptr = &raw const IDS_ARENA as *mut c_void;
-    let page = unsafe { arena_alloc_pages(arena_ptr, 1) };
-    let Some(page) = page else {
-        return false;
+
+    // Lazy init: anchor the arena at IDS_ARENA_FIXED_VA on first call.
+    let base = unsafe {
+        let cached = core::ptr::read_volatile(&raw const ARENA_BASE);
+        if cached != 0 {
+            cached as *mut u8
+        } else {
+            let allocated = arena_alloc_pages_at(
+                arena_ptr,
+                IDS_ARENA_FIXED_VA as *mut c_void,
+                IDS_ARENA_PAGES,
+            );
+            match allocated {
+                Some(ptr) => {
+                    core::ptr::write_volatile(&raw mut ARENA_BASE, ptr as u64);
+                    ptr as *mut u8
+                }
+                None => {
+                    let now = core::ptr::read_volatile(&raw const ARENA_BASE);
+                    if now != 0 {
+                        now as *mut u8
+                    } else {
+                        return false;
+                    }
+                }
+            }
+        }
     };
 
-    let base = page as *mut u8;
     let seq = unsafe {
         ARENA_SEQUENCE += 1;
         ARENA_SEQUENCE
     };
+    let slot_idx = ((seq - 1) as usize) % IDS_SLOT_COUNT;
+    let slot_offset = ids_slot_offset(slot_idx);
+    let slot_ptr = unsafe { base.add(slot_offset) };
 
-    // Write ArenaEventHeader at start of page.
-    let header = ArenaEventHeader {
-        sequence: seq,
-        timestamp_ns: unsafe { bpf_ktime_get_boot_ns() },
-        payload_len: core::mem::size_of::<L7EventBuf>() as u32,
-        event_type: EVENT_TYPE_L7,
-        _pad: [0; 3],
-    };
-    unsafe {
-        core::ptr::write_volatile(base.cast::<ArenaEventHeader>(), header);
-    }
-
-    // Write L7EventBuf after the header.
-    let event_offset = core::mem::size_of::<ArenaEventHeader>();
-    let event_ptr = unsafe { base.add(event_offset) } as *mut L7EventBuf;
+    // Slot body: PacketEvent header + full L7 payload.
+    let event_ptr = unsafe { slot_ptr.add(core::mem::size_of::<ArenaEventHeader>()) }
+        as *mut L7EventBuf;
     unsafe {
         fill_l7_header(
             ctx,
@@ -774,6 +803,25 @@ fn try_emit_arena_l7(
             (*event_ptr).payload.as_mut_ptr() as *mut _,
             MAX_L7_PAYLOAD as u32,
         );
+    }
+
+    // Slot header written *after* the body so userspace can detect
+    // torn slots by comparing `slot.sequence` to the expected value.
+    let header = ArenaEventHeader {
+        sequence: seq,
+        timestamp_ns: unsafe { bpf_ktime_get_boot_ns() },
+        payload_len: core::mem::size_of::<L7EventBuf>() as u32,
+        event_type: EVENT_TYPE_L7,
+        _pad: [0; 3],
+    };
+    unsafe {
+        core::ptr::write_volatile(slot_ptr.cast::<ArenaEventHeader>(), header);
+    }
+
+    // Publish: bump the global write_seq so userspace knows a new
+    // slot is ready.
+    unsafe {
+        core::ptr::write_volatile(base.add(IDS_WRITE_SEQ_OFFSET).cast::<u64>(), seq);
     }
 
     true
