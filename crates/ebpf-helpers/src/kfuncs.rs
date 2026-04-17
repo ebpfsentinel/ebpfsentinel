@@ -1348,15 +1348,21 @@ pub mod host_stubs {
 
     pub unsafe fn bpf_arena_alloc_pages(
         _p__map: *mut core::ffi::c_void,
-        _addr__ign: *mut core::ffi::c_void,
+        addr__ign: *mut core::ffi::c_void,
         page_cnt: u32,
         _node_id: i32,
         _flags: u64,
     ) -> *mut core::ffi::c_void {
         HOST_ARENA_ALLOCATED_PAGES.fetch_add(page_cnt as usize, Ordering::SeqCst);
-        // Return a non-null sentinel so callers see success.
-        // In real BPF this returns a pointer into the arena address space.
-        page_cnt as usize as *mut core::ffi::c_void
+        // Return the explicit address hint when provided so host-side
+        // tests can observe `arena_alloc_pages_at` honouring its hint.
+        // Real kernel returns the same address on success when the hint
+        // points to a free, page-aligned slot inside the arena VM range.
+        if addr__ign.is_null() {
+            page_cnt as usize as *mut core::ffi::c_void
+        } else {
+            addr__ign
+        }
     }
 
     pub unsafe fn bpf_arena_free_pages(
@@ -2191,6 +2197,31 @@ pub unsafe fn arena_alloc_pages(
     let ptr = unsafe {
         host_stubs::bpf_arena_alloc_pages(map_ptr, core::ptr::null_mut(), page_count, -1, 0)
     };
+    if ptr.is_null() { None } else { Some(ptr) }
+}
+
+/// Allocate `page_count` pages from a BPF arena map at an explicit
+/// virtual address `addr_hint`. Returns the allocated pointer (which
+/// equals `addr_hint` on success) or `None` on failure. Used to pin
+/// the arena base to a known shared address that userspace can
+/// `mmap(MAP_FIXED_NOREPLACE)` to. Kernel 6.9+.
+///
+/// # Safety
+/// `map_ptr` must be a valid pointer to an arena map fd obtained
+/// from the BPF program's map definitions. `addr_hint` must be a
+/// page-aligned virtual address inside the userspace VM range that
+/// the userspace side has reserved (or will reserve) via mmap.
+#[inline(always)]
+#[must_use]
+pub unsafe fn arena_alloc_pages_at(
+    map_ptr: *mut core::ffi::c_void,
+    addr_hint: *mut core::ffi::c_void,
+    page_count: u32,
+) -> Option<*mut core::ffi::c_void> {
+    #[cfg(target_arch = "bpf")]
+    let ptr = unsafe { bpf_arena_alloc_pages(map_ptr, addr_hint, page_count, -1, 0) };
+    #[cfg(not(target_arch = "bpf"))]
+    let ptr = unsafe { host_stubs::bpf_arena_alloc_pages(map_ptr, addr_hint, page_count, -1, 0) };
     if ptr.is_null() { None } else { Some(ptr) }
 }
 

@@ -796,32 +796,15 @@ pub async fn run(
         cancel_token.clone(),
     );
 
-    // ── 6b. Create arena shared memory bus ──────────────────────────
-    // Arena maps provide mmap'd shared memory for zero-copy data
-    // exchange between userspace components. Created here, consumed
-    // by metrics reader and event reader below. Gracefully skipped
-    // if the kernel lacks arena support.
+    // ── 6b. Create userspace-only metrics arena ─────────────────────
+    // Arena maps provide mmap'd shared memory. The DLP arena writer
+    // is wired below via try_load_uprobe_dlp -> mmap_dlp_arena, which
+    // adopts the BPF-loaded fd so kernel writes are visible at the
+    // same VA. The metrics arena here is a userspace-only scratch
+    // bus reserved for future agent-side counters.
     let arena_metrics = adapters::ebpf::arena::ArenaMap::create(1, "metrics_arena").ok();
-    let arena_events = adapters::ebpf::arena::ArenaMap::create(4, "events_arena").ok();
-
     if arena_metrics.is_some() {
         info!("arena metrics bus created (1 page, 512 counters via mmap)");
-    }
-    if arena_events.is_some() {
-        info!("arena events bus created (4 pages, zero-copy event fan-out)");
-    }
-
-    // Spawn arena event reader if events arena is available.
-    if let Some(events_arena) = arena_events {
-        let reader = adapters::ebpf::arena_event_reader::ArenaEventReader::new(events_arena);
-        let (arena_tx, _arena_rx) = tokio::sync::mpsc::channel(256);
-        let arena_cancel = cancel_token.clone();
-        tokio::spawn(async move {
-            reader
-                .run(arena_tx, Duration::from_millis(100), arena_cancel)
-                .await;
-        });
-        info!("arena event reader started (100ms poll)");
     }
 
     // ── 6c. Spawn conntrack event poller ─────────────────────────────
@@ -1419,11 +1402,21 @@ pub async fn run(
         // 10f. Uprobe DLP
         dlp_ok = if config.dlp.enabled {
             match try_load_uprobe_dlp(&ebpf_dir, &config) {
-                Ok((loader, dlp_rdr, reader)) => {
+                Ok((loader, dlp_rdr, reader, arena_reader)) => {
                     let event_tx_clone = event_tx.clone();
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, CancellationToken::new()).await;
                     });
+                    if let Some(arena) = arena_reader {
+                        let arena_tx = event_tx.clone();
+                        let arena_cancel = cancel_token.clone();
+                        tokio::spawn(async move {
+                            arena
+                                .run(arena_tx, std::time::Duration::from_millis(50), arena_cancel)
+                                .await;
+                        });
+                        info!("DLP arena reader started (50ms poll)");
+                    }
                     if let Some(rdr) = dlp_rdr {
                         metrics_readers.push(rdr);
                     }
@@ -3081,7 +3074,12 @@ const SSL_LIBRARY_CANDIDATES: &[&str] = &[
 pub fn try_load_uprobe_dlp(
     ebpf_dir: &str,
     _config: &AgentConfig,
-) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>, DlpEventReader)> {
+) -> anyhow::Result<(
+    EbpfLoader,
+    Option<MetricsReader>,
+    DlpEventReader,
+    Option<adapters::ebpf::arena_event_reader::DlpArenaReader>,
+)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "uprobe-dlp")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
@@ -3111,14 +3109,13 @@ pub fn try_load_uprobe_dlp(
 
     let reader = DlpEventReader::new(loader.ebpf_mut())?;
 
-    // Log if the DLP_ARENA map was loaded — BPF writes zero-copy
-    // events there, userspace can mmap it via ArenaMap helper.
-    if loader.ebpf_mut().map("DLP_ARENA").is_some() {
-        info!("DLP_ARENA map loaded — BPF arena zero-copy path active");
-    }
+    // Adopt the DLP_ARENA map fd loaded by aya, mmap it at the same
+    // fixed VA the BPF program will allocate from, and wrap it in a
+    // DlpArenaReader so userspace can drain zero-copy events.
+    let arena_reader = adapters::ebpf::arena_event_reader::mmap_dlp_arena(loader.ebpf_mut());
 
     info!(library = %ssl_path, "uprobe-dlp attached");
-    Ok((loader, dlp_metrics_rdr, reader))
+    Ok((loader, dlp_metrics_rdr, reader, arena_reader))
 }
 
 /// Search for a usable SSL/TLS shared library on the system.

@@ -694,11 +694,23 @@ pub async fn load_ebpf_programs(
     // ── Uprobe DLP ──────────────────────────────────────────────
     let dlp_ok = if config.dlp.enabled {
         match startup::try_load_uprobe_dlp(&ebpf_dir, config) {
-            Ok((mut loader, dlp_rdr, reader)) => {
+            Ok((mut loader, dlp_rdr, reader, arena_reader)) => {
                 let event_tx_clone = event_tx.clone();
                 tokio::spawn(
                     async move { reader.run(event_tx_clone, CancellationToken::new()).await },
                 );
+                if let Some(arena) = arena_reader {
+                    let arena_tx = event_tx.clone();
+                    tokio::spawn(async move {
+                        arena
+                            .run(
+                                arena_tx,
+                                std::time::Duration::from_millis(50),
+                                CancellationToken::new(),
+                            )
+                            .await;
+                    });
+                }
                 if let Some(rdr) = dlp_rdr {
                     metrics_readers.push(rdr);
                 }

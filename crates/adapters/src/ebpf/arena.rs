@@ -11,7 +11,7 @@
 //! Requires `CAP_BPF` + kernel 6.9+.
 
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::ptr;
 
 use tracing::{debug, info};
@@ -132,6 +132,81 @@ impl ArenaMap {
             size_bytes = size,
             name,
             "arena map created and mmap'd"
+        );
+
+        Ok(Self {
+            _fd: owned_fd,
+            ptr: ptr.cast::<u8>(),
+            size,
+        })
+    }
+
+    /// Adopt an existing arena map fd (owned by the aya loader),
+    /// duplicating it and `mmap`'ing the result at the supplied
+    /// fixed virtual address. Used to share the BPF-loaded
+    /// `DLP_ARENA` map with userspace at the same VA the BPF
+    /// program will allocate from.
+    ///
+    /// `MAP_FIXED_NOREPLACE` ensures we never silently clobber an
+    /// existing mapping at `fixed_va`.
+    pub fn from_aya_fd(
+        fd: BorrowedFd<'_>,
+        page_count: u32,
+        fixed_va: usize,
+    ) -> Result<Self, ArenaError> {
+        let size = (page_count as usize) * 4096;
+
+        // SAFETY: dup the borrowed fd so we own a ref-counted handle
+        // for the lifetime of this ArenaMap.
+        let dup = unsafe { libc::dup(fd.as_raw_fd()) };
+        if dup < 0 {
+            let err = io::Error::last_os_error();
+            return Err(ArenaError::CreateFailed {
+                errno: err.raw_os_error().unwrap_or(0),
+                message: format!("dup arena fd: {err}"),
+            });
+        }
+        // SAFETY: dup returned a valid fd we own.
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(dup) };
+
+        // SAFETY: fixed_va is a high userspace address (16 TiB) that
+        // sits well above the typical heap/stack range; MAP_FIXED_NOREPLACE
+        // returns -1 / EEXIST if it would clobber an existing mapping.
+        let ptr = unsafe {
+            libc::mmap(
+                fixed_va as *mut libc::c_void,
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | libc::MAP_FIXED_NOREPLACE,
+                owned_fd.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            let err = io::Error::last_os_error();
+            return Err(ArenaError::MmapFailed {
+                errno: err.raw_os_error().unwrap_or(0),
+                message: format!("mmap MAP_FIXED_NOREPLACE @ {fixed_va:#x}: {err}"),
+            });
+        }
+        if (ptr as usize) != fixed_va {
+            // Defensive: kernel honoured the request elsewhere — unmap
+            // and refuse so the BPF/userspace VAs don't drift.
+            // SAFETY: ptr was returned by a successful mmap call.
+            unsafe { libc::munmap(ptr, size) };
+            return Err(ArenaError::MmapFailed {
+                errno: 0,
+                message: format!(
+                    "mmap returned {ptr:p} instead of requested fixed VA {fixed_va:#x}"
+                ),
+            });
+        }
+
+        info!(
+            pages = page_count,
+            size_bytes = size,
+            fixed_va = format_args!("{fixed_va:#x}"),
+            "arena map adopted from aya fd at fixed VA"
         );
 
         Ok(Self {

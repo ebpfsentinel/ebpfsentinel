@@ -479,12 +479,26 @@ impl EbpfProgramManager {
     }
 
     async fn enable_uprobe_dlp(&mut self, config: &AgentConfig) -> anyhow::Result<()> {
-        let (mut loader, dlp_rdr, reader) = startup::try_load_uprobe_dlp(&self.ebpf_dir, config)?;
+        let (mut loader, dlp_rdr, reader, arena_reader) =
+            startup::try_load_uprobe_dlp(&self.ebpf_dir, config)?;
 
         let cancel = CancellationToken::new();
         let tx = self.event_tx.clone();
         let c = cancel.clone();
         let jh = tokio::spawn(async move { reader.run(tx, c).await });
+
+        let mut reader_handles = vec![jh];
+        if let Some(arena) = arena_reader {
+            let arena_tx = self.event_tx.clone();
+            let arena_cancel = cancel.clone();
+            let arena_handle = tokio::spawn(async move {
+                arena
+                    .run(arena_tx, std::time::Duration::from_millis(50), arena_cancel)
+                    .await;
+            });
+            reader_handles.push(arena_handle);
+            info!("DLP arena reader started via hot-reload (50ms poll)");
+        }
 
         if let Some(rdr) = dlp_rdr {
             self.metrics_readers.write().await.push(rdr);
@@ -502,7 +516,7 @@ impl EbpfProgramManager {
                 name: "uprobe_dlp".to_string(),
                 loader,
                 reader_cancel: cancel,
-                reader_handles: vec![jh],
+                reader_handles,
             },
         );
 

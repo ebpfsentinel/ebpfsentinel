@@ -11,11 +11,20 @@
 //! This is the userspace consumer counterpart to a BPF program that
 //! writes `ArenaEventHeader` + payload bytes into the arena.
 
+use std::os::fd::AsFd;
 use std::time::Duration;
 
-use ebpf_common::arena::{ARENA_EVENT_HEADER_SIZE, ArenaEventHeader};
+use application::packet_pipeline::AgentEvent;
+use aya::Ebpf;
+use aya::maps::Map;
+use ebpf_common::arena::{
+    ARENA_EVENT_HEADER_SIZE, ArenaEventHeader, DLP_ARENA_FIXED_VA, DLP_ARENA_PAGES, DLP_SLOT_COUNT,
+    DLP_WRITE_SEQ_OFFSET, dlp_slot_offset,
+};
+use ebpf_common::dlp::{DLP_MAX_EXCERPT, DLP_SMALL_EXCERPT, DlpEvent, DlpEventSmall};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace};
+use tracing::{debug, info, trace, warn};
 
 use super::arena::ArenaMap;
 
@@ -102,6 +111,171 @@ impl ArenaEventReader {
     }
 }
 
+/// Reader for the DLP arena ring layout written by the
+/// `uprobe-dlp` BPF program. The arena is laid out as a 64 B header
+/// (with `write_seq` at offset 0) followed by `DLP_SLOT_COUNT` fixed
+/// slots; each slot holds an `ArenaEventHeader` plus a
+/// `DlpEventSmall`. The reader polls `write_seq`, drains every
+/// unseen sequence and forwards them as `AgentEvent::Dlp` (with the
+/// truncated excerpt promoted into the standard `DlpEvent` shape).
+pub struct DlpArenaReader {
+    arena: ArenaMap,
+    last_sequence: u64,
+}
+
+impl DlpArenaReader {
+    /// Wrap a DLP arena. Initial `write_seq` of the arena is captured
+    /// so we don't replay events that arrived before the reader was
+    /// installed (typical for an agent restart with a still-alive
+    /// kernel-side BPF program).
+    #[must_use]
+    pub fn new(arena: ArenaMap) -> Self {
+        // SAFETY: write_seq lives at offset 0 of the mmap'd arena.
+        let initial = unsafe { arena.read_at::<u64>(DLP_WRITE_SEQ_OFFSET) };
+        Self {
+            arena,
+            last_sequence: initial,
+        }
+    }
+
+    /// Drain newly-published slots into a vector of `DlpEvent`. Returns
+    /// an empty vector when no new event is ready.
+    pub fn drain(&mut self) -> Vec<DlpEvent> {
+        // SAFETY: write_seq is a u64 at offset 0 of the arena.
+        let write_seq = unsafe { self.arena.read_at::<u64>(DLP_WRITE_SEQ_OFFSET) };
+        if write_seq <= self.last_sequence {
+            return Vec::new();
+        }
+
+        // Cap the drain to one ring lap to keep the BPF writer from
+        // moving us into stale slots while we iterate.
+        let lag = write_seq.saturating_sub(self.last_sequence);
+        let drained = lag.min(DLP_SLOT_COUNT as u64);
+        let start_seq = write_seq - drained + 1;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let mut out = Vec::with_capacity(drained as usize);
+        for seq in start_seq..=write_seq {
+            #[allow(clippy::cast_possible_truncation)]
+            let slot_idx = ((seq - 1) as usize) % DLP_SLOT_COUNT;
+            let slot_offset = dlp_slot_offset(slot_idx);
+
+            // SAFETY: slot_offset + slot_size <= arena.size() by
+            // construction (DLP_SLOT_COUNT is sized to fit).
+            let header: ArenaEventHeader = unsafe { self.arena.read_at(slot_offset) };
+            if header.sequence != seq {
+                // Slot was overwritten by the BPF writer between our
+                // write_seq snapshot and the slot read — skip it.
+                continue;
+            }
+            // SAFETY: same bounds as above; body sits right after header.
+            let small: DlpEventSmall =
+                unsafe { self.arena.read_at(slot_offset + ARENA_EVENT_HEADER_SIZE) };
+            out.push(promote_small_to_full(&small));
+        }
+
+        self.last_sequence = write_seq;
+        out
+    }
+
+    /// Long-running poll loop. Forwards each drained event as
+    /// `AgentEvent::Dlp` so it joins the same downstream pipeline as
+    /// the `RingBuf`-based `DlpEventReader`.
+    pub async fn run(
+        mut self,
+        tx: mpsc::Sender<AgentEvent>,
+        poll_interval: Duration,
+        cancel: CancellationToken,
+    ) {
+        let mut ticker = tokio::time::interval(poll_interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        debug!(
+            poll_ms = poll_interval.as_millis(),
+            "DLP arena reader started"
+        );
+
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    debug!("DLP arena reader cancelled");
+                    break;
+                }
+                _ = ticker.tick() => {
+                    for event in self.drain() {
+                        trace!(
+                            pid = event.pid,
+                            data_len = event.data_len,
+                            "DLP arena event drained"
+                        );
+                        if tx.try_send(AgentEvent::Dlp(Box::new(event))).is_err() {
+                            debug!("DLP arena event channel full, dropping");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Adopt the BPF-loaded `DLP_ARENA` map fd from the supplied
+/// `aya::Ebpf` instance, mmap it at `DLP_ARENA_FIXED_VA`, and wrap
+/// the result in a `DlpArenaReader`. Returns `None` when the map is
+/// missing, the kernel rejects the fixed VA, or the map appears
+/// under an unexpected `aya` variant — the caller then keeps `RingBuf`
+/// as the sole DLP delivery channel.
+#[must_use]
+pub fn mmap_dlp_arena(ebpf: &mut Ebpf) -> Option<DlpArenaReader> {
+    let map = ebpf.map("DLP_ARENA")?;
+    let map_data = match map {
+        Map::Unsupported(md) => md,
+        other => {
+            warn!(
+                kind = ?core::mem::discriminant(other),
+                "DLP_ARENA loaded as a typed aya map; expected Unsupported(MapData)"
+            );
+            return None;
+        }
+    };
+
+    let fd = map_data.fd().as_fd();
+    match ArenaMap::from_aya_fd(fd, DLP_ARENA_PAGES, DLP_ARENA_FIXED_VA) {
+        Ok(arena) => {
+            info!(
+                fixed_va = format_args!("{DLP_ARENA_FIXED_VA:#x}"),
+                pages = DLP_ARENA_PAGES,
+                "DLP_ARENA mmap'd; BPF arena zero-copy delivery active"
+            );
+            Some(DlpArenaReader::new(arena))
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "DLP_ARENA mmap failed; falling back to RingBuf-only delivery"
+            );
+            None
+        }
+    }
+}
+
+/// Promote a 288 B `DlpEventSmall` into the full 4128 B `DlpEvent`
+/// shape used by the rest of the agent pipeline. The trailing
+/// excerpt bytes are zero-padded.
+fn promote_small_to_full(small: &DlpEventSmall) -> DlpEvent {
+    let mut full = DlpEvent {
+        pid: small.pid,
+        tgid: small.tgid,
+        timestamp_ns: small.timestamp_ns,
+        cgroup_id: small.cgroup_id,
+        data_len: small.data_len,
+        direction: small.direction,
+        _padding: small._padding,
+        data_excerpt: [0; DLP_MAX_EXCERPT],
+    };
+    let copy_len = DLP_SMALL_EXCERPT.min(DLP_MAX_EXCERPT);
+    full.data_excerpt[..copy_len].copy_from_slice(&small.data_excerpt[..copy_len]);
+    full
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +323,139 @@ mod tests {
 
         // Second read with same sequence → None.
         assert!(reader.try_read().is_none());
+    }
+
+    fn fake_small(seq_marker: u8) -> DlpEventSmall {
+        let mut excerpt = [0u8; DLP_SMALL_EXCERPT];
+        excerpt[0] = seq_marker;
+        DlpEventSmall {
+            pid: u32::from(seq_marker),
+            tgid: u32::from(seq_marker) + 1,
+            timestamp_ns: 100,
+            cgroup_id: 200,
+            data_len: 4,
+            direction: 1,
+            _padding: [0; 3],
+            data_excerpt: excerpt,
+        }
+    }
+
+    fn write_dlp_slot(arena: &ArenaMap, seq: u64, marker: u8) {
+        let slot_idx = ((seq - 1) as usize) % DLP_SLOT_COUNT;
+        let off = dlp_slot_offset(slot_idx);
+        let header = ArenaEventHeader {
+            sequence: seq,
+            timestamp_ns: 100,
+            payload_len: core::mem::size_of::<DlpEventSmall>() as u32,
+            event_type: 3,
+            _pad: [0; 3],
+        };
+        unsafe { arena.write_at(off, header) };
+        unsafe { arena.write_at(off + ARENA_EVENT_HEADER_SIZE, fake_small(marker)) };
+    }
+
+    #[test]
+    fn dlp_arena_reader_drains_published_slot() {
+        let arena = match ArenaMap::create(4, "dlp_drain") {
+            Ok(a) => a,
+            Err(_) => {
+                eprintln!("skip: no CAP_BPF");
+                return;
+            }
+        };
+
+        write_dlp_slot(&arena, 1, 0xAB);
+        unsafe { arena.write_at::<u64>(DLP_WRITE_SEQ_OFFSET, 1) };
+
+        let mut reader = DlpArenaReader::new(arena);
+        // The reader was constructed AFTER write_seq=1 was published —
+        // it captures that as the baseline and refuses to replay.
+        assert!(reader.drain().is_empty());
+    }
+
+    #[test]
+    fn dlp_arena_reader_drains_new_events() {
+        let arena = match ArenaMap::create(4, "dlp_new") {
+            Ok(a) => a,
+            Err(_) => {
+                eprintln!("skip: no CAP_BPF");
+                return;
+            }
+        };
+
+        let mut reader = DlpArenaReader::new(arena);
+
+        // Publish two events after the reader is in place.
+        let arena_ref = &reader.arena;
+        write_dlp_slot(arena_ref, 1, 0x11);
+        write_dlp_slot(arena_ref, 2, 0x22);
+        unsafe { arena_ref.write_at::<u64>(DLP_WRITE_SEQ_OFFSET, 2) };
+
+        let drained = reader.drain();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].pid, 0x11);
+        assert_eq!(drained[0].data_excerpt[0], 0x11);
+        assert_eq!(drained[1].pid, 0x22);
+        assert_eq!(drained[1].data_excerpt[0], 0x22);
+
+        // Second drain with no new events → empty.
+        assert!(reader.drain().is_empty());
+    }
+
+    #[test]
+    fn dlp_arena_reader_caps_lag_to_one_lap() {
+        let arena = match ArenaMap::create(4, "dlp_lap") {
+            Ok(a) => a,
+            Err(_) => {
+                eprintln!("skip: no CAP_BPF");
+                return;
+            }
+        };
+
+        let mut reader = DlpArenaReader::new(arena);
+        // Simulate a writer that lapped the ring: only the most recent
+        // DLP_SLOT_COUNT events are recoverable.
+        let last_seq = (DLP_SLOT_COUNT as u64) * 3;
+        for seq in (last_seq - DLP_SLOT_COUNT as u64 + 1)..=last_seq {
+            #[allow(clippy::cast_possible_truncation)]
+            write_dlp_slot(&reader.arena, seq, (seq & 0xFF) as u8);
+        }
+        unsafe { reader.arena.write_at::<u64>(DLP_WRITE_SEQ_OFFSET, last_seq) };
+
+        let drained = reader.drain();
+        assert_eq!(drained.len(), DLP_SLOT_COUNT);
+    }
+
+    #[test]
+    fn dlp_arena_reader_skips_torn_slot() {
+        let arena = match ArenaMap::create(4, "dlp_torn") {
+            Ok(a) => a,
+            Err(_) => {
+                eprintln!("skip: no CAP_BPF");
+                return;
+            }
+        };
+
+        let mut reader = DlpArenaReader::new(arena);
+        // Slot 1 carries a stale sequence (was overwritten by a wrap).
+        write_dlp_slot(&reader.arena, 99, 0x99);
+        // But we publish write_seq=1 — body says 99, header expects 1.
+        unsafe { reader.arena.write_at::<u64>(DLP_WRITE_SEQ_OFFSET, 1) };
+
+        let drained = reader.drain();
+        assert!(drained.is_empty(), "torn slot must be skipped");
+    }
+
+    #[test]
+    fn promote_small_to_full_zero_pads_excerpt() {
+        let mut small = fake_small(0xFE);
+        small.data_excerpt[10] = 0xCD;
+        let full = promote_small_to_full(&small);
+        assert_eq!(full.pid, 0xFE);
+        assert_eq!(full.data_excerpt[0], 0xFE);
+        assert_eq!(full.data_excerpt[10], 0xCD);
+        // Tail is zero-padded.
+        assert_eq!(full.data_excerpt[DLP_SMALL_EXCERPT], 0);
+        assert_eq!(full.data_excerpt[DLP_MAX_EXCERPT - 1], 0);
     }
 }
