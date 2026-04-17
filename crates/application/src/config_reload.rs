@@ -35,10 +35,37 @@ use crate::schedule_service_impl::ScheduleService;
 use crate::threatintel_service_impl::ThreatIntelAppService;
 use crate::zone_service_impl::ZoneAppService;
 
+/// Per-domain reload serialization tokens.
+///
+/// Each domain owns its own `Mutex<()>` so concurrent reloads of
+/// independent domains run in parallel. A reload is still serialized
+/// against itself within a single domain (consistent with the
+/// previous global-mutex semantics).
+#[derive(Default)]
+struct ReloadLocks {
+    firewall: Mutex<()>,
+    ids: Mutex<()>,
+    ips: Mutex<()>,
+    l7: Mutex<()>,
+    ratelimit: Mutex<()>,
+    ddos: Mutex<()>,
+    threatintel: Mutex<()>,
+    conntrack: Mutex<()>,
+    dlp: Mutex<()>,
+    nat: Mutex<()>,
+    alias: Mutex<()>,
+    routing: Mutex<()>,
+    loadbalancer: Mutex<()>,
+    qos: Mutex<()>,
+    zone: Mutex<()>,
+    schedule: Mutex<()>,
+}
+
 /// Application-level service for hot-reloading configuration.
 ///
-/// Wraps reload logic with serialization (one reload at a time),
-/// metrics recording, and structured logging.
+/// Wraps reload logic with per-domain serialization (one reload at a
+/// time per domain, but reloads of different domains run in
+/// parallel), metrics recording, and structured logging.
 pub struct ConfigReloadService {
     firewall_service: Arc<RwLock<FirewallAppService>>,
     ids_service: Arc<ArcSwap<IdsAppService>>,
@@ -58,7 +85,7 @@ pub struct ConfigReloadService {
     zone_service: Option<Arc<RwLock<ZoneAppService>>>,
     schedule_service: Option<Arc<RwLock<ScheduleService>>>,
     metrics: Arc<dyn MetricsPort>,
-    reload_mutex: Mutex<()>,
+    reload_locks: ReloadLocks,
 }
 
 impl ConfigReloadService {
@@ -93,7 +120,7 @@ impl ConfigReloadService {
             zone_service: None,
             schedule_service: None,
             metrics,
-            reload_mutex: Mutex::new(()),
+            reload_locks: ReloadLocks::default(),
         }
     }
 
@@ -151,7 +178,7 @@ impl ConfigReloadService {
         let Some(ref sched_svc) = self.schedule_service else {
             return Ok(());
         };
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.schedule.lock().await;
 
         let mut svc = sched_svc.write().await;
         let count = schedules.len();
@@ -171,7 +198,7 @@ impl ConfigReloadService {
         let Some(ref zone_svc) = self.zone_service else {
             return Ok(());
         };
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.zone.lock().await;
 
         let mut svc = zone_svc.write().await;
         svc.set_enabled(enabled);
@@ -200,7 +227,7 @@ impl ConfigReloadService {
         let Some(ref dlp_svc) = self.dlp_service else {
             return Ok(());
         };
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.dlp.lock().await;
 
         let mut svc = (**dlp_svc.load()).clone();
         svc.set_enabled(enabled);
@@ -234,7 +261,7 @@ impl ConfigReloadService {
         let Some(ref lb_svc) = self.loadbalancer_service else {
             return Ok(());
         };
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.loadbalancer.lock().await;
 
         let mut svc = lb_svc.write().await;
         svc.set_enabled(enabled);
@@ -267,7 +294,7 @@ impl ConfigReloadService {
         let Some(ref qos_svc) = self.qos_service else {
             return Ok(());
         };
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.qos.lock().await;
 
         let mut svc = qos_svc.write().await;
         svc.set_enabled(enabled);
@@ -309,7 +336,7 @@ impl ConfigReloadService {
         let Some(ref ct_svc) = self.conntrack_service else {
             return Ok(());
         };
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.conntrack.lock().await;
 
         let mut svc = ct_svc.write().await;
         svc.set_enabled(enabled);
@@ -333,7 +360,7 @@ impl ConfigReloadService {
         let Some(ref nat_svc) = self.nat_service else {
             return Ok(());
         };
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.nat.lock().await;
 
         let mut svc = nat_svc.write().await;
         svc.set_enabled(enabled);
@@ -374,7 +401,7 @@ impl ConfigReloadService {
         let Some(ref alias_svc) = self.alias_service else {
             return Ok(());
         };
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.alias.lock().await;
 
         let mut svc = alias_svc.write().await;
         let count = aliases.len();
@@ -395,7 +422,7 @@ impl ConfigReloadService {
         let Some(ref routing_svc) = self.routing_service else {
             return Ok(());
         };
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.routing.lock().await;
 
         let mut svc = routing_svc.write().await;
         svc.set_enabled(enabled);
@@ -422,8 +449,9 @@ impl ConfigReloadService {
         enabled: bool,
         mode: DomainMode,
     ) -> Result<(), anyhow::Error> {
-        // Serialize concurrent reload attempts
-        let _guard = self.reload_mutex.lock().await;
+        // Serialize concurrent firewall reloads only — other domains
+        // can reload in parallel.
+        let _guard = self.reload_locks.firewall.lock().await;
 
         let mut svc = self.firewall_service.write().await;
 
@@ -492,7 +520,7 @@ impl ConfigReloadService {
         mode: DomainMode,
         sampling: SamplingMode,
     ) -> Result<(), anyhow::Error> {
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.ids.lock().await;
 
         let mut svc = (**self.ids_service.load()).clone();
 
@@ -563,7 +591,7 @@ impl ConfigReloadService {
         policy: IpsPolicy,
         sampling: SamplingMode,
     ) -> Result<(), anyhow::Error> {
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.ips.lock().await;
 
         let mut svc = (**self.ips_service.load()).clone();
 
@@ -649,7 +677,7 @@ impl ConfigReloadService {
 
     /// Reload L7 rules atomically with enabled awareness.
     pub async fn reload_l7(&self, rules: Vec<L7Rule>, enabled: bool) -> Result<(), anyhow::Error> {
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.l7.lock().await;
 
         let mut svc = (**self.l7_service.load()).clone();
 
@@ -695,7 +723,7 @@ impl ConfigReloadService {
         policies: Vec<RateLimitPolicy>,
         enabled: bool,
     ) -> Result<(), anyhow::Error> {
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.ratelimit.lock().await;
 
         let mut svc = self.ratelimit_service.write().await;
 
@@ -740,7 +768,7 @@ impl ConfigReloadService {
         &self,
         tiers: Vec<domain::ratelimit::entity::CountryTierConfig>,
     ) -> Result<(), anyhow::Error> {
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.ratelimit.lock().await;
 
         let mut svc = self.ratelimit_service.write().await;
         let tier_count = tiers.len();
@@ -771,7 +799,7 @@ impl ConfigReloadService {
         policies: Vec<DdosPolicy>,
         enabled: bool,
     ) -> Result<(), anyhow::Error> {
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.ddos.lock().await;
 
         let mut svc = (**self.ddos_service.load()).clone();
 
@@ -819,7 +847,7 @@ impl ConfigReloadService {
         mode: DomainMode,
         country_confidence_boost: HashMap<String, i8>,
     ) -> Result<(), anyhow::Error> {
-        let _guard = self.reload_mutex.lock().await;
+        let _guard = self.reload_locks.threatintel.lock().await;
 
         let mut svc = (**self.threatintel_service.load()).clone();
 
