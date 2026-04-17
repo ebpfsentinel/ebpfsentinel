@@ -1,12 +1,13 @@
 use domain::common::error::DomainError;
 use domain::conntrack::entity::{ConnTrackSettings, Connection};
 
-/// Secondary port for conntrack eBPF map operations.
+/// Secondary port for conntrack operations.
 ///
-/// Provides read and control access to the kernel conntrack table
-/// (`CT_TABLE_V4`/`CT_TABLE_V6`) and configuration map (`CT_CONFIG`).
+/// Backed by `/proc/net/nf_conntrack` for reads (sole source of truth
+/// since the BPF shadow tables were removed) and by the BPF
+/// `CT_CONFIG` map for kernel-side configuration push.
 ///
-/// Implemented by a conntrack adapter in the adapter layer.
+/// Implemented by conntrack adapters in the adapter layer.
 pub trait ConnTrackMapPort: Send + Sync {
     /// Retrieve active connections from the conntrack table, up to `limit`.
     fn get_connections(&self, limit: usize) -> Result<Vec<Connection>, DomainError>;

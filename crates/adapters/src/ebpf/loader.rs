@@ -47,7 +47,7 @@ impl EbpfLoader {
     /// BPF filesystem. The first program to load creates and pins the map;
     /// subsequent programs reuse the pinned map automatically.
     ///
-    /// This enables `CT_TABLE_V4`/`CT_TABLE_V6` and `INTERFACE_GROUPS` to be shared
+    /// Used for `INTERFACE_GROUPS`, `CT_CONFIG`, and other maps shared
     /// across tc-conntrack, xdp-firewall, tc-nat-ingress, tc-nat-egress.
     pub fn load_with_pin_path(program_bytes: &[u8], pin_path: &str) -> Result<Self, anyhow::Error> {
         // Ensure pin directory exists
