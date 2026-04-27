@@ -205,8 +205,7 @@ fn parse_stix_json(text: &str, config: &FeedConfig) -> Result<CtiIndicators, Dom
     let source_tag = format!("stix:{}", config.id);
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
 
     // Phase 1: index SDOs by ID for relationship enrichment
     let mut sdo_types: std::collections::HashMap<&str, ThreatType> =
@@ -1214,7 +1213,7 @@ mod tests {
     fn iso8601_basic() {
         assert_eq!(
             parse_iso8601_epoch_secs("2024-01-01T00:00:00Z"),
-            Some(1704067200)
+            Some(1_704_067_200)
         );
     }
 
@@ -1222,7 +1221,7 @@ mod tests {
     fn iso8601_with_fractional() {
         assert_eq!(
             parse_iso8601_epoch_secs("2024-01-01T00:00:00.000Z"),
-            Some(1704067200)
+            Some(1_704_067_200)
         );
     }
 

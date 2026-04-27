@@ -322,13 +322,10 @@ mod tests {
         // → read it back. This validates the userspace side of the
         // zero-copy path. The BPF side (writing from a TC/XDP
         // program) can only be tested on a real kernel with CAP_BPF.
-        let arena = match ArenaMap::create(1, "poc") {
-            Ok(a) => a,
-            Err(_) => {
-                // No CAP_BPF — skip gracefully (CI).
-                eprintln!("arena_proof_of_concept: skipped (no CAP_BPF)");
-                return;
-            }
+        let Ok(arena) = ArenaMap::create(1, "poc") else {
+            // No CAP_BPF — skip gracefully (CI).
+            eprintln!("arena_proof_of_concept: skipped (no CAP_BPF)");
+            return;
         };
 
         assert!(arena.size() >= 4096);

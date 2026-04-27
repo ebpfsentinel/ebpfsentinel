@@ -174,7 +174,7 @@ impl CgroupCache {
     }
 
     pub fn len(&self) -> usize {
-        self.inner.lock().map(|g| g.len()).unwrap_or(0)
+        self.inner.lock().map_or(0, |g| g.len())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -273,7 +273,7 @@ mod tests {
                 assert_eq!(runtime, ContainerRuntime::Docker);
                 assert_eq!(pid, 42);
             }
-            _ => panic!("expected container info"),
+            ContainerInfo::Host => panic!("expected container info"),
         }
     }
 

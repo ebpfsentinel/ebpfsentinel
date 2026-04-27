@@ -203,7 +203,7 @@ mod tests {
         let nss = discover_pod_network_namespaces();
         let mut inodes: Vec<u64> = nss.iter().map(|(_, ino)| *ino).collect();
         let before_dedup = inodes.len();
-        inodes.sort();
+        inodes.sort_unstable();
         inodes.dedup();
         assert_eq!(inodes.len(), before_dedup, "should already be unique");
     }

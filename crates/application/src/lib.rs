@@ -55,6 +55,7 @@ pub fn convert_to_lpm_entries(
 pub mod alert_enrichment;
 pub mod alert_event;
 pub mod alert_pipeline;
+pub mod alert_replay;
 pub mod alias_service_impl;
 pub mod audit_service_impl;
 pub mod config_reload;

@@ -102,7 +102,7 @@ fn bench_process_alert(c: &mut Criterion) {
                         AlertRouter::new(
                             routes.clone(),
                             Duration::from_secs(0), // no dedup (each alert is unique)
-                            Duration::from_secs(300),
+                            Duration::from_mins(5),
                             1_000_000,
                         )
                     },
@@ -129,8 +129,8 @@ fn bench_dedup(c: &mut Criterion) {
             || {
                 AlertRouter::new(
                     routes.clone(),
-                    Duration::from_secs(60),
-                    Duration::from_secs(300),
+                    Duration::from_mins(1),
+                    Duration::from_mins(5),
                     100_000,
                 )
             },
@@ -147,8 +147,8 @@ fn bench_dedup(c: &mut Criterion) {
             || {
                 let mut router = AlertRouter::new(
                     routes.clone(),
-                    Duration::from_secs(60),
-                    Duration::from_secs(300),
+                    Duration::from_mins(1),
+                    Duration::from_mins(5),
                     100_000,
                 );
                 // Pre-fill with the alert we'll try to submit
@@ -189,7 +189,7 @@ fn bench_event_type_filter(c: &mut Criterion) {
                 AlertRouter::new(
                     routes.clone(),
                     Duration::from_secs(0),
-                    Duration::from_secs(300),
+                    Duration::from_mins(5),
                     1_000_000,
                 )
             },

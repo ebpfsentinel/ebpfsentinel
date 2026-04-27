@@ -132,11 +132,7 @@ impl RateLimitPolicy {
 
         match self.algorithm {
             RateLimitAlgorithm::TokenBucket => {
-                let ns_per_token = if self.rate > 0 {
-                    1_000_000_000 / self.rate
-                } else {
-                    0
-                };
+                let ns_per_token = 1_000_000_000u64.checked_div(self.rate).unwrap_or(0);
                 EbpfConfig {
                     ns_per_token,
                     burst: self.burst,
@@ -212,11 +208,7 @@ impl CountryTierConfig {
 
         match self.algorithm {
             RateLimitAlgorithm::TokenBucket => {
-                let ns_per_token = if self.rate > 0 {
-                    1_000_000_000 / self.rate
-                } else {
-                    0
-                };
+                let ns_per_token = 1_000_000_000u64.checked_div(self.rate).unwrap_or(0);
                 EbpfConfig {
                     ns_per_token,
                     burst: self.burst,

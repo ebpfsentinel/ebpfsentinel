@@ -213,7 +213,7 @@ pub mod arena {
         #[test]
         fn dlp_slot_holds_header_plus_small_event() {
             // 24 (ArenaEventHeader) + 288 (DlpEventSmall) = 312 ≤ 320.
-            assert!(ARENA_EVENT_HEADER_SIZE + 288 <= DLP_SLOT_SIZE);
+            const { assert!(ARENA_EVENT_HEADER_SIZE + 288 <= DLP_SLOT_SIZE) };
         }
 
         #[test]

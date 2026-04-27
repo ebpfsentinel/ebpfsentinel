@@ -6,8 +6,10 @@ use domain::dlp::engine::DlpEngine;
 use domain::dlp::entity::DlpPattern;
 
 fn make_pattern(id: usize, regex: &str) -> DlpPattern {
+    // Built-in `dlp-pci-*` prefix keeps the bench OSS-compatible: custom
+    // (non-builtin) DLP patterns are an Enterprise feature.
     DlpPattern {
-        id: RuleId(format!("dlp-{id:03}")),
+        id: RuleId(format!("dlp-pci-{id:03}")),
         name: format!("Pattern {id}"),
         regex: regex.to_string(),
         severity: Severity::High,

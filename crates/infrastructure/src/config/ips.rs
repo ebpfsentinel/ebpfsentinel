@@ -233,7 +233,7 @@ mod tests {
         let policy = cfg.to_domain_policy();
         assert_eq!(
             policy.max_blacklist_duration,
-            std::time::Duration::from_secs(3600)
+            std::time::Duration::from_hours(1)
         );
         assert_eq!(policy.auto_blacklist_threshold, 3);
         assert_eq!(policy.max_blacklist_size, 10_000);

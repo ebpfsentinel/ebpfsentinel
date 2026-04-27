@@ -166,3 +166,8 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+# Bounded casts in eBPF / kernel-size paths are intentional.
+cast_possible_truncation = "allow"
+# Eponymous bindings like `cgroup1_id` / `cgroup_id` are clearer
+# than disambiguated names in eBPF event tests.
+similar_names = "allow"

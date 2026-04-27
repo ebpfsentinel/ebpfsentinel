@@ -78,12 +78,9 @@ mod tests {
 
     #[test]
     fn read_counter_from_empty_arena() {
-        let arena = match ArenaMap::create(1, "metrics_test") {
-            Ok(a) => a,
-            Err(_) => {
-                eprintln!("skip: no CAP_BPF");
-                return;
-            }
+        let Ok(arena) = ArenaMap::create(1, "metrics_test") else {
+            eprintln!("skip: no CAP_BPF");
+            return;
         };
         let reader = ArenaMetricsReader::new(arena);
         // Freshly created arena is zeroed.
@@ -94,12 +91,9 @@ mod tests {
 
     #[test]
     fn write_then_read_counter() {
-        let arena = match ArenaMap::create(1, "metrics_test2") {
-            Ok(a) => a,
-            Err(_) => {
-                eprintln!("skip: no CAP_BPF");
-                return;
-            }
+        let Ok(arena) = ArenaMap::create(1, "metrics_test2") else {
+            eprintln!("skip: no CAP_BPF");
+            return;
         };
 
         // Simulate BPF atomic write at counter index 7.
@@ -114,12 +108,9 @@ mod tests {
 
     #[test]
     fn read_all_returns_correct_count() {
-        let arena = match ArenaMap::create(1, "metrics_test3") {
-            Ok(a) => a,
-            Err(_) => {
-                eprintln!("skip: no CAP_BPF");
-                return;
-            }
+        let Ok(arena) = ArenaMap::create(1, "metrics_test3") else {
+            eprintln!("skip: no CAP_BPF");
+            return;
         };
         unsafe { arena.write_at::<u64>(0, 10) };
         unsafe { arena.write_at::<u64>(8, 20) };
@@ -132,12 +123,9 @@ mod tests {
 
     #[test]
     fn non_zero_counters_filters_zeros() {
-        let arena = match ArenaMap::create(1, "metrics_test4") {
-            Ok(a) => a,
-            Err(_) => {
-                eprintln!("skip: no CAP_BPF");
-                return;
-            }
+        let Ok(arena) = ArenaMap::create(1, "metrics_test4") else {
+            eprintln!("skip: no CAP_BPF");
+            return;
         };
         unsafe { arena.write_at::<u64>(2 * 8, 100) };
         unsafe { arena.write_at::<u64>(5 * 8, 200) };

@@ -257,7 +257,7 @@ mod tests {
     #[tokio::test]
     async fn email_sender_construction() {
         let metrics = Arc::new(TestMetrics::new());
-        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
         let result = EmailAlertSender::new(
             "127.0.0.1",
             25,
@@ -276,7 +276,7 @@ mod tests {
     #[tokio::test]
     async fn email_circuit_breaker_blocks_when_open() {
         let metrics = Arc::new(TestMetrics::new());
-        let cb = CircuitBreaker::new(1, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(1, Duration::from_mins(1));
         let sender = EmailAlertSender::new(
             "127.0.0.1",
             25,
@@ -311,7 +311,7 @@ mod tests {
     #[tokio::test]
     async fn email_metric_updated() {
         let metrics = Arc::new(TestMetrics::new());
-        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
         let sender = EmailAlertSender::new(
             "127.0.0.1",
             25,
@@ -338,7 +338,7 @@ mod tests {
     #[tokio::test]
     async fn email_sender_construction_with_credentials() {
         let metrics = Arc::new(TestMetrics::new());
-        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
         let result = EmailAlertSender::new(
             "127.0.0.1",
             587,
@@ -357,7 +357,7 @@ mod tests {
     #[tokio::test]
     async fn email_sender_construction_dangerous_no_tls() {
         let metrics = Arc::new(TestMetrics::new());
-        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
         let result = EmailAlertSender::new(
             "127.0.0.1",
             25,
@@ -413,7 +413,7 @@ mod tests {
     #[tokio::test]
     async fn email_non_email_route_returns_error() {
         let metrics = Arc::new(TestMetrics::new());
-        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
         let sender = EmailAlertSender::new(
             "127.0.0.1",
             25,

@@ -60,7 +60,7 @@ mod tests {
                 .filter(|e| e.rule_id == rule_id)
                 .cloned()
                 .collect();
-            matched.sort_by(|a, b| b.version.cmp(&a.version));
+            matched.sort_by_key(|e| std::cmp::Reverse(e.version));
             matched.truncate(limit);
             Ok(matched)
         }

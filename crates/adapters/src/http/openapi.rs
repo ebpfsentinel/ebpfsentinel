@@ -76,6 +76,7 @@ use super::zone_handler;
         // Alerts
         alert_handler::list_alerts,
         alert_handler::mark_false_positive,
+        alert_handler::stream_alerts,
         // Audit
         audit_handler::list_audit_logs,
         audit_handler::rule_history,

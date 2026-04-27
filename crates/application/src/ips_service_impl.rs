@@ -392,7 +392,7 @@ mod tests {
     fn make_service() -> (IpsAppService, Arc<TestMetrics>) {
         let metrics = Arc::new(TestMetrics::new());
         let policy = IpsPolicy {
-            max_blacklist_duration: Duration::from_secs(60),
+            max_blacklist_duration: Duration::from_mins(1),
             auto_blacklist_threshold: 3,
             max_blacklist_size: 100,
             country_thresholds: None,
@@ -420,22 +420,22 @@ mod tests {
 
     #[test]
     fn blacklisted_ip_detected() {
-        let (mut svc, _) = make_service();
+        let (svc, _) = make_service();
         let addr = ip(10, 0, 0, 1);
-        svc.add_to_blacklist(addr, "manual".into(), Duration::from_secs(60))
+        svc.add_to_blacklist(addr, "manual".into(), Duration::from_mins(1))
             .unwrap();
         assert!(svc.is_blacklisted(addr));
     }
 
     #[test]
     fn non_blacklisted_ip() {
-        let (mut svc, _) = make_service();
+        let (svc, _) = make_service();
         assert!(!svc.is_blacklisted(ip(10, 0, 0, 1)));
     }
 
     #[test]
     fn detection_threshold_triggers_enforcement() {
-        let (mut svc, metrics) = make_service();
+        let (svc, metrics) = make_service();
         let addr = ip(192, 168, 1, 100);
 
         assert!(svc.record_detection(addr).is_empty()); // 1
@@ -451,11 +451,11 @@ mod tests {
 
     #[test]
     fn blacklist_crud() {
-        let (mut svc, metrics) = make_service();
+        let (svc, metrics) = make_service();
         let addr = ip(10, 0, 0, 1);
 
         // Add
-        svc.add_to_blacklist(addr, "test".into(), Duration::from_secs(60))
+        svc.add_to_blacklist(addr, "test".into(), Duration::from_mins(1))
             .unwrap();
         assert_eq!(svc.blacklist_size(), 1);
         assert_eq!(metrics.blacklist_size.load(Ordering::Relaxed), 1);
@@ -473,10 +473,10 @@ mod tests {
 
     #[test]
     fn clear_blacklist() {
-        let (mut svc, metrics) = make_service();
-        svc.add_to_blacklist(ip(10, 0, 0, 1), "a".into(), Duration::from_secs(60))
+        let (svc, metrics) = make_service();
+        svc.add_to_blacklist(ip(10, 0, 0, 1), "a".into(), Duration::from_mins(1))
             .unwrap();
-        svc.add_to_blacklist(ip(10, 0, 0, 2), "b".into(), Duration::from_secs(60))
+        svc.add_to_blacklist(ip(10, 0, 0, 2), "b".into(), Duration::from_mins(1))
             .unwrap();
         svc.clear_blacklist();
         assert_eq!(svc.blacklist_size(), 0);
@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn cleanup_expired_updates_metrics() {
-        let (mut svc, _) = make_service();
+        let (svc, _) = make_service();
         svc.add_to_blacklist(ip(10, 0, 0, 1), "old".into(), Duration::from_millis(1))
             .unwrap();
 
@@ -499,7 +499,7 @@ mod tests {
     fn policy_update() {
         let (mut svc, _) = make_service();
         let new_policy = IpsPolicy {
-            max_blacklist_duration: Duration::from_secs(120),
+            max_blacklist_duration: Duration::from_mins(2),
             auto_blacklist_threshold: 5,
             max_blacklist_size: 500,
             country_thresholds: None,
@@ -537,7 +537,7 @@ mod tests {
         let wl = vec![WhitelistEntry::new(ip(10, 0, 0, 1), None).unwrap()];
         svc.reload_whitelist(wl);
         // Whitelisted IP cannot be added to blacklist
-        let result = svc.add_to_blacklist(ip(10, 0, 0, 1), "test".into(), Duration::from_secs(60));
+        let result = svc.add_to_blacklist(ip(10, 0, 0, 1), "test".into(), Duration::from_mins(1));
         assert!(result.is_err());
     }
 

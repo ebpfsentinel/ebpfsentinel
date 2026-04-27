@@ -578,7 +578,7 @@ pub async fn cmd_alerts_stats(client: &ApiClient, limit: u64, output: OutputForm
 
     // Top rules
     let mut rule_sorted: Vec<_> = by_rule.iter().collect();
-    rule_sorted.sort_by(|a, b| (b.1).1.cmp(&(a.1).1));
+    rule_sorted.sort_by_key(|item| std::cmp::Reverse((item.1).1));
     println!("  Top Rules                Alerts  Severity");
     println!("  {}", "-".repeat(50));
     for (rule, (severity, count)) in rule_sorted.iter().take(10) {
@@ -1729,7 +1729,7 @@ pub async fn cmd_flows(client: &ApiClient, limit: usize, output: OutputFormat) -
     }
 
     let mut sorted: Vec<(String, FlowAgg)> = agg.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.bytes.cmp(&a.1.bytes));
+    sorted.sort_by_key(|item| std::cmp::Reverse(item.1.bytes));
 
     if output == OutputFormat::Json {
         let json_flows: Vec<serde_json::Value> = sorted
@@ -1837,7 +1837,7 @@ pub async fn cmd_conntrack_watch(client: &ApiClient, interval: u64) -> Result<()
                 c.src_ip, c.src_port, c.dst_ip, c.dst_port, c.protocol,
             );
             if !prev_keys.contains(&key) {
-                println!("[NEW] {} {} state={}", chrono_or_now(), key, c.state,);
+                println!("[NEW] {} {} state={}", chrono_or_now(), key, c.state);
             }
             curr_keys.insert(key);
         }
@@ -1956,10 +1956,7 @@ pub async fn cmd_score(client: &ApiClient, alert_limit: u64, output: OutputForma
 
     // ── Connection anomaly score (0-1) ──
     let mut conn_score: f64 = 0.0;
-    let conn_count = conntrack_res
-        .as_ref()
-        .map(|c| c.connection_count)
-        .unwrap_or(0);
+    let conn_count = conntrack_res.as_ref().map_or(0, |c| c.connection_count);
     // Very rough heuristic: >10k connections = suspicious
     if conn_count > 10_000 {
         conn_score = 1.0;

@@ -45,7 +45,7 @@ pub struct IpsPolicy {
 impl Default for IpsPolicy {
     fn default() -> Self {
         Self {
-            max_blacklist_duration: Duration::from_secs(3600),
+            max_blacklist_duration: Duration::from_hours(1),
             auto_blacklist_threshold: 3,
             max_blacklist_size: 10_000,
             country_thresholds: None,
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn entry_not_expired() {
-        let entry = make_entry(Duration::from_secs(3600));
+        let entry = make_entry(Duration::from_hours(1));
         assert!(!entry.is_expired());
     }
 
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn default_policy_values() {
         let policy = IpsPolicy::default();
-        assert_eq!(policy.max_blacklist_duration, Duration::from_secs(3600));
+        assert_eq!(policy.max_blacklist_duration, Duration::from_hours(1));
         assert_eq!(policy.auto_blacklist_threshold, 3);
         assert_eq!(policy.max_blacklist_size, 10_000);
     }
@@ -209,7 +209,7 @@ mod tests {
         let ip = IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1));
         let action = EnforcementAction::BlacklistIp {
             ip,
-            ttl: Duration::from_secs(60),
+            ttl: Duration::from_mins(1),
         };
         assert!(matches!(action, EnforcementAction::BlacklistIp { .. }));
     }
@@ -226,11 +226,11 @@ mod tests {
         let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
         let a = EnforcementAction::BlacklistIp {
             ip,
-            ttl: Duration::from_secs(60),
+            ttl: Duration::from_mins(1),
         };
         let b = EnforcementAction::BlacklistIp {
             ip,
-            ttl: Duration::from_secs(60),
+            ttl: Duration::from_mins(1),
         };
         assert_eq!(a, b);
     }

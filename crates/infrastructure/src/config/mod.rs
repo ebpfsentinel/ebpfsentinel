@@ -1925,7 +1925,7 @@ ips:
         let policy = config.ips_policy();
         assert_eq!(
             policy.max_blacklist_duration,
-            std::time::Duration::from_secs(1800)
+            std::time::Duration::from_mins(30)
         );
         assert_eq!(policy.auto_blacklist_threshold, 10);
         assert_eq!(policy.max_blacklist_size, 5000);

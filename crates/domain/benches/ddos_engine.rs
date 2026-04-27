@@ -51,7 +51,7 @@ fn bench_process_event(c: &mut Criterion) {
                         .collect();
                     (engine, events)
                 },
-                |(mut engine, events)| {
+                |(engine, events)| {
                     for event in &events {
                         let _ = engine.process_event(black_box(event));
                     }
@@ -111,7 +111,7 @@ fn bench_tick(c: &mut Criterion) {
                     }
                     engine
                 },
-                |mut engine| {
+                |engine| {
                     engine.tick();
                 },
                 criterion::BatchSize::SmallInput,

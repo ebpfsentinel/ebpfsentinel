@@ -61,7 +61,7 @@ mod tests {
         let mock = InMemoryBlacklist::new();
         let ip = "192.168.1.1".parse::<IpAddr>().unwrap();
 
-        mock.add_to_blacklist(ip, "test reason".to_string(), Duration::from_secs(60))
+        mock.add_to_blacklist(ip, "test reason".to_string(), Duration::from_mins(1))
             .unwrap();
         assert!(mock.entries.lock().unwrap().contains_key(&ip));
 
@@ -74,9 +74,9 @@ mod tests {
         let mock = InMemoryBlacklist::new();
         let ip = "192.168.1.1".parse::<IpAddr>().unwrap();
 
-        mock.add_to_blacklist(ip, "first".to_string(), Duration::from_secs(60))
+        mock.add_to_blacklist(ip, "first".to_string(), Duration::from_mins(1))
             .unwrap();
-        mock.add_to_blacklist(ip, "second".to_string(), Duration::from_secs(120))
+        mock.add_to_blacklist(ip, "second".to_string(), Duration::from_mins(2))
             .unwrap();
         assert!(mock.entries.lock().unwrap().contains_key(&ip));
     }

@@ -1537,7 +1537,7 @@ mod tests {
 
     // ── JA4+ field extraction tests ───────────────────────────────
 
-    /// Build a full ClientHello with multiple extensions for JA4+ testing.
+    /// Build a full `ClientHello` with multiple extensions for JA4+ testing.
     fn build_full_client_hello() -> Vec<u8> {
         let hostname = b"ja4.example.com";
 

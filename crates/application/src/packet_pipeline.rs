@@ -118,7 +118,7 @@ impl EventDispatcher {
             dns_blocklist_svc: None,
             fingerprint_cache: Arc::new(FingerprintCache::new(
                 10_000,
-                std::time::Duration::from_secs(300),
+                std::time::Duration::from_mins(5),
             )),
             encrypted_dns_detector: EncryptedDnsDetector::default(),
             container_resolver: None,

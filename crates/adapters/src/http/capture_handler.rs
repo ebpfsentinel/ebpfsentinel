@@ -349,7 +349,7 @@ fn pcap_capture_blocking(
     }
 
     drop(savefile);
-    let file_size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+    let file_size = std::fs::metadata(output_path).map_or(0, |m| m.len());
 
     Ok((id.to_string(), packets, file_size))
 }

@@ -1,16 +1,25 @@
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::Duration;
 
 use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use serde::{Deserialize, Serialize};
+use tokio_stream::Stream;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 use utoipa::{IntoParams, ToSchema};
 
+use domain::alert::entity::Alert;
 use domain::alert::query::AlertQuery;
 use domain::audit::entity::{AuditAction, AuditComponent};
 use domain::auth::entity::JwtClaims;
 use domain::common::entity::Severity;
-use ports::secondary::metrics_port::AlertMetrics;
+use ports::secondary::metrics_port::{AlertMetrics, MetricsPort};
 
 use super::error::{ApiError, ErrorBody};
 use super::middleware::rbac::require_write_access;
@@ -150,6 +159,10 @@ pub struct FalsePositiveResponse {
 
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 1000;
+/// Cadence of the `:keepalive` SSE comment. Conservative enough to keep
+/// idle proxies (NGINX `proxy_read_timeout` defaults to 60 s) from closing
+/// the connection while still leaving headroom for a missed tick.
+const SSE_KEEPALIVE_SECS: u64 = 15;
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -358,6 +371,233 @@ pub async fn mark_false_positive(
         alert_id: id,
         marked,
     }))
+}
+
+// ── SSE stream contract ─────────────────────────────────────────────
+
+/// Query-string filters accepted by `GET /api/v1/alerts/stream`.
+///
+/// All fields are optional. A missing field means "do not filter on
+/// this dimension". Tenant scoping is an Enterprise-only concern and
+/// is not exposed by the OSS endpoint.
+#[derive(Debug, Default, Deserialize, IntoParams)]
+pub struct StreamFilters {
+    /// Minimum severity to receive (`low`, `medium`, `high`, `critical`).
+    pub severity_min: Option<String>,
+    /// Component to receive (case-insensitive exact match).
+    pub component: Option<String>,
+    /// MITRE ATT&CK tactic (kebab-case, case-insensitive).
+    pub mitre_tactic: Option<String>,
+}
+
+/// Server-side filter compiled from [`StreamFilters`].
+///
+/// `matches` is invoked against every alert pushed through the
+/// broadcast channel before it is forwarded to the client.
+#[derive(Debug, Default, Clone)]
+pub struct AlertFilter {
+    severity_min: Option<Severity>,
+    component: Option<String>,
+    mitre_tactic: Option<String>,
+}
+
+impl AlertFilter {
+    /// True when the alert satisfies every filter dimension.
+    #[must_use]
+    pub fn matches(&self, alert: &Alert) -> bool {
+        if let Some(min) = self.severity_min
+            && alert.severity.to_u8() < min.to_u8()
+        {
+            return false;
+        }
+        if let Some(ref c) = self.component
+            && !alert.component.eq_ignore_ascii_case(c)
+        {
+            return false;
+        }
+        if let Some(ref t) = self.mitre_tactic {
+            let ok = alert
+                .mitre_attack
+                .as_ref()
+                .is_some_and(|m| m.tactic.eq_ignore_ascii_case(t));
+            if !ok {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl StreamFilters {
+    fn into_filter(self) -> Result<AlertFilter, ApiError> {
+        let severity_min = self
+            .severity_min
+            .as_deref()
+            .map(|s| {
+                parse_severity(s).ok_or_else(|| ApiError::BadRequest {
+                    code: "INVALID_SEVERITY",
+                    message: format!(
+                        "severity_min must be one of low|medium|high|critical, got {s:?}"
+                    ),
+                })
+            })
+            .transpose()?;
+        Ok(AlertFilter {
+            severity_min,
+            component: self.component,
+            mitre_tactic: self.mitre_tactic,
+        })
+    }
+}
+
+/// RAII guard that bumps the `alerts_sse_subscribers` gauge on
+/// construction and decrements it on drop.
+struct SubscriberGuard {
+    metrics: Arc<dyn MetricsPort>,
+    counter: Arc<AtomicI64>,
+}
+
+impl SubscriberGuard {
+    fn new(metrics: Arc<dyn MetricsPort>, counter: Arc<AtomicI64>) -> Self {
+        let new = counter.fetch_add(1, Ordering::Relaxed) + 1;
+        metrics.set_alerts_sse_subscribers(new);
+        Self { metrics, counter }
+    }
+}
+
+impl Drop for SubscriberGuard {
+    fn drop(&mut self) {
+        let new = self.counter.fetch_sub(1, Ordering::Relaxed) - 1;
+        self.metrics.set_alerts_sse_subscribers(new.max(0));
+    }
+}
+
+/// Stream wrapper that ties a [`SubscriberGuard`] to the underlying SSE
+/// stream lifetime: the guard drops when the client disconnects.
+struct GuardedSseStream<S> {
+    inner: S,
+    _guard: SubscriberGuard,
+}
+
+impl<S: Stream<Item = Result<Event, Infallible>> + Unpin> Stream for GuardedSseStream<S> {
+    type Item = Result<Event, Infallible>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_next(cx)
+    }
+}
+
+/// Process-wide live subscriber counter, surfaced via the
+/// `ebpfsentinel_alerts_sse_subscribers` Prometheus gauge.
+fn subscriber_counter() -> Arc<AtomicI64> {
+    use std::sync::OnceLock;
+    static COUNTER: OnceLock<Arc<AtomicI64>> = OnceLock::new();
+    Arc::clone(COUNTER.get_or_init(|| Arc::new(AtomicI64::new(0))))
+}
+
+/// Render an alert as an SSE event (`id:`, `event: alert`, `data: <json>`).
+fn alert_to_event(alert: &Alert) -> Event {
+    let json = serde_json::to_string(alert).unwrap_or_else(|_| "{}".to_string());
+    Event::default()
+        .id(alert.id.clone())
+        .event("alert")
+        .data(json)
+}
+
+/// Read the `Last-Event-ID` HTTP header per the SSE reconnection
+/// contract. Empty values are treated as absent.
+fn last_event_id(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
+/// `GET /api/v1/alerts/stream` — Server-Sent Events live alert feed.
+///
+/// Server-side filtering happens on every alert before it is forwarded.
+/// Reconnects can pass `Last-Event-ID` to backfill missed alerts from
+/// the in-memory replay buffer (≤ 5 000 events). Lagged subscribers
+/// silently skip the gap; clients should refetch via
+/// `GET /api/v1/alerts` to backfill in that case.
+#[utoipa::path(
+    get, path = "/api/v1/alerts/stream",
+    tag = "Alerts",
+    params(StreamFilters),
+    responses(
+        (
+            status = 200,
+            description = "SSE stream of `event: alert` frames; `:keepalive` every 15 s",
+            content_type = "text/event-stream",
+        ),
+        (status = 400, description = "Invalid filter parameter", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 503, description = "Alert stream not enabled", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn stream_alerts(
+    State(state): State<Arc<AppState>>,
+    Query(filters): Query<StreamFilters>,
+    headers: HeaderMap,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let tx = state
+        .alert_stream_tx
+        .as_ref()
+        .ok_or(ApiError::ServiceUnavailable {
+            message: "alert stream not enabled".to_string(),
+        })?;
+    let filter = filters.into_filter()?;
+    let resume_from = last_event_id(&headers);
+
+    // Snapshot first, then subscribe: events between the snapshot and the
+    // subscribe instant are still delivered because the broadcast channel
+    // is fed AFTER the replay buffer (see `AlertPipeline::push_replay`).
+    let replay = state
+        .alert_replay_buffer
+        .as_ref()
+        .map(|buf| buf.snapshot_after(resume_from.as_deref()))
+        .unwrap_or_default();
+    let rx = tx.subscribe();
+
+    let metrics: Arc<dyn MetricsPort> = Arc::clone(&state.metrics) as Arc<dyn MetricsPort>;
+    let guard = SubscriberGuard::new(metrics, subscriber_counter());
+
+    let replay_filter = filter.clone();
+    let replay_stream = tokio_stream::iter(
+        replay
+            .into_iter()
+            .filter(move |a| replay_filter.matches(a))
+            .map(|a| Ok::<_, Infallible>(alert_to_event(&a))),
+    );
+
+    let live_filter = filter;
+    let live_stream = BroadcastStream::new(rx).filter_map(move |item| match item {
+        Ok(alert) if live_filter.matches(&alert) => Some(Ok(alert_to_event(&alert))),
+        Ok(_) | Err(_) => None,
+    });
+
+    let combined = replay_stream.chain(live_stream);
+
+    let stream = GuardedSseStream {
+        inner: combined,
+        _guard: guard,
+    };
+
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(SSE_KEEPALIVE_SECS))
+            .text("keepalive"),
+    ))
 }
 
 #[cfg(test)]

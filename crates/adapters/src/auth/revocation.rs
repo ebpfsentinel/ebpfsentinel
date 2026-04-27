@@ -17,7 +17,7 @@ pub struct RevocableAuthProvider {
 
 impl std::fmt::Debug for RevocableAuthProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let count = self.revoked.read().map(|r| r.len()).unwrap_or(0);
+        let count = self.revoked.read().map_or(0, |r| r.len());
         f.debug_struct("RevocableAuthProvider")
             .field("revoked_count", &count)
             .finish_non_exhaustive()

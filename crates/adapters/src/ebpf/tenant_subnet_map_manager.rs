@@ -161,7 +161,7 @@ mod tests {
     fn set_tenant_subnets_no_maps_succeeds() {
         let mut mgr = TenantSubnetMapManager::new();
         // Non-empty entries but no maps -- loop body never executes.
-        let result = mgr.set_tenant_subnets(&[(0x0A010000, 16, 1), (0xC0A80000, 24, 2)]);
+        let result = mgr.set_tenant_subnets(&[(0x0A01_0000, 16, 1), (0xC0A8_0000, 24, 2)]);
         assert!(result.is_ok());
     }
 

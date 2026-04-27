@@ -320,7 +320,7 @@ mod tests {
     #[tokio::test]
     async fn circuit_breaker_opens_after_threshold() {
         let metrics = Arc::new(TestMetrics::new());
-        let cb = CircuitBreaker::new(2, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(2, Duration::from_mins(1));
         let mut sender = WebhookAlertSender::new(
             cb,
             fast_retry(),
@@ -347,7 +347,7 @@ mod tests {
     #[tokio::test]
     async fn circuit_blocks_when_open() {
         let metrics = Arc::new(TestMetrics::new());
-        let cb = CircuitBreaker::new(1, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(1, Duration::from_mins(1));
         let mut sender = WebhookAlertSender::new(
             cb,
             fast_retry(),
@@ -372,7 +372,7 @@ mod tests {
     #[tokio::test]
     async fn metric_updated_on_send() {
         let metrics = Arc::new(TestMetrics::new());
-        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
         let mut sender = WebhookAlertSender::new(
             cb,
             fast_retry(),
@@ -392,7 +392,7 @@ mod tests {
     #[tokio::test]
     async fn non_webhook_route_returns_error() {
         let metrics = Arc::new(TestMetrics::new());
-        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
         let sender = WebhookAlertSender::new(
             cb,
             fast_retry(),
@@ -429,7 +429,7 @@ mod tests {
 
         let url = format!("http://{addr}/webhook");
         let metrics = Arc::new(TestMetrics::new());
-        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
         let mut sender = WebhookAlertSender::new(
             cb,
             fast_retry(),
@@ -472,7 +472,7 @@ mod tests {
 
         let url = format!("http://{addr}/webhook");
         let metrics = Arc::new(TestMetrics::new());
-        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
         let mut sender = WebhookAlertSender::new(
             cb,
             fast_retry(),
@@ -519,7 +519,7 @@ mod tests {
 
         let url = format!("http://{addr}/webhook");
         let metrics = Arc::new(TestMetrics::new());
-        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
         let no_retry = RetryConfig {
             max_retries: 0,
             backoff_schedule: vec![],

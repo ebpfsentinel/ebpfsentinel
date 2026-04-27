@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(EVENT_TYPE_QOS, 8);
         assert_eq!(MAX_L7_PAYLOAD, 2048);
         assert_eq!(SMALL_L7_PAYLOAD, 512);
-        assert!(SMALL_L7_PAYLOAD < MAX_L7_PAYLOAD);
+        const { assert!(SMALL_L7_PAYLOAD < MAX_L7_PAYLOAD) };
     }
 
     #[test]

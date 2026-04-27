@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn test_small_excerpt_constant() {
         assert_eq!(DLP_SMALL_EXCERPT, 256);
-        assert!(DLP_SMALL_EXCERPT < DLP_MAX_EXCERPT);
+        const { assert!(DLP_SMALL_EXCERPT < DLP_MAX_EXCERPT) };
     }
 
     #[test]

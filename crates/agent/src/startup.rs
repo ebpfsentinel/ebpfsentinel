@@ -691,6 +691,15 @@ pub async fn run(
     ));
     app_state = app_state.with_response_engine(Arc::clone(&response_engine));
 
+    // Real-time alert plumbing (broadcast + replay buffer). Created here
+    // so AppState can hand them to the SSE handler and the agent can
+    // hand the same broadcast clone to the gRPC streaming server below.
+    let (alert_stream_tx, _) = broadcast::channel::<Alert>(ALERT_CHANNEL_CAPACITY);
+    let alert_replay_buffer = Arc::new(application::alert_replay::AlertReplayBuffer::default());
+    app_state = app_state
+        .with_alert_stream_tx(alert_stream_tx.clone())
+        .with_alert_replay_buffer(Arc::clone(&alert_replay_buffer));
+
     // Create alert channel early so DNS services can emit alerts
     let (alert_tx, alert_rx) =
         mpsc::channel::<application::alert_event::AlertEvent>(ALERT_CHANNEL_CAPACITY);
@@ -900,7 +909,6 @@ pub async fn run(
     // reload_handle is spawned after eBPF loading (step 10) to include EbpfMapHolder
 
     // ── 8b. Spawn gRPC alert streaming server ─────────────────────────
-    let (alert_stream_tx, _) = broadcast::channel::<Alert>(ALERT_CHANNEL_CAPACITY);
     let grpc_port = config.agent.grpc_port;
     let grpc_bind = config.agent.bind_address.clone();
     let grpc_stream_tx = alert_stream_tx.clone();
@@ -1937,8 +1945,7 @@ pub async fn run(
                     _ = ticker.tick() => {
                         let now_ns = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
-                            .unwrap_or(0);
+                            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
                         let flushed = sweep_handle.flush_expired(now_ns);
                         if !flushed.is_empty() {
                             tracing::debug!(count = flushed.len(), "l7 reassembler flushed idle flows");
@@ -1970,7 +1977,8 @@ pub async fn run(
         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
         Arc::clone(&audit_svc),
     )
-    .with_stream_sender(alert_stream_tx);
+    .with_stream_sender(alert_stream_tx)
+    .with_replay_buffer(Arc::clone(&alert_replay_buffer));
     if let Some(store) = alert_store {
         alert_pipeline = alert_pipeline.with_alert_store(store);
     }
@@ -2164,7 +2172,7 @@ pub async fn run(
         .iter()
         .any(|r| r.destination.eq_ignore_ascii_case("webhook"));
     if has_webhook_routes {
-        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
         let webhook_sender: Arc<dyn AlertSender> = Arc::new(WebhookAlertSender::new(
             cb,
             retry_config.clone(),
@@ -2182,7 +2190,7 @@ pub async fn run(
         .iter()
         .any(|r| r.destination.eq_ignore_ascii_case("email"));
     if has_email_routes && let Some(ref smtp) = config.alerting.smtp {
-        let cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
         let email_sender = EmailAlertSender::new(
             &smtp.host,
             smtp.port,
@@ -2355,7 +2363,7 @@ pub async fn run(
             "schedule evaluator starting (60s interval)"
         );
         Some(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            let mut interval = tokio::time::interval(Duration::from_mins(1));
             loop {
                 tokio::select! {
                     () = sched_cancel.cancelled() => break,
@@ -2381,7 +2389,7 @@ pub async fn run(
         let cleanup_ids = Arc::clone(&ids_svc);
         let cleanup_cancel = cancel_token.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            let mut interval = tokio::time::interval(Duration::from_mins(1));
             interval.tick().await; // skip first immediate tick
             loop {
                 tokio::select! {

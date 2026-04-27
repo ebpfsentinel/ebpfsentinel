@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use crate::auth::revocation::RevocationHandle;
+use application::alert_replay::AlertReplayBuffer;
 use application::alias_service_impl::AliasAppService;
 use application::audit_service_impl::AuditAppService;
 use application::conntrack_service_impl::ConnTrackAppService;
@@ -24,6 +25,7 @@ use application::routing_service_impl::RoutingAppService;
 use application::threatintel_service_impl::ThreatIntelAppService;
 use application::zone_service_impl::ZoneAppService;
 use arc_swap::ArcSwap;
+use domain::alert::entity::Alert;
 use domain::conntrack::entity::ConntrackEvent;
 use infrastructure::config::AgentConfig;
 use infrastructure::metrics::AgentMetrics;
@@ -71,6 +73,12 @@ pub struct AppState {
     /// Broadcast sender for conntrack lifecycle events. SSE clients
     /// subscribe by calling `tx.subscribe()`.
     pub conntrack_event_tx: Option<broadcast::Sender<ConntrackEvent>>,
+    /// Broadcast sender feeding the SSE alerts stream. SSE handlers
+    /// subscribe via `tx.subscribe()`.
+    pub alert_stream_tx: Option<broadcast::Sender<Alert>>,
+    /// Replay buffer used by the SSE alerts handler to honour the
+    /// `Last-Event-ID` resume contract.
+    pub alert_replay_buffer: Option<Arc<AlertReplayBuffer>>,
 }
 
 impl AppState {
@@ -123,6 +131,8 @@ impl AppState {
             response_engine: None,
             capture_engine: None,
             conntrack_event_tx: None,
+            alert_stream_tx: None,
+            alert_replay_buffer: None,
         }
     }
 
@@ -171,6 +181,21 @@ impl AppState {
     #[must_use]
     pub fn with_conntrack_event_tx(mut self, tx: broadcast::Sender<ConntrackEvent>) -> Self {
         self.conntrack_event_tx = Some(tx);
+        self
+    }
+
+    /// Attach the broadcast sender used by the SSE alerts stream.
+    #[must_use]
+    pub fn with_alert_stream_tx(mut self, tx: broadcast::Sender<Alert>) -> Self {
+        self.alert_stream_tx = Some(tx);
+        self
+    }
+
+    /// Attach the replay buffer used by the SSE alerts stream's
+    /// `Last-Event-ID` resume contract.
+    #[must_use]
+    pub fn with_alert_replay_buffer(mut self, buffer: Arc<AlertReplayBuffer>) -> Self {
+        self.alert_replay_buffer = Some(buffer);
         self
     }
 

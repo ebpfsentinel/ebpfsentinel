@@ -559,12 +559,9 @@ mod tests {
 
     #[test]
     fn try_read_returns_none_when_no_new_event() {
-        let arena = match ArenaMap::create(1, "reader_test") {
-            Ok(a) => a,
-            Err(_) => {
-                eprintln!("skip: no CAP_BPF");
-                return;
-            }
+        let Ok(arena) = ArenaMap::create(1, "reader_test") else {
+            eprintln!("skip: no CAP_BPF");
+            return;
         };
         let mut reader = ArenaEventReader::new(arena);
         assert!(reader.try_read().is_none());
@@ -572,12 +569,9 @@ mod tests {
 
     #[test]
     fn try_read_returns_event_after_write() {
-        let arena = match ArenaMap::create(1, "reader_test2") {
-            Ok(a) => a,
-            Err(_) => {
-                eprintln!("skip: no CAP_BPF");
-                return;
-            }
+        let Ok(arena) = ArenaMap::create(1, "reader_test2") else {
+            eprintln!("skip: no CAP_BPF");
+            return;
         };
 
         // Simulate BPF write: header + payload.
@@ -633,12 +627,9 @@ mod tests {
 
     #[test]
     fn dlp_arena_reader_drains_published_slot() {
-        let arena = match ArenaMap::create(4, "dlp_drain") {
-            Ok(a) => a,
-            Err(_) => {
-                eprintln!("skip: no CAP_BPF");
-                return;
-            }
+        let Ok(arena) = ArenaMap::create(4, "dlp_drain") else {
+            eprintln!("skip: no CAP_BPF");
+            return;
         };
 
         write_dlp_slot(&arena, 1, 0xAB);
@@ -652,12 +643,9 @@ mod tests {
 
     #[test]
     fn dlp_arena_reader_drains_new_events() {
-        let arena = match ArenaMap::create(4, "dlp_new") {
-            Ok(a) => a,
-            Err(_) => {
-                eprintln!("skip: no CAP_BPF");
-                return;
-            }
+        let Ok(arena) = ArenaMap::create(4, "dlp_new") else {
+            eprintln!("skip: no CAP_BPF");
+            return;
         };
 
         let mut reader = DlpArenaReader::new(arena);
@@ -681,12 +669,9 @@ mod tests {
 
     #[test]
     fn dlp_arena_reader_caps_lag_to_one_lap() {
-        let arena = match ArenaMap::create(4, "dlp_lap") {
-            Ok(a) => a,
-            Err(_) => {
-                eprintln!("skip: no CAP_BPF");
-                return;
-            }
+        let Ok(arena) = ArenaMap::create(4, "dlp_lap") else {
+            eprintln!("skip: no CAP_BPF");
+            return;
         };
 
         let mut reader = DlpArenaReader::new(arena);
@@ -705,12 +690,9 @@ mod tests {
 
     #[test]
     fn dlp_arena_reader_skips_torn_slot() {
-        let arena = match ArenaMap::create(4, "dlp_torn") {
-            Ok(a) => a,
-            Err(_) => {
-                eprintln!("skip: no CAP_BPF");
-                return;
-            }
+        let Ok(arena) = ArenaMap::create(4, "dlp_torn") else {
+            eprintln!("skip: no CAP_BPF");
+            return;
         };
 
         let mut reader = DlpArenaReader::new(arena);
@@ -780,12 +762,9 @@ mod tests {
 
     #[test]
     fn ids_arena_reader_drains_new_events() {
-        let arena = match ArenaMap::create(IDS_ARENA_PAGES, "ids_new") {
-            Ok(a) => a,
-            Err(_) => {
-                eprintln!("skip: no CAP_BPF");
-                return;
-            }
+        let Ok(arena) = ArenaMap::create(IDS_ARENA_PAGES, "ids_new") else {
+            eprintln!("skip: no CAP_BPF");
+            return;
         };
 
         let mut reader = IdsArenaReader::new(arena);
@@ -813,12 +792,9 @@ mod tests {
 
     #[test]
     fn ids_arena_reader_skips_torn_slot() {
-        let arena = match ArenaMap::create(IDS_ARENA_PAGES, "ids_torn") {
-            Ok(a) => a,
-            Err(_) => {
-                eprintln!("skip: no CAP_BPF");
-                return;
-            }
+        let Ok(arena) = ArenaMap::create(IDS_ARENA_PAGES, "ids_torn") else {
+            eprintln!("skip: no CAP_BPF");
+            return;
         };
 
         let mut reader = IdsArenaReader::new(arena);
@@ -858,7 +834,7 @@ mod tests {
             arena.write_at(
                 off + ARENA_EVENT_HEADER_SIZE,
                 fake_dns_body(marker, dns_len),
-            )
+            );
         };
         let header = ArenaEventHeader {
             sequence: seq,
@@ -872,12 +848,9 @@ mod tests {
 
     #[test]
     fn dns_arena_reader_drains_new_events() {
-        let arena = match ArenaMap::create(DNS_ARENA_PAGES, "dns_new") {
-            Ok(a) => a,
-            Err(_) => {
-                eprintln!("skip: no CAP_BPF");
-                return;
-            }
+        let Ok(arena) = ArenaMap::create(DNS_ARENA_PAGES, "dns_new") else {
+            eprintln!("skip: no CAP_BPF");
+            return;
         };
 
         let mut reader = DnsArenaReader::new(arena);
@@ -910,12 +883,9 @@ mod tests {
 
     #[test]
     fn dns_arena_reader_clamps_payload_len() {
-        let arena = match ArenaMap::create(DNS_ARENA_PAGES, "dns_clamp") {
-            Ok(a) => a,
-            Err(_) => {
-                eprintln!("skip: no CAP_BPF");
-                return;
-            }
+        let Ok(arena) = ArenaMap::create(DNS_ARENA_PAGES, "dns_clamp") else {
+            eprintln!("skip: no CAP_BPF");
+            return;
         };
 
         let mut reader = DnsArenaReader::new(arena);

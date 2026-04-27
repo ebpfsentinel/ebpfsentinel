@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn process_event_without_policy_ignored() {
-        let mut engine = DdosEngine::new();
+        let engine = DdosEngine::new();
         let event = make_event(DdosAttackType::SynFlood, 1_000_000_000);
         let changed = engine.process_event(&event);
         assert!(!changed);

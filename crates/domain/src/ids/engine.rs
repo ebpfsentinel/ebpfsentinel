@@ -743,7 +743,7 @@ mod tests {
 
     #[test]
     fn threshold_limit_alerts_first_n() {
-        let mut engine = IdsEngine::new();
+        let engine = IdsEngine::new();
         let rule_id = RuleId("ids-001".to_string());
         let thresh = threshold_limit(3, 60);
 
@@ -756,7 +756,7 @@ mod tests {
 
     #[test]
     fn threshold_every_alerts_at_multiples() {
-        let mut engine = IdsEngine::new();
+        let engine = IdsEngine::new();
         let rule_id = RuleId("ids-001".to_string());
         let thresh = threshold_every(3, 60);
 
@@ -770,7 +770,7 @@ mod tests {
 
     #[test]
     fn threshold_both_alerts_once_after_count() {
-        let mut engine = IdsEngine::new();
+        let engine = IdsEngine::new();
         let rule_id = RuleId("ids-001".to_string());
         let thresh = threshold_both(3, 60);
 
@@ -783,7 +783,7 @@ mod tests {
 
     #[test]
     fn threshold_window_expiry_resets() {
-        let mut engine = IdsEngine::new();
+        let engine = IdsEngine::new();
         let rule_id = RuleId("ids-001".to_string());
         // Use 1ms window so it expires immediately
         let thresh = threshold_limit(2, 0);
@@ -795,7 +795,7 @@ mod tests {
 
     #[test]
     fn threshold_different_track_keys_independent() {
-        let mut engine = IdsEngine::new();
+        let engine = IdsEngine::new();
         let rule_id = RuleId("ids-001".to_string());
         let thresh = threshold_limit(2, 60);
 
@@ -813,7 +813,7 @@ mod tests {
 
     #[test]
     fn threshold_track_by_dst_ip() {
-        let mut engine = IdsEngine::new();
+        let engine = IdsEngine::new();
         let rule_id = RuleId("ids-001".to_string());
         let thresh = ThresholdConfig {
             threshold_type: ThresholdType::Limit,
@@ -829,7 +829,7 @@ mod tests {
 
     #[test]
     fn threshold_track_by_both() {
-        let mut engine = IdsEngine::new();
+        let engine = IdsEngine::new();
         let rule_id = RuleId("ids-001".to_string());
         let thresh = ThresholdConfig {
             threshold_type: ThresholdType::Limit,

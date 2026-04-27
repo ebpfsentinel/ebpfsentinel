@@ -28,12 +28,10 @@ use ebpf_common::threatintel::{ThreatIntelKey, ThreatIntelValue};
 /// Returns `true` when the effective UID is 0 (root).
 /// Used by benchmarks that would need real eBPF access.
 fn is_root() -> bool {
-    std::fs::read_to_string("/proc/self/status")
-        .map(|s| {
-            s.lines()
-                .any(|l| l.starts_with("Uid:") && l.split_whitespace().nth(1) == Some("0"))
-        })
-        .unwrap_or(false)
+    std::fs::read_to_string("/proc/self/status").is_ok_and(|s| {
+        s.lines()
+            .any(|l| l.starts_with("Uid:") && l.split_whitespace().nth(1) == Some("0"))
+    })
 }
 
 /// Build a synthetic [`FirewallRule`] with deterministic fields derived from `i`.

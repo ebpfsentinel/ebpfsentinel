@@ -61,7 +61,7 @@ impl DockerCache {
     }
 
     pub fn len(&self) -> usize {
-        self.inner.lock().map(|l| l.len()).unwrap_or(0)
+        self.inner.lock().map_or(0, |l| l.len())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn hit_miss() {
-        let cache = DockerCache::new(4, Duration::from_secs(60));
+        let cache = DockerCache::new(4, Duration::from_mins(1));
         assert!(cache.get("abc").is_none());
         cache.insert("abc".into(), sample("c1"));
         assert_eq!(cache.get("abc").unwrap().name, "c1");
@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn capacity_eviction() {
-        let cache = DockerCache::new(2, Duration::from_secs(60));
+        let cache = DockerCache::new(2, Duration::from_mins(1));
         cache.insert("a".into(), sample("1"));
         cache.insert("b".into(), sample("2"));
         cache.insert("c".into(), sample("3"));
@@ -112,14 +112,14 @@ mod tests {
 
     #[test]
     fn zero_capacity_coerces_to_one() {
-        let cache = DockerCache::new(0, Duration::from_secs(60));
+        let cache = DockerCache::new(0, Duration::from_mins(1));
         cache.insert("a".into(), sample("1"));
         assert!(cache.get("a").is_some());
     }
 
     #[test]
     fn len_reflects_inserts() {
-        let cache = DockerCache::new(4, Duration::from_secs(60));
+        let cache = DockerCache::new(4, Duration::from_mins(1));
         assert!(cache.is_empty());
         cache.insert("a".into(), sample("1"));
         cache.insert("b".into(), sample("2"));

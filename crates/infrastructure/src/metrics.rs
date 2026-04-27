@@ -112,6 +112,9 @@ pub struct AgentMetrics {
     pub alerts_total: Family<AlertLabels, Counter>,
     pub alerts_dropped_total: Family<ReasonLabels, Counter>,
     pub alert_sender_circuit_state: Family<DestinationLabels, Gauge>,
+    /// Live SSE alert-stream subscriber count. Set by handler on
+    /// connect / disconnect.
+    pub alerts_sse_subscribers: Gauge,
     pub ips_blacklist_size: Gauge,
     pub ips_blocks_total: Counter,
     pub alerts_by_rule_total: Family<RuleLabels, Counter>,
@@ -235,6 +238,13 @@ impl AgentMetrics {
             "alert_sender_circuit_state",
             "Alert sender circuit breaker state (0=closed, 1=half-open, 2=open)",
             alert_sender_circuit_state.clone(),
+        );
+
+        let alerts_sse_subscribers = Gauge::default();
+        registry.register(
+            "alerts_sse_subscribers",
+            "Current number of SSE alert-stream subscribers",
+            alerts_sse_subscribers.clone(),
         );
 
         let ips_blacklist_size = Gauge::default();
@@ -544,6 +554,7 @@ impl AgentMetrics {
             alerts_total,
             alerts_dropped_total,
             alert_sender_circuit_state,
+            alerts_sse_subscribers,
             ips_blacklist_size,
             ips_blocks_total,
             alerts_by_rule_total,
@@ -712,6 +723,10 @@ impl AlertMetrics for AgentMetrics {
                 rule_id: rule_id.to_string(),
             })
             .inc();
+    }
+
+    fn set_alerts_sse_subscribers(&self, count: i64) {
+        self.alerts_sse_subscribers.set(count);
     }
 }
 

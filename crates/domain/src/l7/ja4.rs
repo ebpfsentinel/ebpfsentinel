@@ -476,16 +476,16 @@ mod tests {
 
     fn make_flow_key(port: u16) -> FlowKey {
         FlowKey {
-            src_addr: [0x0A000001, 0, 0, 0],
+            src_addr: [0x0A00_0001, 0, 0, 0],
             src_port: port,
-            dst_addr: [0x0A000002, 0, 0, 0],
+            dst_addr: [0x0A00_0002, 0, 0, 0],
             dst_port: 443,
         }
     }
 
     #[test]
     fn cache_insert_and_get() {
-        let cache = FingerprintCache::new(100, Duration::from_secs(300));
+        let cache = FingerprintCache::new(100, Duration::from_mins(5));
         let fp = compute_ja4(&make_hello());
         let key = make_flow_key(12345);
         cache.insert(key.clone(), fp.clone());
@@ -495,14 +495,14 @@ mod tests {
 
     #[test]
     fn cache_miss() {
-        let cache = FingerprintCache::new(100, Duration::from_secs(300));
+        let cache = FingerprintCache::new(100, Duration::from_mins(5));
         assert!(cache.get(&make_flow_key(12345)).is_none());
         assert!(cache.is_empty());
     }
 
     #[test]
     fn cache_evicts_at_capacity() {
-        let cache = FingerprintCache::new(2, Duration::from_secs(300));
+        let cache = FingerprintCache::new(2, Duration::from_mins(5));
         let fp = compute_ja4(&make_hello());
         cache.insert(make_flow_key(1), fp.clone());
         cache.insert(make_flow_key(2), fp.clone());

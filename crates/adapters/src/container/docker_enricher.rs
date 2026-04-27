@@ -142,7 +142,7 @@ mod tests {
 
     fn unreachable_enricher() -> DockerEnricher {
         let client = DockerClient::new("/nonexistent/docker.sock", 10);
-        let cache = DockerCache::new(4, Duration::from_secs(60));
+        let cache = DockerCache::new(4, Duration::from_mins(1));
         DockerEnricher::new(client, cache)
     }
 

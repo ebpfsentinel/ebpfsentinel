@@ -232,7 +232,7 @@ impl AlertStore for RedbAlertStore {
             .collect();
 
         // Sort newest first by timestamp.
-        alerts.sort_by(|a, b| b.timestamp_ns.cmp(&a.timestamp_ns));
+        alerts.sort_by_key(|a| std::cmp::Reverse(a.timestamp_ns));
 
         // Apply offset/limit.
         let total = alerts.len();

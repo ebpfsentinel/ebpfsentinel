@@ -30,7 +30,7 @@ const AUTH_RATE_LIMIT_PER_SECOND: u64 = 10;
 const AUTH_RATE_LIMIT_BURST: u32 = 30;
 
 use super::agent_handler::agent_status;
-use super::alert_handler::{list_alerts, mark_false_positive};
+use super::alert_handler::{list_alerts, mark_false_positive, stream_alerts};
 use super::alias_handler::{alias_status, set_external_alias_content};
 use super::audit_handler::{list_audit_logs, rule_history};
 use super::capture_handler::{list_captures, start_capture, stop_capture};
@@ -151,6 +151,7 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
             .route("/api/v1/threatintel/iocs", get(list_iocs))
             .route("/api/v1/threatintel/feeds", get(list_feeds))
             .route("/api/v1/alerts", get(list_alerts))
+            .route("/api/v1/alerts/stream", get(stream_alerts))
             .route("/api/v1/audit/logs", get(list_audit_logs))
             .route("/api/v1/audit/rules/{id}/history", get(rule_history))
             .route("/api/v1/config", get(get_config))
@@ -301,7 +302,7 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
             axum::http::header::HeaderName::from_static("x-api-key"),
         ])
         .expose_headers([axum::http::header::CONTENT_TYPE])
-        .max_age(std::time::Duration::from_secs(3600));
+        .max_age(std::time::Duration::from_hours(1));
 
     let router = router.layer(cors);
 

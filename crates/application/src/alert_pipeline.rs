@@ -18,6 +18,7 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::alert_event::AlertEvent;
+use crate::alert_replay::AlertReplayBuffer;
 use crate::audit_service_impl::AuditAppService;
 use crate::ips_service_impl::IpsAppService;
 
@@ -37,6 +38,10 @@ pub struct AlertPipeline {
     /// Optional broadcast sender for gRPC alert streaming.
     /// Non-blocking: sends are best-effort (dropped if no receivers or lagged).
     stream_tx: Option<broadcast::Sender<Alert>>,
+    /// Optional replay buffer feeding the SSE alerts stream's
+    /// `Last-Event-ID` resume contract. Pushed in lock-step with the
+    /// `stream_tx` broadcast so subscribers can backfill missed events.
+    replay_buffer: Option<Arc<AlertReplayBuffer>>,
     /// Optional persistent alert store for query and false-positive marking.
     alert_store: Option<Arc<dyn AlertStore>>,
     /// Optional enricher for adding domain context to alerts.
@@ -79,6 +84,7 @@ impl AlertPipeline {
             email_sender: None,
             otlp_sender: None,
             stream_tx: None,
+            replay_buffer: None,
             alert_store: None,
             enricher: None,
             metadata_enrichers: Vec::new(),
@@ -126,6 +132,21 @@ impl AlertPipeline {
     pub fn with_stream_sender(mut self, tx: broadcast::Sender<Alert>) -> Self {
         self.stream_tx = Some(tx);
         self
+    }
+
+    /// Attach a replay buffer fed in lock-step with the broadcast sender.
+    /// Used by the SSE alerts handler to fulfil `Last-Event-ID` resume.
+    #[must_use]
+    pub fn with_replay_buffer(mut self, buffer: Arc<AlertReplayBuffer>) -> Self {
+        self.replay_buffer = Some(buffer);
+        self
+    }
+
+    /// Push an alert onto the replay buffer (no-op when no buffer is wired).
+    fn push_replay(&self, alert: &Alert) {
+        if let Some(ref buf) = self.replay_buffer {
+            buf.push(alert.clone());
+        }
     }
 
     /// Attach a persistent alert store for query and false-positive marking.
@@ -249,6 +270,7 @@ impl AlertPipeline {
         }
 
         // Broadcast to gRPC stream subscribers (best-effort, non-blocking)
+        self.push_replay(&alert);
         if let Some(ref tx) = self.stream_tx {
             let _ = tx.send(alert.clone());
         }
@@ -332,6 +354,7 @@ impl AlertPipeline {
         }
 
         // Broadcast to gRPC stream subscribers (best-effort, non-blocking)
+        self.push_replay(&alert);
         if let Some(ref tx) = self.stream_tx {
             let _ = tx.send(alert.clone());
         }
@@ -419,6 +442,7 @@ impl AlertPipeline {
         }
 
         // Broadcast to gRPC stream subscribers (best-effort, non-blocking)
+        self.push_replay(&alert);
         if let Some(ref tx) = self.stream_tx {
             let _ = tx.send(alert.clone());
         }
@@ -474,6 +498,7 @@ impl AlertPipeline {
             tracing::warn!(alert_id = %alert.id, error = %e, "failed to store {} alert", alert.component);
         }
 
+        self.push_replay(&alert);
         if let Some(ref tx) = self.stream_tx {
             let _ = tx.send(alert.clone());
         }
@@ -512,7 +537,7 @@ impl AlertPipeline {
                 )
             }
             DnsAlertReason::EncryptedDns { protocol, resolver } => {
-                format!("Encrypted DNS detected: {protocol} to resolver {resolver}",)
+                format!("Encrypted DNS detected: {protocol} to resolver {resolver}")
             }
         };
         let mut alert = Alert::from_dns_alert(dns_alert, &description);
@@ -543,6 +568,7 @@ impl AlertPipeline {
         }
 
         // Broadcast to gRPC stream subscribers (best-effort, non-blocking)
+        self.push_replay(&alert);
         if let Some(ref tx) = self.stream_tx {
             let _ = tx.send(alert.clone());
         }
@@ -965,7 +991,7 @@ mod tests {
         let router = AlertRouter::new(
             routes,
             Duration::from_secs(0), // no dedup for tests
-            Duration::from_secs(300),
+            Duration::from_mins(5),
             100,
         );
         AlertPipeline::new(
@@ -995,8 +1021,8 @@ mod tests {
         let metrics = Arc::new(TestMetrics::new());
         let router = AlertRouter::new(
             vec![make_route("all", Severity::Low)],
-            Duration::from_secs(60), // dedup enabled
-            Duration::from_secs(300),
+            Duration::from_mins(1), // dedup enabled
+            Duration::from_mins(5),
             100,
         );
         let mut pipeline = AlertPipeline::new(
@@ -1021,7 +1047,7 @@ mod tests {
         let router = AlertRouter::new(
             vec![make_route("all", Severity::Low)],
             Duration::from_secs(0),
-            Duration::from_secs(300),
+            Duration::from_mins(5),
             1, // throttle max = 1
         );
         let mut pipeline = AlertPipeline::new(

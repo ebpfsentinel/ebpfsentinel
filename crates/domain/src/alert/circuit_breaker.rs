@@ -93,14 +93,14 @@ mod tests {
 
     #[test]
     fn closed_allows_attempts() {
-        let mut cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let mut cb = CircuitBreaker::new(5, Duration::from_mins(1));
         assert!(cb.can_attempt());
         assert_eq!(cb.state(), CircuitState::Closed);
     }
 
     #[test]
     fn failure_increments_count() {
-        let mut cb = CircuitBreaker::new(5, Duration::from_secs(60));
+        let mut cb = CircuitBreaker::new(5, Duration::from_mins(1));
         cb.record_failure();
         assert_eq!(cb.state(), CircuitState::Closed);
         assert!(cb.can_attempt());
@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn threshold_opens_circuit() {
-        let mut cb = CircuitBreaker::new(3, Duration::from_secs(60));
+        let mut cb = CircuitBreaker::new(3, Duration::from_mins(1));
         cb.record_failure();
         cb.record_failure();
         assert_eq!(cb.state(), CircuitState::Closed);
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn open_blocks_attempts() {
-        let mut cb = CircuitBreaker::new(2, Duration::from_secs(60));
+        let mut cb = CircuitBreaker::new(2, Duration::from_mins(1));
         cb.record_failure();
         cb.record_failure();
         assert_eq!(cb.state(), CircuitState::Open);
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn success_resets_failure_count() {
-        let mut cb = CircuitBreaker::new(3, Duration::from_secs(60));
+        let mut cb = CircuitBreaker::new(3, Duration::from_mins(1));
         cb.record_failure();
         cb.record_failure();
         cb.record_success();

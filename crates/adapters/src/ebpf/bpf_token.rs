@@ -255,8 +255,7 @@ mod tests {
         // rather than silently returning Ok.
         let attr = TokenCreateAttr::enterprise_default(-1);
         match create_token(&attr) {
-            Err(BpfTokenError::SyscallFailed { .. }) => {}
-            Err(BpfTokenError::InvalidFd(_)) => {}
+            Err(BpfTokenError::SyscallFailed { .. } | BpfTokenError::InvalidFd(_)) => {}
             Err(e) => panic!("expected SyscallFailed, got {e:?}"),
             Ok(_) => panic!("expected failure with fd=-1"),
         }

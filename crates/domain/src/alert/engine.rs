@@ -202,12 +202,7 @@ mod tests {
     }
 
     fn make_router(routes: Vec<AlertRoute>) -> AlertRouter {
-        AlertRouter::new(
-            routes,
-            Duration::from_secs(60),
-            Duration::from_secs(300),
-            100,
-        )
+        AlertRouter::new(routes, Duration::from_mins(1), Duration::from_mins(5), 100)
     }
 
     #[test]
@@ -229,7 +224,7 @@ mod tests {
         let mut router = AlertRouter::new(
             routes,
             Duration::from_millis(0), // instant expiry
-            Duration::from_secs(300),
+            Duration::from_mins(5),
             100,
         );
         let alert = make_alert("ids-001", Severity::High);
@@ -246,7 +241,7 @@ mod tests {
     fn throttle_within_limit_allows() {
         let routes = vec![make_route("all", Severity::Low)];
         let mut router =
-            AlertRouter::new(routes, Duration::from_secs(0), Duration::from_secs(300), 3);
+            AlertRouter::new(routes, Duration::from_secs(0), Duration::from_mins(5), 3);
 
         // Different src_ip to avoid dedup
         for i in 0..3 {
@@ -261,7 +256,7 @@ mod tests {
     fn throttle_exceeded_suppresses() {
         let routes = vec![make_route("all", Severity::Low)];
         let mut router =
-            AlertRouter::new(routes, Duration::from_secs(0), Duration::from_secs(300), 2);
+            AlertRouter::new(routes, Duration::from_secs(0), Duration::from_mins(5), 2);
 
         for i in 0..2 {
             let mut alert = make_alert("ids-001", Severity::High);
@@ -280,12 +275,8 @@ mod tests {
     #[test]
     fn route_severity_filter_high_only() {
         let routes = vec![make_route("high-only", Severity::High)];
-        let mut router = AlertRouter::new(
-            routes,
-            Duration::from_secs(0),
-            Duration::from_secs(300),
-            100,
-        );
+        let mut router =
+            AlertRouter::new(routes, Duration::from_secs(0), Duration::from_mins(5), 100);
 
         let low = make_alert("ids-low", Severity::Low);
         assert!(router.process_alert(&low).is_empty());
@@ -301,12 +292,8 @@ mod tests {
             Severity::Low,
             vec!["ids".to_string()],
         )];
-        let mut router = AlertRouter::new(
-            routes,
-            Duration::from_secs(0),
-            Duration::from_secs(300),
-            100,
-        );
+        let mut router =
+            AlertRouter::new(routes, Duration::from_secs(0), Duration::from_mins(5), 100);
 
         let ids_alert = make_alert("ids-001", Severity::High);
         assert_eq!(router.process_alert(&ids_alert).len(), 1);
@@ -322,12 +309,8 @@ mod tests {
             make_route("all", Severity::Low),
             make_route("high-only", Severity::High),
         ];
-        let mut router = AlertRouter::new(
-            routes,
-            Duration::from_secs(0),
-            Duration::from_secs(300),
-            100,
-        );
+        let mut router =
+            AlertRouter::new(routes, Duration::from_secs(0), Duration::from_mins(5), 100);
 
         let alert = make_alert("ids-001", Severity::High);
         let matches = router.process_alert(&alert);
@@ -339,12 +322,8 @@ mod tests {
     #[test]
     fn no_routes_matched() {
         let routes = vec![make_route("critical-only", Severity::Critical)];
-        let mut router = AlertRouter::new(
-            routes,
-            Duration::from_secs(0),
-            Duration::from_secs(300),
-            100,
-        );
+        let mut router =
+            AlertRouter::new(routes, Duration::from_secs(0), Duration::from_mins(5), 100);
 
         let alert = make_alert("ids-001", Severity::Low);
         assert!(router.process_alert(&alert).is_empty());
@@ -353,12 +332,8 @@ mod tests {
     #[test]
     fn reload_routes_replaces_routes() {
         let routes = vec![make_route("old", Severity::Critical)];
-        let mut router = AlertRouter::new(
-            routes,
-            Duration::from_secs(0),
-            Duration::from_secs(300),
-            100,
-        );
+        let mut router =
+            AlertRouter::new(routes, Duration::from_secs(0), Duration::from_mins(5), 100);
 
         let alert = make_alert("ids-001", Severity::Low);
         assert!(router.process_alert(&alert).is_empty());
@@ -371,12 +346,8 @@ mod tests {
 
     #[test]
     fn empty_routes_matches_nothing() {
-        let mut router = AlertRouter::new(
-            vec![],
-            Duration::from_secs(0),
-            Duration::from_secs(300),
-            100,
-        );
+        let mut router =
+            AlertRouter::new(vec![], Duration::from_secs(0), Duration::from_mins(5), 100);
         let alert = make_alert("ids-001", Severity::Critical);
         assert!(router.process_alert(&alert).is_empty());
     }
@@ -396,12 +367,8 @@ mod tests {
     #[test]
     fn severity_ordering_in_route_filter() {
         let routes = vec![make_route("medium-up", Severity::Medium)];
-        let mut router = AlertRouter::new(
-            routes,
-            Duration::from_secs(0),
-            Duration::from_secs(300),
-            100,
-        );
+        let mut router =
+            AlertRouter::new(routes, Duration::from_secs(0), Duration::from_mins(5), 100);
 
         // Low < Medium → filtered out
         let low = make_alert("a", Severity::Low);
@@ -438,8 +405,8 @@ mod tests {
                 };
                 let mut router = AlertRouter::new(
                     vec![route],
-                    Duration::from_secs(60),
-                    Duration::from_secs(300),
+                    Duration::from_mins(1),
+                    Duration::from_mins(5),
                     100,
                 );
 

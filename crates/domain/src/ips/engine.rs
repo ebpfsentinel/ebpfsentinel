@@ -347,7 +347,7 @@ mod tests {
 
     fn test_policy() -> IpsPolicy {
         IpsPolicy {
-            max_blacklist_duration: Duration::from_secs(60),
+            max_blacklist_duration: Duration::from_mins(1),
             auto_blacklist_threshold: 3,
             max_blacklist_size: 100,
             country_thresholds: None,
@@ -368,7 +368,7 @@ mod tests {
         let engine = IpsEngine::default();
         assert_eq!(
             engine.policy().max_blacklist_duration,
-            Duration::from_secs(3600)
+            Duration::from_hours(1)
         );
         assert_eq!(engine.policy().auto_blacklist_threshold, 3);
     }
@@ -377,19 +377,19 @@ mod tests {
 
     #[test]
     fn is_blacklisted_false_when_empty() {
-        let mut engine = IpsEngine::new(test_policy());
+        let engine = IpsEngine::new(test_policy());
         assert!(!engine.is_blacklisted(ip(10, 0, 0, 1)));
     }
 
     #[test]
     fn is_blacklisted_true_after_add() {
-        let mut engine = IpsEngine::new(test_policy());
+        let engine = IpsEngine::new(test_policy());
         engine
             .add_to_blacklist(
                 ip(10, 0, 0, 1),
                 "test".into(),
                 false,
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )
             .unwrap();
         assert!(engine.is_blacklisted(ip(10, 0, 0, 1)));
@@ -397,7 +397,7 @@ mod tests {
 
     #[test]
     fn is_blacklisted_removes_expired() {
-        let mut engine = IpsEngine::new(test_policy());
+        let engine = IpsEngine::new(test_policy());
         let addr = ip(10, 0, 0, 1);
         // Insert with a very short TTL
         engine
@@ -416,12 +416,12 @@ mod tests {
 
     #[test]
     fn add_to_blacklist_succeeds() {
-        let mut engine = IpsEngine::new(test_policy());
+        let engine = IpsEngine::new(test_policy());
         let result = engine.add_to_blacklist(
             ip(10, 0, 0, 1),
             "attack".into(),
             true,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
         assert!(result.is_ok());
         assert_eq!(engine.blacklist_size(), 1);
@@ -429,12 +429,12 @@ mod tests {
 
     #[test]
     fn add_duplicate_fails() {
-        let mut engine = IpsEngine::new(test_policy());
+        let engine = IpsEngine::new(test_policy());
         let addr = ip(10, 0, 0, 1);
         engine
-            .add_to_blacklist(addr, "first".into(), true, Duration::from_secs(60))
+            .add_to_blacklist(addr, "first".into(), true, Duration::from_mins(1))
             .unwrap();
-        let result = engine.add_to_blacklist(addr, "second".into(), true, Duration::from_secs(60));
+        let result = engine.add_to_blacklist(addr, "second".into(), true, Duration::from_mins(1));
         assert!(matches!(result, Err(IpsError::AlreadyBlacklisted { .. })));
     }
 
@@ -444,15 +444,15 @@ mod tests {
             max_blacklist_size: 2,
             ..test_policy()
         };
-        let mut engine = IpsEngine::new(policy);
+        let engine = IpsEngine::new(policy);
         engine
-            .add_to_blacklist(ip(10, 0, 0, 1), "a".into(), true, Duration::from_secs(60))
+            .add_to_blacklist(ip(10, 0, 0, 1), "a".into(), true, Duration::from_mins(1))
             .unwrap();
         engine
-            .add_to_blacklist(ip(10, 0, 0, 2), "b".into(), true, Duration::from_secs(60))
+            .add_to_blacklist(ip(10, 0, 0, 2), "b".into(), true, Duration::from_mins(1))
             .unwrap();
         let result =
-            engine.add_to_blacklist(ip(10, 0, 0, 3), "c".into(), true, Duration::from_secs(60));
+            engine.add_to_blacklist(ip(10, 0, 0, 3), "c".into(), true, Duration::from_mins(1));
         assert!(matches!(result, Err(IpsError::BlacklistFull)));
     }
 
@@ -460,10 +460,10 @@ mod tests {
 
     #[test]
     fn remove_succeeds() {
-        let mut engine = IpsEngine::new(test_policy());
+        let engine = IpsEngine::new(test_policy());
         let addr = ip(10, 0, 0, 1);
         engine
-            .add_to_blacklist(addr, "test".into(), true, Duration::from_secs(60))
+            .add_to_blacklist(addr, "test".into(), true, Duration::from_mins(1))
             .unwrap();
         engine.remove_from_blacklist(&addr).unwrap();
         assert_eq!(engine.blacklist_size(), 0);
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn remove_nonexistent_fails() {
-        let mut engine = IpsEngine::new(test_policy());
+        let engine = IpsEngine::new(test_policy());
         let result = engine.remove_from_blacklist(&ip(10, 0, 0, 1));
         assert!(matches!(result, Err(IpsError::NotBlacklisted { .. })));
     }
@@ -480,12 +480,12 @@ mod tests {
 
     #[test]
     fn clear_removes_all() {
-        let mut engine = IpsEngine::new(test_policy());
+        let engine = IpsEngine::new(test_policy());
         engine
-            .add_to_blacklist(ip(10, 0, 0, 1), "a".into(), true, Duration::from_secs(60))
+            .add_to_blacklist(ip(10, 0, 0, 1), "a".into(), true, Duration::from_mins(1))
             .unwrap();
         engine
-            .add_to_blacklist(ip(10, 0, 0, 2), "b".into(), true, Duration::from_secs(60))
+            .add_to_blacklist(ip(10, 0, 0, 2), "b".into(), true, Duration::from_mins(1))
             .unwrap();
         engine.clear_blacklist();
         assert_eq!(engine.blacklist_size(), 0);
@@ -495,7 +495,7 @@ mod tests {
 
     #[test]
     fn record_detection_under_threshold() {
-        let mut engine = IpsEngine::new(test_policy());
+        let engine = IpsEngine::new(test_policy());
         let addr = ip(10, 0, 0, 1);
         assert!(engine.record_detection(addr).is_empty());
         assert!(engine.record_detection(addr).is_empty());
@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn record_detection_at_threshold_triggers_blacklist() {
-        let mut engine = IpsEngine::new(test_policy());
+        let engine = IpsEngine::new(test_policy());
         let addr = ip(10, 0, 0, 1);
         assert!(engine.record_detection(addr).is_empty()); // 1
         assert!(engine.record_detection(addr).is_empty()); // 2
@@ -514,7 +514,7 @@ mod tests {
             actions[0],
             EnforcementAction::BlacklistIp {
                 ip: addr,
-                ttl: Duration::from_secs(60),
+                ttl: Duration::from_mins(1),
             }
         );
         assert!(engine.is_blacklisted(addr));
@@ -528,7 +528,7 @@ mod tests {
             max_blacklist_size: 100,
             country_thresholds: None,
         };
-        let mut engine = IpsEngine::new(policy);
+        let engine = IpsEngine::new(policy);
         let addr = ip(10, 0, 0, 1);
 
         // Record 2 detections
@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn cleanup_expired_removes_and_returns_actions() {
-        let mut engine = IpsEngine::new(test_policy());
+        let engine = IpsEngine::new(test_policy());
         let addr1 = ip(10, 0, 0, 1);
         let addr2 = ip(10, 0, 0, 2);
 
@@ -554,7 +554,7 @@ mod tests {
             .add_to_blacklist(addr1, "old".into(), true, Duration::from_millis(1))
             .unwrap();
         engine
-            .add_to_blacklist(addr2, "fresh".into(), true, Duration::from_secs(3600))
+            .add_to_blacklist(addr2, "fresh".into(), true, Duration::from_hours(1))
             .unwrap();
 
         std::thread::sleep(Duration::from_millis(5));
@@ -568,9 +568,9 @@ mod tests {
 
     #[test]
     fn cleanup_no_expired_returns_empty() {
-        let mut engine = IpsEngine::new(test_policy());
+        let engine = IpsEngine::new(test_policy());
         engine
-            .add_to_blacklist(ip(10, 0, 0, 1), "x".into(), true, Duration::from_secs(3600))
+            .add_to_blacklist(ip(10, 0, 0, 1), "x".into(), true, Duration::from_hours(1))
             .unwrap();
         let actions = engine.cleanup_expired();
         assert!(actions.is_empty());
@@ -587,7 +587,7 @@ mod tests {
             country_thresholds: Some(ct),
             ..test_policy()
         };
-        let mut engine = IpsEngine::new(policy);
+        let engine = IpsEngine::new(policy);
         let addr = ip(10, 0, 0, 1);
         // RU threshold is 1 -> blacklist after first detection + subnet block
         let actions = engine.record_detection_with_country(addr, Some("RU"));
@@ -606,7 +606,7 @@ mod tests {
             country_thresholds: Some(ct),
             ..test_policy()
         };
-        let mut engine = IpsEngine::new(policy);
+        let engine = IpsEngine::new(policy);
         let addr = ip(10, 0, 0, 2);
         // FR not in map -> uses global threshold of 3
         assert!(
@@ -627,7 +627,7 @@ mod tests {
     fn set_policy_updates() {
         let mut engine = IpsEngine::new(test_policy());
         let new_policy = IpsPolicy {
-            max_blacklist_duration: Duration::from_secs(120),
+            max_blacklist_duration: Duration::from_mins(2),
             auto_blacklist_threshold: 5,
             max_blacklist_size: 500,
             country_thresholds: None,
@@ -639,13 +639,13 @@ mod tests {
 
     #[test]
     fn blacklist_entries_accessor() {
-        let mut engine = IpsEngine::new(test_policy());
+        let engine = IpsEngine::new(test_policy());
         engine
             .add_to_blacklist(
                 ip(10, 0, 0, 1),
                 "test".into(),
                 false,
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )
             .unwrap();
         let entries = engine.blacklist_entries();
@@ -669,7 +669,7 @@ mod tests {
         let mut engine = IpsEngine::new(test_policy());
         let addr = ip(10, 0, 0, 1);
         engine.set_whitelist(vec![wl_exact(10, 0, 0, 1)]);
-        let result = engine.add_to_blacklist(addr, "test".into(), false, Duration::from_secs(60));
+        let result = engine.add_to_blacklist(addr, "test".into(), false, Duration::from_mins(1));
         assert!(matches!(result, Err(IpsError::Whitelisted { .. })));
     }
 
@@ -702,7 +702,7 @@ mod tests {
         engine.set_whitelist(vec![wl_exact(10, 0, 0, 1)]);
         let other = ip(10, 0, 0, 2);
         engine
-            .add_to_blacklist(other, "test".into(), false, Duration::from_secs(60))
+            .add_to_blacklist(other, "test".into(), false, Duration::from_mins(1))
             .unwrap();
         assert!(engine.is_blacklisted(other));
     }
@@ -721,10 +721,10 @@ mod tests {
 
     #[test]
     fn empty_whitelist_no_effect() {
-        let mut engine = IpsEngine::new(test_policy());
+        let engine = IpsEngine::new(test_policy());
         let addr = ip(10, 0, 0, 1);
         engine
-            .add_to_blacklist(addr, "test".into(), false, Duration::from_secs(60))
+            .add_to_blacklist(addr, "test".into(), false, Duration::from_mins(1))
             .unwrap();
         assert!(engine.is_blacklisted(addr));
     }
@@ -780,7 +780,7 @@ mod tests {
         let addr = ip(10, 0, 0, 1);
         // First blacklist
         engine
-            .add_to_blacklist(addr, "test".into(), false, Duration::from_secs(3600))
+            .add_to_blacklist(addr, "test".into(), false, Duration::from_hours(1))
             .unwrap();
         assert!(engine.is_blacklisted(addr));
         // Then add to whitelist
@@ -801,14 +801,14 @@ mod tests {
                 c in 0u8..=255u8,
                 d in 1u8..=254u8,
             ) {
-                let mut engine = IpsEngine::new(test_policy());
+                let engine = IpsEngine::new(test_policy());
                 let addr = IpAddr::V4(Ipv4Addr::new(a, b, c, d));
 
                 engine.add_to_blacklist(
                     addr,
                     "proptest".to_string(),
                     false,
-                    Duration::from_secs(60),
+                    Duration::from_mins(1),
                 ).unwrap();
                 prop_assert!(engine.is_blacklisted(addr));
             }
@@ -848,7 +848,7 @@ mod tests {
             country_thresholds: Some(ct),
             ..test_policy()
         };
-        let mut engine = IpsEngine::new(policy);
+        let engine = IpsEngine::new(policy);
         let addr = ip(1, 2, 3, 4);
         let actions = engine.record_detection_with_country(addr, Some("RU"));
         assert_eq!(actions.len(), 2);
@@ -868,7 +868,7 @@ mod tests {
             country_thresholds: Some(ct),
             ..test_policy()
         };
-        let mut engine = IpsEngine::new(policy);
+        let engine = IpsEngine::new(policy);
         let addr = ip(1, 2, 3, 4);
         let actions = engine.record_detection_with_country(addr, Some("RU"));
         if let EnforcementAction::BlockSubnet {
@@ -893,7 +893,7 @@ mod tests {
             country_thresholds: Some(ct),
             ..test_policy()
         };
-        let mut engine = IpsEngine::new(policy);
+        let engine = IpsEngine::new(policy);
         let addr = ip(10, 0, 0, 1);
         // 3 detections with FR (not in thresholds) -> no subnet block
         engine.record_detection_with_country(addr, Some("FR"));
@@ -914,7 +914,7 @@ mod tests {
             max_blacklist_size: 100,
             country_thresholds: Some(ct),
         };
-        let mut engine = IpsEngine::new(policy);
+        let engine = IpsEngine::new(policy);
         let addr = ip(1, 2, 3, 4);
         engine.record_detection_with_country(addr, Some("RU"));
 

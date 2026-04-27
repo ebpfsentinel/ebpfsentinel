@@ -416,16 +416,20 @@ mod tests {
 
     #[test]
     fn port_respects_limit() {
+        use std::fmt::Write as _;
+
         let dir = tempfile::tempdir().unwrap();
         let ct_path = dir.path().join("nf_conntrack");
         let count_path = dir.path().join("nf_conntrack_count");
 
         let mut lines = String::new();
         for i in 0..50 {
-            lines.push_str(&format!(
-                "ipv4     2 tcp      6 100 ESTABLISHED src=10.0.0.{i} dst=10.0.0.1 sport={} dport=80 src=10.0.0.1 dst=10.0.0.{i} sport=80 dport={} mark=0 use=2\n",
-                1000 + i, 1000 + i
-            ));
+            let port = 1000 + i;
+            writeln!(
+                &mut lines,
+                "ipv4     2 tcp      6 100 ESTABLISHED src=10.0.0.{i} dst=10.0.0.1 sport={port} dport=80 src=10.0.0.1 dst=10.0.0.{i} sport=80 dport={port} mark=0 use=2"
+            )
+            .expect("write to String never fails");
         }
         std::fs::write(&ct_path, &lines).unwrap();
         std::fs::write(&count_path, "50\n").unwrap();

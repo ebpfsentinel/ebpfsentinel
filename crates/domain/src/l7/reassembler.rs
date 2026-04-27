@@ -120,7 +120,7 @@ impl StreamReassembler {
     }
 
     pub fn flow_count(&self) -> usize {
-        self.flows.lock().map(|lock| lock.len()).unwrap_or(0)
+        self.flows.lock().map_or(0, |lock| lock.len())
     }
 
     /// Append `payload` to the flow's buffer. Returns [`Ingest::Complete`]

@@ -52,7 +52,7 @@ pub async fn run_grpc_server(
 
     let mut builder = Server::builder()
         .timeout(Duration::from_secs(30))
-        .tcp_keepalive(Some(Duration::from_secs(60)))
+        .tcp_keepalive(Some(Duration::from_mins(1)))
         .http2_keepalive_interval(Some(Duration::from_secs(30)))
         .http2_keepalive_timeout(Some(Duration::from_secs(10)))
         .concurrency_limit_per_connection(64);

@@ -230,23 +230,19 @@ fn parse_resource_record(
     let mut cname_target = None;
 
     match record_type {
-        DnsRecordType::A => {
-            if rdlength == 4 {
-                let ip = Ipv4Addr::new(
-                    payload[offset],
-                    payload[offset + 1],
-                    payload[offset + 2],
-                    payload[offset + 3],
-                );
-                resolved_ips.push(IpAddr::V4(ip));
-            }
+        DnsRecordType::A if rdlength == 4 => {
+            let ip = Ipv4Addr::new(
+                payload[offset],
+                payload[offset + 1],
+                payload[offset + 2],
+                payload[offset + 3],
+            );
+            resolved_ips.push(IpAddr::V4(ip));
         }
-        DnsRecordType::AAAA => {
-            if rdlength == 16 {
-                let mut octets = [0u8; 16];
-                octets.copy_from_slice(&payload[offset..offset + 16]);
-                resolved_ips.push(IpAddr::V6(Ipv6Addr::from(octets)));
-            }
+        DnsRecordType::AAAA if rdlength == 16 => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&payload[offset..offset + 16]);
+            resolved_ips.push(IpAddr::V6(Ipv6Addr::from(octets)));
         }
         DnsRecordType::CNAME => {
             let (target, _) = parse_name(payload, offset)?;

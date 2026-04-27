@@ -50,6 +50,12 @@ pub trait AlertMetrics: Send + Sync {
 
     /// Record an IDS rule match based on domain pattern (not just IP+port).
     fn record_ids_domain_match(&self, _rule_id: &str) {}
+
+    /// Set the current number of live SSE alert-stream subscribers.
+    ///
+    /// Called by the SSE handler on connect / disconnect to keep the
+    /// `ebpfsentinel_alerts_sse_subscribers` gauge accurate.
+    fn set_alerts_sse_subscribers(&self, _count: i64) {}
 }
 
 // ── IPS metrics ────────────────────────────────────────────────────

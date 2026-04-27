@@ -131,7 +131,7 @@ impl DnsCacheEngine {
             .iter()
             .map(|(domain, entry)| (domain.clone(), entry.query_count))
             .collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.1));
         entries.truncate(n);
         entries
     }

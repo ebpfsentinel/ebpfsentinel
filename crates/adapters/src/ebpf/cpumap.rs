@@ -19,13 +19,11 @@ pub fn populate_cpumap(ebpf: &mut Ebpf, map_name: &str) {
         }
     };
 
-    let num_cpus = std::thread::available_parallelism()
-        .map(|n| {
-            #[allow(clippy::cast_possible_truncation)]
-            let cpus = n.get() as u32;
-            cpus
-        })
-        .unwrap_or(4);
+    let num_cpus = std::thread::available_parallelism().map_or(4, |n| {
+        #[allow(clippy::cast_possible_truncation)]
+        let cpus = n.get() as u32;
+        cpus
+    });
     let queue_size = 192u32;
     let mut populated = 0u32;
     for cpu in 0..num_cpus.min(128) {
