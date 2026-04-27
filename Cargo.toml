@@ -36,7 +36,7 @@ edition = "2024"
 license = "AGPL-3.0-only"
 publish = false
 repository = "https://github.com/ebpfsentinel/ebpfsentinel"
-rust-version = "1.93"
+rust-version = "1.95"
 
 [workspace.dependencies]
 # eBPF
