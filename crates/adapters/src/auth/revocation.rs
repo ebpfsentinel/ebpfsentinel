@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
+use async_trait::async_trait;
 use domain::auth::entity::JwtClaims;
 use domain::auth::error::AuthError;
 use ports::secondary::auth_provider::AuthProvider;
@@ -46,9 +47,10 @@ impl RevocableAuthProvider {
     }
 }
 
+#[async_trait]
 impl AuthProvider for RevocableAuthProvider {
-    fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
-        let claims = self.inner.validate_token(token)?;
+    async fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
+        let claims = self.inner.validate_token(token).await?;
 
         let key = revocation_key(&claims);
         let revoked = self.revoked.read().map_err(|e| {
@@ -125,8 +127,9 @@ mod tests {
     use super::*;
 
     struct OkProvider;
+    #[async_trait]
     impl AuthProvider for OkProvider {
-        fn validate_token(&self, _token: &str) -> Result<JwtClaims, AuthError> {
+        async fn validate_token(&self, _token: &str) -> Result<JwtClaims, AuthError> {
             Ok(JwtClaims {
                 sub: "user-1".to_string(),
                 exp: u64::MAX,
@@ -135,53 +138,55 @@ mod tests {
                 aud: None,
                 role: Some("admin".to_string()),
                 namespaces: None,
+                tenant_id: None,
+                roles: None,
             })
         }
     }
 
-    #[test]
-    fn valid_token_passes_when_not_revoked() {
+    #[tokio::test]
+    async fn valid_token_passes_when_not_revoked() {
         let provider = RevocableAuthProvider::new(Arc::new(OkProvider));
-        let claims = provider.validate_token("any").unwrap();
+        let claims = provider.validate_token("any").await.unwrap();
         assert_eq!(claims.sub, "user-1");
     }
 
-    #[test]
-    fn revoked_token_rejected() {
+    #[tokio::test]
+    async fn revoked_token_rejected() {
         let provider = RevocableAuthProvider::new(Arc::new(OkProvider));
         let handle = provider.revocation_handle();
 
         handle.revoke("user-1", 1000);
-        let err = provider.validate_token("any").unwrap_err();
+        let err = provider.validate_token("any").await.unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)));
         assert!(err.to_string().contains("revoked"));
     }
 
-    #[test]
-    fn unrevoke_restores_access() {
+    #[tokio::test]
+    async fn unrevoke_restores_access() {
         let provider = RevocableAuthProvider::new(Arc::new(OkProvider));
         let handle = provider.revocation_handle();
 
         handle.revoke("user-1", 1000);
-        assert!(provider.validate_token("any").is_err());
+        assert!(provider.validate_token("any").await.is_err());
 
         handle.unrevoke("user-1", 1000);
-        assert!(provider.validate_token("any").is_ok());
+        assert!(provider.validate_token("any").await.is_ok());
     }
 
-    #[test]
-    fn different_iat_not_revoked() {
+    #[tokio::test]
+    async fn different_iat_not_revoked() {
         let provider = RevocableAuthProvider::new(Arc::new(OkProvider));
         let handle = provider.revocation_handle();
 
         // Revoke a different iat
         handle.revoke("user-1", 999);
         // Token with iat=1000 should still pass
-        assert!(provider.validate_token("any").is_ok());
+        assert!(provider.validate_token("any").await.is_ok());
     }
 
-    #[test]
-    fn clear_removes_all_revocations() {
+    #[tokio::test]
+    async fn clear_removes_all_revocations() {
         let provider = RevocableAuthProvider::new(Arc::new(OkProvider));
         let handle = provider.revocation_handle();
 
@@ -190,7 +195,7 @@ mod tests {
 
         handle.clear();
         assert!(handle.is_empty());
-        assert!(provider.validate_token("any").is_ok());
+        assert!(provider.validate_token("any").await.is_ok());
     }
 
     #[test]

@@ -26,7 +26,7 @@ pub async fn jwt_auth_middleware(
     };
 
     let token = extract_token(&request)?;
-    let claims = auth_provider.validate_token(token)?;
+    let claims = auth_provider.validate_token(token).await?;
     request.extensions_mut().insert(claims);
 
     Ok(next.run(request).await)
@@ -68,6 +68,7 @@ fn extract_token(request: &Request) -> Result<&str, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Request as HttpRequest, StatusCode};
@@ -80,8 +81,9 @@ mod tests {
     use tower::ServiceExt;
 
     struct AlwaysOkProvider;
+    #[async_trait]
     impl AuthProvider for AlwaysOkProvider {
-        fn validate_token(&self, _token: &str) -> Result<JwtClaims, AuthError> {
+        async fn validate_token(&self, _token: &str) -> Result<JwtClaims, AuthError> {
             Ok(JwtClaims {
                 sub: "test-user".to_string(),
                 exp: 9_999_999_999,
@@ -90,13 +92,16 @@ mod tests {
                 aud: None,
                 role: Some("admin".to_string()),
                 namespaces: None,
+                tenant_id: None,
+                roles: None,
             })
         }
     }
 
     struct AlwaysFailProvider;
+    #[async_trait]
     impl AuthProvider for AlwaysFailProvider {
-        fn validate_token(&self, _token: &str) -> Result<JwtClaims, AuthError> {
+        async fn validate_token(&self, _token: &str) -> Result<JwtClaims, AuthError> {
             Err(AuthError::TokenInvalid("bad".to_string()))
         }
     }

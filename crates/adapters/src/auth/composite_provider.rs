@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use domain::auth::entity::JwtClaims;
 use domain::auth::error::AuthError;
 use ports::secondary::auth_provider::AuthProvider;
@@ -27,10 +28,11 @@ impl CompositeAuthProvider {
     }
 }
 
+#[async_trait]
 impl AuthProvider for CompositeAuthProvider {
-    fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
+    async fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
         for provider in &self.providers {
-            if let Ok(claims) = provider.validate_token(token) {
+            if let Ok(claims) = provider.validate_token(token).await {
                 return Ok(claims);
             }
         }
@@ -46,8 +48,9 @@ mod tests {
     struct OkProvider {
         sub: &'static str,
     }
+    #[async_trait]
     impl AuthProvider for OkProvider {
-        fn validate_token(&self, _token: &str) -> Result<JwtClaims, AuthError> {
+        async fn validate_token(&self, _token: &str) -> Result<JwtClaims, AuthError> {
             Ok(JwtClaims {
                 sub: self.sub.to_string(),
                 exp: u64::MAX,
@@ -56,44 +59,47 @@ mod tests {
                 aud: None,
                 role: Some("admin".to_string()),
                 namespaces: None,
+                tenant_id: None,
+                roles: None,
             })
         }
     }
 
     struct FailProvider;
+    #[async_trait]
     impl AuthProvider for FailProvider {
-        fn validate_token(&self, _token: &str) -> Result<JwtClaims, AuthError> {
+        async fn validate_token(&self, _token: &str) -> Result<JwtClaims, AuthError> {
             Err(AuthError::TokenInvalid("nope".to_string()))
         }
     }
 
-    #[test]
-    fn first_provider_wins() {
+    #[tokio::test]
+    async fn first_provider_wins() {
         let composite = CompositeAuthProvider::new(vec![
             Arc::new(OkProvider { sub: "first" }),
             Arc::new(OkProvider { sub: "second" }),
         ]);
-        let claims = composite.validate_token("any").unwrap();
+        let claims = composite.validate_token("any").await.unwrap();
         assert_eq!(claims.sub, "first");
     }
 
-    #[test]
-    fn falls_through_to_second_provider() {
+    #[tokio::test]
+    async fn falls_through_to_second_provider() {
         let composite = CompositeAuthProvider::new(vec![
             Arc::new(FailProvider) as Arc<dyn AuthProvider>,
             Arc::new(OkProvider { sub: "second" }),
         ]);
-        let claims = composite.validate_token("any").unwrap();
+        let claims = composite.validate_token("any").await.unwrap();
         assert_eq!(claims.sub, "second");
     }
 
-    #[test]
-    fn all_fail_returns_generic_error() {
+    #[tokio::test]
+    async fn all_fail_returns_generic_error() {
         let composite = CompositeAuthProvider::new(vec![
             Arc::new(FailProvider) as Arc<dyn AuthProvider>,
             Arc::new(FailProvider),
         ]);
-        let err = composite.validate_token("any").unwrap_err();
+        let err = composite.validate_token("any").await.unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)));
         assert_eq!(err.to_string(), "invalid token: authentication failed");
     }

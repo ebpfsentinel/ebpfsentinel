@@ -593,7 +593,11 @@ pub async fn run(
                         Some(Arc::clone(&arc) as Arc<dyn AuthProvider>),
                     )
                 }
-                infrastructure::config::JwtKeySource::Jwks { ref url, .. } => {
+                infrastructure::config::JwtKeySource::Jwks {
+                    ref url,
+                    refresh_on_unknown_kid,
+                    ..
+                } => {
                     let jwk_set = oidc_provider::fetch_jwks(url)
                         .await
                         .map_err(|e| anyhow::anyhow!("failed to fetch JWT JWKS: {e}"))?;
@@ -614,9 +618,13 @@ pub async fn run(
                     .map_err(|e| {
                         anyhow::anyhow!("failed to initialize JWT JWKS auth provider: {e}")
                     })?;
+                    let refresher: Arc<dyn oidc_provider::JwksRefresher> =
+                        Arc::new(oidc_provider::HttpJwksRefresher::new(url.clone()));
+                    let provider = provider.with_refresher(refresher, refresh_on_unknown_kid);
                     info!(
                         algorithm = ?config.auth.jwt.algorithm,
                         jwks_url = %url,
+                        refresh_on_unknown_kid,
                         "JWT authentication enabled (JWKS)"
                     );
                     let arc = Arc::new(provider);

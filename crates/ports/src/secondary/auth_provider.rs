@@ -1,12 +1,17 @@
+use async_trait::async_trait;
 use domain::auth::entity::JwtClaims;
 use domain::auth::error::AuthError;
 
 /// Port for token-based authentication.
 ///
-/// Synchronous trait — JWT validation is CPU-bound and uses `std::sync::RwLock`
-/// for the decoding key (non-blocking reads).
+/// `async` because JWKS-backed providers may refresh their key set
+/// inline when an unknown `kid` arrives — that refresh is an HTTPS
+/// round-trip and must not block a Tokio worker. Static-PEM and API-key
+/// providers do no I/O on the hot path; their implementations just
+/// trampoline the synchronous decoder.
+#[async_trait]
 pub trait AuthProvider: Send + Sync {
-    fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError>;
+    async fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError>;
 }
 
 #[cfg(test)]

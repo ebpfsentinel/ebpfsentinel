@@ -31,15 +31,53 @@ pub struct JwtClaims {
     /// Namespace scoping: list of namespaces the identity may access.
     #[serde(default)]
     pub namespaces: Option<Vec<String>>,
+
+    /// Multi-tenant identifier minted by the dashboard for per-tenant
+    /// JWTs. Surfaced for the dashboard's cross-tenant scoping; the OSS
+    /// agent's RBAC middleware ignores it (tenants are an Enterprise
+    /// concern).
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+
+    /// Multi-role claim list. The legacy `role` field carries a single
+    /// string for backwards compat; `roles` allows the dashboard to
+    /// emit several roles at once (e.g. `["analyst", "compliance"]`).
+    /// `Self::role()` falls back to the first entry of `roles` when
+    /// `role` is unset.
+    #[serde(default)]
+    pub roles: Option<Vec<String>>,
 }
 
 impl JwtClaims {
     /// Parse the role claim, defaulting to `Viewer` (least privilege).
+    ///
+    /// Prefers `role` (legacy single-string claim) when set; otherwise
+    /// falls back to the first entry of `roles` so dashboards that mint
+    /// multi-role JWTs still drive the OSS RBAC layer.
     pub fn role(&self) -> Role {
-        self.role
-            .as_deref()
-            .and_then(|r| r.parse().ok())
-            .unwrap_or(Role::Viewer)
+        let raw = self.role.as_deref().or_else(|| {
+            self.roles
+                .as_ref()
+                .and_then(|list| list.first().map(String::as_str))
+        });
+        raw.and_then(|r| r.parse().ok()).unwrap_or(Role::Viewer)
+    }
+
+    /// Effective role list: `roles` if set, else a single-element list
+    /// from `role`, else empty. Used by the dashboard layer to surface
+    /// every active role on the audit trail.
+    #[must_use]
+    pub fn effective_roles(&self) -> Vec<String> {
+        if let Some(ref roles) = self.roles {
+            return roles.clone();
+        }
+        self.role.clone().map(|r| vec![r]).unwrap_or_default()
+    }
+
+    /// Optional tenant identifier minted by the dashboard.
+    #[must_use]
+    pub fn tenant(&self) -> Option<&str> {
+        self.tenant_id.as_deref()
     }
 
     /// Check whether the claims grant access to the given namespace.

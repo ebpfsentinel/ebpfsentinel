@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use async_trait::async_trait;
 use domain::auth::entity::JwtClaims;
 use domain::auth::error::AuthError;
 use ports::secondary::auth_provider::AuthProvider;
@@ -73,8 +74,9 @@ impl ApiKeyAuthProvider {
     }
 }
 
+#[async_trait]
 impl AuthProvider for ApiKeyAuthProvider {
-    fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
+    async fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
         if token.is_empty() {
             return Err(AuthError::TokenMissing);
         }
@@ -101,6 +103,8 @@ impl AuthProvider for ApiKeyAuthProvider {
             aud: None,
             role: Some(entry.role.clone()),
             namespaces: entry.namespaces.clone(),
+            tenant_id: None,
+            roles: None,
         })
     }
 }
@@ -150,44 +154,44 @@ mod tests {
         )
     }
 
-    #[test]
-    fn valid_admin_key() {
+    #[tokio::test]
+    async fn valid_admin_key() {
         let provider = make_provider();
-        let claims = provider.validate_token("sk-admin-secret").unwrap();
+        let claims = provider.validate_token("sk-admin-secret").await.unwrap();
         assert_eq!(claims.sub, "admin-key");
         assert_eq!(claims.role.as_deref(), Some("admin"));
         assert!(claims.namespaces.is_none());
     }
 
-    #[test]
-    fn valid_viewer_key() {
+    #[tokio::test]
+    async fn valid_viewer_key() {
         let provider = make_provider();
-        let claims = provider.validate_token("sk-viewer-secret").unwrap();
+        let claims = provider.validate_token("sk-viewer-secret").await.unwrap();
         assert_eq!(claims.sub, "viewer-key");
         assert_eq!(claims.role.as_deref(), Some("viewer"));
     }
 
-    #[test]
-    fn valid_operator_key_with_namespaces() {
+    #[tokio::test]
+    async fn valid_operator_key_with_namespaces() {
         let provider = make_provider();
-        let claims = provider.validate_token("sk-ops-prod").unwrap();
+        let claims = provider.validate_token("sk-ops-prod").await.unwrap();
         assert_eq!(claims.sub, "ops-prod");
         assert_eq!(claims.role.as_deref(), Some("operator"));
         let ns = claims.namespaces.unwrap();
         assert_eq!(ns, vec!["prod", "staging"]);
     }
 
-    #[test]
-    fn invalid_key_rejected() {
+    #[tokio::test]
+    async fn invalid_key_rejected() {
         let provider = make_provider();
-        let err = provider.validate_token("sk-wrong-key").unwrap_err();
+        let err = provider.validate_token("sk-wrong-key").await.unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
     }
 
-    #[test]
-    fn empty_key_rejected() {
+    #[tokio::test]
+    async fn empty_key_rejected() {
         let provider = make_provider();
-        let err = provider.validate_token("").unwrap_err();
+        let err = provider.validate_token("").await.unwrap_err();
         assert!(matches!(err, AuthError::TokenMissing), "got: {err}");
     }
 
@@ -199,8 +203,8 @@ mod tests {
         assert!(!debug.contains("sk-admin"));
     }
 
-    #[test]
-    fn plaintext_key_not_stored() {
+    #[tokio::test]
+    async fn plaintext_key_not_stored() {
         let provider = make_provider();
         // Keys should be stored as hashes, not plaintext
         assert!(!provider.keys.contains_key("sk-admin-secret"));
@@ -209,16 +213,16 @@ mod tests {
         assert!(provider.keys.contains_key(&expected_hash));
     }
 
-    #[test]
-    fn hash_key_is_deterministic() {
+    #[tokio::test]
+    async fn hash_key_is_deterministic() {
         let h1 = hash_key_with_salt(TEST_SALT, "test-key");
         let h2 = hash_key_with_salt(TEST_SALT, "test-key");
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64); // SHA-256 hex = 64 chars
     }
 
-    #[test]
-    fn different_keys_produce_different_hashes() {
+    #[tokio::test]
+    async fn different_keys_produce_different_hashes() {
         let h1 = hash_key_with_salt(TEST_SALT, "key-a");
         let h2 = hash_key_with_salt(TEST_SALT, "key-b");
         assert_ne!(h1, h2);

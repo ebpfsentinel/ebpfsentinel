@@ -1,6 +1,7 @@
 use std::sync::RwLock;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use domain::auth::entity::JwtClaims;
 use domain::auth::error::AuthError;
 use jsonwebtoken::{
@@ -8,13 +9,35 @@ use jsonwebtoken::{
 };
 use ports::secondary::auth_provider::AuthProvider;
 
+/// Hook used by the OIDC / JWKS provider to refresh its key set when a
+/// JWT arrives with a `kid` it does not know about.
+///
+/// The hook is constructed with the JWKS URL captured from the agent's
+/// config so the provider can refetch + replace its cached `JwkSet`
+/// without holding a `reqwest::Client` itself. Implementations must be
+/// `Send + Sync` and idempotent — they can be called once per request
+/// in the worst case.
+#[async_trait]
+pub trait JwksRefresher: Send + Sync {
+    /// Fetch the latest JWKS from the upstream URL.
+    async fn refresh(&self) -> Result<JwkSet, AuthError>;
+}
+
 /// OIDC authentication provider using JWKS (JSON Web Key Set) for token validation.
 ///
 /// Validates JWT tokens by matching the `kid` (Key ID) header field against
-/// cached JWKS keys. Supports key rotation via `rotate_keys()`.
+/// cached JWKS keys. Supports key rotation via `rotate_keys()` and, when
+/// configured, an inline refresh on unknown `kid`.
 pub struct OidcAuthProvider {
     jwk_set: RwLock<JwkSet>,
     validation: Validation,
+    /// Optional inline refresh handle used when a request arrives with
+    /// a `kid` not present in the cached set.
+    refresher: Option<std::sync::Arc<dyn JwksRefresher>>,
+    /// Whether to attempt an inline refresh on unknown `kid`. Defaults
+    /// to `true` so the dashboard can rotate keys without redeploying
+    /// agents; set to `false` to keep the agent stricter / quieter.
+    refresh_on_unknown_kid: bool,
 }
 
 impl std::fmt::Debug for OidcAuthProvider {
@@ -75,7 +98,24 @@ impl OidcAuthProvider {
         Self {
             jwk_set: RwLock::new(jwk_set),
             validation,
+            refresher: None,
+            refresh_on_unknown_kid: true,
         }
+    }
+
+    /// Wire an inline JWKS refresher. The provider will call
+    /// `refresher.refresh()` once per request that arrives with an
+    /// unknown `kid`, replace its cached set with the result, and retry
+    /// the verification before failing.
+    #[must_use]
+    pub fn with_refresher(
+        mut self,
+        refresher: std::sync::Arc<dyn JwksRefresher>,
+        refresh_on_unknown_kid: bool,
+    ) -> Self {
+        self.refresher = Some(refresher);
+        self.refresh_on_unknown_kid = refresh_on_unknown_kid;
+        self
     }
 
     /// Atomically replace the cached JWKS (for periodic key rotation).
@@ -88,26 +128,22 @@ impl OidcAuthProvider {
     }
 }
 
-impl AuthProvider for OidcAuthProvider {
-    fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
-        if token.is_empty() {
-            return Err(AuthError::TokenMissing);
-        }
+impl OidcAuthProvider {
+    /// True when the cached JWKS contains the given `kid`.
+    fn cached_has_kid(&self, kid: &str) -> bool {
+        self.jwk_set.read().is_ok_and(|guard| {
+            guard
+                .keys
+                .iter()
+                .any(|k| k.common.key_id.as_deref() == Some(kid))
+        })
+    }
 
-        // Decode the JWT header to extract the `kid`.
-        // Detailed errors are logged server-side; clients receive a generic message
-        // to prevent authentication infrastructure enumeration.
-        let header = decode_header(token).map_err(|e| {
-            tracing::debug!(error = %e, "OIDC token header decode failed");
-            AuthError::TokenInvalid("invalid token".to_string())
-        })?;
-
-        let kid = header.kid.as_ref().ok_or_else(|| {
-            tracing::debug!("OIDC token missing kid header");
-            AuthError::TokenInvalid("invalid token".to_string())
-        })?;
-
-        // Find the matching JWK in the cached set
+    /// Look up `kid` in the cached set, build a `DecodingKey`, and
+    /// run the verifier. Returns `AuthError::TokenInvalid("kid")` when
+    /// the kid is missing from the cache so the outer call site can
+    /// decide whether to refresh + retry.
+    fn validate_with_cached(&self, token: &str, kid: &str) -> Result<JwtClaims, AuthError> {
         let jwk_set = self.jwk_set.read().map_err(|e| {
             tracing::error!("OIDC JWKS RwLock poisoned on read: {e}");
             AuthError::TokenInvalid("internal auth error".to_string())
@@ -116,10 +152,10 @@ impl AuthProvider for OidcAuthProvider {
         let jwk = jwk_set
             .keys
             .iter()
-            .find(|k| k.common.key_id.as_deref() == Some(kid.as_str()))
+            .find(|k| k.common.key_id.as_deref() == Some(kid))
             .ok_or_else(|| {
                 tracing::debug!(kid, "OIDC no JWK found for kid");
-                AuthError::TokenInvalid("invalid token".to_string())
+                AuthError::TokenInvalid("kid".to_string())
             })?;
 
         let decoding_key = DecodingKey::from_jwk(jwk).map_err(|e| {
@@ -136,8 +172,82 @@ impl AuthProvider for OidcAuthProvider {
                     AuthError::TokenInvalid("invalid token".to_string())
                 }
             })?;
-
         Ok(token_data.claims)
+    }
+}
+
+#[async_trait]
+impl AuthProvider for OidcAuthProvider {
+    async fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
+        if token.is_empty() {
+            return Err(AuthError::TokenMissing);
+        }
+
+        // Decode the JWT header to extract the `kid`.
+        // Detailed errors are logged server-side; clients receive a generic message
+        // to prevent authentication infrastructure enumeration.
+        let header = decode_header(token).map_err(|e| {
+            tracing::debug!(error = %e, "OIDC token header decode failed");
+            AuthError::TokenInvalid("invalid token".to_string())
+        })?;
+
+        let kid = header.kid.clone().ok_or_else(|| {
+            tracing::debug!("OIDC token missing kid header");
+            AuthError::TokenInvalid("invalid token".to_string())
+        })?;
+
+        match self.validate_with_cached(token, &kid) {
+            Ok(claims) => Ok(claims),
+            Err(AuthError::TokenInvalid(ref msg)) if msg == "kid" => {
+                if !self.refresh_on_unknown_kid {
+                    return Err(AuthError::TokenInvalid("invalid token".to_string()));
+                }
+                let Some(refresher) = self.refresher.as_ref() else {
+                    return Err(AuthError::TokenInvalid("invalid token".to_string()));
+                };
+                tracing::debug!(kid = %kid, "JWKS unknown kid — forcing refresh");
+                let new_set = refresher.refresh().await.map_err(|e| {
+                    tracing::warn!(error = %e, "JWKS inline refresh failed");
+                    AuthError::TokenInvalid("invalid token".to_string())
+                })?;
+                self.rotate_keys(new_set);
+                if !self.cached_has_kid(&kid) {
+                    tracing::debug!(kid = %kid, "JWKS still missing kid after refresh");
+                    return Err(AuthError::TokenInvalid("invalid token".to_string()));
+                }
+                self.validate_with_cached(token, &kid).map_err(|e| match e {
+                    AuthError::TokenInvalid(msg) if msg == "kid" => {
+                        AuthError::TokenInvalid("invalid token".to_string())
+                    }
+                    other => other,
+                })
+            }
+            Err(other) => Err(other),
+        }
+    }
+}
+
+/// Concrete [`JwksRefresher`] implementation that calls [`fetch_jwks`]
+/// with the configured URL on every refresh request.
+///
+/// Held by the OIDC provider behind an `Arc<dyn JwksRefresher>` so the
+/// provider does not have to know about HTTP plumbing.
+#[derive(Debug, Clone)]
+pub struct HttpJwksRefresher {
+    url: String,
+}
+
+impl HttpJwksRefresher {
+    #[must_use]
+    pub fn new(url: String) -> Self {
+        Self { url }
+    }
+}
+
+#[async_trait]
+impl JwksRefresher for HttpJwksRefresher {
+    async fn refresh(&self) -> Result<JwkSet, AuthError> {
+        fetch_jwks(&self.url).await
     }
 }
 
@@ -319,8 +429,8 @@ mod tests {
         encode(&header, claims, &key).unwrap()
     }
 
-    #[test]
-    fn valid_token_with_matching_kid() {
+    #[tokio::test]
+    async fn valid_token_with_matching_kid() {
         let jwk_set = build_test_jwk_set("test-key-1");
         let provider = OidcAuthProvider::new(jwk_set, None, None).unwrap();
 
@@ -333,13 +443,13 @@ mod tests {
             namespaces: Some(vec!["prod".to_string()]),
         };
         let token = sign_token_with_kid(&claims, "test-key-1");
-        let result = provider.validate_token(&token).unwrap();
+        let result = provider.validate_token(&token).await.unwrap();
         assert_eq!(result.sub, "k8s-sa");
         assert_eq!(result.role.as_deref(), Some("admin"));
     }
 
-    #[test]
-    fn token_with_unknown_kid_rejected() {
+    #[tokio::test]
+    async fn token_with_unknown_kid_rejected() {
         let jwk_set = build_test_jwk_set("test-key-1");
         let provider = OidcAuthProvider::new(jwk_set, None, None).unwrap();
 
@@ -352,13 +462,13 @@ mod tests {
             namespaces: None,
         };
         let token = sign_token_with_kid(&claims, "unknown-kid");
-        let err = provider.validate_token(&token).unwrap_err();
+        let err = provider.validate_token(&token).await.unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
         assert!(err.to_string().contains("invalid token"));
     }
 
-    #[test]
-    fn expired_token_rejected() {
+    #[tokio::test]
+    async fn expired_token_rejected() {
         let jwk_set = build_test_jwk_set("test-key-1");
         let provider = OidcAuthProvider::new(jwk_set, None, None).unwrap();
 
@@ -371,12 +481,12 @@ mod tests {
             namespaces: None,
         };
         let token = sign_token_with_kid(&claims, "test-key-1");
-        let err = provider.validate_token(&token).unwrap_err();
+        let err = provider.validate_token(&token).await.unwrap_err();
         assert!(matches!(err, AuthError::TokenExpired), "got: {err}");
     }
 
-    #[test]
-    fn key_rotation() {
+    #[tokio::test]
+    async fn key_rotation() {
         let jwk_set = build_test_jwk_set("old-key");
         let provider = OidcAuthProvider::new(jwk_set, None, None).unwrap();
 
@@ -391,27 +501,27 @@ mod tests {
 
         // Token signed with kid "new-key" fails before rotation
         let token = sign_token_with_kid(&claims, "new-key");
-        assert!(provider.validate_token(&token).is_err());
+        assert!(provider.validate_token(&token).await.is_err());
 
         // Rotate to include the new key
         let new_jwk_set = build_test_jwk_set("new-key");
         provider.rotate_keys(new_jwk_set);
 
         // Now it works
-        let result = provider.validate_token(&token).unwrap();
+        let result = provider.validate_token(&token).await.unwrap();
         assert_eq!(result.sub, "user");
     }
 
-    #[test]
-    fn empty_token_rejected() {
+    #[tokio::test]
+    async fn empty_token_rejected() {
         let jwk_set = build_test_jwk_set("k1");
         let provider = OidcAuthProvider::new(jwk_set, None, None).unwrap();
-        let err = provider.validate_token("").unwrap_err();
+        let err = provider.validate_token("").await.unwrap_err();
         assert!(matches!(err, AuthError::TokenMissing), "got: {err}");
     }
 
-    #[test]
-    fn token_without_kid_rejected() {
+    #[tokio::test]
+    async fn token_without_kid_rejected() {
         let jwk_set = build_test_jwk_set("k1");
         let provider = OidcAuthProvider::new(jwk_set, None, None).unwrap();
 
@@ -428,7 +538,7 @@ mod tests {
         };
         let token = encode(&header, &claims, &key).unwrap();
 
-        let err = provider.validate_token(&token).unwrap_err();
+        let err = provider.validate_token(&token).await.unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
         assert!(err.to_string().contains("invalid token"));
     }
@@ -478,8 +588,8 @@ mod tests {
         encode(&header, claims, &key).unwrap()
     }
 
-    #[test]
-    fn eddsa_jwks_valid_token_accepted() {
+    #[tokio::test]
+    async fn eddsa_jwks_valid_token_accepted() {
         let jwk_set = build_eddsa_jwk_set("dash-2026-04");
         let provider = OidcAuthProvider::new_for_eddsa(jwk_set, None, None).unwrap();
 
@@ -492,13 +602,13 @@ mod tests {
             namespaces: None,
         };
         let token = sign_eddsa_with_kid(&claims, "dash-2026-04");
-        let result = provider.validate_token(&token).unwrap();
+        let result = provider.validate_token(&token).await.unwrap();
         assert_eq!(result.sub, "tenant-admin");
         assert_eq!(result.role.as_deref(), Some("admin"));
     }
 
-    #[test]
-    fn eddsa_jwks_unknown_kid_rejected() {
+    #[tokio::test]
+    async fn eddsa_jwks_unknown_kid_rejected() {
         let jwk_set = build_eddsa_jwk_set("dash-2026-04");
         let provider = OidcAuthProvider::new_for_eddsa(jwk_set, None, None).unwrap();
 
@@ -511,12 +621,12 @@ mod tests {
             namespaces: None,
         };
         let token = sign_eddsa_with_kid(&claims, "dash-2025-12");
-        let err = provider.validate_token(&token).unwrap_err();
+        let err = provider.validate_token(&token).await.unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
     }
 
-    #[test]
-    fn eddsa_jwks_rejects_rs256_token() {
+    #[tokio::test]
+    async fn eddsa_jwks_rejects_rs256_token() {
         let jwk_set = build_eddsa_jwk_set("dash-2026-04");
         let provider = OidcAuthProvider::new_for_eddsa(jwk_set, None, None).unwrap();
 
@@ -529,12 +639,12 @@ mod tests {
             namespaces: None,
         };
         let rsa_token = sign_token_with_kid(&claims, "dash-2026-04");
-        let err = provider.validate_token(&rsa_token).unwrap_err();
+        let err = provider.validate_token(&rsa_token).await.unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
     }
 
-    #[test]
-    fn eddsa_jwks_rotation_picks_up_new_kid() {
+    #[tokio::test]
+    async fn eddsa_jwks_rotation_picks_up_new_kid() {
         let jwk_set = build_eddsa_jwk_set("old-kid");
         let provider = OidcAuthProvider::new_for_eddsa(jwk_set, None, None).unwrap();
 
@@ -547,10 +657,122 @@ mod tests {
             namespaces: None,
         };
         let token = sign_eddsa_with_kid(&claims, "new-kid");
-        assert!(provider.validate_token(&token).is_err());
+        assert!(provider.validate_token(&token).await.is_err());
 
         provider.rotate_keys(build_eddsa_jwk_set("new-kid"));
-        let result = provider.validate_token(&token).unwrap();
+        let result = provider.validate_token(&token).await.unwrap();
         assert_eq!(result.sub, "x");
+    }
+
+    // ── Inline force-refresh on unknown kid ────────────────────────
+
+    /// In-memory `JwksRefresher` for tests — returns a pre-baked JWKS
+    /// the next time `refresh()` is called and counts invocations.
+    struct StubRefresher {
+        next: std::sync::Mutex<Option<JwkSet>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl StubRefresher {
+        fn new(next: JwkSet) -> Self {
+            Self {
+                next: std::sync::Mutex::new(Some(next)),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl JwksRefresher for StubRefresher {
+        async fn refresh(&self) -> Result<JwkSet, AuthError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.next.lock().unwrap().take().ok_or_else(|| {
+                AuthError::KeyLoadFailed("stub refresher already drained".to_string())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_kid_triggers_inline_refresh_and_retries() {
+        let stale = build_eddsa_jwk_set("old-kid");
+        let fresh = build_eddsa_jwk_set("new-kid");
+        let refresher = std::sync::Arc::new(StubRefresher::new(fresh));
+        let provider = OidcAuthProvider::new_for_eddsa(stale, None, None)
+            .unwrap()
+            .with_refresher(refresher.clone(), true);
+
+        let token = sign_eddsa_with_kid(
+            &TestClaims {
+                sub: "rotated".to_string(),
+                exp: future_exp(),
+                iss: None,
+                aud: None,
+                role: None,
+                namespaces: None,
+            },
+            "new-kid",
+        );
+
+        let claims = provider.validate_token(&token).await.unwrap();
+        assert_eq!(claims.sub, "rotated");
+        assert_eq!(refresher.calls(), 1);
+
+        // Second call hits the cache — no extra refresh.
+        let _ = provider.validate_token(&token).await.unwrap();
+        assert_eq!(refresher.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn unknown_kid_refused_when_refresh_disabled() {
+        let stale = build_eddsa_jwk_set("old-kid");
+        let fresh = build_eddsa_jwk_set("new-kid");
+        let refresher = std::sync::Arc::new(StubRefresher::new(fresh));
+        let provider = OidcAuthProvider::new_for_eddsa(stale, None, None)
+            .unwrap()
+            .with_refresher(refresher.clone(), false);
+
+        let token = sign_eddsa_with_kid(
+            &TestClaims {
+                sub: "x".to_string(),
+                exp: future_exp(),
+                iss: None,
+                aud: None,
+                role: None,
+                namespaces: None,
+            },
+            "new-kid",
+        );
+        assert!(provider.validate_token(&token).await.is_err());
+        assert_eq!(refresher.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn unknown_kid_still_missing_after_refresh_returns_invalid() {
+        // Refresher returns a JWKS that still lacks the requested kid.
+        let stale = build_eddsa_jwk_set("old-kid");
+        let useless = build_eddsa_jwk_set("still-old-kid");
+        let refresher = std::sync::Arc::new(StubRefresher::new(useless));
+        let provider = OidcAuthProvider::new_for_eddsa(stale, None, None)
+            .unwrap()
+            .with_refresher(refresher.clone(), true);
+
+        let token = sign_eddsa_with_kid(
+            &TestClaims {
+                sub: "x".to_string(),
+                exp: future_exp(),
+                iss: None,
+                aud: None,
+                role: None,
+                namespaces: None,
+            },
+            "brand-new-kid",
+        );
+        let err = provider.validate_token(&token).await.unwrap_err();
+        assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
+        assert_eq!(refresher.calls(), 1);
     }
 }

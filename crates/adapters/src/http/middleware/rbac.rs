@@ -67,6 +67,8 @@ mod tests {
             aud: None,
             role: role.map(String::from),
             namespaces: namespaces.map(|ns| ns.into_iter().map(String::from).collect()),
+            tenant_id: None,
+            roles: None,
         }
     }
 

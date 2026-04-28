@@ -1,5 +1,6 @@
 use std::sync::RwLock;
 
+use async_trait::async_trait;
 use base64::Engine as _;
 use domain::auth::entity::JwtClaims;
 use domain::auth::error::AuthError;
@@ -226,8 +227,9 @@ fn build_validation(
     validation
 }
 
+#[async_trait]
 impl AuthProvider for JwtAuthProvider {
-    fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
+    async fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
         if token.is_empty() {
             return Err(AuthError::TokenMissing);
         }
@@ -295,8 +297,8 @@ mod tests {
             - 3600
     }
 
-    #[test]
-    fn valid_token_accepted() {
+    #[tokio::test]
+    async fn valid_token_accepted() {
         let provider = JwtAuthProvider::new(TEST_RSA_PUBLIC_KEY, None, None).unwrap();
         let claims = TestClaims {
             sub: "user-1".to_string(),
@@ -306,12 +308,12 @@ mod tests {
             aud: None,
         };
         let token = sign_token(&claims, TEST_RSA_PRIVATE_KEY);
-        let result = provider.validate_token(&token).unwrap();
+        let result = provider.validate_token(&token).await.unwrap();
         assert_eq!(result.sub, "user-1");
     }
 
-    #[test]
-    fn expired_token_rejected() {
+    #[tokio::test]
+    async fn expired_token_rejected() {
         let provider = JwtAuthProvider::new(TEST_RSA_PUBLIC_KEY, None, None).unwrap();
         let claims = TestClaims {
             sub: "user-1".to_string(),
@@ -321,29 +323,29 @@ mod tests {
             aud: None,
         };
         let token = sign_token(&claims, TEST_RSA_PRIVATE_KEY);
-        let err = provider.validate_token(&token).unwrap_err();
+        let err = provider.validate_token(&token).await.unwrap_err();
         assert!(matches!(err, AuthError::TokenExpired), "got: {err}");
     }
 
-    #[test]
-    fn wrong_key_rejected() {
+    #[tokio::test]
+    async fn wrong_key_rejected() {
         // Use the private key as "public key" — will fail to parse or validate
         let provider = JwtAuthProvider::new(TEST_RSA_PUBLIC_KEY, None, None).unwrap();
         // Sign with a different key pair (we just use a tampered token)
         let token = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjo5OTk5OTk5OTk5fQ.invalid-signature";
-        let err = provider.validate_token(token).unwrap_err();
+        let err = provider.validate_token(token).await.unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
     }
 
-    #[test]
-    fn empty_token_rejected() {
+    #[tokio::test]
+    async fn empty_token_rejected() {
         let provider = JwtAuthProvider::new(TEST_RSA_PUBLIC_KEY, None, None).unwrap();
-        let err = provider.validate_token("").unwrap_err();
+        let err = provider.validate_token("").await.unwrap_err();
         assert!(matches!(err, AuthError::TokenMissing), "got: {err}");
     }
 
-    #[test]
-    fn issuer_validated() {
+    #[tokio::test]
+    async fn issuer_validated() {
         let provider =
             JwtAuthProvider::new(TEST_RSA_PUBLIC_KEY, Some("https://idp.example.com"), None)
                 .unwrap();
@@ -355,12 +357,12 @@ mod tests {
             aud: None,
         };
         let token = sign_token(&claims, TEST_RSA_PRIVATE_KEY);
-        let err = provider.validate_token(&token).unwrap_err();
+        let err = provider.validate_token(&token).await.unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
     }
 
-    #[test]
-    fn audience_validated() {
+    #[tokio::test]
+    async fn audience_validated() {
         let provider =
             JwtAuthProvider::new(TEST_RSA_PUBLIC_KEY, None, Some("ebpfsentinel")).unwrap();
         let claims = TestClaims {
@@ -371,12 +373,12 @@ mod tests {
             aud: Some("wrong-audience".to_string()),
         };
         let token = sign_token(&claims, TEST_RSA_PRIVATE_KEY);
-        let err = provider.validate_token(&token).unwrap_err();
+        let err = provider.validate_token(&token).await.unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
     }
 
-    #[test]
-    fn key_rotation_works() {
+    #[tokio::test]
+    async fn key_rotation_works() {
         let provider = JwtAuthProvider::new(TEST_RSA_PUBLIC_KEY, None, None).unwrap();
 
         let claims = TestClaims {
@@ -389,30 +391,30 @@ mod tests {
         let token = sign_token(&claims, TEST_RSA_PRIVATE_KEY);
 
         // Validate with original key
-        provider.validate_token(&token).unwrap();
+        provider.validate_token(&token).await.unwrap();
 
         // Rotate key to same key (simulates reload)
         provider.rotate_key(TEST_RSA_PUBLIC_KEY).unwrap();
 
         // Still validates
-        let result = provider.validate_token(&token).unwrap();
+        let result = provider.validate_token(&token).await.unwrap();
         assert_eq!(result.sub, "user-1");
     }
 
-    #[test]
-    fn invalid_pem_fails_construction() {
+    #[tokio::test]
+    async fn invalid_pem_fails_construction() {
         let err = JwtAuthProvider::new(b"not a PEM", None, None).unwrap_err();
         assert!(matches!(err, AuthError::KeyLoadFailed(_)), "got: {err}");
     }
 
-    #[test]
-    fn rsa_key_size_validation_accepts_2048() {
+    #[tokio::test]
+    async fn rsa_key_size_validation_accepts_2048() {
         // The test fixture is a 2048-bit key
         assert!(validate_rsa_key_size(TEST_RSA_PUBLIC_KEY).is_ok());
     }
 
-    #[test]
-    fn rsa_key_size_validation_reports_bits() {
+    #[tokio::test]
+    async fn rsa_key_size_validation_reports_bits() {
         let key_bits = {
             let pem_str = std::str::from_utf8(TEST_RSA_PUBLIC_KEY).unwrap();
             let b64: String = pem_str
@@ -439,8 +441,8 @@ mod tests {
         jsonwebtoken::encode(&Header::new(Algorithm::EdDSA), claims, &key).unwrap()
     }
 
-    #[test]
-    fn eddsa_valid_token_accepted() {
+    #[tokio::test]
+    async fn eddsa_valid_token_accepted() {
         let provider = JwtAuthProvider::new_eddsa(TEST_ED25519_PUBLIC_KEY, None, None).unwrap();
         let token = sign_eddsa(&TestClaims {
             sub: "user-1".to_string(),
@@ -449,13 +451,13 @@ mod tests {
             iss: None,
             aud: None,
         });
-        let claims = provider.validate_token(&token).unwrap();
+        let claims = provider.validate_token(&token).await.unwrap();
         assert_eq!(claims.sub, "user-1");
         assert_eq!(provider.algorithm(), Algorithm::EdDSA);
     }
 
-    #[test]
-    fn eddsa_expired_token_rejected() {
+    #[tokio::test]
+    async fn eddsa_expired_token_rejected() {
         let provider = JwtAuthProvider::new_eddsa(TEST_ED25519_PUBLIC_KEY, None, None).unwrap();
         let token = sign_eddsa(&TestClaims {
             sub: "user-1".to_string(),
@@ -464,12 +466,12 @@ mod tests {
             iss: None,
             aud: None,
         });
-        let err = provider.validate_token(&token).unwrap_err();
+        let err = provider.validate_token(&token).await.unwrap_err();
         assert!(matches!(err, AuthError::TokenExpired), "got: {err}");
     }
 
-    #[test]
-    fn eddsa_rejects_rs256_signed_token() {
+    #[tokio::test]
+    async fn eddsa_rejects_rs256_signed_token() {
         // A token signed with the RSA fixture must not validate against
         // an `EdDSA`-mode provider.
         let provider = JwtAuthProvider::new_eddsa(TEST_ED25519_PUBLIC_KEY, None, None).unwrap();
@@ -481,12 +483,12 @@ mod tests {
             aud: None,
         };
         let rsa_token = sign_token(&claims, TEST_RSA_PRIVATE_KEY);
-        let err = provider.validate_token(&rsa_token).unwrap_err();
+        let err = provider.validate_token(&rsa_token).await.unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
     }
 
-    #[test]
-    fn eddsa_rotation_keeps_validating() {
+    #[tokio::test]
+    async fn eddsa_rotation_keeps_validating() {
         let provider = JwtAuthProvider::new_eddsa(TEST_ED25519_PUBLIC_KEY, None, None).unwrap();
         let token = sign_eddsa(&TestClaims {
             sub: "user-1".to_string(),
@@ -495,27 +497,27 @@ mod tests {
             iss: None,
             aud: None,
         });
-        provider.validate_token(&token).unwrap();
+        provider.validate_token(&token).await.unwrap();
         provider.rotate_key(TEST_ED25519_PUBLIC_KEY).unwrap();
-        let claims = provider.validate_token(&token).unwrap();
+        let claims = provider.validate_token(&token).await.unwrap();
         assert_eq!(claims.sub, "user-1");
     }
 
-    #[test]
-    fn eddsa_invalid_pem_fails_construction() {
+    #[tokio::test]
+    async fn eddsa_invalid_pem_fails_construction() {
         let err = JwtAuthProvider::new_eddsa(b"not a PEM", None, None).unwrap_err();
         assert!(matches!(err, AuthError::KeyLoadFailed(_)), "got: {err}");
     }
 
-    #[test]
-    fn eddsa_rotation_rejects_rsa_pem() {
+    #[tokio::test]
+    async fn eddsa_rotation_rejects_rsa_pem() {
         let provider = JwtAuthProvider::new_eddsa(TEST_ED25519_PUBLIC_KEY, None, None).unwrap();
         let err = provider.rotate_key(TEST_RSA_PUBLIC_KEY).unwrap_err();
         assert!(matches!(err, AuthError::KeyLoadFailed(_)), "got: {err}");
     }
 
-    #[test]
-    fn rs256_rotation_rejects_eddsa_pem() {
+    #[tokio::test]
+    async fn rs256_rotation_rejects_eddsa_pem() {
         let provider = JwtAuthProvider::new(TEST_RSA_PUBLIC_KEY, None, None).unwrap();
         let err = provider.rotate_key(TEST_ED25519_PUBLIC_KEY).unwrap_err();
         assert!(matches!(err, AuthError::KeyLoadFailed(_)), "got: {err}");

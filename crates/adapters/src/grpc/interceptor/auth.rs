@@ -19,9 +19,14 @@ pub fn make_jwt_interceptor(
             Status::unauthenticated("authentication required: provide Bearer token or x-api-key")
         })?;
 
-        provider
-            .validate_token(token)
-            .map_err(|e| Status::unauthenticated(e.to_string()))?;
+        // Bridge the async `AuthProvider` into tonic's sync interceptor
+        // hook by entering the current Tokio runtime in a blocking
+        // section. Requires the multi-thread runtime that the agent
+        // boots with (`#[tokio::main]` defaults to multi-thread).
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(provider.validate_token(token))
+        });
+        result.map_err(|e| Status::unauthenticated(e.to_string()))?;
 
         Ok(request)
     }
@@ -55,13 +60,15 @@ fn extract_token(request: &Request<()>) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use domain::auth::entity::JwtClaims;
     use domain::auth::error::AuthError;
     use tonic::metadata::MetadataValue;
 
     struct AlwaysOkProvider;
+    #[async_trait]
     impl AuthProvider for AlwaysOkProvider {
-        fn validate_token(&self, _token: &str) -> Result<JwtClaims, AuthError> {
+        async fn validate_token(&self, _token: &str) -> Result<JwtClaims, AuthError> {
             Ok(JwtClaims {
                 sub: "test".to_string(),
                 exp: 9_999_999_999,
@@ -70,19 +77,22 @@ mod tests {
                 aud: None,
                 role: None,
                 namespaces: None,
+                tenant_id: None,
+                roles: None,
             })
         }
     }
 
     struct AlwaysFailProvider;
+    #[async_trait]
     impl AuthProvider for AlwaysFailProvider {
-        fn validate_token(&self, _token: &str) -> Result<JwtClaims, AuthError> {
+        async fn validate_token(&self, _token: &str) -> Result<JwtClaims, AuthError> {
             Err(AuthError::TokenExpired)
         }
     }
 
-    #[test]
-    fn accept_valid_bearer() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn accept_valid_bearer() {
         let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
         let mut req = Request::new(());
         req.metadata_mut().insert(
@@ -92,16 +102,16 @@ mod tests {
         assert!(interceptor(req).is_ok());
     }
 
-    #[test]
-    fn reject_missing_auth() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_missing_auth() {
         let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
         let req = Request::new(());
         let status = interceptor(req).unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
     }
 
-    #[test]
-    fn reject_invalid_token() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_invalid_token() {
         let interceptor = make_jwt_interceptor(Arc::new(AlwaysFailProvider));
         let mut req = Request::new(());
         req.metadata_mut().insert(
@@ -112,8 +122,8 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
     }
 
-    #[test]
-    fn reject_non_bearer_without_api_key() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_non_bearer_without_api_key() {
         let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
         let mut req = Request::new(());
         req.metadata_mut().insert(
@@ -124,8 +134,8 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
     }
 
-    #[test]
-    fn accept_valid_api_key() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn accept_valid_api_key() {
         let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
         let mut req = Request::new(());
         req.metadata_mut()
@@ -133,8 +143,8 @@ mod tests {
         assert!(interceptor(req).is_ok());
     }
 
-    #[test]
-    fn reject_invalid_api_key() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_invalid_api_key() {
         let interceptor = make_jwt_interceptor(Arc::new(AlwaysFailProvider));
         let mut req = Request::new(());
         req.metadata_mut()
@@ -143,8 +153,8 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
     }
 
-    #[test]
-    fn bearer_takes_precedence_over_api_key() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bearer_takes_precedence_over_api_key() {
         let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
         let mut req = Request::new(());
         req.metadata_mut().insert(
@@ -157,8 +167,8 @@ mod tests {
         assert!(interceptor(req).is_ok());
     }
 
-    #[test]
-    fn authorization_metadata_is_case_insensitive() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn authorization_metadata_is_case_insensitive() {
         // HTTP/2 metadata keys are normalized to lowercase by tonic/http,
         // so "Authorization" inserted as "authorization" is matched correctly.
         let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
