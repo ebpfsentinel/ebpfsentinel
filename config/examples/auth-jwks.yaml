@@ -1,0 +1,19 @@
+# Auth example — EdDSA JWT signed by the dashboard, verified via JWKS.
+#
+# Pairs the agent with the dashboard's short-lived per-tenant token flow:
+# the dashboard mints Ed25519-signed JWTs with a rotating key, exposes the
+# JWKS at `https://dashboard/.well-known/jwks.json`, and the agent fetches
+# the verification key from there.
+
+agent:
+  interfaces: [eth0]
+
+auth:
+  enabled: true
+  jwt:
+    algorithm: EdDSA
+    jwks_url: https://dashboard.example.com/.well-known/jwks.json
+    jwks_cache_ttl_seconds: 3600
+    jwks_refresh_on_unknown_kid: true
+    issuer: https://dashboard.example.com
+    audience: ebpfsentinel-agent

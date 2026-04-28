@@ -6,19 +6,26 @@ use domain::auth::error::AuthError;
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation};
 use ports::secondary::auth_provider::AuthProvider;
 
-/// JWT authentication provider using RSA (RS256) public key validation.
+/// JWT authentication provider using a static PEM public key.
 ///
-/// The decoding key is held behind a `std::sync::RwLock` for concurrent reads
-/// and rare writes (key rotation via config reload).
+/// Two algorithms are supported:
+///
+/// - `RS256` — RSA-2048+ (legacy default).
+/// - ``EdDSA`` — Ed25519 (used by the dashboard's short-lived per-tenant
+///   tokens; rotation is handled by the JWKS-based provider, not this one).
+///
+/// The decoding key is held behind a `std::sync::RwLock` for concurrent
+/// reads and rare writes (key rotation via config reload).
 pub struct JwtAuthProvider {
     decoding_key: RwLock<DecodingKey>,
     validation: Validation,
+    algorithm: Algorithm,
 }
 
 impl std::fmt::Debug for JwtAuthProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JwtAuthProvider")
-            .field("algorithm", &"RS256")
+            .field("algorithm", &format!("{:?}", self.algorithm))
             .finish_non_exhaustive()
     }
 }
@@ -139,31 +146,52 @@ impl JwtAuthProvider {
         let decoding_key = DecodingKey::from_rsa_pem(pem_bytes)
             .map_err(|e| AuthError::KeyLoadFailed(e.to_string()))?;
 
-        let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_required_spec_claims(&["sub", "exp"]);
-        validation.leeway = 0; // Explicit: reject expired tokens with zero tolerance
+        Ok(Self {
+            decoding_key: RwLock::new(decoding_key),
+            validation: build_validation(Algorithm::RS256, issuer, audience),
+            algorithm: Algorithm::RS256,
+        })
+    }
 
-        if let Some(iss) = issuer {
-            validation.set_issuer(&[iss]);
-        }
-        if let Some(aud) = audience {
-            validation.set_audience(&[aud]);
-        }
+    /// Create a new provider from PEM-encoded Ed25519 public key bytes.
+    ///
+    /// `EdDSA` is enabled when `auth.jwt.algorithm: EdDSA` is set in the
+    /// agent config and pairs with a static `public_key_path`. JWKS-based
+    /// `EdDSA` flows go through the JWKS provider instead.
+    pub fn new_eddsa(
+        pem_bytes: &[u8],
+        issuer: Option<&str>,
+        audience: Option<&str>,
+    ) -> Result<Self, AuthError> {
+        let decoding_key = DecodingKey::from_ed_pem(pem_bytes)
+            .map_err(|e| AuthError::KeyLoadFailed(format!("invalid Ed25519 PEM: {e}")))?;
 
         Ok(Self {
             decoding_key: RwLock::new(decoding_key),
-            validation,
+            validation: build_validation(Algorithm::EdDSA, issuer, audience),
+            algorithm: Algorithm::EdDSA,
         })
     }
 
     /// Atomically replace the decoding key (for config-reload key rotation).
     ///
-    /// Rejects keys smaller than 2048 bits.
+    /// Rejects keys smaller than 2048 bits when the provider is RSA;
+    /// rejects malformed Ed25519 PEMs when the provider is `EdDSA`.
     pub fn rotate_key(&self, pem_bytes: &[u8]) -> Result<(), AuthError> {
-        validate_rsa_key_size(pem_bytes)?;
-
-        let new_key = DecodingKey::from_rsa_pem(pem_bytes)
-            .map_err(|e| AuthError::KeyLoadFailed(e.to_string()))?;
+        let new_key = match self.algorithm {
+            Algorithm::RS256 => {
+                validate_rsa_key_size(pem_bytes)?;
+                DecodingKey::from_rsa_pem(pem_bytes)
+                    .map_err(|e| AuthError::KeyLoadFailed(e.to_string()))?
+            }
+            Algorithm::EdDSA => DecodingKey::from_ed_pem(pem_bytes)
+                .map_err(|e| AuthError::KeyLoadFailed(format!("invalid Ed25519 PEM: {e}")))?,
+            other => {
+                return Err(AuthError::KeyLoadFailed(format!(
+                    "unsupported JWT algorithm for rotation: {other:?}"
+                )));
+            }
+        };
         let mut key = self.decoding_key.write().map_err(|e| {
             tracing::error!("JWT decoding key RwLock poisoned: {e}");
             AuthError::KeyLoadFailed("internal auth state corrupted".to_string())
@@ -171,6 +199,31 @@ impl JwtAuthProvider {
         *key = new_key;
         Ok(())
     }
+
+    /// Algorithm advertised by this provider — exposed for diagnostics.
+    #[must_use]
+    pub fn algorithm(&self) -> Algorithm {
+        self.algorithm
+    }
+}
+
+/// Build the shared `Validation` policy for both RS256 and `EdDSA` paths.
+fn build_validation(
+    algorithm: Algorithm,
+    issuer: Option<&str>,
+    audience: Option<&str>,
+) -> Validation {
+    let mut validation = Validation::new(algorithm);
+    validation.set_required_spec_claims(&["sub", "exp"]);
+    validation.leeway = 0; // explicit: reject expired tokens with zero tolerance
+
+    if let Some(iss) = issuer {
+        validation.set_issuer(&[iss]);
+    }
+    if let Some(aud) = audience {
+        validation.set_audience(&[aud]);
+    }
+    validation
 }
 
 impl AuthProvider for JwtAuthProvider {
@@ -372,5 +425,99 @@ mod tests {
             extract_rsa_modulus_len(&der).unwrap() * 8
         };
         assert_eq!(key_bits, 2048);
+    }
+
+    // ── `EdDSA` / Ed25519 ────────────────────────────────────────────
+
+    const TEST_ED25519_PRIVATE_KEY: &[u8] =
+        include_bytes!("../../tests/fixtures/jwt_test_ed25519.pem");
+    const TEST_ED25519_PUBLIC_KEY: &[u8] =
+        include_bytes!("../../tests/fixtures/jwt_test_ed25519.pub.pem");
+
+    fn sign_eddsa(claims: &TestClaims) -> String {
+        let key = EncodingKey::from_ed_pem(TEST_ED25519_PRIVATE_KEY).unwrap();
+        jsonwebtoken::encode(&Header::new(Algorithm::EdDSA), claims, &key).unwrap()
+    }
+
+    #[test]
+    fn eddsa_valid_token_accepted() {
+        let provider = JwtAuthProvider::new_eddsa(TEST_ED25519_PUBLIC_KEY, None, None).unwrap();
+        let token = sign_eddsa(&TestClaims {
+            sub: "user-1".to_string(),
+            exp: future_exp(),
+            iat: 0,
+            iss: None,
+            aud: None,
+        });
+        let claims = provider.validate_token(&token).unwrap();
+        assert_eq!(claims.sub, "user-1");
+        assert_eq!(provider.algorithm(), Algorithm::EdDSA);
+    }
+
+    #[test]
+    fn eddsa_expired_token_rejected() {
+        let provider = JwtAuthProvider::new_eddsa(TEST_ED25519_PUBLIC_KEY, None, None).unwrap();
+        let token = sign_eddsa(&TestClaims {
+            sub: "user-1".to_string(),
+            exp: past_exp(),
+            iat: 0,
+            iss: None,
+            aud: None,
+        });
+        let err = provider.validate_token(&token).unwrap_err();
+        assert!(matches!(err, AuthError::TokenExpired), "got: {err}");
+    }
+
+    #[test]
+    fn eddsa_rejects_rs256_signed_token() {
+        // A token signed with the RSA fixture must not validate against
+        // an `EdDSA`-mode provider.
+        let provider = JwtAuthProvider::new_eddsa(TEST_ED25519_PUBLIC_KEY, None, None).unwrap();
+        let claims = TestClaims {
+            sub: "x".to_string(),
+            exp: future_exp(),
+            iat: 0,
+            iss: None,
+            aud: None,
+        };
+        let rsa_token = sign_token(&claims, TEST_RSA_PRIVATE_KEY);
+        let err = provider.validate_token(&rsa_token).unwrap_err();
+        assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
+    }
+
+    #[test]
+    fn eddsa_rotation_keeps_validating() {
+        let provider = JwtAuthProvider::new_eddsa(TEST_ED25519_PUBLIC_KEY, None, None).unwrap();
+        let token = sign_eddsa(&TestClaims {
+            sub: "user-1".to_string(),
+            exp: future_exp(),
+            iat: 0,
+            iss: None,
+            aud: None,
+        });
+        provider.validate_token(&token).unwrap();
+        provider.rotate_key(TEST_ED25519_PUBLIC_KEY).unwrap();
+        let claims = provider.validate_token(&token).unwrap();
+        assert_eq!(claims.sub, "user-1");
+    }
+
+    #[test]
+    fn eddsa_invalid_pem_fails_construction() {
+        let err = JwtAuthProvider::new_eddsa(b"not a PEM", None, None).unwrap_err();
+        assert!(matches!(err, AuthError::KeyLoadFailed(_)), "got: {err}");
+    }
+
+    #[test]
+    fn eddsa_rotation_rejects_rsa_pem() {
+        let provider = JwtAuthProvider::new_eddsa(TEST_ED25519_PUBLIC_KEY, None, None).unwrap();
+        let err = provider.rotate_key(TEST_RSA_PUBLIC_KEY).unwrap_err();
+        assert!(matches!(err, AuthError::KeyLoadFailed(_)), "got: {err}");
+    }
+
+    #[test]
+    fn rs256_rotation_rejects_eddsa_pem() {
+        let provider = JwtAuthProvider::new(TEST_RSA_PUBLIC_KEY, None, None).unwrap();
+        let err = provider.rotate_key(TEST_ED25519_PUBLIC_KEY).unwrap_err();
+        assert!(matches!(err, AuthError::KeyLoadFailed(_)), "got: {err}");
     }
 }

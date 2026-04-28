@@ -559,27 +559,74 @@ pub async fn run(
                 Some(crate::reload::AuthProviderHandle::Oidc(Arc::clone(&arc))),
                 Some(Arc::clone(&arc) as Arc<dyn AuthProvider>),
             )
-        } else if !config.auth.jwt.public_key_path.is_empty() {
-            let pem_bytes = std::fs::read(&config.auth.jwt.public_key_path).map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to read JWT public key at '{}': {e}",
-                    config.auth.jwt.public_key_path
-                )
-            })?;
-            let provider = JwtAuthProvider::new(
-                &pem_bytes,
-                config.auth.jwt.issuer.as_deref(),
-                config.auth.jwt.audience.as_deref(),
-            )
-            .map_err(|e| anyhow::anyhow!("failed to initialize JWT auth provider: {e}"))?;
-            info!("JWT authentication enabled");
-            let arc = Arc::new(provider);
-            (
-                Some(crate::reload::AuthProviderHandle::Jwt(Arc::clone(&arc))),
-                Some(Arc::clone(&arc) as Arc<dyn AuthProvider>),
-            )
         } else {
-            (None, None)
+            match config
+                .auth
+                .jwt
+                .key_source()
+                .map_err(|e| anyhow::anyhow!("auth.jwt config error: {e}"))?
+            {
+                infrastructure::config::JwtKeySource::Pem { path } => {
+                    let pem_bytes = std::fs::read(&path).map_err(|e| {
+                        anyhow::anyhow!("failed to read JWT public key at '{path}': {e}")
+                    })?;
+                    let provider = match config.auth.jwt.algorithm {
+                        infrastructure::config::JwtAlgorithm::RS256 => JwtAuthProvider::new(
+                            &pem_bytes,
+                            config.auth.jwt.issuer.as_deref(),
+                            config.auth.jwt.audience.as_deref(),
+                        ),
+                        infrastructure::config::JwtAlgorithm::EdDSA => JwtAuthProvider::new_eddsa(
+                            &pem_bytes,
+                            config.auth.jwt.issuer.as_deref(),
+                            config.auth.jwt.audience.as_deref(),
+                        ),
+                    }
+                    .map_err(|e| anyhow::anyhow!("failed to initialize JWT auth provider: {e}"))?;
+                    info!(
+                        algorithm = ?config.auth.jwt.algorithm,
+                        "JWT authentication enabled (static PEM)"
+                    );
+                    let arc = Arc::new(provider);
+                    (
+                        Some(crate::reload::AuthProviderHandle::Jwt(Arc::clone(&arc))),
+                        Some(Arc::clone(&arc) as Arc<dyn AuthProvider>),
+                    )
+                }
+                infrastructure::config::JwtKeySource::Jwks { ref url, .. } => {
+                    let jwk_set = oidc_provider::fetch_jwks(url)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("failed to fetch JWT JWKS: {e}"))?;
+                    let provider = match config.auth.jwt.algorithm {
+                        infrastructure::config::JwtAlgorithm::RS256 => OidcAuthProvider::new(
+                            jwk_set,
+                            config.auth.jwt.issuer.as_deref(),
+                            config.auth.jwt.audience.as_deref(),
+                        ),
+                        infrastructure::config::JwtAlgorithm::EdDSA => {
+                            OidcAuthProvider::new_for_eddsa(
+                                jwk_set,
+                                config.auth.jwt.issuer.as_deref(),
+                                config.auth.jwt.audience.as_deref(),
+                            )
+                        }
+                    }
+                    .map_err(|e| {
+                        anyhow::anyhow!("failed to initialize JWT JWKS auth provider: {e}")
+                    })?;
+                    info!(
+                        algorithm = ?config.auth.jwt.algorithm,
+                        jwks_url = %url,
+                        "JWT authentication enabled (JWKS)"
+                    );
+                    let arc = Arc::new(provider);
+                    (
+                        Some(crate::reload::AuthProviderHandle::Oidc(Arc::clone(&arc))),
+                        Some(Arc::clone(&arc) as Arc<dyn AuthProvider>),
+                    )
+                }
+                infrastructure::config::JwtKeySource::None => (None, None),
+            }
         };
 
         // Build API key provider if configured

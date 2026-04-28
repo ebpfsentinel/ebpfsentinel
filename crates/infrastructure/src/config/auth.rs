@@ -80,11 +80,49 @@ pub struct OidcConfig {
     pub audience: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Signing algorithm advertised by the JWT verifier.
+///
+/// `RS256` (legacy default) verifies with an RSA-2048+ public key.
+/// `EdDSA` verifies with an Ed25519 public key — required for the
+/// dashboard's short-lived per-tenant tokens with JWKS rotation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum JwtAlgorithm {
+    /// RSA + SHA-256 (legacy). Requires `public_key_path` to point at
+    /// an RSA-2048+ public key in PEM format.
+    #[default]
+    RS256,
+    /// Ed25519. Pairs with either an Ed25519 PEM at `public_key_path`
+    /// or a JWKS endpoint at `jwks_url` carrying `kty=OKP, crv=Ed25519`.
+    EdDSA,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JwtConfig {
-    /// Path to the RSA public key in PEM format.
+    /// Signing algorithm. `RS256` keeps the existing static-PEM path;
+    /// `EdDSA` enables the dashboard's rotating-key JWKS path.
+    #[serde(default)]
+    pub algorithm: JwtAlgorithm,
+
+    /// Path to the public key in PEM format. Mutually exclusive with
+    /// `jwks_url`. Empty string disables the static-PEM source.
     #[serde(default)]
     pub public_key_path: String,
+
+    /// JWKS URL (`https://`). Mutually exclusive with
+    /// `public_key_path`. The agent fetches once at startup, caches for
+    /// `jwks_cache_ttl_seconds`, and refreshes in the background.
+    #[serde(default)]
+    pub jwks_url: Option<String>,
+
+    /// JWKS cache TTL in seconds. Default: 3600 (1h).
+    #[serde(default = "default_jwks_cache_ttl_seconds")]
+    pub jwks_cache_ttl_seconds: u64,
+
+    /// On unknown `kid`, request an immediate JWKS refresh from the
+    /// background fetcher and retry once. Default: true.
+    #[serde(default = "default_jwks_refresh_on_unknown_kid")]
+    pub jwks_refresh_on_unknown_kid: bool,
 
     /// Expected token issuer (`iss` claim). Validated when set.
     #[serde(default)]
@@ -93,6 +131,76 @@ pub struct JwtConfig {
     /// Expected token audience (`aud` claim). Validated when set.
     #[serde(default)]
     pub audience: Option<String>,
+}
+
+fn default_jwks_cache_ttl_seconds() -> u64 {
+    3600
+}
+
+fn default_jwks_refresh_on_unknown_kid() -> bool {
+    true
+}
+
+impl Default for JwtConfig {
+    fn default() -> Self {
+        Self {
+            algorithm: JwtAlgorithm::default(),
+            public_key_path: String::new(),
+            jwks_url: None,
+            jwks_cache_ttl_seconds: default_jwks_cache_ttl_seconds(),
+            jwks_refresh_on_unknown_kid: default_jwks_refresh_on_unknown_kid(),
+            issuer: None,
+            audience: None,
+        }
+    }
+}
+
+/// Source of the JWT verification key, derived from [`JwtConfig`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JwtKeySource {
+    /// Static PEM file on disk.
+    Pem { path: String },
+    /// JWKS HTTP endpoint with cached refresh.
+    Jwks {
+        url: String,
+        cache_ttl_seconds: u64,
+        refresh_on_unknown_kid: bool,
+    },
+    /// Auth disabled / no JWT source configured.
+    None,
+}
+
+impl JwtConfig {
+    /// Resolve the key source, rejecting ambiguous configurations.
+    ///
+    /// Returns [`JwtKeySource::None`] when both `public_key_path` and
+    /// `jwks_url` are empty (auth turned off or pure-API-key mode).
+    pub fn key_source(&self) -> Result<JwtKeySource, String> {
+        let has_pem = !self.public_key_path.is_empty();
+        let has_jwks = self.jwks_url.as_deref().is_some_and(|s| !s.is_empty());
+        match (has_pem, has_jwks) {
+            (true, true) => Err(
+                "auth.jwt: exactly one of `public_key_path` or `jwks_url` may be set".to_string(),
+            ),
+            (true, false) => Ok(JwtKeySource::Pem {
+                path: self.public_key_path.clone(),
+            }),
+            (false, true) => {
+                let url = self.jwks_url.as_deref().unwrap_or_default().to_string();
+                if !(url.starts_with("https://") || url.starts_with("http://")) {
+                    return Err(format!(
+                        "auth.jwt.jwks_url must be `http://` or `https://`, got {url:?}"
+                    ));
+                }
+                Ok(JwtKeySource::Jwks {
+                    url,
+                    cache_ttl_seconds: self.jwks_cache_ttl_seconds,
+                    refresh_on_unknown_kid: self.jwks_refresh_on_unknown_kid,
+                })
+            }
+            (false, false) => Ok(JwtKeySource::None),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -171,6 +279,97 @@ jwt:
         assert_eq!(cfg.jwt.public_key_path, "/etc/sentinel/pub.pem");
         assert_eq!(cfg.jwt.issuer.as_deref(), Some("sentinel"));
         assert_eq!(cfg.jwt.audience.as_deref(), Some("api"));
+    }
+
+    #[test]
+    fn jwt_default_algorithm_is_rs256() {
+        let cfg = JwtConfig::default();
+        assert_eq!(cfg.algorithm, JwtAlgorithm::RS256);
+        assert!(cfg.jwks_url.is_none());
+        assert_eq!(cfg.jwks_cache_ttl_seconds, 3600);
+        assert!(cfg.jwks_refresh_on_unknown_kid);
+    }
+
+    #[test]
+    fn jwt_key_source_pem_when_only_path_set() {
+        let cfg = JwtConfig {
+            public_key_path: "/etc/keys/pub.pem".to_string(),
+            ..JwtConfig::default()
+        };
+        assert_eq!(
+            cfg.key_source().unwrap(),
+            JwtKeySource::Pem {
+                path: "/etc/keys/pub.pem".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn jwt_key_source_jwks_when_only_url_set() {
+        let cfg = JwtConfig {
+            jwks_url: Some("https://dashboard/.well-known/jwks.json".to_string()),
+            ..JwtConfig::default()
+        };
+        match cfg.key_source().unwrap() {
+            JwtKeySource::Jwks {
+                ref url,
+                cache_ttl_seconds,
+                refresh_on_unknown_kid,
+            } => {
+                assert_eq!(url, "https://dashboard/.well-known/jwks.json");
+                assert_eq!(cache_ttl_seconds, 3600);
+                assert!(refresh_on_unknown_kid);
+            }
+            other => panic!("unexpected source: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jwt_key_source_rejects_both_set() {
+        let cfg = JwtConfig {
+            public_key_path: "/p".to_string(),
+            jwks_url: Some("https://x".to_string()),
+            ..JwtConfig::default()
+        };
+        let err = cfg.key_source().unwrap_err();
+        assert!(err.contains("exactly one"));
+    }
+
+    #[test]
+    fn jwt_key_source_rejects_non_http_jwks() {
+        let cfg = JwtConfig {
+            jwks_url: Some("ftp://nope".to_string()),
+            ..JwtConfig::default()
+        };
+        let err = cfg.key_source().unwrap_err();
+        assert!(err.contains("must be"));
+    }
+
+    #[test]
+    fn jwt_key_source_none_when_unset() {
+        let cfg = JwtConfig::default();
+        assert_eq!(cfg.key_source().unwrap(), JwtKeySource::None);
+    }
+
+    #[test]
+    fn jwt_yaml_with_eddsa_and_jwks() {
+        let yaml = r"
+jwt:
+  algorithm: EdDSA
+  jwks_url: https://dashboard.example.com/.well-known/jwks.json
+  jwks_cache_ttl_seconds: 600
+  jwks_refresh_on_unknown_kid: false
+  issuer: dashboard
+  audience: agent
+";
+        let cfg: AuthConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(cfg.jwt.algorithm, JwtAlgorithm::EdDSA);
+        assert_eq!(
+            cfg.jwt.jwks_url.as_deref(),
+            Some("https://dashboard.example.com/.well-known/jwks.json")
+        );
+        assert_eq!(cfg.jwt.jwks_cache_ttl_seconds, 600);
+        assert!(!cfg.jwt.jwks_refresh_on_unknown_kid);
     }
 
     #[test]

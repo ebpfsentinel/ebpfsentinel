@@ -32,7 +32,36 @@ impl OidcAuthProvider {
         issuer: Option<&str>,
         audience: Option<&str>,
     ) -> Result<Self, AuthError> {
-        let mut validation = Validation::new(Algorithm::RS256);
+        Ok(Self::new_with_algorithm(
+            Algorithm::RS256,
+            jwk_set,
+            issuer,
+            audience,
+        ))
+    }
+
+    /// Create a new provider that validates `EdDSA` (Ed25519) tokens against
+    /// a JWKS. Used by the dashboard's short-lived per-tenant JWT path.
+    pub fn new_for_eddsa(
+        jwk_set: JwkSet,
+        issuer: Option<&str>,
+        audience: Option<&str>,
+    ) -> Result<Self, AuthError> {
+        Ok(Self::new_with_algorithm(
+            Algorithm::EdDSA,
+            jwk_set,
+            issuer,
+            audience,
+        ))
+    }
+
+    fn new_with_algorithm(
+        algorithm: Algorithm,
+        jwk_set: JwkSet,
+        issuer: Option<&str>,
+        audience: Option<&str>,
+    ) -> Self {
+        let mut validation = Validation::new(algorithm);
         validation.set_required_spec_claims(&["sub", "exp"]);
         validation.leeway = 0; // Explicit: reject expired tokens with zero tolerance
 
@@ -43,10 +72,10 @@ impl OidcAuthProvider {
             validation.set_audience(&[aud]);
         }
 
-        Ok(Self {
+        Self {
             jwk_set: RwLock::new(jwk_set),
             validation,
-        })
+        }
     }
 
     /// Atomically replace the cached JWKS (for periodic key rotation).
@@ -402,5 +431,126 @@ mod tests {
         let err = provider.validate_token(&token).unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
         assert!(err.to_string().contains("invalid token"));
+    }
+
+    // ── EdDSA-via-JWKS ─────────────────────────────────────────────
+
+    const TEST_ED25519_PRIVATE_KEY: &[u8] =
+        include_bytes!("../../tests/fixtures/jwt_test_ed25519.pem");
+    const TEST_ED25519_PUBLIC_KEY: &[u8] =
+        include_bytes!("../../tests/fixtures/jwt_test_ed25519.pub.pem");
+
+    /// Extract the raw 32-byte Ed25519 public key from a PEM-encoded
+    /// `SubjectPublicKeyInfo`. Ed25519 has a fixed wire layout, so the
+    /// public key is always the last 32 bytes of the DER body.
+    fn ed25519_pubkey_raw() -> [u8; 32] {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
+        let pem = std::str::from_utf8(TEST_ED25519_PUBLIC_KEY).unwrap();
+        let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+        let der = STANDARD.decode(body).unwrap();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&der[der.len() - 32..]);
+        out
+    }
+
+    fn build_eddsa_jwk_set(kid: &str) -> JwkSet {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let raw = ed25519_pubkey_raw();
+        let x_b64 = URL_SAFE_NO_PAD.encode(raw);
+        let jwk_json = serde_json::json!({
+            "keys": [{
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "kid": kid,
+                "use": "sig",
+                "alg": "EdDSA",
+                "x": x_b64,
+            }]
+        });
+        serde_json::from_value(jwk_json).unwrap()
+    }
+
+    fn sign_eddsa_with_kid(claims: &TestClaims, kid: &str) -> String {
+        let key = EncodingKey::from_ed_pem(TEST_ED25519_PRIVATE_KEY).unwrap();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some(kid.to_string());
+        encode(&header, claims, &key).unwrap()
+    }
+
+    #[test]
+    fn eddsa_jwks_valid_token_accepted() {
+        let jwk_set = build_eddsa_jwk_set("dash-2026-04");
+        let provider = OidcAuthProvider::new_for_eddsa(jwk_set, None, None).unwrap();
+
+        let claims = TestClaims {
+            sub: "tenant-admin".to_string(),
+            exp: future_exp(),
+            iss: None,
+            aud: None,
+            role: Some("admin".to_string()),
+            namespaces: None,
+        };
+        let token = sign_eddsa_with_kid(&claims, "dash-2026-04");
+        let result = provider.validate_token(&token).unwrap();
+        assert_eq!(result.sub, "tenant-admin");
+        assert_eq!(result.role.as_deref(), Some("admin"));
+    }
+
+    #[test]
+    fn eddsa_jwks_unknown_kid_rejected() {
+        let jwk_set = build_eddsa_jwk_set("dash-2026-04");
+        let provider = OidcAuthProvider::new_for_eddsa(jwk_set, None, None).unwrap();
+
+        let claims = TestClaims {
+            sub: "x".to_string(),
+            exp: future_exp(),
+            iss: None,
+            aud: None,
+            role: None,
+            namespaces: None,
+        };
+        let token = sign_eddsa_with_kid(&claims, "dash-2025-12");
+        let err = provider.validate_token(&token).unwrap_err();
+        assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
+    }
+
+    #[test]
+    fn eddsa_jwks_rejects_rs256_token() {
+        let jwk_set = build_eddsa_jwk_set("dash-2026-04");
+        let provider = OidcAuthProvider::new_for_eddsa(jwk_set, None, None).unwrap();
+
+        let claims = TestClaims {
+            sub: "x".to_string(),
+            exp: future_exp(),
+            iss: None,
+            aud: None,
+            role: None,
+            namespaces: None,
+        };
+        let rsa_token = sign_token_with_kid(&claims, "dash-2026-04");
+        let err = provider.validate_token(&rsa_token).unwrap_err();
+        assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
+    }
+
+    #[test]
+    fn eddsa_jwks_rotation_picks_up_new_kid() {
+        let jwk_set = build_eddsa_jwk_set("old-kid");
+        let provider = OidcAuthProvider::new_for_eddsa(jwk_set, None, None).unwrap();
+
+        let claims = TestClaims {
+            sub: "x".to_string(),
+            exp: future_exp(),
+            iss: None,
+            aud: None,
+            role: None,
+            namespaces: None,
+        };
+        let token = sign_eddsa_with_kid(&claims, "new-kid");
+        assert!(provider.validate_token(&token).is_err());
+
+        provider.rotate_keys(build_eddsa_jwk_set("new-kid"));
+        let result = provider.validate_token(&token).unwrap();
+        assert_eq!(result.sub, "x");
     }
 }

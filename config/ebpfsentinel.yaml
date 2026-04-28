@@ -116,6 +116,17 @@ audit:
 # When enabled, /metrics requires a token by default (metrics_auth_required).
 auth:
   enabled: false
+  # JWT verification path. Two modes:
+  #   - static PEM   (algorithm: RS256 + public_key_path)
+  #   - JWKS          (algorithm: EdDSA + jwks_url) — required by the
+  #                   dashboard's short-lived per-tenant tokens with key
+  #                   rotation.
+  jwt:
+    # algorithm: RS256       # RS256 (default) or EdDSA
+    # public_key_path: ""    # PEM path; mutually exclusive with jwks_url
+    # jwks_url: ""           # https://dashboard/.well-known/jwks.json
+    # jwks_cache_ttl_seconds: 3600
+    # jwks_refresh_on_unknown_kid: true
 
 conntrack:
   enabled: false

@@ -37,7 +37,7 @@ mod zone;
 pub use alerting::{AlertRouteConfig, AlertingConfig, SmtpConfig};
 pub use alias::AliasConfig;
 pub use audit::AuditConfig;
-pub use auth::{ApiKeyConfig, AuthConfig, JwtConfig, OidcConfig};
+pub use auth::{ApiKeyConfig, AuthConfig, JwtAlgorithm, JwtConfig, JwtKeySource, OidcConfig};
 pub use common::{ConfigError, parse_cidr, parse_domain_mode};
 pub use conntrack::ConnTrackSectionConfig;
 pub use container::{ContainerConfig, ResolverConfig as ContainerResolverConfig};
