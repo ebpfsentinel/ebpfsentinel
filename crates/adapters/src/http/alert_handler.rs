@@ -15,6 +15,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use utoipa::{IntoParams, ToSchema};
 
 use domain::alert::entity::Alert;
+use domain::alert::filter::{AlertFilter, FilterError, parse_severity as parse_severity_domain};
 use domain::alert::query::AlertQuery;
 use domain::audit::entity::{AuditAction, AuditComponent};
 use domain::auth::entity::JwtClaims;
@@ -167,13 +168,7 @@ const SSE_KEEPALIVE_SECS: u64 = 15;
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn parse_severity(s: &str) -> Option<Severity> {
-    match s.to_lowercase().as_str() {
-        "low" => Some(Severity::Low),
-        "medium" => Some(Severity::Medium),
-        "high" => Some(Severity::High),
-        "critical" => Some(Severity::Critical),
-        _ => None,
-    }
+    parse_severity_domain(s)
 }
 
 fn severity_label(s: Severity) -> &'static str {
@@ -390,62 +385,20 @@ pub struct StreamFilters {
     pub mitre_tactic: Option<String>,
 }
 
-/// Server-side filter compiled from [`StreamFilters`].
-///
-/// `matches` is invoked against every alert pushed through the
-/// broadcast channel before it is forwarded to the client.
-#[derive(Debug, Default, Clone)]
-pub struct AlertFilter {
-    severity_min: Option<Severity>,
-    component: Option<String>,
-    mitre_tactic: Option<String>,
-}
-
-impl AlertFilter {
-    /// True when the alert satisfies every filter dimension.
-    #[must_use]
-    pub fn matches(&self, alert: &Alert) -> bool {
-        if let Some(min) = self.severity_min
-            && alert.severity.to_u8() < min.to_u8()
-        {
-            return false;
-        }
-        if let Some(ref c) = self.component
-            && !alert.component.eq_ignore_ascii_case(c)
-        {
-            return false;
-        }
-        if let Some(ref t) = self.mitre_tactic {
-            let ok = alert
-                .mitre_attack
-                .as_ref()
-                .is_some_and(|m| m.tactic.eq_ignore_ascii_case(t));
-            if !ok {
-                return false;
-            }
-        }
-        true
-    }
-}
-
 impl StreamFilters {
     fn into_filter(self) -> Result<AlertFilter, ApiError> {
-        let severity_min = self
-            .severity_min
-            .as_deref()
-            .map(|s| {
-                parse_severity(s).ok_or_else(|| ApiError::BadRequest {
-                    code: "INVALID_SEVERITY",
-                    message: format!(
-                        "severity_min must be one of low|medium|high|critical, got {s:?}"
-                    ),
-                })
-            })
-            .transpose()?;
-        Ok(AlertFilter {
-            severity_min,
-            component: self.component,
-            mitre_tactic: self.mitre_tactic,
+        AlertFilter::compile(
+            self.severity_min.as_deref(),
+            self.component,
+            self.mitre_tactic,
+        )
+        .map_err(|e| match e {
+            FilterError::InvalidSeverity { value } => ApiError::BadRequest {
+                code: "INVALID_SEVERITY",
+                message: format!(
+                    "severity_min must be one of low|medium|high|critical, got {value:?}"
+                ),
+            },
         })
     }
 }

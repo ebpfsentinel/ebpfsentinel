@@ -137,3 +137,8 @@ doc = false
 name = "fuzz_conntrack_settings"
 path = "fuzz_targets/fuzz_conntrack_settings.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_alerts_sse_filter"
+path = "fuzz_targets/fuzz_alerts_sse_filter.rs"
+doc = false
