@@ -1,0 +1,24 @@
+# Management metadata example
+#
+# Surfaces ownership of the agent's configuration to the dashboard via
+# `GET /api/v1/agent/identity`. Used by the dashboard to lock its
+# config-edit UI on operator-managed agents and to deep-link operators
+# back to the Kubernetes operator's own admin surface.
+#
+# Both fields are hot-reloadable: a config reload (file watcher /
+# `POST /api/v1/config/reload`) toggles the values without restarting
+# the agent.
+
+agent:
+  interfaces: [eth0]
+
+management:
+  # When true, the dashboard treats this agent as "owned" by the
+  # operator: the config-edit UI is read-only and a badge points the
+  # user at `operator_endpoint`. Default is `false` (agent stand-alone).
+  operator_managed: true
+
+  # Optional URL the operator exposes (typically a Kubernetes-native UI
+  # or the operator's web admin). Must be an absolute http/https URL.
+  # Validated at config load — malformed URLs reject the reload.
+  operator_endpoint: https://operator.example.com:9443/ui

@@ -21,6 +21,7 @@ mod ids;
 mod ips;
 mod l7;
 mod loadbalancer;
+mod management;
 mod nat;
 mod qos;
 mod ratelimit;
@@ -57,6 +58,7 @@ pub use ids::{IdsConfig, IdsRuleConfig, SamplingConfig, ThresholdRuleConfig};
 pub use ips::{IpsConfig, IpsRuleConfig};
 pub use l7::{L7Config, L7RuleConfig};
 pub use loadbalancer::{LbBackendConfig, LbServiceConfig as LbServiceCfg, LoadBalancerConfig};
+pub use management::ManagementConfig;
 pub use nat::{HairpinNatConfig, NatConfig, NatRuleConfig, NptV6RuleConfig};
 pub use qos::{QosClassifierConfig, QosPipeConfig, QosQueueConfig, QosSectionConfig};
 pub use ratelimit::{RateLimitRuleConfig, RateLimitSectionConfig};
@@ -183,6 +185,12 @@ pub struct AgentConfig {
     /// flow timeline, and forensics API.
     #[serde(default)]
     pub auto_capture: AutoCaptureConfig,
+
+    /// Management metadata exposed via `GET /api/v1/agent/identity`. Used
+    /// by the dashboard to lock the config-edit UI on operator-managed
+    /// agents and deep-link to the operator UI.
+    #[serde(default)]
+    pub management: ManagementConfig,
 }
 
 /// Maximum number of interface groups (bits 0-30 of `group_mask`).
@@ -332,6 +340,9 @@ impl AgentConfig {
             self.alerting.routes.len(),
             MAX_ALERTING_ROUTES,
         )?;
+
+        // Validate management metadata block
+        self.management.validate()?;
 
         // Validate container resolver config
         self.container.validate()?;

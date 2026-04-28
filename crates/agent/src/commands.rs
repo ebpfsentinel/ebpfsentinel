@@ -2018,6 +2018,32 @@ pub async fn cmd_score(client: &ApiClient, alert_limit: u64, output: OutputForma
     Ok(())
 }
 
+// ── Identity ────────────────────────────────────────────────────────
+
+pub async fn cmd_identity(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let identity = client.get_identity().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&identity)?);
+        return Ok(());
+    }
+
+    let endpoint = identity.operator_endpoint.as_deref().unwrap_or("-");
+    println!("Version:           {}", identity.version);
+    println!("Hostname:          {}", identity.hostname);
+    println!("Uptime (seconds):  {}", identity.uptime_seconds);
+    println!(
+        "Operator-managed:  {}",
+        if identity.operator_managed {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    println!("Operator endpoint: {endpoint}");
+    Ok(())
+}
+
 // ── Enhanced Status ─────────────────────────────────────────────────
 
 pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Result<()> {

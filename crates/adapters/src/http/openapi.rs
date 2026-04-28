@@ -51,6 +51,7 @@ use super::zone_handler;
         health_handler::readyz,
         // Agent
         agent_handler::agent_status,
+        agent_handler::agent_identity,
         // Metrics
         metrics_handler::metrics,
         // Firewall
@@ -166,6 +167,7 @@ use super::zone_handler;
         health_handler::ReadyResponse,
         // Agent
         agent_handler::AgentStatusResponse,
+        agent_handler::AgentIdentityResponse,
         // Firewall
         firewall_handler::CreateRuleRequest,
         firewall_handler::RuleResponse,

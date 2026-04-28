@@ -29,7 +29,7 @@ const READ_RATE_LIMIT_BURST: u32 = 200;
 const AUTH_RATE_LIMIT_PER_SECOND: u64 = 10;
 const AUTH_RATE_LIMIT_BURST: u32 = 30;
 
-use super::agent_handler::agent_status;
+use super::agent_handler::{agent_identity, agent_status};
 use super::alert_handler::{list_alerts, mark_false_positive, stream_alerts};
 use super::alias_handler::{alias_status, set_external_alias_content};
 use super::audit_handler::{list_audit_logs, rule_history};
@@ -139,6 +139,7 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
         // Read-only routes (no rate limiting)
         let read_routes = Router::new()
             .route("/api/v1/agent/status", get(agent_status))
+            .route("/api/v1/agent/identity", get(agent_identity))
             .route("/api/v1/firewall/rules", get(list_rules))
             .route("/api/v1/firewall/l7-rules", get(list_l7_rules))
             .route("/api/v1/ips/rules", get(list_ips_rules))

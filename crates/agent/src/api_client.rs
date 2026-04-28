@@ -32,6 +32,16 @@ pub struct AgentStatusResponse {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct AgentIdentityResponse {
+    pub version: String,
+    pub hostname: String,
+    pub uptime_seconds: u64,
+    pub operator_managed: bool,
+    #[serde(default)]
+    pub operator_endpoint: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct RuleResponse {
     pub id: String,
     pub enabled: bool,
@@ -652,6 +662,16 @@ impl ApiClient {
     pub async fn get_status(&self) -> anyhow::Result<AgentStatusResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/agent/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    /// `GET /api/v1/agent/identity` — operator-managed metadata.
+    pub async fn get_identity(&self) -> anyhow::Result<AgentIdentityResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/agent/identity")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

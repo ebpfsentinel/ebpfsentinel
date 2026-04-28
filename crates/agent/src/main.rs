@@ -30,6 +30,19 @@ async fn main() -> Result<()> {
             commands::cmd_status_enhanced(&client, output).await
         }
 
+        Some(Command::Identity {
+            conn,
+            output: identity_output,
+        }) => {
+            let client = ApiClient::new(&conn.host, conn.port, cli.token);
+            let format = if identity_output.eq_ignore_ascii_case("json") {
+                cli::OutputFormat::Json
+            } else {
+                output
+            };
+            commands::cmd_identity(&client, format).await
+        }
+
         Some(Command::Health { conn }) => {
             let client = ApiClient::new(&conn.host, conn.port, cli.token);
             commands::cmd_health(&client, output).await

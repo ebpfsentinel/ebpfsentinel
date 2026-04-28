@@ -143,3 +143,14 @@ zones:
 
 qos:
   enabled: false
+
+# Management metadata exposed via `GET /api/v1/agent/identity`. The
+# dashboard reads these values to lock its config-edit UI on agents
+# whose configuration is owned by the Kubernetes operator (CRD-driven)
+# and to deep-link to the operator's own UI.
+#
+# Both fields are hot-reloadable; toggling them at runtime takes effect
+# on the next request without restart.
+management:
+  # operator_managed: false
+  # operator_endpoint: https://operator.example.com
