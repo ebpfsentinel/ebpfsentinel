@@ -8,3 +8,10 @@ publish = false
 [dependencies]
 clap = { workspace = true }
 anyhow = { workspace = true }
+adapters = { workspace = true }
+serde_json = { workspace = true }
+utoipa = { workspace = true }
+# Pin a k8s-openapi version feature here — adapters' default `kubernetes`
+# feature pulls k8s-openapi as a library dep without a version, and any
+# binary crate at the top of the dep graph must select one.
+k8s-openapi = { workspace = true, features = ["v1_31"] }

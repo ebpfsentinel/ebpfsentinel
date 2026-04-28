@@ -4726,8 +4726,12 @@ dependencies = [
 name = "xtask"
 version = "0.0.0"
 dependencies = [
+ "adapters",
  "anyhow",
  "clap",
+ "k8s-openapi",
+ "serde_json",
+ "utoipa",
 ]
 
 [[package]]
