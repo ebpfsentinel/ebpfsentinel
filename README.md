@@ -1,6 +1,6 @@
 # eBPFsentinel
 
-[lockup](./img/ebpfsentinel-lockup-light.svg)
+![lockup](./assets/ebpfsentinel-lockup-light.svg)
 
 Kernel-native **Network Detection & Response (NDR)** platform for Linux. One Rust binary replaces your firewall, IDS/IPS, DDoS mitigation, DLP, and 10+ other network security tools — all running inside the Linux kernel via eBPF at wire speed. Not an endpoint agent — a **network agent** that runs where your traffic flows.
 
