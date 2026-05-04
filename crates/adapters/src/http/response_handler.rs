@@ -53,7 +53,7 @@ pub struct ResponseListResponse {
     request_body = CreateResponseRequest,
     responses(
         (status = 201, description = "Response action created", body = ResponseActionResponse),
-        (status = 400, description = "Invalid request"),
+        (status = 400, description = "Invalid request", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -182,7 +182,7 @@ pub async fn list_response_actions(
     params(("id" = String, Path, description = "Response action ID")),
     responses(
         (status = 200, description = "Action revoked", body = ResponseActionResponse),
-        (status = 404, description = "Action not found"),
+        (status = 404, description = "Action not found", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),

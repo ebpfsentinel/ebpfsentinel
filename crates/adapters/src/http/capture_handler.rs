@@ -61,7 +61,7 @@ pub struct CaptureListResponse {
     request_body = StartCaptureRequest,
     responses(
         (status = 201, description = "Capture started", body = CaptureResponse),
-        (status = 409, description = "Another capture is already running"),
+        (status = 409, description = "Another capture is already running", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -216,7 +216,7 @@ pub async fn list_captures(
     params(("id" = String, Path, description = "Capture session ID")),
     responses(
         (status = 200, description = "Capture stopped", body = CaptureResponse),
-        (status = 404, description = "Capture not found"),
+        (status = 404, description = "Capture not found", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),

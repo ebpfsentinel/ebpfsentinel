@@ -2,11 +2,10 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use super::error::ErrorBody;
+use super::error::{ApiError, ErrorBody};
 use super::state::AppState;
 
 // ── Response types ────────────────────────────────────────────────
@@ -36,7 +35,7 @@ pub struct EbpfStatusResponse {
     tag = "Operations",
     responses(
         (status = 200, description = "Reload triggered successfully", body = ReloadResponse),
-        (status = 500, description = "Failed to trigger reload", body = ReloadResponse),
+        (status = 500, description = "Failed to trigger reload", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -47,22 +46,15 @@ pub struct EbpfStatusResponse {
 )]
 pub async fn reload_config(
     State(state): State<Arc<AppState>>,
-) -> (StatusCode, Json<ReloadResponse>) {
+) -> Result<Json<ReloadResponse>, ApiError> {
     match state.reload_trigger.try_send(()) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(ReloadResponse {
-                status: "ok".to_string(),
-                message: "configuration reload triggered".to_string(),
-            }),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ReloadResponse {
-                status: "error".to_string(),
-                message: "reload already in progress or channel unavailable".to_string(),
-            }),
-        ),
+        Ok(()) => Ok(Json(ReloadResponse {
+            status: "ok".to_string(),
+            message: "configuration reload triggered".to_string(),
+        })),
+        Err(_) => Err(ApiError::Internal {
+            message: "reload already in progress or channel unavailable".to_string(),
+        }),
     }
 }
 
@@ -181,8 +173,8 @@ mod tests {
     #[tokio::test]
     async fn reload_config_returns_ok() {
         let (state, _rx) = make_state();
-        let (status, Json(resp)) = reload_config(State(state)).await;
-        assert_eq!(status, StatusCode::OK);
+        let result = reload_config(State(state)).await;
+        let Json(resp) = result.expect("reload should succeed");
         assert_eq!(resp.status, "ok");
     }
 
@@ -191,9 +183,8 @@ mod tests {
         let (state, _rx) = make_state();
         // Fill the channel (capacity 1)
         let _ = state.reload_trigger.try_send(());
-        let (status, Json(resp)) = reload_config(State(state)).await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(resp.status, "error");
+        let result = reload_config(State(state)).await;
+        assert!(matches!(result, Err(ApiError::Internal { .. })));
     }
 
     #[tokio::test]

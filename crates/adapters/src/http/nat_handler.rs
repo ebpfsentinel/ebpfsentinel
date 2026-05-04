@@ -167,7 +167,7 @@ pub async fn list_nptv6_rules(
     request_body = CreateNptV6RuleRequest,
     responses(
         (status = 201, description = "NPTv6 rule created", body = NptV6RuleResponse),
-        (status = 400, description = "Invalid rule"),
+        (status = 400, description = "Invalid rule", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -231,7 +231,7 @@ pub async fn create_nptv6_rule(
     params(("id" = String, Path, description = "NPTv6 rule ID")),
     responses(
         (status = 204, description = "NPTv6 rule deleted"),
-        (status = 404, description = "Rule not found"),
+        (status = 404, description = "Rule not found", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),

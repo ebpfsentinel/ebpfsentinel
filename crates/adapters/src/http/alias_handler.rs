@@ -57,8 +57,8 @@ pub async fn alias_status(
     request_body = ExternalAliasContent,
     responses(
         (status = 200, description = "Content loaded"),
-        (status = 404, description = "Alias not found"),
-        (status = 400, description = "Invalid content or alias is not External"),
+        (status = 404, description = "Alias not found", body = ErrorBody),
+        (status = 400, description = "Invalid content or alias is not External", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),

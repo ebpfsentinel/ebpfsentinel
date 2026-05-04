@@ -123,7 +123,7 @@ fn get_dns_services(
     params(CacheQueryParams),
     responses(
         (status = 200, description = "DNS cache entries", body = DnsCacheListResponse),
-        (status = 503, description = "DNS not enabled"),
+        (status = 503, description = "DNS not enabled", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -209,7 +209,7 @@ pub async fn list_dns_cache(
     tag = "DNS Intelligence",
     responses(
         (status = 200, description = "DNS statistics", body = DnsStatsResponse),
-        (status = 503, description = "DNS not enabled"),
+        (status = 503, description = "DNS not enabled", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -249,7 +249,7 @@ pub async fn dns_stats(State(state): State<Arc<AppState>>) -> Result<impl IntoRe
     tag = "DNS Intelligence",
     responses(
         (status = 200, description = "Blocklist rules", body = Vec<BlocklistRuleResponse>),
-        (status = 503, description = "DNS not enabled"),
+        (status = 503, description = "DNS not enabled", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -281,7 +281,7 @@ pub async fn list_dns_blocklist(
     tag = "DNS Intelligence",
     responses(
         (status = 200, description = "Cache flushed", body = DnsFlushResponse),
-        (status = 503, description = "DNS not enabled"),
+        (status = 503, description = "DNS not enabled", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),

@@ -37,7 +37,7 @@ pub struct IdsRuleResponse {
     tag = "IDS",
     responses(
         (status = 200, description = "IDS status", body = IdsStatusResponse),
-        (status = 404, description = "IDS not available"),
+        (status = 404, description = "IDS not available", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -67,7 +67,7 @@ pub async fn ids_status(
     tag = "IDS",
     responses(
         (status = 200, description = "List of IDS rules", body = Vec<IdsRuleResponse>),
-        (status = 404, description = "IDS not available"),
+        (status = 404, description = "IDS not available", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),

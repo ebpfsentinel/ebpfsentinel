@@ -550,7 +550,14 @@
             "description": "Content loaded"
           },
           "400": {
-            "description": "Invalid content or alias is not External"
+            "description": "Invalid content or alias is not External",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           },
           "401": {
             "description": "Authentication required",
@@ -573,7 +580,14 @@
             }
           },
           "404": {
-            "description": "Alias not found"
+            "description": "Alias not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -918,7 +932,14 @@
             }
           },
           "409": {
-            "description": "Another capture is already running"
+            "description": "Another capture is already running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -981,7 +1002,14 @@
             }
           },
           "404": {
-            "description": "Capture not found"
+            "description": "Capture not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -1079,7 +1107,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReloadResponse"
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -1716,7 +1744,14 @@
             }
           },
           "503": {
-            "description": "DNS not enabled"
+            "description": "DNS not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -1814,7 +1849,14 @@
             }
           },
           "503": {
-            "description": "DNS not enabled"
+            "description": "DNS not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -1864,7 +1906,14 @@
             }
           },
           "503": {
-            "description": "DNS not enabled"
+            "description": "DNS not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -1916,7 +1965,14 @@
             }
           },
           "503": {
-            "description": "DNS not enabled"
+            "description": "DNS not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -2718,7 +2774,14 @@
             }
           },
           "404": {
-            "description": "IDS not available"
+            "description": "IDS not available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -2770,7 +2833,14 @@
             }
           },
           "404": {
-            "description": "IDS not available"
+            "description": "IDS not available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -3456,7 +3526,14 @@
             }
           },
           "400": {
-            "description": "Invalid rule"
+            "description": "Invalid rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           },
           "401": {
             "description": "Authentication required",
@@ -3532,7 +3609,14 @@
             }
           },
           "404": {
-            "description": "Rule not found"
+            "description": "Rule not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -4541,7 +4625,14 @@
             }
           },
           "400": {
-            "description": "Invalid request"
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           },
           "401": {
             "description": "Authentication required",
@@ -4624,7 +4715,14 @@
             }
           },
           "404": {
-            "description": "Action not found"
+            "description": "Action not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
