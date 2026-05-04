@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 96" width="540" height="144" fill="none">
+<g transform="translate(8,16)">  
+  <path d="M32 4 L56 14 V36 C56 47 45 56 32 60 C19 56 8 47 8 36 V14 Z" fill="#7c5cff" fill-opacity="0.08" stroke="#7c5cff" stroke-width="2.2" stroke-linejoin="round"></path>
+  
+  <line x1="32" y1="32" x2="32" y2="19" stroke="#7c5cff" stroke-width="1.2" opacity="0.55"></line>
+  <line x1="32" y1="32" x2="32" y2="45" stroke="#7c5cff" stroke-width="1.2" opacity="0.55"></line>
+  <line x1="32" y1="32" x2="21" y2="25.5" stroke="#7c5cff" stroke-width="1.2" opacity="0.55"></line>
+  <line x1="32" y1="32" x2="43" y2="25.5" stroke="#7c5cff" stroke-width="1.2" opacity="0.55"></line>
+  <line x1="32" y1="32" x2="21" y2="38.5" stroke="#7c5cff" stroke-width="1.2" opacity="0.55"></line>
+  <line x1="32" y1="32" x2="43" y2="38.5" stroke="#7c5cff" stroke-width="1.2" opacity="0.55"></line>
+  <line x1="32" y1="19" x2="43" y2="25.5" stroke="#7c5cff" stroke-width="1.2" opacity="0.55"></line>
+  <line x1="32" y1="19" x2="21" y2="25.5" stroke="#7c5cff" stroke-width="1.2" opacity="0.55"></line>
+  <line x1="32" y1="45" x2="21" y2="38.5" stroke="#7c5cff" stroke-width="1.2" opacity="0.55"></line>
+  <line x1="32" y1="45" x2="43" y2="38.5" stroke="#7c5cff" stroke-width="1.2" opacity="0.55"></line>
+  
+  <path d="M38.20 32.00 L35.10 37.37 L28.90 37.37 L25.80 32.00 L28.90 26.63 L35.10 26.63 Z" stroke="#7c5cff" stroke-width="1.6" fill="#7c5cff" opacity="1"></path>
+  <path d="M38.20 19.00 L35.10 24.37 L28.90 24.37 L25.80 19.00 L28.90 13.63 L35.10 13.63 Z" stroke="#7c5cff" stroke-width="1.6" fill="none" opacity="0.85"></path>
+  <path d="M38.20 45.00 L35.10 50.37 L28.90 50.37 L25.80 45.00 L28.90 39.63 L35.10 39.63 Z" stroke="#7c5cff" stroke-width="1.6" fill="none" opacity="0.85"></path>
+  <path d="M27.20 25.50 L24.10 30.87 L17.90 30.87 L14.80 25.50 L17.90 20.13 L24.10 20.13 Z" stroke="#7c5cff" stroke-width="1.6" fill="none" opacity="0.85"></path>
+  <path d="M49.20 25.50 L46.10 30.87 L39.90 30.87 L36.80 25.50 L39.90 20.13 L46.10 20.13 Z" stroke="#7c5cff" stroke-width="1.6" fill="none" opacity="0.85"></path>
+  <path d="M27.20 38.50 L24.10 43.87 L17.90 43.87 L14.80 38.50 L17.90 33.13 L24.10 33.13 Z" stroke="#7c5cff" stroke-width="1.6" fill="none" opacity="0.85"></path>
+  <path d="M49.20 38.50 L46.10 43.87 L39.90 43.87 L36.80 38.50 L39.90 33.13 L46.10 33.13 Z" stroke="#7c5cff" stroke-width="1.6" fill="none" opacity="0.85"></path>
+  
+  <circle cx="32" cy="32" r="1.6" fill="#ffffff"></circle>
+  <circle cx="32" cy="19" r="1.4" fill="#7c5cff"></circle>
+  <circle cx="32" cy="45" r="1.4" fill="#7c5cff"></circle>
+  <circle cx="21" cy="25.5" r="1.4" fill="#7c5cff"></circle>
+  <circle cx="43" cy="25.5" r="1.4" fill="#7c5cff"></circle>
+  <circle cx="21" cy="38.5" r="1.4" fill="#7c5cff"></circle>
+  <circle cx="43" cy="38.5" r="1.4" fill="#7c5cff"></circle></g>
+  
+  <text x="86" y="54" font-family="Inter, -apple-system, system-ui, sans-serif" font-size="26" font-weight="700" letter-spacing="-0.5" fill="#15142b">eBPF<tspan fill="#7c5cff">sentinel</tspan></text>
+  
+  <text x="86" y="72" font-family="Inter, -apple-system, system-ui, sans-serif" font-size="9.5" font-weight="600" letter-spacing="1.5" fill="#6c6a8a">NETWORK SECURITY PLATFORM</text>
+</svg>
