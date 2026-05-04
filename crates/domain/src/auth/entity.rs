@@ -145,6 +145,22 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_sse_subscriber_role_parses_to_viewer() {
+        // The dashboard mints upstream SSE JWTs with a service-identity
+        // role string that is not one of the canonical operator roles.
+        // It must fall through to the least-privilege default so the
+        // subscriber can read streams but never mutate state.
+        let json =
+            r#"{"sub":"dashboard-sse-subscriber","exp":1,"role":"dashboard-sse-subscriber"}"#;
+        let claims: JwtClaims = serde_json::from_str(json).unwrap();
+        assert_eq!(claims.role(), Role::Viewer);
+        assert_eq!(
+            claims.effective_roles(),
+            vec!["dashboard-sse-subscriber".to_string()]
+        );
+    }
+
+    #[test]
     fn has_namespace_denied_when_none() {
         let json = r#"{"sub":"svc","exp":1}"#;
         let claims: JwtClaims = serde_json::from_str(json).unwrap();
