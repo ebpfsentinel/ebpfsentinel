@@ -43,14 +43,14 @@ fuzz_target!(|data: &[u8]| {
             // Also try with structured JSON from fuzz bytes
             if data.len() >= 10 {
                 let sub_len = (data[1] as usize % 20) + 1;
-                let sub: String = data[2..].iter()
+                let sub: String = data[2..]
+                    .iter()
                     .take(sub_len)
                     .map(|b| (b % 26 + b'a') as char)
                     .collect();
 
                 let exp = u64::from_le_bytes([
-                    data[2], data[3], data[4], data[5],
-                    data[6], data[7], data[8], data[9],
+                    data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9],
                 ]);
 
                 let role_str = match data[1] % 4 {
@@ -60,10 +60,7 @@ fuzz_target!(|data: &[u8]| {
                     _ => "unknown",
                 };
 
-                let json = format!(
-                    r#"{{"sub":"{}","exp":{},"role":"{}"}}"#,
-                    sub, exp, role_str
-                );
+                let json = format!(r#"{{"sub":"{}","exp":{},"role":"{}"}}"#, sub, exp, role_str);
 
                 if let Ok(claims) = serde_json::from_str::<JwtClaims>(&json) {
                     let _ = claims.role();
@@ -107,6 +104,8 @@ fuzz_target!(|data: &[u8]| {
                     aud: None,
                     role: role_str,
                     namespaces,
+                    tenant_id: None,
+                    roles: None,
                 };
 
                 let _ = claims.role();
