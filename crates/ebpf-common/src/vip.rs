@@ -18,6 +18,10 @@ pub const MAX_VIPS: u32 = 256;
 /// Maximum number of interfaces with a resolved NIC MAC.
 pub const MAX_IFACE_MAC: u32 = 64;
 
+/// Maximum number of self-owned (VIP → NIC MAC) bindings. Same key
+/// space as [`VIP_SET`], so the bound matches [`MAX_VIPS`].
+pub const MAX_SELF_BINDINGS: u32 = MAX_VIPS;
+
 /// ARP operation: request.
 pub const ARP_OP_REQUEST: u16 = 1;
 /// ARP operation: reply.
@@ -75,10 +79,38 @@ impl IfaceMac {
     }
 }
 
+/// Self-owned (VIP → NIC MAC) binding stored in `SELF_OWNED_BINDINGS`,
+/// keyed by the VIP IPv4 as a big-endian numeric `u32` (same key space
+/// as [`VIP_SET`]). Written by userspace **only while this node is the
+/// elected speaker** and cleared on speaker loss.
+///
+/// Two readers:
+/// - the announcer sources the forged ARP reply's `sha` from here,
+///   falling back to [`IfaceMac`] when no binding exists;
+/// - the later ARP-guard epic uses it to recognise (and not alert on)
+///   this node's own gratuitous ARP / binding changes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SelfBinding {
+    /// 6-byte Ethernet address this node announces for the VIP.
+    pub mac: [u8; 6],
+    pub _pad: [u8; 2],
+}
+
+impl SelfBinding {
+    /// Construct from a 6-byte MAC.
+    #[must_use]
+    pub const fn new(mac: [u8; 6]) -> Self {
+        Self { mac, _pad: [0; 2] }
+    }
+}
+
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for VipEntry {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for IfaceMac {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for SelfBinding {}
 
 #[cfg(test)]
 mod tests {
@@ -99,6 +131,17 @@ mod tests {
         let m = IfaceMac::new([1, 2, 3, 4, 5, 6]);
         assert_eq!(m.mac, [1, 2, 3, 4, 5, 6]);
         assert_eq!(m._pad, [0, 0]);
+    }
+
+    #[test]
+    fn self_binding_layout() {
+        assert_eq!(mem::size_of::<SelfBinding>(), 8);
+        assert_eq!(mem::align_of::<SelfBinding>(), 1);
+        let b = SelfBinding::new([6, 5, 4, 3, 2, 1]);
+        assert_eq!(b.mac, [6, 5, 4, 3, 2, 1]);
+        assert_eq!(b._pad, [0, 0]);
+        assert_eq!(SelfBinding::new([0; 6]), SelfBinding::default());
+        assert_eq!(MAX_SELF_BINDINGS, MAX_VIPS);
     }
 
     #[test]

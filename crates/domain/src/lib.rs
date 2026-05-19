@@ -14,6 +14,7 @@ pub mod dns;
 pub mod firewall;
 pub mod ids;
 pub mod ips;
+pub mod l2;
 pub mod l7;
 pub mod loadbalancer;
 pub mod nat;

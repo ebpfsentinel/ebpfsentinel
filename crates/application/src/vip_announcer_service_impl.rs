@@ -1,7 +1,11 @@
 use std::sync::Arc;
 
+use std::net::IpAddr;
+
 use domain::common::error::DomainError;
+use domain::l2::{L2Binding, OwnedBindings};
 use domain::loadbalancer::vip::VipAnnounceConfig;
+use ports::secondary::l2_binding_port::L2BindingPort;
 use ports::secondary::metrics_port::MetricsPort;
 use ports::secondary::vip_announcer_port::{GratuitousArpPort, IfaceMacResolverPort, VipMapPort};
 
@@ -18,9 +22,16 @@ use ports::secondary::vip_announcer_port::{GratuitousArpPort, IfaceMacResolverPo
 pub struct VipAnnouncerService {
     config: VipAnnounceConfig,
     map_port: Option<Box<dyn VipMapPort + Send>>,
+    binding_port: Option<Box<dyn L2BindingPort + Send>>,
     mac_resolver: Option<Arc<dyn IfaceMacResolverPort>>,
     garp: Option<Arc<dyn GratuitousArpPort>>,
     metrics: Arc<dyn MetricsPort>,
+    /// Self-whitelist of `(VIP → owned MAC)` bindings this node
+    /// announces while speaker. Live producer for the kernel
+    /// `SELF_OWNED_BINDINGS` map; the ARP-guard epic consumes the
+    /// [`OwnedBindings::is_self_announced`] predicate exposed via
+    /// [`VipAnnouncerService::is_self_announced`].
+    bindings: OwnedBindings,
 }
 
 impl VipAnnouncerService {
@@ -28,10 +39,35 @@ impl VipAnnouncerService {
         Self {
             config: VipAnnounceConfig::default(),
             map_port: None,
+            binding_port: None,
             mac_resolver: None,
             garp: None,
             metrics,
+            bindings: OwnedBindings::new(),
         }
+    }
+
+    /// Inject the kernel `SELF_OWNED_BINDINGS` map port. Set before
+    /// [`Self::set_map_port`] so the reconcile it triggers also writes
+    /// the self-binding map.
+    pub fn set_binding_port(&mut self, port: Box<dyn L2BindingPort + Send>) {
+        self.binding_port = Some(port);
+    }
+
+    /// Clear the self-binding map port (program unloaded).
+    pub fn clear_binding_port(&mut self) {
+        self.binding_port = None;
+    }
+
+    /// Whether `(ip, mac)` is a binding this node itself announces.
+    ///
+    /// Live predicate consumed by the ARP-guard so it never raises a
+    /// binding-change / gratuitous-ARP anomaly on traffic this node
+    /// generated. Also used internally as a pre-send guard in
+    /// [`Self::announce_takeover`].
+    #[must_use]
+    pub fn is_self_announced(&self, ip: IpAddr, mac: [u8; 6]) -> bool {
+        self.bindings.is_self_announced(ip, mac)
     }
 
     /// Inject the netlink-backed iface MAC resolver.
@@ -90,11 +126,15 @@ impl VipAnnouncerService {
         };
 
         if !self.config.is_speaker() {
-            // Standby / disabled → guarantee silence.
+            // Standby / disabled → guarantee silence and own nothing.
             map.clear_vips()?;
+            self.bindings.clear();
+            if let Some(bp) = self.binding_port.as_mut() {
+                bp.clear_bindings()?;
+            }
             tracing::info!(
                 role = self.config.role.as_str(),
-                "vip announcer: non-speaker, VIP_SET cleared"
+                "vip announcer: non-speaker, VIP_SET + self bindings cleared"
             );
             return Ok(());
         }
@@ -107,17 +147,26 @@ impl VipAnnouncerService {
         let mac = resolver.mac(iface)?;
         map.sync_iface_mac(ifindex, mac)?;
 
-        // Rebuild the owned set from scratch so a removed VIP stops
-        // being answered immediately.
+        // Rebuild the owned set + self-binding whitelist from scratch
+        // so a removed VIP stops being answered immediately.
         map.clear_vips()?;
+        self.bindings.clear();
+        if let Some(bp) = self.binding_port.as_mut() {
+            bp.clear_bindings()?;
+        }
         for vip in &self.config.vips {
             map.sync_vip(vip.addr)?;
+            let binding = L2Binding::new(vip.addr, mac);
+            self.bindings.register(binding);
+            if let Some(bp) = self.binding_port.as_mut() {
+                bp.register_binding(&binding)?;
+            }
         }
         tracing::info!(
             iface,
             ifindex,
             vips = self.config.vips.len(),
-            "vip announcer: speaker, VIP_SET synced"
+            "vip announcer: speaker, VIP_SET + self bindings synced"
         );
         Ok(())
     }
@@ -134,6 +183,17 @@ impl VipAnnouncerService {
         let iface = self.config.interface.as_str();
         let mac = resolver.mac(iface)?;
         for vip in &self.config.vips {
+            // Only ever broadcast a pair we actually own. reconcile()
+            // registered the binding just before this; a miss means a
+            // resolver/registration mismatch — skip rather than poison
+            // upstream ARP caches with a pair we cannot back.
+            if !self.bindings.is_self_announced(vip.addr, mac) {
+                tracing::warn!(
+                    vip = %vip.name, addr = %vip.addr,
+                    "vip announcer: skipping gratuitous ARP (not a self-owned binding)"
+                );
+                continue;
+            }
             garp.send_gratuitous_arp(iface, mac, vip)?;
             self.metrics.record_vip_takeover(&vip.name);
             tracing::info!(vip = %vip.name, addr = %vip.addr, "vip announcer: gratuitous ARP sent");
@@ -201,6 +261,27 @@ mod tests {
         }
         fn vip_count(&self) -> Result<usize, DomainError> {
             Ok(self.vips.lock().unwrap().len())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeBindingPort {
+        live: Mutex<HashSet<IpAddr>>,
+        clears: Mutex<u32>,
+    }
+    impl L2BindingPort for FakeBindingPort {
+        fn register_binding(&mut self, binding: &L2Binding) -> Result<(), DomainError> {
+            self.live.lock().unwrap().insert(binding.ip());
+            Ok(())
+        }
+        fn deregister_binding(&mut self, ip: IpAddr) -> Result<(), DomainError> {
+            self.live.lock().unwrap().remove(&ip);
+            Ok(())
+        }
+        fn clear_bindings(&mut self) -> Result<(), DomainError> {
+            self.live.lock().unwrap().clear();
+            *self.clears.lock().unwrap() += 1;
+            Ok(())
         }
     }
 
@@ -323,5 +404,63 @@ mod tests {
         // Re-applying the same speaker config must NOT re-emit GARP.
         s.configure(primary_cfg()).unwrap();
         assert_eq!(garp.sent.lock().unwrap().len(), 2);
+    }
+
+    const RESOLVED_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0x01];
+
+    #[test]
+    fn speaker_registers_self_bindings_and_writes_port() {
+        let mut s = svc();
+        s.set_gratuitous_arp(Arc::new(FakeGarp::default()));
+        s.set_binding_port(Box::new(FakeBindingPort::default()));
+        s.set_map_port(Box::new(FakeMap::default())).unwrap();
+        s.configure(primary_cfg()).unwrap();
+        // Both VIPs are self-announced with the resolver MAC.
+        assert!(s.is_self_announced(ip(192, 0, 2, 10), RESOLVED_MAC));
+        assert!(s.is_self_announced(ip(192, 0, 2, 11), RESOLVED_MAC));
+        // A foreign MAC for an owned VIP is NOT self-announced.
+        assert!(!s.is_self_announced(ip(192, 0, 2, 10), [9, 9, 9, 9, 9, 9]));
+        // An unknown VIP is NOT self-announced.
+        assert!(!s.is_self_announced(ip(192, 0, 2, 99), RESOLVED_MAC));
+    }
+
+    #[test]
+    fn speaker_loss_deregisters_all_self_bindings() {
+        let mut s = svc();
+        s.set_gratuitous_arp(Arc::new(FakeGarp::default()));
+        s.set_map_port(Box::new(FakeMap::default())).unwrap();
+        s.configure(primary_cfg()).unwrap();
+        assert!(s.is_self_announced(ip(192, 0, 2, 10), RESOLVED_MAC));
+        // Demote to standby → own nothing (split-brain safe).
+        s.configure(VipAnnounceConfig {
+            role: AnnounceRole::Standby,
+            interface: "eth0".into(),
+            vips: vec![Vip {
+                name: "web".into(),
+                addr: ip(192, 0, 2, 10),
+            }],
+        })
+        .unwrap();
+        assert!(!s.is_self_announced(ip(192, 0, 2, 10), RESOLVED_MAC));
+        assert!(!s.is_self_announced(ip(192, 0, 2, 11), RESOLVED_MAC));
+    }
+
+    #[test]
+    fn standby_clears_binding_port() {
+        let mut s = svc();
+        s.set_binding_port(Box::new(FakeBindingPort::default()));
+        s.set_map_port(Box::new(FakeMap::default())).unwrap();
+        // set_map_port already reconciled once (default = disabled).
+        s.configure(VipAnnounceConfig {
+            role: AnnounceRole::Standby,
+            interface: "eth0".into(),
+            vips: vec![Vip {
+                name: "web".into(),
+                addr: ip(192, 0, 2, 10),
+            }],
+        })
+        .unwrap();
+        assert!(!s.is_speaker());
+        assert!(!s.is_self_announced(ip(192, 0, 2, 10), RESOLVED_MAC));
     }
 }

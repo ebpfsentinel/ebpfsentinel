@@ -22,8 +22,8 @@ use aya_ebpf::{
     programs::XdpContext,
 };
 use ebpf_common::vip::{
-    ARP_HW_ETHERNET, ARP_OP_REPLY, ARP_OP_REQUEST, IfaceMac, MAX_IFACE_MAC, MAX_VIPS,
-    VIP_METRIC_ARP_REPLIES, VIP_METRIC_ARP_SEEN, VIP_METRIC_COUNT, VipEntry,
+    ARP_HW_ETHERNET, ARP_OP_REPLY, ARP_OP_REQUEST, IfaceMac, MAX_IFACE_MAC, MAX_SELF_BINDINGS,
+    MAX_VIPS, SelfBinding, VIP_METRIC_ARP_REPLIES, VIP_METRIC_ARP_SEEN, VIP_METRIC_COUNT, VipEntry,
 };
 use ebpf_helpers::net::{ETH_P_8021AD, ETH_P_8021Q, ETH_P_ARP, ETH_P_IP, VLAN_HDR_LEN, VlanHdr};
 use ebpf_helpers::xdp::ptr_at_mut;
@@ -52,6 +52,16 @@ static VIP_SET: HashMap<u32, VipEntry> = HashMap::with_max_entries(MAX_VIPS, 0);
 /// Resolved NIC MAC per ifindex (filled by userspace via netlink).
 #[map]
 static IFACE_MAC: HashMap<u32, IfaceMac> = HashMap::with_max_entries(MAX_IFACE_MAC, 0);
+
+/// Self-owned (VIP → NIC MAC) bindings, keyed like [`VIP_SET`]. Filled
+/// by userspace only while this node is the elected speaker and cleared
+/// on speaker loss. Authoritative source for the forged reply's `sha`
+/// (per-VIP, so multi-homed VIPs answer with the right MAC); falls back
+/// to [`IFACE_MAC`] when a VIP has no explicit binding yet. The later
+/// ARP-guard epic reads the same map to ignore our own gratuitous ARP.
+#[map]
+static SELF_OWNED_BINDINGS: HashMap<u32, SelfBinding> =
+    HashMap::with_max_entries(MAX_SELF_BINDINGS, 0);
 
 /// Aggregate per-CPU counters (ARP frames seen / replies forged).
 #[map]
@@ -116,11 +126,16 @@ fn try_announce(ctx: &XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
 
-    // Resolve this interface's NIC MAC.
+    // Resolve the MAC to answer with: prefer the per-VIP self-owned
+    // binding (authoritative, set by userspace while speaker), fall
+    // back to this interface's NIC MAC.
     let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
-    let nic_mac = match unsafe { IFACE_MAC.get(&ifindex) } {
-        Some(m) => m.mac,
-        None => return Ok(xdp_action::XDP_PASS),
+    let nic_mac = match unsafe { SELF_OWNED_BINDINGS.get(&vip_key) } {
+        Some(b) => b.mac,
+        None => match unsafe { IFACE_MAC.get(&ifindex) } {
+            Some(m) => m.mac,
+            None => return Ok(xdp_action::XDP_PASS),
+        },
     };
 
     // ── Forge the ARP reply in place (bounded, no loop) ──

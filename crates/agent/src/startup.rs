@@ -1367,7 +1367,7 @@ pub async fn run(
             && let Some(ref mut fw) = fw_loader
         {
             match try_load_xdp_vip_announcer(&ebpf_dir) {
-                Ok((vip_loader, vip_mgr)) => {
+                Ok((vip_loader, vip_mgr, binding_mgr)) => {
                     if let Ok(vip_fd) = vip_loader.xdp_program_fd("xdp_vip_announcer") {
                         if let Err(e) = fw.set_tail_call_target("XDP_PROG_ARRAY", 3, &vip_fd) {
                             warn!("firewall → VIP announcer tail-call wiring failed: {e}");
@@ -1377,6 +1377,9 @@ pub async fn run(
                     }
                     {
                         let mut svc = vip_svc.write().await;
+                        // Binding port first: set_map_port triggers the
+                        // reconcile that also writes SELF_OWNED_BINDINGS.
+                        svc.set_binding_port(Box::new(binding_mgr));
                         if let Err(e) = svc.set_map_port(Box::new(vip_mgr)) {
                             warn!("vip announcer map port wiring failed: {e}");
                         }
@@ -3646,17 +3649,23 @@ pub fn try_load_xdp_loadbalancer(
 /// `PROG_IDX_VIP_ARP`) when an ARP frame is seen. It therefore only
 /// makes sense when the firewall XDP chain is active; the caller gates
 /// on that. Returns the loader (kept alive for the tail-call FD) and the
-/// `VipMapManager` over `VIP_SET` / `IFACE_MAC` / `VIP_ARP_REPLIES`.
+/// `VipMapManager` over `VIP_SET` / `IFACE_MAC` / `VIP_ARP_REPLIES`
+/// plus the `SelfBindingManager` over `SELF_OWNED_BINDINGS`.
 pub fn try_load_xdp_vip_announcer(
     ebpf_dir: &str,
-) -> anyhow::Result<(EbpfLoader, adapters::ebpf::VipMapManager)> {
+) -> anyhow::Result<(
+    EbpfLoader,
+    adapters::ebpf::VipMapManager,
+    adapters::ebpf::SelfBindingManager,
+)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-vip-announcer")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
     loader.load_xdp_program("xdp_vip_announcer")?;
     info!("xdp-vip-announcer loaded as tail-call target (firewall ARP path)");
     let vip_mgr = adapters::ebpf::VipMapManager::new(loader.ebpf_mut())?;
-    Ok((loader, vip_mgr))
+    let binding_mgr = adapters::ebpf::SelfBindingManager::new(loader.ebpf_mut())?;
+    Ok((loader, vip_mgr, binding_mgr))
 }
 
 /// Attach a TC program to an interface, dispatching based on
