@@ -34,6 +34,28 @@ macro_rules! copy_mac_asm {
     };
 }
 
+/// Copy 4 bytes (IPv4 address) via inline asm using 2×u16 loads/stores.
+///
+/// # Safety
+/// Caller must have proven bounds for `$src..$src+4` via `ptr_at` in the
+/// current stack frame. `$dst` must point to at least 4 writable bytes.
+#[macro_export]
+macro_rules! copy_4b_asm {
+    ($dst:expr, $src:expr) => {
+        core::arch::asm!(
+            "{tmp1} = *(u16 *)({src} + 0)",
+            "*(u16 *)({dst} + 0) = {tmp1}",
+            "{tmp2} = *(u16 *)({src} + 2)",
+            "*(u16 *)({dst} + 2) = {tmp2}",
+            src = in(reg) $src,
+            dst = in(reg) $dst,
+            tmp1 = out(reg) _,
+            tmp2 = out(reg) _,
+            options(nostack, preserves_flags)
+        )
+    };
+}
+
 /// Copy 16 bytes (IPv6 address) via inline asm using 8×u16 loads/stores.
 ///
 /// # Safety

@@ -57,7 +57,9 @@ pub use geoip::{GeoIpConfig, GeoIpSource};
 pub use ids::{IdsConfig, IdsRuleConfig, SamplingConfig, ThresholdRuleConfig};
 pub use ips::{IpsConfig, IpsRuleConfig};
 pub use l7::{L7Config, L7RuleConfig};
-pub use loadbalancer::{LbBackendConfig, LbServiceConfig as LbServiceCfg, LoadBalancerConfig};
+pub use loadbalancer::{
+    AnnounceConfig, LbBackendConfig, LbServiceConfig as LbServiceCfg, LoadBalancerConfig, VipConfig,
+};
 pub use management::ManagementConfig;
 pub use nat::{HairpinNatConfig, NatConfig, NatRuleConfig, NptV6RuleConfig};
 pub use qos::{QosClassifierConfig, QosPipeConfig, QosQueueConfig, QosSectionConfig};
@@ -591,6 +593,7 @@ impl AgentConfig {
         for (idx, svc_cfg) in self.loadbalancer.services.iter().enumerate() {
             svc_cfg.validate(idx)?;
         }
+        self.loadbalancer.announce.validate()?;
 
         // Validate QoS config
         if self.qos.enabled {
@@ -923,6 +926,11 @@ impl AgentConfig {
             .iter()
             .map(loadbalancer::LbServiceConfig::to_domain_service)
             .collect()
+    }
+
+    /// Convert the L2 VIP announce config to its domain entity.
+    pub fn lb_announce(&self) -> Result<domain::loadbalancer::vip::VipAnnounceConfig, ConfigError> {
+        self.loadbalancer.announce.to_domain()
     }
 
     /// Convert all `QoS` pipe configs to domain `QosPipe` entities.

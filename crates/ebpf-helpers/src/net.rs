@@ -10,6 +10,8 @@ pub const ETH_P_IPV6: u16 = 0x86DD;
 pub const ETH_P_8021Q: u16 = 0x8100;
 /// 802.1ad (QinQ) `EtherType`.
 pub const ETH_P_8021AD: u16 = 0x88A8;
+/// ARP `EtherType`.
+pub const ETH_P_ARP: u16 = 0x0806;
 
 /// Size of an 802.1Q VLAN tag in bytes.
 pub const VLAN_HDR_LEN: usize = 4;

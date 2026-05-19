@@ -18,6 +18,7 @@ pub mod ratelimit;
 pub mod scrub;
 pub mod tenant;
 pub mod threatintel;
+pub mod vip;
 pub mod zone;
 
 /// Shared arena event header visible from both BPF and userspace.

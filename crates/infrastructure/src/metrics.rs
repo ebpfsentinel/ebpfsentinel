@@ -94,6 +94,11 @@ pub struct ServiceLabels {
     pub service: String,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct VipLabels {
+    pub vip: String,
+}
+
 // ── Agent metrics registry ──────────────────────────────────────────
 
 /// Prometheus metrics registry for the agent.
@@ -150,6 +155,11 @@ pub struct AgentMetrics {
     pub audit_failures_total: Counter,
     pub lb_forwarded_total: Counter,
     pub lb_backends_healthy: Family<ServiceLabels, Gauge>,
+    /// Cumulative forged ARP replies per VIP, mirrored from the kernel
+    /// `VIP_ARP_REPLIES` map (gauge mirror of a kernel counter).
+    pub lb_vip_arp_replies: Family<VipLabels, Gauge>,
+    /// Speaker takeovers per VIP (userspace-incremented on promotion).
+    pub lb_vip_takeovers_total: Family<VipLabels, Counter>,
     pub worker_events_total: Family<WorkerLabels, Counter>,
     pub worker_processing_duration: Family<WorkerLabels, Histogram>,
     pub container_resolver_cache_hits_total: Counter,
@@ -491,6 +501,20 @@ impl AgentMetrics {
             lb_backends_healthy.clone(),
         );
 
+        let lb_vip_arp_replies = Family::<VipLabels, Gauge>::default();
+        registry.register(
+            "lb_vip_arp_replies_total",
+            "Forged ARP replies per announced VIP",
+            lb_vip_arp_replies.clone(),
+        );
+
+        let lb_vip_takeovers_total = Family::<VipLabels, Counter>::default();
+        registry.register(
+            "lb_vip_takeovers",
+            "Speaker takeovers per announced VIP",
+            lb_vip_takeovers_total.clone(),
+        );
+
         let worker_events_total = Family::<WorkerLabels, Counter>::default();
         registry.register(
             "worker_events",
@@ -590,6 +614,8 @@ impl AgentMetrics {
             audit_failures_total,
             lb_forwarded_total,
             lb_backends_healthy,
+            lb_vip_arp_replies,
+            lb_vip_takeovers_total,
             worker_events_total,
             worker_processing_duration,
             container_resolver_cache_hits_total,
@@ -943,6 +969,22 @@ impl LbMetrics for AgentMetrics {
                 service: service.to_string(),
             })
             .set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn set_vip_arp_replies(&self, vip: &str, count: u64) {
+        self.lb_vip_arp_replies
+            .get_or_create(&VipLabels {
+                vip: vip.to_string(),
+            })
+            .set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn record_vip_takeover(&self, vip: &str) {
+        self.lb_vip_takeovers_total
+            .get_or_create(&VipLabels {
+                vip: vip.to_string(),
+            })
+            .inc();
     }
 }
 

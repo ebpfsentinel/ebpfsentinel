@@ -16,12 +16,12 @@ use aya_ebpf::{
     },
     programs::XdpContext,
 };
+use aya_ebpf_bindings::helpers::bpf_probe_read_kernel;
 use core::mem;
 use ebpf_common::{
     conntrack::{
-        CT_SRC_COUNTER_MAX, CT_STATE_ESTABLISHED, CT_STATE_NEW, CT_STATE_RELATED,
-        ConnTrackConfig, NfConnOffsets,
-        OVERLOAD_SET_ID, SRC_COUNTER_FLAG_OVERLOADED, SrcStateCounter,
+        CT_SRC_COUNTER_MAX, CT_STATE_ESTABLISHED, CT_STATE_NEW, CT_STATE_RELATED, ConnTrackConfig,
+        NfConnOffsets, OVERLOAD_SET_ID, SRC_COUNTER_FLAG_OVERLOADED, SrcStateCounter,
     },
     event::{
         EVENT_TYPE_FIREWALL, FLAG_IPV6, FLAG_VLAN, META_FLAG_PRESENT, PacketEvent, XdpMetadata,
@@ -38,15 +38,14 @@ use ebpf_common::{
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
-use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, IcmpHdr, Ipv6Hdr, PROTO_ICMPV6,
-    PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes,
-    u32_from_be_bytes,
-};
-use aya_ebpf_bindings::helpers::bpf_probe_read_kernel;
 use ebpf_helpers::kfuncs::{
-    BpfCtOpts, CtTuple, bpf_xfrm_state_opts, kill_flow_via_xdp_ct, with_xdp_ct_lookup,
-    with_xdp_xfrm_state, xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag, XdpDynptr,
+    BpfCtOpts, CtTuple, XdpDynptr, bpf_xfrm_state_opts, kill_flow_via_xdp_ct, with_xdp_ct_lookup,
+    with_xdp_xfrm_state, xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag,
+};
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, IcmpHdr, Ipv6Hdr,
+    PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4,
+    u16_from_be_bytes, u32_from_be_bytes,
 };
 use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{copy_mac_asm, increment_metric, ringbuf_has_backpressure};
@@ -159,10 +158,19 @@ const PROG_IDX_RATELIMIT: u32 = 0;
 const PROG_IDX_REJECT: u32 = 1;
 /// Index of the loadbalancer program in `XDP_PROG_ARRAY`.
 const PROG_IDX_LOADBALANCER: u32 = 2;
+/// Index of the VIP announcer (ARP responder) program in `XDP_PROG_ARRAY`.
+const PROG_IDX_VIP_ARP: u32 = 3;
 
 /// Sentinel value returned by `apply_action` to signal the entry point
 /// to tail-call into `xdp-firewall-reject`. Not a real XDP action.
 const XDP_ACTION_REJECT: u32 = 0xFF;
+
+/// Sentinel value returned by `try_xdp_firewall` to signal the entry
+/// point to tail-call into the VIP announcer (`xdp-vip-announcer`,
+/// slot 3) for ARP frames. Not a real XDP action. Falls back to
+/// XDP_PASS when the announcer is not loaded so ARP still reaches the
+/// host normally.
+const XDP_ACTION_ARP_VIP: u32 = 0xFE;
 
 /// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
 #[map]
@@ -255,7 +263,6 @@ const METRIC_MTU_EXCEEDED: u32 = 6;
 fn ringbuf_has_backpressure() -> bool {
     ringbuf_has_backpressure!(EVENTS)
 }
-
 
 // ── Interface group helpers ──────────────────────────────────────────
 
@@ -565,6 +572,15 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         }
         return xdp_action::XDP_DROP;
     }
+    if action == XDP_ACTION_ARP_VIP {
+        // ARP frame: tail-call the VIP announcer (slot 3). If it is not
+        // loaded the tail-call is a no-op and we fall through to
+        // XDP_PASS so ARP still reaches the host normally.
+        unsafe {
+            let _ = XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_VIP_ARP);
+        }
+        return xdp_action::XDP_PASS;
+    }
     if action == xdp_action::XDP_PASS {
         // Check MTU before passing — drop oversized packets early.
         let mut mtu: u32 = 0;
@@ -662,6 +678,12 @@ fn try_xdp_firewall(ctx: &XdpContext) -> Result<u32, ()> {
         process_firewall_v4(ctx, l3_offset, vlan_id, flags)
     } else if ether_type == ETH_P_IPV6 {
         process_firewall_v6(ctx, l3_offset, vlan_id, flags | FLAG_IPV6)
+    } else if ether_type == ETH_P_ARP {
+        // Hand ARP frames to the bounded VIP announcer (slot 3). The
+        // entry point performs the tail-call; it falls back to
+        // XDP_PASS when the announcer is not loaded so ARP still
+        // reaches the host normally.
+        Ok(XDP_ACTION_ARP_VIP)
     } else {
         increment_metric(METRIC_PASSED);
         Ok(xdp_action::XDP_PASS)
@@ -757,9 +779,8 @@ fn process_firewall_v4(
             // Write dst IP into daddr (first 4 bytes, network order).
             let dst_be = unsafe { (*ipv4hdr).dst_addr };
             opts.daddr[..4].copy_from_slice(&dst_be);
-            let _ipsec_hit = unsafe {
-                with_xdp_xfrm_state(ctx.ctx as *mut _, &mut opts, |_xs| true)
-            };
+            let _ipsec_hit =
+                unsafe { with_xdp_xfrm_state(ctx.ctx as *mut _, &mut opts, |_xs| true) };
             // TODO(future): surface _ipsec_hit via PacketEvent or
             // firewall rule matcher for IPsec-aware allow/deny.
         }
@@ -1186,7 +1207,11 @@ fn conntrack_lookup_v6(
     next_hdr: u8,
 ) -> u8 {
     let tuple = CtTuple::v6(*src_addr, *dst_addr, src_port, dst_port);
-    let mut opts = if next_hdr == PROTO_TCP { BpfCtOpts::tcp() } else { BpfCtOpts::udp() };
+    let mut opts = if next_hdr == PROTO_TCP {
+        BpfCtOpts::tcp()
+    } else {
+        BpfCtOpts::udp()
+    };
     unsafe {
         with_xdp_ct_lookup(ctx.ctx as *mut _, tuple, &mut opts, |ct| {
             read_kernel_ct_state(ct)
@@ -1206,7 +1231,11 @@ fn kernel_ct_lookup_v4(
     protocol: u8,
 ) -> u8 {
     let tuple = CtTuple::v4(src_ip, dst_ip, src_port, dst_port);
-    let mut opts = if protocol == PROTO_TCP { BpfCtOpts::tcp() } else { BpfCtOpts::udp() };
+    let mut opts = if protocol == PROTO_TCP {
+        BpfCtOpts::tcp()
+    } else {
+        BpfCtOpts::udp()
+    };
     unsafe {
         with_xdp_ct_lookup(ctx.ctx as *mut _, tuple, &mut opts, |ct| {
             read_kernel_ct_state(ct)
@@ -1581,15 +1610,24 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
             // firewall rules on every subsequent packet.
             if let Some(pkt) = PKT_CTX.get_ptr(0) {
                 let (s, d, sp, dp, proto) = unsafe {
-                    ((*pkt).src_addr, (*pkt).dst_addr, (*pkt).src_port,
-                     (*pkt).dst_port, (*pkt).protocol)
+                    (
+                        (*pkt).src_addr,
+                        (*pkt).dst_addr,
+                        (*pkt).src_port,
+                        (*pkt).dst_port,
+                        (*pkt).protocol,
+                    )
                 };
                 let tuple = if (*unsafe { &*pkt }).flags & FLAG_IPV6 != 0 {
                     CtTuple::v6(s, d, sp, dp)
                 } else {
                     CtTuple::v4(s[0], d[0], sp, dp)
                 };
-                let mut opts = if proto == PROTO_TCP { BpfCtOpts::tcp() } else { BpfCtOpts::udp() };
+                let mut opts = if proto == PROTO_TCP {
+                    BpfCtOpts::tcp()
+                } else {
+                    BpfCtOpts::udp()
+                };
                 unsafe { kill_flow_via_xdp_ct(ctx.ctx as *mut _, tuple, &mut opts) };
             }
 
@@ -1634,8 +1672,6 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 // ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::xdp
-
-
 
 // increment_metric! imported from ebpf_helpers
 

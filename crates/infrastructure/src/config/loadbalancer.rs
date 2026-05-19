@@ -4,6 +4,7 @@ use domain::common::entity::RuleId;
 use domain::loadbalancer::entity::{
     LbAlgorithm, LbBackend, LbForwardingMode, LbProtocol, LbService,
 };
+use domain::loadbalancer::vip::{AnnounceRole, Vip, VipAnnounceConfig};
 use domain::routing::entity::HealthCheck;
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,132 @@ pub struct LoadBalancerConfig {
 
     #[serde(default)]
     pub services: Vec<LbServiceConfig>,
+
+    /// L2 VIP announcer policy (ARP responder + gratuitous ARP failover).
+    #[serde(default)]
+    pub announce: AnnounceConfig,
+}
+
+/// Maximum number of owned VIPs (matches eBPF `MAX_VIPS` capacity).
+pub(super) const MAX_VIPS: usize = 256;
+
+/// Node-level VIP announce configuration.
+///
+/// Single-speaker election is explicit and config-driven: set `role` to
+/// `primary` on exactly one node of an L2 failover pair, `standby` on the
+/// other. A standby node validates the same VIP set but stays silent
+/// until promoted (split-brain safe). The Kubernetes Lease seam that
+/// would drive automatic promotion is documented in the operator and
+/// deliberately not implemented here. `disabled` (default) turns the
+/// announcer off entirely.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnnounceConfig {
+    /// `disabled` (default), `primary`, or `standby`.
+    #[serde(default = "default_announce_role")]
+    pub role: String,
+
+    /// L2 interface the VIPs live on (ARP responder egresses here).
+    #[serde(default)]
+    pub interface: String,
+
+    /// The set of VIPs this node owns.
+    #[serde(default)]
+    pub vips: Vec<VipConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VipConfig {
+    /// Stable label used as the Prometheus `{vip}` dimension.
+    pub name: String,
+    /// The virtual IP address this node may claim on the segment.
+    pub addr: String,
+}
+
+fn default_announce_role() -> String {
+    "disabled".to_string()
+}
+
+fn parse_announce_role(s: &str) -> Result<AnnounceRole, ()> {
+    match s.trim().to_lowercase().as_str() {
+        "" | "disabled" | "off" | "none" => Ok(AnnounceRole::Disabled),
+        "primary" | "speaker" | "active" => Ok(AnnounceRole::Primary),
+        "standby" | "passive" | "backup" => Ok(AnnounceRole::Standby),
+        _ => Err(()),
+    }
+}
+
+impl AnnounceConfig {
+    pub(super) fn validate(&self) -> Result<(), ConfigError> {
+        let role = parse_announce_role(&self.role).map_err(|()| ConfigError::InvalidValue {
+            field: "loadbalancer.announce.role".to_string(),
+            value: self.role.clone(),
+            expected: "disabled, primary, standby".to_string(),
+        })?;
+
+        if self.vips.len() > MAX_VIPS {
+            return Err(ConfigError::Validation {
+                field: "loadbalancer.announce.vips".to_string(),
+                message: format!("at most {MAX_VIPS} VIPs are supported"),
+            });
+        }
+
+        for (idx, vip) in self.vips.iter().enumerate() {
+            let prefix = format!("loadbalancer.announce.vips[{idx}]");
+            if vip.name.trim().is_empty() {
+                return Err(ConfigError::Validation {
+                    field: format!("{prefix}.name"),
+                    message: "vip name must not be empty".to_string(),
+                });
+            }
+            vip.addr
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| ConfigError::Validation {
+                    field: format!("{prefix}.addr"),
+                    message: format!("invalid IP address: {}", vip.addr),
+                })?;
+        }
+
+        // Delegate the role-coupled invariants (interface required,
+        // non-empty + unique VIP set for primary/standby) to the domain.
+        if role != AnnounceRole::Disabled {
+            self.to_domain()?
+                .validate()
+                .map_err(|e| ConfigError::Validation {
+                    field: "loadbalancer.announce".to_string(),
+                    message: e.to_string(),
+                })?;
+        }
+
+        Ok(())
+    }
+
+    /// Convert to the domain [`VipAnnounceConfig`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] when the role string or any
+    /// VIP address fails to parse.
+    pub fn to_domain(&self) -> Result<VipAnnounceConfig, ConfigError> {
+        let role = parse_announce_role(&self.role).map_err(|()| ConfigError::Validation {
+            field: "loadbalancer.announce.role".to_string(),
+            message: format!("invalid announce role: {}", self.role),
+        })?;
+        let mut vips = Vec::with_capacity(self.vips.len());
+        for (idx, v) in self.vips.iter().enumerate() {
+            vips.push(Vip {
+                name: v.name.clone(),
+                addr: v.addr.parse().map_err(|_| ConfigError::Validation {
+                    field: format!("loadbalancer.announce.vips[{idx}].addr"),
+                    message: format!("invalid IP address: {}", v.addr),
+                })?,
+            });
+        }
+        Ok(VipAnnounceConfig {
+            role,
+            interface: self.interface.clone(),
+            vips,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

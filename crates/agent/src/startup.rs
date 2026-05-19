@@ -243,6 +243,22 @@ pub async fn run(
         "Load balancer engine initialized"
     );
 
+    // ── 5c⅝¾. Build L2 VIP announcer service ────────────────────────
+    let vip_announce_cfg = config.lb_announce()?;
+    let vip_svc = {
+        let mut svc = application::vip_announcer_service_impl::VipAnnouncerService::new(
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+        );
+        svc.set_mac_resolver(Arc::new(adapters::net::IoctlIfaceMacResolver));
+        svc.set_gratuitous_arp(Arc::new(adapters::net::RawSocketGratuitousArp));
+        Arc::new(RwLock::new(svc))
+    };
+    info!(
+        role = vip_announce_cfg.role.as_str(),
+        vips = vip_announce_cfg.vips.len(),
+        "L2 VIP announcer service initialized"
+    );
+
     // ── 5c⅝½. Build QoS service ──────────────────────────────────────
     let qos_svc = {
         let mut svc = application::qos_service_impl::QosAppService::new(
@@ -1067,6 +1083,7 @@ pub async fn run(
     let (mut fw_ok, mut rl_ok, mut lb_pre_loaded) = (false, false, false);
     let (mut ids_ok, mut ti_ok, mut dns_ok, mut dlp_ok) = (false, false, false, false);
     let (mut ct_ok, mut nat_ok, mut scrub_ok, mut lb_ok) = (false, false, false, false);
+    let mut vip_announcer_ok = false;
     let mut fw_loader: Option<EbpfLoader> = None;
 
     if ebpf_capable {
@@ -1337,6 +1354,64 @@ pub async fn run(
                 }
                 Err(e) => warn!("LB load for FW chain failed: {e}"),
             }
+        }
+
+        // Wire FW → VIP announcer (slot 3) when the announcer is enabled
+        // and the firewall XDP entry point is active. The bounded ARP
+        // responder is a separate tail-call target from the LB hot path;
+        // xdp-firewall dispatches to it only for ARP frames. Split-brain
+        // safety lives in VipAnnouncerService: VIP_SET is populated only
+        // while this node is the elected speaker.
+        if fw_ok
+            && vip_announce_cfg.role != domain::loadbalancer::vip::AnnounceRole::Disabled
+            && let Some(ref mut fw) = fw_loader
+        {
+            match try_load_xdp_vip_announcer(&ebpf_dir) {
+                Ok((vip_loader, vip_mgr)) => {
+                    if let Ok(vip_fd) = vip_loader.xdp_program_fd("xdp_vip_announcer") {
+                        if let Err(e) = fw.set_tail_call_target("XDP_PROG_ARRAY", 3, &vip_fd) {
+                            warn!("firewall → VIP announcer tail-call wiring failed: {e}");
+                        } else {
+                            info!("XDP tail-call: firewall → vip-announcer wired (FW slot 3)");
+                        }
+                    }
+                    {
+                        let mut svc = vip_svc.write().await;
+                        if let Err(e) = svc.set_map_port(Box::new(vip_mgr)) {
+                            warn!("vip announcer map port wiring failed: {e}");
+                        }
+                        if let Err(e) = svc.configure(vip_announce_cfg.clone()) {
+                            warn!("vip announcer configure failed: {e}");
+                        }
+                    }
+                    ebpf_state.add_loader(vip_loader);
+                    // Mirror the kernel per-VIP forged-reply counters into
+                    // Prometheus on a slow cadence (cumulative gauge).
+                    let vip_metrics_svc = Arc::clone(&vip_svc);
+                    tokio::spawn(async move {
+                        let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+                        loop {
+                            tick.tick().await;
+                            if let Err(e) = vip_metrics_svc.read().await.refresh_metrics() {
+                                warn!("vip announcer metrics refresh failed: {e}");
+                            }
+                        }
+                    });
+                    metrics.set_ebpf_program_status("xdp_vip_announcer", true);
+                    vip_announcer_ok = true;
+                    info!(
+                        role = vip_announce_cfg.role.as_str(),
+                        vips = vip_announce_cfg.vips.len(),
+                        "eBPF xdp-vip-announcer active (via firewall chain)"
+                    );
+                }
+                Err(e) => {
+                    warn!("xdp-vip-announcer load failed (VIP announce disabled): {e}");
+                    metrics.set_ebpf_program_status("xdp_vip_announcer", false);
+                }
+            }
+        } else {
+            metrics.set_ebpf_program_status("xdp_vip_announcer", false);
         }
 
         // Move firewall loader into eBPF state (after tail-call wiring)
@@ -1711,6 +1786,7 @@ pub async fn run(
         status.insert("tc_nat_egress".to_string(), nat_ok);
         status.insert("tc_scrub".to_string(), scrub_ok);
         status.insert("xdp_loadbalancer".to_string(), lb_ok);
+        status.insert("xdp_vip_announcer".to_string(), vip_announcer_ok);
     }
 
     // ── 10½a. Build netkit hot-plug registry + spawn watcher ─────────
@@ -1819,6 +1895,9 @@ pub async fn run(
         }
         if lb_ok {
             mgr.mark_startup_loaded("xdp_loadbalancer");
+        }
+        if vip_announcer_ok {
+            mgr.mark_startup_loaded("xdp_vip_announcer");
         }
         // Move map holder fields into the manager
         mgr.config_flags = ebpf_map_holder.config_flags;
@@ -3558,6 +3637,26 @@ pub fn try_load_xdp_loadbalancer(
     let reader = EventReader::new(loader.ebpf_mut())?;
 
     Ok((loader, lb_mgr, metrics_rdr, reader))
+}
+
+/// Load the bounded XDP VIP announcer program.
+///
+/// The announcer is never attached directly: it is always invoked via
+/// tail-call from the `xdp-firewall` entry point (slot 3,
+/// `PROG_IDX_VIP_ARP`) when an ARP frame is seen. It therefore only
+/// makes sense when the firewall XDP chain is active; the caller gates
+/// on that. Returns the loader (kept alive for the tail-call FD) and the
+/// `VipMapManager` over `VIP_SET` / `IFACE_MAC` / `VIP_ARP_REPLIES`.
+pub fn try_load_xdp_vip_announcer(
+    ebpf_dir: &str,
+) -> anyhow::Result<(EbpfLoader, adapters::ebpf::VipMapManager)> {
+    let program_bytes = read_ebpf_program(ebpf_dir, "xdp-vip-announcer")?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    loader.load_xdp_program("xdp_vip_announcer")?;
+    info!("xdp-vip-announcer loaded as tail-call target (firewall ARP path)");
+    let vip_mgr = adapters::ebpf::VipMapManager::new(loader.ebpf_mut())?;
+    Ok((loader, vip_mgr))
 }
 
 /// Attach a TC program to an interface, dispatching based on

@@ -80,4 +80,5 @@ pub mod retry;
 pub mod routing_service_impl;
 pub mod schedule_service_impl;
 pub mod threatintel_service_impl;
+pub mod vip_announcer_service_impl;
 pub mod zone_service_impl;

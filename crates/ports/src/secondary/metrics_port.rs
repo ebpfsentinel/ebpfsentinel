@@ -189,6 +189,13 @@ pub trait AuditMetrics: Send + Sync {
 pub trait LbMetrics: Send + Sync {
     fn record_lb_forwarded(&self) {}
     fn set_lb_backends_healthy(&self, _service: &str, _count: u64) {}
+
+    /// Mirror the kernel's cumulative forged-ARP-reply count for a VIP
+    /// (read from the `VIP_ARP_REPLIES` per-CPU map, summed across CPUs).
+    fn set_vip_arp_replies(&self, _vip: &str, _count: u64) {}
+
+    /// Record a speaker takeover that emitted gratuitous ARP for a VIP.
+    fn record_vip_takeover(&self, _vip: &str) {}
 }
 
 // ── Fingerprint metrics ──────────────────────────────────────────
