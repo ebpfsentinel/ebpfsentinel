@@ -23,6 +23,7 @@ use application::qos_service_impl::QosAppService;
 use application::ratelimit_service_impl::RateLimitAppService;
 use application::routing_service_impl::RoutingAppService;
 use application::threatintel_service_impl::ThreatIntelAppService;
+use application::vip_announcer_service_impl::VipAnnouncerService;
 use application::zone_service_impl::ZoneAppService;
 use arc_swap::ArcSwap;
 use domain::alert::entity::Alert;
@@ -56,6 +57,7 @@ pub struct AppState {
     pub routing_service: Option<Arc<RwLock<RoutingAppService>>>,
     pub zone_service: Option<Arc<RwLock<ZoneAppService>>>,
     pub loadbalancer_service: Option<Arc<RwLock<LbAppService>>>,
+    pub vip_announcer_service: Option<Arc<RwLock<VipAnnouncerService>>>,
     pub qos_service: Option<Arc<RwLock<QosAppService>>>,
     pub dns_cache_service: Option<Arc<DnsCacheAppService>>,
     pub dns_blocklist_service: Option<Arc<DnsBlocklistAppService>>,
@@ -116,6 +118,7 @@ impl AppState {
             routing_service: None,
             zone_service: None,
             loadbalancer_service: None,
+            vip_announcer_service: None,
             qos_service: None,
             dns_cache_service: None,
             dns_blocklist_service: None,
@@ -245,6 +248,13 @@ impl AppState {
     #[must_use]
     pub fn with_loadbalancer_service(mut self, svc: Arc<RwLock<LbAppService>>) -> Self {
         self.loadbalancer_service = Some(svc);
+        self
+    }
+
+    /// Attach the L2 VIP announcer service (drives `/api/v1/lb/vips`).
+    #[must_use]
+    pub fn with_vip_announcer_service(mut self, svc: Arc<RwLock<VipAnnouncerService>>) -> Self {
+        self.vip_announcer_service = Some(svc);
         self
     }
 

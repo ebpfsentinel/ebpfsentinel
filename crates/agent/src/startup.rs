@@ -862,6 +862,7 @@ pub async fn run(
         .with_alias_service(Arc::clone(&alias_svc))
         .with_routing_service(Arc::clone(&routing_svc))
         .with_loadbalancer_service(Arc::clone(&lb_svc))
+        .with_vip_announcer_service(Arc::clone(&vip_svc))
         .with_qos_service(Arc::clone(&qos_svc))
         .with_zone_service(Arc::clone(&zone_svc));
     let app_state = Arc::new(app_state);
@@ -970,6 +971,7 @@ pub async fn run(
     reload_service.set_alias_service(Arc::clone(&alias_svc));
     reload_service.set_routing_service(Arc::clone(&routing_svc));
     reload_service.set_loadbalancer_service(Arc::clone(&lb_svc));
+    reload_service.set_vip_announcer_service(Arc::clone(&vip_svc));
     reload_service.set_qos_service(Arc::clone(&qos_svc));
     reload_service.set_zone_service(Arc::clone(&zone_svc));
     reload_service.set_schedule_service(Arc::clone(&schedule_svc));

@@ -456,6 +456,18 @@ async fn perform_reload(
         tracing::warn!(error = %e, "load balancer config reload failed at application level");
     }
 
+    // Phase 6f⅔: L2 VIP announcer reload
+    let vip_announce = match config.lb_announce() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid VIP announce config");
+            return;
+        }
+    };
+    if let Err(e) = reload_service.reload_vip_announcer(vip_announce).await {
+        tracing::warn!(error = %e, "VIP announcer config reload failed at application level");
+    }
+
     // Phase 6f¾: QoS reload
     let qos_pipes = match config.qos_pipes() {
         Ok(p) => p,

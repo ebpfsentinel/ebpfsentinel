@@ -33,6 +33,7 @@ use crate::ratelimit_service_impl::RateLimitAppService;
 use crate::routing_service_impl::RoutingAppService;
 use crate::schedule_service_impl::ScheduleService;
 use crate::threatintel_service_impl::ThreatIntelAppService;
+use crate::vip_announcer_service_impl::VipAnnouncerService;
 use crate::zone_service_impl::ZoneAppService;
 
 /// Per-domain reload serialization tokens.
@@ -56,6 +57,7 @@ struct ReloadLocks {
     alias: Mutex<()>,
     routing: Mutex<()>,
     loadbalancer: Mutex<()>,
+    vip_announcer: Mutex<()>,
     qos: Mutex<()>,
     zone: Mutex<()>,
     schedule: Mutex<()>,
@@ -81,6 +83,7 @@ pub struct ConfigReloadService {
     alias_service: Option<Arc<RwLock<AliasAppService>>>,
     routing_service: Option<Arc<RwLock<RoutingAppService>>>,
     loadbalancer_service: Option<Arc<RwLock<LbAppService>>>,
+    vip_announcer_service: Option<Arc<RwLock<VipAnnouncerService>>>,
     qos_service: Option<Arc<RwLock<crate::qos_service_impl::QosAppService>>>,
     zone_service: Option<Arc<RwLock<ZoneAppService>>>,
     schedule_service: Option<Arc<RwLock<ScheduleService>>>,
@@ -116,6 +119,7 @@ impl ConfigReloadService {
             alias_service: None,
             routing_service: None,
             loadbalancer_service: None,
+            vip_announcer_service: None,
             qos_service: None,
             zone_service: None,
             schedule_service: None,
@@ -152,6 +156,11 @@ impl ConfigReloadService {
     /// Set the load balancer service for reload integration.
     pub fn set_loadbalancer_service(&mut self, svc: Arc<RwLock<LbAppService>>) {
         self.loadbalancer_service = Some(svc);
+    }
+
+    /// Set the VIP announcer service for reload integration.
+    pub fn set_vip_announcer_service(&mut self, svc: Arc<RwLock<VipAnnouncerService>>) {
+        self.vip_announcer_service = Some(svc);
     }
 
     /// Set the `QoS` service for reload integration.
@@ -279,6 +288,37 @@ impl ConfigReloadService {
             enabled,
             count = svc.service_count(),
             "load balancer configuration reloaded"
+        );
+        Ok(())
+    }
+
+    /// Reload the L2 VIP announcer (role, interface, VIP list).
+    pub async fn reload_vip_announcer(
+        &self,
+        cfg: domain::loadbalancer::vip::VipAnnounceConfig,
+    ) -> Result<(), anyhow::Error> {
+        let Some(ref svc) = self.vip_announcer_service else {
+            return Ok(());
+        };
+        let _guard = self.reload_locks.vip_announcer.lock().await;
+
+        let role = cfg.role;
+        let vip_count = cfg.vips.len();
+        let interface = cfg.interface.clone();
+
+        let mut announcer = svc.write().await;
+        announcer
+            .configure(cfg)
+            .map_err(|e| anyhow::anyhow!("VIP announcer reload failed: {e}"))?;
+        drop(announcer);
+
+        self.metrics
+            .record_config_reload("vip_announcer", "success");
+        tracing::info!(
+            ?role,
+            interface = %interface,
+            vip_count,
+            "VIP announcer configuration reloaded"
         );
         Ok(())
     }

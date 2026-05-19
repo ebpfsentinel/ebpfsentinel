@@ -4,7 +4,7 @@ use std::net::IpAddr;
 
 use domain::common::error::DomainError;
 use domain::l2::{L2Binding, OwnedBindings};
-use domain::loadbalancer::vip::VipAnnounceConfig;
+use domain::loadbalancer::vip::{Vip, VipAnnounceConfig};
 use ports::secondary::l2_binding_port::L2BindingPort;
 use ports::secondary::metrics_port::MetricsPort;
 use ports::secondary::vip_announcer_port::{GratuitousArpPort, IfaceMacResolverPort, VipMapPort};
@@ -99,6 +99,51 @@ impl VipAnnouncerService {
     /// Whether this node is the elected speaker.
     pub fn is_speaker(&self) -> bool {
         self.config.is_speaker()
+    }
+
+    /// L2 interface VIPs egress on (empty when the announcer is disabled).
+    #[must_use]
+    pub fn interface(&self) -> &str {
+        self.config.interface.as_str()
+    }
+
+    /// VIPs this node owns under the current configuration.
+    #[must_use]
+    pub fn vips(&self) -> &[Vip] {
+        &self.config.vips
+    }
+
+    /// Snapshot of the current announce configuration (clone — used by
+    /// the CLI / REST surfaces and by reload to round-trip the request).
+    #[must_use]
+    pub fn config_snapshot(&self) -> VipAnnounceConfig {
+        self.config.clone()
+    }
+
+    /// Number of currently registered self-owned bindings (0 unless the
+    /// node is the speaker and the announcer is wired).
+    #[must_use]
+    pub fn bindings_count(&self) -> usize {
+        self.bindings.len()
+    }
+
+    /// Whether `ip` is currently self-announced by this node (any MAC).
+    ///
+    /// Equivalent to checking `(ip, resolved_iface_mac)` against
+    /// [`Self::is_self_announced`] without requiring the caller to know
+    /// the MAC — handy for status / observability surfaces.
+    #[must_use]
+    pub fn vip_is_self_announced(&self, ip: IpAddr) -> bool {
+        self.bindings.contains_ip(&ip)
+    }
+
+    /// Per-VIP forged-ARP-reply counter read from the kernel map (0 when
+    /// the announcer program is not loaded).
+    pub fn arp_replies(&self, ip: IpAddr) -> Result<u64, DomainError> {
+        match self.map_port.as_ref() {
+            Some(map) => map.arp_replies(ip),
+            None => Ok(0),
+        }
     }
 
     /// Apply a new announce configuration and reconcile the kernel maps.

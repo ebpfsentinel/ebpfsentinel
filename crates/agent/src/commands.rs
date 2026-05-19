@@ -1374,6 +1374,61 @@ pub async fn cmd_lb_delete(client: &ApiClient, id: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn cmd_lb_vips(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let status = client.list_lb_vips().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!("L2 VIP Announcer");
+    println!("  Role:           {}", status.role);
+    println!("  Interface:      {}", status.interface);
+    println!("  Speaker:        {}", yes_no(status.is_speaker));
+    println!("  Bindings count: {}", status.bindings_count);
+
+    if status.vips.is_empty() {
+        println!("\n  No VIPs configured.");
+        return Ok(());
+    }
+
+    println!(
+        "\n  {:<20}  {:<18}  {:>12}  {:<10}",
+        "NAME", "ADDR", "ARP_REPLIES", "ANNOUNCED"
+    );
+    for vip in &status.vips {
+        println!(
+            "  {:<20}  {:<18}  {:>12}  {:<10}",
+            truncate(&vip.name, 20),
+            vip.addr,
+            vip.arp_replies,
+            yes_no(vip.self_announced),
+        );
+    }
+    println!("\n  {} VIP(s) total.", status.vips.len());
+    Ok(())
+}
+
+pub async fn cmd_lb_announce(client: &ApiClient, json: &str, output: OutputFormat) -> Result<()> {
+    let body: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?;
+    let status = client.apply_lb_announce(&body).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!(
+        "VIP announce config applied: role={}, interface={}, vips={}",
+        status.role,
+        status.interface,
+        status.vips.len()
+    );
+    Ok(())
+}
+
 // ── QoS ─────────────────────────────────────────────────────────────
 
 pub async fn cmd_qos_status(client: &ApiClient, output: OutputFormat) -> Result<()> {

@@ -130,6 +130,8 @@ use super::zone_handler;
         lb_handler::get_lb_service,
         lb_handler::create_lb_service,
         lb_handler::delete_lb_service,
+        lb_handler::list_lb_vips,
+        lb_handler::apply_lb_announce,
         // QoS
         qos_handler::get_qos_status,
         qos_handler::list_qos_pipes,
@@ -244,6 +246,10 @@ use super::zone_handler;
         lb_handler::LbBackendResponse,
         lb_handler::CreateLbServiceRequest,
         lb_handler::CreateLbBackendRequest,
+        lb_handler::LbVipStatusResponse,
+        lb_handler::LbVipResponse,
+        lb_handler::LbVipAnnounceRequest,
+        lb_handler::LbVipRequest,
         // QoS
         qos_handler::QosStatusResponse,
         qos_handler::QosPipeResponse,

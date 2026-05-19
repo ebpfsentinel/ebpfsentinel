@@ -9,6 +9,7 @@ use domain::auth::entity::JwtClaims;
 use domain::loadbalancer::entity::{
     LbAlgorithm, LbBackend, LbForwardingMode, LbProtocol, LbService,
 };
+use domain::loadbalancer::vip::{AnnounceRole, Vip, VipAnnounceConfig};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -376,6 +377,209 @@ pub async fn delete_lb_service(
     );
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── VIP announcer DTOs ────────────────────────────────────────────
+
+#[derive(Serialize, ToSchema)]
+pub struct LbVipStatusResponse {
+    /// `disabled`, `primary`, or `standby`.
+    pub role: String,
+    /// L2 interface VIPs egress on (empty when role is disabled).
+    pub interface: String,
+    /// Whether this node currently answers ARP / sends gratuitous ARP.
+    pub is_speaker: bool,
+    /// Number of self-owned bindings registered in the kernel
+    /// `SELF_OWNED_BINDINGS` map.
+    pub bindings_count: usize,
+    pub vips: Vec<LbVipResponse>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct LbVipResponse {
+    pub name: String,
+    pub addr: String,
+    /// Forged ARP replies emitted for this VIP since program load
+    /// (per-CPU summed kernel counter).
+    pub arp_replies: u64,
+    /// Whether this VIP is currently in the self-whitelist (true when
+    /// the node is speaker and the binding has been written).
+    pub self_announced: bool,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct LbVipAnnounceRequest {
+    /// `disabled`, `primary`, or `standby`.
+    #[serde(default = "default_vip_role")]
+    pub role: String,
+    /// L2 interface VIPs egress on. Required when role is primary/standby.
+    #[serde(default)]
+    pub interface: String,
+    /// VIPs this node owns. Must be non-empty when role is
+    /// primary/standby; ignored when role is disabled.
+    #[serde(default)]
+    pub vips: Vec<LbVipRequest>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct LbVipRequest {
+    pub name: String,
+    pub addr: String,
+}
+
+fn default_vip_role() -> String {
+    "disabled".to_string()
+}
+
+// ── VIP announcer handlers ────────────────────────────────────────
+
+/// `GET /api/v1/lb/vips` — VIP announcer status.
+#[utoipa::path(
+    get, path = "/api/v1/lb/vips",
+    tag = "Load Balancer",
+    responses(
+        (status = 200, description = "VIP announcer status", body = LbVipStatusResponse),
+        (status = 404, description = "VIP announcer not enabled", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn list_lb_vips(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<LbVipStatusResponse>, ApiError> {
+    let svc = state
+        .vip_announcer_service
+        .as_ref()
+        .ok_or(ApiError::NotFound {
+            code: "SERVICE_NOT_AVAILABLE",
+            message: "VIP announcer not enabled".to_string(),
+        })?;
+    let svc = svc.read().await;
+    Ok(Json(snapshot_status(&svc)?))
+}
+
+/// `POST /api/v1/lb/vips` — apply a new VIP announce configuration.
+#[utoipa::path(
+    post, path = "/api/v1/lb/vips",
+    tag = "Load Balancer",
+    request_body = LbVipAnnounceRequest,
+    responses(
+        (status = 200, description = "Configuration applied", body = LbVipStatusResponse),
+        (status = 400, description = "Validation error", body = ErrorBody),
+        (status = 404, description = "VIP announcer not enabled", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn apply_lb_announce(
+    State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
+    Json(req): Json<LbVipAnnounceRequest>,
+) -> Result<Json<LbVipStatusResponse>, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
+    let cfg = parse_vip_announce_request(req)?;
+    let after_role = cfg.role.as_str().to_string();
+    let after_json = serde_json::to_string(&cfg).ok();
+
+    let svc = state
+        .vip_announcer_service
+        .as_ref()
+        .ok_or(ApiError::NotFound {
+            code: "SERVICE_NOT_AVAILABLE",
+            message: "VIP announcer not enabled".to_string(),
+        })?;
+    let mut guard = svc.write().await;
+    guard.configure(cfg).map_err(|e| ApiError::BadRequest {
+        code: "VALIDATION_ERROR",
+        message: e.to_string(),
+    })?;
+    let status = snapshot_status(&guard)?;
+    drop(guard);
+
+    tracing::info!(role = %after_role, "VIP announce configuration applied via API");
+
+    state.audit_service.record_rule_change(
+        domain::audit::entity::AuditComponent::Loadbalancer,
+        domain::audit::entity::AuditAction::RuleAdded,
+        domain::audit::rule_change::ChangeActor::Api,
+        "lb-announce",
+        None,
+        after_json,
+    );
+
+    Ok(Json(status))
+}
+
+fn snapshot_status(
+    svc: &application::vip_announcer_service_impl::VipAnnouncerService,
+) -> Result<LbVipStatusResponse, ApiError> {
+    let mut vips = Vec::with_capacity(svc.vips().len());
+    for vip in svc.vips() {
+        let arp_replies = svc.arp_replies(vip.addr).map_err(|e| ApiError::Internal {
+            message: e.to_string(),
+        })?;
+        vips.push(LbVipResponse {
+            name: vip.name.clone(),
+            addr: vip.addr.to_string(),
+            arp_replies,
+            self_announced: svc.vip_is_self_announced(vip.addr),
+        });
+    }
+    Ok(LbVipStatusResponse {
+        role: svc.role().to_string(),
+        interface: svc.interface().to_string(),
+        is_speaker: svc.is_speaker(),
+        bindings_count: svc.bindings_count(),
+        vips,
+    })
+}
+
+fn parse_announce_role(s: &str) -> Result<AnnounceRole, ApiError> {
+    match s.trim().to_lowercase().as_str() {
+        "" | "disabled" | "off" | "none" => Ok(AnnounceRole::Disabled),
+        "primary" | "speaker" | "active" => Ok(AnnounceRole::Primary),
+        "standby" | "passive" | "backup" => Ok(AnnounceRole::Standby),
+        _ => Err(ApiError::BadRequest {
+            code: "VALIDATION_ERROR",
+            message: format!("invalid announce role '{s}': expected disabled, primary, or standby"),
+        }),
+    }
+}
+
+fn parse_vip_announce_request(req: LbVipAnnounceRequest) -> Result<VipAnnounceConfig, ApiError> {
+    validate_string_length("role", &req.role, MAX_SHORT_STRING_LENGTH)?;
+    validate_string_length("interface", &req.interface, MAX_SHORT_STRING_LENGTH)?;
+    let role = parse_announce_role(&req.role)?;
+    let mut vips = Vec::with_capacity(req.vips.len());
+    for v in req.vips {
+        validate_string_length("vip.name", &v.name, MAX_SHORT_STRING_LENGTH)?;
+        validate_string_length("vip.addr", &v.addr, MAX_SHORT_STRING_LENGTH)?;
+        let addr: std::net::IpAddr = v.addr.parse().map_err(|_| ApiError::BadRequest {
+            code: "VALIDATION_ERROR",
+            message: format!("invalid vip address '{}'", v.addr),
+        })?;
+        vips.push(Vip { name: v.name, addr });
+    }
+    let cfg = VipAnnounceConfig {
+        role,
+        interface: req.interface,
+        vips,
+    };
+    cfg.validate().map_err(|e| ApiError::BadRequest {
+        code: "VALIDATION_ERROR",
+        message: e.to_string(),
+    })?;
+    Ok(cfg)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────

@@ -53,7 +53,8 @@ use super::ips_handler::{
 };
 use super::l7_handler::{create_l7_rule, delete_l7_rule, list_l7_rules};
 use super::lb_handler::{
-    create_lb_service, delete_lb_service, get_lb_service, lb_status, list_lb_services,
+    apply_lb_announce, create_lb_service, delete_lb_service, get_lb_service, lb_status,
+    list_lb_services, list_lb_vips,
 };
 use super::metrics_handler::metrics;
 use super::middleware::auth::jwt_auth_middleware;
@@ -187,6 +188,7 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
             .route("/api/v1/lb/status", get(lb_status))
             .route("/api/v1/lb/services", get(list_lb_services))
             .route("/api/v1/lb/services/{id}", get(get_lb_service))
+            .route("/api/v1/lb/vips", get(list_lb_vips))
             .route("/api/v1/zones/status", get(zone_status))
             .route("/api/v1/zones", get(list_zones))
             .route("/api/v1/zones/policies", get(list_zone_policies))
@@ -228,6 +230,7 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
             )
             .route("/api/v1/lb/services", post(create_lb_service))
             .route("/api/v1/lb/services/{id}", delete(delete_lb_service))
+            .route("/api/v1/lb/vips", post(apply_lb_announce))
             .route("/api/v1/qos/pipes", post(create_qos_pipe))
             .route("/api/v1/qos/pipes/{id}", delete(delete_qos_pipe))
             .route("/api/v1/qos/queues", post(create_qos_queue))

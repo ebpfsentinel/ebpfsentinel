@@ -552,6 +552,14 @@ pub enum LbCommand {
         /// Service ID to delete
         id: String,
     },
+    /// Show the L2 VIP announcer status (role, interface, VIPs)
+    Vips,
+    /// Apply a VIP announce configuration from inline JSON
+    Announce {
+        /// JSON `{"role":"primary|standby|disabled","interface":"eth0","vips":[{"name":"web","addr":"192.0.2.10"}]}`
+        #[arg(long)]
+        json: String,
+    },
 }
 
 // ── QoS ─────────────────────────────────────────────────────────────────

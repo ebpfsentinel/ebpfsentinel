@@ -570,6 +570,23 @@ pub struct LbBackendResponse {
     pub active_connections: u64,
 }
 
+#[derive(Deserialize, Serialize)]
+pub struct LbVipStatusResponse {
+    pub role: String,
+    pub interface: String,
+    pub is_speaker: bool,
+    pub bindings_count: usize,
+    pub vips: Vec<LbVipResponse>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct LbVipResponse {
+    pub name: String,
+    pub addr: String,
+    pub arp_replies: u64,
+    pub self_announced: bool,
+}
+
 // ── NAT ─────────────────────────────────────────────────────────
 
 #[derive(Deserialize, Serialize)]
@@ -1306,6 +1323,28 @@ impl ApiClient {
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;
         handle_delete(resp).await
+    }
+
+    pub async fn list_lb_vips(&self) -> anyhow::Result<LbVipStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/lb/vips")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn apply_lb_announce(
+        &self,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<LbVipStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/lb/vips")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
     }
 
     // ── QoS ────────────────────────────────────────────────────────
