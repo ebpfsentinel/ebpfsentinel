@@ -480,7 +480,7 @@ fn select_least_conn(backends: &[LbBackendState], healthy_indices: &[usize]) -> 
 mod tests {
     use super::*;
     use crate::loadbalancer::entity::{
-        LbAlgorithm, LbBackend, LbBackendStatus, LbProtocol, LbService,
+        LbAlgorithm, LbBackend, LbBackendStatus, LbForwardingMode, LbProtocol, LbService,
     };
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -492,6 +492,7 @@ mod tests {
             port,
             weight,
             enabled: true,
+            same_segment: false,
         }
     }
 
@@ -502,6 +503,7 @@ mod tests {
             protocol: LbProtocol::Tcp,
             listen_port: 443,
             algorithm,
+            mode: LbForwardingMode::Dnat,
             backends,
             enabled: true,
             health_check: None,

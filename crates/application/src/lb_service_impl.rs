@@ -3,10 +3,13 @@ use std::sync::Arc;
 
 use domain::common::error::DomainError;
 use domain::loadbalancer::engine::LbEngine;
-use domain::loadbalancer::entity::{LbAlgorithm, LbBackend, LbProtocol, LbService};
+use domain::loadbalancer::entity::{
+    LbAlgorithm, LbBackend, LbForwardingMode, LbProtocol, LbService,
+};
 use ebpf_common::loadbalancer::{
     LB_ALG_IP_HASH, LB_ALG_LEAST_CONN, LB_ALG_MAGLEV, LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED,
-    LB_MAX_BACKENDS_V2, LbBackendEntry, LbServiceConfigV2, LbServiceKey, lb_service_index,
+    LB_MAX_BACKENDS_V2, LB_MODE_DNAT, LB_MODE_L2DSR, LbBackendEntry, LbServiceConfigV2,
+    LbServiceKey, lb_service_index,
 };
 use ports::secondary::loadbalancer_map_port::LoadBalancerMapPort;
 use ports::secondary::metrics_port::MetricsPort;
@@ -252,13 +255,19 @@ fn service_to_ebpf_config(service: &LbService, backend_start_id: u32) -> LbServi
         LbAlgorithm::Maglev => LB_ALG_MAGLEV,
     };
 
+    let mode = match service.mode {
+        LbForwardingMode::Dnat => LB_MODE_DNAT,
+        LbForwardingMode::L2Dsr => LB_MODE_L2DSR,
+    };
+
     #[allow(clippy::cast_possible_truncation)]
     let backend_count = service.backends.len().min(LB_MAX_BACKENDS_V2 as usize) as u8;
 
     LbServiceConfigV2 {
         algorithm,
         backend_count,
-        _pad: [0; 2],
+        mode,
+        _pad: 0,
         backend_start_id,
     }
 }
@@ -296,7 +305,9 @@ fn backend_to_ebpf_entry(backend: &LbBackend) -> LbBackendEntry {
 mod tests {
     use super::*;
     use domain::common::entity::RuleId;
-    use domain::loadbalancer::entity::{LbAlgorithm, LbBackend, LbProtocol, LbService};
+    use domain::loadbalancer::entity::{
+        LbAlgorithm, LbBackend, LbForwardingMode, LbProtocol, LbService,
+    };
     use ports::test_utils::NoopMetrics;
     use std::net::Ipv4Addr;
 
@@ -311,6 +322,7 @@ mod tests {
             port,
             weight: 1,
             enabled: true,
+            same_segment: false,
         }
     }
 
@@ -321,6 +333,7 @@ mod tests {
             protocol: LbProtocol::Tcp,
             listen_port: port,
             algorithm: LbAlgorithm::RoundRobin,
+            mode: LbForwardingMode::Dnat,
             backends: vec![make_backend("be-1", 8080), make_backend("be-2", 8081)],
             enabled: true,
             health_check: None,
@@ -449,6 +462,7 @@ mod tests {
             port: 8080,
             weight: 10,
             enabled: true,
+            same_segment: false,
         };
         let entry = backend_to_ebpf_entry(&be);
         assert_eq!(entry.addr_v4, 0);

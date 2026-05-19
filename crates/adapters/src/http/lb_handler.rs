@@ -6,7 +6,9 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use domain::auth::entity::JwtClaims;
-use domain::loadbalancer::entity::{LbAlgorithm, LbBackend, LbProtocol, LbService};
+use domain::loadbalancer::entity::{
+    LbAlgorithm, LbBackend, LbForwardingMode, LbProtocol, LbService,
+};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -30,6 +32,7 @@ pub struct LbServiceResponse {
     pub protocol: String,
     pub listen_port: u16,
     pub algorithm: String,
+    pub mode: String,
     pub backend_count: usize,
     pub enabled: bool,
 }
@@ -42,6 +45,7 @@ impl LbServiceResponse {
             protocol: s.protocol.as_str().to_string(),
             listen_port: s.listen_port,
             algorithm: s.algorithm.as_str().to_string(),
+            mode: s.mode.as_str().to_string(),
             backend_count: s.backends.len(),
             enabled: s.enabled,
         }
@@ -55,6 +59,7 @@ pub struct LbServiceDetailResponse {
     pub protocol: String,
     pub listen_port: u16,
     pub algorithm: String,
+    pub mode: String,
     pub enabled: bool,
     pub backends: Vec<LbBackendResponse>,
 }
@@ -66,6 +71,7 @@ pub struct LbBackendResponse {
     pub port: u16,
     pub weight: u32,
     pub enabled: bool,
+    pub same_segment: bool,
     pub status: String,
     pub active_connections: u64,
 }
@@ -80,6 +86,8 @@ pub struct CreateLbServiceRequest {
     pub listen_port: u16,
     #[serde(default = "default_algorithm")]
     pub algorithm: String,
+    #[serde(default = "default_mode")]
+    pub mode: String,
     pub backends: Vec<CreateLbBackendRequest>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -94,10 +102,15 @@ pub struct CreateLbBackendRequest {
     pub weight: u32,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default)]
+    pub same_segment: bool,
 }
 
 fn default_algorithm() -> String {
     "round_robin".to_string()
+}
+fn default_mode() -> String {
+    "dnat".to_string()
 }
 fn default_weight() -> u32 {
     1
@@ -216,6 +229,7 @@ pub async fn get_lb_service(
                 port: bs.backend.port,
                 weight: bs.backend.weight,
                 enabled: bs.backend.enabled,
+                same_segment: bs.backend.same_segment,
                 status: bs.status.as_str().to_string(),
                 active_connections: bs.active_connections,
             })
@@ -229,6 +243,7 @@ pub async fn get_lb_service(
                 port: b.port,
                 weight: b.weight,
                 enabled: b.enabled,
+                same_segment: b.same_segment,
                 status: "healthy".to_string(),
                 active_connections: 0,
             })
@@ -241,6 +256,7 @@ pub async fn get_lb_service(
         protocol: service.protocol.as_str().to_string(),
         listen_port: service.listen_port,
         algorithm: service.algorithm.as_str().to_string(),
+        mode: service.mode.as_str().to_string(),
         enabled: service.enabled,
         backends,
     }))
@@ -392,14 +408,27 @@ fn parse_algorithm(s: &str) -> Result<LbAlgorithm, ApiError> {
     }
 }
 
+fn parse_mode(s: &str) -> Result<LbForwardingMode, ApiError> {
+    match s.to_lowercase().as_str() {
+        "dnat" => Ok(LbForwardingMode::Dnat),
+        "l2dsr" | "l2_dsr" | "dsr" => Ok(LbForwardingMode::L2Dsr),
+        _ => Err(ApiError::BadRequest {
+            code: "VALIDATION_ERROR",
+            message: format!("invalid mode '{s}': expected dnat or l2dsr"),
+        }),
+    }
+}
+
 fn parse_create_request(req: CreateLbServiceRequest) -> Result<LbService, ApiError> {
     validate_string_length("id", &req.id, MAX_ID_LENGTH)?;
     validate_string_length("name", &req.name, MAX_SHORT_STRING_LENGTH)?;
     validate_string_length("protocol", &req.protocol, MAX_SHORT_STRING_LENGTH)?;
     validate_string_length("algorithm", &req.algorithm, MAX_SHORT_STRING_LENGTH)?;
+    validate_string_length("mode", &req.mode, MAX_SHORT_STRING_LENGTH)?;
 
     let protocol = parse_protocol(&req.protocol)?;
     let algorithm = parse_algorithm(&req.algorithm)?;
+    let mode = parse_mode(&req.mode)?;
 
     if req.listen_port == 0 {
         return Err(ApiError::BadRequest {
@@ -444,19 +473,27 @@ fn parse_create_request(req: CreateLbServiceRequest) -> Result<LbService, ApiErr
             port: be.port,
             weight: be.weight,
             enabled: be.enabled,
+            same_segment: be.same_segment,
         });
     }
 
-    Ok(LbService {
+    let service = LbService {
         id: domain::common::entity::RuleId(req.id),
         name: req.name,
         protocol,
         listen_port: req.listen_port,
         algorithm,
+        mode,
         backends,
         enabled: req.enabled,
         health_check: None,
-    })
+    };
+    // Enforce the l2dsr same-segment invariant before the engine sees it.
+    service.validate().map_err(|e| ApiError::BadRequest {
+        code: "VALIDATION_ERROR",
+        message: e.to_string(),
+    })?;
+    Ok(service)
 }
 
 #[cfg(test)]
@@ -471,12 +508,14 @@ mod tests {
             protocol: "tcp".to_string(),
             listen_port: 443,
             algorithm: "round_robin".to_string(),
+            mode: "dnat".to_string(),
             backends: vec![CreateLbBackendRequest {
                 id: "be-1".to_string(),
                 addr: "10.0.0.1".to_string(),
                 port: 8080,
                 weight: 1,
                 enabled: true,
+                same_segment: false,
             }],
             enabled: true,
         };
@@ -495,12 +534,14 @@ mod tests {
             protocol: "invalid".to_string(),
             listen_port: 443,
             algorithm: "round_robin".to_string(),
+            mode: "dnat".to_string(),
             backends: vec![CreateLbBackendRequest {
                 id: "be-1".to_string(),
                 addr: "10.0.0.1".to_string(),
                 port: 8080,
                 weight: 1,
                 enabled: true,
+                same_segment: false,
             }],
             enabled: true,
         };
@@ -515,12 +556,14 @@ mod tests {
             protocol: "tcp".to_string(),
             listen_port: 443,
             algorithm: "unknown".to_string(),
+            mode: "dnat".to_string(),
             backends: vec![CreateLbBackendRequest {
                 id: "be-1".to_string(),
                 addr: "10.0.0.1".to_string(),
                 port: 8080,
                 weight: 1,
                 enabled: true,
+                same_segment: false,
             }],
             enabled: true,
         };
@@ -535,12 +578,14 @@ mod tests {
             protocol: "tcp".to_string(),
             listen_port: 0,
             algorithm: "round_robin".to_string(),
+            mode: "dnat".to_string(),
             backends: vec![CreateLbBackendRequest {
                 id: "be-1".to_string(),
                 addr: "10.0.0.1".to_string(),
                 port: 8080,
                 weight: 1,
                 enabled: true,
+                same_segment: false,
             }],
             enabled: true,
         };
@@ -555,6 +600,7 @@ mod tests {
             protocol: "tcp".to_string(),
             listen_port: 443,
             algorithm: "round_robin".to_string(),
+            mode: "dnat".to_string(),
             backends: vec![],
             enabled: true,
         };
@@ -569,12 +615,14 @@ mod tests {
             protocol: "tcp".to_string(),
             listen_port: 443,
             algorithm: "round_robin".to_string(),
+            mode: "dnat".to_string(),
             backends: vec![CreateLbBackendRequest {
                 id: "be-1".to_string(),
                 addr: "not-an-ip".to_string(),
                 port: 8080,
                 weight: 1,
                 enabled: true,
+                same_segment: false,
             }],
             enabled: true,
         };
@@ -611,12 +659,14 @@ mod tests {
             protocol: LbProtocol::Tcp,
             listen_port: 443,
             algorithm: LbAlgorithm::RoundRobin,
+            mode: LbForwardingMode::Dnat,
             backends: vec![LbBackend {
                 id: "be-1".to_string(),
                 addr: "10.0.0.1".parse().unwrap(),
                 port: 8080,
                 weight: 1,
                 enabled: true,
+                same_segment: false,
             }],
             enabled: true,
             health_check: None,
@@ -636,15 +686,94 @@ mod tests {
             protocol: "tcp".to_string(),
             listen_port: 443,
             algorithm: "round_robin".to_string(),
+            mode: "dnat".to_string(),
             backends: vec![CreateLbBackendRequest {
                 id: "be-1".to_string(),
                 addr: "10.0.0.1".to_string(),
                 port: 8080,
                 weight: 0,
                 enabled: true,
+                same_segment: false,
             }],
             enabled: true,
         };
         assert!(parse_create_request(req).is_err());
+    }
+
+    #[test]
+    fn parse_mode_values() {
+        assert_eq!(parse_mode("dnat").unwrap(), LbForwardingMode::Dnat);
+        assert_eq!(parse_mode("l2dsr").unwrap(), LbForwardingMode::L2Dsr);
+        assert_eq!(parse_mode("DSR").unwrap(), LbForwardingMode::L2Dsr);
+        assert!(parse_mode("bogus").is_err());
+    }
+
+    #[test]
+    fn default_mode_request_is_dnat() {
+        let req = CreateLbServiceRequest {
+            id: "lb-mode".to_string(),
+            name: "test".to_string(),
+            protocol: "tcp".to_string(),
+            listen_port: 443,
+            algorithm: "round_robin".to_string(),
+            mode: default_mode(),
+            backends: vec![CreateLbBackendRequest {
+                id: "be-1".to_string(),
+                addr: "10.0.0.1".to_string(),
+                port: 8080,
+                weight: 1,
+                enabled: true,
+                same_segment: false,
+            }],
+            enabled: true,
+        };
+        let svc = parse_create_request(req).unwrap();
+        assert_eq!(svc.mode, LbForwardingMode::Dnat);
+    }
+
+    #[test]
+    fn l2dsr_request_rejected_without_same_segment() {
+        let req = CreateLbServiceRequest {
+            id: "lb-dsr".to_string(),
+            name: "test".to_string(),
+            protocol: "tcp".to_string(),
+            listen_port: 443,
+            algorithm: "round_robin".to_string(),
+            mode: "l2dsr".to_string(),
+            backends: vec![CreateLbBackendRequest {
+                id: "be-1".to_string(),
+                addr: "10.0.0.1".to_string(),
+                port: 8080,
+                weight: 1,
+                enabled: true,
+                same_segment: false,
+            }],
+            enabled: true,
+        };
+        assert!(parse_create_request(req).is_err());
+    }
+
+    #[test]
+    fn l2dsr_request_accepted_with_same_segment() {
+        let req = CreateLbServiceRequest {
+            id: "lb-dsr".to_string(),
+            name: "test".to_string(),
+            protocol: "tcp".to_string(),
+            listen_port: 443,
+            algorithm: "round_robin".to_string(),
+            mode: "l2dsr".to_string(),
+            backends: vec![CreateLbBackendRequest {
+                id: "be-1".to_string(),
+                addr: "10.0.0.1".to_string(),
+                port: 8080,
+                weight: 1,
+                enabled: true,
+                same_segment: true,
+            }],
+            enabled: true,
+        };
+        let svc = parse_create_request(req).unwrap();
+        assert_eq!(svc.mode, LbForwardingMode::L2Dsr);
+        assert!(svc.backends[0].same_segment);
     }
 }

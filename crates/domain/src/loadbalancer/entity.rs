@@ -64,6 +64,36 @@ impl std::fmt::Display for LbAlgorithm {
     }
 }
 
+/// Packet forwarding mode for a load balancer service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LbForwardingMode {
+    /// Destination NAT: rewrite dst IP/port to the backend and recompute
+    /// L3/L4 checksums. Default; backend replies traverse the LB.
+    #[default]
+    Dnat,
+    /// L2 Direct Server Return: rewrite only the destination MAC to the
+    /// backend, leave dst IP = VIP and L3/L4 checksums untouched. The
+    /// backend replies directly to the client. Requires all backends on
+    /// the same L2 segment as the LB.
+    L2Dsr,
+}
+
+impl LbForwardingMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dnat => "dnat",
+            Self::L2Dsr => "l2dsr",
+        }
+    }
+}
+
+impl std::fmt::Display for LbForwardingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A backend server in a load balancer service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LbBackend {
@@ -77,6 +107,10 @@ pub struct LbBackend {
     pub weight: u32,
     /// Whether this backend is administratively enabled.
     pub enabled: bool,
+    /// Whether this backend is on the same L2 segment as the LB.
+    /// Required to be `true` for all backends of an `l2dsr` service.
+    #[serde(default)]
+    pub same_segment: bool,
 }
 
 /// A load balancer service definition.
@@ -92,6 +126,9 @@ pub struct LbService {
     pub listen_port: u16,
     /// Balancing algorithm.
     pub algorithm: LbAlgorithm,
+    /// Packet forwarding mode (DNAT or L2 DSR).
+    #[serde(default)]
+    pub mode: LbForwardingMode,
     /// Backend servers.
     pub backends: Vec<LbBackend>,
     /// Whether this service is enabled.
@@ -143,6 +180,18 @@ impl LbService {
                     "backend '{}' weight must be > 0",
                     backend.id
                 )));
+            }
+        }
+
+        if self.mode == LbForwardingMode::L2Dsr {
+            for backend in &self.backends {
+                if !backend.same_segment {
+                    return Err(LbError::InvalidService(format!(
+                        "l2dsr service '{}' requires all backends on the same L2 segment; \
+                         backend '{}' is not flagged same_segment",
+                        self.id, backend.id
+                    )));
+                }
             }
         }
 
@@ -232,6 +281,7 @@ mod tests {
             port: 8080,
             weight: 1,
             enabled: true,
+            same_segment: false,
         }
     }
 
@@ -242,6 +292,7 @@ mod tests {
             protocol: LbProtocol::Tcp,
             listen_port: 443,
             algorithm: LbAlgorithm::RoundRobin,
+            mode: LbForwardingMode::Dnat,
             backends,
             enabled: true,
             health_check: None,
@@ -353,6 +404,58 @@ mod tests {
         assert_eq!(format!("{}", LbProtocol::Tcp), "tcp");
         assert_eq!(format!("{}", LbProtocol::Udp), "udp");
         assert_eq!(format!("{}", LbProtocol::TlsPassthrough), "tls_passthrough");
+    }
+
+    #[test]
+    fn forwarding_mode_display_and_default() {
+        assert_eq!(format!("{}", LbForwardingMode::Dnat), "dnat");
+        assert_eq!(format!("{}", LbForwardingMode::L2Dsr), "l2dsr");
+        assert_eq!(LbForwardingMode::default(), LbForwardingMode::Dnat);
+    }
+
+    #[test]
+    fn dnat_service_ignores_same_segment() {
+        // Default mode is DNAT; same_segment=false backends are fine.
+        let svc = test_service(vec![test_backend("be-1"), test_backend("be-2")]);
+        assert_eq!(svc.mode, LbForwardingMode::Dnat);
+        assert!(svc.validate().is_ok());
+    }
+
+    #[test]
+    fn l2dsr_rejects_backend_not_same_segment() {
+        let mut svc = test_service(vec![test_backend("be-1"), test_backend("be-2")]);
+        svc.mode = LbForwardingMode::L2Dsr;
+        let err = svc.validate().unwrap_err();
+        assert!(matches!(err, LbError::InvalidService(_)));
+    }
+
+    #[test]
+    fn l2dsr_accepts_all_same_segment_backends() {
+        let mut be1 = test_backend("be-1");
+        let mut be2 = test_backend("be-2");
+        be1.same_segment = true;
+        be2.same_segment = true;
+        let mut svc = test_service(vec![be1, be2]);
+        svc.mode = LbForwardingMode::L2Dsr;
+        assert!(svc.validate().is_ok());
+    }
+
+    #[test]
+    fn l2dsr_rejects_mixed_segment_backends() {
+        let mut be1 = test_backend("be-1");
+        be1.same_segment = true;
+        let be2 = test_backend("be-2"); // same_segment = false
+        let mut svc = test_service(vec![be1, be2]);
+        svc.mode = LbForwardingMode::L2Dsr;
+        assert!(svc.validate().is_err());
+    }
+
+    #[test]
+    fn forwarding_mode_serde_snake_case() {
+        let json = serde_json::to_string(&LbForwardingMode::L2Dsr).unwrap();
+        assert_eq!(json, "\"l2dsr\"");
+        let parsed: LbForwardingMode = serde_json::from_str("\"dnat\"").unwrap();
+        assert_eq!(parsed, LbForwardingMode::Dnat);
     }
 
     #[test]

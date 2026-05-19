@@ -12,13 +12,13 @@ use aya_ebpf::{
 use ebpf_common::{
     event::{FLAG_IPV6, FLAG_VLAN, PacketEvent},
     loadbalancer::{
-        EVENT_TYPE_LB, LB_ACTION_FORWARD, LB_ACTION_NO_BACKEND, LB_ALG_IP_HASH, LB_ALG_MAGLEV,
-        LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED, LB_MAX_BACKENDS_V2, LB_METRIC_BYTES_FORWARDED,
-        LB_METRIC_COUNT, LB_METRIC_EVENTS_DROPPED, LB_METRIC_MTU_EXCEEDED,
-        LB_METRIC_PACKETS_FORWARDED, LB_METRIC_PACKETS_NO_BACKEND, LB_METRIC_TOTAL_SEEN,
-        LbBackendEntry, LbServiceConfigV2, LbServiceKey, MAGLEV_EMPTY, MAGLEV_RING_SIZE,
-        MAX_LB_BACKENDS_TOTAL, MAX_LB_SERVICES, MAX_MAGLEV_SERVICES, MaglevLookup, lb_fnv1a_u32,
-        lb_service_index,
+        BackendMac, EVENT_TYPE_LB, LB_ACTION_FORWARD, LB_ACTION_NO_BACKEND, LB_ALG_IP_HASH,
+        LB_ALG_MAGLEV, LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED, LB_MAX_BACKENDS_V2,
+        LB_METRIC_BYTES_FORWARDED, LB_METRIC_COUNT, LB_METRIC_EVENTS_DROPPED,
+        LB_METRIC_MTU_EXCEEDED, LB_METRIC_PACKETS_FORWARDED, LB_METRIC_PACKETS_NO_BACKEND,
+        LB_METRIC_TOTAL_SEEN, LB_MODE_L2DSR, LbBackendEntry, LbServiceConfigV2, LbServiceKey,
+        MAGLEV_EMPTY, MAGLEV_RING_SIZE, MAX_LB_BACKEND_MAC, MAX_LB_BACKENDS_TOTAL, MAX_LB_SERVICES,
+        MAX_MAGLEV_SERVICES, MaglevLookup, lb_fnv1a_u32, lb_service_index,
     },
 };
 use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, with_xdp_ct_lookup, xdp_rx_hash, xdp_rx_timestamp};
@@ -90,6 +90,13 @@ static LB_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(LB_METRIC_CO
 /// Falls back to MAC swap + XDP_TX when the DevMap entry is absent.
 #[map]
 static LB_DEVMAP: DevMap = DevMap::with_max_entries(256, 0);
+
+/// Resolved backend MAC addresses for L2 DSR: backend_id → MAC.
+/// Populated by userspace neighbor/ARP/ND resolution in the loader
+/// adapter. Read only when a service is in `LB_MODE_L2DSR`; an absent
+/// entry makes the data plane fall back to the DNAT path unchanged.
+#[map]
+static LB_BACKEND_MAC: HashMap<u32, BackendMac> = HashMap::with_max_entries(MAX_LB_BACKEND_MAC, 0);
 
 /// Shared event ring buffer.
 #[map]
@@ -206,6 +213,20 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
             return Ok(xdp_action::XDP_PASS);
         }
     };
+
+    // ── L2 DSR forwarding mode ──────────────────────────────────
+    // Rewrite only the destination MAC; dst IP stays the VIP and the
+    // L3/L4 checksums are untouched. The backend (VIP on loopback)
+    // replies directly to the client. If the backend MAC is not yet
+    // resolved, fall through to the DNAT path unchanged (no regression).
+    if svc_config.mode == LB_MODE_L2DSR {
+        if let Some(action) = try_dsr_forward(
+            ctx, backend_id, &src_addr, &dst_addr, src_port, dst_port, protocol, 0, vlan_id,
+            pkt_len,
+        ) {
+            return Ok(action);
+        }
+    }
 
     // ── DNAT rewrite ────────────────────────────────────────────
     let ipv4hdr_mut: *mut Ipv4Hdr = unsafe { ptr_at_mut(ctx, l3_offset)? };
@@ -341,6 +362,18 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
         }
     };
 
+    // ── L2 DSR forwarding mode (IPv6) ───────────────────────────
+    // Rewrite only the destination MAC; dst IP stays the VIP and the
+    // L4 checksum is untouched. Fall through to DNAT if MAC unresolved.
+    if svc_config.mode == LB_MODE_L2DSR {
+        if let Some(action) = try_dsr_forward(
+            ctx, backend_id, &src_addr, &dst_addr, src_port, dst_port, next_hdr, FLAG_IPV6,
+            vlan_id, pkt_len,
+        ) {
+            return Ok(action);
+        }
+    }
+
     // ── DNAT rewrite (IPv6) ─────────────────────────────────────
     let ipv6hdr_mut: *mut Ipv6Hdr = unsafe { ptr_at_mut(ctx, l3_offset)? };
     let l4hdr_mut: *mut TcpUdpHdr = unsafe { ptr_at_mut(ctx, l4_offset)? };
@@ -424,6 +457,68 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     }
 
     Ok(xdp_action::XDP_TX)
+}
+
+// ── L2 DSR Forwarding ───────────────────────────────────────────────
+
+/// L2 Direct Server Return: rewrite ONLY the destination Ethernet
+/// address to the resolved backend MAC and L2-forward the packet. The
+/// destination IP stays the VIP and no L3/L4 checksum is recomputed.
+///
+/// Returns `Some(action)` once the packet is handled (REDIRECT / TX, or
+/// DROP on MTU overflow). Returns `None` when the backend MAC has not
+/// been resolved yet, so the caller falls back to the DNAT path.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn try_dsr_forward(
+    ctx: &XdpContext,
+    backend_id: u32,
+    src_addr: &[u32; 4],
+    dst_addr: &[u32; 4],
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    flags: u8,
+    vlan_id: u16,
+    pkt_len: u64,
+) -> Option<u32> {
+    // Resolve backend MAC; absent → caller falls back to DNAT.
+    let mac = unsafe { LB_BACKEND_MAC.get(&backend_id) }?.mac;
+
+    // Rewrite ONLY eth.dst. dst IP = VIP, L3/L4 checksums untouched.
+    // copy_mac_asm! prevents LLVM memcpy outlining with packet pointers.
+    let ethhdr_mut: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0).ok()? };
+    unsafe {
+        copy_mac_asm!(ethhdr_mut as *mut u8, mac.as_ptr());
+    }
+
+    increment_metric(LB_METRIC_PACKETS_FORWARDED);
+    add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
+    emit_event(
+        ctx,
+        src_addr,
+        dst_addr,
+        src_port,
+        dst_port,
+        protocol,
+        LB_ACTION_FORWARD,
+        flags,
+        vlan_id,
+    );
+
+    // Check MTU before forwarding to avoid silent fragmentation.
+    let mut mtu: u32 = 0;
+    let mtu_ret = unsafe { bpf_check_mtu(ctx.ctx as *mut _, 0, &mut mtu as *mut u32, 0, 0) };
+    if mtu_ret != 0 {
+        increment_metric(LB_METRIC_MTU_EXCEEDED);
+        return Some(xdp_action::XDP_DROP);
+    }
+
+    // DevMap redirect first (wire-speed), MAC-rewrite + XDP_TX fallback.
+    if LB_DEVMAP.redirect(backend_id, 0).is_ok() {
+        return Some(xdp_action::XDP_REDIRECT);
+    }
+    Some(xdp_action::XDP_TX)
 }
 
 // ── Backend Selection ───────────────────────────────────────────────

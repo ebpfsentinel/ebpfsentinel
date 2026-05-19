@@ -33,6 +33,14 @@ pub trait LoadBalancerMapPort: Send + Sync {
     /// Remove a service's Maglev ring from the `LB_MAGLEV` map.
     fn remove_maglev_table(&mut self, svc_index: u32) -> Result<(), DomainError>;
 
+    /// Insert or update a backend's resolved MAC in the `LB_BACKEND_MAC`
+    /// map (used by L2 DSR forwarding). `mac` is the 6-byte Ethernet
+    /// address resolved via neighbor/ARP/ND lookup.
+    fn sync_backend_mac(&mut self, backend_id: u32, mac: [u8; 6]) -> Result<(), DomainError>;
+
+    /// Remove a backend's MAC from the `LB_BACKEND_MAC` map.
+    fn remove_backend_mac(&mut self, backend_id: u32) -> Result<(), DomainError>;
+
     /// Remove all service and backend entries from the maps.
     fn clear_all(&mut self) -> Result<(), DomainError>;
 

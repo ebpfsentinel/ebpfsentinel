@@ -2,7 +2,7 @@ use aya::Ebpf;
 use aya::maps::{DevMap, HashMap, MapData};
 use domain::common::error::DomainError;
 use ebpf_common::loadbalancer::{
-    LbBackendEntry, LbServiceConfigV2, LbServiceKey, MAGLEV_RING_SIZE, MaglevLookup,
+    BackendMac, LbBackendEntry, LbServiceConfigV2, LbServiceKey, MAGLEV_RING_SIZE, MaglevLookup,
 };
 use ports::secondary::loadbalancer_map_port::LoadBalancerMapPort;
 use tracing::{debug, info};
@@ -22,6 +22,9 @@ pub struct LbMapManager {
     /// `LB_MAGLEV`: per-service Maglev lookup ring (consistent hashing).
     /// Optional — only present in the `xdp-loadbalancer` program.
     maglev_map: Option<HashMap<MapData, u32, MaglevLookup>>,
+    /// `LB_BACKEND_MAC`: resolved backend MACs for L2 DSR forwarding.
+    /// Optional — only present in the `xdp-loadbalancer` program.
+    backend_mac_map: Option<HashMap<MapData, u32, BackendMac>>,
 }
 
 impl LbMapManager {
@@ -54,12 +57,21 @@ impl LbMapManager {
             info!("LB_MAGLEV acquired for consistent-hash selection");
         }
 
+        // LB_BACKEND_MAC is optional — only the xdp-loadbalancer has it.
+        let backend_mac_map = ebpf
+            .take_map("LB_BACKEND_MAC")
+            .and_then(|m| HashMap::try_from(m).ok());
+        if backend_mac_map.is_some() {
+            info!("LB_BACKEND_MAC acquired for L2 DSR forwarding");
+        }
+
         info!("LB_SERVICES and LB_BACKENDS maps acquired");
         Ok(Self {
             services_map,
             backends_map,
             devmap,
             maglev_map,
+            backend_mac_map,
         })
     }
 
@@ -92,6 +104,26 @@ impl LbMapManager {
             && let Err(e) = map.remove(&svc_index)
         {
             debug!(svc_index, error = %e, "LB_MAGLEV remove (entry absent)");
+        }
+        Ok(())
+    }
+
+    /// Insert or update a backend's resolved MAC (L2 DSR).
+    pub fn sync_backend_mac(&mut self, backend_id: u32, mac: [u8; 6]) -> Result<(), anyhow::Error> {
+        let Some(ref mut map) = self.backend_mac_map else {
+            return Ok(());
+        };
+        map.insert(backend_id, BackendMac::new(mac), 0)
+            .map_err(|e| anyhow::anyhow!("LB_BACKEND_MAC insert failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Remove a backend's MAC (best-effort — a missing entry is fine).
+    pub fn remove_backend_mac(&mut self, backend_id: u32) -> Result<(), anyhow::Error> {
+        if let Some(ref mut map) = self.backend_mac_map
+            && let Err(e) = map.remove(&backend_id)
+        {
+            debug!(backend_id, error = %e, "LB_BACKEND_MAC remove (entry absent)");
         }
         Ok(())
     }
@@ -145,6 +177,26 @@ impl LbMapManager {
             }
         }
 
+        // Populate LB_BACKEND_MAC for L2 DSR. Resolved unconditionally so
+        // the map is current if the service is (or becomes) `l2dsr`; the
+        // eBPF data plane only reads it in `LB_MODE_L2DSR` and falls back
+        // to DNAT when the MAC is absent (no regression for `dnat`).
+        if self.backend_mac_map.is_some() {
+            match resolve_mac_for_ip(entry.addr_v4, &entry.addr_v6, entry.is_ipv6 == 1) {
+                Some(mac) => {
+                    if let Err(e) = self.sync_backend_mac(backend_id, mac) {
+                        debug!(backend_id, error = %e, "LB_BACKEND_MAC set failed (DSR falls back to DNAT)");
+                    }
+                }
+                None => {
+                    debug!(
+                        backend_id,
+                        "no MAC resolved for backend (DSR falls back to DNAT)"
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -157,6 +209,8 @@ impl LbMapManager {
         if let Some(ref mut dm) = self.devmap {
             let _ = dm.set(backend_id, 0, None, 0); // setting ifindex 0 effectively disables redirect
         }
+        // Clean up L2 DSR MAC entry
+        self.remove_backend_mac(backend_id)?;
         Ok(())
     }
 
@@ -199,6 +253,14 @@ impl LbMapManager {
             for key in &mg_keys {
                 map.remove(key)
                     .map_err(|e| anyhow::anyhow!("LB_MAGLEV clear failed: {e}"))?;
+            }
+        }
+
+        if let Some(ref mut map) = self.backend_mac_map {
+            let mac_keys: Vec<u32> = map.keys().filter_map(Result::ok).collect();
+            for key in &mac_keys {
+                map.remove(key)
+                    .map_err(|e| anyhow::anyhow!("LB_BACKEND_MAC clear failed: {e}"))?;
             }
         }
 
@@ -251,6 +313,16 @@ impl LoadBalancerMapPort for LbMapManager {
             .map_err(|e| DomainError::EngineError(format!("lb maglev remove failed: {e}")))
     }
 
+    fn sync_backend_mac(&mut self, backend_id: u32, mac: [u8; 6]) -> Result<(), DomainError> {
+        self.sync_backend_mac(backend_id, mac)
+            .map_err(|e| DomainError::EngineError(format!("lb backend mac sync failed: {e}")))
+    }
+
+    fn remove_backend_mac(&mut self, backend_id: u32) -> Result<(), DomainError> {
+        self.remove_backend_mac(backend_id)
+            .map_err(|e| DomainError::EngineError(format!("lb backend mac remove failed: {e}")))
+    }
+
     fn clear_all(&mut self) -> Result<(), DomainError> {
         self.clear_all()
             .map_err(|e| DomainError::EngineError(format!("lb clear failed: {e}")))
@@ -259,6 +331,55 @@ impl LoadBalancerMapPort for LbMapManager {
     fn service_count(&self) -> Result<usize, DomainError> {
         Ok(self.service_count())
     }
+}
+
+/// Resolve the link-layer (MAC) address for a backend IP via the kernel
+/// neighbor table (`ip neigh show <ip>`). Used to populate
+/// `LB_BACKEND_MAC` for L2 DSR forwarding. Returns `None` when the
+/// neighbor is not yet resolved — the eBPF data plane then falls back to
+/// the DNAT path with no regression.
+fn resolve_mac_for_ip(addr_v4: u32, addr_v6: &[u32; 4], is_ipv6: bool) -> Option<[u8; 6]> {
+    let ip = if is_ipv6 {
+        let mut octets = [0u8; 16];
+        for (i, word) in addr_v6.iter().enumerate() {
+            octets[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+        }
+        std::net::Ipv6Addr::from(octets).to_string()
+    } else if addr_v4 == 0 {
+        return None;
+    } else {
+        std::net::Ipv4Addr::from(addr_v4).to_string()
+    };
+
+    let output = std::process::Command::new("ip")
+        .args(["neigh", "show", &ip])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Line form: "<ip> dev <if> lladdr aa:bb:cc:dd:ee:ff REACHABLE"
+    let mut tokens = stdout.split_whitespace();
+    let mac_str = loop {
+        match tokens.next() {
+            Some("lladdr") => break tokens.next()?,
+            Some(_) => {}
+            None => return None,
+        }
+    };
+
+    let mut mac = [0u8; 6];
+    let mut parts = mac_str.split(':');
+    for byte in &mut mac {
+        *byte = u8::from_str_radix(parts.next()?, 16).ok()?;
+    }
+    // Reject if there are extra octets (malformed) or an all-zero MAC.
+    if parts.next().is_some() || mac == [0u8; 6] {
+        return None;
+    }
+    Some(mac)
 }
 
 /// Resolve the network interface index for a given backend IP address.

@@ -6,7 +6,9 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use domain::common::entity::RuleId;
 use domain::loadbalancer::engine::LbEngine;
-use domain::loadbalancer::entity::{LbAlgorithm, LbBackend, LbProtocol, LbService};
+use domain::loadbalancer::entity::{
+    LbAlgorithm, LbBackend, LbForwardingMode, LbProtocol, LbService,
+};
 
 fn make_backend(id: usize, weight: u32) -> LbBackend {
     LbBackend {
@@ -15,6 +17,7 @@ fn make_backend(id: usize, weight: u32) -> LbBackend {
         port: 8080 + id as u16,
         weight,
         enabled: true,
+        same_segment: false,
     }
 }
 
@@ -26,6 +29,7 @@ fn make_service(id: usize, algorithm: LbAlgorithm, n_backends: usize) -> LbServi
         protocol: LbProtocol::Tcp,
         listen_port: 443 + id as u16,
         algorithm,
+        mode: LbForwardingMode::Dnat,
         backends,
         enabled: true,
         health_check: None,

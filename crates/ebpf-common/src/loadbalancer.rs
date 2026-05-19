@@ -14,6 +14,13 @@ pub const LB_ALG_LEAST_CONN: u8 = 3;
 /// ring, minimal flow disruption (~1/N) on backend set change.
 pub const LB_ALG_MAGLEV: u8 = 4;
 
+/// Forwarding-mode constants for `LbServiceConfigV2.mode`.
+/// DNAT (default): rewrite dst IP/port + recompute L3/L4 checksums.
+pub const LB_MODE_DNAT: u8 = 0;
+/// L2 Direct Server Return: rewrite only dst MAC, leave dst IP = VIP and
+/// L3/L4 checksums untouched; backend replies directly to the client.
+pub const LB_MODE_L2DSR: u8 = 1;
+
 /// Maximum backends per service (legacy, used by `LbServiceConfig`).
 pub const LB_MAX_BACKENDS: usize = 16;
 
@@ -98,7 +105,9 @@ pub struct LbServiceConfigV2 {
     pub algorithm: u8,
     /// Number of active backends (0..=255).
     pub backend_count: u8,
-    pub _pad: [u8; 2],
+    /// Forwarding mode: `LB_MODE_DNAT` (default) or `LB_MODE_L2DSR`.
+    pub mode: u8,
+    pub _pad: u8,
     /// First backend ID in the global `LB_BACKENDS` map.
     /// Backends are at IDs `backend_start_id..backend_start_id + backend_count`.
     pub backend_start_id: u32,
@@ -175,6 +184,38 @@ pub struct LbBackendEntry {
     pub _pad: [u8; 2],
 }
 
+// ── Backend MAC (L2 DSR) ───────────────────────────────────────
+
+/// Value for the `LB_BACKEND_MAC` `HashMap`, keyed by backend ID.
+///
+/// Populated by userspace neighbor/ARP/ND resolution in the eBPF loader
+/// adapter. Read by the eBPF data plane only when a service is in
+/// `LB_MODE_L2DSR` — the destination Ethernet address is rewritten to
+/// `mac` and the packet is L2-redirected with no L3/L4 mutation.
+///
+/// A dedicated 8-byte struct (not a bare `[u8; 6]`) so the type is a
+/// well-defined `aya::Pod` with explicit padding.
+///
+/// Size: 8 bytes (aligned to 1 byte; padded to 8 for map-value stability).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendMac {
+    /// Resolved backend MAC address.
+    pub mac: [u8; 6],
+    pub _pad: [u8; 2],
+}
+
+impl BackendMac {
+    /// Construct from a resolved 6-byte MAC.
+    #[must_use]
+    pub const fn new(mac: [u8; 6]) -> Self {
+        Self { mac, _pad: [0; 2] }
+    }
+}
+
+/// Maximum entries in the `LB_BACKEND_MAC` map (one per backend, V2).
+pub const MAX_LB_BACKEND_MAC: u32 = MAX_LB_BACKENDS_TOTAL;
+
 // ── Metrics ────────────────────────────────────────────────────
 
 /// Metric index constants for `LB_METRICS` `PerCpuArray`.
@@ -201,6 +242,8 @@ unsafe impl aya::Pod for LbBackendEntry {}
 unsafe impl aya::Pod for LbServiceConfigV2 {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for MaglevLookup {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for BackendMac {}
 
 #[cfg(test)]
 mod tests {
@@ -277,8 +320,27 @@ mod tests {
     fn lb_service_config_v2_offsets() {
         assert_eq!(mem::offset_of!(LbServiceConfigV2, algorithm), 0);
         assert_eq!(mem::offset_of!(LbServiceConfigV2, backend_count), 1);
-        assert_eq!(mem::offset_of!(LbServiceConfigV2, _pad), 2);
+        assert_eq!(mem::offset_of!(LbServiceConfigV2, mode), 2);
+        assert_eq!(mem::offset_of!(LbServiceConfigV2, _pad), 3);
         assert_eq!(mem::offset_of!(LbServiceConfigV2, backend_start_id), 4);
+    }
+
+    #[test]
+    fn lb_mode_constants() {
+        assert_eq!(LB_MODE_DNAT, 0);
+        assert_eq!(LB_MODE_L2DSR, 1);
+    }
+
+    #[test]
+    fn backend_mac_layout() {
+        assert_eq!(mem::size_of::<BackendMac>(), 8);
+        assert_eq!(mem::align_of::<BackendMac>(), 1);
+        assert_eq!(mem::offset_of!(BackendMac, mac), 0);
+        assert_eq!(mem::offset_of!(BackendMac, _pad), 6);
+        assert_eq!(MAX_LB_BACKEND_MAC, MAX_LB_BACKENDS_TOTAL);
+        let bm = BackendMac::new([1, 2, 3, 4, 5, 6]);
+        assert_eq!(bm.mac, [1, 2, 3, 4, 5, 6]);
+        assert_eq!(bm._pad, [0, 0]);
     }
 
     #[test]

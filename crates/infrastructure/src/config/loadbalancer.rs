@@ -1,7 +1,9 @@
 //! Load balancer domain configuration structs and conversion logic.
 
 use domain::common::entity::RuleId;
-use domain::loadbalancer::entity::{LbAlgorithm, LbBackend, LbProtocol, LbService};
+use domain::loadbalancer::entity::{
+    LbAlgorithm, LbBackend, LbForwardingMode, LbProtocol, LbService,
+};
 use domain::routing::entity::HealthCheck;
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +37,10 @@ pub struct LbServiceConfig {
     #[serde(default = "default_lb_algorithm")]
     pub algorithm: String,
 
+    /// Forwarding mode: `dnat` (default) or `l2dsr`.
+    #[serde(default = "default_lb_mode")]
+    pub mode: String,
+
     #[serde(default)]
     pub backends: Vec<LbBackendConfig>,
 
@@ -56,6 +62,11 @@ pub struct LbBackendConfig {
 
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// Whether this backend is on the same L2 segment as the LB.
+    /// Required `true` for all backends of an `l2dsr` service.
+    #[serde(default)]
+    pub same_segment: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +97,9 @@ fn default_lb_protocol() -> String {
 }
 fn default_lb_algorithm() -> String {
     "round_robin".to_string()
+}
+fn default_lb_mode() -> String {
+    "dnat".to_string()
 }
 fn default_backend_weight() -> u32 {
     1
@@ -151,6 +165,27 @@ impl LbServiceConfig {
             backend.validate(idx, bidx)?;
         }
 
+        let mode = parse_lb_mode(&self.mode).map_err(|()| ConfigError::InvalidValue {
+            field: format!("{prefix}.mode"),
+            value: self.mode.clone(),
+            expected: "dnat, l2dsr".to_string(),
+        })?;
+
+        if mode == LbForwardingMode::L2Dsr {
+            for backend in &self.backends {
+                if !backend.same_segment {
+                    return Err(ConfigError::Validation {
+                        field: format!("{prefix}.mode"),
+                        message: format!(
+                            "l2dsr requires all backends on the same L2 segment; \
+                             backend '{}' is not flagged same_segment",
+                            backend.id
+                        ),
+                    });
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -166,8 +201,14 @@ impl LbServiceConfig {
             parse_lb_algorithm(&self.algorithm).map_err(|()| ConfigError::InvalidValue {
                 field: "algorithm".to_string(),
                 value: self.algorithm.clone(),
-                expected: "round_robin, weighted, ip_hash, least_conn".to_string(),
+                expected: "round_robin, weighted, ip_hash, least_conn, maglev".to_string(),
             })?;
+
+        let mode = parse_lb_mode(&self.mode).map_err(|()| ConfigError::InvalidValue {
+            field: "mode".to_string(),
+            value: self.mode.clone(),
+            expected: "dnat, l2dsr".to_string(),
+        })?;
 
         let backends: Vec<LbBackend> = self
             .backends
@@ -187,6 +228,7 @@ impl LbServiceConfig {
             protocol,
             listen_port: self.listen_port,
             algorithm,
+            mode,
             backends,
             enabled: self.enabled,
             health_check,
@@ -248,6 +290,7 @@ impl LbBackendConfig {
             port: self.port,
             weight: self.weight,
             enabled: self.enabled,
+            same_segment: self.same_segment,
         })
     }
 }
@@ -293,6 +336,14 @@ fn parse_lb_protocol(s: &str) -> Result<LbProtocol, ()> {
     }
 }
 
+fn parse_lb_mode(s: &str) -> Result<LbForwardingMode, ()> {
+    match s.to_lowercase().as_str() {
+        "dnat" => Ok(LbForwardingMode::Dnat),
+        "l2dsr" | "l2_dsr" | "dsr" => Ok(LbForwardingMode::L2Dsr),
+        _ => Err(()),
+    }
+}
+
 fn parse_lb_algorithm(s: &str) -> Result<LbAlgorithm, ()> {
     match s.to_lowercase().as_str() {
         "round_robin" | "roundrobin" | "rr" => Ok(LbAlgorithm::RoundRobin),
@@ -315,6 +366,7 @@ mod tests {
             port: 8080,
             weight: 1,
             enabled: true,
+            same_segment: false,
         }
     }
 
@@ -325,6 +377,7 @@ mod tests {
             protocol: "tcp".to_string(),
             listen_port: 443,
             algorithm: "round_robin".to_string(),
+            mode: "dnat".to_string(),
             backends: vec![make_backend_config("be-1")],
             enabled: true,
             health_check: None,
@@ -356,6 +409,51 @@ mod tests {
         let mut cfg = make_service_config("svc-1");
         cfg.listen_port = 0;
         assert!(cfg.validate(0).is_err());
+    }
+
+    #[test]
+    fn default_mode_is_dnat_and_valid() {
+        let cfg = make_service_config("svc-1");
+        assert_eq!(cfg.mode, "dnat");
+        let svc = cfg.to_domain_service().unwrap();
+        assert_eq!(svc.mode, LbForwardingMode::Dnat);
+    }
+
+    #[test]
+    fn reject_invalid_mode() {
+        let mut cfg = make_service_config("svc-1");
+        cfg.mode = "bridge".to_string();
+        assert!(cfg.validate(0).is_err());
+    }
+
+    #[test]
+    fn l2dsr_rejects_backend_not_same_segment() {
+        let mut cfg = make_service_config("svc-1");
+        cfg.mode = "l2dsr".to_string();
+        assert!(cfg.validate(0).is_err());
+    }
+
+    #[test]
+    fn l2dsr_accepts_same_segment_backends() {
+        let mut be = make_backend_config("be-1");
+        be.same_segment = true;
+        let mut cfg = make_service_config("svc-1");
+        cfg.mode = "l2dsr".to_string();
+        cfg.backends = vec![be];
+        assert!(cfg.validate(0).is_ok());
+        let svc = cfg.to_domain_service().unwrap();
+        assert_eq!(svc.mode, LbForwardingMode::L2Dsr);
+        assert!(svc.backends[0].same_segment);
+        // Domain-level validation must also accept it.
+        assert!(svc.validate().is_ok());
+    }
+
+    #[test]
+    fn parse_lb_mode_aliases() {
+        assert_eq!(parse_lb_mode("dnat"), Ok(LbForwardingMode::Dnat));
+        assert_eq!(parse_lb_mode("l2dsr"), Ok(LbForwardingMode::L2Dsr));
+        assert_eq!(parse_lb_mode("DSR"), Ok(LbForwardingMode::L2Dsr));
+        assert!(parse_lb_mode("nope").is_err());
     }
 
     #[test]
