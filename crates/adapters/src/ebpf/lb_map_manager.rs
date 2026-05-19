@@ -1,7 +1,9 @@
 use aya::Ebpf;
 use aya::maps::{DevMap, HashMap, MapData};
 use domain::common::error::DomainError;
-use ebpf_common::loadbalancer::{LbBackendEntry, LbServiceConfigV2, LbServiceKey};
+use ebpf_common::loadbalancer::{
+    LbBackendEntry, LbServiceConfigV2, LbServiceKey, MAGLEV_RING_SIZE, MaglevLookup,
+};
 use ports::secondary::loadbalancer_map_port::LoadBalancerMapPort;
 use tracing::{debug, info};
 
@@ -17,6 +19,9 @@ pub struct LbMapManager {
     /// When populated, the eBPF program uses `redirect()` for wire-speed
     /// forwarding instead of MAC swap + `XDP_TX`.
     devmap: Option<DevMap<MapData>>,
+    /// `LB_MAGLEV`: per-service Maglev lookup ring (consistent hashing).
+    /// Optional — only present in the `xdp-loadbalancer` program.
+    maglev_map: Option<HashMap<MapData, u32, MaglevLookup>>,
 }
 
 impl LbMapManager {
@@ -41,12 +46,54 @@ impl LbMapManager {
             info!("LB_DEVMAP acquired for XDP redirect forwarding");
         }
 
+        // LB_MAGLEV is optional — only the xdp-loadbalancer program has it.
+        let maglev_map = ebpf
+            .take_map("LB_MAGLEV")
+            .and_then(|m| HashMap::try_from(m).ok());
+        if maglev_map.is_some() {
+            info!("LB_MAGLEV acquired for consistent-hash selection");
+        }
+
         info!("LB_SERVICES and LB_BACKENDS maps acquired");
         Ok(Self {
             services_map,
             backends_map,
             devmap,
+            maglev_map,
         })
+    }
+
+    /// Insert or update a service's Maglev lookup ring.
+    pub fn sync_maglev_table(
+        &mut self,
+        svc_index: u32,
+        table: &[u16],
+    ) -> Result<(), anyhow::Error> {
+        let Some(ref mut map) = self.maglev_map else {
+            return Ok(());
+        };
+        if table.len() != MAGLEV_RING_SIZE {
+            return Err(anyhow::anyhow!(
+                "maglev table length {} != ring size {MAGLEV_RING_SIZE}",
+                table.len()
+            ));
+        }
+        // Heap-allocate the 128 KiB ring to keep it off the stack.
+        let mut lookup = Box::new(MaglevLookup::empty());
+        lookup.entries.copy_from_slice(table);
+        map.insert(svc_index, lookup.as_ref(), 0)
+            .map_err(|e| anyhow::anyhow!("LB_MAGLEV insert failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Remove a service's Maglev ring (best-effort — a missing entry is fine).
+    pub fn remove_maglev_table(&mut self, svc_index: u32) -> Result<(), anyhow::Error> {
+        if let Some(ref mut map) = self.maglev_map
+            && let Err(e) = map.remove(&svc_index)
+        {
+            debug!(svc_index, error = %e, "LB_MAGLEV remove (entry absent)");
+        }
+        Ok(())
     }
 
     /// Insert or update a service entry.
@@ -147,6 +194,14 @@ impl LbMapManager {
                 .map_err(|e| anyhow::anyhow!("LB_BACKENDS clear failed: {e}"))?;
         }
 
+        if let Some(ref mut map) = self.maglev_map {
+            let mg_keys: Vec<u32> = map.keys().filter_map(Result::ok).collect();
+            for key in &mg_keys {
+                map.remove(key)
+                    .map_err(|e| anyhow::anyhow!("LB_MAGLEV clear failed: {e}"))?;
+            }
+        }
+
         Ok(())
     }
 
@@ -184,6 +239,16 @@ impl LoadBalancerMapPort for LbMapManager {
     fn update_backend_health(&mut self, backend_id: u32, healthy: bool) -> Result<(), DomainError> {
         self.update_backend_health(backend_id, healthy)
             .map_err(|e| DomainError::EngineError(format!("lb backend health update failed: {e}")))
+    }
+
+    fn sync_maglev_table(&mut self, svc_index: u32, table: &[u16]) -> Result<(), DomainError> {
+        self.sync_maglev_table(svc_index, table)
+            .map_err(|e| DomainError::EngineError(format!("lb maglev sync failed: {e}")))
+    }
+
+    fn remove_maglev_table(&mut self, svc_index: u32) -> Result<(), DomainError> {
+        self.remove_maglev_table(svc_index)
+            .map_err(|e| DomainError::EngineError(format!("lb maglev remove failed: {e}")))
     }
 
     fn clear_all(&mut self) -> Result<(), DomainError> {

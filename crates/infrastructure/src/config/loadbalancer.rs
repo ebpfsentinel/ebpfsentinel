@@ -299,6 +299,7 @@ fn parse_lb_algorithm(s: &str) -> Result<LbAlgorithm, ()> {
         "weighted" => Ok(LbAlgorithm::Weighted),
         "ip_hash" | "iphash" => Ok(LbAlgorithm::IpHash),
         "least_conn" | "leastconn" | "least_connections" => Ok(LbAlgorithm::LeastConn),
+        "maglev" => Ok(LbAlgorithm::Maglev),
         _ => Err(()),
     }
 }

@@ -382,10 +382,11 @@ fn parse_algorithm(s: &str) -> Result<LbAlgorithm, ApiError> {
         "weighted" => Ok(LbAlgorithm::Weighted),
         "ip_hash" | "iphash" => Ok(LbAlgorithm::IpHash),
         "least_conn" | "leastconn" => Ok(LbAlgorithm::LeastConn),
+        "maglev" => Ok(LbAlgorithm::Maglev),
         _ => Err(ApiError::BadRequest {
             code: "VALIDATION_ERROR",
             message: format!(
-                "invalid algorithm '{s}': expected round_robin, weighted, ip_hash, or least_conn"
+                "invalid algorithm '{s}': expected round_robin, weighted, ip_hash, least_conn, or maglev"
             ),
         }),
     }

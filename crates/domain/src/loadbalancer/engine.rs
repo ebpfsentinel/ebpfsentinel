@@ -9,6 +9,29 @@ use super::error::LbError;
 /// Maximum number of services tracked.
 const MAX_SERVICES: usize = 64;
 
+/// Maglev ring size. Prime, sufficiently larger than the max backend
+/// count so the permutation fills every slot. Mirrors
+/// `ebpf_common::loadbalancer::MAGLEV_RING_SIZE` (the adapter asserts
+/// equality when converting — domain stays free of internal deps).
+pub const MAGLEV_RING_SIZE: usize = 65537;
+
+/// FNV-1a offset basis for the Maglev `offset` permutation component.
+const MAGLEV_BASIS_OFFSET: u32 = 0x811c_9dc5;
+/// Independent basis for the Maglev `skip` permutation component
+/// (golden-ratio constant) — decorrelates the two hashes.
+const MAGLEV_BASIS_SKIP: u32 = 0x9e37_79b1;
+
+/// Cached Maglev lookup table plus the healthy-backend signature it was
+/// built from. Rebuilt only when the signature changes.
+#[derive(Debug)]
+struct MaglevCache {
+    /// Ordered backend IDs of the healthy set this table was built for.
+    sig: Vec<String>,
+    /// Ring of `MAGLEV_RING_SIZE` entries; each value is an index into
+    /// `ServiceState::backends` (always a currently-healthy backend).
+    table: Vec<u16>,
+}
+
 /// Internal state for a running service.
 #[derive(Debug)]
 struct ServiceState {
@@ -16,6 +39,8 @@ struct ServiceState {
     backends: Vec<LbBackendState>,
     /// Round-robin counter (used by `RoundRobin` and as fallback for `LeastConn` in eBPF).
     rr_index: usize,
+    /// Lazily-built Maglev table (only when algorithm is `Maglev`).
+    maglev: Option<MaglevCache>,
 }
 
 /// L4 load balancer engine.
@@ -66,6 +91,7 @@ impl LbEngine {
                 service,
                 backends,
                 rr_index: 0,
+                maglev: None,
             },
         );
         Ok(())
@@ -115,6 +141,7 @@ impl LbEngine {
                     service,
                     backends,
                     rr_index: 0,
+                    maglev: None,
                 },
             );
         }
@@ -187,9 +214,48 @@ impl LbEngine {
                 healthy_indices[idx]
             }
             LbAlgorithm::LeastConn => select_least_conn(&state.backends, &healthy_indices),
+            LbAlgorithm::Maglev => {
+                refresh_maglev_cache(state, &healthy_indices);
+                match &state.maglev {
+                    Some(c) if !c.table.is_empty() => {
+                        let slot = (fnv1a_hash(&client_addr) as usize) % MAGLEV_RING_SIZE;
+                        c.table[slot] as usize
+                    }
+                    // Unreachable in practice (healthy set non-empty here),
+                    // but stay total without a panic.
+                    _ => healthy_indices[0],
+                }
+            }
         };
 
         Some(&state.backends[selected_idx].backend)
+    }
+
+    /// Return the Maglev lookup ring for a service, rebuilding it from the
+    /// current healthy backend set if stale. Entries are indices into the
+    /// service's backend list (`0..backend_count`), matching the eBPF
+    /// `backend_start_id` window. `None` if the service is unknown,
+    /// disabled, not using Maglev, or has no healthy backend.
+    ///
+    /// Live producer for the `LB_MAGLEV` eBPF map (consumed by the
+    /// loadbalancer map adapter — no dead code).
+    pub fn maglev_table(&mut self, service_id: &str) -> Option<&[u16]> {
+        let state = self.states.get_mut(service_id)?;
+        if !state.service.enabled || state.service.algorithm != LbAlgorithm::Maglev {
+            return None;
+        }
+        let healthy_indices: Vec<usize> = state
+            .backends
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.is_healthy())
+            .map(|(i, _)| i)
+            .collect();
+        if healthy_indices.is_empty() {
+            return None;
+        }
+        refresh_maglev_cache(state, &healthy_indices);
+        state.maglev.as_ref().map(|c| c.table.as_slice())
     }
 
     // ── Connection Tracking ───────────────────────────────────────
@@ -290,6 +356,78 @@ fn fnv1a_hash(addr: &[u32; 4]) -> u32 {
         }
     }
     hash
+}
+
+/// Seeded FNV-1a over UTF-8 bytes of a backend identity string.
+fn fnv1a_str(s: &str, basis: u32) -> u32 {
+    let mut hash = basis;
+    for b in s.as_bytes() {
+        hash ^= u32::from(*b);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+/// Build the Maglev permutation lookup ring over the healthy backend set.
+///
+/// `healthy_indices[j]` is the backend-list index of the `j`-th healthy
+/// backend; `keys[j]` its stable identity (used for the per-backend
+/// permutation). Returns a ring of `MAGLEV_RING_SIZE` entries, each an
+/// index into the backend list. With ≥1 backend every slot is filled
+/// (ring size is prime and larger than any backend count).
+fn build_maglev_table(healthy_indices: &[usize], keys: &[String]) -> Vec<u16> {
+    const UNSET: u16 = u16::MAX;
+    let m = MAGLEV_RING_SIZE;
+    let n = healthy_indices.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let mut perm_offset = Vec::with_capacity(n);
+    let mut perm_skip = Vec::with_capacity(n);
+    for key in keys {
+        let h1 = fnv1a_str(key, MAGLEV_BASIS_OFFSET) as usize;
+        let h2 = fnv1a_str(key, MAGLEV_BASIS_SKIP) as usize;
+        perm_offset.push(h1 % m);
+        perm_skip.push(h2 % (m - 1) + 1);
+    }
+
+    let mut entry = vec![UNSET; m];
+    let mut next = vec![0usize; n];
+    let mut filled = 0usize;
+
+    loop {
+        for j in 0..n {
+            let mut c = (perm_offset[j] + next[j] * perm_skip[j]) % m;
+            while entry[c] != UNSET {
+                next[j] += 1;
+                c = (perm_offset[j] + next[j] * perm_skip[j]) % m;
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                entry[c] = healthy_indices[j] as u16;
+            }
+            next[j] += 1;
+            filled += 1;
+            if filled == m {
+                return entry;
+            }
+        }
+    }
+}
+
+/// Rebuild the cached Maglev table iff the healthy-backend signature
+/// changed since the last build (deterministic, minimal-disruption).
+fn refresh_maglev_cache(state: &mut ServiceState, healthy_indices: &[usize]) {
+    let sig: Vec<String> = healthy_indices
+        .iter()
+        .map(|&i| state.backends[i].backend.id.clone())
+        .collect();
+    let stale = state.maglev.as_ref().is_none_or(|c| c.sig != sig);
+    if stale {
+        let table = build_maglev_table(healthy_indices, &sig);
+        state.maglev = Some(MaglevCache { sig, table });
+    }
 }
 
 /// Weighted selection using cumulative weight + deterministic pseudo-random.
@@ -638,6 +776,192 @@ mod tests {
             heavy_count > light_count,
             "heavy={heavy_count}, light={light_count}"
         );
+    }
+
+    // ── Maglev ────────────────────────────────────────────────
+
+    fn maglev_service(id: &str, n: usize) -> LbService {
+        let backends = (0..n)
+            .map(|i| make_backend(&format!("be-{i}"), 8080 + i as u16, 1))
+            .collect();
+        make_service(id, LbAlgorithm::Maglev, backends)
+    }
+
+    #[test]
+    fn maglev_table_fully_populated_no_sentinel() {
+        let table = build_maglev_table(&[0, 1, 2], &["a".into(), "b".into(), "c".into()]);
+        assert_eq!(table.len(), MAGLEV_RING_SIZE);
+        assert!(table.iter().all(|&e| (e as usize) < 3));
+    }
+
+    #[test]
+    fn maglev_table_empty_when_no_backends() {
+        assert!(build_maglev_table(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn maglev_deterministic_regeneration() {
+        let idx = [0, 1, 2, 3, 4];
+        let keys: Vec<String> = (0..5).map(|i| format!("be-{i}")).collect();
+        let a = build_maglev_table(&idx, &keys);
+        let b = build_maglev_table(&idx, &keys);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn maglev_single_backend_maps_everything() {
+        let table = build_maglev_table(&[7], &["solo".into()]);
+        assert_eq!(table.len(), MAGLEV_RING_SIZE);
+        assert!(table.iter().all(|&e| e == 7));
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn maglev_distribution_is_balanced() {
+        let n = 5;
+        let idx: Vec<usize> = (0..n).collect();
+        let keys: Vec<String> = (0..n).map(|i| format!("be-{i}")).collect();
+        let table = build_maglev_table(&idx, &keys);
+
+        let mut counts = vec![0usize; n];
+        for &e in &table {
+            counts[e as usize] += 1;
+        }
+        let ideal = MAGLEV_RING_SIZE as f64 / n as f64;
+        for (i, &c) in counts.iter().enumerate() {
+            let dev = (c as f64 - ideal).abs() / ideal;
+            assert!(dev < 0.01, "backend {i}: count={c} dev={dev:.4} > 1%");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn maglev_minimal_disruption_on_backend_removal() {
+        let n = 8;
+        let idx: Vec<usize> = (0..n).collect();
+        let keys: Vec<String> = (0..n).map(|i| format!("be-{i}")).collect();
+        let before = build_maglev_table(&idx, &keys);
+
+        // Remove the last backend (be-7): rebuild over the remaining set.
+        let idx2: Vec<usize> = (0..n - 1).collect();
+        let keys2: Vec<String> = (0..n - 1).map(|i| format!("be-{i}")).collect();
+        let after = build_maglev_table(&idx2, &keys2);
+
+        let removed = (n - 1) as u16;
+        let mut moved_unrelated = 0usize;
+        let mut still_present = 0usize;
+        for slot in 0..MAGLEV_RING_SIZE {
+            if before[slot] == removed {
+                continue; // these MUST move — the ~1/N share
+            }
+            still_present += 1;
+            if before[slot] != after[slot] {
+                moved_unrelated += 1;
+            }
+        }
+        let churn = moved_unrelated as f64 / still_present as f64;
+        // Maglev reshuffles only a small fraction beyond the removed share.
+        assert!(churn < 0.05, "unrelated churn {churn:.4} too high");
+    }
+
+    #[test]
+    fn maglev_select_is_sticky_per_client() {
+        let mut engine = LbEngine::new();
+        engine.add_service(maglev_service("svc-1", 4)).unwrap();
+
+        let addr = client_addr(99);
+        let b1 = engine.select_backend("svc-1", addr).unwrap().id.clone();
+        let b2 = engine.select_backend("svc-1", addr).unwrap().id.clone();
+        let b3 = engine.select_backend("svc-1", addr).unwrap().id.clone();
+        assert_eq!(b1, b2);
+        assert_eq!(b2, b3);
+    }
+
+    #[test]
+    fn maglev_spreads_clients_across_backends() {
+        let mut engine = LbEngine::new();
+        engine.add_service(maglev_service("svc-1", 4)).unwrap();
+
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..=255u8 {
+            seen.insert(
+                engine
+                    .select_backend("svc-1", client_addr(i))
+                    .unwrap()
+                    .id
+                    .clone(),
+            );
+        }
+        assert_eq!(seen.len(), 4, "all 4 backends should receive traffic");
+    }
+
+    #[test]
+    fn maglev_skips_unhealthy_and_returns_none_when_all_down() {
+        let mut engine = LbEngine::new();
+        engine.add_service(maglev_service("svc-1", 3)).unwrap();
+
+        engine
+            .update_backend_health("svc-1", "be-0", false, 1)
+            .unwrap();
+        // Selected backend is always one of the remaining healthy ones.
+        for i in 0..=64u8 {
+            let id = engine
+                .select_backend("svc-1", client_addr(i))
+                .unwrap()
+                .id
+                .clone();
+            assert_ne!(id, "be-0");
+        }
+
+        engine
+            .update_backend_health("svc-1", "be-1", false, 1)
+            .unwrap();
+        engine
+            .update_backend_health("svc-1", "be-2", false, 1)
+            .unwrap();
+        assert!(engine.select_backend("svc-1", client_addr(1)).is_none());
+    }
+
+    #[test]
+    fn maglev_table_accessor_tracks_health() {
+        let mut engine = LbEngine::new();
+        engine.add_service(maglev_service("svc-1", 3)).unwrap();
+
+        let t = engine.maglev_table("svc-1").unwrap();
+        assert_eq!(t.len(), MAGLEV_RING_SIZE);
+        assert!(t.iter().all(|&e| (e as usize) < 3));
+
+        // Non-Maglev / unknown / disabled => None.
+        engine
+            .add_service(make_service(
+                "rr",
+                LbAlgorithm::RoundRobin,
+                vec![make_backend("b", 8080, 1)],
+            ))
+            .unwrap();
+        assert!(engine.maglev_table("rr").is_none());
+        assert!(engine.maglev_table("nope").is_none());
+
+        // All unhealthy => None.
+        for be in ["be-0", "be-1", "be-2"] {
+            engine.update_backend_health("svc-1", be, false, 1).unwrap();
+        }
+        assert!(engine.maglev_table("svc-1").is_none());
+    }
+
+    #[test]
+    fn maglev_cache_rebuilds_on_health_change() {
+        let mut engine = LbEngine::new();
+        engine.add_service(maglev_service("svc-1", 4)).unwrap();
+
+        let before: Vec<u16> = engine.maglev_table("svc-1").unwrap().to_vec();
+        engine
+            .update_backend_health("svc-1", "be-3", false, 1)
+            .unwrap();
+        let after = engine.maglev_table("svc-1").unwrap();
+        assert_ne!(before, after, "table must rebuild when health changes");
+        // be-3 (index 3) no longer appears.
+        assert!(after.iter().all(|&e| e != 3));
     }
 
     // ── All backends unhealthy ─────────────────────────────────

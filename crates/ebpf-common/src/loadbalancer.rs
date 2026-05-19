@@ -10,6 +10,9 @@ pub const LB_ALG_ROUND_ROBIN: u8 = 0;
 pub const LB_ALG_WEIGHTED: u8 = 1;
 pub const LB_ALG_IP_HASH: u8 = 2;
 pub const LB_ALG_LEAST_CONN: u8 = 3;
+/// Maglev consistent hashing: O(1) lookup into a precomputed permutation
+/// ring, minimal flow disruption (~1/N) on backend set change.
+pub const LB_ALG_MAGLEV: u8 = 4;
 
 /// Maximum backends per service (legacy, used by `LbServiceConfig`).
 pub const LB_MAX_BACKENDS: usize = 16;
@@ -20,6 +23,29 @@ pub const LB_MAX_BACKENDS_V2: u32 = 256;
 pub const MAX_LB_SERVICES: u32 = 4096;
 /// Maximum total backends in the `LB_BACKENDS` map (V2).
 pub const MAX_LB_BACKENDS_TOTAL: u32 = 65536;
+
+// ── Shared service index hash ──────────────────────────────────
+
+/// FNV-1a hash of a `u32` — shared by the eBPF data plane and userspace
+/// so both derive an identical per-service index (single source of
+/// truth, no drift between `LB_RR_STATE` / `LB_MAGLEV` keys).
+#[must_use]
+pub fn lb_fnv1a_u32(val: u32) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in val.to_le_bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+/// Per-service index in `0..MAX_LB_SERVICES`, keyed by (protocol, port).
+/// Used as the `LB_RR_STATE` and `LB_MAGLEV` map key.
+#[must_use]
+pub fn lb_service_index(protocol: u8, port: u16) -> u32 {
+    let combined = (u32::from(protocol) << 16) | u32::from(port);
+    lb_fnv1a_u32(combined) % MAX_LB_SERVICES
+}
 
 // ── Service Key ────────────────────────────────────────────────
 
@@ -78,6 +104,53 @@ pub struct LbServiceConfigV2 {
     pub backend_start_id: u32,
 }
 
+// ── Maglev Lookup Table ────────────────────────────────────────
+
+/// Maglev ring size. Prime, per the Maglev paper (Eisenbud et al., NSDI'16):
+/// must be a prime sufficiently larger than the max backend count so the
+/// permutation fills every slot. 65537 is the smallest prime > 65536.
+pub const MAGLEV_RING_SIZE: usize = 65537;
+
+/// Sentinel stored in an unpopulated ring slot (no healthy backend).
+/// Slots only stay empty if a service has zero healthy backends.
+pub const MAGLEV_EMPTY: u16 = u16::MAX;
+
+/// Maximum number of services that may use the Maglev algorithm
+/// concurrently. Each table is ~128 KiB so the map is capped well
+/// below `MAX_LB_SERVICES` to bound kernel memory.
+pub const MAX_MAGLEV_SERVICES: u32 = 256;
+
+/// Value for the `LB_MAGLEV` `HashMap`, keyed by service slot index.
+///
+/// Built by userspace (pure domain table generator), read by eBPF with
+/// a single `entries[hash(5-tuple) % MAGLEV_RING_SIZE]` index — no
+/// per-packet state write. Each entry is a slot index into the
+/// service's backend window (`0..backend_count`), or `MAGLEV_EMPTY`.
+///
+/// Size: 131074 bytes (65537 × u16).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaglevLookup {
+    /// Ring entries: backend slot index within the service window.
+    pub entries: [u16; MAGLEV_RING_SIZE],
+}
+
+impl MaglevLookup {
+    /// A fully-empty table (every slot = `MAGLEV_EMPTY`).
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            entries: [MAGLEV_EMPTY; MAGLEV_RING_SIZE],
+        }
+    }
+}
+
+impl Default for MaglevLookup {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 // ── Backend Entry ──────────────────────────────────────────────
 
 /// Value for the `LB_BACKENDS` `HashMap`.
@@ -126,6 +199,8 @@ unsafe impl aya::Pod for LbServiceConfig {}
 unsafe impl aya::Pod for LbBackendEntry {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for LbServiceConfigV2 {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for MaglevLookup {}
 
 #[cfg(test)]
 mod tests {
@@ -219,6 +294,42 @@ mod tests {
         assert_eq!(LB_ALG_WEIGHTED, 1);
         assert_eq!(LB_ALG_IP_HASH, 2);
         assert_eq!(LB_ALG_LEAST_CONN, 3);
+        assert_eq!(LB_ALG_MAGLEV, 4);
+    }
+
+    #[test]
+    fn maglev_ring_is_prime_and_larger_than_max_backends() {
+        assert_eq!(MAGLEV_RING_SIZE, 65537);
+        let n = MAGLEV_RING_SIZE as u64;
+        let mut d = 2u64;
+        while d * d <= n {
+            assert!(!n.is_multiple_of(d), "MAGLEV_RING_SIZE must be prime");
+            d += 1;
+        }
+        assert!(MAGLEV_RING_SIZE > LB_MAX_BACKENDS_V2 as usize);
+    }
+
+    #[test]
+    fn maglev_lookup_size() {
+        assert_eq!(mem::size_of::<MaglevLookup>(), 131_074);
+    }
+
+    #[test]
+    fn maglev_lookup_alignment() {
+        assert_eq!(mem::align_of::<MaglevLookup>(), 2);
+    }
+
+    #[test]
+    fn maglev_lookup_offsets() {
+        assert_eq!(mem::offset_of!(MaglevLookup, entries), 0);
+    }
+
+    #[test]
+    fn maglev_lookup_empty_is_all_sentinel() {
+        let t = MaglevLookup::empty();
+        assert_eq!(MAGLEV_EMPTY, u16::MAX);
+        assert!(t.entries.iter().all(|&e| e == MAGLEV_EMPTY));
+        assert_eq!(MAX_MAGLEV_SERVICES, 256);
     }
 
     #[test]

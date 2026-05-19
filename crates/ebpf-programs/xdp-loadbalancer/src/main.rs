@@ -9,23 +9,26 @@ use aya_ebpf::{
     maps::{DevMap, HashMap, PerCpuArray, RingBuf},
     programs::XdpContext,
 };
-use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
-    PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u32x4_to_ipv6_bytes,
-};
-use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, with_xdp_ct_lookup, xdp_rx_hash, xdp_rx_timestamp};
-use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
-use ebpf_helpers::{add_metric, copy_16b_asm, copy_mac_asm, increment_metric, ringbuf_has_backpressure};
 use ebpf_common::{
-    event::{PacketEvent, FLAG_IPV6, FLAG_VLAN},
+    event::{FLAG_IPV6, FLAG_VLAN, PacketEvent},
     loadbalancer::{
-        LbBackendEntry, LbServiceConfigV2, LbServiceKey, LB_ACTION_FORWARD,
-        LB_ACTION_NO_BACKEND, LB_ALG_IP_HASH, LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED,
-        LB_MAX_BACKENDS_V2, MAX_LB_BACKENDS_TOTAL, MAX_LB_SERVICES, LB_METRIC_BYTES_FORWARDED,
+        EVENT_TYPE_LB, LB_ACTION_FORWARD, LB_ACTION_NO_BACKEND, LB_ALG_IP_HASH, LB_ALG_MAGLEV,
+        LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED, LB_MAX_BACKENDS_V2, LB_METRIC_BYTES_FORWARDED,
         LB_METRIC_COUNT, LB_METRIC_EVENTS_DROPPED, LB_METRIC_MTU_EXCEEDED,
         LB_METRIC_PACKETS_FORWARDED, LB_METRIC_PACKETS_NO_BACKEND, LB_METRIC_TOTAL_SEEN,
-        EVENT_TYPE_LB,
+        LbBackendEntry, LbServiceConfigV2, LbServiceKey, MAGLEV_EMPTY, MAGLEV_RING_SIZE,
+        MAX_LB_BACKENDS_TOTAL, MAX_LB_SERVICES, MAX_MAGLEV_SERVICES, MaglevLookup, lb_fnv1a_u32,
+        lb_service_index,
     },
+};
+use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, with_xdp_ct_lookup, xdp_rx_hash, xdp_rx_timestamp};
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
+    VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u32x4_to_ipv6_bytes,
+};
+use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
+use ebpf_helpers::{
+    add_metric, copy_16b_asm, copy_mac_asm, increment_metric, ringbuf_has_backpressure,
 };
 use network_types::{
     eth::EthHdr,
@@ -69,6 +72,13 @@ static LB_BACKENDS: HashMap<u32, LbBackendEntry> =
 /// Per-service round-robin state (index 0..4095).
 #[map]
 static LB_RR_STATE: PerCpuArray<u32> = PerCpuArray::with_max_entries(MAX_LB_SERVICES, 0);
+
+/// Per-service Maglev lookup ring: svc_index → precomputed permutation.
+/// Written by userspace (pure domain table generator), rebuilt only on
+/// healthy-backend-set change. Read with a single O(1) index — no
+/// per-packet state write — giving consistent flow pinning across nodes.
+#[map]
+static LB_MAGLEV: HashMap<u32, MaglevLookup> = HashMap::with_max_entries(MAX_MAGLEV_SERVICES, 0);
 
 /// Per-CPU metrics.
 #[map]
@@ -167,11 +177,14 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     // conntrack entry, the kernel has seen it before — the same
     // backend should handle subsequent packets for connection affinity.
     let tuple = CtTuple::v4(src_ip, u32::from_be_bytes(dst_addr_raw), src_port, dst_port);
-    let mut ct_opts = if protocol == PROTO_TCP { BpfCtOpts::tcp() } else { BpfCtOpts::udp() };
-    let _ct_exists = unsafe {
-        with_xdp_ct_lookup(ctx.ctx as *mut _, tuple, &mut ct_opts, |_ct| true)
-    }
-    .unwrap_or(false);
+    let mut ct_opts = if protocol == PROTO_TCP {
+        BpfCtOpts::tcp()
+    } else {
+        BpfCtOpts::udp()
+    };
+    let _ct_exists =
+        unsafe { with_xdp_ct_lookup(ctx.ctx as *mut _, tuple, &mut ct_opts, |_ct| true) }
+            .unwrap_or(false);
 
     // Select backend using per-service round-robin index
     let svc_idx = service_key_index(&key);
@@ -245,15 +258,7 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
 
     // Check MTU before forwarding to avoid silent fragmentation.
     let mut mtu: u32 = 0;
-    let mtu_ret = unsafe {
-        bpf_check_mtu(
-            ctx.ctx as *mut _,
-            0,
-            &mut mtu as *mut u32,
-            0,
-            0,
-        )
-    };
+    let mtu_ret = unsafe { bpf_check_mtu(ctx.ctx as *mut _, 0, &mut mtu as *mut u32, 0, 0) };
     if mtu_ret != 0 {
         increment_metric(LB_METRIC_MTU_EXCEEDED);
         return Ok(xdp_action::XDP_DROP);
@@ -272,9 +277,9 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     let mut tmp_mac = [0u8; 6];
     unsafe {
         let p = ethhdr_mut as *mut u8;
-        copy_mac_asm!(tmp_mac.as_mut_ptr(), p);       // tmp = dst
-        copy_mac_asm!(p, p.add(6));                    // dst = src
-        copy_mac_asm!(p.add(6), tmp_mac.as_ptr());    // src = tmp
+        copy_mac_asm!(tmp_mac.as_mut_ptr(), p); // tmp = dst
+        copy_mac_asm!(p, p.add(6)); // dst = src
+        copy_mac_asm!(p.add(6), tmp_mac.as_ptr()); // src = tmp
     }
 
     Ok(xdp_action::XDP_TX)
@@ -288,8 +293,8 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
 
     // Skip IPv6 extension headers to find the actual L4 protocol.
-    let (next_hdr, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr)
-        .ok_or(())?;
+    let (next_hdr, l4_offset) =
+        skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr).ok_or(())?;
 
     if next_hdr != PROTO_TCP && next_hdr != PROTO_UDP {
         return Ok(xdp_action::XDP_PASS);
@@ -398,9 +403,7 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
 
     // Check MTU before forwarding
     let mut mtu: u32 = 0;
-    let mtu_ret = unsafe {
-        bpf_check_mtu(ctx.ctx as *mut _, 0, &mut mtu as *mut u32, 0, 0)
-    };
+    let mtu_ret = unsafe { bpf_check_mtu(ctx.ctx as *mut _, 0, &mut mtu as *mut u32, 0, 0) };
     if mtu_ret != 0 {
         increment_metric(LB_METRIC_MTU_EXCEEDED);
         return Ok(xdp_action::XDP_DROP);
@@ -461,11 +464,9 @@ fn select_backend<'a>(
         // Prefer NIC RSS hash when available (hardware-computed,
         // better distribution, zero CPU cost). Fall back to
         // software FNV-1a when the driver lacks RSS metadata.
-        LB_ALG_IP_HASH => {
-            unsafe { xdp_rx_hash(ctx.ctx.cast()) }
-                .map(|(h, _)| h as usize)
-                .unwrap_or_else(|| fnv1a(src_ip) as usize)
-        }
+        LB_ALG_IP_HASH => unsafe { xdp_rx_hash(ctx.ctx.cast()) }
+            .map(|(h, _)| h as usize)
+            .unwrap_or_else(|| fnv1a(src_ip) as usize),
         LB_ALG_WEIGHTED => {
             let rr_ptr = LB_RR_STATE.get_ptr_mut(svc_index)?;
             let rr = unsafe { *rr_ptr };
@@ -474,6 +475,33 @@ fn select_backend<'a>(
             }
             (rr ^ src_ip) as usize
         }
+        // Maglev: O(1) lookup into the precomputed permutation ring.
+        // Deterministic software hash of the source IP (NOT the NIC RSS
+        // hash) so every node maps a flow to the same slot — required
+        // for L2 DSR / multi-node ECMP. The userspace table already
+        // contains only healthy backend slots; the linear probe below
+        // still covers a backend that went down between rebuilds.
+        LB_ALG_MAGLEV => match unsafe { LB_MAGLEV.get(&svc_index) } {
+            Some(tbl) => {
+                let slot = (fnv1a(src_ip) as usize) % MAGLEV_RING_SIZE;
+                // Verifier bound (modulo already guarantees this).
+                if slot < MAGLEV_RING_SIZE {
+                    let e = tbl.entries[slot];
+                    if e == MAGLEV_EMPTY { 0 } else { e as usize }
+                } else {
+                    0
+                }
+            }
+            // Table not synced yet — safe RR fallback.
+            None => {
+                let rr_ptr = LB_RR_STATE.get_ptr_mut(svc_index)?;
+                let rr = unsafe { *rr_ptr };
+                unsafe {
+                    *rr_ptr = rr.wrapping_add(1);
+                }
+                rr as usize
+            }
+        },
         // LeastConn falls back to RoundRobin in eBPF
         _ => {
             let rr_ptr = LB_RR_STATE.get_ptr_mut(svc_index)?;
@@ -510,22 +538,14 @@ fn select_backend<'a>(
 /// Maps the (protocol, port) pair to an index in `0..MAX_LB_SERVICES`.
 #[inline(always)]
 fn service_key_index(key: &LbServiceKey) -> u32 {
-    let combined = (key.protocol as u32) << 16 | (key.port as u32);
-    fnv1a(combined) % MAX_LB_SERVICES
+    lb_service_index(key.protocol, key.port)
 }
 
-/// FNV-1a hash of a u32 value.
+/// FNV-1a hash of a u32 value. Delegates to the shared `ebpf-common`
+/// implementation so the data plane and userspace never drift.
 #[inline(always)]
 fn fnv1a(val: u32) -> u32 {
-    let mut hash: u32 = 0x811c_9dc5;
-    let bytes = val.to_le_bytes();
-    let mut i = 0;
-    while i < 4 {
-        hash ^= bytes[i] as u32;
-        hash = hash.wrapping_mul(0x0100_0193);
-        i += 1;
-    }
-    hash
+    lb_fnv1a_u32(val)
 }
 
 // ── Checksum Helpers ────────────────────────────────────────────────
@@ -704,7 +724,11 @@ fn emit_event(
         }
     };
 
-    let vlan_flags = if vlan_id > 0 { flags | FLAG_VLAN } else { flags };
+    let vlan_flags = if vlan_id > 0 {
+        flags | FLAG_VLAN
+    } else {
+        flags
+    };
 
     unsafe {
         let ptr = event.as_mut_ptr();

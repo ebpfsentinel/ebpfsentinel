@@ -25,6 +25,14 @@ pub trait LoadBalancerMapPort: Send + Sync {
     /// Update only the `healthy` field of a backend in the `LB_BACKENDS` map.
     fn update_backend_health(&mut self, backend_id: u32, healthy: bool) -> Result<(), DomainError>;
 
+    /// Insert or update a service's Maglev lookup ring in the
+    /// `LB_MAGLEV` map. `table` length must equal the Maglev ring size;
+    /// each entry is a backend slot index within the service window.
+    fn sync_maglev_table(&mut self, svc_index: u32, table: &[u16]) -> Result<(), DomainError>;
+
+    /// Remove a service's Maglev ring from the `LB_MAGLEV` map.
+    fn remove_maglev_table(&mut self, svc_index: u32) -> Result<(), DomainError>;
+
     /// Remove all service and backend entries from the maps.
     fn clear_all(&mut self) -> Result<(), DomainError>;
 

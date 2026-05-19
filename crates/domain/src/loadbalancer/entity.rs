@@ -41,6 +41,9 @@ pub enum LbAlgorithm {
     Weighted,
     IpHash,
     LeastConn,
+    /// Maglev consistent hashing — O(1) lookup, ~1/N flow disruption
+    /// on backend set change. Required for L2 DSR / multi-node ECMP.
+    Maglev,
 }
 
 impl LbAlgorithm {
@@ -50,6 +53,7 @@ impl LbAlgorithm {
             Self::Weighted => "weighted",
             Self::IpHash => "ip_hash",
             Self::LeastConn => "least_conn",
+            Self::Maglev => "maglev",
         }
     }
 }
@@ -357,5 +361,6 @@ mod tests {
         assert_eq!(format!("{}", LbAlgorithm::Weighted), "weighted");
         assert_eq!(format!("{}", LbAlgorithm::IpHash), "ip_hash");
         assert_eq!(format!("{}", LbAlgorithm::LeastConn), "least_conn");
+        assert_eq!(format!("{}", LbAlgorithm::Maglev), "maglev");
     }
 }
