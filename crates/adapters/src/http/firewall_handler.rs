@@ -56,6 +56,12 @@ pub struct CreateRuleRequest {
     /// Optional 802.1Q VLAN ID filter.
     #[serde(default)]
     pub vlan_id: Option<u16>,
+    /// Optional source MAC filter (L2), colon-separated (e.g. `aa:bb:cc:dd:ee:ff`).
+    #[serde(default)]
+    pub src_mac: Option<String>,
+    /// Optional destination MAC filter (L2), colon-separated.
+    #[serde(default)]
+    pub dst_mac: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -240,6 +246,25 @@ impl CreateRuleRequest {
         let dst_port = self.dst_port.map(|p| PortRange { start: p, end: p });
         let scope = parse_scope(&self.scope)?;
 
+        let src_mac = self
+            .src_mac
+            .as_deref()
+            .map(domain::firewall::entity::parse_mac_address)
+            .transpose()
+            .map_err(|e| ApiError::BadRequest {
+                code: "VALIDATION_ERROR",
+                message: format!("invalid src_mac: {e}"),
+            })?;
+        let dst_mac = self
+            .dst_mac
+            .as_deref()
+            .map(domain::firewall::entity::parse_mac_address)
+            .transpose()
+            .map_err(|e| ApiError::BadRequest {
+                code: "VALIDATION_ERROR",
+                message: format!("invalid dst_mac: {e}"),
+            })?;
+
         Ok(FirewallRule {
             id: RuleId(self.id),
             priority: self.priority,
@@ -267,8 +292,8 @@ impl CreateRuleRequest {
             dscp_match: None,
             dscp_mark: None,
             max_states: None,
-            src_mac: None,
-            dst_mac: None,
+            src_mac,
+            dst_mac,
             schedule: None,
             system: false,
             route_action: None,
@@ -674,6 +699,8 @@ mod tests {
             scope: "global".to_string(),
             enabled: true,
             vlan_id: None,
+            src_mac: None,
+            dst_mac: None,
         };
         let rule = req.into_domain_rule().unwrap();
         assert_eq!(rule.id.0, "fw-001");
@@ -682,6 +709,51 @@ mod tests {
         assert_eq!(rule.protocol, Protocol::Tcp);
         assert!(rule.src_ip.is_some());
         assert_eq!(rule.dst_port.unwrap().start, 22);
+    }
+
+    #[test]
+    fn create_request_mac_filter() {
+        let req = CreateRuleRequest {
+            id: "fw-mac".to_string(),
+            priority: 100,
+            action: "deny".to_string(),
+            protocol: "any".to_string(),
+            src_ip: None,
+            dst_ip: None,
+            src_port: None,
+            dst_port: None,
+            scope: "global".to_string(),
+            enabled: true,
+            vlan_id: None,
+            src_mac: Some("aa:bb:cc:dd:ee:ff".to_string()),
+            dst_mac: None,
+        };
+        let rule = req.into_domain_rule().unwrap();
+        assert_eq!(
+            rule.src_mac.unwrap().0,
+            [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+        );
+        assert!(rule.dst_mac.is_none());
+    }
+
+    #[test]
+    fn create_request_invalid_mac() {
+        let req = CreateRuleRequest {
+            id: "fw-mac".to_string(),
+            priority: 100,
+            action: "deny".to_string(),
+            protocol: "any".to_string(),
+            src_ip: None,
+            dst_ip: None,
+            src_port: None,
+            dst_port: None,
+            scope: "global".to_string(),
+            enabled: true,
+            vlan_id: None,
+            src_mac: Some("not-a-mac".to_string()),
+            dst_mac: None,
+        };
+        assert!(req.into_domain_rule().is_err());
     }
 
     #[test]
@@ -698,6 +770,8 @@ mod tests {
             scope: "global".to_string(),
             enabled: true,
             vlan_id: None,
+            src_mac: None,
+            dst_mac: None,
         };
         assert!(req.into_domain_rule().is_err());
     }
@@ -716,6 +790,8 @@ mod tests {
             scope: "global".to_string(),
             enabled: true,
             vlan_id: None,
+            src_mac: None,
+            dst_mac: None,
         };
         assert!(req.into_domain_rule().is_err());
     }
