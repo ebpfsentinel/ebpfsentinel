@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 31-ebpf-qos-scenarios.bats — QoS eBPF scenario tests
-# Requires: root, kernel >= 6.1, bpftool, iperf3
+# Requires: root, kernel >= 6.9, bpftool, iperf3
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

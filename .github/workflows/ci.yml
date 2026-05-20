@@ -17,6 +17,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ── Coverage matrix audit ─────────────────────────────────────────
+  coverage-audit:
+    name: Coverage Matrix Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install PyYAML
+        run: python3 -m pip install --user pyyaml
+      - name: Audit feature -> suite coverage
+        run: bash tests/integration/scripts/audit-coverage.sh
+      - name: Verify README coverage block is up-to-date
+        run: bash tests/integration/scripts/audit-coverage.sh --check-render
+
   # ── Format check ──────────────────────────────────────────────────
   fmt:
     name: Format

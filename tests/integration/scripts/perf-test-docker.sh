@@ -11,7 +11,7 @@
 #   docker  (default) — run agent via docker compose
 #   binary  — run agent as a local binary process
 #
-# Requirements: root, kernel >= 6.1, iperf3, hping3, bpftool, bc, jq
+# Requirements: root, kernel >= 6.9, iperf3, hping3, bpftool, bc, jq
 #   Docker mode additionally requires: Docker
 #   Binary mode additionally requires: ebpfsentinel-agent binary
 #
@@ -231,8 +231,8 @@ preflight() {
     local kernel_major kernel_minor
     kernel_major="$(uname -r | cut -d. -f1)"
     kernel_minor="$(uname -r | cut -d. -f2)"
-    if [ "$kernel_major" -lt 5 ] || { [ "$kernel_major" -eq 5 ] && [ "$kernel_minor" -lt 17 ]; }; then
-        echo "ERROR: Kernel $(uname -r) < 6.1 (eBPF features required)" >&2
+    if [ "$kernel_major" -lt 6 ] || { [ "$kernel_major" -eq 6 ] && [ "$kernel_minor" -lt 9 ]; }; then
+        echo "ERROR: Kernel $(uname -r) < 6.9 (eBPF features required)" >&2
         exit 1
     fi
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 34-ebpf-zone-scenarios.bats — Zone management eBPF scenario tests
-# Requires: root, kernel >= 6.1, bpftool
+# Requires: root, kernel >= 6.9, bpftool
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

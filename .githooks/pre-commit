@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Optional pre-commit hook. Enable with:
+#   git config core.hooksPath .githooks
+#
+# Runs the coverage-matrix audit so that adding a new eBPF program,
+# CLI subcommand, or domain module without updating coverage-matrix.yaml
+# is caught before the PR.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+script="${repo_root}/tests/integration/scripts/audit-coverage.sh"
+
+if [ ! -x "${script}" ]; then
+  echo "coverage audit script missing or not executable: ${script}" >&2
+  exit 1
+fi
+
+# Only run if a relevant surface was touched.
+if git diff --cached --name-only | grep -qE '^(crates/ebpf-programs/|crates/agent/src/cli\.rs|crates/domain/src/|tests/integration/coverage-matrix\.yaml)'; then
+  echo "[pre-commit] coverage audit (touched feature surface)…"
+  "${script}"
+  "${script}" --check-render
+fi

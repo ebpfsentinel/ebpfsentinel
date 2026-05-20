@@ -1,0 +1,561 @@
+# Integration test coverage matrix
+#
+# Source of truth that maps every observable agent surface
+# (eBPF program, CLI subcommand, domain module) to the bats suite(s)
+# that exercise it. Read by `scripts/audit-coverage.sh` on every CI run.
+#
+# Schema:
+#   coverage[].kind        one of: ebpf_program | cli_subcommand | domain_module
+#   coverage[].feature     identifier (must match enumerable name on disk)
+#   coverage[].suites      list of bats suite ids ("11", "32") or ["TBD"]
+#   coverage[].topology    none | 2vm | 3vm | docker | k8s
+#   coverage[].kernel_min  string ("6.9" minimum, "n/a" when no eBPF)
+#   coverage[].profile     pr | nightly | manual
+#   coverage[].notes       short free-text, optional
+#
+# Rules:
+#   - Every eBPF program under crates/ebpf-programs/* MUST have a row
+#     of kind ebpf_program with the same dir name as feature.
+#   - Every variant of `pub enum Command` in crates/agent/src/cli.rs
+#     MUST have a row of kind cli_subcommand (lowercase variant name).
+#   - Every dir under crates/domain/src/ except `common` MUST have a
+#     row of kind domain_module. `common` is shared types, no surface
+#     of its own, allowed to be skipped via `skip_domains` list below.
+#   - `suites: [TBD]` is permitted but tracked as a gap in CI summary.
+#   - Suites listed must exist under tests/integration/suites/.
+
+# Domains intentionally not test-mapped (shared types, no behaviour).
+skip_domains:
+  - common
+
+coverage:
+  # ── eBPF programs (15) ──────────────────────────────────────────
+  - kind: ebpf_program
+    feature: xdp-firewall
+    suites: ["11", "25", "27"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "L3/L4 stateful firewall (XDP)"
+
+  - kind: ebpf_program
+    feature: xdp-firewall-reject
+    suites: [TBD]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    notes: "TCP RST / ICMP forging tail-call — planned suite 46"
+
+  - kind: ebpf_program
+    feature: xdp-ratelimit
+    suites: ["14", "16"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Token bucket + sliding window + leaky bucket"
+
+  - kind: ebpf_program
+    feature: xdp-ratelimit-syncookie
+    suites: [TBD]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    notes: "SYN cookie forging tail-call — planned suite 47"
+
+  - kind: ebpf_program
+    feature: xdp-loadbalancer
+    suites: ["21"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "L4 LB + Maglev. DSR end-to-end planned suite 48 (3-VM)"
+
+  - kind: ebpf_program
+    feature: xdp-vip-announcer
+    suites: ["40"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    notes: "L2 VIP announcer / ARP responder"
+
+  - kind: ebpf_program
+    feature: tc-ids
+    suites: ["12", "26"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Intrusion detection (TC)"
+
+  - kind: ebpf_program
+    feature: tc-threatintel
+    suites: ["18", "36"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "OSINT feed IOC matching (TC)"
+
+  - kind: ebpf_program
+    feature: tc-conntrack
+    suites: ["19", "25"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Connection tracking; kernel-CT kill via kill_flow_via_skb_ct planned suite 51"
+
+  - kind: ebpf_program
+    feature: tc-dns
+    suites: ["20"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Passive DNS capture; DoH/DoT detection planned suite 49"
+
+  - kind: ebpf_program
+    feature: tc-nat-ingress
+    suites: ["22"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "DNAT (TC ingress)"
+
+  - kind: ebpf_program
+    feature: tc-nat-egress
+    suites: ["22"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "SNAT (TC egress)"
+
+  - kind: ebpf_program
+    feature: tc-qos
+    suites: ["31"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Traffic shaping (TC egress)"
+
+  - kind: ebpf_program
+    feature: tc-scrub
+    suites: ["24"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Packet normalization; byte-level assertions planned suite 50"
+
+  - kind: ebpf_program
+    feature: uprobe-dlp
+    suites: ["28"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "SSL/TLS DLP via uprobes; TLS-MITM inspection enterprise suite 63"
+
+  # ── CLI subcommands (28) ────────────────────────────────────────
+  - kind: cli_subcommand
+    feature: version
+    suites: ["01"]
+    topology: none
+    kernel_min: "n/a"
+    profile: pr
+    notes: "Version + build info"
+
+  - kind: cli_subcommand
+    feature: status
+    suites: ["01", "02"]
+    topology: none
+    kernel_min: "n/a"
+    profile: pr
+    notes: "Runtime status query"
+
+  - kind: cli_subcommand
+    feature: identity
+    suites: ["38"]
+    topology: none
+    kernel_min: "n/a"
+    profile: pr
+    notes: "Operator-managed flag, hostname, version"
+
+  - kind: cli_subcommand
+    feature: health
+    suites: ["02"]
+    topology: none
+    kernel_min: "n/a"
+    profile: pr
+    notes: "/healthz + /readyz"
+
+  - kind: cli_subcommand
+    feature: metrics
+    suites: ["02"]
+    topology: none
+    kernel_min: "n/a"
+    profile: pr
+    notes: "Prometheus metrics"
+
+  - kind: cli_subcommand
+    feature: watch
+    suites: ["37"]
+    topology: none
+    kernel_min: "n/a"
+    profile: pr
+    notes: "SSE alerts stream (tail -f)"
+
+  - kind: cli_subcommand
+    feature: top
+    suites: ["04"]
+    topology: none
+    kernel_min: "n/a"
+    profile: pr
+    notes: "Top talkers by traffic volume"
+
+  - kind: cli_subcommand
+    feature: flows
+    suites: ["04", "19"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Aggregated connection map"
+
+  - kind: cli_subcommand
+    feature: score
+    suites: ["04"]
+    topology: none
+    kernel_min: "n/a"
+    profile: pr
+    notes: "0-10 network risk score"
+
+  - kind: cli_subcommand
+    feature: investigate
+    suites: ["04"]
+    topology: none
+    kernel_min: "n/a"
+    profile: pr
+    notes: "IP correlation across alerts/CT/DNS/blacklist"
+
+  - kind: cli_subcommand
+    feature: conntrack
+    suites: ["19", "17"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Connection tracking inspection + flush"
+
+  - kind: cli_subcommand
+    feature: firewall
+    suites: ["03", "11", "27"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "L3/L4 rule CRUD + eBPF scenarios"
+
+  - kind: cli_subcommand
+    feature: l7
+    suites: ["17", "32"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "L7 firewall rules (HTTP/SMTP/FTP/SMB inspection)"
+
+  - kind: cli_subcommand
+    feature: ips
+    suites: ["13", "17"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Intrusion prevention + auto-blacklist"
+
+  - kind: cli_subcommand
+    feature: ratelimit
+    suites: ["04", "14", "17"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Rate limit policies"
+
+  - kind: cli_subcommand
+    feature: threatintel
+    suites: ["17", "18", "36"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "OSINT feed CRUD + IOC matching + STIX feed"
+
+  - kind: cli_subcommand
+    feature: alerts
+    suites: ["04", "26", "37"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Alert list + e2e + SSE stream"
+
+  - kind: cli_subcommand
+    feature: audit
+    suites: ["04"]
+    topology: none
+    kernel_min: "n/a"
+    profile: pr
+    notes: "Audit log + rule history"
+
+  - kind: cli_subcommand
+    feature: dns
+    suites: ["04", "20"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "DNS cache, stats, blocklist"
+
+  - kind: cli_subcommand
+    feature: domains
+    suites: ["04"]
+    topology: none
+    kernel_min: "n/a"
+    profile: pr
+    notes: "Domain reputation + blocklist"
+
+  - kind: cli_subcommand
+    feature: ddos
+    suites: ["16", "23"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "DDoS protection + scrub"
+
+  - kind: cli_subcommand
+    feature: lb
+    suites: ["17", "21", "40"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Load balancer services + VIPs"
+
+  - kind: cli_subcommand
+    feature: qos
+    suites: ["17", "31"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "QoS / traffic shaping"
+
+  - kind: cli_subcommand
+    feature: nat
+    suites: ["17", "22"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "NAT + NPTv6; NPTv6 dedicated suite planned (54)"
+
+  - kind: cli_subcommand
+    feature: mitre
+    suites: [TBD]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    notes: "MITRE coverage matrix; technique assertions planned suite 55"
+
+  - kind: cli_subcommand
+    feature: fingerprints
+    suites: ["32"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "JA4+ cache; diversity suite planned (45)"
+
+  - kind: cli_subcommand
+    feature: responses
+    suites: [TBD]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    notes: "Manual time-bounded response actions — planned suite 52"
+
+  - kind: cli_subcommand
+    feature: capture
+    suites: [TBD]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    notes: "Manual packet capture (pcap) — planned suite 53"
+
+  # ── Domain modules (23, excl. common) ───────────────────────────
+  - kind: domain_module
+    feature: alert
+    suites: ["04", "26", "37"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Alert pipeline + routing"
+
+  - kind: domain_module
+    feature: alias
+    suites: ["17"]
+    topology: none
+    kernel_min: "n/a"
+    profile: pr
+    notes: "AliasSet (CIDR aliases)"
+
+  - kind: domain_module
+    feature: audit
+    suites: ["04"]
+    topology: none
+    kernel_min: "n/a"
+    profile: pr
+    notes: "Audit trail + rule history"
+
+  - kind: domain_module
+    feature: auth
+    suites: ["07", "39"]
+    topology: none
+    kernel_min: "n/a"
+    profile: pr
+    notes: "JWT/OIDC/JWKS/API-key + RBAC"
+
+  - kind: domain_module
+    feature: capture
+    suites: [TBD]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    notes: "Pcap export — planned suite 53"
+
+  - kind: domain_module
+    feature: conntrack
+    suites: ["19", "25"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Connection tracking"
+
+  - kind: domain_module
+    feature: container
+    suites: [TBD]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    notes: "cgroup_id enrichment + per-tenant cgroup map — planned suite 58"
+
+  - kind: domain_module
+    feature: ddos
+    suites: ["16", "23"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "DDoS detection + policy"
+
+  - kind: domain_module
+    feature: dlp
+    suites: ["17", "28"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Data loss prevention; TLS proxy enterprise"
+
+  - kind: domain_module
+    feature: dns
+    suites: ["04", "20"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "DNS intel; DoH/DoT detect planned (49)"
+
+  - kind: domain_module
+    feature: firewall
+    suites: ["03", "11", "25", "27"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Stateful L3/L4 firewall"
+
+  - kind: domain_module
+    feature: ids
+    suites: ["12", "26"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Intrusion detection engine"
+
+  - kind: domain_module
+    feature: ips
+    suites: ["13", "17"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Auto-blacklist + whitelist"
+
+  - kind: domain_module
+    feature: l2
+    suites: ["40"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    notes: "L2 binding + self-whitelist; DSR end-to-end planned (48)"
+
+  - kind: domain_module
+    feature: l7
+    suites: ["17", "32"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "HTTP/TLS/SNI/gRPC/SMTP/FTP/SMB; SMTP/FTP/SMB edge planned (60)"
+
+  - kind: domain_module
+    feature: loadbalancer
+    suites: ["17", "21", "40"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Maglev + DSR; 3-VM end-to-end planned (48)"
+
+  - kind: domain_module
+    feature: nat
+    suites: ["17", "22"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "SNAT/DNAT/NPTv6; NPTv6 dedicated planned (54)"
+
+  - kind: domain_module
+    feature: qos
+    suites: ["17", "31"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Traffic shaping policies"
+
+  - kind: domain_module
+    feature: ratelimit
+    suites: ["04", "14"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Token bucket + variants"
+
+  - kind: domain_module
+    feature: response
+    suites: [TBD]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    notes: "Automated response policy — planned suite 52"
+
+  - kind: domain_module
+    feature: routing
+    suites: ["35"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Multi-WAN routing; failover planned suite 57"
+
+  - kind: domain_module
+    feature: threatintel
+    suites: ["17", "18", "36"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "OSINT feeds + IOC + STIX"
+
+  - kind: domain_module
+    feature: zone
+    suites: ["34"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Zone-based policy"

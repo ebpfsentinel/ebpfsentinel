@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 13-ebpf-ips-scenarios.bats — IPS eBPF auto-blacklisting scenario tests
-# Requires: root, kernel >= 6.1, bpftool, ncat
+# Requires: root, kernel >= 6.9, bpftool, ncat
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

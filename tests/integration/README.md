@@ -64,7 +64,7 @@ make test
 # Run a single suite
 make test-suite SUITE=01-agent-lifecycle
 
-# Run eBPF scenario tests (requires root + kernel >= 6.1)
+# Run eBPF scenario tests (requires root + kernel >= 6.9)
 make test-ebpf-scenarios
 
 # Quick performance test
@@ -87,7 +87,7 @@ Run without root. Require the agent binary built (`cargo build --release`).
 | **03-rest-api-firewall** |     8 | Firewall rule CRUD via REST: create, read, update, delete, priority ordering, bulk operations                                                                                    |
 | **04-rest-api-domains**  |    23 | Domain-specific REST APIs: IPS blacklist, rate limit config, threat intel feeds, alerting routes, L7 inspection, DNS cache/blocklist, domain reputation |
 | **05-grpc-streaming**    |     4 | gRPC health check, server reflection, event streaming subscription                                                                                                               |
-| **06-ebpf-programs**     |     3 | eBPF program loading and attachment to a veth interface (requires kernel >= 6.1)                                                                                                |
+| **06-ebpf-programs**     |     3 | eBPF program loading and attachment to a veth interface (requires kernel >= 6.9)                                                                                                |
 | **07-authentication**    |    11 | JWT RS256 validation, OIDC JWKS endpoint, API key auth, role-based access control (admin/operator/viewer), token expiry, composite auth                                          |
 | **08-tls**               |     5 | HTTPS termination on port 8443, gRPC over TLS, self-signed certificate validation, mTLS                                                                                         |
 | **09-docker**            |    11 | Docker image build, compose deployment, healthz, baseline/Docker TCP throughput, ICMP latency, RSS/CPU overhead, API latency under load, memory stability, clean shutdown         |
@@ -97,7 +97,7 @@ Run without root. Require the agent binary built (`cargo build --release`).
 
 ### eBPF Scenario Tests (suites 11-14, 18-24)
 
-Require **root** and **kernel >= 6.1**. Use isolated network namespaces with veth pairs (10.200.0.0/24) to test real eBPF packet processing. In 2-VM mode, root is not required locally.
+Require **root** and **kernel >= 6.9**. Use isolated network namespaces with veth pairs (10.200.0.0/24) to test real eBPF packet processing. In 2-VM mode, root is not required locally.
 
 | Suite                              | Tests | What it covers                                                                                                                                    |
 | ---------------------------------- | ----: | ------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -115,7 +115,7 @@ Require **root** and **kernel >= 6.1**. Use isolated network namespaces with vet
 
 ### End-to-End & Advanced Tests (suites 25-28)
 
-Require **root** and **kernel >= 6.1** (or 2-VM mode).
+Require **root** and **kernel >= 6.9** (or 2-VM mode).
 
 | Suite                          | Tests | What it covers                                                                                                |
 | ------------------------------ | ----: | ------------------------------------------------------------------------------------------------------------- |
@@ -126,13 +126,118 @@ Require **root** and **kernel >= 6.1** (or 2-VM mode).
 
 ### Performance & Benchmark Suites (suites 15, 29-30)
 
-Require **root** and **kernel >= 6.1** (or 2-VM mode). Measure agent overhead using iperf3, hping3, and `/proc` sampling.
+Require **root** and **kernel >= 6.9** (or 2-VM mode). Measure agent overhead using iperf3, hping3, and `/proc` sampling.
 
 | Suite                          | Tests | What it covers                                                                                                   |
 | ------------------------------ | ----: | ---------------------------------------------------------------------------------------------------------------- |
 | **15-performance-benchmark**   |     9 | TCP/UDP throughput, ICMP latency, TCP SYN latency, packets-per-second, CPU/RSS overhead, JSON report generation  |
 | **29-ebpf-feature-overhead**   |     8 | Per-feature overhead: baseline, then cumulative (firewall, +IDS, +ratelimit, +threatintel, +all), NFR2 threshold |
 | **30-ebpf-map-operation-bench**|    12 | Bulk API latency: firewall rules (100/1K/10K), threatintel IOCs, ratelimit policies, LB backends, DNS blocklist  |
+
+## Coverage Matrix
+
+`coverage-matrix.yaml` is the single source of truth that maps every observable agent surface — each eBPF program, each CLI subcommand, each domain module — to the bats suite(s) that exercise it. The matrix is enforced by `scripts/audit-coverage.sh`, which runs on every PR and fails the build if a new feature lands without a matrix row.
+
+**Workflow when adding a feature** (new eBPF program / new CLI subcommand / new domain module):
+
+1. Land the code change.
+2. Add a row to `coverage-matrix.yaml` (kind / feature / suites / topology / kernel_min / profile / notes). If the suite doesn't exist yet, use `suites: [TBD]` and reference the planned suite id in `notes` — this is tracked as a gap but does not fail CI.
+3. Run `tests/integration/scripts/audit-coverage.sh --render` to regenerate the table below.
+4. Commit the matrix + README in the same PR as the code change.
+
+**Profiles**:
+
+- `pr` — runs on every pull request (≤30 s/suite). Existing 40 suites + lightweight additions.
+- `nightly` — runs on a nightly schedule (suites 41+, perf benches, soak job).
+- `manual` — `workflow_dispatch` only.
+
+<!-- coverage:start -->
+<!-- AUTO-GENERATED by tests/integration/scripts/audit-coverage.sh --render. Do not edit by hand. -->
+
+_Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render` after adding/removing a feature._
+
+#### eBPF programs (15)
+
+| Feature | Suites | Topology | Kernel | Profile | Notes |
+|---|---|---|---|---|---|
+| `tc-conntrack` | 19, 25 | 2vm | 6.9 | pr | Connection tracking; kernel-CT kill via kill_flow_via_skb_ct planned suite 51 |
+| `tc-dns` | 20 | 2vm | 6.9 | pr | Passive DNS capture; DoH/DoT detection planned suite 49 |
+| `tc-ids` | 12, 26 | 2vm | 6.9 | pr | Intrusion detection (TC) |
+| `tc-nat-egress` | 22 | 2vm | 6.9 | pr | SNAT (TC egress) |
+| `tc-nat-ingress` | 22 | 2vm | 6.9 | pr | DNAT (TC ingress) |
+| `tc-qos` | 31 | 2vm | 6.9 | pr | Traffic shaping (TC egress) |
+| `tc-scrub` | 24 | 2vm | 6.9 | pr | Packet normalization; byte-level assertions planned suite 50 |
+| `tc-threatintel` | 18, 36 | 2vm | 6.9 | pr | OSINT feed IOC matching (TC) |
+| `uprobe-dlp` | 28 | 2vm | 6.9 | pr | SSL/TLS DLP via uprobes; TLS-MITM inspection enterprise suite 63 |
+| `xdp-firewall` | 11, 25, 27 | 2vm | 6.9 | pr | L3/L4 stateful firewall (XDP) |
+| `xdp-firewall-reject` | TBD | 2vm | 6.9 | nightly | TCP RST / ICMP forging tail-call — planned suite 46 |
+| `xdp-loadbalancer` | 21 | 2vm | 6.9 | pr | L4 LB + Maglev. DSR end-to-end planned suite 48 (3-VM) |
+| `xdp-ratelimit` | 14, 16 | 2vm | 6.9 | pr | Token bucket + sliding window + leaky bucket |
+| `xdp-ratelimit-syncookie` | TBD | 2vm | 6.9 | nightly | SYN cookie forging tail-call — planned suite 47 |
+| `xdp-vip-announcer` | 40 | 2vm | 6.9 | nightly | L2 VIP announcer / ARP responder |
+
+#### CLI subcommands (28)
+
+| Feature | Suites | Topology | Kernel | Profile | Notes |
+|---|---|---|---|---|---|
+| `alerts` | 04, 26, 37 | 2vm | 6.9 | pr | Alert list + e2e + SSE stream |
+| `audit` | 04 | none | n/a | pr | Audit log + rule history |
+| `capture` | TBD | 2vm | 6.9 | nightly | Manual packet capture (pcap) — planned suite 53 |
+| `conntrack` | 19, 17 | 2vm | 6.9 | pr | Connection tracking inspection + flush |
+| `ddos` | 16, 23 | 2vm | 6.9 | pr | DDoS protection + scrub |
+| `dns` | 04, 20 | 2vm | 6.9 | pr | DNS cache, stats, blocklist |
+| `domains` | 04 | none | n/a | pr | Domain reputation + blocklist |
+| `fingerprints` | 32 | 2vm | 6.9 | pr | JA4+ cache; diversity suite planned (45) |
+| `firewall` | 03, 11, 27 | 2vm | 6.9 | pr | L3/L4 rule CRUD + eBPF scenarios |
+| `flows` | 04, 19 | 2vm | 6.9 | pr | Aggregated connection map |
+| `health` | 02 | none | n/a | pr | /healthz + /readyz |
+| `identity` | 38 | none | n/a | pr | Operator-managed flag, hostname, version |
+| `investigate` | 04 | none | n/a | pr | IP correlation across alerts/CT/DNS/blacklist |
+| `ips` | 13, 17 | 2vm | 6.9 | pr | Intrusion prevention + auto-blacklist |
+| `l7` | 17, 32 | 2vm | 6.9 | pr | L7 firewall rules (HTTP/SMTP/FTP/SMB inspection) |
+| `lb` | 17, 21, 40 | 2vm | 6.9 | pr | Load balancer services + VIPs |
+| `metrics` | 02 | none | n/a | pr | Prometheus metrics |
+| `mitre` | TBD | 2vm | 6.9 | nightly | MITRE coverage matrix; technique assertions planned suite 55 |
+| `nat` | 17, 22 | 2vm | 6.9 | pr | NAT + NPTv6; NPTv6 dedicated suite planned (54) |
+| `qos` | 17, 31 | 2vm | 6.9 | pr | QoS / traffic shaping |
+| `ratelimit` | 04, 14, 17 | 2vm | 6.9 | pr | Rate limit policies |
+| `responses` | TBD | 2vm | 6.9 | nightly | Manual time-bounded response actions — planned suite 52 |
+| `score` | 04 | none | n/a | pr | 0-10 network risk score |
+| `status` | 01, 02 | none | n/a | pr | Runtime status query |
+| `threatintel` | 17, 18, 36 | 2vm | 6.9 | pr | OSINT feed CRUD + IOC matching + STIX feed |
+| `top` | 04 | none | n/a | pr | Top talkers by traffic volume |
+| `version` | 01 | none | n/a | pr | Version + build info |
+| `watch` | 37 | none | n/a | pr | SSE alerts stream (tail -f) |
+
+#### Domain modules (23)
+
+| Feature | Suites | Topology | Kernel | Profile | Notes |
+|---|---|---|---|---|---|
+| `alert` | 04, 26, 37 | 2vm | 6.9 | pr | Alert pipeline + routing |
+| `alias` | 17 | none | n/a | pr | AliasSet (CIDR aliases) |
+| `audit` | 04 | none | n/a | pr | Audit trail + rule history |
+| `auth` | 07, 39 | none | n/a | pr | JWT/OIDC/JWKS/API-key + RBAC |
+| `capture` | TBD | 2vm | 6.9 | nightly | Pcap export — planned suite 53 |
+| `conntrack` | 19, 25 | 2vm | 6.9 | pr | Connection tracking |
+| `container` | TBD | 2vm | 6.9 | nightly | cgroup_id enrichment + per-tenant cgroup map — planned suite 58 |
+| `ddos` | 16, 23 | 2vm | 6.9 | pr | DDoS detection + policy |
+| `dlp` | 17, 28 | 2vm | 6.9 | pr | Data loss prevention; TLS proxy enterprise |
+| `dns` | 04, 20 | 2vm | 6.9 | pr | DNS intel; DoH/DoT detect planned (49) |
+| `firewall` | 03, 11, 25, 27 | 2vm | 6.9 | pr | Stateful L3/L4 firewall |
+| `ids` | 12, 26 | 2vm | 6.9 | pr | Intrusion detection engine |
+| `ips` | 13, 17 | 2vm | 6.9 | pr | Auto-blacklist + whitelist |
+| `l2` | 40 | 2vm | 6.9 | nightly | L2 binding + self-whitelist; DSR end-to-end planned (48) |
+| `l7` | 17, 32 | 2vm | 6.9 | pr | HTTP/TLS/SNI/gRPC/SMTP/FTP/SMB; SMTP/FTP/SMB edge planned (60) |
+| `loadbalancer` | 17, 21, 40 | 2vm | 6.9 | pr | Maglev + DSR; 3-VM end-to-end planned (48) |
+| `nat` | 17, 22 | 2vm | 6.9 | pr | SNAT/DNAT/NPTv6; NPTv6 dedicated planned (54) |
+| `qos` | 17, 31 | 2vm | 6.9 | pr | Traffic shaping policies |
+| `ratelimit` | 04, 14 | 2vm | 6.9 | pr | Token bucket + variants |
+| `response` | TBD | 2vm | 6.9 | nightly | Automated response policy — planned suite 52 |
+| `routing` | 35 | 2vm | 6.9 | pr | Multi-WAN routing; failover planned suite 57 |
+| `threatintel` | 17, 18, 36 | 2vm | 6.9 | pr | OSINT feeds + IOC + STIX |
+| `zone` | 34 | 2vm | 6.9 | pr | Zone-based policy |
+
+<!-- coverage:end -->
 
 ## Performance Test Scripts
 
@@ -407,9 +512,9 @@ make vagrant-destroy       # Delete VM
 | `test-vm`                 | Run all suites in Vagrant VM | Vagrant              |
 | `test-suite SUITE=<name>` | Run a single suite           | agent binary         |
 | `test-k8s`                | Kubernetes suite only        | Minikube             |
-| `test-ebpf-scenarios`     | Suites 11-14, 18-24          | root, kernel >= 6.1 |
-| `test-performance`        | Suite 15                     | root, kernel >= 6.1 |
-| `test-ebpf-all`           | Suites 11-15                 | root, kernel >= 6.1 |
+| `test-ebpf-scenarios`     | Suites 11-14, 18-24          | root, kernel >= 6.9 |
+| `test-performance`        | Suite 15                     | root, kernel >= 6.9 |
+| `test-ebpf-all`           | Suites 11-15                 | root, kernel >= 6.9 |
 | `test-ebpf-vm`            | eBPF suites in Vagrant VM    | Vagrant              |
 
 ### 2-VM Topology
