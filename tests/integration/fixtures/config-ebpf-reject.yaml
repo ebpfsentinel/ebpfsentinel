@@ -1,0 +1,87 @@
+# config-ebpf-reject.yaml — Firewall reject-action fixture for Suite 46.
+#
+# Drives the xdp-firewall-reject tail-call program: matched packets are
+# answered with a forged TCP RST (TCP) or ICMP Destination-Port-Unreachable
+# (UDP) instead of a silent drop.
+#
+# Layout:
+#   - TCP dst_port 8081  → action: reject    (RST)
+#   - UDP dst_port 9999  → action: reject    (ICMP type 3 code 3)
+#   - Whitelist allow rule for __WHITELIST_SUBNET__ at higher priority,
+#     so traffic from that source bypasses the reject path.
+#
+# Placeholders substituted by prepare_ebpf_config:
+#   __HOST_IP__, __NS_IP__, __WHITELIST_SUBNET__, __INTERFACE__, __DATA_DIR__
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: info
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: pass
+  rules:
+    # Priority 5: whitelist allow for the trusted subnet (TCP+UDP both
+    # bypass the reject path). Lower priority number wins, so this fires
+    # before the reject rules.
+    - id: fw-reject-allow-whitelist
+      priority: 5
+      action: allow
+      protocol: any
+      src_ip: "__WHITELIST_SUBNET__"
+      scope: global
+      enabled: true
+
+    # Priority 20: TCP reject — agent forges RST back to the source.
+    - id: fw-reject-tcp-8081
+      priority: 20
+      action: reject
+      protocol: tcp
+      dst_port: 8081
+      scope: global
+      enabled: true
+
+    # Priority 30: UDP reject — agent forges ICMP Dest-Port-Unreachable.
+    - id: fw-reject-udp-9999
+      priority: 30
+      action: reject
+      protocol: udp
+      dst_port: 9999
+      scope: global
+      enabled: true
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

@@ -1,0 +1,72 @@
+# config-ebpf-syncookie.yaml — XDP ratelimit + SYN-cookie fixture for
+# Suite 47. Mirrors the suite-42 syncookie fixture but targets a TCP
+# listener port (default 11443) instead of the pktgen UDP path so the
+# legitimate attacker can complete the 3-way handshake via the cookie.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: info
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: true
+  default_rate: 200
+  default_burst: 400
+  default_algorithm: token_bucket
+  rules:
+    - id: rl-syncookie-tcp
+      rate: 200
+      burst: 400
+      scope: global
+      algorithm: token_bucket
+      action: syn_cookie
+      protocol: tcp
+      dst_port: 11443
+      enabled: true
+
+threatintel:
+  enabled: false
+
+ddos:
+  enabled: true
+  policies:
+    - id: ddos-syncookie-syn-flood
+      attack_type: syn_flood
+      detection_threshold_pps: 500
+      mitigation_action: block
+      auto_block_duration_secs: 30
+      enabled: true
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

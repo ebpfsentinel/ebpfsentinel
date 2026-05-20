@@ -40,11 +40,11 @@ coverage:
 
   - kind: ebpf_program
     feature: xdp-firewall-reject
-    suites: [TBD]
+    suites: ["46"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "TCP RST / ICMP forging tail-call — planned suite 46"
+    notes: "TCP RST / ICMP forging tail-call; suite 46 wire-validates checksums + src/dst swap + whitelist bypass"
 
   - kind: ebpf_program
     feature: xdp-ratelimit
@@ -56,11 +56,11 @@ coverage:
 
   - kind: ebpf_program
     feature: xdp-ratelimit-syncookie
-    suites: [TBD]
+    suites: ["47"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "SYN cookie forging tail-call — planned suite 47"
+    notes: "SYN cookie forging tail-call; suite 47 asserts TcpExtSyncookiesSent + agent metric grow, legit ncat completes, spoofed flood leaves TcpExtSyncookiesRecv flat"
 
   - kind: ebpf_program
     feature: xdp-loadbalancer
@@ -606,3 +606,19 @@ attack_suites:
     profile: nightly
     surfaces: ["l7", "fingerprints"]
     notes: "Diverse TLS clients (curl/openssl/urllib3/aiohttp/go/MHDDoS) populate JA4 cache; asserts cache growth + MITRE T1071 tag on malicious-SNI alert + ja4_fingerprint surfaces on /api/v1/alerts + FP guard for legit SNI + endpoint liveness after agent restart"
+
+  - suite: "46"
+    name: xdp-firewall-reject
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["xdp-firewall", "xdp-firewall-reject"]
+    notes: "Forged-reply wire validation: TCP RST yields ECONNREFUSED + valid checksum + swapped src/dst; UDP yields ICMP type 3 code 3; whitelisted source bypasses reject path; rejected metric increments"
+
+  - suite: "47"
+    name: xdp-ratelimit-syncookie
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["xdp-ratelimit", "xdp-ratelimit-syncookie", "ddos"]
+    notes: "SYN flood: nstat TcpExtSyncookiesSent and agent syncookie_sent metric grow, legit ncat completes 3-way via cookie, spoofed-source flood leaves TcpExtSyncookiesRecv flat"
