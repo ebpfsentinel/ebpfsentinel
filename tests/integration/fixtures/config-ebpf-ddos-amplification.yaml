@@ -1,0 +1,112 @@
+# config-ebpf-ddos-amplification.yaml — Suite 44 (scapy amplification) fixture.
+#
+# Combines the scrub layer (which performs the RPF-style check used to
+# drop spoofed-source packets before they reach a daemon) with explicit
+# UDP-flood / amplification DDoS policies and per-protocol firewall
+# rules that deny the four amplification ports (DNS/NTP/SSDP/Memcached)
+# at XDP ingress. Belt-and-braces: even if scrub failed open, the XDP
+# firewall blocks the response trigger; both layers should record drops.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: pass
+  scrub:
+    enabled: true
+    min_ttl: 64
+    max_mss: 1460
+  rules:
+    - id: fw-amp-deny-dns
+      priority: 10
+      action: deny
+      protocol: udp
+      dst_port: 53
+      scope: global
+      enabled: true
+    - id: fw-amp-deny-ntp
+      priority: 10
+      action: deny
+      protocol: udp
+      dst_port: 123
+      scope: global
+      enabled: true
+    - id: fw-amp-deny-ssdp
+      priority: 10
+      action: deny
+      protocol: udp
+      dst_port: 1900
+      scope: global
+      enabled: true
+    - id: fw-amp-deny-memcached
+      priority: 10
+      action: deny
+      protocol: udp
+      dst_port: 11211
+      scope: global
+      enabled: true
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: true
+  default_rate: 100
+  default_burst: 200
+  default_algorithm: token_bucket
+  rules:
+    - id: rl-amp-udp-cap
+      rate: 100
+      burst: 200
+      scope: global
+      algorithm: token_bucket
+      action: drop
+      enabled: true
+
+threatintel:
+  enabled: false
+
+ddos:
+  enabled: true
+  policies:
+    - id: ddos-amp-udp-flood
+      attack_type: udp_flood
+      detection_threshold_pps: 100
+      mitigation_action: block
+      auto_block_duration_secs: 60
+      enabled: true
+    - id: ddos-amp-reflection
+      attack_type: amplification
+      detection_threshold_pps: 50
+      mitigation_action: block
+      auto_block_duration_secs: 60
+      enabled: true
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

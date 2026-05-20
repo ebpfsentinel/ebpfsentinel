@@ -32,11 +32,11 @@ coverage:
   # ── eBPF programs (15) ──────────────────────────────────────────
   - kind: ebpf_program
     feature: xdp-firewall
-    suites: ["11", "25", "27", "42"]
+    suites: ["11", "25", "27", "42", "44"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "L3/L4 stateful firewall (XDP); XDP-drop CPU savings measured in 42"
+    notes: "L3/L4 stateful firewall (XDP); XDP-drop CPU savings measured in 42; amplification ports denied in 44"
 
   - kind: ebpf_program
     feature: xdp-firewall-reject
@@ -80,11 +80,11 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-ids
-    suites: ["12", "26", "42"]
+    suites: ["12", "26", "42", "43"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in 42"
+    notes: "Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in 42; slow-attack signatures in 43"
 
   - kind: ebpf_program
     feature: tc-threatintel
@@ -136,11 +136,11 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-scrub
-    suites: ["24"]
+    suites: ["24", "44"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Packet normalization; byte-level assertions planned suite 50"
+    notes: "Packet normalization; spoofed-source amplification drop in 44; byte-level assertions planned suite 50"
 
   - kind: ebpf_program
     feature: uprobe-dlp
@@ -241,27 +241,27 @@ coverage:
 
   - kind: cli_subcommand
     feature: firewall
-    suites: ["03", "11", "27"]
+    suites: ["03", "11", "27", "44"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "L3/L4 rule CRUD + eBPF scenarios"
+    notes: "L3/L4 rule CRUD + eBPF scenarios; amplification UDP-port denies in 44"
 
   - kind: cli_subcommand
     feature: l7
-    suites: ["17", "32", "41"]
+    suites: ["17", "32", "41", "43"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "L7 firewall rules (HTTP/SMTP/FTP/SMB inspection); MHDDoS flood matrix in 41"
+    notes: "L7 firewall rules (HTTP/SMTP/FTP/SMB inspection); MHDDoS flood matrix in 41; slow-request timeout in 43"
 
   - kind: cli_subcommand
     feature: ips
-    suites: ["13", "17", "41"]
+    suites: ["13", "17", "41", "43"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Intrusion prevention + auto-blacklist; MHDDoS flood matrix in 41"
+    notes: "Intrusion prevention + auto-blacklist; MHDDoS flood matrix in 41; slowhttptest in 43"
 
   - kind: cli_subcommand
     feature: ratelimit
@@ -313,11 +313,11 @@ coverage:
 
   - kind: cli_subcommand
     feature: ddos
-    suites: ["16", "23", "41"]
+    suites: ["16", "23", "41", "43", "44"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "DDoS protection + scrub; MHDDoS flood matrix in 41"
+    notes: "DDoS protection + scrub; MHDDoS flood matrix in 41; slow-attack T1499.002 in 43; amplification T1498.002 in 44"
 
   - kind: cli_subcommand
     feature: lb
@@ -434,11 +434,11 @@ coverage:
 
   - kind: domain_module
     feature: ddos
-    suites: ["16", "23", "41"]
+    suites: ["16", "23", "41", "43", "44"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "DDoS detection + policy; MHDDoS flood matrix in 41"
+    notes: "DDoS detection + policy; MHDDoS flood matrix in 41; service-exhaustion in 43; amplification in 44"
 
   - kind: domain_module
     feature: dlp
@@ -458,27 +458,27 @@ coverage:
 
   - kind: domain_module
     feature: firewall
-    suites: ["03", "11", "25", "27"]
+    suites: ["03", "11", "25", "27", "44"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Stateful L3/L4 firewall"
+    notes: "Stateful L3/L4 firewall; amplification UDP-port denies in 44"
 
   - kind: domain_module
     feature: ids
-    suites: ["12", "26", "41"]
+    suites: ["12", "26", "41", "43"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Intrusion detection engine; behavioural signatures stressed in 41"
+    notes: "Intrusion detection engine; behavioural signatures stressed in 41; slow-attack signatures in 43"
 
   - kind: domain_module
     feature: ips
-    suites: ["13", "17", "41"]
+    suites: ["13", "17", "41", "43"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Auto-blacklist + whitelist; MHDDoS flood matrix in 41"
+    notes: "Auto-blacklist + whitelist; MHDDoS flood matrix in 41; slowhttptest in 43"
 
   - kind: domain_module
     feature: l2
@@ -490,11 +490,11 @@ coverage:
 
   - kind: domain_module
     feature: l7
-    suites: ["17", "32", "41"]
+    suites: ["17", "32", "41", "43"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "HTTP/TLS/SNI/gRPC/SMTP/FTP/SMB; SMTP/FTP/SMB edge planned (60)"
+    notes: "HTTP/TLS/SNI/gRPC/SMTP/FTP/SMB; slow-request timeout in 43; SMTP/FTP/SMB edge planned (60)"
 
   - kind: domain_module
     feature: loadbalancer
@@ -582,3 +582,19 @@ attack_suites:
     profile: nightly
     surfaces: ["xdp-firewall", "xdp-ratelimit", "tc-ids"]
     notes: "≥1 Mpps via kernel pktgen; asserts XDP-drop CPU savings + SYN cookie path"
+
+  - suite: "43"
+    name: slowhttptest-slow-attacks
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["l7", "ids", "ips", "ddos"]
+    notes: "Slowloris / RUDY / Slowread via slowhttptest; asserts IPS auto-blacklist + MITRE T1499.002 + false-positive guard"
+
+  - suite: "44"
+    name: scapy-amplification
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["xdp-firewall", "tc-scrub", "ddos"]
+    notes: "Spoofed-source DNS ANY / NTP monlist / SSDP / Memcached probes; asserts pre-response drop + MITRE T1498.002 + zero egress amplification"
