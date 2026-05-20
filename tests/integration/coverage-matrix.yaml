@@ -32,11 +32,11 @@ coverage:
   # ── eBPF programs (15) ──────────────────────────────────────────
   - kind: ebpf_program
     feature: xdp-firewall
-    suites: ["11", "25", "27"]
+    suites: ["11", "25", "27", "42"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "L3/L4 stateful firewall (XDP)"
+    notes: "L3/L4 stateful firewall (XDP); XDP-drop CPU savings measured in 42"
 
   - kind: ebpf_program
     feature: xdp-firewall-reject
@@ -48,11 +48,11 @@ coverage:
 
   - kind: ebpf_program
     feature: xdp-ratelimit
-    suites: ["14", "16"]
+    suites: ["14", "16", "42"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Token bucket + sliding window + leaky bucket"
+    notes: "Token bucket + sliding window + leaky bucket; SYN cookie at >1 Mpps in 42"
 
   - kind: ebpf_program
     feature: xdp-ratelimit-syncookie
@@ -80,11 +80,11 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-ids
-    suites: ["12", "26"]
+    suites: ["12", "26", "42"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Intrusion detection (TC)"
+    notes: "Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in 42"
 
   - kind: ebpf_program
     feature: tc-threatintel
@@ -574,3 +574,11 @@ attack_suites:
     profile: nightly
     surfaces: ["l7", "ips", "ratelimit", "ddos", "ids"]
     notes: "MHDDoS GET/POST/STRESS/BYPASS/OVH/TLS/CFB/SLOW multi-method floods"
+
+  - suite: "42"
+    name: pktgen-high-pps
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["xdp-firewall", "xdp-ratelimit", "tc-ids"]
+    notes: "≥1 Mpps via kernel pktgen; asserts XDP-drop CPU savings + SYN cookie path"

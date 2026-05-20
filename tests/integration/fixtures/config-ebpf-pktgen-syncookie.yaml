@@ -1,0 +1,76 @@
+# config-ebpf-pktgen-syncookie.yaml — Rate limit + SYN cookie fixture
+# for the suite 42 SYN-flood scenario. Drops UDP at the firewall and
+# arms the XDP rate-limiter with a SYN-cookie response on the TCP path.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: info
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: pass
+  rules:
+    - id: fw-pktgen-drop-udp
+      priority: 10
+      action: deny
+      protocol: udp
+      dst_port: 9
+      scope: global
+      enabled: true
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: true
+  default_rate: 500
+  default_burst: 1000
+  default_algorithm: token_bucket
+  rules:
+    - id: rl-pktgen-syn-cookie
+      rate: 500
+      burst: 1000
+      scope: global
+      algorithm: token_bucket
+      action: syn_cookie
+      enabled: true
+
+threatintel:
+  enabled: false
+
+ddos:
+  enabled: true
+  policies:
+    - id: ddos-pktgen-syn-flood
+      attack_type: syn_flood
+      detection_threshold_pps: 1000
+      mitigation_action: block
+      auto_block_duration_secs: 60
+      enabled: true
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
