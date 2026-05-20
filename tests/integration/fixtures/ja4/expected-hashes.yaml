@@ -1,0 +1,70 @@
+# expected-hashes.yaml — reference JA4 / JA4S hashes per TLS client.
+#
+# Each client entry pins:
+#   client       — short name used by `ja4_helpers.bash`
+#   tool         — system-installed binary or Python module driving the
+#                  ClientHello.
+#   version_pin  — pinning that controls the observed JA4 hash. Bumping
+#                  the listed package WILL drift the hash; treat any
+#                  mismatch in CI as either a real regression or a
+#                  re-pin job.
+#   notes        — caveats: hashes depend on OpenSSL/BoringSSL build
+#                  flags, Python ssl module backports, Go version, etc.
+#                  Empty `ja4` / `ja4s` mean "not yet recorded on the
+#                  CI baseline image"; the suite still passes since it
+#                  only asserts diversity (distinct count), not exact
+#                  values.
+#
+# Re-pin job:
+#   ./tests/integration/scripts/regen-ja4-hashes.sh
+#       1. starts the suite-45 fixture against a clean agent
+#       2. runs every available client connect
+#       3. reads `/api/v1/alerts?limit=1000` for each client's distinct
+#          ja4_fingerprint
+#       4. rewrites this file in-place
+#
+# When regenerated, the diff should be committed with a message like
+#   `test(integration): re-pin JA4 reference hashes for <client> upgrade`
+
+clients:
+  - client: curl
+    tool: curl
+    version_pin: ""
+    ja4: ""
+    ja4s: ""
+    notes: "OpenSSL build flags determine cipher list ordering"
+
+  - client: openssl
+    tool: openssl s_client
+    version_pin: ""
+    ja4: ""
+    ja4s: ""
+    notes: "Forced -tls1_2 -no_tls1_3; cipher list = system default"
+
+  - client: urllib3
+    tool: python3 + urllib3
+    version_pin: ""
+    ja4: ""
+    ja4s: ""
+    notes: "Inherits CPython ssl defaults; OS-vendor OpenSSL build"
+
+  - client: aiohttp
+    tool: python3 + aiohttp
+    version_pin: ""
+    ja4: ""
+    ja4s: ""
+    notes: "Separate ssl context from urllib3; usually same JA4 in practice"
+
+  - client: go
+    tool: go run (crypto/tls)
+    version_pin: ""
+    ja4: ""
+    ja4s: ""
+    notes: "Go's TLS stack is independent of OpenSSL; JA4 will be distinct"
+
+  - client: mhddos
+    tool: MHDDoS start.py TLS method
+    version_pin: ""
+    ja4: ""
+    ja4s: ""
+    notes: "Forced cipher ECDHE-RSA-AES256-GCM-SHA384 in fallback path"

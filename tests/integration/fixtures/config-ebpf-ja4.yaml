@@ -1,0 +1,88 @@
+# config-ebpf-ja4.yaml — Suite 45 (JA4 client-diversity) fixture.
+#
+# Enables L7 inspection on the test-target TLS port (8443) so that
+# ClientHello bytes are parsed → JA4 fingerprint computed → cached.
+# Two SNI rules drive the alert path:
+#
+#   * deny on  "malicious-ja4.test" — sentinel SNI used by the
+#     "malicious" client variant, emits an alert + MITRE tag.
+#   * allow on "legit-ja4.test"      — sentinel SNI used by the FP
+#     guard, must NOT emit an L7 deny alert.
+#
+# The agent does not terminate TLS; clients connect to an
+# `openssl s_server` running on the agent VM at 0.0.0.0:8443
+# (helper `start_tls_target`). The agent observes ClientHello bytes
+# on its monitored interface via tc-conntrack + L7 parser.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+dlp:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+ddos:
+  enabled: false
+
+l7:
+  enabled: true
+  ports: [443, 8443]
+  reassembly:
+    enabled: true
+    max_flows: 4096
+    max_buffer_per_flow: 16384
+    idle_timeout_secs: 30
+    sweep_interval_secs: 5
+  rules:
+    - id: l7-tls-malicious-sni-deny
+      priority: 10
+      action: deny
+      protocol: tls
+      sni: "malicious-ja4.test"
+      enabled: true
+    - id: l7-tls-legit-sni-allow
+      priority: 20
+      action: allow
+      protocol: tls
+      sni: "legit-ja4.test"
+      enabled: true
+    - id: l7-tls-fallback-log
+      priority: 1000
+      action: log
+      protocol: tls
+      sni: "*"
+      enabled: true
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

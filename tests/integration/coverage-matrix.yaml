@@ -353,11 +353,11 @@ coverage:
 
   - kind: cli_subcommand
     feature: fingerprints
-    suites: ["32"]
+    suites: ["32", "45"]
     topology: 2vm
     kernel_min: "6.9"
-    profile: pr
-    notes: "JA4+ cache; diversity suite planned (45)"
+    profile: nightly
+    notes: "JA4+ cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 45"
 
   - kind: cli_subcommand
     feature: responses
@@ -598,3 +598,11 @@ attack_suites:
     profile: nightly
     surfaces: ["xdp-firewall", "tc-scrub", "ddos"]
     notes: "Spoofed-source DNS ANY / NTP monlist / SSDP / Memcached probes; asserts pre-response drop + MITRE T1498.002 + zero egress amplification"
+
+  - suite: "45"
+    name: ja4-fingerprint-diversity
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["l7", "fingerprints"]
+    notes: "Diverse TLS clients (curl/openssl/urllib3/aiohttp/go/MHDDoS) populate JA4 cache; asserts cache growth + MITRE T1071 tag on malicious-SNI alert + ja4_fingerprint surfaces on /api/v1/alerts + FP guard for legit SNI + endpoint liveness after agent restart"
