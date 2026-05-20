@@ -15,14 +15,11 @@
 #      response carries a non-null ja4_fingerprint and a MITRE
 #      technique id (T1071-family, via dst_port 443 / 8443 mapping).
 #   3. A "legit" SNI does NOT match the deny rule.
-#   4. After agent restart the /api/v1/fingerprints/summary endpoint
-#      still returns a valid 200 (service liveness post-restart).
-#
-# NOT yet asserted (blocked on missing agent features):
-#   - JA4S server hash exposure via /api/v1/fingerprints/ja4s
-#     (endpoint does not exist; JA4S is computed in-domain but never
-#     surfaced).
-#   - JA4 cache persistence across restart (cache is in-memory only).
+#   4. JA4S server-side fingerprints populate the JA4S cache and surface
+#      on /api/v1/fingerprints/ja4s after ServerHello observation.
+#   5. JA4/JA4S caches persist across agent restart when
+#      l7.fingerprints.persistence_path is configured: cached_count
+#      after restart is non-zero (redb-backed persistence).
 
 load '../lib/ebpf_helpers'
 load '../lib/ja4_helpers'
@@ -190,28 +187,80 @@ _ja4_drive_available_clients() {
     }
 }
 
-@test "fingerprint summary endpoint is responsive after agent restart" {
-    # Sanity: endpoint reachable now.
-    ja4_summary_count >/dev/null || {
-        echo "/api/v1/fingerprints/summary not reachable before restart" >&2
+@test "JA4S server fingerprints surface on /api/v1/fingerprints/ja4s" {
+    # Drive available TLS clients against the legit SNI so the agent
+    # observes ServerHello bytes and computes JA4S per flow.
+    local fired
+    fired="$(_ja4_drive_available_clients "$LEGIT_SNI")"
+    [ "$fired" -ge 1 ] || skip "no TLS client available to drive ServerHello"
+
+    # Let the userspace L7 pipeline ingest server-side handshake bytes.
+    sleep 2
+
+    local ja4s_count
+    ja4s_count="$(ja4s_summary_count || echo 0)"
+    [ -z "$ja4s_count" ] && ja4s_count=0
+
+    [ "$ja4s_count" -ge 1 ] || {
+        echo "expected /api/v1/fingerprints/ja4s cached_count >= 1, got ${ja4s_count}" >&2
+        api_get /api/v1/fingerprints/ja4s || true
+        return 1
+    }
+}
+
+@test "JA4/JA4S caches persist across agent restart (redb-backed)" {
+    # Pre-condition: caches populated by earlier tests in this suite.
+    local before_ja4 before_ja4s
+    before_ja4="$(ja4_summary_count || echo 0)"
+    before_ja4s="$(ja4s_summary_count || echo 0)"
+    [ -z "$before_ja4" ] && before_ja4=0
+    [ -z "$before_ja4s" ] && before_ja4s=0
+
+    [ "$before_ja4" -ge 1 ] || skip "JA4 cache empty before restart (no clients fired earlier)"
+
+    # Persistence flag must be advertised by the summary endpoint.
+    local persistent
+    persistent="$(ja4_summary_persistent || echo false)"
+    [ "$persistent" = "true" ] || {
+        echo "expected summary.persistent=true with l7.fingerprints.persistence_path configured" >&2
         return 1
     }
 
-    # Restart the agent against the same prepared config. The JA4 cache
-    # is in-memory only and IS expected to reset — this test asserts
-    # service liveness, not data persistence.
     stop_ebpf_agent 2>/dev/null || true
     start_ebpf_agent "$PREPARED_CONFIG"
     wait_for_ebpf_loaded 30 || skip "agent failed to come back up"
 
-    # Endpoint must answer 200 within 10 s.
-    local i
+    # Wait up to 10 s for HTTP to come back, then assert real persistence:
+    # cached_count must be > 0 after restart (entries loaded from redb).
+    local i ready=0
     for i in 1 2 3 4 5 6 7 8 9 10; do
         if ja4_summary_count >/dev/null 2>&1; then
-            return 0
+            ready=1
+            break
         fi
         sleep 1
     done
-    echo "/api/v1/fingerprints/summary did not become responsive within 10s" >&2
-    return 1
+    [ "$ready" = "1" ] || {
+        echo "/api/v1/fingerprints/summary did not become responsive within 10s" >&2
+        return 1
+    }
+
+    local after_ja4 after_ja4s
+    after_ja4="$(ja4_summary_count || echo 0)"
+    after_ja4s="$(ja4s_summary_count || echo 0)"
+    [ -z "$after_ja4" ] && after_ja4=0
+    [ -z "$after_ja4s" ] && after_ja4s=0
+
+    [ "$after_ja4" -ge 1 ] || {
+        echo "JA4 cache did NOT persist across restart: before=${before_ja4} after=${after_ja4}" >&2
+        return 1
+    }
+
+    # JA4S persistence is asserted only if we had any server hashes pre-restart.
+    if [ "$before_ja4s" -ge 1 ]; then
+        [ "$after_ja4s" -ge 1 ] || {
+            echo "JA4S cache did NOT persist across restart: before=${before_ja4s} after=${after_ja4s}" >&2
+            return 1
+        }
+    fi
 }

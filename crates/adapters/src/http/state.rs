@@ -70,6 +70,7 @@ pub struct AppState {
     pub reload_trigger: mpsc::Sender<()>,
     pub ebpf_program_status: Arc<RwLock<HashMap<String, bool>>>,
     pub fingerprint_cache: Option<Arc<domain::l7::ja4::FingerprintCache>>,
+    pub ja4s_fingerprint_cache: Option<Arc<domain::l7::ja4::Ja4sFingerprintCache>>,
     pub response_engine: Option<Arc<RwLock<domain::response::engine::ResponseEngine>>>,
     pub capture_engine: Option<Arc<RwLock<domain::capture::engine::CaptureEngine>>>,
     /// Broadcast sender for conntrack lifecycle events. SSE clients
@@ -131,6 +132,7 @@ impl AppState {
             reload_trigger,
             ebpf_program_status,
             fingerprint_cache: None,
+            ja4s_fingerprint_cache: None,
             response_engine: None,
             capture_engine: None,
             conntrack_event_tx: None,
@@ -163,6 +165,16 @@ impl AppState {
     #[must_use]
     pub fn with_fingerprint_cache(mut self, cache: Arc<domain::l7::ja4::FingerprintCache>) -> Self {
         self.fingerprint_cache = Some(cache);
+        self
+    }
+
+    /// Attach a JA4S server-side fingerprint cache.
+    #[must_use]
+    pub fn with_ja4s_fingerprint_cache(
+        mut self,
+        cache: Arc<domain::l7::ja4::Ja4sFingerprintCache>,
+    ) -> Self {
+        self.ja4s_fingerprint_cache = Some(cache);
         self
     }
 

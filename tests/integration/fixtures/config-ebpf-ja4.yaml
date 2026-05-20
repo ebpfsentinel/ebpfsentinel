@@ -50,6 +50,8 @@ ddos:
 l7:
   enabled: true
   ports: [443, 8443]
+  fingerprints:
+    persistence_path: __DATA_DIR__/fingerprints.redb
   reassembly:
     enabled: true
     max_flows: 4096

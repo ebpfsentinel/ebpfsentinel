@@ -10,6 +10,8 @@
 #   stop_tls_target                — kill it
 #   ja4_connect <client> <sni>     — single TLS connect from attacker VM
 #   ja4_summary_count              — GET /api/v1/fingerprints/summary → cached_count
+#   ja4_summary_persistent         — GET /api/v1/fingerprints/summary → persistent flag
+#   ja4s_summary_count             — GET /api/v1/fingerprints/ja4s → cached_count
 #   ja4_alert_hashes [filter]      — distinct ja4_fingerprint values across alerts
 #
 # Clients (subset, gated by availability):
@@ -312,6 +314,24 @@ ja4_connect() {
 ja4_summary_count() {
     local body
     body="$(api_get /api/v1/fingerprints/summary 2>/dev/null)" || return 1
+    _load_http_status
+    [ "${HTTP_STATUS:-0}" = "200" ] || return 1
+    echo "$body" | jq -r '.cached_count // 0'
+}
+
+# ja4_summary_persistent — return "true"/"false" for cache persistence.
+ja4_summary_persistent() {
+    local body
+    body="$(api_get /api/v1/fingerprints/summary 2>/dev/null)" || return 1
+    _load_http_status
+    [ "${HTTP_STATUS:-0}" = "200" ] || return 1
+    echo "$body" | jq -r '.persistent // false'
+}
+
+# ja4s_summary_count — return the agent's cached JA4S server fingerprint count.
+ja4s_summary_count() {
+    local body
+    body="$(api_get /api/v1/fingerprints/ja4s 2>/dev/null)" || return 1
     _load_http_status
     [ "${HTTP_STATUS:-0}" = "200" ] || return 1
     echo "$body" | jq -r '.cached_count // 0'

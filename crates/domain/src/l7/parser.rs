@@ -1,7 +1,7 @@
 use super::entity::{
     DetectedProtocol, DnsTcpMessage, FtpCommand, GrpcRequest, HttpRequest, ImapCommand, MySqlQuery,
     ParsedProtocol, Pop3Command, PostgresQuery, RedisCommand, SmbHeader, SmtpCommand, SshBanner,
-    TlsClientHello,
+    TlsClientHello, TlsServerHello,
 };
 use super::error::L7Error;
 
@@ -308,9 +308,15 @@ pub fn parse_payload(payload: &[u8]) -> ParsedProtocol {
             Ok(req) => ParsedProtocol::Http(req),
             Err(_) => ParsedProtocol::Unknown,
         },
-        DetectedProtocol::Tls => match parse_tls_client_hello(payload) {
-            Ok(hello) => ParsedProtocol::Tls(hello),
-            Err(_) => ParsedProtocol::Unknown,
+        DetectedProtocol::Tls => match peek_tls_handshake_type(payload) {
+            Some(0x02) => match parse_tls_server_hello(payload) {
+                Ok(hello) => ParsedProtocol::TlsServer(hello),
+                Err(_) => ParsedProtocol::Unknown,
+            },
+            _ => match parse_tls_client_hello(payload) {
+                Ok(hello) => ParsedProtocol::Tls(hello),
+                Err(_) => ParsedProtocol::Unknown,
+            },
         },
         DetectedProtocol::Grpc => match parse_grpc(payload) {
             Ok(req) => ParsedProtocol::Grpc(req),
@@ -523,6 +529,15 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, L7Error>
 
 /// Validate TLS record + handshake headers, return `(record_version, handshake_body)`.
 fn validate_tls_record(payload: &[u8]) -> Result<(u16, &[u8]), L7Error> {
+    validate_tls_record_typed(payload, 0x01, "ClientHello (0x01)")
+}
+
+/// Validate TLS record + handshake headers for a specific handshake type.
+fn validate_tls_record_typed<'a>(
+    payload: &'a [u8],
+    expected_hs_type: u8,
+    expected_label: &'static str,
+) -> Result<(u16, &'a [u8]), L7Error> {
     if payload.len() < 5 {
         return Err(L7Error::InsufficientData {
             needed: 5,
@@ -554,10 +569,10 @@ fn validate_tls_record(payload: &[u8]) -> Result<(u16, &[u8]), L7Error> {
             got: payload.len(),
         });
     }
-    if record[0] != 0x01 {
+    if record[0] != expected_hs_type {
         return Err(L7Error::InvalidFormat {
             protocol: "TLS",
-            detail: format!("expected ClientHello (0x01), got 0x{:02x}", record[0]),
+            detail: format!("expected {expected_label}, got 0x{:02x}", record[0]),
         });
     }
     if record.len() < 4 {
@@ -576,6 +591,123 @@ fn validate_tls_record(payload: &[u8]) -> Result<(u16, &[u8]), L7Error> {
         });
     }
     Ok((record_version, hs))
+}
+
+/// Return the handshake type byte (e.g. `0x01` `ClientHello`, `0x02` `ServerHello`)
+/// for a payload that begins with a TLS handshake record, or `None` if the
+/// payload is too short or not a handshake record.
+fn peek_tls_handshake_type(payload: &[u8]) -> Option<u8> {
+    if payload.len() < 6 || payload[0] != 0x16 {
+        return None;
+    }
+    Some(payload[5])
+}
+
+/// Parse a TLS `ServerHello` message and extract JA4S fingerprint fields.
+///
+/// `ServerHello` body layout:
+///   - 2 bytes `legacy_version`
+///   - 32 bytes random
+///   - 1 byte `session_id_length`, N bytes `session_id`
+///   - 2 bytes selected cipher suite
+///   - 1 byte compression method
+///   - 2 bytes `extensions_length`, M bytes extensions
+pub fn parse_tls_server_hello(payload: &[u8]) -> Result<TlsServerHello, L7Error> {
+    let (_record_version, hs) = validate_tls_record_typed(payload, 0x02, "ServerHello (0x02)")?;
+    let legacy_version = u16::from_be_bytes([hs[0], hs[1]]);
+    let mut pos = 34; // skip version (2) + random (32)
+
+    // session_id: length(1) + data
+    if pos >= hs.len() {
+        return Ok(TlsServerHello {
+            selected_cipher: 0,
+            selected_version: legacy_version,
+            extensions: Vec::new(),
+            selected_group: None,
+        });
+    }
+    let session_id_len = hs[pos] as usize;
+    pos += 1 + session_id_len;
+
+    // selected cipher: 2 bytes
+    if pos + 2 > hs.len() {
+        return Ok(TlsServerHello {
+            selected_cipher: 0,
+            selected_version: legacy_version,
+            extensions: Vec::new(),
+            selected_group: None,
+        });
+    }
+    let selected_cipher = u16::from_be_bytes([hs[pos], hs[pos + 1]]);
+    pos += 2;
+
+    // compression method: 1 byte (TLS 1.3 mandates 0x00)
+    if pos >= hs.len() {
+        return Ok(TlsServerHello {
+            selected_cipher,
+            selected_version: legacy_version,
+            extensions: Vec::new(),
+            selected_group: None,
+        });
+    }
+    pos += 1;
+
+    // extensions: length(2) + data
+    if pos + 2 > hs.len() {
+        return Ok(TlsServerHello {
+            selected_cipher,
+            selected_version: legacy_version,
+            extensions: Vec::new(),
+            selected_group: None,
+        });
+    }
+    let extensions_len = u16::from_be_bytes([hs[pos], hs[pos + 1]]) as usize;
+    pos += 2;
+    let ext_end = pos + extensions_len.min(hs.len().saturating_sub(pos));
+
+    let mut extension_types: Vec<u16> = Vec::new();
+    let mut selected_version = legacy_version;
+    let mut selected_group: Option<u16> = None;
+
+    let mut p = pos;
+    while p + 4 <= ext_end {
+        let ext_type = u16::from_be_bytes([hs[p], hs[p + 1]]);
+        let ext_len = u16::from_be_bytes([hs[p + 2], hs[p + 3]]) as usize;
+        p += 4;
+        let data_end = p + ext_len.min(hs.len().saturating_sub(p));
+        let data = &hs[p..data_end];
+
+        if !is_grease(ext_type) {
+            extension_types.push(ext_type);
+        }
+
+        match ext_type {
+            // supported_versions extension in ServerHello carries the
+            // selected version as a single 2-byte value.
+            0x002B if data.len() >= 2 => {
+                selected_version = u16::from_be_bytes([data[0], data[1]]);
+            }
+            // key_share extension in ServerHello carries the selected
+            // named group: 2 bytes group + 2 bytes key_exchange length + N
+            // bytes key.
+            0x0033 if data.len() >= 2 => {
+                let group = u16::from_be_bytes([data[0], data[1]]);
+                if !is_grease(group) {
+                    selected_group = Some(group);
+                }
+            }
+            _ => {}
+        }
+
+        p = data_end;
+    }
+
+    Ok(TlsServerHello {
+        selected_cipher,
+        selected_version,
+        extensions: extension_types,
+        selected_group,
+    })
 }
 
 /// Parsed extension fields collected during extension traversal.

@@ -176,6 +176,7 @@ pub struct Pop3Command {
 pub enum ParsedProtocol {
     Http(HttpRequest),
     Tls(TlsClientHello),
+    TlsServer(TlsServerHello),
     Grpc(GrpcRequest),
     Smtp(SmtpCommand),
     Ftp(FtpCommand),

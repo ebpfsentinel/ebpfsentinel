@@ -151,6 +151,7 @@ use super::zone_handler;
         mitre_handler::mitre_coverage,
         // Fingerprints
         fingerprint_handler::fingerprint_summary,
+        fingerprint_handler::ja4s_summary,
         // Captures
         capture_handler::start_capture,
         capture_handler::list_captures,
@@ -270,6 +271,7 @@ use super::zone_handler;
         mitre_handler::TacticSummary,
         // Fingerprints
         fingerprint_handler::FingerprintSummaryResponse,
+        fingerprint_handler::Ja4sSummaryResponse,
         // Captures
         capture_handler::StartCaptureRequest,
         capture_handler::CaptureResponse,

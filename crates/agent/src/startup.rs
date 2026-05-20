@@ -726,6 +726,63 @@ pub async fn run(
     let ebpf_program_status: Arc<RwLock<std::collections::HashMap<String, bool>>> =
         Arc::new(RwLock::new(std::collections::HashMap::new()));
 
+    // ── JA4 / JA4S fingerprint caches (optionally redb-backed) ──────
+    let fingerprint_cache_ttl = std::time::Duration::from_mins(5);
+    let fingerprint_cache_max = 10_000;
+    let (ja4_cache, ja4s_cache) = if let Some(ref path) = config.l7.fingerprints.persistence_path {
+        match adapters::storage::fingerprint_store_redb::RedbFingerprintStore::open(
+            std::path::Path::new(path),
+        ) {
+            Ok(store) => {
+                let store: Arc<adapters::storage::fingerprint_store_redb::RedbFingerprintStore> =
+                    Arc::new(store);
+                let ja4: Arc<dyn domain::l7::ja4::Ja4Persist> = store.clone();
+                let ja4s: Arc<dyn domain::l7::ja4::Ja4sPersist> = store;
+                info!(path = %path, "JA4/JA4S fingerprint persistence enabled");
+                (
+                    Arc::new(domain::l7::ja4::FingerprintCache::with_persist(
+                        fingerprint_cache_max,
+                        fingerprint_cache_ttl,
+                        ja4,
+                    )),
+                    Arc::new(domain::l7::ja4::Ja4sFingerprintCache::with_persist(
+                        fingerprint_cache_max,
+                        fingerprint_cache_ttl,
+                        ja4s,
+                    )),
+                )
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %path,
+                    error = %e,
+                    "failed to open fingerprint persistence store, falling back to in-memory caches"
+                );
+                (
+                    Arc::new(domain::l7::ja4::FingerprintCache::new(
+                        fingerprint_cache_max,
+                        fingerprint_cache_ttl,
+                    )),
+                    Arc::new(domain::l7::ja4::Ja4sFingerprintCache::new(
+                        fingerprint_cache_max,
+                        fingerprint_cache_ttl,
+                    )),
+                )
+            }
+        }
+    } else {
+        (
+            Arc::new(domain::l7::ja4::FingerprintCache::new(
+                fingerprint_cache_max,
+                fingerprint_cache_ttl,
+            )),
+            Arc::new(domain::l7::ja4::Ja4sFingerprintCache::new(
+                fingerprint_cache_max,
+                fingerprint_cache_ttl,
+            )),
+        )
+    };
+
     let mut app_state = AppState::new(
         Arc::clone(&metrics),
         Arc::clone(&ebpf_loaded),
@@ -761,6 +818,11 @@ pub async fn run(
         domain::response::engine::ResponseEngine::new(86400), // max TTL: 24h
     ));
     app_state = app_state.with_response_engine(Arc::clone(&response_engine));
+
+    // Wire JA4 + JA4S caches built earlier so handlers can report counts
+    app_state = app_state
+        .with_fingerprint_cache(Arc::clone(&ja4_cache))
+        .with_ja4s_fingerprint_cache(Arc::clone(&ja4s_cache));
 
     // Real-time alert plumbing (broadcast + replay buffer). Created here
     // so AppState can hand them to the SSE handler and the agent can
@@ -2028,7 +2090,9 @@ pub async fn run(
     .with_ips_service(Arc::clone(&ips_svc))
     .with_ddos_service(Arc::clone(&ddos_svc))
     .with_dlp_service(Arc::clone(&dlp_svc))
-    .with_doh_resolvers(&config.dns.doh_resolvers);
+    .with_doh_resolvers(&config.dns.doh_resolvers)
+    .with_fingerprint_cache(Arc::clone(&ja4_cache))
+    .with_ja4s_fingerprint_cache(Arc::clone(&ja4s_cache));
     // Wire DNS services into the dispatcher for DNS response processing
     let dispatcher = if let Some(ref svc) = dns_cache_svc_concrete {
         dispatcher.with_dns_cache_svc(Arc::clone(svc))

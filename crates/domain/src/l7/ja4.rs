@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -189,7 +190,7 @@ fn sha256_12(input: &str) -> String {
 // ── Flow fingerprint cache ────────────────────────────────────────
 
 /// 4-tuple flow key for fingerprint caching.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowKey {
     pub src_addr: [u32; 4],
     pub src_port: u16,
@@ -197,9 +198,29 @@ pub struct FlowKey {
     pub dst_port: u16,
 }
 
-struct CacheEntry {
-    fingerprint: Ja4Fingerprint,
-    inserted_at: Instant,
+struct CacheEntry<T> {
+    fingerprint: T,
+    inserted_at: SystemTime,
+}
+
+/// Persistence port for the JA4 fingerprint cache. Implementations
+/// can back the cache with an embedded KV store (redb), allowing the
+/// agent to repopulate the in-memory cache after a restart.
+pub trait Ja4Persist: Send + Sync {
+    /// Persist a fresh cache entry. Errors are swallowed by the cache
+    /// (best-effort: persistence must never block the hot path).
+    fn save(&self, key: &FlowKey, fp: &Ja4Fingerprint, inserted_at: SystemTime);
+
+    /// Load every persisted entry. Called once at cache construction
+    /// to repopulate after restart. Implementations should skip
+    /// entries older than the cache TTL.
+    fn load_all(&self) -> Vec<(FlowKey, Ja4Fingerprint, SystemTime)>;
+}
+
+/// Persistence port for the JA4S fingerprint cache.
+pub trait Ja4sPersist: Send + Sync {
+    fn save(&self, key: &FlowKey, fp: &Ja4sFingerprint, inserted_at: SystemTime);
+    fn load_all(&self) -> Vec<(FlowKey, Ja4sFingerprint, SystemTime)>;
 }
 
 /// LRU-ish fingerprint cache with configurable TTL and max size.
@@ -207,9 +228,10 @@ struct CacheEntry {
 /// Uses interior mutability (`Mutex`) so all methods take `&self`.
 /// Safe to share via `Arc<FingerprintCache>` without an external lock.
 pub struct FingerprintCache {
-    entries: std::sync::Mutex<HashMap<FlowKey, CacheEntry>>,
+    entries: std::sync::Mutex<HashMap<FlowKey, CacheEntry<Ja4Fingerprint>>>,
     max_size: usize,
     ttl: Duration,
+    persist: Option<Arc<dyn Ja4Persist>>,
 }
 
 impl FingerprintCache {
@@ -218,6 +240,31 @@ impl FingerprintCache {
             entries: std::sync::Mutex::new(HashMap::new()),
             max_size,
             ttl,
+            persist: None,
+        }
+    }
+
+    /// Build a cache that mirrors writes to `persist` and primes itself
+    /// from `persist.load_all()` at construction time.
+    pub fn with_persist(max_size: usize, ttl: Duration, persist: Arc<dyn Ja4Persist>) -> Self {
+        let mut map: HashMap<FlowKey, CacheEntry<Ja4Fingerprint>> = HashMap::new();
+        let now = SystemTime::now();
+        for (key, fp, ts) in persist.load_all() {
+            if now.duration_since(ts).is_ok_and(|d| d <= ttl) && map.len() < max_size {
+                map.insert(
+                    key,
+                    CacheEntry {
+                        fingerprint: fp,
+                        inserted_at: ts,
+                    },
+                );
+            }
+        }
+        Self {
+            entries: std::sync::Mutex::new(map),
+            max_size,
+            ttl,
+            persist: Some(persist),
         }
     }
 
@@ -228,7 +275,7 @@ impl FingerprintCache {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = entries.get(key)?;
-        if entry.inserted_at.elapsed() > self.ttl {
+        if entry.inserted_at.elapsed().is_ok_and(|d| d > self.ttl) {
             return None;
         }
         Some(entry.fingerprint.clone())
@@ -236,18 +283,22 @@ impl FingerprintCache {
 
     /// Insert a fingerprint. Evicts oldest entries if cache is full.
     pub fn insert(&self, key: FlowKey, fingerprint: Ja4Fingerprint) {
+        let now = SystemTime::now();
+        if let Some(persist) = self.persist.as_ref() {
+            persist.save(&key, &fingerprint, now);
+        }
         let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if entries.len() >= self.max_size {
-            Self::evict_expired_or_oldest(&mut entries, self.ttl, self.max_size);
+            evict_expired_or_oldest(&mut entries, self.ttl, self.max_size);
         }
         entries.insert(
             key,
             CacheEntry {
                 fingerprint,
-                inserted_at: Instant::now(),
+                inserted_at: now,
             },
         );
     }
@@ -268,21 +319,119 @@ impl FingerprintCache {
             .is_empty()
     }
 
-    fn evict_expired_or_oldest(
-        entries: &mut HashMap<FlowKey, CacheEntry>,
-        ttl: Duration,
-        max_size: usize,
-    ) {
-        entries.retain(|_, entry| entry.inserted_at.elapsed() <= ttl);
+    /// Returns whether a persistence backend is wired to this cache.
+    pub fn is_persistent(&self) -> bool {
+        self.persist.is_some()
+    }
+}
 
-        if entries.len() >= max_size
-            && let Some(oldest_key) = entries
-                .iter()
-                .min_by_key(|(_, e)| e.inserted_at)
-                .map(|(k, _)| k.clone())
-        {
-            entries.remove(&oldest_key);
+fn evict_expired_or_oldest<T>(
+    entries: &mut HashMap<FlowKey, CacheEntry<T>>,
+    ttl: Duration,
+    max_size: usize,
+) {
+    entries.retain(|_, entry| entry.inserted_at.elapsed().map_or(true, |d| d <= ttl));
+
+    if entries.len() >= max_size
+        && let Some(oldest_key) = entries
+            .iter()
+            .min_by_key(|(_, e)| e.inserted_at)
+            .map(|(k, _)| k.clone())
+    {
+        entries.remove(&oldest_key);
+    }
+}
+
+/// JA4S server-side fingerprint cache. Mirrors [`FingerprintCache`] but
+/// stores [`Ja4sFingerprint`] entries keyed by the same 4-tuple.
+pub struct Ja4sFingerprintCache {
+    entries: std::sync::Mutex<HashMap<FlowKey, CacheEntry<Ja4sFingerprint>>>,
+    max_size: usize,
+    ttl: Duration,
+    persist: Option<Arc<dyn Ja4sPersist>>,
+}
+
+impl Ja4sFingerprintCache {
+    pub fn new(max_size: usize, ttl: Duration) -> Self {
+        Self {
+            entries: std::sync::Mutex::new(HashMap::new()),
+            max_size,
+            ttl,
+            persist: None,
         }
+    }
+
+    pub fn with_persist(max_size: usize, ttl: Duration, persist: Arc<dyn Ja4sPersist>) -> Self {
+        let mut map: HashMap<FlowKey, CacheEntry<Ja4sFingerprint>> = HashMap::new();
+        let now = SystemTime::now();
+        for (key, fp, ts) in persist.load_all() {
+            if now.duration_since(ts).is_ok_and(|d| d <= ttl) && map.len() < max_size {
+                map.insert(
+                    key,
+                    CacheEntry {
+                        fingerprint: fp,
+                        inserted_at: ts,
+                    },
+                );
+            }
+        }
+        Self {
+            entries: std::sync::Mutex::new(map),
+            max_size,
+            ttl,
+            persist: Some(persist),
+        }
+    }
+
+    pub fn get(&self, key: &FlowKey) -> Option<Ja4sFingerprint> {
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = entries.get(key)?;
+        if entry.inserted_at.elapsed().is_ok_and(|d| d > self.ttl) {
+            return None;
+        }
+        Some(entry.fingerprint.clone())
+    }
+
+    pub fn insert(&self, key: FlowKey, fingerprint: Ja4sFingerprint) {
+        let now = SystemTime::now();
+        if let Some(persist) = self.persist.as_ref() {
+            persist.save(&key, &fingerprint, now);
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if entries.len() >= self.max_size {
+            evict_expired_or_oldest(&mut entries, self.ttl, self.max_size);
+        }
+        entries.insert(
+            key,
+            CacheEntry {
+                fingerprint,
+                inserted_at: now,
+            },
+        );
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    }
+
+    pub fn is_persistent(&self) -> bool {
+        self.persist.is_some()
     }
 }
 
