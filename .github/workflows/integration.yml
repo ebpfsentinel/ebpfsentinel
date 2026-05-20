@@ -1,8 +1,9 @@
 name: Integration Tests
 
 on:
-  schedule:
-    - cron: "0 5 * * 1" # Weekly Monday 05:00 UTC
+  # schedule:
+  #   - cron: "0 5 * * 1" # Weekly Monday 05:00 UTC (API + Docker + eBPF)
+  #   - cron: "0 4 * * *" # Nightly 04:00 UTC (3-VM transit topology)
   workflow_dispatch:
 
 permissions:
@@ -172,3 +173,56 @@ jobs:
 
       - name: Suite 40 — L2 VIP Announcer
         run: sudo bats --timing tests/integration/suites/40-ebpf-vip-announcer-scenarios.bats
+
+  # ── 3-VM transit topology (nightly, self-hosted Vagrant runner) ──
+  # Real execution requires Vagrant + VirtualBox + nested virt, which the
+  # hosted GitHub runners do not provide. The job is gated to runners
+  # carrying the `vagrant` label; on the nightly cron schedule and on
+  # explicit dispatch only. Without such a runner the workflow run skips
+  # the job rather than failing.
+  integration-3vm:
+    name: 3-VM Transit Integration
+    if: github.event.schedule == '0 4 * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, vagrant]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Sanity-check 3-VM scripts
+        run: |
+          bash -n tests/integration/scripts/run-in-3vm.sh
+          bash -n tests/integration/vagrant/provision/setup-backend.sh
+
+      - name: Validate coverage-matrix topology tags
+        run: |
+          python3 -m pip install --user pyyaml
+          python3 - <<'PY'
+          import sys, yaml
+          with open("tests/integration/coverage-matrix.yaml") as f:
+              doc = yaml.safe_load(f)
+          allowed = {"none", "2vm", "3vm", "docker", "k8s"}
+          bad = []
+          for section in ("ebpf_programs", "cli_subcommands", "domain_modules"):
+              for row in doc.get(section, []) or []:
+                  topo = row.get("topology", "any")
+                  if topo not in allowed:
+                      bad.append((section, row.get("program") or row.get("subcommand") or row.get("module"), topo))
+          if bad:
+              for s, k, t in bad:
+                  print(f"::error::{s} entry '{k}' has invalid topology '{t}'", file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: Boot 3-VM transit topology
+        run: |
+          cd tests/integration/vagrant
+          VAGRANT_3VM=1 vagrant up agent attacker backend
+
+      - name: Run transit-tagged suites
+        run: bash tests/integration/scripts/run-in-3vm.sh --skip-provision --transit-only
+
+      - name: Tear down VMs
+        if: always()
+        run: |
+          cd tests/integration/vagrant
+          VAGRANT_3VM=1 vagrant destroy -f agent attacker backend || true

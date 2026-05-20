@@ -3,31 +3,49 @@
 #
 # Vagrantfile for eBPFsentinel integration testing.
 #
-# Defines two VMs:
-#   - agent:    runs the eBPF agent (builds, provisions, serves endpoints)
-#   - attacker: runs attack/test tools against the agent VM
+# Two topologies are supported from this single file:
+#
+#   2-VM mode (default):
+#     - agent:    runs the eBPF agent (builds, provisions, serves endpoints)
+#     - attacker: runs attack/test tools against the agent VM
+#     Single private network: 192.168.56.0/24 (agent .10, attacker .20).
+#
+#   3-VM mode (transit topology, set VAGRANT_3VM=1):
+#     - attacker: client side (192.168.56.20, default route -> agent)
+#     - agent:    dual-homed router (eth1 192.168.56.10, eth2 192.168.57.10,
+#                 ip_forward=1, eBPF programs attached on transit traffic)
+#     - backend:  service side (192.168.57.30, iperf3/nginx/sshd/openssl
+#                 s_server, default route -> agent)
+#     Used for DSR load balancing, transit NAT/QoS, multi-WAN failover,
+#     and TLS-MITM scenarios.
 #
 # Usage:
-#   vagrant up                # Create and provision both VMs
+#   vagrant up                # Create and provision the default topology
+#   VAGRANT_3VM=1 vagrant up  # Create and provision the 3-VM transit topology
 #   vagrant up agent          # Create agent VM only
 #   vagrant up attacker       # Create attacker VM only
-#   vagrant ssh agent         # SSH into agent VM
-#   vagrant ssh attacker      # SSH into attacker VM
-#   vagrant halt              # Stop both VMs
-#   vagrant destroy -f        # Delete both VMs
+#   VAGRANT_3VM=1 vagrant up backend
+#   vagrant ssh {agent,attacker,backend}
+#   vagrant halt              # Stop VMs
+#   vagrant destroy -f        # Delete VMs
 #
 # Environment variables:
 #   AGENT_VM_CPUS     Agent VM vCPUs (default: 2)
 #   AGENT_VM_MEMORY   Agent VM RAM in MB (default: 2048)
+#   VAGRANT_3VM       Set to "1" / "true" to enable the 3-VM transit topology
 #
 # Provider: VirtualBox (default) or VMware Workstation (vmware_desktop)
 # Base box: bento/ubuntu-24.04 (provisioned inline)
 #
 # Network: VMs communicate over a VirtualBox host-only network (192.168.56.0/24)
-# with MTU 9000, TCP BBR, and tuned buffers for maximum throughput.
+# with MTU 9000, TCP BBR, and tuned buffers for maximum throughput. In 3-VM
+# mode a second host-only network 192.168.57.0/24 is added between agent
+# and backend.
 
 VAGRANTFILE_API_VERSION = "2"
 
+# 3-VM mode toggle (transit topology with a dedicated backend VM).
+VAGRANT_3VM = %w[1 true yes on].include?((ENV["VAGRANT_3VM"] || "").downcase)
 
 # Internal network name shared by both VMs (faster than host-only)
 
@@ -43,6 +61,11 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 
     # Private network for inter-VM communication
     agent.vm.network "private_network", ip: "192.168.56.10"
+
+    # In 3-VM transit mode, attach a second NIC on the backend network.
+    if VAGRANT_3VM
+      agent.vm.network "private_network", ip: "192.168.57.10"
+    end
 
     # Port forwards for direct host access to agent endpoints
     agent.vm.network "forwarded_port", guest: 8080, host: 8080, auto_correct: true
@@ -204,10 +227,46 @@ NETPLAN
     SHELL
 
     # ----------------------------------------------------------
+    # Provisioner: 3-VM transit routing (enable forwarding + MTU on eth2)
+    # Only fires when VAGRANT_3VM is set; the agent acts as an IP router
+    # between the client subnet (192.168.56.0/24) and the backend subnet
+    # (192.168.57.0/24).
+    # ----------------------------------------------------------
+    if VAGRANT_3VM
+      agent.vm.provision "shell", name: "transit-routing", inline: <<-SHELL
+        set -euxo pipefail
+
+        cat > /etc/sysctl.d/99-ebpfsentinel-forward.conf <<SYSCTL
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.default.rp_filter=0
+SYSCTL
+        sysctl --system
+
+        # Jumbo frames on the backend-side NIC too
+        if ip link show eth2 &>/dev/null; then
+          ip link set eth2 mtu 9000
+          cat > /etc/netplan/99-mtu-eth2.yaml <<NETPLAN
+network:
+  version: 2
+  ethernets:
+    eth2:
+      mtu: 9000
+NETPLAN
+          netplan apply 2>/dev/null || true
+        fi
+      SHELL
+    end
+
+    # ----------------------------------------------------------
     # Provisioner: setup (external script, unprivileged)
     # ----------------------------------------------------------
     agent.vm.provision "shell", name: "setup", privileged: false, path: "provision/setup-agent.sh",
-      env: { "PROVISION_MODE" => ENV.fetch('PROVISION_MODE', 'fast') }
+      env: {
+        "PROVISION_MODE" => ENV.fetch('PROVISION_MODE', 'fast'),
+        "VAGRANT_3VM"    => VAGRANT_3VM ? "1" : "0"
+      }
   end
 
   # ============================================================
@@ -303,8 +362,88 @@ NETPLAN
     SHELL
 
     # ----------------------------------------------------------
+    # Provisioner: 3-VM transit routing (route backend network via agent)
+    # ----------------------------------------------------------
+    if VAGRANT_3VM
+      attacker.vm.provision "shell", name: "transit-routing", inline: <<-SHELL
+        set -euxo pipefail
+
+        # Static route: anything destined to the backend subnet goes via
+        # the agent. Persistent across reboots via a systemd-networkd drop-in.
+        ip route replace 192.168.57.0/24 via 192.168.56.10 dev eth1 || true
+
+        cat > /etc/networkd-dispatcher/routable.d/50-3vm-route.sh <<'EOS'
+#!/bin/sh
+ip route replace 192.168.57.0/24 via 192.168.56.10 dev eth1 || true
+EOS
+        chmod +x /etc/networkd-dispatcher/routable.d/50-3vm-route.sh 2>/dev/null || true
+      SHELL
+    end
+
+    # ----------------------------------------------------------
     # Provisioner: setup (external script, unprivileged)
     # ----------------------------------------------------------
     attacker.vm.provision "shell", name: "setup", privileged: false, path: "provision/setup-attacker.sh"
+  end
+
+  # ============================================================
+  # Backend VM — only created in 3-VM transit mode.
+  # ============================================================
+  if VAGRANT_3VM
+    config.vm.define "backend" do |backend|
+      backend.vm.box = "bento/ubuntu-24.04"
+      backend.vm.hostname = "ebpf-backend"
+
+      # Backend sits on the 192.168.57.0/24 segment. The VirtualBox host-only
+      # adapter for this subnet only attaches to agent (eth2) and backend.
+      backend.vm.network "private_network", ip: "192.168.57.30"
+
+      backend.vm.synced_folder "../../../", "/home/vagrant/ebpfsentinel",
+        type: "rsync",
+        rsync__exclude: [".git/", "target/", "node_modules/", ".vagrant/"]
+
+      backend.vm.provider "virtualbox" do |vb|
+        vb.memory = 1024
+        vb.cpus = 2
+        vb.name = "eBPFsentinel Backend VM"
+        vb.gui = false
+      end
+
+      backend.vm.provider "vmware_desktop" do |v|
+        v.vmx["memsize"] = "1024"
+        v.vmx["numvcpus"] = "2"
+        v.vmx["displayname"] = "eBPFsentinel Backend VM"
+        v.gui = false
+        v.linked_clone = false
+      end
+
+      # Route client-side traffic back via the agent so transit policies
+      # (NAT, conntrack, QoS, DSR L2) traverse the agent's eBPF datapath.
+      backend.vm.provision "shell", name: "transit-routing", inline: <<-SHELL
+        set -euxo pipefail
+        ip route replace 192.168.56.0/24 via 192.168.57.10 dev eth1 || true
+        cat > /etc/networkd-dispatcher/routable.d/50-3vm-route.sh <<'EOS'
+#!/bin/sh
+ip route replace 192.168.56.0/24 via 192.168.57.10 dev eth1 || true
+EOS
+        chmod +x /etc/networkd-dispatcher/routable.d/50-3vm-route.sh 2>/dev/null || true
+
+        # Jumbo frames on the backend NIC.
+        if ip link show eth1 &>/dev/null; then
+          ip link set eth1 mtu 9000
+          cat > /etc/netplan/99-mtu.yaml <<NETPLAN
+network:
+  version: 2
+  ethernets:
+    eth1:
+      mtu: 9000
+NETPLAN
+          netplan apply 2>/dev/null || true
+        fi
+      SHELL
+
+      backend.vm.provision "shell", name: "setup", privileged: false,
+        path: "provision/setup-backend.sh"
+    end
   end
 end

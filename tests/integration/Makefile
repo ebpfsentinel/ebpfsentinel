@@ -201,6 +201,43 @@ test-2vm-perf-comparison: vagrant-2vm-up ## Binary vs Docker perf comparison in 
 test-2vm-perf-comparison-quick: vagrant-2vm-up ## Quick binary vs Docker comparison
 	$(SCRIPT_DIR)/run-in-2vm.sh --skip-provision --perf-comparison --quick
 
+# ── 3-VM transit topology (client + agent-router + backend) ──────
+
+.PHONY: vagrant-3vm-up
+vagrant-3vm-up: ## Start agent (dual-NIC), client (attacker), and backend VMs
+	cd $(VAGRANT_DIR) && VAGRANT_3VM=1 vagrant up agent attacker backend
+
+.PHONY: vagrant-3vm-halt
+vagrant-3vm-halt: ## Stop all three VMs
+	cd $(VAGRANT_DIR) && VAGRANT_3VM=1 vagrant halt agent attacker backend
+
+.PHONY: vagrant-3vm-destroy
+vagrant-3vm-destroy: ## Destroy all three VMs
+	cd $(VAGRANT_DIR) && VAGRANT_3VM=1 vagrant destroy -f agent attacker backend
+
+.PHONY: vagrant-ssh-client
+vagrant-ssh-client: ## SSH into the client VM (alias for attacker in 3-VM mode)
+	cd $(VAGRANT_DIR) && VAGRANT_3VM=1 vagrant ssh attacker
+
+.PHONY: vagrant-ssh-backend
+vagrant-ssh-backend: ## SSH into the backend VM
+	cd $(VAGRANT_DIR) && VAGRANT_3VM=1 vagrant ssh backend
+
+.PHONY: test-3vm
+test-3vm: vagrant-3vm-up ## Run all 3-VM-tagged suites via transit topology
+	$(SCRIPT_DIR)/run-in-3vm.sh --skip-provision
+
+.PHONY: test-3vm-suite
+test-3vm-suite: ## Run single suite in 3-VM mode: make test-3vm-suite SUITE=31
+ifndef SUITE
+	$(error SUITE is required, e.g. make test-3vm-suite SUITE=31)
+endif
+	$(SCRIPT_DIR)/run-in-3vm.sh --skip-provision --suite $(SUITE)
+
+.PHONY: test-3vm-transit
+test-3vm-transit: vagrant-3vm-up ## Run only suites tagged topology=3vm
+	$(SCRIPT_DIR)/run-in-3vm.sh --skip-provision --transit-only
+
 # ── Utilities ────────────────────────────────────────────────────
 
 .PHONY: sync-agent

@@ -419,6 +419,205 @@ wait_for_ebpf_loaded() {
     return 1
 }
 
+# ── 3-VM transit topology helpers ────────────────────────────────
+#
+# Active only when EBPF_3VM_MODE=true (set by run-in-3vm.sh).
+# Topology:
+#   Client VM  (192.168.56.20) ── 56.0/24 ──┐
+#                                          [Agent dual-NIC router]
+#   Backend VM (192.168.57.30) ── 57.0/24 ──┘
+#
+# The agent's `eth1` lives on 56.0/24 (client side), `eth2` on 57.0/24
+# (backend side). Static routes push all cross-subnet traffic through
+# the agent so eBPF datapath (NAT, conntrack, QoS, DSR, TLS DLP) sees
+# every packet.
+
+BACKEND_VM_IP="${BACKEND_VM_IP:-192.168.57.30}"
+AGENT_BACKEND_IP="${AGENT_BACKEND_IP:-192.168.57.10}"
+BACKEND_SSH_KEY="${BACKEND_SSH_KEY:-${HOME}/.ssh/backend_key}"
+BACKEND_SSH_CMD="ssh -i ${BACKEND_SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=5 vagrant@${BACKEND_VM_IP}"
+EBPF_AGENT_BACKEND_IFACE="${EBPF_AGENT_BACKEND_IFACE:-eth2}"
+EBPF_BACKEND_IFACE="${EBPF_BACKEND_IFACE:-eth1}"
+
+# _backend_ssh <command...>
+# Run a command on the backend VM via SSH. Returns the remote exit code.
+_backend_ssh() {
+    if [ $# -eq 0 ]; then
+        echo "usage: _backend_ssh <command...>" >&2
+        return 1
+    fi
+    $BACKEND_SSH_CMD -- "$@"
+}
+
+# _backend_ssh_sudo <command...>
+# Run a command on the backend VM as root via SSH.
+_backend_ssh_sudo() {
+    if [ $# -eq 0 ]; then
+        echo "usage: _backend_ssh_sudo <command...>" >&2
+        return 1
+    fi
+    $BACKEND_SSH_CMD -- sudo "$@"
+}
+
+# skip_if_not_3vm
+# Skip a bats test when EBPF_3VM_MODE is not set.
+skip_if_not_3vm() {
+    if [ "${EBPF_3VM_MODE:-false}" != "true" ]; then
+        skip "Test requires 3-VM transit topology (set EBPF_3VM_MODE=true)"
+    fi
+}
+
+# route_via_agent <side>
+# Install a route on `side` so traffic to the opposite subnet flows
+# through the agent router. <side> is "client" or "backend".
+# Returns 0 on success, non-zero on SSH/route failure.
+route_via_agent() {
+    local side="$1"
+    case "$side" in
+        client)
+            # Client (attacker) reaches 192.168.57.0/24 via agent's 56.10
+            $AGENT_SSH_CMD -- true >/dev/null 2>&1 || true
+            ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
+                -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+                "vagrant@${ATTACKER_VM_IP}" -- \
+                sudo ip route replace 192.168.57.0/24 via "${AGENT_VM_IP}" dev eth1
+            ;;
+        backend)
+            # Backend reaches 192.168.56.0/24 via agent's 57.10
+            _backend_ssh_sudo ip route replace 192.168.56.0/24 \
+                via "${AGENT_BACKEND_IP}" dev "${EBPF_BACKEND_IFACE}"
+            ;;
+        *)
+            echo "route_via_agent: side must be 'client' or 'backend' (got '${side}')" >&2
+            return 2
+            ;;
+    esac
+}
+
+# set_backend_arp [iface]
+# Discover the backend's MAC on its backend-side NIC, then populate the
+# agent's BACKEND_MAC eBPF map so L2 DSR programs can rewrite dst MAC
+# without an ARP round-trip on the data path.
+#
+# Echoes "<ip> <mac>" on stdout. Returns 0 on success.
+set_backend_arp() {
+    local iface="${1:-${EBPF_BACKEND_IFACE}}"
+    local line ip mac
+    line="$(_backend_ssh /usr/local/bin/backend-arp "${iface}")" || return 1
+    ip="${line%% *}"
+    mac="${line##* }"
+    if [ -z "${ip}" ] || [ -z "${mac}" ]; then
+        echo "set_backend_arp: empty ip/mac from backend (line='${line}')" >&2
+        return 1
+    fi
+    # Prime agent ARP cache so the kernel resolver agrees with the eBPF map.
+    _agent_ssh_sudo ip neigh replace "${ip}" lladdr "${mac}" \
+        dev "${EBPF_AGENT_BACKEND_IFACE}" nud permanent >/dev/null 2>&1 || true
+    # Push the entry through the LB control API (idempotent).
+    curl -sf --max-time "${HTTP_TIMEOUT}" -X POST \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${API_TOKEN:-test-token}" \
+        "${BASE_URL}/api/v1/lb/backends/mac" \
+        -d "{\"ip\":\"${ip}\",\"mac\":\"${mac}\"}" >/dev/null 2>&1 || true
+    echo "${ip} ${mac}"
+}
+
+# start_backend_service <svc> [port]
+# Start a backend service via systemd and wait for its port to accept
+# connections. Supported svc names: iperf3, nginx, sshd, s-server.
+start_backend_service() {
+    local svc="$1"
+    local port="${2:-}"
+    local unit
+    case "$svc" in
+        iperf3)    unit="iperf3-backend.service";  port="${port:-5201}" ;;
+        nginx)     unit="nginx.service";           port="${port:-80}"   ;;
+        sshd)      unit="ssh.service";             port="${port:-22}"   ;;
+        s-server)  unit="s-server-backend.service"; port="${port:-8443}" ;;
+        *)
+            echo "start_backend_service: unknown svc '${svc}'" >&2
+            return 2
+            ;;
+    esac
+    _backend_ssh_sudo systemctl start "${unit}" || return 1
+    # Wait for port (up to 10s)
+    local attempt=0
+    while [ "$attempt" -lt 10 ]; do
+        if _backend_ssh "nc -z -w1 127.0.0.1 ${port}" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    echo "start_backend_service: ${svc} did not open :${port} on backend" >&2
+    return 1
+}
+
+# capture_on <vm> <iface> <bpf-filter>
+# Start a background tcpdump on the named VM (agent|client|backend) and
+# echo the remote pcap path on stdout. Pair with stop_capture <vm> <path>.
+capture_on() {
+    local vm="$1"
+    local iface="$2"
+    local bpf="$3"
+    local pcap="/tmp/cap-$$-$(date +%s).pcap"
+    local pidfile="${pcap}.pid"
+    local sshrun
+    case "$vm" in
+        agent)   sshrun=("_agent_ssh_sudo") ;;
+        backend) sshrun=("_backend_ssh_sudo") ;;
+        client)
+            sshrun=(ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key"
+                    -o StrictHostKeyChecking=no -o ConnectTimeout=5
+                    "vagrant@${ATTACKER_VM_IP}" -- sudo)
+            ;;
+        *)
+            echo "capture_on: vm must be 'agent', 'client', or 'backend' (got '${vm}')" >&2
+            return 2
+            ;;
+    esac
+    "${sshrun[@]}" sh -c "nohup tcpdump -n -U -w '${pcap}' -i '${iface}' ${bpf} >/dev/null 2>&1 & echo \$! > '${pidfile}'" || return 1
+    # Brief settle so tcpdump opens the BPF socket before traffic flows.
+    sleep 1
+    echo "${pcap}"
+}
+
+# stop_capture <vm> <pcap-path>
+# Stop the tcpdump started by capture_on and fetch the pcap locally.
+# Echoes the local path on stdout.
+stop_capture() {
+    local vm="$1"
+    local pcap="$2"
+    local pidfile="${pcap}.pid"
+    local local_pcap="${DATA_DIR:-/tmp}/$(basename "${pcap}")"
+    local sshrun scpsrc
+    case "$vm" in
+        agent)
+            sshrun=("_agent_ssh_sudo")
+            scpsrc="vagrant@${AGENT_VM_IP}:${pcap}"
+            ;;
+        backend)
+            sshrun=("_backend_ssh_sudo")
+            scpsrc="vagrant@${BACKEND_VM_IP}:${pcap}"
+            ;;
+        client)
+            sshrun=(ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key"
+                    -o StrictHostKeyChecking=no -o ConnectTimeout=5
+                    "vagrant@${ATTACKER_VM_IP}" -- sudo)
+            scpsrc="vagrant@${ATTACKER_VM_IP}:${pcap}"
+            ;;
+        *)
+            echo "stop_capture: vm must be 'agent', 'client', or 'backend' (got '${vm}')" >&2
+            return 2
+            ;;
+    esac
+    "${sshrun[@]}" sh -c "kill \$(cat '${pidfile}') 2>/dev/null; sync; rm -f '${pidfile}'" || true
+    # Pull pcap locally so bats assertions can run tshark/tcpdump on it.
+    scp -i "${AGENT_SSH_KEY}" -o StrictHostKeyChecking=no \
+        "${scpsrc}" "${local_pcap}" >/dev/null 2>&1 || true
+    echo "${local_pcap}"
+}
+
 # ── Cleanup (override) ───────────────────────────────────────────
 
 cleanup_test_env() {
