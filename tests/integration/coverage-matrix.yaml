@@ -249,27 +249,27 @@ coverage:
 
   - kind: cli_subcommand
     feature: l7
-    suites: ["17", "32"]
+    suites: ["17", "32", "41"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "L7 firewall rules (HTTP/SMTP/FTP/SMB inspection)"
+    notes: "L7 firewall rules (HTTP/SMTP/FTP/SMB inspection); MHDDoS flood matrix in 41"
 
   - kind: cli_subcommand
     feature: ips
-    suites: ["13", "17"]
+    suites: ["13", "17", "41"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Intrusion prevention + auto-blacklist"
+    notes: "Intrusion prevention + auto-blacklist; MHDDoS flood matrix in 41"
 
   - kind: cli_subcommand
     feature: ratelimit
-    suites: ["04", "14", "17"]
+    suites: ["04", "14", "17", "41"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Rate limit policies"
+    notes: "Rate limit policies; MHDDoS flood matrix in 41"
 
   - kind: cli_subcommand
     feature: threatintel
@@ -313,11 +313,11 @@ coverage:
 
   - kind: cli_subcommand
     feature: ddos
-    suites: ["16", "23"]
+    suites: ["16", "23", "41"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "DDoS protection + scrub"
+    notes: "DDoS protection + scrub; MHDDoS flood matrix in 41"
 
   - kind: cli_subcommand
     feature: lb
@@ -434,11 +434,11 @@ coverage:
 
   - kind: domain_module
     feature: ddos
-    suites: ["16", "23"]
+    suites: ["16", "23", "41"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "DDoS detection + policy"
+    notes: "DDoS detection + policy; MHDDoS flood matrix in 41"
 
   - kind: domain_module
     feature: dlp
@@ -466,19 +466,19 @@ coverage:
 
   - kind: domain_module
     feature: ids
-    suites: ["12", "26"]
+    suites: ["12", "26", "41"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Intrusion detection engine"
+    notes: "Intrusion detection engine; behavioural signatures stressed in 41"
 
   - kind: domain_module
     feature: ips
-    suites: ["13", "17"]
+    suites: ["13", "17", "41"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Auto-blacklist + whitelist"
+    notes: "Auto-blacklist + whitelist; MHDDoS flood matrix in 41"
 
   - kind: domain_module
     feature: l2
@@ -490,7 +490,7 @@ coverage:
 
   - kind: domain_module
     feature: l7
-    suites: ["17", "32"]
+    suites: ["17", "32", "41"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -522,11 +522,11 @@ coverage:
 
   - kind: domain_module
     feature: ratelimit
-    suites: ["04", "14"]
+    suites: ["04", "14", "41"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Token bucket + variants"
+    notes: "Token bucket + variants; exhaustion under flood in 41"
 
   - kind: domain_module
     feature: response
@@ -559,3 +559,18 @@ coverage:
     kernel_min: "6.9"
     profile: pr
     notes: "Zone-based policy"
+
+# ── Attack suites (per-suite tagging) ────────────────────────────────
+# Rows above map features → suites. The block below tags each Wave-2
+# attack suite individually so CI scheduling (nightly vs PR) and
+# topology requirements can be looked up by suite id without scanning
+# the cross-product of feature rows.
+
+attack_suites:
+  - suite: "41"
+    name: mhddos-l7-attacks
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["l7", "ips", "ratelimit", "ddos", "ids"]
+    notes: "MHDDoS GET/POST/STRESS/BYPASS/OVH/TLS/CFB/SLOW multi-method floods"
