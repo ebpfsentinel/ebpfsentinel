@@ -1,0 +1,3 @@
+[submodule "tests/integration/vendor/MHDDoS"]
+	path = tests/integration/vendor/MHDDoS
+	url = https://github.com/MatrixTM/MHDDoS.git

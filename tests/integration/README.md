@@ -399,6 +399,48 @@ All fixtures use `__PLACEHOLDER__` tokens substituted at runtime:
 | `docker-compose-test.yml`         | Docker smoke test compose (loopback, BTF mounts)                 |
 | `docker-compose-perf.yml`         | Docker overhead test compose (host networking, privileged)       |
 
+## Attacker Toolkit
+
+The attacker VM (192.168.56.20) is provisioned with a complete L3-L7
+attack and load-generation toolkit so suites can run reproducibly
+without per-suite installs.
+
+| Tool | Purpose |
+|---|---|
+| `pktgen` (kmod) | >1 Mpps L4 floods (loaded via `/etc/modules-load.d/pktgen.conf`) |
+| `MHDDoS` (`/opt/MHDDoS/.venv`) | L7 multi-method: GET/POST/STRESS/BYPASS/SLOW/TLS/UDP/SYN |
+| `slowhttptest` | Slowloris / RUDY / slowread |
+| `scapy` (`/opt/scapy-venv`) | Custom packet crafting, amplification simulation |
+| `nping` | Fine-grained packet crafting (from `nmap`) |
+| `t50` | Multi-protocol stress |
+| `hyenae-ng` | L2 attack crafting |
+| `wrk`, `vegeta`, `k6` | HTTP load generators with different profiles |
+| `dnsperf` | DNS load |
+| `mitmproxy` (`/opt/mitmproxy-venv`) | TLS MITM (enterprise DLP MITM suite) |
+| `hydra`, `ncrack` | SSH / HTTP brute-force |
+| `nuclei` | Template-based attack/scan patterns |
+| `dnscrypt-proxy`, `cloudflared` | DoH / DoT clients (DNS detection suite) |
+
+Pinned versions live in
+[`vagrant/provision/TOOL_VERSIONS.md`](vagrant/provision/TOOL_VERSIONS.md).
+MHDDoS is vendored as a git submodule at
+[`vendor/MHDDoS`](vendor/) (GPL-3.0, runtime fork only — see
+[`vendor/README.md`](vendor/README.md)).
+
+```bash
+# Verify the toolkit on a running attacker VM
+vagrant ssh attacker -c \
+    'bash /home/vagrant/ebpfsentinel/tests/integration/vagrant/provision/attacker_tools_check.sh'
+
+# Initialize the MHDDoS submodule on a fresh checkout (host side)
+git submodule update --init --depth 1 --recursive \
+    tests/integration/vendor/MHDDoS
+```
+
+The provisioner runs `attacker_tools_check.sh` at the tail of
+`setup-attacker.sh`; a failed check aborts the VM boot so a broken
+toolkit cannot quietly mask a test failure.
+
 ## 2-VM Topology (Recommended)
 
 The recommended way to run eBPF integration tests. Uses two VMs connected over a VirtualBox private network -- no root permissions needed on the developer machine.

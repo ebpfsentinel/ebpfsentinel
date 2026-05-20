@@ -278,6 +278,18 @@ bench-resource-matrix-2vm: ## Run resource matrix benchmark in 2VM mode
 bench-resource-merge: ## Merge two resource matrix reports: make bench-resource-merge F1=report1.json F2=report2.json
 	bash $(SCRIPT_DIR)/benchmark-resource-matrix.sh --merge $(F1) $(F2)
 
+# ── Attacker toolkit ─────────────────────────────────────────────
+
+.PHONY: vendor-init
+vendor-init: ## Initialize vendored attack-tool submodules (MHDDoS, ...)
+	cd $(PROJECT_ROOT) && git submodule update --init --depth 1 --recursive \
+		tests/integration/vendor/MHDDoS
+
+.PHONY: check-attacker-tools
+check-attacker-tools: ## Run attacker_tools_check.sh on a running attacker VM
+	cd $(VAGRANT_DIR) && vagrant ssh attacker -c \
+		'bash /home/vagrant/ebpfsentinel/tests/integration/vagrant/provision/attacker_tools_check.sh'
+
 # ── Cleanup ────────────────────────────────────────────────────────
 
 .PHONY: clean
