@@ -686,3 +686,19 @@ attack_suites:
     profile: nightly
     surfaces: ["tc-nat-egress", "tc-nat-ingress", "nat", "nptv6"]
     notes: "NPTv6 (RFC 6296) prefix translation surface: GET /api/v1/nat/nptv6 surfaces configured rule, POST + DELETE round-trip a rule, CLI `nat nptv6 list` mirrors the REST list; wire-level egress-source-prefix swap (fd00:54::/64 → 2001:db8:54::/64) gated on per-VM IPv6 reachability and skips when the test VMs lack the IPv6 link addresses + routes"
+
+  - suite: "55"
+    name: mitre-assertions-sweep
+    topology: none
+    kernel_min: "n/a"
+    profile: pr
+    surfaces: ["alert", "mitre"]
+    notes: "Meta-test enforcing MITRE coverage on alert-producing suites (12, 13, 14, 16, 18, 20, 22, 23, 26, 28, 32, 36, 41, 43, 44, 47). Grep-based introspection of each .bats source: fails if assert_alert_has_(any_)mitre_technique helper from lib/alert_helpers.bash is not invoked. Emits mitre-coverage.json with (suite, alert_type, expected_technique) triples; REST-only surfaces (16/20/22/36) tagged rest-only with empty technique"
+
+  - suite: "56"
+    name: hot-reload-under-load
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["firewall", "config-reload"]
+    notes: "SIGHUP map-swap safety under sustained best-effort load (wrk HTTP + iperf3 TCP, both optional). 6× reload cycle alternating add/remove of a toggle rule at 5 s spacing. Asserts: agent PID stable (no crash + restart), rules_reloads_total{result=success} strictly increments (map generation counter), open FD count stays within +25% / +20 of baseline (proves old map FDs reclaimed — no leak), no panic line in agent log, alert ids unique across the cycle"

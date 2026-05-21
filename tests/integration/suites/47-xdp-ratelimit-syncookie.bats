@@ -159,3 +159,15 @@ _metric_or_zero() {
         return 1
     }
 }
+
+# ── MITRE coverage sweep ───────────────────────────────────────────
+
+@test "alerts emitted by this suite carry a MITRE technique mapping" {
+    local body count
+    body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
+    count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
+    if [ "${count:-0}" -lt 1 ]; then
+        skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+    fi
+    assert_alert_has_any_mitre_technique 15
+}

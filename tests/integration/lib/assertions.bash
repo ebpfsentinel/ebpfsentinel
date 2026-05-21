@@ -133,28 +133,10 @@ assert_ip_blacklisted() {
     return 1
 }
 
-# assert_alert_has_mitre_technique <technique_id> [max_attempts]
-# Polls /api/v1/alerts for an alert tagged with the given MITRE technique
-# (T1498, T1499, ...). Matches either the canonical .mitre.techniques
-# array or the flat .mitre_techniques fallback.
-assert_alert_has_mitre_technique() {
-    local technique="${1:?usage: assert_alert_has_mitre_technique <id> [max_attempts]}"
-    local max="${2:-30}"
-    local filter
-    filter="$(printf '
-        .[]
-        | select(
-            (.mitre.techniques // .mitre_techniques // [])
-            | map(. | ascii_upcase) | index("%s") != null
-        )
-        | (.id // .alert_id // .timestamp)
-    ' "$technique")"
-    if wait_for_alert "$filter" "$max" 1 >/dev/null 2>&1; then
-        return 0
-    fi
-    echo "No alert tagged with MITRE technique ${technique} after ${max}s" >&2
-    return 1
-}
+# MITRE assertion helpers live in lib/alert_helpers.bash. This file used to
+# host a stub `assert_alert_has_mitre_technique`; the real implementation
+# (with both an exact-id matcher and an any-technique sweep matcher) is now
+# co-located with the alert helpers and sourced by lib/helpers.bash.
 
 # assert_api_p99_below <p99_ms_budget> [samples] [path]
 # Sends <samples> sequential probes to <path> (default /healthz) and

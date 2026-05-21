@@ -23,6 +23,7 @@ export PROJECT_ROOT
 source "${HELPERS_DIR}/constants.bash"
 source "${HELPERS_DIR}/retry.bash"
 source "${HELPERS_DIR}/assertions.bash"
+source "${HELPERS_DIR}/alert_helpers.bash"
 
 # ── Port cleanup ──────────────────────────────────────────────────
 
