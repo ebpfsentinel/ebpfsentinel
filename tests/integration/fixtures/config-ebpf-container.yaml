@@ -1,0 +1,73 @@
+# config-ebpf-container.yaml — Container cgroup enrichment scenario fixture.
+#
+# Enables the cgroup resolver + Docker enricher so containerised processes
+# are mapped from cgroup_id back to a container id, runtime, and image.
+# IDS is enabled with a single signature on TCP/65501 so a container that
+# touches that port triggers a deterministic alert without polluting the
+# host firewall surface.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: true
+  mode: alert
+  rules:
+    - id: ids-container-probe
+      description: "Container cgroup-enrichment probe target"
+      severity: high
+      protocol: tcp
+      dst_port: 65501
+      enabled: true
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+container:
+  resolver:
+    enabled: true
+    cache_size: 4096
+    proc_path: /proc
+  docker:
+    enabled: true
+    socket: /var/run/docker.sock
+    cache_size: 256
+    cache_ttl_seconds: 60
+    timeout_ms: 2000
+  kubernetes:
+    enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

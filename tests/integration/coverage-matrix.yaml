@@ -434,11 +434,11 @@ coverage:
 
   - kind: domain_module
     feature: container
-    suites: [TBD]
+    suites: ["58"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "cgroup_id enrichment + per-tenant cgroup map — planned suite 58"
+    notes: "cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 58; AlertResponse container fields, k8s pod enrichment, and per-tenant cgroup filter map tracked as deferred ACs in the suite header"
 
   - kind: domain_module
     feature: ddos
@@ -546,11 +546,11 @@ coverage:
 
   - kind: domain_module
     feature: routing
-    suites: ["35"]
+    suites: ["35", "57"]
     topology: 2vm
     kernel_min: "6.9"
-    profile: pr
-    notes: "Multi-WAN routing; failover planned suite 57"
+    profile: nightly
+    notes: "Multi-WAN routing; failover ordering + REST + metrics surface asserted in 57 (priority-ordered list, gateways_total gauge, failovers_total counter, SIGHUP-driven priority swap). Active health probe loop + WAN_ALL_DOWN alert + real link-down egress reroute tracked as deferred ACs in the suite header"
 
   - kind: domain_module
     feature: threatintel
@@ -702,3 +702,19 @@ attack_suites:
     profile: nightly
     surfaces: ["firewall", "config-reload"]
     notes: "SIGHUP map-swap safety under sustained best-effort load (wrk HTTP + iperf3 TCP, both optional). 6× reload cycle alternating add/remove of a toggle rule at 5 s spacing. Asserts: agent PID stable (no crash + restart), rules_reloads_total{result=success} strictly increments (map generation counter), open FD count stays within +25% / +20 of baseline (proves old map FDs reclaimed — no leak), no panic line in agent log, alert ids unique across the cycle"
+
+  - suite: "57"
+    name: multiwan-failover
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["routing"]
+    notes: "Multi-WAN failover-ordering contract: both gateways round-trip /api/v1/routing/gateways sorted primary→secondary by priority, /api/v1/routing/status reports the configured count, ebpfsentinel_routing_gateways gauge equals 2, ebpfsentinel_routing_failovers counter is exposed, and a SIGHUP-driven priority swap re-orders the list deterministically without changing the agent PID. Active probe loop + WAN_ALL_DOWN alert + real link-down 3-VM transit reroute are deferred ACs"
+
+  - suite: "58"
+    name: container-cgroup-enrichment
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["container"]
+    notes: "Container cgroup → identity surface: container_resolver_cache_{hits,misses,errors} counters present when container.resolver.enabled=true; Docker-driven probe traffic on tc-ids signature port advances the cache-misses counter (proves cgroup_id reaches the resolver). AlertResponse REST container fields, kubernetes pod enrichment via suite 10 fixtures, and per-tenant TENANT_CGROUP_MAP filtering are deferred ACs tracked in the suite header"
