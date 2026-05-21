@@ -1,0 +1,54 @@
+# config-tls-pq-prefer.yaml — TLS with PQ hybrid key exchange in "prefer" mode.
+#
+# The agent offers X25519MLKEM768 first and falls back to classical
+# groups (X25519, secp256r1) for clients that lack PQ support. This is
+# the default policy and the suite uses it to prove both:
+#
+#   * Classical curl/openssl clients still negotiate (fallback path).
+#   * A PQ-aware client (openssl s_client -groups X25519MLKEM768) lands
+#     on the hybrid named group.
+
+agent:
+  interfaces:
+    - lo
+  bind_address: "0.0.0.0"
+  log_level: info
+  log_format: json
+  http_port: 8443
+  grpc_port: 50051
+  metrics_port: 9090
+  tls:
+    enabled: true
+    cert_path: __CERT_PATH__
+    key_path: __KEY_PATH__
+    pq_mode: prefer
+
+firewall:
+  enabled: true
+  mode: alert
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

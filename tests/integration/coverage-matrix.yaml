@@ -450,11 +450,11 @@ coverage:
 
   - kind: domain_module
     feature: dlp
-    suites: ["17", "28"]
+    suites: ["17", "28", "63"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Data loss prevention; TLS proxy enterprise"
+    notes: "Data loss prevention; TLS proxy enterprise. Suite 63 enforces the license-gate skip path (AC #3) on the OSS bats fleet and tracks the wire-level malicious-MITM + decrypted-payload pattern-match assertions as 3-VM deferrals (need mitmproxy + injected-CA topology)"
 
   - kind: domain_module
     feature: dns
@@ -474,19 +474,19 @@ coverage:
 
   - kind: domain_module
     feature: ids
-    suites: ["12", "26", "41", "43", "59"]
+    suites: ["12", "26", "41", "43", "59", "62"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Intrusion detection engine; behavioural signatures stressed in 41; slow-attack signatures in 43; IPv6-scoped signature surface asserted in 59 (wire-level v6 IDS alert via tc-ids deferred — needs dual-stack 2-VM topology)"
+    notes: "Intrusion detection engine; behavioural signatures stressed in 41; slow-attack signatures in 43; IPv6-scoped signature surface asserted in 59 (wire-level v6 IDS alert via tc-ids deferred — needs dual-stack 2-VM topology); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 62 (real hydra/ncrack credential bursts deferred — same dataplane contract is driven by the SYN-burst path)"
 
   - kind: domain_module
     feature: ips
-    suites: ["13", "17", "41", "43", "59"]
+    suites: ["13", "17", "41", "43", "59", "62"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Auto-blacklist + whitelist; MHDDoS flood matrix in 41; slowhttptest in 43; IPv6 blacklist-write surface asserted in 59"
+    notes: "Auto-blacklist + whitelist; MHDDoS flood matrix in 41; slowhttptest in 43; IPv6 blacklist-write surface asserted in 59; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 62"
 
   - kind: domain_module
     feature: l2
@@ -734,3 +734,27 @@ attack_suites:
     profile: nightly
     surfaces: ["l7"]
     notes: "L7 SMTP/FTP/SMB edge-case sweep: pre-loaded SMTP/FTP/SMB rules round-trip GET /api/v1/firewall/l7-rules with command/is_smb2 matcher fields preserved; POST + DELETE round-trip per protocol; invalid protocol returns 4xx (not 5xx, not silent accept) without crashing the agent; truncated TCP segments on the L7-hooked ports (25/21/445) leave /readyz reporting ebpf_loaded=true. Wire-level swaks/lftp/smbclient per-command behaviour (SMTP pipelining, FTP PASV gating, SMB2 dialect capture, SMB1 policy reject) is deferred to a follow-up that adds those tools to the test VMs; per-command parser logic is exercised by domain l7::engine unit tests"
+
+  - suite: "61"
+    name: pqc-handshake
+    topology: 2vm
+    kernel_min: "n/a"
+    profile: nightly
+    surfaces: ["tls", "crypto"]
+    notes: "X25519MLKEM768 PQ-hybrid TLS sweep: pq_mode=prefer accepts both classical clients (fallback path proven) and PQ-aware clients (openssl s_client -groups X25519MLKEM768 lands on the hybrid named group); pq_mode=require rejects classical-only clients at the handshake and still accepts PQ-aware clients. PQ-handshake assertions are skipped cleanly when local openssl lacks X25519MLKEM768 (< 3.5). The /api/v1/tls/status per-connection negotiated-group surface (AC #1 second bullet) and the HA mTLS PQ path (AC #3) are tracked as deferred ACs in the suite header"
+
+  - suite: "62"
+    name: ssh-brute-force-real
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["ids", "ips"]
+    notes: "SSH brute-force IDS + IPS sweep: pre-loaded threshold rules (port 22, count=5 in 30s, track_by=src_ip) round-trip via /api/v1/ids/rules + /api/v1/ips/rules; a SYN burst from the test netns to TCP/22 fires an alert with rule_id=ids-ssh-bruteforce, severity=high, MITRE T1110(.001) per the domain dst-port mapping; the IPS auto-blacklist captures the source under the same threshold. Real hydra/ncrack credential bursts and the sshd no-successful-auth negative assertion are deferred (extra deps + multi-VM topology)"
+
+  - suite: "63"
+    name: dlp-tls-mitm
+    topology: 3vm
+    kernel_min: "n/a"
+    profile: nightly
+    surfaces: ["dlp", "tls"]
+    notes: "Enterprise DLP TLS-inspection proxy. AC #3 license-gated skip-path is the only assertion that runs on the OSS bats fleet: detect license (EBPFSENTINEL_LICENSE env or /etc/ebpfsentinel/enterprise.lic), enterprise binary discoverability, and mitmproxy availability; skip cleanly with a documented reason when any is missing. Wire-level malicious-MITM cert mismatch alert (AC #1) and decrypted-payload DLP pattern match (AC #2) are tracked as 3-VM deferrals — they need the enterprise agent + mitmproxy attacker VM with an injected CA, neither of which is on the OSS test fleet"

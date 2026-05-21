@@ -1,0 +1,80 @@
+# config-ebpf-ssh-bruteforce.yaml — SSH brute-force scenario fixture.
+#
+# Pre-loads an IDS threshold rule and an IPS auto-block rule for TCP/22
+# so the suite can drive a synthetic connection burst from the test
+# netns and assert the IDS surfaces the rule + an alert fires + the IPS
+# auto-blacklist captures the source IP. Threshold counts/windows are
+# squeezed so the suite stays fast (no minute-long sleeps).
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: true
+  mode: alert
+  rules:
+    - id: ids-ssh-bruteforce
+      description: "SSH brute-force detection (test fixture)"
+      severity: high
+      protocol: tcp
+      dst_port: 22
+      enabled: true
+      threshold:
+        type: threshold
+        count: 5
+        window_secs: 30
+        track_by: src_ip
+
+ips:
+  enabled: true
+  mode: alert
+  auto_blacklist_threshold: 5
+  max_blacklist_duration_secs: 600
+  rules:
+    - id: ips-ssh-bruteforce
+      description: "Auto-block SSH brute-force sources (test fixture)"
+      severity: high
+      mode: block
+      protocol: tcp
+      dst_port: 22
+      enabled: true
+      threshold:
+        type: threshold
+        count: 5
+        window_secs: 30
+        track_by: src_ip
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

@@ -1,0 +1,51 @@
+# config-tls-pq-require.yaml — TLS in PQ "require" mode.
+#
+# The agent only offers X25519MLKEM768. Clients that cannot negotiate a
+# PQ-hybrid named group must be rejected at the handshake. The suite
+# uses this fixture to prove PQ enforcement is wired (classical-only
+# clients fail) and that a PQ-aware client still succeeds.
+
+agent:
+  interfaces:
+    - lo
+  bind_address: "0.0.0.0"
+  log_level: info
+  log_format: json
+  http_port: 8443
+  grpc_port: 50051
+  metrics_port: 9090
+  tls:
+    enabled: true
+    cert_path: __CERT_PATH__
+    key_path: __KEY_PATH__
+    pq_mode: require
+
+firewall:
+  enabled: true
+  mode: alert
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
