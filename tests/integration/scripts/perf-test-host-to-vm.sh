@@ -27,6 +27,7 @@ FIXTURE_DIR="${INTEGRATION_DIR}/fixtures"
 MODE="both"
 QUICK=false
 SOAK=false
+SOAK_DURATION_OVERRIDE=""
 SKIP_PROVISION=false
 REPORT_DIR="/tmp"
 
@@ -42,16 +43,27 @@ while [ $# -gt 0 ]; do
             ;;
         --quick)          QUICK=true ;;
         --soak)           SOAK=true ;;
+        --soak-duration)
+            SOAK=true
+            SOAK_DURATION_OVERRIDE="${2:?--soak-duration requires seconds}"
+            if ! [[ "$SOAK_DURATION_OVERRIDE" =~ ^[0-9]+$ ]]; then
+                echo "ERROR: --soak-duration must be an integer (seconds), got '$SOAK_DURATION_OVERRIDE'" >&2
+                exit 1
+            fi
+            shift
+            ;;
         --skip-provision) SKIP_PROVISION=true ;;
         --report-dir)     REPORT_DIR="${2:?--report-dir requires a path}"; shift ;;
         -h|--help)
-            echo "Usage: $0 [--mode binary|docker|both] [--quick] [--soak]"
+            echo "Usage: $0 [--mode binary|docker|both] [--quick] [--soak] [--soak-duration N]"
             echo "                                 [--skip-provision] [--report-dir DIR]"
             echo ""
             echo "Options:"
             echo "  --mode             Run mode: 'binary', 'docker', or 'both' (default)"
             echo "  --quick            Short durations (3s iperf, 30 pings)"
             echo "  --soak             Enable soak test (sustained load with leak detection)"
+            echo "  --soak-duration N  Enable soak with a custom duration in seconds (e.g.,"
+            echo "                     28800 for the nightly 8 h soak). Implies --soak."
             echo "  --skip-provision   Skip vagrant up / provisioning"
             echo "  --report-dir       Directory for JSON reports (default: /tmp)"
             exit 0
@@ -83,6 +95,28 @@ else
     SOAK_INTERVAL=30
     API_REQUESTS=1000
     API_CONCURRENCY=10
+fi
+
+# --soak-duration N overrides whatever profile picked. Sampling cadence
+# scales with duration so an 8-hour soak doesn't emit 1920 samples — cap
+# at one sample every 5 minutes for long runs, floor at 30 s.
+if [ -n "$SOAK_DURATION_OVERRIDE" ]; then
+    SOAK_DURATION="$SOAK_DURATION_OVERRIDE"
+    if [ "$SOAK_DURATION" -ge 3600 ]; then
+        SOAK_INTERVAL=300
+    elif [ "$SOAK_DURATION" -ge 600 ]; then
+        SOAK_INTERVAL=60
+    else
+        SOAK_INTERVAL=30
+    fi
+fi
+
+# FD growth ceiling: bump for long soaks (a few transient FDs over 8 h
+# is normal); short soaks should be near-flat.
+if [ "$SOAK_DURATION" -ge 3600 ]; then
+    THRESH_SOAK_FD_GROWTH=25
+else
+    THRESH_SOAK_FD_GROWTH=10
 fi
 
 # ── Network constants ──────────────────────────────────────────────
@@ -963,17 +997,19 @@ run_soak_test() {
         return
     fi
 
-    # Initial RSS
-    local initial_result initial_rss
+    # Initial RSS + FD count
+    local initial_result initial_rss initial_fd
     initial_result="$(vm_measure_resources "$agent_mode" 1)"
     initial_rss="$(echo "$initial_result" | jq '.rss_kb // 0')"
+    initial_fd="$(echo "$initial_result" | jq '.fd_count // 0')"
     echo "  Initial RSS: ${initial_rss} KB"
+    echo "  Initial FDs: ${initial_fd}"
 
     # Start iperf3 in background for sustained load
     iperf3 -c "$VM_IP" -t "$SOAK_DURATION" -P 4 >/dev/null 2>&1 &
     local iperf_bg_pid=$!
 
-    # Sample RSS/CPU periodically
+    # Sample RSS/CPU/FDs periodically
     local samples_json="["
     local elapsed=0
     local first=true
@@ -981,25 +1017,28 @@ run_soak_test() {
         sleep "$SOAK_INTERVAL"
         elapsed=$((elapsed + SOAK_INTERVAL))
 
-        local sample_result current_rss current_cpu
+        local sample_result current_rss current_cpu current_fd
         sample_result="$(vm_measure_resources "$agent_mode" 2)"
         current_rss="$(echo "$sample_result" | jq '.rss_kb // 0')"
         current_cpu="$(echo "$sample_result" | jq '.cpu_pct // 0')"
-        echo "  [${elapsed}s] RSS: ${current_rss} KB, CPU: ${current_cpu}%"
+        current_fd="$(echo "$sample_result" | jq '.fd_count // 0')"
+        echo "  [${elapsed}s] RSS: ${current_rss} KB, CPU: ${current_cpu}%, FDs: ${current_fd}"
 
         [ "$first" = "true" ] || samples_json+=","
-        samples_json+="{\"elapsed_s\":$elapsed,\"rss_kb\":$current_rss,\"cpu_pct\":$current_cpu}"
+        samples_json+="{\"elapsed_s\":$elapsed,\"rss_kb\":$current_rss,\"cpu_pct\":$current_cpu,\"fd_count\":$current_fd}"
         first=false
     done
     samples_json+="]"
 
     wait "$iperf_bg_pid" 2>/dev/null || true
 
-    # Final RSS
-    local final_result final_rss
+    # Final RSS + FD count
+    local final_result final_rss final_fd
     final_result="$(vm_measure_resources "$agent_mode" 1)"
     final_rss="$(echo "$final_result" | jq '.rss_kb // 0')"
+    final_fd="$(echo "$final_result" | jq '.fd_count // 0')"
     echo "  Final RSS: ${final_rss} KB"
+    echo "  Final FDs: ${final_fd}"
 
     # Calculate growth
     local rss_growth_pct=0
@@ -1008,11 +1047,20 @@ run_soak_test() {
     fi
     echo "  RSS growth: ${rss_growth_pct}%"
 
+    local fd_growth_pct=0
+    if [ "$initial_fd" -gt 0 ] 2>/dev/null; then
+        fd_growth_pct="$(echo "scale=2; (($final_fd - $initial_fd) / $initial_fd) * 100" | bc -l 2>/dev/null)" || fd_growth_pct=0
+    fi
+    echo "  FD growth: ${fd_growth_pct}%"
+
     report_update ".soak = {
         \"duration_secs\": $SOAK_DURATION,
         \"initial_rss_kb\": $initial_rss,
         \"final_rss_kb\": $final_rss,
         \"rss_growth_pct\": $rss_growth_pct,
+        \"initial_fd_count\": $initial_fd,
+        \"final_fd_count\": $final_fd,
+        \"fd_growth_pct\": $fd_growth_pct,
         \"samples\": $samples_json
     }"
 
@@ -1021,6 +1069,10 @@ run_soak_test() {
     local result="pass"
     [ "$(echo "$rss_growth_pct < $THRESH_SOAK_RSS_GROWTH" | bc -l 2>/dev/null)" = "1" ] || result="fail"
     check_result "Soak RSS growth" "$result" "${rss_growth_pct}% (limit: <${THRESH_SOAK_RSS_GROWTH}%)"
+
+    local fd_result="pass"
+    [ "$(echo "$fd_growth_pct < $THRESH_SOAK_FD_GROWTH" | bc -l 2>/dev/null)" = "1" ] || fd_result="fail"
+    check_result "Soak FD growth" "$fd_result" "${fd_growth_pct}% (limit: <${THRESH_SOAK_FD_GROWTH}%)"
 
     vm_stop_agent "$agent_mode" 2>/dev/null || true
     sleep 1
@@ -1072,9 +1124,11 @@ generate_report() {
     printf "  %-45s %s\n" "REST API p99" "${api_p99} ms (limit: <${THRESH_API_P99_MS} ms)"
 
     if [ "$SOAK" = "true" ]; then
-        local soak_growth
+        local soak_growth soak_fd_growth
         soak_growth="$(echo "$report" | jq -r '.soak.rss_growth_pct // "N/A"')"
+        soak_fd_growth="$(echo "$report" | jq -r '.soak.fd_growth_pct // "N/A"')"
         printf "  %-45s %s\n" "Soak RSS growth" "${soak_growth}% (limit: <${THRESH_SOAK_RSS_GROWTH}%)"
+        printf "  %-45s %s\n" "Soak FD growth" "${soak_fd_growth}% (limit: <${THRESH_SOAK_FD_GROWTH}%)"
     fi
 
     echo ""

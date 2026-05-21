@@ -70,6 +70,12 @@ with matrix_path.open() as fh:
     matrix = yaml.safe_load(fh)
 
 skip_domains = set(matrix.get("skip_domains") or [])
+# `nested_cli_subcommands` lists logical CLI surfaces that are nested
+# under a parent `Command` variant (e.g. `nat nptv6 ...`). They are
+# documented as cli_subcommand rows for traceability but don't appear
+# as top-level variants in cli.rs, so the audit must not flag them as
+# extras.
+allowed_nested_cli = set(matrix.get("nested_cli_subcommands") or [])
 rows = matrix.get("coverage") or []
 
 # ── Enumerate observable surface on disk ────────────────────────────
@@ -128,6 +134,8 @@ for kind, disk in groups:
     for feat in sorted(disk_set - matrix_set):
         missing.append(f"  - kind={kind} feature={feat}")
     for feat in sorted(matrix_set - disk_set):
+        if kind == "cli_subcommand" and feat in allowed_nested_cli:
+            continue
         extra.append(f"  - kind={kind} feature={feat}")
 
 # ── Cross-check suite ids ───────────────────────────────────────────
@@ -150,6 +158,18 @@ for row in rows:
     for s in suites:
         if s not in known_suites:
             stale_suite_refs.append(f"  - {kind}/{feat} references suite {s}")
+
+# ── Validate suite_profiles map ─────────────────────────────────────
+suite_profiles_raw = matrix.get("suite_profiles") or {}
+valid_profiles = {"pr", "nightly", "manual"}
+bad_profile_values: list[str] = []
+for sid, prof in suite_profiles_raw.items():
+    if prof not in valid_profiles:
+        bad_profile_values.append(f"  - {sid} -> '{prof}'")
+
+suite_profile_keys = {str(k) for k in suite_profiles_raw}
+missing_profile_for_suite = sorted(known_suites - suite_profile_keys)
+extra_profile_for_suite = sorted(suite_profile_keys - known_suites)
 
 # ── Report ──────────────────────────────────────────────────────────
 def banner(t: str) -> None:
@@ -178,6 +198,19 @@ if extra:
 if stale_suite_refs:
     banner("STALE suite references (suite id not under suites/)")
     print("\n".join(stale_suite_refs))
+    failed = True
+
+if bad_profile_values:
+    banner("INVALID suite_profiles values (allowed: pr | nightly | manual)")
+    print("\n".join(bad_profile_values))
+    failed = True
+if missing_profile_for_suite:
+    banner("MISSING suite_profiles entries (suite on disk, no profile pin)")
+    print("\n".join(f"  - {s}" for s in missing_profile_for_suite))
+    failed = True
+if extra_profile_for_suite:
+    banner("EXTRA suite_profiles entries (profile pin, no suite on disk)")
+    print("\n".join(f"  - {s}" for s in extra_profile_for_suite))
     failed = True
 
 if tbd_rows:

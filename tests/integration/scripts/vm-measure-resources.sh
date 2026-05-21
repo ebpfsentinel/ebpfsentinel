@@ -12,11 +12,12 @@ PID=${1:?usage: vm-measure-resources.sh <pid> <sample_secs>}
 SAMPLE=${2:-5}
 
 if [ ! -f "/proc/$PID/status" ]; then
-    echo '{"rss_kb": 0, "cpu_pct": 0, "error": "process not found"}'
+    echo '{"rss_kb": 0, "cpu_pct": 0, "fd_count": 0, "error": "process not found"}'
     exit 0
 fi
 
 RSS=$(grep VmRSS "/proc/$PID/status" 2>/dev/null | awk '{print $2}')
+FD_COUNT=$(ls -1 "/proc/$PID/fd" 2>/dev/null | wc -l)
 
 STAT1=$(cat "/proc/$PID/stat" 2>/dev/null)
 UT1=$(echo "$STAT1" | awk '{print $14}')
@@ -28,7 +29,7 @@ sleep "$SAMPLE"
 
 STAT2=$(cat "/proc/$PID/stat" 2>/dev/null)
 if [ -z "$STAT2" ]; then
-    echo "{\"rss_kb\": ${RSS:-0}, \"cpu_pct\": 0, \"error\": \"process exited\"}"
+    echo "{\"rss_kb\": ${RSS:-0}, \"cpu_pct\": 0, \"fd_count\": ${FD_COUNT:-0}, \"error\": \"process exited\"}"
     exit 0
 fi
 UT2=$(echo "$STAT2" | awk '{print $14}')
@@ -40,4 +41,4 @@ CLK=$(getconf CLK_TCK)
 DT=$((T2 - T1))
 CPU=$(echo "scale=2; ($DT / $CLK) / ($C2 - $C1) * 100" | bc -l 2>/dev/null)
 
-echo "{\"rss_kb\": ${RSS:-0}, \"cpu_pct\": ${CPU:-0}}"
+echo "{\"rss_kb\": ${RSS:-0}, \"cpu_pct\": ${CPU:-0}, \"fd_count\": ${FD_COUNT:-0}}"

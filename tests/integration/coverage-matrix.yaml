@@ -28,6 +28,90 @@
 skip_domains:
   - common
 
+# Logical CLI surfaces nested under a parent `Command` variant (e.g.
+# `agent nat nptv6 …`). They have coverage rows for traceability but
+# aren't top-level `pub enum Command` variants, so the audit must
+# allowlist them rather than flag them as orphans.
+nested_cli_subcommands:
+  - nptv6
+
+# Suite-level CI profile (consumed by scripts/list-suites-by-profile.sh
+# which drives .github/workflows/integration.yml).
+#
+#   pr      — runs on every pull-request + push (fast feedback, ≤30 s/suite p95
+#             per the 15-min CI budget)
+#   nightly — runs on the 02:00 UTC cron, plus workflow_dispatch profile=full
+#             (attack-realism suites 41+, perf benches 15/29/30, soak job)
+#   manual  — workflow_dispatch profile=full only
+#
+# The feature-level `profile` field on each coverage row remains informational
+# (it describes the *primary* execution profile of that feature); this block
+# is the authoritative source for which bats suite runs on which trigger.
+suite_profiles:
+  "01": pr
+  "02": pr
+  "03": pr
+  "04": pr
+  "05": pr
+  "06": pr
+  "07": pr
+  "08": pr
+  "09": pr
+  "10": pr
+  "11": pr
+  "12": pr
+  "13": pr
+  "14": pr
+  "15": nightly       # 15-performance-benchmark — heavy iperf/hping3 sweep
+  "16": pr
+  "17": pr
+  "18": pr
+  "19": pr
+  "20": pr
+  "21": pr
+  "22": pr
+  "23": pr
+  "24": pr
+  "25": pr
+  "26": pr
+  "27": pr
+  "28": pr
+  "29": nightly       # 29-ebpf-feature-overhead — per-feature CPU/RSS sweep
+  "30": nightly       # 30-ebpf-map-operation-bench — map churn microbench
+  "31": pr
+  "32": pr
+  "33": pr
+  "34": pr
+  "35": nightly       # 35-ebpf-routing-scenarios — multi-WAN setup heavy
+  "36": pr
+  "37": pr
+  "38": pr
+  "39": pr
+  "40": pr
+  "41": nightly       # 41-mhddos-l7-attacks
+  "42": nightly       # 42-pktgen-high-pps
+  "43": nightly       # 43-slowhttptest-slow-attacks
+  "44": nightly       # 44-scapy-amplification
+  "45": nightly       # 45-ja4-fingerprint-diversity
+  "46": nightly       # 46-xdp-firewall-reject
+  "47": nightly       # 47-xdp-ratelimit-syncookie
+  "48": nightly       # 48-lb-dsr-maglev (3-VM)
+  "49": nightly       # 49-dns-doh-dot-detect
+  "50": nightly       # 50-scrub-byte-level
+  "51": nightly       # 51-conntrack-kernel-ct-kill
+  "52": nightly       # 52-responses-time-bounded
+  "53": nightly       # 53-capture-pcap-export
+  "54": nightly       # 54-nptv6-prefix-translation
+  "55": nightly       # 55-mitre-assertions-sweep
+  "56": nightly       # 56-hot-reload-under-load
+  "57": nightly       # 57-multiwan-failover (3-VM)
+  "58": nightly       # 58-container-cgroup-enrichment
+  "59": nightly       # 59-ipv6-full-path-sweep
+  "60": nightly       # 60-l7-smtp-ftp-smb-edge
+  "61": nightly       # 61-pqc-handshake
+  "62": nightly       # 62-ssh-brute-force-real
+  "63": nightly       # 63-dlp-tls-mitm
+
 coverage:
   # ── eBPF programs (15) ──────────────────────────────────────────
   - kind: ebpf_program
