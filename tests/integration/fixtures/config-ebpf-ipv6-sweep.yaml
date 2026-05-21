@@ -1,0 +1,98 @@
+# config-ebpf-ipv6-sweep.yaml — IPv6 full-path sweep scenario fixture.
+#
+# Configures one IPv6-scoped rule per dataplane feature (firewall, IDS,
+# IPS auto-blacklist, ratelimit per-source) so the suite can assert each
+# loads, surfaces via REST, and survives a v4↔v6 mixed traffic burst.
+# Conntrack + DNS observation are enabled so AAAA queries are accepted
+# by the parser surface (DNS captures only — no rule firing required).
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules:
+    - id: fw-ipv6-cidr-allow
+      enabled: true
+      priority: 100
+      action: allow
+      protocol: tcp
+      src_ip: "fd00:59::/64"
+      dst_ip: "fd00:59::/64"
+      dst_port:
+        start: 65510
+        end: 65510
+    - id: fw-ipv6-loopback-host
+      enabled: true
+      priority: 110
+      action: allow
+      protocol: any
+      dst_ip: "::1/128"
+    - id: fw-ipv4-counterpart
+      enabled: true
+      priority: 120
+      action: allow
+      protocol: tcp
+      src_ip: "10.200.0.0/24"
+      dst_port:
+        start: 65511
+        end: 65511
+
+ids:
+  enabled: true
+  mode: alert
+  rules:
+    - id: ids-ipv6-probe
+      description: "IPv6 probe target on port 65520"
+      severity: high
+      protocol: tcp
+      dst_port: 65520
+      enabled: true
+
+ips:
+  enabled: true
+  mode: alert
+  auto_blacklist_threshold: 3
+
+ratelimit:
+  enabled: true
+  rules:
+    - id: rl-ipv6-source
+      rate: 5
+      burst: 10
+      src_ip: "fd00:59::/64"
+      action: drop
+      scope: source_ip
+      algorithm: token_bucket
+      enabled: true
+
+conntrack:
+  enabled: true
+
+dns:
+  enabled: true
+
+l7:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

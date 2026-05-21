@@ -1,0 +1,77 @@
+# config-ebpf-l7-edge.yaml — L7 SMTP/FTP/SMB edge-case scenario fixture.
+#
+# Pre-loads three L7 rules — one per protocol — so the suite can assert
+# they round-trip through the REST surface as the agent boots, and so
+# the L7 parser is wired into the dataplane when the suite later drives
+# malformed/edge traffic.
+#
+# Ports chosen to keep traffic local (not the real well-known ports):
+#   * SMTP: 25
+#   * FTP control: 21
+#   * SMB: 445
+# The L7 rules match on the protocol parser output, not the port; the
+# ports here are only the wire entry points that the L7 inspector hooks
+# via TC ingress.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: true
+  rules:
+    - id: l7-smtp-ehlo-log
+      priority: 10
+      action: log
+      protocol: smtp
+      command: EHLO
+      enabled: true
+    - id: l7-ftp-port-deny
+      priority: 20
+      action: deny
+      protocol: ftp
+      command: PORT
+      enabled: true
+    - id: l7-smb-smb1-deny
+      priority: 30
+      action: deny
+      protocol: smb
+      is_smb2: false
+      enabled: true
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
