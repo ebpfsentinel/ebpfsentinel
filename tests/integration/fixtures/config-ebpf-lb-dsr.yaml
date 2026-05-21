@@ -1,0 +1,62 @@
+# config-ebpf-lb-dsr.yaml — 3-VM L4 LB DSR + Maglev scenario config.
+#
+# Topology (set EBPF_3VM_MODE=true to drive):
+#   Client VM   192.168.56.20 ── 56.0/24 ──┐
+#                                          [Agent dual-NIC router]
+#   Backend VM  192.168.57.30 ── 57.0/24 ──┘
+#
+# The agent claims a VIP (192.168.56.100) on the client-side NIC (eth1)
+# via the XDP ARP responder, and L2 DSR-forwards traffic to backends
+# reachable on the backend-side NIC (eth2). The agent itself never sees
+# the backend→client return path (responses bypass it).
+
+agent:
+  interfaces:
+    - eth1
+    - eth2
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+loadbalancer:
+  enabled: true
+  services: []
+  announce:
+    role: primary
+    interface: eth1
+    vips:
+      - name: dsr-vip
+        addr: 192.168.56.100
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

@@ -64,19 +64,19 @@ coverage:
 
   - kind: ebpf_program
     feature: xdp-loadbalancer
-    suites: ["21"]
+    suites: ["21", "48"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "L4 LB + Maglev. DSR end-to-end planned suite 48 (3-VM)"
+    notes: "L4 LB + Maglev; suite 48 (3-VM) covers L2 DSR end-to-end and Maglev disruption bound"
 
   - kind: ebpf_program
     feature: xdp-vip-announcer
-    suites: ["40"]
+    suites: ["40", "48"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "L2 VIP announcer / ARP responder"
+    notes: "L2 VIP announcer / ARP responder; suite 48 (3-VM) drives the responder + gratuitous-ARP + is_self_announced predicate from a real client"
 
   - kind: ebpf_program
     feature: tc-ids
@@ -498,11 +498,11 @@ coverage:
 
   - kind: domain_module
     feature: loadbalancer
-    suites: ["17", "21", "40"]
+    suites: ["17", "21", "40", "48"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Maglev + DSR; 3-VM end-to-end planned (48)"
+    notes: "Maglev + DSR; 3-VM end-to-end coverage via suite 48"
 
   - kind: domain_module
     feature: nat
@@ -622,3 +622,11 @@ attack_suites:
     profile: nightly
     surfaces: ["xdp-ratelimit", "xdp-ratelimit-syncookie", "ddos"]
     notes: "SYN flood: nstat TcpExtSyncookiesSent and agent syncookie_sent metric grow, legit ncat completes 3-way via cookie, spoofed-source flood leaves TcpExtSyncookiesRecv flat"
+
+  - suite: "48"
+    name: lb-dsr-maglev
+    topology: 3vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["xdp-loadbalancer", "xdp-vip-announcer", "loadbalancer"]
+    notes: "L2 DSR end-to-end: agent rewrites dst MAC and the backend→client return bypasses it; Maglev rebuild on backend removal stays under the 2/N disruption bound; XDP ARP responder answers on the client subnet; gratuitous-ARP takeover metric increments; is_self_announced() suppresses self-ARP alerts"
