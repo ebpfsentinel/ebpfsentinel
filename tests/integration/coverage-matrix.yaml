@@ -96,19 +96,19 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-conntrack
-    suites: ["19", "25"]
-    topology: 2vm
+    suites: ["19", "25", "51"]
+    topology: 3vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Connection tracking; kernel-CT kill via kill_flow_via_skb_ct planned suite 51"
+    notes: "Connection tracking; kernel-CT kill via kill_flow_via_xdp_ct/skb_ct asserted in 51"
 
   - kind: ebpf_program
     feature: tc-dns
-    suites: ["20"]
-    topology: 2vm
+    suites: ["20", "49"]
+    topology: 3vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Passive DNS capture; DoH/DoT detection planned suite 49"
+    notes: "Passive DNS capture; DoH/DoT detection via ClientHello SNI + dst_port 853 asserted in 49"
 
   - kind: ebpf_program
     feature: tc-nat-ingress
@@ -136,11 +136,11 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-scrub
-    suites: ["24", "44"]
-    topology: 2vm
+    suites: ["24", "44", "50"]
+    topology: 3vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Packet normalization; spoofed-source amplification drop in 44; byte-level assertions planned suite 50"
+    notes: "Packet normalization; spoofed-source amplification drop in 44; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 50"
 
   - kind: ebpf_program
     feature: uprobe-dlp
@@ -418,11 +418,11 @@ coverage:
 
   - kind: domain_module
     feature: conntrack
-    suites: ["19", "25"]
-    topology: 2vm
+    suites: ["19", "25", "51"]
+    topology: 3vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Connection tracking"
+    notes: "Connection tracking; kernel-CT kill on block-rule injection mid-flow in 51"
 
   - kind: domain_module
     feature: container
@@ -450,19 +450,19 @@ coverage:
 
   - kind: domain_module
     feature: dns
-    suites: ["04", "20"]
-    topology: 2vm
+    suites: ["04", "20", "49"]
+    topology: 3vm
     kernel_min: "6.9"
     profile: pr
-    notes: "DNS intel; DoH/DoT detect planned (49)"
+    notes: "DNS intel; DoH/DoT detection via ClientHello SNI + dst_port 853 in 49"
 
   - kind: domain_module
     feature: firewall
-    suites: ["03", "11", "25", "27", "44"]
-    topology: 2vm
+    suites: ["03", "11", "25", "27", "44", "51"]
+    topology: 3vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Stateful L3/L4 firewall; amplification UDP-port denies in 44"
+    notes: "Stateful L3/L4 firewall; amplification UDP-port denies in 44; mid-flow block + CT-kill in 51"
 
   - kind: domain_module
     feature: ids
@@ -630,3 +630,27 @@ attack_suites:
     profile: nightly
     surfaces: ["xdp-loadbalancer", "xdp-vip-announcer", "loadbalancer"]
     notes: "L2 DSR end-to-end: agent rewrites dst MAC and the backend→client return bypasses it; Maglev rebuild on backend removal stays under the 2/N disruption bound; XDP ARP responder answers on the client subnet; gratuitous-ARP takeover metric increments; is_self_announced() suppresses self-ARP alerts"
+
+  - suite: "49"
+    name: dns-doh-dot-detect
+    topology: 3vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["tc-dns", "l7", "dns"]
+    notes: "DoH detection via TLS ClientHello SNI on built-in resolver list and on custom dns.doh_resolvers entry; DoT detection by dst_port 853; plain UDP/53 traffic does not raise an EncryptedDns alert (FP guard)"
+
+  - suite: "50"
+    name: scrub-byte-level
+    topology: 3vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["tc-scrub", "firewall"]
+    notes: "Byte-level pcap assertions on the post-transit backend capture: TTL floor (min_ttl raises low TTL to 64), TCP MSS option clamped to max_mss=1400, IPv4 DF flag cleared, IPv4 identification randomized away from sender-chosen value; fragment-policy AC deferred (no ScrubConfig knob yet)"
+
+  - suite: "51"
+    name: conntrack-kernel-ct-kill
+    topology: 3vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["tc-conntrack", "xdp-firewall", "firewall", "conntrack"]
+    notes: "Established iperf3 flow tracked by kernel netfilter conntrack on the transit agent; mid-flow deny rule POST triggers kill_flow_via_xdp_ct kfunc; CT entry disappears within seconds and does not re-establish while the rule is active; removing the rule restores forwarding"

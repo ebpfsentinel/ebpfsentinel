@@ -109,7 +109,8 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
         build-essential pkg-config libssl-dev libpcap-dev protobuf-compiler llvm-dev \
         linux-headers-$(uname -r) iproute2 tcpdump curl wget jq git \
         ca-certificates openssl \
-        iperf3 hping3 ncat stress-ng bc
+        iperf3 hping3 ncat stress-ng bc \
+        conntrack
 
       # Install bpftool if available
       apt-get install -y --no-install-recommends linux-tools-$(uname -r) bpftool 2>/dev/null || true

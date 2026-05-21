@@ -1,0 +1,50 @@
+# config-ebpf-conntrack-kill.yaml — Stateful firewall + kernel-CT kill, 3-VM.
+#
+# Drives the kill_flow_via_xdp_ct / kill_flow_via_skb_ct kfunc path: an
+# established TCP flow is matched by a block rule injected mid-flow,
+# the XDP firewall returns ACTION_DROP, and the kernel CT entry for
+# that 4-tuple is destroyed in the same code path.
+
+agent:
+  interfaces:
+    - eth1
+    - eth2
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+conntrack:
+  enabled: true
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

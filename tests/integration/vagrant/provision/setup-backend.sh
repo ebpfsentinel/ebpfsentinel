@@ -118,6 +118,30 @@ UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now s-server-backend.service
 
+# ── [4c/5] openssl s_server systemd unit on :853 (DoT endpoint) ──────
+# Minimal TLS listener used by the DoH/DoT detection suite. The cert
+# is the same self-signed one nginx ships with; the listener does not
+# implement DNS-over-TLS — the agent only inspects the ClientHello.
+echo "=== [4c/5] Configuring DoT-style listener on :853 ==="
+sudo tee /etc/systemd/system/dot-backend.service >/dev/null <<'UNIT'
+[Unit]
+Description=openssl s_server on :853 (eBPFsentinel DoT-style endpoint)
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/openssl s_server -accept 853 \
+    -cert /etc/nginx/tls/server.crt -key /etc/nginx/tls/server.key \
+    -quiet
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+sudo systemctl daemon-reload
+sudo systemctl enable --now dot-backend.service || true
+
 # ── [5/5] ARP / MAC capture helper (used by tests + agent) ───────────
 echo "=== [5/5] Installing ARP capture helper /usr/local/bin/backend-arp ==="
 sudo tee /usr/local/bin/backend-arp >/dev/null <<'EOS'
