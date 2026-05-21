@@ -1,0 +1,49 @@
+# config-ebpf-capture.yaml — Time-bounded packet capture (suite 53).
+#
+# Drives the manual capture endpoint at /api/v1/captures/manual and the
+# matching `ebpfsentinel-agent capture start` CLI. The agent writes the
+# resulting pcap to /var/lib/ebpfsentinel/captures/{id}.pcap; the suite
+# pulls that file back via SSH and validates it with tcpdump -r.
+#
+# The capture engine is wired in startup unconditionally; this fixture
+# only needs a sane interface + audit so we can observe capture metadata.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

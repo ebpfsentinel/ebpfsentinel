@@ -112,19 +112,19 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-nat-ingress
-    suites: ["22"]
+    suites: ["22", "54"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "DNAT (TC ingress)"
+    notes: "DNAT (TC ingress); NPTv6 reverse-prefix translation surface asserted via REST + CLI in 54"
 
   - kind: ebpf_program
     feature: tc-nat-egress
-    suites: ["22"]
+    suites: ["22", "54"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "SNAT (TC egress)"
+    notes: "SNAT (TC egress); NPTv6 (RFC 6296) checksum-neutral prefix swap config + CLI/REST surface asserted in 54 (wire-level swap gated on IPv6 routability)"
 
   - kind: ebpf_program
     feature: tc-qos
@@ -361,19 +361,27 @@ coverage:
 
   - kind: cli_subcommand
     feature: responses
-    suites: [TBD]
+    suites: ["52"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "Manual time-bounded response actions — planned suite 52"
+    notes: "Manual time-bounded response actions (create/list/revoke + TTL auto-expire) asserted via REST + CLI parity in 52"
 
   - kind: cli_subcommand
     feature: capture
-    suites: [TBD]
+    suites: ["53"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "Manual packet capture (pcap) — planned suite 53"
+    notes: "Manual packet capture (start/list/stop) with tcpdump-parseable pcap export asserted in 53"
+
+  - kind: cli_subcommand
+    feature: nptv6
+    suites: ["54"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    notes: "NPTv6 prefix-translation CRUD + listing asserted via REST + `nat nptv6 list` CLI parity in 54"
 
   # ── Domain modules (23, excl. common) ───────────────────────────
   - kind: domain_module
@@ -410,11 +418,11 @@ coverage:
 
   - kind: domain_module
     feature: capture
-    suites: [TBD]
+    suites: ["53"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "Pcap export — planned suite 53"
+    notes: "Pcap export lifecycle (Running → Completed) + on-disk pcap validity asserted in 53"
 
   - kind: domain_module
     feature: conntrack
@@ -506,11 +514,11 @@ coverage:
 
   - kind: domain_module
     feature: nat
-    suites: ["17", "22"]
+    suites: ["17", "22", "54"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "SNAT/DNAT/NPTv6; NPTv6 dedicated planned (54)"
+    notes: "SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 54"
 
   - kind: domain_module
     feature: qos
@@ -530,11 +538,11 @@ coverage:
 
   - kind: domain_module
     feature: response
-    suites: [TBD]
+    suites: ["52"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "Automated response policy — planned suite 52"
+    notes: "In-memory ResponseEngine create/list/revoke + TTL auto-expire asserted in 52; auto_response → IpsService → firewall-map mirroring exercised separately by the auto-response pipeline (not in 52)"
 
   - kind: domain_module
     feature: routing
@@ -654,3 +662,27 @@ attack_suites:
     profile: nightly
     surfaces: ["tc-conntrack", "xdp-firewall", "firewall", "conntrack"]
     notes: "Established iperf3 flow tracked by kernel netfilter conntrack on the transit agent; mid-flow deny rule POST triggers kill_flow_via_xdp_ct kfunc; CT entry disappears within seconds and does not re-establish while the rule is active; removing the rule restores forwarding"
+
+  - suite: "52"
+    name: responses-time-bounded
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["responses", "response"]
+    notes: "Time-bounded ResponseEngine via /api/v1/responses/manual: TTL-bound block_ip surfaces in list_active with decreasing remaining_secs; entry drops from active list after TTL; DELETE /api/v1/responses/{id} revokes before TTL; CLI parity via `responses create --action --target --ttl`; AC #3 audit-trail entry deferred (response engine emits no AuditEntry today)"
+
+  - suite: "53"
+    name: capture-pcap-export
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["capture"]
+    notes: "Manual capture lifecycle via /api/v1/captures/manual + /api/v1/captures: session reaches status=completed at duration boundary, pcap lands at /var/lib/ebpfsentinel/captures/<id>.pcap, tcpdump -r parses cleanly; CLI parity via `capture start --filter --duration --interface`"
+
+  - suite: "54"
+    name: nptv6-prefix-translation
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    surfaces: ["tc-nat-egress", "tc-nat-ingress", "nat", "nptv6"]
+    notes: "NPTv6 (RFC 6296) prefix translation surface: GET /api/v1/nat/nptv6 surfaces configured rule, POST + DELETE round-trip a rule, CLI `nat nptv6 list` mirrors the REST list; wire-level egress-source-prefix swap (fd00:54::/64 → 2001:db8:54::/64) gated on per-VM IPv6 reachability and skips when the test VMs lack the IPv6 link addresses + routes"

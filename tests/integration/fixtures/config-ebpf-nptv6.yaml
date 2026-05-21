@@ -1,0 +1,61 @@
+# config-ebpf-nptv6.yaml — NPTv6 prefix translation (suite 54).
+#
+# Drives the tc-nat-ingress/egress eBPF programs in NPTv6 mode (RFC 6296).
+# Internal site-local prefix fd00:54::/64 is translated to external
+# 2001:db8:54::/64 on egress and reversed on ingress. The suite ships
+# IPv6 packets from the attacker VM, captures them on the backend, and
+# verifies the source-prefix swap (and the reverse on the return path).
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+conntrack:
+  enabled: true
+
+nat:
+  enabled: true
+  snat_rules: []
+  dnat_rules: []
+  nptv6_rules:
+    - id: nptv6-suite54
+      enabled: true
+      internal_prefix: "fd00:54::"
+      external_prefix: "2001:db8:54::"
+      prefix_len: 64
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
