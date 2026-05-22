@@ -68,6 +68,10 @@ pub struct AppState {
     pub metrics_auth_required: bool,
     pub config: Arc<RwLock<AgentConfig>>,
     pub reload_trigger: mpsc::Sender<()>,
+    /// Manual threat-intel feed re-fetch trigger. `Some` only when the feed
+    /// fetcher task is running (threat intel enabled with ≥1 feed); `None`
+    /// otherwise, in which case the refresh endpoint reports unavailable.
+    pub feed_refresh_trigger: Option<mpsc::Sender<()>>,
     pub ebpf_program_status: Arc<RwLock<HashMap<String, bool>>>,
     pub fingerprint_cache: Option<Arc<domain::l7::ja4::FingerprintCache>>,
     pub ja4s_fingerprint_cache: Option<Arc<domain::l7::ja4::Ja4sFingerprintCache>>,
@@ -130,6 +134,7 @@ impl AppState {
             metrics_auth_required: false,
             config,
             reload_trigger,
+            feed_refresh_trigger: None,
             ebpf_program_status,
             fingerprint_cache: None,
             ja4s_fingerprint_cache: None,
@@ -139,6 +144,13 @@ impl AppState {
             alert_stream_tx: None,
             alert_replay_buffer: None,
         }
+    }
+
+    /// Attach a manual threat-intel feed re-fetch trigger.
+    #[must_use]
+    pub fn with_feed_refresh_trigger(mut self, tx: mpsc::Sender<()>) -> Self {
+        self.feed_refresh_trigger = Some(tx);
+        self
     }
 
     /// Attach a capture engine for manual packet capture.

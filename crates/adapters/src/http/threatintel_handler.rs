@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use super::error::ErrorBody;
+use super::error::{ApiError, ErrorBody};
 use super::state::AppState;
 
 // ── Response DTOs ───────────────────────────────────────────────────
@@ -37,6 +37,25 @@ pub struct FeedResponse {
     pub refresh_interval_secs: u64,
     pub max_iocs: usize,
     pub min_confidence: u8,
+    /// Unix-epoch milliseconds of the last completed feed fetch, or `null`
+    /// if no fetch has run yet. Shared across feeds (one fetch cycle).
+    pub last_fetched: Option<u64>,
+}
+
+/// Optional body for a feed refresh request.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct RefreshFeedRequest {
+    /// Feed to refresh. Accepted for forward compatibility; the fetcher
+    /// currently refreshes every enabled feed in a single cycle.
+    #[serde(default)]
+    pub feed_id: Option<String>,
+}
+
+/// Response to a feed refresh request.
+#[derive(Serialize, ToSchema)]
+pub struct RefreshResponse {
+    pub status: String,
+    pub message: String,
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
@@ -110,6 +129,7 @@ pub async fn list_iocs(State(state): State<Arc<AppState>>) -> Json<Vec<IocRespon
 )]
 pub async fn list_feeds(State(state): State<Arc<AppState>>) -> Json<Vec<FeedResponse>> {
     let svc = state.threatintel_service.load();
+    let last_fetched = svc.last_fetched();
     let feeds: Vec<FeedResponse> = svc
         .list_feeds()
         .iter()
@@ -122,9 +142,55 @@ pub async fn list_feeds(State(state): State<Arc<AppState>>) -> Json<Vec<FeedResp
             refresh_interval_secs: f.refresh_interval_secs,
             max_iocs: f.max_iocs,
             min_confidence: f.min_confidence,
+            last_fetched,
         })
         .collect();
     Json(feeds)
+}
+
+/// `POST /api/v1/threatintel/feeds/refresh` — trigger an immediate re-fetch
+/// of all enabled threat-intel feeds.
+#[utoipa::path(
+    post, path = "/api/v1/threatintel/feeds/refresh",
+    tag = "Threat Intelligence",
+    request_body = RefreshFeedRequest,
+    responses((status = 200, description = "Feed refresh triggered", body = RefreshResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 503, description = "Threat intel feeds not enabled", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn refresh_feeds(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<RefreshFeedRequest>>,
+) -> Result<Json<RefreshResponse>, ApiError> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let trigger =
+        state
+            .feed_refresh_trigger
+            .as_ref()
+            .ok_or_else(|| ApiError::ServiceUnavailable {
+                message: "threat intel feeds are not enabled".to_string(),
+            })?;
+    match trigger.try_send(()) {
+        // Sent, or a refresh is already queued — both mean a fetch will run.
+        Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
+            tracing::info!(feed_id = ?req.feed_id, "threat intel feed refresh requested");
+            Ok(Json(RefreshResponse {
+                status: "ok".to_string(),
+                message: "feed refresh triggered".to_string(),
+            }))
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+            Err(ApiError::ServiceUnavailable {
+                message: "feed fetcher is not running".to_string(),
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -173,9 +239,36 @@ mod tests {
             refresh_interval_secs: 3600,
             max_iocs: 500_000,
             min_confidence: 0,
+            last_fetched: Some(1_700_000_000_000),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "test");
         assert_eq!(json["refresh_interval_secs"], 3600);
+        assert_eq!(json["last_fetched"], 1_700_000_000_000_u64);
+    }
+
+    #[test]
+    fn feed_response_null_last_fetched() {
+        let resp = FeedResponse {
+            id: "test".to_string(),
+            name: "Test Feed".to_string(),
+            url: "https://example.com".to_string(),
+            format: "stix".to_string(),
+            enabled: true,
+            refresh_interval_secs: 3600,
+            max_iocs: 1000,
+            min_confidence: 0,
+            last_fetched: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["last_fetched"].is_null());
+    }
+
+    #[test]
+    fn refresh_request_defaults_feed_id_none() {
+        let req: RefreshFeedRequest = serde_json::from_str("{}").unwrap();
+        assert!(req.feed_id.is_none());
+        let req: RefreshFeedRequest = serde_json::from_str(r#"{"feed_id":"x"}"#).unwrap();
+        assert_eq!(req.feed_id.as_deref(), Some("x"));
     }
 }

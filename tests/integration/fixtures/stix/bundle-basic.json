@@ -4,6 +4,7 @@
   "objects": [
     {
       "type": "indicator",
+      "spec_version": "2.1",
       "id": "indicator--1",
       "pattern": "[ipv4-addr:value = '198.51.100.1']",
       "pattern_type": "stix",
@@ -13,6 +14,7 @@
     },
     {
       "type": "indicator",
+      "spec_version": "2.1",
       "id": "indicator--2",
       "pattern": "[domain-name:value = 'evil.example.com']",
       "pattern_type": "stix",
@@ -22,6 +24,7 @@
     },
     {
       "type": "indicator",
+      "spec_version": "2.1",
       "id": "indicator--3",
       "pattern": "[url:value = 'http://malware.test/payload.exe']",
       "pattern_type": "stix",
@@ -30,6 +33,7 @@
     },
     {
       "type": "indicator",
+      "spec_version": "2.1",
       "id": "indicator--expired",
       "pattern": "[ipv4-addr:value = '203.0.113.50']",
       "pattern_type": "stix",
@@ -38,12 +42,14 @@
     },
     {
       "type": "malware",
+      "spec_version": "2.1",
       "id": "malware--1",
       "name": "EvilBot",
       "is_family": false
     },
     {
       "type": "relationship",
+      "spec_version": "2.1",
       "id": "relationship--1",
       "relationship_type": "indicates",
       "source_ref": "indicator--1",

@@ -85,11 +85,13 @@ use super::zone_handler;
         threatintel_handler::threatintel_status,
         threatintel_handler::list_iocs,
         threatintel_handler::list_feeds,
+        threatintel_handler::refresh_feeds,
         // Ops
         ops_handler::reload_config,
         ops_handler::get_config,
         ops_handler::get_ebpf_status,
         // DNS
+        dns_handler::dns_status,
         dns_handler::list_dns_cache,
         dns_handler::dns_stats,
         dns_handler::list_dns_blocklist,
@@ -201,11 +203,14 @@ use super::zone_handler;
         threatintel_handler::ThreatIntelStatusResponse,
         threatintel_handler::IocResponse,
         threatintel_handler::FeedResponse,
+        threatintel_handler::RefreshFeedRequest,
+        threatintel_handler::RefreshResponse,
         // Ops
         ops_handler::ReloadResponse,
         ops_handler::EbpfStatusResponse,
         ops_handler::ProgramStatus,
         // DNS
+        dns_handler::DnsStatusResponse,
         dns_handler::DnsCacheEntryResponse,
         dns_handler::DnsCacheListResponse,
         dns_handler::DnsStatsResponse,

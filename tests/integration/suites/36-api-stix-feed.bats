@@ -263,8 +263,14 @@ teardown_file() {
     bundle_type="$(echo "$body" | jq -r '.type' 2>/dev/null)" || true
     [ "$bundle_type" = "bundle" ]
 
+    # STIX 2.1 bundles drop the top-level spec_version; each SDO carries its
+    # own. Accept either location and scan all objects for the first match.
     local spec_version
-    spec_version="$(echo "$body" | jq -r '.spec_version // .objects[0].spec_version' 2>/dev/null)" || true
+    spec_version="$(echo "$body" | jq -r '
+        .spec_version
+        // ([.objects[]?.spec_version] | map(select(. != null)) | .[0])
+        // empty
+    ' 2>/dev/null)" || true
     assert_contains "$spec_version" "2.1"
 }
 

@@ -27,6 +27,10 @@ pub struct ThreatIntelAppService {
     feeds: Vec<FeedConfig>,
     mode: DomainMode,
     enabled: bool,
+    /// Unix-epoch milliseconds of the last completed feed fetch cycle, or
+    /// `None` if no fetch has run yet. Shared across all feeds because the
+    /// fetcher refreshes every enabled feed in a single cycle.
+    last_fetched: Option<u64>,
 }
 
 impl ThreatIntelAppService {
@@ -43,6 +47,7 @@ impl ThreatIntelAppService {
             feeds,
             mode: DomainMode::default(),
             enabled: true,
+            last_fetched: None,
         }
     }
 
@@ -126,6 +131,20 @@ impl ThreatIntelAppService {
 
     pub fn set_feeds(&mut self, feeds: Vec<FeedConfig>) {
         self.feeds = feeds;
+    }
+
+    /// Unix-epoch milliseconds of the last completed feed fetch, if any.
+    pub fn last_fetched(&self) -> Option<u64> {
+        self.last_fetched
+    }
+
+    /// Stamp the current time as the last completed feed fetch. Called by
+    /// the feed fetcher after every fetch cycle (periodic or manual).
+    pub fn mark_fetched(&mut self) {
+        self.last_fetched = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+            .ok();
     }
 
     /// Direct access to the engine (for feed update orchestration).

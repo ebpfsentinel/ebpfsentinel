@@ -80,6 +80,15 @@ pub struct DnsFlushResponse {
     pub flushed_entries: usize,
 }
 
+#[derive(Serialize, ToSchema, Default)]
+pub struct DnsStatusResponse {
+    /// Whether DNS intelligence (cache + blocklist) is enabled.
+    pub enabled: bool,
+    pub blocklist_pattern_count: usize,
+    pub blocklist_domains_blocked: u64,
+    pub blocklist_ips_injected: usize,
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn now_ns() -> u64 {
@@ -115,6 +124,35 @@ fn get_dns_services(
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
+
+/// `GET /api/v1/dns/status` — DNS intelligence subsystem status.
+#[utoipa::path(
+    get, path = "/api/v1/dns/status",
+    tag = "DNS Intelligence",
+    responses(
+        (status = 200, description = "DNS intelligence status", body = DnsStatusResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn dns_status(State(state): State<Arc<AppState>>) -> Json<DnsStatusResponse> {
+    match state.dns_blocklist_service.as_ref() {
+        Some(blocklist) => {
+            let stats = blocklist.stats();
+            Json(DnsStatusResponse {
+                enabled: true,
+                blocklist_pattern_count: stats.pattern_count,
+                blocklist_domains_blocked: stats.domains_blocked,
+                blocklist_ips_injected: stats.ips_injected,
+            })
+        }
+        None => Json(DnsStatusResponse::default()),
+    }
+}
 
 /// `GET /api/v1/dns/cache` — list DNS cache entries.
 #[utoipa::path(
@@ -379,6 +417,23 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["flushed_entries"], 150);
+    }
+
+    #[test]
+    fn status_response_serialization() {
+        let resp = DnsStatusResponse {
+            enabled: true,
+            blocklist_pattern_count: 3,
+            blocklist_domains_blocked: 7,
+            blocklist_ips_injected: 2,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["blocklist_pattern_count"], 3);
+        // Disabled default carries false + zeroed counters.
+        let off = serde_json::to_value(DnsStatusResponse::default()).unwrap();
+        assert_eq!(off["enabled"], false);
+        assert_eq!(off["blocklist_pattern_count"], 0);
     }
 
     #[test]

@@ -42,7 +42,9 @@ use super::ddos_handler::{
     list_ddos_policies,
 };
 use super::dlp_handler::{dlp_status, list_dlp_patterns};
-use super::dns_handler::{dns_stats, flush_dns_cache, list_dns_blocklist, list_dns_cache};
+use super::dns_handler::{
+    dns_stats, dns_status, flush_dns_cache, list_dns_blocklist, list_dns_cache,
+};
 use super::domain_handler::{add_to_blocklist, list_domain_reputations, remove_from_blocklist};
 use super::fingerprint_handler::{fingerprint_summary, ja4s_summary};
 use super::firewall_handler::{create_rule, delete_rule, list_rules};
@@ -77,7 +79,7 @@ use super::response_handler::{
 };
 use super::routing_handler::{list_gateways, routing_status};
 use super::state::AppState;
-use super::threatintel_handler::{list_feeds, list_iocs, threatintel_status};
+use super::threatintel_handler::{list_feeds, list_iocs, refresh_feeds, threatintel_status};
 use super::zone_handler::{list_zone_policies, list_zones, zone_status};
 
 /// Build the main Axum router with all REST API routes.
@@ -152,12 +154,14 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
             .route("/api/v1/threatintel/status", get(threatintel_status))
             .route("/api/v1/threatintel/iocs", get(list_iocs))
             .route("/api/v1/threatintel/feeds", get(list_feeds))
+            .route("/api/v1/threatintel/feeds/refresh", post(refresh_feeds))
             .route("/api/v1/alerts", get(list_alerts))
             .route("/api/v1/alerts/stream", get(stream_alerts))
             .route("/api/v1/audit/logs", get(list_audit_logs))
             .route("/api/v1/audit/rules/{id}/history", get(rule_history))
             .route("/api/v1/config", get(get_config))
             .route("/api/v1/ebpf/status", get(get_ebpf_status))
+            .route("/api/v1/dns/status", get(dns_status))
             .route("/api/v1/dns/cache", get(list_dns_cache))
             .route("/api/v1/dns/stats", get(dns_stats))
             .route("/api/v1/dns/blocklist", get(list_dns_blocklist))

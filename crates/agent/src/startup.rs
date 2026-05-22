@@ -76,6 +76,42 @@ use tracing::{error, info, warn};
 
 use infrastructure::config::{LogFormat, LogLevel};
 
+/// Run one threat-intel feed fetch cycle: fetch every enabled feed, reload
+/// the IOC set, stamp `last_fetched`, and inject any STIX domain indicators
+/// into the DNS blocklist. Shared by the startup fetch, the periodic timer,
+/// and the manual refresh trigger.
+async fn run_ti_feed_cycle(
+    ti_svc: &Arc<ArcSwap<ThreatIntelAppService>>,
+    fetcher: &adapters::threatintel::HttpFeedFetcher,
+    metrics: &Arc<dyn MetricsPort>,
+    dns_blocklist: Option<&Arc<DnsBlocklistAppService>>,
+    phase: &'static str,
+) {
+    let feeds = ti_svc.load().list_feeds().to_vec();
+    let result = application::feed_update::fetch_all_feeds_v2(&feeds, fetcher, metrics).await;
+
+    let mut svc = (**ti_svc.load()).clone();
+    if !result.iocs.is_empty()
+        && let Err(e) = svc.reload_iocs(result.iocs)
+    {
+        warn!(phase, "feed IOC reload failed: {e}");
+    }
+    // Stamp the fetch time on every cycle, even when no IOCs changed, so the
+    // feed status reflects the most recent fetch attempt.
+    svc.mark_fetched();
+    ti_svc.store(Arc::new(svc));
+
+    // Distribute STIX domain indicators to the DNS blocklist.
+    if let Some(bl_svc) = dns_blocklist {
+        for domain in &result.domains {
+            let source_tag = domain.source.clone();
+            if let Err(e) = bl_svc.add_pattern_with_source(&domain.domain, source_tag) {
+                tracing::debug!(domain = %domain.domain, error = %e, "domain blocklist inject skipped");
+            }
+        }
+    }
+}
+
 /// Run the agent startup sequence and block until shutdown.
 ///
 /// `log_level_override` and `log_format_override` take precedence over config file values.
@@ -723,6 +759,18 @@ pub async fn run(
     // Shared config, reload trigger, and eBPF program status for ops endpoints
     let shared_config = Arc::new(RwLock::new(config.clone()));
     let (reload_trigger_tx, reload_trigger_rx) = mpsc::channel::<()>(1);
+    // Manual threat-intel feed re-fetch channel. Only wired into AppState
+    // when the feed fetcher task actually runs (threat intel enabled with
+    // ≥1 feed); otherwise the refresh endpoint reports the feature off.
+    let ti_feeds_active = config.threatintel.enabled && !config.threatintel.feeds.is_empty();
+    let mut feed_refresh_rx: Option<mpsc::Receiver<()>> = None;
+    let feed_refresh_tx = if ti_feeds_active {
+        let (tx, rx) = mpsc::channel::<()>(4);
+        feed_refresh_rx = Some(rx);
+        Some(tx)
+    } else {
+        None
+    };
     let ebpf_program_status: Arc<RwLock<std::collections::HashMap<String, bool>>> =
         Arc::new(RwLock::new(std::collections::HashMap::new()));
 
@@ -796,6 +844,9 @@ pub async fn run(
         reload_trigger_tx,
         Arc::clone(&ebpf_program_status),
     );
+    if let Some(tx) = feed_refresh_tx {
+        app_state = app_state.with_feed_refresh_trigger(tx);
+    }
     if let Some(ref store) = alert_store {
         app_state = app_state.with_alert_store(Arc::clone(store));
     }
@@ -2474,58 +2525,50 @@ pub async fn run(
             feed_count = config.threatintel.feeds.len(),
             "threat intel feed fetcher starting"
         );
+        let mut refresh_rx = feed_refresh_rx
+            .take()
+            .expect("feed refresh rx present when feeds active");
         Some(tokio::spawn(async move {
-            // Initial fetch at startup
-            {
-                let feeds = feed_ti_svc.load().list_feeds().to_vec();
-                let result =
-                    application::feed_update::fetch_all_feeds_v2(&feeds, &fetcher, &feed_metrics)
-                        .await;
-                if !result.iocs.is_empty() {
-                    let mut svc = (**feed_ti_svc.load()).clone();
-                    if let Err(e) = svc.reload_iocs(result.iocs) {
-                        warn!("initial feed IOC reload failed: {e}");
-                    } else {
-                        feed_ti_svc.store(Arc::new(svc));
-                    }
-                }
-                // Distribute STIX domains to DNS blocklist
-                if let Some(ref bl_svc) = feed_dns_blocklist {
-                    for domain in &result.domains {
-                        let source_tag = domain.source.clone();
-                        if let Err(e) = bl_svc.add_pattern_with_source(&domain.domain, source_tag) {
-                            tracing::debug!(domain = %domain.domain, error = %e, "domain blocklist inject skipped");
-                        }
-                    }
-                }
-            }
+            // Initial fetch at startup.
+            run_ti_feed_cycle(
+                &feed_ti_svc,
+                &fetcher,
+                &feed_metrics,
+                feed_dns_blocklist.as_ref(),
+                "initial",
+            )
+            .await;
 
             let mut interval = tokio::time::interval(Duration::from_secs(refresh_secs));
             interval.tick().await; // skip the first immediate tick (already fetched above)
             loop {
                 tokio::select! {
                     () = feed_cancel.cancelled() => break,
-                    _ = interval.tick() => {}
-                }
-                let feeds = feed_ti_svc.load().list_feeds().to_vec();
-                let result =
-                    application::feed_update::fetch_all_feeds_v2(&feeds, &fetcher, &feed_metrics)
+                    _ = interval.tick() => {
+                        run_ti_feed_cycle(
+                            &feed_ti_svc,
+                            &fetcher,
+                            &feed_metrics,
+                            feed_dns_blocklist.as_ref(),
+                            "periodic",
+                        )
                         .await;
-                if !result.iocs.is_empty() {
-                    let mut svc = (**feed_ti_svc.load()).clone();
-                    if let Err(e) = svc.reload_iocs(result.iocs) {
-                        warn!("periodic feed IOC reload failed: {e}");
-                    } else {
-                        feed_ti_svc.store(Arc::new(svc));
                     }
-                }
-                if let Some(ref bl_svc) = feed_dns_blocklist {
-                    for domain in &result.domains {
-                        let source_tag = domain.source.clone();
-                        if let Err(e) = bl_svc.add_pattern_with_source(&domain.domain, source_tag) {
-                            tracing::debug!(domain = %domain.domain, error = %e, "domain blocklist inject skipped");
+                    msg = refresh_rx.recv() => match msg {
+                        Some(()) => {
+                            info!("manual threat intel feed refresh triggered");
+                            run_ti_feed_cycle(
+                                &feed_ti_svc,
+                                &fetcher,
+                                &feed_metrics,
+                                feed_dns_blocklist.as_ref(),
+                                "manual",
+                            )
+                            .await;
                         }
-                    }
+                        // All refresh senders dropped — happens only at shutdown.
+                        None => break,
+                    },
                 }
             }
         }))
