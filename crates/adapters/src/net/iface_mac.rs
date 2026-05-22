@@ -14,9 +14,11 @@ use domain::common::error::DomainError;
 use ports::secondary::vip_announcer_port::IfaceMacResolverPort;
 
 /// `SIOCGIFHWADDR` — get hardware (MAC) address. Stable Linux ioctl.
-const SIOCGIFHWADDR: libc::c_ulong = 0x8927;
+/// Typed `libc::Ioctl` so it matches the `ioctl(2)` request parameter on
+/// both glibc (`c_ulong`) and musl (`c_int`) targets.
+const SIOCGIFHWADDR: libc::Ioctl = 0x8927;
 /// `SIOCGIFINDEX` — get interface index. Stable Linux ioctl.
-const SIOCGIFINDEX: libc::c_ulong = 0x8933;
+const SIOCGIFINDEX: libc::Ioctl = 0x8933;
 
 /// Hand-rolled `struct ifreq`. libc's `ifreq` exposes its `ifr_ifru`
 /// union via version-churning accessors; a flat 24-byte tail is the
