@@ -8,55 +8,57 @@ Kernel-native **Network & Security platform** for Linux. One Rust binary replace
 
 ## What it does
 
+A snapshot of the capabilities below — see the [Features guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/overview.md) for the full reference on each engine.
+
 ### Network Security & Control
 
-| Feature | What it does |
-|---------|-------------|
-| **DDoS Mitigation** | XDP-speed SYN cookie validation, UDP/ICMP/TCP flood detection, volumetric attack mitigation, per-country thresholds, automatic CIDR blocking — drops attacks before they reach the TCP stack |
-| **Stateful Firewall** | L3/L4 kernel-side filtering with connection tracking, GeoIP blocking, security zones, VLAN/QinQ support, schedule-based rules, full IPv4/IPv6 dual-stack |
-| **L7 Filtering** | Protocol-aware rules for HTTP, TLS/SNI, gRPC, SMTP, FTP, SMB with GeoIP source/destination matching |
-| **L4 Load Balancer** | TCP/UDP/TLS passthrough with round-robin, weighted, IP hash, and least-connections algorithms |
-| **Traffic Shaping (QoS)** | Bandwidth limits, delay/loss simulation, weighted fair queuing, per-flow token buckets, EDT pacing, FQ-CoDel AQM |
-| **Rate Limiting** | Four algorithms (token bucket, fixed window, sliding window, leaky bucket), kernel-side per-country tiers |
-| **NAT** | SNAT, DNAT, masquerade, port forwarding, 1:1 NAT, NPTv6 prefix translation, hairpin NAT |
-| **Connection Tracking** | Kernel-side TCP/UDP/ICMP state machine, bidirectional flow tracking, timeout policies, flood thresholds |
-| **Traffic Normalization** | TTL normalization, MSS clamping, TCP flag/timestamp scrubbing, IP ID randomization, DF/ECN/DSCP rewriting |
-| **Policy Routing** | Multi-gateway selection with ICMP/TCP health checks, automatic failover, geographic preference |
-| **Zone Segmentation** | Network zones with inter-zone isolation policies — DMZ, LAN, WAN with per-zone rule scoping |
-| **Interface Groups** | Named groups of interfaces for multi-NIC rule scoping with bitmask matching and inversion (`!group`) |
-| **IP/Port Aliases** | Named alias objects (host, network, GeoIP, dynamic DNS) reusable across firewall, IPS, and DDoS rules |
-| **VLAN / QinQ** | 802.1Q and 802.1ad double-tagging support across firewall, IDS, threat intel, and rate limiting |
-| **IPv6 Dual-Stack** | Full parity across all engines: separate V4/V6 maps, 128-bit addresses, NDP-aware, NPTv6 |
+| Feature | Summary |
+|---------|---------|
+| **DDoS Mitigation** | XDP-speed SYN cookies + flood detection, drops attacks before the TCP stack |
+| **Stateful Firewall** | L3/L4 filtering with conntrack, GeoIP, zones, VLAN/QinQ, IPv4/IPv6 |
+| **L7 Filtering** | Protocol-aware rules for HTTP, TLS/SNI, gRPC, SMTP, FTP, SMB |
+| **L4 Load Balancer** | TCP/UDP/TLS passthrough with four balancing algorithms |
+| **Traffic Shaping (QoS)** | Bandwidth limits, fair queuing, EDT pacing, FQ-CoDel AQM |
+| **Rate Limiting** | Four algorithms with kernel-side per-country tiers |
+| **NAT** | SNAT, DNAT, masquerade, port forwarding, 1:1, NPTv6, hairpin |
+| **Connection Tracking** | Kernel-side TCP/UDP/ICMP state machine with timeout policies |
+| **Traffic Normalization** | TTL/MSS/flag scrubbing, IP ID randomization, DSCP rewriting |
+| **Policy Routing** | Multi-gateway with health checks and automatic failover |
+| **Zone Segmentation** | Network zones (DMZ/LAN/WAN) with inter-zone isolation |
+| **Interface Groups** | Named NIC groups for multi-NIC rule scoping |
+| **IP/Port Aliases** | Reusable named objects across firewall, IPS, and DDoS rules |
+| **VLAN / QinQ** | 802.1Q and 802.1ad double-tagging across engines |
+| **IPv6 Dual-Stack** | Full V4/V6 parity, NDP-aware, NPTv6 |
 
 ### Threat Detection & Response
 
-| Feature | What it does |
-|---------|-------------|
-| **IDS / IPS** | Kernel-side pattern matching with automatic blocking — detects and blocks, not just alerts |
-| **Threat Intelligence** | Plug any OSINT feed (CSV, JSON, plaintext, STIX 2.1) — real-time IOC matching, auto-blocking, no vendor lock-in |
-| **DLP** | Inspects TLS traffic for PCI card numbers, PII, and credential patterns via uprobe interception |
-| **DNS Security** | Passive DNS capture, domain blocklists, behavioral reputation scoring, DNS-enriched alerts |
-| **MITRE ATT&CK Mapping** | Every alert tagged with tactic + technique ID — ready for SOC dashboards and SIEM correlation |
-| **JA4+ Fingerprinting** | TLS client fingerprinting for detecting C2, malware, and anomalous connections |
-| **GeoIP Enforcement** | MaxMind-backed country resolution shared across all engines: DDoS auto-block, IPS subnet injection, rate-limit tiers, L7 filtering |
-| **Automated Response** | Response policies with conditions (severity, component) and actions (block IP, webhook, alert escalation) |
+| Feature | Summary |
+|---------|---------|
+| **IDS / IPS** | Kernel-side pattern matching with automatic blocking |
+| **Threat Intelligence** | Any OSINT feed (CSV, JSON, STIX 2.1) with real-time IOC matching |
+| **DLP** | TLS inspection for PCI, PII, and credential patterns via uprobe |
+| **DNS Security** | Passive capture, blocklists, behavioral reputation scoring |
+| **MITRE ATT&CK Mapping** | Every alert tagged with tactic + technique ID |
+| **JA4+ Fingerprinting** | TLS client fingerprinting for C2 and malware detection |
+| **GeoIP Enforcement** | MaxMind country resolution shared across all engines |
+| **Automated Response** | Condition-based policies (block IP, webhook, escalation) |
 
 ### Operations
 
-| Feature | What it does |
-|---------|-------------|
-| **Hot Reload** | Update rules, modes, and enabled flags without restart. Dynamically loads/unloads eBPF kernel programs when features are toggled. XDP tail-call chain auto-rewires. Triggered by file watcher, SIGHUP, or API |
-| **REST API** | OpenAPI 3.0 with Swagger UI and SecurityScheme — all domains covered |
-| **gRPC Streaming** | Real-time alert subscriptions with severity, component, and MITRE ATT&CK filters |
-| **Prometheus Metrics** | Per-domain counters, histograms, kernel-side eBPF counters, and system-level tracking |
-| **OTLP Export** | Alerts as OpenTelemetry Logs (gRPC or HTTP) to any OTLP-compatible collector |
-| **Alert Pipeline** | Routing to email, webhook, log, and OTLP sinks with deduplication and throttling |
-| **Audit Trail** | Rule change history with before/after diff, actor tracking, and persistent storage |
-| **Packet Capture** | Ring-buffer based packet capture with BPF filters for forensic analysis |
-| **CLI** | 18+ domain subcommands covering all endpoints with `--output table\|json` and `--token` auth |
-| **Authentication** | JWT (RS256), OIDC (JWKS auto-refresh), and API keys with role-based access (Admin, Operator, Viewer) |
-| **TLS 1.3** | REST and gRPC endpoints secured with rustls + aws_lc_rs, post-quantum ready (X25519MLKEM768) |
-| **Binary Integrity** | SHA-256 + Ed25519 self-verification of the agent binary at startup |
+| Feature | Summary |
+|---------|---------|
+| **Hot Reload** | Update rules and toggle eBPF programs without restart |
+| **REST API** | OpenAPI 3.0 with Swagger UI, all domains covered |
+| **gRPC Streaming** | Real-time alert subscriptions with severity/component filters |
+| **Prometheus Metrics** | Per-domain and kernel-side eBPF counters |
+| **OTLP Export** | Alerts as OpenTelemetry Logs (gRPC or HTTP) |
+| **Alert Pipeline** | Routing to email, webhook, log, OTLP with dedup + throttling |
+| **Audit Trail** | Rule change history with before/after diff and actor tracking |
+| **Packet Capture** | Ring-buffer capture with BPF filters for forensics |
+| **CLI** | 18+ subcommands with `--output table\|json` and `--token` auth |
+| **Authentication** | JWT, OIDC, and API keys with role-based access |
+| **TLS 1.3** | rustls + aws_lc_rs, post-quantum ready (X25519MLKEM768) |
+| **Binary Integrity** | SHA-256 + Ed25519 self-verification at startup |
 
 ## Architecture
 
