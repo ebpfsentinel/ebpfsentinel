@@ -70,10 +70,28 @@ static DLP_ARENA: RawMapDef = arena_def(DLP_ARENA_PAGES);
 static mut ARENA_BASE: u64 = 0;
 
 /// Monotonically increasing sequence counter for arena events.
-/// uprobes are per-task and the verifier serialises map writes, so
-/// a non-atomic `u64` is sufficient — duplicate sequences would only
-/// cause one slot overwrite, which is benign because userspace double
-/// checks `slot.sequence` before consuming.
+///
+/// This is a `.bss` `static mut` shared across all CPUs. uprobes fire
+/// concurrently (one per task entering `SSL_read`/`SSL_write`), so the
+/// `+= 1` read-modify-write is *not* serialised — two CPUs can observe
+/// the same value, land on the same slot, and interleave body writes.
+/// The userspace reader's `slot.sequence` recheck catches a torn slot
+/// only when the stamped sequence differs from the expected one; it
+/// cannot catch a lost-update collision where both writers stamp the
+/// identical sequence, so that rare case can surface a corrupted
+/// excerpt.
+///
+/// A drop-in atomic is not available: the `bpfel-unknown-none` target
+/// declares no atomic-CAS support, so `AtomicU64::fetch_add` does not
+/// compile (BPF fetch-atomics are ISA v3 and the target spec gates the
+/// method out regardless of `-C target-cpu`). A per-CPU counter is also
+/// unusable here because the userspace reader consumes a single global
+/// `write_seq` and walks `start_seq..=write_seq` contiguously — per-CPU
+/// sequences are non-contiguous and would break that drain. Eliminating
+/// the residual race therefore needs a per-CPU-ring protocol redesign
+/// (writer + reader + shared layout), tracked separately. The window is
+/// tiny and the impact is a single dropped/garbled excerpt, so the
+/// existing seqlock-style publish is retained in the meantime.
 static mut ARENA_SEQUENCE: u64 = 0;
 
 /// Per-task context: saves SSL_read entry arguments for the uretprobe.

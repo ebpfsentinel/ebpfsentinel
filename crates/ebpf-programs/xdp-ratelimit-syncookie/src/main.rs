@@ -175,7 +175,10 @@ fn send_syn_ack_v4(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
         let seq_ptr = tcp_out.add(4) as *mut u32;
         *seq_ptr = cookie.to_be();
         let ack_ptr = tcp_out.add(8) as *mut u32;
-        *ack_ptr = (in_seq + 1).to_be();
+        // ACK acknowledges the SYN's sequence + 1; TCP sequence space
+        // wraps mod 2^32, so use wrapping_add to stay correct (and
+        // overflow-check-safe) regardless of build profile.
+        *ack_ptr = in_seq.wrapping_add(1).to_be();
         *tcp_out.add(12) = 0x60; // data offset = 6 (24 bytes)
         *tcp_out.add(13) = 0x12; // SYN+ACK
         let win_ptr = tcp_out.add(14) as *mut u16;
@@ -214,8 +217,13 @@ fn send_syn_ack_v6(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
     let in_src_port_be = unsafe { (*sctx).in_src_port_be };
     let in_dst_port_be = unsafe { (*sctx).in_dst_port_be };
     let mss_idx = unsafe { (*sctx).mss_idx };
+    // Raw IPv6 addresses captured by xdp-ratelimit at the packet's true
+    // L3 offset — VLAN-aware, so no fixed-offset re-read here (which would
+    // grab the wrong bytes on VLAN-tagged frames).
+    let in_src_addr: [u8; 16] = unsafe { (*sctx).in_src_addr };
+    let in_dst_addr: [u8; 16] = unsafe { (*sctx).in_dst_addr };
 
-    // Read MACs and IPv6 addresses from packet at constant offsets.
+    // Read MACs from packet at constant offset 0 (MACs precede any VLAN tag).
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut in_src_mac = [0u8; 6];
     let mut in_dst_mac = [0u8; 6];
@@ -224,18 +232,6 @@ fn send_syn_ack_v6(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
         copy_mac_asm!(in_dst_mac.as_mut_ptr(), p);
         copy_mac_asm!(in_src_mac.as_mut_ptr(), p.add(6));
     }
-
-    // Read IPv6 addresses from original packet (l3_off may vary, but we
-    // read from the PKT_CTX map instead to avoid variable offsets).
-    // For the SYN+ACK, we need the IPv6 src/dst to swap them.
-    // We use src_ip/dst_ip (XOR-folded) for the cookie, but need the
-    // raw 16-byte addresses for the response header. Read them from the
-    // original packet at a known-good offset: xdp-ratelimit already
-    // proved bounds for these. Since this is a tail call, the packet is
-    // still valid. Read from the constant Ethernet offset (14).
-    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, 14)? };
-    let in_src_addr: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
-    let in_dst_addr: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
 
     // Compute cookie.
     let secret = match SYNCOOKIE_SECRET.get(0) {
@@ -286,7 +282,8 @@ fn send_syn_ack_v6(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
         let seq_ptr = tcp_out.add(4) as *mut u32;
         *seq_ptr = cookie.to_be();
         let ack_ptr = tcp_out.add(8) as *mut u32;
-        *ack_ptr = (in_seq + 1).to_be();
+        // TCP sequence space wraps mod 2^32 — wrapping_add stays correct.
+        *ack_ptr = in_seq.wrapping_add(1).to_be();
         *tcp_out.add(12) = 0x60;
         *tcp_out.add(13) = 0x12;
         let win_ptr = tcp_out.add(14) as *mut u16;

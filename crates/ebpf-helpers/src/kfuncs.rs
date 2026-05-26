@@ -1959,12 +1959,21 @@ impl CtBuilder {
         rc == 0
     }
 
+    /// Failure sentinel returned by [`insert`](Self::insert).
+    ///
+    /// `bpf_ct_insert_entry` reports failure only by returning `NULL`;
+    /// it exposes no errno to BPF (and the alloc-time `opts.error` is
+    /// already `0` for any builder that exists, since allocation
+    /// succeeded). This fixed value is therefore the only failure signal
+    /// available — it is a sentinel, not a kernel error code.
+    pub const INSERT_FAILED: i32 = -1;
+
     /// Commit the builder into the kernel conntrack table,
     /// consuming `self`. On success returns a live `*mut nf_conn`
     /// the caller is responsible for releasing via [`ct_release`].
-    /// On failure returns `Err(errno)` — the kernel consumes the
-    /// `___init` reference either way, matching `bpf_ct_insert_entry`
-    /// semantics.
+    /// On failure returns `Err(Self::INSERT_FAILED)` — the kernel
+    /// consumes the `___init` reference either way, matching
+    /// `bpf_ct_insert_entry` semantics (which surfaces no errno).
     #[inline(always)]
     pub fn insert(self) -> Result<CtEntry, i32> {
         let raw = self.inner;
@@ -1976,7 +1985,7 @@ impl CtBuilder {
         #[cfg(not(target_arch = "bpf"))]
         let p = unsafe { host_stubs::bpf_ct_insert_entry(raw) };
         if p.is_null() {
-            Err(-1)
+            Err(Self::INSERT_FAILED)
         } else {
             Ok(CtEntry { inner: p })
         }

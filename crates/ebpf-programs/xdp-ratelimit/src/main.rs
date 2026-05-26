@@ -816,7 +816,7 @@ fn check_syn_flood_v4(
 #[inline(always)]
 fn check_syn_flood_v6(
     ctx: &XdpContext,
-    _l3_offset: usize,
+    l3_offset: usize,
     l4_offset: usize,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
@@ -862,6 +862,13 @@ fn check_syn_flood_v6(
         vlan_id,
     );
 
+    // Capture the raw 16-byte IPv6 addresses at the packet's true L3
+    // offset (VLAN-aware) so the syncookie program never re-reads the
+    // packet at a fixed offset to forge the reply.
+    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset).ok()? };
+    let raw_src_addr = unsafe { (*ipv6hdr).src_addr };
+    let raw_dst_addr = unsafe { (*ipv6hdr).dst_addr };
+
     // Populate context for the syncookie tail-call program.
     let in_seq = u32::from_be(unsafe { (*tcphdr).seq_num });
     if let Some(sctx) = SYNCOOKIE_CTX.get_ptr_mut(0) {
@@ -875,6 +882,8 @@ fn check_syn_flood_v6(
             (*sctx).in_dst_port_be = (*tcphdr).dst_port;
             (*sctx).mss_idx = 4;
             (*sctx).flags = flags | FLAG_IPV6;
+            (*sctx).in_src_addr = raw_src_addr;
+            (*sctx).in_dst_addr = raw_dst_addr;
         }
     }
     Some(XDP_ACTION_SYNCOOKIE)

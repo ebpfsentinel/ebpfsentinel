@@ -178,6 +178,14 @@ pub struct SyncookieCtx {
     /// Flags: FLAG_IPV6 if IPv6 packet.
     pub flags: u8,
     pub _pad: [u8; 2],
+    /// Raw IPv6 source address (network byte order). Only valid when
+    /// `FLAG_IPV6` is set. Captured at the packet's true L3 offset by the
+    /// ratelimit program so the syncookie program never re-reads the packet
+    /// at a fixed offset (which would be wrong for VLAN-tagged frames).
+    pub in_src_addr: [u8; 16],
+    /// Raw IPv6 destination address (network byte order). Only valid when
+    /// `FLAG_IPV6` is set.
+    pub in_dst_addr: [u8; 16],
 }
 
 // ── ICMP Protection Config ───────────────────────────────────────
