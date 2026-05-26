@@ -3154,21 +3154,17 @@ pub fn try_load_xdp_ratelimit(
     // Set SYN cookie secret (random 32-byte key for cookie generation/validation)
     match SyncookieSecretManager::new(loader.ebpf_mut()) {
         Ok(mut mgr) => {
+            // The SYN-cookie PRF is only unforgeable if its key is
+            // unpredictable, so seed it from the kernel CSPRNG rather than a
+            // guessable clock value. Read 32 bytes from /dev/urandom into the
+            // eight key words (native endianness — the key is opaque).
+            let mut key_bytes = [0u8; 32];
+            std::fs::File::open("/dev/urandom")
+                .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut key_bytes))
+                .expect("/dev/urandom should be readable");
             let mut key = [0u32; 8];
-            // Use std::time nonce + xorshift as entropy source (sufficient for SYN cookie keying)
-            let seed = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let mut state = seed;
-            for slot in &mut key {
-                state ^= state.wrapping_shl(13);
-                state ^= state.wrapping_shr(7);
-                state ^= state.wrapping_shl(17);
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    *slot = state as u32;
-                }
+            for (slot, chunk) in key.iter_mut().zip(key_bytes.chunks_exact(4)) {
+                *slot = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             }
             let secret = ebpf_common::ddos::SyncookieSecret { key };
             if let Err(e) = mgr.set_secret(&secret) {

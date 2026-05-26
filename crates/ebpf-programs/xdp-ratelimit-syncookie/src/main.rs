@@ -20,17 +20,14 @@ use aya_ebpf::{
 use aya_ebpf_bindings::helpers::bpf_ktime_get_boot_ns;
 use ebpf_common::ddos::{
     DDOS_METRIC_COUNT, DDOS_METRIC_SYNCOOKIE_SENT, SYNCOOKIE_MSS_TABLE, SyncookieCtx,
-    SyncookieSecret,
+    SyncookieSecret, syncookie_prf,
 };
 use ebpf_common::event::FLAG_IPV6;
 use ebpf_helpers::checksum::{compute_ipv4_csum, compute_tcp_csum_v4_24, compute_tcp_csum_v6_24};
 use ebpf_helpers::net::{IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP};
 use ebpf_helpers::xdp::{ptr_at, ptr_at_mut};
 use ebpf_helpers::{barrier, copy_mac_asm};
-use network_types::{
-    eth::EthHdr,
-    ip::Ipv4Hdr,
-};
+use network_types::{eth::EthHdr, ip::Ipv4Hdr};
 
 // ── Maps (shared via pinning) ───────────────────────────────────────
 
@@ -83,33 +80,6 @@ fn increment_ddos_metric(index: u32) {
 // ── Cookie computation ──────────────────────────────────────────────
 
 #[inline(always)]
-fn syncookie_hash(
-    src_ip: u32,
-    dst_ip: u32,
-    src_port: u16,
-    dst_port: u16,
-    ts_counter: u32,
-    secret: &[u32; 8],
-) -> u32 {
-    let mut h: u32 = 0x811c_9dc5; // FNV offset basis
-    h ^= src_ip;
-    h = h.wrapping_mul(0x0100_0193);
-    h ^= dst_ip;
-    h = h.wrapping_mul(0x0100_0193);
-    h ^= ((src_port as u32) << 16) | (dst_port as u32);
-    h = h.wrapping_mul(0x0100_0193);
-    h ^= ts_counter;
-    h = h.wrapping_mul(0x0100_0193);
-    let mut i = 0u32;
-    while i < 8 {
-        h ^= secret[i as usize];
-        h = h.wrapping_mul(0x0100_0193);
-        i += 1;
-    }
-    h
-}
-
-#[inline(always)]
 fn make_syncookie(
     src_ip: u32,
     dst_ip: u32,
@@ -119,7 +89,7 @@ fn make_syncookie(
     secret: &[u32; 8],
 ) -> u32 {
     let ts = (unsafe { bpf_ktime_get_boot_ns() } / 60_000_000_000) as u32;
-    let hash = syncookie_hash(src_ip, dst_ip, src_port, dst_port, ts, secret);
+    let hash = syncookie_prf(src_ip, dst_ip, src_port, dst_port, ts, secret);
     (hash & 0xFFFF_FFF8) | ((mss_idx & 0x07) as u32)
 }
 
@@ -200,7 +170,7 @@ fn send_syn_ack_v4(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
     // Build TCP SYN+ACK with MSS option.
     unsafe {
         let port_ptr = tcp_out as *mut u16;
-        *port_ptr = in_dst_port_be;       // src = original dst
+        *port_ptr = in_dst_port_be; // src = original dst
         *port_ptr.add(1) = in_src_port_be; // dst = original src
         let seq_ptr = tcp_out.add(4) as *mut u32;
         *seq_ptr = cookie.to_be();

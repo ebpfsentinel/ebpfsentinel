@@ -33,7 +33,7 @@ use ebpf_common::{
         DdosConnTrackKey, DdosConnTrackValue, DdosSynConfig, EVENT_TYPE_DDOS_AMP,
         EVENT_TYPE_DDOS_CONNTRACK, EVENT_TYPE_DDOS_ICMP, EVENT_TYPE_DDOS_SYN, FLOOD_TYPE_ACK,
         FLOOD_TYPE_FIN, FLOOD_TYPE_RST, FloodCounterKey, IcmpConfig, SynRateState, SyncookieCtx,
-        SyncookieSecret,
+        SyncookieSecret, syncookie_prf,
     },
     event::{EVENT_TYPE_RATELIMIT, FLAG_IPV6, FLAG_VLAN, PacketEvent},
     ratelimit::{
@@ -1545,41 +1545,7 @@ fn check_flood_rate(src_ip: u32, flood_type: u8, threshold: u64, now: u64) -> bo
 
 // ── SYN Cookie Helpers ──────────────────────────────────────────────
 
-/// FNV-1a hash of 4-tuple + timestamp counter + secret.
-/// Returns a 32-bit cookie value.
-#[inline(always)]
-fn syncookie_hash(
-    src_ip: u32,
-    dst_ip: u32,
-    src_port: u16,
-    dst_port: u16,
-    ts_counter: u32,
-    secret: &[u32; 8],
-) -> u32 {
-    let mut h: u32 = 0x811c_9dc5; // FNV offset basis
-    // Mix source IP
-    h ^= src_ip;
-    h = h.wrapping_mul(0x0100_0193); // FNV prime
-    // Mix dest IP
-    h ^= dst_ip;
-    h = h.wrapping_mul(0x0100_0193);
-    // Mix ports (combined as u32)
-    h ^= ((src_port as u32) << 16) | (dst_port as u32);
-    h = h.wrapping_mul(0x0100_0193);
-    // Mix timestamp counter
-    h ^= ts_counter;
-    h = h.wrapping_mul(0x0100_0193);
-    // Mix secret (8 u32 words)
-    let mut i = 0u32;
-    while i < 8 {
-        h ^= secret[i as usize];
-        h = h.wrapping_mul(0x0100_0193);
-        i += 1;
-    }
-    h
-}
-
-/// Build a SYN cookie: hash with MSS index in lower 3 bits.
+/// Build a SYN cookie: keyed PRF (SipHash-2-4) with MSS index in lower 3 bits.
 #[allow(dead_code)]
 #[inline(always)]
 fn make_syncookie(
@@ -1591,7 +1557,7 @@ fn make_syncookie(
     secret: &[u32; 8],
 ) -> u32 {
     let ts = (unsafe { bpf_ktime_get_boot_ns() } / 60_000_000_000) as u32; // minute counter
-    let hash = syncookie_hash(src_ip, dst_ip, src_port, dst_port, ts, secret);
+    let hash = syncookie_prf(src_ip, dst_ip, src_port, dst_port, ts, secret);
     (hash & 0xFFFF_FFF8) | ((mss_idx & 0x07) as u32)
 }
 
@@ -1608,12 +1574,12 @@ fn validate_syncookie(
     let mss_bits = cookie & 0x07;
     let ts = (unsafe { bpf_ktime_get_boot_ns() } / 60_000_000_000) as u32;
     // Check current minute
-    let h0 = syncookie_hash(src_ip, dst_ip, src_port, dst_port, ts, secret);
+    let h0 = syncookie_prf(src_ip, dst_ip, src_port, dst_port, ts, secret);
     if (h0 & 0xFFFF_FFF8) | mss_bits == cookie {
         return true;
     }
     // Check previous minute (for clock boundary)
-    let h1 = syncookie_hash(
+    let h1 = syncookie_prf(
         src_ip,
         dst_ip,
         src_port,
