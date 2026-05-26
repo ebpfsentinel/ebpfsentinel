@@ -4,7 +4,14 @@
   <img src="./assets/ebpfsentinel-lockup-light.svg" width="600">
 </p>
 
-Kernel-native **Network & Security platform** for Linux. One Rust binary replaces your firewall, IDS/IPS, DDoS mitigation, DLP, and 10+ other network security tools — all running inside the Linux kernel via eBPF at wire speed. Not an endpoint agent — a **network agent** that runs where your traffic flows.
+A unified, kernel-native **Network & Security platform** for Linux — one Rust binary that replaces your firewall, IDS/IPS, DDoS mitigation, DLP, and 10+ more tools, all running in-kernel via eBPF at wire speed. Not an endpoint agent — it enforces security inline, right where your traffic flows.
+
+## Why eBPFsentinel
+
+- **One agent, not a stack.** Firewall, IDS/IPS, DDoS, DLP, threat intel, NAT, and QoS normally mean a rack of appliances or a pile of daemons — each with its own config, parser, and packet copy. eBPFsentinel runs them as a single binary sharing one kernel pipeline: less to deploy, less to patch, less attack surface.
+- **In-kernel, at the source.** Programs attach at XDP/TC/uprobe hook points, so traffic is inspected and dropped in the kernel — no packet copy to userspace on the fast path, no sidecar hop. Malicious traffic dies on the wire instead of costing you CPU upstack.
+- **Network placement, not endpoint sprawl.** It runs where traffic flows — host NIC, node boundary — not as an agent on every workload. One enforcement point per node sees east-west and north-south alike, with no per-app instrumentation.
+- **Built for trust.** Pure Rust with `#![forbid(unsafe_code)]` across the domain and application layers, hexagonal/DDD design, and SHA-256 + Ed25519 binary self-verification at startup. It runs **rootless** via BPF token delegation — zero `CAP_BPF` / `CAP_NET_ADMIN` — and tags every alert with MITRE ATT&CK for your SIEM.
 
 ## What it does
 
@@ -137,30 +144,59 @@ flowchart TB
 
 ## Quick start
 
-**Requirements:** Linux kernel 6.9+ with BTF, Rust stable + nightly
+**Requirements:** Linux kernel 6.9+ on x86_64 or aarch64, with BTF (`CONFIG_DEBUG_INFO_BTF=y`). The 6.9 floor unlocks **BPF token delegation** — the agent loads its eBPF programs with zero `CAP_BPF` / `CAP_NET_ADMIN` (rootless).
+
+### Install (prebuilt)
+
+Grab the latest tarball for your architecture from the [releases page](https://github.com/ebpfsentinel/ebpfsentinel/releases) — it ships the agent, prebuilt eBPF objects, a systemd unit, and an `install.sh`:
 
 ```bash
-# Build
-cargo build --release
-cargo xtask ebpf-build
+tar xzf ebpfsentinel-<version>-linux-x86_64.tar.gz
+cd ebpfsentinel-<version>-linux-x86_64
+sudo ./install.sh            # installs to /usr/local, wires up the systemd unit
+```
 
-# Run
+### Build from source
+
+The userspace agent builds on **stable**; the eBPF kernel programs need the **nightly** toolchain (driven by `cargo xtask`, `bpfel` target). Install Rust via [rustup](https://rustup.rs):
+
+```bash
+cargo build --release        # userspace agent (stable)
+cargo xtask ebpf-build        # eBPF programs (nightly)
 sudo ./target/release/ebpfsentinel-agent --config config/ebpfsentinel.yaml
 ```
 
-Or with Docker:
+### Docker (rootless)
+
+On kernel 6.9+ the agent runs **rootless** via BPF token delegation — no `CAP_BPF`, no `CAP_NET_ADMIN`, no `--privileged`. Prepare the delegated bpffs mount once on the host, then run with every capability dropped:
 
 ```bash
-docker run --privileged --network host \
+sudo /usr/local/bin/ebpfsentinel-token-setup.sh    # one-time: delegated bpffs mount
+
+docker run --network host \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
   -v ./config:/etc/ebpfsentinel \
+  -v /sys/fs/bpf/ebpfsentinel:/sys/fs/bpf/ebpfsentinel \
   ghcr.io/ebpfsentinel/ebpfsentinel:latest
 ```
 
-Minimal configuration — only the interface is required:
+Enable it with `agent.bpf_token.enabled: true` in your config (add `CAP_NET_RAW` only if you use manual packet capture). A ready-made Compose override ships at `dist/docker-compose.bpf-token.yml`. See the [BPF token guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/operations/deployment/bpf-token.md) for the systemd and Kubernetes paths, plus the capability / privileged fallbacks on kernels below 6.9.
+
+### Minimal config
+
+Only the interface is required:
 
 ```yaml
 agent:
   interfaces: [eth0]
+```
+
+### Verify it's running
+
+```bash
+curl http://127.0.0.1:8080/healthz     # liveness probe (no auth)
+ebpfsentinel-agent status              # agent + per-engine status
 ```
 
 See the [Getting Started guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/getting-started/quickstart.md) for detailed setup instructions.
@@ -199,7 +235,22 @@ See [Compatibility](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/
 
 ## OSS vs Enterprise
 
-The open-source agent includes all security domains, APIs, CLI, authentication, and observability. An enterprise version adds ML anomaly detection, multi-tenancy, advanced DLP, SIEM integration, compliance reporting, HA clustering, multi-cluster federation, advanced RBAC, air-gap support, analytics dashboards, fleet management, AI/LLM security, TLS intelligence, network forensics, and automated response orchestration. See [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for details.
+The **open-source agent** is fully functional on its own: every security domain shown above, plus the REST/gRPC APIs, CLI, authentication, and observability. Nothing in the core is paywalled.
+
+The **enterprise edition** layers on capabilities for fleets and regulated environments:
+
+| Area | Enterprise adds |
+| ---- | --------------- |
+| Detection | ML anomaly detection (Z-score, EWMA, CUSUM, ONNX, DGA, C2 beaconing, TLS clustering), AI/LLM security, TLS intelligence, network forensics |
+| L7 deep inspection | Extended protocol parsers (MQTT, AMQP, NATS, Cassandra), content inspection (SQLi/XSS/injection signatures), per-protocol policies (Redis/Mongo/Kafka/SQL/LDAP/SSH), alert enrichment (OWASP/MITRE/PCI), extended TLS-library hooking |
+| Data protection | Advanced DLP (Vectorscan engine, custom patterns, block mode) |
+| Operations | HA clustering, multi-cluster federation, fleet management, air-gap mode |
+| Multi-tenancy & access | Multi-tenancy (isolation + quotas), advanced RBAC, advanced analytics & reports |
+| Integration & response | SIEM integration (10 connectors), automated response orchestration (SOAR) |
+| Compliance | Compliance reports (PCI-DSS 4, HIPAA, GDPR, SOC 2, NIS2, DORA, SecNumCloud, HDS) |
+| Licensing | Ed25519 + ML-DSA-65 dual-signed keys, machine fingerprint binding, air-gap activation |
+
+A web dashboard UI and a CRD-driven Kubernetes operator are on the roadmap. See [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for the full list and per-feature detail.
 
 ## License
 
