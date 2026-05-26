@@ -475,36 +475,34 @@ fn process_ratelimit_v4(
     }
 
     // ── DDoS: UDP amplification protection ─────────────────────────
-    if protocol == PROTO_UDP {
-        if let Some(action) =
+    if protocol == PROTO_UDP
+        && let Some(action) =
             check_udp_amplification(ctx, l4_offset, src_ip, dst_ip, flags, vlan_id)
-        {
-            return Ok(action);
-        }
+    {
+        return Ok(action);
     }
 
     // ── Country-tier LPM lookup (before per-IP) ────────────────────
     let lpm_key = Key::new(32, src_ip.to_be_bytes());
-    if let Some(tier_val) = RL_LPM_SRC_V4.get(&lpm_key) {
-        if let Some(tier_cfg) = RL_TIER_CONFIG.get(tier_val.tier_id as u32) {
-            if tier_cfg.ns_per_token > 0 {
-                let key = RateLimitKey { src_ip };
-                let now = unsafe { bpf_ktime_get_coarse_ns() };
-                let passed = dispatch_algorithm(&key, tier_cfg, now);
-                if passed {
-                    increment_metric(METRIC_PASSED);
-                    return Ok(xdp_action::XDP_PASS);
-                }
-                let src_addr = [src_ip, 0, 0, 0];
-                let dst_addr = [dst_ip, 0, 0, 0];
-                let (src_port, dst_port) = read_l4_ports_v4(ctx, l4_offset);
-                emit_ratelimit_event(
-                    ctx, &src_addr, &dst_addr, src_port, dst_port, protocol, flags, vlan_id,
-                );
-                increment_metric(METRIC_THROTTLED);
-                return Ok(xdp_action::XDP_DROP);
-            }
+    if let Some(tier_val) = RL_LPM_SRC_V4.get(&lpm_key)
+        && let Some(tier_cfg) = RL_TIER_CONFIG.get(tier_val.tier_id as u32)
+        && tier_cfg.ns_per_token > 0
+    {
+        let key = RateLimitKey { src_ip };
+        let now = unsafe { bpf_ktime_get_coarse_ns() };
+        let passed = dispatch_algorithm(&key, tier_cfg, now);
+        if passed {
+            increment_metric(METRIC_PASSED);
+            return Ok(xdp_action::XDP_PASS);
         }
+        let src_addr = [src_ip, 0, 0, 0];
+        let dst_addr = [dst_ip, 0, 0, 0];
+        let (src_port, dst_port) = read_l4_ports_v4(ctx, l4_offset);
+        emit_ratelimit_event(
+            ctx, &src_addr, &dst_addr, src_port, dst_port, protocol, flags, vlan_id,
+        );
+        increment_metric(METRIC_THROTTLED);
+        return Ok(xdp_action::XDP_DROP);
     }
 
     // ── Existing: generic rate limiting ────────────────────────────
@@ -594,35 +592,34 @@ fn process_ratelimit_v6(
     }
 
     // ── DDoS: UDP amplification (IPv6) ─────────────────────────────
-    if next_hdr == PROTO_UDP {
-        if let Some(action) = check_udp_amp_v6(
+    if next_hdr == PROTO_UDP
+        && let Some(action) = check_udp_amp_v6(
             ctx, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id,
-        ) {
-            return Ok(action);
-        }
+        )
+    {
+        return Ok(action);
     }
 
     // ── Country-tier LPM lookup (IPv6, before per-IP) ──────────────
     let src_bytes = unsafe { (*ipv6hdr).src_addr };
     let lpm_key_v6 = Key::new(128, src_bytes);
-    if let Some(tier_val) = RL_LPM_SRC_V6.get(&lpm_key_v6) {
-        if let Some(tier_cfg) = RL_TIER_CONFIG.get(tier_val.tier_id as u32) {
-            if tier_cfg.ns_per_token > 0 {
-                let key = RateLimitKey { src_ip: src_hash };
-                let now = unsafe { bpf_ktime_get_coarse_ns() };
-                let passed = dispatch_algorithm(&key, tier_cfg, now);
-                if passed {
-                    increment_metric(METRIC_PASSED);
-                    return Ok(xdp_action::XDP_PASS);
-                }
-                let (src_port, dst_port) = read_l4_ports_raw(ctx, l4_offset, next_hdr);
-                emit_ratelimit_event(
-                    ctx, &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
-                );
-                increment_metric(METRIC_THROTTLED);
-                return Ok(xdp_action::XDP_DROP);
-            }
+    if let Some(tier_val) = RL_LPM_SRC_V6.get(&lpm_key_v6)
+        && let Some(tier_cfg) = RL_TIER_CONFIG.get(tier_val.tier_id as u32)
+        && tier_cfg.ns_per_token > 0
+    {
+        let key = RateLimitKey { src_ip: src_hash };
+        let now = unsafe { bpf_ktime_get_coarse_ns() };
+        let passed = dispatch_algorithm(&key, tier_cfg, now);
+        if passed {
+            increment_metric(METRIC_PASSED);
+            return Ok(xdp_action::XDP_PASS);
         }
+        let (src_port, dst_port) = read_l4_ports_raw(ctx, l4_offset, next_hdr);
+        emit_ratelimit_event(
+            ctx, &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
+        );
+        increment_metric(METRIC_THROTTLED);
+        return Ok(xdp_action::XDP_DROP);
     }
 
     // ── Existing: generic rate limiting ────────────────────────────
@@ -718,14 +715,14 @@ fn read_l4_ports_v4(ctx: &XdpContext, l4_offset: usize) -> (u16, u16) {
 /// Read L4 ports from a raw protocol byte (IPv6 next_hdr).
 #[inline(always)]
 fn read_l4_ports_raw(ctx: &XdpContext, l4_offset: usize, protocol: u8) -> (u16, u16) {
-    if protocol == PROTO_TCP || protocol == PROTO_UDP {
-        if let Ok(ports) = unsafe { ptr_at::<[u8; 4]>(ctx, l4_offset) } {
-            let ports = unsafe { &*ports };
-            return (
-                u16::from_be_bytes([ports[0], ports[1]]),
-                u16::from_be_bytes([ports[2], ports[3]]),
-            );
-        }
+    if (protocol == PROTO_TCP || protocol == PROTO_UDP)
+        && let Ok(ports) = unsafe { ptr_at::<[u8; 4]>(ctx, l4_offset) }
+    {
+        let ports = unsafe { &*ports };
+        return (
+            u16::from_be_bytes([ports[0], ports[1]]),
+            u16::from_be_bytes([ports[2], ports[3]]),
+        );
     }
     (0u16, 0u16)
 }
@@ -814,6 +811,7 @@ fn check_syn_flood_v4(
 /// Check if a TCP packet is a SYN flood candidate (IPv6).
 /// Forges a SYN+ACK with SYN cookie via `XDP_TX` when flood is detected.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn check_syn_flood_v6(
     ctx: &XdpContext,
     l3_offset: usize,
@@ -1306,6 +1304,7 @@ fn process_conntrack_v6(
 /// Core connection tracking state machine and flood detection.
 /// Shared between IPv4 and IPv6 paths.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn process_conntrack_tcp(
     ctx: &XdpContext,
     cfg: &DdosConnTrackConfig,
@@ -1696,6 +1695,7 @@ fn validate_syncookie_ack_v6(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> 
 /// Emit a DDoS-specific event to the EVENTS RingBuf.
 /// Sampled during floods to avoid overwhelming the ring buffer.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn emit_ddos_event(
     ctx: &XdpContext,
     src_addr: &[u32; 4],
@@ -2011,6 +2011,7 @@ fn increment_metric(index: u32) {
 /// metric when the ring is saturated. At 96 B per event the 4 MiB
 /// ring holds ~50k drops, outperforming a same-size arena.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn emit_ratelimit_event(
     ctx: &XdpContext,
     src_addr: &[u32; 4],
