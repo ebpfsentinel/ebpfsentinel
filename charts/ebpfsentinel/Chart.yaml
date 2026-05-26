@@ -1,6 +1,6 @@
 apiVersion: v2
 name: ebpfsentinel
-description: eBPF-native Network Detection & Response (NDR) platform for Linux
+description: eBPF-native Network & Security platform for Linux
 type: application
 version: 0.1.0
 appVersion: "0.0.0-dev"

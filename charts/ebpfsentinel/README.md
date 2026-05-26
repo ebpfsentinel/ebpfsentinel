@@ -1,10 +1,10 @@
 # ebpfsentinel
 
-eBPF-native Network Detection & Response (NDR) platform for Linux
+eBPF-native Network & Security platform for Linux
 
 ## Overview
 
-Deploys [eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel) — a kernel-native **Network Detection & Response (NDR)** platform — as a Kubernetes DaemonSet. One agent per node with fine-grained capabilities (`CAP_BPF`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, `CAP_NET_RAW`), attached to host network interfaces via eBPF (XDP/TC).
+Deploys [eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel) — a kernel-native **Network & Security platform** — as a Kubernetes DaemonSet. One agent per node with fine-grained capabilities (`CAP_BPF`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, `CAP_NET_RAW`), attached to host network interfaces via eBPF (XDP/TC).
 
 ## Edition: OSS (AGPL-3.0)
 
@@ -78,7 +78,7 @@ eBPFsentinel attaches to the **host physical interface** (e.g., `eth0`), not to 
 - Compatible with: Calico, Flannel, Cilium, Weave, any CNI
 - Firewall rules apply to the host interface — they affect all pods on the node equally
 
-For per-pod network policy, use your CNI's native policy engine (e.g., Cilium NetworkPolicy). eBPFsentinel complements CNI by adding NDR capabilities (IDS, DLP, threat intel, DDoS) at the node boundary.
+For per-pod network policy, use your CNI's native policy engine (e.g., Cilium NetworkPolicy). eBPFsentinel complements CNI by adding network security capabilities (IDS, DLP, threat intel, DDoS) at the node boundary.
 
 ## Quick Start
 
@@ -108,7 +108,7 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
   --set agent.interfaces='{eth0}'
 ```
 
-### Full NDR with Prometheus monitoring
+### Full Network & Security deployment with Prometheus monitoring
 
 ```bash
 helm install ebpfsentinel ebpfsentinel/ebpfsentinel \

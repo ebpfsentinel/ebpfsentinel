@@ -4,7 +4,7 @@
   <img src="./assets/ebpfsentinel-lockup-light.svg" width="600">
 </p>
 
-Kernel-native **Network Detection & Response (NDR)** platform for Linux. One Rust binary replaces your firewall, IDS/IPS, DDoS mitigation, DLP, and 10+ other network security tools — all running inside the Linux kernel via eBPF at wire speed. Not an endpoint agent — a **network agent** that runs where your traffic flows.
+Kernel-native **Network & Security platform** for Linux. One Rust binary replaces your firewall, IDS/IPS, DDoS mitigation, DLP, and 10+ other network security tools — all running inside the Linux kernel via eBPF at wire speed. Not an endpoint agent — a **network agent** that runs where your traffic flows.
 
 ## What it does
 
