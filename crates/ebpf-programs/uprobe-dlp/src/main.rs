@@ -8,17 +8,17 @@ use aya_ebpf::{
     programs::{ProbeContext, RetProbeContext},
 };
 use core::ffi::c_void;
-use ebpf_helpers::arena_map::{RawMapDef, arena_def};
-use ebpf_helpers::increment_metric;
 use ebpf_common::arena::{
     ArenaEventHeader, DLP_ARENA_FIXED_VA, DLP_ARENA_PAGES, DLP_SLOT_COUNT, DLP_WRITE_SEQ_OFFSET,
     dlp_slot_offset,
 };
 use ebpf_common::dlp::{
-    DlpEvent, DlpEventSmall, SslReadArgs, DLP_DIRECTION_READ, DLP_DIRECTION_WRITE,
-    DLP_MAX_EXCERPT, DLP_METRIC_ERRORS, DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_READ_EVENTS,
-    DLP_METRIC_TOTAL_SEEN, DLP_METRIC_WRITE_EVENTS, DLP_SMALL_EXCERPT,
+    DLP_DIRECTION_READ, DLP_DIRECTION_WRITE, DLP_MAX_EXCERPT, DLP_METRIC_ERRORS,
+    DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_READ_EVENTS, DLP_METRIC_TOTAL_SEEN,
+    DLP_METRIC_WRITE_EVENTS, DLP_SMALL_EXCERPT, DlpEvent, DlpEventSmall, SslReadArgs,
 };
+use ebpf_helpers::arena_map::{RawMapDef, arena_def};
+use ebpf_helpers::increment_metric;
 
 // ── Per-connection DLP context via SK_STORAGE (kernel 5.2+) ─────────
 //
@@ -207,9 +207,11 @@ fn try_ssl_read_ret(ctx: &RetProbeContext) -> Result<(), ()> {
 ///    needs a statically-known reservation size to validate memory access
 ///    bounds on the returned pointer.
 ///
-/// 2. **`bpf_probe_read_user` length**: On kernel 6.17+ the verifier
-///    rejects variable-length arguments to `bpf_probe_read_user`. We must
-///    pass the compile-time constant `DLP_MAX_EXCERPT` as the read length.
+/// 2. **`bpf_probe_read_user` length**: the read length is clamped to
+///    `data_len`, capped at the excerpt size, so only the bytes the SSL
+///    payload actually holds are copied — never adjacent process memory
+///    past the buffer. The verifier accepts this runtime length because
+///    the clamp proves `copy_len <= ` the destination excerpt size.
 ///
 /// 3. **No variable-size ring entries**: The BPF ring buffer does support
 ///    `bpf_ringbuf_reserve` with a runtime size at the C API level, but
@@ -252,15 +254,23 @@ fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
             (*ptr).direction = direction;
             (*ptr)._padding = [0; 3];
             core::ptr::write_bytes((*ptr).data_excerpt.as_mut_ptr(), 0, DLP_SMALL_EXCERPT);
-            // Use compile-time constant size: kernel 6.17+ verifier rejects
-            // variable-length arguments to bpf_probe_read_user. The buffer is
-            // zero-initialized above, so excess bytes beyond data_len stay zero.
-            // data_len in the header tells userspace the meaningful byte count.
-            let _ = r#gen::bpf_probe_read_user(
-                (*ptr).data_excerpt.as_mut_ptr() as *mut c_void,
-                DLP_SMALL_EXCERPT as u32,
-                user_buf as *const c_void,
-            );
+            // Read only the bytes the payload actually holds — never the
+            // full excerpt — so we don't capture adjacent process memory
+            // past the SSL buffer. The clamp keeps copy_len <= the
+            // destination size, which the verifier needs to accept a
+            // runtime length (same bound as the arena path).
+            let copy_len = if data_len > DLP_SMALL_EXCERPT as u32 {
+                DLP_SMALL_EXCERPT as u32
+            } else {
+                data_len
+            };
+            if copy_len > 0 {
+                let _ = r#gen::bpf_probe_read_user(
+                    (*ptr).data_excerpt.as_mut_ptr() as *mut c_void,
+                    copy_len,
+                    user_buf as *const c_void,
+                );
+            }
         }
         entry.submit(0);
     } else {
@@ -294,11 +304,22 @@ fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8) {
             (*ptr).direction = direction;
             (*ptr)._padding = [0; 3];
             core::ptr::write_bytes((*ptr).data_excerpt.as_mut_ptr(), 0, DLP_MAX_EXCERPT);
-            let _ = r#gen::bpf_probe_read_user(
-                (*ptr).data_excerpt.as_mut_ptr() as *mut c_void,
-                DLP_MAX_EXCERPT as u32,
-                user_buf as *const c_void,
-            );
+            // Clamp the read to the payload length (capped at the excerpt
+            // size) so we never copy adjacent process memory past the SSL
+            // buffer. The clamp keeps copy_len <= the destination size,
+            // which the verifier needs to accept a runtime length.
+            let copy_len = if data_len > DLP_MAX_EXCERPT as u32 {
+                DLP_MAX_EXCERPT as u32
+            } else {
+                data_len
+            };
+            if copy_len > 0 {
+                let _ = r#gen::bpf_probe_read_user(
+                    (*ptr).data_excerpt.as_mut_ptr() as *mut c_void,
+                    copy_len,
+                    user_buf as *const c_void,
+                );
+            }
         }
         entry.submit(0);
     } else {
@@ -361,8 +382,8 @@ fn try_emit_arena(user_buf: *const u8, data_len: u32, direction: u8) -> bool {
     // Slot body: copy the SSL plaintext excerpt (truncated to
     // DLP_SMALL_EXCERPT for the arena fast-path; full excerpt still
     // available via the RingBuf fallback when the caller needs it).
-    let event_ptr = unsafe { slot_ptr.add(core::mem::size_of::<ArenaEventHeader>()) }
-        as *mut DlpEventSmall;
+    let event_ptr =
+        unsafe { slot_ptr.add(core::mem::size_of::<ArenaEventHeader>()) } as *mut DlpEventSmall;
     let pid_tgid = bpf_get_current_pid_tgid();
     let copy_len = if data_len > DLP_SMALL_EXCERPT as u32 {
         DLP_SMALL_EXCERPT as u32
