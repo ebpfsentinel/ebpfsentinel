@@ -16,6 +16,7 @@ use super::domain_handler;
 use super::error;
 use super::fingerprint_handler;
 use super::firewall_handler;
+use super::geoip_handler;
 use super::health_handler;
 use super::ids_handler;
 use super::ips_handler;
@@ -126,6 +127,9 @@ use super::zone_handler;
         // Routing
         routing_handler::routing_status,
         routing_handler::list_gateways,
+        routing_handler::create_gateway,
+        routing_handler::delete_gateway,
+        routing_handler::list_routes,
         // Load Balancer
         lb_handler::lb_status,
         lb_handler::list_lb_services,
@@ -149,6 +153,12 @@ use super::zone_handler;
         zone_handler::zone_status,
         zone_handler::list_zones,
         zone_handler::list_zone_policies,
+        zone_handler::create_zone,
+        zone_handler::delete_zone,
+        zone_handler::create_zone_policy,
+        zone_handler::delete_zone_policy,
+        geoip_handler::geoip_status,
+        geoip_handler::geoip_lookup,
         // MITRE ATT&CK
         mitre_handler::mitre_coverage,
         // Fingerprints
@@ -245,6 +255,8 @@ use super::zone_handler;
         // Routing
         routing_handler::RoutingStatusResponse,
         routing_handler::GatewayResponse,
+        routing_handler::CreateGatewayRequest,
+        routing_handler::RouteResponse,
         // Load Balancer
         lb_handler::LbStatusResponse,
         lb_handler::LbServiceResponse,
@@ -270,6 +282,10 @@ use super::zone_handler;
         zone_handler::ZoneStatusResponse,
         zone_handler::ZoneResponse,
         zone_handler::ZonePolicyResponse,
+        zone_handler::CreateZoneRequest,
+        zone_handler::CreateZonePolicyRequest,
+        geoip_handler::GeoIpStatusResponse,
+        geoip_handler::GeoIpLookupResponse,
         // MITRE ATT&CK
         mitre_handler::MitreCoverageResponse,
         mitre_handler::TechniqueEntry,

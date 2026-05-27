@@ -48,6 +48,7 @@ use super::dns_handler::{
 use super::domain_handler::{add_to_blocklist, list_domain_reputations, remove_from_blocklist};
 use super::fingerprint_handler::{fingerprint_summary, ja4s_summary};
 use super::firewall_handler::{create_rule, delete_rule, list_rules};
+use super::geoip_handler::{geoip_lookup, geoip_status};
 use super::health_handler::{healthz, readyz};
 use super::ids_handler::{ids_status, list_ids_rules};
 use super::ips_handler::{
@@ -77,10 +78,15 @@ use super::ratelimit_handler::{
 use super::response_handler::{
     create_response_action, list_response_actions, revoke_response_action,
 };
-use super::routing_handler::{list_gateways, routing_status};
+use super::routing_handler::{
+    create_gateway, delete_gateway, list_gateways, list_routes, routing_status,
+};
 use super::state::AppState;
 use super::threatintel_handler::{list_feeds, list_iocs, refresh_feeds, threatintel_status};
-use super::zone_handler::{list_zone_policies, list_zones, zone_status};
+use super::zone_handler::{
+    create_zone, create_zone_policy, delete_zone, delete_zone_policy, list_zone_policies,
+    list_zones, zone_status,
+};
 
 /// Build the main Axum router with all REST API routes.
 ///
@@ -189,6 +195,7 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
             )
             .route("/api/v1/routing/status", get(routing_status))
             .route("/api/v1/routing/gateways", get(list_gateways))
+            .route("/api/v1/routing/routes", get(list_routes))
             .route("/api/v1/lb/status", get(lb_status))
             .route("/api/v1/lb/services", get(list_lb_services))
             .route("/api/v1/lb/services/{id}", get(get_lb_service))
@@ -196,6 +203,8 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
             .route("/api/v1/zones/status", get(zone_status))
             .route("/api/v1/zones", get(list_zones))
             .route("/api/v1/zones/policies", get(list_zone_policies))
+            .route("/api/v1/geoip/status", get(geoip_status))
+            .route("/api/v1/geoip/lookup", get(geoip_lookup))
             .route("/api/v1/qos/status", get(get_qos_status))
             .route("/api/v1/qos/pipes", get(list_qos_pipes))
             .route("/api/v1/qos/queues", get(list_qos_queues))
@@ -233,6 +242,12 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
                 "/api/v1/domains/blocklist/{domain}",
                 delete(remove_from_blocklist),
             )
+            .route("/api/v1/routing/gateways", post(create_gateway))
+            .route("/api/v1/routing/gateways/{id}", delete(delete_gateway))
+            .route("/api/v1/zones", post(create_zone))
+            .route("/api/v1/zones/{id}", delete(delete_zone))
+            .route("/api/v1/zones/policies", post(create_zone_policy))
+            .route("/api/v1/zones/policies/{id}", delete(delete_zone_policy))
             .route("/api/v1/lb/services", post(create_lb_service))
             .route("/api/v1/lb/services/{id}", delete(delete_lb_service))
             .route("/api/v1/lb/vips", post(apply_lb_announce))

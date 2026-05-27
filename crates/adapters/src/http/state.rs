@@ -32,6 +32,7 @@ use infrastructure::config::AgentConfig;
 use infrastructure::metrics::AgentMetrics;
 use ports::secondary::alert_store::AlertStore;
 use ports::secondary::auth_provider::AuthProvider;
+use ports::secondary::geoip_port::GeoIpPort;
 use tokio::sync::{RwLock, broadcast, mpsc};
 
 /// Shared application state for the REST API server.
@@ -56,6 +57,9 @@ pub struct AppState {
     pub alias_service: Option<Arc<RwLock<AliasAppService>>>,
     pub routing_service: Option<Arc<RwLock<RoutingAppService>>>,
     pub zone_service: Option<Arc<RwLock<ZoneAppService>>>,
+    /// `GeoIP` lookup port. `Some` only when `GeoIP` is enabled and an mmdb-backed
+    /// adapter was built successfully; drives `/api/v1/geoip/status`.
+    pub geoip_port: Option<Arc<dyn GeoIpPort>>,
     pub loadbalancer_service: Option<Arc<RwLock<LbAppService>>>,
     pub vip_announcer_service: Option<Arc<RwLock<VipAnnouncerService>>>,
     pub qos_service: Option<Arc<RwLock<QosAppService>>>,
@@ -122,6 +126,7 @@ impl AppState {
             alias_service: None,
             routing_service: None,
             zone_service: None,
+            geoip_port: None,
             loadbalancer_service: None,
             vip_announcer_service: None,
             qos_service: None,
@@ -265,6 +270,13 @@ impl AppState {
     #[must_use]
     pub fn with_zone_service(mut self, svc: Arc<RwLock<ZoneAppService>>) -> Self {
         self.zone_service = Some(svc);
+        self
+    }
+
+    /// Attach a `GeoIP` lookup port (drives `/api/v1/geoip/status`).
+    #[must_use]
+    pub fn with_geoip_port(mut self, port: Arc<dyn GeoIpPort>) -> Self {
+        self.geoip_port = Some(port);
         self
     }
 

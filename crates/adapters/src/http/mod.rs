@@ -11,6 +11,7 @@ pub mod domain_handler;
 pub mod error;
 pub mod fingerprint_handler;
 pub mod firewall_handler;
+pub mod geoip_handler;
 pub mod health_handler;
 pub mod ids_handler;
 pub mod ips_handler;

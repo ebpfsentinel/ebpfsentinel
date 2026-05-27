@@ -74,6 +74,35 @@ impl RoutingAppService {
         Ok(())
     }
 
+    /// Add a new gateway, auto-assigning the lowest free identifier (0-255).
+    ///
+    /// Returns the assigned [`GatewayId`]. Errors with [`RoutingError::Full`]
+    /// when all 256 identifiers are in use.
+    pub fn add_gateway(&mut self, mut gateway: Gateway) -> Result<GatewayId, RoutingError> {
+        let id = (0..=u8::MAX)
+            .find(|candidate| !self.gateways.contains_key(candidate))
+            .ok_or(RoutingError::Full { max: 256 })?;
+        gateway.id = id;
+        self.gateways.insert(id, GatewayState::new(gateway));
+        if let Some(ref m) = self.metrics {
+            m.set_routing_gateways_total(self.gateways.len() as u64);
+        }
+        tracing::info!(id, count = self.gateways.len(), "routing gateway added");
+        Ok(id)
+    }
+
+    /// Remove a gateway by identifier.
+    pub fn remove_gateway(&mut self, id: GatewayId) -> Result<(), RoutingError> {
+        self.gateways
+            .remove(&id)
+            .ok_or(RoutingError::GatewayNotFound { id })?;
+        if let Some(ref m) = self.metrics {
+            m.set_routing_gateways_total(self.gateways.len() as u64);
+        }
+        tracing::info!(id, count = self.gateways.len(), "routing gateway removed");
+        Ok(())
+    }
+
     /// Record a health-check success for a gateway.
     pub fn record_probe_success(&mut self, id: GatewayId) -> Result<(), RoutingError> {
         let state = self
@@ -288,5 +317,24 @@ mod tests {
         assert!(!svc.enabled());
         svc.set_enabled(true);
         assert!(svc.enabled());
+    }
+
+    #[test]
+    fn add_gateway_assigns_free_id() {
+        let mut svc = RoutingAppService::new();
+        svc.reload_gateways(vec![make_gateway(0, 10)]).unwrap();
+        let id = svc.add_gateway(make_gateway(0, 20)).unwrap();
+        assert_eq!(id, 1); // 0 taken, lowest free is 1
+        assert_eq!(svc.gateway_count(), 2);
+    }
+
+    #[test]
+    fn remove_gateway_drops_and_errors_when_absent() {
+        let mut svc = RoutingAppService::new();
+        let id = svc.add_gateway(make_gateway(0, 10)).unwrap();
+        assert_eq!(svc.gateway_count(), 1);
+        svc.remove_gateway(id).unwrap();
+        assert_eq!(svc.gateway_count(), 0);
+        assert!(svc.remove_gateway(id).is_err());
     }
 }

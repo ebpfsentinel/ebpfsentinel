@@ -970,7 +970,7 @@ pub async fn run(
     if let Some(ref tx) = conntrack_event_tx {
         app_state = app_state.with_conntrack_event_tx(tx.clone());
     }
-    let app_state = app_state
+    let mut app_state = app_state
         .with_nat_service(Arc::clone(&nat_svc))
         .with_alias_service(Arc::clone(&alias_svc))
         .with_routing_service(Arc::clone(&routing_svc))
@@ -978,6 +978,11 @@ pub async fn run(
         .with_vip_announcer_service(Arc::clone(&vip_svc))
         .with_qos_service(Arc::clone(&qos_svc))
         .with_zone_service(Arc::clone(&zone_svc));
+    if let Some(ref adapter) = geoip_adapter {
+        app_state = app_state.with_geoip_port(
+            Arc::clone(adapter) as Arc<dyn ports::secondary::geoip_port::GeoIpPort>
+        );
+    }
     let app_state = Arc::new(app_state);
 
     // ── 6. Create cancellation token ────────────────────────────────

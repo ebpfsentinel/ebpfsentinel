@@ -8,4 +8,6 @@ pub enum RoutingError {
     DuplicateGateway { id: u8 },
     #[error("no healthy gateway available")]
     NoHealthyGateway,
+    #[error("gateway table full (max {max} gateways)")]
+    Full { max: usize },
 }

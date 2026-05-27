@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use domain::zone::entity::{Zone, ZoneConfig, ZonePair, ZonePolicy};
+use domain::zone::error::ZoneError;
 use ports::secondary::metrics_port::MetricsPort;
 
 /// Application-level zone service.
@@ -60,6 +61,92 @@ impl ZoneAppService {
             "zone config reloaded"
         );
         Ok(())
+    }
+
+    /// Add a security zone. Validates the zone id is non-empty and unique.
+    pub fn add_zone(&mut self, zone: Zone) -> Result<(), ZoneError> {
+        if zone.id.is_empty() {
+            return Err(ZoneError::Invalid {
+                reason: "zone ID must not be empty".to_string(),
+            });
+        }
+        let cfg = self.config_mut();
+        if cfg.zones.iter().any(|z| z.id == zone.id) {
+            return Err(ZoneError::Duplicate { id: zone.id });
+        }
+        cfg.zones.push(zone);
+        self.refresh_metrics();
+        Ok(())
+    }
+
+    /// Remove a security zone by id.
+    pub fn remove_zone(&mut self, id: &str) -> Result<(), ZoneError> {
+        let cfg = self
+            .config
+            .as_mut()
+            .ok_or_else(|| ZoneError::NotFound { id: id.to_string() })?;
+        let before = cfg.zones.len();
+        cfg.zones.retain(|z| z.id != id);
+        if cfg.zones.len() == before {
+            return Err(ZoneError::NotFound { id: id.to_string() });
+        }
+        self.refresh_metrics();
+        Ok(())
+    }
+
+    /// Add (or replace) an inter-zone policy for the `(from, to)` pair.
+    pub fn add_policy(&mut self, pair: ZonePair) -> Result<(), ZoneError> {
+        pair.validate()?;
+        let cfg = self.config_mut();
+        if let Some(existing) = cfg
+            .zone_policies
+            .iter_mut()
+            .find(|p| p.from == pair.from && p.to == pair.to)
+        {
+            existing.policy = pair.policy;
+        } else {
+            cfg.zone_policies.push(pair);
+        }
+        self.refresh_metrics();
+        Ok(())
+    }
+
+    /// Remove the inter-zone policy for the `(from, to)` pair.
+    pub fn remove_policy(&mut self, from: &str, to: &str) -> Result<(), ZoneError> {
+        let cfg = self
+            .config
+            .as_mut()
+            .ok_or_else(|| ZoneError::PairNotFound {
+                from: from.to_string(),
+                to: to.to_string(),
+            })?;
+        let before = cfg.zone_policies.len();
+        cfg.zone_policies
+            .retain(|p| !(p.from == from && p.to == to));
+        if cfg.zone_policies.len() == before {
+            return Err(ZoneError::PairNotFound {
+                from: from.to_string(),
+                to: to.to_string(),
+            });
+        }
+        self.refresh_metrics();
+        Ok(())
+    }
+
+    /// Mutable access to the in-memory config, initialising an empty one if absent.
+    fn config_mut(&mut self) -> &mut ZoneConfig {
+        self.config.get_or_insert_with(|| ZoneConfig {
+            zones: Vec::new(),
+            zone_policies: Vec::new(),
+        })
+    }
+
+    /// Re-publish the loaded-rule gauge after a mutation.
+    fn refresh_metrics(&self) {
+        if let Some(ref m) = self.metrics {
+            let total = self.zone_count() + self.policy_count();
+            m.set_rules_loaded("zones", total as u64);
+        }
     }
 
     /// List all zones.
