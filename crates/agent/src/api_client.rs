@@ -433,6 +433,7 @@ pub struct BlocklistRemoveResponse {
 pub struct ConnTrackStatusResponse {
     pub enabled: bool,
     pub connection_count: u64,
+    pub max_connections: u64,
 }
 
 #[derive(Deserialize, Serialize)]

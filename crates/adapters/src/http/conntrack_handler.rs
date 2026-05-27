@@ -20,6 +20,9 @@ use super::state::AppState;
 pub struct ConnTrackStatusResponse {
     pub enabled: bool,
     pub connection_count: u64,
+    /// Conntrack table capacity — the maximum number of flows the
+    /// agent tracks before eviction (the BPF connection-table size).
+    pub max_connections: u64,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -75,6 +78,7 @@ pub async fn conntrack_status(
     Ok(Json(ConnTrackStatusResponse {
         enabled: svc.enabled(),
         connection_count: count,
+        max_connections: u64::from(ebpf_common::conntrack::CT_MAX_ENTRIES_V4),
     }))
 }
 

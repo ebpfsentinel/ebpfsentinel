@@ -1839,8 +1839,8 @@ pub async fn cmd_conntrack_status(client: &ApiClient, output: OutputFormat) -> R
         println!("{}", serde_json::to_string_pretty(&resp)?);
     } else {
         println!(
-            "enabled: {}\nconnections: {}",
-            resp.enabled, resp.connection_count
+            "enabled: {}\nconnections: {} / {}",
+            resp.enabled, resp.connection_count, resp.max_connections
         );
     }
     Ok(())
