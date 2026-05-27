@@ -224,6 +224,18 @@ impl AliasAppService {
         self.resolver.aliases().len()
     }
 
+    /// Country codes backing a `GeoIP` alias, if the named alias is a `GeoIp` kind.
+    ///
+    /// Lets the firewall API surface the ISO-3166 codes a rule blocks via a
+    /// `GeoIP` alias reference, without re-resolving the CIDR set.
+    pub fn alias_country_codes(&self, alias_name: &str) -> Option<Vec<String>> {
+        use domain::alias::entity::AliasKind;
+        match self.resolver.get(alias_name).map(|a| &a.kind) {
+            Some(AliasKind::GeoIp { country_codes }) => Some(country_codes.clone()),
+            _ => None,
+        }
+    }
+
     /// Resolve a single dynamic alias using the resolution port.
     fn resolve_dynamic_alias(alias: &Alias, port: &dyn AliasResolutionPort) -> Vec<IpNetwork> {
         use domain::alias::entity::AliasKind;
@@ -503,6 +515,31 @@ mod tests {
         fn lookup_bgp_asn(&self, _asns: &[u32]) -> Result<Vec<IpNetwork>, DomainError> {
             Ok(Vec::new())
         }
+    }
+
+    #[test]
+    fn alias_country_codes_for_geoip() {
+        let mut svc = make_service();
+        svc.reload_aliases(vec![Alias {
+            id: AliasId("geo-deny".to_string()),
+            kind: AliasKind::GeoIp {
+                country_codes: vec!["KP".to_string(), "CU".to_string()],
+            },
+            description: None,
+        }])
+        .unwrap();
+        assert_eq!(
+            svc.alias_country_codes("geo-deny"),
+            Some(vec!["KP".to_string(), "CU".to_string()])
+        );
+    }
+
+    #[test]
+    fn alias_country_codes_none_for_non_geoip() {
+        let mut svc = make_service();
+        svc.reload_aliases(vec![ip_set_alias("plain")]).unwrap();
+        assert_eq!(svc.alias_country_codes("plain"), None);
+        assert_eq!(svc.alias_country_codes("missing"), None);
     }
 
     #[test]

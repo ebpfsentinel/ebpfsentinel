@@ -115,6 +115,11 @@ pub struct RuleResponse {
     pub system: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_action: Option<String>,
+    /// ISO-3166 country codes this rule matches, resolved from a `GeoIP`
+    /// alias referenced by `src_alias`/`dst_alias`. Set only when the
+    /// referenced alias is a `GeoIP` kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country_codes: Option<Vec<String>>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -460,6 +465,7 @@ impl From<&FirewallRule> for RuleResponse {
             schedule: rule.schedule.clone(),
             system: rule.system,
             route_action: rule.route_action.map(format_route_action),
+            country_codes: None,
         }
     }
 }
@@ -481,8 +487,27 @@ impl From<&FirewallRule> for RuleResponse {
     )
 )]
 pub async fn list_rules(State(state): State<Arc<AppState>>) -> Json<Vec<RuleResponse>> {
-    let svc = state.firewall_service.read().await;
-    let rules: Vec<RuleResponse> = svc.list_rules().iter().map(RuleResponse::from).collect();
+    let mut rules: Vec<RuleResponse> = {
+        let svc = state.firewall_service.read().await;
+        svc.list_rules().iter().map(RuleResponse::from).collect()
+    };
+
+    // Surface ISO-3166 codes for rules referencing a GeoIP alias.
+    if let Some(alias_service) = state.alias_service.as_ref() {
+        let alias_svc = alias_service.read().await;
+        for rule in &mut rules {
+            let codes: Vec<String> = [rule.src_alias.as_deref(), rule.dst_alias.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter_map(|name| alias_svc.alias_country_codes(name))
+                .flatten()
+                .collect();
+            if !codes.is_empty() {
+                rule.country_codes = Some(codes);
+            }
+        }
+    }
+
     Json(rules)
 }
 

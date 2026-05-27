@@ -35,6 +35,9 @@ pub struct AgentIdentityResponse {
 
 #[derive(Serialize, ToSchema)]
 pub struct AgentStatusResponse {
+    /// Coarse lifecycle state: `running` once eBPF programs are attached,
+    /// `degraded` while operating without them (userspace-only fallback).
+    pub status: String,
     pub version: String,
     pub uptime_seconds: u64,
     pub ebpf_loaded: bool,
@@ -63,10 +66,12 @@ pub async fn agent_status(State(state): State<Arc<AppState>>) -> Json<AgentStatu
     let firewall_mode = svc.mode().as_str().to_string();
     let firewall_enabled = svc.enabled();
     drop(svc);
+    let ebpf_loaded = state.ebpf_loaded.load(Ordering::Relaxed);
     Json(AgentStatusResponse {
+        status: if ebpf_loaded { "running" } else { "degraded" }.to_string(),
         version: state.version.to_string(),
         uptime_seconds: state.start_time.elapsed().as_secs(),
-        ebpf_loaded: state.ebpf_loaded.load(Ordering::Relaxed),
+        ebpf_loaded,
         rule_count,
         firewall_enabled,
         firewall_mode,
@@ -225,6 +230,7 @@ mod tests {
 
         let Json(resp) = agent_status(State(state)).await;
         assert_eq!(resp.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(resp.status, "running");
         assert!(resp.ebpf_loaded);
         assert_eq!(resp.rule_count, 1);
         assert!(resp.uptime_seconds < 2);

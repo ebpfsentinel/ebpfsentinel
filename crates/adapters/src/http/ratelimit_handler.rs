@@ -62,6 +62,10 @@ pub struct RateLimitRuleResponse {
     pub algorithm: String,
     pub src_ip: Option<String>,
     pub enabled: bool,
+    /// ISO-3166 country codes this rule is scoped to (userspace annotation;
+    /// enforced by the GeoIP-aware ratelimit pipeline). Absent when unscoped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country_codes: Option<Vec<String>>,
 }
 
 impl RateLimitRuleResponse {
@@ -75,6 +79,7 @@ impl RateLimitRuleResponse {
             algorithm: format_algorithm(p.algorithm),
             src_ip: p.src_ip.map(format_cidr),
             enabled: p.enabled,
+            country_codes: p.country_codes.clone(),
         }
     }
 }
@@ -529,6 +534,7 @@ mod tests {
             algorithm: "token_bucket".to_string(),
             src_ip: Some("10.0.0.0/8".to_string()),
             enabled: true,
+            country_codes: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "rl-001");

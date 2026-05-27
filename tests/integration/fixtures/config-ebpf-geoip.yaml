@@ -14,17 +14,24 @@ agent:
 firewall:
   enabled: true
   default_policy: pass
+  aliases:
+    geo-deny-kp:
+      type: geoip
+      country_codes:
+        - "KP"
+    geo-deny-cu:
+      type: geoip
+      country_codes:
+        - "CU"
   rules:
     - id: fw-test-country-deny-kp
       action: deny
-      src_country_codes:
-        - "KP"
+      src_alias: geo-deny-kp
       priority: 10
       enabled: true
     - id: fw-test-country-deny-cu
       action: deny
-      src_country_codes:
-        - "CU"
+      src_alias: geo-deny-cu
       priority: 20
       enabled: true
 
@@ -45,6 +52,8 @@ ratelimit:
       burst: 200
       scope: source_ip
       action: drop
+      country_codes:
+        - "CN"
 
 threatintel:
   enabled: false
