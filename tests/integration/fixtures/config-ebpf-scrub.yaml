@@ -23,6 +23,8 @@ firewall:
     enabled: true
     min_ttl: 64
     max_mss: 1460
+    random_ip_id: true
+    strip_tcp_timestamps: true
 
 ids:
   enabled: false

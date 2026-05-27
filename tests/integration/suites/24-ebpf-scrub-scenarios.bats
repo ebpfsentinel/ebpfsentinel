@@ -94,10 +94,11 @@ teardown_file() {
 
     sleep 2
 
-    # Check for scrub metrics (may be named differently or under firewall)
+    # Scrub counters surface through the generic kernel-metrics pipeline as
+    # ebpfsentinel_packets_total{interface="SCRUB_METRICS",action="..."}. The
+    # poller ticks on a 10s loop, so allow up to 20 attempts.
     local value
-    value="$(wait_for_metric "ebpfsentinel_scrub_packets_total" 1 10)" || \
-    value="$(wait_for_metric "ebpfsentinel_firewall_total_seen" 1 5)" || true
+    value="$(wait_for_metric "ebpfsentinel_packets_total" 1 20 '{interface="SCRUB_METRICS",action="total_seen"}')" || true
 
     [ -n "$value" ]
 }
@@ -137,10 +138,9 @@ teardown_file() {
 
     sleep 2
 
-    # Verify metrics increment after fragmented traffic
+    # Verify the scrub kernel-metrics counter is exposed after fragmented traffic
     local value
-    value="$(wait_for_metric "ebpfsentinel_scrub_packets_total" 1 10)" || \
-    value="$(wait_for_metric "ebpfsentinel_firewall_total_seen" 1 5)" || true
+    value="$(wait_for_metric "ebpfsentinel_packets_total" 1 20 '{interface="SCRUB_METRICS",action="total_seen"}')" || true
 
     [ -n "$value" ]
 }
@@ -171,11 +171,14 @@ teardown_file() {
     send_icmp_from_ns "$EBPF_HOST_IP" 5 10 || true
     sleep 2
 
+    # Let the 10s kernel-metrics loop tick so SCRUB_METRICS counters are exposed
+    wait_for_metric "ebpfsentinel_packets_total" 1 20 '{interface="SCRUB_METRICS",action="total_seen"}' >/dev/null || true
+
     local metrics
     metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
 
     [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_scrub"
+    echo "$metrics" | grep -qE 'ebpfsentinel_packets_total\{interface="SCRUB_METRICS"'
 }
 
 @test "Scrub IPv6 hop limit normalization" {
@@ -191,8 +194,7 @@ teardown_file() {
     fi
 
     local value
-    value="$(wait_for_metric "ebpfsentinel_scrub_packets_total" 1 10)" || \
-    value="$(wait_for_metric "ebpfsentinel_firewall_total_seen" 1 5)" || true
+    value="$(wait_for_metric "ebpfsentinel_packets_total" 1 20 '{interface="SCRUB_METRICS",action="total_seen"}')" || true
 
     [ -n "$value" ]
 }
