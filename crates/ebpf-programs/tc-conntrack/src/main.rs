@@ -10,8 +10,8 @@ use aya_ebpf::{
 };
 use aya_ebpf_bindings::helpers::bpf_probe_read_kernel;
 use ebpf_common::conntrack::{
-    ConnTrackConfig, CT_METRIC_COUNT, CT_METRIC_ERRORS, CT_METRIC_KFUNC_HITS,
-    CT_METRIC_KFUNC_LOOKUPS, CT_METRIC_KFUNC_MISSES, CT_METRIC_TOTAL_SEEN, NfConnOffsets,
+    CT_METRIC_COUNT, CT_METRIC_ERRORS, CT_METRIC_KFUNC_HITS, CT_METRIC_KFUNC_LOOKUPS,
+    CT_METRIC_KFUNC_MISSES, CT_METRIC_TOTAL_SEEN, ConnTrackConfig, NfConnOffsets,
 };
 use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, with_skb_ct_lookup};
 use ebpf_helpers::net::{
@@ -43,7 +43,14 @@ static CT_NF_CONN_OFFSETS: Array<NfConnOffsets> = Array::with_max_entries(1, 0);
 #[classifier]
 pub fn tc_conntrack(ctx: TcContext) -> i32 {
     increment_metric(CT_METRIC_TOTAL_SEEN);
-    match try_tc_conntrack(&ctx) {
+    // Capture the trusted skb pointer by value in the entry frame, where
+    // `ctx` is owned (guaranteed `PTR_TO_CTX`). Threading it by value through
+    // every subprogram keeps it in a register, so the verifier preserves the
+    // trusted-ctx type required by `bpf_skb_ct_lookup` (`KF_TRUSTED_ARGS`).
+    // Reloading it from `&TcContext` in an outlined subprogram would yield a
+    // plain scalar and the kfunc call would be rejected.
+    let skb_raw: *mut core::ffi::c_void = ctx.skb.skb.cast();
+    match try_tc_conntrack(&ctx, skb_raw) {
         Ok(action) => action,
         Err(()) => {
             increment_metric(CT_METRIC_ERRORS);
@@ -62,7 +69,7 @@ fn increment_metric(index: u32) {
 // ── Packet processing ───────────────────────────────────────────────
 
 #[inline(always)]
-fn try_tc_conntrack(ctx: &TcContext) -> Result<i32, ()> {
+fn try_tc_conntrack(ctx: &TcContext, skb_raw: *mut core::ffi::c_void) -> Result<i32, ()> {
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
     let mut l3_offset = EthHdr::LEN;
@@ -81,9 +88,9 @@ fn try_tc_conntrack(ctx: &TcContext) -> Result<i32, ()> {
     }
 
     if ether_type == ETH_P_IP {
-        process_conntrack_v4(ctx, l3_offset)
+        process_conntrack_v4(ctx, skb_raw, l3_offset)
     } else if ether_type == ETH_P_IPV6 {
-        process_conntrack_v6(ctx, l3_offset)
+        process_conntrack_v6(ctx, skb_raw, l3_offset)
     } else {
         Ok(TC_ACT_OK)
     }
@@ -100,7 +107,11 @@ fn try_tc_conntrack(ctx: &TcContext) -> Result<i32, ()> {
 ///
 /// Kernel netfilter manages timeouts, state machine, and eviction.
 #[inline(always)]
-fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
+fn process_conntrack_v4(
+    ctx: &TcContext,
+    skb_raw: *mut core::ffi::c_void,
+    l3_offset: usize,
+) -> Result<i32, ()> {
     let ct_config = match CT_CONFIG.get(0) {
         Some(cfg) => cfg,
         None => return Ok(TC_ACT_OK),
@@ -133,18 +144,27 @@ fn process_conntrack_v4(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         PROTO_ICMP => {
             let icmp_type_ptr: *const u8 = unsafe { ptr_at(ctx, l4_offset)? };
             let icmp_code_ptr: *const u8 = unsafe { ptr_at(ctx, l4_offset + 1)? };
-            (unsafe { *icmp_type_ptr } as u16, unsafe { *icmp_code_ptr } as u16)
+            (unsafe { *icmp_type_ptr } as u16, unsafe { *icmp_code_ptr }
+                as u16)
         }
         _ => return Ok(TC_ACT_OK),
     };
 
-    kfunc_ct_probe(ctx, CtTuple::v4(src_ip, dst_ip, src_port, dst_port), protocol);
+    kfunc_ct_probe(
+        skb_raw,
+        CtTuple::v4(src_ip, dst_ip, src_port, dst_port),
+        protocol,
+    );
     Ok(TC_ACT_OK)
 }
 
 /// IPv6 conntrack: parse 5-tuple, probe kernel netfilter CT.
 #[inline(never)]
-fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
+fn process_conntrack_v6(
+    ctx: &TcContext,
+    skb_raw: *mut core::ffi::c_void,
+    l3_offset: usize,
+) -> Result<i32, ()> {
     let ct_config = match CT_CONFIG.get(0) {
         Some(cfg) => cfg,
         None => return Ok(TC_ACT_OK),
@@ -176,7 +196,8 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
         PROTO_ICMPV6 => {
             let icmp_type_ptr: *const u8 = unsafe { ptr_at(ctx, l4_offset)? };
             let icmp_code_ptr: *const u8 = unsafe { ptr_at(ctx, l4_offset + 1)? };
-            (unsafe { *icmp_type_ptr } as u16, unsafe { *icmp_code_ptr } as u16)
+            (unsafe { *icmp_type_ptr } as u16, unsafe { *icmp_code_ptr }
+                as u16)
         }
         _ => return Ok(TC_ACT_OK),
     };
@@ -194,7 +215,11 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
     let src_addr = ipv6_addr_to_u32x4(&src_bytes);
     let dst_addr = ipv6_addr_to_u32x4(&dst_bytes);
 
-    kfunc_ct_probe(ctx, CtTuple::v6(src_addr, dst_addr, src_port, dst_port), protocol);
+    kfunc_ct_probe(
+        skb_raw,
+        CtTuple::v6(src_addr, dst_addr, src_port, dst_port),
+        protocol,
+    );
     Ok(TC_ACT_OK)
 }
 
@@ -202,7 +227,7 @@ fn process_conntrack_v6(ctx: &TcContext, l3_offset: usize) -> Result<i32, ()> {
 /// `nf_conn->mark` via `bpf_probe_read_kernel` at runtime BTF offsets.
 /// Increments kfunc hit/miss metrics.
 #[inline(always)]
-fn kfunc_ct_probe(ctx: &TcContext, tuple: CtTuple, protocol: u8) {
+fn kfunc_ct_probe(skb_raw: *mut core::ffi::c_void, tuple: CtTuple, protocol: u8) {
     increment_metric(CT_METRIC_KFUNC_LOOKUPS);
     let mut opts = if protocol == PROTO_TCP {
         BpfCtOpts::tcp()
@@ -210,7 +235,7 @@ fn kfunc_ct_probe(ctx: &TcContext, tuple: CtTuple, protocol: u8) {
         BpfCtOpts::udp()
     };
     let found = unsafe {
-        with_skb_ct_lookup(ctx.skb.skb as *mut _, tuple, &mut opts, |ct| {
+        with_skb_ct_lookup(skb_raw, tuple, &mut opts, |ct| {
             read_nf_conn_fields(ct);
             true
         })

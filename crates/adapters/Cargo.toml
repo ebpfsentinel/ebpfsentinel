@@ -17,6 +17,8 @@ arc-swap = { workspace = true }
 libc = { workspace = true }
 jsonwebtoken = { workspace = true }
 aya = { workspace = true }
+aya-obj = { workspace = true }
+object = { workspace = true }
 aya-log = { workspace = true }
 axum = { workspace = true }
 http-body-util = { workspace = true }

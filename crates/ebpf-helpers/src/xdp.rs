@@ -5,6 +5,20 @@ use aya_ebpf::programs::XdpContext;
 use core::mem;
 
 /// Bounds-checked read-only pointer access for XDP programs.
+///
+/// Returns a pointer to a `T` at `offset` bytes into the packet, or
+/// `Err(())` when `[offset, offset + size_of::<T>())` falls outside the
+/// `[data, data_end)` window.
+///
+/// # Safety
+/// `ctx` must be a live `XdpContext` for the current program invocation.
+/// The returned pointer is valid only until the packet is modified by a
+/// helper that adjusts its head/tail, and must not be dereferenced
+/// beyond `size_of::<T>()` bytes.
+// `()` error follows the established aya eBPF bounds-check idiom; a richer
+// error type would bloat every call site across the no_std programs for no
+// added signal (callers only branch on Ok/Err).
+#[allow(clippy::result_unit_err)]
 #[inline(always)]
 pub unsafe fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
     let start = ctx.data();
@@ -18,6 +32,20 @@ pub unsafe fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()>
 }
 
 /// Bounds-checked mutable pointer access for XDP programs.
+///
+/// Returns a mutable pointer to a `T` at `offset` bytes into the packet,
+/// or `Err(())` when `[offset, offset + size_of::<T>())` falls outside
+/// the `[data, data_end)` window.
+///
+/// # Safety
+/// `ctx` must be a live `XdpContext` for the current program invocation.
+/// The returned pointer is valid only until the packet is modified by a
+/// helper that adjusts its head/tail, and must not be dereferenced
+/// beyond `size_of::<T>()` bytes.
+// `()` error follows the established aya eBPF bounds-check idiom; a richer
+// error type would bloat every call site across the no_std programs for no
+// added signal (callers only branch on Ok/Err).
+#[allow(clippy::result_unit_err)]
 #[inline(always)]
 pub unsafe fn ptr_at_mut<T>(ctx: &XdpContext, offset: usize) -> Result<*mut T, ()> {
     let start = ctx.data();

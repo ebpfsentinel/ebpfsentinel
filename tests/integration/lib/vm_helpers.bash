@@ -459,13 +459,8 @@ _backend_ssh_sudo() {
     $BACKEND_SSH_CMD -- sudo "$@"
 }
 
-# skip_if_not_3vm
-# Skip a bats test when EBPF_3VM_MODE is not set.
-skip_if_not_3vm() {
-    if [ "${EBPF_3VM_MODE:-false}" != "true" ]; then
-        skip "Test requires 3-VM transit topology (set EBPF_3VM_MODE=true)"
-    fi
-}
+# skip_if_not_3vm is defined in ebpf_helpers.bash (always sourced) so it is
+# available to guard setup before this file is loaded.
 
 # route_via_agent <side>
 # Install a route on `side` so traffic to the opposite subnet flows

@@ -2,26 +2,26 @@
 #![no_main]
 
 use aya_ebpf::{
-    bindings::TC_ACT_OK,
-    helpers::{bpf_get_prandom_u32, bpf_l3_csum_replace, bpf_l4_csum_replace},
+    EbpfContext,
+    bindings::{__sk_buff, TC_ACT_OK},
+    cty::c_void,
+    helpers::{bpf_get_prandom_u32, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop},
     macros::{classifier, map},
     maps::{Array, PerCpuArray},
     programs::TcContext,
-    EbpfContext,
 };
+use ebpf_common::scrub::{
+    SCRUB_METRIC_COUNT, SCRUB_METRIC_DF_CLEARED, SCRUB_METRIC_ECN_STRIPPED, SCRUB_METRIC_ERRORS,
+    SCRUB_METRIC_HOP_FIXED, SCRUB_METRIC_IPID_RANDOMIZED, SCRUB_METRIC_MSS_CLAMPED,
+    SCRUB_METRIC_PACKETS, SCRUB_METRIC_TCP_FLAGS_SCRUBBED, SCRUB_METRIC_TCP_TS_STRIPPED,
+    SCRUB_METRIC_TOS_NORMALIZED, SCRUB_METRIC_TOTAL_SEEN, SCRUB_METRIC_TTL_FIXED, ScrubFlags,
+};
+use ebpf_helpers::increment_metric;
 use ebpf_helpers::net::{
     ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
     VLAN_HDR_LEN, VlanHdr,
 };
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
-use ebpf_helpers::increment_metric;
-use ebpf_common::scrub::{
-    ScrubFlags, SCRUB_METRIC_COUNT, SCRUB_METRIC_DF_CLEARED, SCRUB_METRIC_ECN_STRIPPED,
-    SCRUB_METRIC_ERRORS, SCRUB_METRIC_HOP_FIXED, SCRUB_METRIC_IPID_RANDOMIZED,
-    SCRUB_METRIC_MSS_CLAMPED, SCRUB_METRIC_PACKETS, SCRUB_METRIC_TCP_FLAGS_SCRUBBED,
-    SCRUB_METRIC_TCP_TS_STRIPPED, SCRUB_METRIC_TOS_NORMALIZED, SCRUB_METRIC_TOTAL_SEEN,
-    SCRUB_METRIC_TTL_FIXED,
-};
 use network_types::{eth::EthHdr, ip::Ipv4Hdr};
 
 // ── Constants ───────────────────────────────────────────────────────
@@ -45,8 +45,11 @@ const TCP_OPT_TIMESTAMP_LEN: u8 = 10;
 /// TCP SYN flag.
 const TCP_SYN: u8 = 0x02;
 
-/// Maximum TCP options bytes to scan (prevents unbounded loops).
-const MAX_TCP_OPT_SCAN: usize = 40;
+/// Iteration bound for the TCP option walk, passed to `bpf_loop`. The TCP
+/// options area is at most 40 bytes (a 60-byte TCP header minus the 20-byte
+/// fixed header), and every step advances by at least one byte, so 40 steps
+/// always covers the whole area.
+const MAX_TCP_OPT_SCAN: u32 = 40;
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -132,27 +135,28 @@ fn scrub_ipv4(ctx: &mut TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result
     let ihl = unsafe { (*ipv4hdr).ihl() } as usize;
     let l4_offset = l3_offset + ihl;
 
+    // Snapshot every mutable IPv4 header field up front. The scrub helpers below
+    // call bpf_skb_store_bytes / bpf_l3_csum_replace, which invalidate direct
+    // packet pointers, so each field must be read before the first mutation —
+    // re-dereferencing `ipv4hdr` afterwards is a verifier-rejected scalar access.
+    let ttl = unsafe { (*ipv4hdr).ttl };
+    let frag_off = u16::from_be_bytes(unsafe { (*ipv4hdr).frags });
+    let old_id = u16::from_be_bytes(unsafe { (*ipv4hdr).id });
+
     // ── TTL normalization ───────────────────────────────────────
-    if cfg.min_ttl > 0 {
-        let ttl = unsafe { (*ipv4hdr).ttl };
-        if ttl < cfg.min_ttl {
-            scrub_fix_ttl(ctx, l3_offset, ttl, cfg.min_ttl)?;
-            increment_metric(SCRUB_METRIC_TTL_FIXED);
-        }
+    if cfg.min_ttl > 0 && ttl < cfg.min_ttl {
+        scrub_fix_ttl(ctx, l3_offset, ttl, cfg.min_ttl)?;
+        increment_metric(SCRUB_METRIC_TTL_FIXED);
     }
 
     // ── Clear DF bit ────────────────────────────────────────────
-    if cfg.clear_df != 0 {
-        let frag_off = u16::from_be_bytes(unsafe { (*ipv4hdr).frags });
-        if frag_off & IP_DF != 0 {
-            scrub_clear_df(ctx, l3_offset, frag_off)?;
-            increment_metric(SCRUB_METRIC_DF_CLEARED);
-        }
+    if cfg.clear_df != 0 && frag_off & IP_DF != 0 {
+        scrub_clear_df(ctx, l3_offset, frag_off)?;
+        increment_metric(SCRUB_METRIC_DF_CLEARED);
     }
 
     // ── Randomize IP ID ─────────────────────────────────────────
     if cfg.random_ip_id != 0 {
-        let old_id = u16::from_be_bytes(unsafe { (*ipv4hdr).id });
         let new_id = (unsafe { bpf_get_prandom_u32() } & 0xFFFF) as u16;
         if old_id != new_id {
             scrub_random_ip_id(ctx, l3_offset, old_id, new_id)?;
@@ -160,9 +164,9 @@ fn scrub_ipv4(ctx: &mut TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result
         }
     }
 
-    // ── MSS clamping (TCP SYN only) ─────────────────────────────
-    if cfg.max_mss > 0 && protocol == PROTO_TCP {
-        scrub_mss_clamp(ctx, cfg.max_mss, l3_offset, l4_offset)?;
+    // ── TCP option scrubbing: MSS clamp + timestamp strip (one pass) ──
+    if protocol == PROTO_TCP && (cfg.max_mss > 0 || cfg.strip_tcp_timestamps != 0) {
+        scrub_tcp_options(ctx, cfg, l4_offset)?;
     }
 
     // ── TCP reserved flag scrubbing ────────────────────────────
@@ -180,11 +184,6 @@ fn scrub_ipv4(ctx: &mut TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result
         scrub_normalize_tos_v4(ctx, l3_offset, cfg.tos_value)?;
     }
 
-    // ── TCP timestamp stripping ────────────────────────────────
-    if cfg.strip_tcp_timestamps != 0 && protocol == PROTO_TCP {
-        scrub_strip_tcp_timestamps(ctx, l3_offset, l4_offset)?;
-    }
-
     Ok(())
 }
 
@@ -198,8 +197,8 @@ fn scrub_ipv6(ctx: &mut TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result
     let raw_protocol = unsafe { (*ipv6hdr).next_hdr };
 
     // Skip IPv6 extension headers to find the actual L4 protocol.
-    let (protocol, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_protocol)
-        .ok_or(())?;
+    let (protocol, l4_offset) =
+        skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_protocol).ok_or(())?;
 
     // ── Hop Limit normalization (IPv6 equivalent of TTL) ────────
     if cfg.min_hop_limit > 0 {
@@ -214,10 +213,10 @@ fn scrub_ipv6(ctx: &mut TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result
         }
     }
 
-    // ── MSS clamping (TCP SYN only) ─────────────────────────────
+    // ── TCP option scrubbing: MSS clamp + timestamp strip (one pass) ──
     // TCP options are L4-agnostic, reuse the same function.
-    if cfg.max_mss > 0 && protocol == PROTO_TCP {
-        scrub_mss_clamp(ctx, cfg.max_mss, l3_offset, l4_offset)?;
+    if protocol == PROTO_TCP && (cfg.max_mss > 0 || cfg.strip_tcp_timestamps != 0) {
+        scrub_tcp_options(ctx, cfg, l4_offset)?;
     }
 
     // ── TCP reserved flag scrubbing ────────────────────────────
@@ -235,17 +234,17 @@ fn scrub_ipv6(ctx: &mut TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result
         scrub_normalize_tos_v6(ctx, l3_offset, cfg.tos_value)?;
     }
 
-    // ── TCP timestamp stripping ────────────────────────────────
-    if cfg.strip_tcp_timestamps != 0 && protocol == PROTO_TCP {
-        scrub_strip_tcp_timestamps(ctx, l3_offset, l4_offset)?;
-    }
-
     Ok(())
 }
 
 /// Rewrite TTL field and update IPv4 header checksum.
 #[inline(always)]
-fn scrub_fix_ttl(ctx: &mut TcContext, l3_offset: usize, old_ttl: u8, new_ttl: u8) -> Result<(), ()> {
+fn scrub_fix_ttl(
+    ctx: &mut TcContext,
+    l3_offset: usize,
+    old_ttl: u8,
+    new_ttl: u8,
+) -> Result<(), ()> {
     // TTL is at offset 8 in the IPv4 header
     let ttl_offset = l3_offset + 8;
     let csum_offset = (l3_offset + 10) as u32; // check field at offset 10
@@ -258,7 +257,13 @@ fn scrub_fix_ttl(ctx: &mut TcContext, l3_offset: usize, old_ttl: u8, new_ttl: u8
     let old_val = (old_ttl as u32) << 8;
     let new_val = (new_ttl as u32) << 8;
     unsafe {
-        bpf_l3_csum_replace(ctx.as_ptr() as *mut _, csum_offset, old_val as u64, new_val as u64, 2);
+        bpf_l3_csum_replace(
+            ctx.as_ptr() as *mut _,
+            csum_offset,
+            old_val as u64,
+            new_val as u64,
+            2,
+        );
     }
     Ok(())
 }
@@ -311,91 +316,198 @@ fn scrub_random_ip_id(
     Ok(())
 }
 
-/// Clamp MSS option in TCP SYN packets if MSS > max_mss.
-///
-/// Scans TCP options looking for MSS (kind=2, len=4), rewrites in-place.
+/// Overwrite one 2-byte pair of a TCP timestamp option with NOP/NOP (0x0101),
+/// updating the TCP checksum only when the pair actually changes.
 #[inline(always)]
-fn scrub_mss_clamp(
-    ctx: &mut TcContext,
-    max_mss: u16,
-    _l3_offset: usize,
-    l4_offset: usize,
-) -> Result<(), ()> {
-    // Read TCP flags to check if SYN
-    let flags_offset = l4_offset + 13;
-    let flags: u8 = ctx.load(flags_offset).map_err(|_| ())?;
-    if flags & TCP_SYN == 0 {
-        return Ok(()); // Not a SYN — nothing to clamp
+fn strip_ts_pair(ctx: &mut TcContext, pos: usize, tcp_csum_offset: u32) -> Result<(), ()> {
+    let old_hi: u8 = ctx.load(pos).map_err(|_| ())?;
+    let old_lo: u8 = ctx.load(pos + 1).map_err(|_| ())?;
+    let old_val = ((old_hi as u16) << 8) | (old_lo as u16);
+    let new_val: u16 = 0x0101; // NOP NOP
+    if old_val != new_val {
+        ctx.store(pos, &TCP_OPT_NOP, 0).map_err(|_| ())?;
+        ctx.store(pos + 1, &TCP_OPT_NOP, 0).map_err(|_| ())?;
+        unsafe {
+            bpf_l4_csum_replace(
+                ctx.as_ptr() as *mut _,
+                tcp_csum_offset,
+                old_val as u64,
+                new_val as u64,
+                2,
+            );
+        }
     }
+    Ok(())
+}
 
-    // TCP data offset (header length in 32-bit words)
+/// Context threaded through `bpf_loop` for the single-pass TCP option walk.
+///
+/// The walk advances by a packet-derived, variable stride each step. Carried
+/// through an in-line `while` loop, that running offset mints a fresh,
+/// ever-widening scalar every iteration, so no two loop states match, nothing
+/// is pruned, and the program blows past the 1M instruction-complexity limit.
+/// `bpf_loop` makes the verifier analyse the step callback exactly once,
+/// sidestepping the blow-up while still covering the whole option area at
+/// runtime. The option reads/writes go through `bpf_skb_load_bytes` /
+/// `bpf_skb_store_bytes` (runtime-bounds-checked), so the unknown running
+/// offset needs no static bound.
+#[repr(C)]
+struct ScrubOptCtx {
+    /// Packet handle, re-wrapped as a `TcContext` inside the callback.
+    skb: *mut __sk_buff,
+    /// Byte offset of the first TCP option.
+    opts_start: u32,
+    /// Length of the option area (TCP header length − 20).
+    opts_len: u32,
+    /// Running byte offset into the option area; advances each step.
+    scanned: u32,
+    /// TCP checksum field offset for incremental checksum updates.
+    tcp_csum_offset: u32,
+    /// MSS clamp ceiling (host byte order).
+    max_mss: u16,
+    /// 1 when MSS clamping applies to this packet (configured and SYN).
+    mss_active: u8,
+    /// 1 when timestamp stripping is configured.
+    do_ts: u8,
+}
+
+/// Clamp a TCP MSS option in place and update the TCP checksum.
+#[inline(always)]
+fn clamp_mss(ctx: &mut TcContext, pos: usize, tcp_csum_offset: u32, max_mss: u16) {
+    let mss_hi: u8 = match ctx.load(pos + 2) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let mss_lo: u8 = match ctx.load(pos + 3) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let current_mss = ((mss_hi as u16) << 8) | (mss_lo as u16);
+    if current_mss <= max_mss {
+        return;
+    }
+    let new_mss_be = max_mss.to_be_bytes();
+    if ctx.store(pos + 2, &new_mss_be[0], 0).is_err()
+        || ctx.store(pos + 3, &new_mss_be[1], 0).is_err()
+    {
+        return;
+    }
+    unsafe {
+        bpf_l4_csum_replace(
+            ctx.as_ptr() as *mut _,
+            tcp_csum_offset,
+            current_mss as u64,
+            max_mss as u64,
+            2,
+        );
+    }
+    increment_metric(SCRUB_METRIC_MSS_CLAMPED);
+}
+
+/// One step of the TCP option walk, invoked by `bpf_loop`.
+///
+/// Returns 1 to stop (end of options or a parse error), 0 to continue. MSS
+/// clamp applies only when `mss_active` is set; timestamp strip applies when
+/// `do_ts` is set. Both options are handled in the single walk.
+#[inline(never)]
+unsafe extern "C" fn scrub_opt_step(_index: u32, ctx: *mut c_void) -> i64 {
+    unsafe {
+        let lctx = &mut *(ctx as *mut ScrubOptCtx);
+        let scanned = lctx.scanned as usize;
+        let opts_len = lctx.opts_len as usize;
+        if scanned >= opts_len {
+            return 1;
+        }
+
+        let mut tctx = TcContext::new(lctx.skb);
+        let pos = lctx.opts_start as usize + scanned;
+
+        let kind: u8 = match tctx.load(pos) {
+            Ok(k) => k,
+            Err(_) => return 1,
+        };
+        if kind == TCP_OPT_EOL {
+            return 1;
+        }
+        if kind == TCP_OPT_NOP {
+            lctx.scanned = (scanned + 1) as u32;
+            return 0;
+        }
+
+        // Multi-byte option: a length byte must follow.
+        if scanned + 1 >= opts_len {
+            return 1;
+        }
+        let opt_len: u8 = match tctx.load(pos + 1) {
+            Ok(l) => l,
+            Err(_) => return 1,
+        };
+        if opt_len < 2 {
+            return 1; // invalid
+        }
+
+        if lctx.mss_active != 0 && kind == TCP_OPT_MSS && opt_len == 4 && scanned + 4 <= opts_len {
+            clamp_mss(&mut tctx, pos, lctx.tcp_csum_offset, lctx.max_mss);
+        } else if lctx.do_ts != 0
+            && kind == TCP_OPT_TIMESTAMP
+            && opt_len == TCP_OPT_TIMESTAMP_LEN
+            && scanned + 10 <= opts_len
+        {
+            // Overwrite all 10 bytes (5 fixed 2-byte pairs) with NOP (kind=1).
+            let _ = strip_ts_pair(&mut tctx, pos, lctx.tcp_csum_offset);
+            let _ = strip_ts_pair(&mut tctx, pos + 2, lctx.tcp_csum_offset);
+            let _ = strip_ts_pair(&mut tctx, pos + 4, lctx.tcp_csum_offset);
+            let _ = strip_ts_pair(&mut tctx, pos + 6, lctx.tcp_csum_offset);
+            let _ = strip_ts_pair(&mut tctx, pos + 8, lctx.tcp_csum_offset);
+            increment_metric(SCRUB_METRIC_TCP_TS_STRIPPED);
+        }
+
+        lctx.scanned = (scanned + opt_len as usize) as u32;
+        0
+    }
+}
+
+/// Walk the TCP option area once via `bpf_loop`, applying both MSS clamping and
+/// timestamp stripping in a single pass.
+///
+/// MSS clamp applies only to SYN packets when `cfg.max_mss > 0`; timestamp
+/// strip applies when `cfg.strip_tcp_timestamps != 0`.
+#[inline(never)]
+fn scrub_tcp_options(ctx: &mut TcContext, cfg: &ScrubFlags, l4_offset: usize) -> Result<(), ()> {
+    let do_mss = cfg.max_mss > 0;
+    let do_ts = cfg.strip_tcp_timestamps != 0;
+
+    // MSS clamp is SYN-only; read the flags byte (offset 13) once.
+    let flags: u8 = ctx.load(l4_offset + 13).map_err(|_| ())?;
+    let is_syn = flags & TCP_SYN != 0;
+
+    // TCP data offset (header length in 32-bit words).
     let doff_byte: u8 = ctx.load(l4_offset + 12).map_err(|_| ())?;
     let tcp_hdr_len = ((doff_byte >> 4) as usize) * 4;
     if tcp_hdr_len <= 20 {
         return Ok(()); // No options
     }
 
-    let opts_start = l4_offset + 20;
-    let opts_end = l4_offset + tcp_hdr_len;
-    let mut pos = opts_start;
+    let opts_len = tcp_hdr_len - 20;
 
-    // Scan TCP options (bounded loop)
-    let mut i = 0usize;
-    while i < MAX_TCP_OPT_SCAN && pos < opts_end {
-        let kind: u8 = ctx.load(pos).map_err(|_| ())?;
+    let mut opt_ctx = ScrubOptCtx {
+        skb: ctx.skb.skb,
+        opts_start: (l4_offset + 20) as u32,
+        opts_len: opts_len as u32,
+        scanned: 0,
+        tcp_csum_offset: (l4_offset + 16) as u32,
+        max_mss: cfg.max_mss,
+        mss_active: u8::from(do_mss && is_syn),
+        do_ts: u8::from(do_ts),
+    };
 
-        if kind == TCP_OPT_EOL {
-            break;
-        }
-        if kind == TCP_OPT_NOP {
-            pos += 1;
-            i += 1;
-            continue;
-        }
-
-        // Read option length
-        if pos + 1 >= opts_end {
-            break;
-        }
-        let opt_len: u8 = ctx.load(pos + 1).map_err(|_| ())?;
-        if opt_len < 2 {
-            break; // Invalid
-        }
-
-        if kind == TCP_OPT_MSS && opt_len == 4 && pos + 4 <= opts_end {
-            // Read current MSS (network byte order)
-            let mss_hi: u8 = ctx.load(pos + 2).map_err(|_| ())?;
-            let mss_lo: u8 = ctx.load(pos + 3).map_err(|_| ())?;
-            let current_mss = ((mss_hi as u16) << 8) | (mss_lo as u16);
-
-            if current_mss > max_mss {
-                // Clamp MSS
-                let new_mss_be = max_mss.to_be_bytes();
-                let old_mss_val = current_mss as u32;
-                let new_mss_val = max_mss as u32;
-
-                ctx.store(pos + 2, &new_mss_be[0], 0).map_err(|_| ())?;
-                ctx.store(pos + 3, &new_mss_be[1], 0).map_err(|_| ())?;
-
-                // Update TCP checksum (offset 16 in TCP header)
-                let tcp_csum_offset = (l4_offset + 16) as u32;
-                unsafe {
-                    bpf_l4_csum_replace(
-                        ctx.as_ptr() as *mut _,
-                        tcp_csum_offset,
-                        old_mss_val as u64,
-                        new_mss_val as u64,
-                        2,
-                    );
-                }
-
-                increment_metric(SCRUB_METRIC_MSS_CLAMPED);
-            }
-            break; // Only one MSS option expected
-        }
-
-        pos += opt_len as usize;
-        i += 1;
+    unsafe {
+        bpf_loop(
+            MAX_TCP_OPT_SCAN,
+            scrub_opt_step as *mut c_void,
+            &mut opt_ctx as *mut ScrubOptCtx as *mut c_void,
+            0,
+        );
     }
 
     Ok(())
@@ -478,7 +590,13 @@ fn scrub_strip_ecn_v4(ctx: &mut TcContext, l3_offset: usize) -> Result<(), ()> {
     let old_val = (tos as u32) << 8;
     let new_val = (new_tos as u32) << 8;
     unsafe {
-        bpf_l3_csum_replace(ctx.as_ptr() as *mut _, csum_offset, old_val as u64, new_val as u64, 2);
+        bpf_l3_csum_replace(
+            ctx.as_ptr() as *mut _,
+            csum_offset,
+            old_val as u64,
+            new_val as u64,
+            2,
+        );
     }
 
     increment_metric(SCRUB_METRIC_ECN_STRIPPED);
@@ -524,7 +642,13 @@ fn scrub_normalize_tos_v4(ctx: &mut TcContext, l3_offset: usize, tos_value: u8) 
     let old_val = (tos as u32) << 8;
     let new_val = (tos_value as u32) << 8;
     unsafe {
-        bpf_l3_csum_replace(ctx.as_ptr() as *mut _, csum_offset, old_val as u64, new_val as u64, 2);
+        bpf_l3_csum_replace(
+            ctx.as_ptr() as *mut _,
+            csum_offset,
+            old_val as u64,
+            new_val as u64,
+            2,
+        );
     }
 
     increment_metric(SCRUB_METRIC_TOS_NORMALIZED);
@@ -560,90 +684,6 @@ fn scrub_normalize_tos_v6(ctx: &mut TcContext, l3_offset: usize, tos_value: u8) 
     ctx.store(l3_offset + 1, &new_byte1, 0).map_err(|_| ())?;
 
     increment_metric(SCRUB_METRIC_TOS_NORMALIZED);
-    Ok(())
-}
-
-/// Strip TCP timestamp option (kind=8, len=10) by overwriting with NOP bytes.
-///
-/// Scans TCP options using a bounded loop (same pattern as MSS clamping).
-/// When the timestamp option is found, all 10 bytes are overwritten with
-/// NOP (kind=1) and the TCP checksum is updated incrementally for each
-/// 2-byte pair that changes.
-#[inline(always)]
-fn scrub_strip_tcp_timestamps(
-    ctx: &mut TcContext,
-    _l3_offset: usize,
-    l4_offset: usize,
-) -> Result<(), ()> {
-    // Read TCP data offset to determine header length
-    let doff_byte: u8 = ctx.load(l4_offset + 12).map_err(|_| ())?;
-    let tcp_hdr_len = ((doff_byte >> 4) as usize) * 4;
-    if tcp_hdr_len <= 20 {
-        return Ok(()); // No options
-    }
-
-    let opts_start = l4_offset + 20;
-    let opts_end = l4_offset + tcp_hdr_len;
-    let tcp_csum_offset = (l4_offset + 16) as u32;
-    let mut pos = opts_start;
-
-    let mut i = 0usize;
-    while i < MAX_TCP_OPT_SCAN && pos < opts_end {
-        let kind: u8 = ctx.load(pos).map_err(|_| ())?;
-
-        if kind == TCP_OPT_EOL {
-            break;
-        }
-        if kind == TCP_OPT_NOP {
-            pos += 1;
-            i += 1;
-            continue;
-        }
-
-        // Read option length
-        if pos + 1 >= opts_end {
-            break;
-        }
-        let opt_len: u8 = ctx.load(pos + 1).map_err(|_| ())?;
-        if opt_len < 2 {
-            break; // Invalid
-        }
-
-        if kind == TCP_OPT_TIMESTAMP && opt_len == TCP_OPT_TIMESTAMP_LEN && pos + 10 <= opts_end {
-            // Overwrite all 10 bytes with NOP (kind=1), updating checksum
-            // for each 2-byte pair that changes.
-            let mut j = 0usize;
-            while j < 10 && j + 1 < 10 {
-                let old_hi: u8 = ctx.load(pos + j).map_err(|_| ())?;
-                let old_lo: u8 = ctx.load(pos + j + 1).map_err(|_| ())?;
-                let old_val = ((old_hi as u16) << 8) | (old_lo as u16);
-                let new_val: u16 = 0x0101; // NOP NOP
-
-                if old_val != new_val {
-                    ctx.store(pos + j, &TCP_OPT_NOP, 0).map_err(|_| ())?;
-                    ctx.store(pos + j + 1, &TCP_OPT_NOP, 0).map_err(|_| ())?;
-
-                    unsafe {
-                        bpf_l4_csum_replace(
-                            ctx.as_ptr() as *mut _,
-                            tcp_csum_offset,
-                            old_val as u64,
-                            new_val as u64,
-                            2,
-                        );
-                    }
-                }
-                j += 2;
-            }
-
-            increment_metric(SCRUB_METRIC_TCP_TS_STRIPPED);
-            break; // Only one timestamp option expected
-        }
-
-        pos += opt_len as usize;
-        i += 1;
-    }
-
     Ok(())
 }
 

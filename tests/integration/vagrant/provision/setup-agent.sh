@@ -56,6 +56,28 @@ if ! command -v grpcurl &>/dev/null; then
         sudo tar -xz -C /usr/local/bin grpcurl
 fi
 
+# ── Load kernel modules exposing eBPF kfuncs ───────────────────────
+# xdp-firewall uses the conntrack lookup kfuncs (bpf_xdp_ct_lookup),
+# tc-ids uses the FOU/GUE encap kfuncs (bpf_skb_get_fou_encap) and
+# tc-nat-ingress/egress use the xfrm interface kfuncs
+# (bpf_skb_get_xfrm_info). Those kfuncs are registered by the
+# `nf_conntrack`, `fou` and `xfrm_interface` modules; loading the modules
+# publishes their BTF under /sys/kernel/btf/<module> so the agent's kfunc
+# resolver can bind them at program-load time. Without nf_conntrack the
+# xdp-firewall load fails ("kfunc bpf_xdp_ct_lookup not found") and the
+# agent stays in degraded mode (ebpf_loaded=false), which skips the eBPF
+# suites. Persisted across reboot via modules-load.d.
+echo "=== [5/9] Loading kernel modules for eBPF kfuncs ==="
+sudo tee /etc/modules-load.d/ebpfsentinel-kfuncs.conf >/dev/null <<'KMODS'
+nf_conntrack
+fou
+fou6
+xfrm_interface
+KMODS
+for kmod in nf_conntrack fou fou6 xfrm_interface; do
+    sudo modprobe "$kmod" 2>/dev/null || echo "    NOTE: modprobe ${kmod} deferred until reboot"
+done
+
 # ── Build / install agent + eBPF programs ──────────────────────────
 install_from_prebuilt() {
     local src="${PROJECT_DIR}/target/release/ebpfsentinel-agent"
@@ -90,7 +112,7 @@ build_from_source() {
     install_from_prebuilt
 }
 
-echo "=== [5/8] Installing agent (mode: ${PROVISION_MODE}) ==="
+echo "=== [6/9] Installing agent (mode: ${PROVISION_MODE}) ==="
 case "$PROVISION_MODE" in
     docker)
         if [ -f "$IMAGE_TAR" ] && command -v docker &>/dev/null; then
@@ -126,7 +148,7 @@ echo "  eBPF programs:"
 ls -1 "${EBPF_INSTALL_DIR}/" 2>/dev/null || echo "  WARNING: No eBPF programs found in ${EBPF_INSTALL_DIR}"
 
 # ── Start iperf3 server ────────────────────────────────────────────
-echo "=== [6/8] Starting iperf3 server ==="
+echo "=== [7/9] Starting iperf3 server ==="
 pkill -f "iperf3 -s" 2>/dev/null || true
 if command -v iperf3 &>/dev/null; then
     iperf3 -s -B 192.168.56.10 -p 5201 -D
@@ -134,7 +156,7 @@ if command -v iperf3 &>/dev/null; then
 fi
 
 # ── Prepare runtime configs from templates ─────────────────────────
-echo "=== [7/8] Preparing config files ==="
+echo "=== [8/9] Preparing config files ==="
 mkdir -p "$DATA_DIR"
 
 for template in "${INTEGRATION_DIR}/fixtures/"config-*.yaml; do
@@ -159,7 +181,7 @@ if [ -d "${INTEGRATION_DIR}/fixtures/stix" ]; then
 fi
 
 # ── Validate eBPF load capability ──────────────────────────────────
-echo "=== [8/8] Validating eBPF environment ==="
+echo "=== [9/9] Validating eBPF environment ==="
 if [ "${EBPF_SKIP_VALIDATION:-false}" = "true" ]; then
     echo "  Skipping eBPF validation (EBPF_SKIP_VALIDATION=true)"
 else
@@ -167,6 +189,8 @@ else
     SMOKE_CONFIG="/tmp/ebpfsentinel-prepared-config-minimal.yaml"
     if [ -f "$SMOKE_CONFIG" ]; then
         echo "  Starting smoke test (5s timeout)..."
+        # Agent refuses world-readable config; match the 640 the bats harness sets.
+        sudo chmod 640 "$SMOKE_CONFIG"
         sudo "${AGENT_INSTALL_DIR}/ebpfsentinel-agent" --config "$SMOKE_CONFIG" \
             > /tmp/ebpfsentinel-smoke.log 2>&1 &
         SMOKE_PID=$!
@@ -194,6 +218,23 @@ else
         echo "  Skipping smoke test (no minimal config)"
     fi
 fi
+
+# ── Reclaim build space ────────────────────────────────────────────
+# The VM builds from source on a ~31G root disk. Leaving the docker builder
+# cache and apt/journal cruft behind once filled the disk to 100%, which
+# corrupted the ext4 filesystem ("Structure needs cleaning") and wedged sshd.
+# Reclaim those here. Do NOT `cargo clean`: the bats harness (_has_local_ebpf
+# in lib/ebpf_helpers.bash) launches the agent from ${PROJECT_DIR}/target/
+# release/ebpfsentinel-agent and target/bpfel-unknown-none/release/*, so the
+# target/ tree must survive. Docker builder prune alone reclaims the bulk in
+# full mode; target/ (~3G) on a 31G disk stays comfortably under the ceiling.
+echo "=== Reclaiming build space ==="
+if command -v docker &>/dev/null; then
+    sudo docker builder prune -f 2>/dev/null || true
+fi
+sudo apt-get clean 2>/dev/null || true
+sudo journalctl --vacuum-size=50M 2>/dev/null || true
+echo "  Disk after reclaim: $(df -h / | awk 'NR==2 {print $4" free ("$5" used)"}')"
 
 # ── Mark agent VM as ready ─────────────────────────────────────────
 touch /tmp/ebpfsentinel-agent-ready

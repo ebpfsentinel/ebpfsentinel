@@ -5,6 +5,20 @@ use aya_ebpf::programs::TcContext;
 use core::mem;
 
 /// Bounds-checked read-only pointer access for TC programs.
+///
+/// Returns a pointer to a `T` at `offset` bytes into the packet, or
+/// `Err(())` when `[offset, offset + size_of::<T>())` falls outside the
+/// `[data, data_end)` window.
+///
+/// # Safety
+/// `ctx` must be a live `TcContext` for the current program invocation.
+/// The returned pointer is valid only until the packet is modified by a
+/// helper that adjusts its head/tail, and must not be dereferenced
+/// beyond `size_of::<T>()` bytes.
+// `()` error follows the established aya eBPF bounds-check idiom; a richer
+// error type would bloat every call site across the no_std programs for no
+// added signal (callers only branch on Ok/Err).
+#[allow(clippy::result_unit_err)]
 #[inline(always)]
 pub unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> {
     let start = ctx.data();

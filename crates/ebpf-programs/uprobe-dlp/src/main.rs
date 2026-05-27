@@ -8,16 +8,11 @@ use aya_ebpf::{
     programs::{ProbeContext, RetProbeContext},
 };
 use core::ffi::c_void;
-use ebpf_common::arena::{
-    ArenaEventHeader, DLP_ARENA_FIXED_VA, DLP_ARENA_PAGES, DLP_SLOT_COUNT, DLP_WRITE_SEQ_OFFSET,
-    dlp_slot_offset,
-};
 use ebpf_common::dlp::{
     DLP_DIRECTION_READ, DLP_DIRECTION_WRITE, DLP_MAX_EXCERPT, DLP_METRIC_ERRORS,
     DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_READ_EVENTS, DLP_METRIC_TOTAL_SEEN,
     DLP_METRIC_WRITE_EVENTS, DLP_SMALL_EXCERPT, DlpEvent, DlpEventSmall, SslReadArgs,
 };
-use ebpf_helpers::arena_map::{RawMapDef, arena_def};
 use ebpf_helpers::increment_metric;
 
 // ── Per-connection DLP context via SK_STORAGE (kernel 5.2+) ─────────
@@ -49,50 +44,8 @@ use ebpf_helpers::increment_metric;
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// Kernel→userspace event ring buffer (4 MB) for DLP events.
-/// Used as fallback when the arena map is not available.
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 4096, 0);
-
-/// Arena map for zero-copy DLP event delivery to userspace.
-/// 4 pages = 16 KiB — laid out as a 64-byte ring header followed by
-/// 50 fixed slots × 320 B (24 B `ArenaEventHeader` + 288 B
-/// `DlpEventSmall`). BPF allocates the 4 pages once, anchored at
-/// `DLP_ARENA_FIXED_VA`, so userspace's `mmap(MAP_FIXED_NOREPLACE)`
-/// at the same address shares the same pointer space and reads slot
-/// contents zero-copy.
-#[unsafe(link_section = ".maps")]
-#[unsafe(no_mangle)]
-static DLP_ARENA: RawMapDef = arena_def(DLP_ARENA_PAGES);
-
-/// Cached arena base pointer, set on first successful allocation.
-/// Stored as `u64` because BPF lacks `AtomicPtr` and the sentinel
-/// value 0 marks "not allocated yet".
-static mut ARENA_BASE: u64 = 0;
-
-/// Monotonically increasing sequence counter for arena events.
-///
-/// This is a `.bss` `static mut` shared across all CPUs. uprobes fire
-/// concurrently (one per task entering `SSL_read`/`SSL_write`), so the
-/// `+= 1` read-modify-write is *not* serialised — two CPUs can observe
-/// the same value, land on the same slot, and interleave body writes.
-/// The userspace reader's `slot.sequence` recheck catches a torn slot
-/// only when the stamped sequence differs from the expected one; it
-/// cannot catch a lost-update collision where both writers stamp the
-/// identical sequence, so that rare case can surface a corrupted
-/// excerpt.
-///
-/// A drop-in atomic is not available: the `bpfel-unknown-none` target
-/// declares no atomic-CAS support, so `AtomicU64::fetch_add` does not
-/// compile (BPF fetch-atomics are ISA v3 and the target spec gates the
-/// method out regardless of `-C target-cpu`). A per-CPU counter is also
-/// unusable here because the userspace reader consumes a single global
-/// `write_seq` and walks `start_seq..=write_seq` contiguously — per-CPU
-/// sequences are non-contiguous and would break that drain. Eliminating
-/// the residual race therefore needs a per-CPU-ring protocol redesign
-/// (writer + reader + shared layout), tracked separately. The window is
-/// tiny and the impact is a single dropped/garbled excerpt, so the
-/// existing seqlock-style publish is retained in the meantime.
-static mut ARENA_SEQUENCE: u64 = 0;
 
 /// Per-task context: saves SSL_read entry arguments for the uretprobe.
 /// Uses LRU eviction so entries from crashed processes (SIGKILL during
@@ -273,15 +226,20 @@ fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
             (*ptr)._padding = [0; 3];
             core::ptr::write_bytes((*ptr).data_excerpt.as_mut_ptr(), 0, DLP_SMALL_EXCERPT);
             // Read only the bytes the payload actually holds — never the
-            // full excerpt — so we don't capture adjacent process memory
-            // past the SSL buffer. The clamp keeps copy_len <= the
-            // destination size, which the verifier needs to accept a
-            // runtime length (same bound as the arena path).
-            let copy_len = if data_len > DLP_SMALL_EXCERPT as u32 {
-                DLP_SMALL_EXCERPT as u32
+            // full excerpt — so we don't capture adjacent process memory past
+            // the SSL buffer. This is `#[inline(never)]`, so the caller's
+            // `data_len <= DLP_SMALL_EXCERPT` invariant is lost across the
+            // frame and a plain branch leaves the helper reading the unmasked
+            // register ("R2 min value is negative"); the explicit AND restores
+            // the bound the verifier needs to accept a runtime length. A
+            // payload of exactly DLP_SMALL_EXCERPT bytes copies the first
+            // DLP_SMALL_EXCERPT-1 (the buffer is pre-zeroed, so the last byte
+            // stays 0) — acceptable for an excerpt preview.
+            let copy_len = (if data_len >= DLP_SMALL_EXCERPT as u32 {
+                DLP_SMALL_EXCERPT as u32 - 1
             } else {
                 data_len
-            };
+            }) & (DLP_SMALL_EXCERPT as u32 - 1);
             if copy_len > 0 {
                 let _ = r#gen::bpf_probe_read_user(
                     (*ptr).data_excerpt.as_mut_ptr() as *mut c_void,
@@ -298,18 +256,12 @@ fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
 
 /// Full DLP event (4120 bytes): for SSL payloads > 256 bytes.
 ///
-/// Tries arena zero-copy path first (direct write to mmap'd page),
-/// falls back to RingBuf if arena_alloc_pages fails or the arena
-/// was not loaded.
+/// Emitted via RingBuf. Arena zero-copy is not available: the eBPF
+/// arena pointer returned by `bpf_arena_alloc_pages` stays an untyped
+/// scalar on the Rust `bpfel` target (no `addr_space_cast`), so the
+/// verifier rejects any write through it.
 #[inline(never)]
 fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8) {
-    // Try arena path: write header + DlpEvent directly into mmap'd
-    // arena page. Userspace reads via pointer deref — zero-copy.
-    if try_emit_arena(user_buf, data_len, direction) {
-        return;
-    }
-
-    // Fallback: RingBuf path (copy-based).
     if let Some(mut entry) = EVENTS.reserve::<DlpEvent>(0) {
         let ptr = entry.as_mut_ptr();
         let pid_tgid = bpf_get_current_pid_tgid();
@@ -343,109 +295,6 @@ fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8) {
     } else {
         increment_metric(DLP_METRIC_EVENTS_DROPPED);
     }
-}
-
-/// Attempt to write a DLP event into the arena ring. Returns `true`
-/// on success, `false` if the arena allocation failed (falls back to
-/// RingBuf).
-///
-/// Layout: pages are allocated once at `DLP_ARENA_FIXED_VA` so the
-/// userspace mmap shares the same address space. Each event writes
-/// the slot body first, then publishes the new sequence to the ring
-/// header so userspace observes a complete record.
-#[inline(always)]
-fn try_emit_arena(user_buf: *const u8, data_len: u32, direction: u8) -> bool {
-    use ebpf_helpers::kfuncs::arena_alloc_pages_at;
-
-    let arena_ptr = &raw const DLP_ARENA as *mut c_void;
-
-    // Lazy init: anchor the arena at DLP_ARENA_FIXED_VA on first call.
-    let base = unsafe {
-        let cached = core::ptr::read_volatile(&raw const ARENA_BASE);
-        if cached != 0 {
-            cached as *mut u8
-        } else {
-            let allocated = arena_alloc_pages_at(
-                arena_ptr,
-                DLP_ARENA_FIXED_VA as *mut c_void,
-                DLP_ARENA_PAGES,
-            );
-            match allocated {
-                Some(ptr) => {
-                    core::ptr::write_volatile(&raw mut ARENA_BASE, ptr as u64);
-                    ptr as *mut u8
-                }
-                None => {
-                    // Lost a race or the kernel rejected the hint. Recheck
-                    // the cache once before falling back to RingBuf.
-                    let now = core::ptr::read_volatile(&raw const ARENA_BASE);
-                    if now != 0 {
-                        now as *mut u8
-                    } else {
-                        return false;
-                    }
-                }
-            }
-        }
-    };
-
-    let seq = unsafe {
-        ARENA_SEQUENCE += 1;
-        ARENA_SEQUENCE
-    };
-    let slot_idx = ((seq - 1) as usize) % DLP_SLOT_COUNT;
-    let slot_offset = dlp_slot_offset(slot_idx);
-    let slot_ptr = unsafe { base.add(slot_offset) };
-
-    // Slot body: copy the SSL plaintext excerpt (truncated to
-    // DLP_SMALL_EXCERPT for the arena fast-path; full excerpt still
-    // available via the RingBuf fallback when the caller needs it).
-    let event_ptr =
-        unsafe { slot_ptr.add(core::mem::size_of::<ArenaEventHeader>()) } as *mut DlpEventSmall;
-    let pid_tgid = bpf_get_current_pid_tgid();
-    let copy_len = if data_len > DLP_SMALL_EXCERPT as u32 {
-        DLP_SMALL_EXCERPT as u32
-    } else {
-        data_len
-    };
-    unsafe {
-        (*event_ptr).pid = pid_tgid as u32;
-        (*event_ptr).tgid = (pid_tgid >> 32) as u32;
-        (*event_ptr).timestamp_ns = bpf_ktime_get_boot_ns();
-        (*event_ptr).cgroup_id = bpf_get_current_cgroup_id();
-        (*event_ptr).data_len = data_len;
-        (*event_ptr).direction = direction;
-        (*event_ptr)._padding = [0; 3];
-        core::ptr::write_bytes((*event_ptr).data_excerpt.as_mut_ptr(), 0, DLP_SMALL_EXCERPT);
-        if copy_len > 0 {
-            let _ = r#gen::bpf_probe_read_user(
-                (*event_ptr).data_excerpt.as_mut_ptr() as *mut c_void,
-                copy_len,
-                user_buf as *const c_void,
-            );
-        }
-    }
-
-    // Slot header: written *after* the body so userspace can detect
-    // torn slots by comparing slot.sequence to the expected value.
-    let header = ArenaEventHeader {
-        sequence: seq,
-        timestamp_ns: unsafe { bpf_ktime_get_boot_ns() },
-        payload_len: core::mem::size_of::<DlpEventSmall>() as u32,
-        event_type: 3, // EVENT_TYPE_DLP
-        _pad: [0; 3],
-    };
-    unsafe {
-        core::ptr::write_volatile(slot_ptr.cast::<ArenaEventHeader>(), header);
-    }
-
-    // Publish: bump the global write_seq at the arena head so
-    // userspace knows a new slot is ready.
-    unsafe {
-        core::ptr::write_volatile(base.add(DLP_WRITE_SEQ_OFFSET).cast::<u64>(), seq);
-    }
-
-    true
 }
 
 /// Increment a per-CPU metric counter.

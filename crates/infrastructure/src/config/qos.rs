@@ -395,6 +395,15 @@ impl QosSectionConfig {
             .map(QosClassifierConfig::to_domain_classifier)
             .collect()
     }
+
+    /// Parse the configured scheduler string into its domain `QosScheduler`.
+    pub fn to_domain_scheduler(&self) -> Result<QosScheduler, ConfigError> {
+        parse_scheduler(&self.scheduler).map_err(|msg| ConfigError::InvalidValue {
+            field: "qos.scheduler".to_string(),
+            value: self.scheduler.clone(),
+            expected: msg,
+        })
+    }
 }
 
 // ── Pipe validation & conversion ────────────────────────────────────

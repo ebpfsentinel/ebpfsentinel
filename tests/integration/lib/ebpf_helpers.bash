@@ -219,9 +219,15 @@ start_ebpf_agent() {
         export EBPF_PROGRAM_DIR="${PROJECT_ROOT}/target/bpfel-unknown-none/release"
         echo "  [strategy] Using local binary: $AGENT_BIN" >&2
 
-        EBPF_PROGRAM_DIR="${EBPF_PROGRAM_DIR}" \
-        "$AGENT_BIN" --config "$config_file" "$@" \
-            >"$AGENT_LOG_FILE" 2>&1 &
+        # Launch in a new session via setsid so the agent survives bats
+        # tearing down the setup_file process group: a plain backgrounded
+        # job started in setup_file() shares bats' process group and gets
+        # SIGTERM'd the instant that phase ends, before any test runs.
+        # Detaching the session keeps the agent alive for the whole file.
+        # stdin from /dev/null so it never sees a controlling-terminal EOF.
+        setsid env EBPF_PROGRAM_DIR="${EBPF_PROGRAM_DIR}" \
+            "$AGENT_BIN" --config "$config_file" "$@" \
+            </dev/null >"$AGENT_LOG_FILE" 2>&1 &
         AGENT_PID=$!
         echo "$AGENT_PID" > "$AGENT_PID_FILE"
 
@@ -314,6 +320,11 @@ prepare_ebpf_config() {
         -e "s|__HOST_IP__|${host_ip}|g" \
         -e "s|__NS_IP__|${ns_ip}|g" \
         "$fixture" > "$output"
+
+    # The agent rejects world-readable config files (they may carry secrets):
+    # "config file ... is world-readable (mode 100644)". The default umask
+    # leaves the sed output at 0644, so tighten it before the agent reads it.
+    chmod 600 "$output"
 
     echo "$output"
 }
@@ -421,21 +432,34 @@ wait_for_ebpf_loaded() {
         if [ "$loaded" = "true" ]; then
             return 0
         fi
-        # Early exit: if agent is healthy but ebpf_loaded is explicitly false,
-        # it's running in degraded mode (eBPF programs not available).
-        if [ -n "$body" ] && [ "$loaded" = "false" ]; then
-            return 1
-        fi
+        # /readyz reports {"status":"not_ready","ebpf_loaded":false} both while
+        # the programs are still loading AND when the agent is genuinely
+        # degraded — the status field is derived solely from ebpf_loaded, so the
+        # two are indistinguishable over HTTP. We therefore keep polling on
+        # false (startup takes ~2s to attach XDP) and only declare degraded once
+        # the timeout elapses; failing fast on the first false reading skipped
+        # suites before the programs had a chance to attach.
         sleep 1
         attempt=$((attempt + 1))
     done
     return 1
 }
 
-# ── 2-VM mode override ────────────────────────────────────────────────
-# When EBPF_2VM_MODE=true (set by the attacker VM's .bashrc or Makefile),
-# source vm_helpers.bash which overrides netns, agent lifecycle, and
-# packet generation functions to work across the private network.
-if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+# skip_if_not_3vm
+# Skip a bats test when EBPF_3VM_MODE is not set. Defined here (always
+# sourced) so suites can guard their setup before the heavier 3-VM
+# helpers in vm_helpers.bash are loaded.
+skip_if_not_3vm() {
+    if [ "${EBPF_3VM_MODE:-false}" != "true" ]; then
+        skip "Test requires 3-VM transit topology (set EBPF_3VM_MODE=true)"
+    fi
+}
+
+# ── 2-VM / 3-VM mode override ─────────────────────────────────────────
+# vm_helpers.bash carries both the 2-VM cross-network overrides and the
+# 3-VM transit-topology helpers. Source it whenever either mode is active
+# so the override functions (netns, agent lifecycle, packet generation,
+# backend SSH, route_via_agent) are available.
+if [ "${EBPF_2VM_MODE:-false}" = "true" ] || [ "${EBPF_3VM_MODE:-false}" = "true" ]; then
     source "${EBPF_HELPERS_DIR}/vm_helpers.bash"
 fi

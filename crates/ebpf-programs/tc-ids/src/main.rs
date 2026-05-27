@@ -15,29 +15,25 @@ use aya_ebpf::{
 use aya_ebpf_bindings::helpers::{bpf_clone_redirect, bpf_get_socket_cookie, bpf_skb_load_bytes};
 #[cfg(debug_assertions)]
 use aya_log_ebpf::info;
-use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
-    PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
-};
-use core::ffi::c_void;
-use ebpf_helpers::arena_map::{RawMapDef, arena_def};
-use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, SkbDynptr, kill_flow_via_skb_ct, skb_get_fou_encap};
-use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
-use ebpf_helpers::{emit_packet_event, increment_metric, ringbuf_has_backpressure};
-use ebpf_common::arena::{
-    ArenaEventHeader, IDS_ARENA_FIXED_VA, IDS_ARENA_PAGES, IDS_SLOT_COUNT, IDS_WRITE_SEQ_OFFSET,
-    ids_slot_offset,
-};
 use ebpf_common::{
     event::{
-        PacketEvent, EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, FLAG_VLAN,
-        MAX_L7_PAYLOAD, MAX_L7_PORTS, SMALL_L7_PAYLOAD,
+        EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, FLAG_VLAN, MAX_L7_PAYLOAD, MAX_L7_PORTS,
+        PacketEvent, SMALL_L7_PAYLOAD,
     },
     ids::{
-        IdsSamplingConfig, IdsPatternKey, IdsPatternValue, IDS_ACTION_DROP, IDS_SAMPLING_RANDOM,
+        IDS_ACTION_DROP, IDS_SAMPLING_RANDOM, IdsPatternKey, IdsPatternValue, IdsSamplingConfig,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
+use ebpf_helpers::kfuncs::{
+    BpfCtOpts, CtTuple, kill_flow_via_skb_ct, skb_get_fou_encap, skb_l7_probe,
+};
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
+    VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
+};
+use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::{emit_packet_event, increment_metric, opaque_usize, ringbuf_has_backpressure};
 use network_types::{
     eth::EthHdr,
     ip::{IpProto, Ipv4Hdr},
@@ -76,8 +72,7 @@ use network_types::{
 
 /// IDS pattern lookup: port+protocol → action + rule metadata.
 #[map]
-static IDS_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue> =
-    HashMap::with_max_entries(10240, 0);
+static IDS_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue> = HashMap::with_max_entries(10240, 0);
 
 /// Per-CPU packet counters. Index: 0=matched, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen, 5=cgroup_tenant_resolved.
 #[map]
@@ -137,26 +132,6 @@ static TENANT_CGROUP_MAP: HashMap<u64, u32> = HashMap::with_max_entries(4096, 0)
 /// message brokers, caches, and custom services concurrently.
 #[map]
 static L7_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(MAX_L7_PORTS, 0);
-
-/// Arena map for zero-copy L7 event delivery to userspace.
-/// Sized by `IDS_ARENA_PAGES` (32 pages = 128 KiB) — enough for
-/// ~58 `L7EventBuf` slots. The BPF program allocates those pages
-/// once at `IDS_ARENA_FIXED_VA` so userspace's
-/// `mmap(MAP_FIXED_NOREPLACE)` at the same address shares the same
-/// pointer space and reads slot contents zero-copy.
-#[unsafe(link_section = ".maps")]
-#[unsafe(no_mangle)]
-static IDS_ARENA: RawMapDef = arena_def(IDS_ARENA_PAGES);
-
-/// Cached arena base pointer, set on first successful allocation.
-/// Stored as `u64` because BPF lacks `AtomicPtr` and the sentinel
-/// value 0 marks "not allocated yet".
-static mut ARENA_BASE: u64 = 0;
-
-/// Monotonically increasing sequence counter for arena events.
-/// BPF atomics not available — use a simple u64 (single-writer safe
-/// in TC classifier context since invocations are per-CPU serialized).
-static mut ARENA_SEQUENCE: u64 = 0;
 
 /// Small L7 event buffer: `PacketEvent` header + `SMALL_L7_PAYLOAD` bytes
 /// of payload (512 B). Used when TCP payload ≤ 512 bytes — saves ~75%
@@ -362,12 +337,7 @@ fn try_tc_ids(ctx: &TcContext) -> Result<i32, ()> {
 
 /// IPv4 IDS processing path.
 #[inline(always)]
-fn process_ids_v4(
-    ctx: &TcContext,
-    l3_offset: usize,
-    vlan_id: u16,
-    flags: u8,
-) -> Result<i32, ()> {
+fn process_ids_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) -> Result<i32, ()> {
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });
     let dst_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).dst_addr });
@@ -412,30 +382,36 @@ fn process_ids_v4(
             // (via skb_header_pointer), so linearization via
             // bpf_skb_pull_data is unnecessary and wastes ~1µs on
             // large packets. Removed in favour of direct load.
-            emit_l7_event(ctx, &src_addr, &dst_addr, src_port, dst_port, flags, vlan_id, l7_offset);
+            emit_l7_event(
+                ctx, &src_addr, &dst_addr, src_port, dst_port, flags, vlan_id, l7_offset,
+            );
         }
     }
 
     // IDS pattern matching (key is port+protocol, no IP in key)
-    process_ids_pattern(ctx, &src_addr, &dst_addr, src_port, dst_port, protocol as u8, flags, vlan_id)
+    process_ids_pattern(
+        ctx,
+        &src_addr,
+        &dst_addr,
+        src_port,
+        dst_port,
+        protocol as u8,
+        flags,
+        vlan_id,
+    )
 }
 
 /// IPv6 IDS processing path.
 #[inline(always)]
-fn process_ids_v6(
-    ctx: &TcContext,
-    l3_offset: usize,
-    vlan_id: u16,
-    flags: u8,
-) -> Result<i32, ()> {
+fn process_ids_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) -> Result<i32, ()> {
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
     let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
 
     // Skip IPv6 extension headers to find the actual L4 protocol.
-    let (next_hdr, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr)
-        .ok_or(())?;
+    let (next_hdr, l4_offset) =
+        skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr).ok_or(())?;
 
     // Parse L4 ports. For TCP, keep a reference to the header so we can
     // reuse it for doff() in the L7 path (avoids a duplicate ptr_at).
@@ -465,12 +441,16 @@ fn process_ids_v6(
             let l7_offset = l4_offset + tcp_data_off;
             // bpf_skb_load_bytes handles fragments natively — no
             // linearization needed (see IPv4 path comment).
-            emit_l7_event(ctx, &src_addr, &dst_addr, src_port, dst_port, flags, vlan_id, l7_offset);
+            emit_l7_event(
+                ctx, &src_addr, &dst_addr, src_port, dst_port, flags, vlan_id, l7_offset,
+            );
         }
     }
 
     // IDS pattern matching (key is port+protocol, same map for v4/v6)
-    process_ids_pattern(ctx, &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id)
+    process_ids_pattern(
+        ctx, &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
+    )
 }
 
 /// IDS pattern lookup and action (shared by v4/v6 — key is port+protocol only).
@@ -545,7 +525,10 @@ fn process_ids_pattern(
 
     if pattern.action == IDS_ACTION_DROP {
         #[cfg(debug_assertions)]
-        info!(_ctx, "IDS DROP {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port);
+        info!(
+            _ctx,
+            "IDS DROP {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port
+        );
 
         // Mark the kernel netfilter conntrack entry as DYING so the
         // next packet of this flow is dropped by netfilter without a
@@ -569,7 +552,10 @@ fn process_ids_pattern(
         Ok(TC_ACT_SHOT)
     } else {
         #[cfg(debug_assertions)]
-        info!(_ctx, "IDS ALERT {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port);
+        info!(
+            _ctx,
+            "IDS ALERT {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port
+        );
         Ok(TC_ACT_OK)
     }
 }
@@ -617,35 +603,41 @@ fn emit_l7_event(
     // overlay-aware IDS rules in cloud environments.
     let _fou_encap = unsafe { skb_get_fou_encap(ctx.skb.skb as *mut _) };
 
-    // Use SkbDynptr to get the full packet size and read the first
-    // 4 bytes of the L7 payload via adjust + read. This validates
-    // the dynptr adjust/read path in TC context and provides a
-    // protocol magic number for pre-classification (e.g. 0x16030x
-    // for TLS, "HTTP" for HTTP/1.x, 0x505249 for HTTP/2 preface).
-    let (pkt_len, _l7_magic) = unsafe { SkbDynptr::from_skb(ctx.skb.skb as *mut _) }
-        .map(|mut dp| {
-            let total = dp.size() as usize;
-            // Clone the dynptr before adjusting so a second cursor
-            // can independently scan headers while the primary cursor
-            // reads the body (dual-cursor for HTTP pipelining etc.).
-            let _header_cursor = dp.clone_dynptr();
-            let magic: u32 = if l7_offset < total {
-                dp.adjust(l7_offset as u32, dp.size());
-                unsafe { dp.read::<u32>(0) }.unwrap_or(0)
-            } else {
-                0
-            };
-            (total, magic)
-        })
+    // Probe the dynptr for the full packet size and the first 4 bytes
+    // of the L7 payload. This exercises the dynptr from_skb/size/
+    // adjust/slice path in TC context and provides a protocol magic
+    // number for pre-classification (e.g. 0x16030x for TLS, "HTTP" for
+    // HTTP/1.x, 0x505249 for HTTP/2 preface). Falls back to `ctx.len()`
+    // if the dynptr cannot be created (should not happen on 6.9+).
+    let (pkt_len, _l7_magic) = unsafe { skb_l7_probe(ctx.skb.skb as *mut _, l7_offset as u32) }
+        .map(|(total, magic)| (total as usize, magic))
         .unwrap_or((ctx.len() as usize, 0));
     let payload_avail = pkt_len.saturating_sub(l7_offset);
 
     if payload_avail <= SMALL_L7_PAYLOAD {
-        // Small tier: reserve 192 bytes instead of 576
-        emit_l7_small(ctx, src_addr, dst_addr, src_port, dst_port, flags, vlan_id, l7_offset);
+        emit_l7_small(
+            ctx,
+            src_addr,
+            dst_addr,
+            src_port,
+            dst_port,
+            flags,
+            vlan_id,
+            l7_offset,
+            payload_avail,
+        );
     } else {
-        // Full tier: reserve 576 bytes
-        emit_l7_full(ctx, src_addr, dst_addr, src_port, dst_port, flags, vlan_id, l7_offset);
+        emit_l7_full(
+            ctx,
+            src_addr,
+            dst_addr,
+            src_port,
+            dst_port,
+            flags,
+            vlan_id,
+            l7_offset,
+            payload_avail,
+        );
     }
 }
 
@@ -660,21 +652,53 @@ fn emit_l7_small(
     flags: u8,
     vlan_id: u16,
     l7_offset: usize,
+    payload_avail: usize,
 ) {
+    // Bound the copy to what the packet actually carries, capped at the
+    // buffer size. The clamp gives the verifier a known upper bound for
+    // the `bpf_skb_load_bytes` length, and loading the exact available
+    // length avoids the fixed-size load failing on short packets.
+    let to_load = if payload_avail > SMALL_L7_PAYLOAD {
+        SMALL_L7_PAYLOAD
+    } else {
+        payload_avail
+    };
+    // A segment with no L7 payload (e.g. a bare ACK) carries nothing to
+    // inspect, so skip it.
+    if to_load == 0 {
+        return;
+    }
+    // The verifier snapshots a register's range into its spill slot *at spill
+    // time* and never back-propagates a later refinement. The RingBuf reserve
+    // below spills `to_load`, and LLVM places that spill before the `== 0`
+    // guard above — so the reloaded length feeding `bpf_skb_load_bytes` carries
+    // `[0, CAP]` and the helper rejects the zero case ("R4 invalid zero-sized
+    // read"). Route the value through a barrier (so LLVM cannot re-prove it
+    // non-zero and elide the lower clamp) then clamp to `[1, CAP]`: the stored
+    // value now carries the lower bound, which survives the spill/reload.
+    let to_load = opaque_usize(to_load).clamp(1, SMALL_L7_PAYLOAD);
     if let Some(mut entry) = EVENTS.reserve::<L7EventSmall>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
             fill_l7_header(
                 ctx,
                 &mut (*ptr).header,
-                src_addr, dst_addr, src_port, dst_port, flags, vlan_id,
+                src_addr,
+                dst_addr,
+                src_port,
+                dst_port,
+                flags,
+                vlan_id,
             );
-            core::ptr::write_bytes((*ptr).payload.as_mut_ptr(), 0, SMALL_L7_PAYLOAD);
+            // `bpf_skb_load_bytes` marks its destination region initialized
+            // for the verifier, so no separate memset of the payload is
+            // needed — an explicit memset of a RingBuf reservation explodes
+            // verifier state on the byte-by-byte `compiler_builtins` lowering.
             let _ = bpf_skb_load_bytes(
                 ctx.skb.skb as *const _,
                 l7_offset as u32,
                 (*ptr).payload.as_mut_ptr() as *mut _,
-                SMALL_L7_PAYLOAD as u32,
+                to_load as u32,
             );
         }
         entry.submit(0);
@@ -685,9 +709,9 @@ fn emit_l7_small(
 
 /// Full L7 event (2144 bytes): for packets with > 512 bytes TCP payload.
 ///
-/// Tries arena zero-copy path first (direct write to mmap'd page),
-/// falls back to `RingBuf` if `arena_alloc_pages` fails or the arena
-/// was not loaded.
+/// Emitted via `RingBuf`. TC programs are not sleepable, so the
+/// sleepable arena-alloc kfunc is unavailable here; the copy-based
+/// `RingBuf` path is the sole transport.
 #[inline(always)]
 fn emit_l7_full(
     ctx: &TcContext,
@@ -698,133 +722,59 @@ fn emit_l7_full(
     flags: u8,
     vlan_id: u16,
     l7_offset: usize,
+    payload_avail: usize,
 ) {
-    // Try arena path: write header + L7EventBuf directly into mmap'd
-    // arena page. Userspace reads via pointer deref — zero-copy.
-    if try_emit_arena_l7(ctx, src_addr, dst_addr, src_port, dst_port, flags, vlan_id, l7_offset) {
+    // Bound the copy to what the packet actually carries, capped at the
+    // buffer size. The clamp gives the verifier a known upper bound for
+    // the `bpf_skb_load_bytes` length, and loading the exact available
+    // length avoids the fixed-size load failing on packets shorter than
+    // the full buffer.
+    let to_load = if payload_avail > MAX_L7_PAYLOAD {
+        MAX_L7_PAYLOAD
+    } else {
+        payload_avail
+    };
+    // A segment with no L7 payload carries nothing to inspect, so skip it.
+    if to_load == 0 {
         return;
     }
-
-    // Fallback: RingBuf path (copy-based).
+    // The verifier snapshots a register's range into its spill slot *at spill
+    // time* and never back-propagates a later refinement. The RingBuf reserve
+    // below spills `to_load`, and LLVM places that spill before the `== 0`
+    // guard above — so the reloaded length feeding `bpf_skb_load_bytes` carries
+    // `[0, CAP]` and the helper rejects the zero case ("R4 invalid zero-sized
+    // read"). Route the value through a barrier (so LLVM cannot re-prove it
+    // non-zero and elide the lower clamp) then clamp to `[1, CAP]`: the stored
+    // value now carries the lower bound, which survives the spill/reload.
+    let to_load = opaque_usize(to_load).clamp(1, MAX_L7_PAYLOAD);
     if let Some(mut entry) = EVENTS.reserve::<L7EventBuf>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
             fill_l7_header(
                 ctx,
                 &mut (*ptr).header,
-                src_addr, dst_addr, src_port, dst_port, flags, vlan_id,
+                src_addr,
+                dst_addr,
+                src_port,
+                dst_port,
+                flags,
+                vlan_id,
             );
-            core::ptr::write_bytes((*ptr).payload.as_mut_ptr(), 0, MAX_L7_PAYLOAD);
+            // `bpf_skb_load_bytes` marks its destination region initialized
+            // for the verifier, so no separate memset of the payload is
+            // needed — an explicit memset of a RingBuf reservation explodes
+            // verifier state on the byte-by-byte `compiler_builtins` lowering.
             let _ = bpf_skb_load_bytes(
                 ctx.skb.skb as *const _,
                 l7_offset as u32,
                 (*ptr).payload.as_mut_ptr() as *mut _,
-                MAX_L7_PAYLOAD as u32,
+                to_load as u32,
             );
         }
         entry.submit(0);
     } else {
         increment_metric(METRIC_EVENTS_DROPPED);
     }
-}
-
-/// Attempt to write an L7 event into the arena ring. Returns `true`
-/// on success, `false` if arena allocation fails (falls back to
-/// `RingBuf`).
-///
-/// Layout: arena pages are allocated once at `IDS_ARENA_FIXED_VA` so
-/// the userspace mmap shares the same address space. Each event
-/// writes the slot body first, then publishes the new sequence to
-/// the ring header so userspace observes a complete record.
-#[inline(always)]
-fn try_emit_arena_l7(
-    ctx: &TcContext,
-    src_addr: &[u32; 4],
-    dst_addr: &[u32; 4],
-    src_port: u16,
-    dst_port: u16,
-    flags: u8,
-    vlan_id: u16,
-    l7_offset: usize,
-) -> bool {
-    use ebpf_helpers::kfuncs::arena_alloc_pages_at;
-
-    let arena_ptr = &raw const IDS_ARENA as *mut c_void;
-
-    // Lazy init: anchor the arena at IDS_ARENA_FIXED_VA on first call.
-    let base = unsafe {
-        let cached = core::ptr::read_volatile(&raw const ARENA_BASE);
-        if cached != 0 {
-            cached as *mut u8
-        } else {
-            let allocated = arena_alloc_pages_at(
-                arena_ptr,
-                IDS_ARENA_FIXED_VA as *mut c_void,
-                IDS_ARENA_PAGES,
-            );
-            match allocated {
-                Some(ptr) => {
-                    core::ptr::write_volatile(&raw mut ARENA_BASE, ptr as u64);
-                    ptr as *mut u8
-                }
-                None => {
-                    let now = core::ptr::read_volatile(&raw const ARENA_BASE);
-                    if now != 0 {
-                        now as *mut u8
-                    } else {
-                        return false;
-                    }
-                }
-            }
-        }
-    };
-
-    let seq = unsafe {
-        ARENA_SEQUENCE += 1;
-        ARENA_SEQUENCE
-    };
-    let slot_idx = ((seq - 1) as usize) % IDS_SLOT_COUNT;
-    let slot_offset = ids_slot_offset(slot_idx);
-    let slot_ptr = unsafe { base.add(slot_offset) };
-
-    // Slot body: PacketEvent header + full L7 payload.
-    let event_ptr = unsafe { slot_ptr.add(core::mem::size_of::<ArenaEventHeader>()) }
-        as *mut L7EventBuf;
-    unsafe {
-        fill_l7_header(
-            ctx,
-            &mut (*event_ptr).header,
-            src_addr, dst_addr, src_port, dst_port, flags, vlan_id,
-        );
-        core::ptr::write_bytes((*event_ptr).payload.as_mut_ptr(), 0, MAX_L7_PAYLOAD);
-        let _ = bpf_skb_load_bytes(
-            ctx.skb.skb as *const _,
-            l7_offset as u32,
-            (*event_ptr).payload.as_mut_ptr() as *mut _,
-            MAX_L7_PAYLOAD as u32,
-        );
-    }
-
-    // Slot header written *after* the body so userspace can detect
-    // torn slots by comparing `slot.sequence` to the expected value.
-    let header = ArenaEventHeader {
-        sequence: seq,
-        timestamp_ns: unsafe { bpf_ktime_get_boot_ns() },
-        payload_len: core::mem::size_of::<L7EventBuf>() as u32,
-        event_type: EVENT_TYPE_L7,
-        _pad: [0; 3],
-    };
-    unsafe {
-        core::ptr::write_volatile(slot_ptr.cast::<ArenaEventHeader>(), header);
-    }
-
-    // Publish: bump the global write_seq so userspace knows a new
-    // slot is ready.
-    unsafe {
-        core::ptr::write_volatile(base.add(IDS_WRITE_SEQ_OFFSET).cast::<u64>(), seq);
-    }
-
-    true
 }
 
 /// Fill the L7 event header fields (shared by both tiers).

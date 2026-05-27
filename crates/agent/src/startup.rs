@@ -12,7 +12,7 @@ use adapters::auth::oidc_provider::{self, OidcAuthProvider};
 use adapters::ebpf::{
     ConfigFlagsManager, ConnTrackMapManager, DlpEventReader, DnsEventReader, EbpfLoader,
     EbpfMapWriteAdapter, EventReader, FirewallMapManager, IdsMapManager, InterfaceGroupsManager,
-    IpSetMapManager, L7PortsManager, LpmCoordinator, MetricsReader, NatMapManager,
+    IpSetMapManager, L7PortsManager, LpmCoordinator, MetricsReader, NatMapManager, QosMapManager,
     RateLimitLpmManager, RateLimitMapManager, ScrubConfigManager, SyncookieSecretManager,
     ThreatIntelMapManager,
 };
@@ -990,18 +990,7 @@ pub async fn run(
         cancel_token.clone(),
     );
 
-    // ── 6b. Create userspace-only metrics arena ─────────────────────
-    // Arena maps provide mmap'd shared memory. The DLP arena writer
-    // is wired below via try_load_uprobe_dlp -> mmap_dlp_arena, which
-    // adopts the BPF-loaded fd so kernel writes are visible at the
-    // same VA. The metrics arena here is a userspace-only scratch
-    // bus reserved for future agent-side counters.
-    let arena_metrics = adapters::ebpf::arena::ArenaMap::create(1, "metrics_arena").ok();
-    if arena_metrics.is_some() {
-        info!("arena metrics bus created (1 page, 512 counters via mmap)");
-    }
-
-    // ── 6c. Spawn conntrack event poller ─────────────────────────────
+    // ── 6b. Spawn conntrack event poller ─────────────────────────────
     if let Some(ref tx) = conntrack_event_tx {
         let nf_port = adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new();
         let poller_tx = tx.clone();
@@ -1198,6 +1187,7 @@ pub async fn run(
     let (mut fw_ok, mut rl_ok, mut lb_pre_loaded) = (false, false, false);
     let (mut ids_ok, mut ti_ok, mut dns_ok, mut dlp_ok) = (false, false, false, false);
     let (mut ct_ok, mut nat_ok, mut scrub_ok, mut lb_ok) = (false, false, false, false);
+    let mut qos_ok = false;
     let mut vip_announcer_ok = false;
     let mut fw_loader: Option<EbpfLoader> = None;
 
@@ -1279,10 +1269,9 @@ pub async fn run(
                     }
                     // Wire tail-call: firewall → ratelimit (if both loaded).
                     if let Some(ref mut fw) = fw_loader {
-                        match rl_loader.xdp_program_fd("xdp_ratelimit") {
+                        match rl_loader.program_raw_fd("xdp_ratelimit") {
                             Ok(rl_fd) => {
-                                if let Err(e) = fw.set_tail_call_target("XDP_PROG_ARRAY", 0, &rl_fd)
-                                {
+                                if let Err(e) = fw.set_tail_call_raw("XDP_PROG_ARRAY", 0, rl_fd) {
                                     warn!("tail-call wiring failed (non-fatal): {e}");
                                 } else {
                                     info!("XDP tail-call: firewall → ratelimit wired");
@@ -1323,10 +1312,10 @@ pub async fn run(
                                     metrics_readers.push(rdr);
                                 }
                                 if let Ok(lb_fd) =
-                                    lb_loader_early.xdp_program_fd("xdp_loadbalancer")
+                                    lb_loader_early.program_raw_fd("xdp_loadbalancer")
                                 {
                                     if let Err(e) =
-                                        rl_loader.set_tail_call_target("RL_PROG_ARRAY", 1, &lb_fd)
+                                        rl_loader.set_tail_call_raw("RL_PROG_ARRAY", 1, lb_fd)
                                     {
                                         warn!("ratelimit → LB tail-call wiring failed: {e}");
                                     } else {
@@ -1338,9 +1327,9 @@ pub async fn run(
                                 // Also wire into firewall (slot 2) for the no-ratelimit fallback path.
                                 if let Some(ref mut fw) = fw_loader
                                     && let Ok(lb_fd) =
-                                        lb_loader_early.xdp_program_fd("xdp_loadbalancer")
+                                        lb_loader_early.program_raw_fd("xdp_loadbalancer")
                                 {
-                                    let _ = fw.set_tail_call_target("XDP_PROG_ARRAY", 2, &lb_fd);
+                                    let _ = fw.set_tail_call_raw("XDP_PROG_ARRAY", 2, lb_fd);
                                 }
                                 ebpf_state.add_loader(lb_loader_early);
                                 metrics.set_ebpf_program_status("xdp_loadbalancer", true);
@@ -1455,8 +1444,8 @@ pub async fn run(
                     if let Some(rdr) = lb_metrics_rdr {
                         metrics_readers.push(rdr);
                     }
-                    if let Ok(lb_fd) = lb_loader.xdp_program_fd("xdp_loadbalancer") {
-                        if let Err(e) = fw.set_tail_call_target("XDP_PROG_ARRAY", 2, &lb_fd) {
+                    if let Ok(lb_fd) = lb_loader.program_raw_fd("xdp_loadbalancer") {
+                        if let Err(e) = fw.set_tail_call_raw("XDP_PROG_ARRAY", 2, lb_fd) {
                             warn!("firewall → LB tail-call wiring failed: {e}");
                         } else {
                             info!("XDP tail-call: firewall → loadbalancer wired (FW slot 2)");
@@ -1483,8 +1472,8 @@ pub async fn run(
         {
             match try_load_xdp_vip_announcer(&ebpf_dir) {
                 Ok((vip_loader, vip_mgr, binding_mgr)) => {
-                    if let Ok(vip_fd) = vip_loader.xdp_program_fd("xdp_vip_announcer") {
-                        if let Err(e) = fw.set_tail_call_target("XDP_PROG_ARRAY", 3, &vip_fd) {
+                    if let Ok(vip_fd) = vip_loader.program_raw_fd("xdp_vip_announcer") {
+                        if let Err(e) = fw.set_tail_call_raw("XDP_PROG_ARRAY", 3, vip_fd) {
                             warn!("firewall → VIP announcer tail-call wiring failed: {e}");
                         } else {
                             info!("XDP tail-call: firewall → vip-announcer wired (FW slot 3)");
@@ -1540,29 +1529,11 @@ pub async fn run(
         // 10c. TC IDS
         ids_ok = if config.ids.enabled {
             match try_load_tc_ids(&ebpf_dir, &config) {
-                Ok((
-                    mut loader,
-                    ids_mgr_opt,
-                    l7_mgr_opt,
-                    cfg_mgr_opt,
-                    ids_rdr,
-                    reader,
-                    arena_reader,
-                )) => {
+                Ok((mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr, reader)) => {
                     let event_tx_clone = event_tx.clone();
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, CancellationToken::new()).await;
                     });
-                    if let Some(arena) = arena_reader {
-                        let arena_tx = event_tx.clone();
-                        let arena_cancel = cancel_token.clone();
-                        tokio::spawn(async move {
-                            arena
-                                .run(arena_tx, std::time::Duration::from_millis(50), arena_cancel)
-                                .await;
-                        });
-                        info!("IDS arena reader started (50ms poll)");
-                    }
                     if let Some(ids_mgr) = ids_mgr_opt {
                         {
                             let mut svc = (**ids_svc.load()).clone();
@@ -1649,21 +1620,11 @@ pub async fn run(
         // 10e. TC DNS
         dns_ok = if config.dns.enabled {
             match try_load_tc_dns(&ebpf_dir, &config) {
-                Ok((loader, dns_rdr, reader, arena_reader)) => {
+                Ok((loader, dns_rdr, reader)) => {
                     let event_tx_clone = event_tx.clone();
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, CancellationToken::new()).await;
                     });
-                    if let Some(arena) = arena_reader {
-                        let arena_tx = event_tx.clone();
-                        let arena_cancel = cancel_token.clone();
-                        tokio::spawn(async move {
-                            arena
-                                .run(arena_tx, std::time::Duration::from_millis(50), arena_cancel)
-                                .await;
-                        });
-                        info!("DNS arena reader started (50ms poll)");
-                    }
                     if let Some(rdr) = dns_rdr {
                         metrics_readers.push(rdr);
                     }
@@ -1686,21 +1647,11 @@ pub async fn run(
         // 10f. Uprobe DLP
         dlp_ok = if config.dlp.enabled {
             match try_load_uprobe_dlp(&ebpf_dir, &config) {
-                Ok((loader, dlp_rdr, reader, arena_reader)) => {
+                Ok((loader, dlp_rdr, reader)) => {
                     let event_tx_clone = event_tx.clone();
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, CancellationToken::new()).await;
                     });
-                    if let Some(arena) = arena_reader {
-                        let arena_tx = event_tx.clone();
-                        let arena_cancel = cancel_token.clone();
-                        tokio::spawn(async move {
-                            arena
-                                .run(arena_tx, std::time::Duration::from_millis(50), arena_cancel)
-                                .await;
-                        });
-                        info!("DLP arena reader started (50ms poll)");
-                    }
                     if let Some(rdr) = dlp_rdr {
                         metrics_readers.push(rdr);
                     }
@@ -1824,6 +1775,54 @@ pub async fn run(
             false
         };
 
+        // 10j. TC QoS
+        qos_ok = if config.qos.enabled {
+            match try_load_tc_qos(&ebpf_dir, &config) {
+                Ok((mut loader, qos_mgr, qos_rdr, opt_reader)) => {
+                    if let Some(reader) = opt_reader {
+                        let event_tx_clone = event_tx.clone();
+                        tokio::spawn(async move {
+                            reader.run(event_tx_clone, CancellationToken::new()).await;
+                        });
+                    }
+                    {
+                        let mut svc = qos_svc.write().await;
+                        if let Ok(scheduler) = config.qos_scheduler() {
+                            svc.set_scheduler(scheduler);
+                        }
+                        // Bind the eBPF maps, then resync config so the just-wired
+                        // maps reflect the pipes/queues/classifiers from config.
+                        svc.set_map_port(Box::new(qos_mgr));
+                        if let Ok(pipes) = config.qos_pipes() {
+                            let _ = svc.reload_pipes(pipes);
+                        }
+                        if let Ok(queues) = config.qos_queues() {
+                            let _ = svc.reload_queues(queues);
+                        }
+                        if let Ok(classifiers) = config.qos_classifiers() {
+                            let _ = svc.reload_classifiers(classifiers);
+                        }
+                    }
+                    if let Some(rdr) = qos_rdr {
+                        metrics_readers.push(rdr);
+                    }
+                    iface_groups_mgr.add_map(loader.ebpf_mut());
+                    ebpf_state.add_loader(loader);
+                    metrics.set_ebpf_program_status("tc_qos", true);
+                    info!("eBPF tc-qos active");
+                    true
+                }
+                Err(e) => {
+                    warn!("tc-qos load failed (degraded mode): {e}");
+                    metrics.set_ebpf_program_status("tc_qos", false);
+                    false
+                }
+            }
+        } else {
+            metrics.set_ebpf_program_status("tc_qos", false);
+            false
+        };
+
         // 10k. XDP Load Balancer
         // The LB can run standalone (attached to interface) or as a tail-call
         // target in the chain: firewall → ratelimit → loadbalancer.
@@ -1903,6 +1902,7 @@ pub async fn run(
         status.insert("tc_nat_ingress".to_string(), nat_ok);
         status.insert("tc_nat_egress".to_string(), nat_ok);
         status.insert("tc_scrub".to_string(), scrub_ok);
+        status.insert("tc_qos".to_string(), qos_ok);
         status.insert("xdp_loadbalancer".to_string(), lb_ok);
         status.insert("xdp_vip_announcer".to_string(), vip_announcer_ok);
     }
@@ -1917,6 +1917,7 @@ pub async fn run(
             ("tc_nat_ingress", nat_ok),
             ("tc_nat_egress", nat_ok),
             ("tc_scrub", scrub_ok),
+            ("tc_qos", qos_ok),
         ];
 
         let mut registry = adapters::ebpf::netkit::NetkitHotPlugRegistry::new();
@@ -2010,6 +2011,9 @@ pub async fn run(
         }
         if scrub_ok {
             mgr.mark_startup_loaded("tc_scrub");
+        }
+        if qos_ok {
+            mgr.mark_startup_loaded("tc_qos");
         }
         if lb_ok {
             mgr.mark_startup_loaded("xdp_loadbalancer");
@@ -2816,8 +2820,6 @@ fn check_ebpf_privileges() -> anyhow::Result<()> {
 ///
 /// - `BPF_TOKEN_CREATE` + `BPF_F_TOKEN_FD` (6.9) — container-aware
 ///   least-privilege loading
-/// - `BPF_MAP_TYPE_ARENA` + `bpf_arena_alloc_pages` (6.9) — mmap'd
-///   zero-copy maps
 /// - `bpf_task_get_cgroup1` kfunc (6.8) — cgroup1 inode enrichment
 /// - `bpf_xdp_metadata_rx_vlan_tag` / `bpf_xdp_get_xfrm_state` /
 ///   `bpf_iter_css_task` kfuncs (6.7 / 6.8)
@@ -2862,8 +2864,8 @@ fn check_kernel_version_from(path: &std::path::Path) -> anyhow::Result<()> {
     Err(anyhow::anyhow!(
         "kernel {version} is below the mandatory minimum {MIN_KERNEL_MAJOR}.{MIN_KERNEL_MINOR} — \
          eBPFsentinel refuses to start. Required features: BPF token delegation, \
-         BPF_MAP_TYPE_ARENA, cgroup1 kfunc, XDP metadata kfuncs, netfilter conntrack \
-         kfuncs, dynptr helpers. No fallback path exists — upgrade the host kernel \
+         cgroup1 kfunc, XDP metadata kfuncs, netfilter conntrack kfuncs, dynptr \
+         helpers. No fallback path exists — upgrade the host kernel \
          to 6.9+ and restart the agent."
     ))
 }
@@ -2995,8 +2997,11 @@ pub fn try_load_xdp_firewall(
     use infrastructure::config::DefaultPolicy;
 
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-firewall")?;
-    let mut loader =
-        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    let mut loader = EbpfLoader::load_with_pin_path_dev_bound(
+        &program_bytes,
+        adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+        metadata_dev_bound_ifindex(config),
+    )?;
 
     let xdp_flags = adapters::ebpf::xdp_mode_to_flags(config.agent.xdp_mode);
     for iface in &config.agent.interfaces {
@@ -3063,15 +3068,19 @@ pub fn try_load_xdp_firewall_reject(
     fw_loader: &mut EbpfLoader,
 ) -> anyhow::Result<EbpfLoader> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-firewall-reject")?;
-    let mut reject_loader =
-        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    // Raw load so this tail-call target matches the kfunc-raw-loaded
+    // xdp-firewall owner of XDP_PROG_ARRAY (see `load_xdp_raw_with_pin_path`).
+    let mut reject_loader = EbpfLoader::load_xdp_raw_with_pin_path(
+        &program_bytes,
+        adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+    )?;
 
     // Load the XDP program (verifier check) but don't attach to an interface.
     reject_loader.load_xdp_program("xdp_firewall_reject")?;
 
     // Wire into firewall's ProgramArray at slot 1.
-    let reject_fd = reject_loader.xdp_program_fd("xdp_firewall_reject")?;
-    fw_loader.set_tail_call_target("XDP_PROG_ARRAY", 1, &reject_fd)?;
+    let reject_fd = reject_loader.program_raw_fd("xdp_firewall_reject")?;
+    fw_loader.set_tail_call_raw("XDP_PROG_ARRAY", 1, reject_fd)?;
 
     Ok(reject_loader)
 }
@@ -3094,11 +3103,15 @@ pub fn try_load_xdp_ratelimit_syncookie(
     rl_loader: &mut EbpfLoader,
 ) -> anyhow::Result<EbpfLoader> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-ratelimit-syncookie")?;
-    let mut sc_loader =
-        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    // Raw load so this tail-call target matches the kfunc-raw-loaded
+    // xdp-ratelimit owner of RL_PROG_ARRAY (see `load_xdp_raw_with_pin_path`).
+    let mut sc_loader = EbpfLoader::load_xdp_raw_with_pin_path(
+        &program_bytes,
+        adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+    )?;
     sc_loader.load_xdp_program("xdp_ratelimit_syncookie")?;
-    let sc_fd = sc_loader.xdp_program_fd("xdp_ratelimit_syncookie")?;
-    rl_loader.set_tail_call_target("RL_PROG_ARRAY", 0, &sc_fd)?;
+    let sc_fd = sc_loader.program_raw_fd("xdp_ratelimit_syncookie")?;
+    rl_loader.set_tail_call_raw("RL_PROG_ARRAY", 0, sc_fd)?;
     Ok(sc_loader)
 }
 
@@ -3108,8 +3121,11 @@ pub fn try_load_xdp_ratelimit(
     firewall_active: bool,
 ) -> anyhow::Result<XdpRatelimitResult> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-ratelimit")?;
-    let mut loader =
-        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    let mut loader = EbpfLoader::load_with_pin_path_dev_bound(
+        &program_bytes,
+        adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+        metadata_dev_bound_ifindex(config),
+    )?;
 
     if firewall_active {
         // Firewall is active: load the program (verifier check) but do NOT
@@ -3189,7 +3205,7 @@ pub fn try_load_xdp_ratelimit(
     Ok((loader, rl_mgr_opt, rl_lpm_opt, rdrs, reader))
 }
 
-/// IDS program load result: loader, IDS map manager, L7 ports manager, config flags manager, metrics reader, event reader, optional arena reader.
+/// IDS program load result: loader, IDS map manager, L7 ports manager, config flags manager, metrics reader, event reader.
 pub type TcIdsResult = (
     EbpfLoader,
     Option<IdsMapManager>,
@@ -3197,7 +3213,6 @@ pub type TcIdsResult = (
     Option<ConfigFlagsManager>,
     Option<MetricsReader>,
     EventReader,
-    Option<adapters::ebpf::arena_event_reader::IdsArenaReader>,
 );
 
 /// Load the TC IDS program: attach TC ingress, set up maps, create event reader.
@@ -3252,11 +3267,6 @@ pub fn try_load_tc_ids(ebpf_dir: &str, config: &AgentConfig) -> anyhow::Result<T
 
     let reader = EventReader::new(loader.ebpf_mut())?;
 
-    // Adopt the IDS_ARENA map fd loaded by aya, mmap it at the fixed
-    // VA the BPF program will allocate from, and wrap it in an
-    // IdsArenaReader so userspace can drain zero-copy L7 events.
-    let arena_reader = adapters::ebpf::arena_event_reader::mmap_ids_arena(loader.ebpf_mut());
-
     Ok((
         loader,
         ids_mgr_opt,
@@ -3264,7 +3274,6 @@ pub fn try_load_tc_ids(ebpf_dir: &str, config: &AgentConfig) -> anyhow::Result<T
         cfg_mgr_opt,
         ids_metrics_rdr,
         reader,
-        arena_reader,
     ))
 }
 
@@ -3330,12 +3339,7 @@ pub fn try_load_tc_threatintel(
 pub fn try_load_tc_dns(
     ebpf_dir: &str,
     config: &AgentConfig,
-) -> anyhow::Result<(
-    EbpfLoader,
-    Option<MetricsReader>,
-    DnsEventReader,
-    Option<adapters::ebpf::arena_event_reader::DnsArenaReader>,
-)> {
+) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>, DnsEventReader)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-dns")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
@@ -3348,11 +3352,7 @@ pub fn try_load_tc_dns(
 
     let reader = DnsEventReader::new(loader.ebpf_mut())?;
 
-    // Adopt the DNS_ARENA map fd; mmap it at DNS_ARENA_FIXED_VA so
-    // zero-copy DNS event drainage can run alongside the RingBuf.
-    let arena_reader = adapters::ebpf::arena_event_reader::mmap_dns_arena(loader.ebpf_mut());
-
-    Ok((loader, dns_metrics_rdr, reader, arena_reader))
+    Ok((loader, dns_metrics_rdr, reader))
 }
 
 /// Load the uprobe DLP program: attach uprobes to SSL functions, start DLP event reader.
@@ -3368,12 +3368,7 @@ const SSL_LIBRARY_CANDIDATES: &[&str] = &[
 pub fn try_load_uprobe_dlp(
     ebpf_dir: &str,
     _config: &AgentConfig,
-) -> anyhow::Result<(
-    EbpfLoader,
-    Option<MetricsReader>,
-    DlpEventReader,
-    Option<adapters::ebpf::arena_event_reader::DlpArenaReader>,
-)> {
+) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>, DlpEventReader)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "uprobe-dlp")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
@@ -3403,13 +3398,8 @@ pub fn try_load_uprobe_dlp(
 
     let reader = DlpEventReader::new(loader.ebpf_mut())?;
 
-    // Adopt the DLP_ARENA map fd loaded by aya, mmap it at the same
-    // fixed VA the BPF program will allocate from, and wrap it in a
-    // DlpArenaReader so userspace can drain zero-copy events.
-    let arena_reader = adapters::ebpf::arena_event_reader::mmap_dlp_arena(loader.ebpf_mut());
-
     info!(library = %ssl_path, "uprobe-dlp attached");
-    Ok((loader, dlp_metrics_rdr, reader, arena_reader))
+    Ok((loader, dlp_metrics_rdr, reader))
 }
 
 /// Search for a usable SSL/TLS shared library on the system.
@@ -3482,6 +3472,21 @@ pub fn get_ifindex(iface: &str) -> Result<u32, anyhow::Error> {
     s.trim()
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid ifindex for '{iface}': {e}"))
+}
+
+/// Device-bound target ifindex for an XDP program that calls `bpf_xdp_metadata_rx_*`.
+///
+/// A device-bound load binds the program to ONE netdev so those kfuncs resolve
+/// against its `xdp_metadata_ops`. That only fits when exactly one interface is
+/// configured; with multiple (or none) we return `None` so the loader
+/// neutralizes the metadata kfuncs and a single program fd attaches to every
+/// interface. Returns `None` if the lone interface's ifindex can't be read
+/// (the loader then neutralizes too).
+fn metadata_dev_bound_ifindex(config: &AgentConfig) -> Option<u32> {
+    match config.agent.interfaces.as_slice() {
+        [iface] => get_ifindex(iface).ok(),
+        _ => None,
+    }
 }
 
 /// Convert ratelimit algorithm string to the eBPF u8 constant.
@@ -3656,6 +3661,33 @@ pub fn try_load_tc_scrub(
     Ok((loader, scrub_metrics_rdr))
 }
 
+/// Load the TC `QoS` program: attach TC, acquire the `QoS` maps, and create
+/// the metrics + event readers. The caller binds the returned map manager to
+/// the `QoS` service and syncs pipes/queues/classifiers from config.
+pub fn try_load_tc_qos(
+    ebpf_dir: &str,
+    config: &AgentConfig,
+) -> anyhow::Result<(
+    EbpfLoader,
+    QosMapManager,
+    Option<MetricsReader>,
+    Option<EventReader>,
+)> {
+    let program_bytes = read_ebpf_program(ebpf_dir, "tc-qos")?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+
+    for iface in &config.agent.interfaces {
+        attach_tc_auto(&mut loader, "tc_qos", iface, config.agent.attach_mode)?;
+    }
+
+    let qos_mgr = QosMapManager::new(loader.ebpf_mut())?;
+    let qos_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "QOS_METRICS").ok();
+    let opt_reader = EventReader::new(loader.ebpf_mut()).ok();
+
+    Ok((loader, qos_mgr, qos_metrics_rdr, opt_reader))
+}
+
 /// Build `ScrubFlags` from the agent config's scrub section.
 pub fn build_scrub_flags(config: &AgentConfig) -> ebpf_common::scrub::ScrubFlags {
     let scrub = &config.firewall.scrub;
@@ -3721,8 +3753,19 @@ pub fn try_load_xdp_loadbalancer(
     EventReader,
 )> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-loadbalancer")?;
-    let mut loader =
-        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    // Device-bound only in standalone mode: a tail-call target must match its
+    // caller's dev-bound state, and the non-kfunc reject/syncookie targets in
+    // the XDP chain cannot be device-bound, so the chained form is neutralized.
+    let dev_bound = if xdp_chain_active {
+        None
+    } else {
+        metadata_dev_bound_ifindex(config)
+    };
+    let mut loader = EbpfLoader::load_with_pin_path_dev_bound(
+        &program_bytes,
+        adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+        dev_bound,
+    )?;
 
     if xdp_chain_active {
         // Another XDP program owns the interface — load only (tail-call target).
@@ -3764,8 +3807,12 @@ pub fn try_load_xdp_vip_announcer(
     adapters::ebpf::SelfBindingManager,
 )> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-vip-announcer")?;
-    let mut loader =
-        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    // Raw load so this tail-call target matches the kfunc-raw-loaded
+    // xdp-firewall owner of XDP_PROG_ARRAY (see `load_xdp_raw_with_pin_path`).
+    let mut loader = EbpfLoader::load_xdp_raw_with_pin_path(
+        &program_bytes,
+        adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+    )?;
     loader.load_xdp_program("xdp_vip_announcer")?;
     info!("xdp-vip-announcer loaded as tail-call target (firewall ARP path)");
     let vip_mgr = adapters::ebpf::VipMapManager::new(loader.ebpf_mut())?;

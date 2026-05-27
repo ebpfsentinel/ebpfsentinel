@@ -21,6 +21,65 @@ const EBPF_PROGRAMS: &[&str] = &[
     "uprobe-dlp",
 ];
 
+// Kernel kfuncs called by the eBPF programs. These resolve to undefined
+// `extern "C"` symbols in the object; bpf-linker would otherwise internalize
+// them (`declare internal fastcc`), which strips every argument off the call
+// and produces a verifier rejection (`arg#0 expected pointer to ctx, but got
+// scalar`). Passing each kfunc to `--export` keeps the symbol external so the
+// argument-register ABI is preserved; the userspace loader then resolves each
+// symbol against kernel/module BTF at load time. Exporting a symbol a given
+// program does not reference is a harmless no-op, so a single union list is
+// applied to every program.
+const KFUNC_EXPORTS: &[&str] = &[
+    "bpf_ct_change_status",
+    "bpf_ct_change_timeout",
+    "bpf_ct_insert_entry",
+    "bpf_ct_release",
+    "bpf_ct_set_nat_info",
+    "bpf_ct_set_status",
+    "bpf_ct_set_timeout",
+    "bpf_dynptr_adjust",
+    "bpf_dynptr_clone",
+    "bpf_dynptr_from_skb",
+    "bpf_dynptr_from_xdp",
+    "bpf_dynptr_is_null",
+    "bpf_dynptr_size",
+    "bpf_dynptr_slice",
+    "bpf_dynptr_slice_rdwr",
+    "bpf_skb_ct_alloc",
+    "bpf_skb_ct_lookup",
+    "bpf_skb_get_fou_encap",
+    "bpf_skb_get_xfrm_info",
+    "bpf_skb_set_fou_encap",
+    "bpf_skb_set_xfrm_info",
+    "bpf_xdp_ct_alloc",
+    "bpf_xdp_ct_lookup",
+    "bpf_xdp_get_xfrm_state",
+    "bpf_xdp_metadata_rx_hash",
+    "bpf_xdp_metadata_rx_timestamp",
+    "bpf_xdp_metadata_rx_vlan_tag",
+    "bpf_xdp_xfrm_state_release",
+];
+
+/// Build the `CARGO_ENCODED_RUSTFLAGS` value: base flags plus a
+/// `--export <kfunc>` link-arg pair for each kfunc. Components are separated
+/// by the ASCII unit separator (`\x1f`) as cargo expects.
+fn encoded_rustflags() -> String {
+    let mut parts: Vec<String> = vec![
+        "-C".into(),
+        "debuginfo=2".into(),
+        "-C".into(),
+        "link-arg=--btf".into(),
+    ];
+    for kfunc in KFUNC_EXPORTS {
+        parts.push("-C".into());
+        parts.push("link-arg=--export".into());
+        parts.push("-C".into());
+        parts.push(format!("link-arg={kfunc}"));
+    }
+    parts.join("\x1f")
+}
+
 pub fn build_all() -> Result<()> {
     let workspace_root = std::env::var("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
@@ -56,10 +115,7 @@ pub fn build_all() -> Result<()> {
             .arg("build-std=core")
             .arg("--target")
             .arg("bpfel-unknown-none")
-            .env(
-                "CARGO_ENCODED_RUSTFLAGS",
-                "-C\x1fdebuginfo=2\x1f-C\x1flink-arg=--btf",
-            )
+            .env("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags())
             .current_dir(&program_dir)
             .status()
             .with_context(|| format!("failed to run cargo for {program}"))?;

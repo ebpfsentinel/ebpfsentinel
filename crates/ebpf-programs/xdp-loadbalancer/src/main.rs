@@ -28,7 +28,8 @@ use ebpf_helpers::net::{
 };
 use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
 use ebpf_helpers::{
-    add_metric, copy_16b_asm, copy_mac_asm, increment_metric, ringbuf_has_backpressure,
+    add_metric, copy_16b_asm, copy_mac_asm, increment_metric, opaque_usize,
+    ringbuf_has_backpressure,
 };
 use network_types::{
     eth::EthHdr,
@@ -107,14 +108,20 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
 #[xdp]
 pub fn xdp_loadbalancer(ctx: XdpContext) -> u32 {
     increment_metric(LB_METRIC_TOTAL_SEEN);
-    match try_xdp_loadbalancer(&ctx) {
+    // Capture the trusted XDP context pointer by value in the entry frame so
+    // the `KF_TRUSTED_ARGS` kfuncs (conntrack lookup, RX-metadata) keep their
+    // trusted arg#0 across outlined bpf-to-bpf calls. Reloading it from a
+    // `&XdpContext` in a subprogram drops the trusted flag and the verifier
+    // rejects the call with "arg#0 ... got scalar".
+    let ctx_raw: *mut core::ffi::c_void = ctx.ctx.cast();
+    match try_xdp_loadbalancer(&ctx, ctx_raw) {
         Ok(action) => action,
         Err(()) => xdp_action::XDP_PASS,
     }
 }
 
 #[inline(always)]
-fn try_xdp_loadbalancer(ctx: &XdpContext) -> Result<u32, ()> {
+fn try_xdp_loadbalancer(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void) -> Result<u32, ()> {
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
     let mut l3_offset = EthHdr::LEN;
@@ -137,8 +144,8 @@ fn try_xdp_loadbalancer(ctx: &XdpContext) -> Result<u32, ()> {
     }
 
     match ether_type {
-        ETH_P_IP => process_v4(ctx, l3_offset, vlan_id),
-        ETH_P_IPV6 => process_v6(ctx, l3_offset, vlan_id),
+        ETH_P_IP => process_v4(ctx, ctx_raw, l3_offset, vlan_id),
+        ETH_P_IPV6 => process_v6(ctx, ctx_raw, l3_offset, vlan_id),
         _ => Ok(xdp_action::XDP_PASS),
     }
 }
@@ -146,7 +153,12 @@ fn try_xdp_loadbalancer(ctx: &XdpContext) -> Result<u32, ()> {
 // ── IPv4 Processing ─────────────────────────────────────────────────
 
 #[inline(always)]
-fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, ()> {
+fn process_v4(
+    ctx: &XdpContext,
+    ctx_raw: *mut core::ffi::c_void,
+    l3_offset: usize,
+    vlan_id: u16,
+) -> Result<u32, ()> {
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let proto = unsafe { (*ipv4hdr).proto };
     let protocol = proto as u8;
@@ -190,17 +202,16 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
         BpfCtOpts::udp()
     };
     let _ct_exists =
-        unsafe { with_xdp_ct_lookup(ctx.ctx as *mut _, tuple, &mut ct_opts, |_ct| true) }
-            .unwrap_or(false);
+        unsafe { with_xdp_ct_lookup(ctx_raw, tuple, &mut ct_opts, |_ct| true) }.unwrap_or(false);
 
     // Select backend using per-service round-robin index
     let svc_idx = service_key_index(&key);
-    let (backend_id, backend) = match select_backend(ctx, svc_config, src_ip, svc_idx) {
+    let (backend_id, backend) = match select_backend(ctx_raw, svc_config, src_ip, svc_idx) {
         Some(b) => b,
         None => {
             increment_metric(LB_METRIC_PACKETS_NO_BACKEND);
             emit_event(
-                ctx,
+                ctx_raw,
                 &src_addr,
                 &dst_addr,
                 src_port,
@@ -221,8 +232,8 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     // resolved, fall through to the DNAT path unchanged (no regression).
     if svc_config.mode == LB_MODE_L2DSR {
         if let Some(action) = try_dsr_forward(
-            ctx, backend_id, &src_addr, &dst_addr, src_port, dst_port, protocol, 0, vlan_id,
-            pkt_len,
+            ctx, ctx_raw, backend_id, &src_addr, &dst_addr, src_port, dst_port, protocol, 0,
+            vlan_id, pkt_len,
         ) {
             return Ok(action);
         }
@@ -266,7 +277,7 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
 
     emit_event(
-        ctx,
+        ctx_raw,
         &src_addr,
         &dst_addr,
         src_port,
@@ -309,7 +320,12 @@ fn process_v4(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
 // ── IPv6 Processing ─────────────────────────────────────────────────
 
 #[inline(always)]
-fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, ()> {
+fn process_v6(
+    ctx: &XdpContext,
+    ctx_raw: *mut core::ffi::c_void,
+    l3_offset: usize,
+    vlan_id: u16,
+) -> Result<u32, ()> {
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
 
@@ -343,12 +359,12 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     let pkt_len = ctx.data_end().saturating_sub(ctx.data()) as u64;
 
     let svc_idx = service_key_index(&key);
-    let (backend_id, backend) = match select_backend(ctx, svc_config, src_ip_folded, svc_idx) {
+    let (backend_id, backend) = match select_backend(ctx_raw, svc_config, src_ip_folded, svc_idx) {
         Some(b) => b,
         None => {
             increment_metric(LB_METRIC_PACKETS_NO_BACKEND);
             emit_event(
-                ctx,
+                ctx_raw,
                 &src_addr,
                 &dst_addr,
                 src_port,
@@ -367,8 +383,8 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     // L4 checksum is untouched. Fall through to DNAT if MAC unresolved.
     if svc_config.mode == LB_MODE_L2DSR {
         if let Some(action) = try_dsr_forward(
-            ctx, backend_id, &src_addr, &dst_addr, src_port, dst_port, next_hdr, FLAG_IPV6,
-            vlan_id, pkt_len,
+            ctx, ctx_raw, backend_id, &src_addr, &dst_addr, src_port, dst_port, next_hdr,
+            FLAG_IPV6, vlan_id, pkt_len,
         ) {
             return Ok(action);
         }
@@ -423,7 +439,7 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
     add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
 
     emit_event(
-        ctx,
+        ctx_raw,
         &src_addr,
         &dst_addr,
         src_port,
@@ -472,6 +488,7 @@ fn process_v6(ctx: &XdpContext, l3_offset: usize, vlan_id: u16) -> Result<u32, (
 #[allow(clippy::too_many_arguments)]
 fn try_dsr_forward(
     ctx: &XdpContext,
+    ctx_raw: *mut core::ffi::c_void,
     backend_id: u32,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
@@ -495,7 +512,7 @@ fn try_dsr_forward(
     increment_metric(LB_METRIC_PACKETS_FORWARDED);
     add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
     emit_event(
-        ctx,
+        ctx_raw,
         src_addr,
         dst_addr,
         src_port,
@@ -530,7 +547,7 @@ fn try_dsr_forward(
 /// The algorithm selects a starting offset, then probes linearly for a healthy backend.
 #[inline(always)]
 fn select_backend<'a>(
-    ctx: &XdpContext,
+    ctx_raw: *mut core::ffi::c_void,
     svc: &'a LbServiceConfigV2,
     src_ip: u32,
     svc_index: u32,
@@ -559,7 +576,7 @@ fn select_backend<'a>(
         // Prefer NIC RSS hash when available (hardware-computed,
         // better distribution, zero CPU cost). Fall back to
         // software FNV-1a when the driver lacks RSS metadata.
-        LB_ALG_IP_HASH => unsafe { xdp_rx_hash(ctx.ctx.cast()) }
+        LB_ALG_IP_HASH => unsafe { xdp_rx_hash(ctx_raw.cast_const()) }
             .map(|(h, _)| h as usize)
             .unwrap_or_else(|| fnv1a(src_ip) as usize),
         LB_ALG_WEIGHTED => {
@@ -578,8 +595,15 @@ fn select_backend<'a>(
         // still covers a backend that went down between rebuilds.
         LB_ALG_MAGLEV => match unsafe { LB_MAGLEV.get(&svc_index) } {
             Some(tbl) => {
-                let slot = (fnv1a(src_ip) as usize) % MAGLEV_RING_SIZE;
-                // Verifier bound (modulo already guarantees this).
+                // `% MAGLEV_RING_SIZE` provably yields a slot in
+                // `[0, MAGLEV_RING_SIZE)`, but the ring size is prime so the
+                // compiler proves the `if slot < MAGLEV_RING_SIZE` guard
+                // redundant and elides it — leaving the verifier with the
+                // unbounded modulo result and rejecting the `entries[slot]`
+                // deref ("unbounded memory access"). Routing the slot through
+                // a value barrier first turns the guard into a real runtime
+                // branch the verifier uses to bound the index.
+                let slot = opaque_usize((fnv1a(src_ip) as usize) % MAGLEV_RING_SIZE);
                 if slot < MAGLEV_RING_SIZE {
                     let e = tbl.entries[slot];
                     if e == MAGLEV_EMPTY { 0 } else { e as usize }
@@ -796,7 +820,7 @@ fn ringbuf_has_backpressure() -> bool {
 
 #[inline(always)]
 fn emit_event(
-    ctx: &XdpContext,
+    ctx_raw: *mut core::ffi::c_void,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
     src_port: u16,
@@ -842,10 +866,10 @@ fn emit_event(
         (*ptr).socket_cookie = 0;
         (*ptr).cgroup_id = 0;
         (*ptr).cgroup1_id = 0;
-        let (rss_h, rss_t) = xdp_rx_hash(ctx.ctx.cast()).unwrap_or((0, 0));
+        let (rss_h, rss_t) = xdp_rx_hash(ctx_raw.cast_const()).unwrap_or((0, 0));
         (*ptr).rss_hash = rss_h;
         (*ptr).rss_hash_type = rss_t;
-        (*ptr).rx_hw_timestamp_ns = xdp_rx_timestamp(ctx.ctx.cast()).unwrap_or(0);
+        (*ptr).rx_hw_timestamp_ns = xdp_rx_timestamp(ctx_raw.cast_const()).unwrap_or(0);
         event.submit(0);
     }
 }

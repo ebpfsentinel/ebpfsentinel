@@ -9,25 +9,19 @@ use aya_ebpf::{
     programs::TcContext,
 };
 use aya_ebpf_bindings::helpers::bpf_skb_load_bytes;
-use core::ffi::c_void;
 use core::mem;
-use ebpf_helpers::arena_map::{RawMapDef, arena_def};
-use ebpf_common::arena::{
-    ArenaEventHeader, DNS_ARENA_FIXED_VA, DNS_ARENA_PAGES, DNS_SLOT_COUNT, DNS_WRITE_SEQ_OFFSET,
-    dns_slot_offset,
-};
-use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
-    PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
-};
-use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
-use ebpf_helpers::increment_metric;
 use ebpf_common::dns::{
-    DnsEvent, DnsEventBuf, DNS_DIRECTION_QUERY, DNS_DIRECTION_RESPONSE, DNS_MAX_PAYLOAD,
-    DNS_METRIC_ERRORS, DNS_METRIC_EVENTS_DROPPED, DNS_METRIC_EVENTS_EMITTED,
-    DNS_METRIC_PACKETS_INSPECTED, DNS_METRIC_TOTAL_SEEN,
+    DNS_DIRECTION_QUERY, DNS_DIRECTION_RESPONSE, DNS_MAX_PAYLOAD, DNS_METRIC_ERRORS,
+    DNS_METRIC_EVENTS_DROPPED, DNS_METRIC_EVENTS_EMITTED, DNS_METRIC_PACKETS_INSPECTED,
+    DNS_METRIC_TOTAL_SEEN, DnsEvent, DnsEventBuf,
 };
 use ebpf_common::event::{FLAG_IPV6, FLAG_TCP, FLAG_VLAN};
+use ebpf_helpers::increment_metric;
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
+    VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
+};
+use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use network_types::{
     eth::EthHdr,
     ip::{IpProto, Ipv4Hdr},
@@ -51,21 +45,6 @@ static DNS_EVENTS: RingBuf = RingBuf::with_byte_size(64 * 4096, 0);
 /// 2=errors, 3=events_dropped, 4=total_seen.
 #[map]
 static DNS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
-
-/// Arena map for zero-copy DNS event delivery to userspace.
-/// Sized by `DNS_ARENA_PAGES` (16 pages = 64 KiB) — ~102 slots of
-/// one `DnsEventBuf` (576 B) each. The BPF program allocates those
-/// pages once at `DNS_ARENA_FIXED_VA` so userspace's
-/// `mmap(MAP_FIXED_NOREPLACE)` shares the same pointer space.
-#[unsafe(link_section = ".maps")]
-#[unsafe(no_mangle)]
-static DNS_ARENA: RawMapDef = arena_def(DNS_ARENA_PAGES);
-
-/// Cached arena base pointer, set on first successful allocation.
-static mut ARENA_BASE: u64 = 0;
-
-/// Monotonically increasing sequence counter for arena events.
-static mut ARENA_SEQUENCE: u64 = 0;
 
 // ── Entry point ─────────────────────────────────────────────────────
 
@@ -124,12 +103,7 @@ fn try_tc_dns(ctx: &TcContext) -> Result<i32, ()> {
 
 /// IPv4 DNS processing path (UDP and TCP port 53).
 #[inline(always)]
-fn process_dns_v4(
-    ctx: &TcContext,
-    l3_offset: usize,
-    vlan_id: u16,
-    flags: u8,
-) -> Result<i32, ()> {
+fn process_dns_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) -> Result<i32, ()> {
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let protocol = unsafe { (*ipv4hdr).proto };
 
@@ -196,18 +170,13 @@ fn process_dns_v4(
 
 /// IPv6 DNS processing path (UDP and TCP port 53).
 #[inline(always)]
-fn process_dns_v6(
-    ctx: &TcContext,
-    l3_offset: usize,
-    vlan_id: u16,
-    flags: u8,
-) -> Result<i32, ()> {
+fn process_dns_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) -> Result<i32, ()> {
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
 
     // Skip IPv6 extension headers to find the actual L4 protocol.
-    let (next_hdr, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr)
-        .ok_or(())?;
+    let (next_hdr, l4_offset) =
+        skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr).ok_or(())?;
 
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
@@ -314,13 +283,8 @@ fn emit_dns_event(
     // bpf_skb_load_bytes handles fragmented packets natively (via
     // skb_header_pointer), so linearization is unnecessary.
 
-    // Try arena zero-copy path first.
-    if try_emit_arena_dns(ctx, src_addr, dst_addr, flags, vlan_id, direction, dns_offset, payload_len) {
-        increment_metric(DNS_METRIC_EVENTS_EMITTED);
-        return;
-    }
-
-    // Fallback: RingBuf path (copy-based).
+    // RingBuf path (copy-based). TC programs are not sleepable, so the
+    // sleepable arena-alloc kfunc is unavailable here.
     if let Some(mut entry) = DNS_EVENTS.reserve::<DnsEventBuf>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
@@ -364,111 +328,6 @@ fn emit_dns_event(
     } else {
         increment_metric(DNS_METRIC_EVENTS_DROPPED);
     }
-}
-
-/// Attempt to write a DNS event into the arena ring. Returns `true`
-/// on success, `false` if arena allocation fails (falls back to
-/// `RingBuf`).
-///
-/// Layout: arena pages are allocated once at `DNS_ARENA_FIXED_VA` so
-/// the userspace mmap shares the same address space. Each event
-/// writes the slot body first, then publishes the new sequence to
-/// the ring header so userspace observes a complete record.
-#[inline(always)]
-#[allow(clippy::too_many_arguments)]
-fn try_emit_arena_dns(
-    ctx: &TcContext,
-    src_addr: &[u32; 4],
-    dst_addr: &[u32; 4],
-    flags: u8,
-    vlan_id: u16,
-    direction: u8,
-    dns_offset: usize,
-    payload_len: usize,
-) -> bool {
-    use ebpf_helpers::kfuncs::arena_alloc_pages_at;
-
-    let arena_ptr = &raw const DNS_ARENA as *mut c_void;
-
-    // Lazy init: anchor the arena at DNS_ARENA_FIXED_VA on first call.
-    let base = unsafe {
-        let cached = core::ptr::read_volatile(&raw const ARENA_BASE);
-        if cached != 0 {
-            cached as *mut u8
-        } else {
-            let allocated = arena_alloc_pages_at(
-                arena_ptr,
-                DNS_ARENA_FIXED_VA as *mut c_void,
-                DNS_ARENA_PAGES,
-            );
-            match allocated {
-                Some(ptr) => {
-                    core::ptr::write_volatile(&raw mut ARENA_BASE, ptr as u64);
-                    ptr as *mut u8
-                }
-                None => {
-                    let now = core::ptr::read_volatile(&raw const ARENA_BASE);
-                    if now != 0 {
-                        now as *mut u8
-                    } else {
-                        return false;
-                    }
-                }
-            }
-        }
-    };
-
-    let seq = unsafe {
-        ARENA_SEQUENCE += 1;
-        ARENA_SEQUENCE
-    };
-    let slot_idx = ((seq - 1) as usize) % DNS_SLOT_COUNT;
-    let slot_offset = dns_slot_offset(slot_idx);
-    let slot_ptr = unsafe { base.add(slot_offset) };
-
-    // Slot body: DnsEventBuf (header + raw DNS payload).
-    let event_ptr = unsafe { slot_ptr.add(mem::size_of::<ArenaEventHeader>()) }
-        as *mut DnsEventBuf;
-    unsafe {
-        (*event_ptr).header.timestamp_ns = bpf_ktime_get_boot_ns();
-        (*event_ptr).header.src_addr = *src_addr;
-        (*event_ptr).header.dst_addr = *dst_addr;
-        (*event_ptr).header.dns_payload_len = payload_len as u16;
-        (*event_ptr).header.dns_payload_offset = DnsEvent::HEADER_SIZE;
-        (*event_ptr).header.direction = direction;
-        (*event_ptr).header.flags = flags;
-        (*event_ptr).header.vlan_id = vlan_id;
-        (*event_ptr).header._padding = [0; 8];
-        (*event_ptr).header.cgroup_id = bpf_get_current_cgroup_id();
-        core::ptr::write_bytes((*event_ptr).payload.as_mut_ptr(), 0, DNS_MAX_PAYLOAD);
-        let _ = bpf_skb_load_bytes(
-            ctx.skb.skb as *const _,
-            dns_offset as u32,
-            (*event_ptr).payload.as_mut_ptr() as *mut _,
-            DNS_MAX_PAYLOAD as u32,
-        );
-    }
-
-    // Slot header written *after* the body so userspace can detect
-    // torn slots.
-    let header = ArenaEventHeader {
-        sequence: seq,
-        timestamp_ns: unsafe { bpf_ktime_get_boot_ns() },
-        payload_len: mem::size_of::<DnsEventBuf>() as u32,
-        event_type: 7, // EVENT_TYPE_DNS
-        _pad: [0; 3],
-    };
-    unsafe {
-        core::ptr::write_volatile(slot_ptr.cast::<ArenaEventHeader>(), header);
-    }
-
-    // Publish: bump the global write_seq so userspace knows a new
-    // slot is ready.
-    unsafe {
-        core::ptr::write_volatile(base.add(DNS_WRITE_SEQ_OFFSET).cast::<u64>(), seq);
-    }
-
-    true
 }
 
 #[panic_handler]

@@ -1,6 +1,3 @@
-pub mod arena;
-pub mod arena_event_reader;
-pub mod arena_metrics;
 pub mod bpf_token;
 // NOTE: `netkit` uses raw BPF_LINK_CREATE syscall — the module itself
 // has #[allow(unsafe_code)] at the top.
@@ -17,6 +14,9 @@ pub mod ids_map_manager;
 pub mod ids_mirror_map_manager;
 pub mod ipset_map_manager;
 pub mod kernel_probe;
+pub mod kfunc;
+pub mod kfunc_attach;
+pub mod kfunc_loader;
 pub mod l7_ports_manager;
 pub mod lb_map_manager;
 pub mod loader;

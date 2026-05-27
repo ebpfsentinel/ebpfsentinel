@@ -28,18 +28,13 @@
 //! | `bpf_dynptr_from_skb`           | 6.4    | `int(*)(struct __sk_buff *skb, u64 flags, struct bpf_dynptr *ptr__uninit) __ksym;`                                                               |
 //! | `bpf_dynptr_from_xdp`           | 6.4    | `int(*)(struct xdp_md *xdp, u64 flags, struct bpf_dynptr *ptr__uninit) __ksym;`                                                                  |
 //! | `bpf_dynptr_slice`              | 6.4    | `void *(*)(const struct bpf_dynptr *p, u32 offset, void *buffer__opt, u32 buffer__szk) __ksym;`                                                  |
-//! | `bpf_dynptr_slice_rdwr`         | 6.4    | `void *(*)(const struct bpf_dynptr *p, u32 offset, void *buffer__opt, u32 buffer__szk) __ksym;`                                                  |
 //! | `bpf_skb_get_fou_encap`         | 6.4    | `int(*)(struct __sk_buff *skb, struct bpf_fou_encap *encap) __ksym;`                                                                             |
 //! | `bpf_skb_set_fou_encap`         | 6.4    | `int(*)(struct __sk_buff *skb, struct bpf_fou_encap *encap, int type) __ksym;`                                                                   |
 //! | `bpf_dynptr_adjust`             | 6.5    | `int(*)(const struct bpf_dynptr *p, u32 start, u32 end) __ksym;`                                                                                 |
 //! | `bpf_dynptr_size`               | 6.5    | `u32(*)(const struct bpf_dynptr *p) __ksym;`                                                                                                     |
-//! | `bpf_dynptr_is_null`            | 6.5    | `bool(*)(const struct bpf_dynptr *p) __ksym;`                                                                                                    |
-//! | `bpf_dynptr_clone`              | 6.5    | `int(*)(const struct bpf_dynptr *src, struct bpf_dynptr *clone__uninit) __ksym;`                                                                 |
 //! | `bpf_xdp_metadata_rx_vlan_tag`  | 6.8    | `int(*)(const struct xdp_md *ctx, __be16 *vlan_proto, u16 *vlan_tci) __ksym;`                                                                    |
 //! | `bpf_xdp_get_xfrm_state`        | 6.8    | `struct xfrm_state *(*)(struct xdp_md *ctx, struct bpf_xfrm_state_opts *opts, u32 opts__sz) __ksym;`                                             |
 //! | `bpf_xdp_xfrm_state_release`    | 6.8    | `void(*)(struct xfrm_state *x) __ksym;`                                                                                                          |
-//! | `bpf_arena_alloc_pages`         | 6.9    | `void *(*)(void *arena, void *addr__ign, u32 page_cnt, int node_id) __ksym;`                                                                     |
-//! | `bpf_arena_free_pages`          | 6.9    | `void(*)(void *arena, void *ptr, u32 page_cnt) __ksym;`                                                                                          |
 //!
 //! Kfuncs annotated with `KF_ACQUIRE | KF_RET_NULL` (notably
 //! `bpf_xdp_get_xfrm_state`) must pair every successful call with a
@@ -439,15 +434,6 @@ unsafe extern "C" {
         buffer__szk: u32,
     ) -> *const core::ffi::c_void;
 
-    /// Like [`bpf_dynptr_slice`] but returns a mutable pointer.
-    /// Rejected at load time on read-only dynptrs. Kernel 6.4+.
-    pub fn bpf_dynptr_slice_rdwr(
-        p: *const BpfDynptr,
-        offset: u32,
-        buffer__opt: *mut core::ffi::c_void,
-        buffer__szk: u32,
-    ) -> *mut core::ffi::c_void;
-
     // ── Kernel 6.5 dynptr accessors ───────────────────────────
 
     /// Narrow an existing dynptr to the `[start, end)` byte window.
@@ -457,15 +443,6 @@ unsafe extern "C" {
 
     /// Return the logical size of the dynptr in bytes. Kernel 6.5+.
     pub fn bpf_dynptr_size(p: *const BpfDynptr) -> u32;
-
-    /// Return `true` when the dynptr was never successfully
-    /// initialised or has been invalidated. Kernel 6.5+.
-    pub fn bpf_dynptr_is_null(p: *const BpfDynptr) -> bool;
-
-    /// Initialise `clone` from `src` so the two dynptrs can be
-    /// advanced independently (e.g. two cursors over the same
-    /// HTTP-pipelined payload). Kernel 6.5+.
-    pub fn bpf_dynptr_clone(src: *const BpfDynptr, clone: *mut BpfDynptr) -> i32;
 
     // ── Kernel 5.18 netfilter conntrack lookup ──────────────────
     //
@@ -594,28 +571,6 @@ unsafe extern "C" {
         encap: *mut BpfFouEncap,
         type_: i32,
     ) -> i32;
-
-    // ── Kernel 6.9 arena allocation ─────────────────────────────
-
-    /// Allocate `page_cnt` pages from the BPF arena map. Returns a
-    /// pointer into the arena's address space. `addr__ign` is
-    /// reserved (pass null). `node_id` selects NUMA node (-1 = any).
-    /// `flags` is reserved (pass 0). Kernel 6.9+.
-    pub fn bpf_arena_alloc_pages(
-        p__map: *mut core::ffi::c_void,
-        addr__ign: *mut core::ffi::c_void,
-        page_cnt: u32,
-        node_id: i32,
-        flags: u64,
-    ) -> *mut core::ffi::c_void;
-
-    /// Free `page_cnt` pages starting at `ptr__ign` back to the
-    /// arena map. Kernel 6.9+.
-    pub fn bpf_arena_free_pages(
-        p__map: *mut core::ffi::c_void,
-        ptr__ign: *mut core::ffi::c_void,
-        page_cnt: u32,
-    );
 }
 
 // ── Host-target stubs ────────────────────────────────────────────
@@ -753,15 +708,6 @@ pub mod host_stubs {
     }
 
     impl HostDynptrBacking {
-        pub const fn empty() -> Self {
-            Self {
-                data: core::ptr::null(),
-                len: 0,
-                start: 0,
-                end: 0,
-            }
-        }
-
         pub fn as_opaque(self) -> [u64; 2] {
             // Pack pointer + range into the two-u64 opaque slot.
             let ptr_bits = self.data as usize as u64;
@@ -788,38 +734,62 @@ pub mod host_stubs {
         }
     }
 
-    /// Install a host-side backing over `bytes` into `ptr`. Used by
-    /// the unit tests to feed deterministic bytes through the safe
-    /// wrappers. Returns the length stored.
-    pub unsafe fn install_host_dynptr(ptr: *mut BpfDynptr, bytes: &[u8]) -> u32 {
+    /// Backing bytes queued by tests for the next dynptr-init stub
+    /// ([`bpf_dynptr_from_skb`] / [`bpf_dynptr_from_xdp`]). The
+    /// free-function wrappers create the dynptr internally, so tests
+    /// seed deterministic bytes here rather than writing them into a
+    /// dynptr after the fact.
+    static HOST_NEXT_DYNPTR_DATA: AtomicU64 = AtomicU64::new(0);
+    static HOST_NEXT_DYNPTR_LEN: AtomicU32 = AtomicU32::new(0);
+    /// Error code the next dynptr-init stub reports (0 = success).
+    static HOST_NEXT_DYNPTR_RC: AtomicI32 = AtomicI32::new(0);
+
+    /// Queue host backing over `bytes` for the next dynptr-init stub,
+    /// which then reports `rc` (0 = success; non-zero makes the wrapper
+    /// return `None`). Used by unit tests to drive the free-function
+    /// dynptr wrappers end-to-end.
+    pub fn host_queue_dynptr(bytes: &[u8], rc: i32) {
+        HOST_NEXT_DYNPTR_DATA.store(bytes.as_ptr() as usize as u64, Ordering::SeqCst);
         #[allow(clippy::cast_possible_truncation)]
-        let len = bytes.len() as u32;
+        HOST_NEXT_DYNPTR_LEN.store(bytes.len() as u32, Ordering::SeqCst);
+        HOST_NEXT_DYNPTR_RC.store(rc, Ordering::SeqCst);
+    }
+
+    /// Install any queued backing into `ptr`, returning the queued rc.
+    unsafe fn take_queued_dynptr(ptr: *mut BpfDynptr) -> i32 {
+        let rc = HOST_NEXT_DYNPTR_RC.swap(0, Ordering::SeqCst);
+        #[allow(clippy::cast_possible_truncation)]
+        let data = HOST_NEXT_DYNPTR_DATA.swap(0, Ordering::SeqCst) as usize as *const u8;
+        let len = HOST_NEXT_DYNPTR_LEN.swap(0, Ordering::SeqCst);
+        if rc != 0 {
+            return rc;
+        }
         let backing = HostDynptrBacking {
-            data: bytes.as_ptr(),
+            data,
             len,
             start: 0,
             end: len,
         };
         unsafe { (*ptr).__opaque = backing.as_opaque() };
-        len
+        0
     }
 
     pub unsafe fn bpf_dynptr_from_skb(
         _skb: *mut core::ffi::c_void,
         _flags: u64,
-        _ptr: *mut BpfDynptr,
+        ptr: *mut BpfDynptr,
     ) -> i32 {
-        // Host builds never observe a real skb. Tests drive the
-        // dynptr directly via [`install_host_dynptr`].
-        0
+        // Host builds never observe a real skb. Tests seed bytes via
+        // [`host_queue_dynptr`]; install them into the caller's dynptr.
+        unsafe { take_queued_dynptr(ptr) }
     }
 
     pub unsafe fn bpf_dynptr_from_xdp(
         _xdp: *mut core::ffi::c_void,
         _flags: u64,
-        _ptr: *mut BpfDynptr,
+        ptr: *mut BpfDynptr,
     ) -> i32 {
-        0
+        unsafe { take_queued_dynptr(ptr) }
     }
 
     pub unsafe fn bpf_dynptr_slice(
@@ -845,15 +815,6 @@ pub mod host_stubs {
         }
     }
 
-    pub unsafe fn bpf_dynptr_slice_rdwr(
-        p: *const BpfDynptr,
-        offset: u32,
-        buffer_opt: *mut core::ffi::c_void,
-        buffer_sz: u32,
-    ) -> *mut core::ffi::c_void {
-        unsafe { bpf_dynptr_slice(p, offset, buffer_opt, buffer_sz).cast_mut() }
-    }
-
     pub unsafe fn bpf_dynptr_adjust(p: *const BpfDynptr, start: u32, end: u32) -> i32 {
         let mut backing = unsafe { HostDynptrBacking::from_opaque((*p).__opaque) };
         if start > end || end > backing.len {
@@ -871,18 +832,6 @@ pub mod host_stubs {
     pub unsafe fn bpf_dynptr_size(p: *const BpfDynptr) -> u32 {
         let backing = unsafe { HostDynptrBacking::from_opaque((*p).__opaque) };
         backing.end.saturating_sub(backing.start)
-    }
-
-    pub unsafe fn bpf_dynptr_is_null(p: *const BpfDynptr) -> bool {
-        let backing = unsafe { HostDynptrBacking::from_opaque((*p).__opaque) };
-        backing.data.is_null()
-    }
-
-    pub unsafe fn bpf_dynptr_clone(src: *const BpfDynptr, clone: *mut BpfDynptr) -> i32 {
-        unsafe {
-            (*clone).__opaque = (*src).__opaque;
-        }
-        0
     }
 
     // ── Conntrack stubs (kernel 5.18) ──
@@ -1329,50 +1278,6 @@ pub mod host_stubs {
         }
         0
     }
-
-    // ── Arena allocation stubs ──
-
-    /// Tracks pages allocated via the host stub (for test assertions).
-    static HOST_ARENA_ALLOCATED_PAGES: AtomicUsize = AtomicUsize::new(0);
-
-    /// Test helper: read the total pages allocated via the arena stub.
-    #[must_use]
-    pub fn host_arena_allocated_pages() -> usize {
-        HOST_ARENA_ALLOCATED_PAGES.load(Ordering::SeqCst)
-    }
-
-    /// Reset arena stub state.
-    pub fn host_reset_arena_state() {
-        HOST_ARENA_ALLOCATED_PAGES.store(0, Ordering::SeqCst);
-    }
-
-    pub unsafe fn bpf_arena_alloc_pages(
-        _p__map: *mut core::ffi::c_void,
-        addr__ign: *mut core::ffi::c_void,
-        page_cnt: u32,
-        _node_id: i32,
-        _flags: u64,
-    ) -> *mut core::ffi::c_void {
-        HOST_ARENA_ALLOCATED_PAGES.fetch_add(page_cnt as usize, Ordering::SeqCst);
-        // Return the explicit address hint when provided so host-side
-        // tests can observe `arena_alloc_pages_at` honouring its hint.
-        // Real kernel returns the same address on success when the hint
-        // points to a free, page-aligned slot inside the arena VM range.
-        if addr__ign.is_null() {
-            page_cnt as usize as *mut core::ffi::c_void
-        } else {
-            addr__ign
-        }
-    }
-
-    pub unsafe fn bpf_arena_free_pages(
-        _p__map: *mut core::ffi::c_void,
-        _ptr__ign: *mut core::ffi::c_void,
-        page_cnt: u32,
-    ) {
-        let prev = HOST_ARENA_ALLOCATED_PAGES.load(Ordering::SeqCst);
-        HOST_ARENA_ALLOCATED_PAGES.store(prev.saturating_sub(page_cnt as usize), Ordering::SeqCst);
-    }
 }
 
 // ── Safe wrappers ────────────────────────────────────────────────
@@ -1489,188 +1394,104 @@ where
 
 // ── Dynptr safe wrappers ─────────────────────────────────────────
 //
-// Idiomatic Rust wrappers around the 8 dynptr kfuncs. The core
-// invariant is that a `SkbDynptr` / `XdpDynptr` owns a
-// stack-allocated `BpfDynptr` initialised by the kernel; the
-// wrappers never let callers forge a dynptr or call the accessors
-// on an uninitialised one.
+// A `bpf_dynptr` is a kernel-managed opaque stack object that must
+// stay pinned in the exact stack slot the init kfunc wrote it to. A
+// Rust wrapper struct that returns the dynptr by value moves it out of
+// that slot, which the verifier rejects with `invalid read from
+// stack`. So both the TC and XDP sides expose their dynptr work as
+// standalone functions that create and consume the dynptr entirely
+// within one frame — accessed only through `&raw mut` / `&raw const`,
+// never moved — letting only scalars escape.
 
-/// Dynptr over a TC skb.
-#[repr(transparent)]
-pub struct SkbDynptr {
-    inner: BpfDynptr,
-}
+/// Probe a TC skb's L7 payload without linearising the packet.
+///
+/// Creates a dynptr over `skb`, then returns the full packet size
+/// (including non-linear fragments) and the 4-byte protocol magic at
+/// `l7_offset` — e.g. `0x1603xx` for TLS, `"HTTP"` for HTTP/1.x, the
+/// HTTP/2 client preface. The magic is `0` when `l7_offset` is past the
+/// end of the packet or the window read fails.
+///
+/// Like [`xdp_frame_size`], the `bpf_dynptr` is a kernel-managed stack
+/// object that must stay pinned in the slot the kfunc wrote it to, so
+/// it is created and consumed entirely within this one frame — accessed
+/// only through `&raw mut` / `&raw const`, never moved — and only the
+/// two scalars escape. This exercises the full TC dynptr path:
+/// `from_skb` → `size` → `adjust` → `slice`.
+///
+/// Returns `None` when the dynptr cannot be created.
+///
+/// # Safety
+/// `skb` must be a live `__sk_buff*` owned by the current TC program
+/// invocation.
+#[inline(always)]
+pub unsafe fn skb_l7_probe(skb: *mut core::ffi::c_void, l7_offset: u32) -> Option<(u32, u32)> {
+    let mut inner = BpfDynptr::uninit();
+    #[cfg(target_arch = "bpf")]
+    let rc = unsafe { bpf_dynptr_from_skb(skb, 0, &raw mut inner) };
+    #[cfg(not(target_arch = "bpf"))]
+    let rc = unsafe { host_stubs::bpf_dynptr_from_skb(skb, 0, &raw mut inner) };
+    if rc != 0 {
+        return None;
+    }
+    #[cfg(target_arch = "bpf")]
+    let total = unsafe { bpf_dynptr_size(&raw const inner) };
+    #[cfg(not(target_arch = "bpf"))]
+    let total = unsafe { host_stubs::bpf_dynptr_size(&raw const inner) };
 
-impl SkbDynptr {
-    /// Initialise a dynptr over the given `__sk_buff` pointer.
-    /// Returns `None` when the kfunc reports a non-zero error code.
-    ///
-    /// # Safety
-    /// `skb` must be a live `__sk_buff*` owned by the current TC
-    /// program invocation.
-    #[inline(always)]
-    pub unsafe fn from_skb(skb: *mut core::ffi::c_void) -> Option<Self> {
-        let mut inner = BpfDynptr::uninit();
+    let mut magic: u32 = 0;
+    if l7_offset < total {
         #[cfg(target_arch = "bpf")]
-        let rc = unsafe { bpf_dynptr_from_skb(skb, 0, &raw mut inner) };
+        let _ = unsafe { bpf_dynptr_adjust(&raw const inner, l7_offset, total) };
         #[cfg(not(target_arch = "bpf"))]
-        let rc = unsafe { host_stubs::bpf_dynptr_from_skb(skb, 0, &raw mut inner) };
-        if rc != 0 { None } else { Some(Self { inner }) }
-    }
+        let _ = unsafe { host_stubs::bpf_dynptr_adjust(&raw const inner, l7_offset, total) };
 
-    /// Raw reference to the inner kernel dynptr, for kfunc calls
-    /// that need a pointer.
-    #[inline(always)]
-    #[must_use]
-    pub fn as_raw(&self) -> *const BpfDynptr {
-        &raw const self.inner
-    }
-
-    /// Mutable raw reference — required by adjust/clone targets.
-    #[inline(always)]
-    pub fn as_raw_mut(&mut self) -> *mut BpfDynptr {
-        &raw mut self.inner
-    }
-
-    /// Read `buffer_sz` bytes at `offset`. Returns `None` when the
-    /// window falls outside the dynptr bounds.
-    ///
-    /// # Safety
-    /// `buffer` must point to at least `buffer_sz` writable bytes.
-    #[inline(always)]
-    pub unsafe fn slice(
-        &self,
-        offset: u32,
-        buffer: *mut core::ffi::c_void,
-        buffer_sz: u32,
-    ) -> Option<*const core::ffi::c_void> {
+        let mut buf = core::mem::MaybeUninit::<u32>::uninit();
         #[cfg(target_arch = "bpf")]
-        let out = unsafe { bpf_dynptr_slice(self.as_raw(), offset, buffer, buffer_sz) };
+        let ptr = unsafe { bpf_dynptr_slice(&raw const inner, 0, buf.as_mut_ptr().cast(), 4) };
         #[cfg(not(target_arch = "bpf"))]
-        let out = unsafe { host_stubs::bpf_dynptr_slice(self.as_raw(), offset, buffer, buffer_sz) };
-        if out.is_null() { None } else { Some(out) }
-    }
-
-    /// Mutable variant of [`slice`]. Rejected at load time on
-    /// read-only dynptrs.
-    ///
-    /// # Safety
-    /// Same contract as [`Self::slice`].
-    #[inline(always)]
-    pub unsafe fn slice_rdwr(
-        &self,
-        offset: u32,
-        buffer: *mut core::ffi::c_void,
-        buffer_sz: u32,
-    ) -> Option<*mut core::ffi::c_void> {
-        #[cfg(target_arch = "bpf")]
-        let out = unsafe { bpf_dynptr_slice_rdwr(self.as_raw(), offset, buffer, buffer_sz) };
-        #[cfg(not(target_arch = "bpf"))]
-        let out =
-            unsafe { host_stubs::bpf_dynptr_slice_rdwr(self.as_raw(), offset, buffer, buffer_sz) };
-        if out.is_null() { None } else { Some(out) }
-    }
-
-    /// Narrow the visible window to `[start, end)`. Returns `false`
-    /// on EINVAL.
-    #[inline(always)]
-    pub fn adjust(&mut self, start: u32, end: u32) -> bool {
-        #[cfg(target_arch = "bpf")]
-        let rc = unsafe { bpf_dynptr_adjust(self.as_raw(), start, end) };
-        #[cfg(not(target_arch = "bpf"))]
-        let rc = unsafe { host_stubs::bpf_dynptr_adjust(self.as_raw(), start, end) };
-        rc == 0
-    }
-
-    /// Current visible size in bytes.
-    #[inline(always)]
-    #[must_use]
-    pub fn size(&self) -> u32 {
-        #[cfg(target_arch = "bpf")]
-        let sz = unsafe { bpf_dynptr_size(self.as_raw()) };
-        #[cfg(not(target_arch = "bpf"))]
-        let sz = unsafe { host_stubs::bpf_dynptr_size(self.as_raw()) };
-        sz
-    }
-
-    /// True when the dynptr has been invalidated.
-    #[inline(always)]
-    #[must_use]
-    pub fn is_null(&self) -> bool {
-        #[cfg(target_arch = "bpf")]
-        let b = unsafe { bpf_dynptr_is_null(self.as_raw()) };
-        #[cfg(not(target_arch = "bpf"))]
-        let b = unsafe { host_stubs::bpf_dynptr_is_null(self.as_raw()) };
-        b
-    }
-
-    /// Clone into a fresh independent dynptr. Returns `None` on
-    /// failure.
-    #[inline(always)]
-    #[must_use]
-    pub fn clone_dynptr(&self) -> Option<Self> {
-        let mut dst = BpfDynptr::uninit();
-        #[cfg(target_arch = "bpf")]
-        let rc = unsafe { bpf_dynptr_clone(self.as_raw(), &raw mut dst) };
-        #[cfg(not(target_arch = "bpf"))]
-        let rc = unsafe { host_stubs::bpf_dynptr_clone(self.as_raw(), &raw mut dst) };
-        if rc != 0 {
-            None
-        } else {
-            Some(Self { inner: dst })
+        let ptr = unsafe {
+            host_stubs::bpf_dynptr_slice(&raw const inner, 0, buf.as_mut_ptr().cast(), 4)
+        };
+        if !ptr.is_null() {
+            // SAFETY: `slice` populated 4 bytes at `ptr`.
+            magic = unsafe { core::ptr::read_unaligned(ptr.cast::<u32>()) };
         }
     }
-
-    /// Read a `T` at `offset` using an on-stack scratch buffer.
-    /// Transparently handles non-linear skbs. Returns `None` on
-    /// out-of-range access.
-    ///
-    /// # Safety
-    /// `T` must be `#[repr(C)]`, `Copy`, and correctly modelled by
-    /// the caller — the kernel performs no endianness or alignment
-    /// conversion.
-    #[inline(always)]
-    pub unsafe fn read<T: Copy>(&self, offset: u32) -> Option<T> {
-        let mut buf = core::mem::MaybeUninit::<T>::uninit();
-        #[allow(clippy::cast_possible_truncation)]
-        let sz = core::mem::size_of::<T>() as u32;
-        let ptr = unsafe { self.slice(offset, buf.as_mut_ptr().cast(), sz)? };
-        // SAFETY: `slice` populated `sz` bytes at `buf`.
-        Some(unsafe { core::ptr::read_unaligned(ptr.cast::<T>()) })
-    }
+    Some((total, magic))
 }
 
-/// Dynptr over an XDP frame. Same API surface as [`SkbDynptr`].
-#[repr(transparent)]
-pub struct XdpDynptr {
-    inner: BpfDynptr,
-}
-
-impl XdpDynptr {
-    /// Initialise a dynptr over the given `xdp_md` pointer.
-    ///
-    /// # Safety
-    /// `xdp` must be a live `xdp_md*` owned by the current XDP
-    /// program invocation.
-    #[inline(always)]
-    pub unsafe fn from_xdp(xdp: *mut core::ffi::c_void) -> Option<Self> {
-        let mut inner = BpfDynptr::uninit();
-        #[cfg(target_arch = "bpf")]
-        let rc = unsafe { bpf_dynptr_from_xdp(xdp, 0, &raw mut inner) };
-        #[cfg(not(target_arch = "bpf"))]
-        let rc = unsafe { host_stubs::bpf_dynptr_from_xdp(xdp, 0, &raw mut inner) };
-        if rc != 0 { None } else { Some(Self { inner }) }
+/// Full XDP frame size (including multi-buffer fragments) without
+/// linearising the packet.
+///
+/// A `bpf_dynptr` initialised over an XDP frame is a kernel-managed
+/// stack object that must stay pinned in the stack slot the kfunc
+/// wrote it to. Wrapping it in a struct and returning that struct
+/// moves the dynptr out of its slot, which the verifier rejects with
+/// `invalid read from stack`. So the dynptr is created and consumed
+/// entirely within this one frame — accessed only through
+/// `&raw mut` / `&raw const`, never moved — and only the scalar size
+/// escapes.
+///
+/// Returns `None` when the dynptr cannot be created.
+///
+/// # Safety
+/// `xdp` must be a live `xdp_md*` owned by the current XDP program
+/// invocation.
+#[inline(always)]
+pub unsafe fn xdp_frame_size(xdp: *mut core::ffi::c_void) -> Option<u32> {
+    let mut inner = BpfDynptr::uninit();
+    #[cfg(target_arch = "bpf")]
+    let rc = unsafe { bpf_dynptr_from_xdp(xdp, 0, &raw mut inner) };
+    #[cfg(not(target_arch = "bpf"))]
+    let rc = unsafe { host_stubs::bpf_dynptr_from_xdp(xdp, 0, &raw mut inner) };
+    if rc != 0 {
+        return None;
     }
-
-    #[inline(always)]
-    #[must_use]
-    pub fn size(&self) -> u32 {
-        #[cfg(target_arch = "bpf")]
-        let sz = unsafe { bpf_dynptr_size(&raw const self.inner) };
-        #[cfg(not(target_arch = "bpf"))]
-        let sz = unsafe { host_stubs::bpf_dynptr_size(&raw const self.inner) };
-        sz
-    }
+    #[cfg(target_arch = "bpf")]
+    let sz = unsafe { bpf_dynptr_size(&raw const inner) };
+    #[cfg(not(target_arch = "bpf"))]
+    let sz = unsafe { host_stubs::bpf_dynptr_size(&raw const inner) };
+    Some(sz)
 }
 
 /// Read FOU/GUE encapsulation parameters attached to a TC skb.
@@ -2186,76 +2007,6 @@ pub unsafe fn skb_set_fou_encap(
     rc == 0
 }
 
-/// Allocate `page_count` pages from a BPF arena map. Returns a
-/// pointer into the arena's shared address space, or `None` on
-/// failure. The arena must have been created with
-/// `BPF_MAP_TYPE_ARENA`. Kernel 6.9+.
-///
-/// # Safety
-/// `map_ptr` must be a valid pointer to an arena map fd obtained
-/// from the BPF program's map definitions.
-#[inline(always)]
-#[must_use]
-pub unsafe fn arena_alloc_pages(
-    map_ptr: *mut core::ffi::c_void,
-    page_count: u32,
-) -> Option<*mut core::ffi::c_void> {
-    #[cfg(target_arch = "bpf")]
-    let ptr = unsafe { bpf_arena_alloc_pages(map_ptr, core::ptr::null_mut(), page_count, -1, 0) };
-    #[cfg(not(target_arch = "bpf"))]
-    let ptr = unsafe {
-        host_stubs::bpf_arena_alloc_pages(map_ptr, core::ptr::null_mut(), page_count, -1, 0)
-    };
-    if ptr.is_null() { None } else { Some(ptr) }
-}
-
-/// Allocate `page_count` pages from a BPF arena map at an explicit
-/// virtual address `addr_hint`. Returns the allocated pointer (which
-/// equals `addr_hint` on success) or `None` on failure. Used to pin
-/// the arena base to a known shared address that userspace can
-/// `mmap(MAP_FIXED_NOREPLACE)` to. Kernel 6.9+.
-///
-/// # Safety
-/// `map_ptr` must be a valid pointer to an arena map fd obtained
-/// from the BPF program's map definitions. `addr_hint` must be a
-/// page-aligned virtual address inside the userspace VM range that
-/// the userspace side has reserved (or will reserve) via mmap.
-#[inline(always)]
-#[must_use]
-pub unsafe fn arena_alloc_pages_at(
-    map_ptr: *mut core::ffi::c_void,
-    addr_hint: *mut core::ffi::c_void,
-    page_count: u32,
-) -> Option<*mut core::ffi::c_void> {
-    #[cfg(target_arch = "bpf")]
-    let ptr = unsafe { bpf_arena_alloc_pages(map_ptr, addr_hint, page_count, -1, 0) };
-    #[cfg(not(target_arch = "bpf"))]
-    let ptr = unsafe { host_stubs::bpf_arena_alloc_pages(map_ptr, addr_hint, page_count, -1, 0) };
-    if ptr.is_null() { None } else { Some(ptr) }
-}
-
-/// Free `page_count` pages starting at `ptr` back to the arena map.
-/// Kernel 6.9+.
-///
-/// # Safety
-/// `map_ptr` must be a valid arena map pointer. `ptr` must have been
-/// returned by a prior `arena_alloc_pages` call on the same arena.
-#[inline(always)]
-pub unsafe fn arena_free_pages(
-    map_ptr: *mut core::ffi::c_void,
-    ptr: *mut core::ffi::c_void,
-    page_count: u32,
-) {
-    #[cfg(target_arch = "bpf")]
-    unsafe {
-        bpf_arena_free_pages(map_ptr, ptr, page_count);
-    }
-    #[cfg(not(target_arch = "bpf"))]
-    unsafe {
-        host_stubs::bpf_arena_free_pages(map_ptr, ptr, page_count);
-    }
-}
-
 #[cfg(all(test, not(target_arch = "bpf")))]
 mod tests {
     use super::*;
@@ -2277,17 +2028,14 @@ mod tests {
         assert!(rc.is_none());
     }
 
-    // ── Dynptr tests ─────────────────────────────────────────────
-
-    fn make_skb_dynptr_with(bytes: &[u8]) -> SkbDynptr {
-        let mut dyn_ptr = SkbDynptr {
-            inner: BpfDynptr::uninit(),
-        };
-        unsafe {
-            host_stubs::install_host_dynptr(dyn_ptr.as_raw_mut(), bytes);
-        }
-        dyn_ptr
-    }
+    // ── Dynptr free-function tests ───────────────────────────────
+    //
+    // The dynptr wrappers are standalone functions (`skb_l7_probe`,
+    // `xdp_frame_size`) — a `bpf_dynptr` must stay pinned in its stack
+    // slot, so it is never wrapped in a returnable struct. Each test
+    // seeds deterministic backing via `host_queue_dynptr`, which the
+    // host init stub installs into the dynptr the function creates
+    // internally.
 
     #[test]
     fn dynptr_layout_is_two_u64() {
@@ -2296,81 +2044,67 @@ mod tests {
     }
 
     #[test]
-    fn skb_dynptr_read_u16_in_bounds() {
-        let bytes: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
-        let dp = make_skb_dynptr_with(&bytes);
-        let val: u16 = unsafe { dp.read::<u16>(0).unwrap() };
-        // read_unaligned returns the two bytes verbatim; on LE the
-        // packed result is 0xADDE.
-        assert_eq!(val, 0xADDE);
+    fn skb_l7_probe_reads_magic_at_offset_zero() {
+        let bytes = [0x16u8, 0x03, 0x01, 0x00, 0xAA, 0xBB];
+        host_stubs::host_queue_dynptr(&bytes, 0);
+        let (total, magic) = unsafe { skb_l7_probe(core::ptr::null_mut(), 0) }.unwrap();
+        assert_eq!(total, bytes.len() as u32);
+        // First 4 bytes read back little-endian (e.g. a TLS record header).
+        assert_eq!(magic, u32::from_le_bytes([0x16, 0x03, 0x01, 0x00]));
     }
 
     #[test]
-    fn skb_dynptr_read_out_of_bounds_returns_none() {
-        let bytes: [u8; 2] = [0, 0];
-        let dp = make_skb_dynptr_with(&bytes);
-        let val = unsafe { dp.read::<u32>(0) };
-        assert!(val.is_none());
+    fn skb_l7_probe_reads_magic_at_nonzero_offset() {
+        // 14-byte L2/L3 prefix then a 4-byte magic at offset 14.
+        let mut bytes = [0u8; 18];
+        bytes[14..18].copy_from_slice(b"HTTP");
+        host_stubs::host_queue_dynptr(&bytes, 0);
+        let (total, magic) = unsafe { skb_l7_probe(core::ptr::null_mut(), 14) }.unwrap();
+        assert_eq!(total, 18);
+        assert_eq!(magic, u32::from_le_bytes(*b"HTTP"));
     }
 
     #[test]
-    fn skb_dynptr_size_matches_installed_len() {
-        let bytes = [0u8; 42];
-        let dp = make_skb_dynptr_with(&bytes);
-        assert_eq!(dp.size(), 42);
-        assert!(!dp.is_null());
+    fn skb_l7_probe_magic_zero_past_end() {
+        let bytes = [0u8; 2];
+        host_stubs::host_queue_dynptr(&bytes, 0);
+        let (total, magic) = unsafe { skb_l7_probe(core::ptr::null_mut(), 10) }.unwrap();
+        assert_eq!(total, 2);
+        // Offset past the packet end: the window read is skipped.
+        assert_eq!(magic, 0);
     }
 
     #[test]
-    fn skb_dynptr_adjust_narrows_window() {
-        let bytes = [0u8; 100];
-        let mut dp = make_skb_dynptr_with(&bytes);
-        assert!(dp.adjust(10, 30));
-        assert_eq!(dp.size(), 20);
+    fn skb_l7_probe_magic_zero_when_window_too_short() {
+        // Only 3 bytes available: the 4-byte magic slice fails.
+        let bytes = [0xAAu8, 0xBB, 0xCC];
+        host_stubs::host_queue_dynptr(&bytes, 0);
+        let (total, magic) = unsafe { skb_l7_probe(core::ptr::null_mut(), 0) }.unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(magic, 0);
     }
 
     #[test]
-    fn skb_dynptr_adjust_rejects_out_of_range() {
-        let bytes = [0u8; 10];
-        let mut dp = make_skb_dynptr_with(&bytes);
-        assert!(!dp.adjust(0, 99));
+    fn skb_l7_probe_returns_none_on_init_failure() {
+        // Non-zero rc from the init kfunc → wrapper bails out.
+        host_stubs::host_queue_dynptr(&[], -22);
+        let r = unsafe { skb_l7_probe(core::ptr::null_mut(), 0) };
+        assert!(r.is_none());
     }
 
     #[test]
-    fn skb_dynptr_clone_is_independent() {
-        let bytes = [1u8, 2, 3, 4, 5, 6];
-        let dp = make_skb_dynptr_with(&bytes);
-        let mut clone = dp.clone_dynptr().unwrap();
-        assert!(clone.adjust(2, 5));
-        assert_eq!(clone.size(), 3);
-        assert_eq!(dp.size(), 6);
+    fn xdp_frame_size_returns_installed_len() {
+        let bytes = [0u8; 64];
+        host_stubs::host_queue_dynptr(&bytes, 0);
+        let sz = unsafe { xdp_frame_size(core::ptr::null_mut()) }.unwrap();
+        assert_eq!(sz, 64);
     }
 
     #[test]
-    fn skb_dynptr_slice_rdwr_returns_same_pointer() {
-        let bytes = [0u8; 16];
-        let dp = make_skb_dynptr_with(&bytes);
-        let mut buf = [0u8; 4];
-        let ptr = unsafe { dp.slice_rdwr(0, buf.as_mut_ptr().cast(), 4).unwrap() };
-        assert!(!ptr.is_null());
-    }
-
-    #[test]
-    fn skb_dynptr_from_null_skb_returns_some_on_host() {
-        // Host stub always succeeds so the safe wrapper returns
-        // an initialised (but empty) dynptr. Real kernel path
-        // would return None on failure.
-        let dp = unsafe { SkbDynptr::from_skb(core::ptr::null_mut()) };
-        assert!(dp.is_some());
-        assert!(dp.unwrap().is_null());
-    }
-
-    #[test]
-    fn skb_dynptr_slice_zero_size_returns_none() {
-        let bytes = [0u8; 4];
-        let dp = make_skb_dynptr_with(&bytes);
-        let out = unsafe { dp.slice(0, core::ptr::null_mut(), 0) };
-        assert!(out.is_none());
+    fn xdp_frame_size_returns_none_on_init_failure() {
+        host_stubs::host_queue_dynptr(&[], -1);
+        let r = unsafe { xdp_frame_size(core::ptr::null_mut()) };
+        assert!(r.is_none());
     }
 
     // ── Conntrack lookup tests ─────────────────────────────────────
@@ -2816,32 +2550,5 @@ mod tests {
         let ok = unsafe { skb_set_fou_encap(core::ptr::null_mut(), &encap, FouEncapType::Fou) };
         assert!(!ok);
         assert_eq!(host_stubs::host_last_fou_encap(), None);
-    }
-
-    // ── Arena allocation tests ─────────────────────────────────
-
-    #[test]
-    fn arena_alloc_returns_non_null_on_host() {
-        host_stubs::host_reset_arena_state();
-        let ptr = unsafe { arena_alloc_pages(core::ptr::null_mut(), 4) };
-        assert!(ptr.is_some());
-        assert_eq!(host_stubs::host_arena_allocated_pages(), 4);
-    }
-
-    #[test]
-    fn arena_free_decrements_counter() {
-        host_stubs::host_reset_arena_state();
-        let ptr = unsafe { arena_alloc_pages(core::ptr::null_mut(), 8) };
-        assert_eq!(host_stubs::host_arena_allocated_pages(), 8);
-        unsafe { arena_free_pages(core::ptr::null_mut(), ptr.unwrap(), 3) };
-        assert_eq!(host_stubs::host_arena_allocated_pages(), 5);
-    }
-
-    #[test]
-    fn arena_alloc_free_roundtrip_returns_to_zero() {
-        host_stubs::host_reset_arena_state();
-        let ptr = unsafe { arena_alloc_pages(core::ptr::null_mut(), 2) };
-        unsafe { arena_free_pages(core::ptr::null_mut(), ptr.unwrap(), 2) };
-        assert_eq!(host_stubs::host_arena_allocated_pages(), 0);
     }
 }

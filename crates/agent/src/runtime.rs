@@ -558,9 +558,9 @@ pub async fn load_ebpf_programs(
                 }
                 // Wire tail-call: firewall → ratelimit
                 if let Some(ref mut fw) = fw_loader
-                    && let Ok(rl_fd) = rl_loader.xdp_program_fd("xdp_ratelimit")
+                    && let Ok(rl_fd) = rl_loader.program_raw_fd("xdp_ratelimit")
                 {
-                    let _ = fw.set_tail_call_target("XDP_PROG_ARRAY", 0, &rl_fd);
+                    let _ = fw.set_tail_call_raw("XDP_PROG_ARRAY", 0, rl_fd);
                 }
                 iface_groups_mgr.add_map(rl_loader.ebpf_mut());
                 tenant_vlan_mgr.add_map(rl_loader.ebpf_mut());
@@ -593,31 +593,11 @@ pub async fn load_ebpf_programs(
     // ── TC IDS ──────────────────────────────────────────────────
     let ids_ok = if config.ids.enabled {
         match startup::try_load_tc_ids(&ebpf_dir, config) {
-            Ok((
-                mut loader,
-                ids_mgr_opt,
-                l7_mgr_opt,
-                cfg_mgr_opt,
-                ids_rdr,
-                reader,
-                arena_reader,
-            )) => {
+            Ok((mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr, reader)) => {
                 let event_tx_clone = event_tx.clone();
                 tokio::spawn(
                     async move { reader.run(event_tx_clone, CancellationToken::new()).await },
                 );
-                if let Some(arena) = arena_reader {
-                    let arena_tx = event_tx.clone();
-                    tokio::spawn(async move {
-                        arena
-                            .run(
-                                arena_tx,
-                                std::time::Duration::from_millis(50),
-                                CancellationToken::new(),
-                            )
-                            .await;
-                    });
-                }
                 if let Some(ids_mgr) = ids_mgr_opt {
                     let mut svc = (**services.ids_svc.load()).clone();
                     svc.set_map_port(Box::new(ids_mgr));
@@ -689,23 +669,11 @@ pub async fn load_ebpf_programs(
     // ── TC DNS ──────────────────────────────────────────────────
     let dns_ok = if config.dns.enabled {
         match startup::try_load_tc_dns(&ebpf_dir, config) {
-            Ok((mut loader, dns_rdr, reader, arena_reader)) => {
+            Ok((mut loader, dns_rdr, reader)) => {
                 let event_tx_clone = event_tx.clone();
                 tokio::spawn(
                     async move { reader.run(event_tx_clone, CancellationToken::new()).await },
                 );
-                if let Some(arena) = arena_reader {
-                    let arena_tx = event_tx.clone();
-                    tokio::spawn(async move {
-                        arena
-                            .run(
-                                arena_tx,
-                                std::time::Duration::from_millis(50),
-                                CancellationToken::new(),
-                            )
-                            .await;
-                    });
-                }
                 if let Some(rdr) = dns_rdr {
                     metrics_readers.push(rdr);
                 }
@@ -726,23 +694,11 @@ pub async fn load_ebpf_programs(
     // ── Uprobe DLP ──────────────────────────────────────────────
     let dlp_ok = if config.dlp.enabled {
         match startup::try_load_uprobe_dlp(&ebpf_dir, config) {
-            Ok((mut loader, dlp_rdr, reader, arena_reader)) => {
+            Ok((mut loader, dlp_rdr, reader)) => {
                 let event_tx_clone = event_tx.clone();
                 tokio::spawn(
                     async move { reader.run(event_tx_clone, CancellationToken::new()).await },
                 );
-                if let Some(arena) = arena_reader {
-                    let arena_tx = event_tx.clone();
-                    tokio::spawn(async move {
-                        arena
-                            .run(
-                                arena_tx,
-                                std::time::Duration::from_millis(50),
-                                CancellationToken::new(),
-                            )
-                            .await;
-                    });
-                }
                 if let Some(rdr) = dlp_rdr {
                     metrics_readers.push(rdr);
                 }

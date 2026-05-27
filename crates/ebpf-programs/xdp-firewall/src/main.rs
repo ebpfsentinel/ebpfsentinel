@@ -39,8 +39,8 @@ use ebpf_common::{
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
 use ebpf_helpers::kfuncs::{
-    BpfCtOpts, CtTuple, XdpDynptr, bpf_xfrm_state_opts, kill_flow_via_xdp_ct, with_xdp_ct_lookup,
-    with_xdp_xfrm_state, xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag,
+    BpfCtOpts, CtTuple, bpf_xfrm_state_opts, kill_flow_via_xdp_ct, with_xdp_ct_lookup,
+    with_xdp_xfrm_state, xdp_frame_size, xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag,
 };
 use ebpf_helpers::net::{
     ETH_P_8021AD, ETH_P_8021Q, ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, IcmpHdr, Ipv6Hdr,
@@ -553,7 +553,17 @@ unsafe extern "C" fn scan_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
 #[xdp]
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
     increment_metric(METRIC_TOTAL_SEEN);
-    let action = match try_xdp_firewall(&ctx) {
+    // Capture the trusted XDP context pointer by value in the entry frame,
+    // where `ctx` is owned (guaranteed `PTR_TO_CTX` with the trusted flag).
+    // The `KF_TRUSTED_ARGS` kfuncs (conntrack, xfrm, dynptr, RX-metadata)
+    // require that trusted ctx as arg#0. Reloading the pointer from a
+    // `&XdpContext` inside an outlined subprogram keeps `PTR_TO_CTX` (so
+    // helpers and context field reads still work) but drops the trusted
+    // flag, which the verifier reports as "arg#0 ... got scalar". Threading
+    // the pointer by value keeps it in a register so the trusted flag
+    // survives every bpf-to-bpf call down to the kfunc site.
+    let ctx_raw: *mut core::ffi::c_void = ctx.ctx.cast();
+    let action = match try_xdp_firewall(&ctx, ctx_raw) {
         Ok(action) => action,
         Err(()) => {
             increment_metric(METRIC_ERRORS);
@@ -619,10 +629,10 @@ fn read_default_policy() -> u8 {
 
 /// Apply the default policy action. Reads packet metadata from `PKT_CTX`.
 #[inline(always)]
-fn apply_default_policy(ctx: &XdpContext) -> Result<u32, ()> {
+fn apply_default_policy(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void) -> Result<u32, ()> {
     let policy = read_default_policy();
     if policy == DEFAULT_POLICY_DROP {
-        emit_event(ctx, ACTION_DROP);
+        emit_event(ctx_raw, ACTION_DROP);
         increment_metric(METRIC_DROPPED);
         Ok(xdp_action::XDP_DROP)
     } else {
@@ -635,7 +645,7 @@ fn apply_default_policy(ctx: &XdpContext) -> Result<u32, ()> {
 // ── Packet processing ───────────────────────────────────────────────
 
 #[inline(always)]
-fn try_xdp_firewall(ctx: &XdpContext) -> Result<u32, ()> {
+fn try_xdp_firewall(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void) -> Result<u32, ()> {
     // Parse Ethernet header
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
@@ -666,7 +676,7 @@ fn try_xdp_firewall(ctx: &XdpContext) -> Result<u32, ()> {
     // The bpf_xdp_metadata_rx_vlan_tag kfunc (kernel 6.8+) recovers
     // the stripped tag from NIC metadata.
     if vlan_id == 0 {
-        if let Some((_proto, tci)) = unsafe { xdp_rx_vlan_tag(ctx.ctx.cast()) } {
+        if let Some((_proto, tci)) = unsafe { xdp_rx_vlan_tag(ctx_raw.cast_const()) } {
             vlan_id = tci & 0x0FFF;
             if vlan_id != 0 {
                 flags |= FLAG_VLAN;
@@ -675,9 +685,9 @@ fn try_xdp_firewall(ctx: &XdpContext) -> Result<u32, ()> {
     }
 
     if ether_type == ETH_P_IP {
-        process_firewall_v4(ctx, l3_offset, vlan_id, flags)
+        process_firewall_v4(ctx_raw, l3_offset, vlan_id, flags)
     } else if ether_type == ETH_P_IPV6 {
-        process_firewall_v6(ctx, l3_offset, vlan_id, flags | FLAG_IPV6)
+        process_firewall_v6(ctx_raw, l3_offset, vlan_id, flags | FLAG_IPV6)
     } else if ether_type == ETH_P_ARP {
         // Hand ARP frames to the bounded VIP announcer (slot 3). The
         // entry point performs the tail-call; it falls back to
@@ -696,11 +706,18 @@ fn try_xdp_firewall(ctx: &XdpContext) -> Result<u32, ()> {
 /// (~48 bytes for `RuleScanCtx` + locals), separate from the IPv6 path.
 #[inline(never)]
 fn process_firewall_v4(
-    ctx: &XdpContext,
+    ctx_raw: *mut core::ffi::c_void,
     l3_offset: usize,
     vlan_id: u16,
     flags: u8,
 ) -> Result<u32, ()> {
+    // BPF passes at most five arguments in registers (r1-r5); a sixth spills
+    // to the stack, which the BPF backend rejects. Carry only the trusted
+    // `ctx_raw` (the KF_TRUSTED kfuncs need it by value) and rebuild a local
+    // `XdpContext` for the helper/`ptr_at` reads, which only need PTR_TO_CTX.
+    let ctx_owned = XdpContext::new(ctx_raw.cast());
+    let ctx = &ctx_owned;
+
     // Read MACs via inline asm (u32+u16 loads). LLVM cannot outline these
     // into memcpy, and the bounds proof from ptr_at stays in this frame.
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
@@ -779,8 +796,7 @@ fn process_firewall_v4(
             // Write dst IP into daddr (first 4 bytes, network order).
             let dst_be = unsafe { (*ipv4hdr).dst_addr };
             opts.daddr[..4].copy_from_slice(&dst_be);
-            let _ipsec_hit =
-                unsafe { with_xdp_xfrm_state(ctx.ctx as *mut _, &mut opts, |_xs| true) };
+            let _ipsec_hit = unsafe { with_xdp_xfrm_state(ctx_raw, &mut opts, |_xs| true) };
             // TODO(future): surface _ipsec_hit via PacketEvent or
             // firewall rule matcher for IPsec-aware allow/deny.
         }
@@ -821,7 +837,8 @@ fn process_firewall_v4(
     // Phase 0: Kernel CT lookup via bpf_xdp_ct_lookup kfunc.
     // Reads nf_conn->status via bpf_probe_read_kernel at runtime
     // BTF-resolved offsets. Replaces the CT_TABLE_V4 shadow map.
-    let ct_state: u8 = kernel_ct_lookup_v4(ctx, src_ip, dst_ip, src_port, dst_port, protocol as u8);
+    let ct_state: u8 =
+        kernel_ct_lookup_v4(ctx_raw, src_ip, dst_ip, src_port, dst_port, protocol as u8);
     if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
         // Fast-path bypass: ESTABLISHED/RELATED skip rule evaluation.
         increment_metric(METRIC_PASSED);
@@ -833,11 +850,11 @@ fn process_firewall_v4(
     // Keys use network byte order for correct prefix matching.
     let src_key = Key::new(32, src_ip.to_be_bytes());
     if let Some(val) = FW_LPM_SRC_V4.get(&src_key) {
-        return apply_action(ctx, val.action);
+        return apply_action(ctx, ctx_raw, val.action);
     }
     let dst_key = Key::new(32, dst_ip.to_be_bytes());
     if let Some(val) = FW_LPM_DST_V4.get(&dst_key) {
-        return apply_action(ctx, val.action);
+        return apply_action(ctx, ctx_raw, val.action);
     }
 
     // Phase 1b: 5-tuple exact-match HashMap lookup — O(1).
@@ -850,7 +867,7 @@ fn process_firewall_v4(
         _pad: [0; 3],
     };
     if let Some(val) = unsafe { FW_HASH_5TUPLE.get(&hash_key_5t) } {
-        return apply_action(ctx, val.action);
+        return apply_action(ctx, ctx_raw, val.action);
     }
 
     // Phase 1c: protocol+port HashMap lookup — O(1).
@@ -860,7 +877,7 @@ fn process_firewall_v4(
         _pad: 0,
     };
     if let Some(val) = unsafe { FW_HASH_PORT.get(&hash_key_port) } {
-        return apply_action(ctx, val.action);
+        return apply_action(ctx, ctx_raw, val.action);
     }
 
     // Phase 2: Linear scan for complex rules (port ranges, VLAN, MAC, CT state).
@@ -922,16 +939,16 @@ fn process_firewall_v4(
         {
             if !check_connection_limits(src_ip, matched_rule_idx, matched_max_states) {
                 // Connection limit exceeded → DROP.
-                emit_event(ctx, ACTION_DROP);
+                emit_event(ctx_raw, ACTION_DROP);
                 increment_metric(METRIC_DROPPED);
                 return Ok(xdp_action::XDP_DROP);
             }
         }
-        return apply_action(ctx, action);
+        return apply_action(ctx, ctx_raw, action);
     }
 
     // No rule matched — apply default policy
-    apply_default_policy(ctx)
+    apply_default_policy(ctx, ctx_raw)
 }
 
 /// Check if an IPv4 rule matches the packet fields.
@@ -1199,7 +1216,7 @@ fn ct_state_to_bitmask(state: u8) -> u8 {
 /// state, or 0xFF if no entry exists.
 #[inline(always)]
 fn conntrack_lookup_v6(
-    ctx: &XdpContext,
+    ctx_raw: *mut core::ffi::c_void,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
     src_port: u16,
@@ -1212,18 +1229,14 @@ fn conntrack_lookup_v6(
     } else {
         BpfCtOpts::udp()
     };
-    unsafe {
-        with_xdp_ct_lookup(ctx.ctx as *mut _, tuple, &mut opts, |ct| {
-            read_kernel_ct_state(ct)
-        })
-    }
-    .unwrap_or(0xFF)
+    unsafe { with_xdp_ct_lookup(ctx_raw, tuple, &mut opts, |ct| read_kernel_ct_state(ct)) }
+        .unwrap_or(0xFF)
 }
 
 /// IPv4 kernel CT lookup via `bpf_xdp_ct_lookup` + `bpf_probe_read_kernel`.
 #[inline(always)]
 fn kernel_ct_lookup_v4(
-    ctx: &XdpContext,
+    ctx_raw: *mut core::ffi::c_void,
     src_ip: u32,
     dst_ip: u32,
     src_port: u16,
@@ -1236,12 +1249,8 @@ fn kernel_ct_lookup_v4(
     } else {
         BpfCtOpts::udp()
     };
-    unsafe {
-        with_xdp_ct_lookup(ctx.ctx as *mut _, tuple, &mut opts, |ct| {
-            read_kernel_ct_state(ct)
-        })
-    }
-    .unwrap_or(0xFF)
+    unsafe { with_xdp_ct_lookup(ctx_raw, tuple, &mut opts, |ct| read_kernel_ct_state(ct)) }
+        .unwrap_or(0xFF)
 }
 
 /// Read `nf_conn->status` via `bpf_probe_read_kernel` at runtime
@@ -1308,11 +1317,17 @@ fn lpm_lookup_v6(pkt_ctx: *const PacketCtx) -> i32 {
 /// accumulating with `RuleScanCtx` (~48 bytes) in `process_firewall_v4`.
 #[inline(never)]
 fn process_firewall_v6(
-    ctx: &XdpContext,
+    ctx_raw: *mut core::ffi::c_void,
     l3_offset: usize,
     vlan_id: u16,
     flags: u8,
 ) -> Result<u32, ()> {
+    // See `process_firewall_v4`: keep the arg count within the five-register
+    // BPF limit by carrying only the trusted `ctx_raw` and rebuilding a local
+    // `XdpContext` for the PTR_TO_CTX helper/`ptr_at` reads.
+    let ctx_owned = XdpContext::new(ctx_raw.cast());
+    let ctx = &ctx_owned;
+
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut dst_mac = [0u8; 6];
     let mut src_mac = [0u8; 6];
@@ -1394,7 +1409,8 @@ fn process_firewall_v6(
     // Phase 0: Conntrack lookup (IPv6).
     // Look up the connection state once; used for fast-path bypass and
     // ct_state_mask matching during the rule scan.
-    let ct_state: u8 = conntrack_lookup_v6(ctx, &src_addr, &dst_addr, src_port, dst_port, next_hdr);
+    let ct_state: u8 =
+        conntrack_lookup_v6(ctx_raw, &src_addr, &dst_addr, src_port, dst_port, next_hdr);
     if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
         increment_metric(METRIC_PASSED);
         write_xdp_metadata(ctx, ACTION_PASS, 0);
@@ -1405,7 +1421,7 @@ fn process_firewall_v6(
     // Read raw bytes from off-stack PKT_CTX.
     let lpm_action = lpm_lookup_v6(pkt_ctx);
     if lpm_action >= 0 {
-        return apply_action(ctx, lpm_action as u8);
+        return apply_action(ctx, ctx_raw, lpm_action as u8);
     }
 
     // Phase 2: Linear scan for complex rules (port, protocol, VLAN).
@@ -1465,16 +1481,16 @@ fn process_firewall_v6(
             && (ct_state == CT_STATE_NEW || ct_state == 0xFF)
         {
             if !check_connection_limits(src_addr[0], matched_rule_idx, matched_max_states) {
-                emit_event(ctx, ACTION_DROP);
+                emit_event(ctx_raw, ACTION_DROP);
                 increment_metric(METRIC_DROPPED);
                 return Ok(xdp_action::XDP_DROP);
             }
         }
-        return apply_action(ctx, action);
+        return apply_action(ctx, ctx_raw, action);
     }
 
     // No rule matched — apply default policy
-    apply_default_policy(ctx)
+    apply_default_policy(ctx, ctx_raw)
 }
 
 /// Check if an IPv6 rule matches the packet fields.
@@ -1599,10 +1615,10 @@ fn match_rule_v6(
 /// `XDP_PASS` — this satisfies the kernel 6.17+ verifier requirement
 /// that tail_call only happens in functions returning `int`.
 #[inline(always)]
-fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
+fn apply_action(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void, action: u8) -> Result<u32, ()> {
     match action {
         ACTION_DROP => {
-            emit_event(ctx, ACTION_DROP);
+            emit_event(ctx_raw, ACTION_DROP);
             increment_metric(METRIC_DROPPED);
 
             // Mark the kernel netfilter CT entry as DYING so the rest
@@ -1628,7 +1644,7 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
                 } else {
                     BpfCtOpts::udp()
                 };
-                unsafe { kill_flow_via_xdp_ct(ctx.ctx as *mut _, tuple, &mut opts) };
+                unsafe { kill_flow_via_xdp_ct(ctx_raw, tuple, &mut opts) };
             }
 
             // Try CpuMap redirect for DDoS CPU steering. When userspace has
@@ -1642,14 +1658,14 @@ fn apply_action(ctx: &XdpContext, action: u8) -> Result<u32, ()> {
             Ok(xdp_action::XDP_DROP)
         }
         ACTION_REJECT => {
-            emit_event(ctx, ACTION_REJECT);
+            emit_event(ctx_raw, ACTION_REJECT);
             increment_metric(METRIC_REJECTED);
             // Return sentinel — the entry point will tail-call to
             // xdp-firewall-reject which has its own 512B stack.
             Ok(XDP_ACTION_REJECT)
         }
         ACTION_LOG => {
-            emit_event(ctx, ACTION_LOG);
+            emit_event(ctx_raw, ACTION_LOG);
             increment_metric(METRIC_PASSED);
             write_xdp_metadata(ctx, ACTION_LOG, 0);
             Ok(xdp_action::XDP_PASS)
@@ -1724,7 +1740,7 @@ fn write_xdp_metadata(ctx: &XdpContext, action: u8, rule_id: u32) {
 /// fields stay 0 — userspace consumers gate on
 /// `PacketEvent::has_hw_rss_hash` / `has_hw_timestamp`.
 #[inline(always)]
-fn emit_event(ctx: &XdpContext, action: u8) {
+fn emit_event(ctx_raw: *mut core::ffi::c_void, action: u8) {
     if ringbuf_has_backpressure() {
         increment_metric(METRIC_EVENTS_DROPPED);
         return;
@@ -1734,13 +1750,11 @@ fn emit_event(ctx: &XdpContext, action: u8) {
         None => return,
     };
 
-    // XdpDynptr validates the kfunc path from XDP context and
-    // provides the full frame size including multi-buffer fragments.
-    let _xdp_frame_size = unsafe { XdpDynptr::from_xdp(ctx.ctx as *mut _) }
-        .map(|dp| dp.size())
-        .unwrap_or(0);
-    let (rss_hash, rss_hash_type) = unsafe { xdp_rx_hash(ctx.ctx.cast()) }.unwrap_or((0, 0));
-    let rx_hw_ts = unsafe { xdp_rx_timestamp(ctx.ctx.cast()) }.unwrap_or(0);
+    // Validates the dynptr kfunc path from XDP context and provides
+    // the full frame size including multi-buffer fragments.
+    let _xdp_frame_size = unsafe { xdp_frame_size(ctx_raw) }.unwrap_or(0);
+    let (rss_hash, rss_hash_type) = unsafe { xdp_rx_hash(ctx_raw.cast_const()) }.unwrap_or((0, 0));
+    let rx_hw_ts = unsafe { xdp_rx_timestamp(ctx_raw.cast_const()) }.unwrap_or(0);
     if let Some(mut entry) = EVENTS.reserve::<PacketEvent>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {

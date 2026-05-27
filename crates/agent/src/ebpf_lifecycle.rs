@@ -233,7 +233,7 @@ impl EbpfProgramManager {
     // ── Per-program enable implementations ─────────────────────────
 
     async fn enable_tc_ids(&mut self, config: &AgentConfig) -> anyhow::Result<()> {
-        let (mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr, reader, arena_reader) =
+        let (mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr, reader) =
             startup::try_load_tc_ids(&self.ebpf_dir, config)?;
 
         let cancel = CancellationToken::new();
@@ -241,18 +241,7 @@ impl EbpfProgramManager {
         let c = cancel.clone();
         let jh = tokio::spawn(async move { reader.run(tx, c).await });
 
-        let mut reader_handles = vec![jh];
-        if let Some(arena) = arena_reader {
-            let arena_tx = self.event_tx.clone();
-            let arena_cancel = cancel.clone();
-            let arena_jh = tokio::spawn(async move {
-                arena
-                    .run(arena_tx, std::time::Duration::from_millis(50), arena_cancel)
-                    .await;
-            });
-            reader_handles.push(arena_jh);
-            info!("IDS arena reader started (50ms poll)");
-        }
+        let reader_handles = vec![jh];
 
         if let Some(ids_mgr) = ids_mgr_opt {
             {
@@ -336,26 +325,14 @@ impl EbpfProgramManager {
     }
 
     async fn enable_tc_dns(&mut self, config: &AgentConfig) -> anyhow::Result<()> {
-        let (mut loader, dns_rdr, reader, arena_reader) =
-            startup::try_load_tc_dns(&self.ebpf_dir, config)?;
+        let (mut loader, dns_rdr, reader) = startup::try_load_tc_dns(&self.ebpf_dir, config)?;
 
         let cancel = CancellationToken::new();
         let tx = self.event_tx.clone();
         let c = cancel.clone();
         let jh = tokio::spawn(async move { reader.run(tx, c).await });
 
-        let mut reader_handles = vec![jh];
-        if let Some(arena) = arena_reader {
-            let arena_tx = self.event_tx.clone();
-            let arena_cancel = cancel.clone();
-            let arena_jh = tokio::spawn(async move {
-                arena
-                    .run(arena_tx, std::time::Duration::from_millis(50), arena_cancel)
-                    .await;
-            });
-            reader_handles.push(arena_jh);
-            info!("DNS arena reader started (50ms poll)");
-        }
+        let reader_handles = vec![jh];
 
         if let Some(rdr) = dns_rdr {
             self.metrics_readers.write().await.push(rdr);
@@ -506,26 +483,14 @@ impl EbpfProgramManager {
     }
 
     async fn enable_uprobe_dlp(&mut self, config: &AgentConfig) -> anyhow::Result<()> {
-        let (mut loader, dlp_rdr, reader, arena_reader) =
-            startup::try_load_uprobe_dlp(&self.ebpf_dir, config)?;
+        let (mut loader, dlp_rdr, reader) = startup::try_load_uprobe_dlp(&self.ebpf_dir, config)?;
 
         let cancel = CancellationToken::new();
         let tx = self.event_tx.clone();
         let c = cancel.clone();
         let jh = tokio::spawn(async move { reader.run(tx, c).await });
 
-        let mut reader_handles = vec![jh];
-        if let Some(arena) = arena_reader {
-            let arena_tx = self.event_tx.clone();
-            let arena_cancel = cancel.clone();
-            let arena_handle = tokio::spawn(async move {
-                arena
-                    .run(arena_tx, std::time::Duration::from_millis(50), arena_cancel)
-                    .await;
-            });
-            reader_handles.push(arena_handle);
-            info!("DLP arena reader started via hot-reload (50ms poll)");
-        }
+        let reader_handles = vec![jh];
 
         if let Some(rdr) = dlp_rdr {
             self.metrics_readers.write().await.push(rdr);
@@ -581,11 +546,10 @@ impl EbpfProgramManager {
                     .programs
                     .get("xdp_ratelimit")
                     .ok_or_else(|| anyhow::anyhow!("xdp_ratelimit not loaded"))?;
-                rl.loader.xdp_program_fd("xdp_ratelimit")?
+                rl.loader.program_raw_fd("xdp_ratelimit")?
             };
             if let Some(fw) = self.programs.get_mut("xdp_firewall") {
-                fw.loader
-                    .set_tail_call_target("XDP_PROG_ARRAY", 0, &rl_fd)?;
+                fw.loader.set_tail_call_raw("XDP_PROG_ARRAY", 0, rl_fd)?;
                 info!("XDP chain: firewall → ratelimit wired (slot 0)");
             }
         } else if fw_loaded {
@@ -602,11 +566,10 @@ impl EbpfProgramManager {
                     .programs
                     .get("xdp_loadbalancer")
                     .ok_or_else(|| anyhow::anyhow!("xdp_loadbalancer not loaded"))?;
-                lb.loader.xdp_program_fd("xdp_loadbalancer")?
+                lb.loader.program_raw_fd("xdp_loadbalancer")?
             };
             if let Some(fw) = self.programs.get_mut("xdp_firewall") {
-                fw.loader
-                    .set_tail_call_target("XDP_PROG_ARRAY", 2, &lb_fd)?;
+                fw.loader.set_tail_call_raw("XDP_PROG_ARRAY", 2, lb_fd)?;
                 info!("XDP chain: firewall → loadbalancer wired (slot 2)");
             }
         } else if fw_loaded && let Some(fw) = self.programs.get_mut("xdp_firewall") {
@@ -620,10 +583,10 @@ impl EbpfProgramManager {
                     .programs
                     .get("xdp_loadbalancer")
                     .ok_or_else(|| anyhow::anyhow!("xdp_loadbalancer not loaded"))?;
-                lb.loader.xdp_program_fd("xdp_loadbalancer")?
+                lb.loader.program_raw_fd("xdp_loadbalancer")?
             };
             if let Some(rl) = self.programs.get_mut("xdp_ratelimit") {
-                rl.loader.set_tail_call_target("RL_PROG_ARRAY", 1, &lb_fd)?;
+                rl.loader.set_tail_call_raw("RL_PROG_ARRAY", 1, lb_fd)?;
                 info!("XDP chain: ratelimit → loadbalancer wired (RL slot 1)");
             }
         } else if rl_loaded && let Some(rl) = self.programs.get_mut("xdp_ratelimit") {
