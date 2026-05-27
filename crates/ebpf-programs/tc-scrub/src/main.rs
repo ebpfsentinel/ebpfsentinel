@@ -66,13 +66,17 @@ static SCRUB_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(SCRUB_MET
 #[classifier]
 pub fn tc_scrub(mut ctx: TcContext) -> i32 {
     increment_metric(SCRUB_METRIC_TOTAL_SEEN);
-    match try_tc_scrub(&mut ctx) {
+    let action = match try_tc_scrub(&mut ctx) {
         Ok(action) => action,
         Err(()) => {
             increment_metric(SCRUB_METRIC_ERRORS);
             TC_ACT_OK
         }
-    }
+    };
+    // Under TCX (kernel >= 6.6) returning TC_ACT_OK terminates the program
+    // chain on this hook; translate a "pass" verdict to TCX_NEXT (-1) so other
+    // tc programs on the same interface still run. Terminal verdicts pass through.
+    if action == TC_ACT_OK { -1 } else { action }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

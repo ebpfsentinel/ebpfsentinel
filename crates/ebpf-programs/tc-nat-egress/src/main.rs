@@ -4,44 +4,39 @@
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     cty::c_void,
-    helpers::{bpf_ktime_get_boot_ns, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop, bpf_skb_store_bytes},
+    helpers::{
+        bpf_ktime_get_boot_ns, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop,
+        bpf_skb_store_bytes,
+    },
     macros::{classifier, map},
     maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, lpm_trie::Key},
     programs::TcContext,
 };
-use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
-    PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, ipv6_mask_match, ones_complement_add,
-    prefix_to_mask, u16_from_be_bytes, u32_from_be_bytes, u32x4_to_bytes,
-};
-use ebpf_helpers::kfuncs::{
-    BpfCtOpts, BpfFouEncap, BpfXfrmInfo, CtBuilder, CtTuple, FouEncapType, NfInetAddr,
-    NfNatManipType, skb_set_fou_encap, skb_set_xfrm_info,
-};
-use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
-use ebpf_helpers::increment_metric;
 use ebpf_common::{
     conntrack::normalize_key_v6,
     nat::{
-        MAX_NAT_HASH_EXACT, MAX_NAT_PORT_ALLOC, MAX_NAT_RULES, MAX_NAT_RULES_V6,
-        MAX_NPTV6_RULES, NAT_MATCH_DST_IP, NAT_MATCH_PROTO,
-        NAT_MATCH_SRC_IP, NAT_METRIC_COUNT, NAT_METRIC_ERRORS,
-        NAT_METRIC_FOU_ENCAP, NAT_METRIC_KFUNC_DELEGATED,
-        NAT_METRIC_KFUNC_FALLBACK, NAT_METRIC_MASQ_APPLIED,
-        NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_SNAT_APPLIED,
-        NAT_METRIC_TOTAL_SEEN, NAT_METRIC_XFRM_STEERED,
-        NAT_TYPE_MASQUERADE, NAT_TYPE_SNAT,
+        MAX_NAT_HASH_EXACT, MAX_NAT_PORT_ALLOC, MAX_NAT_RULES, MAX_NAT_RULES_V6, MAX_NPTV6_RULES,
+        NAT_MATCH_DST_IP, NAT_MATCH_PROTO, NAT_MATCH_SRC_IP, NAT_METRIC_COUNT, NAT_METRIC_ERRORS,
+        NAT_METRIC_FOU_ENCAP, NAT_METRIC_KFUNC_DELEGATED, NAT_METRIC_KFUNC_FALLBACK,
+        NAT_METRIC_MASQ_APPLIED, NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_SNAT_APPLIED,
+        NAT_METRIC_TOTAL_SEEN, NAT_METRIC_XFRM_STEERED, NAT_TYPE_MASQUERADE, NAT_TYPE_SNAT,
         NatHashKeyExact, NatHashValue, NatPortAllocKey, NatPortAllocValue, NatRuleEntry,
         NatRuleEntryV6, NptV6RuleEntry,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
-use network_types::{
-    eth::EthHdr,
-    ip::Ipv4Hdr,
-    tcp::TcpHdr,
-    udp::UdpHdr,
+use ebpf_helpers::increment_metric;
+use ebpf_helpers::kfuncs::{
+    BpfCtOpts, BpfFouEncap, BpfXfrmInfo, CtBuilder, CtTuple, FouEncapType, NfInetAddr,
+    NfNatManipType, skb_set_fou_encap, skb_set_xfrm_info,
 };
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
+    VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, ipv6_mask_match, ones_complement_add,
+    prefix_to_mask, u16_from_be_bytes, u32_from_be_bytes, u32x4_to_bytes,
+};
+use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 
 // ── Constants ───────────────────────────────────────────────────────
 // Network constants and header structs imported from ebpf_helpers.
@@ -122,13 +117,17 @@ static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
 #[classifier]
 pub fn tc_nat_egress(ctx: TcContext) -> i32 {
     increment_metric(NAT_METRIC_TOTAL_SEEN);
-    match try_nat_egress(&ctx) {
+    let action = match try_nat_egress(&ctx) {
         Ok(action) => action,
         Err(()) => {
             increment_metric(NAT_METRIC_ERRORS);
             TC_ACT_OK
         }
-    }
+    };
+    // Under TCX (kernel >= 6.6) returning TC_ACT_OK terminates the program
+    // chain on this hook; translate a "pass" verdict to TCX_NEXT (-1) so other
+    // tc programs on the same interface still run. Terminal verdicts pass through.
+    if action == TC_ACT_OK { -1 } else { action }
 }
 
 // ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::tc
@@ -306,7 +305,12 @@ unsafe extern "C" fn scan_snat_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
 
                 lctx.new_src_ip = new_src_ip;
                 lctx.new_src_port = if rule.nat_port_start != 0 {
-                    allocate_port(lctx.src_ip, lctx.src_port, rule.nat_port_start, rule.nat_port_end)
+                    allocate_port(
+                        lctx.src_ip,
+                        lctx.src_port,
+                        rule.nat_port_start,
+                        rule.nat_port_end,
+                    )
                 } else {
                     lctx.src_port
                 };
@@ -351,7 +355,12 @@ unsafe extern "C" fn scan_snat_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
 
                 lctx.new_src_addr = new_src_addr;
                 lctx.new_src_port = if rule.nat_port_start != 0 {
-                    allocate_port_v6(&lctx.src_addr, lctx.src_port, rule.nat_port_start, rule.nat_port_end)
+                    allocate_port_v6(
+                        &lctx.src_addr,
+                        lctx.src_port,
+                        rule.nat_port_start,
+                        rule.nat_port_end,
+                    )
                 } else {
                     lctx.src_port
                 };
@@ -443,8 +452,15 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         }
         increment_metric(NAT_METRIC_SNAT_APPLIED);
         kfunc_delegate_nat_v4(
-            ctx, src_ip, dst_ip, src_port, dst_port, protocol,
-            val.nat_addr, val.nat_port_start, NfNatManipType::Src,
+            ctx,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            protocol,
+            val.nat_addr,
+            val.nat_port_start,
+            NfNatManipType::Src,
         );
         return Ok(TC_ACT_OK);
     }
@@ -462,7 +478,11 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
     let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) };
 
     let mut scan_ctx = SnatScanCtx {
-        count: if count > MAX_NAT_RULES { MAX_NAT_RULES } else { count },
+        count: if count > MAX_NAT_RULES {
+            MAX_NAT_RULES
+        } else {
+            count
+        },
         src_ip,
         dst_ip,
         src_port,
@@ -507,8 +527,15 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         }
 
         kfunc_delegate_nat_v4(
-            ctx, src_ip, dst_ip, src_port, dst_port, protocol,
-            translated_ip, new_src_port, NfNatManipType::Src,
+            ctx,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            protocol,
+            translated_ip,
+            new_src_port,
+            NfNatManipType::Src,
         );
 
         // IPsec steering: push matched traffic through an xfrmi device.
@@ -560,8 +587,8 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
     }
 
     // Skip IPv6 extension headers to find the actual L4 protocol.
-    let (protocol, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_protocol)
-        .ok_or(())?;
+    let (protocol, l4_offset) =
+        skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_protocol).ok_or(())?;
 
     let (src_port, dst_port) = match protocol {
         PROTO_TCP => {
@@ -602,7 +629,11 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
     let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr) };
 
     let mut scan_ctx = SnatScanCtxV6 {
-        count: if count > MAX_NAT_RULES_V6 { MAX_NAT_RULES_V6 } else { count },
+        count: if count > MAX_NAT_RULES_V6 {
+            MAX_NAT_RULES_V6
+        } else {
+            count
+        },
         src_addr,
         dst_addr,
         src_port,
@@ -641,8 +672,15 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         }
 
         kfunc_delegate_nat_v6(
-            ctx, &src_addr, &dst_addr, src_port, dst_port, protocol,
-            &translated_addr, new_src_port, NfNatManipType::Src,
+            ctx,
+            &src_addr,
+            &dst_addr,
+            src_port,
+            dst_port,
+            protocol,
+            &translated_addr,
+            new_src_port,
+            NfNatManipType::Src,
         );
     }
 
@@ -657,7 +695,11 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
 fn try_nptv6_egress(ctx: &TcContext, l3_offset: usize, src_addr: &[u32; 4]) -> Result<bool, ()> {
     let count = match NPTV6_RULE_COUNT.get(0) {
         Some(&c) if c > 0 => {
-            if c > MAX_NPTV6_RULES { MAX_NPTV6_RULES } else { c }
+            if c > MAX_NPTV6_RULES {
+                MAX_NPTV6_RULES
+            } else {
+                c
+            }
         }
         _ => return Ok(false),
     };

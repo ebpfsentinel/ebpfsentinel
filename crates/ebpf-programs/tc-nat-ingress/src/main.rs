@@ -4,40 +4,39 @@
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     cty::c_void,
-    helpers::{bpf_ktime_get_boot_ns, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop, bpf_skb_store_bytes},
+    helpers::{
+        bpf_ktime_get_boot_ns, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop,
+        bpf_skb_store_bytes,
+    },
     macros::{classifier, map},
     maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, lpm_trie::Key},
     programs::TcContext,
 };
 
-use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
-    PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, ipv6_mask_match, ones_complement_add,
-    prefix_to_mask, u16_from_be_bytes, u32_from_be_bytes, u32x4_to_bytes,
-};
-use ebpf_helpers::kfuncs::{BpfCtOpts, CtBuilder, CtTuple, NfInetAddr, NfNatManipType, skb_get_xfrm_info};
-use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
-use ebpf_helpers::increment_metric;
 use ebpf_common::{
     conntrack::{ConnKey, normalize_key_v4, normalize_key_v6},
     nat::{
-        HairpinConfig, HairpinCtValue, MAX_HAIRPIN_CT,
-        MAX_NAT_HASH_EXACT, MAX_NAT_RULES, MAX_NAT_RULES_V6, MAX_NPTV6_RULES,
-        NAT_MATCH_DST_IP, NAT_MATCH_DST_PORT, NAT_MATCH_PROTO, NAT_MATCH_XFRM,
-        NAT_MATCH_SRC_IP, NAT_METRIC_COUNT, NAT_METRIC_DNAT_APPLIED, NAT_METRIC_ERRORS,
-        NAT_METRIC_HAIRPIN_APPLIED, NAT_METRIC_KFUNC_DELEGATED, NAT_METRIC_KFUNC_FALLBACK,
-        NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_TOTAL_SEEN,
-        NAT_TYPE_DNAT, NAT_TYPE_ONETOONE, NAT_TYPE_REDIRECT,
-        NatHashKeyExact, NatHashValue, NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry,
+        HairpinConfig, HairpinCtValue, MAX_HAIRPIN_CT, MAX_NAT_HASH_EXACT, MAX_NAT_RULES,
+        MAX_NAT_RULES_V6, MAX_NPTV6_RULES, NAT_MATCH_DST_IP, NAT_MATCH_DST_PORT, NAT_MATCH_PROTO,
+        NAT_MATCH_SRC_IP, NAT_MATCH_XFRM, NAT_METRIC_COUNT, NAT_METRIC_DNAT_APPLIED,
+        NAT_METRIC_ERRORS, NAT_METRIC_HAIRPIN_APPLIED, NAT_METRIC_KFUNC_DELEGATED,
+        NAT_METRIC_KFUNC_FALLBACK, NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_TOTAL_SEEN,
+        NAT_TYPE_DNAT, NAT_TYPE_ONETOONE, NAT_TYPE_REDIRECT, NatHashKeyExact, NatHashValue,
+        NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
-use network_types::{
-    eth::EthHdr,
-    ip::Ipv4Hdr,
-    tcp::TcpHdr,
-    udp::UdpHdr,
+use ebpf_helpers::increment_metric;
+use ebpf_helpers::kfuncs::{
+    BpfCtOpts, CtBuilder, CtTuple, NfInetAddr, NfNatManipType, skb_get_xfrm_info,
 };
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
+    VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, ipv6_mask_match, ones_complement_add,
+    prefix_to_mask, u16_from_be_bytes, u32_from_be_bytes, u32x4_to_bytes,
+};
+use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 
 // ── Constants ───────────────────────────────────────────────────────
 // Network constants and header structs imported from ebpf_helpers.
@@ -131,13 +130,17 @@ static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
 #[classifier]
 pub fn tc_nat_ingress(ctx: TcContext) -> i32 {
     increment_metric(NAT_METRIC_TOTAL_SEEN);
-    match try_nat_ingress(&ctx) {
+    let action = match try_nat_ingress(&ctx) {
         Ok(action) => action,
         Err(()) => {
             increment_metric(NAT_METRIC_ERRORS);
             TC_ACT_OK
         }
-    }
+    };
+    // Under TCX (kernel >= 6.6) returning TC_ACT_OK terminates the program
+    // chain on this hook; translate a "pass" verdict to TCX_NEXT (-1) so other
+    // tc programs on the same interface still run. Terminal verdicts pass through.
+    if action == TC_ACT_OK { -1 } else { action }
 }
 
 // ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::tc
@@ -296,7 +299,14 @@ unsafe extern "C" fn scan_dnat_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
             if rule.tenant_id != 0 && rule.tenant_id != lctx.tenant_id {
                 return 0; // tenant mismatch, continue to next rule
             }
-            if match_nat_rule(rule, lctx.src_ip, lctx.dst_ip, lctx.dst_port, lctx.protocol, lctx.xfrm_if_id) {
+            if match_nat_rule(
+                rule,
+                lctx.src_ip,
+                lctx.dst_ip,
+                lctx.dst_port,
+                lctx.protocol,
+                lctx.xfrm_if_id,
+            ) {
                 let new_dst_ip = match rule.nat_type {
                     NAT_TYPE_DNAT | NAT_TYPE_ONETOONE => rule.nat_addr,
                     NAT_TYPE_REDIRECT => lctx.src_ip,
@@ -337,7 +347,13 @@ unsafe extern "C" fn scan_dnat_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
             if (rule.match_flags & NAT_MATCH_XFRM) != 0 && rule.xfrm_if_id != lctx.xfrm_if_id {
                 return 0;
             }
-            if match_nat_rule_v6(rule, &lctx.src_addr, &lctx.dst_addr, lctx.dst_port, lctx.protocol) {
+            if match_nat_rule_v6(
+                rule,
+                &lctx.src_addr,
+                &lctx.dst_addr,
+                lctx.dst_port,
+                lctx.protocol,
+            ) {
                 let new_dst_addr = match rule.nat_type {
                     NAT_TYPE_DNAT | NAT_TYPE_ONETOONE => rule.nat_addr,
                     NAT_TYPE_REDIRECT => lctx.src_addr,
@@ -428,9 +444,23 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
     let hp_key = normalize_key_v4(src_ip, dst_ip, src_port, dst_port, protocol);
     if let Some(hp_val) = unsafe { NAT_HAIRPIN_CT.get(&hp_key) } {
         // Return traffic: dst is the firewall SNAT IP -> restore to original client
-        rewrite_dst_ip(ctx, l3_offset, l4_offset, protocol, dst_ip, hp_val.orig_src_ip)?;
+        rewrite_dst_ip(
+            ctx,
+            l3_offset,
+            l4_offset,
+            protocol,
+            dst_ip,
+            hp_val.orig_src_ip,
+        )?;
         // Return traffic: src is the internal server -> restore to external IP
-        rewrite_src_ip(ctx, l3_offset, l4_offset, protocol, src_ip, hp_val.orig_dst_ip)?;
+        rewrite_src_ip(
+            ctx,
+            l3_offset,
+            l4_offset,
+            protocol,
+            src_ip,
+            hp_val.orig_dst_ip,
+        )?;
         increment_metric(NAT_METRIC_HAIRPIN_APPLIED);
         return Ok(TC_ACT_OK);
     }
@@ -451,8 +481,15 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         // NAT info delegated to kernel CT via bpf_ct_set_nat_info.
         increment_metric(NAT_METRIC_DNAT_APPLIED);
         kfunc_delegate_nat_v4(
-            ctx, src_ip, dst_ip, src_port, dst_port, protocol,
-            val.nat_addr, val.nat_port_start, NfNatManipType::Dst,
+            ctx,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            protocol,
+            val.nat_addr,
+            val.nat_port_start,
+            NfNatManipType::Dst,
         );
         return Ok(TC_ACT_OK);
     }
@@ -477,7 +514,11 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         .unwrap_or(0);
 
     let mut scan_ctx = DnatScanCtx {
-        count: if count > MAX_NAT_RULES { MAX_NAT_RULES } else { count },
+        count: if count > MAX_NAT_RULES {
+            MAX_NAT_RULES
+        } else {
+            count
+        },
         src_ip,
         dst_ip,
         dst_port,
@@ -518,8 +559,14 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         // the DNAT mapping and any nf_nat-aware tooling can track it.
         kfunc_delegate_nat_v4(
             ctx,
-            src_ip, dst_ip, src_port, dst_port, protocol,
-            new_dst_ip, new_dst_port, NfNatManipType::Dst,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            protocol,
+            new_dst_ip,
+            new_dst_port,
+            NfNatManipType::Dst,
         );
 
         // Hairpin forward path: if both the original source and the
@@ -536,16 +583,23 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
                 {
                     // SNAT: rewrite source to firewall internal IP.
                     rewrite_src_ip(
-                        ctx, l3_offset, l4_offset, protocol,
-                        src_ip, hcfg.hairpin_snat_ip,
+                        ctx,
+                        l3_offset,
+                        l4_offset,
+                        protocol,
+                        src_ip,
+                        hcfg.hairpin_snat_ip,
                     )?;
 
                     // Store reverse mapping so return traffic can be restored.
                     // Key is the post-rewrite 5-tuple: (hairpin_snat_ip, new_dst_ip,
                     // src_port, new_dst_port, protocol).
                     let post_key = normalize_key_v4(
-                        hcfg.hairpin_snat_ip, new_dst_ip,
-                        src_port, new_dst_port, protocol,
+                        hcfg.hairpin_snat_ip,
+                        new_dst_ip,
+                        src_port,
+                        new_dst_port,
+                        protocol,
                     );
                     let hp_val = HairpinCtValue {
                         orig_src_ip: src_ip,
@@ -578,8 +632,8 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
     }
 
     // Skip IPv6 extension headers to find the actual L4 protocol.
-    let (protocol, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_protocol)
-        .ok_or(())?;
+    let (protocol, l4_offset) =
+        skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_protocol).ok_or(())?;
 
     let (src_port, dst_port) = match protocol {
         PROTO_TCP => {
@@ -623,7 +677,11 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         .unwrap_or(0);
 
     let mut scan_ctx = DnatScanCtxV6 {
-        count: if count > MAX_NAT_RULES_V6 { MAX_NAT_RULES_V6 } else { count },
+        count: if count > MAX_NAT_RULES_V6 {
+            MAX_NAT_RULES_V6
+        } else {
+            count
+        },
         src_addr,
         dst_addr,
         dst_port,
@@ -659,8 +717,15 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         increment_metric(NAT_METRIC_DNAT_APPLIED);
 
         kfunc_delegate_nat_v6(
-            ctx, &src_addr, &dst_addr, src_port, dst_port, protocol,
-            &new_dst_addr, new_dst_port, NfNatManipType::Dst,
+            ctx,
+            &src_addr,
+            &dst_addr,
+            src_port,
+            dst_port,
+            protocol,
+            &new_dst_addr,
+            new_dst_port,
+            NfNatManipType::Dst,
         );
     }
 
@@ -734,7 +799,7 @@ fn rewrite_dst_ip(
             l4_csum_off,
             u32::from_be_bytes(old_be) as u64,
             u32::from_be_bytes(new_be) as u64,
-            4,  // BPF_F_PSEUDO_HDR is 0x10, but 4 = size of the field
+            4, // BPF_F_PSEUDO_HDR is 0x10, but 4 = size of the field
         )
     };
     if ret != 0 {
@@ -937,7 +1002,11 @@ fn rewrite_dst_port(
 fn try_nptv6_ingress(ctx: &TcContext, l3_offset: usize, dst_addr: &[u32; 4]) -> Result<bool, ()> {
     let count = match NPTV6_RULE_COUNT.get(0) {
         Some(&c) if c > 0 => {
-            if c > MAX_NPTV6_RULES { MAX_NPTV6_RULES } else { c }
+            if c > MAX_NPTV6_RULES {
+                MAX_NPTV6_RULES
+            } else {
+                c
+            }
         }
         _ => return Ok(false),
     };
@@ -1075,10 +1144,14 @@ fn match_nat_rule_v6(
     if (flags & NAT_MATCH_PROTO) != 0 && rule.match_protocol != protocol {
         return false;
     }
-    if (flags & NAT_MATCH_SRC_IP) != 0 && !ipv6_mask_match(src_addr, &rule.match_src_addr, &rule.match_src_mask) {
+    if (flags & NAT_MATCH_SRC_IP) != 0
+        && !ipv6_mask_match(src_addr, &rule.match_src_addr, &rule.match_src_mask)
+    {
         return false;
     }
-    if (flags & NAT_MATCH_DST_IP) != 0 && !ipv6_mask_match(dst_addr, &rule.match_dst_addr, &rule.match_dst_mask) {
+    if (flags & NAT_MATCH_DST_IP) != 0
+        && !ipv6_mask_match(dst_addr, &rule.match_dst_addr, &rule.match_dst_mask)
+    {
         return false;
     }
     if (flags & NAT_MATCH_DST_PORT) != 0

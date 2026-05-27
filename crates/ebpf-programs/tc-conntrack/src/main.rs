@@ -50,13 +50,17 @@ pub fn tc_conntrack(ctx: TcContext) -> i32 {
     // Reloading it from `&TcContext` in an outlined subprogram would yield a
     // plain scalar and the kfunc call would be rejected.
     let skb_raw: *mut core::ffi::c_void = ctx.skb.skb.cast();
-    match try_tc_conntrack(&ctx, skb_raw) {
+    let action = match try_tc_conntrack(&ctx, skb_raw) {
         Ok(action) => action,
         Err(()) => {
             increment_metric(CT_METRIC_ERRORS);
             TC_ACT_OK
         }
-    }
+    };
+    // Under TCX (kernel >= 6.6) returning TC_ACT_OK terminates the program
+    // chain on this hook; translate a "pass" verdict to TCX_NEXT (-1) so other
+    // tc programs on the same interface still run. Terminal verdicts pass through.
+    if action == TC_ACT_OK { -1 } else { action }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

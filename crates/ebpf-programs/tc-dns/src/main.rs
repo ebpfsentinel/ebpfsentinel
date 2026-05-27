@@ -54,13 +54,17 @@ static DNS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
 #[classifier]
 pub fn tc_dns(ctx: TcContext) -> i32 {
     increment_metric(DNS_METRIC_TOTAL_SEEN);
-    match try_tc_dns(&ctx) {
+    let action = match try_tc_dns(&ctx) {
         Ok(action) => action,
         Err(()) => {
             increment_metric(DNS_METRIC_ERRORS);
             TC_ACT_OK
         }
-    }
+    };
+    // Under TCX (kernel >= 6.6) a program returning TC_ACT_OK terminates the
+    // program chain on this hook; translate a "pass" verdict to TCX_NEXT (-1)
+    // so other tc programs attached to the same interface still run.
+    if action == TC_ACT_OK { -1 } else { action }
 }
 
 // ── Packet processing ───────────────────────────────────────────────

@@ -286,13 +286,17 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) 
 #[classifier]
 pub fn tc_ids(ctx: TcContext) -> i32 {
     increment_metric(METRIC_TOTAL_SEEN);
-    match try_tc_ids(&ctx) {
+    let action = match try_tc_ids(&ctx) {
         Ok(action) => action,
         Err(()) => {
             increment_metric(METRIC_ERRORS);
             TC_ACT_OK
         }
-    }
+    };
+    // Under TCX (kernel >= 6.6) returning TC_ACT_OK terminates the program
+    // chain on this hook; translate a "pass" verdict to TCX_NEXT (-1) so other
+    // tc programs on the same interface still run. Terminal verdicts pass through.
+    if action == TC_ACT_OK { -1 } else { action }
 }
 
 // ── XDP metadata reading ────────────────────────────────────────────

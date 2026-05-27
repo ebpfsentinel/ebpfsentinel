@@ -10,23 +10,20 @@ use aya_ebpf::{
 };
 #[cfg(debug_assertions)]
 use aya_log_ebpf::info;
-use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
-    PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
-};
-use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
-use ebpf_helpers::{emit_packet_event, increment_metric};
 use ebpf_common::{
-    event::{
-        EVENT_TYPE_THREATINTEL, FLAG_IPV6, FLAG_VLAN,
-    },
+    event::{EVENT_TYPE_THREATINTEL, FLAG_IPV6, FLAG_VLAN},
     threatintel::{
         THREATINTEL_ACTION_DROP, THREATINTEL_MAX_ENTRIES, THREATINTEL_METRIC_DROPPED,
         THREATINTEL_METRIC_ERRORS, THREATINTEL_METRIC_EVENTS_DROPPED, THREATINTEL_METRIC_MATCHED,
-        THREATINTEL_METRIC_TOTAL_SEEN,
-        ThreatIntelKey, ThreatIntelKeyV6, ThreatIntelValue,
+        THREATINTEL_METRIC_TOTAL_SEEN, ThreatIntelKey, ThreatIntelKeyV6, ThreatIntelValue,
     },
 };
+use ebpf_helpers::net::{
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
+    VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
+};
+use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::{emit_packet_event, increment_metric};
 use network_types::{
     eth::EthHdr,
     ip::{IpProto, Ipv4Hdr},
@@ -84,13 +81,17 @@ static CONFIG_FLAGS: Array<u32> = Array::with_max_entries(1, 0);
 #[classifier]
 pub fn tc_threatintel(ctx: TcContext) -> i32 {
     increment_metric(THREATINTEL_METRIC_TOTAL_SEEN);
-    match try_tc_threatintel(&ctx) {
+    let action = match try_tc_threatintel(&ctx) {
         Ok(action) => action,
         Err(()) => {
             increment_metric(THREATINTEL_METRIC_ERRORS);
             TC_ACT_OK
         }
-    }
+    };
+    // Under TCX (kernel >= 6.6) returning TC_ACT_OK terminates the program
+    // chain on this hook; translate a "pass" verdict to TCX_NEXT (-1) so other
+    // tc programs on the same interface still run. Terminal verdicts pass through.
+    if action == TC_ACT_OK { -1 } else { action }
 }
 
 // ── Packet processing ───────────────────────────────────────────────
@@ -246,8 +247,8 @@ fn process_threatintel_v6(
     let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
 
     // Skip IPv6 extension headers to find the actual L4 protocol.
-    let (next_hdr, l4_offset) = skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr)
-        .ok_or(())?;
+    let (next_hdr, l4_offset) =
+        skip_ipv6_ext_headers(ctx, l3_offset + IPV6_HDR_LEN, raw_next_hdr).ok_or(())?;
 
     // Parse L4 ports
     let (src_port, dst_port) = if next_hdr == PROTO_TCP {
