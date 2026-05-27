@@ -59,7 +59,7 @@ teardown_file() {
     require_tool ncat
 
     # Start a simple HTTP listener on port 8888 to absorb the connection
-    ip netns exec "$EBPF_TEST_NS" ncat -l -p 8888 -k --sh-exec "echo -e 'HTTP/1.1 200 OK\r\n\r\nOK'" &
+    ip netns exec "$EBPF_TEST_NS" ncat -l -p 8888 -k --sh-exec "echo -e 'HTTP/1.1 200 OK\r\n\r\nOK'" </dev/null >/dev/null 2>&1 &
     local listener_pid=$!
     sleep 0.5
 
@@ -93,7 +93,7 @@ teardown_file() {
     before_count="$(echo "$before_body" | jq '(.alerts // .) | length' 2>/dev/null)" || before_count=0
 
     # Start a simple HTTP listener on port 8888
-    ip netns exec "$EBPF_TEST_NS" ncat -l -p 8888 -k --sh-exec "echo -e 'HTTP/1.1 200 OK\r\n\r\nOK'" &
+    ip netns exec "$EBPF_TEST_NS" ncat -l -p 8888 -k --sh-exec "echo -e 'HTTP/1.1 200 OK\r\n\r\nOK'" </dev/null >/dev/null 2>&1 &
     local listener_pid=$!
     sleep 0.5
 
@@ -152,7 +152,7 @@ teardown_file() {
 
     local create_body
     create_body="$(api_post /api/v1/firewall/l7-rules \
-        '{"name":"test-crud-http-rule","protocol":"http","action":"alert","priority":50,"http_path":"/test-crud","enabled":true}')"
+        '{"id":"test-crud-http-rule","protocol":"http","action":"log","priority":50,"path":"/test-crud","enabled":true}')"
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
@@ -173,7 +173,7 @@ teardown_file() {
     if [ -z "${L7_CRUD_RULE_ID:-}" ] || [ "$L7_CRUD_RULE_ID" = "null" ]; then
         local create_body
         create_body="$(api_post /api/v1/firewall/l7-rules \
-            '{"name":"test-crud-http-rule-del","protocol":"http","action":"alert","priority":51,"http_path":"/test-crud-del","enabled":true}')"
+            '{"id":"test-crud-http-rule-del","protocol":"http","action":"log","priority":51,"path":"/test-crud-del","enabled":true}')"
         _load_http_status
         L7_CRUD_RULE_ID="$(echo "$create_body" | jq -r '.id // .rule_id' 2>/dev/null)" || true
     fi
@@ -196,14 +196,14 @@ teardown_file() {
     # Create two rules with distinct priorities
     local body_low body_high
     body_low="$(api_post /api/v1/firewall/l7-rules \
-        '{"name":"priority-low","protocol":"http","action":"alert","priority":90,"http_path":"/low-prio","enabled":true}')"
+        '{"id":"priority-low","protocol":"http","action":"log","priority":90,"path":"/low-prio","enabled":true}')"
     _load_http_status
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
     local id_low
     id_low="$(echo "$body_low" | jq -r '.id // .rule_id' 2>/dev/null)" || true
 
     body_high="$(api_post /api/v1/firewall/l7-rules \
-        '{"name":"priority-high","protocol":"http","action":"alert","priority":5,"http_path":"/high-prio","enabled":true}')"
+        '{"id":"priority-high","protocol":"http","action":"log","priority":5,"path":"/high-prio","enabled":true}')"
     _load_http_status
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
     local id_high
@@ -257,7 +257,7 @@ teardown_file() {
     metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
 
     [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_l7"
+    echo "$metrics" | grep -qE 'ebpfsentinel_rules_loaded\{[^}]*component="l7"|ebpfsentinel_packets_total\{[^}]*interface="l7"'
 }
 
 # ── gRPC service filtering ──────────────────────────────────────
@@ -268,7 +268,7 @@ teardown_file() {
     # Create a gRPC-specific L7 rule
     local create_body
     create_body="$(api_post /api/v1/firewall/l7-rules \
-        '{"name":"grpc-deny-admin","protocol":"grpc","action":"deny","priority":10,"grpc_service":"admin.AdminService","enabled":true}')"
+        '{"id":"grpc-deny-admin","protocol":"grpc","action":"deny","priority":10,"service":"admin.AdminService","enabled":true}')"
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
@@ -299,7 +299,7 @@ teardown_file() {
 
     local create_body
     create_body="$(api_post /api/v1/firewall/l7-rules \
-        '{"name":"smtp-alert","protocol":"smtp","action":"alert","priority":30,"enabled":true}')"
+        '{"id":"smtp-alert","protocol":"smtp","action":"log","priority":30,"enabled":true}')"
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
@@ -311,7 +311,7 @@ teardown_file() {
 
     # Verify the protocol field is stored as smtp
     local protocol
-    protocol="$(echo "$create_body" | jq -r '.protocol' 2>/dev/null)" || true
+    protocol="$(echo "$create_body" | jq -r '.matcher.protocol // .protocol' 2>/dev/null)" || true
     [ "$protocol" = "smtp" ]
 
     # Clean up
@@ -325,7 +325,7 @@ teardown_file() {
 
     local create_body
     create_body="$(api_post /api/v1/firewall/l7-rules \
-        '{"name":"ftp-deny","protocol":"ftp","action":"deny","priority":25,"enabled":true}')"
+        '{"id":"ftp-deny","protocol":"ftp","action":"deny","priority":25,"enabled":true}')"
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
@@ -336,7 +336,7 @@ teardown_file() {
     [ "$rule_id" != "null" ]
 
     local protocol
-    protocol="$(echo "$create_body" | jq -r '.protocol' 2>/dev/null)" || true
+    protocol="$(echo "$create_body" | jq -r '.matcher.protocol // .protocol' 2>/dev/null)" || true
     [ "$protocol" = "ftp" ]
 
     # Clean up
@@ -350,7 +350,7 @@ teardown_file() {
 
     local create_body
     create_body="$(api_post /api/v1/firewall/l7-rules \
-        '{"name":"smb-alert","protocol":"smb","action":"alert","priority":35,"enabled":true}')"
+        '{"id":"smb-alert","protocol":"smb","action":"log","priority":35,"enabled":true}')"
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
@@ -361,7 +361,7 @@ teardown_file() {
     [ "$rule_id" != "null" ]
 
     local protocol
-    protocol="$(echo "$create_body" | jq -r '.protocol' 2>/dev/null)" || true
+    protocol="$(echo "$create_body" | jq -r '.matcher.protocol // .protocol' 2>/dev/null)" || true
     [ "$protocol" = "smb" ]
 
     # Clean up
@@ -409,14 +409,14 @@ teardown_file() {
     require_tool ncat
 
     # Start a simple HTTP listener on port 8889
-    ip netns exec "$EBPF_TEST_NS" ncat -l -p 8889 -k --sh-exec "echo -e 'HTTP/1.1 200 OK\r\n\r\nOK'" &
+    ip netns exec "$EBPF_TEST_NS" ncat -l -p 8889 -k --sh-exec "echo -e 'HTTP/1.1 200 OK\r\n\r\nOK'" </dev/null >/dev/null 2>&1 &
     local listener_pid=$!
     sleep 0.5
 
     # Create a rule to deny /wp-admin
     local create_body
     create_body="$(api_post /api/v1/firewall/l7-rules \
-        '{"name":"deny-wp-admin","protocol":"http","action":"alert","priority":8,"http_path":"/wp-admin","enabled":true}')"
+        '{"id":"deny-wp-admin","protocol":"http","action":"log","priority":8,"path":"/wp-admin","enabled":true}')"
     _load_http_status
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
     local rule_id
@@ -448,10 +448,10 @@ teardown_file() {
 
     # Read initial L7 metrics value
     local before
-    before="$(get_metrics_value ebpfsentinel_l7_packets_total)" || before=0
+    before="$(get_metrics_value ebpfsentinel_packets_total '{interface="l7"')" || before=0
 
     # Start a simple HTTP listener on port 8890
-    ip netns exec "$EBPF_TEST_NS" ncat -l -p 8890 -k --sh-exec "echo -e 'HTTP/1.1 200 OK\r\n\r\nOK'" &
+    ip netns exec "$EBPF_TEST_NS" ncat -l -p 8890 -k --sh-exec "echo -e 'HTTP/1.1 200 OK\r\n\r\nOK'" </dev/null >/dev/null 2>&1 &
     local listener_pid=$!
     sleep 0.5
 
@@ -467,82 +467,75 @@ teardown_file() {
     local metrics
     metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
     [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_l7"
+    echo "$metrics" | grep -qE 'ebpfsentinel_rules_loaded\{[^}]*component="l7"|ebpfsentinel_packets_total\{[^}]*interface="l7"'
 }
 
-# ── L7 rule update ──────────────────────────────────────────────
+# ── L7 rule update (via recreate) ───────────────────────────────
 
-@test "L7 rule CRUD — update existing rule" {
+@test "L7 rule update via recreate" {
     require_root
 
     # Create a rule
-    local create_body
     create_body="$(api_post /api/v1/firewall/l7-rules \
-        '{"name":"update-test-rule","protocol":"http","action":"alert","priority":60,"http_path":"/update-test","enabled":true}')"
+        '{"id":"update-test-rule","protocol":"http","action":"log","priority":60,"path":"/update-test","enabled":true}')"
     _load_http_status
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
 
-    local rule_id
-    rule_id="$(echo "$create_body" | jq -r '.id // .rule_id' 2>/dev/null)" || true
-    [ -n "$rule_id" ]
-    [ "$rule_id" != "null" ]
+    # L7 rules are immutable; an "update" is delete + recreate under the
+    # same id with the new fields. Recreate with a new priority and action.
+    api_delete /api/v1/firewall/l7-rules/update-test-rule >/dev/null 2>&1 || true
 
-    # Update the rule priority and action
     local update_body
-    update_body="$(api_patch "/api/v1/firewall/l7-rules/${rule_id}" \
-        '{"priority":15,"action":"deny"}')"
+    update_body="$(api_post /api/v1/firewall/l7-rules \
+        '{"id":"update-test-rule","protocol":"http","action":"deny","priority":15,"path":"/update-test","enabled":true}')"
     _load_http_status
-    [ "$HTTP_STATUS" = "200" ]
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
 
-    # Verify the update took effect
+    # Verify the new values took effect
     local new_priority
     new_priority="$(echo "$update_body" | jq -r '.priority' 2>/dev/null)" || true
     [ "$new_priority" = "15" ]
 
     # Clean up
-    api_delete "/api/v1/firewall/l7-rules/${rule_id}" >/dev/null 2>&1 || true
+    api_delete /api/v1/firewall/l7-rules/update-test-rule >/dev/null 2>&1 || true
 }
 
-# ── L7 rule disable/enable ──────────────────────────────────────
+# ── L7 rule disable/enable (via recreate) ───────────────────────
 
-@test "L7 rule disable and re-enable" {
+@test "L7 rule disable and re-enable via recreate" {
     require_root
 
     # Create an enabled rule
-    local create_body
     create_body="$(api_post /api/v1/firewall/l7-rules \
-        '{"name":"toggle-rule","protocol":"http","action":"alert","priority":70,"http_path":"/toggle","enabled":true}')"
+        '{"id":"toggle-rule","protocol":"http","action":"log","priority":70,"path":"/toggle","enabled":true}')"
     _load_http_status
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
 
-    local rule_id
-    rule_id="$(echo "$create_body" | jq -r '.id // .rule_id' 2>/dev/null)" || true
-    [ -n "$rule_id" ]
-    [ "$rule_id" != "null" ]
-
-    # Disable the rule
+    # Disable: recreate the rule with enabled:false (rules are immutable).
+    api_delete /api/v1/firewall/l7-rules/toggle-rule >/dev/null 2>&1 || true
     local disable_body
-    disable_body="$(api_patch "/api/v1/firewall/l7-rules/${rule_id}" \
-        '{"enabled":false}')"
+    disable_body="$(api_post /api/v1/firewall/l7-rules \
+        '{"id":"toggle-rule","protocol":"http","action":"log","priority":70,"path":"/toggle","enabled":false}')"
     _load_http_status
-    [ "$HTTP_STATUS" = "200" ]
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
 
     local enabled
     enabled="$(echo "$disable_body" | jq -r '.enabled' 2>/dev/null)" || true
     [ "$enabled" = "false" ]
 
-    # Re-enable the rule
+    # Re-enable: recreate with enabled:true.
+    api_delete /api/v1/firewall/l7-rules/toggle-rule >/dev/null 2>&1 || true
     local enable_body
-    enable_body="$(api_patch "/api/v1/firewall/l7-rules/${rule_id}" \
-        '{"enabled":true}')"
+    enable_body="$(api_post /api/v1/firewall/l7-rules \
+        '{"id":"toggle-rule","protocol":"http","action":"log","priority":70,"path":"/toggle","enabled":true}')"
     _load_http_status
-    [ "$HTTP_STATUS" = "200" ]
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
 
     enabled="$(echo "$enable_body" | jq -r '.enabled' 2>/dev/null)" || true
     [ "$enabled" = "true" ]
 
     # Clean up
-    api_delete "/api/v1/firewall/l7-rules/${rule_id}" >/dev/null 2>&1 || true
+    api_delete /api/v1/firewall/l7-rules/toggle-rule >/dev/null 2>&1 || true
 }
 
 # ── MITRE coverage sweep ───────────────────────────────────────────
