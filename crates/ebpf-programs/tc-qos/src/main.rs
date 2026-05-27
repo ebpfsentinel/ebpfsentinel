@@ -182,13 +182,17 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) 
 #[classifier]
 pub fn tc_qos(ctx: TcContext) -> i32 {
     increment_qos_metric(QOS_METRIC_TOTAL_SEEN);
-    match try_tc_qos(&ctx) {
+    let action = match try_tc_qos(&ctx) {
         Ok(action) => action,
         Err(()) => {
             increment_qos_metric(QOS_METRIC_ERRORS);
             TC_ACT_OK
         }
-    }
+    };
+    // Under TCX (kernel >= 6.6) returning TC_ACT_OK terminates the program
+    // chain on this hook; translate a "pass" verdict to TCX_NEXT (-1) so other
+    // tc programs on the same interface still run. Terminal verdicts pass through.
+    if action == TC_ACT_OK { -1 } else { action }
 }
 
 // ── Packet processing ───────────────────────────────────────────────
@@ -399,8 +403,51 @@ fn classify(
         return Some(*val);
     }
 
-    // 4. Wildcard all (catch-all rule)
+    // 4. Wildcard IPs, exact ports — port-based rule that applies to any host.
     let key4 = QosClassifierKey {
+        src_ip: 0,
+        dst_ip: 0,
+        src_port,
+        dst_port,
+        protocol,
+        dscp,
+        _padding: [0; 2],
+    };
+    if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key4) } {
+        return Some(*val);
+    }
+
+    // 5. Wildcard IPs + src_port, match dst_port — the common "by destination
+    //    port" classifier (e.g. shape all traffic to TCP/5201) regardless of host.
+    let key5 = QosClassifierKey {
+        src_ip: 0,
+        dst_ip: 0,
+        src_port: 0,
+        dst_port,
+        protocol,
+        dscp,
+        _padding: [0; 2],
+    };
+    if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key5) } {
+        return Some(*val);
+    }
+
+    // 6. Wildcard IPs + dst_port, match src_port — "by source port" classifier.
+    let key6 = QosClassifierKey {
+        src_ip: 0,
+        dst_ip: 0,
+        src_port,
+        dst_port: 0,
+        protocol,
+        dscp,
+        _padding: [0; 2],
+    };
+    if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key6) } {
+        return Some(*val);
+    }
+
+    // 7. Wildcard all (catch-all rule)
+    let key7 = QosClassifierKey {
         src_ip: 0,
         dst_ip: 0,
         src_port: 0,
@@ -409,7 +456,7 @@ fn classify(
         dscp: 0xFF,
         _padding: [0; 2],
     };
-    if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key4) } {
+    if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key7) } {
         return Some(*val);
     }
 
@@ -520,7 +567,7 @@ fn apply_qos(
     }
 
     // Step 4: Token bucket bandwidth enforcement
-    if pipe_cfg.bytes_per_ns > 0 {
+    if pipe_cfg.ns_per_byte > 0 {
         let now_ns = unsafe { bpf_ktime_get_boot_ns() };
         let fh = flow_hash(src_ip, dst_ip, src_port, dst_port, protocol);
         let pkt_len = ctx.data_end().saturating_sub(ctx.data()) as u64;
@@ -530,19 +577,10 @@ fn apply_qos(
                 let state = unsafe { &mut *state_ptr };
                 // Refill tokens — use division (supported) not multiplication
                 // (u64*u64 triggers __multi3 which eBPF lacks).
-                // bytes_per_ns is the rate. Compute ns_per_byte = 1/bytes_per_ns.
-                // new_tokens = elapsed_ns / ns_per_byte (both u64, division is OK).
+                // ns_per_byte is precomputed by userspace; grant one byte of
+                // credit per ns_per_byte elapsed: new_tokens = elapsed_ns / ns_per_byte.
                 let elapsed_ns = now_ns.saturating_sub(state.last_refill_ns);
-                let ns_per_byte = if pipe_cfg.bytes_per_ns > 0 {
-                    1_000_000_000 / pipe_cfg.bytes_per_ns
-                } else {
-                    u64::MAX
-                };
-                let new_tokens = if ns_per_byte > 0 {
-                    elapsed_ns / ns_per_byte
-                } else {
-                    elapsed_ns // rate >= 1 byte/ns → get all elapsed as tokens
-                };
+                let new_tokens = elapsed_ns / pipe_cfg.ns_per_byte;
                 state.tokens = (state.tokens + new_tokens).min(pipe_cfg.burst_bytes);
                 state.last_refill_ns = now_ns;
 
@@ -623,11 +661,7 @@ fn apply_qos(
         };
 
         unsafe {
-            bpf_skb_set_tstamp(
-                ctx.skb.skb,
-                edt,
-                BPF_SKB_TSTAMP_DELIVERY_MONO,
-            );
+            bpf_skb_set_tstamp(ctx.skb.skb, edt, BPF_SKB_TSTAMP_DELIVERY_MONO);
         }
 
         increment_qos_metric(QOS_METRIC_DELAYED);

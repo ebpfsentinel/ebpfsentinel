@@ -37,9 +37,10 @@ pub const QOS_METRIC_COUNT: u32 = 7;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct QosPipeConfig {
-    /// Bandwidth expressed as bytes per nanosecond (`bw_bps / 8 / 1e9`).
-    /// 0 = unlimited.
-    pub bytes_per_ns: u64,
+    /// Bandwidth expressed as nanoseconds per byte (`8e9 / bw_bps`).
+    /// The token bucket grants one byte of credit every `ns_per_byte`
+    /// nanoseconds. 0 = unlimited (rate too high to represent, or unset).
+    pub ns_per_byte: u64,
     /// Maximum burst size in bytes (token bucket capacity).
     pub burst_bytes: u64,
     /// Propagation delay in nanoseconds.
@@ -216,7 +217,7 @@ mod tests {
 
     #[test]
     fn qos_pipe_config_field_offsets() {
-        assert_eq!(mem::offset_of!(QosPipeConfig, bytes_per_ns), 0);
+        assert_eq!(mem::offset_of!(QosPipeConfig, ns_per_byte), 0);
         assert_eq!(mem::offset_of!(QosPipeConfig, burst_bytes), 8);
         assert_eq!(mem::offset_of!(QosPipeConfig, delay_ns), 16);
         assert_eq!(mem::offset_of!(QosPipeConfig, loss_rate), 24);

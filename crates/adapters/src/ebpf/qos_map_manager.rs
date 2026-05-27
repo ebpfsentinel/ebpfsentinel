@@ -47,12 +47,10 @@ impl QosMapManager {
 
     /// Convert a domain `QosPipe` to a `QosPipeConfig` eBPF struct.
     fn pipe_to_ebpf(pipe: &QosPipe, index: u8) -> QosPipeConfig {
-        // Convert rate_bps to bytes_per_ns: (rate_bps / 8) / 1e9
-        let bytes_per_ns = if pipe.rate_bps > 0 {
-            pipe.rate_bps / 8 / 1_000_000_000
-        } else {
-            0
-        };
+        // Convert rate (bits/sec) to nanoseconds-per-byte: 1e9 / (rate_bps / 8)
+        // = 8e9 / rate_bps. Integer math stays nonzero for any rate up to 8 Gbps
+        // (e.g. 10 Mbps → 800 ns/byte); 0 means unlimited.
+        let ns_per_byte = 8_000_000_000u64.checked_div(pipe.rate_bps).unwrap_or(0);
         // Convert delay_ms to delay_ns
         let delay_ns = u64::from(pipe.delay_ms) * 1_000_000;
         // Convert loss_pct (0.0-100.0) to a fixed-point rate (0-10000)
@@ -63,7 +61,7 @@ impl QosMapManager {
             0u16
         };
         QosPipeConfig {
-            bytes_per_ns,
+            ns_per_byte,
             burst_bytes: pipe.burst_bytes,
             delay_ns,
             loss_rate,
@@ -193,7 +191,7 @@ impl QosMapManager {
     /// Zero out pipe array entries.
     fn clear_pipes(&mut self, count: u32) {
         let zero = QosPipeConfig {
-            bytes_per_ns: 0,
+            ns_per_byte: 0,
             burst_bytes: 0,
             delay_ns: 0,
             loss_rate: 0,
@@ -322,8 +320,8 @@ mod tests {
         assert_eq!(config.pipe_id, 0);
         assert_eq!(config.enabled, 1);
         assert_eq!(config.burst_bytes, 1_000_000);
-        // 8_000_000_000 / 8 / 1_000_000_000 = 1
-        assert_eq!(config.bytes_per_ns, 1);
+        // 8_000_000_000 / 8_000_000_000 = 1 ns per byte
+        assert_eq!(config.ns_per_byte, 1);
     }
 
     #[test]
@@ -340,7 +338,7 @@ mod tests {
             group_mask: 0,
         };
         let config = QosMapManager::pipe_to_ebpf(&pipe, 5);
-        assert_eq!(config.bytes_per_ns, 0);
+        assert_eq!(config.ns_per_byte, 0);
         assert_eq!(config.pipe_id, 5);
     }
 

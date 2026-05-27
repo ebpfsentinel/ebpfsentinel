@@ -142,8 +142,9 @@ pub struct QosClassifierConfig {
     #[serde(default = "default_priority")]
     pub priority: u8,
 
-    /// Match rule for classifying traffic.
-    #[serde(default)]
+    /// Match rule for classifying traffic. Spelled `match` in YAML (the
+    /// shipped examples and docs use `match:`); `match_rule` accepted as alias.
+    #[serde(rename = "match", alias = "match_rule", default)]
     pub match_rule: QosMatchConfig,
 
     /// Interface groups this classifier applies to. Empty = all (floating).
@@ -182,20 +183,20 @@ pub struct QosMatchConfig {
 // ── Parsing helpers ─────────────────────────────────────────────────
 
 /// Parse a bandwidth string like "100mbps", "1gbps", "500kbps", "1000bps"
-/// into bytes per second.
+/// into bits per second (the suffixes denote bits — "mbps" = megabits/sec).
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn parse_bandwidth(s: &str) -> Result<u64, String> {
     let lower = s.to_lowercase();
     let lower = lower.trim();
 
     let (num_str, multiplier) = if let Some(num) = lower.strip_suffix("gbps") {
-        (num, 1_000_000_000.0_f64 / 8.0)
+        (num, 1_000_000_000.0_f64)
     } else if let Some(num) = lower.strip_suffix("mbps") {
-        (num, 1_000_000.0_f64 / 8.0)
+        (num, 1_000_000.0_f64)
     } else if let Some(num) = lower.strip_suffix("kbps") {
-        (num, 1_000.0_f64 / 8.0)
+        (num, 1_000.0_f64)
     } else if let Some(num) = lower.strip_suffix("bps") {
-        (num, 1.0_f64 / 8.0)
+        (num, 1.0_f64)
     } else {
         return Err(format!(
             "invalid bandwidth format: '{s}' (expected e.g. '100mbps', '1gbps', '500kbps', '1000bps')"
@@ -641,28 +642,28 @@ mod tests {
 
     #[test]
     fn parse_bandwidth_gbps() {
-        assert_eq!(parse_bandwidth("1gbps").unwrap(), 125_000_000);
+        assert_eq!(parse_bandwidth("1gbps").unwrap(), 1_000_000_000);
     }
 
     #[test]
     fn parse_bandwidth_mbps() {
-        assert_eq!(parse_bandwidth("100mbps").unwrap(), 12_500_000);
+        assert_eq!(parse_bandwidth("100mbps").unwrap(), 100_000_000);
     }
 
     #[test]
     fn parse_bandwidth_kbps() {
-        assert_eq!(parse_bandwidth("500kbps").unwrap(), 62_500);
+        assert_eq!(parse_bandwidth("500kbps").unwrap(), 500_000);
     }
 
     #[test]
     fn parse_bandwidth_bps() {
-        assert_eq!(parse_bandwidth("8000bps").unwrap(), 1000);
+        assert_eq!(parse_bandwidth("8000bps").unwrap(), 8000);
     }
 
     #[test]
     fn parse_bandwidth_case_insensitive() {
-        assert_eq!(parse_bandwidth("1Gbps").unwrap(), 125_000_000);
-        assert_eq!(parse_bandwidth("100MBPS").unwrap(), 12_500_000);
+        assert_eq!(parse_bandwidth("1Gbps").unwrap(), 1_000_000_000);
+        assert_eq!(parse_bandwidth("100MBPS").unwrap(), 100_000_000);
     }
 
     #[test]
@@ -679,7 +680,7 @@ mod tests {
 
     #[test]
     fn parse_bandwidth_10gbps() {
-        assert_eq!(parse_bandwidth("10gbps").unwrap(), 1_250_000_000);
+        assert_eq!(parse_bandwidth("10gbps").unwrap(), 10_000_000_000);
     }
 
     // ── Byte size parsing ───────────────────────────────────────────
@@ -1029,7 +1030,7 @@ direction: both
 
         let domain = pipe.to_domain_pipe().unwrap();
         assert_eq!(domain.id, "pipe-test");
-        assert_eq!(domain.rate_bps, 125_000_000);
+        assert_eq!(domain.rate_bps, 1_000_000_000);
         assert_eq!(domain.delay_ms, 20);
         assert!((domain.loss_pct - 1.5).abs() < f32::EPSILON);
         assert_eq!(domain.burst_bytes, 1_048_576);
