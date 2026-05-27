@@ -63,6 +63,16 @@ ddos:
   syn_flood:
     enabled: true
     max_pps: 500
+  policies:
+    - id: ddos-test-country-syn
+      attack_type: syn_flood
+      detection_threshold_pps: 5000
+      mitigation_action: block
+      auto_block_duration_secs: 300
+      enabled: true
+      country_thresholds:
+        KP: 100
+        CU: 100
 
 l7:
   enabled: false
