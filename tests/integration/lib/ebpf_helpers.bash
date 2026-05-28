@@ -14,8 +14,12 @@
 
 EBPF_HELPERS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Source core helpers if not already loaded
-if [ -z "${PROJECT_ROOT:-}" ]; then
+# Source core helpers if not already loaded. Guard on a helper *function*,
+# not on PROJECT_ROOT: that variable is exported and leaks into a later
+# suite's bats subshell from an earlier suite's setup_file, but functions do
+# not cross subshells — so keying off the variable would skip sourcing while
+# api_get/assert_* are actually absent.
+if ! declare -F api_get >/dev/null 2>&1; then
     source "${EBPF_HELPERS_DIR}/helpers.bash"
 fi
 
