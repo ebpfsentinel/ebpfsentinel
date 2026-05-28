@@ -556,7 +556,7 @@ capture_on() {
     local iface="$2"
     local bpf="$3"
     local pcap="/tmp/cap-$$-$(date +%s).pcap"
-    local pidfile="${pcap}.pid"
+    local unit="ebpf-cap-$(basename "${pcap}" .pcap)"
     local sshrun
     case "$vm" in
         agent)   sshrun=("_agent_ssh_sudo") ;;
@@ -571,9 +571,23 @@ capture_on() {
             return 2
             ;;
     esac
-    "${sshrun[@]}" sh -c "nohup tcpdump -n -U -w '${pcap}' -i '${iface}' ${bpf} >/dev/null 2>&1 & echo \$! > '${pidfile}'" || return 1
-    # Brief settle so tcpdump opens the BPF socket before traffic flows.
-    sleep 1
+    # Run tcpdump as a transient systemd unit. A plain backgrounded tcpdump
+    # (nohup/setsid) is reaped when its launching SSH session ends over the
+    # attacker->backend hop and never creates the capture file; the transient
+    # unit is owned by systemd, survives the SSH close, and is stopped (clean
+    # SIGTERM → pcap flush) by stop_capture via the same derived unit name.
+    "${sshrun[@]}" systemd-run --unit="${unit}" --collect \
+        tcpdump -n -U -w "${pcap}" -i "${iface}" ${bpf} >/dev/null 2>&1 || return 1
+    # Wait until tcpdump has actually opened its capture file before returning,
+    # so traffic that flows right after capture_on isn't missed. systemd-run
+    # starts the unit asynchronously, so a fixed short sleep races the BPF
+    # socket open; poll for the pcap to appear (tcpdump writes the 24-byte
+    # global header immediately) and fall back to a generous settle.
+    local _i
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+        "${sshrun[@]}" test -s "${pcap}" >/dev/null 2>&1 && break
+        sleep 0.5
+    done
     echo "${pcap}"
 }
 
@@ -583,7 +597,7 @@ capture_on() {
 stop_capture() {
     local vm="$1"
     local pcap="$2"
-    local pidfile="${pcap}.pid"
+    local unit="ebpf-cap-$(basename "${pcap}" .pcap)"
     local local_pcap="${DATA_DIR:-/tmp}/$(basename "${pcap}")"
     local sshrun scpsrc scpkey
     case "$vm" in
@@ -609,7 +623,12 @@ stop_capture() {
             return 2
             ;;
     esac
-    "${sshrun[@]}" sh -c "kill \$(cat '${pidfile}') 2>/dev/null; sync; rm -f '${pidfile}'" || true
+    # Stop the transient capture unit. systemctl stop is synchronous: it returns
+    # only after tcpdump has received SIGTERM and exited (flushing its pcap), so
+    # the file is complete before the scp below. Call systemctl directly through
+    # sshrun (which already prepends sudo) — wrapping it in `sh -c` dropped the
+    # unit argument through the quoting layers and left captures running.
+    "${sshrun[@]}" systemctl stop "${unit}" >/dev/null 2>&1 || true
     # Pull pcap locally with the key that authenticates to THIS vm (the backend
     # rejects the agent key, which silently emptied the pcap and skipped tests).
     scp -i "${scpkey}" -o StrictHostKeyChecking=no \

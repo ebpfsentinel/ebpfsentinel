@@ -128,14 +128,20 @@ scapy_send_via() {
         -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
         "vagrant@${ATTACKER_VM_IP}" -- \
         sudo /opt/scapy-venv/bin/python3 - "${dst_ip}" "${ttl}" "${ip_id}" "${mss}" "${flags}" "${count}" <<'PY'
+import random
 import sys
 from scapy.all import IP, TCP, send
 
 dst, ttl, ip_id, mss, flags, count = sys.argv[1:]
 ttl = int(ttl); ip_id = int(ip_id); mss = int(mss); count = int(count)
+# Fresh source-port base per invocation: reusing fixed ports across the
+# suite's tests lets the agent's conntrack/stateful-firewall state from an
+# earlier test drop a later test's reused 4-tuple, so the transit never
+# reaches the backend and the capture comes back empty.
+base = random.randint(20000, 60000)
 for i in range(count):
     pkt = IP(dst=dst, ttl=ttl, id=ip_id, flags=flags) / \
-          TCP(sport=20000 + i, dport=80, flags="S", seq=0,
+          TCP(sport=base + i, dport=80, flags="S", seq=0,
               options=[('MSS', mss)])
     send(pkt, verbose=0)
 PY
