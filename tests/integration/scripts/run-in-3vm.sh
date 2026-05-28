@@ -15,6 +15,7 @@
 #   ./run-in-3vm.sh                        # Run all 3-VM-tagged suites
 #   ./run-in-3vm.sh --suite 31             # Run a single suite by number
 #   ./run-in-3vm.sh --transit-only         # Only suites tagged topology=3vm
+#   ./run-in-3vm.sh --profile nightly      # Only suites with suite_profiles==nightly
 #   ./run-in-3vm.sh --skip-provision       # Skip vagrant up
 #
 set -euo pipefail
@@ -29,12 +30,14 @@ COVERAGE_MATRIX="${INTEGRATION_DIR}/coverage-matrix.yaml"
 SUITE=""
 TRANSIT_ONLY=false
 SKIP_PROVISION=false
+PROFILE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --suite)          SUITE="$2"; shift 2 ;;
         --transit-only)   TRANSIT_ONLY=true; shift ;;
         --skip-provision) SKIP_PROVISION=true; shift ;;
+        --profile)        PROFILE="$2"; shift 2 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -84,7 +87,38 @@ PY
         "${COVERAGE_MATRIX}" 2>/dev/null || true
 }
 
+# Emit suite numbers whose suite_profiles entry matches $PROFILE.
+list_profile_suites() {
+    python3 - "$PROFILE" <<PY
+import sys, yaml
+profile = sys.argv[1]
+with open("${COVERAGE_MATRIX}") as f:
+    doc = yaml.safe_load(f)
+for num, prof in (doc.get("suite_profiles") or {}).items():
+    if prof == profile:
+        print(num)
+PY
+}
+
 build_suite_args() {
+    if [ -n "$PROFILE" ]; then
+        local names paths
+        names="$(list_profile_suites | sort)"
+        if [ -z "$names" ]; then
+            echo "ERROR: No suites with profile='${PROFILE}' in coverage-matrix.yaml" >&2
+            exit 1
+        fi
+        paths=""
+        while IFS= read -r n; do
+            [ -z "$n" ] && continue
+            local p
+            p="$(ls "${SUITE_DIR}/${n}"-* 2>/dev/null | head -1)" || true
+            [ -n "$p" ] && paths="${paths} ${p}"
+        done <<< "$names"
+        echo "$paths"
+        return
+    fi
+
     if [ -n "$SUITE" ]; then
         local match
         match="$(ls "${SUITE_DIR}/${SUITE}"*.bats 2>/dev/null | head -1)" || true
