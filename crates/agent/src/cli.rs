@@ -69,10 +69,6 @@ pub enum Command {
     Identity {
         #[command(flatten)]
         conn: ConnectionArgs,
-
-        /// Output format: `table` (default) or `json`.
-        #[arg(long, default_value = "table")]
-        output: String,
     },
 
     /// Check agent liveness and readiness
