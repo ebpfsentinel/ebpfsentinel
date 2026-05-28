@@ -12,6 +12,7 @@
 # tables in crates/domain/src/alert/mitre.rs.
 
 load '../lib/helpers'
+load '../lib/ebpf_helpers'
 
 # Suites in scope for MITRE coverage. The list mirrors the alert-producing
 # suites enumerated in the integration coverage matrix; adding a new alert

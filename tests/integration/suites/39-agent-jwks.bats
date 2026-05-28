@@ -31,8 +31,13 @@ setup_file() {
         "$JWKS_DIR/private.pem" \
         "kid-test"
 
-    # Serve the JWKS on localhost.
-    (cd "$JWKS_DIR" && python3 -m http.server "$JWKS_PORT" >"$JWKS_DIR/server.log" 2>&1) &
+    # Serve the JWKS on localhost. Launch python directly (no cd subshell)
+    # so $! is the real server PID — a subshell wrapper makes $! the
+    # subshell, and killing it leaves the python orphaned. Close bats' FD 3
+    # (3>&-) so a stray server can never hold the TAP stream open and hang
+    # teardown.
+    python3 -m http.server "$JWKS_PORT" --directory "$JWKS_DIR" \
+        >"$JWKS_DIR/server.log" 2>&1 3>&- &
     export JWKS_PID=$!
     sleep 1
 

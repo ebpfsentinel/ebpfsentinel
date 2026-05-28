@@ -28,6 +28,7 @@
 #     traverse it for the pattern engine to fire on plaintext.
 
 load '../lib/helpers'
+load '../lib/ebpf_helpers'
 
 _locate_license() {
     if [ -n "${EBPFSENTINEL_LICENSE:-}" ] && [ -r "${EBPFSENTINEL_LICENSE}" ]; then

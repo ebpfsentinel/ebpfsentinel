@@ -27,6 +27,7 @@
 #     single-VM. Tracked as a multi-VM enablement task.
 
 load '../lib/helpers'
+load '../lib/ebpf_helpers'
 
 setup_file() {
     require_root

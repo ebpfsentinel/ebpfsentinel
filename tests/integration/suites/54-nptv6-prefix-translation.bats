@@ -141,11 +141,13 @@ teardown_file() {
         true
     fi
 
-    # Capture on backend in the background, then trigger.
+    # Capture on backend in the background, then trigger. 3>&- closes bats'
+    # TAP fd so the backgrounded capture can never hold it open and hang
+    # teardown.
     local pcap="${DATA_DIR}/nptv6-egress.pcap"
     (
         capture_backend_ipv6 "${pcap}" 8 eth1
-    ) &
+    ) 3>&- &
     local cap_pid=$!
     sleep 1
 

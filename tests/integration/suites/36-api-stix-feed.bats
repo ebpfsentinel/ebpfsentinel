@@ -14,8 +14,10 @@ setup_file() {
 
     # Start a local HTTP server to serve the STIX bundle fixture
     local stix_dir="${FIXTURE_DIR}/stix"
+    # 3>&- closes bats' TAP fd so the server can never hold it open and
+    # hang teardown if a kill is missed.
     python3 -m http.server 18888 --directory "$stix_dir" \
-        >"$DATA_DIR/http-server.log" 2>&1 &
+        >"$DATA_DIR/http-server.log" 2>&1 3>&- &
     echo $! > "$BATS_FILE_TMPDIR/http.pid"
 
     # Wait briefly for the HTTP server to be ready
