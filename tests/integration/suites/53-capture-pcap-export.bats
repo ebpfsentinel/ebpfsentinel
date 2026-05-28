@@ -65,12 +65,14 @@ _drive_traffic_to_port() {
     # Fire a couple of TCP SYN+payload bursts to the loopback of the agent
     # on the target port. The capture filter is "tcp port <port>"; the
     # destination doesn't have to be listening — we just need wire
-    # traffic that tcpdump can record.
-    _agent_ssh_sudo sh -c \
-        "for i in 1 2 3 4 5; do \
-            (echo probe; sleep 0.1) \
-            | nc -w1 127.0.0.1 ${port} >/dev/null 2>&1 || true; \
-         done"
+    # traffic that tcpdump can record. Loop on the test host (one nc per
+    # iteration) so the remote shell never re-parses a multi-statement
+    # script — SSH flattens args, which would mangle a remote for-loop.
+    local i
+    for i in 1 2 3 4 5; do
+        printf 'probe\n' | _agent_ssh_sudo nc -w1 127.0.0.1 "${port}" >/dev/null 2>&1 || true
+        sleep 0.1
+    done
 }
 
 _pull_remote_pcap() {
@@ -160,12 +162,11 @@ _pull_remote_pcap() {
     local iface
     iface="$(_capture_iface)"
 
+    # Pass the whole command as one string so SSH forwards it verbatim and
+    # the remote shell parses the multi-word --filter argument; SSH flattens
+    # separate argv with spaces, which would split "tcp port 4445".
     local out
-    out="$(_agent_ssh_sudo /usr/local/bin/ebpfsentinel-agent --output json \
-        capture start \
-        --filter "tcp port 4445" \
-        --duration 6s \
-        --interface "${iface}" 2>&1)" || {
+    out="$(_agent_ssh_sudo "/usr/local/bin/ebpfsentinel-agent --output json capture start --filter 'tcp port 4445' --duration 6s --interface '${iface}'" 2>&1)" || {
         echo "CLI capture start failed: ${out}" >&2
         return 1
     }
