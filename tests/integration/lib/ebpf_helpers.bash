@@ -459,6 +459,18 @@ skip_if_not_3vm() {
     fi
 }
 
+# attacker_ip
+# Echoes the IP the agent will see as the attack source. In 2-VM mode this is
+# the attacker VM's address; otherwise localhost. Defined here (always sourced)
+# so both the MHDDoS and slowhttp suites share one definition.
+attacker_ip() {
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        echo "${ATTACKER_VM_IP:-192.168.56.20}"
+    else
+        echo "127.0.0.1"
+    fi
+}
+
 # ── 2-VM / 3-VM mode override ─────────────────────────────────────────
 # vm_helpers.bash carries both the 2-VM cross-network overrides and the
 # 3-VM transit-topology helpers. Source it whenever either mode is active

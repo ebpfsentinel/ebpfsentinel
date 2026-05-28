@@ -191,15 +191,5 @@ stop_mhddos() {
     fi
 }
 
-# attacker_ip
-# Echoes the IP the agent will see as the attack source. In 2-VM mode
-# this is the attacker VM's address; otherwise localhost (host-local
-# tests do not exercise IPS auto-blacklist because the whitelist
-# covers loopback).
-attacker_ip() {
-    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
-        echo "${ATTACKER_VM_IP:-192.168.56.20}"
-    else
-        echo "127.0.0.1"
-    fi
-}
+# attacker_ip is defined in ebpf_helpers.bash (always sourced) so both the
+# MHDDoS and slowhttp suites resolve it without cross-loading.
