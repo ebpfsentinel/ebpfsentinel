@@ -5,7 +5,9 @@ use aya_ebpf::{
     EbpfContext,
     bindings::{__sk_buff, TC_ACT_OK},
     cty::c_void,
-    helpers::{bpf_get_prandom_u32, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop},
+    helpers::{
+        bpf_csum_diff, bpf_get_prandom_u32, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop,
+    },
     macros::{classifier, map},
     maps::{Array, PerCpuArray},
     programs::TcContext,
@@ -147,26 +149,13 @@ fn scrub_ipv4(ctx: &mut TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result
     let frag_off = u16::from_be_bytes(unsafe { (*ipv4hdr).frags });
     let old_id = u16::from_be_bytes(unsafe { (*ipv4hdr).id });
 
-    // ── TTL normalization ───────────────────────────────────────
-    if cfg.min_ttl > 0 && ttl < cfg.min_ttl {
-        scrub_fix_ttl(ctx, l3_offset, ttl, cfg.min_ttl)?;
-        increment_metric(SCRUB_METRIC_TTL_FIXED);
-    }
-
-    // ── Clear DF bit ────────────────────────────────────────────
-    if cfg.clear_df != 0 && frag_off & IP_DF != 0 {
-        scrub_clear_df(ctx, l3_offset, frag_off)?;
-        increment_metric(SCRUB_METRIC_DF_CLEARED);
-    }
-
-    // ── Randomize IP ID ─────────────────────────────────────────
-    if cfg.random_ip_id != 0 {
-        let new_id = (unsafe { bpf_get_prandom_u32() } & 0xFFFF) as u16;
-        if old_id != new_id {
-            scrub_random_ip_id(ctx, l3_offset, old_id, new_id)?;
-            increment_metric(SCRUB_METRIC_IPID_RANDOMIZED);
-        }
-    }
+    // ── TTL floor + DF clear + IP-ID randomize (single coalesced rewrite) ──
+    // These three IPv4-header edits touch the contiguous bytes 4..9 (id, frag,
+    // ttl) and all fold into one checksum fixup. Applying them as one
+    // bpf_skb_store_bytes + one bpf_l3_csum_replace (vs three of each) avoids a
+    // repeated in-place mutation pattern that hard-wedges the kernel when the
+    // skb is on the forward path under a generic-XDP program.
+    scrub_ipv4_header_fields(ctx, cfg, l3_offset, ttl, frag_off, old_id)?;
 
     // ── TCP option scrubbing: MSS clamp + timestamp strip (one pass) ──
     if protocol == PROTO_TCP && (cfg.max_mss > 0 || cfg.strip_tcp_timestamps != 0) {
@@ -241,81 +230,107 @@ fn scrub_ipv6(ctx: &mut TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result
     Ok(())
 }
 
-/// Rewrite TTL field and update IPv4 header checksum.
+/// Apply TTL floor, DF clear, and IP-ID randomization to the IPv4 header in a
+/// single pass.
+///
+/// All three edits live in the contiguous byte window at IPv4 offset 4
+/// (`id` 4-5, `frag_off` 6-7, `ttl` 8) and share the one header checksum at
+/// offset 10. Rather than three `bpf_skb_store_bytes` + three
+/// `bpf_l3_csum_replace` calls, this writes the mutated bytes once and applies
+/// a single checksum fixup computed by `bpf_csum_diff` over the changed window.
+/// Collapsing the mutations to one store + one checksum op is what keeps the
+/// forward path stable: repeated in-place rewrites of a forwarded skb that also
+/// carries a generic-XDP program wedge the kernel.
 #[inline(always)]
-fn scrub_fix_ttl(
+fn scrub_ipv4_header_fields(
     ctx: &mut TcContext,
+    cfg: &ScrubFlags,
     l3_offset: usize,
     old_ttl: u8,
-    new_ttl: u8,
-) -> Result<(), ()> {
-    // TTL is at offset 8 in the IPv4 header
-    let ttl_offset = l3_offset + 8;
-    let csum_offset = (l3_offset + 10) as u32; // check field at offset 10
-
-    // Write the new TTL byte
-    ctx.store(ttl_offset, &new_ttl, 0).map_err(|_| ())?;
-
-    // Update L3 checksum: old value in upper bits of u16 at offset 8 (TTL + Proto)
-    // Use incremental checksum update
-    let old_val = (old_ttl as u32) << 8;
-    let new_val = (new_ttl as u32) << 8;
-    unsafe {
-        bpf_l3_csum_replace(
-            ctx.as_ptr() as *mut _,
-            csum_offset,
-            old_val as u64,
-            new_val as u64,
-            2,
-        );
-    }
-    Ok(())
-}
-
-/// Clear the DF bit in IPv4 flags and update checksum.
-#[inline(always)]
-fn scrub_clear_df(ctx: &mut TcContext, l3_offset: usize, old_frag_off: u16) -> Result<(), ()> {
-    let new_frag_off = old_frag_off & !IP_DF;
-    let frag_offset = l3_offset + 6; // frag_off at offset 6 in IPv4 header
-    let csum_offset = (l3_offset + 10) as u32;
-
-    let new_frag_be = new_frag_off.to_be();
-    ctx.store(frag_offset, &new_frag_be, 0).map_err(|_| ())?;
-
-    unsafe {
-        bpf_l3_csum_replace(
-            ctx.as_ptr() as *mut _,
-            csum_offset,
-            old_frag_off as u64,
-            new_frag_off as u64,
-            2,
-        );
-    }
-    Ok(())
-}
-
-/// Randomize IP ID and update checksum.
-#[inline(always)]
-fn scrub_random_ip_id(
-    ctx: &mut TcContext,
-    l3_offset: usize,
+    old_frag_off: u16,
     old_id: u16,
-    new_id: u16,
 ) -> Result<(), ()> {
-    let id_offset = l3_offset + 4; // id at offset 4 in IPv4 header
-    let csum_offset = (l3_offset + 10) as u32;
+    let new_ttl = if cfg.min_ttl > 0 && old_ttl < cfg.min_ttl {
+        cfg.min_ttl
+    } else {
+        old_ttl
+    };
+    let new_frag_off = if cfg.clear_df != 0 {
+        old_frag_off & !IP_DF
+    } else {
+        old_frag_off
+    };
+    let new_id = if cfg.random_ip_id != 0 {
+        (unsafe { bpf_get_prandom_u32() } & 0xFFFF) as u16
+    } else {
+        old_id
+    };
 
-    let new_id_be = new_id.to_be();
-    ctx.store(id_offset, &new_id_be, 0).map_err(|_| ())?;
+    let ttl_changed = new_ttl != old_ttl;
+    let df_changed = new_frag_off != old_frag_off;
+    let id_changed = new_id != old_id;
+    if !ttl_changed && !df_changed && !id_changed {
+        return Ok(());
+    }
 
+    // 8-byte windows over IPv4 offsets 4..12 (id, frag, ttl, proto, csum). Only
+    // bytes 0..5 change; the trailing proto/csum bytes are set identically in
+    // both windows so they cancel in the checksum diff. The 8-byte length keeps
+    // `bpf_csum_diff` happy (it requires a multiple of 4).
+    let mut old_win: [u8; 8] = [
+        (old_id >> 8) as u8,
+        old_id as u8,
+        (old_frag_off >> 8) as u8,
+        old_frag_off as u8,
+        old_ttl,
+        0,
+        0,
+        0,
+    ];
+    let mut new_win: [u8; 8] = [
+        (new_id >> 8) as u8,
+        new_id as u8,
+        (new_frag_off >> 8) as u8,
+        new_frag_off as u8,
+        new_ttl,
+        0,
+        0,
+        0,
+    ];
+
+    // Single in-place write of the five mutated bytes (id, frag, ttl).
+    let fields: [u8; 5] = [new_win[0], new_win[1], new_win[2], new_win[3], new_win[4]];
+    ctx.store(l3_offset + 4, &fields, 0).map_err(|_| ())?;
+
+    // One checksum fixup from the aggregate diff (from == 0, size == 0 ⇒ the
+    // helper adds `diff` to the header checksum).
+    let diff = unsafe {
+        bpf_csum_diff(
+            old_win.as_mut_ptr() as *mut u32,
+            old_win.len() as u32,
+            new_win.as_mut_ptr() as *mut u32,
+            new_win.len() as u32,
+            0,
+        )
+    };
     unsafe {
         bpf_l3_csum_replace(
             ctx.as_ptr() as *mut _,
-            csum_offset,
-            old_id as u64,
-            new_id as u64,
-            2,
+            (l3_offset + 10) as u32,
+            0,
+            diff as u64,
+            0,
         );
+    }
+
+    if ttl_changed {
+        increment_metric(SCRUB_METRIC_TTL_FIXED);
+    }
+    if df_changed {
+        increment_metric(SCRUB_METRIC_DF_CLEARED);
+    }
+    if id_changed {
+        increment_metric(SCRUB_METRIC_IPID_RANDOMIZED);
     }
     Ok(())
 }
@@ -391,19 +406,28 @@ fn clamp_mss(ctx: &mut TcContext, pos: usize, tcp_csum_offset: u32, max_mss: u16
         return;
     }
     let new_mss_be = max_mss.to_be_bytes();
-    if ctx.store(pos + 2, &new_mss_be[0], 0).is_err()
-        || ctx.store(pos + 3, &new_mss_be[1], 0).is_err()
-    {
+    // Single 2-byte write of the clamped MSS option value.
+    if ctx.store(pos + 2, &new_mss_be, 0).is_err() {
         return;
     }
+    // Update the TCP checksum from a raw-byte diff rather than passing
+    // host-order field values to csum_replace (which corrupts the L4 checksum
+    // and makes the kernel drop locally-delivered scrubbed TCP). The 4-byte
+    // windows pad the 2-byte MSS value with zeros that cancel in the diff and
+    // satisfy bpf_csum_diff's multiple-of-4 length requirement.
+    let mut old_win: [u8; 4] = [mss_hi, mss_lo, 0, 0];
+    let mut new_win: [u8; 4] = [new_mss_be[0], new_mss_be[1], 0, 0];
+    let diff = unsafe {
+        bpf_csum_diff(
+            old_win.as_mut_ptr() as *mut u32,
+            old_win.len() as u32,
+            new_win.as_mut_ptr() as *mut u32,
+            new_win.len() as u32,
+            0,
+        )
+    };
     unsafe {
-        bpf_l4_csum_replace(
-            ctx.as_ptr() as *mut _,
-            tcp_csum_offset,
-            current_mss as u64,
-            max_mss as u64,
-            2,
-        );
+        bpf_l4_csum_replace(ctx.as_ptr() as *mut _, tcp_csum_offset, 0, diff as u64, 0);
     }
     increment_metric(SCRUB_METRIC_MSS_CLAMPED);
 }
