@@ -77,8 +77,12 @@ _scrub_bpf() {
     local_pcap="$(stop_capture backend "$pcap")"
     [ -s "$local_pcap" ] || skip "pcap empty (transit may not have reached backend)"
 
+    # tc-scrub floors the TTL to min_ttl (64) at the agent's ingress hook, then
+    # the agent forwards the packet and the kernel's IP-forward path decrements
+    # it by one hop. The backend therefore captures min_ttl - 1 (63). Asserting
+    # >= 63 confirms the floor was applied (the packet was sent with ttl=10).
     local res
-    res="$(assert_ttl_ge "$local_pcap" "tcp and dst port 80" 64)"
+    res="$(assert_ttl_ge "$local_pcap" "tcp and dst port 80" 63)"
     [ "$res" = "ok" ] || {
         echo "TTL floor violated: ${res}" >&2
         return 1
