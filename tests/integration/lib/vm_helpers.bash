@@ -585,21 +585,24 @@ stop_capture() {
     local pcap="$2"
     local pidfile="${pcap}.pid"
     local local_pcap="${DATA_DIR:-/tmp}/$(basename "${pcap}")"
-    local sshrun scpsrc
+    local sshrun scpsrc scpkey
     case "$vm" in
         agent)
             sshrun=("_agent_ssh_sudo")
             scpsrc="vagrant@${AGENT_VM_IP}:${pcap}"
+            scpkey="${AGENT_SSH_KEY}"
             ;;
         backend)
             sshrun=("_backend_ssh_sudo")
             scpsrc="vagrant@${BACKEND_VM_IP}:${pcap}"
+            scpkey="${BACKEND_SSH_KEY:-${AGENT_SSH_KEY%agent_key}backend_key}"
             ;;
         client)
             sshrun=(ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key"
                     -o StrictHostKeyChecking=no -o ConnectTimeout=5
                     "vagrant@${ATTACKER_VM_IP}" -- sudo)
             scpsrc="vagrant@${ATTACKER_VM_IP}:${pcap}"
+            scpkey="${AGENT_SSH_KEY%agent_key}attacker_key"
             ;;
         *)
             echo "stop_capture: vm must be 'agent', 'client', or 'backend' (got '${vm}')" >&2
@@ -607,8 +610,9 @@ stop_capture() {
             ;;
     esac
     "${sshrun[@]}" sh -c "kill \$(cat '${pidfile}') 2>/dev/null; sync; rm -f '${pidfile}'" || true
-    # Pull pcap locally so bats assertions can run tshark/tcpdump on it.
-    scp -i "${AGENT_SSH_KEY}" -o StrictHostKeyChecking=no \
+    # Pull pcap locally with the key that authenticates to THIS vm (the backend
+    # rejects the agent key, which silently emptied the pcap and skipped tests).
+    scp -i "${scpkey}" -o StrictHostKeyChecking=no \
         "${scpsrc}" "${local_pcap}" >/dev/null 2>&1 || true
     echo "${local_pcap}"
 }
