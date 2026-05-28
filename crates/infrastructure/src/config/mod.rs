@@ -482,7 +482,17 @@ impl AgentConfig {
 
         // Validate auth config
         if self.auth.enabled {
-            let has_jwt = !self.auth.jwt.public_key_path.is_empty();
+            // Resolve the JWT key source — counts both the static-PEM path and
+            // the EdDSA/JWKS path, and surfaces ambiguous/bad-scheme configs.
+            let jwt_source =
+                self.auth
+                    .jwt
+                    .key_source()
+                    .map_err(|message| ConfigError::Validation {
+                        field: "auth.jwt".to_string(),
+                        message,
+                    })?;
+            let has_jwt = jwt_source != JwtKeySource::None;
             let has_oidc = self.auth.oidc.is_some();
             let has_api_keys = !self.auth.api_keys.is_empty();
 
