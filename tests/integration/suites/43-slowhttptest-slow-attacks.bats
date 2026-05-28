@@ -12,8 +12,9 @@
 # offensive variant asserts:
 #   1. an IDS / IPS metric grew
 #   2. the attacker IP was promoted to the blacklist
-#   3. at least one alert carries MITRE T1499.002
-# The false-positive test asserts the IP is NOT blacklisted.
+# A dedicated coverage test then asserts the suite's alerts carry a
+# MITRE technique mapping. The false-positive test asserts the IP is
+# NOT blacklisted.
 
 load '../lib/ebpf_helpers'
 load '../lib/slowhttp_helpers'
@@ -66,37 +67,45 @@ teardown() {
     stop_slowhttp 2>/dev/null || true
 }
 
-# _run_slow_and_assert <mode> <metric>
-# Foreground attack, then assert metric grew, attacker is blacklisted,
-# and MITRE T1499.002 was tagged on at least one alert.
+# _run_slow_and_assert <mode> <metric> [label_filter]
+# Foreground attack, then assert the IDS alert metric grew and the
+# attacker is blacklisted. MITRE tagging is covered once by the
+# dedicated coverage test below (a port-8080 IDS/IPS alert is mapped to
+# its web-facing technique via alert::mitre — there is no slow-attack →
+# T1499 path in the OSS agent, so this per-variant check stays
+# behavioral, mirroring the sibling flood suite 41).
 _run_slow_and_assert() {
     local mode="$1"
     local metric="$2"
+    local label="${3:-}"
 
     local before
-    before="$(get_metrics_value "$metric" || echo "0")"
+    before="$(get_metrics_value "$metric" "$label" || echo "0")"
     [ -z "$before" ] && before="0"
 
     run_slowhttp "$mode" "$ATTACK_DURATION"
 
-    assert_metric_increased "$metric" "$before" 1
+    assert_metric_increased "$metric" "$before" 1 "$label"
     assert_ip_blacklisted "$ATTACKER_IP"
-    assert_alert_has_mitre_technique T1499.002 || \
-        assert_alert_has_mitre_technique T1499
 }
+
+# IDS alerts are exported as the labelled family `ebpfsentinel_alerts_total`
+# with `component="ids"` — there is no `ebpfsentinel_ids_alerts_total` series.
+IDS_ALERTS_METRIC='ebpfsentinel_alerts_total'
+IDS_ALERTS_LABEL='{component="ids"'
 
 # ── Offensive variants ────────────────────────────────────────────────
 
 @test "slowhttptest Slowloris (-H) trips slow-headers timeout and blacklists source" {
-    _run_slow_and_assert slowloris ebpfsentinel_ids_alerts_total
+    _run_slow_and_assert slowloris "$IDS_ALERTS_METRIC" "$IDS_ALERTS_LABEL"
 }
 
 @test "slowhttptest RUDY (-B) trips slow-body timeout and blacklists source" {
-    _run_slow_and_assert rudy ebpfsentinel_ids_alerts_total
+    _run_slow_and_assert rudy "$IDS_ALERTS_METRIC" "$IDS_ALERTS_LABEL"
 }
 
 @test "slowhttptest Slowread (-X) trips slow-read timeout and blacklists source" {
-    _run_slow_and_assert slowread ebpfsentinel_ids_alerts_total
+    _run_slow_and_assert slowread "$IDS_ALERTS_METRIC" "$IDS_ALERTS_LABEL"
 }
 
 # ── False-positive guard ──────────────────────────────────────────────

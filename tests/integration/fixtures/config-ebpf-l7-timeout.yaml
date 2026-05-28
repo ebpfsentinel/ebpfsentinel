@@ -7,8 +7,8 @@
 #     forcibly closed by the reassembler.
 #   - IPS auto-blacklist with a low threshold so the attacker IP is
 #     promoted to the blacklist within ~10 s.
-#   - DDoS service-exhaustion policy so the alert path emits a
-#     MITRE T1499.002 tag.
+#   - A DDoS policy as a secondary signal; the IDS/IPS alerts on the
+#     HTTP port carry their web-facing MITRE technique via alert::mitre.
 #
 # Whitelist: loopback only — the attacker subnet stays floodable.
 
