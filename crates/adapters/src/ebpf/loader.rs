@@ -500,7 +500,14 @@ impl EbpfLoader {
             .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found in eBPF object"))?
             .try_into()?;
 
-        program.load()?;
+        // Load once: when the same program is attached to several
+        // interfaces, the program object is loaded on the first call and
+        // already-loaded on the rest. Tolerate that so a multi-interface
+        // attach (e.g. tc-scrub on eth1 + eth2) does not abort the loader.
+        match program.load() {
+            Ok(()) | Err(aya::programs::ProgramError::AlreadyLoaded) => {}
+            Err(e) => return Err(e.into()),
+        }
         // Aya auto-detects kernel version:
         // >= 6.6: uses TCX (BPF_TCX_INGRESS link, priority ordering)
         // <  6.6: uses netlink (legacy clsact qdisc attach)
