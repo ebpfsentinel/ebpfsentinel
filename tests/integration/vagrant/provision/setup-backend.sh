@@ -21,9 +21,35 @@ S_SERVER_PORT="${BACKEND_S_SERVER_PORT:-8443}"
 IPERF_PORT="${BACKEND_IPERF_PORT:-5201}"
 
 # ── [1/5] Base packages ──────────────────────────────────────────────
+# Cloud images run unattended-upgrades on first boot, which holds the dpkg
+# lock. Re-running this provisioner then races it and `set -e` would abort.
+# Wait (bounded) for the lock to clear before touching apt.
+wait_for_apt_lock() {
+    local waited=0
+    while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock \
+            /var/lib/dpkg/lock >/dev/null 2>&1; do
+        if [ "${waited}" -ge 300 ]; then
+            echo "dpkg lock still held after ${waited}s — proceeding anyway" >&2
+            break
+        fi
+        echo "  apt/dpkg lock held; waiting (${waited}s)…"
+        sleep 5
+        waited=$((waited + 5))
+    done
+}
+
 echo "=== [1/5] Installing base packages ==="
-sudo apt-get update
-sudo apt-get install -y --no-install-recommends \
+wait_for_apt_lock
+# `sudo` strips DEBIAN_FRONTEND from the script env, so apt would fall back to
+# the interactive (whiptail) frontend and hang on prompts like iperf3's
+# "start as daemon?". Carry it explicitly on every privileged apt/dpkg call.
+APT_ENV="DEBIAN_FRONTEND=noninteractive"
+# A previously interrupted apt run (e.g. unattended-upgrades killed mid-install)
+# leaves dpkg half-configured; recover before doing anything else.
+sudo $APT_ENV dpkg --configure -a || true
+sudo $APT_ENV apt-get update
+wait_for_apt_lock
+sudo $APT_ENV apt-get install -y --no-install-recommends \
     ca-certificates curl jq openssl \
     iperf3 nginx openssh-server \
     iproute2 tcpdump net-tools \
