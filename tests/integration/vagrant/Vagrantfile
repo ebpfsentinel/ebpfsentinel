@@ -369,6 +369,33 @@ NETPLAN
     SHELL
 
     # ----------------------------------------------------------
+    # Provisioner: kernel-hwe
+    #
+    # bats runs on this VM, so its kernel gates the require_kernel checks
+    # of every eBPF suite, and suite 61 starts a local agent here — and the
+    # agent hard-refuses to start below 6.9. The bento/ubuntu-24.04 box
+    # ships 6.8, so without this the kernel-gated suites all skip and the
+    # PQ-handshake suite's setup_file fails. Mirror the agent VM: install
+    # the HWE kernel (>= 6.9) and reboot into it.
+    # ----------------------------------------------------------
+    attacker.vm.provision "shell", name: "kernel-hwe", reboot: true, inline: <<-SHELL
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      apt-get update
+      apt-get install -y --no-install-recommends linux-tools-generic-hwe-24.04
+
+      running="$(uname -r | sed 's/-generic//')"
+      if dpkg --compare-versions "$running" ge 6.9; then
+        echo "kernel $running already >= 6.9, nothing to do"
+        exit 0
+      fi
+
+      apt-get install -y --no-install-recommends linux-generic-hwe-24.04
+      echo "HWE kernel + tools installed; rebooting into >= 6.9"
+    SHELL
+
+    # ----------------------------------------------------------
     # Provisioner: network-tuning (match agent VM settings)
     # ----------------------------------------------------------
     attacker.vm.provision "shell", name: "network-tuning", inline: <<-SHELL
