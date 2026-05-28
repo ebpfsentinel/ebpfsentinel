@@ -28,6 +28,10 @@ MHDDOS_TOR_FLAG="${MHDDOS_TOR_FLAG:-${MHDDOS_DIR}/.tor-disabled}"
 MHDDOS_DEFAULT_RPC="${MHDDOS_DEFAULT_RPC:-100}"
 MHDDOS_DEFAULT_THREADS="${MHDDOS_DEFAULT_THREADS:-10}"
 MHDDOS_DEFAULT_DURATION="${MHDDOS_DEFAULT_DURATION:-30}"
+# Layer7 methods require a proxylist argument. An existing but EMPTY file makes
+# start.py run proxyless (direct single-source flood) instead of downloading a
+# proxy pool — which is what the per-source rate-limit assertions need.
+MHDDOS_PROXY_NONE="${MHDDOS_PROXY_NONE:-none.txt}"
 
 # ── Guards ────────────────────────────────────────────────────────────
 
@@ -40,6 +44,9 @@ require_mhddos() {
     if [ ! -f "${MHDDOS_TOR_FLAG}" ]; then
         skip "MHDDoS Tor disable flag missing (${MHDDOS_TOR_FLAG})"
     fi
+    # Ensure the empty proxylist exists so L7 floods run proxyless (direct).
+    mkdir -p "${MHDDOS_DIR}/files/proxies"
+    : > "${MHDDOS_DIR}/files/proxies/${MHDDOS_PROXY_NONE}"
 }
 
 # _mhddos_validate_target <ip>
@@ -73,19 +80,15 @@ _mhddos_method_args() {
     local threads="$4"
     local extra="${5:-}"
 
+    # start.py Layer7 positional order is:
+    #   <method> <url> <proxy_ty> <threads> <proxylist> <rpc> <duration>
+    # proxy_ty=0 + an empty proxylist => direct, proxyless single-source flood.
     case "$method" in
-        # L7 HTTP/HTTPS floods — all share <method> <url> useproxy rpc threads duration
-        GET|POST|STRESS|BYPASS|OVH|TLS|CFB)
-            # useproxy=0 disables the proxy pool; rpc = requests per connection
-            printf '%s\n%s\n0\n%d\n%d\n%d\n' \
-                "$method" "${target}${extra}" "$MHDDOS_DEFAULT_RPC" \
-                "$threads" "$duration"
-            ;;
-        # SLOW = slowloris-style; same arg shape as the L7 floods.
-        SLOW)
-            printf '%s\n%s\n0\n%d\n%d\n%d\n' \
-                "$method" "${target}${extra}" "$MHDDOS_DEFAULT_RPC" \
-                "$threads" "$duration"
+        GET|POST|STRESS|BYPASS|OVH|TLS|CFB|SLOW)
+            printf '%s\n%s\n0\n%d\n%s\n%d\n%d\n' \
+                "$method" "${target}${extra}" \
+                "$threads" "$MHDDOS_PROXY_NONE" \
+                "$MHDDOS_DEFAULT_RPC" "$duration"
             ;;
         *)
             echo "_mhddos_method_args: unknown method '${method}'" >&2
