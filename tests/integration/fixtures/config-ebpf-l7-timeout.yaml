@@ -78,8 +78,8 @@ threatintel:
 ddos:
   enabled: true
   policies:
-    - id: ddos-slowhttp-service-exhaustion
-      attack_type: service_exhaustion
+    - id: ddos-slowhttp-volumetric
+      attack_type: volumetric
       detection_threshold_pps: 50
       mitigation_action: block
       auto_block_duration_secs: 60
