@@ -1547,8 +1547,11 @@ pub async fn run(
             ebpf_state.add_loader(loader);
         }
 
-        // 10c. TC IDS
-        ids_ok = if config.ids.enabled {
+        // 10c. TC IDS — also the L7 capture vehicle (TLS ClientHello / HTTP
+        // pre-classification feeds the L7 parser and encrypted-DNS detector).
+        // L7 payload emission is gated on the L7_PORTS map, not the IDS config
+        // flag, so the program must load whenever IDS *or* L7 is enabled.
+        ids_ok = if config.ids.enabled || config.l7.enabled {
             match try_load_tc_ids(&ebpf_dir, &config) {
                 Ok((mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr, reader)) => {
                     let event_tx_clone = event_tx.clone();
