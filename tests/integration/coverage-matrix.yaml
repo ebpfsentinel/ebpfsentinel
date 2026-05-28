@@ -110,7 +110,6 @@ suite_profiles:
   "60": nightly       # 60-l7-smtp-ftp-smb-edge
   "61": nightly       # 61-pqc-handshake
   "62": nightly       # 62-ssh-brute-force-real
-  "63": nightly       # 63-dlp-tls-mitm
 
 coverage:
   # ── eBPF programs (15) ──────────────────────────────────────────
@@ -534,7 +533,7 @@ coverage:
 
   - kind: domain_module
     feature: dlp
-    suites: ["17", "28", "63"]
+    suites: ["17", "28"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -834,11 +833,3 @@ attack_suites:
     profile: nightly
     surfaces: ["ids", "ips"]
     notes: "SSH brute-force IDS + IPS sweep: pre-loaded threshold rules (port 22, count=5 in 30s, track_by=src_ip) round-trip via /api/v1/ids/rules + /api/v1/ips/rules; a SYN burst from the test netns to TCP/22 fires an alert with rule_id=ids-ssh-bruteforce, severity=high, MITRE T1110(.001) per the domain dst-port mapping; the IPS auto-blacklist captures the source under the same threshold. Real hydra/ncrack credential bursts and the sshd no-successful-auth negative assertion are deferred (extra deps + multi-VM topology)"
-
-  - suite: "63"
-    name: dlp-tls-mitm
-    topology: 3vm
-    kernel_min: "n/a"
-    profile: nightly
-    surfaces: ["dlp", "tls"]
-    notes: "Enterprise DLP TLS-inspection proxy. AC #3 license-gated skip-path is the only assertion that runs on the OSS bats fleet: detect license (EBPFSENTINEL_LICENSE env or /etc/ebpfsentinel/enterprise.lic), enterprise binary discoverability, and mitmproxy availability; skip cleanly with a documented reason when any is missing. Wire-level malicious-MITM cert mismatch alert (AC #1) and decrypted-payload DLP pattern match (AC #2) are tracked as 3-VM deferrals — they need the enterprise agent + mitmproxy attacker VM with an injected CA, neither of which is on the OSS test fleet"
