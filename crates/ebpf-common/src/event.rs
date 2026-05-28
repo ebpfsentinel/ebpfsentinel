@@ -98,6 +98,10 @@ pub struct PacketEvent {
     pub action: u8,
     /// Bit flags: `FLAG_IPV6` (0x01), `FLAG_VLAN` (0x02).
     pub flags: u8,
+    /// Matched rule identifier. For L7 events (`EVENT_TYPE_L7`), which have
+    /// no kernel-side rule, this field instead carries the number of payload
+    /// bytes actually captured, so userspace can trim the fixed-size RingBuf
+    /// buffer to its real length and avoid reading the uninitialised tail.
     pub rule_id: u32,
     /// 802.1Q VLAN ID (0 = no VLAN).
     pub vlan_id: u16,

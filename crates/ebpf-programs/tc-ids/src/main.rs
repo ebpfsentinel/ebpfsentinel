@@ -693,6 +693,7 @@ fn emit_l7_small(
                 dst_port,
                 flags,
                 vlan_id,
+                to_load as u32,
             );
             // `bpf_skb_load_bytes` marks its destination region initialized
             // for the verifier, so no separate memset of the payload is
@@ -763,6 +764,7 @@ fn emit_l7_full(
                 dst_port,
                 flags,
                 vlan_id,
+                to_load as u32,
             );
             // `bpf_skb_load_bytes` marks its destination region initialized
             // for the verifier, so no separate memset of the payload is
@@ -782,6 +784,12 @@ fn emit_l7_full(
 }
 
 /// Fill the L7 event header fields (shared by both tiers).
+///
+/// `payload_len` is the number of payload bytes actually copied into the
+/// event by `bpf_skb_load_bytes`. It is carried in the otherwise-unused
+/// `rule_id` field (L7 events have no kernel rule id) so userspace can
+/// trim the fixed-size RingBuf buffer to the real length and never read
+/// the uninitialised tail.
 #[inline(always)]
 unsafe fn fill_l7_header(
     ctx: &TcContext,
@@ -792,6 +800,7 @@ unsafe fn fill_l7_header(
     dst_port: u16,
     flags: u8,
     vlan_id: u16,
+    payload_len: u32,
 ) {
     unsafe {
         header.timestamp_ns = bpf_ktime_get_boot_ns();
@@ -803,7 +812,7 @@ unsafe fn fill_l7_header(
         header.event_type = EVENT_TYPE_L7;
         header.action = 0;
         header.flags = flags;
-        header.rule_id = 0;
+        header.rule_id = payload_len;
         header.vlan_id = vlan_id;
         header.cpu_id = bpf_get_smp_processor_id() as u16;
         // Populate socket cookie for TC context (not available in XDP).

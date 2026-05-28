@@ -60,26 +60,7 @@ impl EventReader {
             // Batch drain: read all available events
             let rb = guard.get_inner_mut();
             while let Some(item) = rb.next() {
-                let bytes: &[u8] = &item;
-                if bytes.len() >= std::mem::size_of::<PacketEvent>() {
-                    // SAFETY: PacketEvent is #[repr(C)] with known layout (64 bytes).
-                    // The kernel writes this exact layout. We verify the length above.
-                    // read_unaligned handles any alignment issues.
-                    let event =
-                        unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<PacketEvent>()) };
-
-                    let agent_event = if event.event_type == EVENT_TYPE_L7
-                        && bytes.len() > std::mem::size_of::<PacketEvent>()
-                    {
-                        let payload = bytes[std::mem::size_of::<PacketEvent>()..].to_vec();
-                        AgentEvent::L7 {
-                            header: event,
-                            payload,
-                        }
-                    } else {
-                        AgentEvent::L4(event)
-                    };
-
+                if let Some(agent_event) = decode_event(&item) {
                     // Backpressure: drop on full channel
                     if tx.try_send(agent_event).is_err() {
                         debug!("event channel full, dropping event");
@@ -89,6 +70,36 @@ impl EventReader {
 
             guard.clear_ready();
         }
+    }
+}
+
+/// Decode one `RingBuf` record into an [`AgentEvent`].
+///
+/// Returns `None` when the record is too short to hold a [`PacketEvent`].
+/// For L7 events the kernel reserves a fixed-size buffer (512 or 2048 B)
+/// but only fills `header.rule_id` bytes via `bpf_skb_load_bytes`; the
+/// remaining bytes are uninitialised kernel memory. The payload is trimmed
+/// to that captured length so downstream parsers never read — nor leak —
+/// the stale tail.
+fn decode_event(bytes: &[u8]) -> Option<AgentEvent> {
+    let header_len = std::mem::size_of::<PacketEvent>();
+    if bytes.len() < header_len {
+        return None;
+    }
+    // SAFETY: PacketEvent is #[repr(C)] with a known layout the kernel
+    // writes verbatim. The length is checked above; read_unaligned copes
+    // with any alignment.
+    let event = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<PacketEvent>()) };
+
+    if event.event_type == EVENT_TYPE_L7 && bytes.len() > header_len {
+        let raw = &bytes[header_len..];
+        let real_len = (event.rule_id as usize).min(raw.len());
+        Some(AgentEvent::L7 {
+            header: event,
+            payload: raw[..real_len].to_vec(),
+        })
+    } else {
+        Some(AgentEvent::L4(event))
     }
 }
 
@@ -208,5 +219,41 @@ mod tests {
         // Verify that our length check would reject short data
         let short_bytes = [0u8; 16];
         assert!(short_bytes.len() < std::mem::size_of::<PacketEvent>());
+        assert!(decode_event(&short_bytes).is_none());
+    }
+
+    #[test]
+    fn l7_payload_trimmed_to_captured_length() {
+        let header_len = std::mem::size_of::<PacketEvent>();
+        let real = [0x16u8, 0x03, 0x01, 0x00, 0x05];
+        let mut bytes = vec![0u8; header_len];
+        bytes[45] = EVENT_TYPE_L7; // event_type
+        bytes[48..52].copy_from_slice(&(real.len() as u32).to_ne_bytes()); // rule_id = captured len
+        bytes.extend_from_slice(&real);
+        // Fixed small-tier buffer tail (512 B) of uninitialised garbage.
+        bytes.extend_from_slice(&[0xFFu8; 512 - 5]);
+
+        match decode_event(&bytes) {
+            Some(AgentEvent::L7 { payload, .. }) => {
+                assert_eq!(payload.len(), real.len(), "must trim to captured length");
+                assert_eq!(payload, real, "must not leak the stale tail");
+            }
+            _ => panic!("expected an L7 event"),
+        }
+    }
+
+    #[test]
+    fn l7_payload_len_clamped_to_available() {
+        // A captured length larger than the buffer must clamp, not panic.
+        let header_len = std::mem::size_of::<PacketEvent>();
+        let mut bytes = vec![0u8; header_len];
+        bytes[45] = EVENT_TYPE_L7;
+        bytes[48..52].copy_from_slice(&9999u32.to_ne_bytes());
+        bytes.extend_from_slice(&[0xABu8; 10]);
+
+        match decode_event(&bytes) {
+            Some(AgentEvent::L7 { payload, .. }) => assert_eq!(payload.len(), 10),
+            _ => panic!("expected an L7 event"),
+        }
     }
 }
