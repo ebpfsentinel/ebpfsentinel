@@ -28,8 +28,8 @@ require_syncookie_tools() {
             skip "${tool} not available on attacker VM"
         fi
     done
-    if ! python3 -c "import scapy.all" >/dev/null 2>&1; then
-        skip "scapy not installed on attacker VM (run story 34.3 provisioner)"
+    if ! "$EBPF_SCAPY_PY" -c "import scapy.all" >/dev/null 2>&1; then
+        skip "scapy not installed on attacker VM (run the attacker provisioner)"
     fi
 }
 
@@ -100,7 +100,7 @@ syncookie_spoofed_flood() {
     local count="${2:-200}"
     local target="${AGENT_VM_IP:-${AGENT_HOST}}"
 
-    sudo -n python3 - <<PY 2>/dev/null || true
+    sudo -n "$EBPF_SCAPY_PY" - <<PY 2>/dev/null || true
 from random import randint
 from scapy.all import IP, TCP, send
 target = "${target}"

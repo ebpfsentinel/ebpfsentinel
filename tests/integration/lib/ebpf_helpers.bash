@@ -25,6 +25,13 @@ fi
 
 # ── Constants ────────────────────────────────────────────────────────
 
+# Scapy lives in a dedicated venv on the attacker VM (the system python
+# has no scapy — see setup-attacker.sh). Resolve the interpreter once so
+# every suite drives scapy through the venv and stops silently skipping;
+# fall back to the bare interpreter only where the venv is absent.
+EBPF_SCAPY_PY="${EBPF_SCAPY_PY:-/opt/scapy-venv/bin/python3}"
+[ -x "$EBPF_SCAPY_PY" ] || EBPF_SCAPY_PY="python3"
+
 EBPF_TEST_NS="${EBPF_TEST_NS:-ebpf-test-ns}"
 EBPF_VETH_HOST="${EBPF_VETH_HOST:-veth-ebpf0}"
 EBPF_VETH_NS="${EBPF_VETH_NS:-veth-ebpf1}"

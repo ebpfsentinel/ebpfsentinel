@@ -165,6 +165,26 @@ for s in $SUITES; do
     REMOTE_SUITES="${REMOTE_SUITES} suites/${bn}"
 done
 
+# ── Heal attacker → backend SSH trust ──────────────────────────────
+# Vagrant provisions VMs in definition order, so a combined `up` runs the
+# attacker's backend-key copy before the backend VM exists — leaving the
+# transit suites (50/51 capture + iperf3) unable to reach the backend.
+# Re-copy the key here (idempotent) now that all three VMs are up.
+cd "$VAGRANT_DIR"
+VAGRANT_3VM=1 vagrant ssh attacker -c '
+  if ! ssh -i ~/.ssh/backend_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        -o BatchMode=yes vagrant@192.168.57.30 true 2>/dev/null; then
+    if command -v sshpass >/dev/null 2>&1; then
+      sshpass -p vagrant ssh-copy-id -i ~/.ssh/backend_key.pub \
+        -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        vagrant@192.168.57.30 2>/dev/null \
+        && echo "backend SSH trust established" \
+        || echo "WARN: could not establish backend SSH trust"
+    fi
+  fi
+' || true
+cd "$INTEGRATION_DIR"
+
 # ── Run BATS suites on client VM ───────────────────────────────────
 echo "=== Running tests on client VM (192.168.56.20) → agent (.10/.57.10) → backend (192.168.57.30) ==="
 echo "  Suites: $(echo "$REMOTE_SUITES" | wc -w | tr -d ' ')"

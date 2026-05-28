@@ -17,14 +17,14 @@ VIP_ADDR="10.200.0.50"
 NON_VIP_ADDR="10.200.0.99"
 
 require_scapy() {
-    python3 -c 'import scapy.all' 2>/dev/null || skip "python3 scapy not available"
+    "$EBPF_SCAPY_PY" -c 'import scapy.all' 2>/dev/null || skip "scapy not available"
 }
 
 # Send a broadcast ARP request for $1 from inside the test netns and echo
 # the responder's hardware address (empty if no reply within the timeout).
 arp_probe() {
     local target="$1"
-    ip netns exec "$EBPF_TEST_NS" python3 - "$EBPF_VETH_NS" "$target" <<'PY'
+    ip netns exec "$EBPF_TEST_NS" "$EBPF_SCAPY_PY" - "$EBPF_VETH_NS" "$target" <<'PY'
 import sys
 from scapy.all import Ether, ARP, srp
 iface, target = sys.argv[1], sys.argv[2]

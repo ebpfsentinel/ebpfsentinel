@@ -28,7 +28,11 @@ _attacker_ssh() {
 # otherwise. Suites should `skip` on non-zero return rather than fail —
 # kernel CT itself is always on, only the userspace inspector is gated.
 ensure_conntrack_tool() {
-    if _agent_ssh_sudo command -v conntrack >/dev/null 2>&1; then
+    # `command -v` is a shell builtin, so it must run inside a shell — a
+    # bare `sudo command -v` tries to exec a binary named "command" and
+    # always fails. conntrack lives in /usr/sbin and needs no privilege to
+    # locate, so check over a plain (non-sudo) SSH shell.
+    if _agent_ssh sh -c 'command -v conntrack' >/dev/null 2>&1; then
         return 0
     fi
     echo "agent VM missing 'conntrack' tool (apt install conntrack)" >&2

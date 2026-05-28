@@ -63,8 +63,9 @@ teardown_file() {
     rm -f "${PREPARED_CONFIG:-}"
 }
 
+# EBPF_SCAPY_PY (the scapy venv interpreter) is resolved in ebpf_helpers.
 require_scapy() {
-    python3 -c 'import scapy.all' 2>/dev/null || skip "python3 scapy not available"
+    "$EBPF_SCAPY_PY" -c 'import scapy.all' 2>/dev/null || skip "scapy not available"
 }
 
 agent_iface_mac() {
@@ -184,7 +185,7 @@ agent_iface_mac() {
     sleep 2
 
     local responder expected got want
-    responder="$(python3 - "${EBPF_AGENT_INTERFACE:-eth1}" "${LB_VIP_ADDR}" <<'PY'
+    responder="$("$EBPF_SCAPY_PY" - "${EBPF_AGENT_INTERFACE:-eth1}" "${LB_VIP_ADDR}" <<'PY'
 import sys
 from scapy.all import Ether, ARP, srp
 iface, target = sys.argv[1], sys.argv[2]
@@ -230,7 +231,7 @@ PY
 
     # Drive a few ARP probes for the VIP so the forged-reply path emits
     # frames the agent's own monitoring would observe.
-    python3 - "${EBPF_AGENT_INTERFACE:-eth1}" "${LB_VIP_ADDR}" <<'PY' >/dev/null 2>&1 || true
+    "$EBPF_SCAPY_PY" - "${EBPF_AGENT_INTERFACE:-eth1}" "${LB_VIP_ADDR}" <<'PY' >/dev/null 2>&1 || true
 import sys
 from scapy.all import Ether, ARP, srp
 iface, target = sys.argv[1], sys.argv[2]

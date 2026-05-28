@@ -190,8 +190,7 @@ _attacker_iface() {
 }
 
 @test "whitelisted source NOT rejected (no RST when src is in whitelist)" {
-    if ! command -v scapy >/dev/null 2>&1 \
-        && ! python3 -c "import scapy.all" >/dev/null 2>&1; then
+    if ! "$EBPF_SCAPY_PY" -c "import scapy.all" >/dev/null 2>&1; then
         skip "scapy not available — cannot forge whitelisted-source SYN"
     fi
 
@@ -206,7 +205,7 @@ _attacker_iface() {
     # Send a SYN with a spoofed source inside the whitelist subnet.
     # The agent must NOT emit a forged RST in response (whitelist allow
     # fires before the reject rule). Use sudo for raw-socket access.
-    sudo -n python3 - <<PY 2>/dev/null || true
+    sudo -n "$EBPF_SCAPY_PY" - <<PY 2>/dev/null || true
 from scapy.all import IP, TCP, send
 pkt = IP(src="${WHITELIST_PROBE_SRC}", dst="${AGENT_VM_IP}") / \
       TCP(sport=33333, dport=${REJECT_TCP_PORT}, flags="S", seq=1000)
