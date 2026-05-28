@@ -2215,8 +2215,8 @@ pub async fn run(
 
     // Periodic sweep task: flush flows that went idle past the
     // configured timeout so their partial buffers can still be parsed.
-    if let Some(ref reassembler) = stream_reassembler {
-        let sweep_handle = Arc::clone(reassembler);
+    if stream_reassembler.is_some() {
+        let sweep_dispatcher = dispatcher.clone();
         let sweep_interval = Duration::from_secs(config.l7.reassembly.sweep_interval_secs.max(1));
         let sweep_cancel = cancel_token.clone();
         tokio::spawn(async move {
@@ -2229,9 +2229,9 @@ pub async fn run(
                         let now_ns = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
-                        let flushed = sweep_handle.flush_expired(now_ns);
-                        if !flushed.is_empty() {
-                            tracing::debug!(count = flushed.len(), "l7 reassembler flushed idle flows");
+                        let count = sweep_dispatcher.flush_reassembled(now_ns);
+                        if count > 0 {
+                            tracing::debug!(count, "l7 reassembler flushed + parsed idle flows");
                         }
                     }
                 }

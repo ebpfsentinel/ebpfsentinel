@@ -790,6 +790,16 @@ impl EventDispatcher {
             payload
         };
 
+        self.process_l7_payload(&header, payload);
+    }
+
+    /// Detect the protocol, compute fingerprints, run encrypted-DNS
+    /// detection, and evaluate L7 rules for an already-reassembled payload.
+    ///
+    /// Shared by the live event path ([`process_l7_event`](Self::process_l7_event))
+    /// and the reassembler idle-flush path ([`flush_reassembled`](Self::flush_reassembled))
+    /// so flushed partial buffers receive identical treatment.
+    fn process_l7_payload(&self, header: &PacketEvent, payload: &[u8]) {
         let protocol = detect_protocol(payload);
         let mut protocol_label = match protocol {
             DetectedProtocol::Http => "http",
@@ -833,7 +843,7 @@ impl EventDispatcher {
             self.fingerprint_cache.insert(flow_key, fp);
 
             // Detect encrypted DNS (DoH/DoT)
-            self.check_encrypted_dns(tls_hello, &header);
+            self.check_encrypted_dns(tls_hello, header);
         }
 
         // Compute and cache JA4S fingerprint for TLS ServerHello replies.
@@ -852,9 +862,20 @@ impl EventDispatcher {
 
         // Evaluate L7 rules against parsed content
         let l7_svc = self.l7_service.load();
-        let l7_result = l7_svc.evaluate(&header, &parsed);
+        let l7_result = l7_svc.evaluate(header, &parsed);
         drop(l7_svc);
 
+        self.apply_l7_rule_result(header, protocol_label, l7_result);
+    }
+
+    /// Log, audit, alert, and record metrics for the outcome of evaluating
+    /// the L7 rule engine against a parsed payload.
+    fn apply_l7_rule_result(
+        &self,
+        header: &PacketEvent,
+        protocol_label: &str,
+        l7_result: Option<(FirewallAction, domain::common::entity::RuleId)>,
+    ) {
         if let Some((action, rule_id)) = l7_result {
             let action_label = match action {
                 FirewallAction::Allow => "allow",
@@ -910,7 +931,7 @@ impl EventDispatcher {
             if action == FirewallAction::Deny || action == FirewallAction::Reject {
                 self.emit_packet_security_alert(
                     domain::alert::entity::PacketAlertComponent::L7,
-                    &header,
+                    header,
                     &rule_id.0,
                     action_label,
                     &detail,
@@ -926,6 +947,65 @@ impl EventDispatcher {
                 "L7 event — no rule matched"
             );
             self.metrics.record_packet("l7", protocol_label);
+        }
+    }
+
+    /// Flush reassembler flows that went idle past the configured timeout
+    /// and run their (partial) buffers through the L7 parser.
+    ///
+    /// The reassembler only emits `Complete` for HTTP/1.x with a known
+    /// `Content-Length`; every other protocol (TLS/DoH/DoT, SSH, Redis, …)
+    /// stays buffered until it goes idle. Without this flush path those
+    /// buffers would never reach [`process_l7_payload`](Self::process_l7_payload)
+    /// and the protocol would silently never be detected.
+    ///
+    /// Returns the number of flows flushed.
+    pub fn flush_reassembled(&self, now_ns: u64) -> usize {
+        let Some(ref reassembler) = self.stream_reassembler else {
+            return 0;
+        };
+        let flushed = reassembler.flush_expired(now_ns);
+        let count = flushed.len();
+        for (flow, bytes) in flushed {
+            if bytes.is_empty() {
+                continue;
+            }
+            let header = Self::l7_header_from_flow(&flow, now_ns);
+            self.process_l7_payload(&header, &bytes);
+        }
+        count
+    }
+
+    /// Reconstruct a minimal `PacketEvent` header from a reassembler
+    /// [`FlowId`](domain::l7::reassembler::FlowId) so a flushed buffer can be
+    /// fed back through the same L7 processing as a live event. Only the
+    /// 5-tuple and timestamp are meaningful; kernel-only metadata (socket
+    /// cookie, cgroup, RSS hash) is unavailable for a flushed flow and left
+    /// zeroed.
+    fn l7_header_from_flow(flow: &domain::l7::reassembler::FlowId, now_ns: u64) -> PacketEvent {
+        let mut flags = 0u8;
+        if flow.is_ipv6 {
+            flags |= ebpf_common::event::FLAG_IPV6;
+        }
+        PacketEvent {
+            timestamp_ns: now_ns,
+            src_addr: flow.src_addr,
+            dst_addr: flow.dst_addr,
+            src_port: flow.src_port,
+            dst_port: flow.dst_port,
+            protocol: 6, // IPPROTO_TCP — L7 capture is TCP-only
+            event_type: ebpf_common::event::EVENT_TYPE_L7,
+            action: 0,
+            flags,
+            rule_id: 0,
+            vlan_id: 0,
+            cpu_id: 0,
+            socket_cookie: 0,
+            cgroup_id: 0,
+            cgroup1_id: 0,
+            rss_hash: 0,
+            rss_hash_type: 0,
+            rx_hw_timestamp_ns: 0,
         }
     }
 
@@ -1433,6 +1513,79 @@ mod tests {
             alert_tx,
             None,
         )
+    }
+
+    /// Minimal well-formed TLS 1.2 `ClientHello` record carrying an SNI.
+    fn build_tls_client_hello(hostname: &str) -> Vec<u8> {
+        let name = hostname.as_bytes();
+        let sni_value_len = 2 + 1 + 2 + name.len();
+        let sni_list_len = 1 + 2 + name.len();
+        let ext_data_len = 4 + sni_value_len;
+        let ch_body_len = 2 + 32 + 1 + 4 + 2 + 2 + ext_data_len;
+        let hs_len = 4 + ch_body_len;
+
+        let mut pkt = Vec::new();
+        pkt.push(0x16); // handshake record
+        pkt.extend_from_slice(&[0x03, 0x01]); // record version (TLS 1.0)
+        pkt.extend_from_slice(&u16::try_from(hs_len).unwrap().to_be_bytes());
+        pkt.push(0x01); // ClientHello
+        let body = u32::try_from(ch_body_len).unwrap();
+        pkt.push((body >> 16) as u8);
+        pkt.push((body >> 8) as u8);
+        pkt.push(body as u8);
+        pkt.extend_from_slice(&[0x03, 0x03]); // client_version TLS 1.2
+        pkt.extend_from_slice(&[0xAA; 32]); // random
+        pkt.push(0x00); // session id
+        pkt.extend_from_slice(&[0x00, 0x02, 0x00, 0x2f]); // 1 cipher suite
+        pkt.extend_from_slice(&[0x01, 0x00]); // 1 compression method (null)
+        pkt.extend_from_slice(&u16::try_from(ext_data_len).unwrap().to_be_bytes());
+        pkt.extend_from_slice(&[0x00, 0x00]); // ext type SNI
+        pkt.extend_from_slice(&u16::try_from(sni_value_len).unwrap().to_be_bytes());
+        pkt.extend_from_slice(&u16::try_from(sni_list_len).unwrap().to_be_bytes());
+        pkt.push(0x00); // host_name type
+        pkt.extend_from_slice(&u16::try_from(name.len()).unwrap().to_be_bytes());
+        pkt.extend_from_slice(name);
+        pkt
+    }
+
+    // A buffered non-HTTP flow (TLS ClientHello) must still reach the L7
+    // parser via the idle-flush path — otherwise the reassembler is a sink
+    // that silently drops every protocol it cannot complete inline.
+    #[tokio::test]
+    async fn flush_reassembled_parses_buffered_tls_clienthello() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let reassembler = Arc::new(domain::l7::reassembler::StreamReassembler::new(
+            domain::l7::reassembler::ReassemblerConfig::default(),
+        ));
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_stream_reassembler(reassembler);
+
+        // DoT flow: dst_port 853, TLS ClientHello.
+        let mut header = make_event(EVENT_TYPE_L7, 0);
+        header.dst_port = 853;
+        let client_hello = build_tls_client_hello("dot.example");
+
+        // Live path: reassembler buffers it (not HTTP) → no alert yet.
+        dispatcher.process_l7_event(header, &client_hello);
+        assert!(
+            alert_rx.try_recv().is_err(),
+            "buffered ClientHello must not emit before flush"
+        );
+
+        // Idle flush (now far past the 5s default timeout) → parsed → DoT alert.
+        let flushed = dispatcher.flush_reassembled(10_000_000_000);
+        assert_eq!(flushed, 1, "exactly one idle flow should flush");
+        match alert_rx.try_recv() {
+            Ok(AlertEvent::Dns(alert)) => match alert.reason {
+                domain::dns::entity::DnsAlertReason::EncryptedDns { protocol, .. } => {
+                    assert_eq!(protocol, "dot");
+                }
+                _ => panic!("expected EncryptedDns reason"),
+            },
+            _ => panic!("expected AlertEvent::Dns"),
+        }
     }
 
     #[tokio::test]
