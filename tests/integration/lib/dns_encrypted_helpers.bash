@@ -29,9 +29,12 @@ tls_probe_sni() {
     local host="${1:?usage: tls_probe_sni <host_ip> <port> <sni>}"
     local port="${2:?usage: tls_probe_sni <host_ip> <port> <sni>}"
     local sni="${3:?usage: tls_probe_sni <host_ip> <port> <sni>}"
-    _attacker_ssh sh -c \
-        "echo Q | openssl s_client -connect ${host}:${port} -servername ${sni} \
-            -verify_return_error 0 -tls1_2 </dev/null >/dev/null 2>&1 || true"
+    # Pass the whole remote command as a SINGLE string. _attacker_ssh is
+    # exec-style (ssh ... -- "$@"), so ssh re-joins argv with spaces and the
+    # remote login shell parses the result; an extra `sh -c` wrapper would be
+    # re-split and mangle multi-token / multi-statement scripts.
+    _attacker_ssh \
+        "echo Q | openssl s_client -connect ${host}:${port} -servername ${sni} -verify_return_error 0 -tls1_2 </dev/null >/dev/null 2>&1 || true"
 }
 
 # encrypted_dns_alerts <protocol>

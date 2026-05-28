@@ -107,7 +107,7 @@ teardown_file() {
     # Verify the backend's DoT listener is reachable; if dot-backend.service
     # didn't come up (older provisioner, missing systemd unit) the
     # agent still has nothing to observe — skip rather than fail.
-    if ! _attacker_ssh sh -c \
+    if ! _attacker_ssh \
             "nc -z -w2 ${BACKEND_VM_IP:-192.168.57.30} 853"; then
         skip "backend DoT listener (:853) unreachable; dot-backend.service not running"
     fi
@@ -136,12 +136,8 @@ teardown_file() {
     # backend has no resolver bound on :53 so each query yields ICMP
     # port-unreach, but the packet still crosses the agent — which is
     # what we want to assert against.
-    _attacker_ssh sh -c \
-        "for i in 1 2 3; do \
-            (echo 'q'; sleep 0.2) \
-            | nc -u -w1 ${BACKEND_VM_IP:-192.168.57.30} 53 \
-            >/dev/null 2>&1 || true; \
-         done"
+    _attacker_ssh \
+        "for i in 1 2 3; do (echo 'q'; sleep 0.2) | nc -u -w1 ${BACKEND_VM_IP:-192.168.57.30} 53 >/dev/null 2>&1 || true; done"
     sleep 3
 
     doh_after="$(encrypted_dns_alerts doh)"
