@@ -78,6 +78,10 @@ _drive_traffic_to_port() {
 _pull_remote_pcap() {
     local remote="${1:?usage: _pull_remote_pcap <remote_path> <local>}"
     local local_dest="${2:?usage: _pull_remote_pcap <remote_path> <local>}"
+    # The agent runs as root, so the pcap lands root-owned 0600 and the
+    # unprivileged vagrant scp user cannot read it. Relax to world-readable
+    # first (test artefact in a throwaway VM dir).
+    _agent_ssh_sudo chmod 0644 "${remote}" >/dev/null 2>&1 || true
     scp -i "${AGENT_SSH_KEY}" -o StrictHostKeyChecking=no \
         "vagrant@${AGENT_VM_IP}:${remote}" "${local_dest}" >/dev/null 2>&1
 }
