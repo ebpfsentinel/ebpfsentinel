@@ -294,6 +294,59 @@ network:
 NETPLAN
           netplan apply 2>/dev/null || true
         fi
+
+        # Docker (installed for the container test strategy) sets the iptables
+        # FORWARD policy to DROP and recreates the DOCKER-USER chain on every
+        # daemon start, which silently kills the agent's transit forwarding
+        # between the client (192.168.56.0/24) and backend (192.168.57.0/24)
+        # subnets. Rules added once at provision time are lost on reboot, so
+        # install a boot-time oneshot (ordered after docker) that re-inserts
+        # idempotent ACCEPT rules into DOCKER-USER — the Docker-sanctioned hook
+        # for user rules.
+        cat > /usr/local/sbin/ebpf-transit-forward.sh <<'FWD'
+#!/usr/bin/env bash
+# Allow agent transit forwarding between the client and backend subnets
+# despite Docker's default-DROP FORWARD chain. Idempotent.
+set -u
+CLIENT_NET="192.168.56.0/24"
+BACKEND_NET="192.168.57.0/24"
+# Wait briefly for the DOCKER-USER chain to exist (docker may still be starting).
+for _ in $(seq 1 30); do
+  iptables -L DOCKER-USER -n >/dev/null 2>&1 && break
+  sleep 1
+done
+add_rule() {
+  iptables -C DOCKER-USER "$@" 2>/dev/null || iptables -I DOCKER-USER "$@"
+}
+if iptables -L DOCKER-USER -n >/dev/null 2>&1; then
+  add_rule -s "$CLIENT_NET"  -d "$BACKEND_NET" -j ACCEPT
+  add_rule -s "$BACKEND_NET" -d "$CLIENT_NET"  -j ACCEPT
+else
+  # No Docker chain (docker not installed/running) — fall back to the main
+  # FORWARD chain so plain kernel forwarding still works.
+  iptables -C FORWARD -s "$CLIENT_NET"  -d "$BACKEND_NET" -j ACCEPT 2>/dev/null || iptables -I FORWARD -s "$CLIENT_NET"  -d "$BACKEND_NET" -j ACCEPT
+  iptables -C FORWARD -s "$BACKEND_NET" -d "$CLIENT_NET"  -j ACCEPT 2>/dev/null || iptables -I FORWARD -s "$BACKEND_NET" -d "$CLIENT_NET"  -j ACCEPT
+fi
+FWD
+        chmod +x /usr/local/sbin/ebpf-transit-forward.sh
+
+        cat > /etc/systemd/system/ebpf-transit-forward.service <<UNIT
+[Unit]
+Description=Allow eBPFsentinel transit forwarding past Docker FORWARD DROP
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ebpf-transit-forward.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+        systemctl daemon-reload
+        systemctl enable ebpf-transit-forward.service
+        systemctl restart ebpf-transit-forward.service || true
       SHELL
     end
 
