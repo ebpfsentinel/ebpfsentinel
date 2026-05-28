@@ -179,7 +179,7 @@ PY
 
     local value
     value="$(echo "${metrics}" \
-        | awk '/^ebpfsentinel_routing_gateways(_total)?\b/ {print $NF; exit}')"
+        | awk '/^ebpfsentinel_routing_gateways(_total)?[[:space:]]/ {print $NF; exit}')"
     [ -n "${value}" ] || {
         echo "ebpfsentinel_routing_gateways gauge missing from /metrics" >&2
         return 1
