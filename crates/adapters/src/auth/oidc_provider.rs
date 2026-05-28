@@ -251,13 +251,40 @@ impl JwksRefresher for HttpJwksRefresher {
     }
 }
 
+/// Whether a JWKS URL may be fetched over plaintext HTTP.
+///
+/// Only loopback hosts (`localhost`, `127.0.0.0/8`, `::1`) are exempt from
+/// the HTTPS requirement — these never leave the host, so there is no MITM
+/// surface. Every other host must use HTTPS. Mirrors the OAuth "localhost is
+/// exempt" carve-out and lets dashboards/sidecars co-located with the agent
+/// serve JWKS without provisioning TLS.
+fn allows_plaintext(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    match parsed.host_str() {
+        Some(host) => {
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }
+        None => false,
+    }
+}
+
 /// Fetch a JWKS from a remote URL.
 ///
-/// Enforces HTTPS-only and a 10-second timeout to prevent MITM attacks
-/// and hanging on unresponsive identity providers.
+/// Enforces HTTPS (except for loopback hosts, see [`allows_plaintext`]) and a
+/// 10-second timeout to prevent MITM attacks and hanging on unresponsive
+/// identity providers.
 pub async fn fetch_jwks(url: &str) -> Result<JwkSet, AuthError> {
     let client = reqwest::Client::builder()
-        .https_only(true)
+        .https_only(!allows_plaintext(url))
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| AuthError::KeyLoadFailed(format!("JWKS HTTP client error: {e}")))?;
@@ -774,5 +801,25 @@ mod tests {
         let err = provider.validate_token(&token).await.unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
         assert_eq!(refresher.calls(), 1);
+    }
+
+    #[test]
+    fn allows_plaintext_only_for_loopback_http() {
+        // Loopback over http is exempt.
+        assert!(allows_plaintext("http://localhost:8765/jwks.json"));
+        assert!(allows_plaintext("http://127.0.0.1:8765/jwks.json"));
+        assert!(allows_plaintext("http://[::1]:8765/jwks.json"));
+        assert!(allows_plaintext("http://127.0.0.2/jwks.json"));
+
+        // Non-loopback http is not.
+        assert!(!allows_plaintext("http://example.com/jwks.json"));
+        assert!(!allows_plaintext("http://10.0.0.1/jwks.json"));
+
+        // https never needs the carve-out (and is not "plaintext").
+        assert!(!allows_plaintext("https://localhost/jwks.json"));
+        assert!(!allows_plaintext("https://example.com/jwks.json"));
+
+        // Garbage URLs are rejected.
+        assert!(!allows_plaintext("not a url"));
     }
 }
