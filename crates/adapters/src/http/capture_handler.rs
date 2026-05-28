@@ -313,12 +313,21 @@ fn pcap_capture_blocking(
         pcap::Device::from(interface)
     };
 
-    let mut cap = pcap::Capture::from_device(device)
+    let cap = pcap::Capture::from_device(device)
         .map_err(|e| (id.to_string(), format!("capture init failed: {e}")))?
         .snaplen(snap_length.try_into().unwrap_or(i32::MAX))
-        .timeout(1000) // 1s read timeout for periodic stop checks
+        .immediate_mode(true)
         .open()
         .map_err(|e| (id.to_string(), format!("capture open failed: {e}")))?;
+
+    // Non-blocking mode: next_packet() returns immediately with TimeoutExpired
+    // when no frame is ready, instead of blocking inside libpcap until one
+    // arrives. Blocking mode never honours the duration deadline on a quiet
+    // link (Linux only wakes next_packet() on packet arrival), leaving the
+    // session stuck in "running" forever.
+    let mut cap = cap
+        .setnonblock()
+        .map_err(|e| (id.to_string(), format!("capture nonblock failed: {e}")))?;
 
     if !filter.is_empty() {
         cap.filter(filter, true).map_err(|e| {
@@ -343,7 +352,11 @@ fn pcap_capture_blocking(
                 savefile.write(&packet);
                 packets += 1;
             }
-            Err(pcap::Error::TimeoutExpired) => {}
+            // No frame ready — yield briefly so we re-check the deadline
+            // without busy-spinning the capture thread.
+            Err(pcap::Error::TimeoutExpired | pcap::Error::NoMorePackets) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             Err(_) => break,
         }
     }
