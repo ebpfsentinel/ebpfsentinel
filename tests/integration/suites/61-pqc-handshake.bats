@@ -35,10 +35,28 @@ setup_file() {
 
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"
-    export AGENT_BIN="${AGENT_BIN:-${PROJECT_ROOT}/target/release/ebpfsentinel-agent}"
     export DATA_DIR="/tmp/ebpfsentinel-test-data-pqc-$$"
     export CERT_DIR="${CERT_DIR:-/tmp/ebpfsentinel-test-certs}"
     mkdir -p "${DATA_DIR}"
+
+    # This suite runs a local userspace agent for a localhost TLS handshake —
+    # no kernel/transit path. Prefer a build tree, then the installed binary.
+    # In 2VM/3VM mode bats runs on the client VM, which has neither (target/ is
+    # rsync-excluded), so pull the binary from the agent VM over the existing
+    # SSH key.
+    AGENT_BIN="${AGENT_BIN:-${PROJECT_ROOT}/target/release/ebpfsentinel-agent}"
+    if [ ! -x "${AGENT_BIN}" ]; then
+        if [ -x /usr/local/bin/ebpfsentinel-agent ]; then
+            AGENT_BIN=/usr/local/bin/ebpfsentinel-agent
+        elif [ "${EBPF_2VM_MODE:-false}" = "true" ] && [ -n "${AGENT_VM_IP:-}" ]; then
+            AGENT_BIN="${DATA_DIR}/ebpfsentinel-agent"
+            scp -i "${AGENT_SSH_KEY}" -o StrictHostKeyChecking=no \
+                "vagrant@${AGENT_VM_IP}:/usr/local/bin/ebpfsentinel-agent" \
+                "${AGENT_BIN}" >/dev/null 2>&1 && chmod +x "${AGENT_BIN}"
+        fi
+    fi
+    [ -x "${AGENT_BIN}" ] || skip "agent binary not available on this host"
+    export AGENT_BIN
 
     if [ ! -f "${CERT_DIR}/server.pem" ]; then
         bash "${SCRIPT_DIR}/generate-certs.sh" --out-dir "${CERT_DIR}"
@@ -68,6 +86,15 @@ setup_file() {
     chmod 640 "${PREPARED_CONFIG_REQUIRE}"
 
     export AGENT_HTTP_PORT="${AGENT_TLS_PORT}"
+
+    # This suite starts its own agent on the local host (binds 0.0.0.0). In
+    # 2VM/3VM mode the inherited AGENT_HOST points at the remote agent VM, so
+    # the health probe and s_client must be re-pinned to localhost or they hit
+    # the wrong host (no TLS on :8443 there → connection refused).
+    export AGENT_HOST="127.0.0.1"
+    export TLS_URL="https://${AGENT_HOST}:${AGENT_TLS_PORT}"
+    export BASE_URL="http://${AGENT_HOST}:${AGENT_HTTP_PORT}"
+
     stop_agent 2>/dev/null || true
     _kill_port_holders "${AGENT_TLS_PORT}" "${AGENT_GRPC_PORT}"
 
@@ -86,6 +113,16 @@ setup_file() {
         tail -20 "${AGENT_LOG_FILE}" >&2
         return 1
     }
+}
+
+setup() {
+    # bats re-sources the file (and thus constants.bash) before each test,
+    # which recomputes TLS_URL from the inherited AGENT_HOST — in 2VM/3VM mode
+    # that is the remote agent VM. This suite's agent runs locally, so re-pin
+    # every test to localhost (mirrors the setup_file pin).
+    export AGENT_HOST="127.0.0.1"
+    export TLS_URL="https://${AGENT_HOST}:${AGENT_TLS_PORT}"
+    export BASE_URL="http://${AGENT_HOST}:${AGENT_TLS_PORT}"
 }
 
 teardown_file() {
@@ -132,6 +169,17 @@ _s_client_named_group() {
     echo "${key_line}" | sed -E 's/^[^:]+:[[:space:]]*//; s/,.*$//'
 }
 
+# Readiness probe by TCP connect rather than a completed TLS handshake.
+# In pq_mode=require the server rejects any client that cannot offer the PQ
+# hybrid group, so a curl/openssl health probe on a host without MLKEM support
+# can never succeed even though the agent is up — confirming the port is
+# listening is the correct restart check; the require-mode rejection itself is
+# asserted by the test body.
+_wait_for_tls_port() {
+    retry "${RETRY_MAX_ATTEMPTS}" \
+        bash -c "exec 3<>/dev/tcp/${AGENT_HOST}/${AGENT_TLS_PORT}"
+}
+
 _restart_agent_with() {
     local config="${1:?usage: _restart_agent_with <config>}"
     stop_agent 2>/dev/null || true
@@ -140,8 +188,8 @@ _restart_agent_with() {
     AGENT_PID=$!
     echo "${AGENT_PID}" > "${AGENT_PID_FILE}"
     sleep 0.3
-    kill -0 "${AGENT_PID}" 2>/dev/null
-    wait_for_agent_tls "${TLS_URL}/healthz" "${CERT_DIR}/ca.pem"
+    kill -0 "${AGENT_PID}" 2>/dev/null || return 1
+    _wait_for_tls_port
 }
 
 # ── prefer-mode tests ──────────────────────────────────────────────
