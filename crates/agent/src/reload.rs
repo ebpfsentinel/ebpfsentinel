@@ -7,7 +7,7 @@ use adapters::auth::oidc_provider::{self, OidcAuthProvider};
 use application::config_reload::ConfigReloadService;
 use infrastructure::config::AgentConfig;
 use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use adapters::ebpf::{ConfigFlagsManager, InterfaceGroupsManager, L7PortsManager};
@@ -60,14 +60,28 @@ pub fn spawn_reload_task(
     mut api_trigger: mpsc::Receiver<()>,
     shared_config: Arc<RwLock<AgentConfig>>,
     ebpf_manager: Arc<Mutex<EbpfProgramManager>>,
+    reload_complete: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
+    // Receiver for operational SIGHUP-driven reloads. The default
+    // (process-terminating) disposition is already overridden earlier in
+    // startup (before the HTTP server advertises readiness); a SIGHUP racing
+    // startup is therefore captured by that earlier guard rather than killing
+    // the agent. This stream handles every reload signal once the task is live.
+    #[cfg(unix)]
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .expect("failed to install SIGHUP handler");
+
     tokio::spawn(async move {
         // Channel for file watcher events → async task
         let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<()>(4);
 
-        // File watcher with 500ms debounce
+        // File watcher with 500ms debounce. A failure here only disables the
+        // file-watch trigger — SIGHUP and API-driven reloads keep working — so
+        // we log and continue rather than aborting the task. The debouncer is
+        // bound for the task's lifetime; dropping it would stop delivering
+        // events.
         let tx_for_watcher = notify_tx.clone();
-        let mut debouncer = match new_debouncer(
+        let _debouncer = match new_debouncer(
             Duration::from_millis(500),
             move |res: Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>| {
                 if let Ok(events) = res {
@@ -80,31 +94,34 @@ pub fn spawn_reload_task(
                 }
             },
         ) {
-            Ok(d) => d,
+            Ok(mut d) => match d
+                .watcher()
+                .watch(Path::new(&config_path), notify::RecursiveMode::NonRecursive)
+            {
+                Ok(()) => {
+                    tracing::info!(path = %config_path, "config file watcher started");
+                    Some(d)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %config_path,
+                        error = %e,
+                        "failed to watch config file, file-driven hot-reload disabled"
+                    );
+                    None
+                }
+            },
             Err(e) => {
-                tracing::warn!(error = %e, "failed to create file watcher, hot-reload disabled");
-                return;
+                tracing::warn!(
+                    error = %e,
+                    "failed to create file watcher, file-driven hot-reload disabled"
+                );
+                None
             }
         };
-
-        if let Err(e) = debouncer
-            .watcher()
-            .watch(Path::new(&config_path), notify::RecursiveMode::NonRecursive)
-        {
-            tracing::warn!(
-                path = %config_path,
-                error = %e,
-                "failed to watch config file, hot-reload disabled"
-            );
-            return;
-        }
-
-        tracing::info!(path = %config_path, "config file watcher started");
-
-        // SIGHUP handler
-        #[cfg(unix)]
-        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-            .expect("failed to install SIGHUP handler");
+        // Keep `notify_tx` alive so the watcher channel never closes (a closed
+        // channel would make `notify_rx.recv()` return immediately and spin).
+        let _notify_tx_keepalive = notify_tx;
 
         loop {
             #[cfg(unix)]
@@ -156,6 +173,10 @@ pub fn spawn_reload_task(
                 &ebpf_manager,
             )
             .await;
+
+            // Wake any caller (e.g. the API reload handler) blocked waiting for
+            // this reload to be applied to the shared config.
+            reload_complete.notify_waiters();
         }
     })
 }

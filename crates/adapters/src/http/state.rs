@@ -33,7 +33,7 @@ use infrastructure::metrics::AgentMetrics;
 use ports::secondary::alert_store::AlertStore;
 use ports::secondary::auth_provider::AuthProvider;
 use ports::secondary::geoip_port::GeoIpPort;
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{Notify, RwLock, broadcast, mpsc};
 
 /// Shared application state for the REST API server.
 ///
@@ -72,6 +72,14 @@ pub struct AppState {
     pub metrics_auth_required: bool,
     pub config: Arc<RwLock<AgentConfig>>,
     pub reload_trigger: mpsc::Sender<()>,
+    /// Path to the on-disk config file. `Some` at runtime (set by startup);
+    /// lets the reload endpoint validate the new config synchronously and
+    /// reject a malformed reload with `400` instead of silently dropping it.
+    pub config_path: Option<Arc<str>>,
+    /// Notified once each config reload has been fully applied to
+    /// [`Self::config`]. `Some` at runtime; lets the reload endpoint block
+    /// until the new config is observable before returning.
+    pub reload_complete: Option<Arc<Notify>>,
     /// Manual threat-intel feed re-fetch trigger. `Some` only when the feed
     /// fetcher task is running (threat intel enabled with ≥1 feed); `None`
     /// otherwise, in which case the refresh endpoint reports unavailable.
@@ -139,6 +147,8 @@ impl AppState {
             metrics_auth_required: false,
             config,
             reload_trigger,
+            config_path: None,
+            reload_complete: None,
             feed_refresh_trigger: None,
             ebpf_program_status,
             fingerprint_cache: None,

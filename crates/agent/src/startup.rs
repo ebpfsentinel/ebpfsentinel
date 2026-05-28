@@ -759,6 +759,9 @@ pub async fn run(
     // Shared config, reload trigger, and eBPF program status for ops endpoints
     let shared_config = Arc::new(RwLock::new(config.clone()));
     let (reload_trigger_tx, reload_trigger_rx) = mpsc::channel::<()>(1);
+    // Signalled by the reload task once a reload finishes, so the
+    // /config/reload endpoint can wait for completion before returning.
+    let reload_complete = Arc::new(tokio::sync::Notify::new());
     // Manual threat-intel feed re-fetch channel. Only wired into AppState
     // when the feed fetcher task actually runs (threat intel enabled with
     // ≥1 feed); otherwise the refresh endpoint reports the feature off.
@@ -844,6 +847,8 @@ pub async fn run(
         reload_trigger_tx,
         Arc::clone(&ebpf_program_status),
     );
+    app_state.config_path = Some(Arc::from(config_path));
+    app_state.reload_complete = Some(Arc::clone(&reload_complete));
     if let Some(tx) = feed_refresh_tx {
         app_state = app_state.with_feed_refresh_trigger(tx);
     }
@@ -1037,6 +1042,17 @@ pub async fn run(
 
     // ── 6d. Netkit hot-plug watcher is spawned after eBPF loading (section 10½) ──
     // so program FDs are available for dynamic attachment.
+
+    // Install the SIGHUP handler before the HTTP server advertises readiness.
+    // `tokio::signal::unix::signal` replaces the default (process-terminating)
+    // disposition the instant it is called, so a SIGHUP racing startup is
+    // captured instead of killing the agent. The reload task (spawned much
+    // later, after eBPF loading) installs its own receiver for operational
+    // reloads; this guard only closes the early window between readiness and
+    // that task being live.
+    #[cfg(unix)]
+    let _sighup_guard = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .expect("failed to install SIGHUP handler");
 
     // ── 7. Spawn HTTP API server ──────────────────────────────────
     let http_port = config.agent.http_port;
@@ -2044,6 +2060,7 @@ pub async fn run(
         reload_trigger_rx,
         Arc::clone(&shared_config),
         Arc::clone(&ebpf_manager),
+        Arc::clone(&reload_complete),
     );
 
     // ── 10d. Build container resolver ───────────────────────────────

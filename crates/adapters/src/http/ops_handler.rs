@@ -1,7 +1,10 @@
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
+use infrastructure::config::AgentConfig;
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -47,15 +50,42 @@ pub struct EbpfStatusResponse {
 pub async fn reload_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ReloadResponse>, ApiError> {
-    match state.reload_trigger.try_send(()) {
-        Ok(()) => Ok(Json(ReloadResponse {
-            status: "ok".to_string(),
-            message: "configuration reload triggered".to_string(),
-        })),
-        Err(_) => Err(ApiError::Internal {
-            message: "reload already in progress or channel unavailable".to_string(),
-        }),
+    // Validate the on-disk config before triggering the reload so a bad
+    // edit is rejected synchronously instead of crashing the reload task.
+    if let Some(path) = state.config_path.as_deref()
+        && let Err(e) = AgentConfig::load(Path::new(path))
+    {
+        return Err(ApiError::BadRequest {
+            code: "INVALID_CONFIG",
+            message: format!("config reload rejected: {e}"),
+        });
     }
+
+    // Register for the completion signal *before* triggering so we never
+    // miss the notify_waiters() fired by the reload task.
+    let notified = state.reload_complete.as_ref().map(|n| {
+        let mut fut = Box::pin(n.notified());
+        fut.as_mut().enable();
+        fut
+    });
+
+    state
+        .reload_trigger
+        .try_send(())
+        .map_err(|_| ApiError::Internal {
+            message: "reload already in progress or channel unavailable".to_string(),
+        })?;
+
+    // Wait for the reload to actually complete (bounded), so callers that
+    // read state immediately after see the new config.
+    if let Some(fut) = notified {
+        let _ = tokio::time::timeout(Duration::from_secs(8), fut).await;
+    }
+
+    Ok(Json(ReloadResponse {
+        status: "ok".to_string(),
+        message: "configuration reloaded".to_string(),
+    }))
 }
 
 /// Return the current (sanitized) agent configuration.
