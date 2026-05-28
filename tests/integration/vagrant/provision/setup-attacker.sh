@@ -44,6 +44,44 @@ fi
 ssh -i ~/.ssh/agent_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
     vagrant@${AGENT_IP} echo "SSH connection OK"
 
+# ── Set up self-SSH key (attacker_key) ─────────────────────────────
+# DoH/DoT probes drive openssl from this VM via _attacker_ssh, which SSHes
+# back into the attacker itself using attacker_key.
+if [ ! -f ~/.ssh/attacker_key ]; then
+    ssh-keygen -t ed25519 -f ~/.ssh/attacker_key -N ""
+fi
+touch ~/.ssh/authorized_keys
+cat ~/.ssh/attacker_key.pub >> ~/.ssh/authorized_keys
+sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+ssh -i ~/.ssh/attacker_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+    vagrant@${ATTACKER_VM_IP:-192.168.56.20} echo "self-SSH OK" || true
+
+# ── Set up SSH access to backend VM (backend_key) ──────────────────
+# 3-VM-only: transit suites capture pcaps on the backend (service) side via
+# _backend_ssh. Reached over the agent transit route (192.168.57.0/24).
+BACKEND_IP="192.168.57.30"
+if [ ! -f ~/.ssh/backend_key ]; then
+    ssh-keygen -t ed25519 -f ~/.ssh/backend_key -N ""
+fi
+if command -v sshpass &>/dev/null; then
+    for attempt in $(seq 1 10); do
+        if sshpass -p vagrant ssh-copy-id \
+            -i ~/.ssh/backend_key.pub \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=5 \
+            vagrant@${BACKEND_IP} 2>/dev/null; then
+            echo "  Backend SSH key copied (attempt ${attempt})"
+            break
+        fi
+        echo "  Waiting for backend SSH... (attempt ${attempt}/10)"
+        sleep 10
+    done
+    ssh -i ~/.ssh/backend_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        vagrant@${BACKEND_IP} echo "backend SSH OK" || \
+        echo "  WARN: backend SSH not reachable (3-VM transit only)"
+fi
+
 # ── Generate local TLS certificates and JWT keys ───────────────────
 echo "=== [2/5] Generating local TLS certificates ==="
 bash "${INTEGRATION_DIR}/scripts/generate-certs.sh" --out-dir "$CERT_DIR"
