@@ -27,6 +27,17 @@ pub struct IdsRuleResponse {
     pub dst_port: Option<u16>,
     pub pattern: String,
     pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<ThresholdResponse>,
+}
+
+/// Per-rule threshold/rate detection, surfaced for rate-based IDS rules.
+#[derive(Serialize, ToSchema)]
+pub struct ThresholdResponse {
+    pub threshold_type: String,
+    pub count: u32,
+    pub window_secs: u64,
+    pub track_by: String,
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
@@ -96,6 +107,12 @@ pub async fn list_ids_rules(
             dst_port: r.dst_port,
             pattern: r.pattern.clone(),
             enabled: r.enabled,
+            threshold: r.threshold.as_ref().map(|t| ThresholdResponse {
+                threshold_type: format!("{:?}", t.threshold_type),
+                count: t.count,
+                window_secs: t.window_secs,
+                track_by: format!("{:?}", t.track_by),
+            }),
         })
         .collect();
     Ok(Json(rules))
@@ -129,9 +146,16 @@ mod tests {
             dst_port: Some(22),
             pattern: String::new(),
             enabled: true,
+            threshold: Some(ThresholdResponse {
+                threshold_type: "Threshold".to_string(),
+                count: 5,
+                window_secs: 30,
+                track_by: "SrcIp".to_string(),
+            }),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "ids-001");
         assert_eq!(json["dst_port"], 22);
+        assert_eq!(json["threshold"]["count"], 5);
     }
 }

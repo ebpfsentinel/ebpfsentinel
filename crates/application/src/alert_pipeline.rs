@@ -962,6 +962,7 @@ mod tests {
             timestamp_ns: 1_000_000_000,
             matched_domain: None,
             container: None,
+            rate_based: false,
         }
     }
 

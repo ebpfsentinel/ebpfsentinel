@@ -726,6 +726,7 @@ impl EventDispatcher {
             timestamp_ns: event.timestamp_ns,
             matched_domain: None,
             container: None,
+            rate_based: false,
         };
 
         tracing::info!(

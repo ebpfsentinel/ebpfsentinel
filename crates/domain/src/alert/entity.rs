@@ -199,6 +199,7 @@ impl Alert {
             total_packets: None,
             mitre_attack: Some(mitre::lookup(&MitreContext::Ids {
                 dst_port: ids.dst_port,
+                rate_based: ids.rate_based,
             })),
             ja4_fingerprint: None,
             ml_anomaly_score: None,
@@ -739,6 +740,7 @@ mod tests {
             timestamp_ns: 1_000_000_000,
             matched_domain: None,
             container: None,
+            rate_based: false,
         }
     }
 

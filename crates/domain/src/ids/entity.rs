@@ -261,6 +261,10 @@ pub struct IdsAlert {
     pub matched_domain: Option<String>,
     /// Container context resolved from the event's `cgroup_id` (if any).
     pub container: Option<crate::container::entity::ContainerInfo>,
+    /// `true` when the matched rule is a rate/threshold rule (repeated-attempt
+    /// detection). Refines MITRE technique selection toward brute-force
+    /// techniques for login services.
+    pub rate_based: bool,
 }
 
 impl IdsAlert {
@@ -280,6 +284,7 @@ impl IdsAlert {
             timestamp_ns: event.timestamp_ns,
             matched_domain: None,
             container: None,
+            rate_based: rule.threshold.is_some(),
         }
     }
 

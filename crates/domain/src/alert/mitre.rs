@@ -93,6 +93,8 @@ pub enum TlsIntelligenceMitreReason {
 pub enum MitreContext<'a> {
     Ids {
         dst_port: u16,
+        /// `true` for rate/threshold rules (repeated-attempt detection).
+        rate_based: bool,
     },
     ThreatIntel {
         threat_type: ThreatType,
@@ -114,7 +116,10 @@ pub enum MitreContext<'a> {
 /// returned [`MitreAttackInfo`] is built from `&'static str` literals.
 pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
     match ctx {
-        MitreContext::Ids { dst_port } => lookup_ids(*dst_port),
+        MitreContext::Ids {
+            dst_port,
+            rate_based,
+        } => lookup_ids(*dst_port, *rate_based),
 
         MitreContext::ThreatIntel {
             threat_type,
@@ -214,7 +219,16 @@ pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
 ///
 /// An IDS alert on port 22 (SSH) indicates different attacker behavior
 /// than one on port 443 (HTTPS) or port 53 (DNS tunneling).
-fn lookup_ids(dst_port: u16) -> MitreAttackInfo {
+fn lookup_ids(dst_port: u16, rate_based: bool) -> MitreAttackInfo {
+    if rate_based {
+        // A rate/threshold rule counts repeated attempts against a service —
+        // that is brute-force behaviour, not a single signature match. Login
+        // services map to the matching brute-force sub-technique.
+        return match dst_port {
+            22 | 3389 => info("T1110.001", "Password Guessing", "credential-access"),
+            _ => info("T1110", "Brute Force", "credential-access"),
+        };
+    }
     match dst_port {
         22 => info("T1021.004", "SSH", "lateral-movement"),
         23 => info("T1021", "Remote Services", "lateral-movement"),
@@ -943,33 +957,67 @@ mod tests {
 
     #[test]
     fn ids_ssh_maps_to_lateral_movement() {
-        let info = lookup(&MitreContext::Ids { dst_port: 22 });
+        let info = lookup(&MitreContext::Ids {
+            dst_port: 22,
+            rate_based: false,
+        });
         assert_eq!(info.technique_id, "T1021.004");
         assert_eq!(info.tactic, "lateral-movement");
     }
 
     #[test]
+    fn ids_ssh_rate_rule_maps_to_password_guessing() {
+        let info = lookup(&MitreContext::Ids {
+            dst_port: 22,
+            rate_based: true,
+        });
+        assert_eq!(info.technique_id, "T1110.001");
+        assert_eq!(info.tactic, "credential-access");
+    }
+
+    #[test]
+    fn ids_rate_rule_generic_port_maps_to_brute_force() {
+        let info = lookup(&MitreContext::Ids {
+            dst_port: 8080,
+            rate_based: true,
+        });
+        assert_eq!(info.technique_id, "T1110");
+    }
+
+    #[test]
     fn ids_http_maps_to_web_protocols() {
-        let info = lookup(&MitreContext::Ids { dst_port: 443 });
+        let info = lookup(&MitreContext::Ids {
+            dst_port: 443,
+            rate_based: false,
+        });
         assert_eq!(info.technique_id, "T1071.001");
         assert_eq!(info.tactic, "command-and-control");
     }
 
     #[test]
     fn ids_dns_maps_to_dns() {
-        let info = lookup(&MitreContext::Ids { dst_port: 53 });
+        let info = lookup(&MitreContext::Ids {
+            dst_port: 53,
+            rate_based: false,
+        });
         assert_eq!(info.technique_id, "T1071.004");
     }
 
     #[test]
     fn ids_unknown_port_maps_to_generic() {
-        let info = lookup(&MitreContext::Ids { dst_port: 9999 });
+        let info = lookup(&MitreContext::Ids {
+            dst_port: 9999,
+            rate_based: false,
+        });
         assert_eq!(info.technique_id, "T1071");
     }
 
     #[test]
     fn ids_rdp_maps_to_rdp() {
-        let info = lookup(&MitreContext::Ids { dst_port: 3389 });
+        let info = lookup(&MitreContext::Ids {
+            dst_port: 3389,
+            rate_based: false,
+        });
         assert_eq!(info.technique_id, "T1021.001");
     }
 
