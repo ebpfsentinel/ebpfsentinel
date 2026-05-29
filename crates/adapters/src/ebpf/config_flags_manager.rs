@@ -1,7 +1,10 @@
 use aya::Ebpf;
 use aya::maps::{Array, HashMap, MapData};
 use ebpf_common::config_flags::ConfigFlags;
-use ebpf_common::ddos::{DdosConnTrackConfig, DdosSynConfig, IcmpConfig, SyncookieSecret};
+use ebpf_common::ddos::{
+    AmpProtectConfig, AmpProtectKey, DdosConnTrackConfig, DdosSynConfig, IcmpConfig,
+    SyncookieSecret,
+};
 use ebpf_common::scrub::ScrubFlags;
 use tracing::info;
 
@@ -207,6 +210,48 @@ impl DdosConnTrackConfigManager {
             ack_threshold = config.ack_threshold,
             "CONNTRACK_CONFIG updated"
         );
+        Ok(())
+    }
+}
+
+/// Manages the `AMP_PROTECT_CONFIG` eBPF `HashMap` map.
+///
+/// Keyed by `{source port, protocol}`, it gates the xdp-ratelimit UDP
+/// amplification path: `check_udp_amplification` looks up the packet's
+/// source port and bails when the entry is missing or `enabled == 0`.
+/// One entry must be inserted per configured amplification vector port.
+pub struct AmpProtectConfigManager {
+    config_map: HashMap<MapData, AmpProtectKey, AmpProtectConfig>,
+}
+
+impl AmpProtectConfigManager {
+    /// Create a new manager by taking ownership of the `AMP_PROTECT_CONFIG` map.
+    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+        let map = ebpf
+            .take_map("AMP_PROTECT_CONFIG")
+            .ok_or_else(|| anyhow::anyhow!("map 'AMP_PROTECT_CONFIG' not found in eBPF object"))?;
+        let config_map = HashMap::try_from(map)?;
+        info!("AMP_PROTECT_CONFIG map acquired");
+        Ok(Self { config_map })
+    }
+
+    /// Enable amplification protection for one source port (host-order)
+    /// over the given IP protocol, capped at `max_pps` per source IP.
+    pub fn set_port(&mut self, port: u16, protocol: u8, max_pps: u32) -> Result<(), anyhow::Error> {
+        let key = AmpProtectKey {
+            port,
+            protocol,
+            _pad: 0,
+        };
+        let cfg = AmpProtectConfig {
+            enabled: 1,
+            _pad: [0; 3],
+            max_pps,
+        };
+        self.config_map
+            .insert(key, cfg, 0)
+            .map_err(|e| anyhow::anyhow!("AMP_PROTECT_CONFIG insert failed: {e}"))?;
+        info!(port, protocol, max_pps, "AMP_PROTECT_CONFIG port armed");
         Ok(())
     }
 }

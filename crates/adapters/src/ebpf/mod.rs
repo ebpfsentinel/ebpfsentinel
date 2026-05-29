@@ -41,8 +41,8 @@ pub use bpf_token::{
     open_bpffs_dir,
 };
 pub use config_flags_manager::{
-    ConfigFlagsManager, DdosConnTrackConfigManager, DdosSynConfigManager, IcmpConfigManager,
-    InterfaceGroupsManager, ScrubConfigManager, SyncookieSecretManager,
+    AmpProtectConfigManager, ConfigFlagsManager, DdosConnTrackConfigManager, DdosSynConfigManager,
+    IcmpConfigManager, InterfaceGroupsManager, ScrubConfigManager, SyncookieSecretManager,
 };
 pub use conntrack_map_manager::ConnTrackMapManager;
 pub use dlp_event_reader::DlpEventReader;

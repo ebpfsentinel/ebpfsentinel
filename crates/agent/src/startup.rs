@@ -10,10 +10,10 @@ use adapters::audit::log_audit_sink::LogAuditSink;
 use adapters::auth::jwt_provider::JwtAuthProvider;
 use adapters::auth::oidc_provider::{self, OidcAuthProvider};
 use adapters::ebpf::{
-    ConfigFlagsManager, ConnTrackMapManager, DdosConnTrackConfigManager, DdosSynConfigManager,
-    DlpEventReader, DnsEventReader, EbpfLoader, EbpfMapWriteAdapter, EventReader,
-    FirewallMapManager, IcmpConfigManager, IdsMapManager, InterfaceGroupsManager, IpSetMapManager,
-    L7PortsManager, LpmCoordinator, MetricsReader, NatMapManager, QosMapManager,
+    AmpProtectConfigManager, ConfigFlagsManager, ConnTrackMapManager, DdosConnTrackConfigManager,
+    DdosSynConfigManager, DlpEventReader, DnsEventReader, EbpfLoader, EbpfMapWriteAdapter,
+    EventReader, FirewallMapManager, IcmpConfigManager, IdsMapManager, InterfaceGroupsManager,
+    IpSetMapManager, L7PortsManager, LpmCoordinator, MetricsReader, NatMapManager, QosMapManager,
     RateLimitLpmManager, RateLimitMapManager, ScrubConfigManager, SyncookieSecretManager,
     ThreatIntelMapManager,
 };
@@ -3208,6 +3208,31 @@ fn arm_ddos_ebpf_configs(loader: &mut EbpfLoader, config: &AgentConfig) {
                 }
             }
             Err(e) => warn!("CONNTRACK_CONFIG map not available (non-fatal): {e}"),
+        }
+    }
+
+    if config.ddos.amplification_protection.enabled
+        && !config.ddos.amplification_protection.ports.is_empty()
+    {
+        // IANA protocol number for UDP; the eBPF amp path is UDP-only.
+        const PROTO_UDP: u8 = 17;
+        match AmpProtectConfigManager::new(loader.ebpf_mut()) {
+            Ok(mut mgr) => {
+                for p in &config.ddos.amplification_protection.ports {
+                    if !p.protocol.eq_ignore_ascii_case("udp") {
+                        warn!(
+                            port = p.port,
+                            protocol = %p.protocol,
+                            "AMP_PROTECT_CONFIG skipping non-UDP port (eBPF amp path is UDP-only)"
+                        );
+                        continue;
+                    }
+                    if let Err(e) = mgr.set_port(p.port, PROTO_UDP, p.max_pps) {
+                        warn!(port = p.port, "AMP_PROTECT_CONFIG write failed: {e}");
+                    }
+                }
+            }
+            Err(e) => warn!("AMP_PROTECT_CONFIG map not available (non-fatal): {e}"),
         }
     }
 }
