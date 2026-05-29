@@ -335,26 +335,42 @@ fn scrub_ipv4_header_fields(
     Ok(())
 }
 
-/// Overwrite one 2-byte pair of a TCP timestamp option with NOP/NOP (0x0101),
-/// updating the TCP checksum only when the pair actually changes.
+/// Overwrite the whole 10-byte TCP timestamp option with NOPs (0x01) in a
+/// single store plus a single checksum fixup.
+///
+/// Collapsing all five 2-byte pairs into one `bpf_skb_store_bytes` (rather than
+/// five store + `bpf_l4_csum_replace` pairs) avoids the repeated in-place
+/// packet-pointer invalidation that hard-wedges the kernel when the skb is on
+/// the forward path under a generic-XDP program — the same coalescing the IPv4
+/// header rewrite relies on. The checksum is fixed from a raw-byte diff via
+/// `bpf_csum_diff` instead of passing host-order field values to
+/// `bpf_l4_csum_replace` (which corrupts the L4 checksum and makes the kernel
+/// drop locally-delivered scrubbed TCP). The 10 changed bytes are padded to 12
+/// (a multiple of 4) with trailing zeros that cancel in the diff.
 #[inline(always)]
-fn strip_ts_pair(ctx: &mut TcContext, pos: usize, tcp_csum_offset: u32) -> Result<(), ()> {
-    let old_hi: u8 = ctx.load(pos).map_err(|_| ())?;
-    let old_lo: u8 = ctx.load(pos + 1).map_err(|_| ())?;
-    let old_val = ((old_hi as u16) << 8) | (old_lo as u16);
-    let new_val: u16 = 0x0101; // NOP NOP
-    if old_val != new_val {
-        ctx.store(pos, &TCP_OPT_NOP, 0).map_err(|_| ())?;
-        ctx.store(pos + 1, &TCP_OPT_NOP, 0).map_err(|_| ())?;
-        unsafe {
-            bpf_l4_csum_replace(
-                ctx.as_ptr() as *mut _,
-                tcp_csum_offset,
-                old_val as u64,
-                new_val as u64,
-                2,
-            );
-        }
+fn strip_ts_option(ctx: &mut TcContext, pos: usize, tcp_csum_offset: u32) -> Result<(), ()> {
+    let old: [u8; 10] = ctx.load(pos).map_err(|_| ())?;
+    let new: [u8; 10] = [TCP_OPT_NOP; 10];
+    if old == new {
+        return Ok(()); // already all NOPs — nothing to change
+    }
+    ctx.store(pos, &new, 0).map_err(|_| ())?;
+
+    let mut old_win: [u8; 12] = [0; 12];
+    let mut new_win: [u8; 12] = [0; 12];
+    old_win[..10].copy_from_slice(&old);
+    new_win[..10].copy_from_slice(&new);
+    let diff = unsafe {
+        bpf_csum_diff(
+            old_win.as_mut_ptr() as *mut u32,
+            old_win.len() as u32,
+            new_win.as_mut_ptr() as *mut u32,
+            new_win.len() as u32,
+            0,
+        )
+    };
+    unsafe {
+        bpf_l4_csum_replace(ctx.as_ptr() as *mut _, tcp_csum_offset, 0, diff as u64, 0);
     }
     Ok(())
 }
@@ -481,12 +497,9 @@ unsafe extern "C" fn scrub_opt_step(_index: u32, ctx: *mut c_void) -> i64 {
             && opt_len == TCP_OPT_TIMESTAMP_LEN
             && scanned + 10 <= opts_len
         {
-            // Overwrite all 10 bytes (5 fixed 2-byte pairs) with NOP (kind=1).
-            let _ = strip_ts_pair(&mut tctx, pos, lctx.tcp_csum_offset);
-            let _ = strip_ts_pair(&mut tctx, pos + 2, lctx.tcp_csum_offset);
-            let _ = strip_ts_pair(&mut tctx, pos + 4, lctx.tcp_csum_offset);
-            let _ = strip_ts_pair(&mut tctx, pos + 6, lctx.tcp_csum_offset);
-            let _ = strip_ts_pair(&mut tctx, pos + 8, lctx.tcp_csum_offset);
+            // Overwrite all 10 bytes (the kind/len header + four timestamp
+            // words) with NOP (kind=1) in one coalesced rewrite.
+            let _ = strip_ts_option(&mut tctx, pos, lctx.tcp_csum_offset);
             increment_metric(SCRUB_METRIC_TCP_TS_STRIPPED);
         }
 
