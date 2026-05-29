@@ -219,6 +219,19 @@ else
     fi
 fi
 
+# ── Scapy venv (agent-local netns suites) ──────────────────────────
+# The agent-local (netns) suites — VIP-announcer ARP probes, byte-level
+# scrub, DSR/Maglev — craft raw frames with scapy on the agent itself.
+# lib/ebpf_helpers.bash resolves EBPF_SCAPY_PY=/opt/scapy-venv/bin/python3;
+# without the venv those suites silently skip. Pin matches setup-attacker.sh.
+echo "=== Installing scapy venv ==="
+sudo apt-get install -y python3-venv python3-pip >/dev/null 2>&1 || true
+sudo mkdir -p /opt/scapy-venv && sudo chown "${USER}:${USER}" /opt/scapy-venv
+[ -d /opt/scapy-venv/bin ] || python3 -m venv /opt/scapy-venv
+/opt/scapy-venv/bin/pip install --upgrade pip >/dev/null
+/opt/scapy-venv/bin/pip install "scapy==2.7.0" >/dev/null
+echo "  scapy: $(/opt/scapy-venv/bin/python3 -c 'import scapy; print(scapy.__version__)' 2>&1)"
+
 # ── Reclaim build space ────────────────────────────────────────────
 # The VM builds from source on a ~31G root disk. Leaving the docker builder
 # cache and apt/journal cruft behind once filled the disk to 100%, which
