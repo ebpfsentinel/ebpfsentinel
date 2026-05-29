@@ -1,7 +1,7 @@
 use aya::Ebpf;
 use aya::maps::{Array, HashMap, MapData};
 use ebpf_common::config_flags::ConfigFlags;
-use ebpf_common::ddos::SyncookieSecret;
+use ebpf_common::ddos::{DdosSynConfig, SyncookieSecret};
 use ebpf_common::scrub::ScrubFlags;
 use tracing::info;
 
@@ -97,6 +97,42 @@ impl SyncookieSecretManager {
             .set(0, *secret, 0)
             .map_err(|e| anyhow::anyhow!("SYNCOOKIE_SECRET set failed: {e}"))?;
         info!("SYN cookie secret initialized");
+        Ok(())
+    }
+}
+
+/// Manages the `DDOS_SYN_CONFIG` eBPF `Array` map.
+///
+/// Stores a single [`DdosSynConfig`] at index 0, which gates the
+/// xdp-ratelimit SYN-cookie path: `check_syn_flood` reads `enabled`
+/// (off by default) plus the threshold-mode parameters. Without this
+/// write the map stays zeroed and SYN-cookie generation never fires.
+pub struct DdosSynConfigManager {
+    config_map: Array<MapData, DdosSynConfig>,
+}
+
+impl DdosSynConfigManager {
+    /// Create a new manager by taking ownership of the `DDOS_SYN_CONFIG` map.
+    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+        let map = ebpf
+            .take_map("DDOS_SYN_CONFIG")
+            .ok_or_else(|| anyhow::anyhow!("map 'DDOS_SYN_CONFIG' not found in eBPF object"))?;
+        let config_map = Array::try_from(map)?;
+        info!("DDOS_SYN_CONFIG map acquired");
+        Ok(Self { config_map })
+    }
+
+    /// Write the `DdosSynConfig` struct to index 0.
+    pub fn set_config(&mut self, config: &DdosSynConfig) -> Result<(), anyhow::Error> {
+        self.config_map
+            .set(0, *config, 0)
+            .map_err(|e| anyhow::anyhow!("DDOS_SYN_CONFIG set failed: {e}"))?;
+        info!(
+            enabled = config.enabled,
+            threshold_mode = config.threshold_mode,
+            threshold_pps = config.threshold_pps,
+            "DDOS_SYN_CONFIG updated"
+        );
         Ok(())
     }
 }

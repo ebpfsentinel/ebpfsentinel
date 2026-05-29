@@ -10,11 +10,11 @@ use adapters::audit::log_audit_sink::LogAuditSink;
 use adapters::auth::jwt_provider::JwtAuthProvider;
 use adapters::auth::oidc_provider::{self, OidcAuthProvider};
 use adapters::ebpf::{
-    ConfigFlagsManager, ConnTrackMapManager, DlpEventReader, DnsEventReader, EbpfLoader,
-    EbpfMapWriteAdapter, EventReader, FirewallMapManager, IdsMapManager, InterfaceGroupsManager,
-    IpSetMapManager, L7PortsManager, LpmCoordinator, MetricsReader, NatMapManager, QosMapManager,
-    RateLimitLpmManager, RateLimitMapManager, ScrubConfigManager, SyncookieSecretManager,
-    ThreatIntelMapManager,
+    ConfigFlagsManager, ConnTrackMapManager, DdosSynConfigManager, DlpEventReader, DnsEventReader,
+    EbpfLoader, EbpfMapWriteAdapter, EventReader, FirewallMapManager, IdsMapManager,
+    InterfaceGroupsManager, IpSetMapManager, L7PortsManager, LpmCoordinator, MetricsReader,
+    NatMapManager, QosMapManager, RateLimitLpmManager, RateLimitMapManager, ScrubConfigManager,
+    SyncookieSecretManager, ThreatIntelMapManager,
 };
 use adapters::grpc::server::{GrpcTlsConfig, run_grpc_server};
 use adapters::http::tls::load_rustls_config;
@@ -3214,6 +3214,28 @@ pub fn try_load_xdp_ratelimit(
         }
         Err(e) => {
             warn!("SYNCOOKIE_SECRET map not available (non-fatal): {e}");
+        }
+    }
+
+    // Arm SYN-cookie protection: the xdp-ratelimit `check_syn_flood` path
+    // reads `DDOS_SYN_CONFIG` (zeroed → disabled by default), so it never
+    // forges cookies unless userspace writes `enabled = 1` here.
+    if config.ddos.enabled && config.ddos.syn_protection.enabled {
+        match DdosSynConfigManager::new(loader.ebpf_mut()) {
+            Ok(mut mgr) => {
+                let syn_cfg = ebpf_common::ddos::DdosSynConfig {
+                    enabled: 1,
+                    threshold_mode: u8::from(config.ddos.syn_protection.threshold_mode),
+                    _pad: [0; 6],
+                    threshold_pps: config.ddos.syn_protection.threshold_pps,
+                };
+                if let Err(e) = mgr.set_config(&syn_cfg) {
+                    warn!("DDOS_SYN_CONFIG write failed (syncookie disabled): {e}");
+                }
+            }
+            Err(e) => {
+                warn!("DDOS_SYN_CONFIG map not available (non-fatal): {e}");
+            }
         }
     }
 

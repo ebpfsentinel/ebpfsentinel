@@ -45,7 +45,7 @@ ratelimit:
       burst: 1000
       scope: global
       algorithm: token_bucket
-      action: syn_cookie
+      action: pass
       enabled: true
 
 threatintel:
@@ -53,6 +53,12 @@ threatintel:
 
 ddos:
   enabled: true
+  # SYN-cookie generation is armed by syn_protection (writes DDOS_SYN_CONFIG),
+  # not by a rate-limit rule action.
+  syn_protection:
+    enabled: true
+    threshold_mode: true
+    threshold_pps: 1000
   policies:
     - id: ddos-pktgen-syn-flood
       attack_type: syn_flood

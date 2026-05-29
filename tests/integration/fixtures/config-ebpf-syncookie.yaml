@@ -39,7 +39,7 @@ ratelimit:
       burst: 400
       scope: global
       algorithm: token_bucket
-      action: syn_cookie
+      action: pass
       protocol: tcp
       dst_port: 11443
       enabled: true
@@ -49,6 +49,14 @@ threatintel:
 
 ddos:
   enabled: true
+  # SYN-cookie generation is armed by syn_protection (writes DDOS_SYN_CONFIG),
+  # not by a rate-limit rule action. Threshold mode lets the kernel handle
+  # SYNs normally until the per-source SYN rate crosses threshold_pps, then
+  # the XDP path forges SYN+ACK cookies so legitimate clients still connect.
+  syn_protection:
+    enabled: true
+    threshold_mode: true
+    threshold_pps: 500
   policies:
     - id: ddos-syncookie-syn-flood
       attack_type: syn_flood
