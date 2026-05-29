@@ -1,0 +1,11 @@
+[package]
+name = "xdp-pass"
+version = "0.0.0-dev"
+edition = "2024"
+
+[dependencies]
+aya-ebpf = "0.1.1"
+
+[[bin]]
+name = "xdp-pass"
+path = "src/main.rs"

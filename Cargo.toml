@@ -20,6 +20,7 @@ exclude = [
     "crates/ebpf-programs/xdp-ratelimit-syncookie",
     "crates/ebpf-programs/xdp-loadbalancer",
     "crates/ebpf-programs/xdp-vip-announcer",
+    "crates/ebpf-programs/xdp-pass",
     "crates/ebpf-programs/tc-dns",
     "crates/ebpf-programs/tc-ids",
     "crates/ebpf-programs/tc-threatintel",

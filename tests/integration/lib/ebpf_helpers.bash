@@ -130,6 +130,23 @@ create_test_netns() {
     ip netns exec "$EBPF_TEST_NS" ip link set "$EBPF_VETH_NS" up
     ip netns exec "$EBPF_TEST_NS" ip link set lo up
 
+    # Attach a pass-through XDP program on the namespace-side veth. The kernel
+    # only arms a veth's receive-side XDP path — and therefore only delivers
+    # XDP_TX'd frames sent from the host side — when that end carries a native
+    # XDP program. The agent forges ARP replies (VIP announcer) and TCP RSTs
+    # (firewall reject) and XDP_TX's them back out the host veth; without this
+    # the reflections are silently dropped before reaching the namespace. A
+    # physical NIC needs no such helper, so this is test-only. Best effort:
+    # suites that never trigger XDP_TX are unaffected if the object is absent.
+    local xdp_pass_obj="${EBPF_PROGRAM_DIR:-${PROJECT_ROOT}/target/bpfel-unknown-none/release}/xdp-pass"
+    if [ -f "$xdp_pass_obj" ]; then
+        ip netns exec "$EBPF_TEST_NS" \
+            ip link set dev "$EBPF_VETH_NS" xdpdrv obj "$xdp_pass_obj" sec xdp 2>/dev/null \
+        || ip netns exec "$EBPF_TEST_NS" \
+            ip link set dev "$EBPF_VETH_NS" xdp obj "$xdp_pass_obj" sec xdp 2>/dev/null \
+        || true
+    fi
+
     # Wait for interfaces to be fully up
     sleep 0.5
 }

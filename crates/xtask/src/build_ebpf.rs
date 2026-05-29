@@ -10,6 +10,7 @@ const EBPF_PROGRAMS: &[&str] = &[
     "xdp-ratelimit-syncookie",
     "xdp-loadbalancer",
     "xdp-vip-announcer",
+    "xdp-pass",
     "tc-dns",
     "tc-ids",
     "tc-threatintel",
