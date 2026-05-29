@@ -119,8 +119,10 @@ teardown_file() {
     api_post /api/v1/firewall/rules "$rule" >/dev/null 2>&1 || true
 
     # Try once more — XDP should still drop the SYN, so no fresh CT
-    # entry should appear.
-    _attacker_ssh sh -c \
+    # entry should appear. Pass the whole pipeline as one argument so the
+    # remote login shell runs it (a nested `sh -c` would only run the first
+    # word and silently never launch iperf3).
+    _attacker_ssh \
         "nohup iperf3 -c '${dst}' -p '${dport}' -t 3 -b 1M >/dev/null 2>&1 &" >/dev/null 2>&1 || true
     sleep 3
 

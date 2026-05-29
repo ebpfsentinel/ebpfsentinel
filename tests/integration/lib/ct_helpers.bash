@@ -51,7 +51,12 @@ establish_iperf_flow() {
     local duration="${3:-60}"
     local out_log="/tmp/iperf3-ctkill-$$.log"
     local pid
-    pid="$(_attacker_ssh sh -c "nohup iperf3 -c '${dst_ip}' -p '${dst_port}' -t ${duration} -b 1M --json >'${out_log}' 2>&1 & echo \$!")" || return 1
+    # Pass the whole pipeline as a SINGLE argument to the remote login shell.
+    # `_attacker_ssh sh -c "..."` would arrive as `sh -c <word1> <word2>...`
+    # (ssh space-joins its args), so the remote `sh -c` runs only the first
+    # word — here `nohup` with no operand — and iperf3 never launches while
+    # `echo $!` still returns a pid, masking the failure (no CT entry forms).
+    pid="$(_attacker_ssh "nohup iperf3 -c '${dst_ip}' -p '${dst_port}' -t ${duration} -b 1M --json >'${out_log}' 2>&1 & echo \$!")" || return 1
     [ -n "$pid" ] || return 1
     # Brief settle so the SYN/ACK round-trip clears and CT picks up the
     # flow on the agent.
