@@ -10,11 +10,12 @@ use adapters::audit::log_audit_sink::LogAuditSink;
 use adapters::auth::jwt_provider::JwtAuthProvider;
 use adapters::auth::oidc_provider::{self, OidcAuthProvider};
 use adapters::ebpf::{
-    ConfigFlagsManager, ConnTrackMapManager, DdosSynConfigManager, DlpEventReader, DnsEventReader,
-    EbpfLoader, EbpfMapWriteAdapter, EventReader, FirewallMapManager, IdsMapManager,
-    InterfaceGroupsManager, IpSetMapManager, L7PortsManager, LpmCoordinator, MetricsReader,
-    NatMapManager, QosMapManager, RateLimitLpmManager, RateLimitMapManager, ScrubConfigManager,
-    SyncookieSecretManager, ThreatIntelMapManager,
+    ConfigFlagsManager, ConnTrackMapManager, DdosConnTrackConfigManager, DdosSynConfigManager,
+    DlpEventReader, DnsEventReader, EbpfLoader, EbpfMapWriteAdapter, EventReader,
+    FirewallMapManager, IcmpConfigManager, IdsMapManager, InterfaceGroupsManager, IpSetMapManager,
+    L7PortsManager, LpmCoordinator, MetricsReader, NatMapManager, QosMapManager,
+    RateLimitLpmManager, RateLimitMapManager, ScrubConfigManager, SyncookieSecretManager,
+    ThreatIntelMapManager,
 };
 use adapters::grpc::server::{GrpcTlsConfig, run_grpc_server};
 use adapters::http::tls::load_rustls_config;
@@ -3140,6 +3141,77 @@ pub fn try_load_xdp_ratelimit_syncookie(
     Ok(sc_loader)
 }
 
+/// Populate the xdp-ratelimit `DDoS` config Array maps from `config`.
+///
+/// `check_syn_flood` / `process_icmp` / `process_conntrack` each read a
+/// single-entry Array map and bail when `enabled == 0`. The maps default
+/// to zeroed, so these writes are what actually arm the protections.
+/// All writes are best-effort (non-fatal): a missing map or write error
+/// just leaves that protection disabled.
+fn arm_ddos_ebpf_configs(loader: &mut EbpfLoader, config: &AgentConfig) {
+    if !config.ddos.enabled {
+        return;
+    }
+
+    if config.ddos.syn_protection.enabled {
+        match DdosSynConfigManager::new(loader.ebpf_mut()) {
+            Ok(mut mgr) => {
+                let syn_cfg = ebpf_common::ddos::DdosSynConfig {
+                    enabled: 1,
+                    threshold_mode: u8::from(config.ddos.syn_protection.threshold_mode),
+                    _pad: [0; 6],
+                    threshold_pps: config.ddos.syn_protection.threshold_pps,
+                };
+                if let Err(e) = mgr.set_config(&syn_cfg) {
+                    warn!("DDOS_SYN_CONFIG write failed (syncookie disabled): {e}");
+                }
+            }
+            Err(e) => warn!("DDOS_SYN_CONFIG map not available (non-fatal): {e}"),
+        }
+    }
+
+    if config.ddos.icmp_protection.enabled {
+        match IcmpConfigManager::new(loader.ebpf_mut()) {
+            Ok(mut mgr) => {
+                let icmp_cfg = ebpf_common::ddos::IcmpConfig {
+                    enabled: 1,
+                    _pad: 0,
+                    max_payload_size: config.ddos.icmp_protection.max_payload_size,
+                    max_pps: config.ddos.icmp_protection.max_pps,
+                };
+                if let Err(e) = mgr.set_config(&icmp_cfg) {
+                    warn!("ICMP_CONFIG write failed (ICMP protection disabled): {e}");
+                }
+            }
+            Err(e) => warn!("ICMP_CONFIG map not available (non-fatal): {e}"),
+        }
+    }
+
+    if config.ddos.connection_tracking.enabled {
+        match DdosConnTrackConfigManager::new(loader.ebpf_mut()) {
+            Ok(mut mgr) => {
+                let ct = &config.ddos.connection_tracking;
+                let ct_cfg = ebpf_common::ddos::DdosConnTrackConfig {
+                    enabled: 1,
+                    _pad: [0; 3],
+                    half_open_threshold: ct.half_open_threshold,
+                    rst_threshold: ct.rst_threshold,
+                    fin_threshold: ct.fin_threshold,
+                    ack_threshold: ct.ack_threshold,
+                    _pad2: [0; 4],
+                    // 60s entry timeout (the eBPF path does not yet expire on
+                    // this value; kept sane for when it does).
+                    timeout_ns: 60_000_000_000,
+                };
+                if let Err(e) = mgr.set_config(&ct_cfg) {
+                    warn!("CONNTRACK_CONFIG write failed (CT flood protection disabled): {e}");
+                }
+            }
+            Err(e) => warn!("CONNTRACK_CONFIG map not available (non-fatal): {e}"),
+        }
+    }
+}
+
 pub fn try_load_xdp_ratelimit(
     ebpf_dir: &str,
     config: &AgentConfig,
@@ -3217,27 +3289,10 @@ pub fn try_load_xdp_ratelimit(
         }
     }
 
-    // Arm SYN-cookie protection: the xdp-ratelimit `check_syn_flood` path
-    // reads `DDOS_SYN_CONFIG` (zeroed → disabled by default), so it never
-    // forges cookies unless userspace writes `enabled = 1` here.
-    if config.ddos.enabled && config.ddos.syn_protection.enabled {
-        match DdosSynConfigManager::new(loader.ebpf_mut()) {
-            Ok(mut mgr) => {
-                let syn_cfg = ebpf_common::ddos::DdosSynConfig {
-                    enabled: 1,
-                    threshold_mode: u8::from(config.ddos.syn_protection.threshold_mode),
-                    _pad: [0; 6],
-                    threshold_pps: config.ddos.syn_protection.threshold_pps,
-                };
-                if let Err(e) = mgr.set_config(&syn_cfg) {
-                    warn!("DDOS_SYN_CONFIG write failed (syncookie disabled): {e}");
-                }
-            }
-            Err(e) => {
-                warn!("DDOS_SYN_CONFIG map not available (non-fatal): {e}");
-            }
-        }
-    }
+    // Arm the xdp-ratelimit DDoS protections gated by zeroed config maps
+    // (SYN cookie, ICMP flood, conntrack flood). Without these writes the
+    // eBPF reads `enabled == 0` and each protection is a silent no-op.
+    arm_ddos_ebpf_configs(&mut loader, config);
 
     let mut rdrs = Vec::new();
     if let Ok(r) = MetricsReader::new(loader.ebpf_mut(), "RATELIMIT_METRICS") {

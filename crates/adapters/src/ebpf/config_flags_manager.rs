@@ -1,7 +1,7 @@
 use aya::Ebpf;
 use aya::maps::{Array, HashMap, MapData};
 use ebpf_common::config_flags::ConfigFlags;
-use ebpf_common::ddos::{DdosSynConfig, SyncookieSecret};
+use ebpf_common::ddos::{DdosConnTrackConfig, DdosSynConfig, IcmpConfig, SyncookieSecret};
 use ebpf_common::scrub::ScrubFlags;
 use tracing::info;
 
@@ -132,6 +132,80 @@ impl DdosSynConfigManager {
             threshold_mode = config.threshold_mode,
             threshold_pps = config.threshold_pps,
             "DDOS_SYN_CONFIG updated"
+        );
+        Ok(())
+    }
+}
+
+/// Manages the `ICMP_CONFIG` eBPF `Array` map.
+///
+/// Stores a single [`IcmpConfig`] at index 0, which gates the
+/// xdp-ratelimit ICMP-flood path: `process_icmp` reads `enabled`
+/// (off by default). Without this write the map stays zeroed and ICMP
+/// flood protection never engages.
+pub struct IcmpConfigManager {
+    config_map: Array<MapData, IcmpConfig>,
+}
+
+impl IcmpConfigManager {
+    /// Create a new manager by taking ownership of the `ICMP_CONFIG` map.
+    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+        let map = ebpf
+            .take_map("ICMP_CONFIG")
+            .ok_or_else(|| anyhow::anyhow!("map 'ICMP_CONFIG' not found in eBPF object"))?;
+        let config_map = Array::try_from(map)?;
+        info!("ICMP_CONFIG map acquired");
+        Ok(Self { config_map })
+    }
+
+    /// Write the `IcmpConfig` struct to index 0.
+    pub fn set_config(&mut self, config: &IcmpConfig) -> Result<(), anyhow::Error> {
+        self.config_map
+            .set(0, *config, 0)
+            .map_err(|e| anyhow::anyhow!("ICMP_CONFIG set failed: {e}"))?;
+        info!(
+            enabled = config.enabled,
+            max_pps = config.max_pps,
+            max_payload_size = config.max_payload_size,
+            "ICMP_CONFIG updated"
+        );
+        Ok(())
+    }
+}
+
+/// Manages the xdp-ratelimit `CONNTRACK_CONFIG` eBPF `Array` map.
+///
+/// Stores a single [`DdosConnTrackConfig`] at index 0, which gates the
+/// xdp-ratelimit RST/FIN/ACK/half-open flood path: `process_conntrack`
+/// reads `enabled` (off by default). This is distinct from the
+/// tc-conntrack `CT_CONFIG` map (see `ConnTrackMapManager`).
+pub struct DdosConnTrackConfigManager {
+    config_map: Array<MapData, DdosConnTrackConfig>,
+}
+
+impl DdosConnTrackConfigManager {
+    /// Create a new manager by taking ownership of the `CONNTRACK_CONFIG` map.
+    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+        let map = ebpf
+            .take_map("CONNTRACK_CONFIG")
+            .ok_or_else(|| anyhow::anyhow!("map 'CONNTRACK_CONFIG' not found in eBPF object"))?;
+        let config_map = Array::try_from(map)?;
+        info!("CONNTRACK_CONFIG map acquired");
+        Ok(Self { config_map })
+    }
+
+    /// Write the `DdosConnTrackConfig` struct to index 0.
+    pub fn set_config(&mut self, config: &DdosConnTrackConfig) -> Result<(), anyhow::Error> {
+        self.config_map
+            .set(0, *config, 0)
+            .map_err(|e| anyhow::anyhow!("CONNTRACK_CONFIG set failed: {e}"))?;
+        info!(
+            enabled = config.enabled,
+            half_open_threshold = config.half_open_threshold,
+            rst_threshold = config.rst_threshold,
+            fin_threshold = config.fin_threshold,
+            ack_threshold = config.ack_threshold,
+            "CONNTRACK_CONFIG updated"
         );
         Ok(())
     }
