@@ -63,6 +63,18 @@ _agent_scp() {
     local local_path="${1:?usage: _agent_scp <local_path> <remote_path>}"
     local remote_path="${2:?usage: _agent_scp <local_path> <remote_path>}"
 
+    # A freshly booted agent VM has a clean /tmp, so a per-suite scratch dir
+    # created locally on the test runner does not exist on the agent. Create
+    # the remote parent directory before the copy, otherwise scp fails with
+    # "failed to upload file ... to ...". The agent-local test mode (sudo bats
+    # on the agent) can also leave root-owned files at the same fixed /tmp
+    # paths, which the unprivileged scp cannot overwrite — so prepare the
+    # directory with sudo, hand it back to the vagrant user, and clear any
+    # stale destination file first.
+    local remote_dir
+    remote_dir="$(dirname "$remote_path")"
+    _agent_ssh_sudo "mkdir -p '$remote_dir' && chown vagrant: '$remote_dir' && rm -f '$remote_path'" 2>/dev/null || true
+
     scp -i "${AGENT_SSH_KEY}" \
         -o StrictHostKeyChecking=no \
         -o ConnectTimeout=5 \

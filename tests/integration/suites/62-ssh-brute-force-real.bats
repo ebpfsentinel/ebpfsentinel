@@ -154,9 +154,12 @@ _drive_ssh_burst() {
     # Poll the alert stream for the rule_id; the IDS pipeline buffers
     # events through redb so the alert may be visible a few seconds
     # after the burst lands.
+    # wait_for_alert already unwraps `.alerts`, so the filter selects over the
+    # alert array directly (matching the convention used by suites 12/26/45)
+    # and emits the matching alert objects — non-empty output means a match.
     local alerts
     alerts="$(wait_for_alert \
-        '[.alerts[] | select(.rule_id == "ids-ssh-bruteforce")] | length > 0' \
+        '.[] | select(.rule_id == "ids-ssh-bruteforce")' \
         15 1)" || {
         echo "no ids-ssh-bruteforce alert surfaced after SYN burst" >&2
         api_get /api/v1/alerts >&2 || true
@@ -167,8 +170,7 @@ _drive_ssh_burst() {
     # in the fixture and a MITRE technique consistent with the
     # dst-port mapping for port 22 (T1110.001 / T1110).
     local first
-    first="$(echo "${alerts}" \
-        | jq -c '[.alerts[] | select(.rule_id == "ids-ssh-bruteforce")] | .[0]')"
+    first="$(echo "${alerts}" | jq -sc '.[0]')"
     local severity
     severity="$(echo "${first}" | jq -r '.severity // ""')"
     [ "${severity}" = "high" ] || {
