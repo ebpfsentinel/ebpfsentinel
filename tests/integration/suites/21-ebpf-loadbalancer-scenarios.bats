@@ -145,7 +145,11 @@ teardown_file() {
 @test "LB service CRUD — create TCP service" {
     require_root
 
-    local svc='{"id":"test-svc","name":"test-svc","protocol":"tcp","listen_port":8080,"algorithm":"round_robin","backends":[{"id":"be-1","addr":"10.200.0.1","port":8080,"weight":1}]}'
+    # listen_port must not collide with the agent's own management ports
+    # (http 8080 / metrics 9090 / grpc 50051): the XDP load balancer keys on
+    # listen_port and would otherwise hijack the management API's traffic,
+    # wedging every subsequent API call.
+    local svc='{"id":"test-svc","name":"test-svc","protocol":"tcp","listen_port":18080,"algorithm":"round_robin","backends":[{"id":"be-1","addr":"10.200.0.1","port":8080,"weight":1}]}'
     local body
     body="$(api_post /api/v1/lb/services "$svc")"
     _load_http_status
@@ -214,7 +218,7 @@ teardown_file() {
 @test "weighted algorithm distributes traffic by weight" {
     require_root
 
-    local svc='{"id":"lb-weighted-001","name":"weighted-test","protocol":"tcp","listen_port":9090,"algorithm":"weighted","backends":[{"id":"b1","addr":"10.200.0.1","port":9091,"weight":3,"enabled":true},{"id":"b2","addr":"10.200.0.1","port":9092,"weight":1,"enabled":true}],"enabled":true}'
+    local svc='{"id":"lb-weighted-001","name":"weighted-test","protocol":"tcp","listen_port":19090,"algorithm":"weighted","backends":[{"id":"b1","addr":"10.200.0.1","port":9091,"weight":3,"enabled":true},{"id":"b2","addr":"10.200.0.1","port":9092,"weight":1,"enabled":true}],"enabled":true}'
     local body
     body="$(api_post /api/v1/lb/services "$svc")"
     _load_http_status

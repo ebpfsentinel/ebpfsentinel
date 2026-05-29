@@ -55,6 +55,9 @@ setup_file() {
         local remote_config="${_REMOTE_CONFIG_DIR}/$(basename "$PREPARED_CONFIG")"
         _agent_scp "$rewritten" "$remote_config"
         rm -f "$rewritten"
+        # scp lands the config world-readable (umask 664); the agent refuses a
+        # world-readable config, so tighten it like start_ebpf_agent does.
+        _agent_ssh_sudo chmod 640 "$remote_config" 2>/dev/null || true
         _agent_ssh_sudo bash -c \
             "'nohup /usr/local/bin/ebpfsentinel-agent --config ${remote_config} >${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}'"
         sleep 0.5

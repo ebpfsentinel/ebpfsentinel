@@ -140,7 +140,7 @@ PROVISION_DIR="${INTEGRATION_DIR}/vagrant/provision"
 echo "  [tk/1] apt-managed tools"
 sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    slowhttptest nmap t50 wrk dnsperf hydra ncrack tcpdump \
+    slowhttptest nmap t50 wrk dnsperf hydra ncrack tcpdump tshark \
     python3-venv python3-pip cmake build-essential pkg-config \
     libpcap-dev unzip jq
 
