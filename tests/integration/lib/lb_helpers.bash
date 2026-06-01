@@ -96,13 +96,23 @@ delete_lb_service() {
 # decoded locally so the test can diff two snapshots cheaply.
 dump_maglev_table() {
     local out="${1:?usage: dump_maglev_table <out_path>}"
-    local raw
+    local raw json_tmp
     raw="$(_agent_ssh_sudo bpftool -j map dump name LB_MAGLEV 2>/dev/null)" || return 1
     [ -n "$raw" ] || return 1
-    printf '%s' "$raw" | python3 - "$out" <<'PY' || return 1
+
+    # The bpftool JSON is passed to python via a temp file argument, NOT stdin:
+    # the heredoc that carries the decoder script already occupies the process's
+    # stdin, so a `printf ... | python3 -` pipe would be silently discarded
+    # (python reads the script from stdin and `sys.stdin.read()` then returns
+    # empty). Hand the data over a file path instead.
+    json_tmp="$(mktemp)"
+    printf '%s' "$raw" >"$json_tmp"
+
+    python3 - "$out" "$json_tmp" <<'PY'
 import json, sys
-out_path = sys.argv[1]
-data = json.loads(sys.stdin.read() or "[]")
+out_path, json_path = sys.argv[1], sys.argv[2]
+with open(json_path, encoding="utf-8") as f:
+    data = json.loads(f.read() or "[]")
 if not data:
     sys.exit(1)
 # Each entry has "value" as a list of byte strings ("0x12") in little-endian
@@ -121,6 +131,9 @@ with open(out_path, "w", encoding="utf-8") as f:
     for r in ring:
         f.write(f"{r}\n")
 PY
+    local rc=$?
+    rm -f "$json_tmp"
+    [ "$rc" -eq 0 ] || return 1
     [ -s "$out" ] || return 1
 }
 
