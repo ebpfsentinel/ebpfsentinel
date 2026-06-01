@@ -185,7 +185,7 @@ agent_iface_mac() {
     sleep 2
 
     local responder expected got want
-    responder="$("$EBPF_SCAPY_PY" - "${EBPF_AGENT_INTERFACE:-eth1}" "${LB_VIP_ADDR}" <<'PY'
+    responder="$(sudo -n "$EBPF_SCAPY_PY" - "${EBPF_AGENT_INTERFACE:-eth1}" "${LB_VIP_ADDR}" <<'PY'
 import sys
 from scapy.all import Ether, ARP, srp
 iface, target = sys.argv[1], sys.argv[2]
