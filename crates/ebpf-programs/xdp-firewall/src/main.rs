@@ -137,7 +137,11 @@ static FIREWALL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(7, 0);
 /// Avoids passing 8+ arguments through inlined functions that would blow
 /// the 512-byte BPF stack.
 #[map]
-static PKT_CTX: PerCpuArray<PacketCtx> = PerCpuArray::with_max_entries(1, 0);
+// Pinned by name so the tail-called xdp-firewall-reject program shares this
+// exact scratch buffer (same BPF-fs pin path) instead of binding its own
+// zero-filled copy — otherwise reject reads protocol/offsets as 0 and forges
+// a malformed ICMP from offset 0 for every packet.
+static PKT_CTX: PerCpuArray<PacketCtx> = PerCpuArray::pinned(1, 0);
 
 /// Shared kernel->userspace event ring buffer (1 MB).
 #[map]

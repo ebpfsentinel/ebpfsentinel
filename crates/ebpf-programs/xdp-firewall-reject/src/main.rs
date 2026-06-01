@@ -19,8 +19,8 @@ use aya_ebpf::{
     maps::PerCpuArray,
     programs::XdpContext,
 };
-use ebpf_common::firewall::{FIREWALL_METRIC_REJECTED, PacketCtx};
 use ebpf_common::event::FLAG_IPV6;
+use ebpf_common::firewall::{FIREWALL_METRIC_REJECTED, PacketCtx};
 use ebpf_helpers::checksum::{
     compute_icmp_csum, compute_icmpv6_csum, compute_ipv4_csum, compute_tcp_csum_v4,
     compute_tcp_csum_v6,
@@ -37,7 +37,12 @@ use network_types::{
 // ── Maps (shared with xdp-firewall via BPF filesystem pinning) ──────
 
 #[map]
-static PKT_CTX: PerCpuArray<PacketCtx> = PerCpuArray::with_max_entries(1, 0);
+// Pinned by name so this tail-call target reuses the parent xdp-firewall's
+// populated scratch buffer (shared BPF-fs pin path) rather than binding its
+// own zero-filled copy. Without pinning, protocol/l3_offset/l4_offset read as
+// 0 here, dispatching every reject to the ICMP path with offset-0 (Ethernet)
+// header parsing.
+static PKT_CTX: PerCpuArray<PacketCtx> = PerCpuArray::pinned(1, 0);
 
 #[map]
 static FIREWALL_METRICS: PerCpuArray<u64> =
@@ -161,8 +166,8 @@ fn send_tcp_rst_v4(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Result<u32
     // Step 4: Swap MACs + set ether_type (in case original had VLAN tags).
     unsafe {
         let p = eth as *mut u8;
-        copy_mac_asm!(p, in_src_mac.as_ptr());         // dst = original src
-        copy_mac_asm!(p.add(6), in_dst_mac.as_ptr());  // src = original dst
+        copy_mac_asm!(p, in_src_mac.as_ptr()); // dst = original src
+        copy_mac_asm!(p.add(6), in_dst_mac.as_ptr()); // src = original dst
         (*eth).ether_type = 0x0008u16; // ETH_P_IP in network byte order
     }
 
@@ -299,11 +304,7 @@ fn send_tcp_rst_v6(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Result<u32
 // ── ICMP Destination Unreachable (IPv4) ─────────────────────────────
 
 #[inline(never)]
-fn send_icmp_unreachable_v4(
-    ctx: &XdpContext,
-    l3_off: usize,
-    _l4_off: usize,
-) -> Result<u32, ()> {
+fn send_icmp_unreachable_v4(ctx: &XdpContext, l3_off: usize, _l4_off: usize) -> Result<u32, ()> {
     // Step 1: Save original IP header + first 8 bytes of L4 (28 bytes)
     // into a PerCpuArray scratch buffer (not the stack) to stay under 512B.
     let scratch = match REJECT_SCRATCH.get_ptr_mut(0) {
@@ -412,11 +413,7 @@ fn send_icmp_unreachable_v4(
 // ── ICMPv6 Destination Unreachable (IPv6) ───────────────────────────
 
 #[inline(never)]
-fn send_icmpv6_unreachable(
-    ctx: &XdpContext,
-    l3_off: usize,
-    _l4_off: usize,
-) -> Result<u32, ()> {
+fn send_icmpv6_unreachable(ctx: &XdpContext, l3_off: usize, _l4_off: usize) -> Result<u32, ()> {
     // Step 1: Save original IPv6 header (40) + first 8 bytes of L4 = 48 bytes
     // into scratch buffer (not stack) to stay under 512B.
     let scratch = match REJECT_SCRATCH.get_ptr_mut(0) {
