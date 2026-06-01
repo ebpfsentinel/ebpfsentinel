@@ -122,9 +122,19 @@ impl FirewallArrayMapPort for FirewallMapManager {
         self.clear_hash_maps();
 
         // Classify rules into fast-path HashMaps vs array fallback.
+        //
+        // `rules` arrive sorted by ascending priority (lowest number wins). The
+        // eBPF datapath checks the O(1) hash fast-paths BEFORE the linear array
+        // scan, so a rule may only be fast-pathed while no higher-priority rule
+        // has already been routed to the array — otherwise the hash hit would
+        // short-circuit and skip that higher-priority rule (e.g. a broad
+        // whitelist `allow` losing to a narrow `reject` on the same port).
+        // Once the first array-bound rule is seen, every subsequent fast-path
+        // candidate is demoted to the array so priority order is preserved.
         let mut array_rules: Vec<FirewallRuleEntry> = Vec::new();
         let mut hash_5tuple_count = 0u32;
         let mut hash_port_count = 0u32;
+        let mut seen_array_rule = false;
 
         for rule in rules {
             let flags = rule.match_flags;
@@ -135,7 +145,8 @@ impl FirewallArrayMapPort for FirewallMapManager {
                 || rule.src_set_id != 0
                 || rule.dst_set_id != 0;
 
-            if !has_extended
+            if !seen_array_rule
+                && !has_extended
                 && flags
                     == (MATCH_SRC_IP | MATCH_DST_IP | MATCH_SRC_PORT | MATCH_DST_PORT | MATCH_PROTO)
                 && rule.src_port_start == rule.src_port_end
@@ -161,7 +172,8 @@ impl FirewallArrayMapPort for FirewallMapManager {
                     hash_5tuple_count += 1;
                     continue;
                 }
-            } else if !has_extended
+            } else if !seen_array_rule
+                && !has_extended
                 && flags == (MATCH_DST_PORT | MATCH_PROTO)
                 && rule.dst_port_start == rule.dst_port_end
             {
@@ -182,8 +194,10 @@ impl FirewallArrayMapPort for FirewallMapManager {
                 }
             }
 
-            // Fallback: complex rule → array scan
+            // Fallback: complex rule (or a fast-path candidate demoted because a
+            // higher-priority rule already went to the array) → linear scan.
             array_rules.push(*rule);
+            seen_array_rule = true;
         }
 
         // Load remaining rules into the array
