@@ -41,8 +41,14 @@ require_syncookie_tools() {
 syncookie_start_target() {
     local port="${1:-$SYNCOOKIE_TARGET_PORT}"
 
-    _agent_ssh_sudo sh -c "nohup ncat -lk -p ${port} > /dev/null 2>&1 < /dev/null & echo \$! > ${SYNCOOKIE_TARGET_PID_FILE}" \
-        >/dev/null 2>&1 || return 1
+    # setsid detaches ncat into its own session so the SSH channel closes and
+    # the call returns instead of blocking on the listener's inherited fds.
+    # The listener's existence is confirmed by the ss poll below, not by this
+    # command's exit status (a backgrounded remote start can report success
+    # before the socket is bound, or the transport can return non-zero while
+    # the listener is in fact up).
+    _agent_ssh_sudo "setsid sh -c 'ncat -lk -p ${port} >/dev/null 2>&1 </dev/null & echo \$! > ${SYNCOOKIE_TARGET_PID_FILE}'" \
+        >/dev/null 2>&1 || true
 
     # Wait up to 5 s for the socket to be listening.
     local i
