@@ -38,7 +38,7 @@
 # Base box: bento/ubuntu-24.04 (provisioned inline)
 #
 # Network: VMs communicate over a VirtualBox host-only network (192.168.56.0/24)
-# with MTU 9000, TCP BBR, and tuned buffers for maximum throughput. In 3-VM
+# with MTU 1500 (vmxnet3 native XDP caps MTU at ~3000), TCP BBR, tuned buffers. In 3-VM
 # mode a second host-only network 192.168.57.0/24 is added between agent
 # and backend.
 
@@ -196,20 +196,24 @@ net.core.default_qdisc=fq
 SYSCTL
       sysctl --system
 
-      # Set MTU 9000 (jumbo frames) on the internal network interface
+      # MTU 1500 on the transit interface. vmxnet3 rejects native XDP when
+      # MTU > ~3000 ("MTU 9000 too large for XDP"), and the kfunc XDP datapath
+      # (firewall/reject/ratelimit/LB) requires native attach — so jumbo
+      # frames and native XDP are mutually exclusive here. 1500 keeps the
+      # XDP datapath suites (46/47/48/51) working.
       # eth1 is the private_network interface
       if ip link show eth1 &>/dev/null; then
-        ip link set eth1 mtu 9000
+        ip link set eth1 mtu 1500
         # Persist via netplan
         NETPLAN_FILE=$(ls /etc/netplan/*.yaml 2>/dev/null | head -1)
-        if [ -n "$NETPLAN_FILE" ] && ! grep -q 'mtu: 9000' "$NETPLAN_FILE" 2>/dev/null; then
+        if [ -n "$NETPLAN_FILE" ] && ! grep -q 'mtu: 1500' "$NETPLAN_FILE" 2>/dev/null; then
           # Add MTU to eth1 config via a separate netplan file
           cat > /etc/netplan/99-mtu.yaml <<NETPLAN
 network:
   version: 2
   ethernets:
     eth1:
-      mtu: 9000
+      mtu: 1500
 NETPLAN
           netplan apply 2>/dev/null || true
         fi
@@ -289,13 +293,13 @@ SYSCTL
 
         # Jumbo frames on the backend-side NIC too
         if ip link show eth2 &>/dev/null; then
-          ip link set eth2 mtu 9000
+          ip link set eth2 mtu 1500
           cat > /etc/netplan/99-mtu-eth2.yaml <<NETPLAN
 network:
   version: 2
   ethernets:
     eth2:
-      mtu: 9000
+      mtu: 1500
 NETPLAN
           netplan apply 2>/dev/null || true
         fi
@@ -483,13 +487,13 @@ SYSCTL
 
       # Jumbo frames on internal network
       if ip link show eth1 &>/dev/null; then
-        ip link set eth1 mtu 9000
+        ip link set eth1 mtu 1500
         cat > /etc/netplan/99-mtu.yaml <<NETPLAN
 network:
   version: 2
   ethernets:
     eth1:
-      mtu: 9000
+      mtu: 1500
 NETPLAN
         netplan apply 2>/dev/null || true
       fi
@@ -564,13 +568,13 @@ EOS
 
         # Jumbo frames on the backend NIC.
         if ip link show eth1 &>/dev/null; then
-          ip link set eth1 mtu 9000
+          ip link set eth1 mtu 1500
           cat > /etc/netplan/99-mtu.yaml <<NETPLAN
 network:
   version: 2
   ethernets:
     eth1:
-      mtu: 9000
+      mtu: 1500
 NETPLAN
           netplan apply 2>/dev/null || true
         fi

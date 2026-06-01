@@ -122,8 +122,13 @@ for i in $(seq 1 "$MAX_RETRIES"); do
     fi
 
     if [ "$i" -eq "$MAX_RETRIES" ]; then
-        echo "ERROR: Agent VM did not become ready within $((MAX_RETRIES * RETRY_INTERVAL))s"
-        exit 1
+        # Non-fatal: the agent readiness marker is a convenience sync only.
+        # Each suite's setup_file starts the agent itself, and the attack
+        # toolkit installed below does not depend on the agent — so do NOT
+        # abort the whole provision (which would leave tshark/hping/etc.
+        # uninstalled) just because the marker is absent.
+        echo "WARNING: agent readiness marker not seen within $((MAX_RETRIES * RETRY_INTERVAL))s; continuing (suites start the agent themselves)" >&2
+        break
     fi
 
     echo "  Waiting... (attempt ${i}/${MAX_RETRIES})"
