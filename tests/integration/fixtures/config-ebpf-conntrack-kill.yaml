@@ -18,6 +18,7 @@ agent:
 
 firewall:
   enabled: true
+  mode: block
   default_policy: pass
   rules: []
 
