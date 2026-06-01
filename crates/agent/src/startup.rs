@@ -3129,8 +3129,9 @@ pub fn try_load_xdp_ratelimit_syncookie(
     rl_loader: &mut EbpfLoader,
 ) -> anyhow::Result<EbpfLoader> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-ratelimit-syncookie")?;
-    // Raw load so this tail-call target matches the kfunc-raw-loaded
-    // xdp-ratelimit owner of RL_PROG_ARRAY (see `load_xdp_raw_with_pin_path`).
+    // Raw load so this kfunc-free tail-call target matches the kfunc-loaded
+    // (outside-aya) xdp-ratelimit owner of RL_PROG_ARRAY, exactly as the reject
+    // target matches the firewall owner of XDP_PROG_ARRAY.
     let mut sc_loader = EbpfLoader::load_xdp_raw_with_pin_path(
         &program_bytes,
         adapters::ebpf::DEFAULT_BPF_PIN_PATH,
@@ -3243,10 +3244,23 @@ pub fn try_load_xdp_ratelimit(
     firewall_active: bool,
 ) -> anyhow::Result<XdpRatelimitResult> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-ratelimit")?;
+    // A tail-call target must match its caller's device-bound state. When the
+    // firewall is active it owns XDP_PROG_ARRAY and is loaded raw (non
+    // device-bound, since the non-kfunc reject/syncookie chain cannot be
+    // device-bound), so a device-bound ratelimit fd is rejected with EINVAL
+    // when wired into slot 0 — leaving the firewall→ratelimit hop dead and
+    // every DDoS/syncookie check unreachable. Neutralize the dev-bind in the
+    // chained form (mirrors `try_load_xdp_loadbalancer`); only device-bind in
+    // standalone mode where ratelimit attaches to the interface directly.
+    let dev_bound = if firewall_active {
+        None
+    } else {
+        metadata_dev_bound_ifindex(config)
+    };
     let mut loader = EbpfLoader::load_with_pin_path_dev_bound(
         &program_bytes,
         adapters::ebpf::DEFAULT_BPF_PIN_PATH,
-        metadata_dev_bound_ifindex(config),
+        dev_bound,
     )?;
 
     if firewall_active {
