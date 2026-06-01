@@ -97,6 +97,8 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
       v.linked_clone = false
       # vmxnet3 supports native XDP (XDP_TX included); the default e1000e
       # has no native XDP, which the kfunc XDP datapath requires.
+      # Per-driver XDP support + max MTU matrix:
+      #   https://docs.ebpf.io/linux/program-type/BPF_PROG_TYPE_XDP/#max-mtu
       v.vmx["ethernet0.virtualDev"] = "vmxnet3"
       v.vmx["ethernet1.virtualDev"] = "vmxnet3"
       v.vmx["ethernet2.virtualDev"] = "vmxnet3"
@@ -200,7 +202,8 @@ SYSCTL
       # MTU > ~3000 ("MTU 9000 too large for XDP"), and the kfunc XDP datapath
       # (firewall/reject/ratelimit/LB) requires native attach — so jumbo
       # frames and native XDP are mutually exclusive here. 1500 keeps the
-      # XDP datapath suites (46/47/48/51) working.
+      # XDP datapath suites (46/47/48/51) working. Per-driver max-MTU matrix:
+      #   https://docs.ebpf.io/linux/program-type/BPF_PROG_TYPE_XDP/#max-mtu
       # eth1 is the private_network interface
       if ip link show eth1 &>/dev/null; then
         ip link set eth1 mtu 1500
