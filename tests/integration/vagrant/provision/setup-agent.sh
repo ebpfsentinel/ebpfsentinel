@@ -38,7 +38,19 @@ echo "=== [2/8] Generating JWT keys and tokens ==="
 bash "${INTEGRATION_DIR}/scripts/generate-jwt-keys.sh" --out-dir "$JWT_DIR"
 
 # ── Install BATS (needed for local test execution) ─────────────────
+# Wait for DNS + outbound connectivity before any github fetch. The VMware
+# NAT DNS resolver can lag a few seconds after boot, which otherwise breaks
+# the first `git clone`/`curl` to github.com mid-provision.
+wait_for_network() {
+    for _ in $(seq 1 30); do
+        getent hosts github.com >/dev/null 2>&1 && return 0
+        sleep 2
+    done
+    echo "WARNING: DNS/network not ready after 60s; continuing anyway" >&2
+}
+
 echo "=== [3/8] Installing BATS ==="
+wait_for_network
 if ! command -v bats &>/dev/null; then
     git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats-core
     sudo /tmp/bats-core/install.sh /usr/local

@@ -121,7 +121,10 @@ if ! id -u testuser >/dev/null 2>&1; then
     echo "testuser:testpass" | sudo chpasswd
 fi
 sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-sudo systemctl reload ssh || sudo systemctl reload sshd
+# On Ubuntu 24.04 the unit is `ssh` (socket-activated); reload fails when it
+# is not active, and `sshd` does not exist — restart as a fallback and never
+# let this abort provisioning.
+sudo systemctl reload ssh 2>/dev/null || sudo systemctl restart ssh 2>/dev/null || true
 
 # ── [4b/5] openssl s_server systemd unit ─────────────────────────────
 echo "=== [4b/5] Configuring openssl s_server on :${S_SERVER_PORT} ==="

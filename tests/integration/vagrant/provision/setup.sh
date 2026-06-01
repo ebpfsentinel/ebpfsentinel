@@ -30,6 +30,11 @@ echo "=== Generating JWT keys and tokens ==="
 bash "${INTEGRATION_DIR}/scripts/generate-jwt-keys.sh" --out-dir "$JWT_DIR"
 
 # ── Install BATS ──────────────────────────────────────────────────
+# Wait for DNS/connectivity first (VMware NAT DNS can lag after boot).
+for _ in $(seq 1 30); do
+    getent hosts github.com >/dev/null 2>&1 && break
+    sleep 2
+done
 echo "=== Installing BATS ==="
 if ! command -v bats &>/dev/null; then
     git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats-core

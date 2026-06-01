@@ -30,8 +30,8 @@
 #   vagrant destroy -f        # Delete VMs
 #
 # Environment variables:
-#   AGENT_VM_CPUS     Agent VM vCPUs (default: 2)
-#   AGENT_VM_MEMORY   Agent VM RAM in MB (default: 2048)
+#   AGENT_VM_CPUS     Agent VM vCPUs (default: 4)
+#   AGENT_VM_MEMORY   Agent VM RAM in MB (default: 4096)
 #   VAGRANT_3VM       Set to "1" / "true" to enable the 3-VM transit topology
 #
 # Provider: VirtualBox (default) or VMware Workstation (vmware_desktop)
@@ -80,8 +80,8 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 
     # VirtualBox provider (default)
     agent.vm.provider "virtualbox" do |vb|
-      vb.memory = ENV.fetch('AGENT_VM_MEMORY', '2048').to_i
-      vb.cpus = ENV.fetch('AGENT_VM_CPUS', '2').to_i
+      vb.memory = ENV.fetch('AGENT_VM_MEMORY', '4096').to_i
+      vb.cpus = ENV.fetch('AGENT_VM_CPUS', '4').to_i
       vb.name = "eBPFsentinel Agent VM"
       vb.gui = false
       # Nested virtualization for Docker / eBPF
@@ -90,11 +90,16 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 
     # VMware Workstation provider (alternative)
     agent.vm.provider "vmware_desktop" do |v|
-      v.vmx["memsize"] = ENV.fetch('AGENT_VM_MEMORY', '2048')
-      v.vmx["numvcpus"] = ENV.fetch('AGENT_VM_CPUS', '2')
+      v.vmx["memsize"] = ENV.fetch('AGENT_VM_MEMORY', '4096')
+      v.vmx["numvcpus"] = ENV.fetch('AGENT_VM_CPUS', '4')
       v.vmx["displayname"] = "eBPFsentinel Agent VM"
       v.gui = false
       v.linked_clone = false
+      # vmxnet3 supports native XDP (XDP_TX included); the default e1000e
+      # has no native XDP, which the kfunc XDP datapath requires.
+      v.vmx["ethernet0.virtualDev"] = "vmxnet3"
+      v.vmx["ethernet1.virtualDev"] = "vmxnet3"
+      v.vmx["ethernet2.virtualDev"] = "vmxnet3"
     end
 
     # ----------------------------------------------------------
@@ -399,14 +404,25 @@ UNIT
       set -euxo pipefail
       export DEBIAN_FRONTEND=noninteractive
 
+      # The VMware NAT DNS resolver can lag a few seconds after boot, which
+      # otherwise breaks the first github fetch below. Wait for it.
+      for _ in $(seq 1 30); do
+        getent hosts github.com >/dev/null 2>&1 && break
+        sleep 2
+      done
+
       apt-get update
       apt-get install -y --no-install-recommends \
         curl jq iperf3 hping3 ncat nmap bc openssl \
         sshpass stress-ng netcat-openbsd
 
-      # Install bats from source
+      # Install bats from source (retry the clone — transient NAT DNS hiccups)
       if ! command -v bats &>/dev/null; then
-        git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats-core
+        for attempt in 1 2 3; do
+          rm -rf /tmp/bats-core
+          git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats-core && break
+          echo "bats clone attempt ${attempt} failed; retrying in 5s" >&2; sleep 5
+        done
         (cd /tmp/bats-core && ./install.sh /usr/local)
         rm -rf /tmp/bats-core
       fi
