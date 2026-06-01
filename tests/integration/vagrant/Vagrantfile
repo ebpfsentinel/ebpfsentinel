@@ -509,15 +509,24 @@ NETPLAN
       attacker.vm.provision "shell", name: "transit-routing", inline: <<-SHELL
         set -euxo pipefail
 
-        # Static route: anything destined to the backend subnet goes via
-        # the agent. Persistent across reboots via a systemd-networkd drop-in.
+        # Static route: anything destined to the backend subnet goes via the
+        # agent so attack traffic traverses the agent's eBPF datapath instead
+        # of short-circuiting over the shared NAT segment. Persist via netplan
+        # (networkd-dispatcher drop-ins only fire on routable transitions and
+        # were unreliable — the route silently reverted to the NAT path).
         ip route replace 192.168.57.0/24 via 192.168.56.10 dev eth1 || true
 
-        cat > /etc/networkd-dispatcher/routable.d/50-3vm-route.sh <<'EOS'
-#!/bin/sh
-ip route replace 192.168.57.0/24 via 192.168.56.10 dev eth1 || true
-EOS
-        chmod +x /etc/networkd-dispatcher/routable.d/50-3vm-route.sh 2>/dev/null || true
+        cat > /etc/netplan/99-3vm-route.yaml <<NETPLAN
+network:
+  version: 2
+  ethernets:
+    eth1:
+      routes:
+        - to: 192.168.57.0/24
+          via: 192.168.56.10
+NETPLAN
+        chmod 600 /etc/netplan/99-3vm-route.yaml
+        netplan apply 2>/dev/null || true
       SHELL
     end
 
@@ -562,25 +571,29 @@ EOS
       # (NAT, conntrack, QoS, DSR L2) traverse the agent's eBPF datapath.
       backend.vm.provision "shell", name: "transit-routing", inline: <<-SHELL
         set -euxo pipefail
-        ip route replace 192.168.56.0/24 via 192.168.57.10 dev eth1 || true
-        cat > /etc/networkd-dispatcher/routable.d/50-3vm-route.sh <<'EOS'
-#!/bin/sh
-ip route replace 192.168.56.0/24 via 192.168.57.10 dev eth1 || true
-EOS
-        chmod +x /etc/networkd-dispatcher/routable.d/50-3vm-route.sh 2>/dev/null || true
 
-        # Jumbo frames on the backend NIC.
+        # Return route: client-side traffic goes back via the agent so transit
+        # policies (NAT, conntrack, QoS, DSR L2) traverse the agent's eBPF
+        # datapath. Persist via netplan (see attacker note re: dispatcher).
+        ip route replace 192.168.56.0/24 via 192.168.57.10 dev eth1 || true
+
+        # MTU 1500 on the backend NIC (vmxnet3 native-XDP cap, path-wide match).
         if ip link show eth1 &>/dev/null; then
           ip link set eth1 mtu 1500
-          cat > /etc/netplan/99-mtu.yaml <<NETPLAN
+        fi
+
+        cat > /etc/netplan/99-3vm-route.yaml <<NETPLAN
 network:
   version: 2
   ethernets:
     eth1:
       mtu: 1500
+      routes:
+        - to: 192.168.56.0/24
+          via: 192.168.57.10
 NETPLAN
-          netplan apply 2>/dev/null || true
-        fi
+        chmod 600 /etc/netplan/99-3vm-route.yaml
+        netplan apply 2>/dev/null || true
       SHELL
 
       backend.vm.provision "shell", name: "setup", privileged: false,
