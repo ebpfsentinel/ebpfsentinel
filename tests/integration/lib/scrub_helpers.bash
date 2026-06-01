@@ -122,8 +122,13 @@ scapy_send_via() {
     local mss="${4:?usage: scapy_send_via <dst_ip> <ttl> <ip_id> <mss> <df> [count]}"
     local df="${5:?usage: scapy_send_via <dst_ip> <ttl> <ip_id> <mss> <df> [count]}"
     local count="${6:-1}"
+    # Pass a non-empty sentinel ("none") for the DF-clear case. An empty-string
+    # argv element is silently dropped when ssh re-joins the remote command with
+    # spaces and the login shell re-splits it, which would shift `count` into the
+    # flags slot and crash the unpack below — so every positional must be
+    # non-empty over the wire. The python side maps "none" back to no flags.
     local flags="DF"
-    [ "$df" = "0" ] && flags=""
+    [ "$df" = "0" ] && flags="none"
     ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
         -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
         "vagrant@${ATTACKER_VM_IP}" -- \
@@ -134,6 +139,7 @@ from scapy.all import IP, TCP, send
 
 dst, ttl, ip_id, mss, flags, count = sys.argv[1:]
 ttl = int(ttl); ip_id = int(ip_id); mss = int(mss); count = int(count)
+flags = "" if flags == "none" else flags
 # Fresh source-port base per invocation: reusing fixed ports across the
 # suite's tests lets the agent's conntrack/stateful-firewall state from an
 # earlier test drop a later test's reused 4-tuple, so the transit never
