@@ -34,7 +34,7 @@ tls_probe_sni() {
     # remote login shell parses the result; an extra `sh -c` wrapper would be
     # re-split and mangle multi-token / multi-statement scripts.
     _attacker_ssh \
-        "echo Q | openssl s_client -connect ${host}:${port} -servername ${sni} -verify_return_error 0 -tls1_2 </dev/null >/dev/null 2>&1 || true"
+        "echo Q | openssl s_client -connect ${host}:${port} -servername ${sni} -tls1_2 </dev/null >/dev/null 2>&1 || true"
 }
 
 # encrypted_dns_alerts <protocol>
@@ -50,7 +50,7 @@ encrypted_dns_alerts() {
     count="$(echo "$body" | jq --arg p "$proto" '
         [ (.alerts // .)
           | .[]?
-          | select((.description // "") | test("Encrypted DNS detected: " + $p; "i"))
+          | select((.message // .description // "") | test("Encrypted DNS detected: " + $p; "i"))
         ] | length' 2>/dev/null)" || count=0
     echo "${count:-0}"
 }
@@ -90,7 +90,7 @@ encrypted_dns_resolver_match() {
     count="$(echo "$body" | jq --arg s "$frag" '
         [ (.alerts // .)
           | .[]?
-          | select((.description // "") | test("Encrypted DNS detected.*" + $s; "i"))
+          | select((.message // .description // "") | test("Encrypted DNS detected.*" + $s; "i"))
         ] | length' 2>/dev/null)" || count=0
     echo "${count:-0}"
 }
