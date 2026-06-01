@@ -39,13 +39,27 @@ reject_start_capture() {
 
     local pcap="/tmp/reject-cap-$$-$(date +%s).pcap"
     local pidfile="${pcap}.pid"
+    local readyfile="${pcap}.ready"
 
+    # Capture tcpdump's startup banner so we can block until it is actually
+    # listening. A fixed `sleep` races the trigger on virtual NICs: the kernel
+    # receives the forged RST (ncat reports "refused") but the capture isn't
+    # live yet, so the pcap shows zero RSTs — a false negative.
     sudo -n nohup tcpdump -n -U -w "$pcap" -i "$iface" "$bpf" \
-        >/dev/null 2>&1 &
+        >/dev/null 2>"$readyfile" &
     echo $! > "$pidfile"
     # tcpdump uses sudo so the PID we captured isn't its real pid;
     # rely on the pidfile-by-filename pattern below.
-    sleep 1
+
+    # Wait up to 5s for "listening on <iface>", then a short extra settle so
+    # the AF_PACKET ring is fully attached before the caller fires traffic.
+    local waited=0
+    while [ "$waited" -lt 50 ]; do
+        grep -q "listening on" "$readyfile" 2>/dev/null && break
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    sleep 0.3
     echo "$pcap"
 }
 
@@ -55,10 +69,20 @@ reject_start_capture() {
 reject_stop_capture() {
     local pcap="${1:?usage: reject_stop_capture <pcap-path>}"
 
+    # Drain the kernel capture ring BEFORE signalling tcpdump. On SIGTERM
+    # tcpdump flushes only the frames its userspace read loop has already
+    # pulled off the AF_PACKET ring — it does NOT drain entries still queued
+    # in the ring. On virtual NICs (vmxnet3) that userspace read lags the
+    # kernel by a beat, so a forged reply that lands microseconds after the
+    # trigger can still be sitting unread in the ring when the caller stops
+    # the capture, yielding an empty pcap (false negative). This settle lets
+    # tcpdump's read loop catch up so the reply is committed to the file.
+    sleep "${REJECT_CAPTURE_DRAIN_SECS:-2}"
+
     sudo -n pkill -f "tcpdump.*-w ${pcap}" 2>/dev/null || true
     sleep 1
     sudo -n chown "$(id -u):$(id -g)" "$pcap" 2>/dev/null || true
-    rm -f "${pcap}.pid" 2>/dev/null || true
+    rm -f "${pcap}.pid" "${pcap}.ready" 2>/dev/null || true
     echo "$pcap"
 }
 
