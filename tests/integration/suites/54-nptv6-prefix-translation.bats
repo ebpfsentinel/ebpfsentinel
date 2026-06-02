@@ -191,31 +191,32 @@ teardown_file() {
     wait "${cap_pid}" 2>/dev/null || true
 
     # Count the test's own probe packets (UDP dport 4546) by source prefix.
+    # NPTv6 (RFC 6296) is checksum-neutral: it rewrites the /64 prefix and
+    # adjusts a word in the interface ID, so the source prints as e.g.
+    # 2001:db8:54:0:30b8::1 (NOT the compressed 2001:db8:54::1). Match on the
+    # network bytes with one trailing colon so the adjusted-ID form still hits.
+    local ext_match="${EXTERNAL_PREFIX%:}"
+    local int_match="${INTERNAL_PREFIX%:}"
     local external_hits internal_hits
     external_hits=0
     internal_hits=0
     if [ -s "${pcap}" ]; then
         external_hits="$(tcpdump -nr "${pcap}" 'ip6 and udp port 4546' 2>/dev/null \
-            | grep -c "IP6 ${EXTERNAL_PREFIX}" || true)"
+            | grep -c "IP6 ${ext_match}" || true)"
         internal_hits="$(tcpdump -nr "${pcap}" 'ip6 and udp port 4546' 2>/dev/null \
-            | grep -c "IP6 ${INTERNAL_PREFIX}" || true)"
+            | grep -c "IP6 ${int_match}" || true)"
     fi
 
-    # No probe reached the backend. The transit routing/translation setup is in
-    # place (and the REST/CLI tests above prove the rule is loaded), but IPv6
-    # unicast does not currently traverse the agent's running eBPF datapath
-    # (a kernel ping6 from the attacker to the agent's own IPv6 gateway address
-    # is 100% loss while the stack is attached) — a product-side IPv6 transit
-    # gap, not a missing test fixture. Surface as a skip until the datapath
-    # forwards IPv6; the assertion below proves the rewrite the moment it does.
+    # No probe reached the backend at all → the IPv6 transit link is down, not a
+    # translation failure; surface as a skip rather than a false negative.
     if [ "${external_hits:-0}" -eq 0 ] && [ "${internal_hits:-0}" -eq 0 ]; then
-        skip "IPv6 does not traverse the agent eBPF datapath yet (product gap); NPTv6 rewrite unverifiable on the wire"
+        skip "no IPv6 probe reached backend — transit link not established"
     fi
 
-    # The probe reached the backend: assert NPTv6 swapped the source prefix.
+    # The probe reached the backend: assert NPTv6 swapped the source prefix
+    # (external prefix present, internal prefix absent).
     [ "${external_hits:-0}" -ge 1 ] || {
         echo "NPTv6 egress did not rewrite: external=${external_hits} internal=${internal_hits}" >&2
-        echo "--- backend IPv6 probe capture ---" >&2
         tcpdump -nr "${pcap}" 'ip6 and udp port 4546' 2>/dev/null | head -10 >&2
         return 1
     }
