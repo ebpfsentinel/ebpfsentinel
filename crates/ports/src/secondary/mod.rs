@@ -5,6 +5,7 @@ pub mod alias_resolution_port;
 pub mod audit_sink;
 pub mod audit_store;
 pub mod auth_provider;
+pub mod conntrack_kill_port;
 pub mod conntrack_map_port;
 pub mod container_resolver_port;
 pub mod dns_cache_port;

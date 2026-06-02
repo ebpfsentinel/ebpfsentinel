@@ -79,8 +79,14 @@ impl ConnTrackAppService {
     /// netfilter port when available (authoritative), falls back to
     /// the BPF shadow.
     pub fn get_connections(&self, limit: usize) -> Result<Vec<Connection>, DomainError> {
-        if let Some(ref nf) = self.netfilter_port {
-            return nf.get_connections(limit);
+        // Prefer the kernel netfilter reader, but fall back to the BPF shadow
+        // when it cannot be read — e.g. a kernel built without
+        // CONFIG_NF_CONNTRACK_PROCFS, where the sysctl knobs are still present
+        // (so the port is wired for writes) but /proc/net/nf_conntrack is not.
+        if let Some(ref nf) = self.netfilter_port
+            && let Ok(conns) = nf.get_connections(limit)
+        {
+            return Ok(conns);
         }
         match self.map_port {
             Some(ref port) => port.get_connections(limit),
@@ -114,8 +120,10 @@ impl ConnTrackAppService {
     /// Return the current connection count. Prefers kernel netfilter
     /// when available.
     pub fn connection_count(&self) -> Result<u64, DomainError> {
-        if let Some(ref nf) = self.netfilter_port {
-            return nf.connection_count();
+        if let Some(ref nf) = self.netfilter_port
+            && let Ok(count) = nf.connection_count()
+        {
+            return Ok(count);
         }
         match self.map_port {
             Some(ref port) => port.connection_count(),

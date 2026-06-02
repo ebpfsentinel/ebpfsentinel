@@ -1900,6 +1900,12 @@ pub unsafe fn kill_flow_via_skb_ct(
         with_skb_ct_lookup(skb, tuple, opts, |ct| {
             let mut entry = CtEntry { inner: ct };
             let ok = entry.change_status(ips_status::DYING);
+            // Collapse the timeout so the conntrack gc reaps the entry
+            // promptly. Marking DYING alone leaves the entry hashed and
+            // visible in `conntrack -L` until its original (often multi-day)
+            // ESTABLISHED timeout — a dropped flow never re-enters netfilter
+            // to trigger deletion, so the short timeout is what evicts it.
+            entry.change_timeout(1);
             // Leak the wrapper so Drop doesn't run — the outer
             // `with_skb_ct_lookup` already releases via the kfunc.
             core::mem::forget(entry);
@@ -1924,6 +1930,12 @@ pub unsafe fn kill_flow_via_xdp_ct(
         with_xdp_ct_lookup(xdp, tuple, opts, |ct| {
             let mut entry = CtEntry { inner: ct };
             let ok = entry.change_status(ips_status::DYING);
+            // Collapse the timeout so the conntrack gc reaps the entry
+            // promptly. XDP drops run before netfilter, so once the flow is
+            // blocked no further packet re-enters conntrack to act on the
+            // DYING bit — the short timeout is what evicts the entry from
+            // `conntrack -L` instead of leaving it at its ESTABLISHED timeout.
+            entry.change_timeout(1);
             core::mem::forget(entry);
             ok
         })

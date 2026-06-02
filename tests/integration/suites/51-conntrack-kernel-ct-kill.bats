@@ -145,6 +145,14 @@ teardown_file() {
     api_delete "/api/v1/firewall/rules/fw-ctkill-block-5201" >/dev/null 2>&1 || true
     sleep 1
 
+    # The mid-flow deny rule blocked the earlier connection's teardown (its
+    # FIN/RST never reached the backend through the dropped port), so the
+    # single-test iperf3 server can still be wedged on the now-dead flow.
+    # Restart the listener unconditionally so a fresh client connects on a
+    # clean server (a plain `start` is a no-op while the daemon is listening).
+    _backend_ssh_sudo systemctl restart iperf3-backend.service >/dev/null 2>&1 || true
+    sleep 2
+
     local iperf_pid
     iperf_pid="$(establish_iperf_flow "$dst" "$dport" 15)" || {
         echo "iperf3 launch failed after rule removal" >&2

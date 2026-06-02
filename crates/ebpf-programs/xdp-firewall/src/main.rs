@@ -843,12 +843,6 @@ fn process_firewall_v4(
     // BTF-resolved offsets. Replaces the CT_TABLE_V4 shadow map.
     let ct_state: u8 =
         kernel_ct_lookup_v4(ctx_raw, src_ip, dst_ip, src_port, dst_port, protocol as u8);
-    if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
-        // Fast-path bypass: ESTABLISHED/RELATED skip rule evaluation.
-        increment_metric(METRIC_PASSED);
-        write_xdp_metadata(ctx, ACTION_PASS, 0);
-        return Ok(xdp_action::XDP_PASS);
-    }
 
     // Phase 1: LPM Trie lookup — O(log n) for CIDR-only rules.
     // Keys use network byte order for correct prefix matching.
@@ -882,6 +876,18 @@ fn process_firewall_v4(
     };
     if let Some(val) = unsafe { FW_HASH_PORT.get(&hash_key_port) } {
         return apply_action(ctx, ctx_raw, val.action);
+    }
+
+    // Fast-path bypass: ESTABLISHED/RELATED flows skip the expensive Phase-2
+    // linear scan. Placed AFTER the O(1) LPM/hash lookups (Phase 1/1b/1c) so a
+    // deny rule expressible as CIDR / 5-tuple / proto+port is still enforced
+    // mid-flow against an already-established connection — apply_action(DROP)
+    // then kills the kernel CT entry via kill_flow_via_xdp_ct, stopping the
+    // flow instead of letting CT state grant it permanent passage.
+    if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
+        increment_metric(METRIC_PASSED);
+        write_xdp_metadata(ctx, ACTION_PASS, 0);
+        return Ok(xdp_action::XDP_PASS);
     }
 
     // Phase 2: Linear scan for complex rules (port ranges, VLAN, MAC, CT state).
@@ -1415,17 +1421,22 @@ fn process_firewall_v6(
     // ct_state_mask matching during the rule scan.
     let ct_state: u8 =
         conntrack_lookup_v6(ctx_raw, &src_addr, &dst_addr, src_port, dst_port, next_hdr);
-    if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
-        increment_metric(METRIC_PASSED);
-        write_xdp_metadata(ctx, ACTION_PASS, 0);
-        return Ok(xdp_action::XDP_PASS);
-    }
 
     // Phase 1: LPM Trie lookup — O(log n) for CIDR-only rules.
     // Read raw bytes from off-stack PKT_CTX.
     let lpm_action = lpm_lookup_v6(pkt_ctx);
     if lpm_action >= 0 {
         return apply_action(ctx, ctx_raw, lpm_action as u8);
+    }
+
+    // Fast-path bypass: ESTABLISHED/RELATED flows skip the expensive Phase-2
+    // linear scan. Placed AFTER the O(log n) LPM lookup so a CIDR deny rule is
+    // still enforced mid-flow against an already-established connection —
+    // apply_action(DROP) then kills the kernel CT entry via kill_flow_via_xdp_ct.
+    if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
+        increment_metric(METRIC_PASSED);
+        write_xdp_metadata(ctx, ACTION_PASS, 0);
+        return Ok(xdp_action::XDP_PASS);
     }
 
     // Phase 2: Linear scan for complex rules (port, protocol, VLAN).

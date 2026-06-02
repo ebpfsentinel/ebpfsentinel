@@ -6,6 +6,7 @@ use domain::common::error::DomainError;
 use domain::firewall::engine::FirewallEngine;
 use domain::firewall::entity::{FirewallAction, FirewallRule, PortRange, Scope};
 use domain::firewall::error::FirewallError;
+use ports::secondary::conntrack_kill_port::ConnTrackKillPort;
 use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
 use ports::secondary::metrics_port::MetricsPort;
 
@@ -34,6 +35,10 @@ impl Default for AntiLockoutSettings {
 pub struct FirewallAppService {
     engine: FirewallEngine,
     map_port: Option<Box<dyn FirewallArrayMapPort + Send>>,
+    /// Optional kernel-conntrack kill port. When a deny/reject rule is added
+    /// while enforcing, matching ESTABLISHED flows are torn down here — the
+    /// XDP drop alone cannot evict an existing conntrack entry.
+    kill_port: Option<Box<dyn ConnTrackKillPort + Send>>,
     metrics: Arc<dyn MetricsPort>,
     mode: DomainMode,
     enabled: bool,
@@ -49,6 +54,7 @@ impl FirewallAppService {
         Self {
             engine,
             map_port,
+            kill_port: None,
             metrics,
             mode: DomainMode::default(),
             enabled: true,
@@ -91,11 +97,75 @@ impl FirewallAppService {
         self.map_port = None;
     }
 
+    /// Set the kernel-conntrack kill port.
+    ///
+    /// Wired after the netfilter conntrack adapter is built so that adding a
+    /// deny/reject rule mid-flow tears down already-established connections
+    /// instead of leaving their conntrack entries alive (the XDP datapath
+    /// drop runs before netfilter and cannot evict them).
+    pub fn set_kill_port(&mut self, port: Box<dyn ConnTrackKillPort + Send>) {
+        self.kill_port = Some(port);
+    }
+
+    /// Destroy kernel conntrack entries that a newly enforced deny/reject rule
+    /// now blocks, so an already-ESTABLISHED flow is actually torn down.
+    ///
+    /// No-op unless a kill port is wired, the firewall is enforcing (not in
+    /// alert mode), the rule is enabled and denies, and it targets a single
+    /// concrete protocol + destination port (the shape the kernel conntrack
+    /// CLI can match precisely).
+    fn enforce_flow_kill(&self, rule: &FirewallRule) {
+        let Some(ref kill_port) = self.kill_port else {
+            return;
+        };
+        if self.mode == DomainMode::Alert || !rule.enabled {
+            return;
+        }
+        if !matches!(rule.action, FirewallAction::Deny | FirewallAction::Reject) {
+            return;
+        }
+        let protocol = rule.protocol.to_u8();
+        // Only proto-specific, single-port rules can be targeted without risk
+        // of deleting unrelated flows.
+        if protocol == Protocol::Any.to_u8() {
+            return;
+        }
+        let Some(ref dst_port) = rule.dst_port else {
+            return;
+        };
+        if dst_port.start != dst_port.end {
+            return;
+        }
+        match kill_port.delete_matching(protocol, dst_port.start) {
+            Ok(n) if n > 0 => {
+                tracing::info!(
+                    rule = rule.id.0,
+                    protocol,
+                    dst_port = dst_port.start,
+                    deleted = n,
+                    "tore down established flows for new firewall deny rule"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    rule = rule.id.0,
+                    "conntrack flow teardown for deny rule failed: {e}"
+                );
+            }
+        }
+    }
+
     /// Add a firewall rule. Syncs to eBPF maps and updates metrics.
     pub fn add_rule(&mut self, rule: FirewallRule) -> Result<(), DomainError> {
         let rule_id = rule.id.0.clone();
+        // Snapshot the fields the conntrack teardown needs before the rule is
+        // moved into the engine, so we don't have to look it back up afterwards.
+        let kill_snapshot = rule.clone();
         self.engine.add_rule(rule)?;
         self.sync_ebpf_maps();
+        // Tear down any already-established flow the new rule now denies.
+        self.enforce_flow_kill(&kill_snapshot);
         self.update_metrics();
         tracing::info!(
             id = rule_id,

@@ -188,6 +188,12 @@ pub async fn run(
     let mut svc =
         FirewallAppService::new(engine, None, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     svc.set_mode(firewall_mode);
+    // Wire kernel-conntrack teardown so a deny rule added mid-flow evicts
+    // already-established connections (the XDP drop runs before netfilter and
+    // cannot remove an existing conntrack entry on its own).
+    svc.set_kill_port(Box::new(
+        adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new(),
+    ));
     let firewall_svc = Arc::new(RwLock::new(svc));
 
     let mut ids_svc = IdsAppService::new(
@@ -328,19 +334,21 @@ pub async fn run(
     let ct_settings = config.conntrack_settings();
     let mut ct_svc = ConnTrackAppService::new(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     ct_svc.set_enabled(config.conntrack.enabled);
-    if config.conntrack.enabled
-        && let Err(e) = ct_svc.reload_settings(ct_settings)
-    {
-        warn!("conntrack settings reload failed (non-fatal): {e}");
-    }
-    // Inject the kernel netfilter conntrack reader so REST /conntrack
-    // endpoints return the kernel's authoritative view (coherent with
-    // `conntrack -L`) instead of the BPF shadow.
-    let nf_ct_available = adapters::netfilter::conntrack::is_proc_conntrack_available();
-    let conntrack_event_tx = if nf_ct_available {
+    // Inject the kernel netfilter conntrack port. It owns both the
+    // authoritative read view (coherent with `conntrack -L`) and the kernel
+    // sysctl writes (timeouts + tcp_loose hardening). Wire it whenever
+    // conntrack is enabled, BEFORE reload_settings, so the settings sync
+    // actually reaches the kernel — those writes are no-ops until the port is
+    // present. Reads degrade gracefully to the BPF shadow on kernels without
+    // CONFIG_NF_CONNTRACK_PROCFS, where the sysctl knobs still exist but
+    // /proc/net/nf_conntrack does not.
+    if config.conntrack.enabled {
         ct_svc.set_netfilter_port(Box::new(
             adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new(),
         ));
+    }
+    let nf_ct_available = adapters::netfilter::conntrack::is_proc_conntrack_available();
+    let conntrack_event_tx = if nf_ct_available {
         info!("kernel netfilter conntrack reader injected via /proc/net/nf_conntrack");
         // Broadcast channel created now; poller spawned later after
         // cancel_token exists (see section 6c below).
@@ -350,6 +358,11 @@ pub async fn run(
     } else {
         None
     };
+    if config.conntrack.enabled
+        && let Err(e) = ct_svc.reload_settings(ct_settings)
+    {
+        warn!("conntrack settings reload failed (non-fatal): {e}");
+    }
     let conntrack_svc = Arc::new(RwLock::new(ct_svc));
     info!(
         enabled = config.conntrack.enabled,

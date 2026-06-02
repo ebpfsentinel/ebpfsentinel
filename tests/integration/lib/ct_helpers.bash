@@ -74,18 +74,34 @@ stop_iperf_flow() {
 
 # ct_entry_count <dst_ip> <dst_port> [protocol]
 #
-# Echo the number of conntrack entries on the agent matching the given
-# destination tuple. Protocol defaults to tcp. Returns 0 with the
-# count, even when no rows match (echoes "0"). Returns non-zero only
-# when the conntrack tool itself is missing.
+# Echo the number of *live* conntrack entries on the agent for the given
+# destination tuple. Protocol defaults to tcp. Returns 0 with the count,
+# even when no rows match (echoes "0"). Returns non-zero only when the
+# conntrack tool itself is missing.
+#
+# "Live" means a flow that is up or coming up — ESTABLISHED, or the
+# SYN_SENT/SYN_RECV handshake. Teardown states (CLOSE, CLOSE_WAIT,
+# FIN_WAIT, LAST_ACK, TIME_WAIT) are deliberately excluded: when the
+# firewall kills a flow, the kernel CT entry is destroyed but the
+# trailing FIN/RST briefly re-materializes a CLOSE-state entry that just
+# drains its ~10s close timeout and is never refreshed. That draining
+# entry is the connection *dying*, not a flow that survived the deny
+# rule, so it must not count as a tracked flow. For non-TCP protocols
+# (no TCP state column) every matching row counts.
 ct_entry_count() {
     local dst_ip="${1:?usage: ct_entry_count <dst_ip> <dst_port> [proto]}"
     local dst_port="${2:?usage: ct_entry_count <dst_ip> <dst_port> [proto]}"
     local proto="${3:-tcp}"
     ensure_conntrack_tool || return 1
     local rows
-    rows="$(_agent_ssh_sudo conntrack -L -p "${proto}" --dst "${dst_ip}" --dport "${dst_port}" 2>/dev/null \
-            | grep -c "dport=${dst_port}")" || rows=0
+    if [ "${proto}" = "tcp" ]; then
+        rows="$(_agent_ssh_sudo conntrack -L -p "${proto}" --dst "${dst_ip}" --dport "${dst_port}" 2>/dev/null \
+                | grep "dport=${dst_port}" \
+                | grep -cE 'ESTABLISHED|SYN_SENT|SYN_RECV')" || rows=0
+    else
+        rows="$(_agent_ssh_sudo conntrack -L -p "${proto}" --dst "${dst_ip}" --dport "${dst_port}" 2>/dev/null \
+                | grep -c "dport=${dst_port}")" || rows=0
+    fi
     echo "${rows:-0}"
 }
 

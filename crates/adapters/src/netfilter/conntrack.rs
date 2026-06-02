@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use domain::common::error::DomainError;
 use domain::conntrack::entity::{ConnTrackSettings, Connection, ConnectionState};
+use ports::secondary::conntrack_kill_port::ConnTrackKillPort;
 use ports::secondary::conntrack_map_port::ConnTrackMapPort;
 use tracing::{debug, warn};
 
@@ -59,6 +60,49 @@ impl Default for ProcNetfilterConntrackPort {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl ConnTrackKillPort for ProcNetfilterConntrackPort {
+    fn delete_matching(&self, protocol: u8, dst_port: u16) -> Result<u64, DomainError> {
+        let proto = match protocol {
+            6 => "tcp",
+            17 => "udp",
+            1 => "icmp",
+            132 => "sctp",
+            // Wildcard / unsupported protocol — no precise tuple to target,
+            // so refuse rather than risk a table-wide delete.
+            _ => return Ok(0),
+        };
+        let dport = dst_port.to_string();
+        let output = std::process::Command::new("conntrack")
+            .args(["-D", "-p", proto, "--dport", &dport])
+            .output()
+            .map_err(|e| {
+                DomainError::EngineError(format!(
+                    "failed to run `conntrack -D`: {e} (conntrack-tools installed?)"
+                ))
+            })?;
+        // `conntrack -D` summarises the result on stderr as
+        // "... N flow entries have been deleted." and exits non-zero when
+        // nothing matched — that is not an error here, so parse the count
+        // from the output regardless of exit status.
+        let deleted = parse_deleted_count(&String::from_utf8_lossy(&output.stderr));
+        debug!(
+            protocol = proto,
+            dst_port, deleted, "conntrack entries deleted to enforce firewall deny rule"
+        );
+        Ok(deleted)
+    }
+}
+
+/// Parse the "N flow entries have been deleted." summary emitted by
+/// `conntrack -D` on stderr. Returns the first standalone numeric token,
+/// which is the deleted-entry count (the tool version like `v1.4.6` is not
+/// a bare integer, so it is skipped).
+fn parse_deleted_count(text: &str) -> u64 {
+    text.split_whitespace()
+        .find_map(|tok| tok.parse::<u64>().ok())
+        .unwrap_or(0)
 }
 
 impl ConnTrackMapPort for ProcNetfilterConntrackPort {
@@ -138,6 +182,13 @@ impl ConnTrackMapPort for ProcNetfilterConntrackPort {
             "net.netfilter.nf_conntrack_icmp_timeout",
             settings.icmp_timeout_secs,
         );
+        // Disable mid-stream connection pickup. A stateful security gateway must
+        // not adopt a TCP flow whose opening SYN it never observed — honoring
+        // such flows is a known firewall-evasion vector. It is also what makes a
+        // firewall-driven flow teardown durable: once the kernel conntrack entry
+        // for a denied flow is destroyed, an in-flight reply packet must not
+        // silently re-create an ESTABLISHED entry and resurrect the flow.
+        write_sysctl("net.netfilter.nf_conntrack_tcp_loose", 0);
         debug!("kernel netfilter conntrack timeouts synced via sysctl");
         Ok(())
     }
@@ -290,6 +341,19 @@ pub fn is_proc_conntrack_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_deleted_count_extracts_number() {
+        let summary = "conntrack v1.4.6 (conntrack-tools): 2 flow entries have been deleted.";
+        assert_eq!(parse_deleted_count(summary), 2);
+    }
+
+    #[test]
+    fn parse_deleted_count_zero_when_none() {
+        let summary = "conntrack v1.4.6 (conntrack-tools): 0 flow entries have been deleted.";
+        assert_eq!(parse_deleted_count(summary), 0);
+        assert_eq!(parse_deleted_count(""), 0);
+    }
 
     #[test]
     fn parse_tcp_established_line() {
