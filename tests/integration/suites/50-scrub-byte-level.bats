@@ -165,6 +165,40 @@ _scrub_bpf() {
 
 # ── Fragment policy (deferred) ───────────────────────────────────────
 
-@test "fragmented IPv4 — fragment_policy AC deferred (no config knob)" {
-    skip "ScrubConfig has no fragment_policy / drop_fragments / reassemble field — AC deferred to follow-up Rust feature story"
+@test "tc-scrub drops IPv4 fragments when drop_fragments is enabled" {
+    skip_if_not_3vm
+
+    local dst="${BACKEND_VM_IP:-192.168.57.30}"
+    local pcap
+    pcap="$(capture_on backend "${EBPF_BACKEND_IFACE:-eth1}" \
+        "src host ${ATTACKER_VM_IP} and dst host ${dst}")"
+    [ -n "$pcap" ] || skip "capture_on backend returned no pcap"
+
+    # Control: an unfragmented SYN must traverse (proves the transit path is up,
+    # so an empty fragment result means "dropped", not "path broken").
+    scapy_send_via "${dst}" 64 4444 1200 1 2 >/dev/null 2>&1 || true
+    # Fragmented datagrams: tc-scrub must drop these at the agent ingress hook
+    # before they are forwarded to the backend.
+    scapy_send_fragment_via "${dst}" 5 >/dev/null 2>&1 || true
+    sleep 2
+
+    local local_pcap
+    local_pcap="$(stop_capture backend "$pcap")"
+    [ -s "$local_pcap" ] || skip "pcap empty — transit path did not deliver the control packet"
+
+    # The control SYN (unfragmented, dst port 80) must reach the backend.
+    local control
+    control="$(tshark -r "$local_pcap" \
+        -Y 'tcp.dstport == 80 and ip.flags.mf == 0 and ip.frag_offset == 0' \
+        2>/dev/null | wc -l)"
+    [ "${control:-0}" -ge 1 ] || skip "control SYN never reached backend — transit inconclusive"
+
+    # No fragment (MF set or non-zero offset) may reach the backend.
+    local frags
+    frags="$(tshark -r "$local_pcap" \
+        -Y 'ip.flags.mf == 1 or ip.frag_offset > 0' 2>/dev/null | wc -l)"
+    [ "${frags:-0}" -eq 0 ] || {
+        echo "expected fragments dropped by tc-scrub, but ${frags} reached backend" >&2
+        return 1
+    }
 }

@@ -26,6 +26,7 @@ firewall:
     max_mss: 1400
     clear_df: true
     random_ip_id: true
+    drop_fragments: true
 
 ids:
   enabled: false

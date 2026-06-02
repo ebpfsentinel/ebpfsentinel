@@ -3,7 +3,7 @@
 
 use aya_ebpf::{
     EbpfContext,
-    bindings::{__sk_buff, TC_ACT_OK},
+    bindings::{__sk_buff, TC_ACT_OK, TC_ACT_SHOT},
     cty::c_void,
     helpers::{
         bpf_csum_diff, bpf_get_prandom_u32, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop,
@@ -14,9 +14,10 @@ use aya_ebpf::{
 };
 use ebpf_common::scrub::{
     SCRUB_METRIC_COUNT, SCRUB_METRIC_DF_CLEARED, SCRUB_METRIC_ECN_STRIPPED, SCRUB_METRIC_ERRORS,
-    SCRUB_METRIC_HOP_FIXED, SCRUB_METRIC_IPID_RANDOMIZED, SCRUB_METRIC_MSS_CLAMPED,
-    SCRUB_METRIC_PACKETS, SCRUB_METRIC_TCP_FLAGS_SCRUBBED, SCRUB_METRIC_TCP_TS_STRIPPED,
-    SCRUB_METRIC_TOS_NORMALIZED, SCRUB_METRIC_TOTAL_SEEN, SCRUB_METRIC_TTL_FIXED, ScrubFlags,
+    SCRUB_METRIC_FRAGMENTS_DROPPED, SCRUB_METRIC_HOP_FIXED, SCRUB_METRIC_IPID_RANDOMIZED,
+    SCRUB_METRIC_MSS_CLAMPED, SCRUB_METRIC_PACKETS, SCRUB_METRIC_TCP_FLAGS_SCRUBBED,
+    SCRUB_METRIC_TCP_TS_STRIPPED, SCRUB_METRIC_TOS_NORMALIZED, SCRUB_METRIC_TOTAL_SEEN,
+    SCRUB_METRIC_TTL_FIXED, ScrubFlags,
 };
 use ebpf_helpers::increment_metric;
 use ebpf_helpers::net::{
@@ -123,6 +124,18 @@ fn try_tc_scrub(ctx: &mut TcContext) -> Result<i32, ()> {
     }
 
     if ether_type == ETH_P_IP {
+        // Fragment drop: refuse any IPv4 fragment (MF set or non-zero offset)
+        // before normalization. Reassembly evasion relies on fragments, so a
+        // scrubbing gateway can drop them outright when configured to.
+        if cfg.drop_fragments != 0 {
+            let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
+            let frag_off = u16::from_be_bytes(unsafe { (*ipv4hdr).frags });
+            // 0x2000 = More-Fragments, 0x1FFF = fragment offset; 0x4000 (DF) ignored.
+            if frag_off & 0x3FFF != 0 {
+                increment_metric(SCRUB_METRIC_FRAGMENTS_DROPPED);
+                return Ok(TC_ACT_SHOT);
+            }
+        }
         scrub_ipv4(ctx, &cfg, l3_offset)?;
         increment_metric(SCRUB_METRIC_PACKETS);
     } else if ether_type == ETH_P_IPV6 {

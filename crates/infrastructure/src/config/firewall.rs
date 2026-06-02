@@ -121,6 +121,10 @@ pub struct ScrubConfig {
     /// Remove TCP timestamp option (kind=8, len=10) to prevent OS fingerprinting.
     #[serde(default)]
     pub strip_tcp_timestamps: bool,
+    /// Drop IPv4 fragments (MF set or non-zero fragment offset). Refusing
+    /// fragments closes a classic inspection-evasion vector.
+    #[serde(default)]
+    pub drop_fragments: bool,
 }
 
 // ── Schedule config (Epic 28) ───────────────────────────────────────

@@ -152,3 +152,33 @@ for i in range(count):
     send(pkt, verbose=0)
 PY
 }
+
+# scapy_send_fragment_via <dst_ip> [count]
+#
+# Drive scapy on the attacker VM to emit `count` fragmented IPv4 datagrams
+# toward dst_ip (a large UDP payload split with scapy's fragment()). Each
+# emitted IP fragment carries MF set or a non-zero fragment offset, which is
+# exactly what tc-scrub's drop_fragments path refuses. Used to assert that a
+# scrubbing gateway drops fragments before forwarding them to the backend.
+scapy_send_fragment_via() {
+    local dst_ip="${1:?usage: scapy_send_fragment_via <dst_ip> [count]}"
+    local count="${2:-1}"
+    ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
+        -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        "vagrant@${ATTACKER_VM_IP}" -- \
+        sudo /opt/scapy-venv/bin/python3 - "${dst_ip}" "${count}" <<'PY'
+import random
+import sys
+from scapy.all import IP, UDP, fragment, send
+
+dst, count = sys.argv[1:]
+count = int(count)
+base = random.randint(20000, 60000)
+for i in range(count):
+    # 2000-byte payload over a 576-byte fragsize => several fragments, all of
+    # which have MF set or a non-zero offset.
+    pkt = IP(dst=dst, id=40000 + i) / UDP(sport=base + i, dport=9) / (b"X" * 2000)
+    for frag in fragment(pkt, fragsize=576):
+        send(frag, verbose=0)
+PY
+}

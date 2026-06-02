@@ -3857,7 +3857,8 @@ pub fn build_scrub_flags(config: &AgentConfig) -> ebpf_common::scrub::ScrubFlags
         normalize_tos: u8::from(scrub.normalize_tos),
         tos_value: scrub.tos_value.unwrap_or(0),
         strip_tcp_timestamps: u8::from(scrub.strip_tcp_timestamps),
-        _pad: [0; 2],
+        drop_fragments: u8::from(scrub.drop_fragments),
+        _pad: [0; 1],
     }
 }
 

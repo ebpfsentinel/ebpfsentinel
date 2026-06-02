@@ -34,8 +34,12 @@ pub struct ScrubFlags {
     /// Remove TCP timestamp option (kind=8, len=10) by overwriting with NOP bytes.
     /// Prevents OS fingerprinting via TCP timestamp analysis. (0 = no, 1 = yes).
     pub strip_tcp_timestamps: u8,
+    /// Drop IPv4 fragments (any packet with MF set or a non-zero fragment
+    /// offset). Fragmentation is a classic inspection-evasion vector, so a
+    /// normalizing gateway can refuse fragments outright. (0 = no, 1 = yes).
+    pub drop_fragments: u8,
     /// Padding for 2-byte alignment.
-    pub _pad: [u8; 2],
+    pub _pad: [u8; 1],
 }
 
 impl ScrubFlags {
@@ -53,7 +57,8 @@ impl ScrubFlags {
             normalize_tos: 0,
             tos_value: 0,
             strip_tcp_timestamps: 0,
-            _pad: [0; 2],
+            drop_fragments: 0,
+            _pad: [0; 1],
         }
     }
 }
@@ -84,8 +89,10 @@ pub const SCRUB_METRIC_ECN_STRIPPED: u32 = 9;
 pub const SCRUB_METRIC_TOS_NORMALIZED: u32 = 10;
 /// TCP timestamp options stripped.
 pub const SCRUB_METRIC_TCP_TS_STRIPPED: u32 = 11;
+/// IPv4 fragments dropped (when `drop_fragments` is enabled).
+pub const SCRUB_METRIC_FRAGMENTS_DROPPED: u32 = 12;
 /// Total metric slots.
-pub const SCRUB_METRIC_COUNT: u32 = 12;
+pub const SCRUB_METRIC_COUNT: u32 = 13;
 
 // ── Pod impl ────────────────────────────────────────────────────────
 
@@ -122,6 +129,7 @@ mod tests {
         assert_eq!(mem::offset_of!(ScrubFlags, normalize_tos), 9);
         assert_eq!(mem::offset_of!(ScrubFlags, tos_value), 10);
         assert_eq!(mem::offset_of!(ScrubFlags, strip_tcp_timestamps), 11);
+        assert_eq!(mem::offset_of!(ScrubFlags, drop_fragments), 12);
     }
 
     #[test]
@@ -137,6 +145,7 @@ mod tests {
         assert_eq!(flags.normalize_tos, 0);
         assert_eq!(flags.tos_value, 0);
         assert_eq!(flags.strip_tcp_timestamps, 0);
+        assert_eq!(flags.drop_fragments, 0);
     }
 
     #[test]
@@ -154,6 +163,7 @@ mod tests {
             SCRUB_METRIC_ECN_STRIPPED,
             SCRUB_METRIC_TOS_NORMALIZED,
             SCRUB_METRIC_TCP_TS_STRIPPED,
+            SCRUB_METRIC_FRAGMENTS_DROPPED,
         ];
         for (i, &a) in indices.iter().enumerate() {
             for &b in &indices[i + 1..] {
