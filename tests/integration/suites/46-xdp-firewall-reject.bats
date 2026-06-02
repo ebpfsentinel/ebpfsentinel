@@ -125,12 +125,20 @@ _attacker_iface() {
         return 1
     }
 
-    # The agent's `rejected` metric must have grown.
-    sleep 2
-    local rejected_after
-    rejected_after="$(_metric_or_zero ebpfsentinel_packets_total \
-        '{interface="FIREWALL_METRICS",action="rejected"}')"
-    [ "$(echo "$rejected_after > $rejected_before" | bc -l)" = "1" ] || {
+    # The agent's `rejected` metric must have grown. The kernel-metrics
+    # collection loop polls the eBPF maps on a 10s tick, so poll for up to
+    # ~18s for the counter to reflect the reject rather than reading once.
+    local rejected_after grew=0 i
+    for ((i = 0; i < 18; i++)); do
+        rejected_after="$(_metric_or_zero ebpfsentinel_packets_total \
+            '{interface="FIREWALL_METRICS",action="rejected"}')"
+        if [ "$(echo "$rejected_after > $rejected_before" | bc -l)" = "1" ]; then
+            grew=1
+            break
+        fi
+        sleep 1
+    done
+    [ "$grew" = "1" ] || {
         echo "rejected counter did not grow: before=${rejected_before} after=${rejected_after}" >&2
         return 1
     }
