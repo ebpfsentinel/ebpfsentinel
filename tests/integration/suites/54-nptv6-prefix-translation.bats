@@ -17,10 +17,16 @@ load '../lib/helpers'
 load '../lib/ebpf_helpers'
 load '../lib/nptv6_helpers'
 
+# NPTv6 maps the internal prefix 1:1 onto the external prefix: an internal
+# host fd00:54::X appears to the outside as 2001:db8:54::X. The backend plays
+# an *outside* host and therefore must live on a third network that is NEITHER
+# prefix — otherwise the agent's ingress reverse-translation would rewrite the
+# probe's destination and misroute it instead of forwarding to the backend.
 INTERNAL_PREFIX="fd00:54::"
 EXTERNAL_PREFIX="2001:db8:54::"
 ATTACKER_V6="fd00:54::1"
-BACKEND_V6="2001:db8:54::30"
+DEST_PREFIX="2001:db8:99::"
+BACKEND_V6="2001:db8:99::30"
 
 setup_file() {
     require_kernel 5 15
@@ -125,21 +131,49 @@ teardown_file() {
 @test "egress source prefix is rewritten from internal to external" {
     skip_if_not_3vm
 
-    # Set up minimal IPv6 reachability for the test:
-    #   * attacker has fd00:54::1 on its inter-VM NIC
-    #   * backend has 2001:db8:54::30 on its inter-VM NIC
-    #   * attacker routes 2001:db8:54::/64 via the agent
-    # Each step is best-effort; if any fails (e.g. missing iface name)
-    # the wire test is skipped rather than failed.
-    if ! ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
-            -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-            "vagrant@${ATTACKER_VM_IP}" \
-            sudo ip -6 addr add "${ATTACKER_V6}/64" dev eth1 2>/dev/null; then
-        true # already-exists is fine
-    fi
-    if ! _backend_ssh_sudo ip -6 addr add "${BACKEND_V6}/64" dev eth1 2>/dev/null; then
-        true
-    fi
+    # Stand up an IPv6 transit path across the three VMs so the agent's
+    # tc-nat-egress NPTv6 rewrite is actually exercised on eth2:
+    #   * attacker  fd00:54::1/64 on eth1, route to the external prefix via the
+    #               agent's internal gateway address
+    #   * agent     IPv6 forwarding on; gateway fd00:54::254/64 on eth1 (client
+    #               side) + 2001:db8:54::254/64 on eth2 (backend side)
+    #   * backend   2001:db8:54::30/64 on eth1, return route to the internal prefix
+    # Each step is idempotent (replace) and best-effort; if the link never
+    # comes up the wire portion below skips rather than fails.
+    local agent_v6_gw="fd00:54::254"       # internal-side gateway (eth1)
+    local agent_v6_ext="2001:db8:99::254"  # outside-side gateway (eth2, dest net)
+
+    # Attacker (internal host): address + route toward the outside dest network
+    # via the agent's internal gateway.
+    ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
+        -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        "vagrant@${ATTACKER_VM_IP}" "sudo ip -6 addr replace ${ATTACKER_V6}/64 dev eth1; \
+         sudo ip -6 route replace ${DEST_PREFIX}/64 via ${agent_v6_gw} dev eth1" \
+        >/dev/null 2>&1 || true
+
+    # Agent: forwarding + internal gateway on eth1 + outside gateway on eth2.
+    _agent_ssh_sudo sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+    _agent_ssh_sudo ip -6 addr replace "${agent_v6_gw}/64" \
+        dev "${EBPF_AGENT_INTERFACE:-eth1}" >/dev/null 2>&1 || true
+    _agent_ssh_sudo ip -6 addr replace "${agent_v6_ext}/64" \
+        dev "${EBPF_AGENT_BACKEND_IFACE:-eth2}" >/dev/null 2>&1 || true
+
+    # Backend (outside host): address on the dest network + a return route to the
+    # external prefix (the translated source it will see) via the agent.
+    _backend_ssh_sudo ip -6 addr replace "${BACKEND_V6}/64" dev eth1 >/dev/null 2>&1 || true
+    _backend_ssh_sudo ip -6 route replace "${EXTERNAL_PREFIX}/64" \
+        via "${agent_v6_ext}" dev eth1 >/dev/null 2>&1 || true
+
+    # Let DAD settle so the source address is usable (a tentative addr makes
+    # scapy's send drop the packet).
+    sleep 2
+
+    # Warm the attacker's neighbor cache for the gateway: the L2 sender reads the
+    # kernel neighbour table for the agent MAC, and a kernel ping6 populates it.
+    ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
+        -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        "vagrant@${ATTACKER_VM_IP}" "ping6 -c2 -W2 ${agent_v6_gw} >/dev/null 2>&1" \
+        >/dev/null 2>&1 || true
 
     # Capture on backend in the background, then trigger. 3>&- closes bats'
     # TAP fd so the backgrounded capture can never hold it open and hang
@@ -156,19 +190,33 @@ teardown_file() {
 
     wait "${cap_pid}" 2>/dev/null || true
 
-    if [ ! -s "${pcap}" ]; then
-        skip "no IPv6 packets captured on backend — link/route not set up between VMs"
+    # Count the test's own probe packets (UDP dport 4546) by source prefix.
+    local external_hits internal_hits
+    external_hits=0
+    internal_hits=0
+    if [ -s "${pcap}" ]; then
+        external_hits="$(tcpdump -nr "${pcap}" 'ip6 and udp port 4546' 2>/dev/null \
+            | grep -c "IP6 ${EXTERNAL_PREFIX}" || true)"
+        internal_hits="$(tcpdump -nr "${pcap}" 'ip6 and udp port 4546' 2>/dev/null \
+            | grep -c "IP6 ${INTERNAL_PREFIX}" || true)"
     fi
 
-    # Assert at least one packet on the backend wire has the EXTERNAL prefix.
-    # If only the internal prefix shows up the agent didn't rewrite (which
-    # for now we surface as a skip — full transit datapath requires per-VM
-    # IPv6 default routing the test framework doesn't configure).
-    local external_hits
-    external_hits="$(assert_ipv6_src_prefix "${pcap}" "${EXTERNAL_PREFIX}" 1 \
-        && true)" || external_hits=0
-    if [ "${external_hits:-0}" -lt 1 ]; then
-        skip "no externally-prefixed packets reached backend; agent transit route not configured for IPv6"
+    # No probe reached the backend. The transit routing/translation setup is in
+    # place (and the REST/CLI tests above prove the rule is loaded), but IPv6
+    # unicast does not currently traverse the agent's running eBPF datapath
+    # (a kernel ping6 from the attacker to the agent's own IPv6 gateway address
+    # is 100% loss while the stack is attached) — a product-side IPv6 transit
+    # gap, not a missing test fixture. Surface as a skip until the datapath
+    # forwards IPv6; the assertion below proves the rewrite the moment it does.
+    if [ "${external_hits:-0}" -eq 0 ] && [ "${internal_hits:-0}" -eq 0 ]; then
+        skip "IPv6 does not traverse the agent eBPF datapath yet (product gap); NPTv6 rewrite unverifiable on the wire"
     fi
-    [ "${external_hits:-0}" -ge 1 ]
+
+    # The probe reached the backend: assert NPTv6 swapped the source prefix.
+    [ "${external_hits:-0}" -ge 1 ] || {
+        echo "NPTv6 egress did not rewrite: external=${external_hits} internal=${internal_hits}" >&2
+        echo "--- backend IPv6 probe capture ---" >&2
+        tcpdump -nr "${pcap}" 'ip6 and udp port 4546' 2>/dev/null | head -10 >&2
+        return 1
+    }
 }
