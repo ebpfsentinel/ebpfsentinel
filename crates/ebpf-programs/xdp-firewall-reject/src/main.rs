@@ -14,13 +14,15 @@
 
 use aya_ebpf::{
     bindings::xdp_action,
-    helpers::bpf_xdp_adjust_tail,
+    helpers::{bpf_ktime_get_boot_ns, bpf_xdp_adjust_tail},
     macros::{map, xdp},
-    maps::PerCpuArray,
+    maps::{LruHashMap, PerCpuArray},
     programs::XdpContext,
 };
 use ebpf_common::event::FLAG_IPV6;
-use ebpf_common::firewall::{FIREWALL_METRIC_REJECTED, PacketCtx};
+use ebpf_common::firewall::{
+    FIREWALL_METRIC_COUNT, FIREWALL_METRIC_REJECT_THROTTLED, FIREWALL_METRIC_REJECTED, PacketCtx,
+};
 use ebpf_helpers::checksum::{
     compute_icmp_csum, compute_icmpv6_csum, compute_ipv4_csum, compute_tcp_csum_v4,
     compute_tcp_csum_v6,
@@ -45,8 +47,64 @@ use network_types::{
 static PKT_CTX: PerCpuArray<PacketCtx> = PerCpuArray::pinned(1, 0);
 
 #[map]
-static FIREWALL_METRICS: PerCpuArray<u64> =
-    PerCpuArray::with_max_entries(FIREWALL_METRIC_REJECTED + 1, 0);
+static FIREWALL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(FIREWALL_METRIC_COUNT, 0);
+
+// ── Per-source reject rate limit ────────────────────────────────────
+//
+// This program forges TCP RST / ICMP-unreachable replies and sends them via
+// XDP_TX with the addresses swapped. A spoofed-source flood hitting a REJECT
+// rule would otherwise make the host reflect a reply to every forged source at
+// line rate. A per-source token bucket caps that reflection: once a source
+// exhausts its tokens the reject is dropped silently (XDP_DROP, no TX).
+
+/// Token bucket state, keyed by the (folded) source address.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RejectBucket {
+    /// Tokens remaining; one is spent per forged reply.
+    tokens: u32,
+    _pad: u32,
+    /// Boot-time (ns) of the last refill.
+    last_refill_ns: u64,
+}
+
+/// Max reply burst held per source.
+const REJECT_RL_BURST: u32 = 20;
+/// Refill cadence: one token per 50 ms ⇒ a 20 reply/s sustained ceiling.
+const REJECT_RL_REFILL_NS: u64 = 50_000_000;
+
+#[map]
+static REJECT_RATELIMIT: LruHashMap<u32, RejectBucket> = LruHashMap::with_max_entries(65536, 0);
+
+/// Returns `true` if a reject reply may be forged for `src_key`, consuming a
+/// token. Returns `false` once the source's bucket is empty.
+#[inline(always)]
+fn reject_allowed(src_key: u32) -> bool {
+    let now = unsafe { bpf_ktime_get_boot_ns() };
+    if let Some(bucket) = REJECT_RATELIMIT.get_ptr_mut(&src_key) {
+        unsafe {
+            let elapsed = now.saturating_sub((*bucket).last_refill_ns);
+            let refill = (elapsed / REJECT_RL_REFILL_NS) as u32;
+            if refill > 0 {
+                (*bucket).tokens = (*bucket).tokens.saturating_add(refill).min(REJECT_RL_BURST);
+                (*bucket).last_refill_ns = now;
+            }
+            if (*bucket).tokens > 0 {
+                (*bucket).tokens -= 1;
+                return true;
+            }
+        }
+        return false;
+    }
+    // First reply seen for this source: seed a full bucket minus this token.
+    let bucket = RejectBucket {
+        tokens: REJECT_RL_BURST - 1,
+        _pad: 0,
+        last_refill_ns: now,
+    };
+    let _ = REJECT_RATELIMIT.insert(&src_key, &bucket, 0);
+    true
+}
 
 /// Per-CPU scratch buffer for ICMP/ICMPv6 payload (original header bytes).
 /// Stored in a map instead of the stack to stay under the 512-byte limit.
@@ -79,6 +137,17 @@ fn try_reject(ctx: &XdpContext) -> Result<u32, ()> {
     let protocol = unsafe { (*pkt).protocol };
     let flags = unsafe { (*pkt).flags };
     let is_ipv6 = (flags & FLAG_IPV6) != 0;
+
+    // Rate-limit forged replies per source to bound reflection abuse. The
+    // parent firewall already populated `src_addr` ([v4, 0, 0, 0] for IPv4,
+    // the full address as u32x4 for IPv6); fold it to a single key so both
+    // families share one bucket scheme.
+    let src = unsafe { (*pkt).src_addr };
+    let src_key = src[0] ^ src[1] ^ src[2] ^ src[3];
+    if !reject_allowed(src_key) {
+        increment_metric(FIREWALL_METRIC_REJECT_THROTTLED);
+        return Ok(xdp_action::XDP_DROP);
+    }
 
     // Read original offsets for READING from the incoming packet.
     let l3_off = (unsafe { (*pkt).l3_offset } as usize) & 0x3F;

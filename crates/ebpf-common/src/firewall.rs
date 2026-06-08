@@ -32,8 +32,12 @@ pub const FIREWALL_METRIC_TOTAL_SEEN: u32 = 4;
 pub const FIREWALL_METRIC_REJECTED: u32 = 5;
 /// Metric index: packets dropped because they exceeded the interface MTU.
 pub const FIREWALL_METRIC_MTU_EXCEEDED: u32 = 6;
+/// Metric index: reject responses suppressed by the per-source rate limit
+/// (dropped silently instead of forging a TCP RST / ICMP reply, to bound the
+/// program's use as a spoofed-source reflection vector).
+pub const FIREWALL_METRIC_REJECT_THROTTLED: u32 = 7;
 /// Total number of firewall metric slots.
-pub const FIREWALL_METRIC_COUNT: u32 = 7;
+pub const FIREWALL_METRIC_COUNT: u32 = 8;
 
 // ── Per-packet context (shared between xdp-firewall and xdp-firewall-reject) ──
 
@@ -519,7 +523,8 @@ mod tests {
         assert_eq!(FIREWALL_METRIC_TOTAL_SEEN, 4);
         assert_eq!(FIREWALL_METRIC_REJECTED, 5);
         assert_eq!(FIREWALL_METRIC_MTU_EXCEEDED, 6);
-        assert_eq!(FIREWALL_METRIC_COUNT, 7);
+        assert_eq!(FIREWALL_METRIC_REJECT_THROTTLED, 7);
+        assert_eq!(FIREWALL_METRIC_COUNT, 8);
     }
 
     #[test]

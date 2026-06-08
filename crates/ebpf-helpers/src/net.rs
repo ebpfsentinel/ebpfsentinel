@@ -134,7 +134,14 @@ pub fn ones_complement_add(a: u16, b: u16) -> u16 {
 #[inline(always)]
 pub fn prefix_to_mask(prefix_len: u8) -> [u32; 4] {
     let mut mask = [0u32; 4];
-    let mut remaining = prefix_len as u32;
+    // Clamp to the IPv6 maximum: a prefix > 128 would otherwise leave
+    // `remaining` non-zero after four 32-bit words and silently yield an
+    // all-ones mask, masking a misconfiguration instead of rejecting it.
+    let mut remaining = if prefix_len > 128 {
+        128u32
+    } else {
+        prefix_len as u32
+    };
     let mut i = 0usize;
     while i < 4 {
         if remaining >= 32 {

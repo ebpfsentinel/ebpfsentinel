@@ -129,9 +129,11 @@ static FW_HASH_PORT: HashMap<FwHashKeyPort, FwHashValue> =
 // userspace API. Config push uses bpf_map_update_elem via map managers.
 // See: known limitation "User RingBuf config push" in CHANGELOG.md.
 
-/// Per-CPU packet counters. Index: 0=passed, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen, 5=rejected.
+/// Per-CPU packet counters. Index: 0=passed, 1=dropped, 2=errors,
+/// 3=events_dropped, 4=total_seen, 5=rejected, 6=mtu_exceeded,
+/// 7=reject_throttled.
 #[map]
-static FIREWALL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(7, 0);
+static FIREWALL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(8, 0);
 
 /// Per-CPU scratch buffer for packet context shared across action/event helpers.
 /// Avoids passing 8+ arguments through inlined functions that would blow

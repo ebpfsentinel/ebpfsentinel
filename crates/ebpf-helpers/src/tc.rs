@@ -64,14 +64,20 @@ pub fn skip_ipv6_ext_headers(
                 if next_hdr == 44 {
                     pos += 8;
                 } else {
-                    let hdr_len_byte = unsafe { *hdr_ptr.add(1) };
-                    let clamped = (hdr_len_byte & 0x1F) as usize;
+                    // Use the full 8-bit Hdr-Ext-Len field. Masking it makes
+                    // this parser advance fewer bytes than the host stack for
+                    // headers longer than the mask, so the L4 offset diverges
+                    // and crafted IPv6 extension chains evade inspection.
+                    // `u8 as usize` is provably 0..=255, so the multiply stays
+                    // bounded for the verifier.
+                    let hdr_len_byte = unsafe { *hdr_ptr.add(1) } as usize;
                     if next_hdr == 51 {
-                        // AH header: length in 4-byte units, max (31+2)*4 = 132
-                        pos += (clamped + 2) * 4;
+                        // AH header: length in 4-byte units, max (255+2)*4 = 1028.
+                        pos += (hdr_len_byte + 2) * 4;
                     } else {
-                        // Other ext headers: length in 8-byte units, max (31+1)*8 = 256
-                        pos += (clamped + 1) * 8;
+                        // Other ext headers: length in 8-byte units,
+                        // max (255+1)*8 = 2048.
+                        pos += (hdr_len_byte + 1) * 8;
                     }
                 }
                 // Bounds check after each header advancement

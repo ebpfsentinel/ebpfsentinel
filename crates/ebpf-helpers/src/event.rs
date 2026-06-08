@@ -59,6 +59,16 @@ macro_rules! emit_packet_event {
                 // Ingress softirq has no process context, so this returns
                 // 0 and userspace falls back to /proc parsing.
                 (*ptr).cgroup_id = aya_ebpf::helpers::bpf_get_current_cgroup_id();
+                // Zero the trailing fields this TC path does not populate.
+                // `RingBuf::reserve` returns uninitialised storage, so leaving
+                // them unset would leak stale kernel ring-buffer bytes to
+                // userspace. These metadata fields are only available in the
+                // XDP datapath (RSS hash / HW timestamp) or are not collected
+                // here (cgroup v1 inode).
+                (*ptr).cgroup1_id = 0;
+                (*ptr).rss_hash = 0;
+                (*ptr).rss_hash_type = 0;
+                (*ptr).rx_hw_timestamp_ns = 0;
             }
             entry.submit(0);
         } else {
@@ -93,6 +103,14 @@ macro_rules! emit_packet_event {
                 (*ptr).socket_cookie = 0;
                 // XDP runs before any task context; cgroup_id is always 0.
                 (*ptr).cgroup_id = 0;
+                // Zero the trailing fields this generic path does not populate.
+                // `RingBuf::reserve` returns uninitialised storage; callers that
+                // collect RSS hash / HW timestamp do so via the manual emit
+                // path. Leaving them unset would leak stale ring-buffer bytes.
+                (*ptr).cgroup1_id = 0;
+                (*ptr).rss_hash = 0;
+                (*ptr).rss_hash_type = 0;
+                (*ptr).rx_hw_timestamp_ns = 0;
             }
             entry.submit(0);
         } else {

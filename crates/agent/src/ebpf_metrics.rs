@@ -73,6 +73,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (4, "total_seen"),
             (5, "rejected"),
             (6, "mtu_exceeded"),
+            (7, "reject_throttled"),
         ],
         "RATELIMIT_METRICS" => &[
             (0, "matched"),
