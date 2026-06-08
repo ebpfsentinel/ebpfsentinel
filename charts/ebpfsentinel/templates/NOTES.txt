@@ -58,11 +58,11 @@ when high-severity alerts fire.
 
 Security context:
 {{- if .Values.daemonset.securityContext.privileged }}
-  WARNING: Running in privileged mode. Consider switching to fine-grained
-  capabilities for better security:
+  WARNING: Running in privileged mode. Consider switching to the scoped
+  capability set for better security:
     daemonset.securityContext.capabilities.add=[BPF,NET_ADMIN,SYS_ADMIN,NET_RAW]
 {{- else }}
-  Using fine-grained capabilities (recommended).
+  Using the scoped capability set (BPF, NET_ADMIN, SYS_ADMIN, NET_RAW).
 {{- end }}
 
 Secrets management (TLS certs, JWT keys, API keys):

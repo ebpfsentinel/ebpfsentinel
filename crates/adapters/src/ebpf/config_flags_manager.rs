@@ -1,4 +1,4 @@
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, HashMap, MapData};
 use ebpf_common::config_flags::ConfigFlags;
 use ebpf_common::ddos::{
@@ -19,7 +19,7 @@ pub struct ConfigFlagsManager {
 impl ConfigFlagsManager {
     /// Create a new `ConfigFlagsManager` by taking ownership of the
     /// `CONFIG_FLAGS` map from the loaded eBPF program.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let map = ebpf
             .take_map("CONFIG_FLAGS")
             .ok_or_else(|| anyhow::anyhow!("map 'CONFIG_FLAGS' not found in eBPF object"))?;
@@ -56,7 +56,7 @@ pub struct ScrubConfigManager {
 impl ScrubConfigManager {
     /// Create a new `ScrubConfigManager` by taking ownership of the
     /// `SCRUB_CONFIG` map from the loaded eBPF program.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let map = ebpf
             .take_map("SCRUB_CONFIG")
             .ok_or_else(|| anyhow::anyhow!("map 'SCRUB_CONFIG' not found in eBPF object"))?;
@@ -85,7 +85,7 @@ pub struct SyncookieSecretManager {
 
 impl SyncookieSecretManager {
     /// Create a new manager by taking ownership of the `SYNCOOKIE_SECRET` map.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let map = ebpf
             .take_map("SYNCOOKIE_SECRET")
             .ok_or_else(|| anyhow::anyhow!("map 'SYNCOOKIE_SECRET' not found in eBPF object"))?;
@@ -116,7 +116,7 @@ pub struct DdosSynConfigManager {
 
 impl DdosSynConfigManager {
     /// Create a new manager by taking ownership of the `DDOS_SYN_CONFIG` map.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let map = ebpf
             .take_map("DDOS_SYN_CONFIG")
             .ok_or_else(|| anyhow::anyhow!("map 'DDOS_SYN_CONFIG' not found in eBPF object"))?;
@@ -152,7 +152,7 @@ pub struct IcmpConfigManager {
 
 impl IcmpConfigManager {
     /// Create a new manager by taking ownership of the `ICMP_CONFIG` map.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let map = ebpf
             .take_map("ICMP_CONFIG")
             .ok_or_else(|| anyhow::anyhow!("map 'ICMP_CONFIG' not found in eBPF object"))?;
@@ -188,7 +188,7 @@ pub struct DdosConnTrackConfigManager {
 
 impl DdosConnTrackConfigManager {
     /// Create a new manager by taking ownership of the `CONNTRACK_CONFIG` map.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let map = ebpf
             .take_map("CONNTRACK_CONFIG")
             .ok_or_else(|| anyhow::anyhow!("map 'CONNTRACK_CONFIG' not found in eBPF object"))?;
@@ -226,7 +226,7 @@ pub struct AmpProtectConfigManager {
 
 impl AmpProtectConfigManager {
     /// Create a new manager by taking ownership of the `AMP_PROTECT_CONFIG` map.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let map = ebpf
             .take_map("AMP_PROTECT_CONFIG")
             .ok_or_else(|| anyhow::anyhow!("map 'AMP_PROTECT_CONFIG' not found in eBPF object"))?;
@@ -275,7 +275,7 @@ impl InterfaceGroupsManager {
     /// Take the `INTERFACE_GROUPS` map from the loaded eBPF program and
     /// register it for group membership updates. No-op if the map does
     /// not exist in the program (e.g., programs that do not support groups).
-    pub fn add_map(&mut self, ebpf: &mut Ebpf) {
+    pub fn add_map(&mut self, ebpf: &mut dyn MapStore) {
         if let Some(map) = ebpf.take_map("INTERFACE_GROUPS") {
             match HashMap::try_from(map) {
                 Ok(hm) => {

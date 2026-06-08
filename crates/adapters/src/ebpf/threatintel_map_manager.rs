@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{BloomFilter, HashMap, MapData};
 use domain::common::error::DomainError;
 use domain::threatintel::entity::Ioc;
@@ -37,7 +37,7 @@ impl ThreatIntelMapManager {
     /// `THREATINTEL_IOCS` map from the loaded eBPF program.
     ///
     /// Also attempts to take the `THREATINTEL_IOCS_V6` map (graceful if absent).
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let map = ebpf
             .take_map("THREATINTEL_IOCS")
             .ok_or_else(|| anyhow::anyhow!("map 'THREATINTEL_IOCS' not found in eBPF object"))?;

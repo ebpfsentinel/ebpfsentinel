@@ -1,0 +1,61 @@
+# config-bpf-token.yaml — BPF-token-only loading (integration suite 61).
+#
+# `bpf_token.enabled: true` + `fallback_allow_capabilities: false` forces the
+# agent down the token-only path: it MUST create a BPF token against the
+# delegated bpffs and load/attach every program through it, with no CAP_BPF /
+# CAP_SYS_ADMIN / CAP_PERFMON. The harness (fixtures/bpf-token/delegate-and-run)
+# provides the delegated bpffs at `bpffs_path` and the module BTF fds.
+#
+# Every program group is enabled so the suite exercises the full token loader:
+#   firewall  → xdp-firewall (conntrack kfunc) + xdp-firewall-reject tail-call
+#   ids       → tc-ids       (fou kfunc)
+#   threatintel → tc-threatintel
+#   dns       → tc-dns
+#   dlp       → uprobe-dlp    (uprobe_multi link attach)
+#
+# Placeholders __DATA_DIR__, __EBPF_DIR__, __IFACE__ are substituted at runtime.
+
+agent:
+  interfaces:
+    - __IFACE__
+  bind_address: "0.0.0.0"
+  log_level: info
+  log_format: json
+  http_port: 18099
+  grpc_port: 18055
+  metrics_port: 18090
+  ebpf_program_dir: __EBPF_DIR__
+  bpf_token:
+    enabled: true
+    bpffs_path: /run/etok
+    fallback_allow_capabilities: false
+
+firewall:
+  enabled: true
+  mode: alert
+  rules: []
+
+ids:
+  enabled: true
+
+threatintel:
+  enabled: true
+
+dns:
+  enabled: true
+
+dlp:
+  enabled: true
+
+ratelimit:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

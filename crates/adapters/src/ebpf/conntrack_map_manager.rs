@@ -1,4 +1,4 @@
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, MapData};
 use domain::common::error::DomainError;
 use domain::conntrack::entity::{ConnTrackSettings, Connection};
@@ -20,7 +20,7 @@ pub struct ConnTrackMapManager {
 impl ConnTrackMapManager {
     /// Create a new `ConnTrackMapManager` by taking ownership of the
     /// `CT_CONFIG` map from the loaded eBPF program.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let config = Array::try_from(
             ebpf.take_map("CT_CONFIG")
                 .ok_or_else(|| anyhow::anyhow!("map 'CT_CONFIG' not found"))?,
@@ -65,7 +65,7 @@ impl ConnTrackMapPort for ConnTrackMapManager {
 /// Push runtime-resolved `nf_conn` BTF offsets into the
 /// `CT_NF_CONN_OFFSETS` BPF array map.
 pub fn push_nf_conn_offsets(
-    ebpf: &mut aya::Ebpf,
+    ebpf: &mut dyn MapStore,
     offsets: ebpf_common::conntrack::NfConnOffsets,
 ) -> Result<(), anyhow::Error> {
     let map = ebpf

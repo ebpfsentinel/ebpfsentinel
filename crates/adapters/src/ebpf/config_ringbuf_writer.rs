@@ -1,4 +1,4 @@
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::Map;
 use ebpf_common::config_cmd::ConfigCommand;
 use tracing::{info, warn};
@@ -21,7 +21,7 @@ impl ConfigRingBufWriter {
     /// Create a new writer by taking ownership of the `CONFIG_RINGBUF` map.
     ///
     /// Returns `None` if the map is not found (program doesn't have `UserRingBuf`).
-    pub fn new(ebpf: &mut Ebpf) -> Option<Self> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Option<Self> {
         let map = ebpf.take_map("CONFIG_RINGBUF")?;
         info!("CONFIG_RINGBUF (UserRingBuf) map acquired for config push");
         Some(Self { _map: map })

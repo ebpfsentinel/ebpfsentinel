@@ -34,10 +34,12 @@
 //! returned program fds directly (see the raw-attach helpers).
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::CString;
 use std::hash::BuildHasher;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
+use aya::maps::{Map as AyaMap, MapData};
 use aya_obj::btf::BtfFeatures;
 use aya_obj::{Object, ProgramSection};
 use object::{Object as _, ObjectSection, ObjectSymbol, RelocationTarget};
@@ -48,6 +50,13 @@ use super::kfunc::{KfuncError, KfuncResolver, KfuncTarget};
 const BPF_PROG_LOAD: u32 = 5;
 const BPF_BTF_LOAD: u32 = 18;
 
+/// The process-global BPF token fd (set by the agent after `BPF_TOKEN_CREATE`),
+/// or `None` when loading via capabilities — so every raw BTF/program load this
+/// module issues is token-authorized.
+fn global_token_fd() -> Option<i32> {
+    super::bpf_token::global_token_fd()
+}
+
 /// `BPF_PSEUDO_KFUNC_CALL` source-register marker on a call instruction.
 const BPF_PSEUDO_KFUNC_CALL: u8 = 2;
 /// `BPF_JMP | BPF_CALL` opcode.
@@ -57,6 +66,11 @@ const INSN_CALL: u8 = 0x85;
 const BPF_PROG_TYPE_KPROBE: u32 = 2;
 const BPF_PROG_TYPE_SCHED_CLS: u32 = 3;
 const BPF_PROG_TYPE_XDP: u32 = 6;
+
+/// `BPF_TRACE_UPROBE_MULTI` (`enum bpf_attach_type`). A KPROBE-type program
+/// must be loaded with this `expected_attach_type` to be attachable via a
+/// `uprobe_multi` `BPF_LINK_CREATE` — the token-friendly uprobe attach path.
+const BPF_TRACE_UPROBE_MULTI: u32 = 48;
 
 /// `BPF_F_*` prog-load flags.
 const BPF_F_SLEEPABLE: u32 = 1 << 4;
@@ -126,6 +140,15 @@ pub enum KfuncLoaderError {
         errno: i32,
         log: String,
     },
+
+    #[error("BPF_MAP_CREATE `{name}` failed (errno {errno})")]
+    MapCreate { name: String, errno: i32 },
+
+    #[error("pin map at `{path}` failed (errno {errno})")]
+    Pin { path: String, errno: i32 },
+
+    #[error("wrap map fd into typed map: {0}")]
+    MapWrap(String),
 }
 
 /// A kfunc call site in the raw object: the section it lives in, the byte
@@ -233,8 +256,7 @@ pub fn classify(elf: &[u8], resolver: &KfuncResolver) -> Result<KfuncClass, Kfun
     for name in &names {
         // A module kfunc needs the fd_array; a device-bound metadata kfunc
         // needs prog_ifindex or neutralization — neither is expressible in aya.
-        if resolver.resolve(name)?.module_btf_obj_id.is_some() || is_dev_bound_metadata_kfunc(name)
-        {
+        if resolver.resolve(name)?.module_name.is_some() || is_dev_bound_metadata_kfunc(name) {
             needs_raw = true;
         }
     }
@@ -317,7 +339,7 @@ pub fn prepatch_vmlinux_kfuncs(
 ) -> Result<Vec<u8>, KfuncLoaderError> {
     patch_sites(elf, |name| {
         let target = resolver.resolve(name)?;
-        if target.module_btf_obj_id.is_some() {
+        if target.module_name.is_some() {
             return Err(KfuncLoaderError::Relocate(format!(
                 "kfunc `{name}` is a module kfunc; needs the fd_array loader"
             )));
@@ -334,9 +356,10 @@ type ProgramMeta = (String, (usize, u64), u32, u32, u32);
 struct FdArray {
     /// `fd_array` passed to the kernel (index 0 reserved for vmlinux).
     fds: Vec<i32>,
-    /// module BTF object id -> `fd_array` slot index.
-    module_slot: HashMap<u32, i16>,
-    /// Owned module BTF fds kept alive through the load.
+    /// module name -> `fd_array` slot index.
+    module_slot: HashMap<String, i16>,
+    /// Owned module BTF fds kept alive through the load. Pre-passed fds (token
+    /// mode) are owned elsewhere and are intentionally absent here.
     _owned: Vec<OwnedFd>,
 }
 
@@ -486,17 +509,19 @@ fn build_fd_array(
 ) -> Result<FdArray, KfuncLoaderError> {
     use std::collections::hash_map::Entry;
 
-    let mut module_slot: HashMap<u32, i16> = HashMap::new();
+    let mut module_slot: HashMap<String, i16> = HashMap::new();
     let mut owned: Vec<OwnedFd> = Vec::new();
     let mut fds: Vec<i32> = vec![0];
     for target in targets.values() {
-        if let Some(obj_id) = target.module_btf_obj_id
-            && let Entry::Vacant(slot) = module_slot.entry(obj_id)
+        if let Some(module) = &target.module_name
+            && let Entry::Vacant(slot) = module_slot.entry(module.clone())
         {
-            let fd = resolver.module_btf_fd(obj_id)?;
+            let (raw, owned_fd) = resolver.module_btf_fd_by_name(module)?;
             slot.insert(i16::try_from(fds.len()).expect("fd_array slot fits i16"));
-            fds.push(fd.as_raw_fd());
-            owned.push(fd);
+            fds.push(raw);
+            if let Some(fd) = owned_fd {
+                owned.push(fd);
+            }
         }
     }
     Ok(FdArray {
@@ -515,7 +540,7 @@ fn rewrite_kfunc_calls(
     insns: &mut [aya_obj::generated::bpf_insn],
     names: &[String],
     targets: &HashMap<String, KfuncTarget>,
-    module_slot: &HashMap<u32, i16>,
+    module_slot: &HashMap<String, i16>,
     dev_bound: bool,
 ) {
     for ins in insns {
@@ -534,8 +559,9 @@ fn rewrite_kfunc_calls(
             let target = &targets[name];
             ins.imm = i32::try_from(target.btf_id).expect("btf id fits i32");
             ins.off = target
-                .module_btf_obj_id
-                .map_or(0, |obj_id| module_slot[&obj_id]);
+                .module_name
+                .as_ref()
+                .map_or(0, |module| module_slot[module]);
         }
     }
 }
@@ -549,9 +575,12 @@ fn prog_attrs(section: &ProgramSection) -> (u32, u32, u32) {
             (BPF_PROG_TYPE_XDP, 0, flags)
         }
         ProgramSection::SchedClassifier => (BPF_PROG_TYPE_SCHED_CLS, 0, 0),
-        ProgramSection::UProbe { sleepable, .. } => {
+        // u(ret)probe both load as KPROBE with the `uprobe_multi` attach type
+        // (required for the token-friendly `BPF_LINK_CREATE` attach); entry-vs-
+        // return is selected at attach time via the link's RETURN flag.
+        ProgramSection::UProbe { sleepable, .. } | ProgramSection::URetProbe { sleepable, .. } => {
             let flags = if *sleepable { BPF_F_SLEEPABLE } else { 0 };
-            (BPF_PROG_TYPE_KPROBE, 0, flags)
+            (BPF_PROG_TYPE_KPROBE, BPF_TRACE_UPROBE_MULTI, flags)
         }
         _ => (0, 0, 0),
     }
@@ -566,6 +595,8 @@ struct BtfLoadAttr {
     btf_log_size: u32,
     btf_log_level: u32,
     btf_log_true_size: u32,
+    btf_flags: u32,
+    btf_token_fd: i32,
 }
 
 /// `BPF_BTF_LOAD`: load a BTF blob and return its fd.
@@ -579,6 +610,12 @@ fn load_btf(bytes: &[u8]) -> Result<OwnedFd, KfuncLoaderError> {
         btf_log_level: 1,
         ..Default::default()
     };
+    // Authorize the BTF load through the process-global BPF token when set,
+    // matching the (patched) aya loader so a NET_RAW-only process can load.
+    if let Some(token) = global_token_fd() {
+        attr.btf_flags |= super::bpf_token::BPF_F_TOKEN_FD;
+        attr.btf_token_fd = token;
+    }
     let rc = unsafe {
         bpf(
             BPF_BTF_LOAD,
@@ -627,6 +664,15 @@ struct ProgLoadAttr {
     core_relos: u64,
     core_relo_rec_size: u32,
     log_true_size: u32,
+    prog_token_fd: i32,
+    // The kernel (>= 6.12) reads `fd_array_cnt` at this offset. It MUST be a
+    // real, zero-initialised field: were it left as struct tail padding, Rust
+    // leaves those bytes uninitialised, the kernel interprets the garbage as a
+    // non-zero count, and then walks `fd_array` (which is NULL here) for that
+    // many entries — faulting every `BPF_PROG_LOAD` with `EFAULT`, 0 insns
+    // processed. `BPF_MAP_CREATE`/`BPF_BTF_LOAD` have no such trailing field,
+    // which is why only program loads were affected.
+    fd_array_cnt: u32,
 }
 
 /// Inputs for a single raw `BPF_PROG_LOAD`.
@@ -679,21 +725,37 @@ fn sanitize_line_info(bytes: &[u8], rec_size: u32) -> Vec<u8> {
 /// Issue a raw `BPF_PROG_LOAD`, returning the loaded program fd or a verifier
 /// log on rejection.
 fn raw_prog_load(req: &RawProgLoad<'_>) -> Result<OwnedFd, KfuncLoaderError> {
-    // func_info/line_info are only valid alongside a program BTF.
-    let (fi_ptr, fi_rec, fi_cnt, li_ptr, li_rec, li_cnt) = match req.prog_btf_fd {
-        Some(_) if req.func_info_rec_size > 0 => (
-            req.func_info.as_ptr() as u64,
-            req.func_info_rec_size,
-            u32::try_from(req.func_info.len()).unwrap_or(0) / req.func_info_rec_size,
-            req.line_info.as_ptr() as u64,
-            req.line_info_rec_size,
-            u32::try_from(req.line_info.len())
-                .unwrap_or(0)
-                .checked_div(req.line_info_rec_size)
-                .unwrap_or(0),
-        ),
-        _ => (0, 0, 0, 0, 0, 0),
-    };
+    // func_info/line_info are passed straight through. They are not merely
+    // debug metadata: a kfunc called from a BPF-to-BPF *subprogram* needs its
+    // owning subprogram's BTF, which the kernel locates via func_info — without
+    // it the load fails (`EINVAL`, with no verifier-log line). `relocate_calls`
+    // already produced the correct *combined* multi-subprogram table (each
+    // subprogram's records appended with `insn_off` rebased and `num_info`
+    // updated, mirroring aya), so `func_info_cnt == subprog_cnt` holds. Each
+    // block is gated on a program BTF fd plus non-empty bytes; a non-empty
+    // `rec_size` with an empty slice would hand the kernel a dangling pointer
+    // (the empty slice's `as_ptr`) and fault.
+    let has_btf = req.prog_btf_fd.is_some();
+    let (fi_ptr, fi_rec, fi_cnt) =
+        if has_btf && req.func_info_rec_size > 0 && !req.func_info.is_empty() {
+            (
+                req.func_info.as_ptr() as u64,
+                req.func_info_rec_size,
+                u32::try_from(req.func_info.len()).unwrap_or(0) / req.func_info_rec_size,
+            )
+        } else {
+            (0, 0, 0)
+        };
+    let (li_ptr, li_rec, li_cnt) =
+        if has_btf && req.line_info_rec_size > 0 && !req.line_info.is_empty() {
+            (
+                req.line_info.as_ptr() as u64,
+                req.line_info_rec_size,
+                u32::try_from(req.line_info.len()).unwrap_or(0) / req.line_info_rec_size,
+            )
+        } else {
+            (0, 0, 0)
+        };
 
     let dev_bound_flags = if req.dev_bound_ifindex.is_some() {
         BPF_F_XDP_DEV_BOUND_ONLY
@@ -730,6 +792,13 @@ fn raw_prog_load(req: &RawProgLoad<'_>) -> Result<OwnedFd, KfuncLoaderError> {
     let name_bytes = req.name.as_bytes();
     let n = name_bytes.len().min(15);
     attr.prog_name[..n].copy_from_slice(&name_bytes[..n]);
+
+    // Authorize the program load through the process-global BPF token when set,
+    // so a NET_RAW-only process loads without CAP_BPF (matches patched aya).
+    if let Some(token) = global_token_fd() {
+        attr.prog_flags |= super::bpf_token::BPF_F_TOKEN_FD;
+        attr.prog_token_fd = token;
+    }
 
     // Phase 1: load with no verifier log. A verbose log for a large program
     // (the load balancer's fully-unrolled paths emit hundreds of thousands of
@@ -807,6 +876,324 @@ unsafe fn bpf(cmd: u32, attr: *mut core::ffi::c_void, size: usize) -> i64 {
     }
 }
 
+// ── Full token-mode object loader ───────────────────────────────────────
+//
+// When the agent holds a BPF token (kernel 6.9+, no CAP_BPF), aya cannot load
+// anything — every map_create / btf_load / prog_load needs the token fd in its
+// attr, which stock aya does not pass. This loader does the whole object via
+// raw syscalls (token-authorized), reusing `load_kfunc_programs` for the BTF
+// load + relocation + program load (already token-aware), and adds the one
+// thing aya owned: raw `BPF_MAP_CREATE`. Maps are returned wrapped as
+// `aya::maps::Map` so the existing map managers consume them unchanged.
+
+const BPF_MAP_CREATE: u32 = 0;
+const BPF_OBJ_PIN: u32 = 6;
+const BPF_OBJ_GET: u32 = 7;
+
+/// Kernel-matching `union bpf_attr` `map_create` member (6.9+ layout, ending
+/// in `map_token_fd`). Mirrors `aya_obj::generated::bpf_attr__bindgen_ty_1`.
+#[repr(C)]
+#[derive(Default)]
+struct MapCreateAttr {
+    map_type: u32,
+    key_size: u32,
+    value_size: u32,
+    max_entries: u32,
+    map_flags: u32,
+    inner_map_fd: u32,
+    numa_node: u32,
+    map_name: [u8; 16],
+    map_ifindex: u32,
+    btf_fd: u32,
+    btf_key_type_id: u32,
+    btf_value_type_id: u32,
+    btf_vmlinux_value_type_id: u32,
+    map_extra: u64,
+    value_type_btf_obj_fd: i32,
+    map_token_fd: i32,
+}
+
+/// `union bpf_attr` member for `BPF_OBJ_PIN` / `BPF_OBJ_GET`.
+#[repr(C)]
+#[derive(Default)]
+struct ObjAttr {
+    pathname: u64,
+    bpf_fd: u32,
+    file_flags: u32,
+    path_fd: i32,
+}
+
+/// One loaded eBPF object: every map (wrapped for the managers) and every
+/// program fd, all created/loaded through the BPF token.
+pub struct TokenLoadedObject {
+    /// Map name → typed aya map (built from the raw, token-created fd).
+    pub maps: HashMap<String, AyaMap>,
+    /// Program name → (fd, `bpf_prog_type`).
+    pub programs: Vec<KfuncLoadedProgram>,
+    /// Map name → a borrowed (dup'd) raw fd of the same kernel map, kept so the
+    /// loader can issue raw `BPF_MAP_UPDATE_ELEM` (e.g. tail-call `ProgramArray`
+    /// wiring) against a map whose typed form lives in `maps`.
+    pub hosted: HashMap<String, OwnedFd>,
+}
+
+/// `BPF_MAP_CREATE` (token-authorized), replicating aya's BTF-map handling.
+fn raw_map_create(
+    name: &str,
+    def: &aya_obj::Map,
+    btf_fd: Option<RawFd>,
+) -> Result<OwnedFd, KfuncLoaderError> {
+    let mut attr = MapCreateAttr {
+        map_type: def.map_type(),
+        key_size: def.key_size(),
+        value_size: def.value_size(),
+        max_entries: def.max_entries(),
+        map_flags: def.map_flags(),
+        ..Default::default()
+    };
+
+    // BTF-defined maps carry key/value BTF type ids — except a set of map types
+    // the kernel rejects BTF for (mirrors libbpf issue #355 / aya).
+    if let aya_obj::Map::Btf(m) = def {
+        const NO_BTF_TYPES: &[u32] = &[
+            4,  // PERF_EVENT_ARRAY
+            5,  // CGROUP_ARRAY
+            7,  // STACK_TRACE
+            12, // ARRAY_OF_MAPS
+            13, // HASH_OF_MAPS
+            14, // DEVMAP
+            25, // DEVMAP_HASH
+            16, // CPUMAP
+            17, // XSKMAP
+            15, // SOCKMAP
+            18, // SOCKHASH
+            22, // QUEUE
+            23, // STACK
+            27, // RINGBUF
+        ];
+        if !NO_BTF_TYPES.contains(&attr.map_type) {
+            attr.btf_key_type_id = m.def.btf_key_type_id;
+            attr.btf_value_type_id = m.def.btf_value_type_id;
+            attr.btf_fd = u32::try_from(btf_fd.unwrap_or_default()).unwrap_or_default();
+        }
+    }
+
+    let n = name.as_bytes();
+    let len = n.len().min(15);
+    attr.map_name[..len].copy_from_slice(&n[..len]);
+
+    if let Some(token) = global_token_fd() {
+        attr.map_flags |= super::bpf_token::BPF_F_TOKEN_FD;
+        attr.map_token_fd = token;
+    }
+
+    let rc = unsafe {
+        bpf(
+            BPF_MAP_CREATE,
+            (&raw mut attr).cast(),
+            std::mem::size_of::<MapCreateAttr>(),
+        )
+    };
+    if rc < 0 {
+        return Err(KfuncLoaderError::MapCreate {
+            name: name.to_owned(),
+            errno: io::Error::last_os_error().raw_os_error().unwrap_or(0),
+        });
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let raw = rc as RawFd;
+    // SAFETY: rc >= 0 is a valid fd owned by this process.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+/// Pin a map fd into the bpffs at `path` (`BPF_OBJ_PIN`). Best-effort: an
+/// already-pinned name (`EEXIST`) is tolerated by the caller.
+fn obj_pin(fd: RawFd, path: &str) -> Result<(), KfuncLoaderError> {
+    let c = CString::new(path).map_err(|_| KfuncLoaderError::Pin {
+        path: path.to_owned(),
+        errno: libc::EINVAL,
+    })?;
+    let mut attr = ObjAttr {
+        pathname: c.as_ptr() as u64,
+        bpf_fd: u32::try_from(fd).unwrap_or_default(),
+        ..Default::default()
+    };
+    let rc = unsafe {
+        bpf(
+            BPF_OBJ_PIN,
+            (&raw mut attr).cast(),
+            std::mem::size_of::<ObjAttr>(),
+        )
+    };
+    if rc < 0 {
+        return Err(KfuncLoaderError::Pin {
+            path: path.to_owned(),
+            errno: io::Error::last_os_error().raw_os_error().unwrap_or(0),
+        });
+    }
+    Ok(())
+}
+
+/// Open an already-pinned map (`BPF_OBJ_GET`); `None` if it does not exist.
+fn obj_get(path: &str) -> Option<OwnedFd> {
+    let c = CString::new(path).ok()?;
+    let mut attr = ObjAttr {
+        pathname: c.as_ptr() as u64,
+        ..Default::default()
+    };
+    let rc = unsafe {
+        bpf(
+            BPF_OBJ_GET,
+            (&raw mut attr).cast(),
+            std::mem::size_of::<ObjAttr>(),
+        )
+    };
+    if rc < 0 {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    // SAFETY: rc >= 0 is a valid fd.
+    Some(unsafe { OwnedFd::from_raw_fd(rc as RawFd) })
+}
+
+/// Wrap a raw map fd into the `aya::maps::Map` variant matching its kernel map
+/// type, so the typed map managers (`Array::try_from`, `HashMap::try_from`, …)
+/// accept it. Mirrors aya's own `map_type → Map` table (`bpf.rs`).
+#[allow(clippy::enum_glob_use)]
+fn wrap_map_data(fd: OwnedFd, map_type: u32) -> Result<AyaMap, KfuncLoaderError> {
+    use aya_obj::generated::bpf_map_type::*;
+    let data = MapData::from_fd(fd).map_err(|e| KfuncLoaderError::MapWrap(e.to_string()))?;
+    let m = match map_type {
+        x if x == BPF_MAP_TYPE_ARRAY as u32 => AyaMap::Array(data),
+        x if x == BPF_MAP_TYPE_PERCPU_ARRAY as u32 => AyaMap::PerCpuArray(data),
+        x if x == BPF_MAP_TYPE_PROG_ARRAY as u32 => AyaMap::ProgramArray(data),
+        x if x == BPF_MAP_TYPE_HASH as u32 => AyaMap::HashMap(data),
+        x if x == BPF_MAP_TYPE_LRU_HASH as u32 => AyaMap::LruHashMap(data),
+        x if x == BPF_MAP_TYPE_PERCPU_HASH as u32 => AyaMap::PerCpuHashMap(data),
+        x if x == BPF_MAP_TYPE_LRU_PERCPU_HASH as u32 => AyaMap::PerCpuLruHashMap(data),
+        x if x == BPF_MAP_TYPE_PERF_EVENT_ARRAY as u32 => AyaMap::PerfEventArray(data),
+        x if x == BPF_MAP_TYPE_RINGBUF as u32 => AyaMap::RingBuf(data),
+        x if x == BPF_MAP_TYPE_SOCKHASH as u32 => AyaMap::SockHash(data),
+        x if x == BPF_MAP_TYPE_SOCKMAP as u32 => AyaMap::SockMap(data),
+        x if x == BPF_MAP_TYPE_BLOOM_FILTER as u32 => AyaMap::BloomFilter(data),
+        x if x == BPF_MAP_TYPE_LPM_TRIE as u32 => AyaMap::LpmTrie(data),
+        x if x == BPF_MAP_TYPE_STACK as u32 => AyaMap::Stack(data),
+        x if x == BPF_MAP_TYPE_STACK_TRACE as u32 => AyaMap::StackTraceMap(data),
+        x if x == BPF_MAP_TYPE_QUEUE as u32 => AyaMap::Queue(data),
+        x if x == BPF_MAP_TYPE_CPUMAP as u32 => AyaMap::CpuMap(data),
+        x if x == BPF_MAP_TYPE_DEVMAP as u32 => AyaMap::DevMap(data),
+        x if x == BPF_MAP_TYPE_DEVMAP_HASH as u32 => AyaMap::DevMapHash(data),
+        x if x == BPF_MAP_TYPE_XSKMAP as u32 => AyaMap::XskMap(data),
+        _ => AyaMap::Unsupported(data),
+    };
+    Ok(m)
+}
+
+/// Create (or reuse, when already pinned) every map an object declares, through
+/// the token, returning `name → (owned fd, map_type)`. Shared maps
+/// (`INTERFACE_GROUPS`, `CT_CONFIG`, …) reuse the existing pin so they stay a
+/// single kernel object across the objects that reference them.
+fn create_object_maps(
+    elf: &[u8],
+    pin_path: &str,
+    btf_fd: Option<RawFd>,
+) -> Result<HashMap<String, (OwnedFd, u32)>, KfuncLoaderError> {
+    let obj = Object::parse(elf).map_err(|e| KfuncLoaderError::ParseObject(e.to_string()))?;
+    let mut out = HashMap::new();
+    for (name, def) in &obj.maps {
+        let map_type = def.map_type();
+        // The kernel truncates map names to 15 bytes; pin under the full ELF
+        // name so distinct maps never collide on the pinned path.
+        let pin = format!("{}/{}", pin_path.trim_end_matches('/'), name);
+        if let Some(fd) = obj_get(&pin) {
+            out.insert(name.clone(), (fd, map_type));
+            continue;
+        }
+        let fd = raw_map_create(name, def, btf_fd)?;
+        // Best-effort pin so sibling objects reuse the same map. A racing
+        // EEXIST is fine — re-fetch the existing pin instead.
+        match obj_pin(fd.as_raw_fd(), &pin) {
+            Ok(()) => out.insert(name.clone(), (fd, map_type)),
+            Err(_) => match obj_get(&pin) {
+                Some(existing) => out.insert(name.clone(), (existing, map_type)),
+                None => out.insert(name.clone(), (fd, map_type)),
+            },
+        };
+    }
+    Ok(out)
+}
+
+/// Load a complete eBPF object through the BPF token: create all maps, load
+/// BTF, relocate, and load every program — all token-authorized, no aya, no
+/// `CAP_BPF`. Returns the maps (wrapped for the managers) and program fds.
+pub fn load_object_token(
+    elf: &[u8],
+    pin_path: &str,
+    dev_bound_ifindex: Option<u32>,
+) -> Result<TokenLoadedObject, KfuncLoaderError> {
+    std::fs::create_dir_all(pin_path).map_err(|e| KfuncLoaderError::Pin {
+        path: pin_path.to_owned(),
+        errno: e.raw_os_error().unwrap_or(0),
+    })?;
+
+    // Pre-patch every kfunc call to a sentinel (no-op when the object has no
+    // kfuncs) so `relocate_calls` does not mistake a kfunc call for a BPF-to-BPF
+    // call to an unknown function — exactly what the capability-mode HasModule
+    // path does before `load_kfunc_programs`. `load_kfunc_programs` restores the
+    // real `(btf_id, fd_array idx)` afterward.
+    let patched = prepatch_kfunc_calls(elf)?;
+
+    // The program BTF must exist before map creation so BTF-typed maps can
+    // reference it. `load_kfunc_programs` reloads it for the programs; the
+    // kernel dedups identical BTF, and both fds are dropped after load.
+    let mut probe =
+        Object::parse(&patched).map_err(|e| KfuncLoaderError::ParseObject(e.to_string()))?;
+    let features = BtfFeatures::new(true, true, true, true, true, true, true);
+    probe
+        .fixup_and_sanitize_btf(&features)
+        .map_err(|e| KfuncLoaderError::SanitizeBtf(e.to_string()))?;
+    let btf_bytes = probe.btf.as_ref().map(aya_obj::btf::Btf::to_bytes);
+    let btf_fd = match btf_bytes {
+        Some(ref b) if !b.is_empty() => Some(load_btf(b)?),
+        _ => None,
+    };
+
+    let created = create_object_maps(&patched, pin_path, btf_fd.as_ref().map(AsRawFd::as_raw_fd))?;
+
+    // Hand the created map fds to the shared program loader as "hosted" maps;
+    // it relocates against them and loads every program with the token.
+    let hosted: HashMap<String, OwnedFd> = created
+        .iter()
+        .map(|(name, (fd, _))| Ok((name.clone(), fd.try_clone()?)))
+        .collect::<io::Result<_>>()
+        .map_err(|e| KfuncLoaderError::MapWrap(e.to_string()))?;
+
+    let resolver = KfuncResolver::new()?;
+    // Mirror the capability-mode device-bound metadata fallback: try device
+    // bound first (so `bpf_xdp_metadata_rx_*` resolve), then retry neutralized.
+    let programs = if dev_bound_ifindex.is_some() && uses_dev_bound_metadata_kfuncs(&patched) {
+        match load_kfunc_programs(&patched, &resolver, &hosted, dev_bound_ifindex) {
+            Ok(p) => p,
+            Err(_) => load_kfunc_programs(&patched, &resolver, &hosted, None)?,
+        }
+    } else {
+        load_kfunc_programs(&patched, &resolver, &hosted, None)?
+    };
+    drop(btf_fd);
+
+    let mut maps = HashMap::new();
+    for (name, (fd, map_type)) in created {
+        maps.insert(name, wrap_map_data(fd, map_type)?);
+    }
+
+    // `hosted` (dup'd raw fds, one per map) outlived the program load; hand it
+    // on so tail-call wiring can update `ProgramArray`s by raw fd.
+    Ok(TokenLoadedObject {
+        maps,
+        programs,
+        hosted,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -880,6 +1267,7 @@ mod tests {
             names[0].clone(),
             KfuncTarget {
                 btf_id: 4242,
+                module_name: None,
                 module_btf_obj_id: None,
             },
         );
@@ -902,6 +1290,7 @@ mod tests {
             names[0].clone(),
             KfuncTarget {
                 btf_id: 4242,
+                module_name: None,
                 module_btf_obj_id: None,
             },
         );
@@ -914,5 +1303,16 @@ mod tests {
         assert_eq!(insns[0].code, INSN_CALL);
         assert_eq!(insns[0].imm, 4242);
         assert_eq!(insns[0].off, 0);
+    }
+
+    #[test]
+    fn map_create_attr_matches_kernel_layout() {
+        // The raw map_create attr must byte-match the kernel's bpf_attr
+        // map_create union member (ending in map_token_fd); a layout drift
+        // would corrupt every BPF_MAP_CREATE.
+        assert_eq!(
+            std::mem::size_of::<MapCreateAttr>(),
+            std::mem::size_of::<aya_obj::generated::bpf_attr__bindgen_ty_1>(),
+        );
     }
 }

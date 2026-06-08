@@ -1,4 +1,4 @@
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, HashMap, MapData};
 use domain::common::error::DomainError;
 use ebpf_common::ids::{IdsPatternKey, IdsPatternValue, IdsSamplingConfig};
@@ -18,7 +18,7 @@ pub struct IdsMapManager {
 impl IdsMapManager {
     /// Create a new `IdsMapManager` by taking ownership of the
     /// `IDS_PATTERNS` map from the loaded eBPF program.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let map = ebpf
             .take_map("IDS_PATTERNS")
             .ok_or_else(|| anyhow::anyhow!("map 'IDS_PATTERNS' not found in eBPF object"))?;

@@ -1,4 +1,4 @@
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{HashMap, MapData};
 use domain::common::error::DomainError;
 use domain::ratelimit::entity::RateLimitPolicy;
@@ -18,7 +18,7 @@ pub struct RateLimitMapManager {
 impl RateLimitMapManager {
     /// Create a new `RateLimitMapManager` by taking ownership of the
     /// `RATELIMIT_CONFIG` map from the loaded eBPF program.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let map = ebpf
             .take_map("RATELIMIT_CONFIG")
             .ok_or_else(|| anyhow::anyhow!("map 'RATELIMIT_CONFIG' not found in eBPF object"))?;

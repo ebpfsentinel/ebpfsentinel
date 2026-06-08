@@ -1,4 +1,4 @@
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::Array;
 use aya::maps::MapData;
 use aya::maps::lpm_trie::{Key, LpmTrie};
@@ -16,7 +16,7 @@ pub struct RateLimitLpmManager {
 }
 
 impl RateLimitLpmManager {
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let lpm_src_v4 = LpmTrie::try_from(
             ebpf.take_map("RL_LPM_SRC_V4")
                 .ok_or_else(|| anyhow::anyhow!("map 'RL_LPM_SRC_V4' not found"))?,

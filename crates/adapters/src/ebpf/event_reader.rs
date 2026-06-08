@@ -1,7 +1,7 @@
 #![allow(unsafe_code)] // Required for eBPF RingBuf event parsing (read_unaligned)
 
+use crate::ebpf::map_store::MapStore;
 use application::packet_pipeline::AgentEvent;
-use aya::Ebpf;
 use aya::maps::{MapData, RingBuf};
 use ebpf_common::event::{EVENT_TYPE_L7, PacketEvent};
 use tokio::io::unix::AsyncFd;
@@ -21,7 +21,7 @@ pub struct EventReader {
 
 impl EventReader {
     /// Create a new `EventReader` by taking ownership of the EVENTS map.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let map = ebpf
             .take_map("EVENTS")
             .ok_or_else(|| anyhow::anyhow!("map 'EVENTS' not found in eBPF object"))?;

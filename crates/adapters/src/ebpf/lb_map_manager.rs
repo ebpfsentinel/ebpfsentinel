@@ -1,4 +1,4 @@
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{DevMap, HashMap, MapData};
 use domain::common::error::DomainError;
 use ebpf_common::loadbalancer::{
@@ -30,7 +30,7 @@ pub struct LbMapManager {
 impl LbMapManager {
     /// Create a new `LbMapManager` by taking ownership of the
     /// `LB_SERVICES` and `LB_BACKENDS` maps from the loaded eBPF program.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let svc_map = ebpf
             .take_map("LB_SERVICES")
             .ok_or_else(|| anyhow::anyhow!("map 'LB_SERVICES' not found in eBPF object"))?;

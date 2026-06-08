@@ -1,4 +1,4 @@
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{HashMap, MapData};
 use domain::common::error::DomainError;
 use ebpf_common::firewall::IpSetKeyV4;
@@ -16,7 +16,7 @@ pub struct IpSetMapManager {
 
 impl IpSetMapManager {
     /// Create a new `IpSetMapManager` by taking ownership of the IP set map.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let ipset_v4 = HashMap::try_from(
             ebpf.take_map("FW_IPSET_V4")
                 .ok_or_else(|| anyhow::anyhow!("map 'FW_IPSET_V4' not found"))?,

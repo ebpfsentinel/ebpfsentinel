@@ -2,9 +2,11 @@
 
 eBPF-native Network & Security platform for Linux
 
+![Version: 0.1.0](https://img.shields.io/badge/Version-0.1.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.0.0-dev](https://img.shields.io/badge/AppVersion-0.0.0--dev-informational?style=flat-square)
+
 ## Overview
 
-Deploys [eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel) — a kernel-native **Network & Security platform** — as a Kubernetes DaemonSet. One agent per node with fine-grained capabilities (`CAP_BPF`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, `CAP_NET_RAW`), attached to host network interfaces via eBPF (XDP/TC).
+Deploys [eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel) — a kernel-native **Network & Security platform** — as a Kubernetes DaemonSet. One agent per node, attached to host network interfaces via eBPF (XDP/TC). By default (kernel 6.9+) the agent loads its eBPF programs through **BPF token delegation**: a privileged init container mounts a delegated bpffs and the agent container runs unprivileged with only `CAP_NET_RAW` (pcap capture). Set `agent.bpfToken.enabled=false` to fall back to the scoped capability set (`CAP_BPF`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, `CAP_NET_RAW`).
 
 ## Edition: OSS (AGPL-3.0)
 
@@ -46,10 +48,10 @@ See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/m
 | Requirement | Reason |
 |-------------|--------|
 | `hostNetwork: true` | XDP/TC programs attach to host interfaces, not pod veth |
-| `CAP_BPF` + `CAP_NET_ADMIN` + `CAP_SYS_ADMIN` + `CAP_NET_RAW` | eBPF program loading and network access (default). Fallback: `privileged: true` for kernels without `CAP_BPF` |
-| `/sys/fs/bpf` mount | BPF filesystem for map pinning |
+| BPF token + `CAP_NET_RAW` (default) | The agent loads eBPF through a BPF token; the agent container needs only `CAP_NET_RAW` for pcap capture. A privileged init container mounts the delegated bpffs. Fallback (`agent.bpfToken.enabled=false`): scoped caps `CAP_BPF` + `CAP_NET_ADMIN` + `CAP_SYS_ADMIN` + `CAP_NET_RAW` |
+| `/sys/fs/bpf` mount | BPF filesystem for map pinning + delegated token bpffs |
 | `/sys/kernel/debug` mount | eBPF tracing (debugfs) |
-| Kernel 6.6+ with BTF | CO-RE eBPF requires BTF type information (TCX link-based TC attach) |
+| Kernel 6.9+ with BTF | Agent minimum: BPF token delegation, ARENA maps, kfuncs; CO-RE requires BTF |
 
 ### Feature Limitations in Kubernetes
 
@@ -171,8 +173,12 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| agent | object | `{"bindAddress":"0.0.0.0","eventWorkers":4,"grpcPort":50051,"grpcReflection":false,"httpPort":8080,"interfaces":["eth0"],"logFormat":"json","logLevel":"info","metricsPort":9090,"swaggerUi":false,"tls":{"allowTls12":false,"certPath":"","enabled":false,"keyPath":"","pqMode":"prefer"},"xdpMode":"auto"}` | Agent configuration (generates config.yaml) |
+| agent | object | `{"bindAddress":"0.0.0.0","bpfToken":{"bpffsPath":"/sys/fs/bpf/ebpfsentinel","enabled":true,"fallbackAllowCapabilities":false},"eventWorkers":4,"grpcPort":50051,"grpcReflection":false,"httpPort":8080,"interfaces":["eth0"],"logFormat":"json","logLevel":"info","metricsPort":9090,"swaggerUi":false,"tls":{"allowTls12":false,"certPath":"","enabled":false,"keyPath":"","pqMode":"prefer"},"xdpMode":"auto"}` | Agent configuration (generates config.yaml) |
 | agent.bindAddress | string | `"0.0.0.0"` | Listen address for HTTP/gRPC/metrics |
+| agent.bpfToken | object | `{"bpffsPath":"/sys/fs/bpf/ebpfsentinel","enabled":true,"fallbackAllowCapabilities":false}` | BPF token delegation (kernel 6.9+, the agent's minimum). Enabled by default: a privileged init container mounts a delegated bpffs, and the agent loads every eBPF program through a BPF token so the main container runs with no CAP_BPF / CAP_NET_ADMIN / CAP_SYS_ADMIN — only CAP_NET_RAW. |
+| agent.bpfToken.bpffsPath | string | `"/sys/fs/bpf/ebpfsentinel"` | Path of the delegated bpffs mount |
+| agent.bpfToken.enabled | bool | `true` | Use BPF token delegation (adds the token-setup init container and drops the agent container to CAP_NET_RAW). Disable only to fall back to the broad capability set in daemonset.securityContext. |
+| agent.bpfToken.fallbackAllowCapabilities | bool | `false` | Fall back to capability-based loading if token creation fails (false = refuse to start without a token) |
 | agent.eventWorkers | int | `4` | Parallel event dispatch workers |
 | agent.grpcPort | int | `50051` | gRPC streaming port |
 | agent.grpcReflection | bool | `false` | Enable gRPC reflection (disabled by default for security) |
@@ -199,7 +205,7 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 | commonLabels | object | `{}` | Labels added to all resources |
 | configOverride | string | `""` | Override the entire config.yaml content. When set, all agent.* and domain toggles above are ignored. |
 | conntrack.enabled | bool | `false` | Enable connection tracking |
-| daemonset | object | `{"affinity":{},"extraContainers":[],"extraEnv":[],"extraVolumeMounts":[],"extraVolumes":[],"hostPID":false,"initContainers":[],"minReadySeconds":0,"nodeSelector":{},"podAnnotations":{},"podLabels":{},"priorityClassName":"","resources":{"limits":{"cpu":"1000m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}},"revisionHistoryLimit":10,"securityContext":{"capabilities":{"add":["BPF","NET_ADMIN","SYS_ADMIN","NET_RAW","PERFMON"],"drop":["ALL"]}},"terminationGracePeriodSeconds":30,"tolerations":[{"operator":"Exists"}],"updateStrategy":{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"}}` | DaemonSet configuration |
+| daemonset | object | `{"affinity":{},"extraContainers":[],"extraEnv":[],"extraVolumeMounts":[],"extraVolumes":[],"hostPID":false,"initContainers":[],"minReadySeconds":0,"nodeSelector":{},"podAnnotations":{},"podLabels":{},"priorityClassName":"","resources":{"limits":{"cpu":"1000m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}},"revisionHistoryLimit":10,"securityContext":{"capabilities":{"add":["BPF","NET_ADMIN","SYS_ADMIN","NET_RAW"],"drop":["ALL"]}},"terminationGracePeriodSeconds":30,"tolerations":[{"operator":"Exists"}],"updateStrategy":{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"}}` | DaemonSet configuration |
 | daemonset.affinity | object | `{}` | Affinity rules |
 | daemonset.extraContainers | list | `[]` | Extra containers (sidecars) |
 | daemonset.extraEnv | list | `[]` | Extra environment variables |
@@ -214,7 +220,7 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 | daemonset.priorityClassName | string | `""` | Pod priority class name |
 | daemonset.resources | object | `{"limits":{"cpu":"1000m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}` | Resource requests and limits |
 | daemonset.revisionHistoryLimit | int | `10` | Number of old ReplicaSets to retain |
-| daemonset.securityContext | object | `{"capabilities":{"add":["BPF","NET_ADMIN","SYS_ADMIN","NET_RAW","PERFMON"],"drop":["ALL"]}}` | Container security context (fine-grained capabilities by default) |
+| daemonset.securityContext | object | `{"capabilities":{"add":["BPF","NET_ADMIN","SYS_ADMIN","NET_RAW"],"drop":["ALL"]}}` | Container security context. Drops ALL capabilities and adds only the scoped set the agent needs, instead of `privileged: true`. This matches the systemd unit (dist/ebpfsentinel.service): BPF + NET_ADMIN + SYS_ADMIN for eBPF program loading/attach, plus NET_RAW for pcap packet capture. |
 | daemonset.terminationGracePeriodSeconds | int | `30` | Grace period for pod termination (seconds) |
 | daemonset.tolerations | list | `[{"operator":"Exists"}]` | Tolerations (default: schedule on all nodes including control-plane) |
 | daemonset.updateStrategy | object | `{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"}` | DaemonSet update strategy |

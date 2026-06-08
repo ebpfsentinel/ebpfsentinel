@@ -1,6 +1,6 @@
 use std::net::Ipv6Addr;
 
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::MapData;
 use aya::maps::lpm_trie::{Key, LpmTrie};
 use tracing::info;
@@ -29,7 +29,7 @@ impl TenantSubnetMapManager {
     /// Take the `TENANT_SUBNET_V4` map from the loaded eBPF program and
     /// register it for tenant subnet updates. No-op if the map does
     /// not exist in the program.
-    pub fn add_map(&mut self, ebpf: &mut Ebpf) {
+    pub fn add_map(&mut self, ebpf: &mut dyn MapStore) {
         if let Some(map) = ebpf.take_map("TENANT_SUBNET_V4") {
             match LpmTrie::try_from(map) {
                 Ok(trie) => {
@@ -46,7 +46,7 @@ impl TenantSubnetMapManager {
     /// Take the `TENANT_SUBNET_V6` map from the loaded eBPF program and
     /// register it for IPv6 tenant subnet updates. No-op if the map does
     /// not exist in the program.
-    pub fn add_v6_map(&mut self, ebpf: &mut Ebpf) {
+    pub fn add_v6_map(&mut self, ebpf: &mut dyn MapStore) {
         if let Some(map) = ebpf.take_map("TENANT_SUBNET_V6") {
             match LpmTrie::try_from(map) {
                 Ok(trie) => {

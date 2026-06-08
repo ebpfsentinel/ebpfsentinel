@@ -1,4 +1,4 @@
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, MapData};
 use std::sync::Mutex;
 use tracing::{info, warn};
@@ -26,7 +26,7 @@ impl IdsMirrorMapManager {
     ///
     /// Returns `None` (with a warning) if the map does not exist in the object.
     #[must_use]
-    pub fn new(ebpf: &mut Ebpf) -> Option<Self> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Option<Self> {
         let map = ebpf.take_map("IDS_MIRROR_CONFIG")?;
         match Array::try_from(map) {
             Ok(arr) => {

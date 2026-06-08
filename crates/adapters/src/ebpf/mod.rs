@@ -22,6 +22,7 @@ pub mod lb_map_manager;
 pub mod loader;
 pub mod lpm_coordinator;
 pub mod map_manager;
+pub mod map_store;
 pub mod metrics_reader;
 pub mod nat_map_manager;
 pub mod netkit;
@@ -38,7 +39,7 @@ pub mod vip_map_manager;
 
 pub use bpf_token::{
     BPF_F_TOKEN_FD, BpfTokenError, TokenCreateAttr, create_enterprise_token, create_token,
-    open_bpffs_dir,
+    global_token_fd, open_bpffs_dir, set_global_token_fd as set_bpf_token_fd,
 };
 pub use config_flags_manager::{
     AmpProtectConfigManager, ConfigFlagsManager, DdosConnTrackConfigManager, DdosSynConfigManager,
@@ -57,6 +58,7 @@ pub use kernel_probe::{
     KernelFeatures, KernelProbeError, MIN_KERNEL_MAJOR, MIN_KERNEL_MINOR,
     probe as probe_kernel_features, probe_from as probe_kernel_features_from,
 };
+pub use kfunc::set_module_btf_fd;
 pub use l7_ports_manager::L7PortsManager;
 pub use lb_map_manager::LbMapManager;
 pub use loader::{DEFAULT_BPF_PIN_PATH, EbpfLoader, xdp_mode_to_flags};

@@ -41,6 +41,25 @@ const BPF_TOKEN_CREATE: u32 = 36;
 /// that expect a token fd in the request. Kernel 6.9+.
 pub const BPF_F_TOKEN_FD: u32 = 1 << 16;
 
+/// Process-global BPF token fd, set once after `BPF_TOKEN_CREATE`. The raw
+/// token loader reads it to authorize every map/BTF/program load it issues,
+/// the way libbpf's `LIBBPF_BPF_TOKEN_PATH` applies one token process-wide.
+/// `-1` means no token (capability-based loading via aya).
+static GLOBAL_TOKEN_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// Register the process-global BPF token fd. The caller must keep the fd open
+/// for as long as eBPF objects are loaded.
+pub fn set_global_token_fd(fd: std::os::fd::RawFd) {
+    GLOBAL_TOKEN_FD.store(fd, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The process-global BPF token fd, or `None` when loading via capabilities.
+#[must_use]
+pub fn global_token_fd() -> Option<std::os::fd::RawFd> {
+    let fd = GLOBAL_TOKEN_FD.load(std::sync::atomic::Ordering::Relaxed);
+    (fd >= 0).then_some(fd)
+}
+
 /// Errors surfaced by the thin syscall wrapper.
 #[derive(Debug, thiserror::Error)]
 pub enum BpfTokenError {
@@ -61,56 +80,46 @@ pub enum BpfTokenError {
     InvalidFd(i64),
 }
 
-/// Bitmask of allowed BPF command numbers the consumer may invoke with
-/// the returned token. Defaults to the command set the enterprise
-/// loader actually needs.
+/// Arguments for `BPF_TOKEN_CREATE`. The kernel's `token_create` attr
+/// is only `{ flags, bpffs_fd }` — the set of delegated commands, maps,
+/// programs, and attach types is **not** part of the syscall; it is
+/// configured through the bpffs *mount* options (`delegate_cmds`,
+/// `delegate_maps`, `delegate_progs`, `delegate_attachs`) when the
+/// delegated bpffs is mounted (see `ebpfsentinel-token-setup.sh`).
 #[derive(Debug, Clone, Copy)]
 pub struct TokenCreateAttr {
     pub flags: u32,
     pub bpffs_fd: RawFd,
-    pub allowed_cmds: u64,
-    pub allowed_maps: u64,
-    pub allowed_progs: u64,
-    pub allowed_attachs: u64,
 }
 
 impl TokenCreateAttr {
-    /// Enterprise default: allow map/prog load commands only, no
-    /// `BPF_OBJ_PIN`, no `BPF_LINK_*` create from the consumer side.
+    /// Create a token against the supplied delegated-bpffs directory fd.
+    /// Delegation scope comes from the mount options, so there is nothing
+    /// else to specify here.
     #[must_use]
     pub const fn enterprise_default(bpffs_fd: RawFd) -> Self {
-        // Allow MAP_CREATE, PROG_LOAD, BTF_LOAD, OBJ_GET_INFO_BY_FD.
-        // Numbers come from `enum bpf_cmd` in linux/bpf.h.
-        let allowed_cmds: u64 = (1 << 0) // MAP_CREATE
-            | (1 << 5)   // PROG_LOAD
-            | (1 << 18)  // BTF_LOAD
-            | (1 << 15); // OBJ_GET_INFO_BY_FD
-        Self {
-            flags: 0,
-            bpffs_fd,
-            allowed_cmds,
-            // All map + prog + attach types left wide open so the
-            // enterprise crate can load the same 14 programs the
-            // root-capable binary loads.
-            allowed_maps: u64::MAX,
-            allowed_progs: u64::MAX,
-            allowed_attachs: u64::MAX,
-        }
+        Self { flags: 0, bpffs_fd }
     }
 }
 
 /// Kernel-matching layout for the `token_create` branch of
-/// `union bpf_attr`. Keeping it private + `#[repr(C)]` so we control
-/// the memory layout passed to the syscall.
+/// `union bpf_attr` (kernel 6.9+):
+///
+/// ```c
+/// struct { /* BPF_TOKEN_CREATE */
+///     __u32 flags;
+///     __u32 bpffs_fd;
+/// } token_create;
+/// ```
+///
+/// Only these two fields exist — passing any non-zero trailing bytes
+/// makes the kernel reject the syscall with `EINVAL`. Keeping it
+/// private + `#[repr(C)]` so we control the layout passed to `bpf(2)`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct BpfAttrTokenCreate {
     flags: u32,
     bpffs_fd: u32,
-    allowed_cmds: u64,
-    allowed_maps: u64,
-    allowed_progs: u64,
-    allowed_attachs: u64,
 }
 
 /// Call `bpf(BPF_TOKEN_CREATE, …)` with the supplied attributes and
@@ -128,10 +137,6 @@ pub fn create_token(attr: &TokenCreateAttr) -> Result<OwnedFd, BpfTokenError> {
     let kernel_attr = BpfAttrTokenCreate {
         flags: attr.flags,
         bpffs_fd: bpffs_fd_u32,
-        allowed_cmds: attr.allowed_cmds,
-        allowed_maps: attr.allowed_maps,
-        allowed_progs: attr.allowed_progs,
-        allowed_attachs: attr.allowed_attachs,
     };
     let attr_ptr: *const BpfAttrTokenCreate = &raw const kernel_attr;
     #[allow(clippy::cast_possible_truncation)]
@@ -189,9 +194,16 @@ pub fn open_bpffs_dir(path: &Path) -> Result<OwnedFd, BpfTokenError> {
             source: io::Error::other("path contains interior NUL byte"),
         }
     })?;
-    // SAFETY: c_path lives until after the syscall returns; O_PATH is
-    // correct for a directory fd passed to `bpf(BPF_TOKEN_CREATE)`.
-    let raw = unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    // SAFETY: c_path lives until after the syscall returns. The bpffs
+    // dir fd must be a regular open fd — BPF_TOKEN_CREATE inspects the
+    // file's superblock magic and rejects an O_PATH fd with EBADF, so we
+    // open it O_RDONLY | O_DIRECTORY.
+    let raw = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
     if raw < 0 {
         return Err(BpfTokenError::OpenBpffs {
             path: path.display().to_string(),
@@ -226,20 +238,18 @@ mod tests {
 
     #[test]
     fn attr_layout_matches_kernel() {
-        // 4 + 4 + 8 + 8 + 8 + 8 = 40 bytes. The kernel expects at
-        // least this many bytes for the token_create attr union.
-        assert_eq!(mem::size_of::<BpfAttrTokenCreate>(), 40);
-        assert_eq!(mem::align_of::<BpfAttrTokenCreate>(), 8);
+        // The kernel's token_create attr is exactly { __u32 flags;
+        // __u32 bpffs_fd; } = 8 bytes. Any non-zero trailing bytes make
+        // BPF_TOKEN_CREATE fail with EINVAL.
+        assert_eq!(mem::size_of::<BpfAttrTokenCreate>(), 8);
+        assert_eq!(mem::align_of::<BpfAttrTokenCreate>(), 4);
     }
 
     #[test]
-    fn enterprise_default_sets_expected_cmds() {
-        let attr = TokenCreateAttr::enterprise_default(-1);
-        // MAP_CREATE (bit 0) + PROG_LOAD (bit 5) + OBJ_GET_INFO_BY_FD (bit 15) + BTF_LOAD (bit 18)
-        let expected = 1_u64 | (1 << 5) | (1 << 15) | (1 << 18);
-        assert_eq!(attr.allowed_cmds, expected);
-        assert_eq!(attr.allowed_maps, u64::MAX);
-        assert_eq!(attr.allowed_progs, u64::MAX);
+    fn enterprise_default_carries_only_fd_and_flags() {
+        let attr = TokenCreateAttr::enterprise_default(7);
+        assert_eq!(attr.flags, 0);
+        assert_eq!(attr.bpffs_fd, 7);
     }
 
     #[test]

@@ -33,6 +33,17 @@ spec:
             - name: metrics
               containerPort: 9090
               protocol: TCP
+          # Startup can take a little while (eBPF program load + attach) before
+          # the HTTP server binds. A startupProbe holds off the liveness probe
+          # until the agent is actually serving, so a slow boot never trips a
+          # spurious restart (up to ~120s of grace).
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 24
           livenessProbe:
             httpGet:
               path: /healthz
@@ -55,6 +66,9 @@ spec:
               readOnly: true
             - name: bpf-fs
               mountPath: /sys/fs/bpf
+            - name: btf
+              mountPath: /sys/kernel/btf
+              readOnly: true
             - name: debug-fs
               mountPath: /sys/kernel/debug
               readOnly: true
@@ -71,10 +85,17 @@ spec:
         - name: config
           configMap:
             name: ebpfsentinel-config
+            # The agent refuses a world-readable config file; ConfigMap volumes
+            # default to 0644, so restrict to owner-only (the container is root).
+            defaultMode: 0640
         - name: bpf-fs
           hostPath:
             path: /sys/fs/bpf
             type: DirectoryOrCreate
+        - name: btf
+          hostPath:
+            path: /sys/kernel/btf
+            type: Directory
         - name: debug-fs
           hostPath:
             path: /sys/kernel/debug

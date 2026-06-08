@@ -1,4 +1,4 @@
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, HashMap, MapData};
 use domain::common::error::DomainError;
 use ebpf_common::firewall::{
@@ -42,7 +42,7 @@ impl FirewallMapManager {
     ///
     /// LPM Trie maps must be taken **before** calling this constructor
     /// (see `GeoIpLpmManager`), as `take_map()` is destructive.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let rules_v4 = Array::try_from(
             ebpf.take_map("FIREWALL_RULES")
                 .ok_or_else(|| anyhow::anyhow!("map 'FIREWALL_RULES' not found"))?,
@@ -270,7 +270,7 @@ impl FirewallArrayMapPort for FirewallMapManager {
 /// ifindex via `/sys/class/net/<iface>/ifindex`.
 ///
 /// Best-effort: logs warnings for unresolvable interfaces.
-pub fn populate_zone_map(ebpf: &mut Ebpf, zone_cfg: &domain::zone::entity::ZoneConfig) {
+pub fn populate_zone_map(ebpf: &mut dyn MapStore, zone_cfg: &domain::zone::entity::ZoneConfig) {
     use aya::maps::HashMap;
 
     let Some(map) = ebpf.take_map("ZONE_MAP") else {

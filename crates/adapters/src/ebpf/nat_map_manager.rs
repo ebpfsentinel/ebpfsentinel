@@ -1,4 +1,4 @@
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, MapData};
 use domain::common::error::DomainError;
 use ebpf_common::nat::{HairpinConfig, NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry};
@@ -36,8 +36,8 @@ pub struct NatMapManager {
 impl NatMapManager {
     /// Create a `NatMapManager` by taking maps from both ingress and egress programs.
     pub fn from_ingress_egress(
-        ingress: &mut Ebpf,
-        egress: &mut Ebpf,
+        ingress: &mut dyn MapStore,
+        egress: &mut dyn MapStore,
     ) -> Result<Self, anyhow::Error> {
         let dnat_rules = Array::try_from(
             ingress

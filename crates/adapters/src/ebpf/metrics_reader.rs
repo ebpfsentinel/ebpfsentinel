@@ -1,4 +1,4 @@
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{MapData, PerCpuArray, PerCpuValues};
 use tracing::info;
 
@@ -15,7 +15,7 @@ pub struct MetricsReader {
 impl MetricsReader {
     /// Create a new `MetricsReader` by taking ownership of a named
     /// `PerCpuArray<u64>` map from the loaded eBPF program.
-    pub fn new(ebpf: &mut Ebpf, map_name: &str) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore, map_name: &str) -> Result<Self, anyhow::Error> {
         let map = ebpf
             .take_map(map_name)
             .ok_or_else(|| anyhow::anyhow!("map '{map_name}' not found in eBPF object"))?;

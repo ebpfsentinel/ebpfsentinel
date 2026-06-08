@@ -24,7 +24,8 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::{LazyLock, Mutex};
 
 /// `bpf(2)` commands used here. Numbers from `enum bpf_cmd`.
 const BPF_BTF_GET_FD_BY_ID: u32 = 19;
@@ -37,6 +38,34 @@ const BTF_KIND_FUNC: u32 = 12;
 const VMLINUX_BTF_PATH: &str = "/sys/kernel/btf/vmlinux";
 /// Directory holding per-module split BTF blobs.
 const MODULE_BTF_DIR: &str = "/sys/kernel/btf";
+
+/// Module-name → BTF-object fd, supplied by a privileged helper.
+///
+/// Opening a module's BTF object fd needs `CAP_SYS_ADMIN`
+/// (`BTF_GET_FD_BY_ID`), which a BPF-token process deliberately lacks — the
+/// token authorises program/map loads but not global-object introspection. To
+/// load a program that calls a *module* kfunc (e.g. `bpf_xdp_ct_lookup` from
+/// `nf_conntrack`) the owning module's BTF fd must still go into the
+/// program-load `fd_array`. A privileged setup component opens those fds and
+/// hands them down to the unprivileged agent (inherited across exec); the agent
+/// records them here so the loader can splice them into the `fd_array` without
+/// any privileged syscall of its own.
+static MODULE_BTF_FDS: LazyLock<Mutex<HashMap<String, RawFd>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Register a pre-opened module BTF object fd for `module`. Called from agent
+/// startup for each fd passed in by the privileged setup component. The fd must
+/// stay open for the process lifetime; the loader borrows it, never closes it.
+pub fn set_module_btf_fd(module: &str, fd: RawFd) {
+    if let Ok(mut map) = MODULE_BTF_FDS.lock() {
+        map.insert(module.to_owned(), fd);
+    }
+}
+
+/// Look up a pre-passed module BTF fd by module name.
+fn global_module_btf_fd(module: &str) -> Option<RawFd> {
+    MODULE_BTF_FDS.lock().ok()?.get(module).copied()
+}
 
 /// Errors surfaced while resolving kfuncs.
 #[derive(Debug, thiserror::Error)]
@@ -54,6 +83,13 @@ pub enum KfuncError {
     #[error("kfunc `{0}` not found in vmlinux or any loaded module BTF")]
     Unresolved(String),
 
+    #[error(
+        "module `{0}` BTF object fd unavailable: no fd was passed in by a \
+         privileged helper and BTF_GET_FD_BY_ID needs CAP_SYS_ADMIN (which a \
+         BPF token does not grant)"
+    )]
+    ModuleBtfUnavailable(String),
+
     #[error("BTF_GET_FD_BY_ID(id={id}) failed: {source}")]
     GetFdById {
         id: u32,
@@ -67,8 +103,14 @@ pub enum KfuncError {
 pub struct KfuncTarget {
     /// Global BTF id of the kfunc's `FUNC` type (goes in `insn.imm`).
     pub btf_id: u32,
-    /// Runtime BTF object id of the owning module, or `None` for vmlinux.
-    /// Used to fetch the module BTF fd for the program-load `fd_array`.
+    /// Name of the owning kernel module, or `None` for vmlinux. This is the
+    /// stable module identity: it is recovered from the per-module split BTF
+    /// blob in sysfs (an unprivileged file read), so it is available even in
+    /// BPF-token mode where the BTF-object-id syscalls are denied.
+    pub module_name: Option<String>,
+    /// Runtime BTF object id of the owning module, or `None` for vmlinux (or
+    /// when enumeration was unavailable). Used to fetch the module BTF fd via
+    /// `BTF_GET_FD_BY_ID` when the process holds `CAP_SYS_ADMIN`.
     pub module_btf_obj_id: Option<u32>,
 }
 
@@ -351,28 +393,39 @@ impl KfuncResolver {
         let vmlinux = BtfBlob::parse_base(vmlinux_data)?;
         let vmlinux_funcs = vmlinux.func_ids(None)?;
 
-        // Map module name -> runtime BTF object id by enumerating loaded BTFs.
-        let module_obj_ids = enumerate_module_btf_obj_ids();
-
-        // Parse each module's split BTF (from sysfs) for its FUNC ids.
+        // Discover module kfuncs by reading every per-module split BTF blob
+        // directly from sysfs. Listing the directory and reading the blobs is an
+        // *unprivileged* file operation, so module-kfunc names resolve even in
+        // BPF-token mode — unlike the BTF-object-id enumeration below, which
+        // needs `CAP_SYS_ADMIN` and yields nothing under a token.
         let mut module_funcs = HashMap::new();
-        for module in module_obj_ids.keys() {
-            let path = format!("{MODULE_BTF_DIR}/{module}");
-            let Ok(data) = std::fs::read(&path) else {
-                continue;
-            };
-            let Ok(blob) = BtfBlob::parse_split(data, &vmlinux) else {
-                continue;
-            };
-            let Ok(funcs) = blob.func_ids(Some(&vmlinux)) else {
-                continue;
-            };
-            for (name, id) in funcs {
-                module_funcs
-                    .entry(name)
-                    .or_insert_with(|| (id, module.clone()));
+        if let Ok(entries) = std::fs::read_dir(MODULE_BTF_DIR) {
+            for entry in entries.flatten() {
+                let module = entry.file_name().to_string_lossy().into_owned();
+                if module == "vmlinux" {
+                    continue;
+                }
+                let Ok(data) = std::fs::read(entry.path()) else {
+                    continue;
+                };
+                let Ok(blob) = BtfBlob::parse_split(data, &vmlinux) else {
+                    continue;
+                };
+                let Ok(funcs) = blob.func_ids(Some(&vmlinux)) else {
+                    continue;
+                };
+                for (name, id) in funcs {
+                    module_funcs
+                        .entry(name)
+                        .or_insert_with(|| (id, module.clone()));
+                }
             }
         }
+
+        // Best-effort module name -> runtime BTF object id. This needs
+        // `CAP_SYS_ADMIN`; under a BPF token it returns empty and the loader
+        // instead uses the fds pre-registered via `set_module_btf_fd`.
+        let module_obj_ids = enumerate_module_btf_obj_ids();
 
         Ok(Self {
             vmlinux_funcs,
@@ -387,22 +440,43 @@ impl KfuncResolver {
         if let Some(&btf_id) = self.vmlinux_funcs.get(name) {
             return Ok(KfuncTarget {
                 btf_id,
+                module_name: None,
                 module_btf_obj_id: None,
             });
         }
         if let Some((btf_id, module)) = self.module_funcs.get(name) {
             return Ok(KfuncTarget {
                 btf_id: *btf_id,
+                module_name: Some(module.clone()),
                 module_btf_obj_id: self.module_obj_ids.get(module).copied(),
             });
         }
         Err(KfuncError::Unresolved(name.to_owned()))
     }
 
-    /// Open an fd to a module's BTF object by its runtime id, for inclusion
-    /// in the program-load `fd_array`.
-    pub fn module_btf_fd(&self, obj_id: u32) -> Result<OwnedFd, KfuncError> {
-        btf_get_fd_by_id(obj_id)
+    /// Resolve a module's BTF object fd for the program-load `fd_array`.
+    ///
+    /// Prefers a fd pre-registered by the privileged helper (the only path that
+    /// works under a BPF token); otherwise falls back to `BTF_GET_FD_BY_ID` on
+    /// the runtime object id, which needs `CAP_SYS_ADMIN`. Returns the raw fd to
+    /// place in the array plus, when this call opened it, the `OwnedFd` whose
+    /// lifetime must cover the program load. A pre-registered fd is borrowed
+    /// (owned elsewhere for the process lifetime), so no `OwnedFd` is returned.
+    pub fn module_btf_fd_by_name(
+        &self,
+        module: &str,
+    ) -> Result<(RawFd, Option<OwnedFd>), KfuncError> {
+        if let Some(fd) = global_module_btf_fd(module) {
+            return Ok((fd, None));
+        }
+        let obj_id = self
+            .module_obj_ids
+            .get(module)
+            .copied()
+            .ok_or_else(|| KfuncError::ModuleBtfUnavailable(module.to_owned()))?;
+        let owned = btf_get_fd_by_id(obj_id)?;
+        let raw = owned.as_raw_fd();
+        Ok((raw, Some(owned)))
     }
 }
 

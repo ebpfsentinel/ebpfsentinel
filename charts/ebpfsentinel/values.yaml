@@ -89,10 +89,13 @@ daemonset:
   terminationGracePeriodSeconds: 30
   # -- Pod priority class name
   priorityClassName: ""
-  # -- Container security context (fine-grained capabilities by default)
+  # -- Container security context. Drops ALL capabilities and adds only the
+  # scoped set the agent needs, instead of `privileged: true`. This matches
+  # the systemd unit (dist/ebpfsentinel.service): BPF + NET_ADMIN + SYS_ADMIN
+  # for eBPF program loading/attach, plus NET_RAW for pcap packet capture.
   securityContext:
     capabilities:
-      add: [BPF, NET_ADMIN, SYS_ADMIN, NET_RAW, PERFMON]
+      add: [BPF, NET_ADMIN, SYS_ADMIN, NET_RAW]
       drop: [ALL]
     # Fallback for older kernels without CAP_BPF:
     # privileged: true

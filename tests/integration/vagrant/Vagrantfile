@@ -246,6 +246,33 @@ NETPLAN
     SHELL
 
     # ----------------------------------------------------------
+    # Provisioner: kubernetes-tools (kubectl + minikube)
+    # Installs the binaries the 10-kubernetes suite needs. minikube runs
+    # with the docker driver (no nested VM), and conntrack — required by the
+    # kube-proxy/kubelet on the node — is part of the base-packages set.
+    # ----------------------------------------------------------
+    agent.vm.provision "shell", name: "kubernetes-tools", inline: <<-SHELL
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      if ! command -v kubectl &>/dev/null; then
+        KVER="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
+        curl -fsSL -o /usr/local/bin/kubectl \
+          "https://dl.k8s.io/release/${KVER}/bin/linux/$(dpkg --print-architecture)/kubectl"
+        chmod +x /usr/local/bin/kubectl
+      fi
+
+      if ! command -v minikube &>/dev/null; then
+        curl -fsSL -o /usr/local/bin/minikube \
+          "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-$(dpkg --print-architecture)"
+        chmod +x /usr/local/bin/minikube
+      fi
+
+      # conntrack is a minikube hard dependency; ensure it is present.
+      command -v conntrack &>/dev/null || apt-get install -y --no-install-recommends conntrack
+    SHELL
+
+    # ----------------------------------------------------------
     # Provisioner: rust (unprivileged)
     # ----------------------------------------------------------
     agent.vm.provision "shell", name: "rust", privileged: false, inline: <<-SHELL

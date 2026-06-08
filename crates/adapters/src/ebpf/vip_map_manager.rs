@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{HashMap, MapData, PerCpuHashMap, PerCpuValues};
 use domain::common::error::DomainError;
 use ebpf_common::vip::{IfaceMac, VipEntry};
@@ -25,7 +25,7 @@ pub struct VipMapManager {
 impl VipMapManager {
     /// Take ownership of the `VIP_SET`, `IFACE_MAC`, and
     /// `VIP_ARP_REPLIES` maps from the loaded `xdp-vip-announcer` object.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let vip_set = HashMap::try_from(
             ebpf.take_map("VIP_SET")
                 .ok_or_else(|| anyhow::anyhow!("map 'VIP_SET' not found in eBPF object"))?,

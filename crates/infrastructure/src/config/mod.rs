@@ -1204,11 +1204,12 @@ pub struct AgentInfo {
 /// BPF token delegation configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BpfTokenConfig {
-    /// When `true` the agent will attempt to create a BPF token at
-    /// startup. The host kernel must be >= 6.9 and the configured
-    /// `bpffs_path` must be a bpffs mount with the `delegate_*` mount
-    /// options set. Defaults to `false` so existing deployments keep
-    /// their current capability-based loading path.
+    /// When `true` the agent creates a BPF token at startup against the
+    /// delegated bpffs at `bpffs_path`. **Experimental / forward-looking:**
+    /// the token fd is created and held, but the current `aya` release
+    /// does not yet thread it into program/map loads, so eBPF still loads
+    /// via process capabilities. Defaults to `false` — capability-based
+    /// loading is the working default until `aya` gains token support.
     #[serde(default)]
     pub enabled: bool,
 

@@ -10,6 +10,15 @@ data:
     agent:
       interfaces:
         - eth0
+      # Bind on all interfaces (default is 127.0.0.1) so the kubelet's
+      # liveness/readiness HTTP probes — which hit the pod/node IP, not
+      # loopback — can reach /healthz and /readyz.
+      bind_address: "0.0.0.0"
+      # BPF token is the production default, but a nested minikube-on-docker
+      # node can't delegate a bpffs; this pod is privileged, so load eBPF the
+      # capability way for a deterministic deployment-mechanics test.
+      bpf_token:
+        enabled: false
       log_level: info
       log_format: json
       http_port: 8080

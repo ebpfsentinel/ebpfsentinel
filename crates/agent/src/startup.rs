@@ -1,3 +1,4 @@
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1208,6 +1209,25 @@ pub async fn run(
         .as_ref()
         .map_or(adapters::ebpf::BpfLoadingMode::Privileged, |h| h.mode);
     metrics.set_bpf_loading_mode(bpf_mode.metric_value(), bpf_mode.as_str());
+
+    // When a BPF token was obtained, register it process-wide BEFORE any eBPF
+    // load so every map/BTF/program syscall (aya and the kfunc loader) is
+    // authorized by the token instead of the process capabilities. The token
+    // fd is kept alive for the process lifetime by `ebpf_state.bpf_handle`.
+    if let Some(handle) = bpf_handle.as_ref()
+        && let Some(token_fd) = handle.token_fd.as_ref()
+    {
+        adapters::ebpf::set_bpf_token_fd(token_fd.as_raw_fd());
+    }
+
+    // In BPF-token mode the agent cannot open a kernel module's BTF object fd
+    // itself (BTF_GET_FD_BY_ID needs CAP_SYS_ADMIN, which the token does not
+    // grant), yet that fd is required to load programs that call module kfuncs
+    // (e.g. conntrack). A privileged setup component opens those fds and passes
+    // them in, inherited across exec, advertised via `EBPF_MODULE_BTF_FDS` as a
+    // comma-separated `module=fd` list. Register each so the kfunc loader can
+    // splice it into the program-load `fd_array`.
+    register_module_btf_fds();
 
     let mut ebpf_state = EbpfState::new();
     if let Some(handle) = bpf_handle {
@@ -3549,6 +3569,36 @@ pub fn try_load_uprobe_dlp(
 /// Parses `ldconfig -p` to extract the full path for each candidate,
 /// then falls back to common library directories. Returns the absolute
 /// path to the first library found, which aya needs for uprobe attach.
+/// Parse `EBPF_MODULE_BTF_FDS` (a comma-separated `module=fd` list passed in by
+/// a privileged setup component in BPF-token mode) and register each module BTF
+/// object fd with the kfunc loader. A malformed entry is logged and skipped so
+/// one bad pair never blocks the rest. Absent or empty env is the normal case
+/// (privileged mode resolves the fds itself) and does nothing.
+fn register_module_btf_fds() {
+    let Ok(raw) = std::env::var("EBPF_MODULE_BTF_FDS") else {
+        return;
+    };
+    for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let Some((module, fd_str)) = entry.split_once('=') else {
+            warn!(
+                entry,
+                "ignoring malformed EBPF_MODULE_BTF_FDS entry (no '=')"
+            );
+            continue;
+        };
+        match fd_str.trim().parse::<std::os::fd::RawFd>() {
+            Ok(fd) if fd >= 0 => {
+                adapters::ebpf::set_module_btf_fd(module.trim(), fd);
+                info!(module = module.trim(), fd, "registered module BTF fd");
+            }
+            _ => warn!(
+                entry,
+                "ignoring malformed EBPF_MODULE_BTF_FDS entry (bad fd)"
+            ),
+        }
+    }
+}
+
 fn find_ssl_library_path() -> Option<String> {
     use std::process::Command;
 

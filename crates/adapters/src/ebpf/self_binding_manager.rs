@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{HashMap, MapData};
 use domain::common::error::DomainError;
 use domain::l2::L2Binding;
@@ -22,7 +22,7 @@ pub struct SelfBindingManager {
 impl SelfBindingManager {
     /// Take ownership of the `SELF_OWNED_BINDINGS` map from the loaded
     /// `xdp-vip-announcer` object.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let bindings =
             HashMap::try_from(ebpf.take_map("SELF_OWNED_BINDINGS").ok_or_else(|| {
                 anyhow::anyhow!("map 'SELF_OWNED_BINDINGS' not found in eBPF object")

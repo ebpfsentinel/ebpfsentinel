@@ -1,4 +1,4 @@
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{HashMap, MapData};
 use tracing::info;
 
@@ -22,7 +22,7 @@ impl TenantVlanMapManager {
     /// register it for tenant VLAN updates. No-op if the map does
     /// not exist in the program (e.g., programs that do not support
     /// VLAN-based tenant identification).
-    pub fn add_map(&mut self, ebpf: &mut Ebpf) {
+    pub fn add_map(&mut self, ebpf: &mut dyn MapStore) {
         if let Some(map) = ebpf.take_map("TENANT_VLAN_MAP") {
             match HashMap::try_from(map) {
                 Ok(hm) => {

@@ -22,7 +22,15 @@ pub const DEFAULT_BPF_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel";
 /// Wraps the `aya::Ebpf` instance and provides methods for
 /// program lifecycle management (load, attach, detach).
 pub struct EbpfLoader {
-    ebpf: Ebpf,
+    /// The aya instance in capability mode. `None` in BPF-token mode, where
+    /// aya cannot load (every syscall needs the token fd it does not pass) and
+    /// the object is loaded by the raw token loader instead — its maps live in
+    /// `token_maps` and its programs in `kfunc_progs`.
+    ebpf: Option<Ebpf>,
+    /// Token-mode maps (from `kfunc_loader::load_object_token`), exposed to the
+    /// map managers through the same `MapStore` surface as the aya maps. Empty
+    /// in capability mode.
+    token_maps: super::map_store::TokenMaps,
     /// Owned link fds for netkit attachments. Dropping these detaches.
     netkit_links: Vec<OwnedFd>,
     /// Programs aya cannot load because they call kfuncs it can't relocate.
@@ -143,11 +151,40 @@ fn load_kfunc_with_metadata_fallback<S: BuildHasher>(
 }
 
 impl EbpfLoader {
+    /// Build a token-mode loader from a raw-loaded object: maps go into the
+    /// `MapStore` the managers consume, programs into `kfunc_progs` where the
+    /// raw-attach paths already pick them up. There is no aya instance.
+    fn from_token_object(loaded: kfunc_loader::TokenLoadedObject) -> Self {
+        let kfunc_progs = loaded
+            .programs
+            .into_iter()
+            .map(|p| (p.name, p.fd))
+            .collect();
+        Self {
+            ebpf: None,
+            token_maps: super::map_store::TokenMaps::new(loaded.maps),
+            netkit_links: Vec::new(),
+            kfunc_progs,
+            kfunc_links: Vec::new(),
+            // Raw map fds captured at load time, so `set_tail_call_raw` can wire
+            // `ProgramArray`s (e.g. XDP_PROG_ARRAY) the same way as cap mode.
+            kfunc_hosted_maps: loaded.hosted,
+        }
+    }
+
     /// Load an eBPF program from raw ELF bytes.
     ///
     /// Initializes aya-log for eBPF debug message forwarding (best-effort).
     /// Returns an error if the verifier rejects the program.
     pub fn load(program_bytes: &[u8]) -> Result<Self, anyhow::Error> {
+        // BPF-token mode: aya cannot load without `CAP_BPF`, so the raw token
+        // loader creates the maps and loads the programs through the token.
+        if super::bpf_token::global_token_fd().is_some() {
+            let loaded =
+                kfunc_loader::load_object_token(program_bytes, DEFAULT_BPF_PIN_PATH, None)?;
+            return Ok(Self::from_token_object(loaded));
+        }
+
         // `allow_unsupported_maps` (inside `aya_load`) lets aya create maps it
         // has no high-level wrapper for by passing the parsed definition
         // straight to `BPF_MAP_CREATE`.
@@ -160,7 +197,8 @@ impl EbpfLoader {
 
         info!("eBPF program loaded successfully");
         Ok(Self {
-            ebpf,
+            ebpf: Some(ebpf),
+            token_maps: super::map_store::TokenMaps::default(),
             netkit_links: Vec::new(),
             kfunc_progs: HashMap::new(),
             kfunc_links: Vec::new(),
@@ -197,6 +235,14 @@ impl EbpfLoader {
         pin_path: &str,
         dev_bound_ifindex: Option<u32>,
     ) -> Result<Self, anyhow::Error> {
+        // BPF-token mode: the raw token loader creates all maps and loads every
+        // program through the token (no aya, no `CAP_BPF`).
+        if super::bpf_token::global_token_fd().is_some() {
+            let loaded =
+                kfunc_loader::load_object_token(program_bytes, pin_path, dev_bound_ifindex)?;
+            return Ok(Self::from_token_object(loaded));
+        }
+
         // Ensure pin directory exists
         let path = Path::new(pin_path);
         if !path.exists() {
@@ -260,7 +306,8 @@ impl EbpfLoader {
 
         info!(pin_path, "eBPF program loaded with map pinning");
         Ok(Self {
-            ebpf,
+            ebpf: Some(ebpf),
+            token_maps: super::map_store::TokenMaps::default(),
             netkit_links: Vec::new(),
             kfunc_progs,
             kfunc_links: Vec::new(),
@@ -291,6 +338,15 @@ impl EbpfLoader {
             info!(pin_path, "created BPF pin directory");
         }
 
+        // BPF-token mode: aya cannot create this program's maps (it has no
+        // token), so the token loader creates them — reusing the owner's
+        // pin-shared maps and creating this program's private ones (e.g.
+        // `REJECT_SCRATCH`) — and loads the program raw, all through the token.
+        if super::bpf_token::global_token_fd().is_some() {
+            let loaded = kfunc_loader::load_object_token(program_bytes, pin_path, None)?;
+            return Ok(Self::from_token_object(loaded));
+        }
+
         // aya hosts the maps (and pin-shares them with the owner program);
         // it never loads the program into the kernel — the raw loader does.
         let mut ebpf = aya_load(program_bytes, Some(pin_path))?;
@@ -314,7 +370,8 @@ impl EbpfLoader {
 
         info!(pin_path, "XDP program loaded raw with map pinning");
         Ok(Self {
-            ebpf,
+            ebpf: Some(ebpf),
+            token_maps: super::map_store::TokenMaps::default(),
             netkit_links: Vec::new(),
             kfunc_progs,
             kfunc_links: Vec::new(),
@@ -397,6 +454,8 @@ impl EbpfLoader {
 
         let program: &mut Xdp = self
             .ebpf
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("aya programs unavailable in BPF-token mode"))?
             .program_mut(program_name)
             .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found in eBPF object"))?
             .try_into()?;
@@ -453,6 +512,8 @@ impl EbpfLoader {
 
         let program: &mut Xdp = self
             .ebpf
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("aya programs unavailable in BPF-token mode"))?
             .program_mut(program_name)
             .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found in eBPF object"))?
             .try_into()?;
@@ -496,6 +557,8 @@ impl EbpfLoader {
 
         let program: &mut SchedClassifier = self
             .ebpf
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("aya programs unavailable in BPF-token mode"))?
             .program_mut(program_name)
             .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found in eBPF object"))?
             .try_into()?;
@@ -531,6 +594,8 @@ impl EbpfLoader {
         } else {
             let program: &mut aya::programs::SchedClassifier = self
                 .ebpf
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("aya programs unavailable in BPF-token mode"))?
                 .program_mut(program_name)
                 .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found"))?
                 .try_into()?;
@@ -553,8 +618,24 @@ impl EbpfLoader {
         target: &str,
         is_ret_probe: bool,
     ) -> Result<(), anyhow::Error> {
+        // Token mode: the raw loader already issued BPF_PROG_LOAD, so attach the
+        // captured fd through the kernel uprobe PMU (aya never made a handle).
+        if let Some(prog_fd) = self.kfunc_progs.get(program_name) {
+            let link = kfunc_attach::attach_uprobe_raw(
+                program_name,
+                prog_fd.as_raw_fd(),
+                target,
+                fn_name,
+                is_ret_probe,
+            )?;
+            self.kfunc_links.push(link);
+            return Ok(());
+        }
+
         let program: &mut UProbe = self
             .ebpf
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("aya programs unavailable in BPF-token mode"))?
             .program_mut(program_name)
             .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found in eBPF object"))?
             .try_into()?;
@@ -572,6 +653,8 @@ impl EbpfLoader {
     pub fn detach(&mut self) -> Result<(), anyhow::Error> {
         let program: &mut Xdp = self
             .ebpf
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("aya programs unavailable in BPF-token mode"))?
             .program_mut("xdp_firewall")
             .ok_or_else(|| anyhow::anyhow!("program 'xdp_firewall' not found in eBPF object"))?
             .try_into()?;
@@ -593,7 +676,8 @@ impl EbpfLoader {
         }
         let program = self
             .ebpf
-            .program(program_name)
+            .as_ref()
+            .and_then(|e| e.program(program_name))
             .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found"))?;
         if let Ok(xdp) = <&Xdp>::try_from(program) {
             return Ok(xdp
@@ -650,7 +734,7 @@ impl EbpfLoader {
         index: u32,
     ) -> Result<(), anyhow::Error> {
         let map = self
-            .ebpf
+            .ebpf_mut()
             .map_mut(map_name)
             .ok_or_else(|| anyhow::anyhow!("map '{map_name}' not found"))?;
         let mut prog_array = ProgramArray::try_from(map)?;
@@ -659,11 +743,16 @@ impl EbpfLoader {
         Ok(())
     }
 
-    /// Borrow the inner `Ebpf` instance mutably.
+    /// Borrow this loader's maps as a [`MapStore`](super::map_store::MapStore).
     ///
-    /// Used by map managers and event readers to access maps.
-    pub fn ebpf_mut(&mut self) -> &mut Ebpf {
-        &mut self.ebpf
+    /// Used by map managers and event readers. Returns the aya instance in
+    /// capability mode and the raw-token map collection in BPF-token mode —
+    /// both expose the same `take_map` / `map` / `map_mut` surface.
+    pub fn ebpf_mut(&mut self) -> &mut dyn super::map_store::MapStore {
+        match self.ebpf.as_mut() {
+            Some(e) => e,
+            None => &mut self.token_maps,
+        }
     }
 
     /// Get the raw fd of a loaded program by name.
@@ -674,7 +763,8 @@ impl EbpfLoader {
         if let Some(fd) = self.kfunc_progs.get(program_name) {
             return Some(fd.as_raw_fd());
         }
-        let program: &SchedClassifier = self.ebpf.program(program_name)?.try_into().ok()?;
+        let program: &SchedClassifier =
+            self.ebpf.as_ref()?.program(program_name)?.try_into().ok()?;
         Some(program.fd().ok()?.as_fd().as_raw_fd())
     }
 

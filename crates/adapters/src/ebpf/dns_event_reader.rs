@@ -1,7 +1,7 @@
 #![allow(unsafe_code)] // Required for eBPF RingBuf event parsing (read_unaligned)
 
+use crate::ebpf::map_store::MapStore;
 use application::packet_pipeline::AgentEvent;
-use aya::Ebpf;
 use aya::maps::{MapData, RingBuf};
 use ebpf_common::dns::DnsEvent;
 use tokio::io::unix::AsyncFd;
@@ -20,7 +20,7 @@ pub struct DnsEventReader {
 
 impl DnsEventReader {
     /// Create a new `DnsEventReader` by taking ownership of the `DNS_EVENTS` map.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let map = ebpf
             .take_map("DNS_EVENTS")
             .ok_or_else(|| anyhow::anyhow!("map 'DNS_EVENTS' not found in eBPF object"))?;

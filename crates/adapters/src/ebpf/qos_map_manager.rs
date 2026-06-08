@@ -1,4 +1,4 @@
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, HashMap, MapData};
 use domain::common::error::DomainError;
 use domain::qos::entity::{QosClassifier, QosPipe, QosQueue};
@@ -19,7 +19,7 @@ pub struct QosMapManager {
 impl QosMapManager {
     /// Create a new `QosMapManager` by taking ownership of the `QoS` maps
     /// from the loaded eBPF program.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let pipe_map = ebpf
             .take_map("QOS_PIPE_CONFIG")
             .ok_or_else(|| anyhow::anyhow!("map 'QOS_PIPE_CONFIG' not found in eBPF object"))?;

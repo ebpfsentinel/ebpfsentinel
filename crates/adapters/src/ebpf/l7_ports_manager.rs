@@ -1,4 +1,4 @@
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::{HashMap, MapData};
 use tracing::info;
 
@@ -13,7 +13,7 @@ pub struct L7PortsManager {
 impl L7PortsManager {
     /// Create a new `L7PortsManager` by taking ownership of the
     /// `L7_PORTS` map from the loaded eBPF program.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let map = ebpf
             .take_map("L7_PORTS")
             .ok_or_else(|| anyhow::anyhow!("map 'L7_PORTS' not found in eBPF object"))?;

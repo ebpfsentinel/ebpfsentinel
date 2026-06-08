@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use aya::Ebpf;
+use crate::ebpf::map_store::MapStore;
 use aya::maps::MapData;
 use aya::maps::lpm_trie::{Key, LpmTrie};
 use domain::common::error::DomainError;
@@ -62,7 +62,7 @@ impl LpmCoordinator {
     ///
     /// Must be created **before** `FirewallMapManager` since `take_map()` is
     /// destructive.
-    pub fn new(ebpf: &mut Ebpf) -> Result<Self, anyhow::Error> {
+    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let lpm_src_v4 = LpmTrie::try_from(
             ebpf.take_map("FW_LPM_SRC_V4")
                 .ok_or_else(|| anyhow::anyhow!("map 'FW_LPM_SRC_V4' not found"))?,
