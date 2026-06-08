@@ -2876,37 +2876,25 @@ fn check_kernel_version() -> anyhow::Result<()> {
     check_kernel_version_from(std::path::Path::new("/proc/sys/kernel/osrelease"))
 }
 
-/// Mandatory kernel minimum: **6.9**. Exposed as a const so tests
-/// and docs cite a single source of truth.
-pub const MIN_KERNEL_MAJOR: u32 = 6;
-pub const MIN_KERNEL_MINOR: u32 = 9;
-
 fn check_kernel_version_from(path: &std::path::Path) -> anyhow::Result<()> {
-    let release = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("cannot read kernel version from {}: {e}", path.display()))?;
+    use adapters::ebpf::{MIN_KERNEL_MAJOR, MIN_KERNEL_MINOR, probe_kernel_features_from};
 
-    let version = release.trim();
-    let mut parts = version.split(|c: char| !c.is_ascii_digit());
-    let major = parts
-        .next()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(0);
-    let minor = parts
-        .next()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(0);
-
-    if major > MIN_KERNEL_MAJOR || (major == MIN_KERNEL_MAJOR && minor >= MIN_KERNEL_MINOR) {
-        return Ok(());
-    }
-
-    Err(anyhow::anyhow!(
-        "kernel {version} is below the mandatory minimum {MIN_KERNEL_MAJOR}.{MIN_KERNEL_MINOR} — \
-         eBPFsentinel refuses to start. Required features: BPF token delegation, \
-         cgroup1 kfunc, XDP metadata kfuncs, netfilter conntrack kfuncs, dynptr \
-         helpers. No fallback path exists — upgrade the host kernel \
-         to 6.9+ and restart the agent."
-    ))
+    // The version floor + parsing live in `adapters::ebpf::kernel_probe`,
+    // the single source of truth. BTF presence is irrelevant to the gate,
+    // so a missing `/sys/kernel/btf/vmlinux` is non-fatal here — only the
+    // version comparison decides pass/fail.
+    probe_kernel_features_from(path, std::path::Path::new("/sys/kernel/btf/vmlinux")).map_err(
+        |e| {
+            anyhow::anyhow!(
+                "kernel is below the mandatory minimum {MIN_KERNEL_MAJOR}.{MIN_KERNEL_MINOR} \
+                 ({e}) — eBPFsentinel refuses to start. Required features: BPF token \
+                 delegation, cgroup1 kfunc, XDP metadata kfuncs, netfilter conntrack kfuncs, \
+                 dynptr helpers. No fallback path exists — upgrade the host kernel to 6.9+ \
+                 and restart the agent."
+            )
+        },
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -53,7 +53,10 @@ pub use geoip_lpm_manager::GeoIpLpmManager;
 pub use ids_map_manager::IdsMapManager;
 pub use ids_mirror_map_manager::IdsMirrorMapManager;
 pub use ipset_map_manager::IpSetMapManager;
-pub use kernel_probe::{KernelFeatures, KernelProbeError, probe as probe_kernel_features};
+pub use kernel_probe::{
+    KernelFeatures, KernelProbeError, MIN_KERNEL_MAJOR, MIN_KERNEL_MINOR,
+    probe as probe_kernel_features, probe_from as probe_kernel_features_from,
+};
 pub use l7_ports_manager::L7PortsManager;
 pub use lb_map_manager::LbMapManager;
 pub use loader::{DEFAULT_BPF_PIN_PATH, EbpfLoader, xdp_mode_to_flags};

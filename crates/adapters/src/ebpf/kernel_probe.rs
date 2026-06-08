@@ -83,7 +83,14 @@ pub fn probe() -> Result<KernelFeatures, KernelProbeError> {
     )
 }
 
-pub(crate) fn probe_from(
+/// Probe from explicit `osrelease` + BTF paths. Exposed so callers
+/// (e.g. the agent's startup gate) and tests can inject synthetic
+/// `/proc` + `/sys` paths instead of the live defaults [`probe`] uses.
+///
+/// # Errors
+/// Same as [`probe`]: IO/parse failures and
+/// [`KernelProbeError::BelowMinimum`] when the kernel is below 6.9.
+pub fn probe_from(
     osrelease_path: &Path,
     btf_path: &Path,
 ) -> Result<KernelFeatures, KernelProbeError> {
