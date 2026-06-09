@@ -35,6 +35,8 @@ pub struct PacketSecurityAlert {
     pub action_label: String,
     pub severity: Severity,
     pub detail: String,
+    /// JA4 TLS `ClientHello` fingerprint for the flow, when one was computed.
+    pub ja4_fingerprint: Option<String>,
 }
 
 /// Full-context alert with all FR30 fields.
@@ -572,7 +574,7 @@ impl Alert {
             mitigation_status: None,
             total_packets: None,
             mitre_attack: Some(mitre::lookup(&mitre_context)),
-            ja4_fingerprint: None,
+            ja4_fingerprint: psa.ja4_fingerprint.clone(),
             ml_anomaly_score: None,
             ml_top_feature: None,
             ml_engine: None,
@@ -1025,6 +1027,7 @@ mod tests {
             action_label: action.to_string(),
             severity: Severity::Medium,
             detail: "test detail".to_string(),
+            ja4_fingerprint: None,
         }
     }
 

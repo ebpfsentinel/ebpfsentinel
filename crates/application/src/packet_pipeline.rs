@@ -1024,6 +1024,17 @@ impl EventDispatcher {
             }
             _ => domain::common::entity::Severity::Medium,
         };
+        // Attach the flow's JA4 fingerprint when one was computed for the
+        // originating ClientHello (same client→server flow key).
+        let ja4_fingerprint = self
+            .fingerprint_cache
+            .get(&FlowKey {
+                src_addr: event.src_addr,
+                src_port: event.src_port,
+                dst_addr: event.dst_addr,
+                dst_port: event.dst_port,
+            })
+            .map(|fp| fp.ja4);
         let psa = domain::alert::entity::PacketSecurityAlert {
             component,
             src_addr: event.src_addr,
@@ -1037,6 +1048,7 @@ impl EventDispatcher {
             action_label: action_label.to_string(),
             severity,
             detail: detail.to_string(),
+            ja4_fingerprint,
         };
         let _ = self.alert_tx.try_send(AlertEvent::PacketSecurity(psa));
     }
@@ -1549,11 +1561,12 @@ mod tests {
         pkt
     }
 
-    // A buffered non-HTTP flow (TLS ClientHello) must still reach the L7
-    // parser via the idle-flush path — otherwise the reassembler is a sink
-    // that silently drops every protocol it cannot complete inline.
+    // A complete TLS ClientHello is a self-contained record, so the
+    // reassembler recognises its boundary and emits it inline — the L7 parser
+    // (and JA4 fingerprinting) runs immediately, not deferred to the idle
+    // flush. Nothing is left buffered for a later flush.
     #[tokio::test]
-    async fn flush_reassembled_parses_buffered_tls_clienthello() {
+    async fn complete_tls_clienthello_parses_inline() {
         let ids = make_service_with_rules(vec![]);
         let metrics = Arc::new(TestMetrics::new());
         let (alert_tx, mut alert_rx) = mpsc::channel(10);
@@ -1563,21 +1576,13 @@ mod tests {
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
             .with_stream_reassembler(reassembler);
 
-        // DoT flow: dst_port 853, TLS ClientHello.
+        // DoT flow: dst_port 853, complete TLS ClientHello record.
         let mut header = make_event(EVENT_TYPE_L7, 0);
         header.dst_port = 853;
         let client_hello = build_tls_client_hello("dot.example");
 
-        // Live path: reassembler buffers it (not HTTP) → no alert yet.
+        // Live path: the complete record is parsed inline → DoT alert now.
         dispatcher.process_l7_event(header, &client_hello);
-        assert!(
-            alert_rx.try_recv().is_err(),
-            "buffered ClientHello must not emit before flush"
-        );
-
-        // Idle flush (now far past the 5s default timeout) → parsed → DoT alert.
-        let flushed = dispatcher.flush_reassembled(10_000_000_000);
-        assert_eq!(flushed, 1, "exactly one idle flow should flush");
         match alert_rx.try_recv() {
             Ok(AlertEvent::Dns(alert)) => match alert.reason {
                 domain::dns::entity::DnsAlertReason::EncryptedDns { protocol, .. } => {
@@ -1585,8 +1590,15 @@ mod tests {
                 }
                 _ => panic!("expected EncryptedDns reason"),
             },
-            _ => panic!("expected AlertEvent::Dns"),
+            _ => panic!("expected AlertEvent::Dns emitted inline"),
         }
+
+        // The flow was emitted, not buffered — the idle flush has nothing left.
+        let flushed = dispatcher.flush_reassembled(10_000_000_000);
+        assert_eq!(
+            flushed, 0,
+            "no flow should remain buffered after inline parse"
+        );
     }
 
     #[tokio::test]

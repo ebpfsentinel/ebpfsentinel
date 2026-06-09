@@ -155,9 +155,12 @@ impl StreamReassembler {
             );
         }
 
-        // Check HTTP Content-Length completion after the update.
+        // Emit as soon as a protocol boundary is recognised: an HTTP/1.x
+        // message (Content-Length) or a complete TLS record (ClientHello /
+        // ServerHello). TLS records are self-contained, so buffering them
+        // until the idle flush would needlessly delay JA4 fingerprinting.
         if let Some(buf) = lock.peek(&flow)
-            && http_is_complete(&buf.bytes)
+            && (http_is_complete(&buf.bytes) || tls_record_is_complete(&buf.bytes))
             && let Some(entry) = lock.pop(&flow)
         {
             return Ingest::Complete(entry.bytes);
@@ -233,6 +236,25 @@ fn find_double_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
+/// Whether `buf` holds at least one complete TLS record. A TLS record is a
+/// 5-byte header (content type, 2-byte version, 2-byte length) followed by
+/// `length` bytes of fragment. A `ClientHello` is a self-contained handshake
+/// record (content type `0x16`), so recognising the record boundary lets the
+/// reassembler emit it immediately instead of buffering it until the idle
+/// flush — which is what JA4 fingerprinting needs to run in real time.
+fn tls_record_is_complete(buf: &[u8]) -> bool {
+    if buf.len() < 5 {
+        return false;
+    }
+    // 0x16 = handshake (ClientHello / ServerHello live here). Major version
+    // 0x03 covers SSL 3.0 .. TLS 1.3 record layers.
+    if buf[0] != 0x16 || buf[1] != 0x03 {
+        return false;
+    }
+    let record_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
+    buf.len() >= 5 + record_len
+}
+
 /// Case-insensitive `Content-Length:` value extractor. Returns `None`
 /// when the header is absent, malformed, or larger than `usize::MAX`.
 fn extract_content_length(headers: &[u8]) -> Option<usize> {
@@ -277,6 +299,26 @@ mod tests {
         let out = r.ingest(flow(80), b"", 0);
         assert_eq!(out, Ingest::Pending);
         assert_eq!(r.flow_count(), 0);
+    }
+
+    #[test]
+    fn ingest_complete_tls_record_emits_immediately() {
+        let r = StreamReassembler::new(ReassemblerConfig::default());
+        // Handshake record (0x16), TLS 1.2 (0x0303), length 4, 4 payload bytes.
+        let record = [0x16, 0x03, 0x03, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00];
+        let out = r.ingest(flow(8443), &record, 1);
+        assert_eq!(out, Ingest::Complete(record.to_vec()));
+        // Flow emitted, not left buffered for the idle flush.
+        assert_eq!(r.flow_count(), 0);
+    }
+
+    #[test]
+    fn ingest_partial_tls_record_stays_pending() {
+        let r = StreamReassembler::new(ReassemblerConfig::default());
+        // Header claims a 16-byte fragment but only 2 bytes follow.
+        let partial = [0x16, 0x03, 0x03, 0x00, 0x10, 0xAA, 0xBB];
+        let out = r.ingest(flow(8443), &partial, 1);
+        assert_eq!(out, Ingest::Pending);
     }
 
     #[test]
