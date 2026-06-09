@@ -161,29 +161,6 @@ pub fn attach_tcx(
     Ok(fd)
 }
 
-/// Attach a raw `CGROUP_SOCK_ADDR` program fd (e.g. `cgroup_connect4`) to a
-/// cgroup via `BPF_LINK_CREATE`. `cgroup_fd` is an open fd on the cgroup v2
-/// directory; `attach_type` is `BPF_CGROUP_INET4_CONNECT` /
-/// `BPF_CGROUP_INET6_CONNECT` and must match the program's
-/// `expected_attach_type`. The `target_ifindex` field of `bpf_attr` aliases
-/// the `target_fd` union member, so the cgroup fd is passed there. Returns the
-/// link fd; dropping it detaches.
-pub fn attach_cgroup_sock_addr(
-    program: &str,
-    prog_fd: RawFd,
-    cgroup_fd: RawFd,
-    attach_type: u32,
-) -> Result<OwnedFd, KfuncAttachError> {
-    #[allow(clippy::cast_sign_loss)]
-    let target = cgroup_fd as u32;
-    let fd = link_create(program, prog_fd, target, attach_type, 0)?;
-    info!(
-        program,
-        "cgroup_sock_addr kfunc program attached (raw link)"
-    );
-    Ok(fd)
-}
-
 /// Set slot `index` of a `PROG_ARRAY` (identified by `array_fd`) to `prog_fd`.
 /// Works regardless of whether `prog_fd` came from aya or the raw loader.
 pub fn prog_array_set(array_fd: RawFd, index: u32, prog_fd: RawFd) -> Result<(), KfuncAttachError> {

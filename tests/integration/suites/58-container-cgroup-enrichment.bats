@@ -16,12 +16,12 @@
 #     name/image metadata against the resolved cgroup.
 #
 # Attribution path: the container dials a server in the test netns through
-# the inspected veth. tc-ids runs on ingress, where the kernel has not yet
-# attached a socket to inbound packets, so the cgroup cannot be read from
-# the skb. Instead a cgroup/connect hook records the dialing cgroup keyed
-# by the remote endpoint, and the ingress path recovers it from the reply's
-# source endpoint. A src_port IDS rule fires on that reply so the alert is
-# emitted with the container identity attached.
+# the inspected veth, so its outbound request crosses the veth EGRESS hook.
+# With ids.inspect_egress enabled the IDS classifier runs there too, and on
+# egress the kernel has bound the originating socket to the skb, so
+# bpf_skb_cgroup_id yields the container's cgroup. The dst_port rule matches
+# that outbound request and the alert is emitted with the container identity
+# attached.
 #
 # Scope notes (gaps tracked, deferred):
 #

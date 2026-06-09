@@ -3537,15 +3537,14 @@ pub fn try_load_tc_ids(ebpf_dir: &str, config: &AgentConfig) -> anyhow::Result<T
         attach_tc_auto(&mut loader, "tc_ids", iface, config.agent.attach_mode)?;
     }
 
-    // Attach the cgroup connect hooks so the container resolver can map
-    // ingress traffic back to its cgroup. Best-effort: a missing cgroup
-    // mount or token-mode loader leaves container enrichment unavailable
-    // rather than failing the agent.
-    if config.container.resolver.enabled {
-        let cgroup_root = &config.container.resolver.cgroup_root;
-        for prog in ["cgroup_connect4", "cgroup_connect6"] {
-            if let Err(e) = loader.attach_cgroup_connect(prog, cgroup_root) {
-                warn!("cgroup connect hook '{prog}' attach failed: {e}");
+    // Also attach tc-ids on egress when requested, so locally-originated
+    // (e.g. container outbound) traffic is inspected with the originating
+    // socket's cgroup available via `bpf_skb_cgroup_id` — enabling
+    // container attribution that the ingress softirq path cannot provide.
+    if config.ids.inspect_egress {
+        for iface in &config.agent.interfaces {
+            if let Err(e) = loader.attach_tc_egress("tc_ids", iface) {
+                warn!("tc-ids egress attach on '{iface}' failed: {e}");
             }
         }
     }

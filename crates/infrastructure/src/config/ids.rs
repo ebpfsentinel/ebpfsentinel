@@ -225,6 +225,13 @@ pub struct IdsConfig {
     #[serde(default)]
     pub sampling: Option<SamplingConfig>,
 
+    /// Also attach the IDS classifier on the egress hook. Off by default —
+    /// the IDS normally inspects ingress only. Enable to attribute
+    /// locally-originated (e.g. container outbound) traffic to its cgroup,
+    /// since on egress the originating socket is bound to the skb.
+    #[serde(default)]
+    pub inspect_egress: bool,
+
     #[serde(default)]
     pub rules: Vec<IdsRuleConfig>,
 }
@@ -235,6 +242,7 @@ impl Default for IdsConfig {
             enabled: true,
             mode: "alert".to_string(),
             sampling: None,
+            inspect_egress: false,
             rules: Vec::new(),
         }
     }

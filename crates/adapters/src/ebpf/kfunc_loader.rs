@@ -66,18 +66,11 @@ const INSN_CALL: u8 = 0x85;
 const BPF_PROG_TYPE_KPROBE: u32 = 2;
 const BPF_PROG_TYPE_SCHED_CLS: u32 = 3;
 const BPF_PROG_TYPE_XDP: u32 = 6;
-const BPF_PROG_TYPE_CGROUP_SOCK_ADDR: u32 = 18;
 
 /// `BPF_TRACE_UPROBE_MULTI` (`enum bpf_attach_type`). A KPROBE-type program
 /// must be loaded with this `expected_attach_type` to be attachable via a
 /// `uprobe_multi` `BPF_LINK_CREATE` — the token-friendly uprobe attach path.
 const BPF_TRACE_UPROBE_MULTI: u32 = 48;
-
-/// `enum bpf_attach_type` for the cgroup `connect4` / `connect6` hooks. A
-/// `CGROUP_SOCK_ADDR` program must be loaded with the matching
-/// `expected_attach_type` and attached to a cgroup with the same value.
-const BPF_CGROUP_INET4_CONNECT: u32 = 10;
-const BPF_CGROUP_INET6_CONNECT: u32 = 11;
 
 /// `BPF_F_*` prog-load flags.
 const BPF_F_SLEEPABLE: u32 = 1 << 4;
@@ -582,18 +575,6 @@ fn prog_attrs(section: &ProgramSection) -> (u32, u32, u32) {
             (BPF_PROG_TYPE_XDP, 0, flags)
         }
         ProgramSection::SchedClassifier => (BPF_PROG_TYPE_SCHED_CLS, 0, 0),
-        // cgroup connect hooks: load as CGROUP_SOCK_ADDR with the connect
-        // expected_attach_type so they are attachable to a cgroup. Other
-        // sock_addr attach kinds are not emitted by this project.
-        ProgramSection::CgroupSockAddr { attach_type, .. } => {
-            use aya_obj::programs::CgroupSockAddrAttachType;
-            let eat = match attach_type {
-                CgroupSockAddrAttachType::Connect4 => BPF_CGROUP_INET4_CONNECT,
-                CgroupSockAddrAttachType::Connect6 => BPF_CGROUP_INET6_CONNECT,
-                _ => return (0, 0, 0),
-            };
-            (BPF_PROG_TYPE_CGROUP_SOCK_ADDR, eat, 0)
-        }
         // u(ret)probe both load as KPROBE with the `uprobe_multi` attach type
         // (required for the token-friendly `BPF_LINK_CREATE` attach); entry-vs-
         // return is selected at attach time via the link's RETURN flag.

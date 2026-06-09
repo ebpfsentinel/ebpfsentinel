@@ -8,11 +8,13 @@ use aya_ebpf::{
         bpf_get_current_cgroup_id, bpf_get_prandom_u32, bpf_get_smp_processor_id,
         bpf_ktime_get_boot_ns,
     },
-    macros::{cgroup_sock_addr, classifier, map},
-    maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
-    programs::{SockAddrContext, TcContext},
+    macros::{classifier, map},
+    maps::{Array, HashMap, LpmTrie, PerCpuArray, RingBuf, lpm_trie::Key},
+    programs::TcContext,
 };
-use aya_ebpf_bindings::helpers::{bpf_clone_redirect, bpf_get_socket_cookie, bpf_skb_load_bytes};
+use aya_ebpf_bindings::helpers::{
+    bpf_clone_redirect, bpf_get_socket_cookie, bpf_skb_cgroup_id, bpf_skb_load_bytes,
+};
 #[cfg(debug_assertions)]
 use aya_log_ebpf::info;
 use ebpf_common::{
@@ -134,33 +136,6 @@ static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
 /// meaningful on egress where the current task owns the skb.
 #[map]
 static TENANT_CGROUP_MAP: HashMap<u64, u32> = HashMap::with_max_entries(4096, 0);
-
-/// Remote (server) endpoint → cgroup v2 id, populated by the
-/// `cgroup/connect4` and `cgroup/connect6` hooks below. Those run in the
-/// connecting task's process context, where `bpf_get_current_cgroup_id`
-/// is valid, and record the cgroup keyed on the *remote* address+port the
-/// container dialed (available in the connect context as `user_ip4` /
-/// `user_ip6` / `user_port`).
-///
-/// TC ingress cannot read the skb's socket — at that point in the RX path
-/// `skb->sk` is not yet set — so cookie/`skb_cgroup_id` attribution is
-/// impossible for inbound packets. Instead the ingress path keys this map
-/// by the *reply's* source endpoint (`src_addr` / `src_port`), which is
-/// exactly the remote the container connected to, recovering the cgroup
-/// from packet headers alone. LRU so stale endpoints self-evict.
-#[map]
-static REMOTE_CGROUP: LruHashMap<RemoteKey, u64> = LruHashMap::with_max_entries(65536, 0);
-
-/// Key for [`REMOTE_CGROUP`]: a remote endpoint in the same host-order
-/// representation the TC datapath uses for `src_addr` / `src_port`, so a
-/// connect-time write and an ingress-time read produce identical bytes.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RemoteKey {
-    addr: [u32; 4],
-    port: u16,
-    _pad: u16,
-}
 
 /// L7 port lookup: dst_port → enabled flag. When set, TCP packets to this
 /// port have their payload captured and sent to userspace for L7 protocol
@@ -319,81 +294,26 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) 
 
 /// Resolve the cgroup v2 id to attribute to a classified packet.
 ///
-/// This hook is TC ingress, so the packet is an inbound reply: the
-/// connect hooks recorded the dialing container's cgroup keyed on the
-/// remote endpoint, and the reply's source *is* that remote, so the
-/// header tuple recovers the cgroup without needing `skb->sk`. That map
-/// is consulted first because `bpf_get_current_cgroup_id` on the ingress
-/// path is unreliable — it is 0 in softirq and, when a task does happen
-/// to own the context, it is the *receiving* side (e.g. a local server),
-/// not the container that originated the flow. The current-cgroup value
-/// is only a last-resort fallback (e.g. a locally-generated packet that
-/// loops back through ingress).
+/// On the egress path (where tc-ids is also attached when container
+/// awareness is enabled) the kernel has already bound the originating
+/// socket to the skb, so `bpf_skb_cgroup_id` returns the cgroup of the
+/// process that generated the packet — i.e. the container that opened the
+/// outbound connection. On ingress `skb->sk` is not yet set and this
+/// returns 0, in which case the current task's cgroup is tried as a
+/// best-effort fallback for locally-generated traffic.
 ///
 /// Returns 0 when neither applies, in which case userspace leaves the
 /// alert un-enriched.
 #[inline(always)]
-unsafe fn resolve_remote_cgroup_id(src_addr: &[u32; 4], src_port: u16) -> u64 {
+unsafe fn resolve_skb_cgroup_id(ctx: &TcContext) -> u64 {
     unsafe {
-        let key = RemoteKey {
-            addr: *src_addr,
-            port: src_port,
-            _pad: 0,
-        };
-        if let Some(&cgid) = REMOTE_CGROUP.get(&key) {
+        let from_skb = bpf_skb_cgroup_id(ctx.skb.skb as *mut _);
+        if from_skb != 0 {
             increment_metric(METRIC_CGROUP_TENANT_RESOLVED);
-            return cgid;
+            return from_skb;
         }
         bpf_get_current_cgroup_id()
     }
-}
-
-/// Record `remote_endpoint → cgroup_id` for an outbound connect. Runs in
-/// the connecting task's process context, so `bpf_get_current_cgroup_id`
-/// returns the container's cgroup; the key is the remote address+port the
-/// socket is connecting to, in the host-order representation the TC
-/// datapath uses. `is_v6` selects the `user_ip6` vs `user_ip4` field.
-#[inline(always)]
-unsafe fn record_connect_cgroup(ctx: &SockAddrContext, is_v6: bool) {
-    unsafe {
-        let cgid = bpf_get_current_cgroup_id();
-        if cgid == 0 {
-            return;
-        }
-        let sa = &*ctx.sock_addr;
-        let addr = if is_v6 {
-            [
-                u32::from_be(sa.user_ip6[0]),
-                u32::from_be(sa.user_ip6[1]),
-                u32::from_be(sa.user_ip6[2]),
-                u32::from_be(sa.user_ip6[3]),
-            ]
-        } else {
-            [u32::from_be(sa.user_ip4), 0, 0, 0]
-        };
-        let key = RemoteKey {
-            addr,
-            port: u16::from_be(sa.user_port as u16),
-            _pad: 0,
-        };
-        let _ = REMOTE_CGROUP.insert(&key, &cgid, 0);
-    }
-}
-
-/// `cgroup/connect4` hook: record the cgroup of every IPv4 outbound
-/// connect, keyed by the remote endpoint. Always returns 1 (allow) — this
-/// program only observes.
-#[cgroup_sock_addr(connect4)]
-pub fn cgroup_connect4(ctx: SockAddrContext) -> i32 {
-    unsafe { record_connect_cgroup(&ctx, false) };
-    1
-}
-
-/// `cgroup/connect6` hook: same as [`cgroup_connect4`] for IPv6.
-#[cgroup_sock_addr(connect6)]
-pub fn cgroup_connect6(ctx: SockAddrContext) -> i32 {
-    unsafe { record_connect_cgroup(&ctx, true) };
-    1
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
@@ -632,7 +552,7 @@ fn process_ids_pattern(
     // but always enforce the drop action for IPS mode.
     if !should_skip_by_sampling() {
         (|| {
-            let cgroup_id = unsafe { resolve_remote_cgroup_id(src_addr, src_port) };
+            let cgroup_id = unsafe { resolve_skb_cgroup_id(_ctx) };
             emit_packet_event!(EVENTS, IDS_METRICS, METRIC_EVENTS_DROPPED,
                 src_addr, dst_addr, src_port, dst_port, protocol,
                 EVENT_TYPE_IDS, pattern.action, pattern.rule_id, flags, vlan_id;
@@ -948,9 +868,9 @@ unsafe fn fill_l7_header(
         header.cpu_id = bpf_get_smp_processor_id() as u16;
         // Populate socket cookie for TC context (not available in XDP).
         header.socket_cookie = bpf_get_socket_cookie(ctx.skb.skb as *mut _);
-        // Resolved via the current task (egress) or the connect-hook
-        // remote-endpoint map (inbound reply); 0 when neither applies.
-        header.cgroup_id = resolve_remote_cgroup_id(src_addr, src_port);
+        // The skb's socket cgroup on egress (container that sent it), or
+        // the current task as a fallback; 0 when neither applies.
+        header.cgroup_id = resolve_skb_cgroup_id(ctx);
         header.cgroup1_id = 0;
         // RSS hash + RX timestamp are XDP-only metadata, populated by
         // xdp-firewall on the ingress path. TC programs leave them at 0.

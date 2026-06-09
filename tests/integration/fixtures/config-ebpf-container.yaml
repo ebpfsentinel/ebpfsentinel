@@ -24,17 +24,16 @@ firewall:
 ids:
   enabled: true
   mode: alert
+  # Inspect the egress hook too: the container's outbound request to the
+  # probe port is seen on egress, where the originating socket is bound to
+  # the skb so the container's cgroup is recoverable for enrichment.
+  inspect_egress: true
   rules:
-    # Matches on the SOURCE port so the rule fires on the server's reply
-    # (the reply leg is what the TC ingress hook observes; the container's
-    # outbound request is egress and never crosses ingress). The container
-    # dials a server on this port through the test veth, so the reply
-    # carries src_port 65501 and is attributed to the container's cgroup.
     - id: ids-container-probe
       description: "Container cgroup-enrichment probe target"
       severity: high
       protocol: tcp
-      src_port: 65501
+      dst_port: 65501
       enabled: true
 
 ips:
