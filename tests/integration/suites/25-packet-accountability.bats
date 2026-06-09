@@ -55,9 +55,10 @@ teardown_file() {
 # ── Helpers ────────────────────────────────────────────────────────
 
 # get_kernel_metric <map_label> <action_label>
-# Reads the absolute kernel counter value from /metrics endpoint.
-# Returns the ebpfsentinel_bytes_processed_total value for the given
-# map name and action, which carries the raw kernel counter value.
+# Reads the cumulative kernel counter value from the /metrics endpoint.
+# Returns the ebpfsentinel_packets_total value for the given map name and
+# action — the poll loop mirrors each eBPF map counter onto this family
+# under interface="<MAP>_METRICS",action="<label>".
 get_kernel_metric() {
     local map_name="${1:?usage: get_kernel_metric <map_name> <action>}"
     local action="${2:?usage: get_kernel_metric <map_name> <action>}"
@@ -66,11 +67,11 @@ get_kernel_metric() {
     local body
     body="$(curl -sf --max-time "$HTTP_TIMEOUT" "$metrics_url" 2>/dev/null)" || return 1
 
-    # Look for the bytes_processed counter which carries absolute kernel values
+    # Read the cumulative kernel counter mirrored onto packets_total.
     local value
-    value="$(echo "$body" | grep "^ebpfsentinel_bytes_processed_total{" | \
+    value="$(echo "$body" | grep "^ebpfsentinel_packets_total{" | \
         grep "interface=\"${map_name}\"" | \
-        grep "direction=\"${action}\"" | \
+        grep "action=\"${action}\"" | \
         awk '{print $2}' | head -1)"
 
     if [ -z "$value" ] || [ "$value" = "null" ]; then
@@ -240,5 +241,5 @@ wait_for_metrics_flush() {
     }
 
     # Check that total_seen appears in the metrics output for the firewall
-    echo "$body" | grep -q 'direction="total_seen"'
+    echo "$body" | grep -q 'interface="FIREWALL_METRICS",action="total_seen"'
 }

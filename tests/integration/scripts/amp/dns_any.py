@@ -85,14 +85,14 @@ def main() -> int:
         # before any daemon can answer — used by the egress-zero guard to
         # confirm the agent never emits an amplified response.
         layer4 = UDP(sport=33333, dport=53) / DNS(
-            rd=1, qd=DNSQR(qname=args.qname, qtype="ANY")
+            rd=1, qd=DNSQR(qname=args.qname, qtype=255)
         )
     else:
         # Victim-protection direction (default): the reflected ANY response
         # flood arriving *from* the DNS port. Exercises the UDP
         # amplification rate-drop and the MITRE T1498.002 alert.
         layer4 = UDP(sport=53, dport=33333) / DNS(
-            qr=1, rd=1, qd=DNSQR(qname=args.qname, qtype="ANY")
+            qr=1, rd=1, qd=DNSQR(qname=args.qname, qtype=255)
         )
     pkt = IP(src=args.spoof_src, dst=args.dst) / layer4
 

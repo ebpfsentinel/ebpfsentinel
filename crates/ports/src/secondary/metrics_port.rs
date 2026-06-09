@@ -12,6 +12,14 @@ pub trait PacketMetrics: Send + Sync {
     /// Record a processed packet with interface and action labels.
     fn record_packet(&self, _interface: &str, _action: &str) {}
 
+    /// Add `count` to the processed-packet counter for an interface/action.
+    ///
+    /// Used by the kernel-metrics poll loop to mirror a cumulative eBPF
+    /// counter: it reads the absolute per-CPU value, computes the delta
+    /// since the previous poll, and adds only that delta — so the exposed
+    /// counter tracks the real kernel counter rather than the poll cadence.
+    fn record_packets_by(&self, _interface: &str, _action: &str, _count: u64) {}
+
     /// Record bytes processed on a given interface and direction (rx/tx).
     fn record_bytes_processed(&self, _interface: &str, _direction: &str, _bytes: u64) {}
 

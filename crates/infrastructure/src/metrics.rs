@@ -677,6 +677,15 @@ impl PacketMetrics for AgentMetrics {
             .inc();
     }
 
+    fn record_packets_by(&self, interface: &str, action: &str, count: u64) {
+        self.packets_total
+            .get_or_create(&PacketLabels {
+                interface: interface.to_string(),
+                action: action.to_string(),
+            })
+            .inc_by(count);
+    }
+
     fn record_bytes_processed(&self, interface: &str, direction: &str, bytes: u64) {
         self.bytes_processed_total
             .get_or_create(&BytesLabels {

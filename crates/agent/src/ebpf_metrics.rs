@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,8 +11,16 @@ use tokio_util::sync::CancellationToken;
 /// into the Prometheus-based `AgentMetrics` registry.
 ///
 /// Each `MetricsReader` owns a single `*_METRICS` map. We read a fixed
-/// set of indices per map (4 by default: matched, dropped, errors, events dropped)
-/// and expose them as Prometheus counters via `record_packet`.
+/// set of indices per map and mirror them onto the
+/// `ebpfsentinel_packets_total{interface="<MAP>",action="<label>"}`
+/// counter family.
+///
+/// The eBPF maps hold **cumulative** per-CPU counters, so each poll the
+/// loop computes the delta against the previous reading and adds only that
+/// delta. The exposed counter therefore tracks the real kernel counter and
+/// is independent of the poll cadence. A reading that drops below the
+/// previous value (program reload zeroes the map) is treated as a counter
+/// reset: the new absolute value is taken as the delta.
 ///
 /// Accepts a shared `Arc<RwLock<Vec<MetricsReader>>>` so that readers
 /// can be added/removed dynamically as eBPF programs are loaded/unloaded.
@@ -25,6 +34,9 @@ pub async fn run_kernel_metrics_loop(
     // Skip first immediate tick — metrics are 0 at startup
     ticker.tick().await;
 
+    // Last absolute value seen per (map name, index), to derive deltas.
+    let mut last: HashMap<(String, u32), u64> = HashMap::new();
+
     loop {
         tokio::select! {
             () = cancel.cancelled() => break,
@@ -34,18 +46,19 @@ pub async fn run_kernel_metrics_loop(
         let readers_lock = readers.read().await;
         for reader in readers_lock.iter() {
             let map_name = reader.map_name();
-            // Read common indices: 0=matched/passed, 1=dropped, 2=errors, 3=events_dropped
-            // Each map may have more indices, but these 4 are universal.
             let labels = metric_labels(map_name);
             for (idx, action) in labels {
                 match reader.read_metric(*idx) {
                     Ok(value) => {
-                        // Use record_packet with (program_name, action) as a generic counter.
-                        // The interface label carries the map name for identification.
-                        metrics.record_packet(map_name, action);
-                        // Also record as gauge-style observation for absolute kernel counters.
-                        // We use bytes_processed as a vehicle for absolute counter values.
-                        metrics.record_bytes_processed(map_name, action, value);
+                        let key = (map_name.to_string(), *idx);
+                        let prev = last.get(&key).copied().unwrap_or(0);
+                        // Counter reset (map recreated on reload) → the
+                        // current absolute value is the delta.
+                        let delta = if value >= prev { value - prev } else { value };
+                        if delta > 0 {
+                            metrics.record_packets_by(map_name, action, delta);
+                        }
+                        last.insert(key, value);
                     }
                     Err(e) => {
                         tracing::debug!(

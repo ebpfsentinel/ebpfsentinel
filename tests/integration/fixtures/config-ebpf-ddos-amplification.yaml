@@ -85,11 +85,14 @@ ddos:
   enabled: true
   amplification_protection:
     enabled: true
+    # max_pps is the per-source/amplifier-port drop threshold. The scapy
+    # traffic generator sustains ~35-40 pps, so the threshold is set well
+    # below that to exercise the drop + MITRE T1498.002 alert path.
     ports:
-      - { port: 53, protocol: udp, max_pps: 50 }
-      - { port: 123, protocol: udp, max_pps: 50 }
-      - { port: 1900, protocol: udp, max_pps: 50 }
-      - { port: 11211, protocol: udp, max_pps: 50 }
+      - { port: 53, protocol: udp, max_pps: 5 }
+      - { port: 123, protocol: udp, max_pps: 5 }
+      - { port: 1900, protocol: udp, max_pps: 5 }
+      - { port: 11211, protocol: udp, max_pps: 5 }
   policies:
     - id: ddos-amp-udp-flood
       attack_type: udp_amplification
