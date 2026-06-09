@@ -410,7 +410,9 @@ pub async fn run(
                 match build_geoip_adapter(geoip_cfg) {
                     Ok(adapter) => {
                         info!("GeoIP adapter initialized");
-                        Some(Arc::new(adapter))
+                        Some(Arc::new(
+                            adapter.with_metrics(Arc::clone(&metrics) as Arc<dyn MetricsPort>),
+                        ))
                     }
                     Err(e) => {
                         warn!("GeoIP adapter initialization failed (degraded mode): {e}");

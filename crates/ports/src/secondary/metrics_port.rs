@@ -104,6 +104,9 @@ pub trait DomainMetrics: Send + Sync {
 
     /// Record a reputation-driven auto-block event for the given domain.
     fn record_reputation_auto_block(&self, _domain: &str) {}
+
+    /// Record a `GeoIP` database lookup. `found` is true when the IP resolved.
+    fn record_geoip_lookup(&self, _found: bool) {}
 }
 
 // ── System resource metrics ────────────────────────────────────────

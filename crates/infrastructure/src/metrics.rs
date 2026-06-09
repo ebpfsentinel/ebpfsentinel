@@ -25,6 +25,12 @@ pub struct ReasonLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct GeoLookupLabels {
+    /// `hit` when the IP resolved to a country, `miss` otherwise.
+    pub result: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct BpfLoadingModeLabels {
     pub mode: String,
 }
@@ -136,6 +142,7 @@ pub struct AgentMetrics {
     pub dns_injected_ips: Gauge,
     pub domain_reputation_high_risk: Gauge,
     pub domain_auto_blocked_total: Counter,
+    pub geoip_lookups_total: Family<GeoLookupLabels, Counter>,
     pub ids_domain_matches_total: Family<RuleIdLabels, Counter>,
     pub dlp_scans_total: Counter,
     pub dlp_matches_total: Family<RuleIdLabels, Counter>,
@@ -369,6 +376,13 @@ impl AgentMetrics {
             domain_auto_blocked_total.clone(),
         );
 
+        let geoip_lookups_total = Family::<GeoLookupLabels, Counter>::default();
+        registry.register(
+            "geoip_lookups",
+            "Total GeoIP database lookups, labelled hit/miss",
+            geoip_lookups_total.clone(),
+        );
+
         let ids_domain_matches_total = Family::<RuleIdLabels, Counter>::default();
         registry.register(
             "ids_domain_matches",
@@ -595,6 +609,7 @@ impl AgentMetrics {
             dns_injected_ips,
             domain_reputation_high_risk,
             domain_auto_blocked_total,
+            geoip_lookups_total,
             ids_domain_matches_total,
             dlp_scans_total,
             dlp_matches_total,
@@ -803,6 +818,14 @@ impl DomainMetrics for AgentMetrics {
 
     fn record_reputation_auto_block(&self, _domain: &str) {
         self.domain_auto_blocked_total.inc();
+    }
+
+    fn record_geoip_lookup(&self, found: bool) {
+        self.geoip_lookups_total
+            .get_or_create(&GeoLookupLabels {
+                result: if found { "hit" } else { "miss" }.to_string(),
+            })
+            .inc();
     }
 }
 

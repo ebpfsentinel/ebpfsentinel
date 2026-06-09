@@ -1,11 +1,13 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::path::Path;
+use std::sync::Arc;
 
 use domain::alias::entity::GeoIpInfo;
 use domain::firewall::entity::IpNetwork;
 use maxminddb::{Reader, WithinOptions};
 use ports::secondary::geoip_port::GeoIpPort;
+use ports::secondary::metrics_port::MetricsPort;
 use tracing::{info, warn};
 
 /// `GeoIP` adapter backed by `MaxMind` `.mmdb` database files.
@@ -15,6 +17,7 @@ use tracing::{info, warn};
 pub struct MaxMindGeoIpAdapter {
     city_reader: Option<Reader<Vec<u8>>>,
     asn_reader: Option<Reader<Vec<u8>>>,
+    metrics: Option<Arc<dyn MetricsPort>>,
 }
 
 impl MaxMindGeoIpAdapter {
@@ -45,7 +48,15 @@ impl MaxMindGeoIpAdapter {
         Ok(Self {
             city_reader,
             asn_reader,
+            metrics: None,
         })
+    }
+
+    /// Attach a metrics sink so each lookup records a hit/miss counter.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<dyn MetricsPort>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Download from `MaxMind` API, then load.
@@ -285,6 +296,10 @@ impl GeoIpPort for MaxMindGeoIpAdapter {
             found = true;
         }
 
+        if let Some(ref metrics) = self.metrics {
+            metrics.record_geoip_lookup(found);
+        }
+
         if found { Some(info) } else { None }
     }
 
@@ -344,6 +359,7 @@ mod tests {
         let adapter = MaxMindGeoIpAdapter {
             city_reader: None,
             asn_reader: None,
+            metrics: None,
         };
         assert!(!adapter.is_ready());
         let ip: IpAddr = "8.8.8.8".parse().unwrap();
