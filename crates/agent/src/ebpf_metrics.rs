@@ -89,6 +89,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (2, "errors"),
             (3, "events_dropped"),
             (4, "total_seen"),
+            (5, "cgroup_resolved"),
         ],
         "DNS_METRICS" => &[
             (0, "inspected"),

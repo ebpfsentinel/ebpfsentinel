@@ -37,6 +37,9 @@ pub struct PacketSecurityAlert {
     pub detail: String,
     /// JA4 TLS `ClientHello` fingerprint for the flow, when one was computed.
     pub ja4_fingerprint: Option<String>,
+    /// Container provenance resolved from the event's `cgroup_id`, when the
+    /// datapath captured one and the cgroup resolver matched it.
+    pub container: Option<crate::container::entity::ContainerInfo>,
 }
 
 /// Full-context alert with all FR30 fields.
@@ -584,7 +587,7 @@ impl Alert {
             ai_exfil_type: None,
             tls_threat_category: None,
             tls_pqc_status: None,
-            container: None,
+            container: psa.container.clone(),
             container_metadata: None,
         }
     }
@@ -1028,6 +1031,7 @@ mod tests {
             severity: Severity::Medium,
             detail: "test detail".to_string(),
             ja4_fingerprint: None,
+            container: None,
         }
     }
 

@@ -6,7 +6,9 @@ use std::path::Path;
 use aya::{
     Ebpf, EbpfLoader as AyaEbpfLoader, VerifierLogLevel,
     maps::ProgramArray,
-    programs::{SchedClassifier, TcAttachType, UProbe, Xdp, XdpFlags, tc},
+    programs::{
+        CgroupAttachMode, CgroupSockAddr, SchedClassifier, TcAttachType, UProbe, Xdp, XdpFlags, tc,
+    },
 };
 use tracing::{debug, info, warn};
 
@@ -576,6 +578,75 @@ impl EbpfLoader {
         // <  6.6: uses netlink (legacy clsact qdisc attach)
         program.attach(interface, TcAttachType::Ingress)?;
         info!(program_name, interface, "TC program attached (ingress)");
+        Ok(())
+    }
+
+    /// Attach a `cgroup_sock_addr` program (e.g. `cgroup_connect4`) to the
+    /// cgroup v2 hierarchy root so it runs in the connecting task's process
+    /// context. Used to record `socket_cookie → cgroup_id` for container
+    /// attribution of ingress traffic that the TC softirq path cannot
+    /// resolve on its own.
+    ///
+    /// tc-ids carries kfuncs, so it routes through the raw loader and its
+    /// programs (including these cgroup hooks) live in `kfunc_progs`; that
+    /// path is tried first and attaches via a raw `BPF_LINK_CREATE` to the
+    /// cgroup fd. The aya path is the fallback for a capability-mode object
+    /// aya loaded whole. In BPF-token mode neither is available, so the
+    /// attach is skipped with a warning rather than failing the agent —
+    /// container enrichment simply stays unavailable.
+    pub fn attach_cgroup_connect(
+        &mut self,
+        program_name: &str,
+        cgroup_path: &str,
+    ) -> Result<(), anyhow::Error> {
+        // `enum bpf_attach_type`: BPF_CGROUP_INET4_CONNECT / INET6_CONNECT.
+        let attach_type: u32 = match program_name {
+            "cgroup_connect4" => 10,
+            "cgroup_connect6" => 11,
+            other => anyhow::bail!("unknown cgroup connect program '{other}'"),
+        };
+
+        let cgroup = std::fs::File::open(cgroup_path).map_err(|e| {
+            anyhow::anyhow!("failed to open cgroup root '{cgroup_path}' for attach: {e}")
+        })?;
+
+        // Raw path: tc-ids' programs were loaded outside aya.
+        if let Some(prog_fd) = self.kfunc_progs.get(program_name) {
+            let link = kfunc_attach::attach_cgroup_sock_addr(
+                program_name,
+                prog_fd.as_raw_fd(),
+                cgroup.as_fd().as_raw_fd(),
+                attach_type,
+            )?;
+            self.kfunc_links.push(link);
+            info!(
+                program_name,
+                cgroup_path, "cgroup_sock_addr program attached (raw)"
+            );
+            return Ok(());
+        }
+
+        // Capability-mode fallback: aya loaded the whole object.
+        let Some(ebpf) = self.ebpf.as_mut() else {
+            warn!(
+                program_name,
+                "cgroup_sock_addr attach skipped in BPF-token mode (container cgroup enrichment unavailable)"
+            );
+            return Ok(());
+        };
+        let program: &mut CgroupSockAddr = ebpf
+            .program_mut(program_name)
+            .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found in eBPF object"))?
+            .try_into()?;
+        match program.load() {
+            Ok(()) | Err(aya::programs::ProgramError::AlreadyLoaded) => {}
+            Err(e) => return Err(e.into()),
+        }
+        program.attach(cgroup, CgroupAttachMode::Single)?;
+        info!(
+            program_name,
+            cgroup_path, "cgroup_sock_addr program attached"
+        );
         Ok(())
     }
 

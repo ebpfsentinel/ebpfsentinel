@@ -19,6 +19,22 @@ pub trait IdsMapPort: Send + Sync {
     /// Remove all patterns from the eBPF map.
     fn clear_patterns(&mut self) -> Result<(), DomainError>;
 
+    /// Insert or update a pattern in the source-port `IDS_SRC_PATTERNS`
+    /// map (rules that match on the reply leg). The key's `dst_port` field
+    /// carries the source port. Default no-op for backends without the map.
+    fn insert_src_pattern(
+        &mut self,
+        _key: &IdsPatternKey,
+        _value: &IdsPatternValue,
+    ) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    /// Remove all patterns from the source-port map. Default no-op.
+    fn clear_src_patterns(&mut self) -> Result<(), DomainError> {
+        Ok(())
+    }
+
     /// Return the number of patterns currently in the eBPF map.
     fn pattern_count(&self) -> Result<usize, DomainError>;
 

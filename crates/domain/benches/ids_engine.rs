@@ -16,6 +16,7 @@ fn make_rule(id: usize) -> IdsRule {
         mode: DomainMode::Alert,
         protocol: Protocol::Tcp,
         dst_port: Some(22),
+        src_port: None,
         pattern: String::new(),
         enabled: true,
         threshold: None,

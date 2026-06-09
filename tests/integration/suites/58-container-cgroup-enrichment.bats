@@ -15,15 +15,16 @@
 #     to talk to /var/run/docker.sock; on success the enricher records
 #     name/image metadata against the resolved cgroup.
 #
+# Attribution path: the container dials a server in the test netns through
+# the inspected veth. tc-ids runs on ingress, where the kernel has not yet
+# attached a socket to inbound packets, so the cgroup cannot be read from
+# the skb. Instead a cgroup/connect hook records the dialing cgroup keyed
+# by the remote endpoint, and the ingress path recovers it from the reply's
+# source endpoint. A src_port IDS rule fires on that reply so the alert is
+# emitted with the container identity attached.
+#
 # Scope notes (gaps tracked, deferred):
 #
-#   * AC #1 — REST AlertResponse does not yet serialise the alert's
-#     `container` / `container_metadata` fields (no `container.cgroup_id`
-#     / `container.runtime` / `container.id` / `container.image` keys
-#     reach /api/v1/alerts). The fields live on the domain alert but
-#     the REST DTO needs a follow-up before they can be asserted via
-#     the public API. Tested here through the resolver metric surface
-#     instead.
 #   * AC #2 — Kubernetes pod enrichment requires minikube + the
 #     ebpfsentinel image to be loaded into the cluster (see suite 10).
 #     The single-VM ids-on-65501 path is reused under kind/minikube
@@ -35,6 +36,30 @@
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
+
+# Probe port the test netns server listens on and the IDS src_port rule
+# matches. Kept in one place so the fixture and the traffic agree.
+PROBE_PORT=65501
+
+# ── Probe listener (test netns) ─────────────────────────────────────
+
+# Spawn a re-listening TCP server inside the test netns so every container
+# connection to ${EBPF_NS_IP}:${PROBE_PORT} is accepted and replied to.
+_start_probe_listener() {
+    ip netns exec "${EBPF_TEST_NS}" sh -c \
+        "while true; do nc -l -p ${PROBE_PORT} -w 2 >/dev/null 2>&1 || sleep 0.2; done" &
+    PROBE_LISTENER_PID=$!
+    export PROBE_LISTENER_PID
+}
+
+_stop_probe_listener() {
+    if [ -n "${PROBE_LISTENER_PID:-}" ]; then
+        kill "${PROBE_LISTENER_PID}" 2>/dev/null || true
+        pkill -P "${PROBE_LISTENER_PID}" 2>/dev/null || true
+    fi
+    # Belt-and-braces: clear any stray netns listener.
+    ip netns exec "${EBPF_TEST_NS}" pkill -f "nc -l -p ${PROBE_PORT}" 2>/dev/null || true
+}
 
 # ── Docker availability ─────────────────────────────────────────────
 
@@ -78,12 +103,21 @@ setup_file() {
         destroy_test_netns 2>/dev/null || true
         skip "eBPF programs not loaded (degraded mode)"
     }
+
+    # Re-listening TCP server in the test netns on the probe port. A
+    # container that dials ${EBPF_NS_IP}:${PROBE_PORT} through the test veth
+    # gets a reply whose source port is ${PROBE_PORT}; that reply crosses
+    # the tc-ids ingress hook (the request itself is egress and is never
+    # inspected), firing the src_port rule and carrying the cgroup the
+    # connect hook recorded.
+    _start_probe_listener
 }
 
 teardown_file() {
     if _docker_available; then
         _docker_cmd rm -f "ebpfsentinel-cgroup-probe-$$" >/dev/null 2>&1 || true
     fi
+    _stop_probe_listener 2>/dev/null || true
     stop_ebpf_agent 2>/dev/null || true
     destroy_test_netns 2>/dev/null || true
     rm -rf "${DATA_DIR:-/tmp/ebpfsentinel-test-data-container-$$}"
@@ -133,7 +167,7 @@ teardown_file() {
         --network host \
         busybox:latest sh -c \
             'for i in 1 2 3 4 5; do
-                (echo probe; sleep 0.1) | nc -w 1 127.0.0.1 65501 >/dev/null 2>&1 || true
+                (echo probe; sleep 0.1) | nc -w 1 '"${EBPF_NS_IP}"' '"${PROBE_PORT}"' >/dev/null 2>&1 || true
              done; sleep 1' >/dev/null 2>&1 || skip "busybox container could not run"
 
     sleep 2
@@ -165,7 +199,7 @@ teardown_file() {
         --network host \
         busybox:latest sh -c \
             'for i in 1 2 3 4 5; do
-                (echo probe; sleep 0.1) | nc -w 1 127.0.0.1 65501 >/dev/null 2>&1 || true
+                (echo probe; sleep 0.1) | nc -w 1 '"${EBPF_NS_IP}"' '"${PROBE_PORT}"' >/dev/null 2>&1 || true
              done; sleep 1' >/dev/null 2>&1 || skip "busybox container could not run"
 
     sleep 2

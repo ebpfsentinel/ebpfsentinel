@@ -2250,13 +2250,18 @@ pub async fn run(
         let proc_resolver = Arc::new(adapters::container::ProcContainerResolver::new(
             &config.container.resolver.proc_path,
         )) as Arc<dyn domain::container::engine::CgroupReader>;
+        let id_resolver = Arc::new(adapters::container::CgroupfsResolver::new(
+            &config.container.resolver.cgroup_root,
+        )) as Arc<dyn domain::container::engine::CgroupIdResolver>;
         let engine = domain::container::engine::ContainerResolverEngine::new(
             proc_resolver,
             config.container.resolver.cache_size,
-        );
+        )
+        .with_id_resolver(id_resolver);
         info!(
             cache_size = config.container.resolver.cache_size,
             proc_path = %config.container.resolver.proc_path,
+            cgroup_root = %config.container.resolver.cgroup_root,
             "Container resolver initialized"
         );
         Some(Arc::new(engine))
@@ -3530,6 +3535,19 @@ pub fn try_load_tc_ids(ebpf_dir: &str, config: &AgentConfig) -> anyhow::Result<T
 
     for iface in &config.agent.interfaces {
         attach_tc_auto(&mut loader, "tc_ids", iface, config.agent.attach_mode)?;
+    }
+
+    // Attach the cgroup connect hooks so the container resolver can map
+    // ingress traffic back to its cgroup. Best-effort: a missing cgroup
+    // mount or token-mode loader leaves container enrichment unavailable
+    // rather than failing the agent.
+    if config.container.resolver.enabled {
+        let cgroup_root = &config.container.resolver.cgroup_root;
+        for prog in ["cgroup_connect4", "cgroup_connect6"] {
+            if let Err(e) = loader.attach_cgroup_connect(prog, cgroup_root) {
+                warn!("cgroup connect hook '{prog}' attach failed: {e}");
+            }
+        }
     }
 
     // IDS map manager (best-effort: non-fatal if maps not present)

@@ -25,11 +25,16 @@ ids:
   enabled: true
   mode: alert
   rules:
+    # Matches on the SOURCE port so the rule fires on the server's reply
+    # (the reply leg is what the TC ingress hook observes; the container's
+    # outbound request is egress and never crosses ingress). The container
+    # dials a server on this port through the test veth, so the reply
+    # carries src_port 65501 and is attributed to the container's cgroup.
     - id: ids-container-probe
       description: "Container cgroup-enrichment probe target"
       severity: high
       protocol: tcp
-      dst_port: 65501
+      src_port: 65501
       enabled: true
 
 ips:

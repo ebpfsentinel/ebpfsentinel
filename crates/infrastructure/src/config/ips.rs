@@ -183,6 +183,7 @@ impl IpsRuleConfig {
             mode,
             protocol,
             dst_port: self.dst_port,
+            src_port: None,
             pattern: self.pattern.clone().unwrap_or_default(),
             enabled: self.enabled,
             threshold,

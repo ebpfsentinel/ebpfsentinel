@@ -198,21 +198,31 @@ impl IdsAppService {
             tracing::warn!("failed to clear IDS eBPF patterns map: {e}");
             return;
         }
+        if let Err(e) = map.clear_src_patterns() {
+            tracing::warn!("failed to clear IDS eBPF source-port patterns map: {e}");
+            return;
+        }
 
         for (idx, rule) in self.engine.rules().iter().enumerate() {
             if !rule.enabled {
                 continue;
             }
-            let Some(key) = rule.to_ebpf_key() else {
-                continue; // Wildcard rules not representable in eBPF HashMap
-            };
             #[allow(clippy::cast_possible_truncation)] // rule count bounded well below u32::MAX
             let mut value = rule.to_ebpf_value(idx as u32);
             if self.mode == DomainMode::Alert {
                 value.action = IDS_ACTION_ALERT;
             }
-            if let Err(e) = map.insert_pattern(&key, &value) {
+            // A rule may match on dst_port, src_port, or both; wildcard
+            // (neither) rules are handled only by the userspace engine.
+            if let Some(key) = rule.to_ebpf_key()
+                && let Err(e) = map.insert_pattern(&key, &value)
+            {
                 tracing::warn!(rule_id = %rule.id, "failed to sync IDS rule to eBPF map: {e}");
+            }
+            if let Some(src_key) = rule.to_ebpf_src_key()
+                && let Err(e) = map.insert_src_pattern(&src_key, &value)
+            {
+                tracing::warn!(rule_id = %rule.id, "failed to sync IDS src rule to eBPF map: {e}");
             }
         }
     }
@@ -237,6 +247,7 @@ mod tests {
             mode: DomainMode::Alert,
             protocol: Protocol::Tcp,
             dst_port: Some(22),
+            src_port: None,
             pattern: String::new(),
             enabled: true,
             threshold: None,

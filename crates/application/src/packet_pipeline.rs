@@ -194,6 +194,36 @@ impl EventDispatcher {
         Some(info)
     }
 
+    /// Resolve container provenance from a `cgroup_id` alone (no pid), used
+    /// by the TC datapath alert path. Returns `None` when no resolver is
+    /// wired or the id maps to the host namespace, so host traffic is not
+    /// tagged with an empty container surface.
+    fn resolve_container_by_id(
+        &self,
+        cgroup_id: u64,
+    ) -> Option<domain::container::entity::ContainerInfo> {
+        // cgroup_id 0 = the datapath captured no cgroup (softirq ingress on
+        // a real NIC before demux). Not an error — skip silently so routine
+        // host traffic does not churn the resolver error counter.
+        if cgroup_id == 0 {
+            return None;
+        }
+        let resolver = self.container_resolver.as_ref()?;
+        let (info, outcome) = resolver.resolve_by_id(cgroup_id);
+        match outcome {
+            domain::container::engine::ResolveOutcome::CacheHit => {
+                self.metrics.record_container_cache_hit();
+            }
+            domain::container::engine::ResolveOutcome::CacheMiss => {
+                self.metrics.record_container_cache_miss();
+            }
+            domain::container::engine::ResolveOutcome::ReadError => {
+                self.metrics.record_container_resolver_error();
+            }
+        }
+        if info.is_host() { None } else { Some(info) }
+    }
+
     /// Return a shared reference to the JA4 fingerprint cache.
     pub fn fingerprint_cache(&self) -> Arc<FingerprintCache> {
         Arc::clone(&self.fingerprint_cache)
@@ -1035,6 +1065,11 @@ impl EventDispatcher {
                 dst_port: event.dst_port,
             })
             .map(|fp| fp.ja4);
+        // Attribute the alert to a container when the datapath captured a
+        // cgroup id (TC ingress recovers it from the connect-hook cookie
+        // map). No pid is available here, so resolution goes through the
+        // cgroup-id path rather than `/proc/<pid>/cgroup`.
+        let container = self.resolve_container_by_id(event.cgroup_id);
         let psa = domain::alert::entity::PacketSecurityAlert {
             component,
             src_addr: event.src_addr,
@@ -1049,6 +1084,7 @@ impl EventDispatcher {
             severity,
             detail: detail.to_string(),
             ja4_fingerprint,
+            container,
         };
         let _ = self.alert_tx.try_send(AlertEvent::PacketSecurity(psa));
     }
@@ -1405,6 +1441,7 @@ mod tests {
             mode: DomainMode::Alert,
             protocol: Protocol::Tcp,
             dst_port: Some(22),
+            src_port: None,
             pattern: String::new(),
             enabled: true,
             threshold: None,

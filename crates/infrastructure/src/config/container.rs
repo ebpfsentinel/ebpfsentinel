@@ -12,6 +12,10 @@ fn default_proc_path() -> String {
     "/proc".to_string()
 }
 
+fn default_cgroup_root() -> String {
+    "/sys/fs/cgroup".to_string()
+}
+
 fn default_docker_socket() -> String {
     "/var/run/docker.sock".to_string()
 }
@@ -50,6 +54,12 @@ pub struct ResolverConfig {
 
     #[serde(default = "default_proc_path")]
     pub proc_path: String,
+
+    /// cgroup v2 hierarchy root. The `cgroup_sock_addr` connect hooks
+    /// attach here so they record the connecting task's cgroup id, which
+    /// the TC ingress path recovers for container attribution.
+    #[serde(default = "default_cgroup_root")]
+    pub cgroup_root: String,
 }
 
 impl Default for ResolverConfig {
@@ -58,6 +68,7 @@ impl Default for ResolverConfig {
             enabled: true,
             cache_size: default_cache_size(),
             proc_path: default_proc_path(),
+            cgroup_root: default_cgroup_root(),
         }
     }
 }
@@ -125,6 +136,12 @@ impl ContainerConfig {
                 message: "proc_path must not be empty".to_string(),
             });
         }
+        if self.resolver.cgroup_root.is_empty() {
+            return Err(ConfigError::Validation {
+                field: "container.resolver.cgroup_root".to_string(),
+                message: "cgroup_root must not be empty".to_string(),
+            });
+        }
         if self.docker.enabled {
             if self.docker.socket.is_empty() {
                 return Err(ConfigError::Validation {
@@ -159,6 +176,7 @@ mod tests {
         assert!(cfg.resolver.enabled);
         assert_eq!(cfg.resolver.cache_size, 4096);
         assert_eq!(cfg.resolver.proc_path, "/proc");
+        assert_eq!(cfg.resolver.cgroup_root, "/sys/fs/cgroup");
         assert!(!cfg.docker.enabled);
         assert_eq!(cfg.docker.cache_size, 1024);
         assert_eq!(cfg.docker.cache_ttl_seconds, 300);
@@ -181,6 +199,13 @@ mod tests {
     fn validate_rejects_empty_proc_path() {
         let mut cfg = ContainerConfig::default();
         cfg.resolver.proc_path = String::new();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_empty_cgroup_root() {
+        let mut cfg = ContainerConfig::default();
+        cfg.resolver.cgroup_root = String::new();
         assert!(cfg.validate().is_err());
     }
 

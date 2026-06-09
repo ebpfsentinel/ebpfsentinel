@@ -14,6 +14,18 @@ pub trait CgroupReader: Send + Sync {
     fn read_cgroup(&self, pid: u32) -> std::io::Result<String>;
 }
 
+/// Resolves a kernel cgroup v2 id (as returned by
+/// `bpf_get_current_cgroup_id`) to its cgroup filesystem path. Used to
+/// attribute events that carry only a `cgroup_id` and no pid — e.g. the
+/// TC ingress datapath, where the connect hooks recorded the cgroup but
+/// no process context is available. An adapter implements this by
+/// scanning the cgroup v2 mount and matching directory inode numbers.
+pub trait CgroupIdResolver: Send + Sync {
+    /// Returns the cgroup path (relative or absolute) for `cgroup_id`, or
+    /// `None` when no live cgroup matches.
+    fn path_for_id(&self, cgroup_id: u64) -> Option<String>;
+}
+
 /// Default LRU capacity if no configuration override is provided.
 pub const DEFAULT_CACHE_CAPACITY: usize = 4096;
 
@@ -198,6 +210,7 @@ pub enum ResolveOutcome {
 pub struct ContainerResolverEngine {
     cache: CgroupCache,
     reader: Arc<dyn CgroupReader>,
+    id_resolver: Option<Arc<dyn CgroupIdResolver>>,
 }
 
 impl ContainerResolverEngine {
@@ -205,11 +218,44 @@ impl ContainerResolverEngine {
         Self {
             cache: CgroupCache::new(cache_capacity),
             reader,
+            id_resolver: None,
         }
+    }
+
+    /// Attach a cgroup-id resolver, enabling [`Self::resolve_by_id`] for
+    /// pid-less attribution (TC ingress datapath).
+    #[must_use]
+    pub fn with_id_resolver(mut self, id_resolver: Arc<dyn CgroupIdResolver>) -> Self {
+        self.id_resolver = Some(id_resolver);
+        self
     }
 
     pub fn cache_len(&self) -> usize {
         self.cache.len()
+    }
+
+    /// Resolve a `cgroup_id` to a `ContainerInfo` without a pid, by mapping
+    /// the id to a cgroup path via the [`CgroupIdResolver`] and parsing it.
+    /// Cache is keyed on `cgroup_id`. Returns `(Host, ReadError)` when the
+    /// id is 0, no resolver is attached, or no live cgroup matches.
+    pub fn resolve_by_id(&self, cgroup_id: u64) -> (ContainerInfo, ResolveOutcome) {
+        if cgroup_id == 0 {
+            return (ContainerInfo::Host, ResolveOutcome::ReadError);
+        }
+        if let Some(cached) = self.cache.get(cgroup_id) {
+            return (cached, ResolveOutcome::CacheHit);
+        }
+        let Some(ref id_resolver) = self.id_resolver else {
+            return (ContainerInfo::Host, ResolveOutcome::ReadError);
+        };
+        match id_resolver.path_for_id(cgroup_id) {
+            Some(path) => {
+                let info = resolve_path_to_info(&path, 0);
+                self.cache.insert(cgroup_id, info.clone());
+                (info, ResolveOutcome::CacheMiss)
+            }
+            None => (ContainerInfo::Host, ResolveOutcome::ReadError),
+        }
     }
 
     /// Resolve `(pid, cgroup_id)` to a `ContainerInfo`. Cache is keyed
@@ -523,5 +569,63 @@ mod tests {
     #[test]
     fn parse_payload_empty_is_none() {
         assert!(parse_cgroup_payload("", 1).is_none());
+    }
+
+    struct FakeIdResolver {
+        map: HashMap<u64, String>,
+    }
+
+    impl CgroupIdResolver for FakeIdResolver {
+        fn path_for_id(&self, cgroup_id: u64) -> Option<String> {
+            self.map.get(&cgroup_id).cloned()
+        }
+    }
+
+    #[test]
+    fn resolve_by_id_maps_cgroup_to_container() {
+        let mut map = HashMap::new();
+        map.insert(0x99u64, format!("/system.slice/docker-{HEX64}.scope"));
+        let reader = Arc::new(FakeReader::new());
+        let engine = ContainerResolverEngine::new(reader, 16)
+            .with_id_resolver(Arc::new(FakeIdResolver { map }));
+
+        let (info, outcome) = engine.resolve_by_id(0x99);
+        assert_eq!(outcome, ResolveOutcome::CacheMiss);
+        assert_eq!(info.container_id(), Some(HEX64));
+        assert_eq!(info.runtime(), ContainerRuntime::Docker);
+
+        // Second call hits the cache.
+        let (info2, outcome2) = engine.resolve_by_id(0x99);
+        assert_eq!(outcome2, ResolveOutcome::CacheHit);
+        assert_eq!(info2.container_id(), Some(HEX64));
+    }
+
+    #[test]
+    fn resolve_by_id_zero_is_read_error() {
+        let reader = Arc::new(FakeReader::new());
+        let engine = ContainerResolverEngine::new(reader, 16);
+        let (info, outcome) = engine.resolve_by_id(0);
+        assert!(info.is_host());
+        assert_eq!(outcome, ResolveOutcome::ReadError);
+    }
+
+    #[test]
+    fn resolve_by_id_without_resolver_is_read_error() {
+        let reader = Arc::new(FakeReader::new());
+        let engine = ContainerResolverEngine::new(reader, 16);
+        let (info, outcome) = engine.resolve_by_id(0x1234);
+        assert!(info.is_host());
+        assert_eq!(outcome, ResolveOutcome::ReadError);
+    }
+
+    #[test]
+    fn resolve_by_id_no_match_is_read_error() {
+        let engine = ContainerResolverEngine::new(Arc::new(FakeReader::new()), 16)
+            .with_id_resolver(Arc::new(FakeIdResolver {
+                map: HashMap::new(),
+            }));
+        let (info, outcome) = engine.resolve_by_id(0x1234);
+        assert!(info.is_host());
+        assert_eq!(outcome, ResolveOutcome::ReadError);
     }
 }

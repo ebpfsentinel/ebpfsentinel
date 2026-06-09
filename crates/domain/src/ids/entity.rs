@@ -162,6 +162,12 @@ pub struct IdsRule {
     pub mode: DomainMode,
     pub protocol: Protocol,
     pub dst_port: Option<u16>,
+    /// Optional source-port match. Fires on packets whose source port
+    /// equals this value — used to detect the *reply* leg of a flow (e.g.
+    /// a response from a server port) on the TC ingress path, where only
+    /// the reply, not the request, traverses the inspected hook.
+    #[serde(default)]
+    pub src_port: Option<u16>,
     pub pattern: String,
     pub enabled: bool,
     /// Optional per-rule threshold/rate detection.
@@ -192,6 +198,11 @@ impl IdsRule {
         {
             return Err("dst_port must be > 0");
         }
+        if let Some(port) = self.src_port
+            && port == 0
+        {
+            return Err("src_port must be > 0");
+        }
         // domain_pattern and domain_match_mode must be set together
         match (&self.domain_pattern, &self.domain_match_mode) {
             (Some(_), None) => {
@@ -215,6 +226,19 @@ impl IdsRule {
         let dst_port = self.dst_port?;
         Some(IdsPatternKey {
             dst_port,
+            protocol: self.protocol.to_u8(),
+            _padding: 0,
+        })
+    }
+
+    /// Convert to an eBPF key for the source-port `IDS_SRC_PATTERNS`
+    /// `HashMap`. Returns `None` when `src_port` is not set. The
+    /// `dst_port` field of the key carries the source port (the eBPF side
+    /// keys this map by `src_port`).
+    pub fn to_ebpf_src_key(&self) -> Option<IdsPatternKey> {
+        let src_port = self.src_port?;
+        Some(IdsPatternKey {
+            dst_port: src_port,
             protocol: self.protocol.to_u8(),
             _padding: 0,
         })
@@ -344,6 +368,7 @@ mod tests {
             mode: DomainMode::Alert,
             protocol: Protocol::Tcp,
             dst_port: Some(22),
+            src_port: None,
             pattern: String::new(),
             enabled: true,
             threshold: None,

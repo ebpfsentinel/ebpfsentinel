@@ -29,6 +29,47 @@
 /// Without the `; tc $ctx` suffix, `socket_cookie` is set to 0 (XDP mode).
 #[macro_export]
 macro_rules! emit_packet_event {
+    // TC variant with an explicit cgroup id. Used when the caller resolved
+    // the cgroup via a fallback chain (connect-hook cookie map, skb cgroup)
+    // instead of relying on `bpf_get_current_cgroup_id`, which is 0 on
+    // ingress softirq.
+    ($ringbuf:expr, $metrics:expr, $metric_dropped:expr,
+     $src_addr:expr, $dst_addr:expr, $src_port:expr, $dst_port:expr,
+     $protocol:expr, $event_type:expr, $action:expr, $rule_id:expr,
+     $flags:expr, $vlan_id:expr ; tc $ctx:expr, cgroup $cgroup_id:expr) => {{
+        if $crate::ringbuf_has_backpressure!($ringbuf) {
+            $crate::increment_metric!($metrics, $metric_dropped);
+            return;
+        }
+        if let Some(mut entry) = $ringbuf.reserve::<ebpf_common::event::PacketEvent>(0) {
+            let ptr = entry.as_mut_ptr();
+            unsafe {
+                (*ptr).timestamp_ns = aya_ebpf::helpers::bpf_ktime_get_boot_ns();
+                (*ptr).src_addr = *$src_addr;
+                (*ptr).dst_addr = *$dst_addr;
+                (*ptr).src_port = $src_port;
+                (*ptr).dst_port = $dst_port;
+                (*ptr).protocol = $protocol;
+                (*ptr).event_type = $event_type;
+                (*ptr).action = $action;
+                (*ptr).flags = $flags;
+                (*ptr).rule_id = $rule_id;
+                (*ptr).vlan_id = $vlan_id;
+                (*ptr).cpu_id = aya_ebpf::helpers::bpf_get_smp_processor_id() as u16;
+                (*ptr).socket_cookie =
+                    aya_ebpf::helpers::bpf_get_socket_cookie($ctx.skb.skb as *mut _);
+                (*ptr).cgroup_id = $cgroup_id;
+                (*ptr).cgroup1_id = 0;
+                (*ptr).rss_hash = 0;
+                (*ptr).rss_hash_type = 0;
+                (*ptr).rx_hw_timestamp_ns = 0;
+            }
+            entry.submit(0);
+        } else {
+            $crate::increment_metric!($metrics, $metric_dropped);
+        }
+    }};
+
     // TC variant: with socket_cookie from TcContext
     ($ringbuf:expr, $metrics:expr, $metric_dropped:expr,
      $src_addr:expr, $dst_addr:expr, $src_port:expr, $dst_port:expr,

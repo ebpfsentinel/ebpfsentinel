@@ -258,6 +258,11 @@ pub struct IdsRuleConfig {
 
     pub dst_port: Option<u16>,
 
+    /// Optional source-port match — fires on a reply leg (source port equal
+    /// to this value). Used for ingress detection of server responses.
+    #[serde(default)]
+    pub src_port: Option<u16>,
+
     /// Payload regex pattern for deeper inspection.
     #[serde(default)]
     pub pattern: Option<String>,
@@ -440,6 +445,7 @@ impl IdsRuleConfig {
             mode,
             protocol,
             dst_port: self.dst_port,
+            src_port: self.src_port,
             pattern: self.pattern.clone().unwrap_or_default(),
             enabled: self.enabled,
             threshold,
@@ -463,6 +469,7 @@ mod tests {
             mode: None,
             protocol: "tcp".to_string(),
             dst_port: Some(22),
+            src_port: None,
             pattern: None,
             enabled: true,
             threshold: None,
