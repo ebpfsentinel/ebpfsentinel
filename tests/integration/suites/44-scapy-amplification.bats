@@ -80,19 +80,19 @@ _run_amp_and_assert() {
 # ── Per-vector tests ──────────────────────────────────────────────────
 
 @test "DNS ANY flood with spoofed source is dropped pre-response" {
-    _run_amp_and_assert dns_any ebpfsentinel_firewall_dropped_total
+    _run_amp_and_assert dns_any 'ebpfsentinel_packets_total{interface="DDOS_METRICS",action="amp_dropped"}'
 }
 
 @test "NTP monlist with spoofed source is blocked" {
-    _run_amp_and_assert ntp_monlist ebpfsentinel_firewall_dropped_total
+    _run_amp_and_assert ntp_monlist 'ebpfsentinel_packets_total{interface="DDOS_METRICS",action="amp_dropped"}'
 }
 
 @test "SSDP M-SEARCH with spoofed source is blocked" {
-    _run_amp_and_assert ssdp_search ebpfsentinel_firewall_dropped_total
+    _run_amp_and_assert ssdp_search 'ebpfsentinel_packets_total{interface="DDOS_METRICS",action="amp_dropped"}'
 }
 
 @test "Memcached stats with spoofed source is blocked" {
-    _run_amp_and_assert memcached_stats ebpfsentinel_firewall_dropped_total
+    _run_amp_and_assert memcached_stats 'ebpfsentinel_packets_total{interface="DDOS_METRICS",action="amp_dropped"}'
 }
 
 # ── Egress-zero guard ─────────────────────────────────────────────────

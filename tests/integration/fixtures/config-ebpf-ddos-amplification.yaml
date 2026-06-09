@@ -83,6 +83,13 @@ threatintel:
 
 ddos:
   enabled: true
+  amplification_protection:
+    enabled: true
+    ports:
+      - { port: 53, protocol: udp, max_pps: 50 }
+      - { port: 123, protocol: udp, max_pps: 50 }
+      - { port: 1900, protocol: udp, max_pps: 50 }
+      - { port: 11211, protocol: udp, max_pps: 50 }
   policies:
     - id: ddos-amp-udp-flood
       attack_type: udp_amplification
