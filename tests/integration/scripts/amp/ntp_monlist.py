@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""ntp_monlist.py — Spoofed-source NTP `monlist` (mode 7) requests.
+"""ntp_monlist.py — Flood an agent with reflected NTP amplification responses.
 
 NTP monlist is a textbook amplification vector: a 234-byte response is
 generated for a ~30-byte request, multiplied across thousands of stored
-client addresses. The agent's scrub layer is expected to identify the
-RPF mismatch on the spoofed source and drop the packet before the NTP
-daemon (if any) generates an amplification response.
+client addresses. This script models the victim-facing leg — a flood
+sourced *from* the NTP port (123), the amplified responses a reflector
+blasts at a spoofed victim. The agent's UDP amplification protection
+rate-limits per source/amplifier-port and drops the flood beyond the
+configured `max_pps`, emitting a MITRE T1498.002 alert.
 
 Usage:
-    sudo ntp_monlist.py --dst <agent_ip> [--spoof-src <victim_ip>]
+    sudo ntp_monlist.py --dst <agent_ip> [--spoof-src <reflector_ip>]
                         [--count N] [--rate PPS]
 """
 
@@ -69,7 +71,7 @@ def main() -> int:
     inter = 1.0 / max(args.rate, 1)
     pkt = (
         IP(src=args.spoof_src, dst=args.dst)
-        / UDP(sport=33333, dport=123)
+        / UDP(sport=123, dport=33333)
         / Raw(load=_MONLIST)
     )
 

@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""memcached_stats.py — Spoofed-source memcached `stats` amplification probes.
+"""memcached_stats.py — Flood an agent with reflected memcached responses.
 
-Memcached on UDP/11211 with a 'stats' request yields the largest-known
-amplification factor (~50000x in the wild). The probe is a 15-byte
-UDP datagram; the scrub layer must drop it before a daemon (if any)
-generates a multi-KB reply.
+Memcached on UDP/11211 yields the largest-known amplification factor
+(~50000x in the wild). This script models the victim-facing leg: a
+flood sourced *from* the memcached port (11211), the amplified
+responses a reflector blasts at a spoofed victim. The agent's UDP
+amplification protection rate-limits per source/amplifier-port and
+drops the flood beyond the configured `max_pps`, emitting a MITRE
+T1498.002 alert.
 
 Usage:
-    sudo memcached_stats.py --dst <agent_ip> [--spoof-src <victim_ip>]
+    sudo memcached_stats.py --dst <agent_ip> [--spoof-src <reflector_ip>]
                             [--count N] [--rate PPS]
 """
 
@@ -72,7 +75,7 @@ def main() -> int:
     inter = 1.0 / max(args.rate, 1)
     pkt = (
         IP(src=args.spoof_src, dst=args.dst)
-        / UDP(sport=33333, dport=11211)
+        / UDP(sport=11211, dport=33333)
         / Raw(load=_PAYLOAD)
     )
 

@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""dns_any.py — Send spoofed-source DNS ANY queries against an agent.
+"""dns_any.py — Flood an agent with reflected DNS amplification responses.
 
-Used by suite 44 (scapy amplification). The attacker VM crafts UDP/53
-queries whose source address is a *third-party* RFC1918 host (the
-spoofed victim) — the canonical setup for reflection / amplification
-attacks. The agent's ingress scrub layer is expected to identify the
-RPF mismatch (the source claims an IP that does not own the route
-through this interface) and drop the packet *before* a response is
-generated.
+Used by suite 44 (scapy amplification). The attacker VM models the
+victim-facing leg of a DNS reflection attack: a flood of UDP datagrams
+sourced *from* the DNS port (53) — the amplified responses a reflector
+blasts at a spoofed victim. The source address is an arbitrary RFC1918
+reflector. The agent's UDP amplification protection rate-limits traffic
+per source/amplifier-port and drops the flood once it exceeds the
+configured `max_pps`, emitting a MITRE T1498.002 (Reflection
+Amplification) alert before any response leaves.
 
 Usage:
-    sudo dns_any.py --dst <agent_ip> [--spoof-src <victim_ip>]
+    sudo dns_any.py --dst <agent_ip> [--spoof-src <reflector_ip>]
                     [--count N] [--rate PPS] [--qname example.com]
 
 The script refuses non-RFC1918 destinations to prevent accidental
@@ -50,7 +51,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--spoof-src",
         default="192.168.56.99",
-        help="spoofed victim source IP (must be RFC1918)",
+        help="apparent reflector source IP (must be RFC1918)",
     )
     p.add_argument("--count", type=int, default=500, help="packet count")
     p.add_argument("--rate", type=int, default=200, help="target pps")
@@ -58,6 +59,12 @@ def _parse_args() -> argparse.Namespace:
         "--qname",
         default="example.com",
         help="DNS qname used in the ANY query",
+    )
+    p.add_argument(
+        "--query",
+        action="store_true",
+        help="send the reflector-direction query (dst=53) instead of the "
+        "default victim-direction response flood (src=53)",
     )
     return p.parse_args()
 
@@ -72,11 +79,22 @@ def main() -> int:
         return 2
 
     inter = 1.0 / max(args.rate, 1)
-    pkt = (
-        IP(src=args.spoof_src, dst=args.dst)
-        / UDP(sport=33333, dport=53)
-        / DNS(rd=1, qd=DNSQR(qname=args.qname, qtype="ANY"))
-    )
+    if args.query:
+        # Reflector-protection direction: a spoofed-source ANY query *to*
+        # the DNS port. The firewall deny / scrub layer blocks the query
+        # before any daemon can answer — used by the egress-zero guard to
+        # confirm the agent never emits an amplified response.
+        layer4 = UDP(sport=33333, dport=53) / DNS(
+            rd=1, qd=DNSQR(qname=args.qname, qtype="ANY")
+        )
+    else:
+        # Victim-protection direction (default): the reflected ANY response
+        # flood arriving *from* the DNS port. Exercises the UDP
+        # amplification rate-drop and the MITRE T1498.002 alert.
+        layer4 = UDP(sport=53, dport=33333) / DNS(
+            qr=1, rd=1, qd=DNSQR(qname=args.qname, qtype="ANY")
+        )
+    pkt = IP(src=args.spoof_src, dst=args.dst) / layer4
 
     sent = 0
     start = time.monotonic()

@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""ssdp_search.py — Spoofed-source SSDP M-SEARCH amplification probes.
+"""ssdp_search.py — Flood an agent with reflected SSDP amplification responses.
 
-SSDP M-SEARCH (UDP/1900) yields a multi-line UPnP response from any
-discovered device — a ~30x amplification vector. Suite 44 uses a
-spoofed source IP so the agent's scrub layer should fail RPF and drop
-before any device on the lan can answer.
+SSDP (UDP/1900) yields a multi-line UPnP response from any discovered
+device — a ~30x amplification vector. This script models the victim-
+facing leg: a flood sourced *from* the SSDP port (1900), the amplified
+responses a reflector blasts at a spoofed victim. The agent's UDP
+amplification protection rate-limits per source/amplifier-port and
+drops the flood beyond the configured `max_pps`, emitting a MITRE
+T1498.002 alert.
 
 Usage:
-    sudo ssdp_search.py --dst <agent_ip> [--spoof-src <victim_ip>]
+    sudo ssdp_search.py --dst <agent_ip> [--spoof-src <reflector_ip>]
                         [--count N] [--rate PPS]
 """
 
@@ -68,7 +71,7 @@ def main() -> int:
     inter = 1.0 / max(args.rate, 1)
     pkt = (
         IP(src=args.spoof_src, dst=args.dst)
-        / UDP(sport=33333, dport=1900)
+        / UDP(sport=1900, dport=33333)
         / Raw(load=_MSEARCH)
     )
 

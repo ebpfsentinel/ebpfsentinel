@@ -62,15 +62,17 @@ _amp_resolve_script() {
 
 # ── Public entrypoints ────────────────────────────────────────────────
 
-# amp_run <vector> [count] [rate] [spoof-src]
+# amp_run <vector> [count] [rate] [spoof-src] [extra-args...]
 # Run one amplification probe synchronously. Returns the script's exit
 # code (non-zero only on argv / sanity errors — packet send is best-
-# effort and never aborts on partial delivery).
+# effort and never aborts on partial delivery). Any args past the fourth
+# (e.g. --query) are forwarded verbatim to the vector script.
 amp_run() {
-    local vector="${1:?usage: amp_run <vector> [count] [rate] [spoof-src]}"
+    local vector="${1:?usage: amp_run <vector> [count] [rate] [spoof-src] [extra-args...]}"
     local count="${2:-$AMP_DEFAULT_COUNT}"
     local rate="${3:-$AMP_DEFAULT_RATE}"
     local spoof_src="${4:-$AMP_DEFAULT_SPOOF_SRC}"
+    shift $(( $# < 4 ? $# : 4 ))
 
     require_amp
 
@@ -94,6 +96,7 @@ amp_run() {
         --spoof-src "$spoof_src" \
         --count "$count" \
         --rate "$rate" \
+        "$@" \
         >>"$AMP_LOG" 2>&1
 }
 

@@ -1,18 +1,23 @@
 #!/usr/bin/env bats
-# 44-scapy-amplification.bats — Spoofed-source UDP reflection/amplification
-# probes against an agent with scrub + amplification DDoS policy.
+# 44-scapy-amplification.bats — UDP reflection/amplification protection
+# against an agent with scrub + amplification DDoS policy.
 #
 # Topology: 2vm. Profile: nightly. Requires:
 #   - Attacker VM with python3 + scapy (Story 34.3)
 #   - Agent VM reachable via 2VM SSH helpers (Story 34.2)
 #   - Kernel >= 6.9
 #
-# Each vector test asserts:
-#   1. xdp/scrub drop metric grew (spoofed packets dropped pre-response)
+# Each vector test floods the agent (victim side) with the reflected
+# response leg of an amplification attack: UDP datagrams sourced *from*
+# the amplifier port (53/123/1900/11211). The kernel UDP-amplification
+# protection rate-limits per source/amplifier-port and drops the flood,
+# and asserts:
+#   1. the DDoS amp_dropped metric grew (flood dropped at XDP ingress)
 #   2. at least one alert carries MITRE T1498.002 (Reflection Amplification)
 #
-# A final test captures the agent's external interface during a fresh
-# DNS-ANY salvo and asserts ZERO amplification responses leave the agent.
+# A final test drives the reflector leg instead (--query: a spoofed-source
+# query *to* the amplifier port, denied by the firewall) and asserts ZERO
+# amplification responses leave the agent.
 
 load '../lib/ebpf_helpers'
 load '../lib/amp_helpers'
@@ -98,16 +103,18 @@ _run_amp_and_assert() {
 # ── Egress-zero guard ─────────────────────────────────────────────────
 
 @test "no amplification response leaves the agent (egress capture)" {
-    # Start a capture on the agent's external interface, then run one
-    # short DNS-ANY salvo. The agent must NOT emit any UDP packets
-    # sourced from the amplification ports (53/123/1900/11211).
+    # Start a capture on the agent's external interface, then run one short
+    # DNS-ANY salvo in the reflector direction (--query: a spoofed-source
+    # ANY query *to* UDP/53). The firewall denies the query at ingress; the
+    # agent must NOT answer it, i.e. emit any UDP packet sourced from the
+    # amplification ports (53/123/1900/11211).
     local iface="${EBPF_AGENT_INTERFACE:-eth1}"
     local bpf='udp and (src port 53 or src port 123 or src port 1900 or src port 11211)'
 
     local remote_pcap
     remote_pcap="$(capture_on agent "$iface" "$bpf")" || skip "capture_on failed on agent VM"
 
-    amp_run dns_any 200 200 || true
+    amp_run dns_any 200 200 "" --query || true
 
     local local_pcap
     local_pcap="$(stop_capture agent "$remote_pcap")" || skip "stop_capture failed on agent VM"
