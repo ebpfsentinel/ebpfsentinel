@@ -106,7 +106,16 @@ setup_file() {
         _agent_ssh_sudo bash -c "'iperf3 -s -B ${EBPF_HOST_IP} -D --pidfile /tmp/iperf3-docker.pid'" 2>/dev/null || true
         sleep 1
     else
-        # Local mode: substitute interface and start iperf3
+        # Local mode: build a netns/veth traffic source so the perf tests have a
+        # real packet generator on a single VM. The container runs with
+        # network_mode:host and attaches its eBPF datapath to the host-side veth
+        # ($EBPF_VETH_HOST); traffic is driven from the namespace peer via the
+        # iperf3_from_ns / send_icmp_from_ns helpers (which `ip netns exec`).
+        # Without this, those helpers target a non-existent namespace, the
+        # baseline fails, and every agent-traffic test silently skips.
+        create_test_netns
+
+        # Substitute interface (the host veth) and start iperf3 on the host side.
         local perf_config="/tmp/ebpfsentinel-docker-perf-config-$$.yaml"
         local iface="${EBPF_VETH_HOST:-lo}"
         sed "s|__INTERFACE__|${iface}|g" \
@@ -161,6 +170,7 @@ teardown_file() {
     else
         [ -f /tmp/iperf3-docker-$$.pid ] && kill "$(cat /tmp/iperf3-docker-$$.pid)" 2>/dev/null || true
         pkill -f "iperf3 -s -B" 2>/dev/null || true
+        destroy_test_netns 2>/dev/null || true
     fi
 }
 

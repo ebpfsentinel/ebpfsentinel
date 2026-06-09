@@ -25,7 +25,23 @@ setup_file() {
         minikube start --driver=docker --cpus=2 --memory=2048
     fi
 
-    # Load local Docker image into minikube
+    # Ensure the agent image exists, then load it into minikube. The DaemonSet
+    # pulls ebpfsentinel:latest with imagePullPolicy:IfNotPresent, so the image
+    # must be present inside the cluster (otherwise ImagePullBackOff). Build it
+    # from source if it is missing — staging the pre-built eBPF objects into
+    # ebpf-out/ first (the Dockerfile COPYs that dir) so the in-cluster agent
+    # can actually load its datapath and reach readiness.
+    if ! docker image inspect ebpfsentinel:latest &>/dev/null 2>&1; then
+        echo "# Staging eBPF programs for Docker build..." >&3
+        mkdir -p "${PROJECT_ROOT}/ebpf-out"
+        find "${PROJECT_ROOT}/crates/ebpf-programs/"*/target/bpfel-unknown-none/release \
+          -maxdepth 1 -type f ! -name '*.d' ! -name '*.fingerprint' ! -name '.cargo*' \
+          -exec cp {} "${PROJECT_ROOT}/ebpf-out/" \; 2>/dev/null || true
+        echo "# Building ebpfsentinel:latest..." >&3
+        docker build -t ebpfsentinel:latest "${PROJECT_ROOT}" || {
+            echo "# Docker build failed — tests will be skipped" >&3
+        }
+    fi
     if docker image inspect ebpfsentinel:latest &>/dev/null 2>&1; then
         minikube image load ebpfsentinel:latest
     fi
