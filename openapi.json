@@ -1985,6 +1985,55 @@
         ]
       }
     },
+    "/api/v1/dns/status": {
+      "get": {
+        "tags": [
+          "DNS Intelligence"
+        ],
+        "summary": "`GET /api/v1/dns/status` — DNS intelligence subsystem status.",
+        "operationId": "dns_status",
+        "responses": {
+          "200": {
+            "description": "DNS intelligence status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DnsStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/domains/blocklist": {
       "post": {
         "tags": [
@@ -2264,6 +2313,55 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/EbpfStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/fingerprints/ja4s": {
+      "get": {
+        "tags": [
+          "Fingerprints"
+        ],
+        "summary": "`GET /api/v1/fingerprints/ja4s` — JA4S server-side fingerprint cache status.",
+        "operationId": "ja4s_summary",
+        "responses": {
+          "200": {
+            "description": "JA4S server fingerprint cache summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ja4sSummaryResponse"
                 }
               }
             }
@@ -2713,6 +2811,135 @@
           },
           "404": {
             "description": "Rule not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/geoip/lookup": {
+      "get": {
+        "tags": [
+          "GeoIP"
+        ],
+        "summary": "`GET /api/v1/geoip/lookup?ip=<addr>` — resolve an IP to `GeoIP` info.",
+        "operationId": "geoip_lookup",
+        "parameters": [
+          {
+            "name": "ip",
+            "in": "query",
+            "description": "IP address to resolve (IPv4 or IPv6).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "GeoIP lookup result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeoIpLookupResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid IP address",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "GeoIP not available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/geoip/status": {
+      "get": {
+        "tags": [
+          "GeoIP"
+        ],
+        "summary": "`GET /api/v1/geoip/status` — `GeoIP` enrichment status.",
+        "operationId": "geoip_status",
+        "responses": {
+          "200": {
+            "description": "GeoIP status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeoIpStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
             "content": {
               "application/json": {
                 "schema": {
@@ -3379,6 +3606,142 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/lb/vips": {
+      "get": {
+        "tags": [
+          "Load Balancer"
+        ],
+        "summary": "`GET /api/v1/lb/vips` — VIP announcer status.",
+        "operationId": "list_lb_vips",
+        "responses": {
+          "200": {
+            "description": "VIP announcer status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LbVipStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "VIP announcer not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Load Balancer"
+        ],
+        "summary": "`POST /api/v1/lb/vips` — apply a new VIP announce configuration.",
+        "operationId": "apply_lb_announce",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LbVipAnnounceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Configuration applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LbVipStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "VIP announcer not enabled",
             "content": {
               "application/json": {
                 "schema": {
@@ -4785,6 +5148,188 @@
             "api_key": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "Routing"
+        ],
+        "summary": "`POST /api/v1/routing/gateways` — add a routing gateway.",
+        "operationId": "create_gateway",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateGatewayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Gateway created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Gateway conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/routing/gateways/{id}": {
+      "delete": {
+        "tags": [
+          "Routing"
+        ],
+        "summary": "`DELETE /api/v1/routing/gateways/{id}` — remove a routing gateway.",
+        "operationId": "delete_gateway",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Gateway identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Gateway deleted"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Gateway not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/routing/routes": {
+      "get": {
+        "tags": [
+          "Routing"
+        ],
+        "summary": "`GET /api/v1/routing/routes` — effective default route(s) from gateway selection.",
+        "operationId": "list_routes",
+        "responses": {
+          "200": {
+            "description": "Active routes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RouteResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
       }
     },
     "/api/v1/routing/status": {
@@ -4869,6 +5414,75 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/threatintel/feeds/refresh": {
+      "post": {
+        "tags": [
+          "Threat Intelligence"
+        ],
+        "summary": "`POST /api/v1/threatintel/feeds/refresh` — trigger an immediate re-fetch\nof all enabled threat-intel feeds.",
+        "operationId": "refresh_feeds",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshFeedRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Feed refresh triggered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefreshResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Threat intel feeds not enabled",
             "content": {
               "application/json": {
                 "schema": {
@@ -5039,6 +5653,83 @@
             "api_key": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "Zones"
+        ],
+        "summary": "`POST /api/v1/zones` — create a security zone.",
+        "operationId": "create_zone",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateZoneRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Zone created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ZoneResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid zone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Zone conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
       }
     },
     "/api/v1/zones/policies": {
@@ -5091,6 +5782,146 @@
             "api_key": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "Zones"
+        ],
+        "summary": "`POST /api/v1/zones/policies` — create an inter-zone policy.",
+        "operationId": "create_zone_policy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateZonePolicyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Zone policy created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ZonePolicyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/zones/policies/{id}": {
+      "delete": {
+        "tags": [
+          "Zones"
+        ],
+        "summary": "`DELETE /api/v1/zones/policies/{id}` — remove an inter-zone policy.",
+        "operationId": "delete_zone_policy",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Policy identifier `{from}__{to}`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Zone policy deleted"
+          },
+          "400": {
+            "description": "Invalid policy id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Zone policy not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
       }
     },
     "/api/v1/zones/status": {
@@ -5123,6 +5954,69 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/zones/{id}": {
+      "delete": {
+        "tags": [
+          "Zones"
+        ],
+        "summary": "`DELETE /api/v1/zones/{id}` — remove a security zone.",
+        "operationId": "delete_zone",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Zone identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Zone deleted"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Zone not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -5254,6 +6148,7 @@
       "AgentStatusResponse": {
         "type": "object",
         "required": [
+          "status",
           "version",
           "uptime_seconds",
           "ebpf_loaded",
@@ -5274,6 +6169,10 @@
           "rule_count": {
             "type": "integer",
             "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "description": "Coarse lifecycle state: `running` once eBPF programs are attached,\n`degraded` while operating without them (userspace-only fallback)."
           },
           "uptime_seconds": {
             "type": "integer",
@@ -5354,6 +6253,17 @@
             "format": "int32",
             "description": "Threat intel: IOC confidence score (0-100).",
             "minimum": 0
+          },
+          "container": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ContainerIdentity",
+                "description": "Container identity resolved from the event's `cgroup_id` (if any)."
+              }
+            ]
           },
           "current_pps": {
             "type": [
@@ -5824,7 +6734,8 @@
         "type": "object",
         "required": [
           "enabled",
-          "connection_count"
+          "connection_count",
+          "max_connections"
         ],
         "properties": {
           "connection_count": {
@@ -5834,6 +6745,12 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "max_connections": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Conntrack table capacity — the maximum number of flows the\nagent tracks before eviction (the BPF connection-table size).",
+            "minimum": 0
           }
         }
       },
@@ -5898,6 +6815,55 @@
           }
         }
       },
+      "ContainerIdentity": {
+        "type": "object",
+        "description": "Container provenance surfaced on an alert. `kind` is `container` for a\nresolved container and `host` for a host-namespace process; the Docker /\nKubernetes fields are populated only when an enricher attached metadata.",
+        "required": [
+          "kind",
+          "runtime",
+          "id",
+          "cgroup_path"
+        ],
+        "properties": {
+          "cgroup_path": {
+            "type": "string",
+            "description": "cgroup path the resolver matched."
+          },
+          "container_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Kubernetes container name (only when a k8s enricher attached metadata)."
+          },
+          "id": {
+            "type": "string",
+            "description": "Container ID (empty for host)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`container` or `host`."
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Kubernetes namespace (only when a k8s enricher attached metadata)."
+          },
+          "pod": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Kubernetes pod name (only when a k8s enricher attached metadata)."
+          },
+          "runtime": {
+            "type": "string",
+            "description": "Detected runtime (docker, containerd, crio, podman, unknown)."
+          }
+        }
+      },
       "CreateDdosPolicyRequest": {
         "type": "object",
         "required": [
@@ -5941,6 +6907,47 @@
           },
           "mitigation_action": {
             "type": "string"
+          }
+        }
+      },
+      "CreateGatewayRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "ip"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "health_check_interval_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Health-check probe interval in seconds. When set, an ICMP probe is configured.",
+            "minimum": 0
+          },
+          "interface": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Egress interface; defaults to empty (inherits the agent's primary)."
+          },
+          "ip": {
+            "type": "string",
+            "description": "Gateway IPv4 address."
+          },
+          "name": {
+            "type": "string"
+          },
+          "weight": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Routing weight; maps to failover priority (lower = preferred).",
+            "minimum": 0
           }
         }
       },
@@ -6076,6 +7083,9 @@
             "format": "int32",
             "minimum": 0
           },
+          "same_segment": {
+            "type": "boolean"
+          },
           "weight": {
             "type": "integer",
             "format": "int32",
@@ -6112,6 +7122,9 @@
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          },
+          "mode": {
+            "type": "string"
           },
           "name": {
             "type": "string"
@@ -6358,6 +7371,13 @@
             ],
             "description": "Destination IP in CIDR notation."
           },
+          "dst_mac": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional destination MAC filter (L2), colon-separated."
+          },
           "dst_port": {
             "type": [
               "integer",
@@ -6392,6 +7412,13 @@
             ],
             "description": "Source IP in CIDR notation (e.g. `192.168.1.0/24`)."
           },
+          "src_mac": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional source MAC filter (L2), colon-separated (e.g. `aa:bb:cc:dd:ee:ff`)."
+          },
           "src_port": {
             "type": [
               "integer",
@@ -6408,6 +7435,92 @@
             "format": "int32",
             "description": "Optional 802.1Q VLAN ID filter.",
             "minimum": 0
+          }
+        }
+      },
+      "CreateZonePolicyRequest": {
+        "type": "object",
+        "required": [
+          "source_zone",
+          "dest_zone",
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`allow` permits traffic; any other verb denies."
+          },
+          "dest_zone": {
+            "type": "string",
+            "description": "Destination zone identifier."
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "source_zone": {
+            "type": "string",
+            "description": "Source zone identifier."
+          }
+        }
+      },
+      "CreateZoneRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "interfaces": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Network interfaces grouped into this zone."
+          },
+          "name": {
+            "type": "string",
+            "description": "Zone name; used as the zone identifier."
+          },
+          "subnets": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Subnets are accepted for forward-compatibility but not yet enforced."
           }
         }
       },
@@ -6701,6 +7814,34 @@
           }
         }
       },
+      "DnsStatusResponse": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "blocklist_pattern_count",
+          "blocklist_domains_blocked",
+          "blocklist_ips_injected"
+        ],
+        "properties": {
+          "blocklist_domains_blocked": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "blocklist_ips_injected": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "blocklist_pattern_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether DNS intelligence (cache + blocklist) is enabled."
+          }
+        }
+      },
       "DomainBlockResponse": {
         "type": "object",
         "required": [
@@ -6888,6 +8029,15 @@
           "id": {
             "type": "string"
           },
+          "last_fetched": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix-epoch milliseconds of the last completed feed fetch, or `null`\nif no fetch has run yet. Shared across feeds (one fetch cycle).",
+            "minimum": 0
+          },
           "max_iocs": {
             "type": "integer",
             "minimum": 0
@@ -6916,7 +8066,8 @@
         "required": [
           "cached_count",
           "max_size",
-          "ttl_seconds"
+          "ttl_seconds",
+          "persistent"
         ],
         "properties": {
           "cached_count": {
@@ -6928,6 +8079,10 @@
             "type": "integer",
             "description": "Maximum cache size.",
             "minimum": 0
+          },
+          "persistent": {
+            "type": "boolean",
+            "description": "Whether the cache is backed by a persistent store that survives restarts."
           },
           "ttl_seconds": {
             "type": "integer",
@@ -6945,8 +8100,10 @@
           "interface",
           "gateway_ip",
           "priority",
+          "weight",
           "enabled",
-          "status"
+          "status",
+          "health_status"
         ],
         "properties": {
           "enabled": {
@@ -6955,10 +8112,13 @@
           "gateway_ip": {
             "type": "string"
           },
+          "health_status": {
+            "type": "string",
+            "description": "Alias of `status` for clients expecting a `health_status` field."
+          },
           "id": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
+            "type": "string",
+            "description": "Gateway identifier, rendered as a string for stable API addressing."
           },
           "interface": {
             "type": "string"
@@ -6969,10 +8129,78 @@
           "priority": {
             "type": "integer",
             "format": "int32",
+            "description": "Failover priority (lower = preferred).",
             "minimum": 0
           },
           "status": {
+            "type": "string",
+            "description": "Health-check observed status (`healthy` / `degraded` / `down`)."
+          },
+          "weight": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Alias of `priority`, exposed as a routing weight.",
+            "minimum": 0
+          }
+        }
+      },
+      "GeoIpLookupResponse": {
+        "type": "object",
+        "required": [
+          "ip"
+        ],
+        "properties": {
+          "as_org": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "asn": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "country_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "country_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ip": {
             "type": "string"
+          }
+        }
+      },
+      "GeoIpStatusResponse": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "ready"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether `GeoIP` enrichment is enabled in the agent configuration."
+          },
+          "ready": {
+            "type": "boolean",
+            "description": "Whether an mmdb-backed lookup database is loaded and ready."
           }
         }
       },
@@ -7028,6 +8256,16 @@
           },
           "severity": {
             "type": "string"
+          },
+          "threshold": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThresholdResponse"
+              }
+            ]
           }
         }
       },
@@ -7135,6 +8373,38 @@
           }
         }
       },
+      "Ja4sSummaryResponse": {
+        "type": "object",
+        "description": "Response for `GET /api/v1/fingerprints/ja4s`.",
+        "required": [
+          "cached_count",
+          "max_size",
+          "ttl_seconds",
+          "persistent"
+        ],
+        "properties": {
+          "cached_count": {
+            "type": "integer",
+            "description": "Number of cached JA4S server fingerprints.",
+            "minimum": 0
+          },
+          "max_size": {
+            "type": "integer",
+            "description": "Maximum cache size.",
+            "minimum": 0
+          },
+          "persistent": {
+            "type": "boolean",
+            "description": "Whether the cache is backed by a persistent store that survives restarts."
+          },
+          "ttl_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Cache TTL in seconds.",
+            "minimum": 0
+          }
+        }
+      },
       "L7RuleResponse": {
         "type": "object",
         "required": [
@@ -7188,6 +8458,7 @@
           "port",
           "weight",
           "enabled",
+          "same_segment",
           "status",
           "active_connections"
         ],
@@ -7211,6 +8482,9 @@
             "format": "int32",
             "minimum": 0
           },
+          "same_segment": {
+            "type": "boolean"
+          },
           "status": {
             "type": "string"
           },
@@ -7229,6 +8503,7 @@
           "protocol",
           "listen_port",
           "algorithm",
+          "mode",
           "enabled",
           "backends"
         ],
@@ -7253,6 +8528,9 @@
             "format": "int32",
             "minimum": 0
           },
+          "mode": {
+            "type": "string"
+          },
           "name": {
             "type": "string"
           },
@@ -7269,6 +8547,7 @@
           "protocol",
           "listen_port",
           "algorithm",
+          "mode",
           "backend_count",
           "enabled"
         ],
@@ -7291,6 +8570,9 @@
             "format": "int32",
             "minimum": 0
           },
+          "mode": {
+            "type": "string"
+          },
           "name": {
             "type": "string"
           },
@@ -7312,6 +8594,103 @@
           "service_count": {
             "type": "integer",
             "minimum": 0
+          }
+        }
+      },
+      "LbVipAnnounceRequest": {
+        "type": "object",
+        "properties": {
+          "interface": {
+            "type": "string",
+            "description": "L2 interface VIPs egress on. Required when role is primary/standby."
+          },
+          "role": {
+            "type": "string",
+            "description": "`disabled`, `primary`, or `standby`."
+          },
+          "vips": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LbVipRequest"
+            },
+            "description": "VIPs this node owns. Must be non-empty when role is\nprimary/standby; ignored when role is disabled."
+          }
+        }
+      },
+      "LbVipRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "addr"
+        ],
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "LbVipResponse": {
+        "type": "object",
+        "required": [
+          "name",
+          "addr",
+          "arp_replies",
+          "self_announced"
+        ],
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "arp_replies": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Forged ARP replies emitted for this VIP since program load\n(per-CPU summed kernel counter).",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "self_announced": {
+            "type": "boolean",
+            "description": "Whether this VIP is currently in the self-whitelist (true when\nthe node is speaker and the binding has been written)."
+          }
+        }
+      },
+      "LbVipStatusResponse": {
+        "type": "object",
+        "required": [
+          "role",
+          "interface",
+          "is_speaker",
+          "bindings_count",
+          "vips"
+        ],
+        "properties": {
+          "bindings_count": {
+            "type": "integer",
+            "description": "Number of self-owned bindings registered in the kernel\n`SELF_OWNED_BINDINGS` map.",
+            "minimum": 0
+          },
+          "interface": {
+            "type": "string",
+            "description": "L2 interface VIPs egress on (empty when role is disabled)."
+          },
+          "is_speaker": {
+            "type": "boolean",
+            "description": "Whether this node currently answers ARP / sends gratuitous ARP."
+          },
+          "role": {
+            "type": "string",
+            "description": "`disabled`, `primary`, or `standby`."
+          },
+          "vips": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LbVipResponse"
+            }
           }
         }
       },
@@ -7627,6 +9006,16 @@
             "format": "int64",
             "minimum": 0
           },
+          "country_codes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "ISO-3166 country codes this rule is scoped to (userspace annotation;\nenforced by the GeoIP-aware ratelimit pipeline). Absent when unscoped."
+          },
           "enabled": {
             "type": "boolean"
           },
@@ -7663,6 +9052,35 @@
           "status": {
             "type": "string",
             "description": "`\"ready\"` or `\"not_ready\"`."
+          }
+        }
+      },
+      "RefreshFeedRequest": {
+        "type": "object",
+        "description": "Optional body for a feed refresh request.",
+        "properties": {
+          "feed_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Feed to refresh. Accepted for forward compatibility; the fetcher\ncurrently refreshes every enabled feed in a single cycle."
+          }
+        }
+      },
+      "RefreshResponse": {
+        "type": "object",
+        "description": "Response to a feed refresh request.",
+        "required": [
+          "status",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
           }
         }
       },
@@ -7744,6 +9162,28 @@
           "active_count": {
             "type": "integer",
             "minimum": 0
+          }
+        }
+      },
+      "RouteResponse": {
+        "type": "object",
+        "description": "A resolved default route derived from the active gateway selection.",
+        "required": [
+          "destination",
+          "gateway_id",
+          "gateway_ip"
+        ],
+        "properties": {
+          "destination": {
+            "type": "string",
+            "description": "Destination CIDR served by this route."
+          },
+          "gateway_id": {
+            "type": "string",
+            "description": "Identifier of the gateway this route egresses through."
+          },
+          "gateway_ip": {
+            "type": "string"
           }
         }
       },
@@ -7837,6 +9277,16 @@
         "properties": {
           "action": {
             "type": "string"
+          },
+          "country_codes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "ISO-3166 country codes this rule matches, resolved from a `GeoIP`\nalias referenced by `src_alias`/`dst_alias`. Set only when the\nreferenced alias is a `GeoIP` kind."
           },
           "ct_states": {
             "type": [
@@ -8110,6 +9560,34 @@
           }
         }
       },
+      "ThresholdResponse": {
+        "type": "object",
+        "description": "Per-rule threshold/rate detection, surfaced for rate-based IDS rules.",
+        "required": [
+          "threshold_type",
+          "count",
+          "window_secs",
+          "track_by"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "threshold_type": {
+            "type": "string"
+          },
+          "track_by": {
+            "type": "string"
+          },
+          "window_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "TopQueriedEntry": {
         "type": "object",
         "required": [
@@ -8130,13 +9608,23 @@
       "ZonePolicyResponse": {
         "type": "object",
         "required": [
+          "id",
           "from",
           "to",
-          "policy"
+          "policy",
+          "action"
         ],
         "properties": {
+          "action": {
+            "type": "string",
+            "description": "Alias of `policy`, exposed under the `action` field name."
+          },
           "from": {
             "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable identifier `{from}__{to}` for API addressing."
           },
           "policy": {
             "type": "string"
