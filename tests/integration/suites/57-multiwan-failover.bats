@@ -233,8 +233,40 @@ PY
     [ "${first_priority}" = "10" ]
 }
 
-# ── Documented deferral: active probe loop + WAN_ALL_DOWN alert ────
+# ── Active probe loop drives gateways down + raises WAN_ALL_DOWN ────
 
-@test "active probe-driven failover path is tracked as a coverage gap" {
-    skip "in-process gateway health probe loop + WAN_ALL_DOWN alert not wired yet; AC #1/#2 deferred"
+@test "active probe loop marks both gateways down and raises WAN_ALL_DOWN" {
+    # Both fixture gateways health-check unreachable targets (10.200.0.254/.253),
+    # so the in-process probe loop must flip both to "down" within a few probe
+    # intervals (interval 1s × failure_threshold 3 ≈ 3-4s).
+    local i down
+    down=0
+    for ((i = 0; i < 20; i++)); do
+        local gws
+        gws="$(_gateways_array)" || gws="[]"
+        down="$(echo "${gws}" | jq '[.[] | select(.status == "down")] | length' 2>/dev/null)" || down=0
+        [ "${down:-0}" -ge 2 ] && break
+        sleep 1
+    done
+    [ "${down:-0}" -ge 2 ] || {
+        echo "expected both gateways down within 20s, got ${down}" >&2
+        _gateways_array >&2
+        return 1
+    }
+
+    # The all-down transition must raise a single critical routing alert.
+    local found=0
+    for ((i = 0; i < 10; i++)); do
+        local alerts
+        alerts="$(api_get '/api/v1/alerts?component=routing&limit=50' 2>/dev/null)" || alerts=""
+        found="$(echo "${alerts}" | jq '[.alerts[]
+            | select(.rule_id == "routing-wan-all-down")] | length' 2>/dev/null)" || found=0
+        [ "${found:-0}" -ge 1 ] && break
+        sleep 1
+    done
+    [ "${found:-0}" -ge 1 ] || {
+        echo "no WAN_ALL_DOWN (routing-wan-all-down) alert after both gateways down" >&2
+        api_get '/api/v1/alerts?component=routing&limit=50' >&2
+        return 1
+    }
 }

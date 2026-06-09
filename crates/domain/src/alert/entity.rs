@@ -455,6 +455,65 @@ impl Alert {
         }
     }
 
+    /// Create a critical alert when every enabled WAN gateway has gone down
+    /// (multi-WAN total-failure). `gateways` lists the down gateway names and
+    /// `timestamp_ns` is the wall-clock time of the transition.
+    pub fn wan_all_down(gateways: &[String], timestamp_ns: u64) -> Self {
+        let rule_id = RuleId("routing-wan-all-down".to_string());
+        let message = format!(
+            "all {} WAN gateway(s) down: {}",
+            gateways.len(),
+            gateways.join(", ")
+        );
+        Self {
+            id: Self::generate_id(timestamp_ns, &rule_id),
+            timestamp_ns,
+            component: "routing".to_string(),
+            severity: Severity::Critical,
+            rule_id,
+            action: DomainMode::Alert,
+            src_addr: [0; 4],
+            dst_addr: [0; 4],
+            src_port: 0,
+            dst_port: 0,
+            protocol: 0,
+            is_ipv6: false,
+            message,
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: None,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: None,
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+        }
+    }
+
     /// Create an alert from a packet-level security event (firewall, ratelimit, L7, IPS).
     pub fn from_packet_security_alert(psa: &PacketSecurityAlert) -> Self {
         let component_str = match psa.component {

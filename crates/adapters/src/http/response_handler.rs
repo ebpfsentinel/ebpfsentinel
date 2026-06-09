@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::extract::{Path, State};
+use domain::audit::entity::AuditAction;
 use domain::response::entity::{ResponseAction, ResponseActionType};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -128,6 +129,18 @@ pub async fn create_response_action(
             })?;
     }
 
+    state.audit_service.record_response_action(
+        AuditAction::RuleAdded,
+        &action.target,
+        &action.rule_id,
+        &format!(
+            "created {} response on {} (ttl {}s)",
+            to_response(&action, now_ns).action_type,
+            action.target,
+            action.ttl_secs
+        ),
+    );
+
     let resp = to_response(&action, now_ns);
     Ok(Json(resp))
 }
@@ -209,11 +222,20 @@ pub async fn revoke_response_action(
         .try_into()
         .unwrap_or(u64::MAX);
 
-    let mut engine = response_engine.write().await;
-    let action = engine.revoke(&id).ok_or(ApiError::NotFound {
-        code: "RESPONSE_NOT_FOUND",
-        message: format!("response action '{id}' not found or already revoked"),
-    })?;
+    let action = {
+        let mut engine = response_engine.write().await;
+        engine.revoke(&id).ok_or(ApiError::NotFound {
+            code: "RESPONSE_NOT_FOUND",
+            message: format!("response action '{id}' not found or already revoked"),
+        })?
+    };
+
+    state.audit_service.record_response_action(
+        AuditAction::RuleRemoved,
+        &action.target,
+        &action.rule_id,
+        &format!("revoked response on {} before ttl", action.target),
+    );
 
     Ok(Json(to_response(&action, now_ns)))
 }

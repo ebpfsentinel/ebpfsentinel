@@ -46,13 +46,15 @@ require_pktgen() {
         fi
         sleep 0.2
     fi
-    if [ ! -w "${PKTGEN_PROCROOT}/pgctrl" ]; then
-        # /proc/net/pktgen/* requires root.
-        if [ "$(id -u)" -ne 0 ]; then
-            skip "pktgen control files require root on attacker VM"
+    # /proc/net/pktgen/* is root-only. The control wrappers (_pg) already write
+    # through sudo, so non-root bats is fine as long as passwordless sudo works.
+    if [ "$(id -u)" -ne 0 ] && [ ! -w "${PKTGEN_PROCROOT}/pgctrl" ]; then
+        if ! sudo -n true 2>/dev/null; then
+            skip "pktgen control files need root (passwordless sudo unavailable)"
         fi
     fi
-    if [ ! -e "${PKTGEN_PROCROOT}/${PKTGEN_KTHREAD}" ]; then
+    # The per-CPU thread file is also root-only to stat; check it through sudo.
+    if ! sudo test -e "${PKTGEN_PROCROOT}/${PKTGEN_KTHREAD}"; then
         skip "pktgen thread ${PKTGEN_KTHREAD} missing under ${PKTGEN_PROCROOT}"
     fi
 }

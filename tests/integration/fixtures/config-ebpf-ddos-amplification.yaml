@@ -85,13 +85,13 @@ ddos:
   enabled: true
   policies:
     - id: ddos-amp-udp-flood
-      attack_type: udp_flood
+      attack_type: udp_amplification
       detection_threshold_pps: 100
       mitigation_action: block
       auto_block_duration_secs: 60
       enabled: true
     - id: ddos-amp-reflection
-      attack_type: amplification
+      attack_type: volumetric
       detection_threshold_pps: 50
       mitigation_action: block
       auto_block_duration_secs: 60

@@ -650,7 +650,49 @@ impl AlertPipeline {
             AlertEvent::PacketSecurity(psa) => {
                 self.process_packet_security_alert(&psa).await;
             }
+            AlertEvent::System(alert) => self.process_system_alert(*alert).await,
         }
+    }
+
+    /// Emit a pre-built system alert (multi-WAN failure, etc.) through the same
+    /// metrics → store → broadcast → route path the kernel-event handlers use.
+    pub async fn process_system_alert(&mut self, mut alert: Alert) {
+        self.apply_metadata_enrichers(&mut alert).await;
+
+        let severity_str = severity_label(alert.severity);
+        let technique_id = alert
+            .mitre_attack
+            .as_ref()
+            .map_or("", |m| m.technique_id.as_str());
+        self.metrics
+            .record_alert(&alert.component, severity_str, technique_id);
+        self.metrics
+            .record_alert_by_rule(&alert.component, &alert.rule_id.0);
+
+        if let Some(ref store) = self.alert_store
+            && let Err(e) = store.store_alert(&alert)
+        {
+            tracing::warn!(alert_id = %alert.id, error = %e, "failed to store system alert");
+        }
+
+        self.push_replay(&alert);
+        if let Some(ref tx) = self.stream_tx {
+            let _ = tx.send(alert.clone());
+        }
+
+        let matched_routes: Vec<_> = self
+            .router
+            .process_alert(&alert)
+            .into_iter()
+            .map(|(i, r)| (i, r.clone()))
+            .collect();
+
+        if matched_routes.is_empty() {
+            self.metrics.record_alert_dropped("no_route");
+            return;
+        }
+
+        self.send_to_destinations(&alert, matched_routes).await;
     }
 
     /// Evaluate an alert against simple auto-response policies.

@@ -13,6 +13,7 @@ pub enum AuditComponent {
     Dlp,
     Ddos,
     Loadbalancer,
+    Responses,
     Config,
 }
 
@@ -28,6 +29,7 @@ impl AuditComponent {
             Self::Dlp => "dlp",
             Self::Ddos => "ddos",
             Self::Loadbalancer => "loadbalancer",
+            Self::Responses => "responses",
             Self::Config => "config",
         }
     }
@@ -44,6 +46,7 @@ impl AuditComponent {
             "dlp" => Self::Dlp,
             "ddos" => Self::Ddos,
             "loadbalancer" | "lb" => Self::Loadbalancer,
+            "responses" | "response" => Self::Responses,
             _ => Self::Config,
         }
     }
@@ -183,6 +186,27 @@ impl AuditEntry {
         }
     }
 
+    /// Create an audit entry for a response-engine action (manual block/throttle,
+    /// TTL expiry, early revoke). The target IP is parsed into `src_addr` when it
+    /// is a bare IPv4 literal so audit queries can filter by it; otherwise it is
+    /// carried in `detail`.
+    pub fn response_action(action: AuditAction, target: &str, rule_id: &str, detail: &str) -> Self {
+        let (src_addr, is_ipv6) = parse_target_ipv4(target);
+        Self {
+            timestamp_ns: current_timestamp_ns(),
+            component: AuditComponent::Responses,
+            action,
+            src_addr,
+            dst_addr: [0; 4],
+            src_port: 0,
+            dst_port: 0,
+            protocol: 0,
+            is_ipv6,
+            rule_id: rule_id.to_string(),
+            detail: sanitize_detail(detail),
+        }
+    }
+
     /// Returns the source IPv4 address (first element of `src_addr`).
     pub fn src_ip(&self) -> u32 {
         self.src_addr[0]
@@ -207,6 +231,17 @@ fn sanitize_detail(detail: &str) -> String {
         detail
     };
     truncated.to_string()
+}
+
+/// Parse a response target into a `[u32; 4]` `src_addr`. Returns the zeroed
+/// address (and `is_ipv6 = false`) for CIDRs or non-IPv4 literals — those keep
+/// their full representation in the entry's `detail`.
+fn parse_target_ipv4(target: &str) -> ([u32; 4], bool) {
+    if let Ok(addr) = target.parse::<std::net::Ipv4Addr>() {
+        ([u32::from(addr).to_be(), 0, 0, 0], false)
+    } else {
+        ([0; 4], false)
+    }
 }
 
 /// Returns current wall-clock time as nanoseconds since UNIX epoch.

@@ -34,18 +34,25 @@ setup_file() {
     export DATA_DIR="/tmp/ebpfsentinel-test-data-responses-$$"
     mkdir -p "$DATA_DIR"
 
+    # The responses fixture enables xdp-firewall on the netns interface, so the
+    # veth must exist before the agent starts — this suite is otherwise
+    # self-contained (the response engine is in-memory).
+    create_test_netns
+
     PREPARED_CONFIG="$(prepare_ebpf_config "${FIXTURE_DIR}/config-ebpf-responses.yaml")"
     export PREPARED_CONFIG
 
     start_ebpf_agent "$PREPARED_CONFIG"
     wait_for_ebpf_loaded 30 || {
         stop_ebpf_agent 2>/dev/null || true
+        destroy_test_netns 2>/dev/null || true
         skip "eBPF programs not loaded (degraded mode)"
     }
 }
 
 teardown_file() {
     stop_ebpf_agent 2>/dev/null || true
+    destroy_test_netns 2>/dev/null || true
     rm -rf "${DATA_DIR:-/tmp/ebpfsentinel-test-data-responses-$$}"
     rm -f "${PREPARED_CONFIG:-}"
 }
@@ -160,8 +167,46 @@ teardown_file() {
     [ "$(response_present "${id}")" = "1" ]
 }
 
-# ── Audit-trail gap (documented in completion notes) ────────────────
+# ── Audit trail: create + TTL expiry land `responses` audit entries ──
 
-@test "audit trail for responses is documented gap (skipped)" {
-    skip "response engine does not emit AuditEntry today — no Responses variant in AuditComponent; AC #3 (audit create+expire) gated on a follow-up Rust feature"
+@test "responses create and TTL expiry emit responses audit entries" {
+    # A fresh create must land a responses/rule_added audit entry.
+    local before_add
+    before_add="$(audit_log_count responses rule_added)" || before_add=0
+
+    local id
+    id="$(create_response block_ip 198.51.100.46 4s)"
+    [ -n "${id}" ] || {
+        echo "create_response returned empty id (HTTP ${HTTP_STATUS:-?})" >&2
+        return 1
+    }
+
+    local after_add
+    after_add="$(audit_log_count responses rule_added)" || after_add=0
+    [ "${after_add}" -gt "${before_add}" ] || {
+        echo "no responses/rule_added audit entry after create (${before_add} -> ${after_add})" >&2
+        return 1
+    }
+
+    # Once the TTL elapses, the background sweeper must drop the entry and emit
+    # a responses/rule_removed audit entry recording the expiry.
+    local before_exp
+    before_exp="$(audit_log_count responses rule_removed)" || before_exp=0
+
+    wait_for_response_expired "${id}" 15 1 || {
+        echo "response ${id} did not expire within 15s" >&2
+        return 1
+    }
+
+    local i after_exp
+    after_exp="${before_exp}"
+    for ((i = 0; i < 10; i++)); do
+        after_exp="$(audit_log_count responses rule_removed)" || after_exp="${before_exp}"
+        [ "${after_exp}" -gt "${before_exp}" ] && break
+        sleep 1
+    done
+    [ "${after_exp}" -gt "${before_exp}" ] || {
+        echo "no responses/rule_removed audit entry after expiry (${before_exp} -> ${after_exp})" >&2
+        return 1
+    }
 }

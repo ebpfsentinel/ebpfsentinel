@@ -448,7 +448,22 @@ UNIT
       apt-get update
       apt-get install -y --no-install-recommends \
         curl jq iperf3 hping3 ncat nmap bc openssl \
-        sshpass stress-ng netcat-openbsd
+        sshpass stress-ng netcat-openbsd \
+        swaks lftp smbclient hydra ncrack ldnsutils
+
+      # pktgen kernel module for suite 42 (≥1 Mpps generation from the NIC).
+      # Load now and persist so the module is present across reboots.
+      modprobe pktgen 2>/dev/null || true
+      echo pktgen >/etc/modules-load.d/pktgen.conf
+
+      # Scapy venv for the amplification suite (44), which crafts spoofed
+      # packets from the attacker. Mirrors the agent VM's /opt/scapy-venv so
+      # lib/amp_helpers.bash resolves AMP_PY to it instead of skipping.
+      mkdir -p /opt/scapy-venv
+      [ -d /opt/scapy-venv/bin ] || python3 -m venv /opt/scapy-venv
+      /opt/scapy-venv/bin/pip install --upgrade pip >/dev/null 2>&1 || true
+      /opt/scapy-venv/bin/pip install "scapy==2.7.0" >/dev/null 2>&1 || true
+      chmod -R a+rx /opt/scapy-venv
 
       # Install bats from source (retry the clone — transient NAT DNS hiccups)
       if ! command -v bats &>/dev/null; then

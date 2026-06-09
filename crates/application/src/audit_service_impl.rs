@@ -124,6 +124,22 @@ impl AuditAppService {
         self.write_entry(&entry);
     }
 
+    /// Record a response-engine lifecycle event (manual create, TTL expiry,
+    /// early revoke) under the `responses` component. No-op if disabled.
+    pub fn record_response_action(
+        &self,
+        action: AuditAction,
+        target: &str,
+        rule_id: &str,
+        detail: &str,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let entry = AuditEntry::response_action(action, target, rule_id, detail);
+        self.write_entry(&entry);
+    }
+
     /// Record a rule change with before/after snapshots and version tracking.
     ///
     /// No-op if disabled or no rule change store is configured.

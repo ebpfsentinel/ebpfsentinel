@@ -19,7 +19,10 @@ AMP_SCRIPT_DIR="${AMP_SCRIPT_DIR:-${SCRIPT_DIR:-${BATS_TEST_DIRNAME:-.}/../scrip
 AMP_DEFAULT_COUNT="${AMP_DEFAULT_COUNT:-500}"
 AMP_DEFAULT_RATE="${AMP_DEFAULT_RATE:-200}"
 AMP_DEFAULT_SPOOF_SRC="${AMP_DEFAULT_SPOOF_SRC:-192.168.56.99}"
-AMP_PY="${AMP_PY:-python3}"
+# Scapy lives in a dedicated venv on the attacker VM (the system python has no
+# scapy). Prefer it, mirroring EBPF_SCAPY_PY, and fall back to a bare python3.
+AMP_PY="${AMP_PY:-/opt/scapy-venv/bin/python3}"
+[ -x "$AMP_PY" ] || AMP_PY="python3"
 
 # ── Guards ────────────────────────────────────────────────────────────
 

@@ -148,6 +148,33 @@ pub struct AlertResponse {
     /// JA4 TLS `ClientHello` fingerprint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ja4_fingerprint: Option<String>,
+    /// Container identity resolved from the event's `cgroup_id` (if any).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<ContainerIdentity>,
+}
+
+/// Container provenance surfaced on an alert. `kind` is `container` for a
+/// resolved container and `host` for a host-namespace process; the Docker /
+/// Kubernetes fields are populated only when an enricher attached metadata.
+#[derive(Serialize, ToSchema)]
+pub struct ContainerIdentity {
+    /// `container` or `host`.
+    pub kind: String,
+    /// Detected runtime (docker, containerd, crio, podman, unknown).
+    pub runtime: String,
+    /// Container ID (empty for host).
+    pub id: String,
+    /// cgroup path the resolver matched.
+    pub cgroup_path: String,
+    /// Kubernetes namespace (only when a k8s enricher attached metadata).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// Kubernetes pod name (only when a k8s enricher attached metadata).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pod: Option<String>,
+    /// Kubernetes container name (only when a k8s enricher attached metadata).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_name: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -178,6 +205,46 @@ fn severity_label(s: Severity) -> &'static str {
         Severity::High => "high",
         Severity::Critical => "critical",
     }
+}
+
+/// Build the alert's [`ContainerIdentity`] DTO from the domain container
+/// context. Returns `None` for a host-namespace process (nothing to surface)
+/// and folds any Kubernetes enricher metadata into the namespace/pod fields.
+fn container_identity(
+    info: Option<&domain::container::entity::ContainerInfo>,
+    metadata: Option<&domain::container::entity::ContainerMetadata>,
+) -> Option<ContainerIdentity> {
+    use domain::container::entity::{ContainerInfo, ContainerMetadata};
+
+    let info = info?;
+    let ContainerInfo::Container {
+        container_id,
+        runtime,
+        cgroup_path,
+        ..
+    } = info
+    else {
+        return None;
+    };
+
+    let (namespace, pod, container_name) = match metadata {
+        Some(ContainerMetadata::Kubernetes(k)) => (
+            Some(k.namespace.clone()),
+            Some(k.pod_name.clone()),
+            Some(k.container_name.clone()),
+        ),
+        _ => (None, None, None),
+    };
+
+    Some(ContainerIdentity {
+        kind: "container".to_string(),
+        runtime: runtime.to_string(),
+        id: container_id.clone(),
+        cgroup_path: cgroup_path.clone(),
+        namespace,
+        pod,
+        container_name,
+    })
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
@@ -274,6 +341,7 @@ pub async fn list_alerts(
             mitre_technique_name: a.mitre_attack.as_ref().map(|m| m.technique_name.clone()),
             mitre_tactic: a.mitre_attack.map(|m| m.tactic),
             ja4_fingerprint: a.ja4_fingerprint,
+            container: container_identity(a.container.as_ref(), a.container_metadata.as_ref()),
         })
         .collect();
 
@@ -596,6 +664,7 @@ mod tests {
             mitre_technique_name: None,
             mitre_tactic: None,
             ja4_fingerprint: None,
+            container: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "test-001");

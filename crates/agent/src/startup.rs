@@ -890,6 +890,41 @@ pub async fn run(
     ));
     app_state = app_state.with_response_engine(Arc::clone(&response_engine));
 
+    // Background sweeper: drop response actions whose TTL has elapsed and emit
+    // a `responses` audit entry for each genuine expiry (revokes are audited at
+    // revoke time, so they are skipped here to avoid a duplicate event).
+    {
+        let sweeper_engine = Arc::clone(&response_engine);
+        let sweeper_audit = Arc::clone(&audit_svc);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+            loop {
+                tick.tick().await;
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+                    .try_into()
+                    .unwrap_or(u64::MAX);
+                let expired = {
+                    let mut engine = sweeper_engine.write().await;
+                    engine.drain_expired(now_ns)
+                };
+                for action in expired {
+                    if action.revoked {
+                        continue;
+                    }
+                    sweeper_audit.record_response_action(
+                        domain::audit::entity::AuditAction::RuleRemoved,
+                        &action.target,
+                        &action.rule_id,
+                        &format!("response on {} expired after ttl", action.target),
+                    );
+                }
+            }
+        });
+    }
+
     // Wire JA4 + JA4S caches built earlier so handlers can report counts
     app_state = app_state
         .with_fingerprint_cache(Arc::clone(&ja4_cache))
@@ -907,6 +942,114 @@ pub async fn run(
     // Create alert channel early so DNS services can emit alerts
     let (alert_tx, alert_rx) =
         mpsc::channel::<application::alert_event::AlertEvent>(ALERT_CHANNEL_CAPACITY);
+
+    // ── Multi-WAN active health-probe loop ──────────────────────────
+    // Probe each gateway's configured health-check target, drive the routing
+    // service's consecutive failure/success counters (which flip a gateway to
+    // Down past its failure_threshold), and raise a single critical
+    // WAN_ALL_DOWN alert the first time every enabled gateway is down.
+    if config.routing.enabled {
+        let probe_specs: Vec<(u8, String, domain::routing::entity::HealthCheck)> = {
+            let svc = routing_svc.read().await;
+            svc.list_gateways()
+                .into_iter()
+                .filter(|s| s.gateway.enabled)
+                .filter_map(|s| {
+                    s.gateway
+                        .health_check
+                        .clone()
+                        .map(|hc| (s.gateway.id, s.gateway.name.clone(), hc))
+                })
+                .collect()
+        };
+
+        if !probe_specs.is_empty() {
+            let probe_routing = Arc::clone(&routing_svc);
+            let probe_alert_tx = alert_tx.clone();
+            let tick_secs = probe_specs
+                .iter()
+                .map(|(_, _, hc)| u64::from(hc.interval_secs).max(1))
+                .min()
+                .unwrap_or(5);
+            tokio::spawn(async move {
+                use domain::routing::entity::HealthCheckProto;
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(tick_secs));
+                let mut was_all_down = false;
+                loop {
+                    tick.tick().await;
+                    for (id, _name, hc) in &probe_specs {
+                        let timeout =
+                            std::time::Duration::from_secs(u64::from(hc.timeout_secs).max(1));
+                        let ok = match hc.protocol {
+                            HealthCheckProto::Tcp { port } => {
+                                let addr = format!("{}:{port}", hc.target);
+                                matches!(
+                                    tokio::time::timeout(
+                                        timeout,
+                                        tokio::net::TcpStream::connect(&addr)
+                                    )
+                                    .await,
+                                    Ok(Ok(_))
+                                )
+                            }
+                            HealthCheckProto::Icmp => {
+                                let secs = timeout.as_secs().max(1).to_string();
+                                tokio::process::Command::new("ping")
+                                    .args(["-c", "1", "-W", &secs, &hc.target])
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .status()
+                                    .await
+                                    .is_ok_and(|s| s.success())
+                            }
+                        };
+                        let mut svc = probe_routing.write().await;
+                        let _ = if ok {
+                            svc.record_probe_success(*id)
+                        } else {
+                            svc.record_probe_failure(*id)
+                        };
+                    }
+
+                    // Edge-detect the all-down transition under one lock.
+                    let down_names: Vec<String> = {
+                        let svc = probe_routing.read().await;
+                        let gws = svc.list_gateways();
+                        let enabled: Vec<_> = gws.iter().filter(|s| s.gateway.enabled).collect();
+                        let all_down = !enabled.is_empty()
+                            && enabled
+                                .iter()
+                                .all(|s| s.status == domain::routing::entity::GatewayStatus::Down);
+                        if all_down {
+                            enabled.iter().map(|s| s.gateway.name.clone()).collect()
+                        } else {
+                            Vec::new()
+                        }
+                    };
+
+                    if !down_names.is_empty() && !was_all_down {
+                        was_all_down = true;
+                        let now_ns = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos()
+                            .try_into()
+                            .unwrap_or(u64::MAX);
+                        let alert = domain::alert::entity::Alert::wan_all_down(&down_names, now_ns);
+                        let _ = probe_alert_tx
+                            .send(application::alert_event::AlertEvent::System(Box::new(
+                                alert,
+                            )))
+                            .await;
+                        tracing::warn!(gateways = ?down_names, "multi-WAN all gateways down");
+                    } else if down_names.is_empty() {
+                        was_all_down = false;
+                    }
+                }
+            });
+            info!("multi-WAN health-probe loop started");
+        }
+    }
 
     // ── 5b. Wire DNS intelligence and domain reputation services ────
     let mut dns_blocklist_ref: Option<Arc<DnsBlocklistAppService>> = None;

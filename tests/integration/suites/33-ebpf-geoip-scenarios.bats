@@ -26,16 +26,22 @@ setup_file() {
     export DATA_DIR="/tmp/ebpfsentinel-test-data-geoip-$$"
     mkdir -p "$DATA_DIR"
 
-    # Copy mmdb files from well-known system or project locations if available.
-    # Tests skip individually when the file is absent — no hard failure here.
-    for mmdb_src in \
-        "${PROJECT_ROOT}/tests/fixtures/GeoLite2-Country.mmdb" \
-        "/usr/share/GeoIP/GeoLite2-Country.mmdb" \
-        "/var/lib/GeoIP/GeoLite2-Country.mmdb"; do
-        if [ -f "$mmdb_src" ]; then
-            cp "$mmdb_src" "${DATA_DIR}/GeoLite2-Country.mmdb" 2>/dev/null || true
-            break
-        fi
+    # Copy the mmdb set from well-known project / system locations if available.
+    # The agent reads City + ASN (config city_path/asn_path); Country is the
+    # suite's skip sentinel. The project ships synthetic fixtures (built by
+    # tests/fixtures/geoip-gen) mapping the netns source range 10.200.0.0/24 -> KP
+    # and 8.8.8.8 -> US, so the country-deny rules and the lookup test actually
+    # fire. Tests still skip gracefully when no mmdb is present anywhere.
+    for db in Country City ASN; do
+        for mmdb_src in \
+            "${PROJECT_ROOT}/tests/fixtures/GeoLite2-${db}.mmdb" \
+            "/usr/share/GeoIP/GeoLite2-${db}.mmdb" \
+            "/var/lib/GeoIP/GeoLite2-${db}.mmdb"; do
+            if [ -f "$mmdb_src" ]; then
+                cp "$mmdb_src" "${DATA_DIR}/GeoLite2-${db}.mmdb" 2>/dev/null || true
+                break
+            fi
+        done
     done
 
     create_test_netns

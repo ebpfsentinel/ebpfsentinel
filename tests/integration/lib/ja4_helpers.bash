@@ -103,7 +103,10 @@ _ja4_remote_exec_user() {
 start_tls_target() {
     local port="${1:-$JA4_TLS_PORT}"
 
-    _ja4_remote_exec mkdir -p "$JA4_REMOTE_DIR" >/dev/null 2>&1 || true
+    # Create the scratch dir as the same (non-root) user that writes the cert
+    # below — a root-owned dir (sudo mkdir) makes the user-run openssl req fail
+    # with permission denied, leaving no cert and a server that never binds.
+    _ja4_remote_exec_user mkdir -p "$JA4_REMOTE_DIR" >/dev/null 2>&1 || true
 
     # Generate a throwaway self-signed cert idempotently.
     _ja4_remote_exec_user bash -c "\

@@ -1,4 +1,4 @@
-use domain::alert::entity::PacketSecurityAlert;
+use domain::alert::entity::{Alert, PacketSecurityAlert};
 use domain::ddos::entity::DdosAttack;
 use domain::dlp::entity::DlpAlert;
 use domain::dns::entity::DnsAlert;
@@ -22,4 +22,7 @@ pub enum AlertEvent {
     },
     Dns(DnsAlert),
     PacketSecurity(PacketSecurityAlert),
+    /// A pre-built system alert (e.g. multi-WAN total failure) that does not
+    /// originate from a kernel security event. Boxed to keep the envelope small.
+    System(Box<Alert>),
 }
