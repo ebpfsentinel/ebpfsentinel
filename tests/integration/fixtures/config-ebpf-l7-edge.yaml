@@ -45,6 +45,14 @@ threatintel:
 
 l7:
   enabled: true
+  # Wire entry points the L7 inspector hooks on TC ingress. tc-ids only
+  # captures (and parses) payload for packets whose dst_port is in this
+  # set; without it the L7 dataplane stays dark. Matches the local test
+  # ports below: SMTP 25 / FTP control 21 / SMB 445.
+  ports:
+    - 25
+    - 21
+    - 445
   rules:
     - id: l7-smtp-ehlo-log
       priority: 10

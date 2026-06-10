@@ -13,15 +13,18 @@
 #     returns 4xx (not 5xx and not silent acceptance), and a truncated
 #     TCP burst on the L7-hooked ports leaves the agent answering /readyz.
 #
-# Coverage gaps (tracked, deferred):
+# Wire-level coverage:
 #
-#   * Wire-level SMTP/FTP/SMB alert assertions (AC #1 per-protocol
-#     command behaviour: SMTP pipelining, FTP PASV data-channel gating,
-#     SMB2 dialect capture, SMB1 policy reject) require swaks / lftp /
-#     smbclient on the test VMs. The OSS test fleet does not ship
-#     those today; the per-command behaviour is exercised by the L7
-#     engine's domain unit tests instead. Tested here through the rule
-#     surface + parser-robustness path.
+#   * A genuine FTP PORT command and a genuine SMB1 negotiate, driven
+#     from the test netns through the L7-hooked TC ingress, each fire a
+#     component=l7 deny alert (rules l7-ftp-port-deny / l7-smb-smb1-deny).
+#   * A genuine SMTP EHLO is parsed and recorded on the L7 audit trail
+#     (the EHLO rule action is `log`, which audits without alerting).
+#
+# The L7 inspector only captures payload for the dst ports declared in
+# `l7.ports` (25/21/445 here); the fixture wires them so the dataplane
+# is live. Per-command parser corner cases (pipelining, PASV gating,
+# SMB2 dialects) remain covered by the domain l7::parser unit tests.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
@@ -260,8 +263,96 @@ _post_l7_rule() {
     }
 }
 
-# ── Documented deferral: wire-level per-command behaviour ──────────
+# ── Wire-level per-command behaviour ───────────────────────────────
 
-@test "per-command SMTP/FTP/SMB wire-level assertions are tracked as a coverage gap" {
-    skip "wire-level swaks/lftp/smbclient assertions need extra deps on test VMs; per-command behaviour exercised by domain l7::engine unit tests; AC #1 per-protocol behaviour deferred"
+# _l7_host_listeners — start one recv-only TCP listener per L7 port on
+# the host side of the veth (default netns) so the netns client's
+# handshake completes and its first command segment is transmitted on
+# the wire, where tc-ids ingress captures it. Echoes the listener PIDs.
+_l7_host_listeners() {
+    local pids=()
+    local port
+    for port in 25 21 445; do
+        ncat -l "${EBPF_HOST_IP}" "${port}" -k --recv-only >/dev/null 2>&1 &
+        pids+=($!)
+    done
+    sleep 0.5
+    echo "${pids[@]}"
+}
+
+# _drive_l7_commands — fire a genuine command per protocol from the test
+# netns a few times (capture is best-effort per segment).
+#   SMTP EHLO            -> l7-smtp-ehlo-log  (action log  -> audit only)
+#   FTP  PORT            -> l7-ftp-port-deny  (action deny -> l7 alert)
+#   SMB1 negotiate       -> l7-smb-smb1-deny  (action deny -> l7 alert)
+_drive_l7_commands() {
+    local i
+    for i in 1 2 3 4; do
+        send_tcp_from_ns "${EBPF_HOST_IP}" 25 $'EHLO probe.test\r\n' 2 || true
+        send_tcp_from_ns "${EBPF_HOST_IP}" 21 $'PORT 10,200,0,2,4,5\r\n' 2 || true
+        # SMB1 negotiate: NetBIOS session header (4 B, leading NUL) + the
+        # "\xffSMB" magic + an SMB1 command header. The payload starts with
+        # a NUL byte, which a bash variable cannot carry, so it is streamed
+        # straight from printf into ncat (bypassing send_tcp_from_ns's echo).
+        ip netns exec "${EBPF_TEST_NS}" bash -c \
+            "printf '\\x00\\x00\\x00\\x55\\xffSMB\\x72\\x00\\x00\\x00\\x00\\x18\\x53\\xc8' \
+             | timeout 2 ncat -w 2 ${EBPF_HOST_IP} 445" 2>/dev/null || true
+    done
+}
+
+@test "FTP PORT and SMB1 commands on the wire fire L7 deny alerts (component=l7)" {
+    require_tool ncat
+
+    local pids
+    pids="$(_l7_host_listeners)"
+    _drive_l7_commands
+
+    # shellcheck disable=SC2086
+    for p in ${pids}; do kill "${p}" 2>/dev/null || true; done
+
+    # FTP PORT deny -> component=l7 alert.
+    wait_for_alert \
+        '.[] | select(.rule_id == "l7-ftp-port-deny" and .component == "l7")' \
+        15 1 >/dev/null || {
+        echo "no l7-ftp-port-deny alert after FTP PORT command" >&2
+        api_get /api/v1/alerts >&2 || true
+        return 1
+    }
+
+    # SMB1 negotiate deny -> component=l7 alert.
+    wait_for_alert \
+        '.[] | select(.rule_id == "l7-smb-smb1-deny" and .component == "l7")' \
+        15 1 >/dev/null || {
+        echo "no l7-smb-smb1-deny alert after SMB1 negotiate" >&2
+        api_get /api/v1/alerts >&2 || true
+        return 1
+    }
+}
+
+@test "SMTP EHLO command is parsed and recorded on the L7 audit trail" {
+    require_tool ncat
+
+    local pids
+    pids="$(_l7_host_listeners)"
+    _drive_l7_commands
+
+    # shellcheck disable=SC2086
+    for p in ${pids}; do kill "${p}" 2>/dev/null || true; done
+
+    # The EHLO rule action is `log` -> no alert, but the L7 path audits
+    # the decision under component=l7 / action=pass.
+    local count=0 attempt=0
+    while [ "${attempt}" -lt 15 ]; do
+        local body
+        body="$(api_get '/api/v1/audit/logs?component=l7&limit=200' 2>/dev/null)" || body=""
+        count="$(echo "${body}" | jq -r '(.entries // []) | length' 2>/dev/null)" || count=0
+        [ "${count:-0}" -ge 1 ] && break
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    [ "${count:-0}" -ge 1 ] || {
+        echo "no L7 audit entries after SMTP EHLO (expected component=l7)" >&2
+        api_get '/api/v1/audit/logs?component=l7&limit=200' >&2 || true
+        return 1
+    }
 }

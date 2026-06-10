@@ -117,6 +117,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
         linux-headers-$(uname -r) iproute2 tcpdump curl wget jq git \
         ca-certificates openssl \
         iperf3 hping3 ncat stress-ng bc \
+        hydra \
         conntrack
 
       # Install bpftool if available

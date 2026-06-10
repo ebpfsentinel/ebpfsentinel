@@ -16,19 +16,16 @@
 #   * The IPS auto-blacklist endpoint accepts the source IP under load
 #     and exposes at least one auto-generated entry.
 #
-# Coverage gaps (tracked, deferred):
+# Real-tool coverage:
 #
-#   * Real hydra/ncrack credential bursts (AC #1 first bullet wording).
-#     The OSS test fleet does not ship hydra/ncrack; the behaviour
-#     asserted here — IDS rule fire + IPS auto-block under threshold
-#     count from a single source — is the same dataplane contract
-#     hydra/ncrack would drive on a richer fleet. Tracked-deferred
-#     under "extra test-VM deps".
-#   * sshd "no successful auth" negative assertion (AC #1 third bullet).
-#     Requires a running sshd in the agent VM plus passwd seeding;
-#     tracked as a multi-VM enablement task (3-VM topology with the
-#     SSH backend already exists at story 34.2 level but is not
-#     wired into the bats fleet today).
+#   * A genuine hydra SSH credential burst from the test netns drives the
+#     IDS brute-force alert (T1110.001) and the IPS auto-block, exercising
+#     the same dataplane contract as the synthetic SYN burst with a real
+#     attack tool (hydra is provisioned on the agent VM).
+#   * The "no successful auth" negative assertion is checked locally: the
+#     burst targets the key-only `vagrant` account with a wordlist that
+#     cannot hold its password, and the test asserts hydra cracks nothing
+#     ("0 valid password found") while the source is still auto-blocked.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
@@ -200,12 +197,90 @@ _drive_ssh_burst() {
     }
 }
 
-# ── Documented deferrals ──────────────────────────────────────────
+# ── Real hydra credential burst ────────────────────────────────────
 
-@test "real hydra/ncrack credential bursts are tracked as a coverage gap" {
-    skip "hydra/ncrack not on the OSS test fleet; SYN-burst path above asserts the same IDS/IPS dataplane contract"
+# _drive_ssh_hydra <user> <pwfile> — run an SSH credential burst from the
+# test netns against the agent host's sshd on TCP/22. Each password is a
+# distinct authentication attempt (one flow), so a wordlist of >= the IDS
+# threshold drives the brute-force detection. The agent's host sshd
+# already listens on 0.0.0.0:22, which answers on the veth host IP. The
+# full stdout/stderr is captured in _HYDRA_OUT for the auth-outcome
+# assertion.
+_HYDRA_OUT=""
+_drive_ssh_hydra() {
+    local user="${1:?usage: _drive_ssh_hydra <user> <pwfile>}"
+    local pwfile="${2:?usage: _drive_ssh_hydra <user> <pwfile>}"
+    _HYDRA_OUT="$(ip netns exec "${EBPF_TEST_NS}" \
+        timeout 45 hydra -l "${user}" -P "${pwfile}" -t 4 -W 2 \
+        "ssh://${EBPF_HOST_IP}:22" 2>&1)" || true
 }
 
-@test "sshd no-successful-auth assertion is tracked as a multi-VM coverage gap" {
-    skip "negative auth-log assertion needs an sshd in the agent VM; 3-VM SSH-backend topology deferred"
+@test "real hydra SSH credential burst fires the IDS brute-force alert (MITRE T1110.001)" {
+    require_tool hydra
+
+    local pwfile="${DATA_DIR}/ssh-pw-burst.lst"
+    printf '%s\n' \
+        badpass1 hunter2 letmein toor admin password123 qwerty 123456 changeme rootroot \
+        > "${pwfile}"
+
+    _drive_ssh_hydra nosuchuser "${pwfile}"
+
+    local alerts
+    alerts="$(wait_for_alert \
+        '.[] | select(.rule_id == "ids-ssh-bruteforce")' 20 1)" || {
+        echo "no ids-ssh-bruteforce alert after hydra credential burst" >&2
+        echo "--- hydra output ---" >&2
+        echo "${_HYDRA_OUT}" >&2
+        api_get /api/v1/alerts >&2 || true
+        return 1
+    }
+
+    local first severity
+    first="$(echo "${alerts}" | jq -sc '.[0]')"
+    severity="$(echo "${first}" | jq -r '.severity // ""')"
+    [ "${severity}" = "high" ] || {
+        echo "expected severity=high; got ${severity}: ${first}" >&2
+        return 1
+    }
+    echo "${first}" | grep -qE 'T1110\.001|T1110' || {
+        echo "expected MITRE T1110(.001) in alert: ${first}" >&2
+        return 1
+    }
+}
+
+# ── Negative auth + mitigation ─────────────────────────────────────
+
+@test "the hydra brute force achieves no successful auth and the source is auto-blocked" {
+    require_tool hydra
+
+    local pwfile="${DATA_DIR}/ssh-pw-neg.lst"
+    printf '%s\n' wrong1 wrong2 wrong3 wrong4 wrong5 wrong6 wrong7 wrong8 \
+        > "${pwfile}"
+
+    # Target the key-only `vagrant` account with a wordlist that cannot
+    # hold its real (absent/disabled) password — every attempt must fail.
+    _drive_ssh_hydra vagrant "${pwfile}"
+
+    # Negative auth: a hydra success prints a "[22][ssh] host: ... login:
+    # ... password: ..." line. Its absence proves no credential cracked.
+    if echo "${_HYDRA_OUT}" | grep -qE '^\[22\]\[ssh\] host:'; then
+        echo "hydra reported a successful SSH login (brute force succeeded):" >&2
+        echo "${_HYDRA_OUT}" >&2
+        return 1
+    fi
+    # And hydra's own tally must read zero valid passwords found.
+    echo "${_HYDRA_OUT}" | grep -qiE '\b0 valid password' || {
+        echo "expected '0 valid password found' from hydra; got:" >&2
+        echo "${_HYDRA_OUT}" >&2
+        return 1
+    }
+
+    # Mitigation: the IPS auto-blacklist captured the brute-force source.
+    local count
+    count="$(get_blacklist_count 15)"
+    [ "${count:-0}" -ge 1 ] || {
+        echo "IPS auto-blacklist did not capture the brute-force source" >&2
+        api_get /api/v1/ips/blacklist >&2 || true
+        return 1
+    }
 }
