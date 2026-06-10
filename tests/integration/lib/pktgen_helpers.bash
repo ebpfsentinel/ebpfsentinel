@@ -82,11 +82,19 @@ _pktgen_resolve_dst_mac() {
     local ip="$1"
     local iface="$2"
     local mac
-    mac="$(ip neigh show "$ip" dev "$iface" 2>/dev/null | awk '{print $5}' | head -1)"
-    if [ -z "$mac" ] || [ "$mac" = "FAILED" ]; then
+    # `ip neigh show <ip> dev <iface>` omits the "dev <iface>" column, so the
+    # lladdr lands in a different field than the unfiltered form. Locate it by
+    # name (print the token after "lladdr") instead of a fixed column, which a
+    # prior `$5` read got wrong (the MAC sits at $3 here) — leaving pktgen with
+    # an empty dst_mac and generating zero packets.
+    _extract_lladdr() {
+        awk '{for (i = 1; i <= NF; i++) if ($i == "lladdr") { print $(i + 1); exit }}'
+    }
+    mac="$(ip neigh show "$ip" dev "$iface" 2>/dev/null | _extract_lladdr)"
+    if [ -z "$mac" ]; then
         ping -c 1 -W 1 -I "$iface" "$ip" >/dev/null 2>&1 || true
         sleep 0.2
-        mac="$(ip neigh show "$ip" dev "$iface" 2>/dev/null | awk '{print $5}' | head -1)"
+        mac="$(ip neigh show "$ip" dev "$iface" 2>/dev/null | _extract_lladdr)"
     fi
     echo "${mac:-}"
 }
@@ -178,9 +186,11 @@ pktgen_run() {
     wait "$stopper" 2>/dev/null || true
     sleep 0.2
 
-    # Persist stats and return realised pps.
+    # Persist stats and return realised pps. The per-iface result file under
+    # /proc/net/pktgen is root-only, so read it through sudo and snapshot it
+    # into a world-readable copy for the parser + post-mortem.
     local stats_file="/tmp/pktgen-${iface}.stats"
-    cat "${PKTGEN_PROCROOT}/${iface}" 2>/dev/null | tee "$stats_file" >/dev/null || true
+    sudo cat "${PKTGEN_PROCROOT}/${iface}" 2>/dev/null | tee "$stats_file" >/dev/null || true
     pktgen_realised_pps
 }
 
@@ -189,16 +199,23 @@ pktgen_run() {
 # average pps. Returns 0 even if the result is missing (echoes "0").
 pktgen_realised_pps() {
     local iface="$PKTGEN_IFACE"
-    local stats="${PKTGEN_PROCROOT}/${iface}"
-    if [ ! -r "$stats" ]; then
-        echo "0"
-        return 0
+    # Prefer the world-readable snapshot pktgen_run persisted; fall back to a
+    # sudo read of the root-only proc file. A plain non-root read of
+    # /proc/net/pktgen/<iface> returns nothing, which previously made every
+    # measurement collapse to 0 ("pktgen not generating") even at ~70k pps.
+    local snapshot="/tmp/pktgen-${iface}.stats"
+    local content
+    if [ -s "$snapshot" ]; then
+        content="$(cat "$snapshot" 2>/dev/null)"
+    else
+        content="$(sudo cat "${PKTGEN_PROCROOT}/${iface}" 2>/dev/null)" || content=""
     fi
-    # Line shape: "  pps NNN ..."
+    [ -n "$content" ] || { echo "0"; return 0; }
+    # Result line shape: "  70763pps 33Mb/sec (...) errors: 0".
     local pps
-    pps="$(grep -E "^[[:space:]]*[0-9]+pps" "$stats" 2>/dev/null | awk '{print $1}' | head -1)"
+    pps="$(printf '%s\n' "$content" | grep -E "^[[:space:]]*[0-9]+pps" | awk '{print $1}' | head -1)"
     if [ -z "$pps" ]; then
-        pps="$(awk '/pps/ && $1 ~ /^[0-9]+pps/ {gsub("pps","",$1); print $1; exit}' "$stats" 2>/dev/null)"
+        pps="$(printf '%s\n' "$content" | awk '/pps/ && $1 ~ /^[0-9]+pps/ {gsub("pps","",$1); print $1; exit}')"
     fi
     pps="${pps//pps/}"
     echo "${pps:-0}"

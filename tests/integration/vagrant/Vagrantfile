@@ -335,6 +335,17 @@ NETPLAN
           netplan apply 2>/dev/null || true
         fi
 
+        # Dual-stack transit: ULA IPv6 gateways parallel to the IPv4 .56/.57
+        # segments (fd00:56::/64 client side on eth1, fd00:57::/64 backend
+        # side on eth2). Applied AFTER netplan apply, which would otherwise
+        # flush manually-added addresses. Imperative + idempotent; the v6
+        # suites also re-apply these via `ip -6 addr replace` so a reboot
+        # still converges. IPv6 forwarding is enabled above.
+        ip -6 addr replace fd00:56::10/64 dev eth1 || true
+        if ip link show eth2 &>/dev/null; then
+          ip -6 addr replace fd00:57::10/64 dev eth2 || true
+        fi
+
         # Docker (installed for the container test strategy) sets the iptables
         # FORWARD policy to DROP and recreates the DOCKER-USER chain on every
         # daemon start, which silently kills the agent's transit forwarding
@@ -570,6 +581,13 @@ network:
 NETPLAN
         chmod 600 /etc/netplan/99-3vm-route.yaml
         netplan apply 2>/dev/null || true
+
+        # Dual-stack: client-side ULA address + a v6 route to the backend
+        # segment via the agent, parallel to the IPv4 route above. Applied
+        # after netplan apply so it is not flushed; the v6 suite re-applies
+        # it idempotently at runtime as well.
+        ip -6 addr replace fd00:56::20/64 dev eth1 || true
+        ip -6 route replace fd00:57::/64 via fd00:56::10 dev eth1 || true
       SHELL
     end
 
@@ -637,6 +655,13 @@ network:
 NETPLAN
         chmod 600 /etc/netplan/99-3vm-route.yaml
         netplan apply 2>/dev/null || true
+
+        # Dual-stack: backend-side ULA address + a v6 return route to the
+        # client segment via the agent, parallel to the IPv4 route above.
+        # Applied after netplan apply so it is not flushed; the v6 suite
+        # re-applies it idempotently at runtime as well.
+        ip -6 addr replace fd00:57::30/64 dev eth1 || true
+        ip -6 route replace fd00:56::/64 via fd00:57::10 dev eth1 || true
       SHELL
 
       backend.vm.provision "shell", name: "setup", privileged: false,

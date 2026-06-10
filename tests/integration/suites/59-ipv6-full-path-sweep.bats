@@ -34,6 +34,7 @@
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
+load '../lib/nptv6_helpers'
 
 # IPv6 endpoints — link-local-ish ULA bound on the host + namespace.
 EBPF_HOST_V6="fd00:59::1"
@@ -275,12 +276,135 @@ teardown_file() {
     [ "${HTTP_STATUS}" = "200" ]
 }
 
-# ── Documented deferral: wire-level IPv6 alert path (multi-VM) ─────
+# ── Wire-level IPv6 IDS alert via tc-ids ───────────────────────────
 
-@test "wire-level IPv6 IDS alert path is tracked as a coverage gap" {
-    skip "deterministic v6 IDS alert via tc-ids requires dual-stack 2-VM topology; AC #1 IDS/IPS deferred"
+@test "wire-level IPv6 TCP probe fires the tc-ids IDS alert (component=ids, is_ipv6)" {
+    require_tool ncat
+    # Local-lane only: drives the agent through the dual-stack veth/netns set
+    # up by create_test_netns + _assign_v6_to_veth. In the 2-VM/3-VM lane that
+    # local target does not exist (the agent is a remote transit router), so
+    # this skips there; the 3-VM v6 datapath is covered by the transit-forward
+    # test below.
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        skip "v6 netns IDS wire probe is local-lane only (3-VM v6 path covered by the forward test)"
+    fi
+
+    # Drive IPv6 TCP SYNs from the netns at the ids-ipv6-probe target
+    # (dst_port 65520). tc-ids inspects both address families on the veth
+    # ingress; the signature has no threshold so the SYN is matched even
+    # though no listener completes the handshake.
+    local i
+    for i in 1 2 3 4 5; do
+        ip netns exec "${EBPF_TEST_NS}" \
+            timeout 2 ncat -6 -w 2 "${EBPF_HOST_V6}" 65520 </dev/null 2>/dev/null || true
+        sleep 0.2
+    done
+
+    local alerts
+    alerts="$(wait_for_alert \
+        '.[] | select(.rule_id == "ids-ipv6-probe")' 15 1)" || {
+        echo "no ids-ipv6-probe alert after IPv6 TCP probe" >&2
+        api_get /api/v1/alerts >&2 || true
+        return 1
+    }
+
+    local first
+    first="$(echo "${alerts}" | jq -sc '.[0]')"
+    # The alert must be attributed to the IPv6 flow and the IDS component.
+    [ "$(echo "${first}" | jq -r '.is_ipv6 // false')" = "true" ] || {
+        echo "expected is_ipv6=true on the v6 IDS alert: ${first}" >&2
+        return 1
+    }
+    [ "$(echo "${first}" | jq -r '.component // ""')" = "ids" ] || {
+        echo "expected component=ids on the v6 IDS alert: ${first}" >&2
+        return 1
+    }
 }
 
-@test "end-to-end IPv6 forward via NAT is tracked as a coverage gap" {
-    skip "regular IPv6 forward across agent transit requires 3-VM layout; AC #1 NAT deferred (NPTv6 covered by suite 54)"
+@test "agent transit-forwards regular IPv6 with the source prefix unchanged (no NPTv6)" {
+    skip_if_not_3vm
+
+    # Plain (non-translated) IPv6 transit across the three VMs, using the
+    # dual-stack ULA segments the Vagrantfile provisions parallel to the
+    # IPv4 .56/.57 networks:
+    #   * attacker  fd00:56::20/64 on eth1, route to fd00:57::/64 via the agent
+    #   * agent     IPv6 forwarding on; fd00:56::10/64 (eth1) + fd00:57::10/64 (eth2)
+    #   * backend   fd00:57::30/64 on eth1, return route to fd00:56::/64 via the agent
+    # Each step is an idempotent `replace` so the test self-heals if a reboot
+    # dropped the imperative provisioner addresses. Unlike suite 54 (NPTv6),
+    # no prefix rewrite is configured, so the backend must observe the
+    # attacker's *unchanged* source — proving the agent forwards IPv6 across
+    # both transit NICs while the eBPF datapath is attached.
+    local attacker_v6="fd00:56::20"
+    local backend_v6="fd00:57::30"
+    local agent_gw_int="fd00:56::10"   # client-side gateway (eth1)
+    local agent_gw_ext="fd00:57::10"   # backend-side gateway (eth2)
+    local agent_eth1="${EBPF_AGENT_INTERFACE:-eth1}"
+    local agent_eth2="${EBPF_AGENT_BACKEND_IFACE:-eth2}"
+
+    # Attacker: address + route toward the backend network via the agent.
+    ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
+        -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        "vagrant@${ATTACKER_VM_IP}" \
+        "sudo ip -6 addr replace ${attacker_v6}/64 dev eth1; \
+         sudo ip -6 route replace fd00:57::/64 via ${agent_gw_int} dev eth1" \
+        >/dev/null 2>&1 || true
+
+    # Agent: forwarding on + a gateway address on each transit NIC.
+    _agent_ssh_sudo sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+    _agent_ssh_sudo ip -6 addr replace "${agent_gw_int}/64" dev "${agent_eth1}" >/dev/null 2>&1 || true
+    _agent_ssh_sudo ip -6 addr replace "${agent_gw_ext}/64" dev "${agent_eth2}" >/dev/null 2>&1 || true
+
+    # Backend: address on its network + a return route to the attacker prefix.
+    _backend_ssh_sudo ip -6 addr replace "${backend_v6}/64" dev eth1 >/dev/null 2>&1 || true
+    _backend_ssh_sudo ip -6 route replace "fd00:56::/64" via "${agent_gw_ext}" dev eth1 >/dev/null 2>&1 || true
+
+    # Let DAD settle so the source address is usable.
+    sleep 2
+
+    # Warm the attacker neighbour cache for the gateway (scapy reads lladdr).
+    ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
+        -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        "vagrant@${ATTACKER_VM_IP}" "ping6 -c2 -W2 ${agent_gw_int} >/dev/null 2>&1" \
+        >/dev/null 2>&1 || true
+
+    # Capture on the backend, then drive the probe (UDP dport 4546).
+    local pcap="${DATA_DIR}/ipv6-forward.pcap"
+    ( capture_backend_ipv6 "${pcap}" 8 eth1 ) 3>&- &
+    local cap_pid=$!
+    sleep 1
+
+    scapy_send_ipv6_via "${attacker_v6}" "${backend_v6}" 5 eth1 "${agent_gw_int}" \
+        >/dev/null 2>&1 || true
+
+    wait "${cap_pid}" 2>/dev/null || true
+
+    # Probes reaching the backend with the attacker's unchanged source prove
+    # a regular (non-translated) forward.
+    local src_hits any_hits
+    src_hits=0
+    any_hits=0
+    if [ -s "${pcap}" ]; then
+        src_hits="$(tcpdump -nr "${pcap}" 'ip6 and udp port 4546' 2>/dev/null \
+            | grep -c "IP6 ${attacker_v6}" || true)"
+        any_hits="$(tcpdump -nr "${pcap}" 'ip6 and udp port 4546' 2>/dev/null \
+            | grep -c 'IP6 ' || true)"
+    fi
+
+    # A probe arrived but NOT with our source → a real forward/translation
+    # fault (the ipv6-sweep fixture configures no NPTv6, so the source must
+    # survive). Fail rather than skip.
+    if [ "${any_hits:-0}" -ge 1 ] && [ "${src_hits:-0}" -eq 0 ]; then
+        echo "IPv6 probe reached backend but source ${attacker_v6} was rewritten/dropped" >&2
+        tcpdump -nr "${pcap}" 'ip6 and udp port 4546' 2>/dev/null | head >&2
+        return 1
+    fi
+
+    # Nothing reached the backend at all → transit link never came up; skip
+    # rather than register a false negative (same convention as suite 54).
+    if [ "${src_hits:-0}" -eq 0 ]; then
+        skip "no IPv6 probe reached backend — transit link not established"
+    fi
+
+    [ "${src_hits:-0}" -ge 1 ]
 }
