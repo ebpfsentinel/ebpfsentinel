@@ -23,16 +23,9 @@
 # that outbound request and the alert is emitted with the container identity
 # attached.
 #
-# Scope notes (gaps tracked, deferred):
-#
-#   * AC #2 — Kubernetes pod enrichment requires minikube + the
-#     ebpfsentinel image to be loaded into the cluster (see suite 10).
-#     The single-VM ids-on-65501 path is reused under kind/minikube
-#     when available, otherwise the test is skipped.
-#   * AC #3 — Per-tenant cgroup filter map (TENANT_CGROUP_MAP) is
-#     populated by an enterprise tenant adapter not present in OSS;
-#     the per-tenant filtering assertion is deferred to the enterprise
-#     tenant-aware suite.
+# OSS scope: container (Docker cgroup) enrichment only. Kubernetes pod
+# enrichment is exercised by suite 10; per-tenant cgroup filtering is an
+# enterprise feature and is tested in the enterprise repo.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

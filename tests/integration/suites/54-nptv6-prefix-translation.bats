@@ -164,16 +164,23 @@ teardown_file() {
     _backend_ssh_sudo ip -6 route replace "${EXTERNAL_PREFIX}/64" \
         via "${agent_v6_ext}" dev eth1 >/dev/null 2>&1 || true
 
-    # Let DAD settle so the source address is usable (a tentative addr makes
-    # scapy's send drop the packet).
-    sleep 2
+    # Let DAD settle so every address is usable (a tentative addr makes the
+    # sender — and the agent's forwarding path — drop the packet).
+    sleep 4
 
-    # Warm the attacker's neighbor cache for the gateway: the L2 sender reads the
-    # kernel neighbour table for the agent MAC, and a kernel ping6 populates it.
+    # Warm the neighbour caches on every hop of the forward path. The kernel
+    # reads the neighbour table for the next-hop MAC; an unresolved entry makes
+    # the first packet trigger NS/NA and get dropped. ping6 populates them:
+    #   * attacker → agent gateway (eth1 ingress)
+    #   * agent    → backend       (eth2 egress, so the translated packet can be
+    #                               L2-delivered instead of stalling on NS)
+    #   * backend  → agent gateway (return-path symmetry; harmless if unused)
     ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
         -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
         "vagrant@${ATTACKER_VM_IP}" "ping6 -c2 -W2 ${agent_v6_gw} >/dev/null 2>&1" \
         >/dev/null 2>&1 || true
+    _agent_ssh_sudo ping6 -c2 -W2 "${BACKEND_V6}" >/dev/null 2>&1 || true
+    _backend_ssh_sudo ping6 -c2 -W2 "${agent_v6_ext}" >/dev/null 2>&1 || true
 
     # Capture on backend in the background, then trigger. 3>&- closes bats'
     # TAP fd so the backgrounded capture can never hold it open and hang

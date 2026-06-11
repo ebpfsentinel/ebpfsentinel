@@ -16,16 +16,6 @@
 # stays green on older fleets while still exercising the configuration
 # surface (prefer/require parsing + binding) on every run.
 #
-# Coverage gaps (tracked, deferred):
-#
-#   * /api/v1/tls/status endpoint exposing the negotiated named group on
-#     a per-connection basis (AC #1 second bullet). No such endpoint
-#     exists in the OSS agent today; PQ negotiation is observable via
-#     wire-level inspection (s_client output) only.
-#   * HA mTLS PQ path (AC #3). The agent's HA stack is a separate
-#     listener and runs in multi-node topology; the OSS test fleet runs
-#     single-VM. Tracked as a multi-VM enablement task.
-
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
 
@@ -290,7 +280,7 @@ _restart_agent_with() {
     }
 }
 
-# ── Documented deferrals ──────────────────────────────────────────
+# ── TLS status surface ────────────────────────────────────────────
 
 @test "tls/status surfaces the per-connection negotiated key-exchange group" {
     # Run in prefer mode so a classical OpenSSL curl client can complete the
@@ -343,8 +333,4 @@ _restart_agent_with() {
             return 1
         }
     fi
-}
-
-@test "HA mTLS PQ path is tracked as a multi-VM coverage gap" {
-    skip "agent HA stack runs on a separate listener and requires a multi-node fixture; AC #3 deferred"
 }
