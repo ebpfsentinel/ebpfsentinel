@@ -89,16 +89,26 @@ daemonset:
   terminationGracePeriodSeconds: 30
   # -- Pod priority class name
   priorityClassName: ""
-  # -- Container security context. Drops ALL capabilities and adds only the
-  # scoped set the agent needs, instead of `privileged: true`. This matches
-  # the systemd unit (dist/ebpfsentinel.service): BPF + NET_ADMIN + SYS_ADMIN
-  # for eBPF program loading/attach, plus NET_RAW for pcap packet capture.
+  # -- BPF token delegation. eBPF is loaded EXCLUSIVELY through a BPF token
+  # (kernel 6.9+), a user-namespace feature. The container entrypoint
+  # `ebpfsentinel-token-launch` sets up the delegated bpffs at `bpffsPath` in a
+  # child user namespace and execs the agent there, so the long-running agent
+  # holds no host capabilities. There is no capability-based loading path.
+  bpfToken:
+    bpffsPath: /sys/fs/bpf/ebpfsentinel
+  # -- Agent container security context. The launcher entrypoint needs
+  # CAP_SYS_ADMIN (bpffs delegation + module BTF fds) and user-namespace
+  # creation; it drops into the unprivileged userns before exec'ing the agent
+  # (no CAP_BPF anywhere). NOTE: nested user namespaces + bpffs delegation can
+  # require cluster-specific runtime config (allow unprivileged userns; some
+  # runtimes/PSA levels block CAP_SYS_ADMIN). pcap / conntrack-kill teardown /
+  # VIP gratuitous-ARP are unavailable to the userns agent (eBPF equivalents
+  # keep working).
   securityContext:
     capabilities:
-      add: [BPF, NET_ADMIN, SYS_ADMIN, NET_RAW]
+      add: [SYS_ADMIN]
       drop: [ALL]
-    # Fallback for older kernels without CAP_BPF:
-    # privileged: true
+    allowPrivilegeEscalation: true
   # -- Resource requests and limits
   resources:
     requests:

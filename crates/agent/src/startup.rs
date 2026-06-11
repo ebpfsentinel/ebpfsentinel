@@ -1309,63 +1309,49 @@ pub async fn run(
     // agent as a pure HTTP frontend on a 6.8 host gives operators a
     // false sense of coverage, so we refuse to boot.
     //
-    // The privilege check stays soft: an unprivileged caller can
-    // still run the agent in API-only mode (REST/gRPC endpoints
-    // live, no eBPF attach). The three BPF loading modes
-    // (token / capabilities / privileged) all still work, but only
-    // on top of a 6.9+ kernel.
+    // eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+). The
+    // agent never loads programs with CAP_BPF / CAP_NET_ADMIN: a
+    // privileged setup step (systemd ExecStartPre, a Kubernetes init
+    // container, or ebpfsentinel-token-setup.sh) must have mounted the
+    // delegated bpffs before the agent started, and the agent — which
+    // may run fully unprivileged — creates the token against it. If the
+    // token cannot be created the agent stays up in API-only mode
+    // (REST/gRPC live, no eBPF attach); there is deliberately no
+    // capability-based fallback.
     check_kernel_version()?;
-    let ebpf_capable = match check_ebpf_privileges() {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::error!(error = %e, "eBPF unavailable — running in API-only mode");
-            false
-        }
-    };
     let ebpf_dir = resolve_ebpf_program_dir(&config);
 
-    // Bootstrap the BPF loading mode (token / capabilities / privileged).
-    // Runs before any program load so the loader can attach the token
-    // fd when one is obtained, and so the Prometheus gauge is set
-    // before eBPF attachment races with the metrics scrape.
-    let bpf_token_cfg = &config.agent.bpf_token;
-    let bpf_policy = adapters::ebpf::BpfTokenPolicy::from_config(
-        bpf_token_cfg.enabled,
-        bpf_token_cfg.bpffs_path.clone(),
-        bpf_token_cfg.fallback_allow_capabilities,
-    );
-    let bpf_handle = if ebpf_capable {
-        match adapters::ebpf::bootstrap_bpf(&bpf_policy) {
-            Ok(h) => {
-                info!(
-                    mode = h.mode.as_str(),
-                    kernel = h.kernel.version_string(),
-                    reason = h.reason,
-                    "BPF loading mode selected"
-                );
-                Some(h)
-            }
-            Err(e) => {
-                error!(error = %e, "BPF token bootstrap failed");
-                None
-            }
+    // Bootstrap the BPF token before any program load, so the loader can
+    // attach the token fd and the Prometheus gauge is set before eBPF
+    // attachment races with the metrics scrape.
+    let bpf_policy = adapters::ebpf::BpfTokenPolicy::new(config.agent.bpf_token.bpffs_path.clone());
+    let bpf_handle = match adapters::ebpf::bootstrap_bpf(&bpf_policy) {
+        Ok(h) => {
+            info!(
+                kernel = h.kernel.version_string(),
+                reason = h.reason,
+                "eBPF loading via BPF token"
+            );
+            Some(h)
         }
-    } else {
-        None
+        Err(e) => {
+            error!(
+                error = %e,
+                "BPF token unavailable — running in API-only mode (no eBPF). Mount the \
+                 delegated bpffs (ebpfsentinel-token-setup.sh / init container) and restart."
+            );
+            None
+        }
     };
-    let bpf_mode = bpf_handle
-        .as_ref()
-        .map_or(adapters::ebpf::BpfLoadingMode::Privileged, |h| h.mode);
-    metrics.set_bpf_loading_mode(bpf_mode.metric_value(), bpf_mode.as_str());
+    let ebpf_capable = bpf_handle.is_some();
+    metrics.set_bpf_token_used(ebpf_capable);
 
-    // When a BPF token was obtained, register it process-wide BEFORE any eBPF
-    // load so every map/BTF/program syscall (aya and the kfunc loader) is
-    // authorized by the token instead of the process capabilities. The token
-    // fd is kept alive for the process lifetime by `ebpf_state.bpf_handle`.
-    if let Some(handle) = bpf_handle.as_ref()
-        && let Some(token_fd) = handle.token_fd.as_ref()
-    {
-        adapters::ebpf::set_bpf_token_fd(token_fd.as_raw_fd());
+    // Register the token fd process-wide BEFORE any eBPF load so every
+    // map/BTF/program syscall (aya and the kfunc loader) is authorized by
+    // the token. The token fd is kept alive for the process lifetime by
+    // `ebpf_state.bpf_handle`.
+    if let Some(handle) = bpf_handle.as_ref() {
+        adapters::ebpf::set_bpf_token_fd(handle.token_fd.as_raw_fd());
     }
 
     // In BPF-token mode the agent cannot open a kernel module's BTF object fd
@@ -2982,48 +2968,6 @@ impl EbpfState {
     }
 }
 
-/// Verify the process has sufficient privileges to load eBPF programs.
-///
-/// Checks for root (UID 0) or the required Linux capabilities
-/// (`CAP_BPF` + `CAP_NET_ADMIN`, or `CAP_SYS_ADMIN`).
-/// Fails fast with a clear error instead of waiting for cryptic kernel errors.
-fn check_ebpf_privileges() -> anyhow::Result<()> {
-    const CAP_NET_ADMIN: u64 = 1 << 12;
-    const CAP_SYS_ADMIN: u64 = 1 << 21;
-    const CAP_BPF: u64 = 1 << 39;
-
-    let status = std::fs::read_to_string("/proc/self/status")
-        .map_err(|e| anyhow::anyhow!("cannot read /proc/self/status: {e}"))?;
-
-    // Check if running as root
-    let is_root = status
-        .lines()
-        .any(|line| line.starts_with("Uid:") && line.split_whitespace().nth(1) == Some("0"));
-    if is_root {
-        return Ok(());
-    }
-
-    // Check effective capabilities for CAP_BPF(39)+CAP_NET_ADMIN(12) or CAP_SYS_ADMIN(21)
-    let cap_eff = status
-        .lines()
-        .find(|line| line.starts_with("CapEff:"))
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
-        .unwrap_or(0);
-
-    let has_sys_admin = cap_eff & CAP_SYS_ADMIN != 0;
-    let has_bpf_and_net = cap_eff & CAP_BPF != 0 && cap_eff & CAP_NET_ADMIN != 0;
-
-    if has_sys_admin || has_bpf_and_net {
-        return Ok(());
-    }
-
-    Err(anyhow::anyhow!(
-        "insufficient privileges to load eBPF programs — \
-         run as root or grant CAP_BPF + CAP_NET_ADMIN capabilities"
-    ))
-}
-
 /// Verify the kernel version is **>= 6.9**.
 ///
 /// The 6.9 floor is mandatory — there is **no graceful fallback on
@@ -3042,9 +2986,8 @@ fn check_ebpf_privileges() -> anyhow::Result<()> {
 /// A kernel that fails this check **cannot** run the agent in a
 /// degraded mode — the eBPF verifier rejects every program at load
 /// time because the kfuncs are not present in `vmlinux` BTF. The
-/// correct response is to upgrade the kernel. The three BPF loading
-/// modes (token / capabilities / privileged) all still work, but
-/// only on top of a 6.9+ kernel.
+/// correct response is to upgrade the kernel. `BPF_TOKEN_CREATE` —
+/// the agent's only eBPF loading path — also requires 6.9+.
 fn check_kernel_version() -> anyhow::Result<()> {
     check_kernel_version_from(std::path::Path::new("/proc/sys/kernel/osrelease"))
 }

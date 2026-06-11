@@ -163,25 +163,30 @@ The userspace agent builds on **stable**; the eBPF kernel programs need the **ni
 ```bash
 cargo build --release        # userspace agent (stable)
 cargo xtask ebpf-build        # eBPF programs (nightly)
-sudo ./target/release/ebpfsentinel-agent --config config/ebpfsentinel.yaml
+
+# eBPF loads ONLY through a BPF token — mount the delegated bpffs first
+# (this is the one step that needs CAP_SYS_ADMIN), then run the agent.
+sudo dist/ebpfsentinel-token-setup.sh /sys/fs/bpf/ebpfsentinel
+./target/release/ebpfsentinel-agent --config config/ebpfsentinel.yaml
 ```
 
 ### Docker (rootless)
 
-On kernel 6.9+ the agent runs **rootless** via BPF token delegation — no `CAP_BPF`, no `CAP_NET_ADMIN`, no `--privileged`. Prepare the delegated bpffs mount once on the host, then run with every capability dropped:
+The agent loads eBPF **exclusively** through a BPF token (kernel 6.9+) — never `CAP_BPF`, never `--privileged`. A privileged init step mounts the delegated bpffs; the agent container then runs rootless. `docker compose up` wires this automatically (a `bpf-token-setup` init service mounts the bpffs, the agent runs with `cap_drop: ALL`). To run it by hand:
 
 ```bash
-sudo /usr/local/bin/ebpfsentinel-token-setup.sh    # one-time: delegated bpffs mount
+sudo dist/ebpfsentinel-token-setup.sh /sys/fs/bpf/ebpfsentinel   # privileged, one-time
 
 docker run --network host \
   --cap-drop ALL \
+  --cap-add NET_RAW --cap-add NET_ADMIN \
   --security-opt no-new-privileges:true \
   -v ./config:/etc/ebpfsentinel \
   -v /sys/fs/bpf/ebpfsentinel:/sys/fs/bpf/ebpfsentinel \
   ghcr.io/ebpfsentinel/ebpfsentinel:latest
 ```
 
-Enable it with `agent.bpf_token.enabled: true` in your config (add `CAP_NET_RAW` only if you use manual packet capture). A ready-made Compose override ships at `dist/docker-compose.bpf-token.yml`. See the [BPF token guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/operations/deployment/bpf-token.md) for the systemd and Kubernetes paths, plus the capability / privileged fallbacks on kernels below 6.9.
+`CAP_NET_RAW` is needed only for manual/auto packet capture and `CAP_NET_ADMIN` only for conntrack flow-kill + Multi-WAN routing — drop either if unused. See the [BPF token guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/operations/deployment/bpf-token.md) for the systemd and Kubernetes paths and the full capability matrix.
 
 ### Minimal config
 

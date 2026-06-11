@@ -5,20 +5,31 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/ebpfsentinel-agent --config /etc/ebpfsentinel/config.yaml
+
+# eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+), which is a
+# user-namespace feature: BPF_TOKEN_CREATE returns EOPNOTSUPP in the host user
+# namespace, so the agent must run inside a child user namespace that owns the
+# delegated bpffs. `ebpfsentinel-token-launch` is a minimal privileged
+# bootstrap: as root it enumerates module BTF fds and sets up the delegated
+# bpffs, then unshares a user namespace and execs the agent there. The
+# long-running AGENT process therefore holds NO capabilities over the host
+# (no CAP_BPF, no CAP_SYS_ADMIN) — the token authorizes every eBPF syscall.
+#
+# Note: because the agent runs in a child user namespace it has no privileges
+# over the host network namespace. The eBPF datapath (firewall, IDS, IPS
+# flow-kill via IPS_DYING, DLP, DNS, DDoS, NAT, QoS, LB incl. xdp-vip-announcer)
+# works fully. Host-netns helpers that need init-namespace capabilities degrade
+# gracefully: pcap manual capture, the `conntrack -D` retroactive teardown on a
+# new deny rule, and the one-shot gratuitous ARP on VIP takeover are skipped.
+ExecStart=/usr/local/bin/ebpfsentinel-token-launch \
+    --bpffs /sys/fs/bpf/ebpfsentinel \
+    /usr/local/bin/ebpfsentinel-agent --config /etc/ebpfsentinel/config.yaml
 Restart=on-failure
 RestartSec=5s
 
-# eBPF requires BPF, NET_ADMIN, and SYS_ADMIN capabilities
-# CAP_NET_RAW is required for pcap packet capture (POST /api/v1/captures/manual)
-AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW
-
-# Security hardening
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/var/lib/ebpfsentinel
-PrivateTmp=yes
+# The launcher needs CAP_SYS_ADMIN (bpffs delegation + module BTF fds) and the
+# ability to create a user namespace; it drops into the unprivileged userns
+# before exec. Do NOT set NoNewPrivileges (it would block the userns setup).
 
 # Logging
 StandardOutput=journal

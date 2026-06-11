@@ -1,7 +1,14 @@
 # eBPFsentinel — Multi-stage Docker build
 #
 # Build:  docker build -t ebpfsentinel .
-# Run:    docker run --privileged --network host -v ./config:/etc/ebpfsentinel ebpfsentinel
+# Run:    docker run --cap-add SYS_ADMIN --network host \
+#           --security-opt apparmor=unconfined \
+#           -v ./config:/etc/ebpfsentinel ebpfsentinel
+#
+# eBPF loads only through a BPF token (user-namespace feature): the entrypoint
+# launcher needs CAP_SYS_ADMIN + the ability to create a user namespace, then
+# execs the agent unprivileged inside it. The long-running agent holds no host
+# capabilities.
 #
 # eBPF programs must be pre-built before docker build:
 #   cargo xtask ebpf-build
@@ -43,6 +50,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml deny.toml ./
 COPY .cargo/ .cargo/
 COPY crates/ crates/
 COPY proto/ proto/
+COPY dist/ dist/
 
 ENV LIBPCAP_LIBDIR=/usr/local/musl/lib
 
@@ -57,6 +65,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp "/build/target/${MUSL_TARGET}/release/ebpfsentinel-agent" /build/ebpfsentinel-agent && \
     mkdir -p /build/captures-dir
 
+# Build the BPF token launcher as a fully static binary (no deps beyond libc).
+# eBPF loads only through a token, a user-namespace feature: the launcher sets
+# up the delegated bpffs in a child userns and execs the agent there (rootless).
+RUN musl-gcc -O2 -static -o /build/ebpfsentinel-token-launch dist/ebpfsentinel-token-launch.c
+
 # ── Stage 2: Minimal runtime image ──────────────────────────────────
 #
 # distroless/static: ca-certificates only — no libc, no shell, no package manager.
@@ -70,6 +83,7 @@ LABEL org.opencontainers.image.title="eBPFsentinel" \
     org.opencontainers.image.licenses="AGPL-3.0-only"
 
 COPY --from=agent-builder /build/ebpfsentinel-agent /usr/local/bin/ebpfsentinel-agent
+COPY --from=agent-builder /build/ebpfsentinel-token-launch /usr/local/bin/ebpfsentinel-token-launch
 
 # Copy pre-built eBPF programs (built by CI or `cargo xtask ebpf-build`)
 COPY ebpf-out/ /usr/local/lib/ebpfsentinel/
@@ -86,5 +100,7 @@ EXPOSE 8080 50051 9090
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
     CMD ["ebpfsentinel-agent", "health"]
 
-ENTRYPOINT ["ebpfsentinel-agent"]
+# The launcher bootstraps the BPF token in a child user namespace, then execs
+# the agent (appending CMD) inside it. CMD carries the agent's own arguments.
+ENTRYPOINT ["/usr/local/bin/ebpfsentinel-token-launch", "--bpffs", "/sys/fs/bpf/ebpfsentinel", "/usr/local/bin/ebpfsentinel-agent"]
 CMD ["--config", "/etc/ebpfsentinel/config.yaml"]

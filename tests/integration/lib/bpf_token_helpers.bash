@@ -71,8 +71,17 @@ bpf_token_run() {
     # Stage the agent under /tmp so the user-namespace exec can reach it.
     install -m755 "$AGENT_BIN" "$BPF_TOKEN_AGENT_STAGE"
     : >"$BPF_TOKEN_LOG"
-    timeout "$secs" "$BPF_TOKEN_HARNESS_BIN" "$BPF_TOKEN_AGENT_STAGE" --config "$config" \
-        >"$BPF_TOKEN_LOG" 2>&1 || true
+    # Close inherited fds (>=3) before the harness. bats holds its TAP stream on
+    # fd 3, which the harness would otherwise inherit — pushing the module BTF
+    # fds it opens to higher numbers and colliding with the fds the agent's token
+    # loader allocates, so map creation fails with a bare -1. Running the harness
+    # with a clean fd table makes the module BTF fds start at 3 as they do
+    # outside bats.
+    (
+        for _fd in $(seq 3 30); do eval "exec ${_fd}>&-" 2>/dev/null || true; done
+        exec timeout "$secs" "$BPF_TOKEN_HARNESS_BIN" "$BPF_TOKEN_AGENT_STAGE" \
+            --config "$config" >"$BPF_TOKEN_LOG" 2>&1
+    ) || true
     [ -s "$BPF_TOKEN_LOG" ]
 }
 

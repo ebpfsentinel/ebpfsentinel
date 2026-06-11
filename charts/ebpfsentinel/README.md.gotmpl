@@ -48,7 +48,7 @@ See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/m
 | Requirement | Reason |
 |-------------|--------|
 | `hostNetwork: true` | XDP/TC programs attach to host interfaces, not pod veth |
-| BPF token + `CAP_NET_RAW` (default) | The agent loads eBPF through a BPF token; the agent container needs only `CAP_NET_RAW` for pcap capture. A privileged init container mounts the delegated bpffs. Fallback (`agent.bpfToken.enabled=false`): scoped caps `CAP_BPF` + `CAP_NET_ADMIN` + `CAP_SYS_ADMIN` + `CAP_NET_RAW` |
+| BPF token (only loading path) | eBPF loads **exclusively** through a BPF token — there is no capability-based loading. The `bpf-token-setup` init container (privileged, `CAP_SYS_ADMIN`) mounts the delegated bpffs; the rootless agent container holds NO `CAP_BPF`/`CAP_SYS_ADMIN`, only feature-scoped `CAP_NET_RAW` (pcap capture) + `CAP_NET_ADMIN` (conntrack flow-kill, Multi-WAN) |
 | `/sys/fs/bpf` mount | BPF filesystem for map pinning + delegated token bpffs |
 | `/sys/kernel/debug` mount | eBPF tracing (debugfs) |
 | Kernel 6.9+ with BTF | Agent minimum: BPF token delegation, ARENA maps, kfuncs; CO-RE requires BTF |

@@ -1191,57 +1191,38 @@ pub struct AgentInfo {
     #[serde(default = "default_event_workers")]
     pub event_workers: usize,
 
-    /// BPF token delegation settings (kernel 6.9+). When enabled, the
-    /// agent creates a token fd via `BPF_TOKEN_CREATE` against a
-    /// delegated bpffs mount and uses it to load programs without
-    /// requiring `CAP_BPF` in the process. On older kernels the block
-    /// is silently ignored and the agent falls back to capability- or
-    /// privilege-based loading.
+    /// BPF token delegation settings (kernel 6.9+). eBPF is loaded
+    /// **exclusively** through a BPF token created against the delegated
+    /// bpffs at `bpffs_path`; there is no capability-based loading path.
+    /// A privileged setup step (systemd `ExecStartPre`, a Kubernetes
+    /// init container, or `ebpfsentinel-token-setup.sh`) must mount the
+    /// delegated bpffs before the agent starts. The agent process itself
+    /// needs no `CAP_BPF` / `CAP_SYS_ADMIN`.
     #[serde(default)]
     pub bpf_token: BpfTokenConfig,
 }
 
-/// BPF token delegation configuration.
+/// BPF token delegation configuration. eBPF loading is token-only, so
+/// the sole knob is where the delegated bpffs lives.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BpfTokenConfig {
-    /// When `true` the agent creates a BPF token at startup against the
-    /// delegated bpffs at `bpffs_path`. **Experimental / forward-looking:**
-    /// the token fd is created and held, but the current `aya` release
-    /// does not yet thread it into program/map loads, so eBPF still loads
-    /// via process capabilities. Defaults to `false` — capability-based
-    /// loading is the working default until `aya` gains token support.
-    #[serde(default)]
-    pub enabled: bool,
-
     /// Filesystem path of the delegated bpffs mount. Used as the
     /// `bpffs_fd` argument of `BPF_TOKEN_CREATE`. Typically
     /// `/sys/fs/bpf/ebpfsentinel`.
     #[serde(default = "default_bpf_token_path")]
     pub bpffs_path: String,
-
-    /// When `true` and token creation fails, the agent falls back to
-    /// capability-based loading (`CAP_BPF` + `CAP_NET_ADMIN`) instead
-    /// of refusing to start. Recommended for staged rollouts.
-    #[serde(default = "default_true")]
-    pub fallback_allow_capabilities: bool,
 }
 
 impl Default for BpfTokenConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             bpffs_path: default_bpf_token_path(),
-            fallback_allow_capabilities: true,
         }
     }
 }
 
 fn default_bpf_token_path() -> String {
     "/sys/fs/bpf/ebpfsentinel".into()
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// TLS configuration for HTTP and gRPC servers (NFR9).

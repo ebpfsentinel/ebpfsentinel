@@ -1,35 +1,26 @@
 use std::collections::HashMap;
-use std::hash::BuildHasher;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::Path;
 
-use aya::{
-    Ebpf, EbpfLoader as AyaEbpfLoader, VerifierLogLevel,
-    maps::ProgramArray,
-    programs::{SchedClassifier, TcAttachType, UProbe, Xdp, XdpFlags, tc},
-};
-use tracing::{debug, info, warn};
+use aya::{maps::ProgramArray, programs::XdpFlags};
+use tracing::{info, warn};
 
-use super::kfunc::KfuncResolver;
 use super::kfunc_attach;
-use super::kfunc_loader::{self, KfuncClass};
+use super::kfunc_loader;
 
 /// Default BPF filesystem pin path for shared maps.
 pub const DEFAULT_BPF_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel";
 
 /// Loads and attaches eBPF programs (XDP, TC, uprobe).
 ///
-/// Wraps the `aya::Ebpf` instance and provides methods for
-/// program lifecycle management (load, attach, detach).
+/// eBPF is loaded **exclusively** through the raw BPF-token loader
+/// ([`kfunc_loader::load_object_token`]): the agent holds no `CAP_BPF`,
+/// so aya — which cannot pass a token fd on its syscalls — is never used
+/// to load or attach. Maps live in `token_maps`, programs in
+/// `kfunc_progs`, and attaches go through the raw `kfunc_attach` paths.
 pub struct EbpfLoader {
-    /// The aya instance in capability mode. `None` in BPF-token mode, where
-    /// aya cannot load (every syscall needs the token fd it does not pass) and
-    /// the object is loaded by the raw token loader instead — its maps live in
-    /// `token_maps` and its programs in `kfunc_progs`.
-    ebpf: Option<Ebpf>,
     /// Token-mode maps (from `kfunc_loader::load_object_token`), exposed to the
-    /// map managers through the same `MapStore` surface as the aya maps. Empty
-    /// in capability mode.
+    /// map managers through the [`MapStore`](super::map_store::MapStore) surface.
     token_maps: super::map_store::TokenMaps,
     /// Owned link fds for netkit attachments. Dropping these detaches.
     netkit_links: Vec<OwnedFd>,
@@ -47,113 +38,10 @@ pub struct EbpfLoader {
     kfunc_hosted_maps: HashMap<String, OwnedFd>,
 }
 
-/// Read back every map aya hosted, keyed by full ELF name, as an independent
-/// owned fd. Each `aya::maps::Map` variant wraps a `MapData` whose `fd()` is
-/// public; cloning it gives the kfunc loader a handle to the exact kernel map
-/// aya created — pin-free and immune to the kernel's 15-byte name truncation.
-fn hosted_map_fds(ebpf: &Ebpf) -> anyhow::Result<HashMap<String, OwnedFd>> {
-    use aya::maps::Map;
-    let mut hosted = HashMap::new();
-    for (name, map) in ebpf.maps() {
-        let data = match map {
-            Map::Array(d)
-            | Map::BloomFilter(d)
-            | Map::CpuMap(d)
-            | Map::DevMap(d)
-            | Map::DevMapHash(d)
-            | Map::HashMap(d)
-            | Map::LpmTrie(d)
-            | Map::LruHashMap(d)
-            | Map::PerCpuArray(d)
-            | Map::PerCpuHashMap(d)
-            | Map::PerCpuLruHashMap(d)
-            | Map::PerfEventArray(d)
-            | Map::ProgramArray(d)
-            | Map::Queue(d)
-            | Map::RingBuf(d)
-            | Map::SockHash(d)
-            | Map::SockMap(d)
-            | Map::Stack(d)
-            | Map::StackTraceMap(d)
-            | Map::Unsupported(d)
-            | Map::XskMap(d) => d,
-        };
-        let owned = data
-            .fd()
-            .as_fd()
-            .try_clone_to_owned()
-            .map_err(|e| anyhow::anyhow!("clone hosted map `{name}` fd: {e}"))?;
-        hosted.insert(name.to_owned(), owned);
-    }
-    Ok(hosted)
-}
-
-/// Load an ELF object through aya with the verifier log disabled on the happy
-/// path, retrying once with aya's default (verbose) log only if the first
-/// attempt fails — so a genuine rejection still carries its reason.
-///
-/// aya defaults its verifier log level to `LEVEL1 | STATS` and grows the log
-/// buffer when the kernel returns `ENOSPC`, but that growth is capped. A large
-/// yet *valid* program whose verbose log runs to several megabytes then fails
-/// to load with `ENOSPC` even though verification itself passed. Loading with
-/// the log disabled sidesteps the buffer entirely; the retry only ever runs
-/// for a program that genuinely failed, where the log is bounded by the
-/// rejection point and worth capturing.
-fn aya_load(bytes: &[u8], pin_path: Option<&str>) -> Result<Ebpf, anyhow::Error> {
-    let attempt = |level: VerifierLogLevel| -> Result<Ebpf, aya::EbpfError> {
-        let mut loader = AyaEbpfLoader::new();
-        loader.allow_unsupported_maps().verifier_log_level(level);
-        if let Some(path) = pin_path {
-            loader.map_pin_path(path);
-        }
-        loader.load(bytes)
-    };
-    match attempt(VerifierLogLevel::DISABLE) {
-        Ok(ebpf) => Ok(ebpf),
-        Err(_) => Ok(attempt(VerifierLogLevel::default())?),
-    }
-}
-
-/// Load the raw kfunc programs, preferring a device-bound load when one is
-/// requested and the object actually uses device-bound-only metadata kfuncs.
-///
-/// A device-bound load lets `bpf_xdp_metadata_rx_*` resolve against the target
-/// device's `xdp_metadata_ops`. Drivers without that support make the verifier
-/// reject the load; we then retry with the metadata kfuncs neutralized so the
-/// program loads on any NIC (its wrapper already tolerates the missing data).
-fn load_kfunc_with_metadata_fallback<S: BuildHasher>(
-    elf: &[u8],
-    resolver: &KfuncResolver,
-    hosted: &HashMap<String, OwnedFd, S>,
-    dev_bound_ifindex: Option<u32>,
-) -> anyhow::Result<Vec<kfunc_loader::KfuncLoadedProgram>> {
-    if dev_bound_ifindex.is_some() && kfunc_loader::uses_dev_bound_metadata_kfuncs(elf) {
-        match kfunc_loader::load_kfunc_programs(elf, resolver, hosted, dev_bound_ifindex) {
-            Ok(loaded) => {
-                info!(
-                    ifindex = dev_bound_ifindex,
-                    "XDP metadata kfunc program loaded device-bound"
-                );
-                return Ok(loaded);
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "device-bound XDP load rejected (driver lacks xdp_metadata_ops?); \
-                     retrying with metadata kfuncs neutralized"
-                );
-            }
-        }
-    }
-    Ok(kfunc_loader::load_kfunc_programs(
-        elf, resolver, hosted, None,
-    )?)
-}
-
 impl EbpfLoader {
-    /// Build a token-mode loader from a raw-loaded object: maps go into the
+    /// Build a loader from a raw-loaded object: maps go into the
     /// `MapStore` the managers consume, programs into `kfunc_progs` where the
-    /// raw-attach paths already pick them up. There is no aya instance.
+    /// raw-attach paths already pick them up.
     fn from_token_object(loaded: kfunc_loader::TokenLoadedObject) -> Self {
         let kfunc_progs = loaded
             .programs
@@ -161,49 +49,24 @@ impl EbpfLoader {
             .map(|p| (p.name, p.fd))
             .collect();
         Self {
-            ebpf: None,
             token_maps: super::map_store::TokenMaps::new(loaded.maps),
             netkit_links: Vec::new(),
             kfunc_progs,
             kfunc_links: Vec::new(),
             // Raw map fds captured at load time, so `set_tail_call_raw` can wire
-            // `ProgramArray`s (e.g. XDP_PROG_ARRAY) the same way as cap mode.
+            // `ProgramArray`s (e.g. XDP_PROG_ARRAY).
             kfunc_hosted_maps: loaded.hosted,
         }
     }
 
-    /// Load an eBPF program from raw ELF bytes.
+    /// Load an eBPF program from raw ELF bytes through the BPF token.
     ///
-    /// Initializes aya-log for eBPF debug message forwarding (best-effort).
-    /// Returns an error if the verifier rejects the program.
+    /// The raw token loader creates the maps and loads every program with
+    /// the token fd, so no `CAP_BPF` is needed. Returns an error if the
+    /// verifier rejects the program or the token is unavailable.
     pub fn load(program_bytes: &[u8]) -> Result<Self, anyhow::Error> {
-        // BPF-token mode: aya cannot load without `CAP_BPF`, so the raw token
-        // loader creates the maps and loads the programs through the token.
-        if super::bpf_token::global_token_fd().is_some() {
-            let loaded =
-                kfunc_loader::load_object_token(program_bytes, DEFAULT_BPF_PIN_PATH, None)?;
-            return Ok(Self::from_token_object(loaded));
-        }
-
-        // `allow_unsupported_maps` (inside `aya_load`) lets aya create maps it
-        // has no high-level wrapper for by passing the parsed definition
-        // straight to `BPF_MAP_CREATE`.
-        let mut ebpf = aya_load(program_bytes, None)?;
-
-        // Initialize aya-log (best-effort — non-fatal if eBPF has no log statements)
-        if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
-            warn!("eBPF logger init failed (non-fatal): {e}");
-        }
-
-        info!("eBPF program loaded successfully");
-        Ok(Self {
-            ebpf: Some(ebpf),
-            token_maps: super::map_store::TokenMaps::default(),
-            netkit_links: Vec::new(),
-            kfunc_progs: HashMap::new(),
-            kfunc_links: Vec::new(),
-            kfunc_hosted_maps: HashMap::new(),
-        })
+        let loaded = kfunc_loader::load_object_token(program_bytes, DEFAULT_BPF_PIN_PATH, None)?;
+        Ok(Self::from_token_object(loaded))
     }
 
     /// Load an eBPF program with map pinning enabled.
@@ -222,161 +85,46 @@ impl EbpfLoader {
     /// device-bound-only metadata kfuncs (`bpf_xdp_metadata_rx_*`).
     ///
     /// When `dev_bound_ifindex` is `Some` (caller policy: exactly one target
-    /// interface), the program is first loaded device-bound to that netdev so
-    /// the kfuncs resolve against its `xdp_metadata_ops` and read real hardware
+    /// interface), the program is loaded device-bound to that netdev so the
+    /// kfuncs resolve against its `xdp_metadata_ops` and read real hardware
     /// hints. If the driver lacks that support the verifier rejects the load,
-    /// and the loader transparently falls back to neutralizing the metadata
-    /// kfuncs (`r0 = -EOPNOTSUPP`) so the program still loads — the program's
-    /// wrapper degrades gracefully, exactly as on a driver answering `-EOPNOTSUPP`.
-    /// `None` (multiple or zero interfaces) always neutralizes, so a single
-    /// program fd can attach to every interface.
+    /// and the token loader transparently falls back to neutralizing the
+    /// metadata kfuncs (`r0 = -EOPNOTSUPP`) so the program still loads — the
+    /// program's wrapper degrades gracefully, exactly as on a driver answering
+    /// `-EOPNOTSUPP`. `None` (multiple or zero interfaces) always neutralizes,
+    /// so a single program fd can attach to every interface.
     pub fn load_with_pin_path_dev_bound(
         program_bytes: &[u8],
         pin_path: &str,
         dev_bound_ifindex: Option<u32>,
     ) -> Result<Self, anyhow::Error> {
-        // BPF-token mode: the raw token loader creates all maps and loads every
-        // program through the token (no aya, no `CAP_BPF`).
-        if super::bpf_token::global_token_fd().is_some() {
-            let loaded =
-                kfunc_loader::load_object_token(program_bytes, pin_path, dev_bound_ifindex)?;
-            return Ok(Self::from_token_object(loaded));
-        }
-
-        // Ensure pin directory exists
-        let path = Path::new(pin_path);
-        if !path.exists() {
-            std::fs::create_dir_all(path)?;
-            info!(pin_path, "created BPF pin directory");
-        }
-
-        // kfunc calls are invisible to aya: it can neither relocate them nor
-        // load a program that contains them. The resolver classifies the
-        // object so each strategy is applied with surgical precision —
-        // vmlinux-only kfuncs are pre-patched to their resolved btf ids and
-        // aya loads them unchanged, while module kfuncs are pre-patched to a
-        // sentinel (so aya still hosts the maps) and loaded outside aya.
-        let mut kfunc_progs = HashMap::new();
-        let mut kfunc_hosted_maps = HashMap::new();
-        let resolver = if kfunc_loader::has_kfunc_calls(program_bytes) {
-            Some(KfuncResolver::new()?)
-        } else {
-            None
-        };
-
-        let mut ebpf = match resolver {
-            None => aya_load(program_bytes, Some(pin_path))?,
-            Some(resolver) => match kfunc_loader::classify(program_bytes, &resolver)? {
-                KfuncClass::None => aya_load(program_bytes, Some(pin_path))?,
-                KfuncClass::VmlinuxOnly => {
-                    let patched = kfunc_loader::prepatch_vmlinux_kfuncs(program_bytes, &resolver)?;
-                    info!(pin_path, "loading vmlinux-only kfunc program via aya");
-                    aya_load(&patched, Some(pin_path))?
-                }
-                KfuncClass::HasModule => {
-                    // aya hosts the maps from the sentinel-patched ELF but
-                    // cannot load a program that calls module or device-bound
-                    // metadata kfuncs; the raw loader re-parses the same bytes,
-                    // relocates against those maps, and issues BPF_PROG_LOAD
-                    // with the module fd_array (and, when a single interface is
-                    // targeted, device-bound to it). The maps' fds are read
-                    // back from aya by full name.
-                    let patched = kfunc_loader::prepatch_kfunc_calls(program_bytes)?;
-                    let ebpf = aya_load(&patched, Some(pin_path))?;
-                    let hosted = hosted_map_fds(&ebpf)?;
-                    let loaded = load_kfunc_with_metadata_fallback(
-                        &patched,
-                        &resolver,
-                        &hosted,
-                        dev_bound_ifindex,
-                    )?;
-                    kfunc_hosted_maps = hosted;
-                    for prog in loaded {
-                        info!(program = %prog.name, "module-kfunc program loaded outside aya");
-                        kfunc_progs.insert(prog.name, prog.fd);
-                    }
-                    ebpf
-                }
-            },
-        };
-
-        if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
-            warn!("eBPF logger init failed (non-fatal): {e}");
-        }
-
-        info!(pin_path, "eBPF program loaded with map pinning");
-        Ok(Self {
-            ebpf: Some(ebpf),
-            token_maps: super::map_store::TokenMaps::default(),
-            netkit_links: Vec::new(),
-            kfunc_progs,
-            kfunc_links: Vec::new(),
-            kfunc_hosted_maps,
-        })
+        // The raw token loader creates all maps and loads every program through
+        // the token (no aya, no `CAP_BPF`), classifying kfunc usage internally
+        // and pin-sharing maps under `pin_path`.
+        let loaded = kfunc_loader::load_object_token(program_bytes, pin_path, dev_bound_ifindex)?;
+        Ok(Self::from_token_object(loaded))
     }
 
-    /// Load a kfunc-free XDP object through the raw `BPF_PROG_LOAD` path (the
-    /// same one used for module-kfunc programs) instead of via aya.
+    /// Load a kfunc-free XDP object through the token loader so it stays
+    /// tail-call-compatible with a kfunc-raw owner program.
     ///
     /// A `ProgramArray` records the load attributes of the first program to
     /// reference it and rejects any later-inserted program whose attributes
     /// differ — `bpf_prog_map_compatible` compares `prog_type`, `jited`,
     /// `xdp_has_frags`, and `attach_func_proto`. The firewall and ratelimit
-    /// programs that own `XDP_PROG_ARRAY` / `RL_PROG_ARRAY` are loaded outside
-    /// aya because they call module kfuncs, so their tail-call targets — even
-    /// the kfunc-free `xdp-firewall-reject` and `xdp-ratelimit-syncookie` —
-    /// must take the identical path or the kernel refuses the slot update with
-    /// `EINVAL`. aya still hosts the object's maps so they pin-share with the
-    /// owner exactly as before; only the program is loaded raw.
+    /// programs that own `XDP_PROG_ARRAY` / `RL_PROG_ARRAY` load through the
+    /// token, so their tail-call targets — even the kfunc-free
+    /// `xdp-firewall-reject` and `xdp-ratelimit-syncookie` — must take the
+    /// identical path or the kernel refuses the slot update with `EINVAL`.
+    /// The token loader creates the object's maps (reusing the owner's
+    /// pin-shared maps and creating this program's private ones, e.g.
+    /// `REJECT_SCRATCH`) and loads the program, all through the token.
     pub fn load_xdp_raw_with_pin_path(
         program_bytes: &[u8],
         pin_path: &str,
     ) -> Result<Self, anyhow::Error> {
-        let path = Path::new(pin_path);
-        if !path.exists() {
-            std::fs::create_dir_all(path)?;
-            info!(pin_path, "created BPF pin directory");
-        }
-
-        // BPF-token mode: aya cannot create this program's maps (it has no
-        // token), so the token loader creates them — reusing the owner's
-        // pin-shared maps and creating this program's private ones (e.g.
-        // `REJECT_SCRATCH`) — and loads the program raw, all through the token.
-        if super::bpf_token::global_token_fd().is_some() {
-            let loaded = kfunc_loader::load_object_token(program_bytes, pin_path, None)?;
-            return Ok(Self::from_token_object(loaded));
-        }
-
-        // aya hosts the maps (and pin-shares them with the owner program);
-        // it never loads the program into the kernel — the raw loader does.
-        let mut ebpf = aya_load(program_bytes, Some(pin_path))?;
-        let hosted = hosted_map_fds(&ebpf)?;
-
-        // The object declares no kfunc calls, so the resolver resolves nothing
-        // and the fd_array is empty; the raw load path is what makes the
-        // resulting program load-compatible with the kfunc-raw owner.
-        let resolver = KfuncResolver::new()?;
-        let loaded = kfunc_loader::load_kfunc_programs(program_bytes, &resolver, &hosted, None)?;
-
-        let mut kfunc_progs = HashMap::new();
-        for prog in loaded {
-            info!(program = %prog.name, "kfunc-free XDP program loaded raw (tail-call compat)");
-            kfunc_progs.insert(prog.name, prog.fd);
-        }
-
-        if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
-            warn!("eBPF logger init failed (non-fatal): {e}");
-        }
-
-        info!(pin_path, "XDP program loaded raw with map pinning");
-        Ok(Self {
-            ebpf: Some(ebpf),
-            token_maps: super::map_store::TokenMaps::default(),
-            netkit_links: Vec::new(),
-            kfunc_progs,
-            kfunc_links: Vec::new(),
-            kfunc_hosted_maps: hosted,
-        })
+        let loaded = kfunc_loader::load_object_token(program_bytes, pin_path, None)?;
+        Ok(Self::from_token_object(loaded))
     }
 
     /// Clean up pinned maps from the BPF filesystem.
@@ -452,47 +200,9 @@ impl EbpfLoader {
             }
         }
 
-        let program: &mut Xdp = self
-            .ebpf
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("aya programs unavailable in BPF-token mode"))?
-            .program_mut(program_name)
-            .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found in eBPF object"))?
-            .try_into()?;
-
-        program.load()?;
-
-        let mode_label = xdp_flags_label(flags);
-        match program.attach(interface, flags) {
-            Ok(_) => {
-                info!(
-                    program_name,
-                    interface,
-                    mode = mode_label,
-                    "XDP program attached"
-                );
-                Ok(())
-            }
-            Err(e) if flags.bits() != XdpFlags::default().bits() => {
-                warn!(
-                    program_name,
-                    interface,
-                    requested_mode = mode_label,
-                    error = %e,
-                    "XDP attach failed with requested mode, falling back to auto"
-                );
-                program.attach(interface, XdpFlags::default())?;
-                let fallback_label = xdp_flags_label(XdpFlags::default());
-                info!(
-                    program_name,
-                    interface,
-                    mode = fallback_label,
-                    "XDP program attached (fallback from {mode_label})"
-                );
-                Ok(())
-            }
-            Err(e) => Err(e.into()),
-        }
+        Err(anyhow::anyhow!(
+            "XDP program '{program_name}' was not loaded through the BPF token"
+        ))
     }
 
     /// Load a named XDP program without attaching it to any interface.
@@ -502,28 +212,17 @@ impl EbpfLoader {
     /// `xdp-firewall`).
     pub fn load_xdp_program(&mut self, program_name: &str) -> Result<(), anyhow::Error> {
         if self.kfunc_progs.contains_key(program_name) {
-            // The raw loader already issued BPF_PROG_LOAD; nothing to attach.
+            // The token loader already issued BPF_PROG_LOAD; nothing to attach.
             info!(
                 program_name,
-                "XDP kfunc program already loaded (tail-call target, no attach)"
+                "XDP program already loaded (tail-call target, no attach)"
             );
             return Ok(());
         }
 
-        let program: &mut Xdp = self
-            .ebpf
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("aya programs unavailable in BPF-token mode"))?
-            .program_mut(program_name)
-            .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found in eBPF object"))?
-            .try_into()?;
-
-        program.load()?;
-        info!(
-            program_name,
-            "XDP program loaded (tail-call target, no attach)"
-        );
-        Ok(())
+        Err(anyhow::anyhow!(
+            "XDP program '{program_name}' was not loaded through the BPF token"
+        ))
     }
 
     /// Attach a TC (Traffic Control) classifier program to the given interface.
@@ -549,34 +248,9 @@ impl EbpfLoader {
             return Ok(());
         }
 
-        // clsact qdisc is only needed for legacy netlink attach (kernel < 6.6).
-        // TCX (kernel >= 6.6) doesn't use qdiscs. Best-effort, ignore errors.
-        if let Err(e) = tc::qdisc_add_clsact(interface) {
-            debug!(interface, error = %e, "qdisc_add_clsact skipped (TCX or already exists)");
-        }
-
-        let program: &mut SchedClassifier = self
-            .ebpf
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("aya programs unavailable in BPF-token mode"))?
-            .program_mut(program_name)
-            .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found in eBPF object"))?
-            .try_into()?;
-
-        // Load once: when the same program is attached to several
-        // interfaces, the program object is loaded on the first call and
-        // already-loaded on the rest. Tolerate that so a multi-interface
-        // attach (e.g. tc-scrub on eth1 + eth2) does not abort the loader.
-        match program.load() {
-            Ok(()) | Err(aya::programs::ProgramError::AlreadyLoaded) => {}
-            Err(e) => return Err(e.into()),
-        }
-        // Aya auto-detects kernel version:
-        // >= 6.6: uses TCX (BPF_TCX_INGRESS link, priority ordering)
-        // <  6.6: uses netlink (legacy clsact qdisc attach)
-        program.attach(interface, TcAttachType::Ingress)?;
-        info!(program_name, interface, "TC program attached (ingress)");
-        Ok(())
+        Err(anyhow::anyhow!(
+            "TC program '{program_name}' was not loaded through the BPF token"
+        ))
     }
 
     /// Attach an already-loaded TC classifier to the EGRESS hook of
@@ -602,23 +276,9 @@ impl EbpfLoader {
             return Ok(());
         }
 
-        if let Err(e) = tc::qdisc_add_clsact(interface) {
-            debug!(interface, error = %e, "qdisc_add_clsact skipped (TCX or already exists)");
-        }
-        let program: &mut SchedClassifier = self
-            .ebpf
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("aya programs unavailable in BPF-token mode"))?
-            .program_mut(program_name)
-            .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found in eBPF object"))?
-            .try_into()?;
-        match program.load() {
-            Ok(()) | Err(aya::programs::ProgramError::AlreadyLoaded) => {}
-            Err(e) => return Err(e.into()),
-        }
-        program.attach(interface, TcAttachType::Egress)?;
-        info!(program_name, interface, "TC program attached (egress)");
-        Ok(())
+        Err(anyhow::anyhow!(
+            "TC program '{program_name}' was not loaded through the BPF token"
+        ))
     }
 
     /// Attach a TC program to a netkit interface via `BPF_LINK_CREATE`.
@@ -631,19 +291,12 @@ impl EbpfLoader {
     ) -> Result<(), anyhow::Error> {
         use super::netkit::{BPF_NETKIT_PRIMARY, netkit_attach_by_name};
 
-        let prog_fd: RawFd = if let Some(fd) = self.kfunc_progs.get(program_name) {
-            fd.as_raw_fd()
-        } else {
-            let program: &mut aya::programs::SchedClassifier = self
-                .ebpf
-                .as_mut()
-                .ok_or_else(|| anyhow::anyhow!("aya programs unavailable in BPF-token mode"))?
-                .program_mut(program_name)
-                .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found"))?
-                .try_into()?;
-            program.load()?;
-            program.fd()?.as_fd().as_raw_fd()
+        let Some(fd) = self.kfunc_progs.get(program_name) else {
+            return Err(anyhow::anyhow!(
+                "TC program '{program_name}' was not loaded through the BPF token"
+            ));
         };
+        let prog_fd: RawFd = fd.as_raw_fd();
         let link_fd = netkit_attach_by_name(prog_fd, interface, BPF_NETKIT_PRIMARY)?;
         // Store the link fd to keep the attachment alive.
         // When EbpfLoader is dropped, the link fd closes and detaches.
@@ -660,8 +313,8 @@ impl EbpfLoader {
         target: &str,
         is_ret_probe: bool,
     ) -> Result<(), anyhow::Error> {
-        // Token mode: the raw loader already issued BPF_PROG_LOAD, so attach the
-        // captured fd through the kernel uprobe PMU (aya never made a handle).
+        // The token loader already issued BPF_PROG_LOAD, so attach the captured
+        // fd through the kernel uprobe PMU.
         if let Some(prog_fd) = self.kfunc_progs.get(program_name) {
             let link = kfunc_attach::attach_uprobe_raw(
                 program_name,
@@ -674,70 +327,21 @@ impl EbpfLoader {
             return Ok(());
         }
 
-        let program: &mut UProbe = self
-            .ebpf
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("aya programs unavailable in BPF-token mode"))?
-            .program_mut(program_name)
-            .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found in eBPF object"))?
-            .try_into()?;
-
-        program.load()?;
-        program.attach(Some(fn_name), 0, target, None)?;
-        let probe_type = if is_ret_probe { "uretprobe" } else { "uprobe" };
-        info!(program_name, fn_name, target, probe_type, "uprobe attached");
-        Ok(())
-    }
-
-    /// Detach the XDP firewall program.
-    ///
-    /// After detach the program is unloaded and no longer processes packets.
-    pub fn detach(&mut self) -> Result<(), anyhow::Error> {
-        let program: &mut Xdp = self
-            .ebpf
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("aya programs unavailable in BPF-token mode"))?
-            .program_mut("xdp_firewall")
-            .ok_or_else(|| anyhow::anyhow!("program 'xdp_firewall' not found in eBPF object"))?
-            .try_into()?;
-
-        program.unload()?;
-        info!("XDP firewall detached");
-        Ok(())
+        Err(anyhow::anyhow!(
+            "uprobe program '{program_name}' was not loaded through the BPF token"
+        ))
     }
 
     /// Get the raw fd of a loaded program by name, for tail-call wiring.
     ///
-    /// Checks raw-loaded kfunc programs first, then aya-loaded XDP and TC
-    /// programs. The returned fd is valid as long as this `EbpfLoader` is
-    /// alive and can be inserted into another loader's `ProgramArray` via
+    /// The returned fd is valid as long as this `EbpfLoader` is alive and
+    /// can be inserted into another loader's `ProgramArray` via
     /// [`Self::set_tail_call_raw`] (fds are process-global).
     pub fn program_raw_fd(&self, program_name: &str) -> Result<RawFd, anyhow::Error> {
-        if let Some(fd) = self.kfunc_progs.get(program_name) {
-            return Ok(fd.as_raw_fd());
-        }
-        let program = self
-            .ebpf
-            .as_ref()
-            .and_then(|e| e.program(program_name))
-            .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found"))?;
-        if let Ok(xdp) = <&Xdp>::try_from(program) {
-            return Ok(xdp
-                .fd()
-                .map_err(|e| anyhow::anyhow!("program '{program_name}' fd unavailable: {e}"))?
-                .as_fd()
-                .as_raw_fd());
-        }
-        if let Ok(sc) = <&SchedClassifier>::try_from(program) {
-            return Ok(sc
-                .fd()
-                .map_err(|e| anyhow::anyhow!("program '{program_name}' fd unavailable: {e}"))?
-                .as_fd()
-                .as_raw_fd());
-        }
-        Err(anyhow::anyhow!(
-            "program '{program_name}' is neither XDP nor TC"
-        ))
+        self.kfunc_progs
+            .get(program_name)
+            .map(AsRawFd::as_raw_fd)
+            .ok_or_else(|| anyhow::anyhow!("program '{program_name}' not found"))
     }
 
     /// Wire a tail-call: insert `target_fd` at `index` in the named
@@ -787,14 +391,11 @@ impl EbpfLoader {
 
     /// Borrow this loader's maps as a [`MapStore`](super::map_store::MapStore).
     ///
-    /// Used by map managers and event readers. Returns the aya instance in
-    /// capability mode and the raw-token map collection in BPF-token mode —
-    /// both expose the same `take_map` / `map` / `map_mut` surface.
+    /// Used by map managers and event readers. The maps come from the raw
+    /// token loader; `MapStore` exposes the `take_map` / `map` / `map_mut`
+    /// surface the managers consume.
     pub fn ebpf_mut(&mut self) -> &mut dyn super::map_store::MapStore {
-        match self.ebpf.as_mut() {
-            Some(e) => e,
-            None => &mut self.token_maps,
-        }
+        &mut self.token_maps
     }
 
     /// Get the raw fd of a loaded program by name.
@@ -802,12 +403,7 @@ impl EbpfLoader {
     /// Returns `None` if the program is not found or not loaded.
     /// The returned fd is valid as long as this `EbpfLoader` is alive.
     pub fn program_fd(&self, program_name: &str) -> Option<RawFd> {
-        if let Some(fd) = self.kfunc_progs.get(program_name) {
-            return Some(fd.as_raw_fd());
-        }
-        let program: &SchedClassifier =
-            self.ebpf.as_ref()?.program(program_name)?.try_into().ok()?;
-        Some(program.fd().ok()?.as_fd().as_raw_fd())
+        self.kfunc_progs.get(program_name).map(AsRawFd::as_raw_fd)
     }
 
     // ── Zero-downtime program swap via BPF_LINK_UPDATE (kernel 5.7+) ────

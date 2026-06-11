@@ -31,15 +31,15 @@ agent:
   grpc_port: 50051
   metrics_port: 9090
 
-  # BPF token delegation (kernel 6.9+). EXPERIMENTAL and disabled by
-  # default: the agent can create a BPF token, but the current aya release
-  # does not yet load programs through it, so eBPF still loads via process
-  # capabilities. Enable only to exercise the token-create path; mount the
-  # delegated bpffs first with `ebpfsentinel-token-setup.sh`.
+  # BPF token delegation (kernel 6.9+ REQUIRED). eBPF is loaded
+  # exclusively through a BPF token — the agent never loads programs with
+  # CAP_BPF. BPF tokens are a user-namespace feature, so the agent is
+  # started by `ebpfsentinel-token-launch`, which sets up the delegated
+  # bpffs in a child user namespace and execs the agent there (rootless).
+  # `bpffs_path` MUST match the launcher's --bpffs argument. Override only
+  # if you run the launcher with a non-default mount path.
   # bpf_token:
-  #   enabled: false
   #   bpffs_path: /sys/fs/bpf/ebpfsentinel
-  #   fallback_allow_capabilities: true
 
   # TLS for HTTP and gRPC listeners. Disabled by default (plaintext).
   # tls:

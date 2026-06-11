@@ -54,6 +54,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "Installing ebpfsentinel-agent to ${INSTALL_BIN}..."
 install -Dm755 "${SCRIPT_DIR}/ebpfsentinel-agent" "${INSTALL_BIN}/ebpfsentinel-agent"
 
+# ── Build + install the BPF token launcher ────────────────────────
+#
+# eBPF loads only through a BPF token, which is a user-namespace feature
+# (BPF_TOKEN_CREATE is EOPNOTSUPP in the host userns). The launcher is a
+# minimal privileged bootstrap: it sets up a delegated bpffs in a child
+# user namespace and execs the agent there, so the agent runs with no
+# capabilities over the host. The systemd unit's ExecStart calls it.
+#
+# Ship a prebuilt binary if present, else compile from source with cc.
+if [[ -x "${SCRIPT_DIR}/ebpfsentinel-token-launch" ]]; then
+  echo "Installing ebpfsentinel-token-launch to ${INSTALL_BIN}..."
+  install -Dm755 "${SCRIPT_DIR}/ebpfsentinel-token-launch" "${INSTALL_BIN}/ebpfsentinel-token-launch"
+elif command -v cc > /dev/null; then
+  echo "Building ebpfsentinel-token-launch from source..."
+  cc -O2 -o "${INSTALL_BIN}/ebpfsentinel-token-launch" "${SCRIPT_DIR}/ebpfsentinel-token-launch.c"
+  chmod 755 "${INSTALL_BIN}/ebpfsentinel-token-launch"
+else
+  echo "Error: no prebuilt ebpfsentinel-token-launch and no C compiler (cc) found." >&2
+  echo "       Install a C toolchain (e.g. apt-get install gcc) and re-run." >&2
+  exit 1
+fi
+
 # ── Install eBPF programs ─────────────────────────────────────────
 
 echo "Installing eBPF programs to ${INSTALL_LIB}..."

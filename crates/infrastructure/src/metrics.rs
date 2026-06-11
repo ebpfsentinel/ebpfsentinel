@@ -31,11 +31,6 @@ pub struct GeoLookupLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct BpfLoadingModeLabels {
-    pub mode: String,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct ComponentLabels {
     pub component: String,
 }
@@ -176,11 +171,10 @@ pub struct AgentMetrics {
     /// mark a conntrack entry `IPS_DYING` to terminate a live flow
     /// following a block-mode rule match.
     pub ids_ct_dying_total: Counter,
-    /// BPF loading mode chosen at startup:
-    /// `2 = token delegation`, `1 = capabilities`, `0 = privileged`.
-    /// The `mode` label carries the textual value for at-a-glance
-    /// dashboards.
-    pub bpf_token_used: Family<BpfLoadingModeLabels, Gauge>,
+    /// Whether eBPF is loaded through a BPF token: `1` when the agent
+    /// loaded its programs via `BPF_TOKEN_CREATE` (the only supported
+    /// path), `0` when running in API-only mode with no eBPF attached.
+    pub bpf_token_used: Gauge,
 }
 
 impl AgentMetrics {
@@ -574,10 +568,10 @@ impl AgentMetrics {
             ids_ct_dying_total.clone(),
         );
 
-        let bpf_token_used = Family::<BpfLoadingModeLabels, Gauge>::default();
+        let bpf_token_used = Gauge::default();
         registry.register(
             "bpf_token_used",
-            "Selected BPF loading mode (2=token, 1=capabilities, 0=privileged)",
+            "eBPF loaded via BPF token (1=token-loaded, 0=API-only/no eBPF)",
             bpf_token_used.clone(),
         );
 
@@ -641,13 +635,10 @@ impl AgentMetrics {
         }
     }
 
-    /// Record the BPF loading mode chosen at startup.
-    pub fn set_bpf_loading_mode(&self, value: i64, mode: &str) {
-        self.bpf_token_used
-            .get_or_create(&BpfLoadingModeLabels {
-                mode: mode.to_string(),
-            })
-            .set(value);
+    /// Record whether eBPF was loaded through a BPF token (`true`) or the
+    /// agent is running in API-only mode with no eBPF (`false`).
+    pub fn set_bpf_token_used(&self, token_loaded: bool) {
+        self.bpf_token_used.set(i64::from(token_loaded));
     }
 
     /// Encode all registered metrics to `OpenMetrics` text format.

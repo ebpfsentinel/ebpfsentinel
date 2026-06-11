@@ -1,16 +1,13 @@
-//! Abstraction over "where a map comes from" so the map managers work the same
-//! whether the agent loaded eBPF via aya (capability mode) or via the raw BPF
-//! token loader (token mode, no `CAP_BPF`).
+//! Abstraction over the maps the raw BPF-token loader produced, so the map
+//! managers and event readers consume a uniform `&mut dyn MapStore`.
 //!
-//! In capability mode the maps live inside an [`aya::Ebpf`]; in token mode they
-//! are created by [`super::kfunc_loader::load_object_token`] and handed over as
-//! [`aya::maps::Map`] values. Both expose the same `take_map` / `map` /
-//! `map_mut` surface the managers use, so they consume a `&mut dyn MapStore`
-//! and never need to know which path produced the map.
+//! eBPF is loaded only via [`super::kfunc_loader::load_object_token`], which
+//! creates the maps and hands them over as [`aya::maps::Map`] values (aya is
+//! used purely as the typed-map wrapper, never to load). [`TokenMaps`] exposes
+//! the `take_map` / `map` / `map_mut` surface the managers use.
 
 use std::collections::HashMap;
 
-use aya::Ebpf;
 use aya::maps::Map;
 
 /// The three map-access operations the map managers and event readers need.
@@ -21,18 +18,6 @@ pub trait MapStore {
     fn map(&self, name: &str) -> Option<&Map>;
     /// Borrow the named map mutably.
     fn map_mut(&mut self, name: &str) -> Option<&mut Map>;
-}
-
-impl MapStore for Ebpf {
-    fn take_map(&mut self, name: &str) -> Option<Map> {
-        Ebpf::take_map(self, name)
-    }
-    fn map(&self, name: &str) -> Option<&Map> {
-        Ebpf::map(self, name)
-    }
-    fn map_mut(&mut self, name: &str) -> Option<&mut Map> {
-        Ebpf::map_mut(self, name)
-    }
 }
 
 /// Token-mode map collection: the maps the raw token loader created, keyed by

@@ -57,13 +57,11 @@ when high-severity alerts fire.
 {{- end }}
 
 Security context:
-{{- if .Values.daemonset.securityContext.privileged }}
-  WARNING: Running in privileged mode. Consider switching to the scoped
-  capability set for better security:
-    daemonset.securityContext.capabilities.add=[BPF,NET_ADMIN,SYS_ADMIN,NET_RAW]
-{{- else }}
-  Using the scoped capability set (BPF, NET_ADMIN, SYS_ADMIN, NET_RAW).
-{{- end }}
+  Rootless: eBPF loads through a BPF token (the bpf-token-setup init container
+  mounts the delegated bpffs at {{ .Values.daemonset.bpfToken.bpffsPath }}).
+  The agent container holds NO CAP_BPF / CAP_SYS_ADMIN — only the feature-scoped
+  caps {{ .Values.daemonset.securityContext.capabilities.add | join ", " }}
+  (NET_RAW=pcap capture, NET_ADMIN=conntrack flow-kill + Multi-WAN).
 
 Secrets management (TLS certs, JWT keys, API keys):
 

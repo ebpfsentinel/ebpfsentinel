@@ -100,6 +100,8 @@ spec:
               readOnly: true
             - name: bpf
               mountPath: /sys/fs/bpf
+              # See the delegated bpffs the init container mounted.
+              mountPropagation: HostToContainer
             - name: debug
               mountPath: /sys/kernel/debug
               readOnly: true

@@ -9,6 +9,11 @@
 #   - Linux kernel 6.9+ with BTF support
 #   - Docker with host networking support
 #
+# eBPF is loaded EXCLUSIVELY through a BPF token (no CAP_BPF). The
+# privileged `bpf-token-setup` init container mounts a delegated bpffs on
+# the host; the agent container then runs rootless and creates the token
+# against it.
+#
 # Hot-reload: edit config/ebpfsentinel.yaml while running — the agent
 # detects changes automatically and reloads rules without restart.
 
@@ -24,25 +29,19 @@ services:
     # on — "127.0.0.1" is localhost-only, "0.0.0.0" exposes on all interfaces.
     network_mode: host
 
-    # eBPF requires elevated privileges.
-    # Default: fine-grained capabilities (least privilege, kernel 5.8+).
-    # If your kernel lacks CAP_BPF support, uncomment privileged: true below.
+    # The image entrypoint is ebpfsentinel-token-launch: as root it sets up the
+    # delegated bpffs in a child user namespace and execs the agent there. It
+    # needs CAP_SYS_ADMIN (bpffs delegation + module BTF fds) and userns
+    # creation — hence apparmor=unconfined. NO CAP_BPF: the token authorizes
+    # every eBPF syscall, and the long-running agent runs unprivileged inside
+    # the user namespace (no host capabilities).
     cap_add:
-      - BPF
-      - NET_ADMIN
       - SYS_ADMIN
-      - NET_RAW
     security_opt:
-      - no-new-privileges:true
-    # Fallback for older kernels without CAP_BPF:
-    # privileged: true
-
-    # Defense-in-depth: read-only root prevents writes to container filesystem
-    # even under privileged mode (no dropped binaries, no modified libraries).
-    read_only: true
-    # /tmp writable for libraries that may need scratch space (TLS, etc.)
-    tmpfs:
-      - /tmp:size=64m
+      - apparmor=unconfined
+    # NOTE: pcap capture, conntrack -D retroactive teardown, and gratuitous-ARP
+    # on VIP takeover need host-netns caps the userns agent lacks; their eBPF
+    # equivalents (IPS_DYING flow-kill, xdp-vip-announcer) keep working.
 
     volumes:
       # Agent configuration — writable for hot-reload via file watcher

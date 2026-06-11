@@ -72,8 +72,8 @@ teardown_file() {
 
 # ── Tests ──────────────────────────────────────────────────────────
 
-@test "agent selects BPF token loading mode (no capabilities)" {
-    bpf_token_log_has '"mode":"token"'
+@test "agent loads eBPF through a BPF token (no capabilities)" {
+    bpf_token_log_has 'eBPF loading via BPF token'
 }
 
 @test "module BTF fds are registered from the privileged helper" {
@@ -83,7 +83,7 @@ teardown_file() {
 @test "no program load failed and nothing degraded" {
     # The whole point: the token path loads everything cleanly. A non-zero grep
     # exit means none of these failure markers appear in the agent log.
-    run grep -iE 'load failed|degraded mode|falls back' "$BPF_TOKEN_LOG"
+    run grep -iE 'load failed|degraded mode|api-only mode|token unavailable' "$BPF_TOKEN_LOG"
     [ "$status" -ne 0 ]
 }
 

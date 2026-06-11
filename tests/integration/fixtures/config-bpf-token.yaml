@@ -1,10 +1,10 @@
 # config-bpf-token.yaml — BPF-token-only loading (integration suite 61).
 #
-# `bpf_token.enabled: true` + `fallback_allow_capabilities: false` forces the
-# agent down the token-only path: it MUST create a BPF token against the
-# delegated bpffs and load/attach every program through it, with no CAP_BPF /
-# CAP_SYS_ADMIN / CAP_PERFMON. The harness (fixtures/bpf-token/delegate-and-run)
-# provides the delegated bpffs at `bpffs_path` and the module BTF fds.
+# eBPF is loaded ONLY through a BPF token (the agent has no capability-based
+# loading path): it MUST create a BPF token against the delegated bpffs and
+# load/attach every program through it, with no CAP_BPF / CAP_SYS_ADMIN /
+# CAP_PERFMON. The harness (fixtures/bpf-token/delegate-and-run) provides the
+# delegated bpffs at `bpffs_path` and the module BTF fds.
 #
 # Every program group is enabled so the suite exercises the full token loader:
 #   firewall  → xdp-firewall (conntrack kfunc) + xdp-firewall-reject tail-call
@@ -26,9 +26,7 @@ agent:
   metrics_port: 18090
   ebpf_program_dir: __EBPF_DIR__
   bpf_token:
-    enabled: true
     bpffs_path: /run/etok
-    fallback_allow_capabilities: false
 
 firewall:
   enabled: true
