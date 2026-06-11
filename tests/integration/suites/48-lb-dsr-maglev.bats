@@ -48,7 +48,7 @@ setup_file() {
     start_ebpf_agent "$PREPARED_CONFIG"
     wait_for_ebpf_loaded 30 || {
         stop_ebpf_agent 2>/dev/null || true
-        skip "eBPF programs not loaded (degraded mode)"
+        { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     }
 
     route_via_agent backend >/dev/null 2>&1 || true
@@ -65,7 +65,7 @@ teardown_file() {
 
 # EBPF_SCAPY_PY (the scapy venv interpreter) is resolved in ebpf_helpers.
 require_scapy() {
-    "$EBPF_SCAPY_PY" -c 'import scapy.all' 2>/dev/null || skip "scapy not available"
+    "$EBPF_SCAPY_PY" -c 'import scapy.all' 2>/dev/null || { echo "scapy not available" >&2; return 1; }
 }
 
 agent_iface_mac() {

@@ -41,7 +41,7 @@ setup_file() {
         tail -5 "$AGENT_LOG_FILE" >&2
         stop_ebpf_agent 2>/dev/null || true
         destroy_test_netns 2>/dev/null || true
-        skip "eBPF programs not loaded (degraded mode)"
+        { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     }
 }
 

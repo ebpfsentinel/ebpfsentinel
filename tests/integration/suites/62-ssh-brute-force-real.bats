@@ -57,7 +57,7 @@ setup_file() {
     wait_for_ebpf_loaded 30 || {
         stop_ebpf_agent 2>/dev/null || true
         destroy_test_netns 2>/dev/null || true
-        skip "eBPF programs not loaded (degraded mode)"
+        { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     }
 }
 
@@ -95,9 +95,6 @@ _drive_ssh_burst() {
     local body
     body="$(api_get /api/v1/ids/rules)" || true
     _load_http_status
-    if [ "${HTTP_STATUS}" = "404" ]; then
-        skip "IDS rules REST endpoint not exposed"
-    fi
     [ "${HTTP_STATUS}" = "200" ]
 
     local rule
@@ -127,9 +124,6 @@ _drive_ssh_burst() {
     local body
     body="$(api_get /api/v1/ips/rules)" || true
     _load_http_status
-    if [ "${HTTP_STATUS}" = "404" ]; then
-        skip "IPS rules REST endpoint not exposed"
-    fi
     [ "${HTTP_STATUS}" = "200" ]
 
     local rule

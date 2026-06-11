@@ -59,7 +59,7 @@ setup_file() {
     wait_for_ebpf_loaded 30 || {
         stop_ebpf_agent 2>/dev/null || true
         destroy_test_netns 2>/dev/null || true
-        skip "eBPF programs not loaded (degraded mode)"
+        { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     }
 }
 
@@ -199,7 +199,8 @@ _attacker_iface() {
 
 @test "whitelisted source NOT rejected (no RST when src is in whitelist)" {
     if ! "$EBPF_SCAPY_PY" -c "import scapy.all" >/dev/null 2>&1; then
-        skip "scapy not available — cannot forge whitelisted-source SYN"
+        echo "scapy not available — cannot forge whitelisted-source SYN" >&2
+        return 1
     fi
 
     local iface

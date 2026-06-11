@@ -136,7 +136,7 @@ teardown_file() {
 }
 
 @test "gRPC over TLS with CA cert returns SERVING" {
-    command -v grpcurl &>/dev/null || skip "grpcurl not installed"
+    command -v grpcurl &>/dev/null || { echo "grpcurl not installed" >&2; return 1; }
 
     local output
     output="$(grpcurl -cacert "${CERT_DIR}/ca.pem" \
@@ -146,7 +146,7 @@ teardown_file() {
 }
 
 @test "gRPC without CA cert fails connection" {
-    command -v grpcurl &>/dev/null || skip "grpcurl not installed"
+    command -v grpcurl &>/dev/null || { echo "grpcurl not installed" >&2; return 1; }
 
     local exit_code=0
     grpcurl "${AGENT_HOST}:${AGENT_GRPC_PORT}" \

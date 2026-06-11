@@ -40,7 +40,7 @@ setup_file() {
         tail -5 "$AGENT_LOG_FILE" >&2
         stop_ebpf_agent 2>/dev/null || true
         destroy_test_netns 2>/dev/null || true
-        skip "eBPF programs not loaded (degraded mode)"
+        { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     }
 }
 
@@ -202,7 +202,7 @@ _send_tls_data() {
 
 @test "TLS echo server starts for DLP tests" {
     require_root
-    command -v openssl &>/dev/null || skip "openssl not installed"
+    command -v openssl &>/dev/null || { echo "openssl not installed" >&2; return 1; }
 
     _start_tls_echo_server
     sleep 1
@@ -214,7 +214,7 @@ _send_tls_data() {
 
 @test "Visa card via TLS triggers DLP scan" {
     require_root
-    command -v openssl &>/dev/null || skip "openssl not installed"
+    command -v openssl &>/dev/null || { echo "openssl not installed" >&2; return 1; }
     [ -f "$DATA_DIR/tls_server.pid" ] || skip "TLS server not running"
 
     _send_tls_data "payment card: 4111111111111111 process immediately"

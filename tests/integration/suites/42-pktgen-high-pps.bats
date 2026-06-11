@@ -130,7 +130,7 @@ _start_with() {
     export PREPARED_CONFIG
     start_ebpf_agent "$PREPARED_CONFIG"
     wait_for_ebpf_loaded 30 || {
-        skip "eBPF programs not loaded for fixture ${fixture}"
+        { echo "eBPF programs not loaded for fixture ${fixture}" >&2; return 1; }
     }
 }
 

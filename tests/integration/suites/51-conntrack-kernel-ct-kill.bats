@@ -39,7 +39,7 @@ setup_file() {
     start_ebpf_agent "$PREPARED_CONFIG"
     wait_for_ebpf_loaded 30 || {
         stop_ebpf_agent 2>/dev/null || true
-        skip "eBPF programs not loaded (degraded mode)"
+        { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     }
 
     route_via_agent backend >/dev/null 2>&1 || true

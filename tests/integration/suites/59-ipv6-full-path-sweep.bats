@@ -77,7 +77,7 @@ setup_file() {
     wait_for_ebpf_loaded 30 || {
         stop_ebpf_agent 2>/dev/null || true
         destroy_test_netns 2>/dev/null || true
-        skip "eBPF programs not loaded (degraded mode)"
+        { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     }
 }
 
@@ -137,9 +137,6 @@ teardown_file() {
     local body
     body="$(api_get /api/v1/ids/rules)" || true
     _load_http_status
-    if [ "${HTTP_STATUS}" = "404" ]; then
-        skip "IDS rules REST endpoint not exposed"
-    fi
     [ "${HTTP_STATUS}" = "200" ]
 
     local hit
@@ -162,10 +159,7 @@ teardown_file() {
         "{\"ip\":\"${target}\",\"reason\":\"ipv6-sweep-test\"}" 2>/dev/null)" || true
     _load_http_status
     case "${HTTP_STATUS}" in
-        200|201|204) : ;;
-        404|405)
-            skip "IPS blacklist write API not exposed in this build"
-            ;;
+        200 | 201 | 204) : ;;
         *)
             echo "unexpected status ${HTTP_STATUS} for POST /api/v1/ips/blacklist" >&2
             echo "${body}" >&2
@@ -190,9 +184,6 @@ teardown_file() {
     local body
     body="$(api_get /api/v1/ratelimit/rules)" || true
     _load_http_status
-    if [ "${HTTP_STATUS}" = "404" ]; then
-        skip "ratelimit rules REST endpoint not exposed"
-    fi
     [ "${HTTP_STATUS}" = "200" ]
 
     echo "${body}" | grep -qi 'rl-ipv6-source' || {

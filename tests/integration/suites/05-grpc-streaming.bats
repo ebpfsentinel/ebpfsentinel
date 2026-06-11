@@ -7,7 +7,7 @@ load '../lib/helpers'
 setup_file() {
     # Skip entire suite if grpcurl is not available
     if ! command -v grpcurl &>/dev/null; then
-        skip "grpcurl not installed"
+        { echo "grpcurl not installed" >&2; return 1; }
     fi
 
     export PROJECT_ROOT
@@ -32,7 +32,7 @@ teardown_file() {
 # ── Tests ──────────────────────────────────────────────────────────
 
 @test "gRPC health check returns SERVING" {
-    command -v grpcurl &>/dev/null || skip "grpcurl not installed"
+    command -v grpcurl &>/dev/null || { echo "grpcurl not installed" >&2; return 1; }
 
     local output
     output="$(grpcurl -plaintext -import-path "${FIXTURE_DIR}" -proto health.proto \
@@ -41,7 +41,7 @@ teardown_file() {
 }
 
 @test "gRPC reflection lists AlertStreamService" {
-    command -v grpcurl &>/dev/null || skip "grpcurl not installed"
+    command -v grpcurl &>/dev/null || { echo "grpcurl not installed" >&2; return 1; }
 
     local output
     output="$(grpcurl -plaintext "$GRPC_ADDR" list 2>&1)" || true
@@ -49,7 +49,7 @@ teardown_file() {
 }
 
 @test "StreamAlerts connects without error" {
-    command -v grpcurl &>/dev/null || skip "grpcurl not installed"
+    command -v grpcurl &>/dev/null || { echo "grpcurl not installed" >&2; return 1; }
 
     # Connect to the stream with a short timeout — we just verify the connection works
     local output
@@ -61,7 +61,7 @@ teardown_file() {
 }
 
 @test "StreamAlerts with severity filter connects" {
-    command -v grpcurl &>/dev/null || skip "grpcurl not installed"
+    command -v grpcurl &>/dev/null || { echo "grpcurl not installed" >&2; return 1; }
 
     local output
     output="$(timeout 3 grpcurl -plaintext \

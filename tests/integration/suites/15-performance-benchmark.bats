@@ -121,7 +121,7 @@ _report_set_str() {
     export PREPARED_CONFIG
 
     start_ebpf_agent "$PREPARED_CONFIG"
-    wait_for_ebpf_loaded 30 || skip "eBPF programs not loaded (degraded mode)"
+    wait_for_ebpf_loaded 30 || { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
 
     # Record agent PID for later checks
     _report_set "agent_pid" "$AGENT_PID"

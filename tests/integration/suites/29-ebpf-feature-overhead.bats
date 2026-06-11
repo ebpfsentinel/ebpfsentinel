@@ -236,7 +236,7 @@ _measure_tcp_throughput() {
     prepared="$(prepare_ebpf_config "$config_file")"
 
     start_ebpf_agent "$prepared"
-    wait_for_ebpf_loaded 30 || skip "eBPF programs not loaded"
+    wait_for_ebpf_loaded 30 || { echo "eBPF programs not loaded" >&2; return 1; }
 
     local bps
     bps="$(_measure_tcp_throughput)" || skip "iperf3 failed"
@@ -277,7 +277,7 @@ _measure_tcp_throughput() {
     prepared="$(prepare_ebpf_config "$config_file")"
 
     start_ebpf_agent "$prepared"
-    wait_for_ebpf_loaded 30 || skip "eBPF programs not loaded"
+    wait_for_ebpf_loaded 30 || { echo "eBPF programs not loaded" >&2; return 1; }
 
     local bps
     bps="$(_measure_tcp_throughput)" || skip "iperf3 failed"
@@ -319,7 +319,7 @@ _measure_tcp_throughput() {
     prepared="$(prepare_ebpf_config "$config_file")"
 
     start_ebpf_agent "$prepared"
-    wait_for_ebpf_loaded 30 || skip "eBPF programs not loaded"
+    wait_for_ebpf_loaded 30 || { echo "eBPF programs not loaded" >&2; return 1; }
 
     local bps
     bps="$(_measure_tcp_throughput)" || skip "iperf3 failed"
@@ -361,7 +361,7 @@ _measure_tcp_throughput() {
     prepared="$(prepare_ebpf_config "$config_file")"
 
     start_ebpf_agent "$prepared"
-    wait_for_ebpf_loaded 30 || skip "eBPF programs not loaded"
+    wait_for_ebpf_loaded 30 || { echo "eBPF programs not loaded" >&2; return 1; }
 
     local bps
     bps="$(_measure_tcp_throughput)" || skip "iperf3 failed"
@@ -403,7 +403,7 @@ _measure_tcp_throughput() {
     prepared="$(prepare_ebpf_config "$config_file")"
 
     start_ebpf_agent "$prepared"
-    wait_for_ebpf_loaded 30 || skip "eBPF programs not loaded"
+    wait_for_ebpf_loaded 30 || { echo "eBPF programs not loaded" >&2; return 1; }
 
     local bps
     bps="$(_measure_tcp_throughput)" || skip "iperf3 failed"

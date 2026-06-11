@@ -17,7 +17,7 @@ VIP_ADDR="10.200.0.50"
 NON_VIP_ADDR="10.200.0.99"
 
 require_scapy() {
-    "$EBPF_SCAPY_PY" -c 'import scapy.all' 2>/dev/null || skip "scapy not available"
+    "$EBPF_SCAPY_PY" -c 'import scapy.all' 2>/dev/null || { echo "scapy not available" >&2; return 1; }
 }
 
 # Send a broadcast ARP request for $1 from inside the test netns and echo
@@ -63,7 +63,7 @@ setup_file() {
     wait_for_ebpf_loaded 30 || {
         stop_ebpf_agent 2>/dev/null || true
         destroy_test_netns 2>/dev/null || true
-        skip "eBPF programs not loaded (degraded mode)"
+        { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     }
 }
 
@@ -162,7 +162,7 @@ teardown_file() {
     export STANDBY_CONFIG
 
     start_ebpf_agent "$STANDBY_CONFIG"
-    wait_for_ebpf_loaded 30 || skip "eBPF programs not loaded (degraded mode)"
+    wait_for_ebpf_loaded 30 || { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     sleep 2
 
     local responder

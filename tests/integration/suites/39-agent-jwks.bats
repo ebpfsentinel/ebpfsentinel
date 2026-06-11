@@ -9,10 +9,10 @@ load '../lib/helpers'
 
 setup_file() {
     if ! command -v python3 &>/dev/null; then
-        skip "python3 not installed"
+        { echo "python3 not installed" >&2; return 1; }
     fi
     if ! python3 -c "import jwt" &>/dev/null; then
-        skip "PyJWT not installed (pip install pyjwt cryptography)"
+        { echo "PyJWT not installed (pip install pyjwt cryptography)" >&2; return 1; }
     fi
 
     export PROJECT_ROOT
