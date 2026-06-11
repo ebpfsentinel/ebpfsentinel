@@ -67,6 +67,8 @@ use super::zone_handler;
         ips_handler::list_ips_rules,
         ips_handler::patch_ips_rule_mode,
         ips_handler::list_ips_blacklist,
+        ips_handler::add_ips_blacklist,
+        ips_handler::delete_ips_blacklist,
         ips_handler::list_ips_domain_blocks,
         // IDS
         ids_handler::ids_status,
@@ -85,6 +87,7 @@ use super::zone_handler;
         // Threat Intelligence
         threatintel_handler::threatintel_status,
         threatintel_handler::list_iocs,
+        threatintel_handler::list_url_iocs,
         threatintel_handler::list_feeds,
         threatintel_handler::refresh_feeds,
         // Ops
@@ -193,6 +196,8 @@ use super::zone_handler;
         ips_handler::IpsRuleResponse,
         ips_handler::BlacklistEntryResponse,
         ips_handler::PatchRuleModeRequest,
+        ips_handler::AddBlacklistRequest,
+        ips_handler::BlacklistMutationResponse,
         ips_handler::DomainBlockResponse,
         // IDS
         ids_handler::IdsStatusResponse,
@@ -212,6 +217,7 @@ use super::zone_handler;
         // Threat Intelligence
         threatintel_handler::ThreatIntelStatusResponse,
         threatintel_handler::IocResponse,
+        threatintel_handler::UrlIocResponse,
         threatintel_handler::FeedResponse,
         threatintel_handler::RefreshFeedRequest,
         threatintel_handler::RefreshResponse,

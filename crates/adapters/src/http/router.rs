@@ -52,7 +52,8 @@ use super::geoip_handler::{geoip_lookup, geoip_status};
 use super::health_handler::{healthz, readyz};
 use super::ids_handler::{ids_status, list_ids_rules};
 use super::ips_handler::{
-    list_ips_blacklist, list_ips_domain_blocks, list_ips_rules, patch_ips_rule_mode,
+    add_ips_blacklist, delete_ips_blacklist, list_ips_blacklist, list_ips_domain_blocks,
+    list_ips_rules, patch_ips_rule_mode,
 };
 use super::l7_handler::{create_l7_rule, delete_l7_rule, list_l7_rules};
 use super::lb_handler::{
@@ -82,7 +83,9 @@ use super::routing_handler::{
     create_gateway, delete_gateway, list_gateways, list_routes, routing_status,
 };
 use super::state::AppState;
-use super::threatintel_handler::{list_feeds, list_iocs, refresh_feeds, threatintel_status};
+use super::threatintel_handler::{
+    list_feeds, list_iocs, list_url_iocs, refresh_feeds, threatintel_status,
+};
 use super::zone_handler::{
     create_zone, create_zone_policy, delete_zone, delete_zone_policy, list_zone_policies,
     list_zones, zone_status,
@@ -159,6 +162,7 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
             .route("/api/v1/ratelimit/rules", get(list_ratelimit_rules))
             .route("/api/v1/threatintel/status", get(threatintel_status))
             .route("/api/v1/threatintel/iocs", get(list_iocs))
+            .route("/api/v1/threatintel/urls", get(list_url_iocs))
             .route("/api/v1/threatintel/feeds", get(list_feeds))
             .route("/api/v1/threatintel/feeds/refresh", post(refresh_feeds))
             .route("/api/v1/alerts", get(list_alerts))
@@ -223,6 +227,8 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
             .route("/api/v1/firewall/l7-rules", post(create_l7_rule))
             .route("/api/v1/firewall/l7-rules/{id}", delete(delete_l7_rule))
             .route("/api/v1/ips/rules/{id}", patch(patch_ips_rule_mode))
+            .route("/api/v1/ips/blacklist", post(add_ips_blacklist))
+            .route("/api/v1/ips/blacklist/{ip}", delete(delete_ips_blacklist))
             .route("/api/v1/ratelimit/rules", post(create_ratelimit_rule))
             .route(
                 "/api/v1/ratelimit/rules/{id}",

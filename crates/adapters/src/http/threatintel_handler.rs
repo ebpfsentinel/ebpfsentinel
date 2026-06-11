@@ -28,6 +28,14 @@ pub struct IocResponse {
 }
 
 #[derive(Serialize, ToSchema)]
+pub struct UrlIocResponse {
+    pub url: String,
+    pub feed_id: String,
+    pub confidence: u8,
+    pub threat_type: String,
+}
+
+#[derive(Serialize, ToSchema)]
 pub struct FeedResponse {
     pub id: String,
     pub name: String,
@@ -112,6 +120,36 @@ pub async fn list_iocs(State(state): State<Arc<AppState>>) -> Json<Vec<IocRespon
         })
         .collect();
     Json(iocs)
+}
+
+/// `GET /api/v1/threatintel/urls` — list malicious URL indicators ingested
+/// from CTI feeds. The threat-intel engine is IP-only, so URL indicators are
+/// surfaced from the service's retained snapshot.
+#[utoipa::path(
+    get, path = "/api/v1/threatintel/urls",
+    tag = "Threat Intelligence",
+    responses((status = 200, description = "List of malicious URL indicators", body = Vec<UrlIocResponse>),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn list_url_iocs(State(state): State<Arc<AppState>>) -> Json<Vec<UrlIocResponse>> {
+    let svc = state.threatintel_service.load();
+    let urls: Vec<UrlIocResponse> = svc
+        .urls()
+        .iter()
+        .map(|u| UrlIocResponse {
+            url: u.url.clone(),
+            feed_id: u.feed_id.clone(),
+            confidence: u.confidence,
+            threat_type: u.threat_type.to_string(),
+        })
+        .collect();
+    Json(urls)
 }
 
 /// `GET /api/v1/threatintel/feeds` — list configured feeds.

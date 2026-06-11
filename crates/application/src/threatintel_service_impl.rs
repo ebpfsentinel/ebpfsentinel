@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use domain::common::entity::DomainMode;
 use domain::common::error::DomainError;
 use domain::threatintel::engine::ThreatIntelEngine;
-use domain::threatintel::entity::{FeedConfig, Ioc};
+use domain::threatintel::entity::{CtiUrl, FeedConfig, Ioc};
 use ports::secondary::geoip_port::GeoIpPort;
 use ports::secondary::metrics_port::MetricsPort;
 use ports::secondary::threatintel_map_port::ThreatIntelMapPort;
@@ -31,6 +31,10 @@ pub struct ThreatIntelAppService {
     /// `None` if no fetch has run yet. Shared across all feeds because the
     /// fetcher refreshes every enabled feed in a single cycle.
     last_fetched: Option<u64>,
+    /// Malicious URL indicators ingested from CTI feeds. The threat-intel
+    /// engine itself is IP-only, so URL indicators are retained here and
+    /// surfaced read-only via the API.
+    urls: Vec<CtiUrl>,
 }
 
 impl ThreatIntelAppService {
@@ -48,7 +52,22 @@ impl ThreatIntelAppService {
             mode: DomainMode::default(),
             enabled: true,
             last_fetched: None,
+            urls: Vec::new(),
         }
+    }
+
+    /// Replace the retained URL indicators with the latest feed snapshot.
+    pub fn reload_urls(&mut self, urls: Vec<CtiUrl>) {
+        let count = urls.len();
+        self.urls = urls;
+        if count > 0 {
+            tracing::info!(count, "threat intel URL indicators reloaded");
+        }
+    }
+
+    /// Read-only view of the retained malicious URL indicators.
+    pub fn urls(&self) -> &[CtiUrl] {
+        &self.urls
     }
 
     /// Set the eBPF map port and perform an initial sync.
@@ -319,6 +338,24 @@ mod tests {
         let (svc, _) = make_service();
         assert_eq!(svc.list_feeds().len(), 1);
         assert_eq!(svc.list_feeds()[0].id, "test");
+    }
+
+    #[test]
+    fn reload_urls_retains_and_surfaces() {
+        let (mut svc, _) = make_service();
+        assert!(svc.urls().is_empty());
+        svc.reload_urls(vec![CtiUrl {
+            url: "http://malware.test/payload.exe".to_string(),
+            feed_id: "test-feed".to_string(),
+            confidence: 90,
+            threat_type: ThreatType::C2,
+            source: None,
+        }]);
+        assert_eq!(svc.urls().len(), 1);
+        assert_eq!(svc.urls()[0].url, "http://malware.test/payload.exe");
+        // A subsequent reload replaces the snapshot.
+        svc.reload_urls(Vec::new());
+        assert!(svc.urls().is_empty());
     }
 
     #[test]

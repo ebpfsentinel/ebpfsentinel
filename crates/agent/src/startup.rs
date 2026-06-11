@@ -98,6 +98,9 @@ async fn run_ti_feed_cycle(
     {
         warn!(phase, "feed IOC reload failed: {e}");
     }
+    // Retain URL indicators so they surface read-only via the API (the
+    // IP-only threat-intel engine has no place for them).
+    svc.reload_urls(result.urls);
     // Stamp the fetch time on every cycle, even when no IOCs changed, so the
     // feed status reflects the most recent fetch attempt.
     svc.mark_fetched();

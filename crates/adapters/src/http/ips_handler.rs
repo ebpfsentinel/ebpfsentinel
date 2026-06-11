@@ -1,4 +1,7 @@
+use std::net::IpAddr;
+use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Extension;
 use axum::Json;
@@ -53,6 +56,26 @@ pub struct DomainBlockResponse {
 pub struct PatchRuleModeRequest {
     /// `alert` or `block`.
     pub mode: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct AddBlacklistRequest {
+    /// IP address to blacklist (IPv4 or IPv6).
+    pub ip: String,
+    /// Optional human-readable reason. Defaults to `manual-api`.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Optional TTL in seconds. Defaults to — and is capped at — the policy's
+    /// maximum blacklist duration.
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct BlacklistMutationResponse {
+    pub ip: String,
+    pub reason: String,
+    pub ttl_remaining_secs: u64,
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
@@ -223,6 +246,127 @@ pub async fn list_ips_blacklist(
         })
         .collect();
     Json(entries)
+}
+
+/// `POST /api/v1/ips/blacklist` — manually add an IP to the IPS blacklist.
+///
+/// Drives the same `add_to_blacklist` path the DNS-blocklist and reputation
+/// auto-block features already use, so the entry is visible via `GET` and
+/// subject to the policy's TTL cap + expiry sweeper.
+#[utoipa::path(
+    post, path = "/api/v1/ips/blacklist",
+    tag = "IPS",
+    request_body = AddBlacklistRequest,
+    responses(
+        (status = 201, description = "IP added to blacklist", body = BlacklistMutationResponse),
+        (status = 400, description = "Invalid IP address or blacklist full", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn add_ips_blacklist(
+    State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
+    Json(req): Json<AddBlacklistRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
+    let ip = IpAddr::from_str(req.ip.trim()).map_err(|_| ApiError::BadRequest {
+        code: "VALIDATION_ERROR",
+        message: format!("invalid IP address: {}", req.ip),
+    })?;
+    let reason = req
+        .reason
+        .filter(|r| !r.trim().is_empty())
+        .unwrap_or_else(|| "manual-api".to_string());
+
+    let svc = state.ips_service.load();
+    let max_ttl = svc.policy().max_blacklist_duration;
+    let ttl = req
+        .ttl_secs
+        .map_or(max_ttl, |s| Duration::from_secs(s).min(max_ttl));
+
+    svc.add_to_blacklist(ip, reason.clone(), ttl)
+        .map_err(|e| ApiError::BadRequest {
+            code: "IPS_BLACKLIST_ERROR",
+            message: e.to_string(),
+        })?;
+
+    tracing::info!(component = "ips", %ip, %reason, "IPS blacklist entry added via API");
+    state.audit_service.record_rule_change(
+        domain::audit::entity::AuditComponent::Ips,
+        domain::audit::entity::AuditAction::RuleAdded,
+        domain::audit::rule_change::ChangeActor::Api,
+        &ip.to_string(),
+        None,
+        serde_json::to_string(&serde_json::json!({ "ip": ip.to_string(), "reason": reason })).ok(),
+    );
+
+    Ok((
+        StatusCode::CREATED,
+        Json(BlacklistMutationResponse {
+            ip: ip.to_string(),
+            reason,
+            ttl_remaining_secs: ttl.as_secs(),
+        }),
+    ))
+}
+
+/// `DELETE /api/v1/ips/blacklist/{ip}` — remove an IP from the IPS blacklist.
+#[utoipa::path(
+    delete, path = "/api/v1/ips/blacklist/{ip}",
+    tag = "IPS",
+    params(("ip" = String, Path, description = "IP address to remove")),
+    responses(
+        (status = 204, description = "IP removed from blacklist"),
+        (status = 400, description = "Invalid IP address", body = ErrorBody),
+        (status = 404, description = "IP not in blacklist", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn delete_ips_blacklist(
+    State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
+    Path(ip_str): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
+    let ip = IpAddr::from_str(ip_str.trim()).map_err(|_| ApiError::BadRequest {
+        code: "VALIDATION_ERROR",
+        message: format!("invalid IP address: {ip_str}"),
+    })?;
+
+    state
+        .ips_service
+        .load()
+        .remove_from_blacklist(ip)
+        .map_err(|e| ApiError::NotFound {
+            code: "IPS_BLACKLIST_ENTRY_NOT_FOUND",
+            message: e.to_string(),
+        })?;
+
+    tracing::info!(component = "ips", %ip, "IPS blacklist entry removed via API");
+    state.audit_service.record_rule_change(
+        domain::audit::entity::AuditComponent::Ips,
+        domain::audit::entity::AuditAction::RuleRemoved,
+        domain::audit::rule_change::ChangeActor::Api,
+        &ip.to_string(),
+        None,
+        None,
+    );
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `GET /api/v1/ips/domain-blocks` — list IPS blacklist entries originating from domain mechanisms.
