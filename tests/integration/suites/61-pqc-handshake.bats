@@ -63,10 +63,25 @@ setup_file() {
         bash "${SCRIPT_DIR}/generate-certs.sh" --out-dir "${CERT_DIR}"
     fi
 
-    # Detect PQ-hybrid client support in the local openssl build. If
+    # Resolve the openssl client binary. X25519MLKEM768 needs OpenSSL >= 3.5,
+    # which Ubuntu 24.04 does not ship; the provisioner builds it under
+    # /opt/openssl-3.5 (see setup-agent.sh). Prefer that build when it advertises
+    # the hybrid group, else fall back to the system openssl (PQ tests skip).
+    # OpenSSL 3.5 advertises the hybrid under `list -kem-algorithms`; the older
+    # `list -groups` is empty there, so probe both listings.
+    _openssl_has_mlkem() {
+        { "$1" list -groups 2>/dev/null; "$1" list -kem-algorithms 2>/dev/null; } \
+            | grep -q 'X25519MLKEM768'
+    }
+    export EBPF_OPENSSL="openssl"
+    if [ -x /opt/openssl-3.5/bin/openssl ] && _openssl_has_mlkem /opt/openssl-3.5/bin/openssl; then
+        EBPF_OPENSSL="/opt/openssl-3.5/bin/openssl"
+    fi
+
+    # Detect PQ-hybrid client support in the resolved openssl build. If
     # X25519MLKEM768 is unknown, every PQ-handshake test in this file
     # is skipped, but the configuration-surface assertions still run.
-    if openssl list -groups 2>/dev/null | grep -q 'X25519MLKEM768'; then
+    if _openssl_has_mlkem "${EBPF_OPENSSL}"; then
         export EBPF_OPENSSL_HAS_MLKEM=1
     else
         export EBPF_OPENSSL_HAS_MLKEM=0
@@ -145,7 +160,7 @@ _s_client_named_group() {
     shift
     local out
     out="$(echo Q \
-        | timeout 5 openssl s_client \
+        | timeout 5 "${EBPF_OPENSSL:-openssl}" s_client \
             -connect "${AGENT_HOST}:${AGENT_TLS_PORT}" \
             -CAfile "${CERT_DIR}/ca.pem" \
             -groups "${groups}" \
@@ -153,10 +168,11 @@ _s_client_named_group() {
             -brief \
             -servername "${AGENT_HOST}" \
             "$@" 2>&1)" || return 1
-    # `-brief` prints "Server Temp Key: <group>, <bits> bits"; the
+    # `-brief` prints "Server Temp Key: <group>, <bits> bits" on OpenSSL < 3.5
+    # and "Peer Temp Key: <group>, <bits> bits" on OpenSSL >= 3.5; the
     # negotiated named group is the substring before the comma.
     local key_line
-    key_line="$(echo "${out}" | grep -E '^Server Temp Key' | head -1)"
+    key_line="$(echo "${out}" | grep -E '^(Server|Peer) Temp Key' | head -1)"
     if [ -z "${key_line}" ]; then
         # Older openssl (< 3.5) uses a different trace format; fall
         # back to parsing -msg style if `-brief` was a no-op.
@@ -245,7 +261,7 @@ _restart_agent_with() {
     # require mode the server must abort the handshake.
     local rc=0
     echo Q \
-        | timeout 5 openssl s_client \
+        | timeout 5 "${EBPF_OPENSSL:-openssl}" s_client \
             -connect "${AGENT_HOST}:${AGENT_TLS_PORT}" \
             -CAfile "${CERT_DIR}/ca.pem" \
             -groups X25519:secp256r1 \
@@ -276,8 +292,57 @@ _restart_agent_with() {
 
 # ── Documented deferrals ──────────────────────────────────────────
 
-@test "per-connection negotiated-group surface is tracked as a coverage gap" {
-    skip "no /api/v1/tls/status endpoint surfaces the negotiated named group; AC #1 second bullet deferred until the endpoint lands"
+@test "tls/status surfaces the per-connection negotiated key-exchange group" {
+    # Run in prefer mode so a classical OpenSSL curl client can complete the
+    # handshake (the preceding require-mode test would reject it).
+    _restart_agent_with "${PREPARED_CONFIG_PREFER}" || {
+        echo "agent failed to restart in pq_mode=prefer" >&2
+        return 1
+    }
+
+    local body
+    body="$(curl -s --max-time "${HTTP_TIMEOUT}" \
+        --cacert "${CERT_DIR}/ca.pem" \
+        "${TLS_URL}/api/v1/tls/status")" || {
+        echo "GET /api/v1/tls/status failed" >&2
+        return 1
+    }
+
+    echo "${body}" | jq -e '.tls == true' >/dev/null 2>&1 || {
+        echo "expected tls=true from /api/v1/tls/status; got: ${body}" >&2
+        return 1
+    }
+
+    local group
+    group="$(echo "${body}" | jq -r '.negotiated_group // empty')"
+    [ -n "${group}" ] || {
+        echo "tls/status did not surface a negotiated_group; got: ${body}" >&2
+        return 1
+    }
+    case "${group}" in
+        X25519MLKEM768 | X25519 | secp256r1 | secp384r1 | secp521r1) : ;;
+        *)
+            echo "unexpected negotiated_group '${group}'" >&2
+            return 1
+            ;;
+    esac
+
+    # The post_quantum flag must agree with the named group. A classical curl
+    # client lands on X25519 (post_quantum=false); a PQ-aware client would show
+    # X25519MLKEM768 (post_quantum=true).
+    local pq
+    pq="$(echo "${body}" | jq -r '.post_quantum')"
+    if [ "${group}" = "X25519MLKEM768" ]; then
+        [ "${pq}" = "true" ] || {
+            echo "post_quantum must be true for X25519MLKEM768; got ${pq}" >&2
+            return 1
+        }
+    else
+        [ "${pq}" = "false" ] || {
+            echo "post_quantum must be false for ${group}; got ${pq}" >&2
+            return 1
+        }
+    fi
 }
 
 @test "HA mTLS PQ path is tracked as a multi-VM coverage gap" {

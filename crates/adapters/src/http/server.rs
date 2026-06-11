@@ -68,7 +68,7 @@ async fn tls_connect_info_to_socket_addr(
         .get::<ConnectInfo<TlsConnectInfo>>()
         .copied()
     {
-        req.extensions_mut().insert(ConnectInfo(tls_info.0.0));
+        req.extensions_mut().insert(ConnectInfo(tls_info.0.addr));
     }
     next.run(req).await
 }

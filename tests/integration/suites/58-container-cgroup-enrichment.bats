@@ -226,15 +226,3 @@ teardown_file() {
         skip "no alert carried a container identity — degraded cgroup path"
     fi
 }
-
-# ── Kubernetes pod path (deferred to suite 10 topology) ────────────
-
-@test "Kubernetes pod enrichment path (deferred to k8s topology)" {
-    skip "kubernetes.namespace/pod/container enrichment is exercised by suite 10 fixtures + the k8s enricher adapter; deferred — AC #2"
-}
-
-# ── Per-tenant cgroup filter map (deferred to enterprise tenant) ──
-
-@test "per-tenant cgroup map filters tc-ids alerts (deferred)" {
-    skip "TENANT_CGROUP_MAP is consumed by tc-ids but not populated by the OSS path; per-tenant filter assertion belongs to the enterprise tenant suite — AC #3 deferred"
-}

@@ -86,6 +86,7 @@ use super::state::AppState;
 use super::threatintel_handler::{
     list_feeds, list_iocs, list_url_iocs, refresh_feeds, threatintel_status,
 };
+use super::tls_handler::tls_status;
 use super::zone_handler::{
     create_zone, create_zone_policy, delete_zone, delete_zone_policy, list_zone_policies,
     list_zones, zone_status,
@@ -163,6 +164,7 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
             .route("/api/v1/threatintel/status", get(threatintel_status))
             .route("/api/v1/threatintel/iocs", get(list_iocs))
             .route("/api/v1/threatintel/urls", get(list_url_iocs))
+            .route("/api/v1/tls/status", get(tls_status))
             .route("/api/v1/threatintel/feeds", get(list_feeds))
             .route("/api/v1/threatintel/feeds/refresh", post(refresh_feeds))
             .route("/api/v1/alerts", get(list_alerts))

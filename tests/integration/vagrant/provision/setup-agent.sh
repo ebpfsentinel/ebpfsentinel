@@ -249,6 +249,43 @@ sudo apt-get install -y python3-jwt python3-cryptography >/dev/null 2>&1 || true
 echo "  jwt: $(python3 -c 'import jwt; print(jwt.__version__)' 2>&1)" \
      "| cryptography: $(python3 -c 'import cryptography; print(cryptography.__version__)' 2>&1)"
 
+# ── OpenSSL 3.5 (PQ-hybrid client for suite 61) ────────────────────
+# 61-pqc-handshake drives an X25519MLKEM768 handshake against the agent's PQ
+# TLS server. The hybrid named group needs OpenSSL >= 3.5, which Ubuntu 24.04
+# does not package, so build it to a private prefix (/opt/openssl-3.5) without
+# touching the system openssl. The suite auto-detects this build and only then
+# runs the PQ-handshake assertions (otherwise they skip). Idempotent: skip the
+# ~5-minute build if the binary already advertises the group.
+if { /opt/openssl-3.5/bin/openssl list -groups 2>/dev/null; \
+     /opt/openssl-3.5/bin/openssl list -kem-algorithms 2>/dev/null; } \
+     | grep -q 'X25519MLKEM768'; then
+    echo "=== OpenSSL 3.5 PQ client already present ==="
+else
+    echo "=== Building OpenSSL 3.5 (PQ-hybrid client for suite 61) ==="
+    OSSL_VER="3.5.0"
+    sudo apt-get install -y build-essential perl wget >/dev/null 2>&1 || true
+    tmp_ossl="$(mktemp -d)"
+    if wget -qO "${tmp_ossl}/openssl.tar.gz" \
+        "https://github.com/openssl/openssl/releases/download/openssl-${OSSL_VER}/openssl-${OSSL_VER}.tar.gz"; then
+        tar -xzf "${tmp_ossl}/openssl.tar.gz" -C "${tmp_ossl}"
+        (
+            cd "${tmp_ossl}/openssl-${OSSL_VER}" || exit 1
+            # rpath so the binary loads its own libcrypto/libssl 3.5 rather than
+            # the system 3.0 (otherwise: "version OPENSSL_3.5.0 not found").
+            ./Configure --prefix=/opt/openssl-3.5 --openssldir=/opt/openssl-3.5 \
+                --libdir=lib no-docs "-Wl,-rpath,/opt/openssl-3.5/lib" >/dev/null 2>&1
+            make -j"$(nproc)" >/dev/null 2>&1
+            sudo make install_sw >/dev/null 2>&1
+        )
+        rm -rf "${tmp_ossl}"
+        echo "  openssl: $(/opt/openssl-3.5/bin/openssl version 2>&1)" \
+             "| MLKEM: $(/opt/openssl-3.5/bin/openssl list -groups 2>/dev/null | grep -c X25519MLKEM768)"
+    else
+        echo "  WARN: openssl ${OSSL_VER} download failed — suite 61 PQ tests will skip"
+        rm -rf "${tmp_ossl}"
+    fi
+fi
+
 # ── Scapy venv (agent-local netns suites) ──────────────────────────
 # The agent-local (netns) suites — VIP-announcer ARP probes, byte-level
 # scrub, DSR/Maglev — craft raw frames with scapy on the agent itself.

@@ -105,13 +105,28 @@ pub fn build_crypto_provider(pq_mode: PqMode) -> tokio_rustls::rustls::crypto::C
 /// `tower_governor::PeerIpKeyExtractor` (which looks for
 /// `ConnectInfo<SocketAddr>`) keeps working.
 #[derive(Debug, Clone, Copy)]
-pub struct TlsConnectInfo(pub SocketAddr);
+pub struct TlsConnectInfo {
+    pub addr: SocketAddr,
+    /// Negotiated TLS 1.3 key-exchange named group for this connection,
+    /// captured right after the handshake completes. `None` if the peer
+    /// negotiated no key-exchange group (should not happen for TLS 1.3).
+    pub kx_group: Option<tokio_rustls::rustls::NamedGroup>,
+}
 
 impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TlsListener>>
     for TlsConnectInfo
 {
     fn connect_info(target: axum::serve::IncomingStream<'_, TlsListener>) -> Self {
-        Self(*target.remote_addr())
+        let addr = *target.remote_addr();
+        // The handshake is already complete by the time the stream is yielded
+        // from `TlsListener::accept`, so the negotiated group is observable.
+        let kx_group = target
+            .io()
+            .get_ref()
+            .1
+            .negotiated_key_exchange_group()
+            .map(tokio_rustls::rustls::crypto::SupportedKxGroup::name);
+        Self { addr, kx_group }
     }
 }
 
