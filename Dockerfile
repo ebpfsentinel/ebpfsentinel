@@ -50,10 +50,12 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml deny.toml ./
 COPY .cargo/ .cargo/
 COPY crates/ crates/
 COPY proto/ proto/
-COPY dist/ dist/
 
 ENV LIBPCAP_LIBDIR=/usr/local/musl/lib
 
+# Build the agent and the BPF token launcher (both static, musl). eBPF loads
+# only through a token, a user-namespace feature: the launcher sets up the
+# delegated bpffs in a child userns and execs the agent there (rootless).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     case "${TARGETARCH}" in \
         arm64) MUSL_TARGET="aarch64-unknown-linux-musl" ;; \
@@ -61,14 +63,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     esac && \
     rustup target add "${MUSL_TARGET}" && \
     RUSTFLAGS="-L native=/usr/local/musl/lib" \
-    cargo build --release --target "${MUSL_TARGET}" --bin ebpfsentinel-agent && \
+    cargo build --release --target "${MUSL_TARGET}" \
+        --bin ebpfsentinel-agent --bin ebpfsentinel-token-launch && \
     cp "/build/target/${MUSL_TARGET}/release/ebpfsentinel-agent" /build/ebpfsentinel-agent && \
+    cp "/build/target/${MUSL_TARGET}/release/ebpfsentinel-token-launch" /build/ebpfsentinel-token-launch && \
     mkdir -p /build/captures-dir
-
-# Build the BPF token launcher as a fully static binary (no deps beyond libc).
-# eBPF loads only through a token, a user-namespace feature: the launcher sets
-# up the delegated bpffs in a child userns and execs the agent there (rootless).
-RUN musl-gcc -O2 -static -o /build/ebpfsentinel-token-launch dist/ebpfsentinel-token-launch.c
 
 # ── Stage 2: Minimal runtime image ──────────────────────────────────
 #

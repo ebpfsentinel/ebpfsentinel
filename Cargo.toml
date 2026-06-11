@@ -8,6 +8,7 @@ members = [
     "crates/adapters",
     "crates/infrastructure",
     "crates/agent",
+    "crates/token-launch",
     "crates/xtask",
 ]
 # eBPF program crates target bpfel-unknown-none (nightly) — excluded from default build

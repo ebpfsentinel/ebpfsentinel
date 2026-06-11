@@ -1,0 +1,13 @@
+[package]
+name = "ebpfsentinel-token-launch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "ebpfsentinel-token-launch"
+path = "src/main.rs"
+
+[dependencies]
+libc = { workspace = true }
