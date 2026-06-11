@@ -55,7 +55,43 @@ fn alert_to_event(alert: &Alert) -> proto::AlertEvent {
             .as_ref()
             .map_or_else(String::new, |m| m.tactic.clone()),
         ja4_fingerprint: alert.ja4_fingerprint.clone().unwrap_or_default(),
+        container: container_context(alert),
     }
+}
+
+/// Build the alert's [`proto::ContainerContext`] from the domain container
+/// context. Returns `None` for a host-namespace process (nothing to surface)
+/// and folds any Kubernetes enricher metadata into the namespace/pod fields.
+fn container_context(alert: &Alert) -> Option<proto::ContainerIdentity> {
+    use domain::container::entity::{ContainerInfo, ContainerMetadata};
+
+    let ContainerInfo::Container {
+        container_id,
+        runtime,
+        cgroup_path,
+        ..
+    } = alert.container.as_ref()?
+    else {
+        return None;
+    };
+
+    let (namespace, pod, container_name) = match alert.container_metadata.as_ref() {
+        Some(ContainerMetadata::Kubernetes(k)) => (
+            k.namespace.clone(),
+            k.pod_name.clone(),
+            k.container_name.clone(),
+        ),
+        _ => (String::new(), String::new(), String::new()),
+    };
+
+    Some(proto::ContainerIdentity {
+        runtime: runtime.to_string(),
+        id: container_id.clone(),
+        cgroup_path: cgroup_path.clone(),
+        namespace,
+        pod,
+        container_name,
+    })
 }
 
 fn severity_label(severity: Severity) -> &'static str {
@@ -248,6 +284,44 @@ mod tests {
         assert_eq!(event.dst_domain, "");
         assert!((event.src_domain_score - (-1.0)).abs() < f64::EPSILON);
         assert!((event.dst_domain_score - (-1.0)).abs() < f64::EPSILON);
+        // Host-namespace process: no container context surfaced.
+        assert!(event.container.is_none());
+    }
+
+    #[test]
+    fn container_context_folds_kubernetes_metadata() {
+        use domain::container::entity::{
+            ContainerInfo, ContainerMetadata, ContainerRuntime, KubernetesMetadata,
+        };
+
+        let mut alert = make_alert("ids", Severity::High, "ids-002");
+        alert.container = Some(ContainerInfo::Container {
+            container_id: "abc123".to_string(),
+            runtime: ContainerRuntime::Containerd,
+            cgroup_path: "/kubepods/pod-abc/abc123".to_string(),
+            pid: 4242,
+        });
+        alert.container_metadata = Some(ContainerMetadata::Kubernetes(KubernetesMetadata {
+            pod_name: "web-0".to_string(),
+            namespace: "prod".to_string(),
+            container_name: "web".to_string(),
+            labels: Vec::new(),
+            annotations: Vec::new(),
+            service_account: String::new(),
+            owner_kind: None,
+            owner_name: None,
+            node_name: String::new(),
+        }));
+
+        let ctx = alert_to_event(&alert)
+            .container
+            .expect("container context surfaced for a resolved container");
+        assert_eq!(ctx.id, "abc123");
+        assert_eq!(ctx.runtime, "containerd");
+        assert_eq!(ctx.cgroup_path, "/kubepods/pod-abc/abc123");
+        assert_eq!(ctx.namespace, "prod");
+        assert_eq!(ctx.pod, "web-0");
+        assert_eq!(ctx.container_name, "web");
     }
 
     #[test]

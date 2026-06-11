@@ -98,4 +98,26 @@ message AlertEvent {
   string mitre_tactic = 35;
   // JA4 TLS ClientHello fingerprint (e.g. "t13d1516h2_8daaf6152771_02713d6af862"). Empty if absent.
   string ja4_fingerprint = 36;
+  // Container / Kubernetes provenance resolved from the event's cgroup_id.
+  // Unset for host-namespace processes (nothing to attribute).
+  ContainerIdentity container = 37;
+}
+
+// Container and Kubernetes provenance for an alert, resolved from the
+// originating process's cgroup_id. Mirrors the HTTP alert DTO's container
+// block. The Kubernetes fields are populated only when a k8s enricher
+// attached pod metadata.
+message ContainerIdentity {
+  // Detected runtime (docker, containerd, crio, podman, unknown).
+  string runtime = 1;
+  // Container ID.
+  string id = 2;
+  // cgroup path the resolver matched.
+  string cgroup_path = 3;
+  // Kubernetes namespace (empty unless a k8s enricher attached metadata).
+  string namespace = 4;
+  // Kubernetes pod name (empty unless a k8s enricher attached metadata).
+  string pod = 5;
+  // Kubernetes container name (empty unless a k8s enricher attached metadata).
+  string container_name = 6;
 }
