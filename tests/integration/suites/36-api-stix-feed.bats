@@ -143,23 +143,20 @@ teardown_file() {
 
 # ── URL indicators ───────────────────────────────────────────────
 
-@test "STIX URL indicators collected" {
-    # URL indicators (http://malware.test/payload.exe) may not be surfaced via
-    # a dedicated endpoint in the current API — check the IOC list or skip with note.
+@test "STIX URL indicators surfaced via the threatintel URLs endpoint" {
+    # URL indicators (http://malware.test/payload.exe) are retained by the
+    # threat-intel service and surfaced read-only via /api/v1/threatintel/urls
+    # (the IP-only IOC engine has no place for them).
     local body
-    body="$(api_get /api/v1/threatintel/iocs)"
+    body="$(api_get /api/v1/threatintel/urls)"
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ]
-    # Accept: either the URL is present as an IOC, or the endpoint simply returns 200
-    # with no URL data (feature not yet surfaced via API).
-    local found
-    found="$(echo "$body" | grep -c "malware.test" 2>/dev/null)" || found=0
-    # Non-fatal: URL IOCs may not yet be visible via this endpoint
-    if [ "$found" -eq 0 ]; then
-        skip "URL IOCs not yet surfaced via /api/v1/threatintel/iocs (feature pending)"
-    fi
-    [ "$found" -ge 1 ]
+    echo "$body" | grep -q "malware.test" || {
+        echo "URL indicator http://malware.test/... not surfaced via /api/v1/threatintel/urls" >&2
+        echo "$body" >&2
+        return 1
+    }
 }
 
 # ── Metrics ──────────────────────────────────────────────────────
