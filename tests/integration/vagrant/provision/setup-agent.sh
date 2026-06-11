@@ -90,6 +90,12 @@ for kmod in nf_conntrack fou fou6 xfrm_interface; do
     sudo modprobe "$kmod" 2>/dev/null || echo "    NOTE: modprobe ${kmod} deferred until reboot"
 done
 
+# The `conntrack` userspace CLI (separate from the nf_conntrack kmod above) is
+# how suite 51 reads/kills kernel CT entries; `ensure_conntrack_tool` skips the
+# whole CT-kill suite when it's absent. The kmod publishes the kfunc BTF; this
+# package provides the /usr/sbin/conntrack tool the test drives.
+sudo apt-get install -y conntrack >/dev/null 2>&1 || true
+
 # ── Build / install agent + eBPF programs ──────────────────────────
 install_from_prebuilt() {
     local src="${PROJECT_DIR}/target/release/ebpfsentinel-agent"
@@ -230,6 +236,18 @@ else
         echo "  Skipping smoke test (no minimal config)"
     fi
 fi
+
+# ── JWKS/JWT verification deps (suite 39) ──────────────────────────
+# 39-agent-jwks signs an EdDSA JWT and serves a matching JWKS to prove the
+# auth middleware accepts it. The helper scripts call the system `python3`
+# directly (build_eddsa_jwks.py needs `cryptography`, mint_eddsa_jwt.py needs
+# PyJWT), so both modules must be importable from the system interpreter — a
+# venv won't do, the suite hard-codes bare python3. Install via apt to dodge
+# PEP-668 (externally-managed-environment) on the system Python.
+echo "=== Installing JWKS/JWT deps (python3-jwt, python3-cryptography) ==="
+sudo apt-get install -y python3-jwt python3-cryptography >/dev/null 2>&1 || true
+echo "  jwt: $(python3 -c 'import jwt; print(jwt.__version__)' 2>&1)" \
+     "| cryptography: $(python3 -c 'import cryptography; print(cryptography.__version__)' 2>&1)"
 
 # ── Scapy venv (agent-local netns suites) ──────────────────────────
 # The agent-local (netns) suites — VIP-announcer ARP probes, byte-level
