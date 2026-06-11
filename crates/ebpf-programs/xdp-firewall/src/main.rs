@@ -598,10 +598,18 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         return xdp_action::XDP_PASS;
     }
     if action == xdp_action::XDP_PASS {
-        // Check MTU before passing — drop oversized packets early.
+        // Check MTU before passing — drop genuinely oversized packets early.
+        //
+        // `bpf_check_mtu` returns a positive `BPF_MTU_CHK_RET_*` code on an
+        // actual MTU violation (FRAG_NEEDED / SEGS_TOOBIG) and a *negative*
+        // errno when the helper itself cannot run (e.g. on some drivers/XDP
+        // modes the ingress device lookup fails for forwarded IPv6 transit
+        // packets). Dropping on the error case violated NFR15 (default-to-pass
+        // on internal error) and silently blackholed forwarded IPv6 traffic
+        // (e.g. NPTv6 transit). Only drop on a real violation; pass on error.
         let mut mtu: u32 = 0;
         let mtu_ret = unsafe { bpf_check_mtu(ctx.ctx as *mut _, 0, &mut mtu as *mut u32, 0, 0) };
-        if mtu_ret != 0 {
+        if mtu_ret > 0 {
             increment_metric(METRIC_MTU_EXCEEDED);
             return xdp_action::XDP_DROP;
         }

@@ -291,7 +291,10 @@ fn process_v4(
     // Check MTU before forwarding to avoid silent fragmentation.
     let mut mtu: u32 = 0;
     let mtu_ret = unsafe { bpf_check_mtu(ctx.ctx as *mut _, 0, &mut mtu as *mut u32, 0, 0) };
-    if mtu_ret != 0 {
+    // Only drop on a genuine MTU violation (positive BPF_MTU_CHK_RET_*); a
+    // negative return is a helper error → pass (NFR15), otherwise forwarded
+    // IPv6 transit packets get silently blackholed.
+    if mtu_ret > 0 {
         increment_metric(LB_METRIC_MTU_EXCEEDED);
         return Ok(xdp_action::XDP_DROP);
     }
@@ -453,7 +456,10 @@ fn process_v6(
     // Check MTU before forwarding
     let mut mtu: u32 = 0;
     let mtu_ret = unsafe { bpf_check_mtu(ctx.ctx as *mut _, 0, &mut mtu as *mut u32, 0, 0) };
-    if mtu_ret != 0 {
+    // Only drop on a genuine MTU violation (positive BPF_MTU_CHK_RET_*); a
+    // negative return is a helper error → pass (NFR15), otherwise forwarded
+    // IPv6 transit packets get silently blackholed.
+    if mtu_ret > 0 {
         increment_metric(LB_METRIC_MTU_EXCEEDED);
         return Ok(xdp_action::XDP_DROP);
     }
@@ -526,7 +532,10 @@ fn try_dsr_forward(
     // Check MTU before forwarding to avoid silent fragmentation.
     let mut mtu: u32 = 0;
     let mtu_ret = unsafe { bpf_check_mtu(ctx.ctx as *mut _, 0, &mut mtu as *mut u32, 0, 0) };
-    if mtu_ret != 0 {
+    // Only drop on a genuine MTU violation (positive BPF_MTU_CHK_RET_*); a
+    // negative return is a helper error → pass (NFR15), otherwise forwarded
+    // IPv6 transit packets get silently blackholed.
+    if mtu_ret > 0 {
         increment_metric(LB_METRIC_MTU_EXCEEDED);
         return Some(xdp_action::XDP_DROP);
     }
