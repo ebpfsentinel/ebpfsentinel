@@ -2,12 +2,14 @@
 # 61-bpf-token-only-load.bats — every eBPF program loads + attaches through a
 # BPF token alone, with no CAP_BPF / CAP_SYS_ADMIN / CAP_PERFMON.
 #
-# A privileged stand-in (fixtures/bpf-token/delegate-and-run) delegates a bpffs
-# and passes module BTF fds — what a container runtime / K8s init-container does
-# in production — then execs the agent in a capability-less user namespace. The
-# agent must create a BPF token and load/attach the full program set through it.
+# The shipped launcher (ebpfsentinel-token-launch) delegates a bpffs and passes
+# module BTF fds — exactly what runs in production under systemd / Docker / K8s —
+# then execs the agent in a capability-less user namespace. The agent must create
+# a BPF token and load/attach the full program set through it. Driving the real
+# launcher means CI validates the binary we actually ship.
 #
-# Requires: root, kernel >= 6.9, cc, local eBPF build. VM-only (Vagrant agent).
+# Requires: root, kernel >= 6.9, local eBPF build, the launcher binary (prebuilt
+# next to the agent or built on demand). VM-only (Vagrant agent).
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
@@ -22,14 +24,16 @@ setup_file() {
 
     # bats runs setup_file and every @test in separate processes, so the helper's
     # `$$`-derived defaults differ per process. Pin and export them once here so
-    # every test reads the same captured log / harness / staging paths.
-    export BPF_TOKEN_HARNESS_BIN BPF_TOKEN_LOG BPF_TOKEN_BPFFS BPF_TOKEN_HARNESS_SRC \
+    # every test reads the same captured log / launcher / staging paths.
+    export BPF_TOKEN_LAUNCHER_BIN BPF_TOKEN_LOG BPF_TOKEN_BPFFS \
         BPF_TOKEN_AGENT_STAGE BPF_TOKEN_EBPF_STAGE
 
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"
     export AGENT_BIN="${AGENT_BIN:-${PROJECT_ROOT}/target/release/ebpfsentinel-agent}"
     [ -x "$AGENT_BIN" ] || skip "agent binary not found: ${AGENT_BIN}"
+
+    bpf_token_build_launcher
 
     export EBPF_DIR="${PROJECT_ROOT}/target/bpfel-unknown-none/release"
     [ -f "${EBPF_DIR}/xdp-firewall" ] || skip "eBPF objects not found in ${EBPF_DIR}"
@@ -59,8 +63,7 @@ setup_file() {
         -e "s|__IFACE__|${IFACE}|g" \
         "${FIXTURE_DIR}/config-bpf-token.yaml" >"$PREPARED_CONFIG"
 
-    bpf_token_compile_harness
-    bpf_token_run "$PREPARED_CONFIG" 9 || skip "harness produced no output"
+    bpf_token_run "$PREPARED_CONFIG" 9 || skip "launcher produced no output"
 }
 
 teardown_file() {

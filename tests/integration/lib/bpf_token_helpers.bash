@@ -1,11 +1,14 @@
 # bpf_token_helpers.bash — helpers for the BPF-token-only loading suite (61).
 #
-# These drive the privileged-runtime stand-in (fixtures/bpf-token/delegate-and-run)
-# that delegates a bpffs + passes module BTF fds, then runs the agent token-only
-# and captures its log so tests can assert on what loaded/attached.
+# These drive the *shipped* privileged launcher (crates/token-launch →
+# ebpfsentinel-token-launch) that delegates a bpffs + passes module BTF fds,
+# then runs the agent token-only in a capability-less user namespace. The log
+# is captured so tests can assert on what loaded/attached. Exercising the real
+# launcher (not a test-only stand-in) means CI validates the exact binary we
+# ship in the tarball / container image.
 
-BPF_TOKEN_HARNESS_SRC="${BPF_TOKEN_HARNESS_SRC:-${FIXTURE_DIR}/bpf-token/delegate-and-run.c}"
-BPF_TOKEN_HARNESS_BIN="${BPF_TOKEN_HARNESS_BIN:-/tmp/ebpfsentinel-bpf-token-harness-$$}"
+# Resolved lazily (needs $AGENT_BIN / $PROJECT_ROOT from the suite's setup_file).
+BPF_TOKEN_LAUNCHER_BIN="${BPF_TOKEN_LAUNCHER_BIN:-}"
 BPF_TOKEN_LOG="${BPF_TOKEN_LOG:-/tmp/ebpfsentinel-bpf-token-$$.log}"
 # The agent runs inside a user namespace, where any path component owned by an
 # unmapped uid (e.g. a 0750 home directory) is inaccessible — to both exec and
@@ -14,8 +17,8 @@ BPF_TOKEN_LOG="${BPF_TOKEN_LOG:-/tmp/ebpfsentinel-bpf-token-$$.log}"
 # where the build tree lives.
 BPF_TOKEN_AGENT_STAGE="${BPF_TOKEN_AGENT_STAGE:-/tmp/ebpfsentinel-bpf-token-agent-$$}"
 BPF_TOKEN_EBPF_STAGE="${BPF_TOKEN_EBPF_STAGE:-/tmp/ebpfsentinel-bpf-token-ebpf-$$}"
-# Must match `bpf_token.bpffs_path` in config-bpf-token.yaml and BPFFS_MOUNTPOINT
-# in the harness.
+# Must match `bpf_token.bpffs_path` in config-bpf-token.yaml (passed to the
+# launcher via --bpffs).
 BPF_TOKEN_BPFFS="${BPF_TOKEN_BPFFS:-/run/etok}"
 
 # require_bpf_token_env — skip unless this host can exercise token delegation.
@@ -23,17 +26,31 @@ require_bpf_token_env() {
     require_root
     # BPF token delegation (BPF_TOKEN_CREATE + delegated bpffs) is kernel 6.9+.
     require_kernel 6 9
-    require_tool cc
-    if [ ! -r "$BPF_TOKEN_HARNESS_SRC" ]; then
-        skip "harness source missing: ${BPF_TOKEN_HARNESS_SRC}"
-    fi
 }
 
-# bpf_token_compile_harness — build the C harness; skip the suite if it fails.
-bpf_token_compile_harness() {
-    if ! cc -O2 -o "$BPF_TOKEN_HARNESS_BIN" "$BPF_TOKEN_HARNESS_SRC" 2>"${BPF_TOKEN_HARNESS_BIN}.cc.log"; then
-        skip "harness failed to compile (missing kernel headers?): $(cat "${BPF_TOKEN_HARNESS_BIN}.cc.log")"
+# bpf_token_build_launcher — resolve (or build) the shipped launcher binary and
+# export its path. Prefers a prebuilt binary next to the agent (as CI's build
+# job produces); falls back to `cargo build` from the project tree; skips the
+# suite if neither yields a binary.
+bpf_token_build_launcher() {
+    if [ -n "$BPF_TOKEN_LAUNCHER_BIN" ] && [ -x "$BPF_TOKEN_LAUNCHER_BIN" ]; then
+        return 0
     fi
+    # Same directory as the agent binary the suite already located.
+    local candidate="$(dirname "$AGENT_BIN")/ebpfsentinel-token-launch"
+    if [ -x "$candidate" ]; then
+        BPF_TOKEN_LAUNCHER_BIN="$candidate"
+        export BPF_TOKEN_LAUNCHER_BIN
+        return 0
+    fi
+    require_tool cargo
+    if ! (cd "$PROJECT_ROOT" && cargo build --release -p ebpfsentinel-token-launch) \
+        >/tmp/ebpfsentinel-token-launch-build-$$.log 2>&1; then
+        skip "launcher failed to build: $(cat /tmp/ebpfsentinel-token-launch-build-$$.log)"
+    fi
+    BPF_TOKEN_LAUNCHER_BIN="${PROJECT_ROOT}/target/release/ebpfsentinel-token-launch"
+    [ -x "$BPF_TOKEN_LAUNCHER_BIN" ] || skip "launcher binary not found after build"
+    export BPF_TOKEN_LAUNCHER_BIN
 }
 
 # bpf_token_stage_ebpf_dir <src_dir> — copy the eBPF object files to a
@@ -60,7 +77,7 @@ bpf_token_module_btf_available() {
     [ -r "/sys/kernel/btf/${module}" ]
 }
 
-# bpf_token_run <config> [seconds] — run the agent token-only via the harness
+# bpf_token_run <config> [seconds] — run the agent token-only via the launcher
 # for N seconds (default 9), capturing combined stdout+stderr to $BPF_TOKEN_LOG.
 # The agent is a daemon, so `timeout` reaping it (exit 124) is the success path;
 # the assertions inspect the captured log rather than an exit code.
@@ -71,16 +88,16 @@ bpf_token_run() {
     # Stage the agent under /tmp so the user-namespace exec can reach it.
     install -m755 "$AGENT_BIN" "$BPF_TOKEN_AGENT_STAGE"
     : >"$BPF_TOKEN_LOG"
-    # Close inherited fds (>=3) before the harness. bats holds its TAP stream on
-    # fd 3, which the harness would otherwise inherit — pushing the module BTF
+    # Close inherited fds (>=3) before the launcher. bats holds its TAP stream on
+    # fd 3, which the launcher would otherwise inherit — pushing the module BTF
     # fds it opens to higher numbers and colliding with the fds the agent's token
-    # loader allocates, so map creation fails with a bare -1. Running the harness
+    # loader allocates, so map creation fails with a bare -1. Running the launcher
     # with a clean fd table makes the module BTF fds start at 3 as they do
     # outside bats.
     (
         for _fd in $(seq 3 30); do eval "exec ${_fd}>&-" 2>/dev/null || true; done
-        exec timeout "$secs" "$BPF_TOKEN_HARNESS_BIN" "$BPF_TOKEN_AGENT_STAGE" \
-            --config "$config" >"$BPF_TOKEN_LOG" 2>&1
+        exec timeout "$secs" "$BPF_TOKEN_LAUNCHER_BIN" --bpffs "$BPF_TOKEN_BPFFS" \
+            "$BPF_TOKEN_AGENT_STAGE" --config "$config" >"$BPF_TOKEN_LOG" 2>&1
     ) || true
     [ -s "$BPF_TOKEN_LOG" ]
 }
@@ -95,10 +112,11 @@ bpf_token_log_has() {
     grep -qiE "${1:?usage: bpf_token_log_has <regex>}" "$BPF_TOKEN_LOG"
 }
 
-# bpf_token_cleanup — remove harness binary, log, prepared config, leftover mount.
+# bpf_token_cleanup — remove log, staged agent, leftover mount. The launcher is
+# a build artifact (target/release or next to the agent), so it is never removed.
 bpf_token_cleanup() {
     umount "$BPF_TOKEN_BPFFS" 2>/dev/null || true
-    rm -f "$BPF_TOKEN_HARNESS_BIN" "${BPF_TOKEN_HARNESS_BIN}.cc.log" "$BPF_TOKEN_LOG" \
-        "$BPF_TOKEN_AGENT_STAGE"
+    rm -f "$BPF_TOKEN_LOG" "$BPF_TOKEN_AGENT_STAGE" \
+        "/tmp/ebpfsentinel-token-launch-build-$$.log"
     rm -rf "$BPF_TOKEN_EBPF_STAGE"
 }

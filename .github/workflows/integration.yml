@@ -123,14 +123,16 @@ jobs:
       - name: Build eBPF programs
         run: cargo xtask ebpf-build
 
-      - name: Build agent (release)
-        run: cargo build --release --bin ebpfsentinel-agent
+      - name: Build agent + token launcher (release)
+        run: cargo build --release --bin ebpfsentinel-agent --bin ebpfsentinel-token-launch
 
       - name: Upload agent binary
         uses: actions/upload-artifact@v4
         with:
           name: ebpfsentinel-agent
-          path: target/release/ebpfsentinel-agent
+          path: |
+            target/release/ebpfsentinel-agent
+            target/release/ebpfsentinel-token-launch
           retention-days: 7
 
   # ── PR-fast: API + Docker bats suites (profile=pr) ───────────────

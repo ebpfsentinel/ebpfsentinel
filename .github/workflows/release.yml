@@ -128,17 +128,18 @@ jobs:
       - name: Build eBPF programs
         run: cargo xtask ebpf-build
 
-      - name: Build release binary
+      - name: Build release binaries
         env:
           LIBPCAP_LIBDIR: /usr/local/musl/lib
           RUSTFLAGS: "-L native=/usr/local/musl/lib"
-        run: cargo build --release --target ${{ matrix.target }} --bin ebpfsentinel-agent
+        run: cargo build --release --target ${{ matrix.target }} --bin ebpfsentinel-agent --bin ebpfsentinel-token-launch
 
       - name: Create release tarball
         run: |
           STAGING="ebpfsentinel-${VERSION}-linux-${{ matrix.arch }}"
           mkdir -p "${STAGING}/ebpf"
           cp "target/${{ matrix.target }}/release/ebpfsentinel-agent" "${STAGING}/"
+          cp "target/${{ matrix.target }}/release/ebpfsentinel-token-launch" "${STAGING}/"
           cp config/ebpfsentinel.yaml "${STAGING}/"
           cp dist/ebpfsentinel.service "${STAGING}/"
           cp dist/install.sh "${STAGING}/"
