@@ -17,6 +17,7 @@ data:
     agent:
       interfaces: {{ .Values.agent.interfaces | toJson }}
       bind_address: {{ .Values.agent.bindAddress | quote }}
+      allow_unauthenticated_api: {{ .Values.agent.allowUnauthenticatedApi }}
       http_port: {{ .Values.agent.httpPort }}
       grpc_port: {{ .Values.agent.grpcPort }}
       metrics_port: {{ .Values.agent.metricsPort }}

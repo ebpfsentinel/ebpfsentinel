@@ -14,6 +14,10 @@ data:
       # liveness/readiness HTTP probes — which hit the pod/node IP, not
       # loopback — can reach /healthz and /readyz.
       bind_address: "0.0.0.0"
+      # Non-loopback bind with auth disabled is rejected at config validation
+      # unless explicitly acknowledged. This is a deployment-mechanics test on
+      # an isolated cluster, so opt in.
+      allow_unauthenticated_api: true
       # BPF token is the production default, but a nested minikube-on-docker
       # node can't delegate a bpffs; this pod is privileged, so load eBPF the
       # capability way for a deterministic deployment-mechanics test.

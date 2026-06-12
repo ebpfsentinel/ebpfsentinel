@@ -32,6 +32,12 @@ agent:
     - eth0
   # -- Listen address for HTTP/gRPC/metrics
   bindAddress: "0.0.0.0"
+  # -- Allow the control API on a non-loopback bind while auth is disabled.
+  # The pod binds 0.0.0.0 so the kubelet can reach the probes, so this is on
+  # by default. INSECURE without auth: set `auth.enabled: true` for production,
+  # or restrict access with a NetworkPolicy. The agent refuses to boot with a
+  # non-loopback bind + auth disabled unless this is true.
+  allowUnauthenticatedApi: true
   # -- REST API port
   httpPort: 8080
   # -- gRPC streaming port

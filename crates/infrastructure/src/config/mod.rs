@@ -559,6 +559,32 @@ impl AgentConfig {
             }
         }
 
+        // Refuse to serve the control API (HTTP + gRPC) on a network-reachable
+        // address while authentication is disabled. A non-loopback bind with
+        // `auth.enabled: false` exposes an unauthenticated control plane —
+        // firewall, IPS, config reload — to anyone who can reach the port.
+        // Operators who fence the API off by other means can opt in explicitly.
+        if !self.auth.enabled && !self.agent.allow_unauthenticated_api {
+            let bind_is_loopback = self
+                .agent
+                .bind_address
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+            if !bind_is_loopback {
+                return Err(ConfigError::Validation {
+                    field: "agent.bind_address".to_string(),
+                    message: format!(
+                        "refusing to bind the control API to non-loopback address '{}' with \
+                         auth.enabled=false: this exposes an unauthenticated control plane. \
+                         Enable auth, bind to 127.0.0.1/::1, or set \
+                         agent.allow_unauthenticated_api=true if the API is fenced off by \
+                         other means",
+                        self.agent.bind_address
+                    ),
+                });
+            }
+        }
+
         // Validate alerting routes
         let smtp_present = self.alerting.smtp.is_some();
         for (idx, route_cfg) in self.alerting.routes.iter().enumerate() {
@@ -1157,6 +1183,15 @@ pub struct AgentInfo {
     /// on all interfaces (required for Docker/container deployments).
     #[serde(default = "default_bind_address")]
     pub bind_address: String,
+
+    /// Explicitly allow serving the control API on a non-loopback address
+    /// while authentication is disabled. Off by default: binding to anything
+    /// other than localhost with `auth.enabled: false` is rejected at config
+    /// validation, because it exposes an unauthenticated control plane to the
+    /// network. Set to `true` only when the API is fenced off by other means
+    /// (a trusted network, a service mesh, an authenticating proxy).
+    #[serde(default)]
+    pub allow_unauthenticated_api: bool,
 
     /// Enable Swagger UI at `/swagger-ui`. Disabled by default in production.
     #[serde(default)]
@@ -2919,6 +2954,66 @@ auth:
 ";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert!(!config.auth.enabled);
+    }
+
+    #[test]
+    fn nonloopback_bind_without_auth_rejected() {
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+  bind_address: "0.0.0.0"
+auth:
+  enabled: false
+"#;
+        let err = AgentConfig::from_yaml(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unauthenticated control plane"),
+            "error: {msg}"
+        );
+    }
+
+    #[test]
+    fn nonloopback_bind_without_auth_allowed_with_optout() {
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+auth:
+  enabled: false
+"#;
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert!(config.agent.allow_unauthenticated_api);
+    }
+
+    #[test]
+    fn nonloopback_bind_with_auth_enabled_ok() {
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+  bind_address: "0.0.0.0"
+auth:
+  enabled: true
+  jwt:
+    public_key_path: /etc/ebpfsentinel/jwt-pub.pem
+"#;
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.agent.bind_address, "0.0.0.0");
+    }
+
+    #[test]
+    fn loopback_bind_without_auth_ok() {
+        // Explicit ::1 loopback with auth disabled must pass.
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+  bind_address: "::1"
+auth:
+  enabled: false
+"#;
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert!(!config.agent.allow_unauthenticated_api);
     }
 
     #[test]

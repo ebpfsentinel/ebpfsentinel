@@ -14,6 +14,14 @@ agent:
   # address — "127.0.0.1" means only local access, even in a container.
   bind_address: "127.0.0.1"
 
+  # Allow the control API to listen on a non-loopback address while
+  # authentication is disabled. Default false: binding to anything other than
+  # 127.0.0.1/::1 with `auth.enabled: false` is rejected, because it exposes an
+  # unauthenticated control plane (firewall, IPS, config reload) to the network.
+  # Enable auth instead, or set this to true only when the API is fenced off by
+  # other means (trusted network, service mesh, authenticating proxy).
+  # allow_unauthenticated_api: false
+
   # Serve the Swagger UI at /swagger-ui (useful for development/debugging).
   swagger_ui: false
 
