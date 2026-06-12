@@ -228,7 +228,7 @@ static CT_NF_CONN_OFFSETS: Array<NfConnOffsets> = Array::with_max_entries(1, 0);
 #[map]
 static FW_IPSET_V4: HashMap<IpSetKeyV4, u8> = HashMap::with_max_entries(MAX_IPSET_ENTRIES_V4, 0);
 
-// ── Connection limit maps (Epic 25) ─────────────────────────────────
+// ── Connection limit maps ───────────────────────────────────────────
 
 /// Per-source-IP state counter. Keyed by source IPv4 address (u32).
 /// Tracks concurrent connections and connection rate for overload protection.

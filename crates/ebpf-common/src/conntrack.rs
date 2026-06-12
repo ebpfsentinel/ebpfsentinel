@@ -216,7 +216,7 @@ impl ConnTrackConfig {
     }
 }
 
-// ── Per-source state counter (Epic 25) ──────────────────────────────
+// ── Per-source state counter ────────────────────────────────────────
 
 /// Per-source-IP connection counter for overload protection.
 ///

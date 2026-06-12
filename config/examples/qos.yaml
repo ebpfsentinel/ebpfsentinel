@@ -29,7 +29,7 @@
 # Fields (QosQueue):
 #   id         — Unique queue identifier (required)
 #   pipe_id    — Pipe this queue is attached to (required)
-#   weight     — WF2Q+ scheduling weight, 1–1000 (default: 100)
+#   weight     — WF2Q+ scheduling weight, 1–100 (default: 100)
 #   enabled    — Administrative enable flag (default: true)
 #
 # Fields (QosClassifier):
@@ -126,31 +126,31 @@ qos:
     # Default queue on the WAN pipe — catch-all traffic
     - id: queue-default
       pipe_id: pipe-wan
-      weight: 100
+      weight: 20
       enabled: true
 
     # Interactive traffic (SSH, web browsing) — higher weight
     - id: queue-interactive
       pipe_id: pipe-wan
-      weight: 300
+      weight: 60
       enabled: true
 
     # VoIP queue — attached to the priority pipe
     - id: queue-voip
       pipe_id: pipe-voip
-      weight: 500
+      weight: 100
       enabled: true
 
     # Video conferencing — shares the VoIP pipe with lower weight
     - id: queue-video
       pipe_id: pipe-voip
-      weight: 200
+      weight: 40
       enabled: true
 
     # Bulk downloads, backups, updates
     - id: queue-bulk
       pipe_id: pipe-bulk
-      weight: 100
+      weight: 20
       enabled: true
 
   # ── Classifiers ────────────────────────────────────────────────────

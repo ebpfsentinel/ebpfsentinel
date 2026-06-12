@@ -156,8 +156,14 @@ routing:
 loadbalancer:
   enabled: false
 
-geoip:
-  enabled: false
+# GeoIP is disabled by default: leave the whole block commented out.
+# Unlike other sections it has no standalone on/off — enabling it requires a
+# `source` (maxmind_account / url / file). See config/examples/geoip.yaml.
+# geoip:
+#   enabled: true
+#   source:
+#     mode: file
+#     city_path: /var/lib/ebpfsentinel/geoip/GeoLite2-City.mmdb
 
 zones:
   enabled: false

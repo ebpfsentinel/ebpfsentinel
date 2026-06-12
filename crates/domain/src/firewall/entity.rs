@@ -23,7 +23,7 @@ pub enum FirewallAction {
     Reject,
 }
 
-// ── Routing actions (Epic 29) ──────────────────────────────────────
+// ── Routing actions ────────────────────────────────────────────────
 
 /// Policy routing action attached to a firewall rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -23,7 +23,7 @@ pub struct DnsConfig {
     #[serde(default)]
     pub reputation: ReputationSectionConfig,
 
-    /// Additional `DoH` resolver domains for encrypted DNS detection (Story 29.8).
+    /// Additional `DoH` resolver domains for encrypted DNS detection.
     #[serde(default)]
     pub doh_resolvers: Vec<String>,
 }

@@ -109,7 +109,7 @@ pub const MATCH2_DST_MAC: u8 = 0x80;
 /// Wildcard value for ICMP type/code: skip comparison.
 pub const ICMP_WILDCARD: u8 = 0xFF;
 
-// ── Route action constants (Epic 29) ────────────────────────────────
+// ── Route action constants ──────────────────────────────────────────
 
 /// No routing action (normal pass/drop/log behaviour).
 pub const ROUTE_ACTION_NONE: u8 = 0;
@@ -239,7 +239,7 @@ pub struct FirewallRuleEntry {
     pub src_set_id: u8,
     /// IP set ID for destination matching (used with MATCH_DST_SET).
     pub dst_set_id: u8,
-    // ── Extended fields (Epic 24+) ──────────────────────────────────
+    // ── Extended fields ─────────────────────────────────────────────
     /// TCP flags that must be SET for a match (e.g. SYN=0x02).
     pub tcp_flags_match: u8,
     /// Which TCP flag bits to inspect (e.g. SYN+ACK mask=0x12).
@@ -308,7 +308,7 @@ pub struct FirewallRuleEntryV6 {
     pub src_set_id: u8,
     /// IP set ID for destination matching (used with MATCH_DST_SET).
     pub dst_set_id: u8,
-    // ── Extended fields (Epic 24+) ──────────────────────────────────
+    // ── Extended fields ─────────────────────────────────────────────
     /// TCP flags that must be SET for a match (e.g. SYN=0x02).
     pub tcp_flags_match: u8,
     /// Which TCP flag bits to inspect (e.g. SYN+ACK mask=0x12).

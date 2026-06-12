@@ -59,7 +59,7 @@ impl Default for FirewallConfig {
     }
 }
 
-// ── Anti-lockout config (Epic 31) ───────────────────────────────────
+// ── Anti-lockout config ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AntiLockoutConfig {
@@ -87,7 +87,7 @@ impl Default for AntiLockoutConfig {
     }
 }
 
-// ── Scrub config (Epic 26) ──────────────────────────────────────────
+// ── Scrub config ────────────────────────────────────────────────────
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -127,7 +127,7 @@ pub struct ScrubConfig {
     pub drop_fragments: bool,
 }
 
-// ── Schedule config (Epic 28) ───────────────────────────────────────
+// ── Schedule config ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleConfig {
