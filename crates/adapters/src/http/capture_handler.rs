@@ -57,6 +57,22 @@ pub struct CaptureListResponse {
 
 // ── Handlers ─────────────────────────────────────────────────────────
 
+/// Reject a capture ID that is not safe to interpolate into a filesystem path.
+///
+/// The ID is server-generated and therefore always path-safe; this guard runs
+/// at runtime (unlike a `debug_assert!`, which is compiled out of release
+/// builds) so that any future change to the ID source cannot silently turn the
+/// `{id}.pcap` path into a traversal sink.
+fn ensure_path_safe_id(id: &str) -> Result<(), ApiError> {
+    if id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        Ok(())
+    } else {
+        Err(ApiError::Internal {
+            message: "generated capture id is not path-safe".to_string(),
+        })
+    }
+}
+
 /// `POST /api/v1/captures/manual` — start a time-bounded packet capture.
 #[utoipa::path(
     post, path = "/api/v1/captures/manual",
@@ -96,8 +112,7 @@ pub async fn start_capture(
         .unwrap_or(u64::MAX);
 
     let id = format!("cap-{}", now_ns / 1_000_000);
-    // Defensive: ID is server-generated but verify it is path-safe (alphanumeric + hyphen)
-    debug_assert!(id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
+    ensure_path_safe_id(&id)?;
     let interface = req.interface.unwrap_or_else(|| "any".to_string());
 
     // Validate BPF filter length
