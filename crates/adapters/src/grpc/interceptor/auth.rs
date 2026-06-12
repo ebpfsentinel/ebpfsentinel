@@ -1,69 +1,135 @@
+use std::convert::Infallible;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
+use axum::http::{HeaderMap, Request, Response, header};
 use ports::secondary::auth_provider::AuthProvider;
-use tonic::{Request, Status};
+use tonic::Status;
+use tonic::body::Body;
+use tonic::server::NamedService;
+use tower::{Layer, Service};
 
-/// Create a tonic interceptor that validates Bearer tokens or API keys.
+/// Tower layer that authenticates gRPC requests with an [`AuthProvider`].
 ///
-/// Extraction order (matching HTTP middleware parity):
-/// 1. `authorization` metadata with `Bearer <token>` prefix
-/// 2. `x-api-key` metadata (raw key value)
+/// Unlike a [`tonic`] sync interceptor, this validates the token **inside the
+/// async call** rather than blocking a runtime worker thread with
+/// `block_in_place` + `block_on`. That matters because token validation can do
+/// network I/O (an OIDC/JWKS refresh on an unknown `kid`); blocking a worker
+/// per request lets a flood of bogus-`kid` tokens starve the runtime.
 ///
-/// The returned function can be used with `ServiceServer::with_interceptor()`.
-/// Health and reflection services should NOT use this interceptor.
-pub fn make_jwt_interceptor(
+/// Extraction order (HTTP-middleware parity):
+/// 1. `authorization: Bearer <token>` — must look like a JWT (3 dot parts)
+/// 2. `x-api-key: <key>`
+///
+/// Health and reflection services must NOT be wrapped with this layer.
+#[derive(Clone)]
+pub struct AuthLayer {
     provider: Arc<dyn AuthProvider>,
-) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone {
-    move |request: Request<()>| {
-        let token = extract_token(&request).ok_or_else(|| {
-            Status::unauthenticated("authentication required: provide Bearer token or x-api-key")
-        })?;
+}
 
-        // Bridge the async `AuthProvider` into tonic's sync interceptor
-        // hook by entering the current Tokio runtime in a blocking
-        // section. Requires the multi-thread runtime that the agent
-        // boots with (`#[tokio::main]` defaults to multi-thread).
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(provider.validate_token(token))
-        });
-        result.map_err(|e| Status::unauthenticated(e.to_string()))?;
-
-        Ok(request)
+impl AuthLayer {
+    #[must_use]
+    pub fn new(provider: Arc<dyn AuthProvider>) -> Self {
+        Self { provider }
     }
 }
 
-/// Extract a token from gRPC metadata: Bearer header first, then x-api-key.
+impl<S> Layer<S> for AuthLayer {
+    type Service = AuthService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        AuthService {
+            inner,
+            provider: Arc::clone(&self.provider),
+        }
+    }
+}
+
+/// Service produced by [`AuthLayer`].
+#[derive(Clone)]
+pub struct AuthService<S> {
+    inner: S,
+    provider: Arc<dyn AuthProvider>,
+}
+
+impl<S> Service<Request<Body>> for AuthService<S>
+where
+    S: Service<Request<Body>, Response = Response<Body>, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = Response<Body>;
+    type Error = Infallible;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Request<Body>) -> Self::Future {
+        let provider = Arc::clone(&self.provider);
+        // Use the instance that was just `poll_ready`'d; leave a fresh clone in
+        // its place (standard tower readiness-correctness pattern).
+        let clone = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, clone);
+
+        let token = extract_token(req.headers());
+
+        Box::pin(async move {
+            let Some(token) = token else {
+                return Ok(Status::unauthenticated(
+                    "authentication required: provide Bearer token or x-api-key",
+                )
+                .into_http());
+            };
+            match provider.validate_token(&token).await {
+                Ok(_) => inner.call(req).await,
+                Err(e) => Ok(Status::unauthenticated(e.to_string()).into_http()),
+            }
+        })
+    }
+}
+
+impl<S: NamedService> NamedService for AuthService<S> {
+    const NAME: &'static str = S::NAME;
+}
+
+/// Extract a credential from request headers: Bearer JWT first, then x-api-key.
 ///
 /// Bearer tokens must look like a JWT (3 dot-separated parts); malformed
-/// tokens are rejected early without hitting the provider.
-fn extract_token(request: &Request<()>) -> Option<&str> {
-    // Try Bearer token — must be a valid JWT structure
-    if let Some(bearer) = request
-        .metadata()
-        .get("authorization")
+/// values are rejected early without hitting the provider.
+fn extract_token(headers: &HeaderMap) -> Option<String> {
+    if let Some(bearer) = headers
+        .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
     {
         if !bearer.is_empty() && bearer.matches('.').count() == 2 {
-            return Some(bearer);
+            return Some(bearer.to_string());
         }
-        // Malformed Bearer → fall through (caller returns Unauthenticated)
+        // Malformed Bearer → no fallback (caller returns Unauthenticated).
         return None;
     }
-    // Fall back to x-api-key
-    request
-        .metadata()
+    headers
         .get("x-api-key")
         .and_then(|v| v.to_str().ok())
+        .map(ToString::to_string)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use async_trait::async_trait;
     use domain::auth::entity::JwtClaims;
     use domain::auth::error::AuthError;
-    use tonic::metadata::MetadataValue;
+    use tower::util::BoxCloneService;
+    use tower::{ServiceExt, service_fn};
 
     struct AlwaysOkProvider;
     #[async_trait]
@@ -91,93 +157,101 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn accept_valid_bearer() {
-        let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
-        let mut req = Request::new(());
-        req.metadata_mut().insert(
-            "authorization",
-            MetadataValue::from_static("Bearer header.payload.signature"),
-        );
-        assert!(interceptor(req).is_ok());
+    /// Build an `AuthService` whose inner service flips `called` to true and
+    /// returns 200 OK, so tests can assert whether the request reached it.
+    fn wrap(
+        provider: Arc<dyn AuthProvider>,
+        called: Arc<AtomicBool>,
+    ) -> AuthService<BoxCloneService<Request<Body>, Response<Body>, Infallible>> {
+        let inner = service_fn(move |_req: Request<Body>| {
+            let called = Arc::clone(&called);
+            async move {
+                called.store(true, Ordering::SeqCst);
+                Ok::<_, Infallible>(Response::new(Body::empty()))
+            }
+        })
+        .boxed_clone();
+        AuthLayer::new(provider).layer(inner)
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn reject_missing_auth() {
-        let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
-        let req = Request::new(());
-        let status = interceptor(req).unwrap_err();
-        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    fn grpc_status(resp: &Response<Body>) -> Option<i32> {
+        resp.headers()
+            .get("grpc-status")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse().ok())
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn reject_invalid_token() {
-        let interceptor = make_jwt_interceptor(Arc::new(AlwaysFailProvider));
-        let mut req = Request::new(());
-        req.metadata_mut().insert(
-            "authorization",
-            MetadataValue::from_static("Bearer bad.token.here"),
-        );
-        let status = interceptor(req).unwrap_err();
-        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    #[tokio::test]
+    async fn valid_bearer_reaches_inner() {
+        let called = Arc::new(AtomicBool::new(false));
+        let svc = wrap(Arc::new(AlwaysOkProvider), Arc::clone(&called));
+        let req = Request::builder()
+            .header("authorization", "Bearer header.payload.signature")
+            .body(Body::empty())
+            .unwrap();
+        let _ = svc.oneshot(req).await.unwrap();
+        assert!(called.load(Ordering::SeqCst), "inner must be called");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn reject_non_bearer_without_api_key() {
-        let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
-        let mut req = Request::new(());
-        req.metadata_mut().insert(
-            "authorization",
-            MetadataValue::from_static("Basic dXNlcjpwYXNz"),
-        );
-        let status = interceptor(req).unwrap_err();
-        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    #[tokio::test]
+    async fn valid_api_key_reaches_inner() {
+        let called = Arc::new(AtomicBool::new(false));
+        let svc = wrap(Arc::new(AlwaysOkProvider), Arc::clone(&called));
+        let req = Request::builder()
+            .header("x-api-key", "sk-valid-key")
+            .body(Body::empty())
+            .unwrap();
+        let _ = svc.oneshot(req).await.unwrap();
+        assert!(called.load(Ordering::SeqCst));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn accept_valid_api_key() {
-        let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
-        let mut req = Request::new(());
-        req.metadata_mut()
-            .insert("x-api-key", MetadataValue::from_static("sk-valid-key"));
-        assert!(interceptor(req).is_ok());
+    #[tokio::test]
+    async fn missing_credential_rejected_before_inner() {
+        let called = Arc::new(AtomicBool::new(false));
+        let svc = wrap(Arc::new(AlwaysOkProvider), Arc::clone(&called));
+        let req = Request::builder().body(Body::empty()).unwrap();
+        let resp = svc.oneshot(req).await.unwrap();
+        assert!(!called.load(Ordering::SeqCst), "inner must NOT be called");
+        // gRPC UNAUTHENTICATED = 16
+        assert_eq!(grpc_status(&resp), Some(16));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn reject_invalid_api_key() {
-        let interceptor = make_jwt_interceptor(Arc::new(AlwaysFailProvider));
-        let mut req = Request::new(());
-        req.metadata_mut()
-            .insert("x-api-key", MetadataValue::from_static("sk-bad-key"));
-        let status = interceptor(req).unwrap_err();
-        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    #[tokio::test]
+    async fn invalid_token_rejected_before_inner() {
+        let called = Arc::new(AtomicBool::new(false));
+        let svc = wrap(Arc::new(AlwaysFailProvider), Arc::clone(&called));
+        let req = Request::builder()
+            .header("authorization", "Bearer bad.token.here")
+            .body(Body::empty())
+            .unwrap();
+        let resp = svc.oneshot(req).await.unwrap();
+        assert!(!called.load(Ordering::SeqCst));
+        assert_eq!(grpc_status(&resp), Some(16));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn bearer_takes_precedence_over_api_key() {
-        let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
-        let mut req = Request::new(());
-        req.metadata_mut().insert(
-            "authorization",
-            MetadataValue::from_static("Bearer header.payload.signature"),
-        );
-        req.metadata_mut()
-            .insert("x-api-key", MetadataValue::from_static("sk-key"));
-        // Should succeed via Bearer, not api-key
-        assert!(interceptor(req).is_ok());
+    #[tokio::test]
+    async fn malformed_bearer_rejected() {
+        let called = Arc::new(AtomicBool::new(false));
+        let svc = wrap(Arc::new(AlwaysOkProvider), Arc::clone(&called));
+        let req = Request::builder()
+            .header("authorization", "Bearer not-a-jwt")
+            .body(Body::empty())
+            .unwrap();
+        let resp = svc.oneshot(req).await.unwrap();
+        assert!(!called.load(Ordering::SeqCst));
+        assert_eq!(grpc_status(&resp), Some(16));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn authorization_metadata_is_case_insensitive() {
-        // HTTP/2 metadata keys are normalized to lowercase by tonic/http,
-        // so "Authorization" inserted as "authorization" is matched correctly.
-        let interceptor = make_jwt_interceptor(Arc::new(AlwaysOkProvider));
-        let mut req = Request::new(());
-        // tonic normalizes to lowercase internally
-        req.metadata_mut().insert(
-            "authorization",
-            MetadataValue::from_static("Bearer header.payload.signature"),
-        );
-        assert!(interceptor(req).is_ok());
+    #[tokio::test]
+    async fn non_bearer_authorization_rejected() {
+        let called = Arc::new(AtomicBool::new(false));
+        let svc = wrap(Arc::new(AlwaysOkProvider), Arc::clone(&called));
+        let req = Request::builder()
+            .header("authorization", "Basic dXNlcjpwYXNz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = svc.oneshot(req).await.unwrap();
+        assert!(!called.load(Ordering::SeqCst));
+        assert_eq!(grpc_status(&resp), Some(16));
     }
 }

@@ -1006,14 +1006,24 @@ pub async fn run(
                                 )
                             }
                             HealthCheckProto::Icmp => {
-                                let secs = timeout.as_secs().max(1).to_string();
-                                tokio::process::Command::new("ping")
-                                    .args(["-c", "1", "-W", &secs, &hc.target])
-                                    .stdout(std::process::Stdio::null())
-                                    .stderr(std::process::Stdio::null())
-                                    .status()
-                                    .await
-                                    .is_ok_and(|s| s.success())
+                                if is_safe_probe_target(&hc.target) {
+                                    let secs = timeout.as_secs().max(1).to_string();
+                                    // `--` terminates option parsing so a target
+                                    // beginning with `-` can never be read as a flag.
+                                    tokio::process::Command::new("ping")
+                                        .args(["-c", "1", "-W", &secs, "--", &hc.target])
+                                        .stdout(std::process::Stdio::null())
+                                        .stderr(std::process::Stdio::null())
+                                        .status()
+                                        .await
+                                        .is_ok_and(|s| s.success())
+                                } else {
+                                    tracing::warn!(
+                                        target = %hc.target,
+                                        "skipping ICMP health probe: invalid target"
+                                    );
+                                    false
+                                }
                             }
                         };
                         let mut svc = probe_routing.write().await;
@@ -2987,6 +2997,22 @@ impl EbpfState {
     }
 }
 
+/// Validate a health-check probe target before passing it to `ping`.
+///
+/// The target is config/API-sourced and lands in a `Command` argument
+/// array (no shell), so the only risk is argument injection — a value
+/// beginning with `-` being parsed as a `ping` flag. We pair `--` at the
+/// call site with this allow-list (valid IPv4/IPv6/hostname characters,
+/// never leading `-`) for defense in depth.
+fn is_safe_probe_target(target: &str) -> bool {
+    if target.is_empty() || target.len() > 253 || target.starts_with('-') {
+        return false;
+    }
+    target
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
+}
+
 /// Verify the kernel version is **>= 6.9**.
 ///
 /// The 6.9 floor is mandatory — there is **no graceful fallback on
@@ -3102,6 +3128,30 @@ mod kernel_version_tests {
         let p = write_osrelease(&tmp, "not-a-version\n");
         // parse yields (0, 0) → below minimum → Err
         assert!(check_kernel_version_from(&p).is_err());
+    }
+
+    #[test]
+    fn probe_target_accepts_ip_and_hostname() {
+        assert!(is_safe_probe_target("8.8.8.8"));
+        assert!(is_safe_probe_target("2001:db8::1"));
+        assert!(is_safe_probe_target("gw.internal.example.com"));
+        assert!(is_safe_probe_target("router-1"));
+    }
+
+    #[test]
+    fn probe_target_rejects_option_injection() {
+        // A leading '-' would be parsed by ping as a flag.
+        assert!(!is_safe_probe_target("-O"));
+        assert!(!is_safe_probe_target("--flood"));
+    }
+
+    #[test]
+    fn probe_target_rejects_shell_and_empty() {
+        assert!(!is_safe_probe_target(""));
+        assert!(!is_safe_probe_target("8.8.8.8; rm -rf /"));
+        assert!(!is_safe_probe_target("$(whoami)"));
+        assert!(!is_safe_probe_target("a b"));
+        assert!(!is_safe_probe_target(&"a".repeat(254)));
     }
 }
 
@@ -3447,16 +3497,25 @@ pub fn try_load_xdp_ratelimit(
             // guessable clock value. Read 32 bytes from /dev/urandom into the
             // eight key words (native endianness — the key is opaque).
             let mut key_bytes = [0u8; 32];
-            std::fs::File::open("/dev/urandom")
+            match std::fs::File::open("/dev/urandom")
                 .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut key_bytes))
-                .expect("/dev/urandom should be readable");
-            let mut key = [0u32; 8];
-            for (slot, chunk) in key.iter_mut().zip(key_bytes.chunks_exact(4)) {
-                *slot = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            }
-            let secret = ebpf_common::ddos::SyncookieSecret { key };
-            if let Err(e) = mgr.set_secret(&secret) {
-                warn!("SYN cookie secret write failed (non-fatal): {e}");
+            {
+                Ok(()) => {
+                    let mut key = [0u32; 8];
+                    for (slot, chunk) in key.iter_mut().zip(key_bytes.chunks_exact(4)) {
+                        *slot = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    }
+                    let secret = ebpf_common::ddos::SyncookieSecret { key };
+                    if let Err(e) = mgr.set_secret(&secret) {
+                        warn!("SYN cookie secret write failed (non-fatal): {e}");
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "could not read /dev/urandom for SYN cookie secret \
+                         (non-fatal, SYN-cookie protection disabled): {e}"
+                    );
+                }
             }
         }
         Err(e) => {

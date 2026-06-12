@@ -7,9 +7,10 @@ use domain::alert::entity::Alert;
 use ports::secondary::auth_provider::AuthProvider;
 use tokio::sync::broadcast;
 use tonic::transport::Server;
+use tower::ServiceBuilder;
 
 use super::alert_service::AlertStreamServiceImpl;
-use super::interceptor::auth::make_jwt_interceptor;
+use super::interceptor::auth::AuthLayer;
 use super::proto::alert_stream_service_server::AlertStreamServiceServer;
 
 /// TLS material for the gRPC server (PEM-encoded cert chain + private key).
@@ -81,13 +82,14 @@ pub async fn run_grpc_server(
         tracing::info!("gRPC reflection enabled");
     }
 
-    // Wrap AlertStreamService with auth interceptor when configured
+    // Wrap AlertStreamService with the async auth layer when configured.
+    // The layer validates tokens inside the async call (no worker-thread
+    // blocking), unlike a sync tonic interceptor.
     router = if let Some(provider) = auth_provider {
-        let interceptor = make_jwt_interceptor(provider);
-        router.add_service(AlertStreamServiceServer::with_interceptor(
-            alert_service,
-            interceptor,
-        ))
+        let svc = ServiceBuilder::new()
+            .layer(AuthLayer::new(provider))
+            .service(AlertStreamServiceServer::new(alert_service));
+        router.add_service(svc)
     } else {
         router.add_service(AlertStreamServiceServer::new(alert_service))
     };

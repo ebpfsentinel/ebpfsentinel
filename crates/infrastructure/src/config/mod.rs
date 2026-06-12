@@ -263,6 +263,9 @@ impl AgentConfig {
         for key in &mut sanitized.auth.api_keys {
             key.key = "***".to_string();
         }
+        if sanitized.auth.api_key_salt.is_some() {
+            sanitized.auth.api_key_salt = Some("***".to_string());
+        }
         if !sanitized.agent.tls.key_path.is_empty() {
             sanitized.agent.tls.key_path = "***".to_string();
         }
@@ -3285,6 +3288,25 @@ alerting:
         // username is NOT masked
         assert_eq!(smtp.username.as_deref(), Some("admin"));
         assert_eq!(smtp.host, "smtp.example.com");
+    }
+
+    #[test]
+    fn sanitized_masks_api_key_salt() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+auth:
+  enabled: true
+  api_key_salt: a-very-secret-salt-value
+  api_keys:
+    - name: svc
+      key: sk-secret
+      role: admin
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let sanitized = config.sanitized();
+        assert_eq!(sanitized.auth.api_key_salt.as_deref(), Some("***"));
+        assert_eq!(sanitized.auth.api_keys[0].key, "***");
     }
 
     #[test]
