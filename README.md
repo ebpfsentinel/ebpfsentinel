@@ -71,7 +71,7 @@ A snapshot of the capabilities below — see the [Features guide](https://github
 
 ```mermaid
 flowchart TB
-    subgraph kernel["Linux Kernel (14 eBPF programs)"]
+    subgraph kernel["Linux Kernel (16 eBPF programs)"]
         direction TB
         subgraph xdp["XDP — wire-speed packet processing"]
             fw["xdp-firewall\n(stateful L3/L4)"]
@@ -79,6 +79,8 @@ flowchart TB
             rl["xdp-ratelimit\n(DDoS / rate limit)"]
             rl_sc["xdp-ratelimit-syncookie\n(SYN cookie forge)"]
             lb["xdp-loadbalancer\n(L4 DNAT)"]
+            vip["xdp-vip-announcer\n(VIP ARP reply)"]
+            pass["xdp-pass\n(veth peer · test rig)"]
         end
         subgraph tc["TC — deep packet inspection & rewriting"]
             ct[tc-conntrack]
@@ -98,11 +100,13 @@ flowchart TB
     fw -- "PASS → slot 0" --> rl
     fw -- "REJECT → slot 1" --> fw_rej
     fw -- "PASS (no RL) → slot 2" --> lb
+    fw -- "ARP VIP → slot 3" --> vip
     rl -- "SYN flood → slot 0" --> rl_sc
     rl -- "PASS → slot 1" --> lb
     fw_rej -- "XDP_TX" --> packets
     rl_sc -- "XDP_TX" --> packets
     lb -- "XDP_TX / REDIRECT" --> packets
+    vip -- "XDP_TX" --> packets
 
     fw -- "XDP_PASS" --> tc
     tc --- uprobe
@@ -161,32 +165,30 @@ sudo ./install.sh            # installs to /usr/local, wires up the systemd unit
 The userspace agent builds on **stable**; the eBPF kernel programs need the **nightly** toolchain (driven by `cargo xtask`, `bpfel` target). Install Rust via [rustup](https://rustup.rs):
 
 ```bash
-cargo build --release        # userspace agent (stable)
+cargo build --release        # agent + token launcher (stable)
 cargo xtask ebpf-build        # eBPF programs (nightly)
 
-# eBPF loads ONLY through a BPF token — mount the delegated bpffs first
-# (this is the one step that needs CAP_SYS_ADMIN), then run the agent.
-sudo dist/ebpfsentinel-token-setup.sh /sys/fs/bpf/ebpfsentinel
-./target/release/ebpfsentinel-agent --config config/ebpfsentinel.yaml
+# eBPF loads only through a BPF token (a user-namespace feature). The launcher
+# sets up the delegated bpffs in a child user namespace and execs the agent
+# there — this brief bootstrap is the one step that needs CAP_SYS_ADMIN.
+sudo ./target/release/ebpfsentinel-token-launch \
+  --bpffs /sys/fs/bpf/ebpfsentinel \
+  ./target/release/ebpfsentinel-agent --config config/ebpfsentinel.yaml
 ```
 
 ### Docker (rootless)
 
-The agent loads eBPF **exclusively** through a BPF token (kernel 6.9+) — never `CAP_BPF`, never `--privileged`. A privileged init step mounts the delegated bpffs; the agent container then runs rootless. `docker compose up` wires this automatically (a `bpf-token-setup` init service mounts the bpffs, the agent runs with `cap_drop: ALL`). To run it by hand:
+The agent loads eBPF **exclusively** through a BPF token (kernel 6.9+) — never `CAP_BPF`, never `--privileged`. The image entrypoint is the `ebpfsentinel-token-launch` launcher: as root it mounts the delegated bpffs in a child user namespace, then execs the agent there, unprivileged. `docker compose up` wires this automatically. To run it by hand:
 
 ```bash
-sudo dist/ebpfsentinel-token-setup.sh /sys/fs/bpf/ebpfsentinel   # privileged, one-time
-
 docker run --network host \
-  --cap-drop ALL \
-  --cap-add NET_RAW --cap-add NET_ADMIN \
-  --security-opt no-new-privileges:true \
+  --cap-add SYS_ADMIN --cap-add NET_RAW \
+  --security-opt apparmor=unconfined \
   -v ./config:/etc/ebpfsentinel \
-  -v /sys/fs/bpf/ebpfsentinel:/sys/fs/bpf/ebpfsentinel \
   ghcr.io/ebpfsentinel/ebpfsentinel:latest
 ```
 
-`CAP_NET_RAW` is needed only for manual/auto packet capture and `CAP_NET_ADMIN` only for conntrack flow-kill + Multi-WAN routing — drop either if unused. See the [BPF token guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/operations/deployment/bpf-token.md) for the systemd and Kubernetes paths and the full capability matrix.
+`CAP_SYS_ADMIN` is held only by the brief launcher bootstrap (bpffs delegation + user-namespace creation), not by the long-running agent. `CAP_NET_RAW` lets the launcher pre-open the `AF_PACKET` sockets for rootless packet capture (it is in Docker's default set anyway). See the [BPF token guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/operations/deployment/bpf-token.md) for the systemd and Kubernetes paths and the full capability matrix.
 
 ### Minimal config
 
