@@ -124,7 +124,14 @@ spec:
         - name: config
           configMap:
             name: {{ include "ebpfsentinel.fullname" . }}-config
+            # The agent rejects a world-readable config; configMap volumes
+            # default to 0644, so pin a stricter mode.
+            defaultMode: 0640
         - name: bpf
+          # A container's /sys is read-only, so the launcher needs this writable
+          # host bpffs to create the delegated mountpoint. On nested runtimes
+          # (kind, minikube) whose /sys/fs/bpf is itself read-only, override with
+          # an emptyDir: { medium: Memory } via daemonset.extraVolumes instead.
           hostPath:
             path: /sys/fs/bpf
         - name: debug

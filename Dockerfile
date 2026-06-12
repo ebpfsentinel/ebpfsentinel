@@ -1,9 +1,16 @@
 # eBPFsentinel — Multi-stage Docker build
 #
 # Build:  docker build -t ebpfsentinel .
-# Run:    docker run --cap-add SYS_ADMIN --network host \
+# Run:    docker run --cap-add SYS_ADMIN --cap-add NET_RAW --network host \
 #           --security-opt apparmor=unconfined \
-#           -v ./config:/etc/ebpfsentinel ebpfsentinel
+#           -v ./config:/etc/ebpfsentinel \
+#           -v /sys/fs/bpf:/sys/fs/bpf ebpfsentinel
+#
+# The /sys/fs/bpf bind-mount is required: a container's /sys is read-only, so
+# the launcher cannot create the bpffs mountpoint there without a writable
+# /sys/fs/bpf. The host bpffs is writable; bind it in. (On a host without a
+# bpffs mounted, `--tmpfs /sys/fs/bpf` works too.) CAP_NET_RAW lets the launcher
+# pre-open the AF_PACKET pcap pool — drop it if you never capture.
 #
 # eBPF loads only through a BPF token (user-namespace feature): the entrypoint
 # launcher needs CAP_SYS_ADMIN + the ability to create a user namespace, then
