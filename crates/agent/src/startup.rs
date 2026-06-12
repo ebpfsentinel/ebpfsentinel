@@ -1239,6 +1239,26 @@ pub async fn run(
     let http_port = config.agent.http_port;
     let http_bind = config.agent.bind_address.clone();
     let http_swagger_ui = config.agent.swagger_ui;
+
+    // Loud startup warning when the control plane is served unauthenticated on a
+    // network-reachable address. Config validation already refuses this unless
+    // the operator opted in with `allow_unauthenticated_api=true`; that escape
+    // hatch is preserved, but the exposure must not be silent.
+    if !config.auth.enabled {
+        let bind_is_loopback = http_bind
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+        if !bind_is_loopback {
+            tracing::warn!(
+                bind_address = %http_bind,
+                "control plane is UNAUTHENTICATED on a non-loopback address \
+                 (auth.enabled=false, allow_unauthenticated_api=true): firewall, \
+                 IPS and config-reload APIs are reachable without credentials — \
+                 ensure the port is fenced off by other means"
+            );
+        }
+    }
+
     let state_for_server = Arc::clone(&app_state);
     let http_shutdown = cancel_token.clone();
     let http_tls = tls_config.clone();
