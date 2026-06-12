@@ -1,5 +1,5 @@
 use std::sync::RwLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use domain::auth::entity::JwtClaims;
@@ -38,7 +38,26 @@ pub struct OidcAuthProvider {
     /// to `true` so the dashboard can rotate keys without redeploying
     /// agents; set to `false` to keep the agent stricter / quieter.
     refresh_on_unknown_kid: bool,
+    /// Minimum interval between two inline JWKS refreshes. Bounds the
+    /// outbound fetch rate to at most one per window **globally** (not
+    /// per-IP), so an unauthenticated flood of tokens carrying random
+    /// `kid` values cannot amplify into a reflected `DoS` on the upstream
+    /// JWKS endpoint or exhaust the agent's outbound connections.
+    refresh_cooldown: Duration,
+    /// Timestamp of the most recent claimed refresh slot. `None` until the
+    /// first refresh is attempted. Guarded so the claim is atomic across
+    /// concurrent requests (prevents a thundering herd of simultaneous
+    /// refreshes when many unknown-`kid` requests arrive at once).
+    last_refresh: RwLock<Option<Instant>>,
 }
+
+/// Default minimum interval between two inline JWKS refreshes.
+///
+/// A legitimate key rotation only needs a single refresh — the fetched set
+/// is cached, so subsequent requests find the new `kid` without refetching.
+/// This window therefore only ever throttles requests whose `kid` is *still*
+/// unknown after a recent refresh, i.e. exactly the amplification pattern.
+const DEFAULT_JWKS_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 
 impl std::fmt::Debug for OidcAuthProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -100,6 +119,8 @@ impl OidcAuthProvider {
             validation,
             refresher: None,
             refresh_on_unknown_kid: true,
+            refresh_cooldown: DEFAULT_JWKS_REFRESH_COOLDOWN,
+            last_refresh: RwLock::new(None),
         }
     }
 
@@ -116,6 +137,36 @@ impl OidcAuthProvider {
         self.refresher = Some(refresher);
         self.refresh_on_unknown_kid = refresh_on_unknown_kid;
         self
+    }
+
+    /// Override the minimum interval between two inline JWKS refreshes.
+    /// Defaults to [`DEFAULT_JWKS_REFRESH_COOLDOWN`].
+    #[must_use]
+    pub fn with_refresh_cooldown(mut self, cooldown: Duration) -> Self {
+        self.refresh_cooldown = cooldown;
+        self
+    }
+
+    /// Atomically check the refresh cooldown and, if the window has elapsed,
+    /// claim the slot by stamping the current instant. Returns `true` iff the
+    /// caller may perform an outbound refresh now.
+    ///
+    /// The slot is claimed *before* the (awaited) fetch so that concurrent
+    /// unknown-`kid` requests in the same window collapse to a single
+    /// outbound refresh, and a slow or failing upstream cannot be hammered.
+    fn try_claim_refresh(&self) -> bool {
+        let now = Instant::now();
+        let mut last = self
+            .last_refresh
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match *last {
+            Some(prev) if now.duration_since(prev) < self.refresh_cooldown => false,
+            _ => {
+                *last = Some(now);
+                true
+            }
+        }
     }
 
     /// Atomically replace the cached JWKS (for periodic key rotation).
@@ -205,6 +256,15 @@ impl AuthProvider for OidcAuthProvider {
                 let Some(refresher) = self.refresher.as_ref() else {
                     return Err(AuthError::TokenInvalid("invalid token".to_string()));
                 };
+                // Gate the outbound fetch behind a global cooldown. Without this,
+                // any unauthenticated client can force one upstream JWKS request
+                // per token by supplying a random `kid` (the header is read before
+                // signature verification) — a reflected-DoS / connection-exhaustion
+                // amplifier that a per-IP rate limit cannot contain.
+                if !self.try_claim_refresh() {
+                    tracing::debug!(kid = %kid, "JWKS refresh suppressed by cooldown");
+                    return Err(AuthError::TokenInvalid("invalid token".to_string()));
+                }
                 tracing::debug!(kid = %kid, "JWKS unknown kid — forcing refresh");
                 let new_set = refresher.refresh().await.map_err(|e| {
                     tracing::warn!(error = %e, "JWKS inline refresh failed");
@@ -801,6 +861,103 @@ mod tests {
         let err = provider.validate_token(&token).await.unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)), "got: {err}");
         assert_eq!(refresher.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn cooldown_caps_unknown_kid_refresh_amplification() {
+        // A refresher that always returns a JWKS *without* the requested kid,
+        // so absent a cooldown every probe would force a fresh outbound fetch.
+        struct UselessRefresher {
+            set: JwkSet,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait]
+        impl JwksRefresher for UselessRefresher {
+            async fn refresh(&self) -> Result<JwkSet, AuthError> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(self.set.clone())
+            }
+        }
+
+        let stale = build_eddsa_jwk_set("old-kid");
+        let refresher = std::sync::Arc::new(UselessRefresher {
+            set: build_eddsa_jwk_set("still-old-kid"),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let provider = OidcAuthProvider::new_for_eddsa(stale, None, None)
+            .unwrap()
+            .with_refresher(refresher.clone(), true)
+            // Long window so the whole burst falls inside one cooldown.
+            .with_refresh_cooldown(Duration::from_hours(1));
+
+        // A flood of distinct unknown kids — the amplification pattern an
+        // unauthenticated attacker would use (header kid is read before any
+        // signature check).
+        for i in 0..20 {
+            let token = sign_eddsa_with_kid(
+                &TestClaims {
+                    sub: "attacker".to_string(),
+                    exp: future_exp(),
+                    iss: None,
+                    aud: None,
+                    role: None,
+                    namespaces: None,
+                },
+                &format!("rand-kid-{i}"),
+            );
+            assert!(provider.validate_token(&token).await.is_err());
+        }
+
+        // Despite 20 unauthenticated probes, the cooldown caps outbound
+        // refreshes to exactly one.
+        assert_eq!(
+            refresher.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "cooldown must bound refresh fan-out"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_allowed_again_after_cooldown_elapses() {
+        struct UselessRefresher {
+            set: JwkSet,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait]
+        impl JwksRefresher for UselessRefresher {
+            async fn refresh(&self) -> Result<JwkSet, AuthError> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(self.set.clone())
+            }
+        }
+
+        let refresher = std::sync::Arc::new(UselessRefresher {
+            set: build_eddsa_jwk_set("still-old-kid"),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        // Zero cooldown: every unknown-kid request is allowed to refresh, proving
+        // the cap in the previous test comes from the cooldown and not some other
+        // path that swallows the refresh.
+        let provider = OidcAuthProvider::new_for_eddsa(build_eddsa_jwk_set("old-kid"), None, None)
+            .unwrap()
+            .with_refresher(refresher.clone(), true)
+            .with_refresh_cooldown(Duration::ZERO);
+
+        for i in 0..3 {
+            let token = sign_eddsa_with_kid(
+                &TestClaims {
+                    sub: "x".to_string(),
+                    exp: future_exp(),
+                    iss: None,
+                    aud: None,
+                    role: None,
+                    namespaces: None,
+                },
+                &format!("kid-{i}"),
+            );
+            assert!(provider.validate_token(&token).await.is_err());
+        }
+        assert_eq!(refresher.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[test]
