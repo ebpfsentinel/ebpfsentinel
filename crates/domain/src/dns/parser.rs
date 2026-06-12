@@ -30,14 +30,20 @@ pub fn parse_dns_packet(
     src_addr: IpAddr,
     timestamp_ns: u64,
 ) -> Result<DnsPacket, DnsError> {
-    if payload.len() < DNS_HEADER_LEN {
-        return Err(DnsError::TruncatedPayload {
-            need: DNS_HEADER_LEN,
-            got: payload.len(),
-        });
-    }
+    // Borrow the fixed-size header prefix up front. `first_chunk` returns
+    // `None` (→ truncated) when fewer than `DNS_HEADER_LEN` bytes are present,
+    // so `parse_header` receives a `&[u8; DNS_HEADER_LEN]` and its field reads
+    // are bounds-checked by the type, not by a caller-side guard that a future
+    // refactor could drop.
+    let header_bytes =
+        payload
+            .first_chunk::<DNS_HEADER_LEN>()
+            .ok_or(DnsError::TruncatedPayload {
+                need: DNS_HEADER_LEN,
+                got: payload.len(),
+            })?;
 
-    let header = parse_header(payload);
+    let header = parse_header(header_bytes);
 
     // QR bit: 0 = query, 1 = response
     if header.is_response {
@@ -60,7 +66,7 @@ struct DnsHeader {
 }
 
 #[allow(clippy::similar_names)] // ancount/arcount are RFC 1035 field names
-fn parse_header(payload: &[u8]) -> DnsHeader {
+fn parse_header(payload: &[u8; DNS_HEADER_LEN]) -> DnsHeader {
     let transaction_id = u16::from_be_bytes([payload[0], payload[1]]);
     let flags = u16::from_be_bytes([payload[2], payload[3]]);
     let is_response = (flags >> 15) & 1 == 1;
