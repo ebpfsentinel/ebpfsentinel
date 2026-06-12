@@ -10,6 +10,11 @@
 # execs the agent unprivileged inside it. The long-running agent holds no host
 # capabilities.
 #
+# Packet capture works rootless: the launcher pre-opens the AF_PACKET sockets
+# (CAP_NET_RAW, in Docker's default capability set) and passes the fds to the
+# agent. libpcap is statically linked (musl) below, so the runtime image needs
+# no extra package. If you run with `--cap-drop ALL`, re-add `--cap-add NET_RAW`.
+#
 # eBPF programs must be pre-built before docker build:
 #   cargo xtask ebpf-build
 #

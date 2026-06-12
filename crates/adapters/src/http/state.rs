@@ -89,6 +89,10 @@ pub struct AppState {
     pub ja4s_fingerprint_cache: Option<Arc<domain::l7::ja4::Ja4sFingerprintCache>>,
     pub response_engine: Option<Arc<RwLock<domain::response::engine::ResponseEngine>>>,
     pub capture_engine: Option<Arc<RwLock<domain::capture::engine::CaptureEngine>>>,
+    /// Pool of `AF_PACKET` sockets pre-opened by the privileged launcher for
+    /// rootless packet capture. `None` when the launcher did not provision any
+    /// (capture then degrades gracefully).
+    pub pcap_pool: Option<Arc<crate::net::pcap_capture::PcapSocketPool>>,
     /// Broadcast sender for conntrack lifecycle events. SSE clients
     /// subscribe by calling `tx.subscribe()`.
     pub conntrack_event_tx: Option<broadcast::Sender<ConntrackEvent>>,
@@ -155,6 +159,7 @@ impl AppState {
             ja4s_fingerprint_cache: None,
             response_engine: None,
             capture_engine: None,
+            pcap_pool: None,
             conntrack_event_tx: None,
             alert_stream_tx: None,
             alert_replay_buffer: None,
@@ -175,6 +180,14 @@ impl AppState {
         engine: Arc<RwLock<domain::capture::engine::CaptureEngine>>,
     ) -> Self {
         self.capture_engine = Some(engine);
+        self
+    }
+
+    /// Attach the launcher-provisioned `AF_PACKET` socket pool used for rootless
+    /// packet capture.
+    #[must_use]
+    pub fn with_pcap_pool(mut self, pool: Arc<crate::net::pcap_capture::PcapSocketPool>) -> Self {
+        self.pcap_pool = Some(pool);
         self
     }
 

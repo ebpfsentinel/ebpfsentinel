@@ -9,10 +9,10 @@
 #   - Linux kernel 6.9+ with BTF support
 #   - Docker with host networking support
 #
-# eBPF is loaded EXCLUSIVELY through a BPF token (no CAP_BPF). The
-# privileged `bpf-token-setup` init container mounts a delegated bpffs on
-# the host; the agent container then runs rootless and creates the token
-# against it.
+# eBPF is loaded EXCLUSIVELY through a BPF token (no CAP_BPF). The image
+# entrypoint (ebpfsentinel-token-launch) runs as root only long enough to set
+# up a delegated bpffs in a child user namespace, then execs the agent inside
+# it — the long-running agent is unprivileged and creates the token there.
 #
 # Hot-reload: edit config/ebpfsentinel.yaml while running — the agent
 # detects changes automatically and reloads rules without restart.
@@ -37,11 +37,30 @@ services:
     # the user namespace (no host capabilities).
     cap_add:
       - SYS_ADMIN
+      # NET_RAW lets the launcher open the AF_PACKET capture sockets (see NOTE
+      # below). It is already in Docker's default capability set — listed here
+      # only so packet capture survives a future `cap_drop`.
+      - NET_RAW
     security_opt:
       - apparmor=unconfined
-    # NOTE: pcap capture, conntrack -D retroactive teardown, and gratuitous-ARP
-    # on VIP takeover need host-netns caps the userns agent lacks; their eBPF
-    # equivalents (IPS_DYING flow-kill, xdp-vip-announcer) keep working.
+
+    # Override the AF_PACKET capture pool size (default 2) if you run many
+    # concurrent captures.
+    # environment:
+    #   EBPFSENTINEL_PCAP_POOL: "4"
+    # NOTE: pcap capture works rootless because the launcher pre-opens the
+    # AF_PACKET sockets while still global root and passes the fds to the agent
+    # (CAP_NET_RAW is checked only at socket() time). Tune the pool with
+    # EBPFSENTINEL_PCAP_POOL (default 2) if you run many concurrent captures.
+    #
+    # Two host-netns features stay unavailable and cap_add does NOT help: eBPF is
+    # token-only so the agent runs in a child user namespace, and a descendant
+    # userns is never privileged over the init-userns-owned host netns:
+    #   - conntrack -D retroactive teardown (CAP_NET_ADMIN, re-checked per netlink
+    #     message against the sender -> fd-passing can't delegate it)
+    #   - gratuitous-ARP on VIP takeover (same AF_PACKET path as pcap; not
+    #     fd-provisioned today)
+    # Their eBPF equivalents (IPS_DYING flow-kill, xdp-vip-announcer) keep working.
 
     volumes:
       # Agent configuration — writable for hot-reload via file watcher

@@ -12,7 +12,9 @@
 //!    inherits an fd for each (cleared of `O_CLOEXEC`), and advertises them to
 //!    the agent via `EBPF_MODULE_BTF_FDS=name=fd,...` — this is what lets module
 //!    kfuncs (`nf_conntrack`, `fou`) resolve without `CAP_SYS_ADMIN` in the
-//!    agent.
+//!    agent. It likewise opens a small pool of `AF_PACKET` sockets and advertises
+//!    them via `EBPFSENTINEL_PCAP_FDS=fd,...` so the agent can run packet capture
+//!    rootless — `CAP_NET_RAW` is checked only at `socket()`, which happens here.
 //! 2. It sets up the delegated bpffs via the kernel fd-passing dance: a CHILD
 //!    unshares a user namespace and `fsopen("bpf")` (the superblock is owned by
 //!    the child userns); it passes the fs fd to the (global-root) PARENT via
@@ -27,9 +29,11 @@
 //!
 //! The agent runs in a child user namespace and therefore has no capabilities
 //! over host-owned resources (the host network namespace). The eBPF datapath
-//! works through the token; host-netns helpers (pcap `AF_PACKET` capture,
-//! `conntrack -D` retroactive teardown, gratuitous ARP on VIP takeover) degrade
-//! gracefully — their eBPF equivalents keep working.
+//! works through the token, and pcap capture works through the pre-opened
+//! `AF_PACKET` sockets above. The remaining host-netns helpers (`conntrack -D`
+//! retroactive teardown, gratuitous ARP on VIP takeover) degrade gracefully —
+//! their cap check is re-evaluated per operation, so a pre-opened fd cannot
+//! delegate them; their eBPF equivalents keep working.
 
 #![allow(unsafe_code)] // Raw mount/bpf/userns syscalls require libc + unsafe.
 #![allow(
@@ -176,6 +180,46 @@ fn collect_module_btf_fds() -> String {
     out
 }
 
+/// Default number of `AF_PACKET` capture sockets to pre-open.
+const DEFAULT_PCAP_POOL: usize = 2;
+
+/// Open a small pool of `AF_PACKET`/`SOCK_RAW` sockets for rootless packet
+/// capture and return their fds as `"fd,fd,..."`.
+///
+/// Created here (global root, before the userns fork) because the agent, once
+/// inside its child user namespace, fails the `CAP_NET_RAW` check on
+/// `socket(AF_PACKET)`. Protocol `0` keeps the sockets silent until the agent
+/// binds one to an interface with `ETH_P_ALL`. The fds are cleared of
+/// `O_CLOEXEC` so they survive the child's `execv`. Pool size is
+/// `EBPFSENTINEL_PCAP_POOL` (default `DEFAULT_PCAP_POOL`, capped at 32).
+fn open_pcap_pool() -> String {
+    let n = std::env::var("EBPFSENTINEL_PCAP_POOL")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0 && n <= 32)
+        .unwrap_or(DEFAULT_PCAP_POOL);
+    let mut out = String::new();
+    for _ in 0..n {
+        let fd = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, 0) };
+        if fd < 0 {
+            // No CAP_NET_RAW (or AF_PACKET unavailable): leave capture
+            // unprovisioned — the agent degrades gracefully.
+            perror("socket(AF_PACKET) for pcap pool");
+            break;
+        }
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+        }
+        if !out.is_empty() {
+            out.push(',');
+        }
+        out.push_str(&fd.to_string());
+        // Keep fd open (inherited by the child); do NOT close.
+    }
+    out
+}
+
 /// Write `value` to the file at `path` (used for `setgroups` / `uid_map` /
 /// `gid_map`). Returns `false` on error.
 fn write_file(path: &str, value: &str) -> bool {
@@ -260,7 +304,7 @@ fn fsconfig_string(fs: RawFd, key: &str, value: &str) {
     }
 }
 
-fn child(bpffs: &str, agent_argv: &[CString], modfds: &str, sv1: RawFd) -> ! {
+fn child(bpffs: &str, agent_argv: &[CString], modfds: &str, pcapfds: &str, sv1: RawFd) -> ! {
     unsafe {
         libc::setenv(
             c"EBPF_MODULE_BTF_FDS".as_ptr(),
@@ -268,6 +312,15 @@ fn child(bpffs: &str, agent_argv: &[CString], modfds: &str, sv1: RawFd) -> ! {
             1,
         )
     };
+    if !pcapfds.is_empty() {
+        unsafe {
+            libc::setenv(
+                c"EBPFSENTINEL_PCAP_FDS".as_ptr(),
+                CString::new(pcapfds).unwrap().as_ptr(),
+                1,
+            )
+        };
+    }
     let (uid, gid) = (unsafe { libc::getuid() }, unsafe { libc::getgid() });
     if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
         perror("unshare USER");
@@ -375,8 +428,10 @@ fn main() -> ExitCode {
         .map(|a| CString::new(a.as_str()).unwrap())
         .collect();
 
-    // Open module BTF fds while still global root, before the userns fork.
+    // Open module BTF fds and the pcap capture sockets while still global root,
+    // before the userns fork, so the child inherits them across execv.
     let modfds = collect_module_btf_fds();
+    let pcapfds = open_pcap_pool();
 
     let mut sv = [0 as RawFd; 2];
     if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sv.as_mut_ptr()) } != 0 {
@@ -386,7 +441,7 @@ fn main() -> ExitCode {
     let pid = unsafe { libc::fork() };
     if pid == 0 {
         unsafe { libc::close(sv[0]) };
-        child(&bpffs, &agent_argv, &modfds, sv[1]);
+        child(&bpffs, &agent_argv, &modfds, &pcapfds, sv[1]);
     }
     // PARENT: global root, configures delegation on the child's fs fd.
     unsafe { libc::close(sv[1]) };

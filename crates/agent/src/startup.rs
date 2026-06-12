@@ -889,6 +889,14 @@ pub async fn run(
     ));
     app_state = app_state.with_capture_engine(Arc::clone(&capture_engine));
 
+    // Adopt the AF_PACKET sockets the privileged launcher pre-opened for
+    // rootless packet capture (advertised via EBPFSENTINEL_PCAP_FDS). Absent in
+    // a non-launcher run — capture then degrades gracefully.
+    let pcap_pool = adapters::net::pcap_capture::PcapSocketPool::from_env();
+    if let Some(ref pool) = pcap_pool {
+        app_state = app_state.with_pcap_pool(Arc::clone(pool));
+    }
+
     // Wire response engine for manual TTL actions
     let response_engine = Arc::new(RwLock::new(
         domain::response::engine::ResponseEngine::new(86400), // max TTL: 24h
@@ -2532,21 +2540,32 @@ pub async fn run(
 
         // Spawn capture receiver — bridges application → adapters layer.
         let cap_engine_clone = Arc::clone(&capture_engine);
+        #[cfg(feature = "pcap-capture")]
+        let cap_pcap_pool = pcap_pool.clone();
         tokio::spawn(async move {
             while let Some(req) = capture_rx.recv().await {
                 let s = req.session;
                 #[cfg(feature = "pcap-capture")]
                 {
-                    let engine = Arc::clone(&cap_engine_clone);
-                    tokio::spawn(adapters::http::capture_handler::run_pcap_capture(
-                        s.id,
-                        s.interface,
-                        s.filter,
-                        s.duration_secs,
-                        s.snap_length,
-                        s.output_path,
-                        engine,
-                    ));
+                    if let Some(ref pool) = cap_pcap_pool {
+                        let engine = Arc::clone(&cap_engine_clone);
+                        tokio::spawn(adapters::http::capture_handler::run_pcap_capture(
+                            Arc::clone(pool),
+                            s.id,
+                            s.interface,
+                            s.filter,
+                            s.duration_secs,
+                            s.snap_length,
+                            s.output_path,
+                            engine,
+                        ));
+                    } else {
+                        tracing::warn!(
+                            capture_id = %s.id,
+                            "auto-capture: no AF_PACKET socket provisioned by the launcher"
+                        );
+                        cap_engine_clone.write().await.fail(&s.id);
+                    }
                 }
                 #[cfg(not(feature = "pcap-capture"))]
                 {

@@ -155,24 +155,33 @@ pub async fn start_capture(
     // Build response before spawning (session is moved into the task)
     let resp = to_response(&session);
 
-    // Spawn pcap capture in background (requires pcap-capture feature + libpcap-dev)
+    // Spawn the capture in the background. Capture runs on an AF_PACKET socket
+    // pre-opened by the privileged launcher (requires the pcap-capture feature).
     #[cfg(feature = "pcap-capture")]
     {
-        let cap_engine = Arc::clone(capture_engine);
-        tokio::spawn(run_pcap_capture(
-            session.id,
-            session.interface,
-            session.filter,
-            session.duration_secs,
-            session.snap_length,
-            session.output_path,
-            cap_engine,
-        ));
+        if let Some(pool) = state.pcap_pool.clone() {
+            let cap_engine = Arc::clone(capture_engine);
+            tokio::spawn(run_pcap_capture(
+                pool,
+                session.id,
+                session.interface,
+                session.filter,
+                session.duration_secs,
+                session.snap_length,
+                session.output_path,
+                cap_engine,
+            ));
+        } else {
+            tracing::warn!(
+                capture_id = %session.id,
+                "packet capture unavailable: the launcher provisioned no AF_PACKET socket (EBPFSENTINEL_PCAP_FDS unset)"
+            );
+        }
     }
     #[cfg(not(feature = "pcap-capture"))]
     {
         let _ = capture_engine;
-        tracing::warn!(capture_id = %session.id, "pcap capture requires the pcap-capture feature and libpcap-dev");
+        tracing::warn!(capture_id = %session.id, "pcap capture requires the pcap-capture feature");
         // Session is registered but no actual capture runs without the feature
     }
 
@@ -245,14 +254,17 @@ pub async fn stop_capture(
     Ok(Json(to_response(session)))
 }
 
-// ── libpcap capture ──────────────────────────────────────────────────
+// ── AF_PACKET capture (launcher-provisioned socket) ───────────────────
 
-/// Run a packet capture using the `pcap` crate (libpcap).
-#[cfg(feature = "pcap-capture")]
+/// Run a packet capture on an `AF_PACKET` socket borrowed from the
+/// launcher-provisioned pool.
 ///
-/// Spawned on a blocking thread via `tokio::task::spawn_blocking` because
-/// libpcap's `next_packet()` blocks.
+/// Spawned on a blocking thread via `tokio::task::spawn_blocking` because the
+/// capture loop performs blocking `recv` polling.
+#[cfg(feature = "pcap-capture")]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_pcap_capture(
+    pool: Arc<crate::net::pcap_capture::PcapSocketPool>,
     id: String,
     interface: String,
     filter: String,
@@ -262,14 +274,24 @@ pub async fn run_pcap_capture(
     engine: Arc<tokio::sync::RwLock<domain::capture::engine::CaptureEngine>>,
 ) {
     let result = tokio::task::spawn_blocking(move || {
-        pcap_capture_blocking(
-            &id,
+        let Some(lease) = pool.borrow() else {
+            return Err((
+                id,
+                "no AF_PACKET capture socket available (all sockets in use)".to_string(),
+            ));
+        };
+        match crate::net::pcap_capture::run_capture(
+            lease.fd(),
             &interface,
             &filter,
-            duration_secs,
+            std::time::Duration::from_secs(duration_secs),
             snap_length,
             &output_path,
-        )
+        ) {
+            Ok(stats) => Ok((id, stats.packets, stats.file_size)),
+            Err(e) => Err((id, e)),
+        }
+        // `lease` returns the socket to the pool on drop here.
     })
     .await;
 
@@ -293,78 +315,6 @@ pub async fn run_pcap_capture(
         eng.complete(&cap_id, file_size, packets);
         tracing::info!(capture_id = %cap_id, packets, file_size, "capture completed");
     }
-}
-
-/// Blocking capture loop — runs on a dedicated thread.
-#[cfg(feature = "pcap-capture")]
-fn pcap_capture_blocking(
-    id: &str,
-    interface: &str,
-    filter: &str,
-    duration_secs: u64,
-    snap_length: u32,
-    output_path: &str,
-) -> Result<(String, u64, u64), (String, String)> {
-    let device = if interface == "any" {
-        pcap::Device::lookup()
-            .map_err(|e| (id.to_string(), format!("device lookup failed: {e}")))?
-            .ok_or_else(|| (id.to_string(), "no capture device found".to_string()))?
-    } else {
-        pcap::Device::from(interface)
-    };
-
-    let cap = pcap::Capture::from_device(device)
-        .map_err(|e| (id.to_string(), format!("capture init failed: {e}")))?
-        .snaplen(snap_length.try_into().unwrap_or(i32::MAX))
-        .immediate_mode(true)
-        .open()
-        .map_err(|e| (id.to_string(), format!("capture open failed: {e}")))?;
-
-    // Non-blocking mode: next_packet() returns immediately with TimeoutExpired
-    // when no frame is ready, instead of blocking inside libpcap until one
-    // arrives. Blocking mode never honours the duration deadline on a quiet
-    // link (Linux only wakes next_packet() on packet arrival), leaving the
-    // session stuck in "running" forever.
-    let mut cap = cap
-        .setnonblock()
-        .map_err(|e| (id.to_string(), format!("capture nonblock failed: {e}")))?;
-
-    if !filter.is_empty() {
-        cap.filter(filter, true).map_err(|e| {
-            tracing::debug!(error = %e, "BPF filter compilation failed");
-            (
-                id.to_string(),
-                "BPF filter compilation failed — check filter syntax".to_string(),
-            )
-        })?;
-    }
-
-    let mut savefile = cap
-        .savefile(output_path)
-        .map_err(|e| (id.to_string(), format!("pcap file create failed: {e}")))?;
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(duration_secs);
-    let mut packets: u64 = 0;
-
-    while std::time::Instant::now() < deadline {
-        match cap.next_packet() {
-            Ok(packet) => {
-                savefile.write(&packet);
-                packets += 1;
-            }
-            // No frame ready — yield briefly so we re-check the deadline
-            // without busy-spinning the capture thread.
-            Err(pcap::Error::TimeoutExpired | pcap::Error::NoMorePackets) => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(_) => break,
-        }
-    }
-
-    drop(savefile);
-    let file_size = std::fs::metadata(output_path).map_or(0, |m| m.len());
-
-    Ok((id.to_string(), packets, file_size))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
