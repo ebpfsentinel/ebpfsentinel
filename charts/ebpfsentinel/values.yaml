@@ -90,10 +90,13 @@ daemonset:
   # -- Pod priority class name
   priorityClassName: ""
   # -- BPF token delegation. eBPF is loaded EXCLUSIVELY through a BPF token
-  # (kernel 6.9+), a user-namespace feature. The container entrypoint
+  # (kernel 6.9+), a user-namespace feature. The launcher
   # `ebpfsentinel-token-launch` sets up the delegated bpffs at `bpffsPath` in a
   # child user namespace and execs the agent there, so the long-running agent
   # holds no host capabilities. There is no capability-based loading path.
+  # `bpffsPath` drives BOTH the launcher `--bpffs` (DaemonSet command) and the
+  # agent's `bpf_token.bpffs_path` (ConfigMap) — keep them in sync via this one
+  # value; they must point at the same mount.
   bpfToken:
     bpffsPath: /sys/fs/bpf/ebpfsentinel
   # -- Agent container security context. The launcher entrypoint needs

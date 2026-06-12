@@ -59,6 +59,13 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.daemonset.securityContext | nindent 12 }}
+          # Override the image entrypoint so the launcher --bpffs tracks the
+          # configured bpffsPath (the agent's bpf_token.bpffs_path must match).
+          command:
+            - "/usr/local/bin/ebpfsentinel-token-launch"
+            - "--bpffs"
+            - {{ .Values.daemonset.bpfToken.bpffsPath | quote }}
+            - "/usr/local/bin/ebpfsentinel-agent"
           args:
             - "--config"
             - "/etc/ebpfsentinel/config.yaml"
@@ -100,7 +107,8 @@ spec:
               readOnly: true
             - name: bpf
               mountPath: /sys/fs/bpf
-              # See the delegated bpffs the init container mounted.
+              # The launcher mounts the delegated bpffs over this path inside its
+              # own private mount namespace; expose the host bpffs to the pod.
               mountPropagation: HostToContainer
             - name: debug
               mountPath: /sys/kernel/debug

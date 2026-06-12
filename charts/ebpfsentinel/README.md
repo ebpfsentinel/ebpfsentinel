@@ -6,7 +6,7 @@ eBPF-native Network & Security platform for Linux
 
 ## Overview
 
-Deploys [eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel) — a kernel-native **Network & Security platform** — as a Kubernetes DaemonSet. One agent per node with a scoped capability set (`CAP_BPF`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, `CAP_NET_RAW`) instead of `privileged: true`, attached to host network interfaces via eBPF (XDP/TC).
+Deploys [eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel) — a kernel-native **Network & Security platform** — as a Kubernetes DaemonSet. One agent per node, attached to host network interfaces via eBPF (XDP/TC). eBPF loads **exclusively** through a BPF token: the container entrypoint (`ebpfsentinel-token-launch`) creates the token in a child user namespace and execs the agent unprivileged, so the pod is granted only `CAP_SYS_ADMIN` (for the launcher bootstrap) instead of `privileged: true`.
 
 ## Edition: OSS (AGPL-3.0)
 
@@ -48,7 +48,8 @@ See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/m
 | Requirement | Reason |
 |-------------|--------|
 | `hostNetwork: true` | XDP/TC programs attach to host interfaces, not pod veth |
-| BPF token (only loading path) | eBPF loads **exclusively** through a BPF token — there is no capability-based loading. The `bpf-token-setup` init container (privileged, `CAP_SYS_ADMIN`) mounts the delegated bpffs; the rootless agent container holds NO `CAP_BPF`/`CAP_SYS_ADMIN`, only feature-scoped `CAP_NET_RAW` (pcap capture) + `CAP_NET_ADMIN` (conntrack flow-kill, Multi-WAN) |
+| `CAP_SYS_ADMIN` + `allowPrivilegeEscalation: true` (launcher only) | eBPF loads **exclusively** through a BPF token — there is no capability-based loading path and no init container. The image entrypoint (`ebpfsentinel-token-launch`) consumes `CAP_SYS_ADMIN` to set up the delegated bpffs and create the token inside a child user namespace, then execs the agent there holding **no host capabilities** |
+| unprivileged user namespaces enabled on the node | `BPF_TOKEN_CREATE` is `EOPNOTSUPP` outside a user namespace |
 | `/sys/fs/bpf` mount | BPF filesystem for map pinning + delegated token bpffs |
 | `/sys/kernel/debug` mount | eBPF tracing (debugfs) |
 | Kernel 6.9+ with BTF | Agent minimum: BPF token delegation, ARENA maps, kfuncs; CO-RE requires BTF |
@@ -59,7 +60,7 @@ See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/m
 |---------|-----------|-------|
 | Firewall, IDS, DDoS, Rate Limiting | Full | Attached to host NIC — sees all node traffic |
 | DLP | Partial | Only sees pod processes unless `hostPID: true` |
-| Multi-WAN Routing | Full\* | `hostNetwork` shares host routing table. \*Test with Calico BGP — see CNI note below |
+| Multi-WAN Routing | Limited | `hostNetwork` shares the routing table, but the agent runs in a child user namespace and route application (`ip rule`/`ip route`) goes through netlink, which re-checks `CAP_NET_ADMIN` against the userns sender — so route changes do not take effect (health probes still run). Same constraint as `conntrack -D` flow-kill |
 | Sidecar mode | Not recommended | XDP works on veth (generic mode) but only sees the pod's own traffic — no host or cross-pod visibility |
 
 **DLP full coverage** requires `hostPID: true` in the DaemonSet spec:
@@ -201,9 +202,9 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 | commonLabels | object | `{}` | Labels added to all resources |
 | configOverride | string | `""` | Override the entire config.yaml content. When set, all agent.* and domain toggles above are ignored. |
 | conntrack.enabled | bool | `false` | Enable connection tracking |
-| daemonset | object | `{"affinity":{},"bpfToken":{"bpffsPath":"/sys/fs/bpf/ebpfsentinel"},"extraContainers":[],"extraEnv":[],"extraVolumeMounts":[],"extraVolumes":[],"hostPID":false,"initContainers":[],"minReadySeconds":0,"nodeSelector":{},"podAnnotations":{},"podLabels":{},"priorityClassName":"","resources":{"limits":{"cpu":"1000m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}},"revisionHistoryLimit":10,"securityContext":{"capabilities":{"add":["NET_RAW","NET_ADMIN"],"drop":["ALL"]}},"terminationGracePeriodSeconds":30,"tolerations":[{"operator":"Exists"}],"updateStrategy":{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"}}` | DaemonSet configuration |
+| daemonset | object | `{"affinity":{},"bpfToken":{"bpffsPath":"/sys/fs/bpf/ebpfsentinel"},"extraContainers":[],"extraEnv":[],"extraVolumeMounts":[],"extraVolumes":[],"hostPID":false,"initContainers":[],"minReadySeconds":0,"nodeSelector":{},"podAnnotations":{},"podLabels":{},"priorityClassName":"","resources":{"limits":{"cpu":"1000m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}},"revisionHistoryLimit":10,"securityContext":{"allowPrivilegeEscalation":true,"capabilities":{"add":["SYS_ADMIN"],"drop":["ALL"]}},"terminationGracePeriodSeconds":30,"tolerations":[{"operator":"Exists"}],"updateStrategy":{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"}}` | DaemonSet configuration |
 | daemonset.affinity | object | `{}` | Affinity rules |
-| daemonset.bpfToken | object | `{"bpffsPath":"/sys/fs/bpf/ebpfsentinel"}` | BPF token delegation. eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+): the bpf-token-setup init container mounts the delegated bpffs at `bpffsPath`, and the rootless agent container creates the token against it. There is no capability-based loading path. |
+| daemonset.bpfToken | object | `{"bpffsPath":"/sys/fs/bpf/ebpfsentinel"}` | BPF token delegation. eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+), a user-namespace feature. The launcher `ebpfsentinel-token-launch` sets up the delegated bpffs at `bpffsPath` in a child user namespace and execs the agent there, so the long-running agent holds no host capabilities. There is no capability-based loading path. `bpffsPath` drives BOTH the launcher `--bpffs` (DaemonSet command) and the agent's `bpf_token.bpffs_path` (ConfigMap) — keep them in sync via this one value; they must point at the same mount. |
 | daemonset.extraContainers | list | `[]` | Extra containers (sidecars) |
 | daemonset.extraEnv | list | `[]` | Extra environment variables |
 | daemonset.extraVolumeMounts | list | `[]` | Extra volume mounts (e.g., GeoIP database, TLS certs) |
@@ -217,7 +218,7 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 | daemonset.priorityClassName | string | `""` | Pod priority class name |
 | daemonset.resources | object | `{"limits":{"cpu":"1000m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}` | Resource requests and limits |
 | daemonset.revisionHistoryLimit | int | `10` | Number of old ReplicaSets to retain |
-| daemonset.securityContext | object | `{"capabilities":{"add":["NET_RAW","NET_ADMIN"],"drop":["ALL"]}}` | Agent container security context. Rootless: the BPF token authorizes every eBPF syscall, so NO CAP_BPF and NO CAP_SYS_ADMIN (CAP_SYS_ADMIN lives only in the bpf-token-setup init container). Only feature-scoped caps remain — drop either if you do not use the matching feature:   NET_RAW   — pcap manual/auto packet capture.   NET_ADMIN — conntrack flow-kill (IPS response) + Multi-WAN routing. |
+| daemonset.securityContext | object | `{"allowPrivilegeEscalation":true,"capabilities":{"add":["SYS_ADMIN"],"drop":["ALL"]}}` | Agent container security context. The launcher entrypoint needs CAP_SYS_ADMIN (bpffs delegation + module BTF fds) and user-namespace creation; it drops into the unprivileged userns before exec'ing the agent (no CAP_BPF anywhere). NOTE: nested user namespaces + bpffs delegation can require cluster-specific runtime config (allow unprivileged userns; some runtimes/PSA levels block CAP_SYS_ADMIN). pcap / conntrack-kill teardown / VIP gratuitous-ARP are unavailable to the userns agent (eBPF equivalents keep working). |
 | daemonset.terminationGracePeriodSeconds | int | `30` | Grace period for pod termination (seconds) |
 | daemonset.tolerations | list | `[{"operator":"Exists"}]` | Tolerations (default: schedule on all nodes including control-plane) |
 | daemonset.updateStrategy | object | `{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"}` | DaemonSet update strategy |
