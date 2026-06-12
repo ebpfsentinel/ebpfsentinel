@@ -1,14 +1,17 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
 use domain::audit::entity::AuditAction;
+use domain::auth::entity::JwtClaims;
 use domain::response::entity::{ResponseAction, ResponseActionType};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
+use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 
 // ── Request/Response DTOs ────────────────────────────────────────────
@@ -65,8 +68,12 @@ pub struct ResponseListResponse {
 )]
 pub async fn create_response_action(
     State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<CreateResponseRequest>,
 ) -> Result<Json<ResponseActionResponse>, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
     let action_type = match req.action.as_str() {
         "block_ip" => ResponseActionType::BlockIp,
         "throttle_ip" => ResponseActionType::ThrottleIp,
@@ -206,8 +213,12 @@ pub async fn list_response_actions(
 )]
 pub async fn revoke_response_action(
     State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<Json<ResponseActionResponse>, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
     let response_engine = state
         .response_engine
         .as_ref()

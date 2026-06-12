@@ -1,13 +1,16 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
+use domain::auth::entity::JwtClaims;
 use domain::capture::entity::{CaptureSession, CaptureStatus};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
+use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 use super::validation::validate_string_length;
 
@@ -72,8 +75,12 @@ pub struct CaptureListResponse {
 )]
 pub async fn start_capture(
     State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<StartCaptureRequest>,
 ) -> Result<Json<CaptureResponse>, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
     let capture_engine = state
         .capture_engine
         .as_ref()
@@ -236,8 +243,12 @@ pub async fn list_captures(
 )]
 pub async fn stop_capture(
     State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<Json<CaptureResponse>, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
     let capture_engine = state
         .capture_engine
         .as_ref()

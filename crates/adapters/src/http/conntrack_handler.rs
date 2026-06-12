@@ -1,17 +1,20 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use domain::auth::entity::JwtClaims;
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
+use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
@@ -142,7 +145,11 @@ pub async fn list_connections(
 )]
 pub async fn flush_connections(
     State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
     let ct = state.conntrack_service.as_ref().ok_or(ApiError::NotFound {
         code: "SERVICE_NOT_AVAILABLE",
         message: "Conntrack not enabled".to_string(),

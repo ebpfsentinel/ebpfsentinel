@@ -2,13 +2,16 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::State;
+use domain::auth::entity::JwtClaims;
 use infrastructure::config::AgentConfig;
 use serde::Serialize;
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
+use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 
 // ── Response types ────────────────────────────────────────────────
@@ -49,7 +52,11 @@ pub struct EbpfStatusResponse {
 )]
 pub async fn reload_config(
     State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
 ) -> Result<Json<ReloadResponse>, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
     // Validate the on-disk config before triggering the reload so a bad
     // edit is rejected synchronously instead of crashing the reload task.
     if let Some(path) = state.config_path.as_deref()
@@ -200,10 +207,24 @@ mod tests {
         (state, reload_rx)
     }
 
+    fn claims_with_role(role: &str) -> JwtClaims {
+        JwtClaims {
+            sub: "test-user".to_string(),
+            exp: 9_999_999_999,
+            iat: 0,
+            iss: None,
+            aud: None,
+            role: Some(role.to_string()),
+            namespaces: None,
+            tenant_id: None,
+            roles: None,
+        }
+    }
+
     #[tokio::test]
     async fn reload_config_returns_ok() {
         let (state, _rx) = make_state();
-        let result = reload_config(State(state)).await;
+        let result = reload_config(State(state), None).await;
         let Json(resp) = result.expect("reload should succeed");
         assert_eq!(resp.status, "ok");
     }
@@ -213,8 +234,33 @@ mod tests {
         let (state, _rx) = make_state();
         // Fill the channel (capacity 1)
         let _ = state.reload_trigger.try_send(());
-        let result = reload_config(State(state)).await;
+        let result = reload_config(State(state), None).await;
         assert!(matches!(result, Err(ApiError::Internal { .. })));
+    }
+
+    #[tokio::test]
+    async fn reload_config_rejects_viewer() {
+        let (state, _rx) = make_state();
+        let claims = Extension(claims_with_role("viewer"));
+        let result = reload_config(State(state), Some(claims)).await;
+        assert!(
+            matches!(
+                result,
+                Err(ApiError::Forbidden {
+                    code: "INSUFFICIENT_ROLE",
+                    ..
+                })
+            ),
+            "viewer must not be able to reload config"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_config_allows_operator() {
+        let (state, _rx) = make_state();
+        let claims = Extension(claims_with_role("operator"));
+        let result = reload_config(State(state), Some(claims)).await;
+        assert!(result.is_ok(), "operator must be allowed to reload config");
     }
 
     #[tokio::test]

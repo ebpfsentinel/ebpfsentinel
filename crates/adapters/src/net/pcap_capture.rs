@@ -64,7 +64,7 @@ impl PcapSocketPool {
     /// Number of sockets currently available.
     #[must_use]
     pub fn available(&self) -> usize {
-        self.free.lock().map(|f| f.len()).unwrap_or(0)
+        self.free.lock().map_or(0, |f| f.len())
     }
 
     /// Borrow a socket. Returns `None` when every socket is in use.

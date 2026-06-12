@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::State;
+use domain::auth::entity::JwtClaims;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
+use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 
 // ── Response DTOs ───────────────────────────────────────────────────
@@ -204,8 +207,12 @@ pub async fn list_feeds(State(state): State<Arc<AppState>>) -> Json<Vec<FeedResp
 )]
 pub async fn refresh_feeds(
     State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
     body: Option<Json<RefreshFeedRequest>>,
 ) -> Result<Json<RefreshResponse>, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
     let req = body.map(|Json(b)| b).unwrap_or_default();
     let trigger =
         state

@@ -1,13 +1,16 @@
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
+use domain::auth::entity::JwtClaims;
 use domain::zone::entity::{Zone, ZonePair, ZonePolicy};
 use domain::zone::error::ZoneError;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
+use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
@@ -232,8 +235,12 @@ pub async fn list_zone_policies(
 )]
 pub async fn create_zone(
     State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<CreateZoneRequest>,
 ) -> Result<(axum::http::StatusCode, Json<ZoneResponse>), ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
     let zone = state.zone_service.as_ref().ok_or(ApiError::NotFound {
         code: "SERVICE_NOT_AVAILABLE",
         message: "Zone service not enabled".to_string(),
@@ -273,8 +280,12 @@ pub async fn create_zone(
 )]
 pub async fn delete_zone(
     State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
     let zone = state.zone_service.as_ref().ok_or(ApiError::NotFound {
         code: "SERVICE_NOT_AVAILABLE",
         message: "Zone service not enabled".to_string(),
@@ -301,8 +312,12 @@ pub async fn delete_zone(
 )]
 pub async fn create_zone_policy(
     State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<CreateZonePolicyRequest>,
 ) -> Result<(axum::http::StatusCode, Json<ZonePolicyResponse>), ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
     let zone = state.zone_service.as_ref().ok_or(ApiError::NotFound {
         code: "SERVICE_NOT_AVAILABLE",
         message: "Zone service not enabled".to_string(),
@@ -339,8 +354,12 @@ pub async fn create_zone_policy(
 )]
 pub async fn delete_zone_policy(
     State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
     let zone = state.zone_service.as_ref().ok_or(ApiError::NotFound {
         code: "SERVICE_NOT_AVAILABLE",
         message: "Zone service not enabled".to_string(),

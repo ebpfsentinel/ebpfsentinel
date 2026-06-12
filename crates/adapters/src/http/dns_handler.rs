@@ -1,14 +1,17 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
+use domain::auth::entity::JwtClaims;
 use ports::secondary::dns_cache_port::DnsCachePort;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use super::error::{ApiError, ErrorBody};
+use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 
 // ── Query parameters ────────────────────────────────────────────────
@@ -330,7 +333,11 @@ pub async fn list_dns_blocklist(
 )]
 pub async fn flush_dns_cache(
     State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
     let (cache, _) = get_dns_services(&state)?;
     let count = cache.flush_and_count();
     Ok(Json(DnsFlushResponse {

@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
+use domain::auth::entity::JwtClaims;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
+use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
@@ -178,8 +181,12 @@ pub async fn list_nptv6_rules(
 )]
 pub async fn create_nptv6_rule(
     State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<CreateNptV6RuleRequest>,
 ) -> Result<Json<NptV6RuleResponse>, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
     let nat = state.nat_service.as_ref().ok_or(ApiError::NotFound {
         code: "SERVICE_NOT_AVAILABLE",
         message: "NAT not enabled".to_string(),
@@ -242,8 +249,12 @@ pub async fn create_nptv6_rule(
 )]
 pub async fn delete_nptv6_rule(
     State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<Json<()>, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
     let nat = state.nat_service.as_ref().ok_or(ApiError::NotFound {
         code: "SERVICE_NOT_AVAILABLE",
         message: "NAT not enabled".to_string(),

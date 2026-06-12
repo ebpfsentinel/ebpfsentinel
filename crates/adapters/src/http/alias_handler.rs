@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
+use domain::auth::entity::JwtClaims;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
+use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
@@ -69,9 +72,13 @@ pub async fn alias_status(
 )]
 pub async fn set_external_alias_content(
     State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
     Path(alias_id): Path<String>,
     Json(body): Json<ExternalAliasContent>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
     let alias_svc = state.alias_service.as_ref().ok_or(ApiError::NotFound {
         code: "SERVICE_NOT_AVAILABLE",
         message: "Alias service not enabled".to_string(),
