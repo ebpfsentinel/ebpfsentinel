@@ -1,0 +1,67 @@
+# Split-broker Docker Compose — kernel 6.9+ required.
+#
+# Privilege-isolated layout: the privileged bpffs delegation + module-BTF/pcap fd
+# provisioning lives in a small `broker` container; the long-running `agent`
+# container runs NON-ROOT + cap-drop ALL + no CAP_SYS_ADMIN. An auditor sees the
+# agent locked down and the full-access surface confined to the tiny broker.
+#
+# Both services run the same image; only the entrypoint args differ. They share
+# the broker socket through the `broker-sock` volume.
+#
+# The agent runs as uid/gid 65534, so the mounted config and data must be
+# readable/writable by that id:
+#   chown -R 65534:65534 ./config ./data && chmod 640 ./config/ebpfsentinel.yaml
+# (the agent rejects a world-readable config).
+
+services:
+  broker:
+    image: ebpfsentinel:latest
+    entrypoint: ["/usr/local/bin/ebpfsentinel-token-launch"]
+    command: ["--broker-serve", "/run/ebpfsentinel/broker.sock"]
+    network_mode: host
+    pid: host
+    cap_drop: [ALL]
+    cap_add:
+      - SYS_ADMIN # bpffs delegation + module BTF fds
+      - NET_RAW # pre-open the AF_PACKET pcap pool
+    security_opt:
+      - apparmor=unconfined # launcher does mount/move_mount
+      - seccomp=unconfined
+    volumes:
+      - broker-sock:/run/ebpfsentinel
+    restart: unless-stopped
+
+  agent:
+    image: ebpfsentinel:latest
+    depends_on: [broker]
+    entrypoint: ["/usr/local/bin/ebpfsentinel-token-launch"]
+    command:
+      - "--broker-connect"
+      - "/run/ebpfsentinel/broker.sock"
+      - "--bpffs"
+      - "/sys/fs/bpf/ebpfsentinel"
+      - "/usr/local/bin/ebpfsentinel-agent"
+      - "--config"
+      - "/etc/ebpfsentinel/config.yaml"
+    network_mode: host
+    pid: host
+    user: "65534:65534" # non-root: the shim's uid_map self-map needs it
+    cap_drop: [ALL] # NO CAP_SYS_ADMIN, NO CAP_NET_RAW — the broker holds them
+    security_opt:
+      - apparmor=unconfined # the shim unshares a userns + mounts the bpffs
+      - seccomp=unconfined # (or ./seccomp/ebpfsentinel-agent.json)
+    volumes:
+      - broker-sock:/run/ebpfsentinel
+      - ./config:/etc/ebpfsentinel:ro
+      - ./data:/var/lib/ebpfsentinel
+      # A container's /sys is read-only; this writable tmpfs is where the shim
+      # mounts the delegated bpffs and the agent pins its maps. mode 1777 so the
+      # non-root (uid 65534) shim can create the mountpoint.
+      - type: tmpfs
+        target: /sys/fs/bpf
+        tmpfs:
+          mode: 0o1777
+    restart: unless-stopped
+
+volumes:
+  broker-sock:
