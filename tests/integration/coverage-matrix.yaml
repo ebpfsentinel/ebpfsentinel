@@ -41,7 +41,7 @@ nested_cli_subcommands:
 #   pr      — runs on every pull-request + push (fast feedback, ≤30 s/suite p95
 #             per the 15-min CI budget)
 #   nightly — runs on the 02:00 UTC cron, plus workflow_dispatch profile=full
-#             (attack-realism suites 41+, perf benches 15/29/30, soak job)
+#             (attack-realism suites 38+, perf benches 15/29/30, soak job)
 #   manual  — workflow_dispatch profile=full only
 #
 # The feature-level `profile` field on each coverage row remains informational
@@ -62,7 +62,7 @@ suite_profiles:
   "12": pr
   "13": pr
   "14": pr
-  "15": nightly       # 15-performance-benchmark — heavy iperf/hping3 sweep
+  "15": pr
   "16": pr
   "17": pr
   "18": pr
@@ -76,102 +76,106 @@ suite_profiles:
   "26": pr
   "27": pr
   "28": pr
-  "29": nightly       # 29-ebpf-feature-overhead — per-feature CPU/RSS sweep
-  "30": nightly       # 30-ebpf-map-operation-bench — map churn microbench
+  "29": pr
+  "30": pr
   "31": pr
-  "32": pr
+  "32": nightly
   "33": pr
   "34": pr
-  "35": nightly       # 35-ebpf-routing-scenarios — multi-WAN setup heavy
+  "35": pr
   "36": pr
   "37": pr
-  "38": pr
-  "39": pr
-  "40": pr
-  "41": nightly       # 41-mhddos-l7-attacks
-  "42": nightly       # 42-pktgen-high-pps
-  "43": nightly       # 43-slowhttptest-slow-attacks
-  "44": nightly       # 44-scapy-amplification
-  "45": nightly       # 45-ja4-fingerprint-diversity
-  "46": nightly       # 46-xdp-firewall-reject
-  "47": nightly       # 47-xdp-ratelimit-syncookie
-  "48": nightly       # 48-lb-dsr-maglev (3-VM)
-  "49": nightly       # 49-dns-doh-dot-detect
-  "50": nightly       # 50-scrub-byte-level
-  "51": nightly       # 51-conntrack-kernel-ct-kill
-  "52": nightly       # 52-responses-time-bounded
-  "53": nightly       # 53-capture-pcap-export
-  "54": nightly       # 54-nptv6-prefix-translation
-  "55": nightly       # 55-mitre-assertions-sweep
-  "56": nightly       # 56-hot-reload-under-load
-  "57": nightly       # 57-multiwan-failover (3-VM)
-  "58": nightly       # 58-container-cgroup-enrichment
-  "59": nightly       # 59-ipv6-full-path-sweep
-  "60": nightly       # 60-l7-smtp-ftp-smb-edge
-  "61": nightly       # 61-pqc-handshake
-  "62": nightly       # 62-ssh-brute-force-real
+  "38": nightly
+  "39": nightly
+  "40": nightly
+  "41": nightly
+  "42": nightly
+  "43": nightly
+  "44": nightly
+  "45": nightly
+  "46": nightly
+  "47": nightly
+  "48": nightly
+  "49": nightly
+  "50": nightly
+  "51": nightly
+  "52": nightly
+  "53": nightly
+  "54": nightly
+  "55": nightly
+  "56": nightly
+  "57": nightly
+  "58": nightly
+  "59": nightly
+  "60": nightly
+  "perf/01": nightly
+  "perf/02": nightly
+  "perf/03": nightly
+  "perf/04": nightly
+  "perf/05": nightly
+  # The performance suites (perf/01-05) live in tests/perf/, run via `make test-perf`.
 
 coverage:
   # ── eBPF programs (15) ──────────────────────────────────────────
   - kind: ebpf_program
     feature: xdp-firewall
-    suites: ["11", "25", "27", "42", "44"]
+    suites: ["11", "24", "26", "perf/04", "40"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "L3/L4 stateful firewall (XDP); XDP-drop CPU savings measured in 42; amplification ports denied in 44"
+    notes: "L3/L4 stateful firewall (XDP); XDP-drop CPU savings measured in perf/04; amplification ports denied in 40"
 
   - kind: ebpf_program
     feature: xdp-firewall-reject
-    suites: ["46"]
+    suites: ["42"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "TCP RST / ICMP forging tail-call; suite 46 wire-validates checksums + src/dst swap + whitelist bypass"
+    notes: "TCP RST / ICMP forging tail-call; perf/04 wire-validates checksums + src/dst swap + whitelist bypass"
 
   - kind: ebpf_program
     feature: xdp-ratelimit
-    suites: ["14", "16", "42"]
+    suites: ["14", "15", "perf/04"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Token bucket + sliding window + leaky bucket; SYN cookie at >1 Mpps in 42"
+    notes: "Token bucket + sliding window + leaky bucket; SYN cookie at >1 Mpps in perf/04"
 
   - kind: ebpf_program
     feature: xdp-ratelimit-syncookie
-    suites: ["47"]
+    suites: ["43"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "SYN cookie forging tail-call; suite 47 asserts TcpExtSyncookiesSent + agent metric grow, legit ncat completes, spoofed flood leaves TcpExtSyncookiesRecv flat"
+    notes: "SYN cookie forging tail-call; suite 43 asserts TcpExtSyncookiesSent + agent metric grow, legit ncat completes, spoofed flood leaves TcpExtSyncookiesRecv flat"
 
   - kind: ebpf_program
     feature: xdp-loadbalancer
-    suites: ["21", "48"]
+    suites: ["20", "44"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "L4 LB + Maglev; suite 48 (3-VM) covers L2 DSR end-to-end and Maglev disruption bound"
+    notes: "L4 LB + Maglev; suite 44 (3-VM) covers L2 DSR end-to-end and Maglev disruption bound"
 
   - kind: ebpf_program
     feature: xdp-vip-announcer
-    suites: ["40", "48"]
+    suites: ["37", "44"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "L2 VIP announcer / ARP responder; suite 48 (3-VM) drives the responder + gratuitous-ARP + is_self_announced predicate from a real client"
+    notes: "L2 VIP announcer / ARP responder; suite 44 (3-VM) drives the responder + gratuitous-ARP + is_self_announced predicate from a real client"
 
   - kind: ebpf_program
     feature: tc-ids
-    suites: ["12", "26", "42", "43"]
+    suites: ["12", "25", "perf/04", "39"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in 42; slow-attack signatures in 43"
+    notes: "Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in perf/04; slow-attack signatures in 39"
 
   - kind: ebpf_program
     feature: tc-threatintel
-    suites: ["18", "36"]
+    suites: ["17", "33"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -179,39 +183,39 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-conntrack
-    suites: ["19", "25", "51"]
+    suites: ["18", "24", "47"]
     topology: 3vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Connection tracking; kernel-CT kill via kill_flow_via_xdp_ct/skb_ct asserted in 51"
+    notes: "Connection tracking; kernel-CT kill via kill_flow_via_xdp_ct/skb_ct asserted in 47"
 
   - kind: ebpf_program
     feature: tc-dns
-    suites: ["20", "49"]
+    suites: ["19", "45"]
     topology: 3vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Passive DNS capture; DoH/DoT detection via ClientHello SNI + dst_port 853 asserted in 49"
+    notes: "Passive DNS capture; DoH/DoT detection via ClientHello SNI + dst_port 853 asserted in 45"
 
   - kind: ebpf_program
     feature: tc-nat-ingress
-    suites: ["22", "54"]
+    suites: ["21", "50"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "DNAT (TC ingress); NPTv6 reverse-prefix translation surface asserted via REST + CLI in 54"
+    notes: "DNAT (TC ingress); NPTv6 reverse-prefix translation surface asserted via REST + CLI in 50"
 
   - kind: ebpf_program
     feature: tc-nat-egress
-    suites: ["22", "54"]
+    suites: ["21", "50"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "SNAT (TC egress); NPTv6 (RFC 6296) checksum-neutral prefix swap config + CLI/REST surface asserted in 54 (wire-level swap gated on IPv6 routability)"
+    notes: "SNAT (TC egress); NPTv6 (RFC 6296) checksum-neutral prefix swap config + CLI/REST surface asserted in 50 (wire-level swap gated on IPv6 routability)"
 
   - kind: ebpf_program
     feature: tc-qos
-    suites: ["31"]
+    suites: ["28"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -219,19 +223,19 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-scrub
-    suites: ["24", "44", "50"]
+    suites: ["23", "40", "46"]
     topology: 3vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Packet normalization; spoofed-source amplification drop in 44; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 50"
+    notes: "Packet normalization; spoofed-source amplification drop in 40; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 46"
 
   - kind: ebpf_program
     feature: uprobe-dlp
-    suites: ["28"]
+    suites: ["27"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "SSL/TLS DLP via uprobes; TLS-MITM inspection enterprise suite 63"
+    notes: "SSL/TLS DLP via uprobes; TLS-MITM inspection enterprise suite 60"
 
   # ── CLI subcommands (28) ────────────────────────────────────────
   - kind: cli_subcommand
@@ -252,7 +256,7 @@ coverage:
 
   - kind: cli_subcommand
     feature: identity
-    suites: ["38"]
+    suites: ["35"]
     topology: none
     kernel_min: "n/a"
     profile: pr
@@ -276,7 +280,7 @@ coverage:
 
   - kind: cli_subcommand
     feature: watch
-    suites: ["37"]
+    suites: ["34"]
     topology: none
     kernel_min: "n/a"
     profile: pr
@@ -292,7 +296,7 @@ coverage:
 
   - kind: cli_subcommand
     feature: flows
-    suites: ["04", "19"]
+    suites: ["04", "18"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -316,7 +320,7 @@ coverage:
 
   - kind: cli_subcommand
     feature: conntrack
-    suites: ["19", "17"]
+    suites: ["18", "16"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -324,39 +328,39 @@ coverage:
 
   - kind: cli_subcommand
     feature: firewall
-    suites: ["03", "11", "27", "44"]
+    suites: ["03", "11", "26", "40"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "L3/L4 rule CRUD + eBPF scenarios; amplification UDP-port denies in 44"
+    notes: "L3/L4 rule CRUD + eBPF scenarios; amplification UDP-port denies in 40"
 
   - kind: cli_subcommand
     feature: l7
-    suites: ["17", "32", "41", "43"]
+    suites: ["16", "29", "38", "39"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "L7 firewall rules (HTTP/SMTP/FTP/SMB inspection); MHDDoS flood matrix in 41; slow-request timeout in 43"
+    notes: "L7 firewall rules (HTTP/SMTP/FTP/SMB inspection); MHDDoS flood matrix in 38; slow-request timeout in 39"
 
   - kind: cli_subcommand
     feature: ips
-    suites: ["13", "17", "41", "43"]
+    suites: ["13", "16", "38", "39"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Intrusion prevention + auto-blacklist; MHDDoS flood matrix in 41; slowhttptest in 43"
+    notes: "Intrusion prevention + auto-blacklist; MHDDoS flood matrix in 38; slowhttptest in 39"
 
   - kind: cli_subcommand
     feature: ratelimit
-    suites: ["04", "14", "17", "41"]
+    suites: ["04", "14", "16", "38"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Rate limit policies; MHDDoS flood matrix in 41"
+    notes: "Rate limit policies; MHDDoS flood matrix in 38"
 
   - kind: cli_subcommand
     feature: threatintel
-    suites: ["17", "18", "36"]
+    suites: ["16", "17", "33"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -364,7 +368,7 @@ coverage:
 
   - kind: cli_subcommand
     feature: alerts
-    suites: ["04", "26", "37"]
+    suites: ["04", "25", "34"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -380,7 +384,7 @@ coverage:
 
   - kind: cli_subcommand
     feature: dns
-    suites: ["04", "20"]
+    suites: ["04", "19"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -396,15 +400,15 @@ coverage:
 
   - kind: cli_subcommand
     feature: ddos
-    suites: ["16", "23", "41", "43", "44"]
+    suites: ["15", "22", "38", "39", "40"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "DDoS protection + scrub; MHDDoS flood matrix in 41; slow-attack T1499.002 in 43; amplification T1498.002 in 44"
+    notes: "DDoS protection + scrub; MHDDoS flood matrix in 38; slow-attack T1499.002 in 39; amplification T1498.002 in 40"
 
   - kind: cli_subcommand
     feature: lb
-    suites: ["17", "21", "40"]
+    suites: ["16", "20", "37"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -412,7 +416,7 @@ coverage:
 
   - kind: cli_subcommand
     feature: qos
-    suites: ["17", "31"]
+    suites: ["16", "28"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -420,7 +424,7 @@ coverage:
 
   - kind: cli_subcommand
     feature: nat
-    suites: ["17", "22"]
+    suites: ["16", "21"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -432,44 +436,44 @@ coverage:
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "MITRE coverage matrix; technique assertions planned suite 55"
+    notes: "MITRE coverage matrix; technique assertions planned suite 51"
 
   - kind: cli_subcommand
     feature: fingerprints
-    suites: ["32", "45"]
+    suites: ["29", "41"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "JA4+ cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 45"
+    notes: "JA4+ cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 41"
 
   - kind: cli_subcommand
     feature: responses
-    suites: ["52"]
+    suites: ["48"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "Manual time-bounded response actions (create/list/revoke + TTL auto-expire) asserted via REST + CLI parity in 52"
+    notes: "Manual time-bounded response actions (create/list/revoke + TTL auto-expire) asserted via REST + CLI parity in 48"
 
   - kind: cli_subcommand
     feature: capture
-    suites: ["53"]
+    suites: ["49"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "Manual packet capture (start/list/stop) with tcpdump-parseable pcap export asserted in 53"
+    notes: "Manual packet capture (start/list/stop) with tcpdump-parseable pcap export asserted in 49"
 
   - kind: cli_subcommand
     feature: nptv6
-    suites: ["54"]
+    suites: ["50"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "NPTv6 prefix-translation CRUD + listing asserted via REST + `nat nptv6 list` CLI parity in 54"
+    notes: "NPTv6 prefix-translation CRUD + listing asserted via REST + `nat nptv6 list` CLI parity in 50"
 
   # ── Domain modules (23, excl. common) ───────────────────────────
   - kind: domain_module
     feature: alert
-    suites: ["04", "26", "37"]
+    suites: ["04", "25", "34"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -477,7 +481,7 @@ coverage:
 
   - kind: domain_module
     feature: alias
-    suites: ["17"]
+    suites: ["16"]
     topology: none
     kernel_min: "n/a"
     profile: pr
@@ -493,7 +497,7 @@ coverage:
 
   - kind: domain_module
     feature: auth
-    suites: ["07", "39"]
+    suites: ["07", "36"]
     topology: none
     kernel_min: "n/a"
     profile: pr
@@ -501,39 +505,39 @@ coverage:
 
   - kind: domain_module
     feature: capture
-    suites: ["53"]
+    suites: ["49"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "Pcap export lifecycle (Running → Completed) + on-disk pcap validity asserted in 53"
+    notes: "Pcap export lifecycle (Running → Completed) + on-disk pcap validity asserted in 49"
 
   - kind: domain_module
     feature: conntrack
-    suites: ["19", "25", "51"]
+    suites: ["18", "24", "47"]
     topology: 3vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Connection tracking; kernel-CT kill on block-rule injection mid-flow in 51"
+    notes: "Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47"
 
   - kind: domain_module
     feature: container
-    suites: ["58"]
+    suites: ["54"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 58; AlertResponse container fields, k8s pod enrichment, and per-tenant cgroup filter map tracked as deferred ACs in the suite header"
+    notes: "cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 54; AlertResponse container fields, k8s pod enrichment, and per-tenant cgroup filter map tracked as deferred ACs in the suite header"
 
   - kind: domain_module
     feature: ddos
-    suites: ["16", "23", "41", "43", "44"]
+    suites: ["15", "22", "38", "39", "40"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "DDoS detection + policy; MHDDoS flood matrix in 41; service-exhaustion in 43; amplification in 44"
+    notes: "DDoS detection + policy; MHDDoS flood matrix in 38; service-exhaustion in 39; amplification in 40"
 
   - kind: domain_module
     feature: dlp
-    suites: ["17", "28"]
+    suites: ["16", "27"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -541,39 +545,39 @@ coverage:
 
   - kind: domain_module
     feature: dns
-    suites: ["04", "20", "49", "59"]
+    suites: ["04", "19", "45", "55"]
     topology: 3vm
     kernel_min: "6.9"
     profile: pr
-    notes: "DNS intel; DoH/DoT detection via ClientHello SNI + dst_port 853 in 49; AAAA query parser-readiness asserted in 59"
+    notes: "DNS intel; DoH/DoT detection via ClientHello SNI + dst_port 853 in 45; AAAA query parser-readiness asserted in 55"
 
   - kind: domain_module
     feature: firewall
-    suites: ["03", "11", "25", "27", "44", "51", "59"]
+    suites: ["03", "11", "24", "26", "40", "47", "55"]
     topology: 3vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Stateful L3/L4 firewall; amplification UDP-port denies in 44; mid-flow block + CT-kill in 51; IPv6 CIDR rule round-trip + v4↔v6 co-existence asserted in 59"
+    notes: "Stateful L3/L4 firewall; amplification UDP-port denies in 40; mid-flow block + CT-kill in 47; IPv6 CIDR rule round-trip + v4↔v6 co-existence asserted in 55"
 
   - kind: domain_module
     feature: ids
-    suites: ["12", "26", "41", "43", "59", "62"]
+    suites: ["12", "25", "38", "39", "55", "59"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Intrusion detection engine; behavioural signatures stressed in 41; slow-attack signatures in 43; IPv6-scoped signature surface asserted in 59 (wire-level v6 IDS alert via tc-ids deferred — needs dual-stack 2-VM topology); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 62 (real hydra/ncrack credential bursts deferred — same dataplane contract is driven by the SYN-burst path)"
+    notes: "Intrusion detection engine; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (wire-level v6 IDS alert via tc-ids deferred — needs dual-stack 2-VM topology); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (real hydra/ncrack credential bursts deferred — same dataplane contract is driven by the SYN-burst path)"
 
   - kind: domain_module
     feature: ips
-    suites: ["13", "17", "41", "43", "59", "62"]
+    suites: ["13", "16", "38", "39", "55", "59"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Auto-blacklist + whitelist; MHDDoS flood matrix in 41; slowhttptest in 43; IPv6 blacklist-write surface asserted in 59; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 62"
+    notes: "Auto-blacklist + whitelist; MHDDoS flood matrix in 38; slowhttptest in 39; IPv6 blacklist-write surface asserted in 55; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 55"
 
   - kind: domain_module
     feature: l2
-    suites: ["40"]
+    suites: ["37"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
@@ -581,31 +585,31 @@ coverage:
 
   - kind: domain_module
     feature: l7
-    suites: ["17", "32", "41", "43", "60"]
+    suites: ["16", "29", "38", "39", "56"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "HTTP/TLS/SNI/gRPC/SMTP/FTP/SMB; slow-request timeout in 43; SMTP/FTP/SMB matcher round-trip + parser robustness (truncated TCP, invalid-protocol POST rejection) asserted in 60. Wire-level swaks/lftp/smbclient per-command behaviour deferred (needs extra deps on test VMs; covered by domain l7::engine unit tests)"
+    notes: "HTTP/TLS/SNI/gRPC/SMTP/FTP/SMB; slow-request timeout in 39; SMTP/FTP/SMB matcher round-trip + parser robustness (truncated TCP, invalid-protocol POST rejection) asserted in 56. Wire-level swaks/lftp/smbclient per-command behaviour deferred (needs extra deps on test VMs; covered by domain l7::engine unit tests)"
 
   - kind: domain_module
     feature: loadbalancer
-    suites: ["17", "21", "40", "48"]
+    suites: ["16", "20", "37", "44"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Maglev + DSR; 3-VM end-to-end coverage via suite 48"
+    notes: "Maglev + DSR; 3-VM end-to-end coverage via suite 44"
 
   - kind: domain_module
     feature: nat
-    suites: ["17", "22", "54"]
+    suites: ["16", "21", "50"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 54"
+    notes: "SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 50"
 
   - kind: domain_module
     feature: qos
-    suites: ["17", "31"]
+    suites: ["16", "28"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -613,31 +617,31 @@ coverage:
 
   - kind: domain_module
     feature: ratelimit
-    suites: ["04", "14", "41"]
+    suites: ["04", "14", "38"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Token bucket + variants; exhaustion under flood in 41"
+    notes: "Token bucket + variants; exhaustion under flood in 38"
 
   - kind: domain_module
     feature: response
-    suites: ["52"]
+    suites: ["48"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "In-memory ResponseEngine create/list/revoke + TTL auto-expire asserted in 52; auto_response → IpsService → firewall-map mirroring exercised separately by the auto-response pipeline (not in 52)"
+    notes: "In-memory ResponseEngine create/list/revoke + TTL auto-expire asserted in 48; auto_response → IpsService → firewall-map mirroring exercised separately by the auto-response pipeline (not in 48)"
 
   - kind: domain_module
     feature: routing
-    suites: ["35", "57"]
+    suites: ["32", "53"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "Multi-WAN routing; failover ordering + REST + metrics surface asserted in 57 (priority-ordered list, gateways_total gauge, failovers_total counter, SIGHUP-driven priority swap). Active health probe loop + WAN_ALL_DOWN alert + real link-down egress reroute tracked as deferred ACs in the suite header"
+    notes: "Multi-WAN routing; failover ordering + REST + metrics surface asserted in 53 (priority-ordered list, gateways_total gauge, failovers_total counter, SIGHUP-driven priority swap). Active health probe loop + WAN_ALL_DOWN alert + real link-down egress reroute tracked as deferred ACs in the suite header"
 
   - kind: domain_module
     feature: threatintel
-    suites: ["17", "18", "36"]
+    suites: ["16", "17", "33"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -645,7 +649,7 @@ coverage:
 
   - kind: domain_module
     feature: zone
-    suites: ["34"]
+    suites: ["31"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -658,7 +662,7 @@ coverage:
 # the cross-product of feature rows.
 
 attack_suites:
-  - suite: "41"
+  - suite: "38"
     name: mhddos-l7-attacks
     topology: 2vm
     kernel_min: "6.9"
@@ -666,7 +670,7 @@ attack_suites:
     surfaces: ["l7", "ips", "ratelimit", "ddos", "ids"]
     notes: "MHDDoS GET/POST/STRESS/BYPASS/OVH/TLS/CFB/SLOW multi-method floods"
 
-  - suite: "42"
+  - suite: "perf/04"
     name: pktgen-high-pps
     topology: 2vm
     kernel_min: "6.9"
@@ -674,7 +678,7 @@ attack_suites:
     surfaces: ["xdp-firewall", "xdp-ratelimit", "tc-ids"]
     notes: "≥1 Mpps via kernel pktgen; asserts XDP-drop CPU savings + SYN cookie path"
 
-  - suite: "43"
+  - suite: "39"
     name: slowhttptest-slow-attacks
     topology: 2vm
     kernel_min: "6.9"
@@ -682,7 +686,7 @@ attack_suites:
     surfaces: ["l7", "ids", "ips", "ddos"]
     notes: "Slowloris / RUDY / Slowread via slowhttptest; asserts IPS auto-blacklist + MITRE T1499.002 + false-positive guard"
 
-  - suite: "44"
+  - suite: "40"
     name: scapy-amplification
     topology: 2vm
     kernel_min: "6.9"
@@ -690,7 +694,7 @@ attack_suites:
     surfaces: ["xdp-firewall", "tc-scrub", "ddos"]
     notes: "Spoofed-source DNS ANY / NTP monlist / SSDP / Memcached probes; asserts pre-response drop + MITRE T1498.002 + zero egress amplification"
 
-  - suite: "45"
+  - suite: "41"
     name: ja4-fingerprint-diversity
     topology: 2vm
     kernel_min: "6.9"
@@ -698,7 +702,7 @@ attack_suites:
     surfaces: ["l7", "fingerprints"]
     notes: "Diverse TLS clients (curl/openssl/urllib3/aiohttp/go/MHDDoS) populate JA4 cache; asserts cache growth + MITRE T1071 tag on malicious-SNI alert + ja4_fingerprint surfaces on /api/v1/alerts + FP guard for legit SNI + endpoint liveness after agent restart"
 
-  - suite: "46"
+  - suite: "42"
     name: xdp-firewall-reject
     topology: 2vm
     kernel_min: "6.9"
@@ -706,7 +710,7 @@ attack_suites:
     surfaces: ["xdp-firewall", "xdp-firewall-reject"]
     notes: "Forged-reply wire validation: TCP RST yields ECONNREFUSED + valid checksum + swapped src/dst; UDP yields ICMP type 3 code 3; whitelisted source bypasses reject path; rejected metric increments"
 
-  - suite: "47"
+  - suite: "43"
     name: xdp-ratelimit-syncookie
     topology: 2vm
     kernel_min: "6.9"
@@ -714,7 +718,7 @@ attack_suites:
     surfaces: ["xdp-ratelimit", "xdp-ratelimit-syncookie", "ddos"]
     notes: "SYN flood: nstat TcpExtSyncookiesSent and agent syncookie_sent metric grow, legit ncat completes 3-way via cookie, spoofed-source flood leaves TcpExtSyncookiesRecv flat"
 
-  - suite: "48"
+  - suite: "44"
     name: lb-dsr-maglev
     topology: 3vm
     kernel_min: "6.9"
@@ -722,7 +726,7 @@ attack_suites:
     surfaces: ["xdp-loadbalancer", "xdp-vip-announcer", "loadbalancer"]
     notes: "L2 DSR end-to-end: agent rewrites dst MAC and the backend→client return bypasses it; Maglev rebuild on backend removal stays under the 2/N disruption bound; XDP ARP responder answers on the client subnet; gratuitous-ARP takeover metric increments; is_self_announced() suppresses self-ARP alerts"
 
-  - suite: "49"
+  - suite: "45"
     name: dns-doh-dot-detect
     topology: 3vm
     kernel_min: "6.9"
@@ -730,7 +734,7 @@ attack_suites:
     surfaces: ["tc-dns", "l7", "dns"]
     notes: "DoH detection via TLS ClientHello SNI on built-in resolver list and on custom dns.doh_resolvers entry; DoT detection by dst_port 853; plain UDP/53 traffic does not raise an EncryptedDns alert (FP guard)"
 
-  - suite: "50"
+  - suite: "46"
     name: scrub-byte-level
     topology: 3vm
     kernel_min: "6.9"
@@ -738,7 +742,7 @@ attack_suites:
     surfaces: ["tc-scrub", "firewall"]
     notes: "Byte-level pcap assertions on the post-transit backend capture: TTL floor (min_ttl raises low TTL to 64), TCP MSS option clamped to max_mss=1400, IPv4 DF flag cleared, IPv4 identification randomized away from sender-chosen value; fragment-policy AC deferred (no ScrubConfig knob yet)"
 
-  - suite: "51"
+  - suite: "47"
     name: conntrack-kernel-ct-kill
     topology: 3vm
     kernel_min: "6.9"
@@ -746,7 +750,7 @@ attack_suites:
     surfaces: ["tc-conntrack", "xdp-firewall", "firewall", "conntrack"]
     notes: "Established iperf3 flow tracked by kernel netfilter conntrack on the transit agent; mid-flow deny rule POST triggers kill_flow_via_xdp_ct kfunc; CT entry disappears within seconds and does not re-establish while the rule is active; removing the rule restores forwarding"
 
-  - suite: "52"
+  - suite: "48"
     name: responses-time-bounded
     topology: 2vm
     kernel_min: "6.9"
@@ -754,7 +758,7 @@ attack_suites:
     surfaces: ["responses", "response"]
     notes: "Time-bounded ResponseEngine via /api/v1/responses/manual: TTL-bound block_ip surfaces in list_active with decreasing remaining_secs; entry drops from active list after TTL; DELETE /api/v1/responses/{id} revokes before TTL; CLI parity via `responses create --action --target --ttl`; AC #3 audit-trail entry deferred (response engine emits no AuditEntry today)"
 
-  - suite: "53"
+  - suite: "49"
     name: capture-pcap-export
     topology: 2vm
     kernel_min: "6.9"
@@ -762,7 +766,7 @@ attack_suites:
     surfaces: ["capture"]
     notes: "Manual capture lifecycle via /api/v1/captures/manual + /api/v1/captures: session reaches status=completed at duration boundary, pcap lands at /var/lib/ebpfsentinel/captures/<id>.pcap, tcpdump -r parses cleanly; CLI parity via `capture start --filter --duration --interface`"
 
-  - suite: "54"
+  - suite: "50"
     name: nptv6-prefix-translation
     topology: 2vm
     kernel_min: "6.9"
@@ -770,7 +774,7 @@ attack_suites:
     surfaces: ["tc-nat-egress", "tc-nat-ingress", "nat", "nptv6"]
     notes: "NPTv6 (RFC 6296) prefix translation surface: GET /api/v1/nat/nptv6 surfaces configured rule, POST + DELETE round-trip a rule, CLI `nat nptv6 list` mirrors the REST list; wire-level egress-source-prefix swap (fd00:54::/64 → 2001:db8:54::/64) gated on per-VM IPv6 reachability and skips when the test VMs lack the IPv6 link addresses + routes"
 
-  - suite: "55"
+  - suite: "51"
     name: mitre-assertions-sweep
     topology: none
     kernel_min: "n/a"
@@ -778,7 +782,7 @@ attack_suites:
     surfaces: ["alert", "mitre"]
     notes: "Meta-test enforcing MITRE coverage on alert-producing suites (12, 13, 14, 16, 18, 20, 22, 23, 26, 28, 32, 36, 41, 43, 44, 47). Grep-based introspection of each .bats source: fails if assert_alert_has_(any_)mitre_technique helper from lib/alert_helpers.bash is not invoked. Emits mitre-coverage.json with (suite, alert_type, expected_technique) triples; REST-only surfaces (16/20/22/36) tagged rest-only with empty technique"
 
-  - suite: "56"
+  - suite: "52"
     name: hot-reload-under-load
     topology: 2vm
     kernel_min: "6.9"
@@ -786,7 +790,7 @@ attack_suites:
     surfaces: ["firewall", "config-reload"]
     notes: "SIGHUP map-swap safety under sustained best-effort load (wrk HTTP + iperf3 TCP, both optional). 6× reload cycle alternating add/remove of a toggle rule at 5 s spacing. Asserts: agent PID stable (no crash + restart), rules_reloads_total{result=success} strictly increments (map generation counter), open FD count stays within +25% / +20 of baseline (proves old map FDs reclaimed — no leak), no panic line in agent log, alert ids unique across the cycle"
 
-  - suite: "57"
+  - suite: "53"
     name: multiwan-failover
     topology: 2vm
     kernel_min: "6.9"
@@ -794,7 +798,7 @@ attack_suites:
     surfaces: ["routing"]
     notes: "Multi-WAN failover-ordering contract: both gateways round-trip /api/v1/routing/gateways sorted primary→secondary by priority, /api/v1/routing/status reports the configured count, ebpfsentinel_routing_gateways gauge equals 2, ebpfsentinel_routing_failovers counter is exposed, and a SIGHUP-driven priority swap re-orders the list deterministically without changing the agent PID. Active probe loop + WAN_ALL_DOWN alert + real link-down 3-VM transit reroute are deferred ACs"
 
-  - suite: "58"
+  - suite: "54"
     name: container-cgroup-enrichment
     topology: 2vm
     kernel_min: "6.9"
@@ -802,15 +806,15 @@ attack_suites:
     surfaces: ["container"]
     notes: "Container cgroup → identity surface: container_resolver_cache_{hits,misses,errors} counters present when container.resolver.enabled=true; Docker-driven probe traffic on tc-ids signature port advances the cache-misses counter (proves cgroup_id reaches the resolver). AlertResponse REST container fields, kubernetes pod enrichment via suite 10 fixtures, and per-tenant TENANT_CGROUP_MAP filtering are deferred ACs tracked in the suite header"
 
-  - suite: "59"
+  - suite: "55"
     name: ipv6-full-path-sweep
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["firewall", "ids", "ips", "ratelimit", "dns"]
-    notes: "IPv6 parity sweep across dataplane features: firewall surfaces IPv6 CIDR rules with the v6 prefix preserved and co-loads matching v4 + v6 rules without conflict; IDS surfaces the v6-scoped signature; IPS blacklist endpoint accepts v6 sources; ratelimit surfaces the per-v6 source rule; mixed v4/v6 burst does not move the packets counter backwards or kill /healthz; DNS parser stays ready under a synthetic AAAA query. Wire-level v6 IDS alert via tc-ids and end-to-end v6 NAT forward across agent transit are deferred ACs (need dual-stack 2-/3-VM topology; NPTv6 covered by suite 54)"
+    notes: "IPv6 parity sweep across dataplane features: firewall surfaces IPv6 CIDR rules with the v6 prefix preserved and co-loads matching v4 + v6 rules without conflict; IDS surfaces the v6-scoped signature; IPS blacklist endpoint accepts v6 sources; ratelimit surfaces the per-v6 source rule; mixed v4/v6 burst does not move the packets counter backwards or kill /healthz; DNS parser stays ready under a synthetic AAAA query. Wire-level v6 IDS alert via tc-ids and end-to-end v6 NAT forward across agent transit are deferred ACs (need dual-stack 2-/3-VM topology; NPTv6 covered by suite 50)"
 
-  - suite: "60"
+  - suite: "56"
     name: l7-smtp-ftp-smb-edge
     topology: 2vm
     kernel_min: "6.9"
@@ -818,7 +822,7 @@ attack_suites:
     surfaces: ["l7"]
     notes: "L7 SMTP/FTP/SMB edge-case sweep: pre-loaded SMTP/FTP/SMB rules round-trip GET /api/v1/firewall/l7-rules with command/is_smb2 matcher fields preserved; POST + DELETE round-trip per protocol; invalid protocol returns 4xx (not 5xx, not silent accept) without crashing the agent; truncated TCP segments on the L7-hooked ports (25/21/445) leave /readyz reporting ebpf_loaded=true. Wire-level swaks/lftp/smbclient per-command behaviour (SMTP pipelining, FTP PASV gating, SMB2 dialect capture, SMB1 policy reject) is deferred to a follow-up that adds those tools to the test VMs; per-command parser logic is exercised by domain l7::engine unit tests"
 
-  - suite: "61"
+  - suite: "58"
     name: pqc-handshake
     topology: 2vm
     kernel_min: "n/a"
@@ -826,7 +830,7 @@ attack_suites:
     surfaces: ["tls", "crypto"]
     notes: "X25519MLKEM768 PQ-hybrid TLS sweep: pq_mode=prefer accepts both classical clients (fallback path proven) and PQ-aware clients (openssl s_client -groups X25519MLKEM768 lands on the hybrid named group); pq_mode=require rejects classical-only clients at the handshake and still accepts PQ-aware clients. PQ-handshake assertions are skipped cleanly when local openssl lacks X25519MLKEM768 (< 3.5). The /api/v1/tls/status per-connection negotiated-group surface (AC #1 second bullet) and the HA mTLS PQ path (AC #3) are tracked as deferred ACs in the suite header"
 
-  - suite: "62"
+  - suite: "59"
     name: ssh-brute-force-real
     topology: 2vm
     kernel_min: "6.9"

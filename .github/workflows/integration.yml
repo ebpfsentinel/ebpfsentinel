@@ -290,7 +290,7 @@ jobs:
         run: sudo bats --timing tests/integration/suites/06-ebpf-programs.bats
 
       - name: Suite 40 — L2 VIP Announcer
-        run: sudo bats --timing tests/integration/suites/40-ebpf-vip-announcer-scenarios.bats
+        run: sudo bats --timing tests/integration/suites/37-ebpf-vip-announcer-scenarios.bats
 
   # ── Nightly attack/perf bats matrix (self-hosted Vagrant) ────────
   nightly-suites:

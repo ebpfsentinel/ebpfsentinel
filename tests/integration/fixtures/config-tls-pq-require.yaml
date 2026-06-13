@@ -9,6 +9,7 @@ agent:
   interfaces:
     - lo
   bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
   log_level: info
   log_format: json
   http_port: 8443

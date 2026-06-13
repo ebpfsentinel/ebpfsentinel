@@ -121,7 +121,7 @@ elif [ "$EBPF_SCENARIOS" = "true" ]; then
     done
 elif [ "$PERFORMANCE" = "true" ]; then
     # Performance benchmark suite (15)
-    PERF_SUITE="${SUITE_DIR}/15-performance-benchmark.bats"
+    PERF_SUITE="${SUITE_DIR}/01-performance-benchmark.bats"
     if [ -f "$PERF_SUITE" ]; then
         run_suite "$PERF_SUITE"
     else

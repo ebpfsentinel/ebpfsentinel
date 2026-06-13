@@ -11,7 +11,7 @@ tests/integration/
 │   ├── 01-agent-lifecycle.bats
 │   ├── 02-rest-api-health.bats
 │   ├── ...
-│   └── 30-ebpf-map-operation-bench.bats
+│   └── 03-ebpf-map-operation-bench.bats
 ├── lib/                                # Shared bash helper libraries
 │   ├── helpers.bash                    # Core: agent start/stop, HTTP/gRPC wrappers
 │   ├── assertions.bash                 # Custom BATS assertions
@@ -92,8 +92,8 @@ Run without root. Require the agent binary built (`cargo build --release`).
 | **08-tls**               |     5 | HTTPS termination on port 8443, gRPC over TLS, self-signed certificate validation, mTLS                                                                                         |
 | **09-docker**            |    11 | Docker image build, compose deployment, healthz, baseline/Docker TCP throughput, ICMP latency, RSS/CPU overhead, API latency under load, memory stability, clean shutdown         |
 | **10-kubernetes**        |     5 | Minikube DaemonSet deployment, ConfigMap injection, RBAC, pod health (VM-only)                                                                                                   |
-| **16-rest-api-ddos**     |     9 | DDoS protection: status, attacks, history, policy CRUD, validation (invalid type, zero threshold, nonexistent delete)                                                            |
-| **17-rest-api-extended** |    26 | Extended domains: IDS, DLP, conntrack, NAT, routing, aliases, LB (CRUD + validation), operations (config, eBPF status, reload), IPS domain-blocks                               |
+| **15-rest-api-ddos**     |     9 | DDoS protection: status, attacks, history, policy CRUD, validation (invalid type, zero threshold, nonexistent delete)                                                            |
+| **16-rest-api-extended** |    26 | Extended domains: IDS, DLP, conntrack, NAT, routing, aliases, LB (CRUD + validation), operations (config, eBPF status, reload), IPS domain-blocks                               |
 
 ### eBPF Scenario Tests (suites 11-14, 18-24)
 
@@ -105,24 +105,24 @@ Require **root** and **kernel >= 6.9**. Use isolated network namespaces with vet
 | **12-ebpf-ids-scenarios**          |     6 | Intrusion detection: reverse shell detection (port 4444), SSH brute-force threshold alerts, alert deduplication, REST alert notification pipeline |
 | **13-ebpf-ips-scenarios**          |     6 | Intrusion prevention: auto-blacklist after threshold, dynamic rule injection, whitelist bypass for trusted subnets, blacklist expiry, TTL         |
 | **14-ebpf-ratelimit-scenarios**    |     5 | Token bucket rate limiting: per-rule rate enforcement, ICMP/TCP/UDP rate control, burst handling, global vs per-source tracking                   |
-| **18-ebpf-threatintel-scenarios**  |     5 | Threat intel: TC program attachment, status/feeds/IOC API access, metrics counters                                                                |
-| **19-ebpf-conntrack-scenarios**    |     6 | Connection tracking: TC program attachment, connection table population, connection count, flush, metrics                                         |
-| **20-ebpf-dns-scenarios**          |     6 | DNS intelligence: TC program attachment, cache/stats/blocklist API, cache flush, UDP:53 packet observation                                       |
-| **21-ebpf-loadbalancer-scenarios** |     7 | Load balancer: XDP program attachment, service CRUD with eBPF map sync, backend detail, service deletion, metrics                                |
-| **22-ebpf-nat-scenarios**          |     5 | NAT: TC ingress/egress program attachment, status/rules API, conntrack co-dependency, metrics                                                    |
-| **23-ebpf-ddos-scenarios**         |     8 | DDoS/scrub: TC scrub program attachment, policy loading, ICMP/SYN flood detection, attack history, metrics                                       |
-| **24-ebpf-scrub-scenarios**        |     5 | Packet scrub: program attachment, metrics increment, fragmented packet handling, API access                                                      |
+| **17-ebpf-threatintel-scenarios**  |     5 | Threat intel: TC program attachment, status/feeds/IOC API access, metrics counters                                                                |
+| **18-ebpf-conntrack-scenarios**    |     6 | Connection tracking: TC program attachment, connection table population, connection count, flush, metrics                                         |
+| **19-ebpf-dns-scenarios**          |     6 | DNS intelligence: TC program attachment, cache/stats/blocklist API, cache flush, UDP:53 packet observation                                       |
+| **20-ebpf-loadbalancer-scenarios** |     7 | Load balancer: XDP program attachment, service CRUD with eBPF map sync, backend detail, service deletion, metrics                                |
+| **21-ebpf-nat-scenarios**          |     5 | NAT: TC ingress/egress program attachment, status/rules API, conntrack co-dependency, metrics                                                    |
+| **22-ebpf-ddos-scenarios**         |     8 | DDoS/scrub: TC scrub program attachment, policy loading, ICMP/SYN flood detection, attack history, metrics                                       |
+| **23-ebpf-scrub-scenarios**        |     5 | Packet scrub: program attachment, metrics increment, fragmented packet handling, API access                                                      |
 
-### End-to-End & Advanced Tests (suites 25-28)
+### End-to-End & Advanced Tests (suites 24-28)
 
 Require **root** and **kernel >= 6.9** (or 2-VM mode).
 
 | Suite                          | Tests | What it covers                                                                                                |
 | ------------------------------ | ----: | ------------------------------------------------------------------------------------------------------------- |
-| **25-packet-accountability**   |     6 | Firewall packet counters: total_seen increments, total_seen >= passed + dropped, UDP/TCP delta accuracy       |
-| **26-alert-end-to-end**        |     7 | Alert pipeline: IDS alert generation, REST query, source/destination fields, count increment, false positive   |
-| **27-hot-reload-rules**        |     4 | Config hot-reload: initial rule count, SIGHUP adds rules, invalid config rollback, agent stays healthy        |
-| **28-ebpf-dlp-scenarios**      |     5 | DLP: program attachment, configuration API, metrics, pattern loading, mode verification                       |
+| **24-packet-accountability**   |     6 | Firewall packet counters: total_seen increments, total_seen >= passed + dropped, UDP/TCP delta accuracy       |
+| **25-alert-end-to-end**        |     7 | Alert pipeline: IDS alert generation, REST query, source/destination fields, count increment, false positive   |
+| **26-hot-reload-rules**        |     4 | Config hot-reload: initial rule count, SIGHUP adds rules, invalid config rollback, agent stays healthy        |
+| **27-ebpf-dlp-scenarios**      |     5 | DLP: program attachment, configuration API, metrics, pattern loading, mode verification                       |
 
 ### Performance & Benchmark Suites (suites 15, 29-30)
 
@@ -130,9 +130,9 @@ Require **root** and **kernel >= 6.9** (or 2-VM mode). Measure agent overhead us
 
 | Suite                          | Tests | What it covers                                                                                                   |
 | ------------------------------ | ----: | ---------------------------------------------------------------------------------------------------------------- |
-| **15-performance-benchmark**   |     9 | TCP/UDP throughput, ICMP latency, TCP SYN latency, packets-per-second, CPU/RSS overhead, JSON report generation  |
-| **29-ebpf-feature-overhead**   |     8 | Per-feature overhead: baseline, then cumulative (firewall, +IDS, +ratelimit, +threatintel, +all), NFR2 threshold |
-| **30-ebpf-map-operation-bench**|    12 | Bulk API latency: firewall rules (100/1K/10K), threatintel IOCs, ratelimit policies, LB backends, DNS blocklist  |
+| **01-performance-benchmark**   |     9 | TCP/UDP throughput, ICMP latency, TCP SYN latency, packets-per-second, CPU/RSS overhead, JSON report generation  |
+| **02-ebpf-feature-overhead**   |     8 | Per-feature overhead: baseline, then cumulative (firewall, +IDS, +ratelimit, +threatintel, +all), NFR2 threshold |
+| **03-ebpf-map-operation-bench**|    12 | Bulk API latency: firewall rules (100/1K/10K), threatintel IOCs, ratelimit policies, LB backends, DNS blocklist  |
 
 ## Coverage Matrix
 
@@ -184,13 +184,13 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `tc-qos` | 31 | 2vm | 6.9 | pr | Traffic shaping (TC egress) |
 | `tc-scrub` | 24, 44, 50 | 3vm | 6.9 | pr | Packet normalization; spoofed-source amplification drop in 44; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 50 |
 | `tc-threatintel` | 18, 36 | 2vm | 6.9 | pr | OSINT feed IOC matching (TC) |
-| `uprobe-dlp` | 28 | 2vm | 6.9 | pr | SSL/TLS DLP via uprobes; TLS-MITM inspection enterprise suite 63 |
+| `uprobe-dlp` | 28 | 2vm | 6.9 | pr | SSL/TLS DLP via uprobes; TLS-MITM inspection enterprise suite 60 |
 | `xdp-firewall` | 11, 25, 27, 42, 44 | 2vm | 6.9 | pr | L3/L4 stateful firewall (XDP); XDP-drop CPU savings measured in 42; amplification ports denied in 44 |
-| `xdp-firewall-reject` | 46 | 2vm | 6.9 | nightly | TCP RST / ICMP forging tail-call; suite 46 wire-validates checksums + src/dst swap + whitelist bypass |
-| `xdp-loadbalancer` | 21, 48 | 2vm | 6.9 | pr | L4 LB + Maglev; suite 48 (3-VM) covers L2 DSR end-to-end and Maglev disruption bound |
+| `xdp-firewall-reject` | 46 | 2vm | 6.9 | nightly | TCP RST / ICMP forging tail-call; suite 42 wire-validates checksums + src/dst swap + whitelist bypass |
+| `xdp-loadbalancer` | 21, 48 | 2vm | 6.9 | pr | L4 LB + Maglev; suite 44 (3-VM) covers L2 DSR end-to-end and Maglev disruption bound |
 | `xdp-ratelimit` | 14, 16, 42 | 2vm | 6.9 | pr | Token bucket + sliding window + leaky bucket; SYN cookie at >1 Mpps in 42 |
-| `xdp-ratelimit-syncookie` | 47 | 2vm | 6.9 | nightly | SYN cookie forging tail-call; suite 47 asserts TcpExtSyncookiesSent + agent metric grow, legit ncat completes, spoofed flood leaves TcpExtSyncookiesRecv flat |
-| `xdp-vip-announcer` | 40, 48 | 2vm | 6.9 | nightly | L2 VIP announcer / ARP responder; suite 48 (3-VM) drives the responder + gratuitous-ARP + is_self_announced predicate from a real client |
+| `xdp-ratelimit-syncookie` | 47 | 2vm | 6.9 | nightly | SYN cookie forging tail-call; suite 43 asserts TcpExtSyncookiesSent + agent metric grow, legit ncat completes, spoofed flood leaves TcpExtSyncookiesRecv flat |
+| `xdp-vip-announcer` | 40, 48 | 2vm | 6.9 | nightly | L2 VIP announcer / ARP responder; suite 44 (3-VM) drives the responder + gratuitous-ARP + is_self_announced predicate from a real client |
 
 #### CLI subcommands (28)
 
@@ -203,7 +203,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `ddos` | 16, 23, 41, 43, 44 | 2vm | 6.9 | pr | DDoS protection + scrub; MHDDoS flood matrix in 41; slow-attack T1499.002 in 43; amplification T1498.002 in 44 |
 | `dns` | 04, 20 | 2vm | 6.9 | pr | DNS cache, stats, blocklist |
 | `domains` | 04 | none | n/a | pr | Domain reputation + blocklist |
-| `fingerprints` | 32, 45 | 2vm | 6.9 | nightly | JA4+ cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 45 |
+| `fingerprints` | 32, 45 | 2vm | 6.9 | nightly | JA4+ cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 41 |
 | `firewall` | 03, 11, 27, 44 | 2vm | 6.9 | pr | L3/L4 rule CRUD + eBPF scenarios; amplification UDP-port denies in 44 |
 | `flows` | 04, 19 | 2vm | 6.9 | pr | Aggregated connection map |
 | `health` | 02 | none | n/a | pr | /healthz + /readyz |
@@ -213,7 +213,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `l7` | 17, 32, 41, 43 | 2vm | 6.9 | pr | L7 firewall rules (HTTP/SMTP/FTP/SMB inspection); MHDDoS flood matrix in 41; slow-request timeout in 43 |
 | `lb` | 17, 21, 40 | 2vm | 6.9 | pr | Load balancer services + VIPs |
 | `metrics` | 02 | none | n/a | pr | Prometheus metrics |
-| `mitre` | TBD | 2vm | 6.9 | nightly | MITRE coverage matrix; technique assertions planned suite 55 |
+| `mitre` | TBD | 2vm | 6.9 | nightly | MITRE coverage matrix; technique assertions planned suite 51 |
 | `nat` | 17, 22 | 2vm | 6.9 | pr | NAT + NPTv6; NPTv6 dedicated suite planned (54) |
 | `qos` | 17, 31 | 2vm | 6.9 | pr | QoS / traffic shaping |
 | `ratelimit` | 04, 14, 17, 41 | 2vm | 6.9 | pr | Rate limit policies; MHDDoS flood matrix in 41 |
@@ -244,7 +244,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `ips` | 13, 17, 41, 43, 59, 62 | 2vm | 6.9 | pr | Auto-blacklist + whitelist; MHDDoS flood matrix in 41; slowhttptest in 43; IPv6 blacklist-write surface asserted in 59; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 62 |
 | `l2` | 40 | 2vm | 6.9 | nightly | L2 binding + self-whitelist; DSR end-to-end planned (48) |
 | `l7` | 17, 32, 41, 43, 60 | 2vm | 6.9 | pr | HTTP/TLS/SNI/gRPC/SMTP/FTP/SMB; slow-request timeout in 43; SMTP/FTP/SMB matcher round-trip + parser robustness (truncated TCP, invalid-protocol POST rejection) asserted in 60. Wire-level swaks/lftp/smbclient per-command behaviour deferred (needs extra deps on test VMs; covered by domain l7::engine unit tests) |
-| `loadbalancer` | 17, 21, 40, 48 | 2vm | 6.9 | pr | Maglev + DSR; 3-VM end-to-end coverage via suite 48 |
+| `loadbalancer` | 17, 21, 40, 48 | 2vm | 6.9 | pr | Maglev + DSR; 3-VM end-to-end coverage via suite 44 |
 | `nat` | 17, 22, 54 | 2vm | 6.9 | pr | SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 54 |
 | `qos` | 17, 31 | 2vm | 6.9 | pr | Traffic shaping policies |
 | `ratelimit` | 04, 14, 41 | 2vm | 6.9 | pr | Token bucket + variants; exhaustion under flood in 41 |

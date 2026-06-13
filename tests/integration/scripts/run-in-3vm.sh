@@ -13,7 +13,7 @@
 #
 # Usage:
 #   ./run-in-3vm.sh                        # Run all 3-VM-tagged suites
-#   ./run-in-3vm.sh --suite 31             # Run a single suite by number
+#   ./run-in-3vm.sh --suite 28             # Run a single suite by number
 #   ./run-in-3vm.sh --transit-only         # Only suites tagged topology=3vm
 #   ./run-in-3vm.sh --profile nightly      # Only suites with suite_profiles==nightly
 #   ./run-in-3vm.sh --skip-provision       # Skip vagrant up

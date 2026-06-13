@@ -265,6 +265,12 @@ start_ebpf_agent() {
         return 1
     }
     rm -f "$rewritten_config"
+    # The agent runs in a child user namespace (via the launcher); files owned by
+    # an unmapped uid (the vagrant user that scp'd them) are unreadable there.
+    # Give the config + data dir to root (uid 0 is the only mapped id) so the
+    # userns agent can read its config and write its audit/alert stores.
+    _agent_ssh_sudo chown -R root:root "${_REMOTE_CONFIG_DIR}" "${_REMOTE_DATA_DIR}" 2>/dev/null || true
+    _agent_ssh_sudo chmod 755 "${_REMOTE_CONFIG_DIR}" "${_REMOTE_DATA_DIR}" 2>/dev/null || true
     _agent_ssh_sudo chmod 640 "$remote_config" 2>/dev/null || true
 
     # Build the extra args string (properly quoted)
@@ -273,10 +279,20 @@ start_ebpf_agent() {
         extra_args="${extra_args} $(printf '%q' "$arg")"
     done
 
-    # Start agent on remote host via SSH
-    # We use nohup + redirect so the process survives SSH disconnect.
+    # Start agent on remote host via SSH. eBPF loads EXCLUSIVELY through a BPF
+    # token (a user-namespace feature), so the agent must run via the shipped
+    # launcher (delegates a bpffs + execs the agent in a child userns, as
+    # production does). Run directly and it starts in API-only mode (no eBPF).
+    # Binaries + objects live under /usr/local (world-traversable), so the userns
+    # agent needs no staging. nohup so the process survives SSH disconnect.
     _agent_ssh_sudo bash -c \
-        "'nohup /usr/local/bin/ebpfsentinel-agent --config ${remote_config}${extra_args} >${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}'" || {
+        "'sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 >/dev/null 2>&1 || true; \
+          LAUNCH=/usr/local/bin/ebpfsentinel-token-launch; \
+          if [ -x \"\$LAUNCH\" ]; then \
+            nohup env EBPF_PROGRAM_DIR=/usr/local/lib/ebpfsentinel \"\$LAUNCH\" --bpffs /sys/fs/bpf/ebpfsentinel /usr/local/bin/ebpfsentinel-agent --config ${remote_config}${extra_args} >${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}; \
+          else \
+            nohup /usr/local/bin/ebpfsentinel-agent --config ${remote_config}${extra_args} >${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}; \
+          fi'" || {
         echo "Failed to start agent on agent VM" >&2
         return 1
     }
@@ -344,6 +360,11 @@ stop_ebpf_agent() {
             sleep 0.5
         fi
     fi
+
+    # Reap any launcher-spawned agent left over (the userns child is not the
+    # tracked launcher pid).
+    _agent_ssh_sudo pkill -f "ebpfsentinel-agent --config" 2>/dev/null || true
+    _agent_ssh_sudo pkill -f "ebpfsentinel-token-launch" 2>/dev/null || true
 
     # Clean up remote PID file
     _agent_ssh_sudo rm -f "${_REMOTE_PID_FILE}" 2>/dev/null || true

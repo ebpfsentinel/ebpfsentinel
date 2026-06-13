@@ -78,8 +78,8 @@ API_SUITES=(
     05-grpc-streaming
     07-authentication
     08-tls
-    16-rest-api-ddos
-    17-rest-api-extended
+    15-rest-api-ddos
+    16-rest-api-extended
 )
 
 EBPF_SUITES=(
@@ -87,12 +87,12 @@ EBPF_SUITES=(
     12-ebpf-ids-scenarios
     13-ebpf-ips-scenarios
     14-ebpf-ratelimit-scenarios
-    18-ebpf-threatintel-scenarios
-    19-ebpf-conntrack-scenarios
-    20-ebpf-dns-scenarios
-    21-ebpf-loadbalancer-scenarios
-    22-ebpf-nat-scenarios
-    23-ebpf-ddos-scenarios
+    17-ebpf-threatintel-scenarios
+    18-ebpf-conntrack-scenarios
+    19-ebpf-dns-scenarios
+    20-ebpf-loadbalancer-scenarios
+    21-ebpf-nat-scenarios
+    22-ebpf-ddos-scenarios
 )
 
 SUITES=()

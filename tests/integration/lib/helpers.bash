@@ -131,8 +131,11 @@ stop_agent() {
         return 0
     fi
 
-    # Graceful SIGTERM
-    kill -TERM "$pid" 2>/dev/null
+    # Graceful SIGTERM. The agent is a setsid session leader (pid == pgid), so
+    # signal the whole process group: when started via the BPF-token launcher
+    # the real agent runs as a child in that group, and killing only the leader
+    # would orphan it. Fall back to the bare pid if group signalling is refused.
+    kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
 
     # Wait for shutdown
     local waited=0
@@ -143,7 +146,7 @@ stop_agent() {
 
     # Fallback SIGKILL if still alive
     if kill -0 "$pid" 2>/dev/null; then
-        kill -KILL "$pid" 2>/dev/null
+        kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
         sleep 0.5
     fi
 

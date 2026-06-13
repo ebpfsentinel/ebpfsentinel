@@ -19,6 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INTEGRATION_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VAGRANT_DIR="${INTEGRATION_DIR}/vagrant"
 SUITE_DIR="${INTEGRATION_DIR}/suites"
+PERF_DIR="${INTEGRATION_DIR}/../perf"
 
 # ── Parse arguments ────────────────────────────────────────────────
 SUITE=""
@@ -67,21 +68,19 @@ build_suite_args() {
            "${SUITE_DIR}"/12-*.bats \
            "${SUITE_DIR}"/13-*.bats \
            "${SUITE_DIR}"/14-*.bats \
+           "${SUITE_DIR}"/17-*.bats \
            "${SUITE_DIR}"/18-*.bats \
            "${SUITE_DIR}"/19-*.bats \
            "${SUITE_DIR}"/20-*.bats \
            "${SUITE_DIR}"/21-*.bats \
            "${SUITE_DIR}"/22-*.bats \
-           "${SUITE_DIR}"/23-*.bats \
            2>/dev/null || true
         return
     fi
 
     if [ "$PERF_ONLY" = "true" ]; then
-        ls "${SUITE_DIR}"/15-*.bats \
-           "${SUITE_DIR}"/29-*.bats \
-           "${SUITE_DIR}"/30-*.bats \
-           2>/dev/null || true
+        # Performance suites now live in tests/perf/ (run on the same VMs).
+        ls "${PERF_DIR}"/*.bats 2>/dev/null || true
         return
     fi
 
@@ -138,7 +137,11 @@ fi
 REMOTE_SUITES=""
 for s in $SUITES; do
     basename="$(basename "$s")"
-    REMOTE_SUITES="${REMOTE_SUITES} suites/${basename}"
+    # Performance suites live in tests/perf/; everything else in suites/.
+    case "$s" in
+        */perf/*) REMOTE_SUITES="${REMOTE_SUITES} ../perf/${basename}" ;;
+        *)        REMOTE_SUITES="${REMOTE_SUITES} suites/${basename}" ;;
+    esac
 done
 
 echo "=== Running tests on attacker VM (192.168.56.20) ==="

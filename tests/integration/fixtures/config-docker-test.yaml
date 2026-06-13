@@ -2,6 +2,7 @@
 agent:
   interfaces: [lo]
   bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
   swagger_ui: true
   log_level: info
   log_format: json

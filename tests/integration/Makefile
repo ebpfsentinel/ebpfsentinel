@@ -18,6 +18,7 @@ PROJECT_ROOT := $(INTEGRATION_DIR)/../..
 VAGRANT_DIR := $(INTEGRATION_DIR)/vagrant
 SUITE_DIR := $(INTEGRATION_DIR)/suites
 SCRIPT_DIR := $(INTEGRATION_DIR)/scripts
+PERF_DIR := $(INTEGRATION_DIR)/../perf
 
 # ── Vagrant ────────────────────────────────────────────────────────
 
@@ -79,12 +80,12 @@ test-ebpf-scenarios: ## Run eBPF suites 11-14, 18-23 via sudo (binary mode)
 		$(SUITE_DIR)/12-ebpf-ids-scenarios.bats \
 		$(SUITE_DIR)/13-ebpf-ips-scenarios.bats \
 		$(SUITE_DIR)/14-ebpf-ratelimit-scenarios.bats \
-		$(SUITE_DIR)/18-ebpf-threatintel-scenarios.bats \
-		$(SUITE_DIR)/19-ebpf-conntrack-scenarios.bats \
-		$(SUITE_DIR)/20-ebpf-dns-scenarios.bats \
-		$(SUITE_DIR)/21-ebpf-loadbalancer-scenarios.bats \
-		$(SUITE_DIR)/22-ebpf-nat-scenarios.bats \
-		$(SUITE_DIR)/23-ebpf-ddos-scenarios.bats
+		$(SUITE_DIR)/17-ebpf-threatintel-scenarios.bats \
+		$(SUITE_DIR)/18-ebpf-conntrack-scenarios.bats \
+		$(SUITE_DIR)/19-ebpf-dns-scenarios.bats \
+		$(SUITE_DIR)/20-ebpf-loadbalancer-scenarios.bats \
+		$(SUITE_DIR)/21-ebpf-nat-scenarios.bats \
+		$(SUITE_DIR)/22-ebpf-ddos-scenarios.bats
 
 .PHONY: test-ebpf-docker-runner
 test-ebpf-docker-runner: ## Run eBPF suites in privileged Docker (no sudo needed)
@@ -102,8 +103,12 @@ endif
 	bash $(SCRIPT_DIR)/run-ebpf-docker.sh --suite $(SUITE) --skip-build
 
 .PHONY: test-performance
-test-performance: ## Run performance benchmark suite 15 (requires root)
-	sudo bats --timing $(SUITE_DIR)/15-performance-benchmark.bats
+test-performance: ## Run the throughput-overhead benchmark (perf suite 15, requires root)
+	sudo bats --timing $(PERF_DIR)/01-performance-benchmark.bats
+
+.PHONY: test-perf
+test-perf: ## Run the full performance suite (perf/01-05, requires root) — see tests/perf/
+	sudo bats --timing $(PERF_DIR)/*.bats
 
 .PHONY: test-ebpf-all
 test-ebpf-all: test-ebpf-scenarios test-performance ## Run all eBPF + performance suites
@@ -128,13 +133,13 @@ test-ebpf-vm: vagrant-up ## Run eBPF + performance suites inside the VM
 			suites/12-ebpf-ids-scenarios.bats \
 			suites/13-ebpf-ips-scenarios.bats \
 			suites/14-ebpf-ratelimit-scenarios.bats \
-			suites/15-performance-benchmark.bats \
-			suites/18-ebpf-threatintel-scenarios.bats \
-			suites/19-ebpf-conntrack-scenarios.bats \
-			suites/20-ebpf-dns-scenarios.bats \
-			suites/21-ebpf-loadbalancer-scenarios.bats \
-			suites/22-ebpf-nat-scenarios.bats \
-			suites/23-ebpf-ddos-scenarios.bats'
+			../perf/01-performance-benchmark.bats \
+			suites/17-ebpf-threatintel-scenarios.bats \
+			suites/18-ebpf-conntrack-scenarios.bats \
+			suites/19-ebpf-dns-scenarios.bats \
+			suites/20-ebpf-loadbalancer-scenarios.bats \
+			suites/21-ebpf-nat-scenarios.bats \
+			suites/22-ebpf-ddos-scenarios.bats'
 
 .PHONY: test-perf-vagrant
 test-perf-vagrant: ## Binary vs Docker perf comparison in Vagrant VM

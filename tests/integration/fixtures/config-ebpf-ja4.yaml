@@ -18,6 +18,7 @@ agent:
   interfaces:
     - __INTERFACE__
   bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
   log_level: debug
   log_format: json
   http_port: 8080
