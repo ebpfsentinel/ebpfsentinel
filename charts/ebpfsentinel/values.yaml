@@ -121,14 +121,15 @@ daemonset:
       add: [SYS_ADMIN, NET_RAW]
       drop: [ALL]
     allowPrivilegeEscalation: true
-    # The launcher issues mount/move_mount (bpffs delegation) and writes
-    # /proc/self/uid_map after unshare(CLONE_NEWUSER). On AppArmor nodes (e.g.
-    # Ubuntu) the default container profile blocks these, and the default
-    # seccomp profile must not filter the mount syscalls — run both unconfined.
+    # The launcher issues mount/move_mount (bpffs delegation) + unshare(userns)
+    # as root with CAP_SYS_ADMIN. On AppArmor nodes (e.g. Ubuntu) the default
+    # container profile blocks mount regardless of caps, so AppArmor must be
+    # Unconfined. Seccomp can stay RuntimeDefault: the default profile gates
+    # mount/unshare/bpf on CAP_SYS_ADMIN, which this container holds.
     appArmorProfile:
       type: Unconfined
     seccompProfile:
-      type: Unconfined
+      type: RuntimeDefault
   # -- Split-broker mode. When enabled, the privileged bpffs delegation +
   # module-BTF/pcap fd provisioning runs in a separate `broker` container, and
   # the long-running `agent` container runs NON-ROOT + cap-drop ALL + no
