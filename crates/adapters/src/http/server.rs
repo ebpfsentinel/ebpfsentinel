@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::ConnectInfo;
+use infrastructure::config::ApiRateLimitConfig;
 use tokio_rustls::rustls::ServerConfig;
 
 use super::router::build_router;
@@ -20,9 +21,10 @@ pub async fn run_http_server(
     port: u16,
     swagger_ui: bool,
     tls_config: Option<Arc<ServerConfig>>,
+    rate_limit: ApiRateLimitConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
-    let router = build_router(state, swagger_ui, tls_config.is_some());
+    let router = build_router(state, swagger_ui, tls_config.is_some(), rate_limit);
     let listener = tokio::net::TcpListener::bind(format!("{bind_address}:{port}")).await?;
 
     if let Some(tls) = tls_config {

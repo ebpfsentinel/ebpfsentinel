@@ -20,6 +20,7 @@ dependencies = [
  "ebpf-common",
  "flate2",
  "futures-util",
+ "governor",
  "http-body-util",
  "infrastructure",
  "ipnetwork",

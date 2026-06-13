@@ -25,6 +25,17 @@ agent:
   # Serve the Swagger UI at /swagger-ui (useful for development/debugging).
   swagger_ui: false
 
+  # Rate limit for the mutating (POST/DELETE/PATCH/PUT) control-plane API,
+  # per client IP (GCRA token bucket). Read endpoints keep a separate, looser
+  # limit. Defaults shown: 60-request burst refilling at 1/s (= 60/min). Raise
+  # these if you drive bulk reconfiguration through the API. Loopback clients
+  # are exempt by default, so same-host tooling and bulk loads are never
+  # throttled; set exempt_loopback: false to rate-limit local clients too.
+  # api_rate_limit:
+  #   write_per_second: 1
+  #   write_burst: 60
+  #   exempt_loopback: true
+
   # XDP attachment mode: auto, native, generic, or offloaded.
   # auto (default): kernel picks best available (native → generic fallback).
   # native: driver-mode XDP (fastest, requires driver support — e.g. virtio_net, mlx5, i40e).

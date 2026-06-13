@@ -1239,6 +1239,7 @@ pub async fn run(
     let http_port = config.agent.http_port;
     let http_bind = config.agent.bind_address.clone();
     let http_swagger_ui = config.agent.swagger_ui;
+    let http_rate_limit = config.agent.api_rate_limit;
 
     // Loud startup warning when the control plane is served unauthenticated on a
     // network-reachable address. Config validation already refuses this unless
@@ -1269,6 +1270,7 @@ pub async fn run(
             http_port,
             http_swagger_ui,
             http_tls,
+            http_rate_limit,
             http_shutdown.cancelled_owned(),
         )
         .await

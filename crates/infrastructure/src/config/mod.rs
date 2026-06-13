@@ -346,6 +346,9 @@ impl AgentConfig {
             MAX_ALERTING_ROUTES,
         )?;
 
+        // Validate control-plane write-API rate limit
+        self.agent.api_rate_limit.validate()?;
+
         // Validate management metadata block
         self.management.validate()?;
 
@@ -1238,6 +1241,62 @@ pub struct AgentInfo {
     /// needs no `CAP_BPF` / `CAP_SYS_ADMIN`.
     #[serde(default)]
     pub bpf_token: BpfTokenConfig,
+
+    /// Control-plane HTTP write-API rate limit (per client IP).
+    #[serde(default)]
+    pub api_rate_limit: ApiRateLimitConfig,
+}
+
+/// Rate limit applied to the mutating (POST/DELETE/PATCH/PUT) control-plane
+/// HTTP endpoints, per client IP, via a GCRA token bucket. Read endpoints keep
+/// a separate, looser fixed limit. Tunable so operators who drive bulk
+/// reconfiguration through the API can raise the ceiling, and so the limit can
+/// be exercised in tests; loopback can be exempted so local tooling and
+/// same-host bulk loads are never throttled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ApiRateLimitConfig {
+    /// Sustained refill rate for the write-API bucket, in requests per second
+    /// per IP. Default 1 (60/minute once the burst is spent).
+    pub write_per_second: u32,
+
+    /// Burst capacity of the write-API bucket, in requests per IP. Default 60.
+    pub write_burst: u32,
+
+    /// Exempt loopback clients (`127.0.0.0/8`, `::1`) from the write-API limit.
+    /// Default `true`: local CLI tooling and same-host bulk reconfiguration are
+    /// not throttled. The limit still applies to every non-loopback peer.
+    pub exempt_loopback: bool,
+}
+
+impl Default for ApiRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            write_per_second: 1,
+            write_burst: 60,
+            exempt_loopback: true,
+        }
+    }
+}
+
+impl ApiRateLimitConfig {
+    /// Reject a zero rate or burst — both would make the token bucket reject
+    /// every request, locking out the write API entirely.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.write_per_second == 0 {
+            return Err(ConfigError::Validation {
+                field: "agent.api_rate_limit.write_per_second".to_string(),
+                message: "must be at least 1".to_string(),
+            });
+        }
+        if self.write_burst == 0 {
+            return Err(ConfigError::Validation {
+                field: "agent.api_rate_limit.write_burst".to_string(),
+                message: "must be at least 1".to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// BPF token delegation configuration. eBPF loading is token-only, so
@@ -3498,6 +3557,34 @@ nat:
     }
 
     // ── Interface groups ────────────────────────────────────────────
+
+    #[test]
+    fn api_rate_limit_defaults_when_absent() {
+        let config = AgentConfig::from_yaml("agent:\n  interfaces: [eth0]\n").unwrap();
+        let rl = config.agent.api_rate_limit;
+        assert_eq!(rl.write_per_second, 1);
+        assert_eq!(rl.write_burst, 60);
+        assert!(rl.exempt_loopback);
+    }
+
+    #[test]
+    fn api_rate_limit_parses_overrides() {
+        let yaml = "agent:\n  interfaces: [eth0]\n  api_rate_limit:\n    write_per_second: 50\n    write_burst: 500\n    exempt_loopback: false\n";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let rl = config.agent.api_rate_limit;
+        assert_eq!(rl.write_per_second, 50);
+        assert_eq!(rl.write_burst, 500);
+        assert!(!rl.exempt_loopback);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn api_rate_limit_rejects_zero() {
+        let yaml = "agent:\n  interfaces: [eth0]\n  api_rate_limit:\n    write_per_second: 0\n";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err();
+        assert!(matches!(err, ConfigError::Validation { ref field, .. }
+            if field == "agent.api_rate_limit.write_per_second"));
+    }
 
     #[test]
     fn interface_groups_empty_by_default() {

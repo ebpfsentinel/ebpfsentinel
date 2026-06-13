@@ -1,11 +1,18 @@
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Request};
+use axum::http::StatusCode;
 use axum::http::header::HeaderValue;
 use axum::middleware;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
+use governor::clock::{Clock, DefaultClock};
+use governor::state::keyed::DefaultKeyedStateStore;
+use governor::{Quota, RateLimiter};
+use infrastructure::config::ApiRateLimitConfig;
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -14,10 +21,6 @@ use utoipa_swagger_ui::SwaggerUi;
 
 /// Maximum request body size for API endpoints (64 KiB).
 const MAX_BODY_SIZE: usize = 64 * 1024;
-
-/// Rate limit for write endpoints: 60 requests per 60 seconds per IP.
-const WRITE_RATE_LIMIT_PER_SECOND: u64 = 1;
-const WRITE_RATE_LIMIT_BURST: u32 = 60;
 
 /// Rate limit for read endpoints: 200 requests per 60 seconds per IP.
 /// Prevents enumeration and resource exhaustion on list queries.
@@ -92,6 +95,56 @@ use super::zone_handler::{
     list_zones, zone_status,
 };
 
+/// Keyed GCRA limiter for the mutating control-plane endpoints, one token
+/// bucket per client IP.
+type WriteRateLimiter = RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>;
+
+/// Build the write-API rate limiter from config. `write_per_second` and
+/// `write_burst` are validated `>= 1` at config load; clamp defensively so a
+/// direct/in-test construction can never panic on `NonZeroU32`.
+fn build_write_rate_limiter(cfg: ApiRateLimitConfig) -> WriteRateLimiter {
+    let per_second = NonZeroU32::new(cfg.write_per_second.max(1)).expect("clamped >= 1");
+    let burst = NonZeroU32::new(cfg.write_burst.max(1)).expect("clamped >= 1");
+    RateLimiter::keyed(Quota::per_second(per_second).allow_burst(burst))
+}
+
+/// Per-IP rate limit for the mutating (POST/DELETE/PATCH/PUT) control-plane
+/// endpoints. Loopback peers are exempt when `exempt_loopback` is set, so local
+/// tooling and same-host bulk reconfiguration are never throttled. Non-loopback
+/// peers over the burst get `429` with a `Retry-After`, matching the previous
+/// `tower_governor` contract. If the peer IP can't be determined the request is
+/// rate-limited under a shared key (fail closed).
+async fn write_rate_limit(
+    req: Request,
+    next: middleware::Next,
+    limiter: &WriteRateLimiter,
+    exempt_loopback: bool,
+) -> Response {
+    let peer_ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip());
+
+    if exempt_loopback && peer_ip.is_some_and(|ip| ip.is_loopback()) {
+        return next.run(req).await;
+    }
+
+    let key = peer_ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    match limiter.check_key(&key) {
+        Ok(()) => next.run(req).await,
+        Err(not_until) => {
+            let wait = not_until.wait_time_from(DefaultClock::default().now());
+            let retry_after = wait.as_secs().max(1).to_string();
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(axum::http::header::RETRY_AFTER, retry_after)],
+                "Too Many Requests",
+            )
+                .into_response()
+        }
+    }
+}
+
 /// Build the main Axum router with all REST API routes.
 ///
 /// Routes are split into three groups:
@@ -99,7 +152,12 @@ use super::zone_handler::{
 /// 2. **Metrics** (conditional auth): `/metrics` — auth only when configured
 /// 3. **API** (protected): `/api/v1/*` — auth when provider is present
 #[allow(clippy::too_many_lines)]
-pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -> Router {
+pub fn build_router(
+    state: Arc<AppState>,
+    swagger_ui: bool,
+    tls_enabled: bool,
+    rate_limit: ApiRateLimitConfig,
+) -> Router {
     // Group 1: Public routes — never require auth (K8s probes)
     let public_routes = Router::new()
         .route("/healthz", get(healthz))
@@ -130,16 +188,13 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
 
     // Group 3: Protected API routes — split into read and write
     //
-    // Write routes: strict rate limit (60 req/min per IP).
-    // Read routes: lighter rate limit (200 req/min per IP) to prevent
+    // Write routes: configurable per-IP GCRA token bucket (default 60 burst,
+    // refill 1/s = 60 req/min), with optional loopback exemption so same-host
+    // tooling and bulk reconfiguration are not throttled. See `write_rate_limit`.
+    // Read routes: lighter fixed limit (200 req/min per IP) to prevent
     // enumeration and brute-force on auth-protected endpoints.
-    let write_governor = Arc::new(
-        GovernorConfigBuilder::default()
-            .per_second(WRITE_RATE_LIMIT_PER_SECOND)
-            .burst_size(WRITE_RATE_LIMIT_BURST)
-            .finish()
-            .expect("write governor config should build"),
-    );
+    let write_limiter = Arc::new(build_write_rate_limiter(rate_limit));
+    let exempt_loopback = rate_limit.exempt_loopback;
     let read_governor = Arc::new(
         GovernorConfigBuilder::default()
             .per_second(READ_RATE_LIMIT_PER_SECOND)
@@ -272,7 +327,12 @@ pub fn build_router(state: Arc<AppState>, swagger_ui: bool, tls_enabled: bool) -
             .route("/api/v1/responses/{id}", delete(revoke_response_action))
             .route("/api/v1/captures/manual", post(start_capture))
             .route("/api/v1/captures/{id}", delete(stop_capture))
-            .layer(GovernorLayer::new(write_governor));
+            .layer(middleware::from_fn(
+                move |req: Request, next: middleware::Next| {
+                    let limiter = Arc::clone(&write_limiter);
+                    async move { write_rate_limit(req, next, &limiter, exempt_loopback).await }
+                },
+            ));
 
         let r = read_routes
             .merge(write_routes)
@@ -478,7 +538,117 @@ mod tests {
             reload_tx,
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         ));
-        let _router = build_router(state, true, false);
+        let _router = build_router(state, true, false, ApiRateLimitConfig::default());
+    }
+
+    fn limiter_test_state() -> Arc<AppState> {
+        let noop: Arc<dyn MetricsPort> = Arc::new(NoopMetrics);
+        let fw_svc = FirewallAppService::new(FirewallEngine::new(), None, Arc::clone(&noop));
+        let ips_svc = IpsAppService::new(IpsEngine::default(), Arc::clone(&noop));
+        let l7_svc = L7AppService::new(L7Engine::new(), Arc::clone(&noop));
+        let rl_svc = RateLimitAppService::new(RateLimitEngine::new(), Arc::clone(&noop));
+        let ti_svc = ThreatIntelAppService::new(
+            ThreatIntelEngine::new(1_000_000),
+            Arc::clone(&noop),
+            vec![],
+        );
+        let audit_svc = AuditAppService::new(Arc::new(NoopSink) as Arc<dyn AuditSink>);
+        let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(1);
+        Arc::new(AppState::new(
+            Arc::new(AgentMetrics::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(tokio::sync::RwLock::new(fw_svc)),
+            Arc::new(arc_swap::ArcSwap::from_pointee(ips_svc)),
+            Arc::new(arc_swap::ArcSwap::from_pointee(l7_svc)),
+            Arc::new(tokio::sync::RwLock::new(rl_svc)),
+            Arc::new(arc_swap::ArcSwap::from_pointee(ti_svc)),
+            Arc::new(audit_svc),
+            Arc::new(tokio::sync::RwLock::new(
+                infrastructure::config::AgentConfig::from_yaml("agent:\n  interfaces: [eth0]")
+                    .unwrap(),
+            )),
+            reload_tx,
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        ))
+    }
+
+    // POST to a write route from `peer`, returning the HTTP status. The body is
+    // deliberately empty — the rate limiter runs before the handler, so any
+    // non-429 status means the request passed the limiter.
+    async fn write_post_status(router: &Router, peer: SocketAddr) -> StatusCode {
+        use tower::ServiceExt;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/firewall/rules")
+            .header("content-type", "application/json")
+            .extension(ConnectInfo(peer))
+            .body(axum::body::Body::from("{}"))
+            .unwrap();
+        router.clone().oneshot(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn write_limit_throttles_non_loopback_past_burst() {
+        let cfg = ApiRateLimitConfig {
+            write_per_second: 1,
+            write_burst: 3,
+            exempt_loopback: true,
+        };
+        let router = build_router(limiter_test_state(), false, false, cfg);
+        let peer: SocketAddr = "203.0.113.5:40000".parse().unwrap();
+
+        let mut throttled = 0;
+        for _ in 0..10 {
+            if write_post_status(&router, peer).await == StatusCode::TOO_MANY_REQUESTS {
+                throttled += 1;
+            }
+        }
+        // 3-token burst then 1/s: 10 rapid requests must trip the limit.
+        assert!(
+            throttled > 0,
+            "non-loopback peer should be throttled past burst"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_limit_exempts_loopback() {
+        let cfg = ApiRateLimitConfig {
+            write_per_second: 1,
+            write_burst: 3,
+            exempt_loopback: true,
+        };
+        let router = build_router(limiter_test_state(), false, false, cfg);
+        let peer: SocketAddr = "127.0.0.1:40000".parse().unwrap();
+
+        for _ in 0..10 {
+            assert_ne!(
+                write_post_status(&router, peer).await,
+                StatusCode::TOO_MANY_REQUESTS,
+                "loopback peer must never be throttled when exempt_loopback is set"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn write_limit_applies_to_loopback_when_not_exempt() {
+        let cfg = ApiRateLimitConfig {
+            write_per_second: 1,
+            write_burst: 3,
+            exempt_loopback: false,
+        };
+        let router = build_router(limiter_test_state(), false, false, cfg);
+        let peer: SocketAddr = "127.0.0.1:40000".parse().unwrap();
+
+        let mut throttled = 0;
+        for _ in 0..10 {
+            if write_post_status(&router, peer).await == StatusCode::TOO_MANY_REQUESTS {
+                throttled += 1;
+            }
+        }
+        assert!(
+            throttled > 0,
+            "loopback should be throttled when exemption is off"
+        );
     }
 
     // ── CORS localhost origin validation ─────────────────────────────

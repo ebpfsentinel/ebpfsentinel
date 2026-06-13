@@ -64,6 +64,7 @@ http-body-util = "0.1"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 tower_governor = "0.8"
+governor = "0.10"
 
 # gRPC
 tonic = { version = "0.14", features = ["tls-aws-lc"] }
