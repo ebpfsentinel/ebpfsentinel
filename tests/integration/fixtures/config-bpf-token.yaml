@@ -18,7 +18,7 @@
 agent:
   interfaces:
     - __IFACE__
-  bind_address: "0.0.0.0"
+  bind_address: "127.0.0.1"
   log_level: info
   log_format: json
   http_port: 18099
