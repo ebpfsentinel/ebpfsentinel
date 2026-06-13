@@ -42,6 +42,12 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: {{ include "ebpfsentinel.serviceAccountName" . }}
       automountServiceAccountToken: false
+      {{- if .Values.daemonset.brokerSidecar.enabled }}
+      securityContext:
+        # The agent runs as this fsGroup so it can read the 0640 configMap
+        # (group-owned) without the file being world-readable.
+        fsGroup: {{ .Values.daemonset.brokerSidecar.agentUid }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -54,15 +60,43 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
+        {{- if .Values.daemonset.brokerSidecar.enabled }}
+        # Privileged broker — the only full-access component. Delegates the
+        # bpffs + hands the agent the module-BTF/pcap fds over the shared socket.
+        - name: broker
+          image: {{ include "ebpfsentinel.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.daemonset.brokerSidecar.brokerSecurityContext | nindent 12 }}
+          command:
+            - "/usr/local/bin/ebpfsentinel-token-launch"
+            - "--broker-serve"
+            - {{ .Values.daemonset.brokerSidecar.socketPath | quote }}
+          {{- with .Values.daemonset.brokerSidecar.brokerResources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: broker-sock
+              mountPath: {{ dir .Values.daemonset.brokerSidecar.socketPath | quote }}
+        {{- end }}
         - name: agent
           image: {{ include "ebpfsentinel.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
+            {{- if .Values.daemonset.brokerSidecar.enabled }}
+            {{- toYaml .Values.daemonset.brokerSidecar.agentSecurityContext | nindent 12 }}
+            {{- else }}
             {{- toYaml .Values.daemonset.securityContext | nindent 12 }}
+            {{- end }}
           # Override the image entrypoint so the launcher --bpffs tracks the
           # configured bpffsPath (the agent's bpf_token.bpffs_path must match).
           command:
             - "/usr/local/bin/ebpfsentinel-token-launch"
+            {{- if .Values.daemonset.brokerSidecar.enabled }}
+            - "--broker-connect"
+            - {{ .Values.daemonset.brokerSidecar.socketPath | quote }}
+            {{- end }}
             - "--bpffs"
             - {{ .Values.daemonset.bpfToken.bpffsPath | quote }}
             - "/usr/local/bin/ebpfsentinel-agent"
@@ -105,11 +139,20 @@ spec:
             - name: config
               mountPath: /etc/ebpfsentinel
               readOnly: true
+            {{- if .Values.daemonset.brokerSidecar.enabled }}
+            - name: broker-sock
+              mountPath: {{ dir .Values.daemonset.brokerSidecar.socketPath | quote }}
+            - name: bpf
+              # In split mode /sys is read-only and the bpffs is a fresh delegated
+              # mount, so this is an in-pod tmpfs (mountpoint + pinned maps).
+              mountPath: /sys/fs/bpf
+            {{- else }}
             - name: bpf
               mountPath: /sys/fs/bpf
               # The launcher mounts the delegated bpffs over this path inside its
               # own private mount namespace; expose the host bpffs to the pod.
               mountPropagation: HostToContainer
+            {{- end }}
             - name: debug
               mountPath: /sys/kernel/debug
               readOnly: true
@@ -128,12 +171,23 @@ spec:
             # default to 0644, so pin a stricter mode.
             defaultMode: 0640
         - name: bpf
+          {{- if .Values.daemonset.brokerSidecar.enabled }}
+          # Split mode: the bpffs is freshly delegated by the broker, so an in-pod
+          # tmpfs gives the writable mountpoint (a container's /sys is read-only).
+          emptyDir:
+            medium: Memory
+          {{- else }}
           # A container's /sys is read-only, so the launcher needs this writable
           # host bpffs to create the delegated mountpoint. On nested runtimes
           # (kind, minikube) whose /sys/fs/bpf is itself read-only, override with
           # an emptyDir: { medium: Memory } via daemonset.extraVolumes instead.
           hostPath:
             path: /sys/fs/bpf
+          {{- end }}
+        {{- if .Values.daemonset.brokerSidecar.enabled }}
+        - name: broker-sock
+          emptyDir: {}
+        {{- end }}
         - name: debug
           hostPath:
             path: /sys/kernel/debug

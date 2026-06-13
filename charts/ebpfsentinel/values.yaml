@@ -129,6 +129,48 @@ daemonset:
       type: Unconfined
     seccompProfile:
       type: Unconfined
+  # -- Split-broker mode. When enabled, the privileged bpffs delegation +
+  # module-BTF/pcap fd provisioning runs in a separate `broker` container, and
+  # the long-running `agent` container runs NON-ROOT + cap-drop ALL + no
+  # CAP_SYS_ADMIN — an auditor sees the agent locked down and the full-access
+  # surface confined to the small broker. (Mirrors
+  # dist/kubernetes/bpf-token-broker-daemonset.yaml.) `securityContext` above is
+  # used only in the default single-container mode.
+  brokerSidecar:
+    enabled: false
+    socketPath: /run/ebpfsentinel/broker.sock
+    agentUid: 65534
+    # The broker — the only full-access component.
+    brokerSecurityContext:
+      privileged: false
+      allowPrivilegeEscalation: true
+      appArmorProfile:
+        type: Unconfined
+      seccompProfile:
+        type: Unconfined
+      capabilities:
+        drop: [ALL]
+        add: [SYS_ADMIN, NET_RAW]
+    brokerResources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        cpu: 250m
+        memory: 128Mi
+    # The agent — non-root, cap-drop ALL, no CAP_SYS_ADMIN. allowPrivilegeEscalation
+    # must stay true so the shim can unshare its own userns + write uid_map.
+    agentSecurityContext:
+      privileged: false
+      runAsUser: 65534
+      runAsGroup: 65534
+      allowPrivilegeEscalation: true
+      appArmorProfile:
+        type: Unconfined
+      seccompProfile:
+        type: Unconfined
+      capabilities:
+        drop: [ALL]
   # -- Resource requests and limits
   resources:
     requests:

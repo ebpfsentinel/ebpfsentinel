@@ -49,7 +49,7 @@ services:
     cap_drop: [ALL] # NO CAP_SYS_ADMIN, NO CAP_NET_RAW — the broker holds them
     security_opt:
       - apparmor=unconfined # the shim unshares a userns + mounts the bpffs
-      - seccomp=unconfined # (or ./seccomp/ebpfsentinel-agent.json)
+      - seccomp=./seccomp/ebpfsentinel-agent.json # narrow profile (default + userns/mount/bpf syscalls); seccomp=unconfined if relocated
     volumes:
       - broker-sock:/run/ebpfsentinel
       - ./config:/etc/ebpfsentinel:ro
