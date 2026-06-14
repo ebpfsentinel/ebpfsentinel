@@ -488,6 +488,7 @@ pub async fn load_ebpf_programs(
 ) -> anyhow::Result<EbpfLoadResult> {
     let ebpf_dir = startup::resolve_ebpf_program_dir(config);
     EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
+    EbpfLoader::cleanup_pin_path(startup::DLP_PIN_PATH);
 
     let mut ebpf_state = EbpfState::new();
     let mut ebpf_map_holder = EbpfMapHolder::new();
@@ -693,8 +694,7 @@ pub async fn load_ebpf_programs(
 
     // ── Uprobe DLP ──────────────────────────────────────────────
     let dlp_ok = if config.dlp.enabled {
-        match startup::try_load_uprobe_dlp(&ebpf_dir, config, adapters::ebpf::DEFAULT_BPF_PIN_PATH)
-        {
+        match startup::try_load_uprobe_dlp(&ebpf_dir, config, startup::DLP_PIN_PATH) {
             Ok((mut loader, dlp_rdr, reader)) => {
                 let event_tx_clone = event_tx.clone();
                 tokio::spawn(
@@ -870,5 +870,6 @@ pub fn detach_ebpf(state: EbpfState) {
     let count = state.loaders.len();
     drop(state);
     EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
+    EbpfLoader::cleanup_pin_path(startup::DLP_PIN_PATH);
     info!(program_count = count, "eBPF programs detached");
 }

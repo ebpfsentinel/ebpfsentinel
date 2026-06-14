@@ -147,7 +147,9 @@ impl LoadedProgram {
 
 /// Distinct bpffs pin path for uprobe-dlp, so its `EVENTS` ring buffer is a
 /// separate kernel object from the shared packet `EVENTS` (same ELF map name).
-const DLP_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel-dlp";
+/// uprobe-dlp's other maps (`SSL_READ_ARGS`, `DLP_METRICS`) are DLP-internal and
+/// shared with nothing, so an isolated pin path is strictly correct.
+pub(crate) const DLP_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel-dlp";
 
 #[allow(clippy::too_many_lines)] // linear load sequence; mirrors run()'s load block
 fn load_all_programs(config_path: &str) -> anyhow::Result<Vec<LoadedProgram>> {
@@ -1878,6 +1880,7 @@ pub async fn run(
     if ebpf_capable {
         // Clean up stale pinned maps from a previous crash (if any)
         EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
+        EbpfLoader::cleanup_pin_path(DLP_PIN_PATH);
 
         // 10a. XDP Firewall
         fw_ok = if config.firewall.enabled {
@@ -2333,7 +2336,7 @@ pub async fn run(
 
         // 10f. Uprobe DLP
         dlp_ok = if config.dlp.enabled {
-            match try_load_uprobe_dlp(&ebpf_dir, &config, adapters::ebpf::DEFAULT_BPF_PIN_PATH) {
+            match try_load_uprobe_dlp(&ebpf_dir, &config, DLP_PIN_PATH) {
                 Ok((loader, dlp_rdr, reader)) => {
                     let event_tx_clone = event_tx.clone();
                     tokio::spawn(async move {

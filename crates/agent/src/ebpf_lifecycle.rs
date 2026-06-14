@@ -222,6 +222,7 @@ impl EbpfProgramManager {
             }
         }
         EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
+        EbpfLoader::cleanup_pin_path(startup::DLP_PIN_PATH);
         info!("all eBPF programs detached");
     }
 
@@ -483,11 +484,8 @@ impl EbpfProgramManager {
     }
 
     async fn enable_uprobe_dlp(&mut self, config: &AgentConfig) -> anyhow::Result<()> {
-        let (mut loader, dlp_rdr, reader) = startup::try_load_uprobe_dlp(
-            &self.ebpf_dir,
-            config,
-            adapters::ebpf::DEFAULT_BPF_PIN_PATH,
-        )?;
+        let (mut loader, dlp_rdr, reader) =
+            startup::try_load_uprobe_dlp(&self.ebpf_dir, config, startup::DLP_PIN_PATH)?;
 
         let cancel = CancellationToken::new();
         let tx = self.event_tx.clone();
