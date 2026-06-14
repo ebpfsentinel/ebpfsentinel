@@ -252,6 +252,14 @@ fn parse_stix_json(text: &str, config: &FeedConfig) -> Result<CtiIndicators, Dom
     let mut result = CtiIndicators::default();
 
     for obj in objects {
+        // Stop once every bucket is full; per-bucket guards below bound each
+        // collection to max_iocs so total memory cannot exceed 3 * max_iocs.
+        if result.iocs.len() >= config.max_iocs
+            && result.domains.len() >= config.max_iocs
+            && result.urls.len() >= config.max_iocs
+        {
+            break;
+        }
         let obj_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let obj_id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -321,8 +329,11 @@ fn extract_stix_indicator(
 
     let pattern = obj.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Extract IPs
+    // Extract IPs (bounded to max_iocs to cap memory)
     for ip in extract_ips_from_stix_pattern(pattern) {
+        if result.iocs.len() >= config.max_iocs {
+            break;
+        }
         result.iocs.push(Ioc {
             ip,
             feed_id: config.id.clone(),
@@ -333,8 +344,11 @@ fn extract_stix_indicator(
         });
     }
 
-    // Extract domains
+    // Extract domains (bounded to max_iocs)
     for domain in extract_domains_from_stix_pattern(pattern) {
+        if result.domains.len() >= config.max_iocs {
+            break;
+        }
         result.domains.push(CtiDomain {
             domain,
             feed_id: config.id.clone(),
@@ -344,8 +358,11 @@ fn extract_stix_indicator(
         });
     }
 
-    // Extract URLs
+    // Extract URLs (bounded to max_iocs)
     for url in extract_urls_from_stix_pattern(pattern) {
+        if result.urls.len() >= config.max_iocs {
+            break;
+        }
         result.urls.push(CtiUrl {
             url,
             feed_id: config.id.clone(),
@@ -366,7 +383,8 @@ fn extract_stix_sco(
 ) {
     match obj_type {
         "ipv4-addr" | "ipv6-addr" => {
-            if let Some(value) = obj.get("value").and_then(|v| v.as_str())
+            if result.iocs.len() < config.max_iocs
+                && let Some(value) = obj.get("value").and_then(|v| v.as_str())
                 && let Ok(ip) = value.parse::<IpAddr>()
             {
                 result.iocs.push(Ioc {
@@ -380,7 +398,8 @@ fn extract_stix_sco(
             }
         }
         "domain-name" => {
-            if let Some(value) = obj.get("value").and_then(|v| v.as_str())
+            if result.domains.len() < config.max_iocs
+                && let Some(value) = obj.get("value").and_then(|v| v.as_str())
                 && value.contains('.')
             {
                 result.domains.push(CtiDomain {
@@ -393,7 +412,9 @@ fn extract_stix_sco(
             }
         }
         "url" => {
-            if let Some(value) = obj.get("value").and_then(|v| v.as_str()) {
+            if result.urls.len() < config.max_iocs
+                && let Some(value) = obj.get("value").and_then(|v| v.as_str())
+            {
                 result.urls.push(CtiUrl {
                     url: value.to_string(),
                     feed_id: config.id.clone(),
@@ -517,6 +538,11 @@ fn parse_json_feed(text: &str, config: &FeedConfig) -> Result<Vec<Ioc>, DomainEr
     let mut iocs = Vec::new();
 
     for item in items {
+        // Bound memory up front: a 100 MiB array of `{"ip":"1.1.1.1"}` would
+        // otherwise build millions of structs before the post-parse cap trims them.
+        if iocs.len() >= config.max_iocs {
+            break;
+        }
         let ip_str = item
             .get(&mapping.ip_field)
             .and_then(|v| v.as_str())
