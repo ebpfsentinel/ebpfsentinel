@@ -1,0 +1,32 @@
+# Helm overrides for deploying the eBPFsentinel agent onto the local Talos
+# qemu cluster (see run.sh). Pulls the image from the host-side insecure
+# registry mirrored into the cluster by patch-all.yaml.
+image:
+  repository: 10.5.0.1:5005/ebpfsentinel
+  tag: latest
+  # Always: the local registry is re-pushed by run.sh prep on each iteration;
+  # IfNotPresent would pin nodes to a stale cached :latest.
+  pullPolicy: Always
+
+agent:
+  # Attach to the Talos node's primary NIC (qemu virtio_net, alias net0). This is
+  # a throwaway qemu VM, NOT the operator's host — XDP_PASS-by-default keeps
+  # node/CNI traffic flowing.
+  interfaces:
+    - enp0s2
+  # SKB/generic XDP never hard-detaches the driver path: safest on the node's
+  # only NIC (which also carries the kube-apiserver / flannel traffic).
+  xdpMode: generic
+  logLevel: info
+  logFormat: json
+
+daemonset:
+  # Split-broker mode (preferred posture): a small privileged `broker` sidecar
+  # does the bpffs delegation + pcap fd provisioning, and the long-running
+  # `agent` container runs NON-ROOT (uid/gid 65534) with cap-drop ALL — no
+  # CAP_SYS_ADMIN on the agent. The agent's broker-connect launcher self-maps its
+  # own (already non-root) uid, so it needs no SETUID/SETGID and no probe/drop.
+  # (Set this to false to use the single-container mode, where the launcher keeps
+  # root under Docker but drops to 65534 under a containerd-based runtime.)
+  brokerSidecar:
+    enabled: true

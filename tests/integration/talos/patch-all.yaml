@@ -1,0 +1,15 @@
+# Talos machine-config patch applied to all node types (control plane + workers).
+# Wires the in-cluster containerd to the host-side insecure image registry and
+# ensures unprivileged user namespaces are available for the agent's BPF-token
+# launcher (it unshare()s a child userns to create a delegated bpffs).
+machine:
+  registries:
+    mirrors:
+      # Host bridge gateway for the qemu network (CIDR 10.5.0.0/24 -> .1 = host).
+      # The local `registry:2` container listens on :5005 there.
+      "10.5.0.1:5005":
+        endpoints:
+          - http://10.5.0.1:5005
+  sysctls:
+    # Headroom for nested user namespaces (launcher unshare(CLONE_NEWUSER)).
+    user.max_user_namespaces: "63359"
