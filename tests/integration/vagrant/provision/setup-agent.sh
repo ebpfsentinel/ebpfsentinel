@@ -102,6 +102,17 @@ install_from_prebuilt() {
     sudo cp "$src" "${AGENT_INSTALL_DIR}/ebpfsentinel-agent"
     sudo chmod +x "${AGENT_INSTALL_DIR}/ebpfsentinel-agent"
 
+    # The agent loads eBPF EXCLUSIVELY through a BPF token created by the
+    # launcher (it sets up a delegated bpffs in a child userns and execs the
+    # agent there). Without the launcher the agent starts in "API-only mode (no
+    # eBPF)" and every datapath suite sees ebpf_loaded=false — so the launcher
+    # MUST be installed alongside the agent.
+    local launch_src="${PROJECT_DIR}/target/release/ebpfsentinel-token-launch"
+    if [ -f "$launch_src" ]; then
+        sudo cp "$launch_src" "${AGENT_INSTALL_DIR}/ebpfsentinel-token-launch"
+        sudo chmod +x "${AGENT_INSTALL_DIR}/ebpfsentinel-token-launch"
+    fi
+
     local ebpf_src="${PROJECT_DIR}/target/bpfel-unknown-none/release"
     if [ -d "$ebpf_src" ]; then
         sudo mkdir -p "$EBPF_INSTALL_DIR"
@@ -115,8 +126,10 @@ install_from_docker_image() {
     container_id="$(sudo docker create ebpfsentinel-agent:latest true)"
     sudo mkdir -p "$EBPF_INSTALL_DIR"
     sudo docker cp "${container_id}:/usr/local/bin/ebpfsentinel-agent" "${AGENT_INSTALL_DIR}/ebpfsentinel-agent"
+    # The launcher is required to load eBPF (BPF token) — see install_from_prebuilt.
+    sudo docker cp "${container_id}:/usr/local/bin/ebpfsentinel-token-launch" "${AGENT_INSTALL_DIR}/ebpfsentinel-token-launch" 2>/dev/null || true
     sudo docker cp "${container_id}:/usr/local/lib/ebpfsentinel/." "${EBPF_INSTALL_DIR}/" 2>/dev/null || true
-    sudo chmod +x "${AGENT_INSTALL_DIR}/ebpfsentinel-agent"
+    sudo chmod +x "${AGENT_INSTALL_DIR}/ebpfsentinel-agent" "${AGENT_INSTALL_DIR}/ebpfsentinel-token-launch" 2>/dev/null || true
     sudo docker rm "$container_id" >/dev/null
 }
 
@@ -126,6 +139,9 @@ build_from_source() {
 
     echo "  Building agent binary (release)..."
     (cd "$PROJECT_DIR" && cargo build --release --bin ebpfsentinel-agent)
+
+    echo "  Building BPF-token launcher (release)..."
+    (cd "$PROJECT_DIR" && cargo build --release --bin ebpfsentinel-token-launch)
 
     install_from_prebuilt
 }

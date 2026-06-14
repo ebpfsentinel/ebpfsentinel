@@ -225,6 +225,39 @@ NETPLAN
     SHELL
 
     # ----------------------------------------------------------
+    # Provisioner: bpf-token-userns
+    #
+    # eBPF is loaded EXCLUSIVELY through a BPF token, which is created inside a
+    # child user namespace by ebpfsentinel-token-launch. Ubuntu 24.04 ships with
+    # unprivileged user namespaces restricted by AppArmor
+    # (kernel.apparmor_restrict_unprivileged_userns=1), so on a fresh box the
+    # launcher cannot create its userns / delegated bpffs and the agent falls
+    # back to "API-only mode (no eBPF)" — every datapath suite then sees
+    # ebpf_loaded=false. Relax the restriction persistently and make sure
+    # /sys/fs/bpf is a bpffs mount so the launcher has somewhere to delegate.
+    # ----------------------------------------------------------
+    agent.vm.provision "shell", name: "bpf-token-userns", inline: <<-SHELL
+      set -euxo pipefail
+
+      cat > /etc/sysctl.d/99-ebpfsentinel-userns.conf <<SYSCTL
+# Allow ebpfsentinel-token-launch to create an unprivileged user namespace
+# (required for BPF token delegation, kernel 6.9+).
+kernel.apparmor_restrict_unprivileged_userns=0
+# Older fallback knob (no-op where the AppArmor gate is the one in effect).
+kernel.unprivileged_userns_clone=1
+SYSCTL
+      # Apply now; ignore the older knob if this kernel doesn't expose it.
+      sysctl -p /etc/sysctl.d/99-ebpfsentinel-userns.conf 2>/dev/null || \
+        sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+
+      # Ensure /sys/fs/bpf is a bpffs mount (systemd usually mounts it, but be
+      # explicit so the launcher can pin/delegate under it).
+      if ! mountpoint -q /sys/fs/bpf; then
+        mount -t bpf bpffs /sys/fs/bpf || true
+      fi
+    SHELL
+
+    # ----------------------------------------------------------
     # Provisioner: docker
     # ----------------------------------------------------------
     agent.vm.provision "shell", name: "docker", inline: <<-SHELL
@@ -477,7 +510,14 @@ UNIT
       /opt/scapy-venv/bin/pip install "scapy==2.7.0" >/dev/null 2>&1 || true
       chmod -R a+rx /opt/scapy-venv
 
-      # Install bats from source (retry the clone — transient NAT DNS hiccups)
+      # Install bats. Prefer the distro package (Ubuntu 24.04 ships bats 1.10
+      # in universe) — the from-source clone kept failing on transient NAT DNS
+      # hiccups and left the attacker without bats, which makes every 2-VM suite
+      # die with "bats: command not found". Fall back to the source build only
+      # if apt has no candidate.
+      if ! command -v bats &>/dev/null; then
+        apt-get install -y bats || true
+      fi
       if ! command -v bats &>/dev/null; then
         for attempt in 1 2 3; do
           rm -rf /tmp/bats-core
@@ -590,6 +630,38 @@ NETPLAN
         ip -6 route replace fd00:57::/64 via fd00:56::10 dev eth1 || true
       SHELL
     end
+
+    # ----------------------------------------------------------
+    # Provisioner: agent-ssh-key
+    #
+    # The 2-VM lane runs bats on the attacker and SSHes into the agent
+    # (192.168.56.10) as `vagrant` with ~/.ssh/agent_key (AGENT_SSH_KEY). That
+    # key was a manual setup step, so a freshly provisioned attacker could not
+    # reach the agent and every 2-VM suite failed with "Permission denied
+    # (publickey)". Generate the key and install it into the agent's
+    # authorized_keys via the password auth the agent's ssh-access provisioner
+    # enables (sshpass is installed above). Runs unprivileged so the key lands
+    # in the vagrant user's home; best-effort retry while the agent settles.
+    # ----------------------------------------------------------
+    attacker.vm.provision "shell", name: "agent-ssh-key", privileged: false, inline: <<-SHELL
+      set -uo pipefail
+      KEY="$HOME/.ssh/agent_key"
+      mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+      [ -f "$KEY" ] || ssh-keygen -t ed25519 -f "$KEY" -N "" -q
+      for attempt in 1 2 3 4 5 6; do
+        if sshpass -p vagrant ssh-copy-id -i "${KEY}.pub" \
+             -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+             vagrant@192.168.56.10 >/dev/null 2>&1; then
+          echo "agent_key installed on agent VM"; break
+        fi
+        echo "ssh-copy-id to agent attempt ${attempt} failed; retrying in 5s" >&2
+        sleep 5
+      done
+      # Verify (non-fatal): a working key-based login to the agent.
+      ssh -i "$KEY" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 \
+        vagrant@192.168.56.10 true && echo "2-VM SSH OK" || \
+        echo "WARNING: key-based SSH to agent not working yet" >&2
+    SHELL
 
     # ----------------------------------------------------------
     # Provisioner: setup (external script, unprivileged)
