@@ -86,8 +86,9 @@ fn handshake_then_conntrack_and_unimplemented() {
     let resp: Response = read_frame(&mut s).unwrap();
     assert!(matches!(resp, Response::Conntrack { .. }), "got {resp:?}");
 
-    // A command not yet wired in this build returns the typed Unimplemented.
-    write_frame(&mut s, &Command::ConntrackFlush).unwrap();
+    // A command not wired in `warden serve` (bpffs delegation rides the
+    // token-launch broker path, not this socket) returns the typed Unimplemented.
+    write_frame(&mut s, &Command::Delegate).unwrap();
     let resp: Response = read_frame(&mut s).unwrap();
     assert_eq!(resp, Response::Unimplemented);
 

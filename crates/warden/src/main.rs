@@ -21,14 +21,14 @@
 use std::fs;
 use std::io::{self, BufReader};
 use std::mem;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::ExitCode;
 use std::ptr;
 
 use ebpfsentinel_warden::map_engine::MapRegistry;
-use ebpfsentinel_warden::{enable_tcp_syncookies, send_msg_fds};
+use ebpfsentinel_warden::{enable_tcp_syncookies, net_ops, send_msg_fds};
 use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
 
 /// Default peer uid the warden accepts — the rootless agent's id. Override with
@@ -185,10 +185,26 @@ fn handle_conn(conn: UnixStream, registry: &MapRegistry) {
     }
 
     while let Ok(cmd) = read_frame::<_, Command>(&mut reader) {
-        // `GetRingbufFd` answers out-of-band: an `FdReady` frame followed by the
-        // map fd in an `SCM_RIGHTS` cmsg, so it bypasses the plain `dispatch`.
+        // `GetRingbufFd` / `PcapOpen` answer out-of-band: an `FdReady` frame
+        // followed by a fd in an `SCM_RIGHTS` cmsg, so they bypass `dispatch`.
         let ok = match &cmd {
-            Command::GetRingbufFd { program } => serve_ringbuf_fd(&mut writer, registry, program),
+            Command::GetRingbufFd { program } => serve_passed_fd(
+                &mut writer,
+                registry
+                    .ringbuf_fd(program)
+                    .ok_or_else(|| format!("'{program}' is not a pinned ring-buffer map")),
+            ),
+            Command::PcapOpen { iface, filter } => {
+                eprintln!("[warden] pcap open on {iface} (filter applied agent-side: {filter:?})");
+                match net_ops::open_pcap_fd(iface) {
+                    Ok(owned) => {
+                        let ok = serve_passed_fd(&mut writer, Ok(owned.as_raw_fd()));
+                        drop(owned); // fd dup'd into the agent by SCM_RIGHTS; ours can close
+                        ok
+                    }
+                    Err(message) => serve_passed_fd(&mut writer, Err(message)),
+                }
+            }
             other => write_frame(&mut writer, &dispatch(other, registry)).is_ok(),
         };
         if !ok {
@@ -197,26 +213,22 @@ fn handle_conn(conn: UnixStream, registry: &MapRegistry) {
     }
 }
 
-/// Serve a `GetRingbufFd`: if `name` is a pinned ring-buffer map, write `FdReady`
-/// and pass its fd over `SCM_RIGHTS`; otherwise reply with a typed `Error` and
-/// send no fd. Returns `false` only on a write/socket error (close the
-/// connection); a refused-but-answered request returns `true`.
-fn serve_ringbuf_fd(writer: &mut UnixStream, registry: &MapRegistry, name: &str) -> bool {
-    let Some(fd) = registry.ringbuf_fd(name) else {
-        return write_frame(
-            writer,
-            &Response::Error {
-                message: format!("'{name}' is not a pinned ring-buffer map"),
-            },
-        )
-        .is_ok();
-    };
-    if write_frame(writer, &Response::FdReady).is_err() {
-        return false;
+/// Answer an fd-passing command: on `Ok(fd)` write `FdReady` then send the fd in
+/// an `SCM_RIGHTS` cmsg; on `Err` reply with a typed `Error` and send no fd.
+/// Returns `false` only on a write/socket error (close the connection); a
+/// refused-but-answered request returns `true`.
+fn serve_passed_fd(writer: &mut UnixStream, fd: Result<RawFd, String>) -> bool {
+    match fd {
+        Ok(fd) => {
+            if write_frame(writer, &Response::FdReady).is_err() {
+                return false;
+            }
+            // One sentinel payload byte carries the fd; the agent reads `FdReady`,
+            // then recvmsg's exactly this byte to collect the descriptor.
+            send_msg_fds(writer.as_raw_fd(), &[0u8], &[fd])
+        }
+        Err(message) => write_frame(writer, &Response::Error { message }).is_ok(),
     }
-    // One sentinel payload byte carries the fd; the agent reads `FdReady`, then
-    // recvmsg's exactly this byte to collect the descriptor.
-    send_msg_fds(writer.as_raw_fd(), &[0u8], &[fd])
 }
 
 /// Map a request to a response. The conntrack read and map element ops are wired
@@ -259,9 +271,23 @@ fn dispatch(cmd: &Command, registry: &MapRegistry) -> Response {
                 message: e.to_string(),
             },
         },
+        // Host-network ops needing CAP_NET_ADMIN/CAP_NET_RAW the token can't grant.
+        Command::ConntrackDelete { tuple } => result_to_response(net_ops::conntrack_delete(tuple)),
+        Command::ConntrackFlush => result_to_response(net_ops::conntrack_flush()),
+        Command::RouteAdd { route } => result_to_response(net_ops::route(true, route)),
+        Command::RouteDel { route } => result_to_response(net_ops::route(false, route)),
+        Command::ArpAnnounce { iface, ip } => result_to_response(net_ops::arp_announce(iface, ip)),
         Command::Hello { .. } => Response::Error {
             message: "Hello already completed".into(),
         },
         _ => Response::Unimplemented,
+    }
+}
+
+/// Collapse a `net_ops` result into a `Response`.
+fn result_to_response(result: Result<(), String>) -> Response {
+    match result {
+        Ok(()) => Response::Ok,
+        Err(message) => Response::Error { message },
     }
 }

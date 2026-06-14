@@ -24,7 +24,9 @@ use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
-use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
+use ebpfsentinel_warden_proto::{
+    Command, ConntrackTuple, PROTOCOL_VERSION, Response, RouteSpec, read_frame, write_frame,
+};
 
 /// A connected, handshaked client to a warden socket.
 pub struct WardenClient {
@@ -118,6 +120,45 @@ impl WardenClient {
         }
     }
 
+    /// Issue a command that the warden answers with a bare `Ok` on success.
+    fn expect_ok(&mut self, cmd: &Command, op: &str) -> io::Result<()> {
+        match self.call(cmd)? {
+            Response::Ok => Ok(()),
+            other => Err(unexpected(op, &other)),
+        }
+    }
+
+    /// Tear down a single conntrack flow (a `CAP_NET_ADMIN` op).
+    pub fn conntrack_delete(&mut self, tuple: ConntrackTuple) -> io::Result<()> {
+        self.expect_ok(&Command::ConntrackDelete { tuple }, "ConntrackDelete")
+    }
+
+    /// Flush the whole conntrack table.
+    pub fn conntrack_flush(&mut self) -> io::Result<()> {
+        self.expect_ok(&Command::ConntrackFlush, "ConntrackFlush")
+    }
+
+    /// Add (idempotent `replace`) a route — multi-WAN gateway programming.
+    pub fn route_add(&mut self, route: RouteSpec) -> io::Result<()> {
+        self.expect_ok(&Command::RouteAdd { route }, "RouteAdd")
+    }
+
+    /// Delete a route.
+    pub fn route_del(&mut self, route: RouteSpec) -> io::Result<()> {
+        self.expect_ok(&Command::RouteDel { route }, "RouteDel")
+    }
+
+    /// Broadcast a gratuitous ARP for `ip` on `iface` (VIP takeover).
+    pub fn arp_announce(&mut self, iface: &str, ip: &str) -> io::Result<()> {
+        self.expect_ok(
+            &Command::ArpAnnounce {
+                iface: iface.to_owned(),
+                ip: ip.to_owned(),
+            },
+            "ArpAnnounce",
+        )
+    }
+
     /// Request the named ring-buffer map's fd from the warden and receive it over
     /// `SCM_RIGHTS`. The returned [`OwnedFd`](std::os::fd::OwnedFd) refers to the
     /// same kernel ring buffer the in-kernel programs write to; the agent drains it
@@ -133,6 +174,25 @@ impl WardenClient {
         match read_frame::<_, Response>(&mut self.stream)? {
             Response::FdReady => fd_pass::recv_one_fd(&self.stream),
             other => Err(unexpected("GetRingbufFd", &other)),
+        }
+    }
+
+    /// Ask the warden to open an `AF_PACKET` capture socket bound to `iface` and
+    /// receive its fd over `SCM_RIGHTS`. `filter` is recorded by the warden; the
+    /// agent installs the cBPF filter on the returned fd itself. Issues no
+    /// privileged syscall in the agent.
+    #[cfg(feature = "fd-pass")]
+    pub fn pcap_open(&mut self, iface: &str, filter: &str) -> io::Result<std::os::fd::OwnedFd> {
+        write_frame(
+            &mut self.stream,
+            &Command::PcapOpen {
+                iface: iface.to_owned(),
+                filter: filter.to_owned(),
+            },
+        )?;
+        match read_frame::<_, Response>(&mut self.stream)? {
+            Response::FdReady => fd_pass::recv_one_fd(&self.stream),
+            other => Err(unexpected("PcapOpen", &other)),
         }
     }
 }

@@ -51,6 +51,7 @@ use std::process::ExitCode;
 use std::ptr;
 
 pub mod map_engine;
+pub mod net_ops;
 
 // `bpf(2)` command numbers (uapi/linux/bpf.h `enum bpf_cmd`).
 const BPF_OBJ_GET_INFO_BY_FD: libc::c_int = 15;
