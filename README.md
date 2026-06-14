@@ -259,8 +259,10 @@ The **enterprise edition** layers on capabilities for fleets and regulated envir
 | Integration & response | SIEM integration (10 connectors), automated response orchestration (SOAR) |
 | Compliance | Compliance reports (PCI-DSS 4, HIPAA, GDPR, SOC 2, NIS2, DORA, SecNumCloud, HDS) |
 | Licensing & integrity | Ed25519 + ML-DSA-65 dual-signed keys, machine fingerprint binding, air-gap activation, SHA-256 + Ed25519 binary self-verification at startup |
+| Kubernetes operator | CRD-driven deployment & lifecycle management for the agent fleet |
+| Web dashboard | Multi-tenant web UI & control plane (MSSP front-end) |
 
-A CRD-driven Kubernetes operator and a web dashboard UI complement the agent. See [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for the full list and per-feature detail.
+See [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for the full list and per-feature detail.
 
 ## License
 
