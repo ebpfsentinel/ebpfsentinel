@@ -164,6 +164,16 @@ prepare_ebpf_config() {
         -e "s|__NS_IP__|${ATTACKER_VM_IP}|g" \
         "$fixture" > "$output"
 
+    # In 2VM mode the agent must be reachable from the attacker VM (HTTP health
+    # check + REST traffic), so it has to bind all interfaces, not loopback.
+    # Many fixtures default to 127.0.0.1; rewrite it. Binding non-loopback with
+    # auth disabled requires allow_unauthenticated_api, so add it when absent
+    # (avoid a duplicate key, which serde_yaml rejects).
+    sed -i -E 's|^([[:space:]]*)bind_address:.*|\1bind_address: "0.0.0.0"|' "$output"
+    if ! grep -qE '^[[:space:]]*allow_unauthenticated_api:' "$output"; then
+        sed -i -E 's|^([[:space:]]*)bind_address: "0.0.0.0"|\1bind_address: "0.0.0.0"\n\1allow_unauthenticated_api: true|' "$output"
+    fi
+
     echo "$output"
 }
 
@@ -362,9 +372,35 @@ stop_ebpf_agent() {
     fi
 
     # Reap any launcher-spawned agent left over (the userns child is not the
-    # tracked launcher pid).
-    _agent_ssh_sudo pkill -f "ebpfsentinel-agent --config" 2>/dev/null || true
-    _agent_ssh_sudo pkill -f "ebpfsentinel-token-launch" 2>/dev/null || true
+    # tracked launcher pid) and WAIT for it to actually die. The agent attaches
+    # XDP via a BPF_LINK held by its process fd; that link only auto-detaches
+    # once the process is gone. If a lingering userns child stays attached, it
+    # keeps throttling eth1 — contaminating the next suite's "no agent" baseline
+    # — and its XDP hook makes the next attach fail with EBUSY (errno 16).
+    #
+    # Match by process name (comm), NOT `pkill -f "… --config"`: `_agent_ssh_sudo`
+    # sends the command through ssh, which re-joins argv with spaces and drops
+    # the quotes, so a multi-word `-f` pattern arrives as `pkill -f name --config`
+    # — pkill then treats `--config` as a flag and silently kills nothing. The
+    # binary's comm is truncated to 15 chars (`ebpfsentinel-ag` / `…-to`); a bare
+    # single-token pattern survives ssh and never matches the pkill command line.
+    local _reap=0
+    _agent_ssh_sudo pkill ebpfsentinel-ag 2>/dev/null || true
+    _agent_ssh_sudo pkill ebpfsentinel-to 2>/dev/null || true
+    while _agent_ssh_sudo pgrep ebpfsentinel-ag >/dev/null 2>&1 && [ "$_reap" -lt 20 ]; do
+        _agent_ssh_sudo pkill -9 ebpfsentinel-ag 2>/dev/null || true
+        _agent_ssh_sudo pkill -9 ebpfsentinel-to 2>/dev/null || true
+        sleep 0.3
+        _reap=$((_reap + 1))
+    done
+
+    # Belt-and-suspenders: strip any XDP/TC the dead agent left on the data
+    # interface so the next attach sees a clean hook (covers legacy/pinned
+    # attaches that don't auto-detach on process exit).
+    local _iface="${EBPF_AGENT_INTERFACE:-eth1}"
+    _agent_ssh_sudo ip link set dev "$_iface" xdpgeneric off 2>/dev/null || true
+    _agent_ssh_sudo ip link set dev "$_iface" xdp off 2>/dev/null || true
+    _agent_ssh_sudo tc qdisc del dev "$_iface" clsact 2>/dev/null || true
 
     # Clean up remote PID file
     _agent_ssh_sudo rm -f "${_REMOTE_PID_FILE}" 2>/dev/null || true

@@ -39,13 +39,15 @@ setup_file() {
 
     export DATA_DIR="/tmp/ebpfsentinel-test-data-overhead-ext-$$"
     mkdir -p "$DATA_DIR"
+    # No leftover agent before the baseline (it would skew the overhead figures).
+    stop_ebpf_agent 2>/dev/null || true
     create_test_netns
 
     rm -f "$OVERHEAD_REPORT"
     echo '{}' > "$OVERHEAD_REPORT"
 
     if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
-        _agent_ssh_sudo pkill -f "iperf3 -s" 2>/dev/null || true
+        _agent_ssh_sudo pkill iperf3 2>/dev/null || true
         sleep 0.5
         _agent_ssh_sudo bash -c "'iperf3 -s -B ${EBPF_HOST_IP} -D --pidfile /tmp/iperf3-overhead-ext.pid'" 2>/dev/null || true
     else
@@ -58,7 +60,7 @@ teardown_file() {
     stop_ebpf_agent 2>/dev/null || true
     destroy_test_netns 2>/dev/null || true
     if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
-        _agent_ssh_sudo pkill -f "iperf3 -s" 2>/dev/null || true
+        _agent_ssh_sudo pkill iperf3 2>/dev/null || true
     else
         [ -f /tmp/iperf3-overhead-ext-$$.pid ] && { kill "$(cat /tmp/iperf3-overhead-ext-$$.pid)" 2>/dev/null || true; rm -f /tmp/iperf3-overhead-ext-$$.pid; }
         pkill -f "iperf3 -s -B ${EBPF_HOST_IP}" 2>/dev/null || true

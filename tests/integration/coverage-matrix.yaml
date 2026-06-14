@@ -113,7 +113,8 @@ suite_profiles:
   "perf/03": nightly
   "perf/04": nightly
   "perf/05": nightly
-  # The performance suites (perf/01-05) live in tests/perf/, run via `make test-perf`.
+  "perf/06": nightly
+  # The performance suites (perf/01-06) live in tests/perf/, run via `make test-perf`.
 
 coverage:
   # ── eBPF programs (15) ──────────────────────────────────────────
@@ -199,19 +200,19 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-nat-ingress
-    suites: ["21", "50"]
+    suites: ["21", "50", "perf/06"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "DNAT (TC ingress); NPTv6 reverse-prefix translation surface asserted via REST + CLI in 50"
+    notes: "DNAT (TC ingress); NPTv6 reverse-prefix translation surface asserted via REST + CLI in 50; DNAT datapath throughput overhead measured in perf/06"
 
   - kind: ebpf_program
     feature: tc-nat-egress
-    suites: ["21", "50"]
+    suites: ["21", "50", "perf/06"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "SNAT (TC egress); NPTv6 (RFC 6296) checksum-neutral prefix swap config + CLI/REST surface asserted in 50 (wire-level swap gated on IPv6 routability)"
+    notes: "SNAT (TC egress); NPTv6 (RFC 6296) checksum-neutral prefix swap config + CLI/REST surface asserted in 50 (wire-level swap gated on IPv6 routability); SNAT/masquerade datapath throughput overhead measured in perf/06"
 
   - kind: ebpf_program
     feature: tc-qos
@@ -231,11 +232,11 @@ coverage:
 
   - kind: ebpf_program
     feature: uprobe-dlp
-    suites: ["27"]
+    suites: ["27", "perf/06"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "SSL/TLS DLP via uprobes; TLS-MITM inspection enterprise suite 60"
+    notes: "SSL/TLS DLP via uprobes; TLS-MITM inspection enterprise suite 60; uprobe SSL-inspection goodput cost (loopback libssl) measured in perf/06"
 
   # ── CLI subcommands (28) ────────────────────────────────────────
   - kind: cli_subcommand
@@ -464,11 +465,11 @@ coverage:
 
   - kind: cli_subcommand
     feature: nptv6
-    suites: ["50"]
+    suites: ["50", "perf/03"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "NPTv6 prefix-translation CRUD + listing asserted via REST + `nat nptv6 list` CLI parity in 50"
+    notes: "NPTv6 prefix-translation CRUD + listing asserted via REST + `nat nptv6 list` CLI parity in 50; prefix-rule add control-plane latency (10/100) benched in perf/03"
 
   # ── Domain modules (23, excl. common) ───────────────────────────
   - kind: domain_module
@@ -537,11 +538,11 @@ coverage:
 
   - kind: domain_module
     feature: dlp
-    suites: ["16", "27"]
+    suites: ["16", "27", "perf/06"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Data loss prevention; TLS proxy enterprise. Suite 63 enforces the license-gate skip path (AC #3) on the OSS bats fleet and tracks the wire-level malicious-MITM + decrypted-payload pattern-match assertions as 3-VM deferrals (need mitmproxy + injected-CA topology)"
+    notes: "Data loss prevention; TLS proxy enterprise. Suite 63 enforces the license-gate skip path (AC #3) on the OSS bats fleet and tracks the wire-level malicious-MITM + decrypted-payload pattern-match assertions as 3-VM deferrals (need mitmproxy + injected-CA topology); uprobe SSL-inspection goodput cost benched in perf/06"
 
   - kind: domain_module
     feature: dns
@@ -569,11 +570,11 @@ coverage:
 
   - kind: domain_module
     feature: ips
-    suites: ["13", "16", "38", "39", "55", "59"]
+    suites: ["13", "16", "38", "39", "55", "59", "perf/03"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Auto-blacklist + whitelist; MHDDoS flood matrix in 38; slowhttptest in 39; IPv6 blacklist-write surface asserted in 55; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 55"
+    notes: "Auto-blacklist + whitelist; MHDDoS flood matrix in 38; slowhttptest in 39; IPv6 blacklist-write surface asserted in 55; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 55; in-kernel blacklist-injection control-plane latency (100/1K) benched in perf/03"
 
   - kind: domain_module
     feature: l2
@@ -601,11 +602,11 @@ coverage:
 
   - kind: domain_module
     feature: nat
-    suites: ["16", "21", "50"]
+    suites: ["16", "21", "50", "perf/03", "perf/06"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 50"
+    notes: "SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 50; NPTv6 control-plane add latency in perf/03; SNAT/DNAT datapath throughput overhead in perf/06"
 
   - kind: domain_module
     feature: qos

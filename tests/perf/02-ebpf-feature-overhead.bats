@@ -36,6 +36,10 @@ setup_file() {
     export DATA_DIR="/tmp/ebpfsentinel-test-data-overhead-$$"
     mkdir -p "$DATA_DIR"
 
+    # Ensure no agent from a previous suite is still attached (it would throttle
+    # the "no agent" baseline and silently invalidate the overhead figures).
+    stop_ebpf_agent 2>/dev/null || true
+
     # Create netns + veth pair
     create_test_netns
 
@@ -46,7 +50,7 @@ setup_file() {
     # Start iperf3 server on host side
     if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
         # Kill stale iperf3 on agent VM
-        _agent_ssh_sudo pkill -f "iperf3 -s" 2>/dev/null || true
+        _agent_ssh_sudo pkill iperf3 2>/dev/null || true
         sleep 0.5
         _agent_ssh_sudo bash -c "'iperf3 -s -B ${EBPF_HOST_IP} -D --pidfile /tmp/iperf3-overhead.pid'" 2>/dev/null || true
     else
@@ -61,7 +65,7 @@ teardown_file() {
 
     # Stop iperf3 server
     if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
-        _agent_ssh_sudo pkill -f "iperf3 -s" 2>/dev/null || true
+        _agent_ssh_sudo pkill iperf3 2>/dev/null || true
     else
         if [ -f /tmp/iperf3-overhead-$$.pid ]; then
             kill "$(cat /tmp/iperf3-overhead-$$.pid)" 2>/dev/null || true

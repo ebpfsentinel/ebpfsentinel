@@ -8,6 +8,8 @@
 #   - Ratelimit policy add (100 / 1K)
 #   - LB backend update (10 / 100)
 #   - DNS blocklist sync (1K / 10K)
+#   - IPS blacklist injection (100 / 1K)   — in-kernel blocklist write path
+#   - NAT NPTv6 rule add (10 / 100)        — stateless prefix-map write path
 #
 # Outputs JSON report to /tmp/ebpfsentinel-map-ops-latest.json
 
@@ -309,6 +311,96 @@ _bench_threatintel_iocs() {
     done
 }
 
+# ── Helper: generate and POST IPS blacklist entries ─────────────────
+# Exercises the in-kernel IPS blocklist write path (POST /api/v1/ips/blacklist
+# → add_to_blacklist → eBPF LPM map). Distinct from the firewall rule path: it
+# writes the blacklist map enforced wire-speed by xdp-firewall.
+
+_bench_ips_blacklist() {
+    local count="$1"
+    local label="$2"
+    local i status_ok=0 status_fail=0
+
+    local start_ns end_ns duration_ms
+    start_ns="$(date +%s%N)"
+
+    for i in $(seq 1 "$count"); do
+        local octet2=$(( (i / 65536) % 256 ))
+        local octet3=$(( (i / 256) % 256 ))
+        local octet4=$(( i % 256 ))
+        local payload
+        payload="$(jq -n --arg ip "100.${octet2}.${octet3}.${octet4}" \
+            '{ip: $ip, reason: "perf-bench", ttl_secs: 600}')"
+        api_post /api/v1/ips/blacklist "$payload" >/dev/null 2>&1
+        _load_http_status
+        if [ "$HTTP_STATUS" = "201" ] || [ "$HTTP_STATUS" = "200" ]; then
+            status_ok=$(( status_ok + 1 ))
+        else
+            status_fail=$(( status_fail + 1 ))
+        fi
+    done
+
+    end_ns="$(date +%s%N)"
+    duration_ms="$(( (end_ns - start_ns) / 1000000 ))"
+
+    _report_set "ips_blacklist_${label}_count" "$count"
+    _report_set "ips_blacklist_${label}_ok" "$status_ok"
+    _report_set "ips_blacklist_${label}_fail" "$status_fail"
+    _report_set "ips_blacklist_${label}_duration_ms" "$duration_ms"
+
+    echo "# ips blacklist ${label}: ${count} IPs in ${duration_ms}ms (ok=${status_ok}, fail=${status_fail})"
+
+    # Cleanup
+    for i in $(seq 1 "$count"); do
+        local octet2=$(( (i / 65536) % 256 ))
+        local octet3=$(( (i / 256) % 256 ))
+        local octet4=$(( i % 256 ))
+        api_delete "/api/v1/ips/blacklist/100.${octet2}.${octet3}.${octet4}" >/dev/null 2>&1 || true
+    done
+}
+
+# ── Helper: generate and POST NPTv6 prefix rules ────────────────────
+# Exercises the stateless NPTv6 prefix-map write path (POST /api/v1/nat/nptv6).
+
+_bench_nptv6_rules() {
+    local count="$1"
+    local label="$2"
+    local i status_ok=0 status_fail=0
+
+    local start_ns end_ns duration_ms
+    start_ns="$(date +%s%N)"
+
+    for i in $(seq 1 "$count"); do
+        local hex; hex="$(printf '%x' "$i")"
+        local payload
+        payload="$(jq -n --arg id "nptv6-bench-${label}-${i}" \
+            --arg int "fd00:${hex}::" --arg ext "2001:db8:${hex}::" \
+            '{id: $id, enabled: true, internal_prefix: $int, external_prefix: $ext, prefix_len: 48}')"
+        api_post /api/v1/nat/nptv6 "$payload" >/dev/null 2>&1
+        _load_http_status
+        if [ "$HTTP_STATUS" = "201" ] || [ "$HTTP_STATUS" = "200" ]; then
+            status_ok=$(( status_ok + 1 ))
+        else
+            status_fail=$(( status_fail + 1 ))
+        fi
+    done
+
+    end_ns="$(date +%s%N)"
+    duration_ms="$(( (end_ns - start_ns) / 1000000 ))"
+
+    _report_set "nptv6_${label}_count" "$count"
+    _report_set "nptv6_${label}_ok" "$status_ok"
+    _report_set "nptv6_${label}_fail" "$status_fail"
+    _report_set "nptv6_${label}_duration_ms" "$duration_ms"
+
+    echo "# nptv6 ${label}: ${count} rules in ${duration_ms}ms (ok=${status_ok}, fail=${status_fail})"
+
+    # Cleanup
+    for i in $(seq 1 "$count"); do
+        api_delete "/api/v1/nat/nptv6/nptv6-bench-${label}-${i}" >/dev/null 2>&1 || true
+    done
+}
+
 # ── Firewall rule bulk load benchmarks ──────────────────────────────
 
 @test "firewall: bulk load 100 rules" {
@@ -416,6 +508,68 @@ _bench_threatintel_iocs() {
     [ "${EBPF_2VM_MODE:-false}" = "true" ] && count=500
 
     _bench_dns_blocklist "$count" "10k"
+}
+
+# ── IPS blacklist injection benchmarks ─────────────────────────────
+#
+# The blacklist POST is a write route under the API write governor (default 60
+# burst, refill 1/s). Loopback is exempt by default (agent.api_rate_limit.
+# exempt_loopback), so the local-lane client (127.0.0.1) is NOT throttled and
+# bulk injection measures the real kernel blacklist-map write path; we assert
+# every op landed. In 2VM mode the client is a remote IP and IS governed, so we
+# keep the count inside one burst there and don't assert a full success count.
+
+@test "ips: blacklist inject 100 IPs" {
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
+
+    local count=100
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] && count=50
+
+    _bench_ips_blacklist "$count" "100"
+    if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
+        local ok; ok="$(jq -r '.ips_blacklist_100_ok' "$MAP_OPS_REPORT")"
+        [ "$ok" -eq "$count" ]
+    fi
+}
+
+@test "ips: blacklist inject 1K IPs" {
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
+
+    # Local lane: loopback-exempt, so the full 1K lands. Remote (2VM) lane is
+    # governed past the 60 burst, so stay within it.
+    local count=1000
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] && count=50
+
+    _bench_ips_blacklist "$count" "1k"
+    if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
+        local ok; ok="$(jq -r '.ips_blacklist_1k_ok' "$MAP_OPS_REPORT")"
+        [ "$ok" -eq "$count" ]
+    fi
+}
+
+# ── NAT NPTv6 prefix-rule benchmarks ───────────────────────────────
+#
+# create_nptv6_rule is served under the read governor (burst 200), so up to
+# ~200 ops/burst land; 10 and 100 both stay within it and must all succeed.
+
+@test "nat: NPTv6 add 10 rules" {
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
+
+    _bench_nptv6_rules 10 "10"
+    local ok; ok="$(jq -r '.nptv6_10_ok' "$MAP_OPS_REPORT")"
+    [ "$ok" -eq 10 ]
+}
+
+@test "nat: NPTv6 add 100 rules" {
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
+    _require_agent_alive
+
+    _bench_nptv6_rules 100 "100"
+    local ok; ok="$(jq -r '.nptv6_100_ok' "$MAP_OPS_REPORT")"
+    [ "$ok" -eq 100 ]
 }
 
 # ── Summary ─────────────────────────────────────────────────────────

@@ -26,6 +26,10 @@ setup_file() {
     export DATA_DIR="/tmp/ebpfsentinel-test-data-bench-$$"
     mkdir -p "$DATA_DIR"
 
+    # Ensure no agent from a previous suite is still attached (it would throttle
+    # the "no agent" baseline and silently invalidate the overhead figures).
+    stop_ebpf_agent 2>/dev/null || true
+
     # Create netns + veth pair
     create_test_netns
 
@@ -33,8 +37,17 @@ setup_file() {
     rm -f "$BENCHMARK_REPORT"
     echo '{}' > "$BENCHMARK_REPORT"
 
-    # Start iperf3 server on the host side
-    iperf3 -s -B "$EBPF_HOST_IP" -D --pidfile /tmp/iperf3-bench-$$.pid 2>/dev/null
+    # Start the iperf3 server. In 2-VM mode the agent is the iperf target
+    # (EBPF_HOST_IP = the agent VM), so the server must run ON THE AGENT — not on
+    # the attacker VM that runs bats. Starting it locally there fails to bind the
+    # agent's IP, leaving the baseline client with no server (it hangs/skips).
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        _agent_ssh_sudo pkill iperf3 2>/dev/null || true
+        sleep 0.5
+        _agent_ssh_sudo bash -c "'iperf3 -s -B ${EBPF_HOST_IP} -D --pidfile /tmp/iperf3-bench.pid'" 2>/dev/null || true
+    else
+        iperf3 -s -B "$EBPF_HOST_IP" -D --pidfile /tmp/iperf3-bench-$$.pid 2>/dev/null
+    fi
     sleep 1
 }
 
@@ -42,13 +55,16 @@ teardown_file() {
     stop_ebpf_agent 2>/dev/null || true
     destroy_test_netns 2>/dev/null || true
 
-    # Stop iperf3 server
-    if [ -f /tmp/iperf3-bench-$$.pid ]; then
-        kill "$(cat /tmp/iperf3-bench-$$.pid)" 2>/dev/null || true
-        rm -f /tmp/iperf3-bench-$$.pid
+    # Stop iperf3 server (on the agent VM in 2-VM mode, locally otherwise).
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        _agent_ssh_sudo pkill iperf3 2>/dev/null || true
+    else
+        if [ -f /tmp/iperf3-bench-$$.pid ]; then
+            kill "$(cat /tmp/iperf3-bench-$$.pid)" 2>/dev/null || true
+            rm -f /tmp/iperf3-bench-$$.pid
+        fi
+        pkill -f "iperf3 -s -B ${EBPF_HOST_IP}" 2>/dev/null || true
     fi
-    # Kill any leftover iperf3 on our bind address
-    pkill -f "iperf3 -s -B ${EBPF_HOST_IP}" 2>/dev/null || true
 
     rm -rf "${DATA_DIR:-/tmp/ebpfsentinel-test-data-bench-$$}"
 }

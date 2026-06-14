@@ -28,14 +28,14 @@ fixtures live here; there is no separate Vagrant box.
 |-------|----------|------|
 | `01-performance-benchmark` | full-stack TCP/UDP throughput overhead + RSS (< 20 % / < 256 MB) | 2VM |
 | `02-ebpf-feature-overhead` | incremental per-feature CPU overhead (firewall → IDS → ratelimit → threatintel → conntrack/DDoS) | 2VM |
-| `03-ebpf-map-operation-bench` | control-plane map-op latency (rule / IOC / policy / backend / blocklist bulk load) | local |
+| `03-ebpf-map-operation-bench` | control-plane map-op latency (firewall / IOC / ratelimit / LB / DNS / IPS-blacklist / NPTv6 bulk load) | local |
 | `04-pktgen-high-pps` | ≥ 1 Mpps XDP-drop CPU savings + SYN-cookie path | 2VM (pktgen) |
 | `05-ebpf-feature-overhead-extended` | isolated per-feature throughput overhead: scrub, DNS, QoS, conntrack | 2VM |
+| `06-ebpf-feature-overhead-nat-dlp` | NAT translation overhead (SNAT egress / DNAT ingress / both) + DLP uprobe SSL-inspection cost | local + 2VM |
 
-Remaining per-feature datapath suites — **NAT** + **L4 LB** (forwarded, 3VM),
-**L7** (HTTP via `run_http_bench`), **DLP** (uprobe-on-TLS), **IPS** (block
-latency) — are planned alongside these; they need the 3VM transit lane / an HTTP
-or TLS target and are added once calibrated on the agent VM.
+Remaining per-feature datapath suites — **L4 LB** (forwarded, 3VM) and **L7**
+(HTTP via `run_http_bench`) — are planned alongside these; they need the 3VM
+transit lane / an HTTP target and are added once calibrated on the agent VM.
 
 ## Running
 
