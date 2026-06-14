@@ -124,7 +124,11 @@ daemonset:
       # SYS_ADMIN: launcher bootstrap (bpffs delegation + module BTF fds +
       # userns). NET_RAW: launcher pre-opens the AF_PACKET pcap pool (CAP_NET_RAW
       # is checked only at socket() time) — remove if you never run captures.
-      add: [SYS_ADMIN, NET_RAW]
+      # SETUID/SETGID: under a stock container runtime the pod runs in the init
+      # user namespace, where a global-root child cannot self-map namespace-0 to
+      # real root (verify_root_map). The launcher therefore drops the userns
+      # child to uid/gid 65534 before mapping; that drop needs SETUID/SETGID.
+      add: [SYS_ADMIN, NET_RAW, SETUID, SETGID]
       drop: [ALL]
     allowPrivilegeEscalation: true
     # The launcher issues mount/move_mount (bpffs delegation) + unshare(userns)
@@ -276,6 +280,12 @@ loadbalancer:
 geoip:
   # -- Enable GeoIP enrichment (MaxMind)
   enabled: false
+  # -- GeoIP database source (REQUIRED when enabled). Rendered verbatim under
+  # `geoip.source`. Examples:
+  #   source: { mode: file, city_path: /var/lib/ebpfsentinel/geoip/GeoLite2-City.mmdb }
+  #   source: { mode: url, city_url: https://mirror/GeoLite2-City.mmdb }
+  #   source: { mode: maxmind_account, account_id: "123", license_key: "key" }
+  source: {}
 
 zones:
   # -- Enable security zones

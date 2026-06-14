@@ -29,6 +29,13 @@ spec:
       hostNetwork: true
       hostPID: true
       serviceAccountName: ebpfsentinel
+      securityContext:
+        # Under a stock container runtime the pod runs in the init user
+        # namespace, where the launcher cannot map namespace-0 to real root; it
+        # therefore drops the userns child to uid/gid 65534, so the agent runs as
+        # host gid 65534. This fsGroup makes the 0640 configMap group-readable by
+        # it.
+        fsGroup: 65534
       containers:
         - name: agent
           image: ebpfsentinel-agent:latest
@@ -64,6 +71,12 @@ spec:
                 # (CAP_NET_RAW is checked only at socket() time). Drop if you
                 # never run packet capture.
                 - NET_RAW
+                # SETUID/SETGID: in the init user namespace the launcher drops
+                # the userns child to uid/gid 65534 before self-mapping (it
+                # cannot map namespace-0 to real root there); that drop needs
+                # SETUID/SETGID.
+                - SETUID
+                - SETGID
           resources:
             requests:
               cpu: 100m

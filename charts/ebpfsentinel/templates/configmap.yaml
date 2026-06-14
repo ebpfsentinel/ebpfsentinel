@@ -61,8 +61,14 @@ data:
       enabled: {{ .Values.routing.enabled }}
     loadbalancer:
       enabled: {{ .Values.loadbalancer.enabled }}
+    {{- if .Values.geoip.enabled }}
     geoip:
-      enabled: {{ .Values.geoip.enabled }}
+      enabled: true
+      {{- with .Values.geoip.source }}
+      source:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
     zones:
       enabled: {{ .Values.zones.enabled }}
     qos:

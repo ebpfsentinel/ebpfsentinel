@@ -100,7 +100,10 @@ COPY --from=agent-builder /build/ebpfsentinel-token-launch /usr/local/bin/ebpfse
 COPY ebpf-out/ /usr/local/lib/ebpfsentinel/
 
 # 0640: the agent rejects a world-readable config (it may hold secrets). The
-# source file is 0644 in git, so tighten it as it lands in the image.
+# source file is 0644 in git, so tighten it as it lands in the image. Left
+# root-owned: under Docker the launcher keeps the agent as root (Docker permits
+# the root userns self-map), so root reads it directly. (Under a containerd-based
+# Kubernetes the config comes from a ConfigMap, not this baked copy.)
 COPY --chmod=0640 config/ebpfsentinel.yaml /etc/ebpfsentinel/config.yaml
 
 # distroless has no shell — create the directory in the builder stage and COPY it.

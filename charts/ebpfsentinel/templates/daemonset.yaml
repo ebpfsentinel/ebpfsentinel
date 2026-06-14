@@ -42,12 +42,18 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: {{ include "ebpfsentinel.serviceAccountName" . }}
       automountServiceAccountToken: false
-      {{- if .Values.daemonset.brokerSidecar.enabled }}
       securityContext:
+        {{- if .Values.daemonset.brokerSidecar.enabled }}
         # The agent runs as this fsGroup so it can read the 0640 configMap
         # (group-owned) without the file being world-readable.
         fsGroup: {{ .Values.daemonset.brokerSidecar.agentUid }}
-      {{- end }}
+        {{- else }}
+        # Single-container mode: the launcher drops the user-namespace child to
+        # uid/gid 65534 before self-mapping (it cannot map namespace-0 to real
+        # root under a stock container runtime), so the agent runs as host gid
+        # 65534. This fsGroup makes the 0640 configMap group-readable by it.
+        fsGroup: 65534
+        {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
