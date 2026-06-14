@@ -693,7 +693,8 @@ pub async fn load_ebpf_programs(
 
     // ── Uprobe DLP ──────────────────────────────────────────────
     let dlp_ok = if config.dlp.enabled {
-        match startup::try_load_uprobe_dlp(&ebpf_dir, config) {
+        match startup::try_load_uprobe_dlp(&ebpf_dir, config, adapters::ebpf::DEFAULT_BPF_PIN_PATH)
+        {
             Ok((mut loader, dlp_rdr, reader)) => {
                 let event_tx_clone = event_tx.clone();
                 tokio::spawn(

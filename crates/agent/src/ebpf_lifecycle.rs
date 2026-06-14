@@ -483,7 +483,11 @@ impl EbpfProgramManager {
     }
 
     async fn enable_uprobe_dlp(&mut self, config: &AgentConfig) -> anyhow::Result<()> {
-        let (mut loader, dlp_rdr, reader) = startup::try_load_uprobe_dlp(&self.ebpf_dir, config)?;
+        let (mut loader, dlp_rdr, reader) = startup::try_load_uprobe_dlp(
+            &self.ebpf_dir,
+            config,
+            adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+        )?;
 
         let cancel = CancellationToken::new();
         let tx = self.event_tx.clone();

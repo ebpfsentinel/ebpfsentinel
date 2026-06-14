@@ -125,7 +125,32 @@ async fn run_ti_feed_cycle(
 ///
 /// This build wires the XDP firewall; the remaining programs are added
 /// incrementally (each mirrors its `try_load_*` call in [`run`]).
-fn load_all_programs(config_path: &str) -> anyhow::Result<Vec<EbpfLoader>> {
+/// A loaded+attached program held for the warden's lifetime, plus any map-name
+/// aliases to apply when exposing its held fds to the warden registry. The alias
+/// disambiguates a collision: uprobe-dlp's ring buffer is named `EVENTS` in its
+/// object (same as the shared packet ring buffer), so it is loaded under a
+/// distinct pin path (a separate kernel object) and re-exported as `DLP_EVENTS`.
+struct LoadedProgram {
+    loader: EbpfLoader,
+    map_aliases: &'static [(&'static str, &'static str)],
+}
+
+impl LoadedProgram {
+    /// A loaded program whose map names are exposed to the registry verbatim.
+    fn plain(loader: EbpfLoader) -> Self {
+        Self {
+            loader,
+            map_aliases: &[],
+        }
+    }
+}
+
+/// Distinct bpffs pin path for uprobe-dlp, so its `EVENTS` ring buffer is a
+/// separate kernel object from the shared packet `EVENTS` (same ELF map name).
+const DLP_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel-dlp";
+
+#[allow(clippy::too_many_lines)] // linear load sequence; mirrors run()'s load block
+fn load_all_programs(config_path: &str) -> anyhow::Result<Vec<LoadedProgram>> {
     adapters::system::set_restrictive_umask();
     let config = AgentConfig::load(Path::new(config_path))?;
     init_logging(config.agent.log_level, config.agent.log_format)?;
@@ -152,22 +177,233 @@ fn load_all_programs(config_path: &str) -> anyhow::Result<Vec<EbpfLoader>> {
 
     let ebpf_dir = resolve_ebpf_program_dir(&config);
     EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
+    EbpfLoader::cleanup_pin_path(DLP_PIN_PATH);
 
     // Loaders are held for the process lifetime so the raw links stay attached.
-    let mut loaders: Vec<EbpfLoader> = Vec::new();
+    // This mirrors `run()`'s load block (managers / readers / metrics / service
+    // wiring discarded — the rootless agent drives those over the warden RPC), but
+    // preserves the XDP tail-call chaining that makes the datapath correct: the
+    // firewall is the single XDP entry point and dispatches to ratelimit (slot 0),
+    // reject (1), loadbalancer (2) and the VIP announcer (3); ratelimit dispatches
+    // to syncookie (internal) and loadbalancer (RL slot 1). Maps survive discarding
+    // their managers because the loader keeps an independent dup of every map fd
+    // (`hosted_map_fds`), which is what the warden serves.
+    let mut loaders: Vec<LoadedProgram> = Vec::new();
+    let mut fw_loader: Option<EbpfLoader> = None;
+    let mut lb_pre_loaded = false;
 
-    if config.firewall.enabled {
+    // XDP firewall — the entry point + tail-call dispatcher.
+    let fw_ok = if config.firewall.enabled {
         let domain_rules = config.firewall_rules()?;
         match try_load_xdp_firewall(&ebpf_dir, &config, &domain_rules) {
-            Ok((loader, _map_manager, _metrics_reader, _event_reader)) => {
+            Ok((loader, ..)) => {
                 info!("xdp-firewall loaded + attached");
-                loaders.push(loader);
+                fw_loader = Some(loader);
+                true
             }
-            Err(e) => warn!("xdp-firewall load failed: {e}"),
+            Err(e) => {
+                warn!("xdp-firewall load failed: {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    // XDP ratelimit (+ syncookie + LB pre-load into the ratelimit chain).
+    let rl_ok = if config.ratelimit.enabled {
+        match try_load_xdp_ratelimit(&ebpf_dir, &config, fw_ok) {
+            Ok((mut rl_loader, ..)) => {
+                if let Some(ref mut fw) = fw_loader
+                    && let Ok(rl_fd) = rl_loader.program_raw_fd("xdp_ratelimit")
+                {
+                    let _ = fw.set_tail_call_raw("XDP_PROG_ARRAY", 0, rl_fd);
+                }
+                match try_load_xdp_ratelimit_syncookie(&ebpf_dir, &mut rl_loader) {
+                    Ok(sc) => loaders.push(LoadedProgram::plain(sc)),
+                    Err(e) => warn!("xdp-ratelimit-syncookie load failed: {e}"),
+                }
+                if config.loadbalancer.enabled {
+                    match try_load_xdp_loadbalancer(&ebpf_dir, &config, true) {
+                        Ok((lb_loader, ..)) => {
+                            if let Ok(lb_fd) = lb_loader.program_raw_fd("xdp_loadbalancer") {
+                                let _ = rl_loader.set_tail_call_raw("RL_PROG_ARRAY", 1, lb_fd);
+                                if let Some(ref mut fw) = fw_loader {
+                                    let _ = fw.set_tail_call_raw("XDP_PROG_ARRAY", 2, lb_fd);
+                                }
+                            }
+                            loaders.push(LoadedProgram::plain(lb_loader));
+                            lb_pre_loaded = true;
+                        }
+                        Err(e) => warn!("LB pre-load for ratelimit chain failed: {e}"),
+                    }
+                }
+                loaders.push(LoadedProgram::plain(rl_loader));
+                true
+            }
+            Err(e) => {
+                warn!("xdp-ratelimit load failed: {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    // firewall → reject (slot 1, wired inside the loader helper).
+    if let Some(ref mut fw) = fw_loader {
+        match try_load_xdp_firewall_reject(&ebpf_dir, fw) {
+            Ok(reject) => loaders.push(LoadedProgram::plain(reject)),
+            Err(e) => warn!("xdp-firewall-reject load failed: {e}"),
         }
     }
 
+    // firewall → loadbalancer (slot 2) when ratelimit is absent but FW + LB are on.
+    if fw_ok
+        && !rl_ok
+        && config.loadbalancer.enabled
+        && !lb_pre_loaded
+        && let Some(ref mut fw) = fw_loader
+    {
+        match try_load_xdp_loadbalancer(&ebpf_dir, &config, true) {
+            Ok((lb_loader, ..)) => {
+                if let Ok(lb_fd) = lb_loader.program_raw_fd("xdp_loadbalancer") {
+                    let _ = fw.set_tail_call_raw("XDP_PROG_ARRAY", 2, lb_fd);
+                }
+                loaders.push(LoadedProgram::plain(lb_loader));
+                lb_pre_loaded = true;
+            }
+            Err(e) => warn!("LB load for firewall chain failed: {e}"),
+        }
+    }
+
+    // firewall → VIP announcer (slot 3) when the announcer is enabled.
+    let vip_enabled = config
+        .lb_announce()
+        .is_ok_and(|c| c.role != domain::loadbalancer::vip::AnnounceRole::Disabled);
+    if fw_ok
+        && vip_enabled
+        && let Some(ref mut fw) = fw_loader
+    {
+        match try_load_xdp_vip_announcer(&ebpf_dir) {
+            Ok((vip_loader, ..)) => {
+                if let Ok(vip_fd) = vip_loader.program_raw_fd("xdp_vip_announcer") {
+                    let _ = fw.set_tail_call_raw("XDP_PROG_ARRAY", 3, vip_fd);
+                }
+                loaders.push(LoadedProgram::plain(vip_loader));
+            }
+            Err(e) => warn!("xdp-vip-announcer load failed: {e}"),
+        }
+    }
+
+    // Firewall loader is held last, after all its tail-call slots are wired.
+    if let Some(fw) = fw_loader {
+        loaders.push(LoadedProgram::plain(fw));
+    }
+
+    load_leaf_programs(
+        &ebpf_dir,
+        &config,
+        fw_ok,
+        rl_ok,
+        lb_pre_loaded,
+        &mut loaders,
+    );
+
     Ok(loaders)
+}
+
+/// Load the TC / uprobe leaf programs and the standalone load balancer, appending
+/// each to `loaders`. These are independently attached (TC clsact hooks, uprobes)
+/// and carry no XDP tail-call chaining; split out of [`load_all_programs`] to keep
+/// each function focused.
+fn load_leaf_programs(
+    ebpf_dir: &str,
+    config: &AgentConfig,
+    fw_ok: bool,
+    rl_ok: bool,
+    lb_pre_loaded: bool,
+    loaders: &mut Vec<LoadedProgram>,
+) {
+    // TC IDS (also the L7 capture vehicle).
+    if config.ids.enabled || config.l7.enabled {
+        match try_load_tc_ids(ebpf_dir, config) {
+            Ok((loader, ..)) => loaders.push(LoadedProgram::plain(loader)),
+            Err(e) => warn!("tc-ids load failed: {e}"),
+        }
+    }
+
+    // TC threat-intel.
+    if config.threatintel.enabled {
+        match try_load_tc_threatintel(ebpf_dir, config) {
+            Ok((loader, ..)) => loaders.push(LoadedProgram::plain(loader)),
+            Err(e) => warn!("tc-threatintel load failed: {e}"),
+        }
+    }
+
+    // TC DNS.
+    if config.dns.enabled {
+        match try_load_tc_dns(ebpf_dir, config) {
+            Ok((loader, ..)) => loaders.push(LoadedProgram::plain(loader)),
+            Err(e) => warn!("tc-dns load failed: {e}"),
+        }
+    }
+
+    // uprobe-DLP — loaded under its own pin path so its `EVENTS` ring buffer is a
+    // distinct kernel object, then re-exported to the registry as `DLP_EVENTS`.
+    if config.dlp.enabled {
+        match try_load_uprobe_dlp(ebpf_dir, config, DLP_PIN_PATH) {
+            Ok((loader, ..)) => loaders.push(LoadedProgram {
+                loader,
+                map_aliases: &[("EVENTS", "DLP_EVENTS")],
+            }),
+            Err(e) => warn!("uprobe-dlp load failed: {e}"),
+        }
+    }
+
+    // TC conntrack.
+    if config.conntrack.enabled {
+        match try_load_tc_conntrack(ebpf_dir, config) {
+            Ok((loader, ..)) => loaders.push(LoadedProgram::plain(loader)),
+            Err(e) => warn!("tc-conntrack load failed: {e}"),
+        }
+    }
+
+    // TC NAT (ingress + egress).
+    if config.nat.enabled {
+        match try_load_tc_nat(ebpf_dir, config) {
+            Ok((ingress, egress, ..)) => {
+                loaders.push(LoadedProgram::plain(ingress));
+                loaders.push(LoadedProgram::plain(egress));
+            }
+            Err(e) => warn!("tc-nat load failed: {e}"),
+        }
+    }
+
+    // TC scrub.
+    if config.firewall.scrub.enabled {
+        match try_load_tc_scrub(ebpf_dir, config) {
+            Ok((loader, ..)) => loaders.push(LoadedProgram::plain(loader)),
+            Err(e) => warn!("tc-scrub load failed: {e}"),
+        }
+    }
+
+    // TC QoS.
+    if config.qos.enabled {
+        match try_load_tc_qos(ebpf_dir, config) {
+            Ok((loader, ..)) => loaders.push(LoadedProgram::plain(loader)),
+            Err(e) => warn!("tc-qos load failed: {e}"),
+        }
+    }
+
+    // XDP loadbalancer standalone (only when not already pre-loaded into the chain).
+    if !lb_pre_loaded && config.loadbalancer.enabled {
+        let chain_active = fw_ok || rl_ok;
+        match try_load_xdp_loadbalancer(ebpf_dir, config, chain_active) {
+            Ok((loader, ..)) => loaders.push(LoadedProgram::plain(loader)),
+            Err(e) => warn!("xdp-loadbalancer load failed: {e}"),
+        }
+    }
 }
 
 /// Block until `SIGTERM`/`SIGINT`, then return so the caller can drop the loaders
@@ -237,7 +473,21 @@ pub async fn warden_serve(config_path: &str, sock: &str, allowed_uid: u32) -> an
     // the maps the registry still references.
     let fds: Vec<(&str, std::os::fd::RawFd)> = loaders
         .iter()
-        .flat_map(EbpfLoader::hosted_map_fds)
+        .flat_map(|lp| {
+            lp.loader
+                .hosted_map_fds()
+                .into_iter()
+                .map(move |(name, fd)| {
+                    // Re-export an aliased map name (e.g. uprobe-dlp's `EVENTS` →
+                    // `DLP_EVENTS`) so it does not collide with another loader's map.
+                    let exported = lp
+                        .map_aliases
+                        .iter()
+                        .find(|(from, _)| *from == name)
+                        .map_or(name, |(_, to)| *to);
+                    (exported, fd)
+                })
+        })
         .collect();
     let registry = ebpfsentinel_warden::map_engine::MapRegistry::from_fds(&fds);
     info!(
@@ -2083,7 +2333,7 @@ pub async fn run(
 
         // 10f. Uprobe DLP
         dlp_ok = if config.dlp.enabled {
-            match try_load_uprobe_dlp(&ebpf_dir, &config) {
+            match try_load_uprobe_dlp(&ebpf_dir, &config, adapters::ebpf::DEFAULT_BPF_PIN_PATH) {
                 Ok((loader, dlp_rdr, reader)) => {
                     let event_tx_clone = event_tx.clone();
                     tokio::spawn(async move {
@@ -3959,10 +4209,10 @@ const SSL_LIBRARY_CANDIDATES: &[&str] = &[
 pub fn try_load_uprobe_dlp(
     ebpf_dir: &str,
     _config: &AgentConfig,
+    pin_path: &str,
 ) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>, DlpEventReader)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "uprobe-dlp")?;
-    let mut loader =
-        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    let mut loader = EbpfLoader::load_with_pin_path(&program_bytes, pin_path)?;
 
     // Probe for a usable SSL library on the system (full path needed for aya).
     let ssl_path = find_ssl_library_path();
