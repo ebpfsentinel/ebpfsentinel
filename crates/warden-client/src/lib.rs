@@ -12,8 +12,13 @@
 //! (map writes, conntrack reads) is rare, so a simple synchronous
 //! request/response loop over the raw stream is sufficient — the hot event path
 //! never crosses this client (it rides ring-buffer fds passed once by the warden).
+//!
+//! The optional `fd-pass` feature adds [`WardenClient::get_ringbuf_fd`], which
+//! receives a ring-buffer map fd over `SCM_RIGHTS`. That receive is the only
+//! `libc`/`unsafe` in this crate; with the feature off the crate is
+//! `#![forbid(unsafe_code)]`.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "fd-pass"), forbid(unsafe_code))]
 
 use std::io;
 use std::os::unix::net::UnixStream;
@@ -112,6 +117,87 @@ impl WardenClient {
             other => Err(unexpected("ConntrackDump", &other)),
         }
     }
+
+    /// Request the named ring-buffer map's fd from the warden and receive it over
+    /// `SCM_RIGHTS`. The returned [`OwnedFd`](std::os::fd::OwnedFd) refers to the
+    /// same kernel ring buffer the in-kernel programs write to; the agent drains it
+    /// with `mmap`+`poll`, issuing no `bpf()`.
+    #[cfg(feature = "fd-pass")]
+    pub fn get_ringbuf_fd(&mut self, name: &str) -> io::Result<std::os::fd::OwnedFd> {
+        write_frame(
+            &mut self.stream,
+            &Command::GetRingbufFd {
+                program: name.to_owned(),
+            },
+        )?;
+        match read_frame::<_, Response>(&mut self.stream)? {
+            Response::FdReady => fd_pass::recv_one_fd(&self.stream),
+            other => Err(unexpected("GetRingbufFd", &other)),
+        }
+    }
+}
+
+/// `SCM_RIGHTS` fd receive — the sole `unsafe`/`libc` in this crate, compiled only
+/// under the `fd-pass` feature.
+#[cfg(feature = "fd-pass")]
+mod fd_pass {
+    use std::io;
+    use std::mem;
+    use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+    use std::os::unix::net::UnixStream;
+    use std::ptr;
+
+    /// Receive exactly one fd, sent by the warden alongside a single sentinel byte.
+    pub fn recv_one_fd(stream: &UnixStream) -> io::Result<OwnedFd> {
+        use std::os::fd::AsRawFd;
+
+        let mut byte = [0u8; 1];
+        let mut iov = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: byte.len(),
+        };
+        // SAFETY: a zeroed `msghdr` is a valid empty message header; the control
+        // buffer is sized for exactly one fd via `CMSG_SPACE`.
+        let mut cbuf = [0u8; unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) } as usize];
+        let mut msg: libc::msghdr = unsafe { mem::zeroed() };
+        msg.msg_iov = ptr::from_mut(&mut iov);
+        msg.msg_iovlen = 1;
+        msg.msg_control = cbuf.as_mut_ptr().cast();
+        msg.msg_controllen = cbuf.len() as _;
+
+        // SAFETY: `msg` points at the valid `iov`/`cbuf` locals above.
+        let n = unsafe { libc::recvmsg(stream.as_raw_fd(), ptr::from_mut(&mut msg), 0) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+            // The kernel dropped the fd because the control buffer was too small;
+            // never act on a partial/forged fd set.
+            return Err(io::Error::other("ring-buffer fd was truncated in transit"));
+        }
+        // SAFETY: walk the well-formed control buffer the kernel just filled.
+        let fd = unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(ptr::from_ref(&msg));
+            if cmsg.is_null()
+                || (*cmsg).cmsg_level != libc::SOL_SOCKET
+                || (*cmsg).cmsg_type != libc::SCM_RIGHTS
+            {
+                return Err(io::Error::other("no SCM_RIGHTS fd in warden reply"));
+            }
+            let mut raw: RawFd = -1;
+            ptr::copy_nonoverlapping(
+                libc::CMSG_DATA(cmsg),
+                ptr::from_mut(&mut raw).cast(),
+                mem::size_of::<RawFd>(),
+            );
+            raw
+        };
+        if fd < 0 {
+            return Err(io::Error::other("warden returned an invalid fd"));
+        }
+        // SAFETY: `fd` is a fresh descriptor the kernel just installed; we own it.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
 }
 
 /// Turn an off-protocol or `Error` response into an `io::Error`.
@@ -122,5 +208,67 @@ fn unexpected(op: &str, resp: &Response) -> io::Error {
             io::Error::other(format!("{op}: not implemented by this warden build"))
         }
         other => io::Error::other(format!("{op}: unexpected response {other:?}")),
+    }
+}
+
+#[cfg(all(test, feature = "fd-pass"))]
+mod fd_pass_tests {
+    use crate::fd_pass::recv_one_fd;
+    use std::io::{Read, Write};
+    use std::mem;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::os::unix::net::UnixStream;
+    use std::ptr;
+
+    /// Send one fd alongside a single sentinel byte — the warden's wire shape.
+    unsafe fn send_one_fd(sock: RawFd, fd: RawFd) -> bool {
+        let mut byte = [0u8; 1];
+        let mut iov = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: byte.len(),
+        };
+        let mut cbuf = [0u8; unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) } as usize];
+        let mut msg: libc::msghdr = unsafe { mem::zeroed() };
+        msg.msg_iov = ptr::from_mut(&mut iov);
+        msg.msg_iovlen = 1;
+        msg.msg_control = cbuf.as_mut_ptr().cast();
+        msg.msg_controllen = cbuf.len() as _;
+        unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(ptr::from_ref(&msg));
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(mem::size_of::<RawFd>() as u32) as _;
+            ptr::copy_nonoverlapping(
+                ptr::from_ref(&fd).cast(),
+                libc::CMSG_DATA(cmsg),
+                mem::size_of::<RawFd>(),
+            );
+            libc::sendmsg(sock, ptr::from_ref(&msg), 0) >= 0
+        }
+    }
+
+    #[test]
+    fn received_fd_refers_to_the_same_kernel_object() {
+        let (sender, receiver) = UnixStream::pair().unwrap();
+
+        // Pass the read end of a pipe across the socket.
+        let mut fds = [0 as RawFd; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (read_fd, write_fd) = (fds[0], fds[1]);
+
+        assert!(unsafe { send_one_fd(sender.as_raw_fd(), read_fd) });
+        let received: OwnedFd = recv_one_fd(&receiver).expect("recv fd");
+
+        // Drop our copy of the original read end; the received fd must still read
+        // bytes written to the write end — proving it is the same pipe.
+        unsafe { libc::close(read_fd) };
+        let mut writer = unsafe { std::fs::File::from_raw_fd(write_fd) };
+        writer.write_all(b"hi").unwrap();
+        drop(writer);
+
+        let mut reader = std::fs::File::from(received);
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"hi");
     }
 }

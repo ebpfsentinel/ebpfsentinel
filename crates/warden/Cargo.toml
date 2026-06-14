@@ -24,5 +24,5 @@ libc = { workspace = true }
 ebpfsentinel-warden-proto = { workspace = true }
 
 [dev-dependencies]
-ebpfsentinel-warden-client = { workspace = true }
+ebpfsentinel-warden-client = { workspace = true, features = ["fd-pass"] }
 tempfile = { workspace = true }

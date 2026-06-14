@@ -30,6 +30,10 @@ const BPF_MAP_UPDATE_ELEM: libc::c_int = 2;
 const BPF_MAP_DELETE_ELEM: libc::c_int = 3;
 const BPF_OBJ_GET: libc::c_int = 7;
 
+/// `enum bpf_map_type::BPF_MAP_TYPE_RINGBUF` — only ring-buffer maps may have
+/// their fd handed to the agent for `mmap`+`poll` event draining.
+const BPF_MAP_TYPE_RINGBUF: u32 = 27;
+
 /// `pathname`/`bpf_fd` branch of `bpf_attr` (`BPF_OBJ_GET`).
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -107,9 +111,11 @@ impl fmt::Display for MapOpError {
 
 impl std::error::Error for MapOpError {}
 
-/// One opened, pinned map and the element sizes it enforces.
+/// One opened, pinned map: its fd, the `bpf_map_type`, and the element sizes it
+/// enforces.
 struct MapHandle {
     fd: RawFd,
+    map_type: u32,
     key_size: u32,
     value_size: u32,
 }
@@ -138,11 +144,12 @@ impl MapRegistry {
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if let Some((fd, key_size, value_size)) = open_pinned_map(&path) {
+            if let Some((fd, map_type, key_size, value_size)) = open_pinned_map(&path) {
                 maps.insert(
                     name.to_owned(),
                     MapHandle {
                         fd,
+                        map_type,
                         key_size,
                         value_size,
                     },
@@ -253,6 +260,17 @@ impl MapRegistry {
         Ok(())
     }
 
+    /// The fd of a pinned **ring-buffer** map, for passing to the agent over
+    /// `SCM_RIGHTS`. Returns `None` if the name is unknown or names a non-ringbuf
+    /// map (so a control map's fd is never handed out as if it were an event
+    /// stream). The registry keeps ownership — `SCM_RIGHTS` dups the fd into the
+    /// receiver, leaving this one valid.
+    #[must_use]
+    pub fn ringbuf_fd(&self, name: &str) -> Option<RawFd> {
+        let handle = self.maps.get(name)?;
+        (handle.map_type == BPF_MAP_TYPE_RINGBUF).then_some(handle.fd)
+    }
+
     /// Resolve a pin name to its handle or refuse it as unknown.
     fn handle(&self, name: &str) -> Result<&MapHandle, MapOpError> {
         self.maps
@@ -280,9 +298,9 @@ fn check_len(got: usize, expected: u32, is_key: bool) -> Result<(), MapOpError> 
     }
 }
 
-/// `BPF_OBJ_GET` a pin, then read its `key_size`/`value_size`. Returns `None` for
-/// a pin that is not a map or cannot be opened.
-fn open_pinned_map(path: &Path) -> Option<(RawFd, u32, u32)> {
+/// `BPF_OBJ_GET` a pin, then read its `map_type`/`key_size`/`value_size`. Returns
+/// `None` for a pin that is not a map or cannot be opened.
+fn open_pinned_map(path: &Path) -> Option<(RawFd, u32, u32, u32)> {
     let cpath = CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut obj = BpfAttrObj {
         pathname: cpath.as_ptr() as u64,
@@ -317,7 +335,7 @@ fn open_pinned_map(path: &Path) -> Option<(RawFd, u32, u32)> {
         unsafe { libc::close(fd) };
         return None;
     }
-    Some((fd, info.key_size, info.value_size))
+    Some((fd, info.map_type, info.key_size, info.value_size))
 }
 
 /// The current thread's `errno`.
@@ -365,6 +383,12 @@ mod tests {
             reg.delete("NOPE", &[0]),
             Err(MapOpError::UnknownMap("NOPE".to_owned()))
         );
+    }
+
+    #[test]
+    fn ringbuf_fd_unknown_is_none() {
+        let reg = MapRegistry::default();
+        assert!(reg.ringbuf_fd("EVENTS").is_none());
     }
 
     #[test]

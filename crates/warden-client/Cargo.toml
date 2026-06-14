@@ -8,5 +8,12 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# `fd-pass` adds the `SCM_RIGHTS` ring-buffer fd receiver; it is the only code in
+# this crate that uses `libc`/`unsafe`. With the feature off the crate is
+# `#![forbid(unsafe_code)]` and the map/conntrack control path carries no `unsafe`.
+fd-pass = ["dep:libc"]
+
 [dependencies]
 ebpfsentinel-warden-proto = { workspace = true }
+libc = { workspace = true, optional = true }

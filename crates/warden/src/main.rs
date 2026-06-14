@@ -27,8 +27,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::ExitCode;
 use std::ptr;
 
-use ebpfsentinel_warden::enable_tcp_syncookies;
 use ebpfsentinel_warden::map_engine::MapRegistry;
+use ebpfsentinel_warden::{enable_tcp_syncookies, send_msg_fds};
 use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
 
 /// Default peer uid the warden accepts — the rootless agent's id. Override with
@@ -185,11 +185,38 @@ fn handle_conn(conn: UnixStream, registry: &MapRegistry) {
     }
 
     while let Ok(cmd) = read_frame::<_, Command>(&mut reader) {
-        let resp = dispatch(&cmd, registry);
-        if write_frame(&mut writer, &resp).is_err() {
+        // `GetRingbufFd` answers out-of-band: an `FdReady` frame followed by the
+        // map fd in an `SCM_RIGHTS` cmsg, so it bypasses the plain `dispatch`.
+        let ok = match &cmd {
+            Command::GetRingbufFd { program } => serve_ringbuf_fd(&mut writer, registry, program),
+            other => write_frame(&mut writer, &dispatch(other, registry)).is_ok(),
+        };
+        if !ok {
             break;
         }
     }
+}
+
+/// Serve a `GetRingbufFd`: if `name` is a pinned ring-buffer map, write `FdReady`
+/// and pass its fd over `SCM_RIGHTS`; otherwise reply with a typed `Error` and
+/// send no fd. Returns `false` only on a write/socket error (close the
+/// connection); a refused-but-answered request returns `true`.
+fn serve_ringbuf_fd(writer: &mut UnixStream, registry: &MapRegistry, name: &str) -> bool {
+    let Some(fd) = registry.ringbuf_fd(name) else {
+        return write_frame(
+            writer,
+            &Response::Error {
+                message: format!("'{name}' is not a pinned ring-buffer map"),
+            },
+        )
+        .is_ok();
+    };
+    if write_frame(writer, &Response::FdReady).is_err() {
+        return false;
+    }
+    // One sentinel payload byte carries the fd; the agent reads `FdReady`, then
+    // recvmsg's exactly this byte to collect the descriptor.
+    send_msg_fds(writer.as_raw_fd(), &[0u8], &[fd])
 }
 
 /// Map a request to a response. The conntrack read and map element ops are wired
