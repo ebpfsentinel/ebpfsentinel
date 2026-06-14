@@ -128,16 +128,12 @@ impl ThreatIntelFeedConfig {
             });
         }
 
-        // Only allow http:// and https:// schemes to prevent SSRF
-        if !self.url.starts_with("http://") && !self.url.starts_with("https://") {
-            return Err(ConfigError::Validation {
-                field: format!("{prefix}.url"),
-                message: format!(
-                    "feed URL must use http:// or https:// scheme, got: '{}'",
-                    self.url
-                ),
-            });
-        }
+        // Enforce the full SSRF guard (http(s) scheme + no loopback / private /
+        // link-local / metadata targets), not just the URL scheme.
+        FeedConfig::validate_url(&self.url).map_err(|message| ConfigError::Validation {
+            field: format!("{prefix}.url"),
+            message: message.to_string(),
+        })?;
 
         if self.refresh_interval_secs == 0 {
             return Err(ConfigError::Validation {
@@ -273,6 +269,22 @@ refresh_interval_secs: 3600
         feed.url = "file:///etc/passwd".to_string();
         let err = feed.validate(0).unwrap_err();
         assert!(err.to_string().contains("http:// or https://"));
+    }
+
+    #[test]
+    fn validate_rejects_ssrf_metadata_url() {
+        let mut feed = valid_feed();
+        feed.url = "http://169.254.169.254/latest/meta-data/".to_string();
+        let err = feed.validate(0).unwrap_err();
+        assert!(err.to_string().contains("private or link-local"));
+    }
+
+    #[test]
+    fn validate_rejects_loopback_url() {
+        let mut feed = valid_feed();
+        feed.url = "http://127.0.0.1:8080/feed".to_string();
+        let err = feed.validate(0).unwrap_err();
+        assert!(err.to_string().contains("loopback"));
     }
 
     #[test]

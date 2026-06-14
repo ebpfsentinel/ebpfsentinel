@@ -296,7 +296,7 @@ impl FeedConfig {
     }
 
     /// Validate feed URL: must be http(s), must not target private/loopback/link-local addresses.
-    fn validate_url(url: &str) -> Result<(), &'static str> {
+    pub fn validate_url(url: &str) -> Result<(), &'static str> {
         // Scheme check
         let rest = if let Some(r) = url.strip_prefix("https://") {
             r
