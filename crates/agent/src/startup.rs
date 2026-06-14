@@ -116,6 +116,87 @@ async fn run_ti_feed_cycle(
     }
 }
 
+/// Privileged **load step** for the split (rootless-agent) deployment.
+///
+/// Loads, pins and attaches every configured eBPF program through the BPF token,
+/// then parks until `SIGTERM`/`SIGINT` so the program attachments (held as raw
+/// links in the returned loaders) stay alive for the process lifetime. The warden
+/// runs this inside its own namespace; the maps and ring buffers it pins are then
+/// served to the rootless agent over the warden socket — the agent itself loads
+/// nothing and never touches the bpffs.
+///
+/// Loading is **token-only**: if `BPF_TOKEN_CREATE` fails this returns an error
+/// rather than falling back to capability-based loading.
+///
+/// This build wires the XDP firewall; the remaining programs are added
+/// incrementally (each mirrors its `try_load_*` call in [`run`]).
+pub async fn load_pin(config_path: &str) -> anyhow::Result<()> {
+    adapters::system::set_restrictive_umask();
+    let config = AgentConfig::load(Path::new(config_path))?;
+    init_logging(config.agent.log_level, config.agent.log_format)?;
+    info!(
+        config_path,
+        interfaces = ?config.agent.interfaces,
+        "load-pin: loading + pinning eBPF via BPF token, then parking"
+    );
+
+    // Token bootstrap is mandatory here — token-only, no capability fallback.
+    let bpf_policy = adapters::ebpf::BpfTokenPolicy::new(config.agent.bpf_token.bpffs_path.clone());
+    let bpf_handle = adapters::ebpf::bootstrap_bpf(&bpf_policy).map_err(|e| {
+        anyhow::anyhow!(
+            "load-pin requires a BPF token (a privileged setup must mount the delegated bpffs): {e}"
+        )
+    })?;
+    info!(
+        kernel = bpf_handle.kernel.version_string(),
+        reason = bpf_handle.reason,
+        "eBPF loading via BPF token"
+    );
+    adapters::ebpf::set_bpf_token_fd(bpf_handle.token_fd.as_raw_fd());
+    register_module_btf_fds();
+
+    let ebpf_dir = resolve_ebpf_program_dir(&config);
+    EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
+
+    // Loaders are held for the process lifetime so the raw links stay attached.
+    let mut loaders: Vec<EbpfLoader> = Vec::new();
+
+    if config.firewall.enabled {
+        let domain_rules = config.firewall_rules()?;
+        match try_load_xdp_firewall(&ebpf_dir, &config, &domain_rules) {
+            Ok((loader, _map_manager, _metrics_reader, _event_reader)) => {
+                info!("xdp-firewall loaded + pinned + attached");
+                loaders.push(loader);
+            }
+            Err(e) => warn!("xdp-firewall load failed: {e}"),
+        }
+    }
+
+    // Self-report the pinned objects (we are in the loader's namespace, so they
+    // are visible here even though they are not host-visible to other namespaces).
+    if let Ok(entries) = std::fs::read_dir(adapters::ebpf::DEFAULT_BPF_PIN_PATH) {
+        let mut pins: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        pins.sort();
+        info!(pin_count = pins.len(), pins = ?pins, "eBPF objects pinned");
+    }
+
+    info!(
+        "load-pin complete; parking to hold {} loader(s)",
+        loaders.len()
+    );
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    tokio::select! {
+        _ = sigterm.recv() => info!("load-pin received SIGTERM, exiting"),
+        _ = sigint.recv() => info!("load-pin received SIGINT, exiting"),
+    }
+    drop(loaders);
+    Ok(())
+}
+
 /// Run the agent startup sequence and block until shutdown.
 ///
 /// `log_level_override` and `log_format_override` take precedence over config file values.

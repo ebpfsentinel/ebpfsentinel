@@ -408,6 +408,9 @@ async fn main() -> Result<()> {
             }
         }
 
+        // Privileged load step for the split (rootless-agent) deployment.
+        Some(Command::LoadPin) => ebpfsentinel_agent::startup::load_pin(&cli.config).await,
+
         // No subcommand = run the agent daemon
         None => ebpfsentinel_agent::startup::run(&cli.config, cli.log_level, cli.log_format).await,
     }

@@ -59,6 +59,12 @@ pub enum Command {
     /// Display version and build information
     Version,
 
+    /// Privileged internal: load + pin + attach every eBPF program through the
+    /// BPF token, then park to hold the program attachments. This is the warden's
+    /// load step in the split (rootless-agent) deployment — not for direct use.
+    #[command(hide = true)]
+    LoadPin,
+
     /// Query running agent status
     Status {
         #[command(flatten)]
