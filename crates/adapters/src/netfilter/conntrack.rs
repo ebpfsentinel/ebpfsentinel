@@ -27,9 +27,11 @@
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use domain::common::error::DomainError;
 use domain::conntrack::entity::{ConnTrackSettings, Connection, ConnectionState};
+use ebpfsentinel_warden_client::{ConntrackTuple, ReconnectingClient};
 use ports::secondary::conntrack_kill_port::ConnTrackKillPort;
 use ports::secondary::conntrack_map_port::ConnTrackMapPort;
 use tracing::{debug, warn};
@@ -46,6 +48,12 @@ const BROKER_SOCK_ENV: &str = "EBPFSENTINEL_BROKER_SOCK";
 /// Command byte selecting a conntrack-table read on a broker connection (must
 /// match `CMD_CONNTRACK` in the warden-token broker).
 const BROKER_CMD_CONNTRACK: u8 = b'C';
+/// Env var set for the rootless agent with the warden control-plane socket. When
+/// present, every conntrack operation (table read, flush, targeted delete) is
+/// proxied to the warden over its typed protocol instead of touching `/proc` or
+/// the `conntrack` CLI directly — the rootless agent holds none of the required
+/// privileges. Takes precedence over the legacy raw broker read path.
+const WARDEN_SOCK_ENV: &str = "EBPFSENTINEL_WARDEN_SOCK";
 
 /// Reads the kernel netfilter conntrack table via `/proc/net/nf_conntrack`.
 ///
@@ -61,12 +69,21 @@ pub struct ProcNetfilterConntrackPort {
     /// Broker `AF_UNIX` socket to proxy table reads through, when the agent runs
     /// non-root in a child user namespace and cannot read the proc file directly.
     broker_sock: Option<PathBuf>,
+    /// Warden control-plane client. When present (rootless agent), every conntrack
+    /// operation is proxied to the warden over its typed protocol. The client
+    /// caches its connection, so it is held behind a `Mutex` to satisfy the `&self`
+    /// read/delete methods.
+    warden: Option<Mutex<ReconnectingClient>>,
 }
 
 impl ProcNetfilterConntrackPort {
     /// Build a port reading from the default `/proc` paths.
     #[must_use]
     pub fn new() -> Self {
+        let warden = std::env::var_os(WARDEN_SOCK_ENV)
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| Mutex::new(ReconnectingClient::new(p)));
         let broker_sock = std::env::var_os(BROKER_SOCK_ENV)
             .map(PathBuf::from)
             .filter(|p| !p.as_os_str().is_empty());
@@ -74,16 +91,18 @@ impl ProcNetfilterConntrackPort {
             nf_conntrack_path: PathBuf::from(DEFAULT_NF_CONNTRACK_PATH),
             nf_conntrack_count_path: PathBuf::from(DEFAULT_NF_CONNTRACK_COUNT_PATH),
             broker_sock,
+            warden,
         }
     }
 
-    /// Build a port with injectable paths for unit testing (no broker).
+    /// Build a port with injectable paths for unit testing (no broker, no warden).
     #[must_use]
     pub fn with_paths(nf_conntrack: PathBuf, nf_conntrack_count: PathBuf) -> Self {
         Self {
             nf_conntrack_path: nf_conntrack,
             nf_conntrack_count_path: nf_conntrack_count,
             broker_sock: None,
+            warden: None,
         }
     }
 }
@@ -105,6 +124,30 @@ impl ConnTrackKillPort for ProcNetfilterConntrackPort {
             // so refuse rather than risk a table-wide delete.
             _ => return Ok(0),
         };
+        // Rootless agent: the netlink delete is a CAP_NET_ADMIN op the warden runs.
+        // The warden reports only success/failure (no deleted count), so report 0
+        // and log the teardown so it stays observable.
+        if let Some(warden) = &self.warden {
+            let tuple = ConntrackTuple {
+                proto: protocol,
+                src_ip: String::new(),
+                dst_ip: String::new(),
+                src_port: 0,
+                dst_port,
+            };
+            warden
+                .lock()
+                .map_err(|_| DomainError::EngineError("warden client lock poisoned".into()))?
+                .conntrack_delete(&tuple)
+                .map_err(|e| {
+                    DomainError::EngineError(format!("warden conntrack delete failed: {e}"))
+                })?;
+            debug!(
+                protocol = proto,
+                dst_port, "conntrack flow teardown issued via warden"
+            );
+            return Ok(0);
+        }
         let dport = dst_port.to_string();
         let output = std::process::Command::new("conntrack")
             .args(["-D", "-p", proto, "--dport", &dport])
@@ -166,9 +209,19 @@ fn fetch_conntrack_via_broker(sock: &Path) -> Result<Vec<u8>, DomainError> {
 
 impl ConnTrackMapPort for ProcNetfilterConntrackPort {
     fn get_connections(&self, limit: usize) -> Result<Vec<Connection>, DomainError> {
-        // Non-root userns agent: proxy the read through the privileged broker;
-        // otherwise read the proc file directly. Same text format either way.
-        let reader: Box<dyn std::io::BufRead> = if let Some(sock) = &self.broker_sock {
+        // Rootless agent: proxy the read through the warden's typed protocol.
+        // Legacy broker mode: proxy through the raw broker byte protocol.
+        // Otherwise read the proc file directly. Same text format every way.
+        let reader: Box<dyn std::io::BufRead> = if let Some(warden) = &self.warden {
+            let bytes = warden
+                .lock()
+                .map_err(|_| DomainError::EngineError("warden client lock poisoned".into()))?
+                .conntrack_dump()
+                .map_err(|e| {
+                    DomainError::EngineError(format!("warden conntrack dump failed: {e}"))
+                })?;
+            Box::new(std::io::Cursor::new(bytes))
+        } else if let Some(sock) = &self.broker_sock {
             Box::new(std::io::Cursor::new(fetch_conntrack_via_broker(sock)?))
         } else {
             let file = std::fs::File::open(&self.nf_conntrack_path).map_err(|e| {
@@ -202,6 +255,19 @@ impl ConnTrackMapPort for ProcNetfilterConntrackPort {
 
     fn flush_all(&mut self) -> Result<u64, DomainError> {
         let count = self.connection_count().unwrap_or(0);
+        // Rootless agent: the kernel flush is a CAP_NET_ADMIN op the warden runs.
+        // The pre-flush count is best-effort (the proc count file is root-only, so
+        // it is typically 0 here); the flush itself is authoritative.
+        if let Some(warden) = &self.warden {
+            warden
+                .lock()
+                .map_err(|_| DomainError::EngineError("warden client lock poisoned".into()))?
+                .conntrack_flush()
+                .map_err(|e| {
+                    DomainError::EngineError(format!("warden conntrack flush failed: {e}"))
+                })?;
+            return Ok(count);
+        }
         let status = std::process::Command::new("conntrack")
             .args(["-F"])
             .stdout(std::process::Stdio::null())

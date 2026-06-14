@@ -24,9 +24,10 @@ use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
-use ebpfsentinel_warden_proto::{
-    Command, ConntrackTuple, PROTOCOL_VERSION, Response, RouteSpec, read_frame, write_frame,
-};
+use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
+// Re-exported under their real names so callers of the typed control methods can
+// build request values without taking a direct dependency on the protocol crate.
+pub use ebpfsentinel_warden_proto::{ConntrackTuple, RouteSpec};
 
 /// A connected, handshaked client to a warden socket.
 pub struct WardenClient {

@@ -17,6 +17,7 @@ dependencies = [
  "criterion",
  "domain",
  "ebpf-common",
+ "ebpfsentinel-warden-client",
  "flate2",
  "futures-util",
  "governor",
