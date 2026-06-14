@@ -12,7 +12,7 @@ use arc_swap::ArcSwap;
 use domain::dns::encrypted_dns::EncryptedDnsDetector;
 use domain::l7::entity::{DetectedProtocol, ParsedProtocol};
 use domain::l7::ja4::{self, FingerprintCache, FlowKey, Ja4sFingerprintCache};
-use domain::l7::parser::{detect_protocol, parse_payload};
+use domain::l7::parser::{detect_protocol, parse_payload_with};
 use domain::threatintel::entity::ThreatIntelAlert;
 use ebpf_common::ddos::{
     EVENT_TYPE_DDOS_AMP, EVENT_TYPE_DDOS_CONNTRACK, EVENT_TYPE_DDOS_ICMP, EVENT_TYPE_DDOS_SYN,
@@ -604,7 +604,7 @@ impl EventDispatcher {
             .unwrap_or_default();
 
         // Evaluate and threshold check (all methods are now &self via interior mutability)
-        let (_rule_clone, alert, detail, _src_country) = {
+        let (alert, detail) = {
             let svc = self.ids_service.load();
 
             if !svc.enabled() {
@@ -626,13 +626,13 @@ impl EventDispatcher {
                 self.metrics.record_ids_domain_match(&rule.id.0);
             }
             alert.matched_domain = matched_domain;
-            let rule_clone = rule.clone();
-            let threshold = rule.threshold.clone();
 
-            // Threshold check with country-aware overrides (now &self, no write lock needed)
-            if threshold.is_some()
+            // Threshold check with country-aware overrides (now &self, no write lock
+            // needed). `rule` is borrowed for the duration of this block, so the
+            // check borrows it directly — no per-match deep clone of the rule.
+            if rule.threshold.is_some()
                 && !svc.check_threshold_with_country(
-                    &rule_clone,
+                    rule,
                     event.src_addr[0],
                     event.dst_addr[0],
                     src_country.as_deref(),
@@ -650,7 +650,7 @@ impl EventDispatcher {
                 svc.record_flow_killed_via_ct();
             }
 
-            (rule_clone, alert, detail, src_country)
+            (alert, detail)
         };
 
         self.audit_service.record_security_decision(
@@ -859,7 +859,8 @@ impl EventDispatcher {
             protocol_label = label;
         }
 
-        let parsed = parse_payload(payload);
+        // Reuse the protocol detected above instead of re-scanning the payload.
+        let parsed = parse_payload_with(protocol, payload);
 
         // Compute and cache JA4 fingerprint for TLS connections
         if let ParsedProtocol::Tls(ref tls_hello) = parsed {

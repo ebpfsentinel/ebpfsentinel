@@ -48,6 +48,11 @@ fn parse_plaintext(text: &str, config: &FeedConfig) -> Vec<Ioc> {
     let mut iocs = Vec::new();
 
     for line in text.lines() {
+        // Bound memory up front: a hostile feed of bare `1.2.3.4\n` lines would
+        // otherwise build millions of structs before the post-parse cap trims them.
+        if iocs.len() >= config.max_iocs {
+            break;
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with(comment_prefix) {
             continue;
@@ -97,6 +102,10 @@ fn parse_csv(text: &str, config: &FeedConfig) -> Vec<Ioc> {
     let mut iocs = Vec::new();
 
     for line in lines {
+        // Bound memory up front (see parse_plaintext): cap raw growth at max_iocs.
+        if iocs.len() >= config.max_iocs {
+            break;
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with(comment_prefix) {
             continue;

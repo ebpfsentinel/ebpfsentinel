@@ -303,7 +303,13 @@ fn is_ftp(payload: &[u8]) -> bool {
 
 /// Parse the payload into the appropriate protocol structure.
 pub fn parse_payload(payload: &[u8]) -> ParsedProtocol {
-    match detect_protocol(payload) {
+    parse_payload_with(detect_protocol(payload), payload)
+}
+
+/// Parse the payload using a protocol that was already detected by the caller,
+/// avoiding a redundant [`detect_protocol`] signature scan on the hot path.
+pub fn parse_payload_with(protocol: DetectedProtocol, payload: &[u8]) -> ParsedProtocol {
+    match protocol {
         DetectedProtocol::Http => match parse_http(payload) {
             Ok(req) => ParsedProtocol::Http(req),
             Err(_) => ParsedProtocol::Unknown,

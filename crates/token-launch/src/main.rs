@@ -287,6 +287,14 @@ fn recv_fd(sock: RawFd) -> RawFd {
         if cmsg.is_null() {
             return -1;
         }
+        // Defensively confirm this is an SCM_RIGHTS message carrying at least one
+        // fd before reading fd-sized bytes out of the control buffer.
+        if (*cmsg).cmsg_level != libc::SOL_SOCKET
+            || (*cmsg).cmsg_type != libc::SCM_RIGHTS
+            || ((*cmsg).cmsg_len as usize) < libc::CMSG_LEN(mem::size_of::<RawFd>() as u32) as usize
+        {
+            return -1;
+        }
         let mut fd: RawFd = -1;
         ptr::copy_nonoverlapping(
             libc::CMSG_DATA(cmsg),
@@ -554,6 +562,11 @@ fn recv_msg_fds(sock: RawFd, buf: &mut [u8], max_fds: usize) -> (usize, Vec<RawF
     msg.msg_controllen = cbuf.len();
     let n = unsafe { libc::recvmsg(sock, &mut msg, 0) };
     if n < 0 {
+        return (0, Vec::new());
+    }
+    // A truncated control buffer means the kernel silently dropped fds; treat it
+    // as an error rather than acting on a partial, attacker-influenced fd set.
+    if msg.msg_flags & libc::MSG_CTRUNC != 0 {
         return (0, Vec::new());
     }
     let mut fds = Vec::new();
