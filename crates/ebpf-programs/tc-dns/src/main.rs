@@ -109,7 +109,7 @@ fn try_tc_dns(ctx: &TcContext) -> Result<i32, ()> {
 #[inline(always)]
 fn process_dns_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) -> Result<i32, ()> {
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
-    let protocol = unsafe { (*ipv4hdr).proto };
+    let protocol = unsafe { (*ipv4hdr).proto() }.unwrap_or(IpProto::Reserved);
 
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });
     let dst_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).dst_addr });

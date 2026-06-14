@@ -160,7 +160,7 @@ fn process_v4(
     vlan_id: u16,
 ) -> Result<u32, ()> {
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
-    let proto = unsafe { (*ipv4hdr).proto };
+    let proto = unsafe { (*ipv4hdr).proto() }.unwrap_or(IpProto::Reserved);
     let protocol = proto as u8;
     let ihl = unsafe { (*ipv4hdr).ihl() } as usize;
     let l4_offset = l3_offset + ihl;

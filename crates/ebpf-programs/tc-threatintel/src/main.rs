@@ -150,7 +150,7 @@ fn process_threatintel_v4(
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });
     let dst_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).dst_addr });
-    let protocol = unsafe { (*ipv4hdr).proto };
+    let protocol = unsafe { (*ipv4hdr).proto() }.unwrap_or(IpProto::Reserved);
 
     // ihl() returns the header length in bytes (already multiplied by 4)
     let ihl = unsafe { (*ipv4hdr).ihl() } as usize;

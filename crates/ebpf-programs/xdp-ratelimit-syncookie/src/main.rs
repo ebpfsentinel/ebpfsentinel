@@ -159,7 +159,7 @@ fn send_syn_ack_v4(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
         (*ip).set_id(0);
         (*ip).set_frags(0x02, 0); // DF
         (*ip).ttl = 64;
-        (*ip).proto = network_types::ip::IpProto::Tcp;
+        (*ip).proto = network_types::ip::IpProto::Tcp as u8;
         (*ip).src_addr = dst_ip.to_be().to_ne_bytes();
         (*ip).dst_addr = src_ip.to_be().to_ne_bytes();
         (*ip).check = [0, 0];

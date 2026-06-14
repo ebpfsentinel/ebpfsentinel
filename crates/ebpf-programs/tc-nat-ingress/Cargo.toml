@@ -7,7 +7,7 @@ edition = "2024"
 aya-ebpf = "0.1.1"
 ebpf-common = { path = "../../ebpf-common", default-features = false }
 ebpf-helpers = { path = "../../ebpf-helpers" }
-network-types = "0.1.0"
+network-types = "0.2.0"
 
 [[bin]]
 name = "tc-nat-ingress"

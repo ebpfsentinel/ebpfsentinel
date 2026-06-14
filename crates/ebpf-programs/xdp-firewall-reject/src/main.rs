@@ -248,7 +248,7 @@ fn send_tcp_rst_v4(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Result<u32
         (*ip).set_id(0);
         (*ip).set_frags(0x02, 0); // DF
         (*ip).ttl = 64;
-        (*ip).proto = IpProto::Tcp;
+        (*ip).proto = IpProto::Tcp as u8;
         (*ip).src_addr = in_dst_addr; // swap
         (*ip).dst_addr = in_src_addr;
         (*ip).check = [0, 0];
@@ -441,7 +441,7 @@ fn send_icmp_unreachable_v4(ctx: &XdpContext, l3_off: usize, _l4_off: usize) -> 
         (*ip).set_id(0);
         (*ip).set_frags(0, 0);
         (*ip).ttl = 64;
-        (*ip).proto = IpProto::Icmp;
+        (*ip).proto = IpProto::Icmp as u8;
         (*ip).src_addr = orig_dst;
         (*ip).dst_addr = orig_src;
         (*ip).check = [0, 0];
