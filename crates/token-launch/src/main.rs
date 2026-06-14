@@ -251,7 +251,7 @@ fn send_fd(sock: RawFd, fd: RawFd) -> bool {
     msg.msg_iov = ptr::from_mut(&mut iov);
     msg.msg_iovlen = 1;
     msg.msg_control = buf.as_mut_ptr().cast();
-    msg.msg_controllen = buf.len();
+    msg.msg_controllen = buf.len() as _;
     unsafe {
         let cmsg = libc::CMSG_FIRSTHDR(&msg);
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
@@ -278,7 +278,7 @@ fn recv_fd(sock: RawFd) -> RawFd {
     msg.msg_iov = ptr::from_mut(&mut iov);
     msg.msg_iovlen = 1;
     msg.msg_control = buf.as_mut_ptr().cast();
-    msg.msg_controllen = buf.len();
+    msg.msg_controllen = buf.len() as _;
     unsafe {
         if libc::recvmsg(sock, &mut msg, 0) < 0 {
             return -1;
@@ -534,7 +534,7 @@ fn send_msg_fds(sock: RawFd, payload: &[u8], fds: &[RawFd]) -> bool {
     msg.msg_iovlen = 1;
     if !fds.is_empty() {
         msg.msg_control = cbuf.as_mut_ptr().cast();
-        msg.msg_controllen = cbuf.len();
+        msg.msg_controllen = cbuf.len() as _;
         unsafe {
             let cmsg = libc::CMSG_FIRSTHDR(&msg);
             (*cmsg).cmsg_level = libc::SOL_SOCKET;
@@ -559,7 +559,7 @@ fn recv_msg_fds(sock: RawFd, buf: &mut [u8], max_fds: usize) -> (usize, Vec<RawF
     msg.msg_iov = ptr::from_mut(&mut iov);
     msg.msg_iovlen = 1;
     msg.msg_control = cbuf.as_mut_ptr().cast();
-    msg.msg_controllen = cbuf.len();
+    msg.msg_controllen = cbuf.len() as _;
     let n = unsafe { libc::recvmsg(sock, &mut msg, 0) };
     if n < 0 {
         return (0, Vec::new());
