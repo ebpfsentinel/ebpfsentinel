@@ -124,7 +124,7 @@ flowchart TB
             http["REST API\n(Axum)"]
             grpc["gRPC\n(tonic)"]
             store["Storage\n(redb)"]
-            otlp["OTLP exporter\n(logs/traces)"]
+            otlp["OTLP exporter\n(alerts as logs)"]
         end
     end
 
@@ -142,8 +142,8 @@ flowchart TB
     swagger(("Swagger UI")) --> http
     prom(("Prometheus")) --> http
     alerts(("Alert clients")) --> grpc
-    otel(("OTLP collector")) --> otlp
-    otlp --> as
+    as --> otlp
+    otlp --> otel(("OTLP collector"))
 ```
 
 ## Quick start
