@@ -5,9 +5,12 @@
 //! beyond `std` — the proc filesystem is stable since Linux 2.6 and the
 //! format has not changed.
 //!
-//! Reading requires `CAP_NET_ADMIN` (already held by the agent for BPF).
-//! Flushing delegates to the `conntrack -F` CLI tool; kernel sysctl writes
-//! update timeout parameters directly.
+//! Reading `/proc/net/nf_conntrack` needs only access to the host network
+//! namespace, so it works in the default rootless BPF-token deployment where
+//! the agent holds no `CAP_BPF` / `CAP_NET_ADMIN`. Flushing (`conntrack -F`)
+//! and kernel sysctl writes for timeout parameters do require `CAP_NET_ADMIN`,
+//! so they are available only when the agent runs in the `CAP_NET_ADMIN`
+//! fallback mode.
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
