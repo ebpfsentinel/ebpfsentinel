@@ -60,6 +60,26 @@ per-packet eBPF cost** — every program here is cheap:
   free for iperf3's single 5-tuple. The TC programs (scrub/dns/qos/conntrack/nat)
   add a few percent each. Consistent with the production CPU matrix below.
 
+### XDP attachment mode — native vs generic (vmxnet3)
+
+The agent's XDP datapath loads in either **native** (driver, pre-`sk_buff`) or
+**generic** (SKB, post-`sk_buff`) mode; `xdp_mode: auto` (default) picks native.
+vmxnet3 supports both — **offloaded is not available** (paravirtual NIC, no
+SmartNIC). Same firewall-pass config, single TCP flow, idle host:
+
+| Mode                  | Throughput | Overhead vs baseline |
+| --------------------- | ---------- | -------------------- |
+| baseline (no agent)   | ~7.76 Gbps | —                    |
+| native (`xdp`)        | ~7.84 Gbps | ~0 %                 |
+| generic (`xdpgeneric`)| ~6.0 Gbps  | **~23 %**            |
+
+- **Generic XDP costs ~23 % throughput vs native** on vmxnet3 because the program
+  runs after the kernel allocates an `sk_buff` (same position as a TC hook),
+  losing native's pre-allocation fast-path. This is why `xdp_mode: auto`
+  (native-first) is the right default, and a large part of why the earlier
+  single-VM **veth** lane (generic XDP, no NIC) showed 85–95 % "overhead" —
+  generic mode *and* no physical NIC compounded.
+
 ### Full eBPF stack — throughput is rate-limit-bound, not CPU-bound
 
 With **every** program enabled the single-flow TCP throughput collapses to
