@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use crate::auth::revocation::RevocationHandle;
-use crate::metrics::AgentMetrics;
+use adapters::auth::revocation::RevocationHandle;
+use adapters::metrics::AgentMetrics;
 use application::alert_replay::AlertReplayBuffer;
 use application::alias_service_impl::AliasAppService;
 use application::audit_service_impl::AuditAppService;
@@ -92,7 +92,7 @@ pub struct AppState {
     /// Pool of `AF_PACKET` sockets pre-opened by the privileged launcher for
     /// rootless packet capture. `None` when the launcher did not provision any
     /// (capture then degrades gracefully).
-    pub pcap_pool: Option<Arc<crate::net::pcap_capture::PcapSocketPool>>,
+    pub pcap_pool: Option<Arc<adapters::net::pcap_capture::PcapSocketPool>>,
     /// Broadcast sender for conntrack lifecycle events. SSE clients
     /// subscribe by calling `tx.subscribe()`.
     pub conntrack_event_tx: Option<broadcast::Sender<ConntrackEvent>>,
@@ -186,7 +186,10 @@ impl AppState {
     /// Attach the launcher-provisioned `AF_PACKET` socket pool used for rootless
     /// packet capture.
     #[must_use]
-    pub fn with_pcap_pool(mut self, pool: Arc<crate::net::pcap_capture::PcapSocketPool>) -> Self {
+    pub fn with_pcap_pool(
+        mut self,
+        pool: Arc<adapters::net::pcap_capture::PcapSocketPool>,
+    ) -> Self {
         self.pcap_pool = Some(pool);
         self
     }

@@ -8,7 +8,6 @@ pub mod container;
 pub mod ebpf;
 pub mod geoip;
 pub mod grpc;
-pub mod http;
 pub mod metrics;
 pub mod net;
 pub mod netfilter;

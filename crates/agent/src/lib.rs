@@ -2,6 +2,7 @@
 
 pub mod ebpf_lifecycle;
 pub mod ebpf_metrics;
+pub mod http;
 pub mod reload;
 pub mod runtime;
 pub mod schedule_eval;

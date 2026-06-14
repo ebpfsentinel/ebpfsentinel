@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::http::tls::load_rustls_config;
+use crate::http::{AppState, run_http_server};
 use adapters::alert::email_sender::EmailAlertSender;
 use adapters::alert::log_sender::LogAlertSender;
 use adapters::alert::webhook_sender::WebhookAlertSender;
@@ -19,8 +21,6 @@ use adapters::ebpf::{
     ThreatIntelMapManager,
 };
 use adapters::grpc::server::{GrpcTlsConfig, run_grpc_server};
-use adapters::http::tls::load_rustls_config;
-use adapters::http::{AppState, run_http_server};
 use adapters::metrics::AgentMetrics;
 use adapters::storage::redb_alert_store::RedbAlertStore;
 use adapters::storage::redb_audit_store::RedbAuditStore;
@@ -42,7 +42,6 @@ use application::l7_service_impl::L7AppService;
 use application::nat_service_impl::NatAppService;
 use application::packet_pipeline::{AgentEvent, EventDispatcher};
 use application::ratelimit_service_impl::RateLimitAppService;
-use application::retry::RetryConfig;
 use application::routing_service_impl::RoutingAppService;
 use application::schedule_service_impl::ScheduleService;
 use application::threatintel_service_impl::ThreatIntelAppService;
@@ -64,6 +63,7 @@ use infrastructure::constants::{
     ALERT_CHANNEL_CAPACITY, EVENT_CHANNEL_CAPACITY, GRACEFUL_SHUTDOWN_TIMEOUT,
 };
 use infrastructure::logging::init_logging;
+use infrastructure::retry::RetryConfig;
 use ports::secondary::alert_sender::AlertSender;
 use ports::secondary::alert_store::AlertStore;
 use ports::secondary::audit_sink::AuditSink;
@@ -1201,7 +1201,7 @@ pub async fn run(
     // ── 6b. Load TLS configuration ─────────────────────────────────
     // Install the PQ-aware CryptoProvider for all outbound TLS (reqwest, lettre)
     // even when server-side TLS is disabled.
-    adapters::http::tls::install_pq_provider(config.agent.tls.pq_mode);
+    crate::http::tls::install_pq_provider(config.agent.tls.pq_mode);
 
     let tls_config = if config.agent.tls.enabled {
         let rustls_cfg = load_rustls_config(
@@ -2581,7 +2581,7 @@ pub async fn run(
                 {
                     if let Some(ref pool) = cap_pcap_pool {
                         let engine = Arc::clone(&cap_engine_clone);
-                        tokio::spawn(adapters::http::capture_handler::run_pcap_capture(
+                        tokio::spawn(crate::http::capture_handler::run_pcap_capture(
                             Arc::clone(pool),
                             s.id,
                             s.interface,

@@ -290,7 +290,7 @@ pub async fn stop_capture(
 #[cfg(feature = "pcap-capture")]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_pcap_capture(
-    pool: Arc<crate::net::pcap_capture::PcapSocketPool>,
+    pool: Arc<adapters::net::pcap_capture::PcapSocketPool>,
     id: String,
     interface: String,
     filter: String,
@@ -306,7 +306,7 @@ pub async fn run_pcap_capture(
                 "no AF_PACKET capture socket available (all sockets in use)".to_string(),
             ));
         };
-        match crate::net::pcap_capture::run_capture(
+        match adapters::net::pcap_capture::run_capture(
             lease.fd(),
             &interface,
             &filter,

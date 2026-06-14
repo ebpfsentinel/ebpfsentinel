@@ -2,10 +2,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use application::retry::{RetryConfig, retry_with_backoff};
 use domain::alert::circuit_breaker::CircuitBreaker;
 use domain::alert::entity::{Alert, AlertDestination, AlertRoute};
 use domain::common::error::DomainError;
+use infrastructure::retry::{RetryConfig, retry_with_backoff};
 use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};

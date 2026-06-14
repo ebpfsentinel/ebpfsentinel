@@ -1,8 +1,8 @@
 #![allow(unsafe_code)] // Required for eBPF RingBuf event parsing (read_unaligned)
 
 use crate::ebpf::map_store::MapStore;
-use application::packet_pipeline::AgentEvent;
 use aya::maps::{MapData, RingBuf};
+use domain::common::agent_event::AgentEvent;
 use ebpf_common::event::{EVENT_TYPE_L7, PacketEvent};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;

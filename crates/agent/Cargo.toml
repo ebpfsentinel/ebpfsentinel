@@ -34,6 +34,20 @@ reqwest = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
+# HTTP control-plane (driving adapter) deps — the REST API layer lives here.
+axum = { workspace = true }
+http-body-util = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tower_governor = { workspace = true }
+governor = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-rustls = { workspace = true }
+jsonwebtoken = { workspace = true }
+serde_yaml_ng = { workspace = true }
+thiserror = { workspace = true }
+utoipa = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
 serde_json = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
@@ -42,6 +56,8 @@ k8s-openapi = { workspace = true, features = ["v1_31"], optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ports = { workspace = true, features = ["test-utils"] }
+async-trait = { workspace = true }
 
 [lints]
 workspace = true

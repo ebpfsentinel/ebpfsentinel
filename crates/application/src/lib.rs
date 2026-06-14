@@ -76,7 +76,6 @@ pub mod packet_pipeline;
 pub mod qos_service_impl;
 pub mod ratelimit_service_impl;
 pub mod reputation_enforcement;
-pub mod retry;
 pub mod routing_service_impl;
 pub mod schedule_service_impl;
 pub mod threatintel_service_impl;

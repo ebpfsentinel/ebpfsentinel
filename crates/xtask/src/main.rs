@@ -2,9 +2,9 @@ mod build_ebpf;
 
 use std::path::PathBuf;
 
-use adapters::http::openapi::ApiDoc;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use ebpfsentinel_agent::http::openapi::ApiDoc;
 use utoipa::OpenApi;
 
 #[derive(Parser)]

@@ -107,7 +107,7 @@ mod tests {
     }
 
     fn make_test_state(auth_provider: Option<Arc<dyn AuthProvider>>) -> Arc<AppState> {
-        use crate::metrics::AgentMetrics;
+        use adapters::metrics::AgentMetrics;
         use application::audit_service_impl::AuditAppService;
         use application::firewall_service_impl::FirewallAppService;
         use application::ips_service_impl::IpsAppService;

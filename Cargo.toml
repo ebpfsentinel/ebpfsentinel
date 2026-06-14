@@ -158,6 +158,7 @@ ports = { path = "crates/ports" }
 application = { path = "crates/application" }
 adapters = { path = "crates/adapters" }
 infrastructure = { path = "crates/infrastructure" }
+ebpfsentinel-agent = { path = "crates/agent" }
 
 [profile.release]
 strip = true

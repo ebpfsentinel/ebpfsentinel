@@ -7,7 +7,6 @@ name = "adapters"
 version = "0.0.0-dev"
 dependencies = [
  "anyhow",
- "application",
  "arc-swap",
  "async-trait",
  "axum",
@@ -837,10 +836,15 @@ dependencies = [
  "anyhow",
  "application",
  "arc-swap",
+ "async-trait",
+ "axum",
  "clap",
  "domain",
  "ebpf-common",
+ "governor",
+ "http-body-util",
  "infrastructure",
+ "jsonwebtoken",
  "k8s-openapi",
  "notify",
  "notify-debouncer-mini",
@@ -848,10 +852,19 @@ dependencies = [
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
+ "tokio-stream",
  "tokio-util",
+ "tower",
+ "tower-http",
+ "tower_governor",
  "tracing",
+ "utoipa",
+ "utoipa-swagger-ui",
 ]
 
 [[package]]
@@ -4670,9 +4683,9 @@ dependencies = [
 name = "xtask"
 version = "0.0.0"
 dependencies = [
- "adapters",
  "anyhow",
  "clap",
+ "ebpfsentinel-agent",
  "k8s-openapi",
  "serde_json",
  "utoipa",

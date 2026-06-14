@@ -38,23 +38,9 @@ use crate::ips_service_impl::IpsAppService;
 use crate::l7_service_impl::L7AppService;
 use crate::threatintel_service_impl::ThreatIntelAppService;
 
-/// Wrapper around events flowing from the eBPF event reader to the dispatcher.
-///
-/// `L4` carries the 32-byte `PacketEvent` as before. `L7` carries the same
-/// header plus a variable-length payload extracted from the `RingBuf`.
-#[derive(Debug, Clone)]
-pub enum AgentEvent {
-    L4(PacketEvent),
-    L7 {
-        header: PacketEvent,
-        payload: Vec<u8>,
-    },
-    Dns {
-        header: DnsEvent,
-        payload: Vec<u8>,
-    },
-    Dlp(Box<DlpEvent>),
-}
+/// Event wrapper flowing from the eBPF event reader to the dispatcher.
+/// Defined in the domain layer; re-exported here for existing call sites.
+pub use domain::common::agent_event::AgentEvent;
 
 /// Routes eBPF events by `event_type` to the correct domain engine.
 ///

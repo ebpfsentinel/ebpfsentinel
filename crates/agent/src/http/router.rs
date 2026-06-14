@@ -483,7 +483,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
-    use crate::metrics::AgentMetrics;
+    use adapters::metrics::AgentMetrics;
     use application::audit_service_impl::AuditAppService;
     use application::firewall_service_impl::FirewallAppService;
     use application::ips_service_impl::IpsAppService;
