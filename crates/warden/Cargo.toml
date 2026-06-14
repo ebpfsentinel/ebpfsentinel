@@ -1,17 +1,15 @@
 [package]
-name = "ebpfsentinel-token-launch"
+name = "ebpfsentinel-warden"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
 
-[lib]
-name = "ebpfsentinel_token_launch"
-path = "src/lib.rs"
-
 [[bin]]
-name = "ebpfsentinel-token-launch"
+name = "warden"
 path = "src/main.rs"
 
 [dependencies]
 libc = { workspace = true }
+ebpfsentinel-warden-proto = { workspace = true }
+ebpfsentinel-token-launch = { path = "../token-launch" }

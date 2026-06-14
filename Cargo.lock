@@ -928,6 +928,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ebpfsentinel-warden"
+version = "0.0.0-dev"
+dependencies = [
+ "ebpfsentinel-token-launch",
+ "ebpfsentinel-warden-proto",
+ "libc",
+]
+
+[[package]]
 name = "ebpfsentinel-warden-proto"
 version = "0.0.0-dev"
 dependencies = [
