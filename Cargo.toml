@@ -164,6 +164,7 @@ infrastructure = { path = "crates/infrastructure" }
 ebpfsentinel-agent = { path = "crates/agent" }
 ebpfsentinel-warden-proto = { path = "crates/warden-proto" }
 ebpfsentinel-warden-client = { path = "crates/warden-client" }
+ebpfsentinel-warden = { path = "crates/warden" }
 
 [profile.release]
 strip = true

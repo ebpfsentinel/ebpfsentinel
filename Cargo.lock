@@ -894,6 +894,7 @@ dependencies = [
  "clap",
  "domain",
  "ebpf-common",
+ "ebpfsentinel-warden",
  "governor",
  "http-body-util",
  "infrastructure",

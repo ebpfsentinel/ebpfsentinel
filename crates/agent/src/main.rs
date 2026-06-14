@@ -411,6 +411,12 @@ async fn main() -> Result<()> {
         // Privileged load step for the split (rootless-agent) deployment.
         Some(Command::LoadPin) => ebpfsentinel_agent::startup::load_pin(&cli.config).await,
 
+        // Privileged load-and-serve step: load in-process, then serve the warden
+        // control plane from the held map fds for the rootless agent.
+        Some(Command::WardenServe { sock, uid }) => {
+            ebpfsentinel_agent::startup::warden_serve(&cli.config, &sock, uid).await
+        }
+
         // No subcommand = run the agent daemon
         None => ebpfsentinel_agent::startup::run(&cli.config, cli.log_level, cli.log_format).await,
     }

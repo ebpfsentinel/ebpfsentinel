@@ -192,6 +192,42 @@ impl MapRegistry {
         Self { maps }
     }
 
+    /// Build a registry from map fds the caller already holds, keyed by name.
+    /// Each fd is `dup`'d so the registry owns its own descriptor (its `Drop`
+    /// closes only these copies; the caller keeps its originals). The map's
+    /// `map_type`/`key_size`/`value_size` are read back with
+    /// `BPF_OBJ_GET_INFO_BY_FD`. A name already present is skipped (maps shared
+    /// across programs appear once per loader). This is the in-process backing for
+    /// the agent's `warden-serve` mode, where the maps are never pinned — the
+    /// loader holds the fds directly.
+    #[must_use]
+    pub fn from_fds(fds: &[(&str, RawFd)]) -> Self {
+        let mut maps = HashMap::new();
+        for &(name, fd) in fds {
+            if maps.contains_key(name) {
+                continue;
+            }
+            let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+            if dup < 0 {
+                continue;
+            }
+            if let Some((map_type, key_size, value_size)) = map_info(dup) {
+                maps.insert(
+                    name.to_owned(),
+                    MapHandle {
+                        fd: dup,
+                        map_type,
+                        key_size,
+                        value_size,
+                    },
+                );
+            } else {
+                unsafe { libc::close(dup) };
+            }
+        }
+        Self { maps }
+    }
+
     /// Number of maps the registry serves.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -350,7 +386,18 @@ fn open_pinned_map(path: &Path) -> Option<(RawFd, u32, u32, u32)> {
         return None;
     }
     let fd = fd as RawFd;
+    match map_info(fd) {
+        Some((map_type, key_size, value_size)) => Some((fd, map_type, key_size, value_size)),
+        None => {
+            unsafe { libc::close(fd) };
+            None
+        }
+    }
+}
 
+/// Read a map fd's `map_type`/`key_size`/`value_size` via `BPF_OBJ_GET_INFO_BY_FD`.
+/// Returns `None` if the fd is not a map or the query fails.
+fn map_info(fd: RawFd) -> Option<(u32, u32, u32)> {
     let mut info = BpfMapInfo::default();
     let mut info_attr = BpfAttrInfo {
         bpf_fd: fd as u32,
@@ -365,10 +412,9 @@ fn open_pinned_map(path: &Path) -> Option<(RawFd, u32, u32, u32)> {
         )
     };
     if rc < 0 {
-        unsafe { libc::close(fd) };
         return None;
     }
-    Some((fd, info.map_type, info.key_size, info.value_size))
+    Some((info.map_type, info.key_size, info.value_size))
 }
 
 /// The current thread's `errno`.
@@ -416,6 +462,13 @@ mod tests {
             reg.delete("NOPE", &[0]),
             Err(MapOpError::UnknownMap("NOPE".to_owned()))
         );
+    }
+
+    #[test]
+    fn from_fds_empty_yields_empty_registry() {
+        let reg = MapRegistry::from_fds(&[]);
+        assert!(reg.is_empty());
+        assert!(reg.names().is_empty());
     }
 
     #[test]

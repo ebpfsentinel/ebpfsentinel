@@ -407,6 +407,17 @@ impl EbpfLoader {
         self.kfunc_progs.get(program_name).map(AsRawFd::as_raw_fd)
     }
 
+    /// Every map this loader hosts, as `(name, raw_fd)`. The fds are the loader's
+    /// own copies (one per map, captured at load time); they stay valid for the
+    /// loader's lifetime. The rootless-agent control plane (`warden-serve`) reads
+    /// these to serve map RPC and ring-buffer fd-passing without pinning anything.
+    pub fn hosted_map_fds(&self) -> Vec<(&str, RawFd)> {
+        self.kfunc_hosted_maps
+            .iter()
+            .map(|(name, fd)| (name.as_str(), fd.as_raw_fd()))
+            .collect()
+    }
+
     // ── Zero-downtime program swap via BPF_LINK_UPDATE (kernel 5.7+) ────
     //
     // Current approach: detach old program, attach new program. This creates

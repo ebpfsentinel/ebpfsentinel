@@ -65,6 +65,19 @@ pub enum Command {
     #[command(hide = true)]
     LoadPin,
 
+    /// Privileged internal: load + attach every eBPF program in-process, then
+    /// serve the warden control plane (map RPC, ring-buffer fd-passing, conntrack,
+    /// netlink) from the held map fds over `sock`. The rootless agent connects as
+    /// a pure client and loads nothing. Not for direct use.
+    #[command(hide = true)]
+    WardenServe {
+        /// Unix socket path to serve the warden protocol on.
+        sock: String,
+        /// Peer uid allowed to connect (the rootless agent's id).
+        #[arg(long, default_value_t = 65534)]
+        uid: u32,
+    },
+
     /// Query running agent status
     Status {
         #[command(flatten)]

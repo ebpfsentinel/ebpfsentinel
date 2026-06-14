@@ -116,35 +116,30 @@ async fn run_ti_feed_cycle(
     }
 }
 
-/// Privileged **load step** for the split (rootless-agent) deployment.
-///
-/// Loads, pins and attaches every configured eBPF program through the BPF token,
-/// then parks until `SIGTERM`/`SIGINT` so the program attachments (held as raw
-/// links in the returned loaders) stay alive for the process lifetime. The warden
-/// runs this inside its own namespace; the maps and ring buffers it pins are then
-/// served to the rootless agent over the warden socket — the agent itself loads
-/// nothing and never touches the bpffs.
+/// Load + attach every configured eBPF program through the BPF token and return
+/// the loaders (which hold the program attachments and map fds alive). Shared by
+/// the [`load_pin`] and [`warden_serve`] privileged entry points.
 ///
 /// Loading is **token-only**: if `BPF_TOKEN_CREATE` fails this returns an error
 /// rather than falling back to capability-based loading.
 ///
 /// This build wires the XDP firewall; the remaining programs are added
 /// incrementally (each mirrors its `try_load_*` call in [`run`]).
-pub async fn load_pin(config_path: &str) -> anyhow::Result<()> {
+fn load_all_programs(config_path: &str) -> anyhow::Result<Vec<EbpfLoader>> {
     adapters::system::set_restrictive_umask();
     let config = AgentConfig::load(Path::new(config_path))?;
     init_logging(config.agent.log_level, config.agent.log_format)?;
     info!(
         config_path,
         interfaces = ?config.agent.interfaces,
-        "load-pin: loading + pinning eBPF via BPF token, then parking"
+        "privileged load: loading + attaching eBPF via BPF token"
     );
 
     // Token bootstrap is mandatory here — token-only, no capability fallback.
     let bpf_policy = adapters::ebpf::BpfTokenPolicy::new(config.agent.bpf_token.bpffs_path.clone());
     let bpf_handle = adapters::ebpf::bootstrap_bpf(&bpf_policy).map_err(|e| {
         anyhow::anyhow!(
-            "load-pin requires a BPF token (a privileged setup must mount the delegated bpffs): {e}"
+            "privileged load requires a BPF token (a privileged setup must mount the delegated bpffs): {e}"
         )
     })?;
     info!(
@@ -165,34 +160,93 @@ pub async fn load_pin(config_path: &str) -> anyhow::Result<()> {
         let domain_rules = config.firewall_rules()?;
         match try_load_xdp_firewall(&ebpf_dir, &config, &domain_rules) {
             Ok((loader, _map_manager, _metrics_reader, _event_reader)) => {
-                info!("xdp-firewall loaded + pinned + attached");
+                info!("xdp-firewall loaded + attached");
                 loaders.push(loader);
             }
             Err(e) => warn!("xdp-firewall load failed: {e}"),
         }
     }
 
-    // Self-report the pinned objects (we are in the loader's namespace, so they
-    // are visible here even though they are not host-visible to other namespaces).
-    if let Ok(entries) = std::fs::read_dir(adapters::ebpf::DEFAULT_BPF_PIN_PATH) {
-        let mut pins: Vec<String> = entries
-            .flatten()
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect();
-        pins.sort();
-        info!(pin_count = pins.len(), pins = ?pins, "eBPF objects pinned");
-    }
+    Ok(loaders)
+}
 
+/// Block until `SIGTERM`/`SIGINT`, then return so the caller can drop the loaders
+/// (detaching the programs) on its way out.
+async fn park_until_signal(context: &str) -> anyhow::Result<()> {
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    tokio::select! {
+        _ = sigterm.recv() => info!("{context} received SIGTERM, exiting"),
+        _ = sigint.recv() => info!("{context} received SIGINT, exiting"),
+    }
+    Ok(())
+}
+
+/// Privileged **load step** for the split (rootless-agent) deployment.
+///
+/// Loads and attaches every configured eBPF program through the BPF token, then
+/// parks until `SIGTERM`/`SIGINT` so the program attachments (held as raw links in
+/// the loaders) stay alive for the process lifetime.
+pub async fn load_pin(config_path: &str) -> anyhow::Result<()> {
+    let loaders = load_all_programs(config_path)?;
     info!(
         "load-pin complete; parking to hold {} loader(s)",
         loaders.len()
     );
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    tokio::select! {
-        _ = sigterm.recv() => info!("load-pin received SIGTERM, exiting"),
-        _ = sigint.recv() => info!("load-pin received SIGINT, exiting"),
-    }
+    park_until_signal("load-pin").await?;
+    drop(loaders);
+    Ok(())
+}
+
+/// Privileged **load-and-serve step** for the split (rootless-agent) deployment.
+///
+/// Loads and attaches every program in-process, then serves the warden control
+/// plane — map element RPC, ring-buffer fd-passing, conntrack reads and netlink
+/// ops — to the rootless agent over `sock`, backed by the map fds the loaders hold
+/// directly (no pins). The rootless agent connects as a pure client and loads
+/// nothing. Only a peer whose uid is `allowed_uid` is served.
+pub async fn warden_serve(config_path: &str, sock: &str, allowed_uid: u32) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let loaders = load_all_programs(config_path)?;
+
+    // Build the in-process map source from every loader's held fds. `from_fds`
+    // dups them, so the registry owns its own descriptors and the loaders keep
+    // theirs; dropping the loaders later detaches the programs without disturbing
+    // the maps the registry still references.
+    let fds: Vec<(&str, std::os::fd::RawFd)> = loaders
+        .iter()
+        .flat_map(EbpfLoader::hosted_map_fds)
+        .collect();
+    let registry = ebpfsentinel_warden::map_engine::MapRegistry::from_fds(&fds);
+    info!(
+        map_count = registry.len(),
+        maps = ?registry.names(),
+        "warden-serve: in-process map source ready"
+    );
+    drop(fds); // release the borrow on `loaders` before parking
+
+    let _ = std::fs::remove_file(sock);
+    let listener = std::os::unix::net::UnixListener::bind(sock)
+        .map_err(|e| anyhow::anyhow!("warden-serve bind {sock}: {e}"))?;
+    std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600))?;
+    info!(
+        sock,
+        allowed_uid, "warden-serve: serving the warden protocol"
+    );
+
+    // Serve on a dedicated thread (the loop is blocking). The rootless agent loads
+    // nothing, so delegation carries no BTF/pcap fds — both sets are empty.
+    let serve = std::thread::Builder::new()
+        .name("warden-serve".into())
+        .spawn(move || {
+            ebpfsentinel_warden::server::serve_loop(&listener, &registry, &[], &[], allowed_uid);
+        })?;
+
+    park_until_signal("warden-serve").await?;
+    // Drop the loaders (detaching the programs); the serve thread dies with the
+    // process. Not joined — its accept loop blocks until the socket closes at exit.
+    drop(serve);
     drop(loaders);
     Ok(())
 }
