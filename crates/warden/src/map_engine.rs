@@ -111,6 +111,39 @@ impl fmt::Display for MapOpError {
 
 impl std::error::Error for MapOpError {}
 
+/// A source of map element operations the warden server can serve, regardless of
+/// where the map fds come from. [`MapRegistry`] backs it with maps opened from a
+/// bpffs pin directory; an in-process loader (the agent's `warden-serve` mode)
+/// backs it with the map fds it holds directly from loading, with no pins. The
+/// server's `dispatch` and ring-buffer fd-passing depend only on this trait, so
+/// the same protocol logic serves either source.
+pub trait MapSource {
+    /// Look up one element. `Ok(None)` means the key is absent.
+    fn lookup(&self, name: &str, key: &[u8]) -> Result<Option<Vec<u8>>, MapOpError>;
+    /// Insert or update one element with `BPF_MAP_UPDATE_ELEM` `flags`.
+    fn update(&self, name: &str, key: &[u8], value: &[u8], flags: u64) -> Result<(), MapOpError>;
+    /// Delete one element.
+    fn delete(&self, name: &str, key: &[u8]) -> Result<(), MapOpError>;
+    /// The fd of a **ring-buffer** map named `name`, for `SCM_RIGHTS` passing to
+    /// the agent; `None` if the name is unknown or names a non-ringbuf map.
+    fn ringbuf_fd(&self, name: &str) -> Option<RawFd>;
+}
+
+impl MapSource for MapRegistry {
+    fn lookup(&self, name: &str, key: &[u8]) -> Result<Option<Vec<u8>>, MapOpError> {
+        MapRegistry::lookup(self, name, key)
+    }
+    fn update(&self, name: &str, key: &[u8], value: &[u8], flags: u64) -> Result<(), MapOpError> {
+        MapRegistry::update(self, name, key, value, flags)
+    }
+    fn delete(&self, name: &str, key: &[u8]) -> Result<(), MapOpError> {
+        MapRegistry::delete(self, name, key)
+    }
+    fn ringbuf_fd(&self, name: &str) -> Option<RawFd> {
+        MapRegistry::ringbuf_fd(self, name)
+    }
+}
+
 /// One opened, pinned map: its fd, the `bpf_map_type`, and the element sizes it
 /// enforces.
 struct MapHandle {

@@ -27,7 +27,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::ExitCode;
 use std::ptr;
 
-use ebpfsentinel_warden::map_engine::MapRegistry;
+use ebpfsentinel_warden::map_engine::{MapRegistry, MapSource};
 use ebpfsentinel_warden::{
     collect_module_btf_fds, delegate_over_fd, enable_tcp_syncookies, net_ops, open_pcap_pool,
     prioritize_and_cap_btf, recv_fd, send_msg_fds,
@@ -167,7 +167,12 @@ fn peer_allowed(conn: &UnixStream, allowed_uid: u32) -> bool {
 /// Reads frame-by-frame on the raw stream (no `BufReader`): a buffered reader
 /// would read past a frame boundary and swallow the sentinel byte that carries an
 /// inbound `SCM_RIGHTS` fd (e.g. the `Delegate` bpffs fd), dropping the fd.
-fn handle_conn(conn: UnixStream, registry: &MapRegistry, btf: &[(String, RawFd)], pcap: &[RawFd]) {
+fn handle_conn<M: MapSource>(
+    conn: UnixStream,
+    registry: &M,
+    btf: &[(String, RawFd)],
+    pcap: &[RawFd],
+) {
     let mut reader = match conn.try_clone() {
         Ok(c) => c,
         Err(_) => return,
@@ -300,7 +305,7 @@ fn serve_delegate(writer: &mut UnixStream, btf: &[(String, RawFd)], pcap: &[RawF
 
 /// Map a request to a response. The conntrack read and map element ops are wired
 /// in this build; every other declared command is answered `Unimplemented`.
-fn dispatch(cmd: &Command, registry: &MapRegistry) -> Response {
+fn dispatch<M: MapSource>(cmd: &Command, registry: &M) -> Response {
     match cmd {
         Command::ConntrackDump => match fs::read(NF_CONNTRACK_PROC) {
             Ok(table) => Response::Conntrack { table },
