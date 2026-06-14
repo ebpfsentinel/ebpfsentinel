@@ -1,6 +1,6 @@
 # bpf_token_helpers.bash — helpers for the BPF-token-only loading suite (61).
 #
-# These drive the *shipped* privileged launcher (crates/token-launch →
+# These drive the *shipped* privileged launcher (crates/warden →
 # ebpfsentinel-token-launch) that delegates a bpffs + passes module BTF fds,
 # then runs the agent token-only in a capability-less user namespace. The log
 # is captured so tests can assert on what loaded/attached. Exercising the real
@@ -44,7 +44,7 @@ bpf_token_build_launcher() {
         return 0
     fi
     require_tool cargo
-    if ! (cd "$PROJECT_ROOT" && cargo build --release -p ebpfsentinel-token-launch) \
+    if ! (cd "$PROJECT_ROOT" && cargo build --release --bin ebpfsentinel-token-launch) \
         >/tmp/ebpfsentinel-token-launch-build-$$.log 2>&1; then
         skip "launcher failed to build: $(cat /tmp/ebpfsentinel-token-launch-build-$$.log)"
     fi
