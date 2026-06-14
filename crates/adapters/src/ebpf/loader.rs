@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::Path;
+use std::time::Duration;
 
 use aya::{maps::ProgramArray, programs::XdpFlags};
 use tracing::{info, warn};
@@ -162,7 +163,7 @@ impl EbpfLoader {
         if let Some(prog_fd) = self.kfunc_progs.get(program_name) {
             let raw = prog_fd.as_raw_fd();
             let mode_label = xdp_flags_label(flags);
-            match kfunc_attach::attach_xdp(program_name, raw, interface, flags.bits()) {
+            match attach_xdp_ebusy_retry(program_name, raw, interface, flags.bits()) {
                 Ok(link) => {
                     self.kfunc_links.push(link);
                     info!(
@@ -181,7 +182,7 @@ impl EbpfLoader {
                         error = %e,
                         "XDP kfunc attach failed with requested mode, falling back to auto"
                     );
-                    let link = kfunc_attach::attach_xdp(
+                    let link = attach_xdp_ebusy_retry(
                         program_name,
                         raw,
                         interface,
@@ -451,6 +452,54 @@ impl EbpfLoader {
     // wire it here after each static map population. Maps that receive runtime updates
     // (CONFIG_FLAGS, CT_CONFIG, DDOS_SYN_CONFIG, ICMP_CONFIG, QOS_PIPE_CONFIG, etc.) must NOT
     // be frozen — only truly write-once maps are candidates.
+}
+
+/// How many times to retry an XDP attach that fails with `EBUSY`, and the
+/// delay between attempts. On a fast restart / redeploy the previous agent's
+/// XDP `BPF_LINK` may not be released by the kernel yet (its fd is closed
+/// asynchronously on process teardown), so a fresh attach briefly races it and
+/// gets `EBUSY` (errno 16). The link auto-releases once the old fd is gone, so
+/// riding out that window with a few retries makes a restart self-heal instead
+/// of failing into degraded mode. Total worst-case wait stays ~1.5 s, paid once
+/// at startup before the agent serves traffic.
+const XDP_ATTACH_EBUSY_RETRIES: u32 = 5;
+const XDP_ATTACH_EBUSY_DELAY: Duration = Duration::from_millis(300);
+
+/// Attach an XDP program, retrying on `EBUSY` so a restart races out cleanly.
+/// Non-`EBUSY` errors are returned immediately (no point retrying them).
+fn attach_xdp_ebusy_retry(
+    program_name: &str,
+    prog_fd: RawFd,
+    interface: &str,
+    flags_bits: u32,
+) -> Result<OwnedFd, kfunc_attach::KfuncAttachError> {
+    let mut attempt = 0;
+    loop {
+        match kfunc_attach::attach_xdp(program_name, prog_fd, interface, flags_bits) {
+            Ok(link) => return Ok(link),
+            Err(e) => {
+                let busy = matches!(
+                    e,
+                    kfunc_attach::KfuncAttachError::LinkCreate { errno, .. }
+                        if errno == libc::EBUSY
+                );
+                if busy && attempt < XDP_ATTACH_EBUSY_RETRIES {
+                    attempt += 1;
+                    warn!(
+                        program_name,
+                        interface,
+                        attempt,
+                        retries = XDP_ATTACH_EBUSY_RETRIES,
+                        "XDP interface busy (errno 16) — a previous instance may still hold the \
+                         link after a restart; retrying after a short delay"
+                    );
+                    std::thread::sleep(XDP_ATTACH_EBUSY_DELAY);
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
 }
 
 /// Human-readable label for XDP attachment flags.
