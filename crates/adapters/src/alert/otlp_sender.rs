@@ -87,8 +87,9 @@ impl AlertSender for OtlpAlertSender {
 
             logger.emit(record);
 
-            // Fire-and-forget: metric only, no retry
-            self.metrics.record_alert_dropped("otlp_exported");
+            // Fire-and-forget: count the hand-off to the OTLP batch exporter.
+            // No retry and no delivery confirmation (batched export).
+            self.metrics.record_alert_exported("otlp");
 
             Ok(())
         })

@@ -46,6 +46,10 @@ pub trait AlertMetrics: Send + Sync {
     /// Record an alert dropped (dedup, throttle, backpressure, etc.).
     fn record_alert_dropped(&self, _reason: &str) {}
 
+    /// Record an alert successfully handed off to an external sender,
+    /// labelled by destination (e.g. `otlp`).
+    fn record_alert_exported(&self, _destination: &str) {}
+
     /// Record an alert for per-rule counting (enables FP rate computation).
     fn record_alert_by_rule(&self, _component: &str, _rule_id: &str) {}
 

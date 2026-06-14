@@ -117,6 +117,7 @@ pub struct AgentMetrics {
     pub rules_reloads_total: Family<ReloadLabels, Counter>,
     pub alerts_total: Family<AlertLabels, Counter>,
     pub alerts_dropped_total: Family<ReasonLabels, Counter>,
+    pub alerts_exported_total: Family<DestinationLabels, Counter>,
     pub alert_sender_circuit_state: Family<DestinationLabels, Gauge>,
     /// Live SSE alert-stream subscriber count. Set by handler on
     /// connect / disconnect.
@@ -242,6 +243,13 @@ impl AgentMetrics {
             "alerts_dropped",
             "Alerts dropped due to dedup, throttle, or backpressure",
             alerts_dropped_total.clone(),
+        );
+
+        let alerts_exported_total = Family::<DestinationLabels, Counter>::default();
+        registry.register(
+            "alerts_exported",
+            "Alerts successfully handed off to an external sender, by destination",
+            alerts_exported_total.clone(),
         );
 
         let alert_sender_circuit_state = Family::<DestinationLabels, Gauge>::default();
@@ -585,6 +593,7 @@ impl AgentMetrics {
             rules_reloads_total,
             alerts_total,
             alerts_dropped_total,
+            alerts_exported_total,
             alert_sender_circuit_state,
             alerts_sse_subscribers,
             ips_blacklist_size,
@@ -728,6 +737,14 @@ impl AlertMetrics for AgentMetrics {
         self.alerts_dropped_total
             .get_or_create(&ReasonLabels {
                 reason: reason.to_string(),
+            })
+            .inc();
+    }
+
+    fn record_alert_exported(&self, destination: &str) {
+        self.alerts_exported_total
+            .get_or_create(&DestinationLabels {
+                destination: destination.to_string(),
             })
             .inc();
     }
@@ -1168,6 +1185,18 @@ mod tests {
         assert!(encoded.contains("ebpfsentinel_alerts_dropped"));
         assert!(encoded.contains("reason=\"dedup\""));
         assert!(encoded.contains("reason=\"throttle\""));
+    }
+
+    #[test]
+    fn alert_exported_counter_increments() {
+        let metrics = AgentMetrics::new();
+        metrics.record_alert_exported("otlp");
+
+        let encoded = metrics.encode();
+        assert!(encoded.contains("ebpfsentinel_alerts_exported"));
+        assert!(encoded.contains("destination=\"otlp\""));
+        // It must NOT be recorded as a drop.
+        assert!(!encoded.contains("reason=\"otlp_exported\""));
     }
 
     #[test]
