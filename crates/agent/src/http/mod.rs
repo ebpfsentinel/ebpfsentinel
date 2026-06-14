@@ -37,5 +37,5 @@ pub(crate) mod validation;
 pub mod zone_handler;
 
 pub use router::build_router;
-pub use server::run_http_server;
+pub use server::{run_http_server, run_metrics_server};
 pub use state::AppState;

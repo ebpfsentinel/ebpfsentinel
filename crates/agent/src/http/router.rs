@@ -163,28 +163,10 @@ pub fn build_router(
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz));
 
-    // Group 2: Metrics route — rate-limited and conditionally auth-protected.
-    // Rate limiting is always applied (even without auth) to prevent scraping DoS.
-    let metrics_routes = {
-        let metrics_governor = Arc::new(
-            GovernorConfigBuilder::default()
-                .per_second(2)
-                .burst_size(10)
-                .finish()
-                .expect("metrics governor config should build"),
-        );
-        let r = Router::new()
-            .route("/metrics", get(metrics))
-            .layer(GovernorLayer::new(metrics_governor));
-        if state.auth_provider.is_some() && state.metrics_auth_required {
-            r.layer(middleware::from_fn_with_state(
-                Arc::clone(&state),
-                jwt_auth_middleware,
-            ))
-        } else {
-            r
-        }
-    };
+    // Group 2: Metrics route. Also served on the dedicated metrics listener
+    // bound to `agent.metrics_port` (see `build_metrics_router`) so a scraper can
+    // reach metrics even when the control-API port is firewalled off.
+    let metrics_routes = metrics_routes_fragment(&state);
 
     // Group 3: Protected API routes — split into read and write
     //
@@ -408,6 +390,47 @@ pub fn build_router(
     router.with_state(state)
 }
 
+/// Build the `/metrics` route group: rate-limited (scrape-DoS guard, applied
+/// even without auth) and conditionally auth-protected. Shared by the main API
+/// router and the dedicated metrics listener so both enforce the same policy.
+fn metrics_routes_fragment(state: &Arc<AppState>) -> Router<Arc<AppState>> {
+    let metrics_governor = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(2)
+            .burst_size(10)
+            .finish()
+            .expect("metrics governor config should build"),
+    );
+    let r = Router::new()
+        .route("/metrics", get(metrics))
+        .layer(GovernorLayer::new(metrics_governor));
+    if state.auth_provider.is_some() && state.metrics_auth_required {
+        r.layer(middleware::from_fn_with_state(
+            Arc::clone(state),
+            jwt_auth_middleware,
+        ))
+    } else {
+        r
+    }
+}
+
+/// Build the standalone router for the dedicated metrics listener bound to
+/// `agent.metrics_port`.
+///
+/// It serves only `/metrics` (same rate-limit + conditional-auth policy as the
+/// API server's metrics route), so the metrics port can be exposed to a scraper
+/// such as Prometheus while the control-API port stays firewalled. Security
+/// response headers mirror the API server.
+pub fn build_metrics_router(state: Arc<AppState>, tls_enabled: bool) -> Router {
+    let router = metrics_routes_fragment(&state);
+    let router = if tls_enabled {
+        router.layer(middleware::map_response(security_headers_with_hsts))
+    } else {
+        router.layer(middleware::map_response(security_headers))
+    };
+    router.with_state(state)
+}
+
 /// Check whether an Origin header value refers to a localhost address.
 ///
 /// Accepts `scheme://host` or `scheme://host:port` where host is one of
@@ -539,6 +562,12 @@ mod tests {
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         ));
         let _router = build_router(state, true, false, ApiRateLimitConfig::default());
+    }
+
+    #[test]
+    fn build_metrics_router_does_not_panic() {
+        let _router = build_metrics_router(limiter_test_state(), false);
+        let _router_tls = build_metrics_router(limiter_test_state(), true);
     }
 
     fn limiter_test_state() -> Arc<AppState> {

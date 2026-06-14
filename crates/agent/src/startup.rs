@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::http::tls::load_rustls_config;
-use crate::http::{AppState, run_http_server};
+use crate::http::{AppState, run_http_server, run_metrics_server};
 use adapters::alert::email_sender::EmailAlertSender;
 use adapters::alert::log_sender::LogAlertSender;
 use adapters::alert::webhook_sender::WebhookAlertSender;
@@ -1275,6 +1275,28 @@ pub async fn run(
         .await
         {
             tracing::error!(error = %e, "HTTP API server failed");
+        }
+    });
+
+    // ── 7b. Spawn dedicated metrics server on `agent.metrics_port` ─────
+    // A separate listener so the metrics port can be exposed to a scraper
+    // (Prometheus) while the control-API port is firewalled off.
+    let metrics_state = Arc::clone(&app_state);
+    let metrics_bind = config.agent.bind_address.clone();
+    let metrics_port = config.agent.metrics_port;
+    let metrics_shutdown = cancel_token.clone();
+    let metrics_tls = tls_config.clone();
+    let metrics_handle = tokio::spawn(async move {
+        if let Err(e) = run_metrics_server(
+            metrics_state,
+            &metrics_bind,
+            metrics_port,
+            metrics_tls,
+            metrics_shutdown.cancelled_owned(),
+        )
+        .await
+        {
+            tracing::error!(error = %e, "metrics server failed");
         }
     });
 
@@ -2954,6 +2976,7 @@ pub async fn run(
 
     info!("shutdown phase 2: draining HTTP and gRPC connections");
     let _ = tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, http_handle).await;
+    let _ = tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, metrics_handle).await;
     let _ = tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, grpc_handle).await;
 
     info!("shutdown phase 3: stopping config watcher");
