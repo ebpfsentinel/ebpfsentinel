@@ -182,6 +182,27 @@ async fn park_until_signal(context: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The warden control socket path in rootless warden-client mode, or `None` when
+/// the agent runs standalone. A set-but-empty value is treated as unset.
+fn warden_sock_from_env() -> Option<std::path::PathBuf> {
+    std::env::var_os("EBPFSENTINEL_WARDEN_SOCK")
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// Build a capture-socket pool from the warden when the launcher provisioned none
+/// and the agent runs in rootless warden-client mode (`EBPFSENTINEL_WARDEN_SOCK`
+/// set). The warden performs the privileged `socket(AF_PACKET)`; the agent rebinds
+/// and filters per capture. Returns `None` outside warden mode or when the warden
+/// serves no socket, leaving capture gracefully unavailable.
+fn warden_pcap_pool(
+    config: &AgentConfig,
+) -> Option<std::sync::Arc<adapters::net::pcap_capture::PcapSocketPool>> {
+    let sock = warden_sock_from_env()?;
+    let iface = config.agent.interfaces.first()?;
+    adapters::warden::pcap::pool_from_warden(&sock, iface, 2)
+}
+
 /// Privileged **load step** for the split (rootless-agent) deployment.
 ///
 /// Loads and attaches every configured eBPF program through the BPF token, then
@@ -431,7 +452,15 @@ pub async fn run(
             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
         );
         svc.set_mac_resolver(Arc::new(adapters::net::IoctlIfaceMacResolver));
-        svc.set_gratuitous_arp(Arc::new(adapters::net::RawSocketGratuitousArp));
+        // Rootless warden-client mode cannot open an AF_PACKET socket to emit the
+        // takeover ARP, so route it through the warden; otherwise broadcast it
+        // directly from a raw socket.
+        let arp_port: Arc<dyn ports::secondary::vip_announcer_port::GratuitousArpPort> =
+            match warden_sock_from_env() {
+                Some(sock) => Arc::new(adapters::warden::arp::WardenGratuitousArp::new(sock)),
+                None => Arc::new(adapters::net::RawSocketGratuitousArp),
+            };
+        svc.set_gratuitous_arp(arp_port);
         Arc::new(RwLock::new(svc))
     };
     info!(
@@ -1025,8 +1054,11 @@ pub async fn run(
 
     // Adopt the AF_PACKET sockets the privileged launcher pre-opened for
     // rootless packet capture (advertised via EBPFSENTINEL_PCAP_FDS). Absent in
-    // a non-launcher run — capture then degrades gracefully.
-    let pcap_pool = adapters::net::pcap_capture::PcapSocketPool::from_env();
+    // a non-launcher run — fall back to the warden (rootless warden-client mode),
+    // which performs the privileged socket() and hands the fd over SCM_RIGHTS;
+    // capture degrades gracefully when neither source provisions a socket.
+    let pcap_pool = adapters::net::pcap_capture::PcapSocketPool::from_env()
+        .or_else(|| warden_pcap_pool(&config));
     if let Some(ref pool) = pcap_pool {
         app_state = app_state.with_pcap_pool(Arc::clone(pool));
     }
@@ -1519,9 +1551,7 @@ pub async fn run(
     // nothing and proxies kernel operations over `EBPFSENTINEL_WARDEN_SOCK`, so it
     // skips the kernel-version gate (the warden enforces it) and never attempts a
     // BPF token — it routes through the existing no-eBPF path below.
-    let warden_sock = std::env::var_os("EBPFSENTINEL_WARDEN_SOCK")
-        .map(std::path::PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty());
+    let warden_sock = warden_sock_from_env();
 
     if warden_sock.is_none() {
         check_kernel_version()?;

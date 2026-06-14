@@ -2,5 +2,7 @@
 //! deployment where the agent loads no eBPF and proxies kernel operations to the
 //! privileged warden over its typed `AF_UNIX` protocol.
 
+pub mod arp;
 pub mod events;
 pub mod map_write;
+pub mod pcap;
