@@ -251,7 +251,7 @@ The **enterprise edition** layers on capabilities for fleets and regulated envir
 
 | Area | Enterprise adds |
 | ---- | --------------- |
-| Detection | ML anomaly detection (Z-score, EWMA, CUSUM, ONNX, DGA, C2 beaconing, TLS clustering), AI/LLM security, TLS intelligence, network forensics |
+| Detection | ML anomaly detection (Z-score, EWMA, CUSUM, ONNX, heavy-hitter CMS, DGA/tunneling, C2 beaconing, TLS clustering), AI/LLM security, TLS intelligence, network forensics |
 | L7 deep inspection | Extended protocol parsers (MQTT, AMQP, NATS, Cassandra), content inspection (SQLi/XSS/injection signatures), per-protocol policies (Redis/Mongo/Kafka/SQL/LDAP/SSH), alert enrichment (OWASP/MITRE/PCI), extended TLS-library hooking |
 | Data protection | Advanced DLP (Vectorscan engine, custom patterns, block mode) |
 | Operations | HA clustering, multi-cluster federation, fleet management, air-gap mode |
