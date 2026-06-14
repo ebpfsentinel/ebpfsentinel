@@ -17,7 +17,10 @@ use aya_ebpf::{
 // Sufficient for rate limiting (window checks, token bucket refill) where
 // sub-millisecond precision is not required. Syncookie generation and event
 // timestamps continue to use bpf_ktime_get_boot_ns for monotonic accuracy.
-use aya_ebpf_bindings::helpers::bpf_ktime_get_coarse_ns;
+use aya_ebpf_bindings::bindings::{iphdr, ipv6hdr, tcphdr};
+use aya_ebpf_bindings::helpers::{
+    bpf_ktime_get_coarse_ns, bpf_tcp_raw_check_syncookie_ipv4, bpf_tcp_raw_check_syncookie_ipv6,
+};
 #[cfg(debug_assertions)]
 use aya_log_ebpf::info;
 use ebpf_common::{
@@ -33,7 +36,6 @@ use ebpf_common::{
         DdosConnTrackKey, DdosConnTrackValue, DdosSynConfig, EVENT_TYPE_DDOS_AMP,
         EVENT_TYPE_DDOS_CONNTRACK, EVENT_TYPE_DDOS_ICMP, EVENT_TYPE_DDOS_SYN, FLOOD_TYPE_ACK,
         FLOOD_TYPE_FIN, FLOOD_TYPE_RST, FloodCounterKey, IcmpConfig, SynRateState, SyncookieCtx,
-        SyncookieSecret, syncookie_prf,
     },
     event::{EVENT_TYPE_RATELIMIT, FLAG_IPV6, FLAG_VLAN, PacketEvent},
     ratelimit::{
@@ -187,10 +189,6 @@ static AMP_RATE_BUCKETS: LruPerCpuHashMap<u64, FixedWindowValue> =
 /// DDoS-specific per-CPU metrics (see `DDOS_METRIC_*` constants).
 #[map]
 static DDOS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(DDOS_METRIC_COUNT, 0);
-
-/// SYN cookie secret key (32 bytes), set by userspace.
-#[map]
-static SYNCOOKIE_SECRET: Array<SyncookieSecret> = Array::with_max_entries(1, 0);
 
 /// Per-CPU context for passing packet fields to the syncookie tail-call
 /// program (`xdp-ratelimit-syncookie`). Shared via BPF filesystem pinning.
@@ -1554,67 +1552,10 @@ fn check_flood_rate(src_ip: u32, flood_type: u8, threshold: u64, now: u64) -> bo
     }
 }
 
-// ── SYN Cookie Helpers ──────────────────────────────────────────────
-
-/// Build a SYN cookie: keyed PRF (SipHash-2-4) with MSS index in lower 3 bits.
-#[allow(dead_code)]
-#[inline(always)]
-fn make_syncookie(
-    src_ip: u32,
-    dst_ip: u32,
-    src_port: u16,
-    dst_port: u16,
-    mss_idx: u8,
-    secret: &[u32; 8],
-) -> u32 {
-    let ts = (unsafe { bpf_ktime_get_boot_ns() } / 60_000_000_000) as u32; // minute counter
-    let hash = syncookie_prf(src_ip, dst_ip, src_port, dst_port, ts, secret);
-    (hash & 0xFFFF_FFF8) | ((mss_idx & 0x07) as u32)
-}
-
-/// Validate a cookie (check current minute and previous minute).
-#[inline(always)]
-fn validate_syncookie(
-    src_ip: u32,
-    dst_ip: u32,
-    src_port: u16,
-    dst_port: u16,
-    cookie: u32,
-    secret: &[u32; 8],
-) -> bool {
-    let mss_bits = cookie & 0x07;
-    let ts = (unsafe { bpf_ktime_get_boot_ns() } / 60_000_000_000) as u32;
-    // Check current minute
-    let h0 = syncookie_prf(src_ip, dst_ip, src_port, dst_port, ts, secret);
-    if (h0 & 0xFFFF_FFF8) | mss_bits == cookie {
-        return true;
-    }
-    // Check previous minute (for clock boundary)
-    let h1 = syncookie_prf(
-        src_ip,
-        dst_ip,
-        src_port,
-        dst_port,
-        ts.wrapping_sub(1),
-        secret,
-    );
-    (h1 & 0xFFFF_FFF8) | mss_bits == cookie
-}
-
-/// Parse TCP MSS option from SYN packet and return the MSS table index (0-7).
-///
-/// On kernel 6.17+, the BPF verifier rejects variable-offset packet access
-/// in the TCP options parsing loop (`pkt + var_off` with r=0). As a
-/// workaround, return the default MSS index (1460 bytes) which is correct
-/// for the vast majority of connections.
-// TODO: re-enable once the verifier supports variable-offset pkt access
-#[allow(dead_code)]
-#[inline(always)]
-fn parse_mss_index(_ctx: &XdpContext, _l4_offset: usize) -> u8 {
-    4 // 1460 bytes — default MSS
-}
-
-// Syncookie forging + checksum helpers moved to xdp-ratelimit-syncookie and ebpf-helpers.
+// SYN cookie generation/validation now uses the kernel
+// `bpf_tcp_raw_gen_syncookie` / `bpf_tcp_raw_check_syncookie` helpers
+// (forging lives in xdp-ratelimit-syncookie; validation in
+// `validate_syncookie_ack_v4/v6` above), so no custom cookie PRF is needed.
 
 // ── SYN Cookie: ACK Validation ──────────────────────────────────────
 
@@ -1628,19 +1569,15 @@ fn validate_syncookie_ack_v4(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> 
         return None;
     }
 
-    let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off).ok()? };
-    let ack_no = u32::from_be(unsafe { (*tcphdr).ack_num });
-    let cookie = ack_no.wrapping_sub(1);
-
+    // Validate the kernel-issued cookie carried by this ACK. On success the
+    // kernel (with net.ipv4.tcp_syncookies enabled) reconstructs the socket
+    // from the passed ACK, completing the handshake for legitimate clients.
     let iphdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_off).ok()? };
-    let src_ip = u32_from_be_bytes(unsafe { (*iphdr).src_addr });
-    let dst_ip = u32_from_be_bytes(unsafe { (*iphdr).dst_addr });
-    let src_port = u16::from_be(unsafe { (*tcphdr).src_port });
-    let dst_port = u16::from_be(unsafe { (*tcphdr).dst_port });
-
-    let secret = SYNCOOKIE_SECRET.get(0)?;
-
-    if validate_syncookie(src_ip, dst_ip, src_port, dst_port, cookie, &secret.key) {
+    let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off).ok()? };
+    let valid = unsafe {
+        bpf_tcp_raw_check_syncookie_ipv4(iphdr as *mut iphdr, tcphdr as *mut tcphdr) >= 0
+    };
+    if valid {
         increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_VALID);
         Some(xdp_action::XDP_PASS)
     } else {
@@ -1659,32 +1596,14 @@ fn validate_syncookie_ack_v6(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> 
         return None;
     }
 
-    let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off).ok()? };
-    let ack_no = u32::from_be(unsafe { (*tcphdr).ack_num });
-    let cookie = ack_no.wrapping_sub(1);
-
+    // Validate the kernel-issued cookie carried by this ACK (see the IPv4
+    // path); a valid cookie ACK is passed for the kernel to complete.
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_off).ok()? };
-    let src_addr_bytes: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
-    let dst_addr_bytes: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
-
-    let src_u32 = ipv6_addr_to_u32x4(&src_addr_bytes);
-    let src_ip_hash = src_u32[0] ^ src_u32[1] ^ src_u32[2] ^ src_u32[3];
-    let dst_u32 = ipv6_addr_to_u32x4(&dst_addr_bytes);
-    let dst_ip_hash = dst_u32[0] ^ dst_u32[1] ^ dst_u32[2] ^ dst_u32[3];
-
-    let src_port = u16::from_be(unsafe { (*tcphdr).src_port });
-    let dst_port = u16::from_be(unsafe { (*tcphdr).dst_port });
-
-    let secret = SYNCOOKIE_SECRET.get(0)?;
-
-    if validate_syncookie(
-        src_ip_hash,
-        dst_ip_hash,
-        src_port,
-        dst_port,
-        cookie,
-        &secret.key,
-    ) {
+    let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_off).ok()? };
+    let valid = unsafe {
+        bpf_tcp_raw_check_syncookie_ipv6(ipv6hdr as *mut ipv6hdr, tcphdr as *mut tcphdr) >= 0
+    };
+    if valid {
         increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_VALID);
         Some(xdp_action::XDP_PASS)
     } else {

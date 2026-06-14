@@ -40,118 +40,9 @@ pub struct SynRateState {
     pub window_start: u64,
 }
 
-// ── SYN Cookie Secret ────────────────────────────────────────────
-
-/// SYN cookie secret key (32 bytes), stored in Array map, set by userspace.
-///
-/// Size: 32 bytes (8 × u32), align 4.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct SyncookieSecret {
-    pub key: [u32; 8],
-}
-
-/// Common MSS values for SYN cookie encoding (3-bit index to MSS value).
-pub const SYNCOOKIE_MSS_TABLE: [u16; 8] = [536, 1220, 1440, 1452, 1460, 4312, 8960, 65535];
-
-// ── SYN Cookie Keyed PRF (SipHash-2-4) ───────────────────────────
-
-/// One SipHash round — the ARX permutation `SIPROUND`.
-#[inline(always)]
-fn sipround(v0: &mut u64, v1: &mut u64, v2: &mut u64, v3: &mut u64) {
-    *v0 = v0.wrapping_add(*v1);
-    *v1 = v1.rotate_left(13);
-    *v1 ^= *v0;
-    *v0 = v0.rotate_left(32);
-    *v2 = v2.wrapping_add(*v3);
-    *v3 = v3.rotate_left(16);
-    *v3 ^= *v2;
-    *v0 = v0.wrapping_add(*v3);
-    *v3 = v3.rotate_left(21);
-    *v3 ^= *v0;
-    *v2 = v2.wrapping_add(*v1);
-    *v1 = v1.rotate_left(17);
-    *v1 ^= *v2;
-    *v2 = v2.rotate_left(32);
-}
-
-/// SipHash-2-4 over `N` little-endian 64-bit message words, keyed by the
-/// 128-bit key `(k0, k1)`. `total_len` is the message length in bytes
-/// folded into the finalization block (equals `8 * N` for full-word
-/// messages).
-///
-/// SipHash is a keyed pseudo-random function: without the key, recovering
-/// it or forging an output for a fresh input costs on the order of `2^128`
-/// work. That property is what the SYN-cookie scheme relies on — see
-/// [`syncookie_prf`]. The const generic `N` keeps the compression loop
-/// fully unrollable, so the BPF verifier accepts it as a bounded program.
-#[inline(always)]
-fn siphash_2_4<const N: usize>(k0: u64, k1: u64, words: &[u64; N], total_len: u64) -> u64 {
-    let mut v0 = k0 ^ 0x736f_6d65_7073_6575;
-    let mut v1 = k1 ^ 0x646f_7261_6e64_6f6d;
-    let mut v2 = k0 ^ 0x6c79_6765_6e65_7261;
-    let mut v3 = k1 ^ 0x7465_6462_7974_6573;
-
-    let mut i = 0usize;
-    while i < N {
-        let m = words[i];
-        v3 ^= m;
-        // c = 2 compression rounds per message word.
-        sipround(&mut v0, &mut v1, &mut v2, &mut v3);
-        sipround(&mut v0, &mut v1, &mut v2, &mut v3);
-        v0 ^= m;
-        i += 1;
-    }
-
-    // Finalization block carries the message length in its top byte.
-    let b = (total_len & 0xff) << 56;
-    v3 ^= b;
-    sipround(&mut v0, &mut v1, &mut v2, &mut v3);
-    sipround(&mut v0, &mut v1, &mut v2, &mut v3);
-    v0 ^= b;
-
-    v2 ^= 0xff;
-    // d = 4 finalization rounds.
-    sipround(&mut v0, &mut v1, &mut v2, &mut v3);
-    sipround(&mut v0, &mut v1, &mut v2, &mut v3);
-    sipround(&mut v0, &mut v1, &mut v2, &mut v3);
-    sipround(&mut v0, &mut v1, &mut v2, &mut v3);
-
-    v0 ^ v1 ^ v2 ^ v3
-}
-
-/// Keyed SYN-cookie pseudo-random function (SipHash-2-4).
-///
-/// Computes a 32-bit value over the connection 4-tuple and the
-/// minute-granularity time counter, keyed by the 256-bit per-boot secret.
-/// All 256 secret bits contribute: 128 bits form the SipHash key, the
-/// other 128 are prepended to the message as a secret prefix. Because
-/// SipHash is a keyed PRF, an attacker who observes cookies (e.g. via the
-/// forged SYN+ACK sequence number) cannot recover the secret nor forge a
-/// cookie for a spoofed tuple without ~`2^128` work — unlike a plain
-/// non-keyed hash, whose secret is recoverable from a few observed pairs.
-#[inline(always)]
-#[must_use]
-pub fn syncookie_prf(
-    src_ip: u32,
-    dst_ip: u32,
-    src_port: u16,
-    dst_port: u16,
-    ts_counter: u32,
-    secret: &[u32; 8],
-) -> u32 {
-    let k0 = u64::from(secret[0]) | (u64::from(secret[1]) << 32);
-    let k1 = u64::from(secret[2]) | (u64::from(secret[3]) << 32);
-    let words: [u64; 4] = [
-        u64::from(secret[4]) | (u64::from(secret[5]) << 32),
-        u64::from(secret[6]) | (u64::from(secret[7]) << 32),
-        (u64::from(src_ip) << 32) | u64::from(dst_ip),
-        (u64::from(src_port) << 48) | (u64::from(dst_port) << 32) | u64::from(ts_counter),
-    ];
-    let h = siphash_2_4(k0, k1, &words, 32);
-    // Fold the 64-bit PRF output down to the 32 bits the cookie carries.
-    u32::try_from((h ^ (h >> 32)) & 0xFFFF_FFFF).unwrap_or(0)
-}
+// SYN cookies are issued and validated by the kernel
+// `bpf_tcp_raw_*_syncookie` helpers, so there is no userspace secret key or
+// MSS table to model here.
 
 /// Per-CPU context passed from `xdp-ratelimit` to `xdp-ratelimit-syncookie`
 /// via a shared `PerCpuArray` map. Contains all packet fields needed to
@@ -381,8 +272,6 @@ unsafe impl aya::Pod for DdosConnTrackKey {}
 unsafe impl aya::Pod for DdosConnTrackValue {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for FloodCounterKey {}
-#[cfg(feature = "userspace")]
-unsafe impl aya::Pod for SyncookieSecret {}
 
 #[cfg(test)]
 mod tests {
@@ -493,101 +382,6 @@ mod tests {
         assert_eq!(EVENT_TYPE_DDOS_ICMP, 11);
         assert_eq!(EVENT_TYPE_DDOS_AMP, 12);
         assert_eq!(EVENT_TYPE_DDOS_CONNTRACK, 13);
-    }
-
-    #[test]
-    fn syncookie_secret_size() {
-        assert_eq!(mem::size_of::<SyncookieSecret>(), 32);
-    }
-
-    #[test]
-    fn syncookie_secret_alignment() {
-        assert_eq!(mem::align_of::<SyncookieSecret>(), 4);
-    }
-
-    #[test]
-    fn syncookie_mss_table_len() {
-        assert_eq!(SYNCOOKIE_MSS_TABLE.len(), 8);
-        assert_eq!(SYNCOOKIE_MSS_TABLE[4], 1460);
-    }
-
-    #[test]
-    fn siphash_2_4_matches_reference_vectors() {
-        // Published SipHash-2-4 vectors: key = 00 01 .. 0f (little-endian
-        // words), message = 00 01 .. (len-1).
-        let k0 = 0x0706_0504_0302_0100u64;
-        let k1 = 0x0f0e_0d0c_0b0a_0908u64;
-        // Empty message.
-        let empty: [u64; 0] = [];
-        assert_eq!(siphash_2_4(k0, k1, &empty, 0), 0x726f_db47_dd0e_0e31);
-        // 8-byte message → exactly one little-endian word.
-        let one = [0x0706_0504_0302_0100u64];
-        assert_eq!(siphash_2_4(k0, k1, &one, 8), 0x93f5_f579_9a93_2462);
-    }
-
-    #[test]
-    fn syncookie_prf_is_deterministic() {
-        let secret = [1, 2, 3, 4, 5, 6, 7, 8];
-        let a = syncookie_prf(0x0a00_0001, 0x0a00_0002, 1234, 80, 42, &secret);
-        let b = syncookie_prf(0x0a00_0001, 0x0a00_0002, 1234, 80, 42, &secret);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn syncookie_prf_depends_on_every_input_field() {
-        let secret = [
-            0x1111_1111,
-            0x2222_2222,
-            0x3333_3333,
-            0x4444_4444,
-            0x5555_5555,
-            0x6666_6666,
-            0x7777_7777,
-            0x8888_8888,
-        ];
-        let base = syncookie_prf(0x0a00_0001, 0x0a00_0002, 1234, 80, 42, &secret);
-        assert_ne!(
-            base,
-            syncookie_prf(0x0a00_0011, 0x0a00_0002, 1234, 80, 42, &secret),
-            "src_ip"
-        );
-        assert_ne!(
-            base,
-            syncookie_prf(0x0a00_0001, 0x0a00_0012, 1234, 80, 42, &secret),
-            "dst_ip"
-        );
-        assert_ne!(
-            base,
-            syncookie_prf(0x0a00_0001, 0x0a00_0002, 1235, 80, 42, &secret),
-            "src_port"
-        );
-        assert_ne!(
-            base,
-            syncookie_prf(0x0a00_0001, 0x0a00_0002, 1234, 81, 42, &secret),
-            "dst_port"
-        );
-        assert_ne!(
-            base,
-            syncookie_prf(0x0a00_0001, 0x0a00_0002, 1234, 80, 43, &secret),
-            "ts_counter"
-        );
-    }
-
-    #[test]
-    fn syncookie_prf_depends_on_full_secret() {
-        let base_secret = [1, 2, 3, 4, 5, 6, 7, 8];
-        let base = syncookie_prf(0x0a00_0001, 0x0a00_0002, 1234, 80, 42, &base_secret);
-        // Flipping a bit in any of the 8 secret words must change the output,
-        // proving the whole 256-bit key is keyed in.
-        for i in 0..8 {
-            let mut s = base_secret;
-            s[i] ^= 1;
-            assert_ne!(
-                base,
-                syncookie_prf(0x0a00_0001, 0x0a00_0002, 1234, 80, 42, &s),
-                "secret word {i} did not affect output"
-            );
-        }
     }
 
     #[test]

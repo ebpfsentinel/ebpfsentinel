@@ -658,9 +658,27 @@ fn broker_handle_conn(conn: RawFd, btf: &[(String, RawFd)], pcap: &[RawFd]) {
     unsafe { libc::close(fs) };
 }
 
+/// Enable kernel SYN cookies in always-on mode (`net.ipv4.tcp_syncookies=2`)
+/// from the privileged launcher, before any user-namespace unshare.
+///
+/// The XDP syncookie offload issues kernel cookies via
+/// `bpf_tcp_raw_gen_syncookie`; the kernel only completes a legitimate
+/// client's handshake from the passed cookie-ACK when it always validates
+/// syncookies. Mode 1 engages only on SYN-backlog overflow, which never
+/// happens because XDP absorbs the flood SYNs — so mode 2 is required. The
+/// agent cannot set this itself once it is inside the child user namespace,
+/// which lacks host-netns `CAP_NET_ADMIN`.
+fn enable_tcp_syncookies() {
+    match std::fs::write("/proc/sys/net/ipv4/tcp_syncookies", "2\n") {
+        Ok(()) => eprintln!("[launch] net.ipv4.tcp_syncookies=2 (SYN-cookie handshake completion)"),
+        Err(e) => eprintln!("[launch] WARN could not set net.ipv4.tcp_syncookies=2: {e}"),
+    }
+}
+
 /// `--broker-serve <sock>`: the privileged sidecar. Opens module BTF + the pcap
 /// pool once, then serves agent connections forever.
 fn run_broker_serve(sockpath: &str) -> ExitCode {
+    enable_tcp_syncookies();
     let btf = prioritize_and_cap_btf(collect_module_btf_fds(), 0);
     let pcap = open_pcap_pool();
     let s = bind_listen_unix(sockpath);
@@ -813,6 +831,10 @@ fn main() -> ExitCode {
     if let Some(sock) = broker_sock {
         run_broker_connect(&sock, &bpffs, &agent_argv);
     }
+
+    // Still global root here (before the userns fork): enable always-on SYN
+    // cookies so legitimate handshakes complete under the XDP syncookie offload.
+    enable_tcp_syncookies();
 
     // Open module BTF fds and the pcap capture sockets while still global root,
     // before the userns fork, so the child inherits them across execv.

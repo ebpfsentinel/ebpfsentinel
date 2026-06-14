@@ -43,7 +43,7 @@ pub use bpf_token::{
 };
 pub use config_flags_manager::{
     AmpProtectConfigManager, ConfigFlagsManager, DdosConnTrackConfigManager, DdosSynConfigManager,
-    IcmpConfigManager, InterfaceGroupsManager, ScrubConfigManager, SyncookieSecretManager,
+    IcmpConfigManager, InterfaceGroupsManager, ScrubConfigManager,
 };
 pub use conntrack_map_manager::ConnTrackMapManager;
 pub use dlp_event_reader::DlpEventReader;

@@ -3,7 +3,6 @@ use aya::maps::{Array, HashMap, MapData};
 use ebpf_common::config_flags::ConfigFlags;
 use ebpf_common::ddos::{
     AmpProtectConfig, AmpProtectKey, DdosConnTrackConfig, DdosSynConfig, IcmpConfig,
-    SyncookieSecret,
 };
 use ebpf_common::scrub::ScrubFlags;
 use tracing::info;
@@ -71,35 +70,6 @@ impl ScrubConfigManager {
             .set(0, *flags, 0)
             .map_err(|e| anyhow::anyhow!("SCRUB_CONFIG set failed: {e}"))?;
         info!("SCRUB_CONFIG updated");
-        Ok(())
-    }
-}
-
-/// Manages the `SYNCOOKIE_SECRET` eBPF `Array` map.
-///
-/// Stores a 32-byte random key used by xdp-ratelimit for SYN cookie
-/// generation and validation.
-pub struct SyncookieSecretManager {
-    secret_map: Array<MapData, SyncookieSecret>,
-}
-
-impl SyncookieSecretManager {
-    /// Create a new manager by taking ownership of the `SYNCOOKIE_SECRET` map.
-    pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
-        let map = ebpf
-            .take_map("SYNCOOKIE_SECRET")
-            .ok_or_else(|| anyhow::anyhow!("map 'SYNCOOKIE_SECRET' not found in eBPF object"))?;
-        let secret_map = Array::try_from(map)?;
-        info!("SYNCOOKIE_SECRET map acquired");
-        Ok(Self { secret_map })
-    }
-
-    /// Write a random secret key to index 0.
-    pub fn set_secret(&mut self, secret: &SyncookieSecret) -> Result<(), anyhow::Error> {
-        self.secret_map
-            .set(0, *secret, 0)
-            .map_err(|e| anyhow::anyhow!("SYNCOOKIE_SECRET set failed: {e}"))?;
-        info!("SYN cookie secret initialized");
         Ok(())
     }
 }

@@ -17,8 +17,7 @@ use adapters::ebpf::{
     DdosSynConfigManager, DlpEventReader, DnsEventReader, EbpfLoader, EbpfMapWriteAdapter,
     EventReader, FirewallMapManager, IcmpConfigManager, IdsMapManager, InterfaceGroupsManager,
     IpSetMapManager, L7PortsManager, LpmCoordinator, MetricsReader, NatMapManager, QosMapManager,
-    RateLimitLpmManager, RateLimitMapManager, ScrubConfigManager, SyncookieSecretManager,
-    ThreatIntelMapManager,
+    RateLimitLpmManager, RateLimitMapManager, ScrubConfigManager, ThreatIntelMapManager,
 };
 use adapters::grpc::server::{GrpcTlsConfig, run_grpc_server};
 use adapters::metrics::AgentMetrics;
@@ -74,7 +73,7 @@ use ports::secondary::metrics_port::{FirewallMetrics, MetricsPort};
 use ports::secondary::rule_change_store::RuleChangeStore;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use infrastructure::config::{LogFormat, LogLevel};
 
@@ -3377,6 +3376,21 @@ fn arm_ddos_ebpf_configs(loader: &mut EbpfLoader, config: &AgentConfig) {
             }
             Err(e) => warn!("DDOS_SYN_CONFIG map not available (non-fatal): {e}"),
         }
+
+        // The XDP syncookie path issues kernel cookies via
+        // `bpf_tcp_raw_gen_syncookie`; the kernel only completes a legitimate
+        // client's handshake from the passed cookie-ACK when it always
+        // validates syncookies (mode 2 — mode 1 engages only on SYN-backlog
+        // overflow, which never happens because XDP absorbs the flood SYNs).
+        // In the default token deployment the privileged launcher already set
+        // this before the user-namespace unshare; this best-effort write only
+        // succeeds in the CAP_NET_ADMIN fallback, so a failure here is expected.
+        match std::fs::write("/proc/sys/net/ipv4/tcp_syncookies", "2\n") {
+            Ok(()) => info!("net.ipv4.tcp_syncookies=2 set for SYN-cookie handshake completion"),
+            Err(e) => {
+                debug!("tcp_syncookies sysctl not writable here (set by the launcher): {e}");
+            }
+        }
     }
 
     if config.ddos.icmp_protection.enabled {
@@ -3511,39 +3525,9 @@ pub fn try_load_xdp_ratelimit(
         }
     };
 
-    // Set SYN cookie secret (random 32-byte key for cookie generation/validation)
-    match SyncookieSecretManager::new(loader.ebpf_mut()) {
-        Ok(mut mgr) => {
-            // The SYN-cookie PRF is only unforgeable if its key is
-            // unpredictable, so seed it from the kernel CSPRNG rather than a
-            // guessable clock value. Read 32 bytes from /dev/urandom into the
-            // eight key words (native endianness — the key is opaque).
-            let mut key_bytes = [0u8; 32];
-            match std::fs::File::open("/dev/urandom")
-                .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut key_bytes))
-            {
-                Ok(()) => {
-                    let mut key = [0u32; 8];
-                    for (slot, chunk) in key.iter_mut().zip(key_bytes.chunks_exact(4)) {
-                        *slot = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                    }
-                    let secret = ebpf_common::ddos::SyncookieSecret { key };
-                    if let Err(e) = mgr.set_secret(&secret) {
-                        warn!("SYN cookie secret write failed (non-fatal): {e}");
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "could not read /dev/urandom for SYN cookie secret \
-                         (non-fatal, SYN-cookie protection disabled): {e}"
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            warn!("SYNCOOKIE_SECRET map not available (non-fatal): {e}");
-        }
-    }
+    // SYN cookies are now issued and validated by the kernel
+    // `bpf_tcp_raw_*_syncookie` helpers, so there is no userspace secret to
+    // seed — the kernel keeps its own cookie key.
 
     // Arm the xdp-ratelimit DDoS protections gated by zeroed config maps
     // (SYN cookie, ICMP flood, conntrack flood). Without these writes the

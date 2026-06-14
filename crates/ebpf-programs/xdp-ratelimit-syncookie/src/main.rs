@@ -1,10 +1,14 @@
 //! XDP SYN cookie forging program — tail-called from `xdp-ratelimit`.
 //!
-//! Forges SYN+ACK responses with SYN cookies for detected SYN floods.
-//! Runs in its own XDP entry point with a fresh 512-byte stack budget.
+//! Forges SYN+ACK responses with **kernel-issued** SYN cookies for detected
+//! SYN floods, via the `bpf_tcp_raw_gen_syncookie_ipv4/ipv6` helpers. Because
+//! the cookie comes from the kernel's own algorithm, a legitimate client that
+//! completes the handshake produces an ACK the kernel can validate and turn
+//! into an established socket (with `net.ipv4.tcp_syncookies` enabled), so real
+//! connections survive the flood while spoofed sources cannot.
 //!
-//! Reads `SYNCOOKIE_CTX` (PerCpuArray, shared via pinning) for packet
-//! fields and `SYNCOOKIE_SECRET` for the cookie key.
+//! Reads `SYNCOOKIE_CTX` (PerCpuArray, shared via pinning) for the swapped
+//! reply addresses/ports captured by the ratelimit program.
 
 #![no_std]
 #![no_main]
@@ -14,33 +18,29 @@ use aya_ebpf::{
     bindings::xdp_action,
     helpers::bpf_xdp_adjust_tail,
     macros::{map, xdp},
-    maps::{Array, PerCpuArray},
+    maps::PerCpuArray,
     programs::XdpContext,
 };
-use aya_ebpf_bindings::helpers::bpf_ktime_get_boot_ns;
-use ebpf_common::ddos::{
-    DDOS_METRIC_COUNT, DDOS_METRIC_SYNCOOKIE_SENT, SYNCOOKIE_MSS_TABLE, SyncookieCtx,
-    SyncookieSecret, syncookie_prf,
-};
+use aya_ebpf_bindings::bindings::{iphdr, ipv6hdr, tcphdr};
+use aya_ebpf_bindings::helpers::{bpf_tcp_raw_gen_syncookie_ipv4, bpf_tcp_raw_gen_syncookie_ipv6};
+use ebpf_common::ddos::{DDOS_METRIC_COUNT, DDOS_METRIC_SYNCOOKIE_SENT, SyncookieCtx};
 use ebpf_common::event::FLAG_IPV6;
 use ebpf_helpers::checksum::{compute_ipv4_csum, compute_tcp_csum_v4_24, compute_tcp_csum_v6_24};
 use ebpf_helpers::net::{IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP};
 use ebpf_helpers::xdp::{ptr_at, ptr_at_mut};
 use ebpf_helpers::{barrier, copy_mac_asm};
-use network_types::{eth::EthHdr, ip::Ipv4Hdr};
-
-// ── Maps (shared via pinning) ───────────────────────────────────────
+use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr};
 
 #[map]
 static SYNCOOKIE_CTX: PerCpuArray<SyncookieCtx> = PerCpuArray::with_max_entries(1, 0);
 
 #[map]
-static SYNCOOKIE_SECRET: Array<SyncookieSecret> = Array::with_max_entries(1, 0);
-
-#[map]
 static DDOS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(DDOS_METRIC_COUNT, 0);
 
-// ── Entry point ─────────────────────────────────────────────────────
+/// Base TCP header length passed to the cookie generator. Passing the fixed
+/// base header (no options) keeps the verifier bounds check a constant size;
+/// the kernel still issues a valid cookie that round-trips via `tcp_syncookies`.
+const TH_BASE_LEN: u32 = 20;
 
 #[xdp]
 pub fn xdp_ratelimit_syncookie(ctx: XdpContext) -> u32 {
@@ -77,36 +77,14 @@ fn increment_ddos_metric(index: u32) {
     }
 }
 
-// ── Cookie computation ──────────────────────────────────────────────
-
-#[inline(always)]
-fn make_syncookie(
-    src_ip: u32,
-    dst_ip: u32,
-    src_port: u16,
-    dst_port: u16,
-    mss_idx: u8,
-    secret: &[u32; 8],
-) -> u32 {
-    let ts = (unsafe { bpf_ktime_get_boot_ns() } / 60_000_000_000) as u32;
-    let hash = syncookie_prf(src_ip, dst_ip, src_port, dst_port, ts, secret);
-    (hash & 0xFFFF_FFF8) | ((mss_idx & 0x07) as u32)
-}
-
-// ── SYN+ACK Forging (IPv4) ─────────────────────────────────────────
-
 #[inline(never)]
 fn send_syn_ack_v4(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, ()> {
-    let src_ip = unsafe { (*sctx).src_ip };
-    let dst_ip = unsafe { (*sctx).dst_ip };
-    let src_port = unsafe { (*sctx).src_port };
-    let dst_port = unsafe { (*sctx).dst_port };
     let in_seq = unsafe { (*sctx).in_seq };
     let in_src_port_be = unsafe { (*sctx).in_src_port_be };
     let in_dst_port_be = unsafe { (*sctx).in_dst_port_be };
-    let mss_idx = unsafe { (*sctx).mss_idx };
+    let reply_src_ip = unsafe { (*sctx).dst_ip }; // reply src = original dst
+    let reply_dst_ip = unsafe { (*sctx).src_ip }; // reply dst = original src
 
-    // Read MACs from packet at constant offset 0.
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut in_src_mac = [0u8; 6];
     let mut in_dst_mac = [0u8; 6];
@@ -116,14 +94,21 @@ fn send_syn_ack_v4(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
         copy_mac_asm!(in_src_mac.as_mut_ptr(), p.add(6));
     }
 
-    // Compute cookie.
-    let secret = match SYNCOOKIE_SECRET.get(0) {
-        Some(s) => s,
-        None => return Err(()),
+    // Issue a kernel SYN cookie from the *original* SYN headers before the
+    // packet is rewritten. Pointers are bounds-checked against the packet.
+    let iph_in: *const Ipv4Hdr = unsafe { ptr_at(ctx, 14)? };
+    let th_in: *const TcpHdr = unsafe { ptr_at(ctx, 34)? };
+    let value = unsafe {
+        bpf_tcp_raw_gen_syncookie_ipv4(iph_in as *mut iphdr, th_in as *mut tcphdr, TH_BASE_LEN)
     };
-    let cookie = make_syncookie(src_ip, dst_ip, src_port, dst_port, mss_idx, &secret.key);
+    if value < 0 {
+        return Err(());
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let cookie = value as u32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let mss = (value >> 32) as u16;
 
-    // Truncate to fixed Eth(14) + IP(20) + TCP(24) = 58 bytes.
     const PKT_LEN: usize = 14 + 20 + 24;
     let current_len = ctx.data_end().saturating_sub(ctx.data());
     let delta = PKT_LEN as i32 - current_len as i32;
@@ -135,14 +120,11 @@ fn send_syn_ack_v4(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
     }
     unsafe { barrier() };
 
-    // Re-derive at CONSTANT offsets.
     let eth: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
     let ip: *mut Ipv4Hdr = unsafe { ptr_at_mut(ctx, 14)? };
-    // Bounds check for full TCP(24) at offset 34.
     let _end: *const u8 = unsafe { ptr_at(ctx, 34 + 23)? };
     let tcp_out: *mut u8 = unsafe { ptr_at_mut(ctx, 34)? };
 
-    // Swap MACs + set ether_type.
     unsafe {
         let p = eth as *mut u8;
         copy_mac_asm!(p, in_src_mac.as_ptr());
@@ -150,7 +132,6 @@ fn send_syn_ack_v4(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
         (*eth).ether_type = 0x0008u16; // ETH_P_IP
     }
 
-    // Build IPv4 header (IHL=5, 20 bytes).
     unsafe {
         let ver_ihl = ip as *mut u8;
         *ver_ihl = 0x45;
@@ -160,14 +141,13 @@ fn send_syn_ack_v4(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
         (*ip).set_frags(0x02, 0); // DF
         (*ip).ttl = 64;
         (*ip).proto = network_types::ip::IpProto::Tcp as u8;
-        (*ip).src_addr = dst_ip.to_be().to_ne_bytes();
-        (*ip).dst_addr = src_ip.to_be().to_ne_bytes();
+        (*ip).src_addr = reply_src_ip.to_be().to_ne_bytes();
+        (*ip).dst_addr = reply_dst_ip.to_be().to_ne_bytes();
         (*ip).check = [0, 0];
         let csum = compute_ipv4_csum(ip as *const u8);
         (*ip).set_checksum(csum);
     }
 
-    // Build TCP SYN+ACK with MSS option.
     unsafe {
         let port_ptr = tcp_out as *mut u16;
         *port_ptr = in_dst_port_be; // src = original dst
@@ -175,9 +155,6 @@ fn send_syn_ack_v4(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
         let seq_ptr = tcp_out.add(4) as *mut u32;
         *seq_ptr = cookie.to_be();
         let ack_ptr = tcp_out.add(8) as *mut u32;
-        // ACK acknowledges the SYN's sequence + 1; TCP sequence space
-        // wraps mod 2^32, so use wrapping_add to stay correct (and
-        // overflow-check-safe) regardless of build profile.
         *ack_ptr = in_seq.wrapping_add(1).to_be();
         *tcp_out.add(12) = 0x60; // data offset = 6 (24 bytes)
         *tcp_out.add(13) = 0x12; // SYN+ACK
@@ -187,13 +164,10 @@ fn send_syn_ack_v4(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
         *csum_ptr = 0;
         let urg_ptr = tcp_out.add(18) as *mut u16;
         *urg_ptr = 0;
-        // MSS option: kind=2, len=4, value.
-        let mss_val = SYNCOOKIE_MSS_TABLE[mss_idx as usize & 0x07];
         *tcp_out.add(20) = 2;
         *tcp_out.add(21) = 4;
         let mss_ptr = tcp_out.add(22) as *mut u16;
-        *mss_ptr = mss_val.to_be();
-        // Compute TCP checksum with pseudo-header.
+        *mss_ptr = mss.to_be();
         let new_src_ip = (*ip).src_addr;
         let new_dst_ip = (*ip).dst_addr;
         let csum = compute_tcp_csum_v4_24(&new_src_ip, &new_dst_ip, tcp_out);
@@ -205,25 +179,14 @@ fn send_syn_ack_v4(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
     Ok(xdp_action::XDP_TX)
 }
 
-// ── SYN+ACK Forging (IPv6) ─────────────────────────────────────────
-
 #[inline(never)]
 fn send_syn_ack_v6(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, ()> {
-    let src_ip = unsafe { (*sctx).src_ip };
-    let dst_ip = unsafe { (*sctx).dst_ip };
-    let src_port = unsafe { (*sctx).src_port };
-    let dst_port = unsafe { (*sctx).dst_port };
     let in_seq = unsafe { (*sctx).in_seq };
     let in_src_port_be = unsafe { (*sctx).in_src_port_be };
     let in_dst_port_be = unsafe { (*sctx).in_dst_port_be };
-    let mss_idx = unsafe { (*sctx).mss_idx };
-    // Raw IPv6 addresses captured by xdp-ratelimit at the packet's true
-    // L3 offset — VLAN-aware, so no fixed-offset re-read here (which would
-    // grab the wrong bytes on VLAN-tagged frames).
     let in_src_addr: [u8; 16] = unsafe { (*sctx).in_src_addr };
     let in_dst_addr: [u8; 16] = unsafe { (*sctx).in_dst_addr };
 
-    // Read MACs from packet at constant offset 0 (MACs precede any VLAN tag).
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut in_src_mac = [0u8; 6];
     let mut in_dst_mac = [0u8; 6];
@@ -233,14 +196,21 @@ fn send_syn_ack_v6(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
         copy_mac_asm!(in_src_mac.as_mut_ptr(), p.add(6));
     }
 
-    // Compute cookie.
-    let secret = match SYNCOOKIE_SECRET.get(0) {
-        Some(s) => s,
-        None => return Err(()),
+    // Issue a kernel SYN cookie from the original IPv6 SYN headers (offset 54
+    // = 14 eth + 40 IPv6) before the packet is rewritten.
+    let iph_in: *const Ipv6Hdr = unsafe { ptr_at(ctx, 14)? };
+    let th_in: *const TcpHdr = unsafe { ptr_at(ctx, 54)? };
+    let value = unsafe {
+        bpf_tcp_raw_gen_syncookie_ipv6(iph_in as *mut ipv6hdr, th_in as *mut tcphdr, TH_BASE_LEN)
     };
-    let cookie = make_syncookie(src_ip, dst_ip, src_port, dst_port, mss_idx, &secret.key);
+    if value < 0 {
+        return Err(());
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let cookie = value as u32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let mss = (value >> 32) as u16;
 
-    // Truncate to fixed Eth(14) + IPv6(40) + TCP(24) = 78 bytes.
     const PKT_LEN: usize = 14 + IPV6_HDR_LEN + 24;
     let current_len = ctx.data_end().saturating_sub(ctx.data());
     let delta = PKT_LEN as i32 - current_len as i32;
@@ -252,7 +222,6 @@ fn send_syn_ack_v6(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
     }
     unsafe { barrier() };
 
-    // Re-derive at CONSTANT offsets.
     let eth: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
     unsafe {
         let p = eth as *mut u8;
@@ -264,7 +233,6 @@ fn send_syn_ack_v6(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
     let _end: *const u8 = unsafe { ptr_at(ctx, 54 + 23)? };
     let tcp_out: *mut u8 = unsafe { ptr_at_mut(ctx, 54)? };
 
-    // Build IPv6 header.
     unsafe {
         (*ip6)._vtcfl = (6u32 << 28).to_be();
         (*ip6)._payload_len = 24u16.to_be(); // TCP with MSS option
@@ -274,7 +242,6 @@ fn send_syn_ack_v6(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
         (*ip6).dst_addr = in_src_addr;
     }
 
-    // Build TCP SYN+ACK with MSS option.
     unsafe {
         let port_ptr = tcp_out as *mut u16;
         *port_ptr = in_dst_port_be;
@@ -282,7 +249,6 @@ fn send_syn_ack_v6(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
         let seq_ptr = tcp_out.add(4) as *mut u32;
         *seq_ptr = cookie.to_be();
         let ack_ptr = tcp_out.add(8) as *mut u32;
-        // TCP sequence space wraps mod 2^32 — wrapping_add stays correct.
         *ack_ptr = in_seq.wrapping_add(1).to_be();
         *tcp_out.add(12) = 0x60;
         *tcp_out.add(13) = 0x12;
@@ -292,11 +258,10 @@ fn send_syn_ack_v6(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
         *csum_ptr = 0;
         let urg_ptr = tcp_out.add(18) as *mut u16;
         *urg_ptr = 0;
-        let mss_val = SYNCOOKIE_MSS_TABLE[mss_idx as usize & 0x07];
         *tcp_out.add(20) = 2;
         *tcp_out.add(21) = 4;
         let mss_ptr = tcp_out.add(22) as *mut u16;
-        *mss_ptr = mss_val.to_be();
+        *mss_ptr = mss.to_be();
         let csum = compute_tcp_csum_v6_24(&in_dst_addr, &in_src_addr, tcp_out);
         let csum_be = csum.to_be_bytes();
         *tcp_out.add(16) = csum_be[0];
