@@ -1514,29 +1514,48 @@ pub async fn run(
     // token cannot be created the agent stays up in API-only mode
     // (REST/gRPC live, no eBPF attach); there is deliberately no
     // capability-based fallback.
-    check_kernel_version()?;
+    // Rootless warden-client mode: the eBPF datapath runs in the privileged warden
+    // process, which loaded the programs and holds the maps. The agent loads
+    // nothing and proxies kernel operations over `EBPFSENTINEL_WARDEN_SOCK`, so it
+    // skips the kernel-version gate (the warden enforces it) and never attempts a
+    // BPF token — it routes through the existing no-eBPF path below.
+    let warden_sock = std::env::var_os("EBPFSENTINEL_WARDEN_SOCK")
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty());
+
+    if warden_sock.is_none() {
+        check_kernel_version()?;
+    }
     let ebpf_dir = resolve_ebpf_program_dir(&config);
 
     // Bootstrap the BPF token before any program load, so the loader can
     // attach the token fd and the Prometheus gauge is set before eBPF
     // attachment races with the metrics scrape.
     let bpf_policy = adapters::ebpf::BpfTokenPolicy::new(config.agent.bpf_token.bpffs_path.clone());
-    let bpf_handle = match adapters::ebpf::bootstrap_bpf(&bpf_policy) {
-        Ok(h) => {
-            info!(
-                kernel = h.kernel.version_string(),
-                reason = h.reason,
-                "eBPF loading via BPF token"
-            );
-            Some(h)
-        }
-        Err(e) => {
-            error!(
-                error = %e,
-                "BPF token unavailable — running in API-only mode (no eBPF). Mount the \
-                 delegated bpffs (ebpfsentinel-token-setup.sh / init container) and restart."
-            );
-            None
+    let bpf_handle = if warden_sock.is_some() {
+        info!(
+            "rootless warden-client mode: eBPF datapath runs in the warden; the agent \
+             loads nothing and proxies kernel ops over EBPFSENTINEL_WARDEN_SOCK"
+        );
+        None
+    } else {
+        match adapters::ebpf::bootstrap_bpf(&bpf_policy) {
+            Ok(h) => {
+                info!(
+                    kernel = h.kernel.version_string(),
+                    reason = h.reason,
+                    "eBPF loading via BPF token"
+                );
+                Some(h)
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "BPF token unavailable — running in API-only mode (no eBPF). Mount the \
+                     delegated bpffs (ebpfsentinel-token-setup.sh / init container) and restart."
+                );
+                None
+            }
         }
     };
     let ebpf_capable = bpf_handle.is_some();
@@ -2276,6 +2295,19 @@ pub async fn run(
         // Store the manager for config reload
         ebpf_map_holder.iface_groups = Some(iface_groups_mgr);
     } // end if ebpf_capable
+
+    // Rootless warden-client mode: the agent loaded nothing above, so wire the
+    // threat-intel map writer to the warden. DNS-blocklist injections then reach
+    // the kernel IOC maps the warden holds, over its typed protocol.
+    if let (Some(sock), Some(blocklist)) = (&warden_sock, &dns_blocklist_ref) {
+        let writer = Arc::new(adapters::warden::map_write::WardenMapWriteAdapter::new(
+            sock.clone(),
+        ));
+        blocklist.set_map_writer(
+            writer as Arc<dyn ports::secondary::ebpf_map_write_port::EbpfMapWritePort>,
+        );
+        info!("warden-client: DNS blocklist threat-intel writes routed to the warden");
+    }
 
     // Populate eBPF program status for ops endpoint
     {
