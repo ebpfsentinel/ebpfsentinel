@@ -22,3 +22,7 @@ path = "src/bin/ebpfsentinel-token-launch.rs"
 [dependencies]
 libc = { workspace = true }
 ebpfsentinel-warden-proto = { workspace = true }
+
+[dev-dependencies]
+ebpfsentinel-warden-client = { workspace = true }
+tempfile = { workspace = true }

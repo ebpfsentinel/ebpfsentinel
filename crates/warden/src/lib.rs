@@ -50,6 +50,8 @@ use std::os::fd::RawFd;
 use std::process::ExitCode;
 use std::ptr;
 
+pub mod map_engine;
+
 // `bpf(2)` command numbers (uapi/linux/bpf.h `enum bpf_cmd`).
 const BPF_OBJ_GET_INFO_BY_FD: libc::c_int = 15;
 const BPF_BTF_GET_FD_BY_ID: libc::c_int = 19;

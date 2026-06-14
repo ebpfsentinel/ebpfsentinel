@@ -9,6 +9,7 @@ members = [
     "crates/infrastructure",
     "crates/agent",
     "crates/warden-proto",
+    "crates/warden-client",
     "crates/warden",
     "crates/xtask",
 ]
@@ -162,6 +163,7 @@ adapters = { path = "crates/adapters" }
 infrastructure = { path = "crates/infrastructure" }
 ebpfsentinel-agent = { path = "crates/agent" }
 ebpfsentinel-warden-proto = { path = "crates/warden-proto" }
+ebpfsentinel-warden-client = { path = "crates/warden-client" }
 
 [profile.release]
 strip = true

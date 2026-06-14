@@ -8,11 +8,12 @@
 //! the extended privileges (`CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_NET_RAW`) and
 //! does nothing on its own initiative — it only answers validated requests.
 //!
-//! This build serves the protocol handshake and the conntrack-table read; the
-//! map, attach, netlink and fd-passing operations are declared by the protocol
-//! and answered with `Unimplemented` until their dedicated work lands. The
-//! privileged launcher primitives live in the shared `ebpfsentinel-token-launch`
-//! library.
+//! This build serves the protocol handshake, the conntrack-table read, and the
+//! map element operations (`MapLookup`/`MapUpdate`/`MapDelete`) against the maps
+//! pinned under its bpffs directory; the attach, netlink and fd-passing
+//! operations are declared by the protocol and answered with `Unimplemented`
+//! until their dedicated work lands. The privileged launcher primitives and the
+//! map engine live in the shared `ebpfsentinel-warden` library.
 
 #![allow(unsafe_code)] // SO_PEERCRED via getsockopt requires libc + unsafe.
 #![allow(clippy::cast_possible_truncation)]
@@ -27,11 +28,15 @@ use std::process::ExitCode;
 use std::ptr;
 
 use ebpfsentinel_warden::enable_tcp_syncookies;
+use ebpfsentinel_warden::map_engine::MapRegistry;
 use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
 
 /// Default peer uid the warden accepts — the rootless agent's id. Override with
 /// `--uid <n>`.
 const DEFAULT_UID: u32 = 65534;
+/// Default bpffs directory holding the pinned maps the warden serves. Override
+/// with `--maps-dir <path>`.
+const DEFAULT_MAPS_DIR: &str = "/sys/fs/bpf/ebpfsentinel";
 /// Kernel conntrack table the warden reads on the agent's behalf (a `0440 root`
 /// file the rootless agent cannot open).
 const NF_CONNTRACK_PROC: &str = "/proc/net/nf_conntrack";
@@ -41,14 +46,15 @@ fn main() -> ExitCode {
     match args.get(1).map(String::as_str) {
         Some("serve") => {
             let Some(sock) = args.get(2) else {
-                eprintln!("usage: warden serve <socket> [--uid <n>]");
+                eprintln!("usage: warden serve <socket> [--uid <n>] [--maps-dir <path>]");
                 return ExitCode::from(2);
             };
             let uid = parse_uid(&args).unwrap_or(DEFAULT_UID);
-            serve(sock, uid)
+            let maps_dir = parse_opt(&args, "--maps-dir").unwrap_or(DEFAULT_MAPS_DIR.to_owned());
+            serve(sock, uid, &maps_dir)
         }
         _ => {
-            eprintln!("usage: warden serve <socket> [--uid <n>]");
+            eprintln!("usage: warden serve <socket> [--uid <n>] [--maps-dir <path>]");
             ExitCode::from(2)
         }
     }
@@ -56,15 +62,28 @@ fn main() -> ExitCode {
 
 /// Parse `--uid <n>` if present.
 fn parse_uid(args: &[String]) -> Option<u32> {
-    let i = args.iter().position(|a| a == "--uid")?;
-    args.get(i + 1)?.parse().ok()
+    parse_opt(args, "--uid")?.parse().ok()
+}
+
+/// Parse the value following `flag` if present.
+fn parse_opt(args: &[String], flag: &str) -> Option<String> {
+    let i = args.iter().position(|a| a == flag)?;
+    args.get(i + 1).cloned()
 }
 
 /// Bind the listening socket (mode `0600`) and serve agent connections forever.
-fn serve(sockpath: &str, allowed_uid: u32) -> ExitCode {
+fn serve(sockpath: &str, allowed_uid: u32, maps_dir: &str) -> ExitCode {
     // Privileged setup the agent cannot perform once rootless (the XDP syncookie
     // offload needs always-on kernel syncookies).
     enable_tcp_syncookies();
+
+    // Open the pinned maps once; their set is the allowlist for map RPC.
+    let registry = MapRegistry::open_pin_dir(std::path::Path::new(maps_dir));
+    eprintln!(
+        "[warden] map registry: {} map(s) from {maps_dir} {:?}",
+        registry.len(),
+        registry.names()
+    );
 
     let _ = fs::remove_file(sockpath);
     let listener = match UnixListener::bind(sockpath) {
@@ -85,7 +104,7 @@ fn serve(sockpath: &str, allowed_uid: u32) -> ExitCode {
         match stream {
             Ok(conn) => {
                 if peer_allowed(&conn, allowed_uid) {
-                    handle_conn(conn);
+                    handle_conn(conn, &registry);
                 }
             }
             Err(e) => eprintln!("[warden] accept: {e}"),
@@ -125,7 +144,7 @@ fn peer_allowed(conn: &UnixStream, allowed_uid: u32) -> bool {
 
 /// Handle one agent connection: require a matching-version `Hello`, then answer
 /// commands until the peer closes the connection.
-fn handle_conn(conn: UnixStream) {
+fn handle_conn(conn: UnixStream, registry: &MapRegistry) {
     let mut reader = BufReader::new(match conn.try_clone() {
         Ok(c) => c,
         Err(_) => return,
@@ -166,16 +185,16 @@ fn handle_conn(conn: UnixStream) {
     }
 
     while let Ok(cmd) = read_frame::<_, Command>(&mut reader) {
-        let resp = dispatch(&cmd);
+        let resp = dispatch(&cmd, registry);
         if write_frame(&mut writer, &resp).is_err() {
             break;
         }
     }
 }
 
-/// Map a request to a response. Only the conntrack read is wired in this build;
-/// every other declared command is answered `Unimplemented`.
-fn dispatch(cmd: &Command) -> Response {
+/// Map a request to a response. The conntrack read and map element ops are wired
+/// in this build; every other declared command is answered `Unimplemented`.
+fn dispatch(cmd: &Command, registry: &MapRegistry) -> Response {
     match cmd {
         Command::ConntrackDump => match fs::read(NF_CONNTRACK_PROC) {
             Ok(table) => Response::Conntrack { table },
@@ -184,6 +203,33 @@ fn dispatch(cmd: &Command) -> Response {
             }
             Err(e) => Response::Error {
                 message: format!("read {NF_CONNTRACK_PROC}: {e}"),
+            },
+        },
+        Command::MapLookup { map, key } => match registry.lookup(map, key) {
+            Ok(Some(value)) => Response::MapValue { found: true, value },
+            Ok(None) => Response::MapValue {
+                found: false,
+                value: Vec::new(),
+            },
+            Err(e) => Response::Error {
+                message: e.to_string(),
+            },
+        },
+        Command::MapUpdate {
+            map,
+            key,
+            value,
+            flags,
+        } => match registry.update(map, key, value, *flags) {
+            Ok(()) => Response::Ok,
+            Err(e) => Response::Error {
+                message: e.to_string(),
+            },
+        },
+        Command::MapDelete { map, key } => match registry.delete(map, key) {
+            Ok(()) => Response::Ok,
+            Err(e) => Response::Error {
+                message: e.to_string(),
             },
         },
         Command::Hello { .. } => Response::Error {
