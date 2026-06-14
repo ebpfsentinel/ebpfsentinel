@@ -593,16 +593,6 @@ impl EventDispatcher {
         let action = action_label(event.action);
         self.metrics.record_packet("ids", action);
 
-        // Reverse DNS lookup for domain-aware rules (non-blocking, in-memory cache)
-        let dst_domains = self
-            .dns_cache
-            .as_ref()
-            .map(|cache| {
-                let dst_ip = addr_to_ip(event.dst_addr, event.is_ipv6());
-                cache.lookup_ip(&dst_ip)
-            })
-            .unwrap_or_default();
-
         // Evaluate and threshold check (all methods are now &self via interior mutability)
         let (alert, detail) = {
             let svc = self.ids_service.load();
@@ -610,6 +600,20 @@ impl EventDispatcher {
             if !svc.enabled() {
                 return;
             }
+
+            // Reverse DNS lookup only when a domain-aware rule is loaded; otherwise
+            // skip the cache RwLock read + Vec<String> allocation on the hot path.
+            let dst_domains = if svc.has_domain_rules() {
+                self.dns_cache
+                    .as_ref()
+                    .map(|cache| {
+                        let dst_ip = addr_to_ip(event.dst_addr, event.is_ipv6());
+                        cache.lookup_ip(&dst_ip)
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
 
             // Resolve source country for country-aware sampling and thresholds
             let src_country = svc.resolve_country(event.src_addr, event.is_ipv6());

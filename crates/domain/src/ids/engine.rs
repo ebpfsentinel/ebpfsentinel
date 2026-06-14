@@ -65,6 +65,16 @@ impl IdsEngine {
         }
     }
 
+    /// Return `true` if any loaded rule carries a compiled domain pattern.
+    ///
+    /// Lets the packet pipeline skip the reverse-DNS lookup (an `RwLock` read
+    /// plus a `Vec<String>` allocation) on every IDS event when no rule needs
+    /// resolved domains — the common case.
+    #[must_use]
+    pub fn has_domain_rules(&self) -> bool {
+        self.compiled_domain_patterns.iter().any(Option::is_some)
+    }
+
     /// Add a single IDS rule. Validates, checks for duplicates,
     /// and compiles the regex pattern.
     pub fn add_rule(&mut self, rule: IdsRule) -> Result<(), DomainError> {

@@ -158,6 +158,13 @@ impl IdsAppService {
             .check_threshold_with_country(rule, src_ip, dst_ip, src_country)
     }
 
+    /// Return `true` if any loaded rule uses a domain pattern, so the pipeline
+    /// can skip the per-event reverse-DNS lookup when none do.
+    #[must_use]
+    pub fn has_domain_rules(&self) -> bool {
+        self.engine.has_domain_rules()
+    }
+
     /// Resolve the country code for an IP address via the `GeoIP` port.
     pub fn resolve_country(&self, src_addr: [u32; 4], is_ipv6: bool) -> Option<String> {
         let geoip = self.geoip.as_ref()?;
