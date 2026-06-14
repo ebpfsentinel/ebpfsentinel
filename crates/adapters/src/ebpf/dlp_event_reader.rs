@@ -33,6 +33,16 @@ impl DlpEventReader {
         Ok(Self { ring_buf: async_fd })
     }
 
+    /// Create a `DlpEventReader` from a ring-buffer map fd received from the
+    /// warden (rootless deployment). The warden serves the uprobe-dlp ring buffer
+    /// under a distinct key (its raw map name `EVENTS` collides with the packet
+    /// ring buffer), rather than from an in-process loader's map.
+    pub fn from_ringbuf_fd(fd: std::os::fd::OwnedFd) -> Result<Self, anyhow::Error> {
+        let ring_buf = crate::ebpf::event_reader::ringbuf_from_fd(fd)?;
+        info!("DLP EVENTS RingBuf reader initialized from warden fd");
+        Ok(Self { ring_buf })
+    }
+
     /// Run the DLP event reader loop, sending parsed events to `tx`.
     ///
     /// Exits when the `cancel` token is triggered, the `RingBuf` errors, or

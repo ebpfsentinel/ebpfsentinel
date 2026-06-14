@@ -19,6 +19,25 @@ pub struct EventReader {
     ring_buf: AsyncFd<RingBuf<MapData>>,
 }
 
+/// Build an epoll-ready ring-buffer reader from a raw ring-buffer map fd.
+///
+/// Used by the rootless (warden-client) deployment: the warden holds the loaded
+/// program's ring-buffer map and hands its fd to the agent over `SCM_RIGHTS`. The
+/// returned [`OwnedFd`] refers to the same kernel ring buffer the in-kernel
+/// programs write to, so the agent drains it with `mmap`+`poll` and issues no
+/// `bpf()` of its own. `aya`'s [`MapData::from_fd`] adopts the fd and
+/// [`RingBuf::try_from`] wraps it exactly as the in-process loader would.
+pub(crate) fn ringbuf_from_fd(
+    fd: std::os::fd::OwnedFd,
+) -> Result<AsyncFd<RingBuf<MapData>>, anyhow::Error> {
+    let data = MapData::from_fd(fd)?;
+    let ring_buf = RingBuf::try_from(aya::maps::Map::RingBuf(data))?;
+    Ok(AsyncFd::with_interest(
+        ring_buf,
+        tokio::io::Interest::READABLE,
+    )?)
+}
+
 impl EventReader {
     /// Create a new `EventReader` by taking ownership of the EVENTS map.
     pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
@@ -29,6 +48,14 @@ impl EventReader {
         let async_fd = AsyncFd::with_interest(ring_buf, tokio::io::Interest::READABLE)?;
         info!("EVENTS RingBuf reader initialized");
         Ok(Self { ring_buf: async_fd })
+    }
+
+    /// Create an `EventReader` from a ring-buffer map fd received from the warden
+    /// (rootless deployment), rather than from an in-process loader's map.
+    pub fn from_ringbuf_fd(fd: std::os::fd::OwnedFd) -> Result<Self, anyhow::Error> {
+        let ring_buf = ringbuf_from_fd(fd)?;
+        info!("EVENTS RingBuf reader initialized from warden fd");
+        Ok(Self { ring_buf })
     }
 
     /// Run the event reader loop, sending parsed events to `tx`.

@@ -30,6 +30,14 @@ impl DnsEventReader {
         Ok(Self { ring_buf: async_fd })
     }
 
+    /// Create a `DnsEventReader` from a ring-buffer map fd received from the
+    /// warden (rootless deployment), rather than from an in-process loader's map.
+    pub fn from_ringbuf_fd(fd: std::os::fd::OwnedFd) -> Result<Self, anyhow::Error> {
+        let ring_buf = crate::ebpf::event_reader::ringbuf_from_fd(fd)?;
+        info!("DNS_EVENTS RingBuf reader initialized from warden fd");
+        Ok(Self { ring_buf })
+    }
+
     /// Run the DNS event reader loop, sending parsed events to `tx`.
     ///
     /// Exits when the `cancel` token is triggered, the `RingBuf` errors, or

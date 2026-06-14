@@ -2309,6 +2309,23 @@ pub async fn run(
         info!("warden-client: DNS blocklist threat-intel writes routed to the warden");
     }
 
+    // Rootless warden-client mode: acquire the event ring-buffer fds the warden
+    // holds and spawn the packet / DNS / DLP readers on them, draining into the
+    // same `event_tx` pipeline the in-process readers feed. The agent issues no
+    // `bpf()` — it `mmap`+`poll`s fds passed by the warden over `SCM_RIGHTS`.
+    if let Some(sock) = &warden_sock {
+        let started = adapters::warden::events::spawn_event_readers(
+            sock.clone(),
+            event_tx.clone(),
+            CancellationToken::new(),
+        )
+        .await;
+        info!(
+            readers = started,
+            "warden-client: event readers wired from warden ring-buffer fds"
+        );
+    }
+
     // Populate eBPF program status for ops endpoint
     {
         let mut status = ebpf_program_status.write().await;
