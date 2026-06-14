@@ -76,7 +76,7 @@ prost = "0.14"
 tokio-stream = "0.1"
 
 # Storage
-redb = "3.1"
+redb = "4.1.0"
 
 # Logging
 tracing = "0.1"
