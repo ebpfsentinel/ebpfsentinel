@@ -26,7 +26,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::ExitCode;
 use std::ptr;
 
-use ebpfsentinel_token_launch::enable_tcp_syncookies;
+use ebpfsentinel_warden::enable_tcp_syncookies;
 use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
 
 /// Default peer uid the warden accepts — the rootless agent's id. Override with

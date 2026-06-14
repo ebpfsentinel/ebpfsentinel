@@ -8,7 +8,6 @@ members = [
     "crates/adapters",
     "crates/infrastructure",
     "crates/agent",
-    "crates/token-launch",
     "crates/warden-proto",
     "crates/warden",
     "crates/xtask",

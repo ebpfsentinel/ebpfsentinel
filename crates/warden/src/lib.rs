@@ -1,5 +1,7 @@
-//! `ebpfsentinel-token-launch` — privileged launcher for rootless, token-only
-//! eBPF loading.
+//! `ebpfsentinel-warden` — shared privileged primitives for rootless, token-only
+//! eBPF loading, backing both the `ebpfsentinel-token-launch` launcher binary
+//! (all-in-one / broker-serve / broker-connect modes, via [`run`]) and the
+//! `warden` control-plane binary.
 //!
 //! BPF token delegation is a *user-namespace* feature: `BPF_TOKEN_CREATE` only
 //! succeeds against a bpffs whose superblock is owned by a user namespace the
