@@ -60,6 +60,20 @@ const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
 
 const DEFAULT_BPFFS: &str = "/sys/fs/bpf/ebpfsentinel";
 
+/// Unprivileged uid/gid the all-in-one child drops to before creating its user
+/// namespace. `enter_userns` writes a single-entry self-map (`0 <uid> 1`); the
+/// kernel refuses to map namespace-uid 0 to the *real* root (uid 0) unless the
+/// writer is privileged over the parent user namespace (`verify_root_map`,
+/// anti-escalation). Under a stock container runtime the pod runs in the init
+/// user namespace (e.g. containerd on Talos/Kubernetes), so a global-root child
+/// cannot self-map. Dropping to a non-root id first makes the map target
+/// non-root, which is permitted. The child needs no init-ns capabilities: the
+/// parent performs the bpffs delegation and the pcap/module-BTF fds are already
+/// open and inherited across the fork. The agent then runs as this host id
+/// (namespace-root), so deployments make its config group-readable via fsGroup.
+const UNPRIV_UID: libc::uid_t = 65534;
+const UNPRIV_GID: libc::gid_t = 65534;
+
 /// `start_id` / `next_id` branch of `bpf_attr` (`*_GET_NEXT_ID`,
 /// `*_GET_FD_BY_ID`). The first `u32` is the id; layout is identical for the
 /// next-id and get-fd-by-id commands.
@@ -236,7 +250,13 @@ fn open_pcap_pool() -> Vec<RawFd> {
 /// Write `value` to the file at `path` (used for `setgroups` / `uid_map` /
 /// `gid_map`). Returns `false` on error.
 fn write_file(path: &str, value: &str) -> bool {
-    std::fs::write(path, value).is_ok()
+    match std::fs::write(path, value) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("[token-launch] write {path}: {e}");
+            false
+        }
+    }
 }
 
 /// Send a single fd over a `SCM_RIGHTS` control message.
@@ -351,6 +371,31 @@ fn delegate_over_fd(fs: RawFd) -> bool {
     true
 }
 
+/// Probe, in a throwaway fork, whether this process may map namespace-uid 0 to
+/// the *real* root (uid 0) in a fresh user namespace. True for a global-root
+/// process on a real host; false for a container running in the init user
+/// namespace, where the kernel's `verify_root_map` forbids mapping to real root
+/// unless privileged over the parent userns (e.g. containerd on Talos/Kubernetes).
+/// The probe runs in a child process so its namespace work never affects the
+/// caller.
+fn root_userns_self_map_ok() -> bool {
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+            unsafe { libc::_exit(1) };
+        }
+        let _ = std::fs::write("/proc/self/setgroups", "deny");
+        let ok = std::fs::write("/proc/self/uid_map", "0 0 1").is_ok();
+        unsafe { libc::_exit(i32::from(!ok)) };
+    }
+    if pid < 0 {
+        return false;
+    }
+    let mut st: libc::c_int = 0;
+    unsafe { libc::waitpid(pid, &mut st, 0) };
+    libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0
+}
+
 fn child(bpffs: &str, agent_argv: &[CString], modfds: &str, pcapfds: &str, sv1: RawFd) -> ! {
     unsafe {
         libc::setenv(
@@ -367,6 +412,28 @@ fn child(bpffs: &str, agent_argv: &[CString], modfds: &str, pcapfds: &str, sv1: 
                 1,
             )
         };
+    }
+    // Under a stock container runtime the pod runs in the init user namespace,
+    // where a global-root child cannot self-map namespace-0 to real root
+    // (verify_root_map). Detect that and drop to a non-root id first so the
+    // self-map targets a non-root uid (see UNPRIV_UID). On a real host running
+    // as global root the root self-map is permitted, so keep uid 0 (the agent
+    // then runs as host root, preserving the systemd/bare-metal behaviour). No-op
+    // if the container already runs unprivileged.
+    if unsafe { libc::getuid() } == 0 && !root_userns_self_map_ok() {
+        unsafe { libc::setgroups(0, ptr::null()) };
+        if unsafe { libc::setgid(UNPRIV_GID) } != 0 || unsafe { libc::setuid(UNPRIV_UID) } != 0 {
+            perror("drop to unprivileged uid before userns");
+            std::process::exit(1);
+        }
+        // Dropping the real uid clears the dumpable flag, which reparents
+        // /proc/self/{setgroups,uid_map,gid_map} to root and makes them
+        // unwritable by the now-unprivileged child (EACCES). Restore dumpable so
+        // enter_userns() can write its id maps.
+        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) } != 0 {
+            perror("PR_SET_DUMPABLE");
+            std::process::exit(1);
+        }
     }
     enter_userns();
     let fs = fsopen_bpf();
@@ -474,6 +541,40 @@ fn perror(ctx: &str) {
 
 /// Reply header magic (`ebpfsentinel token broker v1`).
 const PROTO_MAGIC: [u8; 4] = *b"ETB1";
+
+/// First byte a client writes on a broker connection, selecting the request.
+/// `CMD_DELEGATE` runs the bpffs-delegation + fd-handout handshake; `CMD_CONNTRACK`
+/// asks the (host-userns, privileged) broker to read the conntrack table on the
+/// non-root agent's behalf — the agent cannot read the `0440 root` proc file from
+/// its child user namespace.
+const CMD_DELEGATE: u8 = b'D';
+const CMD_CONNTRACK: u8 = b'C';
+/// Kernel conntrack table the broker reads for `CMD_CONNTRACK`.
+const NF_CONNTRACK_PROC: &str = "/proc/net/nf_conntrack";
+
+/// Write the whole buffer to `fd`, looping over short writes. Returns `false` on
+/// error.
+fn write_all_fd(fd: RawFd, mut buf: &[u8]) -> bool {
+    while !buf.is_empty() {
+        let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
+        if n <= 0 {
+            return false;
+        }
+        buf = &buf[n as usize..];
+    }
+    true
+}
+
+/// Serve a `CMD_CONNTRACK` request: read `/proc/net/nf_conntrack` (the broker is
+/// real root in the host network namespace) and reply with a little-endian `u32`
+/// length followed by the raw table bytes. The agent parses them exactly as if it
+/// had read the file itself.
+fn broker_serve_conntrack(conn: RawFd) {
+    let data = std::fs::read(NF_CONNTRACK_PROC).unwrap_or_default();
+    let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
+    write_all_fd(conn, &len.to_le_bytes());
+    write_all_fd(conn, &data[..len as usize]);
+}
 /// `SCM_RIGHTS` cannot carry more than `SCM_MAX_FD` (253) fds per message.
 const SCM_MAX_FDS: usize = 253;
 /// Modules whose BTF the eBPF programs need (conntrack/fou kfuncs) — kept at the
@@ -697,7 +798,16 @@ fn run_broker_serve(sockpath: &str) -> ExitCode {
             perror("accept");
             continue;
         }
-        broker_handle_conn(c, &btf, &pcap);
+        // First byte selects the request: delegation handshake or a conntrack
+        // table read on behalf of the non-root agent.
+        let mut cmd = [0u8; 1];
+        if unsafe { libc::read(c, cmd.as_mut_ptr().cast(), 1) } == 1 {
+            match cmd[0] {
+                CMD_DELEGATE => broker_handle_conn(c, &btf, &pcap),
+                CMD_CONNTRACK => broker_serve_conntrack(c),
+                other => eprintln!("[broker] unknown command byte {other:#x}"),
+            }
+        }
         unsafe { libc::close(c) };
     }
 }
@@ -719,6 +829,11 @@ fn run_broker_connect(sock: &str, bpffs: &str, agent_argv: &[CString]) -> ! {
     let len = mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
     if unsafe { libc::connect(conn, ptr::from_ref(&sa).cast(), len) } != 0 {
         perror("connect broker");
+        std::process::exit(1);
+    }
+    // Select the delegation handshake on this connection.
+    if !write_all_fd(conn, &[CMD_DELEGATE]) {
+        perror("write broker command");
         std::process::exit(1);
     }
     if !send_fd(conn, fs) {
@@ -776,6 +891,14 @@ fn run_broker_connect(sock: &str, bpffs: &str, agent_argv: &[CString]) -> ! {
                 1,
             );
         }
+        // Tell the agent where to reach the broker for conntrack reads: it cannot
+        // read the 0440-root proc file from its child user namespace, so it proxies
+        // each snapshot through the privileged broker (CMD_CONNTRACK).
+        libc::setenv(
+            c"EBPFSENTINEL_BROKER_SOCK".as_ptr(),
+            CString::new(sock).unwrap().as_ptr(),
+            1,
+        );
     }
     mount_and_exec(fs, bpffs, agent_argv);
 }
