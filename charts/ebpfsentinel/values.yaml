@@ -105,6 +105,12 @@ daemonset:
   # value; they must point at the same mount.
   bpfToken:
     bpffsPath: /sys/fs/bpf/ebpfsentinel
+    # -- Back the bpffs mount with an in-pod tmpfs (emptyDir medium: Memory)
+    # instead of the host's /sys/fs/bpf. Required on nested runtimes (kind,
+    # minikube) whose node /sys/fs/bpf is read-only or absent — there the
+    # hostPath mount fails. On a real node leave this false so pinned maps live
+    # on the host bpffs. Ignored in split-broker mode (always an in-pod tmpfs).
+    bpffsEmptyDir: false
   # -- Agent container security context. The launcher entrypoint needs
   # CAP_SYS_ADMIN (bpffs delegation + module BTF fds) and user-namespace
   # creation; it drops into the unprivileged userns before exec'ing the agent

@@ -8,6 +8,20 @@
 # Prerequisites:
 #   - Linux kernel 6.9+ with BTF support
 #   - Docker with host networking support
+#   - Config ownership for the bind mount below. The agent runs unprivileged
+#     inside a child user namespace where only container-root is mapped, AND it
+#     rejects a world-readable config (it may hold secrets). So the bind-mounted
+#     file must be owned by root with mode 0640 — otherwise it is either
+#     unreadable (a host-user-owned file appears as `nobody`) or rejected as
+#     world-readable. After cloning:
+#       sudo chown root:root ./config/ebpfsentinel.yaml
+#       sudo chmod 640 ./config/ebpfsentinel.yaml
+#     Editing it for hot-reload then also needs root. (The baked-in image copy
+#     is already root:root 0640 — to skip this, drop the config volume below and
+#     run with the baked default.)
+#   - SYN-cookie DDoS protection (if enabled) needs net.ipv4.tcp_syncookies=2.
+#     With network_mode: host the container shares (read-only) the host sysctls,
+#     so set it on the HOST: sysctl -w net.ipv4.tcp_syncookies=2
 #
 # eBPF is loaded EXCLUSIVELY through a BPF token (no CAP_BPF). The image
 # entrypoint (ebpfsentinel-token-launch) runs as root only long enough to set

@@ -95,6 +95,13 @@
       "type": "object",
       "properties": {
         "hostPID": { "type": "boolean" },
+        "bpfToken": {
+          "type": "object",
+          "properties": {
+            "bpffsPath": { "type": "string" },
+            "bpffsEmptyDir": { "type": "boolean" }
+          }
+        },
         "updateStrategy": { "type": "object" },
         "minReadySeconds": { "type": "integer", "minimum": 0 },
         "revisionHistoryLimit": { "type": "integer", "minimum": 0 },

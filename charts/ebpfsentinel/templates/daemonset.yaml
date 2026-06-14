@@ -149,9 +149,12 @@ spec:
             {{- else }}
             - name: bpf
               mountPath: /sys/fs/bpf
+              {{- if not .Values.daemonset.bpfToken.bpffsEmptyDir }}
               # The launcher mounts the delegated bpffs over this path inside its
               # own private mount namespace; expose the host bpffs to the pod.
+              # (Omitted for an in-pod tmpfs, where there is no host bpffs.)
               mountPropagation: HostToContainer
+              {{- end }}
             {{- end }}
             - name: debug
               mountPath: /sys/kernel/debug
@@ -171,16 +174,17 @@ spec:
             # default to 0644, so pin a stricter mode.
             defaultMode: 0640
         - name: bpf
-          {{- if .Values.daemonset.brokerSidecar.enabled }}
-          # Split mode: the bpffs is freshly delegated by the broker, so an in-pod
+          {{- if or .Values.daemonset.brokerSidecar.enabled .Values.daemonset.bpfToken.bpffsEmptyDir }}
+          # Split mode, or bpfToken.bpffsEmptyDir on a nested runtime (kind,
+          # minikube): the bpffs is a fresh delegated/in-pod mount, so an in-pod
           # tmpfs gives the writable mountpoint (a container's /sys is read-only).
           emptyDir:
             medium: Memory
           {{- else }}
           # A container's /sys is read-only, so the launcher needs this writable
           # host bpffs to create the delegated mountpoint. On nested runtimes
-          # (kind, minikube) whose /sys/fs/bpf is itself read-only, override with
-          # an emptyDir: { medium: Memory } via daemonset.extraVolumes instead.
+          # (kind, minikube) whose /sys/fs/bpf is read-only or absent, set
+          # daemonset.bpfToken.bpffsEmptyDir=true to use an in-pod tmpfs instead.
           hostPath:
             path: /sys/fs/bpf
           {{- end }}

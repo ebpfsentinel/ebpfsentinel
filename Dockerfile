@@ -99,7 +99,9 @@ COPY --from=agent-builder /build/ebpfsentinel-token-launch /usr/local/bin/ebpfse
 # Copy pre-built eBPF programs (built by CI or `cargo xtask ebpf-build`)
 COPY ebpf-out/ /usr/local/lib/ebpfsentinel/
 
-COPY config/ebpfsentinel.yaml /etc/ebpfsentinel/config.yaml
+# 0640: the agent rejects a world-readable config (it may hold secrets). The
+# source file is 0644 in git, so tighten it as it lands in the image.
+COPY --chmod=0640 config/ebpfsentinel.yaml /etc/ebpfsentinel/config.yaml
 
 # distroless has no shell — create the directory in the builder stage and COPY it.
 COPY --from=agent-builder /build/captures-dir /var/lib/ebpfsentinel/captures
