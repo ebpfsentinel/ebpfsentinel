@@ -77,10 +77,13 @@ fn serve(sockpath: &str, allowed_uid: u32, maps_dir: &str) -> ExitCode {
     // offload needs always-on kernel syncookies).
     enable_tcp_syncookies();
 
-    // Open the pinned maps once; their set is the allowlist for map RPC.
+    // Open the pinned maps once; their set is the allowlist for map RPC. Because
+    // the maps are pinned in bpffs, this re-adopts exactly the objects a previous
+    // warden served — a warden restart reloads no eBPF and never disturbs the
+    // agent's already-held ring-buffer fds.
     let registry = MapRegistry::open_pin_dir(std::path::Path::new(maps_dir));
     eprintln!(
-        "[warden] map registry: {} map(s) from {maps_dir} {:?}",
+        "[warden] re-adopted {} pinned map(s) from {maps_dir} {:?}",
         registry.len(),
         registry.names()
     );
