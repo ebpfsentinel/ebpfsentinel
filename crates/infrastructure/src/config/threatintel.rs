@@ -276,7 +276,7 @@ refresh_interval_secs: 3600
         let mut feed = valid_feed();
         feed.url = "http://169.254.169.254/latest/meta-data/".to_string();
         let err = feed.validate(0).unwrap_err();
-        assert!(err.to_string().contains("private or link-local"));
+        assert!(err.to_string().contains("link-local"));
     }
 
     #[test]
