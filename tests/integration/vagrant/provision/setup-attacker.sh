@@ -144,10 +144,19 @@ PROVISION_DIR="${INTEGRATION_DIR}/vagrant/provision"
 # [tk/1] apt-managed tools
 echo "  [tk/1] apt-managed tools"
 sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
+# Essential capture/analysis + build tooling. Suites gate on tcpdump/tshark/nmap,
+# so these MUST install — kept in one transaction so a failure is loud.
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    slowhttptest nmap t50 wrk dnsperf hydra ncrack tcpdump tshark \
+    tcpdump tshark nmap wrk slowhttptest \
     python3-venv python3-pip cmake build-essential pkg-config \
     libpcap-dev unzip jq
+# Optional exotic attack tools — not present in every mirror (t50/ncrack in
+# particular). Install best-effort so one missing package can't atomically fail
+# the apt transaction and leave the essential tools above uninstalled.
+for pkg in t50 dnsperf hydra ncrack; do
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" \
+        || echo "  (optional tool '$pkg' unavailable in repo — skipping)"
+done
 
 # [tk/2] vendored MHDDoS submodule + venv
 echo "  [tk/2] MHDDoS submodule + venv"
@@ -169,11 +178,18 @@ if [ -f /opt/MHDDoS/start.py ] && ! [ -f /opt/MHDDoS/.tor-disabled ]; then
 fi
 
 # [tk/3] scapy venv
+# Gate on whether scapy actually imports — a bare `[ -d .../bin ]` check passes
+# even when an earlier run left the venv without pip/scapy, which then wedges
+# every re-provision. Recreate cleanly and drive pip via `python -m pip` so a
+# missing pip launcher script can't block the install.
 echo "  [tk/3] scapy venv"
-sudo mkdir -p /opt/scapy-venv && sudo chown "${USER}:${USER}" /opt/scapy-venv
-[ -d /opt/scapy-venv/bin ] || python3 -m venv /opt/scapy-venv
-/opt/scapy-venv/bin/pip install --upgrade pip >/dev/null
-/opt/scapy-venv/bin/pip install "scapy==2.7.0"
+if ! /opt/scapy-venv/bin/python3 -c "import scapy" 2>/dev/null; then
+    sudo rm -rf /opt/scapy-venv
+    sudo python3 -m venv /opt/scapy-venv
+    sudo /opt/scapy-venv/bin/python3 -m pip install --upgrade pip >/dev/null
+    sudo /opt/scapy-venv/bin/python3 -m pip install "scapy==2.7.0"
+    sudo chmod -R a+rx /opt/scapy-venv
+fi
 
 # [tk/4] mitmproxy venv
 echo "  [tk/4] mitmproxy venv"

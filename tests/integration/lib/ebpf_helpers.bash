@@ -57,16 +57,27 @@ require_root() {
     fi
 }
 
-# require_kernel <major> <minor> — skip if kernel is older than given version
+# require_kernel <major> <minor> — skip if kernel is older than given version.
+# In 2-VM / 3-VM mode the suite runs on the traffic-generating attacker VM, but
+# the eBPF programs load on the agent VM — so the kernel floor must be checked
+# against the agent's kernel, not the local one.
 require_kernel() {
     local req_major="${1:-5}"
     local req_minor="${2:-17}"
+    local kernel_str
+    if { [ "${EBPF_2VM_MODE:-false}" = "true" ] || [ "${EBPF_3VM_MODE:-false}" = "true" ]; } \
+       && [ -n "${AGENT_SSH_CMD:-}" ]; then
+        kernel_str="$(${AGENT_SSH_CMD} 'uname -r' 2>/dev/null)" || kernel_str="$(uname -r)"
+        [ -n "$kernel_str" ] || kernel_str="$(uname -r)"
+    else
+        kernel_str="$(uname -r)"
+    fi
     local kernel_major kernel_minor
-    kernel_major="$(uname -r | cut -d. -f1)"
-    kernel_minor="$(uname -r | cut -d. -f2)"
+    kernel_major="$(echo "$kernel_str" | cut -d. -f1)"
+    kernel_minor="$(echo "$kernel_str" | cut -d. -f2)"
     if [ "$kernel_major" -lt "$req_major" ] || \
        { [ "$kernel_major" -eq "$req_major" ] && [ "$kernel_minor" -lt "$req_minor" ]; }; then
-        skip "kernel $(uname -r) < ${req_major}.${req_minor}"
+        skip "agent kernel $kernel_str < ${req_major}.${req_minor}"
     fi
 }
 
