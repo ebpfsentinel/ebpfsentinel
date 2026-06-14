@@ -180,10 +180,14 @@ sudo ./target/release/ebpfsentinel-token-launch \
 The agent loads eBPF **exclusively** through a BPF token (kernel 6.9+) — never `CAP_BPF`, never `--privileged`. The image entrypoint is the `ebpfsentinel-token-launch` launcher: as root it mounts the delegated bpffs in a child user namespace, then execs the agent there, unprivileged. `docker compose up` wires this automatically. To run it by hand:
 
 ```bash
+# Optional: to override the config, bind-mount it root-owned and not
+# world-readable (the agent rejects mode 0644); omit the -v line to use the
+# image's baked-in default.
+#   sudo chown root:root config/ebpfsentinel.yaml && sudo chmod 640 config/ebpfsentinel.yaml
 docker run --network host \
   --cap-add SYS_ADMIN --cap-add NET_RAW \
   --security-opt apparmor=unconfined \
-  -v ./config:/etc/ebpfsentinel \
+  -v ./config/ebpfsentinel.yaml:/etc/ebpfsentinel/config.yaml \
   ghcr.io/ebpfsentinel/ebpfsentinel:latest
 ```
 
@@ -256,7 +260,7 @@ The **enterprise edition** layers on capabilities for fleets and regulated envir
 | Compliance | Compliance reports (PCI-DSS 4, HIPAA, GDPR, SOC 2, NIS2, DORA, SecNumCloud, HDS) |
 | Licensing & integrity | Ed25519 + ML-DSA-65 dual-signed keys, machine fingerprint binding, air-gap activation, SHA-256 + Ed25519 binary self-verification at startup |
 
-A web dashboard UI and a CRD-driven Kubernetes operator are on the roadmap. See [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for the full list and per-feature detail.
+A CRD-driven Kubernetes operator and a web dashboard UI complement the agent. See [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for the full list and per-feature detail.
 
 ## License
 
