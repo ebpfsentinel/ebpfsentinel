@@ -1,14 +1,50 @@
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use domain::common::error::DomainError;
 use domain::threatintel::entity::FeedConfig;
 use ports::secondary::feed_source::FeedSource;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
 /// Maximum feed response size: 100 MiB. Prevents OOM from
 /// compromised or misconfigured feeds returning unbounded data.
 const MAX_FEED_RESPONSE_SIZE: usize = 100 * 1024 * 1024;
+
+/// reqwest DNS resolver that rejects any host resolving to a loopback, private,
+/// or link-local address.
+///
+/// Validating the *resolved* address — the one reqwest will actually connect to
+/// — closes SSRF vectors that the config-time URL check alone cannot: numeric
+/// host encodings that resolve via libc `inet_aton` (`http://2130706433/`) and
+/// DNS rebinding (a public hostname whose A record points at `169.254.169.254`).
+struct SsrfGuardResolver;
+
+impl Resolve for SsrfGuardResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        Box::pin(async move {
+            let host = name.as_str().to_owned();
+            // Port 0 is a placeholder; reqwest substitutes the real port.
+            let addrs = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+            let mut validated: Vec<SocketAddr> = Vec::new();
+            for addr in addrs {
+                if FeedConfig::is_forbidden_ip(addr.ip()) {
+                    return Err(format!(
+                        "refusing to connect to blocked address {} for host '{host}'",
+                        addr.ip()
+                    )
+                    .into());
+                }
+                validated.push(addr);
+            }
+            Ok(Box::new(validated.into_iter()) as Addrs)
+        })
+    }
+}
 
 /// HTTP-based feed fetcher using reqwest.
 ///
@@ -25,6 +61,7 @@ impl HttpFeedFetcher {
             .timeout(Duration::from_secs(30))
             .user_agent("ebpfsentinel-agent/0.1")
             .redirect(reqwest::redirect::Policy::none())
+            .dns_resolver(Arc::new(SsrfGuardResolver))
             .build()
             .map_err(|e| DomainError::EngineError(format!("HTTP client init failed: {e}")))?;
 

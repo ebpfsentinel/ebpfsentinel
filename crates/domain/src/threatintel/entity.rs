@@ -335,37 +335,51 @@ impl FeedConfig {
             return Err("feed url must not target localhost or metadata endpoints");
         }
 
-        // If host parses as an IP address, reject private/loopback/link-local ranges
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            if ip.is_loopback() {
-                return Err("feed url must not target loopback addresses");
-            }
-            if ip.is_unspecified() {
-                return Err("feed url must not target unspecified addresses");
-            }
-            if ip.is_multicast() {
-                return Err("feed url must not target multicast addresses");
-            }
-            match ip {
-                std::net::IpAddr::V4(v4) => {
-                    if v4.is_private()
-                        || v4.is_link_local()
-                        || v4.octets()[0] == 169 && v4.octets()[1] == 254
-                    {
-                        return Err("feed url must not target private or link-local addresses");
-                    }
-                }
-                std::net::IpAddr::V6(v6) => {
-                    // Reject ULA (fc00::/7) and link-local (fe80::/10)
-                    let first = v6.segments()[0];
-                    if (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80 {
-                        return Err("feed url must not target private or link-local addresses");
-                    }
-                }
-            }
+        // Defense-in-depth: reject non-canonical numeric host encodings that slip
+        // past `IpAddr` parsing yet still resolve to a numeric address via the
+        // libc `inet_aton` path (decimal `2130706433`, octal, short `127.1`,
+        // hex `0x7f000001`). A dotted/all-digit or `0x`-prefixed host that does
+        // not parse as a canonical IP is never a legitimate DNS name.
+        let numericish = host_lower.starts_with("0x")
+            || (!host.contains(':') && host.bytes().all(|b| b.is_ascii_digit() || b == b'.'));
+        if numericish && host.parse::<std::net::IpAddr>().is_err() {
+            return Err("feed url uses a non-canonical numeric host encoding");
+        }
+
+        // If host parses as an IP literal, reject private/loopback/link-local ranges.
+        if let Ok(ip) = host.parse::<std::net::IpAddr>()
+            && Self::is_forbidden_ip(ip)
+        {
+            return Err("feed url must not target loopback, private, or link-local addresses");
         }
 
         Ok(())
+    }
+
+    /// Return `true` if `ip` is a loopback, private, link-local, unspecified, or
+    /// multicast address that a feed fetch must never target (SSRF guard).
+    ///
+    /// IPv4-mapped / -compatible IPv6 addresses (e.g. `::ffff:127.0.0.1`) are
+    /// unwrapped and re-checked as IPv4 so they cannot smuggle a blocked target
+    /// past the IPv6 arm. Used both for URL literals and for resolved addresses
+    /// at fetch time.
+    #[must_use]
+    pub fn is_forbidden_ip(ip: std::net::IpAddr) -> bool {
+        use std::net::IpAddr;
+        if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+            return true;
+        }
+        match ip {
+            IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_broadcast(),
+            IpAddr::V6(v6) => {
+                if let Some(v4) = v6.to_ipv4_mapped().or_else(|| v6.to_ipv4()) {
+                    return Self::is_forbidden_ip(IpAddr::V4(v4));
+                }
+                // ULA (fc00::/7) and link-local (fe80::/10)
+                let first = v6.segments()[0];
+                (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+            }
+        }
     }
 
     /// Validate auth header: must contain `:`, name/value must not contain CR/LF/NUL.
@@ -543,7 +557,7 @@ mod tests {
         f.url = "http://127.0.0.1/feed.csv".to_string();
         assert_eq!(
             f.validate().unwrap_err(),
-            "feed url must not target loopback addresses"
+            "feed url must not target loopback, private, or link-local addresses"
         );
     }
 
@@ -598,6 +612,43 @@ mod tests {
         let mut f = make_feed();
         f.url = "https://1.2.3.4/feed.csv".to_string();
         assert!(f.validate().is_ok());
+    }
+
+    #[test]
+    fn feed_url_rejects_decimal_ip_encoding() {
+        let mut f = make_feed();
+        f.url = "http://2130706433/latest/meta-data/".to_string();
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn feed_url_rejects_hex_and_short_ip_encoding() {
+        for host in ["0x7f000001", "127.1", "017700000001"] {
+            let mut f = make_feed();
+            f.url = format!("http://{host}/feed");
+            assert!(f.validate().is_err(), "host {host} should be rejected");
+        }
+    }
+
+    #[test]
+    fn feed_url_rejects_ipv4_mapped_ipv6_loopback() {
+        let mut f = make_feed();
+        f.url = "http://[::ffff:7f00:0001]/feed".to_string();
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn is_forbidden_ip_unwraps_mapped_addresses() {
+        use std::net::IpAddr;
+        assert!(FeedConfig::is_forbidden_ip(
+            "::ffff:169.254.169.254".parse::<IpAddr>().unwrap()
+        ));
+        assert!(FeedConfig::is_forbidden_ip(
+            "10.0.0.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(!FeedConfig::is_forbidden_ip(
+            "1.2.3.4".parse::<IpAddr>().unwrap()
+        ));
     }
 
     // ── Auth header validation (CRLF injection prevention) ──────────
