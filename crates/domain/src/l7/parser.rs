@@ -1155,13 +1155,18 @@ fn read_bulk_string(bytes: &[u8], idx: &mut usize) -> Result<String, L7Error> {
     *idx += 1;
     #[allow(clippy::cast_possible_truncation)]
     let len = read_decimal_until_crlf(bytes, idx)? as usize;
-    if *idx + len + 2 > bytes.len() {
-        return Err(L7Error::InvalidFormat {
+    // Guard against integer overflow: a hostile bulk length near usize::MAX
+    // would wrap `*idx + len + 2`, sneak past the bounds check, and then panic
+    // on the inverted slice range below. `checked_add` rejects it instead.
+    let end = (*idx)
+        .checked_add(len)
+        .and_then(|e| e.checked_add(2))
+        .filter(|&e| e <= bytes.len())
+        .ok_or(L7Error::InvalidFormat {
             protocol: "Redis",
             detail: "bulk string truncated".to_string(),
-        });
-    }
-    let slice = &bytes[*idx..*idx + len];
+        })?;
+    let slice = &bytes[*idx..end - 2];
     let s = core::str::from_utf8(slice)
         .map_err(|_| L7Error::InvalidFormat {
             protocol: "Redis",
@@ -2140,6 +2145,14 @@ mod tests {
     #[test]
     fn parse_redis_rejects_malformed_array() {
         assert!(parse_redis(b"*\r\n").is_err());
+    }
+
+    #[test]
+    fn parse_redis_rejects_overflowing_bulk_length() {
+        // A bulk length near usize::MAX must not wrap the bounds check and
+        // panic on an inverted slice range — it must return an error.
+        let payload = b"*1\r\n$18446744073709551615\r\nx";
+        assert!(parse_redis(payload).is_err());
     }
 
     #[test]
