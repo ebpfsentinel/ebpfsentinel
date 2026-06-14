@@ -1,0 +1,65 @@
+# eBPFsentinel — warden control-plane image (split / rootless-agent deployment)
+#
+# Build:  docker build -f Dockerfile.warden -t ebpfsentinel-warden .
+#
+# This is the privileged half of the split deployment: a small sidecar that holds
+# the extended capabilities (CAP_SYS_ADMIN / CAP_NET_ADMIN / CAP_NET_RAW) and
+# serves kernel operations to a fully rootless agent over an AF_UNIX socket. It
+# does nothing on its own initiative — it only answers the narrow, typed,
+# peer-authenticated `warden-proto` RPC (map element ops, conntrack read/teardown,
+# route programming, gratuitous ARP, ring-buffer + pcap fd-passing).
+#
+# Run (alongside a rootless agent sharing the socket volume):
+#   docker run --cap-add SYS_ADMIN --cap-add NET_ADMIN --cap-add NET_RAW \
+#     --network host -v warden-sock:/run/ebpfsentinel \
+#     ebpfsentinel-warden serve /run/ebpfsentinel/warden.sock --uid 65534
+#
+# The warden binary is fully static (musl) and needs no libpcap (it opens raw
+# AF_PACKET sockets directly), so the build is leaner than the agent image.
+
+# ── Stage 1: build the warden binary ─────────────────────────────────
+
+FROM rust:bookworm AS warden-builder
+
+ARG TARGETARCH
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends musl-tools && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock rust-toolchain.toml deny.toml ./
+COPY .cargo/ .cargo/
+COPY crates/ crates/
+COPY proto/ proto/
+
+# Build only the `warden` control-plane binary (static, musl).
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    case "${TARGETARCH}" in \
+        arm64) MUSL_TARGET="aarch64-unknown-linux-musl" ;; \
+        *)     MUSL_TARGET="x86_64-unknown-linux-musl" ;; \
+    esac && \
+    rustup target add "${MUSL_TARGET}" && \
+    cargo build --release --target "${MUSL_TARGET}" --bin warden && \
+    cp "/build/target/${MUSL_TARGET}/release/warden" /build/warden
+
+# ── Stage 2: minimal runtime image ──────────────────────────────────
+#
+# distroless/static: no libc, no shell, no package manager. The warden is a
+# static musl binary, so nothing else is required.
+
+FROM gcr.io/distroless/static-debian13
+
+LABEL org.opencontainers.image.title="eBPFsentinel-warden" \
+    org.opencontainers.image.description="Privileged kernel-operation control plane for a rootless eBPFsentinel agent" \
+    org.opencontainers.image.source="https://github.com/ebpfsentinel/ebpfsentinel" \
+    org.opencontainers.image.licenses="AGPL-3.0-only"
+
+COPY --from=warden-builder /build/warden /usr/local/bin/warden
+
+# The warden serves on a socket under this directory, shared with the agent
+# container via a volume. The agent connects with EBPFSENTINEL_WARDEN_SOCK.
+ENV EBPFSENTINEL_WARDEN_SOCK=/run/ebpfsentinel/warden.sock
+
+ENTRYPOINT ["/usr/local/bin/warden"]
+CMD ["serve", "/run/ebpfsentinel/warden.sock", "--uid", "65534"]
