@@ -149,6 +149,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::AtomicBool;
 
+    use crate::metrics::AgentMetrics;
     use application::audit_service_impl::AuditAppService;
     use application::firewall_service_impl::FirewallAppService;
     use application::ips_service_impl::IpsAppService;
@@ -163,7 +164,6 @@ mod tests {
     use domain::ratelimit::engine::RateLimitEngine;
     use domain::threatintel::engine::ThreatIntelEngine;
     use infrastructure::config::AgentConfig;
-    use infrastructure::metrics::AgentMetrics;
     use ports::secondary::audit_sink::AuditSink;
     use ports::secondary::metrics_port::MetricsPort;
     use ports::test_utils::NoopMetrics;

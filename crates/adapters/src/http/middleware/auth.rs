@@ -107,6 +107,7 @@ mod tests {
     }
 
     fn make_test_state(auth_provider: Option<Arc<dyn AuthProvider>>) -> Arc<AppState> {
+        use crate::metrics::AgentMetrics;
         use application::audit_service_impl::AuditAppService;
         use application::firewall_service_impl::FirewallAppService;
         use application::ips_service_impl::IpsAppService;
@@ -120,7 +121,6 @@ mod tests {
         use domain::l7::engine::L7Engine;
         use domain::ratelimit::engine::RateLimitEngine;
         use domain::threatintel::engine::ThreatIntelEngine;
-        use infrastructure::metrics::AgentMetrics;
         use ports::secondary::audit_sink::AuditSink;
         use ports::secondary::metrics_port::MetricsPort;
         use ports::test_utils::NoopMetrics;

@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use adapters::metrics::AgentMetrics;
 use application::alias_service_impl::AliasAppService;
 use application::audit_service_impl::AuditAppService;
 use application::conntrack_service_impl::ConnTrackAppService;
@@ -33,7 +34,6 @@ use domain::l7::engine::L7Engine;
 use domain::ratelimit::engine::RateLimitEngine;
 use domain::threatintel::engine::ThreatIntelEngine;
 use infrastructure::config::AgentConfig;
-use infrastructure::metrics::AgentMetrics;
 use ports::secondary::metrics_port::{FirewallMetrics, MetricsPort};
 use tokio::sync::RwLock;
 use tracing::{info, warn};

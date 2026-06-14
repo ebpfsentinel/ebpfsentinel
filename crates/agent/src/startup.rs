@@ -21,9 +21,11 @@ use adapters::ebpf::{
 use adapters::grpc::server::{GrpcTlsConfig, run_grpc_server};
 use adapters::http::tls::load_rustls_config;
 use adapters::http::{AppState, run_http_server};
+use adapters::metrics::AgentMetrics;
 use adapters::storage::redb_alert_store::RedbAlertStore;
 use adapters::storage::redb_audit_store::RedbAuditStore;
 use adapters::storage::redb_rule_change_store::RedbRuleChangeStore;
+use adapters::system_metrics;
 use application::alert_pipeline::AlertPipeline;
 use application::alias_service_impl::AliasAppService;
 use application::audit_service_impl::AuditAppService;
@@ -62,8 +64,6 @@ use infrastructure::constants::{
     ALERT_CHANNEL_CAPACITY, EVENT_CHANNEL_CAPACITY, GRACEFUL_SHUTDOWN_TIMEOUT,
 };
 use infrastructure::logging::init_logging;
-use infrastructure::metrics::AgentMetrics;
-use infrastructure::system_metrics;
 use ports::secondary::alert_sender::AlertSender;
 use ports::secondary::alert_store::AlertStore;
 use ports::secondary::audit_sink::AuditSink;

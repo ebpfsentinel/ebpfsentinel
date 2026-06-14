@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use crate::auth::revocation::RevocationHandle;
+use crate::metrics::AgentMetrics;
 use application::alert_replay::AlertReplayBuffer;
 use application::alias_service_impl::AliasAppService;
 use application::audit_service_impl::AuditAppService;
@@ -29,7 +30,6 @@ use arc_swap::ArcSwap;
 use domain::alert::entity::Alert;
 use domain::conntrack::entity::ConntrackEvent;
 use infrastructure::config::AgentConfig;
-use infrastructure::metrics::AgentMetrics;
 use ports::secondary::alert_store::AlertStore;
 use ports::secondary::auth_provider::AuthProvider;
 use ports::secondary::geoip_port::GeoIpPort;
