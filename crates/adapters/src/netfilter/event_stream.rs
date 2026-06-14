@@ -53,6 +53,11 @@ pub async fn run_conntrack_event_poller(
     let mut prev: HashMap<FlowKey, Connection> = HashMap::new();
     let mut ticker = tokio::time::interval(poll_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Suppress repeated identical snapshot errors: a persistent failure (e.g. a
+    // non-root agent that cannot read /proc/net/nf_conntrack — its eBPF conntrack
+    // path keeps working) would otherwise warn on every tick. Warn once, then
+    // demote identical follow-ups to debug; reset on the next success.
+    let mut last_err: Option<String> = None;
 
     loop {
         tokio::select! {
@@ -64,10 +69,17 @@ pub async fn run_conntrack_event_poller(
                 let current = match port.get_connections(usize::MAX) {
                     Ok(conns) => conns,
                     Err(e) => {
-                        warn!("conntrack snapshot failed: {e}");
+                        let msg = e.to_string();
+                        if last_err.as_deref() == Some(msg.as_str()) {
+                            debug!("conntrack snapshot still failing: {msg}");
+                        } else {
+                            warn!("conntrack snapshot failed (identical errors suppressed until it recovers): {msg}");
+                            last_err = Some(msg);
+                        }
                         continue;
                     }
                 };
+                last_err = None;
 
                 let mut curr_map: HashMap<FlowKey, Connection> = HashMap::with_capacity(current.len());
                 for conn in current {
