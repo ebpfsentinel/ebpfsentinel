@@ -11,7 +11,7 @@ A unified, kernel-native **Network & Security platform** for Linux — one Rust 
 - **One agent, not a stack.** Firewall, IDS/IPS, DDoS, DLP, threat intel, NAT, and QoS normally mean a rack of appliances or a pile of daemons — each with its own config, parser, and packet copy. eBPFsentinel runs them as a single binary sharing one kernel pipeline: less to deploy, less to patch, less attack surface.
 - **In-kernel, at the source.** Programs attach at XDP/TC/uprobe hook points, so traffic is inspected and dropped in the kernel — no packet copy to userspace on the fast path, no sidecar hop. Malicious traffic dies on the wire instead of costing you CPU upstack.
 - **Network placement, not endpoint sprawl.** It runs where traffic flows — host NIC, node boundary — not as an agent on every workload. One enforcement point per node sees east-west and north-south alike, with no per-app instrumentation.
-- **Built for trust.** Pure Rust with `#![forbid(unsafe_code)]` across the domain and application layers, hexagonal/DDD design, and SHA-256 + Ed25519 binary self-verification at startup. It runs **rootless** via BPF token delegation — zero `CAP_BPF` / `CAP_NET_ADMIN` — and tags every alert with MITRE ATT&CK for your SIEM.
+- **Built for trust.** Pure Rust with `#![forbid(unsafe_code)]` across the domain and application layers and a hexagonal/DDD design. It runs **rootless** via BPF token delegation — zero `CAP_BPF` / `CAP_NET_ADMIN` — and tags every alert with MITRE ATT&CK for your SIEM.
 
 ## What it does
 
@@ -65,7 +65,6 @@ A snapshot of the capabilities below — see the [Features guide](https://github
 | **CLI** | 18+ subcommands with `--output table\|json` and `--token` auth |
 | **Authentication** | JWT, OIDC, and API keys with role-based access |
 | **TLS 1.3** | rustls + aws_lc_rs, post-quantum ready (X25519MLKEM768) |
-| **Binary Integrity** | SHA-256 + Ed25519 self-verification at startup |
 
 ## Architecture
 
@@ -255,7 +254,7 @@ The **enterprise edition** layers on capabilities for fleets and regulated envir
 | Multi-tenancy & access | Multi-tenancy (isolation + quotas), advanced RBAC, advanced analytics & reports |
 | Integration & response | SIEM integration (10 connectors), automated response orchestration (SOAR) |
 | Compliance | Compliance reports (PCI-DSS 4, HIPAA, GDPR, SOC 2, NIS2, DORA, SecNumCloud, HDS) |
-| Licensing | Ed25519 + ML-DSA-65 dual-signed keys, machine fingerprint binding, air-gap activation |
+| Licensing & integrity | Ed25519 + ML-DSA-65 dual-signed keys, machine fingerprint binding, air-gap activation, SHA-256 + Ed25519 binary self-verification at startup |
 
 A web dashboard UI and a CRD-driven Kubernetes operator are on the roadmap. See [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for the full list and per-feature detail.
 
