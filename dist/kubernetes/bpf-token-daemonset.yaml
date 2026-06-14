@@ -1,6 +1,6 @@
 # BPF token-delegated DaemonSet — kernel 6.9+ required.
 #
-# The container entrypoint (ebpfsentinel-token-launch) sets up a delegated bpffs
+# The container entrypoint (warden-token) sets up a delegated bpffs
 # in a child user namespace and execs the agent there, which creates a BPF token
 # and loads every program through it. The launcher needs CAP_SYS_ADMIN; the
 # long-running agent holds no host capabilities (no CAP_BPF). Because it runs in
@@ -39,7 +39,7 @@ spec:
       containers:
         - name: agent
           image: ebpfsentinel-agent:latest
-          # Image entrypoint is ebpfsentinel-token-launch: it sets up the
+          # Image entrypoint is warden-token: it sets up the
           # delegated bpffs in a child user namespace and execs the agent there.
           # `args` are appended to the agent invocation by the launcher.
           args:

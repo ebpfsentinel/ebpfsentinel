@@ -1,7 +1,7 @@
 # bpf_token_helpers.bash — helpers for the BPF-token-only loading suite (61).
 #
 # These drive the *shipped* privileged launcher (crates/warden →
-# ebpfsentinel-token-launch) that delegates a bpffs + passes module BTF fds,
+# warden-token) that delegates a bpffs + passes module BTF fds,
 # then runs the agent token-only in a capability-less user namespace. The log
 # is captured so tests can assert on what loaded/attached. Exercising the real
 # launcher (not a test-only stand-in) means CI validates the exact binary we
@@ -37,18 +37,18 @@ bpf_token_build_launcher() {
         return 0
     fi
     # Same directory as the agent binary the suite already located.
-    local candidate="$(dirname "$AGENT_BIN")/ebpfsentinel-token-launch"
+    local candidate="$(dirname "$AGENT_BIN")/warden-token"
     if [ -x "$candidate" ]; then
         BPF_TOKEN_LAUNCHER_BIN="$candidate"
         export BPF_TOKEN_LAUNCHER_BIN
         return 0
     fi
     require_tool cargo
-    if ! (cd "$PROJECT_ROOT" && cargo build --release --bin ebpfsentinel-token-launch) \
-        >/tmp/ebpfsentinel-token-launch-build-$$.log 2>&1; then
-        skip "launcher failed to build: $(cat /tmp/ebpfsentinel-token-launch-build-$$.log)"
+    if ! (cd "$PROJECT_ROOT" && cargo build --release --bin warden-token) \
+        >/tmp/warden-token-build-$$.log 2>&1; then
+        skip "launcher failed to build: $(cat /tmp/warden-token-build-$$.log)"
     fi
-    BPF_TOKEN_LAUNCHER_BIN="${PROJECT_ROOT}/target/release/ebpfsentinel-token-launch"
+    BPF_TOKEN_LAUNCHER_BIN="${PROJECT_ROOT}/target/release/warden-token"
     [ -x "$BPF_TOKEN_LAUNCHER_BIN" ] || skip "launcher binary not found after build"
     export BPF_TOKEN_LAUNCHER_BIN
 }
@@ -188,6 +188,6 @@ bpf_token_log_has() {
 bpf_token_cleanup() {
     umount "$BPF_TOKEN_BPFFS" 2>/dev/null || true
     rm -f "$BPF_TOKEN_LOG" "$BPF_TOKEN_AGENT_STAGE" \
-        "/tmp/ebpfsentinel-token-launch-build-$$.log"
+        "/tmp/warden-token-build-$$.log"
     rm -rf "$BPF_TOKEN_EBPF_STAGE"
 }

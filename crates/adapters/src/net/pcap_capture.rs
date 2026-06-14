@@ -6,7 +6,7 @@
 )]
 
 //! Rootless packet capture over an `AF_PACKET` socket pre-opened by the
-//! privileged launcher (`ebpfsentinel-token-launch`) and inherited across exec.
+//! privileged launcher (`warden-token`) and inherited across exec.
 //!
 //! eBPF is loaded token-only, so the agent runs inside a child user namespace
 //! and cannot create an `AF_PACKET` socket itself — `CAP_NET_RAW` is checked

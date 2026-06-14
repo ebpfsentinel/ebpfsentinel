@@ -2,7 +2,7 @@
 # 57-bpf-token-only-load.bats — every eBPF program loads + attaches through a
 # BPF token alone, with no CAP_BPF / CAP_SYS_ADMIN / CAP_PERFMON.
 #
-# The shipped launcher (ebpfsentinel-token-launch) delegates a bpffs and passes
+# The shipped launcher (warden-token) delegates a bpffs and passes
 # module BTF fds — exactly what runs in production under systemd / Docker / K8s —
 # then execs the agent in a capability-less user namespace. The agent must create
 # a BPF token and load/attach the full program set through it. Driving the real

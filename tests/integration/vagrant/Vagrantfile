@@ -228,7 +228,7 @@ NETPLAN
     # Provisioner: bpf-token-userns
     #
     # eBPF is loaded EXCLUSIVELY through a BPF token, which is created inside a
-    # child user namespace by ebpfsentinel-token-launch. Ubuntu 24.04 ships with
+    # child user namespace by warden-token. Ubuntu 24.04 ships with
     # unprivileged user namespaces restricted by AppArmor
     # (kernel.apparmor_restrict_unprivileged_userns=1), so on a fresh box the
     # launcher cannot create its userns / delegated bpffs and the agent falls
@@ -240,7 +240,7 @@ NETPLAN
       set -euxo pipefail
 
       cat > /etc/sysctl.d/99-ebpfsentinel-userns.conf <<SYSCTL
-# Allow ebpfsentinel-token-launch to create an unprivileged user namespace
+# Allow warden-token to create an unprivileged user namespace
 # (required for BPF token delegation, kernel 6.9+).
 kernel.apparmor_restrict_unprivileged_userns=0
 # Older fallback knob (no-op where the AppArmor gate is the one in effect).

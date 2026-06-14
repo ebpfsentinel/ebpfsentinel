@@ -58,7 +58,7 @@ when high-severity alerts fire.
 
 Security context:
   eBPF loads EXCLUSIVELY through a BPF token (no capability-based path). The
-  image entrypoint `ebpfsentinel-token-launch` sets up the delegated bpffs at
+  image entrypoint `warden-token` sets up the delegated bpffs at
   {{ .Values.daemonset.bpfToken.bpffsPath }} and creates the token inside a
   child user namespace, then execs the agent there unprivileged.
   The pod is granted {{ .Values.daemonset.securityContext.capabilities.add | join ", " }}

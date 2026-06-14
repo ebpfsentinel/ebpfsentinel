@@ -170,14 +170,14 @@ cargo xtask ebpf-build        # eBPF programs (nightly)
 # eBPF loads only through a BPF token (a user-namespace feature). The launcher
 # sets up the delegated bpffs in a child user namespace and execs the agent
 # there — this brief bootstrap is the one step that needs CAP_SYS_ADMIN.
-sudo ./target/release/ebpfsentinel-token-launch \
+sudo ./target/release/warden-token \
   --bpffs /sys/fs/bpf/ebpfsentinel \
   ./target/release/ebpfsentinel-agent --config config/ebpfsentinel.yaml
 ```
 
 ### Docker (rootless)
 
-The agent loads eBPF **exclusively** through a BPF token (kernel 6.9+) — never `CAP_BPF`, never `--privileged`. The image entrypoint is the `ebpfsentinel-token-launch` launcher: as root it mounts the delegated bpffs in a child user namespace, then execs the agent there, unprivileged. `docker compose up` wires this automatically. To run it by hand:
+The agent loads eBPF **exclusively** through a BPF token (kernel 6.9+) — never `CAP_BPF`, never `--privileged`. The image entrypoint is the `warden-token` launcher: as root it mounts the delegated bpffs in a child user namespace, then execs the agent there, unprivileged. `docker compose up` wires this automatically. To run it by hand:
 
 ```bash
 # Optional: to override the config, bind-mount it root-owned and not

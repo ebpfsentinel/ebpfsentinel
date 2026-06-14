@@ -9,7 +9,7 @@ Type=simple
 # eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+), which is a
 # user-namespace feature: BPF_TOKEN_CREATE returns EOPNOTSUPP in the host user
 # namespace, so the agent must run inside a child user namespace that owns the
-# delegated bpffs. `ebpfsentinel-token-launch` is a minimal privileged
+# delegated bpffs. `warden-token` is a minimal privileged
 # bootstrap: as root it enumerates module BTF fds and sets up the delegated
 # bpffs, then unshares a user namespace and execs the agent there. The
 # long-running AGENT process therefore holds NO capabilities over the host
@@ -21,7 +21,7 @@ Type=simple
 # works fully. Host-netns helpers that need init-namespace capabilities degrade
 # gracefully: pcap manual capture, the `conntrack -D` retroactive teardown on a
 # new deny rule, and the one-shot gratuitous ARP on VIP takeover are skipped.
-ExecStart=/usr/local/bin/ebpfsentinel-token-launch \
+ExecStart=/usr/local/bin/warden-token \
     --bpffs /sys/fs/bpf/ebpfsentinel \
     /usr/local/bin/ebpfsentinel-agent --config /etc/ebpfsentinel/config.yaml
 Restart=on-failure

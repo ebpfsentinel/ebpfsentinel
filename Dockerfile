@@ -76,9 +76,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     rustup target add "${MUSL_TARGET}" && \
     RUSTFLAGS="-L native=/usr/local/musl/lib" \
     cargo build --release --target "${MUSL_TARGET}" \
-        --bin ebpfsentinel-agent --bin ebpfsentinel-token-launch && \
+        --bin ebpfsentinel-agent --bin warden-token && \
     cp "/build/target/${MUSL_TARGET}/release/ebpfsentinel-agent" /build/ebpfsentinel-agent && \
-    cp "/build/target/${MUSL_TARGET}/release/ebpfsentinel-token-launch" /build/ebpfsentinel-token-launch && \
+    cp "/build/target/${MUSL_TARGET}/release/warden-token" /build/warden-token && \
     mkdir -p /build/captures-dir
 
 # ── Stage 2: Minimal runtime image ──────────────────────────────────
@@ -94,7 +94,7 @@ LABEL org.opencontainers.image.title="eBPFsentinel" \
     org.opencontainers.image.licenses="AGPL-3.0-only"
 
 COPY --from=agent-builder /build/ebpfsentinel-agent /usr/local/bin/ebpfsentinel-agent
-COPY --from=agent-builder /build/ebpfsentinel-token-launch /usr/local/bin/ebpfsentinel-token-launch
+COPY --from=agent-builder /build/warden-token /usr/local/bin/warden-token
 
 # Copy pre-built eBPF programs (built by CI or `cargo xtask ebpf-build`)
 COPY ebpf-out/ /usr/local/lib/ebpfsentinel/
@@ -118,5 +118,5 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
 
 # The launcher bootstraps the BPF token in a child user namespace, then execs
 # the agent (appending CMD) inside it. CMD carries the agent's own arguments.
-ENTRYPOINT ["/usr/local/bin/ebpfsentinel-token-launch", "--bpffs", "/sys/fs/bpf/ebpfsentinel", "/usr/local/bin/ebpfsentinel-agent"]
+ENTRYPOINT ["/usr/local/bin/warden-token", "--bpffs", "/sys/fs/bpf/ebpfsentinel", "/usr/local/bin/ebpfsentinel-agent"]
 CMD ["--config", "/etc/ebpfsentinel/config.yaml"]

@@ -97,7 +97,7 @@ daemonset:
   priorityClassName: ""
   # -- BPF token delegation. eBPF is loaded EXCLUSIVELY through a BPF token
   # (kernel 6.9+), a user-namespace feature. The launcher
-  # `ebpfsentinel-token-launch` sets up the delegated bpffs at `bpffsPath` in a
+  # `warden-token` sets up the delegated bpffs at `bpffsPath` in a
   # child user namespace and execs the agent there, so the long-running agent
   # holds no host capabilities. There is no capability-based loading path.
   # `bpffsPath` drives BOTH the launcher `--bpffs` (DaemonSet command) and the

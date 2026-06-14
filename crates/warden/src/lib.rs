@@ -1,5 +1,5 @@
 //! `ebpfsentinel-warden` — shared privileged primitives for rootless, token-only
-//! eBPF loading, backing both the `ebpfsentinel-token-launch` launcher binary
+//! eBPF loading, backing both the `warden-token` launcher binary
 //! (all-in-one / broker-serve / broker-connect modes, via [`run`]) and the
 //! `warden` control-plane binary.
 //!
@@ -27,7 +27,7 @@
 //!    capabilities. The agent finds the delegated bpffs, creates a BPF token,
 //!    and loads/attaches every program through it.
 //!
-//! Usage: `ebpfsentinel-token-launch [--bpffs <path>] <agent-binary> [args...]`
+//! Usage: `warden-token [--bpffs <path>] <agent-binary> [args...]`
 //!
 //! The agent runs in a child user namespace and therefore has no capabilities
 //! over host-owned resources (the host network namespace). The eBPF datapath
@@ -258,7 +258,7 @@ fn write_file(path: &str, value: &str) -> bool {
     match std::fs::write(path, value) {
         Ok(()) => true,
         Err(e) => {
-            eprintln!("[token-launch] write {path}: {e}");
+            eprintln!("[warden-token] write {path}: {e}");
             false
         }
     }
@@ -448,7 +448,7 @@ fn child(bpffs: &str, agent_argv: &[CString], modfds: &str, pcapfds: &str, sv1: 
     }
     let mut ack = [0u8; 1];
     if unsafe { libc::read(sv1, ack.as_mut_ptr().cast(), 1) } != 1 || ack[0] != 1 {
-        eprintln!("[token-launch] parent CMD_CREATE failed");
+        eprintln!("[warden-token] parent CMD_CREATE failed");
         std::process::exit(1);
     }
     mount_and_exec(fs, bpffs, agent_argv);
@@ -467,7 +467,7 @@ fn enter_userns() {
     if !write_file("/proc/self/uid_map", &format!("0 {uid} 1"))
         || !write_file("/proc/self/gid_map", &format!("0 {gid} 1"))
     {
-        eprintln!("[token-launch] failed to write uid/gid map");
+        eprintln!("[warden-token] failed to write uid/gid map");
         std::process::exit(1);
     }
     if unsafe { libc::setgid(0) } != 0 || unsafe { libc::setuid(0) } != 0 {
@@ -532,7 +532,7 @@ fn mount_and_exec(fs: RawFd, bpffs: &str, agent_argv: &[CString]) -> ! {
 
 pub fn perror(ctx: &str) {
     let e = std::io::Error::last_os_error();
-    eprintln!("[token-launch] {ctx}: {e}");
+    eprintln!("[warden-token] {ctx}: {e}");
 }
 
 // ── Broker mode: protocol + fd passing ─────────────────────────────────────
@@ -849,17 +849,17 @@ fn run_broker_connect(sock: &str, bpffs: &str, agent_argv: &[CString]) -> ! {
     let mut buf = [0u8; 8192];
     let (n, fds) = recv_msg_fds(conn, &mut buf, SCM_MAX_FDS);
     let Some((ok, btf_names, pcap_count)) = decode_reply(&buf[..n]) else {
-        eprintln!("[token-launch] malformed broker reply");
+        eprintln!("[warden-token] malformed broker reply");
         std::process::exit(1);
     };
     if !ok {
-        eprintln!("[token-launch] broker failed to delegate the bpffs");
+        eprintln!("[warden-token] broker failed to delegate the bpffs");
         std::process::exit(1);
     }
     let nbtf = btf_names.len();
     if fds.len() < nbtf + pcap_count {
         eprintln!(
-            "[token-launch] broker sent {} fds, expected {}",
+            "[warden-token] broker sent {} fds, expected {}",
             fds.len(),
             nbtf + pcap_count
         );
@@ -916,7 +916,7 @@ fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-/// Entry point for the `ebpfsentinel-token-launch` binary: dispatches the
+/// Entry point for the `warden-token` binary: dispatches the
 /// all-in-one, broker-serve and broker-connect launcher modes. Exposed from the
 /// library so the privileged primitives are shared with the `warden` binary.
 pub fn run() -> ExitCode {
@@ -947,8 +947,8 @@ pub fn run() -> ExitCode {
     }
     if i >= args.len() {
         eprintln!(
-            "usage: ebpfsentinel-token-launch [--bpffs <path>] [--broker-connect <sock>] \
-             <agent-binary> [agent-args...]\n   or: ebpfsentinel-token-launch --broker-serve <sock>"
+            "usage: warden-token [--bpffs <path>] [--broker-connect <sock>] \
+             <agent-binary> [agent-args...]\n   or: warden-token --broker-serve <sock>"
         );
         return ExitCode::from(2);
     }

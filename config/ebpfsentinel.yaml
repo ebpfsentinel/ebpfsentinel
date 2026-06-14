@@ -53,7 +53,7 @@ agent:
   # BPF token delegation (kernel 6.9+ REQUIRED). eBPF is loaded
   # exclusively through a BPF token — the agent never loads programs with
   # CAP_BPF. BPF tokens are a user-namespace feature, so the agent is
-  # started by `ebpfsentinel-token-launch`, which sets up the delegated
+  # started by `warden-token`, which sets up the delegated
   # bpffs in a child user namespace and execs the agent there (rootless).
   # `bpffs_path` MUST match the launcher's --bpffs argument. Override only
   # if you run the launcher with a non-default mount path.

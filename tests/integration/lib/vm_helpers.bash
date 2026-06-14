@@ -297,7 +297,7 @@ start_ebpf_agent() {
     # agent needs no staging. nohup so the process survives SSH disconnect.
     _agent_ssh_sudo bash -c \
         "'sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 >/dev/null 2>&1 || true; \
-          LAUNCH=/usr/local/bin/ebpfsentinel-token-launch; \
+          LAUNCH=/usr/local/bin/warden-token; \
           if [ -x \"\$LAUNCH\" ]; then \
             nohup env EBPF_PROGRAM_DIR=/usr/local/lib/ebpfsentinel \"\$LAUNCH\" --bpffs /sys/fs/bpf/ebpfsentinel /usr/local/bin/ebpfsentinel-agent --config ${remote_config}${extra_args} >${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}; \
           else \

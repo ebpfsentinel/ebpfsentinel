@@ -44,7 +44,7 @@ const DEFAULT_NF_CONNTRACK_COUNT_PATH: &str = "/proc/sys/net/netfilter/nf_conntr
 /// itself); when absent (single-container root, or bare metal) it reads `/proc`.
 const BROKER_SOCK_ENV: &str = "EBPFSENTINEL_BROKER_SOCK";
 /// Command byte selecting a conntrack-table read on a broker connection (must
-/// match `CMD_CONNTRACK` in the token-launch broker).
+/// match `CMD_CONNTRACK` in the warden-token broker).
 const BROKER_CMD_CONNTRACK: u8 = b'C';
 
 /// Reads the kernel netfilter conntrack table via `/proc/net/nf_conntrack`.

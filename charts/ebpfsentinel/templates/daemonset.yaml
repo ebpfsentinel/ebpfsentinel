@@ -75,7 +75,7 @@ spec:
           securityContext:
             {{- toYaml .Values.daemonset.brokerSidecar.brokerSecurityContext | nindent 12 }}
           command:
-            - "/usr/local/bin/ebpfsentinel-token-launch"
+            - "/usr/local/bin/warden-token"
             - "--broker-serve"
             - {{ .Values.daemonset.brokerSidecar.socketPath | quote }}
           {{- with .Values.daemonset.brokerSidecar.brokerResources }}
@@ -98,7 +98,7 @@ spec:
           # Override the image entrypoint so the launcher --bpffs tracks the
           # configured bpffsPath (the agent's bpf_token.bpffs_path must match).
           command:
-            - "/usr/local/bin/ebpfsentinel-token-launch"
+            - "/usr/local/bin/warden-token"
             {{- if .Values.daemonset.brokerSidecar.enabled }}
             - "--broker-connect"
             - {{ .Values.daemonset.brokerSidecar.socketPath | quote }}

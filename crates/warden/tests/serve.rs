@@ -87,7 +87,7 @@ fn handshake_then_conntrack_and_unimplemented() {
     assert!(matches!(resp, Response::Conntrack { .. }), "got {resp:?}");
 
     // A command not wired in `warden serve` (bpffs delegation rides the
-    // token-launch broker path, not this socket) returns the typed Unimplemented.
+    // warden-token broker path, not this socket) returns the typed Unimplemented.
     write_frame(&mut s, &Command::Delegate).unwrap();
     let resp: Response = read_frame(&mut s).unwrap();
     assert_eq!(resp, Response::Unimplemented);

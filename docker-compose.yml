@@ -25,7 +25,7 @@
 #     so set it on the HOST: sysctl -w net.ipv4.tcp_syncookies=2
 #
 # eBPF is loaded EXCLUSIVELY through a BPF token (no CAP_BPF). The image
-# entrypoint (ebpfsentinel-token-launch) runs as root only long enough to set
+# entrypoint (warden-token) runs as root only long enough to set
 # up a delegated bpffs in a child user namespace, then execs the agent inside
 # it — the long-running agent is unprivileged and creates the token there.
 #
@@ -50,7 +50,7 @@ services:
     # on — "127.0.0.1" is localhost-only, "0.0.0.0" exposes on all interfaces.
     network_mode: host
 
-    # The image entrypoint is ebpfsentinel-token-launch: as root it sets up the
+    # The image entrypoint is warden-token: as root it sets up the
     # delegated bpffs in a child user namespace and execs the agent there. It
     # needs CAP_SYS_ADMIN (bpffs delegation + module BTF fds) and userns
     # creation — hence apparmor=unconfined. NO CAP_BPF: the token authorizes

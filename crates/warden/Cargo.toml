@@ -9,15 +9,15 @@ publish = false
 name = "ebpfsentinel_warden"
 path = "src/lib.rs"
 
-# `warden` is the privileged control-plane sidecar; `ebpfsentinel-token-launch` is
+# `warden` is the privileged control-plane sidecar; `warden-token` is
 # the single-container / systemd launcher. Both share the library above.
 [[bin]]
 name = "warden"
 path = "src/main.rs"
 
 [[bin]]
-name = "ebpfsentinel-token-launch"
-path = "src/bin/ebpfsentinel-token-launch.rs"
+name = "warden-token"
+path = "src/bin/warden-token.rs"
 
 [dependencies]
 libc = { workspace = true }

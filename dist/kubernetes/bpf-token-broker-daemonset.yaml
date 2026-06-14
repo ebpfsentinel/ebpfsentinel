@@ -7,8 +7,8 @@
 # the full-access surface confined to the tiny broker.
 #
 # Both containers run the same image; only the entrypoint args differ:
-#   broker : ebpfsentinel-token-launch --broker-serve <sock>
-#   agent  : ebpfsentinel-token-launch --broker-connect <sock> --bpffs <path> \
+#   broker : warden-token --broker-serve <sock>
+#   agent  : warden-token --broker-connect <sock> --bpffs <path> \
 #            ebpfsentinel-agent --config ...
 # The agent shim creates its own user namespace, hands its bpffs fd to the broker
 # for delegation over the shared socket, receives the module-BTF + pcap fds, then
@@ -45,7 +45,7 @@ spec:
           image: ebpfsentinel-agent:latest
           imagePullPolicy: IfNotPresent
           command:
-            - /usr/local/bin/ebpfsentinel-token-launch
+            - /usr/local/bin/warden-token
             - --broker-serve
             - /run/ebpfsentinel/broker.sock
           securityContext:
@@ -72,7 +72,7 @@ spec:
           image: ebpfsentinel-agent:latest
           imagePullPolicy: IfNotPresent
           command:
-            - /usr/local/bin/ebpfsentinel-token-launch
+            - /usr/local/bin/warden-token
             - --broker-connect
             - /run/ebpfsentinel/broker.sock
             - --bpffs

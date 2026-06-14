@@ -266,7 +266,7 @@ start_ebpf_agent() {
         # The launcher needs unprivileged user namespaces; enable them in the
         # (root, throwaway) test VM.
         local launcher
-        launcher="$(dirname "$AGENT_BIN")/ebpfsentinel-token-launch"
+        launcher="$(dirname "$AGENT_BIN")/warden-token"
         sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 >/dev/null 2>&1 || true
 
         # Launch in a new session via setsid so the agent survives bats

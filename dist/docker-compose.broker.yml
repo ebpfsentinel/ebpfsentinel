@@ -16,7 +16,7 @@
 services:
   broker:
     image: ebpfsentinel:latest
-    entrypoint: ["/usr/local/bin/ebpfsentinel-token-launch"]
+    entrypoint: ["/usr/local/bin/warden-token"]
     command: ["--broker-serve", "/run/ebpfsentinel/broker.sock"]
     network_mode: host
     pid: host
@@ -34,7 +34,7 @@ services:
   agent:
     image: ebpfsentinel:latest
     depends_on: [broker]
-    entrypoint: ["/usr/local/bin/ebpfsentinel-token-launch"]
+    entrypoint: ["/usr/local/bin/warden-token"]
     command:
       - "--broker-connect"
       - "/run/ebpfsentinel/broker.sock"

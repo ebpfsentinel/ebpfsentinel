@@ -62,9 +62,9 @@ install -Dm755 "${SCRIPT_DIR}/ebpfsentinel-agent" "${INSTALL_BIN}/ebpfsentinel-a
 # user namespace and execs the agent there, so the agent runs with no
 # capabilities over the host. The systemd unit's ExecStart calls it. It
 # ships as a cargo-built binary alongside ebpfsentinel-agent
-# (cargo build --release --bin ebpfsentinel-token-launch).
-echo "Installing ebpfsentinel-token-launch to ${INSTALL_BIN}..."
-install -Dm755 "${SCRIPT_DIR}/ebpfsentinel-token-launch" "${INSTALL_BIN}/ebpfsentinel-token-launch"
+# (cargo build --release --bin warden-token).
+echo "Installing warden-token to ${INSTALL_BIN}..."
+install -Dm755 "${SCRIPT_DIR}/warden-token" "${INSTALL_BIN}/warden-token"
 
 # ── Install eBPF programs ─────────────────────────────────────────
 
