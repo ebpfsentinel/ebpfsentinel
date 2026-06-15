@@ -53,6 +53,7 @@ pub mod host_ops;
 pub mod map_engine;
 pub mod net_ops;
 pub mod server;
+pub mod userns_bootstrap;
 
 // `bpf(2)` command numbers (uapi/linux/bpf.h `enum bpf_cmd`).
 const BPF_OBJ_GET_INFO_BY_FD: libc::c_int = 15;
@@ -272,7 +273,7 @@ fn write_file(path: &str, value: &str) -> bool {
 }
 
 /// Send a single fd over a `SCM_RIGHTS` control message.
-fn send_fd(sock: RawFd, fd: RawFd) -> bool {
+pub fn send_fd(sock: RawFd, fd: RawFd) -> bool {
     let mut iov_base = *b"x";
     let mut iov = libc::iovec {
         iov_base: iov_base.as_mut_ptr().cast(),
@@ -335,6 +336,49 @@ pub fn recv_fd(sock: RawFd) -> RawFd {
         );
         fd
     }
+}
+
+/// Receive up to `max_fds` fds from a single `SCM_RIGHTS` control message (plus
+/// one sentinel payload byte). Returns the received fds, each cleared of
+/// `O_CLOEXEC` so they survive the agent trampoline's `execv` into normal
+/// startup. The agent uses this to collect the module-BTF + pcap fds the warden
+/// sends after a `Delegate`.
+pub fn recv_msg_fds(sock: RawFd, max_fds: usize) -> Vec<RawFd> {
+    let mut payload = [0u8; 1];
+    let mut iov = libc::iovec {
+        iov_base: payload.as_mut_ptr().cast(),
+        iov_len: 1,
+    };
+    let cap_bytes = max_fds * mem::size_of::<RawFd>();
+    let mut cbuf = vec![0u8; unsafe { libc::CMSG_SPACE(cap_bytes as u32) } as usize];
+    let mut msg: libc::msghdr = unsafe { mem::zeroed() };
+    msg.msg_iov = ptr::from_mut(&mut iov);
+    msg.msg_iovlen = 1;
+    msg.msg_control = cbuf.as_mut_ptr().cast();
+    msg.msg_controllen = cbuf.len() as _;
+    let mut out: Vec<RawFd> = Vec::new();
+    unsafe {
+        if libc::recvmsg(sock, &mut msg, 0) < 0 {
+            perror("recvmsg fds");
+            return out;
+        }
+        let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
+        while !cmsg.is_null() {
+            if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
+                let data_len = (*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
+                let n = data_len / mem::size_of::<RawFd>();
+                let mut fds = vec![-1 as RawFd; n];
+                ptr::copy_nonoverlapping(libc::CMSG_DATA(cmsg), fds.as_mut_ptr().cast(), data_len);
+                for fd in fds {
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                    out.push(fd);
+                }
+            }
+            cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
+        }
+    }
+    out
 }
 
 /// Create every leading directory of `path` (like `mkdir -p`), ignoring errors.
@@ -425,28 +469,7 @@ fn child(bpffs: &str, agent_argv: &[CString], modfds: &str, pcapfds: &str, sv1: 
             )
         };
     }
-    // Under a stock container runtime the pod runs in the init user namespace,
-    // where a global-root child cannot self-map namespace-0 to real root
-    // (verify_root_map). Detect that and drop to a non-root id first so the
-    // self-map targets a non-root uid (see UNPRIV_UID). On a real host running
-    // as global root the root self-map is permitted, so keep uid 0 (the agent
-    // then runs as host root, preserving the systemd/bare-metal behaviour). No-op
-    // if the container already runs unprivileged.
-    if unsafe { libc::getuid() } == 0 && !root_userns_self_map_ok() {
-        unsafe { libc::setgroups(0, ptr::null()) };
-        if unsafe { libc::setgid(UNPRIV_GID) } != 0 || unsafe { libc::setuid(UNPRIV_UID) } != 0 {
-            perror("drop to unprivileged uid before userns");
-            std::process::exit(1);
-        }
-        // Dropping the real uid clears the dumpable flag, which reparents
-        // /proc/self/{setgroups,uid_map,gid_map} to root and makes them
-        // unwritable by the now-unprivileged child (EACCES). Restore dumpable so
-        // enter_userns() can write its id maps.
-        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) } != 0 {
-            perror("PR_SET_DUMPABLE");
-            std::process::exit(1);
-        }
-    }
+    drop_to_unpriv_if_needed();
     enter_userns();
     let fs = fsopen_bpf();
     if !send_fd(sv1, fs) {
@@ -461,10 +484,39 @@ fn child(bpffs: &str, agent_argv: &[CString], modfds: &str, pcapfds: &str, sv1: 
     mount_and_exec(fs, bpffs, agent_argv);
 }
 
+/// Drop to an unprivileged uid before creating a user namespace, but only when
+/// running as global root under a runtime that forbids the root self-map.
+///
+/// Under a stock container runtime the pod runs in the init user namespace,
+/// where a global-root process cannot self-map namespace-0 to real root
+/// (`verify_root_map`). Detect that and drop to a non-root id first so the
+/// self-map targets a non-root uid (see [`UNPRIV_UID`]). On a real host running
+/// as global root the root self-map is permitted, so keep uid 0 (the process
+/// then runs as host root, preserving the systemd/bare-metal behaviour). No-op
+/// if already running unprivileged. Exits the process on failure.
+pub fn drop_to_unpriv_if_needed() {
+    if unsafe { libc::getuid() } == 0 && !root_userns_self_map_ok() {
+        unsafe { libc::setgroups(0, ptr::null()) };
+        if unsafe { libc::setgid(UNPRIV_GID) } != 0 || unsafe { libc::setuid(UNPRIV_UID) } != 0 {
+            perror("drop to unprivileged uid before userns");
+            std::process::exit(1);
+        }
+        // Dropping the real uid clears the dumpable flag, which reparents
+        // /proc/self/{setgroups,uid_map,gid_map} to root and makes them
+        // unwritable by the now-unprivileged process (EACCES). Restore dumpable
+        // so enter_userns() can write its id maps.
+        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) } != 0 {
+            perror("PR_SET_DUMPABLE");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Enter a fresh user namespace (single-uid self-map) and a private mount
-/// namespace. Used by the all-in-one fork child; exits the process on failure.
-/// Must run single-threaded (before any runtime).
-fn enter_userns() {
+/// namespace. Used by the all-in-one fork child and the agent self-bootstrap
+/// trampoline; exits the process on failure. Must run single-threaded (before
+/// any runtime).
+pub fn enter_userns() {
     let (uid, gid) = (unsafe { libc::getuid() }, unsafe { libc::getgid() });
     if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
         perror("unshare USER");
@@ -497,7 +549,7 @@ fn enter_userns() {
 }
 
 /// `fsopen("bpf")` in the current user namespace; exits on failure.
-fn fsopen_bpf() -> RawFd {
+pub fn fsopen_bpf() -> RawFd {
     let fs = unsafe { libc::syscall(libc::SYS_fsopen, c"bpf".as_ptr(), 0) } as RawFd;
     if fs < 0 {
         perror("fsopen");
@@ -506,9 +558,10 @@ fn fsopen_bpf() -> RawFd {
     fs
 }
 
-/// `fsmount` the (delegated) bpffs `fs_fd` and `move_mount` it at `bpffs`, then
-/// `execv` the agent inside this namespace. Never returns. Shared by both modes.
-fn mount_and_exec(fs: RawFd, bpffs: &str, agent_argv: &[CString]) -> ! {
+/// `fsmount` the (delegated) bpffs `fs_fd` and `move_mount` it at `bpffs`.
+/// Exits the process on failure. Shared by the all-in-one launcher and the agent
+/// self-bootstrap trampoline (which mounts then continues rather than execing).
+pub fn mount_bpffs(fs: RawFd, bpffs: &str) {
     let mnt = unsafe { libc::syscall(libc::SYS_fsmount, fs, 0, 0) } as RawFd;
     if mnt < 0 {
         perror("fsmount");
@@ -530,6 +583,11 @@ fn mount_and_exec(fs: RawFd, bpffs: &str, agent_argv: &[CString]) -> ! {
         perror("move_mount");
         std::process::exit(1);
     }
+}
+
+/// `mount_bpffs` then `execv` the agent inside this namespace. Never returns.
+fn mount_and_exec(fs: RawFd, bpffs: &str, agent_argv: &[CString]) -> ! {
+    mount_bpffs(fs, bpffs);
     let mut argv: Vec<*const libc::c_char> = agent_argv.iter().map(|a| a.as_ptr()).collect();
     argv.push(ptr::null());
     unsafe { libc::execv(agent_argv[0].as_ptr(), argv.as_ptr()) };
