@@ -25,7 +25,8 @@ CIDR="10.5.0.0/24"
 GATEWAY="10.5.0.1"
 REGISTRY_PORT="5005"
 REGISTRY_NAME="talos-e2e-registry"
-IMAGE_LOCAL="localhost:${REGISTRY_PORT}/ebpfsentinel:latest"   # push (docker treats localhost as insecure)
+IMAGE_LOCAL="localhost:${REGISTRY_PORT}/ebpfsentinel:latest"           # push (docker treats localhost as insecure)
+WARDEN_LOCAL="localhost:${REGISTRY_PORT}/ebpfsentinel-warden:latest"   # privileged broker sidecar image
 NAMESPACE="ebpfsentinel-e2e"
 RELEASE="ebpfsentinel"
 CHART="${PROJECT_ROOT}/charts/ebpfsentinel"
@@ -58,6 +59,12 @@ prep() {
     docker build -f "${PROJECT_ROOT}/Dockerfile.agent" -t ebpfsentinel:latest "${PROJECT_ROOT}"
   fi
 
+  # Split deployment: the privileged warden broker ships as its own lean image.
+  if ! docker image inspect ebpfsentinel-warden:latest >/dev/null 2>&1; then
+    log "Building ebpfsentinel-warden:latest"
+    docker build -f "${PROJECT_ROOT}/Dockerfile.warden" -t ebpfsentinel-warden:latest "${PROJECT_ROOT}"
+  fi
+
   if ! docker ps --format '{{.Names}}' | grep -qx "${REGISTRY_NAME}"; then
     log "Starting local registry on :${REGISTRY_PORT}"
     docker rm -f "${REGISTRY_NAME}" >/dev/null 2>&1 || true
@@ -67,7 +74,12 @@ prep() {
   log "Tag + push ${IMAGE_LOCAL}"
   docker tag ebpfsentinel:latest "${IMAGE_LOCAL}"
   docker push "${IMAGE_LOCAL}"
-  log "prep done — image in registry as repo 'ebpfsentinel' (pulled in-cluster via ${GATEWAY}:${REGISTRY_PORT})"
+
+  log "Tag + push ${WARDEN_LOCAL}"
+  docker tag ebpfsentinel-warden:latest "${WARDEN_LOCAL}"
+  docker push "${WARDEN_LOCAL}"
+
+  log "prep done — agent + warden images in registry (pulled in-cluster via ${GATEWAY}:${REGISTRY_PORT})"
 }
 
 # ── up: cluster + deploy + verify (root) ──────────────────────────────────────
@@ -106,7 +118,7 @@ deploy() {
   command -v kubectl >/dev/null || die "kubectl not found"
   command -v helm >/dev/null || die "helm not found"
 
-  log "Namespace ${NAMESPACE} (PodSecurity: privileged — agent needs CAP_SYS_ADMIN)"
+  log "Namespace ${NAMESPACE} (PodSecurity: privileged — warden holds CAP_SYS_ADMIN, agent runs unconfined)"
   kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
   kubectl label namespace "${NAMESPACE}" \
     pod-security.kubernetes.io/enforce=privileged --overwrite

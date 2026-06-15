@@ -8,6 +8,12 @@ image:
   # IfNotPresent would pin nodes to a stale cached :latest.
   pullPolicy: Always
 
+# The privileged warden broker (native sidecar) ships as its own image; pull it
+# from the same host-side registry. Its imagePullPolicy follows image.pullPolicy.
+wardenImage:
+  repository: 10.5.0.1:5005/ebpfsentinel-warden
+  tag: latest
+
 agent:
   # Attach to the Talos node's primary NIC (qemu virtio_net, alias net0). This is
   # a throwaway qemu VM, NOT the operator's host — XDP_PASS-by-default keeps
@@ -20,9 +26,9 @@ agent:
   logLevel: info
   logFormat: json
 
-daemonset:
-  # Sidecar-split posture: the pod runs the privileged `warden` broker as a native
-  # sidecar (CAP_SYS_ADMIN/NET_ADMIN/NET_RAW for delegation + conntrack/route/ARP/
-  # pcap) and the rootless `agent` (cap-drop ALL) which self-unshares a user
-  # namespace and loads its own eBPF through the BPF token. The chart's default
-  # warden/agent securityContexts (see values.yaml) already set this.
+# Sidecar-split posture: the pod runs the privileged `warden` broker as a native
+# sidecar (CAP_SYS_ADMIN/NET_ADMIN/NET_RAW for delegation + conntrack/route/ARP/
+# pcap) and the rootless `agent` (cap-drop ALL) which self-unshares a user
+# namespace and loads its own eBPF through the BPF token. The chart's default
+# warden/agent securityContexts (see values.yaml) already set this, so no
+# daemonset override is needed here.
