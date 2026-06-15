@@ -1,40 +1,34 @@
-//! `ebpfsentinel-warden` — shared privileged primitives for rootless, token-only
-//! eBPF loading, backing both the `warden-token` all-in-one launcher binary
-//! (via [`run`]) and the `warden` control-plane binary.
+//! `ebpfsentinel-warden` — shared privileged primitives for the `warden`
+//! control-plane broker and the rootless agent's self-bootstrap trampoline (see
+//! [`userns_bootstrap`]).
 //!
 //! BPF token delegation is a *user-namespace* feature: `BPF_TOKEN_CREATE` only
 //! succeeds against a bpffs whose superblock is owned by a user namespace the
 //! caller is in. In the initial user namespace it returns `EOPNOTSUPP`, so a
-//! token-only agent cannot run directly under systemd/Docker in the host user
-//! namespace — it must run inside a child user namespace that owns the delegated
-//! bpffs. This launcher sets that up, then execs the agent.
+//! token-only agent cannot load eBPF directly under systemd/Docker in the host
+//! user namespace — it must run inside a child user namespace that owns the
+//! delegated bpffs. The agent enters that namespace itself and asks the warden to
+//! apply the `delegate_*` mount options (which need `CAP_SYS_ADMIN` in
+//! `init_user_ns`) over the control socket.
 //!
-//! 1. While still global root it enumerates every loaded module's BTF object,
-//!    inherits an fd for each (cleared of `O_CLOEXEC`), and advertises them to
-//!    the agent via `EBPF_MODULE_BTF_FDS=name=fd,...` — this is what lets module
-//!    kfuncs (`nf_conntrack`, `fou`) resolve without `CAP_SYS_ADMIN` in the
-//!    agent. It likewise opens a small pool of `AF_PACKET` sockets and advertises
-//!    them via `EBPFSENTINEL_PCAP_FDS=fd,...` so the agent can run packet capture
-//!    rootless — `CAP_NET_RAW` is checked only at `socket()`, which happens here.
-//! 2. It sets up the delegated bpffs via the kernel fd-passing dance: a CHILD
-//!    unshares a user namespace and `fsopen("bpf")` (the superblock is owned by
-//!    the child userns); it passes the fs fd to the (global-root) PARENT via
-//!    `SCM_RIGHTS`; the parent applies `delegate_*=any` + `FSCONFIG_CMD_CREATE`
-//!    (the steps that need global `CAP_SYS_ADMIN`); the child `fsmount`s +
-//!    `move_mount`s it at the bpffs path.
-//! 3. The child execs the agent inside the namespace with no global
-//!    capabilities. The agent finds the delegated bpffs, creates a BPF token,
-//!    and loads/attaches every program through it.
+//! This library holds the syscall primitives both halves share:
 //!
-//! Usage: `warden-token [--bpffs <path>] <agent-binary> [args...]`
+//! * [`collect_module_btf_fds`] / [`open_pcap_pool`] / [`prioritize_and_cap_btf`]
+//!   — the warden opens these while privileged (BTF enumeration needs
+//!   `CAP_SYS_ADMIN`, the `AF_PACKET` pool needs `CAP_NET_RAW`) and hands them to
+//!   the agent on `Delegate`, so module kfuncs (`nf_conntrack`, `fou`) resolve and
+//!   packet capture works without those capabilities in the agent.
+//! * [`enter_userns`] / [`fsopen_bpf`] / [`mount_bpffs`] / [`delegate_over_fd`] +
+//!   the `SCM_RIGHTS` helpers ([`send_fd`] / [`recv_fd`] / [`send_msg_fds`] /
+//!   [`recv_msg_fds`]) — the bpffs delegation handshake: the agent `fsopen`s a
+//!   bpffs in its own userns and sends the fs fd to the warden, which applies
+//!   `delegate_*=any` + `FSCONFIG_CMD_CREATE`, then the agent `fsmount`s +
+//!   `move_mount`s it and creates the token.
 //!
-//! The agent runs in a child user namespace and therefore has no capabilities
-//! over host-owned resources (the host network namespace). The eBPF datapath
-//! works through the token, and pcap capture works through the pre-opened
-//! `AF_PACKET` sockets above. The remaining host-netns helpers (`conntrack -D`
-//! retroactive teardown, gratuitous ARP on VIP takeover) degrade gracefully —
-//! their cap check is re-evaluated per operation, so a pre-opened fd cannot
-//! delegate them; their eBPF equivalents keep working.
+//! The agent stays in the host network namespace, so the host-netns ops it cannot
+//! perform from its user namespace (conntrack teardown, route programming,
+//! gratuitous ARP, packet capture) are brokered by the warden over the same
+//! socket — see [`server`] and [`host_ops`].
 
 #![allow(unsafe_code)] // Raw mount/bpf/userns syscalls require libc + unsafe.
 #![allow(
@@ -46,11 +40,9 @@
 use std::ffi::CString;
 use std::mem;
 use std::os::fd::RawFd;
-use std::process::ExitCode;
 use std::ptr;
 
 pub mod host_ops;
-pub mod map_engine;
 pub mod net_ops;
 pub mod server;
 pub mod userns_bootstrap;
@@ -67,22 +59,18 @@ const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
 
 const DEFAULT_BPFFS: &str = "/sys/fs/bpf/ebpfsentinel";
 
-/// Default socket the resident netns-helper binds in the init netns and that the
-/// userns `warden-serve` forwards host-network ops to. Override with the
-/// `EBPFSENTINEL_NETNS_HELPER_SOCK` environment variable.
-const DEFAULT_NETNS_HELPER_SOCK: &str = "/run/ebpfsentinel-netns-helper.sock";
-
-/// Unprivileged uid/gid the all-in-one child drops to before creating its user
-/// namespace. `enter_userns` writes a single-entry self-map (`0 <uid> 1`); the
-/// kernel refuses to map namespace-uid 0 to the *real* root (uid 0) unless the
-/// writer is privileged over the parent user namespace (`verify_root_map`,
-/// anti-escalation). Under a stock container runtime the pod runs in the init
-/// user namespace (e.g. containerd on Talos/Kubernetes), so a global-root child
-/// cannot self-map. Dropping to a non-root id first makes the map target
-/// non-root, which is permitted. The child needs no init-ns capabilities: the
-/// parent performs the bpffs delegation and the pcap/module-BTF fds are already
-/// open and inherited across the fork. The agent then runs as this host id
-/// (namespace-root), so deployments make its config group-readable via fsGroup.
+/// Unprivileged uid/gid the agent drops to before creating its user namespace
+/// under a container runtime. `enter_userns` writes a single-entry self-map
+/// (`0 <uid> 1`); the kernel refuses to map namespace-uid 0 to the *real* root
+/// (uid 0) unless the writer is privileged over the parent user namespace
+/// (`verify_root_map`, anti-escalation). Under a stock container runtime the pod
+/// runs in the init user namespace (e.g. containerd on Talos/Kubernetes), so a
+/// global-root process cannot self-map. Dropping to a non-root id first makes the
+/// map target non-root, which is permitted. The agent needs no init-ns
+/// capabilities: the warden performs the bpffs delegation and opens the
+/// pcap/module-BTF fds, handing them over the control socket. The agent then runs
+/// as this host id (namespace-root), so deployments make its config
+/// group-readable via fsGroup.
 const UNPRIV_UID: libc::uid_t = 65534;
 const UNPRIV_GID: libc::gid_t = 65534;
 
@@ -123,11 +111,10 @@ unsafe fn bpf(cmd: libc::c_int, attr: *mut libc::c_void, size: usize) -> libc::c
     unsafe { libc::syscall(libc::SYS_bpf, cmd, attr, size as libc::c_uint) }
 }
 
-/// Collect `(module_name, fd)` for every loaded module BTF. Opened here (global
-/// root, before the userns fork, while we still hold `CAP_SYS_ADMIN`) so the fds
-/// can be inherited across `execv` (all-in-one) or passed over `SCM_RIGHTS` (the
-/// `serve_loop` delegation handshake). Format with [`fmt_btf_env`] for the
-/// `EBPF_MODULE_BTF_FDS` env var.
+/// Collect `(module_name, fd)` for every loaded module BTF. Opened by the warden
+/// while it holds `CAP_SYS_ADMIN`, then passed to the agent over `SCM_RIGHTS` (the
+/// `serve_loop` delegation handshake) so module kfuncs resolve in the agent's
+/// token-only load.
 pub fn collect_module_btf_fds() -> Vec<(String, RawFd)> {
     let mut out: Vec<(String, RawFd)> = Vec::new();
     let mut id: u32 = 0;
@@ -163,8 +150,8 @@ pub fn collect_module_btf_fds() -> Vec<(String, RawFd)> {
             continue;
         }
         let fd = fd as RawFd;
-        // BTF_GET_FD_BY_ID returns an O_CLOEXEC fd; clear it so the fd survives
-        // the child's execv and reaches the agent at the same number.
+        // BTF_GET_FD_BY_ID returns an O_CLOEXEC fd; clear it so the fd can be
+        // passed to the agent over SCM_RIGHTS on delegation.
         unsafe {
             let flags = libc::fcntl(fd, libc::F_GETFD);
             libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
@@ -200,41 +187,23 @@ pub fn collect_module_btf_fds() -> Vec<(String, RawFd)> {
             continue;
         }
         out.push((nm.into_owned(), fd));
-        // Keep fd open (inherited by the child / passed over delegation); do NOT close.
+        // Keep fd open (passed to the agent over delegation); do NOT close.
     }
     out
-}
-
-/// Format `(name, fd)` pairs as the `EBPF_MODULE_BTF_FDS` env value the agent
-/// parses: `"name=fd,name=fd,..."`.
-fn fmt_btf_env(btf: &[(String, RawFd)]) -> String {
-    btf.iter()
-        .map(|(n, fd)| format!("{n}={fd}"))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-/// Format pcap socket fds as the `EBPFSENTINEL_PCAP_FDS` env value: `"fd,fd"`.
-fn fmt_pcap_env(pcap: &[RawFd]) -> String {
-    pcap.iter()
-        .map(RawFd::to_string)
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 /// Default number of `AF_PACKET` capture sockets to pre-open.
 const DEFAULT_PCAP_POOL: usize = 2;
 
 /// Open a small pool of `AF_PACKET`/`SOCK_RAW` sockets for rootless packet
-/// capture and return their fds as `"fd,fd,..."`.
+/// capture and return their fds.
 ///
-/// Created here (global root, before the userns fork) because the agent, once
-/// inside its child user namespace, fails the `CAP_NET_RAW` check on
-/// `socket(AF_PACKET)`. Protocol `0` keeps the sockets silent until the agent
-/// binds one to an interface with `ETH_P_ALL`. The fds are cleared of
-/// `O_CLOEXEC` so they survive the child's `execv` / can be passed over delegation.
-/// Pool size is `EBPFSENTINEL_PCAP_POOL` (default `DEFAULT_PCAP_POOL`, capped 32).
-/// Format with [`fmt_pcap_env`] for the `EBPFSENTINEL_PCAP_FDS` env var.
+/// Opened by the warden because the agent, once inside its child user namespace,
+/// fails the `CAP_NET_RAW` check on `socket(AF_PACKET)`. Protocol `0` keeps the
+/// sockets silent until the agent binds one to an interface with `ETH_P_ALL`. The
+/// fds are cleared of `O_CLOEXEC` so they can be passed to the agent over
+/// delegation. Pool size is `EBPFSENTINEL_PCAP_POOL` (default `DEFAULT_PCAP_POOL`,
+/// capped 32).
 pub fn open_pcap_pool() -> Vec<RawFd> {
     let n = std::env::var("EBPFSENTINEL_PCAP_POOL")
         .ok()
@@ -255,7 +224,7 @@ pub fn open_pcap_pool() -> Vec<RawFd> {
             libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
         }
         out.push(fd);
-        // Keep fd open (inherited by the child / passed over delegation); do NOT close.
+        // Keep fd open (passed to the agent over delegation); do NOT close.
     }
     out
 }
@@ -266,7 +235,7 @@ fn write_file(path: &str, value: &str) -> bool {
     match std::fs::write(path, value) {
         Ok(()) => true,
         Err(e) => {
-            eprintln!("[warden-token] write {path}: {e}");
+            eprintln!("[warden] write {path}: {e}");
             false
         }
     }
@@ -452,38 +421,6 @@ fn root_userns_self_map_ok() -> bool {
     libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0
 }
 
-fn child(bpffs: &str, agent_argv: &[CString], modfds: &str, pcapfds: &str, sv1: RawFd) -> ! {
-    unsafe {
-        libc::setenv(
-            c"EBPF_MODULE_BTF_FDS".as_ptr(),
-            CString::new(modfds).unwrap().as_ptr(),
-            1,
-        )
-    };
-    if !pcapfds.is_empty() {
-        unsafe {
-            libc::setenv(
-                c"EBPFSENTINEL_PCAP_FDS".as_ptr(),
-                CString::new(pcapfds).unwrap().as_ptr(),
-                1,
-            )
-        };
-    }
-    drop_to_unpriv_if_needed();
-    enter_userns();
-    let fs = fsopen_bpf();
-    if !send_fd(sv1, fs) {
-        perror("send_fd");
-        std::process::exit(1);
-    }
-    let mut ack = [0u8; 1];
-    if unsafe { libc::read(sv1, ack.as_mut_ptr().cast(), 1) } != 1 || ack[0] != 1 {
-        eprintln!("[warden-token] parent CMD_CREATE failed");
-        std::process::exit(1);
-    }
-    mount_and_exec(fs, bpffs, agent_argv);
-}
-
 /// Drop to an unprivileged uid before creating a user namespace, but only when
 /// running as global root under a runtime that forbids the root self-map.
 ///
@@ -513,9 +450,8 @@ pub fn drop_to_unpriv_if_needed() {
 }
 
 /// Enter a fresh user namespace (single-uid self-map) and a private mount
-/// namespace. Used by the all-in-one fork child and the agent self-bootstrap
-/// trampoline; exits the process on failure. Must run single-threaded (before
-/// any runtime).
+/// namespace. Used by the agent self-bootstrap trampoline; exits the process on
+/// failure. Must run single-threaded (before any runtime).
 pub fn enter_userns() {
     let (uid, gid) = (unsafe { libc::getuid() }, unsafe { libc::getgid() });
     if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
@@ -526,7 +462,7 @@ pub fn enter_userns() {
     if !write_file("/proc/self/uid_map", &format!("0 {uid} 1"))
         || !write_file("/proc/self/gid_map", &format!("0 {gid} 1"))
     {
-        eprintln!("[warden-token] failed to write uid/gid map");
+        eprintln!("[warden] failed to write uid/gid map");
         std::process::exit(1);
     }
     if unsafe { libc::setgid(0) } != 0 || unsafe { libc::setuid(0) } != 0 {
@@ -559,8 +495,7 @@ pub fn fsopen_bpf() -> RawFd {
 }
 
 /// `fsmount` the (delegated) bpffs `fs_fd` and `move_mount` it at `bpffs`.
-/// Exits the process on failure. Shared by the all-in-one launcher and the agent
-/// self-bootstrap trampoline (which mounts then continues rather than execing).
+/// Exits the process on failure. Used by the agent self-bootstrap trampoline.
 pub fn mount_bpffs(fs: RawFd, bpffs: &str) {
     let mnt = unsafe { libc::syscall(libc::SYS_fsmount, fs, 0, 0) } as RawFd;
     if mnt < 0 {
@@ -585,27 +520,16 @@ pub fn mount_bpffs(fs: RawFd, bpffs: &str) {
     }
 }
 
-/// `mount_bpffs` then `execv` the agent inside this namespace. Never returns.
-fn mount_and_exec(fs: RawFd, bpffs: &str, agent_argv: &[CString]) -> ! {
-    mount_bpffs(fs, bpffs);
-    let mut argv: Vec<*const libc::c_char> = agent_argv.iter().map(|a| a.as_ptr()).collect();
-    argv.push(ptr::null());
-    unsafe { libc::execv(agent_argv[0].as_ptr(), argv.as_ptr()) };
-    perror("execv");
-    std::process::exit(127);
-}
-
 pub fn perror(ctx: &str) {
     let e = std::io::Error::last_os_error();
-    eprintln!("[warden-token] {ctx}: {e}");
+    eprintln!("[warden] {ctx}: {e}");
 }
 
 // ── fd passing over SCM_RIGHTS ──────────────────────────────────────────────
 //
-// The launcher hands the module-BTF and pcap fds to its userns child across the
-// `fork`/`execv`; the `serve_loop` delegation handshake (`Command::Delegate`)
-// passes them over a socket when the privileged and rootless halves run as
-// separate processes. Both paths use the `SCM_RIGHTS` primitives below.
+// The `serve_loop` delegation handshake (`Command::Delegate`) passes the
+// module-BTF and pcap fds from the privileged warden to the rootless agent over
+// the control socket, using the `SCM_RIGHTS` primitives below.
 
 /// `SCM_RIGHTS` cannot carry more than `SCM_MAX_FD` (253) fds per message.
 const SCM_MAX_FDS: usize = 253;
@@ -660,7 +584,7 @@ pub fn prioritize_and_cap_btf(
 }
 
 /// Enable kernel SYN cookies in always-on mode (`net.ipv4.tcp_syncookies=2`)
-/// from the privileged launcher, before any user-namespace unshare.
+/// from the privileged warden.
 ///
 /// The XDP syncookie offload issues kernel cookies via
 /// `bpf_tcp_raw_gen_syncookie`; the kernel only completes a legitimate
@@ -673,150 +597,5 @@ pub fn enable_tcp_syncookies() {
     match std::fs::write("/proc/sys/net/ipv4/tcp_syncookies", "2\n") {
         Ok(()) => eprintln!("[launch] net.ipv4.tcp_syncookies=2 (SYN-cookie handshake completion)"),
         Err(e) => eprintln!("[launch] WARN could not set net.ipv4.tcp_syncookies=2: {e}"),
-    }
-}
-
-/// Spawn the resident netns-helper on a background thread: bind `sock` and answer
-/// conntrack / route / ARP commands with init-netns authority for the userns
-/// `warden-serve`. The thread runs for the process's lifetime; the parent reaps
-/// the agent on the main thread, and process teardown stops the helper.
-fn serve_netns_helper(sock: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::net::UnixListener;
-
-    // The only legitimate peer is `warden-serve`, which the launcher forked into a
-    // child user namespace mapping uid 0 → the launcher's own uid (identity for a
-    // global-root launcher: it stays privileged so it can load eBPF). It therefore
-    // presents the launcher's uid to this init-netns helper — gate on that, not on
-    // the rootless consumer's uid (the consumer never talks to the helper).
-    let allowed_uid = unsafe { libc::getuid() };
-    let sock = sock.to_string();
-    std::thread::spawn(move || {
-        let _ = std::fs::remove_file(&sock);
-        let listener = match UnixListener::bind(&sock) {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("[netns-helper] bind {sock}: {e}");
-                return;
-            }
-        };
-        // `SO_PEERCRED` (not the file mode) is the auth gate, so 0666 lets the
-        // userns `warden-serve` connect while non-matching uids are rejected at
-        // accept.
-        if let Err(e) = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666)) {
-            eprintln!("[netns-helper] chmod {sock}: {e}");
-        }
-        eprintln!("[netns-helper] resident host-ops helper on {sock} (peer uid {allowed_uid})");
-        server::serve_loop(
-            &listener,
-            &map_engine::NoMaps,
-            &[],
-            &[],
-            &host_ops::LocalHostOps,
-            allowed_uid,
-        );
-    });
-}
-
-/// Entry point for the `warden-token` binary: the all-in-one launcher. Stays
-/// global root in the init netns, forks a userns child that loads eBPF via the
-/// BPF token and execs the agent in `warden-serve` mode, and serves the resident
-/// netns-helper for host-network ops. Exposed from the library so the privileged
-/// primitives are shared with the `warden` binary.
-pub fn run() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
-
-    let mut bpffs = DEFAULT_BPFFS.to_string();
-    let mut i = 1;
-    while i < args.len() && args[i].starts_with("--") {
-        if args[i] == "--bpffs" && i + 1 < args.len() {
-            bpffs = args[i + 1].clone();
-            i += 2;
-        } else if args[i] == "--" {
-            i += 1;
-            break;
-        } else {
-            eprintln!("unknown option: {}", args[i]);
-            return ExitCode::from(2);
-        }
-    }
-    if i >= args.len() {
-        eprintln!("usage: warden-token [--bpffs <path>] <agent-binary> [agent-args...]");
-        return ExitCode::from(2);
-    }
-    let agent_argv: Vec<CString> = args[i..]
-        .iter()
-        .map(|a| CString::new(a.as_str()).unwrap())
-        .collect();
-
-    // Still global root here (before the userns fork): enable always-on SYN
-    // cookies so legitimate handshakes complete under the XDP syncookie offload.
-    enable_tcp_syncookies();
-
-    // Pick the socket the resident netns-helper will serve and `warden-serve` will
-    // forward host-network ops to; export it so the userns child inherits it
-    // across `execv` and dials the helper for conntrack / route / ARP.
-    let helper_sock = std::env::var("EBPFSENTINEL_NETNS_HELPER_SOCK")
-        .unwrap_or_else(|_| DEFAULT_NETNS_HELPER_SOCK.to_string());
-    unsafe {
-        libc::setenv(
-            c"EBPFSENTINEL_NETNS_HELPER_SOCK".as_ptr(),
-            CString::new(helper_sock.as_str()).unwrap().as_ptr(),
-            1,
-        );
-    }
-
-    // Open module BTF fds and the pcap capture sockets while still global root,
-    // before the userns fork, so the child inherits them across execv.
-    let modfds = fmt_btf_env(&collect_module_btf_fds());
-    let pcapfds = fmt_pcap_env(&open_pcap_pool());
-
-    let mut sv = [0 as RawFd; 2];
-    if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sv.as_mut_ptr()) } != 0 {
-        perror("socketpair");
-        return ExitCode::FAILURE;
-    }
-    let pid = unsafe { libc::fork() };
-    if pid == 0 {
-        unsafe { libc::close(sv[0]) };
-        child(&bpffs, &agent_argv, &modfds, &pcapfds, sv[1]);
-    }
-    // PARENT: global root, configures delegation on the child's fs fd.
-    unsafe { libc::close(sv[1]) };
-    let fs = recv_fd(sv[0]);
-    if fs < 0 {
-        perror("recv_fd");
-        return ExitCode::FAILURE;
-    }
-    let ack: u8 = u8::from(delegate_over_fd(fs));
-    unsafe { libc::write(sv[0], ptr::from_ref(&ack).cast(), 1) };
-
-    // Stay resident as the netns-helper: the userns `warden-serve` cannot perform
-    // host-network ops (conntrack teardown, routes, gratuitous ARP) because its
-    // capabilities are namespaced. It forwards them here, where we still hold the
-    // init-netns capabilities. The helper owns no maps; it only answers those ops.
-    serve_netns_helper(&helper_sock);
-
-    let mut st: libc::c_int = 0;
-    unsafe { libc::waitpid(pid, &mut st, 0) };
-    if libc::WIFEXITED(st) {
-        ExitCode::from(libc::WEXITSTATUS(st) as u8)
-    } else {
-        ExitCode::FAILURE
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{fmt_btf_env, fmt_pcap_env};
-    use std::os::fd::RawFd;
-
-    #[test]
-    fn env_formatting() {
-        let btf = vec![("a".to_string(), 3 as RawFd), ("b".to_string(), 5)];
-        assert_eq!(fmt_btf_env(&btf), "a=3,b=5");
-        assert_eq!(fmt_btf_env(&[]), "");
-        assert_eq!(fmt_pcap_env(&[7, 8]), "7,8");
-        assert_eq!(fmt_pcap_env(&[]), "");
     }
 }

@@ -9,22 +9,15 @@ publish = false
 name = "ebpfsentinel_warden"
 path = "src/lib.rs"
 
-# `warden` is the privileged control-plane sidecar; `warden-token` is
-# the single-container / systemd launcher. Both share the library above.
+# `warden` is the privileged control-plane broker the rootless agent reaches over
+# a socket. It shares the library above with the agent's self-bootstrap trampoline.
 [[bin]]
 name = "warden"
 path = "src/main.rs"
 
-[[bin]]
-name = "warden-token"
-path = "src/bin/warden-token.rs"
-
 [dependencies]
 libc = { workspace = true }
 ebpfsentinel-warden-proto = { workspace = true }
-# Used by `HelperHostOps` so the userns `warden-serve` can forward host-network
-# ops to the resident netns-helper over the warden protocol.
-ebpfsentinel-warden-client = { workspace = true }
 
 [dev-dependencies]
 ebpfsentinel-warden-client = { workspace = true, features = ["fd-pass"] }

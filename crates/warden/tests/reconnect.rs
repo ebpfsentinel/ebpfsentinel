@@ -7,16 +7,9 @@ use std::time::{Duration, Instant};
 
 use ebpfsentinel_warden_client::ReconnectingClient;
 
-fn spawn_warden(sock: &str, uid: u32, maps_dir: &str) -> Child {
+fn spawn_warden(sock: &str, uid: u32) -> Child {
     Proc::new(env!("CARGO_BIN_EXE_warden"))
-        .args([
-            "serve",
-            sock,
-            "--uid",
-            &uid.to_string(),
-            "--maps-dir",
-            maps_dir,
-        ])
+        .args(["serve", sock, "--uid", &uid.to_string()])
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn warden")
@@ -56,12 +49,11 @@ fn reconnects_transparently_after_warden_restart() {
         .join("warden.sock")
         .to_string_lossy()
         .into_owned();
-    let maps_dir = dir.path().to_string_lossy().into_owned();
 
     let mut client = ReconnectingClient::new(&sock);
 
     // First warden: the client connects on the first call.
-    let warden_a = Kill(spawn_warden(&sock, current_uid(), &maps_dir));
+    let warden_a = Kill(spawn_warden(&sock, current_uid()));
     assert!(
         dump_until_ok(&mut client, Duration::from_secs(2)),
         "first warden never answered"
@@ -72,7 +64,7 @@ fn reconnects_transparently_after_warden_restart() {
 
     // A replacement warden binds the same socket. The next call must transparently
     // reconnect + retry and ultimately succeed.
-    let _warden_b = Kill(spawn_warden(&sock, current_uid(), &maps_dir));
+    let _warden_b = Kill(spawn_warden(&sock, current_uid()));
     assert!(
         dump_until_ok(&mut client, Duration::from_secs(2)),
         "client did not recover after warden restart"

@@ -2,31 +2,20 @@
 //! **init** network namespace — conntrack teardown, route programming, gratuitous
 //! ARP — plus the conntrack-table read of the `0440 root` proc file.
 //!
-//! These split from the map RPC because *where* they can run differs. A map op is
-//! a `bpf()` on an fd the server already holds, so it works wherever the server
-//! holds the fd. A conntrack/route/ARP op is netlink (or an `AF_PACKET` send), and
-//! the kernel re-checks `CAP_NET_ADMIN`/`CAP_NET_RAW` against the init netns on
-//! **every** message — a capability held only inside a child user namespace grants
-//! no authority over the host's conntrack table or NICs. The agent's
-//! `warden-serve` mode runs in exactly such a userns (so that `BPF_TOKEN_CREATE`
-//! works), and therefore cannot perform these ops itself.
+//! A conntrack/route/ARP op is netlink (or an `AF_PACKET` send), and the kernel
+//! re-checks `CAP_NET_ADMIN`/`CAP_NET_RAW` against the init netns on **every**
+//! message — a capability held only inside a child user namespace grants no
+//! authority over the host's conntrack table or NICs. The rootless agent runs in
+//! exactly such a userns (so that `BPF_TOKEN_CREATE` works), and therefore cannot
+//! perform these ops itself; it brokers them to the host-root warden.
 //!
-//! [`HostOps`] abstracts that authority away from the server's `dispatch`. Two
-//! implementations back it:
-//!
-//! * [`LocalHostOps`] runs the op directly, for a warden that genuinely lives in
-//!   the init netns with the capabilities (the bare-metal `warden serve` binary
-//!   and the resident netns-helper).
-//! * [`HelperHostOps`] forwards the op over `warden-proto` to such a helper, for a
-//!   `warden-serve` that sits in a userns and must borrow the helper's authority.
-//!
-//! Either way the server's wire behaviour is identical; only the executor moves.
+//! [`HostOps`] abstracts that authority away from the server's `dispatch`.
+//! [`LocalHostOps`] runs each op directly, in the warden that lives in the init
+//! netns with the capabilities.
 
 use std::fs;
 use std::io;
-use std::sync::Mutex;
 
-use ebpfsentinel_warden_client::ReconnectingClient;
 use ebpfsentinel_warden_proto::{ConntrackTuple, RouteSpec};
 
 use crate::net_ops;
@@ -53,8 +42,8 @@ pub trait HostOps: Send + Sync {
     fn arp_announce(&self, iface: &str, ip: &str) -> Result<(), String>;
 }
 
-/// Performs each op directly, for a warden that holds the capabilities in the init
-/// netns (the bare-metal `warden serve` binary and the resident netns-helper).
+/// Performs each op directly, for the warden that holds the capabilities in the
+/// init netns.
 pub struct LocalHostOps;
 
 impl HostOps for LocalHostOps {
@@ -81,58 +70,5 @@ impl HostOps for LocalHostOps {
     }
     fn arp_announce(&self, iface: &str, ip: &str) -> Result<(), String> {
         net_ops::arp_announce(iface, ip)
-    }
-}
-
-/// Forwards each op over `warden-proto` to a resident netns-helper living in the
-/// init netns. Used by `warden-serve`, which runs in a user namespace where these
-/// ops would fail locally. The connection reconnects on its own if the helper
-/// bounces.
-pub struct HelperHostOps {
-    client: Mutex<ReconnectingClient>,
-}
-
-impl HelperHostOps {
-    /// Bind to the netns-helper socket at `sock`. Connection is lazy — the first op
-    /// dials the helper, which may legitimately start after `warden-serve`.
-    #[must_use]
-    pub fn connect(sock: impl Into<std::path::PathBuf>) -> Self {
-        Self {
-            client: Mutex::new(ReconnectingClient::new(sock)),
-        }
-    }
-
-    /// Run `op` against the guarded client, mapping any error to a string the
-    /// server relays verbatim to the agent.
-    fn with<T>(
-        &self,
-        op: impl FnOnce(&mut ReconnectingClient) -> io::Result<T>,
-    ) -> Result<T, String> {
-        let mut client = self
-            .client
-            .lock()
-            .map_err(|_| "netns-helper client mutex poisoned".to_string())?;
-        op(&mut client).map_err(|e| e.to_string())
-    }
-}
-
-impl HostOps for HelperHostOps {
-    fn conntrack_dump(&self) -> Result<Vec<u8>, String> {
-        self.with(ReconnectingClient::conntrack_dump)
-    }
-    fn conntrack_delete(&self, tuple: &ConntrackTuple) -> Result<(), String> {
-        self.with(|c| c.conntrack_delete(tuple))
-    }
-    fn conntrack_flush(&self) -> Result<(), String> {
-        self.with(ReconnectingClient::conntrack_flush)
-    }
-    fn route_add(&self, route: &RouteSpec) -> Result<(), String> {
-        self.with(|c| c.route_add(route))
-    }
-    fn route_del(&self, route: &RouteSpec) -> Result<(), String> {
-        self.with(|c| c.route_del(route))
-    }
-    fn arp_announce(&self, iface: &str, ip: &str) -> Result<(), String> {
-        self.with(|c| c.arp_announce(iface, ip))
     }
 }

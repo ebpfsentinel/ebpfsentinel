@@ -8,16 +8,9 @@ use std::process::{Child, Command as Proc, Stdio};
 use ebpfsentinel_warden_client::WardenClient;
 use ebpfsentinel_warden_proto::RouteSpec;
 
-fn spawn_warden(sock: &str, uid: u32, maps_dir: &str) -> Child {
+fn spawn_warden(sock: &str, uid: u32) -> Child {
     Proc::new(env!("CARGO_BIN_EXE_warden"))
-        .args([
-            "serve",
-            sock,
-            "--uid",
-            &uid.to_string(),
-            "--maps-dir",
-            maps_dir,
-        ])
+        .args(["serve", sock, "--uid", &uid.to_string()])
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn warden")
@@ -60,10 +53,9 @@ fn host_network_ops_error_cleanly_and_keep_the_stream_in_sync() {
         .join("warden.sock")
         .to_string_lossy()
         .into_owned();
-    let maps_dir = dir.path().to_string_lossy().into_owned();
 
     let guard = Guard {
-        child: spawn_warden(&sock, current_uid(), &maps_dir),
+        child: spawn_warden(&sock, current_uid()),
         sock: sock.clone(),
     };
     let mut client = connect(&sock);

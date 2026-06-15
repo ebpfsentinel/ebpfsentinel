@@ -9,12 +9,12 @@
 //! A client connects over the warden's `AF_UNIX` socket, completes the versioned
 //! [`Hello`](ebpfsentinel_warden_proto::Command::Hello) handshake once, then issues
 //! one [`Command`] per call and reads back its [`Response`]. The control path
-//! (map writes, conntrack reads) is rare, so a simple synchronous
-//! request/response loop over the raw stream is sufficient — the hot event path
-//! never crosses this client (it rides ring-buffer fds passed once by the warden).
+//! (conntrack reads/teardown, route programming, gratuitous ARP) is rare, so a
+//! simple synchronous request/response loop over the raw stream is sufficient —
+//! the hot event path never crosses this client.
 //!
-//! The optional `fd-pass` feature adds [`WardenClient::get_ringbuf_fd`], which
-//! receives a ring-buffer map fd over `SCM_RIGHTS`. That receive is the only
+//! The optional `fd-pass` feature adds [`WardenClient::pcap_open`], which receives
+//! an `AF_PACKET` capture-socket fd over `SCM_RIGHTS`. That receive is the only
 //! `libc`/`unsafe` in this crate; with the feature off the crate is
 //! `#![forbid(unsafe_code)]`.
 
@@ -71,48 +71,6 @@ impl WardenClient {
         read_frame(&mut self.stream)
     }
 
-    /// Look up one element of an eBPF map. Returns `None` when the key is absent.
-    pub fn map_lookup(&mut self, map: &str, key: Vec<u8>) -> io::Result<Option<Vec<u8>>> {
-        match self.call(&Command::MapLookup {
-            map: map.to_owned(),
-            key,
-        })? {
-            Response::MapValue { found: true, value } => Ok(Some(value)),
-            Response::MapValue { found: false, .. } => Ok(None),
-            other => Err(unexpected("MapLookup", &other)),
-        }
-    }
-
-    /// Insert or update one element of an eBPF map.
-    pub fn map_update(
-        &mut self,
-        map: &str,
-        key: Vec<u8>,
-        value: Vec<u8>,
-        flags: u64,
-    ) -> io::Result<()> {
-        match self.call(&Command::MapUpdate {
-            map: map.to_owned(),
-            key,
-            value,
-            flags,
-        })? {
-            Response::Ok => Ok(()),
-            other => Err(unexpected("MapUpdate", &other)),
-        }
-    }
-
-    /// Delete one element of an eBPF map.
-    pub fn map_delete(&mut self, map: &str, key: Vec<u8>) -> io::Result<()> {
-        match self.call(&Command::MapDelete {
-            map: map.to_owned(),
-            key,
-        })? {
-            Response::Ok => Ok(()),
-            other => Err(unexpected("MapDelete", &other)),
-        }
-    }
-
     /// Read the kernel conntrack table the rootless agent cannot open itself.
     pub fn conntrack_dump(&mut self) -> io::Result<Vec<u8>> {
         match self.call(&Command::ConntrackDump)? {
@@ -158,24 +116,6 @@ impl WardenClient {
             },
             "ArpAnnounce",
         )
-    }
-
-    /// Request the named ring-buffer map's fd from the warden and receive it over
-    /// `SCM_RIGHTS`. The returned [`OwnedFd`](std::os::fd::OwnedFd) refers to the
-    /// same kernel ring buffer the in-kernel programs write to; the agent drains it
-    /// with `mmap`+`poll`, issuing no `bpf()`.
-    #[cfg(feature = "fd-pass")]
-    pub fn get_ringbuf_fd(&mut self, name: &str) -> io::Result<std::os::fd::OwnedFd> {
-        write_frame(
-            &mut self.stream,
-            &Command::GetRingbufFd {
-                program: name.to_owned(),
-            },
-        )?;
-        match read_frame::<_, Response>(&mut self.stream)? {
-            Response::FdReady => fd_pass::recv_one_fd(&self.stream),
-            other => Err(unexpected("GetRingbufFd", &other)),
-        }
     }
 
     /// Ask the warden to open an `AF_PACKET` capture socket bound to `iface` and
@@ -268,27 +208,6 @@ impl ReconnectingClient {
         }
     }
 
-    /// Look up one element of an eBPF map.
-    pub fn map_lookup(&mut self, map: &str, key: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        self.with_retry(|c| c.map_lookup(map, key.to_vec()))
-    }
-
-    /// Insert or update one element of an eBPF map.
-    pub fn map_update(
-        &mut self,
-        map: &str,
-        key: &[u8],
-        value: &[u8],
-        flags: u64,
-    ) -> io::Result<()> {
-        self.with_retry(|c| c.map_update(map, key.to_vec(), value.to_vec(), flags))
-    }
-
-    /// Delete one element of an eBPF map.
-    pub fn map_delete(&mut self, map: &str, key: &[u8]) -> io::Result<()> {
-        self.with_retry(|c| c.map_delete(map, key.to_vec()))
-    }
-
     /// Read the kernel conntrack table.
     pub fn conntrack_dump(&mut self) -> io::Result<Vec<u8>> {
         self.with_retry(WardenClient::conntrack_dump)
@@ -317,12 +236,6 @@ impl ReconnectingClient {
     /// Broadcast a gratuitous ARP for `ip` on `iface`.
     pub fn arp_announce(&mut self, iface: &str, ip: &str) -> io::Result<()> {
         self.with_retry(|c| c.arp_announce(iface, ip))
-    }
-
-    /// Acquire a ring-buffer map fd, reconnecting if the warden bounced.
-    #[cfg(feature = "fd-pass")]
-    pub fn get_ringbuf_fd(&mut self, name: &str) -> io::Result<std::os::fd::OwnedFd> {
-        self.with_retry(|c| c.get_ringbuf_fd(name))
     }
 
     /// Open a capture socket on `iface`, reconnecting if the warden bounced.

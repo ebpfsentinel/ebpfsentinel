@@ -57,7 +57,7 @@ fn current_uid() -> u32 {
 }
 
 #[test]
-fn handshake_then_conntrack_and_unimplemented() {
+fn handshake_then_conntrack() {
     let sock = sock_path("ok");
     let guard = Guard {
         child: spawn_warden(&sock, current_uid()),
@@ -85,19 +85,6 @@ fn handshake_then_conntrack_and_unimplemented() {
     write_frame(&mut s, &Command::ConntrackDump).unwrap();
     let resp: Response = read_frame(&mut s).unwrap();
     assert!(matches!(resp, Response::Conntrack { .. }), "got {resp:?}");
-
-    // A command not wired in `warden serve` (attach/detach ride the in-process
-    // loader, not this map-serving socket) returns the typed Unimplemented.
-    write_frame(
-        &mut s,
-        &Command::Detach {
-            program: "tc-ids".into(),
-            iface: "eth0".into(),
-        },
-    )
-    .unwrap();
-    let resp: Response = read_frame(&mut s).unwrap();
-    assert_eq!(resp, Response::Unimplemented);
 
     drop(guard);
 }

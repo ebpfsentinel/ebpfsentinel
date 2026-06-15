@@ -9,7 +9,7 @@
 //! [`Read`]/[`Write`].
 //!
 //! The codec is pure serialization — no `unsafe`, no `libc`. The few commands that
-//! must hand a file descriptor across the boundary (bpffs delegation, ring-buffer
+//! must hand a file descriptor across the boundary (bpffs delegation, module-BTF
 //! and pcap fds) ride that fd in an `SCM_RIGHTS` control message *alongside* the
 //! frame defined here; the privileged warden binary owns that fd-passing, keeping
 //! all `unsafe` out of this shared crate and out of the agent.
@@ -29,19 +29,6 @@ pub const PROTOCOL_VERSION: u16 = 1;
 /// legitimate message and stays far below this; the bound just stops a hostile or
 /// corrupt length prefix from forcing a huge allocation.
 pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
-
-/// How a program should be attached to an interface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AttachMode {
-    /// XDP in generic (driver-independent) mode.
-    XdpGeneric,
-    /// XDP in native (driver) mode.
-    XdpNative,
-    /// TC ingress (clsact) hook.
-    TcIngress,
-    /// TC egress (clsact) hook.
-    TcEgress,
-}
 
 /// A conntrack entry identity, used to delete a single flow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,53 +83,6 @@ pub enum Command {
     },
     /// Flush the whole conntrack table.
     ConntrackFlush,
-    /// Hand the agent the ring-buffer fd for `program` (rides in an `SCM_RIGHTS`
-    /// cmsg); the agent consumes it with `mmap`+`poll`, issuing no `bpf()`.
-    GetRingbufFd {
-        /// Program whose ring buffer is requested.
-        program: String,
-    },
-    /// Look up one element of an eBPF map.
-    MapLookup {
-        /// Map name (allowlisted by the warden).
-        map: String,
-        /// Lookup key bytes.
-        key: Vec<u8>,
-    },
-    /// Insert or update one element of an eBPF map.
-    MapUpdate {
-        /// Map name (allowlisted by the warden).
-        map: String,
-        /// Element key bytes.
-        key: Vec<u8>,
-        /// Element value bytes.
-        value: Vec<u8>,
-        /// `BPF_MAP_UPDATE_ELEM` flags.
-        flags: u64,
-    },
-    /// Delete one element of an eBPF map.
-    MapDelete {
-        /// Map name (allowlisted by the warden).
-        map: String,
-        /// Element key bytes.
-        key: Vec<u8>,
-    },
-    /// Load (if needed) and attach `program` to `iface`.
-    Attach {
-        /// Program name.
-        program: String,
-        /// Interface name (allowlisted by the warden).
-        iface: String,
-        /// Attach mode.
-        mode: AttachMode,
-    },
-    /// Detach `program` from `iface`.
-    Detach {
-        /// Program name.
-        program: String,
-        /// Interface name.
-        iface: String,
-    },
     /// Add a route (multi-WAN gateway selection / failover).
     RouteAdd {
         /// The route to add.
@@ -193,15 +133,8 @@ pub enum Response {
         /// The conntrack table contents.
         table: Vec<u8>,
     },
-    /// The result of a map lookup.
-    MapValue {
-        /// Whether the key was present.
-        found: bool,
-        /// The value bytes (empty when `found` is false).
-        value: Vec<u8>,
-    },
-    /// A file descriptor rides in the accompanying `SCM_RIGHTS` cmsg (ring-buffer
-    /// or pcap socket).
+    /// A file descriptor rides in the accompanying `SCM_RIGHTS` cmsg (the pcap
+    /// capture socket from [`Command::PcapOpen`]).
     FdReady,
     /// The command succeeded and carries no payload.
     Ok,
@@ -245,8 +178,7 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AttachMode, Command, ConntrackTuple, MAX_FRAME_LEN, Response, RouteSpec, read_frame,
-        write_frame,
+        Command, ConntrackTuple, MAX_FRAME_LEN, Response, RouteSpec, read_frame, write_frame,
     };
     use std::io::Cursor;
 
@@ -272,32 +204,6 @@ mod tests {
                 tuple: tuple.clone(),
             },
             Command::ConntrackFlush,
-            Command::GetRingbufFd {
-                program: "tc-ids".into(),
-            },
-            Command::MapLookup {
-                map: "FIREWALL_RULES".into(),
-                key: vec![1, 2, 3, 4],
-            },
-            Command::MapUpdate {
-                map: "IPS_BLACKLIST".into(),
-                key: vec![9, 9],
-                value: vec![1],
-                flags: 0,
-            },
-            Command::MapDelete {
-                map: "IPS_BLACKLIST".into(),
-                key: vec![9, 9],
-            },
-            Command::Attach {
-                program: "xdp-firewall".into(),
-                iface: "enp0s2".into(),
-                mode: AttachMode::XdpGeneric,
-            },
-            Command::Detach {
-                program: "xdp-firewall".into(),
-                iface: "enp0s2".into(),
-            },
             Command::RouteAdd {
                 route: route.clone(),
             },
@@ -322,10 +228,6 @@ mod tests {
             },
             Response::Conntrack {
                 table: vec![0xde, 0xad, 0xbe, 0xef],
-            },
-            Response::MapValue {
-                found: true,
-                value: vec![7, 7, 7],
             },
             Response::FdReady,
             Response::Ok,

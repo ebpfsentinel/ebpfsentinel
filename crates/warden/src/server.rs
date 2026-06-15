@@ -1,12 +1,11 @@
-//! The warden control-plane server loop, generic over the [`MapSource`] backing
-//! the map RPC.
+//! The warden control-plane server loop.
 //!
-//! Two callers share this exact protocol logic. The `warden` binary backs it with
-//! a [`MapRegistry`](crate::map_engine::MapRegistry) opened from a bpffs pin
-//! directory. The agent's `warden-serve` mode backs it with a `MapSource` built
-//! from the map fds it holds directly after loading every program in-process — no
-//! pins, which sidesteps the fact that token-loaded maps are not pinnable from a
-//! delegated bpffs. Either way the wire behaviour is identical.
+//! The `warden` binary is a pure privilege broker: it loads no eBPF and holds no
+//! maps (the rootless agent loads its own programs against the bpffs the warden
+//! delegates). This loop answers only the privileged operations the agent cannot
+//! perform from its user namespace — bpffs delegation + module-BTF/pcap fd hand-off
+//! (`Delegate`), an on-demand pcap capture socket (`PcapOpen`), the conntrack-table
+//! read, conntrack teardown, route programming, and gratuitous ARP.
 
 use std::mem;
 use std::os::fd::{AsRawFd, RawFd};
@@ -16,15 +15,13 @@ use std::ptr;
 use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
 
 use crate::host_ops::HostOps;
-use crate::map_engine::MapSource;
 use crate::{delegate_over_fd, net_ops, recv_fd, send_msg_fds};
 
-/// Serve agent connections on `listener` forever, answering map RPC from
-/// `registry` and handing out the `btf` / `pcap` fds on delegation. Only a peer
+/// Serve agent connections on `listener` forever, handing out the `btf` / `pcap`
+/// fds on delegation and brokering the host-network ops via `host`. Only a peer
 /// whose uid equals `allowed_uid` (checked via `SO_PEERCRED`) is served.
-pub fn serve_loop<M: MapSource>(
+pub fn serve_loop(
     listener: &UnixListener,
-    registry: &M,
     btf: &[(String, RawFd)],
     pcap: &[RawFd],
     host: &dyn HostOps,
@@ -34,7 +31,7 @@ pub fn serve_loop<M: MapSource>(
         match stream {
             Ok(conn) => {
                 if peer_allowed(&conn, allowed_uid) {
-                    handle_conn(conn, registry, btf, pcap, host);
+                    handle_conn(conn, btf, pcap, host);
                 }
             }
             Err(e) => eprintln!("[warden] accept: {e}"),
@@ -77,13 +74,7 @@ fn peer_allowed(conn: &UnixStream, allowed_uid: u32) -> bool {
 /// Reads frame-by-frame on the raw stream (no `BufReader`): a buffered reader
 /// would read past a frame boundary and swallow the sentinel byte that carries an
 /// inbound `SCM_RIGHTS` fd (e.g. the `Delegate` bpffs fd), dropping the fd.
-fn handle_conn<M: MapSource>(
-    conn: UnixStream,
-    registry: &M,
-    btf: &[(String, RawFd)],
-    pcap: &[RawFd],
-    host: &dyn HostOps,
-) {
+fn handle_conn(conn: UnixStream, btf: &[(String, RawFd)], pcap: &[RawFd], host: &dyn HostOps) {
     let mut reader = match conn.try_clone() {
         Ok(c) => c,
         Err(_) => return,
@@ -131,15 +122,9 @@ fn handle_conn<M: MapSource>(
     let mut pcap_next = 0usize;
 
     while let Ok(cmd) = read_frame::<_, Command>(&mut reader) {
-        // `GetRingbufFd` / `PcapOpen` answer out-of-band: an `FdReady` frame
-        // followed by a fd in an `SCM_RIGHTS` cmsg, so they bypass `dispatch`.
+        // `PcapOpen` answers out-of-band: an `FdReady` frame followed by a fd in an
+        // `SCM_RIGHTS` cmsg, so it bypasses `dispatch`.
         let ok = match &cmd {
-            Command::GetRingbufFd { program } => serve_passed_fd(
-                &mut writer,
-                registry
-                    .ringbuf_fd(program)
-                    .ok_or_else(|| format!("'{program}' is not a pinned ring-buffer map")),
-            ),
             Command::PcapOpen { iface, filter } => {
                 eprintln!("[warden] pcap open on {iface} (filter applied agent-side: {filter:?})");
                 if pcap_next < pcap.len() {
@@ -163,7 +148,7 @@ fn handle_conn<M: MapSource>(
                 }
             }
             Command::Delegate => serve_delegate(&mut writer, btf, pcap),
-            other => write_frame(&mut writer, &dispatch(other, registry, host)).is_ok(),
+            other => write_frame(&mut writer, &dispatch(other, host)).is_ok(),
         };
         if !ok {
             break;
@@ -231,45 +216,17 @@ fn serve_delegate(writer: &mut UnixStream, btf: &[(String, RawFd)], pcap: &[RawF
     send_msg_fds(writer.as_raw_fd(), &[0u8], &fds)
 }
 
-/// Map a request to a response. Map element ops go to `registry`; the conntrack
-/// read and the host-network ops go to `host` (run locally or forwarded to the
-/// resident netns-helper, transparently to the agent). `Attach`/`Detach` (loader-side)
-/// are answered `Unimplemented`.
-fn dispatch<M: MapSource>(cmd: &Command, registry: &M, host: &dyn HostOps) -> Response {
+/// Map a request to a response. The conntrack read and the host-network ops go to
+/// `host`. The fd-passing commands (`Delegate`, `PcapOpen`) are answered out of
+/// band by the caller and never reach here.
+fn dispatch(cmd: &Command, host: &dyn HostOps) -> Response {
     match cmd {
         Command::ConntrackDump => match host.conntrack_dump() {
             Ok(table) => Response::Conntrack { table },
             Err(message) => Response::Error { message },
         },
-        Command::MapLookup { map, key } => match registry.lookup(map, key) {
-            Ok(Some(value)) => Response::MapValue { found: true, value },
-            Ok(None) => Response::MapValue {
-                found: false,
-                value: Vec::new(),
-            },
-            Err(e) => Response::Error {
-                message: e.to_string(),
-            },
-        },
-        Command::MapUpdate {
-            map,
-            key,
-            value,
-            flags,
-        } => match registry.update(map, key, value, *flags) {
-            Ok(()) => Response::Ok,
-            Err(e) => Response::Error {
-                message: e.to_string(),
-            },
-        },
-        Command::MapDelete { map, key } => match registry.delete(map, key) {
-            Ok(()) => Response::Ok,
-            Err(e) => Response::Error {
-                message: e.to_string(),
-            },
-        },
-        // Host-network ops needing authority over the init netns. `host` runs them
-        // directly (netns-helper / bare-metal) or forwards them there (userns warden-serve).
+        // Host-network ops needing authority over the init netns, performed
+        // directly by the host-root warden.
         Command::ConntrackDelete { tuple } => result_to_response(host.conntrack_delete(tuple)),
         Command::ConntrackFlush => result_to_response(host.conntrack_flush()),
         Command::RouteAdd { route } => result_to_response(host.route_add(route)),

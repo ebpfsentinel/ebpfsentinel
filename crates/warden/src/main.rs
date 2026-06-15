@@ -8,10 +8,9 @@
 //! the extended privileges (`CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_NET_RAW`) and
 //! does nothing on its own initiative — it only answers validated requests.
 //!
-//! This binary serves the protocol against the maps pinned under its bpffs
-//! directory. The protocol logic itself lives in
-//! [`ebpfsentinel_warden::server`], so the agent's in-process `warden-serve` mode
-//! serves the exact same wire behaviour from the map fds it holds after loading.
+//! This binary is a pure privilege broker: it loads no eBPF and holds no maps (the
+//! rootless agent loads its own programs against the bpffs the warden delegates).
+//! The protocol logic itself lives in [`ebpfsentinel_warden::server`].
 
 #![allow(clippy::cast_possible_truncation)]
 
@@ -21,7 +20,6 @@ use std::os::unix::net::UnixListener;
 use std::process::ExitCode;
 
 use ebpfsentinel_warden::host_ops::LocalHostOps;
-use ebpfsentinel_warden::map_engine::NoMaps;
 use ebpfsentinel_warden::server::serve_loop;
 use ebpfsentinel_warden::{
     collect_module_btf_fds, enable_tcp_syncookies, open_pcap_pool, prioritize_and_cap_btf,
@@ -104,8 +102,7 @@ fn serve(sockpath: &str, allowed_uid: u32) -> ExitCode {
     );
 
     // The warden runs as host root in the init netns, so it performs host-network
-    // ops directly. It serves no map elements: `NoMaps` answers every map RPC with
-    // `UnknownMap` (the agent never issues them — it holds its own maps).
-    serve_loop(&listener, &NoMaps, &btf, &pcap, &LocalHostOps, allowed_uid);
+    // ops directly. It serves no map elements — the agent holds its own maps.
+    serve_loop(&listener, &btf, &pcap, &LocalHostOps, allowed_uid);
     ExitCode::SUCCESS
 }
