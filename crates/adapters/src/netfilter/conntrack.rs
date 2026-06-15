@@ -10,20 +10,16 @@
 //! the conntrack event poller that diffs its snapshots) therefore works only when
 //! the agent runs as real root in the host user namespace — i.e. the
 //! single-container mode where the launcher keeps the agent as root (e.g. under
-//! Docker). Under the non-root BPF-token deployments (the broker-mode agent, or
-//! the single-container agent dropped to uid 65534 under a containerd-based
-//! runtime) the agent is a non-root uid in a child user namespace, where
-//! `CAP_DAC_OVERRIDE` is unusable against a file owned by the unmapped host root,
-//! so a direct open returns `EACCES`. In **split-broker mode** the agent instead
-//! reads the table through the broker: the privileged broker (real root in the
-//! host network namespace) reads `/proc/net/nf_conntrack` and returns the bytes
-//! over its socket, selected by `EBPFSENTINEL_BROKER_SOCK` (see
-//! `fetch_conntrack_via_broker`). In single-container non-root mode there is no
-//! broker, so the open still fails; the eBPF conntrack datapath covers the
-//! functionality and the poller logs the failure once and continues. Flushing
-//! (`conntrack -F`) and kernel sysctl writes for timeout parameters require
-//! `CAP_NET_ADMIN` (netlink), which the user-namespace agent lacks over the host
-//! netns regardless of the broker.
+//! Docker). Under the rootless token deployment the agent is a non-root uid in a
+//! child user namespace, where `CAP_DAC_OVERRIDE` is unusable against a file owned
+//! by the unmapped host root, so a direct open returns `EACCES`; the agent instead
+//! proxies every conntrack operation (table read, flush, targeted delete) to the
+//! warden over its typed protocol, selected by `EBPFSENTINEL_WARDEN_SOCK`. The
+//! warden in turn runs the host-netns ops (`conntrack -F`, netlink delete, the
+//! `0440 root` proc read) through its resident netns-helper, which holds the
+//! `CAP_NET_ADMIN` the user-namespace agent lacks over the host netns. When no
+//! warden socket is set (single-container root, or bare metal) the reader opens
+//! `/proc` directly.
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -40,19 +36,11 @@ use tracing::{debug, warn};
 const DEFAULT_NF_CONNTRACK_PATH: &str = "/proc/net/nf_conntrack";
 /// Default path to the kernel conntrack entry count.
 const DEFAULT_NF_CONNTRACK_COUNT_PATH: &str = "/proc/sys/net/netfilter/nf_conntrack_count";
-/// Env var set by the broker-connect launcher with the broker `AF_UNIX` socket
-/// path. When present, the non-root user-namespace agent reads the conntrack
-/// table through the privileged broker (it cannot open the `0440 root` proc file
-/// itself); when absent (single-container root, or bare metal) it reads `/proc`.
-const BROKER_SOCK_ENV: &str = "EBPFSENTINEL_BROKER_SOCK";
-/// Command byte selecting a conntrack-table read on a broker connection (must
-/// match `CMD_CONNTRACK` in the warden-token broker).
-const BROKER_CMD_CONNTRACK: u8 = b'C';
 /// Env var set for the rootless agent with the warden control-plane socket. When
 /// present, every conntrack operation (table read, flush, targeted delete) is
 /// proxied to the warden over its typed protocol instead of touching `/proc` or
 /// the `conntrack` CLI directly — the rootless agent holds none of the required
-/// privileges. Takes precedence over the legacy raw broker read path.
+/// privileges.
 const WARDEN_SOCK_ENV: &str = "EBPFSENTINEL_WARDEN_SOCK";
 
 /// Reads the kernel netfilter conntrack table via `/proc/net/nf_conntrack`.
@@ -66,9 +54,6 @@ pub struct ProcNetfilterConntrackPort {
     nf_conntrack_path: PathBuf,
     /// Path to the proc conntrack count file.
     nf_conntrack_count_path: PathBuf,
-    /// Broker `AF_UNIX` socket to proxy table reads through, when the agent runs
-    /// non-root in a child user namespace and cannot read the proc file directly.
-    broker_sock: Option<PathBuf>,
     /// Warden control-plane client. When present (rootless agent), every conntrack
     /// operation is proxied to the warden over its typed protocol. The client
     /// caches its connection, so it is held behind a `Mutex` to satisfy the `&self`
@@ -84,24 +69,19 @@ impl ProcNetfilterConntrackPort {
             .map(PathBuf::from)
             .filter(|p| !p.as_os_str().is_empty())
             .map(|p| Mutex::new(ReconnectingClient::new(p)));
-        let broker_sock = std::env::var_os(BROKER_SOCK_ENV)
-            .map(PathBuf::from)
-            .filter(|p| !p.as_os_str().is_empty());
         Self {
             nf_conntrack_path: PathBuf::from(DEFAULT_NF_CONNTRACK_PATH),
             nf_conntrack_count_path: PathBuf::from(DEFAULT_NF_CONNTRACK_COUNT_PATH),
-            broker_sock,
             warden,
         }
     }
 
-    /// Build a port with injectable paths for unit testing (no broker, no warden).
+    /// Build a port with injectable paths for unit testing (no warden).
     #[must_use]
     pub fn with_paths(nf_conntrack: PathBuf, nf_conntrack_count: PathBuf) -> Self {
         Self {
             nf_conntrack_path: nf_conntrack,
             nf_conntrack_count_path: nf_conntrack_count,
-            broker_sock: None,
             warden: None,
         }
     }
@@ -180,38 +160,10 @@ fn parse_deleted_count(text: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// Fetch the raw conntrack table from the broker: connect to its `AF_UNIX` socket,
-/// send the `CMD_CONNTRACK` byte, then read a little-endian `u32` length followed
-/// by that many bytes. The broker (real root in the host netns) reads
-/// `/proc/net/nf_conntrack` for us; the returned bytes are the same text the proc
-/// file would yield.
-fn fetch_conntrack_via_broker(sock: &Path) -> Result<Vec<u8>, DomainError> {
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
-
-    let mut stream = UnixStream::connect(sock).map_err(|e| {
-        DomainError::EngineError(format!("failed to connect broker {}: {e}", sock.display()))
-    })?;
-    stream
-        .write_all(&[BROKER_CMD_CONNTRACK])
-        .map_err(|e| DomainError::EngineError(format!("broker conntrack request failed: {e}")))?;
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).map_err(|e| {
-        DomainError::EngineError(format!("broker conntrack length read failed: {e}"))
-    })?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    let mut data = vec![0u8; len];
-    stream
-        .read_exact(&mut data)
-        .map_err(|e| DomainError::EngineError(format!("broker conntrack body read failed: {e}")))?;
-    Ok(data)
-}
-
 impl ConnTrackMapPort for ProcNetfilterConntrackPort {
     fn get_connections(&self, limit: usize) -> Result<Vec<Connection>, DomainError> {
         // Rootless agent: proxy the read through the warden's typed protocol.
-        // Legacy broker mode: proxy through the raw broker byte protocol.
-        // Otherwise read the proc file directly. Same text format every way.
+        // Otherwise read the proc file directly. Same text format either way.
         let reader: Box<dyn std::io::BufRead> = if let Some(warden) = &self.warden {
             let bytes = warden
                 .lock()
@@ -221,8 +173,6 @@ impl ConnTrackMapPort for ProcNetfilterConntrackPort {
                     DomainError::EngineError(format!("warden conntrack dump failed: {e}"))
                 })?;
             Box::new(std::io::Cursor::new(bytes))
-        } else if let Some(sock) = &self.broker_sock {
-            Box::new(std::io::Cursor::new(fetch_conntrack_via_broker(sock)?))
         } else {
             let file = std::fs::File::open(&self.nf_conntrack_path).map_err(|e| {
                 DomainError::EngineError(format!(

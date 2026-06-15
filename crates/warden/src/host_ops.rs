@@ -16,9 +16,9 @@
 //!
 //! * [`LocalHostOps`] runs the op directly, for a warden that genuinely lives in
 //!   the init netns with the capabilities (the bare-metal `warden serve` binary
-//!   and the resident broker).
-//! * [`BrokerHostOps`] forwards the op over `warden-proto` to such a broker, for a
-//!   `warden-serve` that sits in a userns and must borrow the broker's authority.
+//!   and the resident netns-helper).
+//! * [`HelperHostOps`] forwards the op over `warden-proto` to such a helper, for a
+//!   `warden-serve` that sits in a userns and must borrow the helper's authority.
 //!
 //! Either way the server's wire behaviour is identical; only the executor moves.
 
@@ -54,7 +54,7 @@ pub trait HostOps: Send + Sync {
 }
 
 /// Performs each op directly, for a warden that holds the capabilities in the init
-/// netns (the bare-metal `warden serve` binary and the resident broker).
+/// netns (the bare-metal `warden serve` binary and the resident netns-helper).
 pub struct LocalHostOps;
 
 impl HostOps for LocalHostOps {
@@ -84,16 +84,17 @@ impl HostOps for LocalHostOps {
     }
 }
 
-/// Forwards each op over `warden-proto` to a resident broker living in the init
-/// netns. Used by `warden-serve`, which runs in a user namespace where these ops
-/// would fail locally. The connection reconnects on its own if the broker bounces.
-pub struct BrokerHostOps {
+/// Forwards each op over `warden-proto` to a resident netns-helper living in the
+/// init netns. Used by `warden-serve`, which runs in a user namespace where these
+/// ops would fail locally. The connection reconnects on its own if the helper
+/// bounces.
+pub struct HelperHostOps {
     client: Mutex<ReconnectingClient>,
 }
 
-impl BrokerHostOps {
-    /// Bind to the broker socket at `sock`. Connection is lazy — the first op
-    /// dials the broker, which may legitimately start after `warden-serve`.
+impl HelperHostOps {
+    /// Bind to the netns-helper socket at `sock`. Connection is lazy — the first op
+    /// dials the helper, which may legitimately start after `warden-serve`.
     #[must_use]
     pub fn connect(sock: impl Into<std::path::PathBuf>) -> Self {
         Self {
@@ -110,12 +111,12 @@ impl BrokerHostOps {
         let mut client = self
             .client
             .lock()
-            .map_err(|_| "broker client mutex poisoned".to_string())?;
+            .map_err(|_| "netns-helper client mutex poisoned".to_string())?;
         op(&mut client).map_err(|e| e.to_string())
     }
 }
 
-impl HostOps for BrokerHostOps {
+impl HostOps for HelperHostOps {
     fn conntrack_dump(&self) -> Result<Vec<u8>, String> {
         self.with(ReconnectingClient::conntrack_dump)
     }

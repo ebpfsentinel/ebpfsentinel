@@ -31,9 +31,10 @@
 #
 # This single-container layout grants the agent container CAP_SYS_ADMIN for the
 # bootstrap. To keep the agent container itself off CAP_SYS_ADMIN (non-root +
-# cap-drop ALL), use the split-broker layout instead: dist/docker-compose.broker.yml
-# (a privileged `broker` service delegates the bpffs over a socket; the `agent`
-# service holds no host capabilities). See operations/deployment/bpf-token.md.
+# cap-drop ALL), use the rootless warden-serve layout instead:
+# dist/docker-compose.warden.yml (a privileged `warden` loads + serves the eBPF
+# datapath; the `agent` service holds no host capabilities). See
+# operations/deployment/bpf-token.md.
 #
 # Hot-reload: edit config/ebpfsentinel.yaml while running — the agent
 # detects changes automatically and reloads rules without restart.

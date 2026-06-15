@@ -1,5 +1,4 @@
-//! `warden serve` handles the `Delegate` bpffs handshake (the `warden serve`
-//! equivalent of `warden-token --broker-serve`). The happy path needs a real
+//! `warden serve` handles the `Delegate` bpffs handshake. The happy path needs a real
 //! `fsopen("bpf")` fd from a child user namespace and `CAP_SYS_ADMIN`, so it runs
 //! in the VM lane; here we drive the protocol with a non-bpffs fd and assert the
 //! delegation is refused cleanly — proving the command frame is read, the

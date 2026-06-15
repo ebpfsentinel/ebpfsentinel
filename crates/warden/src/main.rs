@@ -84,9 +84,8 @@ fn serve(sockpath: &str, allowed_uid: u32, maps_dir: &str) -> ExitCode {
 
     // Open the module-BTF and pcap fds once (privileged: BTF enumeration needs
     // CAP_SYS_ADMIN, the AF_PACKET pool needs CAP_NET_RAW). They are handed to the
-    // agent on `Delegate`, making `warden serve` a superset of the legacy
-    // `warden-token --broker-serve` lineage. Without the capabilities both sets
-    // come back empty and delegation simply carries no fds.
+    // agent on `Delegate`. Without the capabilities both sets come back empty and
+    // delegation simply carries no fds.
     let pcap = open_pcap_pool();
     let btf = prioritize_and_cap_btf(collect_module_btf_fds(), pcap.len());
     eprintln!(

@@ -129,7 +129,7 @@ pub trait MapSource {
     fn ringbuf_fd(&self, name: &str) -> Option<RawFd>;
 }
 
-/// A [`MapSource`] holding no maps. Backs the resident broker, which exists only
+/// A [`MapSource`] holding no maps. Backs the resident netns-helper, which exists only
 /// to perform host-network operations in the init netns — it owns no eBPF maps
 /// (the agent's `warden-serve` holds those), so every map command is refused.
 pub struct NoMaps;

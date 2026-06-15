@@ -233,7 +233,7 @@ fn serve_delegate(writer: &mut UnixStream, btf: &[(String, RawFd)], pcap: &[RawF
 
 /// Map a request to a response. Map element ops go to `registry`; the conntrack
 /// read and the host-network ops go to `host` (run locally or forwarded to the
-/// resident broker, transparently to the agent). `Attach`/`Detach` (loader-side)
+/// resident netns-helper, transparently to the agent). `Attach`/`Detach` (loader-side)
 /// are answered `Unimplemented`.
 fn dispatch<M: MapSource>(cmd: &Command, registry: &M, host: &dyn HostOps) -> Response {
     match cmd {
@@ -269,7 +269,7 @@ fn dispatch<M: MapSource>(cmd: &Command, registry: &M, host: &dyn HostOps) -> Re
             },
         },
         // Host-network ops needing authority over the init netns. `host` runs them
-        // directly (broker / bare-metal) or forwards them there (userns warden-serve).
+        // directly (netns-helper / bare-metal) or forwards them there (userns warden-serve).
         Command::ConntrackDelete { tuple } => result_to_response(host.conntrack_delete(tuple)),
         Command::ConntrackFlush => result_to_response(host.conntrack_flush()),
         Command::RouteAdd { route } => result_to_response(host.route_add(route)),

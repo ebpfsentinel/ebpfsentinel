@@ -1,7 +1,6 @@
 //! `ebpfsentinel-warden` — shared privileged primitives for rootless, token-only
-//! eBPF loading, backing both the `warden-token` launcher binary
-//! (all-in-one / broker-serve / broker-connect modes, via [`run`]) and the
-//! `warden` control-plane binary.
+//! eBPF loading, backing both the `warden-token` all-in-one launcher binary
+//! (via [`run`]) and the `warden` control-plane binary.
 //!
 //! BPF token delegation is a *user-namespace* feature: `BPF_TOKEN_CREATE` only
 //! succeeds against a bpffs whose superblock is owned by a user namespace the
@@ -67,10 +66,10 @@ const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
 
 const DEFAULT_BPFFS: &str = "/sys/fs/bpf/ebpfsentinel";
 
-/// Default socket the resident broker binds in the init netns and that the userns
-/// `warden-serve` forwards host-network ops to. Override with the
-/// `EBPFSENTINEL_BROKER_SOCK` environment variable.
-const DEFAULT_BROKER_SOCK: &str = "/run/ebpfsentinel-warden-broker.sock";
+/// Default socket the resident netns-helper binds in the init netns and that the
+/// userns `warden-serve` forwards host-network ops to. Override with the
+/// `EBPFSENTINEL_NETNS_HELPER_SOCK` environment variable.
+const DEFAULT_NETNS_HELPER_SOCK: &str = "/run/ebpfsentinel-netns-helper.sock";
 
 /// Unprivileged uid/gid the all-in-one child drops to before creating its user
 /// namespace. `enter_userns` writes a single-entry self-map (`0 <uid> 1`); the
@@ -124,9 +123,10 @@ unsafe fn bpf(cmd: libc::c_int, attr: *mut libc::c_void, size: usize) -> libc::c
 }
 
 /// Collect `(module_name, fd)` for every loaded module BTF. Opened here (global
-/// root, before the userns fork / while the broker holds `CAP_SYS_ADMIN`) so the
-/// fds can be inherited across `execv` (all-in-one) or passed over `SCM_RIGHTS`
-/// (broker). Format with [`fmt_btf_env`] for the `EBPF_MODULE_BTF_FDS` env var.
+/// root, before the userns fork, while we still hold `CAP_SYS_ADMIN`) so the fds
+/// can be inherited across `execv` (all-in-one) or passed over `SCM_RIGHTS` (the
+/// `serve_loop` delegation handshake). Format with [`fmt_btf_env`] for the
+/// `EBPF_MODULE_BTF_FDS` env var.
 pub fn collect_module_btf_fds() -> Vec<(String, RawFd)> {
     let mut out: Vec<(String, RawFd)> = Vec::new();
     let mut id: u32 = 0;
@@ -199,7 +199,7 @@ pub fn collect_module_btf_fds() -> Vec<(String, RawFd)> {
             continue;
         }
         out.push((nm.into_owned(), fd));
-        // Keep fd open (inherited by the child / passed by the broker); do NOT close.
+        // Keep fd open (inherited by the child / passed over delegation); do NOT close.
     }
     out
 }
@@ -231,7 +231,7 @@ const DEFAULT_PCAP_POOL: usize = 2;
 /// inside its child user namespace, fails the `CAP_NET_RAW` check on
 /// `socket(AF_PACKET)`. Protocol `0` keeps the sockets silent until the agent
 /// binds one to an interface with `ETH_P_ALL`. The fds are cleared of
-/// `O_CLOEXEC` so they survive the child's `execv` / can be passed by the broker.
+/// `O_CLOEXEC` so they survive the child's `execv` / can be passed over delegation.
 /// Pool size is `EBPFSENTINEL_PCAP_POOL` (default `DEFAULT_PCAP_POOL`, capped 32).
 /// Format with [`fmt_pcap_env`] for the `EBPFSENTINEL_PCAP_FDS` env var.
 pub fn open_pcap_pool() -> Vec<RawFd> {
@@ -254,7 +254,7 @@ pub fn open_pcap_pool() -> Vec<RawFd> {
             libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
         }
         out.push(fd);
-        // Keep fd open (inherited by the child / passed by the broker); do NOT close.
+        // Keep fd open (inherited by the child / passed over delegation); do NOT close.
     }
     out
 }
@@ -359,8 +359,8 @@ fn fsconfig_string(fs: RawFd, key: &str, value: &str) {
 
 /// Apply `delegate_*=any` + `FSCONFIG_CMD_CREATE` to a bpffs `fs_fd` whose
 /// superblock is owned by a (descendant) user namespace. Requires `CAP_SYS_ADMIN`
-/// in `init_user_ns` — done by the all-in-one parent or the broker. Returns
-/// `true` on success. Shared by the all-in-one fork path and the broker.
+/// in `init_user_ns` — done by the all-in-one parent or the bare-metal `warden
+/// serve`. Returns `true` on success.
 pub fn delegate_over_fd(fs: RawFd) -> bool {
     fsconfig_string(fs, "delegate_cmds", "any");
     fsconfig_string(fs, "delegate_maps", "any");
@@ -462,8 +462,8 @@ fn child(bpffs: &str, agent_argv: &[CString], modfds: &str, pcapfds: &str, sv1: 
 }
 
 /// Enter a fresh user namespace (single-uid self-map) and a private mount
-/// namespace. Shared by the all-in-one fork child and the broker-connect shim;
-/// exits the process on failure. Must run single-threaded (before any runtime).
+/// namespace. Used by the all-in-one fork child; exits the process on failure.
+/// Must run single-threaded (before any runtime).
 fn enter_userns() {
     let (uid, gid) = (unsafe { libc::getuid() }, unsafe { libc::getgid() });
     if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
@@ -542,97 +542,18 @@ pub fn perror(ctx: &str) {
     eprintln!("[warden-token] {ctx}: {e}");
 }
 
-// ── Broker mode: protocol + fd passing ─────────────────────────────────────
+// ── fd passing over SCM_RIGHTS ──────────────────────────────────────────────
 //
-// In split deployments the privileged delegation lives in a separate `broker`
-// process/container; the unprivileged agent container connects over an AF_UNIX
-// socket. The agent sends its own bpffs `fs_fd`; the broker delegates it and
-// replies with the module-BTF and pcap fds the agent would otherwise need
-// `CAP_SYS_ADMIN` / `CAP_NET_RAW` to open. This relocates the privilege into the
-// small broker — the agent runs cap-less.
+// The launcher hands the module-BTF and pcap fds to its userns child across the
+// `fork`/`execv`; the `serve_loop` delegation handshake (`Command::Delegate`)
+// passes them over a socket when the privileged and rootless halves run as
+// separate processes. Both paths use the `SCM_RIGHTS` primitives below.
 
-/// Reply header magic (`ebpfsentinel token broker v1`).
-const PROTO_MAGIC: [u8; 4] = *b"ETB1";
-
-/// First byte a client writes on a broker connection, selecting the request.
-/// `CMD_DELEGATE` runs the bpffs-delegation + fd-handout handshake; `CMD_CONNTRACK`
-/// asks the (host-userns, privileged) broker to read the conntrack table on the
-/// non-root agent's behalf — the agent cannot read the `0440 root` proc file from
-/// its child user namespace.
-const CMD_DELEGATE: u8 = b'D';
-const CMD_CONNTRACK: u8 = b'C';
-/// Kernel conntrack table the broker reads for `CMD_CONNTRACK`.
-const NF_CONNTRACK_PROC: &str = "/proc/net/nf_conntrack";
-
-/// Write the whole buffer to `fd`, looping over short writes. Returns `false` on
-/// error.
-fn write_all_fd(fd: RawFd, mut buf: &[u8]) -> bool {
-    while !buf.is_empty() {
-        let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
-        if n <= 0 {
-            return false;
-        }
-        buf = &buf[n as usize..];
-    }
-    true
-}
-
-/// Serve a `CMD_CONNTRACK` request: read `/proc/net/nf_conntrack` (the broker is
-/// real root in the host network namespace) and reply with a little-endian `u32`
-/// length followed by the raw table bytes. The agent parses them exactly as if it
-/// had read the file itself.
-fn broker_serve_conntrack(conn: RawFd) {
-    let data = std::fs::read(NF_CONNTRACK_PROC).unwrap_or_default();
-    let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
-    write_all_fd(conn, &len.to_le_bytes());
-    write_all_fd(conn, &data[..len as usize]);
-}
 /// `SCM_RIGHTS` cannot carry more than `SCM_MAX_FD` (253) fds per message.
 const SCM_MAX_FDS: usize = 253;
 /// Modules whose BTF the eBPF programs need (conntrack/fou kfuncs) — kept at the
 /// front of the fd set so a cap never drops them.
 const NEEDED_MODULE_BTF: &[&str] = &["nf_conntrack", "fou"];
-
-/// Encode the broker→agent reply header: status + module-BTF names + pcap count.
-/// The fds themselves travel in the `SCM_RIGHTS` cmsg, ordered btf-then-pcap.
-fn encode_reply(ok: bool, btf_names: &[&str], pcap_count: usize) -> Vec<u8> {
-    let mut p = Vec::with_capacity(9 + btf_names.iter().map(|n| 1 + n.len()).sum::<usize>());
-    p.extend_from_slice(&PROTO_MAGIC);
-    p.push(u8::from(ok));
-    p.extend_from_slice(
-        &u16::try_from(btf_names.len())
-            .unwrap_or(u16::MAX)
-            .to_le_bytes(),
-    );
-    p.extend_from_slice(&u16::try_from(pcap_count).unwrap_or(u16::MAX).to_le_bytes());
-    for n in btf_names {
-        let bytes = n.as_bytes();
-        let len = bytes.len().min(255);
-        p.push(u8::try_from(len).unwrap_or(255));
-        p.extend_from_slice(&bytes[..len]);
-    }
-    p
-}
-
-/// Decode the reply header. Returns `(ok, btf_names, pcap_count)`.
-fn decode_reply(buf: &[u8]) -> Option<(bool, Vec<String>, usize)> {
-    if buf.len() < 9 || buf[0..4] != PROTO_MAGIC {
-        return None;
-    }
-    let ok = buf[4] != 0;
-    let btf_count = u16::from_le_bytes([buf[5], buf[6]]) as usize;
-    let pcap_count = u16::from_le_bytes([buf[7], buf[8]]) as usize;
-    let mut off = 9;
-    let mut names = Vec::with_capacity(btf_count);
-    for _ in 0..btf_count {
-        let len = *buf.get(off)? as usize;
-        off += 1;
-        let end = off.checked_add(len)?;
-        names.push(String::from_utf8_lossy(buf.get(off..end)?).into_owned());
-        off = end;
-    }
-    Some((ok, names, pcap_count))
-}
 
 /// Send `payload` bytes plus `fds` over one `SCM_RIGHTS` control message.
 pub fn send_msg_fds(sock: RawFd, payload: &[u8], fds: &[RawFd]) -> bool {
@@ -659,47 +580,6 @@ pub fn send_msg_fds(sock: RawFd, payload: &[u8], fds: &[RawFd]) -> bool {
     unsafe { libc::sendmsg(sock, &msg, 0) >= 0 }
 }
 
-/// Receive up to `buf.len()` payload bytes plus up to `max_fds` fds.
-/// Returns `(payload_len, fds)`; `(0, [])` on error.
-pub fn recv_msg_fds(sock: RawFd, buf: &mut [u8], max_fds: usize) -> (usize, Vec<RawFd>) {
-    let mut iov = libc::iovec {
-        iov_base: buf.as_mut_ptr().cast(),
-        iov_len: buf.len(),
-    };
-    let mut cbuf =
-        vec![0u8; unsafe { libc::CMSG_SPACE((max_fds * mem::size_of::<RawFd>()) as u32) } as usize];
-    let mut msg: libc::msghdr = unsafe { mem::zeroed() };
-    msg.msg_iov = ptr::from_mut(&mut iov);
-    msg.msg_iovlen = 1;
-    msg.msg_control = cbuf.as_mut_ptr().cast();
-    msg.msg_controllen = cbuf.len() as _;
-    let n = unsafe { libc::recvmsg(sock, &mut msg, 0) };
-    if n < 0 {
-        return (0, Vec::new());
-    }
-    // A truncated control buffer means the kernel silently dropped fds; treat it
-    // as an error rather than acting on a partial, attacker-influenced fd set.
-    if msg.msg_flags & libc::MSG_CTRUNC != 0 {
-        return (0, Vec::new());
-    }
-    let mut fds = Vec::new();
-    unsafe {
-        let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
-        while !cmsg.is_null() {
-            if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
-                let hdr = libc::CMSG_LEN(0) as usize;
-                let data_len = (*cmsg).cmsg_len as usize - hdr;
-                let count = data_len / mem::size_of::<RawFd>();
-                let mut tmp = vec![0 as RawFd; count];
-                ptr::copy_nonoverlapping(libc::CMSG_DATA(cmsg), tmp.as_mut_ptr().cast(), data_len);
-                fds.extend_from_slice(&tmp);
-            }
-            cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
-        }
-    }
-    (n as usize, fds)
-}
-
 /// Keep needed-module BTF fds at the front and cap the set so a single
 /// `SCM_RIGHTS` message (plus the pcap fds) stays under `SCM_MAX_FDS`.
 pub fn prioritize_and_cap_btf(
@@ -710,7 +590,7 @@ pub fn prioritize_and_cap_btf(
     let cap = SCM_MAX_FDS.saturating_sub(pcap_count).saturating_sub(1);
     if btf.len() > cap {
         eprintln!(
-            "[broker] {} module BTF fds exceed the SCM_RIGHTS cap; passing {} (needed modules kept)",
+            "[warden] {} module BTF fds exceed the SCM_RIGHTS cap; passing {} (needed modules kept)",
             btf.len(),
             cap
         );
@@ -719,56 +599,6 @@ pub fn prioritize_and_cap_btf(
         }
     }
     btf
-}
-
-fn bind_listen_unix(sockpath: &str) -> RawFd {
-    let _ = std::fs::remove_file(sockpath);
-    let s = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-    if s < 0 {
-        perror("socket(AF_UNIX)");
-        return -1;
-    }
-    let mut sa: libc::sockaddr_un = unsafe { mem::zeroed() };
-    sa.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    for (dst, b) in sa.sun_path.iter_mut().zip(sockpath.bytes()) {
-        *dst = b as libc::c_char;
-    }
-    let len = mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
-    if unsafe { libc::bind(s, ptr::from_ref(&sa).cast(), len) } != 0 {
-        perror("bind");
-        return -1;
-    }
-    if let Ok(cpath) = CString::new(sockpath) {
-        unsafe { libc::chmod(cpath.as_ptr(), 0o666) };
-    }
-    if unsafe { libc::listen(s, 8) } != 0 {
-        perror("listen");
-        return -1;
-    }
-    s
-}
-
-/// Serve one agent connection: receive its bpffs `fs_fd`, delegate it, and reply
-/// with the module-BTF + pcap fds (broker keeps its originals open for the next
-/// agent / restart).
-fn broker_handle_conn(conn: RawFd, btf: &[(String, RawFd)], pcap: &[RawFd]) {
-    let fs = recv_fd(conn);
-    if fs < 0 {
-        let payload = encode_reply(false, &[], 0);
-        send_msg_fds(conn, &payload, &[]);
-        return;
-    }
-    let ok = delegate_over_fd(fs);
-    let names: Vec<&str> = btf.iter().map(|(n, _)| n.as_str()).collect();
-    let payload = encode_reply(ok, &names, pcap.len());
-    if ok {
-        let mut fds: Vec<RawFd> = btf.iter().map(|(_, fd)| *fd).collect();
-        fds.extend_from_slice(pcap);
-        send_msg_fds(conn, &payload, &fds);
-    } else {
-        send_msg_fds(conn, &payload, &[]);
-    }
-    unsafe { libc::close(fs) };
 }
 
 /// Enable kernel SYN cookies in always-on mode (`net.ipv4.tcp_syncookies=2`)
@@ -788,154 +618,19 @@ pub fn enable_tcp_syncookies() {
     }
 }
 
-/// `--broker-serve <sock>`: the privileged sidecar. Opens module BTF + the pcap
-/// pool once, then serves agent connections forever.
-fn run_broker_serve(sockpath: &str) -> ExitCode {
-    enable_tcp_syncookies();
-    let btf = prioritize_and_cap_btf(collect_module_btf_fds(), 0);
-    let pcap = open_pcap_pool();
-    let s = bind_listen_unix(sockpath);
-    if s < 0 {
-        return ExitCode::FAILURE;
-    }
-    eprintln!(
-        "[broker] serving on {sockpath} ({} module BTF fds, {} pcap fds, uid={})",
-        btf.len(),
-        pcap.len(),
-        unsafe { libc::getuid() }
-    );
-    loop {
-        let c = unsafe { libc::accept(s, ptr::null_mut(), ptr::null_mut()) };
-        if c < 0 {
-            perror("accept");
-            continue;
-        }
-        // First byte selects the request: delegation handshake or a conntrack
-        // table read on behalf of the non-root agent.
-        let mut cmd = [0u8; 1];
-        if unsafe { libc::read(c, cmd.as_mut_ptr().cast(), 1) } == 1 {
-            match cmd[0] {
-                CMD_DELEGATE => broker_handle_conn(c, &btf, &pcap),
-                CMD_CONNTRACK => broker_serve_conntrack(c),
-                other => eprintln!("[broker] unknown command byte {other:#x}"),
-            }
-        }
-        unsafe { libc::close(c) };
-    }
-}
-
-/// `--broker-connect <sock>`: the UNPRIVILEGED agent-container entrypoint.
-/// Creates its own user namespace, `fsopen`s a bpffs, has the broker delegate it
-/// over `sock`, receives the module-BTF + pcap fds, sets the env the agent reads,
-/// then execs the agent. Holds no `CAP_SYS_ADMIN` / `CAP_NET_RAW`. Never returns.
-fn run_broker_connect(sock: &str, bpffs: &str, agent_argv: &[CString]) -> ! {
-    enter_userns();
-    let fs = fsopen_bpf();
-
-    let conn = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-    let mut sa: libc::sockaddr_un = unsafe { mem::zeroed() };
-    sa.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    for (dst, b) in sa.sun_path.iter_mut().zip(sock.bytes()) {
-        *dst = b as libc::c_char;
-    }
-    let len = mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
-    if unsafe { libc::connect(conn, ptr::from_ref(&sa).cast(), len) } != 0 {
-        perror("connect broker");
-        std::process::exit(1);
-    }
-    // Select the delegation handshake on this connection.
-    if !write_all_fd(conn, &[CMD_DELEGATE]) {
-        perror("write broker command");
-        std::process::exit(1);
-    }
-    if !send_fd(conn, fs) {
-        perror("send_fd broker");
-        std::process::exit(1);
-    }
-
-    let mut buf = [0u8; 8192];
-    let (n, fds) = recv_msg_fds(conn, &mut buf, SCM_MAX_FDS);
-    let Some((ok, btf_names, pcap_count)) = decode_reply(&buf[..n]) else {
-        eprintln!("[warden-token] malformed broker reply");
-        std::process::exit(1);
-    };
-    if !ok {
-        eprintln!("[warden-token] broker failed to delegate the bpffs");
-        std::process::exit(1);
-    }
-    let nbtf = btf_names.len();
-    if fds.len() < nbtf + pcap_count {
-        eprintln!(
-            "[warden-token] broker sent {} fds, expected {}",
-            fds.len(),
-            nbtf + pcap_count
-        );
-        std::process::exit(1);
-    }
-    // Clear O_CLOEXEC so the received fds survive execv into the agent.
-    for &fd in &fds {
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-        }
-    }
-    let modfds = btf_names
-        .iter()
-        .zip(&fds[..nbtf])
-        .map(|(name, fd)| format!("{name}={fd}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let pcapfds = fds[nbtf..nbtf + pcap_count]
-        .iter()
-        .map(RawFd::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    unsafe {
-        libc::setenv(
-            c"EBPF_MODULE_BTF_FDS".as_ptr(),
-            CString::new(modfds).unwrap().as_ptr(),
-            1,
-        );
-        if !pcapfds.is_empty() {
-            libc::setenv(
-                c"EBPFSENTINEL_PCAP_FDS".as_ptr(),
-                CString::new(pcapfds).unwrap().as_ptr(),
-                1,
-            );
-        }
-        // Tell the agent where to reach the broker for conntrack reads: it cannot
-        // read the 0440-root proc file from its child user namespace, so it proxies
-        // each snapshot through the privileged broker (CMD_CONNTRACK).
-        libc::setenv(
-            c"EBPFSENTINEL_BROKER_SOCK".as_ptr(),
-            CString::new(sock).unwrap().as_ptr(),
-            1,
-        );
-    }
-    mount_and_exec(fs, bpffs, agent_argv);
-}
-
-/// Return the value following `flag` in `args`, if present.
-fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    args.iter()
-        .position(|a| a == flag)
-        .and_then(|i| args.get(i + 1))
-        .map(String::as_str)
-}
-
-/// Spawn the resident host-ops broker on a background thread: bind `sock` and
-/// answer conntrack / route / ARP commands with init-netns authority for the
-/// userns `warden-serve`. The thread runs for the process's lifetime; the parent
-/// reaps the agent on the main thread, and process teardown stops the broker.
-fn serve_broker(sock: &str) {
+/// Spawn the resident netns-helper on a background thread: bind `sock` and answer
+/// conntrack / route / ARP commands with init-netns authority for the userns
+/// `warden-serve`. The thread runs for the process's lifetime; the parent reaps
+/// the agent on the main thread, and process teardown stops the helper.
+fn serve_netns_helper(sock: &str) {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
 
     // The only legitimate peer is `warden-serve`, which the launcher forked into a
     // child user namespace mapping uid 0 → the launcher's own uid (identity for a
     // global-root launcher: it stays privileged so it can load eBPF). It therefore
-    // presents the launcher's uid to this init-netns broker — gate on that, not on
-    // the rootless consumer's uid (the consumer never talks to the broker).
+    // presents the launcher's uid to this init-netns helper — gate on that, not on
+    // the rootless consumer's uid (the consumer never talks to the helper).
     let allowed_uid = unsafe { libc::getuid() };
     let sock = sock.to_string();
     std::thread::spawn(move || {
@@ -943,7 +638,7 @@ fn serve_broker(sock: &str) {
         let listener = match UnixListener::bind(&sock) {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("[broker] bind {sock}: {e}");
+                eprintln!("[netns-helper] bind {sock}: {e}");
                 return;
             }
         };
@@ -951,9 +646,9 @@ fn serve_broker(sock: &str) {
         // userns `warden-serve` connect while non-matching uids are rejected at
         // accept.
         if let Err(e) = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666)) {
-            eprintln!("[broker] chmod {sock}: {e}");
+            eprintln!("[netns-helper] chmod {sock}: {e}");
         }
-        eprintln!("[broker] resident host-ops broker on {sock} (peer uid {allowed_uid})");
+        eprintln!("[netns-helper] resident host-ops helper on {sock} (peer uid {allowed_uid})");
         server::serve_loop(
             &listener,
             &map_engine::NoMaps,
@@ -965,26 +660,19 @@ fn serve_broker(sock: &str) {
     });
 }
 
-/// Entry point for the `warden-token` binary: dispatches the
-/// all-in-one, broker-serve and broker-connect launcher modes. Exposed from the
-/// library so the privileged primitives are shared with the `warden` binary.
+/// Entry point for the `warden-token` binary: the all-in-one launcher. Stays
+/// global root in the init netns, forks a userns child that loads eBPF via the
+/// BPF token and execs the agent in `warden-serve` mode, and serves the resident
+/// netns-helper for host-network ops. Exposed from the library so the privileged
+/// primitives are shared with the `warden` binary.
 pub fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
-    // Broker mode: privileged sidecar that delegates bpffs + hands out fds.
-    if let Some(sock) = flag_value(&args, "--broker-serve") {
-        return run_broker_serve(sock);
-    }
-
     let mut bpffs = DEFAULT_BPFFS.to_string();
-    let mut broker_sock: Option<String> = None;
     let mut i = 1;
     while i < args.len() && args[i].starts_with("--") {
         if args[i] == "--bpffs" && i + 1 < args.len() {
             bpffs = args[i + 1].clone();
-            i += 2;
-        } else if args[i] == "--broker-connect" && i + 1 < args.len() {
-            broker_sock = Some(args[i + 1].clone());
             i += 2;
         } else if args[i] == "--" {
             i += 1;
@@ -995,10 +683,7 @@ pub fn run() -> ExitCode {
         }
     }
     if i >= args.len() {
-        eprintln!(
-            "usage: warden-token [--bpffs <path>] [--broker-connect <sock>] \
-             <agent-binary> [agent-args...]\n   or: warden-token --broker-serve <sock>"
-        );
+        eprintln!("usage: warden-token [--bpffs <path>] <agent-binary> [agent-args...]");
         return ExitCode::from(2);
     }
     let agent_argv: Vec<CString> = args[i..]
@@ -1006,25 +691,19 @@ pub fn run() -> ExitCode {
         .map(|a| CString::new(a.as_str()).unwrap())
         .collect();
 
-    // Broker-connect mode: unprivileged shim — own userns, hand the bpffs to the
-    // broker for delegation, receive the BTF/pcap fds, then exec the agent.
-    if let Some(sock) = broker_sock {
-        run_broker_connect(&sock, &bpffs, &agent_argv);
-    }
-
     // Still global root here (before the userns fork): enable always-on SYN
     // cookies so legitimate handshakes complete under the XDP syncookie offload.
     enable_tcp_syncookies();
 
-    // Pick the socket the resident broker will serve and `warden-serve` will
+    // Pick the socket the resident netns-helper will serve and `warden-serve` will
     // forward host-network ops to; export it so the userns child inherits it
-    // across `execv` and dials the broker for conntrack / route / ARP.
-    let broker_sock = std::env::var("EBPFSENTINEL_BROKER_SOCK")
-        .unwrap_or_else(|_| DEFAULT_BROKER_SOCK.to_string());
+    // across `execv` and dials the helper for conntrack / route / ARP.
+    let helper_sock = std::env::var("EBPFSENTINEL_NETNS_HELPER_SOCK")
+        .unwrap_or_else(|_| DEFAULT_NETNS_HELPER_SOCK.to_string());
     unsafe {
         libc::setenv(
-            c"EBPFSENTINEL_BROKER_SOCK".as_ptr(),
-            CString::new(broker_sock.as_str()).unwrap().as_ptr(),
+            c"EBPFSENTINEL_NETNS_HELPER_SOCK".as_ptr(),
+            CString::new(helper_sock.as_str()).unwrap().as_ptr(),
             1,
         );
     }
@@ -1054,11 +733,11 @@ pub fn run() -> ExitCode {
     let ack: u8 = u8::from(delegate_over_fd(fs));
     unsafe { libc::write(sv[0], ptr::from_ref(&ack).cast(), 1) };
 
-    // Stay resident as the broker: the userns `warden-serve` cannot perform
+    // Stay resident as the netns-helper: the userns `warden-serve` cannot perform
     // host-network ops (conntrack teardown, routes, gratuitous ARP) because its
     // capabilities are namespaced. It forwards them here, where we still hold the
-    // init-netns capabilities. The broker owns no maps; it only answers those ops.
-    serve_broker(&broker_sock);
+    // init-netns capabilities. The helper owns no maps; it only answers those ops.
+    serve_netns_helper(&helper_sock);
 
     let mut st: libc::c_int = 0;
     unsafe { libc::waitpid(pid, &mut st, 0) };
@@ -1071,40 +750,8 @@ pub fn run() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_reply, encode_reply, fmt_btf_env, fmt_pcap_env};
+    use super::{fmt_btf_env, fmt_pcap_env};
     use std::os::fd::RawFd;
-
-    #[test]
-    fn reply_roundtrips() {
-        let names = ["nf_conntrack", "fou", "x_tables"];
-        let p = encode_reply(true, &names, 2);
-        let (ok, got, pcap) = decode_reply(&p).expect("decode");
-        assert!(ok);
-        assert_eq!(
-            got,
-            names.iter().map(|s| (*s).to_string()).collect::<Vec<_>>()
-        );
-        assert_eq!(pcap, 2);
-    }
-
-    #[test]
-    fn reply_failure_carries_no_names() {
-        let p = encode_reply(false, &[], 0);
-        let (ok, got, pcap) = decode_reply(&p).expect("decode");
-        assert!(!ok);
-        assert!(got.is_empty());
-        assert_eq!(pcap, 0);
-    }
-
-    #[test]
-    fn decode_rejects_malformed() {
-        assert!(decode_reply(b"nope").is_none());
-        assert!(decode_reply(&[]).is_none());
-        // truncated trailing name must not panic and must reject
-        let mut p = encode_reply(true, &["abcdef"], 0);
-        p.truncate(p.len() - 3);
-        assert!(decode_reply(&p).is_none());
-    }
 
     #[test]
     fn env_formatting() {

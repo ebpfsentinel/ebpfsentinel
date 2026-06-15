@@ -1,8 +1,7 @@
 # Split-warden Docker Compose — kernel 6.9+ required.
 #
-# The rootless-agent layout. Unlike the broker variant (where the agent still
-# unshares a user namespace, mounts a bpffs and loads eBPF itself), here the
-# privileged `warden` loads + attaches every program, holds the maps and ring
+# The rootless-agent layout: the privileged `warden` loads + attaches every
+# program, holds the maps and ring
 # buffers, and serves kernel operations over an AF_UNIX socket. The `agent`
 # loads NOTHING: it is a pure `warden-client` consumer, so it runs under the
 # **default** seccomp profile (no `unconfined`), drops every capability, runs
