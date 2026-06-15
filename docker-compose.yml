@@ -20,6 +20,14 @@
 #   - Linux kernel 6.9+ with BTF support
 #   - Docker with host networking support
 #   - Unprivileged user namespaces enabled on the host (the agent unshares one).
+#   - On Ubuntu 24.04+ (and other kernels that set
+#     kernel.apparmor_restrict_unprivileged_userns=1), unprivileged user-namespace
+#     creation is gated by AppArmor. The agent runs as uid 65534 (non-root), so it
+#     is subject to this and the userns self-map fails (uid_map: Operation not
+#     permitted) even with apparmor/seccomp unconfined below. Allow it on the host:
+#       sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+#     (persist via /etc/sysctl.d/), or scope it to the agent binary with an
+#     AppArmor profile granting `userns` (see dist/apparmor.d/ebpfsentinel-agent).
 #   - Config ownership: the agent runs as uid/gid 65534 and rejects a
 #     world-readable config (it may hold secrets). Make the bind-mounted file
 #     owned by / readable by 65534, mode 0640:

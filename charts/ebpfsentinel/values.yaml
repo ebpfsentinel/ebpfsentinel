@@ -148,7 +148,14 @@ daemonset:
   # default seccomp profile (which gates those on CAP_SYS_ADMIN) would block them,
   # so seccomp + AppArmor are Unconfined. NOTE: nested user namespaces + bpffs
   # delegation can require cluster-specific runtime config (allow unprivileged
-  # userns).
+  # userns). On nodes whose kernel sets
+  # kernel.apparmor_restrict_unprivileged_userns=1 (Ubuntu 24.04+), the agent (uid
+  # 65534) cannot self-unshare a user namespace — the in-pod `seccompProfile`/
+  # `appArmorProfile: Unconfined` above does NOT lift this host-level gate. Set the
+  # sysctl to 0 on each node (e.g. a privileged init DaemonSet, a node-bootstrap
+  # MachineConfig, or /etc/sysctl.d/), or load a per-binary AppArmor profile
+  # granting `userns`. Nodes without that restriction (most non-Ubuntu kernels,
+  # e.g. Talos) need nothing.
   securityContext:
     runAsUser: 65534
     runAsGroup: 65534
