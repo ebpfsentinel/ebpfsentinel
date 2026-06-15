@@ -129,6 +129,32 @@ pub trait MapSource {
     fn ringbuf_fd(&self, name: &str) -> Option<RawFd>;
 }
 
+/// A [`MapSource`] holding no maps. Backs the resident broker, which exists only
+/// to perform host-network operations in the init netns — it owns no eBPF maps
+/// (the agent's `warden-serve` holds those), so every map command is refused.
+pub struct NoMaps;
+
+impl MapSource for NoMaps {
+    fn lookup(&self, name: &str, _key: &[u8]) -> Result<Option<Vec<u8>>, MapOpError> {
+        Err(MapOpError::UnknownMap(name.to_owned()))
+    }
+    fn update(
+        &self,
+        name: &str,
+        _key: &[u8],
+        _value: &[u8],
+        _flags: u64,
+    ) -> Result<(), MapOpError> {
+        Err(MapOpError::UnknownMap(name.to_owned()))
+    }
+    fn delete(&self, name: &str, _key: &[u8]) -> Result<(), MapOpError> {
+        Err(MapOpError::UnknownMap(name.to_owned()))
+    }
+    fn ringbuf_fd(&self, _name: &str) -> Option<RawFd> {
+        None
+    }
+}
+
 impl MapSource for MapRegistry {
     fn lookup(&self, name: &str, key: &[u8]) -> Result<Option<Vec<u8>>, MapOpError> {
         MapRegistry::lookup(self, name, key)

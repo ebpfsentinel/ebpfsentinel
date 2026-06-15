@@ -535,6 +535,24 @@ pub async fn warden_serve(config_path: &str, sock: &str, allowed_uid: u32) -> an
         "warden-serve: packet-capture sockets inherited from the launcher"
     );
 
+    // Host-network ops (conntrack teardown, routes, gratuitous ARP) cannot run from
+    // this child user namespace — its capabilities are namespaced and have no reach
+    // over the host conntrack table or NICs. When the launcher exports a broker
+    // socket, forward those ops there (the resident init-netns broker holds the real
+    // capabilities); otherwise perform them locally (a warden that genuinely holds
+    // them, e.g. a bare-metal deployment).
+    let host: Box<dyn ebpfsentinel_warden::host_ops::HostOps> =
+        match std::env::var("EBPFSENTINEL_BROKER_SOCK") {
+            Ok(sock) if !sock.is_empty() => {
+                info!(broker = %sock, "warden-serve: forwarding host-network ops to the broker");
+                Box::new(ebpfsentinel_warden::host_ops::BrokerHostOps::connect(sock))
+            }
+            _ => {
+                info!("warden-serve: performing host-network ops locally (no broker socket set)");
+                Box::new(ebpfsentinel_warden::host_ops::LocalHostOps)
+            }
+        };
+
     // Serve on a dedicated thread (the loop is blocking). The rootless agent loads
     // nothing, so delegation carries no BTF fds; the pcap pool is served on demand.
     let serve = std::thread::Builder::new()
@@ -545,6 +563,7 @@ pub async fn warden_serve(config_path: &str, sock: &str, allowed_uid: u32) -> an
                 &registry,
                 &[],
                 &pcap_fds,
+                host.as_ref(),
                 allowed_uid,
             );
         })?;

@@ -8,8 +8,6 @@
 //! pins, which sidesteps the fact that token-loaded maps are not pinnable from a
 //! delegated bpffs. Either way the wire behaviour is identical.
 
-use std::fs;
-use std::io;
 use std::mem;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -17,12 +15,9 @@ use std::ptr;
 
 use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
 
+use crate::host_ops::HostOps;
 use crate::map_engine::MapSource;
 use crate::{delegate_over_fd, net_ops, recv_fd, send_msg_fds};
-
-/// Kernel conntrack table the warden reads on the agent's behalf (a `0440 root`
-/// file the rootless agent cannot open).
-const NF_CONNTRACK_PROC: &str = "/proc/net/nf_conntrack";
 
 /// Serve agent connections on `listener` forever, answering map RPC from
 /// `registry` and handing out the `btf` / `pcap` fds on delegation. Only a peer
@@ -32,13 +27,14 @@ pub fn serve_loop<M: MapSource>(
     registry: &M,
     btf: &[(String, RawFd)],
     pcap: &[RawFd],
+    host: &dyn HostOps,
     allowed_uid: u32,
 ) {
     for stream in listener.incoming() {
         match stream {
             Ok(conn) => {
                 if peer_allowed(&conn, allowed_uid) {
-                    handle_conn(conn, registry, btf, pcap);
+                    handle_conn(conn, registry, btf, pcap, host);
                 }
             }
             Err(e) => eprintln!("[warden] accept: {e}"),
@@ -86,6 +82,7 @@ fn handle_conn<M: MapSource>(
     registry: &M,
     btf: &[(String, RawFd)],
     pcap: &[RawFd],
+    host: &dyn HostOps,
 ) {
     let mut reader = match conn.try_clone() {
         Ok(c) => c,
@@ -166,7 +163,7 @@ fn handle_conn<M: MapSource>(
                 }
             }
             Command::Delegate => serve_delegate(&mut writer, btf, pcap),
-            other => write_frame(&mut writer, &dispatch(other, registry)).is_ok(),
+            other => write_frame(&mut writer, &dispatch(other, registry, host)).is_ok(),
         };
         if !ok {
             break;
@@ -234,18 +231,15 @@ fn serve_delegate(writer: &mut UnixStream, btf: &[(String, RawFd)], pcap: &[RawF
     send_msg_fds(writer.as_raw_fd(), &[0u8], &fds)
 }
 
-/// Map a request to a response. The conntrack read and map element ops are wired;
-/// `Attach`/`Detach` (loader-side) are answered `Unimplemented`.
-fn dispatch<M: MapSource>(cmd: &Command, registry: &M) -> Response {
+/// Map a request to a response. Map element ops go to `registry`; the conntrack
+/// read and the host-network ops go to `host` (run locally or forwarded to the
+/// resident broker, transparently to the agent). `Attach`/`Detach` (loader-side)
+/// are answered `Unimplemented`.
+fn dispatch<M: MapSource>(cmd: &Command, registry: &M, host: &dyn HostOps) -> Response {
     match cmd {
-        Command::ConntrackDump => match fs::read(NF_CONNTRACK_PROC) {
+        Command::ConntrackDump => match host.conntrack_dump() {
             Ok(table) => Response::Conntrack { table },
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                Response::Conntrack { table: Vec::new() }
-            }
-            Err(e) => Response::Error {
-                message: format!("read {NF_CONNTRACK_PROC}: {e}"),
-            },
+            Err(message) => Response::Error { message },
         },
         Command::MapLookup { map, key } => match registry.lookup(map, key) {
             Ok(Some(value)) => Response::MapValue { found: true, value },
@@ -274,12 +268,13 @@ fn dispatch<M: MapSource>(cmd: &Command, registry: &M) -> Response {
                 message: e.to_string(),
             },
         },
-        // Host-network ops needing CAP_NET_ADMIN/CAP_NET_RAW the token can't grant.
-        Command::ConntrackDelete { tuple } => result_to_response(net_ops::conntrack_delete(tuple)),
-        Command::ConntrackFlush => result_to_response(net_ops::conntrack_flush()),
-        Command::RouteAdd { route } => result_to_response(net_ops::route(true, route)),
-        Command::RouteDel { route } => result_to_response(net_ops::route(false, route)),
-        Command::ArpAnnounce { iface, ip } => result_to_response(net_ops::arp_announce(iface, ip)),
+        // Host-network ops needing authority over the init netns. `host` runs them
+        // directly (broker / bare-metal) or forwards them there (userns warden-serve).
+        Command::ConntrackDelete { tuple } => result_to_response(host.conntrack_delete(tuple)),
+        Command::ConntrackFlush => result_to_response(host.conntrack_flush()),
+        Command::RouteAdd { route } => result_to_response(host.route_add(route)),
+        Command::RouteDel { route } => result_to_response(host.route_del(route)),
+        Command::ArpAnnounce { iface, ip } => result_to_response(host.arp_announce(iface, ip)),
         Command::Hello { .. } => Response::Error {
             message: "Hello already completed".into(),
         },

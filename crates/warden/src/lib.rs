@@ -50,6 +50,7 @@ use std::os::fd::RawFd;
 use std::process::ExitCode;
 use std::ptr;
 
+pub mod host_ops;
 pub mod map_engine;
 pub mod net_ops;
 pub mod server;
@@ -65,6 +66,11 @@ const FSCONFIG_CMD_CREATE: libc::c_uint = 6;
 const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
 
 const DEFAULT_BPFFS: &str = "/sys/fs/bpf/ebpfsentinel";
+
+/// Default socket the resident broker binds in the init netns and that the userns
+/// `warden-serve` forwards host-network ops to. Override with the
+/// `EBPFSENTINEL_BROKER_SOCK` environment variable.
+const DEFAULT_BROKER_SOCK: &str = "/run/ebpfsentinel-warden-broker.sock";
 
 /// Unprivileged uid/gid the all-in-one child drops to before creating its user
 /// namespace. `enter_userns` writes a single-entry self-map (`0 <uid> 1`); the
@@ -917,6 +923,48 @@ fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
+/// Spawn the resident host-ops broker on a background thread: bind `sock` and
+/// answer conntrack / route / ARP commands with init-netns authority for the
+/// userns `warden-serve`. The thread runs for the process's lifetime; the parent
+/// reaps the agent on the main thread, and process teardown stops the broker.
+fn serve_broker(sock: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+
+    // The only legitimate peer is `warden-serve`, which the launcher forked into a
+    // child user namespace mapping uid 0 → the launcher's own uid (identity for a
+    // global-root launcher: it stays privileged so it can load eBPF). It therefore
+    // presents the launcher's uid to this init-netns broker — gate on that, not on
+    // the rootless consumer's uid (the consumer never talks to the broker).
+    let allowed_uid = unsafe { libc::getuid() };
+    let sock = sock.to_string();
+    std::thread::spawn(move || {
+        let _ = std::fs::remove_file(&sock);
+        let listener = match UnixListener::bind(&sock) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("[broker] bind {sock}: {e}");
+                return;
+            }
+        };
+        // `SO_PEERCRED` (not the file mode) is the auth gate, so 0666 lets the
+        // userns `warden-serve` connect while non-matching uids are rejected at
+        // accept.
+        if let Err(e) = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666)) {
+            eprintln!("[broker] chmod {sock}: {e}");
+        }
+        eprintln!("[broker] resident host-ops broker on {sock} (peer uid {allowed_uid})");
+        server::serve_loop(
+            &listener,
+            &map_engine::NoMaps,
+            &[],
+            &[],
+            &host_ops::LocalHostOps,
+            allowed_uid,
+        );
+    });
+}
+
 /// Entry point for the `warden-token` binary: dispatches the
 /// all-in-one, broker-serve and broker-connect launcher modes. Exposed from the
 /// library so the privileged primitives are shared with the `warden` binary.
@@ -968,6 +1016,19 @@ pub fn run() -> ExitCode {
     // cookies so legitimate handshakes complete under the XDP syncookie offload.
     enable_tcp_syncookies();
 
+    // Pick the socket the resident broker will serve and `warden-serve` will
+    // forward host-network ops to; export it so the userns child inherits it
+    // across `execv` and dials the broker for conntrack / route / ARP.
+    let broker_sock = std::env::var("EBPFSENTINEL_BROKER_SOCK")
+        .unwrap_or_else(|_| DEFAULT_BROKER_SOCK.to_string());
+    unsafe {
+        libc::setenv(
+            c"EBPFSENTINEL_BROKER_SOCK".as_ptr(),
+            CString::new(broker_sock.as_str()).unwrap().as_ptr(),
+            1,
+        );
+    }
+
     // Open module BTF fds and the pcap capture sockets while still global root,
     // before the userns fork, so the child inherits them across execv.
     let modfds = fmt_btf_env(&collect_module_btf_fds());
@@ -992,6 +1053,13 @@ pub fn run() -> ExitCode {
     }
     let ack: u8 = u8::from(delegate_over_fd(fs));
     unsafe { libc::write(sv[0], ptr::from_ref(&ack).cast(), 1) };
+
+    // Stay resident as the broker: the userns `warden-serve` cannot perform
+    // host-network ops (conntrack teardown, routes, gratuitous ARP) because its
+    // capabilities are namespaced. It forwards them here, where we still hold the
+    // init-netns capabilities. The broker owns no maps; it only answers those ops.
+    serve_broker(&broker_sock);
+
     let mut st: libc::c_int = 0;
     unsafe { libc::waitpid(pid, &mut st, 0) };
     if libc::WIFEXITED(st) {

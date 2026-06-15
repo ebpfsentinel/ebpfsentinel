@@ -20,6 +20,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::process::ExitCode;
 
+use ebpfsentinel_warden::host_ops::LocalHostOps;
 use ebpfsentinel_warden::map_engine::MapRegistry;
 use ebpfsentinel_warden::server::serve_loop;
 use ebpfsentinel_warden::{
@@ -109,6 +110,15 @@ fn serve(sockpath: &str, allowed_uid: u32, maps_dir: &str) -> ExitCode {
         "[warden] serving on {sockpath} (allowed peer uid {allowed_uid}, protocol v{PROTOCOL_VERSION})"
     );
 
-    serve_loop(&listener, &registry, &btf, &pcap, allowed_uid);
+    // The bare-metal warden runs as host root in the init netns, so it performs
+    // host-network ops directly.
+    serve_loop(
+        &listener,
+        &registry,
+        &btf,
+        &pcap,
+        &LocalHostOps,
+        allowed_uid,
+    );
     ExitCode::SUCCESS
 }
