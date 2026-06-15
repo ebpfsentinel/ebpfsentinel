@@ -6,7 +6,7 @@ eBPF-native Network & Security platform for Linux
 
 ## Overview
 
-Deploys [eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel) — a kernel-native **Network & Security platform** — as a Kubernetes DaemonSet. One agent per node, attached to host network interfaces via eBPF (XDP/TC). eBPF loads **exclusively** through a BPF token: the container entrypoint (`ebpfsentinel-launch`) starts the privileged `warden` broker, then execs the agent, which self-unshares a user namespace, has the warden delegate a bpffs, and creates the token there — so the pod is granted only the listed capabilities instead of `privileged: true`.
+Deploys [eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel) — a kernel-native **Network & Security platform** — as a Kubernetes DaemonSet. One agent per node, attached to host network interfaces via eBPF (XDP/TC). eBPF loads **exclusively** through a BPF token. Each pod runs two containers: a privileged `warden` broker (native sidecar) and the rootless `agent`. The agent self-unshares a user namespace, has the warden delegate a bpffs over a shared socket, and creates the token there — so the agent holds **no** host capabilities and only the warden sidecar is granted them (never `privileged: true`).
 
 ## Edition: OSS (AGPL-3.0)
 
@@ -48,7 +48,7 @@ See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/m
 | Requirement | Reason |
 |-------------|--------|
 | `hostNetwork: true` | XDP/TC programs attach to host interfaces, not pod veth |
-| `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` + `CAP_NET_RAW` + `allowPrivilegeEscalation: true` | eBPF loads **exclusively** through a BPF token — there is no capability-based loading path and no init container. The combined entrypoint (`ebpfsentinel-launch`) runs the `warden` broker (which holds these capabilities for bpffs delegation, conntrack/routes, and the pcap pool/ARP) plus the agent, which self-unshares a user namespace and loads its own eBPF through the token holding **no host capabilities** |
+| `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` + `CAP_NET_RAW` on the **warden sidecar** only | eBPF loads **exclusively** through a BPF token — there is no capability-based loading path. The warden broker holds these capabilities for bpffs delegation, conntrack/routes, and the pcap pool/ARP. The `agent` container drops every capability (`cap_drop: ALL`, non-root): it self-unshares a user namespace and loads its own eBPF through the token. Both run Unconfined seccomp/AppArmor (the mount/userns/bpf syscalls). |
 | unprivileged user namespaces enabled on the node | `BPF_TOKEN_CREATE` is `EOPNOTSUPP` outside a user namespace |
 | `/sys/fs/bpf` mount | BPF filesystem for map pinning + delegated token bpffs |
 | `/sys/kernel/debug` mount | eBPF tracing (debugfs) |
@@ -203,9 +203,9 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 | commonLabels | object | `{}` | Labels added to all resources |
 | configOverride | string | `""` | Override the entire config.yaml content. When set, all agent.* and domain toggles above are ignored. |
 | conntrack.enabled | bool | `false` | Enable connection tracking |
-| daemonset | object | `{"affinity":{},"bpfToken":{"bpffsEmptyDir":false,"bpffsPath":"/sys/fs/bpf/ebpfsentinel"},"extraContainers":[],"extraEnv":[],"extraVolumeMounts":[],"extraVolumes":[],"hostPID":false,"initContainers":[],"minReadySeconds":0,"nodeSelector":{},"podAnnotations":{},"podLabels":{},"priorityClassName":"","resources":{"limits":{"cpu":"1000m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}},"revisionHistoryLimit":10,"securityContext":{"allowPrivilegeEscalation":true,"appArmorProfile":{"type":"Unconfined"},"capabilities":{"add":["SYS_ADMIN","NET_ADMIN","NET_RAW","SETUID","SETGID"],"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}},"terminationGracePeriodSeconds":30,"tolerations":[{"operator":"Exists"}],"updateStrategy":{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"}}` | DaemonSet configuration |
+| daemonset | object | `{"affinity":{},"bpfToken":{"bpffsEmptyDir":false,"bpffsPath":"/sys/fs/bpf/ebpfsentinel"},"extraContainers":[],"extraEnv":[],"extraVolumeMounts":[],"extraVolumes":[],"hostPID":false,"initContainers":[],"minReadySeconds":0,"nodeSelector":{},"podAnnotations":{},"podLabels":{},"priorityClassName":"","resources":{"limits":{"cpu":"1000m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}},"revisionHistoryLimit":10,"securityContext":{"allowPrivilegeEscalation":true,"appArmorProfile":{"type":"Unconfined"},"capabilities":{"drop":["ALL"]},"runAsGroup":65534,"runAsUser":65534,"seccompProfile":{"type":"Unconfined"}},"terminationGracePeriodSeconds":30,"tolerations":[{"operator":"Exists"}],"updateStrategy":{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"},"warden":{"resources":{"limits":{"cpu":"1000m","memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}},"securityContext":{"allowPrivilegeEscalation":true,"appArmorProfile":{"type":"Unconfined"},"capabilities":{"add":["SYS_ADMIN","NET_ADMIN","NET_RAW"],"drop":["ALL"]},"runAsUser":0,"seccompProfile":{"type":"Unconfined"}}}}` | DaemonSet configuration |
 | daemonset.affinity | object | `{}` | Affinity rules |
-| daemonset.bpfToken | object | `{"bpffsEmptyDir":false,"bpffsPath":"/sys/fs/bpf/ebpfsentinel"}` | BPF token delegation. eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+), a user-namespace feature. The container runs one combined unit (`ebpfsentinel-launch`): it starts the privileged `warden` broker, then execs the agent. The agent self-unshares a user namespace, has the warden delegate a bpffs at `bpffsPath`, and loads its own eBPF through the token — holding no host capabilities. There is no capability-based loading path. `bpffsPath` drives BOTH the `EBPFSENTINEL_BPFFS` env (DaemonSet, the agent's mount target) and the agent's `bpf_token.bpffs_path` (ConfigMap) — keep them in sync via this one value; they must point at the same mount. |
+| daemonset.bpfToken | object | `{"bpffsEmptyDir":false,"bpffsPath":"/sys/fs/bpf/ebpfsentinel"}` | BPF token delegation. eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+), a user-namespace feature. The pod runs the warden broker as a native sidecar; the agent self-unshares a user namespace, has the warden delegate a bpffs at `bpffsPath`, and loads its own eBPF through the token — holding no host capabilities. There is no capability-based loading path. `bpffsPath` drives BOTH the `EBPFSENTINEL_BPFFS` env (DaemonSet, the agent's mount target) and the agent's `bpf_token.bpffs_path` (ConfigMap) — keep them in sync via this one value; they must point at the same mount. |
 | daemonset.bpfToken.bpffsEmptyDir | bool | `false` | Back the bpffs mount with an in-pod tmpfs (emptyDir medium: Memory) instead of the host's /sys/fs/bpf. Required on nested runtimes (kind, minikube) whose node /sys/fs/bpf is read-only or absent — there the hostPath mount fails. On a real node leave this false so pinned maps live on the host bpffs. |
 | daemonset.extraContainers | list | `[]` | Extra containers (sidecars) |
 | daemonset.extraEnv | list | `[]` | Extra environment variables |
@@ -220,10 +220,13 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 | daemonset.priorityClassName | string | `""` | Pod priority class name |
 | daemonset.resources | object | `{"limits":{"cpu":"1000m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}` | Resource requests and limits |
 | daemonset.revisionHistoryLimit | int | `10` | Number of old ReplicaSets to retain |
-| daemonset.securityContext | object | `{"allowPrivilegeEscalation":true,"appArmorProfile":{"type":"Unconfined"},"capabilities":{"add":["SYS_ADMIN","NET_ADMIN","NET_RAW","SETUID","SETGID"],"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}` | Agent container security context. The container holds CAP_SYS_ADMIN (warden bpffs delegation + the agent's userns mount), CAP_NET_ADMIN (warden conntrack teardown + routes), CAP_NET_RAW (warden pcap pool + ARP), and SETUID/SETGID (the agent's privilege drop). NOTE: nested user namespaces + bpffs delegation can require cluster-specific runtime config (allow unprivileged userns; some runtimes/PSA levels block CAP_SYS_ADMIN). |
+| daemonset.securityContext | object | `{"allowPrivilegeEscalation":true,"appArmorProfile":{"type":"Unconfined"},"capabilities":{"drop":["ALL"]},"runAsGroup":65534,"runAsUser":65534,"seccompProfile":{"type":"Unconfined"}}` | Agent container security context. The agent runs non-root (uid 65534) with every capability dropped. It self-unshares a user namespace and loads its own eBPF, so it issues mount/userns/bpf syscalls; holding NO CAP_SYS_ADMIN, the default seccomp profile (which gates those on CAP_SYS_ADMIN) would block them, so seccomp + AppArmor are Unconfined. NOTE: nested user namespaces + bpffs delegation can require cluster-specific runtime config (allow unprivileged userns). |
 | daemonset.terminationGracePeriodSeconds | int | `30` | Grace period for pod termination (seconds) |
 | daemonset.tolerations | list | `[{"operator":"Exists"}]` | Tolerations (default: schedule on all nodes including control-plane) |
 | daemonset.updateStrategy | object | `{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"}` | DaemonSet update strategy |
+| daemonset.warden | object | `{"resources":{"limits":{"cpu":"1000m","memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}},"securityContext":{"allowPrivilegeEscalation":true,"appArmorProfile":{"type":"Unconfined"},"capabilities":{"add":["SYS_ADMIN","NET_ADMIN","NET_RAW"],"drop":["ALL"]},"runAsUser":0,"seccompProfile":{"type":"Unconfined"}}}` | The privileged warden broker (native sidecar). |
+| daemonset.warden.resources | object | `{"limits":{"cpu":"1000m","memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}}` | Warden resource requests and limits |
+| daemonset.warden.securityContext | object | `{"allowPrivilegeEscalation":true,"appArmorProfile":{"type":"Unconfined"},"capabilities":{"add":["SYS_ADMIN","NET_ADMIN","NET_RAW"],"drop":["ALL"]},"runAsUser":0,"seccompProfile":{"type":"Unconfined"}}` | Warden security context. The broker holds the host capabilities: CAP_SYS_ADMIN (bpffs delegation / FSCONFIG_CMD_CREATE), CAP_NET_ADMIN (conntrack teardown + routes), CAP_NET_RAW (pcap pool + gratuitous ARP). It issues fsconfig + netlink + AF_PACKET, so AppArmor + seccomp are Unconfined. |
 | ddos.enabled | bool | `false` | Enable DDoS mitigation (SYN cookie, flood detection) |
 | dlp.enabled | bool | `true` | Enable Data Loss Prevention (SSL/TLS uprobe) |
 | dns.enabled | bool | `true` | Enable DNS intelligence + blocklists |
@@ -233,7 +236,7 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 | geoip.enabled | bool | `false` | Enable GeoIP enrichment (MaxMind) |
 | geoip.source | object | `{}` | GeoIP database source (REQUIRED when enabled). Rendered verbatim under `geoip.source`. Examples:   source: { mode: file, city_path: /var/lib/ebpfsentinel/geoip/GeoLite2-City.mmdb }   source: { mode: url, city_url: https://mirror/GeoLite2-City.mmdb }   source: { mode: maxmind_account, account_id: "123", license_key: "key" } |
 | ids.enabled | bool | `true` | Enable Intrusion Detection System |
-| image | object | `{"pullPolicy":"IfNotPresent","repository":"ghcr.io/ebpfsentinel/ebpfsentinel","tag":""}` | Container image |
+| image | object | `{"pullPolicy":"IfNotPresent","repository":"ghcr.io/ebpfsentinel/ebpfsentinel","tag":""}` | Agent container image (the rootless agent) |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | image.repository | string | `"ghcr.io/ebpfsentinel/ebpfsentinel"` | Image repository |
 | image.tag | string | `""` | Image tag (defaults to Chart appVersion) |
@@ -266,6 +269,9 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 | serviceAccount.create | bool | `true` | Create a dedicated ServiceAccount |
 | serviceAccount.name | string | `""` | ServiceAccount name (auto-generated if empty) |
 | threatintel.enabled | bool | `true` | Enable threat intelligence (OSINT feeds) |
+| wardenImage | object | `{"repository":"ghcr.io/ebpfsentinel/ebpfsentinel-warden","tag":""}` | Warden broker image (the privileged sidecar) |
+| wardenImage.repository | string | `"ghcr.io/ebpfsentinel/ebpfsentinel-warden"` | Image repository |
+| wardenImage.tag | string | `""` | Image tag (defaults to Chart appVersion) |
 | zones.enabled | bool | `false` | Enable security zones |
 
 ## Upgrading

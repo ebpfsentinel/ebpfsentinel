@@ -21,8 +21,8 @@ agent:
   logFormat: json
 
 daemonset:
-  # Combined-unit posture: the container entrypoint (ebpfsentinel-launch) starts
-  # the privileged `warden` broker, then execs the agent. The agent self-unshares
-  # a user namespace and loads its own eBPF through the BPF token; the warden
-  # holds CAP_SYS_ADMIN/NET_ADMIN/NET_RAW for delegation + conntrack/route/ARP/pcap.
-  # The chart's default securityContext (see values.yaml) already grants these.
+  # Sidecar-split posture: the pod runs the privileged `warden` broker as a native
+  # sidecar (CAP_SYS_ADMIN/NET_ADMIN/NET_RAW for delegation + conntrack/route/ARP/
+  # pcap) and the rootless `agent` (cap-drop ALL) which self-unshares a user
+  # namespace and loads its own eBPF through the BPF token. The chart's default
+  # warden/agent securityContexts (see values.yaml) already set this.

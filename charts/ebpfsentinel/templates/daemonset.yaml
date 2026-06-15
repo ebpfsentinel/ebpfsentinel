@@ -55,27 +55,48 @@ spec:
       {{- if .Values.daemonset.priorityClassName }}
       priorityClassName: {{ .Values.daemonset.priorityClassName | quote }}
       {{- end }}
-      {{- with .Values.daemonset.initContainers }}
+      # The warden runs as a NATIVE SIDECAR (init container with
+      # restartPolicy: Always, Kubernetes 1.28+): it starts before the agent and
+      # runs for the pod's life, holding the host capabilities and brokering
+      # kernel ops over the shared socket. The agent loads its own eBPF.
       initContainers:
+        - name: warden
+          image: {{ include "ebpfsentinel.wardenImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          restartPolicy: Always
+          securityContext:
+            {{- toYaml .Values.daemonset.warden.securityContext | nindent 12 }}
+          args:
+            - "serve"
+            - "/run/ebpfsentinel/warden.sock"
+            - "--uid"
+            - "65534" # only the agent's uid is served (SO_PEERCRED gate)
+          {{- with .Values.daemonset.warden.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: warden-sock
+              mountPath: /run/ebpfsentinel
+        {{- with .Values.daemonset.initContainers }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       containers:
         - name: agent
           image: {{ include "ebpfsentinel.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.daemonset.securityContext | nindent 12 }}
-          # The combined-unit launcher starts the warden broker, then execs the
-          # agent against it. The agent mounts its delegated bpffs at
-          # EBPFSENTINEL_BPFFS (set below to bpffsPath; its bpf_token.bpffs_path
-          # config must match).
-          command:
-            - "/usr/local/bin/ebpfsentinel-launch"
-            - "/usr/local/bin/ebpfsentinel-agent"
+          # The agent connects to the warden sidecar over the shared socket, then
+          # self-unshares a user namespace and loads its own eBPF. It mounts the
+          # delegated bpffs at EBPFSENTINEL_BPFFS (set below to bpffsPath; its
+          # bpf_token.bpffs_path config must match).
           args:
             - "--config"
             - "/etc/ebpfsentinel/config.yaml"
           env:
+            - name: EBPFSENTINEL_WARDEN_SOCK
+              value: /run/ebpfsentinel/warden.sock
             - name: EBPFSENTINEL_BPFFS
               value: {{ .Values.daemonset.bpfToken.bpffsPath | quote }}
             {{- with .Values.daemonset.extraEnv }}
@@ -110,6 +131,9 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
+            - name: warden-sock
+              mountPath: /run/ebpfsentinel
+              readOnly: true
             - name: config
               mountPath: /etc/ebpfsentinel
               readOnly: true
@@ -132,6 +156,8 @@ spec:
         {{- end }}
       terminationGracePeriodSeconds: {{ .Values.daemonset.terminationGracePeriodSeconds }}
       volumes:
+        - name: warden-sock
+          emptyDir: {}
         - name: config
           configMap:
             name: {{ include "ebpfsentinel.fullname" . }}-config

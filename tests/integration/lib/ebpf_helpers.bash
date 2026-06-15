@@ -259,24 +259,24 @@ start_ebpf_agent() {
         echo "  [strategy] Using local binary: $AGENT_BIN" >&2
 
         # eBPF loads EXCLUSIVELY through a BPF token (a user-namespace feature),
-        # so the agent must run via the shipped combined-unit launcher: it starts
-        # the warden broker, then execs the agent, which self-unshares a user
-        # namespace and loads its own eBPF, exactly as production (systemd /
-        # Docker / K8s) does. Run directly and the agent cannot create a token and
-        # starts in API-only mode (no eBPF attached). The launcher needs
-        # unprivileged user namespaces; enable them in the (root, throwaway) VM.
-        local launcher
-        launcher="$(dirname "$AGENT_BIN")/ebpfsentinel-launch"
+        # so the deployment is split: a privileged `warden` broker runs alongside
+        # the agent, which self-unshares a user namespace, has the warden delegate
+        # a bpffs, and loads its own eBPF — exactly as production (systemd / Docker
+        # / K8s) does. Run the agent alone and it cannot reach a warden, so it
+        # starts in API-only mode (no eBPF). The agent needs unprivileged user
+        # namespaces; enable them in the (root, throwaway) VM.
+        local warden
+        warden="$(dirname "$AGENT_BIN")/warden"
         sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 >/dev/null 2>&1 || true
 
-        # Launch in a new session via setsid so the agent survives bats
-        # tearing down the setup_file process group: a plain backgrounded
-        # job started in setup_file() shares bats' process group and gets
-        # SIGTERM'd the instant that phase ends, before any test runs.
-        # Detaching the session keeps the agent alive for the whole file.
-        # stdin from /dev/null so it never sees a controlling-terminal EOF.
-        if [ -x "$launcher" ] && [ -x "$(dirname "$launcher")/warden" ]; then
-            echo "  [strategy] eBPF via launcher: $launcher" >&2
+        # Launch in a new session via setsid so the processes survive bats tearing
+        # down the setup_file process group: a plain backgrounded job started in
+        # setup_file() shares bats' process group and gets SIGTERM'd the instant
+        # that phase ends, before any test runs. Detaching the session keeps them
+        # alive for the whole file. stdin from /dev/null so they never see a
+        # controlling-terminal EOF.
+        if [ -x "$warden" ]; then
+            echo "  [strategy] eBPF via warden broker: $warden" >&2
             # The agent execs itself inside a child user namespace, where any path
             # component owned by an unmapped uid (e.g. the 0750 /home/<user> build
             # tree) is inaccessible — to both exec and read. Stage the agent binary
@@ -285,15 +285,22 @@ start_ebpf_agent() {
             # ($DATA_DIR).
             local staged_agent="/tmp/ebpfsentinel-agent-staged"
             local staged_ebpf="/tmp/ebpfsentinel-ebpf-staged"
+            local sock="/tmp/ebpfsentinel-warden-${EBPF_VETH_HOST:-local}.sock"
             install -m755 "$AGENT_BIN" "$staged_agent" 2>/dev/null
             mkdir -p "$staged_ebpf"
             find "$EBPF_PROGRAM_DIR" -maxdepth 1 -type f -exec cp -u {} "$staged_ebpf/" \; 2>/dev/null || true
             chmod 755 "$staged_ebpf"
             chmod a+r "$staged_ebpf"/* 2>/dev/null || true
+            rm -f "$sock"
+            # The privileged warden broker (root, init netns). --uid 0: the test
+            # agent runs as root and maps namespace-0 to real root, presenting 0.
+            setsid "$warden" serve "$sock" --uid 0 </dev/null >>"$AGENT_LOG_FILE" 2>&1 &
+            echo "$!" > "${AGENT_PID_FILE}.warden"
+            local _i
+            for _i in $(seq 1 100); do [ -S "$sock" ] && break; sleep 0.1; done
             setsid env EBPF_PROGRAM_DIR="$staged_ebpf" \
                 EBPFSENTINEL_BPFFS=/sys/fs/bpf/ebpfsentinel \
-                EBPFSENTINEL_WARDEN_SOCK="/tmp/ebpfsentinel-warden-$$.sock" \
-                "$launcher" \
+                EBPFSENTINEL_WARDEN_SOCK="$sock" \
                 "$staged_agent" --config "$config_file" "$@" \
                 </dev/null >"$AGENT_LOG_FILE" 2>&1 &
         else
@@ -357,6 +364,11 @@ stop_ebpf_agent() {
         EBPF_AGENT_VIA_DOCKER="false"
     else
         stop_agent 2>/dev/null || true
+        # Stop the warden broker started alongside the local-binary agent.
+        if [ -f "${AGENT_PID_FILE}.warden" ]; then
+            kill "$(cat "${AGENT_PID_FILE}.warden")" 2>/dev/null || true
+            rm -f "${AGENT_PID_FILE}.warden"
+        fi
     fi
 }
 

@@ -28,10 +28,6 @@
 #   - SYN-cookie DDoS protection (if enabled) needs net.ipv4.tcp_syncookies=2.
 #     With network_mode: host set it on the HOST: sysctl -w net.ipv4.tcp_syncookies=2
 #
-# For the all-in-one single-container layout (one image runs the warden + agent
-# via ebpfsentinel-launch), bake Dockerfile.agent and run it directly with
-# --cap-add SYS_ADMIN --cap-add NET_ADMIN --cap-add NET_RAW (see Dockerfile.agent).
-#
 # Hot-reload: edit config/ebpfsentinel.yaml while running — the agent detects
 # changes automatically and reloads rules without restart.
 
@@ -70,9 +66,6 @@ services:
     image: ebpfsentinel:latest
     container_name: ebpfsentinel
     depends_on: [warden]
-    # Run the agent directly (not the combined launcher): it connects to the
-    # warden over the shared socket instead of starting its own.
-    entrypoint: ["/usr/local/bin/ebpfsentinel-agent"]
     command: ["--config", "/etc/ebpfsentinel/config.yaml"]
     environment:
       EBPFSENTINEL_WARDEN_SOCK: /run/ebpfsentinel/warden.sock

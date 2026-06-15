@@ -8,7 +8,7 @@ nameOverride: ""
 # -- Override the full resource name (disables auto-generated name)
 fullnameOverride: ""
 
-# -- Container image
+# -- Agent container image (the rootless agent)
 image:
   # -- Image repository
   repository: ghcr.io/ebpfsentinel/ebpfsentinel
@@ -16,6 +16,13 @@ image:
   tag: ""
   # -- Image pull policy
   pullPolicy: IfNotPresent
+
+# -- Warden broker image (the privileged sidecar)
+wardenImage:
+  # -- Image repository
+  repository: ghcr.io/ebpfsentinel/ebpfsentinel-warden
+  # -- Image tag (defaults to Chart appVersion)
+  tag: ""
 
 # -- Image pull secrets for private registries
 imagePullSecrets: []
@@ -96,9 +103,8 @@ daemonset:
   # -- Pod priority class name
   priorityClassName: ""
   # -- BPF token delegation. eBPF is loaded EXCLUSIVELY through a BPF token
-  # (kernel 6.9+), a user-namespace feature. The container runs one combined
-  # unit (`ebpfsentinel-launch`): it starts the privileged `warden` broker, then
-  # execs the agent. The agent self-unshares a user namespace, has the warden
+  # (kernel 6.9+), a user-namespace feature. The pod runs the warden broker as a
+  # native sidecar; the agent self-unshares a user namespace, has the warden
   # delegate a bpffs at `bpffsPath`, and loads its own eBPF through the token —
   # holding no host capabilities. There is no capability-based loading path.
   # `bpffsPath` drives BOTH the `EBPFSENTINEL_BPFFS` env (DaemonSet, the agent's
@@ -112,35 +118,47 @@ daemonset:
     # hostPath mount fails. On a real node leave this false so pinned maps live
     # on the host bpffs.
     bpffsEmptyDir: false
-  # -- Agent container security context. The container holds CAP_SYS_ADMIN
-  # (warden bpffs delegation + the agent's userns mount), CAP_NET_ADMIN (warden
-  # conntrack teardown + routes), CAP_NET_RAW (warden pcap pool + ARP), and
-  # SETUID/SETGID (the agent's privilege drop). NOTE: nested user namespaces +
-  # bpffs delegation can require cluster-specific runtime config (allow
-  # unprivileged userns; some runtimes/PSA levels block CAP_SYS_ADMIN).
+  # -- The privileged warden broker (native sidecar).
+  warden:
+    # -- Warden security context. The broker holds the host capabilities:
+    # CAP_SYS_ADMIN (bpffs delegation / FSCONFIG_CMD_CREATE), CAP_NET_ADMIN
+    # (conntrack teardown + routes), CAP_NET_RAW (pcap pool + gratuitous ARP). It
+    # issues fsconfig + netlink + AF_PACKET, so AppArmor + seccomp are Unconfined.
+    securityContext:
+      runAsUser: 0
+      capabilities:
+        add: [SYS_ADMIN, NET_ADMIN, NET_RAW]
+        drop: [ALL]
+      allowPrivilegeEscalation: true
+      appArmorProfile:
+        type: Unconfined
+      seccompProfile:
+        type: Unconfined
+    # -- Warden resource requests and limits
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "256Mi"
+        cpu: "1000m"
+  # -- Agent container security context. The agent runs non-root (uid 65534) with
+  # every capability dropped. It self-unshares a user namespace and loads its own
+  # eBPF, so it issues mount/userns/bpf syscalls; holding NO CAP_SYS_ADMIN, the
+  # default seccomp profile (which gates those on CAP_SYS_ADMIN) would block them,
+  # so seccomp + AppArmor are Unconfined. NOTE: nested user namespaces + bpffs
+  # delegation can require cluster-specific runtime config (allow unprivileged
+  # userns).
   securityContext:
+    runAsUser: 65534
+    runAsGroup: 65534
     capabilities:
-      # SYS_ADMIN: bpffs delegation (warden) + the agent's userns mount.
-      # NET_ADMIN: warden conntrack -D teardown + route programming.
-      # NET_RAW: warden AF_PACKET pcap pool + gratuitous ARP — drop NET_RAW if
-      # you never run captures (ARP also goes quiet).
-      # SETUID/SETGID: under a stock container runtime the pod runs in the init
-      # user namespace, where a global-root process cannot self-map namespace-0
-      # to real root (verify_root_map). The agent therefore drops to uid/gid
-      # 65534 before mapping; that drop needs SETUID/SETGID.
-      add: [SYS_ADMIN, NET_ADMIN, NET_RAW, SETUID, SETGID]
       drop: [ALL]
     allowPrivilegeEscalation: true
-    # The warden issues mount/move_mount (bpffs delegation) and the agent issues
-    # unshare(userns) + mount, all gated on CAP_SYS_ADMIN. On AppArmor nodes
-    # (e.g. Ubuntu) the default container profile blocks mount regardless of
-    # caps, so AppArmor must be Unconfined. Seccomp can stay RuntimeDefault: the
-    # default profile gates mount/unshare/bpf on CAP_SYS_ADMIN, which this
-    # container holds.
     appArmorProfile:
       type: Unconfined
     seccompProfile:
-      type: RuntimeDefault
+      type: Unconfined
   # -- Resource requests and limits
   resources:
     requests:

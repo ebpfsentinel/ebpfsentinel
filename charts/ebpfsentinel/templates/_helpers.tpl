@@ -66,6 +66,13 @@ Container image with tag fallback to appVersion.
 {{- end }}
 
 {{/*
+Warden broker image (the privileged sidecar).
+*/}}
+{{- define "ebpfsentinel.wardenImage" -}}
+{{ .Values.wardenImage.repository }}:{{ .Values.wardenImage.tag | default .Chart.AppVersion }}
+{{- end }}
+
+{{/*
 ServiceAccount name.
 */}}
 {{- define "ebpfsentinel.serviceAccountName" -}}

@@ -1,26 +1,18 @@
-# eBPFsentinel — Multi-stage Docker build (combined agent + warden image)
+# eBPFsentinel — Multi-stage Docker build (rootless agent image)
 #
 # Build:  docker build -f Dockerfile.agent -t ebpfsentinel .
-# Run:    docker run --cap-add SYS_ADMIN --cap-add NET_ADMIN --cap-add NET_RAW \
-#           --network host --security-opt apparmor=unconfined \
-#           -v ./config:/etc/ebpfsentinel \
-#           -v /sys/fs/bpf:/sys/fs/bpf ebpfsentinel
 #
-# This image runs two processes from one entrypoint (`ebpfsentinel-launch`): the
-# privileged `warden` broker and the rootless `ebpfsentinel-agent`. The launcher
-# starts the warden, waits for its control socket, then execs the agent against
-# it. The warden holds the capabilities (CAP_SYS_ADMIN for bpffs delegation,
-# CAP_NET_ADMIN for conntrack/routes/ARP, CAP_NET_RAW for the pcap pool); the
-# agent drops every capability, self-unshares a user namespace, has the warden
-# delegate a bpffs, and loads its own eBPF through a BPF token — never root.
+# This image is the rootless agent ONLY. It runs alongside a `warden` broker
+# (Dockerfile.warden) reached over a shared AF_UNIX socket — see docker-compose.yml
+# (the `warden` + `agent` services) or the Helm chart (warden sidecar). Point the
+# agent at the broker with EBPFSENTINEL_WARDEN_SOCK.
 #
-# The /sys/fs/bpf bind-mount is required: a container's /sys is read-only, so the
-# agent cannot create the bpffs mountpoint there without a writable /sys/fs/bpf.
-# The host bpffs is writable; bind it in. (On a host without a bpffs mounted,
-# `--tmpfs /sys/fs/bpf` works too.) Drop CAP_NET_RAW if you never capture packets.
-#
-# For the split topology (warden in its own container / k8s sidecar) see
-# Dockerfile.warden and the `warden` profile in docker-compose.yml.
+# The agent drops every capability, self-unshares a user namespace, has the warden
+# delegate a bpffs, and loads its own eBPF through a BPF token — never root, never
+# CAP_BPF. It does the userns + mount + bpf syscalls itself, so it needs
+# apparmor/seccomp unconfined (no CAP_SYS_ADMIN to satisfy the default profiles).
+# A container's /sys is read-only, so back the bpffs mountpoint with a writable
+# /sys/fs/bpf (host bind or tmpfs).
 #
 # eBPF programs must be pre-built before docker build:
 #   cargo xtask ebpf-build
@@ -65,9 +57,9 @@ COPY proto/ proto/
 
 ENV LIBPCAP_LIBDIR=/usr/local/musl/lib
 
-# Build the agent, the warden broker, and the combined-unit launcher (all static,
-# musl). The launcher starts the warden and execs the agent, which loads its own
-# eBPF through a BPF token (a user-namespace feature) — rootless.
+# Build the agent (static, musl). It loads its own eBPF through a BPF token (a
+# user-namespace feature) — rootless. The warden broker ships in its own image
+# (Dockerfile.warden).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     case "${TARGETARCH}" in \
         arm64) MUSL_TARGET="aarch64-unknown-linux-musl" ;; \
@@ -76,10 +68,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     rustup target add "${MUSL_TARGET}" && \
     RUSTFLAGS="-L native=/usr/local/musl/lib" \
     cargo build --release --target "${MUSL_TARGET}" \
-        --bin ebpfsentinel-agent --bin warden --bin ebpfsentinel-launch && \
+        --bin ebpfsentinel-agent && \
     cp "/build/target/${MUSL_TARGET}/release/ebpfsentinel-agent" /build/ebpfsentinel-agent && \
-    cp "/build/target/${MUSL_TARGET}/release/warden" /build/warden && \
-    cp "/build/target/${MUSL_TARGET}/release/ebpfsentinel-launch" /build/ebpfsentinel-launch && \
     mkdir -p /build/captures-dir
 
 # ── Stage 2: Minimal runtime image ──────────────────────────────────
@@ -95,17 +85,15 @@ LABEL org.opencontainers.image.title="eBPFsentinel" \
     org.opencontainers.image.licenses="AGPL-3.0-only"
 
 COPY --from=agent-builder /build/ebpfsentinel-agent /usr/local/bin/ebpfsentinel-agent
-COPY --from=agent-builder /build/warden /usr/local/bin/warden
-COPY --from=agent-builder /build/ebpfsentinel-launch /usr/local/bin/ebpfsentinel-launch
 
 # Copy pre-built eBPF programs (built by CI or `cargo xtask ebpf-build`)
 COPY ebpf-out/ /usr/local/lib/ebpfsentinel/
 
 # 0640: the agent rejects a world-readable config (it may hold secrets). The
-# source file is 0644 in git, so tighten it as it lands in the image. Left
-# root-owned: under Docker the agent keeps uid 0 (Docker permits the root userns
-# self-map), so root reads it directly. (Under a containerd-based Kubernetes the
-# config comes from a ConfigMap, not this baked copy.)
+# source file is 0644 in git, so tighten it as it lands in the image. This baked
+# copy is a fallback; deployments that run the agent as a non-root uid (the
+# compose `agent` service, the Helm chart) bind-mount / project a config readable
+# by that uid instead (a ConfigMap under Kubernetes).
 COPY --chmod=0640 config/ebpfsentinel.yaml /etc/ebpfsentinel/config.yaml
 
 # distroless has no shell — create the directory in the builder stage and COPY it.
@@ -118,7 +106,7 @@ EXPOSE 8080 50051 9090
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
     CMD ["ebpfsentinel-agent", "health"]
 
-# The launcher starts the warden broker, then execs the agent (appending CMD)
-# against it. CMD carries the agent's own arguments.
-ENTRYPOINT ["/usr/local/bin/ebpfsentinel-launch", "/usr/local/bin/ebpfsentinel-agent"]
+# The agent connects to the warden at EBPFSENTINEL_WARDEN_SOCK (set by the
+# deployment), self-unshares a user namespace, and loads its own eBPF.
+ENTRYPOINT ["/usr/local/bin/ebpfsentinel-agent"]
 CMD ["--config", "/etc/ebpfsentinel/config.yaml"]

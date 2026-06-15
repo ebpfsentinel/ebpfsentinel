@@ -1,14 +1,15 @@
 # bpf_token_helpers.bash — helpers for the BPF-token-only loading suite (61).
 #
-# These drive the *shipped* combined-unit launcher (crates/warden →
-# ebpfsentinel-launch), which starts the privileged `warden` broker (it delegates
-# a bpffs + passes module BTF fds) then execs the agent, which loads its own eBPF
-# token-only in a capability-less user namespace. The log is captured so tests
-# can assert on what loaded/attached. Exercising the real launcher + warden (not
-# a test-only stand-in) means CI validates the exact binaries we ship.
+# These drive the *shipped* split deployment: the privileged `warden` broker
+# (crates/warden → warden) delegates a bpffs + passes module BTF fds, and the
+# agent — started against it over the socket — loads its own eBPF token-only in a
+# capability-less user namespace. The log is captured so tests can assert on what
+# loaded/attached. Exercising the real warden + agent (not a test-only stand-in)
+# means CI validates the exact binaries we ship.
 
 # Resolved lazily (needs $AGENT_BIN / $PROJECT_ROOT from the suite's setup_file).
-BPF_TOKEN_LAUNCHER_BIN="${BPF_TOKEN_LAUNCHER_BIN:-}"
+BPF_TOKEN_WARDEN_BIN="${BPF_TOKEN_WARDEN_BIN:-}"
+BPF_TOKEN_WARDEN_PID=""
 BPF_TOKEN_LOG="${BPF_TOKEN_LOG:-/tmp/ebpfsentinel-bpf-token-$$.log}"
 # The agent runs inside a user namespace, where any path component owned by an
 # unmapped uid (e.g. a 0750 home directory) is inaccessible — to both exec and
@@ -30,32 +31,30 @@ require_bpf_token_env() {
     require_kernel 6 9
 }
 
-# bpf_token_build_launcher — resolve (or build) the shipped launcher + warden
-# binaries and export the launcher path. The launcher locates the `warden` binary
-# as a sibling, so both must live in the same directory. Prefers prebuilt
-# binaries next to the agent (as CI's build job produces); falls back to
-# `cargo build` from the project tree; skips the suite if neither yields them.
+# bpf_token_build_launcher — resolve (or build) the shipped `warden` broker binary
+# and export its path. The split deployment runs the warden alongside the agent;
+# this resolves the warden the suite drives. Prefers a prebuilt binary next to the
+# agent (as CI's build job produces); falls back to `cargo build` from the project
+# tree; skips the suite if neither yields it.
 bpf_token_build_launcher() {
-    if [ -n "$BPF_TOKEN_LAUNCHER_BIN" ] && [ -x "$BPF_TOKEN_LAUNCHER_BIN" ] \
-        && [ -x "$(dirname "$BPF_TOKEN_LAUNCHER_BIN")/warden" ]; then
+    if [ -n "$BPF_TOKEN_WARDEN_BIN" ] && [ -x "$BPF_TOKEN_WARDEN_BIN" ]; then
         return 0
     fi
     # Same directory as the agent binary the suite already located.
-    local dir="$(dirname "$AGENT_BIN")"
-    if [ -x "$dir/ebpfsentinel-launch" ] && [ -x "$dir/warden" ]; then
-        BPF_TOKEN_LAUNCHER_BIN="$dir/ebpfsentinel-launch"
-        export BPF_TOKEN_LAUNCHER_BIN
+    local candidate="$(dirname "$AGENT_BIN")/warden"
+    if [ -x "$candidate" ]; then
+        BPF_TOKEN_WARDEN_BIN="$candidate"
+        export BPF_TOKEN_WARDEN_BIN
         return 0
     fi
     require_tool cargo
-    if ! (cd "$PROJECT_ROOT" && cargo build --release --bin warden --bin ebpfsentinel-launch) \
-        >/tmp/warden-token-build-$$.log 2>&1; then
-        skip "launcher failed to build: $(cat /tmp/warden-token-build-$$.log)"
+    if ! (cd "$PROJECT_ROOT" && cargo build --release --bin warden) \
+        >/tmp/warden-build-$$.log 2>&1; then
+        skip "warden failed to build: $(cat /tmp/warden-build-$$.log)"
     fi
-    BPF_TOKEN_LAUNCHER_BIN="${PROJECT_ROOT}/target/release/ebpfsentinel-launch"
-    [ -x "$BPF_TOKEN_LAUNCHER_BIN" ] || skip "launcher binary not found after build"
-    [ -x "${PROJECT_ROOT}/target/release/warden" ] || skip "warden binary not found after build"
-    export BPF_TOKEN_LAUNCHER_BIN
+    BPF_TOKEN_WARDEN_BIN="${PROJECT_ROOT}/target/release/warden"
+    [ -x "$BPF_TOKEN_WARDEN_BIN" ] || skip "warden binary not found after build"
+    export BPF_TOKEN_WARDEN_BIN
 }
 
 # bpf_token_stage_ebpf_dir <src_dir> — copy the eBPF object files to a
@@ -82,10 +81,11 @@ bpf_token_module_btf_available() {
     [ -r "/sys/kernel/btf/${module}" ]
 }
 
-# bpf_token_run <config> [seconds] — run the agent token-only via the launcher
-# for N seconds (default 9), capturing combined stdout+stderr to $BPF_TOKEN_LOG.
-# The agent is a daemon, so `timeout` reaping it (exit 124) is the success path;
-# the assertions inspect the captured log rather than an exit code.
+# bpf_token_run <config> [seconds] — start the warden broker, then run the agent
+# token-only against it for N seconds (default 9), capturing combined stdout+stderr
+# to $BPF_TOKEN_LOG. The agent is a daemon, so `timeout` reaping it (exit 124) is
+# the success path; the assertions inspect the captured log rather than an exit
+# code. The warden is killed when the agent's window ends.
 bpf_token_run() {
     local config="${1:?usage: bpf_token_run <config> [seconds]}"
     local secs="${2:-9}"
@@ -93,20 +93,35 @@ bpf_token_run() {
     # Stage the agent under /tmp so the user-namespace exec can reach it.
     install -m755 "$AGENT_BIN" "$BPF_TOKEN_AGENT_STAGE"
     : >"$BPF_TOKEN_LOG"
-    # Close inherited fds (>=3) before the launcher. bats holds its TAP stream on
-    # fd 3, which the launcher would otherwise inherit — pushing the module BTF
-    # fds it opens to higher numbers and colliding with the fds the agent's token
-    # loader allocates, so map creation fails with a bare -1. Running the launcher
-    # with a clean fd table makes the module BTF fds start at 3 as they do
-    # outside bats.
     rm -f "$BPF_TOKEN_WARDEN_SOCK"
+
+    # Start the privileged warden broker. --uid 0: the test agent runs as root and
+    # maps namespace-0 to real root, so it presents uid 0 over SO_PEERCRED.
+    "$BPF_TOKEN_WARDEN_BIN" serve "$BPF_TOKEN_WARDEN_SOCK" --uid 0 \
+        >>"$BPF_TOKEN_LOG" 2>&1 &
+    BPF_TOKEN_WARDEN_PID=$!
+    export BPF_TOKEN_WARDEN_PID
+    # The agent's bootstrap connects once (no retry); wait for the socket.
+    local _i
+    for _i in $(seq 1 100); do
+        [ -S "$BPF_TOKEN_WARDEN_SOCK" ] && break
+        sleep 0.1
+    done
+
+    # Close inherited fds (>=3) before the agent. bats holds its TAP stream on fd
+    # 3, which the agent would otherwise inherit — colliding with the module-BTF
+    # fds it receives from the warden and the fds its token loader allocates. A
+    # clean fd table keeps the received fds at low numbers as outside bats.
     (
         for _fd in $(seq 3 30); do eval "exec ${_fd}>&-" 2>/dev/null || true; done
         export EBPFSENTINEL_BPFFS="$BPF_TOKEN_BPFFS"
         export EBPFSENTINEL_WARDEN_SOCK="$BPF_TOKEN_WARDEN_SOCK"
-        exec timeout "$secs" "$BPF_TOKEN_LAUNCHER_BIN" \
-            "$BPF_TOKEN_AGENT_STAGE" --config "$config" >"$BPF_TOKEN_LOG" 2>&1
+        exec timeout "$secs" "$BPF_TOKEN_AGENT_STAGE" --config "$config" >>"$BPF_TOKEN_LOG" 2>&1
     ) || true
+
+    kill "$BPF_TOKEN_WARDEN_PID" 2>/dev/null || true
+    wait "$BPF_TOKEN_WARDEN_PID" 2>/dev/null || true
+    BPF_TOKEN_WARDEN_PID=""
     [ -s "$BPF_TOKEN_LOG" ]
 }
 
@@ -120,12 +135,13 @@ bpf_token_log_has() {
     grep -qiE "${1:?usage: bpf_token_log_has <regex>}" "$BPF_TOKEN_LOG"
 }
 
-# bpf_token_cleanup — remove log, staged agent, socket, leftover mount. The
-# launcher + warden are build artifacts (target/release or next to the agent), so
-# they are never removed.
+# bpf_token_cleanup — stop a stray warden, remove log, staged agent, socket,
+# leftover mount. The warden is a build artifact (target/release or next to the
+# agent), so it is never removed.
 bpf_token_cleanup() {
+    [ -n "$BPF_TOKEN_WARDEN_PID" ] && kill "$BPF_TOKEN_WARDEN_PID" 2>/dev/null || true
     umount "$BPF_TOKEN_BPFFS" 2>/dev/null || true
     rm -f "$BPF_TOKEN_LOG" "$BPF_TOKEN_AGENT_STAGE" "$BPF_TOKEN_WARDEN_SOCK" \
-        "/tmp/warden-token-build-$$.log"
+        "/tmp/warden-build-$$.log"
     rm -rf "$BPF_TOKEN_EBPF_STAGE"
 }

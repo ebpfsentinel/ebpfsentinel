@@ -164,7 +164,7 @@ sudo ./install.sh            # installs to /usr/local, wires up the systemd unit
 The userspace agent builds on **stable**; the eBPF kernel programs need the **nightly** toolchain (driven by `cargo xtask`, `bpfel` target). Install Rust via [rustup](https://rustup.rs):
 
 ```bash
-cargo build --release        # agent + warden broker + launcher (stable)
+cargo build --release        # agent + warden broker (stable)
 cargo xtask ebpf-build        # eBPF programs (nightly)
 
 # eBPF loads only through a BPF token (a user-namespace feature). The privileged
@@ -174,31 +174,23 @@ cargo xtask ebpf-build        # eBPF programs (nightly)
 sudo ./target/release/warden serve /run/ebpfsentinel/warden.sock --uid 0 &
 sudo EBPFSENTINEL_WARDEN_SOCK=/run/ebpfsentinel/warden.sock \
   ./target/release/ebpfsentinel-agent --config config/ebpfsentinel.yaml
-
-# Or the all-in-one shortcut (launches the warden, then execs the agent):
-sudo ./target/release/ebpfsentinel-launch \
-  ./target/release/ebpfsentinel-agent --config config/ebpfsentinel.yaml
 ```
 
 The systemd install (`dist/install.sh`) wires this as two units — `ebpfsentinel-warden.service` (broker) + `ebpfsentinel.service` (agent) — mirroring the Docker split.
 
 ### Docker (rootless)
 
-The agent loads eBPF **exclusively** through a BPF token (kernel 6.9+) — never `CAP_BPF`, never `--privileged`. The image entrypoint is the `ebpfsentinel-launch` supervisor: it starts the privileged `warden` broker, then execs the agent, which self-unshares a user namespace and loads its own eBPF through the token. `docker compose up` wires this automatically. To run it by hand:
+The agent loads eBPF **exclusively** through a BPF token (kernel 6.9+) — never `CAP_BPF`, never `--privileged`. The deployment is two containers: the privileged `warden` broker and the rootless `agent`, sharing a control socket. `docker compose up` wires both:
 
 ```bash
-# Optional: to override the config, bind-mount it root-owned and not
-# world-readable (the agent rejects mode 0644); omit the -v line to use the
-# image's baked-in default.
-#   sudo chown root:root config/ebpfsentinel.yaml && sudo chmod 640 config/ebpfsentinel.yaml
-docker run --network host \
-  --cap-add SYS_ADMIN --cap-add NET_ADMIN --cap-add NET_RAW \
-  --security-opt apparmor=unconfined \
-  -v ./config/ebpfsentinel.yaml:/etc/ebpfsentinel/config.yaml \
-  ghcr.io/ebpfsentinel/ebpfsentinel:latest
+# The agent runs as uid 65534 and rejects a world-readable config; make it
+# readable by that uid:
+#   sudo chown 65534:65534 config/ebpfsentinel.yaml && sudo chmod 640 config/ebpfsentinel.yaml
+docker compose up -d        # starts the warden broker + the agent
+docker compose logs -f
 ```
 
-The capabilities are held by the `warden` broker (bpffs delegation, conntrack/routes, the pcap pool + ARP); the agent self-unshares a user namespace and loads its own eBPF through the token, holding none of them. See the [BPF token guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/operations/deployment/bpf-token.md) for the systemd and Kubernetes paths and the full capability matrix.
+The capabilities are held by the `warden` broker (bpffs delegation, conntrack/routes, the pcap pool + ARP); the agent drops every capability — it self-unshares a user namespace and loads its own eBPF through the token. See the [BPF token guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/operations/deployment/bpf-token.md) for the systemd and Kubernetes paths and the full capability matrix.
 
 ### Minimal config
 

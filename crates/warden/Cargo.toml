@@ -10,16 +10,10 @@ name = "ebpfsentinel_warden"
 path = "src/lib.rs"
 
 # `warden` is the privileged control-plane broker the rootless agent reaches over
-# a socket; `ebpfsentinel-launch` is the combined-unit supervisor that starts the
-# warden then execs the agent. Both share the library above with the agent's
-# self-bootstrap trampoline.
+# a socket. It shares the library above with the agent's self-bootstrap trampoline.
 [[bin]]
 name = "warden"
 path = "src/main.rs"
-
-[[bin]]
-name = "ebpfsentinel-launch"
-path = "src/bin/launch.rs"
 
 [dependencies]
 libc = { workspace = true }

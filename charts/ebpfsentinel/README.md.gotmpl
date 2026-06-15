@@ -6,7 +6,7 @@
 
 ## Overview
 
-Deploys [eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel) — a kernel-native **Network & Security platform** — as a Kubernetes DaemonSet. One agent per node, attached to host network interfaces via eBPF (XDP/TC). eBPF loads **exclusively** through a BPF token: the container entrypoint (`ebpfsentinel-launch`) starts the privileged `warden` broker, then execs the agent, which self-unshares a user namespace, has the warden delegate a bpffs, and creates the token there — so the pod is granted only the listed capabilities instead of `privileged: true`.
+Deploys [eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel) — a kernel-native **Network & Security platform** — as a Kubernetes DaemonSet. One agent per node, attached to host network interfaces via eBPF (XDP/TC). eBPF loads **exclusively** through a BPF token. Each pod runs two containers: a privileged `warden` broker (native sidecar) and the rootless `agent`. The agent self-unshares a user namespace, has the warden delegate a bpffs over a shared socket, and creates the token there — so the agent holds **no** host capabilities and only the warden sidecar is granted them (never `privileged: true`).
 
 ## Edition: OSS (AGPL-3.0)
 
@@ -48,7 +48,7 @@ See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/m
 | Requirement | Reason |
 |-------------|--------|
 | `hostNetwork: true` | XDP/TC programs attach to host interfaces, not pod veth |
-| `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` + `CAP_NET_RAW` + `allowPrivilegeEscalation: true` | eBPF loads **exclusively** through a BPF token — there is no capability-based loading path and no init container. The combined entrypoint (`ebpfsentinel-launch`) runs the `warden` broker (which holds these capabilities for bpffs delegation, conntrack/routes, and the pcap pool/ARP) plus the agent, which self-unshares a user namespace and loads its own eBPF through the token holding **no host capabilities** |
+| `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` + `CAP_NET_RAW` on the **warden sidecar** only | eBPF loads **exclusively** through a BPF token — there is no capability-based loading path. The warden broker holds these capabilities for bpffs delegation, conntrack/routes, and the pcap pool/ARP. The `agent` container drops every capability (`cap_drop: ALL`, non-root): it self-unshares a user namespace and loads its own eBPF through the token. Both run Unconfined seccomp/AppArmor (the mount/userns/bpf syscalls). |
 | unprivileged user namespaces enabled on the node | `BPF_TOKEN_CREATE` is `EOPNOTSUPP` outside a user namespace |
 | `/sys/fs/bpf` mount | BPF filesystem for map pinning + delegated token bpffs |
 | `/sys/kernel/debug` mount | eBPF tracing (debugfs) |

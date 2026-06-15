@@ -290,17 +290,21 @@ start_ebpf_agent() {
     done
 
     # Start agent on remote host via SSH. eBPF loads EXCLUSIVELY through a BPF
-    # token (a user-namespace feature), so the agent must run via the shipped
-    # combined-unit launcher (starts the warden broker, then execs the agent,
-    # which self-unshares a userns + loads its own eBPF, as production does). Run
-    # directly and it starts in API-only mode (no eBPF). Binaries + objects live
-    # under /usr/local (world-traversable), so the userns agent needs no staging.
-    # nohup so the process survives SSH disconnect.
+    # token (a user-namespace feature), so the deployment is split: a privileged
+    # `warden` broker runs alongside the agent, which self-unshares a userns + has
+    # the warden delegate a bpffs + loads its own eBPF (as production does). Run
+    # the agent alone (no warden) and it starts in API-only mode (no eBPF).
+    # Binaries + objects live under /usr/local (world-traversable), so the userns
+    # agent needs no staging. nohup so the processes survive SSH disconnect. The
+    # warden's PID file lets stop drop both. --uid 0: the agent runs as root.
     _agent_ssh_sudo bash -c \
         "'sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 >/dev/null 2>&1 || true; \
-          LAUNCH=/usr/local/bin/ebpfsentinel-launch; \
-          if [ -x \"\$LAUNCH\" ]; then \
-            nohup env EBPF_PROGRAM_DIR=/usr/local/lib/ebpfsentinel EBPFSENTINEL_BPFFS=/sys/fs/bpf/ebpfsentinel \"\$LAUNCH\" /usr/local/bin/ebpfsentinel-agent --config ${remote_config}${extra_args} >${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}; \
+          WARDEN=/usr/local/bin/warden; SOCK=/run/ebpfsentinel/warden.sock; \
+          if [ -x \"\$WARDEN\" ]; then \
+            mkdir -p /run/ebpfsentinel; rm -f \"\$SOCK\"; \
+            nohup \"\$WARDEN\" serve \"\$SOCK\" --uid 0 >>${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}.warden; \
+            for _ in \$(seq 1 100); do [ -S \"\$SOCK\" ] && break; sleep 0.1; done; \
+            nohup env EBPF_PROGRAM_DIR=/usr/local/lib/ebpfsentinel EBPFSENTINEL_BPFFS=/sys/fs/bpf/ebpfsentinel EBPFSENTINEL_WARDEN_SOCK=\"\$SOCK\" /usr/local/bin/ebpfsentinel-agent --config ${remote_config}${extra_args} >${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}; \
           else \
             nohup /usr/local/bin/ebpfsentinel-agent --config ${remote_config}${extra_args} >${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}; \
           fi'" || {
@@ -379,18 +383,24 @@ stop_ebpf_agent() {
     # keeps throttling eth1 — contaminating the next suite's "no agent" baseline
     # — and its XDP hook makes the next attach fail with EBUSY (errno 16).
     #
+    # Stop the warden broker started alongside the agent (its PID file is the
+    # agent's with a .warden suffix).
+    local warden_pid
+    warden_pid="$(_agent_ssh cat "${_REMOTE_PID_FILE}.warden" 2>/dev/null)" || true
+    [ -n "$warden_pid" ] && _agent_ssh_sudo kill "$warden_pid" 2>/dev/null || true
+
     # Match by process name (comm), NOT `pkill -f "… --config"`: `_agent_ssh_sudo`
     # sends the command through ssh, which re-joins argv with spaces and drops
     # the quotes, so a multi-word `-f` pattern arrives as `pkill -f name --config`
     # — pkill then treats `--config` as a flag and silently kills nothing. The
-    # binary's comm is truncated to 15 chars (`ebpfsentinel-ag` / `…-to`); a bare
+    # binary's comm is truncated to 15 chars (`ebpfsentinel-ag`); a bare
     # single-token pattern survives ssh and never matches the pkill command line.
     local _reap=0
     _agent_ssh_sudo pkill ebpfsentinel-ag 2>/dev/null || true
-    _agent_ssh_sudo pkill ebpfsentinel-to 2>/dev/null || true
+    _agent_ssh_sudo pkill warden 2>/dev/null || true
     while _agent_ssh_sudo pgrep ebpfsentinel-ag >/dev/null 2>&1 && [ "$_reap" -lt 20 ]; do
         _agent_ssh_sudo pkill -9 ebpfsentinel-ag 2>/dev/null || true
-        _agent_ssh_sudo pkill -9 ebpfsentinel-to 2>/dev/null || true
+        _agent_ssh_sudo pkill -9 warden 2>/dev/null || true
         sleep 0.3
         _reap=$((_reap + 1))
     done
