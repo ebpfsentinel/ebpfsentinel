@@ -164,7 +164,7 @@ case "$PROVISION_MODE" in
         # Also build Docker image for Docker-based tests
         if command -v docker &>/dev/null; then
             echo "  Building Docker image..."
-            (cd "$PROJECT_DIR" && sudo docker build -t ebpfsentinel-agent:latest .) || \
+            (cd "$PROJECT_DIR" && sudo docker build -f Dockerfile.agent -t ebpfsentinel-agent:latest .) || \
                 echo "  WARNING: Docker image build failed (non-fatal)"
         fi
         ;;

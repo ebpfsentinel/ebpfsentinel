@@ -109,7 +109,7 @@ vm_build_binary() {
 vm_build_docker() {
     echo "=== VM — Build Docker image ==="
     cd "$VAGRANT_DIR" && vagrant ssh -c \
-        'cd ~/ebpfsentinel && docker build -t ebpfsentinel:latest . 2>&1' \
+        'cd ~/ebpfsentinel && docker build -f Dockerfile.agent -t ebpfsentinel:latest . 2>&1' \
         -- -q
     echo "  Docker image build complete."
     echo ""

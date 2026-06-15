@@ -1,6 +1,6 @@
 # eBPFsentinel — Multi-stage Docker build
 #
-# Build:  docker build -t ebpfsentinel .
+# Build:  docker build -f Dockerfile.agent -t ebpfsentinel .
 # Run:    docker run --cap-add SYS_ADMIN --cap-add NET_RAW --network host \
 #           --security-opt apparmor=unconfined \
 #           -v ./config:/etc/ebpfsentinel \

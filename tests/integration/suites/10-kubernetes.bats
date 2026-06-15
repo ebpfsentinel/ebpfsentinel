@@ -38,7 +38,7 @@ setup_file() {
           -maxdepth 1 -type f ! -name '*.d' ! -name '*.fingerprint' ! -name '.cargo*' \
           -exec cp {} "${PROJECT_ROOT}/ebpf-out/" \; 2>/dev/null || true
         echo "# Building ebpfsentinel:latest..." >&3
-        docker build -t ebpfsentinel:latest "${PROJECT_ROOT}" || {
+        docker build -f "${PROJECT_ROOT}/Dockerfile.agent" -t ebpfsentinel:latest "${PROJECT_ROOT}" || {
             echo "# Docker build failed — tests will be skipped" >&3
         }
     fi

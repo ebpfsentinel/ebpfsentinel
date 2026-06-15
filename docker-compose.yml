@@ -41,7 +41,9 @@
 
 services:
   agent:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
     image: ebpfsentinel:latest
     container_name: ebpfsentinel
 

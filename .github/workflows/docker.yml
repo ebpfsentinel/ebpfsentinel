@@ -157,6 +157,7 @@ jobs:
           DOCKER_BUILD_SUMMARY: false
         with:
           context: .
+          file: Dockerfile.agent
           platforms: ${{ matrix.platform }}
           push: true
           provenance: false

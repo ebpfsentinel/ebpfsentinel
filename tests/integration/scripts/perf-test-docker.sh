@@ -331,7 +331,7 @@ build_image() {
         fi
     else
         echo "  Building ebpfsentinel:latest..."
-        docker build -t ebpfsentinel:latest "$PROJECT_ROOT" >/dev/null 2>&1 || {
+        docker build -f "$PROJECT_ROOT/Dockerfile.agent" -t ebpfsentinel:latest "$PROJECT_ROOT" >/dev/null 2>&1 || {
             echo "ERROR: Docker build failed" >&2
             exit 1
         }

@@ -70,7 +70,7 @@ fi
 if [ "$SKIP_BUILD" = false ]; then
     echo "==> Building Docker image '${IMAGE_NAME}' from ${PROJECT_ROOT}..."
     echo "    (this may take a while on first build)"
-    docker build --network=host "${DOCKER_BUILD_ARGS[@]}" -t "$IMAGE_NAME" "$PROJECT_ROOT"
+    docker build --network=host -f "$PROJECT_ROOT/Dockerfile.agent" "${DOCKER_BUILD_ARGS[@]}" -t "$IMAGE_NAME" "$PROJECT_ROOT"
     echo "==> Build complete."
 else
     # Verify image exists locally

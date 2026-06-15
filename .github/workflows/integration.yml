@@ -253,7 +253,7 @@ jobs:
           ls ebpf-out/ 2>/dev/null || echo "No eBPF programs found (agent-only Docker image)"
 
       - name: Build Docker image
-        run: docker build -t ebpfsentinel:integration-test .
+        run: docker build -f Dockerfile.agent -t ebpfsentinel:integration-test .
 
       - name: Suite 09 — Docker Deployment
         run: bats --timing tests/integration/suites/09-docker.bats

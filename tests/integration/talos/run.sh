@@ -55,7 +55,7 @@ prep() {
     find "${PROJECT_ROOT}/crates/ebpf-programs/"*/target/bpfel-unknown-none/release \
       -maxdepth 1 -type f ! -name '*.d' ! -name '*.fingerprint' ! -name '.cargo*' \
       -exec cp {} "${PROJECT_ROOT}/ebpf-out/" \; 2>/dev/null || true
-    docker build -t ebpfsentinel:latest "${PROJECT_ROOT}"
+    docker build -f "${PROJECT_ROOT}/Dockerfile.agent" -t ebpfsentinel:latest "${PROJECT_ROOT}"
   fi
 
   if ! docker ps --format '{{.Names}}' | grep -qx "${REGISTRY_NAME}"; then

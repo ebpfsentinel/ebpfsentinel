@@ -106,7 +106,7 @@ fi
 if [ "$SYNC_DOCKER" = true ]; then
     if ! docker image inspect "$DOCKER_IMAGE" &>/dev/null; then
         echo "ERROR: Docker image '${DOCKER_IMAGE}' not found locally." >&2
-        echo "       Build it first: docker build -t ${DOCKER_IMAGE} ${PROJECT_ROOT}" >&2
+        echo "       Build it first: docker build -f ${PROJECT_ROOT}/Dockerfile.agent -t ${DOCKER_IMAGE} ${PROJECT_ROOT}" >&2
         exit 1
     fi
 
