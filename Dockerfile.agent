@@ -54,6 +54,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml deny.toml ./
 COPY .cargo/ .cargo/
 COPY crates/ crates/
 COPY proto/ proto/
+COPY config/ebpfsentinel.yaml config/ebpfsentinel.yaml
 
 ENV LIBPCAP_LIBDIR=/usr/local/musl/lib
 
@@ -70,7 +71,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --target "${MUSL_TARGET}" \
         --bin ebpfsentinel-agent && \
     cp "/build/target/${MUSL_TARGET}/release/ebpfsentinel-agent" /build/ebpfsentinel-agent && \
-    mkdir -p /build/captures-dir
+    mkdir -p /build/captures-dir && \
+    mkdir -p /build/etc/ebpfsentinel && \
+    cp config/ebpfsentinel.yaml /build/etc/ebpfsentinel/config.yaml && \
+    chmod 0755 /build/etc/ebpfsentinel && \
+    chmod 0640 /build/etc/ebpfsentinel/config.yaml
 
 # ── Stage 2: Minimal runtime image ──────────────────────────────────
 #
@@ -89,12 +94,16 @@ COPY --from=agent-builder /build/ebpfsentinel-agent /usr/local/bin/ebpfsentinel-
 # Copy pre-built eBPF programs (built by CI or `cargo xtask ebpf-build`)
 COPY ebpf-out/ /usr/local/lib/ebpfsentinel/
 
-# 0640: the agent rejects a world-readable config (it may hold secrets). The
-# source file is 0644 in git, so tighten it as it lands in the image. This baked
-# copy is a fallback; deployments that run the agent as a non-root uid (the
-# compose `agent` service, the Helm chart) bind-mount / project a config readable
-# by that uid instead (a ConfigMap under Kubernetes).
-COPY --chmod=0640 config/ebpfsentinel.yaml /etc/ebpfsentinel/config.yaml
+# Config dir (0755, traversable) + file (0640, the agent rejects a world-readable
+# config — it may hold secrets). Staged in the builder and copied as a tree:
+# `COPY --chmod` on a single file also re-modes the auto-created parent dir, which
+# would leave /etc/ebpfsentinel at 0640 (no execute) — un-traversable, so even the
+# owner cannot stat the file inside (breaks the rootless agent reading its config
+# through its user namespace). This baked copy is a fallback; deployments that run
+# the agent as a non-root uid (the compose `agent` service, the Helm chart)
+# bind-mount / project a config readable by that uid instead (a ConfigMap under
+# Kubernetes).
+COPY --from=agent-builder /build/etc/ebpfsentinel /etc/ebpfsentinel
 
 # distroless has no shell — create the directory in the builder stage and COPY it.
 COPY --from=agent-builder /build/captures-dir /var/lib/ebpfsentinel/captures
