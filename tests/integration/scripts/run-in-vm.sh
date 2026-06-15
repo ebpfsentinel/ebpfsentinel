@@ -50,11 +50,14 @@ for tool in curl jq; do
     fi
 done
 
-# ── Build agent ────────────────────────────────────────────────────
+# ── Build agent + warden broker ────────────────────────────────────
+# eBPF loads token-only via the split deployment: the warden broker runs beside
+# the agent, so both binaries must be built (the harness starts the warden, then
+# the agent against it).
 
 if [ "$SKIP_BUILD" = "false" ]; then
-    echo "Building agent (release)..."
-    (cd "$PROJECT_ROOT" && cargo build --release --bin ebpfsentinel-agent)
+    echo "Building agent + warden (release)..."
+    (cd "$PROJECT_ROOT" && cargo build --release --bin ebpfsentinel-agent --bin warden)
     echo ""
 fi
 
