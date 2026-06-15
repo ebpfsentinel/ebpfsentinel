@@ -90,9 +90,7 @@ cluster_up() {
   docker ps --format '{{.Names}}' | grep -qx "${REGISTRY_NAME}" \
     || die "local registry not running — run (non-root): $0 prep"
 
-  if [ -d "${HOME}/.talos/clusters/${CLUSTER_NAME}" ]; then
-    log "Cluster '${CLUSTER_NAME}' already exists — skipping create, resuming deploy"
-  else
+  create_cluster() {
     log "Creating Talos qemu cluster '${CLUSTER_NAME}' (1 control-plane + 2 workers)"
     # cluster create waits for full health and merges kubeconfig into ~/.kube/config.
     talosctl cluster create qemu \
@@ -102,6 +100,23 @@ cluster_up() {
       --cidr "${CIDR}" \
       --memory-controlplanes 2560 --memory-workers 2048 \
       --config-patch "@${PATCH}"
+  }
+
+  if [ -d "${HOME}/.talos/clusters/${CLUSTER_NAME}" ]; then
+    # A state dir alone does not mean the cluster is alive: the qemu VMs are
+    # processes that do not survive a host reboot, leaving stale state that makes
+    # `cluster create` refuse and the deploy time out against a dead apiserver.
+    # Probe the apiserver; if it is unreachable, the cluster is stale — tear just
+    # the cluster down (leaving the local registry intact) and recreate it.
+    if timeout 5 bash -c "exec 3<>/dev/tcp/${GATEWAY}/6443" 2>/dev/null; then
+      log "Cluster '${CLUSTER_NAME}' is up (apiserver reachable) — resuming deploy"
+    else
+      log "Cluster '${CLUSTER_NAME}' state is stale (apiserver unreachable) — destroying and recreating"
+      talosctl cluster destroy --name "${CLUSTER_NAME}" -f || true
+      create_cluster
+    fi
+  else
+    create_cluster
   fi
 
   # Hand state back to the invoking user so later non-root kubectl works.
@@ -172,7 +187,7 @@ verify() {
 cluster_down() {
   [ "$(id -u)" -eq 0 ] || die "run 'down' as root: sudo -E $0 down"
   log "Destroying Talos cluster '${CLUSTER_NAME}'"
-  talosctl cluster destroy qemu --name "${CLUSTER_NAME}" || true
+  talosctl cluster destroy --name "${CLUSTER_NAME}" -f || true
   log "Removing local registry"
   docker rm -f "${REGISTRY_NAME}" >/dev/null 2>&1 || true
   log "down done"
