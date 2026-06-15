@@ -126,6 +126,13 @@ fn handle_conn<M: MapSource>(
         }
     }
 
+    // Index into the pre-opened pcap pool. Each `PcapOpen` hands out the next
+    // un-served pool fd; the warden keeps its own copy open so a reconnecting
+    // agent is re-served from the start (the fd is dup'd into the agent by
+    // `SCM_RIGHTS`, so both reference the same socket and closing the agent's copy
+    // does not disturb the warden's).
+    let mut pcap_next = 0usize;
+
     while let Ok(cmd) = read_frame::<_, Command>(&mut reader) {
         // `GetRingbufFd` / `PcapOpen` answer out-of-band: an `FdReady` frame
         // followed by a fd in an `SCM_RIGHTS` cmsg, so they bypass `dispatch`.
@@ -138,13 +145,24 @@ fn handle_conn<M: MapSource>(
             ),
             Command::PcapOpen { iface, filter } => {
                 eprintln!("[warden] pcap open on {iface} (filter applied agent-side: {filter:?})");
-                match net_ops::open_pcap_fd(iface) {
-                    Ok(owned) => {
-                        let ok = serve_passed_fd(&mut writer, Ok(owned.as_raw_fd()));
-                        drop(owned); // fd dup'd into the agent by SCM_RIGHTS; ours can close
-                        ok
+                if pcap_next < pcap.len() {
+                    // Serve a launcher-provided socket: the warden may sit in a
+                    // user namespace where `socket(AF_PACKET)` is denied, so the
+                    // pre-opened pool is the only way to capture rootlessly.
+                    let fd = pcap[pcap_next];
+                    pcap_next += 1;
+                    serve_passed_fd(&mut writer, Ok(fd))
+                } else {
+                    // Pool exhausted (or none provided, e.g. a bare-metal warden
+                    // running as host root): open one on demand.
+                    match net_ops::open_pcap_fd(iface) {
+                        Ok(owned) => {
+                            let ok = serve_passed_fd(&mut writer, Ok(owned.as_raw_fd()));
+                            drop(owned); // fd dup'd into the agent by SCM_RIGHTS; ours can close
+                            ok
+                        }
+                        Err(message) => serve_passed_fd(&mut writer, Err(message)),
                     }
-                    Err(message) => serve_passed_fd(&mut writer, Err(message)),
                 }
             }
             Command::Delegate => serve_delegate(&mut writer, btf, pcap),

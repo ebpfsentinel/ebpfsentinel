@@ -502,18 +502,51 @@ pub async fn warden_serve(config_path: &str, sock: &str, allowed_uid: u32) -> an
     let _ = std::fs::remove_file(sock);
     let listener = std::os::unix::net::UnixListener::bind(sock)
         .map_err(|e| anyhow::anyhow!("warden-serve bind {sock}: {e}"))?;
-    std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600))?;
+    // The warden runs privileged inside a user namespace that maps only its own
+    // uid, so it can neither leave the socket root-owned 0600 (the rootless agent
+    // could not open it) nor `chown` it to the agent's uid (that uid is unmapped
+    // in the namespace). The authentication boundary is not the file mode but the
+    // `SO_PEERCRED` check in the serve loop, which admits only `allowed_uid`. Open
+    // the socket so the agent can `connect()`; non-matching peers are rejected at
+    // accept time regardless.
+    std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o666))?;
     info!(
         sock,
         allowed_uid, "warden-serve: serving the warden protocol"
     );
 
+    // AF_PACKET capture sockets cannot be opened from inside the warden's child
+    // user namespace (CAP_NET_RAW there does not reach the host net namespace), so
+    // the privileged launcher pre-opens a pool while still global root and passes
+    // the fds in `EBPFSENTINEL_PCAP_FDS`. The warden hands these out on `PcapOpen`
+    // rather than opening on demand; the rootless agent binds + filters its copy.
+    let pcap_fds: Vec<std::os::fd::RawFd> = std::env::var("EBPFSENTINEL_PCAP_FDS")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| s.parse::<std::os::fd::RawFd>().ok())
+                .filter(|&fd| fd >= 0)
+                .collect()
+        })
+        .unwrap_or_default();
+    info!(
+        pcap_pool = pcap_fds.len(),
+        "warden-serve: packet-capture sockets inherited from the launcher"
+    );
+
     // Serve on a dedicated thread (the loop is blocking). The rootless agent loads
-    // nothing, so delegation carries no BTF/pcap fds — both sets are empty.
+    // nothing, so delegation carries no BTF fds; the pcap pool is served on demand.
     let serve = std::thread::Builder::new()
         .name("warden-serve".into())
         .spawn(move || {
-            ebpfsentinel_warden::server::serve_loop(&listener, &registry, &[], &[], allowed_uid);
+            ebpfsentinel_warden::server::serve_loop(
+                &listener,
+                &registry,
+                &[],
+                &pcap_fds,
+                allowed_uid,
+            );
         })?;
 
     park_until_signal("warden-serve").await?;
