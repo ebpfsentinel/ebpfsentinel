@@ -98,6 +98,30 @@ install -Dm644 "${SCRIPT_DIR}/ebpfsentinel-warden.service" "${SYSTEMD_DIR}/ebpfs
 install -Dm644 "${SCRIPT_DIR}/ebpfsentinel.service" "${SYSTEMD_DIR}/ebpfsentinel.service"
 systemctl daemon-reload
 
+# ── AppArmor: unprivileged user-namespace restriction (Ubuntu 24.04+) ──
+#
+# The agent self-unshares a user namespace to load eBPF through a BPF token. On
+# kernels that gate unprivileged userns behind AppArmor
+# (kernel.apparmor_restrict_unprivileged_userns=1), a process without
+# CAP_SYS_ADMIN in the init user namespace cannot create one. The bare-metal unit
+# runs the agent as root (exempt), so this only bites if the agent is reconfigured
+# to run unprivileged — handle it anyway for that case and for parity with the
+# container deployments. Prefer a per-binary AppArmor profile (scoped to the
+# agent, keeps the host-wide restriction); fall back to a sysctl drop-in
+# (host-wide) only when apparmor_parser is unavailable to load the profile.
+APPARMOR_SYSCTL="kernel.apparmor_restrict_unprivileged_userns"
+if [[ "$(sysctl -n "$APPARMOR_SYSCTL" 2>/dev/null || echo 0)" == "1" ]]; then
+  if command -v apparmor_parser >/dev/null 2>&1; then
+    echo "AppArmor restricts unprivileged user namespaces — installing agent profile..."
+    install -Dm644 "${SCRIPT_DIR}/apparmor.d/ebpfsentinel-agent" /etc/apparmor.d/ebpfsentinel-agent
+    apparmor_parser -r -W /etc/apparmor.d/ebpfsentinel-agent
+  else
+    echo "AppArmor restricts unprivileged user namespaces (no apparmor_parser) — installing sysctl drop-in..."
+    install -Dm644 "${SCRIPT_DIR}/sysctl.d/60-ebpfsentinel-userns.conf" /etc/sysctl.d/60-ebpfsentinel-userns.conf
+    sysctl --system >/dev/null
+  fi
+fi
+
 # ── Done ──────────────────────────────────────────────────────────
 
 echo ""

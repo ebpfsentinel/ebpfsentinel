@@ -1,0 +1,20 @@
+# AppArmor profile — allow the eBPFsentinel agent to create user namespaces.
+#
+# The agent is rootless: it self-unshares a user namespace and loads its eBPF
+# through a BPF token (no host capabilities). On kernels that gate unprivileged
+# user-namespace creation behind AppArmor (kernel.apparmor_restrict_unprivileged_userns=1,
+# the Ubuntu 24.04+ default), a process without CAP_SYS_ADMIN in the init user
+# namespace needs an AppArmor profile that grants `userns` to create one.
+#
+# flags=(unconfined) leaves the agent otherwise unconfined (it issues a wide range
+# of mount/bpf/netlink syscalls); the `userns` rule grants just the namespace
+# capability for this binary, without relaxing the host-wide restriction for
+# everything else. Installed by install.sh only when the restriction is active.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile ebpfsentinel-agent /usr/local/bin/ebpfsentinel-agent flags=(unconfined) {
+  userns,
+
+  include if exists <local/ebpfsentinel-agent>
+}
