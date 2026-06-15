@@ -43,10 +43,10 @@ spec:
       serviceAccountName: {{ include "ebpfsentinel.serviceAccountName" . }}
       automountServiceAccountToken: false
       securityContext:
-        # The launcher drops the user-namespace child to uid/gid 65534 before
-        # self-mapping (it cannot map namespace-0 to real root under a stock
-        # container runtime), so the agent runs as host gid 65534. This fsGroup
-        # makes the 0640 configMap group-readable by it.
+        # The agent drops to uid/gid 65534 before self-mapping its user namespace
+        # (it cannot map namespace-0 to real root under a stock container
+        # runtime), so it runs as host gid 65534. This fsGroup makes the 0640
+        # configMap group-readable by it.
         fsGroup: 65534
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -65,16 +65,22 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.daemonset.securityContext | nindent 12 }}
-          # Override the image entrypoint so the launcher --bpffs tracks the
-          # configured bpffsPath (the agent's bpf_token.bpffs_path must match).
+          # The combined-unit launcher starts the warden broker, then execs the
+          # agent against it. The agent mounts its delegated bpffs at
+          # EBPFSENTINEL_BPFFS (set below to bpffsPath; its bpf_token.bpffs_path
+          # config must match).
           command:
-            - "/usr/local/bin/warden-token"
-            - "--bpffs"
-            - {{ .Values.daemonset.bpfToken.bpffsPath | quote }}
+            - "/usr/local/bin/ebpfsentinel-launch"
             - "/usr/local/bin/ebpfsentinel-agent"
           args:
             - "--config"
             - "/etc/ebpfsentinel/config.yaml"
+          env:
+            - name: EBPFSENTINEL_BPFFS
+              value: {{ .Values.daemonset.bpfToken.bpffsPath | quote }}
+            {{- with .Values.daemonset.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - containerPort: {{ .Values.agent.httpPort }}
               name: http
@@ -103,10 +109,6 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- with .Values.daemonset.extraEnv }}
-          env:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/ebpfsentinel
@@ -114,7 +116,7 @@ spec:
             - name: bpf
               mountPath: /sys/fs/bpf
               {{- if not .Values.daemonset.bpfToken.bpffsEmptyDir }}
-              # The launcher mounts the delegated bpffs over this path inside its
+              # The agent mounts the delegated bpffs over this path inside its
               # own private mount namespace; expose the host bpffs to the pod.
               # (Omitted for an in-pod tmpfs, where there is no host bpffs.)
               mountPropagation: HostToContainer
@@ -144,7 +146,7 @@ spec:
           emptyDir:
             medium: Memory
           {{- else }}
-          # A container's /sys is read-only, so the launcher needs this writable
+          # A container's /sys is read-only, so the agent needs this writable
           # host bpffs to create the delegated mountpoint. On nested runtimes
           # (kind, minikube) whose /sys/fs/bpf is read-only or absent, set
           # daemonset.bpfToken.bpffsEmptyDir=true to use an in-pod tmpfs instead.

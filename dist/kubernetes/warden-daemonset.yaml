@@ -1,18 +1,20 @@
-# Split-warden DaemonSet (rootless agent) — kernel 6.9+ required.
+# Split-warden DaemonSet (warden broker + agent) — kernel 6.9+ required.
 #
 # The warden runs as a NATIVE SIDECAR (an init container with
 # restartPolicy: Always, Kubernetes 1.28+): it starts before the agent and keeps
-# running alongside it. The warden loads + attaches every eBPF program through a
-# BPF token, holds the maps/ring buffers, and serves kernel operations over the
-# shared AF_UNIX socket. The agent is the main container and loads NOTHING — a
-# pure warden-client consumer that runs under the RuntimeDefault seccomp profile,
-# drops every capability, runs non-root with a read-only root filesystem, and
-# forbids privilege escalation. An auditor sees the agent fully locked down and
-# the entire full-access surface confined to the warden sidecar.
+# running alongside it. The warden is the lean broker image (Dockerfile.warden,
+# no agent stack): it loads no eBPF and holds no maps — it only delegates a bpffs
+# and brokers conntrack/route/ARP/pcap over the shared AF_UNIX socket. The agent
+# is the main container: it self-unshares a user namespace, has the warden
+# delegate a bpffs, and loads its OWN eBPF through a BPF token. Because the agent
+# now does the userns + mount + bpf syscalls itself, it runs Unconfined (not
+# RuntimeDefault); the host-netns capabilities stay confined to the warden.
 #
-# Both containers run the same image; only the entrypoint args differ:
-#   warden : warden-token --bpffs <path> ebpfsentinel-agent warden-serve <sock>
-#   agent  : ebpfsentinel-agent --config ...   (EBPFSENTINEL_WARDEN_SOCK set)
+# Images differ between the two containers:
+#   warden : ebpfsentinel-warden  (warden serve <sock> --uid 65534)
+#   agent  : ebpfsentinel-agent   (ebpfsentinel-agent --config ...; EBPFSENTINEL_WARDEN_SOCK set)
+#
+# For the simpler combined single-container layout see bpf-token-daemonset.yaml.
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -38,29 +40,24 @@ spec:
         # The agent runs as uid/gid 65534; fsGroup makes the 0640 configMap
         # group-readable by it (a world-readable config is rejected).
         fsGroup: 65534
-      # ── Native sidecar: the privileged warden ─────────────────────────
+      # ── Native sidecar: the privileged warden broker ──────────────────
       initContainers:
         - name: warden
-          image: ebpfsentinel-agent:latest
+          image: ebpfsentinel-warden:latest
           imagePullPolicy: IfNotPresent
           restartPolicy: Always # native sidecar: starts first, runs for the pod's life
           command:
-            - /usr/local/bin/warden-token
-            - --bpffs
-            - /sys/fs/bpf/ebpfsentinel
-            - /usr/local/bin/ebpfsentinel-agent
-            - warden-serve
+            - /usr/local/bin/warden
+            - serve
             - /run/ebpfsentinel/warden.sock
             - --uid
             - "65534" # only the agent uid is served (SO_PEERCRED gate)
           securityContext:
             privileged: false
             allowPrivilegeEscalation: true
-            # The launcher mounts/move_mounts the delegated bpffs and writes
-            # uid_map after unshare(CLONE_NEWUSER); the default AppArmor/seccomp
-            # profiles block these. The warden must also retain host-netns
-            # CAP_NET_ADMIN/CAP_NET_RAW (conntrack -D, pcap, gratuitous ARP), so
-            # on a stock runtime it requires a node that lets it map to real root.
+            # The warden applies the delegate_* mount options + FSCONFIG_CMD_CREATE
+            # (CAP_SYS_ADMIN) and runs conntrack/route/ARP netlink + AF_PACKET; the
+            # default AppArmor/seccomp profiles block these.
             appArmorProfile:
               type: Unconfined
             seccompProfile:
@@ -68,24 +65,21 @@ spec:
             capabilities:
               drop: [ALL]
               add:
-                - SYS_ADMIN # bpffs delegation, module BTF fds, BPF token
+                - SYS_ADMIN # bpffs delegation (FSCONFIG_CMD_CREATE), module BTF fds
                 - NET_ADMIN # conntrack -D teardown, route programming
                 - NET_RAW # AF_PACKET pcap sockets + gratuitous ARP
           resources:
-            requests: { cpu: 50m, memory: 96Mi }
-            limits: { cpu: "1", memory: 512Mi }
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: "1", memory: 256Mi }
           volumeMounts:
             - { name: warden-sock, mountPath: /run/ebpfsentinel }
-            - { name: config, mountPath: /etc/ebpfsentinel, readOnly: true }
-            - name: bpf
-              mountPath: /sys/fs/bpf
-              mountPropagation: HostToContainer
-            - { name: host-proc, mountPath: /host/proc, readOnly: true }
-      # ── Rootless agent: non-root, cap-drop ALL, RuntimeDefault seccomp ──
+      # ── Agent: loads its own eBPF via the warden-delegated bpffs ───────
       containers:
         - name: agent
           image: ebpfsentinel-agent:latest
           imagePullPolicy: IfNotPresent
+          # Run the agent directly (not the combined launcher): it connects to the
+          # sidecar warden instead of starting its own.
           command:
             - /usr/local/bin/ebpfsentinel-agent
           args:
@@ -95,18 +89,23 @@ spec:
             - name: EBPFSENTINEL_WARDEN_SOCK
               value: /run/ebpfsentinel/warden.sock
           securityContext:
-            runAsNonRoot: true
             runAsUser: 65534
             runAsGroup: 65534
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            # The agent loads nothing — no bpf()/mount/userns syscall — so it runs
-            # under the stock profiles with every capability dropped. This is the
-            # whole point of the warden split.
+            allowPrivilegeEscalation: true
+            # The agent self-unshares a user namespace, mounts the delegated
+            # bpffs, and loads its own eBPF through the token — so it issues
+            # mount/unshare/bpf syscalls and needs Unconfined profiles + the
+            # privilege drop (SETUID/SETGID). It holds no host-netns capability;
+            # conntrack/route/ARP/pcap are brokered to the warden sidecar.
+            appArmorProfile:
+              type: Unconfined
             seccompProfile:
-              type: RuntimeDefault
+              type: Unconfined
             capabilities:
               drop: [ALL]
+              add:
+                - SETUID
+                - SETGID
           resources:
             requests: { cpu: 100m, memory: 256Mi }
             limits: { cpu: "2", memory: 1Gi }
@@ -114,8 +113,9 @@ spec:
             - { name: warden-sock, mountPath: /run/ebpfsentinel, readOnly: true }
             - { name: config, mountPath: /etc/ebpfsentinel, readOnly: true }
             - { name: data, mountPath: /var/lib/ebpfsentinel }
-            # Read-only rootfs: provide a writable /tmp.
-            - { name: tmp, mountPath: /tmp }
+            - name: bpf
+              mountPath: /sys/fs/bpf
+              mountPropagation: HostToContainer
       volumes:
         - name: warden-sock
           emptyDir: {}
@@ -130,11 +130,5 @@ spec:
           hostPath:
             path: /sys/fs/bpf
             type: Directory
-        - name: host-proc
-          hostPath:
-            path: /proc
-            type: Directory
         - name: data
-          emptyDir: {}
-        - name: tmp
           emptyDir: {}

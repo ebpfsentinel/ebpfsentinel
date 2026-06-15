@@ -13,16 +13,9 @@ use std::ptr;
 
 use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
 
-fn spawn_warden(sock: &str, uid: u32, maps_dir: &str) -> Child {
+fn spawn_warden(sock: &str, uid: u32) -> Child {
     Proc::new(env!("CARGO_BIN_EXE_warden"))
-        .args([
-            "serve",
-            sock,
-            "--uid",
-            &uid.to_string(),
-            "--maps-dir",
-            maps_dir,
-        ])
+        .args(["serve", sock, "--uid", &uid.to_string()])
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn warden")
@@ -91,10 +84,9 @@ fn delegate_with_non_bpffs_fd_is_refused() {
         .join("warden.sock")
         .to_string_lossy()
         .into_owned();
-    let maps_dir = dir.path().to_string_lossy().into_owned();
 
     let guard = Guard {
-        child: spawn_warden(&sock, current_uid(), &maps_dir),
+        child: spawn_warden(&sock, current_uid()),
         sock: sock.clone(),
     };
     let mut s = connect(&sock);

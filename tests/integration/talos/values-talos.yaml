@@ -21,11 +21,8 @@ agent:
   logFormat: json
 
 daemonset:
-  # Rootless warden-serve posture: a privileged `warden-serve` sidecar loads the
-  # eBPF programs via the BPF token and serves the warden protocol, while the
-  # long-running `agent` container runs NON-ROOT (uid/gid 65534) with cap-drop ALL
-  # — no CAP_SYS_ADMIN on the agent. Host-network ops (conntrack/route/ARP) are
-  # forwarded to the launcher's resident netns-helper, which holds the init-netns
-  # capabilities.
-  wardenSidecar:
-    enabled: true
+  # Combined-unit posture: the container entrypoint (ebpfsentinel-launch) starts
+  # the privileged `warden` broker, then execs the agent. The agent self-unshares
+  # a user namespace and loads its own eBPF through the BPF token; the warden
+  # holds CAP_SYS_ADMIN/NET_ADMIN/NET_RAW for delegation + conntrack/route/ARP/pcap.
+  # The chart's default securityContext (see values.yaml) already grants these.

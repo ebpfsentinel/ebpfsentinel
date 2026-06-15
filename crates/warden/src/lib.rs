@@ -421,6 +421,25 @@ fn root_userns_self_map_ok() -> bool {
     libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0
 }
 
+/// The uid the agent's bootstrap will present to the warden over `SO_PEERCRED`,
+/// so the combined-unit supervisor can pass the matching `warden serve --uid`.
+/// Mirrors [`drop_to_unpriv_if_needed`]: a global-root process that may self-map
+/// stays root (presents uid 0); one that may not drops to [`UNPRIV_UID`]; an
+/// already-unprivileged process presents its own uid.
+#[must_use]
+pub fn expected_agent_peer_uid() -> u32 {
+    let uid = unsafe { libc::getuid() };
+    if uid == 0 {
+        if root_userns_self_map_ok() {
+            0
+        } else {
+            UNPRIV_UID
+        }
+    } else {
+        uid
+    }
+}
+
 /// Drop to an unprivileged uid before creating a user namespace, but only when
 /// running as global root under a runtime that forbids the root self-map.
 ///

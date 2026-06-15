@@ -1,40 +1,37 @@
 # eBPFsentinel — Docker Compose deployment
 #
 # Usage:
-#   docker compose up -d        # start agent
+#   docker compose up -d        # start the combined agent+warden container
 #   docker compose logs -f      # view logs
-#   docker compose down         # stop agent
+#   docker compose down         # stop
 #
 # Prerequisites:
 #   - Linux kernel 6.9+ with BTF support
 #   - Docker with host networking support
-#   - Config ownership for the bind mount below. eBPF is token-only, so the
-#     launcher runs the agent inside a child user namespace. Under Docker the
-#     launcher keeps the agent as root (Docker permits the root userns self-map),
-#     and the agent rejects a world-readable config (it may hold secrets). So the
-#     bind-mounted file must be owned by root with mode 0640 — otherwise it is
-#     unreadable (a file owned by another uid appears unmapped to the userns root)
-#     or rejected as world-readable. After cloning:
+#   - Config ownership for the bind mount below. Under Docker the agent keeps
+#     uid 0 (Docker permits the root userns self-map), and the agent rejects a
+#     world-readable config (it may hold secrets). So the bind-mounted file must
+#     be owned by root with mode 0640 — otherwise it is unreadable or rejected.
+#     After cloning:
 #       sudo chown root:root ./config/ebpfsentinel.yaml
 #       sudo chmod 640 ./config/ebpfsentinel.yaml
-#     Editing it for hot-reload then also needs root. (The baked-in image copy is
-#     already root:root 0640 — to skip this, drop the config volume below and run
-#     with the baked default.)
+#     (The baked-in image copy is already root:root 0640 — to skip this, drop the
+#     config volume below and run with the baked default.)
 #   - SYN-cookie DDoS protection (if enabled) needs net.ipv4.tcp_syncookies=2.
 #     With network_mode: host the container shares (read-only) the host sysctls,
 #     so set it on the HOST: sysctl -w net.ipv4.tcp_syncookies=2
 #
-# eBPF is loaded EXCLUSIVELY through a BPF token (no CAP_BPF). The image
-# entrypoint (warden-token) runs as root only long enough to set
-# up a delegated bpffs in a child user namespace, then execs the agent inside
-# it — the long-running agent is unprivileged and creates the token there.
+# The image entrypoint (ebpfsentinel-launch) starts the privileged `warden`
+# broker, then execs the agent against it. eBPF loads EXCLUSIVELY through a BPF
+# token (no CAP_BPF): the agent drops every capability, self-unshares a user
+# namespace, has the warden delegate a bpffs, and creates the token there. The
+# warden keeps CAP_SYS_ADMIN/NET_ADMIN/NET_RAW for delegation, conntrack, routes,
+# ARP and the pcap pool.
 #
-# This single-container layout grants the agent container CAP_SYS_ADMIN for the
-# bootstrap. To keep the agent container itself off CAP_SYS_ADMIN (non-root +
-# cap-drop ALL), use the rootless warden-serve layout instead:
-# dist/docker-compose.warden.yml (a privileged `warden` loads + serves the eBPF
-# datapath; the `agent` service holds no host capabilities). See
-# operations/deployment/bpf-token.md.
+# For the split topology — the warden in its OWN container, the agent in another,
+# sharing a socket volume — use the `warden` profile (warden via Dockerfile.warden):
+#   docker compose --profile warden up warden agent
+# See operations/deployment/bpf-token.md.
 #
 # Hot-reload: edit config/ebpfsentinel.yaml while running — the agent
 # detects changes automatically and reloads rules without restart.
@@ -53,38 +50,24 @@ services:
     # on — "127.0.0.1" is localhost-only, "0.0.0.0" exposes on all interfaces.
     network_mode: host
 
-    # The image entrypoint is warden-token: as root it sets up the
-    # delegated bpffs in a child user namespace and execs the agent there. It
-    # needs CAP_SYS_ADMIN (bpffs delegation + module BTF fds) and userns
-    # creation — hence apparmor=unconfined. NO CAP_BPF: the token authorizes
-    # every eBPF syscall, and the long-running agent runs unprivileged inside
-    # the user namespace (no host capabilities).
+    # The combined container runs the warden (root) and the agent (which drops to
+    # an unprivileged uid and enters a user namespace). It needs CAP_SYS_ADMIN
+    # (bpffs delegation), CAP_NET_ADMIN (conntrack teardown + route programming),
+    # CAP_NET_RAW (AF_PACKET pcap pool + gratuitous ARP), userns creation, and the
+    # mount/bpf syscalls the agent issues — hence apparmor/seccomp unconfined. NO
+    # CAP_BPF: the token authorizes every eBPF syscall.
     cap_add:
       - SYS_ADMIN
-      # NET_RAW lets the launcher open the AF_PACKET capture sockets (see NOTE
-      # below). It is already in Docker's default capability set — listed here
-      # only so packet capture survives a future `cap_drop`.
+      - NET_ADMIN
       - NET_RAW
     security_opt:
       - apparmor=unconfined
+      - seccomp=unconfined
 
     # Override the AF_PACKET capture pool size (default 2) if you run many
     # concurrent captures.
     # environment:
     #   EBPFSENTINEL_PCAP_POOL: "4"
-    # NOTE: pcap capture works rootless because the launcher pre-opens the
-    # AF_PACKET sockets while still global root and passes the fds to the agent
-    # (CAP_NET_RAW is checked only at socket() time). Tune the pool with
-    # EBPFSENTINEL_PCAP_POOL (default 2) if you run many concurrent captures.
-    #
-    # Two host-netns features stay unavailable and cap_add does NOT help: eBPF is
-    # token-only so the agent runs in a child user namespace, and a descendant
-    # userns is never privileged over the init-userns-owned host netns:
-    #   - conntrack -D retroactive teardown (CAP_NET_ADMIN, re-checked per netlink
-    #     message against the sender -> fd-passing can't delegate it)
-    #   - gratuitous-ARP on VIP takeover (same AF_PACKET path as pcap; not
-    #     fd-provisioned today)
-    # Their eBPF equivalents (IPS_DYING flow-kill, xdp-vip-announcer) keep working.
 
     volumes:
       # Agent configuration — writable for hot-reload via file watcher
@@ -93,7 +76,8 @@ services:
       - ebpfsentinel-data:/data
       # Packet captures (POST /api/v1/captures/manual)
       - ebpfsentinel-captures:/var/lib/ebpfsentinel/captures
-      # eBPF filesystem — required for map pinning
+      # The agent mounts its delegated bpffs here; a container's /sys is
+      # read-only, so bind the (writable) host bpffs in.
       - /sys/fs/bpf:/sys/fs/bpf
       # Debug filesystem — required for eBPF tracing
       - /sys/kernel/debug:/sys/kernel/debug:ro
@@ -123,8 +107,72 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # ── Split topology (profile: warden) ────────────────────────────────
+  # The privileged `warden` broker runs in its OWN lean container
+  # (Dockerfile.warden, no agent stack); `agent-rootless` runs only the agent,
+  # pointed at the shared socket. Start the pair explicitly (instead of the
+  # default combined container):
+  #   docker compose --profile warden up warden agent-rootless
+  # The agent still self-unshares its user namespace and loads its own eBPF, so it
+  # keeps the mount/userns/bpf syscall exceptions; only the host-netns ops
+  # (conntrack/routes/ARP/pcap) are brokered to the warden.
+  warden:
+    build:
+      context: .
+      dockerfile: Dockerfile.warden
+    image: ebpfsentinel-warden:latest
+    profiles: [warden]
+    command: ["serve", "/run/ebpfsentinel/warden.sock", "--uid", "65534"]
+    network_mode: host
+    cap_drop: [ALL]
+    cap_add:
+      - SYS_ADMIN # bpffs delegation (FSCONFIG_CMD_CREATE)
+      - NET_ADMIN # conntrack -D teardown, route programming
+      - NET_RAW # AF_PACKET pcap sockets + gratuitous ARP
+    security_opt:
+      - apparmor=unconfined # delegation does fsconfig/move_mount
+      - seccomp=unconfined # mount/bpf/netlink syscalls
+    volumes:
+      - warden-sock:/run/ebpfsentinel
+    restart: unless-stopped
+
+  agent-rootless:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    image: ebpfsentinel:latest
+    profiles: [warden]
+    depends_on: [warden]
+    # Run the agent directly (not the combined launcher): it connects to the
+    # external warden via the shared socket instead of starting its own.
+    entrypoint: ["/usr/local/bin/ebpfsentinel-agent"]
+    command: ["--config", "/etc/ebpfsentinel/config.yaml"]
+    environment:
+      EBPFSENTINEL_WARDEN_SOCK: /run/ebpfsentinel/warden.sock
+    network_mode: host
+    user: "65534:65534"
+    cap_drop: [ALL] # the warden holds the host capabilities
+    security_opt:
+      # The agent self-unshares a user namespace and loads its own eBPF, so it
+      # still needs the mount/userns/bpf syscalls (default seccomp blocks them).
+      - apparmor=unconfined
+      - seccomp=unconfined
+    volumes:
+      - warden-sock:/run/ebpfsentinel:ro
+      - ./config/ebpfsentinel.yaml:/etc/ebpfsentinel/config.yaml:ro
+      - ebpfsentinel-data:/data
+      - ebpfsentinel-captures:/var/lib/ebpfsentinel/captures
+      # The agent mounts its delegated bpffs here (read-only host /sys → tmpfs).
+      - type: tmpfs
+        target: /sys/fs/bpf
+        tmpfs:
+          mode: 0o1777
+    restart: unless-stopped
+
 volumes:
   ebpfsentinel-data:
     driver: local
   ebpfsentinel-captures:
+    driver: local
+  warden-sock:
     driver: local

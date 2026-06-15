@@ -6,15 +6,16 @@
 )]
 
 //! Rootless packet capture over an `AF_PACKET` socket pre-opened by the
-//! privileged launcher (`warden-token`) and inherited across exec.
+//! privileged `warden` and handed to the agent on delegation.
 //!
 //! eBPF is loaded token-only, so the agent runs inside a child user namespace
 //! and cannot create an `AF_PACKET` socket itself — `CAP_NET_RAW` is checked
 //! against the host network namespace, which is owned by the initial user
-//! namespace. The launcher creates the sockets while still global root and
-//! advertises their fds via `EBPFSENTINEL_PCAP_FDS`. The `CAP_NET_RAW` check is
-//! enforced **only** at `socket()` time, so the user-namespace agent can bind,
-//! attach a filter and read on an inherited socket with no capability of its own.
+//! namespace. The warden creates the sockets while it holds `CAP_NET_RAW` and
+//! passes their fds to the agent over the control socket (advertised via
+//! `EBPFSENTINEL_PCAP_FDS`). The `CAP_NET_RAW` check is enforced **only** at
+//! `socket()` time, so the user-namespace agent can bind, attach a filter and
+//! read on a received socket with no capability of its own.
 
 use std::os::fd::RawFd;
 use std::sync::{Arc, Mutex};

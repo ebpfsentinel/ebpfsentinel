@@ -1,12 +1,13 @@
-# BPF token-delegated DaemonSet — kernel 6.9+ required.
+# BPF token-delegated DaemonSet (combined agent + warden) — kernel 6.9+ required.
 #
-# The container entrypoint (warden-token) sets up a delegated bpffs
-# in a child user namespace and execs the agent there, which creates a BPF token
-# and loads every program through it. The launcher needs CAP_SYS_ADMIN; the
-# long-running agent holds no host capabilities (no CAP_BPF). Because it runs in
-# a child user namespace it cannot use host-netns capabilities — pcap capture,
-# conntrack -D teardown, and VIP gratuitous-ARP are unavailable (their eBPF
-# equivalents keep working). Nested userns may need node-level config.
+# The container entrypoint (ebpfsentinel-launch) starts the privileged `warden`
+# broker, then execs the agent. The agent self-unshares a user namespace, has the
+# warden delegate a bpffs, and loads its own eBPF through a BPF token — holding no
+# host capabilities (no CAP_BPF). The warden runs in the init network namespace
+# with CAP_SYS_ADMIN/NET_ADMIN/NET_RAW, so the full feature set works (pcap
+# capture, conntrack -D teardown, VIP gratuitous-ARP, route programming). Nested
+# userns may need node-level config. For the split topology (warden in its own
+# container) see warden-daemonset.yaml.
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -31,33 +32,30 @@ spec:
       serviceAccountName: ebpfsentinel
       securityContext:
         # Under a stock container runtime the pod runs in the init user
-        # namespace, where the launcher cannot map namespace-0 to real root; it
-        # therefore drops the userns child to uid/gid 65534, so the agent runs as
-        # host gid 65534. This fsGroup makes the 0640 configMap group-readable by
-        # it.
+        # namespace, where the agent cannot map namespace-0 to real root; it
+        # therefore drops to uid/gid 65534, so it runs as host gid 65534. This
+        # fsGroup makes the 0640 configMap group-readable by it.
         fsGroup: 65534
       containers:
         - name: agent
           image: ebpfsentinel-agent:latest
-          # Image entrypoint is warden-token: it sets up the
-          # delegated bpffs in a child user namespace and execs the agent there.
-          # `args` are appended to the agent invocation by the launcher.
+          # Image entrypoint is ebpfsentinel-launch: it starts the warden broker,
+          # then execs the agent. `args` are appended to the agent invocation.
           args:
             - --config
             - /etc/ebpfsentinel/config.yaml
           securityContext:
-            # The launcher needs CAP_SYS_ADMIN (bpffs delegation + module BTF
-            # fds) and user-namespace creation; it drops into the userns before
-            # exec'ing the agent, which then holds no host capabilities (no
-            # CAP_BPF). conntrack-kill teardown / VIP gratuitous-ARP are
-            # unavailable to the userns agent (eBPF equivalents keep working).
+            # The warden holds CAP_SYS_ADMIN (bpffs delegation), CAP_NET_ADMIN
+            # (conntrack/routes) and CAP_NET_RAW (pcap pool/ARP); the agent
+            # self-unshares a user namespace and loads its own eBPF through the
+            # token, holding no host capabilities (no CAP_BPF).
             privileged: false
             allowPrivilegeEscalation: true
-            # Unconfined: the launcher issues mount/move_mount (bpffs delegation)
-            # and writes /proc/self/uid_map after unshare(CLONE_NEWUSER). On
-            # AppArmor nodes (e.g. Ubuntu) the default container profile blocks
-            # these, and the default seccomp profile must not filter the mount
-            # syscalls either.
+            # Unconfined: the warden issues mount/move_mount (bpffs delegation)
+            # and the agent writes /proc/self/uid_map after unshare(CLONE_NEWUSER)
+            # + mounts the bpffs. On AppArmor nodes (e.g. Ubuntu) the default
+            # container profile blocks these, and the default seccomp profile must
+            # not filter the mount syscalls either.
             appArmorProfile:
               type: Unconfined
             seccompProfile:
@@ -67,14 +65,14 @@ spec:
                 - ALL
               add:
                 - SYS_ADMIN
-                # NET_RAW: the launcher pre-opens the AF_PACKET pcap socket pool
-                # (CAP_NET_RAW is checked only at socket() time). Drop if you
-                # never run packet capture.
+                # NET_ADMIN: warden conntrack -D teardown + route programming.
+                - NET_ADMIN
+                # NET_RAW: warden AF_PACKET pcap pool + gratuitous ARP. Drop if
+                # you never run packet capture (ARP also goes quiet).
                 - NET_RAW
-                # SETUID/SETGID: in the init user namespace the launcher drops
-                # the userns child to uid/gid 65534 before self-mapping (it
-                # cannot map namespace-0 to real root there); that drop needs
-                # SETUID/SETGID.
+                # SETUID/SETGID: in the init user namespace the agent drops to
+                # uid/gid 65534 before self-mapping (it cannot map namespace-0 to
+                # real root there); that drop needs SETUID/SETGID.
                 - SETUID
                 - SETGID
           resources:
@@ -121,8 +119,8 @@ spec:
             type: Directory
 ---
 # Config stanza operators should include in their ConfigMap. eBPF loads only
-# through the BPF token; bpffs_path is optional and must match the launcher's
-# --bpffs (both default /sys/fs/bpf/ebpfsentinel):
+# through the BPF token; bpffs_path is optional and must match the agent's
+# EBPFSENTINEL_BPFFS mount target (both default /sys/fs/bpf/ebpfsentinel):
 #
 # data:
 #   config.yaml: |

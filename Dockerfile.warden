@@ -5,9 +5,10 @@
 # This is the privileged half of the split deployment: a small sidecar that holds
 # the extended capabilities (CAP_SYS_ADMIN / CAP_NET_ADMIN / CAP_NET_RAW) and
 # serves kernel operations to a fully rootless agent over an AF_UNIX socket. It
-# does nothing on its own initiative — it only answers the narrow, typed,
-# peer-authenticated `warden-proto` RPC (map element ops, conntrack read/teardown,
-# route programming, gratuitous ARP, ring-buffer + pcap fd-passing).
+# loads no eBPF and holds no maps — the agent loads its own programs against the
+# bpffs the warden delegates. It answers only the narrow, typed, peer-authenticated
+# `warden-proto` RPC: bpffs delegation (+ module-BTF/pcap fd hand-off), conntrack
+# read/teardown, route programming, gratuitous ARP, and on-demand pcap sockets.
 #
 # Run (alongside a rootless agent sharing the socket volume):
 #   docker run --cap-add SYS_ADMIN --cap-add NET_ADMIN --cap-add NET_RAW \

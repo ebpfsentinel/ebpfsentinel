@@ -27,7 +27,7 @@ data:
       xdp_mode: {{ .Values.agent.xdpMode }}
       event_workers: {{ .Values.agent.eventWorkers }}
       bpf_token:
-        # Must match the launcher --bpffs in the DaemonSet command.
+        # Must match the EBPFSENTINEL_BPFFS env in the DaemonSet command.
         bpffs_path: {{ .Values.daemonset.bpfToken.bpffsPath | quote }}
     firewall:
       enabled: {{ .Values.firewall.enabled }}

@@ -54,17 +54,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "Installing ebpfsentinel-agent to ${INSTALL_BIN}..."
 install -Dm755 "${SCRIPT_DIR}/ebpfsentinel-agent" "${INSTALL_BIN}/ebpfsentinel-agent"
 
-# ── Install the BPF token launcher ────────────────────────────────
+# ── Install the warden broker + combined-unit launcher ────────────
 #
 # eBPF loads only through a BPF token, which is a user-namespace feature
-# (BPF_TOKEN_CREATE is EOPNOTSUPP in the host userns). The launcher is a
-# minimal privileged bootstrap: it sets up a delegated bpffs in a child
-# user namespace and execs the agent there, so the agent runs with no
-# capabilities over the host. The systemd unit's ExecStart calls it. It
-# ships as a cargo-built binary alongside ebpfsentinel-agent
-# (cargo build --release --bin warden-token).
-echo "Installing warden-token to ${INSTALL_BIN}..."
-install -Dm755 "${SCRIPT_DIR}/warden-token" "${INSTALL_BIN}/warden-token"
+# (BPF_TOKEN_CREATE is EOPNOTSUPP in the host userns). The combined unit runs
+# two binaries: `warden` is the privileged broker (bpffs delegation, conntrack,
+# routes, ARP, pcap pool); `ebpfsentinel-launch` starts the warden then execs
+# the agent against it. The systemd unit's ExecStart calls the launcher. Both
+# ship as cargo-built binaries alongside ebpfsentinel-agent
+# (cargo build --release --bin warden --bin ebpfsentinel-launch).
+echo "Installing warden to ${INSTALL_BIN}..."
+install -Dm755 "${SCRIPT_DIR}/warden" "${INSTALL_BIN}/warden"
+echo "Installing ebpfsentinel-launch to ${INSTALL_BIN}..."
+install -Dm755 "${SCRIPT_DIR}/ebpfsentinel-launch" "${INSTALL_BIN}/ebpfsentinel-launch"
 
 # ── Install eBPF programs ─────────────────────────────────────────
 

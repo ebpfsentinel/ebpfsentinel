@@ -2,11 +2,12 @@
 # 57-bpf-token-only-load.bats — every eBPF program loads + attaches through a
 # BPF token alone, with no CAP_BPF / CAP_SYS_ADMIN / CAP_PERFMON.
 #
-# The shipped launcher (warden-token) delegates a bpffs and passes
-# module BTF fds — exactly what runs in production under systemd / Docker / K8s —
-# then execs the agent in a capability-less user namespace. The agent must create
-# a BPF token and load/attach the full program set through it. Driving the real
-# launcher means CI validates the binary we actually ship.
+# The shipped launcher (ebpfsentinel-launch) starts the warden broker, which
+# delegates a bpffs and passes module BTF fds — exactly what runs in production
+# under systemd / Docker / K8s — then execs the agent in a capability-less user
+# namespace. The agent must create a BPF token and load/attach the full program
+# set through it. Driving the real launcher + warden means CI validates the
+# binaries we actually ship.
 #
 # Requires: root, kernel >= 6.9, local eBPF build, the launcher binary (prebuilt
 # next to the agent or built on demand). VM-only (Vagrant agent).

@@ -141,11 +141,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust-build
-      - run: cargo build --release --bin ebpfsentinel-agent --bin warden-token
+      - run: cargo build --release --bin ebpfsentinel-agent --bin warden --bin ebpfsentinel-launch
       - uses: actions/upload-artifact@v4
         with:
           name: ebpfsentinel-agent-x86_64
           path: |
             target/release/ebpfsentinel-agent
-            target/release/warden-token
+            target/release/warden
+            target/release/ebpfsentinel-launch
           retention-days: 7

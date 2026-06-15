@@ -102,15 +102,21 @@ install_from_prebuilt() {
     sudo cp "$src" "${AGENT_INSTALL_DIR}/ebpfsentinel-agent"
     sudo chmod +x "${AGENT_INSTALL_DIR}/ebpfsentinel-agent"
 
-    # The agent loads eBPF EXCLUSIVELY through a BPF token created by the
-    # launcher (it sets up a delegated bpffs in a child userns and execs the
-    # agent there). Without the launcher the agent starts in "API-only mode (no
-    # eBPF)" and every datapath suite sees ebpf_loaded=false — so the launcher
-    # MUST be installed alongside the agent.
-    local launch_src="${PROJECT_DIR}/target/release/warden-token"
+    # The agent loads eBPF EXCLUSIVELY through a BPF token. The combined-unit
+    # launcher starts the warden broker (bpffs delegation), then execs the agent,
+    # which self-unshares a userns and creates the token. Without them the agent
+    # starts in "API-only mode (no eBPF)" and every datapath suite sees
+    # ebpf_loaded=false — so BOTH the launcher and the warden MUST be installed
+    # alongside the agent (the launcher finds `warden` as a sibling).
+    local warden_src="${PROJECT_DIR}/target/release/warden"
+    local launch_src="${PROJECT_DIR}/target/release/ebpfsentinel-launch"
+    if [ -f "$warden_src" ]; then
+        sudo cp "$warden_src" "${AGENT_INSTALL_DIR}/warden"
+        sudo chmod +x "${AGENT_INSTALL_DIR}/warden"
+    fi
     if [ -f "$launch_src" ]; then
-        sudo cp "$launch_src" "${AGENT_INSTALL_DIR}/warden-token"
-        sudo chmod +x "${AGENT_INSTALL_DIR}/warden-token"
+        sudo cp "$launch_src" "${AGENT_INSTALL_DIR}/ebpfsentinel-launch"
+        sudo chmod +x "${AGENT_INSTALL_DIR}/ebpfsentinel-launch"
     fi
 
     local ebpf_src="${PROJECT_DIR}/target/bpfel-unknown-none/release"
@@ -126,10 +132,11 @@ install_from_docker_image() {
     container_id="$(sudo docker create ebpfsentinel-agent:latest true)"
     sudo mkdir -p "$EBPF_INSTALL_DIR"
     sudo docker cp "${container_id}:/usr/local/bin/ebpfsentinel-agent" "${AGENT_INSTALL_DIR}/ebpfsentinel-agent"
-    # The launcher is required to load eBPF (BPF token) — see install_from_prebuilt.
-    sudo docker cp "${container_id}:/usr/local/bin/warden-token" "${AGENT_INSTALL_DIR}/warden-token" 2>/dev/null || true
+    # The launcher + warden are required to load eBPF (BPF token) — see install_from_prebuilt.
+    sudo docker cp "${container_id}:/usr/local/bin/warden" "${AGENT_INSTALL_DIR}/warden" 2>/dev/null || true
+    sudo docker cp "${container_id}:/usr/local/bin/ebpfsentinel-launch" "${AGENT_INSTALL_DIR}/ebpfsentinel-launch" 2>/dev/null || true
     sudo docker cp "${container_id}:/usr/local/lib/ebpfsentinel/." "${EBPF_INSTALL_DIR}/" 2>/dev/null || true
-    sudo chmod +x "${AGENT_INSTALL_DIR}/ebpfsentinel-agent" "${AGENT_INSTALL_DIR}/warden-token" 2>/dev/null || true
+    sudo chmod +x "${AGENT_INSTALL_DIR}/ebpfsentinel-agent" "${AGENT_INSTALL_DIR}/warden" "${AGENT_INSTALL_DIR}/ebpfsentinel-launch" 2>/dev/null || true
     sudo docker rm "$container_id" >/dev/null
 }
 
@@ -140,8 +147,8 @@ build_from_source() {
     echo "  Building agent binary (release)..."
     (cd "$PROJECT_DIR" && cargo build --release --bin ebpfsentinel-agent)
 
-    echo "  Building BPF-token launcher (release)..."
-    (cd "$PROJECT_DIR" && cargo build --release --bin warden-token)
+    echo "  Building warden broker + combined-unit launcher (release)..."
+    (cd "$PROJECT_DIR" && cargo build --release --bin warden --bin ebpfsentinel-launch)
 
     install_from_prebuilt
 }

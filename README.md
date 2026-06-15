@@ -164,20 +164,20 @@ sudo ./install.sh            # installs to /usr/local, wires up the systemd unit
 The userspace agent builds on **stable**; the eBPF kernel programs need the **nightly** toolchain (driven by `cargo xtask`, `bpfel` target). Install Rust via [rustup](https://rustup.rs):
 
 ```bash
-cargo build --release        # agent + token launcher (stable)
+cargo build --release        # agent + warden broker + launcher (stable)
 cargo xtask ebpf-build        # eBPF programs (nightly)
 
-# eBPF loads only through a BPF token (a user-namespace feature). The launcher
-# sets up the delegated bpffs in a child user namespace and execs the agent
-# there — this brief bootstrap is the one step that needs CAP_SYS_ADMIN.
-sudo ./target/release/warden-token \
-  --bpffs /sys/fs/bpf/ebpfsentinel \
+# eBPF loads only through a BPF token (a user-namespace feature). The combined
+# launcher starts the privileged `warden` broker (bpffs delegation, conntrack,
+# routes, ARP, pcap), then execs the agent, which self-unshares a user namespace
+# and loads its own eBPF through the token — never root.
+sudo ./target/release/ebpfsentinel-launch \
   ./target/release/ebpfsentinel-agent --config config/ebpfsentinel.yaml
 ```
 
 ### Docker (rootless)
 
-The agent loads eBPF **exclusively** through a BPF token (kernel 6.9+) — never `CAP_BPF`, never `--privileged`. The image entrypoint is the `warden-token` launcher: as root it mounts the delegated bpffs in a child user namespace, then execs the agent there, unprivileged. `docker compose up` wires this automatically. To run it by hand:
+The agent loads eBPF **exclusively** through a BPF token (kernel 6.9+) — never `CAP_BPF`, never `--privileged`. The image entrypoint is the `ebpfsentinel-launch` supervisor: it starts the privileged `warden` broker, then execs the agent, which self-unshares a user namespace and loads its own eBPF through the token. `docker compose up` wires this automatically. To run it by hand:
 
 ```bash
 # Optional: to override the config, bind-mount it root-owned and not
@@ -185,13 +185,13 @@ The agent loads eBPF **exclusively** through a BPF token (kernel 6.9+) — never
 # image's baked-in default.
 #   sudo chown root:root config/ebpfsentinel.yaml && sudo chmod 640 config/ebpfsentinel.yaml
 docker run --network host \
-  --cap-add SYS_ADMIN --cap-add NET_RAW \
+  --cap-add SYS_ADMIN --cap-add NET_ADMIN --cap-add NET_RAW \
   --security-opt apparmor=unconfined \
   -v ./config/ebpfsentinel.yaml:/etc/ebpfsentinel/config.yaml \
   ghcr.io/ebpfsentinel/ebpfsentinel:latest
 ```
 
-`CAP_SYS_ADMIN` is held only by the brief launcher bootstrap (bpffs delegation + user-namespace creation), not by the long-running agent. `CAP_NET_RAW` lets the launcher pre-open the `AF_PACKET` sockets for rootless packet capture (it is in Docker's default set anyway). See the [BPF token guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/operations/deployment/bpf-token.md) for the systemd and Kubernetes paths and the full capability matrix.
+The capabilities are held by the `warden` broker (bpffs delegation, conntrack/routes, the pcap pool + ARP); the agent self-unshares a user namespace and loads its own eBPF through the token, holding none of them. See the [BPF token guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/operations/deployment/bpf-token.md) for the systemd and Kubernetes paths and the full capability matrix.
 
 ### Minimal config
 

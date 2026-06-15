@@ -9,27 +9,27 @@ Type=simple
 # eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+), which is a
 # user-namespace feature: BPF_TOKEN_CREATE returns EOPNOTSUPP in the host user
 # namespace, so the agent must run inside a child user namespace that owns the
-# delegated bpffs. `warden-token` is a minimal privileged
-# bootstrap: as root it enumerates module BTF fds and sets up the delegated
-# bpffs, then unshares a user namespace and execs the agent there. The
-# long-running AGENT process therefore holds NO capabilities over the host
-# (no CAP_BPF, no CAP_SYS_ADMIN) — the token authorizes every eBPF syscall.
+# delegated bpffs. This is one combined unit: `ebpfsentinel-launch` starts the
+# privileged `warden` broker, then execs the agent against it. The warden holds
+# the host capabilities (CAP_SYS_ADMIN for bpffs delegation, CAP_NET_ADMIN for
+# conntrack/routes, CAP_NET_RAW for the pcap pool + ARP); the agent self-unshares
+# a user namespace, has the warden delegate a bpffs, and loads its own eBPF
+# through the token — holding NO capabilities over the host (no CAP_BPF).
 #
-# Note: because the agent runs in a child user namespace it has no privileges
-# over the host network namespace. The eBPF datapath (firewall, IDS, IPS
-# flow-kill via IPS_DYING, DLP, DNS, DDoS, NAT, QoS, LB incl. xdp-vip-announcer)
-# works fully. Host-netns helpers that need init-namespace capabilities degrade
-# gracefully: pcap manual capture, the `conntrack -D` retroactive teardown on a
-# new deny rule, and the one-shot gratuitous ARP on VIP takeover are skipped.
-ExecStart=/usr/local/bin/warden-token \
-    --bpffs /sys/fs/bpf/ebpfsentinel \
+# Because the warden runs in the init network namespace, the full feature set
+# works: the eBPF datapath (firewall, IDS, IPS flow-kill, DLP, DNS, DDoS, NAT,
+# QoS, LB incl. xdp-vip-announcer) plus the brokered host-netns helpers (pcap
+# manual capture, `conntrack -D` retroactive teardown, gratuitous ARP on VIP
+# takeover).
+ExecStart=/usr/local/bin/ebpfsentinel-launch \
     /usr/local/bin/ebpfsentinel-agent --config /etc/ebpfsentinel/config.yaml
 Restart=on-failure
 RestartSec=5s
 
-# The launcher needs CAP_SYS_ADMIN (bpffs delegation + module BTF fds) and the
-# ability to create a user namespace; it drops into the unprivileged userns
-# before exec. Do NOT set NoNewPrivileges (it would block the userns setup).
+# The warden child needs CAP_SYS_ADMIN (bpffs delegation) and the agent needs to
+# create a user namespace; run as root and do NOT set NoNewPrivileges (it would
+# block the userns setup). KillMode=control-group (the default) stops the warden
+# child with the unit.
 
 # Logging
 StandardOutput=journal

@@ -259,14 +259,14 @@ start_ebpf_agent() {
         echo "  [strategy] Using local binary: $AGENT_BIN" >&2
 
         # eBPF loads EXCLUSIVELY through a BPF token (a user-namespace feature),
-        # so the agent must run via the shipped launcher: it delegates a bpffs
-        # and execs the agent inside a child user namespace, exactly as
-        # production (systemd / Docker / K8s) does. Run directly and the agent
-        # cannot create a token and starts in API-only mode (no eBPF attached).
-        # The launcher needs unprivileged user namespaces; enable them in the
-        # (root, throwaway) test VM.
+        # so the agent must run via the shipped combined-unit launcher: it starts
+        # the warden broker, then execs the agent, which self-unshares a user
+        # namespace and loads its own eBPF, exactly as production (systemd /
+        # Docker / K8s) does. Run directly and the agent cannot create a token and
+        # starts in API-only mode (no eBPF attached). The launcher needs
+        # unprivileged user namespaces; enable them in the (root, throwaway) VM.
         local launcher
-        launcher="$(dirname "$AGENT_BIN")/warden-token"
+        launcher="$(dirname "$AGENT_BIN")/ebpfsentinel-launch"
         sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 >/dev/null 2>&1 || true
 
         # Launch in a new session via setsid so the agent survives bats
@@ -275,14 +275,14 @@ start_ebpf_agent() {
         # SIGTERM'd the instant that phase ends, before any test runs.
         # Detaching the session keeps the agent alive for the whole file.
         # stdin from /dev/null so it never sees a controlling-terminal EOF.
-        if [ -x "$launcher" ]; then
+        if [ -x "$launcher" ] && [ -x "$(dirname "$launcher")/warden" ]; then
             echo "  [strategy] eBPF via launcher: $launcher" >&2
-            # The launcher execs the agent inside a child user namespace, where
-            # any path component owned by an unmapped uid (e.g. the 0750
-            # /home/<user> build tree) is inaccessible — to both exec and read.
-            # Stage the agent binary + eBPF objects under /tmp (world-traversable,
-            # root-owned) so the userns agent can reach them. The config already
-            # lives under /tmp ($DATA_DIR).
+            # The agent execs itself inside a child user namespace, where any path
+            # component owned by an unmapped uid (e.g. the 0750 /home/<user> build
+            # tree) is inaccessible — to both exec and read. Stage the agent binary
+            # + eBPF objects under /tmp (world-traversable, root-owned) so the
+            # userns agent can reach them. The config already lives under /tmp
+            # ($DATA_DIR).
             local staged_agent="/tmp/ebpfsentinel-agent-staged"
             local staged_ebpf="/tmp/ebpfsentinel-ebpf-staged"
             install -m755 "$AGENT_BIN" "$staged_agent" 2>/dev/null
@@ -291,7 +291,9 @@ start_ebpf_agent() {
             chmod 755 "$staged_ebpf"
             chmod a+r "$staged_ebpf"/* 2>/dev/null || true
             setsid env EBPF_PROGRAM_DIR="$staged_ebpf" \
-                "$launcher" --bpffs /sys/fs/bpf/ebpfsentinel \
+                EBPFSENTINEL_BPFFS=/sys/fs/bpf/ebpfsentinel \
+                EBPFSENTINEL_WARDEN_SOCK="/tmp/ebpfsentinel-warden-$$.sock" \
+                "$launcher" \
                 "$staged_agent" --config "$config_file" "$@" \
                 </dev/null >"$AGENT_LOG_FILE" 2>&1 &
         else
