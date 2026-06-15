@@ -1,0 +1,88 @@
+# Split-warden Docker Compose — kernel 6.9+ required.
+#
+# The rootless-agent layout. Unlike the broker variant (where the agent still
+# unshares a user namespace, mounts a bpffs and loads eBPF itself), here the
+# privileged `warden` loads + attaches every program, holds the maps and ring
+# buffers, and serves kernel operations over an AF_UNIX socket. The `agent`
+# loads NOTHING: it is a pure `warden-client` consumer, so it runs under the
+# **default** seccomp profile (no `unconfined`), drops every capability, runs
+# non-root with a read-only root filesystem, and cannot escalate privileges.
+# An auditor sees the agent fully locked down and all kernel access confined to
+# the warden.
+#
+# Both services run the same image; only the entrypoint differs. They share the
+# warden socket through the `warden-sock` volume.
+#
+# The agent runs as uid/gid 65534, so the mounted config and data must be
+# readable/writable by that id:
+#   chown -R 65534:65534 ./config ./data && chmod 640 ./config/ebpfsentinel.yaml
+# (the agent rejects a world-readable config).
+
+services:
+  # ── Privileged warden: loads the datapath + serves the control plane ──
+  warden:
+    image: ebpfsentinel:latest
+    # The launcher delegates a bpffs in a child user namespace and execs
+    # warden-serve there, which loads + attaches every program through a BPF
+    # token and serves the warden-proto RPC from the held map/ring fds.
+    entrypoint: ["/usr/local/bin/warden-token"]
+    command:
+      - "--bpffs"
+      - "/sys/fs/bpf/ebpfsentinel"
+      - "/usr/local/bin/ebpfsentinel-agent"
+      - "warden-serve"
+      - "/run/ebpfsentinel/warden.sock"
+      - "--uid"
+      - "65534" # only this uid (the agent) is served, checked via SO_PEERCRED
+    network_mode: host
+    pid: host
+    cap_drop: [ALL]
+    cap_add:
+      - SYS_ADMIN # bpffs delegation, module BTF fds, BPF token
+      - NET_ADMIN # conntrack -D teardown, route programming
+      - NET_RAW # AF_PACKET pcap sockets + gratuitous ARP
+    security_opt:
+      - apparmor=unconfined # launcher does mount/move_mount + uid_map
+      - seccomp=unconfined # launcher needs userns/mount/bpf syscalls
+    volumes:
+      - warden-sock:/run/ebpfsentinel
+      - ./config:/etc/ebpfsentinel:ro
+      # A container's /sys is read-only; this writable tmpfs is where the
+      # launcher mounts the delegated bpffs. mode 1777 so the userns child can
+      # create the mountpoint.
+      - type: tmpfs
+        target: /sys/fs/bpf
+        tmpfs:
+          mode: 0o1777
+    restart: unless-stopped
+
+  # ── Rootless agent: loads nothing; pure warden-client consumer ────────
+  agent:
+    image: ebpfsentinel:latest
+    depends_on: [warden]
+    # No launcher: the agent issues no bpf()/mount/userns syscall. It connects
+    # to the warden and proxies every kernel operation over the socket.
+    entrypoint: ["/usr/local/bin/ebpfsentinel-agent"]
+    command: ["--config", "/etc/ebpfsentinel/config.yaml"]
+    environment:
+      EBPFSENTINEL_WARDEN_SOCK: /run/ebpfsentinel/warden.sock
+    network_mode: host
+    user: "65534:65534"
+    cap_drop: [ALL] # the warden holds every capability
+    read_only: true # nothing is written to the root filesystem
+    security_opt:
+      - no-new-privileges:true
+      # NOTE: no `seccomp=unconfined`, no `apparmor=unconfined` — the agent runs
+      # under Docker's DEFAULT profiles. This is the payoff of the warden split:
+      # a consumer that loads nothing needs no syscall/LSM exceptions.
+    volumes:
+      - warden-sock:/run/ebpfsentinel:ro
+      - ./config:/etc/ebpfsentinel:ro
+      - ./data:/var/lib/ebpfsentinel
+      # Read-only rootfs: give the agent a writable /tmp.
+      - type: tmpfs
+        target: /tmp
+    restart: unless-stopped
+
+volumes:
+  warden-sock:
