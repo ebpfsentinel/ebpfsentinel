@@ -167,13 +167,20 @@ The userspace agent builds on **stable**; the eBPF kernel programs need the **ni
 cargo build --release        # agent + warden broker + launcher (stable)
 cargo xtask ebpf-build        # eBPF programs (nightly)
 
-# eBPF loads only through a BPF token (a user-namespace feature). The combined
-# launcher starts the privileged `warden` broker (bpffs delegation, conntrack,
-# routes, ARP, pcap), then execs the agent, which self-unshares a user namespace
-# and loads its own eBPF through the token — never root.
+# eBPF loads only through a BPF token (a user-namespace feature). The privileged
+# `warden` broker (bpffs delegation, conntrack, routes, ARP, pcap) runs alongside
+# the agent, which self-unshares a user namespace and loads its own eBPF through
+# the token — never CAP_BPF. Start the broker, then the agent:
+sudo ./target/release/warden serve /run/ebpfsentinel/warden.sock --uid 0 &
+sudo EBPFSENTINEL_WARDEN_SOCK=/run/ebpfsentinel/warden.sock \
+  ./target/release/ebpfsentinel-agent --config config/ebpfsentinel.yaml
+
+# Or the all-in-one shortcut (launches the warden, then execs the agent):
 sudo ./target/release/ebpfsentinel-launch \
   ./target/release/ebpfsentinel-agent --config config/ebpfsentinel.yaml
 ```
+
+The systemd install (`dist/install.sh`) wires this as two units — `ebpfsentinel-warden.service` (broker) + `ebpfsentinel.service` (agent) — mirroring the Docker split.
 
 ### Docker (rootless)
 

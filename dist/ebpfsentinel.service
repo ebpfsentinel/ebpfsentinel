@@ -1,35 +1,33 @@
 [Unit]
 Description=eBPFsentinel Network Security Agent
-After=network-online.target
+Documentation=https://github.com/ebpfsentinel/ebpfsentinel
+After=network-online.target ebpfsentinel-warden.service
 Wants=network-online.target
+# The agent brokers the privileged kernel ops it cannot perform from its user
+# namespace (conntrack/routes/ARP/pcap) to the warden, and needs it for the
+# one-shot bpffs delegation at startup. `Wants` (not `Requires`) so a warden
+# restart does not tear the agent down — the agent holds its own eBPF + maps and
+# its warden client reconnects.
+Wants=ebpfsentinel-warden.service
 
 [Service]
 Type=simple
 
-# eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+), which is a
-# user-namespace feature: BPF_TOKEN_CREATE returns EOPNOTSUPP in the host user
-# namespace, so the agent must run inside a child user namespace that owns the
-# delegated bpffs. This is one combined unit: `ebpfsentinel-launch` starts the
-# privileged `warden` broker, then execs the agent against it. The warden holds
-# the host capabilities (CAP_SYS_ADMIN for bpffs delegation, CAP_NET_ADMIN for
-# conntrack/routes, CAP_NET_RAW for the pcap pool + ARP); the agent self-unshares
-# a user namespace, has the warden delegate a bpffs, and loads its own eBPF
-# through the token — holding NO capabilities over the host (no CAP_BPF).
-#
-# Because the warden runs in the init network namespace, the full feature set
-# works: the eBPF datapath (firewall, IDS, IPS flow-kill, DLP, DNS, DDoS, NAT,
-# QoS, LB incl. xdp-vip-announcer) plus the brokered host-netns helpers (pcap
-# manual capture, `conntrack -D` retroactive teardown, gratuitous ARP on VIP
-# takeover).
-ExecStart=/usr/local/bin/ebpfsentinel-launch \
-    /usr/local/bin/ebpfsentinel-agent --config /etc/ebpfsentinel/config.yaml
+# eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+), a user-namespace
+# feature. The agent self-unshares a user namespace, has the warden delegate a
+# bpffs over the socket, and loads its own eBPF through the token — holding NO
+# capabilities over the host (no CAP_BPF). It runs as root only so it can map
+# namespace-0 to real root and create the bpffs mountpoint under /sys/fs/bpf; do
+# NOT set NoNewPrivileges (it would block the userns setup). Needs unprivileged
+# user namespaces enabled on the host.
+Environment=EBPFSENTINEL_WARDEN_SOCK=/run/ebpfsentinel/warden.sock
+
+# The agent's bootstrap connects to the warden once (no retry), so wait for the
+# broker to bind its socket before starting.
+ExecStartPre=/bin/sh -c 'for _ in $(seq 1 100); do [ -S /run/ebpfsentinel/warden.sock ] && exit 0; sleep 0.1; done; echo "warden socket not ready" >&2; exit 1'
+ExecStart=/usr/local/bin/ebpfsentinel-agent --config /etc/ebpfsentinel/config.yaml
 Restart=on-failure
 RestartSec=5s
-
-# The warden child needs CAP_SYS_ADMIN (bpffs delegation) and the agent needs to
-# create a user namespace; run as root and do NOT set NoNewPrivileges (it would
-# block the userns setup). KillMode=control-group (the default) stops the warden
-# child with the unit.
 
 # Logging
 StandardOutput=journal

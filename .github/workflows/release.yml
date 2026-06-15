@@ -132,7 +132,7 @@ jobs:
         env:
           LIBPCAP_LIBDIR: /usr/local/musl/lib
           RUSTFLAGS: "-L native=/usr/local/musl/lib"
-        run: cargo build --release --target ${{ matrix.target }} --bin ebpfsentinel-agent --bin warden --bin ebpfsentinel-launch
+        run: cargo build --release --target ${{ matrix.target }} --bin ebpfsentinel-agent --bin warden
 
       - name: Create release tarball
         run: |
@@ -140,8 +140,8 @@ jobs:
           mkdir -p "${STAGING}/ebpf"
           cp "target/${{ matrix.target }}/release/ebpfsentinel-agent" "${STAGING}/"
           cp "target/${{ matrix.target }}/release/warden" "${STAGING}/"
-          cp "target/${{ matrix.target }}/release/ebpfsentinel-launch" "${STAGING}/"
           cp config/ebpfsentinel.yaml "${STAGING}/"
+          cp dist/ebpfsentinel-warden.service "${STAGING}/"
           cp dist/ebpfsentinel.service "${STAGING}/"
           cp dist/install.sh "${STAGING}/"
           cp LICENSE "${STAGING}/" 2>/dev/null || true

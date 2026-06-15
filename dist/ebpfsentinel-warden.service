@@ -1,0 +1,31 @@
+[Unit]
+Description=eBPFsentinel warden (privileged kernel-operation broker)
+Documentation=https://github.com/ebpfsentinel/ebpfsentinel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Create /run/ebpfsentinel (the control-socket directory); removed on stop.
+RuntimeDirectory=ebpfsentinel
+RuntimeDirectoryMode=0755
+
+# The warden is the privileged half of the split deployment. It loads no eBPF and
+# holds no maps — it only answers the typed warden-proto RPC over the AF_UNIX
+# socket: it delegates a bpffs (CAP_SYS_ADMIN), reads/tears down conntrack and
+# programs routes (CAP_NET_ADMIN), and opens the AF_PACKET pcap pool + emits
+# gratuitous ARP (CAP_NET_RAW), all in the init network namespace.
+#
+# --uid 0: on bare-metal the agent runs as root and maps namespace-0 to real root,
+# so it presents uid 0 over SO_PEERCRED. Only that uid is served.
+ExecStart=/usr/local/bin/warden serve /run/ebpfsentinel/warden.sock --uid 0
+Restart=on-failure
+RestartSec=2s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

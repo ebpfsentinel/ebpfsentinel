@@ -54,19 +54,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "Installing ebpfsentinel-agent to ${INSTALL_BIN}..."
 install -Dm755 "${SCRIPT_DIR}/ebpfsentinel-agent" "${INSTALL_BIN}/ebpfsentinel-agent"
 
-# ── Install the warden broker + combined-unit launcher ────────────
+# ── Install the warden broker ─────────────────────────────────────
 #
 # eBPF loads only through a BPF token, which is a user-namespace feature
-# (BPF_TOKEN_CREATE is EOPNOTSUPP in the host userns). The combined unit runs
-# two binaries: `warden` is the privileged broker (bpffs delegation, conntrack,
-# routes, ARP, pcap pool); `ebpfsentinel-launch` starts the warden then execs
-# the agent against it. The systemd unit's ExecStart calls the launcher. Both
-# ship as cargo-built binaries alongside ebpfsentinel-agent
-# (cargo build --release --bin warden --bin ebpfsentinel-launch).
+# (BPF_TOKEN_CREATE is EOPNOTSUPP in the host userns). The deployment is split
+# into two systemd units: `warden` is the privileged broker (bpffs delegation,
+# conntrack, routes, ARP, pcap pool); the agent self-unshares a user namespace,
+# has the warden delegate a bpffs, and loads its own eBPF through the token. The
+# warden ships as a cargo-built binary alongside ebpfsentinel-agent
+# (cargo build --release --bin warden).
 echo "Installing warden to ${INSTALL_BIN}..."
 install -Dm755 "${SCRIPT_DIR}/warden" "${INSTALL_BIN}/warden"
-echo "Installing ebpfsentinel-launch to ${INSTALL_BIN}..."
-install -Dm755 "${SCRIPT_DIR}/ebpfsentinel-launch" "${INSTALL_BIN}/ebpfsentinel-launch"
 
 # ── Install eBPF programs ─────────────────────────────────────────
 
@@ -91,9 +89,12 @@ fi
 mkdir -p "${INSTALL_VAR}"
 mkdir -p "${INSTALL_VAR}/captures"
 
-# ── Install systemd unit ──────────────────────────────────────────
-
-echo "Installing systemd service..."
+# ── Install systemd units ─────────────────────────────────────────
+#
+# Two units: the privileged `ebpfsentinel-warden` broker and the `ebpfsentinel`
+# agent (which Wants the warden + waits for its socket before starting).
+echo "Installing systemd units..."
+install -Dm644 "${SCRIPT_DIR}/ebpfsentinel-warden.service" "${SYSTEMD_DIR}/ebpfsentinel-warden.service"
 install -Dm644 "${SCRIPT_DIR}/ebpfsentinel.service" "${SYSTEMD_DIR}/ebpfsentinel.service"
 systemctl daemon-reload
 
@@ -104,6 +105,7 @@ echo "eBPFsentinel installed successfully."
 echo ""
 echo "Next steps:"
 echo "  1. Edit configuration: ${INSTALL_ETC}/config.yaml"
-echo "  2. Start the agent:    systemctl start ebpfsentinel"
-echo "  3. Enable on boot:     systemctl enable ebpfsentinel"
-echo "  4. View logs:          journalctl -u ebpfsentinel -f"
+echo "  2. Start the broker:   systemctl start ebpfsentinel-warden"
+echo "  3. Start the agent:    systemctl start ebpfsentinel"
+echo "  4. Enable on boot:     systemctl enable ebpfsentinel-warden ebpfsentinel"
+echo "  5. View logs:          journalctl -u ebpfsentinel -u ebpfsentinel-warden -f"
