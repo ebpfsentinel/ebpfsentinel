@@ -554,8 +554,9 @@ unsafe extern "C" fn scan_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
 
 // ── Entry point ─────────────────────────────────────────────────────
 
-/// XDP entry point. Delegates to try_xdp_firewall; any error returns XDP_PASS
-/// (NFR15: default-to-pass on internal error).
+/// XDP entry point. Delegates to try_xdp_firewall; on error the configured
+/// default policy is applied (default-allow passes per NFR15, default-deny
+/// drops so unparseable packets cannot bypass inspection).
 #[xdp]
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
     increment_metric(METRIC_TOTAL_SEEN);
@@ -572,8 +573,20 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
     let action = match try_xdp_firewall(&ctx, ctx_raw) {
         Ok(action) => action,
         Err(()) => {
+            // The packet could not be parsed (truncated/malformed header) or an
+            // internal lookup failed. Honour the configured default policy
+            // instead of passing unconditionally: under a default-deny posture
+            // the operator expects unparseable traffic to be dropped, which
+            // closes a fail-open inspection bypass. Default-allow still passes
+            // on error (NFR15). No event is emitted because PKT_CTX may be
+            // unpopulated on an early parse failure — only metrics are bumped.
             increment_metric(METRIC_ERRORS);
-            xdp_action::XDP_PASS
+            if read_default_policy() == DEFAULT_POLICY_DROP {
+                increment_metric(METRIC_DROPPED);
+                xdp_action::XDP_DROP
+            } else {
+                xdp_action::XDP_PASS
+            }
         }
     };
     // Tail calls must happen in the XDP entry point (not subprogs) to

@@ -124,7 +124,11 @@ static RATELIMIT_CONFIG: HashMap<RateLimitKey, RateLimitConfig> =
 
 /// Consolidated per-source-IP bucket state for all algorithms.
 /// Per-CPU LRU eliminates cross-CPU contention; each CPU maintains
-/// independent counters (effective rate scales with CPU count).
+/// independent counters. A single flow is pinned to one RX queue/CPU by RSS,
+/// so its limit is enforced exactly; but a source spreading many flows across
+/// queues is counted independently per CPU, so the aggregate ceiling for that
+/// source is up to `configured_limit × online_CPUs`. Operators sizing limits
+/// against a multi-flow source must divide the intended rate by the CPU count.
 /// Replaces 4 separate per-algorithm maps with a single discriminated union.
 #[map]
 static RL_BUCKETS: LruPerCpuHashMap<RateLimitKey, RateLimitBucketUnion> =
