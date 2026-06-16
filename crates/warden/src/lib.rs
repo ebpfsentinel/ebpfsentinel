@@ -285,6 +285,11 @@ pub fn recv_fd(sock: RawFd) -> RawFd {
         if libc::recvmsg(sock, &mut msg, 0) < 0 {
             return -1;
         }
+        // The kernel dropped the fd because the control buffer was too small;
+        // never act on a partial/forged fd set.
+        if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+            return -1;
+        }
         let cmsg = libc::CMSG_FIRSTHDR(&msg);
         if cmsg.is_null() {
             return -1;
@@ -329,6 +334,12 @@ pub fn recv_msg_fds(sock: RawFd, max_fds: usize) -> Vec<RawFd> {
     unsafe {
         if libc::recvmsg(sock, &mut msg, 0) < 0 {
             perror("recvmsg fds");
+            return out;
+        }
+        // A too-small control buffer makes the kernel drop fds and set
+        // MSG_CTRUNC; refuse the whole message rather than collect a partial set.
+        if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+            eprintln!("[warden] SCM_RIGHTS fd set truncated in transit; refusing partial set");
             return out;
         }
         let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
