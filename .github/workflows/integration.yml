@@ -65,7 +65,7 @@ jobs:
       nightly_suites_json: ${{ steps.resolve.outputs.nightly_suites_json }}
       soak_duration: ${{ steps.resolve.outputs.soak_duration }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install python deps
         run: |
@@ -113,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: plan
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust-build
         with:
           install-nightly: "true"
@@ -127,7 +127,7 @@ jobs:
         run: cargo build --release --bin ebpfsentinel-agent --bin warden
 
       - name: Upload agent binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ebpfsentinel-agent
           path: |
@@ -143,14 +143,14 @@ jobs:
     if: needs.plan.outputs.profile == 'pr' || needs.plan.outputs.profile == 'full'
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Record start time
         id: start
         run: echo "epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - name: Download agent binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ebpfsentinel-agent
           path: target/release/
@@ -228,10 +228,10 @@ jobs:
     needs: [plan, build]
     if: needs.plan.outputs.profile == 'pr' || needs.plan.outputs.profile == 'full'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download agent binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ebpfsentinel-agent
           path: target/release/
@@ -265,10 +265,10 @@ jobs:
     needs: [plan, build]
     if: (needs.plan.outputs.profile == 'pr' || needs.plan.outputs.profile == 'full') && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download agent binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ebpfsentinel-agent
           path: target/release/
@@ -304,7 +304,7 @@ jobs:
       matrix:
         suite: ${{ fromJSON(needs.plan.outputs.nightly_suites_json) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Resolve suite path
         id: lookup
@@ -331,7 +331,7 @@ jobs:
 
       - name: Upload suite log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-suite-${{ matrix.suite }}-log
           path: /tmp/suite-${{ matrix.suite }}.log
@@ -352,7 +352,7 @@ jobs:
     runs-on: [self-hosted, linux, vagrant]
     timeout-minutes: 600
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Run soak (host-to-VM, ${{ needs.plan.outputs.soak_duration }}s sustained load)
         run: |
@@ -363,7 +363,7 @@ jobs:
 
       - name: Upload soak report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-soak-report
           path: ${{ runner.temp }}/soak-report
@@ -443,7 +443,7 @@ jobs:
     needs: [plan]
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Sanity-check 3-VM scripts
         run: |
