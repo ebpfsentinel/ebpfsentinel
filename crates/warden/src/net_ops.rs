@@ -205,9 +205,45 @@ pub fn route_args(add: bool, route: &RouteSpec) -> Vec<String> {
     ]
 }
 
+/// Accept a route destination `ip` understands: the literal `default`, a bare
+/// host address (v4/v6), or an `addr/prefix` CIDR with a prefix in range for the
+/// address family. Defence in depth: the exec path passes argv (no shell), but a
+/// parsed destination keeps a compromised agent from steering `ip route` with a
+/// surprising token.
+fn valid_route_dst(dst: &str) -> bool {
+    use std::net::IpAddr;
+    if dst == "default" {
+        return true;
+    }
+    let (addr, prefix) = match dst.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (dst, None),
+    };
+    let Ok(ip) = addr.parse::<IpAddr>() else {
+        return false;
+    };
+    match prefix {
+        None => true,
+        Some(p) => {
+            let max = if ip.is_ipv4() { 32 } else { 128 };
+            p.parse::<u8>().is_ok_and(|n| n <= max)
+        }
+    }
+}
+
 /// Add (`replace`) or delete a route via `ip route`.
 pub fn route(add: bool, route_spec: &RouteSpec) -> Result<(), String> {
     name_to_cbuf(&route_spec.iface)?; // reject a malformed interface name early
+    if !valid_route_dst(&route_spec.dst_cidr) {
+        return Err(format!(
+            "invalid route destination '{}'",
+            route_spec.dst_cidr
+        ));
+    }
+    route_spec
+        .gateway
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| format!("invalid route gateway '{}'", route_spec.gateway))?;
     run("ip", &route_args(add, route_spec))
 }
 
@@ -374,7 +410,9 @@ fn run_allow_nonzero(cmd: &str, args: &[String]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_garp_frame, conntrack_delete_args, name_to_cbuf, route_args};
+    use super::{
+        build_garp_frame, conntrack_delete_args, name_to_cbuf, route_args, valid_route_dst,
+    };
     use ebpfsentinel_warden_proto::{ConntrackTuple, RouteSpec};
 
     fn tuple(proto: u8, src: &str, dst: &str, sp: u16, dp: u16) -> ConntrackTuple {
@@ -445,6 +483,20 @@ mod tests {
         assert_eq!(&f[20..22], &2u16.to_be_bytes()); // oper = REPLY
         assert_eq!(&f[28..32], &[192, 0, 2, 10]); // spa = VIP
         assert_eq!(&f[38..42], &[192, 0, 2, 10]); // tpa = VIP
+    }
+
+    #[test]
+    fn route_dst_validation() {
+        assert!(valid_route_dst("default"));
+        assert!(valid_route_dst("0.0.0.0/0"));
+        assert!(valid_route_dst("10.0.0.1"));
+        assert!(valid_route_dst("203.0.113.0/24"));
+        assert!(valid_route_dst("2001:db8::/32"));
+        assert!(!valid_route_dst("")); // empty
+        assert!(!valid_route_dst("10.0.0.0/33")); // v4 prefix out of range
+        assert!(!valid_route_dst("2001:db8::/129")); // v6 prefix out of range
+        assert!(!valid_route_dst("10.0.0.1 onlink")); // smuggled token
+        assert!(!valid_route_dst("notanip"));
     }
 
     #[test]
