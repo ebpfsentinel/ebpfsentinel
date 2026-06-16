@@ -281,6 +281,16 @@ impl AgentConfig {
                 feed.auth_header = Some("***".to_string());
             }
         }
+        // Mask webhook header values — they commonly carry an `Authorization`
+        // bearer token or API key. Keep the header names so the sanitized view
+        // still shows which headers are set, but never the secret values.
+        for route in &mut sanitized.alerting.routes {
+            if let Some(ref mut headers) = route.webhook_headers {
+                for value in headers.values_mut() {
+                    *value = "***".to_string();
+                }
+            }
+        }
         // Mask GeoIP license key
         if let Some(ref mut geoip_cfg) = sanitized.geoip
             && let GeoIpSource::MaxMindAccount {
@@ -3347,6 +3357,40 @@ alerting:
         // username is NOT masked
         assert_eq!(smtp.username.as_deref(), Some("admin"));
         assert_eq!(smtp.host, "smtp.example.com");
+    }
+
+    #[test]
+    fn sanitized_masks_webhook_headers() {
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+alerting:
+  routes:
+    - name: hook
+      destination: webhook
+      min_severity: high
+      webhook_url: "https://hooks.example.com/alert"
+      webhook_headers:
+        Authorization: "Bearer super-secret-token"
+        X-Api-Key: "topsecret"
+"#;
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let sanitized = config.sanitized();
+        let headers = sanitized.alerting.routes[0]
+            .webhook_headers
+            .as_ref()
+            .unwrap();
+        // Values masked, header names preserved.
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("***")
+        );
+        assert_eq!(headers.get("X-Api-Key").map(String::as_str), Some("***"));
+        // URL is not a secret and stays visible.
+        assert_eq!(
+            sanitized.alerting.routes[0].webhook_url.as_deref(),
+            Some("https://hooks.example.com/alert")
+        );
     }
 
     #[test]
