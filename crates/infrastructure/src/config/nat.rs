@@ -154,10 +154,13 @@ impl HairpinNatConfig {
             message: format!("invalid prefix length: {e}"),
         })?;
 
-        let mask = if prefix_len == 0 {
-            0
-        } else {
-            !0u32 << (32 - prefix_len)
+        // Total over any prefix_len so this `pub fn` never underflows `32 -
+        // prefix_len` (debug panic) or over-shifts (release) even if called on a
+        // config that skipped `validate()`, which bounds the prefix to 0..=32.
+        let mask = match prefix_len {
+            0 => 0,
+            p if p >= 32 => !0u32,
+            p => !0u32 << (32 - p),
         };
 
         let snat_ip_str = self.hairpin_snat_ip.as_deref().unwrap_or("");
@@ -562,6 +565,32 @@ impl NatRuleConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hairpin(subnet: &str) -> HairpinNatConfig {
+        HairpinNatConfig {
+            enabled: true,
+            internal_subnet: Some(subnet.to_string()),
+            hairpin_snat_ip: Some("192.168.1.1".to_string()),
+        }
+    }
+
+    #[test]
+    fn hairpin_to_parsed_mask_is_correct() {
+        let (_, mask, _) = hairpin("192.168.1.0/24").to_parsed().unwrap();
+        assert_eq!(mask, 0xFFFF_FF00);
+        let (_, mask, _) = hairpin("10.0.0.1/32").to_parsed().unwrap();
+        assert_eq!(mask, 0xFFFF_FFFF);
+        let (_, mask, _) = hairpin("0.0.0.0/0").to_parsed().unwrap();
+        assert_eq!(mask, 0);
+    }
+
+    #[test]
+    fn hairpin_to_parsed_never_panics_on_out_of_range_prefix() {
+        // `validate()` rejects /99, but `to_parsed` must stay total on its own:
+        // no `32 - prefix_len` underflow, clamps to a /32 mask.
+        let (_, mask, _) = hairpin("10.0.0.1/99").to_parsed().unwrap();
+        assert_eq!(mask, 0xFFFF_FFFF);
+    }
 
     fn snat_config() -> NatRuleConfig {
         NatRuleConfig {
