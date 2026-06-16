@@ -24,7 +24,8 @@
 #     kernel.apparmor_restrict_unprivileged_userns=1), unprivileged user-namespace
 #     creation is gated by AppArmor. The agent runs as uid 65534 (non-root), so it
 #     is subject to this and the userns self-map fails (uid_map: Operation not
-#     permitted) even with apparmor/seccomp unconfined below. Allow it on the host:
+#     permitted) regardless of the agent's in-container seccomp/apparmor below —
+#     this is a host-level gate. Allow it on the host:
 #       sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 #     (persist via /etc/sysctl.d/), or scope it to the agent binary with an
 #     AppArmor profile granting `userns` (see dist/apparmor.d/ebpfsentinel-agent).
@@ -85,12 +86,19 @@ services:
     security_opt:
       # The agent self-unshares a user namespace, mounts the delegated bpffs, and
       # loads its own eBPF through the token — so it issues mount/userns/bpf
-      # syscalls. It holds NO CAP_SYS_ADMIN, so the default seccomp profile (which
-      # gates those syscalls on CAP_SYS_ADMIN) would block them: seccomp must be
-      # unconfined here. AppArmor likewise blocks the mount family. (No-op on
-      # hosts without AppArmor.)
+      # syscalls. It holds NO CAP_SYS_ADMIN, so the Docker default seccomp profile
+      # (which gates those syscalls on CAP_SYS_ADMIN) blocks them. Rather than go
+      # fully unconfined, this is the Docker default profile plus an unconditional
+      # allow for exactly that syscall set (unshare/mount family/bpf) — strictly
+      # tighter than seccomp=unconfined. Path resolves from the compose working
+      # dir (run `docker compose` from the repo root). Regenerate from a newer
+      # Docker default: keep the leading allow block, replace the rest.
+      - seccomp=./dist/seccomp/ebpfsentinel-agent.json
+      # AppArmor blocks the mount family; left unconfined. A named per-container
+      # profile would have to be apparmor_parser-loaded on the host first and
+      # would still need broad mount/bpf/netlink access, so the gain is marginal.
+      # (No-op on hosts without AppArmor.)
       - apparmor=unconfined
-      - seccomp=unconfined
     volumes:
       # Agent configuration — writable for hot-reload via file watcher
       - ./config/ebpfsentinel.yaml:/etc/ebpfsentinel/config.yaml
