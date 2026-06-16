@@ -94,9 +94,14 @@ impl From<DomainError> for ApiError {
                 code: "VALIDATION_ERROR",
                 message: err.to_string(),
             },
-            DomainError::EngineError(_) => Self::Internal {
-                message: err.to_string(),
-            },
+            DomainError::EngineError(_) => {
+                // Engine internals must not leak to API clients in a 500 body;
+                // log the detail server-side and return a generic message.
+                tracing::error!(detail = %err, "internal engine error serving API request");
+                Self::Internal {
+                    message: "internal server error".to_string(),
+                }
+            }
             DomainError::PermissionDenied(_) => Self::Forbidden {
                 code: "PERMISSION_DENIED",
                 message: err.to_string(),
@@ -165,6 +170,22 @@ mod tests {
 
         let body = response_body(resp).await;
         assert_eq!(body["error"]["code"], "DUPLICATE_RULE");
+    }
+
+    #[tokio::test]
+    async fn domain_engine_error_does_not_leak_detail() {
+        let err = ApiError::from(DomainError::EngineError(
+            "bpf map IDS_PATTERNS write failed: ENOSPC".to_string(),
+        ));
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = response_body(resp).await;
+        assert_eq!(body["error"]["code"], "INTERNAL_ERROR");
+        // The internal detail must not reach the client.
+        assert_eq!(body["error"]["message"], "internal server error");
+        let msg = body["error"]["message"].as_str().unwrap();
+        assert!(!msg.contains("IDS_PATTERNS") && !msg.contains("ENOSPC"));
     }
 
     #[tokio::test]
