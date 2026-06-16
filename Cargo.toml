@@ -84,7 +84,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 # Metrics
-prometheus-client = "0.24"
+prometheus-client = "0.25"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
