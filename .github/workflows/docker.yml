@@ -74,6 +74,9 @@ jobs:
 
       - uses: ./.github/actions/install-bpf-linker
 
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
       - uses: ./.github/actions/stamp-version
         with:
           version: ${{ needs.prepare.outputs.version }}

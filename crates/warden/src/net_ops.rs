@@ -58,7 +58,7 @@ fn name_to_cbuf(iface: &str) -> Result<[libc::c_char; libc::IFNAMSIZ], String> {
     }
     let mut buf = [0 as libc::c_char; libc::IFNAMSIZ];
     for (dst, &src) in buf.iter_mut().zip(bytes) {
-        *dst = src.cast_signed();
+        *dst = libc::c_char::from_ne_bytes([src]);
     }
     Ok(buf)
 }
