@@ -102,6 +102,13 @@ services:
     volumes:
       # Agent configuration — writable for hot-reload via file watcher
       - ./config/ebpfsentinel.yaml:/etc/ebpfsentinel/config.yaml
+      # Read-only host cgroupfs. The container resolver maps a packet's cgroup
+      # id (recovered on the TC egress hook via bpf_skb_cgroup_id) to a
+      # container by walking this hierarchy. The container's own /sys/fs/cgroup
+      # is a namespaced subtree that lacks the host cgroup inodes, so without
+      # this the resolution fails. Matches container.resolver.cgroup_root
+      # (default /sys/fs/cgroup). Same pattern as node-exporter.
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
       # The warden's control socket (read-only — the agent only connects).
       - warden-sock:/run/ebpfsentinel:ro
       # Persistent data: audit logs, alerts, rule change history (redb)

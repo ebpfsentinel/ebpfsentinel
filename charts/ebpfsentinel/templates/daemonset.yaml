@@ -148,6 +148,13 @@ spec:
             - name: debug
               mountPath: /sys/kernel/debug
               readOnly: true
+            - name: host-cgroup
+              # Read-only host cgroupfs so the container resolver can map a
+              # packet's cgroup id (from bpf_skb_cgroup_id on the TC egress
+              # hook) to a container. The pod's own /sys/fs/cgroup is a
+              # namespaced subtree that lacks the host cgroup inodes.
+              mountPath: /sys/fs/cgroup
+              readOnly: true
             {{- with .Values.daemonset.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -182,6 +189,9 @@ spec:
         - name: debug
           hostPath:
             path: /sys/kernel/debug
+        - name: host-cgroup
+          hostPath:
+            path: /sys/fs/cgroup
         {{- with .Values.daemonset.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
