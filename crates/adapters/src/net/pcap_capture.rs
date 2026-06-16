@@ -1,5 +1,6 @@
 #![allow(unsafe_code)] // Raw AF_PACKET capture requires libc + unsafe.
 #![allow(
+    clippy::cast_lossless,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss
@@ -165,8 +166,8 @@ pub fn run_capture(
                 .unwrap_or_default();
             let header = PacketHeader {
                 ts: libc::timeval {
-                    tv_sec: now.as_secs() as libc::time_t,
-                    tv_usec: libc::suseconds_t::from(now.subsec_micros()),
+                    tv_sec: now.as_secs() as _,
+                    tv_usec: now.subsec_micros() as _,
                 },
                 caplen: caplen as u32,
                 len: len as u32,
