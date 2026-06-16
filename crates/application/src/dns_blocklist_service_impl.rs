@@ -183,7 +183,10 @@ impl DnsBlocklistAppService {
                 let result = match inject_target {
                     InjectTarget::ThreatIntel => writer.inject_threatintel_ip(*ip, &metadata),
                     InjectTarget::Firewall => writer.inject_firewall_drop(*ip),
-                    InjectTarget::Ips => unreachable!("handled above"),
+                    // `Ips` is routed through the IPS-port branch above, so this
+                    // map-writer branch only runs for ThreatIntel/Firewall. Stay a
+                    // no-op rather than panicking on the DNS path if that ever changes.
+                    InjectTarget::Ips => Ok(()),
                 };
                 if let Err(e) = result {
                     tracing::warn!(
@@ -198,7 +201,10 @@ impl DnsBlocklistAppService {
                 let result = match inject_target {
                     InjectTarget::ThreatIntel => writer.remove_threatintel_ip(*ip),
                     InjectTarget::Firewall => writer.remove_firewall_drop(*ip),
-                    InjectTarget::Ips => unreachable!("handled above"),
+                    // `Ips` is routed through the IPS-port branch above, so this
+                    // map-writer branch only runs for ThreatIntel/Firewall. Stay a
+                    // no-op rather than panicking on the DNS path if that ever changes.
+                    InjectTarget::Ips => Ok(()),
                 };
                 if let Err(e) = result {
                     tracing::warn!(
@@ -330,7 +336,10 @@ impl DnsBlocklistAppService {
                     let result = match inject_target {
                         InjectTarget::ThreatIntel => writer.remove_threatintel_ip(*ip),
                         InjectTarget::Firewall => writer.remove_firewall_drop(*ip),
-                        InjectTarget::Ips => unreachable!("handled above"),
+                        // `Ips` is routed through the IPS-port branch above, so this
+                        // map-writer branch only runs for ThreatIntel/Firewall. Stay a
+                        // no-op rather than panicking on the DNS path if that ever changes.
+                        InjectTarget::Ips => Ok(()),
                     };
                     if let Err(e) = result {
                         tracing::warn!(ip = %ip, "failed to remove expired IP from eBPF map: {e}");
@@ -376,7 +385,10 @@ impl DnsBlocklistAppService {
                 let result = match inject_target {
                     InjectTarget::ThreatIntel => writer.remove_threatintel_ip(*ip),
                     InjectTarget::Firewall => writer.remove_firewall_drop(*ip),
-                    InjectTarget::Ips => unreachable!("handled above"),
+                    // `Ips` is routed through the IPS-port branch above, so this
+                    // map-writer branch only runs for ThreatIntel/Firewall. Stay a
+                    // no-op rather than panicking on the DNS path if that ever changes.
+                    InjectTarget::Ips => Ok(()),
                 };
                 if let Err(e) = result {
                     tracing::warn!(ip = %ip, "failed to remove IP after blocklist reload: {e}");
