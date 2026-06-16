@@ -888,19 +888,13 @@ fn process_firewall_v4(
         return apply_action(ctx, ctx_raw, val.action);
     }
 
-    // Fast-path bypass: ESTABLISHED/RELATED flows skip the expensive Phase-2
-    // linear scan. Placed AFTER the O(1) LPM/hash lookups (Phase 1/1b/1c) so a
-    // deny rule expressible as CIDR / 5-tuple / proto+port is still enforced
-    // mid-flow against an already-established connection — apply_action(DROP)
-    // then kills the kernel CT entry via kill_flow_via_xdp_ct, stopping the
-    // flow instead of letting CT state grant it permanent passage.
-    if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
-        increment_metric(METRIC_PASSED);
-        write_xdp_metadata(ctx, ACTION_PASS, 0);
-        return Ok(xdp_action::XDP_PASS);
-    }
-
     // Phase 2: Linear scan for complex rules (port ranges, VLAN, MAC, CT state).
+    // ESTABLISHED/RELATED flows run this scan too, so an explicit deny rule of
+    // any shape (port range, VLAN, MAC, tcp-flags, ct-state mask, ICMP) is
+    // enforced mid-flow against an already-established connection —
+    // apply_action(DROP) then kills the kernel CT entry via kill_flow_via_xdp_ct.
+    // Conntrack state only grants passage in the ABSENCE of a matching rule
+    // (handled after the scan), never over one.
     // Read rule count
     let count = match FIREWALL_RULE_COUNT.get(0) {
         Some(&c) => c,
@@ -965,6 +959,16 @@ fn process_firewall_v4(
             }
         }
         return apply_action(ctx, ctx_raw, action);
+    }
+
+    // No explicit rule matched. ESTABLISHED/RELATED flows were already granted
+    // passage by conntrack, so they bypass the default policy: a default-deny
+    // must not tear down live connections that no longer match any rule. Only
+    // NEW/unknown flows fall through to the default policy.
+    if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
+        increment_metric(METRIC_PASSED);
+        write_xdp_metadata(ctx, ACTION_PASS, 0);
+        return Ok(xdp_action::XDP_PASS);
     }
 
     // No rule matched — apply default policy
@@ -1439,17 +1443,12 @@ fn process_firewall_v6(
         return apply_action(ctx, ctx_raw, lpm_action as u8);
     }
 
-    // Fast-path bypass: ESTABLISHED/RELATED flows skip the expensive Phase-2
-    // linear scan. Placed AFTER the O(log n) LPM lookup so a CIDR deny rule is
-    // still enforced mid-flow against an already-established connection —
-    // apply_action(DROP) then kills the kernel CT entry via kill_flow_via_xdp_ct.
-    if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
-        increment_metric(METRIC_PASSED);
-        write_xdp_metadata(ctx, ACTION_PASS, 0);
-        return Ok(xdp_action::XDP_PASS);
-    }
-
-    // Phase 2: Linear scan for complex rules (port, protocol, VLAN).
+    // Phase 2: Linear scan for complex rules (port, protocol, VLAN, MAC,
+    // tcp-flags, ct-state mask, ICMP). ESTABLISHED/RELATED flows run this scan
+    // too, so an explicit deny rule of any shape is enforced mid-flow against an
+    // already-established connection — apply_action(DROP) then kills the kernel
+    // CT entry via kill_flow_via_xdp_ct. Conntrack state only grants passage in
+    // the ABSENCE of a matching rule (handled after the scan), never over one.
     // Read V6 rule count
     let count = match FIREWALL_RULE_COUNT_V6.get(0) {
         Some(&c) => c,
@@ -1512,6 +1511,16 @@ fn process_firewall_v6(
             }
         }
         return apply_action(ctx, ctx_raw, action);
+    }
+
+    // No explicit rule matched. ESTABLISHED/RELATED flows were already granted
+    // passage by conntrack, so they bypass the default policy: a default-deny
+    // must not tear down live connections that no longer match any rule. Only
+    // NEW/unknown flows fall through to the default policy.
+    if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
+        increment_metric(METRIC_PASSED);
+        write_xdp_metadata(ctx, ACTION_PASS, 0);
+        return Ok(xdp_action::XDP_PASS);
     }
 
     // No rule matched — apply default policy
