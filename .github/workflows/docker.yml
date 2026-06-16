@@ -74,8 +74,8 @@ jobs:
 
       - uses: ./.github/actions/install-bpf-linker
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev
 
       - uses: ./.github/actions/stamp-version
         with:

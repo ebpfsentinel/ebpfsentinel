@@ -93,7 +93,7 @@ jobs:
           shared-key: release-${{ matrix.arch }}
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler ${{ matrix.musl_pkg }} llvm-dev flex bison wget cmake
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler ${{ matrix.musl_pkg }} llvm-dev flex bison wget cmake libpcap-dev
 
       - name: Build static libpcap (musl)
         run: |
