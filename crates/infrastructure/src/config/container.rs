@@ -55,9 +55,9 @@ pub struct ResolverConfig {
     #[serde(default = "default_proc_path")]
     pub proc_path: String,
 
-    /// cgroup v2 hierarchy root. The `cgroup_sock_addr` connect hooks
-    /// attach here so they record the connecting task's cgroup id, which
-    /// the TC ingress path recovers for container attribution.
+    /// cgroup v2 hierarchy root. The resolver walks it to map a packet's
+    /// cgroup id (recovered on the TC egress hook via `bpf_skb_cgroup_id`,
+    /// where the originating socket is bound to the skb) to a container.
     #[serde(default = "default_cgroup_root")]
     pub cgroup_root: String,
 }

@@ -225,10 +225,13 @@ pub struct IdsConfig {
     #[serde(default)]
     pub sampling: Option<SamplingConfig>,
 
-    /// Also attach the IDS classifier on the egress hook. Off by default —
-    /// the IDS normally inspects ingress only. Enable to attribute
-    /// locally-originated (e.g. container outbound) traffic to its cgroup,
-    /// since on egress the originating socket is bound to the skb.
+    /// Also attach the IDS classifier on the egress hook. The IDS normally
+    /// inspects ingress only. The egress hook is where `bpf_skb_cgroup_id`
+    /// can recover the originating socket's cgroup, so the agent already
+    /// attaches egress when the container resolver is enabled (for
+    /// attribution). This flag forces the egress attach independently of the
+    /// resolver. Either way, an egress-attached IDS also enforces verdicts on
+    /// outbound traffic.
     #[serde(default)]
     pub inspect_egress: bool,
 

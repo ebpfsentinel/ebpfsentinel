@@ -3641,11 +3641,14 @@ pub fn try_load_tc_ids(ebpf_dir: &str, config: &AgentConfig) -> anyhow::Result<T
         attach_tc_auto(&mut loader, "tc_ids", iface, config.agent.attach_mode)?;
     }
 
-    // Also attach tc-ids on egress when requested, so locally-originated
-    // (e.g. container outbound) traffic is inspected with the originating
-    // socket's cgroup available via `bpf_skb_cgroup_id` — enabling
-    // container attribution that the ingress softirq path cannot provide.
-    if config.ids.inspect_egress {
+    // Also attach tc-ids on egress so locally-originated (e.g. container
+    // outbound) traffic is seen with the originating socket's cgroup available
+    // via `bpf_skb_cgroup_id` — the ingress softirq path cannot recover it.
+    // This is needed for container attribution, so it fires whenever the
+    // container resolver is on; `inspect_egress` keeps it available even when
+    // attribution is off. NOTE: an egress-attached tc-ids also enforces IDS
+    // verdicts on outbound traffic, not only ingress.
+    if config.ids.inspect_egress || config.container.resolver.enabled {
         for iface in &config.agent.interfaces {
             if let Err(e) = loader.attach_tc_egress("tc_ids", iface) {
                 warn!("tc-ids egress attach on '{iface}' failed: {e}");
