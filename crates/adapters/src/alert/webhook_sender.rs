@@ -1,14 +1,64 @@
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use domain::alert::circuit_breaker::CircuitBreaker;
 use domain::alert::entity::{Alert, AlertDestination, AlertRoute};
 use domain::common::error::DomainError;
+use domain::threatintel::entity::FeedConfig;
 use infrastructure::retry::{RetryConfig, retry_with_backoff};
 use ports::secondary::alert_sender::AlertSender;
 use ports::secondary::metrics_port::MetricsPort;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use tokio::sync::Mutex;
+
+/// reqwest resolver that rejects any host resolving to a forbidden (loopback,
+/// private, link-local, ULA, or cloud-metadata) address.
+///
+/// `validate_webhook_url` only inspects the URL string, so it catches literal-IP
+/// and known hostnames but not a public hostname whose A record points inside
+/// (DNS rebinding) — reqwest connects to whatever the name resolves to. Checking
+/// the *resolved* IP at connect time closes that gap, matching the threat-intel
+/// feed fetcher. Reuses [`FeedConfig::is_forbidden_ip`] so both egress paths
+/// share one block list and cannot drift apart.
+struct SsrfGuardResolver;
+
+impl Resolve for SsrfGuardResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        Box::pin(async move {
+            let host = name.as_str().to_owned();
+            // Port 0 is a placeholder; reqwest substitutes the real port.
+            let addrs = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+            let mut validated: Vec<SocketAddr> = Vec::new();
+            for addr in addrs {
+                if FeedConfig::is_forbidden_ip(addr.ip()) {
+                    return Err(format!(
+                        "refusing to connect to blocked address {} for host '{host}'",
+                        addr.ip()
+                    )
+                    .into());
+                }
+                validated.push(addr);
+            }
+            Ok(Box::new(validated.into_iter()) as Addrs)
+        })
+    }
+}
+
+/// Build the webhook HTTP client with the same SSRF defenses as the feed
+/// fetcher: no redirect following (a 3xx to an internal host cannot bypass the
+/// URL checks) and the connect-time [`SsrfGuardResolver`]. Falls back, like
+/// `reqwest::Client::new()`, to a panic only if the TLS backend cannot init.
+fn build_hardened_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(Arc::new(SsrfGuardResolver))
+        .build()
+        .expect("webhook HTTP client with SSRF guard should build")
+}
 
 /// Alert sender that POSTs alert JSON to a webhook URL.
 ///
@@ -32,7 +82,7 @@ impl WebhookAlertSender {
         destination_name: String,
     ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: build_hardened_client(),
             circuit_breaker: Mutex::new(circuit_breaker),
             retry_config,
             metrics,
@@ -540,6 +590,56 @@ mod tests {
         assert!(result.is_err(), "expected Err for HTTP 500");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("500"), "error should mention 500, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn redirect_to_internal_is_not_followed() {
+        use axum::http::{StatusCode, header::LOCATION};
+        use axum::response::IntoResponse;
+        use axum::{Router, routing::post};
+
+        // A compromised/malicious webhook endpoint 302s to the cloud metadata
+        // service. With redirect-following the agent would chase it; the
+        // hardened client must surface the 3xx as an error instead.
+        async fn handler_redirect() -> impl IntoResponse {
+            (
+                StatusCode::FOUND,
+                [(LOCATION, "http://169.254.169.254/latest/meta-data/")],
+            )
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route("/webhook", post(handler_redirect));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let url = format!("http://{addr}/webhook");
+        let metrics = Arc::new(TestMetrics::new());
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
+        let no_retry = RetryConfig {
+            max_retries: 0,
+            backoff_schedule: vec![],
+            timeout: Duration::from_secs(2),
+        };
+        let mut sender = WebhookAlertSender::new(
+            cb,
+            no_retry,
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            "test-webhook".to_string(),
+        );
+        sender.skip_url_validation = true;
+
+        let alert = sample_alert();
+        let route = webhook_route(&url);
+
+        // The 302 is treated as a failed delivery (non-2xx), not chased to the
+        // metadata host — proving redirects are not followed.
+        let result = sender.send(&alert, &route).await;
+        assert!(result.is_err(), "redirect must not be followed to success");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("302"), "error should mention 302, got: {err}");
     }
 
     #[test]
