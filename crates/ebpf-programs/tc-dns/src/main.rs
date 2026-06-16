@@ -16,12 +16,12 @@ use ebpf_common::dns::{
     DNS_METRIC_TOTAL_SEEN, DnsEvent, DnsEventBuf,
 };
 use ebpf_common::event::{FLAG_IPV6, FLAG_TCP, FLAG_VLAN};
-use ebpf_helpers::increment_metric;
 use ebpf_helpers::net::{
     ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
     VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
 };
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::{increment_metric, opaque_usize};
 use network_types::{
     eth::EthHdr,
     ip::{IpProto, Ipv4Hdr},
@@ -306,25 +306,31 @@ fn emit_dns_event(
             // skb; 0 on ingress softirq (DNS responses).
             (*ptr).header.cgroup_id = bpf_get_current_cgroup_id();
 
-            // Zero payload buffer so bytes beyond the actual DNS
-            // payload are deterministic even if load_bytes copies less.
+            // Zero the payload buffer so bytes beyond the captured DNS
+            // payload are deterministic.
             core::ptr::write_bytes((*ptr).payload.as_mut_ptr(), 0, DNS_MAX_PAYLOAD);
 
-            // Call bpf_skb_load_bytes directly with a compile-time
-            // constant length (DNS_MAX_PAYLOAD = 512). The aya wrapper
-            // `ctx.load_bytes()` computes min(skb_len - offset, dst.len())
-            // which gives the verifier a variable range [0, 511] for R4,
-            // rejected as "invalid zero-sized read" on kernel 6.17+.
+            // Load exactly the bytes the packet carries (clamped to the
+            // buffer), not a fixed DNS_MAX_PAYLOAD. `bpf_skb_load_bytes` is
+            // all-or-nothing: a constant 512-byte read fails whenever the
+            // remaining skb is shorter — the common case for DNS — leaving
+            // the payload all-zero while `dns_payload_len` still advertises
+            // `available`. Loading the real length captures the query/answer.
             //
-            // With a constant length the verifier sees R4=512 (fixed).
-            // If the packet has fewer bytes, bpf_skb_load_bytes returns
-            // an error and the pre-zeroed buffer remains intact — the
-            // actual payload length is recorded in dns_payload_len.
+            // `payload_len` is already in `1..=DNS_MAX_PAYLOAD` (dns_offset <
+            // total_len, so `available >= 1`), but the RingBuf reserve above
+            // spills the register and the verifier loses the lower bound,
+            // rejecting the zero case ("R4 invalid zero-sized read") on
+            // kernel 6.17+. Route the value through a barrier then re-clamp
+            // so the `[1, DNS_MAX_PAYLOAD]` bound survives the spill/reload.
+            // The load always fits (dns_offset + load_len <= total_len =
+            // skb len), so it never fails on bounds.
+            let load_len = opaque_usize(payload_len).clamp(1, DNS_MAX_PAYLOAD);
             let _ = bpf_skb_load_bytes(
                 ctx.skb.skb as *const _,
                 dns_offset as u32,
                 (*ptr).payload.as_mut_ptr() as *mut _,
-                DNS_MAX_PAYLOAD as u32,
+                load_len as u32,
             );
         }
         entry.submit(0);
