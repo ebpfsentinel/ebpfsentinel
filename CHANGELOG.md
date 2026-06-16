@@ -6,6 +6,115 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Versioning follows **CalVer**: `YYYY.M.RELEASE` (year, month without leading zero, release index within that month). Tags use the `v` prefix: `v2026.3.1`.
 
+## [2026.6.1] - 2026-06-16
+
+### Added
+
+#### Kernel Netfilter Integration (kernel 6.9+)
+- **Kernel-native connection tracking**: conntrack delegated to the in-kernel netfilter engine via kfuncs (`bpf_skb_ct_lookup`, `bpf_xdp_ct_lookup`, `bpf_ct_release`) — userspace shadow CT tables removed
+- **Flow termination via netfilter**: `kill_flow` marks flows `IPS_DYING` in the IDS block and XDP drop paths so the kernel tears down the connection
+- **Kernel-native NAT**: `bpf_ct_set_nat_info` delegation at every DNAT/SNAT application site
+- **BPF token delegation end-to-end**: load and attach all eBPF programs with a BPF token alone — no `CAP_BPF`/`CAP_SYS_ADMIN`/`CAP_PERFMON`
+- **Rootless eBPF loading**: userns launcher self-maps and loads the program set without root
+- **kfunc bindings spanning kernel 5.18–6.9**: netfilter CT allocate/lookup/NAT, 6.4–6.5 dynptr (`SkbDynptr`/`XdpDynptr`), 6.3 XDP metadata, 6.9 arena pages, IPsec/FOU-GUE steering, in-kernel container resolution, per-tenant RCU enforcement
+- **Userspace conntrack coherence**: `/proc/net/nf_conntrack` reader, conntrack event stream over SSE, and `conntrack watch`/`list`/`status` CLI subcommands
+
+#### Privilege Isolation (warden)
+- **warden privilege broker + rootless agent**: the agent self-bootstraps its user namespace and loads its own eBPF; the warden brokers the host-netns operations it cannot do rootless (conntrack flush, route, gratuitous ARP, pcap)
+- **warden-proto control plane**: typed protocol crate over a shared control socket with a reconnecting client for warden-restart resilience
+- **Split deployment assets**: rootless `Dockerfile.agent`, `Dockerfile.warden`, split DaemonSet / docker-compose / systemd units, Helm warden sidecar
+- **AppArmor unprivileged-userns handling**: per-binary profile with sysctl fallback
+- **Tailored agent seccomp profile**: Docker default plus an `unshare`/`mount`/`bpf` allow-list (replaces `seccomp=unconfined`)
+- **Host cgroupfs mounted read-only** so the container resolver can attribute egress cgroup ids
+
+#### Container & Kubernetes Awareness
+- **cgroup attribution**: `cgroup_id` on packet/DLP/DNS events, cgroup resolver with LRU cache, port/adapter/alert plumbing
+- **Docker + Kubernetes enrichers**: Docker Engine API client and Kubernetes API enrichment of alerts
+- **tc-ids container attribution**: egress hook + `src_port` rule matching tag locally-originated traffic with a non-zero cgroup id
+- **netkit support**: BPF attach with device detection, pod namespace discovery, and a hot-plug watcher for Kubernetes networking
+- **Container/K8s context** surfaced on both the REST and gRPC alert streams
+
+#### TLS Intelligence (JA4+)
+- **JA4S ServerHello fingerprinting**: `TlsServerHello` parser + `compute_ja4s`, dedicated JA4S endpoint
+- **New MITRE mappings**: TLS version downgrade, `SniCertMismatch` (T1557), `SessionResumeAnomaly`, and container-aware `PeerGroupAnomaly`
+- **Fingerprint persistence**: JA4/JA4S caches backed by a redb store
+- **Inline TLS record parsing** for JA4 enrichment in the L7 path
+
+#### L7 Firewall
+- **IMAP and POP3** parsers in the OSS dispatcher plus an `L7ExtendedParser` extension port
+- **Userspace stream reassembler** with HTTP `Content-Length` completion
+- **Deeper L7 capture**: `MAX_L7_PAYLOAD` raised to 2048, `EVENTS` ring buffer to 4 MiB, `L7_PORTS` capacity to 256 with a `MAX_L7_PORTS` validator
+- **Source/destination MAC filtering** through the firewall rule create API
+
+#### Load Balancer
+- **Maglev consistent-hash** backend selection
+- **L2 DSR forwarding** (`mode: l2dsr`)
+- **L2 VIP announcer**: bounded XDP ARP responder + gratuitous-ARP failover, REST/CLI surface with hot-reload, and an L2 self-binding whitelist
+- **RSS-hash IP_HASH**: NIC RSS hash drives `IP_HASH` backend selection
+
+#### Hardware Offload
+- **NIC metadata on events**: RSS hash, RSS hash type, and hardware RX timestamps on packet/DDoS/ratelimit events
+- **VLAN tag recovery** via `bpf_xdp_metadata_rx_vlan_tag` for hardware-stripped tags
+
+#### NAT, IPsec & Overlays
+- **IPsec xfrm interface steering** and **FOU/GUE overlay encapsulation** on NAT rules
+- **IPsec-aware datapath**: ESP/AH SAD lookup detects protected traffic, tunnel-aware DNAT matching via `NAT_MATCH_XFRM`
+- **IPv4 fragment drop**: `tc-scrub` `drop_fragments` policy
+
+#### Authentication & API
+- **EdDSA + JWKS** JWT verification, async `AuthProvider` with JWKS refresh and tenant claims
+- **Operator-managed identity endpoint**
+- **Server-Sent Events** alert stream with domain-scoped filtering
+- **IPS blacklist write API** + STIX URL indicator surfacing
+- **New REST endpoints**: conntrack status (`max_connections`), geoip status/lookup, zone + policy CRUD, gateway CRUD and routes, `dns/status`, threat-intel feed refresh with `last_fetched`
+- **Configurable write-API rate limit**, loopback-exempt by default
+- **Dedicated metrics listener** on `metrics_port` to match deployment manifests
+- **OpenAPI spec emitted via xtask**; `geoip_lookups_total` hit/miss counter and per-domain GeoIP surfacing
+
+### Changed
+
+- **Minimum kernel raised 6.6 → 6.9**, enforced as a mandatory startup gate with no API-only fallback
+- **Connection tracking is kernel netfilter only**: `CT_TABLE_V4/V6` shadow maps and the userspace TCP state machine were removed
+- **eBPF loads via BPF token by default**; capabilities are demoted to a fallback and the agent runs rootless under a user namespace
+- **Privilege-split deployment**: warden broker + rootless agent across Docker, docker-compose, Helm, systemd, and the integration harness (the combined single-container/launcher topology was retired)
+- **Per-domain config reload locks** replace the single global reload mutex
+- **Architecture cleanup**: Prometheus metrics adapter moved out of infrastructure, HTTP driving adapter moved to the agent crate, kernel-version gate collapsed onto a single `kernel_probe` source of truth
+- Rust toolchain refreshed; `actions/checkout` and other CI action majors bumped
+- Arena zero-copy event paths were added and then narrowed to a RingBuf fallback where `BPF_MAP_TYPE_ARENA` proved non-functional under load
+
+### Fixed
+
+#### Security
+- **Webhook/feed SSRF hardening**: stopped following redirects, validate the resolved IP at connect time, and closed numeric-IP / mapped-IPv6 / DNS-rebinding bypasses
+- **RBAC write enforcement** added to 16 mutating API endpoints
+- **Config disclosure**: webhook `Authorization` header values and `api_key_salt` masked in `sanitized()` (were leaking via `GET /api/v1/config`)
+- **Path traversal**: reject `..` in the key/cert path allowlist (`starts_with` was bypassable)
+- **JWKS**: plaintext fetch restricted to loopback, inline refresh cooldown caps unauthenticated DoS amplification
+- **No error-detail leakage** in HTTP 500 bodies — logged server-side, generic message returned
+- **DoS guards**: reject overflowing Redis bulk length, bound STIX/JSON feed parsing to `max_iocs`, compile-time-safe DNS header bounds, runtime capture-id path-safety
+
+#### Datapath
+- **SYN cookies**: use kernel `bpf_tcp_raw` syncookies so legit clients complete the handshake under flood; keyed with a SipHash-2-4 PRF + CSPRNG secret; IPv6 SYN+ACK forged from VLAN-correct addresses
+- **DDoS protections now arm**: wired `DDOS_SYN_CONFIG`, `ICMP_CONFIG`, `CONNTRACK_CONFIG`, and `AMP_PROTECT_CONFIG` (previously never written → disabled)
+- **tc-scrub kernel hang** on forwarded packets fixed by coalescing IPv4 header rewrites and correcting the MSS/timestamp checksum
+- **Firewall deny enforcement**: explicit deny rules of any shape now apply to already-established flows and tear down the kernel conntrack entry mid-flow
+- **DDoS/ratelimit datapath revived**: load `xdp-ratelimit` non-device-bound so the firewall→ratelimit tail-call wires; demote fast-path rules to the array scan to preserve rule priority
+- **PKT_CTX pinned by name** so `xdp-firewall-reject` shares the parent's populated scratch buffer
+- **TC chaining**: return `TCX_NEXT` on pass for mprog cooperation, allow multi-interface attach without reload error, retry XDP attach on `EBUSY` after restart
+- **tc-dns** loads the actual DNS payload length (the fixed-512 load left short packets empty)
+- **uprobe-dlp** isolated under its own pin path so its `EVENTS` ring buffer never aliases the packet buffer
+- **L7 reassembler** parses idle-flushed buffers instead of discarding them and trims stale ringbuf bytes via carried payload length
+- **QoS** rate unified to bits/sec with `ns_per_byte` storage and classifier match-key parsing
+- **Metrics** expose real eBPF map-counter deltas instead of a poll heartbeat; OTLP exports counted as `alerts_exported` instead of mislabeled drops
+
+#### Build & Platform
+- **tc-ids loads when L7 is enabled** so L7/encrypted-DNS capture works without IDS
+- **Config reload**: synchronous validation, awaited completion, SIGHUP handler installed before readiness; EdDSA/JWKS counted when validating JWT auth
+- **Non-blocking pcap loop** honours the duration deadline on quiet links
+- **musl/Docker builds**: typed `SIOCGIF*` ioctl constants, platform-portable `msg_controllen` cast, config dir staged at 0755 for rootless traversal
+- **TLS API 500s** fixed via `TlsConnectInfo`/`ConnectInfo` injection and axum 0.8 `into_make_service()`
+- Dependency bumps: `rustls-webpki` 0.103.13, `lettre` 0.11.22
+
 ## [2026.3.2] - 2026-03-28
 
 ### Added
