@@ -207,6 +207,21 @@ const ALLOWED_KEY_PREFIXES: &[&str] = &[
 
 /// Validate that a key/cert file path is under an allowed directory.
 pub(super) fn validate_key_path(path: &str, field: &str) -> Result<(), ConfigError> {
+    use std::path::{Component, Path};
+
+    // Reject any `..` component first: a textual `starts_with` check alone is
+    // bypassable by traversal — `/etc/ebpfsentinel/../../root/.ssh/id_rsa`
+    // starts with an allowed prefix yet resolves outside it.
+    if Path::new(path)
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err(ConfigError::Validation {
+            field: field.to_string(),
+            message: format!("path '{path}' must not contain '..' components"),
+        });
+    }
+
     if ALLOWED_KEY_PREFIXES
         .iter()
         .any(|prefix| path.starts_with(prefix))
@@ -467,6 +482,28 @@ mod tests {
     #[test]
     fn parse_domain_mode_invalid() {
         assert!(parse_domain_mode("invalid").is_err());
+    }
+
+    // ── Key-path allowlist ────────────────────────────────────────
+
+    #[test]
+    fn validate_key_path_accepts_allowed_dirs() {
+        assert!(validate_key_path("/etc/ebpfsentinel/tls.key", "key").is_ok());
+        assert!(validate_key_path("/run/secrets/jwt.pem", "key").is_ok());
+    }
+
+    #[test]
+    fn validate_key_path_rejects_outside_allowlist() {
+        assert!(validate_key_path("/root/.ssh/id_rsa", "key").is_err());
+        // Sibling-prefix confusion is blocked by the trailing slash.
+        assert!(validate_key_path("/etc/sslzzz/evil.key", "key").is_err());
+    }
+
+    #[test]
+    fn validate_key_path_rejects_dotdot_traversal() {
+        // Textually starts with an allowed prefix but escapes it via `..`.
+        assert!(validate_key_path("/etc/ebpfsentinel/../../root/.ssh/id_rsa", "key").is_err());
+        assert!(validate_key_path("/run/secrets/../../etc/shadow", "key").is_err());
     }
 
     mod proptests {
