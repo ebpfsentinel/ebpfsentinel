@@ -50,7 +50,11 @@ die() { printf '\033[1;31m[talos-e2e] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 prep() {
   command -v docker >/dev/null || die "docker not found"
 
-  if ! docker image inspect ebpfsentinel:latest >/dev/null 2>&1; then
+  # Rebuild by default so each iteration deploys the CURRENT source — the
+  # registry is re-pushed below and nodes pull :latest (pullPolicy: Always).
+  # Set PREP_NO_REBUILD=1 to reuse existing local images (faster, but may be
+  # stale — skips the build only when the image already exists).
+  if [ "${PREP_NO_REBUILD:-0}" != "1" ] || ! docker image inspect ebpfsentinel:latest >/dev/null 2>&1; then
     log "Staging eBPF objects + building ebpfsentinel:latest"
     mkdir -p "${PROJECT_ROOT}/ebpf-out"
     find "${PROJECT_ROOT}/crates/ebpf-programs/"*/target/bpfel-unknown-none/release \
@@ -60,7 +64,7 @@ prep() {
   fi
 
   # Split deployment: the privileged warden broker ships as its own lean image.
-  if ! docker image inspect ebpfsentinel-warden:latest >/dev/null 2>&1; then
+  if [ "${PREP_NO_REBUILD:-0}" != "1" ] || ! docker image inspect ebpfsentinel-warden:latest >/dev/null 2>&1; then
     log "Building ebpfsentinel-warden:latest"
     docker build -f "${PROJECT_ROOT}/Dockerfile.warden" -t ebpfsentinel-warden:latest "${PROJECT_ROOT}"
   fi
@@ -87,8 +91,13 @@ cluster_up() {
   [ "$(id -u)" -eq 0 ] || die "run 'up' as root: sudo -E $0 up"
   command -v talosctl >/dev/null || die "talosctl not found in PATH (${PATH})"
 
-  docker ps --format '{{.Names}}' | grep -qx "${REGISTRY_NAME}" \
-    || die "local registry not running — run (non-root): $0 prep"
+  # Auto-provision the registry + images when the registry is not running. prep
+  # runs here as root (root can reach the docker socket); HOME already points at
+  # the real user's home (set above), so docker uses their config, not /root.
+  if ! docker ps --format '{{.Names}}' | grep -qx "${REGISTRY_NAME}"; then
+    log "local registry not running — auto-provisioning (build + registry + push)"
+    prep
+  fi
 
   create_cluster() {
     log "Creating Talos qemu cluster '${CLUSTER_NAME}' (1 control-plane + 2 workers)"
