@@ -87,8 +87,14 @@ serviceAccount:
 
 # -- DaemonSet configuration
 daemonset:
-  # -- Enable hostPID for full DLP uprobe coverage on all node processes
-  hostPID: false
+  # -- Share the host PID namespace. Required for cross-container TLS DLP: the
+  # agent resolves each workload's `libssl` through `/host/proc/<pid>` and the
+  # warden attaches the uprobe against the host pid. SECURITY NOTE: hostPID lets
+  # the pod see every process on the node (command lines, `/proc/<pid>`),
+  # widening its visibility beyond its own containers — the irreducible cost of
+  # node-wide DLP. Set to `false` to restrict DLP to the agent's own pod (the
+  # uprobe then covers only libraries the agent itself maps).
+  hostPID: true
   # -- DaemonSet update strategy
   updateStrategy:
     type: RollingUpdate
@@ -122,12 +128,16 @@ daemonset:
   warden:
     # -- Warden security context. The broker holds the host capabilities:
     # CAP_SYS_ADMIN (bpffs delegation / FSCONFIG_CMD_CREATE), CAP_NET_ADMIN
-    # (conntrack teardown + routes), CAP_NET_RAW (pcap pool + gratuitous ARP). It
-    # issues fsconfig + netlink + AF_PACKET, so AppArmor + seccomp are Unconfined.
+    # (conntrack teardown + routes), CAP_NET_RAW (pcap pool + gratuitous ARP),
+    # CAP_SYS_PTRACE (read a neighbouring container's `/proc/<pid>/root` to reach
+    # its `libssl`), and CAP_BPF + CAP_PERFMON (create the DLP uprobe
+    # `BPF_LINK_CREATE`). These tracing capabilities live on the warden ONLY — the
+    # agent stays `cap-drop: ALL`. It issues fsconfig + netlink + AF_PACKET + bpf,
+    # so AppArmor + seccomp are Unconfined.
     securityContext:
       runAsUser: 0
       capabilities:
-        add: [SYS_ADMIN, NET_ADMIN, NET_RAW]
+        add: [SYS_ADMIN, NET_ADMIN, NET_RAW, SYS_PTRACE, BPF, PERFMON]
         drop: [ALL]
       allowPrivilegeEscalation: true
       appArmorProfile:

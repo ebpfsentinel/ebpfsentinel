@@ -14,8 +14,13 @@ RuntimeDirectoryMode=0755
 # The warden is the privileged half of the split deployment. It loads no eBPF and
 # holds no maps — it only answers the typed warden-proto RPC over the AF_UNIX
 # socket: it delegates a bpffs (CAP_SYS_ADMIN), reads/tears down conntrack and
-# programs routes (CAP_NET_ADMIN), and opens the AF_PACKET pcap pool + emits
-# gratuitous ARP (CAP_NET_RAW), all in the init network namespace.
+# programs routes (CAP_NET_ADMIN), opens the AF_PACKET pcap pool + emits
+# gratuitous ARP (CAP_NET_RAW), and attaches the DLP uprobe to a process's libssl
+# (CAP_SYS_PTRACE to reach /proc/<pid>/root, CAP_BPF + CAP_PERFMON for the link),
+# all in the init namespaces. It runs as root, so it holds these implicitly; the
+# token-only agent stays capability-less. On bare metal the warden and the agent
+# share the host PID namespace, so /proc already names every process — no
+# /host/proc bind-mount is needed (that is the containerized deployment's path).
 #
 # --uid 0: on bare-metal the agent runs as root and maps namespace-0 to real root,
 # so it presents uid 0 over SO_PEERCRED. Only that uid is served.

@@ -131,6 +131,17 @@ fn warden_sock_from_env() -> Option<std::path::PathBuf> {
         .filter(|p| !p.as_os_str().is_empty())
 }
 
+/// Host proc filesystem root used for cross-container DLP discovery. Defaults to
+/// `/proc`; set `EBPFSENTINEL_HOST_PROC` (e.g. `/host/proc`) when the host proc is
+/// bind-mounted into the agent container so it can resolve neighbouring
+/// containers' SSL libraries. A set-but-empty value is treated as unset.
+fn host_proc_root() -> std::path::PathBuf {
+    std::env::var_os("EBPFSENTINEL_HOST_PROC")
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::PathBuf::from("/proc"))
+}
+
 /// Build a capture-socket pool from the warden when the delegation handshake
 /// provisioned none and the agent runs against a warden (`EBPFSENTINEL_WARDEN_SOCK`
 /// set). The warden performs the privileged `socket(AF_PACKET)`; the agent rebinds
@@ -3819,12 +3830,13 @@ pub fn try_load_uprobe_dlp(
     let program_bytes = read_ebpf_program(ebpf_dir, "uprobe-dlp")?;
     let mut loader = EbpfLoader::load_with_pin_path(&program_bytes, pin_path)?;
 
-    // Attach to every SSL library mapped across processes/containers (resolved
-    // from each process's memory map and deduplicated by inode), so the DLP
-    // uprobe sees neighbouring containers' TLS, not only the agent's own. The
-    // attacher is handed to a lifecycle watcher below so probes track containers
-    // as they appear and disappear.
-    let mut attacher = adapters::ebpf::DlpUprobeAttacher::with_programs("/proc", &loader)?;
+    // Discover SSL libraries through the host proc root (`/host/proc` when the
+    // host proc is bind-mounted into the agent), so the DLP uprobe sees
+    // neighbouring containers' TLS, not only the agent's own. The same path is
+    // valid in the warden's namespace when the host proc is mounted there too, so
+    // a brokered attach needs no path translation.
+    let proc_root = host_proc_root();
+    let mut attacher = adapters::ebpf::DlpUprobeAttacher::with_programs(&proc_root, &loader)?;
     // Rootless posture: broker the privileged uprobe `BPF_LINK_CREATE` to the
     // warden, so container DLP works under `cap-drop: ALL`.
     if let Some(sock) = warden_sock_from_env() {
@@ -3837,7 +3849,7 @@ pub fn try_load_uprobe_dlp(
     // arms — the inode-wide probe fires once a process maps that library, and the
     // attachment is sticky so the watcher does not tear it down before then.
     if attached == 0
-        && let Some(ssl_path) = find_ssl_library_path()
+        && let Some(ssl_path) = find_ssl_library_path(&proc_root)
     {
         info!(library = %ssl_path, "no mapped SSL library found; attaching to system library");
         attacher.attach_fallback_path(&ssl_path)?;
@@ -3896,10 +3908,35 @@ fn register_module_btf_fds() {
     }
 }
 
-fn find_ssl_library_path() -> Option<String> {
+fn find_ssl_library_path(proc_root: &std::path::Path) -> Option<String> {
     use std::process::Command;
 
-    // Try ldconfig -p first (most reliable — gives full paths)
+    const SEARCH_DIRS: &[&str] = &[
+        "usr/lib/x86_64-linux-gnu",
+        "usr/lib/aarch64-linux-gnu",
+        "usr/lib64",
+        "usr/lib",
+        "lib/x86_64-linux-gnu",
+        "lib64",
+        "lib",
+    ];
+
+    // First search under the host init's root (`{proc_root}/1/root`). When the
+    // host proc is mounted, this is the host's library tree — and the same path
+    // is valid in the warden's namespace, so a brokered attach reaches it. Skipped
+    // silently when unreadable (e.g. no host proc, or insufficient access).
+    let host_root = proc_root.join("1").join("root");
+    for candidate in SSL_LIBRARY_CANDIDATES {
+        for dir in SEARCH_DIRS {
+            let path = host_root.join(dir).join(candidate);
+            if path.exists() {
+                return Some(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    // Then the agent's own rootfs: ldconfig (most reliable — gives full paths),
+    // then the bare directories. Used in the direct (non-brokered) posture.
     if let Ok(output) = Command::new("ldconfig").arg("-p").output() {
         let cache = String::from_utf8_lossy(&output.stdout);
         for candidate in SSL_LIBRARY_CANDIDATES {
@@ -3917,19 +3954,9 @@ fn find_ssl_library_path() -> Option<String> {
         }
     }
 
-    // Fallback: check common paths directly
-    let search_dirs = [
-        "/usr/lib/x86_64-linux-gnu",
-        "/usr/lib/aarch64-linux-gnu",
-        "/usr/lib64",
-        "/usr/lib",
-        "/lib/x86_64-linux-gnu",
-        "/lib64",
-        "/lib",
-    ];
     for candidate in SSL_LIBRARY_CANDIDATES {
-        for dir in &search_dirs {
-            let path = format!("{dir}/{candidate}");
+        for dir in SEARCH_DIRS {
+            let path = format!("/{dir}/{candidate}");
             if std::path::Path::new(&path).exists() {
                 return Some(path);
             }

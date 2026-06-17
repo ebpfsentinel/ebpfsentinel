@@ -51,16 +51,25 @@ services:
     # The warden programs the host network namespace (conntrack, routes, ARP) and
     # attaches to host interfaces.
     network_mode: host
+    # Share the host PID namespace so the warden reaches a neighbouring
+    # container's /proc/<pid>/root to attach the DLP uprobe against its libssl.
+    pid: host
     cap_drop: [ALL]
     cap_add:
       - SYS_ADMIN # bpffs delegation (FSCONFIG_CMD_CREATE), module BTF fds
       - NET_ADMIN # conntrack -D teardown, route programming
       - NET_RAW # AF_PACKET pcap sockets + gratuitous ARP
+      - SYS_PTRACE # read a neighbour container's /proc/<pid>/root (DLP)
+      - BPF # create the DLP uprobe BPF_LINK_CREATE
+      - PERFMON # uprobe attach (perf/tracing)
     security_opt:
       - apparmor=unconfined # delegation does fsconfig/move_mount
       - seccomp=unconfined # mount/bpf/netlink syscalls
     volumes:
       - warden-sock:/run/ebpfsentinel
+      # Read-only host /proc so the warden resolves the same
+      # /host/proc/<pid>/root/<lib> path the agent sends for a brokered uprobe.
+      - /proc:/host/proc:ro
     restart: unless-stopped
     logging:
       driver: json-file
@@ -78,9 +87,17 @@ services:
     command: ["--config", "/etc/ebpfsentinel/config.yaml"]
     environment:
       EBPFSENTINEL_WARDEN_SOCK: /run/ebpfsentinel/warden.sock
+      # Host proc root for cross-container DLP: the agent resolves neighbouring
+      # containers' libssl through this mounted host /proc.
+      EBPFSENTINEL_HOST_PROC: /host/proc
     # XDP/TC programs attach to host interfaces; bind_address in config controls
     # which host IP the API listens on.
     network_mode: host
+    # Share the host PID namespace for cross-container TLS DLP (see the warden).
+    # SECURITY NOTE: this lets the agent see every process on the host — the
+    # irreducible cost of node-wide DLP. Drop `pid: host` to scope DLP to the
+    # agent's own container.
+    pid: host
     user: "65534:65534"
     cap_drop: [ALL] # the warden holds every host capability
     security_opt:
@@ -109,6 +126,9 @@ services:
       # this the resolution fails. Matches container.resolver.cgroup_root
       # (default /sys/fs/cgroup). Same pattern as node-exporter.
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      # Read-only host /proc (EBPFSENTINEL_HOST_PROC) so the agent resolves every
+      # node process's libssl for cross-container TLS DLP.
+      - /proc:/host/proc:ro
       # The warden's control socket (read-only — the agent only connects).
       - warden-sock:/run/ebpfsentinel:ro
       # Persistent data: audit logs, alerts, rule change history (redb)
