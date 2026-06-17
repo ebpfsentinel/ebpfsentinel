@@ -15,7 +15,7 @@ use std::ptr;
 use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
 
 use crate::host_ops::HostOps;
-use crate::{delegate_over_fd, net_ops, recv_fd, send_msg_fds};
+use crate::{delegate_over_fd, net_ops, recv_fd, send_msg_fds, uprobe_ops};
 
 /// Serve agent connections on `listener` forever, handing out the `btf` / `pcap`
 /// fds on delegation and brokering the host-network ops via `host`. Only a peer
@@ -148,6 +148,14 @@ fn handle_conn(conn: UnixStream, btf: &[(String, RawFd)], pcap: &[RawFd], host: 
                 }
             }
             Command::Delegate => serve_delegate(&mut writer, btf, pcap),
+            // `AttachUprobe` answers out-of-band: it first receives the agent's
+            // program fd over `SCM_RIGHTS`, creates the link, then replies
+            // `FdReady` + the link fd (or a typed `Error`).
+            Command::AttachUprobe {
+                path,
+                offset,
+                is_ret,
+            } => serve_attach_uprobe(&mut writer, path, *offset, *is_ret),
             other => write_frame(&mut writer, &dispatch(other, host)).is_ok(),
         };
         if !ok {
@@ -214,6 +222,34 @@ fn serve_delegate(writer: &mut UnixStream, btf: &[(String, RawFd)], pcap: &[RawF
     let mut fds: Vec<RawFd> = btf.iter().map(|(_, fd)| *fd).collect();
     fds.extend_from_slice(pcap);
     send_msg_fds(writer.as_raw_fd(), &[0u8], &fds)
+}
+
+/// Serve an `AttachUprobe`: receive the agent's program fd (sent in an
+/// `SCM_RIGHTS` cmsg right after the command frame), create the `uprobe_multi`
+/// link, then reply `FdReady` + the link fd. The warden closes its own copy of
+/// both the program fd and the link fd — the link fd is dup'd into the agent by
+/// `SCM_RIGHTS` and the link keeps the program alive — so neither leaks.
+fn serve_attach_uprobe(writer: &mut UnixStream, path: &str, offset: u64, is_ret: bool) -> bool {
+    let prog_fd = recv_fd(writer.as_raw_fd());
+    if prog_fd < 0 {
+        return write_frame(
+            writer,
+            &Response::Error {
+                message: "no program fd received for uprobe attach".into(),
+            },
+        )
+        .is_ok();
+    }
+    let result = uprobe_ops::attach_uprobe_link(prog_fd, path, offset, is_ret);
+    unsafe { libc::close(prog_fd) };
+    match result {
+        Ok(link) => {
+            let ok = serve_passed_fd(writer, Ok(link));
+            unsafe { libc::close(link) };
+            ok
+        }
+        Err(message) => serve_passed_fd(writer, Err(message)),
+    }
 }
 
 /// Map a request to a response. The conntrack read and the host-network ops go to

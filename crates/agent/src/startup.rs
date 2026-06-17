@@ -3825,6 +3825,11 @@ pub fn try_load_uprobe_dlp(
     // attacher is handed to a lifecycle watcher below so probes track containers
     // as they appear and disappear.
     let mut attacher = adapters::ebpf::DlpUprobeAttacher::with_programs("/proc", &loader)?;
+    // Rootless posture: broker the privileged uprobe `BPF_LINK_CREATE` to the
+    // warden, so container DLP works under `cap-drop: ALL`.
+    if let Some(sock) = warden_sock_from_env() {
+        attacher = attacher.with_warden_socket(sock);
+    }
     let mut attached = attacher.reconcile().attached;
 
     // Fallback: no process maps an SSL library yet (e.g. the agent starts before

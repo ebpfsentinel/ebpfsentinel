@@ -137,6 +137,10 @@ pub struct DlpUprobeAttacher {
     /// Raw fds of the DLP uprobe programs, aligned with [`SSL_UPROBES`]. Valid
     /// for the life of the owning [`EbpfLoader`]; `-1` for a scan-only attacher.
     fds: [RawFd; SSL_UPROBES.len()],
+    /// Warden control socket. When set (rootless posture), the privileged
+    /// `BPF_LINK_CREATE` is brokered to the warden; when `None`, the agent
+    /// attaches directly (bare-metal / single privileged container).
+    warden_sock: Option<PathBuf>,
     /// Currently-attached libraries keyed by `(dev, ino)` — dedup, idempotency,
     /// and the owning handle whose drop detaches.
     attached: HashMap<(u64, u64), Attachment>,
@@ -149,6 +153,7 @@ impl DlpUprobeAttacher {
         Self {
             proc_root: proc_root.into(),
             fds: [-1; SSL_UPROBES.len()],
+            warden_sock: None,
             attached: HashMap::new(),
         }
     }
@@ -168,8 +173,18 @@ impl DlpUprobeAttacher {
         Ok(Self {
             proc_root: proc_root.into(),
             fds,
+            warden_sock: None,
             attached: HashMap::new(),
         })
+    }
+
+    /// Route the privileged `BPF_LINK_CREATE` through the warden at `sock`. Set in
+    /// the rootless posture where the agent dropped the tracing capability; the
+    /// agent still resolves the symbol offset itself (a plain ELF read).
+    #[must_use]
+    pub fn with_warden_socket(mut self, sock: impl Into<PathBuf>) -> Self {
+        self.warden_sock = Some(sock.into());
+        self
     }
 
     /// Number of distinct SSL libraries currently attached.
@@ -329,7 +344,24 @@ impl DlpUprobeAttacher {
             .ok_or_else(|| anyhow::anyhow!("non-UTF-8 library path"))?;
         let mut links = Vec::with_capacity(SSL_UPROBES.len());
         for (i, (prog, sym, is_ret)) in SSL_UPROBES.iter().enumerate() {
-            let link = kfunc_attach::attach_uprobe_raw(prog, self.fds[i], path, sym, *is_ret)?;
+            let link = match &self.warden_sock {
+                // Rootless: resolve the offset here (a plain ELF read), then let
+                // the warden — which holds the tracing capability — create the
+                // link and pass back its fd.
+                Some(sock) => {
+                    let offset = kfunc_attach::resolve_symbol_offset(path, sym)?;
+                    crate::warden::uprobe::attach_via_warden(
+                        sock,
+                        self.fds[i],
+                        path,
+                        offset,
+                        *is_ret,
+                    )?
+                }
+                // Direct: the agent creates the link itself (bare-metal / single
+                // privileged container).
+                None => kfunc_attach::attach_uprobe_raw(prog, self.fds[i], path, sym, *is_ret)?,
+            };
             links.push(link);
         }
         Ok(links)

@@ -136,6 +136,38 @@ impl WardenClient {
             other => Err(unexpected("PcapOpen", &other)),
         }
     }
+
+    /// Ask the warden to attach a `uprobe_multi` link at `offset` within the ELF
+    /// at `path`, binding the agent's `prog_fd` (handed to the warden over
+    /// `SCM_RIGHTS`). `is_ret` selects a uretprobe. Returns the link fd; the agent
+    /// owns it and dropping it detaches. The warden holds the tracing capability
+    /// and resolves `path` in its own namespaces, so a rootless agent can probe a
+    /// neighbouring container's `libssl` under `cap-drop: ALL`.
+    #[cfg(feature = "fd-pass")]
+    pub fn attach_uprobe(
+        &mut self,
+        path: &str,
+        offset: u64,
+        is_ret: bool,
+        prog_fd: std::os::fd::RawFd,
+    ) -> io::Result<std::os::fd::OwnedFd> {
+        use std::os::fd::AsRawFd;
+        write_frame(
+            &mut self.stream,
+            &Command::AttachUprobe {
+                path: path.to_owned(),
+                offset,
+                is_ret,
+            },
+        )?;
+        // The program fd rides in an `SCM_RIGHTS` cmsg right after the frame, the
+        // mirror of the warden's `Delegate` fs-fd hand-off.
+        fd_pass::send_one_fd(self.stream.as_raw_fd(), prog_fd)?;
+        match read_frame::<_, Response>(&mut self.stream)? {
+            Response::FdReady => fd_pass::recv_one_fd(&self.stream),
+            other => Err(unexpected("AttachUprobe", &other)),
+        }
+    }
 }
 
 /// Was an error caused by the warden's connection going away (so a reconnect is
@@ -243,6 +275,19 @@ impl ReconnectingClient {
     pub fn pcap_open(&mut self, iface: &str, filter: &str) -> io::Result<std::os::fd::OwnedFd> {
         self.with_retry(|c| c.pcap_open(iface, filter))
     }
+
+    /// Attach a uprobe through the warden, reconnecting if it bounced. `prog_fd`
+    /// is the same descriptor on a retry, so the call is replayable.
+    #[cfg(feature = "fd-pass")]
+    pub fn attach_uprobe(
+        &mut self,
+        path: &str,
+        offset: u64,
+        is_ret: bool,
+        prog_fd: std::os::fd::RawFd,
+    ) -> io::Result<std::os::fd::OwnedFd> {
+        self.with_retry(|c| c.attach_uprobe(path, offset, is_ret, prog_fd))
+    }
 }
 
 /// `SCM_RIGHTS` fd receive — the sole `unsafe`/`libc` in this crate, compiled only
@@ -254,6 +299,43 @@ mod fd_pass {
     use std::os::fd::{FromRawFd, OwnedFd, RawFd};
     use std::os::unix::net::UnixStream;
     use std::ptr;
+
+    /// Send exactly one fd alongside a single sentinel byte — the wire shape the
+    /// warden expects for an inbound fd (mirrors its `Delegate` fs-fd receive).
+    pub fn send_one_fd(sock: RawFd, fd: RawFd) -> io::Result<()> {
+        let mut byte = [0u8; 1];
+        let mut iov = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: byte.len(),
+        };
+        // SAFETY: a zeroed `msghdr` is a valid header; the control buffer is sized
+        // for exactly one fd via `CMSG_SPACE`.
+        let mut cbuf = [0u8; unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) } as usize];
+        let mut msg: libc::msghdr = unsafe { mem::zeroed() };
+        msg.msg_iov = ptr::from_mut(&mut iov);
+        msg.msg_iovlen = 1;
+        msg.msg_control = cbuf.as_mut_ptr().cast();
+        msg.msg_controllen = cbuf.len() as _;
+        // SAFETY: `cmsg` points into the valid `cbuf` local; we fill exactly one
+        // `SCM_RIGHTS` header carrying `fd`.
+        unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(ptr::from_ref(&msg));
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(mem::size_of::<RawFd>() as u32) as _;
+            ptr::copy_nonoverlapping(
+                ptr::from_ref(&fd).cast(),
+                libc::CMSG_DATA(cmsg),
+                mem::size_of::<RawFd>(),
+            );
+        }
+        // SAFETY: `msg` points at the valid `iov`/`cbuf` locals above.
+        let n = unsafe { libc::sendmsg(sock, ptr::from_ref(&msg), 0) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 
     /// Receive exactly one fd, sent by the warden alongside a single sentinel byte.
     pub fn recv_one_fd(stream: &UnixStream) -> io::Result<OwnedFd> {

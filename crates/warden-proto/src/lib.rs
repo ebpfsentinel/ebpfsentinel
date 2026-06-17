@@ -108,6 +108,25 @@ pub enum Command {
         /// cBPF/tcpdump filter expression.
         filter: String,
     },
+    /// Attach a uprobe (`is_ret` = uretprobe) at `offset` within the ELF at
+    /// `path`, binding the eBPF program whose fd rides in the accompanying
+    /// `SCM_RIGHTS` cmsg (sent right after this frame). The warden creates the
+    /// `uprobe_multi` `BPF_LINK_CREATE` — it holds the tracing capability the
+    /// rootless agent dropped, and resolves `path` in its own (init) mount + pid
+    /// namespace — then returns the link fd via [`Response::FdReady`]. This lets
+    /// the agent probe a neighbouring container's `libssl` under `cap-drop: ALL`.
+    /// The program fd is the agent's own verified eBPF object, and the kernel
+    /// rejects a program whose type does not match a uprobe link, so the warden
+    /// cannot be coerced into attaching an arbitrary program.
+    AttachUprobe {
+        /// Absolute path to the target ELF (e.g.
+        /// `/proc/<pid>/root/usr/lib/libssl.so.3`).
+        path: String,
+        /// File offset of the symbol to probe.
+        offset: u64,
+        /// `true` for a uretprobe (fires on function return).
+        is_ret: bool,
+    },
 }
 
 /// A reply from the warden to the agent.
@@ -215,6 +234,11 @@ mod tests {
             Command::PcapOpen {
                 iface: "enp0s2".into(),
                 filter: "tcp port 443".into(),
+            },
+            Command::AttachUprobe {
+                path: "/proc/4242/root/usr/lib/libssl.so.3".into(),
+                offset: 0x1234,
+                is_ret: true,
             },
         ]
     }

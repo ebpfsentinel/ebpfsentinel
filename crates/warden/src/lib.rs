@@ -45,6 +45,7 @@ use std::ptr;
 pub mod host_ops;
 pub mod net_ops;
 pub mod server;
+pub mod uprobe_ops;
 pub mod userns_bootstrap;
 
 // `bpf(2)` command numbers (uapi/linux/bpf.h `enum bpf_cmd`).
@@ -106,7 +107,7 @@ struct BpfBtfInfo {
     kernel_btf: u32,
 }
 
-unsafe fn bpf(cmd: libc::c_int, attr: *mut libc::c_void, size: usize) -> libc::c_long {
+pub(crate) unsafe fn bpf(cmd: libc::c_int, attr: *mut libc::c_void, size: usize) -> libc::c_long {
     // SAFETY: caller passes a valid `bpf_attr` region of `size` bytes.
     unsafe { libc::syscall(libc::SYS_bpf, cmd, attr, size as libc::c_uint) }
 }

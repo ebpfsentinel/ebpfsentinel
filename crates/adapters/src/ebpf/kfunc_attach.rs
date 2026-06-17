@@ -327,7 +327,7 @@ pub fn attach_uprobe_raw(
 /// Resolve a symbol name to its file offset within an ELF binary / shared
 /// object — the offset the `uprobe_multi` link expects. Prefers the dynamic
 /// symbol table (exported functions), falling back to the static one.
-fn resolve_symbol_offset(target: &str, symbol: &str) -> Result<u64, KfuncAttachError> {
+pub fn resolve_symbol_offset(target: &str, symbol: &str) -> Result<u64, KfuncAttachError> {
     let err = |message: String| KfuncAttachError::UprobeSymbol {
         target: target.to_owned(),
         symbol: symbol.to_owned(),
