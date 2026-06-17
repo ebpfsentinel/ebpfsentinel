@@ -1,4 +1,4 @@
-//! Container-aware DLP uprobe target discovery and attach.
+//! Container-aware DLP uprobe target discovery, attach, and lifecycle.
 //!
 //! TLS plaintext only exists inside a userspace `libssl`/`BoringSSL`, so DLP is a
 //! uprobe on `SSL_write`/`SSL_read`. A uprobe fires only for processes that map
@@ -8,14 +8,28 @@
 //! (parsing `/proc/<pid>/maps`), deduplicates by `(dev, ino)` so processes that
 //! share a file — e.g. pods of the same image over a shared overlayfs lower
 //! layer — get a single probe set, and attaches the uprobes per unique inode.
+//!
+//! Containers come and go, so the attach is not one-shot: [`DlpUprobeAttacher`]
+//! holds the link fds keyed by `(dev, ino)` and a [`watch`](DlpUprobeAttacher::watch)
+//! loop polls periodically, attaching probes to libraries newly mapped by any
+//! process and detaching a library's probes once no process maps it any more.
+//! The poll/diff/`CancellationToken` shape mirrors the netkit device watcher.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::os::fd::{OwnedFd, RawFd};
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::time::Duration;
 
-use tracing::{debug, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
 
+use super::kfunc_attach;
 use super::loader::EbpfLoader;
+
+/// Poll interval of the DLP target watcher. Container lifecycle events do not
+/// need sub-second reaction; this matches the netkit device watcher cadence.
+pub const DLP_ATTACH_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// SSL library basename markers whose mappings export `SSL_write`/`SSL_read`.
 /// OpenSSL exports them from `libssl`; `BoringSSL` from `libssl`/`libboringssl`.
@@ -45,6 +59,26 @@ pub struct UprobeTarget {
     pub ino: u64,
 }
 
+/// The uprobe links attached to one SSL library inode, held for their lifetime
+/// (dropping the fds detaches the probes).
+struct Attachment {
+    /// Owned uprobe link fds — one per [`SSL_UPROBES`] entry.
+    links: Vec<OwnedFd>,
+    /// Sticky attachments survive a reconcile even when no process maps the
+    /// inode. The cold-start system-library fallback is sticky so its probe
+    /// stays armed before any workload maps the library.
+    sticky: bool,
+}
+
+/// Outcome of one [`DlpUprobeAttacher::reconcile`] pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReconcileOutcome {
+    /// SSL libraries newly attached this pass.
+    pub attached: usize,
+    /// SSL libraries detached this pass (no process maps them any more).
+    pub detached: usize,
+}
+
 /// Extract the distinct in-container absolute paths of mapped SSL libraries from
 /// the contents of a `/proc/<pid>/maps` file.
 fn ssl_paths_in_maps(maps: &str) -> BTreeSet<String> {
@@ -67,29 +101,75 @@ fn ssl_paths_in_maps(maps: &str) -> BTreeSet<String> {
     out
 }
 
+/// `(inodes_to_attach, inodes_to_detach)` — the result of one reconcile diff,
+/// each inode keyed by `(dev, ino)`.
+type ReconcilePlan = (Vec<(u64, u64)>, Vec<(u64, u64)>);
+
+/// Split the live and attached inode sets into the inodes to attach (live, not
+/// yet attached) and the inodes to detach (attached, non-sticky, no longer
+/// live). Pure set algebra, factored out so the lifecycle diff is unit-testable
+/// without issuing any BPF syscall.
+fn plan_reconcile(
+    live: &BTreeSet<(u64, u64)>,
+    attached: &BTreeMap<(u64, u64), bool>,
+) -> ReconcilePlan {
+    let to_attach = live
+        .iter()
+        .filter(|k| !attached.contains_key(k))
+        .copied()
+        .collect();
+    let to_detach = attached
+        .iter()
+        .filter(|&(k, &sticky)| !sticky && !live.contains(k))
+        .map(|(k, _)| *k)
+        .collect();
+    (to_attach, to_detach)
+}
+
 /// Discovers SSL libraries mapped across processes and attaches the DLP uprobe
-/// set once per unique `(dev, ino)`. Holds the dedup/idempotency set so repeated
-/// passes (the lifecycle watcher) never double-attach a library already covered.
+/// set once per unique `(dev, ino)`, then keeps that set in step with the live
+/// process population. Holds the link fds so a library's probes can be detached
+/// when it is no longer mapped.
 pub struct DlpUprobeAttacher {
     /// Proc filesystem root (`/proc`, or `/host/proc` when the host proc is
     /// bind-mounted into the agent container).
     proc_root: PathBuf,
-    /// `(dev, ino)` of libraries already attached — dedup + idempotency set.
-    attached: HashSet<(u64, u64)>,
+    /// Raw fds of the DLP uprobe programs, aligned with [`SSL_UPROBES`]. Valid
+    /// for the life of the owning [`EbpfLoader`]; `-1` for a scan-only attacher.
+    fds: [RawFd; SSL_UPROBES.len()],
+    /// Currently-attached libraries keyed by `(dev, ino)` — dedup, idempotency,
+    /// and the owning handle whose drop detaches.
+    attached: HashMap<(u64, u64), Attachment>,
 }
 
 impl DlpUprobeAttacher {
-    /// Build an attacher over an explicit proc root.
+    /// Build a scan-only attacher over an explicit proc root. The uprobe program
+    /// fds are unset, so it can discover targets but not attach — used in tests.
     pub fn new(proc_root: impl Into<PathBuf>) -> Self {
         Self {
             proc_root: proc_root.into(),
-            attached: HashSet::new(),
+            fds: [-1; SSL_UPROBES.len()],
+            attached: HashMap::new(),
         }
     }
 
-    /// Build an attacher over the default `/proc`.
-    pub fn with_default_proc() -> Self {
-        Self::new(Path::new("/proc"))
+    /// Build an attacher bound to the DLP uprobe programs of `loader`, resolving
+    /// each program's fd up front. Fails if a program was not loaded.
+    pub fn with_programs(
+        proc_root: impl Into<PathBuf>,
+        loader: &EbpfLoader,
+    ) -> anyhow::Result<Self> {
+        let mut fds: [RawFd; SSL_UPROBES.len()] = [-1; SSL_UPROBES.len()];
+        for (i, (prog, _, _)) in SSL_UPROBES.iter().enumerate() {
+            fds[i] = loader.program_fd(prog).ok_or_else(|| {
+                anyhow::anyhow!("DLP uprobe program '{prog}' was not loaded through the BPF token")
+            })?;
+        }
+        Ok(Self {
+            proc_root: proc_root.into(),
+            fds,
+            attached: HashMap::new(),
+        })
     }
 
     /// Number of distinct SSL libraries currently attached.
@@ -97,10 +177,11 @@ impl DlpUprobeAttacher {
         self.attached.len()
     }
 
-    /// Resolve every distinct, not-yet-attached SSL library mapped by any process
-    /// under `proc_root`, deduplicated by `(dev, ino)` against the attached set.
-    fn discover_new_targets(&self) -> Vec<UprobeTarget> {
-        let mut seen: HashSet<(u64, u64)> = self.attached.clone();
+    /// Resolve every distinct SSL library currently mapped by any process under
+    /// `proc_root`, deduplicated by `(dev, ino)` within the pass. Returns the
+    /// full live set (not just new libraries) so the reconcile can also detach.
+    fn scan_live_targets(&self) -> Vec<UprobeTarget> {
+        let mut seen: HashSet<(u64, u64)> = HashSet::new();
         let mut targets = Vec::new();
 
         let Ok(entries) = std::fs::read_dir(&self.proc_root) else {
@@ -133,7 +214,7 @@ impl DlpUprobeAttacher {
                 };
                 let key = (meta.dev(), meta.ino());
                 if !seen.insert(key) {
-                    continue; // already attached, or already queued this pass
+                    continue; // same inode already collected this pass
                 }
                 let base = lib.rsplit('/').next().unwrap_or(&lib).to_owned();
                 targets.push(UprobeTarget {
@@ -147,21 +228,53 @@ impl DlpUprobeAttacher {
         targets
     }
 
-    /// Discover and attach the DLP uprobe set to every new SSL library. Returns
-    /// the count of libraries newly attached. Per-library failures are logged and
-    /// skipped so one bad library never blocks the rest.
-    pub fn attach_new(&mut self, loader: &mut EbpfLoader) -> usize {
+    /// One lifecycle pass: attach the DLP uprobe set to SSL libraries newly
+    /// mapped by any process, and detach a library's probes once no process maps
+    /// it any more (sticky fallback attachments excluded). Per-library attach
+    /// failures are logged and skipped so one bad library never blocks the rest.
+    pub fn reconcile(&mut self) -> ReconcileOutcome {
+        let live_map: BTreeMap<(u64, u64), UprobeTarget> = self
+            .scan_live_targets()
+            .into_iter()
+            .map(|t| ((t.dev, t.ino), t))
+            .collect();
+        let live_keys: BTreeSet<(u64, u64)> = live_map.keys().copied().collect();
+        let attached_sticky: BTreeMap<(u64, u64), bool> =
+            self.attached.iter().map(|(k, a)| (*k, a.sticky)).collect();
+
+        let (to_attach, to_detach) = plan_reconcile(&live_keys, &attached_sticky);
+
+        for k in &to_detach {
+            if let Some(att) = self.attached.remove(k) {
+                debug!(
+                    dev = k.0,
+                    ino = k.1,
+                    links = att.links.len(),
+                    "DLP uprobe detached (SSL library no longer mapped)"
+                );
+            }
+        }
+
         let mut attached = 0usize;
-        for t in self.discover_new_targets() {
-            match Self::attach_target(loader, &t) {
-                Ok(()) => {
-                    self.attached.insert((t.dev, t.ino));
+        for k in to_attach {
+            let Some(t) = live_map.get(&k) else {
+                continue;
+            };
+            match self.attach_target_links(t) {
+                Ok(links) => {
+                    self.attached.insert(
+                        k,
+                        Attachment {
+                            links,
+                            sticky: false,
+                        },
+                    );
                     attached += 1;
                     debug!(
                         lib = %t.lib,
                         path = %t.attach_path.display(),
-                        dev = t.dev,
-                        ino = t.ino,
+                        dev = k.0,
+                        ino = k.1,
                         "DLP uprobe attached to SSL library"
                     );
                 }
@@ -173,27 +286,87 @@ impl DlpUprobeAttacher {
                 ),
             }
         }
-        attached
+
+        ReconcileOutcome {
+            attached,
+            detached: to_detach.len(),
+        }
     }
 
-    /// Attach the SSL uprobe set to one explicit library path. Used for the
-    /// system-library fallback when no process maps an SSL library yet; bypasses
-    /// inode dedup.
-    pub fn attach_path(loader: &mut EbpfLoader, path: &str) -> anyhow::Result<()> {
-        for (prog, sym, is_ret) in SSL_UPROBES {
-            loader.attach_uprobe(prog, sym, path, *is_ret)?;
-        }
+    /// Attach the DLP uprobe set to one explicit library path as a **sticky**
+    /// attachment. Used for the cold-start fallback when no process maps an SSL
+    /// library yet; the inode-wide probe arms and fires once a process maps the
+    /// library, and the sticky flag keeps a later reconcile from tearing it down.
+    pub fn attach_fallback_path(&mut self, path: &str) -> anyhow::Result<()> {
+        let meta = std::fs::metadata(path)
+            .map_err(|e| anyhow::anyhow!("stat fallback SSL library '{path}': {e}"))?;
+        let key = (meta.dev(), meta.ino());
+        let base = path.rsplit('/').next().unwrap_or(path).to_owned();
+        let target = UprobeTarget {
+            attach_path: PathBuf::from(path),
+            lib: base,
+            dev: key.0,
+            ino: key.1,
+        };
+        let links = self.attach_target_links(&target)?;
+        self.attached.insert(
+            key,
+            Attachment {
+                links,
+                sticky: true,
+            },
+        );
         Ok(())
     }
 
     /// Attach the full SSL uprobe set (`SSL_write`, `SSL_read` entry + ret) to one
-    /// resolved target.
-    fn attach_target(loader: &mut EbpfLoader, t: &UprobeTarget) -> anyhow::Result<()> {
+    /// resolved target, returning the owned link fds. A partial failure drops the
+    /// links already created, detaching them, so no half-attached set lingers.
+    fn attach_target_links(&self, t: &UprobeTarget) -> anyhow::Result<Vec<OwnedFd>> {
         let path = t
             .attach_path
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("non-UTF-8 library path"))?;
-        Self::attach_path(loader, path)
+        let mut links = Vec::with_capacity(SSL_UPROBES.len());
+        for (i, (prog, sym, is_ret)) in SSL_UPROBES.iter().enumerate() {
+            let link = kfunc_attach::attach_uprobe_raw(prog, self.fds[i], path, sym, *is_ret)?;
+            links.push(link);
+        }
+        Ok(links)
+    }
+
+    /// Long-running watcher: reconcile the attached SSL library set every
+    /// `poll_interval` until `cancel` fires. Attaches probes to libraries newly
+    /// mapped by appearing containers and detaches them on teardown. Consumes the
+    /// attacher; on cancellation the held link fds drop and every probe detaches.
+    pub async fn watch(mut self, poll_interval: Duration, cancel: CancellationToken) {
+        info!(
+            initial_targets = self.attached_count(),
+            poll_secs = poll_interval.as_secs(),
+            "DLP uprobe target watcher started"
+        );
+        let mut ticker = tokio::time::interval(poll_interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    debug!("DLP uprobe target watcher cancelled");
+                    break;
+                }
+                _ = ticker.tick() => {
+                    let outcome = self.reconcile();
+                    if outcome.attached > 0 || outcome.detached > 0 {
+                        info!(
+                            attached = outcome.attached,
+                            detached = outcome.detached,
+                            total = self.attached_count(),
+                            "DLP uprobe targets reconciled"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -246,16 +419,16 @@ mod tests {
     }
 
     #[test]
-    fn missing_lib_proc_root_discovers_nothing() {
+    fn missing_lib_proc_root_scans_nothing() {
         // Pointing at a proc root with no SSL-mapping processes returns no targets.
         let dir = tempfile::tempdir().unwrap();
         let attacher = DlpUprobeAttacher::new(dir.path());
-        assert!(attacher.discover_new_targets().is_empty());
+        assert!(attacher.scan_live_targets().is_empty());
         assert_eq!(attacher.attached_count(), 0);
     }
 
     #[test]
-    fn discovers_target_from_synthetic_proc() {
+    fn scans_target_from_synthetic_proc() {
         use std::fs;
         // Build a fake proc: /<tmp>/1234/{maps,root/lib/libssl.so.3}
         let dir = tempfile::tempdir().unwrap();
@@ -271,7 +444,7 @@ mod tests {
         .unwrap();
 
         let attacher = DlpUprobeAttacher::new(dir.path());
-        let targets = attacher.discover_new_targets();
+        let targets = attacher.scan_live_targets();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].lib, "libssl.so.3");
         assert_eq!(targets[0].attach_path, lib);
@@ -296,6 +469,38 @@ mod tests {
             .unwrap();
         }
         let attacher = DlpUprobeAttacher::new(dir.path());
-        assert_eq!(attacher.discover_new_targets().len(), 1);
+        assert_eq!(attacher.scan_live_targets().len(), 1);
+    }
+
+    #[test]
+    fn plan_reconcile_attaches_new_and_detaches_vanished() {
+        let live: BTreeSet<(u64, u64)> = [(1, 10), (1, 20)].into_iter().collect();
+        // (1,30) was attached but is no longer live → detach; (1,10) stays;
+        // (1,20) is new → attach.
+        let attached: BTreeMap<(u64, u64), bool> =
+            [((1, 10), false), ((1, 30), false)].into_iter().collect();
+        let (to_attach, to_detach) = plan_reconcile(&live, &attached);
+        assert_eq!(to_attach, vec![(1, 20)]);
+        assert_eq!(to_detach, vec![(1, 30)]);
+    }
+
+    #[test]
+    fn plan_reconcile_keeps_sticky_when_not_live() {
+        // A sticky fallback inode no process maps must NOT be detached.
+        let live: BTreeSet<(u64, u64)> = BTreeSet::new();
+        let attached: BTreeMap<(u64, u64), bool> = [((1, 99), true)].into_iter().collect();
+        let (to_attach, to_detach) = plan_reconcile(&live, &attached);
+        assert!(to_attach.is_empty());
+        assert!(to_detach.is_empty());
+    }
+
+    #[test]
+    fn plan_reconcile_stable_set_is_noop() {
+        let live: BTreeSet<(u64, u64)> = [(1, 10), (1, 20)].into_iter().collect();
+        let attached: BTreeMap<(u64, u64), bool> =
+            [((1, 10), false), ((1, 20), false)].into_iter().collect();
+        let (to_attach, to_detach) = plan_reconcile(&live, &attached);
+        assert!(to_attach.is_empty());
+        assert!(to_detach.is_empty());
     }
 }

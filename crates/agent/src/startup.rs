@@ -1951,10 +1951,20 @@ pub async fn run(
         // 10f. Uprobe DLP
         dlp_ok = if config.dlp.enabled {
             match try_load_uprobe_dlp(&ebpf_dir, &config, DLP_PIN_PATH) {
-                Ok((loader, dlp_rdr, reader)) => {
+                Ok((loader, dlp_rdr, reader, attacher)) => {
                     let event_tx_clone = event_tx.clone();
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, CancellationToken::new()).await;
+                    });
+                    // Lifecycle watcher: attach SSL uprobes to containers as they
+                    // appear and detach them on teardown.
+                    tokio::spawn(async move {
+                        attacher
+                            .watch(
+                                adapters::ebpf::DLP_ATTACH_POLL_INTERVAL,
+                                CancellationToken::new(),
+                            )
+                            .await;
                     });
                     if let Some(rdr) = dlp_rdr {
                         metrics_readers.push(rdr);
@@ -3800,24 +3810,32 @@ pub fn try_load_uprobe_dlp(
     ebpf_dir: &str,
     _config: &AgentConfig,
     pin_path: &str,
-) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>, DlpEventReader)> {
+) -> anyhow::Result<(
+    EbpfLoader,
+    Option<MetricsReader>,
+    DlpEventReader,
+    adapters::ebpf::DlpUprobeAttacher,
+)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "uprobe-dlp")?;
     let mut loader = EbpfLoader::load_with_pin_path(&program_bytes, pin_path)?;
 
     // Attach to every SSL library mapped across processes/containers (resolved
     // from each process's memory map and deduplicated by inode), so the DLP
-    // uprobe sees neighbouring containers' TLS, not only the agent's own.
-    let mut attacher = adapters::ebpf::DlpUprobeAttacher::with_default_proc();
-    let mut attached = attacher.attach_new(&mut loader);
+    // uprobe sees neighbouring containers' TLS, not only the agent's own. The
+    // attacher is handed to a lifecycle watcher below so probes track containers
+    // as they appear and disappear.
+    let mut attacher = adapters::ebpf::DlpUprobeAttacher::with_programs("/proc", &loader)?;
+    let mut attached = attacher.reconcile().attached;
 
     // Fallback: no process maps an SSL library yet (e.g. the agent starts before
     // any TLS workload). Attach to a system library so single-host capture still
-    // arms — the inode-wide probe fires once a process maps that library.
+    // arms — the inode-wide probe fires once a process maps that library, and the
+    // attachment is sticky so the watcher does not tear it down before then.
     if attached == 0
         && let Some(ssl_path) = find_ssl_library_path()
     {
         info!(library = %ssl_path, "no mapped SSL library found; attaching to system library");
-        adapters::ebpf::DlpUprobeAttacher::attach_path(&mut loader, &ssl_path)?;
+        attacher.attach_fallback_path(&ssl_path)?;
         attached = 1;
     }
 
@@ -3835,7 +3853,7 @@ pub fn try_load_uprobe_dlp(
     let reader = DlpEventReader::new(loader.ebpf_mut())?;
 
     info!(libraries = attached, "uprobe-dlp attached");
-    Ok((loader, dlp_metrics_rdr, reader))
+    Ok((loader, dlp_metrics_rdr, reader, attacher))
 }
 
 /// Search for a usable SSL/TLS shared library on the system.

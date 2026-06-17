@@ -695,11 +695,21 @@ pub async fn load_ebpf_programs(
     // ── Uprobe DLP ──────────────────────────────────────────────
     let dlp_ok = if config.dlp.enabled {
         match startup::try_load_uprobe_dlp(&ebpf_dir, config, startup::DLP_PIN_PATH) {
-            Ok((mut loader, dlp_rdr, reader)) => {
+            Ok((mut loader, dlp_rdr, reader, attacher)) => {
                 let event_tx_clone = event_tx.clone();
                 tokio::spawn(
                     async move { reader.run(event_tx_clone, CancellationToken::new()).await },
                 );
+                // Lifecycle watcher: attach SSL uprobes to containers as they
+                // appear and detach them on teardown.
+                tokio::spawn(async move {
+                    attacher
+                        .watch(
+                            adapters::ebpf::DLP_ATTACH_POLL_INTERVAL,
+                            CancellationToken::new(),
+                        )
+                        .await;
+                });
                 if let Some(rdr) = dlp_rdr {
                     metrics_readers.push(rdr);
                 }

@@ -306,33 +306,6 @@ impl EbpfLoader {
         Ok(())
     }
 
-    /// Attach a uprobe or uretprobe to a function in a userspace binary.
-    pub fn attach_uprobe(
-        &mut self,
-        program_name: &str,
-        fn_name: &str,
-        target: &str,
-        is_ret_probe: bool,
-    ) -> Result<(), anyhow::Error> {
-        // The token loader already issued BPF_PROG_LOAD, so attach the captured
-        // fd through the kernel uprobe PMU.
-        if let Some(prog_fd) = self.kfunc_progs.get(program_name) {
-            let link = kfunc_attach::attach_uprobe_raw(
-                program_name,
-                prog_fd.as_raw_fd(),
-                target,
-                fn_name,
-                is_ret_probe,
-            )?;
-            self.kfunc_links.push(link);
-            return Ok(());
-        }
-
-        Err(anyhow::anyhow!(
-            "uprobe program '{program_name}' was not loaded through the BPF token"
-        ))
-    }
-
     /// Get the raw fd of a loaded program by name, for tail-call wiring.
     ///
     /// The returned fd is valid as long as this `EbpfLoader` is alive and

@@ -484,7 +484,7 @@ impl EbpfProgramManager {
     }
 
     async fn enable_uprobe_dlp(&mut self, config: &AgentConfig) -> anyhow::Result<()> {
-        let (mut loader, dlp_rdr, reader) =
+        let (mut loader, dlp_rdr, reader, attacher) =
             startup::try_load_uprobe_dlp(&self.ebpf_dir, config, startup::DLP_PIN_PATH)?;
 
         let cancel = CancellationToken::new();
@@ -492,7 +492,17 @@ impl EbpfProgramManager {
         let c = cancel.clone();
         let jh = tokio::spawn(async move { reader.run(tx, c).await });
 
-        let reader_handles = vec![jh];
+        // Lifecycle watcher: attach SSL uprobes to containers as they appear and
+        // detach them on teardown. Shares the reader's cancel so a hot-reload
+        // disable stops it too.
+        let watch_cancel = cancel.clone();
+        let watch_jh = tokio::spawn(async move {
+            attacher
+                .watch(adapters::ebpf::DLP_ATTACH_POLL_INTERVAL, watch_cancel)
+                .await;
+        });
+
+        let reader_handles = vec![jh, watch_jh];
 
         if let Some(rdr) = dlp_rdr {
             self.metrics_readers.write().await.push(rdr);
