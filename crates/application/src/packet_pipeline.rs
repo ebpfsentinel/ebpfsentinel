@@ -159,24 +159,31 @@ impl EventDispatcher {
         self
     }
 
-    fn resolve_container(
+    /// Record a container resolution outcome on the resolver hit/miss/error
+    /// counters.
+    fn record_resolve_outcome(&self, outcome: domain::container::engine::ResolveOutcome) {
+        use domain::container::engine::ResolveOutcome;
+        match outcome {
+            ResolveOutcome::CacheHit => self.metrics.record_container_cache_hit(),
+            ResolveOutcome::CacheMiss => self.metrics.record_container_cache_miss(),
+            ResolveOutcome::ReadError => self.metrics.record_container_resolver_error(),
+        }
+    }
+
+    /// Resolve container provenance for a DLP uprobe event. Prefers the event's
+    /// `cgroup_id` — reliably populated by the uprobe and resolvable from the
+    /// host cgroupfs without host-PID visibility — so a neighbouring container's
+    /// TLS is attributed to that container, mirroring the cgroup-id attribution
+    /// on the TC datapath. Falls back to the pid cgroup read for cgroup v1 hosts
+    /// where the kernel reports `cgroup_id == 0`.
+    fn resolve_container_dlp(
         &self,
         pid: u32,
         cgroup_id: u64,
     ) -> Option<domain::container::entity::ContainerInfo> {
         let resolver = self.container_resolver.as_ref()?;
-        let (info, outcome) = resolver.resolve(pid, cgroup_id);
-        match outcome {
-            domain::container::engine::ResolveOutcome::CacheHit => {
-                self.metrics.record_container_cache_hit();
-            }
-            domain::container::engine::ResolveOutcome::CacheMiss => {
-                self.metrics.record_container_cache_miss();
-            }
-            domain::container::engine::ResolveOutcome::ReadError => {
-                self.metrics.record_container_resolver_error();
-            }
-        }
+        let (info, outcome) = resolver.resolve_dlp(pid, cgroup_id);
+        self.record_resolve_outcome(outcome);
         Some(info)
     }
 
@@ -196,17 +203,7 @@ impl EventDispatcher {
         }
         let resolver = self.container_resolver.as_ref()?;
         let (info, outcome) = resolver.resolve_by_id(cgroup_id);
-        match outcome {
-            domain::container::engine::ResolveOutcome::CacheHit => {
-                self.metrics.record_container_cache_hit();
-            }
-            domain::container::engine::ResolveOutcome::CacheMiss => {
-                self.metrics.record_container_cache_miss();
-            }
-            domain::container::engine::ResolveOutcome::ReadError => {
-                self.metrics.record_container_resolver_error();
-            }
-        }
+        self.record_resolve_outcome(outcome);
         if info.is_host() { None } else { Some(info) }
     }
 
@@ -1222,7 +1219,7 @@ impl EventDispatcher {
                 );
                 self.metrics.record_packet("dlp", "alert");
 
-                let container_info = self.resolve_container(event.pid, event.cgroup_id);
+                let container_info = self.resolve_container_dlp(event.pid, event.cgroup_id);
                 let patterns = svc.list_patterns();
                 for m in &matches {
                     if let Some(pattern) = patterns.get(m.pattern_index) {

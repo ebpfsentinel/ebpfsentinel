@@ -280,6 +280,22 @@ impl ContainerResolverEngine {
             Err(_) => (ContainerInfo::Host, ResolveOutcome::ReadError),
         }
     }
+
+    /// Resolve a DLP uprobe event's `(pid, cgroup_id)` to a `ContainerInfo`,
+    /// preferring the `cgroup_id`. A uprobe runs in process context so its
+    /// `cgroup_id` is reliable, and resolving by id maps it against the host
+    /// cgroupfs — attributing a neighbouring container's TLS without needing the
+    /// neighbour's pid to be visible to the agent. Falls back to the pid cgroup
+    /// read when the id resolves to the host or is `0` (cgroup v1 hosts).
+    pub fn resolve_dlp(&self, pid: u32, cgroup_id: u64) -> (ContainerInfo, ResolveOutcome) {
+        if cgroup_id != 0 {
+            let (info, outcome) = self.resolve_by_id(cgroup_id);
+            if !info.is_host() {
+                return (info, outcome);
+            }
+        }
+        self.resolve(pid, cgroup_id)
+    }
 }
 
 /// Parse raw `/proc/{pid}/cgroup` contents. Tries cgroup v2 first
@@ -627,5 +643,48 @@ mod tests {
         let (info, outcome) = engine.resolve_by_id(0x1234);
         assert!(info.is_host());
         assert_eq!(outcome, ResolveOutcome::ReadError);
+    }
+
+    #[test]
+    fn resolve_dlp_prefers_cgroup_id_over_pid() {
+        // The id resolver attributes the neighbour container; the pid read
+        // would have failed (no such pid visible), so the id path is essential.
+        let mut map = HashMap::new();
+        map.insert(0x55u64, format!("/system.slice/docker-{HEX64}.scope"));
+        let reader = Arc::new(FakeReader::new());
+        reader.fail_all();
+        let engine = ContainerResolverEngine::new(reader, 16)
+            .with_id_resolver(Arc::new(FakeIdResolver { map }));
+
+        let (info, outcome) = engine.resolve_dlp(4242, 0x55);
+        assert_eq!(info.container_id(), Some(HEX64));
+        assert_eq!(outcome, ResolveOutcome::CacheMiss);
+    }
+
+    #[test]
+    fn resolve_dlp_falls_back_to_pid_when_id_has_no_match() {
+        // The id resolver finds no live cgroup for the id (ReadError, not
+        // cached), so the pid cgroup read decides — here it names a container.
+        let reader = Arc::new(FakeReader::new());
+        reader.insert(4242, &format!("0::/system.slice/docker-{HEX64}.scope"));
+        let engine =
+            ContainerResolverEngine::new(reader, 16).with_id_resolver(Arc::new(FakeIdResolver {
+                map: HashMap::new(),
+            }));
+
+        let (info, _) = engine.resolve_dlp(4242, 0x66);
+        assert_eq!(info.container_id(), Some(HEX64));
+    }
+
+    #[test]
+    fn resolve_dlp_zero_cgroup_id_uses_pid() {
+        // cgroup v1 host: kernel reports cgroup_id 0, so the pid path is used.
+        let reader = Arc::new(FakeReader::new());
+        reader.insert(7, &format!("0::/system.slice/docker-{HEX64}.scope"));
+        let engine = ContainerResolverEngine::new(reader, 16);
+
+        let (info, outcome) = engine.resolve_dlp(7, 0);
+        assert_eq!(info.container_id(), Some(HEX64));
+        assert_eq!(outcome, ResolveOutcome::CacheMiss);
     }
 }
