@@ -3130,6 +3130,147 @@
             "api_key": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "IPS"
+        ],
+        "summary": "`POST /api/v1/ips/blacklist` — manually add an IP to the IPS blacklist.",
+        "description": "Drives the same `add_to_blacklist` path the DNS-blocklist and reputation\nauto-block features already use, so the entry is visible via `GET` and\nsubject to the policy's TTL cap + expiry sweeper.",
+        "operationId": "add_ips_blacklist",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddBlacklistRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "IP added to blacklist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlacklistMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid IP address or blacklist full",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ips/blacklist/{ip}": {
+      "delete": {
+        "tags": [
+          "IPS"
+        ],
+        "summary": "`DELETE /api/v1/ips/blacklist/{ip}` — remove an IP from the IPS blacklist.",
+        "operationId": "delete_ips_blacklist",
+        "parameters": [
+          {
+            "name": "ip",
+            "in": "path",
+            "description": "IP address to remove",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "IP removed from blacklist"
+          },
+          "400": {
+            "description": "Invalid IP address",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "IP not in blacklist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
       }
     },
     "/api/v1/ips/domain-blocks": {
@@ -5603,6 +5744,107 @@
         ]
       }
     },
+    "/api/v1/threatintel/urls": {
+      "get": {
+        "tags": [
+          "Threat Intelligence"
+        ],
+        "summary": "`GET /api/v1/threatintel/urls` — list malicious URL indicators ingested\nfrom CTI feeds. The threat-intel engine is IP-only, so URL indicators are\nsurfaced from the service's retained snapshot.",
+        "operationId": "list_url_iocs",
+        "responses": {
+          "200": {
+            "description": "List of malicious URL indicators",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UrlIocResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tls/status": {
+      "get": {
+        "tags": [
+          "TLS"
+        ],
+        "summary": "`GET /api/v1/tls/status` — report the negotiated TLS key-exchange group\nfor the current connection.",
+        "operationId": "tls_status",
+        "responses": {
+          "200": {
+            "description": "Negotiated TLS parameters for this connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TlsStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/zones": {
       "get": {
         "tags": [
@@ -6108,6 +6350,34 @@
   },
   "components": {
     "schemas": {
+      "AddBlacklistRequest": {
+        "type": "object",
+        "required": [
+          "ip"
+        ],
+        "properties": {
+          "ip": {
+            "type": "string",
+            "description": "IP address to blacklist (IPv4 or IPv6)."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional human-readable reason. Defaults to `manual-api`."
+          },
+          "ttl_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Optional TTL in seconds. Defaults to — and is capped at — the policy's\nmaximum blacklist duration.",
+            "minimum": 0
+          }
+        }
+      },
       "AgentIdentityResponse": {
         "type": "object",
         "description": "Operator-managed metadata advertised to the dashboard, plus the\nminimum identity fields needed to identify the agent uniquely.\n\nRead-only view of the agent's `management` config block; both fields\nare hot-reloadable via the existing config reload mechanism.",
@@ -6590,6 +6860,27 @@
           "auto_generated": {
             "type": "boolean"
           },
+          "ip": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "ttl_remaining_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "BlacklistMutationResponse": {
+        "type": "object",
+        "required": [
+          "ip",
+          "reason",
+          "ttl_remaining_secs"
+        ],
+        "properties": {
           "ip": {
             "type": "string"
           },
@@ -9588,6 +9879,31 @@
           }
         }
       },
+      "TlsStatusResponse": {
+        "type": "object",
+        "description": "Per-connection TLS status, surfaced so operators can confirm the\nnegotiated key-exchange group (e.g. verify a post-quantum hybrid\nhandshake) on a live connection.",
+        "required": [
+          "tls",
+          "post_quantum"
+        ],
+        "properties": {
+          "negotiated_group": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Negotiated TLS 1.3 key-exchange named group for this connection\n(e.g. `X25519MLKEM768`, `X25519`, `secp256r1`), or `null` when the\nrequest did not arrive over TLS."
+          },
+          "post_quantum": {
+            "type": "boolean",
+            "description": "`true` when the negotiated group is the post-quantum hybrid\n(`X25519MLKEM768`)."
+          },
+          "tls": {
+            "type": "boolean",
+            "description": "Whether this request arrived over TLS."
+          }
+        }
+      },
       "TopQueriedEntry": {
         "type": "object",
         "required": [
@@ -9602,6 +9918,31 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "UrlIocResponse": {
+        "type": "object",
+        "required": [
+          "url",
+          "feed_id",
+          "confidence",
+          "threat_type"
+        ],
+        "properties": {
+          "confidence": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "feed_id": {
+            "type": "string"
+          },
+          "threat_type": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
           }
         }
       },
