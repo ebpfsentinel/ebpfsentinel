@@ -1,0 +1,76 @@
+# config-ebpf-dlp-container.yaml — cross-container DLP scenario config.
+#
+# DLP (uprobe-dlp) plus the container resolver, so the agent attaches the SSL
+# uprobe to a NEIGHBOURING container's libssl (resolved through the host /proc)
+# and attributes the captured plaintext back to that container.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: true
+  mode: alert
+  patterns:
+    - id: dlp-pci-visa
+      name: "Visa Card Number"
+      regex: "\\b4[0-9]{12}(?:[0-9]{3})?\\b"
+      severity: critical
+      data_type: pci
+    - id: dlp-pii-email
+      name: "Email Address"
+      regex: "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"
+      severity: medium
+      data_type: pii
+
+container:
+  resolver:
+    enabled: true
+    cache_size: 4096
+    proc_path: /proc
+  docker:
+    enabled: true
+    socket: /var/run/docker.sock
+    cache_size: 256
+    cache_ttl_seconds: 60
+    timeout_ms: 2000
+  kubernetes:
+    enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
