@@ -5,6 +5,7 @@ pub mod config_flags_manager;
 pub mod config_ringbuf_writer;
 pub mod conntrack_map_manager;
 pub mod cpumap;
+pub mod dlp_attach;
 pub mod dlp_event_reader;
 pub mod dns_event_reader;
 pub mod ebpf_map_write_adapter;
@@ -46,6 +47,7 @@ pub use config_flags_manager::{
     IcmpConfigManager, InterfaceGroupsManager, ScrubConfigManager,
 };
 pub use conntrack_map_manager::ConnTrackMapManager;
+pub use dlp_attach::{DlpUprobeAttacher, UprobeTarget};
 pub use dlp_event_reader::DlpEventReader;
 pub use dns_event_reader::DnsEventReader;
 pub use ebpf_map_write_adapter::EbpfMapWriteAdapter;
