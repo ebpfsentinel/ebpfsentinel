@@ -57,6 +57,33 @@ pub struct UprobeTarget {
     pub dev: u64,
     /// Inode of the resolved file — second half of the dedup key.
     pub ino: u64,
+    /// `SSL_write` offset pre-resolved by the warden scan (`0` = resolve locally).
+    ssl_write_offset: u64,
+    /// `SSL_read` offset pre-resolved by the warden scan (`0` = resolve locally).
+    ssl_read_offset: u64,
+    /// When `true` the offsets are authoritative and the agent must NOT read the
+    /// ELF (a neighbour container's library it cannot access) — a `0` offset then
+    /// means the symbol is absent and its probe is skipped. When `false` (local
+    /// scan or system fallback, a library the agent can read) offsets are
+    /// resolved on demand.
+    preresolved: bool,
+}
+
+impl UprobeTarget {
+    /// Build a target from a warden `/proc` scan result — offsets are
+    /// authoritative (the agent cannot read the neighbour's ELF itself).
+    fn from_warden(t: ebpfsentinel_warden_client::DlpTarget) -> Self {
+        let lib = t.path.rsplit('/').next().unwrap_or(&t.path).to_owned();
+        Self {
+            attach_path: PathBuf::from(t.path),
+            lib,
+            dev: t.dev,
+            ino: t.ino,
+            ssl_write_offset: t.ssl_write_offset,
+            ssl_read_offset: t.ssl_read_offset,
+            preresolved: true,
+        }
+    }
 }
 
 /// The uprobe links attached to one SSL library inode, held for their lifetime
@@ -237,6 +264,9 @@ impl DlpUprobeAttacher {
                     lib: base,
                     dev: key.0,
                     ino: key.1,
+                    ssl_write_offset: 0,
+                    ssl_read_offset: 0,
+                    preresolved: false,
                 });
             }
         }
@@ -248,11 +278,19 @@ impl DlpUprobeAttacher {
     /// it any more (sticky fallback attachments excluded). Per-library attach
     /// failures are logged and skipped so one bad library never blocks the rest.
     pub fn reconcile(&mut self) -> ReconcileOutcome {
-        let live_map: BTreeMap<(u64, u64), UprobeTarget> = self
-            .scan_live_targets()
-            .into_iter()
-            .map(|t| ((t.dev, t.ino), t))
-            .collect();
+        // Rootless posture: the agent cannot read other processes' `/proc`
+        // (`CAP_SYS_PTRACE`), so it delegates discovery to the warden, which
+        // returns deduped targets with offsets pre-resolved. Direct posture (the
+        // agent is privileged) scans `/proc` itself.
+        let live: Vec<UprobeTarget> = match &self.warden_sock {
+            Some(sock) => crate::warden::uprobe::scan_via_warden(sock)
+                .into_iter()
+                .map(UprobeTarget::from_warden)
+                .collect(),
+            None => self.scan_live_targets(),
+        };
+        let live_map: BTreeMap<(u64, u64), UprobeTarget> =
+            live.into_iter().map(|t| ((t.dev, t.ino), t)).collect();
         let live_keys: BTreeSet<(u64, u64)> = live_map.keys().copied().collect();
         let attached_sticky: BTreeMap<(u64, u64), bool> =
             self.attached.iter().map(|(k, a)| (*k, a.sticky)).collect();
@@ -322,6 +360,11 @@ impl DlpUprobeAttacher {
             lib: base,
             dev: key.0,
             ino: key.1,
+            // A system library the agent can read itself — resolve offsets on
+            // demand (works in both postures).
+            ssl_write_offset: 0,
+            ssl_read_offset: 0,
+            preresolved: false,
         };
         let links = self.attach_target_links(&target)?;
         self.attached.insert(
@@ -344,25 +387,39 @@ impl DlpUprobeAttacher {
             .ok_or_else(|| anyhow::anyhow!("non-UTF-8 library path"))?;
         let mut links = Vec::with_capacity(SSL_UPROBES.len());
         for (i, (prog, sym, is_ret)) in SSL_UPROBES.iter().enumerate() {
-            let link = match &self.warden_sock {
-                // Rootless: resolve the offset here (a plain ELF read), then let
-                // the warden — which holds the tracing capability — create the
-                // link and pass back its fd.
-                Some(sock) => {
-                    let offset = kfunc_attach::resolve_symbol_offset(path, sym)?;
-                    crate::warden::uprobe::attach_via_warden(
-                        sock,
-                        self.fds[i],
-                        path,
-                        offset,
-                        *is_ret,
-                    )?
-                }
+            if let Some(sock) = &self.warden_sock {
+                // Rootless: the warden — which holds the tracing capability and
+                // can read the target — creates the link and passes back its fd.
+                let preset = if *sym == "SSL_write" {
+                    t.ssl_write_offset
+                } else {
+                    t.ssl_read_offset
+                };
+                let offset = if t.preresolved {
+                    // Authoritative: the agent cannot read this neighbour's ELF.
+                    // A `0` offset means the symbol is absent — skip its probe.
+                    if preset == 0 {
+                        continue;
+                    }
+                    preset
+                } else {
+                    // A library the agent itself can read (system fallback).
+                    kfunc_attach::resolve_symbol_offset(path, sym)?
+                };
+                let link = crate::warden::uprobe::attach_via_warden(
+                    sock,
+                    self.fds[i],
+                    path,
+                    offset,
+                    *is_ret,
+                )?;
+                links.push(link);
+            } else {
                 // Direct: the agent creates the link itself (bare-metal / single
                 // privileged container).
-                None => kfunc_attach::attach_uprobe_raw(prog, self.fds[i], path, sym, *is_ret)?,
-            };
-            links.push(link);
+                let link = kfunc_attach::attach_uprobe_raw(prog, self.fds[i], path, sym, *is_ret)?;
+                links.push(link);
+            }
         }
         Ok(links)
     }

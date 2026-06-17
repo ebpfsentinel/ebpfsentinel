@@ -45,6 +45,25 @@ pub struct ConntrackTuple {
     pub dst_port: u16,
 }
 
+/// A discovered SSL library to attach the DLP uprobe set to. Produced by the
+/// warden's `/proc` scan (which needs `CAP_SYS_PTRACE` the rootless agent lacks)
+/// so the agent never reads a neighbouring container's `/proc` itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DlpTarget {
+    /// Path the warden resolves for the attach — the library seen through the
+    /// owning process's root (`/proc/<pid>/root/<lib>`), in the warden's
+    /// namespace. The agent passes it back verbatim in [`Command::AttachUprobe`].
+    pub path: String,
+    /// Block device of the resolved file — first half of the dedup key.
+    pub dev: u64,
+    /// Inode of the resolved file — second half of the dedup key.
+    pub ino: u64,
+    /// File offset of `SSL_write` (`0` if not exported by this library).
+    pub ssl_write_offset: u64,
+    /// File offset of `SSL_read` (`0` if not exported by this library).
+    pub ssl_read_offset: u64,
+}
+
 /// A routing-table entry, used by multi-WAN failover.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteSpec {
@@ -127,6 +146,12 @@ pub enum Command {
         /// `true` for a uretprobe (fires on function return).
         is_ret: bool,
     },
+    /// Scan `/proc` for SSL libraries mapped by any process and return one
+    /// [`DlpTarget`] per unique `(dev, ino)`, with `SSL_write` / `SSL_read`
+    /// offsets pre-resolved. Reading another process's `/proc/<pid>/maps` and ELF
+    /// needs `CAP_SYS_PTRACE`, which the rootless agent dropped — so it delegates
+    /// the whole discovery to the warden and only keeps the attach lifecycle.
+    DlpScan,
 }
 
 /// A reply from the warden to the agent.
@@ -155,6 +180,12 @@ pub enum Response {
     /// A file descriptor rides in the accompanying `SCM_RIGHTS` cmsg (the pcap
     /// capture socket from [`Command::PcapOpen`]).
     FdReady,
+    /// The SSL libraries the warden's `/proc` scan found, answering
+    /// [`Command::DlpScan`]. The agent reconciles these against its attached set.
+    DlpTargets {
+        /// One entry per unique `(dev, ino)` SSL library.
+        targets: Vec<DlpTarget>,
+    },
     /// The command succeeded and carries no payload.
     Ok,
     /// The command is part of the protocol but not served by this warden build.
@@ -197,7 +228,8 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, ConntrackTuple, MAX_FRAME_LEN, Response, RouteSpec, read_frame, write_frame,
+        Command, ConntrackTuple, DlpTarget, MAX_FRAME_LEN, Response, RouteSpec, read_frame,
+        write_frame,
     };
     use std::io::Cursor;
 
@@ -240,6 +272,7 @@ mod tests {
                 offset: 0x1234,
                 is_ret: true,
             },
+            Command::DlpScan,
         ]
     }
 
@@ -254,6 +287,15 @@ mod tests {
                 table: vec![0xde, 0xad, 0xbe, 0xef],
             },
             Response::FdReady,
+            Response::DlpTargets {
+                targets: vec![DlpTarget {
+                    path: "/proc/4242/root/usr/lib/libssl.so.3".into(),
+                    dev: 48,
+                    ino: 917_962,
+                    ssl_write_offset: 0x1111,
+                    ssl_read_offset: 0x2222,
+                }],
+            },
             Response::Ok,
             Response::Unimplemented,
             Response::Error {

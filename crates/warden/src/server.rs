@@ -11,27 +11,45 @@ use std::mem;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::ptr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
 
 use crate::host_ops::HostOps;
-use crate::{delegate_over_fd, net_ops, recv_fd, send_msg_fds, uprobe_ops};
+use crate::{delegate_over_fd, dlp_scan, net_ops, recv_fd, send_msg_fds, uprobe_ops};
 
 /// Serve agent connections on `listener` forever, handing out the `btf` / `pcap`
 /// fds on delegation and brokering the host-network ops via `host`. Only a peer
 /// whose uid equals `allowed_uid` (checked via `SO_PEERCRED`) is served.
+///
+/// Each accepted connection is handled on its own thread. The agent keeps a few
+/// long-lived `ReconnectingClient` connections open and idle between calls; a
+/// single-threaded accept loop would block on one such idle connection's blocking
+/// read and never serve any other (a `DlpScan` after a held conntrack/ARP client
+/// would deadlock). Thread-per-connection keeps every channel independent — the
+/// op rate is low and the connection count small.
 pub fn serve_loop(
     listener: &UnixListener,
-    btf: &[(String, RawFd)],
-    pcap: &[RawFd],
-    host: &dyn HostOps,
+    btf: Arc<Vec<(String, RawFd)>>,
+    pcap: Arc<Vec<RawFd>>,
+    host: Arc<dyn HostOps>,
     allowed_uid: u32,
 ) {
+    // The pcap pool is handed out across all connections, so the next-index is
+    // shared (a reconnecting agent is re-served from where it left off).
+    let pcap_next = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         match stream {
             Ok(conn) => {
                 if peer_allowed(&conn, allowed_uid) {
-                    handle_conn(conn, btf, pcap, host);
+                    let btf = Arc::clone(&btf);
+                    let pcap = Arc::clone(&pcap);
+                    let host = Arc::clone(&host);
+                    let pcap_next = Arc::clone(&pcap_next);
+                    std::thread::spawn(move || {
+                        handle_conn(conn, &btf, &pcap, &*host, &pcap_next);
+                    });
                 }
             }
             Err(e) => eprintln!("[warden] accept: {e}"),
@@ -74,7 +92,13 @@ fn peer_allowed(conn: &UnixStream, allowed_uid: u32) -> bool {
 /// Reads frame-by-frame on the raw stream (no `BufReader`): a buffered reader
 /// would read past a frame boundary and swallow the sentinel byte that carries an
 /// inbound `SCM_RIGHTS` fd (e.g. the `Delegate` bpffs fd), dropping the fd.
-fn handle_conn(conn: UnixStream, btf: &[(String, RawFd)], pcap: &[RawFd], host: &dyn HostOps) {
+fn handle_conn(
+    conn: UnixStream,
+    btf: &[(String, RawFd)],
+    pcap: &[RawFd],
+    host: &dyn HostOps,
+    pcap_next: &AtomicUsize,
+) {
     let mut reader = match conn.try_clone() {
         Ok(c) => c,
         Err(_) => return,
@@ -114,25 +138,23 @@ fn handle_conn(conn: UnixStream, btf: &[(String, RawFd)], pcap: &[RawFd], host: 
         }
     }
 
-    // Index into the pre-opened pcap pool. Each `PcapOpen` hands out the next
-    // un-served pool fd; the warden keeps its own copy open so a reconnecting
-    // agent is re-served from the start (the fd is dup'd into the agent by
-    // `SCM_RIGHTS`, so both reference the same socket and closing the agent's copy
-    // does not disturb the warden's).
-    let mut pcap_next = 0usize;
-
     while let Ok(cmd) = read_frame::<_, Command>(&mut reader) {
         // `PcapOpen` answers out-of-band: an `FdReady` frame followed by a fd in an
         // `SCM_RIGHTS` cmsg, so it bypasses `dispatch`.
         let ok = match &cmd {
             Command::PcapOpen { iface, filter } => {
                 eprintln!("[warden] pcap open on {iface} (filter applied agent-side: {filter:?})");
-                if pcap_next < pcap.len() {
+                // Claim the next pool slot atomically (the index is shared across
+                // all connection threads). The warden keeps its own copy open so a
+                // reconnecting agent is re-served in order; the fd is dup'd into
+                // the agent by `SCM_RIGHTS`, so closing the agent's copy does not
+                // disturb the warden's.
+                let idx = pcap_next.fetch_add(1, Ordering::Relaxed);
+                if idx < pcap.len() {
                     // Serve a launcher-provided socket: the warden may sit in a
                     // user namespace where `socket(AF_PACKET)` is denied, so the
                     // pre-opened pool is the only way to capture rootlessly.
-                    let fd = pcap[pcap_next];
-                    pcap_next += 1;
+                    let fd = pcap[idx];
                     serve_passed_fd(&mut writer, Ok(fd))
                 } else {
                     // Pool exhausted (or none provided, e.g. a bare-metal warden
@@ -268,6 +290,9 @@ fn dispatch(cmd: &Command, host: &dyn HostOps) -> Response {
         Command::RouteAdd { route } => result_to_response(host.route_add(route)),
         Command::RouteDel { route } => result_to_response(host.route_del(route)),
         Command::ArpAnnounce { iface, ip } => result_to_response(host.arp_announce(iface, ip)),
+        Command::DlpScan => Response::DlpTargets {
+            targets: dlp_scan::scan_dlp_targets(),
+        },
         Command::Hello { .. } => Response::Error {
             message: "Hello already completed".into(),
         },

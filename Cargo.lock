@@ -920,6 +920,7 @@ dependencies = [
  "ebpfsentinel-warden-client",
  "ebpfsentinel-warden-proto",
  "libc",
+ "object 0.39.1",
  "tempfile",
 ]
 

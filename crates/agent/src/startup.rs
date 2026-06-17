@@ -3837,39 +3837,42 @@ pub fn try_load_uprobe_dlp(
     // a brokered attach needs no path translation.
     let proc_root = host_proc_root();
     let mut attacher = adapters::ebpf::DlpUprobeAttacher::with_programs(&proc_root, &loader)?;
-    // Rootless posture: broker the privileged uprobe `BPF_LINK_CREATE` to the
-    // warden, so container DLP works under `cap-drop: ALL`.
+
+    // Rootless posture: discovery (reading other processes' `/proc`) and the
+    // privileged uprobe `BPF_LINK_CREATE` are both brokered to the warden. The
+    // brokered `/proc` scan can be slow on a busy node, so it MUST NOT run on the
+    // synchronous startup path — the lifecycle watcher (spawned by the caller)
+    // performs the first scan and every attach asynchronously. Startup only arms
+    // the module.
     if let Some(sock) = warden_sock_from_env() {
         attacher = attacher.with_warden_socket(sock);
-    }
-    let mut attached = attacher.reconcile().attached;
-
-    // Fallback: no process maps an SSL library yet (e.g. the agent starts before
-    // any TLS workload). Attach to a system library so single-host capture still
-    // arms — the inode-wide probe fires once a process maps that library, and the
-    // attachment is sticky so the watcher does not tear it down before then.
-    if attached == 0
-        && let Some(ssl_path) = find_ssl_library_path(&proc_root)
-    {
-        info!(library = %ssl_path, "no mapped SSL library found; attaching to system library");
-        attacher.attach_fallback_path(&ssl_path)?;
-        attached = 1;
-    }
-
-    if attached == 0 {
-        anyhow::bail!(
-            "no SSL library found (no process maps one, and none on the system — tried: {}). \
-             DLP uprobe requires OpenSSL or BoringSSL. \
-             Install libssl-dev or equivalent package.",
-            SSL_LIBRARY_CANDIDATES.join(", ")
-        );
+    } else {
+        // Direct posture: the agent scans `/proc` itself (fast, local). Attach to
+        // every mapped SSL library now, and fall back to a system library so a
+        // single host arms before any TLS workload appears.
+        let mut attached = attacher.reconcile().attached;
+        if attached == 0
+            && let Some(ssl_path) = find_ssl_library_path(&proc_root)
+        {
+            info!(library = %ssl_path, "no mapped SSL library found; attaching to system library");
+            attacher.attach_fallback_path(&ssl_path)?;
+            attached = 1;
+        }
+        if attached == 0 {
+            anyhow::bail!(
+                "no SSL library found (no process maps one, and none on the system — tried: {}). \
+                 DLP uprobe requires OpenSSL or BoringSSL. \
+                 Install libssl-dev or equivalent package.",
+                SSL_LIBRARY_CANDIDATES.join(", ")
+            );
+        }
     }
 
     let dlp_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "DLP_METRICS").ok();
 
     let reader = DlpEventReader::new(loader.ebpf_mut())?;
 
-    info!(libraries = attached, "uprobe-dlp attached");
+    info!("uprobe-dlp armed (discovery + attach run via the lifecycle watcher)");
     Ok((loader, dlp_metrics_rdr, reader, attacher))
 }
 

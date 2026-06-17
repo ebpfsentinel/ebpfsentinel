@@ -42,6 +42,7 @@ use std::mem;
 use std::os::fd::RawFd;
 use std::ptr;
 
+pub mod dlp_scan;
 pub mod host_ops;
 pub mod net_ops;
 pub mod server;

@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
 // Re-exported under their real names so callers of the typed control methods can
 // build request values without taking a direct dependency on the protocol crate.
-pub use ebpfsentinel_warden_proto::{ConntrackTuple, RouteSpec};
+pub use ebpfsentinel_warden_proto::{ConntrackTuple, DlpTarget, RouteSpec};
 
 /// A connected, handshaked client to a warden socket.
 pub struct WardenClient {
@@ -69,6 +69,16 @@ impl WardenClient {
     fn call(&mut self, cmd: &Command) -> io::Result<Response> {
         write_frame(&mut self.stream, cmd)?;
         read_frame(&mut self.stream)
+    }
+
+    /// Ask the warden to scan `/proc` for SSL libraries and return the DLP
+    /// targets (deduped by inode, with offsets resolved). The rootless agent
+    /// cannot read other processes' `/proc`, so this discovery is brokered.
+    pub fn dlp_scan(&mut self) -> io::Result<Vec<DlpTarget>> {
+        match self.call(&Command::DlpScan)? {
+            Response::DlpTargets { targets } => Ok(targets),
+            other => Err(unexpected("DlpScan", &other)),
+        }
     }
 
     /// Read the kernel conntrack table the rootless agent cannot open itself.
@@ -243,6 +253,11 @@ impl ReconnectingClient {
     /// Read the kernel conntrack table.
     pub fn conntrack_dump(&mut self) -> io::Result<Vec<u8>> {
         self.with_retry(WardenClient::conntrack_dump)
+    }
+
+    /// Scan `/proc` for DLP targets through the warden, reconnecting if it bounced.
+    pub fn dlp_scan(&mut self) -> io::Result<Vec<DlpTarget>> {
+        self.with_retry(WardenClient::dlp_scan)
     }
 
     /// Tear down a single conntrack flow.
