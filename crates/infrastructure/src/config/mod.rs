@@ -193,6 +193,15 @@ pub struct AgentConfig {
     /// agents and deep-link to the operator UI.
     #[serde(default)]
     pub management: ManagementConfig,
+
+    /// Enterprise configuration block. The OSS agent never reads this — the
+    /// enterprise edition parses it with its own loader. It is declared here
+    /// only so a *combined* agent+enterprise config file (the enterprise
+    /// deployment model) still parses under `deny_unknown_fields` instead of
+    /// being rejected and silently falling back to defaults. Captured opaquely
+    /// and never serialized back out by the OSS agent.
+    #[serde(default, skip_serializing)]
+    pub enterprise: Option<serde_yaml_ng::Value>,
 }
 
 /// Maximum number of interface groups (bits 0-30 of `group_mask`).
@@ -1580,6 +1589,35 @@ firewall:
       protocol: tcp
       vlan_id: 4095
 ";
+        assert!(AgentConfig::from_yaml(yaml).is_err());
+    }
+
+    #[test]
+    fn combined_enterprise_config_block_is_accepted_and_ignored() {
+        // A combined agent+enterprise config file (the enterprise deployment
+        // model) must parse under the OSS loader: the `enterprise:` block is
+        // captured opaquely and ignored, while the OSS sections still apply.
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+dlp:
+  enabled: true
+enterprise:
+  advanced_dlp:
+    enabled: true
+    custom_patterns:
+      - id: x
+        regex: 'y'
+";
+        let config = AgentConfig::from_yaml(yaml).expect("combined config parses");
+        assert!(config.dlp.enabled);
+        assert!(config.enterprise.is_some());
+    }
+
+    #[test]
+    fn unknown_top_level_key_still_rejected() {
+        // deny_unknown_fields stays in force for genuine typos.
+        let yaml = "agent:\n  interfaces: [eth0]\nnonsense_key: true\n";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
