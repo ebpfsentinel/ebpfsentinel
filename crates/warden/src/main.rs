@@ -104,11 +104,15 @@ fn serve(sockpath: &str, allowed_uid: u32) -> ExitCode {
     // The warden runs as host root in the init netns, so it performs host-network
     // ops directly. It serves no map elements — the agent holds its own maps.
     // Shared (read-only) across the per-connection threads via `Arc`.
+    // The OSS warden installs no extension handler: an `Extension` command
+    // answers `Unimplemented`. A downstream build (the enterprise warden) reuses
+    // this same `serve_loop` with `Some(handler)` to add privileged operations.
     serve_loop(
         &listener,
         std::sync::Arc::new(btf),
         std::sync::Arc::new(pcap),
         std::sync::Arc::new(LocalHostOps),
+        None,
         allowed_uid,
     );
     ExitCode::SUCCESS

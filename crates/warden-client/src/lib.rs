@@ -81,6 +81,21 @@ impl WardenClient {
         }
     }
 
+    /// Issue an opaque, namespaced extension command and return the reply payload.
+    /// The OSS warden installs no handler, so it answers `Unimplemented` (surfaced
+    /// here as an error); a downstream warden (e.g. the enterprise warden) with a
+    /// handler for `kind` returns the bytes it produced. Lets a downstream client
+    /// add privileged operations without changing the shared protocol.
+    pub fn extension(&mut self, kind: &str, payload: Vec<u8>) -> io::Result<Vec<u8>> {
+        match self.call(&Command::Extension {
+            kind: kind.to_string(),
+            payload,
+        })? {
+            Response::Extension { payload } => Ok(payload),
+            other => Err(unexpected("Extension", &other)),
+        }
+    }
+
     /// Read the kernel conntrack table the rootless agent cannot open itself.
     pub fn conntrack_dump(&mut self) -> io::Result<Vec<u8>> {
         match self.call(&Command::ConntrackDump)? {
@@ -258,6 +273,12 @@ impl ReconnectingClient {
     /// Scan `/proc` for DLP targets through the warden, reconnecting if it bounced.
     pub fn dlp_scan(&mut self) -> io::Result<Vec<DlpTarget>> {
         self.with_retry(WardenClient::dlp_scan)
+    }
+
+    /// Issue an opaque extension command through the warden, reconnecting if it
+    /// bounced. The closure re-clones `payload` because `with_retry` may replay it.
+    pub fn extension(&mut self, kind: &str, payload: &[u8]) -> io::Result<Vec<u8>> {
+        self.with_retry(|c| c.extension(kind, payload.to_vec()))
     }
 
     /// Tear down a single conntrack flow.

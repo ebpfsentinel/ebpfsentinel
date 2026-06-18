@@ -152,6 +152,20 @@ pub enum Command {
     /// needs `CAP_SYS_PTRACE`, which the rootless agent dropped — so it delegates
     /// the whole discovery to the warden and only keeps the attach lifecycle.
     DlpScan,
+    /// An opaque, namespaced extension operation. The OSS warden does not
+    /// interpret it: a downstream build (e.g. the enterprise warden) installs an
+    /// extension handler keyed on `kind` that owns the `payload` semantics, and an
+    /// OSS warden with no handler answers [`Response::Unimplemented`]. This keeps
+    /// build-specific privileged operations out of the shared protocol — `kind`
+    /// namespaces the op, `payload` is its serialized request, and the reply rides
+    /// in [`Response::Extension`]. Carries no enterprise-specific fields, so the
+    /// AGPL protocol stays agnostic to whatever a handler does with it.
+    Extension {
+        /// Namespacing key identifying the extension operation.
+        kind: String,
+        /// Opaque serialized request, defined by the handler for `kind`.
+        payload: Vec<u8>,
+    },
 }
 
 /// A reply from the warden to the agent.
@@ -185,6 +199,13 @@ pub enum Response {
     DlpTargets {
         /// One entry per unique `(dev, ino)` SSL library.
         targets: Vec<DlpTarget>,
+    },
+    /// The opaque reply to a handled [`Command::Extension`]; `payload` is defined
+    /// by the handler that served the request's `kind`. An OSS warden never emits
+    /// this (it has no handler); a downstream warden returns it on success.
+    Extension {
+        /// Opaque serialized reply, defined by the extension handler.
+        payload: Vec<u8>,
     },
     /// The command succeeded and carries no payload.
     Ok,
@@ -273,6 +294,10 @@ mod tests {
                 is_ret: true,
             },
             Command::DlpScan,
+            Command::Extension {
+                kind: "enterprise.proc_tls.v1".into(),
+                payload: vec![0x01, 0x02, 0x03],
+            },
         ]
     }
 
@@ -295,6 +320,9 @@ mod tests {
                     ssl_write_offset: 0x1111,
                     ssl_read_offset: 0x2222,
                 }],
+            },
+            Response::Extension {
+                payload: vec![0xaa, 0xbb],
             },
             Response::Ok,
             Response::Unimplemented,
