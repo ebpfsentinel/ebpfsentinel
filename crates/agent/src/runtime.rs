@@ -453,7 +453,11 @@ pub struct EbpfLoadResult {
     /// Per-program load status.
     pub program_status: std::collections::HashMap<String, bool>,
     /// Receive end of the event channel (for the event dispatcher).
-    pub event_rx: mpsc::Receiver<AgentEvent>,
+    ///
+    /// Wrapped in `Option` so a caller can `take()` it out to drive an event
+    /// dispatcher while keeping the rest of the result (map managers, loader
+    /// state) alive. `None` once taken.
+    pub event_rx: Option<mpsc::Receiver<AgentEvent>>,
     /// Manager for `TENANT_VLAN_MAP` maps across all loaded programs.
     ///
     /// Enterprise callers can populate this with `(vlan_id, tenant_id)` pairs
@@ -868,7 +872,7 @@ pub async fn load_ebpf_programs(
         map_holder: ebpf_map_holder,
         metrics_readers,
         program_status,
-        event_rx,
+        event_rx: Some(event_rx),
         tenant_vlan_mgr,
         tenant_subnet_mgr,
         ids_mirror_mgr,
