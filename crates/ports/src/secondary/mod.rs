@@ -8,6 +8,7 @@ pub mod auth_provider;
 pub mod conntrack_kill_port;
 pub mod conntrack_map_port;
 pub mod container_resolver_port;
+pub mod dlp_matcher_port;
 pub mod dns_cache_port;
 pub mod domain_reputation_port;
 pub mod ebpf_map_port;

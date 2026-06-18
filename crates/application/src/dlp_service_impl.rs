@@ -5,6 +5,7 @@ use domain::common::error::DomainError;
 use domain::dlp::engine::DlpEngine;
 use domain::dlp::entity::{DlpMatch, DlpPattern};
 use domain::dlp::error::DlpError;
+use ports::secondary::dlp_matcher_port::DlpMatcherPort;
 use ports::secondary::metrics_port::MetricsPort;
 
 /// Application-level DLP service.
@@ -17,6 +18,13 @@ pub struct DlpAppService {
     metrics: Arc<dyn MetricsPort>,
     mode: DomainMode,
     enabled: bool,
+    /// Optional external matcher (Enterprise Vectorscan). When set, it scans in
+    /// place of the OSS regex engine.
+    external_matcher: Option<Arc<dyn DlpMatcherPort>>,
+    /// Pattern list backing the external matcher. The OSS engine cannot hold
+    /// these (it license-gates custom patterns), so they are stored here and
+    /// surfaced via `list_patterns()` to resolve external match indices.
+    external_patterns: Option<Vec<DlpPattern>>,
 }
 
 impl DlpAppService {
@@ -26,7 +34,24 @@ impl DlpAppService {
             metrics,
             mode: DomainMode::default(),
             enabled: true,
+            external_matcher: None,
+            external_patterns: None,
         }
+    }
+
+    /// Inject an external DLP matcher (Enterprise Vectorscan engine) together
+    /// with the pattern list it scans against. Once set,
+    /// [`scan_data`](Self::scan_data) routes through the matcher and
+    /// [`list_patterns`](Self::list_patterns) returns `patterns`, so match
+    /// indices resolve to the matcher's patterns — including enterprise custom
+    /// ones the OSS regex engine would reject.
+    pub fn set_external_matcher(
+        &mut self,
+        matcher: Arc<dyn DlpMatcherPort>,
+        patterns: Vec<DlpPattern>,
+    ) {
+        self.external_matcher = Some(matcher);
+        self.external_patterns = Some(patterns);
     }
 
     pub fn mode(&self) -> DomainMode {
@@ -79,20 +104,29 @@ impl DlpAppService {
     }
 
     pub fn list_patterns(&self) -> &[DlpPattern] {
-        self.engine.patterns()
+        match self.external_patterns {
+            Some(ref patterns) => patterns,
+            None => self.engine.patterns(),
+        }
     }
 
     pub fn pattern_count(&self) -> usize {
-        self.engine.pattern_count()
+        match self.external_patterns {
+            Some(ref patterns) => patterns.len(),
+            None => self.engine.pattern_count(),
+        }
     }
 
     pub fn scan_data(&self, data: &[u8]) -> Vec<DlpMatch> {
         let start = std::time::Instant::now();
-        let matches = self.engine.scan_data(data);
+        let matches = match self.external_matcher {
+            Some(ref matcher) => matcher.scan_data(data),
+            None => self.engine.scan_data(data),
+        };
         let elapsed = start.elapsed().as_secs_f64();
         self.metrics.record_dlp_scan();
         self.metrics.observe_dlp_scan_duration(elapsed);
-        let patterns = self.engine.patterns();
+        let patterns = self.list_patterns();
         for m in &matches {
             if let Some(pat) = patterns.get(m.pattern_index) {
                 self.metrics.record_dlp_match(&pat.id.0);
@@ -238,6 +272,36 @@ mod tests {
         svc.add_pattern(make_pattern("dlp-pci-001")).unwrap();
         let matches = svc.scan_data(b"code 1234 here");
         assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn external_matcher_replaces_regex_engine() {
+        // A matcher that always reports one match at a fixed index, regardless
+        // of the data — stands in for the Enterprise Vectorscan engine.
+        struct StubMatcher;
+        impl DlpMatcherPort for StubMatcher {
+            fn scan_data(&self, _data: &[u8]) -> Vec<DlpMatch> {
+                vec![DlpMatch {
+                    pattern_index: 0,
+                    byte_offset: 0,
+                    byte_length: 4,
+                }]
+            }
+        }
+
+        let (mut svc, _) = make_service();
+        // Pattern requires four digits; "no digits here" would NOT match the
+        // OSS regex engine, so a hit proves the external matcher is used.
+        svc.add_pattern(make_pattern("dlp-pci-001")).unwrap();
+        assert!(svc.scan_data(b"no digits here").is_empty());
+        // The external pattern list need not be loadable by the OSS engine.
+        svc.set_external_matcher(Arc::new(StubMatcher), vec![make_pattern("visa-enterprise")]);
+        let matches = svc.scan_data(b"no digits here");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].byte_length, 4);
+        // list_patterns now reflects the external set.
+        assert_eq!(svc.pattern_count(), 1);
+        assert_eq!(svc.list_patterns()[0].id.0, "visa-enterprise");
     }
 
     #[test]
