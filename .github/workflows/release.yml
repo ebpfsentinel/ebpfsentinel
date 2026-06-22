@@ -134,6 +134,21 @@ jobs:
           RUSTFLAGS: "-L native=/usr/local/musl/lib"
         run: cargo build --release --target ${{ matrix.target }} --bin ebpfsentinel-agent --bin warden
 
+      # Spec version is stamped from the build version: `stamp-version` rewrote the
+      # workspace `0.0.0-dev` placeholder above, and the OpenAPI `info.version` is
+      # derived from `CARGO_PKG_VERSION`. Emit once (host arch is sufficient).
+      - name: Generate OpenAPI spec
+        if: matrix.arch == 'amd64'
+        run: cargo xtask emit-openapi --output openapi.json
+
+      - name: Upload OpenAPI spec
+        if: matrix.arch == 'amd64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: openapi-spec
+          path: openapi.json
+          retention-days: 30
+
       - name: Create release tarball
         run: |
           STAGING="ebpfsentinel-${VERSION}-linux-${{ matrix.arch }}"
@@ -214,6 +229,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ needs.prepare.outputs.tag }}" artifacts/*.tar.gz \
+          gh release create "${{ needs.prepare.outputs.tag }}" artifacts/*.tar.gz artifacts/openapi.json \
             --title "eBPFsentinel ${{ needs.prepare.outputs.tag }}" \
             --notes-file release-notes.md

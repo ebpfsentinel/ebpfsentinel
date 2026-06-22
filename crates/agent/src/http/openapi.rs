@@ -39,7 +39,9 @@ use super::zone_handler;
 #[openapi(
     info(
         title = "eBPFsentinel Agent API",
-        version = "1.0.0",
+        // `version` is intentionally omitted here: it is stamped from the build
+        // version (`CARGO_PKG_VERSION`, set by the release `stamp-version` step)
+        // in `SecurityAddon::modify` below so the spec always tracks the release.
         description = "REST API for the eBPFsentinel network security agent.\n\n\
             Provides endpoints for managing firewall rules, IPS/IDS policies, \
             rate limiting, L7 filtering, threat intelligence, alerts, and audit logs.\n\n\
@@ -347,6 +349,11 @@ struct SecurityAddon;
 
 impl Modify for SecurityAddon {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        // Stamp the spec version from the build version. The release pipeline's
+        // `stamp-version` step rewrites the workspace `0.0.0-dev` placeholder to
+        // the resolved `YYYY.M.X`, so this tracks the release automatically.
+        openapi.info.version = concat!("v", env!("CARGO_PKG_VERSION")).to_string();
+
         let components = openapi.components.get_or_insert_with(Default::default);
         components.add_security_scheme(
             "bearer_auth",
