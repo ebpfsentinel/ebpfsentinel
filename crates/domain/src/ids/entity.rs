@@ -225,6 +225,7 @@ impl IdsRule {
     pub fn to_ebpf_key(&self) -> Option<IdsPatternKey> {
         let dst_port = self.dst_port?;
         Some(IdsPatternKey {
+            tenant_id: 0,
             dst_port,
             protocol: self.protocol.to_u8(),
             _padding: 0,
@@ -238,6 +239,7 @@ impl IdsRule {
     pub fn to_ebpf_src_key(&self) -> Option<IdsPatternKey> {
         let src_port = self.src_port?;
         Some(IdsPatternKey {
+            tenant_id: 0,
             dst_port: src_port,
             protocol: self.protocol.to_u8(),
             _padding: 0,

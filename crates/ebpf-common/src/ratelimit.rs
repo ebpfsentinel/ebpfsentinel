@@ -33,20 +33,33 @@ pub const ALGO_SYNCOOKIE: u8 = 4;
 pub const SLIDING_WINDOW_NUM_SLOTS: usize = 8;
 
 /// Key for the `RATELIMIT_CONFIG` and `RATELIMIT_BUCKETS` `HashMap`s (IPv4).
-/// Key `{ src_ip: 0 }` is the global default config.
-/// Size: 4 bytes.
+///
+/// Tenant-scoped: the key is `(tenant_id, src_ip)`. `tenant_id == 0` is the
+/// global/floating tenant and preserves the standalone OSS behaviour (a
+/// standalone agent only ever resolves tenant 0). Lookup falls back to the
+/// global tenant when no tenant-specific entry exists — see the kernel
+/// `lookup_config` for the `(tenant, src_ip) → (tenant, 0) → (0, src_ip) →
+/// (0, 0)` fallback chain. Key `{ tenant_id: 0, src_ip: 0 }` is the global
+/// default config.
+/// Size: 8 bytes (aligned to 4 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RateLimitKey {
+    /// Tenant identifier (0 = global/floating, applies when no tenant entry).
+    pub tenant_id: u32,
     pub src_ip: u32,
 }
 
 /// Key for the `RATELIMIT_CONFIG_V6` and `RATELIMIT_BUCKETS_V6` `HashMap`s (IPv6).
-/// Key `{ src_addr: [0; 4] }` is the global default config.
-/// Size: 16 bytes (aligned to 4 bytes).
+///
+/// Tenant-scoped: see [`RateLimitKey`] for the `tenant_id == 0` global-fallback
+/// contract. Key `{ tenant_id: 0, src_addr: [0; 4] }` is the global default config.
+/// Size: 20 bytes (aligned to 4 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RateLimitKeyV6 {
+    /// Tenant identifier (0 = global/floating, applies when no tenant entry).
+    pub tenant_id: u32,
     pub src_addr: [u32; 4],
 }
 
@@ -270,7 +283,7 @@ mod tests {
 
     #[test]
     fn ratelimit_key_size() {
-        assert_eq!(mem::size_of::<RateLimitKey>(), 4);
+        assert_eq!(mem::size_of::<RateLimitKey>(), 8);
     }
 
     #[test]
@@ -304,7 +317,7 @@ mod tests {
 
     #[test]
     fn ratelimit_key_v6_size() {
-        assert_eq!(mem::size_of::<RateLimitKeyV6>(), 16);
+        assert_eq!(mem::size_of::<RateLimitKeyV6>(), 20);
     }
 
     #[test]
@@ -314,7 +327,10 @@ mod tests {
 
     #[test]
     fn ratelimit_key_field_offsets() {
-        assert_eq!(mem::offset_of!(RateLimitKey, src_ip), 0);
+        assert_eq!(mem::offset_of!(RateLimitKey, tenant_id), 0);
+        assert_eq!(mem::offset_of!(RateLimitKey, src_ip), 4);
+        assert_eq!(mem::offset_of!(RateLimitKeyV6, tenant_id), 0);
+        assert_eq!(mem::offset_of!(RateLimitKeyV6, src_addr), 4);
     }
 
     #[test]

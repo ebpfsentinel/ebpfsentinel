@@ -487,13 +487,18 @@ fn process_ratelimit_v4(
         return Ok(action);
     }
 
+    // Resolve the packet's tenant once; rate-limit config + buckets are
+    // tenant-scoped with a fall back to the global (tenant 0) config.
+    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) };
+
     // ── Country-tier LPM lookup (before per-IP) ────────────────────
     let lpm_key = Key::new(32, src_ip.to_be_bytes());
     if let Some(tier_val) = RL_LPM_SRC_V4.get(&lpm_key)
         && let Some(tier_cfg) = RL_TIER_CONFIG.get(tier_val.tier_id as u32)
         && tier_cfg.ns_per_token > 0
     {
-        let key = RateLimitKey { src_ip };
+        let key = RateLimitKey { tenant_id, src_ip };
         let now = unsafe { bpf_ktime_get_coarse_ns() };
         let passed = dispatch_algorithm(&key, tier_cfg, now);
         if passed {
@@ -511,20 +516,12 @@ fn process_ratelimit_v4(
     }
 
     // ── Existing: generic rate limiting ────────────────────────────
-    let key = RateLimitKey { src_ip };
+    let key = RateLimitKey { tenant_id, src_ip };
     let config = lookup_config(&key)?;
 
     // Check interface group membership before applying rate limit.
     let iface_groups = get_iface_groups(ctx);
     if !group_matches(config.group_mask, iface_groups) {
-        increment_metric(METRIC_PASSED);
-        return Ok(xdp_action::XDP_PASS);
-    }
-
-    // Check tenant isolation.
-    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
-    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) };
-    if config.tenant_id != 0 && config.tenant_id != tenant_id {
         increment_metric(METRIC_PASSED);
         return Ok(xdp_action::XDP_PASS);
     }
@@ -605,6 +602,11 @@ fn process_ratelimit_v6(
         return Ok(action);
     }
 
+    // Resolve the packet's tenant once; rate-limit config + buckets are
+    // tenant-scoped with a fall back to the global (tenant 0) config.
+    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr) };
+
     // ── Country-tier LPM lookup (IPv6, before per-IP) ──────────────
     let src_bytes = unsafe { (*ipv6hdr).src_addr };
     let lpm_key_v6 = Key::new(128, src_bytes);
@@ -612,7 +614,10 @@ fn process_ratelimit_v6(
         && let Some(tier_cfg) = RL_TIER_CONFIG.get(tier_val.tier_id as u32)
         && tier_cfg.ns_per_token > 0
     {
-        let key = RateLimitKey { src_ip: src_hash };
+        let key = RateLimitKey {
+            tenant_id,
+            src_ip: src_hash,
+        };
         let now = unsafe { bpf_ktime_get_coarse_ns() };
         let passed = dispatch_algorithm(&key, tier_cfg, now);
         if passed {
@@ -628,20 +633,15 @@ fn process_ratelimit_v6(
     }
 
     // ── Existing: generic rate limiting ────────────────────────────
-    let key = RateLimitKey { src_ip: src_hash };
+    let key = RateLimitKey {
+        tenant_id,
+        src_ip: src_hash,
+    };
     let config = lookup_config(&key)?;
 
     // Check interface group membership before applying rate limit.
     let iface_groups = get_iface_groups(ctx);
     if !group_matches(config.group_mask, iface_groups) {
-        increment_metric(METRIC_PASSED);
-        return Ok(xdp_action::XDP_PASS);
-    }
-
-    // Check tenant isolation.
-    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
-    let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr) };
-    if config.tenant_id != 0 && config.tenant_id != tenant_id {
         increment_metric(METRIC_PASSED);
         return Ok(xdp_action::XDP_PASS);
     }
@@ -665,15 +665,41 @@ fn process_ratelimit_v6(
     }
 }
 
-/// Look up rate limit config: per-source-IP first, then global default.
+/// Look up rate limit config with the per-tenant rule contract. Lookup order:
+/// `(tenant, src_ip)` → `(tenant, 0)` (tenant default) → `(0, src_ip)` (global
+/// per-IP) → `(0, 0)` (global default). A standalone OSS agent only ever
+/// resolves tenant 0, so this collapses to the original `src_ip → 0` chain.
 /// Returns Err(()) if no config is found (no rate limit → pass).
 #[inline(always)]
 fn lookup_config(key: &RateLimitKey) -> Result<&'static RateLimitConfig, ()> {
     let config = match unsafe { RATELIMIT_CONFIG.get(key) } {
         Some(cfg) => cfg,
         None => {
-            let default_key = RateLimitKey { src_ip: 0 };
-            match unsafe { RATELIMIT_CONFIG.get(&default_key) } {
+            let candidates = [
+                RateLimitKey {
+                    tenant_id: key.tenant_id,
+                    src_ip: 0,
+                },
+                RateLimitKey {
+                    tenant_id: 0,
+                    src_ip: key.src_ip,
+                },
+                RateLimitKey {
+                    tenant_id: 0,
+                    src_ip: 0,
+                },
+            ];
+            let mut found: Option<&'static RateLimitConfig> = None;
+            for cand in &candidates {
+                if cand.tenant_id == key.tenant_id && cand.src_ip == key.src_ip {
+                    continue; // already tried the exact key
+                }
+                if let Some(cfg) = unsafe { RATELIMIT_CONFIG.get(cand) } {
+                    found = Some(cfg);
+                    break;
+                }
+            }
+            match found {
                 Some(cfg) => cfg,
                 None => {
                     increment_metric(METRIC_PASSED);
@@ -772,7 +798,10 @@ fn check_syn_flood_v4(
     // Threshold mode: only activate when SYN rate exceeds threshold
     if cfg.threshold_mode != 0 {
         let now = unsafe { bpf_ktime_get_coarse_ns() };
-        let key = RateLimitKey { src_ip };
+        let key = RateLimitKey {
+            tenant_id: 0,
+            src_ip,
+        };
         if !syn_rate_exceeds_threshold(&key, cfg.threshold_pps, now) {
             return None; // Below threshold — let kernel handle normally
         }
@@ -846,7 +875,10 @@ fn check_syn_flood_v6(
 
     if cfg.threshold_mode != 0 {
         let now = unsafe { bpf_ktime_get_coarse_ns() };
-        let key = RateLimitKey { src_ip: src_hash };
+        let key = RateLimitKey {
+            tenant_id: 0,
+            src_ip: src_hash,
+        };
         if !syn_rate_exceeds_threshold(&key, cfg.threshold_pps, now) {
             return None;
         }
@@ -978,7 +1010,10 @@ fn process_icmp_v4(
 
     // Per-source rate limiting for ICMP echo
     let now = unsafe { bpf_ktime_get_coarse_ns() };
-    let key = RateLimitKey { src_ip };
+    let key = RateLimitKey {
+        tenant_id: 0,
+        src_ip,
+    };
     if icmp_rate_check(&key, cfg.max_pps as u64, now) {
         increment_ddos_metric(DDOS_METRIC_ICMP_PASSED);
         Ok(xdp_action::XDP_PASS)
@@ -1058,7 +1093,10 @@ fn process_icmp_v6(
     }
 
     let now = unsafe { bpf_ktime_get_coarse_ns() };
-    let key = RateLimitKey { src_ip: src_hash };
+    let key = RateLimitKey {
+        tenant_id: 0,
+        src_ip: src_hash,
+    };
     if icmp_rate_check(&key, cfg.max_pps as u64, now) {
         increment_ddos_metric(DDOS_METRIC_ICMP_PASSED);
         Ok(xdp_action::XDP_PASS)

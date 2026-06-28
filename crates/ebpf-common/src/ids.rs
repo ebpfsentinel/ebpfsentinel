@@ -33,11 +33,18 @@ pub struct IdsSamplingConfig {
 unsafe impl aya::Pod for IdsSamplingConfig {}
 
 /// Key for the IDS_PATTERNS HashMap.
-/// Matches on destination port + protocol for kernel fast-path detection.
-/// Size: 4 bytes (aligned to 2 bytes).
+///
+/// Tenant-scoped: the key is `(tenant_id, dst_port, protocol)`. `tenant_id == 0`
+/// is the global/floating tenant and preserves the standalone OSS behaviour (a
+/// standalone agent only ever resolves tenant 0). The kernel looks up the
+/// tenant-specific entry first, then falls back to the `tenant_id == 0` entry,
+/// so a per-tenant rule overrides a global one without breaking it.
+/// Size: 8 bytes (aligned to 4 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdsPatternKey {
+    /// Tenant identifier (0 = global/floating, applies when no tenant entry).
+    pub tenant_id: u32,
     pub dst_port: u16,
     pub protocol: u8,
     pub _padding: u8,
@@ -74,12 +81,19 @@ mod tests {
 
     #[test]
     fn test_ids_pattern_key_size() {
-        assert_eq!(mem::size_of::<IdsPatternKey>(), 4);
+        assert_eq!(mem::size_of::<IdsPatternKey>(), 8);
     }
 
     #[test]
     fn test_ids_pattern_key_alignment() {
-        assert_eq!(mem::align_of::<IdsPatternKey>(), 2);
+        assert_eq!(mem::align_of::<IdsPatternKey>(), 4);
+    }
+
+    #[test]
+    fn test_ids_pattern_key_field_offsets() {
+        assert_eq!(mem::offset_of!(IdsPatternKey, tenant_id), 0);
+        assert_eq!(mem::offset_of!(IdsPatternKey, dst_port), 4);
+        assert_eq!(mem::offset_of!(IdsPatternKey, protocol), 6);
     }
 
     #[test]

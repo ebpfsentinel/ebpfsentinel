@@ -116,9 +116,15 @@ impl RateLimitPolicy {
                     IpCidr::V4 { addr, .. } => addr,
                     IpCidr::V6 { .. } => 0,
                 });
-                EbpfKey { src_ip }
+                EbpfKey {
+                    tenant_id: 0,
+                    src_ip,
+                }
             }
-            RateLimitScope::Global => EbpfKey { src_ip: 0 },
+            RateLimitScope::Global => EbpfKey {
+                tenant_id: 0,
+                src_ip: 0,
+            },
         }
     }
 
@@ -320,6 +326,7 @@ mod tests {
         let policy = make_policy("rl-001", 1000, 2000);
         let key = policy.to_ebpf_key();
         assert_eq!(key.src_ip, 0);
+        assert_eq!(key.tenant_id, 0);
     }
 
     #[test]

@@ -494,7 +494,41 @@ fn process_ids_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
     )
 }
 
-/// IDS pattern lookup and action (shared by v4/v6 — key is port+protocol only).
+/// Look up an IDS pattern with the per-tenant rule contract: try the
+/// packet's own tenant first, then fall back to the global (tenant 0) entry.
+/// A standalone OSS agent only ever resolves tenant 0, so the fallback
+/// collapses to a single lookup and behaviour is unchanged.
+#[inline(always)]
+unsafe fn lookup_ids_pattern(
+    map: &'static HashMap<IdsPatternKey, IdsPatternValue>,
+    tenant_id: u32,
+    port: u16,
+    protocol: u8,
+) -> Option<&'static IdsPatternValue> {
+    unsafe {
+        let tenant_key = IdsPatternKey {
+            tenant_id,
+            dst_port: port,
+            protocol,
+            _padding: 0,
+        };
+        if let Some(p) = map.get(&tenant_key) {
+            return Some(p);
+        }
+        if tenant_id != 0 {
+            let global_key = IdsPatternKey {
+                tenant_id: 0,
+                dst_port: port,
+                protocol,
+                _padding: 0,
+            };
+            return map.get(&global_key);
+        }
+        None
+    }
+}
+
+/// IDS pattern lookup and action (shared by v4/v6 — key is tenant+port+protocol).
 #[inline(always)]
 fn process_ids_pattern(
     _ctx: &TcContext,
@@ -506,23 +540,22 @@ fn process_ids_pattern(
     flags: u8,
     vlan_id: u16,
 ) -> Result<i32, ()> {
-    let dst_key = IdsPatternKey {
-        dst_port,
-        protocol,
-        _padding: 0,
+    // Resolve the packet's tenant once; rule lookup is tenant-scoped with a
+    // fall back to the global (tenant 0) rule.
+    let ifindex = unsafe { (*_ctx.skb.skb).ifindex };
+    let tenant_id = if (flags & FLAG_IPV6) != 0 {
+        unsafe { resolve_tenant_id_v6(ifindex, vlan_id, src_addr) }
+    } else {
+        unsafe { resolve_tenant_id(ifindex, vlan_id, src_addr[0]) }
     };
 
     // Match on destination port first (the request leg), then fall back to
     // source port (the reply leg) so server-response rules fire on ingress.
-    let pattern = match unsafe { IDS_PATTERNS.get(&dst_key) } {
+    let pattern = match unsafe { lookup_ids_pattern(&IDS_PATTERNS, tenant_id, dst_port, protocol) }
+    {
         Some(p) => p,
         None => {
-            let src_key = IdsPatternKey {
-                dst_port: src_port,
-                protocol,
-                _padding: 0,
-            };
-            match unsafe { IDS_SRC_PATTERNS.get(&src_key) } {
+            match unsafe { lookup_ids_pattern(&IDS_SRC_PATTERNS, tenant_id, src_port, protocol) } {
                 Some(p) => p,
                 None => return Ok(TC_ACT_OK),
             }
@@ -533,17 +566,6 @@ fn process_ids_pattern(
     let iface_groups = get_iface_groups(_ctx);
     if !group_matches(pattern.group_mask, iface_groups) {
         return Ok(TC_ACT_OK); // group mismatch -> pass
-    }
-
-    // Check tenant isolation.
-    let ifindex = unsafe { (*_ctx.skb.skb).ifindex };
-    let tenant_id = if (flags & FLAG_IPV6) != 0 {
-        unsafe { resolve_tenant_id_v6(ifindex, vlan_id, src_addr) }
-    } else {
-        unsafe { resolve_tenant_id(ifindex, vlan_id, src_addr[0]) }
-    };
-    if pattern.tenant_id != 0 && pattern.tenant_id != tenant_id {
-        return Ok(TC_ACT_OK); // tenant mismatch -> pass
     }
 
     increment_metric(METRIC_MATCHED);

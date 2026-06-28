@@ -54,7 +54,10 @@ impl RateLimitMapManager {
 
         // Insert default config at key 0 (applies to unmatched source IPs)
         if default_rate > 0 {
-            let default_key = RateLimitKey { src_ip: 0 };
+            let default_key = RateLimitKey {
+                tenant_id: 0,
+                src_ip: 0,
+            };
             let default_config =
                 build_default_config(default_rate, default_burst, default_algorithm);
             self.config_map
@@ -99,6 +102,33 @@ impl RateLimitMapPort for RateLimitMapManager {
     ) -> Result<(), DomainError> {
         self.load_policies(policies, default_rate, default_burst, default_algorithm)
             .map_err(|e| DomainError::EngineError(format!("ratelimit map load failed: {e}")))
+    }
+
+    fn upsert_tenant_config(
+        &mut self,
+        key: RateLimitKey,
+        config: RateLimitConfig,
+    ) -> Result<(), DomainError> {
+        self.config_map.insert(key, config, 0).map_err(|e| {
+            DomainError::EngineError(format!("RATELIMIT_CONFIG tenant upsert failed: {e}"))
+        })?;
+        Ok(())
+    }
+
+    fn remove_tenant_config(&mut self, key: RateLimitKey) -> Result<(), DomainError> {
+        match self.config_map.remove(&key) {
+            // Success, or an absent key, are both no-ops. The kernel returns
+            // ENOENT (surfaced as a SyscallError) for a missing key.
+            Ok(()) | Err(aya::maps::MapError::KeyNotFound) => Ok(()),
+            Err(aya::maps::MapError::SyscallError(ref e))
+                if e.io_error.raw_os_error() == Some(libc::ENOENT) =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(DomainError::EngineError(format!(
+                "RATELIMIT_CONFIG tenant remove failed: {e}"
+            ))),
+        }
     }
 
     fn clear_config(&mut self) -> Result<(), DomainError> {
