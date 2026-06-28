@@ -186,11 +186,11 @@ fn ringbuf_has_backpressure() -> bool {
 /// all events pass through (no sampling).
 #[inline(always)]
 fn should_skip_by_sampling() -> bool {
-    if let Some(cfg) = IDS_SAMPLING_CONFIG.get(0) {
-        if cfg.mode == IDS_SAMPLING_RANDOM {
-            let rand = unsafe { bpf_get_prandom_u32() };
-            return rand > cfg.rate_threshold;
-        }
+    if let Some(cfg) = IDS_SAMPLING_CONFIG.get(0)
+        && cfg.mode == IDS_SAMPLING_RANDOM
+    {
+        let rand = unsafe { bpf_get_prandom_u32() };
+        return rand > cfg.rate_threshold;
     }
     false
 }
@@ -244,11 +244,11 @@ unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
         }
         // Priority 4: Cgroup-based (egress only — cgroup_id is 0 in softirq)
         let cgroup_id = bpf_get_current_cgroup_id();
-        if cgroup_id != 0 {
-            if let Some(&tid) = TENANT_CGROUP_MAP.get(&cgroup_id) {
-                increment_metric(METRIC_CGROUP_TENANT_RESOLVED);
-                return tid;
-            }
+        if cgroup_id != 0
+            && let Some(&tid) = TENANT_CGROUP_MAP.get(&cgroup_id)
+        {
+            increment_metric(METRIC_CGROUP_TENANT_RESOLVED);
+            return tid;
         }
         // Default tenant
         0
@@ -279,11 +279,11 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) 
         }
         // Priority 4: Cgroup-based (egress only)
         let cgroup_id = bpf_get_current_cgroup_id();
-        if cgroup_id != 0 {
-            if let Some(&tid) = TENANT_CGROUP_MAP.get(&cgroup_id) {
-                increment_metric(METRIC_CGROUP_TENANT_RESOLVED);
-                return tid;
-            }
+        if cgroup_id != 0
+            && let Some(&tid) = TENANT_CGROUP_MAP.get(&cgroup_id)
+        {
+            increment_metric(METRIC_CGROUP_TENANT_RESOLVED);
+            return tid;
         }
         // Default tenant
         0
@@ -376,6 +376,19 @@ fn try_tc_ids(ctx: &TcContext) -> Result<i32, ()> {
     }
 }
 
+/// Packet identity fields shared across the IDS detection and L7 event
+/// emitters. Bundled into one value so the hot-path helper signatures stay
+/// small; every consumer is `#[inline(always)]`, so the struct is flattened
+/// away by the optimiser and costs nothing at runtime.
+struct FlowMeta {
+    src_addr: [u32; 4],
+    dst_addr: [u32; 4],
+    src_port: u16,
+    dst_port: u16,
+    flags: u8,
+    vlan_id: u16,
+}
+
 /// IPv4 IDS processing path.
 #[inline(always)]
 fn process_ids_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) -> Result<i32, ()> {
@@ -410,36 +423,31 @@ fn process_ids_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
         _ => (0u16, 0u16),
     };
 
-    let src_addr = [src_ip, 0, 0, 0];
-    let dst_addr = [dst_ip, 0, 0, 0];
+    let flow = FlowMeta {
+        src_addr: [src_ip, 0, 0, 0],
+        dst_addr: [dst_ip, 0, 0, 0],
+        src_port,
+        dst_port,
+        flags,
+        vlan_id,
+    };
 
     // L7 payload capture (independent of IDS patterns).
     // Reuse the TCP header pointer from the port parse above.
-    if let Some(tcphdr) = tcp_hdr_ptr {
-        if unsafe { L7_PORTS.get(&dst_port) }.is_some() {
-            let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
-            let l7_offset = l4_offset + tcp_data_off;
-            // bpf_skb_load_bytes handles fragmented packets natively
-            // (via skb_header_pointer), so linearization via
-            // bpf_skb_pull_data is unnecessary and wastes ~1µs on
-            // large packets. Removed in favour of direct load.
-            emit_l7_event(
-                ctx, &src_addr, &dst_addr, src_port, dst_port, flags, vlan_id, l7_offset,
-            );
-        }
+    if let Some(tcphdr) = tcp_hdr_ptr
+        && unsafe { L7_PORTS.get(&dst_port) }.is_some()
+    {
+        let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
+        let l7_offset = l4_offset + tcp_data_off;
+        // bpf_skb_load_bytes handles fragmented packets natively
+        // (via skb_header_pointer), so linearization via
+        // bpf_skb_pull_data is unnecessary and wastes ~1µs on
+        // large packets. Removed in favour of direct load.
+        emit_l7_event(ctx, &flow, l7_offset);
     }
 
     // IDS pattern matching (key is port+protocol, no IP in key)
-    process_ids_pattern(
-        ctx,
-        &src_addr,
-        &dst_addr,
-        src_port,
-        dst_port,
-        protocol as u8,
-        flags,
-        vlan_id,
-    )
+    process_ids_pattern(ctx, &flow, protocol as u8)
 }
 
 /// IPv6 IDS processing path.
@@ -474,24 +482,29 @@ fn process_ids_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
         (0u16, 0u16)
     };
 
+    let flow = FlowMeta {
+        src_addr,
+        dst_addr,
+        src_port,
+        dst_port,
+        flags,
+        vlan_id,
+    };
+
     // L7 payload capture for IPv6 TCP.
     // Reuse the TCP header pointer from the port parse above.
-    if let Some(tcphdr) = tcp_hdr_ptr {
-        if unsafe { L7_PORTS.get(&dst_port) }.is_some() {
-            let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
-            let l7_offset = l4_offset + tcp_data_off;
-            // bpf_skb_load_bytes handles fragments natively — no
-            // linearization needed (see IPv4 path comment).
-            emit_l7_event(
-                ctx, &src_addr, &dst_addr, src_port, dst_port, flags, vlan_id, l7_offset,
-            );
-        }
+    if let Some(tcphdr) = tcp_hdr_ptr
+        && unsafe { L7_PORTS.get(&dst_port) }.is_some()
+    {
+        let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
+        let l7_offset = l4_offset + tcp_data_off;
+        // bpf_skb_load_bytes handles fragments natively — no
+        // linearization needed (see IPv4 path comment).
+        emit_l7_event(ctx, &flow, l7_offset);
     }
 
     // IDS pattern matching (key is port+protocol, same map for v4/v6)
-    process_ids_pattern(
-        ctx, &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
-    )
+    process_ids_pattern(ctx, &flow, next_hdr)
 }
 
 /// Look up an IDS pattern with the per-tenant rule contract: try the
@@ -530,16 +543,14 @@ unsafe fn lookup_ids_pattern(
 
 /// IDS pattern lookup and action (shared by v4/v6 — key is tenant+port+protocol).
 #[inline(always)]
-fn process_ids_pattern(
-    _ctx: &TcContext,
-    src_addr: &[u32; 4],
-    dst_addr: &[u32; 4],
-    src_port: u16,
-    dst_port: u16,
-    protocol: u8,
-    flags: u8,
-    vlan_id: u16,
-) -> Result<i32, ()> {
+fn process_ids_pattern(_ctx: &TcContext, flow: &FlowMeta, protocol: u8) -> Result<i32, ()> {
+    let src_addr = &flow.src_addr;
+    let dst_addr = &flow.dst_addr;
+    let src_port = flow.src_port;
+    let dst_port = flow.dst_port;
+    let flags = flow.flags;
+    let vlan_id = flow.vlan_id;
+
     // Resolve the packet's tenant once; rule lookup is tenant-scoped with a
     // fall back to the global (tenant 0) rule.
     let ifindex = unsafe { (*_ctx.skb.skb).ifindex };
@@ -582,20 +593,18 @@ fn process_ids_pattern(
         })();
 
         // Packet mirroring for forensics (enterprise feature, controlled by config map)
-        if let Some(mirror_enabled) = IDS_MIRROR_CONFIG.get(1) {
-            if *mirror_enabled == 1 {
-                if let Some(ifindex) = IDS_MIRROR_CONFIG.get(0) {
-                    let target_ifindex = *ifindex;
-                    if target_ifindex > 0 {
-                        unsafe {
-                            bpf_clone_redirect(
-                                _ctx.skb.skb as *mut _,
-                                target_ifindex,
-                                0, // flags: 0 = redirect ingress
-                            );
-                        }
-                    }
-                }
+        if let Some(mirror_enabled) = IDS_MIRROR_CONFIG.get(1)
+            && *mirror_enabled == 1
+            && let Some(ifindex) = IDS_MIRROR_CONFIG.get(0)
+            && *ifindex > 0
+        {
+            let target_ifindex = *ifindex;
+            unsafe {
+                bpf_clone_redirect(
+                    _ctx.skb.skb as *mut _,
+                    target_ifindex,
+                    0, // flags: 0 = redirect ingress
+                );
             }
         }
     }
@@ -660,16 +669,7 @@ fn increment_metric(index: u32) {
 /// including fragments without linearization, then falls back to
 /// `ctx.len()` if the dynptr creation fails (should not happen on 6.9+).
 #[inline(always)]
-fn emit_l7_event(
-    ctx: &TcContext,
-    src_addr: &[u32; 4],
-    dst_addr: &[u32; 4],
-    src_port: u16,
-    dst_port: u16,
-    flags: u8,
-    vlan_id: u16,
-    l7_offset: usize,
-) {
+fn emit_l7_event(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize) {
     if ringbuf_has_backpressure() {
         increment_metric(METRIC_EVENTS_DROPPED);
         return;
@@ -692,45 +692,15 @@ fn emit_l7_event(
     let payload_avail = pkt_len.saturating_sub(l7_offset);
 
     if payload_avail <= SMALL_L7_PAYLOAD {
-        emit_l7_small(
-            ctx,
-            src_addr,
-            dst_addr,
-            src_port,
-            dst_port,
-            flags,
-            vlan_id,
-            l7_offset,
-            payload_avail,
-        );
+        emit_l7_small(ctx, flow, l7_offset, payload_avail);
     } else {
-        emit_l7_full(
-            ctx,
-            src_addr,
-            dst_addr,
-            src_port,
-            dst_port,
-            flags,
-            vlan_id,
-            l7_offset,
-            payload_avail,
-        );
+        emit_l7_full(ctx, flow, l7_offset, payload_avail);
     }
 }
 
 /// Small L7 event (192 bytes): for packets with ≤ 128 bytes TCP payload.
 #[inline(always)]
-fn emit_l7_small(
-    ctx: &TcContext,
-    src_addr: &[u32; 4],
-    dst_addr: &[u32; 4],
-    src_port: u16,
-    dst_port: u16,
-    flags: u8,
-    vlan_id: u16,
-    l7_offset: usize,
-    payload_avail: usize,
-) {
+fn emit_l7_small(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_avail: usize) {
     // Bound the copy to what the packet actually carries, capped at the
     // buffer size. The clamp gives the verifier a known upper bound for
     // the `bpf_skb_load_bytes` length, and loading the exact available
@@ -757,17 +727,7 @@ fn emit_l7_small(
     if let Some(mut entry) = EVENTS.reserve::<L7EventSmall>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
-            fill_l7_header(
-                ctx,
-                &mut (*ptr).header,
-                src_addr,
-                dst_addr,
-                src_port,
-                dst_port,
-                flags,
-                vlan_id,
-                to_load as u32,
-            );
+            fill_l7_header(ctx, &mut (*ptr).header, flow, to_load as u32);
             // `bpf_skb_load_bytes` marks its destination region initialized
             // for the verifier, so no separate memset of the payload is
             // needed — an explicit memset of a RingBuf reservation explodes
@@ -791,17 +751,7 @@ fn emit_l7_small(
 /// sleepable arena-alloc kfunc is unavailable here; the copy-based
 /// `RingBuf` path is the sole transport.
 #[inline(always)]
-fn emit_l7_full(
-    ctx: &TcContext,
-    src_addr: &[u32; 4],
-    dst_addr: &[u32; 4],
-    src_port: u16,
-    dst_port: u16,
-    flags: u8,
-    vlan_id: u16,
-    l7_offset: usize,
-    payload_avail: usize,
-) {
+fn emit_l7_full(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_avail: usize) {
     // Bound the copy to what the packet actually carries, capped at the
     // buffer size. The clamp gives the verifier a known upper bound for
     // the `bpf_skb_load_bytes` length, and loading the exact available
@@ -828,17 +778,7 @@ fn emit_l7_full(
     if let Some(mut entry) = EVENTS.reserve::<L7EventBuf>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
-            fill_l7_header(
-                ctx,
-                &mut (*ptr).header,
-                src_addr,
-                dst_addr,
-                src_port,
-                dst_port,
-                flags,
-                vlan_id,
-                to_load as u32,
-            );
+            fill_l7_header(ctx, &mut (*ptr).header, flow, to_load as u32);
             // `bpf_skb_load_bytes` marks its destination region initialized
             // for the verifier, so no separate memset of the payload is
             // needed — an explicit memset of a RingBuf reservation explodes
@@ -867,14 +807,15 @@ fn emit_l7_full(
 unsafe fn fill_l7_header(
     ctx: &TcContext,
     header: &mut PacketEvent,
-    src_addr: &[u32; 4],
-    dst_addr: &[u32; 4],
-    src_port: u16,
-    dst_port: u16,
-    flags: u8,
-    vlan_id: u16,
+    flow: &FlowMeta,
     payload_len: u32,
 ) {
+    let src_addr = &flow.src_addr;
+    let dst_addr = &flow.dst_addr;
+    let src_port = flow.src_port;
+    let dst_port = flow.dst_port;
+    let flags = flow.flags;
+    let vlan_id = flow.vlan_id;
     unsafe {
         header.timestamp_ns = bpf_ktime_get_boot_ns();
         header.src_addr = *src_addr;
