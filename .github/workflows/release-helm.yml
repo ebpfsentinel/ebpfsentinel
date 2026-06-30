@@ -9,6 +9,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
 
     steps:
       - name: Checkout
@@ -52,5 +55,29 @@ jobs:
         run: helm package charts/ebpfsentinel/
 
       - name: Push Helm chart to GHCR
+        id: push
         run: |
-          helm push ebpfsentinel-${{ steps.version.outputs.version }}.tgz oci://ghcr.io/${{ steps.lowercase.outputs.owner }}/charts
+          helm push "ebpfsentinel-${{ steps.version.outputs.version }}.tgz" \
+            "oci://ghcr.io/${{ steps.lowercase.outputs.owner }}/charts" 2>&1 | tee push.log
+          DIGEST="$(grep -oiE 'sha256:[0-9a-f]{64}' push.log | head -1)"
+          if [ -z "$DIGEST" ]; then
+            echo "::error::could not parse pushed chart digest from helm output"
+            exit 1
+          fi
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${{ steps.lowercase.outputs.owner }}/charts/ebpfsentinel" >> "$GITHUB_OUTPUT"
+
+  # cosign keyless signature of the pushed OCI chart artifact (no SBOM —
+  # syft does not produce a meaningful SBOM for a Helm chart).
+  sign:
+    name: Sign chart
+    needs: release
+    permissions:
+      id-token: write
+      packages: write
+      contents: read
+    uses: ebpfsentinel/ebpfsentinel-release/.github/workflows/sign-image.yml@v1
+    with:
+      image: ${{ needs.release.outputs.image }}
+      digest: ${{ needs.release.outputs.digest }}
+      sbom: false
