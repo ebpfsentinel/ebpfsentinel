@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Versioning follows **CalVer**: `YYYY.M.RELEASE` (year, month without leading zero, release index within that month). Tags use the `v` prefix: `v2026.3.1`.
 
+Within each release, entries are grouped **Added → Changed → Fixed → Security**, and each group is split into thematic subsections so a reader can scan one area (datapath, deployment, API…) at a time.
+
 ## [2026.6.1] - 2026-06-16
 
 ### Added
@@ -31,7 +33,7 @@ Versioning follows **CalVer**: `YYYY.M.RELEASE` (year, month without leading zer
 - **cgroup attribution**: `cgroup_id` on packet/DLP/DNS events, cgroup resolver with LRU cache, port/adapter/alert plumbing
 - **Docker + Kubernetes enrichers**: Docker Engine API client and Kubernetes API enrichment of alerts
 - **tc-ids container attribution**: egress hook + `src_port` rule matching tag locally-originated traffic with a non-zero cgroup id
-- **netkit support**: BPF attach with device detection, pod namespace discovery, and a hot-plug watcher for Kubernetes networking
+- **netkit support**: native TC-program attach on Cilium netkit pod interfaces (kernel 6.7+) via `BPF_LINK_CREATE` + `BPF_NETKIT_PRIMARY`, with device detection, pod namespace discovery, and a hot-plug watcher that attaches/detaches as pods come and go
 - **Container/K8s context** surfaced on both the REST and gRPC alert streams
 
 #### TLS Intelligence (JA4+)
@@ -73,25 +75,21 @@ Versioning follows **CalVer**: `YYYY.M.RELEASE` (year, month without leading zer
 
 ### Changed
 
+#### Platform requirements
 - **Minimum kernel raised 6.6 → 6.9**, enforced as a mandatory startup gate with no API-only fallback
-- **Connection tracking is kernel netfilter only**: `CT_TABLE_V4/V6` shadow maps and the userspace TCP state machine were removed
 - **eBPF loads via BPF token by default**; capabilities are demoted to a fallback and the agent runs rootless under a user namespace
+
+#### Connection tracking
+- **Connection tracking is kernel netfilter only**: `CT_TABLE_V4/V6` shadow maps and the userspace TCP state machine were removed
+
+#### Deployment & architecture
 - **Privilege-split deployment**: warden broker + rootless agent across Docker, docker-compose, Helm, systemd, and the integration harness (the combined single-container/launcher topology was retired)
 - **Per-domain config reload locks** replace the single global reload mutex
 - **Architecture cleanup**: Prometheus metrics adapter moved out of infrastructure, HTTP driving adapter moved to the agent crate, kernel-version gate collapsed onto a single `kernel_probe` source of truth
+- **Arena event paths**: zero-copy arena paths were added and then narrowed to a RingBuf fallback where `BPF_MAP_TYPE_ARENA` proved non-functional under load
 - Rust toolchain refreshed; `actions/checkout` and other CI action majors bumped
-- Arena zero-copy event paths were added and then narrowed to a RingBuf fallback where `BPF_MAP_TYPE_ARENA` proved non-functional under load
 
 ### Fixed
-
-#### Security
-- **Webhook/feed SSRF hardening**: stopped following redirects, validate the resolved IP at connect time, and closed numeric-IP / mapped-IPv6 / DNS-rebinding bypasses
-- **RBAC write enforcement** added to 16 mutating API endpoints
-- **Config disclosure**: webhook `Authorization` header values and `api_key_salt` masked in `sanitized()` (were leaking via `GET /api/v1/config`)
-- **Path traversal**: reject `..` in the key/cert path allowlist (`starts_with` was bypassable)
-- **JWKS**: plaintext fetch restricted to loopback, inline refresh cooldown caps unauthenticated DoS amplification
-- **No error-detail leakage** in HTTP 500 bodies — logged server-side, generic message returned
-- **DoS guards**: reject overflowing Redis bulk length, bound STIX/JSON feed parsing to `max_iocs`, compile-time-safe DNS header bounds, runtime capture-id path-safety
 
 #### Datapath
 - **SYN cookies**: use kernel `bpf_tcp_raw` syncookies so legit clients complete the handshake under flood; keyed with a SipHash-2-4 PRF + CSPRNG secret; IPv6 SYN+ACK forged from VLAN-correct addresses
@@ -114,6 +112,16 @@ Versioning follows **CalVer**: `YYYY.M.RELEASE` (year, month without leading zer
 - **musl/Docker builds**: typed `SIOCGIF*` ioctl constants, platform-portable `msg_controllen` cast, config dir staged at 0755 for rootless traversal
 - **TLS API 500s** fixed via `TlsConnectInfo`/`ConnectInfo` injection and axum 0.8 `into_make_service()`
 - Dependency bumps: `rustls-webpki` 0.103.13, `lettre` 0.11.22
+
+### Security
+
+- **Webhook/feed SSRF hardening**: stopped following redirects, validate the resolved IP at connect time, and closed numeric-IP / mapped-IPv6 / DNS-rebinding bypasses
+- **RBAC write enforcement** added to 16 mutating API endpoints
+- **Config disclosure**: webhook `Authorization` header values and `api_key_salt` masked in `sanitized()` (were leaking via `GET /api/v1/config`)
+- **Path traversal**: reject `..` in the key/cert path allowlist (`starts_with` was bypassable)
+- **JWKS**: plaintext fetch restricted to loopback, inline refresh cooldown caps unauthenticated DoS amplification
+- **No error-detail leakage** in HTTP 500 bodies — logged server-side, generic message returned
+- **DoS guards**: reject overflowing Redis bulk length, bound STIX/JSON feed parsing to `max_iocs`, compile-time-safe DNS header bounds, runtime capture-id path-safety
 
 ## [2026.3.2] - 2026-03-28
 
@@ -171,18 +179,6 @@ Versioning follows **CalVer**: `YYYY.M.RELEASE` (year, month without leading zer
 - **Configurable `securityContext`**, PodDisruptionBudget, container resource limits, optional NetworkPolicy
 - **CAP_NET_RAW**: added to systemd service, captures directory at `/var/lib/ebpfsentinel/captures`
 
-#### Security Hardening
-- **gRPC API key auth**: `x-api-key` header support; gRPC reflection now opt-in
-- **Token revocation**: constant-time API key lookup with revocation list
-- **SSRF protection**: webhook URLs, feed URLs, alert destinations validated against private/loopback/multicast with header injection prevention
-- **Input validation**: BPF filter length limits, interface/namespace name validation, DLP regex validation at config time, JSON nesting depth and YAML size limits
-- **TLS hardening**: default TLS 1.3 only (opt-in 1.2), minimum 2048-bit RSA for JWT, restricted key paths
-- **API rate limiting**: auth-specific rate limits, metrics endpoint rate-limited regardless of auth config
-- **CORS hardening**: exact host validation (fixes origin bypass), restricted to localhost or explicit origins
-- **HTTP security headers**: standard headers on all responses
-- **Salted API key hashes**: `/dev/urandom` for cryptographically secure salt generation
-- **Startup hardening**: restrictive umask, privilege check, strict config file permissions (640), minimum kernel 6.6
-
 #### CI/CD & Quality
 - **Miri + cargo-careful CI jobs**: `deny(unsafe_op_in_unsafe_fn)` in ebpf-common
 - **32 property-based tests (proptest)**: DNS, STIX, CIDR, L7 parsers
@@ -194,35 +190,6 @@ Versioning follows **CalVer**: `YYYY.M.RELEASE` (year, month without leading zer
 - **CI composite actions**: deduplicated workflows, removed redundant audit job
 - **Least-privilege CI/CD permissions**: all workflows hardened
 - **Per-worker Prometheus metrics**: parallel event dispatch observability
-
-### Fixed
-
-- **CORS origin bypass** (P0): prefix match replaced with exact host validation
-- **eBPF verifier failures**: tc-conntrack, tc-nat, uprobe-dlp, xdp-firewall, xdp-ratelimit compatibility fixes
-- **DLP auto-detect SSL library**: OpenSSL/BoringSSL path detection for uprobe attachment
-- **JA4 pipeline**: end-to-end wiring — compute in L7 events, cache, enrich alerts, real cache in API
-- **OTLP config**: wired tests, DoH/DoT metrics, custom resolvers
-- **tc-dns SKB linearization**: jumbo frame support via `bpf_skb_pull_data`
-- **tc-ids `ctx.len()`**: use instead of linear buffer size for `bpf_skb_pull_data`
-- **Kernel memory leak padding**: ESP/AH IPv6 parsing, IHL validation, ICMP conntrack
-- **`take_map` consuming ProgramArray**: on repeated eBPF wiring
-- **JWKS fetch logic**: composite auth provider no longer leaks internal error details
-- **Token revocation not enforced**: revocation list wired into authentication chain
-- **Namespace access default-deny**: absent `namespaces` JWT claim now denies access
-- **DNS compression pointer off-by-one**: hop limit boundary corrected
-- **Firewall stale fast-path**: HashMaps flushed on rule reload
-- **RwLock poison handling**: logged and handled instead of silently recovering
-- **LB ifindex path traversal**: interface name validated in load balancer resolver
-- **DLP uprobe memory leak**: `LruHashMap` for bounded memory, `saturating_sub` for safe arithmetic
-- **Bearer token parsing**: malformed tokens rejected early
-- **SHA validation**: corrected binary integrity version check
-- **Async alert pipeline**: `std::sync::Mutex` → `tokio::sync::Mutex` in async senders
-- **Docker distroless**: `COPY` from builder stage instead of `RUN mkdir`
-- **Docker kernel headers**: symlink Linux headers into musl include path for libpcap build
-- **API latency test**: was measuring timeout duration instead of actual latency
-- **OpenAPI spec**: added QoS endpoints, SecurityScheme, 401/403 responses on all protected paths
-- **Unused `asm_experimental_arch`**: removed from eBPF programs that don't use inline assembly
-- **Benchmark methodology**: 2-VM delta method with 3-run averaging, 5Gbps cap, 500Mbps volume baseline
 
 ### Changed
 
@@ -236,6 +203,51 @@ Versioning follows **CalVer**: `YYYY.M.RELEASE` (year, month without leading zer
 - eBPF Rust 2024 edition: `unsafe` blocks added, unused imports removed, `transmute` replaced
 - Config examples updated with PQ mode, OTLP export, DoH resolver settings
 - QUICKSTART.md added alongside Helm chart
+
+### Fixed
+
+- **eBPF verifier failures**: tc-conntrack, tc-nat, uprobe-dlp, xdp-firewall, xdp-ratelimit compatibility fixes
+- **DLP auto-detect SSL library**: OpenSSL/BoringSSL path detection for uprobe attachment
+- **JA4 pipeline**: end-to-end wiring — compute in L7 events, cache, enrich alerts, real cache in API
+- **OTLP config**: wired tests, DoH/DoT metrics, custom resolvers
+- **tc-dns SKB linearization**: jumbo frame support via `bpf_skb_pull_data`
+- **tc-ids `ctx.len()`**: use instead of linear buffer size for `bpf_skb_pull_data`
+- **Kernel memory leak padding**: ESP/AH IPv6 parsing, IHL validation, ICMP conntrack
+- **`take_map` consuming ProgramArray**: on repeated eBPF wiring
+- **DNS compression pointer off-by-one**: hop limit boundary corrected
+- **Firewall stale fast-path**: HashMaps flushed on rule reload
+- **RwLock poison handling**: logged and handled instead of silently recovering
+- **DLP uprobe memory leak**: `LruHashMap` for bounded memory, `saturating_sub` for safe arithmetic
+- **Async alert pipeline**: `std::sync::Mutex` → `tokio::sync::Mutex` in async senders
+- **Docker distroless**: `COPY` from builder stage instead of `RUN mkdir`
+- **Docker kernel headers**: symlink Linux headers into musl include path for libpcap build
+- **API latency test**: was measuring timeout duration instead of actual latency
+- **OpenAPI spec**: added QoS endpoints, SecurityScheme, 401/403 responses on all protected paths
+- **Unused `asm_experimental_arch`**: removed from eBPF programs that don't use inline assembly
+- **Benchmark methodology**: 2-VM delta method with 3-run averaging, 5Gbps cap, 500Mbps volume baseline
+
+### Security
+
+#### Hardening
+- **gRPC API key auth**: `x-api-key` header support; gRPC reflection now opt-in
+- **Token revocation**: constant-time API key lookup with revocation list
+- **SSRF protection**: webhook URLs, feed URLs, alert destinations validated against private/loopback/multicast with header injection prevention
+- **Input validation**: BPF filter length limits, interface/namespace name validation, DLP regex validation at config time, JSON nesting depth and YAML size limits
+- **TLS hardening**: default TLS 1.3 only (opt-in 1.2), minimum 2048-bit RSA for JWT, restricted key paths
+- **API rate limiting**: auth-specific rate limits, metrics endpoint rate-limited regardless of auth config
+- **CORS hardening**: exact host validation (fixes origin bypass), restricted to localhost or explicit origins
+- **HTTP security headers**: standard headers on all responses
+- **Salted API key hashes**: `/dev/urandom` for cryptographically secure salt generation
+- **Startup hardening**: restrictive umask, privilege check, strict config file permissions (640), minimum kernel 6.6
+
+#### Fixes
+- **CORS origin bypass** (P0): prefix match replaced with exact host validation
+- **Token revocation not enforced**: revocation list wired into authentication chain
+- **Namespace access default-deny**: absent `namespaces` JWT claim now denies access
+- **JWKS fetch logic**: composite auth provider no longer leaks internal error details
+- **Bearer token parsing**: malformed tokens rejected early
+- **SHA validation**: corrected binary integrity version check
+- **LB ifindex path traversal**: interface name validated in load balancer resolver
 
 ## [2026.3.1] - 2026-03-15
 
@@ -280,3 +292,5 @@ Versioning follows **CalVer**: `YYYY.M.RELEASE` (year, month without leading zer
 - QoS EDT (Earliest Departure Time) pacing: delay is tracked in metrics but not enforced in the eBPF datapath (awaiting aya-ebpf `bpf_skb_set_tstamp` API)
 - User RingBuf config push: eBPF drain callback is wired, but userspace write requires mmap-based access not yet available in aya 0.13.1
 - gRPC is alerts-only (streaming); all CRUD/management operations use REST API
+</content>
+</invoke>
