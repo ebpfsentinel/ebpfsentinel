@@ -267,7 +267,7 @@ jobs:
         run: |
           gh release create "${{ needs.prepare.outputs.tag }}" \
             artifacts/*.tar.gz artifacts/openapi.json \
-            artifacts/*.sig artifacts/*.crt \
+            artifacts/*.sig artifacts/*.crt artifacts/*.bundle \
             artifacts/SHA256SUMS \
             --title "eBPFsentinel ${{ needs.prepare.outputs.tag }}" \
             --notes-file release-notes.md
