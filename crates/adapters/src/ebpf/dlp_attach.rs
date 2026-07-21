@@ -413,6 +413,18 @@ impl DlpUprobeAttacher {
                     offset,
                     *is_ret,
                 )?;
+                // The warden created the link, so the direct path's log line
+                // never fires here. Say the same thing anyway: an operator
+                // debugging a rootless deployment needs the same evidence
+                // that a probe attached, whoever issued BPF_LINK_CREATE.
+                let probe = if *is_ret { "uretprobe" } else { "uprobe" };
+                tracing::info!(
+                    program = prog,
+                    target = path,
+                    symbol = sym,
+                    probe,
+                    "uprobe kfunc program attached (uprobe_multi link) via warden"
+                );
                 links.push(link);
             } else {
                 // Direct: the agent creates the link itself (bare-metal / single

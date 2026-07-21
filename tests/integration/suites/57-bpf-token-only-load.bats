@@ -98,9 +98,16 @@ teardown_file() {
     bpf_token_log_has 'eBPF tc-dns active'
 }
 
-@test "uprobe-dlp loads and attaches via uprobe_multi link (token)" {
+@test "uprobe-dlp loads through the token" {
+    # Load only. Under the warden posture the attach is deliberately kept off
+    # the startup path — `try_load_uprobe_dlp` arms the module and the
+    # lifecycle watcher does the /proc scan and every BPF_LINK_CREATE
+    # asynchronously, because the brokered scan can be slow on a busy node.
+    # Whether a link is created therefore depends on a TLS process existing
+    # and on the watcher's poll landing inside this suite's short run window
+    # — neither of which this suite controls. The attach itself is asserted
+    # by suites 27 and 60, which run a full agent against real TLS traffic.
     bpf_token_log_has 'eBPF uprobe-dlp active'
-    bpf_token_log_has 'uprobe_multi link'
 }
 
 @test "tc-ids loads via token using the fou module kfunc" {
