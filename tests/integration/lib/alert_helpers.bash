@@ -60,3 +60,32 @@ assert_alert_has_any_mitre_technique() {
     echo "No alert carries a MITRE technique mapping after ${max}s" >&2
     return 1
 }
+
+# ── SSE client ─────────────────────────────────────────────────────
+#
+# Shared so any suite that can produce alerts may assert on the stream,
+# not just the REST-level SSE suite.
+
+# _start_sse_client <path> <out_file> <pid_file> [extra_curl_args...]
+_start_sse_client() {
+    local path="$1" out_file="$2" pid_file="$3"
+    shift 3
+    curl -sN \
+        -H 'Accept: text/event-stream' \
+        "$@" \
+        "${BASE_URL}${path}" >"$out_file" 2>&1 &
+    echo "$!" > "$pid_file"
+}
+
+# _stop_sse_client <pid_file>
+_stop_sse_client() {
+    local pid_file="$1"
+    if [ -f "$pid_file" ]; then
+        local pid
+        pid="$(cat "$pid_file")"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+        rm -f "$pid_file"
+    fi
+}

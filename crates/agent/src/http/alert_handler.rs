@@ -590,6 +590,14 @@ pub async fn stream_alerts(
         .unwrap_or_default();
     let rx = tx.subscribe();
 
+    // An alert is pushed to the replay buffer *before* it is broadcast, so
+    // one that lands between the snapshot above and this subscribe is
+    // delivered twice: once from the replay, once live. Remember what the
+    // replay already carried and drop those ids from the live stream. The
+    // set is bounded by the replay buffer's capacity.
+    let replayed_ids: std::collections::HashSet<String> =
+        replay.iter().map(|a| a.id.clone()).collect();
+
     let metrics: Arc<dyn MetricsPort> = Arc::clone(&state.metrics) as Arc<dyn MetricsPort>;
     let guard = SubscriberGuard::new(metrics, subscriber_counter());
 
@@ -603,6 +611,7 @@ pub async fn stream_alerts(
 
     let live_filter = filter;
     let live_stream = BroadcastStream::new(rx).filter_map(move |item| match item {
+        Ok(alert) if replayed_ids.contains(&alert.id) => None,
         Ok(alert) if live_filter.matches(&alert) => Some(Ok(alert_to_event(&alert))),
         Ok(_) | Err(_) => None,
     });

@@ -48,6 +48,16 @@ teardown_file() {
 
 # ── Tests ──────────────────────────────────────────────────────────
 
+# _drive_alert_traffic — one IDS-matching flow on the rule's port.
+_drive_alert_traffic() {
+    timeout 10 ncat -l "$EBPF_HOST_IP" 4444 >/dev/null 2>&1 &
+    local listener_pid=$!
+    sleep 0.5
+    send_tcp_from_ns "$EBPF_HOST_IP" 4444 "ALERT_E2E_TEST" 3
+    kill "$listener_pid" 2>/dev/null || true
+    wait "$listener_pid" 2>/dev/null || true
+}
+
 @test "traffic on port 4444 generates IDS alert" {
     require_root
     require_tool ncat
@@ -361,4 +371,56 @@ teardown_file() {
         soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
+}
+
+# ── SSE resume ─────────────────────────────────────────────────────
+
+@test "Last-Event-ID resume returns missed events without duplication" {
+    require_tool jq
+
+    # This suite has driven IDS traffic, so the buffer holds real alerts —
+    # the precondition suite 34 cannot satisfy on its detector-less config.
+    local first_id
+    first_id="$(api_get '/api/v1/alerts?limit=1' | jq -r '.alerts[0].id // empty')"
+    [ -n "${first_id}" ] || {
+        echo "no alert buffered — the suite should have produced one by now" >&2
+        api_get /api/v1/alerts >&2 || true
+        return 1
+    }
+
+    # Produce a second, newer alert so the replay has something to deliver.
+    _drive_alert_traffic
+    local second_id attempt=0
+    while [ "${attempt}" -lt 15 ]; do
+        second_id="$(api_get '/api/v1/alerts?limit=1' | jq -r '.alerts[0].id // empty')"
+        [ -n "${second_id}" ] && [ "${second_id}" != "${first_id}" ] && break
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    [ -n "${second_id}" ] && [ "${second_id}" != "${first_id}" ] || {
+        echo "no newer alert appeared; resume cannot be exercised" >&2
+        return 1
+    }
+
+    local out_file pid_file
+    out_file="$(mktemp -t sse-resume.XXXXXX)"
+    pid_file="$(mktemp -t sse-resume-pid.XXXXXX)"
+    _start_sse_client "/api/v1/alerts/stream" "$out_file" "$pid_file" \
+        -H "Last-Event-ID: ${first_id}"
+    sleep 3
+    _stop_sse_client "$pid_file"
+
+    grep -q "id: ${second_id}" "$out_file" || {
+        echo "newer alert id ${second_id} missing from the resume:" >&2
+        cat "$out_file" >&2
+        rm -f "$out_file"
+        return 1
+    }
+    ! grep -q "id: ${first_id}" "$out_file" || {
+        echo "already-acknowledged id ${first_id} replayed again:" >&2
+        cat "$out_file" >&2
+        rm -f "$out_file"
+        return 1
+    }
+    rm -f "$out_file"
 }

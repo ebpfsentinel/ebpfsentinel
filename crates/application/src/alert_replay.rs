@@ -60,11 +60,22 @@ impl AlertReplayBuffer {
     }
 
     /// Push an alert onto the buffer, evicting the oldest entry if full.
+    ///
+    /// An id already present is not pushed again. The `Last-Event-ID` resume
+    /// contract resolves a client's position by locating that id in the
+    /// buffer, so a second copy would make every alert between the two
+    /// copies replay twice — and the acknowledged event itself come back.
+    /// The alert store cannot show this because it is keyed by id and a
+    /// re-store is idempotent; this buffer is append-only, so it must
+    /// enforce uniqueness itself.
     pub fn push(&self, alert: Alert) {
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.iter().any(|a| a.id == alert.id) {
+            return;
+        }
         if guard.len() >= self.capacity {
             guard.pop_front();
         }
@@ -119,7 +130,7 @@ mod tests {
     use domain::alert::entity::Alert;
     use domain::common::entity::{DomainMode, RuleId, Severity};
 
-    fn alert_with_id(id: &str) -> Alert {
+    pub(super) fn alert_with_id(id: &str) -> Alert {
         Alert {
             id: id.to_string(),
             timestamp_ns: 0,
@@ -220,5 +231,37 @@ mod tests {
         buf.push(alert_with_id("a"));
         buf.push(alert_with_id("b"));
         assert_eq!(buf.snapshot().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::super::alert_replay::tests::alert_with_id;
+    use super::AlertReplayBuffer;
+
+    #[test]
+    fn the_same_id_is_not_buffered_twice() {
+        let buf = AlertReplayBuffer::new(8);
+        buf.push(alert_with_id("a"));
+        buf.push(alert_with_id("a"));
+        buf.push(alert_with_id("b"));
+        assert_eq!(buf.len(), 2);
+    }
+
+    #[test]
+    fn resume_never_returns_the_acknowledged_event() {
+        let buf = AlertReplayBuffer::new(8);
+        buf.push(alert_with_id("a"));
+        // A duplicate dispatch upstream must not corrupt the resume point.
+        buf.push(alert_with_id("a"));
+        buf.push(alert_with_id("b"));
+        buf.push(alert_with_id("c"));
+
+        let after: Vec<String> = buf
+            .snapshot_after(Some("a"))
+            .into_iter()
+            .map(|x| x.id)
+            .collect();
+        assert_eq!(after, vec!["b".to_string(), "c".to_string()]);
     }
 }

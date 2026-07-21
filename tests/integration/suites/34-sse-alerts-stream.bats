@@ -14,6 +14,11 @@
 # alert source wired. Synthetic alerts are injected by toggling a rule and
 # replaying packets via the existing fixture helpers.
 
+# The Last-Event-ID resume assertion lives in suite 25 instead: it needs real
+# alerts in the buffer, and this suite runs the agent on `lo` with every
+# detector off, so it could never produce one. Here we cover the stream's
+# REST-level contract only.
+
 load '../lib/helpers'
 
 setup_file() {
@@ -38,28 +43,6 @@ teardown_file() {
 
 # Background curl helper. Streams `path` to `out_file` and writes the
 # pid into `pid_file`. Returns immediately.
-_start_sse_client() {
-    local path="$1" out_file="$2" pid_file="$3"
-    shift 3
-    curl -sN \
-        -H 'Accept: text/event-stream' \
-        "$@" \
-        "${BASE_URL}${path}" >"$out_file" 2>&1 &
-    echo "$!" > "$pid_file"
-}
-
-_stop_sse_client() {
-    local pid_file="$1"
-    if [ -f "$pid_file" ]; then
-        local pid
-        pid="$(cat "$pid_file")"
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            kill -TERM "$pid" 2>/dev/null || true
-        fi
-        rm -f "$pid_file"
-    fi
-}
-
 # ── Tests ──────────────────────────────────────────────────────────
 
 @test "SSE stream returns text/event-stream content-type" {
@@ -93,46 +76,6 @@ _stop_sse_client() {
         "${BASE_URL}/api/v1/alerts/stream?severity_min=urgent"
     [ "$status" -eq 0 ]
     [ "$output" = "400" ]
-}
-
-@test "Last-Event-ID resume returns missed events without duplication" {
-    # Capture two distinct alert ids by polling the REST endpoint twice.
-    local first_id second_id
-    first_id="$(curl -s --max-time 3 "${BASE_URL}/api/v1/alerts?limit=1" \
-        | jq -r '.alerts[0].id // empty')"
-    if [ -z "$first_id" ]; then
-        soft_skip "no alerts buffered yet — cannot exercise Last-Event-ID"
-    fi
-
-    sleep 1
-    second_id="$(curl -s --max-time 3 "${BASE_URL}/api/v1/alerts?limit=1" \
-        | jq -r '.alerts[0].id // empty')"
-
-    # Connect with Last-Event-ID set to the older id and assert the newer
-    # id appears in the replay.
-    local out_file pid_file
-    out_file="$(mktemp -t sse-resume.XXXXXX)"
-    pid_file="$(mktemp -t sse-resume-pid.XXXXXX)"
-    _start_sse_client "/api/v1/alerts/stream" "$out_file" "$pid_file" \
-        -H "Last-Event-ID: ${first_id}"
-    sleep 2
-    _stop_sse_client "$pid_file"
-
-    if [ -n "$second_id" ] && [ "$second_id" != "$first_id" ]; then
-        # The replay must contain the newer id and must not contain the
-        # already-acknowledged first id (no duplication).
-        grep -q "id: ${second_id}" "$out_file" || {
-            echo "newer alert id ${second_id} missing from resume:"
-            cat "$out_file"
-            false
-        }
-        ! grep -q "id: ${first_id}" "$out_file" || {
-            echo "duplicated already-acked id ${first_id} in resume:"
-            cat "$out_file"
-            false
-        }
-    fi
-    rm -f "$out_file"
 }
 
 @test "severity_min=critical filters out lower-severity alerts" {
