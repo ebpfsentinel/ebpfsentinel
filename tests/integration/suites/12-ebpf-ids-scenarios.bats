@@ -249,10 +249,18 @@ teardown_file() {
     body="$(api_get /api/v1/alerts)"
     _load_http_status
     [ "$HTTP_STATUS" = "200" ]
-    # Port 80 should generate far fewer IDS alerts than monitored ports
-    local count
-    count="$(echo "$body" | jq '[.alerts[] | select(.component == "ids" and .dst_port == 80)] | length' 2>/dev/null)" || count="0"
-    [ "${count:-0}" -le 5 ]
+    # Compare the two ports rather than capping one of them. The store
+    # accumulates over the whole suite, so an absolute bound measures how much
+    # traffic ran earlier; what the test claims — and what matters — is that
+    # the unmonitored port stays below the monitored one.
+    local unmonitored monitored
+    unmonitored="$(echo "$body" | jq '[.alerts[] | select(.component == "ids" and .dst_port == 80)] | length' 2>/dev/null)" || unmonitored=0
+    monitored="$(echo "$body" | jq '[.alerts[] | select(.component == "ids" and .dst_port == 4444)] | length' 2>/dev/null)" || monitored=0
+
+    [ "${unmonitored:-0}" -lt "${monitored:-0}" ] || {
+        echo "unmonitored port 80 produced ${unmonitored} alerts vs ${monitored} on the monitored port 4444" >&2
+        return 1
+    }
 }
 
 @test "IDS metrics show processed packet count" {

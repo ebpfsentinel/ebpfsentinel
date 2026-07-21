@@ -16,7 +16,10 @@ use aya_ebpf::{
     },
     programs::XdpContext,
 };
-use aya_ebpf_bindings::helpers::bpf_probe_read_kernel;
+use aya_ebpf_bindings::bindings::{
+    BPF_FIB_LKUP_RET_SUCCESS, BPF_FIB_LOOKUP_DIRECT, bpf_fib_lookup as BpfFibLookupParams,
+};
+use aya_ebpf_bindings::helpers::{bpf_fib_lookup, bpf_probe_read_kernel};
 use core::mem;
 use ebpf_common::{
     conntrack::{
@@ -26,7 +29,10 @@ use ebpf_common::{
     event::{
         EVENT_TYPE_FIREWALL, FLAG_IPV6, FLAG_VLAN, META_FLAG_PRESENT, PacketEvent, XdpMetadata,
     },
-    zone::{MAX_ZONE_ENTRIES, ZONE_METRIC_SLOTS, ZONE_NONE, ZONE_POLICY_DENY},
+    zone::{
+        MAX_ZONE_ENTRIES, MAX_ZONE_POLICIES, ZONE_METRIC_SLOTS, ZONE_NONE, ZONE_POLICY_DENY,
+        zone_pair_key,
+    },
     firewall::{
         ACTION_DROP, ACTION_LOG, ACTION_PASS, ACTION_REJECT, CT_MATCH_ESTABLISHED,
         CT_MATCH_INVALID, CT_MATCH_NEW, CT_MATCH_RELATED, DEFAULT_POLICY_DROP, FirewallRuleEntry,
@@ -121,6 +127,18 @@ static ZONE_MAP: HashMap<u32, u8> = HashMap::with_max_entries(MAX_ZONE_ENTRIES, 
 /// zone's posture.
 #[map]
 static ZONE_DEFAULT_POLICY: HashMap<u8, u8> = HashMap::with_max_entries(MAX_ZONE_ENTRIES, 0);
+
+/// Per-CPU scratch for the FIB lookup parameters. A 64-byte struct zeroed on
+/// the stack costs the verifier an unrolled memset on every path; a scratch
+/// map costs one lookup.
+#[map]
+static FIB_PARAMS: PerCpuArray<BpfFibLookupParams> = PerCpuArray::with_max_entries(1, 0);
+
+/// Inter-zone policy: `zone_pair_key(from, to)` → 0 = allow, 1 = deny.
+/// Consulted before the zone's own default when the egress zone could be
+/// resolved.
+#[map]
+static ZONE_POLICY_MAP: HashMap<u16, u8> = HashMap::with_max_entries(MAX_ZONE_POLICIES, 0);
 
 /// Per-zone packet counters, indexed by `zone_id`. Slot 0 counts traffic on
 /// unzoned interfaces. Two counters per zone are folded into one slot each:
@@ -688,6 +706,68 @@ fn zone_default_policy(zone: u8) -> Option<u8> {
     unsafe { ZONE_DEFAULT_POLICY.get(&zone) }.copied()
 }
 
+/// Resolve the egress interface for an IPv4 packet through the kernel FIB.
+///
+/// At ingress the destination zone is unknown: it belongs to whichever
+/// interface the packet would leave by. `bpf_fib_lookup` answers exactly
+/// that. `BPF_FIB_LOOKUP_DIRECT` keeps the lookup to the FIB alone (no
+/// neighbour resolution), which is all that is needed to name the interface.
+/// Returns `None` whenever the route cannot be resolved — the caller then
+/// falls back to the zone's own posture rather than guessing.
+#[inline(always)]
+fn egress_ifindex_v4(
+    ctx: &XdpContext,
+    src_be: u32,
+    dst_be: u32,
+    l4_protocol: u8,
+    tot_len: u16,
+) -> Option<u32> {
+    let params = FIB_PARAMS.get_ptr_mut(0)?;
+
+    unsafe {
+        (*params).family = 2; // AF_INET
+        (*params).l4_protocol = l4_protocol;
+        (*params).__bindgen_anon_1.tot_len = tot_len;
+        (*params).__bindgen_anon_3.ipv4_src = src_be;
+        (*params).__bindgen_anon_4.ipv4_dst = dst_be;
+        (*params).ifindex = (*ctx.ctx).ingress_ifindex;
+    }
+
+    let rc = unsafe {
+        bpf_fib_lookup(
+            ctx.ctx.cast::<core::ffi::c_void>(),
+            params,
+            core::mem::size_of::<BpfFibLookupParams>() as i32,
+            BPF_FIB_LOOKUP_DIRECT,
+        )
+    };
+
+    if rc == BPF_FIB_LKUP_RET_SUCCESS as i64 {
+        Some(unsafe { (*params).ifindex })
+    } else {
+        None
+    }
+}
+
+/// The zone an ifindex belongs to, or [`ZONE_NONE`].
+#[inline(always)]
+fn zone_for_ifindex(ifindex: u32) -> u8 {
+    match unsafe { ZONE_MAP.get(&ifindex) } {
+        Some(&zone) => zone,
+        None => ZONE_NONE,
+    }
+}
+
+/// Inter-zone policy for a resolved (from, to) pair, if one is configured.
+/// Traffic that stays inside one zone is not inter-zone traffic.
+#[inline(always)]
+fn interzone_policy(from_zone: u8, to_zone: u8) -> Option<u8> {
+    if from_zone == ZONE_NONE || to_zone == ZONE_NONE || from_zone == to_zone {
+        return None;
+    }
+    unsafe { ZONE_POLICY_MAP.get(&zone_pair_key(from_zone, to_zone)) }.copied()
+}
+
 /// Count a packet against its zone. Bounded by the map size, so an out-of
 /// range zone id is dropped rather than clamped into another zone's slot.
 #[inline(always)]
@@ -718,13 +798,39 @@ fn read_default_policy() -> u8 {
 /// Apply the default policy action. Reads packet metadata from `PKT_CTX`.
 #[inline(always)]
 fn apply_default_policy(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void) -> Result<u32, ()> {
-    // No rule matched. A zone declares the posture for the interfaces it
-    // owns, so it decides here; interfaces outside any zone fall back to the
-    // global default. An explicit rule was already given priority above.
+    // No rule matched, so zone posture decides. Precedence, most specific
+    // first: an inter-zone policy for the resolved (from, to) pair, then the
+    // ingress zone's own default, then the global default. An explicit
+    // firewall rule already won above all of these.
     let zone = zone_for_ingress(ctx);
-    let drop = match zone_default_policy(zone) {
-        Some(zone_policy) => zone_policy == ZONE_POLICY_DENY,
-        None => read_default_policy() == DEFAULT_POLICY_DROP,
+
+    let interzone = if zone == ZONE_NONE {
+        // No zone on ingress: nothing inter-zone to evaluate, and the FIB
+        // lookup would be paid for nothing.
+        None
+    } else {
+        let pkt = match PKT_CTX.get(0) {
+            Some(p) => p,
+            None => return Err(()),
+        };
+        if (pkt.flags & FLAG_IPV6) == 0 {
+            egress_ifindex_v4(ctx, pkt.src_addr[0], pkt.dst_addr[0], pkt.protocol, 0)
+                .map(zone_for_ifindex)
+                .and_then(|to_zone| interzone_policy(zone, to_zone))
+        } else {
+            // IPv6 egress resolution is a separate lookup family; until it is
+            // wired, v6 falls through to the zone default rather than being
+            // judged by a v4-only answer.
+            None
+        }
+    };
+
+    let drop = match interzone {
+        Some(policy) => policy == ZONE_POLICY_DENY,
+        None => match zone_default_policy(zone) {
+            Some(zone_policy) => zone_policy == ZONE_POLICY_DENY,
+            None => read_default_policy() == DEFAULT_POLICY_DROP,
+        },
     };
 
     if drop {

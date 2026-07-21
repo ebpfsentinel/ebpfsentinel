@@ -3374,6 +3374,7 @@ pub fn try_load_xdp_firewall(
     {
         adapters::ebpf::map_manager::populate_zone_map(loader.ebpf_mut(), &zone_cfg);
         adapters::ebpf::map_manager::populate_zone_policy_map(loader.ebpf_mut(), &zone_cfg);
+        adapters::ebpf::map_manager::populate_zone_policy_pairs(loader.ebpf_mut(), &zone_cfg);
     }
 
     // Populate DDOS_CPUMAP with all online CPUs for DDoS CPU steering.

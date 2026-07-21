@@ -23,6 +23,12 @@ pub const ZONE_METRIC_SLOTS: u32 = 256;
 /// Maximum number of zone policy entries.
 pub const MAX_ZONE_POLICIES: u32 = 64;
 
+/// Key for the inter-zone policy map: `(from_zone << 8) | to_zone`.
+#[must_use]
+pub const fn zone_pair_key(from_zone: u8, to_zone: u8) -> u16 {
+    ((from_zone as u16) << 8) | (to_zone as u16)
+}
+
 /// Zone policy entry — maps (from_zone, to_zone) to an action.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +44,18 @@ pub struct ZonePolicyEntry {
 
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for ZonePolicyEntry {}
+
+#[cfg(test)]
+mod pair_key_tests {
+    use super::zone_pair_key;
+
+    #[test]
+    fn the_key_is_ordered_and_unambiguous() {
+        assert_eq!(zone_pair_key(1, 2), 0x0102);
+        // Direction matters: internal→external is not external→internal.
+        assert_ne!(zone_pair_key(1, 2), zone_pair_key(2, 1));
+    }
+}
 
 #[cfg(test)]
 mod tests {

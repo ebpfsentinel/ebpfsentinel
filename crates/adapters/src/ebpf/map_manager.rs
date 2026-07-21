@@ -361,6 +361,64 @@ pub fn populate_zone_policy_map(
     }
 }
 
+/// Populate `ZONE_POLICY_MAP` (`zone_pair_key(from, to)` → allow/deny) from
+/// the configured inter-zone policies.
+///
+/// Zone names are resolved to the same 1-based ids the other two zone maps
+/// use; a policy naming an unknown zone is skipped with a warning rather
+/// than silently mapped onto id 0, which the datapath treats as "no zone".
+pub fn populate_zone_policy_pairs(
+    ebpf: &mut dyn MapStore,
+    zone_cfg: &domain::zone::entity::ZoneConfig,
+) {
+    use aya::maps::HashMap;
+    use domain::zone::entity::ZonePolicy;
+
+    let Some(map) = ebpf.take_map("ZONE_POLICY_MAP") else {
+        tracing::warn!("ZONE_POLICY_MAP not found in eBPF object, skipping inter-zone wiring");
+        return;
+    };
+    let Ok(mut pair_map) = HashMap::<_, u16, u8>::try_from(map) else {
+        tracing::warn!("ZONE_POLICY_MAP type mismatch");
+        return;
+    };
+
+    let zone_id = |name: &str| -> Option<u8> {
+        zone_cfg.zones.iter().position(|z| z.id == name).map(|idx| {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                (idx as u8).wrapping_add(1)
+            }
+        })
+    };
+
+    let mut count = 0u32;
+    for pair in &zone_cfg.zone_policies {
+        let (Some(from), Some(to)) = (zone_id(&pair.from), zone_id(&pair.to)) else {
+            tracing::warn!(
+                from = %pair.from,
+                to = %pair.to,
+                "inter-zone policy names an unknown zone, skipping"
+            );
+            continue;
+        };
+        let policy = match pair.policy {
+            ZonePolicy::Deny => ebpf_common::zone::ZONE_POLICY_DENY,
+            ZonePolicy::Allow => ebpf_common::zone::ZONE_POLICY_ALLOW,
+        };
+        let key = ebpf_common::zone::zone_pair_key(from, to);
+        if let Err(e) = pair_map.insert(key, policy, 0) {
+            tracing::warn!(from = %pair.from, to = %pair.to, "ZONE_POLICY_MAP insert failed: {e}");
+        } else {
+            count += 1;
+        }
+    }
+
+    if count > 0 {
+        info!(entries = count, "ZONE_POLICY_MAP populated");
+    }
+}
+
 /// Resolve a network interface name to its ifindex via sysfs.
 fn resolve_ifindex(iface: &str) -> Option<u32> {
     let path = format!("/sys/class/net/{iface}/ifindex");
