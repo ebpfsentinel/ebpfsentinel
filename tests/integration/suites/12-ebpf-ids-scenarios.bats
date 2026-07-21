@@ -98,10 +98,14 @@ teardown_file() {
     require_root
     require_tool ncat
 
-    # In 2VM mode, port 22 is used by sshd — skip this test as the ongoing
-    # SSH control traffic between VMs pollutes IDS counters on port 22.
-    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
-        env_skip "SSH threshold test not applicable in 2VM mode (port 22 used by sshd)"
+    # This test needs TCP/22 to itself. Where an sshd already owns the port
+    # the listener below never binds, the probe reaches the real sshd, and
+    # its banner exchange feeds the IDS — the alert count then depends on
+    # sshd's behaviour rather than on the threshold under test. That is the
+    # case in 2-VM mode and on any lane whose host runs sshd, so gate on the
+    # actual condition rather than on the lane flag.
+    if ss -tlnH 'sport = :22' 2>/dev/null | grep -q .; then
+        env_skip "TCP/22 already bound by another listener — the SSH threshold test needs the port to itself"
     fi
 
     # Start SSH-like listener

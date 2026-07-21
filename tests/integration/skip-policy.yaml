@@ -21,6 +21,7 @@
 
 
 env:
+  - "TCP/22 already bound by another listener — the SSH threshold test needs the port to itself"
   - "ebpfsentinel:integration-test image not built — run the docker build first"
   - "minikube cluster could not start on this host"
   - "eth2 not present — NPTv6 needs the multi-NIC topology"
@@ -44,7 +45,6 @@ env:
   - "MHDDoS Tor disable flag missing ("
   - "MHDDoS not provisioned at"
   - "MHDDoS target"
-  - "SSH threshold test not applicable in 2VM mode (port 22 used by sshd)"
   - "TCP/22 is in use by sshd in 2VM mode; suite 59 is single-netns only"
   - "TLS handshake flood is sub-threshold for the volumetric rate-limiter; needs a dedicated TLS-rate policy"
   - "Test requires 3-VM transit topology (set EBPF_3VM_MODE=true)"
