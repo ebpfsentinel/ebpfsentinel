@@ -706,7 +706,11 @@ fn zone_default_policy(zone: u8) -> Option<u8> {
     unsafe { ZONE_DEFAULT_POLICY.get(&zone) }.copied()
 }
 
-/// Resolve the egress interface for an IPv4 packet through the kernel FIB.
+/// Address family for the FIB lookup.
+const FIB_AF_INET: u8 = 2;
+const FIB_AF_INET6: u8 = 10;
+
+/// Resolve the egress interface through the kernel FIB.
 ///
 /// At ingress the destination zone is unknown: it belongs to whichever
 /// interface the packet would leave by. `bpf_fib_lookup` answers exactly
@@ -714,22 +718,35 @@ fn zone_default_policy(zone: u8) -> Option<u8> {
 /// neighbour resolution), which is all that is needed to name the interface.
 /// Returns `None` whenever the route cannot be resolved — the caller then
 /// falls back to the zone's own posture rather than guessing.
+///
+/// `src`/`dst` carry the addresses in wire order: word 0 alone for IPv4, all
+/// four for IPv6. The scratch buffer is per-CPU and reused across packets, so
+/// every field the kernel reads is written on each call — a stale port from
+/// the previous packet must not leak into this lookup.
 #[inline(always)]
-fn egress_ifindex_v4(
+fn egress_ifindex(
     ctx: &XdpContext,
-    src_be: u32,
-    dst_be: u32,
+    family: u8,
+    src: [u32; 4],
+    dst: [u32; 4],
     l4_protocol: u8,
     tot_len: u16,
 ) -> Option<u32> {
     let params = FIB_PARAMS.get_ptr_mut(0)?;
 
     unsafe {
-        (*params).family = 2; // AF_INET
+        (*params).family = family;
         (*params).l4_protocol = l4_protocol;
+        (*params).sport = 0;
+        (*params).dport = 0;
         (*params).__bindgen_anon_1.tot_len = tot_len;
-        (*params).__bindgen_anon_3.ipv4_src = src_be;
-        (*params).__bindgen_anon_4.ipv4_dst = dst_be;
+        if family == FIB_AF_INET6 {
+            (*params).__bindgen_anon_3.ipv6_src = src;
+            (*params).__bindgen_anon_4.ipv6_dst = dst;
+        } else {
+            (*params).__bindgen_anon_3.ipv4_src = src[0];
+            (*params).__bindgen_anon_4.ipv4_dst = dst[0];
+        }
         (*params).ifindex = (*ctx.ctx).ingress_ifindex;
     }
 
@@ -747,6 +764,18 @@ fn egress_ifindex_v4(
     } else {
         None
     }
+}
+
+/// Reinterpret 16 header bytes as four words with their wire byte order
+/// preserved — what `bpf_fib_lookup` expects for `ipv6_src`/`ipv6_dst`.
+#[inline(always)]
+fn wire_words(bytes: &[u8; 16]) -> [u32; 4] {
+    [
+        u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        u32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+        u32::from_ne_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+        u32::from_ne_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+    ]
 }
 
 /// The zone an ifindex belongs to, or [`ZONE_NONE`].
@@ -813,16 +842,26 @@ fn apply_default_policy(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void) -> Re
             Some(p) => p,
             None => return Err(()),
         };
-        if (pkt.flags & FLAG_IPV6) == 0 {
-            egress_ifindex_v4(ctx, pkt.src_addr[0], pkt.dst_addr[0], pkt.protocol, 0)
-                .map(zone_for_ifindex)
-                .and_then(|to_zone| interzone_policy(zone, to_zone))
+        // `src_addr`/`dst_addr` hold host-order words for IPv6, while the FIB
+        // struct expects them exactly as they appear on the wire — so the v6
+        // path feeds the raw header bytes, not the converted words.
+        let (family, src, dst) = if (pkt.flags & FLAG_IPV6) == 0 {
+            (
+                FIB_AF_INET,
+                [pkt.src_addr[0], 0, 0, 0],
+                [pkt.dst_addr[0], 0, 0, 0],
+            )
         } else {
-            // IPv6 egress resolution is a separate lookup family; until it is
-            // wired, v6 falls through to the zone default rather than being
-            // judged by a v4-only answer.
-            None
-        }
+            (
+                FIB_AF_INET6,
+                wire_words(&pkt.src_bytes_v6),
+                wire_words(&pkt.dst_bytes_v6),
+            )
+        };
+
+        egress_ifindex(ctx, family, src, dst, pkt.protocol, 0)
+            .map(zone_for_ifindex)
+            .and_then(|to_zone| interzone_policy(zone, to_zone))
     };
 
     let drop = match interzone {
