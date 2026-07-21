@@ -116,7 +116,7 @@ teardown_file() {
     metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
 
     [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_zone|ebpfsentinel_packets"
+    echo "$metrics" | grep -qE "ebpfsentinel_zone_interfaces|ebpfsentinel_zone_policies"
 }
 
 # ── Zone CRUD — create and delete ───────────────────────────────

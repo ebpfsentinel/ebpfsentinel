@@ -54,6 +54,7 @@ impl ZoneAppService {
         self.config = Some(config);
         if let Some(ref m) = self.metrics {
             m.set_rules_loaded("zones", total as u64);
+            self.publish_zone_gauges(m.as_ref());
         }
         tracing::info!(
             zones = self.zone_count(),
@@ -141,11 +142,27 @@ impl ZoneAppService {
         })
     }
 
-    /// Re-publish the loaded-rule gauge after a mutation.
+    /// Re-publish the loaded-rule gauge and the per-zone gauges after a
+    /// mutation. The aggregate alone cannot answer "which zone owns what",
+    /// which is the question an operator actually asks.
     fn refresh_metrics(&self) {
-        if let Some(ref m) = self.metrics {
-            let total = self.zone_count() + self.policy_count();
-            m.set_rules_loaded("zones", total as u64);
+        let Some(ref m) = self.metrics else { return };
+        let total = self.zone_count() + self.policy_count();
+        m.set_rules_loaded("zones", total as u64);
+        self.publish_zone_gauges(m.as_ref());
+    }
+
+    /// Per-zone interface and policy counts, labelled by zone id.
+    fn publish_zone_gauges(&self, m: &dyn MetricsPort) {
+        let Some(ref cfg) = self.config else { return };
+        for zone in &cfg.zones {
+            m.set_zone_interfaces(&zone.id, zone.interfaces.len() as u64);
+            let policies = cfg
+                .zone_policies
+                .iter()
+                .filter(|p| p.from == zone.id)
+                .count();
+            m.set_zone_policies(&zone.id, policies as u64);
         }
     }
 
@@ -271,5 +288,96 @@ mod tests {
         svc.reload(small_config).unwrap();
         assert_eq!(svc.zone_count(), 1);
         assert_eq!(svc.zones()[0].id, "dmz");
+    }
+}
+
+#[cfg(test)]
+mod zone_gauge_tests {
+    use super::*;
+    use ports::secondary::metrics_port::{
+        AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, CtMetrics,
+        DdosMetrics, DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics,
+        FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
+        ThreatIntelMetrics, ZoneMetrics,
+    };
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingMetrics {
+        interfaces: Mutex<HashMap<String, u64>>,
+        policies: Mutex<HashMap<String, u64>>,
+    }
+
+    impl PacketMetrics for RecordingMetrics {}
+    impl FirewallMetrics for RecordingMetrics {}
+    impl AlertMetrics for RecordingMetrics {}
+    impl IpsMetrics for RecordingMetrics {}
+    impl DnsMetrics for RecordingMetrics {}
+    impl DomainMetrics for RecordingMetrics {}
+    impl SystemMetrics for RecordingMetrics {}
+    impl ConfigMetrics for RecordingMetrics {}
+    impl EventMetrics for RecordingMetrics {}
+    impl DlpMetrics for RecordingMetrics {}
+    impl DdosMetrics for RecordingMetrics {}
+    impl ConntrackMetrics for RecordingMetrics {}
+    impl RoutingMetrics for RecordingMetrics {}
+    impl AuditMetrics for RecordingMetrics {}
+    impl LbMetrics for RecordingMetrics {}
+    impl FingerprintMetrics for RecordingMetrics {}
+    impl ContainerMetrics for RecordingMetrics {}
+    impl CtMetrics for RecordingMetrics {}
+    impl ThreatIntelMetrics for RecordingMetrics {}
+    impl ZoneMetrics for RecordingMetrics {
+        fn set_zone_interfaces(&self, zone: &str, count: u64) {
+            self.interfaces
+                .lock()
+                .unwrap()
+                .insert(zone.to_string(), count);
+        }
+
+        fn set_zone_policies(&self, zone: &str, count: u64) {
+            self.policies
+                .lock()
+                .unwrap()
+                .insert(zone.to_string(), count);
+        }
+    }
+
+    fn zone(id: &str, ifaces: &[&str]) -> Zone {
+        Zone {
+            id: id.to_string(),
+            interfaces: ifaces.iter().map(|s| (*s).to_string()).collect(),
+            default_policy: ZonePolicy::Deny,
+        }
+    }
+
+    #[test]
+    fn reload_publishes_a_gauge_per_zone() {
+        let metrics = Arc::new(RecordingMetrics::default());
+        let mut svc = ZoneAppService::new();
+        svc.set_metrics(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
+
+        svc.reload(ZoneConfig {
+            zones: vec![
+                zone("internal", &["eth0", "eth1"]),
+                zone("external", &["eth2"]),
+            ],
+            zone_policies: vec![ZonePair {
+                from: "internal".to_string(),
+                to: "external".to_string(),
+                policy: ZonePolicy::Allow,
+            }],
+        })
+        .unwrap();
+
+        let ifaces = metrics.interfaces.lock().unwrap();
+        assert_eq!(ifaces.get("internal"), Some(&2));
+        assert_eq!(ifaces.get("external"), Some(&1));
+
+        let policies = metrics.policies.lock().unwrap();
+        // Only counted on the source side, so external has none.
+        assert_eq!(policies.get("internal"), Some(&1));
+        assert_eq!(policies.get("external"), Some(&0));
     }
 }

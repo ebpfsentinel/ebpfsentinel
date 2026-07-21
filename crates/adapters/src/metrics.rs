@@ -1,7 +1,7 @@
 use ports::secondary::metrics_port::{
     AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
     DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics,
-    RoutingMetrics, SystemMetrics, ThreatIntelMetrics,
+    RoutingMetrics, SystemMetrics, ThreatIntelMetrics, ZoneMetrics,
 };
 use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::counter::Counter;
@@ -96,6 +96,11 @@ pub struct ServiceLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct ZoneLabels {
+    pub zone: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct FeedLabels {
     pub feed: String,
 }
@@ -124,6 +129,8 @@ pub struct AgentMetrics {
     pub alerts_dropped_total: Family<ReasonLabels, Counter>,
     pub alerts_exported_total: Family<DestinationLabels, Counter>,
     pub threatintel_matches_total: Family<FeedLabels, Counter>,
+    pub zone_interfaces: Family<ZoneLabels, Gauge>,
+    pub zone_policies: Family<ZoneLabels, Gauge>,
     pub alert_sender_circuit_state: Family<DestinationLabels, Gauge>,
     /// Live SSE alert-stream subscriber count. Set by handler on
     /// connect / disconnect.
@@ -263,6 +270,20 @@ impl AgentMetrics {
             "threatintel_matches",
             "IOC matches resolved against a threat-intelligence feed, by feed",
             threatintel_matches_total.clone(),
+        );
+
+        let zone_interfaces = Family::<ZoneLabels, Gauge>::default();
+        registry.register(
+            "zone_interfaces",
+            "Interfaces bound to each security zone",
+            zone_interfaces.clone(),
+        );
+
+        let zone_policies = Family::<ZoneLabels, Gauge>::default();
+        registry.register(
+            "zone_policies",
+            "Inter-zone policies whose source is this zone",
+            zone_policies.clone(),
         );
 
         let alert_sender_circuit_state = Family::<DestinationLabels, Gauge>::default();
@@ -608,6 +629,8 @@ impl AgentMetrics {
             alerts_dropped_total,
             alerts_exported_total,
             threatintel_matches_total,
+            zone_interfaces,
+            zone_policies,
             alert_sender_circuit_state,
             alerts_sse_subscribers,
             ips_blacklist_size,
@@ -820,6 +843,24 @@ impl ThreatIntelMetrics for AgentMetrics {
                 feed: feed_id.to_string(),
             })
             .inc();
+    }
+}
+
+impl ZoneMetrics for AgentMetrics {
+    fn set_zone_interfaces(&self, zone: &str, count: u64) {
+        self.zone_interfaces
+            .get_or_create(&ZoneLabels {
+                zone: zone.to_string(),
+            })
+            .set(i64::try_from(count).unwrap_or(i64::MAX));
+    }
+
+    fn set_zone_policies(&self, zone: &str, count: u64) {
+        self.zone_policies
+            .get_or_create(&ZoneLabels {
+                zone: zone.to_string(),
+            })
+            .set(i64::try_from(count).unwrap_or(i64::MAX));
     }
 }
 

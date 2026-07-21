@@ -934,7 +934,7 @@ mod tests {
         AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, CtMetrics,
         DdosMetrics, DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics,
         FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
-        ThreatIntelMetrics,
+        ThreatIntelMetrics, ZoneMetrics,
     };
     use std::future::Future;
     use std::pin::Pin;
@@ -990,6 +990,7 @@ mod tests {
     impl ContainerMetrics for TestMetrics {}
     impl CtMetrics for TestMetrics {}
     impl ThreatIntelMetrics for TestMetrics {}
+    impl ZoneMetrics for TestMetrics {}
 
     fn make_ids_alert(rule_id: &str, severity: Severity) -> IdsAlert {
         IdsAlert {

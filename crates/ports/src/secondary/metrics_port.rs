@@ -85,6 +85,17 @@ pub trait IpsMetrics: Send + Sync {
 
 // ── DNS metrics ────────────────────────────────────────────────────
 
+/// Zone observability. Zone enforcement itself lives in eBPF, so these
+/// describe the programmed state — which interfaces each zone owns and how
+/// many inter-zone policies reference it — rather than per-packet decisions.
+pub trait ZoneMetrics: Send + Sync {
+    /// Set the number of interfaces bound to a zone.
+    fn set_zone_interfaces(&self, _zone: &str, _count: u64) {}
+
+    /// Set the number of inter-zone policies whose source is this zone.
+    fn set_zone_policies(&self, _zone: &str, _count: u64) {}
+}
+
 /// Threat-intelligence observability.
 pub trait ThreatIntelMetrics: Send + Sync {
     /// Record an IOC match resolved against a feed, labelled by feed id.
@@ -277,6 +288,7 @@ pub trait MetricsPort:
     + ContainerMetrics
     + CtMetrics
     + ThreatIntelMetrics
+    + ZoneMetrics
 {
 }
 
@@ -302,6 +314,7 @@ impl<T> MetricsPort for T where
         + ContainerMetrics
         + CtMetrics
         + ThreatIntelMetrics
+        + ZoneMetrics
 {
 }
 
@@ -375,6 +388,7 @@ mod tests {
         impl ContainerMetrics for MinimalMock {}
         impl CtMetrics for MinimalMock {}
         impl ThreatIntelMetrics for MinimalMock {}
+        impl ZoneMetrics for MinimalMock {}
 
         let mock = MinimalMock;
         let port: &dyn MetricsPort = &mock;

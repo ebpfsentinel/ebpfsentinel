@@ -341,7 +341,7 @@ mod tests {
         AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, CtMetrics,
         DdosMetrics, DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics,
         FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
-        ThreatIntelMetrics,
+        ThreatIntelMetrics, ZoneMetrics,
     };
     use std::net::Ipv4Addr;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -386,6 +386,7 @@ mod tests {
     impl ContainerMetrics for TestMetrics {}
     impl CtMetrics for TestMetrics {}
     impl ThreatIntelMetrics for TestMetrics {}
+    impl ZoneMetrics for TestMetrics {}
 
     fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
