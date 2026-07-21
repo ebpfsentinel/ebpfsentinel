@@ -163,6 +163,17 @@ impl AlertRouteConfig {
                 }
                 _ => {}
             }
+
+            // Custom headers reach the wire verbatim, so reject anything that
+            // could forge a second header or overwrite the body encoding.
+            for (name, value) in self.webhook_headers.iter().flatten() {
+                validate_webhook_header(name, value).map_err(|message| {
+                    ConfigError::Validation {
+                        field: format!("{prefix}.webhook_headers"),
+                        message,
+                    }
+                })?;
+            }
         }
 
         // Email routes require an email_to and smtp config
@@ -199,6 +210,12 @@ impl AlertRouteConfig {
             },
             "webhook" => AlertDestination::Webhook {
                 url: self.webhook_url.clone().unwrap_or_default(),
+                headers: self
+                    .webhook_headers
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
             },
             "otlp" => AlertDestination::Otlp,
             _ => {
@@ -219,11 +236,42 @@ impl AlertRouteConfig {
     }
 }
 
+/// Validate a custom webhook header pair.
+///
+/// The name must be an RFC 7230 token and the value must carry no CR, LF or
+/// NUL — otherwise a crafted config could inject an extra header or split the
+/// request. `Content-Type` is reserved: the sender sets it to
+/// `application/json` and a second value would make the request ambiguous.
+fn validate_webhook_header(name: &str, value: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("header name must not be empty".to_string());
+    }
+    if !trimmed
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+    {
+        return Err(format!("header name '{name}' contains invalid characters"));
+    }
+    if trimmed.eq_ignore_ascii_case("content-type") {
+        return Err("Content-Type is set by the sender and cannot be overridden".to_string());
+    }
+    if value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
+        return Err(format!(
+            "value of header '{name}' contains forbidden characters (CR/LF/NUL)"
+        ));
+    }
+    Ok(())
+}
+
 fn parse_alert_destination(s: &str) -> Result<AlertDestination, ()> {
     match s.to_lowercase().as_str() {
         "log" => Ok(AlertDestination::Log),
         "email" => Ok(AlertDestination::Email { to: String::new() }),
-        "webhook" => Ok(AlertDestination::Webhook { url: String::new() }),
+        "webhook" => Ok(AlertDestination::Webhook {
+            url: String::new(),
+            headers: std::collections::BTreeMap::new(),
+        }),
         "otlp" => Ok(AlertDestination::Otlp),
         _ => Err(()),
     }
@@ -411,7 +459,7 @@ routes:
         let domain = route.to_domain_route().unwrap();
         assert!(matches!(
             domain.destination,
-            AlertDestination::Webhook { ref url } if url == "https://example.com/hook"
+            AlertDestination::Webhook { ref url, .. } if url == "https://example.com/hook"
         ));
         assert_eq!(domain.min_severity, domain::common::entity::Severity::High);
         assert_eq!(domain.event_types, Some(vec!["ids".to_string()]));

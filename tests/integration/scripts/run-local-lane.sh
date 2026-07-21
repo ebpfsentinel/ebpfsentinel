@@ -18,9 +18,10 @@ clean_slate() {
     ip netns del ebpf-test-ns 2>/dev/null || true
     ip link del veth-ebpf0 2>/dev/null || true
     ip link del veth-ebpf1 2>/dev/null || true
+    ip link del ebpfsent-sink0 2>/dev/null || true
     rm -rf /sys/fs/bpf/ebpfsentinel 2>/dev/null || true
     # Free agent ports left by a wedged process.
-    for p in 8080 50051 9090 18080 18099; do
+    for p in 8080 50051 9090 18080 18085 18086 18099; do
         fuser -k "${p}/tcp" 2>/dev/null || true
     done
     sleep 1

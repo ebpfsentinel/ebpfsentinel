@@ -184,16 +184,16 @@ impl AlertSender for WebhookAlertSender {
                 }
             }
 
-            // 2. Extract and validate webhook URL from route destination
-            let url = match &route.destination {
-                AlertDestination::Webhook { url } => {
+            // 2. Extract and validate webhook URL + custom headers from the route
+            let (url, headers) = match &route.destination {
+                AlertDestination::Webhook { url, headers } => {
                     #[cfg(test)]
                     if !self.skip_url_validation {
                         validate_webhook_url(url)?;
                     }
                     #[cfg(not(test))]
                     validate_webhook_url(url)?;
-                    url.clone()
+                    (url.clone(), headers.clone())
                 }
                 _ => {
                     return Err(DomainError::EngineError(
@@ -211,9 +211,16 @@ impl AlertSender for WebhookAlertSender {
             let result = retry_with_backoff(&self.retry_config, || {
                 let url = url.clone();
                 let body = body.clone();
+                let headers = headers.clone();
                 async move {
-                    let response = client
-                        .post(&url)
+                    // Custom headers first, `Content-Type` last: config
+                    // validation already rejects a `Content-Type` override, so
+                    // the body encoding the sender declares always wins.
+                    let mut request = client.post(&url);
+                    for (name, value) in &headers {
+                        request = request.header(name, value);
+                    }
+                    let response = request
                         .header("Content-Type", "application/json")
                         .body(body)
                         .send()
@@ -237,7 +244,10 @@ impl AlertSender for WebhookAlertSender {
             // 5. Record success/failure in circuit breaker and update metric
             let mut cb = self.circuit_breaker.lock().await;
             match &result {
-                Ok(()) => cb.record_success(),
+                Ok(()) => {
+                    cb.record_success();
+                    self.metrics.record_alert_exported(&self.destination_name);
+                }
                 Err(_) => cb.record_failure(),
             }
             self.metrics
@@ -315,6 +325,7 @@ mod tests {
             name: "webhook-test".to_string(),
             destination: AlertDestination::Webhook {
                 url: url.to_string(),
+                headers: std::collections::BTreeMap::new(),
             },
             min_severity: Severity::Low,
             event_types: None,

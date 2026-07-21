@@ -108,6 +108,8 @@ suite_profiles:
   "58": nightly
   "59": nightly
   "60": nightly
+  "61": nightly
+  "62": nightly
   "perf/01": nightly
   "perf/02": nightly
   "perf/03": nightly
@@ -482,11 +484,11 @@ coverage:
   # ── Domain modules (23, excl. common) ───────────────────────────
   - kind: domain_module
     feature: alert
-    suites: ["04", "25", "34"]
+    suites: ["04", "25", "34", "61"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Alert pipeline + routing"
+    notes: "Alert pipeline + routing; outbound delivery (webhook sink: POST + JSON body identity + 5xx retry + SSRF refusal of a loopback target) asserted in 61"
 
   - kind: domain_module
     feature: alias
@@ -522,11 +524,11 @@ coverage:
 
   - kind: domain_module
     feature: conntrack
-    suites: ["16", "18", "24", "47"]
+    suites: ["16", "18", "24", "47", "62"]
     topology: 3vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; GET /api/v1/conntrack/events SSE stream asserted in 16 (skipped when /proc/net/nf_conntrack is absent)"
+    notes: "Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; GET /api/v1/conntrack/events SSE stream asserted in 16 (skipped when /proc/net/nf_conntrack is absent); brokered teardown from the user-namespace agent asserted in 62"
 
   - kind: domain_module
     feature: container

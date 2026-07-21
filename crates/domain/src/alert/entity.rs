@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::alert::mitre::{self, MitreAttackInfo, MitreContext};
@@ -750,8 +752,17 @@ impl Alert {
 /// Routing destination for an alert.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlertDestination {
-    Email { to: String },
-    Webhook { url: String },
+    Email {
+        to: String,
+    },
+    Webhook {
+        url: String,
+        /// Extra HTTP headers to send with the request (e.g. an auth token).
+        /// Ordered so the request is reproducible. Defaults to empty, which
+        /// keeps routes serialized before this field readable.
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    },
     Otlp,
     Log,
 }

@@ -230,12 +230,12 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
-| `alert` | 04, 25, 34 | 2vm | 6.9 | pr | Alert pipeline + routing |
+| `alert` | 04, 25, 34, 61 | 2vm | 6.9 | pr | Alert pipeline + routing; outbound delivery (webhook sink: POST + JSON body identity + 5xx retry + SSRF refusal of a loopback target) asserted in 61 |
 | `alias` | 16 | none | n/a | pr | AliasSet (CIDR aliases); suite 16 covers alias_count plus PUT /api/v1/aliases/{id}/content on an External alias (accept) and on ip_set / unknown / invalid-CIDR inputs (reject) |
 | `audit` | 04 | none | n/a | pr | Audit trail + rule history |
 | `auth` | 07, 36 | none | n/a | pr | JWT/OIDC/JWKS/API-key + RBAC |
 | `capture` | 49 | 2vm | 6.9 | nightly | Pcap export lifecycle (Running → Completed) + on-disk pcap validity asserted in 49 |
-| `conntrack` | 16, 18, 24, 47 | 3vm | 6.9 | pr | Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; GET /api/v1/conntrack/events SSE stream asserted in 16 (skipped when /proc/net/nf_conntrack is absent) |
+| `conntrack` | 16, 18, 24, 47, 62 | 3vm | 6.9 | pr | Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; GET /api/v1/conntrack/events SSE stream asserted in 16 (skipped when /proc/net/nf_conntrack is absent); brokered teardown from the user-namespace agent asserted in 62 |
 | `container` | 54 | 2vm | 6.9 | nightly | cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 54; AlertResponse container fields, k8s pod enrichment, and per-tenant cgroup filter map tracked as deferred ACs in the suite header |
 | `ddos` | 15, 22, 38, 39, 40 | 2vm | 6.9 | pr | DDoS detection + policy; MHDDoS flood matrix in 38; service-exhaustion in 39; amplification in 40 |
 | `dlp` | 16, 27, 60, perf/06 | 2vm | 6.9 | pr | Data loss prevention; suite 27 covers pattern match + uprobe attach, suite 60 the per-container attach path. TLS-MITM proxy is enterprise-only; wire-level malicious-MITM + decrypted-payload assertions remain 3-VM deferrals (need mitmproxy + injected-CA topology). uprobe SSL-inspection goodput cost benched in perf/06 |

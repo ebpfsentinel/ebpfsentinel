@@ -1677,6 +1677,7 @@ mod tests {
                 name: "webhook-high".to_string(),
                 destination: AlertDestination::Webhook {
                     url: "https://example.com/alerts".to_string(),
+                    headers: std::collections::BTreeMap::new(),
                 },
                 min_severity: Severity::Low,
                 event_types: None,

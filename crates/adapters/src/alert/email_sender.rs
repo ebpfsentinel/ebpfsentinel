@@ -135,7 +135,10 @@ impl AlertSender for EmailAlertSender {
             // 5. Record success/failure in circuit breaker and update metric
             let mut cb = self.circuit_breaker.lock().await;
             match &result {
-                Ok(()) => cb.record_success(),
+                Ok(()) => {
+                    cb.record_success();
+                    self.metrics.record_alert_exported(&self.destination_name);
+                }
                 Err(_) => cb.record_failure(),
             }
             self.metrics

@@ -1,0 +1,69 @@
+# config-alert-sink-webhook.yaml — outbound alert delivery (webhook sink)
+#
+# One IDS rule on TCP/4444 feeds the alert pipeline; the pipeline fans the
+# alert out to a webhook route pointing at the local sink and to the log
+# route. The sink address lives in TEST-NET-3 (203.0.113.0/24): the webhook
+# sender refuses loopback/private/link-local targets (SSRF guard), so the
+# suite assigns that address to a dummy interface instead.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: true
+  mode: alert
+  rules:
+    - id: ids-sink-test
+      description: "Alert sink delivery test rule"
+      severity: high
+      protocol: tcp
+      dst_port: 4444
+      enabled: true
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  # Short dedup window: the suite drives the same 5-tuple more than once and
+  # must not have the second alert swallowed before it reaches a sink.
+  dedup_window_secs: 1
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes:
+    - name: it-sink-webhook
+      destination: webhook
+      min_severity: low
+      webhook_url: "http://203.0.113.10:18085/hook"
+    - name: it-sink-log
+      destination: log
+      min_severity: low
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

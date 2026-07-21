@@ -1915,7 +1915,7 @@ alerting:
         );
         assert!(matches!(
             routes[1].destination,
-            AlertDestination::Webhook { ref url } if url == "https://hooks.example.com/alerts"
+            AlertDestination::Webhook { ref url, .. } if url == "https://hooks.example.com/alerts"
         ));
         assert_eq!(routes[2].name, "critical-email");
         assert!(matches!(
