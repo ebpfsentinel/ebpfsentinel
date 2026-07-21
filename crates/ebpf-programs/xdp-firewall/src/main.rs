@@ -26,6 +26,7 @@ use ebpf_common::{
     event::{
         EVENT_TYPE_FIREWALL, FLAG_IPV6, FLAG_VLAN, META_FLAG_PRESENT, PacketEvent, XdpMetadata,
     },
+    zone::{MAX_ZONE_ENTRIES, ZONE_METRIC_SLOTS, ZONE_NONE, ZONE_POLICY_DENY},
     firewall::{
         ACTION_DROP, ACTION_LOG, ACTION_PASS, ACTION_REJECT, CT_MATCH_ESTABLISHED,
         CT_MATCH_INVALID, CT_MATCH_NEW, CT_MATCH_RELATED, DEFAULT_POLICY_DROP, FirewallRuleEntry,
@@ -109,6 +110,27 @@ static FIREWALL_RULE_COUNT_V6: Array<u32> = Array::with_max_entries(1, 0);
 /// Default policy when no rule matches (0=pass, 1=drop).
 #[map]
 static FIREWALL_DEFAULT_POLICY: Array<u8> = Array::with_max_entries(1, 0);
+
+/// Security zones: ingress `ifindex` → `zone_id`. Written by userspace from
+/// `ZoneConfig`; absent or 0 means the interface belongs to no zone.
+#[map]
+static ZONE_MAP: HashMap<u32, u8> = HashMap::with_max_entries(MAX_ZONE_ENTRIES, 0);
+
+/// Per-zone default policy: `zone_id` → 0 = allow, 1 = deny. Consulted only
+/// when no explicit rule matched, so an explicit rule always wins over the
+/// zone's posture.
+#[map]
+static ZONE_DEFAULT_POLICY: HashMap<u8, u8> = HashMap::with_max_entries(MAX_ZONE_ENTRIES, 0);
+
+/// Per-zone packet counters, indexed by `zone_id`. Slot 0 counts traffic on
+/// unzoned interfaces. Two counters per zone are folded into one slot each:
+/// see `ZONE_METRIC_*`.
+#[map]
+static ZONE_METRICS_PASSED: PerCpuArray<u64> = PerCpuArray::with_max_entries(ZONE_METRIC_SLOTS, 0);
+
+#[map]
+static ZONE_METRICS_DROPPED: PerCpuArray<u64> =
+    PerCpuArray::with_max_entries(ZONE_METRIC_SLOTS, 0);
 
 /// Fast-path: 5-tuple exact-match HashMap (proto, src_ip, dst_ip, src_port, dst_port) → action.
 /// Rules with exact values in all 5 fields (no wildcards, ranges, or extended flags) are
@@ -645,6 +667,45 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
     action
 }
 
+// ── Zone helpers ─────────────────────────────────────────────────────
+
+/// Resolve the security zone of the packet's ingress interface.
+#[inline(always)]
+fn zone_for_ingress(ctx: &XdpContext) -> u8 {
+    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    match unsafe { ZONE_MAP.get(&ifindex) } {
+        Some(&zone) => zone,
+        None => ZONE_NONE,
+    }
+}
+
+/// The zone's own default policy, if it declared one.
+#[inline(always)]
+fn zone_default_policy(zone: u8) -> Option<u8> {
+    if zone == ZONE_NONE {
+        return None;
+    }
+    unsafe { ZONE_DEFAULT_POLICY.get(&zone) }.copied()
+}
+
+/// Count a packet against its zone. Bounded by the map size, so an out-of
+/// range zone id is dropped rather than clamped into another zone's slot.
+#[inline(always)]
+fn count_zone(zone: u8, dropped: bool) {
+    let idx = u32::from(zone);
+    if idx >= ZONE_METRIC_SLOTS {
+        return;
+    }
+    let map = if dropped {
+        &ZONE_METRICS_DROPPED
+    } else {
+        &ZONE_METRICS_PASSED
+    };
+    if let Some(counter) = map.get_ptr_mut(idx) {
+        unsafe { *counter += 1 };
+    }
+}
+
 /// Read the default policy from the map (0=pass, 1=drop).
 #[inline(always)]
 fn read_default_policy() -> u8 {
@@ -657,13 +718,23 @@ fn read_default_policy() -> u8 {
 /// Apply the default policy action. Reads packet metadata from `PKT_CTX`.
 #[inline(always)]
 fn apply_default_policy(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void) -> Result<u32, ()> {
-    let policy = read_default_policy();
-    if policy == DEFAULT_POLICY_DROP {
+    // No rule matched. A zone declares the posture for the interfaces it
+    // owns, so it decides here; interfaces outside any zone fall back to the
+    // global default. An explicit rule was already given priority above.
+    let zone = zone_for_ingress(ctx);
+    let drop = match zone_default_policy(zone) {
+        Some(zone_policy) => zone_policy == ZONE_POLICY_DENY,
+        None => read_default_policy() == DEFAULT_POLICY_DROP,
+    };
+
+    if drop {
         emit_event(ctx_raw, ACTION_DROP);
         increment_metric(METRIC_DROPPED);
+        count_zone(zone, true);
         Ok(xdp_action::XDP_DROP)
     } else {
         increment_metric(METRIC_PASSED);
+        count_zone(zone, false);
         write_xdp_metadata(ctx, ACTION_PASS, 0);
         Ok(xdp_action::XDP_PASS)
     }

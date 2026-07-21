@@ -320,6 +320,47 @@ pub fn populate_zone_map(ebpf: &mut dyn MapStore, zone_cfg: &domain::zone::entit
     }
 }
 
+/// Populate `ZONE_DEFAULT_POLICY` (`zone_id` → 0 allow / 1 deny) so the
+/// datapath can apply each zone's posture when no explicit rule matched.
+///
+/// Zone ids are assigned exactly as in [`populate_zone_map`] — 1-based, in
+/// config order — so both maps agree on what a zone id means.
+pub fn populate_zone_policy_map(
+    ebpf: &mut dyn MapStore,
+    zone_cfg: &domain::zone::entity::ZoneConfig,
+) {
+    use aya::maps::HashMap;
+    use domain::zone::entity::ZonePolicy;
+
+    let Some(map) = ebpf.take_map("ZONE_DEFAULT_POLICY") else {
+        tracing::warn!("ZONE_DEFAULT_POLICY not found in eBPF object, skipping zone policy wiring");
+        return;
+    };
+    let Ok(mut policy_map) = HashMap::<_, u8, u8>::try_from(map) else {
+        tracing::warn!("ZONE_DEFAULT_POLICY type mismatch");
+        return;
+    };
+
+    let mut count = 0u32;
+    for (zone_idx, zone) in zone_cfg.zones.iter().enumerate() {
+        #[allow(clippy::cast_possible_truncation)]
+        let zone_id = (zone_idx as u8).wrapping_add(1); // 1-based, matches ZONE_MAP
+        let policy = match zone.default_policy {
+            ZonePolicy::Deny => ebpf_common::zone::ZONE_POLICY_DENY,
+            ZonePolicy::Allow => ebpf_common::zone::ZONE_POLICY_ALLOW,
+        };
+        if let Err(e) = policy_map.insert(zone_id, policy, 0) {
+            tracing::warn!(zone = %zone.id, "ZONE_DEFAULT_POLICY insert failed: {e}");
+        } else {
+            count += 1;
+        }
+    }
+
+    if count > 0 {
+        info!(entries = count, "ZONE_DEFAULT_POLICY populated");
+    }
+}
+
 /// Resolve a network interface name to its ifindex via sysfs.
 fn resolve_ifindex(iface: &str) -> Option<u32> {
     let path = format!("/sys/class/net/{iface}/ifindex");

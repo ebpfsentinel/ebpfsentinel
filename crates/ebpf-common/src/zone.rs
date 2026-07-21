@@ -10,6 +10,16 @@ pub const MAX_ZONE_ENTRIES: u32 = 256;
 /// Zone ID 0 is reserved for "no zone" / unzoned interfaces.
 pub const ZONE_NONE: u8 = 0;
 
+/// Zone default policy: 0 = allow, 1 = deny. Applied to a packet whose
+/// ingress interface belongs to the zone when no explicit firewall rule
+/// matched.
+pub const ZONE_POLICY_ALLOW: u8 = 0;
+pub const ZONE_POLICY_DENY: u8 = 1;
+
+/// Number of per-zone counter slots exposed by the datapath. Index is the
+/// zone id, so slot 0 (`ZONE_NONE`) counts unzoned interfaces.
+pub const ZONE_METRIC_SLOTS: u32 = 256;
+
 /// Maximum number of zone policy entries.
 pub const MAX_ZONE_POLICIES: u32 = 64;
 

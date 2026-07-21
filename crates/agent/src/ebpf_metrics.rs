@@ -104,6 +104,8 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (4, "total_seen"),
             (5, "cgroup_resolved"),
         ],
+        // Per-zone counters are indexed by zone id, not by a fixed action
+        // list, so they are read by `zone_metric_labels` instead.
         "DNS_METRICS" => &[
             (0, "inspected"),
             (1, "emitted"),
