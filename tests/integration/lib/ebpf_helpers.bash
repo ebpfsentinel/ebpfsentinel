@@ -247,6 +247,7 @@ start_ebpf_agent() {
     done
 
     mkdir -p "$DATA_DIR"
+    : >"${AGENT_LOG_FILE}.warden"
 
     # Config must not be world-readable (agent enforces strict permissions)
     chmod 640 "$config_file"
@@ -294,7 +295,11 @@ start_ebpf_agent() {
             rm -f "$sock"
             # The privileged warden broker (root, init netns). --uid 0: the test
             # agent runs as root and maps namespace-0 to real root, presenting 0.
-            setsid "$warden" serve "$sock" --uid 0 </dev/null >>"$AGENT_LOG_FILE" 2>&1 &
+            # The warden gets its own log: the agent's redirection below
+            # truncates $AGENT_LOG_FILE, so anything the warden had already
+            # written there would be lost before the first test runs.
+            setsid "$warden" serve "$sock" --uid 0 \
+                </dev/null >>"${AGENT_LOG_FILE}.warden" 2>&1 &
             echo "$!" > "${AGENT_PID_FILE}.warden"
             local _i
             for _i in $(seq 1 100); do [ -S "$sock" ] && break; sleep 0.1; done

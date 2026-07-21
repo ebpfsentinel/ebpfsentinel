@@ -50,12 +50,27 @@ _agent_pid() {
     cat "${AGENT_PID_FILE}" 2>/dev/null || echo ""
 }
 
+# The warden writes to its own log; the agent's redirection truncates the
+# main one (see lib/ebpf_helpers.bash).
+_warden_log() {
+    echo "${AGENT_LOG_FILE}.warden"
+}
+
+# _staged_probe — the probe must be readable by the unprivileged uid we run
+# it as, and the build tree is 0750. Stage it under /tmp, like the harness
+# already does for the agent binary.
+_staged_probe() {
+    local staged="/tmp/ebpfsentinel-warden-peer-probe.py"
+    install -m 0755 "${BATS_TEST_DIRNAME}/../scripts/warden-peer-probe.py" "${staged}"
+    echo "${staged}"
+}
+
 # _probe_as <uid|root> — run the peer probe, optionally as another uid.
 _probe_as() {
     local who="${1}"
     local sock probe
     sock="$(_warden_sock)"
-    probe="${BATS_TEST_DIRNAME}/../scripts/warden-peer-probe.py"
+    probe="$(_staged_probe)"
 
     if [ "${who}" = "root" ]; then
         python3 "${probe}" "${sock}" 2
@@ -156,12 +171,16 @@ teardown_file() {
 }
 
 @test "broker announces delegation and its protocol version" {
-    grep -q "\[warden\] delegation ready" "${AGENT_LOG_FILE}" || {
-        echo "no delegation-ready line in the agent/warden log" >&2
-        tail -40 "${AGENT_LOG_FILE}" >&2 || true
+    local wlog
+    wlog="$(_warden_log)"
+    [ -f "${wlog}" ] || soft_skip "warden log missing at ${wlog}"
+
+    grep -q "\[warden\] delegation ready" "${wlog}" || {
+        echo "no delegation-ready line in the warden log" >&2
+        tail -40 "${wlog}" >&2 || true
         return 1
     }
-    grep -qE "\[warden\] serving on .* protocol v[0-9]+" "${AGENT_LOG_FILE}" || {
+    grep -qE "\[warden\] serving on .* protocol v[0-9]+" "${wlog}" || {
         echo "no serving line with a protocol version" >&2
         return 1
     }
@@ -193,16 +212,23 @@ teardown_file() {
     }
 
     # An agent in an unprivileged user namespace cannot have loaded these on
-    # its own: the bpffs and the token came from the broker.
-    local body
-    body="$(api_get /api/v1/ebpf/status)"
-    _load_http_status
-    [ "${HTTP_STATUS}" = "200" ] || {
-        echo "GET /api/v1/ebpf/status returned ${HTTP_STATUS}" >&2
-        return 1
-    }
-    echo "${body}" | jq -e '[.programs[] | select(.loaded)] | length >= 1' >/dev/null || {
-        echo "no loaded eBPF program reported: ${body}" >&2
+    # its own: the bpffs and the token came from the broker. The status map is
+    # filled as each program lands, so poll rather than sample once.
+    local body attempt=0 loaded=0
+    while [ "${attempt}" -lt 30 ]; do
+        body="$(api_get /api/v1/ebpf/status)"
+        _load_http_status
+        [ "${HTTP_STATUS}" = "200" ] || {
+            echo "GET /api/v1/ebpf/status returned ${HTTP_STATUS}" >&2
+            return 1
+        }
+        loaded="$(echo "${body}" | jq -r '[.programs[] | select(.loaded)] | length')"
+        [ "${loaded:-0}" -ge 1 ] && break
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    [ "${loaded:-0}" -ge 1 ] || {
+        echo "no loaded eBPF program reported after 30s: ${body}" >&2
         return 1
     }
 }
@@ -294,15 +320,20 @@ teardown_file() {
 @test "the broker hands over AF_PACKET capture sockets" {
     # The warden opens the pool up front (it holds CAP_NET_RAW) and reports it
     # on startup; the agent may also open more explicitly through PcapOpen.
+    # Two shapes, both the broker: the pool is normally opened up front by the
+    # warden and handed over with the bpffs delegation (the agent logs it as
+    # launcher-provisioned, since it arrives as inherited fds), and
+    # `pool_from_warden` opens more explicitly through PcapOpen when needed.
     local announced=0
     grep -qE "\[warden\] delegation ready: [0-9]+ module BTF fd\(s\), [1-9][0-9]* pcap fd\(s\)" \
-        "${AGENT_LOG_FILE}" && announced=1
-    grep -q "packet-capture sockets provisioned by the warden" \
+        "$(_warden_log)" 2>/dev/null && announced=1
+    grep -qE "packet-capture sockets provisioned by the (warden|launcher)" \
         "${AGENT_LOG_FILE}" && announced=1
 
     [ "${announced}" -eq 1 ] || {
-        echo "the broker provisioned no capture socket" >&2
-        grep -i "pcap\|delegation ready" "${AGENT_LOG_FILE}" | tail -10 >&2 || true
+        echo "no capture socket was provisioned for the rootless agent" >&2
+        grep -i "pcap" "${AGENT_LOG_FILE}" | tail -10 >&2 || true
+        grep -i "delegation ready" "$(_warden_log)" 2>/dev/null | tail -5 >&2 || true
         return 1
     }
 

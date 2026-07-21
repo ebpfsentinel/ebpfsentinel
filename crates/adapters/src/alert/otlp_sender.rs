@@ -29,7 +29,7 @@ impl OtlpAlertSender {
         let exporter = match protocol {
             "http" => opentelemetry_otlp::LogExporter::builder()
                 .with_http()
-                .with_endpoint(endpoint)
+                .with_endpoint(http_logs_endpoint(endpoint))
                 .with_timeout(timeout)
                 .build()
                 .map_err(|e| {
@@ -53,6 +53,25 @@ impl OtlpAlertSender {
             logger_provider,
             metrics,
         })
+    }
+}
+
+/// Resolve the OTLP/HTTP logs URL from a configured endpoint.
+///
+/// The SDK only appends the signal path (`/v1/logs`) when the endpoint comes
+/// from the generic `OTEL_EXPORTER_OTLP_ENDPOINT` variable; an endpoint passed
+/// programmatically is used verbatim. Configuration here names a collector
+/// (`http://otel-collector:4318`), so without this the exporter would POST to
+/// `/` and every spec-compliant collector would reject it. An endpoint that
+/// already carries a path is left untouched, so a full signal URL still works.
+fn http_logs_endpoint(endpoint: &str) -> String {
+    let trimmed = endpoint.trim_end_matches('/');
+    // Everything after the scheme; a remaining '/' means a path was given.
+    let after_scheme = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
+    if after_scheme.contains('/') {
+        endpoint.to_string()
+    } else {
+        format!("{trimmed}/v1/logs")
     }
 }
 
@@ -146,5 +165,50 @@ mod tests {
         use domain::common::entity::Severity;
         assert_eq!(severity_label(Severity::Low), "low");
         assert_eq!(severity_label(Severity::High), "high");
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::http_logs_endpoint;
+
+    #[test]
+    fn bare_collector_endpoint_gains_the_signal_path() {
+        assert_eq!(
+            http_logs_endpoint("http://otel-collector:4318"),
+            "http://otel-collector:4318/v1/logs"
+        );
+    }
+
+    #[test]
+    fn trailing_slash_does_not_double_up() {
+        assert_eq!(
+            http_logs_endpoint("http://otel-collector:4318/"),
+            "http://otel-collector:4318/v1/logs"
+        );
+    }
+
+    #[test]
+    fn explicit_signal_url_is_left_alone() {
+        assert_eq!(
+            http_logs_endpoint("http://otel-collector:4318/v1/logs"),
+            "http://otel-collector:4318/v1/logs"
+        );
+    }
+
+    #[test]
+    fn custom_path_is_left_alone() {
+        assert_eq!(
+            http_logs_endpoint("https://gateway.example.com/otlp/v1/logs"),
+            "https://gateway.example.com/otlp/v1/logs"
+        );
+    }
+
+    #[test]
+    fn host_without_scheme_still_resolves() {
+        assert_eq!(
+            http_logs_endpoint("collector:4318"),
+            "collector:4318/v1/logs"
+        );
     }
 }

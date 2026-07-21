@@ -96,9 +96,12 @@ _drive_ids_alert() {
 
 # _sink_deliveries <log> — number of recorded requests.
 _sink_deliveries() {
-    local log="${1}"
+    local log="${1}" n
     [ -f "${log}" ] || { echo 0; return 0; }
-    grep -c . "${log}" 2>/dev/null || echo 0
+    # `grep -c` exits 1 on zero matches, so capture first and default after —
+    # `grep -c ... || echo 0` would print both the count and the fallback.
+    n="$(grep -c . "${log}" 2>/dev/null)" || n=0
+    echo "${n:-0}"
 }
 
 # _wait_for_delivery <log> <max_attempts> — wait until the sink recorded

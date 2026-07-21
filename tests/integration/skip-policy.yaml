@@ -91,6 +91,7 @@ env:
   - "warden binary not found next to"
 
 masking:
+  - "warden log missing at"
   - "API not reachable at"
   - "API not reachable on agent VM"
   - "Agent failed to start"
