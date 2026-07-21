@@ -1,0 +1,45 @@
+# docker-compose-perf.yml — container used by the Docker overhead suite.
+#
+# Same shape as docker-compose-test.yml, with two differences the suite
+# depends on: the container is named `ebpfsentinel-perf` (suite 09's
+# CONTAINER_NAME) and it mounts config-docker-perf.yaml, which binds a real
+# interface instead of loopback. Suite 09 rewrites that mount path to the
+# interface-substituted copy before bringing the stack up.
+
+services:
+  agent:
+    image: ebpfsentinel:integration-test
+    container_name: ebpfsentinel-perf
+
+    # The datapath attaches to a host interface, so the container shares the
+    # host network namespace — as production does.
+    network_mode: host
+    privileged: true
+
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+
+    volumes:
+      # BTF type info — required for eBPF CO-RE
+      - /sys/kernel/btf:/sys/kernel/btf:ro
+      # eBPF filesystem — required for map pinning
+      - /sys/fs/bpf:/sys/fs/bpf
+      # Debug filesystem — required for eBPF tracing
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+      # Perf config (real interface, firewall only). Suite 09 replaces this
+      # path with its interface-substituted copy.
+      - ./config-docker-perf.yaml:/etc/ebpfsentinel/config.yaml:ro
+
+    healthcheck:
+      test: ["CMD", "ebpfsentinel-agent", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "1"

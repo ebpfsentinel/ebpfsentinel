@@ -18,7 +18,7 @@ threatintel:
   feeds:
     - id: test-stix
       name: Test STIX Feed
-      url: "http://127.0.0.1:18888/bundle-basic.json"
+      url: "http://203.0.113.20:18888/bundle-basic.json"
       format: stix
       refresh_interval_secs: 30
       min_confidence: 0

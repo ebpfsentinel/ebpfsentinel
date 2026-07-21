@@ -70,6 +70,13 @@ _report_set_str() {
 setup_file() {
     _docker_check
 
+    # Every test drives a container built from this image. Without it the
+    # suite reports a cascade of failures that all mean "nothing was built",
+    # so gate once, explicitly.
+    if ! _docker_cmd image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
+        env_skip "ebpfsentinel:integration-test image not built — run the docker build first"
+    fi
+
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"
 

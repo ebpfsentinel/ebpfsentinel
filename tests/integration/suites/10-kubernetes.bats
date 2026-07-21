@@ -20,9 +20,13 @@ setup_file() {
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"
 
-    # Start minikube if not running
+    # Start minikube if not running. A cluster that refuses to come up (no
+    # nested virtualisation, no usable driver) is a missing capability, not a
+    # product regression — gate on it instead of failing setup opaquely.
     if ! minikube status --format='{{.Host}}' 2>/dev/null | grep -q "Running"; then
-        minikube start --driver=docker --cpus=2 --memory=2048
+        if ! minikube start --driver=docker --cpus=2 --memory=2048; then
+            env_skip "minikube cluster could not start on this host"
+        fi
     fi
 
     # Ensure the agent image exists, then load it into minikube. The DaemonSet

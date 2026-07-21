@@ -46,7 +46,7 @@ _expected_technique_for_suite() {
         27) echo "dlp|T1041" ;;                  # DLP exfiltration over C2
         29) echo "rest-only|" ;;                 # L7 rule surface; denies audit, no alert
         30) echo "geoip|T1071" ;;                # GeoIP-enriched alerts
-        33) echo "threatintel|T1071.001" ;;      # STIX feed IOC match
+        33) echo "rest-only|" ;;                 # STIX feed load; no matching traffic
         38) echo "ratelimit|T1499" ;;            # MHDDoS L7 floods
         39) echo "ratelimit|T1499" ;;            # Slowloris/RUDY/Slowread
         40) echo "ddos|T1498.002" ;;             # Reflection amplification

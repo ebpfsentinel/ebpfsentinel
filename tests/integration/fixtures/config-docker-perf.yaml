@@ -1,0 +1,56 @@
+# config-docker-perf.yaml — agent config for the Docker overhead suite.
+#
+# Unlike config-docker-test.yaml (loopback, everything off), this one binds a
+# real interface so the suite can measure throughput and latency with the
+# datapath actually attached. `__INTERFACE__` is substituted by suite 09
+# before the file is mounted: the host veth in the local lane, eth1 on the
+# agent VM in the 2-VM lane.
+#
+# The feature set is deliberately the cheap one — firewall only — so the
+# numbers describe baseline datapath overhead rather than a full detection
+# stack.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  swagger_ui: false
+  log_level: info
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  mode: alert
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+conntrack:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: false
