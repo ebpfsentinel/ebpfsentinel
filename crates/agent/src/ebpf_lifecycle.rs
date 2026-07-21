@@ -622,7 +622,7 @@ impl EbpfProgramManager {
         match name {
             "xdp_firewall" => {
                 let domain_rules = config.firewall_rules().unwrap_or_default();
-                let (mut loader, map_manager, metrics_rdr, reader) =
+                let (mut loader, map_manager, metrics_rdr, reader, _zone_rdrs) =
                     startup::try_load_xdp_firewall(&self.ebpf_dir, config, &domain_rules)?;
 
                 let cancel = CancellationToken::new();

@@ -511,7 +511,7 @@ pub async fn load_ebpf_programs(
     let mut fw_loader: Option<EbpfLoader> = None;
     let fw_ok = if config.firewall.enabled {
         match startup::try_load_xdp_firewall(&ebpf_dir, config, &domain_rules) {
-            Ok((loader, map_manager, fw_metrics_rdr, reader)) => {
+            Ok((loader, map_manager, fw_metrics_rdr, reader, _zone_rdrs)) => {
                 let event_tx_clone = event_tx.clone();
                 tokio::spawn(
                     async move { reader.run(event_tx_clone, CancellationToken::new()).await },

@@ -1510,7 +1510,7 @@ pub async fn run(
         // 10a. XDP Firewall
         fw_ok = if config.firewall.enabled {
             match try_load_xdp_firewall(&ebpf_dir, &config, &domain_rules) {
-                Ok((loader, map_manager, fw_metrics_rdr, reader)) => {
+                Ok((loader, map_manager, fw_metrics_rdr, reader, zone_rdrs)) => {
                     let event_tx_clone = event_tx.clone();
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, CancellationToken::new()).await;
@@ -1519,6 +1519,25 @@ pub async fn run(
                     svc.set_map_port(Box::new(map_manager));
                     if let Some(rdr) = fw_metrics_rdr {
                         metrics_readers.push(rdr);
+                    }
+                    if let Some((passed, dropped, zone_names)) = zone_rdrs {
+                        let zm_cancel = cancel_token.clone();
+                        let zm_metrics = Arc::clone(&metrics) as Arc<dyn MetricsPort>;
+                        info!(
+                            zones = zone_names.len(),
+                            "per-zone datapath counters exported"
+                        );
+                        tokio::spawn(async move {
+                            crate::ebpf_metrics::run_zone_metrics_loop(
+                                passed,
+                                dropped,
+                                zone_names,
+                                zm_metrics,
+                                Duration::from_secs(10),
+                                zm_cancel,
+                            )
+                            .await;
+                        });
                     }
                     metrics.set_ebpf_program_status("xdp_firewall", true);
                     ebpf_loaded.store(true, Ordering::Relaxed);
@@ -3311,16 +3330,26 @@ pub fn read_ebpf_program(dir: &str, name: &str) -> anyhow::Result<Vec<u8>> {
 // ── Per-program load functions ───────────────────────────────────────
 
 /// Load the XDP firewall program: attach XDP, populate rules, create event reader.
-pub fn try_load_xdp_firewall(
-    ebpf_dir: &str,
-    config: &AgentConfig,
-    domain_rules: &[FirewallRule],
-) -> anyhow::Result<(
+/// Per-zone counter readers plus the zone id → name mapping used to label
+/// them. `None` when zones are disabled or the maps are absent.
+pub type ZoneMetricsSource = (MetricsReader, MetricsReader, Vec<(u32, String)>);
+
+/// Everything `try_load_xdp_firewall` hands back: the loader, the map
+/// manager the firewall service writes through, the firewall counter reader,
+/// the event reader, and the per-zone counter readers when zones are on.
+pub type XdpFirewallLoad = (
     EbpfLoader,
     FirewallMapManager,
     Option<MetricsReader>,
     EventReader,
-)> {
+    Option<ZoneMetricsSource>,
+);
+
+pub fn try_load_xdp_firewall(
+    ebpf_dir: &str,
+    config: &AgentConfig,
+    domain_rules: &[FirewallRule],
+) -> anyhow::Result<XdpFirewallLoad> {
     use ebpf_common::firewall::{DEFAULT_POLICY_DROP, DEFAULT_POLICY_PASS};
     use infrastructure::config::DefaultPolicy;
 
@@ -3368,6 +3397,8 @@ pub fn try_load_xdp_firewall(
     map_manager.load_v4_rules(&v4_entries)?;
     map_manager.load_v6_rules(&v6_entries)?;
 
+    let mut zone_metrics_readers: Option<ZoneMetricsSource> = None;
+
     // Populate ZONE_MAP (ifindex → zone_id) if zone config is present
     if config.zones.enabled
         && let Ok(zone_cfg) = config.zone_config()
@@ -3375,6 +3406,27 @@ pub fn try_load_xdp_firewall(
         adapters::ebpf::map_manager::populate_zone_map(loader.ebpf_mut(), &zone_cfg);
         adapters::ebpf::map_manager::populate_zone_policy_map(loader.ebpf_mut(), &zone_cfg);
         adapters::ebpf::map_manager::populate_zone_policy_pairs(loader.ebpf_mut(), &zone_cfg);
+
+        // Mirror the datapath's per-zone counters into Prometheus. The maps
+        // are indexed by the same 1-based ids the populators just used, so
+        // the name mapping is derived here rather than re-derived later.
+        let zone_names: Vec<(u32, String)> = zone_cfg
+            .zones
+            .iter()
+            .enumerate()
+            .map(|(idx, zone)| (u32::try_from(idx + 1).unwrap_or(0), zone.id.clone()))
+            .collect();
+        match (
+            MetricsReader::new(loader.ebpf_mut(), "ZONE_METRICS_PASSED"),
+            MetricsReader::new(loader.ebpf_mut(), "ZONE_METRICS_DROPPED"),
+        ) {
+            (Ok(passed), Ok(dropped)) if !zone_names.is_empty() => {
+                zone_metrics_readers = Some((passed, dropped, zone_names));
+            }
+            _ => {
+                tracing::debug!("zone counter maps unavailable, per-zone metrics not exported");
+            }
+        }
     }
 
     // Populate DDOS_CPUMAP with all online CPUs for DDoS CPU steering.
@@ -3384,7 +3436,13 @@ pub fn try_load_xdp_firewall(
 
     let reader = EventReader::new(loader.ebpf_mut())?;
 
-    Ok((loader, map_manager, metrics_rdr, reader))
+    Ok((
+        loader,
+        map_manager,
+        metrics_rdr,
+        reader,
+        zone_metrics_readers,
+    ))
 }
 
 /// Load the xdp-firewall-reject program and wire it as a tail-call target.

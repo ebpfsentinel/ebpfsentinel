@@ -187,3 +187,62 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
         _ => &[(0, "index_0"), (1, "index_1"), (2, "errors")],
     }
 }
+
+// ── Per-zone counters ────────────────────────────────────────────────
+
+/// Poll the datapath's per-zone counters and mirror them into the metrics
+/// port, labelled by zone name.
+///
+/// The zone maps are indexed by `zone_id`, which is an internal 1-based
+/// position in the config. Exposing that number would be useless to an
+/// operator, so the caller supplies the id → name mapping it used to
+/// populate the maps, and only those ids are read.
+///
+/// Deltas are derived exactly as in [`run_kernel_metrics_loop`]: the kernel
+/// counter is absolute, so the exposed counter tracks it regardless of the
+/// poll cadence, and a value that dropped (map recreated on reload) is taken
+/// as the new delta.
+pub async fn run_zone_metrics_loop(
+    passed: MetricsReader,
+    dropped: MetricsReader,
+    zone_names: Vec<(u32, String)>,
+    metrics: Arc<dyn MetricsPort>,
+    interval: Duration,
+    cancel: CancellationToken,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.tick().await; // counters are 0 at startup
+
+    let mut last: HashMap<(u32, &'static str), u64> = HashMap::new();
+
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            _ = ticker.tick() => {}
+        }
+
+        for (zone_id, zone_name) in &zone_names {
+            for (reader, action) in [(&passed, "passed"), (&dropped, "dropped")] {
+                match reader.read_metric(*zone_id) {
+                    Ok(value) => {
+                        let key = (*zone_id, action);
+                        let prev = last.get(&key).copied().unwrap_or(0);
+                        let delta = if value >= prev { value - prev } else { value };
+                        if delta > 0 {
+                            metrics.record_zone_packets_by(zone_name, action, delta);
+                        }
+                        last.insert(key, value);
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            zone = %zone_name,
+                            action,
+                            error = %e,
+                            "zone metric read failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

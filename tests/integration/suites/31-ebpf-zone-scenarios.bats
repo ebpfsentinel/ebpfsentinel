@@ -266,3 +266,40 @@ teardown_file() {
 
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ]
 }
+
+# ── Per-zone datapath counters ─────────────────────────────────────
+
+@test "zone packet counters reach Prometheus" {
+    require_root
+
+    # Drive traffic through the zoned interface, then wait for the counter
+    # poll. The loop mirrors the kernel counters every 10 s, so a single
+    # sample right after the traffic would race it.
+    send_tcp_from_ns "$EBPF_HOST_IP" 8080 "ZONE_COUNTER_TEST" 3 || true
+
+    local attempt=0 series=""
+    while [ "${attempt}" -lt 20 ]; do
+        series="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null \
+            | grep -E '^ebpfsentinel_zone_packets_total\{' || true)"
+        [ -n "${series}" ] && break
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+
+    [ -n "${series}" ] || {
+        echo "no ebpfsentinel_zone_packets_total series after 40s" >&2
+        curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null \
+            | grep -i zone >&2 || true
+        return 1
+    }
+
+    # The series must carry both labels and a zone name, not a raw id.
+    echo "${series}" | grep -qE 'zone="[a-zA-Z][^"]*"' || {
+        echo "zone label missing or numeric: ${series}" >&2
+        return 1
+    }
+    echo "${series}" | grep -qE 'action="(passed|dropped)"' || {
+        echo "action label missing: ${series}" >&2
+        return 1
+    }
+}

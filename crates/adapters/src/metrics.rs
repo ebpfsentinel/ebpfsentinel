@@ -101,6 +101,12 @@ pub struct ZoneLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct ZonePacketLabels {
+    pub zone: String,
+    pub action: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct FeedLabels {
     pub feed: String,
 }
@@ -131,6 +137,7 @@ pub struct AgentMetrics {
     pub threatintel_matches_total: Family<FeedLabels, Counter>,
     pub zone_interfaces: Family<ZoneLabels, Gauge>,
     pub zone_policies: Family<ZoneLabels, Gauge>,
+    pub zone_packets_total: Family<ZonePacketLabels, Counter>,
     pub alert_sender_circuit_state: Family<DestinationLabels, Gauge>,
     /// Live SSE alert-stream subscriber count. Set by handler on
     /// connect / disconnect.
@@ -284,6 +291,13 @@ impl AgentMetrics {
             "zone_policies",
             "Inter-zone policies whose source is this zone",
             zone_policies.clone(),
+        );
+
+        let zone_packets_total = Family::<ZonePacketLabels, Counter>::default();
+        registry.register(
+            "zone_packets",
+            "Packets handled by zone posture, by zone and action",
+            zone_packets_total.clone(),
         );
 
         let alert_sender_circuit_state = Family::<DestinationLabels, Gauge>::default();
@@ -631,6 +645,7 @@ impl AgentMetrics {
             threatintel_matches_total,
             zone_interfaces,
             zone_policies,
+            zone_packets_total,
             alert_sender_circuit_state,
             alerts_sse_subscribers,
             ips_blacklist_size,
@@ -853,6 +868,15 @@ impl ZoneMetrics for AgentMetrics {
                 zone: zone.to_string(),
             })
             .set(i64::try_from(count).unwrap_or(i64::MAX));
+    }
+
+    fn record_zone_packets_by(&self, zone: &str, action: &str, delta: u64) {
+        self.zone_packets_total
+            .get_or_create(&ZonePacketLabels {
+                zone: zone.to_string(),
+                action: action.to_string(),
+            })
+            .inc_by(delta);
     }
 
     fn set_zone_policies(&self, zone: &str, count: u64) {

@@ -94,6 +94,11 @@ pub trait ZoneMetrics: Send + Sync {
 
     /// Set the number of inter-zone policies whose source is this zone.
     fn set_zone_policies(&self, _zone: &str, _count: u64) {}
+
+    /// Add to the per-zone packet counter. `action` is `passed` or `dropped`;
+    /// the value is a delta read from the datapath, so the exposed counter
+    /// tracks the kernel's and is independent of the poll cadence.
+    fn record_zone_packets_by(&self, _zone: &str, _action: &str, _delta: u64) {}
 }
 
 /// Threat-intelligence observability.
