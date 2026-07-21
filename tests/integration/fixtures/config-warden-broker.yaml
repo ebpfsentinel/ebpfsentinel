@@ -1,0 +1,73 @@
+# config-warden-broker.yaml — exercises every privileged operation the agent
+# delegates to the warden broker, in one agent run.
+#
+#   conntrack      → ConntrackDelete / ConntrackFlush (netlink teardown)
+#   capture        → PcapOpen (AF_PACKET fds handed over SCM_RIGHTS)
+#   dlp            → DlpScan + AttachUprobe (uprobe_multi link fd)
+#   loadbalancer   → ArpAnnounce (gratuitous ARP on speaker takeover)
+#
+# The agent runs rootless in a user namespace, so none of those syscalls can
+# succeed without the broker: the assertions in suite 62 read as "the broker
+# served it" rather than "the feature works" (the feature suites 18/27/37/49
+# already own the latter).
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+conntrack:
+  enabled: true
+
+dlp:
+  enabled: true
+  mode: alert
+  patterns:
+    - id: dlp-pii-email
+      name: "Email Address"
+      regex: "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"
+      severity: medium
+      data_type: pii
+
+loadbalancer:
+  enabled: true
+  services: []
+  announce:
+    role: primary
+    interface: __INTERFACE__
+    vips:
+      - name: warden-vip
+        addr: 10.200.0.50
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

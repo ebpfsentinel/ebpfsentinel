@@ -242,7 +242,7 @@ coverage:
 
   - kind: ebpf_program
     feature: uprobe-dlp
-    suites: ["27", "60", "perf/06"]
+    suites: ["27", "60", "62", "perf/06"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -516,11 +516,11 @@ coverage:
 
   - kind: domain_module
     feature: capture
-    suites: ["49"]
+    suites: ["49", "62"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "Pcap export lifecycle (Running → Completed) + on-disk pcap validity asserted in 49"
+    notes: "Pcap export lifecycle (Running → Completed) + on-disk pcap validity asserted in 49; broker-provided AF_PACKET sockets (PcapOpen fd hand-off) asserted in 62"
 
   - kind: domain_module
     feature: conntrack
@@ -548,11 +548,11 @@ coverage:
 
   - kind: domain_module
     feature: dlp
-    suites: ["16", "27", "60", "perf/06"]
+    suites: ["16", "27", "60", "62", "perf/06"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Data loss prevention; suite 27 covers pattern match + uprobe attach, suite 60 the per-container attach path. TLS-MITM proxy is enterprise-only; wire-level malicious-MITM + decrypted-payload assertions remain 3-VM deferrals (need mitmproxy + injected-CA topology). uprobe SSL-inspection goodput cost benched in perf/06"
+    notes: "Data loss prevention; suite 27 covers pattern match + uprobe attach, suite 60 the per-container attach path, suite 62 the brokered DlpScan + AttachUprobe half. TLS-MITM proxy is enterprise-only; wire-level malicious-MITM + decrypted-payload assertions remain 3-VM deferrals (need mitmproxy + injected-CA topology). uprobe SSL-inspection goodput cost benched in perf/06"
 
   - kind: domain_module
     feature: dns
@@ -588,11 +588,11 @@ coverage:
 
   - kind: domain_module
     feature: l2
-    suites: ["37", "44"]
+    suites: ["37", "44", "62"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "L2 binding + self-whitelist; DSR end-to-end covered by suite 44"
+    notes: "L2 binding + self-whitelist; DSR end-to-end covered by suite 44; gratuitous ARP brokered through the warden (ArpAnnounce) asserted in 62"
 
   - kind: domain_module
     feature: l7

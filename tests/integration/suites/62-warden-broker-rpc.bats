@@ -14,8 +14,22 @@
 #     still ends up with eBPF loaded — only the broker can explain that.
 #   * A peer whose uid is not the served one is dropped without being
 #     served, while the served uid keeps its connection open.
-#   * Conntrack teardown, a netlink operation the user-namespace agent
-#     cannot perform itself, succeeds end-to-end through the broker.
+#   * Every privileged operation the agent delegates succeeds end-to-end,
+#     each one impossible from an unprivileged user namespace:
+#       ConntrackFlush  netlink teardown
+#       PcapOpen        AF_PACKET fds handed over SCM_RIGHTS
+#       DlpScan +
+#       AttachUprobe    uprobe_multi link fd for the DLP probes
+#       ArpAnnounce     gratuitous ARP on VIP speaker takeover
+#
+# The feature suites (18 conntrack, 27 DLP, 37 VIP, 49 capture) own the
+# behaviour of each feature; here the claim is narrower — the broker served
+# the privileged half.
+#
+# `RouteAdd` / `RouteDel` are deliberately absent: the proto, the client and
+# the warden implement them, but no OSS agent code issues them (multi-WAN
+# tracks gateway health and selection without programming kernel routes), so
+# there is nothing to drive end-to-end.
 #
 # Requires: root, kernel >= 6.9, local eBPF build + warden binary, python3,
 # setpriv, ncat, jq. VM-only (Vagrant agent).
@@ -72,7 +86,7 @@ setup_file() {
 
     create_test_netns
 
-    PREPARED_CONFIG="$(prepare_ebpf_config "${FIXTURE_DIR}/config-ebpf-conntrack.yaml")"
+    PREPARED_CONFIG="$(prepare_ebpf_config "${FIXTURE_DIR}/config-warden-broker.yaml")"
     export PREPARED_CONFIG
 
     start_ebpf_agent "$PREPARED_CONFIG"
@@ -273,6 +287,118 @@ teardown_file() {
         "${AGENT_LOG_FILE}" || {
         echo "broker refused the conntrack teardown" >&2
         grep -i "warden\|conntrack" "${AGENT_LOG_FILE}" | tail -20 >&2 || true
+        return 1
+    }
+}
+
+@test "the broker hands over AF_PACKET capture sockets" {
+    # The warden opens the pool up front (it holds CAP_NET_RAW) and reports it
+    # on startup; the agent may also open more explicitly through PcapOpen.
+    local announced=0
+    grep -qE "\[warden\] delegation ready: [0-9]+ module BTF fd\(s\), [1-9][0-9]* pcap fd\(s\)" \
+        "${AGENT_LOG_FILE}" && announced=1
+    grep -q "packet-capture sockets provisioned by the warden" \
+        "${AGENT_LOG_FILE}" && announced=1
+
+    [ "${announced}" -eq 1 ] || {
+        echo "the broker provisioned no capture socket" >&2
+        grep -i "pcap\|delegation ready" "${AGENT_LOG_FILE}" | tail -10 >&2 || true
+        return 1
+    }
+
+    ! grep -q "warden pcap socket open failed" "${AGENT_LOG_FILE}" || {
+        echo "PcapOpen failed against the broker" >&2
+        grep "warden pcap socket open failed" "${AGENT_LOG_FILE}" | tail -5 >&2
+        return 1
+    }
+}
+
+@test "a capture session runs on a broker-provided socket" {
+    local body resp
+    body="$(printf '{"filter":"tcp port 4444","duration_seconds":3,"snap_length":256,"interface":"%s"}' \
+        "${EBPF_VETH_HOST}")"
+    resp="$(api_post /api/v1/captures/manual "${body}")"
+    _load_http_status
+
+    if [ "${HTTP_STATUS}" = "503" ]; then
+        skip "capture engine unavailable (pcap-capture feature off)"
+    fi
+    [ "${HTTP_STATUS}" = "200" ] || [ "${HTTP_STATUS}" = "201" ] || {
+        echo "POST /captures/manual returned ${HTTP_STATUS}: ${resp}" >&2
+        return 1
+    }
+
+    # The agent holds no CAP_NET_RAW of its own: a session that reaches the
+    # capture engine at all means the fd came from the broker.
+    local id
+    id="$(echo "${resp}" | jq -r '.id // empty')"
+    [ -n "${id}" ] || {
+        echo "no capture id in the response: ${resp}" >&2
+        return 1
+    }
+}
+
+@test "DLP uprobes attach through the broker" {
+    # The scan runs in the warden (it can read neighbouring /proc), and each
+    # probe is attached with a link fd passed back over SCM_RIGHTS.
+    ! grep -q "warden DLP scan failed" "${AGENT_LOG_FILE}" || {
+        echo "the broker refused the DLP scan" >&2
+        grep "warden DLP scan failed" "${AGENT_LOG_FILE}" | tail -5 >&2
+        return 1
+    }
+
+    local body loaded
+    body="$(api_get /api/v1/ebpf/status)"
+    _load_http_status
+    [ "${HTTP_STATUS}" = "200" ] || {
+        echo "GET /api/v1/ebpf/status returned ${HTTP_STATUS}" >&2
+        return 1
+    }
+
+    loaded="$(echo "${body}" | jq -r '
+        [.programs[] | select((.name | test("uprobe.?dlp"; "i")) and .loaded)] | length
+    ')"
+    [ "${loaded:-0}" -ge 1 ] || {
+        echo "uprobe-dlp not loaded — nothing could have been attached: ${body}" >&2
+        return 1
+    }
+}
+
+@test "gratuitous ARP for the VIP goes through the broker" {
+    # The announcer emits one gratuitous ARP per owned VIP on the transition
+    # into the speaker role; the adapter proxies it to the warden.
+    local attempt=0 sent=0
+    while [ "${attempt}" -lt 20 ]; do
+        if grep -q "vip announcer: gratuitous ARP sent" "${AGENT_LOG_FILE}"; then
+            sent=1
+            break
+        fi
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+
+    if [ "${sent}" -eq 0 ]; then
+        # No takeover happened at all (no speaker transition) — that is a
+        # fixture/topology issue, not a broker refusal, so surface it as such.
+        grep -q "vip announcer" "${AGENT_LOG_FILE}" \
+            || skip "vip announcer never ran — no speaker transition in this topology"
+        echo "vip announcer ran but emitted no gratuitous ARP" >&2
+        grep -i "vip announcer" "${AGENT_LOG_FILE}" | tail -10 >&2
+        return 1
+    fi
+
+    ! grep -q "warden arp_announce failed" "${AGENT_LOG_FILE}" || {
+        echo "the broker refused ArpAnnounce" >&2
+        grep "warden arp_announce failed" "${AGENT_LOG_FILE}" | tail -5 >&2
+        return 1
+    }
+
+    # And the takeover is reflected in the metric the announcer bumps.
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || metrics=""
+    echo "${metrics}" | grep -qE 'ebpfsentinel_lb_vip_takeovers_total\{[^}]*vip="warden-vip"' || {
+        echo "no lb_vip_takeovers_total series for vip=warden-vip" >&2
+        echo "${metrics}" | grep -i "vip" >&2 || true
         return 1
     }
 }
