@@ -117,7 +117,7 @@ suite_profiles:
   # The performance suites (perf/01-06) live in tests/perf/, run via `make test-perf`.
 
 coverage:
-  # ── eBPF programs (15) ──────────────────────────────────────────
+  # ── eBPF programs (16) ──────────────────────────────────────────
   - kind: ebpf_program
     feature: xdp-firewall
     suites: ["11", "24", "26", "perf/04", "40"]
@@ -165,6 +165,14 @@ coverage:
     kernel_min: "6.9"
     profile: nightly
     notes: "L2 VIP announcer / ARP responder; suite 44 (3-VM) drives the responder + gratuitous-ARP + is_self_announced predicate from a real client"
+
+  - kind: ebpf_program
+    feature: xdp-pass
+    suites: ["42", "46"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: nightly
+    notes: "Test-only XDP_PASS stub attached to the netns side of the veth pair by lib/ebpf_helpers.bash (create_test_netns) so XDP_TX reflections from xdp-firewall-reject reach the namespace; a physical NIC needs no such helper"
 
   - kind: ebpf_program
     feature: tc-ids
@@ -232,11 +240,11 @@ coverage:
 
   - kind: ebpf_program
     feature: uprobe-dlp
-    suites: ["27", "perf/06"]
+    suites: ["27", "60", "perf/06"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "SSL/TLS DLP via uprobes; TLS-MITM inspection enterprise suite 60; uprobe SSL-inspection goodput cost (loopback libssl) measured in perf/06"
+    notes: "SSL/TLS DLP via uprobes; per-container uprobe attach across cgroups in suite 60; TLS-MITM inspection is enterprise-only; uprobe SSL-inspection goodput cost (loopback libssl) measured in perf/06"
 
   # ── CLI subcommands (28) ────────────────────────────────────────
   - kind: cli_subcommand
@@ -425,19 +433,19 @@ coverage:
 
   - kind: cli_subcommand
     feature: nat
-    suites: ["16", "21"]
+    suites: ["16", "21", "50"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "NAT + NPTv6; NPTv6 dedicated suite planned (54)"
+    notes: "NAT + NPTv6; NPTv6 prefix translation covered by suite 50"
 
   - kind: cli_subcommand
     feature: mitre
-    suites: [TBD]
+    suites: ["16", "51"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "MITRE coverage matrix; technique assertions planned suite 51"
+    notes: "MITRE coverage matrix; suite 16 asserts GET /api/v1/mitre/coverage (technique/tactic consistency), suite 51 enforces that every alert-producing suite carries a MITRE assertion"
 
   - kind: cli_subcommand
     feature: fingerprints
@@ -486,7 +494,7 @@ coverage:
     topology: none
     kernel_min: "n/a"
     profile: pr
-    notes: "AliasSet (CIDR aliases)"
+    notes: "AliasSet (CIDR aliases); suite 16 covers alias_count plus PUT /api/v1/aliases/{id}/content on an External alias (accept) and on ip_set / unknown / invalid-CIDR inputs (reject)"
 
   - kind: domain_module
     feature: audit
@@ -514,11 +522,11 @@ coverage:
 
   - kind: domain_module
     feature: conntrack
-    suites: ["18", "24", "47"]
+    suites: ["16", "18", "24", "47"]
     topology: 3vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47"
+    notes: "Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; GET /api/v1/conntrack/events SSE stream asserted in 16 (skipped when /proc/net/nf_conntrack is absent)"
 
   - kind: domain_module
     feature: container
@@ -538,11 +546,11 @@ coverage:
 
   - kind: domain_module
     feature: dlp
-    suites: ["16", "27", "perf/06"]
+    suites: ["16", "27", "60", "perf/06"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Data loss prevention; TLS proxy enterprise. Suite 63 enforces the license-gate skip path (AC #3) on the OSS bats fleet and tracks the wire-level malicious-MITM + decrypted-payload pattern-match assertions as 3-VM deferrals (need mitmproxy + injected-CA topology); uprobe SSL-inspection goodput cost benched in perf/06"
+    notes: "Data loss prevention; suite 27 covers pattern match + uprobe attach, suite 60 the per-container attach path. TLS-MITM proxy is enterprise-only; wire-level malicious-MITM + decrypted-payload assertions remain 3-VM deferrals (need mitmproxy + injected-CA topology). uprobe SSL-inspection goodput cost benched in perf/06"
 
   - kind: domain_module
     feature: dns
@@ -574,15 +582,15 @@ coverage:
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Auto-blacklist + whitelist; MHDDoS flood matrix in 38; slowhttptest in 39; IPv6 blacklist-write surface asserted in 55; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 55; in-kernel blacklist-injection control-plane latency (100/1K) benched in perf/03"
+    notes: "Auto-blacklist + whitelist; MHDDoS flood matrix in 38; slowhttptest in 39; IPv6 blacklist-write surface asserted in 55; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 59; in-kernel blacklist-injection control-plane latency (100/1K) benched in perf/03"
 
   - kind: domain_module
     feature: l2
-    suites: ["37"]
+    suites: ["37", "44"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "L2 binding + self-whitelist; DSR end-to-end planned (48)"
+    notes: "L2 binding + self-whitelist; DSR end-to-end covered by suite 44"
 
   - kind: domain_module
     feature: l7

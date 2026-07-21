@@ -61,6 +61,10 @@ mode = sys.argv[3]
 matrix_path = integ_dir / "coverage-matrix.yaml"
 readme_path = integ_dir / "README.md"
 suites_dir = integ_dir / "suites"
+# Perf suites live in a sibling tree (tests/perf) and are referenced from
+# the matrix as `perf/NN`. They run from tests/perf/Makefile, not the
+# integration CI matrix, but the audit must still resolve their ids.
+perf_dir = integ_dir.parent / "perf"
 
 if not matrix_path.exists():
     sys.stderr.write(f"coverage matrix missing: {matrix_path}\n")
@@ -145,6 +149,14 @@ if suites_dir.exists():
         m = re.match(r"^(\d{2})-", p.name)
         if m:
             known_suites.add(m.group(1))
+
+known_perf_suites: set[str] = set()
+if perf_dir.exists():
+    for p in perf_dir.iterdir():
+        m = re.match(r"^(\d{2})-.*\.bats$", p.name)
+        if m:
+            known_perf_suites.add(f"perf/{m.group(1)}")
+known_suites |= known_perf_suites
 
 stale_suite_refs: list[str] = []
 tbd_rows: list[str] = []

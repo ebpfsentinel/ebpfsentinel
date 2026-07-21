@@ -17,6 +17,15 @@ firewall:
   enabled: true
   mode: alert
   default_policy: pass
+  aliases:
+    # External alias: content is pushed at runtime over the REST API.
+    it-alias-external:
+      type: external
+    # Static ip_set alias: rejects runtime content pushes.
+    it-alias-ipset:
+      type: ip_set
+      values:
+        - "10.99.0.0/24"
   rules:
     - id: fw-test-001
       priority: 100

@@ -175,6 +175,10 @@ _drive_ssh_burst() {
         echo "expected MITRE T1110(.001) in alert: ${first}" >&2
         return 1
     }
+
+    # Same claim through the shared helper so the technique is asserted
+    # on the canonical alert field, not only in the raw payload.
+    assert_alert_has_mitre_technique T1110 15
 }
 
 @test "IPS auto-blacklist captures the source after the SSH burst" {
@@ -240,6 +244,10 @@ _drive_ssh_hydra() {
         echo "expected MITRE T1110(.001) in alert: ${first}" >&2
         return 1
     }
+
+    # Same claim through the shared helper so the technique is asserted
+    # on the canonical alert field, not only in the raw payload.
+    assert_alert_has_mitre_technique T1110 15
 }
 
 # ── Negative auth + mitigation ─────────────────────────────────────

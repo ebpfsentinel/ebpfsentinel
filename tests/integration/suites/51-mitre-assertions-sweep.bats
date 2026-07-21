@@ -18,8 +18,9 @@ load '../lib/ebpf_helpers'
 # suites enumerated in the integration coverage matrix; adding a new alert
 # suite without registering it here is a deliberate audit point.
 MITRE_SCOPE_SUITES=(
-    "12" "13" "14" "16" "18" "20" "22" "23"
-    "26" "28" "32" "36" "41" "43" "44" "47"
+    "12" "13" "14" "15" "17" "19" "21" "22"
+    "25" "27" "29" "30" "33" "38" "39" "40"
+    "41" "43" "45" "55" "56" "59"
 )
 
 # Per-suite expected technique mapping. The mapping reflects the dominant
@@ -31,19 +32,25 @@ _expected_technique_for_suite() {
         12) echo "ids|T1071" ;;                  # IDS signature match
         13) echo "ips|T1071" ;;                  # IPS auto-blacklist
         14) echo "ratelimit|T1499" ;;            # Endpoint Denial of Service
-        16) echo "rest-only|" ;;                 # DDoS REST API, no alerts fired
-        18) echo "threatintel|T1071.001" ;;      # ThreatIntel HTTP IOC match
-        20) echo "rest-only|" ;;                 # DNS REST/observation only
-        22) echo "rest-only|" ;;                 # NAT REST surface only
-        23) echo "ddos|T1499" ;;                 # DDoS detection
-        26) echo "ids|T1071" ;;                  # alert end-to-end
-        28) echo "dlp|T1041" ;;                  # DLP exfiltration over C2
-        32) echo "l7|T1071.001" ;;               # L7 web protocol
-        36) echo "rest-only|" ;;                 # STIX feed loader, no alerts
-        41) echo "ratelimit|T1499" ;;            # MHDDoS L7 floods
-        43) echo "ratelimit|T1499" ;;            # Slowloris/RUDY/Slowread
-        44) echo "ddos|T1498.002" ;;             # Reflection amplification
-        47) echo "ratelimit|T1499.001" ;;        # OS Exhaustion (SYN flood)
+        15) echo "ddos|T1499" ;;                 # DDoS REST + policy alerts
+        17) echo "threatintel|T1071.001" ;;      # ThreatIntel HTTP IOC match
+        19) echo "dns|T1071.004" ;;              # DNS application-layer protocol
+        21) echo "nat|T1071" ;;                  # NAT transit alerts
+        22) echo "ddos|T1499" ;;                 # DDoS detection
+        25) echo "ids|T1071" ;;                  # alert end-to-end
+        27) echo "dlp|T1041" ;;                  # DLP exfiltration over C2
+        29) echo "l7|T1071.001" ;;               # L7 web protocol
+        30) echo "geoip|T1071" ;;                # GeoIP-enriched alerts
+        33) echo "threatintel|T1071.001" ;;      # STIX feed IOC match
+        38) echo "ratelimit|T1499" ;;            # MHDDoS L7 floods
+        39) echo "ratelimit|T1499" ;;            # Slowloris/RUDY/Slowread
+        40) echo "ddos|T1498.002" ;;             # Reflection amplification
+        41) echo "l7|T1071.001" ;;               # JA4 / TLS client diversity
+        43) echo "ddos|T1499.001" ;;             # OS Exhaustion (SYN flood)
+        45) echo "dns|T1071.004" ;;              # DoH/DoT encrypted-DNS policy
+        55) echo "ids|T1071" ;;                  # IPv6 parity sweep
+        56) echo "l7|T1071.003" ;;               # SMTP/FTP/SMB edge cases
+        59) echo "ips|T1110.001" ;;              # SSH password guessing
         *)  echo "" ;;
     esac
 }
@@ -117,7 +124,7 @@ teardown_file() {
     } >"${report}"
 
     [ -s "${report}" ]
-    jq -e '.suites | length == 16' "${report}" >/dev/null || {
+    jq -e ".suites | length == ${#MITRE_SCOPE_SUITES[@]}" "${report}" >/dev/null || {
         echo "coverage report missing entries" >&2
         cat "${report}" >&2
         return 1

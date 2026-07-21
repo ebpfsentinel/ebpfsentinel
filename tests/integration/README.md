@@ -172,86 +172,87 @@ Per-suite mapping lives in the `suite_profiles:` block of `coverage-matrix.yaml`
 
 _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render` after adding/removing a feature._
 
-#### eBPF programs (15)
+#### eBPF programs (16)
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
-| `tc-conntrack` | 19, 25, 51 | 3vm | 6.9 | pr | Connection tracking; kernel-CT kill via kill_flow_via_xdp_ct/skb_ct asserted in 51 |
-| `tc-dns` | 20, 49 | 3vm | 6.9 | pr | Passive DNS capture; DoH/DoT detection via ClientHello SNI + dst_port 853 asserted in 49 |
-| `tc-ids` | 12, 26, 42, 43 | 2vm | 6.9 | pr | Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in 42; slow-attack signatures in 43 |
-| `tc-nat-egress` | 22, 54 | 2vm | 6.9 | pr | SNAT (TC egress); NPTv6 (RFC 6296) checksum-neutral prefix swap config + CLI/REST surface asserted in 54 (wire-level swap gated on IPv6 routability) |
-| `tc-nat-ingress` | 22, 54 | 2vm | 6.9 | pr | DNAT (TC ingress); NPTv6 reverse-prefix translation surface asserted via REST + CLI in 54 |
-| `tc-qos` | 31 | 2vm | 6.9 | pr | Traffic shaping (TC egress) |
-| `tc-scrub` | 24, 44, 50 | 3vm | 6.9 | pr | Packet normalization; spoofed-source amplification drop in 44; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 50 |
-| `tc-threatintel` | 18, 36 | 2vm | 6.9 | pr | OSINT feed IOC matching (TC) |
-| `uprobe-dlp` | 28 | 2vm | 6.9 | pr | SSL/TLS DLP via uprobes; TLS-MITM inspection enterprise suite 60 |
-| `xdp-firewall` | 11, 25, 27, 42, 44 | 2vm | 6.9 | pr | L3/L4 stateful firewall (XDP); XDP-drop CPU savings measured in 42; amplification ports denied in 44 |
-| `xdp-firewall-reject` | 46 | 2vm | 6.9 | nightly | TCP RST / ICMP forging tail-call; suite 42 wire-validates checksums + src/dst swap + whitelist bypass |
-| `xdp-loadbalancer` | 21, 48 | 2vm | 6.9 | pr | L4 LB + Maglev; suite 44 (3-VM) covers L2 DSR end-to-end and Maglev disruption bound |
-| `xdp-ratelimit` | 14, 16, 42 | 2vm | 6.9 | pr | Token bucket + sliding window + leaky bucket; SYN cookie at >1 Mpps in 42 |
-| `xdp-ratelimit-syncookie` | 47 | 2vm | 6.9 | nightly | SYN cookie forging tail-call; suite 43 asserts TcpExtSyncookiesSent + agent metric grow, legit ncat completes, spoofed flood leaves TcpExtSyncookiesRecv flat |
-| `xdp-vip-announcer` | 40, 48 | 2vm | 6.9 | nightly | L2 VIP announcer / ARP responder; suite 44 (3-VM) drives the responder + gratuitous-ARP + is_self_announced predicate from a real client |
+| `tc-conntrack` | 18, 24, 47 | 3vm | 6.9 | pr | Connection tracking; kernel-CT kill via kill_flow_via_xdp_ct/skb_ct asserted in 47 |
+| `tc-dns` | 19, 45 | 3vm | 6.9 | pr | Passive DNS capture; DoH/DoT detection via ClientHello SNI + dst_port 853 asserted in 45 |
+| `tc-ids` | 12, 25, perf/04, 39 | 2vm | 6.9 | pr | Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in perf/04; slow-attack signatures in 39 |
+| `tc-nat-egress` | 21, 50, perf/06 | 2vm | 6.9 | pr | SNAT (TC egress); NPTv6 (RFC 6296) checksum-neutral prefix swap config + CLI/REST surface asserted in 50 (wire-level swap gated on IPv6 routability); SNAT/masquerade datapath throughput overhead measured in perf/06 |
+| `tc-nat-ingress` | 21, 50, perf/06 | 2vm | 6.9 | pr | DNAT (TC ingress); NPTv6 reverse-prefix translation surface asserted via REST + CLI in 50; DNAT datapath throughput overhead measured in perf/06 |
+| `tc-qos` | 28 | 2vm | 6.9 | pr | Traffic shaping (TC egress) |
+| `tc-scrub` | 23, 40, 46 | 3vm | 6.9 | pr | Packet normalization; spoofed-source amplification drop in 40; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 46 |
+| `tc-threatintel` | 17, 33 | 2vm | 6.9 | pr | OSINT feed IOC matching (TC) |
+| `uprobe-dlp` | 27, 60, perf/06 | 2vm | 6.9 | pr | SSL/TLS DLP via uprobes; per-container uprobe attach across cgroups in suite 60; TLS-MITM inspection is enterprise-only; uprobe SSL-inspection goodput cost (loopback libssl) measured in perf/06 |
+| `xdp-firewall` | 11, 24, 26, perf/04, 40 | 2vm | 6.9 | pr | L3/L4 stateful firewall (XDP); XDP-drop CPU savings measured in perf/04; amplification ports denied in 40 |
+| `xdp-firewall-reject` | 42 | 2vm | 6.9 | nightly | TCP RST / ICMP forging tail-call; perf/04 wire-validates checksums + src/dst swap + whitelist bypass |
+| `xdp-loadbalancer` | 20, 44 | 2vm | 6.9 | pr | L4 LB + Maglev; suite 44 (3-VM) covers L2 DSR end-to-end and Maglev disruption bound |
+| `xdp-pass` | 42, 46 | 2vm | 6.9 | nightly | Test-only XDP_PASS stub attached to the netns side of the veth pair by lib/ebpf_helpers.bash (create_test_netns) so XDP_TX reflections from xdp-firewall-reject reach the namespace; a physical NIC needs no such helper |
+| `xdp-ratelimit` | 14, 15, perf/04 | 2vm | 6.9 | pr | Token bucket + sliding window + leaky bucket; SYN cookie at >1 Mpps in perf/04 |
+| `xdp-ratelimit-syncookie` | 43 | 2vm | 6.9 | nightly | SYN cookie forging tail-call; suite 43 asserts TcpExtSyncookiesSent + agent metric grow, legit ncat completes, spoofed flood leaves TcpExtSyncookiesRecv flat |
+| `xdp-vip-announcer` | 37, 44 | 2vm | 6.9 | nightly | L2 VIP announcer / ARP responder; suite 44 (3-VM) drives the responder + gratuitous-ARP + is_self_announced predicate from a real client |
 
 #### CLI subcommands (28)
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
-| `alerts` | 04, 26, 37 | 2vm | 6.9 | pr | Alert list + e2e + SSE stream |
+| `alerts` | 04, 25, 34 | 2vm | 6.9 | pr | Alert list + e2e + SSE stream |
 | `audit` | 04 | none | n/a | pr | Audit log + rule history |
-| `capture` | 53 | 2vm | 6.9 | nightly | Manual packet capture (start/list/stop) with tcpdump-parseable pcap export asserted in 53 |
-| `conntrack` | 19, 17 | 2vm | 6.9 | pr | Connection tracking inspection + flush |
-| `ddos` | 16, 23, 41, 43, 44 | 2vm | 6.9 | pr | DDoS protection + scrub; MHDDoS flood matrix in 41; slow-attack T1499.002 in 43; amplification T1498.002 in 44 |
-| `dns` | 04, 20 | 2vm | 6.9 | pr | DNS cache, stats, blocklist |
+| `capture` | 49 | 2vm | 6.9 | nightly | Manual packet capture (start/list/stop) with tcpdump-parseable pcap export asserted in 49 |
+| `conntrack` | 18, 16 | 2vm | 6.9 | pr | Connection tracking inspection + flush |
+| `ddos` | 15, 22, 38, 39, 40 | 2vm | 6.9 | pr | DDoS protection + scrub; MHDDoS flood matrix in 38; slow-attack T1499.002 in 39; amplification T1498.002 in 40 |
+| `dns` | 04, 19 | 2vm | 6.9 | pr | DNS cache, stats, blocklist |
 | `domains` | 04 | none | n/a | pr | Domain reputation + blocklist |
-| `fingerprints` | 32, 45 | 2vm | 6.9 | nightly | JA4+ cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 41 |
-| `firewall` | 03, 11, 27, 44 | 2vm | 6.9 | pr | L3/L4 rule CRUD + eBPF scenarios; amplification UDP-port denies in 44 |
-| `flows` | 04, 19 | 2vm | 6.9 | pr | Aggregated connection map |
+| `fingerprints` | 29, 41 | 2vm | 6.9 | nightly | JA4+ cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 41 |
+| `firewall` | 03, 11, 26, 40 | 2vm | 6.9 | pr | L3/L4 rule CRUD + eBPF scenarios; amplification UDP-port denies in 40 |
+| `flows` | 04, 18 | 2vm | 6.9 | pr | Aggregated connection map |
 | `health` | 02 | none | n/a | pr | /healthz + /readyz |
-| `identity` | 38 | none | n/a | pr | Operator-managed flag, hostname, version |
+| `identity` | 35 | none | n/a | pr | Operator-managed flag, hostname, version |
 | `investigate` | 04 | none | n/a | pr | IP correlation across alerts/CT/DNS/blacklist |
-| `ips` | 13, 17, 41, 43 | 2vm | 6.9 | pr | Intrusion prevention + auto-blacklist; MHDDoS flood matrix in 41; slowhttptest in 43 |
-| `l7` | 17, 32, 41, 43 | 2vm | 6.9 | pr | L7 firewall rules (HTTP/SMTP/FTP/SMB inspection); MHDDoS flood matrix in 41; slow-request timeout in 43 |
-| `lb` | 17, 21, 40 | 2vm | 6.9 | pr | Load balancer services + VIPs |
+| `ips` | 13, 16, 38, 39 | 2vm | 6.9 | pr | Intrusion prevention + auto-blacklist; MHDDoS flood matrix in 38; slowhttptest in 39 |
+| `l7` | 16, 29, 38, 39 | 2vm | 6.9 | pr | L7 firewall rules (HTTP/SMTP/FTP/SMB inspection); MHDDoS flood matrix in 38; slow-request timeout in 39 |
+| `lb` | 16, 20, 37 | 2vm | 6.9 | pr | Load balancer services + VIPs |
 | `metrics` | 02 | none | n/a | pr | Prometheus metrics |
-| `mitre` | TBD | 2vm | 6.9 | nightly | MITRE coverage matrix; technique assertions planned suite 51 |
-| `nat` | 17, 22 | 2vm | 6.9 | pr | NAT + NPTv6; NPTv6 dedicated suite planned (54) |
-| `qos` | 17, 31 | 2vm | 6.9 | pr | QoS / traffic shaping |
-| `ratelimit` | 04, 14, 17, 41 | 2vm | 6.9 | pr | Rate limit policies; MHDDoS flood matrix in 41 |
-| `responses` | 52 | 2vm | 6.9 | nightly | Manual time-bounded response actions (create/list/revoke + TTL auto-expire) asserted via REST + CLI parity in 52 |
+| `mitre` | 16, 51 | 2vm | 6.9 | nightly | MITRE coverage matrix; suite 16 asserts GET /api/v1/mitre/coverage (technique/tactic consistency), suite 51 enforces that every alert-producing suite carries a MITRE assertion |
+| `nat` | 16, 21, 50 | 2vm | 6.9 | pr | NAT + NPTv6; NPTv6 prefix translation covered by suite 50 |
+| `qos` | 16, 28 | 2vm | 6.9 | pr | QoS / traffic shaping |
+| `ratelimit` | 04, 14, 16, 38 | 2vm | 6.9 | pr | Rate limit policies; MHDDoS flood matrix in 38 |
+| `responses` | 48 | 2vm | 6.9 | nightly | Manual time-bounded response actions (create/list/revoke + TTL auto-expire) asserted via REST + CLI parity in 48 |
 | `score` | 04 | none | n/a | pr | 0-10 network risk score |
 | `status` | 01, 02 | none | n/a | pr | Runtime status query |
-| `threatintel` | 17, 18, 36 | 2vm | 6.9 | pr | OSINT feed CRUD + IOC matching + STIX feed |
+| `threatintel` | 16, 17, 33 | 2vm | 6.9 | pr | OSINT feed CRUD + IOC matching + STIX feed |
 | `top` | 04 | none | n/a | pr | Top talkers by traffic volume |
 | `version` | 01 | none | n/a | pr | Version + build info |
-| `watch` | 37 | none | n/a | pr | SSE alerts stream (tail -f) |
+| `watch` | 34 | none | n/a | pr | SSE alerts stream (tail -f) |
 
 #### Domain modules (23)
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
-| `alert` | 04, 26, 37 | 2vm | 6.9 | pr | Alert pipeline + routing |
-| `alias` | 17 | none | n/a | pr | AliasSet (CIDR aliases) |
+| `alert` | 04, 25, 34 | 2vm | 6.9 | pr | Alert pipeline + routing |
+| `alias` | 16 | none | n/a | pr | AliasSet (CIDR aliases); suite 16 covers alias_count plus PUT /api/v1/aliases/{id}/content on an External alias (accept) and on ip_set / unknown / invalid-CIDR inputs (reject) |
 | `audit` | 04 | none | n/a | pr | Audit trail + rule history |
-| `auth` | 07, 39 | none | n/a | pr | JWT/OIDC/JWKS/API-key + RBAC |
-| `capture` | 53 | 2vm | 6.9 | nightly | Pcap export lifecycle (Running → Completed) + on-disk pcap validity asserted in 53 |
-| `conntrack` | 19, 25, 51 | 3vm | 6.9 | pr | Connection tracking; kernel-CT kill on block-rule injection mid-flow in 51 |
-| `container` | 58 | 2vm | 6.9 | nightly | cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 58; AlertResponse container fields, k8s pod enrichment, and per-tenant cgroup filter map tracked as deferred ACs in the suite header |
-| `ddos` | 16, 23, 41, 43, 44 | 2vm | 6.9 | pr | DDoS detection + policy; MHDDoS flood matrix in 41; service-exhaustion in 43; amplification in 44 |
-| `dlp` | 17, 28, 63 | 2vm | 6.9 | pr | Data loss prevention; TLS proxy enterprise. Suite 63 enforces the license-gate skip path (AC #3) on the OSS bats fleet and tracks the wire-level malicious-MITM + decrypted-payload pattern-match assertions as 3-VM deferrals (need mitmproxy + injected-CA topology) |
-| `dns` | 04, 20, 49, 59 | 3vm | 6.9 | pr | DNS intel; DoH/DoT detection via ClientHello SNI + dst_port 853 in 49; AAAA query parser-readiness asserted in 59 |
-| `firewall` | 03, 11, 25, 27, 44, 51, 59 | 3vm | 6.9 | pr | Stateful L3/L4 firewall; amplification UDP-port denies in 44; mid-flow block + CT-kill in 51; IPv6 CIDR rule round-trip + v4↔v6 co-existence asserted in 59 |
-| `ids` | 12, 26, 41, 43, 59, 62 | 2vm | 6.9 | pr | Intrusion detection engine; behavioural signatures stressed in 41; slow-attack signatures in 43; IPv6-scoped signature surface asserted in 59 (wire-level v6 IDS alert via tc-ids deferred — needs dual-stack 2-VM topology); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 62 (real hydra/ncrack credential bursts deferred — same dataplane contract is driven by the SYN-burst path) |
-| `ips` | 13, 17, 41, 43, 59, 62 | 2vm | 6.9 | pr | Auto-blacklist + whitelist; MHDDoS flood matrix in 41; slowhttptest in 43; IPv6 blacklist-write surface asserted in 59; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 62 |
-| `l2` | 40 | 2vm | 6.9 | nightly | L2 binding + self-whitelist; DSR end-to-end planned (48) |
-| `l7` | 17, 32, 41, 43, 60 | 2vm | 6.9 | pr | HTTP/TLS/SNI/gRPC/SMTP/FTP/SMB; slow-request timeout in 43; SMTP/FTP/SMB matcher round-trip + parser robustness (truncated TCP, invalid-protocol POST rejection) asserted in 60. Wire-level swaks/lftp/smbclient per-command behaviour deferred (needs extra deps on test VMs; covered by domain l7::engine unit tests) |
-| `loadbalancer` | 17, 21, 40, 48 | 2vm | 6.9 | pr | Maglev + DSR; 3-VM end-to-end coverage via suite 44 |
-| `nat` | 17, 22, 54 | 2vm | 6.9 | pr | SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 54 |
-| `qos` | 17, 31 | 2vm | 6.9 | pr | Traffic shaping policies |
-| `ratelimit` | 04, 14, 41 | 2vm | 6.9 | pr | Token bucket + variants; exhaustion under flood in 41 |
-| `response` | 52 | 2vm | 6.9 | nightly | In-memory ResponseEngine create/list/revoke + TTL auto-expire asserted in 52; auto_response → IpsService → firewall-map mirroring exercised separately by the auto-response pipeline (not in 52) |
-| `routing` | 35, 57 | 2vm | 6.9 | nightly | Multi-WAN routing; failover ordering + REST + metrics surface asserted in 57 (priority-ordered list, gateways_total gauge, failovers_total counter, SIGHUP-driven priority swap). Active health probe loop + WAN_ALL_DOWN alert + real link-down egress reroute tracked as deferred ACs in the suite header |
-| `threatintel` | 17, 18, 36 | 2vm | 6.9 | pr | OSINT feeds + IOC + STIX |
-| `zone` | 34 | 2vm | 6.9 | pr | Zone-based policy |
+| `auth` | 07, 36 | none | n/a | pr | JWT/OIDC/JWKS/API-key + RBAC |
+| `capture` | 49 | 2vm | 6.9 | nightly | Pcap export lifecycle (Running → Completed) + on-disk pcap validity asserted in 49 |
+| `conntrack` | 16, 18, 24, 47 | 3vm | 6.9 | pr | Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; GET /api/v1/conntrack/events SSE stream asserted in 16 (skipped when /proc/net/nf_conntrack is absent) |
+| `container` | 54 | 2vm | 6.9 | nightly | cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 54; AlertResponse container fields, k8s pod enrichment, and per-tenant cgroup filter map tracked as deferred ACs in the suite header |
+| `ddos` | 15, 22, 38, 39, 40 | 2vm | 6.9 | pr | DDoS detection + policy; MHDDoS flood matrix in 38; service-exhaustion in 39; amplification in 40 |
+| `dlp` | 16, 27, 60, perf/06 | 2vm | 6.9 | pr | Data loss prevention; suite 27 covers pattern match + uprobe attach, suite 60 the per-container attach path. TLS-MITM proxy is enterprise-only; wire-level malicious-MITM + decrypted-payload assertions remain 3-VM deferrals (need mitmproxy + injected-CA topology). uprobe SSL-inspection goodput cost benched in perf/06 |
+| `dns` | 04, 19, 45, 55 | 3vm | 6.9 | pr | DNS intel; DoH/DoT detection via ClientHello SNI + dst_port 853 in 45; AAAA query parser-readiness asserted in 55 |
+| `firewall` | 03, 11, 24, 26, 40, 47, 55 | 3vm | 6.9 | pr | Stateful L3/L4 firewall; amplification UDP-port denies in 40; mid-flow block + CT-kill in 47; IPv6 CIDR rule round-trip + v4↔v6 co-existence asserted in 55 |
+| `ids` | 12, 25, 38, 39, 55, 59 | 2vm | 6.9 | pr | Intrusion detection engine; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (wire-level v6 IDS alert via tc-ids deferred — needs dual-stack 2-VM topology); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (real hydra/ncrack credential bursts deferred — same dataplane contract is driven by the SYN-burst path) |
+| `ips` | 13, 16, 38, 39, 55, 59, perf/03 | 2vm | 6.9 | pr | Auto-blacklist + whitelist; MHDDoS flood matrix in 38; slowhttptest in 39; IPv6 blacklist-write surface asserted in 55; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 59; in-kernel blacklist-injection control-plane latency (100/1K) benched in perf/03 |
+| `l2` | 37, 44 | 2vm | 6.9 | nightly | L2 binding + self-whitelist; DSR end-to-end covered by suite 44 |
+| `l7` | 16, 29, 38, 39, 56 | 2vm | 6.9 | pr | HTTP/TLS/SNI/gRPC/SMTP/FTP/SMB; slow-request timeout in 39; SMTP/FTP/SMB matcher round-trip + parser robustness (truncated TCP, invalid-protocol POST rejection) asserted in 56. Wire-level swaks/lftp/smbclient per-command behaviour deferred (needs extra deps on test VMs; covered by domain l7::engine unit tests) |
+| `loadbalancer` | 16, 20, 37, 44 | 2vm | 6.9 | pr | Maglev + DSR; 3-VM end-to-end coverage via suite 44 |
+| `nat` | 16, 21, 50, perf/03, perf/06 | 2vm | 6.9 | pr | SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 50; NPTv6 control-plane add latency in perf/03; SNAT/DNAT datapath throughput overhead in perf/06 |
+| `qos` | 16, 28 | 2vm | 6.9 | pr | Traffic shaping policies |
+| `ratelimit` | 04, 14, 38 | 2vm | 6.9 | pr | Token bucket + variants; exhaustion under flood in 38 |
+| `response` | 48 | 2vm | 6.9 | nightly | In-memory ResponseEngine create/list/revoke + TTL auto-expire asserted in 48; auto_response → IpsService → firewall-map mirroring exercised separately by the auto-response pipeline (not in 48) |
+| `routing` | 32, 53 | 2vm | 6.9 | nightly | Multi-WAN routing; failover ordering + REST + metrics surface asserted in 53 (priority-ordered list, gateways_total gauge, failovers_total counter, SIGHUP-driven priority swap). Active health probe loop + WAN_ALL_DOWN alert + real link-down egress reroute tracked as deferred ACs in the suite header |
+| `threatintel` | 16, 17, 33 | 2vm | 6.9 | pr | OSINT feeds + IOC + STIX |
+| `zone` | 31 | 2vm | 6.9 | pr | Zone-based policy |
 
 <!-- coverage:end -->
 

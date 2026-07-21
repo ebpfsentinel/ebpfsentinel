@@ -226,6 +226,21 @@ api_delete() {
     echo "$response" | sed '$d'
 }
 
+# api_put <path> <json_body> [extra_curl_args...]
+api_put() {
+    local path="${1:?usage: api_put <path> <json_body>}"
+    local body="${2:?usage: api_put <path> <json_body>}"
+    shift 2
+    local url="${BASE_URL}${path}"
+
+    local response
+    response="$(curl -s --max-time "$HTTP_TIMEOUT" -w '\n%{http_code}' \
+        -H 'Content-Type: application/json' -X PUT -d "$body" "$@" "$url")"
+    HTTP_STATUS="$(echo "$response" | tail -1)"
+    echo "$HTTP_STATUS" > "$_HTTP_STATUS_FILE"
+    echo "$response" | sed '$d'
+}
+
 # api_patch <path> <json_body> [extra_curl_args...]
 api_patch() {
     local path="${1:?usage: api_patch <path> <json_body>}"
