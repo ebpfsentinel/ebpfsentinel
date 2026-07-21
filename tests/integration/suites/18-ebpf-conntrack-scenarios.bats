@@ -152,19 +152,45 @@ teardown_file() {
     send_tcp_from_ns "$EBPF_HOST_IP" 9876 "CT_PRE_FLUSH" 2 || true
     sleep 1
 
+    local before
+    before="$(api_get /api/v1/conntrack/status | jq -r '.connection_count // 0' 2>/dev/null)" || before=0
+
     local body
     body="$(api_post /api/v1/conntrack/flush '{}')"
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ]
 
-    # After flush the active connection count should be zero or reduced
-    local status_body count
+    # The table is the kernel's, shared with everything else on this host:
+    # the administration SSH session and the test's own HTTP calls are
+    # tracked too, and are re-tracked the moment their next packet flows.
+    # An empty table is therefore not something a flush can promise — what
+    # it must deliver is that the flow this test created is gone and that
+    # the table did not grow.
+    local status_body after
     status_body="$(api_get /api/v1/conntrack/status)"
     _load_http_status
     [ "$HTTP_STATUS" = "200" ]
-    count="$(echo "$status_body" | jq -r '.connection_count' 2>/dev/null)" || true
-    [ "${count:-0}" -eq 0 ]
+    after="$(echo "$status_body" | jq -r '.connection_count // 0' 2>/dev/null)" || after=0
+
+    [ "${after:-0}" -le "${before:-0}" ] || {
+        echo "flush did not reduce the table: ${before} -> ${after}" >&2
+        return 1
+    }
+
+    local conns
+    conns="$(api_get /api/v1/conntrack/connections)" || conns=""
+    # The endpoint returns a bare array; `.connections // .` would raise
+    # before the alternative applies, so branch on the type explicitly
+    # (same idiom as suites 13/59).
+    echo "${conns}" | jq -e '
+        [ (if type == "array" then . else (.connections // []) end)[]
+          | select(.dst_port == 9876) ] | length == 0
+    ' >/dev/null || {
+        echo "the flushed flow to :9876 is still tracked" >&2
+        echo "${conns}" >&2
+        return 1
+    }
 }
 
 @test "Conntrack metrics include state counters" {
