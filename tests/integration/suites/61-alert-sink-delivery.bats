@@ -11,7 +11,10 @@
 #     severity the REST API reports for that alert.
 #   * A 5xx answer is retried: the sink is configured to fail the first
 #     request, and the same alert id must arrive again.
-#   * The circuit-breaker gauge is exposed for the webhook destination.
+#   * Headers declared on the route (webhook_headers) are sent, without
+#     displacing the Content-Type the sender declares.
+#   * The delivery is counted on alerts_exported_total and the circuit
+#     breaker gauge is exposed for the webhook destination.
 #   * A route pointing at loopback delivers nothing — the sender's runtime
 #     SSRF guard refuses the connection even though config validation
 #     accepted the URL (it only checks the scheme).
@@ -196,6 +199,39 @@ teardown_file() {
     esac
 }
 
+@test "configured webhook_headers are sent on the request" {
+    _wait_for_delivery "${SINK_LOG}" 30 || skip "no delivery recorded yet"
+
+    local auth tenant ctype
+    auth="$(jq -sr '
+        [.[] | select((.body | fromjson? | .rule_id) == "ids-sink-test")][0]
+        | .headers["x-auth-token"] // ""
+    ' "${SINK_LOG}")"
+    tenant="$(jq -sr '
+        [.[] | select((.body | fromjson? | .rule_id) == "ids-sink-test")][0]
+        | .headers["x-tenant"] // ""
+    ' "${SINK_LOG}")"
+
+    [ "${auth}" = "it-sink-token" ] || {
+        echo "expected X-Auth-Token from the route config; got '${auth}'" >&2
+        return 1
+    }
+    [ "${tenant}" = "integration" ] || {
+        echo "expected X-Tenant from the route config; got '${tenant}'" >&2
+        return 1
+    }
+
+    # Custom headers must not have displaced the body encoding.
+    ctype="$(jq -sr '
+        [.[] | select((.body | fromjson? | .rule_id) == "ids-sink-test")][0]
+        | .headers["content-type"] // ""
+    ' "${SINK_LOG}")"
+    case "${ctype}" in
+        application/json*) ;;
+        *) echo "content-type clobbered by custom headers: '${ctype}'" >&2; return 1 ;;
+    esac
+}
+
 @test "delivered body is the serialized alert the REST API reports" {
     _wait_for_delivery "${SINK_LOG}" 30 || skip "no delivery recorded yet"
 
@@ -285,6 +321,30 @@ teardown_file() {
         | awk '{print $2}' | head -1)"
     [ "${state%.*}" = "0" ] || {
         echo "expected closed breaker (0); got ${state}" >&2
+        return 1
+    }
+}
+
+@test "successful deliveries are counted on alerts_exported_total" {
+    _wait_for_delivery "${SINK_LOG}" 30 || skip "no delivery recorded yet"
+
+    local metrics count
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || metrics=""
+    [ -n "${metrics}" ] || {
+        echo "metrics endpoint returned nothing" >&2
+        return 1
+    }
+
+    count="$(echo "${metrics}" \
+        | grep -E '^ebpfsentinel_alerts_exported_total\{[^}]*destination="webhook"' \
+        | awk '{print $2}' | head -1)"
+    [ -n "${count}" ] || {
+        echo "no alerts_exported_total series for destination=webhook" >&2
+        echo "${metrics}" | grep -E 'alerts_exported' >&2 || true
+        return 1
+    }
+    [ "${count%.*}" -ge 1 ] || {
+        echo "expected at least one exported alert; got ${count}" >&2
         return 1
     }
 }

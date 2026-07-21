@@ -550,4 +550,94 @@ routes: []
         };
         assert!(route.to_domain_route().is_err());
     }
+
+    // ── Custom webhook headers ───────────────────────────────────────
+
+    fn webhook_route_with_headers(pairs: &[(&str, &str)]) -> AlertRouteConfig {
+        AlertRouteConfig {
+            name: "hook".to_string(),
+            destination: "webhook".to_string(),
+            min_severity: "low".to_string(),
+            event_types: None,
+            webhook_url: Some("https://example.com/hook".to_string()),
+            email_to: None,
+            webhook_headers: Some(
+                pairs
+                    .iter()
+                    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                    .collect(),
+            ),
+        }
+    }
+
+    #[test]
+    fn webhook_headers_reach_the_domain_route() {
+        let route = webhook_route_with_headers(&[("X-Auth-Token", "s3cret")]);
+        route.validate(0, false).unwrap();
+
+        let domain = route.to_domain_route().unwrap();
+        match domain.destination {
+            AlertDestination::Webhook { ref headers, .. } => {
+                assert_eq!(
+                    headers.get("X-Auth-Token").map(String::as_str),
+                    Some("s3cret")
+                );
+            }
+            other => panic!("expected a webhook destination, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn webhook_without_headers_yields_an_empty_map() {
+        let route = AlertRouteConfig {
+            name: "hook".to_string(),
+            destination: "webhook".to_string(),
+            min_severity: "low".to_string(),
+            event_types: None,
+            webhook_url: Some("https://example.com/hook".to_string()),
+            email_to: None,
+            webhook_headers: None,
+        };
+        let domain = route.to_domain_route().unwrap();
+        match domain.destination {
+            AlertDestination::Webhook { ref headers, .. } => assert!(headers.is_empty()),
+            other => panic!("expected a webhook destination, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn webhook_header_value_with_crlf_is_rejected() {
+        let route = webhook_route_with_headers(&[("X-Auth", "a\r\nX-Injected: yes")]);
+        assert!(route.validate(0, false).is_err());
+    }
+
+    #[test]
+    fn webhook_header_name_with_separator_is_rejected() {
+        let route = webhook_route_with_headers(&[("X-Bad: Name", "value")]);
+        assert!(route.validate(0, false).is_err());
+    }
+
+    #[test]
+    fn webhook_header_cannot_override_content_type() {
+        let route = webhook_route_with_headers(&[("Content-Type", "text/plain")]);
+        assert!(route.validate(0, false).is_err());
+        let route = webhook_route_with_headers(&[("content-type", "text/plain")]);
+        assert!(route.validate(0, false).is_err());
+    }
+
+    #[test]
+    fn webhook_header_with_empty_name_is_rejected() {
+        let route = webhook_route_with_headers(&[("   ", "value")]);
+        assert!(route.validate(0, false).is_err());
+    }
+
+    #[test]
+    fn non_webhook_route_ignores_header_validation() {
+        // Headers only apply to webhook routes; a stray map on a log route is
+        // inert rather than a config error.
+        let mut route = webhook_route_with_headers(&[("Content-Type", "text/plain")]);
+        route.destination = "log".to_string();
+        route.webhook_url = None;
+        assert!(route.validate(0, false).is_ok());
+    }
 }

@@ -60,6 +60,9 @@ alerting:
       destination: webhook
       min_severity: low
       webhook_url: "http://203.0.113.10:18085/hook"
+      webhook_headers:
+        X-Auth-Token: "it-sink-token"
+        X-Tenant: "integration"
     - name: it-sink-log
       destination: log
       min_severity: low

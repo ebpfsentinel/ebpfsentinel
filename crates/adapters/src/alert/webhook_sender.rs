@@ -334,14 +334,18 @@ mod tests {
 
     struct TestMetrics {
         circuit_state_calls: AtomicU32,
+        exported_calls: AtomicU32,
         last_state: std::sync::Mutex<u8>,
+        last_exported_destination: std::sync::Mutex<String>,
     }
 
     impl TestMetrics {
         fn new() -> Self {
             Self {
                 circuit_state_calls: AtomicU32::new(0),
+                exported_calls: AtomicU32::new(0),
                 last_state: std::sync::Mutex::new(0),
+                last_exported_destination: std::sync::Mutex::new(String::new()),
             }
         }
     }
@@ -352,6 +356,11 @@ mod tests {
         fn record_circuit_state(&self, _: &str, state: u8) {
             self.circuit_state_calls.fetch_add(1, Ordering::Relaxed);
             *self.last_state.lock().unwrap() = state;
+        }
+
+        fn record_alert_exported(&self, destination: &str) {
+            self.exported_calls.fetch_add(1, Ordering::Relaxed);
+            *self.last_exported_destination.lock().unwrap() = destination.to_string();
         }
     }
     impl IpsMetrics for TestMetrics {}
@@ -702,5 +711,121 @@ mod tests {
     #[test]
     fn webhook_url_rejects_ftp_scheme() {
         assert!(validate_webhook_url("ftp://example.com/hook").is_err());
+    }
+
+    #[tokio::test]
+    async fn custom_headers_reach_the_request() {
+        use axum::extract::State;
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::{Router, routing::post};
+        use tokio::sync::Mutex as TokioMutex;
+
+        type SharedHeaders = Arc<TokioMutex<Option<HeaderMap>>>;
+
+        async fn capture_handler(
+            State(store): State<SharedHeaders>,
+            headers: HeaderMap,
+        ) -> StatusCode {
+            *store.lock().await = Some(headers);
+            StatusCode::OK
+        }
+
+        let store: SharedHeaders = Arc::new(TokioMutex::new(None));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/webhook", post(capture_handler))
+            .with_state(Arc::clone(&store));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let metrics = Arc::new(TestMetrics::new());
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
+        let mut sender = WebhookAlertSender::new(
+            cb,
+            fast_retry(),
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            "test-webhook".to_string(),
+        );
+        sender.skip_url_validation = true;
+
+        let mut headers = std::collections::BTreeMap::new();
+        headers.insert("X-Auth-Token".to_string(), "s3cret".to_string());
+        headers.insert("X-Tenant".to_string(), "acme".to_string());
+        let route = AlertRoute {
+            name: "webhook-headers".to_string(),
+            destination: AlertDestination::Webhook {
+                url: format!("http://{addr}/webhook"),
+                headers,
+            },
+            min_severity: Severity::Low,
+            event_types: None,
+        };
+
+        let result = sender.send(&sample_alert(), &route).await;
+        assert!(result.is_ok(), "send failed: {result:?}");
+
+        let captured = store.lock().await;
+        let got = captured.as_ref().expect("no headers captured");
+        assert_eq!(got.get("x-auth-token").unwrap(), "s3cret");
+        assert_eq!(got.get("x-tenant").unwrap(), "acme");
+        // The sender still declares the body encoding, exactly once.
+        assert_eq!(got.get_all("content-type").iter().count(), 1);
+        assert_eq!(got.get("content-type").unwrap(), "application/json");
+    }
+
+    #[tokio::test]
+    async fn successful_delivery_is_counted_as_exported() {
+        use axum::http::StatusCode;
+        use axum::{Router, routing::post};
+
+        async fn handler_ok() -> StatusCode {
+            StatusCode::OK
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route("/webhook", post(handler_ok));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let metrics = Arc::new(TestMetrics::new());
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
+        let mut sender = WebhookAlertSender::new(
+            cb,
+            fast_retry(),
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            "webhook".to_string(),
+        );
+        sender.skip_url_validation = true;
+
+        let route = webhook_route(&format!("http://{addr}/webhook"));
+        assert!(sender.send(&sample_alert(), &route).await.is_ok());
+
+        assert_eq!(metrics.exported_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            metrics.last_exported_destination.lock().unwrap().as_str(),
+            "webhook"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_delivery_is_not_counted_as_exported() {
+        let metrics = Arc::new(TestMetrics::new());
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
+        let mut sender = WebhookAlertSender::new(
+            cb,
+            fast_retry(),
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            "webhook".to_string(),
+        );
+        sender.skip_url_validation = true;
+
+        let route = webhook_route("http://127.0.0.1:1/unreachable");
+        assert!(sender.send(&sample_alert(), &route).await.is_err());
+
+        assert_eq!(metrics.exported_calls.load(Ordering::Relaxed), 0);
     }
 }

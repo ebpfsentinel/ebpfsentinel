@@ -47,7 +47,7 @@ pub trait AlertMetrics: Send + Sync {
     fn record_alert_dropped(&self, _reason: &str) {}
 
     /// Record an alert successfully handed off to an external sender,
-    /// labelled by destination (e.g. `otlp`).
+    /// labelled by destination (`webhook`, `email`, `otlp`).
     fn record_alert_exported(&self, _destination: &str) {}
 
     /// Record an alert for per-rule counting (enables FP rate computation).
