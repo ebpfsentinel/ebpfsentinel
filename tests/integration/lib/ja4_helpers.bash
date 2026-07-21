@@ -33,10 +33,10 @@ JA4_TLS_KEY_FILE="${JA4_TLS_KEY_FILE:-${JA4_REMOTE_DIR}/key.pem}"
 
 require_ja4_min() {
     if ! command -v curl >/dev/null 2>&1; then
-        skip "curl not available on attacker VM"
+        env_skip "curl not available on attacker VM"
     fi
     if ! command -v openssl >/dev/null 2>&1; then
-        skip "openssl not available on attacker VM"
+        env_skip "openssl not available on attacker VM"
     fi
 }
 

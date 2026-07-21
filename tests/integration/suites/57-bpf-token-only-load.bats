@@ -31,12 +31,12 @@ setup_file() {
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"
     export AGENT_BIN="${AGENT_BIN:-${PROJECT_ROOT}/target/release/ebpfsentinel-agent}"
-    [ -x "$AGENT_BIN" ] || skip "agent binary not found: ${AGENT_BIN}"
+    [ -x "$AGENT_BIN" ] || env_skip "agent binary not found: ${AGENT_BIN}"
 
     bpf_token_build_launcher
 
     export EBPF_DIR="${PROJECT_ROOT}/target/bpfel-unknown-none/release"
-    [ -f "${EBPF_DIR}/xdp-firewall" ] || skip "eBPF objects not found in ${EBPF_DIR}"
+    [ -f "${EBPF_DIR}/xdp-firewall" ] || env_skip "eBPF objects not found in ${EBPF_DIR}"
 
     export DATA_DIR="/tmp/ebpfsentinel-bpf-token-data-$$"
     mkdir -p "$DATA_DIR"
@@ -63,7 +63,7 @@ setup_file() {
         -e "s|__IFACE__|${IFACE}|g" \
         "${FIXTURE_DIR}/config-bpf-token.yaml" >"$PREPARED_CONFIG"
 
-    bpf_token_run "$PREPARED_CONFIG" 9 || skip "launcher produced no output"
+    bpf_token_run "$PREPARED_CONFIG" 9 || soft_skip "launcher produced no output"
 }
 
 teardown_file() {
@@ -104,16 +104,16 @@ teardown_file() {
 }
 
 @test "tc-ids loads via token using the fou module kfunc" {
-    [ "${BPF_TOKEN_FOU_BTF}" = "1" ] || skip "no fou module BTF on this kernel"
+    [ "${BPF_TOKEN_FOU_BTF}" = "1" ] || env_skip "no fou module BTF on this kernel"
     bpf_token_log_has 'eBPF tc-ids active'
 }
 
 @test "xdp-firewall loads via token using the conntrack module kfunc" {
-    [ "${BPF_TOKEN_CT_BTF}" = "1" ] || skip "no nf_conntrack module BTF on this kernel"
+    [ "${BPF_TOKEN_CT_BTF}" = "1" ] || env_skip "no nf_conntrack module BTF on this kernel"
     bpf_token_log_has 'eBPF xdp-firewall active'
 }
 
 @test "xdp-firewall reject tail-call is wired through the token loader" {
-    [ "${BPF_TOKEN_CT_BTF}" = "1" ] || skip "no nf_conntrack module BTF on this kernel"
+    [ "${BPF_TOKEN_CT_BTF}" = "1" ] || env_skip "no nf_conntrack module BTF on this kernel"
     bpf_token_log_has 'firewall .* reject wired'
 }

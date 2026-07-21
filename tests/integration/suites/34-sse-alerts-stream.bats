@@ -101,7 +101,7 @@ _stop_sse_client() {
     first_id="$(curl -s --max-time 3 "${BASE_URL}/api/v1/alerts?limit=1" \
         | jq -r '.alerts[0].id // empty')"
     if [ -z "$first_id" ]; then
-        skip "no alerts buffered yet — cannot exercise Last-Event-ID"
+        soft_skip "no alerts buffered yet — cannot exercise Last-Event-ID"
     fi
 
     sleep 1

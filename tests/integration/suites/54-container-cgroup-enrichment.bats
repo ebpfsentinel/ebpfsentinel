@@ -144,7 +144,7 @@ teardown_file() {
 # ── Docker-driven cgroup resolution ────────────────────────────────
 
 @test "Docker container traffic advances container resolver counters" {
-    _docker_available || skip "Docker engine not available"
+    _docker_available || env_skip "Docker engine not available"
 
     # Snapshot resolver cache miss counter before the workload.
     local before
@@ -161,7 +161,7 @@ teardown_file() {
         busybox:latest sh -c \
             'for i in 1 2 3 4 5; do
                 (echo probe; sleep 0.1) | nc -w 1 '"${EBPF_NS_IP}"' '"${PROBE_PORT}"' >/dev/null 2>&1 || true
-             done; sleep 1' >/dev/null 2>&1 || skip "busybox container could not run"
+             done; sleep 1' >/dev/null 2>&1 || soft_skip "busybox container could not run"
 
     sleep 2
 
@@ -173,14 +173,14 @@ teardown_file() {
         # Some kernels strip cgroup_id from the tc-ids event path; treat
         # that as a skip rather than a fail so the suite is robust to the
         # degraded path that suite 09 documents.
-        skip "container resolver did not observe a miss (${before} → ${after}) — degraded cgroup path"
+        env_skip "container resolver did not observe a miss (${before} → ${after}) — degraded cgroup path"
     fi
 }
 
 # ── REST AlertResponse container surface ───────────────────────────
 
 @test "alerts REST surface exposes container identity" {
-    _docker_available || skip "Docker engine not available"
+    _docker_available || env_skip "Docker engine not available"
 
     local cname="ebpfsentinel-cgroup-alert-$$"
     _docker_cmd rm -f "${cname}" >/dev/null 2>&1 || true
@@ -193,7 +193,7 @@ teardown_file() {
         busybox:latest sh -c \
             'for i in 1 2 3 4 5; do
                 (echo probe; sleep 0.1) | nc -w 1 '"${EBPF_NS_IP}"' '"${PROBE_PORT}"' >/dev/null 2>&1 || true
-             done; sleep 1' >/dev/null 2>&1 || skip "busybox container could not run"
+             done; sleep 1' >/dev/null 2>&1 || soft_skip "busybox container could not run"
 
     sleep 2
 
@@ -202,7 +202,7 @@ teardown_file() {
     local alerts
     alerts="$(curl -sf --max-time 5 \
         "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/api/v1/alerts?limit=200" 2>/dev/null)" || true
-    [ -n "${alerts}" ] || skip "alerts endpoint returned nothing"
+    [ -n "${alerts}" ] || soft_skip "alerts endpoint returned nothing"
 
     local matched
     matched="$(echo "${alerts}" | jq '[.alerts[]
@@ -216,6 +216,6 @@ teardown_file() {
         # Same degraded-cgroup caveat as the resolver counter test: some kernels
         # strip cgroup_id from the tc-ids event path, so no container identity
         # can be attached. Surface that as a skip, not a fail.
-        skip "no alert carried a container identity — degraded cgroup path"
+        env_skip "no alert carried a container identity — degraded cgroup path"
     fi
 }

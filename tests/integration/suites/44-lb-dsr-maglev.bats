@@ -97,7 +97,7 @@ agent_iface_mac() {
     local pcap_agent
     pcap_agent="$(capture_on agent "${EBPF_AGENT_BACKEND_IFACE:-eth2}" \
         "src host ${LB_BACKEND_ADDR} and dst host ${ATTACKER_VM_IP:-192.168.56.20}")" || {
-        skip "tcpdump unavailable on agent VM"
+        soft_skip "tcpdump unavailable on agent VM"
     }
 
     # Drive one HTTP request through the VIP; the response races the
@@ -121,7 +121,7 @@ agent_iface_mac() {
     }
 
     _backend_ssh_sudo ip addr del "${LB_VIP_ADDR}/32" dev lo 2>/dev/null || true
-    [ "$curl_rc" -eq 0 ] || skip "curl to VIP failed (rc=${curl_rc}); DSR pcap assertion still passed"
+    [ "$curl_rc" -eq 0 ] || soft_skip "curl to VIP failed (rc=${curl_rc}); DSR pcap assertion still passed"
 }
 
 # ── Maglev disruption bound ──────────────────────────────────────────
@@ -148,7 +148,7 @@ agent_iface_mac() {
     sleep 2
 
     local before="${DATA_DIR}/maglev-before.txt"
-    dump_maglev_table "$before" || skip "LB_MAGLEV map not available on agent VM"
+    dump_maglev_table "$before" || soft_skip "LB_MAGLEV map not available on agent VM"
 
     delete_lb_service "$LB_SERVICE_ID" >/dev/null
     sleep 1
@@ -165,7 +165,7 @@ agent_iface_mac() {
     sleep 2
 
     local after="${DATA_DIR}/maglev-after.txt"
-    dump_maglev_table "$after" || skip "LB_MAGLEV map not available on agent VM (post-rebuild)"
+    dump_maglev_table "$after" || soft_skip "LB_MAGLEV map not available on agent VM (post-rebuild)"
 
     local remapped bound
     remapped="$(count_remapped_flows "$before" "$after")"
@@ -247,7 +247,7 @@ PY
     local body
     body="$(api_get /api/v1/alerts 2>/dev/null)"
     _load_http_status
-    [ "$HTTP_STATUS" = "200" ] || skip "alerts endpoint returned ${HTTP_STATUS}"
+    [ "$HTTP_STATUS" = "200" ] || soft_skip "alerts endpoint returned ${HTTP_STATUS}"
 
     local self_alerts
     self_alerts="$(echo "$body" \

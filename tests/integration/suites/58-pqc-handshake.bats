@@ -46,7 +46,7 @@ setup_file() {
                 "${AGENT_BIN}" >/dev/null 2>&1 && chmod +x "${AGENT_BIN}"
         fi
     fi
-    [ -x "${AGENT_BIN}" ] || skip "agent binary not available on this host"
+    [ -x "${AGENT_BIN}" ] || env_skip "agent binary not available on this host"
     export AGENT_BIN
 
     if [ ! -f "${CERT_DIR}/server.pem" ]; then
@@ -226,7 +226,7 @@ _restart_agent_with() {
 
 @test "PQ-aware client (X25519MLKEM768) lands on the hybrid group in prefer mode" {
     if [ "${EBPF_OPENSSL_HAS_MLKEM:-0}" != "1" ]; then
-        skip "local openssl lacks X25519MLKEM768; PQ handshake assertion deferred"
+        env_skip "local openssl lacks X25519MLKEM768; PQ handshake assertion deferred"
     fi
     local group
     group="$(_s_client_named_group X25519MLKEM768)" || {
@@ -267,7 +267,7 @@ _restart_agent_with() {
 
 @test "pq_mode=require still accepts PQ-aware clients" {
     if [ "${EBPF_OPENSSL_HAS_MLKEM:-0}" != "1" ]; then
-        skip "local openssl lacks X25519MLKEM768; PQ require-mode acceptance deferred"
+        env_skip "local openssl lacks X25519MLKEM768; PQ require-mode acceptance deferred"
     fi
     local group
     group="$(_s_client_named_group X25519MLKEM768)" || {

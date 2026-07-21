@@ -10,7 +10,7 @@ load '../lib/ebpf_helpers'
 
 _require_geoip_mmdb() {
     if [ ! -f "${DATA_DIR}/GeoLite2-Country.mmdb" ]; then
-        skip "GeoIP mmdb not available (${DATA_DIR}/GeoLite2-Country.mmdb)"
+        env_skip "GeoIP mmdb not available (${DATA_DIR}/GeoLite2-Country.mmdb)"
     fi
 }
 
@@ -124,7 +124,7 @@ teardown_file() {
     count="$(echo "$alerts" | jq 'length' 2>/dev/null)" || count=0
 
     if [ "${count:-0}" -eq 0 ]; then
-        skip "no alerts generated — traffic may not have matched a country-deny rule"
+        soft_skip "no alerts generated — traffic may not have matched a country-deny rule"
     fi
 
     # At least one alert should carry GeoIP enrichment fields when mmdb is loaded
@@ -247,7 +247,7 @@ teardown_file() {
     count="$(echo "$alerts" | jq 'length' 2>/dev/null)" || count=0
 
     if [ "${count:-0}" -eq 0 ]; then
-        skip "no alerts generated — traffic may not have matched a country-deny rule"
+        soft_skip "no alerts generated — traffic may not have matched a country-deny rule"
     fi
 
     # At least one new alert should exist
@@ -275,7 +275,7 @@ teardown_file() {
     count="$(echo "$alerts" | jq 'length' 2>/dev/null)" || count=0
 
     if [ "${count:-0}" -eq 0 ]; then
-        skip "no alerts generated — cannot verify GeoIP enrichment"
+        soft_skip "no alerts generated — cannot verify GeoIP enrichment"
     fi
 
     # Check that at least one alert has a country_code or src_country field
@@ -333,7 +333,7 @@ teardown_file() {
     country="$(echo "$body" | jq -r '.country_code // .country // .iso_code' 2>/dev/null)" || true
 
     if [ -z "$country" ] || [ "$country" = "null" ]; then
-        skip "GeoIP lookup endpoint not available or mmdb does not contain 8.8.8.8"
+        soft_skip "GeoIP lookup endpoint not available or mmdb does not contain 8.8.8.8"
     fi
 
     [ "$country" = "US" ]
@@ -359,7 +359,7 @@ teardown_file() {
     geoip_line="$(echo "$metrics" | grep -E "ebpfsentinel_geoip|ebpfsentinel_country" | head -1)" || true
 
     if [ -z "$geoip_line" ]; then
-        skip "no GeoIP-specific metrics found"
+        soft_skip "no GeoIP-specific metrics found"
     fi
 
     local value
@@ -374,7 +374,7 @@ teardown_file() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

@@ -68,14 +68,14 @@ _scrub_bpf() {
 
     local pcap
     pcap="$(capture_on backend "${EBPF_BACKEND_IFACE:-eth1}" "$(_scrub_bpf)")"
-    [ -n "$pcap" ] || skip "capture_on backend returned no pcap"
+    [ -n "$pcap" ] || soft_skip "capture_on backend returned no pcap"
 
     scapy_send_via "${BACKEND_VM_IP:-192.168.57.30}" 10 1111 536 1 5 >/dev/null 2>&1 || true
     sleep 2
 
     local local_pcap
     local_pcap="$(stop_capture backend "$pcap")"
-    [ -s "$local_pcap" ] || skip "pcap empty (transit may not have reached backend)"
+    [ -s "$local_pcap" ] || soft_skip "pcap empty (transit may not have reached backend)"
 
     # tc-scrub floors the TTL to min_ttl (64) at the agent's ingress hook, then
     # the agent forwards the packet and the kernel's IP-forward path decrements
@@ -96,14 +96,14 @@ _scrub_bpf() {
 
     local pcap
     pcap="$(capture_on backend "${EBPF_BACKEND_IFACE:-eth1}" "$(_scrub_bpf)")"
-    [ -n "$pcap" ] || skip "capture_on backend returned no pcap"
+    [ -n "$pcap" ] || soft_skip "capture_on backend returned no pcap"
 
     scapy_send_via "${BACKEND_VM_IP:-192.168.57.30}" 128 2222 1200 1 5 >/dev/null 2>&1 || true
     sleep 2
 
     local local_pcap
     local_pcap="$(stop_capture backend "$pcap")"
-    [ -s "$local_pcap" ] || skip "pcap empty (transit may not have reached backend)"
+    [ -s "$local_pcap" ] || soft_skip "pcap empty (transit may not have reached backend)"
 
     local res
     res="$(assert_df_cleared "$local_pcap" "tcp and dst port 80")"
@@ -120,7 +120,7 @@ _scrub_bpf() {
 
     local pcap
     pcap="$(capture_on backend "${EBPF_BACKEND_IFACE:-eth1}" "$(_scrub_bpf)")"
-    [ -n "$pcap" ] || skip "capture_on backend returned no pcap"
+    [ -n "$pcap" ] || soft_skip "capture_on backend returned no pcap"
 
     # Send 5 SYNs all with id=12345; after rand, none should arrive
     # with id=12345 (probability of a clash on 5 packets ≈ 0.008%).
@@ -129,7 +129,7 @@ _scrub_bpf() {
 
     local local_pcap
     local_pcap="$(stop_capture backend "$pcap")"
-    [ -s "$local_pcap" ] || skip "pcap empty (transit may not have reached backend)"
+    [ -s "$local_pcap" ] || soft_skip "pcap empty (transit may not have reached backend)"
 
     local res
     res="$(assert_ip_id_not "$local_pcap" "tcp and dst port 80" 12345)"
@@ -146,14 +146,14 @@ _scrub_bpf() {
 
     local pcap
     pcap="$(capture_on backend "${EBPF_BACKEND_IFACE:-eth1}" "$(_scrub_bpf)")"
-    [ -n "$pcap" ] || skip "capture_on backend returned no pcap"
+    [ -n "$pcap" ] || soft_skip "capture_on backend returned no pcap"
 
     scapy_send_via "${BACKEND_VM_IP:-192.168.57.30}" 128 3333 65535 0 5 >/dev/null 2>&1 || true
     sleep 2
 
     local local_pcap
     local_pcap="$(stop_capture backend "$pcap")"
-    [ -s "$local_pcap" ] || skip "pcap empty (transit may not have reached backend)"
+    [ -s "$local_pcap" ] || soft_skip "pcap empty (transit may not have reached backend)"
 
     local res
     res="$(assert_mss_le "$local_pcap" "tcp and dst port 80" 1400)"
@@ -172,7 +172,7 @@ _scrub_bpf() {
     local pcap
     pcap="$(capture_on backend "${EBPF_BACKEND_IFACE:-eth1}" \
         "src host ${ATTACKER_VM_IP} and dst host ${dst}")"
-    [ -n "$pcap" ] || skip "capture_on backend returned no pcap"
+    [ -n "$pcap" ] || soft_skip "capture_on backend returned no pcap"
 
     # Control: an unfragmented SYN must traverse (proves the transit path is up,
     # so an empty fragment result means "dropped", not "path broken").
@@ -184,14 +184,14 @@ _scrub_bpf() {
 
     local local_pcap
     local_pcap="$(stop_capture backend "$pcap")"
-    [ -s "$local_pcap" ] || skip "pcap empty — transit path did not deliver the control packet"
+    [ -s "$local_pcap" ] || soft_skip "pcap empty — transit path did not deliver the control packet"
 
     # The control SYN (unfragmented, dst port 80) must reach the backend.
     local control
     control="$(tshark -r "$local_pcap" \
         -Y 'tcp.dstport == 80 and ip.flags.mf == 0 and ip.frag_offset == 0' \
         2>/dev/null | wc -l)"
-    [ "${control:-0}" -ge 1 ] || skip "control SYN never reached backend — transit inconclusive"
+    [ "${control:-0}" -ge 1 ] || soft_skip "control SYN never reached backend — transit inconclusive"
 
     # No fragment (MF set or non-zero offset) may reach the backend.
     local frags

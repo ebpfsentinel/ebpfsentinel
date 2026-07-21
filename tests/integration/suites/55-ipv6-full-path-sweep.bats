@@ -277,7 +277,7 @@ teardown_file() {
     # this skips there; the 3-VM v6 datapath is covered by the transit-forward
     # test below.
     if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
-        skip "v6 netns IDS wire probe is local-lane only (3-VM v6 path covered by the forward test)"
+        env_skip "v6 netns IDS wire probe is local-lane only (3-VM v6 path covered by the forward test)"
     fi
 
     # Drive IPv6 TCP SYNs from the netns at the ids-ipv6-probe target
@@ -394,7 +394,7 @@ teardown_file() {
     # Nothing reached the backend at all → transit link never came up; skip
     # rather than register a false negative (same convention as suite 50).
     if [ "${src_hits:-0}" -eq 0 ]; then
-        skip "no IPv6 probe reached backend — transit link not established"
+        soft_skip "no IPv6 probe reached backend — transit link not established"
     fi
 
     [ "${src_hits:-0}" -ge 1 ]
@@ -407,7 +407,7 @@ teardown_file() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

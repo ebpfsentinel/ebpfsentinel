@@ -98,7 +98,7 @@ _pull_remote_pcap() {
     resp="$(api_post /api/v1/captures/manual "${body}")"
     _load_http_status
     if [ "${HTTP_STATUS}" = "503" ]; then
-        skip "capture engine not available (pcap-capture feature off?)"
+        env_skip "capture engine not available (pcap-capture feature off?)"
     fi
     [ "${HTTP_STATUS}" = "200" ] || [ "${HTTP_STATUS}" = "201" ] || {
         echo "POST /captures/manual returned HTTP ${HTTP_STATUS}: ${resp}" >&2
@@ -160,7 +160,7 @@ _pull_remote_pcap() {
 
 @test "capture start via CLI produces a parseable pcap" {
     if ! _agent_ssh test -x /usr/local/bin/ebpfsentinel-agent 2>/dev/null; then
-        skip "ebpfsentinel-agent CLI not installed on agent VM"
+        env_skip "ebpfsentinel-agent CLI not installed on agent VM"
     fi
 
     local iface

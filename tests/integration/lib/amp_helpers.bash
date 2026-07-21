@@ -31,15 +31,15 @@ AMP_PY="${AMP_PY:-/opt/scapy-venv/bin/python3}"
 # `sudo -n` from a non-root BATS host, otherwise direct.
 require_amp() {
     if ! command -v "$AMP_PY" >/dev/null 2>&1; then
-        skip "python3 not available on attacker VM"
+        env_skip "python3 not available on attacker VM"
     fi
     if ! "$AMP_PY" -c "import scapy.all" >/dev/null 2>&1; then
-        skip "scapy not installed on attacker VM (run story 34.3 provisioner)"
+        env_skip "scapy not installed on attacker VM (run story 34.3 provisioner)"
     fi
     local vector
     for vector in dns_any ntp_monlist ssdp_search memcached_stats; do
         if [ ! -f "${AMP_SCRIPT_DIR}/${vector}.py" ]; then
-            skip "amplification script missing: ${AMP_SCRIPT_DIR}/${vector}.py"
+            env_skip "amplification script missing: ${AMP_SCRIPT_DIR}/${vector}.py"
         fi
     done
 }

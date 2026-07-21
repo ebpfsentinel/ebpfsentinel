@@ -230,7 +230,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
-| `alert` | 04, 25, 34, 61 | 2vm | 6.9 | pr | Alert pipeline + routing; outbound delivery (webhook sink: POST + JSON body identity + 5xx retry + SSRF refusal of a loopback target) asserted in 61 |
+| `alert` | 04, 25, 34, 61 | 2vm | 6.9 | pr | Alert pipeline + routing; outbound delivery asserted in 61 across all three senders — webhook (POST + JSON body identity + route headers + 5xx retry + SSRF refusal of a loopback target), email (SMTP envelope + body) and OTLP (export on /v1/logs with the alert attributes) |
 | `alias` | 16 | none | n/a | pr | AliasSet (CIDR aliases); suite 16 covers alias_count plus PUT /api/v1/aliases/{id}/content on an External alias (accept) and on ip_set / unknown / invalid-CIDR inputs (reject) |
 | `audit` | 04 | none | n/a | pr | Audit trail + rule history |
 | `auth` | 07, 36 | none | n/a | pr | JWT/OIDC/JWKS/API-key + RBAC |

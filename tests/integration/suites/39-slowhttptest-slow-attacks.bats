@@ -28,7 +28,7 @@ setup_file() {
     require_slowhttptest
 
     if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
-        skip "suite 39 requires EBPF_2VM_MODE=true (attacker VM driving real slow flood)"
+        env_skip "suite 39 requires EBPF_2VM_MODE=true (attacker VM driving real slow flood)"
     fi
 
     export PROJECT_ROOT
@@ -151,7 +151,7 @@ IDS_ALERTS_LABEL='{component="ids"'
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

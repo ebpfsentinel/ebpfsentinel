@@ -31,7 +31,7 @@ setup_file() {
     else
         export AGENT_BIN="${AGENT_BIN:-${PROJECT_ROOT}/target/release/ebpfsentinel-agent}"
         if [ ! -x "$AGENT_BIN" ]; then
-            skip "Agent binary not found: ${AGENT_BIN}"
+            env_skip "Agent binary not found: ${AGENT_BIN}"
         fi
 
         # Create veth pair

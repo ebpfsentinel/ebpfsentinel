@@ -36,7 +36,7 @@ setup_file() {
     require_tool openssl
 
     if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
-        skip "suite 41 requires EBPF_2VM_MODE=true (TLS target on agent VM)"
+        env_skip "suite 41 requires EBPF_2VM_MODE=true (TLS target on agent VM)"
     fi
 
     export PROJECT_ROOT
@@ -62,7 +62,7 @@ setup_file() {
     if ! start_tls_target "$JA4_TLS_PORT"; then
         stop_ebpf_agent 2>/dev/null || true
         destroy_test_netns 2>/dev/null || true
-        skip "could not start TLS target on agent VM at port ${JA4_TLS_PORT}"
+        soft_skip "could not start TLS target on agent VM at port ${JA4_TLS_PORT}"
     fi
 }
 
@@ -100,7 +100,7 @@ _ja4_drive_available_clients() {
 
     local fired
     fired="$(_ja4_drive_available_clients "$LEGIT_SNI")"
-    [ "$fired" -ge 2 ] || skip "only ${fired} TLS clients available — need at least 2"
+    [ "$fired" -ge 2 ] || soft_skip "only ${fired} TLS clients available — need at least 2"
 
     # Give the userspace L7 pipeline a moment to ingest each handshake.
     sleep 2
@@ -123,7 +123,7 @@ _ja4_drive_available_clients() {
     # deny rule fires once per client connection.
     local fired
     fired="$(_ja4_drive_available_clients "$MALICIOUS_SNI")"
-    [ "$fired" -ge 1 ] || skip "no TLS client available to drive malicious SNI"
+    [ "$fired" -ge 1 ] || soft_skip "no TLS client available to drive malicious SNI"
 
     # Wait up to 15 s for at least one alert to appear with this rule id.
     wait_for_alert ".[] | select(.rule_id == \"l7-tls-malicious-sni-deny\")" 15 1 \
@@ -192,7 +192,7 @@ _ja4_drive_available_clients() {
     # observes ServerHello bytes and computes JA4S per flow.
     local fired
     fired="$(_ja4_drive_available_clients "$LEGIT_SNI")"
-    [ "$fired" -ge 1 ] || skip "no TLS client available to drive ServerHello"
+    [ "$fired" -ge 1 ] || soft_skip "no TLS client available to drive ServerHello"
 
     # Let the userspace L7 pipeline ingest server-side handshake bytes.
     sleep 2
@@ -208,7 +208,7 @@ _ja4_drive_available_clients() {
     # therefore requires a remote TLS server whose ServerHello transits the
     # agent; surface the agent-local limitation as a skip, not a failure.
     if [ "$ja4s_count" -lt 1 ]; then
-        skip "JA4S needs a remote TLS server (ServerHello must transit the agent ingress); the harness TLS target is agent-local"
+        env_skip "JA4S needs a remote TLS server (ServerHello must transit the agent ingress); the harness TLS target is agent-local"
     fi
 }
 
@@ -220,7 +220,7 @@ _ja4_drive_available_clients() {
     [ -z "$before_ja4" ] && before_ja4=0
     [ -z "$before_ja4s" ] && before_ja4s=0
 
-    [ "$before_ja4" -ge 1 ] || skip "JA4 cache empty before restart (no clients fired earlier)"
+    [ "$before_ja4" -ge 1 ] || soft_skip "JA4 cache empty before restart (no clients fired earlier)"
 
     # Persistence flag must be advertised by the summary endpoint.
     local persistent
@@ -232,7 +232,7 @@ _ja4_drive_available_clients() {
 
     stop_ebpf_agent 2>/dev/null || true
     start_ebpf_agent "$PREPARED_CONFIG"
-    wait_for_ebpf_loaded 30 || skip "agent failed to come back up"
+    wait_for_ebpf_loaded 30 || soft_skip "agent failed to come back up"
 
     # Wait up to 10 s for HTTP to come back, then assert real persistence:
     # cached_count must be > 0 after restart (entries loaded from redb).

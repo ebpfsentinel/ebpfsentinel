@@ -92,11 +92,11 @@ require_root() {
 # checking for local binary/Docker image
 require_ebpf_env() {
     if ! _agent_ssh true 2>/dev/null; then
-        skip "cannot SSH to agent VM at ${AGENT_VM_IP} (EBPF_2VM_MODE)"
+        env_skip "cannot SSH to agent VM at ${AGENT_VM_IP} (EBPF_2VM_MODE)"
     fi
     # Verify the agent binary exists on the remote host
     if ! _agent_ssh test -x /usr/local/bin/ebpfsentinel-agent 2>/dev/null; then
-        skip "ebpfsentinel-agent not found on agent VM ${AGENT_VM_IP}"
+        env_skip "ebpfsentinel-agent not found on agent VM ${AGENT_VM_IP}"
     fi
 }
 
@@ -107,12 +107,12 @@ require_tool() {
     case "$tool" in
         bpftool|tc)
             if ! _agent_ssh_sudo which "$tool" &>/dev/null; then
-                skip "${tool} not installed on agent VM"
+                env_skip "${tool} not installed on agent VM"
             fi
             ;;
         *)
             if ! command -v "$tool" &>/dev/null; then
-                skip "${tool} not installed"
+                env_skip "${tool} not installed"
             fi
             ;;
     esac

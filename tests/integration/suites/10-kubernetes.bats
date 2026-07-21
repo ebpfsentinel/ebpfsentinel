@@ -11,10 +11,10 @@ K8S_FIXTURES="${BATS_TEST_DIRNAME}/../fixtures/k8s"
 setup_file() {
     # Skip if minikube is not available
     if ! command -v minikube &>/dev/null; then
-        skip "minikube not installed"
+        env_skip "minikube not installed"
     fi
     if ! command -v kubectl &>/dev/null; then
-        skip "kubectl not installed"
+        env_skip "kubectl not installed"
     fi
 
     export PROJECT_ROOT
@@ -76,7 +76,7 @@ teardown_file() {
 # ── Tests ──────────────────────────────────────────────────────────
 
 @test "minikube is running" {
-    command -v minikube &>/dev/null || skip "minikube not installed"
+    command -v minikube &>/dev/null || env_skip "minikube not installed"
 
     local status
     status="$(minikube status --format='{{.Host}}' 2>/dev/null)" || true
@@ -84,7 +84,7 @@ teardown_file() {
 }
 
 @test "DaemonSet pod reaches Running state" {
-    command -v kubectl &>/dev/null || skip "kubectl not installed"
+    command -v kubectl &>/dev/null || env_skip "kubectl not installed"
 
     local phase
     phase="$(kubectl -n "$K8S_NAMESPACE" get pod \
@@ -94,7 +94,7 @@ teardown_file() {
 }
 
 @test "liveness probe passes (0 restarts)" {
-    command -v kubectl &>/dev/null || skip "kubectl not installed"
+    command -v kubectl &>/dev/null || env_skip "kubectl not installed"
 
     # Give the probes time to run
     sleep 15
@@ -107,19 +107,19 @@ teardown_file() {
 }
 
 @test "ServiceAccount exists" {
-    command -v kubectl &>/dev/null || skip "kubectl not installed"
+    command -v kubectl &>/dev/null || env_skip "kubectl not installed"
 
     run kubectl -n "$K8S_NAMESPACE" get serviceaccount ebpfsentinel
     [ "$status" -eq 0 ]
 }
 
 @test "metrics endpoint accessible via port-forward" {
-    command -v kubectl &>/dev/null || skip "kubectl not installed"
+    command -v kubectl &>/dev/null || env_skip "kubectl not installed"
 
     local pod_name
     pod_name="$(kubectl -n "$K8S_NAMESPACE" get pod \
         -l app.kubernetes.io/name=ebpfsentinel \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)" || skip "No pod found"
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)" || soft_skip "No pod found"
 
     # Pick a random local port to avoid conflicts with other suites
     local local_port=$((28000 + RANDOM % 1000))

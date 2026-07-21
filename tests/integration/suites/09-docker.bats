@@ -34,20 +34,20 @@ _docker_cmd() {
 _docker_check() {
     if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
         if ! _agent_ssh_sudo docker info &>/dev/null 2>&1; then
-            skip "Docker not running on agent VM"
+            env_skip "Docker not running on agent VM"
         fi
         if ! _agent_ssh_sudo test -f /sys/kernel/btf/vmlinux 2>/dev/null; then
-            skip "Kernel BTF not available on agent VM"
+            env_skip "Kernel BTF not available on agent VM"
         fi
     else
         if ! command -v docker &>/dev/null; then
-            skip "Docker not installed"
+            env_skip "Docker not installed"
         fi
         if ! docker info &>/dev/null 2>&1; then
-            skip "Docker daemon not running"
+            env_skip "Docker daemon not running"
         fi
         if [ ! -f /sys/kernel/btf/vmlinux ]; then
-            skip "Kernel BTF not available (/sys/kernel/btf/vmlinux missing)"
+            env_skip "Kernel BTF not available (/sys/kernel/btf/vmlinux missing)"
         fi
     fi
 }
@@ -227,7 +227,7 @@ teardown_file() {
     bps="$(iperf3_from_ns "$EBPF_HOST_IP" "$IPERF_DURATION" 2>/dev/null | jq '.end.sum_received.bits_per_second' 2>/dev/null)" || true
 
     if [ -z "$bps" ] || [ "$bps" = "null" ]; then
-        skip "iperf3 baseline failed"
+        soft_skip "iperf3 baseline failed"
     fi
 
     _report_set "baseline_bps" "$bps"
@@ -253,13 +253,13 @@ teardown_file() {
     # Verify agent is running
     local health
     health="$(_docker_cmd inspect --format='{{.State.Health.Status}}' "$CONTAINER_NAME" 2>/dev/null)" || health="unknown"
-    [ "$health" = "healthy" ] || skip "Docker agent not healthy"
+    [ "$health" = "healthy" ] || env_skip "Docker agent not healthy"
 
     local bps
     bps="$(iperf3_from_ns "$EBPF_HOST_IP" "$IPERF_DURATION" 2>/dev/null | jq '.end.sum_received.bits_per_second' 2>/dev/null)" || true
 
     if [ -z "$bps" ] || [ "$bps" = "null" ]; then
-        skip "iperf3 failed"
+        soft_skip "iperf3 failed"
     fi
 
     _report_set "docker_agent_bps" "$bps"
@@ -286,7 +286,7 @@ teardown_file() {
 
     local health
     health="$(_docker_cmd inspect --format='{{.State.Health.Status}}' "$CONTAINER_NAME" 2>/dev/null)" || health="unknown"
-    [ "$health" = "healthy" ] || skip "Docker agent not healthy"
+    [ "$health" = "healthy" ] || env_skip "Docker agent not healthy"
 
     local ping_output avg_ms
     ping_output="$(send_icmp_from_ns "$EBPF_HOST_IP" 20 10 2>&1)" || true
@@ -310,7 +310,7 @@ teardown_file() {
 
     local health
     health="$(_docker_cmd inspect --format='{{.State.Health.Status}}' "$CONTAINER_NAME" 2>/dev/null)" || health="unknown"
-    [ "$health" = "healthy" ] || skip "Docker agent not healthy"
+    [ "$health" = "healthy" ] || env_skip "Docker agent not healthy"
 
     # Generate some traffic to warm up
     send_icmp_from_ns "$EBPF_HOST_IP" 10 5 >/dev/null 2>&1
@@ -348,7 +348,7 @@ teardown_file() {
 
     local health
     health="$(_docker_cmd inspect --format='{{.State.Health.Status}}' "$CONTAINER_NAME" 2>/dev/null)" || health="unknown"
-    [ "$health" = "healthy" ] || skip "Docker agent not healthy"
+    [ "$health" = "healthy" ] || env_skip "Docker agent not healthy"
 
     local api_host="${EBPF_HOST_IP:-127.0.0.1}"
     local api_port=8080
@@ -359,12 +359,12 @@ teardown_file() {
         # In 2VM mode, try reaching via the agent VM
         if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
             if ! _agent_ssh_sudo curl -sf --max-time 3 "http://127.0.0.1:${api_port}/healthz" >/dev/null 2>&1; then
-                skip "API not reachable on agent VM"
+                soft_skip "API not reachable on agent VM"
             fi
             # Use docker exec as fallback for latency measurement
             api_url="DOCKER_EXEC"
         else
-            skip "API not reachable at ${api_url}"
+            soft_skip "API not reachable at ${api_url}"
         fi
     fi
 
@@ -418,13 +418,13 @@ teardown_file() {
 
     local health
     health="$(_docker_cmd inspect --format='{{.State.Health.Status}}' "$CONTAINER_NAME" 2>/dev/null)" || health="unknown"
-    [ "$health" = "healthy" ] || skip "Docker agent not healthy"
+    [ "$health" = "healthy" ] || env_skip "Docker agent not healthy"
 
     # Measure memory before (via docker stats, works with distroless)
     local rss_before
     rss_before="$(_docker_cmd stats --no-stream --format '{{.MemUsage}}' "$CONTAINER_NAME" 2>/dev/null \
         | awk '{gsub(/MiB/,"*1048576"); gsub(/GiB/,"*1073741824"); gsub(/KiB/,"*1024"); split($1,a,"*"); printf "%.0f", a[1]*a[2]}')" || true
-    [ -n "$rss_before" ] && [ "$rss_before" -gt 0 ] 2>/dev/null || skip "cannot read memory"
+    [ -n "$rss_before" ] && [ "$rss_before" -gt 0 ] 2>/dev/null || soft_skip "cannot read memory"
     rss_before=$(( rss_before / 1024 ))
 
     # Send sustained traffic: iperf3 + ICMP + TCP
@@ -444,7 +444,7 @@ teardown_file() {
     local rss_after
     rss_after="$(_docker_cmd stats --no-stream --format '{{.MemUsage}}' "$CONTAINER_NAME" 2>/dev/null \
         | awk '{gsub(/MiB/,"*1048576"); gsub(/GiB/,"*1073741824"); gsub(/KiB/,"*1024"); split($1,a,"*"); printf "%.0f", a[1]*a[2]}')" || true
-    [ -n "$rss_after" ] && [ "$rss_after" -gt 0 ] 2>/dev/null || skip "cannot read memory after traffic"
+    [ -n "$rss_after" ] && [ "$rss_after" -gt 0 ] 2>/dev/null || soft_skip "cannot read memory after traffic"
     rss_after=$(( rss_after / 1024 ))
 
     local growth_pct

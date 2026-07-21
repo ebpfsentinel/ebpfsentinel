@@ -395,7 +395,7 @@ teardown_file() {
 
 @test "VLAN-tagged traffic matches vlan_id rule" {
     require_root
-    skip "requires VLAN-capable veth (future)"
+    env_skip "requires VLAN-capable veth (future)"
     # TODO: Create 802.1Q tagged traffic via ip link add link veth-ebpf0 name veth-ebpf0.100 type vlan id 100
 }
 

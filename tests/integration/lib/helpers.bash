@@ -24,6 +24,7 @@ source "${HELPERS_DIR}/constants.bash"
 source "${HELPERS_DIR}/retry.bash"
 source "${HELPERS_DIR}/assertions.bash"
 source "${HELPERS_DIR}/alert_helpers.bash"
+source "${HELPERS_DIR}/skip_policy.bash"
 
 # ── Port cleanup ──────────────────────────────────────────────────
 

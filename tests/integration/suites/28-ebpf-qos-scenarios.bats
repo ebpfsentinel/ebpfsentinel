@@ -123,7 +123,7 @@ teardown_file() {
 
     # If iperf3 ran, parse throughput; otherwise skip (iperf3 requires a listening server)
     if [ -z "$result" ]; then
-        skip "iperf3 did not produce output"
+        soft_skip "iperf3 did not produce output"
     fi
 
     # Extract bits_per_second from iperf3 JSON output (sum/received section)
@@ -132,7 +132,7 @@ teardown_file() {
         '.end.sum_received.bits_per_second // .end.sum.bits_per_second' 2>/dev/null)" || true
 
     if [ -z "$bps" ] || [ "$bps" = "null" ]; then
-        skip "iperf3 JSON output not parseable"
+        soft_skip "iperf3 JSON output not parseable"
     fi
 
     # Pipe cap is 10Mbps (10240 kbps); allow up to 12Mbps for burst
@@ -226,7 +226,7 @@ teardown_file() {
     api_delete /api/v1/qos/classifiers/cls-upload-5202 >/dev/null 2>&1 || true
 
     if [ -z "$result" ]; then
-        skip "iperf3 did not produce output"
+        soft_skip "iperf3 did not produce output"
     fi
 
     local bps
@@ -234,7 +234,7 @@ teardown_file() {
         '.end.sum_received.bits_per_second // .end.sum.bits_per_second' 2>/dev/null)" || true
 
     if [ -z "$bps" ] || [ "$bps" = "null" ]; then
-        skip "iperf3 JSON output not parseable"
+        soft_skip "iperf3 JSON output not parseable"
     fi
 
     # Pipe cap is 10Mbps (10240 kbps); allow up to 15Mbps for burst headroom

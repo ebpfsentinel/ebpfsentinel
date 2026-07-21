@@ -8,6 +8,11 @@
 set -u
 
 PROJECT_ROOT="${PROJECT_ROOT:-/home/vagrant/ebpfsentinel}"
+# The canonical lane provisions every prerequisite a suite owns, so a
+# `soft_skip` here means a regression rather than a missing capability.
+# Export EBPFSENTINEL_STRICT_SKIPS=1 before calling this script to turn those
+# skips into failures (env_skip is unaffected — see lib/skip_policy.bash).
+export EBPFSENTINEL_STRICT_SKIPS="${EBPFSENTINEL_STRICT_SKIPS:-0}"
 cd "${PROJECT_ROOT}/tests/integration" || exit 1
 OUT=/tmp/local-lane-result.txt
 : >"$OUT"
@@ -21,7 +26,7 @@ clean_slate() {
     ip link del ebpfsent-sink0 2>/dev/null || true
     rm -rf /sys/fs/bpf/ebpfsentinel 2>/dev/null || true
     # Free agent ports left by a wedged process.
-    for p in 8080 50051 9090 18080 18085 18086 18099; do
+    for p in 8080 50051 9090 18080 18085 18086 18087 18088 18099; do
         fuser -k "${p}/tcp" 2>/dev/null || true
     done
     sleep 1

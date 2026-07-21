@@ -79,7 +79,7 @@ teardown_file() {
     # The event stream is only wired when the kernel exposes
     # /proc/net/nf_conntrack (see startup: nf_ct_available).
     if [ ! -r /proc/net/nf_conntrack ]; then
-        skip "/proc/net/nf_conntrack unavailable — event stream not wired"
+        env_skip "/proc/net/nf_conntrack unavailable — event stream not wired"
     fi
 
     local headers

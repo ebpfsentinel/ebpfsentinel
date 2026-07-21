@@ -40,7 +40,7 @@ setup_file() {
     start_agent "$PREPARED_CONFIG"
     wait_for_agent >/dev/null || {
         stop_agent 2>/dev/null || true
-        skip "Agent failed to start"
+        soft_skip "Agent failed to start"
     }
 
     # Allow time for the feed to be fetched and parsed
@@ -184,7 +184,7 @@ teardown_file() {
     ioc_count="$(echo "$body" | jq -r '.ioc_count // .active_iocs // .total_iocs' 2>/dev/null)" || true
 
     if [ -z "$ioc_count" ] || [ "$ioc_count" = "null" ]; then
-        skip "IOC count not reported in status endpoint"
+        soft_skip "IOC count not reported in status endpoint"
     fi
 
     [ "$ioc_count" -ge 1 ]
@@ -279,7 +279,7 @@ teardown_file() {
     bundle="$(curl -sf --max-time 5 "http://127.0.0.1:18888/bundle-basic.json" 2>/dev/null)" || true
 
     if [ -z "$bundle" ]; then
-        skip "STIX HTTP server not responding"
+        soft_skip "STIX HTTP server not responding"
     fi
 
     # Count active (non-expired) indicators in the bundle
@@ -346,7 +346,7 @@ teardown_file() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

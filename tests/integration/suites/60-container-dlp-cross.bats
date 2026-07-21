@@ -125,7 +125,7 @@ teardown_file() {
 
 @test "agent captures a neighbouring container's TLS plaintext" {
     require_root
-    _docker_available || skip "Docker engine not available"
+    _docker_available || env_skip "Docker engine not available"
 
     local before after cname
     cname="ebpfsentinel-dlp-neighbour-$$"
@@ -136,7 +136,7 @@ teardown_file() {
     # from the host's), so a captured Visa alert proves the agent attached to the
     # container's library — cross-container coverage, not the agent's own TLS.
     if ! _run_neighbour_tls_container "${cname}" >/dev/null 2>&1; then
-        skip "neighbour TLS container could not run (image pull / apk / openssl)"
+        soft_skip "neighbour TLS container could not run (image pull / apk / openssl)"
     fi
 
     # Allow the final captured event to drain to the alert store.
@@ -150,7 +150,7 @@ teardown_file() {
 
 @test "cross-container DLP alert is attributed to the source container" {
     require_root
-    _docker_available || skip "Docker engine not available"
+    _docker_available || env_skip "Docker engine not available"
 
     # The prior test drove the neighbour traffic; inspect the resulting alerts
     # for a DLP entry carrying container provenance (resolved from the event's
@@ -167,7 +167,7 @@ teardown_file() {
     [ -n "${has_container}" ] || has_container=0
 
     if [ "${has_container}" -lt 1 ]; then
-        skip "DLP alert captured but cgroup attribution unavailable on this kernel"
+        env_skip "DLP alert captured but cgroup attribution unavailable on this kernel"
     fi
     [ "${has_container}" -ge 1 ]
 }

@@ -109,7 +109,7 @@ teardown_file() {
     # agent still has nothing to observe — skip rather than fail.
     if ! _attacker_ssh \
             "nc -z -w2 ${BACKEND_VM_IP:-192.168.57.30} 853"; then
-        skip "backend DoT listener (:853) unreachable; dot-backend.service not running"
+        soft_skip "backend DoT listener (:853) unreachable; dot-backend.service not running"
     fi
 
     tls_probe_sni "${BACKEND_VM_IP:-192.168.57.30}" 853 "dot-probe.test"
@@ -160,7 +160,7 @@ teardown_file() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

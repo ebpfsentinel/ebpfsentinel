@@ -199,7 +199,7 @@ teardown_file() {
     zone_metrics="$(echo "$metrics" | grep -E "ebpfsentinel_zone|zone=" | head -5)" || true
 
     if [ -z "$zone_metrics" ]; then
-        skip "no zone-labelled metrics found"
+        soft_skip "no zone-labelled metrics found"
     fi
 
     # At least one line with zone label should exist

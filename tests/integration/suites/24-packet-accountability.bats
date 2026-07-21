@@ -237,7 +237,7 @@ wait_for_metrics_flush() {
     local metrics_url="http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics"
     local body
     body="$(curl -sf --max-time "$HTTP_TIMEOUT" "$metrics_url" 2>/dev/null)" || {
-        skip "metrics endpoint not available"
+        soft_skip "metrics endpoint not available"
     }
 
     # Check that total_seen appears in the metrics output for the firewall

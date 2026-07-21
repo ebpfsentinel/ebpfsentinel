@@ -136,7 +136,7 @@ teardown_file() {
 
 @test "responses create via CLI surfaces in REST list_active" {
     if ! _agent_ssh test -x /usr/local/bin/ebpfsentinel-agent 2>/dev/null; then
-        skip "ebpfsentinel-agent CLI not installed on agent VM"
+        env_skip "ebpfsentinel-agent CLI not installed on agent VM"
     fi
 
     # CLI uses --ttl (story prose calls it --duration; the binary's clap

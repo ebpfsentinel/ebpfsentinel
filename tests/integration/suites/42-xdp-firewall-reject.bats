@@ -33,7 +33,7 @@ setup_file() {
     require_tool bc
 
     if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
-        skip "suite 42 requires EBPF_2VM_MODE=true (forged-reply capture on attacker VM)"
+        env_skip "suite 42 requires EBPF_2VM_MODE=true (forged-reply capture on attacker VM)"
     fi
 
     require_reject_tools
@@ -105,7 +105,7 @@ _attacker_iface() {
 
     local bpf="tcp and src host ${AGENT_VM_IP} and src port ${REJECT_TCP_PORT}"
     local pcap
-    pcap="$(reject_start_capture "$bpf")" || skip "could not start tcpdump on attacker VM"
+    pcap="$(reject_start_capture "$bpf")" || soft_skip "could not start tcpdump on attacker VM"
 
     # Trigger: TCP connect attempt. Expect ECONNREFUSED (RST received).
     if ! reject_tcp_connect_refused "${AGENT_VM_IP}" "${REJECT_TCP_PORT}"; then
@@ -151,7 +151,7 @@ _attacker_iface() {
 
     local bpf="tcp port ${REJECT_TCP_PORT}"
     local pcap
-    pcap="$(reject_start_capture "$bpf")" || skip "could not start tcpdump on attacker VM"
+    pcap="$(reject_start_capture "$bpf")" || soft_skip "could not start tcpdump on attacker VM"
 
     reject_tcp_connect_refused "${AGENT_VM_IP}" "${REJECT_TCP_PORT}" || true
 
@@ -177,7 +177,7 @@ _attacker_iface() {
 
     local bpf="icmp and src host ${AGENT_VM_IP}"
     local pcap
-    pcap="$(reject_start_capture "$bpf")" || skip "could not start tcpdump on attacker VM"
+    pcap="$(reject_start_capture "$bpf")" || soft_skip "could not start tcpdump on attacker VM"
 
     # Trigger UDP packet to the reject port. send_udp_from_ns wraps ncat -u.
     send_udp_from_ns "${AGENT_VM_IP}" "${REJECT_UDP_PORT}" "PROBE" 2 || true
@@ -209,7 +209,7 @@ _attacker_iface() {
 
     local bpf="tcp and src host ${AGENT_VM_IP} and src port ${REJECT_TCP_PORT}"
     local pcap
-    pcap="$(reject_start_capture "$bpf")" || skip "could not start tcpdump on attacker VM"
+    pcap="$(reject_start_capture "$bpf")" || soft_skip "could not start tcpdump on attacker VM"
 
     # Send a SYN with a spoofed source inside the whitelist subnet.
     # The agent must NOT emit a forged RST in response (whitelist allow

@@ -170,7 +170,7 @@ teardown_file() {
             [ "${count}" -ge 1 ]
         }
     else
-        skip "no blacklist entries to check TTL on"
+        soft_skip "no blacklist entries to check TTL on"
     fi
 }
 
@@ -202,7 +202,7 @@ teardown_file() {
     rule_id="$(echo "$rules" | jq -r '.[0].id' 2>/dev/null)" || true
 
     if [ -z "$rule_id" ] || [ "$rule_id" = "null" ]; then
-        skip "no IPS rules available to patch"
+        soft_skip "no IPS rules available to patch"
     fi
 
     # Toggle the first rule to alert mode and verify the response
@@ -223,7 +223,7 @@ teardown_file() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

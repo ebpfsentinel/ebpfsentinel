@@ -43,8 +43,8 @@ setup_file() {
     }
 
     route_via_agent backend >/dev/null 2>&1 || true
-    start_backend_service iperf3 5201 || skip "backend iperf3 listener did not start"
-    ensure_conntrack_tool || skip "agent VM is missing the 'conntrack' tool (apt install conntrack)"
+    start_backend_service iperf3 5201 || soft_skip "backend iperf3 listener did not start"
+    ensure_conntrack_tool || env_skip "agent VM is missing the 'conntrack' tool (apt install conntrack)"
 }
 
 teardown_file() {

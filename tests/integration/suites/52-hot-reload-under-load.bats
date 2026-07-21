@@ -259,7 +259,7 @@ _start_tcp_load() {
 @test "alerts captured during reload cycle have no duplicate ids" {
     local body
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
-    [ -n "${body}" ] || skip "alerts endpoint returned empty body"
+    [ -n "${body}" ] || soft_skip "alerts endpoint returned empty body"
 
     local total unique
     total="$(echo "${body}" \
@@ -268,7 +268,7 @@ _start_tcp_load() {
         | jq -r '(.alerts // []) | map(.id // .alert_id // "") | unique | length' 2>/dev/null)" \
             || unique=0
     if [ "${total:-0}" -lt 1 ]; then
-        skip "no alerts emitted during reload cycle — duplication check N/A"
+        soft_skip "no alerts emitted during reload cycle — duplication check N/A"
     fi
     [ "${total}" = "${unique}" ] || {
         echo "duplicate alert ids observed: ${total} entries, ${unique} unique" >&2

@@ -160,7 +160,7 @@ teardown_file() {
 
     local alert_id
     alert_id="$(cat "$DATA_DIR/alert_id.txt" 2>/dev/null)"
-    [ -n "$alert_id" ] || skip "no alert_id from previous test"
+    [ -n "$alert_id" ] || soft_skip "no alert_id from previous test"
 
     # No GET /alerts/{id} endpoint — query the list and filter
     local body
@@ -180,7 +180,7 @@ teardown_file() {
 
     local alert_id
     alert_id="$(cat "$DATA_DIR/alert_id.txt" 2>/dev/null)"
-    [ -n "$alert_id" ] || skip "no alert_id from previous test"
+    [ -n "$alert_id" ] || soft_skip "no alert_id from previous test"
 
     local body
     body="$(api_get '/api/v1/alerts?false_positive=false')"
@@ -270,7 +270,7 @@ teardown_file() {
     [ "$HTTP_STATUS" = "200" ]
 
     alert_id="$(echo "$body" | jq -r '[.alerts[] | select(.rule_id == "ids-alert-test")][0].id' 2>/dev/null)" || true
-    [ -n "$alert_id" ] && [ "$alert_id" != "null" ] || skip "no ids-alert-test alert available"
+    [ -n "$alert_id" ] && [ "$alert_id" != "null" ] || soft_skip "no ids-alert-test alert available"
 
     # Mark as false positive
     api_post "/api/v1/alerts/${alert_id}/false-positive" '{"false_positive": true}' >/dev/null
@@ -358,7 +358,7 @@ teardown_file() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

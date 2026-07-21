@@ -34,7 +34,7 @@ setup_file() {
     require_tool bc
 
     if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
-        skip "suite 43 requires EBPF_2VM_MODE=true (real+spoofed flood pair)"
+        env_skip "suite 43 requires EBPF_2VM_MODE=true (real+spoofed flood pair)"
     fi
 
     require_syncookie_tools
@@ -63,7 +63,7 @@ setup_file() {
     syncookie_start_target "$TARGET_PORT" || {
         stop_ebpf_agent 2>/dev/null || true
         destroy_test_netns 2>/dev/null || true
-        skip "could not start ncat listener on agent VM at port ${TARGET_PORT}"
+        soft_skip "could not start ncat listener on agent VM at port ${TARGET_PORT}"
     }
 }
 
@@ -167,7 +167,7 @@ _metric_or_zero() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

@@ -1,10 +1,13 @@
-# config-alert-sink-webhook.yaml — outbound alert delivery (webhook sink)
+# config-alert-sink-webhook.yaml — outbound alert delivery (every sink)
 #
 # One IDS rule on TCP/4444 feeds the alert pipeline; the pipeline fans the
-# alert out to a webhook route pointing at the local sink and to the log
-# route. The sink address lives in TEST-NET-3 (203.0.113.0/24): the webhook
-# sender refuses loopback/private/link-local targets (SSRF guard), so the
-# suite assigns that address to a dummy interface instead.
+# alert out concurrently to a webhook, an email and an OTLP route, plus the
+# log route.
+#
+# The webhook sink address lives in TEST-NET-3 (203.0.113.0/24): that sender
+# refuses loopback/private/link-local targets (SSRF guard), so the suite
+# assigns that address to a dummy interface. The SMTP and OTLP senders have
+# no such guard, so their sinks bind loopback.
 
 agent:
   interfaces:
@@ -50,6 +53,16 @@ l7:
 
 alerting:
   enabled: true
+  smtp:
+    host: "127.0.0.1"
+    port: 18087
+    from_address: "alerts@ebpfsentinel.test"
+    # Plain SMTP against the local sink: no STARTTLS, no AUTH.
+    tls: false
+  otlp:
+    endpoint: "http://127.0.0.1:18088"
+    protocol: http
+    timeout_ms: 2000
   # Short dedup window: the suite drives the same 5-tuple more than once and
   # must not have the second alert swallowed before it reaches a sink.
   dedup_window_secs: 1
@@ -63,6 +76,13 @@ alerting:
       webhook_headers:
         X-Auth-Token: "it-sink-token"
         X-Tenant: "integration"
+    - name: it-sink-email
+      destination: email
+      min_severity: low
+      email_to: "soc@example.test"
+    - name: it-sink-otlp
+      destination: otlp
+      min_severity: low
     - name: it-sink-log
       destination: log
       min_severity: low

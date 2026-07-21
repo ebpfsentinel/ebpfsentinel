@@ -1,9 +1,10 @@
 #!/usr/bin/env bats
-# 61-alert-sink-delivery.bats — outbound alert delivery to a webhook sink.
+# 61-alert-sink-delivery.bats — outbound alert delivery to every sink.
 #
 # Everything upstream of the senders is already covered (25 asserts the
 # alert lands in the store, 34 asserts the SSE fan-out). This suite covers
-# the egress half: what the agent actually POSTs to an external sink.
+# the egress half: what the agent actually hands to an external sink over
+# each of the three transports — webhook, SMTP and OTLP.
 #
 #   * An IDS alert on TCP/4444 reaches the sink as an HTTP POST with
 #     Content-Type: application/json.
@@ -18,9 +19,13 @@
 #   * A route pointing at loopback delivers nothing — the sender's runtime
 #     SSRF guard refuses the connection even though config validation
 #     accepted the URL (it only checks the scheme).
+#   * The same alert reaches the SMTP sink as a mail with the configured
+#     envelope, and the OTLP sink as an export on /v1/logs.
 #
-# The sink binds 203.0.113.10 (TEST-NET-3) on a dummy interface because the
-# SSRF guard rejects loopback/private/link-local targets.
+# The webhook sink binds 203.0.113.10 (TEST-NET-3) on a dummy interface
+# because that sender's SSRF guard rejects loopback/private/link-local
+# targets; the SMTP and OTLP senders have no such guard, so their sinks bind
+# loopback.
 #
 # Requires: root, kernel >= 6.9, python3, ncat, jq.
 
@@ -31,6 +36,8 @@ SINK_IP="203.0.113.10"
 SINK_PORT="18085"
 SINK_IFACE="ebpfsent-sink0"
 LOOPBACK_SINK_PORT="18086"
+SMTP_SINK_PORT="18087"
+OTLP_SINK_PORT="18088"
 
 _start_sink() {
     local bind="${1}" port="${2}" log="${3}" fail_first="${4:-0}"
@@ -40,6 +47,29 @@ _start_sink() {
         --bind "${bind}" --port "${port}" --log "${log}" \
         --fail-first "${fail_first}" </dev/null >>"${DATA_DIR}/sink.stderr" 2>&1 &
     echo "$!"
+}
+
+_start_script_sink() {
+    local script="${1}" bind="${2}" port="${3}" log="${4}"
+
+    setsid python3 "${BATS_TEST_DIRNAME}/../scripts/${script}" \
+        --bind "${bind}" --port "${port}" --log "${log}" \
+        </dev/null >>"${DATA_DIR}/sink.stderr" 2>&1 &
+    echo "$!"
+}
+
+# _wait_for_tcp <host> <port> — the SMTP sink speaks no HTTP, so readiness
+# is a plain connect.
+_wait_for_tcp() {
+    local host="${1}" port="${2}" attempt=0
+    while [ "${attempt}" -lt 30 ]; do
+        if timeout 1 bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.2
+        attempt=$((attempt + 1))
+    done
+    return 1
 }
 
 _wait_for_sink() {
@@ -102,6 +132,8 @@ setup_file() {
     mkdir -p "$DATA_DIR"
     export SINK_LOG="${DATA_DIR}/webhook-sink.jsonl"
     export LOOPBACK_SINK_LOG="${DATA_DIR}/webhook-sink-loopback.jsonl"
+    export SMTP_SINK_LOG="${DATA_DIR}/smtp-sink.jsonl"
+    export OTLP_SINK_LOG="${DATA_DIR}/otlp-sink.jsonl"
 
     # The sink address must not be loopback/private for the sender's SSRF
     # guard to allow it; a dummy interface carries TEST-NET-3 locally.
@@ -116,12 +148,25 @@ setup_file() {
     LOOPBACK_SINK_PID="$(_start_sink "127.0.0.1" "${LOOPBACK_SINK_PORT}" "${LOOPBACK_SINK_LOG}" 0)"
     export LOOPBACK_SINK_PID
 
+    SMTP_SINK_PID="$(_start_script_sink smtp-sink.py 127.0.0.1 "${SMTP_SINK_PORT}" "${SMTP_SINK_LOG}")"
+    export SMTP_SINK_PID
+    OTLP_SINK_PID="$(_start_script_sink otlp-sink.py 127.0.0.1 "${OTLP_SINK_PORT}" "${OTLP_SINK_LOG}")"
+    export OTLP_SINK_PID
+
     _wait_for_sink "http://${SINK_IP}:${SINK_PORT}/ready" || {
         echo "webhook sink did not come up on ${SINK_IP}:${SINK_PORT}" >&2
         return 1
     }
     _wait_for_sink "http://127.0.0.1:${LOOPBACK_SINK_PORT}/ready" || {
         echo "loopback sink did not come up" >&2
+        return 1
+    }
+    _wait_for_tcp 127.0.0.1 "${SMTP_SINK_PORT}" || {
+        echo "SMTP sink did not come up on ${SMTP_SINK_PORT}" >&2
+        return 1
+    }
+    _wait_for_sink "http://127.0.0.1:${OTLP_SINK_PORT}/ready" || {
+        echo "OTLP sink did not come up on ${OTLP_SINK_PORT}" >&2
         return 1
     }
 
@@ -147,6 +192,8 @@ teardown_file() {
     destroy_test_netns 2>/dev/null || true
     kill "${SINK_PID:-0}" 2>/dev/null || true
     kill "${LOOPBACK_SINK_PID:-0}" 2>/dev/null || true
+    kill "${SMTP_SINK_PID:-0}" 2>/dev/null || true
+    kill "${OTLP_SINK_PID:-0}" 2>/dev/null || true
     ip link del "${SINK_IFACE}" 2>/dev/null || true
     rm -rf "${DATA_DIR:-/tmp/ebpfsentinel-test-data-alert-sink-$$}"
     rm -f "${PREPARED_CONFIG:-}" "${PREPARED_SSRF_CONFIG:-}"
@@ -186,7 +233,7 @@ teardown_file() {
 }
 
 @test "delivery carries Content-Type: application/json" {
-    _wait_for_delivery "${SINK_LOG}" 30 || skip "no delivery recorded yet"
+    _wait_for_delivery "${SINK_LOG}" 30 || soft_skip "no delivery recorded yet"
 
     local ctype
     ctype="$(jq -sr '
@@ -200,7 +247,7 @@ teardown_file() {
 }
 
 @test "configured webhook_headers are sent on the request" {
-    _wait_for_delivery "${SINK_LOG}" 30 || skip "no delivery recorded yet"
+    _wait_for_delivery "${SINK_LOG}" 30 || soft_skip "no delivery recorded yet"
 
     local auth tenant ctype
     auth="$(jq -sr '
@@ -233,7 +280,7 @@ teardown_file() {
 }
 
 @test "delivered body is the serialized alert the REST API reports" {
-    _wait_for_delivery "${SINK_LOG}" 30 || skip "no delivery recorded yet"
+    _wait_for_delivery "${SINK_LOG}" 30 || soft_skip "no delivery recorded yet"
 
     local delivered rest_ids
     delivered="$(jq -sc '
@@ -267,7 +314,7 @@ teardown_file() {
 # ── Retry ──────────────────────────────────────────────────────────
 
 @test "a 5xx answer is retried with the same alert" {
-    _wait_for_delivery "${SINK_LOG}" 30 || skip "no delivery recorded yet"
+    _wait_for_delivery "${SINK_LOG}" 30 || soft_skip "no delivery recorded yet"
 
     # The sink answers the first request with HTTP 500 (fail-first 1), so the
     # sender must come back with the same alert. Backoff schedule starts at
@@ -299,7 +346,7 @@ teardown_file() {
 # ── Metrics ────────────────────────────────────────────────────────
 
 @test "circuit-breaker state is exposed for the webhook destination" {
-    _wait_for_delivery "${SINK_LOG}" 30 || skip "no delivery recorded yet"
+    _wait_for_delivery "${SINK_LOG}" 30 || soft_skip "no delivery recorded yet"
 
     local metrics
     metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || metrics=""
@@ -326,7 +373,7 @@ teardown_file() {
 }
 
 @test "successful deliveries are counted on alerts_exported_total" {
-    _wait_for_delivery "${SINK_LOG}" 30 || skip "no delivery recorded yet"
+    _wait_for_delivery "${SINK_LOG}" 30 || soft_skip "no delivery recorded yet"
 
     local metrics count
     metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || metrics=""
@@ -349,6 +396,144 @@ teardown_file() {
     }
 }
 
+# ── SMTP sink ──────────────────────────────────────────────────────
+
+# _wait_for_mail <max_attempts> — wait until the SMTP sink accepted a
+# message whose body carries the suite's rule id.
+_wait_for_mail() {
+    local max="${1:-30}" attempt=0
+    while [ "${attempt}" -lt "${max}" ]; do
+        if [ -f "${SMTP_SINK_LOG}" ] && jq -sre '
+            [.[] | select(.data | contains("ids-sink-test"))] | length >= 1
+        ' "${SMTP_SINK_LOG}" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+@test "the alert is delivered to the SMTP sink" {
+    _wait_for_mail 30 || {
+        echo "SMTP sink accepted no mail carrying ids-sink-test" >&2
+        echo "sink log:" >&2
+        cat "${SMTP_SINK_LOG}" >&2 2>/dev/null || true
+        return 1
+    }
+
+    local from to
+    from="$(jq -sr '[.[] | select(.data | contains("ids-sink-test"))][0].mail_from' "${SMTP_SINK_LOG}")"
+    to="$(jq -sr '[.[] | select(.data | contains("ids-sink-test"))][0].rcpt_to[0]' "${SMTP_SINK_LOG}")"
+
+    # Envelope must match the configured smtp.from_address / route email_to.
+    [ "${from}" = "alerts@ebpfsentinel.test" ] || {
+        echo "expected envelope sender alerts@ebpfsentinel.test; got '${from}'" >&2
+        return 1
+    }
+    [ "${to}" = "soc@example.test" ] || {
+        echo "expected recipient soc@example.test; got '${to}'" >&2
+        return 1
+    }
+}
+
+@test "the mail body carries the alert identity" {
+    _wait_for_mail 30 || soft_skip "no mail recorded yet"
+
+    local data
+    data="$(jq -sr '[.[] | select(.data | contains("ids-sink-test"))][0].data' "${SMTP_SINK_LOG}")"
+
+    # The sender serializes the alert into the message; the rule id and the
+    # component must both survive the transport.
+    echo "${data}" | grep -q "ids-sink-test" || {
+        echo "rule id missing from the mail body" >&2
+        return 1
+    }
+    echo "${data}" | grep -qi "ids" || {
+        echo "component missing from the mail body: ${data}" >&2
+        return 1
+    }
+}
+
+@test "email deliveries are counted on alerts_exported_total" {
+    _wait_for_mail 30 || soft_skip "no mail recorded yet"
+
+    local metrics count
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || metrics=""
+    [ -n "${metrics}" ] || {
+        echo "metrics endpoint returned nothing" >&2
+        return 1
+    }
+
+    count="$(echo "${metrics}" \
+        | grep -E '^ebpfsentinel_alerts_exported_total\{[^}]*destination="email"' \
+        | awk '{print $2}' | head -1)"
+    [ -n "${count}" ] && [ "${count%.*}" -ge 1 ] || {
+        echo "no alerts_exported_total series for destination=email" >&2
+        echo "${metrics}" | grep -E 'alerts_exported' >&2 || true
+        return 1
+    }
+}
+
+# ── OTLP sink ──────────────────────────────────────────────────────
+
+# _wait_for_otlp <max_attempts> — the OTLP sender batches, so the export
+# lands a beat after the alert.
+_wait_for_otlp() {
+    local max="${1:-30}" attempt=0
+    while [ "${attempt}" -lt "${max}" ]; do
+        if [ -f "${OTLP_SINK_LOG}" ] && jq -sre '
+            [.[] | select(.body_text | contains("ids-sink-test"))] | length >= 1
+        ' "${OTLP_SINK_LOG}" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+@test "the alert is exported to the OTLP sink" {
+    _wait_for_otlp 30 || {
+        echo "OTLP sink received no export carrying ids-sink-test" >&2
+        echo "sink log:" >&2
+        jq -sc '[.[] | {index, path, content_type, length}]' "${OTLP_SINK_LOG}" >&2 2>/dev/null || true
+        return 1
+    }
+
+    local path ctype
+    path="$(jq -sr '[.[] | select(.body_text | contains("ids-sink-test"))][0].path' "${OTLP_SINK_LOG}")"
+    ctype="$(jq -sr '[.[] | select(.body_text | contains("ids-sink-test"))][0].content_type' "${OTLP_SINK_LOG}")"
+
+    # OTLP/HTTP logs are POSTed to <endpoint>/v1/logs as protobuf.
+    [ "${path}" = "/v1/logs" ] || {
+        echo "expected export on /v1/logs; got '${path}'" >&2
+        return 1
+    }
+    case "${ctype}" in
+        application/x-protobuf*|application/json*) ;;
+        *) echo "unexpected OTLP content-type: '${ctype}'" >&2; return 1 ;;
+    esac
+}
+
+@test "the OTLP export carries the alert attributes" {
+    _wait_for_otlp 30 || soft_skip "no OTLP export recorded yet"
+
+    local body
+    body="$(jq -sr '[.[] | select(.body_text | contains("ids-sink-test"))][0].body_text' "${OTLP_SINK_LOG}")"
+
+    # The sender sets these attribute keys on every record; they travel as
+    # plain strings inside the protobuf payload.
+    echo "${body}" | grep -q "alert.rule_id" || {
+        echo "alert.rule_id attribute missing from the OTLP payload" >&2
+        return 1
+    }
+    echo "${body}" | grep -q "alert.component" || {
+        echo "alert.component attribute missing from the OTLP payload" >&2
+        return 1
+    }
+}
+
 # ── SSRF guard (runs last: it restarts the agent) ──────────────────
 
 @test "a loopback webhook target receives nothing (SSRF guard)" {
@@ -361,7 +546,7 @@ teardown_file() {
 
     stop_ebpf_agent 2>/dev/null || true
     start_ebpf_agent "$PREPARED_SSRF_CONFIG"
-    wait_for_ebpf_loaded 30 || skip "agent did not reload with the SSRF fixture"
+    wait_for_ebpf_loaded 30 || soft_skip "agent did not reload with the SSRF fixture"
 
     _drive_ids_alert
     wait_for_alert '.[] | select(.rule_id == "ids-sink-test")' 20 1 >/dev/null || {

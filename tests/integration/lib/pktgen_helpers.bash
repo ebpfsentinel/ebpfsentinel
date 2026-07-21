@@ -38,11 +38,11 @@ PKTGEN_DELAY_DEFAULT_NS="${PKTGEN_DELAY_DEFAULT_NS:-0}"
 # Skip the calling test if pktgen is not loaded / accessible.
 require_pktgen() {
     if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
-        skip "pktgen suite requires EBPF_2VM_MODE=true (real flood from attacker NIC)"
+        env_skip "pktgen suite requires EBPF_2VM_MODE=true (real flood from attacker NIC)"
     fi
     if [ ! -d "$PKTGEN_PROCROOT" ]; then
         if ! sudo modprobe pktgen 2>/dev/null; then
-            skip "pktgen kernel module unavailable on this host"
+            env_skip "pktgen kernel module unavailable on this host"
         fi
         sleep 0.2
     fi
@@ -50,12 +50,12 @@ require_pktgen() {
     # through sudo, so non-root bats is fine as long as passwordless sudo works.
     if [ "$(id -u)" -ne 0 ] && [ ! -w "${PKTGEN_PROCROOT}/pgctrl" ]; then
         if ! sudo -n true 2>/dev/null; then
-            skip "pktgen control files need root (passwordless sudo unavailable)"
+            env_skip "pktgen control files need root (passwordless sudo unavailable)"
         fi
     fi
     # The per-CPU thread file is also root-only to stat; check it through sudo.
     if ! sudo test -e "${PKTGEN_PROCROOT}/${PKTGEN_KTHREAD}"; then
-        skip "pktgen thread ${PKTGEN_KTHREAD} missing under ${PKTGEN_PROCROOT}"
+        env_skip "pktgen thread ${PKTGEN_KTHREAD} missing under ${PKTGEN_PROCROOT}"
     fi
 }
 
@@ -70,7 +70,7 @@ _pktgen_validate_target() {
             return 0
             ;;
         *)
-            skip "pktgen target ${ip} is not RFC1918 — refusing to flood"
+            env_skip "pktgen target ${ip} is not RFC1918 — refusing to flood"
             ;;
     esac
 }
@@ -170,7 +170,7 @@ pktgen_run() {
     local dst_mac
     dst_mac="$(_pktgen_resolve_dst_mac "$dst_ip" "$iface")"
     if [ -z "$dst_mac" ]; then
-        skip "could not resolve MAC for ${dst_ip} on ${iface}"
+        soft_skip "could not resolve MAC for ${dst_ip} on ${iface}"
     fi
 
     pktgen_configure "$iface" "$dst_ip" "$dst_mac" "$pkt_size" "$dport" "$delay_ns"

@@ -38,7 +38,7 @@ SLOWHTTP_DEFAULT_INTERVAL="${SLOWHTTP_DEFAULT_INTERVAL:-10}"
 # Skip the calling test if slowhttptest is not installed locally.
 require_slowhttptest() {
     if ! command -v slowhttptest >/dev/null 2>&1 && [ ! -x "$SLOWHTTP_BIN" ]; then
-        skip "slowhttptest not installed (run story 34.3 provisioner)"
+        env_skip "slowhttptest not installed (run story 34.3 provisioner)"
     fi
 }
 
@@ -53,7 +53,7 @@ _slowhttp_validate_target() {
             return 0
             ;;
         *)
-            skip "slowhttptest target ${ip} is not RFC1918 — refusing to flood"
+            env_skip "slowhttptest target ${ip} is not RFC1918 — refusing to flood"
             ;;
     esac
 }

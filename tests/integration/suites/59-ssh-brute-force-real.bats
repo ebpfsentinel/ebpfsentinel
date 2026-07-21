@@ -38,7 +38,7 @@ setup_file() {
     require_tool ncat
 
     if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
-        skip "TCP/22 is in use by sshd in 2VM mode; suite 59 is single-netns only"
+        env_skip "TCP/22 is in use by sshd in 2VM mode; suite 59 is single-netns only"
     fi
 
     export PROJECT_ROOT

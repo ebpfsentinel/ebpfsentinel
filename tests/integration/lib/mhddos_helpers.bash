@@ -39,10 +39,10 @@ MHDDOS_PROXY_NONE="${MHDDOS_PROXY_NONE:-none.txt}"
 # Skip the calling test if MHDDoS is not installed on this host.
 require_mhddos() {
     if [ ! -x "${MHDDOS_PY}" ] || [ ! -f "${MHDDOS_START}" ]; then
-        skip "MHDDoS not provisioned at ${MHDDOS_DIR} (run story 34.3 provisioner)"
+        env_skip "MHDDoS not provisioned at ${MHDDOS_DIR} (run story 34.3 provisioner)"
     fi
     if [ ! -f "${MHDDOS_TOR_FLAG}" ]; then
-        skip "MHDDoS Tor disable flag missing (${MHDDOS_TOR_FLAG})"
+        env_skip "MHDDoS Tor disable flag missing (${MHDDOS_TOR_FLAG})"
     fi
     # Ensure the empty proxylist exists so L7 floods run proxyless (direct).
     mkdir -p "${MHDDOS_DIR}/files/proxies"
@@ -62,7 +62,7 @@ _mhddos_validate_target() {
             return 0
             ;;
         *)
-            skip "MHDDoS target ${ip} is not RFC1918 — refusing to flood public address"
+            env_skip "MHDDoS target ${ip} is not RFC1918 — refusing to flood public address"
             ;;
     esac
 }

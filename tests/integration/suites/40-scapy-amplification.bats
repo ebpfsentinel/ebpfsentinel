@@ -29,7 +29,7 @@ setup_file() {
     require_tool bc
 
     if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
-        skip "suite 40 requires EBPF_2VM_MODE=true (attacker VM crafting spoofed packets)"
+        env_skip "suite 40 requires EBPF_2VM_MODE=true (attacker VM crafting spoofed packets)"
     fi
 
     export PROJECT_ROOT
@@ -112,12 +112,12 @@ _run_amp_and_assert() {
     local bpf='udp and (src port 53 or src port 123 or src port 1900 or src port 11211)'
 
     local remote_pcap
-    remote_pcap="$(capture_on agent "$iface" "$bpf")" || skip "capture_on failed on agent VM"
+    remote_pcap="$(capture_on agent "$iface" "$bpf")" || soft_skip "capture_on failed on agent VM"
 
     amp_run dns_any 200 200 "" --query || true
 
     local local_pcap
-    local_pcap="$(stop_capture agent "$remote_pcap")" || skip "stop_capture failed on agent VM"
+    local_pcap="$(stop_capture agent "$remote_pcap")" || soft_skip "stop_capture failed on agent VM"
 
     amp_egress_zero "$local_pcap"
 }
@@ -129,7 +129,7 @@ _run_amp_and_assert() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

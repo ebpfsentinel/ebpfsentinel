@@ -110,6 +110,8 @@ suite_profiles:
   "60": nightly
   "61": nightly
   "62": nightly
+  # 63 is pure introspection (no agent, no root): cheap enough for every PR.
+  "63": pr
   "perf/01": nightly
   "perf/02": nightly
   "perf/03": nightly
@@ -488,7 +490,7 @@ coverage:
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Alert pipeline + routing; outbound delivery (webhook sink: POST + JSON body identity + 5xx retry + SSRF refusal of a loopback target) asserted in 61"
+    notes: "Alert pipeline + routing; outbound delivery asserted in 61 across all three senders — webhook (POST + JSON body identity + route headers + 5xx retry + SSRF refusal of a loopback target), email (SMTP envelope + body) and OTLP (export on /v1/logs with the alert attributes)"
 
   - kind: domain_module
     feature: alias

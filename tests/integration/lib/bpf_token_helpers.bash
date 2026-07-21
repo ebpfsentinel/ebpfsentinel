@@ -50,10 +50,10 @@ bpf_token_build_launcher() {
     require_tool cargo
     if ! (cd "$PROJECT_ROOT" && cargo build --release --bin warden) \
         >/tmp/warden-build-$$.log 2>&1; then
-        skip "warden failed to build: $(cat /tmp/warden-build-$$.log)"
+        soft_skip "warden failed to build: $(cat /tmp/warden-build-$$.log)"
     fi
     BPF_TOKEN_WARDEN_BIN="${PROJECT_ROOT}/target/release/warden"
-    [ -x "$BPF_TOKEN_WARDEN_BIN" ] || skip "warden binary not found after build"
+    [ -x "$BPF_TOKEN_WARDEN_BIN" ] || env_skip "warden binary not found after build"
     export BPF_TOKEN_WARDEN_BIN
 }
 

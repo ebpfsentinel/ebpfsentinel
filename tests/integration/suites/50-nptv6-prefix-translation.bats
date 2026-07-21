@@ -63,7 +63,7 @@ teardown_file() {
     body="$(api_get /api/v1/nat/nptv6)"
     _load_http_status
     if [ "${HTTP_STATUS}" = "404" ]; then
-        skip "NAT service not enabled or NPTv6 endpoint missing"
+        soft_skip "NAT service not enabled or NPTv6 endpoint missing"
     fi
     [ "${HTTP_STATUS}" = "200" ]
 
@@ -110,7 +110,7 @@ teardown_file() {
 
 @test "CLI nat nptv6 list reports the configured rule" {
     if ! _agent_ssh test -x /usr/local/bin/ebpfsentinel-agent 2>/dev/null; then
-        skip "ebpfsentinel-agent CLI not installed on agent VM"
+        env_skip "ebpfsentinel-agent CLI not installed on agent VM"
     fi
 
     local out
@@ -217,7 +217,7 @@ teardown_file() {
     # No probe reached the backend at all → the IPv6 transit link is down, not a
     # translation failure; surface as a skip rather than a false negative.
     if [ "${external_hits:-0}" -eq 0 ] && [ "${internal_hits:-0}" -eq 0 ]; then
-        skip "no IPv6 probe reached backend — transit link not established"
+        soft_skip "no IPv6 probe reached backend — transit link not established"
     fi
 
     # The probe reached the backend: assert NPTv6 swapped the source prefix

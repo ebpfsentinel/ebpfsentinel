@@ -215,7 +215,7 @@ _send_tls_data() {
 @test "Visa card via TLS triggers DLP scan" {
     require_root
     command -v openssl &>/dev/null || { echo "openssl not installed" >&2; return 1; }
-    [ -f "$DATA_DIR/tls_server.pid" ] || skip "TLS server not running"
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
 
     _send_tls_data "payment card: 4111111111111111 process immediately"
     sleep 3
@@ -228,7 +228,7 @@ _send_tls_data() {
 
 @test "SSN via TLS triggers DLP scan" {
     require_root
-    [ -f "$DATA_DIR/tls_server.pid" ] || skip "TLS server not running"
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
 
     _send_tls_data "Employee SSN: 123-45-6789 salary 85000"
     sleep 3
@@ -241,7 +241,7 @@ _send_tls_data() {
 
 @test "AWS key via TLS triggers DLP scan" {
     require_root
-    [ -f "$DATA_DIR/tls_server.pid" ] || skip "TLS server not running"
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
 
     _send_tls_data "aws_access_key_id = AKIAIOSFODNN7EXAMPLE"
     sleep 3
@@ -254,7 +254,7 @@ _send_tls_data() {
 
 @test "GitHub token via TLS triggers DLP scan" {
     require_root
-    [ -f "$DATA_DIR/tls_server.pid" ] || skip "TLS server not running"
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
 
     _send_tls_data "export GITHUB_TOKEN=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
     sleep 3
@@ -267,7 +267,7 @@ _send_tls_data() {
 
 @test "password leak via TLS triggers DLP scan" {
     require_root
-    [ -f "$DATA_DIR/tls_server.pid" ] || skip "TLS server not running"
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
 
     _send_tls_data "database: password=SuperSecretP@ss123 host=db.prod"
     sleep 3
@@ -280,7 +280,7 @@ _send_tls_data() {
 
 @test "Bearer token via TLS triggers DLP scan" {
     require_root
-    [ -f "$DATA_DIR/tls_server.pid" ] || skip "TLS server not running"
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
 
     _send_tls_data "Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.sig"
     sleep 3
@@ -293,7 +293,7 @@ _send_tls_data() {
 
 @test "email address via TLS triggers DLP scan" {
     require_root
-    [ -f "$DATA_DIR/tls_server.pid" ] || skip "TLS server not running"
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
 
     _send_tls_data "send credentials to john.doe@company-internal.com ASAP"
     sleep 3
@@ -306,7 +306,7 @@ _send_tls_data() {
 
 @test "Mastercard via TLS triggers DLP scan" {
     require_root
-    [ -f "$DATA_DIR/tls_server.pid" ] || skip "TLS server not running"
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
 
     _send_tls_data "charge card 5105105105105100 amount 499.99"
     sleep 3
@@ -319,7 +319,7 @@ _send_tls_data() {
 
 @test "Amex via TLS triggers DLP scan" {
     require_root
-    [ -f "$DATA_DIR/tls_server.pid" ] || skip "TLS server not running"
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
 
     _send_tls_data "amex corporate 371449635398431 exp 12/28"
     sleep 3
@@ -332,7 +332,7 @@ _send_tls_data() {
 
 @test "clean data does not trigger DLP false positive" {
     require_root
-    [ -f "$DATA_DIR/tls_server.pid" ] || skip "TLS server not running"
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
 
     local before_body
     before_body="$(api_get /api/v1/alerts)"
@@ -354,7 +354,7 @@ _send_tls_data() {
 
 @test "multiple patterns in single TLS message" {
     require_root
-    [ -f "$DATA_DIR/tls_server.pid" ] || skip "TLS server not running"
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
 
     _send_tls_data "Payment: 4111111111111111 SSN: 987-65-4321 email: leak@evil.com password=hunter2hunter2"
     sleep 5
@@ -385,7 +385,7 @@ _send_tls_data() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

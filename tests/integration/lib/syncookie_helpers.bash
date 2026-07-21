@@ -25,11 +25,11 @@ require_syncookie_tools() {
     local tool
     for tool in ncat python3 hping3 nstat; do
         if ! command -v "$tool" >/dev/null 2>&1; then
-            skip "${tool} not available on attacker VM"
+            env_skip "${tool} not available on attacker VM"
         fi
     done
     if ! "$EBPF_SCAPY_PY" -c "import scapy.all" >/dev/null 2>&1; then
-        skip "scapy not installed on attacker VM (run the attacker provisioner)"
+        env_skip "scapy not installed on attacker VM (run the attacker provisioner)"
     fi
 }
 

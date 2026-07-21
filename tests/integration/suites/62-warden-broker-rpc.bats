@@ -79,7 +79,7 @@ setup_file() {
 
     export AGENT_BIN="${AGENT_BIN:-${PROJECT_ROOT}/target/release/ebpfsentinel-agent}"
     [ -x "$(dirname "${AGENT_BIN}")/warden" ] \
-        || skip "warden binary not found next to ${AGENT_BIN} — split deployment not built"
+        || env_skip "warden binary not found next to ${AGENT_BIN} — split deployment not built"
 
     export DATA_DIR="/tmp/ebpfsentinel-test-data-warden-$$"
     mkdir -p "$DATA_DIR"
@@ -111,7 +111,7 @@ teardown_file() {
     wpid="$(_warden_pid)"
     apid="$(_agent_pid)"
 
-    [ -n "${wpid}" ] || skip "no warden pid recorded — agent started without the broker"
+    [ -n "${wpid}" ] || soft_skip "no warden pid recorded — agent started without the broker"
     kill -0 "${wpid}" 2>/dev/null || {
         echo "warden pid ${wpid} is not alive" >&2
         tail -30 "${AGENT_LOG_FILE}" >&2 || true
@@ -180,12 +180,12 @@ teardown_file() {
 @test "agent runs in its own user namespace yet has eBPF loaded" {
     local apid
     apid="$(_agent_pid)"
-    [ -n "${apid}" ] && [ -d "/proc/${apid}" ] || skip "agent pid not resolvable"
+    [ -n "${apid}" ] && [ -d "/proc/${apid}" ] || soft_skip "agent pid not resolvable"
 
     local agent_ns init_ns
     agent_ns="$(readlink "/proc/${apid}/ns/user" 2>/dev/null || true)"
     init_ns="$(readlink /proc/1/ns/user 2>/dev/null || true)"
-    [ -n "${agent_ns}" ] && [ -n "${init_ns}" ] || skip "user namespaces not readable"
+    [ -n "${agent_ns}" ] && [ -n "${init_ns}" ] || env_skip "user namespaces not readable"
 
     [ "${agent_ns}" != "${init_ns}" ] || {
         echo "agent shares init's user namespace (${agent_ns}) — not rootless" >&2
@@ -212,7 +212,7 @@ teardown_file() {
 @test "a peer with an unserved uid is dropped without being served" {
     local sock
     sock="$(_warden_sock)"
-    [ -S "${sock}" ] || skip "no broker socket to probe"
+    [ -S "${sock}" ] || soft_skip "no broker socket to probe"
 
     local verdict
     verdict="$(_probe_as 65534)"
@@ -225,7 +225,7 @@ teardown_file() {
 @test "the served uid keeps its connection open" {
     local sock
     sock="$(_warden_sock)"
-    [ -S "${sock}" ] || skip "no broker socket to probe"
+    [ -S "${sock}" ] || soft_skip "no broker socket to probe"
 
     # The harness starts the warden with --uid 0 and the probe runs as root,
     # so the connection must be accepted and held awaiting a request frame.
@@ -240,7 +240,7 @@ teardown_file() {
 @test "the broker survives a rejected peer" {
     local sock
     sock="$(_warden_sock)"
-    [ -S "${sock}" ] || skip "no broker socket to probe"
+    [ -S "${sock}" ] || soft_skip "no broker socket to probe"
 
     _probe_as 65534 >/dev/null || true
 
@@ -321,7 +321,7 @@ teardown_file() {
     _load_http_status
 
     if [ "${HTTP_STATUS}" = "503" ]; then
-        skip "capture engine unavailable (pcap-capture feature off)"
+        env_skip "capture engine unavailable (pcap-capture feature off)"
     fi
     [ "${HTTP_STATUS}" = "200" ] || [ "${HTTP_STATUS}" = "201" ] || {
         echo "POST /captures/manual returned ${HTTP_STATUS}: ${resp}" >&2
@@ -381,7 +381,7 @@ teardown_file() {
         # No takeover happened at all (no speaker transition) — that is a
         # fixture/topology issue, not a broker refusal, so surface it as such.
         grep -q "vip announcer" "${AGENT_LOG_FILE}" \
-            || skip "vip announcer never ran — no speaker transition in this topology"
+            || soft_skip "vip announcer never ran — no speaker transition in this topology"
         echo "vip announcer ran but emitted no gratuitous ARP" >&2
         grep -i "vip announcer" "${AGENT_LOG_FILE}" | tail -10 >&2
         return 1

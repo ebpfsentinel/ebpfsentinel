@@ -53,7 +53,7 @@ EBPF_AGENT_VIA_DOCKER="false"
 # require_root — skip test/suite if not running as root
 require_root() {
     if [ "$(id -u)" -ne 0 ]; then
-        skip "requires root privileges"
+        env_skip "requires root privileges"
     fi
 }
 
@@ -77,7 +77,7 @@ require_kernel() {
     kernel_minor="$(echo "$kernel_str" | cut -d. -f2)"
     if [ "$kernel_major" -lt "$req_major" ] || \
        { [ "$kernel_major" -eq "$req_major" ] && [ "$kernel_minor" -lt "$req_minor" ]; }; then
-        skip "agent kernel $kernel_str < ${req_major}.${req_minor}"
+        env_skip "agent kernel $kernel_str < ${req_major}.${req_minor}"
     fi
 }
 
@@ -85,7 +85,7 @@ require_kernel() {
 require_tool() {
     local tool="${1:?usage: require_tool <command>}"
     if ! command -v "$tool" &>/dev/null; then
-        skip "${tool} not installed"
+        env_skip "${tool} not installed"
     fi
 }
 
@@ -111,7 +111,7 @@ require_ebpf_env() {
     if _has_docker_image; then
         return 0
     fi
-    skip "no eBPF environment (no local build, no Docker image '${EBPF_DOCKER_IMAGE}')"
+    env_skip "no eBPF environment (no local build, no Docker image '${EBPF_DOCKER_IMAGE}')"
 }
 
 # ── Network namespace / veth pair management ─────────────────────────
@@ -536,7 +536,7 @@ wait_for_ebpf_loaded() {
 # helpers in vm_helpers.bash are loaded.
 skip_if_not_3vm() {
     if [ "${EBPF_3VM_MODE:-false}" != "true" ]; then
-        skip "Test requires 3-VM transit topology (set EBPF_3VM_MODE=true)"
+        env_skip "Test requires 3-VM transit topology (set EBPF_3VM_MODE=true)"
     fi
 }
 
