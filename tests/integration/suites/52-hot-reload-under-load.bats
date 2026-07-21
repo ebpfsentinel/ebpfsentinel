@@ -271,7 +271,7 @@ _start_tcp_load() {
     local i
     for i in 1 2 3 4 5; do
         send_tcp_from_ns "${EBPF_HOST_IP}" 4600 "RELOAD_CHURN_${i}" 1 || true
-        api_post /api/v1/config/reload '{}' >/dev/null 2>&1 || true
+        api_post /api/v1/config/reload '{}' --max-time 30 >/dev/null 2>&1 || true
     done
     kill "${listener_pid}" 2>/dev/null || true
     wait "${listener_pid}" 2>/dev/null || true

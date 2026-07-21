@@ -250,7 +250,11 @@ teardown_file() {
 
 @test "Ops: POST config reload returns 200" {
     local body
-    body="$(api_post /api/v1/config/reload '{}')"
+    # The handler validates the on-disk config, then waits up to 8 s for the
+    # reload task to finish before answering, so the default 5 s client
+    # timeout is shorter than the endpoint's own contract. Measured cold on
+    # the VM: 16.3 s first call, 4.6 s second, 0.02 s warm.
+    body="$(api_post /api/v1/config/reload '{}' --max-time 30)"
     assert_http_status "200" "$HTTP_STATUS"
 }
 

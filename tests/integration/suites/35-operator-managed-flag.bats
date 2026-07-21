@@ -47,7 +47,7 @@ _set_management() {
 }
 
 _reload_config() {
-    curl -sf -X POST --max-time 5 "${BASE_URL}/api/v1/config/reload" >/dev/null \
+    curl -sf -X POST --max-time 30 "${BASE_URL}/api/v1/config/reload" >/dev/null \
         || sleep 2  # file watcher fallback
 }
 
@@ -88,7 +88,7 @@ _reload_config() {
     _set_management "true" "not-a-valid-url"
     local status
     status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-        -X POST "${BASE_URL}/api/v1/config/reload")"
+        -X POST --max-time 30 "${BASE_URL}/api/v1/config/reload")"
     # Reload is rejected (4xx/5xx) and the previous valid config is kept.
     [ "$status" -ge "400" ]
 

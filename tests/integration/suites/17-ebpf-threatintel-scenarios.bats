@@ -145,7 +145,7 @@ teardown_file() {
     require_root
 
     # Trigger a full config reload (reloads all subsystems including threat intel feeds)
-    api_post /api/v1/config/reload '{}'
+    api_post /api/v1/config/reload '{}' --max-time 30
     _load_http_status
 
     # 200 or 204 indicates the reload was accepted; 404 if the endpoint does not
