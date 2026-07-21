@@ -32,6 +32,9 @@ pub struct ProgramStatus {
 pub struct EbpfStatusResponse {
     pub programs: Vec<ProgramStatus>,
 }
+/// How long the reload endpoint waits for the reload task to confirm before
+/// answering. Past this the answer says `pending` rather than `ok`.
+const RELOAD_CONFIRM_TIMEOUT: Duration = Duration::from_secs(8);
 
 // ── Handlers ──────────────────────────────────────────────────────
 
@@ -57,15 +60,25 @@ pub async fn reload_config(
     if let Some(Extension(ref claims)) = claims {
         require_write_access(claims)?;
     }
-    // Validate the on-disk config before triggering the reload so a bad
-    // edit is rejected synchronously instead of crashing the reload task.
-    if let Some(path) = state.config_path.as_deref()
-        && let Err(e) = AgentConfig::load(Path::new(path))
-    {
-        return Err(ApiError::BadRequest {
-            code: "INVALID_CONFIG",
-            message: format!("config reload rejected: {e}"),
-        });
+    // Validate the on-disk config before triggering the reload so a bad edit
+    // is rejected up front instead of crashing the reload task. The load
+    // reads files and compiles every rule regex, which measured 16 s cold on
+    // a test VM — far too long to run on a runtime worker, where it would
+    // stall every other request in flight. Hand it to a blocking thread.
+    if let Some(path) = state.config_path.as_deref() {
+        let path = path.to_string();
+        let validated =
+            tokio::task::spawn_blocking(move || AgentConfig::load(Path::new(&path)).map(|_| ()))
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("config validation task failed: {e}"),
+                })?;
+        if let Err(e) = validated {
+            return Err(ApiError::BadRequest {
+                code: "INVALID_CONFIG",
+                message: format!("config reload rejected: {e}"),
+            });
+        }
     }
 
     // Register for the completion signal *before* triggering so we never
@@ -84,15 +97,31 @@ pub async fn reload_config(
         })?;
 
     // Wait for the reload to actually complete (bounded), so callers that
-    // read state immediately after see the new config.
-    if let Some(fut) = notified {
-        let _ = tokio::time::timeout(Duration::from_secs(8), fut).await;
-    }
+    // read state immediately after see the new config. If the bound expires
+    // the reload is still running: say so instead of reporting success, or a
+    // caller that reads state next would be told it is looking at the new
+    // config when it may still be the old one.
+    let confirmed = match notified {
+        Some(fut) => tokio::time::timeout(RELOAD_CONFIRM_TIMEOUT, fut)
+            .await
+            .is_ok(),
+        None => false,
+    };
 
-    Ok(Json(ReloadResponse {
-        status: "ok".to_string(),
-        message: "configuration reloaded".to_string(),
-    }))
+    if confirmed {
+        Ok(Json(ReloadResponse {
+            status: "ok".to_string(),
+            message: "configuration reloaded".to_string(),
+        }))
+    } else {
+        Ok(Json(ReloadResponse {
+            status: "pending".to_string(),
+            message: format!(
+                "reload triggered but not confirmed within {}s; it is still in progress",
+                RELOAD_CONFIRM_TIMEOUT.as_secs()
+            ),
+        }))
+    }
 }
 
 /// Return the current (sanitized) agent configuration.
@@ -207,6 +236,15 @@ mod tests {
         (state, reload_rx)
     }
 
+    /// Same state, un-wrapped, so a test can set optional fields before use.
+    fn make_state_mut() -> (AppState, tokio::sync::mpsc::Receiver<()>) {
+        let (state, rx) = make_state();
+        let inner = Arc::try_unwrap(state).unwrap_or_else(|_| {
+            panic!("make_state must return a uniquely-owned Arc");
+        });
+        (inner, rx)
+    }
+
     fn claims_with_role(role: &str) -> JwtClaims {
         JwtClaims {
             sub: "test-user".to_string(),
@@ -222,8 +260,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reload_config_returns_ok() {
+    async fn reload_without_a_completion_signal_reports_pending() {
+        // No `reload_complete` notifier: the handler triggers the reload but
+        // has no way to observe it finishing, so it must not claim success.
         let (state, _rx) = make_state();
+        let result = reload_config(State(state), None).await;
+        let Json(resp) = result.expect("reload should be accepted");
+        assert_eq!(resp.status, "pending");
+        assert!(
+            resp.message.contains("not confirmed"),
+            "message should say why: {}",
+            resp.message
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_reports_ok_once_the_reload_task_confirms() {
+        let (mut state, _rx) = make_state_mut();
+        let notify = Arc::new(tokio::sync::Notify::new());
+        state.reload_complete = Some(Arc::clone(&notify));
+        let state = Arc::new(state);
+
+        // Confirm shortly after the handler starts waiting.
+        let notifier = Arc::clone(&notify);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            notifier.notify_waiters();
+        });
+
         let result = reload_config(State(state), None).await;
         let Json(resp) = result.expect("reload should succeed");
         assert_eq!(resp.status, "ok");

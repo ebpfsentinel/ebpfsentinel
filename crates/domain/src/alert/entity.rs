@@ -743,9 +743,20 @@ impl Alert {
         self.dst_addr[0]
     }
 
-    /// Generate a simple unique ID from timestamp and rule ID.
+    /// Generate a unique alert ID.
+    ///
+    /// `{timestamp_ns}-{rule_id}` alone is not unique: the kernel stamps
+    /// events from a clock the userspace does not control, so two distinct
+    /// events matching the same rule can carry the same nanosecond. That
+    /// collision is not cosmetic — the alert store is keyed by id, so one of
+    /// the two alerts silently replaces the other, and the SSE resume
+    /// contract locates a client's position by finding its id in the replay
+    /// buffer. A process-lifetime counter makes the id unique regardless of
+    /// what the clock does.
     fn generate_id(timestamp_ns: u64, rule_id: &RuleId) -> String {
-        format!("{timestamp_ns}-{rule_id}")
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("{timestamp_ns}-{rule_id}-{seq}")
     }
 }
 
@@ -1113,5 +1124,25 @@ mod tests {
             alert.mitre_attack.as_ref().unwrap().technique_id,
             "T1110.001"
         );
+    }
+}
+
+#[cfg(test)]
+mod id_uniqueness_tests {
+    use super::*;
+
+    #[test]
+    fn two_alerts_sharing_a_timestamp_and_rule_get_distinct_ids() {
+        // The kernel can stamp two distinct events with the same nanosecond;
+        // the store is keyed by id, so a collision loses one of them.
+        let a = Alert::generate_id(1_000, &RuleId("ids-001".to_string()));
+        let b = Alert::generate_id(1_000, &RuleId("ids-001".to_string()));
+        assert_ne!(a, b, "ids collided: {a}");
+    }
+
+    #[test]
+    fn the_id_still_starts_with_timestamp_and_rule() {
+        let id = Alert::generate_id(42, &RuleId("ids-001".to_string()));
+        assert!(id.starts_with("42-ids-001-"), "unexpected id shape: {id}");
     }
 }
