@@ -92,7 +92,7 @@ teardown_file() {
     metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
 
     [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_threatintel|ebpfsentinel_packets"
+    echo "$metrics" | grep -qE "ebpfsentinel_threatintel_matches|ebpfsentinel_rules_loaded"
 }
 
 # ── Extended threat intel tests ──────────────────────────────────

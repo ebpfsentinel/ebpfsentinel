@@ -962,6 +962,7 @@ mod tests {
         AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, CtMetrics,
         DdosMetrics, DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics,
         FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
+        ThreatIntelMetrics,
     };
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1005,6 +1006,7 @@ mod tests {
     impl FingerprintMetrics for TestMetrics {}
     impl ContainerMetrics for TestMetrics {}
     impl CtMetrics for TestMetrics {}
+    impl ThreatIntelMetrics for TestMetrics {}
 
     fn make_fw_rule(id: &str, priority: u32) -> FirewallRule {
         FirewallRule {

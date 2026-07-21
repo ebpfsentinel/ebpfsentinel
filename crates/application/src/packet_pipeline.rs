@@ -708,6 +708,10 @@ impl EventDispatcher {
         };
         let (feed_id, confidence, threat_type) = (ioc.feed_id, ioc.confidence, ioc.threat_type);
 
+        // Count the match before it becomes an alert: dedup and throttling
+        // downstream may drop the alert, but the IOC did match.
+        self.metrics.record_threatintel_match(&feed_id);
+
         let ti_alert = ThreatIntelAlert {
             feed_id,
             confidence,
@@ -1365,6 +1369,7 @@ mod tests {
         AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, CtMetrics,
         DdosMetrics, DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics,
         FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
+        ThreatIntelMetrics,
     };
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1420,6 +1425,7 @@ mod tests {
     impl FingerprintMetrics for TestMetrics {}
     impl ContainerMetrics for TestMetrics {}
     impl CtMetrics for TestMetrics {}
+    impl ThreatIntelMetrics for TestMetrics {}
 
     fn make_ids_rule(id: &str) -> IdsRule {
         IdsRule {

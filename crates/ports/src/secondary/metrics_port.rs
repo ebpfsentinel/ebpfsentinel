@@ -85,6 +85,12 @@ pub trait IpsMetrics: Send + Sync {
 
 // ── DNS metrics ────────────────────────────────────────────────────
 
+/// Threat-intelligence observability.
+pub trait ThreatIntelMetrics: Send + Sync {
+    /// Record an IOC match resolved against a feed, labelled by feed id.
+    fn record_threatintel_match(&self, _feed_id: &str) {}
+}
+
 pub trait DnsMetrics: Send + Sync {
     /// Set the current number of entries in the DNS resolution cache.
     fn set_dns_cache_entries(&self, _count: u64) {}
@@ -270,6 +276,7 @@ pub trait MetricsPort:
     + FingerprintMetrics
     + ContainerMetrics
     + CtMetrics
+    + ThreatIntelMetrics
 {
 }
 
@@ -294,6 +301,7 @@ impl<T> MetricsPort for T where
         + FingerprintMetrics
         + ContainerMetrics
         + CtMetrics
+        + ThreatIntelMetrics
 {
 }
 
@@ -366,6 +374,7 @@ mod tests {
         impl FingerprintMetrics for MinimalMock {}
         impl ContainerMetrics for MinimalMock {}
         impl CtMetrics for MinimalMock {}
+        impl ThreatIntelMetrics for MinimalMock {}
 
         let mock = MinimalMock;
         let port: &dyn MetricsPort = &mock;

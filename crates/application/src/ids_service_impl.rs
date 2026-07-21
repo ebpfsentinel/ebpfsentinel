@@ -334,7 +334,7 @@ mod tests {
             AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics,
             CtMetrics, DdosMetrics, DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics,
             FingerprintMetrics, FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics,
-            RoutingMetrics, SystemMetrics,
+            RoutingMetrics, SystemMetrics, ThreatIntelMetrics,
         };
         use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -359,6 +359,7 @@ mod tests {
         impl LbMetrics for CountingMetrics {}
         impl FingerprintMetrics for CountingMetrics {}
         impl ContainerMetrics for CountingMetrics {}
+        impl ThreatIntelMetrics for CountingMetrics {}
         impl CtMetrics for CountingMetrics {
             fn record_ids_ct_dying(&self) {
                 self.ct_dying.fetch_add(1, Ordering::SeqCst);

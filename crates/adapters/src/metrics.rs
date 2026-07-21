@@ -1,7 +1,7 @@
 use ports::secondary::metrics_port::{
     AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
     DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics,
-    RoutingMetrics, SystemMetrics,
+    RoutingMetrics, SystemMetrics, ThreatIntelMetrics,
 };
 use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::counter::Counter;
@@ -96,6 +96,11 @@ pub struct ServiceLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct FeedLabels {
+    pub feed: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct VipLabels {
     pub vip: String,
 }
@@ -118,6 +123,7 @@ pub struct AgentMetrics {
     pub alerts_total: Family<AlertLabels, Counter>,
     pub alerts_dropped_total: Family<ReasonLabels, Counter>,
     pub alerts_exported_total: Family<DestinationLabels, Counter>,
+    pub threatintel_matches_total: Family<FeedLabels, Counter>,
     pub alert_sender_circuit_state: Family<DestinationLabels, Gauge>,
     /// Live SSE alert-stream subscriber count. Set by handler on
     /// connect / disconnect.
@@ -250,6 +256,13 @@ impl AgentMetrics {
             "alerts_exported",
             "Alerts successfully handed off to an external sender, by destination",
             alerts_exported_total.clone(),
+        );
+
+        let threatintel_matches_total = Family::<FeedLabels, Counter>::default();
+        registry.register(
+            "threatintel_matches",
+            "IOC matches resolved against a threat-intelligence feed, by feed",
+            threatintel_matches_total.clone(),
         );
 
         let alert_sender_circuit_state = Family::<DestinationLabels, Gauge>::default();
@@ -594,6 +607,7 @@ impl AgentMetrics {
             alerts_total,
             alerts_dropped_total,
             alerts_exported_total,
+            threatintel_matches_total,
             alert_sender_circuit_state,
             alerts_sse_subscribers,
             ips_blacklist_size,
@@ -796,6 +810,16 @@ impl IpsMetrics for AgentMetrics {
 
     fn record_ips_block(&self) {
         self.ips_blocks_total.inc();
+    }
+}
+
+impl ThreatIntelMetrics for AgentMetrics {
+    fn record_threatintel_match(&self, feed_id: &str) {
+        self.threatintel_matches_total
+            .get_or_create(&FeedLabels {
+                feed: feed_id.to_string(),
+            })
+            .inc();
     }
 }
 

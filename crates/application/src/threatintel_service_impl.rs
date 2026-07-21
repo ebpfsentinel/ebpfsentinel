@@ -224,6 +224,7 @@ mod tests {
         AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, CtMetrics,
         DdosMetrics, DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics,
         FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
+        ThreatIntelMetrics,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -264,6 +265,7 @@ mod tests {
     impl FingerprintMetrics for TestMetrics {}
     impl ContainerMetrics for TestMetrics {}
     impl CtMetrics for TestMetrics {}
+    impl ThreatIntelMetrics for TestMetrics {}
 
     fn make_ioc(ip: &str) -> Ioc {
         Ioc {

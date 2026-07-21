@@ -177,7 +177,7 @@ teardown_file() {
 
     [ -n "$metrics" ]
     # Config reload metric is recorded for each feed fetch (success or failure)
-    echo "$metrics" | grep -qE "ebpfsentinel_config_reload|ebpfsentinel_packets"
+    echo "$metrics" | grep -qE "ebpfsentinel_rules_reloads|ebpfsentinel_rules_loaded"
 }
 
 # ── Multi-engine dispatch ───────────────────────────────────────
@@ -342,7 +342,7 @@ teardown_file() {
 
     if [ -z "$ti_metrics" ]; then
         # Fall back to generic config/packets metrics
-        echo "$metrics" | grep -qE "ebpfsentinel_config_reload|ebpfsentinel_packets"
+        echo "$metrics" | grep -qE "ebpfsentinel_rules_reloads|ebpfsentinel_rules_loaded"
     else
         # Threat intel metrics found — verify at least one line exists
         [ -n "$ti_metrics" ]
