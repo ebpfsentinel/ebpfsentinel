@@ -26,6 +26,15 @@ setup_file() {
     PROJECT_ROOT="$(find_project_root)"
     require_ebpf_env
 
+    # The agent must be attached to the very interface this suite captures
+    # on. prepare_ebpf_config otherwise substitutes EBPF_VETH_HOST — the
+    # netns veth — which this suite never creates, so every program would
+    # fail to load with "resolve ifindex for veth-ebpf0".
+    EBPF_VETH_HOST="$(_capture_iface)"
+    export EBPF_VETH_HOST
+    ip link show "${EBPF_VETH_HOST}" >/dev/null 2>&1 \
+        || env_skip "capture interface ${EBPF_VETH_HOST} not present on this host"
+
     export DATA_DIR="/tmp/ebpfsentinel-test-data-capture-$$"
     mkdir -p "$DATA_DIR"
 
@@ -55,6 +64,16 @@ teardown_file() {
 
 # ── Helpers (suite-local) ───────────────────────────────────────────
 
+# The suite runs on the agent host itself in the local lane, where the
+# remote-drive helpers from lib/vm_helpers.bash are not loaded. Define
+# local equivalents so the capture is actually driven rather than silently
+# no-op'd behind `|| true`.
+if ! declare -F _agent_ssh_sudo >/dev/null 2>&1; then
+    _agent_ssh_sudo() {
+        sudo "$@"
+    }
+fi
+
 _capture_iface() {
     # Capture suite runs single-NIC against the configured agent eth1.
     echo "${AGENT_IFACE:-eth1}"
@@ -78,10 +97,17 @@ _drive_traffic_to_port() {
 _pull_remote_pcap() {
     local remote="${1:?usage: _pull_remote_pcap <remote_path> <local>}"
     local local_dest="${2:?usage: _pull_remote_pcap <remote_path> <local>}"
-    # The agent runs as root, so the pcap lands root-owned 0600 and the
-    # unprivileged vagrant scp user cannot read it. Relax to world-readable
-    # first (test artefact in a throwaway VM dir).
+    # The agent runs as root, so the pcap lands root-owned 0600 and an
+    # unprivileged reader cannot open it. Relax to world-readable first
+    # (test artefact in a throwaway VM dir).
     _agent_ssh_sudo chmod 0644 "${remote}" >/dev/null 2>&1 || true
+
+    # Local lane: the pcap is already on this host, so a copy is all it
+    # takes. Only the 2-VM lane needs to pull it over the network.
+    if [ -z "${AGENT_VM_IP:-}" ] || [ ! -r "${AGENT_SSH_KEY:-/nonexistent}" ]; then
+        cp "${remote}" "${local_dest}" 2>/dev/null
+        return $?
+    fi
     scp -i "${AGENT_SSH_KEY}" -o StrictHostKeyChecking=no \
         "vagrant@${AGENT_VM_IP}:${remote}" "${local_dest}" >/dev/null 2>&1
 }

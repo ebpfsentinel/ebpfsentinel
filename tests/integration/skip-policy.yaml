@@ -21,6 +21,7 @@
 
 
 env:
+  - "capture interface"
   - "${tool} not available on attacker VM"
   - "${tool} not installed"
   - "${tool} not installed on agent VM"
