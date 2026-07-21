@@ -32,6 +32,12 @@ setup_file() {
     mkdir -p "${DATA_DIR}"
 
     stop_ebpf_agent 2>/dev/null || true
+    destroy_test_netns 2>/dev/null || true
+
+    # prepare_ebpf_config points the agent at the netns veth, so the
+    # namespace has to exist before the agent starts — otherwise every
+    # program fails to load with "resolve ifindex".
+    create_test_netns
 
     PREPARED_CONFIG="$(prepare_ebpf_config "${FIXTURE_DIR}/config-ebpf-hot-reload.yaml")"
     export PREPARED_CONFIG
@@ -257,6 +263,21 @@ _start_tcp_load() {
 # ── Alert non-duplication under reload churn ────────────────────────
 
 @test "alerts captured during reload cycle have no duplicate ids" {
+    # Drive the IDS rule while rules churn, so the duplication check has a
+    # population to work on rather than skipping itself into a green.
+    timeout 15 ncat -l "${EBPF_HOST_IP}" 4600 -k >/dev/null 2>&1 &
+    local listener_pid=$!
+    sleep 0.5
+    local i
+    for i in 1 2 3 4 5; do
+        send_tcp_from_ns "${EBPF_HOST_IP}" 4600 "RELOAD_CHURN_${i}" 1 || true
+        api_post /api/v1/config/reload '{}' >/dev/null 2>&1 || true
+    done
+    kill "${listener_pid}" 2>/dev/null || true
+    wait "${listener_pid}" 2>/dev/null || true
+
+    wait_for_alert '.[] | select(.rule_id == "ids-reload-churn")' 15 1 >/dev/null || true
+
     local body
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     [ -n "${body}" ] || soft_skip "alerts endpoint returned empty body"

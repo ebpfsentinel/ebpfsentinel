@@ -64,16 +64,6 @@ teardown_file() {
 
 # ── Helpers (suite-local) ───────────────────────────────────────────
 
-# The suite runs on the agent host itself in the local lane, where the
-# remote-drive helpers from lib/vm_helpers.bash are not loaded. Define
-# local equivalents so the capture is actually driven rather than silently
-# no-op'd behind `|| true`.
-if ! declare -F _agent_ssh_sudo >/dev/null 2>&1; then
-    _agent_ssh_sudo() {
-        sudo "$@"
-    }
-fi
-
 _capture_iface() {
     # Capture suite runs single-NIC against the configured agent eth1.
     echo "${AGENT_IFACE:-eth1}"

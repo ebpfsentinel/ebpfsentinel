@@ -40,12 +40,23 @@ setup_file() {
     export DATA_DIR="/tmp/ebpfsentinel-test-data-nptv6-$$"
     mkdir -p "$DATA_DIR"
 
+    # The NPTv6 fixture needs a second NIC (eth2) for the external prefix;
+    # it only exists in the multi-NIC topology.
+    ip link show eth2 >/dev/null 2>&1 \
+        || env_skip "eth2 not present — NPTv6 needs the multi-NIC topology"
+
+    # prepare_ebpf_config points the agent at the netns veth, so the
+    # namespace has to exist before the agent starts — otherwise every
+    # program fails to load with "resolve ifindex".
+    create_test_netns
+
     PREPARED_CONFIG="$(prepare_ebpf_config "${FIXTURE_DIR}/config-ebpf-nptv6.yaml")"
     export PREPARED_CONFIG
 
     start_ebpf_agent "$PREPARED_CONFIG"
     wait_for_ebpf_loaded 30 || {
         stop_ebpf_agent 2>/dev/null || true
+    destroy_test_netns 2>/dev/null || true
         { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     }
 }

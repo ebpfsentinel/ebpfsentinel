@@ -46,11 +46,24 @@ setup_file() {
             "${FIXTURE_DIR}/config-minimal.yaml" > "$PREPARED_CONFIG"
     fi
 
-    start_agent "$PREPARED_CONFIG"
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        start_agent "$PREPARED_CONFIG"
+    else
+        # eBPF loads exclusively through a BPF token brokered by the warden,
+        # so the plain starter yields an API-only agent with nothing attached.
+        # Use the split starter, as every other eBPF suite does.
+        EBPF_VETH_HOST="$VETH_NAME"
+        export EBPF_VETH_HOST
+        start_ebpf_agent "$PREPARED_CONFIG"
+    fi
 }
 
 teardown_file() {
-    stop_agent 2>/dev/null || true
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        stop_agent 2>/dev/null || true
+    else
+        stop_ebpf_agent 2>/dev/null || true
+    fi
     if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
         ip link delete "$VETH_NAME" 2>/dev/null || true
     fi

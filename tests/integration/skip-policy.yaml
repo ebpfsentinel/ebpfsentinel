@@ -21,6 +21,7 @@
 
 
 env:
+  - "eth2 not present — NPTv6 needs the multi-NIC topology"
   - "capture interface"
   - "${tool} not available on attacker VM"
   - "${tool} not installed"

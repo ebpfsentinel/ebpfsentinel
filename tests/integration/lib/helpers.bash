@@ -290,4 +290,9 @@ cleanup_test_env() {
 # start_agent/stop_agent to run the agent on the agent VM via SSH.
 if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
     source "${HELPERS_DIR}/vm_helpers.bash"
+else
+    # Local lane: the suite runs on the agent host itself. Supply local
+    # equivalents of the remote-drive helpers, otherwise every
+    # `_agent_ssh_sudo ... || true` in the fleet is a silent no-op.
+    source "${HELPERS_DIR}/local_lane.bash"
 fi

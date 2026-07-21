@@ -48,7 +48,17 @@ firewall:
       enabled: true
 
 ids:
-  enabled: false
+  # The suite churns rules while traffic flows and asserts that no alert id
+  # is emitted twice; with detection off it had nothing to count.
+  enabled: true
+  mode: alert
+  rules:
+    - id: ids-reload-churn
+      description: "Alert source for the reload-churn duplication check"
+      severity: medium
+      protocol: tcp
+      dst_port: 4600
+      enabled: true
 
 ips:
   enabled: false
