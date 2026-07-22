@@ -199,8 +199,9 @@ _run_nat() {
 
 # See perf/05 header: single-VM netns runs generic (SKB-mode) XDP/TC over a veth,
 # far slower than a physical NIC, so 80-90% overheads are normal here. The bound
-# is a "did not catastrophically break the datapath" sanity check; real budgets
-# (< 20%) are enforced by perf/01 in 2VM real-NIC mode.
+# is a "did not catastrophically break the datapath" sanity check; the real
+# throughput budget is enforced by perf/01 in 2VM real-NIC mode, where it is
+# sampled repeatedly and gated against the run's own measurement noise.
 _assert_overhead() {
     local overhead="$1"
     case "$overhead" in SKIP_NO_BASELINE) skip "baseline not recorded";; ERR_NOT_LOADED) echo "eBPF not loaded" >&2; return 1;; ERR_IPERF) skip "iperf3 failed";; esac

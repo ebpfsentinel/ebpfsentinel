@@ -56,6 +56,7 @@ env:
   - "cannot SSH to agent VM at"
   - "capture engine not available (pcap-capture feature off?)"
   - "capture engine unavailable (pcap-capture feature off)"
+  - "cgroup v2 unified hierarchy not mounted"
   - "container resolver did not observe a miss ("
   - "curl not available on attacker VM"
   - "eBPF objects not found in"

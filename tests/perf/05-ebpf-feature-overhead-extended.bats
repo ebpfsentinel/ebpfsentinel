@@ -175,8 +175,9 @@ _run_feature() {
 # the datapath runs generic (SKB-mode) XDP over a veth, which is far slower than
 # a physical NIC in native mode, so overheads of 80-90 % are normal here. The
 # assertion is therefore a loose "the feature did not catastrophically break the
-# datapath" bound; the values are recorded for regression trending, and real
-# budgets (< 20 %) are enforced by perf/01 in 2VM real-NIC mode.
+# datapath" bound; the values are recorded for regression trending, and the real
+# throughput budget is enforced by perf/01 in 2VM real-NIC mode, where it is
+# sampled repeatedly and gated against the run's own measurement noise.
 _assert_overhead() {
     local overhead="$1"
     case "$overhead" in SKIP_NO_BASELINE) skip "baseline not recorded";; ERR_NOT_LOADED) echo "eBPF not loaded" >&2; return 1;; ERR_IPERF) skip "iperf3 failed";; esac

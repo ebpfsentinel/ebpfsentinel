@@ -23,9 +23,11 @@
 # that outbound request and the alert is emitted with the container identity
 # attached.
 #
-# OSS scope: container (Docker cgroup) enrichment only. Kubernetes pod
-# enrichment is exercised by suite 10; per-tenant cgroup filtering is an
-# enterprise feature and is tested in the enterprise repo.
+# OSS scope: container (Docker cgroup) enrichment, plus the cgroup → tenant
+# datapath mechanism (TENANT_CGROUP_MAP and its kernel lookup). Kubernetes pod
+# enrichment is exercised by suite 10. Deciding *which* tenant owns a cgroup —
+# label conventions, container lifecycle, map upkeep — is an enterprise feature
+# and is tested in the enterprise repo; here the map is written by hand.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
@@ -52,6 +54,88 @@ _stop_probe_listener() {
     fi
     # Belt-and-braces: clear any stray netns listener.
     ip netns exec "${EBPF_TEST_NS}" pkill -f "nc -l -p ${PROBE_PORT}" 2>/dev/null || true
+}
+
+# ── Tenant cgroup map (datapath mechanism) ──────────────────────────
+
+# Tenant id written into TENANT_CGROUP_MAP. Any non-zero value works: the
+# probe rule is global (tenant 0), and a tenant-scoped lookup falls back to
+# the global rule, so the alert still fires whatever tenant is resolved.
+TENANT_PROBE_ID=7
+
+# Cgroup the probe traffic is issued from. Created empty under the unified
+# hierarchy so its id belongs to this suite alone and cannot collide with a
+# live workload's.
+TENANT_CGROUP_DIR="/sys/fs/cgroup/ebpfsentinel-tenant-probe"
+
+# Prometheus mirror of tc-ids metric index 5 (cgroup → tenant resolutions).
+CGROUP_RESOLVED_LABELS='{interface="IDS_METRICS",action="cgroup_resolved"}'
+
+# Little-endian hex byte string for bpftool's `key hex` / `value hex`.
+_le_hex() {
+    local value="$1" width="$2" out="" i
+    for ((i = 0; i < width; i++)); do
+        out+="$(printf '%02x ' $(((value >> (8 * i)) & 0xff)))"
+    done
+    echo "${out% }"
+}
+
+# Kernel object names are capped at 15 characters, so TENANT_CGROUP_MAP
+# surfaces as TENANT_CGROUP_M. Match on the prefix and take the first id:
+# the map is shared by every tc-ids attachment, so there is only ever one.
+_tenant_cgroup_map_id() {
+    bpftool -j map show 2>/dev/null |
+        jq -r 'first(.[] | select((.name // "") | startswith("TENANT_CGROUP")) | .id) // empty'
+}
+
+# Create the probe cgroup and echo its id. The cgroup v2 id the kernel
+# reports to bpf_get_current_cgroup_id is the directory's inode number.
+_probe_cgroup_id() {
+    [ -f /sys/fs/cgroup/cgroup.controllers ] || return 1
+    mkdir -p "${TENANT_CGROUP_DIR}" 2>/dev/null || return 1
+    stat -c %i "${TENANT_CGROUP_DIR}" 2>/dev/null
+}
+
+# Dial the probe port a few times from inside the probe cgroup. The request
+# leg leaves through the inspected veth on egress, where the sending task is
+# still current, so tc-ids can read its cgroup.
+_probe_from_cgroup() {
+    local i
+    for i in 1 2 3 4 5; do
+        sh -c "echo \$\$ > '${TENANT_CGROUP_DIR}/cgroup.procs' 2>/dev/null || exit 0
+               (echo probe; sleep 0.1) | nc -w 1 '${EBPF_NS_IP}' '${PROBE_PORT}' >/dev/null 2>&1 || true" || true
+    done
+}
+
+_cgroup_resolved_count() {
+    local value
+    value="$(get_metrics_value ebpfsentinel_packets_total "${CGROUP_RESOLVED_LABELS}" 2>/dev/null)"
+    echo "${value:-0}"
+}
+
+# Poll until the resolution counter climbs past `floor`. The kernel metrics
+# loop mirrors the map every 10s, so a single read proves nothing.
+_wait_cgroup_resolved_above() {
+    local floor="$1" max="${2:-30}" i value=0
+    for ((i = 0; i < max; i++)); do
+        value="$(_cgroup_resolved_count)"
+        if [ "${value%%.*}" -gt "${floor}" ]; then
+            echo "${value}"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "${value}"
+    return 1
+}
+
+_tenant_cgroup_cleanup() {
+    local map_id="${1:-}" cgroup_id="${2:-}"
+    if [ -n "${map_id}" ] && [ -n "${cgroup_id}" ]; then
+        # shellcheck disable=SC2046  # the hex bytes must expand to separate args
+        bpftool map delete id "${map_id}" key hex $(_le_hex "${cgroup_id}" 8) >/dev/null 2>&1 || true
+    fi
+    rmdir "${TENANT_CGROUP_DIR}" 2>/dev/null || true
 }
 
 # ── Docker availability ─────────────────────────────────────────────
@@ -97,12 +181,11 @@ setup_file() {
         { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     }
 
-    # Re-listening TCP server in the test netns on the probe port. A
-    # container that dials ${EBPF_NS_IP}:${PROBE_PORT} through the test veth
-    # gets a reply whose source port is ${PROBE_PORT}; that reply crosses
-    # the tc-ids ingress hook (the request itself is egress and is never
-    # inspected), firing the src_port rule and carrying the cgroup the
-    # connect hook recorded.
+    # Re-listening TCP server in the test netns on the probe port. A client
+    # that dials ${EBPF_NS_IP}:${PROBE_PORT} through the test veth gets a
+    # reply, so both legs cross a tc-ids hook: the request on egress (where
+    # the originating socket is still bound to the skb, so the cgroup is
+    # recoverable) and the reply on ingress.
     _start_probe_listener
 }
 
@@ -111,6 +194,7 @@ teardown_file() {
         _docker_cmd rm -f "ebpfsentinel-cgroup-probe-$$" >/dev/null 2>&1 || true
     fi
     _stop_probe_listener 2>/dev/null || true
+    rmdir "${TENANT_CGROUP_DIR}" 2>/dev/null || true
     stop_ebpf_agent 2>/dev/null || true
     destroy_test_netns 2>/dev/null || true
     rm -rf "${DATA_DIR:-/tmp/ebpfsentinel-test-data-container-$$}"
@@ -217,5 +301,123 @@ teardown_file() {
         # strip cgroup_id from the tc-ids event path, so no container identity
         # can be attached. Surface that as a skip, not a fail.
         env_skip "no alert carried a container identity — degraded cgroup path"
+    fi
+}
+
+# ── cgroup → tenant datapath ───────────────────────────────────────
+
+@test "TENANT_CGROUP_MAP is present in the loaded IDS datapath" {
+    require_tool bpftool
+    require_tool jq
+
+    local map_id
+    map_id="$(_tenant_cgroup_map_id)"
+    [ -n "${map_id}" ]
+
+    # Geometry is the contract between the kernel program and the userspace
+    # manager: u64 cgroup id → u32 tenant id, one entry per live container.
+    local geometry
+    geometry="$(bpftool -j map show id "${map_id}" 2>/dev/null |
+        jq -r '"\(.key_size) \(.value_size) \(.max_entries)"')"
+    [ "${geometry}" = "8 4 4096" ]
+}
+
+@test "tenant cgroup entry survives a write/read round-trip" {
+    require_tool bpftool
+    require_tool jq
+
+    local map_id
+    map_id="$(_tenant_cgroup_map_id)"
+    [ -n "${map_id}" ]
+
+    local cgroup_id
+    cgroup_id="$(_probe_cgroup_id)" ||
+        env_skip "cgroup v2 unified hierarchy not mounted"
+    [ -n "${cgroup_id}" ]
+
+    # shellcheck disable=SC2046  # the hex bytes must expand to separate args
+    run bpftool map update id "${map_id}" \
+        key hex $(_le_hex "${cgroup_id}" 8) \
+        value hex $(_le_hex "${TENANT_PROBE_ID}" 4)
+    [ "${status}" -eq 0 ]
+
+    # shellcheck disable=SC2046
+    run bpftool map lookup id "${map_id}" key hex $(_le_hex "${cgroup_id}" 8)
+    [ "${status}" -eq 0 ]
+    echo "${output}" | grep -q "$(_le_hex "${TENANT_PROBE_ID}" 4)"
+
+    _tenant_cgroup_cleanup "${map_id}" "${cgroup_id}"
+}
+
+@test "egress traffic from a mapped cgroup resolves its tenant" {
+    require_tool bpftool
+    require_tool jq
+    require_tool nc
+
+    local map_id
+    map_id="$(_tenant_cgroup_map_id)"
+    [ -n "${map_id}" ]
+
+    local cgroup_id
+    cgroup_id="$(_probe_cgroup_id)" ||
+        env_skip "cgroup v2 unified hierarchy not mounted"
+
+    local before
+    before="$(_cgroup_resolved_count)"
+
+    # shellcheck disable=SC2046
+    bpftool map update id "${map_id}" \
+        key hex $(_le_hex "${cgroup_id}" 8) \
+        value hex $(_le_hex "${TENANT_PROBE_ID}" 4)
+
+    _probe_from_cgroup
+
+    local after
+    if ! after="$(_wait_cgroup_resolved_above "${before%%.*}" 30)"; then
+        _tenant_cgroup_cleanup "${map_id}" "${cgroup_id}"
+        echo "cgroup tenant resolution did not advance (${before} → ${after})" >&2
+        return 1
+    fi
+
+    _tenant_cgroup_cleanup "${map_id}" "${cgroup_id}"
+}
+
+@test "removing a cgroup entry stops tenant resolution" {
+    require_tool bpftool
+    require_tool jq
+    require_tool nc
+
+    local map_id
+    map_id="$(_tenant_cgroup_map_id)"
+    [ -n "${map_id}" ]
+
+    local cgroup_id
+    cgroup_id="$(_probe_cgroup_id)" ||
+        env_skip "cgroup v2 unified hierarchy not mounted"
+
+    # Cgroup ids are recycled once a cgroup is destroyed, so a stale entry
+    # would attribute the next container's traffic to the wrong tenant. The
+    # removal path is what keeps that from happening.
+    _tenant_cgroup_cleanup "${map_id}" "${cgroup_id}"
+    mkdir -p "${TENANT_CGROUP_DIR}"
+
+    # Let any resolution still in flight land before the snapshot.
+    sleep 12
+    local before
+    before="$(_cgroup_resolved_count)"
+
+    _probe_from_cgroup
+
+    # Two full metric poll intervals: enough for a resolution to surface if
+    # the entry were still live.
+    sleep 25
+    local after
+    after="$(_cgroup_resolved_count)"
+
+    rmdir "${TENANT_CGROUP_DIR}" 2>/dev/null || true
+
+    if [ "${after%%.*}" -ne "${before%%.*}" ]; then
+        echo "tenant resolved from an unmapped cgroup (${before} → ${after})" >&2
+        return 1
     fi
 }

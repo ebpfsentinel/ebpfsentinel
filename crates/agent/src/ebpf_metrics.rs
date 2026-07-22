@@ -246,3 +246,52 @@ pub async fn run_zone_metrics_loop(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::metric_labels;
+
+    #[test]
+    fn ids_metrics_expose_the_cgroup_tenant_counter() {
+        // Index 5 of IDS_METRICS is where tc-ids counts tenants resolved from
+        // the packet's cgroup. The kernel program owns the index, so a change
+        // there without a change here would silently mislabel the counter.
+        let labels = metric_labels("IDS_METRICS");
+        assert_eq!(
+            labels.iter().find(|(idx, _)| *idx == 5).map(|(_, l)| *l),
+            Some("cgroup_resolved")
+        );
+    }
+
+    #[test]
+    fn every_metric_index_is_declared_once() {
+        for map in [
+            "FIREWALL_METRICS",
+            "RATELIMIT_METRICS",
+            "IDS_METRICS",
+            "THREATINTEL_METRICS",
+            "DNS_METRICS",
+            "DLP_METRICS",
+            "CT_METRICS",
+            "NAT_METRICS",
+            "SCRUB_METRICS",
+            "DDOS_METRICS",
+            "LB_METRICS",
+            "QOS_METRICS",
+        ] {
+            let labels = metric_labels(map);
+            let mut indices: Vec<u32> = labels.iter().map(|(idx, _)| *idx).collect();
+            indices.sort_unstable();
+            let before = indices.len();
+            indices.dedup();
+            assert_eq!(indices.len(), before, "{map} declares an index twice");
+        }
+    }
+
+    #[test]
+    fn unknown_maps_fall_back_to_positional_labels() {
+        let labels = metric_labels("SOMETHING_ELSE");
+        assert_eq!(labels.len(), 3);
+        assert_eq!(labels[2], (2, "errors"));
+    }
+}

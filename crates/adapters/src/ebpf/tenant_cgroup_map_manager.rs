@@ -145,4 +145,15 @@ mod tests {
         let result = mgr.remove_tenant_cgroup(4_294_967_296);
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn add_map_ignores_programs_without_the_map() {
+        // Most programs never resolve a tenant from a cgroup and so carry no
+        // TENANT_CGROUP_MAP. Registering one must leave the manager empty
+        // rather than fail the load.
+        let mut store = crate::ebpf::map_store::TokenMaps::default();
+        let mut mgr = TenantCgroupMapManager::new();
+        mgr.add_map(&mut store);
+        assert_eq!(mgr.map_count(), 0);
+    }
 }
