@@ -538,7 +538,7 @@ coverage:
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
-    notes: "cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 54; AlertResponse container fields, k8s pod enrichment, and per-tenant cgroup filter map tracked as deferred ACs in the suite header"
+    notes: "cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 54; AlertResponse container fields and k8s pod enrichment tracked as deferred ACs in the suite header. Per-tenant cgroup filtering is enterprise-only and is tested in the enterprise repo"
 
   - kind: domain_module
     feature: ddos
@@ -817,7 +817,7 @@ attack_suites:
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["container"]
-    notes: "Container cgroup → identity surface: container_resolver_cache_{hits,misses,errors} counters present when container.resolver.enabled=true; Docker-driven probe traffic on tc-ids signature port advances the cache-misses counter (proves cgroup_id reaches the resolver). AlertResponse REST container fields, kubernetes pod enrichment via suite 10 fixtures, and per-tenant TENANT_CGROUP_MAP filtering are deferred ACs tracked in the suite header"
+    notes: "Container cgroup → identity surface: container_resolver_cache_{hits,misses,errors} counters present when container.resolver.enabled=true; Docker-driven probe traffic on tc-ids signature port advances the cache-misses counter (proves cgroup_id reaches the resolver). AlertResponse REST container fields and kubernetes pod enrichment via suite 10 fixtures are deferred ACs tracked in the suite header. Per-tenant TENANT_CGROUP_MAP filtering is enterprise-only and is tested in the enterprise repo"
 
   - suite: "55"
     name: ipv6-full-path-sweep
