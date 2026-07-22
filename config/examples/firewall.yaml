@@ -173,7 +173,8 @@ firewall:
   #   src_port   — Source port: single (22), range ("1024-65535"), or
   #                explicit ({start: 1024, end: 65535}); omit to match any
   #   dst_port   — Destination port (same formats as src_port)
-  #   vlan_id    — 802.1Q VLAN ID (1-4094); omit to match any VLAN
+  #   vlan_id    — 802.1Q VLAN ID (0-4094); omit to match any VLAN,
+  #                0 to match untagged traffic only
   #   state      — Conntrack state filter: [new, established, related, invalid]
   #   src_alias  — Source IP set alias name; omit to match any
   #   dst_alias  — Destination IP set alias name; omit to match any

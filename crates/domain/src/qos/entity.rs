@@ -113,9 +113,10 @@ pub struct QosMatchRule {
     /// DSCP value (0 = wildcard).
     #[serde(default)]
     pub dscp: u8,
-    /// VLAN ID (0 = wildcard).
+    /// 802.1Q VLAN ID: `None` = any VLAN, `Some(0)` = untagged traffic only,
+    /// `Some(vid)` = that tag only.
     #[serde(default)]
-    pub vlan_id: u16,
+    pub vlan_id: Option<u16>,
 }
 
 /// A `QoS` classifier — maps traffic to a queue based on match rules.
@@ -173,6 +174,6 @@ mod tests {
         assert_eq!(rule.dst_port, 0);
         assert_eq!(rule.protocol, 0);
         assert_eq!(rule.dscp, 0);
-        assert_eq!(rule.vlan_id, 0);
+        assert_eq!(rule.vlan_id, None);
     }
 }

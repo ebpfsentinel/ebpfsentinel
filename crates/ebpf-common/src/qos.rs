@@ -1,3 +1,5 @@
+pub use crate::firewall::VLAN_ANY;
+
 /// Maximum number of `QoS` pipe configurations.
 pub const MAX_QOS_PIPES: u32 = 64;
 /// Maximum number of `QoS` queue configurations.
@@ -80,7 +82,7 @@ pub struct QosQueueConfig {
 
 /// Key for the `QoS` classifier `HashMap`.
 ///
-/// Identifies a flow by 5-tuple plus DSCP.
+/// Identifies a flow by 5-tuple plus DSCP and VLAN.
 ///
 /// Size: 16 bytes.
 #[repr(C)]
@@ -98,7 +100,12 @@ pub struct QosClassifierKey {
     pub protocol: u8,
     /// DSCP value (0 = wildcard).
     pub dscp: u8,
-    pub _padding: [u8; 2],
+    /// 802.1Q VLAN ID: [`VLAN_ANY`] = any, 0 = untagged only, 1-4094 = exact.
+    ///
+    /// Unlike the other fields, 0 cannot mean "wildcard" here: an untagged
+    /// frame is reported as VLAN 0, so 0 is a value an operator may legitimately
+    /// want to single out. Hence the out-of-band sentinel.
+    pub vlan_id: u16,
 }
 
 /// Value for the `QoS` classifier `HashMap`.
@@ -245,7 +252,7 @@ mod tests {
         assert_eq!(mem::offset_of!(QosClassifierKey, dst_port), 10);
         assert_eq!(mem::offset_of!(QosClassifierKey, protocol), 12);
         assert_eq!(mem::offset_of!(QosClassifierKey, dscp), 13);
-        assert_eq!(mem::offset_of!(QosClassifierKey, _padding), 14);
+        assert_eq!(mem::offset_of!(QosClassifierKey, vlan_id), 14);
     }
 
     #[test]

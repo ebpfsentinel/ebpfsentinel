@@ -59,7 +59,9 @@ pub struct QosMatchRuleResponse {
     pub dst_port: u16,
     pub protocol: u8,
     pub dscp: u8,
-    pub vlan_id: u16,
+    /// 802.1Q VLAN ID: absent = any VLAN, 0 = untagged only, 1-4094 = exact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vlan_id: Option<u16>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -116,8 +118,9 @@ pub struct CreateQosMatchRuleRequest {
     pub protocol: u8,
     #[serde(default)]
     pub dscp: u8,
+    /// 802.1Q VLAN ID: omit for any VLAN, 0 for untagged only, 1-4094 exact.
     #[serde(default)]
-    pub vlan_id: u16,
+    pub vlan_id: Option<u16>,
 }
 
 // ── Response builders ───────────────────────────────────────────────
@@ -598,7 +601,7 @@ mod tests {
                 dst_port: 80,
                 protocol: 6,
                 dscp: 0,
-                vlan_id: 0,
+                vlan_id: None,
             },
             priority: 100,
             group_mask: 0,
@@ -653,7 +656,7 @@ mod tests {
                 dst_port: 0,
                 protocol: 0,
                 dscp: 0,
-                vlan_id: 0,
+                vlan_id: None,
             },
         };
         let json = serde_json::to_value(&resp).unwrap();

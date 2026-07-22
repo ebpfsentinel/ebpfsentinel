@@ -393,10 +393,116 @@ teardown_file() {
 
 # ── Extended firewall behaviour tests ────────────────────────────
 
+# Bring up an 802.1Q sub-interface on both ends of the test veth pair so the
+# suite can send tagged frames. XDP stays attached to the *parent* veth and
+# sees the frames before VLAN decapsulation, which is what the rule matches on.
+_vlan_link_up() {
+    local vid="$1" host_ip="$2" ns_ip="$3"
+    ip link add link "$EBPF_VETH_HOST" name "${EBPF_VETH_HOST}.${vid}" \
+        type vlan id "$vid" 2>/dev/null || return 1
+    ip addr add "${host_ip}/24" dev "${EBPF_VETH_HOST}.${vid}"
+    ip link set "${EBPF_VETH_HOST}.${vid}" up
+
+    ip netns exec "$EBPF_TEST_NS" ip link add link "$EBPF_VETH_NS" \
+        name "${EBPF_VETH_NS}.${vid}" type vlan id "$vid" || return 1
+    ip netns exec "$EBPF_TEST_NS" ip addr add "${ns_ip}/24" dev "${EBPF_VETH_NS}.${vid}"
+    ip netns exec "$EBPF_TEST_NS" ip link set "${EBPF_VETH_NS}.${vid}" up
+
+    # veth announces VLAN offload, so the 8021q layer hands the tag over in
+    # skb metadata instead of writing it into the frame. XDP reads bytes off
+    # the wire and would see an untagged packet. Turning the offload off puts
+    # the tag back in the frame, as a trunk port would deliver it.
+    ethtool -K "$EBPF_VETH_HOST" txvlan off rxvlan off &>/dev/null || true
+    ip netns exec "$EBPF_TEST_NS" \
+        ethtool -K "$EBPF_VETH_NS" txvlan off rxvlan off &>/dev/null || true
+    sleep 0.5
+}
+
+_vlan_link_down() {
+    local vid="$1"
+    ip netns exec "$EBPF_TEST_NS" ip link del "${EBPF_VETH_NS}.${vid}" 2>/dev/null || true
+    ip link del "${EBPF_VETH_HOST}.${vid}" 2>/dev/null || true
+}
+
+# Connect from the namespace and report only whether it succeeded.
+_ns_connect() {
+    local target="$1" port="$2" src="${3:-}"
+    local args=(-w 1)
+    [ -n "$src" ] && args+=(-s "$src")
+    ip netns exec "$EBPF_TEST_NS" \
+        timeout 2 ncat "${args[@]}" "$target" "$port" </dev/null &>/dev/null
+}
+
 @test "VLAN-tagged traffic matches vlan_id rule" {
     require_root
-    env_skip "requires VLAN-capable veth (future)"
-    # TODO: Create 802.1Q tagged traffic via ip link add link veth-ebpf0 name veth-ebpf0.100 type vlan id 100
+
+    _vlan_link_up 100 10.201.0.1 10.201.0.2 || {
+        _vlan_link_down 100
+        env_skip "kernel refused 802.1Q sub-interface on veth"
+    }
+
+    local body
+    body='{"id":"fw-vlan-tagged","priority":6,"action":"deny","protocol":"tcp","dst_port":5601,"vlan_id":100,"scope":"global","enabled":true}'
+    api_post /api/v1/firewall/rules "$body"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+    sleep 1
+
+    ncat -l -p 5601 --max-conns 4 &>/dev/null &
+    local listener_pid=$!
+    sleep 0.3
+
+    # Tagged frames carry VLAN 100 and must be dropped.
+    local tagged_rc=0
+    _ns_connect 10.201.0.1 5601 || tagged_rc=$?
+
+    # The same port over the untagged path is untouched by a VLAN-100 rule.
+    local untagged_rc=0
+    _ns_connect "$EBPF_HOST_IP" 5601 || untagged_rc=$?
+
+    kill "$listener_pid" 2>/dev/null || true
+    wait "$listener_pid" 2>/dev/null || true
+    api_delete /api/v1/firewall/rules/fw-vlan-tagged &>/dev/null || true
+    _vlan_link_down 100
+
+    [ "$tagged_rc" -ne 0 ]
+    [ "$untagged_rc" -eq 0 ]
+}
+
+@test "vlan_id 0 rule matches untagged traffic only" {
+    require_root
+
+    _vlan_link_up 100 10.201.0.1 10.201.0.2 || {
+        _vlan_link_down 100
+        env_skip "kernel refused 802.1Q sub-interface on veth"
+    }
+
+    local body
+    body='{"id":"fw-vlan-untagged","priority":6,"action":"deny","protocol":"tcp","dst_port":5602,"vlan_id":0,"scope":"global","enabled":true}'
+    api_post /api/v1/firewall/rules "$body"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+    sleep 1
+
+    ncat -l -p 5602 --max-conns 4 &>/dev/null &
+    local listener_pid=$!
+    sleep 0.3
+
+    # Untagged is what vlan_id 0 selects.
+    local untagged_rc=0
+    _ns_connect "$EBPF_HOST_IP" 5602 || untagged_rc=$?
+
+    # Tagged traffic carries VLAN 100 and must be left alone.
+    local tagged_rc=0
+    _ns_connect 10.201.0.1 5602 || tagged_rc=$?
+
+    kill "$listener_pid" 2>/dev/null || true
+    wait "$listener_pid" 2>/dev/null || true
+    api_delete /api/v1/firewall/rules/fw-vlan-untagged &>/dev/null || true
+    _vlan_link_down 100
+
+    [ "$untagged_rc" -ne 0 ]
+    [ "$tagged_rc" -eq 0 ]
 }
 
 @test "conntrack state established allows return traffic" {

@@ -175,7 +175,8 @@ pub struct QosMatchConfig {
     /// DSCP value (0-63).
     #[serde(default)]
     pub dscp: Option<u8>,
-    /// VLAN ID.
+    /// 802.1Q VLAN ID (0-4094): omit to match any VLAN, 0 to match untagged
+    /// traffic only.
     #[serde(default)]
     pub vlan_id: Option<u16>,
 }
@@ -576,6 +577,16 @@ impl QosClassifierConfig {
             });
         }
 
+        // Validate VLAN ID (0 selects untagged traffic, 4095 is reserved)
+        if let Some(vid) = self.match_rule.vlan_id
+            && vid > 4094
+        {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.match_rule.vlan_id"),
+                message: format!("VLAN ID must be 0-4094, got {vid}"),
+            });
+        }
+
         Ok(())
     }
 
@@ -613,7 +624,7 @@ impl QosClassifierConfig {
                 dst_port: self.match_rule.dst_port.unwrap_or(0),
                 protocol,
                 dscp: self.match_rule.dscp.unwrap_or(0),
-                vlan_id: self.match_rule.vlan_id.unwrap_or(0),
+                vlan_id: self.match_rule.vlan_id,
             },
             group_mask: 0,
         })
@@ -1100,7 +1111,7 @@ queue_id: q-1
         assert_eq!(domain.match_rule.dst_port, 0);
         assert_eq!(domain.match_rule.protocol, 0);
         assert_eq!(domain.match_rule.dscp, 0);
-        assert_eq!(domain.match_rule.vlan_id, 0);
+        assert_eq!(domain.match_rule.vlan_id, None);
     }
 
     #[test]

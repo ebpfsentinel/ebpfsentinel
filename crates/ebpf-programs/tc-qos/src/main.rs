@@ -17,6 +17,7 @@ use ebpf_common::{
         QOS_METRIC_COUNT, QOS_METRIC_DELAYED, QOS_METRIC_DROPPED_LOSS, QOS_METRIC_DROPPED_QUEUE,
         QOS_METRIC_ERRORS, QOS_METRIC_EVENTS_DROPPED, QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN,
         QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig, QosQueueConfig,
+        VLAN_ANY,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
@@ -350,8 +351,11 @@ fn process_qos_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
 
 // ── Classification ──────────────────────────────────────────────────
 
-/// Classify a packet using progressive wildcard lookups (max 4 attempts).
-/// Returns (queue_id, priority) on match, or None.
+/// Classify a packet, first against classifiers scoped to its VLAN, then
+/// against VLAN-agnostic ones. A classifier naming a VLAN therefore wins over
+/// a broader one that names none, and a classifier for VLAN 0 only ever sees
+/// untagged traffic.
+/// Returns the matched classifier value, or None.
 #[inline(always)]
 fn classify(
     src_ip: u32,
@@ -360,6 +364,26 @@ fn classify(
     dst_port: u16,
     protocol: u8,
     dscp: u8,
+    vlan_id: u16,
+) -> Option<QosClassifierValue> {
+    if let Some(val) = classify_in_vlan(src_ip, dst_ip, src_port, dst_port, protocol, dscp, vlan_id)
+    {
+        return Some(val);
+    }
+    classify_in_vlan(src_ip, dst_ip, src_port, dst_port, protocol, dscp, VLAN_ANY)
+}
+
+/// Progressive wildcard lookups (7 attempts) within one VLAN scope.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn classify_in_vlan(
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    dscp: u8,
+    vlan_id: u16,
 ) -> Option<QosClassifierValue> {
     // 1. Exact 5-tuple + DSCP
     let key = QosClassifierKey {
@@ -369,7 +393,7 @@ fn classify(
         dst_port,
         protocol,
         dscp,
-        _padding: [0; 2],
+        vlan_id,
     };
     if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key) } {
         return Some(*val);
@@ -383,7 +407,7 @@ fn classify(
         dst_port,
         protocol,
         dscp,
-        _padding: [0; 2],
+        vlan_id,
     };
     if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key2) } {
         return Some(*val);
@@ -397,7 +421,7 @@ fn classify(
         dst_port: 0,
         protocol,
         dscp,
-        _padding: [0; 2],
+        vlan_id,
     };
     if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key3) } {
         return Some(*val);
@@ -411,7 +435,7 @@ fn classify(
         dst_port,
         protocol,
         dscp,
-        _padding: [0; 2],
+        vlan_id,
     };
     if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key4) } {
         return Some(*val);
@@ -426,7 +450,7 @@ fn classify(
         dst_port,
         protocol,
         dscp,
-        _padding: [0; 2],
+        vlan_id,
     };
     if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key5) } {
         return Some(*val);
@@ -440,7 +464,7 @@ fn classify(
         dst_port: 0,
         protocol,
         dscp,
-        _padding: [0; 2],
+        vlan_id,
     };
     if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key6) } {
         return Some(*val);
@@ -454,7 +478,7 @@ fn classify(
         dst_port: 0,
         protocol: 0,
         dscp: 0xFF,
-        _padding: [0; 2],
+        vlan_id,
     };
     if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key7) } {
         return Some(*val);
@@ -499,7 +523,8 @@ fn apply_qos(
     flags: u8,
 ) -> Result<i32, ()> {
     // Step 1: Classify the packet
-    let classifier_val = match classify(src_ip, dst_ip, src_port, dst_port, protocol, dscp) {
+    let classifier_val = match classify(src_ip, dst_ip, src_port, dst_port, protocol, dscp, vlan_id)
+    {
         Some(v) => v,
         None => return Ok(TC_ACT_OK), // No matching rule -> pass
     };

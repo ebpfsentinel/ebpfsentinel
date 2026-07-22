@@ -43,7 +43,8 @@
 #     dst_port   — Destination port
 #     protocol   — "tcp", "udp", "icmp", or protocol number
 #     dscp       — DSCP value 0–63 (e.g. 46 = EF, 34 = AF41)
-#     vlan_id    — VLAN ID
+#     vlan_id    — 802.1Q VLAN ID (0-4094); omit to match any VLAN,
+#                  0 to match untagged traffic only
 #
 # Scheduler:
 #   "fifo"      — Simple FIFO per pipe (default)

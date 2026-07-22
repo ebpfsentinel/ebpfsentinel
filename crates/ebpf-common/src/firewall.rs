@@ -109,6 +109,16 @@ pub const MATCH2_DST_MAC: u8 = 0x80;
 /// Wildcard value for ICMP type/code: skip comparison.
 pub const ICMP_WILDCARD: u8 = 0xFF;
 
+/// Wildcard value for a VLAN filter: match tagged and untagged alike.
+///
+/// 802.1Q leaves VID 0 meaning "no VLAN, priority only", which the parsers
+/// report as `vlan_id == 0` exactly as they do for an untagged frame. So 0 is
+/// a real, matchable value and cannot double as "any" — a rule asking for
+/// VLAN 0 wants untagged traffic and nothing else. Outside the 12-bit VID
+/// space, `0xFFFF` can never come off the wire, which is what makes it usable
+/// as the wildcard.
+pub const VLAN_ANY: u16 = 0xFFFF;
+
 // ── Route action constants ──────────────────────────────────────────
 
 /// No routing action (normal pass/drop/log behaviour).
@@ -229,7 +239,7 @@ pub struct FirewallRuleEntry {
     pub protocol: u8,
     /// Bitmask of active `MATCH_*` flags.
     pub match_flags: u8,
-    /// 802.1Q VLAN ID filter (0 = match any, 1-4094 = exact).
+    /// 802.1Q VLAN ID filter: `VLAN_ANY` = any, 0 = untagged only, 1-4094 = exact.
     pub vlan_id: u16,
     /// Action: `ACTION_PASS`, `ACTION_DROP`, `ACTION_LOG`, or `ACTION_REJECT`.
     pub action: u8,
@@ -298,7 +308,7 @@ pub struct FirewallRuleEntryV6 {
     pub protocol: u8,
     /// Bitmask of active `MATCH_*` flags.
     pub match_flags: u8,
-    /// 802.1Q VLAN ID filter (0 = match any, 1-4094 = exact).
+    /// 802.1Q VLAN ID filter: `VLAN_ANY` = any, 0 = untagged only, 1-4094 = exact.
     pub vlan_id: u16,
     /// Action: `ACTION_PASS`, `ACTION_DROP`, `ACTION_LOG`, or `ACTION_REJECT`.
     pub action: u8,

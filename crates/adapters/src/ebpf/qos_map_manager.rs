@@ -2,7 +2,9 @@ use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, HashMap, MapData};
 use domain::common::error::DomainError;
 use domain::qos::entity::{QosClassifier, QosPipe, QosQueue};
-use ebpf_common::qos::{QosClassifierKey, QosClassifierValue, QosPipeConfig, QosQueueConfig};
+use ebpf_common::qos::{
+    QosClassifierKey, QosClassifierValue, QosPipeConfig, QosQueueConfig, VLAN_ANY,
+};
 use ports::secondary::qos_map_port::QosMapPort;
 use tracing::info;
 
@@ -109,7 +111,7 @@ impl QosMapManager {
             dst_port: cls.match_rule.dst_port,
             protocol: cls.match_rule.protocol,
             dscp: cls.match_rule.dscp,
-            _padding: [0; 2],
+            vlan_id: cls.match_rule.vlan_id.unwrap_or(VLAN_ANY),
         };
         let value = QosClassifierValue {
             queue_id: queue_index,
@@ -388,6 +390,7 @@ mod tests {
         assert_eq!(key.dst_port, 0);
         assert_eq!(key.protocol, 0);
         assert_eq!(key.dscp, 0);
+        assert_eq!(key.vlan_id, VLAN_ANY);
         assert_eq!(value.queue_id, 2);
         assert_eq!(value.priority, 100);
     }
@@ -406,7 +409,7 @@ mod tests {
                 dst_port: 80,
                 protocol: 6,
                 dscp: 46,
-                vlan_id: 0,
+                vlan_id: Some(0),
             },
             priority: 300,
             group_mask: 0,
@@ -418,6 +421,8 @@ mod tests {
         assert_eq!(key.dst_port, 80);
         assert_eq!(key.protocol, 6);
         assert_eq!(key.dscp, 46);
+        // Some(0) is untagged-only, not the wildcard.
+        assert_eq!(key.vlan_id, 0);
         assert_eq!(value.queue_id, 0);
         // priority clamped to u8
         assert_eq!(value.priority, 255);

@@ -29,10 +29,6 @@ use ebpf_common::{
     event::{
         EVENT_TYPE_FIREWALL, FLAG_IPV6, FLAG_VLAN, META_FLAG_PRESENT, PacketEvent, XdpMetadata,
     },
-    zone::{
-        MAX_ZONE_ENTRIES, MAX_ZONE_POLICIES, ZONE_METRIC_SLOTS, ZONE_NONE, ZONE_POLICY_DENY,
-        zone_pair_key,
-    },
     firewall::{
         ACTION_DROP, ACTION_LOG, ACTION_PASS, ACTION_REJECT, CT_MATCH_ESTABLISHED,
         CT_MATCH_INVALID, CT_MATCH_NEW, CT_MATCH_RELATED, DEFAULT_POLICY_DROP, FirewallRuleEntry,
@@ -41,9 +37,13 @@ use ebpf_common::{
         MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MATCH_SRC_SET, MATCH2_DSCP, MATCH2_DST_MAC,
         MATCH2_ICMP_CODE, MATCH2_ICMP_TYPE, MATCH2_NEGATE_DST, MATCH2_NEGATE_SRC, MATCH2_SRC_MAC,
         MATCH2_TCP_FLAGS, MAX_FIREWALL_RULES, MAX_FW_HASH_5TUPLE, MAX_FW_HASH_PORT,
-        MAX_IPSET_ENTRIES_V4, MAX_LPM_RULES, PacketCtx,
+        MAX_IPSET_ENTRIES_V4, MAX_LPM_RULES, PacketCtx, VLAN_ANY,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
+    zone::{
+        MAX_ZONE_ENTRIES, MAX_ZONE_POLICIES, ZONE_METRIC_SLOTS, ZONE_NONE, ZONE_POLICY_DENY,
+        zone_pair_key,
+    },
 };
 use ebpf_helpers::kfuncs::{
     BpfCtOpts, CtTuple, bpf_xfrm_state_opts, kill_flow_via_xdp_ct, with_xdp_ct_lookup,
@@ -147,8 +147,7 @@ static ZONE_POLICY_MAP: HashMap<u16, u8> = HashMap::with_max_entries(MAX_ZONE_PO
 static ZONE_METRICS_PASSED: PerCpuArray<u64> = PerCpuArray::with_max_entries(ZONE_METRIC_SLOTS, 0);
 
 #[map]
-static ZONE_METRICS_DROPPED: PerCpuArray<u64> =
-    PerCpuArray::with_max_entries(ZONE_METRIC_SLOTS, 0);
+static ZONE_METRICS_DROPPED: PerCpuArray<u64> = PerCpuArray::with_max_entries(ZONE_METRIC_SLOTS, 0);
 
 /// Fast-path: 5-tuple exact-match HashMap (proto, src_ip, dst_ip, src_port, dst_port) → action.
 /// Rules with exact values in all 5 fields (no wildcards, ranges, or extended flags) are
@@ -1273,8 +1272,8 @@ fn match_rule_v4(
         return false;
     }
 
-    // VLAN check (0 = match any)
-    if rule.vlan_id != 0 && rule.vlan_id != vlan_id {
+    // VLAN check (VLAN_ANY = match any, 0 = untagged only)
+    if rule.vlan_id != VLAN_ANY && rule.vlan_id != vlan_id {
         return false;
     }
 
@@ -1831,8 +1830,8 @@ fn match_rule_v6(
         return false;
     }
 
-    // VLAN check (0 = match any)
-    if rule.vlan_id != 0 && rule.vlan_id != vlan_id {
+    // VLAN check (VLAN_ANY = match any, 0 = untagged only)
+    if rule.vlan_id != VLAN_ANY && rule.vlan_id != vlan_id {
         return false;
     }
 

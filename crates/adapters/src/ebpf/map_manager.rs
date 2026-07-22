@@ -4,6 +4,7 @@ use domain::common::error::DomainError;
 use ebpf_common::firewall::{
     FirewallRuleEntry, FirewallRuleEntryV6, FwHashKey5Tuple, FwHashKeyPort, FwHashValue,
     MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MAX_FIREWALL_RULES,
+    VLAN_ANY,
 };
 use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
 use tracing::info;
@@ -139,7 +140,7 @@ impl FirewallArrayMapPort for FirewallMapManager {
         for rule in rules {
             let flags = rule.match_flags;
             let has_extended = rule.match_flags2 != 0
-                || rule.vlan_id != 0
+                || rule.vlan_id != VLAN_ANY
                 || rule.ct_state_mask != 0
                 || rule.group_mask != 0
                 || rule.src_set_id != 0

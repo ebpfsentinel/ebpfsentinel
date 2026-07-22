@@ -149,9 +149,11 @@ impl FirewallEngine {
             return false;
         }
 
-        // VLAN match (None = wildcard, Some(vid) = exact match)
+        // VLAN match (None = wildcard, Some(0) = untagged only, Some(vid) = exact).
+        // An untagged packet carries no tag at all, which 802.1Q equates with
+        // VID 0, so it is compared as 0 rather than being excluded outright.
         if let Some(rule_vid) = rule.vlan_id
-            && packet.vlan_id != Some(rule_vid)
+            && packet.vlan_id.unwrap_or(0) != rule_vid
         {
             return false;
         }
@@ -755,6 +757,21 @@ mod tests {
         let mut pkt = make_packet();
         pkt.vlan_id = Some(100);
         assert_eq!(engine.evaluate(&pkt), Some(FirewallAction::Deny));
+    }
+
+    #[test]
+    fn vlan_zero_rule_matches_untagged_only() {
+        let mut engine = FirewallEngine::new();
+        let mut rule = make_rule("untagged", 1, FirewallAction::Deny);
+        rule.vlan_id = Some(0);
+        engine.add_rule(rule).unwrap();
+
+        let mut pkt = make_packet();
+        pkt.vlan_id = None;
+        assert_eq!(engine.evaluate(&pkt), Some(FirewallAction::Deny));
+
+        pkt.vlan_id = Some(100);
+        assert_eq!(engine.evaluate(&pkt), None);
     }
 
     // ── IPv6 matching ─────────────────────────────────────────────

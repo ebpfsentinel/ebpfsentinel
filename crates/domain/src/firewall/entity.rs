@@ -7,7 +7,7 @@ use ebpf_common::firewall::{
     MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT,
     MATCH2_DSCP, MATCH2_DST_MAC, MATCH2_ICMP_CODE, MATCH2_ICMP_TYPE, MATCH2_NEGATE_DST,
     MATCH2_NEGATE_SRC, MATCH2_SRC_MAC, MATCH2_TCP_FLAGS, ROUTE_ACTION_DUP_TO, ROUTE_ACTION_NONE,
-    ROUTE_ACTION_REPLY_TO, ROUTE_ACTION_ROUTE_TO,
+    ROUTE_ACTION_REPLY_TO, ROUTE_ACTION_ROUTE_TO, VLAN_ANY,
 };
 
 use super::error::FirewallError;
@@ -338,7 +338,8 @@ pub struct FirewallRule {
     pub dst_port: Option<PortRange>,
     pub scope: Scope,
     pub enabled: bool,
-    /// Optional 802.1Q VLAN ID filter (None = match any VLAN, Some(vid) = exact).
+    /// Optional 802.1Q VLAN ID filter: `None` = match any VLAN, `Some(0)` =
+    /// untagged traffic only, `Some(vid)` = that tag only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vlan_id: Option<u16>,
     /// Optional alias reference for source IP matching.
@@ -620,7 +621,7 @@ impl FirewallRule {
             dst_port_end,
             protocol,
             match_flags: flags,
-            vlan_id: self.vlan_id.unwrap_or(0),
+            vlan_id: self.vlan_id.unwrap_or(VLAN_ANY),
             action: action_to_u8(self.action),
             ct_state_mask,
             src_set_id: 0,
@@ -767,7 +768,7 @@ impl FirewallRule {
             dst_port_end,
             protocol,
             match_flags: flags,
-            vlan_id: self.vlan_id.unwrap_or(0),
+            vlan_id: self.vlan_id.unwrap_or(VLAN_ANY),
             action: action_to_u8(self.action),
             ct_state_mask,
             src_set_id: 0,
@@ -1339,6 +1340,19 @@ mod tests {
         assert_eq!(entry.protocol, 6);
         assert_eq!(entry.vlan_id, 100);
         assert_eq!(entry.action, ACTION_PASS);
+    }
+
+    #[test]
+    fn to_ebpf_entry_vlan_wildcard_and_untagged() {
+        let mut rule = make_rule("r", 1);
+
+        rule.vlan_id = None;
+        assert_eq!(rule.to_ebpf_entry().vlan_id, VLAN_ANY);
+        assert_eq!(rule.to_ebpf_entry_v6().vlan_id, VLAN_ANY);
+
+        rule.vlan_id = Some(0);
+        assert_eq!(rule.to_ebpf_entry().vlan_id, 0);
+        assert_eq!(rule.to_ebpf_entry_v6().vlan_id, 0);
     }
 
     #[test]
