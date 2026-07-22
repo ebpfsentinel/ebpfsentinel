@@ -187,6 +187,39 @@ esac
 echo "  eBPF programs:"
 ls -1 "${EBPF_INSTALL_DIR}/" 2>/dev/null || echo "  WARNING: No eBPF programs found in ${EBPF_INSTALL_DIR}"
 
+# ── Install OpenSSL 3.5 (post-quantum hybrid client) ───────────────
+# The distro openssl predates X25519MLKEM768, so it cannot drive the PQ
+# handshake tests as a client even though the agent negotiates the hybrid.
+# 3.5 is installed side-by-side under /opt so the system openssl (and
+# everything linked against it) is left untouched; the suite picks the
+# private build up by path.
+echo "=== [6/9] Installing OpenSSL 3.5 (PQ hybrid client) ==="
+OPENSSL_PQ_VERSION="3.5.4"
+OPENSSL_PQ_PREFIX="/opt/openssl-3.5"
+if "${OPENSSL_PQ_PREFIX}/bin/openssl" list -kem-algorithms 2>/dev/null | grep -q X25519MLKEM768; then
+    echo "  OpenSSL ${OPENSSL_PQ_VERSION} already present with X25519MLKEM768"
+else
+    sudo apt-get install -y --no-install-recommends build-essential perl >/dev/null
+    tmp="$(mktemp -d)"
+    if curl -fsSL --retry 3 \
+        "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_PQ_VERSION}/openssl-${OPENSSL_PQ_VERSION}.tar.gz" \
+        | tar -xz -C "${tmp}"; then
+        (
+            cd "${tmp}/openssl-${OPENSSL_PQ_VERSION}"
+            # no-shared keeps the build self-contained: nothing on the box
+            # ever links against this copy, only the CLI is used.
+            ./Configure --prefix="${OPENSSL_PQ_PREFIX}" \
+                --openssldir="${OPENSSL_PQ_PREFIX}/ssl" no-shared no-docs >/dev/null
+            make -j"$(nproc)" >/dev/null
+            sudo make install_sw >/dev/null
+        ) && echo "  installed: $("${OPENSSL_PQ_PREFIX}/bin/openssl" version)" \
+            || echo "  WARNING: OpenSSL ${OPENSSL_PQ_VERSION} build failed — PQ client tests will skip"
+    else
+        echo "  WARNING: OpenSSL ${OPENSSL_PQ_VERSION} download failed — PQ client tests will skip"
+    fi
+    rm -rf "${tmp}"
+fi
+
 # ── Start iperf3 server ────────────────────────────────────────────
 echo "=== [7/9] Starting iperf3 server ==="
 pkill -f "iperf3 -s" 2>/dev/null || true

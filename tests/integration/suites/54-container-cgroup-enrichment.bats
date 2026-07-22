@@ -90,6 +90,14 @@ _tenant_cgroup_map_id() {
 
 # Create the probe cgroup and echo its id. The cgroup v2 id the kernel
 # reports to bpf_get_current_cgroup_id is the directory's inode number.
+# Attribution reads the cgroup v2 id of the emitting task. A host running the
+# legacy v1 hierarchy exposes no unified controller file and has no such id, so
+# nothing downstream can be attributed — the only genuine environment gap here.
+_require_cgroup_v2() {
+    [ -f /sys/fs/cgroup/cgroup.controllers ] ||
+        env_skip "cgroup v2 unified hierarchy not mounted"
+}
+
 _probe_cgroup_id() {
     [ -f /sys/fs/cgroup/cgroup.controllers ] || return 1
     mkdir -p "${TENANT_CGROUP_DIR}" 2>/dev/null || return 1
@@ -229,6 +237,7 @@ teardown_file() {
 
 @test "Docker container traffic advances container resolver counters" {
     _docker_available || env_skip "Docker engine not available"
+    _require_cgroup_v2
 
     # Snapshot resolver cache miss counter before the workload.
     local before
@@ -253,18 +262,21 @@ teardown_file() {
     after="$(get_metrics_value ebpfsentinel_container_resolver_cache_misses_total 2>/dev/null)"
     [ -n "${after}" ] || after=0
 
-    if [ "$(echo "${after} > ${before}" | bc -l 2>/dev/null)" != "1" ]; then
-        # Some kernels strip cgroup_id from the tc-ids event path; treat
-        # that as a skip rather than a fail so the suite is robust to the
-        # degraded path that suite 09 documents.
-        env_skip "container resolver did not observe a miss (${before} → ${after}) — degraded cgroup path"
-    fi
+    # The egress hook carries the emitting task's cgroup and is attached
+    # whenever the resolver is on, so a container that generated matching
+    # traffic must have produced at least one resolver lookup.
+    [ "$(echo "${after} > ${before}" | bc -l 2>/dev/null)" = "1" ] || {
+        echo "container resolver observed no miss (${before} → ${after})" >&2
+        echo "resolver errors: $(get_metrics_value ebpfsentinel_container_resolver_errors_total 2>/dev/null)" >&2
+        return 1
+    }
 }
 
 # ── REST AlertResponse container surface ───────────────────────────
 
 @test "alerts REST surface exposes container identity" {
     _docker_available || env_skip "Docker engine not available"
+    _require_cgroup_v2
 
     local cname="ebpfsentinel-cgroup-alert-$$"
     _docker_cmd rm -f "${cname}" >/dev/null 2>&1 || true
@@ -296,12 +308,11 @@ teardown_file() {
                  and (.container.id | length) > 0
                  and (.container.cgroup_path | length) > 0)] | length' 2>/dev/null)" || matched=0
 
-    if [ "${matched:-0}" -lt 1 ]; then
-        # Same degraded-cgroup caveat as the resolver counter test: some kernels
-        # strip cgroup_id from the tc-ids event path, so no container identity
-        # can be attached. Surface that as a skip, not a fail.
-        env_skip "no alert carried a container identity — degraded cgroup path"
-    fi
+    [ "${matched:-0}" -ge 1 ] || {
+        echo "no alert carried a complete container identity" >&2
+        echo "${alerts}" | jq -c '[.alerts[] | {component, container}] | .[0:5]' >&2 || true
+        return 1
+    }
 }
 
 # ── cgroup → tenant datapath ───────────────────────────────────────

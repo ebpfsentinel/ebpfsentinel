@@ -154,8 +154,12 @@ teardown_file() {
 
     # The prior test drove the neighbour traffic; inspect the resulting alerts
     # for a DLP entry carrying container provenance (resolved from the event's
-    # cgroup id). Some kernels strip cgroup_id from the uprobe path, so treat an
-    # unattributed-but-captured alert as a skip rather than a failure.
+    # cgroup id). The DLP probes are uprobes, which always run in process
+    # context, so the cgroup id is populated whenever the host runs the unified
+    # hierarchy — that mount is the one genuine gap.
+    [ -f /sys/fs/cgroup/cgroup.controllers ] ||
+        env_skip "cgroup v2 unified hierarchy not mounted"
+
     local body has_container
     body="$(api_get /api/v1/alerts)"
     _load_http_status
@@ -166,8 +170,9 @@ teardown_file() {
         || has_container=0
     [ -n "${has_container}" ] || has_container=0
 
-    if [ "${has_container}" -lt 1 ]; then
-        env_skip "DLP alert captured but cgroup attribution unavailable on this kernel"
-    fi
-    [ "${has_container}" -ge 1 ]
+    [ "${has_container}" -ge 1 ] || {
+        echo "no DLP alert carried container provenance" >&2
+        echo "${body}" | jq -c '[.alerts[]? // .[]? | select(.component == "dlp") | {container}] | .[0:5]' >&2 || true
+        return 1
+    }
 }

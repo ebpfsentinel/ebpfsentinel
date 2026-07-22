@@ -68,9 +68,10 @@ setup_file() {
         EBPF_OPENSSL="/opt/openssl-3.5/bin/openssl"
     fi
 
-    # Detect PQ-hybrid client support in the resolved openssl build. If
-    # X25519MLKEM768 is unknown, every PQ-handshake test in this file
-    # is skipped, but the configuration-surface assertions still run.
+    # Detect PQ-hybrid client support in the resolved openssl build. The
+    # agent-VM provisioner installs a 3.5 build under /opt for exactly this
+    # reason; if it is missing the client-side PQ assertions are skipped,
+    # but the configuration-surface assertions still run.
     if _openssl_has_mlkem "${EBPF_OPENSSL}"; then
         export EBPF_OPENSSL_HAS_MLKEM=1
     else
@@ -226,7 +227,7 @@ _restart_agent_with() {
 
 @test "PQ-aware client (X25519MLKEM768) lands on the hybrid group in prefer mode" {
     if [ "${EBPF_OPENSSL_HAS_MLKEM:-0}" != "1" ]; then
-        env_skip "local openssl lacks X25519MLKEM768; PQ handshake assertion deferred"
+        env_skip "no openssl with X25519MLKEM768 on this host (provision the 3.5 build)"
     fi
     local group
     group="$(_s_client_named_group X25519MLKEM768)" || {
@@ -267,7 +268,7 @@ _restart_agent_with() {
 
 @test "pq_mode=require still accepts PQ-aware clients" {
     if [ "${EBPF_OPENSSL_HAS_MLKEM:-0}" != "1" ]; then
-        env_skip "local openssl lacks X25519MLKEM768; PQ require-mode acceptance deferred"
+        env_skip "no openssl with X25519MLKEM768 on this host (provision the 3.5 build)"
     fi
     local group
     group="$(_s_client_named_group X25519MLKEM768)" || {

@@ -143,24 +143,13 @@ _RL_LABEL='{interface="ratelimit",action="drop"}'
     _run_attack_and_assert OVH "$_RL_METRIC" "$_RL_LABEL" "/"
 }
 
-@test "MHDDoS TLS handshake flood is rate-limited at the kernel datapath" {
-    # TLS/CFB drive HTTPS handshakes (port 8443). Per-connection handshake cost
-    # keeps the single-source proxyless rate well under the volumetric pps
-    # threshold, so they neither trip the kernel rate-limiter nor raise a DoS
-    # alert here. Deterministic coverage needs a dedicated low-rate-TLS policy.
-    env_skip "TLS handshake flood is sub-threshold for the volumetric rate-limiter; needs a dedicated TLS-rate policy"
-}
-
-@test "MHDDoS CFB (WAF bypass) flood is rate-limited at the kernel datapath" {
-    env_skip "CFB HTTPS flood is sub-threshold for the volumetric rate-limiter; needs a dedicated TLS-rate policy"
-}
-
-@test "MHDDoS SLOW (slowloris) flood is rate-limited at the kernel datapath" {
-    # Slowloris holds a few connections open at very low packet rate — by design
-    # it does not trip a pps rate-limiter or the volumetric DDoS detector. It is
-    # the slow-attack/L7-timeout path's job (covered by suite 39).
-    env_skip "slowloris is low-rate by design; not a volumetric rate-limit signal (slow-attack path covered by suite 39)"
-}
+# The TLS, CFB and SLOW attack modes are deliberately absent from the list
+# above. TLS and CFB pay a per-connection handshake cost that keeps a
+# single-source proxyless run well below the volumetric pps threshold, and
+# slowloris holds a handful of connections open at a near-idle packet rate.
+# None of them is a volumetric signal, so asserting that the pps rate-limiter
+# catches them would assert the wrong thing; the slow-attack and L7-timeout
+# paths that do cover them live in suite 39.
 
 # ── MITRE coverage sweep ───────────────────────────────────────────
 

@@ -113,9 +113,6 @@ _pull_remote_pcap() {
     local resp
     resp="$(api_post /api/v1/captures/manual "${body}")"
     _load_http_status
-    if [ "${HTTP_STATUS}" = "503" ]; then
-        env_skip "capture engine not available (pcap-capture feature off?)"
-    fi
     [ "${HTTP_STATUS}" = "200" ] || [ "${HTTP_STATUS}" = "201" ] || {
         echo "POST /captures/manual returned HTTP ${HTTP_STATUS}: ${resp}" >&2
         return 1
