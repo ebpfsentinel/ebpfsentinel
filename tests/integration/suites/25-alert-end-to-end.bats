@@ -205,41 +205,7 @@ _drive_alert_traffic() {
     [ "${match:-0}" -eq 0 ]
 }
 
-@test "Alert dedup window prevents duplicates" {
-    require_root
-    require_tool ncat
-
-    # Record alert count before triggering
-    local before_body before_count
-    before_body="$(api_get /api/v1/alerts)"
-    _load_http_status
-    [ "$HTTP_STATUS" = "200" ]
-    before_count="$(echo "$before_body" | jq '[.alerts[] | select(.rule_id == "ids-alert-test")] | length' 2>/dev/null)" || true
-
-    # Trigger the same alert twice in rapid succession
-    timeout 5 ncat -l "$EBPF_HOST_IP" 4444 >/dev/null 2>&1 &
-    local lp=$!
-    sleep 0.2
-    send_tcp_from_ns "$EBPF_HOST_IP" 4444 "DEDUP_TEST_1" 1 || true
-    send_tcp_from_ns "$EBPF_HOST_IP" 4444 "DEDUP_TEST_2" 1 || true
-    kill "$lp" 2>/dev/null || true
-    wait "$lp" 2>/dev/null || true
-
-    sleep 3
-
-    local after_body after_count delta
-    after_body="$(api_get /api/v1/alerts)"
-    _load_http_status
-    [ "$HTTP_STATUS" = "200" ]
-    after_count="$(echo "$after_body" | jq '[.alerts[] | select(.rule_id == "ids-alert-test")] | length' 2>/dev/null)" || true
-
-    # Dedup window should reduce the number of new alerts; allow generous
-    # tolerance for async pipeline timing and burst processing
-    delta=$(( ${after_count:-0} - ${before_count:-0} ))
-    [ "$delta" -le 20 ]
-}
-
-@test "Alert throttle limits burst" {
+@test "alerting windows are reported by the config endpoint" {
     require_root
 
     local body
@@ -248,10 +214,14 @@ _drive_alert_traffic() {
 
     [ "$HTTP_STATUS" = "200" ]
 
-    # Verify alerting / throttle configuration is present in the config response
-    local throttle
-    throttle="$(echo "$body" | jq '.alerting.throttle_window_secs // .alerting.dedup_window_secs // .alerting // empty' 2>/dev/null)" || true
-    [ -n "$throttle" ]
+    # Named for what it checks: the effective dedup/throttle windows are
+    # visible to an operator. Driving a real throttle needs a fixture with a
+    # small throttle_max, which the dedup tests below would then also trip.
+    local dedup_window throttle_window
+    dedup_window="$(echo "$body" | jq -r '.alerting.dedup_window_secs // empty' 2>/dev/null)" || true
+    throttle_window="$(echo "$body" | jq -r '.alerting.throttle_window_secs // empty' 2>/dev/null)" || true
+
+    [ -n "$dedup_window" ] && [ -n "$throttle_window" ]
 }
 
 @test "Alert list supports pagination" {
@@ -298,40 +268,66 @@ _drive_alert_traffic() {
 
 # ── Extended alert lifecycle tests ────────────────────────────────
 
-@test "dedup window suppresses duplicate alerts" {
+@test "dedup window suppresses duplicate alert deliveries" {
     require_root
 
-    # Measure the increase caused by this burst rather than the suite-wide
-    # total: the store accumulates across every test in the file, so an
-    # absolute cap says more about how much traffic ran earlier than about
-    # dedup. The dedup key is (rule, src, dst, dst_port, protocol) — src_port
-    # is excluded — so five identical flows inside one window must collapse.
-    local before
-    before="$(api_get /api/v1/alerts | jq '[.alerts[] | select(.component == "ids")] | length' 2>/dev/null)" || before=0
+    # Dedup gates *delivery*, not persistence: the pipeline stores, streams and
+    # counts every alert before consulting the router. So counting rows in
+    # /api/v1/alerts measures how many alerts the datapath produced, and says
+    # nothing about dedup — that is why an earlier version of this test saw a
+    # burst grow the store by more than the number of flows sent and could not
+    # explain it. The suppression is observable in exactly one place, the drop
+    # counter, and it now carries its own reason label.
+    local dropped_before alerts_before
+    dropped_before="$(get_metrics_value ebpfsentinel_alerts_dropped_total '{reason="dedup"}')" || dropped_before=0
+    dropped_before="${dropped_before:-0}"
+    alerts_before="$(api_get /api/v1/alerts | jq '[.alerts[] | select(.component == "ids")] | length' 2>/dev/null)" || alerts_before=0
 
+    # Identical 5-tuples apart from src_port, which the dedup key excludes, so
+    # every flow after the first must land in the dedup bucket.
     for i in $(seq 1 5); do
         send_tcp_from_ns "$EBPF_HOST_IP" 4444 "DEDUP_TRIGGER_${i}" 1 &>/dev/null &
     done
     wait
     sleep 5
 
-    local body
-    body="$(api_get /api/v1/alerts)"
-    _load_http_status
-    [ "$HTTP_STATUS" = "200" ]
+    local alerts_after produced
+    alerts_after="$(api_get /api/v1/alerts | jq '[.alerts[] | select(.component == "ids")] | length' 2>/dev/null)" || alerts_after=0
+    produced=$(( alerts_after - alerts_before ))
+    [ "${produced}" -ge 2 ] || soft_skip "burst produced ${produced} ids alerts — nothing for dedup to collapse"
 
-    local after delta
-    after="$(echo "$body" | jq '[.alerts[] | select(.component == "ids")] | length' 2>/dev/null)" || after=0
-    delta=$(( after - before ))
+    local dropped_after deduped
+    dropped_after="$(get_metrics_value ebpfsentinel_alerts_dropped_total '{reason="dedup"}')" || dropped_after=0
+    dropped_after="${dropped_after:-0}"
+    deduped=$(( ${dropped_after%.*} - ${dropped_before%.*} ))
 
-    # Measured on the VM: five flows produce +10 alerts. With a 5 s window and
-    # a key that ignores src_port, the expected figure is one or two — the gap
-    # is unexplained and worth its own investigation (the egress attach is
-    # default-on, so the same packet may be seen twice with swapped src/dst,
-    # which would double the key space). The bound below is set to catch dedup
-    # disappearing outright, not to bless the current number.
-    [ "${delta}" -le 15 ] || {
-        echo "dedup did not bound the burst: ${before} -> ${after} (+${delta})" >&2
+    # Every alert past the first in the window is a duplicate, so the number
+    # suppressed must account for all but one of the alerts produced.
+    [ "${deduped}" -ge $(( produced - 1 )) ] || {
+        echo "dedup suppressed ${deduped} of ${produced} alerts produced by the burst" >&2
+        echo "dropped{reason=dedup}: ${dropped_before} -> ${dropped_after}" >&2
+        return 1
+    }
+}
+
+@test "dedup does not suppress the alert record itself" {
+    require_root
+
+    # The counterpart to the test above, and the reason its accounting is not a
+    # bug: a deduplicated alert is still queryable. Forensics would be lost if
+    # dedup dropped records rather than deliveries.
+    local before
+    before="$(api_get /api/v1/alerts | jq '[.alerts[] | select(.component == "ids")] | length' 2>/dev/null)" || before=0
+
+    send_tcp_from_ns "$EBPF_HOST_IP" 4444 "DEDUP_RECORD_1" 1 &>/dev/null || true
+    sleep 1
+    send_tcp_from_ns "$EBPF_HOST_IP" 4444 "DEDUP_RECORD_2" 1 &>/dev/null || true
+    sleep 4
+
+    local after
+    after="$(api_get /api/v1/alerts | jq '[.alerts[] | select(.component == "ids")] | length' 2>/dev/null)" || after=0
+    [ "$(( after - before ))" -ge 2 ] || {
+        echo "expected both alerts to be stored, store grew by $(( after - before ))" >&2
         return 1
     }
 }

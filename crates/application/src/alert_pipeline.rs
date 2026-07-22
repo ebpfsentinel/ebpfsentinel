@@ -279,21 +279,10 @@ impl AlertPipeline {
         self.evaluate_auto_response(&alert);
         self.evaluate_auto_capture(&alert).await;
 
-        // Pass through router (dedup, throttle, route matching)
-        let matched_routes: Vec<_> = self
-            .router
-            .process_alert(&alert)
-            .into_iter()
-            .map(|(i, r)| (i, r.clone()))
-            .collect();
-
+        // Dedup, throttle, route matching. Suppression here only stops
+        // delivery — the alert is already stored and streamed above.
+        let matched_routes = self.resolve_routes(&alert);
         if matched_routes.is_empty() {
-            self.metrics.record_alert_dropped("no_route");
-            tracing::debug!(
-                rule_id = %alert.rule_id,
-                severity = severity_str,
-                "alert dropped: no matching route or dedup/throttle"
-            );
             return;
         }
 
@@ -363,21 +352,10 @@ impl AlertPipeline {
         self.evaluate_auto_response(&alert);
         self.evaluate_auto_capture(&alert).await;
 
-        // Pass through router (dedup, throttle, route matching)
-        let matched_routes: Vec<_> = self
-            .router
-            .process_alert(&alert)
-            .into_iter()
-            .map(|(i, r)| (i, r.clone()))
-            .collect();
-
+        // Dedup, throttle, route matching. Suppression here only stops
+        // delivery — the alert is already stored and streamed above.
+        let matched_routes = self.resolve_routes(&alert);
         if matched_routes.is_empty() {
-            self.metrics.record_alert_dropped("no_route");
-            tracing::debug!(
-                pattern_id = %alert.rule_id,
-                severity = severity_str,
-                "DLP alert dropped: no matching route or dedup/throttle"
-            );
             return;
         }
 
@@ -451,21 +429,10 @@ impl AlertPipeline {
         self.evaluate_auto_response(&alert);
         self.evaluate_auto_capture(&alert).await;
 
-        // Pass through router (dedup, throttle, route matching)
-        let matched_routes: Vec<_> = self
-            .router
-            .process_alert(&alert)
-            .into_iter()
-            .map(|(i, r)| (i, r.clone()))
-            .collect();
-
+        // Dedup, throttle, route matching. Suppression here only stops
+        // delivery — the alert is already stored and streamed above.
+        let matched_routes = self.resolve_routes(&alert);
         if matched_routes.is_empty() {
-            self.metrics.record_alert_dropped("no_route");
-            tracing::debug!(
-                attack_id = %alert.rule_id,
-                severity = severity_str,
-                "DDoS alert dropped: no matching route or dedup/throttle"
-            );
             return;
         }
 
@@ -506,14 +473,10 @@ impl AlertPipeline {
         self.evaluate_auto_response(&alert);
         self.evaluate_auto_capture(&alert).await;
 
-        let matched_routes: Vec<_> = self
-            .router
-            .process_alert(&alert)
-            .into_iter()
-            .map(|(i, r)| (i, r.clone()))
-            .collect();
+        // Dedup, throttle, route matching. Suppression here only stops
+        // delivery — the alert is already stored and streamed above.
+        let matched_routes = self.resolve_routes(&alert);
         if matched_routes.is_empty() {
-            self.metrics.record_alert_dropped("no_route");
             return;
         }
 
@@ -573,21 +536,10 @@ impl AlertPipeline {
             let _ = tx.send(alert.clone());
         }
 
-        // Pass through router (dedup, throttle, route matching)
-        let matched_routes: Vec<_> = self
-            .router
-            .process_alert(&alert)
-            .into_iter()
-            .map(|(i, r)| (i, r.clone()))
-            .collect();
-
+        // Dedup, throttle, route matching. Suppression here only stops
+        // delivery — the alert is already stored and streamed above.
+        let matched_routes = self.resolve_routes(&alert);
         if matched_routes.is_empty() {
-            self.metrics.record_alert_dropped("no_route");
-            tracing::debug!(
-                rule_id = %alert.rule_id,
-                severity = severity_str,
-                "DNS alert dropped: no matching route or dedup/throttle"
-            );
             return;
         }
 
@@ -680,15 +632,10 @@ impl AlertPipeline {
             let _ = tx.send(alert.clone());
         }
 
-        let matched_routes: Vec<_> = self
-            .router
-            .process_alert(&alert)
-            .into_iter()
-            .map(|(i, r)| (i, r.clone()))
-            .collect();
-
+        // Dedup, throttle, route matching. Suppression here only stops
+        // delivery — the alert is already stored and streamed above.
+        let matched_routes = self.resolve_routes(&alert);
         if matched_routes.is_empty() {
-            self.metrics.record_alert_dropped("no_route");
             return;
         }
 
@@ -875,6 +822,32 @@ impl AlertPipeline {
             AlertDestination::Email { .. } => self.email_sender.as_ref(),
             AlertDestination::Otlp => self.otlp_sender.as_ref(),
         }
+    }
+
+    /// Run an alert through the router and clone the routes it matched.
+    ///
+    /// Returns an empty vec when nothing is to be delivered, after recording
+    /// *why*: a duplicate, a throttled rule and an alert no route wants are
+    /// three different operational situations, and reporting them all as
+    /// `no_route` made the drop counter useless for telling them apart.
+    fn resolve_routes(&mut self, alert: &Alert) -> Vec<(usize, domain::alert::entity::AlertRoute)> {
+        let decision = self.router.process_alert(alert);
+        if let Some(reason) = decision.drop_reason() {
+            self.metrics.record_alert_dropped(reason);
+            tracing::debug!(
+                component = %alert.component,
+                rule_id = %alert.rule_id,
+                severity = severity_label(alert.severity),
+                reason,
+                "alert not delivered to any destination"
+            );
+            return Vec::new();
+        }
+        decision
+            .routes()
+            .iter()
+            .map(|(i, r)| (*i, (*r).clone()))
+            .collect()
     }
 
     /// Dispatch an alert to all matched route senders **concurrently**.
@@ -1073,7 +1046,7 @@ mod tests {
         );
         let mut pipeline = AlertPipeline::new(
             router,
-            metrics as Arc<dyn MetricsPort>,
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
             make_audit_service(),
         );
 
@@ -1084,7 +1057,11 @@ mod tests {
             .process_alert(&make_ids_alert("ids-001", Severity::High))
             .await;
 
-        // Both alerts are recorded as alerts_total, but second has no route match (dedup)
+        // Dedup gates delivery, not observation: both alerts are counted, and
+        // the second is dropped under its own reason rather than "no_route".
+        assert_eq!(metrics.alert_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(metrics.dropped_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.last_drop_reason.lock().unwrap(), "dedup");
     }
 
     #[tokio::test]
@@ -1113,6 +1090,7 @@ mod tests {
         alert2.src_addr = [2, 0, 0, 0];
         pipeline.process_alert(&alert2).await;
         assert_eq!(metrics.dropped_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.last_drop_reason.lock().unwrap(), "throttle");
     }
 
     #[tokio::test]

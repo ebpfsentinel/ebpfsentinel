@@ -140,6 +140,7 @@ masking:
   - "no OTLP export recorded yet"
   - "no TLS client available to drive ServerHello"
   - "no TLS client available to drive malicious SNI"
+  - "burst produced"
   - "no alert_id from previous test"
   - "no alerts emitted by this suite — MITRE assertion not applicable here"
   - "no alerts emitted during reload cycle — duplication check N/A"

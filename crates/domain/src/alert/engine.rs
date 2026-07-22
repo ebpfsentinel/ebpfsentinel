@@ -4,6 +4,44 @@ use std::time::{Duration, Instant};
 
 use super::entity::{Alert, AlertRoute};
 
+/// Why an alert did or did not reach its destinations.
+///
+/// Dedup and throttle are *delivery* controls: they decide whether an alert is
+/// handed to the senders, never whether it is recorded. Callers persist, stream
+/// and count the alert before consulting the router, so an alert suppressed
+/// here is still in the store and on the event stream. Keeping the two
+/// suppressions distinct from an empty route list is what lets the caller name
+/// the real reason instead of reporting every non-delivery as "no route".
+#[derive(Debug)]
+pub enum AlertDecision<'a> {
+    /// An identical alert was seen within the dedup window.
+    Deduplicated,
+    /// The rule exceeded its budget for the throttle window.
+    Throttled,
+    /// The alert passed both gates; the routes it matched (possibly none).
+    Routed(Vec<(usize, &'a AlertRoute)>),
+}
+
+impl<'a> AlertDecision<'a> {
+    /// Routes to deliver to — empty when the alert was suppressed or matched nothing.
+    pub fn routes(&self) -> &[(usize, &'a AlertRoute)] {
+        match self {
+            Self::Deduplicated | Self::Throttled => &[],
+            Self::Routed(routes) => routes,
+        }
+    }
+
+    /// Label for the drop metric, or `None` when the alert is being delivered.
+    pub fn drop_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Deduplicated => Some("dedup"),
+            Self::Throttled => Some("throttle"),
+            Self::Routed(routes) if routes.is_empty() => Some("no_route"),
+            Self::Routed(_) => None,
+        }
+    }
+}
+
 /// Alert router with deduplication, throttling, and severity/type route matching.
 ///
 /// Processing pipeline: dedup check → throttle check → route matching.
@@ -35,16 +73,14 @@ impl AlertRouter {
     }
 
     /// Process an alert through dedup → throttle → route matching.
-    /// Returns indices and references to matching routes.
-    /// Returns empty vec if alert is deduplicated or throttled.
-    pub fn process_alert(&mut self, alert: &Alert) -> Vec<(usize, &AlertRoute)> {
+    pub fn process_alert(&mut self, alert: &Alert) -> AlertDecision<'_> {
         let now = Instant::now();
 
         // 1. Deduplication check
         let hash = Self::dedup_key(alert);
         self.expire_dedup(now);
         if self.is_duplicate(hash) {
-            return Vec::new();
+            return AlertDecision::Deduplicated;
         }
         self.recent_hashes.push_back((hash, now));
 
@@ -52,15 +88,17 @@ impl AlertRouter {
         let throttle_key = alert.rule_id.0.clone();
         self.expire_throttle(now);
         if self.is_throttled(&throttle_key, now) {
-            return Vec::new();
+            return AlertDecision::Throttled;
         }
 
         // 3. Route matching
-        self.routes
-            .iter()
-            .enumerate()
-            .filter(|(_, route)| Self::matches_route(alert, route))
-            .collect()
+        AlertDecision::Routed(
+            self.routes
+                .iter()
+                .enumerate()
+                .filter(|(_, route)| Self::matches_route(alert, route))
+                .collect(),
+        )
     }
 
     /// Compute a dedup key by hashing (`rule_id`, `src_ip()`, `dst_ip()`, `dst_port`, protocol).
@@ -212,10 +250,10 @@ mod tests {
         let alert = make_alert("ids-001", Severity::High);
 
         let first = router.process_alert(&alert);
-        assert_eq!(first.len(), 1);
+        assert_eq!(first.routes().len(), 1);
 
         let second = router.process_alert(&alert);
-        assert!(second.is_empty(), "duplicate should be suppressed");
+        assert!(second.routes().is_empty(), "duplicate should be suppressed");
     }
 
     #[test]
@@ -230,11 +268,45 @@ mod tests {
         let alert = make_alert("ids-001", Severity::High);
 
         let first = router.process_alert(&alert);
-        assert_eq!(first.len(), 1);
+        assert_eq!(first.routes().len(), 1);
 
         // After expiry window (0ms), dedup should allow
         let second = router.process_alert(&alert);
-        assert_eq!(second.len(), 1);
+        assert_eq!(second.routes().len(), 1);
+    }
+
+    #[test]
+    fn suppression_reasons_are_distinct() {
+        let routes = vec![make_route("all", Severity::Low)];
+        let mut router =
+            AlertRouter::new(routes, Duration::from_mins(1), Duration::from_mins(5), 1);
+        let alert = make_alert("ids-001", Severity::High);
+
+        assert_eq!(router.process_alert(&alert).drop_reason(), None);
+        assert_eq!(
+            router.process_alert(&alert).drop_reason(),
+            Some("dedup"),
+            "the identical alert is a duplicate, not a throttle victim"
+        );
+
+        // A different flow clears dedup but exhausts the per-rule budget.
+        let mut other = make_alert("ids-001", Severity::High);
+        other.src_addr[0] = 0xC0A8_0002;
+        assert_eq!(router.process_alert(&other).drop_reason(), Some("throttle"));
+
+        // An alert nothing routes to is neither of the two.
+        let mut router = AlertRouter::new(
+            vec![make_route("critical-only", Severity::Critical)],
+            Duration::from_mins(1),
+            Duration::from_mins(5),
+            100,
+        );
+        assert_eq!(
+            router
+                .process_alert(&make_alert("ids-002", Severity::Low))
+                .drop_reason(),
+            Some("no_route")
+        );
     }
 
     #[test]
@@ -248,7 +320,7 @@ mod tests {
             let mut alert = make_alert("ids-001", Severity::High);
             alert.src_addr[0] = i;
             let result = router.process_alert(&alert);
-            assert_eq!(result.len(), 1, "alert {i} should pass throttle");
+            assert_eq!(result.routes().len(), 1, "alert {i} should pass throttle");
         }
     }
 
@@ -262,14 +334,14 @@ mod tests {
             let mut alert = make_alert("ids-001", Severity::High);
             alert.src_addr[0] = i;
             let result = router.process_alert(&alert);
-            assert_eq!(result.len(), 1);
+            assert_eq!(result.routes().len(), 1);
         }
 
         // Third alert should be throttled
         let mut alert = make_alert("ids-001", Severity::High);
         alert.src_addr[0] = 999;
         let result = router.process_alert(&alert);
-        assert!(result.is_empty(), "should be throttled");
+        assert!(result.routes().is_empty(), "should be throttled");
     }
 
     #[test]
@@ -279,10 +351,10 @@ mod tests {
             AlertRouter::new(routes, Duration::from_secs(0), Duration::from_mins(5), 100);
 
         let low = make_alert("ids-low", Severity::Low);
-        assert!(router.process_alert(&low).is_empty());
+        assert!(router.process_alert(&low).routes().is_empty());
 
         let high = make_alert("ids-high", Severity::High);
-        assert_eq!(router.process_alert(&high).len(), 1);
+        assert_eq!(router.process_alert(&high).routes().len(), 1);
     }
 
     #[test]
@@ -296,11 +368,11 @@ mod tests {
             AlertRouter::new(routes, Duration::from_secs(0), Duration::from_mins(5), 100);
 
         let ids_alert = make_alert("ids-001", Severity::High);
-        assert_eq!(router.process_alert(&ids_alert).len(), 1);
+        assert_eq!(router.process_alert(&ids_alert).routes().len(), 1);
 
         let mut fw_alert = make_alert("fw-001", Severity::High);
         fw_alert.component = "firewall".to_string();
-        assert!(router.process_alert(&fw_alert).is_empty());
+        assert!(router.process_alert(&fw_alert).routes().is_empty());
     }
 
     #[test]
@@ -314,9 +386,9 @@ mod tests {
 
         let alert = make_alert("ids-001", Severity::High);
         let matches = router.process_alert(&alert);
-        assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].0, 0);
-        assert_eq!(matches[1].0, 1);
+        assert_eq!(matches.routes().len(), 2);
+        assert_eq!(matches.routes()[0].0, 0);
+        assert_eq!(matches.routes()[1].0, 1);
     }
 
     #[test]
@@ -326,7 +398,7 @@ mod tests {
             AlertRouter::new(routes, Duration::from_secs(0), Duration::from_mins(5), 100);
 
         let alert = make_alert("ids-001", Severity::Low);
-        assert!(router.process_alert(&alert).is_empty());
+        assert!(router.process_alert(&alert).routes().is_empty());
     }
 
     #[test]
@@ -336,12 +408,12 @@ mod tests {
             AlertRouter::new(routes, Duration::from_secs(0), Duration::from_mins(5), 100);
 
         let alert = make_alert("ids-001", Severity::Low);
-        assert!(router.process_alert(&alert).is_empty());
+        assert!(router.process_alert(&alert).routes().is_empty());
 
         router.reload_routes(vec![make_route("new", Severity::Low)]);
         let mut alert2 = make_alert("ids-002", Severity::Low);
         alert2.src_addr[0] = 999;
-        assert_eq!(router.process_alert(&alert2).len(), 1);
+        assert_eq!(router.process_alert(&alert2).routes().len(), 1);
     }
 
     #[test]
@@ -349,7 +421,7 @@ mod tests {
         let mut router =
             AlertRouter::new(vec![], Duration::from_secs(0), Duration::from_mins(5), 100);
         let alert = make_alert("ids-001", Severity::Critical);
-        assert!(router.process_alert(&alert).is_empty());
+        assert!(router.process_alert(&alert).routes().is_empty());
     }
 
     #[test]
@@ -360,8 +432,8 @@ mod tests {
         let alert1 = make_alert("ids-001", Severity::High);
         let alert2 = make_alert("ids-002", Severity::High);
 
-        assert_eq!(router.process_alert(&alert1).len(), 1);
-        assert_eq!(router.process_alert(&alert2).len(), 1);
+        assert_eq!(router.process_alert(&alert1).routes().len(), 1);
+        assert_eq!(router.process_alert(&alert2).routes().len(), 1);
     }
 
     #[test]
@@ -372,19 +444,19 @@ mod tests {
 
         // Low < Medium → filtered out
         let low = make_alert("a", Severity::Low);
-        assert!(router.process_alert(&low).is_empty());
+        assert!(router.process_alert(&low).routes().is_empty());
 
         // Medium >= Medium → passes
         let med = make_alert("b", Severity::Medium);
-        assert_eq!(router.process_alert(&med).len(), 1);
+        assert_eq!(router.process_alert(&med).routes().len(), 1);
 
         // High >= Medium → passes
         let high = make_alert("c", Severity::High);
-        assert_eq!(router.process_alert(&high).len(), 1);
+        assert_eq!(router.process_alert(&high).routes().len(), 1);
 
         // Critical >= Medium → passes
         let crit = make_alert("d", Severity::Critical);
-        assert_eq!(router.process_alert(&crit).len(), 1);
+        assert_eq!(router.process_alert(&crit).routes().len(), 1);
     }
 
     // Property-based tests
@@ -460,11 +532,11 @@ mod tests {
 
                 // First alert should match routes
                 let routes1 = router.process_alert(&alert);
-                prop_assert!(!routes1.is_empty(), "first alert should match routes");
+                prop_assert!(!routes1.routes().is_empty(), "first alert should match routes");
 
                 // Same alert immediately should be deduped
                 let routes2 = router.process_alert(&alert);
-                prop_assert!(routes2.is_empty(), "duplicate alert should be deduped");
+                prop_assert!(routes2.routes().is_empty(), "duplicate alert should be deduped");
             }
         }
     }

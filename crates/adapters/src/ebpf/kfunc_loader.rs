@@ -1088,10 +1088,30 @@ fn wrap_map_data(fd: OwnedFd, map_type: u32) -> Result<AyaMap, KfuncLoaderError>
     Ok(m)
 }
 
+/// Whether two objects declaring a map of this type under the same name may be
+/// given one kernel object.
+///
+/// Everything a program looks *up* — policy tables, config arrays, counters —
+/// is shared on purpose: userspace writes once and every object reads it. A
+/// ring buffer is the opposite, a stream with an owner, so it is created per
+/// object instead. See [`create_object_maps`] for what sharing one broke.
+fn is_shareable_map(map_type: u32) -> bool {
+    map_type != aya_obj::generated::bpf_map_type::BPF_MAP_TYPE_RINGBUF as u32
+}
+
 /// Create (or reuse, when already pinned) every map an object declares, through
 /// the token, returning `name → (owned fd, map_type)`. Shared maps
 /// (`INTERFACE_GROUPS`, `CT_CONFIG`, …) reuse the existing pin so they stay a
 /// single kernel object across the objects that reference them.
+///
+/// Ring buffers are the exception and are never shared. Seven programs declare
+/// a ring named `EVENTS`, each with its own record layout and byte size, and
+/// each loaded program gets its own reader task. Collapsing them onto one
+/// kernel object made every reader drain the same ring, so a single kernel
+/// record was decoded once per loaded program — the duplicate alerts that made
+/// the dedup window look broken — and let a `uprobe-dlp` record land in a
+/// packet-event reader. A private ring per object is also what the aya path
+/// produces, since none of these maps ask for pinning in their definition.
 fn create_object_maps(
     elf: &[u8],
     pin_path: &str,
@@ -1101,6 +1121,10 @@ fn create_object_maps(
     let mut out = HashMap::new();
     for (name, def) in &obj.maps {
         let map_type = def.map_type();
+        if !is_shareable_map(map_type) {
+            out.insert(name.clone(), (raw_map_create(name, def, btf_fd)?, map_type));
+            continue;
+        }
         // The kernel truncates map names to 15 bytes; pin under the full ELF
         // name so distinct maps never collide on the pinned path.
         let pin = format!("{}/{}", pin_path.trim_end_matches('/'), name);
@@ -1228,6 +1252,25 @@ mod tests {
         ];
         let names = unique_names(&sites);
         assert_eq!(names, vec!["bpf_ct_release", "bpf_skb_ct_lookup"]);
+    }
+
+    #[test]
+    fn ring_buffers_are_never_shared_between_objects() {
+        use aya_obj::generated::bpf_map_type::*;
+        // Seven programs declare a ring named `EVENTS`; one kernel ring behind
+        // them would be drained once per loaded program.
+        assert!(!is_shareable_map(BPF_MAP_TYPE_RINGBUF as u32));
+        // Lookup tables stay shared — that is what the pinning is for.
+        for shared in [
+            BPF_MAP_TYPE_ARRAY,
+            BPF_MAP_TYPE_PERCPU_ARRAY,
+            BPF_MAP_TYPE_HASH,
+            BPF_MAP_TYPE_LRU_HASH,
+            BPF_MAP_TYPE_LPM_TRIE,
+            BPF_MAP_TYPE_PROG_ARRAY,
+        ] {
+            assert!(is_shareable_map(shared as u32));
+        }
     }
 
     #[test]
