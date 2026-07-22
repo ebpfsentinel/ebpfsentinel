@@ -432,8 +432,8 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
 // ── eBPF lifecycle ──────────────────────────────────────────────
 
 use adapters::ebpf::{
-    EbpfLoader, IdsMirrorMapManager, InterfaceGroupsManager, MetricsReader, TenantSubnetMapManager,
-    TenantVlanMapManager,
+    EbpfLoader, IdsMirrorMapManager, InterfaceGroupsManager, MetricsReader, TenantCgroupMapManager,
+    TenantSubnetMapManager, TenantVlanMapManager,
 };
 use application::packet_pipeline::AgentEvent;
 use tokio::sync::mpsc;
@@ -468,6 +468,14 @@ pub struct EbpfLoadResult {
     /// Enterprise callers can populate this with `(ip, prefix_len, tenant_id)`
     /// tuples after loading to wire subnet-based tenant identification.
     pub tenant_subnet_mgr: TenantSubnetMapManager,
+    /// Manager for the `TENANT_CGROUP_MAP` map in `tc-ids`.
+    ///
+    /// Enterprise callers populate this with `(cgroup_id, tenant_id)` pairs to
+    /// attribute a container's egress traffic to its tenant, and drop the entry
+    /// when the container exits. Cgroup resolution is the last fallback in the
+    /// kernel's order and only fires on egress, where the skb still carries the
+    /// originating socket.
+    pub tenant_cgroup_mgr: TenantCgroupMapManager,
     /// Manager for the `IDS_MIRROR_CONFIG` map in `tc-ids`.
     ///
     /// Present only when `tc-ids` was loaded successfully. Enterprise callers
@@ -500,6 +508,7 @@ pub async fn load_ebpf_programs(
     let mut iface_groups_mgr = InterfaceGroupsManager::new();
     let mut tenant_vlan_mgr = TenantVlanMapManager::new();
     let mut tenant_subnet_mgr = TenantSubnetMapManager::new();
+    let mut tenant_cgroup_mgr = TenantCgroupMapManager::new();
     let mut program_status = std::collections::HashMap::new();
     let mut ids_mirror_mgr: Option<IdsMirrorMapManager> = None;
 
@@ -625,6 +634,7 @@ pub async fn load_ebpf_programs(
                 tenant_vlan_mgr.add_map(loader.ebpf_mut());
                 tenant_subnet_mgr.add_map(loader.ebpf_mut());
                 tenant_subnet_mgr.add_v6_map(loader.ebpf_mut());
+                tenant_cgroup_mgr.add_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 true
             }
@@ -875,6 +885,7 @@ pub async fn load_ebpf_programs(
         event_rx: Some(event_rx),
         tenant_vlan_mgr,
         tenant_subnet_mgr,
+        tenant_cgroup_mgr,
         ids_mirror_mgr,
     })
 }

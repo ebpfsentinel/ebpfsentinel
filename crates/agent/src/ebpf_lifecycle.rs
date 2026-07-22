@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use adapters::ebpf::{
     ConfigFlagsManager, EbpfLoader, InterfaceGroupsManager, L7PortsManager, MetricsReader,
-    TenantSubnetMapManager, TenantVlanMapManager,
+    TenantCgroupMapManager, TenantSubnetMapManager, TenantVlanMapManager,
 };
 use application::packet_pipeline::AgentEvent;
 use infrastructure::config::AgentConfig;
@@ -44,6 +44,9 @@ pub struct EbpfProgramManager {
     pub tenant_vlan: TenantVlanMapManager,
     /// Cross-program tenant subnet map manager.
     pub tenant_subnet: TenantSubnetMapManager,
+    /// Tenant cgroup map manager (from tc-ids, the only program that resolves
+    /// a tenant from the originating cgroup).
+    pub tenant_cgroup: TenantCgroupMapManager,
     /// Shared metrics readers — the kernel metrics loop reads from this.
     pub metrics_readers: Arc<RwLock<Vec<MetricsReader>>>,
     /// Programs loaded during startup (loaders kept alive in `EbpfState`).
@@ -68,6 +71,7 @@ impl EbpfProgramManager {
             iface_groups: InterfaceGroupsManager::new(),
             tenant_vlan: TenantVlanMapManager::new(),
             tenant_subnet: TenantSubnetMapManager::new(),
+            tenant_cgroup: TenantCgroupMapManager::new(),
             metrics_readers: Arc::new(RwLock::new(Vec::new())),
             startup_loaded: HashSet::new(),
         }
@@ -265,6 +269,7 @@ impl EbpfProgramManager {
         self.tenant_vlan.add_map(loader.ebpf_mut());
         self.tenant_subnet.add_map(loader.ebpf_mut());
         self.tenant_subnet.add_v6_map(loader.ebpf_mut());
+        self.tenant_cgroup.add_map(loader.ebpf_mut());
 
         self.services
             .metrics
