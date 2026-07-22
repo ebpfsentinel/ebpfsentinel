@@ -137,12 +137,25 @@ static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
 #[map]
 static TENANT_CGROUP_MAP: HashMap<u64, u32> = HashMap::with_max_entries(4096, 0);
 
-/// L7 port lookup: dst_port → enabled flag. When set, TCP packets to this
-/// port have their payload captured and sent to userspace for L7 protocol
-/// parsing. Capacity is `MAX_L7_PORTS` (256) — enough to cover databases,
-/// message brokers, caches, and custom services concurrently.
+/// L7 port lookup: service port → enabled flag. When set, TCP packets of a
+/// conversation with this port have their payload captured and sent to
+/// userspace for L7 protocol parsing. Capacity is `MAX_L7_PORTS` (256) —
+/// enough to cover databases, message brokers, caches, and custom services
+/// concurrently.
 #[map]
 static L7_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(MAX_L7_PORTS, 0);
+
+/// Whether either end of the conversation is a configured L7 service port.
+///
+/// A configured port identifies a *service*, and only the client→server
+/// direction carries it as the destination. Matching the destination alone
+/// would therefore capture requests and drop every response — no server
+/// banner, no `ServerHello`, so no JA4S. Both ends are checked so a
+/// conversation is captured whole, whichever hook sees the packet.
+#[inline(always)]
+fn l7_port_configured(src_port: u16, dst_port: u16) -> bool {
+    unsafe { L7_PORTS.get(&dst_port) }.is_some() || unsafe { L7_PORTS.get(&src_port) }.is_some()
+}
 
 /// Small L7 event buffer: `PacketEvent` header + `SMALL_L7_PAYLOAD` bytes
 /// of payload (512 B). Used when TCP payload ≤ 512 bytes — saves ~75%
@@ -435,7 +448,7 @@ fn process_ids_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
     // L7 payload capture (independent of IDS patterns).
     // Reuse the TCP header pointer from the port parse above.
     if let Some(tcphdr) = tcp_hdr_ptr
-        && unsafe { L7_PORTS.get(&dst_port) }.is_some()
+        && l7_port_configured(src_port, dst_port)
     {
         let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
         let l7_offset = l4_offset + tcp_data_off;
@@ -494,7 +507,7 @@ fn process_ids_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
     // L7 payload capture for IPv6 TCP.
     // Reuse the TCP header pointer from the port parse above.
     if let Some(tcphdr) = tcp_hdr_ptr
-        && unsafe { L7_PORTS.get(&dst_port) }.is_some()
+        && l7_port_configured(src_port, dst_port)
     {
         let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
         let l7_offset = l4_offset + tcp_data_off;

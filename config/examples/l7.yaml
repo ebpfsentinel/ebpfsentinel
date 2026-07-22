@@ -31,8 +31,10 @@ aliases:
 l7:
   enabled: true
 
-  # Ports to inspect for L7 content. Traffic on these ports is passed
-  # to the userspace L7 parser for protocol detection and rule matching.
+  # Service ports to inspect for L7 content. A conversation with one of
+  # these ports at either end is passed to the userspace L7 parser for
+  # protocol detection and rule matching — requests carry the port as the
+  # destination, replies as the source, so server-side content is parsed too.
   ports: [80, 443, 8080, 8443, 25, 21, 445]
 
   # ── Rules ──────────────────────────────────────────────────────────
