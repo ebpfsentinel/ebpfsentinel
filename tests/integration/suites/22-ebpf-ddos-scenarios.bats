@@ -336,8 +336,11 @@ teardown_file() {
 # XDP ratelimit/scrub datapath with real flood generators and assert the
 # observed-packet counter actually *grows*, which is a stronger claim.
 
-# _ddos_packet_metric — sum the agent's observed-packet + DDoS counters so
-# a before/after delta proves the flood really crossed the datapath.
+# _ddos_packet_metric — sum the agent's observed-packet counters
+# (ebpfsentinel_packets_total across every interface/action) so a before/after
+# delta proves the flood really crossed the datapath. This family is a
+# monotonic per-packet counter, unlike the ddos_* gauges which can fall as
+# attacks age out — mixing those in makes the delta non-monotonic and flaky.
 _ddos_packet_metric() {
     local metrics
     metrics="$(curl -sf --max-time 5 \
@@ -346,8 +349,29 @@ _ddos_packet_metric() {
         return
     }
     echo "$metrics" \
-        | awk '/^ebpfsentinel_(packets|ddos)[_a-z]*(_total)?[ {]/ {sum += $NF}
+        | awk '/^ebpfsentinel_packets_total[ {]/ {sum += $NF}
                END { if (sum == "") print 0; else print sum }'
+}
+
+# _wait_metric_grows <before> [tries] — poll the packet metric until it
+# exceeds <before>, echoing the observed value. The userspace metric is
+# refreshed from the eBPF maps on a heartbeat, not synchronously with each
+# packet, so a flood's packets can take a good few seconds to surface; poll
+# generously so a flood that really landed is never missed on timing alone.
+_wait_metric_grows() {
+    local before="${1:?usage: _wait_metric_grows <before> [tries]}"
+    local tries="${2:-20}"
+    local now
+    for _ in $(seq 1 "$tries"); do
+        now="$(_ddos_packet_metric)"
+        if [ "${now:-0}" -gt "${before:-0}" ]; then
+            echo "$now"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "${now:-0}"
+    return 1
 }
 
 @test "real nping crafted TCP-flag flood grows the DDoS packet counter" {
@@ -357,16 +381,19 @@ _ddos_packet_metric() {
     local before
     before="$(_ddos_packet_metric)"
 
-    # nping ships with nmap. Craft a SYN+ACK+RST burst at the ratelimit
-    # hook; --rate/--count keep it bounded so the suite stays fast.
+    # nping ships with nmap. Drive a SYN port-sweep flood across a wide
+    # destination-port range: sweeping the destination port makes every packet
+    # a distinct flow, a real attack pattern the firewall sees packet-for-packet.
+    # The DDoS counter only advances once the observed rate crosses the
+    # detector's pps floor, so push a high --rate; --count is rounds-per-port,
+    # so a few dozen rounds over ~1000 ports is a short, high-pps burst (not the
+    # multi-minute marathon a large per-port count would produce).
     ip netns exec "$EBPF_TEST_NS" \
-        nping --tcp -p 8888 --flags syn,ack,rst \
-        --count 400 --rate 400 "$EBPF_HOST_IP" >/dev/null 2>&1 || true
+        nping --tcp -p 8000-8999 --flags syn \
+        --count 30 --rate 100000 "$EBPF_HOST_IP" >/dev/null 2>&1 || true
 
-    sleep 3
     local after
-    after="$(_ddos_packet_metric)"
-    [ "${after:-0}" -gt "${before:-0}" ] || {
+    after="$(_wait_metric_grows "$before")" || {
         echo "packet counter did not grow under nping flood: ${before} -> ${after}" >&2
         return 1
     }
@@ -379,16 +406,16 @@ _ddos_packet_metric() {
     local before
     before="$(_ddos_packet_metric)"
 
-    # t50 is a raw multi-protocol flooder; --threshold bounds the burst so
-    # it terminates instead of running forever like --flood.
+    # t50 is a raw multi-protocol flooder; --threshold bounds the burst so it
+    # terminates instead of running forever like --flood. Send a large burst so
+    # its contribution is unmistakable against the running packet total even
+    # after the preceding nping flood.
     ip netns exec "$EBPF_TEST_NS" \
-        t50 "$EBPF_HOST_IP" --protocol TCP --dport 8888 --threshold 2000 \
+        t50 "$EBPF_HOST_IP" --protocol TCP --dport 8888 --threshold 20000 \
         >/dev/null 2>&1 || true
 
-    sleep 3
     local after
-    after="$(_ddos_packet_metric)"
-    [ "${after:-0}" -gt "${before:-0}" ] || {
+    after="$(_wait_metric_grows "$before")" || {
         echo "packet counter did not grow under t50 flood: ${before} -> ${after}" >&2
         return 1
     }

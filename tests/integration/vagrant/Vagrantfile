@@ -117,8 +117,16 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
         linux-headers-$(uname -r) iproute2 tcpdump curl wget jq git \
         ca-certificates openssl \
         iperf3 hping3 ncat stress-ng bc \
+        nmap wrk \
         hydra \
         conntrack
+      # dnsperf (suite 19 DNS load) and t50 (suite 22 multi-proto flood) drive
+      # the local-lane netns tests on this VM. Best-effort: not in every mirror,
+      # so a miss must not fail the batch (the load test env-skips instead).
+      for optpkg in dnsperf t50; do
+        apt-get install -y --no-install-recommends "$optpkg" \
+          || echo "  (optional tool '$optpkg' unavailable in repo — its load test will skip)"
+      done
 
       # Install bpftool if available
       apt-get install -y --no-install-recommends linux-tools-$(uname -r) bpftool 2>/dev/null || true
