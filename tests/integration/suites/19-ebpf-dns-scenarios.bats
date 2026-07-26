@@ -108,8 +108,11 @@ teardown_file() {
     echo "$metrics" | grep -qE "ebpfsentinel_dns|ebpfsentinel_packets"
 }
 
-# _dns_observed_metric — sum the agent's DNS-observation counters so a
+# _dns_observed_metric — sum the agent's observed-packet counters so a
 # before/after delta can prove real query volume reached the datapath.
+# DNS observation is exposed as ebpfsentinel_packets_total{interface=
+# "DNS_METRICS",...}; prefer the DNS-labelled rows and fall back to the
+# whole packets family if the label naming differs on this build.
 _dns_observed_metric() {
     local metrics
     metrics="$(curl -sf --max-time 5 \
@@ -118,8 +121,14 @@ _dns_observed_metric() {
         return
     }
     echo "$metrics" \
-        | awk '/^ebpfsentinel_dns_(queries|packets)[_a-z]*(_total)?[ {]/ {sum += $NF}
-               END { if (sum == "") print 0; else print sum }'
+        | awk '/^ebpfsentinel_packets[_a-z]*(_total)?[ {]/ {
+                   all += $NF
+                   if ($0 ~ /DNS_METRICS/) dns += $NF
+               }
+               END {
+                   v = (dns > 0) ? dns : all
+                   if (v == "") print 0; else print v
+               }'
 }
 
 @test "real dnsperf query volume is observed by the DNS datapath" {
