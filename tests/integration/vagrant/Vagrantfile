@@ -289,17 +289,24 @@ SYSCTL
       set -euxo pipefail
       export DEBIAN_FRONTEND=noninteractive
 
+      # Pin the k8s tooling so the 10-kubernetes suite is reproducible and a
+      # moving "latest"/"stable" pointer can't shift behaviour between runs.
+      KUBECTL_VERSION="v1.31.4"
+      MINIKUBE_VERSION="v1.35.0"
+      ARCH="$(dpkg --print-architecture)"
+
       if ! command -v kubectl &>/dev/null; then
-        KVER="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
-        curl -fsSL -o /usr/local/bin/kubectl \
-          "https://dl.k8s.io/release/${KVER}/bin/linux/$(dpkg --print-architecture)/kubectl"
+        curl -fsSL --retry 3 --retry-delay 5 --max-time 180 -o /usr/local/bin/kubectl \
+          "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
         chmod +x /usr/local/bin/kubectl
+        kubectl version --client >/dev/null
       fi
 
       if ! command -v minikube &>/dev/null; then
-        curl -fsSL -o /usr/local/bin/minikube \
-          "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-$(dpkg --print-architecture)"
+        curl -fsSL --retry 3 --retry-delay 5 --max-time 180 -o /usr/local/bin/minikube \
+          "https://storage.googleapis.com/minikube/releases/${MINIKUBE_VERSION}/minikube-linux-${ARCH}"
         chmod +x /usr/local/bin/minikube
+        minikube version >/dev/null
       fi
 
       # conntrack is a minikube hard dependency; ensure it is present.
@@ -494,7 +501,13 @@ UNIT
       apt-get install -y --no-install-recommends \
         curl jq iperf3 hping3 ncat nmap bc openssl \
         sshpass stress-ng netcat-openbsd \
-        swaks lftp smbclient hydra ncrack ldnsutils
+        swaks lftp smbclient hydra ncrack ldnsutils wrk
+      # dnsperf (suite 19 DNS load) and t50 (suite 22 multi-proto flood) are
+      # best-effort: not in every mirror, so a miss must not fail the batch.
+      for optpkg in dnsperf t50; do
+        apt-get install -y --no-install-recommends "$optpkg" \
+          || echo "  (optional tool '$optpkg' unavailable in repo — its load test will skip)"
+      done
 
       # pktgen kernel module for suite 42 (≥1 Mpps generation from the NIC).
       # Load now and persist so the module is present across reboots.

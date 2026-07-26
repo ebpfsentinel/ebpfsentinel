@@ -81,6 +81,7 @@ check_bin "ncrack"        ncrack       -V       "Ncrack"
 check_bin "tcpdump"       tcpdump      --version "tcpdump version"
 check_bin "scapy-cli"     /opt/scapy-venv/bin/python3 -V "Python"
 check_bin "sshpass"       sshpass      -V       "sshpass"
+check_bin "go"            go           version  "go version"
 
 # Release tarballs / source-built binaries — pinned to exact versions
 check_bin "vegeta"        vegeta       -version "12.13.0"

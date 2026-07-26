@@ -101,6 +101,9 @@ export AGENT_SSH="ssh -i ~/.ssh/agent_key -o StrictHostKeyChecking=no vagrant@19
 export AGENT_HOST=192.168.56.10
 export AGENT_HTTP_PORT=8080
 export AGENT_GRPC_PORT=50051
+# MHDDoS sources land at /opt/MHDDoS (case-sensitive); ja4_helpers and the
+# MHDDoS suites default to /opt/mhddos, so point them at the real path.
+export MHDDOS_HOME=/opt/MHDDoS
 ENVEOF
 
 # Add to bashrc if not already there
@@ -149,7 +152,7 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     tcpdump tshark nmap wrk slowhttptest \
     python3-venv python3-pip cmake build-essential pkg-config \
-    libpcap-dev unzip jq
+    libpcap-dev unzip jq golang-go
 # Optional exotic attack tools — not present in every mirror (t50/ncrack in
 # particular). Install best-effort so one missing package can't atomically fail
 # the apt transaction and leave the essential tools above uninstalled.
@@ -159,13 +162,30 @@ for pkg in t50 dnsperf hydra ncrack; do
 done
 
 # [tk/2] vendored MHDDoS submodule + venv
+# Suites 38/41/63 drive MHDDoS from /opt/MHDDoS. The sources ship as a
+# pinned submodule; if the checkout is empty (fresh clone without
+# --recursive) fall back to a pinned-commit clone so the tree is never
+# silently absent.
 echo "  [tk/2] MHDDoS submodule + venv"
+MHDDOS_COMMIT="804f989712d9bbaa14d329436724aecb71b0d0e7"
+MHDDOS_SRC="${INTEGRATION_DIR}/vendor/MHDDoS"
 if [ -d "${PROJECT_DIR}/.git" ]; then
     (cd "${PROJECT_DIR}" && git submodule update --init --depth 1 --recursive \
-        -- tests/integration/vendor/MHDDoS) || true
+        -- tests/integration/vendor/MHDDoS) \
+        || echo "    WARN: submodule update failed; will try pinned clone"
+fi
+if [ ! -f "${MHDDOS_SRC}/start.py" ]; then
+    echo "    submodule empty — cloning MHDDoS at pinned commit ${MHDDOS_COMMIT}"
+    rm -rf "${MHDDOS_SRC}"
+    git clone https://github.com/MatrixTM/MHDDoS "${MHDDOS_SRC}"
+    (cd "${MHDDOS_SRC}" && git checkout --detach "${MHDDOS_COMMIT}")
+fi
+if [ ! -f "${MHDDOS_SRC}/start.py" ]; then
+    echo "    ERROR: MHDDoS sources unavailable at ${MHDDOS_SRC} (start.py missing)" >&2
+    exit 1
 fi
 sudo mkdir -p /opt/MHDDoS
-sudo cp -r "${INTEGRATION_DIR}/vendor/MHDDoS/." /opt/MHDDoS/
+sudo cp -r "${MHDDOS_SRC}/." /opt/MHDDoS/
 sudo chown -R "${USER}:${USER}" /opt/MHDDoS
 if [ ! -d /opt/MHDDoS/.venv ]; then
     python3 -m venv /opt/MHDDoS/.venv
