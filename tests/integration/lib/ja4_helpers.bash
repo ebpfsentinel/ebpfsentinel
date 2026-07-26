@@ -68,6 +68,12 @@ ja4_have_client() {
             command -v mhddos >/dev/null 2>&1 \
                 || [ -f "${MHDDOS_HOME:-/opt/mhddos}/start.py" ]
             ;;
+        mitmproxy)
+            # mitmdump ships in the attacker venv (or on PATH). Its TLS
+            # stack yields a JA4 distinct from the other clients.
+            [ -x "${MITMPROXY_BIN:-/opt/mitmproxy-venv/bin/mitmdump}" ] \
+                || command -v mitmdump >/dev/null 2>&1
+            ;;
         *)
             return 1
             ;;
@@ -293,6 +299,29 @@ PY
     fi
 }
 
+_ja4_connect_mitmproxy() {
+    local sni="$1"
+    local bin="${MITMPROXY_BIN:-/opt/mitmproxy-venv/bin/mitmdump}"
+    command -v mitmdump >/dev/null 2>&1 && bin="$(command -v mitmdump)"
+    [ -x "$bin" ] || return 0
+
+    # Run mitmdump as a reverse proxy in front of the agent TLS target.
+    # curl drives a plain request into it; mitmproxy opens the *upstream*
+    # TLS connection with its own stack, emitting a distinct ClientHello
+    # the agent observes. SNI on the upstream leg is the target host —
+    # the diversity test only needs a distinct fingerprint, not a match.
+    local lport=8931
+    "$bin" --mode "reverse:https://${JA4_TARGET_HOST}:${JA4_TLS_PORT}" \
+        --listen-host 127.0.0.1 --listen-port "$lport" \
+        --ssl-insecure -q >/dev/null 2>&1 &
+    local mp=$!
+    sleep 2
+    curl -sk --max-time 5 -H "Host: ${sni}" \
+        "http://127.0.0.1:${lport}/" >/dev/null 2>&1 || true
+    kill -TERM "$mp" 2>/dev/null || true
+    wait "$mp" 2>/dev/null || true
+}
+
 # ja4_connect <client> <sni>
 ja4_connect() {
     local client="${1:?usage: ja4_connect <client> <sni>}"
@@ -304,6 +333,7 @@ ja4_connect() {
         aiohttp)  _ja4_connect_aiohttp "$sni" ;;
         go)       _ja4_connect_go "$sni" ;;
         mhddos)   _ja4_connect_mhddos "$sni" ;;
+        mitmproxy) _ja4_connect_mitmproxy "$sni" ;;
         *)
             echo "ja4_connect: unknown client '${client}'" >&2
             return 2

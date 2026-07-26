@@ -139,14 +139,47 @@ PY
     fi
 }
 
+# _have_http_loadgen — echo the strongest real HTTP load generator present
+# (vegeta > k6 > wrk), or empty if only the curl fallback is available.
+_have_http_loadgen() {
+    local g
+    for g in vegeta k6 wrk; do
+        command -v "$g" >/dev/null 2>&1 && { echo "$g"; return; }
+    done
+    echo ""
+}
+
 _start_http_load() {
-    # wrk if available; otherwise a curl burst loop in the background.
+    # Prefer a real load generator (vegeta/k6/wrk); otherwise a curl burst
+    # loop. The correctness assertions hold regardless of which one drives.
     local url="http://${AGENT_HOST}:${AGENT_HTTP_PORT}/healthz"
-    if command -v wrk >/dev/null 2>&1; then
-        wrk -c 50 -t 2 -d 30s "${url}" >"${DATA_DIR}/wrk.out" 2>&1 &
-        echo "$!"
-        return
-    fi
+    local gen
+    gen="$(_have_http_loadgen)"
+    case "${gen}" in
+        vegeta)
+            ( echo "GET ${url}" \
+                | vegeta attack -duration=30s -rate=200 -timeout=2s \
+                | vegeta report -type=json >"${DATA_DIR}/vegeta.json" 2>/dev/null ) &
+            echo "$!"
+            return
+            ;;
+        k6)
+            cat >"${DATA_DIR}/k6-load.js" <<K6
+import http from 'k6/http';
+export const options = { vus: 20, duration: '30s' };
+export default function () { http.get('${url}'); }
+K6
+            k6 run --quiet --summary-export="${DATA_DIR}/k6-summary.json" \
+                "${DATA_DIR}/k6-load.js" >/dev/null 2>&1 &
+            echo "$!"
+            return
+            ;;
+        wrk)
+            wrk -c 50 -t 2 -d 30s "${url}" >"${DATA_DIR}/wrk.out" 2>&1 &
+            echo "$!"
+            return
+            ;;
+    esac
     (
         local end=$(( $(date +%s) + 30 ))
         while [ "$(date +%s)" -lt "${end}" ]; do
@@ -156,6 +189,25 @@ _start_http_load() {
         done
     ) >/dev/null 2>&1 &
     echo "$!"
+}
+
+# _http_loadgen_requests <gen> — parse the request count a finished
+# generator reported into stdout (0 if unparseable).
+_http_loadgen_requests() {
+    case "$1" in
+        vegeta)
+            jq -r '.requests // 0' "${DATA_DIR}/vegeta.json" 2>/dev/null || echo 0
+            ;;
+        k6)
+            jq -r '.metrics.http_reqs.count // .metrics.http_reqs.values.count // 0' \
+                "${DATA_DIR}/k6-summary.json" 2>/dev/null || echo 0
+            ;;
+        wrk)
+            awk '/requests in/ {print $1; found=1} END{ if(!found) print 0 }' \
+                "${DATA_DIR}/wrk.out" 2>/dev/null || echo 0
+            ;;
+        *) echo 0 ;;
+    esac
 }
 
 _start_tcp_load() {
@@ -308,6 +360,50 @@ _start_tcp_load() {
     }
     [ "$(echo "${value} >= 0" | bc -l 2>/dev/null)" = "1" ] || {
         echo "rules_reloads_total reported negative or non-numeric: ${value}" >&2
+        return 1
+    }
+}
+
+# ── Real HTTP load generator drives measurable throughput ───────────
+
+@test "a real HTTP load generator sustains throughput while a reload fires" {
+    local gen
+    gen="$(_have_http_loadgen)"
+    [ -n "${gen}" ] || soft_skip "no real HTTP load generator (vegeta/k6/wrk) on this host"
+
+    local pid_before
+    pid_before="$(_agent_pid_local)"
+
+    # Drive real sustained load, flip a rule mid-flight, then drain.
+    local http_pid
+    http_pid="$(_start_http_load)"
+    sleep 8
+    _mutate_config_toggle "fw-loadgen-toggle" 2>/dev/null || true
+    _signal_hup
+    if [ -n "${http_pid}" ]; then
+        wait "${http_pid}" 2>/dev/null || true
+    fi
+
+    # The generator must have issued real requests.
+    local reqs
+    reqs="$(_http_loadgen_requests "${gen}")"
+    [ "${reqs%.*}" -gt 0 ] 2>/dev/null || {
+        echo "${gen} reported no requests issued (${reqs})" >&2
+        return 1
+    }
+
+    # Agent survived the load+reload on the same PID and still answers.
+    local pid_after
+    pid_after="$(_agent_pid_local)"
+    [ "${pid_after}" = "${pid_before}" ] || {
+        echo "agent PID changed under ${gen} load: ${pid_before} → ${pid_after}" >&2
+        return 1
+    }
+    local healthz
+    healthz="$(curl -sf --max-time 5 \
+        "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/healthz" 2>/dev/null)" || true
+    [ -n "${healthz}" ] || {
+        echo "agent /healthz unreachable after ${gen} load" >&2
         return 1
     }
 }

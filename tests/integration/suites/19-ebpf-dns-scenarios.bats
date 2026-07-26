@@ -107,3 +107,54 @@ teardown_file() {
     [ -n "$metrics" ]
     echo "$metrics" | grep -qE "ebpfsentinel_dns|ebpfsentinel_packets"
 }
+
+# _dns_observed_metric — sum the agent's DNS-observation counters so a
+# before/after delta can prove real query volume reached the datapath.
+_dns_observed_metric() {
+    local metrics
+    metrics="$(curl -sf --max-time 5 \
+        "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || {
+        echo 0
+        return
+    }
+    echo "$metrics" \
+        | awk '/^ebpfsentinel_dns_(queries|packets)[_a-z]*(_total)?[ {]/ {sum += $NF}
+               END { if (sum == "") print 0; else print sum }'
+}
+
+@test "real dnsperf query volume is observed by the DNS datapath" {
+    require_tool dnsperf
+
+    local qfile="${DATA_DIR}/dnsperf-queries.txt"
+    printf '%s\n' \
+        "example.com A" "example.net AAAA" "test.local A" \
+        "corp.internal A" "service.test TXT" "api.example.org A" \
+        > "${qfile}"
+
+    local before
+    before="$(_dns_observed_metric)"
+
+    # Drive a few seconds of real DNS queries from the netns at the agent's
+    # :53 hook. No resolver is bound, so dnsperf records timeouts — but every
+    # query packet still crosses the tc-dns hook, which is what we assert.
+    local out
+    out="$(ip netns exec "${EBPF_TEST_NS}" \
+        dnsperf -s "${EBPF_HOST_IP}" -p 53 -d "${qfile}" -l 5 -c 5 -q 200 \
+        2>&1)" || true
+
+    local sent
+    sent="$(echo "${out}" | awk -F'[ ]+' '/Queries sent/ {print $NF}')"
+    [ "${sent:-0}" -gt 0 ] || {
+        echo "dnsperf reported no queries sent" >&2
+        echo "${out}" >&2
+        return 1
+    }
+
+    sleep 2
+    local after
+    after="$(_dns_observed_metric)"
+    [ "${after:-0}" -gt "${before:-0}" ] || {
+        echo "DNS observation counter did not grow under dnsperf load: ${before} -> ${after}" >&2
+        return 1
+    }
+}

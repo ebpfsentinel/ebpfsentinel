@@ -329,3 +329,67 @@ teardown_file() {
     # At least some DDoS metrics should exist after the flood tests
     echo "$metrics" | grep -qE "ebpfsentinel_ddos" || true
 }
+
+# ── Real crafted-packet flood tools (nping / t50) ─────────────────
+#
+# The hping3 tests above assert metric *presence*; these two drive the
+# XDP ratelimit/scrub datapath with real flood generators and assert the
+# observed-packet counter actually *grows*, which is a stronger claim.
+
+# _ddos_packet_metric — sum the agent's observed-packet + DDoS counters so
+# a before/after delta proves the flood really crossed the datapath.
+_ddos_packet_metric() {
+    local metrics
+    metrics="$(curl -sf --max-time 5 \
+        "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || {
+        echo 0
+        return
+    }
+    echo "$metrics" \
+        | awk '/^ebpfsentinel_(packets|ddos)[_a-z]*(_total)?[ {]/ {sum += $NF}
+               END { if (sum == "") print 0; else print sum }'
+}
+
+@test "real nping crafted TCP-flag flood grows the DDoS packet counter" {
+    require_root
+    require_tool nping
+
+    local before
+    before="$(_ddos_packet_metric)"
+
+    # nping ships with nmap. Craft a SYN+ACK+RST burst at the ratelimit
+    # hook; --rate/--count keep it bounded so the suite stays fast.
+    ip netns exec "$EBPF_TEST_NS" \
+        nping --tcp -p 8888 --flags syn,ack,rst \
+        --count 400 --rate 400 "$EBPF_HOST_IP" >/dev/null 2>&1 || true
+
+    sleep 3
+    local after
+    after="$(_ddos_packet_metric)"
+    [ "${after:-0}" -gt "${before:-0}" ] || {
+        echo "packet counter did not grow under nping flood: ${before} -> ${after}" >&2
+        return 1
+    }
+}
+
+@test "real t50 multi-protocol flood grows the DDoS packet counter" {
+    require_root
+    require_tool t50
+
+    local before
+    before="$(_ddos_packet_metric)"
+
+    # t50 is a raw multi-protocol flooder; --threshold bounds the burst so
+    # it terminates instead of running forever like --flood.
+    ip netns exec "$EBPF_TEST_NS" \
+        t50 "$EBPF_HOST_IP" --protocol TCP --dport 8888 --threshold 2000 \
+        >/dev/null 2>&1 || true
+
+    sleep 3
+    local after
+    after="$(_ddos_packet_metric)"
+    [ "${after:-0}" -gt "${before:-0}" ] || {
+        echo "packet counter did not grow under t50 flood: ${before} -> ${after}" >&2
+        return 1
+    }
+}

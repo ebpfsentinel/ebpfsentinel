@@ -124,3 +124,33 @@ teardown() {
     status_code="$(api_status /healthz)"
     assert_http_status "200" "$status_code"
 }
+
+@test "agent stays responsive under stress-ng CPU load" {
+    require_tool stress-ng
+    start_agent "$PREPARED_CONFIG"
+
+    # Saturate every core for a few seconds while polling the health probe.
+    # A well-behaved agent keeps answering /healthz under CPU contention;
+    # a busy-loop or priority-inversion regression would stall the probe.
+    local ncpu
+    ncpu="$(nproc 2>/dev/null || echo 2)"
+    stress-ng --cpu "$ncpu" --timeout 6s >/dev/null 2>&1 &
+    local stress_pid=$!
+
+    local ok=0 i
+    for i in 1 2 3 4 5; do
+        if [ "$(api_status /healthz)" = "200" ]; then
+            ok=$((ok + 1))
+        fi
+        sleep 1
+    done
+
+    kill -TERM "$stress_pid" 2>/dev/null || true
+    wait "$stress_pid" 2>/dev/null || true
+
+    # Every probe during the load window must have succeeded.
+    [ "$ok" -ge 5 ] || {
+        echo "healthz missed under CPU load: only ${ok}/5 probes returned 200" >&2
+        return 1
+    }
+}

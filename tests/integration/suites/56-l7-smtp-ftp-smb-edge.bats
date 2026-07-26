@@ -357,6 +357,161 @@ _drive_l7_commands() {
     }
 }
 
+# ── Real protocol clients on the wire ──────────────────────────────
+#
+# The tests above synthesise each command byte-for-byte. These drive the
+# genuine client tools (swaks/lftp/smbclient) so the exact dialogue a real
+# SMTP/FTP/SMB peer emits — banners, capability negotiation, login state —
+# crosses the L7-hooked ports and exercises the parser against real framing,
+# not just a hand-rolled minimal frame.
+
+# _l7_write_smtp_responder <path>
+# Minimal ESMTP responder: greet, then answer each verb so swaks proceeds
+# far enough to put EHLO/MAIL/RCPT on the wire.
+_l7_write_smtp_responder() {
+    cat >"$1" <<'RESP'
+#!/usr/bin/env bash
+printf '220 responder.test ESMTP\r\n'
+while IFS= read -r line; do
+    line="${line%$'\r'}"
+    case "$line" in
+        EHLO*|HELO*) printf '250-responder.test\r\n250 OK\r\n' ;;
+        MAIL*|RCPT*) printf '250 OK\r\n' ;;
+        DATA)        printf '354 end with .\r\n' ;;
+        .)           printf '250 queued\r\n' ;;
+        QUIT)        printf '221 bye\r\n'; break ;;
+        *)           printf '250 OK\r\n' ;;
+    esac
+done
+RESP
+    chmod +x "$1"
+}
+
+# _l7_write_ftp_responder <path>
+# Minimal FTP control responder that logs the client in and accepts PORT so
+# lftp (active mode) emits a genuine PORT command before the transfer.
+_l7_write_ftp_responder() {
+    cat >"$1" <<'RESP'
+#!/usr/bin/env bash
+printf '220 responder.test FTP\r\n'
+while IFS= read -r line; do
+    line="${line%$'\r'}"
+    case "$line" in
+        USER*)       printf '331 need password\r\n' ;;
+        PASS*)       printf '230 logged in\r\n' ;;
+        SYST)        printf '215 UNIX Type: L8\r\n' ;;
+        FEAT)        printf '211-features\r\n211 end\r\n' ;;
+        PWD|XPWD)    printf '257 "/"\r\n' ;;
+        TYPE*)       printf '200 type set\r\n' ;;
+        PORT*)       printf '200 PORT command ok\r\n' ;;
+        LIST*|NLST*) printf '150 opening data\r\n226 transfer complete\r\n' ;;
+        QUIT)        printf '221 bye\r\n'; break ;;
+        *)           printf '200 ok\r\n' ;;
+    esac
+done
+RESP
+    chmod +x "$1"
+}
+
+@test "real swaks SMTP client EHLO is recorded on the L7 audit trail" {
+    require_tool swaks
+    require_tool ncat
+
+    local resp="${DATA_DIR}/smtp-responder.sh"
+    _l7_write_smtp_responder "${resp}"
+    ncat -l "${EBPF_HOST_IP}" 25 -k --exec "${resp}" >/dev/null 2>&1 &
+    local pid=$!
+    sleep 0.5
+
+    # swaks speaks a full ESMTP dialogue; the EHLO crosses the L7 hook.
+    local i
+    for i in 1 2 3; do
+        ip netns exec "${EBPF_TEST_NS}" \
+            swaks --server "${EBPF_HOST_IP}:25" \
+                --helo probe.test \
+                --from probe@probe.test --to root@responder.test \
+                --timeout 4 >/dev/null 2>&1 || true
+    done
+
+    kill "${pid}" 2>/dev/null || true
+
+    local count=0 attempt=0
+    while [ "${attempt}" -lt 15 ]; do
+        local body
+        body="$(api_get '/api/v1/audit/logs?component=l7&limit=200' 2>/dev/null)" || body=""
+        count="$(echo "${body}" | jq -r '(.entries // []) | length' 2>/dev/null)" || count=0
+        [ "${count:-0}" -ge 1 ] && break
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    [ "${count:-0}" -ge 1 ] || {
+        echo "no L7 audit entries after real swaks EHLO" >&2
+        api_get '/api/v1/audit/logs?component=l7&limit=200' >&2 || true
+        return 1
+    }
+}
+
+@test "real lftp FTP client PORT command fires the L7 deny alert" {
+    require_tool lftp
+    require_tool ncat
+
+    local resp="${DATA_DIR}/ftp-responder.sh"
+    _l7_write_ftp_responder "${resp}"
+    ncat -l "${EBPF_HOST_IP}" 21 -k --exec "${resp}" >/dev/null 2>&1 &
+    local pid=$!
+    sleep 0.5
+
+    # Active mode (passive off) makes lftp issue PORT before the listing.
+    local i
+    for i in 1 2 3; do
+        ip netns exec "${EBPF_TEST_NS}" \
+            lftp -u probe,probe -e \
+                'set ftp:passive-mode false; set net:timeout 3; set net:max-retries 1; cd /; ls; bye' \
+                "${EBPF_HOST_IP}" >/dev/null 2>&1 || true
+    done
+
+    kill "${pid}" 2>/dev/null || true
+
+    wait_for_alert \
+        '.[] | select(.rule_id == "l7-ftp-port-deny" and .component == "l7")' \
+        15 1 >/dev/null || {
+        echo "no l7-ftp-port-deny alert after real lftp PORT command" >&2
+        api_get /api/v1/alerts >&2 || true
+        return 1
+    }
+}
+
+@test "real smbclient SMB1 negotiate fires the L7 deny alert" {
+    require_tool smbclient
+    require_tool ncat
+
+    # SMB direct-TCP (445): the client speaks first, so a recv-only listener
+    # completes the handshake and the negotiate crosses the L7 hook.
+    ncat -l "${EBPF_HOST_IP}" 445 -k --recv-only >/dev/null 2>&1 &
+    local pid=$!
+    sleep 0.5
+
+    # Force SMB1 (NT1) so the negotiate matches the SMB1 deny rule.
+    local i
+    for i in 1 2 3; do
+        ip netns exec "${EBPF_TEST_NS}" \
+            smbclient -N -L "//${EBPF_HOST_IP}" -p 445 \
+                --option='client min protocol=NT1' \
+                --option='client max protocol=NT1' \
+                --socket-options='TCP_NODELAY' >/dev/null 2>&1 || true
+    done
+
+    kill "${pid}" 2>/dev/null || true
+
+    wait_for_alert \
+        '.[] | select(.rule_id == "l7-smb-smb1-deny" and .component == "l7")' \
+        15 1 >/dev/null || {
+        echo "no l7-smb-smb1-deny alert after real smbclient negotiate" >&2
+        api_get /api/v1/alerts >&2 || true
+        return 1
+    }
+}
+
 # ── MITRE coverage sweep ───────────────────────────────────────────
 
 @test "alerts emitted by this suite carry a MITRE technique mapping" {

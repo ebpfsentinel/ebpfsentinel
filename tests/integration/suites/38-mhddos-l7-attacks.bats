@@ -151,6 +151,76 @@ _RL_LABEL='{interface="ratelimit",action="drop"}'
 # catches them would assert the wrong thing; the slow-attack and L7-timeout
 # paths that do cover them live in suite 39.
 
+# ── Real web scanner (nuclei) ─────────────────────────────────────
+#
+# nuclei is provisioned on the attacker VM. It drives genuine crafted
+# HTTP requests (path traversal / SQLi markers) at the agent, which the
+# tc-ids / L7 datapath observes. We assert on the broad observed-packet
+# counter rather than a specific signature so the test is robust to the
+# fixture's exact rule set — the point is that a real scanner's traffic
+# reaches the datapath.
+
+# _l7_packet_metric — sum every observed-packet counter the agent exposes.
+_l7_packet_metric() {
+    local metrics
+    metrics="$(curl -sf --max-time 5 \
+        "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || {
+        echo 0
+        return
+    }
+    echo "$metrics" \
+        | awk '/^ebpfsentinel_packets[_a-z]*(_total)?[ {]/ {sum += $NF}
+               END { if (sum == "") print 0; else print sum }'
+}
+
+@test "real nuclei web scan traffic reaches the L7 datapath" {
+    if ! command -v nuclei >/dev/null 2>&1; then
+        env_skip "nuclei not available on attacker VM"
+    fi
+
+    # Self-contained template — no nuclei-templates DB download required,
+    # so the scan runs offline in the test VM.
+    local tmpl="${DATA_DIR}/ebpfsentinel-probe.yaml"
+    cat > "${tmpl}" <<'YAML'
+id: ebpfsentinel-datapath-probe
+info:
+  name: ebpfsentinel datapath probe
+  author: ebpfsentinel
+  severity: info
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"
+      - "{{BaseURL}}/../../../../etc/passwd"
+      - "{{BaseURL}}/index.php?id=1%20OR%201=1"
+      - "{{BaseURL}}/admin/config"
+    matchers-condition: or
+    matchers:
+      - type: status
+        status:
+          - 200
+          - 400
+          - 401
+          - 403
+          - 404
+YAML
+
+    local before
+    before="$(_l7_packet_metric)"
+
+    nuclei -u "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/" \
+        -t "${tmpl}" -rate-limit 200 -c 20 -timeout 3 \
+        -duc -no-color -silent >/dev/null 2>&1 || true
+
+    sleep 3
+    local after
+    after="$(_l7_packet_metric)"
+    [ "${after:-0}" -gt "${before:-0}" ] || {
+        echo "observed-packet counter did not grow under nuclei scan: ${before} -> ${after}" >&2
+        return 1
+    }
+}
+
 # ── MITRE coverage sweep ───────────────────────────────────────────
 
 @test "alerts emitted by this suite carry a MITRE technique mapping" {

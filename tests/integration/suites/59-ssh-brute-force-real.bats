@@ -250,6 +250,58 @@ _drive_ssh_hydra() {
     assert_alert_has_mitre_technique T1110 15
 }
 
+# ── Real ncrack credential burst (second attack tool) ─────────────
+
+# _drive_ssh_ncrack <user> <pwfile> — run an ncrack SSH credential burst
+# from the test netns against the agent host's sshd on TCP/22. ncrack is a
+# different engine from hydra (its own timing/parallelism), so it validates
+# the IDS threshold is engine-agnostic. Output captured in _NCRACK_OUT.
+_NCRACK_OUT=""
+_drive_ssh_ncrack() {
+    local user="${1:?usage: _drive_ssh_ncrack <user> <pwfile>}"
+    local pwfile="${2:?usage: _drive_ssh_ncrack <user> <pwfile>}"
+    _NCRACK_OUT="$(ip netns exec "${EBPF_TEST_NS}" \
+        timeout 45 ncrack -p 22 --user "${user}" -P "${pwfile}" \
+        -T3 "${EBPF_HOST_IP}" 2>&1)" || true
+}
+
+@test "real ncrack SSH credential burst fires the IDS brute-force alert (MITRE T1110.001)" {
+    require_tool ncrack
+
+    local pwfile="${DATA_DIR}/ssh-pw-ncrack.lst"
+    printf '%s\n' \
+        ncrack1 ncrack2 ncrack3 ncrack4 ncrack5 ncrack6 ncrack7 ncrack8 \
+        > "${pwfile}"
+
+    _drive_ssh_ncrack nosuchuser "${pwfile}"
+
+    local alerts
+    alerts="$(wait_for_alert \
+        '.[] | select(.rule_id == "ids-ssh-bruteforce")' 20 1)" || {
+        echo "no ids-ssh-bruteforce alert after ncrack credential burst" >&2
+        echo "--- ncrack output ---" >&2
+        echo "${_NCRACK_OUT}" >&2
+        api_get /api/v1/alerts >&2 || true
+        return 1
+    }
+
+    local first severity
+    first="$(echo "${alerts}" | jq -sc '.[0]')"
+    severity="$(echo "${first}" | jq -r '.severity // ""')"
+    [ "${severity}" = "high" ] || {
+        echo "expected severity=high; got ${severity}: ${first}" >&2
+        return 1
+    }
+    echo "${first}" | grep -qE 'T1110\.001|T1110' || {
+        echo "expected MITRE T1110(.001) in alert: ${first}" >&2
+        return 1
+    }
+
+    # Same claim through the shared helper so the technique is asserted
+    # on the canonical alert field, not only in the raw payload.
+    assert_alert_has_mitre_technique T1110 15
+}
+
 # ── Negative auth + mitigation ─────────────────────────────────────
 
 @test "the hydra brute force achieves no successful auth and the source is auto-blocked" {
@@ -282,6 +334,41 @@ _drive_ssh_hydra() {
     count="$(get_blacklist_count 15)"
     [ "${count:-0}" -ge 1 ] || {
         echo "IPS auto-blacklist did not capture the brute-force source" >&2
+        api_get /api/v1/ips/blacklist >&2 || true
+        return 1
+    }
+}
+
+@test "a real openssh-client (sshpass) password burst fails and is auto-blocked" {
+    require_tool sshpass
+
+    # Unlike hydra/ncrack, this drives the genuine OpenSSH client one attempt
+    # at a time — the exact handshake a human attacker's ssh(1) emits. Force
+    # password auth (no pubkey) against the key-only vagrant account so every
+    # attempt is a real, failed SSH authentication.
+    local i out cracked=0
+    for i in 1 2 3 4 5 6 7 8; do
+        out="$(ip netns exec "${EBPF_TEST_NS}" \
+            timeout 10 sshpass -p "wrongpass_${i}" \
+            ssh -o PreferredAuthentications=password \
+                -o PubkeyAuthentication=no \
+                -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null \
+                -o ConnectTimeout=4 \
+                "vagrant@${EBPF_HOST_IP}" true 2>&1)" && cracked=1
+        # A rejected password makes ssh exit non-zero; a zero exit here would
+        # mean the "wrong" password actually authenticated.
+        [ "${cracked}" = "1" ] && {
+            echo "sshpass unexpectedly authenticated with wrongpass_${i}: ${out}" >&2
+            return 1
+        }
+    done
+
+    # Mitigation: the burst of failed logins tripped the IPS auto-block.
+    local count
+    count="$(get_blacklist_count 20)"
+    [ "${count:-0}" -ge 1 ] || {
+        echo "IPS auto-blacklist did not capture the sshpass source" >&2
         api_get /api/v1/ips/blacklist >&2 || true
         return 1
     }

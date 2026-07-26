@@ -153,6 +153,60 @@ teardown_file() {
     }
 }
 
+# ── Real DoH/DoT clients on the transit ────────────────────────────
+
+@test "real cloudflared DoH client is detected by SNI on transit" {
+    skip_if_not_3vm
+    if ! _attacker_ssh "command -v cloudflared >/dev/null 2>&1"; then
+        env_skip "cloudflared not available on attacker VM"
+    fi
+
+    local backend="${BACKEND_VM_IP:-192.168.57.30}"
+    local doh_before
+    doh_before="$(encrypted_dns_alerts doh)"
+
+    # corp-doh.test is on the fixture's custom dns.doh_resolvers list.
+    real_doh_probe_cloudflared "${backend}" "corp-doh.test"
+
+    local matched
+    matched="$(encrypted_dns_resolver_match "corp-doh.test")"
+    if [ "${matched:-0}" -eq 0 ]; then
+        local i=0
+        while [ "$i" -lt 20 ]; do
+            matched="$(encrypted_dns_resolver_match "corp-doh.test")"
+            [ "${matched:-0}" -gt 0 ] && break
+            sleep 1
+            i=$((i + 1))
+        done
+    fi
+    [ "${matched:-0}" -gt 0 ] || {
+        echo "no DoH alert from real cloudflared client (before=${doh_before})" >&2
+        _attacker_ssh "tail -20 /tmp/cloudflared-doh.log 2>/dev/null" >&2 || true
+        return 1
+    }
+}
+
+@test "real dnscrypt-proxy DoT client is detected on dst_port 853" {
+    skip_if_not_3vm
+    if ! _attacker_ssh "command -v dnscrypt-proxy >/dev/null 2>&1"; then
+        env_skip "dnscrypt-proxy not available on attacker VM"
+    fi
+    if ! _attacker_ssh "nc -z -w2 ${BACKEND_VM_IP:-192.168.57.30} 853"; then
+        soft_skip "backend DoT listener (:853) unreachable; dot-backend.service not running"
+    fi
+
+    local backend="${BACKEND_VM_IP:-192.168.57.30}"
+    real_dot_probe_dnscrypt "${backend}" "dot-probe.test"
+
+    local count
+    count="$(wait_for_encrypted_dns_alert dot 20 1)" || {
+        echo "no DoT alert from real dnscrypt-proxy client; count=${count}" >&2
+        _attacker_ssh "tail -20 /tmp/dnscrypt-dot.log 2>/dev/null" >&2 || true
+        return 1
+    }
+    [ "${count:-0}" -gt 0 ]
+}
+
 # ── MITRE coverage sweep ───────────────────────────────────────────
 
 @test "alerts emitted by this suite carry a MITRE technique mapping" {

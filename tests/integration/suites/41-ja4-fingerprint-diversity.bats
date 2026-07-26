@@ -82,7 +82,7 @@ teardown_file() {
 _ja4_drive_available_clients() {
     local sni="${1:?usage: _ja4_drive_available_clients <sni>}"
     local fired=0 client
-    for client in curl openssl urllib3 aiohttp go mhddos; do
+    for client in curl openssl urllib3 aiohttp go mhddos mitmproxy; do
         if ja4_have_client "$client"; then
             ja4_connect "$client" "$sni"
             fired=$((fired + 1))
