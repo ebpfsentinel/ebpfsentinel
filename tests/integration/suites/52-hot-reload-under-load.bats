@@ -380,8 +380,16 @@ _start_tcp_load() {
     sleep 8
     _mutate_config_toggle "fw-loadgen-toggle" 2>/dev/null || true
     _signal_hup
+    # The generator was launched inside a command-substitution subshell
+    # (to capture its PID), so it is orphaned from this shell and `wait`
+    # cannot reap it. Poll on the PID until the run finishes and its
+    # output file is complete before parsing the request count.
     if [ -n "${http_pid}" ]; then
-        wait "${http_pid}" 2>/dev/null || true
+        local drained
+        for drained in $(seq 1 60); do
+            kill -0 "${http_pid}" 2>/dev/null || break
+            sleep 1
+        done
     fi
 
     # The generator must have issued real requests.
