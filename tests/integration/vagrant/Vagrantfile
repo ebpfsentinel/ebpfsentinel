@@ -511,7 +511,8 @@ UNIT
       apt-get install -y --no-install-recommends \
         curl jq iperf3 hping3 ncat nmap bc openssl \
         sshpass stress-ng netcat-openbsd \
-        swaks lftp smbclient hydra ncrack ldnsutils wrk
+        swaks lftp smbclient hydra ncrack ldnsutils wrk \
+        python3-venv python3-pip unzip
       # dnsperf (suite 19 DNS load) and t50 (suite 22 multi-proto flood) are
       # best-effort: not in every mirror, so a miss must not fail the batch.
       for optpkg in dnsperf t50; do

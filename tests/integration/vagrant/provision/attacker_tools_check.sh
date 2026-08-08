@@ -71,7 +71,7 @@ check_kmod() {
 # ── Checks ─────────────────────────────────────────────────────────
 
 # apt-managed tools (loose substring match per TOOL_VERSIONS.md)
-check_bin "slowhttptest"  slowhttptest -h      "slowhttptest, version"
+check_bin "slowhttptest"  slowhttptest -h      "slowhttptest, a tool"
 check_bin "nping"         nping        --version "Nping"
 check_bin "t50"           t50          -v       "T50"
 check_bin "wrk"           wrk          -v       "wrk "

@@ -273,9 +273,11 @@ if ! command -v hyenae-ng >/dev/null 2>&1; then
     HN_DIR="$(mktemp -d)"
     if git clone --depth 1 --branch v0.10 \
         https://github.com/r-richter/hyenae-ng "${HN_DIR}" 2>/dev/null; then
-        (cd "${HN_DIR}" && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release >/dev/null && \
-            cmake --build build --parallel 2 >/dev/null && \
-            sudo cmake --install build --prefix /usr/local >/dev/null) || \
+        # v0.10 ships a plain GNU Makefile (src/ + include/, links libpcap +
+        # pthread); `make all` drops the hyenae-ng binary in the source root
+        # and there is no install target, so stage it onto PATH by hand.
+        (cd "${HN_DIR}" && make all >/dev/null 2>&1 && \
+            sudo install -m0755 hyenae-ng /usr/local/bin/hyenae-ng) || \
             echo "    WARN: hyenae-ng build failed; skipping"
     else
         echo "    WARN: hyenae-ng clone failed; skipping"
