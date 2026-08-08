@@ -656,8 +656,17 @@ capture_on() {
     # attacker->backend hop and never creates the capture file; the transient
     # unit is owned by systemd, survives the SSH close, and is stopped (clean
     # SIGTERM → pcap flush) by stop_capture via the same derived unit name.
+    #
+    # `sshrun` forwards through `ssh -- sudo "$@"`, which space-joins its args
+    # into one string re-parsed by the remote shell. A BPF filter like
+    # `udp and (src port 53 or ...)` carries spaces and parens, so it must be
+    # shell-escaped (printf %q) and handed to tcpdump as a single argument —
+    # otherwise the parens reach the remote shell bare and it dies with
+    # "syntax error near unexpected token '('".
+    local -a filter=()
+    [ -n "${bpf}" ] && filter=("$(printf '%q' "${bpf}")")
     "${sshrun[@]}" systemd-run --unit="${unit}" --collect \
-        tcpdump -n -U -w "${pcap}" -i "${iface}" ${bpf} >/dev/null 2>&1 || return 1
+        tcpdump -n -U -w "${pcap}" -i "${iface}" "${filter[@]}" >/dev/null 2>&1 || return 1
     # Wait until tcpdump has actually opened its capture file before returning,
     # so traffic that flows right after capture_on isn't missed. systemd-run
     # starts the unit asynchronously, so a fixed short sleep races the BPF
