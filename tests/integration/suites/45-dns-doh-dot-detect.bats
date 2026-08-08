@@ -43,6 +43,12 @@ setup_file() {
         { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     }
 
+    # Install BOTH transit routes: the client (attacker) must reach the
+    # backend subnet via the agent's eth1 so its ClientHello crosses the
+    # eBPF datapath on the forward path — without this the probe egresses
+    # via the host NAT and the agent never observes the SNI. The backend
+    # route is the symmetric return path.
+    route_via_agent client >/dev/null 2>&1 || true
     route_via_agent backend >/dev/null 2>&1 || true
     start_backend_service nginx 443 || true
     # dot-backend.service is the openssl s_server on :853 shipped by the
@@ -155,10 +161,10 @@ teardown_file() {
 
 # ── Real DoH/DoT clients on the transit ────────────────────────────
 
-@test "real cloudflared DoH client is detected by SNI on transit" {
+@test "real DoH client (curl --doh-url) is detected by SNI on transit" {
     skip_if_not_3vm
-    if ! _attacker_ssh "command -v cloudflared >/dev/null 2>&1"; then
-        env_skip "cloudflared not available on attacker VM"
+    if ! _attacker_ssh "command -v curl >/dev/null 2>&1"; then
+        env_skip "curl not available on attacker VM"
     fi
 
     local backend="${BACKEND_VM_IP:-192.168.57.30}"
@@ -166,7 +172,7 @@ teardown_file() {
     doh_before="$(encrypted_dns_alerts doh)"
 
     # corp-doh.test is on the fixture's custom dns.doh_resolvers list.
-    real_doh_probe_cloudflared "${backend}" "corp-doh.test"
+    real_doh_probe "${backend}" "corp-doh.test"
 
     local matched
     matched="$(encrypted_dns_resolver_match "corp-doh.test")"
@@ -180,28 +186,26 @@ teardown_file() {
         done
     fi
     [ "${matched:-0}" -gt 0 ] || {
-        echo "no DoH alert from real cloudflared client (before=${doh_before})" >&2
-        _attacker_ssh "tail -20 /tmp/cloudflared-doh.log 2>/dev/null" >&2 || true
+        echo "no DoH alert from real curl DoH client (before=${doh_before})" >&2
         return 1
     }
 }
 
-@test "real dnscrypt-proxy DoT client is detected on dst_port 853" {
+@test "real DoT client (kdig +tls) is detected on dst_port 853" {
     skip_if_not_3vm
-    if ! _attacker_ssh "command -v dnscrypt-proxy >/dev/null 2>&1"; then
-        env_skip "dnscrypt-proxy not available on attacker VM"
+    if ! _attacker_ssh "command -v kdig >/dev/null 2>&1"; then
+        env_skip "kdig (knot-dnsutils) not available on attacker VM"
     fi
     if ! _attacker_ssh "nc -z -w2 ${BACKEND_VM_IP:-192.168.57.30} 853"; then
         soft_skip "backend DoT listener (:853) unreachable; dot-backend.service not running"
     fi
 
     local backend="${BACKEND_VM_IP:-192.168.57.30}"
-    real_dot_probe_dnscrypt "${backend}" "dot-probe.test"
+    real_dot_probe "${backend}" "dot-probe.test"
 
     local count
     count="$(wait_for_encrypted_dns_alert dot 20 1)" || {
-        echo "no DoT alert from real dnscrypt-proxy client; count=${count}" >&2
-        _attacker_ssh "tail -20 /tmp/dnscrypt-dot.log 2>/dev/null" >&2 || true
+        echo "no DoT alert from real kdig DoT client; count=${count}" >&2
         return 1
     }
     [ "${count:-0}" -gt 0 ]
