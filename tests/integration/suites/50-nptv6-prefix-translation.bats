@@ -40,10 +40,17 @@ setup_file() {
     export DATA_DIR="/tmp/ebpfsentinel-test-data-nptv6-$$"
     mkdir -p "$DATA_DIR"
 
-    # The NPTv6 fixture needs a second NIC (eth2) for the external prefix;
-    # it only exists in the multi-NIC topology.
-    ip link show eth2 >/dev/null 2>&1 \
-        || env_skip "eth2 not present — NPTv6 needs the multi-NIC topology"
+    # The NPTv6 fixture needs a second NIC (eth2) for the external prefix; it
+    # only exists in the multi-NIC topology. In the 2-VM/3-VM lanes eth2 lives
+    # on the AGENT host while bats runs on the attacker, so the presence check
+    # must target the agent there; in the local lane it is the same host.
+    if declare -F _agent_ssh >/dev/null 2>&1; then
+        _agent_ssh ip link show eth2 >/dev/null 2>&1 \
+            || env_skip "agent VM lacks eth2 — NPTv6 needs the multi-NIC topology"
+    else
+        ip link show eth2 >/dev/null 2>&1 \
+            || env_skip "eth2 not present — NPTv6 needs the multi-NIC topology"
+    fi
 
     # prepare_ebpf_config points the agent at the netns veth, so the
     # namespace has to exist before the agent starts — otherwise every
