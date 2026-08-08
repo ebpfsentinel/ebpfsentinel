@@ -41,4 +41,7 @@ AGENT_PID_FILE="${AGENT_PID_FILE:-/tmp/ebpfsentinel-test.pid}"
 AGENT_LOG_FILE="${AGENT_LOG_FILE:-/tmp/ebpfsentinel-test.log}"
 
 # ── HTTP status persistence (workaround for subshell variable scoping) ─
-_HTTP_STATUS_FILE="/tmp/ebpfsentinel-test-http-status"
+# Suffix with the effective uid so a suite run as root and one run as the
+# unprivileged test user never fight over a single /tmp inode (the loser hits
+# "Permission denied" on a file the other owns).
+_HTTP_STATUS_FILE="/tmp/ebpfsentinel-test-http-status.$(id -u)"

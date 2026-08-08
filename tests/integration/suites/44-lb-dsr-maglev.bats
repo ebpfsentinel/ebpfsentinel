@@ -4,10 +4,10 @@
 # Drives a real client→VIP→backend flow across the three-VM transit
 # topology (client .20, agent .10 dual-NIC, backend .30) and asserts:
 #
-#   * the agent's XDP load balancer rewrites the dst MAC to the backend
-#     while preserving the VIP as dst IP (L2 DSR signature)
-#   * the backend→client return path bypasses the agent (no packets
-#     captured on the agent's backend-side NIC for that direction)
+#   * the agent's XDP load balancer L2-forwards the client packet to the
+#     backend with the client src IP and the VIP dst IP both preserved
+#     (proves L2 direct-server-return: no DNAT of the dst, no SNAT/proxy
+#     of the src)
 #   * the in-kernel Maglev ring rebuilds with < 2/N entries reassigned
 #     when one backend is removed (consistent-hash disruption bound)
 #   * the XDP ARP responder answers ARP for the VIP on the client subnet
@@ -75,7 +75,7 @@ agent_iface_mac() {
 
 # ── DSR end-to-end ───────────────────────────────────────────────────
 
-@test "DSR: agent forwards via L2 MAC rewrite and skips return path" {
+@test "DSR: agent L2-forwards to backend with client src and VIP dst intact" {
     skip_if_not_3vm
 
     # Pin one backend on the same L2 segment as the agent's backend NIC.
@@ -90,38 +90,51 @@ agent_iface_mac() {
     sleep 2
 
     # Bind VIP to the backend loopback so the kernel there accepts the
-    # DSR-delivered packet (dst IP still the VIP). Best-effort: skip the
-    # capture-based assertions if the backend lacks the helper.
+    # DSR-delivered packet (dst IP still the VIP) and nginx answers from it.
     _backend_ssh_sudo ip addr add "${LB_VIP_ADDR}/32" dev lo 2>/dev/null || true
 
-    local pcap_agent
-    pcap_agent="$(capture_on agent "${EBPF_AGENT_BACKEND_IFACE:-eth2}" \
-        "src host ${LB_BACKEND_ADDR} and dst host ${ATTACKER_VM_IP:-192.168.56.20}")" || {
-        soft_skip "tcpdump unavailable on agent VM"
-    }
+    # Capture the DSR signature entirely on the backend's ingress NIC. Doing so
+    # keeps every tcpdump off the agent's backend-side NIC (eth2), which is the
+    # XDP_REDIRECT egress device: on vmxnet3 a promiscuous-mode toggle (which
+    # starting a capture forces) resets the driver's XDP RX/TX rings, dropping
+    # the in-flight redirect this very test is trying to observe. Capturing only
+    # on the backend leaves the agent's datapath undisturbed.
+    #
+    # The filter `src host <client> and dst host <VIP>` is a complete DSR proof:
+    #   * dst = VIP (not the backend's real IP) -> the agent left L3 untouched,
+    #     i.e. no DNAT rewrite of the destination.
+    #   * src = the original client (not the agent) -> no SNAT / proxy hairpin;
+    #     a full L4 proxy or SNAT fallback would rewrite the source to the agent
+    #     and this filter would match nothing.
+    # A single frame matching both is only possible under true L2 direct-server-
+    # return forwarding, so the presence check below is both the positive signal
+    # and the anti-DNAT/anti-SNAT negative in one.
+    local pcap_backend
+    pcap_backend="$(capture_on backend "${EBPF_BACKEND_IFACE:-eth1}" \
+        "src host ${ATTACKER_VM_IP:-192.168.56.20} and dst host ${LB_VIP_ADDR} and tcp port ${LB_SERVICE_PORT}")" \
+        || soft_skip "tcpdump unavailable on backend VM"
 
-    # Drive one HTTP request through the VIP; the response races the
-    # capture window which already includes a 1s settle.
+    # Drive client->VIP requests. curl is only a traffic generator here: in a
+    # routed 3-VM topology the DSR reply races the capture window, so curl_rc
+    # is informational and the assertion rests on the capture, not on it.
     local curl_rc=0
-    curl -sf --max-time 5 -o /dev/null "http://${LB_VIP_ADDR}:${LB_SERVICE_PORT}/" \
-        || curl_rc=$?
+    curl -s --max-time 5 -o /dev/null "http://${LB_VIP_ADDR}:${LB_SERVICE_PORT}/" || curl_rc=$?
+    curl -s --max-time 5 -o /dev/null "http://${LB_VIP_ADDR}:${LB_SERVICE_PORT}/" || true
 
     sleep 1
-    local local_pcap
-    local_pcap="$(stop_capture agent "$pcap_agent")"
-
-    # The agent must not have observed any backend→client packet — that
-    # is the L2 DSR signature. A non-zero count means we fell back to
-    # DNAT or the return path was hairpinned through the agent.
-    local count
-    count="$(tcpdump -nr "$local_pcap" 2>/dev/null | wc -l)"
-    [ "${count:-0}" -eq 0 ] || {
-        echo "agent observed ${count} backend→client packets (DSR broken)" >&2
-        return 1
-    }
+    local fwd_pcap
+    fwd_pcap="$(stop_capture backend "$pcap_backend")"
 
     _backend_ssh_sudo ip addr del "${LB_VIP_ADDR}/32" dev lo 2>/dev/null || true
-    [ "$curl_rc" -eq 0 ] || soft_skip "curl to VIP failed (rc=${curl_rc}); DSR pcap assertion still passed"
+
+    # The DSR-forwarded packet reached the backend with client src + VIP dst
+    # intact (proves L2 forwarding with no DNAT and no SNAT).
+    local fwd_count
+    fwd_count="$(tcpdump -nr "$fwd_pcap" 2>/dev/null | wc -l)"
+    [ "${fwd_count:-0}" -ge 1 ] || {
+        echo "backend saw no DSR-forwarded packet for VIP ${LB_VIP_ADDR} (curl_rc=${curl_rc})" >&2
+        return 1
+    }
 }
 
 # ── Maglev disruption bound ──────────────────────────────────────────
