@@ -31,9 +31,9 @@ use ebpf_helpers::kfuncs::{
     NfNatManipType, skb_set_fou_encap, skb_set_xfrm_info,
 };
 use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
-    VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, ipv6_mask_match, ones_complement_add,
-    prefix_to_mask, u16_from_be_bytes, u32_from_be_bytes, u32x4_to_bytes,
+    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_ICMPV6,
+    PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, ipv6_mask_match,
+    ones_complement_add, prefix_to_mask, u16_from_be_bytes, u32_from_be_bytes, u32x4_to_bytes,
 };
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
@@ -581,6 +581,15 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
     let raw_protocol = unsafe { (*ipv6hdr).next_hdr };
 
+    // RFC 4861 Neighbor Discovery (ICMPv6 types 133-137: RS/RA/NS/NA/Redirect)
+    // is link-scoped control traffic. Prefix-translating it would rewrite the
+    // router's own neighbor advertisements, so a soliciting peer rejects the
+    // reply (source no longer matches the solicited target) and neighbor
+    // resolution never completes. Leave ND frames untranslated.
+    if is_icmpv6_nd(ctx, l3_offset, raw_protocol) {
+        return Ok(TC_ACT_OK);
+    }
+
     // Check NPTv6 rules first (stateless, no conntrack needed).
     if try_nptv6_egress(ctx, l3_offset, &src_addr)? {
         return Ok(TC_ACT_OK);
@@ -688,6 +697,26 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
 }
 
 // ── NPTv6 (RFC 6296) egress helpers ─────────────────────────────────
+
+/// RFC 4861 Neighbor Discovery message? (ICMPv6 types 133-137.)
+///
+/// ND (Router Solicitation/Advertisement, Neighbor Solicitation/Advertisement,
+/// Redirect) is link-scoped control traffic that a NAT/NPTv6 router must never
+/// prefix-translate.
+#[inline(always)]
+fn is_icmpv6_nd(ctx: &TcContext, l3_offset: usize, raw_protocol: u8) -> bool {
+    if raw_protocol != PROTO_ICMPV6 {
+        return false;
+    }
+    // ICMPv6 type is the first byte of the ICMPv6 header, immediately after the
+    // fixed IPv6 header (ND messages carry no extension headers).
+    let type_ptr: *const u8 = match unsafe { ptr_at(ctx, l3_offset + IPV6_HDR_LEN) } {
+        Ok(p) => p,
+        Err(()) => return false,
+    };
+    let t = unsafe { *type_ptr };
+    (133..=137).contains(&t)
+}
 
 /// Try NPTv6 prefix translation on egress (src rewrite: internal -> external).
 /// Returns `true` if a rule matched and translation was applied.
