@@ -5,7 +5,7 @@ use ebpf_common::loadbalancer::{
     BackendMac, LbBackendEntry, LbServiceConfigV2, LbServiceKey, MAGLEV_RING_SIZE, MaglevLookup,
 };
 use ports::secondary::loadbalancer_map_port::LoadBalancerMapPort;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Manages the load balancer eBPF maps: `LB_SERVICES` and `LB_BACKENDS`.
 ///
@@ -44,10 +44,16 @@ impl LbMapManager {
         // DevMap is optional — only present in xdp-loadbalancer programs.
         let devmap = ebpf
             .take_map("LB_DEVMAP")
-            .and_then(|m| DevMap::try_from(m).ok());
-        if devmap.is_some() {
-            info!("LB_DEVMAP acquired for XDP redirect forwarding");
-        }
+            .and_then(|m| match DevMap::try_from(m) {
+                Ok(d) => {
+                    info!("LB_DEVMAP acquired for XDP redirect forwarding");
+                    Some(d)
+                }
+                Err(e) => {
+                    warn!(error = %e, "LB_DEVMAP conversion failed - DSR falls back to XDP_TX");
+                    None
+                }
+            });
 
         // LB_MAGLEV is optional — only the xdp-loadbalancer program has it.
         let maglev_map = ebpf

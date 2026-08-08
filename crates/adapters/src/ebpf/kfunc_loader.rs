@@ -951,6 +951,31 @@ fn raw_map_create(
         ..Default::default()
     };
 
+    // DEVMAP / DEVMAP_HASH / CPUMAP: the kernel-side program declares an 8-byte
+    // `bpf_devmap_val` / `bpf_cpumap_val` value, but the value layout aya's
+    // userspace typed `DevMap` / `CpuMap` wrapper binds is gated on the kernel's
+    // prog-id feature - 8 bytes when supported, a 4-byte index when not. Map and
+    // wrapper must agree or `try_from` rejects the map ("invalid value size ...")
+    // and the redirect target is left unpopulated (DSR silently falls back to
+    // XDP_TX). aya's own loader resolves this by overriding value_size from the
+    // same feature probe (`bpf.rs`: `set_value_size(if prog_id {8} else {4})`);
+    // mirror it against the identical `aya::features()` the wrapper reads so the
+    // two never disagree - notably under token loading, where the probe cannot
+    // run without CAP_BPF and reports the legacy 4-byte layout.
+    if matches!(attr.map_type, 14 | 25) {
+        attr.value_size = if aya::features().devmap_prog_id() {
+            8
+        } else {
+            4
+        };
+    } else if attr.map_type == 16 {
+        attr.value_size = if aya::features().cpumap_prog_id() {
+            8
+        } else {
+            4
+        };
+    }
+
     // BTF-defined maps carry key/value BTF type ids — except a set of map types
     // the kernel rejects BTF for (mirrors libbpf issue #355 / aya).
     if let aya_obj::Map::Btf(m) = def {
@@ -1091,12 +1116,27 @@ fn wrap_map_data(fd: OwnedFd, map_type: u32) -> Result<AyaMap, KfuncLoaderError>
 /// Whether two objects declaring a map of this type under the same name may be
 /// given one kernel object.
 ///
-/// Everything a program looks *up* — policy tables, config arrays, counters —
+/// Everything a program looks *up* - policy tables, config arrays, counters -
 /// is shared on purpose: userspace writes once and every object reads it. A
 /// ring buffer is the opposite, a stream with an owner, so it is created per
 /// object instead. See [`create_object_maps`] for what sharing one broke.
+///
+/// XDP redirect targets (`DEVMAP` / `DEVMAP_HASH` / `CPUMAP`) are also never
+/// shared: each is private to the one program that redirects through it, so
+/// sharing buys nothing. Worse, sharing pins them, and a reused pin keeps the
+/// `value_size` the *first* creator chose - which aya's typed `DevMap` /
+/// `CpuMap` wrappers gate on the running kernel's prog-id feature (4-byte index
+/// without it, 8-byte `bpf_*map_val` with it). A pin left over from a build or
+/// kernel that picked the other layout would then be rejected. Creating them
+/// fresh per object keeps the size matched to this kernel every load.
 fn is_shareable_map(map_type: u32) -> bool {
-    map_type != aya_obj::generated::bpf_map_type::BPF_MAP_TYPE_RINGBUF as u32
+    use aya_obj::generated::bpf_map_type::{
+        BPF_MAP_TYPE_CPUMAP, BPF_MAP_TYPE_DEVMAP, BPF_MAP_TYPE_DEVMAP_HASH, BPF_MAP_TYPE_RINGBUF,
+    };
+    map_type != BPF_MAP_TYPE_RINGBUF as u32
+        && map_type != BPF_MAP_TYPE_DEVMAP as u32
+        && map_type != BPF_MAP_TYPE_DEVMAP_HASH as u32
+        && map_type != BPF_MAP_TYPE_CPUMAP as u32
 }
 
 /// Create (or reuse, when already pinned) every map an object declares, through
