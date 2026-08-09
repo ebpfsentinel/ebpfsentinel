@@ -6,6 +6,12 @@
 # for wire-speed enforcement. Shares the IDS rule format but adds blacklist
 # management and whitelist safeguards.
 #
+# The IPS rules below are matched by the same kernel program as the IDS rules
+# (tc-ids), so `ids.enabled` must stay true for them to be evaluated. Rule ids
+# must be unique across `ids.rules` and `ips.rules`, and two rules that watch
+# the same (protocol, dst_port) pair cannot both be installed in the kernel
+# map: the IPS rule wins and the shadowed rule is named in a startup warning.
+#
 # Usage:
 #   sudo ebpfsentinel-agent --config config/examples/ips.yaml
 #
@@ -25,9 +31,13 @@ ips:
   enabled: true
 
   # Mode controls enforcement:
-  #   "alert"  — log detections only (observe)
-  #   "block"  — actively enforce (blacklist offending IPs)
-  # Individual rules can override the global mode.
+  #   "alert"  - dry run: detections are alerted and the blacklist still
+  #              records what would have been blocked, but nothing is installed
+  #              in the kernel, so no traffic is dropped
+  #   "block"  - actively enforce: blacklisted addresses are installed as
+  #              host routes in the firewall LPM maps and dropped at wire speed
+  # Individual rules override the mode for the escalation they trigger: a rule
+  # in "alert" mode is alerted but never feeds the auto-blacklist counter.
   mode: block
 
   # ── Blacklist configuration ────────────────────────────────────────
@@ -36,13 +46,18 @@ ips:
   # Set higher to reduce false positives, lower for aggressive blocking.
   auto_blacklist_threshold: 5
 
-  # Maximum time (in seconds) an IP stays blacklisted.
-  # After this duration, the IP is removed and must re-trigger to be blocked again.
+  # This duration has two roles:
+  #   - how long an IP stays blacklisted, after which it is removed and must
+  #     re-trigger to be blocked again
+  #   - the window over which detections are counted: once an address has been
+  #     tracked for this long, its counter restarts from the next detection
+  # A value of 0 is not "permanent": entries expire immediately.
   # Default: 3600 (1 hour). Set to 7200 for 2 hours in high-threat environments.
   max_blacklist_duration_secs: 7200
 
-  # Maximum entries in the blacklist table. Oldest entries are evicted
-  # when the limit is reached. Size this for your expected threat volume.
+  # Maximum entries in the blacklist table. Nothing is evicted to make room:
+  # once the table is full, further blacklisting is refused until entries
+  # expire. Size this for your expected threat volume.
   max_blacklist_size: 50000
 
   # ── Per-country blacklist thresholds ──────────────────────────────
@@ -68,7 +83,10 @@ ips:
     - "203.0.113.50"          # External monitoring probe
 
   # Whitelist aliases: reference top-level alias names.
-  # IPs from these aliases are added to the whitelist automatically.
+  # IPs from these aliases are added to the whitelist automatically once the
+  # alias service has loaded. A /32 (or /128) alias value matches that address
+  # alone; an alias that cannot be resolved is logged and skipped rather than
+  # failing the start-up, so check the logs after renaming an alias.
   whitelist_aliases:
     - trusted_infra
 
@@ -85,6 +103,10 @@ ips:
   # Fields:
   #   id, description, enabled, severity, mode, protocol, dst_port,
   #   pattern, threshold (type/count/window_secs/track_by)
+  #
+  # `threshold.type`, `threshold.count` and `threshold.window_secs` have no
+  # default: a threshold block must carry all three or the configuration is
+  # refused. `track_by` defaults to `src_ip`.
 
   rules:
     # Auto-block SSH brute-force sources after 10 attempts in 2 minutes
