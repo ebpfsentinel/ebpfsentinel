@@ -37,10 +37,8 @@ setup_file() {
     # can actually load its datapath and reach readiness.
     if ! docker image inspect ebpfsentinel:latest &>/dev/null 2>&1; then
         echo "# Staging eBPF programs for Docker build..." >&3
-        mkdir -p "${PROJECT_ROOT}/ebpf-out"
-        find "${PROJECT_ROOT}/crates/ebpf-programs/"*/target/bpfel-unknown-none/release \
-          -maxdepth 1 -type f ! -name '*.d' ! -name '*.fingerprint' ! -name '.cargo*' \
-          -exec cp {} "${PROJECT_ROOT}/ebpf-out/" \; 2>/dev/null || true
+        stage_ebpf_objects "$PROJECT_ROOT" \
+            || env_skip "no eBPF objects available to build the agent image"
         echo "# Building ebpfsentinel:latest..." >&3
         docker build -f "${PROJECT_ROOT}/Dockerfile.agent" -t ebpfsentinel:latest "${PROJECT_ROOT}" || {
             echo "# Docker build failed — tests will be skipped" >&3
@@ -68,6 +66,20 @@ setup_file() {
     kubectl -n "$K8S_NAMESPACE" wait --for=condition=Ready pod \
         -l app.kubernetes.io/name=ebpfsentinel \
         --timeout=120s 2>/dev/null || true
+
+    # readyz answers 503 on a nested cluster where XDP cannot attach, so the
+    # wait above always burns its full budget and tells us nothing. What the
+    # suite actually asserts is the Running phase, so poll for that too -
+    # otherwise the first test samples a pod still in ContainerCreating and
+    # fails on image-pull timing rather than on anything the product did.
+    local phase_wait=0
+    while [ "$phase_wait" -lt 60 ]; do
+        [ "$(kubectl -n "$K8S_NAMESPACE" get pod \
+               -l app.kubernetes.io/name=ebpfsentinel \
+               -o jsonpath='{.items[0].status.phase}' 2>/dev/null)" = "Running" ] && break
+        sleep 2
+        phase_wait=$((phase_wait + 1))
+    done
 }
 
 teardown_file() {

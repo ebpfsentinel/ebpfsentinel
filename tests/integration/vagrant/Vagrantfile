@@ -76,7 +76,11 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     # Sync project directory into VM
     agent.vm.synced_folder "../../../", "/home/vagrant/ebpfsentinel",
       type: "rsync",
-      rsync__exclude: [".git/", "target/", "node_modules/", ".vagrant/"]
+      # ebpf-out/ is a build staging dir, not source. A host-side copy is
+      # usually stale (and here was still pre-BTF), and rsync --delete would
+      # push it over whatever the VM staged, so the image silently ships an
+      # older datapath than the code under test. The VM stages its own.
+      rsync__exclude: [".git/", "target/", "node_modules/", ".vagrant/", "ebpf-out/"]
 
     # VirtualBox provider (default)
     agent.vm.provider "virtualbox" do |vb|
@@ -474,7 +478,11 @@ UNIT
     # Sync project directory into VM (for test scripts)
     attacker.vm.synced_folder "../../../", "/home/vagrant/ebpfsentinel",
       type: "rsync",
-      rsync__exclude: [".git/", "target/", "node_modules/", ".vagrant/"]
+      # ebpf-out/ is a build staging dir, not source. A host-side copy is
+      # usually stale (and here was still pre-BTF), and rsync --delete would
+      # push it over whatever the VM staged, so the image silently ships an
+      # older datapath than the code under test. The VM stages its own.
+      rsync__exclude: [".git/", "target/", "node_modules/", ".vagrant/", "ebpf-out/"]
 
     # VirtualBox provider (default)
     attacker.vm.provider "virtualbox" do |vb|
@@ -708,7 +716,11 @@ NETPLAN
 
       backend.vm.synced_folder "../../../", "/home/vagrant/ebpfsentinel",
         type: "rsync",
-        rsync__exclude: [".git/", "target/", "node_modules/", ".vagrant/"]
+        # ebpf-out/ is a build staging dir, not source. A host-side copy is
+      # usually stale (and here was still pre-BTF), and rsync --delete would
+      # push it over whatever the VM staged, so the image silently ships an
+      # older datapath than the code under test. The VM stages its own.
+      rsync__exclude: [".git/", "target/", "node_modules/", ".vagrant/", "ebpf-out/"]
 
       backend.vm.provider "virtualbox" do |vb|
         vb.memory = 1024

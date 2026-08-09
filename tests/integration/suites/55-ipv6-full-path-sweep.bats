@@ -407,6 +407,14 @@ teardown_file() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
+        # The only alert-producing test in this suite is the v6 netns wire
+        # probe, which is local-lane only. Off that lane there is nothing to
+        # assert against by design, so this is a lane gap rather than a
+        # regression - classify it as one, or STRICT_SKIPS fails a run that
+        # behaved exactly as intended.
+        if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+            env_skip "no alert-producing test on this lane (v6 wire probe is local-lane only)"
+        fi
         soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15

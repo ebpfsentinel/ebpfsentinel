@@ -17,6 +17,16 @@ cd "${PROJECT_ROOT}/tests/integration" || exit 1
 OUT=/tmp/local-lane-result.txt
 : >"$OUT"
 
+# Suites that must NOT run as root. minikube refuses its docker driver under
+# root (`DRV_AS_ROOT`), so driving a cluster from this script - which is invoked
+# with sudo because every other suite needs netns and eBPF - silently skips the
+# whole suite with "cluster could not start on this host". Drop back to the
+# invoking user for these, and give them a longer budget: creating a cluster
+# takes minutes, not the seconds a netns suite needs.
+UNPRIVILEGED_SUITES=" 10 "
+UNPRIVILEGED_TIMEOUT=1200
+DEFAULT_TIMEOUT=400
+
 clean_slate() {
     pkill -9 -f ebpfsentinel-agent 2>/dev/null || true
     sleep 1
@@ -40,7 +50,27 @@ for s in "$@"; do
     fi
     clean_slate
     log="/tmp/ll-${s}.tap"
-    PROJECT_ROOT="$PROJECT_ROOT" timeout 400 bats "$suite" >"$log" 2>&1
+
+    case "$UNPRIVILEGED_SUITES" in
+        *" ${s} "*) unpriv=true ;;
+        *)          unpriv=false ;;
+    esac
+
+    if [ "$unpriv" = true ] && [ "$(id -u)" -eq 0 ]; then
+        if [ -z "${SUDO_USER:-}" ]; then
+            echo "SUITE ${s}: NOT RUN (needs an unprivileged user; no SUDO_USER to drop to)" >>"$OUT"
+            continue
+        fi
+        # `env` rather than `sudo -E`: the point is to reset HOME so minikube
+        # and kubectl find the invoking user's ~/.minikube and ~/.kube, while
+        # still carrying the two variables the suites actually read.
+        sudo -u "$SUDO_USER" env \
+            PROJECT_ROOT="$PROJECT_ROOT" \
+            EBPFSENTINEL_STRICT_SKIPS="$EBPFSENTINEL_STRICT_SKIPS" \
+            timeout "$UNPRIVILEGED_TIMEOUT" bats "$suite" >"$log" 2>&1
+    else
+        PROJECT_ROOT="$PROJECT_ROOT" timeout "$DEFAULT_TIMEOUT" bats "$suite" >"$log" 2>&1
+    fi
     rc=$?
     pass=$(grep -cE '^ok ' "$log" 2>/dev/null)
     skip=$(grep -cE '# skip' "$log" 2>/dev/null)

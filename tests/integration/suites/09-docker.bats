@@ -142,12 +142,13 @@ setup_file() {
     exists="$(_docker_cmd image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -cF "$DOCKER_IMAGE")" || true
     if [ "${exists:-0}" -lt 1 ]; then
         echo "# Preparing eBPF programs for Docker build..." >&3
-        mkdir -p "${PROJECT_ROOT}/ebpf-out"
-        find "${PROJECT_ROOT}/crates/ebpf-programs/"*/target/bpfel-unknown-none/release \
-          -maxdepth 1 -type f ! -name '*.d' ! -name '*.fingerprint' \
-          -exec cp {} "${PROJECT_ROOT}/ebpf-out/" \; 2>/dev/null || true
+        stage_ebpf_objects "$PROJECT_ROOT" \
+            || env_skip "no eBPF objects available to build the agent image"
         echo "# Building Docker image ${DOCKER_IMAGE}..." >&3
-        _docker_cmd build -t "$DOCKER_IMAGE" "${PROJECT_ROOT}" || {
+        # -f is required: the repo ships Dockerfile.agent and Dockerfile.warden,
+        # there is no plain Dockerfile for the default build to pick up.
+        _docker_cmd build -f "${PROJECT_ROOT}/Dockerfile.agent" \
+            -t "$DOCKER_IMAGE" "${PROJECT_ROOT}" || {
             echo "# Docker build failed — tests will be skipped" >&3
         }
     fi

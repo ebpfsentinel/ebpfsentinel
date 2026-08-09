@@ -292,6 +292,53 @@ auth_header() {
     echo "-H" "Authorization: Bearer ${token}"
 }
 
+# ── Container image staging ────────────────────────────────────────
+# Dockerfile.agent COPYs ebpf-out/ into the image, so the objects have to be
+# staged there before any build. Where they come from depends on how the tree
+# was built: the workspace target dir, the per-crate dirs xtask writes, or - on
+# a VM that received them from sync-to-agent-vm.sh - the deployed object dir.
+#
+# Try all three, newest wins, and fail loudly when none of them yields
+# anything. The previous version swallowed a miss with `|| true`, which left
+# whatever ebpf-out/ happened to contain from an earlier build: the image then
+# runs a datapath months older than the code under test and every assertion
+# still passes. A silently stale datapath is the exact failure this harness
+# exists to catch.
+stage_ebpf_objects() {
+    local root="${1:-$PROJECT_ROOT}"
+    local out="${root}/ebpf-out"
+    local src staged=0
+
+    # Clear first, so an object for a program that no longer exists cannot
+    # survive into the image. Guarded on the literal suffix: `root` is caller
+    # supplied and this is an rm -rf.
+    case "$out" in
+        */ebpf-out) rm -rf "${out:?}" ;;
+        *) echo "# ERROR: refusing to clear unexpected path ${out}" >&3; return 1 ;;
+    esac
+
+    mkdir -p "$out"
+    for src in "${root}/target/bpfel-unknown-none/release" \
+               "${root}/crates/ebpf-programs/"*/target/bpfel-unknown-none/release \
+               /usr/local/lib/ebpfsentinel; do
+        [ -d "$src" ] || continue
+        while IFS= read -r obj; do
+            cp -u "$obj" "$out/" 2>/dev/null && staged=$((staged + 1))
+        done < <(find "$src" -maxdepth 1 -type f \
+                   ! -name '*.d' ! -name '*.fingerprint' ! -name '.cargo*')
+    done
+
+    if [ "$staged" -eq 0 ]; then
+        echo "# ERROR: no eBPF objects found to stage into ${out}" >&3
+        echo "#        looked in target/bpfel-unknown-none/release," >&3
+        echo "#        crates/ebpf-programs/*/target/..., /usr/local/lib/ebpfsentinel" >&3
+        echo "#        Run 'cargo xtask ebpf-build' or sync-to-agent-vm.sh --ebpf." >&3
+        return 1
+    fi
+    echo "# Staged ${staged} eBPF objects into ebpf-out/" >&3
+    return 0
+}
+
 # ── Cleanup helper ─────────────────────────────────────────────────
 
 cleanup_test_env() {

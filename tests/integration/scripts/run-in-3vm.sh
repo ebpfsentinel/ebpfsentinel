@@ -26,6 +26,12 @@ VAGRANT_DIR="${INTEGRATION_DIR}/vagrant"
 SUITE_DIR="${INTEGRATION_DIR}/suites"
 COVERAGE_MATRIX="${INTEGRATION_DIR}/coverage-matrix.yaml"
 
+# A `soft_skip` on this lane means a prerequisite the lane is supposed to own
+# went missing, so allow callers to turn those skips into failures rather than
+# letting a provisioning gap read as a pass. `env_skip` is unaffected - see
+# lib/skip_policy.bash.
+export EBPFSENTINEL_STRICT_SKIPS="${EBPFSENTINEL_STRICT_SKIPS:-0}"
+
 # ── Parse arguments ────────────────────────────────────────────────
 SUITE=""
 TRANSIT_ONLY=false
@@ -49,6 +55,66 @@ if [ "$SKIP_PROVISION" != "true" ]; then
     VAGRANT_3VM=1 vagrant up agent attacker backend
     cd "$INTEGRATION_DIR"
 fi
+
+# `vagrant up` neither re-applies hardware config nor re-runs provisioners on a
+# VM that is already running. A lane brought up from a 2-VM session therefore
+# keeps a single private NIC on the agent and no backend route on the client,
+# and both faults are silent:
+#
+#   * missing agent eth2  -> every transit suite dies in setup_file with
+#     "resolve ifindex for `eth2`";
+#   * missing client route -> the client reaches the backend over the shared
+#     NAT segment instead of through the agent, so the suites pass traffic that
+#     never touches the datapath and then fail on assertions about it.
+#
+# The second is the dangerous one: it looks exactly like a product regression.
+# Check both, and repair with the named `transit-routing` provisioner only - a
+# full `--provision` would also re-run the eBPF build, which compiles every
+# program into its own target dir and has filled the VM's disk before now.
+echo "=== Checking the 3-VM transit wiring ==="
+cd "$VAGRANT_DIR"
+
+if ! VAGRANT_3VM=1 vagrant ssh agent -c "ip -o link show eth2" >/dev/null 2>&1; then
+    echo "    agent lacks the 192.168.57.0/24 transit NIC, reloading"
+    VAGRANT_3VM=1 vagrant reload agent
+    VAGRANT_3VM=1 vagrant provision agent --provision-with transit-routing
+    if ! VAGRANT_3VM=1 vagrant ssh agent -c "ip -o link show eth2" >/dev/null 2>&1; then
+        echo "ERROR: agent still has no eth2 after reload - cannot run transit suites" >&2
+        exit 1
+    fi
+fi
+
+# The client must reach the backend subnet *via the agent*, not via eth0/NAT.
+_client_routes_via_agent() {
+    VAGRANT_3VM=1 vagrant ssh attacker \
+        -c "ip route get 192.168.57.30 | head -1 | grep -q 'via 192.168.56.10'" >/dev/null 2>&1
+}
+if ! _client_routes_via_agent; then
+    echo "    client routes to the backend subnet off-path, re-provisioning its route"
+    VAGRANT_3VM=1 vagrant provision attacker --provision-with transit-routing
+    if ! _client_routes_via_agent; then
+        echo "ERROR: client still reaches 192.168.57.0/24 without traversing the agent." >&2
+        echo "       Transit suites would assert on traffic the datapath never saw." >&2
+        exit 1
+    fi
+fi
+
+# And the backend must send replies back through the agent.
+_backend_routes_via_agent() {
+    VAGRANT_3VM=1 vagrant ssh backend \
+        -c "ip route get 192.168.56.20 | head -1 | grep -q 'via 192.168.57.10'" >/dev/null 2>&1
+}
+if ! _backend_routes_via_agent; then
+    echo "    backend routes to the client subnet off-path, re-provisioning its route"
+    VAGRANT_3VM=1 vagrant provision backend --provision-with transit-routing
+    if ! _backend_routes_via_agent; then
+        echo "ERROR: backend still reaches 192.168.56.0/24 without traversing the agent." >&2
+        exit 1
+    fi
+fi
+
+echo "    OK"
+cd "$INTEGRATION_DIR"
 
 # ── Build suite list ───────────────────────────────────────────────
 list_transit_suites() {
@@ -201,6 +267,7 @@ VAGRANT_3VM=1 vagrant ssh attacker -c \
      export BACKEND_VM_IP=192.168.57.30 && \
      export AGENT_SSH_KEY=~/.ssh/agent_key && \
      export BACKEND_SSH_KEY=~/.ssh/backend_key && \
+     export EBPFSENTINEL_STRICT_SKIPS=${EBPFSENTINEL_STRICT_SKIPS:-0} && \
      bats --timing ${REMOTE_SUITES}"
 
 echo ""

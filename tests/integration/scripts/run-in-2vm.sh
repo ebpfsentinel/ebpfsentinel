@@ -22,6 +22,12 @@ SUITE_DIR="${INTEGRATION_DIR}/suites"
 PERF_DIR="${INTEGRATION_DIR}/../perf"
 
 # ── Parse arguments ────────────────────────────────────────────────
+# A `soft_skip` on this lane means a prerequisite the lane is supposed to own
+# went missing, so allow callers to turn those skips into failures rather than
+# letting a provisioning gap read as a pass. `env_skip` is unaffected - see
+# lib/skip_policy.bash.
+export EBPFSENTINEL_STRICT_SKIPS="${EBPFSENTINEL_STRICT_SKIPS:-0}"
+
 SUITE=""
 EBPF_ONLY=false
 PERF_ONLY=false
@@ -155,6 +161,7 @@ vagrant ssh attacker -c \
      export AGENT_VM_IP=192.168.56.10 && \
      export ATTACKER_VM_IP=192.168.56.20 && \
      export AGENT_SSH_KEY=~/.ssh/agent_key && \
+     export EBPFSENTINEL_STRICT_SKIPS=${EBPFSENTINEL_STRICT_SKIPS:-0} && \
      bats --timing ${REMOTE_SUITES}"
 
 echo ""

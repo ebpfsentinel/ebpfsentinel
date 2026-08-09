@@ -1,18 +1,29 @@
 #!/usr/bin/env bash
-# sync-to-agent-vm.sh — Sync local binary and/or Docker image to agent VM
+# sync-to-agent-vm.sh — Sync local build artifacts and/or Docker image to agent VM
 #
-# Pushes the locally-built agent binary and Docker image to the agent VM
-# without rebuilding on the VM. Much faster than compiling in the VM.
+# Pushes the locally-built agent binary, warden broker, eBPF objects and Docker
+# image to the agent VM without rebuilding on the VM. Much faster than compiling
+# in the VM.
+#
+# The warden and the eBPF objects are part of the default set on purpose: the
+# agent self-unshares a userns and the warden delegates it a bpffs, and the
+# objects are loaded from disk rather than embedded. Pushing only the agent
+# leaves two thirds of the deployment stale, which reads as a product failure.
 #
 # Usage:
-#   ./sync-to-agent-vm.sh              # sync both binary + Docker image
-#   ./sync-to-agent-vm.sh --binary     # sync binary only
+#   ./sync-to-agent-vm.sh              # sync agent + warden + eBPF objects + Docker image
+#   ./sync-to-agent-vm.sh --binary     # sync agent binary only
+#   ./sync-to-agent-vm.sh --warden     # sync warden broker only
+#   ./sync-to-agent-vm.sh --ebpf       # sync eBPF objects only
 #   ./sync-to-agent-vm.sh --docker     # sync Docker image only
+#   ./sync-to-agent-vm.sh --binary --warden --ebpf   # flags combine
 #
 # Environment:
 #   AGENT_VM_IP       Agent VM IP (default: 192.168.56.10)
 #   AGENT_SSH_KEY     SSH key for agent VM (auto-detected from Vagrant)
 #   AGENT_BINARY      Path to local binary (default: target/release/ebpfsentinel-agent)
+#   WARDEN_BINARY     Path to local warden (default: target/release/warden)
+#   EBPF_OBJ_DIR      Local eBPF object dir (default: target/bpfel-unknown-none/release)
 #   DOCKER_IMAGE      Docker image name (default: ebpfsentinel:integration-test)
 
 set -euo pipefail
@@ -25,18 +36,38 @@ PROJECT_ROOT="${INTEGRATION_DIR}/../.."
 AGENT_VM_IP="${AGENT_VM_IP:-192.168.56.10}"
 SSH_KEY="${AGENT_SSH_KEY:-}"
 AGENT_BINARY="${AGENT_BINARY:-${PROJECT_ROOT}/target/release/ebpfsentinel-agent}"
+WARDEN_BINARY="${WARDEN_BINARY:-${PROJECT_ROOT}/target/release/warden}"
+EBPF_OBJ_DIR="${EBPF_OBJ_DIR:-${PROJECT_ROOT}/target/bpfel-unknown-none/release}"
 DOCKER_IMAGE="${DOCKER_IMAGE:-ebpfsentinel:integration-test}"
 
+# Where the VM expects each artifact. `EBPF_PROGRAM_DIR` in the VM helpers
+# points at the object dir, so keep the two in step.
+REMOTE_EBPF_DIR="/usr/local/lib/ebpfsentinel"
+
 SYNC_BINARY=true
+SYNC_WARDEN=true
+SYNC_EBPF=true
 SYNC_DOCKER=true
 
 # ── Parse args ──────────────────────────────────────────────────
+# The first explicit flag clears the default set so flags can be combined
+# (`--binary --warden` syncs exactly those two).
+_selective=false
+_select() {
+    if [ "$_selective" = false ]; then
+        SYNC_BINARY=false; SYNC_WARDEN=false; SYNC_EBPF=false; SYNC_DOCKER=false
+        _selective=true
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --binary)  SYNC_BINARY=true; SYNC_DOCKER=false; shift ;;
-        --docker)  SYNC_BINARY=false; SYNC_DOCKER=true; shift ;;
+        --binary)  _select; SYNC_BINARY=true; shift ;;
+        --warden)  _select; SYNC_WARDEN=true; shift ;;
+        --ebpf)    _select; SYNC_EBPF=true; shift ;;
+        --docker)  _select; SYNC_DOCKER=true; shift ;;
         --help|-h)
-            head -16 "$0" | grep '^#' | sed 's/^# \?//'
+            head -28 "$0" | grep '^#' | sed 's/^# \?//'
             exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -80,6 +111,8 @@ if [ "$SYNC_BINARY" = true ]; then
         exit 1
     fi
 
+    # `local` is a function-only builtin: using it here would fail under
+    # `set -e` before a single byte was copied.
     local_size=$(stat -c%s "$AGENT_BINARY" 2>/dev/null || stat -f%z "$AGENT_BINARY")
     local_size_mb=$(( local_size / 1048576 ))
     echo "==> Syncing binary to agent VM (${local_size_mb} MB)..."
@@ -102,6 +135,67 @@ if [ "$SYNC_BINARY" = true ]; then
     remote_version="$(_ssh "/usr/local/bin/ebpfsentinel-agent --version 2>/dev/null || echo 'unknown'")"
     echo "    Installed: ${remote_version}"
     echo "==> Binary sync complete."
+fi
+
+# ── Sync warden broker ──────────────────────────────────────────
+if [ "$SYNC_WARDEN" = true ]; then
+    if [ ! -f "$WARDEN_BINARY" ]; then
+        echo "ERROR: Warden not found at ${WARDEN_BINARY}" >&2
+        echo "       Run 'cargo build --release --bin warden' first, or set WARDEN_BINARY" >&2
+        exit 1
+    fi
+
+    echo "==> Syncing warden to agent VM..."
+    echo "    ${WARDEN_BINARY} -> /usr/local/bin/warden"
+
+    _ssh "sudo pkill -x warden 2>/dev/null || true"
+    sleep 1
+
+    scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        "$WARDEN_BINARY" "vagrant@${AGENT_VM_IP}:/tmp/warden-new"
+
+    _ssh "sudo mv /tmp/warden-new /usr/local/bin/warden && sudo chmod 755 /usr/local/bin/warden"
+
+    # The warden has no --version flag, so compare sizes: that is enough to
+    # catch the failure this check exists for (a stale binary left in place).
+    warden_size=$(stat -c%s "$WARDEN_BINARY" 2>/dev/null || stat -f%z "$WARDEN_BINARY")
+    remote_warden_size="$(_ssh "stat -c%s /usr/local/bin/warden")"
+    if [ "$warden_size" != "$remote_warden_size" ]; then
+        echo "ERROR: warden size mismatch (local ${warden_size}, remote ${remote_warden_size})" >&2
+        exit 1
+    fi
+    echo "    Installed: ${remote_warden_size} bytes (matches local)"
+    echo "==> Warden sync complete."
+fi
+
+# ── Sync eBPF objects ───────────────────────────────────────────
+# The agent loads its programs from disk, so a rebuilt object that never
+# reaches the VM silently leaves the previous datapath running.
+if [ "$SYNC_EBPF" = true ]; then
+    if [ ! -d "$EBPF_OBJ_DIR" ] || [ ! -f "${EBPF_OBJ_DIR}/xdp-firewall" ]; then
+        echo "ERROR: eBPF objects not found in ${EBPF_OBJ_DIR}" >&2
+        echo "       Run 'cargo xtask ebpf-build' first, or set EBPF_OBJ_DIR" >&2
+        exit 1
+    fi
+
+    obj_count=$(find "$EBPF_OBJ_DIR" -maxdepth 1 -type f ! -name '*.d' | wc -l)
+    echo "==> Syncing ${obj_count} eBPF objects to agent VM..."
+    echo "    ${EBPF_OBJ_DIR} -> ${REMOTE_EBPF_DIR}"
+
+    _ssh "sudo mkdir -p ${REMOTE_EBPF_DIR} && sudo chmod 755 ${REMOTE_EBPF_DIR}"
+
+    # Stage in /tmp then move as root: the destination is root-owned.
+    _ssh "rm -rf /tmp/ebpf-objs-new && mkdir -p /tmp/ebpf-objs-new"
+    scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        "${EBPF_OBJ_DIR}"/* "vagrant@${AGENT_VM_IP}:/tmp/ebpf-objs-new/" >/dev/null
+
+    _ssh "sudo find /tmp/ebpf-objs-new -maxdepth 1 -name '*.d' -delete; \
+          sudo cp /tmp/ebpf-objs-new/* ${REMOTE_EBPF_DIR}/ && \
+          sudo chmod 644 ${REMOTE_EBPF_DIR}/* && rm -rf /tmp/ebpf-objs-new"
+
+    remote_count="$(_ssh "ls -1 ${REMOTE_EBPF_DIR} | wc -l")"
+    echo "    Installed: ${remote_count} objects"
+    echo "==> eBPF object sync complete."
 fi
 
 # ── Sync Docker image ───────────────────────────────────────────

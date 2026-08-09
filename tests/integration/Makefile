@@ -211,6 +211,16 @@ test-2vm-perf-comparison-quick: vagrant-2vm-up ## Quick binary vs Docker compari
 .PHONY: vagrant-3vm-up
 vagrant-3vm-up: ## Start agent (dual-NIC), client (attacker), and backend VMs
 	cd $(VAGRANT_DIR) && VAGRANT_3VM=1 vagrant up agent attacker backend
+	# `vagrant up` does not re-apply hardware config to an already-running VM,
+	# so an agent booted in 2-VM shape keeps a single private NIC and every
+	# transit suite fails at setup with "resolve ifindex for `eth2`". Reload it
+	# when the transit NIC is missing.
+	cd $(VAGRANT_DIR) && VAGRANT_3VM=1 sh -c '\
+	  if ! vagrant ssh agent -c "ip -o link show eth2" >/dev/null 2>&1; then \
+	    echo "==> agent lacks the 192.168.57.0/24 transit NIC, reloading"; \
+	    vagrant reload agent && \
+	    vagrant provision agent --provision-with transit-routing; \
+	  fi'
 
 .PHONY: vagrant-3vm-halt
 vagrant-3vm-halt: ## Stop all three VMs
