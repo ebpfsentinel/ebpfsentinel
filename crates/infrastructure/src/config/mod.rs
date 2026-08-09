@@ -535,6 +535,10 @@ impl AgentConfig {
             });
         }
 
+        for (idx, port_cfg) in self.ddos.amplification_protection.ports.iter().enumerate() {
+            port_cfg.validate(idx)?;
+        }
+
         // The four guards are the only source of DDoS detections, policies
         // included: with all of them off the section counts nothing, however
         // many policies it carries.
@@ -3901,6 +3905,51 @@ ddos:
         assert!(
             err.to_string().contains("ratelimit.enabled"),
             "expected the error to name the section that must be enabled, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_tcp_amplification_port_is_refused() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+ratelimit:
+  enabled: true
+ddos:
+  enabled: true
+  amplification_protection:
+    enabled: true
+    ports:
+      - port: 53
+        protocol: tcp
+        max_pps: 500
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("protocol"),
+            "expected the error to name the protocol, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_udp_amplification_port_is_accepted() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+ratelimit:
+  enabled: true
+ddos:
+  enabled: true
+  amplification_protection:
+    enabled: true
+    ports:
+      - port: 53
+        max_pps: 500
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(
+            config.ddos.amplification_protection.ports[0].protocol,
+            "udp"
         );
     }
 

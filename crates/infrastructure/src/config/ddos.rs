@@ -133,6 +133,40 @@ fn default_amp_protocol() -> String {
     "udp".to_string()
 }
 
+impl AmpPortConfig {
+    pub(super) fn validate(&self, idx: usize) -> Result<(), ConfigError> {
+        let prefix = format!("ddos.amplification_protection.ports[{idx}]");
+
+        if self.port == 0 {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.port"),
+                message: "port must be > 0".to_string(),
+            });
+        }
+
+        if self.max_pps == 0 {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.max_pps"),
+                message: "max_pps must be > 0, use enabled: false to switch the guard off"
+                    .to_string(),
+            });
+        }
+
+        // Amplification abuses services that answer far more than they are
+        // asked, which the kernel path only tracks over UDP. Anything else
+        // would be accepted here and then silently ignored.
+        if !self.protocol.eq_ignore_ascii_case("udp") {
+            return Err(ConfigError::InvalidValue {
+                field: format!("{prefix}.protocol"),
+                value: self.protocol.clone(),
+                expected: "udp".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
 // ── DDoS Policy Config ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
