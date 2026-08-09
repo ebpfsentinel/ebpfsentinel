@@ -3,7 +3,7 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::time::Duration;
 
-use aya::{maps::ProgramArray, programs::XdpFlags};
+use aya::maps::ProgramArray;
 use tracing::{info, warn};
 
 use super::kfunc_attach;
@@ -11,6 +11,19 @@ use super::kfunc_loader;
 
 /// Default BPF filesystem pin path for shared maps.
 pub const DEFAULT_BPF_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel";
+
+/// XDP attach mode bits, mirroring `XDP_FLAGS_*` in `<linux/if_link.h>`.
+///
+/// The agent attaches through its own `BPF_LINK_CREATE` path rather than
+/// aya's program API, so the mode travels as raw kernel bits. `0` lets the
+/// kernel pick the best available mode.
+pub const XDP_MODE_AUTO: u32 = 0;
+/// Generic XDP, executed by the kernel network stack.
+pub const XDP_MODE_SKB: u32 = 1 << 1;
+/// Native XDP, executed by the network driver.
+pub const XDP_MODE_DRV: u32 = 1 << 2;
+/// Hardware offload, executed by the network device.
+pub const XDP_MODE_HW: u32 = 1 << 3;
 
 /// Loads and attaches eBPF programs (XDP, TC, uprobe).
 ///
@@ -145,25 +158,25 @@ impl EbpfLoader {
     /// Attach the XDP firewall program to the given network interface.
     ///
     /// Backward-compatible wrapper around `attach_xdp_program("xdp_firewall", ...)`.
-    pub fn attach_xdp(&mut self, interface: &str, flags: XdpFlags) -> Result<(), anyhow::Error> {
+    pub fn attach_xdp(&mut self, interface: &str, flags: u32) -> Result<(), anyhow::Error> {
         self.attach_xdp_program("xdp_firewall", interface, flags)
     }
 
     /// Attach a named XDP program to the given network interface.
     ///
     /// Attempts the requested `flags` mode first. If attachment fails and the
-    /// mode is not already auto (default), falls back to `XdpFlags::default()`
-    /// (kernel picks best available) and logs a warning.
+    /// mode is not already auto, falls back to [`XDP_MODE_AUTO`] (kernel picks
+    /// best available) and logs a warning.
     pub fn attach_xdp_program(
         &mut self,
         program_name: &str,
         interface: &str,
-        flags: XdpFlags,
+        flags: u32,
     ) -> Result<(), anyhow::Error> {
         if let Some(prog_fd) = self.kfunc_progs.get(program_name) {
             let raw = prog_fd.as_raw_fd();
             let mode_label = xdp_flags_label(flags);
-            match attach_xdp_ebusy_retry(program_name, raw, interface, flags.bits()) {
+            match attach_xdp_ebusy_retry(program_name, raw, interface, flags) {
                 Ok(link) => {
                     self.kfunc_links.push(link);
                     info!(
@@ -174,7 +187,7 @@ impl EbpfLoader {
                     );
                     return Ok(());
                 }
-                Err(e) if flags.bits() != XdpFlags::default().bits() => {
+                Err(e) if flags != XDP_MODE_AUTO => {
                     warn!(
                         program_name,
                         interface,
@@ -182,17 +195,12 @@ impl EbpfLoader {
                         error = %e,
                         "XDP kfunc attach failed with requested mode, falling back to auto"
                     );
-                    let link = attach_xdp_ebusy_retry(
-                        program_name,
-                        raw,
-                        interface,
-                        XdpFlags::default().bits(),
-                    )?;
+                    let link = attach_xdp_ebusy_retry(program_name, raw, interface, XDP_MODE_AUTO)?;
                     self.kfunc_links.push(link);
                     info!(
                         program_name,
                         interface,
-                        mode = xdp_flags_label(XdpFlags::default()),
+                        mode = xdp_flags_label(XDP_MODE_AUTO),
                         "XDP kfunc program attached (fallback from {mode_label})"
                     );
                     return Ok(());
@@ -476,26 +484,22 @@ fn attach_xdp_ebusy_retry(
 }
 
 /// Human-readable label for XDP attachment flags.
-fn xdp_flags_label(flags: XdpFlags) -> &'static str {
-    let bits = flags.bits();
-    if bits == XdpFlags::DRV_MODE.bits() {
-        "native"
-    } else if bits == XdpFlags::SKB_MODE.bits() {
-        "generic"
-    } else if bits == XdpFlags::HW_MODE.bits() {
-        "offloaded"
-    } else {
-        "auto"
+fn xdp_flags_label(flags: u32) -> &'static str {
+    match flags {
+        XDP_MODE_DRV => "native",
+        XDP_MODE_SKB => "generic",
+        XDP_MODE_HW => "offloaded",
+        _ => "auto",
     }
 }
 
-/// Convert an [`infrastructure::config::XdpMode`] value to [`aya::programs::XdpFlags`].
-pub fn xdp_mode_to_flags(mode: infrastructure::config::XdpMode) -> XdpFlags {
+/// Convert an [`infrastructure::config::XdpMode`] value to XDP attach mode bits.
+pub fn xdp_mode_to_flags(mode: infrastructure::config::XdpMode) -> u32 {
     use infrastructure::config::XdpMode;
     match mode {
-        XdpMode::Auto => XdpFlags::default(),
-        XdpMode::Native => XdpFlags::DRV_MODE,
-        XdpMode::Generic => XdpFlags::SKB_MODE,
-        XdpMode::Offloaded => XdpFlags::HW_MODE,
+        XdpMode::Auto => XDP_MODE_AUTO,
+        XdpMode::Native => XDP_MODE_DRV,
+        XdpMode::Generic => XDP_MODE_SKB,
+        XdpMode::Offloaded => XDP_MODE_HW,
     }
 }

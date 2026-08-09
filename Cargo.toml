@@ -45,8 +45,8 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 # eBPF
-aya = "0.13.1"
-aya-obj = "0.2.1"
+aya = "0.14.0"
+aya-obj = "0.3.0"
 object = { version = "0.39.1", default-features = false, features = ["elf", "read_core"] }
 aya-ebpf = "0.1.1"
 

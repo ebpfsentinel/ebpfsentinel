@@ -382,7 +382,7 @@ pub fn load_kfunc_programs<S: BuildHasher>(
     let names = unique_names(&find_kfunc_sites(elf)?);
 
     let mut obj = Object::parse(elf).map_err(|e| KfuncLoaderError::ParseObject(e.to_string()))?;
-    let features = BtfFeatures::new(true, true, true, true, true, true, true);
+    let features = BtfFeatures::new(true, true, true, true, true, true, true, true);
     obj.fixup_and_sanitize_btf(&features)
         .map_err(|e| KfuncLoaderError::SanitizeBtf(e.to_string()))?;
 
@@ -1211,7 +1211,7 @@ pub fn load_object_token(
     // kernel dedups identical BTF, and both fds are dropped after load.
     let mut probe =
         Object::parse(&patched).map_err(|e| KfuncLoaderError::ParseObject(e.to_string()))?;
-    let features = BtfFeatures::new(true, true, true, true, true, true, true);
+    let features = BtfFeatures::new(true, true, true, true, true, true, true, true);
     probe
         .fixup_and_sanitize_btf(&features)
         .map_err(|e| KfuncLoaderError::SanitizeBtf(e.to_string()))?;
