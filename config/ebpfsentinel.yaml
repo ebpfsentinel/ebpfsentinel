@@ -99,6 +99,13 @@ agent:
 # The first policy that matches an alert is the one applied, so order is
 # precedence. A block blacklists the source; a throttle gives it a token
 # bucket in the XDP rate limiter. Both lapse after ttl_secs.
+#
+# Both responses act on the address the alert names, so the component filter
+# accepts only components whose alerts carry one: ai-security, ddos, firewall,
+# ids, ips, l7, ratelimit, threatintel. DLP, ML, DNS and routing alerts are
+# not tied to a peer address and nothing can be contained for them.
+# A throttle reaches IPv4 sources only, the addresses the rate limiter's map
+# holds; contain an IPv6 source with a block policy.
 
 # ── Auto-Capture (OSS) ────────────────────────────────────────────
 # Start a PCAP capture when a high-severity alert fires.

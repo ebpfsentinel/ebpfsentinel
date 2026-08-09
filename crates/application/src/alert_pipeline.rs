@@ -99,6 +99,14 @@ impl AutoResponseHandler {
         policy: &domain::response::entity::SimpleResponsePolicy,
         ttl: Duration,
     ) -> Result<(), String> {
+        if src_ip.is_ipv6() {
+            return Err(
+                "the rate limiter matches IPv4 sources; contain an IPv6 source with a block \
+                 policy instead"
+                    .to_string(),
+            );
+        }
+
         // A bucket the size of one second of traffic: a burst above the rate
         // is metered rather than waved through on the first packet. A policy
         // that states no rate leaves this at zero, which the policy's own
@@ -139,6 +147,24 @@ impl AutoResponseHandler {
         });
         Ok(())
     }
+}
+
+/// The source address an alert names, or `None` when it names none.
+///
+/// Process-level alerts (DLP, ML anomalies) have no packet behind them and
+/// zero their address fields, and an unspecified address is not a host any
+/// response could contain.
+fn alert_source_ip(alert: &domain::alert::entity::Alert) -> Option<IpAddr> {
+    let ip = if alert.is_ipv6 {
+        let mut bytes = [0u8; 16];
+        for (i, &word) in alert.src_addr.iter().enumerate() {
+            bytes[i * 4..(i + 1) * 4].copy_from_slice(&word.to_be_bytes());
+        }
+        IpAddr::from(bytes)
+    } else {
+        IpAddr::from(std::net::Ipv4Addr::from(alert.src_addr[0]))
+    };
+    (!ip.is_unspecified()).then_some(ip)
 }
 
 /// Single-host CIDR (/32 or /128) for the source an alert names.
@@ -754,8 +780,21 @@ impl AlertPipeline {
     /// stops there, so list order is precedence. A `block` sends the source to
     /// the IPS blacklist; a `throttle` gives it a token bucket at the policy's
     /// rate instead, which shapes the source rather than cutting it off.
+    ///
+    /// Both responses act on the address the alert names, so an alert that
+    /// names none — DLP and ML anomalies are process-level and zero their
+    /// address fields — is left alone rather than contained at 0.0.0.0.
     async fn evaluate_auto_response(&self, alert: &domain::alert::entity::Alert) {
         let Some(ref handler) = self.auto_response else {
+            return;
+        };
+
+        let Some(src_ip) = alert_source_ip(alert) else {
+            tracing::debug!(
+                alert_id = %alert.id,
+                component = %alert.component,
+                "auto-response: skipped (the alert names no source address)"
+            );
             return;
         };
 
@@ -773,20 +812,6 @@ impl AlertPipeline {
             {
                 continue;
             }
-            // Extract source IP
-            let src_ip = if alert.is_ipv6 {
-                let bytes: [u8; 16] = {
-                    let mut b = [0u8; 16];
-                    for (i, &word) in alert.src_addr.iter().enumerate() {
-                        b[i * 4..(i + 1) * 4].copy_from_slice(&word.to_be_bytes());
-                    }
-                    b
-                };
-                std::net::IpAddr::from(bytes)
-            } else {
-                std::net::IpAddr::from(std::net::Ipv4Addr::from(alert.src_addr[0]))
-            };
-
             let reason = format!("auto-response:{} alert={}", policy.name, alert.id);
             let ttl = std::time::Duration::from_secs(policy.ttl_secs);
 
@@ -1884,6 +1909,55 @@ mod tests {
             .await;
 
         assert!(ips.load().is_blacklisted(IpAddr::from([192, 168, 0, 1])));
+        assert_eq!(rl.read().await.policies().len(), 0);
+    }
+
+    /// Process-level alerts carry no packet and zero their address fields.
+    /// Containing 0.0.0.0 would hold nothing while reporting a response.
+    #[tokio::test]
+    async fn an_alert_naming_no_source_is_left_alone() {
+        let metrics = Arc::new(TestMetrics::new());
+        let (ips, rl) = make_auto_response_services(&metrics);
+        let mut pipeline = make_pipeline(vec![make_route("all", Severity::Low)], metrics)
+            .with_auto_response(
+                vec![make_auto_response_policy(
+                    domain::response::entity::ResponseActionType::BlockIp,
+                    None,
+                )],
+                Arc::clone(&ips),
+                Arc::clone(&rl),
+            );
+
+        let mut alert = make_ids_alert("ids-001", Severity::High);
+        alert.src_addr = [0; 4];
+        pipeline.process_alert(&alert).await;
+
+        assert!(!ips.load().is_blacklisted(IpAddr::from([0, 0, 0, 0])));
+        assert_eq!(rl.read().await.policies().len(), 0);
+    }
+
+    /// The rate limiter's config map is keyed by a 32-bit address, so an IPv6
+    /// source has no bucket to install and the throttle reports the failure
+    /// instead of writing one somewhere else.
+    #[tokio::test]
+    async fn a_throttle_installs_nothing_for_an_ipv6_source() {
+        let metrics = Arc::new(TestMetrics::new());
+        let (ips, rl) = make_auto_response_services(&metrics);
+        let mut pipeline = make_pipeline(vec![make_route("all", Severity::Low)], metrics)
+            .with_auto_response(
+                vec![make_auto_response_policy(
+                    domain::response::entity::ResponseActionType::ThrottleIp,
+                    Some(500),
+                )],
+                ips,
+                Arc::clone(&rl),
+            );
+
+        let mut alert = make_ids_alert("ids-001", Severity::High);
+        alert.is_ipv6 = true;
+        alert.src_addr = [0x2001_0DB8, 0, 0, 1];
+        pipeline.process_alert(&alert).await;
+
         assert_eq!(rl.read().await.policies().len(), 0);
     }
 

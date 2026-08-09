@@ -68,7 +68,7 @@ pub use routing::{GatewayConfig, HealthCheckConfig, RoutingConfig};
 pub use threatintel::{ThreatIntelConfig, ThreatIntelFeedConfig};
 pub use zone::{ZoneEntryConfig, ZonePairConfig, ZoneSectionConfig};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use domain::alert::entity::AlertRoute;
@@ -752,7 +752,40 @@ impl AgentConfig {
                 ),
             });
         }
+        let mut seen_policy_names: HashSet<&str> = HashSet::new();
         for (i, policy) in self.auto_response.policies.iter().enumerate() {
+            // The name identifies the policy in the metrics, the audit trail
+            // and the rule ID a throttle installs, so two policies sharing one
+            // would report as a single response and fight over that entry.
+            if policy.name.trim().is_empty() {
+                return Err(ConfigError::Validation {
+                    field: format!("auto_response.policies[{i}].name"),
+                    message: "a policy needs a name: it labels the response in the metrics and \
+                              the audit trail"
+                        .to_string(),
+                });
+            }
+            if !seen_policy_names.insert(policy.name.as_str()) {
+                return Err(ConfigError::Validation {
+                    field: format!("auto_response.policies[{i}].name"),
+                    message: format!("policy name '{}' is already taken", policy.name),
+                });
+            }
+            for component in &policy.components {
+                if !AUTO_RESPONSE_COMPONENTS
+                    .iter()
+                    .any(|c| component.eq_ignore_ascii_case(c))
+                {
+                    return Err(ConfigError::Validation {
+                        field: format!("auto_response.policies[{i}].components"),
+                        message: format!(
+                            "'{component}' names no source a response could contain; \
+                             expected one of: {}",
+                            AUTO_RESPONSE_COMPONENTS.join(", ")
+                        ),
+                    });
+                }
+            }
             let valid_severities = ["low", "medium", "high", "critical"];
             if !valid_severities.contains(&policy.min_severity.as_str()) {
                 return Err(ConfigError::Validation {
@@ -1209,8 +1242,9 @@ pub struct AutoResponsePolicyConfig {
     #[serde(default = "default_min_severity")]
     pub min_severity: String,
 
-    /// Component filter (e.g. [`ids`, `ddos`]).
-    /// If empty, matches all components.
+    /// Component filter, matched case-insensitively against the alert's
+    /// component. If empty, matches every component a response can contain.
+    /// See [`AUTO_RESPONSE_COMPONENTS`] for the accepted names.
     #[serde(default)]
     pub components: Vec<String>,
 
@@ -1239,6 +1273,24 @@ fn default_response_ttl() -> u64 {
 
 /// Maximum number of auto-response policies in OSS.
 pub const MAX_AUTO_RESPONSE_POLICIES: usize = 3;
+
+/// Alert components an auto-response policy may name.
+///
+/// Both responses act on the address the alert carries, so only components
+/// whose alerts name a source belong here. DLP and ML anomalies are
+/// process-level, and DNS and routing alerts describe a name or a gateway
+/// rather than a peer: a policy filtered on those would match alerts and
+/// contain nothing.
+pub const AUTO_RESPONSE_COMPONENTS: [&str; 8] = [
+    "ai-security",
+    "ddos",
+    "firewall",
+    "ids",
+    "ips",
+    "l7",
+    "ratelimit",
+    "threatintel",
+];
 
 // ── Agent info ─────────────────────────────────────────────────────
 
@@ -4081,5 +4133,77 @@ auto_response:
 ";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.auto_response.policies[0].rate_pps, None);
+    }
+
+    #[test]
+    fn auto_response_rejects_a_component_that_names_no_source() {
+        // DLP alerts are process-level, so this policy would match and
+        // contain nothing.
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+auto_response:
+  enabled: true
+  policies:
+    - name: block-leaks
+      min_severity: high
+      components: [dlp]
+      action: block
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("names no source"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn auto_response_accepts_a_component_written_in_any_case() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+auto_response:
+  enabled: true
+  policies:
+    - name: block-scanners
+      min_severity: high
+      components: [IDS, DDoS]
+      action: block
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.auto_response.policies[0].components.len(), 2);
+    }
+
+    #[test]
+    fn auto_response_rejects_an_unnamed_policy() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+auto_response:
+  enabled: true
+  policies:
+    - name: '  '
+      min_severity: high
+      action: block
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("needs a name"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn auto_response_rejects_two_policies_sharing_a_name() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+auto_response:
+  enabled: true
+  policies:
+    - name: contain
+      min_severity: critical
+      action: block
+    - name: contain
+      min_severity: high
+      action: throttle
+      rate_pps: 500
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("already taken"), "unexpected error: {err}");
     }
 }
