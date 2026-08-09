@@ -515,8 +515,17 @@ pub async fn load_ebpf_programs(
     services: &ServiceHandles,
 ) -> anyhow::Result<EbpfLoadResult> {
     let ebpf_dir = startup::resolve_ebpf_program_dir(config);
-    EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
-    EbpfLoader::cleanup_pin_path(startup::DLP_PIN_PATH);
+    // An HA activate lands here after some other node's deactivate, or after
+    // this node's own. Either way the pins on this host belong to a generation
+    // that is gone and cannot be interrogated, so they go.
+    EbpfLoader::cleanup_pin_path_because(
+        adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+        "activate: pins from the previous generation",
+    );
+    EbpfLoader::cleanup_pin_path_because(
+        startup::DLP_PIN_PATH,
+        "activate: pins from the previous generation",
+    );
 
     let mut ebpf_state = EbpfState::new();
     let mut ebpf_map_holder = EbpfMapHolder::new();
@@ -962,7 +971,17 @@ pub async fn load_ebpf_programs(
 pub fn detach_ebpf(state: EbpfState) {
     let count = state.loaders.len();
     drop(state);
-    EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
-    EbpfLoader::cleanup_pin_path(startup::DLP_PIN_PATH);
+    EbpfLoader::cleanup_pin_path_because(
+        adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+        "deactivate: releasing this generation's state",
+    );
+    EbpfLoader::cleanup_pin_path_because(
+        startup::DLP_PIN_PATH,
+        "deactivate: releasing this generation's state",
+    );
+    // Blocks describe attachments that no longer exist. Carrying them into the
+    // next activate would keep readiness pinned to a conflict the agent has
+    // already stopped competing for.
+    adapters::ebpf::clear_attach_blocks();
     info!(program_count = count, "eBPF programs detached");
 }

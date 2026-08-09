@@ -1526,9 +1526,19 @@ pub async fn run(
     let mut fw_loader: Option<EbpfLoader> = None;
 
     if ebpf_capable {
-        // Clean up stale pinned maps from a previous crash (if any)
-        EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
-        EbpfLoader::cleanup_pin_path(DLP_PIN_PATH);
+        // Pins from a previous generation cannot be inspected - the kernel
+        // offers no way to ask whether one is still held - so startup wipes
+        // rather than adopts. Links are the other half of that state and are
+        // handled the opposite way: they are inspected, and an attach that
+        // finds its own program already in place readopts it.
+        EbpfLoader::cleanup_pin_path_because(
+            adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+            "startup: previous generation's pins are not introspectable",
+        );
+        EbpfLoader::cleanup_pin_path_because(
+            DLP_PIN_PATH,
+            "startup: previous generation's pins are not introspectable",
+        );
 
         // 10a. XDP Firewall
         fw_ok = if config.firewall.enabled {
@@ -3260,7 +3270,10 @@ impl Drop for EbpfState {
         // Loaders are dropped first (aya detaches programs via link FDs).
         // Then clean up any pinned maps left on the BPF filesystem.
         self.loaders.clear();
-        EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
+        EbpfLoader::cleanup_pin_path_because(
+            adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+            "eBPF state dropped",
+        );
     }
 }
 

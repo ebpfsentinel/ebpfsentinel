@@ -29,6 +29,13 @@ pub struct ReadyResponse {
     /// `/api/v1/ebpf/kernel-features` distinguishes the two.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub kernel_helpers_missing: Vec<String>,
+    /// Attachments the kernel refused, one operator-readable sentence each,
+    /// naming the program, the interface and what is holding the slot. A
+    /// non-empty list is why this host is not ready; an empty one means the
+    /// agent never lost an attach, which is a different situation from having
+    /// no programs at all.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attach_blocked: Vec<String>,
 }
 
 /// Helpers the startup probe reported missing, empty when it never ran.
@@ -70,14 +77,31 @@ pub async fn healthz() -> Json<HealthResponse> {
 )]
 pub async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let loaded = state.ebpf_loaded.load(Ordering::Relaxed);
-    let (code, body) = readiness(loaded, missing_kernel_helpers());
+    let (code, body) = readiness(loaded, missing_kernel_helpers(), blocked_attaches());
     (code, Json(body))
 }
 
-/// Decide readiness from the two inputs, so the verdict is testable without a
-/// kernel and without reaching into the process-wide probe cache.
-fn readiness(loaded: bool, missing: Vec<String>) -> (StatusCode, ReadyResponse) {
-    let ready = loaded && missing.is_empty();
+/// Attachments the kernel refused, rendered one sentence each.
+///
+/// Nested XDP is the case this exists for: under Docker and Kubernetes the
+/// orchestrator's own program owns the interface, our attach loses, and without
+/// this the only signal is a 503 that looks identical to "the agent has not
+/// finished starting".
+fn blocked_attaches() -> Vec<String> {
+    adapters::ebpf::blocked_attaches()
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// Decide readiness from the three inputs, so the verdict is testable without a
+/// kernel and without reaching into the process-wide caches.
+fn readiness(
+    loaded: bool,
+    missing: Vec<String>,
+    blocked: Vec<String>,
+) -> (StatusCode, ReadyResponse) {
+    let ready = loaded && missing.is_empty() && blocked.is_empty();
     let code = if ready {
         StatusCode::OK
     } else {
@@ -89,6 +113,7 @@ fn readiness(loaded: bool, missing: Vec<String>) -> (StatusCode, ReadyResponse) 
             status: if ready { "ready" } else { "not_ready" },
             ebpf_loaded: loaded,
             kernel_helpers_missing: missing,
+            attach_blocked: blocked,
         },
     )
 }
@@ -185,6 +210,7 @@ mod tests {
                   sched_cls programs"
                     .to_string(),
             ],
+            Vec::new(),
         );
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.status, "not_ready");
@@ -196,9 +222,47 @@ mod tests {
     fn an_unprobed_kernel_does_not_hold_readiness_back() {
         // No probe result is not a negative result. The token-only load path
         // cannot probe at all, and every host on it must still reach ready.
-        let (code, body) = readiness(true, Vec::new());
+        let (code, body) = readiness(true, Vec::new(), Vec::new());
         assert_eq!(code, StatusCode::OK);
         assert_eq!(body.status, "ready");
         assert!(body.kernel_helpers_missing.is_empty());
+    }
+
+    #[test]
+    fn nested_xdp_is_reported_apart_from_a_generic_not_ready() {
+        // Docker and Kubernetes: the orchestrator's program owns the veth, our
+        // attach loses. Without the reason, this 503 is indistinguishable from
+        // an agent that simply has not loaded anything yet.
+        let (code, body) = readiness(
+            false,
+            Vec::new(),
+            vec![
+                "xdp-firewall on eth0: interface already carries XDP program id 42 in native \
+                  mode, held by a BPF link"
+                    .to_string(),
+            ],
+        );
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.attach_blocked.len(), 1);
+        assert!(body.attach_blocked[0].contains("already carries XDP program"));
+
+        // The generic case carries no reason at all, which is the distinction.
+        let (code, generic) = readiness(false, Vec::new(), Vec::new());
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(generic.attach_blocked.is_empty());
+    }
+
+    #[test]
+    fn a_blocked_attach_holds_readiness_back_even_when_other_programs_loaded() {
+        // Losing one interface to a foreign program still means the agent is
+        // not enforcing what it was told to enforce.
+        let (code, body) = readiness(
+            true,
+            Vec::new(),
+            vec!["xdp-firewall on eth0: interface already carries XDP program id 42".to_string()],
+        );
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "not_ready");
+        assert!(body.ebpf_loaded);
     }
 }

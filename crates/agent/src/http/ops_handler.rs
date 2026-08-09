@@ -28,9 +28,26 @@ pub struct ProgramStatus {
     pub loaded: bool,
 }
 
+/// One attach the kernel refused, and what is standing in the way.
+#[derive(Serialize, ToSchema)]
+pub struct AttachBlockEntry {
+    pub program: String,
+    pub interface: String,
+    /// Operator-readable sentence: what the kernel said, translated against
+    /// what is actually on the interface right now.
+    pub reason: String,
+    /// True when the interface already carries somebody else's XDP program,
+    /// the nested-XDP case that Docker and Kubernetes produce.
+    pub nested_xdp: bool,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct EbpfStatusResponse {
     pub programs: Vec<ProgramStatus>,
+    /// Attaches that lost, if any. `programs[].loaded` says a program is in
+    /// the kernel; this says whether it reached the wire.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attach_blocked: Vec<AttachBlockEntry>,
 }
 
 /// One `(program type, helper)` answer from the startup probe.
@@ -211,7 +228,19 @@ pub async fn get_ebpf_status(State(state): State<Arc<AppState>>) -> Json<EbpfSta
             loaded: *loaded,
         })
         .collect();
-    Json(EbpfStatusResponse { programs })
+    let attach_blocked = adapters::ebpf::blocked_attaches()
+        .into_iter()
+        .map(|b| AttachBlockEntry {
+            program: b.program,
+            interface: b.interface,
+            reason: b.reason,
+            nested_xdp: b.nested_xdp,
+        })
+        .collect();
+    Json(EbpfStatusResponse {
+        programs,
+        attach_blocked,
+    })
 }
 
 /// Return what the startup helper probe learned about this kernel.

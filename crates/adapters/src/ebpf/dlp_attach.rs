@@ -110,6 +110,10 @@ pub struct ReconcileOutcome {
     pub attached: usize,
     /// SSL libraries detached this pass (no process maps them any more).
     pub detached: usize,
+    /// The pass did no work because the warden could not be reached, so the
+    /// live set is unknown. Distinct from a pass that found nothing to change:
+    /// here the existing attachments were deliberately left in place.
+    pub skipped: bool,
 }
 
 /// One file-backed SSL library mapping found in a `/proc/<pid>/maps`.
@@ -378,10 +382,26 @@ impl DlpUprobeAttacher {
         // returns deduped targets with offsets pre-resolved. Direct posture (the
         // agent is privileged) scans `/proc` itself.
         let live: Vec<UprobeTarget> = match &self.warden_sock {
-            Some(sock) => crate::warden::uprobe::scan_via_warden(sock)
-                .into_iter()
-                .map(UprobeTarget::from_warden)
-                .collect(),
+            Some(sock) => match crate::warden::uprobe::scan_via_warden(sock) {
+                Ok(targets) => targets.into_iter().map(UprobeTarget::from_warden).collect(),
+                Err(e) => {
+                    // The broker is down, which says nothing about what is
+                    // mapped. Treating it as "nothing is live" would detach
+                    // every probe now and re-create them on the next tick, so
+                    // a warden restart would churn the whole link set for no
+                    // reason. Hold what we have and try again next tick.
+                    warn!(
+                        error = %e,
+                        held = self.attached.len(),
+                        "warden unreachable; holding the current DLP uprobe set"
+                    );
+                    return ReconcileOutcome {
+                        attached: 0,
+                        detached: 0,
+                        skipped: true,
+                    };
+                }
+            },
             None => self.scan_live_targets(),
         };
         let live_map: BTreeMap<(u64, u64), UprobeTarget> =
@@ -438,6 +458,7 @@ impl DlpUprobeAttacher {
         ReconcileOutcome {
             attached,
             detached: to_detach.len(),
+            skipped: false,
         }
     }
 
@@ -822,5 +843,41 @@ mod tests {
         let (to_attach, to_detach) = plan_reconcile(&live, &attached);
         assert!(to_attach.is_empty());
         assert!(to_detach.is_empty());
+    }
+
+    #[test]
+    fn an_unreachable_warden_holds_the_link_set_instead_of_rebuilding_it() {
+        // A warden bounce must not look like "no library is mapped any more".
+        // If it did, the pass would detach every probe and the next pass would
+        // attach them again - a full teardown and rebuild of the link set,
+        // triggered by the broker restarting rather than by anything on the
+        // host changing.
+        let dir = tempfile::tempdir().unwrap();
+        let mut attacher =
+            DlpUprobeAttacher::new(dir.path()).with_warden_socket(dir.path().join("absent.sock"));
+        attacher.attached.insert(
+            (1, 10),
+            Attachment {
+                links: Vec::new(),
+                sticky: false,
+            },
+        );
+
+        let outcome = attacher.reconcile();
+
+        assert!(outcome.skipped, "the pass must declare itself skipped");
+        assert_eq!(outcome.attached, 0);
+        assert_eq!(outcome.detached, 0);
+        assert_eq!(
+            attacher.attached_count(),
+            1,
+            "the existing attachment survives the broker being down"
+        );
+
+        // Repeating the pass is equally inert: no second link for the same
+        // inode, which is the duplicate this guards against.
+        let again = attacher.reconcile();
+        assert!(again.skipped);
+        assert_eq!(attacher.attached_count(), 1);
     }
 }

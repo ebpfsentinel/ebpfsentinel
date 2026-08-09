@@ -23,8 +23,16 @@ setup_file() {
     # Start minikube if not running. A cluster that refuses to come up (no
     # nested virtualisation, no usable driver) is a missing capability, not a
     # product regression — gate on it instead of failing setup opaquely.
+    # The suite runs under sudo (the agent DaemonSet needs privileged eBPF), and
+    # the docker driver refuses to run as root without --force. Passing it is
+    # the only way to have one cluster shared by the root-run kubectl calls
+    # below; without it minikube exits DRV_AS_ROOT and every test skips.
+    local mk_force=()
+    if [ "$(id -u)" -eq 0 ]; then
+        mk_force=(--force)
+    fi
     if ! minikube status --format='{{.Host}}' 2>/dev/null | grep -q "Running"; then
-        if ! minikube start --driver=docker --cpus=2 --memory=2048; then
+        if ! minikube start --driver=docker --cpus=2 --memory=2048 "${mk_force[@]}"; then
             env_skip "minikube cluster could not start on this host"
         fi
     fi

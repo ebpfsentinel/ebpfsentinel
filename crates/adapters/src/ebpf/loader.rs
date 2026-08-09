@@ -6,6 +6,7 @@ use std::time::Duration;
 use aya::maps::ProgramArray;
 use tracing::{info, warn};
 
+use super::attach_inspect::{self, AttachBlock};
 use super::kfunc_attach;
 use super::kfunc_loader;
 
@@ -141,18 +142,37 @@ impl EbpfLoader {
         Ok(Self::from_token_object(loaded))
     }
 
-    /// Clean up pinned maps from the BPF filesystem.
+    /// Remove a pin directory, and say why.
     ///
-    /// Should be called on agent shutdown to avoid stale pins.
-    pub fn cleanup_pin_path(pin_path: &str) {
+    /// Wiping pins is destructive and unconditional: it is the fallback taken
+    /// when the previous generation's state cannot be inspected, not a way of
+    /// reconciling with it. Link state can be introspected
+    /// ([`attach_inspect`]); pinned *maps* cannot - the kernel exposes no way
+    /// to ask whether a live process still holds a pinned map, so a surviving
+    /// pin is indistinguishable from a leaked one. That is why every caller
+    /// wipes rather than adopts, and why each records `reason` in the log: a
+    /// pin directory disappearing is otherwise invisible in a post-mortem.
+    ///
+    /// On shutdown this is bookkeeping. At startup it is the crash-recovery
+    /// path, and it is safe there only because the agent is the sole owner of
+    /// its pin paths.
+    pub fn cleanup_pin_path_because(pin_path: &str, reason: &str) {
         let path = Path::new(pin_path);
         if path.exists() {
             if let Err(e) = std::fs::remove_dir_all(path) {
-                warn!(pin_path, error = %e, "failed to clean up BPF pin directory");
+                warn!(pin_path, reason, error = %e, "failed to clean up BPF pin directory");
             } else {
-                info!(pin_path, "cleaned up BPF pin directory");
+                info!(pin_path, reason, "cleaned up BPF pin directory");
             }
         }
+    }
+
+    /// Clean up pinned maps from the BPF filesystem.
+    ///
+    /// Prefer [`Self::cleanup_pin_path_because`], which records why the wipe
+    /// happened.
+    pub fn cleanup_pin_path(pin_path: &str) {
+        Self::cleanup_pin_path_because(pin_path, "unspecified");
     }
 
     /// Attach the XDP firewall program to the given network interface.
@@ -167,6 +187,11 @@ impl EbpfLoader {
     /// Attempts the requested `flags` mode first. If attachment fails and the
     /// mode is not already auto, falls back to [`XDP_MODE_AUTO`] (kernel picks
     /// best available) and logs a warning.
+    ///
+    /// Attaching is idempotent: when the interface already carries this exact
+    /// program the call succeeds without creating a second link. A failure is
+    /// recorded as an [`AttachBlock`] so readiness and the ops endpoint can
+    /// name what is in the way, and cleared again on success.
     pub fn attach_xdp_program(
         &mut self,
         program_name: &str,
@@ -175,10 +200,30 @@ impl EbpfLoader {
     ) -> Result<(), anyhow::Error> {
         if let Some(prog_fd) = self.kfunc_progs.get(program_name) {
             let raw = prog_fd.as_raw_fd();
+            let own_prog_id = attach_inspect::program_id(raw);
+            let ifindex = kfunc_attach::iface_to_ifindex(interface).ok();
+
+            // Already ours: re-attaching would fail with EBUSY after burning
+            // the retry budget, and on a kernel that allowed it would leave two
+            // links where one belongs. This is the readoption path taken by a
+            // hot reload and by an HA activate that follows an incomplete
+            // deactivate.
+            if let Some(idx) = ifindex
+                && attach_inspect::already_carries(idx, own_prog_id)
+            {
+                attach_inspect::clear_block(program_name, interface);
+                info!(
+                    program_name,
+                    interface, "XDP program already attached to this interface, readopted"
+                );
+                return Ok(());
+            }
+
             let mode_label = xdp_flags_label(flags);
             match attach_xdp_ebusy_retry(program_name, raw, interface, flags) {
                 Ok(link) => {
                     self.kfunc_links.push(link);
+                    attach_inspect::clear_block(program_name, interface);
                     info!(
                         program_name,
                         interface,
@@ -195,17 +240,38 @@ impl EbpfLoader {
                         error = %e,
                         "XDP kfunc attach failed with requested mode, falling back to auto"
                     );
-                    let link = attach_xdp_ebusy_retry(program_name, raw, interface, XDP_MODE_AUTO)?;
-                    self.kfunc_links.push(link);
-                    info!(
+                    match attach_xdp_ebusy_retry(program_name, raw, interface, XDP_MODE_AUTO) {
+                        Ok(link) => {
+                            self.kfunc_links.push(link);
+                            attach_inspect::clear_block(program_name, interface);
+                            info!(
+                                program_name,
+                                interface,
+                                mode = xdp_flags_label(XDP_MODE_AUTO),
+                                "XDP kfunc program attached (fallback from {mode_label})"
+                            );
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            return Err(record_xdp_block(
+                                program_name,
+                                interface,
+                                ifindex,
+                                own_prog_id,
+                                &e,
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(record_xdp_block(
                         program_name,
                         interface,
-                        mode = xdp_flags_label(XDP_MODE_AUTO),
-                        "XDP kfunc program attached (fallback from {mode_label})"
-                    );
-                    return Ok(());
+                        ifindex,
+                        own_prog_id,
+                        &e,
+                    ));
                 }
-                Err(e) => return Err(e.into()),
             }
         }
 
@@ -248,8 +314,21 @@ impl EbpfLoader {
             // TCX (kernel >= 6.6) needs no qdisc; the raw helper mirrors aya's
             // ingress attach for programs aya never loaded.
             let link =
-                kfunc_attach::attach_tcx(program_name, prog_fd.as_raw_fd(), interface, false)?;
+                match kfunc_attach::attach_tcx(program_name, prog_fd.as_raw_fd(), interface, false)
+                {
+                    Ok(link) => link,
+                    Err(e) => {
+                        return Err(record_link_block(
+                            program_name,
+                            interface,
+                            "TCX ingress",
+                            errno_of(&e),
+                            &e,
+                        ));
+                    }
+                };
             self.kfunc_links.push(link);
+            attach_inspect::clear_block(program_name, interface);
             info!(
                 program_name,
                 interface, "TC kfunc program attached (ingress)"
@@ -275,9 +354,25 @@ impl EbpfLoader {
         interface: &str,
     ) -> Result<(), anyhow::Error> {
         if let Some(prog_fd) = self.kfunc_progs.get(program_name) {
-            let link =
-                kfunc_attach::attach_tcx(program_name, prog_fd.as_raw_fd(), interface, true)?;
+            let link = match kfunc_attach::attach_tcx(
+                program_name,
+                prog_fd.as_raw_fd(),
+                interface,
+                true,
+            ) {
+                Ok(link) => link,
+                Err(e) => {
+                    return Err(record_link_block(
+                        program_name,
+                        interface,
+                        "TCX egress",
+                        errno_of(&e),
+                        &e,
+                    ));
+                }
+            };
             self.kfunc_links.push(link);
+            attach_inspect::clear_block(program_name, interface);
             info!(
                 program_name,
                 interface, "TC kfunc program attached (egress)"
@@ -326,15 +421,30 @@ impl EbpfLoader {
             ));
         };
         let prog_fd: RawFd = fd.as_raw_fd();
-        let link_fd = netkit_attach_by_name(prog_fd, interface, attach_type)?;
-        // Store the link fd to keep the attachment alive.
-        // When EbpfLoader is dropped, the link fd closes and detaches.
-        self.netkit_links.push(link_fd);
         let direction = if attach_type == BPF_NETKIT_PRIMARY {
             "ingress"
         } else {
             "egress"
         };
+        let link_fd = match netkit_attach_by_name(prog_fd, interface, attach_type) {
+            Ok(link_fd) => link_fd,
+            Err(e) => {
+                let errno = match &e {
+                    super::netkit::NetkitError::AttachFailed { errno, .. } => *errno,
+                    _ => 0,
+                };
+                let hook = if attach_type == BPF_NETKIT_PRIMARY {
+                    "netkit primary"
+                } else {
+                    "netkit peer"
+                };
+                return Err(record_link_block(program_name, interface, hook, errno, &e));
+            }
+        };
+        // Store the link fd to keep the attachment alive.
+        // When EbpfLoader is dropped, the link fd closes and detaches.
+        self.netkit_links.push(link_fd);
+        attach_inspect::clear_block(program_name, interface);
         info!(
             program_name,
             interface, direction, "TC program attached via netkit"
@@ -509,6 +619,95 @@ fn attach_xdp_ebusy_retry(
             }
         }
     }
+}
+
+/// Turn a failed XDP attach into a recorded block and an operator-readable
+/// error.
+///
+/// The syscall gives an errno and nothing more - `bpf(2)` carries no extended
+/// ack - so the reason has to be established by asking rtnetlink what is
+/// actually on the interface. Doing that only on the failure path keeps the
+/// happy path free of extra syscalls.
+fn record_xdp_block(
+    program_name: &str,
+    interface: &str,
+    ifindex: Option<u32>,
+    own_prog_id: Option<u32>,
+    err: &kfunc_attach::KfuncAttachError,
+) -> anyhow::Error {
+    let errno = match err {
+        kfunc_attach::KfuncAttachError::LinkCreate { errno, .. } => *errno,
+        _ => 0,
+    };
+    let Some(idx) = ifindex else {
+        // The interface could not even be resolved, so there is nothing to
+        // interrogate; the original error already says so.
+        return anyhow::anyhow!("{err}");
+    };
+    let attach_inspect::XdpDiagnosis { reason, nested_xdp } =
+        attach_inspect::diagnose_xdp(errno, interface, idx, own_prog_id);
+    warn!(
+        program_name,
+        interface,
+        errno,
+        nested_xdp,
+        reason = %reason,
+        "XDP attach blocked"
+    );
+    attach_inspect::record_block(AttachBlock {
+        program: program_name.to_owned(),
+        interface: interface.to_owned(),
+        reason: reason.clone(),
+        nested_xdp,
+    });
+    anyhow::anyhow!("{reason}")
+}
+
+/// The errno inside a `BPF_LINK_CREATE` failure, or 0 for the failures that
+/// never reached the syscall (an unresolvable interface, say) and so have no
+/// kernel verdict to translate.
+fn errno_of(err: &kfunc_attach::KfuncAttachError) -> i32 {
+    match err {
+        kfunc_attach::KfuncAttachError::LinkCreate { errno, .. }
+        | kfunc_attach::KfuncAttachError::UprobeLink { errno, .. } => *errno,
+        _ => 0,
+    }
+}
+
+/// Record a refused non-XDP attach and return the operator-readable error.
+///
+/// The XDP twin can read the interface back through rtnetlink; this one cannot,
+/// so it works from the errno and the hook name. `nested_xdp` is always false
+/// here - the field means "somebody else's XDP program owns this interface",
+/// which is not a thing that happens on a TCX or netkit hook.
+fn record_link_block(
+    program_name: &str,
+    interface: &str,
+    hook: &str,
+    errno: i32,
+    err: &dyn std::fmt::Display,
+) -> anyhow::Error {
+    if errno == 0 {
+        // No kernel verdict to translate; the original error already carries
+        // everything known about the failure.
+        return anyhow::anyhow!("{err}");
+    }
+    let reason = attach_inspect::diagnose_link(errno, hook, interface);
+    warn!(
+        program_name,
+        interface,
+        hook,
+        errno,
+        reason = %reason,
+        "attach blocked"
+    );
+    attach_inspect::record_block(AttachBlock {
+        program: program_name.to_owned(),
+        interface: interface.to_owned(),
+        reason: reason.clone(),
+        nested_xdp: false,
+    });
+    anyhow::anyhow!("{reason}")
 }
 
 /// Human-readable label for XDP attachment flags.

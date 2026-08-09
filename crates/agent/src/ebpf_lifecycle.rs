@@ -234,8 +234,15 @@ impl EbpfProgramManager {
                 }
             }
         }
-        EbpfLoader::cleanup_pin_path(adapters::ebpf::DEFAULT_BPF_PIN_PATH);
-        EbpfLoader::cleanup_pin_path(startup::DLP_PIN_PATH);
+        EbpfLoader::cleanup_pin_path_because(
+            adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+            "shutdown: all programs detached",
+        );
+        EbpfLoader::cleanup_pin_path_because(
+            startup::DLP_PIN_PATH,
+            "shutdown: all programs detached",
+        );
+        adapters::ebpf::clear_attach_blocks();
         info!("all eBPF programs detached");
     }
 

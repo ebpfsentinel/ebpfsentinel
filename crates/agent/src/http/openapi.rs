@@ -229,6 +229,7 @@ use super::zone_handler;
         threatintel_handler::RefreshResponse,
         // Ops
         ops_handler::ReloadResponse,
+        ops_handler::AttachBlockEntry,
         ops_handler::EbpfStatusResponse,
         ops_handler::ProgramStatus,
         ops_handler::KernelFeaturesResponse,
