@@ -69,7 +69,7 @@ impl QosMapManager {
             loss_rate,
             pipe_id: index,
             enabled: u8::from(pipe.enabled),
-            group_mask: 0,
+            group_mask: pipe.group_mask,
             tenant_id: 0,
             _pad: [0; 4],
         }
@@ -118,7 +118,7 @@ impl QosMapManager {
             #[allow(clippy::cast_possible_truncation)]
             priority: cls.priority.min(255) as u8,
             _padding: [0; 2],
-            group_mask: 0,
+            group_mask: cls.group_mask,
             tenant_id: 0,
         };
         (key, value)

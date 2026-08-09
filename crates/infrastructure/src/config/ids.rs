@@ -1,5 +1,7 @@
 //! IDS domain configuration structs and conversion logic.
 
+use std::collections::HashMap;
+
 use domain::common::entity::RuleId;
 use domain::ids::entity::{IdsRule, SamplingMode, ThresholdConfig, ThresholdType, TrackBy};
 use serde::{Deserialize, Serialize};
@@ -402,7 +404,14 @@ impl IdsRuleConfig {
         Ok(())
     }
 
-    pub fn to_domain_rule(&self, global_mode: &str) -> Result<IdsRule, ConfigError> {
+    /// Convert to a domain rule. `group_bits` maps every configured
+    /// interface-group name to its bit, so `interfaces` can be resolved into
+    /// the mask the classifier compares against the arrival interface.
+    pub fn to_domain_rule(
+        &self,
+        global_mode: &str,
+        group_bits: &HashMap<String, u32>,
+    ) -> Result<IdsRule, ConfigError> {
         let severity = parse_severity(&self.severity).map_err(|()| ConfigError::InvalidValue {
             field: "severity".to_string(),
             value: self.severity.clone(),
@@ -463,7 +472,12 @@ impl IdsRuleConfig {
             domain_pattern: self.domain_pattern.clone(),
             domain_match_mode,
             country_thresholds,
-            group_mask: 0,
+            group_mask: super::parse_group_mask(&self.interfaces, group_bits).map_err(
+                |message| ConfigError::Validation {
+                    field: "ids.rules.interfaces".to_string(),
+                    message,
+                },
+            )?,
         })
     }
 }
@@ -556,7 +570,7 @@ mod tests {
         let mut rule = base_rule();
         rule.domain_pattern = Some("*.evil.com".to_string());
         rule.domain_match_mode = Some("wildcard".to_string());
-        let domain_rule = rule.to_domain_rule("alert").unwrap();
+        let domain_rule = rule.to_domain_rule("alert", &HashMap::new()).unwrap();
         assert_eq!(domain_rule.domain_pattern, Some("*.evil.com".to_string()));
         assert_eq!(
             domain_rule.domain_match_mode,
@@ -567,8 +581,36 @@ mod tests {
     #[test]
     fn to_domain_rule_without_domain_fields() {
         let rule = base_rule();
-        let domain_rule = rule.to_domain_rule("alert").unwrap();
+        let domain_rule = rule.to_domain_rule("alert", &HashMap::new()).unwrap();
         assert!(domain_rule.domain_pattern.is_none());
         assert!(domain_rule.domain_match_mode.is_none());
+    }
+
+    #[test]
+    fn to_domain_rule_without_interfaces_is_floating() {
+        let rule = base_rule();
+        let domain_rule = rule.to_domain_rule("alert", &HashMap::new()).unwrap();
+        assert_eq!(domain_rule.group_mask, 0);
+    }
+
+    #[test]
+    fn to_domain_rule_resolves_interface_groups() {
+        let bits = HashMap::from([("lan".to_string(), 1u32), ("wan".to_string(), 2u32)]);
+
+        let mut rule = base_rule();
+        rule.interfaces = vec!["wan".to_string()];
+        assert_eq!(rule.to_domain_rule("alert", &bits).unwrap().group_mask, 2);
+
+        rule.interfaces = vec!["!lan".to_string()];
+        let inverted = rule.to_domain_rule("alert", &bits).unwrap().group_mask;
+        assert_eq!(inverted & 0x7FFF_FFFF, 1);
+        assert_ne!(inverted & 0x8000_0000, 0);
+    }
+
+    #[test]
+    fn to_domain_rule_unknown_interface_group_fails() {
+        let mut rule = base_rule();
+        rule.interfaces = vec!["dmz".to_string()];
+        assert!(rule.to_domain_rule("alert", &HashMap::new()).is_err());
     }
 }

@@ -397,14 +397,29 @@ impl AgentConfig {
             validate_key_path(&self.auth.jwt.public_key_path, "auth.jwt.public_key_path")?;
         }
 
+        // The interface groups a rule names are resolved here rather than in
+        // the rule's own validate: only the whole config knows which group
+        // names exist.
+        let group_bits = self.interface_group_bitmasks();
+        let check_groups = |field: String, names: &[String]| -> Result<(), ConfigError> {
+            parse_group_mask(names, &group_bits)
+                .map(|_| ())
+                .map_err(|message| ConfigError::Validation { field, message })
+        };
+
         // Validate firewall rules
         for (idx, rule_cfg) in self.firewall.rules.iter().enumerate() {
             rule_cfg.validate(idx)?;
+            check_groups(
+                format!("firewall.rules[{idx}].interfaces"),
+                &rule_cfg.interfaces,
+            )?;
         }
 
         // Validate IDS rules
         for (idx, rule_cfg) in self.ids.rules.iter().enumerate() {
             rule_cfg.validate(idx)?;
+            check_groups(format!("ids.rules[{idx}].interfaces"), &rule_cfg.interfaces)?;
         }
 
         // Validate IDS sampling
@@ -763,10 +778,11 @@ impl AgentConfig {
 
     /// Convert all firewall rule configs to domain rules.
     pub fn firewall_rules(&self) -> Result<Vec<FirewallRule>, ConfigError> {
+        let group_bits = self.interface_group_bitmasks();
         self.firewall
             .rules
             .iter()
-            .map(FirewallRuleConfig::to_domain_rule)
+            .map(|r| r.to_domain_rule(&group_bits))
             .collect()
     }
 
@@ -777,10 +793,11 @@ impl AgentConfig {
 
     /// Convert all IDS rule configs to domain rules.
     pub fn ids_rules(&self) -> Result<Vec<IdsRule>, ConfigError> {
+        let group_bits = self.interface_group_bitmasks();
         self.ids
             .rules
             .iter()
-            .map(|r| r.to_domain_rule(&self.ids.mode))
+            .map(|r| r.to_domain_rule(&self.ids.mode, &group_bits))
             .collect()
     }
 
@@ -837,10 +854,11 @@ impl AgentConfig {
 
     /// Convert all ratelimit rule configs to domain `RateLimitPolicy` vec.
     pub fn ratelimit_policies(&self) -> Result<Vec<RateLimitPolicy>, ConfigError> {
+        let group_bits = self.interface_group_bitmasks();
         self.ratelimit
             .rules
             .iter()
-            .map(RateLimitRuleConfig::to_domain_policy)
+            .map(|r| r.to_domain_policy(&group_bits))
             .collect()
     }
 
@@ -932,28 +950,31 @@ impl AgentConfig {
 
     /// Convert NAT DNAT rule configs to domain `NatRule` entities.
     pub fn nat_dnat_rules(&self) -> Result<Vec<NatRule>, ConfigError> {
+        let group_bits = self.interface_group_bitmasks();
         self.nat
             .dnat_rules
             .iter()
-            .map(NatRuleConfig::to_domain_rule)
+            .map(|r| r.to_domain_rule(&group_bits))
             .collect()
     }
 
     /// Convert NAT SNAT rule configs to domain `NatRule` entities.
     pub fn nat_snat_rules(&self) -> Result<Vec<NatRule>, ConfigError> {
+        let group_bits = self.interface_group_bitmasks();
         self.nat
             .snat_rules
             .iter()
-            .map(NatRuleConfig::to_domain_rule)
+            .map(|r| r.to_domain_rule(&group_bits))
             .collect()
     }
 
     /// Convert `NPTv6` rule configs to domain `NptV6Rule` entities.
     pub fn nat_nptv6_rules(&self) -> Result<Vec<NptV6Rule>, ConfigError> {
+        let group_bits = self.interface_group_bitmasks();
         self.nat
             .nptv6_rules
             .iter()
-            .map(NptV6RuleConfig::to_domain_rule)
+            .map(|r| r.to_domain_rule(&group_bits))
             .collect()
     }
 
@@ -1005,7 +1026,7 @@ impl AgentConfig {
 
     /// Convert all `QoS` pipe configs to domain `QosPipe` entities.
     pub fn qos_pipes(&self) -> Result<Vec<domain::qos::entity::QosPipe>, ConfigError> {
-        self.qos.to_domain_pipes()
+        self.qos.to_domain_pipes(&self.interface_group_bitmasks())
     }
 
     /// Convert all `QoS` queue configs to domain `QosQueue` entities.
@@ -1015,7 +1036,8 @@ impl AgentConfig {
 
     /// Convert all `QoS` classifier configs to domain `QosClassifier` entities.
     pub fn qos_classifiers(&self) -> Result<Vec<domain::qos::entity::QosClassifier>, ConfigError> {
-        self.qos.to_domain_classifiers()
+        self.qos
+            .to_domain_classifiers(&self.interface_group_bitmasks())
     }
 
     /// Parse the configured `QoS` scheduler into its domain entity.

@@ -1,5 +1,7 @@
 //! Rate limiting domain configuration structs and conversion logic.
 
+use std::collections::HashMap;
+
 use domain::common::entity::RuleId;
 use domain::ratelimit::entity::{
     CountryTierConfig, RateLimitAction, RateLimitAlgorithm, RateLimitPolicy, RateLimitScope,
@@ -253,7 +255,14 @@ impl RateLimitRuleConfig {
         Ok(())
     }
 
-    pub fn to_domain_policy(&self) -> Result<RateLimitPolicy, ConfigError> {
+    /// Convert to a domain `RateLimitPolicy`. `group_bits` maps every
+    /// configured interface-group name to its bit, so `interfaces` can be
+    /// resolved into the mask the limiter compares against the arrival
+    /// interface.
+    pub fn to_domain_policy(
+        &self,
+        group_bits: &HashMap<String, u32>,
+    ) -> Result<RateLimitPolicy, ConfigError> {
         let action =
             parse_ratelimit_action(&self.action).map_err(|()| ConfigError::InvalidValue {
                 field: "action".to_string(),
@@ -295,7 +304,12 @@ impl RateLimitRuleConfig {
             algorithm,
             country_codes: self.country_codes.clone(),
             src_ip_alias: self.src_ip_alias.clone(),
-            group_mask: 0,
+            group_mask: super::parse_group_mask(&self.interfaces, group_bits).map_err(
+                |message| ConfigError::Validation {
+                    field: "ratelimit.rules.interfaces".to_string(),
+                    message,
+                },
+            )?,
         })
     }
 }
@@ -440,7 +454,7 @@ src_ip: "10.0.0.0/8"
         )
         .unwrap();
 
-        let policy = rule.to_domain_policy().unwrap();
+        let policy = rule.to_domain_policy(&HashMap::new()).unwrap();
         assert_eq!(policy.id.0, "rl-test");
         assert_eq!(policy.rate, 200);
         assert_eq!(policy.burst, 400);

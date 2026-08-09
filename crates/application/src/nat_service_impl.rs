@@ -465,7 +465,7 @@ fn nat_rule_to_ebpf_entry_v6(rule: &NatRule) -> ebpf_common::nat::NatRuleEntryV6
         nat_port_start: 0,
         nat_port_end: 0,
         nat_interface: 0,
-        group_mask: 0,
+        group_mask: rule.group_mask,
         tenant_id: 0,
         xfrm_if_id: 0,
         xfrm_link: 0,
@@ -663,7 +663,7 @@ fn nptv6_rule_to_ebpf_entry(rule: &NptV6Rule) -> ebpf_common::nat::NptV6RuleEntr
         prefix_len: rule.prefix_len,
         enabled: u8::from(rule.enabled),
         adjustment,
-        group_mask: 0,
+        group_mask: rule.group_mask,
         tenant_id: 0,
     }
 }

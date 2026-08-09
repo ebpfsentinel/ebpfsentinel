@@ -1,6 +1,6 @@
 //! `QoS` / Traffic Shaping domain configuration structs and conversion logic.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use domain::qos::entity::{
     QosClassifier, QosDirection, QosMatchRule, QosPipe, QosQueue, QosScheduler,
@@ -375,10 +375,13 @@ impl QosSectionConfig {
     }
 
     /// Convert all pipe configs to domain `QosPipe` entities.
-    pub fn to_domain_pipes(&self) -> Result<Vec<QosPipe>, ConfigError> {
+    pub fn to_domain_pipes(
+        &self,
+        group_bits: &HashMap<String, u32>,
+    ) -> Result<Vec<QosPipe>, ConfigError> {
         self.pipes
             .iter()
-            .map(QosPipeConfig::to_domain_pipe)
+            .map(|p| p.to_domain_pipe(group_bits))
             .collect()
     }
 
@@ -391,10 +394,13 @@ impl QosSectionConfig {
     }
 
     /// Convert all classifier configs to domain `QosClassifier` entities.
-    pub fn to_domain_classifiers(&self) -> Result<Vec<QosClassifier>, ConfigError> {
+    pub fn to_domain_classifiers(
+        &self,
+        group_bits: &HashMap<String, u32>,
+    ) -> Result<Vec<QosClassifier>, ConfigError> {
         self.classifiers
             .iter()
-            .map(QosClassifierConfig::to_domain_classifier)
+            .map(|c| c.to_domain_classifier(group_bits))
             .collect()
     }
 
@@ -449,7 +455,13 @@ impl QosPipeConfig {
         Ok(())
     }
 
-    pub fn to_domain_pipe(&self) -> Result<QosPipe, ConfigError> {
+    /// Convert to a domain `QosPipe`. `group_bits` maps every configured
+    /// interface-group name to its bit, so `interfaces` can be resolved into
+    /// the mask the shaper compares against the egress interface.
+    pub fn to_domain_pipe(
+        &self,
+        group_bits: &HashMap<String, u32>,
+    ) -> Result<QosPipe, ConfigError> {
         let bandwidth_bps =
             parse_bandwidth(&self.bandwidth).map_err(|msg| ConfigError::InvalidValue {
                 field: "bandwidth".to_string(),
@@ -479,7 +491,12 @@ impl QosPipeConfig {
             priority: self.priority,
             direction,
             enabled: self.enabled,
-            group_mask: 0,
+            group_mask: super::parse_group_mask(&self.interfaces, group_bits).map_err(
+                |message| ConfigError::Validation {
+                    field: "qos.pipes.interfaces".to_string(),
+                    message,
+                },
+            )?,
         })
     }
 }
@@ -590,7 +607,13 @@ impl QosClassifierConfig {
         Ok(())
     }
 
-    pub fn to_domain_classifier(&self) -> Result<QosClassifier, ConfigError> {
+    /// Convert to a domain `QosClassifier`. `group_bits` maps every configured
+    /// interface-group name to its bit, so `interfaces` can be resolved into
+    /// the mask the shaper compares against the egress interface.
+    pub fn to_domain_classifier(
+        &self,
+        group_bits: &HashMap<String, u32>,
+    ) -> Result<QosClassifier, ConfigError> {
         // Validate CIDRs (but keep as strings in domain)
         if let Some(ref src) = self.match_rule.src_ip {
             parse_cidr(src)?;
@@ -626,7 +649,12 @@ impl QosClassifierConfig {
                 dscp: self.match_rule.dscp.unwrap_or(0),
                 vlan_id: self.match_rule.vlan_id,
             },
-            group_mask: 0,
+            group_mask: super::parse_group_mask(&self.interfaces, group_bits).map_err(
+                |message| ConfigError::Validation {
+                    field: "qos.classifiers.interfaces".to_string(),
+                    message,
+                },
+            )?,
         })
     }
 }
@@ -1039,7 +1067,7 @@ direction: both
         )
         .unwrap();
 
-        let domain = pipe.to_domain_pipe().unwrap();
+        let domain = pipe.to_domain_pipe(&HashMap::new()).unwrap();
         assert_eq!(domain.id, "pipe-test");
         assert_eq!(domain.rate_bps, 1_000_000_000);
         assert_eq!(domain.delay_ms, 20);
@@ -1084,7 +1112,7 @@ match_rule:
         )
         .unwrap();
 
-        let domain = c.to_domain_classifier().unwrap();
+        let domain = c.to_domain_classifier(&HashMap::new()).unwrap();
         assert_eq!(domain.id, "cls-test");
         assert_eq!(domain.queue_id, "q-1");
         assert_eq!(domain.priority, 3);
@@ -1104,7 +1132,7 @@ queue_id: q-1
         )
         .unwrap();
 
-        let domain = c.to_domain_classifier().unwrap();
+        let domain = c.to_domain_classifier(&HashMap::new()).unwrap();
         assert!(domain.match_rule.src_ip.is_none());
         assert!(domain.match_rule.dst_ip.is_none());
         assert_eq!(domain.match_rule.src_port, 0);
@@ -1117,7 +1145,7 @@ queue_id: q-1
     #[test]
     fn to_domain_pipes_from_section() {
         let cfg = valid_section_yaml();
-        let pipes = cfg.to_domain_pipes().unwrap();
+        let pipes = cfg.to_domain_pipes(&HashMap::new()).unwrap();
         assert_eq!(pipes.len(), 1);
         assert_eq!(pipes[0].id, "pipe-1");
     }
@@ -1133,7 +1161,7 @@ queue_id: q-1
     #[test]
     fn to_domain_classifiers_from_section() {
         let cfg = valid_section_yaml();
-        let classifiers = cfg.to_domain_classifiers().unwrap();
+        let classifiers = cfg.to_domain_classifiers(&HashMap::new()).unwrap();
         assert_eq!(classifiers.len(), 1);
         assert_eq!(classifiers[0].id, "cls-1");
     }

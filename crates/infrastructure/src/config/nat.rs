@@ -1,5 +1,6 @@
 //! NAT configuration parsing.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use domain::common::entity::RuleId;
@@ -313,8 +314,13 @@ impl NptV6RuleConfig {
         Ok(())
     }
 
-    /// Convert to a domain `NptV6Rule`.
-    pub fn to_domain_rule(&self) -> Result<NptV6Rule, ConfigError> {
+    /// Convert to a domain `NptV6Rule`. `group_bits` maps every configured
+    /// interface-group name to its bit, so `interfaces` can be resolved into
+    /// the mask the data plane compares against the arrival interface.
+    pub fn to_domain_rule(
+        &self,
+        group_bits: &HashMap<String, u32>,
+    ) -> Result<NptV6Rule, ConfigError> {
         let internal_prefix: Ipv6Addr =
             self.internal_prefix
                 .parse()
@@ -336,7 +342,12 @@ impl NptV6RuleConfig {
             internal_prefix,
             external_prefix,
             prefix_len: self.prefix_len,
-            group_mask: 0,
+            group_mask: super::parse_group_mask(&self.interfaces, group_bits).map_err(
+                |message| ConfigError::Validation {
+                    field: "nat.nptv6_rules.interfaces".to_string(),
+                    message,
+                },
+            )?,
         })
     }
 }
@@ -426,9 +437,14 @@ impl NatRuleConfig {
         Ok(())
     }
 
-    /// Convert to a domain `NatRule`.
+    /// Convert to a domain `NatRule`. `group_bits` maps every configured
+    /// interface-group name to its bit, so `interfaces` can be resolved into
+    /// the mask the data plane compares against the arrival interface.
     #[allow(clippy::too_many_lines)]
-    pub fn to_domain_rule(&self) -> Result<NatRule, ConfigError> {
+    pub fn to_domain_rule(
+        &self,
+        group_bits: &HashMap<String, u32>,
+    ) -> Result<NatRule, ConfigError> {
         let nat_type = match self.nat_type.as_str() {
             "snat" => {
                 let addr: IpAddr = self
@@ -552,7 +568,12 @@ impl NatRuleConfig {
             match_src_alias: self.match_src_alias.clone(),
             match_dst_alias: self.match_dst_alias.clone(),
             enabled: self.enabled,
-            group_mask: 0,
+            group_mask: super::parse_group_mask(&self.interfaces, group_bits).map_err(
+                |message| ConfigError::Validation {
+                    field: "nat.rules.interfaces".to_string(),
+                    message,
+                },
+            )?,
             xfrm_if_id: 0,
             xfrm_link: 0,
             fou_sport: 0,
@@ -703,7 +724,7 @@ mod tests {
 
     #[test]
     fn to_domain_snat() {
-        let rule = snat_config().to_domain_rule().unwrap();
+        let rule = snat_config().to_domain_rule(&HashMap::new()).unwrap();
         assert_eq!(rule.id.0, "snat-1");
         assert!(matches!(rule.nat_type, NatType::Snat { .. }));
     }
@@ -731,7 +752,7 @@ mod tests {
             match_dst_alias: None,
             interfaces: Vec::new(),
         };
-        let rule = cfg.to_domain_rule().unwrap();
+        let rule = cfg.to_domain_rule(&HashMap::new()).unwrap();
         assert!(matches!(
             rule.nat_type,
             NatType::Dnat { port: Some(80), .. }
@@ -822,7 +843,7 @@ dnat_rules: []
 
     #[test]
     fn nptv6_to_domain_rule() {
-        let rule = nptv6_config().to_domain_rule().unwrap();
+        let rule = nptv6_config().to_domain_rule(&HashMap::new()).unwrap();
         assert_eq!(rule.id, "nptv6-1");
         assert_eq!(rule.prefix_len, 48);
         assert!(rule.enabled);
@@ -844,7 +865,7 @@ nptv6_rules:
         let cfg: NatConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(cfg.nptv6_rules.len(), 1);
         assert!(cfg.validate().is_ok());
-        let rule = cfg.nptv6_rules[0].to_domain_rule().unwrap();
+        let rule = cfg.nptv6_rules[0].to_domain_rule(&HashMap::new()).unwrap();
         assert_eq!(rule.id, "nptv6-site1");
         assert_eq!(rule.prefix_len, 48);
     }

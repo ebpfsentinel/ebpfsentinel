@@ -258,7 +258,10 @@ impl IdsRule {
             severity: self.severity.to_u8(),
             _padding: [0; 2],
             rule_id: rule_index,
-            group_mask: 0,
+            // The classifier compares this against the group membership of
+            // the interface the packet arrived on; a zero mask is a floating
+            // rule that matches every interface.
+            group_mask: self.group_mask,
             tenant_id: 0,
         }
     }
@@ -469,6 +472,13 @@ mod tests {
         rule.mode = DomainMode::Block;
         let val = rule.to_ebpf_value(0);
         assert_eq!(val.action, IDS_ACTION_DROP);
+    }
+
+    #[test]
+    fn ids_rule_to_ebpf_value_carries_group_mask() {
+        let mut rule = sample_rule();
+        rule.group_mask = 0x8000_0002;
+        assert_eq!(rule.to_ebpf_value(0).group_mask, 0x8000_0002);
     }
 
     // ── IdsAlert tests ──────────────────────────────────────────

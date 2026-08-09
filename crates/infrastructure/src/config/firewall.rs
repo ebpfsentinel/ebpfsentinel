@@ -321,9 +321,14 @@ impl FirewallRuleConfig {
         Ok(())
     }
 
-    /// Convert to a domain `FirewallRule`.
+    /// Convert to a domain `FirewallRule`. `group_bits` maps every configured
+    /// interface-group name to its bit, so `interfaces` can be resolved into
+    /// the mask the data plane compares against the arrival interface.
     #[allow(clippy::too_many_lines)]
-    pub fn to_domain_rule(&self) -> Result<FirewallRule, ConfigError> {
+    pub fn to_domain_rule(
+        &self,
+        group_bits: &HashMap<String, u32>,
+    ) -> Result<FirewallRule, ConfigError> {
         let action = parse_action(&self.action).map_err(|()| ConfigError::InvalidValue {
             field: "action".to_string(),
             value: self.action.clone(),
@@ -452,7 +457,12 @@ impl FirewallRuleConfig {
             schedule: self.schedule.clone(),
             system: false,
             route_action: None,
-            group_mask: 0,
+            group_mask: super::parse_group_mask(&self.interfaces, group_bits).map_err(
+                |message| ConfigError::Validation {
+                    field: "firewall.rules.interfaces".to_string(),
+                    message,
+                },
+            )?,
         })
     }
 }
