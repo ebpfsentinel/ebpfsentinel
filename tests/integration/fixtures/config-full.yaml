@@ -99,6 +99,10 @@ dns:
 
 ddos:
   enabled: true
+  syn_protection:
+    enabled: true
+    threshold_mode: true
+    threshold_pps: 10000
   policies:
     - id: ddos-test-syn
       attack_type: syn_flood

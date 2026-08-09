@@ -99,9 +99,13 @@ threatintel:
 
 ddos:
   enabled: true
-  syn_flood_threshold: 100
-  udp_flood_threshold: 100
-  icmp_flood_threshold: 100
+  syn_protection:
+    enabled: true
+    threshold_mode: true
+    threshold_pps: 100
+  icmp_protection:
+    enabled: true
+    max_pps: 100
 
 l7:
   enabled: true

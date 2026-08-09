@@ -61,9 +61,10 @@ threatintel:
 
 ddos:
   enabled: true
-  syn_flood:
+  syn_protection:
     enabled: true
-    max_pps: 500
+    threshold_mode: true
+    threshold_pps: 500
   policies:
     - id: ddos-test-country-syn
       attack_type: syn_flood

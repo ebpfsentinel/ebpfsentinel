@@ -523,6 +523,36 @@ impl AgentConfig {
             policy_cfg.validate(idx)?;
         }
 
+        // Every DDoS guard runs inside the rate-limit kernel program, and the
+        // detection events the policies count come from it too. Enabled on its
+        // own, the whole section is inert and nothing says so at runtime.
+        if self.ddos.enabled && !self.ratelimit.enabled {
+            return Err(ConfigError::Validation {
+                field: "ddos.enabled".to_string(),
+                message: "DDoS protection runs inside the rate-limit program; \
+                          enable ratelimit.enabled as well or turn ddos off"
+                    .to_string(),
+            });
+        }
+
+        // The four guards are the only source of DDoS detections, policies
+        // included: with all of them off the section counts nothing, however
+        // many policies it carries.
+        if self.ddos.enabled
+            && !(self.ddos.syn_protection.enabled
+                || self.ddos.icmp_protection.enabled
+                || self.ddos.amplification_protection.enabled
+                || self.ddos.connection_tracking.enabled)
+        {
+            return Err(ConfigError::Validation {
+                field: "ddos".to_string(),
+                message: "DDoS detections come from the syn, icmp, amplification \
+                          and connection-tracking guards; enable at least one of \
+                          them or turn ddos off"
+                    .to_string(),
+            });
+        }
+
         // Validate L7 rules
         for (idx, rule_cfg) in self.l7.rules.iter().enumerate() {
             rule_cfg.validate(idx)?;
@@ -3828,8 +3858,12 @@ agent:
         let yaml = r"
 agent:
   interfaces: [eth0]
+ratelimit:
+  enabled: true
 ddos:
   enabled: true
+  syn_protection:
+    enabled: true
   policies:
     - id: syn-1
       attack_type: syn_flood
@@ -3851,6 +3885,63 @@ ddos:
             domain::ddos::entity::DdosMitigationAction::Block
         );
         assert_eq!(policies[0].auto_block_duration_secs, 600);
+    }
+
+    #[test]
+    fn ddos_without_ratelimit_is_refused() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+ddos:
+  enabled: true
+  syn_protection:
+    enabled: true
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("ratelimit.enabled"),
+            "expected the error to name the section that must be enabled, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_misspelt_ddos_guard_is_refused() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+ratelimit:
+  enabled: true
+ddos:
+  enabled: true
+  syn_flood:
+    enabled: true
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("syn_flood"),
+            "expected the error to name the unknown key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ddos_without_a_single_guard_is_refused() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+ratelimit:
+  enabled: true
+ddos:
+  enabled: true
+  policies:
+    - id: vol-1
+      attack_type: volumetric
+      detection_threshold_pps: 5000
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("guards"),
+            "expected the error to point at the guards, got: {err}"
+        );
     }
 
     #[test]

@@ -76,16 +76,6 @@ dlp:
 threatintel:
   enabled: false
 
-ddos:
-  enabled: true
-  policies:
-    - id: ddos-slowhttp-volumetric
-      attack_type: volumetric
-      detection_threshold_pps: 50
-      mitigation_action: block
-      auto_block_duration_secs: 60
-      enabled: true
-
 l7:
   enabled: true
   # The slow-attack target port; without it no payload is captured and

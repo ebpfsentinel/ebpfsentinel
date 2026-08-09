@@ -19,6 +19,7 @@
 #   block     — drop all traffic from the source (aliases: drop, deny)
 #
 # Prerequisites:
+#   - Rate limiting must be enabled: the guards run inside its eBPF program
 #   - Connection tracking should be enabled for TCP state-based detections
 #   - Firewall should be enabled for block actions to take effect
 #
@@ -33,6 +34,16 @@ agent:
 # ── Connection tracking (recommended for TCP DDoS detection) ──────
 
 conntrack:
+  enabled: true
+
+# ── Rate limiting (required) ─────────────────────────────────────
+#
+# Every DDoS guard lives inside the xdp-ratelimit program, and so do
+# the detection events the policies below count. The program is only
+# loaded when this section is enabled, so DDoS protection without it
+# is inert and the agent refuses to start.
+
+ratelimit:
   enabled: true
 
 # ── DDoS Protection ──────────────────────────────────────────────

@@ -13,6 +13,7 @@ use super::conntrack::ConnTrackSectionConfig;
 pub(super) const MAX_DDOS_POLICIES: usize = 100;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DdosConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -41,6 +42,7 @@ pub struct DdosConfig {
 // ── SYN Protection ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SynProtectionConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -71,6 +73,7 @@ impl Default for SynProtectionConfig {
 // ── ICMP Protection ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IcmpProtectionConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -105,6 +108,7 @@ impl Default for IcmpProtectionConfig {
 // ── Amplification Protection ────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AmpProtectionConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -114,6 +118,7 @@ pub struct AmpProtectionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AmpPortConfig {
     pub port: u16,
 
@@ -131,6 +136,7 @@ fn default_amp_protocol() -> String {
 // ── DDoS Policy Config ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DdosPolicyConfig {
     pub id: String,
 

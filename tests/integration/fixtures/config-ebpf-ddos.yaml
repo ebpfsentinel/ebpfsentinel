@@ -30,8 +30,13 @@ ips:
 dlp:
   enabled: false
 
+# The DDoS guards live inside the xdp-ratelimit program, so rate limiting
+# carries them. The bucket itself is opened wide so it never competes with
+# the flood thresholds this suite exercises.
 ratelimit:
-  enabled: false
+  enabled: true
+  default_rate: 1000000
+  default_burst: 2000000
 
 threatintel:
   enabled: false
@@ -41,6 +46,13 @@ conntrack:
 
 ddos:
   enabled: true
+  syn_protection:
+    enabled: true
+    threshold_mode: true
+    threshold_pps: 100
+  icmp_protection:
+    enabled: true
+    max_pps: 50
   policies:
     - id: ddos-test-syn
       attack_type: syn_flood
