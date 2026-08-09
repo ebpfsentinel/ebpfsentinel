@@ -65,10 +65,14 @@ pub struct QosQueue {
 /// Match criteria for a `QoS` classifier:
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QosMatchRule {
-    /// Source IP (CIDR string, None = wildcard).
+    /// Source host address, `None` = wildcard.
+    ///
+    /// The classifier map is keyed by an exact address, so this is a single
+    /// IPv4 host: a prefix would have nothing to match against.
     #[serde(default)]
     pub src_ip: Option<String>,
-    /// Destination IP (CIDR string, None = wildcard).
+    /// Destination host address, `None` = wildcard. Single IPv4 host, as
+    /// for [`QosMatchRule::src_ip`].
     #[serde(default)]
     pub dst_ip: Option<String>,
     /// Source port (None or 0 = wildcard).

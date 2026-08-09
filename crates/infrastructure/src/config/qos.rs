@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 use domain::qos::entity::{QosClassifier, QosDirection, QosMatchRule, QosPipe, QosQueue};
 use serde::{Deserialize, Serialize};
 
+use domain::firewall::entity::IpNetwork;
+
 use super::common::{ConfigError, default_true, parse_cidr};
 
 // ── Security limits ────────────────────────────────────────────────
@@ -227,6 +229,34 @@ pub fn parse_direction(s: &str) -> Result<QosDirection, String> {
         _ => Err(format!(
             "invalid direction: '{s}' (expected egress, ingress, or both)"
         )),
+    }
+}
+
+/// Validate a classifier match address.
+///
+/// The classifier map is keyed by an exact IPv4 address, so a prefix shorter
+/// than `/32` has nothing to match against and an IPv6 address is reduced to a
+/// flow hash userspace cannot reproduce. Either would be accepted at load and
+/// then shape nothing, so both are refused here with the reason.
+fn validate_classifier_host(field: String, value: &str) -> Result<(), ConfigError> {
+    match parse_cidr(value).map_err(|e| ConfigError::Validation {
+        field: field.clone(),
+        message: e.to_string(),
+    })? {
+        IpNetwork::V4 { prefix_len: 32, .. } => Ok(()),
+        IpNetwork::V4 { prefix_len, .. } => Err(ConfigError::Validation {
+            field,
+            message: format!(
+                "prefix /{prefix_len} cannot be enforced: QoS classifiers match one exact address, \
+                 so only a single host (or /32) is accepted"
+            ),
+        }),
+        IpNetwork::V6 { .. } => Err(ConfigError::Validation {
+            field,
+            message: "IPv6 addresses cannot be enforced: QoS classifiers match one exact IPv4 \
+                      address, so IPv6 flows are shaped by port, protocol or DSCP rules instead"
+                .to_string(),
+        }),
     }
 }
 
@@ -491,18 +521,12 @@ impl QosClassifierConfig {
             });
         }
 
-        // Validate match rule CIDRs
+        // Validate match rule addresses
         if let Some(ref src) = self.match_rule.src_ip {
-            parse_cidr(src).map_err(|e| ConfigError::Validation {
-                field: format!("{prefix}.match_rule.src_ip"),
-                message: e.to_string(),
-            })?;
+            validate_classifier_host(format!("{prefix}.match_rule.src_ip"), src)?;
         }
         if let Some(ref dst) = self.match_rule.dst_ip {
-            parse_cidr(dst).map_err(|e| ConfigError::Validation {
-                field: format!("{prefix}.match_rule.dst_ip"),
-                message: e.to_string(),
-            })?;
+            validate_classifier_host(format!("{prefix}.match_rule.dst_ip"), dst)?;
         }
 
         // Validate protocol
@@ -544,12 +568,12 @@ impl QosClassifierConfig {
         &self,
         group_bits: &HashMap<String, u32>,
     ) -> Result<QosClassifier, ConfigError> {
-        // Validate CIDRs (but keep as strings in domain)
+        // Validate addresses (but keep as strings in domain)
         if let Some(ref src) = self.match_rule.src_ip {
-            parse_cidr(src)?;
+            validate_classifier_host("qos.classifiers.match_rule.src_ip".to_string(), src)?;
         }
         if let Some(ref dst) = self.match_rule.dst_ip {
-            parse_cidr(dst)?;
+            validate_classifier_host("qos.classifiers.match_rule.dst_ip".to_string(), dst)?;
         }
 
         let protocol = self
@@ -851,6 +875,34 @@ match_rule:
     }
 
     #[test]
+    fn classifier_accepts_a_single_host() {
+        let mut c = valid_classifier_yaml();
+        c.match_rule.src_ip = Some("10.0.0.7".to_string());
+        c.validate(0).unwrap();
+
+        c.match_rule.src_ip = Some("10.0.0.7/32".to_string());
+        c.validate(0).unwrap();
+    }
+
+    #[test]
+    fn classifier_refuses_a_prefix_it_cannot_enforce() {
+        let mut c = valid_classifier_yaml();
+        c.match_rule.src_ip = Some("10.0.0.0/8".to_string());
+        assert!(c.validate(0).is_err());
+
+        let mut c = valid_classifier_yaml();
+        c.match_rule.dst_ip = Some("192.168.1.0/24".to_string());
+        assert!(c.validate(0).is_err());
+    }
+
+    #[test]
+    fn classifier_refuses_an_ipv6_host() {
+        let mut c = valid_classifier_yaml();
+        c.match_rule.dst_ip = Some("2001:db8::1".to_string());
+        assert!(c.validate(0).is_err());
+    }
+
+    #[test]
     fn classifier_validate_invalid_protocol() {
         let mut c = valid_classifier_yaml();
         c.match_rule.protocol = Some("magic".to_string());
@@ -986,7 +1038,7 @@ id: cls-test
 queue_id: q-1
 priority: 3
 match_rule:
-  src_ip: "10.0.0.0/8"
+  src_ip: "10.0.0.7"
   dst_port: 443
   protocol: tcp
   dscp: 46

@@ -41,8 +41,11 @@
 #   priority   — Tie-break between classifiers whose match criteria collapse
 #                onto the same lookup key; lower wins (default: 0)
 #   match      — Traffic match criteria (all optional, omit = wildcard):
-#     src_ip     — Source CIDR ("10.0.0.0/8")
-#     dst_ip     — Destination CIDR ("192.168.1.0/24")
+#     src_ip     — Source host ("10.0.0.7", or "10.0.0.7/32")
+#     dst_ip     — Destination host ("192.168.1.10")
+#                  Classifiers are keyed on an exact IPv4 address, so a
+#                  shorter prefix or an IPv6 address is refused at load;
+#                  shape IPv6 by port, protocol or DSCP instead.
 #     src_port   — Source port
 #     dst_port   — Destination port
 #     protocol   — "tcp", "udp", "icmp", or protocol number
