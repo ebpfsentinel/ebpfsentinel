@@ -11,7 +11,7 @@ use ebpf_common::firewall::{FirewallLpmEntryV4, FirewallLpmEntryV6};
 /// Sources are identified by string tags:
 /// - `"alias"` — `GeoIP` country-block aliases
 /// - `"ddos:<CC>"` — `DDoS` auto-block for a specific country
-/// - `"ips"` — IPS /24 subnet blocks
+/// - `"ips"` — IPS blacklist host routes and /24 subnet blocks
 pub trait LpmCoordinatorPort: Send + Sync {
     /// Replace all entries for `source` with new ones.
     ///

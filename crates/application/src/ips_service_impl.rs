@@ -12,6 +12,14 @@ use ports::secondary::geoip_port::GeoIpPort;
 use ports::secondary::lpm_coordinator_port::LpmCoordinatorPort;
 use ports::secondary::metrics_port::MetricsPort;
 
+/// Prefix length that turns an address into a host route.
+fn host_prefix_len(ip: IpAddr) -> u8 {
+    match ip {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    }
+}
+
 /// Application-level IPS service.
 ///
 /// Orchestrates the IPS domain engine (blacklist + detection counting)
@@ -88,13 +96,16 @@ impl IpsAppService {
         if !actions.is_empty() {
             self.metrics.record_ips_block();
             self.update_blacklist_metric();
-            self.apply_subnet_enforcements(&actions);
+            self.apply_enforcements(&actions);
         }
 
         actions
     }
 
     /// Manually add an IP to the blacklist.
+    ///
+    /// The entry is pushed to the firewall LPM Trie as a host route, so the
+    /// kernel drops the source without waiting for a userspace verdict.
     pub fn add_to_blacklist(
         &self,
         ip: IpAddr,
@@ -105,16 +116,18 @@ impl IpsAppService {
             .add_to_blacklist(ip, reason, false, ttl)
             .map_err(DomainError::from)?;
         self.update_blacklist_metric();
+        self.apply_enforcements(&[EnforcementAction::BlacklistIp { ip, ttl }]);
         tracing::info!(%ip, "IPS blacklist entry added");
         Ok(())
     }
 
-    /// Remove an IP from the blacklist.
+    /// Remove an IP from the blacklist, and its host route from the datapath.
     pub fn remove_from_blacklist(&self, ip: IpAddr) -> Result<(), DomainError> {
         self.engine
             .remove_from_blacklist(&ip)
             .map_err(DomainError::from)?;
         self.update_blacklist_metric();
+        self.apply_enforcements(&[EnforcementAction::UnblacklistIp { ip }]);
         tracing::info!(%ip, "IPS blacklist entry removed");
         Ok(())
     }
@@ -124,10 +137,20 @@ impl IpsAppService {
         self.engine.blacklist_entries().values().cloned().collect()
     }
 
-    /// Remove all entries from the blacklist.
+    /// Remove all entries from the blacklist, and their host routes.
+    ///
+    /// Subnet blocks are left alone: they are tracked separately and expire
+    /// on their own TTL.
     pub fn clear_blacklist(&self) {
+        let removals: Vec<EnforcementAction> = self
+            .engine
+            .blacklist_entries()
+            .into_keys()
+            .map(|ip| EnforcementAction::UnblacklistIp { ip })
+            .collect();
         self.engine.clear_blacklist();
         self.update_blacklist_metric();
+        self.apply_enforcements(&removals);
         tracing::info!("IPS blacklist cleared");
     }
 
@@ -142,7 +165,7 @@ impl IpsAppService {
         let actions = self.engine.cleanup_expired();
         if !actions.is_empty() {
             self.update_blacklist_metric();
-            self.apply_subnet_enforcements(&actions);
+            self.apply_enforcements(&actions);
         }
         actions
     }
@@ -216,14 +239,34 @@ impl IpsAppService {
         Ok(old_mode)
     }
 
-    /// Apply subnet-related enforcement actions to the LPM coordinator.
-    fn apply_subnet_enforcements(&self, actions: &[EnforcementAction]) {
+    /// Push enforcement actions to the firewall LPM Trie maps.
+    ///
+    /// A blacklisted IP becomes a host route (/32 or /128) and a subnet block
+    /// becomes a /24 or /48, both under the `ips` source tag so that reloading
+    /// another source never erases them.
+    fn apply_enforcements(&self, actions: &[EnforcementAction]) {
         let Some(ref coordinator) = self.lpm_coordinator else {
             return;
         };
 
         for action in actions {
             match action {
+                EnforcementAction::BlacklistIp { ip, .. } => {
+                    let (src_v4, src_v6) = Self::ip_to_lpm_entries(*ip, host_prefix_len(*ip));
+                    if let Err(e) = coordinator.insert_entries("ips", &src_v4, &src_v6) {
+                        tracing::warn!(addr = %ip, "IPS blacklist: failed to inject LPM entry: {e}");
+                    } else {
+                        tracing::info!(addr = %ip, "IPS blacklist: injected LPM entry");
+                    }
+                }
+                EnforcementAction::UnblacklistIp { ip } => {
+                    let (src_v4, src_v6) = Self::ip_to_lpm_entries(*ip, host_prefix_len(*ip));
+                    if let Err(e) = coordinator.remove_entries("ips", &src_v4, &src_v6) {
+                        tracing::warn!(addr = %ip, "IPS blacklist: failed to remove LPM entry: {e}");
+                    } else {
+                        tracing::info!(addr = %ip, "IPS blacklist: removed LPM entry");
+                    }
+                }
                 EnforcementAction::BlockSubnet {
                     addr, prefix_len, ..
                 } => {
@@ -258,7 +301,6 @@ impl IpsAppService {
                         );
                     }
                 }
-                _ => {}
             }
         }
     }
@@ -344,6 +386,7 @@ mod tests {
         ThreatIntelMetrics, ZoneMetrics,
     };
     use std::net::Ipv4Addr;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct TestMetrics {
@@ -515,6 +558,114 @@ mod tests {
 
     use domain::common::entity::{Protocol, RuleId, Severity};
     use domain::ips::entity::WhitelistEntry;
+
+    /// Records every LPM mutation so the tests can assert what reached the
+    /// datapath rather than only what the engine bookkept.
+    #[derive(Default)]
+    struct RecordingCoordinator {
+        inserted: Mutex<Vec<(u32, [u8; 4])>>,
+        removed: Mutex<Vec<(u32, [u8; 4])>>,
+    }
+
+    impl LpmCoordinatorPort for RecordingCoordinator {
+        fn replace_source_entries(
+            &self,
+            _source: &str,
+            _src_v4: &[FirewallLpmEntryV4],
+            _dst_v4: &[FirewallLpmEntryV4],
+            _src_v6: &[FirewallLpmEntryV6],
+            _dst_v6: &[FirewallLpmEntryV6],
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+
+        fn insert_entries(
+            &self,
+            _source: &str,
+            src_v4: &[FirewallLpmEntryV4],
+            _src_v6: &[FirewallLpmEntryV6],
+        ) -> Result<(), DomainError> {
+            let mut guard = self.inserted.lock().expect("lock");
+            guard.extend(src_v4.iter().map(|e| (e.prefix_len, e.addr)));
+            Ok(())
+        }
+
+        fn remove_entries(
+            &self,
+            _source: &str,
+            src_v4: &[FirewallLpmEntryV4],
+            _src_v6: &[FirewallLpmEntryV6],
+        ) -> Result<(), DomainError> {
+            let mut guard = self.removed.lock().expect("lock");
+            guard.extend(src_v4.iter().map(|e| (e.prefix_len, e.addr)));
+            Ok(())
+        }
+
+        fn remove_all_for_source(&self, _source: &str) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
+    fn service_with_coordinator() -> (IpsAppService, Arc<RecordingCoordinator>) {
+        let (mut svc, _) = make_service();
+        let coordinator = Arc::new(RecordingCoordinator::default());
+        svc.set_lpm_coordinator(Arc::clone(&coordinator) as Arc<dyn LpmCoordinatorPort>);
+        (svc, coordinator)
+    }
+
+    #[test]
+    fn blacklisting_installs_a_host_route() {
+        let (svc, coordinator) = service_with_coordinator();
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5));
+
+        svc.add_to_blacklist(ip, "manual".to_string(), Duration::from_mins(5))
+            .expect("blacklist accepted");
+
+        let inserted = coordinator.inserted.lock().expect("lock");
+        assert_eq!(*inserted, vec![(32, [203, 0, 113, 5])]);
+    }
+
+    #[test]
+    fn unblacklisting_removes_the_host_route() {
+        let (svc, coordinator) = service_with_coordinator();
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5));
+        svc.add_to_blacklist(ip, "manual".to_string(), Duration::from_mins(5))
+            .expect("blacklist accepted");
+
+        svc.remove_from_blacklist(ip).expect("removal accepted");
+
+        let removed = coordinator.removed.lock().expect("lock");
+        assert_eq!(*removed, vec![(32, [203, 0, 113, 5])]);
+    }
+
+    #[test]
+    fn auto_blacklisting_reaches_the_datapath() {
+        let (svc, coordinator) = service_with_coordinator();
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+
+        for _ in 0..3 {
+            svc.record_detection(ip);
+        }
+
+        let inserted = coordinator.inserted.lock().expect("lock");
+        assert_eq!(*inserted, vec![(32, [198, 51, 100, 7])]);
+    }
+
+    #[test]
+    fn clearing_the_blacklist_removes_every_host_route() {
+        let (svc, coordinator) = service_with_coordinator();
+        svc.add_to_blacklist(
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)),
+            "manual".to_string(),
+            Duration::from_mins(5),
+        )
+        .expect("blacklist accepted");
+
+        svc.clear_blacklist();
+
+        let removed = coordinator.removed.lock().expect("lock");
+        assert_eq!(*removed, vec![(32, [203, 0, 113, 5])]);
+    }
 
     fn make_ips_rule(id: &str, mode: DomainMode) -> IdsRule {
         IdsRule {

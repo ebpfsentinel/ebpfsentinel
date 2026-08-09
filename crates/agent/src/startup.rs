@@ -1863,9 +1863,9 @@ pub async fn run(
         }
 
         // Wire LpmCoordinator from xdp-firewall to alias, ddos, ips services (take LPM maps BEFORE others)
-        if geoip_adapter.is_some()
-            && let Some(ref mut loader) = fw_loader
-        {
+        // Not gated on GeoIP: the IPS blacklist and the DDoS auto-block install
+        // LPM entries of their own, which have nothing to do with country data.
+        if let Some(ref mut loader) = fw_loader {
             match LpmCoordinator::new(loader.ebpf_mut()) {
                 Ok(coordinator) => {
                     let coordinator: Arc<
