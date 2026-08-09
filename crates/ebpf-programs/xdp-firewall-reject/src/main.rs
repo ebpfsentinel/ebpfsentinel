@@ -15,8 +15,8 @@
 use aya_ebpf::{
     bindings::xdp_action,
     helpers::{bpf_ktime_get_boot_ns, bpf_xdp_adjust_tail},
-    macros::{map, xdp},
-    maps::{LruHashMap, PerCpuArray},
+    macros::{btf_map, xdp},
+    btf_maps::{LruHashMap, PerCpuArray},
     programs::XdpContext,
 };
 use ebpf_common::event::FLAG_IPV6;
@@ -38,16 +38,16 @@ use network_types::{
 
 // ── Maps (shared with xdp-firewall via BPF filesystem pinning) ──────
 
-#[map]
+#[btf_map]
 // Pinned by name so this tail-call target reuses the parent xdp-firewall's
 // populated scratch buffer (shared BPF-fs pin path) rather than binding its
 // own zero-filled copy. Without pinning, protocol/l3_offset/l4_offset read as
 // 0 here, dispatching every reject to the ICMP path with offset-0 (Ethernet)
 // header parsing.
-static PKT_CTX: PerCpuArray<PacketCtx> = PerCpuArray::pinned(1, 0);
+static PKT_CTX: PerCpuArray<PacketCtx, 1> = PerCpuArray::new();
 
-#[map]
-static FIREWALL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(FIREWALL_METRIC_COUNT, 0);
+#[btf_map]
+static FIREWALL_METRICS: PerCpuArray<u64, { FIREWALL_METRIC_COUNT as usize }> = PerCpuArray::new();
 
 // ── Per-source reject rate limit ────────────────────────────────────
 //
@@ -73,8 +73,8 @@ const REJECT_RL_BURST: u32 = 20;
 /// Refill cadence: one token per 50 ms ⇒ a 20 reply/s sustained ceiling.
 const REJECT_RL_REFILL_NS: u64 = 50_000_000;
 
-#[map]
-static REJECT_RATELIMIT: LruHashMap<u32, RejectBucket> = LruHashMap::with_max_entries(65536, 0);
+#[btf_map]
+static REJECT_RATELIMIT: LruHashMap<u32, RejectBucket, 65536> = LruHashMap::new();
 
 /// Returns `true` if a reject reply may be forged for `src_key`, consuming a
 /// token. Returns `false` once the source's bucket is empty.
@@ -115,8 +115,8 @@ struct ScratchBuf {
     data: [u8; 48],
 }
 
-#[map]
-static REJECT_SCRATCH: PerCpuArray<ScratchBuf> = PerCpuArray::with_max_entries(1, 0);
+#[btf_map]
+static REJECT_SCRATCH: PerCpuArray<ScratchBuf, 1> = PerCpuArray::new();
 
 // ── Entry point ─────────────────────────────────────────────────────
 

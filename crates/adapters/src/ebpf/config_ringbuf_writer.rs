@@ -9,9 +9,10 @@ use tracing::{info, warn};
 /// applying rule changes atomically. This is used for incremental updates;
 /// bulk initial load still uses `bpf_map_update_elem` via the map managers.
 ///
-/// Note: aya 0.13.1 does not have a typed `UserRingBuf` API. Userspace writes
-/// to a `UserRingBuf` require mmap-based access which aya does not yet expose.
-/// This is a placeholder for future aya `UserRingBuf` support.
+/// Note: aya still has no typed `UserRingBuf` API - it classifies
+/// `BPF_MAP_TYPE_USER_RINGBUF` as `Map::Unsupported`. Userspace writes to a
+/// user ring buffer need mmap-based access which aya does not expose. This is
+/// a placeholder until it does; no program currently declares the map either.
 pub struct ConfigRingBufWriter {
     /// Map handle — kept alive to maintain the map reference.
     _map: Map,
@@ -29,12 +30,12 @@ impl ConfigRingBufWriter {
 
     /// Push a config command to the `UserRingBuf`.
     ///
-    /// Note: full `UserRingBuf` write support requires mmap-based access
-    /// which is not yet available in aya 0.13.1. This is a placeholder.
-    /// Incremental rule updates still go through `bpf_map_update_elem`
-    /// via the existing map managers.
+    /// Note: full `UserRingBuf` write support requires mmap-based access,
+    /// which aya does not yet provide. This is a placeholder. Incremental rule
+    /// updates still go through `bpf_map_update_elem` via the existing map
+    /// managers.
     pub fn push_command(&mut self, _cmd: &ConfigCommand) -> Result<(), anyhow::Error> {
-        warn!("UserRingBuf write not yet supported in aya 0.13.1 — command queued but not sent");
+        warn!("UserRingBuf write not yet supported by aya - command queued but not sent");
         Ok(())
     }
 }

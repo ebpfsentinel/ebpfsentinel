@@ -4,8 +4,8 @@
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     helpers::{bpf_get_current_cgroup_id, bpf_ktime_get_boot_ns},
-    macros::{classifier, map},
-    maps::{PerCpuArray, RingBuf},
+    btf_maps::{PerCpuArray, RingBuf},
+    macros::{btf_map, classifier},
     programs::TcContext,
 };
 use aya_ebpf_bindings::helpers::bpf_skb_load_bytes;
@@ -38,13 +38,13 @@ const DNS_PORT: u16 = 53;
 /// Dedicated DNS kernel→userspace event ring buffer (256 KB).
 /// Separate from the main EVENTS RingBuf to avoid DNS volume flooding
 /// security events and to allow independent polling cadence.
-#[map]
-static DNS_EVENTS: RingBuf = RingBuf::with_byte_size(64 * 4096, 0);
+#[btf_map]
+static DNS_EVENTS: RingBuf<DnsEventBuf, { 64 * 4096 }> = RingBuf::new();
 
 /// Per-CPU DNS counters. Index: 0=packets_inspected, 1=events_emitted,
 /// 2=errors, 3=events_dropped, 4=total_seen.
-#[map]
-static DNS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
+#[btf_map]
+static DNS_METRICS: PerCpuArray<u64, 5> = PerCpuArray::new();
 
 // ── Entry point ─────────────────────────────────────────────────────
 
@@ -289,7 +289,7 @@ fn emit_dns_event(
 
     // RingBuf path (copy-based). TC programs are not sleepable, so the
     // sleepable arena-alloc kfunc is unavailable here.
-    if let Some(mut entry) = DNS_EVENTS.reserve::<DnsEventBuf>(0) {
+    if let Some(mut entry) = DNS_EVENTS.reserve(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
             // Fill header

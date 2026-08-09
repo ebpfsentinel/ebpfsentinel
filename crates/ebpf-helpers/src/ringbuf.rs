@@ -20,8 +20,8 @@ pub const DEFAULT_BACKPRESSURE_THRESHOLD: u64 = DEFAULT_RINGBUF_SIZE * 3 / 4;
 /// ```ignore
 /// use ebpf_helpers::ringbuf_has_backpressure;
 ///
-/// #[map]
-/// static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
+/// #[btf_map]
+/// static EVENTS: RingBuf<Event, { 256 * 4096 }> = RingBuf::new();
 ///
 /// if ringbuf_has_backpressure!(EVENTS) {
 ///     return; // skip emission
@@ -38,10 +38,25 @@ pub const DEFAULT_BACKPRESSURE_THRESHOLD: u64 = DEFAULT_RINGBUF_SIZE * 3 / 4;
 #[macro_export]
 macro_rules! ringbuf_has_backpressure {
     ($ringbuf:expr) => {
-        $ringbuf.query($crate::ringbuf::BPF_RB_AVAIL_DATA)
-            > $crate::ringbuf::DEFAULT_BACKPRESSURE_THRESHOLD
+        $crate::ringbuf::avail_data(&$ringbuf) > $crate::ringbuf::DEFAULT_BACKPRESSURE_THRESHOLD
     };
     ($ringbuf:expr, $threshold:expr) => {
-        $ringbuf.query($crate::ringbuf::BPF_RB_AVAIL_DATA) > $threshold
+        $crate::ringbuf::avail_data(&$ringbuf) > $threshold
     };
+}
+
+/// Returns the number of bytes still unconsumed in `ringbuf`.
+///
+/// The BTF-defined `RingBuf` exposes no `query`, and its internal map
+/// pointer accessor is crate-private, so call `bpf_ringbuf_query` on the
+/// map definition directly. Taking the address of the `.maps` static is
+/// exactly what the map wrapper does internally: the compiler emits an
+/// `ld_imm64` against the map symbol and the loader rewrites it to the map
+/// fd, which is the `ARG_CONST_MAP_PTR` the verifier expects.
+#[inline(always)]
+pub fn avail_data<T>(ringbuf: &T) -> u64 {
+    let ptr = core::ptr::from_ref(ringbuf).cast_mut().cast();
+    // SAFETY: `ptr` is the address of a `.maps` ring-buffer definition, which
+    // the loader patches into a map fd before the program runs.
+    unsafe { aya_ebpf::helpers::bpf_ringbuf_query(ptr, BPF_RB_AVAIL_DATA) }
 }

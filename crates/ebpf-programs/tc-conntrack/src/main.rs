@@ -4,8 +4,8 @@
 
 use aya_ebpf::{
     bindings::TC_ACT_OK,
-    macros::{classifier, map},
-    maps::{Array, PerCpuArray},
+    macros::{btf_map, classifier},
+    btf_maps::{Array, PerCpuArray},
     programs::TcContext,
 };
 use aya_ebpf_bindings::helpers::bpf_probe_read_kernel;
@@ -26,17 +26,17 @@ use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// Conntrack configuration (timeouts, enable flag).
-#[map]
-static CT_CONFIG: Array<ConnTrackConfig> = Array::with_max_entries(1, 0);
+#[btf_map]
+static CT_CONFIG: Array<ConnTrackConfig, 1> = Array::new();
 
 /// Per-CPU conntrack metrics.
-#[map]
-static CT_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(CT_METRIC_COUNT, 0);
+#[btf_map]
+static CT_METRICS: PerCpuArray<u64, { CT_METRIC_COUNT as usize }> = PerCpuArray::new();
 
 /// Runtime-resolved `nf_conn` field offsets populated by userspace from
 /// vmlinux BTF. Used by `bpf_probe_read_kernel` to read kernel CT fields.
-#[map]
-static CT_NF_CONN_OFFSETS: Array<NfConnOffsets> = Array::with_max_entries(1, 0);
+#[btf_map]
+static CT_NF_CONN_OFFSETS: Array<NfConnOffsets, 1> = Array::new();
 
 // ── Entry point ─────────────────────────────────────────────────────
 

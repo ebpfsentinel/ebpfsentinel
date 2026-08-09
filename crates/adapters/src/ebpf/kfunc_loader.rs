@@ -936,6 +936,102 @@ pub struct TokenLoadedObject {
     pub hosted: HashMap<String, OwnedFd>,
 }
 
+/// The `value_size` this loader forces for a map type, or `None` to keep the
+/// size the object declares.
+///
+/// `DEVMAP` / `DEVMAP_HASH` / `CPUMAP`: the kernel-side program declares an 8-byte
+/// `bpf_devmap_val` / `bpf_cpumap_val` value, but the value layout aya's
+/// userspace typed `DevMap` / `CpuMap` wrapper binds is gated on the kernel's
+/// prog-id feature - 8 bytes when supported, a 4-byte index when not. Map and
+/// wrapper must agree or `try_from` rejects the map ("invalid value size ...")
+/// and the redirect target is left unpopulated (DSR silently falls back to
+/// `XDP_TX`). aya's own loader resolves this by overriding `value_size` from the
+/// same feature probe (`bpf.rs`: `value_size_override`); mirror it against the
+/// identical `aya::features()` the wrapper reads so the two never disagree -
+/// notably under token loading, where the probe cannot run without `CAP_BPF`
+/// and reports the legacy 4-byte layout. The BTF definition does not change
+/// this: `bpf_devmap_val` is 8 bytes on every kernel, so on a kernel without
+/// prog-id support the declared size and the wrapper still disagree, and the
+/// override is what reconciles them.
+///
+/// A ring buffer is sized by `max_entries` alone and the kernel rejects a
+/// non-zero `value_size`; both map forms already report 0, so that arm only
+/// pins the invariant.
+fn value_size_override(map_type: u32) -> Option<u32> {
+    use aya_obj::generated::bpf_map_type;
+
+    match map_type.try_into() {
+        Ok(bpf_map_type::BPF_MAP_TYPE_DEVMAP | bpf_map_type::BPF_MAP_TYPE_DEVMAP_HASH) => {
+            Some(if aya::features().devmap_prog_id() {
+                8
+            } else {
+                4
+            })
+        }
+        Ok(bpf_map_type::BPF_MAP_TYPE_CPUMAP) => Some(if aya::features().cpumap_prog_id() {
+            8
+        } else {
+            4
+        }),
+        Ok(bpf_map_type::BPF_MAP_TYPE_RINGBUF) => Some(0),
+        _ => None,
+    }
+}
+
+/// The BTF fields of `BPF_MAP_CREATE` for one BTF-defined map.
+#[derive(Debug, PartialEq, Eq)]
+struct BtfMapIds {
+    key_type_id: u32,
+    value_type_id: u32,
+    btf_fd: u32,
+}
+
+/// Decide which BTF ids a BTF-defined map may pass to `BPF_MAP_CREATE`.
+///
+/// Re-derived from `aya::sys::bpf::bpf_create_map` in aya 0.14.0. The
+/// fourteen-type deny-list is unchanged from 0.13.1, but 0.14.0 added the
+/// bloom-filter carve-out: a bloom filter is keyless, so the kernel demands
+/// `key_size` 0 and rejects a key BTF type id, while still accepting and
+/// validating the value type. Sending both ids fails `BPF_MAP_CREATE`
+/// outright, which under BTF-defined maps would leave the threat-intel filters
+/// uncreated and drop every lookup through to the LRU hash.
+fn btf_type_ids(map_type: u32, key_type_id: u32, value_type_id: u32, btf_fd: u32) -> BtfMapIds {
+    use aya_obj::generated::bpf_map_type;
+
+    match map_type.try_into() {
+        Ok(
+            bpf_map_type::BPF_MAP_TYPE_PERF_EVENT_ARRAY
+            | bpf_map_type::BPF_MAP_TYPE_CGROUP_ARRAY
+            | bpf_map_type::BPF_MAP_TYPE_STACK_TRACE
+            | bpf_map_type::BPF_MAP_TYPE_ARRAY_OF_MAPS
+            | bpf_map_type::BPF_MAP_TYPE_HASH_OF_MAPS
+            | bpf_map_type::BPF_MAP_TYPE_DEVMAP
+            | bpf_map_type::BPF_MAP_TYPE_DEVMAP_HASH
+            | bpf_map_type::BPF_MAP_TYPE_CPUMAP
+            | bpf_map_type::BPF_MAP_TYPE_XSKMAP
+            | bpf_map_type::BPF_MAP_TYPE_SOCKMAP
+            | bpf_map_type::BPF_MAP_TYPE_SOCKHASH
+            | bpf_map_type::BPF_MAP_TYPE_QUEUE
+            | bpf_map_type::BPF_MAP_TYPE_STACK
+            | bpf_map_type::BPF_MAP_TYPE_RINGBUF,
+        ) => BtfMapIds {
+            key_type_id: 0,
+            value_type_id: 0,
+            btf_fd: 0,
+        },
+        Ok(bpf_map_type::BPF_MAP_TYPE_BLOOM_FILTER) => BtfMapIds {
+            key_type_id: 0,
+            value_type_id,
+            btf_fd,
+        },
+        _ => BtfMapIds {
+            key_type_id,
+            value_type_id,
+            btf_fd,
+        },
+    }
+}
+
 /// `BPF_MAP_CREATE` (token-authorized), replicating aya's BTF-map handling.
 fn raw_map_create(
     name: &str,
@@ -948,58 +1044,39 @@ fn raw_map_create(
         value_size: def.value_size(),
         max_entries: def.max_entries(),
         map_flags: def.map_flags(),
+        // BTF map definitions can carry per-type extra state the legacy
+        // `bpf_map_def` had no room for - for a bloom filter this is the
+        // hash-function count. Legacy definitions report 0, which is what the
+        // kernel reads as "use the default".
+        map_extra: def.map_extra(),
         ..Default::default()
     };
 
-    // DEVMAP / DEVMAP_HASH / CPUMAP: the kernel-side program declares an 8-byte
-    // `bpf_devmap_val` / `bpf_cpumap_val` value, but the value layout aya's
-    // userspace typed `DevMap` / `CpuMap` wrapper binds is gated on the kernel's
-    // prog-id feature - 8 bytes when supported, a 4-byte index when not. Map and
-    // wrapper must agree or `try_from` rejects the map ("invalid value size ...")
-    // and the redirect target is left unpopulated (DSR silently falls back to
-    // XDP_TX). aya's own loader resolves this by overriding value_size from the
-    // same feature probe (`bpf.rs`: `set_value_size(if prog_id {8} else {4})`);
-    // mirror it against the identical `aya::features()` the wrapper reads so the
-    // two never disagree - notably under token loading, where the probe cannot
-    // run without CAP_BPF and reports the legacy 4-byte layout.
-    if matches!(attr.map_type, 14 | 25) {
-        attr.value_size = if aya::features().devmap_prog_id() {
-            8
-        } else {
-            4
-        };
-    } else if attr.map_type == 16 {
-        attr.value_size = if aya::features().cpumap_prog_id() {
-            8
-        } else {
-            4
-        };
+    if let Some(size) = value_size_override(attr.map_type) {
+        attr.value_size = size;
     }
 
     // BTF-defined maps carry key/value BTF type ids — except a set of map types
     // the kernel rejects BTF for (mirrors libbpf issue #355 / aya).
+    //
+    // Every program this repo ships now defines its maps in `.maps`, so `def` is
+    // always the `Btf` variant here. The legacy variant is still tolerated
+    // rather than rejected because `aya_obj` keeps parsing the old `maps`
+    // section and this loader is handed whatever object it is pointed at
+    // (`/usr/local/lib/ebpfsentinel` is a deploy-time directory). A legacy
+    // definition carries no BTF ids at all, which is exactly what falling
+    // through leaves in `attr`.
     if let aya_obj::Map::Btf(m) = def {
-        const NO_BTF_TYPES: &[u32] = &[
-            4,  // PERF_EVENT_ARRAY
-            5,  // CGROUP_ARRAY
-            7,  // STACK_TRACE
-            12, // ARRAY_OF_MAPS
-            13, // HASH_OF_MAPS
-            14, // DEVMAP
-            25, // DEVMAP_HASH
-            16, // CPUMAP
-            17, // XSKMAP
-            15, // SOCKMAP
-            18, // SOCKHASH
-            22, // QUEUE
-            23, // STACK
-            27, // RINGBUF
-        ];
-        if !NO_BTF_TYPES.contains(&attr.map_type) {
-            attr.btf_key_type_id = m.def.btf_key_type_id;
-            attr.btf_value_type_id = m.def.btf_value_type_id;
-            attr.btf_fd = u32::try_from(btf_fd.unwrap_or_default()).unwrap_or_default();
-        }
+        let fd = u32::try_from(btf_fd.unwrap_or_default()).unwrap_or_default();
+        let ids = btf_type_ids(
+            attr.map_type,
+            m.def.btf_key_type_id,
+            m.def.btf_value_type_id,
+            fd,
+        );
+        attr.btf_key_type_id = ids.key_type_id;
+        attr.btf_value_type_id = ids.value_type_id;
+        attr.btf_fd = ids.btf_fd;
     }
 
     let n = name.as_bytes();
@@ -1269,6 +1346,116 @@ mod tests {
         // unique_names instead (parsing arbitrary bytes would error).
         let sites: Vec<KfuncSite> = Vec::new();
         assert!(unique_names(&sites).is_empty());
+    }
+
+    #[test]
+    fn bloom_filter_passes_only_the_value_btf_id() {
+        use aya_obj::generated::bpf_map_type as t;
+        // Keyless map: a key type id makes BPF_MAP_CREATE fail, but the value
+        // type is accepted and checked.
+        let ids = btf_type_ids(t::BPF_MAP_TYPE_BLOOM_FILTER as u32, 7, 9, 5);
+        assert_eq!(
+            ids,
+            BtfMapIds {
+                key_type_id: 0,
+                value_type_id: 9,
+                btf_fd: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn deny_listed_types_pass_no_btf_at_all() {
+        use aya_obj::generated::bpf_map_type as t;
+        // The exact set aya refuses BTF for (libbpf issue #355).
+        for map_type in [
+            t::BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+            t::BPF_MAP_TYPE_CGROUP_ARRAY,
+            t::BPF_MAP_TYPE_STACK_TRACE,
+            t::BPF_MAP_TYPE_ARRAY_OF_MAPS,
+            t::BPF_MAP_TYPE_HASH_OF_MAPS,
+            t::BPF_MAP_TYPE_DEVMAP,
+            t::BPF_MAP_TYPE_DEVMAP_HASH,
+            t::BPF_MAP_TYPE_CPUMAP,
+            t::BPF_MAP_TYPE_XSKMAP,
+            t::BPF_MAP_TYPE_SOCKMAP,
+            t::BPF_MAP_TYPE_SOCKHASH,
+            t::BPF_MAP_TYPE_QUEUE,
+            t::BPF_MAP_TYPE_STACK,
+            t::BPF_MAP_TYPE_RINGBUF,
+        ] {
+            let map_type = map_type as u32;
+            let ids = btf_type_ids(map_type, 7, 9, 5);
+            assert_eq!(
+                ids,
+                BtfMapIds {
+                    key_type_id: 0,
+                    value_type_id: 0,
+                    btf_fd: 0,
+                },
+                "map type {map_type} must not carry BTF ids"
+            );
+        }
+    }
+
+    #[test]
+    fn keyed_types_pass_both_btf_ids() {
+        use aya_obj::generated::bpf_map_type as t;
+        for map_type in [
+            t::BPF_MAP_TYPE_HASH,
+            t::BPF_MAP_TYPE_ARRAY,
+            t::BPF_MAP_TYPE_PERCPU_ARRAY,
+            t::BPF_MAP_TYPE_PERCPU_HASH,
+            t::BPF_MAP_TYPE_LRU_HASH,
+            t::BPF_MAP_TYPE_LRU_PERCPU_HASH,
+            t::BPF_MAP_TYPE_LPM_TRIE,
+            t::BPF_MAP_TYPE_PROG_ARRAY,
+            t::BPF_MAP_TYPE_SK_STORAGE,
+        ] {
+            let map_type = map_type as u32;
+            let ids = btf_type_ids(map_type, 7, 9, 5);
+            assert_eq!(
+                ids,
+                BtfMapIds {
+                    key_type_id: 7,
+                    value_type_id: 9,
+                    btf_fd: 5,
+                },
+                "map type {map_type} must carry both BTF ids"
+            );
+        }
+    }
+
+    #[test]
+    fn redirect_maps_take_the_value_size_the_typed_wrapper_expects() {
+        use aya_obj::generated::bpf_map_type as t;
+
+        // The typed DevMap / CpuMap wrappers read the same feature probe, so
+        // whatever it reports here, map and wrapper must agree on the size.
+        let devmap_expected = if aya::features().devmap_prog_id() {
+            8
+        } else {
+            4
+        };
+        let cpumap_expected = if aya::features().cpumap_prog_id() {
+            8
+        } else {
+            4
+        };
+        assert_eq!(
+            value_size_override(t::BPF_MAP_TYPE_DEVMAP as u32),
+            Some(devmap_expected)
+        );
+        assert_eq!(
+            value_size_override(t::BPF_MAP_TYPE_DEVMAP_HASH as u32),
+            Some(devmap_expected)
+        );
+        assert_eq!(
+            value_size_override(t::BPF_MAP_TYPE_CPUMAP as u32),
+            Some(cpumap_expected)
+        );
+        assert_eq!(value_size_override(t::BPF_MAP_TYPE_RINGBUF as u32), Some(0));
+        assert_eq!(value_size_override(t::BPF_MAP_TYPE_HASH as u32), None);
     }
 
     #[test]

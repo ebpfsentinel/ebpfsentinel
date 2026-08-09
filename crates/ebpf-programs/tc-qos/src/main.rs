@@ -5,14 +5,14 @@ use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
     helpers::{bpf_get_prandom_u32, bpf_ktime_get_boot_ns},
-    macros::{classifier, map},
-    maps::{Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
+    macros::{btf_map, classifier},
+    btf_maps::{Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
     programs::TcContext,
 };
 use aya_ebpf_bindings::bindings::_bindgen_ty_28::BPF_SKB_TSTAMP_DELIVERY_MONO;
 use aya_ebpf_bindings::helpers::{bpf_skb_ecn_set_ce, bpf_skb_set_tstamp};
 use ebpf_common::{
-    event::{EVENT_TYPE_QOS, FLAG_IPV6, FLAG_VLAN},
+    event::{EVENT_TYPE_QOS, FLAG_IPV6, FLAG_VLAN, PacketEvent},
     qos::{
         QOS_METRIC_COUNT, QOS_METRIC_DELAYED, QOS_METRIC_DROPPED_LOSS, QOS_METRIC_DROPPED_QUEUE,
         QOS_METRIC_ERRORS, QOS_METRIC_EVENTS_DROPPED, QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN,
@@ -41,48 +41,44 @@ use network_types::{
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// `QoS` pipe configuration (written by userspace). Index = pipe_id (0-63).
-#[map]
-static QOS_PIPE_CONFIG: Array<QosPipeConfig> = Array::with_max_entries(64, 0);
+#[btf_map]
+static QOS_PIPE_CONFIG: Array<QosPipeConfig, 64> = Array::new();
 
 /// `QoS` queue configuration (written by userspace). Index = queue_id (0-255).
-#[map]
-static QOS_QUEUE_CONFIG: Array<QosQueueConfig> = Array::with_max_entries(256, 0);
+#[btf_map]
+static QOS_QUEUE_CONFIG: Array<QosQueueConfig, 256> = Array::new();
 
 /// `QoS` classifier lookup: 5-tuple+DSCP -> queue_id + priority.
-#[map]
-static QOS_CLASSIFIERS: HashMap<QosClassifierKey, QosClassifierValue> =
-    HashMap::with_max_entries(1024, 0);
+#[btf_map]
+static QOS_CLASSIFIERS: HashMap<QosClassifierKey, QosClassifierValue, 1024> = HashMap::new();
 
 /// Per-flow `QoS` state (token bucket). Per-CPU LRU eliminates cross-CPU contention.
-#[map]
-static QOS_FLOW_STATE: LruPerCpuHashMap<u32, QosFlowState> =
-    LruPerCpuHashMap::with_max_entries(65536, 0);
+#[btf_map]
+static QOS_FLOW_STATE: LruPerCpuHashMap<u32, QosFlowState, 65536> = LruPerCpuHashMap::new();
 
 /// Per-CPU packet counters.
-#[map]
-static QOS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(QOS_METRIC_COUNT, 0);
+#[btf_map]
+static QOS_METRICS: PerCpuArray<u64, { QOS_METRIC_COUNT as usize }> = PerCpuArray::new();
 
 /// Shared kernel->userspace event ring buffer (1 MB).
-#[map]
-static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
+#[btf_map]
+static EVENTS: RingBuf<PacketEvent, { 256 * 4096 }> = RingBuf::new();
 
 /// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
-#[map]
-static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
+#[btf_map]
+static INTERFACE_GROUPS: HashMap<u32, u32, 64> = HashMap::new();
 
 /// Tenant resolution: VLAN ID -> tenant_id.
-#[map]
-static TENANT_VLAN_MAP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+#[btf_map]
+static TENANT_VLAN_MAP: HashMap<u32, u32, 1024> = HashMap::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv4).
-#[map]
-static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32> =
-    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_LPM_ENTRIES, 0);
+#[btf_map]
+static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32, { MAX_TENANT_SUBNET_LPM_ENTRIES as usize }> = LpmTrie::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv6).
-#[map]
-static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
-    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_V6_LPM_ENTRIES, 0);
+#[btf_map]
+static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRIES as usize }> = LpmTrie::new();
 
 // ── Constants ───────────────────────────────────────────────────────
 

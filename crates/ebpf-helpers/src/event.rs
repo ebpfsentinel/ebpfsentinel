@@ -41,7 +41,7 @@ macro_rules! emit_packet_event {
             $crate::increment_metric!($metrics, $metric_dropped);
             return;
         }
-        if let Some(mut entry) = $ringbuf.reserve::<ebpf_common::event::PacketEvent>(0) {
+        if let Some(mut entry) = $ringbuf.reserve_untyped::<ebpf_common::event::PacketEvent>(0) {
             let ptr = entry.as_mut_ptr();
             unsafe {
                 (*ptr).timestamp_ns = aya_ebpf::helpers::bpf_ktime_get_boot_ns();
@@ -79,7 +79,7 @@ macro_rules! emit_packet_event {
             $crate::increment_metric!($metrics, $metric_dropped);
             return;
         }
-        if let Some(mut entry) = $ringbuf.reserve::<ebpf_common::event::PacketEvent>(0) {
+        if let Some(mut entry) = $ringbuf.reserve_untyped::<ebpf_common::event::PacketEvent>(0) {
             let ptr = entry.as_mut_ptr();
             unsafe {
                 (*ptr).timestamp_ns = aya_ebpf::helpers::bpf_ktime_get_boot_ns();
@@ -126,7 +126,7 @@ macro_rules! emit_packet_event {
             $crate::increment_metric!($metrics, $metric_dropped);
             return;
         }
-        if let Some(mut entry) = $ringbuf.reserve::<ebpf_common::event::PacketEvent>(0) {
+        if let Some(mut entry) = $ringbuf.reserve_untyped::<ebpf_common::event::PacketEvent>(0) {
             let ptr = entry.as_mut_ptr();
             unsafe {
                 (*ptr).timestamp_ns = aya_ebpf::helpers::bpf_ktime_get_boot_ns();

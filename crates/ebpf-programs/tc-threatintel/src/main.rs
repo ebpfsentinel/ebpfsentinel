@@ -4,12 +4,12 @@
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
-    macros::{classifier, map},
-    maps::{Array, LruHashMap, PerCpuArray, RingBuf, bloom_filter::BloomFilter},
+    macros::{btf_map, classifier},
+    btf_maps::{Array, LruHashMap, PerCpuArray, RingBuf, bloom_filter::BloomFilter},
     programs::TcContext,
 };
 use ebpf_common::{
-    event::{EVENT_TYPE_THREATINTEL, FLAG_IPV6, FLAG_VLAN},
+    event::{EVENT_TYPE_THREATINTEL, FLAG_IPV6, FLAG_VLAN, PacketEvent},
     threatintel::{
         THREATINTEL_ACTION_DROP, THREATINTEL_MAX_ENTRIES, THREATINTEL_METRIC_DROPPED,
         THREATINTEL_METRIC_ERRORS, THREATINTEL_METRIC_EVENTS_DROPPED, THREATINTEL_METRIC_MATCHED,
@@ -39,38 +39,34 @@ use network_types::{
 /// Supports 1M+ entries (NFR22). Uses `LruHashMap` so that when the map is
 /// full the least-recently-used entry is evicted instead of silently
 /// dropping new inserts.
-#[map]
-static THREATINTEL_IOCS: LruHashMap<ThreatIntelKey, ThreatIntelValue> =
-    LruHashMap::with_max_entries(THREATINTEL_MAX_ENTRIES, 0);
+#[btf_map]
+static THREATINTEL_IOCS: LruHashMap<ThreatIntelKey, ThreatIntelValue, { THREATINTEL_MAX_ENTRIES as usize }> = LruHashMap::new();
 
 /// Threat intel IOC lookup: IPv6 address → action + feed metadata.
 /// Uses `LruHashMap` for automatic LRU eviction on full maps.
-#[map]
-static THREATINTEL_IOCS_V6: LruHashMap<ThreatIntelKeyV6, ThreatIntelValue> =
-    LruHashMap::with_max_entries(THREATINTEL_MAX_ENTRIES, 0);
+#[btf_map]
+static THREATINTEL_IOCS_V6: LruHashMap<ThreatIntelKeyV6, ThreatIntelValue, { THREATINTEL_MAX_ENTRIES as usize }> = LruHashMap::new();
 
 /// Bloom filter pre-check for IPv4 IOCs (kernel 5.16+).
 /// Eliminates ~98% of HashMap lookups for non-matching packets.
-#[map]
-static mut THREATINTEL_BLOOM_V4: BloomFilter<ThreatIntelKey> =
-    BloomFilter::with_max_entries(THREATINTEL_MAX_ENTRIES, 0);
+#[btf_map]
+static THREATINTEL_BLOOM_V4: BloomFilter<ThreatIntelKey, { THREATINTEL_MAX_ENTRIES as usize }> = BloomFilter::new();
 
 /// Bloom filter pre-check for IPv6 IOCs (kernel 5.16+).
-#[map]
-static mut THREATINTEL_BLOOM_V6: BloomFilter<ThreatIntelKeyV6> =
-    BloomFilter::with_max_entries(THREATINTEL_MAX_ENTRIES, 0);
+#[btf_map]
+static THREATINTEL_BLOOM_V6: BloomFilter<ThreatIntelKeyV6, { THREATINTEL_MAX_ENTRIES as usize }> = BloomFilter::new();
 
 /// Per-CPU counters. Index: 0=matched, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen.
-#[map]
-static THREATINTEL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
+#[btf_map]
+static THREATINTEL_METRICS: PerCpuArray<u64, 5> = PerCpuArray::new();
 
 /// Shared kernel→userspace event ring buffer (1 MB).
-#[map]
-static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
+#[btf_map]
+static EVENTS: RingBuf<PacketEvent, { 256 * 4096 }> = RingBuf::new();
 
 /// Feature enable/disable flags (shared across programs).
-#[map]
-static CONFIG_FLAGS: Array<u32> = Array::with_max_entries(1, 0);
+#[btf_map]
+static CONFIG_FLAGS: Array<u32, 1> = Array::new();
 
 // ── Entry point ─────────────────────────────────────────────────────
 
@@ -178,16 +174,8 @@ fn process_threatintel_v4(
     let src_key = ThreatIntelKey { ip: src_ip };
     let dst_key = ThreatIntelKey { ip: dst_ip };
 
-    let src_maybe = unsafe {
-        (*core::ptr::addr_of_mut!(THREATINTEL_BLOOM_V4))
-            .contains(&src_key)
-            .is_ok()
-    };
-    let dst_maybe = unsafe {
-        (*core::ptr::addr_of_mut!(THREATINTEL_BLOOM_V4))
-            .contains(&dst_key)
-            .is_ok()
-    };
+    let src_maybe = THREATINTEL_BLOOM_V4.contains(&src_key).is_ok();
+    let dst_maybe = THREATINTEL_BLOOM_V4.contains(&dst_key).is_ok();
 
     if !src_maybe && !dst_maybe {
         return Ok(TC_ACT_OK); // guaranteed no match
@@ -269,16 +257,8 @@ fn process_threatintel_v6(
     let src_key = ThreatIntelKeyV6 { ip: src_addr };
     let dst_key = ThreatIntelKeyV6 { ip: dst_addr };
 
-    let src_maybe = unsafe {
-        (*core::ptr::addr_of_mut!(THREATINTEL_BLOOM_V6))
-            .contains(&src_key)
-            .is_ok()
-    };
-    let dst_maybe = unsafe {
-        (*core::ptr::addr_of_mut!(THREATINTEL_BLOOM_V6))
-            .contains(&dst_key)
-            .is_ok()
-    };
+    let src_maybe = THREATINTEL_BLOOM_V6.contains(&src_key).is_ok();
+    let dst_maybe = THREATINTEL_BLOOM_V6.contains(&dst_key).is_ok();
 
     if !src_maybe && !dst_maybe {
         return Ok(TC_ACT_OK); // guaranteed no match

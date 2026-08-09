@@ -4,8 +4,8 @@
 use aya_ebpf::{
     bindings::xdp_action,
     helpers::{bpf_check_mtu, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
-    macros::{map, xdp},
-    maps::{
+    macros::{btf_map, xdp},
+    btf_maps::{
         Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, ProgramArray, RingBuf,
         lpm_trie::Key,
     },
@@ -115,9 +115,8 @@ struct IcmpHdr {
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// Per-source-IP rate limit configuration. Key `{ src_ip: 0 }` = global default.
-#[map]
-static RATELIMIT_CONFIG: HashMap<RateLimitKey, RateLimitConfig> =
-    HashMap::with_max_entries(10240, 0);
+#[btf_map]
+static RATELIMIT_CONFIG: HashMap<RateLimitKey, RateLimitConfig, 10240> = HashMap::new();
 
 /// Consolidated per-source-IP bucket state for all algorithms.
 /// Per-CPU LRU eliminates cross-CPU contention; each CPU maintains
@@ -127,79 +126,72 @@ static RATELIMIT_CONFIG: HashMap<RateLimitKey, RateLimitConfig> =
 /// source is up to `configured_limit × online_CPUs`. Operators sizing limits
 /// against a multi-flow source must divide the intended rate by the CPU count.
 /// Replaces 4 separate per-algorithm maps with a single discriminated union.
-#[map]
-static RL_BUCKETS: LruPerCpuHashMap<RateLimitKey, RateLimitBucketUnion> =
-    LruPerCpuHashMap::with_max_entries(MAX_RL_BUCKET_ENTRIES, 0);
+#[btf_map]
+static RL_BUCKETS: LruPerCpuHashMap<RateLimitKey, RateLimitBucketUnion, { MAX_RL_BUCKET_ENTRIES as usize }> = LruPerCpuHashMap::new();
 
 /// Per-CPU counters. Index: 0=passed, 1=throttled, 2=errors, 3=events_dropped, 4=total_seen.
-#[map]
-static RATELIMIT_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(6, 0);
+#[btf_map]
+static RATELIMIT_METRICS: PerCpuArray<u64, 6> = PerCpuArray::new();
 
 /// Shared kernel→userspace event ring buffer (1 MB).
-#[map]
-static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
+#[btf_map]
+static EVENTS: RingBuf<PacketEvent, { 256 * 4096 }> = RingBuf::new();
 
 // ── Country-Tier LPM Maps ──────────────────────────────────────────
 
 /// IPv4 source LPM Trie for country-tier rate limiting.
 /// Maps CIDR prefixes to tier IDs.
-#[map]
-static RL_LPM_SRC_V4: LpmTrie<[u8; 4], RateLimitTierValue> =
-    LpmTrie::with_max_entries(MAX_RL_LPM_ENTRIES, 0);
+#[btf_map]
+static RL_LPM_SRC_V4: LpmTrie<[u8; 4], RateLimitTierValue, { MAX_RL_LPM_ENTRIES as usize }> = LpmTrie::new();
 
 /// IPv6 source LPM Trie for country-tier rate limiting.
-#[map]
-static RL_LPM_SRC_V6: LpmTrie<[u8; 16], RateLimitTierValue> =
-    LpmTrie::with_max_entries(MAX_RL_LPM_ENTRIES, 0);
+#[btf_map]
+static RL_LPM_SRC_V6: LpmTrie<[u8; 16], RateLimitTierValue, { MAX_RL_LPM_ENTRIES as usize }> = LpmTrie::new();
 
 /// Tier configuration array. Index = tier_id (0-15).
-#[map]
-static RL_TIER_CONFIG: Array<RateLimitConfig> = Array::with_max_entries(MAX_RL_TIERS, 0);
+#[btf_map]
+static RL_TIER_CONFIG: Array<RateLimitConfig, { MAX_RL_TIERS as usize }> = Array::new();
 
 // ── DDoS Protection Maps ────────────────────────────────────────────
 
 /// SYN flood protection configuration (single entry, index 0).
-#[map]
-static DDOS_SYN_CONFIG: Array<DdosSynConfig> = Array::with_max_entries(1, 0);
+#[btf_map]
+static DDOS_SYN_CONFIG: Array<DdosSynConfig, 1> = Array::new();
 
 /// Per-source SYN rate tracking for threshold mode (per-CPU LRU).
-#[map]
-static SYN_RATE_TRACKER: LruPerCpuHashMap<RateLimitKey, SynRateState> =
-    LruPerCpuHashMap::with_max_entries(65536, 0);
+#[btf_map]
+static SYN_RATE_TRACKER: LruPerCpuHashMap<RateLimitKey, SynRateState, 65536> = LruPerCpuHashMap::new();
 
 /// ICMP flood protection configuration (single entry, index 0).
-#[map]
-static ICMP_CONFIG: Array<IcmpConfig> = Array::with_max_entries(1, 0);
+#[btf_map]
+static ICMP_CONFIG: Array<IcmpConfig, 1> = Array::new();
 
 /// Per-source ICMP rate tracking (per-CPU LRU, fixed window).
-#[map]
-static ICMP_RATE_BUCKETS: LruPerCpuHashMap<RateLimitKey, FixedWindowValue> =
-    LruPerCpuHashMap::with_max_entries(65536, 0);
+#[btf_map]
+static ICMP_RATE_BUCKETS: LruPerCpuHashMap<RateLimitKey, FixedWindowValue, 65536> = LruPerCpuHashMap::new();
 
 /// UDP amplification protection config per service port.
-#[map]
-static AMP_PROTECT_CONFIG: HashMap<AmpProtectKey, AmpProtectConfig> =
-    HashMap::with_max_entries(64, 0);
+#[btf_map]
+static AMP_PROTECT_CONFIG: HashMap<AmpProtectKey, AmpProtectConfig, 64> = HashMap::new();
 
 /// Per-source-per-port UDP amplification rate tracking.
 /// Key is a hash of (src_ip, src_port) packed as u64.
-#[map]
-static AMP_RATE_BUCKETS: LruPerCpuHashMap<u64, FixedWindowValue> =
-    LruPerCpuHashMap::with_max_entries(65536, 0);
+#[btf_map]
+static AMP_RATE_BUCKETS: LruPerCpuHashMap<u64, FixedWindowValue, 65536> = LruPerCpuHashMap::new();
 
 /// DDoS-specific per-CPU metrics (see `DDOS_METRIC_*` constants).
-#[map]
-static DDOS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(DDOS_METRIC_COUNT, 0);
+#[btf_map]
+static DDOS_METRICS: PerCpuArray<u64, { DDOS_METRIC_COUNT as usize }> = PerCpuArray::new();
 
 /// Per-CPU context for passing packet fields to the syncookie tail-call
 /// program (`xdp-ratelimit-syncookie`). Shared via BPF filesystem pinning.
-#[map]
-static SYNCOOKIE_CTX: PerCpuArray<SyncookieCtx> = PerCpuArray::with_max_entries(1, 0);
+#[btf_map]
+static SYNCOOKIE_CTX: PerCpuArray<SyncookieCtx, 1> = PerCpuArray::new();
 
 /// XDP program array for tail-call chaining (ratelimit → syncookie).
 /// Index 0: syncookie program fd (set by userspace if DDoS SYN protection is enabled).
-#[map]
-static RL_PROG_ARRAY: ProgramArray = ProgramArray::with_max_entries(4, 0);
+#[btf_map]
+static RL_PROG_ARRAY: ProgramArray<4> = ProgramArray::new();
 
 const PROG_IDX_SYNCOOKIE: u32 = 0;
 /// Index of the loadbalancer in `RL_PROG_ARRAY`.
@@ -212,26 +204,23 @@ const XDP_ACTION_SYNCOOKIE: u32 = 0xFE;
 // ── Connection Tracking Maps ─────────────────────────────────────────
 
 /// Connection tracking configuration (single entry, index 0).
-#[map]
-static CONNTRACK_CONFIG: Array<DdosConnTrackConfig> = Array::with_max_entries(1, 0);
+#[btf_map]
+static CONNTRACK_CONFIG: Array<DdosConnTrackConfig, 1> = Array::new();
 
 /// Lightweight connection tracking table (per-CPU LRU).
 /// Tracks TCP connections with 3 states: NEW, ESTABLISHED, CLOSING.
-#[map]
-static CONN_TABLE: LruPerCpuHashMap<DdosConnTrackKey, DdosConnTrackValue> =
-    LruPerCpuHashMap::with_max_entries(131072, 0);
+#[btf_map]
+static CONN_TABLE: LruPerCpuHashMap<DdosConnTrackKey, DdosConnTrackValue, 131072> = LruPerCpuHashMap::new();
 
 /// Per-source half-open connection counter (per-CPU LRU).
 /// Counts SYNs without matching ACKs per source IP.
-#[map]
-static HALF_OPEN_COUNTERS: LruPerCpuHashMap<u32, u64> =
-    LruPerCpuHashMap::with_max_entries(65536, 0);
+#[btf_map]
+static HALF_OPEN_COUNTERS: LruPerCpuHashMap<u32, u64, 65536> = LruPerCpuHashMap::new();
 
 /// Per-source per-flood-type rate counter (per-CPU LRU, fixed window).
 /// Tracks RST/FIN/ACK flood rates.
-#[map]
-static FLOOD_COUNTERS: LruPerCpuHashMap<FloodCounterKey, FixedWindowValue> =
-    LruPerCpuHashMap::with_max_entries(65536, 0);
+#[btf_map]
+static FLOOD_COUNTERS: LruPerCpuHashMap<FloodCounterKey, FixedWindowValue, 65536> = LruPerCpuHashMap::new();
 
 // ── Metric indices ──────────────────────────────────────────────────
 
@@ -251,22 +240,20 @@ fn ringbuf_has_backpressure() -> bool {
 }
 
 /// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
-#[map]
-static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
+#[btf_map]
+static INTERFACE_GROUPS: HashMap<u32, u32, 64> = HashMap::new();
 
 /// Tenant resolution: VLAN ID -> tenant_id.
-#[map]
-static TENANT_VLAN_MAP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+#[btf_map]
+static TENANT_VLAN_MAP: HashMap<u32, u32, 1024> = HashMap::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv4).
-#[map]
-static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32> =
-    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_LPM_ENTRIES, 0);
+#[btf_map]
+static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32, { MAX_TENANT_SUBNET_LPM_ENTRIES as usize }> = LpmTrie::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv6).
-#[map]
-static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
-    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_V6_LPM_ENTRIES, 0);
+#[btf_map]
+static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRIES as usize }> = LpmTrie::new();
 
 /// Increment a DDoS-specific per-CPU metric counter.
 #[inline(always)]
@@ -369,7 +356,7 @@ pub fn xdp_ratelimit(ctx: XdpContext) -> u32 {
         // SYNCOOKIE_CTX already populated by check_syn_flood_v4/v6.
         // Falls back to DROP if the syncookie program is not loaded.
         unsafe {
-            let _ = RL_PROG_ARRAY.tail_call(&ctx, PROG_IDX_SYNCOOKIE);
+            RL_PROG_ARRAY.tail_call(&ctx, PROG_IDX_SYNCOOKIE);
         }
         return xdp_action::XDP_DROP;
     }
@@ -386,7 +373,7 @@ pub fn xdp_ratelimit(ctx: XdpContext) -> u32 {
         }
         // No-op if LB is not loaded (slot empty).
         unsafe {
-            let _ = RL_PROG_ARRAY.tail_call(&ctx, PROG_IDX_LOADBALANCER);
+            RL_PROG_ARRAY.tail_call(&ctx, PROG_IDX_LOADBALANCER);
         }
     }
     action
@@ -1671,7 +1658,7 @@ fn emit_ddos_event(
     }
     let (rss_hash, rss_hash_type) = unsafe { xdp_rx_hash(ctx.ctx.cast()) }.unwrap_or((0, 0));
     let rx_hw_ts = unsafe { xdp_rx_timestamp(ctx.ctx.cast()) }.unwrap_or(0);
-    if let Some(mut entry) = EVENTS.reserve::<PacketEvent>(0) {
+    if let Some(mut entry) = EVENTS.reserve_untyped::<PacketEvent>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
             (*ptr).timestamp_ns = bpf_ktime_get_boot_ns();
@@ -1986,7 +1973,7 @@ fn emit_ratelimit_event(
 
     let (rss_hash, rss_hash_type) = unsafe { xdp_rx_hash(ctx.ctx.cast()) }.unwrap_or((0, 0));
     let rx_hw_ts = unsafe { xdp_rx_timestamp(ctx.ctx.cast()) }.unwrap_or(0);
-    if let Some(mut entry) = EVENTS.reserve::<PacketEvent>(0) {
+    if let Some(mut entry) = EVENTS.reserve_untyped::<PacketEvent>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
             (*ptr).timestamp_ns = bpf_ktime_get_boot_ns();

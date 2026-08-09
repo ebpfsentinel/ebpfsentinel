@@ -8,8 +8,8 @@ use aya_ebpf::{
         bpf_ktime_get_boot_ns, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop,
         bpf_skb_store_bytes,
     },
-    macros::{classifier, map},
-    maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, lpm_trie::Key},
+    macros::{btf_map, classifier},
+    btf_maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, lpm_trie::Key},
     programs::TcContext,
 };
 use ebpf_common::{
@@ -53,64 +53,60 @@ const BPF_F_RECOMPUTE_CSUM: u64 = 1;
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// SNAT rules (scanned linearly, priority order).
-#[map]
-static NAT_SNAT_RULES: Array<NatRuleEntry> = Array::with_max_entries(MAX_NAT_RULES, 0);
+#[btf_map]
+static NAT_SNAT_RULES: Array<NatRuleEntry, { MAX_NAT_RULES as usize }> = Array::new();
 
 /// Number of active SNAT rules.
-#[map]
-static NAT_SNAT_RULE_COUNT: Array<u32> = Array::with_max_entries(1, 0);
+#[btf_map]
+static NAT_SNAT_RULE_COUNT: Array<u32, 1> = Array::new();
 
 /// IPv6 SNAT rules.
-#[map]
-static NAT_SNAT_RULES_V6: Array<NatRuleEntryV6> = Array::with_max_entries(MAX_NAT_RULES_V6, 0);
+#[btf_map]
+static NAT_SNAT_RULES_V6: Array<NatRuleEntryV6, { MAX_NAT_RULES_V6 as usize }> = Array::new();
 
 /// Number of active IPv6 SNAT rules.
-#[map]
-static NAT_SNAT_RULE_COUNT_V6: Array<u32> = Array::with_max_entries(1, 0);
+#[btf_map]
+static NAT_SNAT_RULE_COUNT_V6: Array<u32, 1> = Array::new();
 
 /// Fast-path: exact-match SNAT HashMap (proto, src_ip, src_port) → NAT action.
-#[map]
-static NAT_HASH_SNAT: HashMap<NatHashKeyExact, NatHashValue> =
-    HashMap::with_max_entries(MAX_NAT_HASH_EXACT, 0);
+#[btf_map]
+static NAT_HASH_SNAT: HashMap<NatHashKeyExact, NatHashValue, { MAX_NAT_HASH_EXACT as usize }> = HashMap::new();
 
 // CT_TABLE_V4/V6 shadow maps removed — kernel netfilter is the sole
 // CT source. NAT info delegated via bpf_ct_set_nat_info (e30-5).
 
 /// NAT port allocation table (LRU): tracks which translated port is
 /// assigned for each original (addr, port) pair.
-#[map]
-static NAT_PORT_ALLOC: LruHashMap<NatPortAllocKey, NatPortAllocValue> =
-    LruHashMap::with_max_entries(MAX_NAT_PORT_ALLOC, 0);
+#[btf_map]
+static NAT_PORT_ALLOC: LruHashMap<NatPortAllocKey, NatPortAllocValue, { MAX_NAT_PORT_ALLOC as usize }> = LruHashMap::new();
 
 /// NPTv6 prefix translation rules (RFC 6296).
-#[map]
-static NPTV6_RULES: Array<NptV6RuleEntry> = Array::with_max_entries(MAX_NPTV6_RULES, 0);
+#[btf_map]
+static NPTV6_RULES: Array<NptV6RuleEntry, { MAX_NPTV6_RULES as usize }> = Array::new();
 
 /// Number of active NPTv6 rules.
-#[map]
-static NPTV6_RULE_COUNT: Array<u32> = Array::with_max_entries(1, 0);
+#[btf_map]
+static NPTV6_RULE_COUNT: Array<u32, 1> = Array::new();
 
 /// Per-CPU NAT metrics.
-#[map]
-static NAT_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(NAT_METRIC_COUNT, 0);
+#[btf_map]
+static NAT_METRICS: PerCpuArray<u64, { NAT_METRIC_COUNT as usize }> = PerCpuArray::new();
 
 /// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
-#[map]
-static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
+#[btf_map]
+static INTERFACE_GROUPS: HashMap<u32, u32, 64> = HashMap::new();
 
 /// Tenant resolution: VLAN ID -> tenant_id.
-#[map]
-static TENANT_VLAN_MAP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+#[btf_map]
+static TENANT_VLAN_MAP: HashMap<u32, u32, 1024> = HashMap::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv4).
-#[map]
-static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32> =
-    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_LPM_ENTRIES, 0);
+#[btf_map]
+static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32, { MAX_TENANT_SUBNET_LPM_ENTRIES as usize }> = LpmTrie::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv6).
-#[map]
-static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
-    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_V6_LPM_ENTRIES, 0);
+#[btf_map]
+static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRIES as usize }> = LpmTrie::new();
 
 // ── Entry point ─────────────────────────────────────────────────────
 

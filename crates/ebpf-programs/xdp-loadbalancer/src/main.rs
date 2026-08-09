@@ -5,8 +5,8 @@
 use aya_ebpf::{
     bindings::xdp_action,
     helpers::{bpf_check_mtu, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
-    macros::{map, xdp},
-    maps::{DevMap, HashMap, PerCpuArray, RingBuf},
+    macros::{btf_map, xdp},
+    btf_maps::{DevMap, HashMap, PerCpuArray, RingBuf},
     programs::XdpContext,
 };
 use ebpf_common::{
@@ -61,47 +61,45 @@ struct TcpUdpHdr {
 // ── eBPF Maps ───────────────────────────────────────────────────────
 
 /// Service lookup: (protocol, port) → compact service config (V2).
-#[map]
-static LB_SERVICES: HashMap<LbServiceKey, LbServiceConfigV2> =
-    HashMap::with_max_entries(MAX_LB_SERVICES, 0);
+#[btf_map]
+static LB_SERVICES: HashMap<LbServiceKey, LbServiceConfigV2, { MAX_LB_SERVICES as usize }> = HashMap::new();
 
 /// Global backend pool: backend_id → backend entry.
-#[map]
-static LB_BACKENDS: HashMap<u32, LbBackendEntry> =
-    HashMap::with_max_entries(MAX_LB_BACKENDS_TOTAL, 0);
+#[btf_map]
+static LB_BACKENDS: HashMap<u32, LbBackendEntry, { MAX_LB_BACKENDS_TOTAL as usize }> = HashMap::new();
 
 /// Per-service round-robin state (index 0..4095).
-#[map]
-static LB_RR_STATE: PerCpuArray<u32> = PerCpuArray::with_max_entries(MAX_LB_SERVICES, 0);
+#[btf_map]
+static LB_RR_STATE: PerCpuArray<u32, { MAX_LB_SERVICES as usize }> = PerCpuArray::new();
 
 /// Per-service Maglev lookup ring: svc_index → precomputed permutation.
 /// Written by userspace (pure domain table generator), rebuilt only on
 /// healthy-backend-set change. Read with a single O(1) index — no
 /// per-packet state write — giving consistent flow pinning across nodes.
-#[map]
-static LB_MAGLEV: HashMap<u32, MaglevLookup> = HashMap::with_max_entries(MAX_MAGLEV_SERVICES, 0);
+#[btf_map]
+static LB_MAGLEV: HashMap<u32, MaglevLookup, { MAX_MAGLEV_SERVICES as usize }> = HashMap::new();
 
 /// Per-CPU metrics.
-#[map]
-static LB_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(LB_METRIC_COUNT, 0);
+#[btf_map]
+static LB_METRICS: PerCpuArray<u64, { LB_METRIC_COUNT as usize }> = PerCpuArray::new();
 
 /// DevMap for high-performance XDP redirect to backend interfaces.
 /// Userspace populates this with backend ifindex values. When an entry
 /// exists for the selected backend, `redirect` is used instead of XDP_TX.
 /// Falls back to MAC swap + XDP_TX when the DevMap entry is absent.
-#[map]
-static LB_DEVMAP: DevMap = DevMap::with_max_entries(256, 0);
+#[btf_map]
+static LB_DEVMAP: DevMap<256> = DevMap::new();
 
 /// Resolved backend MAC addresses for L2 DSR: backend_id → MAC.
 /// Populated by userspace neighbor/ARP/ND resolution in the loader
 /// adapter. Read only when a service is in `LB_MODE_L2DSR`; an absent
 /// entry makes the data plane fall back to the DNAT path unchanged.
-#[map]
-static LB_BACKEND_MAC: HashMap<u32, BackendMac> = HashMap::with_max_entries(MAX_LB_BACKEND_MAC, 0);
+#[btf_map]
+static LB_BACKEND_MAC: HashMap<u32, BackendMac, { MAX_LB_BACKEND_MAC as usize }> = HashMap::new();
 
 /// Shared event ring buffer.
-#[map]
-static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
+#[btf_map]
+static EVENTS: RingBuf<PacketEvent, { 256 * 4096 }> = RingBuf::new();
 
 // ── Entry Point ─────────────────────────────────────────────────────
 
@@ -844,7 +842,7 @@ fn emit_event(
         return;
     }
 
-    let mut event = match EVENTS.reserve::<PacketEvent>(0) {
+    let mut event = match EVENTS.reserve_untyped::<PacketEvent>(0) {
         Some(e) => e,
         None => {
             increment_metric(LB_METRIC_EVENTS_DROPPED);

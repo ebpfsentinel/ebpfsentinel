@@ -17,8 +17,8 @@
 
 use aya_ebpf::{
     bindings::xdp_action,
-    macros::{map, xdp},
-    maps::{HashMap, PerCpuArray, PerCpuHashMap},
+    macros::{btf_map, xdp},
+    btf_maps::{HashMap, PerCpuArray, PerCpuHashMap},
     programs::XdpContext,
 };
 use ebpf_common::vip::{
@@ -46,12 +46,12 @@ struct ArpHdr {
 
 /// Owned VIPs, keyed by the VIP IPv4 as a big-endian numeric `u32`.
 /// Populated by userspace only while this node is the elected speaker.
-#[map]
-static VIP_SET: HashMap<u32, VipEntry> = HashMap::with_max_entries(MAX_VIPS, 0);
+#[btf_map]
+static VIP_SET: HashMap<u32, VipEntry, { MAX_VIPS as usize }> = HashMap::new();
 
 /// Resolved NIC MAC per ifindex (filled by userspace via netlink).
-#[map]
-static IFACE_MAC: HashMap<u32, IfaceMac> = HashMap::with_max_entries(MAX_IFACE_MAC, 0);
+#[btf_map]
+static IFACE_MAC: HashMap<u32, IfaceMac, { MAX_IFACE_MAC as usize }> = HashMap::new();
 
 /// Self-owned (VIP → NIC MAC) bindings, keyed like [`VIP_SET`]. Filled
 /// by userspace only while this node is the elected speaker and cleared
@@ -59,18 +59,17 @@ static IFACE_MAC: HashMap<u32, IfaceMac> = HashMap::with_max_entries(MAX_IFACE_M
 /// (per-VIP, so multi-homed VIPs answer with the right MAC); falls back
 /// to [`IFACE_MAC`] when a VIP has no explicit binding yet. The later
 /// ARP-guard epic reads the same map to ignore our own gratuitous ARP.
-#[map]
-static SELF_OWNED_BINDINGS: HashMap<u32, SelfBinding> =
-    HashMap::with_max_entries(MAX_SELF_BINDINGS, 0);
+#[btf_map]
+static SELF_OWNED_BINDINGS: HashMap<u32, SelfBinding, { MAX_SELF_BINDINGS as usize }> = HashMap::new();
 
 /// Aggregate per-CPU counters (ARP frames seen / replies forged).
-#[map]
-static VIP_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(VIP_METRIC_COUNT, 0);
+#[btf_map]
+static VIP_METRICS: PerCpuArray<u64, { VIP_METRIC_COUNT as usize }> = PerCpuArray::new();
 
 /// Per-VIP ARP reply counter for the Prometheus `{vip}` label. Same key
 /// space as [`VIP_SET`].
-#[map]
-static VIP_ARP_REPLIES: PerCpuHashMap<u32, u64> = PerCpuHashMap::with_max_entries(MAX_VIPS, 0);
+#[btf_map]
+static VIP_ARP_REPLIES: PerCpuHashMap<u32, u64, { MAX_VIPS as usize }> = PerCpuHashMap::new();
 
 #[xdp]
 pub fn xdp_vip_announcer(ctx: XdpContext) -> u32 {

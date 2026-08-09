@@ -4,12 +4,12 @@
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
+    btf_maps::{Array, HashMap, LpmTrie, PerCpuArray, RingBuf, lpm_trie::Key},
     helpers::{
         bpf_get_current_cgroup_id, bpf_get_prandom_u32, bpf_get_smp_processor_id,
         bpf_ktime_get_boot_ns,
     },
-    macros::{classifier, map},
-    maps::{Array, HashMap, LpmTrie, PerCpuArray, RingBuf, lpm_trie::Key},
+    macros::{btf_map, classifier},
     programs::TcContext,
 };
 use aya_ebpf_bindings::helpers::{
@@ -71,21 +71,20 @@ use network_types::{
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// IDS pattern lookup: dst_port+protocol → action + rule metadata.
-#[map]
-static IDS_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue> = HashMap::with_max_entries(10240, 0);
+#[btf_map]
+static IDS_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue, 10240> = HashMap::new();
 
 /// Source-port IDS pattern lookup: `src_port`+protocol → action + rule
 /// metadata. Lets a rule fire on the reply leg of a flow (response from a
 /// server port) on the ingress hook, where the request itself is egress
 /// and never seen. The `dst_port` field of [`IdsPatternKey`] carries the
 /// source port for this map.
-#[map]
-static IDS_SRC_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue> =
-    HashMap::with_max_entries(10240, 0);
+#[btf_map]
+static IDS_SRC_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue, 10240> = HashMap::new();
 
 /// Per-CPU packet counters. Index: 0=matched, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen, 5=cgroup_tenant_resolved.
-#[map]
-static IDS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(6, 0);
+#[btf_map]
+static IDS_METRICS: PerCpuArray<u64, 6> = PerCpuArray::new();
 
 /// Shared kernel→userspace event ring buffer (4 MB).
 ///
@@ -93,55 +92,55 @@ static IDS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(6, 0);
 /// 2048 B — larger events would otherwise cause frequent backpressure
 /// drops. The extra 3 MiB of kernel memory is acceptable on any
 /// modern deployment.
-#[map]
-static EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 4096, 0);
+#[btf_map]
+static EVENTS: RingBuf<PacketEvent, { 1024 * 4096 }> = RingBuf::new();
 
 /// Feature enable/disable flags (shared across programs).
-#[map]
-static CONFIG_FLAGS: Array<u32> = Array::with_max_entries(1, 0);
+#[btf_map]
+static CONFIG_FLAGS: Array<u32, 1> = Array::new();
 
 /// Kernel-side IDS sampling configuration (single entry).
 /// Mode + rate_threshold control event emission probability.
-#[map]
-static IDS_SAMPLING_CONFIG: Array<IdsSamplingConfig> = Array::with_max_entries(1, 0);
+#[btf_map]
+static IDS_SAMPLING_CONFIG: Array<IdsSamplingConfig, 1> = Array::new();
 
 /// Mirror interface config: index 0 = target ifindex, index 1 = enabled (1/0).
 /// Populated by enterprise forensics module.
-#[map]
-static IDS_MIRROR_CONFIG: Array<u32> = Array::with_max_entries(2, 0);
+#[btf_map]
+static IDS_MIRROR_CONFIG: Array<u32, 2> = Array::new();
 
 /// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
-#[map]
-static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
+#[btf_map]
+static INTERFACE_GROUPS: HashMap<u32, u32, 64> = HashMap::new();
 
 /// Tenant resolution: VLAN ID -> tenant_id.
-#[map]
-static TENANT_VLAN_MAP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+#[btf_map]
+static TENANT_VLAN_MAP: HashMap<u32, u32, 1024> = HashMap::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv4).
-#[map]
-static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32> =
-    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_LPM_ENTRIES, 0);
+#[btf_map]
+static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32, { MAX_TENANT_SUBNET_LPM_ENTRIES as usize }> =
+    LpmTrie::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv6).
-#[map]
-static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
-    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_V6_LPM_ENTRIES, 0);
+#[btf_map]
+static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRIES as usize }> =
+    LpmTrie::new();
 
 /// Cgroup-based tenant resolution: cgroup v2 id → tenant_id.
 /// Populated by userspace from the container resolver. Used as the
 /// lowest-priority fallback (after VLAN, interface, subnet) — only
 /// meaningful on egress where the current task owns the skb.
-#[map]
-static TENANT_CGROUP_MAP: HashMap<u64, u32> = HashMap::with_max_entries(4096, 0);
+#[btf_map]
+static TENANT_CGROUP_MAP: HashMap<u64, u32, 4096> = HashMap::new();
 
 /// L7 port lookup: service port → enabled flag. When set, TCP packets of a
 /// conversation with this port have their payload captured and sent to
 /// userspace for L7 protocol parsing. Capacity is `MAX_L7_PORTS` (256) —
 /// enough to cover databases, message brokers, caches, and custom services
 /// concurrently.
-#[map]
-static L7_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(MAX_L7_PORTS, 0);
+#[btf_map]
+static L7_PORTS: HashMap<u16, u8, { MAX_L7_PORTS as usize }> = HashMap::new();
 
 /// Whether either end of the conversation is a configured L7 service port.
 ///
@@ -523,8 +522,8 @@ fn process_ids_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
 /// A standalone OSS agent only ever resolves tenant 0, so the fallback
 /// collapses to a single lookup and behaviour is unchanged.
 #[inline(always)]
-unsafe fn lookup_ids_pattern(
-    map: &'static HashMap<IdsPatternKey, IdsPatternValue>,
+unsafe fn lookup_ids_pattern<const MAX_ENTRIES: usize>(
+    map: &'static HashMap<IdsPatternKey, IdsPatternValue, MAX_ENTRIES>,
     tenant_id: u32,
     port: u16,
     protocol: u8,
@@ -724,7 +723,7 @@ fn emit_l7_small(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_ava
     // non-zero and elide the lower clamp) then clamp to `[1, CAP]`: the stored
     // value now carries the lower bound, which survives the spill/reload.
     let to_load = opaque_usize(to_load).clamp(1, SMALL_L7_PAYLOAD);
-    if let Some(mut entry) = EVENTS.reserve::<L7EventSmall>(0) {
+    if let Some(mut entry) = EVENTS.reserve_untyped::<L7EventSmall>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
             fill_l7_header(ctx, &mut (*ptr).header, flow, to_load as u32);
@@ -775,7 +774,7 @@ fn emit_l7_full(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_avai
     // non-zero and elide the lower clamp) then clamp to `[1, CAP]`: the stored
     // value now carries the lower bound, which survives the spill/reload.
     let to_load = opaque_usize(to_load).clamp(1, MAX_L7_PAYLOAD);
-    if let Some(mut entry) = EVENTS.reserve::<L7EventBuf>(0) {
+    if let Some(mut entry) = EVENTS.reserve_untyped::<L7EventBuf>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
             fill_l7_header(ctx, &mut (*ptr).header, flow, to_load as u32);

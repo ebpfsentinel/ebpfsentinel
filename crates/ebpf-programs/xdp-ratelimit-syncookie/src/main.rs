@@ -17,8 +17,8 @@
 use aya_ebpf::{
     bindings::xdp_action,
     helpers::bpf_xdp_adjust_tail,
-    macros::{map, xdp},
-    maps::PerCpuArray,
+    macros::{btf_map, xdp},
+    btf_maps::PerCpuArray,
     programs::XdpContext,
 };
 use aya_ebpf_bindings::bindings::{iphdr, ipv6hdr, tcphdr};
@@ -31,11 +31,11 @@ use ebpf_helpers::xdp::{ptr_at, ptr_at_mut};
 use ebpf_helpers::{barrier, copy_mac_asm};
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr};
 
-#[map]
-static SYNCOOKIE_CTX: PerCpuArray<SyncookieCtx> = PerCpuArray::with_max_entries(1, 0);
+#[btf_map]
+static SYNCOOKIE_CTX: PerCpuArray<SyncookieCtx, 1> = PerCpuArray::new();
 
-#[map]
-static DDOS_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(DDOS_METRIC_COUNT, 0);
+#[btf_map]
+static DDOS_METRICS: PerCpuArray<u64, { DDOS_METRIC_COUNT as usize }> = PerCpuArray::new();
 
 /// Base TCP header length passed to the cookie generator. Passing the fixed
 /// base header (no options) keeps the verifier bounds check a constant size;

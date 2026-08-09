@@ -8,8 +8,8 @@ use aya_ebpf::{
     helpers::{
         bpf_csum_diff, bpf_get_prandom_u32, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop,
     },
-    macros::{classifier, map},
-    maps::{Array, PerCpuArray},
+    macros::{btf_map, classifier},
+    btf_maps::{Array, PerCpuArray},
     programs::TcContext,
 };
 use ebpf_common::scrub::{
@@ -57,12 +57,12 @@ const MAX_TCP_OPT_SCAN: u32 = 40;
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// Scrub configuration (single entry at index 0).
-#[map]
-static SCRUB_CONFIG: Array<ScrubFlags> = Array::with_max_entries(1, 0);
+#[btf_map]
+static SCRUB_CONFIG: Array<ScrubFlags, 1> = Array::new();
 
 /// Per-CPU scrub metrics.
-#[map]
-static SCRUB_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(SCRUB_METRIC_COUNT, 0);
+#[btf_map]
+static SCRUB_METRICS: PerCpuArray<u64, { SCRUB_METRIC_COUNT as usize }> = PerCpuArray::new();
 
 // ── Entry point ─────────────────────────────────────────────────────
 

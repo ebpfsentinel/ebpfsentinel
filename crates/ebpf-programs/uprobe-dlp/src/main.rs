@@ -2,9 +2,9 @@
 #![no_main]
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_ktime_get_boot_ns, r#gen},
-    macros::{map, uprobe, uretprobe},
-    maps::{LruHashMap, PerCpuArray, RingBuf},
+    helpers::{bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_ktime_get_boot_ns, generated},
+    macros::{btf_map, uprobe, uretprobe},
+    btf_maps::{LruHashMap, PerCpuArray, RingBuf},
     programs::{ProbeContext, RetProbeContext},
 };
 use core::ffi::c_void;
@@ -44,18 +44,18 @@ use ebpf_helpers::increment_metric;
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// Kernel→userspace event ring buffer (4 MB) for DLP events.
-#[map]
-static EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 4096, 0);
+#[btf_map]
+static EVENTS: RingBuf<DlpEvent, { 1024 * 4096 }> = RingBuf::new();
 
 /// Per-task context: saves SSL_read entry arguments for the uretprobe.
 /// Uses LRU eviction so entries from crashed processes (SIGKILL during
 /// SSL_read) are automatically reclaimed when the map is full.
-#[map]
-static SSL_READ_ARGS: LruHashMap<u64, SslReadArgs> = LruHashMap::with_max_entries(10240, 0);
+#[btf_map]
+static SSL_READ_ARGS: LruHashMap<u64, SslReadArgs, 10240> = LruHashMap::new();
 
 /// Per-CPU DLP counters: write_events, read_events, errors, events_dropped, total_seen.
-#[map]
-static DLP_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
+#[btf_map]
+static DLP_METRICS: PerCpuArray<u64, 5> = PerCpuArray::new();
 
 // ── Probes ──────────────────────────────────────────────────────────
 
@@ -145,7 +145,7 @@ fn try_ssl_read_ret(ctx: &RetProbeContext) -> Result<(), ()> {
     let _ = SSL_READ_ARGS.remove(&pid_tgid);
 
     // SSL_read returns the number of bytes read, or ≤0 on error/EOF.
-    let ret: i32 = ctx.ret().ok_or(())?;
+    let ret: i32 = ctx.ret();
     if ret <= 0 {
         return Ok(());
     }
@@ -211,7 +211,7 @@ fn emit_dlp_event(user_buf: *const u8, data_len: u32, direction: u8) {
 /// full-size path.
 #[inline(never)]
 fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
-    if let Some(mut entry) = EVENTS.reserve::<DlpEventSmall>(0) {
+    if let Some(mut entry) = EVENTS.reserve_untyped::<DlpEventSmall>(0) {
         let ptr = entry.as_mut_ptr();
         let pid_tgid = bpf_get_current_pid_tgid();
         unsafe {
@@ -241,7 +241,7 @@ fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
                 data_len
             }) & (DLP_SMALL_EXCERPT as u32 - 1);
             if copy_len > 0 {
-                let _ = r#gen::bpf_probe_read_user(
+                let _ = generated::bpf_probe_read_user(
                     (*ptr).data_excerpt.as_mut_ptr() as *mut c_void,
                     copy_len,
                     user_buf as *const c_void,
@@ -262,7 +262,7 @@ fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
 /// verifier rejects any write through it.
 #[inline(never)]
 fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8) {
-    if let Some(mut entry) = EVENTS.reserve::<DlpEvent>(0) {
+    if let Some(mut entry) = EVENTS.reserve_untyped::<DlpEvent>(0) {
         let ptr = entry.as_mut_ptr();
         let pid_tgid = bpf_get_current_pid_tgid();
         unsafe {
@@ -284,7 +284,7 @@ fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8) {
                 data_len
             };
             if copy_len > 0 {
-                let _ = r#gen::bpf_probe_read_user(
+                let _ = generated::bpf_probe_read_user(
                     (*ptr).data_excerpt.as_mut_ptr() as *mut c_void,
                     copy_len,
                     user_buf as *const c_void,

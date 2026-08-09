@@ -9,8 +9,8 @@ use aya_ebpf::{
         bpf_check_mtu, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns, bpf_loop,
         bpf_xdp_adjust_meta,
     },
-    macros::{map, xdp},
-    maps::{
+    macros::{btf_map, xdp},
+    btf_maps::{
         Array, CpuMap, HashMap, PerCpuArray, ProgramArray, RingBuf,
         lpm_trie::{Key, LpmTrie},
     },
@@ -97,70 +97,67 @@ use network_types::{
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// IPv4 firewall rules (array, indexed 0..count, priority order).
-#[map]
-static FIREWALL_RULES: Array<FirewallRuleEntry> = Array::with_max_entries(MAX_FIREWALL_RULES, 0);
+#[btf_map]
+static FIREWALL_RULES: Array<FirewallRuleEntry, { MAX_FIREWALL_RULES as usize }> = Array::new();
 
 /// Number of active IPv4 rules (single element at index 0).
-#[map]
-static FIREWALL_RULE_COUNT: Array<u32> = Array::with_max_entries(1, 0);
+#[btf_map]
+static FIREWALL_RULE_COUNT: Array<u32, 1> = Array::new();
 
 /// IPv6 firewall rules (array, indexed 0..count, priority order).
-#[map]
-static FIREWALL_RULES_V6: Array<FirewallRuleEntryV6> =
-    Array::with_max_entries(MAX_FIREWALL_RULES, 0);
+#[btf_map]
+static FIREWALL_RULES_V6: Array<FirewallRuleEntryV6, { MAX_FIREWALL_RULES as usize }> = Array::new();
 
 /// Number of active IPv6 rules (single element at index 0).
-#[map]
-static FIREWALL_RULE_COUNT_V6: Array<u32> = Array::with_max_entries(1, 0);
+#[btf_map]
+static FIREWALL_RULE_COUNT_V6: Array<u32, 1> = Array::new();
 
 /// Default policy when no rule matches (0=pass, 1=drop).
-#[map]
-static FIREWALL_DEFAULT_POLICY: Array<u8> = Array::with_max_entries(1, 0);
+#[btf_map]
+static FIREWALL_DEFAULT_POLICY: Array<u8, 1> = Array::new();
 
 /// Security zones: ingress `ifindex` → `zone_id`. Written by userspace from
 /// `ZoneConfig`; absent or 0 means the interface belongs to no zone.
-#[map]
-static ZONE_MAP: HashMap<u32, u8> = HashMap::with_max_entries(MAX_ZONE_ENTRIES, 0);
+#[btf_map]
+static ZONE_MAP: HashMap<u32, u8, { MAX_ZONE_ENTRIES as usize }> = HashMap::new();
 
 /// Per-zone default policy: `zone_id` → 0 = allow, 1 = deny. Consulted only
 /// when no explicit rule matched, so an explicit rule always wins over the
 /// zone's posture.
-#[map]
-static ZONE_DEFAULT_POLICY: HashMap<u8, u8> = HashMap::with_max_entries(MAX_ZONE_ENTRIES, 0);
+#[btf_map]
+static ZONE_DEFAULT_POLICY: HashMap<u8, u8, { MAX_ZONE_ENTRIES as usize }> = HashMap::new();
 
 /// Per-CPU scratch for the FIB lookup parameters. A 64-byte struct zeroed on
 /// the stack costs the verifier an unrolled memset on every path; a scratch
 /// map costs one lookup.
-#[map]
-static FIB_PARAMS: PerCpuArray<BpfFibLookupParams> = PerCpuArray::with_max_entries(1, 0);
+#[btf_map]
+static FIB_PARAMS: PerCpuArray<BpfFibLookupParams, 1> = PerCpuArray::new();
 
 /// Inter-zone policy: `zone_pair_key(from, to)` → 0 = allow, 1 = deny.
 /// Consulted before the zone's own default when the egress zone could be
 /// resolved.
-#[map]
-static ZONE_POLICY_MAP: HashMap<u16, u8> = HashMap::with_max_entries(MAX_ZONE_POLICIES, 0);
+#[btf_map]
+static ZONE_POLICY_MAP: HashMap<u16, u8, { MAX_ZONE_POLICIES as usize }> = HashMap::new();
 
 /// Per-zone packet counters, indexed by `zone_id`. Slot 0 counts traffic on
 /// unzoned interfaces. Two counters per zone are folded into one slot each:
 /// see `ZONE_METRIC_*`.
-#[map]
-static ZONE_METRICS_PASSED: PerCpuArray<u64> = PerCpuArray::with_max_entries(ZONE_METRIC_SLOTS, 0);
+#[btf_map]
+static ZONE_METRICS_PASSED: PerCpuArray<u64, { ZONE_METRIC_SLOTS as usize }> = PerCpuArray::new();
 
-#[map]
-static ZONE_METRICS_DROPPED: PerCpuArray<u64> = PerCpuArray::with_max_entries(ZONE_METRIC_SLOTS, 0);
+#[btf_map]
+static ZONE_METRICS_DROPPED: PerCpuArray<u64, { ZONE_METRIC_SLOTS as usize }> = PerCpuArray::new();
 
 /// Fast-path: 5-tuple exact-match HashMap (proto, src_ip, dst_ip, src_port, dst_port) → action.
 /// Rules with exact values in all 5 fields (no wildcards, ranges, or extended flags) are
 /// placed here by userspace for O(1) lookup before the Array+bpf_loop scan.
-#[map]
-static FW_HASH_5TUPLE: HashMap<FwHashKey5Tuple, FwHashValue> =
-    HashMap::with_max_entries(MAX_FW_HASH_5TUPLE, 0);
+#[btf_map]
+static FW_HASH_5TUPLE: HashMap<FwHashKey5Tuple, FwHashValue, { MAX_FW_HASH_5TUPLE as usize }> = HashMap::new();
 
 /// Fast-path: protocol+port HashMap (proto, dst_port) → action.
 /// Rules that match only on protocol and destination port (all other fields wildcard).
-#[map]
-static FW_HASH_PORT: HashMap<FwHashKeyPort, FwHashValue> =
-    HashMap::with_max_entries(MAX_FW_HASH_PORT, 0);
+#[btf_map]
+static FW_HASH_PORT: HashMap<FwHashKeyPort, FwHashValue, { MAX_FW_HASH_PORT as usize }> = HashMap::new();
 
 // NOTE: User RingBuf (BPF_MAP_TYPE_USER_RINGBUF, type 31) is available since
 // kernel 6.1, but aya 0.13.1 does not support loading this map type (returns
@@ -171,31 +168,31 @@ static FW_HASH_PORT: HashMap<FwHashKeyPort, FwHashValue> =
 /// Per-CPU packet counters. Index: 0=passed, 1=dropped, 2=errors,
 /// 3=events_dropped, 4=total_seen, 5=rejected, 6=mtu_exceeded,
 /// 7=reject_throttled.
-#[map]
-static FIREWALL_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(8, 0);
+#[btf_map]
+static FIREWALL_METRICS: PerCpuArray<u64, 8> = PerCpuArray::new();
 
 /// Per-CPU scratch buffer for packet context shared across action/event helpers.
 /// Avoids passing 8+ arguments through inlined functions that would blow
 /// the 512-byte BPF stack.
-#[map]
+#[btf_map]
 // Pinned by name so the tail-called xdp-firewall-reject program shares this
 // exact scratch buffer (same BPF-fs pin path) instead of binding its own
 // zero-filled copy — otherwise reject reads protocol/offsets as 0 and forges
 // a malformed ICMP from offset 0 for every packet.
-static PKT_CTX: PerCpuArray<PacketCtx> = PerCpuArray::pinned(1, 0);
+static PKT_CTX: PerCpuArray<PacketCtx, 1> = PerCpuArray::new();
 
 /// Shared kernel->userspace event ring buffer (1 MB).
-#[map]
-static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 4096, 0);
+#[btf_map]
+static EVENTS: RingBuf<PacketEvent, { 256 * 4096 }> = RingBuf::new();
 
 /// Feature enable/disable flags (shared across programs).
-#[map]
-static CONFIG_FLAGS: Array<u32> = Array::with_max_entries(1, 0);
+#[btf_map]
+static CONFIG_FLAGS: Array<u32, 1> = Array::new();
 
 /// XDP program array for tail-call chaining (firewall → ratelimit).
 /// Index 0: ratelimit program fd (set by userspace if ratelimit is enabled).
-#[map]
-static XDP_PROG_ARRAY: ProgramArray = ProgramArray::with_max_entries(4, 0);
+#[btf_map]
+static XDP_PROG_ARRAY: ProgramArray<4> = ProgramArray::new();
 
 /// Index of the ratelimit program in `XDP_PROG_ARRAY`.
 const PROG_IDX_RATELIMIT: u32 = 0;
@@ -218,80 +215,77 @@ const XDP_ACTION_REJECT: u32 = 0xFF;
 const XDP_ACTION_ARP_VIP: u32 = 0xFE;
 
 /// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
-#[map]
-static INTERFACE_GROUPS: HashMap<u32, u32> = HashMap::with_max_entries(64, 0);
+#[btf_map]
+static INTERFACE_GROUPS: HashMap<u32, u32, 64> = HashMap::new();
 
 /// Tenant resolution: VLAN ID -> tenant_id.
-#[map]
-static TENANT_VLAN_MAP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+#[btf_map]
+static TENANT_VLAN_MAP: HashMap<u32, u32, 1024> = HashMap::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv4).
 /// Key = `[u8; 4]` (network byte order), Value = `tenant_id`.
-#[map]
-static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32> =
-    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_LPM_ENTRIES, 0);
+#[btf_map]
+static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32, { MAX_TENANT_SUBNET_LPM_ENTRIES as usize }> = LpmTrie::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv6).
 /// Key = `[u8; 16]` (network byte order), Value = `tenant_id`.
-#[map]
-static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32> =
-    LpmTrie::with_max_entries(MAX_TENANT_SUBNET_V6_LPM_ENTRIES, 0);
+#[btf_map]
+static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRIES as usize }> = LpmTrie::new();
 
 /// LPM Trie for O(log n) IPv4 source CIDR matching (CIDR-only rules).
-#[map]
-static FW_LPM_SRC_V4: LpmTrie<[u8; 4], LpmValue> = LpmTrie::with_max_entries(MAX_LPM_RULES, 0);
+#[btf_map]
+static FW_LPM_SRC_V4: LpmTrie<[u8; 4], LpmValue, { MAX_LPM_RULES as usize }> = LpmTrie::new();
 
 /// LPM Trie for O(log n) IPv4 destination CIDR matching.
-#[map]
-static FW_LPM_DST_V4: LpmTrie<[u8; 4], LpmValue> = LpmTrie::with_max_entries(MAX_LPM_RULES, 0);
+#[btf_map]
+static FW_LPM_DST_V4: LpmTrie<[u8; 4], LpmValue, { MAX_LPM_RULES as usize }> = LpmTrie::new();
 
 /// LPM Trie for O(log n) IPv6 source CIDR matching.
-#[map]
-static FW_LPM_SRC_V6: LpmTrie<[u8; 16], LpmValue> = LpmTrie::with_max_entries(MAX_LPM_RULES, 0);
+#[btf_map]
+static FW_LPM_SRC_V6: LpmTrie<[u8; 16], LpmValue, { MAX_LPM_RULES as usize }> = LpmTrie::new();
 
 /// LPM Trie for O(log n) IPv6 destination CIDR matching.
-#[map]
-static FW_LPM_DST_V6: LpmTrie<[u8; 16], LpmValue> = LpmTrie::with_max_entries(MAX_LPM_RULES, 0);
+#[btf_map]
+static FW_LPM_DST_V6: LpmTrie<[u8; 16], LpmValue, { MAX_LPM_RULES as usize }> = LpmTrie::new();
 
 // ── Kernel CT offsets (populated by userspace from vmlinux BTF) ──────
 
 /// Runtime-resolved `nf_conn` field offsets for `bpf_probe_read_kernel`.
 /// Single entry at index 0, populated at agent startup.
-#[map]
-static CT_NF_CONN_OFFSETS: Array<NfConnOffsets> = Array::with_max_entries(1, 0);
+#[btf_map]
+static CT_NF_CONN_OFFSETS: Array<NfConnOffsets, 1> = Array::new();
 
 // ── IP Set maps ─────────────────────────────────────────────────────
 
 /// IPv4 IP set HashMap for large alias matching (GeoIP, blocklists).
 /// Key: (set_id, addr). Presence = membership.
-#[map]
-static FW_IPSET_V4: HashMap<IpSetKeyV4, u8> = HashMap::with_max_entries(MAX_IPSET_ENTRIES_V4, 0);
+#[btf_map]
+static FW_IPSET_V4: HashMap<IpSetKeyV4, u8, { MAX_IPSET_ENTRIES_V4 as usize }> = HashMap::new();
 
 // ── Connection limit maps ───────────────────────────────────────────
 
 /// Per-source-IP state counter. Keyed by source IPv4 address (u32).
 /// Tracks concurrent connections and connection rate for overload protection.
 /// Pinned at /sys/fs/bpf/ebpfsentinel/ct_src_counters, shared with tc-conntrack.
-#[map]
-static CT_SRC_COUNTERS: HashMap<u32, SrcStateCounter> =
-    HashMap::with_max_entries(CT_SRC_COUNTER_MAX, 0);
+#[btf_map]
+static CT_SRC_COUNTERS: HashMap<u32, SrcStateCounter, { CT_SRC_COUNTER_MAX as usize }> = HashMap::new();
 
 /// Global conntrack configuration (single element). Read by XDP for limit thresholds.
 /// Pinned at /sys/fs/bpf/ebpfsentinel/ct_config.
-#[map]
-static CT_CONFIG: Array<ConnTrackConfig> = Array::with_max_entries(1, 0);
+#[btf_map]
+static CT_CONFIG: Array<ConnTrackConfig, 1> = Array::new();
 
 /// Per-rule state counter. Index = rule index in FIREWALL_RULES array.
 /// Tracks how many active connections were admitted by each rule.
-#[map]
-static FW_RULE_STATE_COUNT: Array<u32> = Array::with_max_entries(MAX_FIREWALL_RULES, 0);
+#[btf_map]
+static FW_RULE_STATE_COUNT: Array<u32, { MAX_FIREWALL_RULES as usize }> = Array::new();
 
 /// CpuMap for DDoS CPU steering. When populated by userspace, dropped
 /// packets are redirected to dedicated CPUs for rate-limited analysis
 /// instead of being silently discarded. Falls back to XDP_DROP when
 /// the map is empty (default behavior, no userspace wiring needed).
-#[map]
-static DDOS_CPUMAP: CpuMap = CpuMap::with_max_entries(128, 0);
+#[btf_map]
+static DDOS_CPUMAP: CpuMap<128> = CpuMap::new();
 
 // ── Metric indices ──────────────────────────────────────────────────
 
@@ -636,7 +630,7 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         // PKT_CTX is already populated by process_firewall_v4/v6.
         // Falls back to DROP if the reject program is not loaded.
         unsafe {
-            let _ = XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_REJECT);
+            XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_REJECT);
         }
         return xdp_action::XDP_DROP;
     }
@@ -645,7 +639,7 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         // loaded the tail-call is a no-op and we fall through to
         // XDP_PASS so ARP still reaches the host normally.
         unsafe {
-            let _ = XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_VIP_ARP);
+            XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_VIP_ARP);
         }
         return xdp_action::XDP_PASS;
     }
@@ -674,11 +668,11 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         // a partial chain. The worst case is one packet skipping ratelimit
         // or LB during the reload window (microseconds).
         unsafe {
-            let _ = XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_RATELIMIT);
+            XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_RATELIMIT);
         }
         // Ratelimit not loaded — try loadbalancer directly.
         unsafe {
-            let _ = XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_LOADBALANCER);
+            XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_LOADBALANCER);
         }
     }
     action
@@ -2017,7 +2011,7 @@ fn emit_event(ctx_raw: *mut core::ffi::c_void, action: u8) {
     let _xdp_frame_size = unsafe { xdp_frame_size(ctx_raw) }.unwrap_or(0);
     let (rss_hash, rss_hash_type) = unsafe { xdp_rx_hash(ctx_raw.cast_const()) }.unwrap_or((0, 0));
     let rx_hw_ts = unsafe { xdp_rx_timestamp(ctx_raw.cast_const()) }.unwrap_or(0);
-    if let Some(mut entry) = EVENTS.reserve::<PacketEvent>(0) {
+    if let Some(mut entry) = EVENTS.reserve_untyped::<PacketEvent>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
             (*ptr).timestamp_ns = bpf_ktime_get_boot_ns();
