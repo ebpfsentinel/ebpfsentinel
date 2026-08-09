@@ -2,7 +2,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use domain::common::entity::Severity;
-use domain::dns::blocklist::DomainBlocklistEngine;
+use domain::dns::blocklist::{DomainBlocklistEngine, InjectionDelta};
 use domain::dns::entity::{
     BlocklistAction, DnsAlert, DnsAlertReason, DomainBlocklistConfig, DomainBlocklistStats,
     InjectTarget, ReputationFactor,
@@ -121,16 +121,47 @@ impl DnsBlocklistAppService {
             return;
         };
 
-        let delta = engine.on_blocked_resolution(domain, resolved_ips, ttl_secs, now_ns);
         let action = bm.action;
         let inject_target = bm.inject_target;
         let pattern_str = bm.pattern.to_string();
+
+        // `alert` and `log` name the resolution in the alert stream and stop
+        // there; only `block` puts the resolved addresses in front of the data
+        // plane. The tracking state is entered for `block` alone: recording a
+        // resolution the maps never received would have the expiry sweep and a
+        // later reload remove addresses nothing ever injected.
+        if action != BlocklistAction::Block {
+            drop(engine);
+            self.metrics.increment_dns_blocked_domains();
+            self.emit_blocklist_alert(domain, resolved_ips, action, &pattern_str, now_ns);
+            self.check_geoip_reputation(domain, resolved_ips);
+            return;
+        }
+
+        let delta = engine.on_blocked_resolution(domain, resolved_ips, ttl_secs, now_ns);
         let injected_count = engine.injected_ip_count();
         drop(engine);
 
         self.metrics.increment_dns_blocked_domains();
         self.emit_blocklist_alert(domain, resolved_ips, action, &pattern_str, now_ns);
 
+        self.enforce(domain, inject_target, ttl_secs, &delta);
+
+        self.metrics.set_dns_injected_ips(injected_count as u64);
+
+        // GeoIP reputation: check resolved IPs against high-risk countries
+        self.check_geoip_reputation(domain, resolved_ips);
+    }
+
+    /// Apply an injection delta to whichever data-plane surface the blocklist
+    /// targets. Reached for `action: block` only.
+    fn enforce(
+        &self,
+        domain: &str,
+        inject_target: InjectTarget,
+        ttl_secs: u32,
+        delta: &InjectionDelta,
+    ) {
         if inject_target == InjectTarget::Ips {
             // Route to IPS blacklist
             if let Some(ref ips) = self.ips_port {
@@ -214,17 +245,12 @@ impl DnsBlocklistAppService {
                     );
                 }
             }
-        } else if action == BlocklistAction::Block {
+        } else {
             tracing::debug!(
                 domain = domain,
                 "domain matched blocklist but no eBPF map writer configured"
             );
         }
-
-        self.metrics.set_dns_injected_ips(injected_count as u64);
-
-        // GeoIP reputation: check resolved IPs against high-risk countries
-        self.check_geoip_reputation(domain, resolved_ips);
     }
 
     /// Emit a DNS blocklist alert to the alert pipeline (if configured).
@@ -592,6 +618,36 @@ mod tests {
 
         let injected = writer.injected.lock().unwrap();
         assert_eq!(*injected, vec![ip]);
+    }
+
+    #[test]
+    fn log_action_does_not_inject_into_ebpf_map() {
+        let writer = Arc::new(MockMapWriter::new());
+        let mut config = test_config(vec!["bad.com"]);
+        config.action = BlocklistAction::Log;
+        let svc = DnsBlocklistAppService::new(config, Some(writer.clone()), Arc::new(NoopMetrics));
+
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        svc.on_dns_response("bad.com", &[ip], 300, 0);
+
+        assert!(writer.injected.lock().unwrap().is_empty());
+        // The match is still observed, so the pattern's hit count moves.
+        assert_eq!(svc.list_patterns_with_counts()[0].1, 1);
+        assert_eq!(svc.stats().ips_injected, 0);
+    }
+
+    #[test]
+    fn alert_action_does_not_blacklist_via_ips_port() {
+        let ips = Arc::new(MockIpsBlacklist::new());
+        let mut config = test_config_ips(vec!["bad.com"]);
+        config.action = BlocklistAction::Alert;
+        let svc = DnsBlocklistAppService::new(config, None, Arc::new(NoopMetrics))
+            .with_ips_port(ips.clone());
+
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        svc.on_dns_response("bad.com", &[ip], 300, 0);
+
+        assert!(ips.added.lock().unwrap().is_empty());
     }
 
     #[test]
