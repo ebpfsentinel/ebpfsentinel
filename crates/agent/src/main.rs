@@ -423,7 +423,16 @@ async fn run_cli(cli: cli::Cli) -> Result<()> {
             }
         }
 
-        // No subcommand = run the agent daemon
-        None => ebpfsentinel_agent::startup::run(&cli.config, cli.log_level, cli.log_format).await,
+        // No subcommand = run the agent daemon. Boxed because the startup
+        // future owns every loaded eBPF object and map manager, which is far
+        // too large to keep inline on this stack frame.
+        None => {
+            Box::pin(ebpfsentinel_agent::startup::run(
+                &cli.config,
+                cli.log_level,
+                cli.log_format,
+            ))
+            .await
+        }
     }
 }

@@ -38,6 +38,7 @@ pub mod tenant_vlan_map_manager;
 pub mod threatintel_map_manager;
 pub mod token_bootstrap;
 pub mod vip_map_manager;
+pub mod zone_map_manager;
 
 pub use bpf_token::{
     BPF_F_TOKEN_FD, BpfTokenError, TokenCreateAttr, create_enterprise_token, create_token,
@@ -82,3 +83,4 @@ pub use token_bootstrap::{
     bootstrap_with_kernel,
 };
 pub use vip_map_manager::VipMapManager;
+pub use zone_map_manager::ZoneMapManager;

@@ -18,6 +18,7 @@ use adapters::ebpf::{
     EventReader, FirewallMapManager, IcmpConfigManager, IdsMapManager, InterfaceGroupsManager,
     IpSetMapManager, L7PortsManager, LpmCoordinator, MetricsReader, NatMapManager, QosMapManager,
     RateLimitLpmManager, RateLimitMapManager, ScrubConfigManager, ThreatIntelMapManager,
+    ZoneMapManager,
 };
 use adapters::grpc::server::{GrpcTlsConfig, run_grpc_server};
 use adapters::metrics::AgentMetrics;
@@ -1635,7 +1636,7 @@ pub async fn run(
         // 10a. XDP Firewall
         fw_ok = if config.firewall.enabled {
             match try_load_xdp_firewall(&ebpf_dir, &config, &domain_rules) {
-                Ok((loader, map_manager, fw_metrics_rdr, reader, zone_rdrs)) => {
+                Ok((loader, map_manager, fw_metrics_rdr, reader, zone_mgr, zone_rdrs)) => {
                     let event_tx_clone = event_tx.clone();
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, CancellationToken::new()).await;
@@ -1645,18 +1646,20 @@ pub async fn run(
                     if let Some(rdr) = fw_metrics_rdr {
                         metrics_readers.push(rdr);
                     }
-                    if let Some((passed, dropped, zone_names)) = zone_rdrs {
+                    if let Some(mgr) = zone_mgr {
+                        // Programs the zones loaded above and every later change.
+                        zone_svc.write().await.set_map_port(Box::new(mgr));
+                    }
+                    if let Some((passed, dropped)) = zone_rdrs {
                         let zm_cancel = cancel_token.clone();
                         let zm_metrics = Arc::clone(&metrics) as Arc<dyn MetricsPort>;
-                        info!(
-                            zones = zone_names.len(),
-                            "per-zone datapath counters exported"
-                        );
+                        let zm_svc = Arc::clone(&zone_svc);
+                        info!("per-zone datapath counters exported");
                         tokio::spawn(async move {
                             crate::ebpf_metrics::run_zone_metrics_loop(
                                 passed,
                                 dropped,
-                                zone_names,
+                                zm_svc,
                                 zm_metrics,
                                 Duration::from_secs(10),
                                 zm_cancel,
@@ -3452,18 +3455,21 @@ pub fn read_ebpf_program(dir: &str, name: &str) -> anyhow::Result<Vec<u8>> {
 // ── Per-program load functions ───────────────────────────────────────
 
 /// Load the XDP firewall program: attach XDP, populate rules, create event reader.
-/// Per-zone counter readers plus the zone id → name mapping used to label
-/// them. `None` when zones are disabled or the maps are absent.
-pub type ZoneMetricsSource = (MetricsReader, MetricsReader, Vec<(u32, String)>);
+/// Per-zone passed/dropped counter readers. `None` when the maps are absent.
+/// The zone names that label them are derived from the zone service at read
+/// time, so a zone added after startup is labelled correctly.
+pub type ZoneMetricsSource = (MetricsReader, MetricsReader);
 
 /// Everything `try_load_xdp_firewall` hands back: the loader, the map
 /// manager the firewall service writes through, the firewall counter reader,
-/// the event reader, and the per-zone counter readers when zones are on.
+/// the event reader, the zone map manager the zone service programs through,
+/// and the per-zone counter readers.
 pub type XdpFirewallLoad = (
     EbpfLoader,
     FirewallMapManager,
     Option<MetricsReader>,
     EventReader,
+    Option<ZoneMapManager>,
     Option<ZoneMetricsSource>,
 );
 
@@ -3520,30 +3526,24 @@ pub fn try_load_xdp_firewall(
     map_manager.load_v6_rules(&v6_entries)?;
 
     let mut zone_metrics_readers: Option<ZoneMetricsSource> = None;
+    let mut zone_map_manager: Option<ZoneMapManager> = None;
 
-    // Populate ZONE_MAP (ifindex → zone_id) if zone config is present
-    if config.zones.enabled
-        && let Ok(zone_cfg) = config.zone_config()
-    {
-        adapters::ebpf::map_manager::populate_zone_map(loader.ebpf_mut(), &zone_cfg);
-        adapters::ebpf::map_manager::populate_zone_policy_map(loader.ebpf_mut(), &zone_cfg);
-        adapters::ebpf::map_manager::populate_zone_policy_pairs(loader.ebpf_mut(), &zone_cfg);
+    // Hand the zone maps to a manager rather than writing them here: the zone
+    // service reprograms them on every reload and API change, which a
+    // one-shot population at startup could not do.
+    if config.zones.enabled {
+        match ZoneMapManager::new(loader.ebpf_mut()) {
+            Ok(mgr) => zone_map_manager = Some(mgr),
+            Err(e) => warn!("zone maps unavailable, zoning will not be enforced: {e}"),
+        }
 
-        // Mirror the datapath's per-zone counters into Prometheus. The maps
-        // are indexed by the same 1-based ids the populators just used, so
-        // the name mapping is derived here rather than re-derived later.
-        let zone_names: Vec<(u32, String)> = zone_cfg
-            .zones
-            .iter()
-            .enumerate()
-            .map(|(idx, zone)| (u32::try_from(idx + 1).unwrap_or(0), zone.id.clone()))
-            .collect();
+        // Mirror the datapath's per-zone counters into Prometheus.
         match (
             MetricsReader::new(loader.ebpf_mut(), "ZONE_METRICS_PASSED"),
             MetricsReader::new(loader.ebpf_mut(), "ZONE_METRICS_DROPPED"),
         ) {
-            (Ok(passed), Ok(dropped)) if !zone_names.is_empty() => {
-                zone_metrics_readers = Some((passed, dropped, zone_names));
+            (Ok(passed), Ok(dropped)) => {
+                zone_metrics_readers = Some((passed, dropped));
             }
             _ => {
                 tracing::debug!("zone counter maps unavailable, per-zone metrics not exported");
@@ -3563,6 +3563,7 @@ pub fn try_load_xdp_firewall(
         map_manager,
         metrics_rdr,
         reader,
+        zone_map_manager,
         zone_metrics_readers,
     ))
 }

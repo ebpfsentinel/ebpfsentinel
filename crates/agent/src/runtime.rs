@@ -522,7 +522,7 @@ pub async fn load_ebpf_programs(
     let mut fw_loader: Option<EbpfLoader> = None;
     let fw_ok = if config.firewall.enabled {
         match startup::try_load_xdp_firewall(&ebpf_dir, config, &domain_rules) {
-            Ok((loader, map_manager, fw_metrics_rdr, reader, _zone_rdrs)) => {
+            Ok((loader, map_manager, fw_metrics_rdr, reader, zone_mgr, _zone_rdrs)) => {
                 let event_tx_clone = event_tx.clone();
                 tokio::spawn(
                     async move { reader.run(event_tx_clone, CancellationToken::new()).await },
@@ -531,6 +531,10 @@ pub async fn load_ebpf_programs(
                 svc.set_map_port(Box::new(map_manager));
                 if let Some(rdr) = fw_metrics_rdr {
                     metrics_readers.push(rdr);
+                }
+                if let Some(mgr) = zone_mgr {
+                    // Zoning decides nothing until the maps carry it.
+                    services.zone_svc.write().await.set_map_port(Box::new(mgr));
                 }
                 services
                     .metrics

@@ -97,32 +97,25 @@ fn map_zone_error(err: &ZoneError) -> ApiError {
 pub struct CreateZoneRequest {
     /// Zone name; used as the zone identifier.
     pub name: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    /// Subnets are accepted for forward-compatibility but not yet enforced.
-    #[serde(default)]
-    pub subnets: Option<Vec<String>>,
-    /// Network interfaces grouped into this zone.
+    /// Network interfaces grouped into this zone. A zone with no interface
+    /// carries no traffic: the datapath matches on the ingress interface.
     #[serde(default)]
     pub interfaces: Option<Vec<String>>,
+    /// Policy applied when no rule and no inter-zone policy decided the
+    /// packet. `allow` permits; anything else, including an absent value,
+    /// denies.
     #[serde(default)]
-    pub enabled: Option<bool>,
+    pub default_policy: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreateZonePolicyRequest {
-    #[serde(default)]
-    pub name: Option<String>,
     /// Source zone identifier.
     pub source_zone: String,
     /// Destination zone identifier.
     pub dest_zone: String,
     /// `allow` permits traffic; any other verb denies.
     pub action: String,
-    #[serde(default)]
-    pub priority: Option<u32>,
-    #[serde(default)]
-    pub enabled: Option<bool>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────
@@ -248,7 +241,10 @@ pub async fn create_zone(
     let new_zone = Zone {
         id: req.name,
         interfaces: req.interfaces.unwrap_or_default(),
-        default_policy: ZonePolicy::Deny,
+        default_policy: req
+            .default_policy
+            .as_deref()
+            .map_or(ZonePolicy::Deny, parse_zone_action),
     };
     let mut svc = zone.write().await;
     svc.add_zone(new_zone.clone())

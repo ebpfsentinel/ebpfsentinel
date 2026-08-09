@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adapters::ebpf::MetricsReader;
+use application::zone_service_impl::ZoneAppService;
 use ports::secondary::metrics_port::MetricsPort;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -190,13 +191,21 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
 
 // ── Per-zone counters ────────────────────────────────────────────────
 
+/// Name of the counter slot that holds traffic on interfaces no zone claims.
+const UNZONED: &str = "unzoned";
+
 /// Poll the datapath's per-zone counters and mirror them into the metrics
 /// port, labelled by zone name.
 ///
-/// The zone maps are indexed by `zone_id`, which is an internal 1-based
-/// position in the config. Exposing that number would be useless to an
-/// operator, so the caller supplies the id → name mapping it used to
-/// populate the maps, and only those ids are read.
+/// The zone maps are indexed by `zone_id`, an internal 1-based position in
+/// the configuration that would mean nothing to an operator, so the names are
+/// read from the zone service on every tick: it is the same source the maps
+/// are programmed from, and reading it late is what keeps the labels right
+/// after a zone is added or removed at runtime.
+///
+/// Slot 0 counts the packets that reached the default policy on an interface
+/// no zone claims, which is exported under [`UNZONED`]: traffic escaping the
+/// zoning entirely is exactly what an operator needs to see.
 ///
 /// Deltas are derived exactly as in [`run_kernel_metrics_loop`]: the kernel
 /// counter is absolute, so the exposed counter tracks it regardless of the
@@ -205,7 +214,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
 pub async fn run_zone_metrics_loop(
     passed: MetricsReader,
     dropped: MetricsReader,
-    zone_names: Vec<(u32, String)>,
+    zones: Arc<RwLock<ZoneAppService>>,
     metrics: Arc<dyn MetricsPort>,
     interval: Duration,
     cancel: CancellationToken,
@@ -219,6 +228,17 @@ pub async fn run_zone_metrics_loop(
         tokio::select! {
             () = cancel.cancelled() => break,
             _ = ticker.tick() => {}
+        }
+
+        let mut zone_names = vec![(0u32, UNZONED.to_string())];
+        {
+            let svc = zones.read().await;
+            zone_names.extend(
+                svc.zones()
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, zone)| (u32::try_from(idx + 1).unwrap_or(0), zone.id.clone())),
+            );
         }
 
         for (zone_id, zone_name) in &zone_names {

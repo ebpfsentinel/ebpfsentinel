@@ -3,15 +3,17 @@ use std::sync::Arc;
 use domain::zone::entity::{Zone, ZoneConfig, ZonePair, ZonePolicy};
 use domain::zone::error::ZoneError;
 use ports::secondary::metrics_port::MetricsPort;
+use ports::secondary::zone_map_port::ZoneMapPort;
 
 /// Application-level zone service.
 ///
-/// Manages security zone configuration and provides read-only access
-/// to zones and inter-zone policies. Zone data is loaded from config
-/// and synced to eBPF maps at startup; this service exposes it to the
-/// REST API layer.
+/// Owns the security zone configuration, exposes it to the REST API layer,
+/// and pushes every change down to the datapath. Zoning that lives only in
+/// this service decides nothing: the firewall reads the eBPF maps, so a zone
+/// added here and not programmed there would be reported and never enforced.
 pub struct ZoneAppService {
     config: Option<ZoneConfig>,
+    map_port: Option<Box<dyn ZoneMapPort + Send>>,
     metrics: Option<Arc<dyn MetricsPort>>,
     enabled: bool,
 }
@@ -26,6 +28,7 @@ impl ZoneAppService {
     pub fn new() -> Self {
         Self {
             config: None,
+            map_port: None,
             metrics: None,
             enabled: false,
         }
@@ -36,12 +39,49 @@ impl ZoneAppService {
         self.metrics = Some(metrics);
     }
 
+    /// Set the eBPF map port and program what is already loaded.
+    ///
+    /// The port usually arrives after the configuration, because the firewall
+    /// program is loaded later in startup than the config is parsed.
+    pub fn set_map_port(&mut self, port: Box<dyn ZoneMapPort + Send>) {
+        self.map_port = Some(port);
+        self.sync_maps();
+    }
+
+    /// Drop the map port; the firewall program is gone with its maps.
+    pub fn clear_map_port(&mut self) {
+        self.map_port = None;
+    }
+
+    /// Push the current configuration into the datapath.
+    ///
+    /// A disabled service programs an empty set rather than leaving the last
+    /// zones in the maps: switching zoning off has to stop zone posture from
+    /// deciding packets, not freeze it.
+    fn sync_maps(&mut self) {
+        let Some(ref mut port) = self.map_port else {
+            return;
+        };
+        let empty = ZoneConfig {
+            zones: Vec::new(),
+            zone_policies: Vec::new(),
+        };
+        let config = match (self.enabled, self.config.as_ref()) {
+            (true, Some(cfg)) => cfg,
+            _ => &empty,
+        };
+        if let Err(e) = port.sync(config) {
+            tracing::warn!(error = %e, "zone maps not programmed, the datapath keeps the previous zoning");
+        }
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled
     }
 
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        self.sync_maps();
         tracing::info!(enabled, "zone service toggled");
     }
 
@@ -52,6 +92,7 @@ impl ZoneAppService {
             .map_err(|e| domain::common::error::DomainError::InvalidConfig(e.to_string()))?;
         let total = config.zones.len() + config.zone_policies.len();
         self.config = Some(config);
+        self.sync_maps();
         if let Some(ref m) = self.metrics {
             m.set_rules_loaded("zones", total as u64);
             self.publish_zone_gauges(m.as_ref());
@@ -145,7 +186,8 @@ impl ZoneAppService {
     /// Re-publish the loaded-rule gauge and the per-zone gauges after a
     /// mutation. The aggregate alone cannot answer "which zone owns what",
     /// which is the question an operator actually asks.
-    fn refresh_metrics(&self) {
+    fn refresh_metrics(&mut self) {
+        self.sync_maps();
         let Some(ref m) = self.metrics else { return };
         let total = self.zone_count() + self.policy_count();
         m.set_rules_loaded("zones", total as u64);
@@ -201,7 +243,98 @@ impl ZoneAppService {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    /// Records what reached the datapath, so a test can tell an accepted
+    /// change from an enforced one.
+    #[derive(Default)]
+    struct RecordingMaps {
+        synced: Mutex<Vec<(usize, usize)>>,
+    }
+
+    impl RecordingMaps {
+        /// (zones, policies) of each sync, in order.
+        fn calls(&self) -> Vec<(usize, usize)> {
+            self.synced.lock().expect("recording lock").clone()
+        }
+    }
+
+    /// Port handle sharing one recording with the test.
+    struct Recorder(Arc<RecordingMaps>);
+
+    impl ZoneMapPort for Recorder {
+        fn sync(&mut self, config: &ZoneConfig) -> Result<(), domain::common::error::DomainError> {
+            self.0
+                .synced
+                .lock()
+                .expect("recording lock")
+                .push((config.zones.len(), config.zone_policies.len()));
+            Ok(())
+        }
+    }
+
+    /// An enabled service already wired to a recording map port.
+    fn wired(maps: &Arc<RecordingMaps>) -> ZoneAppService {
+        let mut svc = ZoneAppService::new();
+        svc.set_enabled(true);
+        svc.set_map_port(Box::new(Recorder(Arc::clone(maps))));
+        svc
+    }
+
+    #[test]
+    fn a_reload_programs_the_datapath() {
+        let maps = Arc::new(RecordingMaps::default());
+        let mut svc = wired(&maps);
+        svc.reload(make_config()).expect("reload");
+        assert_eq!(maps.calls().last().copied(), Some((2, 1)));
+    }
+
+    #[test]
+    fn an_added_zone_reaches_the_datapath() {
+        let maps = Arc::new(RecordingMaps::default());
+        let mut svc = wired(&maps);
+        svc.reload(make_config()).expect("reload");
+        svc.add_zone(Zone {
+            id: "dmz".to_string(),
+            interfaces: vec!["eth3".to_string()],
+            default_policy: ZonePolicy::Deny,
+        })
+        .expect("add zone");
+        assert_eq!(maps.calls().last().copied(), Some((3, 1)));
+    }
+
+    #[test]
+    fn a_removed_policy_reaches_the_datapath() {
+        let maps = Arc::new(RecordingMaps::default());
+        let mut svc = wired(&maps);
+        svc.reload(make_config()).expect("reload");
+        svc.remove_policy("lan", "wan").expect("remove policy");
+        assert_eq!(maps.calls().last().copied(), Some((2, 0)));
+    }
+
+    #[test]
+    fn switching_zoning_off_clears_the_datapath() {
+        let maps = Arc::new(RecordingMaps::default());
+        let mut svc = wired(&maps);
+        svc.reload(make_config()).expect("reload");
+        svc.set_enabled(false);
+        // The configuration is kept, but nothing of it decides packets.
+        assert_eq!(maps.calls().last().copied(), Some((0, 0)));
+        assert_eq!(svc.zone_count(), 2);
+    }
+
+    #[test]
+    fn a_port_arriving_after_the_config_still_programs_it() {
+        let maps = Arc::new(RecordingMaps::default());
+        let mut svc = ZoneAppService::new();
+        svc.set_enabled(true);
+        svc.reload(make_config()).expect("reload");
+        assert!(maps.calls().is_empty());
+        svc.set_map_port(Box::new(Recorder(Arc::clone(&maps))));
+        assert_eq!(maps.calls(), vec![(2, 1)]);
+    }
 
     fn make_config() -> ZoneConfig {
         ZoneConfig {

@@ -627,7 +627,7 @@ impl EbpfProgramManager {
         match name {
             "xdp_firewall" => {
                 let domain_rules = config.firewall_rules().unwrap_or_default();
-                let (mut loader, map_manager, metrics_rdr, reader, _zone_rdrs) =
+                let (mut loader, map_manager, metrics_rdr, reader, zone_mgr, _zone_rdrs) =
                     startup::try_load_xdp_firewall(&self.ebpf_dir, config, &domain_rules)?;
 
                 let cancel = CancellationToken::new();
@@ -642,6 +642,15 @@ impl EbpfProgramManager {
                     .set_map_port(Box::new(map_manager));
                 if let Some(rdr) = metrics_rdr {
                     self.metrics_readers.write().await.push(rdr);
+                }
+                if let Some(mgr) = zone_mgr {
+                    // The program is new, so its zone maps are empty: the
+                    // service reprograms them from the config it still holds.
+                    self.services
+                        .zone_svc
+                        .write()
+                        .await
+                        .set_map_port(Box::new(mgr));
                 }
 
                 self.iface_groups.add_map(loader.ebpf_mut());
