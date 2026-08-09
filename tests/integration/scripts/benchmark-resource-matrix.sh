@@ -411,9 +411,11 @@ _start_agent() {
 
 _stop_agent() {
     if [ "$MODE_2VM" = true ]; then
-        _ssh_sudo pkill -f ebpfsentinel-agent 2>/dev/null || true
+        # `-x` matches the process name only: `-f` would also match this
+        # very ssh command line and kill the remote shell instead of the agent.
+        _ssh_sudo pkill -x ebpfsentinel-agent 2>/dev/null || true
         sleep 1
-        _ssh_sudo pkill -9 -f ebpfsentinel-agent 2>/dev/null || true
+        _ssh_sudo pkill -9 -x ebpfsentinel-agent 2>/dev/null || true
     else
         sudo pkill -f ebpfsentinel-agent 2>/dev/null || true
         sleep 1

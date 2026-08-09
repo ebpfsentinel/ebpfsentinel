@@ -390,7 +390,7 @@ vm_stop_agent() {
 
     if [ "$agent_mode" = "binary" ]; then
         # Use the measurement script dir for the stop helper; simple pkill fallback
-        vm_ssh "sudo pkill -f ebpfsentinel-agent 2>/dev/null; sudo rm -f /tmp/ebpfsentinel-host-perf-agent.pid" || true
+        vm_ssh "sudo pkill -x ebpfsentinel-agent 2>/dev/null; sudo rm -f /tmp/ebpfsentinel-host-perf-agent.pid" || true
     else
         vm_ssh "docker rm -f ebpfsentinel-host-perf 2>/dev/null" >/dev/null || true
     fi

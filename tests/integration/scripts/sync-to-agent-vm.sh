@@ -85,8 +85,10 @@ if [ "$SYNC_BINARY" = true ]; then
     echo "==> Syncing binary to agent VM (${local_size_mb} MB)..."
     echo "    ${AGENT_BINARY} -> /usr/local/bin/ebpfsentinel-agent"
 
-    # Stop running agent first
-    _ssh "sudo pkill -f ebpfsentinel-agent 2>/dev/null || true"
+    # Stop running agent first. `pkill -x` matches the process name only:
+    # `pkill -f` would also match this very ssh command line, kill the remote
+    # shell, and abort the sync under `set -e` while still reporting progress.
+    _ssh "sudo pkill -x ebpfsentinel-agent 2>/dev/null || true"
     sleep 1
 
     # SCP to tmp then move (avoids permission issues during transfer)
