@@ -263,12 +263,25 @@ impl InterfaceGroupsManager {
     ///
     /// `memberships` is a slice of `(ifindex, group_bitmask)` pairs.
     /// Each map is updated with every pair (existing entries are overwritten).
+    ///
+    /// A bitmask of 0 means the interface belongs to no group, which the
+    /// datapath already reads as the default for a key it cannot find. The
+    /// entry is therefore removed rather than stored: the same map also backs
+    /// interface-based tenant resolution, where a stored 0 is not equivalent to
+    /// an absent key - it resolves the packet to tenant 0 and short-circuits
+    /// the subnet and cgroup lookups that would have found the real tenant.
     pub fn set_interface_groups(
         &mut self,
         memberships: &[(u32, u32)],
     ) -> Result<(), anyhow::Error> {
         for map in &mut self.maps {
             for &(ifindex, groups) in memberships {
+                if groups == 0 {
+                    // Absent is the encoding for "no group"; a stale non-zero
+                    // entry from an earlier config must still be cleared.
+                    let _ = map.remove(&ifindex);
+                    continue;
+                }
                 map.insert(ifindex, groups, 0)
                     .map_err(|e| anyhow::anyhow!("INTERFACE_GROUPS insert failed: {e}"))?;
             }

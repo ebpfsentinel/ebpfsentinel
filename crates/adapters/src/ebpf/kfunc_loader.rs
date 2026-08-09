@@ -893,7 +893,7 @@ const BPF_OBJ_GET: u32 = 7;
 /// Kernel-matching `union bpf_attr` `map_create` member (6.9+ layout, ending
 /// in `map_token_fd`). Mirrors `aya_obj::generated::bpf_attr__bindgen_ty_1`.
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct MapCreateAttr {
     map_type: u32,
     key_size: u32,
@@ -1033,11 +1033,14 @@ fn btf_type_ids(map_type: u32, key_type_id: u32, value_type_id: u32, btf_fd: u32
 }
 
 /// `BPF_MAP_CREATE` (token-authorized), replicating aya's BTF-map handling.
-fn raw_map_create(
-    name: &str,
-    def: &aya_obj::Map,
-    btf_fd: Option<RawFd>,
-) -> Result<OwnedFd, KfuncLoaderError> {
+/// Build the `BPF_MAP_CREATE` request for a parsed map definition.
+///
+/// Split out from [`raw_map_create`] so the layout the kernel is asked for -
+/// `key_size`, `value_size`, `max_entries`, `map_extra` and the BTF type ids -
+/// is derived in one place from the object alone, with no dependence on whether
+/// this process holds a BPF token. [`apply_bpf_token`] is the only thing a token
+/// changes, and it only ever adds to the request.
+fn map_create_attr(name: &str, def: &aya_obj::Map, btf_fd: Option<RawFd>) -> MapCreateAttr {
     let mut attr = MapCreateAttr {
         map_type: def.map_type(),
         key_size: def.key_size(),
@@ -1083,10 +1086,28 @@ fn raw_map_create(
     let len = n.len().min(15);
     attr.map_name[..len].copy_from_slice(&n[..len]);
 
-    if let Some(token) = global_token_fd() {
+    attr
+}
+
+/// Attach the process-global BPF token to a map-create request, if there is one.
+///
+/// Token mode and capability mode share `raw_map_create`, so this is the entire
+/// difference between them: the same layout, plus a token fd the kernel checks
+/// the request against.
+fn apply_bpf_token(attr: &mut MapCreateAttr, token: Option<i32>) {
+    if let Some(token) = token {
         attr.map_flags |= super::bpf_token::BPF_F_TOKEN_FD;
         attr.map_token_fd = token;
     }
+}
+
+fn raw_map_create(
+    name: &str,
+    def: &aya_obj::Map,
+    btf_fd: Option<RawFd>,
+) -> Result<OwnedFd, KfuncLoaderError> {
+    let mut attr = map_create_attr(name, def, btf_fd);
+    apply_bpf_token(&mut attr, global_token_fd());
 
     let rc = unsafe {
         bpf(
@@ -1346,6 +1367,47 @@ mod tests {
         // unique_names instead (parsing arbitrary bytes would error).
         let sites: Vec<KfuncSite> = Vec::new();
         assert!(unique_names(&sites).is_empty());
+    }
+
+    #[test]
+    fn a_bpf_token_only_adds_to_the_map_create_request() {
+        // Token mode and capability mode share this request, and only the
+        // former runs on a delegated bpffs. If a token could reach any of the
+        // layout fields, the two modes would create maps the typed userspace
+        // wrapper binds differently - the failure being silent in both
+        // directions. Nothing but the flag and the fd may differ.
+        let layout = MapCreateAttr {
+            map_type: 1,
+            key_size: 8,
+            value_size: 16,
+            max_entries: 10240,
+            map_flags: 0,
+            map_extra: 0,
+            btf_key_type_id: 7,
+            btf_value_type_id: 9,
+            btf_fd: 5,
+            ..Default::default()
+        };
+
+        let mut untokened = layout;
+        apply_bpf_token(&mut untokened, None);
+
+        let mut tokened = layout;
+        apply_bpf_token(&mut tokened, Some(42));
+
+        assert_eq!(untokened.key_size, tokened.key_size);
+        assert_eq!(untokened.value_size, tokened.value_size);
+        assert_eq!(untokened.max_entries, tokened.max_entries);
+        assert_eq!(untokened.map_extra, tokened.map_extra);
+        assert_eq!(untokened.map_type, tokened.map_type);
+        assert_eq!(untokened.btf_key_type_id, tokened.btf_key_type_id);
+        assert_eq!(untokened.btf_value_type_id, tokened.btf_value_type_id);
+        assert_eq!(untokened.btf_fd, tokened.btf_fd);
+
+        assert_eq!(untokened.map_token_fd, 0);
+        assert_eq!(untokened.map_flags, 0);
+        assert_eq!(tokened.map_token_fd, 42);
+        assert_eq!(tokened.map_flags, crate::ebpf::bpf_token::BPF_F_TOKEN_FD);
     }
 
     #[test]

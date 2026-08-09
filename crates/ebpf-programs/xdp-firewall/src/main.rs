@@ -4,16 +4,16 @@
 
 use aya_ebpf::{
     bindings::xdp_action,
+    btf_maps::{
+        Array, CpuMap, HashMap, PerCpuArray, ProgramArray, RingBuf,
+        lpm_trie::{Key, LpmTrie},
+    },
     cty::c_void,
     helpers::{
         bpf_check_mtu, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns, bpf_loop,
         bpf_xdp_adjust_meta,
     },
     macros::{btf_map, xdp},
-    btf_maps::{
-        Array, CpuMap, HashMap, PerCpuArray, ProgramArray, RingBuf,
-        lpm_trie::{Key, LpmTrie},
-    },
     programs::XdpContext,
 };
 use aya_ebpf_bindings::bindings::{
@@ -106,7 +106,8 @@ static FIREWALL_RULE_COUNT: Array<u32, 1> = Array::new();
 
 /// IPv6 firewall rules (array, indexed 0..count, priority order).
 #[btf_map]
-static FIREWALL_RULES_V6: Array<FirewallRuleEntryV6, { MAX_FIREWALL_RULES as usize }> = Array::new();
+static FIREWALL_RULES_V6: Array<FirewallRuleEntryV6, { MAX_FIREWALL_RULES as usize }> =
+    Array::new();
 
 /// Number of active IPv6 rules (single element at index 0).
 #[btf_map]
@@ -152,18 +153,19 @@ static ZONE_METRICS_DROPPED: PerCpuArray<u64, { ZONE_METRIC_SLOTS as usize }> = 
 /// Rules with exact values in all 5 fields (no wildcards, ranges, or extended flags) are
 /// placed here by userspace for O(1) lookup before the Array+bpf_loop scan.
 #[btf_map]
-static FW_HASH_5TUPLE: HashMap<FwHashKey5Tuple, FwHashValue, { MAX_FW_HASH_5TUPLE as usize }> = HashMap::new();
+static FW_HASH_5TUPLE: HashMap<FwHashKey5Tuple, FwHashValue, { MAX_FW_HASH_5TUPLE as usize }> =
+    HashMap::new();
 
 /// Fast-path: protocol+port HashMap (proto, dst_port) → action.
 /// Rules that match only on protocol and destination port (all other fields wildcard).
 #[btf_map]
-static FW_HASH_PORT: HashMap<FwHashKeyPort, FwHashValue, { MAX_FW_HASH_PORT as usize }> = HashMap::new();
+static FW_HASH_PORT: HashMap<FwHashKeyPort, FwHashValue, { MAX_FW_HASH_PORT as usize }> =
+    HashMap::new();
 
 // NOTE: User RingBuf (BPF_MAP_TYPE_USER_RINGBUF, type 31) is available since
 // kernel 6.1, but aya 0.13.1 does not support loading this map type (returns
 // "Unsupported map type found 31"). Removed until aya exposes UserRingBuf
 // userspace API. Config push uses bpf_map_update_elem via map managers.
-// See: known limitation "User RingBuf config push" in CHANGELOG.md.
 
 /// Per-CPU packet counters. Index: 0=passed, 1=dropped, 2=errors,
 /// 3=events_dropped, 4=total_seen, 5=rejected, 6=mtu_exceeded,
@@ -184,10 +186,6 @@ static PKT_CTX: PerCpuArray<PacketCtx, 1> = PerCpuArray::new();
 /// Shared kernel->userspace event ring buffer (1 MB).
 #[btf_map]
 static EVENTS: RingBuf<PacketEvent, { 256 * 4096 }> = RingBuf::new();
-
-/// Feature enable/disable flags (shared across programs).
-#[btf_map]
-static CONFIG_FLAGS: Array<u32, 1> = Array::new();
 
 /// XDP program array for tail-call chaining (firewall → ratelimit).
 /// Index 0: ratelimit program fd (set by userspace if ratelimit is enabled).
@@ -225,12 +223,14 @@ static TENANT_VLAN_MAP: HashMap<u32, u32, 1024> = HashMap::new();
 /// LPM trie for subnet-based tenant resolution (IPv4).
 /// Key = `[u8; 4]` (network byte order), Value = `tenant_id`.
 #[btf_map]
-static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32, { MAX_TENANT_SUBNET_LPM_ENTRIES as usize }> = LpmTrie::new();
+static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32, { MAX_TENANT_SUBNET_LPM_ENTRIES as usize }> =
+    LpmTrie::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv6).
 /// Key = `[u8; 16]` (network byte order), Value = `tenant_id`.
 #[btf_map]
-static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRIES as usize }> = LpmTrie::new();
+static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRIES as usize }> =
+    LpmTrie::new();
 
 /// LPM Trie for O(log n) IPv4 source CIDR matching (CIDR-only rules).
 #[btf_map]
@@ -268,7 +268,8 @@ static FW_IPSET_V4: HashMap<IpSetKeyV4, u8, { MAX_IPSET_ENTRIES_V4 as usize }> =
 /// Tracks concurrent connections and connection rate for overload protection.
 /// Pinned at /sys/fs/bpf/ebpfsentinel/ct_src_counters, shared with tc-conntrack.
 #[btf_map]
-static CT_SRC_COUNTERS: HashMap<u32, SrcStateCounter, { CT_SRC_COUNTER_MAX as usize }> = HashMap::new();
+static CT_SRC_COUNTERS: HashMap<u32, SrcStateCounter, { CT_SRC_COUNTER_MAX as usize }> =
+    HashMap::new();
 
 /// Global conntrack configuration (single element). Read by XDP for limit thresholds.
 /// Pinned at /sys/fs/bpf/ebpfsentinel/ct_config.

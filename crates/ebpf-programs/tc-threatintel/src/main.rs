@@ -4,11 +4,12 @@
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
-    macros::{btf_map, classifier},
     btf_maps::{Array, LruHashMap, PerCpuArray, RingBuf, bloom_filter::BloomFilter},
+    macros::{btf_map, classifier},
     programs::TcContext,
 };
 use ebpf_common::{
+    config_flags::ConfigFlags,
     event::{EVENT_TYPE_THREATINTEL, FLAG_IPV6, FLAG_VLAN, PacketEvent},
     threatintel::{
         THREATINTEL_ACTION_DROP, THREATINTEL_MAX_ENTRIES, THREATINTEL_METRIC_DROPPED,
@@ -40,21 +41,31 @@ use network_types::{
 /// full the least-recently-used entry is evicted instead of silently
 /// dropping new inserts.
 #[btf_map]
-static THREATINTEL_IOCS: LruHashMap<ThreatIntelKey, ThreatIntelValue, { THREATINTEL_MAX_ENTRIES as usize }> = LruHashMap::new();
+static THREATINTEL_IOCS: LruHashMap<
+    ThreatIntelKey,
+    ThreatIntelValue,
+    { THREATINTEL_MAX_ENTRIES as usize },
+> = LruHashMap::new();
 
 /// Threat intel IOC lookup: IPv6 address → action + feed metadata.
 /// Uses `LruHashMap` for automatic LRU eviction on full maps.
 #[btf_map]
-static THREATINTEL_IOCS_V6: LruHashMap<ThreatIntelKeyV6, ThreatIntelValue, { THREATINTEL_MAX_ENTRIES as usize }> = LruHashMap::new();
+static THREATINTEL_IOCS_V6: LruHashMap<
+    ThreatIntelKeyV6,
+    ThreatIntelValue,
+    { THREATINTEL_MAX_ENTRIES as usize },
+> = LruHashMap::new();
 
 /// Bloom filter pre-check for IPv4 IOCs (kernel 5.16+).
 /// Eliminates ~98% of HashMap lookups for non-matching packets.
 #[btf_map]
-static THREATINTEL_BLOOM_V4: BloomFilter<ThreatIntelKey, { THREATINTEL_MAX_ENTRIES as usize }> = BloomFilter::new();
+static THREATINTEL_BLOOM_V4: BloomFilter<ThreatIntelKey, { THREATINTEL_MAX_ENTRIES as usize }> =
+    BloomFilter::new();
 
 /// Bloom filter pre-check for IPv6 IOCs (kernel 5.16+).
 #[btf_map]
-static THREATINTEL_BLOOM_V6: BloomFilter<ThreatIntelKeyV6, { THREATINTEL_MAX_ENTRIES as usize }> = BloomFilter::new();
+static THREATINTEL_BLOOM_V6: BloomFilter<ThreatIntelKeyV6, { THREATINTEL_MAX_ENTRIES as usize }> =
+    BloomFilter::new();
 
 /// Per-CPU counters. Index: 0=matched, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen.
 #[btf_map]
@@ -65,8 +76,13 @@ static THREATINTEL_METRICS: PerCpuArray<u64, 5> = PerCpuArray::new();
 static EVENTS: RingBuf<PacketEvent, { 256 * 4096 }> = RingBuf::new();
 
 /// Feature enable/disable flags (shared across programs).
+///
+/// The value type has to be `ConfigFlags` and not a bare integer: userspace
+/// writes the whole struct through `ConfigFlagsManager`, and aya refuses to
+/// bind a typed map handle whose value size disagrees with the map, so a
+/// narrower type here means the map is never acquired and the flags stay zero.
 #[btf_map]
-static CONFIG_FLAGS: Array<u32, 1> = Array::new();
+static CONFIG_FLAGS: Array<ConfigFlags, 1> = Array::new();
 
 // ── Entry point ─────────────────────────────────────────────────────
 
@@ -94,7 +110,7 @@ pub fn tc_threatintel(ctx: TcContext) -> i32 {
 fn try_tc_threatintel(ctx: &TcContext) -> Result<i32, ()> {
     // Check if threat intel is enabled via config flags (0 = disabled).
     if let Some(flags) = CONFIG_FLAGS.get(0) {
-        if *flags == 0 {
+        if flags.threatintel_enabled == 0 {
             return Ok(TC_ACT_OK);
         }
     }

@@ -16,6 +16,7 @@ use aya_ebpf_bindings::helpers::{
     bpf_clone_redirect, bpf_get_socket_cookie, bpf_skb_cgroup_id, bpf_skb_load_bytes,
 };
 use ebpf_common::{
+    config_flags::ConfigFlags,
     event::{
         EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, FLAG_VLAN, MAX_L7_PAYLOAD, MAX_L7_PORTS,
         PacketEvent, SMALL_L7_PAYLOAD,
@@ -96,8 +97,12 @@ static IDS_METRICS: PerCpuArray<u64, 6> = PerCpuArray::new();
 static EVENTS: RingBuf<PacketEvent, { 1024 * 4096 }> = RingBuf::new();
 
 /// Feature enable/disable flags (shared across programs).
+///
+/// Userspace writes the whole `ConfigFlags` struct here, so the value type has
+/// to match it byte for byte; aya refuses to bind a typed handle to a map whose
+/// value size disagrees, and the write is then silently skipped.
 #[btf_map]
-static CONFIG_FLAGS: Array<u32, 1> = Array::new();
+static CONFIG_FLAGS: Array<ConfigFlags, 1> = Array::new();
 
 /// Kernel-side IDS sampling configuration (single entry).
 /// Mode + rate_threshold control event emission probability.
