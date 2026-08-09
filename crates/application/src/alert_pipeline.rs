@@ -853,8 +853,13 @@ impl AlertPipeline {
     }
 
     /// Evaluate an alert against auto-capture policy.
-    /// If it matches and no capture is running, start one with a BPF filter
-    /// derived from the alert's source/destination IPs.
+    ///
+    /// If it matches and no capture is running, start one filtered on the
+    /// address the alert names. An alert that names none — DLP and ML
+    /// anomalies are process-level and zero their address fields — starts no
+    /// capture: `host 0.0.0.0` records nothing while holding the single
+    /// capture slot for the whole policy duration, which is exactly when the
+    /// next alert would have deserved it.
     async fn evaluate_auto_capture(&self, alert: &domain::alert::entity::Alert) {
         let Some(ref handler) = self.auto_capture else {
             return;
@@ -874,6 +879,15 @@ impl AlertPipeline {
         {
             return;
         }
+        let Some(src_ip) = alert_source_ip(alert) else {
+            tracing::debug!(
+                alert_id = %alert.id,
+                component = %alert.component,
+                "auto-capture: skipped (the alert names no source address)"
+            );
+            return;
+        };
+
         // Check if a capture is already running
         if handler.capture_engine.read().await.has_active() {
             tracing::debug!(
@@ -883,19 +897,6 @@ impl AlertPipeline {
             return;
         }
 
-        // Build BPF filter from alert context
-        let src_ip = if alert.is_ipv6 {
-            let bytes: [u8; 16] = {
-                let mut b = [0u8; 16];
-                for (i, &word) in alert.src_addr.iter().enumerate() {
-                    b[i * 4..(i + 1) * 4].copy_from_slice(&word.to_be_bytes());
-                }
-                b
-            };
-            std::net::IpAddr::from(bytes).to_string()
-        } else {
-            std::net::IpAddr::from(std::net::Ipv4Addr::from(alert.src_addr[0])).to_string()
-        };
         let filter = format!("host {src_ip}");
 
         #[allow(clippy::cast_possible_truncation)]
@@ -1817,6 +1818,70 @@ mod tests {
 
         assert_eq!(log_sender.send_calls.load(Ordering::Relaxed), 1);
         assert_eq!(webhook_sender.send_calls.load(Ordering::Relaxed), 1);
+    }
+
+    // ── Auto-capture ───────────────────────────────────────────────
+
+    fn make_auto_capture(
+        pipeline: AlertPipeline,
+    ) -> (
+        AlertPipeline,
+        Arc<RwLock<domain::capture::engine::CaptureEngine>>,
+        mpsc::Receiver<domain::capture::entity::AutoCaptureRequest>,
+    ) {
+        let engine = Arc::new(RwLock::new(domain::capture::engine::CaptureEngine::new(
+            300,
+        )));
+        let (tx, rx) = mpsc::channel(4);
+        let policy = domain::capture::entity::AutoCapturePolicy {
+            name: "auto".to_string(),
+            min_severity: Severity::High,
+            components: Vec::new(),
+            duration_secs: 30,
+            snap_length: 262_144,
+            interface: "eth0".to_string(),
+        };
+        (
+            pipeline.with_auto_capture(policy, Arc::clone(&engine), tx),
+            engine,
+            rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_matching_alert_captures_the_source_it_names() {
+        let metrics = Arc::new(TestMetrics::new());
+        let (mut pipeline, engine, mut rx) = make_auto_capture(make_pipeline(
+            vec![make_route("all", Severity::Low)],
+            metrics,
+        ));
+
+        pipeline
+            .process_alert(&make_ids_alert("ids-001", Severity::High))
+            .await;
+
+        let req = rx.try_recv().expect("a capture was requested");
+        assert_eq!(req.session.filter, "host 192.168.0.1");
+        assert!(engine.read().await.has_active());
+    }
+
+    /// A capture filtered on 0.0.0.0 records nothing and holds the single
+    /// capture slot for the policy duration, so the alert that names no
+    /// source starts none at all.
+    #[tokio::test]
+    async fn an_alert_naming_no_source_starts_no_capture() {
+        let metrics = Arc::new(TestMetrics::new());
+        let (mut pipeline, engine, mut rx) = make_auto_capture(make_pipeline(
+            vec![make_route("all", Severity::Low)],
+            metrics,
+        ));
+
+        let mut alert = make_ids_alert("ids-001", Severity::High);
+        alert.src_addr = [0; 4];
+        pipeline.process_alert(&alert).await;
+
+        assert!(rx.try_recv().is_err(), "no capture should be requested");
+        assert!(!engine.read().await.has_active());
     }
 
     // ── Auto-response enforcement ──────────────────────────────────
