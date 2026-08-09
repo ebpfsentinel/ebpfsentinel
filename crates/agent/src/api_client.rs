@@ -512,6 +512,10 @@ pub struct QosPipeResponse {
     pub id: String,
     pub rate_bps: u64,
     pub burst_bytes: u64,
+    pub direction: String,
+    pub delay_ms: u32,
+    pub loss_pct: f32,
+    pub enabled: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -525,7 +529,6 @@ pub struct QosQueueResponse {
 pub struct QosClassifierResponse {
     pub id: String,
     pub queue_id: String,
-    pub direction: String,
     pub priority: u32,
     pub match_rule: serde_json::Value,
 }

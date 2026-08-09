@@ -1462,14 +1462,20 @@ pub async fn cmd_qos_pipes(client: &ApiClient, output: OutputFormat) -> Result<(
     }
 
     println!(
-        "{:<16}  {:>14}  {:>14}",
-        "ID", "RATE (bps)", "BURST (bytes)"
+        "{:<16}  {:>14}  {:>14}  {:<8}  {:>9}  {:>7}  {:<8}",
+        "ID", "RATE (bps)", "BURST (bytes)", "DIR", "DELAY(ms)", "LOSS(%)", "STATE"
     );
 
     for pipe in &pipes {
         println!(
-            "{:<16}  {:>14}  {:>14}",
-            pipe.id, pipe.rate_bps, pipe.burst_bytes,
+            "{:<16}  {:>14}  {:>14}  {:<8}  {:>9}  {:>7.2}  {:<8}",
+            pipe.id,
+            pipe.rate_bps,
+            pipe.burst_bytes,
+            pipe.direction,
+            pipe.delay_ms,
+            pipe.loss_pct,
+            if pipe.enabled { "enabled" } else { "disabled" },
         );
     }
 
@@ -1516,16 +1522,10 @@ pub async fn cmd_qos_classifiers(client: &ApiClient, output: OutputFormat) -> Re
         return Ok(());
     }
 
-    println!(
-        "{:<16}  {:<16}  {:<8}  {:>4}",
-        "ID", "QUEUE ID", "DIR", "PRI"
-    );
+    println!("{:<16}  {:<16}  {:>4}", "ID", "QUEUE ID", "PRI");
 
     for cls in &classifiers {
-        println!(
-            "{:<16}  {:<16}  {:<8}  {:>4}",
-            cls.id, cls.queue_id, cls.direction, cls.priority,
-        );
+        println!("{:<16}  {:<16}  {:>4}", cls.id, cls.queue_id, cls.priority);
     }
 
     println!("\n{} classifier(s) total.", classifiers.len());
@@ -1593,8 +1593,8 @@ pub async fn cmd_qos_add_classifier(
     }
 
     println!(
-        "QoS classifier created: {} (queue={}, direction={}, priority={})",
-        cls.id, cls.queue_id, cls.direction, cls.priority
+        "QoS classifier created: {} (queue={}, priority={})",
+        cls.id, cls.queue_id, cls.priority
     );
     Ok(())
 }

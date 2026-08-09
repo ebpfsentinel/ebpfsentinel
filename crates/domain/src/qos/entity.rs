@@ -126,8 +126,6 @@ pub struct QosClassifier {
     pub id: String,
     /// Queue this classifier maps to.
     pub queue_id: String,
-    /// Direction (ingress/egress/both).
-    pub direction: QosDirection,
     /// Match criteria.
     pub match_rule: QosMatchRule,
     /// Priority (lower = matched first).

@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 use super::error::{ApiError, ErrorBody};
 use super::middleware::rbac::require_write_access;
 use super::state::AppState;
-use super::validation::{MAX_ID_LENGTH, MAX_SHORT_STRING_LENGTH, validate_string_length};
+use super::validation::{MAX_ID_LENGTH, validate_string_length};
 
 // ── Request / Response DTOs ─────────────────────────────────────────
 
@@ -31,6 +31,11 @@ pub struct QosPipeResponse {
     pub id: String,
     pub rate_bps: u64,
     pub burst_bytes: u64,
+    /// Which hook the pipe shapes: `ingress`, `egress` or `both`.
+    pub direction: String,
+    pub delay_ms: u32,
+    pub loss_pct: f32,
+    pub enabled: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -44,7 +49,6 @@ pub struct QosQueueResponse {
 pub struct QosClassifierResponse {
     pub id: String,
     pub queue_id: String,
-    pub direction: String,
     pub priority: u32,
     pub match_rule: QosMatchRuleResponse,
 }
@@ -70,6 +74,19 @@ pub struct CreateQosPipeRequest {
     pub rate_bps: u64,
     #[serde(default)]
     pub burst_bytes: u64,
+    /// Which hook the pipe shapes: `ingress`, `egress` or `both`.
+    #[serde(default = "default_direction")]
+    pub direction: String,
+    /// Added latency in milliseconds, paced on egress via the fq qdisc.
+    #[serde(default)]
+    pub delay_ms: u32,
+    /// Random packet loss, 0.0 to 100.0.
+    #[serde(default)]
+    pub loss_pct: f32,
+}
+
+fn default_direction() -> String {
+    "egress".to_string()
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -90,18 +107,12 @@ pub struct CreateQosClassifierRequest {
     pub queue_id: String,
     #[serde(default = "default_priority")]
     pub priority: u32,
-    #[serde(default = "default_direction")]
-    pub direction: String,
     #[serde(default)]
     pub match_rule: Option<CreateQosMatchRuleRequest>,
 }
 
 fn default_priority() -> u32 {
     100
-}
-
-fn default_direction() -> String {
-    "egress".to_string()
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -131,6 +142,10 @@ impl QosPipeResponse {
             id: pipe.id.clone(),
             rate_bps: pipe.rate_bps,
             burst_bytes: pipe.burst_bytes,
+            direction: pipe.direction.as_str().to_string(),
+            delay_ms: pipe.delay_ms,
+            loss_pct: pipe.loss_pct,
+            enabled: pipe.enabled,
         }
     }
 }
@@ -150,7 +165,6 @@ impl QosClassifierResponse {
         Self {
             id: cls.id.clone(),
             queue_id: cls.queue_id.clone(),
-            direction: cls.direction.as_str().to_string(),
             priority: cls.priority,
             match_rule: QosMatchRuleResponse {
                 src_ip: cls.match_rule.src_ip.clone(),
@@ -247,14 +261,36 @@ pub async fn create_qos_pipe(
     }
     validate_string_length("id", &req.id, MAX_ID_LENGTH)?;
 
+    let direction = match req.direction.to_lowercase().as_str() {
+        "ingress" | "in" => QosDirection::Ingress,
+        "egress" | "out" => QosDirection::Egress,
+        "both" | "all" => QosDirection::Both,
+        _ => {
+            return Err(ApiError::BadRequest {
+                code: "VALIDATION_ERROR",
+                message: format!(
+                    "invalid direction '{}': expected ingress, egress, or both",
+                    req.direction
+                ),
+            });
+        }
+    };
+
+    if !(0.0..=100.0).contains(&req.loss_pct) {
+        return Err(ApiError::BadRequest {
+            code: "VALIDATION_ERROR",
+            message: format!("invalid loss_pct '{}': expected 0.0 to 100.0", req.loss_pct),
+        });
+    }
+
     let pipe = QosPipe {
         id: req.id,
         rate_bps: req.rate_bps,
         burst_bytes: req.burst_bytes,
-        delay_ms: 0,
-        loss_pct: 0.0,
+        delay_ms: req.delay_ms,
+        loss_pct: req.loss_pct,
         priority: 0,
-        direction: QosDirection::Egress,
+        direction,
         enabled: true,
         group_mask: 0,
     };
@@ -465,22 +501,6 @@ pub async fn create_qos_classifier(
     }
     validate_string_length("id", &req.id, MAX_ID_LENGTH)?;
     validate_string_length("queue_id", &req.queue_id, MAX_ID_LENGTH)?;
-    validate_string_length("direction", &req.direction, MAX_SHORT_STRING_LENGTH)?;
-
-    let direction = match req.direction.to_lowercase().as_str() {
-        "ingress" | "in" => QosDirection::Ingress,
-        "egress" | "out" => QosDirection::Egress,
-        "both" | "all" => QosDirection::Both,
-        _ => {
-            return Err(ApiError::BadRequest {
-                code: "VALIDATION_ERROR",
-                message: format!(
-                    "invalid direction '{}': expected ingress, egress, or both",
-                    req.direction
-                ),
-            });
-        }
-    };
 
     let match_rule = if let Some(mr) = req.match_rule {
         QosMatchRule {
@@ -499,7 +519,6 @@ pub async fn create_qos_classifier(
     let classifier = QosClassifier {
         id: req.id,
         queue_id: req.queue_id,
-        direction,
         match_rule,
         priority: req.priority,
         group_mask: 0,
@@ -572,6 +591,9 @@ mod tests {
         assert_eq!(resp.id, "p-1");
         assert_eq!(resp.rate_bps, 1_000_000);
         assert_eq!(resp.burst_bytes, 125_000);
+        assert_eq!(resp.direction, "egress");
+        assert_eq!(resp.delay_ms, 0);
+        assert!(resp.enabled);
     }
 
     #[test]
@@ -593,7 +615,6 @@ mod tests {
         let cls = QosClassifier {
             id: "c-1".to_string(),
             queue_id: "q-1".to_string(),
-            direction: QosDirection::Egress,
             match_rule: QosMatchRule {
                 src_ip: Some("10.0.0.0/8".to_string()),
                 dst_ip: None,
@@ -609,7 +630,6 @@ mod tests {
         let resp = QosClassifierResponse::from_domain(&cls);
         assert_eq!(resp.id, "c-1");
         assert_eq!(resp.queue_id, "q-1");
-        assert_eq!(resp.direction, "egress");
         assert_eq!(resp.priority, 100);
         assert_eq!(resp.match_rule.src_ip.as_deref(), Some("10.0.0.0/8"));
         assert!(resp.match_rule.dst_ip.is_none());
@@ -623,10 +643,17 @@ mod tests {
             id: "p-1".to_string(),
             rate_bps: 1_000_000,
             burst_bytes: 125_000,
+            direction: "both".to_string(),
+            delay_ms: 20,
+            loss_pct: 0.5,
+            enabled: true,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "p-1");
         assert_eq!(json["rate_bps"], 1_000_000);
+        assert_eq!(json["direction"], "both");
+        assert_eq!(json["delay_ms"], 20);
+        assert!(json["enabled"].as_bool().unwrap());
     }
 
     #[test]
@@ -647,7 +674,6 @@ mod tests {
         let resp = QosClassifierResponse {
             id: "c-1".to_string(),
             queue_id: "q-1".to_string(),
-            direction: "egress".to_string(),
             priority: 100,
             match_rule: QosMatchRuleResponse {
                 src_ip: None,
@@ -661,7 +687,7 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "c-1");
-        assert_eq!(json["direction"], "egress");
+        assert_eq!(json["priority"], 100);
         // src_ip/dst_ip should be absent (skip_serializing_if)
         assert!(json.get("match_rule").unwrap().get("src_ip").is_none());
     }

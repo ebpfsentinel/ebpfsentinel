@@ -237,7 +237,6 @@ mod tests {
         QosClassifier {
             id: id.to_string(),
             queue_id: queue_id.to_string(),
-            direction: QosDirection::Egress,
             match_rule: QosMatchRule::default(),
             priority: 100,
             group_mask: 0,

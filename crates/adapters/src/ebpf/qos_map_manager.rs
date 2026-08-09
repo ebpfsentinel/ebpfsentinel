@@ -453,11 +453,10 @@ mod tests {
 
     #[test]
     fn classifier_to_ebpf_wildcard() {
-        use domain::qos::entity::{QosClassifier, QosDirection, QosMatchRule};
+        use domain::qos::entity::{QosClassifier, QosMatchRule};
         let cls = QosClassifier {
             id: "c-1".to_string(),
             queue_id: "q-1".to_string(),
-            direction: QosDirection::Egress,
             match_rule: QosMatchRule::default(),
             priority: 100,
             group_mask: 0,
@@ -476,11 +475,10 @@ mod tests {
 
     #[test]
     fn classifier_to_ebpf_with_match() {
-        use domain::qos::entity::{QosClassifier, QosDirection, QosMatchRule};
+        use domain::qos::entity::{QosClassifier, QosMatchRule};
         let cls = QosClassifier {
             id: "c-2".to_string(),
             queue_id: "q-1".to_string(),
-            direction: QosDirection::Ingress,
             match_rule: QosMatchRule {
                 src_ip: Some("10.0.0.0/8".to_string()),
                 dst_ip: Some("192.168.1.1".to_string()),
@@ -512,7 +510,6 @@ mod tests {
         QosClassifier {
             id: id.to_string(),
             queue_id: queue_id.to_string(),
-            direction: QosDirection::Egress,
             match_rule: QosMatchRule {
                 dst_port,
                 ..QosMatchRule::default()

@@ -639,7 +639,6 @@ impl QosClassifierConfig {
             id: self.id.clone(),
             queue_id: self.queue_id.clone(),
             priority: u32::from(self.priority),
-            direction: QosDirection::default(),
             match_rule: QosMatchRule {
                 src_ip: self.match_rule.src_ip.clone(),
                 dst_ip: self.match_rule.dst_ip.clone(),
