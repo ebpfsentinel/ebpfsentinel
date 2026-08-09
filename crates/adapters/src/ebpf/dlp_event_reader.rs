@@ -1,6 +1,7 @@
 #![allow(unsafe_code)] // Required for eBPF RingBuf event parsing (read_unaligned)
 
 use crate::ebpf::map_store::MapStore;
+use crate::ebpf::ringbuf_observer::{RingBufObserver, event_timestamp_ns};
 use aya::maps::{MapData, RingBuf};
 use domain::common::agent_event::AgentEvent;
 use ebpf_common::dlp::{DLP_MAX_EXCERPT, DlpEvent};
@@ -47,7 +48,14 @@ impl DlpEventReader {
     ///
     /// Exits when the `cancel` token is triggered, the `RingBuf` errors, or
     /// the runtime shuts down.
-    pub async fn run(self, tx: mpsc::Sender<AgentEvent>, cancel: CancellationToken) {
+    /// `observer` accounts for what this loop drains and for what it throws
+    /// away on a full channel.
+    pub async fn run(
+        self,
+        tx: mpsc::Sender<AgentEvent>,
+        cancel: CancellationToken,
+        observer: RingBufObserver,
+    ) {
         let mut async_fd = self.ring_buf;
 
         loop {
@@ -67,6 +75,8 @@ impl DlpEventReader {
                 }
             };
 
+            // One clock read per batch, not per record.
+            let now_ns = observer.now_ns();
             let rb = guard.get_inner_mut();
             // pid(4) + tgid(4) + timestamp_ns(8) + cgroup_id(8) + data_len(4) + direction(1) + padding(3)
             let header_size = 32_usize;
@@ -100,9 +110,17 @@ impl DlpEventReader {
                     let copy_len = excerpt_bytes.len().min(DLP_MAX_EXCERPT);
                     event.data_excerpt[..copy_len].copy_from_slice(&excerpt_bytes[..copy_len]);
 
-                    if tx.try_send(AgentEvent::Dlp(Box::new(event))).is_err() {
+                    let event = AgentEvent::Dlp(Box::new(event));
+                    observer.drained(now_ns, event_timestamp_ns(&event));
+                    if tx.try_send(event).is_err() {
+                        observer.dropped("channel_full");
                         debug!("DLP event channel full, dropping event");
                     }
+                } else {
+                    // Shorter than the 32-byte header both event shapes share.
+                    // Counted rather than skipped: an unreadable record is a
+                    // loss, and silence would hide it.
+                    observer.dropped("truncated_record");
                 }
             }
 

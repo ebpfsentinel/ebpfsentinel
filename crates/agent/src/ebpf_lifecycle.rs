@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use adapters::ebpf::{
     ConfigFlagsManager, EbpfLoader, InterfaceGroupsManager, L7PortsManager, MetricsReader,
-    TenantCgroupMapManager, TenantSubnetMapManager, TenantVlanMapManager,
+    RingBufObserver, TenantCgroupMapManager, TenantSubnetMapManager, TenantVlanMapManager,
 };
 use application::packet_pipeline::AgentEvent;
 use infrastructure::config::AgentConfig;
-use ports::secondary::metrics_port::FirewallMetrics;
+use ports::secondary::metrics_port::{FirewallMetrics, MetricsPort};
 use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -80,6 +80,15 @@ impl EbpfProgramManager {
     /// Get a clone of the shared metrics readers handle (for the kernel metrics loop).
     pub fn shared_metrics_readers(&self) -> Arc<RwLock<Vec<MetricsReader>>> {
         Arc::clone(&self.metrics_readers)
+    }
+
+    /// Ring-buffer accounting for the reader a hot-reload is about to spawn,
+    /// labelled by the program that feeds it.
+    fn ringbuf_observer(&self, source: &'static str) -> RingBufObserver {
+        RingBufObserver::new(
+            source,
+            Arc::clone(&self.services.metrics) as Arc<dyn MetricsPort>,
+        )
     }
 
     /// Register a pre-loaded program (used during startup to migrate from legacy path).
@@ -244,7 +253,8 @@ impl EbpfProgramManager {
         let cancel = CancellationToken::new();
         let tx = self.event_tx.clone();
         let c = cancel.clone();
-        let jh = tokio::spawn(async move { reader.run(tx, c).await });
+        let obs = self.ringbuf_observer("tc-ids");
+        let jh = tokio::spawn(async move { reader.run(tx, c, obs).await });
 
         let reader_handles = vec![jh];
 
@@ -296,7 +306,8 @@ impl EbpfProgramManager {
         let cancel = CancellationToken::new();
         let tx = self.event_tx.clone();
         let c = cancel.clone();
-        let jh = tokio::spawn(async move { reader.run(tx, c).await });
+        let obs = self.ringbuf_observer("tc-threatintel");
+        let jh = tokio::spawn(async move { reader.run(tx, c, obs).await });
 
         if let Some(ti_mgr) = ti_mgr_opt {
             let mut svc = (**self.services.ti_svc.load()).clone();
@@ -336,7 +347,8 @@ impl EbpfProgramManager {
         let cancel = CancellationToken::new();
         let tx = self.event_tx.clone();
         let c = cancel.clone();
-        let jh = tokio::spawn(async move { reader.run(tx, c).await });
+        let obs = self.ringbuf_observer("tc-dns");
+        let jh = tokio::spawn(async move { reader.run(tx, c, obs).await });
 
         let reader_handles = vec![jh];
 
@@ -373,7 +385,8 @@ impl EbpfProgramManager {
         if let Some(reader) = opt_reader {
             let tx = self.event_tx.clone();
             let c = cancel.clone();
-            handles.push(tokio::spawn(async move { reader.run(tx, c).await }));
+            let obs = self.ringbuf_observer("tc-conntrack");
+            handles.push(tokio::spawn(async move { reader.run(tx, c, obs).await }));
         }
 
         self.services
@@ -495,7 +508,8 @@ impl EbpfProgramManager {
         let cancel = CancellationToken::new();
         let tx = self.event_tx.clone();
         let c = cancel.clone();
-        let jh = tokio::spawn(async move { reader.run(tx, c).await });
+        let obs = self.ringbuf_observer("uprobe-dlp");
+        let jh = tokio::spawn(async move { reader.run(tx, c, obs).await });
 
         // Lifecycle watcher: attach SSL uprobes to containers as they appear and
         // detach them on teardown. Shares the reader's cancel so a hot-reload
@@ -633,7 +647,8 @@ impl EbpfProgramManager {
                 let cancel = CancellationToken::new();
                 let tx = self.event_tx.clone();
                 let c = cancel.clone();
-                let jh = tokio::spawn(async move { reader.run(tx, c).await });
+                let obs = self.ringbuf_observer("xdp-firewall");
+                let jh = tokio::spawn(async move { reader.run(tx, c, obs).await });
 
                 self.services
                     .firewall_svc
@@ -697,7 +712,8 @@ impl EbpfProgramManager {
                 let cancel = CancellationToken::new();
                 let tx = self.event_tx.clone();
                 let c = cancel.clone();
-                let jh = tokio::spawn(async move { reader.run(tx, c).await });
+                let obs = self.ringbuf_observer("xdp-ratelimit");
+                let jh = tokio::spawn(async move { reader.run(tx, c, obs).await });
 
                 if let Some(rl_mgr) = rl_mgr_opt {
                     self.services
@@ -756,7 +772,8 @@ impl EbpfProgramManager {
                 let cancel = CancellationToken::new();
                 let tx = self.event_tx.clone();
                 let c = cancel.clone();
-                let jh = tokio::spawn(async move { reader.run(tx, c).await });
+                let obs = self.ringbuf_observer("xdp-loadbalancer");
+                let jh = tokio::spawn(async move { reader.run(tx, c, obs).await });
 
                 self.services
                     .lb_svc

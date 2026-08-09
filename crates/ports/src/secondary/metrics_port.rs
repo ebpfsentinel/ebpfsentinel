@@ -171,6 +171,28 @@ pub trait ConfigMetrics: Send + Sync {
 pub trait EventMetrics: Send + Sync {
     /// Record a dropped event with a reason label.
     fn record_event_dropped(&self, _reason: &str) {}
+
+    /// Record one record drained from a datapath ring buffer, labelled by the
+    /// program that produced it.
+    ///
+    /// This closes an accounting gap. The kernel side already counts what it
+    /// refused to emit, in the `events_dropped` slot of each program's metrics
+    /// map. Userspace counted nothing: a record that was committed and then
+    /// thrown away at the channel looked exactly like a record the kernel
+    /// never emitted. Drained, dropped-in-userspace and refused-by-the-kernel
+    /// are now three separate numbers, so a record that went missing between
+    /// the commit and the pipeline is visible instead of inferred.
+    fn record_ringbuf_event(&self, _source: &str) {}
+
+    /// Record a drained record that userspace threw away before the pipeline
+    /// saw it, labelled by the producing program and the reason.
+    fn record_ringbuf_event_dropped(&self, _source: &str, _reason: &str) {}
+
+    /// Observe the delay between the kernel committing a ring-buffer record
+    /// and userspace draining it, in seconds.
+    ///
+    /// Both ends read `CLOCK_BOOTTIME`, so the two timestamps are comparable.
+    fn observe_ringbuf_latency(&self, _source: &str, _seconds: f64) {}
     /// Record an event processed by a specific dispatch worker.
     fn record_worker_event(&self, _worker_id: usize) {}
     /// Observe event processing duration for a specific worker.

@@ -23,6 +23,15 @@ use tokio_util::sync::CancellationToken;
 /// previous value (program reload zeroes the map) is treated as a counter
 /// reset: the new absolute value is taken as the delta.
 ///
+/// This loop is **not** a safety net for missed ring-buffer notifications and
+/// must not be retired alongside one. A `PerCpuArray` has no notification
+/// channel of any kind: nothing wakes userspace when the kernel bumps a slot,
+/// so polling is the only way to read these maps, and the delta arithmetic
+/// exists so the exported counter matches the kernel counter regardless of how
+/// often the poll happens. The event path is a separate mechanism entirely -
+/// the three ring-buffer readers are epoll-driven and observe a record as soon
+/// as the kernel commits it, without waiting for a tick here.
+///
 /// Accepts a shared `Arc<RwLock<Vec<MetricsReader>>>` so that readers
 /// can be added/removed dynamically as eBPF programs are loaded/unloaded.
 pub async fn run_kernel_metrics_loop(

@@ -1,6 +1,7 @@
 #![allow(unsafe_code)] // Required for eBPF RingBuf event parsing (read_unaligned)
 
 use crate::ebpf::map_store::MapStore;
+use crate::ebpf::ringbuf_observer::{RingBufObserver, event_timestamp_ns};
 use aya::maps::{MapData, RingBuf};
 use domain::common::agent_event::AgentEvent;
 use ebpf_common::dns::DnsEvent;
@@ -42,7 +43,14 @@ impl DnsEventReader {
     ///
     /// Exits when the `cancel` token is triggered, the `RingBuf` errors, or
     /// the runtime shuts down.
-    pub async fn run(self, tx: mpsc::Sender<AgentEvent>, cancel: CancellationToken) {
+    /// `observer` accounts for what this loop drains and for what it throws
+    /// away on a full channel.
+    pub async fn run(
+        self,
+        tx: mpsc::Sender<AgentEvent>,
+        cancel: CancellationToken,
+        observer: RingBufObserver,
+    ) {
         let mut async_fd = self.ring_buf;
 
         loop {
@@ -62,6 +70,8 @@ impl DnsEventReader {
                 }
             };
 
+            // One clock read per batch, not per record.
+            let now_ns = observer.now_ns();
             let rb = guard.get_inner_mut();
             while let Some(item) = rb.next() {
                 let bytes: &[u8] = &item;
@@ -83,9 +93,16 @@ impl DnsEventReader {
                     };
 
                     let event = AgentEvent::Dns { header, payload };
+                    observer.drained(now_ns, event_timestamp_ns(&event));
                     if tx.try_send(event).is_err() {
+                        observer.dropped("channel_full");
                         debug!("DNS event channel full, dropping event");
                     }
+                } else {
+                    // Shorter than the header the kernel is contracted to
+                    // write. Counted rather than skipped: an unreadable record
+                    // is a loss, and silence would hide it.
+                    observer.dropped("truncated_record");
                 }
             }
 

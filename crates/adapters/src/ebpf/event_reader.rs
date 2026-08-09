@@ -1,6 +1,7 @@
 #![allow(unsafe_code)] // Required for eBPF RingBuf event parsing (read_unaligned)
 
 use crate::ebpf::map_store::MapStore;
+use crate::ebpf::ringbuf_observer::{RingBufObserver, event_timestamp_ns};
 use aya::maps::{MapData, RingBuf};
 use domain::common::agent_event::AgentEvent;
 use ebpf_common::event::{EVENT_TYPE_L7, PacketEvent};
@@ -63,7 +64,16 @@ impl EventReader {
     /// This is a long-running async task. It exits when the `RingBuf`
     /// encounters an unrecoverable error, the `cancel` token is triggered,
     /// or the runtime shuts down.
-    pub async fn run(self, tx: mpsc::Sender<AgentEvent>, cancel: CancellationToken) {
+    ///
+    /// `observer` accounts for what this loop drains and for what it throws
+    /// away on a full channel, so a discarded record is a number rather than a
+    /// debug line nobody reads.
+    pub async fn run(
+        self,
+        tx: mpsc::Sender<AgentEvent>,
+        cancel: CancellationToken,
+        observer: RingBufObserver,
+    ) {
         let mut async_fd = self.ring_buf;
 
         loop {
@@ -84,14 +94,25 @@ impl EventReader {
                 }
             };
 
-            // Batch drain: read all available events
+            // Batch drain: read all available events. One clock read for the
+            // whole batch, not one per record: the loop is tight enough that a
+            // per-record syscall would cost more than the measurement is worth.
+            let now_ns = observer.now_ns();
             let rb = guard.get_inner_mut();
             while let Some(item) = rb.next() {
                 if let Some(agent_event) = decode_event(&item) {
+                    let event_ts_ns = event_timestamp_ns(&agent_event);
+                    observer.drained(now_ns, event_ts_ns);
                     // Backpressure: drop on full channel
                     if tx.try_send(agent_event).is_err() {
+                        observer.dropped("channel_full");
                         debug!("event channel full, dropping event");
                     }
+                } else {
+                    // A record the kernel committed and userspace could not
+                    // read. Counted, because a silent decode failure is
+                    // indistinguishable from an event that never happened.
+                    observer.dropped("decode_failed");
                 }
             }
 

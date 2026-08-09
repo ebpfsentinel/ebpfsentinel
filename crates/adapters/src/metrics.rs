@@ -24,6 +24,19 @@ pub struct ReasonLabels {
     pub reason: String,
 }
 
+/// Labels for the per-program ring-buffer counters. `source` is the eBPF
+/// program that produced the record (`tc-ids`, `xdp-firewall`, …).
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct RingBufLabels {
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct RingBufDropLabels {
+    pub source: String,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct GeoLookupLabels {
     /// `hit` when the IP resolved to a country, `miss` otherwise.
@@ -185,6 +198,18 @@ pub struct AgentMetrics {
     pub lb_vip_takeovers_total: Family<VipLabels, Counter>,
     pub worker_events_total: Family<WorkerLabels, Counter>,
     pub worker_processing_duration: Family<WorkerLabels, Histogram>,
+    /// Records drained from a datapath ring buffer, per producing program.
+    /// Paired with the kernel-side `events_dropped` slot of the same
+    /// program's metrics map, this separates what the kernel refused to
+    /// emit from what userspace received.
+    pub ringbuf_events_total: Family<RingBufLabels, Counter>,
+    /// Drained records userspace threw away before the pipeline saw them.
+    /// Without this a committed-then-discarded record is indistinguishable
+    /// from one the kernel never emitted.
+    pub ringbuf_events_dropped_total: Family<RingBufDropLabels, Counter>,
+    /// Delay between the kernel committing a record and userspace draining
+    /// it. Both ends read `CLOCK_BOOTTIME`, so the timestamps are comparable.
+    pub ringbuf_latency_seconds: Family<RingBufLabels, Histogram>,
     pub container_resolver_cache_hits_total: Counter,
     pub container_resolver_cache_misses_total: Counter,
     pub container_resolver_errors_total: Counter,
@@ -596,6 +621,32 @@ impl AgentMetrics {
             worker_processing_duration.clone(),
         );
 
+        let ringbuf_events_total = Family::<RingBufLabels, Counter>::default();
+        registry.register(
+            "ringbuf_events",
+            "Records drained from a datapath ring buffer, per producing program",
+            ringbuf_events_total.clone(),
+        );
+
+        let ringbuf_events_dropped_total = Family::<RingBufDropLabels, Counter>::default();
+        registry.register(
+            "ringbuf_events_dropped",
+            "Drained records discarded by userspace before the pipeline",
+            ringbuf_events_dropped_total.clone(),
+        );
+
+        // A record that sat in the ring for a whole second is a different
+        // failure from one drained in microseconds, so the range spans both.
+        let ringbuf_latency_seconds =
+            Family::<RingBufLabels, Histogram>::new_with_constructor(|| {
+                Histogram::new(exponential_buckets_range(0.000_001, 1.0, 16))
+            });
+        registry.register(
+            "ringbuf_latency_seconds",
+            "Delay between the kernel committing a ring-buffer record and userspace draining it",
+            ringbuf_latency_seconds.clone(),
+        );
+
         let container_resolver_cache_hits_total = Counter::default();
         registry.register(
             "container_resolver_cache_hits",
@@ -688,6 +739,9 @@ impl AgentMetrics {
             lb_vip_takeovers_total,
             worker_events_total,
             worker_processing_duration,
+            ringbuf_events_total,
+            ringbuf_events_dropped_total,
+            ringbuf_latency_seconds,
             container_resolver_cache_hits_total,
             container_resolver_cache_misses_total,
             container_resolver_errors_total,
@@ -988,6 +1042,31 @@ impl EventMetrics for AgentMetrics {
                 worker_id: worker_id.to_string(),
             })
             .observe(duration_seconds);
+    }
+
+    fn record_ringbuf_event(&self, source: &str) {
+        self.ringbuf_events_total
+            .get_or_create(&RingBufLabels {
+                source: source.to_string(),
+            })
+            .inc();
+    }
+
+    fn record_ringbuf_event_dropped(&self, source: &str, reason: &str) {
+        self.ringbuf_events_dropped_total
+            .get_or_create(&RingBufDropLabels {
+                source: source.to_string(),
+                reason: reason.to_string(),
+            })
+            .inc();
+    }
+
+    fn observe_ringbuf_latency(&self, source: &str, seconds: f64) {
+        self.ringbuf_latency_seconds
+            .get_or_create(&RingBufLabels {
+                source: source.to_string(),
+            })
+            .observe(seconds);
     }
 }
 

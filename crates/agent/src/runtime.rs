@@ -448,8 +448,8 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
 // ── eBPF lifecycle ──────────────────────────────────────────────
 
 use adapters::ebpf::{
-    EbpfLoader, IdsMirrorMapManager, InterfaceGroupsManager, MetricsReader, TenantCgroupMapManager,
-    TenantSubnetMapManager, TenantVlanMapManager,
+    EbpfLoader, IdsMirrorMapManager, InterfaceGroupsManager, MetricsReader, RingBufObserver,
+    TenantCgroupMapManager, TenantSubnetMapManager, TenantVlanMapManager,
 };
 use application::packet_pipeline::AgentEvent;
 use tokio::sync::mpsc;
@@ -538,9 +538,15 @@ pub async fn load_ebpf_programs(
         match startup::try_load_xdp_firewall(&ebpf_dir, config, &domain_rules) {
             Ok((loader, map_manager, fw_metrics_rdr, reader, zone_mgr, _zone_rdrs)) => {
                 let event_tx_clone = event_tx.clone();
-                tokio::spawn(
-                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                let rb_obs = RingBufObserver::new(
+                    "xdp-firewall",
+                    Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
                 );
+                tokio::spawn(async move {
+                    reader
+                        .run(event_tx_clone, CancellationToken::new(), rb_obs)
+                        .await;
+                });
                 let mut svc = services.firewall_svc.write().await;
                 svc.set_map_port(Box::new(map_manager));
                 if let Some(rdr) = fw_metrics_rdr {
@@ -575,9 +581,15 @@ pub async fn load_ebpf_programs(
         match startup::try_load_xdp_ratelimit(&ebpf_dir, config, fw_ok) {
             Ok((mut rl_loader, rl_mgr_opt, _rl_lpm_opt, rl_rdrs, reader)) => {
                 let event_tx_clone = event_tx.clone();
-                tokio::spawn(
-                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                let rb_obs = RingBufObserver::new(
+                    "xdp-ratelimit",
+                    Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
                 );
+                tokio::spawn(async move {
+                    reader
+                        .run(event_tx_clone, CancellationToken::new(), rb_obs)
+                        .await;
+                });
                 metrics_readers.extend(rl_rdrs);
                 if let Some(rl_mgr) = rl_mgr_opt {
                     let mut svc = services.rl_svc.write().await;
@@ -629,9 +641,15 @@ pub async fn load_ebpf_programs(
         match startup::try_load_tc_ids(&ebpf_dir, config) {
             Ok((mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr, reader)) => {
                 let event_tx_clone = event_tx.clone();
-                tokio::spawn(
-                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                let rb_obs = RingBufObserver::new(
+                    "tc-ids",
+                    Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
                 );
+                tokio::spawn(async move {
+                    reader
+                        .run(event_tx_clone, CancellationToken::new(), rb_obs)
+                        .await;
+                });
                 if let Some(ids_mgr) = ids_mgr_opt {
                     let mut svc = (**services.ids_svc.load()).clone();
                     svc.set_map_port(Box::new(ids_mgr));
@@ -673,9 +691,15 @@ pub async fn load_ebpf_programs(
         match startup::try_load_tc_threatintel(&ebpf_dir, config) {
             Ok((mut loader, ti_mgr_opt, cfg_mgr_opt, ti_rdr, reader)) => {
                 let event_tx_clone = event_tx.clone();
-                tokio::spawn(
-                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                let rb_obs = RingBufObserver::new(
+                    "tc-threatintel",
+                    Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
                 );
+                tokio::spawn(async move {
+                    reader
+                        .run(event_tx_clone, CancellationToken::new(), rb_obs)
+                        .await;
+                });
                 if let Some(rdr) = ti_rdr {
                     metrics_readers.push(rdr);
                 }
@@ -706,9 +730,15 @@ pub async fn load_ebpf_programs(
         match startup::try_load_tc_dns(&ebpf_dir, config) {
             Ok((mut loader, dns_rdr, reader)) => {
                 let event_tx_clone = event_tx.clone();
-                tokio::spawn(
-                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                let rb_obs = RingBufObserver::new(
+                    "tc-dns",
+                    Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
                 );
+                tokio::spawn(async move {
+                    reader
+                        .run(event_tx_clone, CancellationToken::new(), rb_obs)
+                        .await;
+                });
                 if let Some(rdr) = dns_rdr {
                     metrics_readers.push(rdr);
                 }
@@ -731,9 +761,15 @@ pub async fn load_ebpf_programs(
         match startup::try_load_uprobe_dlp(&ebpf_dir, config, startup::DLP_PIN_PATH) {
             Ok((mut loader, dlp_rdr, reader, attacher)) => {
                 let event_tx_clone = event_tx.clone();
-                tokio::spawn(
-                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                let rb_obs = RingBufObserver::new(
+                    "uprobe-dlp",
+                    Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
                 );
+                tokio::spawn(async move {
+                    reader
+                        .run(event_tx_clone, CancellationToken::new(), rb_obs)
+                        .await;
+                });
                 // Lifecycle watcher: attach SSL uprobes to containers as they
                 // appear and detach them on teardown.
                 tokio::spawn(async move {
@@ -767,8 +803,14 @@ pub async fn load_ebpf_programs(
             Ok((mut loader, ct_mgr, ct_rdr, opt_reader)) => {
                 if let Some(reader) = opt_reader {
                     let event_tx_clone = event_tx.clone();
+                    let rb_obs = RingBufObserver::new(
+                        "tc-conntrack",
+                        Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
+                    );
                     tokio::spawn(async move {
-                        reader.run(event_tx_clone, CancellationToken::new()).await;
+                        reader
+                            .run(event_tx_clone, CancellationToken::new(), rb_obs)
+                            .await;
                     });
                 }
                 services
@@ -852,9 +894,15 @@ pub async fn load_ebpf_programs(
         match startup::try_load_xdp_loadbalancer(&ebpf_dir, config, fw_ok || rl_ok) {
             Ok((mut loader, lb_mgr, lb_metrics_rdr, reader)) => {
                 let event_tx_clone = event_tx.clone();
-                tokio::spawn(
-                    async move { reader.run(event_tx_clone, CancellationToken::new()).await },
+                let rb_obs = RingBufObserver::new(
+                    "xdp-loadbalancer",
+                    Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
                 );
+                tokio::spawn(async move {
+                    reader
+                        .run(event_tx_clone, CancellationToken::new(), rb_obs)
+                        .await;
+                });
                 services.lb_svc.write().await.set_map_port(Box::new(lb_mgr));
                 if let Some(rdr) = lb_metrics_rdr {
                     metrics_readers.push(rdr);
