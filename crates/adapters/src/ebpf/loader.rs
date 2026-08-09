@@ -298,6 +298,26 @@ impl EbpfLoader {
         program_name: &str,
         interface: &str,
     ) -> Result<(), anyhow::Error> {
+        self.attach_netkit(program_name, interface, super::netkit::BPF_NETKIT_PRIMARY)
+    }
+
+    /// Attach a TC program to the peer (egress) side of a netkit device.
+    /// Netkit devices carry no clsact qdisc, so a program that has to run on
+    /// the way out reaches this side rather than the TCX egress hook.
+    pub fn attach_tc_egress_via_netkit(
+        &mut self,
+        program_name: &str,
+        interface: &str,
+    ) -> Result<(), anyhow::Error> {
+        self.attach_netkit(program_name, interface, super::netkit::BPF_NETKIT_PEER)
+    }
+
+    fn attach_netkit(
+        &mut self,
+        program_name: &str,
+        interface: &str,
+        attach_type: u32,
+    ) -> Result<(), anyhow::Error> {
         use super::netkit::{BPF_NETKIT_PRIMARY, netkit_attach_by_name};
 
         let Some(fd) = self.kfunc_progs.get(program_name) else {
@@ -306,11 +326,19 @@ impl EbpfLoader {
             ));
         };
         let prog_fd: RawFd = fd.as_raw_fd();
-        let link_fd = netkit_attach_by_name(prog_fd, interface, BPF_NETKIT_PRIMARY)?;
+        let link_fd = netkit_attach_by_name(prog_fd, interface, attach_type)?;
         // Store the link fd to keep the attachment alive.
         // When EbpfLoader is dropped, the link fd closes and detaches.
         self.netkit_links.push(link_fd);
-        info!(program_name, interface, "TC program attached via netkit");
+        let direction = if attach_type == BPF_NETKIT_PRIMARY {
+            "ingress"
+        } else {
+            "egress"
+        };
+        info!(
+            program_name,
+            interface, direction, "TC program attached via netkit"
+        );
         Ok(())
     }
 

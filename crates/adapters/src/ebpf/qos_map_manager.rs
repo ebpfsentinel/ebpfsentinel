@@ -1,9 +1,10 @@
 use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, HashMap, MapData};
 use domain::common::error::DomainError;
-use domain::qos::entity::{QosClassifier, QosPipe, QosQueue};
+use domain::qos::entity::{QosClassifier, QosDirection, QosPipe, QosQueue};
 use ebpf_common::qos::{
-    QosClassifierKey, QosClassifierValue, QosPipeConfig, QosQueueConfig, VLAN_ANY,
+    QOS_DIR_BOTH, QOS_DIR_EGRESS, QOS_DIR_INGRESS, QosClassifierKey, QosClassifierValue,
+    QosPipeConfig, QosQueueConfig, VLAN_ANY,
 };
 use ports::secondary::qos_map_port::QosMapPort;
 use tracing::info;
@@ -71,7 +72,8 @@ impl QosMapManager {
             enabled: u8::from(pipe.enabled),
             group_mask: pipe.group_mask,
             tenant_id: 0,
-            _pad: [0; 4],
+            direction: direction_to_ebpf(pipe.direction),
+            _pad: [0; 3],
         }
     }
 
@@ -201,7 +203,8 @@ impl QosMapManager {
             enabled: 0,
             group_mask: 0,
             tenant_id: 0,
-            _pad: [0; 4],
+            direction: QOS_DIR_EGRESS,
+            _pad: [0; 3],
         };
         for i in 0..count {
             let _ = self.pipe_config.set(i, zero, 0);
@@ -281,6 +284,18 @@ impl QosMapPort for QosMapManager {
     }
 }
 
+/// Encode a domain direction for the eBPF pipe config.
+///
+/// The program runs on both TC hooks and reads this byte to decide whether
+/// the pipe applies to the packet in front of it.
+fn direction_to_ebpf(direction: QosDirection) -> u8 {
+    match direction {
+        QosDirection::Ingress => QOS_DIR_INGRESS,
+        QosDirection::Egress => QOS_DIR_EGRESS,
+        QosDirection::Both => QOS_DIR_BOTH,
+    }
+}
+
 /// Parse an IP string (with optional CIDR suffix) to a big-endian `u32`.
 /// Returns `None` on parse failure.
 fn parse_ip_to_u32(s: &str) -> Option<u32> {
@@ -342,6 +357,29 @@ mod tests {
         let config = QosMapManager::pipe_to_ebpf(&pipe, 5);
         assert_eq!(config.ns_per_byte, 0);
         assert_eq!(config.pipe_id, 5);
+    }
+
+    #[test]
+    fn pipe_to_ebpf_carries_the_configured_direction() {
+        for (direction, expected) in [
+            (QosDirection::Egress, QOS_DIR_EGRESS),
+            (QosDirection::Ingress, QOS_DIR_INGRESS),
+            (QosDirection::Both, QOS_DIR_BOTH),
+        ] {
+            let pipe = QosPipe {
+                id: "p-dir".to_string(),
+                rate_bps: 1_000_000,
+                burst_bytes: 64_000,
+                delay_ms: 0,
+                loss_pct: 0.0,
+                priority: 0,
+                direction,
+                enabled: true,
+                group_mask: 0,
+            };
+            let config = QosMapManager::pipe_to_ebpf(&pipe, 1);
+            assert_eq!(config.direction, expected, "direction {direction}");
+        }
     }
 
     #[test]

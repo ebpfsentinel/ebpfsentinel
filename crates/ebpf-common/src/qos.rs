@@ -58,8 +58,37 @@ pub struct QosPipeConfig {
     pub group_mask: u32,
     /// Tenant ID (0 = floating rule, applies to all tenants).
     pub tenant_id: u32,
+    /// Which hook this pipe shapes: [`QOS_DIR_EGRESS`], [`QOS_DIR_INGRESS`]
+    /// or [`QOS_DIR_BOTH`]. The program is attached to both TC hooks, so a
+    /// pipe that does not name the hook it is running on must be skipped;
+    /// without this every pipe would be applied twice, once per direction.
+    pub direction: u8,
     /// Explicit trailing padding to reach 8-byte alignment (40 bytes total).
-    pub _pad: [u8; 4],
+    pub _pad: [u8; 3],
+}
+
+// ── Pipe direction ───────────────────────────────────────────────────
+
+/// [`QosPipeConfig::direction`]: shape packets leaving the interface.
+pub const QOS_DIR_EGRESS: u8 = 0;
+/// [`QosPipeConfig::direction`]: shape packets arriving on the interface.
+pub const QOS_DIR_INGRESS: u8 = 1;
+/// [`QosPipeConfig::direction`]: shape both directions.
+pub const QOS_DIR_BOTH: u8 = 2;
+
+/// Whether a pipe with `direction` shapes packets on the hook described by
+/// `is_ingress`.
+///
+/// Egress is the encoding of the default, so an unknown value shapes egress
+/// rather than nothing: a pipe whose direction userspace failed to translate
+/// still does the thing its configuration most likely asked for.
+#[must_use]
+pub const fn qos_direction_matches(direction: u8, is_ingress: bool) -> bool {
+    match direction {
+        QOS_DIR_BOTH => true,
+        QOS_DIR_INGRESS => is_ingress,
+        _ => !is_ingress,
+    }
 }
 
 /// `QoS` queue configuration written by userspace, read by eBPF.
@@ -232,7 +261,34 @@ mod tests {
         assert_eq!(mem::offset_of!(QosPipeConfig, enabled), 27);
         assert_eq!(mem::offset_of!(QosPipeConfig, group_mask), 28);
         assert_eq!(mem::offset_of!(QosPipeConfig, tenant_id), 32);
-        assert_eq!(mem::offset_of!(QosPipeConfig, _pad), 36);
+        assert_eq!(mem::offset_of!(QosPipeConfig, direction), 36);
+        assert_eq!(mem::offset_of!(QosPipeConfig, _pad), 37);
+    }
+
+    // ── Direction ────────────────────────────────────────────────────
+
+    #[test]
+    fn egress_pipes_only_shape_the_egress_hook() {
+        assert!(qos_direction_matches(QOS_DIR_EGRESS, false));
+        assert!(!qos_direction_matches(QOS_DIR_EGRESS, true));
+    }
+
+    #[test]
+    fn ingress_pipes_only_shape_the_ingress_hook() {
+        assert!(qos_direction_matches(QOS_DIR_INGRESS, true));
+        assert!(!qos_direction_matches(QOS_DIR_INGRESS, false));
+    }
+
+    #[test]
+    fn bidirectional_pipes_shape_both_hooks() {
+        assert!(qos_direction_matches(QOS_DIR_BOTH, true));
+        assert!(qos_direction_matches(QOS_DIR_BOTH, false));
+    }
+
+    #[test]
+    fn an_unknown_direction_falls_back_to_egress() {
+        assert!(qos_direction_matches(u8::MAX, false));
+        assert!(!qos_direction_matches(u8::MAX, true));
     }
 
     #[test]

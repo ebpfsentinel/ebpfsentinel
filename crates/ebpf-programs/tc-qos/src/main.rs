@@ -4,9 +4,9 @@
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
+    btf_maps::{Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
     helpers::{bpf_get_prandom_u32, bpf_ktime_get_boot_ns},
     macros::{btf_map, classifier},
-    btf_maps::{Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
     programs::TcContext,
 };
 use aya_ebpf_bindings::bindings::_bindgen_ty_28::BPF_SKB_TSTAMP_DELIVERY_MONO;
@@ -17,7 +17,7 @@ use ebpf_common::{
         QOS_METRIC_COUNT, QOS_METRIC_DELAYED, QOS_METRIC_DROPPED_LOSS, QOS_METRIC_DROPPED_QUEUE,
         QOS_METRIC_ERRORS, QOS_METRIC_EVENTS_DROPPED, QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN,
         QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig, QosQueueConfig,
-        VLAN_ANY,
+        VLAN_ANY, qos_direction_matches,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
@@ -74,11 +74,13 @@ static TENANT_VLAN_MAP: HashMap<u32, u32, 1024> = HashMap::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv4).
 #[btf_map]
-static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32, { MAX_TENANT_SUBNET_LPM_ENTRIES as usize }> = LpmTrie::new();
+static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32, { MAX_TENANT_SUBNET_LPM_ENTRIES as usize }> =
+    LpmTrie::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv6).
 #[btf_map]
-static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRIES as usize }> = LpmTrie::new();
+static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRIES as usize }> =
+    LpmTrie::new();
 
 // ── Constants ───────────────────────────────────────────────────────
 
@@ -178,8 +180,25 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) 
 /// TC classifier entry point for egress QoS. Default-to-pass on error (NFR15).
 #[classifier]
 pub fn tc_qos(ctx: TcContext) -> i32 {
+    dispatch(&ctx, false)
+}
+
+/// TC classifier entry point for ingress QoS. Default-to-pass on error (NFR15).
+///
+/// The hook a packet arrives on cannot be read from the context: `skb_iif`
+/// stays set to the incoming device while a forwarded packet travels the
+/// egress path, which is the normal case for a router. The direction is
+/// therefore carried by the entry point itself, one per hook, so a pipe can
+/// be matched against the hook it is actually running on.
+#[classifier]
+pub fn tc_qos_ingress(ctx: TcContext) -> i32 {
+    dispatch(&ctx, true)
+}
+
+#[inline(always)]
+fn dispatch(ctx: &TcContext, is_ingress: bool) -> i32 {
     increment_qos_metric(QOS_METRIC_TOTAL_SEEN);
-    let action = match try_tc_qos(&ctx) {
+    let action = match try_tc_qos(ctx, is_ingress) {
         Ok(action) => action,
         Err(()) => {
             increment_qos_metric(QOS_METRIC_ERRORS);
@@ -195,7 +214,7 @@ pub fn tc_qos(ctx: TcContext) -> i32 {
 // ── Packet processing ───────────────────────────────────────────────
 
 #[inline(always)]
-fn try_tc_qos(ctx: &TcContext) -> Result<i32, ()> {
+fn try_tc_qos(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     // Parse Ethernet header
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
@@ -222,9 +241,9 @@ fn try_tc_qos(ctx: &TcContext) -> Result<i32, ()> {
     }
 
     if ether_type == ETH_P_IP {
-        process_qos_v4(ctx, l3_offset, vlan_id, flags)
+        process_qos_v4(ctx, l3_offset, vlan_id, flags, is_ingress)
     } else if ether_type == ETH_P_IPV6 {
-        process_qos_v6(ctx, l3_offset, vlan_id, flags | FLAG_IPV6)
+        process_qos_v6(ctx, l3_offset, vlan_id, flags | FLAG_IPV6, is_ingress)
     } else {
         Ok(TC_ACT_OK)
     }
@@ -232,7 +251,13 @@ fn try_tc_qos(ctx: &TcContext) -> Result<i32, ()> {
 
 /// IPv4 `QoS` processing path.
 #[inline(always)]
-fn process_qos_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) -> Result<i32, ()> {
+fn process_qos_v4(
+    ctx: &TcContext,
+    l3_offset: usize,
+    vlan_id: u16,
+    flags: u8,
+    is_ingress: bool,
+) -> Result<i32, ()> {
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });
     let dst_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).dst_addr });
@@ -278,12 +303,19 @@ fn process_qos_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
         dscp,
         vlan_id,
         flags,
+        is_ingress,
     )
 }
 
 /// IPv6 `QoS` processing path.
 #[inline(always)]
-fn process_qos_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) -> Result<i32, ()> {
+fn process_qos_v6(
+    ctx: &TcContext,
+    l3_offset: usize,
+    vlan_id: u16,
+    flags: u8,
+    is_ingress: bool,
+) -> Result<i32, ()> {
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_raw = unsafe { (*ipv6hdr).src_addr };
     let dst_raw = unsafe { (*ipv6hdr).dst_addr };
@@ -342,6 +374,7 @@ fn process_qos_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
         dscp,
         vlan_id,
         flags,
+        is_ingress,
     )
 }
 
@@ -517,6 +550,7 @@ fn apply_qos(
     dscp: u8,
     vlan_id: u16,
     flags: u8,
+    is_ingress: bool,
 ) -> Result<i32, ()> {
     // Step 1: Classify the packet
     let classifier_val = match classify(src_ip, dst_ip, src_port, dst_port, protocol, dscp, vlan_id)
@@ -560,6 +594,13 @@ fn apply_qos(
     };
 
     if pipe_cfg.enabled == 0 {
+        return Ok(TC_ACT_OK);
+    }
+
+    // A pipe shapes one direction unless it declares both. Without this the
+    // program, which is attached to both hooks, would charge every packet
+    // against the same token bucket twice on forwarded traffic.
+    if !qos_direction_matches(pipe_cfg.direction, is_ingress) {
         return Ok(TC_ACT_OK);
     }
 

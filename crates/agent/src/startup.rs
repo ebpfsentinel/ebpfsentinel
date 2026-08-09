@@ -4373,8 +4373,19 @@ pub fn try_load_tc_qos(
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
+    // Egress is the hook shaping belongs on: EDT pacing hands the packet to
+    // the interface's fq qdisc, which only exists on the way out. Ingress
+    // carries the same program under a second entry point so a pipe declared
+    // `ingress` or `both` is enforced; each entry point only honours pipes
+    // that name its own direction.
     for iface in &config.agent.interfaces {
-        attach_tc_auto(&mut loader, "tc_qos", iface, config.agent.attach_mode)?;
+        attach_tc_egress_auto(&mut loader, "tc_qos", iface, config.agent.attach_mode)?;
+        attach_tc_auto(
+            &mut loader,
+            "tc_qos_ingress",
+            iface,
+            config.agent.attach_mode,
+        )?;
     }
 
     let qos_mgr = QosMapManager::new(loader.ebpf_mut())?;
@@ -4549,6 +4560,44 @@ fn attach_tc_auto(
                 }
             } else {
                 loader.attach_tc_program(program_name, iface)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Attach a TC program to the EGRESS hook of an interface, dispatching on
+/// [`AttachMode`] the same way [`attach_tc_auto`] does for ingress. Netkit
+/// devices take the peer side of the pair; everything else takes TCX egress.
+fn attach_tc_egress_auto(
+    loader: &mut adapters::ebpf::loader::EbpfLoader,
+    program_name: &str,
+    iface: &str,
+    mode: infrastructure::config::AttachMode,
+) -> anyhow::Result<()> {
+    use infrastructure::config::AttachMode;
+
+    match mode {
+        AttachMode::Netkit => {
+            loader.attach_tc_egress_via_netkit(program_name, iface)?;
+        }
+        AttachMode::Tc => {
+            loader.attach_tc_egress(program_name, iface)?;
+        }
+        AttachMode::Auto => {
+            if adapters::ebpf::netkit::is_netkit_device(iface) {
+                match loader.attach_tc_egress_via_netkit(program_name, iface) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        warn!(
+                            program_name, iface, error = %e,
+                            "netkit egress attach failed, falling back to TC"
+                        );
+                        loader.attach_tc_egress(program_name, iface)?;
+                    }
+                }
+            } else {
+                loader.attach_tc_egress(program_name, iface)?;
             }
         }
     }

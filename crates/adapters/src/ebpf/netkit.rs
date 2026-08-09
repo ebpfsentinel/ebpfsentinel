@@ -26,6 +26,9 @@ const BPF_LINK_CREATE: u32 = 28;
 /// `BPF_NETKIT_PRIMARY` attach type — ingress side of the netkit pair.
 pub const BPF_NETKIT_PRIMARY: u32 = 54;
 
+/// `BPF_NETKIT_PEER` attach type — egress side of the netkit pair.
+pub const BPF_NETKIT_PEER: u32 = 55;
+
 /// Subset of `union bpf_attr` for `BPF_LINK_CREATE`.
 #[repr(C)]
 #[derive(Default)]
