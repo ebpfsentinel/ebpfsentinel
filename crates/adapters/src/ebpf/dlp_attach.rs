@@ -37,6 +37,11 @@ pub const DLP_ATTACH_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// `SSL_*` record functions the DLP uprobes hook.
 const SSL_LIB_MARKERS: &[&str] = &["libssl.so", "libboringssl.so"];
 
+/// Marker the kernel appends to a mapping whose backing file was unlinked after
+/// the process mapped it. The inode stays alive and mapped; only its name is
+/// gone, so the mapping is still a valid — and still interesting — uprobe target.
+const DELETED_MARKER: &str = " (deleted)";
+
 /// SSL uprobe attach points: (loader program name, exported symbol, `is_uretprobe`).
 const SSL_UPROBES: &[(&str, &str, bool)] = &[
     ("ssl_write", "SSL_write", false),
@@ -49,7 +54,8 @@ const SSL_UPROBES: &[(&str, &str, bool)] = &[
 pub struct UprobeTarget {
     /// Path the loader opens to resolve symbols and attach — the library seen
     /// through the owning process's root (`/proc/<pid>/root/<lib>`), so it
-    /// resolves inside that process's mount namespace.
+    /// resolves inside that process's mount namespace, or the mapping's
+    /// `/proc/<pid>/map_files` entry when the file has been unlinked.
     pub attach_path: PathBuf,
     /// Library basename, for logging.
     pub lib: String,
@@ -106,26 +112,91 @@ pub struct ReconcileOutcome {
     pub detached: usize,
 }
 
-/// Extract the distinct in-container absolute paths of mapped SSL libraries from
-/// the contents of a `/proc/<pid>/maps` file.
-fn ssl_paths_in_maps(maps: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
+/// One file-backed SSL library mapping found in a `/proc/<pid>/maps`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SslMapping {
+    /// Absolute path as seen inside the mapping process's mount namespace, with
+    /// the kernel's `(deleted)` marker stripped off.
+    path: String,
+    /// Name of this mapping's `/proc/<pid>/map_files` entry.
+    map_file: String,
+    /// The backing file was unlinked after the process mapped it, so `path` no
+    /// longer names this inode — and may since name a different one.
+    deleted: bool,
+}
+
+/// Split a maps line into its five fixed columns and the pathname remainder.
+///
+/// The pathname is deliberately taken as *the rest of the line* rather than as a
+/// sixth whitespace-delimited field: it can legitimately contain spaces, and the
+/// kernel appends `" (deleted)"` to it for an unlinked file. Splitting on
+/// whitespace truncates both cases at the first space.
+fn split_maps_line(line: &str) -> Option<([&str; 5], &str)> {
+    let mut cols = [""; 5];
+    let mut rest = line.trim_start();
+    for col in &mut cols {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        if end == 0 {
+            return None; // fewer columns than a maps line has
+        }
+        *col = &rest[..end];
+        rest = rest[end..].trim_start();
+    }
+    Some((cols, rest))
+}
+
+/// Translate a maps address column into the corresponding `map_files` entry name.
+///
+/// The two are formatted differently: `maps` zero-pads each address to eight hex
+/// digits, `map_files` does not, so the mapping printed as `00400000-00401000` is
+/// named `400000-401000`. Re-format instead of reusing the column verbatim.
+fn map_files_name(range: &str) -> Option<String> {
+    let (start, end) = range.split_once('-')?;
+    let start = u64::from_str_radix(start, 16).ok()?;
+    let end = u64::from_str_radix(end, 16).ok()?;
+    Some(format!("{start:x}-{end:x}"))
+}
+
+/// Extract the distinct SSL library mappings from the contents of a
+/// `/proc/<pid>/maps` file, one entry per (path, deleted) pair — a process that
+/// maps both a replaced library and its replacement holds two live inodes and
+/// both are probe targets.
+fn ssl_mappings_in_maps(maps: &str) -> Vec<SslMapping> {
+    let mut out: BTreeMap<(String, bool), SslMapping> = BTreeMap::new();
     for line in maps.lines() {
-        // maps line: "addr perms offset dev inode pathname". The pathname is the
-        // 6th field and the only one that can begin with '/'; anonymous and
-        // pseudo mappings ("[heap]", "[stack]") are dropped by the '/' guard.
-        let Some(path) = line.split_whitespace().nth(5) else {
+        // maps line: "addr perms offset dev inode pathname".
+        let Some(([range, _perms, _offset, _dev, inode], rest)) = split_maps_line(line) else {
             continue;
+        };
+        // Anonymous mappings and pseudo mappings ("[heap]", "[stack]") are not
+        // backed by a file, so they carry inode 0 and can never host a uprobe.
+        if inode == "0" {
+            continue;
+        }
+        let (path, deleted) = match rest.strip_suffix(DELETED_MARKER) {
+            Some(p) => (p, true),
+            None => (rest, false),
         };
         if !path.starts_with('/') {
             continue;
         }
         let base = path.rsplit('/').next().unwrap_or(path);
-        if SSL_LIB_MARKERS.iter().any(|m| base.starts_with(m)) {
-            out.insert(path.to_string());
+        if !SSL_LIB_MARKERS.iter().any(|m| base.starts_with(m)) {
+            continue;
         }
+        let Some(map_file) = map_files_name(range) else {
+            continue;
+        };
+        // A library occupies several consecutive mappings (text, rodata, data);
+        // they all name one inode, so the first one carries the whole library.
+        out.entry((path.to_owned(), deleted))
+            .or_insert_with(|| SslMapping {
+                path: path.to_owned(),
+                map_file,
+                deleted,
+            });
     }
-    out
+    out.into_values().collect()
 }
 
 /// `(inodes_to_attach, inodes_to_detach)` — the result of one reconcile diff,
@@ -243,22 +314,15 @@ impl DlpUprobeAttacher {
             let Ok(maps) = std::fs::read_to_string(&maps_path) else {
                 continue; // process gone or unreadable — skip
             };
-            for lib in ssl_paths_in_maps(&maps) {
-                // Open the library through the owning process's root so the path
-                // resolves inside that process's mount namespace.
-                let attach_path = self
-                    .proc_root
-                    .join(pid.to_string())
-                    .join("root")
-                    .join(lib.trim_start_matches('/'));
-                let Ok(meta) = std::fs::metadata(&attach_path) else {
+            for m in ssl_mappings_in_maps(&maps) {
+                let Some((attach_path, meta)) = self.resolve_mapping(pid, &m) else {
                     continue; // not reachable from the agent — skip
                 };
                 let key = (meta.dev(), meta.ino());
                 if !seen.insert(key) {
                     continue; // same inode already collected this pass
                 }
-                let base = lib.rsplit('/').next().unwrap_or(&lib).to_owned();
+                let base = m.path.rsplit('/').next().unwrap_or(&m.path).to_owned();
                 targets.push(UprobeTarget {
                     attach_path,
                     lib: base,
@@ -271,6 +335,37 @@ impl DlpUprobeAttacher {
             }
         }
         targets
+    }
+
+    /// Resolve one SSL mapping to a path the loader can open, together with that
+    /// file's metadata.
+    ///
+    /// A live mapping is opened through the owning process's root, so the path
+    /// resolves inside that process's mount namespace. An unlinked mapping has no
+    /// name left there, and worse, the name it used to have may since have been
+    /// taken by a *replacement* library — an in-place package upgrade unlinks the
+    /// old file and renames the new one over it, while every already-running
+    /// process keeps the old inode mapped. Resolving such a mapping by name would
+    /// silently probe the wrong file, so it goes through `/proc/<pid>/map_files`
+    /// instead: those entries are magic links to the mapped inode itself and stay
+    /// openable after the file is gone.
+    ///
+    /// Looking an entry up under `map_files` requires `CAP_SYS_ADMIN` (readdir
+    /// alone does not). Every posture that can scan at all holds it - the warden
+    /// carries it for bpffs delegation, and the direct posture is privileged - so
+    /// the fallback is available wherever it is reachable. Where it is not, the
+    /// mapping is skipped exactly as it was before.
+    fn resolve_mapping(&self, pid: u32, m: &SslMapping) -> Option<(PathBuf, std::fs::Metadata)> {
+        let pid_dir = self.proc_root.join(pid.to_string());
+        if !m.deleted {
+            let by_name = pid_dir.join("root").join(m.path.trim_start_matches('/'));
+            if let Ok(meta) = std::fs::metadata(&by_name) {
+                return Some((by_name, meta));
+            }
+        }
+        let by_map_file = pid_dir.join("map_files").join(&m.map_file);
+        let meta = std::fs::metadata(&by_map_file).ok()?;
+        Some((by_map_file, meta))
     }
 
     /// One lifecycle pass: attach the DLP uprobe set to SSL libraries newly
@@ -484,11 +579,23 @@ mod tests {
 7f1000400000-7f1000500000 r-xp 00000000 fd:01 202 [heap]
 7f1000500000-7f1000600000 r-xp 00000000 fd:01 203 /lib/libboringssl.so";
 
+    /// Paths of the SSL mappings parsed out of a maps fixture.
+    fn ssl_paths(maps: &str) -> Vec<String> {
+        ssl_mappings_in_maps(maps)
+            .into_iter()
+            .map(|m| m.path)
+            .collect()
+    }
+
     #[test]
     fn parses_libssl_and_boringssl_only() {
-        let paths = ssl_paths_in_maps(MAPS_FIXTURE);
-        assert!(paths.contains("/usr/lib/x86_64-linux-gnu/libssl.so.3"));
-        assert!(paths.contains("/lib/libboringssl.so"));
+        let paths = ssl_paths(MAPS_FIXTURE);
+        assert!(
+            paths
+                .iter()
+                .any(|p| p == "/usr/lib/x86_64-linux-gnu/libssl.so.3")
+        );
+        assert!(paths.iter().any(|p| p == "/lib/libboringssl.so"));
         // libcrypto, the binary, anonymous + pseudo mappings excluded.
         assert!(!paths.iter().any(|p| p.contains("libcrypto")));
         assert!(!paths.iter().any(|p| p.contains("curl")));
@@ -498,7 +605,7 @@ mod tests {
     #[test]
     fn dedups_same_library_mapped_twice() {
         // libssl.so.3 appears in two mappings (r-xp + r--p) but resolves once.
-        let paths = ssl_paths_in_maps(MAPS_FIXTURE);
+        let paths = ssl_paths(MAPS_FIXTURE);
         let ssl = paths.iter().filter(|p| p.contains("libssl.so.3")).count();
         assert_eq!(ssl, 1);
     }
@@ -509,14 +616,58 @@ mod tests {
 0-1 r-xp 0 fd:01 1 /a/libssl.so
 0-1 r-xp 0 fd:01 2 /b/libssl.so.1.1
 0-1 r-xp 0 fd:01 3 /c/libboringssl.so.0";
-        let paths = ssl_paths_in_maps(maps);
-        assert_eq!(paths.len(), 3);
+        assert_eq!(ssl_paths(maps).len(), 3);
     }
 
     #[test]
     fn empty_and_anonymous_maps_yield_nothing() {
-        assert!(ssl_paths_in_maps("").is_empty());
-        assert!(ssl_paths_in_maps("0-1 rw-p 0 00:00 0 \n0-1 r-xp 0 fd:01 9 [stack]").is_empty());
+        assert!(ssl_mappings_in_maps("").is_empty());
+        assert!(ssl_mappings_in_maps("0-1 rw-p 0 00:00 0 \n0-1 r-xp 0 fd:01 9 [stack]").is_empty());
+    }
+
+    #[test]
+    fn strips_the_deleted_marker_and_flags_the_mapping() {
+        let maps = "7f10-7f20 r-xp 0 fd:01 7 /usr/lib/libssl.so.3 (deleted)\n";
+        let mappings = ssl_mappings_in_maps(maps);
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].path, "/usr/lib/libssl.so.3");
+        assert!(mappings[0].deleted);
+        assert_eq!(mappings[0].map_file, "7f10-7f20");
+    }
+
+    #[test]
+    fn a_replaced_library_and_its_replacement_are_two_targets() {
+        // An in-place upgrade: the running process still maps the old inode
+        // (marked deleted) while a freshly dlopen'd copy occupies the same path.
+        let maps = "\
+7f10-7f20 r-xp 0 fd:01 7 /usr/lib/libssl.so.3 (deleted)
+7f30-7f40 r-xp 0 fd:01 9 /usr/lib/libssl.so.3";
+        let mappings = ssl_mappings_in_maps(maps);
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(mappings.iter().filter(|m| m.deleted).count(), 1);
+    }
+
+    #[test]
+    fn a_path_containing_spaces_survives_parsing() {
+        // Splitting on whitespace would truncate this to "/opt/my", which then
+        // fails the SSL basename match and the library goes unprobed.
+        let maps = "7f10-7f20 r-xp 0 fd:01 7 /opt/my app/libssl.so.3\n";
+        assert_eq!(ssl_paths(maps), vec!["/opt/my app/libssl.so.3".to_owned()]);
+    }
+
+    #[test]
+    fn map_files_names_drop_the_zero_padding_maps_adds() {
+        // maps pads to eight hex digits, map_files does not.
+        assert_eq!(
+            map_files_name("00400000-00401000").unwrap(),
+            "400000-401000"
+        );
+        assert_eq!(
+            map_files_name("7f1000000000-7f1000100000").unwrap(),
+            "7f1000000000-7f1000100000"
+        );
+        assert!(map_files_name("not-hex").is_none());
+        assert!(map_files_name("0").is_none());
     }
 
     #[test]
@@ -571,6 +722,74 @@ mod tests {
         }
         let attacher = DlpUprobeAttacher::new(dir.path());
         assert_eq!(attacher.scan_live_targets().len(), 1);
+    }
+
+    #[test]
+    fn deleted_mapping_resolves_to_the_mapped_inode_not_its_replacement() {
+        use std::fs;
+        // A library unlinked out from under a running process, whose old path has
+        // since been taken by a replacement. Resolving by name would probe the
+        // replacement - a different inode the process does not map - so the scan
+        // must go through map_files and land on the inode still mapped.
+        let dir = tempfile::tempdir().unwrap();
+        let mapped = dir.path().join("mapped-libssl.so.3");
+        fs::write(&mapped, b"\x7fELF").unwrap();
+        let mapped_ino = fs::metadata(&mapped).unwrap().ino();
+
+        let pid_dir = dir.path().join("1234");
+        let lib_dir = pid_dir.join("root").join("lib");
+        fs::create_dir_all(&lib_dir).unwrap();
+        let replacement = lib_dir.join("libssl.so.3");
+        fs::write(&replacement, b"\x7fELF-new").unwrap();
+        let replacement_ino = fs::metadata(&replacement).unwrap().ino();
+        assert_ne!(mapped_ino, replacement_ino);
+
+        let map_files = pid_dir.join("map_files");
+        fs::create_dir_all(&map_files).unwrap();
+        // Stands in for the kernel's magic link, which stays resolvable after the
+        // file it points at is unlinked. A unit test cannot hold an unlinked file
+        // reachable by path; the genuinely-unlinked case is covered on the VM.
+        std::os::unix::fs::symlink(&mapped, map_files.join("7f1000000000-7f1000100000")).unwrap();
+        fs::write(
+            pid_dir.join("maps"),
+            "7f1000000000-7f1000100000 r-xp 0 fd:01 7 /lib/libssl.so.3 (deleted)\n",
+        )
+        .unwrap();
+
+        let attacher = DlpUprobeAttacher::new(dir.path());
+        let targets = attacher.scan_live_targets();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].lib, "libssl.so.3");
+        assert_eq!(targets[0].ino, mapped_ino);
+        assert_ne!(targets[0].ino, replacement_ino);
+        assert_eq!(
+            targets[0].attach_path,
+            map_files.join("7f1000000000-7f1000100000")
+        );
+    }
+
+    #[test]
+    fn live_mapping_falls_back_to_map_files_when_the_root_path_is_unreachable() {
+        use std::fs;
+        // No `root/` at all - the agent cannot traverse into this process's mount
+        // namespace - but the mapping is still discoverable through map_files.
+        let dir = tempfile::tempdir().unwrap();
+        let mapped = dir.path().join("mapped-libssl.so.3");
+        fs::write(&mapped, b"\x7fELF").unwrap();
+
+        let map_files = dir.path().join("1234").join("map_files");
+        fs::create_dir_all(&map_files).unwrap();
+        std::os::unix::fs::symlink(&mapped, map_files.join("400000-401000")).unwrap();
+        fs::write(
+            dir.path().join("1234").join("maps"),
+            "00400000-00401000 r-xp 0 fd:01 7 /lib/libssl.so.3\n",
+        )
+        .unwrap();
+
+        let attacher = DlpUprobeAttacher::new(dir.path());
+        let targets = attacher.scan_live_targets();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].attach_path, map_files.join("400000-401000"));
     }
 
     #[test]

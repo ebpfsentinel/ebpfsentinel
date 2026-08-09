@@ -121,6 +121,81 @@ teardown_file() {
     [ "${HTTP_STATUS}" = "200" ]
 }
 
+# ── Libraries with no name left ─────────────────────────────────────
+
+@test "an SSL library with no name left is still discovered and probed" {
+    require_root
+    require_tool python3
+
+    local sys_ssl
+    sys_ssl="$(ldconfig -p 2>/dev/null | awk '/libssl\.so\.3/ {print $NF; exit}')"
+    [ -n "${sys_ssl}" ] && [ -f "${sys_ssl}" ] ||
+        env_skip "no system libssl.so.3 to copy"
+
+    # Keep the basename the scanner matches on; only the directory is ours.
+    local copy="${DATA_DIR}/nameless/libssl.so.3"
+    mkdir -p "$(dirname "${copy}")"
+    cp "${sys_ssl}" "${copy}"
+
+    # Unlink the copy BEFORE loading it, so the mapping is born carrying the
+    # kernel's "(deleted)" marker. That makes the case deterministic: no poll of
+    # the watcher can ever have seen this inode under a name, and there is no
+    # path under /proc/<pid>/root that reaches it. Discovery has to go through
+    # the mapping's map_files entry or it does not happen at all.
+    local holder="${DATA_DIR}/hold-deleted.py"
+    cat >"${holder}" <<'PY'
+import ctypes, os, sys, time
+
+path = sys.argv[1]
+fd = os.open(path, os.O_RDONLY)
+os.unlink(path)
+ctypes.CDLL("/proc/self/fd/%d" % fd)
+sys.stdout.write("%d\n" % os.getpid())
+sys.stdout.flush()
+time.sleep(120)
+PY
+
+    python3 "${holder}" "${copy}" >"${DATA_DIR}/holder.out" 2>"${DATA_DIR}/holder.err" &
+    local holder_job=$!
+
+    local pid=""
+    for _ in $(seq 1 40); do
+        pid="$(head -1 "${DATA_DIR}/holder.out" 2>/dev/null || true)"
+        [ -n "${pid}" ] && break
+        sleep 0.25
+    done
+    if [ -z "${pid}" ]; then
+        kill "${holder_job}" 2>/dev/null || true
+        soft_skip "could not load an unlinked libssl copy: $(cat "${DATA_DIR}/holder.err" 2>/dev/null)"
+    fi
+
+    # The condition under test, confirmed rather than assumed.
+    if ! grep libssl "/proc/${pid}/maps" | grep -q "(deleted)"; then
+        kill "${pid}" 2>/dev/null || true
+        echo "mapping is not marked deleted:" >&2
+        grep libssl "/proc/${pid}/maps" >&2 || true
+        return 1
+    fi
+
+    # The attach log names the path the link was created against; the watcher
+    # polls every 5s, so allow several passes.
+    local attached=0
+    for _ in $(seq 1 40); do
+        if grep -q "/proc/${pid}/map_files/" "${AGENT_LOG_FILE}"; then
+            attached=1
+            break
+        fi
+        sleep 1
+    done
+    kill "${pid}" 2>/dev/null || true
+
+    [ "${attached}" -eq 1 ] || {
+        echo "no uprobe attached through the mapping's map_files entry (pid ${pid})" >&2
+        tail -20 "${AGENT_LOG_FILE}" >&2
+        return 1
+    }
+}
+
 # ── Cross-container capture ─────────────────────────────────────────
 
 @test "agent captures a neighbouring container's TLS plaintext" {
