@@ -162,6 +162,33 @@ impl ContainerConfig {
                 });
             }
         }
+        if self.kubernetes.enabled {
+            // The entries are joined into the label selector the API server
+            // parses. A malformed one is rejected there, at watch time, in a
+            // background task nobody is reading — so reject it here instead.
+            for (idx, entry) in self.kubernetes.label_filter.iter().enumerate() {
+                let field = format!("container.kubernetes.label_filter[{idx}]");
+                let Some((key, _value)) = entry.split_once('=') else {
+                    return Err(ConfigError::Validation {
+                        field,
+                        message: "label filter must be a key=value pair".to_string(),
+                    });
+                };
+                if key.is_empty() {
+                    return Err(ConfigError::Validation {
+                        field,
+                        message: "label filter key must not be empty".to_string(),
+                    });
+                }
+                if entry.contains(',') {
+                    return Err(ConfigError::Validation {
+                        field,
+                        message: "write one key=value pair per entry, not a comma-separated list"
+                            .to_string(),
+                    });
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -207,6 +234,37 @@ mod tests {
         let mut cfg = ContainerConfig::default();
         cfg.resolver.cgroup_root = String::new();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_a_label_filter_pair() {
+        let mut cfg = ContainerConfig::default();
+        cfg.kubernetes.enabled = true;
+        cfg.kubernetes.label_filter = vec!["app=web".to_string(), "tier=frontend".to_string()];
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_label_filter_without_a_value() {
+        let mut cfg = ContainerConfig::default();
+        cfg.kubernetes.enabled = true;
+        cfg.kubernetes.label_filter = vec!["app".to_string()];
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_a_comma_separated_label_filter() {
+        let mut cfg = ContainerConfig::default();
+        cfg.kubernetes.enabled = true;
+        cfg.kubernetes.label_filter = vec!["app=web,tier=frontend".to_string()];
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_ignores_the_label_filter_when_kubernetes_is_off() {
+        let mut cfg = ContainerConfig::default();
+        cfg.kubernetes.label_filter = vec!["not-a-pair".to_string()];
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]
