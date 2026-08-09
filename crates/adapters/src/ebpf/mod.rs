@@ -11,6 +11,7 @@ pub mod dns_event_reader;
 pub mod ebpf_map_write_adapter;
 pub mod event_reader;
 pub mod geoip_lpm_manager;
+pub mod helper_probe;
 pub mod ids_map_manager;
 pub mod ids_mirror_map_manager;
 pub mod ipset_map_manager;
@@ -56,6 +57,11 @@ pub use dns_event_reader::DnsEventReader;
 pub use ebpf_map_write_adapter::EbpfMapWriteAdapter;
 pub use event_reader::EventReader;
 pub use geoip_lpm_manager::GeoIpLpmManager;
+pub use helper_probe::{
+    HelperReport, HelperSupport, MissingHelper, ProbeStatus, ProbeType,
+    cached as cached_kernel_helpers, init_cached as init_kernel_helpers,
+    run as probe_kernel_helpers,
+};
 pub use ids_map_manager::IdsMapManager;
 pub use ids_mirror_map_manager::IdsMirrorMapManager;
 pub use ipset_map_manager::IpSetMapManager;

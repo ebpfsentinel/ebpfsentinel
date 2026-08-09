@@ -24,6 +24,27 @@ pub struct ReadyResponse {
     pub status: &'static str,
     /// Whether eBPF programs are successfully loaded.
     pub ebpf_loaded: bool,
+    /// Helpers the startup probe found missing, one sentence each. Empty both
+    /// when the kernel offers everything and when the probe could not run -
+    /// `/api/v1/ebpf/kernel-features` distinguishes the two.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub kernel_helpers_missing: Vec<String>,
+}
+
+/// Helpers the startup probe reported missing, empty when it never ran.
+///
+/// A program refused by the helper gate can be an optional one, in which case
+/// the agent stays up and `ebpf_loaded` stays true. Readiness has to look at
+/// the gap itself, or a host missing a helper would report ready while
+/// silently running without that program.
+fn missing_kernel_helpers() -> Vec<String> {
+    adapters::ebpf::cached_kernel_helpers().map_or_else(Vec::new, |report| {
+        report
+            .missing_required
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    })
 }
 
 /// Liveness probe — always returns 200 if the process is running.
@@ -49,18 +70,26 @@ pub async fn healthz() -> Json<HealthResponse> {
 )]
 pub async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let loaded = state.ebpf_loaded.load(Ordering::Relaxed);
-    let status = if loaded { "ready" } else { "not_ready" };
-    let code = if loaded {
+    let (code, body) = readiness(loaded, missing_kernel_helpers());
+    (code, Json(body))
+}
+
+/// Decide readiness from the two inputs, so the verdict is testable without a
+/// kernel and without reaching into the process-wide probe cache.
+fn readiness(loaded: bool, missing: Vec<String>) -> (StatusCode, ReadyResponse) {
+    let ready = loaded && missing.is_empty();
+    let code = if ready {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
     (
         code,
-        Json(ReadyResponse {
-            status,
+        ReadyResponse {
+            status: if ready { "ready" } else { "not_ready" },
             ebpf_loaded: loaded,
-        }),
+            kernel_helpers_missing: missing,
+        },
     )
 }
 
@@ -143,5 +172,33 @@ mod tests {
         let state = test_state(false);
         let resp = readyz(State(state)).await.into_response();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn a_missing_helper_holds_readiness_back_even_when_programs_loaded() {
+        // The refused program can be an optional one, so `ebpf_loaded` alone
+        // would call this host ready while a feature is silently absent.
+        let (code, body) = readiness(
+            true,
+            vec![
+                "tc-qos needs bpf_skb_ecn_set_ce but this kernel does not support it for \
+                  sched_cls programs"
+                    .to_string(),
+            ],
+        );
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "not_ready");
+        assert!(body.ebpf_loaded);
+        assert_eq!(body.kernel_helpers_missing.len(), 1);
+    }
+
+    #[test]
+    fn an_unprobed_kernel_does_not_hold_readiness_back() {
+        // No probe result is not a negative result. The token-only load path
+        // cannot probe at all, and every host on it must still reach ready.
+        let (code, body) = readiness(true, Vec::new());
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body.status, "ready");
+        assert!(body.kernel_helpers_missing.is_empty());
     }
 }

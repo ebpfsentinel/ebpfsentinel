@@ -1444,6 +1444,24 @@ pub async fn run(
     let warden_sock = warden_sock_from_env();
 
     check_kernel_version()?;
+
+    // Ask the running kernel what it actually offers, once, before anything
+    // loads. The version check above is a proxy for capability: vendors
+    // backport helpers into older trees and distributions compile features
+    // out, so version and truth drift apart. A gap found here names the
+    // helper, the object and the program type; the same gap found at load
+    // time is an opaque verifier rejection.
+    //
+    // The probe itself needs CAP_BPF, which the token-only loading path does
+    // not hold, so on the normal path this reports "not probed" and changes
+    // nothing. That is the intended outcome: an unknown must never read as a
+    // missing helper.
+    let helper_report = adapters::ebpf::init_kernel_helpers();
+    info!("{}", helper_report.summary());
+    for gap in &helper_report.missing_required {
+        warn!(%gap, "required BPF helper unavailable on this kernel");
+    }
+
     let ebpf_dir = resolve_ebpf_program_dir(&config);
 
     // Bootstrap the BPF token before any program load, so the loader can
@@ -3452,10 +3470,36 @@ pub fn resolve_ebpf_program_dir(config: &AgentConfig) -> String {
 }
 
 /// Read a single eBPF program binary from the program directory.
+///
+/// The helper gate sits here because every loader funnels through this one
+/// function with the object's name, so a single check covers all of them.
 pub fn read_ebpf_program(dir: &str, name: &str) -> anyhow::Result<Vec<u8>> {
+    check_required_helpers(name)?;
     let path = Path::new(dir).join(name);
     std::fs::read(&path)
         .map_err(|e| anyhow::anyhow!("failed to read eBPF program '{}': {e}", path.display()))
+}
+
+/// Refuse an object whose kernel-side helpers the probe reported missing.
+///
+/// Silent when the probe never ran. `NotProbed` means "unknown", and turning
+/// an unknown into a refusal would keep the agent off kernels that load every
+/// program perfectly well - which is every host on the token-only path, since
+/// the probe needs a capability that path does not hold.
+fn check_required_helpers(name: &str) -> anyhow::Result<()> {
+    let Some(report) = adapters::ebpf::cached_kernel_helpers() else {
+        return Ok(());
+    };
+    let gaps: Vec<String> = report.gaps_for(name).map(ToString::to_string).collect();
+    if gaps.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "{}. Loading it would be rejected by the verifier with an opaque 'invalid func' error, \
+         so it is refused up front. Upgrade the host kernel, or disable the feature that needs \
+         this program.",
+        gaps.join("; ")
+    ))
 }
 
 // ── Per-program load functions ───────────────────────────────────────

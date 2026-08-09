@@ -32,6 +32,48 @@ pub struct ProgramStatus {
 pub struct EbpfStatusResponse {
     pub programs: Vec<ProgramStatus>,
 }
+
+/// One `(program type, helper)` answer from the startup probe.
+#[derive(Serialize, ToSchema)]
+pub struct HelperSupportEntry {
+    pub program_type: String,
+    pub helper: String,
+    pub supported: bool,
+}
+
+/// A helper an object needs that this kernel does not offer for its type.
+#[derive(Serialize, ToSchema)]
+pub struct MissingHelperEntry {
+    pub object: String,
+    pub program_type: String,
+    pub helper: String,
+    /// The same fact as one sentence, for logs and support tickets.
+    pub detail: String,
+}
+
+/// What the kernel answered when the agent probed it at startup.
+///
+/// `probed = false` means the probe could not run, **not** that the kernel
+/// lacks anything: `helpers` and `missing_required` are then empty because
+/// nothing was measured, and `reason` says why. Treating that as a capability
+/// report would invert its meaning.
+#[derive(Serialize, ToSchema)]
+pub struct KernelFeaturesResponse {
+    pub probed: bool,
+    pub reason: Option<String>,
+    /// How the agent loads its objects, which is why a probe needing
+    /// `CAP_BPF` can be unavailable on a host where every program loads.
+    pub load_mode: String,
+    pub program_types: Vec<ProgramTypeSupport>,
+    pub helpers: Vec<HelperSupportEntry>,
+    pub missing_required: Vec<MissingHelperEntry>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ProgramTypeSupport {
+    pub program_type: String,
+    pub supported: bool,
+}
 /// How long the reload endpoint waits for the reload task to confirm before
 /// answering. Past this the answer says `pending` rather than `ok`.
 const RELOAD_CONFIRM_TIMEOUT: Duration = Duration::from_secs(8);
@@ -170,6 +212,83 @@ pub async fn get_ebpf_status(State(state): State<Arc<AppState>>) -> Json<EbpfSta
         })
         .collect();
     Json(EbpfStatusResponse { programs })
+}
+
+/// Return what the startup helper probe learned about this kernel.
+#[utoipa::path(
+    get, path = "/api/v1/ebpf/kernel-features",
+    tag = "Operations",
+    responses(
+        (status = 200, description = "Kernel helper support as probed at startup", body = KernelFeaturesResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn get_kernel_features() -> Json<KernelFeaturesResponse> {
+    // Read the cache rather than probe, so hitting the endpoint never issues
+    // a syscall pass of its own.
+    Json(kernel_features_body(adapters::ebpf::cached_kernel_helpers()))
+}
+
+/// Build the response from a probe report, or from its absence.
+///
+/// Takes the report as an argument so the shape of the answer is testable
+/// without a kernel and without the process-wide cache.
+fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> KernelFeaturesResponse {
+    use adapters::ebpf::ProbeStatus;
+
+    let Some(report) = report else {
+        return KernelFeaturesResponse {
+            probed: false,
+            reason: Some("startup has not run the kernel helper probe".to_string()),
+            load_mode: adapters::ebpf::helper_probe::LOAD_MODE.to_string(),
+            program_types: Vec::new(),
+            helpers: Vec::new(),
+            missing_required: Vec::new(),
+        };
+    };
+
+    let reason = match &report.status {
+        ProbeStatus::Probed => None,
+        ProbeStatus::NotProbed { reason } => Some(reason.clone()),
+    };
+
+    KernelFeaturesResponse {
+        probed: report.status.probed(),
+        reason,
+        load_mode: report.load_mode.to_string(),
+        program_types: report
+            .program_types
+            .iter()
+            .map(|(program_type, supported)| ProgramTypeSupport {
+                program_type: (*program_type).to_string(),
+                supported: *supported,
+            })
+            .collect(),
+        helpers: report
+            .helpers
+            .iter()
+            .map(|h| HelperSupportEntry {
+                program_type: h.program_type.to_string(),
+                helper: h.helper.to_string(),
+                supported: h.supported,
+            })
+            .collect(),
+        missing_required: report
+            .missing_required
+            .iter()
+            .map(|m| MissingHelperEntry {
+                object: m.object.to_string(),
+                program_type: m.program_type.to_string(),
+                helper: m.helper.to_string(),
+                detail: m.to_string(),
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -374,5 +493,53 @@ mod tests {
         let ids = resp.programs.iter().find(|p| p.name == "tc_ids");
         assert!(ids.is_some());
         assert!(!ids.unwrap().loaded);
+    }
+
+    #[test]
+    fn kernel_features_says_not_probed_rather_than_unsupported() {
+        // The distinction is the whole point of the field: an empty helper
+        // list under `probed: false` means nothing was measured, and a reader
+        // that took it for "this kernel has no helpers" would be inverted.
+        let resp = kernel_features_body(None);
+        assert!(!resp.probed);
+        assert!(resp.reason.is_some());
+        assert!(resp.helpers.is_empty());
+        assert!(resp.missing_required.is_empty());
+
+        let refused = adapters::ebpf::HelperReport::not_probed("operation not permitted");
+        let resp = kernel_features_body(Some(&refused));
+        assert!(!resp.probed);
+        assert_eq!(resp.reason.as_deref(), Some("operation not permitted"));
+        assert!(resp.missing_required.is_empty());
+    }
+
+    #[test]
+    fn kernel_features_reports_each_gap_with_object_type_and_helper() {
+        let report = adapters::ebpf::HelperReport {
+            status: adapters::ebpf::ProbeStatus::Probed,
+            load_mode: "bpf-token",
+            program_types: vec![("xdp", true), ("sched_cls", true), ("kprobe", false)],
+            helpers: vec![adapters::ebpf::HelperSupport {
+                program_type: "sched_cls",
+                helper: "bpf_skb_ecn_set_ce",
+                supported: false,
+            }],
+            missing_required: vec![adapters::ebpf::MissingHelper {
+                object: "tc-qos",
+                program_type: "sched_cls",
+                helper: "bpf_skb_ecn_set_ce",
+            }],
+        };
+
+        let resp = kernel_features_body(Some(&report));
+        assert!(resp.probed);
+        assert!(resp.reason.is_none());
+        assert_eq!(resp.program_types.len(), 3);
+        let gap = &resp.missing_required[0];
+        assert_eq!(gap.object, "tc-qos");
+        assert_eq!(gap.program_type, "sched_cls");
+        assert_eq!(gap.helper, "bpf_skb_ecn_set_ce");
+        assert!(gap.detail.contains("tc-qos"));
+        assert!(gap.detail.contains("bpf_skb_ecn_set_ce"));
     }
 }

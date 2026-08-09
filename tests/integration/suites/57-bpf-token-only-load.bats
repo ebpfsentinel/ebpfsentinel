@@ -90,6 +90,18 @@ teardown_file() {
     [ "$status" -ne 0 ]
 }
 
+@test "the kernel helper probe reports not-probed rather than a false gap" {
+    # The probe issues a plain BPF_PROG_LOAD, which needs CAP_BPF — exactly what
+    # this path deliberately does not hold. "Not probed" is the only honest
+    # answer: reporting a helper as missing here would be a false negative, and
+    # refusing to start on it would break every rootless deployment. The
+    # preceding test already asserts the agent did not fall back to API-only
+    # mode, so a passing pair means the probe stayed out of the way.
+    bpf_token_log_has 'kernel helper probe not run \(load mode bpf-token\)'
+    run grep -iE 'required BPF helper unavailable' "$BPF_TOKEN_LOG"
+    [ "$status" -ne 0 ]
+}
+
 @test "tc-threatintel loads and attaches via token" {
     bpf_token_log_has 'eBPF tc-threatintel active'
 }
