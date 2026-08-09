@@ -42,6 +42,14 @@ use crate::threatintel_service_impl::ThreatIntelAppService;
 /// Defined in the domain layer; re-exported here for existing call sites.
 pub use domain::common::agent_event::AgentEvent;
 
+/// What a match against a prevention (IPS) rule carries into the alert and
+/// escalation decisions that follow it.
+#[derive(Debug, Clone, Copy)]
+struct PreventionMatch {
+    mode: DomainMode,
+    severity: domain::common::entity::Severity,
+}
+
 /// Routes eBPF events by `event_type` to the correct domain engine.
 ///
 /// Consumes `PacketEvent`s from the event channel, dispatches IDS events
@@ -577,12 +585,8 @@ impl EventDispatcher {
         self.metrics.record_packet("ids", action);
 
         // Evaluate and threshold check (all methods are now &self via interior mutability)
-        let (alert, detail) = {
+        let (alert, detail, prevention) = {
             let svc = self.ids_service.load();
-
-            if !svc.enabled() {
-                return;
-            }
 
             // Reverse DNS lookup only when a domain-aware rule is loaded; otherwise
             // skip the cache RwLock read + Vec<String> allocation on the hot path.
@@ -601,13 +605,36 @@ impl EventDispatcher {
             // Resolve source country for country-aware sampling and thresholds
             let src_country = svc.resolve_country(event.src_addr, event.is_ipv6());
 
-            let Some((_idx, rule, matched_domain)) =
+            let Some((idx, rule, matched_domain)) =
                 svc.evaluate_event_with_context(&event, &dst_domains, src_country.as_deref())
             else {
                 return;
             };
 
-            let detail = format!("IDS rule {} matched", rule.id);
+            // Both rule sets are matched by the same kernel program, so the
+            // IDS toggle gates detection rules only: a prevention rule keeps
+            // firing while detection is muted, and answers to `ips.enabled`.
+            let prevention = svc.is_prevention_index(idx).then_some(PreventionMatch {
+                mode: rule.mode,
+                severity: rule.severity,
+            });
+            if prevention.is_none() && !svc.enabled() {
+                return;
+            }
+            if prevention.is_some()
+                && !self
+                    .ips_service
+                    .as_ref()
+                    .is_some_and(|ips| ips.load().enabled())
+            {
+                return;
+            }
+
+            let detail = if prevention.is_some() {
+                format!("IPS rule {} matched", rule.id)
+            } else {
+                format!("IDS rule {} matched", rule.id)
+            };
             let mut alert = IdsAlert::from_event(&event, rule);
             if matched_domain.is_some() {
                 self.metrics.record_ids_domain_match(&rule.id.0);
@@ -637,11 +664,15 @@ impl EventDispatcher {
                 svc.record_flow_killed_via_ct();
             }
 
-            (alert, detail)
+            (alert, detail, prevention)
         };
 
         self.audit_service.record_security_decision(
-            AuditComponent::Ids,
+            if prevention.is_some() {
+                AuditComponent::Ips
+            } else {
+                AuditComponent::Ids
+            },
             AuditAction::Alert,
             event.timestamp_ns,
             event.src_addr,
@@ -654,27 +685,52 @@ impl EventDispatcher {
             &detail,
         );
 
-        if self.alert_tx.try_send(AlertEvent::Ids(alert)).is_err() {
+        // A prevention rule is reported under the IPS component, carrying its
+        // own severity rather than the component default.
+        if let Some(ref prevention) = prevention {
+            self.emit_packet_security_alert_with_severity(
+                domain::alert::entity::PacketAlertComponent::Ips,
+                &event,
+                &alert.rule_id.0,
+                prevention.mode.as_str(),
+                &detail,
+                prevention.severity,
+            );
+        } else if self.alert_tx.try_send(AlertEvent::Ids(alert)).is_err() {
             self.metrics.record_event_dropped("alert_channel_full");
         }
 
-        // Feed detection into IPS for auto-blacklisting
-        if let Some(ref ips_svc) = self.ips_service {
-            let src_ip = addr_to_ip(event.src_addr, event.is_ipv6());
-            let svc = ips_svc.load();
-            let actions = svc.record_detection(src_ip);
+        self.feed_ips_counter(&event, prevention);
+    }
 
-            // Emit alert when IPS auto-blacklists an IP
-            if !actions.is_empty() {
-                let detail = format!("IPS auto-blacklist: {src_ip}");
-                self.emit_packet_security_alert(
-                    domain::alert::entity::PacketAlertComponent::Ips,
-                    &event,
-                    &format!("ips-blacklist:{src_ip}"),
-                    "blacklist",
-                    &detail,
-                );
-            }
+    /// Feed a rule match into the IPS auto-blacklist counter.
+    ///
+    /// A prevention rule in alert mode is observation only, so it never
+    /// counts; sampling and the IPS toggle gate both rule sets alike.
+    fn feed_ips_counter(&self, event: &PacketEvent, prevention: Option<PreventionMatch>) {
+        let Some(ref ips_svc) = self.ips_service else {
+            return;
+        };
+        let svc = ips_svc.load();
+        let counts = svc.enabled()
+            && prevention.is_none_or(|p| p.mode == DomainMode::Block)
+            && svc.should_process(event.src_addr[0], event.dst_addr[0]);
+        if !counts {
+            return;
+        }
+        let src_ip = addr_to_ip(event.src_addr, event.is_ipv6());
+        let actions = svc.record_detection(src_ip);
+
+        // Emit alert when IPS auto-blacklists an IP
+        if !actions.is_empty() {
+            let detail = format!("IPS auto-blacklist: {src_ip}");
+            self.emit_packet_security_alert(
+                domain::alert::entity::PacketAlertComponent::Ips,
+                event,
+                &format!("ips-blacklist:{src_ip}"),
+                "blacklist",
+                &detail,
+            );
         }
     }
 
@@ -1046,6 +1102,28 @@ impl EventDispatcher {
             }
             _ => domain::common::entity::Severity::Medium,
         };
+        self.emit_packet_security_alert_with_severity(
+            component,
+            event,
+            rule_id,
+            action_label,
+            detail,
+            severity,
+        );
+    }
+
+    /// Same as [`Self::emit_packet_security_alert`], for the callers that know
+    /// the severity of the rule that fired rather than inheriting the
+    /// component default.
+    fn emit_packet_security_alert_with_severity(
+        &self,
+        component: domain::alert::entity::PacketAlertComponent,
+        event: &PacketEvent,
+        rule_id: &str,
+        action_label: &str,
+        detail: &str,
+        severity: domain::common::entity::Severity,
+    ) {
         // Attach the flow's JA4 fingerprint when one was computed for the
         // originating ClientHello (same client→server flow key).
         let ja4_fingerprint = self

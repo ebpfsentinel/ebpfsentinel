@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use domain::common::entity::{DomainMode, RuleId};
@@ -5,7 +6,7 @@ use domain::common::error::DomainError;
 use domain::ids::engine::IdsEngine;
 use domain::ids::entity::{IdsRule, SamplingMode, ThresholdConfig};
 use ebpf_common::event::PacketEvent;
-use ebpf_common::ids::IDS_ACTION_ALERT;
+use ebpf_common::ids::{IDS_ACTION_ALERT, IdsPatternKey};
 use ports::secondary::geoip_port::GeoIpPort;
 use ports::secondary::ids_map_port::IdsMapPort;
 use ports::secondary::metrics_port::MetricsPort;
@@ -14,6 +15,10 @@ use ports::secondary::metrics_port::MetricsPort;
 /// service can be cheaply cloned (required by the `ArcSwap` pattern)
 /// while the map port remains shared across clones.
 type SharedIdsMapPort = Arc<Mutex<Box<dyn IdsMapPort + Send>>>;
+
+/// Identity of one kernel map slot: tenant, port, protocol, and whether the
+/// slot lives in the source-port map rather than the destination-port one.
+type KernelSlot = (u32, u16, u8, bool);
 
 /// Application-level IDS service.
 ///
@@ -27,6 +32,15 @@ pub struct IdsAppService {
     mode: DomainMode,
     enabled: bool,
     geoip: Option<Arc<dyn GeoIpPort>>,
+    /// Index at which the prevention rules begin in the engine rule array.
+    ///
+    /// The kernel identifies a match by its index in a single rule array, so
+    /// the detection rules (`ids.rules`) and the prevention rules
+    /// (`ips.rules`) share one array: detection occupies
+    /// `[0, prevention_offset)` and prevention the tail. Keeping prevention
+    /// last means the two halves can be reloaded independently without
+    /// renumbering the other.
+    prevention_offset: usize,
 }
 
 impl IdsAppService {
@@ -35,6 +49,9 @@ impl IdsAppService {
         map_port: Option<Box<dyn IdsMapPort + Send>>,
         metrics: Arc<dyn MetricsPort>,
     ) -> Self {
+        // Whatever the engine already holds is detection: prevention rules
+        // only ever arrive through `set_prevention_rules`.
+        let prevention_offset = engine.rule_count();
         Self {
             engine,
             map_port: map_port.map(|p| Arc::new(Mutex::new(p))),
@@ -42,6 +59,7 @@ impl IdsAppService {
             mode: DomainMode::default(),
             enabled: true,
             geoip: None,
+            prevention_offset,
         }
     }
 
@@ -78,35 +96,79 @@ impl IdsAppService {
         tracing::info!(enabled, "IDS service toggled");
     }
 
+    /// Add a detection rule, keeping it ahead of the prevention rules.
     pub fn add_rule(&mut self, rule: IdsRule) -> Result<(), DomainError> {
-        self.engine.add_rule(rule)?;
+        let mut rules = self.engine.rules().to_vec();
+        rules.insert(self.prevention_offset, rule);
+        self.engine.reload(rules)?;
+        self.prevention_offset += 1;
         self.sync_ebpf_maps();
         self.update_metrics();
         Ok(())
     }
 
+    /// Remove a detection rule. Prevention rules are owned by the IPS
+    /// configuration and are not reachable through the IDS rule API.
     pub fn remove_rule(&mut self, id: &RuleId) -> Result<(), DomainError> {
+        if !self.list_rules().iter().any(|r| r.id == *id) {
+            return Err(DomainError::RuleNotFound(id.0.clone()));
+        }
         self.engine.remove_rule(id)?;
+        self.prevention_offset -= 1;
         self.sync_ebpf_maps();
         self.update_metrics();
         Ok(())
     }
 
+    /// Replace the detection rules, leaving the prevention rules in place.
     pub fn reload_rules(&mut self, rules: Vec<IdsRule>) -> Result<(), DomainError> {
         let count = rules.len();
-        self.engine.reload(rules)?;
+        let prevention = self.prevention_rules().to_vec();
+        let mut all = rules;
+        all.extend(prevention);
+        self.engine.reload(all)?;
+        self.prevention_offset = count;
         self.sync_ebpf_maps();
         self.update_metrics();
         tracing::info!(count, "IDS rules reloaded");
         Ok(())
     }
 
-    pub fn list_rules(&self) -> &[IdsRule] {
-        self.engine.rules()
+    /// Replace the prevention rules, leaving the detection rules in place.
+    ///
+    /// Prevention rules are matched by the same kernel program as detection
+    /// rules; what sets them apart is what a match does, which the pipeline
+    /// decides from [`Self::is_prevention_index`].
+    pub fn set_prevention_rules(&mut self, rules: Vec<IdsRule>) -> Result<(), DomainError> {
+        let count = rules.len();
+        let mut all = self.list_rules().to_vec();
+        all.extend(rules);
+        self.engine.reload(all)?;
+        self.sync_ebpf_maps();
+        self.update_metrics();
+        tracing::info!(count, "IPS prevention rules synced to the IDS pattern maps");
+        Ok(())
     }
 
+    /// The detection rules, in kernel index order.
+    pub fn list_rules(&self) -> &[IdsRule] {
+        &self.engine.rules()[..self.prevention_offset]
+    }
+
+    /// The prevention rules, in kernel index order.
+    pub fn prevention_rules(&self) -> &[IdsRule] {
+        &self.engine.rules()[self.prevention_offset..]
+    }
+
+    /// Whether a matched rule index belongs to the prevention half.
+    #[must_use]
+    pub fn is_prevention_index(&self, index: usize) -> bool {
+        index >= self.prevention_offset
+    }
+
+    /// Number of detection rules.
     pub fn rule_count(&self) -> usize {
-        self.engine.rule_count()
+        self.prevention_offset
     }
 
     /// Set the sampling mode for event processing.
@@ -191,6 +253,12 @@ impl IdsAppService {
     ///
     /// In `Alert` mode, all actions are overridden to `IDS_ACTION_ALERT`
     /// (observation only — no traffic dropped).
+    ///
+    /// The kernel maps are keyed by `(protocol, port)`, so two rules that
+    /// watch the same port cannot both be installed: the later one wins.
+    /// Rules are written in array order, which puts the prevention rules last
+    /// and lets an IPS rule take over a port an IDS rule also watches. The
+    /// losing rule is named in a warning rather than dropped silently.
     fn sync_ebpf_maps(&self) {
         let Some(ref map_port) = self.map_port else {
             return;
@@ -210,6 +278,10 @@ impl IdsAppService {
             return;
         }
 
+        // Key -> id of the rule currently occupying it, so a collision can
+        // name both sides.
+        let mut owners: HashMap<KernelSlot, String> = HashMap::new();
+
         for (idx, rule) in self.engine.rules().iter().enumerate() {
             if !rule.enabled {
                 continue;
@@ -223,11 +295,13 @@ impl IdsAppService {
             // that covers every protocol installs one key per protocol the
             // classifier can observe.
             for key in rule.to_ebpf_keys() {
+                Self::note_key_owner(&mut owners, key, false, &rule.id.0);
                 if let Err(e) = map.insert_pattern(&key, &value) {
                     tracing::warn!(rule_id = %rule.id, "failed to sync IDS rule to eBPF map: {e}");
                 }
             }
             for src_key in rule.to_ebpf_src_keys() {
+                Self::note_key_owner(&mut owners, src_key, true, &rule.id.0);
                 if let Err(e) = map.insert_src_pattern(&src_key, &value) {
                     tracing::warn!(rule_id = %rule.id, "failed to sync IDS src rule to eBPF map: {e}");
                 }
@@ -235,10 +309,48 @@ impl IdsAppService {
         }
     }
 
+    /// Record which rule owns a kernel key, warning when it displaces another.
+    fn note_key_owner(
+        owners: &mut HashMap<KernelSlot, String>,
+        key: IdsPatternKey,
+        source_port_map: bool,
+        rule_id: &str,
+    ) {
+        // The two maps share a key type, so which map it is belongs to the
+        // identity of the slot.
+        let slot = (key.tenant_id, key.dst_port, key.protocol, source_port_map);
+        if let Some(previous) = owners.insert(slot, rule_id.to_string())
+            && previous != rule_id
+        {
+            tracing::warn!(
+                shadowed_rule = %previous,
+                rule_id,
+                port = key.dst_port,
+                protocol = key.protocol,
+                "two rules watch the same port: only the later one is installed in the kernel map"
+            );
+        }
+    }
+
     fn update_metrics(&self) {
         self.metrics
-            .set_rules_loaded("ids", self.engine.rule_count() as u64);
+            .set_rules_loaded("ids", self.prevention_offset as u64);
     }
+}
+
+/// Install the prevention rules into the service that owns the kernel pattern
+/// maps.
+///
+/// The IPS keeps the operator-facing copy of its rules, but only one service
+/// may write the maps, so the rules are mirrored here whenever they change.
+pub fn install_prevention_rules(
+    ids: &arc_swap::ArcSwap<IdsAppService>,
+    rules: Vec<IdsRule>,
+) -> Result<(), DomainError> {
+    let mut svc = (**ids.load()).clone();
+    svc.set_prevention_rules(rules)?;
+    ids.store(Arc::new(svc));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -309,6 +421,72 @@ mod tests {
             .unwrap();
         assert_eq!(svc.rule_count(), 2);
         assert_eq!(svc.list_rules()[0].id.0, "new-1");
+    }
+
+    #[test]
+    fn prevention_rules_sit_after_the_detection_rules() {
+        let mut svc = make_service();
+        svc.reload_rules(vec![make_rule("ids-001"), make_rule("ids-002")])
+            .unwrap();
+
+        svc.set_prevention_rules(vec![make_rule("ips-001")])
+            .unwrap();
+
+        assert_eq!(svc.list_rules().len(), 2);
+        assert_eq!(svc.rule_count(), 2);
+        assert_eq!(svc.prevention_rules().len(), 1);
+        assert_eq!(svc.prevention_rules()[0].id.0, "ips-001");
+        assert!(!svc.is_prevention_index(1));
+        assert!(svc.is_prevention_index(2));
+    }
+
+    #[test]
+    fn reloading_detection_rules_keeps_the_prevention_rules() {
+        let mut svc = make_service();
+        svc.reload_rules(vec![make_rule("ids-001")]).unwrap();
+        svc.set_prevention_rules(vec![make_rule("ips-001")])
+            .unwrap();
+
+        svc.reload_rules(vec![make_rule("ids-002"), make_rule("ids-003")])
+            .unwrap();
+
+        assert_eq!(svc.list_rules().len(), 2);
+        assert_eq!(svc.prevention_rules()[0].id.0, "ips-001");
+        assert!(svc.is_prevention_index(2));
+    }
+
+    #[test]
+    fn adding_a_detection_rule_keeps_the_prevention_rules_last() {
+        let mut svc = make_service();
+        svc.reload_rules(vec![make_rule("ids-001")]).unwrap();
+        svc.set_prevention_rules(vec![make_rule("ips-001")])
+            .unwrap();
+
+        svc.add_rule(make_rule("ids-002")).unwrap();
+
+        assert_eq!(svc.list_rules().len(), 2);
+        assert_eq!(svc.prevention_rules()[0].id.0, "ips-001");
+        assert!(svc.is_prevention_index(2));
+    }
+
+    #[test]
+    fn a_prevention_rule_may_not_reuse_a_detection_rule_id() {
+        let mut svc = make_service();
+        svc.reload_rules(vec![make_rule("shared")]).unwrap();
+
+        assert!(svc.set_prevention_rules(vec![make_rule("shared")]).is_err());
+        // The rejected reload leaves the detection half untouched.
+        assert_eq!(svc.list_rules().len(), 1);
+    }
+
+    #[test]
+    fn the_ids_rule_api_does_not_reach_prevention_rules() {
+        let mut svc = make_service();
+        svc.set_prevention_rules(vec![make_rule("ips-001")])
+            .unwrap();
+
+        assert!(svc.remove_rule(&RuleId("ips-001".to_string())).is_err());
+        assert_eq!(svc.prevention_rules().len(), 1);
     }
 
     #[test]

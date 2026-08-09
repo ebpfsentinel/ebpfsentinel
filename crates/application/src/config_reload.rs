@@ -692,8 +692,24 @@ impl ConfigReloadService {
         let effective_rules = if enabled { rules } else { Vec::new() };
         let rule_count = effective_rules.len();
 
-        match svc.reload_rules(effective_rules) {
+        match svc.reload_rules(effective_rules.clone()) {
             Ok(()) => {
+                // The kernel matches IPS rules out of the same array as the
+                // IDS rules, so the shared array is rebuilt under the IDS lock
+                // before anything is committed: a rule id used by both sets is
+                // rejected here and leaves the running configuration alone.
+                {
+                    let _ids_guard = self.reload_locks.ids.lock().await;
+                    if let Err(e) = crate::ids_service_impl::install_prevention_rules(
+                        &self.ids_service,
+                        effective_rules,
+                    ) {
+                        self.metrics.record_config_reload("ips", "failure");
+                        tracing::warn!(error = %e, "IPS rules rejected by the shared rule array");
+                        return Err(anyhow::anyhow!("ips reload failed: {e}"));
+                    }
+                }
+
                 // Log global mode transition
                 let old_mode = svc.mode();
                 if old_mode != mode {

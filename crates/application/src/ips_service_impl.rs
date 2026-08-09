@@ -244,12 +244,27 @@ impl IpsAppService {
     /// A blacklisted IP becomes a host route (/32 or /128) and a subnet block
     /// becomes a /24 or /48, both under the `ips` source tag so that reloading
     /// another source never erases them.
+    ///
+    /// In `Alert` mode nothing is installed: the blacklist still records what
+    /// would have been blocked, which is what makes the mode a dry run rather
+    /// than an off switch. Removals always go through, so lowering the mode
+    /// never strands an entry in the kernel.
     fn apply_enforcements(&self, actions: &[EnforcementAction]) {
         let Some(ref coordinator) = self.lpm_coordinator else {
             return;
         };
+        let enforcing = self.mode == DomainMode::Block;
 
         for action in actions {
+            if !enforcing
+                && matches!(
+                    action,
+                    EnforcementAction::BlacklistIp { .. } | EnforcementAction::BlockSubnet { .. }
+                )
+            {
+                tracing::debug!("IPS in alert mode: enforcement recorded but not installed");
+                continue;
+            }
             match action {
                 EnforcementAction::BlacklistIp { ip, .. } => {
                     let (src_v4, src_v6) = Self::ip_to_lpm_entries(*ip, host_prefix_len(*ip));
@@ -610,7 +625,21 @@ mod tests {
         let (mut svc, _) = make_service();
         let coordinator = Arc::new(RecordingCoordinator::default());
         svc.set_lpm_coordinator(Arc::clone(&coordinator) as Arc<dyn LpmCoordinatorPort>);
+        svc.set_mode(DomainMode::Block);
         (svc, coordinator)
+    }
+
+    #[test]
+    fn alert_mode_blacklists_without_touching_the_datapath() {
+        let (mut svc, coordinator) = service_with_coordinator();
+        svc.set_mode(DomainMode::Alert);
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5));
+
+        svc.add_to_blacklist(ip, "manual".to_string(), Duration::from_mins(5))
+            .expect("blacklist accepted");
+
+        assert!(svc.is_blacklisted(ip));
+        assert!(coordinator.inserted.lock().expect("lock").is_empty());
     }
 
     #[test]

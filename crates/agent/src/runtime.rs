@@ -141,8 +141,12 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     ips_svc.set_mode(ips_mode);
     ips_svc.set_enabled(config.ips.enabled);
     ips_svc.reload_whitelist(ips_whitelist);
-    ips_svc.reload_rules(ips_rules)?;
+    ips_svc.reload_rules(ips_rules.clone())?;
     let ips_svc = Arc::new(ArcSwap::from_pointee(ips_svc));
+
+    // IPS rules are matched by the same kernel program as the IDS rules, so
+    // the service that owns the pattern maps carries both sets.
+    application::ids_service_impl::install_prevention_rules(&ids_svc, ips_rules)?;
 
     // ── L7 ───────────────────────────────────────────────────────
     let l7_domain_rules = config.l7_rules()?;

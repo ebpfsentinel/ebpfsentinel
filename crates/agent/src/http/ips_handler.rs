@@ -192,7 +192,13 @@ pub async fn patch_ips_rule_mode(
         .iter()
         .find(|r| r.id.0 == id)
         .and_then(|r| serde_json::to_string(r).ok());
+    // The kernel matches IPS rules out of the array the IDS service owns, so
+    // the new mode only takes effect once that array is rebuilt.
+    let prevention_rules = svc.list_rules().to_vec();
     state.ips_service.store(Arc::new(svc));
+    if let Some(ref ids_service) = state.ids_service {
+        application::ids_service_impl::install_prevention_rules(ids_service, prevention_rules)?;
+    }
 
     if old_mode != new_mode {
         state.audit_service.record_rule_change(
