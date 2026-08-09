@@ -265,6 +265,14 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     {
         warn!("alias reload failed (non-fatal): {e}");
     }
+    // The IPS whitelist was installed above with its literal entries only: the
+    // aliases it can also name are unknown until the alias service has loaded.
+    application::ips_whitelist::apply_whitelist_aliases(
+        &ips_svc,
+        config.ips_whitelist()?,
+        &config.ips.whitelist_aliases,
+        &alias_svc,
+    );
     let alias_svc = Arc::new(RwLock::new(alias_svc));
 
     // ── Routing ──────────────────────────────────────────────────

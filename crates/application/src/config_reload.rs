@@ -616,6 +616,42 @@ impl ConfigReloadService {
         }
     }
 
+    /// Append the alias-named half of the IPS whitelist to its literal half.
+    ///
+    /// Aliases are reloaded before the IPS section, so the names resolve
+    /// against the configuration being applied rather than the previous one.
+    async fn whitelist_with_aliases(
+        &self,
+        mut whitelist: Vec<WhitelistEntry>,
+        names: &[String],
+    ) -> Vec<WhitelistEntry> {
+        if names.is_empty() {
+            return whitelist;
+        }
+        let Some(ref alias_service) = self.alias_service else {
+            tracing::warn!(
+                component = "ips",
+                count = names.len(),
+                "whitelist aliases ignored: no alias service is wired"
+            );
+            return whitelist;
+        };
+        let resolved = {
+            let guard = alias_service.read().await;
+            crate::ips_whitelist::resolve_whitelist_aliases(names, &guard)
+        };
+        for (name, reason) in &resolved.failures {
+            tracing::warn!(
+                component = "ips",
+                alias = %name,
+                error = %reason,
+                "IPS whitelist alias could not be resolved"
+            );
+        }
+        whitelist.extend(resolved.entries);
+        whitelist
+    }
+
     /// Reload IPS rules, whitelist, policy, and mode atomically.
     ///
     /// The fallible operation (`reload_rules`) runs first. Non-fallible
@@ -626,12 +662,17 @@ impl ConfigReloadService {
         &self,
         rules: Vec<IdsRule>,
         whitelist: Vec<WhitelistEntry>,
+        whitelist_aliases: Vec<String>,
         enabled: bool,
         mode: DomainMode,
         policy: IpsPolicy,
         sampling: SamplingMode,
     ) -> Result<(), anyhow::Error> {
         let _guard = self.reload_locks.ips.lock().await;
+
+        let whitelist = self
+            .whitelist_with_aliases(whitelist, &whitelist_aliases)
+            .await;
 
         let mut svc = (**self.ips_service.load()).clone();
 
@@ -1457,6 +1498,7 @@ mod tests {
             .reload_ips(
                 rules,
                 Vec::new(),
+                Vec::new(),
                 true,
                 DomainMode::Block,
                 IpsPolicy::default(),
@@ -1491,6 +1533,7 @@ mod tests {
             .reload_ips(
                 vec![make_ips_rule("ips-001", DomainMode::Block)],
                 Vec::new(),
+                Vec::new(),
                 true,
                 DomainMode::Block,
                 IpsPolicy::default(),
@@ -1503,6 +1546,7 @@ mod tests {
         reload
             .reload_ips(
                 vec![make_ips_rule("ips-001", DomainMode::Block)],
+                Vec::new(),
                 Vec::new(),
                 false,
                 DomainMode::Block,
@@ -1542,6 +1586,7 @@ mod tests {
             .reload_ips(
                 Vec::new(),
                 wl,
+                Vec::new(),
                 true,
                 DomainMode::Alert,
                 IpsPolicy::default(),
@@ -1551,6 +1596,74 @@ mod tests {
             .unwrap();
 
         assert_eq!(metrics.success_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn ips_reload_resolves_whitelist_aliases() {
+        use domain::alias::entity::{Alias, AliasId, AliasKind};
+        use domain::firewall::entity::IpNetwork;
+
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
+            make_services();
+        let mut reload = ConfigReloadService::new(
+            Arc::clone(&fw_svc),
+            Arc::clone(&ids_svc),
+            Arc::clone(&ips_svc),
+            Arc::clone(&l7_svc),
+            Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
+            Arc::clone(&ti_svc),
+            Arc::clone(&audit_svc),
+            metrics.clone(),
+        );
+
+        let mut alias_svc = AliasAppService::new(metrics.clone());
+        alias_svc
+            .reload_aliases(vec![Alias {
+                id: AliasId("mgmt".to_string()),
+                kind: AliasKind::IpSet {
+                    values: vec![IpNetwork::V4 {
+                        addr: 0x0A00_0000,
+                        prefix_len: 8,
+                    }],
+                    exclude: Vec::new(),
+                },
+                description: None,
+            }])
+            .unwrap();
+        reload.set_alias_service(Arc::new(RwLock::new(alias_svc)));
+
+        reload
+            .reload_ips(
+                Vec::new(),
+                Vec::new(),
+                vec!["mgmt".to_string()],
+                true,
+                DomainMode::Alert,
+                IpsPolicy::default(),
+                SamplingMode::None,
+            )
+            .await
+            .unwrap();
+
+        // An address covered by the alias must now be refused by the blacklist.
+        let svc = (**ips_svc.load()).clone();
+        assert!(
+            svc.add_to_blacklist(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 2, 3)),
+                "test".to_string(),
+                std::time::Duration::from_mins(1),
+            )
+            .is_err()
+        );
+        assert!(
+            svc.add_to_blacklist(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(11, 1, 2, 3)),
+                "test".to_string(),
+                std::time::Duration::from_mins(1),
+            )
+            .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -1573,6 +1686,7 @@ mod tests {
             .reload_ips(
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
                 true,
                 DomainMode::Alert,
                 IpsPolicy::default(),
@@ -1584,6 +1698,7 @@ mod tests {
 
         reload
             .reload_ips(
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 true,
@@ -1620,6 +1735,7 @@ mod tests {
         let result = reload
             .reload_ips(
                 rules,
+                Vec::new(),
                 Vec::new(),
                 true,
                 DomainMode::Block,

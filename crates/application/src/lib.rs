@@ -70,6 +70,7 @@ pub mod feed_update;
 pub mod firewall_service_impl;
 pub mod ids_service_impl;
 pub mod ips_service_impl;
+pub mod ips_whitelist;
 pub mod l7_service_impl;
 pub mod lb_service_impl;
 pub mod nat_service_impl;

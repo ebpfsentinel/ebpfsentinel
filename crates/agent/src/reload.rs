@@ -552,6 +552,7 @@ async fn perform_reload(
         .reload_ips(
             ips_rules,
             ips_whitelist,
+            config.ips.whitelist_aliases.clone(),
             config.ips.enabled,
             ips_mode,
             ips_policy,
