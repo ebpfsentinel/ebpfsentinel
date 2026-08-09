@@ -17,24 +17,20 @@ firewall:
   default_policy: pass
   rules: []
 
+# The tc-ids program matches both rule sets, so it stays enabled even though
+# every rule below belongs to the IPS. A detection rule on the same port as a
+# prevention rule would be shadowed in the kernel map, so this fixture keeps
+# the two sets on disjoint ports.
 ids:
   enabled: true
   mode: alert
   rules:
-    # IDS rule for reverse shell (feeds IPS)
-    - id: ids-reverse-shell
-      description: "Reverse shell detection"
-      severity: critical
-      protocol: tcp
-      dst_port: 4444
-      enabled: true
-
-    # IDS rule for SSH (feeds IPS)
-    - id: ids-ssh-detect
-      description: "SSH connection detection"
+    # Detection-only rule, on a port no IPS rule claims.
+    - id: ids-telnet-detect
+      description: "Telnet connection detection"
       severity: high
       protocol: tcp
-      dst_port: 22
+      dst_port: 23
       enabled: true
 
 ips:
