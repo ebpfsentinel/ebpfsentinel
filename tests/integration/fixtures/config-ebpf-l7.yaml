@@ -36,6 +36,13 @@ ddos:
 
 l7:
   enabled: true
+  # The listeners the suite drives; a payload only reaches the parser
+  # when one end of the conversation is a listed port.
+  ports:
+    - 8443
+    - 8888
+    - 8889
+    - 8890
   rules:
     - id: l7-test-deny-admin
       priority: 10

@@ -88,6 +88,10 @@ ddos:
 
 l7:
   enabled: true
+  # The slow-attack target port; without it no payload is captured and
+  # the reassembler below never sees a byte.
+  ports:
+    - 8080
   reassembly:
     enabled: true
     max_flows: 4096

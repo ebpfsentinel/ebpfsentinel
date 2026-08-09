@@ -105,6 +105,10 @@ ddos:
 
 l7:
   enabled: true
+  # The flood targets the agent's own HTTP port, so that is the port the
+  # parser has to see to evaluate the rules below.
+  ports:
+    - 8080
   rules:
     - id: l7-mhddos-deny-flood-path
       priority: 10

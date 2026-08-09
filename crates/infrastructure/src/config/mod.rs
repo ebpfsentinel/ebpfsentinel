@@ -517,6 +517,20 @@ impl AgentConfig {
             self.l7.ports.iter().copied().collect();
         check_limit("l7.ports", unique_l7_ports.len(), MAX_L7_PORTS)?;
 
+        // The classifier only copies a payload to userspace when one end of
+        // the conversation is a configured port, and that copy is the sole
+        // source of L7 events. Enabled with an empty list, nothing is ever
+        // parsed: no rule fires and no fingerprint is computed.
+        if self.l7.enabled && unique_l7_ports.is_empty() {
+            return Err(ConfigError::Validation {
+                field: "l7.ports".to_string(),
+                message: "L7 inspection is enabled but no port is listed; the data plane \
+                          captures a payload only for a listed port, so nothing would be \
+                          parsed"
+                    .to_string(),
+            });
+        }
+
         // Validate L7 stream reassembly tunables.
         self.l7.reassembly.validate()?;
 
@@ -2366,6 +2380,34 @@ l7:
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let ports = config.l7_ports();
         assert_eq!(ports, vec![80, 443, 8080]);
+    }
+
+    #[test]
+    fn l7_enabled_without_ports_is_rejected() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+l7:
+  enabled: true
+  ports: []
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Validation { ref field, .. } if field == "l7.ports"),
+            "unexpected error variant: {err:?}"
+        );
+    }
+
+    #[test]
+    fn l7_disabled_without_ports_is_accepted() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+l7:
+  enabled: false
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert!(config.validate().is_ok());
     }
 
     #[test]

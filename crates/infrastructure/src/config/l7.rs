@@ -203,6 +203,18 @@ impl L7RuleConfig {
             });
         }
 
+        // The engine sorts on priority and refuses zero, so catching it here
+        // turns a start-up failure deep in the rule loader into a message
+        // naming the rule that carries it.
+        if self.priority == 0 {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.priority"),
+                message: "priority must be at least 1; rules are evaluated from the \
+                          lowest number up"
+                    .to_string(),
+            });
+        }
+
         parse_action(&self.action).map_err(|()| ConfigError::InvalidValue {
             field: format!("{prefix}.action"),
             value: self.action.clone(),
@@ -212,7 +224,7 @@ impl L7RuleConfig {
         parse_l7_protocol(&self.protocol).map_err(|()| ConfigError::InvalidValue {
             field: format!("{prefix}.protocol"),
             value: self.protocol.clone(),
-            expected: "http, tls, grpc, smtp, ftp, smb".to_string(),
+            expected: L7_PROTOCOLS.join(", "),
         })?;
 
         if let Some(ref cidr) = self.src_ip {
@@ -373,19 +385,25 @@ impl L7RuleConfig {
             other => Err(ConfigError::InvalidValue {
                 field: "protocol".to_string(),
                 value: other.to_string(),
-                expected: "http, tls, grpc, smtp, ftp, smb, ssh, redis, mysql, postgres, \
-                           dns-tcp, imap, pop3"
-                    .to_string(),
+                expected: L7_PROTOCOLS.join(", "),
             }),
         }
     }
 }
 
+/// Every protocol [`L7RuleConfig::build_matcher`] knows how to build a
+/// matcher for. Single source of truth so the accepted set and the set an
+/// error message reports can never drift apart.
+const L7_PROTOCOLS: &[&str] = &[
+    "http", "tls", "grpc", "smtp", "ftp", "smb", "ssh", "redis", "mysql", "postgres", "dns-tcp",
+    "imap", "pop3",
+];
+
 fn parse_l7_protocol(s: &str) -> Result<(), ()> {
-    match s.to_lowercase().as_str() {
-        "http" | "tls" | "grpc" | "smtp" | "ftp" | "smb" | "ssh" | "redis" | "mysql"
-        | "postgres" | "dns-tcp" | "imap" | "pop3" => Ok(()),
-        _ => Err(()),
+    if L7_PROTOCOLS.contains(&s.to_lowercase().as_str()) {
+        Ok(())
+    } else {
+        Err(())
     }
 }
 
@@ -442,6 +460,35 @@ host: "*.example.com"
         rule.protocol = "quic".to_string();
         let err = rule.validate(0).unwrap_err();
         assert!(err.to_string().contains("quic"));
+        // The reported set is the set the matcher builder actually covers,
+        // not a stale prefix of it.
+        let message = err.to_string();
+        for protocol in L7_PROTOCOLS {
+            assert!(
+                message.contains(protocol),
+                "protocol '{protocol}' missing from: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_every_listed_protocol_builds_a_matcher() {
+        for protocol in L7_PROTOCOLS {
+            let mut rule = valid_http_rule();
+            (*protocol).clone_into(&mut rule.protocol);
+            rule.validate(0)
+                .unwrap_or_else(|e| panic!("'{protocol}' rejected by validate: {e}"));
+            rule.to_domain_rule()
+                .unwrap_or_else(|e| panic!("'{protocol}' has no matcher: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_zero_priority_error() {
+        let mut rule = valid_http_rule();
+        rule.priority = 0;
+        let err = rule.validate(0).unwrap_err();
+        assert!(err.to_string().contains("priority"));
     }
 
     #[test]

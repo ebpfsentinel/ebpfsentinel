@@ -67,7 +67,9 @@ threatintel:
 
 l7:
   enabled: true
-  ports: []
+  ports:
+    - 80
+    - 443
   rules: []
 
 alerting:
