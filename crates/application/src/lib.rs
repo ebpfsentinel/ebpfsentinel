@@ -73,6 +73,7 @@ pub mod ips_service_impl;
 pub mod ips_whitelist;
 pub mod l7_service_impl;
 pub mod lb_service_impl;
+pub mod nat_aliases;
 pub mod nat_service_impl;
 pub mod packet_pipeline;
 pub mod qos_service_impl;

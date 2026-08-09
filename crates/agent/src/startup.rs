@@ -10,8 +10,6 @@ use adapters::alert::email_sender::EmailAlertSender;
 use adapters::alert::log_sender::LogAlertSender;
 use adapters::alert::webhook_sender::WebhookAlertSender;
 use adapters::audit::log_audit_sink::LogAuditSink;
-use adapters::auth::jwt_provider::JwtAuthProvider;
-use adapters::auth::oidc_provider::{self, OidcAuthProvider};
 use adapters::ebpf::{
     AmpProtectConfigManager, ConfigFlagsManager, ConnTrackMapManager, DdosConnTrackConfigManager,
     DdosSynConfigManager, DlpEventReader, DnsEventReader, EbpfLoader, EbpfMapWriteAdapter,
@@ -533,6 +531,11 @@ pub async fn run(
         &config.ips.whitelist_aliases,
         &alias_svc,
     );
+    // NAT rules were loaded above with their alias references intact, for the
+    // same reason: the data plane matches CIDRs, so they are resolved here.
+    if config.nat.enabled {
+        application::nat_aliases::apply_rule_aliases(&mut *nat_svc.write().await, &alias_svc);
+    }
     let alias_svc = Arc::new(RwLock::new(alias_svc));
     info!("alias service initialized");
 
@@ -699,172 +702,11 @@ pub async fn run(
     };
 
     // ── 5f. Initialize auth provider (JWT, OIDC, and/or API keys) ────
-    let (auth_handle, auth_provider, revocation_handle): (
-        Option<crate::reload::AuthProviderHandle>,
-        Option<Arc<dyn AuthProvider>>,
-        Option<adapters::auth::revocation::RevocationHandle>,
-    ) = if config.auth.enabled {
-        // Build token-based provider (JWT or OIDC) if configured
-        let (token_handle, token_provider): (
-            Option<crate::reload::AuthProviderHandle>,
-            Option<Arc<dyn AuthProvider>>,
-        ) = if let Some(ref oidc) = config.auth.oidc {
-            let jwk_set = oidc_provider::fetch_jwks(&oidc.jwks_url)
-                .await
-                .map_err(|e| anyhow::anyhow!("failed to fetch JWKS: {e}"))?;
-            let provider =
-                OidcAuthProvider::new(jwk_set, oidc.issuer.as_deref(), oidc.audience.as_deref())
-                    .map_err(|e| anyhow::anyhow!("failed to initialize OIDC auth provider: {e}"))?;
-            info!(jwks_url = %oidc.jwks_url, "OIDC authentication enabled");
-            let arc = Arc::new(provider);
-            (
-                Some(crate::reload::AuthProviderHandle::Oidc(Arc::clone(&arc))),
-                Some(Arc::clone(&arc) as Arc<dyn AuthProvider>),
-            )
-        } else {
-            match config
-                .auth
-                .jwt
-                .key_source()
-                .map_err(|e| anyhow::anyhow!("auth.jwt config error: {e}"))?
-            {
-                infrastructure::config::JwtKeySource::Pem { path } => {
-                    let pem_bytes = std::fs::read(&path).map_err(|e| {
-                        anyhow::anyhow!("failed to read JWT public key at '{path}': {e}")
-                    })?;
-                    let provider = match config.auth.jwt.algorithm {
-                        infrastructure::config::JwtAlgorithm::RS256 => JwtAuthProvider::new(
-                            &pem_bytes,
-                            config.auth.jwt.issuer.as_deref(),
-                            config.auth.jwt.audience.as_deref(),
-                        ),
-                        infrastructure::config::JwtAlgorithm::EdDSA => JwtAuthProvider::new_eddsa(
-                            &pem_bytes,
-                            config.auth.jwt.issuer.as_deref(),
-                            config.auth.jwt.audience.as_deref(),
-                        ),
-                    }
-                    .map_err(|e| anyhow::anyhow!("failed to initialize JWT auth provider: {e}"))?;
-                    info!(
-                        algorithm = ?config.auth.jwt.algorithm,
-                        "JWT authentication enabled (static PEM)"
-                    );
-                    let arc = Arc::new(provider);
-                    (
-                        Some(crate::reload::AuthProviderHandle::Jwt(Arc::clone(&arc))),
-                        Some(Arc::clone(&arc) as Arc<dyn AuthProvider>),
-                    )
-                }
-                infrastructure::config::JwtKeySource::Jwks {
-                    ref url,
-                    refresh_on_unknown_kid,
-                    ..
-                } => {
-                    let jwk_set = oidc_provider::fetch_jwks(url)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("failed to fetch JWT JWKS: {e}"))?;
-                    let provider = match config.auth.jwt.algorithm {
-                        infrastructure::config::JwtAlgorithm::RS256 => OidcAuthProvider::new(
-                            jwk_set,
-                            config.auth.jwt.issuer.as_deref(),
-                            config.auth.jwt.audience.as_deref(),
-                        ),
-                        infrastructure::config::JwtAlgorithm::EdDSA => {
-                            OidcAuthProvider::new_for_eddsa(
-                                jwk_set,
-                                config.auth.jwt.issuer.as_deref(),
-                                config.auth.jwt.audience.as_deref(),
-                            )
-                        }
-                    }
-                    .map_err(|e| {
-                        anyhow::anyhow!("failed to initialize JWT JWKS auth provider: {e}")
-                    })?;
-                    let refresher: Arc<dyn oidc_provider::JwksRefresher> =
-                        Arc::new(oidc_provider::HttpJwksRefresher::new(url.clone()));
-                    let provider = provider.with_refresher(refresher, refresh_on_unknown_kid);
-                    info!(
-                        algorithm = ?config.auth.jwt.algorithm,
-                        jwks_url = %url,
-                        refresh_on_unknown_kid,
-                        "JWT authentication enabled (JWKS)"
-                    );
-                    let arc = Arc::new(provider);
-                    (
-                        Some(crate::reload::AuthProviderHandle::Oidc(Arc::clone(&arc))),
-                        Some(Arc::clone(&arc) as Arc<dyn AuthProvider>),
-                    )
-                }
-                infrastructure::config::JwtKeySource::None => (None, None),
-            }
-        };
-
-        // Build API key provider if configured
-        let api_key_provider: Option<Arc<dyn AuthProvider>> = if config.auth.api_keys.is_empty() {
-            None
-        } else {
-            let entries: Vec<_> = config
-                .auth
-                .api_keys
-                .iter()
-                .map(|k| {
-                    (
-                        k.name.clone(),
-                        k.key.clone(),
-                        k.role.clone(),
-                        k.namespaces.clone(),
-                    )
-                })
-                .collect();
-            // Use configured salt or read 32 random bytes from /dev/urandom.
-            let salt = config.auth.api_key_salt.as_deref().map_or_else(
-                || {
-                    let mut buf = vec![0u8; 32];
-                    std::fs::File::open("/dev/urandom")
-                        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf))
-                        .expect("/dev/urandom should be readable");
-                    warn!("no api_key_salt configured — using ephemeral salt, API keys will invalidate on restart");
-                    buf
-                },
-                |s| s.as_bytes().to_vec(),
-            );
-            info!(key_count = entries.len(), "API key authentication enabled");
-            Some(
-                Arc::new(adapters::auth::api_key_provider::ApiKeyAuthProvider::new(
-                    entries, &salt,
-                )) as Arc<dyn AuthProvider>,
-            )
-        };
-
-        // Combine providers
-        let final_provider: Arc<dyn AuthProvider> = match (token_provider, api_key_provider) {
-            (Some(tp), Some(akp)) => {
-                info!("composite auth: token-based + API keys");
-                Arc::new(
-                    adapters::auth::composite_provider::CompositeAuthProvider::new(vec![tp, akp]),
-                )
-            }
-            (Some(tp), None) => tp,
-            (None, Some(akp)) => akp,
-            (None, None) => {
-                // Should not happen — config validation catches this
-                return Err(anyhow::anyhow!(
-                    "auth is enabled but no auth method configured"
-                ));
-            }
-        };
-
-        // Wrap the final provider with token revocation support.
-        let revocable = adapters::auth::revocation::RevocableAuthProvider::new(final_provider);
-        let revocation_handle = revocable.revocation_handle();
-        let final_provider = Arc::new(revocable) as Arc<dyn AuthProvider>;
-        info!("token revocation enabled");
-
-        let handle = token_handle.unwrap_or(crate::reload::AuthProviderHandle::ApiKeyOnly);
-        (Some(handle), Some(final_provider), Some(revocation_handle))
-    } else {
-        (None, None, None)
-    };
+    let crate::auth_bootstrap::AuthStack {
+        handle: auth_handle,
+        provider: auth_provider,
+        revocation: revocation_handle,
+    } = crate::auth_bootstrap::build_auth_stack(&config.auth).await?;
 
     // Shared config, reload trigger, and eBPF program status for ops endpoints
     let shared_config = Arc::new(RwLock::new(config.clone()));

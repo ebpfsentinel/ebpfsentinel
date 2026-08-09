@@ -402,6 +402,10 @@ impl ConfigReloadService {
         };
         let _guard = self.reload_locks.nat.lock().await;
 
+        // Alias-named match criteria resolve to CIDRs before the rules reach
+        // the kernel maps, which only match addresses.
+        let (dnat_rules, snat_rules) = self.expand_nat_aliases(dnat_rules, snat_rules).await;
+
         let mut svc = nat_svc.write().await;
         svc.set_enabled(enabled);
 
@@ -434,6 +438,26 @@ impl ConfigReloadService {
             "NAT configuration reloaded"
         );
         Ok(())
+    }
+
+    /// Replace the alias references of NAT rules by the CIDRs they name.
+    ///
+    /// Without an alias service the rules pass through untouched, which is what
+    /// a configuration with no `aliases` section produces anyway.
+    async fn expand_nat_aliases(
+        &self,
+        dnat_rules: Vec<NatRule>,
+        snat_rules: Vec<NatRule>,
+    ) -> (Vec<NatRule>, Vec<NatRule>) {
+        let Some(ref alias_svc) = self.alias_service else {
+            return (dnat_rules, snat_rules);
+        };
+        let aliases = alias_svc.read().await;
+        let dnat = crate::nat_aliases::expand_rule_aliases(dnat_rules, &aliases);
+        let snat = crate::nat_aliases::expand_rule_aliases(snat_rules, &aliases);
+        crate::nat_aliases::log_failures(&dnat.failures);
+        crate::nat_aliases::log_failures(&snat.failures);
+        (dnat.rules, snat.rules)
     }
 
     /// Reload aliases.
