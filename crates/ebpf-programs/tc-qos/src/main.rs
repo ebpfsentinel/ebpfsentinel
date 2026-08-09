@@ -402,7 +402,14 @@ fn classify(
     classify_in_vlan(src_ip, dst_ip, src_port, dst_port, protocol, dscp, VLAN_ANY)
 }
 
-/// Progressive wildcard lookups (7 attempts) within one VLAN scope.
+/// Progressive wildcard lookups within one VLAN scope.
+///
+/// A classifier encodes "any" as a zero in the match tuple, so a rule is found
+/// by rebuilding its key from the packet with the fields it left open zeroed
+/// out. The ladder walks from the most specific shape to the least, and a rule
+/// that names a DSCP is tried before one that leaves it open: an operator who
+/// wrote the DSCP down meant it to take precedence over a rule that says
+/// nothing about it.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn classify_in_vlan(
@@ -414,7 +421,80 @@ fn classify_in_vlan(
     dscp: u8,
     vlan_id: u16,
 ) -> Option<QosClassifierValue> {
-    // 1. Exact 5-tuple + DSCP
+    if let Some(val) = classify_at_dscp(src_ip, dst_ip, src_port, dst_port, protocol, dscp, vlan_id)
+    {
+        return Some(val);
+    }
+
+    // Same ladder with the DSCP left open. Skipped when the packet is unmarked,
+    // because every key it would build has already been tried above.
+    if dscp != 0
+        && let Some(val) = classify_at_dscp(src_ip, dst_ip, src_port, dst_port, protocol, 0, vlan_id)
+    {
+        return Some(val);
+    }
+
+    // Rules that name neither a host nor a port: a DSCP-only marking rule, a
+    // protocol-wide rule, and the wildcard that puts everything left over
+    // under a pipe.
+    if dscp != 0
+        && let Some(val) = lookup(0, 0, 0, 0, 0, dscp, vlan_id)
+    {
+        return Some(val);
+    }
+    if let Some(val) = lookup(0, 0, 0, 0, protocol, 0, vlan_id) {
+        return Some(val);
+    }
+    lookup(0, 0, 0, 0, 0, 0, vlan_id)
+}
+
+/// The host/port half of the ladder, at one fixed DSCP.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn classify_at_dscp(
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    dscp: u8,
+    vlan_id: u16,
+) -> Option<QosClassifierValue> {
+    // 1. Exact 5-tuple.
+    if let Some(val) = lookup(src_ip, dst_ip, src_port, dst_port, protocol, dscp, vlan_id) {
+        return Some(val);
+    }
+    // 2. Wildcard src_port — the ephemeral side of a connection is never named.
+    if let Some(val) = lookup(src_ip, dst_ip, 0, dst_port, protocol, dscp, vlan_id) {
+        return Some(val);
+    }
+    // 3. Wildcard both ports — a host-to-host rule.
+    if let Some(val) = lookup(src_ip, dst_ip, 0, 0, protocol, dscp, vlan_id) {
+        return Some(val);
+    }
+    // 4. Wildcard IPs, exact ports — a port pair that applies to any host.
+    if let Some(val) = lookup(0, 0, src_port, dst_port, protocol, dscp, vlan_id) {
+        return Some(val);
+    }
+    // 5. By destination port, any host (shape all traffic to TCP/443).
+    if let Some(val) = lookup(0, 0, 0, dst_port, protocol, dscp, vlan_id) {
+        return Some(val);
+    }
+    // 6. By source port, any host.
+    lookup(0, 0, src_port, 0, protocol, dscp, vlan_id)
+}
+
+/// One classifier map lookup for a fully-built key.
+#[inline(always)]
+fn lookup(
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    dscp: u8,
+    vlan_id: u16,
+) -> Option<QosClassifierValue> {
     let key = QosClassifierKey {
         src_ip,
         dst_ip,
@@ -424,96 +504,7 @@ fn classify_in_vlan(
         dscp,
         vlan_id,
     };
-    if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key) } {
-        return Some(*val);
-    }
-
-    // 2. Wildcard src_port
-    let key2 = QosClassifierKey {
-        src_ip,
-        dst_ip,
-        src_port: 0,
-        dst_port,
-        protocol,
-        dscp,
-        vlan_id,
-    };
-    if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key2) } {
-        return Some(*val);
-    }
-
-    // 3. Wildcard both ports
-    let key3 = QosClassifierKey {
-        src_ip,
-        dst_ip,
-        src_port: 0,
-        dst_port: 0,
-        protocol,
-        dscp,
-        vlan_id,
-    };
-    if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key3) } {
-        return Some(*val);
-    }
-
-    // 4. Wildcard IPs, exact ports — port-based rule that applies to any host.
-    let key4 = QosClassifierKey {
-        src_ip: 0,
-        dst_ip: 0,
-        src_port,
-        dst_port,
-        protocol,
-        dscp,
-        vlan_id,
-    };
-    if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key4) } {
-        return Some(*val);
-    }
-
-    // 5. Wildcard IPs + src_port, match dst_port — the common "by destination
-    //    port" classifier (e.g. shape all traffic to TCP/5201) regardless of host.
-    let key5 = QosClassifierKey {
-        src_ip: 0,
-        dst_ip: 0,
-        src_port: 0,
-        dst_port,
-        protocol,
-        dscp,
-        vlan_id,
-    };
-    if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key5) } {
-        return Some(*val);
-    }
-
-    // 6. Wildcard IPs + dst_port, match src_port — "by source port" classifier.
-    let key6 = QosClassifierKey {
-        src_ip: 0,
-        dst_ip: 0,
-        src_port,
-        dst_port: 0,
-        protocol,
-        dscp,
-        vlan_id,
-    };
-    if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key6) } {
-        return Some(*val);
-    }
-
-    // 7. Wildcard all (catch-all rule)
-    let key7 = QosClassifierKey {
-        src_ip: 0,
-        dst_ip: 0,
-        src_port: 0,
-        dst_port: 0,
-        protocol: 0,
-        dscp: 0xFF,
-        vlan_id,
-    };
-    if let Some(val) = unsafe { QOS_CLASSIFIERS.get(&key7) } {
-        return Some(*val);
-    }
-
-    None
+    unsafe { QOS_CLASSIFIERS.get(key) }.copied()
 }
 
 // ── Flow hashing ────────────────────────────────────────────────────
