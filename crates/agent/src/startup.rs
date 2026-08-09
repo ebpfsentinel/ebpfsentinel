@@ -1125,6 +1125,120 @@ pub async fn run(
         }
     }
 
+    // ── Load-balancer backend health-probe loop ─────────────────────
+    // Probe every enabled backend of every service that configures a
+    // health check, and drive the LB engine's consecutive failure /
+    // success counters. The engine drops a backend past its failure
+    // threshold out of the balancing set and the map port mirrors the
+    // flag into eBPF, so an unreachable backend stops receiving traffic
+    // without an operator editing anything.
+    //
+    // The spec is a startup snapshot: a service created through the HTTP
+    // API carries no health check, so there is nothing later to pick up.
+    if config.loadbalancer.enabled {
+        type LbBackendProbe = (String, std::net::IpAddr, u16);
+        type LbProbeSpec = (
+            String,
+            domain::routing::entity::HealthCheck,
+            Vec<LbBackendProbe>,
+        );
+
+        let probe_specs: Vec<LbProbeSpec> = {
+            let svc = lb_svc.read().await;
+            svc.services()
+                .into_iter()
+                .filter(|s| s.enabled)
+                .filter_map(|s| {
+                    let hc = s.health_check.clone()?;
+                    let backends: Vec<LbBackendProbe> = s
+                        .backends
+                        .iter()
+                        .filter(|b| b.enabled)
+                        .map(|b| (b.id.clone(), b.addr, b.port))
+                        .collect();
+                    (!backends.is_empty()).then(|| (s.id.to_string(), hc, backends))
+                })
+                .collect()
+        };
+
+        if !probe_specs.is_empty() {
+            let probe_lb = Arc::clone(&lb_svc);
+            let tick_secs = probe_specs
+                .iter()
+                .map(|(_, hc, _)| u64::from(hc.interval_secs).max(1))
+                .min()
+                .unwrap_or(10);
+            let backend_count: usize = probe_specs.iter().map(|(_, _, b)| b.len()).sum();
+            let service_count = probe_specs.len();
+            tokio::spawn(async move {
+                use domain::routing::entity::HealthCheckProto;
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(tick_secs));
+                loop {
+                    tick.tick().await;
+                    for (service_id, hc, backends) in &probe_specs {
+                        let timeout =
+                            std::time::Duration::from_secs(u64::from(hc.timeout_secs).max(1));
+                        for (backend_id, addr, port) in backends {
+                            let ok = match hc.protocol {
+                                // The health check carries no target of
+                                // its own: each backend is probed on the
+                                // address and port it serves on.
+                                HealthCheckProto::Tcp { .. } => {
+                                    let target = std::net::SocketAddr::new(*addr, *port);
+                                    matches!(
+                                        tokio::time::timeout(
+                                            timeout,
+                                            tokio::net::TcpStream::connect(target)
+                                        )
+                                        .await,
+                                        Ok(Ok(_))
+                                    )
+                                }
+                                HealthCheckProto::Icmp => {
+                                    let secs = timeout.as_secs().max(1).to_string();
+                                    let target = addr.to_string();
+                                    // `--` terminates option parsing; the
+                                    // target is a parsed IP either way.
+                                    tokio::process::Command::new("ping")
+                                        .args(["-c", "1", "-W", &secs, "--", &target])
+                                        .stdout(std::process::Stdio::null())
+                                        .stderr(std::process::Stdio::null())
+                                        .status()
+                                        .await
+                                        .is_ok_and(|s| s.success())
+                                }
+                            };
+
+                            let threshold = if ok {
+                                hc.recovery_threshold
+                            } else {
+                                hc.failure_threshold
+                            };
+                            let mut svc = probe_lb.write().await;
+                            if let Err(e) = svc.update_backend_health(
+                                service_id,
+                                backend_id,
+                                ok,
+                                threshold.max(1),
+                            ) {
+                                tracing::debug!(
+                                    service = %service_id,
+                                    backend = %backend_id,
+                                    "load balancer backend health update skipped: {e}"
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+            info!(
+                services = service_count,
+                backends = backend_count,
+                "load balancer backend health-probe loop started"
+            );
+        }
+    }
+
     // ── 5b. Wire DNS intelligence and domain reputation services ────
     let mut dns_blocklist_ref: Option<Arc<DnsBlocklistAppService>> = None;
     let mut dns_cache_svc_concrete: Option<Arc<DnsCacheAppService>> = None;

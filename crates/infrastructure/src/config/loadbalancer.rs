@@ -13,6 +13,23 @@ use super::common::{ConfigError, default_true};
 /// Maximum number of LB services (matches eBPF `MAX_LB_SERVICES` capacity).
 pub(super) const MAX_LB_SERVICES: usize = 4096;
 
+/// Every accepted `algorithm` spelling.
+///
+/// Single source of truth for what `parse_lb_algorithm` accepts and for
+/// what a rejection message advertises, so a value the error offers can
+/// never be one the parser refuses. A test walks the list through the
+/// parser to keep the two honest.
+const LB_ALGORITHM_NAMES: [&str; 5] =
+    ["round_robin", "weighted", "ip_hash", "least_conn", "maglev"];
+
+/// Every accepted health-check `protocol` spelling, on the same terms.
+const LB_HC_PROTOCOL_NAMES: [&str; 2] = ["tcp", "icmp"];
+
+/// Render an accepted-value list for a rejection message.
+fn accepted(names: &[&str]) -> String {
+    names.join(", ")
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LoadBalancerConfig {
     #[serde(default)]
@@ -160,7 +177,7 @@ pub struct LbServiceConfig {
     /// Port to listen on for incoming traffic.
     pub listen_port: u16,
 
-    /// Algorithm: `round_robin`, `weighted`, `ip_hash`, `least_conn`.
+    /// Algorithm: see [`LB_ALGORITHM_NAMES`].
     #[serde(default = "default_lb_algorithm")]
     pub algorithm: String,
 
@@ -196,9 +213,16 @@ pub struct LbBackendConfig {
     pub same_segment: bool,
 }
 
+/// Active probing applied to every enabled backend of a service.
+///
+/// The probe target is the backend's own `addr` and `port`, so there is
+/// no target field here: one health check describes how to probe, and
+/// the service's backend list describes what to probe. A backend that
+/// fails `unhealthy_threshold` probes in a row stops receiving traffic
+/// until it passes `healthy_threshold` in a row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LbHealthCheckConfig {
-    /// Protocol: `tcp` or `http`.
+    /// Protocol: see [`LB_HC_PROTOCOL_NAMES`].
     #[serde(default = "default_hc_protocol")]
     pub protocol: String,
 
@@ -278,7 +302,7 @@ impl LbServiceConfig {
         parse_lb_algorithm(&self.algorithm).map_err(|()| ConfigError::InvalidValue {
             field: format!("{prefix}.algorithm"),
             value: self.algorithm.clone(),
-            expected: "round_robin, weighted, ip_hash, least_conn".to_string(),
+            expected: accepted(&LB_ALGORITHM_NAMES),
         })?;
 
         if self.backends.is_empty() {
@@ -313,6 +337,10 @@ impl LbServiceConfig {
             }
         }
 
+        if let Some(hc) = &self.health_check {
+            hc.validate(&prefix)?;
+        }
+
         Ok(())
     }
 
@@ -328,7 +356,7 @@ impl LbServiceConfig {
             parse_lb_algorithm(&self.algorithm).map_err(|()| ConfigError::InvalidValue {
                 field: "algorithm".to_string(),
                 value: self.algorithm.clone(),
-                expected: "round_robin, weighted, ip_hash, least_conn, maglev".to_string(),
+                expected: accepted(&LB_ALGORITHM_NAMES),
             })?;
 
         let mode = parse_lb_mode(&self.mode).map_err(|()| ConfigError::InvalidValue {
@@ -423,20 +451,56 @@ impl LbBackendConfig {
 }
 
 impl LbHealthCheckConfig {
-    fn to_domain_health_check(&self) -> Result<HealthCheck, ConfigError> {
-        use domain::routing::entity::HealthCheckProto;
+    /// Reject a health check the probe loop could not run.
+    ///
+    /// A zero interval would spin the probe loop, a zero timeout would
+    /// fail every probe on the spot, and a zero threshold would never
+    /// let a backend change state - each one turns active probing into
+    /// something that looks configured and does not work.
+    fn validate(&self, prefix: &str) -> Result<(), ConfigError> {
+        if parse_lb_hc_protocol(&self.protocol).is_none() {
+            return Err(ConfigError::InvalidValue {
+                field: format!("{prefix}.health_check.protocol"),
+                value: self.protocol.clone(),
+                expected: accepted(&LB_HC_PROTOCOL_NAMES),
+            });
+        }
 
-        let protocol = match self.protocol.to_lowercase().as_str() {
-            "tcp" => HealthCheckProto::Tcp { port: 0 },
-            "icmp" => HealthCheckProto::Icmp,
-            _ => {
-                return Err(ConfigError::InvalidValue {
-                    field: "health_check.protocol".to_string(),
-                    value: self.protocol.clone(),
-                    expected: "tcp, icmp".to_string(),
+        for (field, value) in [
+            ("interval_secs", self.interval_secs),
+            ("timeout_secs", self.timeout_secs),
+            ("unhealthy_threshold", u64::from(self.unhealthy_threshold)),
+            ("healthy_threshold", u64::from(self.healthy_threshold)),
+        ] {
+            if value == 0 {
+                return Err(ConfigError::Validation {
+                    field: format!("{prefix}.health_check.{field}"),
+                    message: format!("{field} must be > 0"),
                 });
             }
-        };
+        }
+
+        if self.timeout_secs > self.interval_secs {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.health_check.timeout_secs"),
+                message: format!(
+                    "timeout_secs ({}) must not exceed interval_secs ({}); \
+                     a probe that outlives its interval never settles",
+                    self.timeout_secs, self.interval_secs
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn to_domain_health_check(&self) -> Result<HealthCheck, ConfigError> {
+        let protocol =
+            parse_lb_hc_protocol(&self.protocol).ok_or_else(|| ConfigError::InvalidValue {
+                field: "health_check.protocol".to_string(),
+                value: self.protocol.clone(),
+                expected: accepted(&LB_HC_PROTOCOL_NAMES),
+            })?;
 
         #[allow(clippy::cast_possible_truncation)]
         let interval_secs = self.interval_secs.min(u64::from(u32::MAX)) as u32;
@@ -444,6 +508,11 @@ impl LbHealthCheckConfig {
         let timeout_secs = self.timeout_secs.min(u64::from(u32::MAX)) as u32;
 
         Ok(HealthCheck {
+            // The LB reuses the routing health-check record, whose
+            // `target` and TCP `port` address a single gateway. Here the
+            // probe fans out over the service's backends instead, so
+            // both stay empty and the probe loop reads each backend's
+            // own address and port.
             target: String::new(),
             protocol,
             interval_secs,
@@ -460,6 +529,17 @@ fn parse_lb_protocol(s: &str) -> Result<LbProtocol, ()> {
         "udp" => Ok(LbProtocol::Udp),
         "tls_passthrough" | "tls" => Ok(LbProtocol::TlsPassthrough),
         _ => Err(()),
+    }
+}
+
+/// Parse a health-check protocol, accepting exactly [`LB_HC_PROTOCOL_NAMES`].
+fn parse_lb_hc_protocol(s: &str) -> Option<domain::routing::entity::HealthCheckProto> {
+    use domain::routing::entity::HealthCheckProto;
+    match s.to_lowercase().as_str() {
+        // Port 0: the probe loop dials each backend's own port.
+        "tcp" => Some(HealthCheckProto::Tcp { port: 0 }),
+        "icmp" => Some(HealthCheckProto::Icmp),
+        _ => None,
     }
 }
 
@@ -667,6 +747,104 @@ mod tests {
         let hc = svc.health_check.unwrap();
         assert_eq!(hc.failure_threshold, 3);
         assert_eq!(hc.recovery_threshold, 2);
+    }
+
+    fn make_health_check() -> LbHealthCheckConfig {
+        LbHealthCheckConfig {
+            protocol: "tcp".to_string(),
+            interval_secs: 10,
+            timeout_secs: 5,
+            unhealthy_threshold: 3,
+            healthy_threshold: 2,
+        }
+    }
+
+    fn service_with_health_check(hc: LbHealthCheckConfig) -> LbServiceConfig {
+        let mut cfg = make_service_config("svc-1");
+        cfg.health_check = Some(hc);
+        cfg
+    }
+
+    #[test]
+    fn health_check_defaults_are_accepted() {
+        let cfg = service_with_health_check(make_health_check());
+        assert!(cfg.validate(0).is_ok());
+    }
+
+    #[test]
+    fn health_check_icmp_is_accepted() {
+        let mut hc = make_health_check();
+        hc.protocol = "icmp".to_string();
+        let cfg = service_with_health_check(hc);
+        assert!(cfg.validate(0).is_ok());
+        let svc = cfg.to_domain_service().unwrap();
+        assert_eq!(
+            svc.health_check.unwrap().protocol,
+            domain::routing::entity::HealthCheckProto::Icmp
+        );
+    }
+
+    #[test]
+    fn health_check_unknown_protocol_reports_every_accepted_value() {
+        let mut hc = make_health_check();
+        hc.protocol = "http".to_string();
+        let err = service_with_health_check(hc).validate(0).unwrap_err();
+        let msg = err.to_string();
+        for name in LB_HC_PROTOCOL_NAMES {
+            assert!(msg.contains(name), "{msg} should list '{name}'");
+        }
+    }
+
+    #[test]
+    fn health_check_zero_interval_rejected() {
+        let mut hc = make_health_check();
+        hc.interval_secs = 0;
+        assert!(service_with_health_check(hc).validate(0).is_err());
+    }
+
+    #[test]
+    fn health_check_zero_timeout_rejected() {
+        let mut hc = make_health_check();
+        hc.timeout_secs = 0;
+        assert!(service_with_health_check(hc).validate(0).is_err());
+    }
+
+    #[test]
+    fn health_check_zero_thresholds_rejected() {
+        let mut unhealthy = make_health_check();
+        unhealthy.unhealthy_threshold = 0;
+        assert!(service_with_health_check(unhealthy).validate(0).is_err());
+
+        let mut healthy = make_health_check();
+        healthy.healthy_threshold = 0;
+        assert!(service_with_health_check(healthy).validate(0).is_err());
+    }
+
+    #[test]
+    fn health_check_timeout_longer_than_interval_rejected() {
+        let mut hc = make_health_check();
+        hc.timeout_secs = 11;
+        assert!(service_with_health_check(hc).validate(0).is_err());
+    }
+
+    #[test]
+    fn every_listed_algorithm_parses() {
+        for name in LB_ALGORITHM_NAMES {
+            assert!(
+                parse_lb_algorithm(name).is_ok(),
+                "advertised algorithm '{name}' is rejected by the parser"
+            );
+        }
+    }
+
+    #[test]
+    fn every_listed_health_check_protocol_parses() {
+        for name in LB_HC_PROTOCOL_NAMES {
+            assert!(
+                parse_lb_hc_protocol(name).is_some(),
+                "advertised health-check protocol '{name}' is rejected by the parser"
+            );
+        }
     }
 
     #[test]
