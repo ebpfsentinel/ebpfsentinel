@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod auth_bootstrap;
 pub mod ebpf_lifecycle;
 pub mod ebpf_metrics;
 pub mod http;
