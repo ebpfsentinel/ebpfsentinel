@@ -326,6 +326,14 @@ impl DnsBlocklistFeedConfig {
                 message: "feed URL must not be empty".to_string(),
             });
         }
+        // The agent fetches this URL itself, so it is held to the same
+        // scheme and SSRF rules as a threat-intel feed.
+        domain::threatintel::entity::FeedConfig::validate_url(&self.url).map_err(|message| {
+            ConfigError::Validation {
+                field: format!("{prefix}.url"),
+                message: message.to_string(),
+            }
+        })?;
         if !["plaintext", "hosts"].contains(&self.format.as_str()) {
             return Err(ConfigError::InvalidValue {
                 field: format!("{prefix}.format"),
@@ -574,6 +582,32 @@ mod tests {
         });
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("refresh_interval"), "error: {err}");
+    }
+
+    #[test]
+    fn feed_url_targeting_a_private_address_is_refused() {
+        let mut cfg = valid_dns_config();
+        cfg.blocklist.feeds.push(DnsBlocklistFeedConfig {
+            name: "internal".to_string(),
+            url: "http://169.254.169.254/latest/meta-data".to_string(),
+            format: "plaintext".to_string(),
+            refresh_interval_secs: 3600,
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("url"), "error: {err}");
+    }
+
+    #[test]
+    fn feed_url_must_be_http() {
+        let mut cfg = valid_dns_config();
+        cfg.blocklist.feeds.push(DnsBlocklistFeedConfig {
+            name: "local".to_string(),
+            url: "file:///etc/hosts".to_string(),
+            format: "plaintext".to_string(),
+            refresh_interval_secs: 3600,
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("url"), "error: {err}");
     }
 
     // ── to_domain_cache_config ─────────────────────────────────────

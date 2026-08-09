@@ -117,6 +117,29 @@ async fn run_ti_feed_cycle(
     }
 }
 
+/// Translate the configured DNS blocklist feeds into fetch specs.
+///
+/// The format string is validated at config load, so anything other than
+/// `hosts` is the plaintext layout.
+fn dns_feed_specs(
+    feeds: &[infrastructure::config::DnsBlocklistFeedConfig],
+) -> Vec<application::dns_feed_update::DnsFeedSpec> {
+    use domain::dns::blocklist::BlocklistFeedFormat;
+
+    feeds
+        .iter()
+        .map(|feed| application::dns_feed_update::DnsFeedSpec {
+            name: feed.name.clone(),
+            url: feed.url.clone(),
+            format: if feed.format == "hosts" {
+                BlocklistFeedFormat::Hosts
+            } else {
+                BlocklistFeedFormat::Plaintext
+            },
+        })
+        .collect()
+}
+
 /// Distinct bpffs pin path for uprobe-dlp, so its `EVENTS` ring buffer is a
 /// separate kernel object from the shared packet `EVENTS` (same ELF map name).
 /// uprobe-dlp's other maps (`SSL_READ_ARGS`, `DLP_METRICS`) are DLP-internal and
@@ -3064,6 +3087,52 @@ pub async fn run(
         }))
     } else {
         None
+    };
+
+    // ── 11c¼. Spawn DNS blocklist feed fetcher (periodic) ─────────────
+    let _dns_feed_handle = match dns_blocklist_ref.clone() {
+        Some(dns_bl) if !config.dns.blocklist.feeds.is_empty() => {
+            let specs = dns_feed_specs(&config.dns.blocklist.feeds);
+            // Every feed shares one timer, ticking at the shortest interval any
+            // of them asked for, so no feed is refreshed later than configured.
+            let refresh_secs = config
+                .dns
+                .blocklist
+                .feeds
+                .iter()
+                .map(|f| f.refresh_interval_secs)
+                .min()
+                .unwrap_or(3600)
+                .max(60);
+            let fetcher = adapters::threatintel::HttpFeedFetcher::default();
+            let feed_cancel = cancel_token.clone();
+            info!(
+                refresh_interval_secs = refresh_secs,
+                feed_count = specs.len(),
+                "DNS blocklist feed fetcher starting"
+            );
+            Some(tokio::spawn(async move {
+                application::dns_feed_update::refresh_dns_blocklist_feeds(
+                    &specs, &fetcher, &dns_bl,
+                )
+                .await;
+
+                let mut interval = tokio::time::interval(Duration::from_secs(refresh_secs));
+                interval.tick().await; // the first tick is immediate, already done above
+                loop {
+                    tokio::select! {
+                        () = feed_cancel.cancelled() => break,
+                        _ = interval.tick() => {
+                            application::dns_feed_update::refresh_dns_blocklist_feeds(
+                                &specs, &fetcher, &dns_bl,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }))
+        }
+        _ => None,
     };
 
     // ── 11c½. Spawn eBPF kernel metrics reader (periodic, every 10s) ──

@@ -47,9 +47,7 @@ impl DomainReputationPort for DomainReputationAppService {
 
     fn get_score(&self, domain: &str) -> Option<f64> {
         let engine = self.engine.read().unwrap_or_else(PoisonError::into_inner);
-        let rep = engine.get(domain)?;
-        let now = Self::now_ns();
-        Some(rep.effective_score(now, 24 * 3600 * 1_000_000_000))
+        engine.score(domain, Self::now_ns())
     }
 
     fn update_reputation(&self, domain: &str, factor: ReputationFactor) {

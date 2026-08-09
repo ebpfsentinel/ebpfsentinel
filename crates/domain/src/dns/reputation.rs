@@ -66,6 +66,17 @@ impl DomainReputationEngine {
         self.entries.get(&domain.to_lowercase())
     }
 
+    /// Effective score of a single domain, decayed with the configured
+    /// half-life.
+    ///
+    /// Callers must not decay a score themselves: the half-life is a
+    /// configuration knob, and a caller that assumes a value reports a
+    /// different score than the one auto-blocking acts on.
+    pub fn score(&self, domain: &str, now_ns: u64) -> Option<f64> {
+        self.get(domain)
+            .map(|rep| rep.effective_score(now_ns, self.config.half_life_ns()))
+    }
+
     /// List domains with effective score above `min_score`, sorted by score descending.
     pub fn list_high_risk(&self, min_score: f64, now_ns: u64) -> Vec<(&DomainReputation, f64)> {
         let half_life = self.config.half_life_ns();
@@ -253,6 +264,31 @@ mod tests {
     }
 
     // ── Score computation ───────────────────────────────────────────
+
+    #[test]
+    fn score_of_a_domain_uses_the_configured_half_life() {
+        let mut config = test_config();
+        config.decay_half_life_hours = 1;
+        let mut engine = DomainReputationEngine::new(config);
+        let base = engine.update(
+            "bad.com",
+            ReputationFactor::BlocklistHit {
+                list_name: "test".to_string(),
+            },
+            ts(0),
+        );
+
+        // One configured half-life later the score has halved. A caller
+        // assuming the default 24 h would still report the full score here.
+        let decayed = engine.score("bad.com", ts(3600)).expect("domain tracked");
+        assert!((decayed - base / 2.0).abs() < 0.01, "score was {decayed}");
+    }
+
+    #[test]
+    fn score_of_an_unknown_domain_is_none() {
+        let engine = DomainReputationEngine::new(test_config());
+        assert!(engine.score("unknown.com", ts(0)).is_none());
+    }
 
     #[test]
     fn single_factor_score() {

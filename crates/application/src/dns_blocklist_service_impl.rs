@@ -16,6 +16,17 @@ use tokio::sync::mpsc;
 
 use crate::alert_event::AlertEvent;
 
+/// What applying one downloaded feed changed in the blocklist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeedApplyOutcome {
+    /// Patterns the feed now holds.
+    pub applied: usize,
+    /// Entries rejected as malformed or already present.
+    pub skipped: usize,
+    /// Patterns the previous run of this feed held.
+    pub removed: usize,
+}
+
 /// Application-level DNS blocklist service.
 ///
 /// Wraps the domain `DomainBlocklistEngine` with thread-safe access,
@@ -475,6 +486,41 @@ impl DnsBlocklistAppService {
         engine
             .add_pattern_with_source(raw, source)
             .map_err(|e| e.to_string())
+    }
+
+    /// Replace every pattern carrying `source` with `domains`.
+    ///
+    /// This is how a downloaded feed is applied: the previous contents of that
+    /// feed are dropped first, so a domain the publisher removed stops being
+    /// blocked instead of living on until the agent restarts. Patterns from
+    /// other sources, and the ones written in the configuration file, are left
+    /// untouched.
+    ///
+    /// Returns the number of patterns now held for that source. Malformed and
+    /// duplicate entries are counted as skipped rather than failing the feed:
+    /// one bad line in a public list must not cost the other thousands.
+    pub fn replace_source_patterns(&self, source: &str, domains: &[String]) -> FeedApplyOutcome {
+        let mut engine = self
+            .engine
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let removed = engine.remove_patterns_by_source(source);
+        let mut applied = 0;
+        let mut skipped = 0;
+        for domain in domains {
+            match engine.add_pattern_with_source(domain, Some(source.to_string())) {
+                Ok(()) => applied += 1,
+                Err(e) => {
+                    skipped += 1;
+                    tracing::debug!(domain = %domain, source, error = %e, "feed pattern skipped");
+                }
+            }
+        }
+        FeedApplyOutcome {
+            applied,
+            skipped,
+            removed,
+        }
     }
 
     /// Remove a domain pattern from the runtime blocklist.
