@@ -730,6 +730,15 @@ impl AgentConfig {
                     ),
                 });
             }
+            // A throttle installs a token bucket at this rate; without one
+            // there is no bucket to install, and starting anyway would leave
+            // the policy matching alerts and enforcing nothing.
+            if policy.action == "throttle" && policy.rate_pps.unwrap_or(0) == 0 {
+                return Err(ConfigError::Validation {
+                    field: format!("auto_response.policies[{i}].rate_pps"),
+                    message: "a throttle policy must state rate_pps above zero".to_string(),
+                });
+            }
         }
 
         // Validate auto-capture
@@ -3792,5 +3801,58 @@ interface_groups:
     fn parse_group_mask_unknown_inverted_group() {
         let bits = HashMap::new();
         assert!(parse_group_mask(&["!unknown".to_string()], &bits).is_err());
+    }
+
+    // ── Auto-response policies ─────────────────────────────────────
+
+    #[test]
+    fn auto_response_throttle_requires_a_rate() {
+        // Without a rate there is no bucket to install, so the policy would
+        // match alerts and enforce nothing.
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+auto_response:
+  enabled: true
+  policies:
+    - name: throttle-noisy
+      min_severity: high
+      action: throttle
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("rate_pps"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn auto_response_throttle_with_a_rate_is_accepted() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+auto_response:
+  enabled: true
+  policies:
+    - name: throttle-noisy
+      min_severity: high
+      action: throttle
+      rate_pps: 500
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.auto_response.policies[0].rate_pps, Some(500));
+    }
+
+    #[test]
+    fn auto_response_block_needs_no_rate() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+auto_response:
+  enabled: true
+  policies:
+    - name: block-critical
+      min_severity: critical
+      action: block
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.auto_response.policies[0].rate_pps, None);
     }
 }

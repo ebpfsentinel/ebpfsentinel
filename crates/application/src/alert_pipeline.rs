@@ -1,14 +1,21 @@
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use domain::alert::engine::AlertRouter;
 use domain::alert::entity::PacketSecurityAlert;
 use domain::alert::entity::{Alert, AlertDestination};
 use domain::audit::entity::{AuditAction, AuditComponent};
+use domain::common::entity::RuleId;
 use domain::ddos::entity::DdosAttack;
 use domain::dlp::entity::DlpAlert;
 use domain::dns::entity::{DnsAlert, DnsAlertReason};
+use domain::firewall::entity::IpCidr;
 use domain::ids::entity::IdsAlert;
+use domain::ratelimit::entity::{
+    RateLimitAction, RateLimitAlgorithm, RateLimitPolicy, RateLimitScope,
+};
 use ports::secondary::alert_enrichment_port::AlertEnrichmentPort;
 use ports::secondary::alert_sender::AlertSender;
 use ports::secondary::alert_store::AlertStore;
@@ -21,6 +28,7 @@ use crate::alert_event::AlertEvent;
 use crate::alert_replay::AlertReplayBuffer;
 use crate::audit_service_impl::AuditAppService;
 use crate::ips_service_impl::IpsAppService;
+use crate::ratelimit_service_impl::RateLimitAppService;
 
 /// Alert pipeline application service.
 ///
@@ -63,10 +71,107 @@ pub struct AutoCaptureHandler {
 }
 
 /// Simple auto-response: evaluates alerts against severity-based policies
-/// and enforces block/throttle via the IPS blacklist.
+/// and enforces the matching one — a block through the IPS blacklist, a
+/// throttle through the XDP rate limiter.
 pub struct AutoResponseHandler {
     policies: Vec<domain::response::entity::SimpleResponsePolicy>,
     ips_service: Arc<ArcSwap<IpsAppService>>,
+    rate_limit_service: Arc<RwLock<RateLimitAppService>>,
+}
+
+impl AutoResponseHandler {
+    /// Blacklist the source for `ttl`, which the IPS service expires itself.
+    fn block(&self, src_ip: IpAddr, reason: String, ttl: Duration) -> Result<(), String> {
+        self.ips_service
+            .load()
+            .add_to_blacklist(src_ip, reason, ttl)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Install a per-source token bucket in the XDP rate limiter and schedule
+    /// its removal. Unlike a blacklist entry the rate limiter holds no expiry
+    /// of its own, so the caller's TTL has to be honoured here.
+    async fn throttle(
+        &self,
+        src_ip: IpAddr,
+        policy: &domain::response::entity::SimpleResponsePolicy,
+        ttl: Duration,
+    ) -> Result<(), String> {
+        // A bucket the size of one second of traffic: a burst above the rate
+        // is metered rather than waved through on the first packet. A policy
+        // that states no rate leaves this at zero, which the policy's own
+        // validation rejects below rather than silently picking a rate the
+        // operator never asked for.
+        let rate = policy.rate_pps.unwrap_or(0);
+        let rule_id = auto_response_rule_id(&policy.name, src_ip);
+        let entry = RateLimitPolicy {
+            id: rule_id.clone(),
+            scope: RateLimitScope::SourceIp,
+            rate,
+            burst: rate,
+            action: RateLimitAction::Drop,
+            src_ip: Some(host_cidr(src_ip)),
+            enabled: true,
+            algorithm: RateLimitAlgorithm::TokenBucket,
+            country_codes: None,
+            src_ip_alias: None,
+            group_mask: 0,
+        };
+
+        {
+            let mut rl = self.rate_limit_service.write().await;
+            // Re-arming an existing throttle: drop it first so the source gets
+            // one bucket with a fresh TTL instead of two policies on one IP.
+            let _ = rl.remove_policy(&rule_id);
+            rl.add_policy(entry).map_err(|e| e.to_string())?;
+        }
+
+        // Scheduled unconditionally, so a zero TTL lapses at once the way a
+        // zero-TTL blacklist entry does rather than becoming permanent.
+        let service = Arc::clone(&self.rate_limit_service);
+        tokio::spawn(async move {
+            tokio::time::sleep(ttl).await;
+            match service.write().await.remove_policy(&rule_id) {
+                Ok(()) => tracing::info!(%src_ip, "auto-response: throttle expired"),
+                Err(e) => {
+                    tracing::warn!(%src_ip, error = %e, "auto-response: expired throttle not removed");
+                }
+            }
+        });
+        Ok(())
+    }
+}
+
+/// Single-host CIDR (/32 or /128) for the source an alert names.
+fn host_cidr(ip: IpAddr) -> IpCidr {
+    match ip {
+        IpAddr::V4(v4) => IpCidr::V4 {
+            addr: v4.to_bits(),
+            prefix_len: 32,
+        },
+        IpAddr::V6(v6) => IpCidr::V6 {
+            addr: v6.octets(),
+            prefix_len: 128,
+        },
+    }
+}
+
+/// Rule ID for a throttle, keyed by policy and source so re-arming replaces
+/// the entry. Policy names come from the config file and rule IDs accept only
+/// alphanumerics, dashes and underscores, so anything else is folded away.
+fn auto_response_rule_id(policy_name: &str, src_ip: IpAddr) -> RuleId {
+    let raw = format!("auto-response-{policy_name}-{src_ip}");
+    RuleId(
+        raw.chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect(),
+    )
 }
 
 impl AlertPipeline {
@@ -193,6 +298,7 @@ impl AlertPipeline {
         mut self,
         policies: Vec<domain::response::entity::SimpleResponsePolicy>,
         ips_service: Arc<ArcSwap<IpsAppService>>,
+        rate_limit_service: Arc<RwLock<RateLimitAppService>>,
     ) -> Self {
         if !policies.is_empty() {
             tracing::info!(
@@ -202,6 +308,7 @@ impl AlertPipeline {
             self.auto_response = Some(AutoResponseHandler {
                 policies,
                 ips_service,
+                rate_limit_service,
             });
         }
         self
@@ -276,7 +383,7 @@ impl AlertPipeline {
         }
 
         // Auto-response: evaluate and enforce if policies match
-        self.evaluate_auto_response(&alert);
+        self.evaluate_auto_response(&alert).await;
         self.evaluate_auto_capture(&alert).await;
 
         // Dedup, throttle, route matching. Suppression here only stops
@@ -349,7 +456,7 @@ impl AlertPipeline {
         }
 
         // Auto-response: evaluate and enforce if policies match
-        self.evaluate_auto_response(&alert);
+        self.evaluate_auto_response(&alert).await;
         self.evaluate_auto_capture(&alert).await;
 
         // Dedup, throttle, route matching. Suppression here only stops
@@ -426,7 +533,7 @@ impl AlertPipeline {
         }
 
         // Auto-response: evaluate and enforce if policies match
-        self.evaluate_auto_response(&alert);
+        self.evaluate_auto_response(&alert).await;
         self.evaluate_auto_capture(&alert).await;
 
         // Dedup, throttle, route matching. Suppression here only stops
@@ -470,7 +577,7 @@ impl AlertPipeline {
             let _ = tx.send(alert.clone());
         }
 
-        self.evaluate_auto_response(&alert);
+        self.evaluate_auto_response(&alert).await;
         self.evaluate_auto_capture(&alert).await;
 
         // Dedup, throttle, route matching. Suppression here only stops
@@ -643,8 +750,12 @@ impl AlertPipeline {
     }
 
     /// Evaluate an alert against simple auto-response policies.
-    /// If a policy matches, enforce block/throttle via IPS blacklist.
-    fn evaluate_auto_response(&self, alert: &domain::alert::entity::Alert) {
+    ///
+    /// The first policy that matches is the one that applies and evaluation
+    /// stops there, so list order is precedence. A `block` sends the source to
+    /// the IPS blacklist; a `throttle` gives it a token bucket at the policy's
+    /// rate instead, which shapes the source rather than cutting it off.
+    async fn evaluate_auto_response(&self, alert: &domain::alert::entity::Alert) {
         let Some(ref handler) = self.auto_response else {
             return;
         };
@@ -680,8 +791,15 @@ impl AlertPipeline {
             let reason = format!("auto-response:{} alert={}", policy.name, alert.id);
             let ttl = std::time::Duration::from_secs(policy.ttl_secs);
 
-            let ips = handler.ips_service.load();
-            match ips.add_to_blacklist(src_ip, reason.clone(), ttl) {
+            let enforced = match policy.action {
+                domain::response::entity::ResponseActionType::BlockIp => {
+                    handler.block(src_ip, reason, ttl)
+                }
+                domain::response::entity::ResponseActionType::ThrottleIp => {
+                    handler.throttle(src_ip, policy, ttl).await
+                }
+            };
+            match enforced {
                 Ok(()) => {
                     tracing::info!(
                         policy = %policy.name,
@@ -1675,5 +1793,123 @@ mod tests {
 
         assert_eq!(log_sender.send_calls.load(Ordering::Relaxed), 1);
         assert_eq!(webhook_sender.send_calls.load(Ordering::Relaxed), 1);
+    }
+
+    // ── Auto-response enforcement ──────────────────────────────────
+
+    fn make_auto_response_services(
+        metrics: &Arc<TestMetrics>,
+    ) -> (
+        Arc<ArcSwap<IpsAppService>>,
+        Arc<RwLock<RateLimitAppService>>,
+    ) {
+        let ips = IpsAppService::new(
+            domain::ips::engine::IpsEngine::new(domain::ips::entity::IpsPolicy::default()),
+            Arc::clone(metrics) as Arc<dyn MetricsPort>,
+        );
+        let rl = RateLimitAppService::new(
+            domain::ratelimit::engine::RateLimitEngine::new(),
+            Arc::clone(metrics) as Arc<dyn MetricsPort>,
+        );
+        (
+            Arc::new(ArcSwap::from_pointee(ips)),
+            Arc::new(RwLock::new(rl)),
+        )
+    }
+
+    fn make_auto_response_policy(
+        action: domain::response::entity::ResponseActionType,
+        rate_pps: Option<u64>,
+    ) -> domain::response::entity::SimpleResponsePolicy {
+        domain::response::entity::SimpleResponsePolicy {
+            name: "auto".to_string(),
+            min_severity: Severity::High,
+            components: Vec::new(),
+            action,
+            // Long enough that the removal task a throttle schedules cannot
+            // race the assertions below.
+            ttl_secs: 3600,
+            rate_pps,
+        }
+    }
+
+    #[tokio::test]
+    async fn throttle_policy_installs_a_rate_limit_on_the_source() {
+        let metrics = Arc::new(TestMetrics::new());
+        let (ips, rl) = make_auto_response_services(&metrics);
+        let mut pipeline = make_pipeline(vec![make_route("all", Severity::Low)], metrics)
+            .with_auto_response(
+                vec![make_auto_response_policy(
+                    domain::response::entity::ResponseActionType::ThrottleIp,
+                    Some(500),
+                )],
+                Arc::clone(&ips),
+                Arc::clone(&rl),
+            );
+
+        pipeline
+            .process_alert(&make_ids_alert("ids-001", Severity::High))
+            .await;
+
+        let installed = rl.read().await;
+        let policies = installed.policies();
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].rate, 500);
+        assert_eq!(policies[0].scope, RateLimitScope::SourceIp);
+        assert_eq!(
+            policies[0].src_ip,
+            Some(IpCidr::V4 {
+                addr: 0xC0A8_0001,
+                prefix_len: 32,
+            })
+        );
+        // Throttling shapes the source; blacklisting it would cut it off.
+        assert!(!ips.load().is_blacklisted(IpAddr::from([192, 168, 0, 1])));
+    }
+
+    #[tokio::test]
+    async fn block_policy_blacklists_without_touching_the_rate_limiter() {
+        let metrics = Arc::new(TestMetrics::new());
+        let (ips, rl) = make_auto_response_services(&metrics);
+        let mut pipeline = make_pipeline(vec![make_route("all", Severity::Low)], metrics)
+            .with_auto_response(
+                vec![make_auto_response_policy(
+                    domain::response::entity::ResponseActionType::BlockIp,
+                    None,
+                )],
+                Arc::clone(&ips),
+                Arc::clone(&rl),
+            );
+
+        pipeline
+            .process_alert(&make_ids_alert("ids-001", Severity::High))
+            .await;
+
+        assert!(ips.load().is_blacklisted(IpAddr::from([192, 168, 0, 1])));
+        assert_eq!(rl.read().await.policies().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_second_alert_re_arms_one_throttle_rather_than_stacking() {
+        let metrics = Arc::new(TestMetrics::new());
+        let (ips, rl) = make_auto_response_services(&metrics);
+        let mut pipeline = make_pipeline(vec![make_route("all", Severity::Low)], metrics)
+            .with_auto_response(
+                vec![make_auto_response_policy(
+                    domain::response::entity::ResponseActionType::ThrottleIp,
+                    Some(500),
+                )],
+                ips,
+                Arc::clone(&rl),
+            );
+
+        pipeline
+            .process_alert(&make_ids_alert("ids-001", Severity::High))
+            .await;
+        pipeline
+            .process_alert(&make_ids_alert("ids-002", Severity::High))
+            .await;
+
+        assert_eq!(rl.read().await.policies().len(), 1);
     }
 }

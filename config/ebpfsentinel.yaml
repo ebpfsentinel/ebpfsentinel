@@ -88,6 +88,14 @@ agent:
 #       components: [ids, ddos]   # optional filter (empty = all components)
 #       action: block
 #       ttl_secs: 1800
+#     - name: throttle-medium
+#       min_severity: medium
+#       action: throttle          # shapes the source instead of cutting it off
+#       rate_pps: 1000            # required on a throttle policy
+#       ttl_secs: 600
+# The first policy that matches an alert is the one applied, so order is
+# precedence. A block blacklists the source; a throttle gives it a token
+# bucket in the XDP rate limiter. Both lapse after ttl_secs.
 
 # ── Auto-Capture (OSS) ────────────────────────────────────────────
 # Start a PCAP capture when a high-severity alert fires.

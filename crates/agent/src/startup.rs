@@ -2651,7 +2651,8 @@ pub async fn run(
             policy_count = policies.len(),
             "auto-response policies loaded"
         );
-        alert_pipeline = alert_pipeline.with_auto_response(policies, Arc::clone(&ips_svc));
+        alert_pipeline =
+            alert_pipeline.with_auto_response(policies, Arc::clone(&ips_svc), Arc::clone(&rl_svc));
     }
 
     // Wire simple auto-capture (OSS)
