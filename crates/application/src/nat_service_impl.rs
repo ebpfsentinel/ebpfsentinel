@@ -838,6 +838,15 @@ mod tests {
     }
 
     #[test]
+    fn any_protocol_states_no_protocol_match() {
+        let mut rule = make_dnat_rule("any-proto");
+        rule.match_protocol = Some("any".to_string());
+        let entry = nat_rule_to_ebpf_entry(&rule);
+        assert_eq!(entry.match_protocol, 0);
+        assert_eq!(entry.match_flags & ebpf_common::nat::NAT_MATCH_PROTO, 0);
+    }
+
+    #[test]
     fn icmp_spelling_resolves_per_family() {
         let mut rule = make_dnat_rule("icmp-v4");
         rule.match_protocol = Some("icmp".to_string());

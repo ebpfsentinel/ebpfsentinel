@@ -20,10 +20,11 @@ pub(super) const MAX_NPTV6_RULES: usize = 64;
 /// Every accepted `match_protocol` spelling.
 ///
 /// `icmp` and `icmpv6` both mean "the ICMP of this rule's family", so either
-/// one resolves to the number the matching data plane compares. Anything else
-/// is refused here rather than silently dropped when the rule is written to
-/// the map, where an unread protocol widens the rule to every protocol.
-const NAT_MATCH_PROTOCOLS: [&str; 4] = ["tcp", "udp", "icmp", "icmpv6"];
+/// one resolves to the number the matching data plane compares, and `any` is
+/// the written form of the protocol match this rule does not make. Anything
+/// else is refused here rather than silently dropped when the rule is written
+/// to the map, where an unread protocol widens the rule to every protocol.
+const NAT_MATCH_PROTOCOLS: [&str; 5] = ["any", "tcp", "udp", "icmp", "icmpv6"];
 
 /// Whether `value` parses as the CIDR or bare address the data plane reads,
 /// and which family it belongs to (`true` for IPv6).

@@ -23,6 +23,11 @@
 # LRU HashMap (65536 entries), ensuring even distribution across the
 # configured port range.
 #
+# A rule is IPv4 or IPv6 as a whole: it is installed in one map or the other,
+# so its addresses and its match CIDRs must all belong to the same family.
+# Mixing them, writing a match that is neither an address nor a CIDR, or
+# naming an unknown protocol is refused when this file is read.
+#
 # Prerequisites:
 #   - Connection tracking must be enabled (conntrack.enabled: true)
 #   - Firewall should allow the translated traffic
@@ -79,7 +84,9 @@ nat:
   #   type            — "snat", "masquerade", or "one_to_one"
   #   match_src       — Source CIDR to match (packets from this network)
   #   match_dst       — Destination CIDR to match (optional)
-  #   match_protocol  — "tcp", "udp", or "any" (optional, default: any)
+  #   match_protocol  — "tcp", "udp", "icmp", "icmpv6" or "any" (optional,
+  #                     default: any). "icmp" and "icmpv6" both mean the ICMP
+  #                     of the rule's own address family.
   #   translated_addr — New source IP (SNAT only)
   #   interface       — Outgoing interface for masquerade (uses its IP)
   #   port_range      — Ephemeral port range for SNAT/masquerade
@@ -135,7 +142,9 @@ nat:
   #   type            — "dnat", "redirect", or "port_forward"
   #   match_dst       — Destination CIDR to match (optional)
   #   match_dst_port  — Destination port or range to match
-  #   match_protocol  — "tcp", "udp", or "any" (optional, default: any)
+  #   match_protocol  — "tcp", "udp", "icmp", "icmpv6" or "any" (optional,
+  #                     default: any). "icmp" and "icmpv6" both mean the ICMP
+  #                     of the rule's own address family.
   #   translated_addr — New destination IP
   #   translated_port — New destination port
 
