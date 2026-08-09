@@ -1,13 +1,21 @@
+use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use application::ips_service_impl::IpsAppService;
+use application::ratelimit_service_impl::RateLimitAppService;
+use arc_swap::ArcSwap;
 use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
 use domain::audit::entity::AuditAction;
 use domain::auth::entity::JwtClaims;
+use domain::common::entity::RuleId;
+use domain::firewall::entity::IpCidr;
+use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm, RateLimitPolicy};
 use domain::response::entity::{ResponseAction, ResponseActionType};
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
@@ -20,7 +28,9 @@ use super::state::AppState;
 pub struct CreateResponseRequest {
     /// Action type: `block_ip` or `throttle_ip`.
     pub action: String,
-    /// Target IP or CIDR (e.g. "1.2.3.4" or "10.0.0.0/24").
+    /// Target host address (e.g. `1.2.3.4` or `2001:db8::1`). The blacklist
+    /// and the rate limiter are both keyed by a single address, so a prefix
+    /// is refused rather than silently narrowed.
     pub target: String,
     /// TTL duration string (e.g. "1h", "30m", "86400s").
     pub ttl: String,
@@ -88,6 +98,18 @@ pub async fn create_response_action(
         }
     };
 
+    let target: IpAddr = req
+        .target
+        .trim()
+        .parse()
+        .map_err(|_| ApiError::BadRequest {
+            code: "INVALID_REQUEST",
+            message: format!(
+                "invalid target: '{}'. Expected a single host address, e.g. '1.2.3.4'",
+                req.target
+            ),
+        })?;
+
     let ttl_secs = parse_ttl(&req.ttl).ok_or_else(|| ApiError::BadRequest {
         code: "INVALID_REQUEST",
         message: format!(
@@ -118,13 +140,30 @@ pub async fn create_response_action(
         revoked: false,
     };
 
-    // Register in response engine
     let response_engine = state
         .response_engine
         .as_ref()
         .ok_or(ApiError::ServiceUnavailable {
             message: "response engine not configured".to_string(),
         })?;
+
+    // The TTL cap is checked before the data plane is touched, so a refused
+    // action leaves nothing installed behind it.
+    let max_ttl_secs = response_engine.read().await.max_ttl_secs();
+    if ttl_secs > max_ttl_secs {
+        return Err(ApiError::BadRequest {
+            code: "INVALID_REQUEST",
+            message: format!("TTL {ttl_secs}s exceeds maximum {max_ttl_secs}s"),
+        });
+    }
+
+    enforce(
+        &state.ips_service,
+        &state.ratelimit_service,
+        &action,
+        target,
+    )
+    .await?;
 
     {
         let mut engine = response_engine.write().await;
@@ -241,6 +280,8 @@ pub async fn revoke_response_action(
         })?
     };
 
+    withdraw(&state.ips_service, &state.ratelimit_service, &action).await;
+
     state.audit_service.record_response_action(
         AuditAction::RuleRemoved,
         &action.target,
@@ -252,6 +293,99 @@ pub async fn revoke_response_action(
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
+
+/// Apply a response to the data plane.
+///
+/// A block goes to the IPS blacklist, which drops the source and expires the
+/// entry on its own clock. A throttle installs a per-source token bucket in
+/// the XDP rate limiter, whose map is keyed by a 32-bit address and holds no
+/// expiry of its own: the sweeper lifts it when the TTL elapses.
+async fn enforce(
+    ips_service: &ArcSwap<IpsAppService>,
+    ratelimit_service: &RwLock<RateLimitAppService>,
+    action: &ResponseAction,
+    target: IpAddr,
+) -> Result<(), ApiError> {
+    match action.action_type {
+        ResponseActionType::BlockIp => ips_service
+            .load()
+            .add_to_blacklist(
+                target,
+                format!("manual response {}", action.id),
+                Duration::from_secs(action.ttl_secs),
+            )
+            .map_err(|e| ApiError::BadRequest {
+                code: "ENFORCEMENT_FAILED",
+                message: format!("blacklisting {target} failed: {e}"),
+            }),
+        ResponseActionType::ThrottleIp => {
+            let rate = action.rate_pps.unwrap_or(0);
+            if rate == 0 {
+                return Err(ApiError::BadRequest {
+                    code: "INVALID_REQUEST",
+                    message: "throttle_ip needs rate_pps above zero: it is the bucket to install"
+                        .to_string(),
+                });
+            }
+            let IpAddr::V4(v4) = target else {
+                return Err(ApiError::BadRequest {
+                    code: "INVALID_REQUEST",
+                    message: format!(
+                        "the rate limiter matches IPv4 sources; contain {target} with block_ip"
+                    ),
+                });
+            };
+            let policy = RateLimitPolicy {
+                id: RuleId(action.rule_id.clone()),
+                rate,
+                // One second of build-up, the same bucket shape the automatic
+                // throttle installs.
+                burst: rate,
+                action: RateLimitAction::Drop,
+                src_ip: IpCidr::V4 {
+                    addr: v4.to_bits(),
+                    prefix_len: 32,
+                },
+                enabled: true,
+                algorithm: RateLimitAlgorithm::TokenBucket,
+                group_mask: 0,
+            };
+            let mut rl = ratelimit_service.write().await;
+            rl.add_policy(policy).map_err(|e| ApiError::BadRequest {
+                code: "ENFORCEMENT_FAILED",
+                message: format!("throttling {target} failed: {e}"),
+            })
+        }
+    }
+}
+
+/// Lift a response from the data plane, best-effort.
+///
+/// Called on an early revoke and when the sweeper finds an elapsed TTL. A
+/// blacklist entry may already have expired itself, and a throttle may have
+/// been removed by a config reload, so a missing entry is not an error.
+pub(crate) async fn withdraw(
+    ips_service: &ArcSwap<IpsAppService>,
+    ratelimit_service: &RwLock<RateLimitAppService>,
+    action: &ResponseAction,
+) {
+    match action.action_type {
+        ResponseActionType::BlockIp => {
+            let Ok(target) = action.target.parse::<IpAddr>() else {
+                return;
+            };
+            if let Err(e) = ips_service.load().remove_from_blacklist(target) {
+                tracing::debug!(target = %action.target, error = %e, "response: blacklist entry already gone");
+            }
+        }
+        ResponseActionType::ThrottleIp => {
+            let mut rl = ratelimit_service.write().await;
+            if let Err(e) = rl.remove_policy(&RuleId(action.rule_id.clone())) {
+                tracing::debug!(rule_id = %action.rule_id, error = %e, "response: throttle entry already gone");
+            }
+        }
+    }
+}
 
 fn to_response(action: &ResponseAction, now_ns: u64) -> ResponseActionResponse {
     ResponseActionResponse {
@@ -337,5 +471,103 @@ mod tests {
         assert_eq!(json["action_type"], "block_ip");
         assert_eq!(json["remaining_secs"], 1800);
         assert!(json.get("rate_pps").is_none());
+    }
+
+    // ── Data-plane enforcement ───────────────────────────────────────
+
+    fn services() -> (ArcSwap<IpsAppService>, RwLock<RateLimitAppService>) {
+        let noop: Arc<dyn ports::secondary::metrics_port::MetricsPort> =
+            Arc::new(ports::test_utils::NoopMetrics);
+        (
+            ArcSwap::from_pointee(IpsAppService::new(
+                domain::ips::engine::IpsEngine::default(),
+                Arc::clone(&noop),
+            )),
+            RwLock::new(RateLimitAppService::new(
+                domain::ratelimit::engine::RateLimitEngine::new(),
+                noop,
+            )),
+        )
+    }
+
+    fn action(
+        action_type: ResponseActionType,
+        target: &str,
+        rate_pps: Option<u64>,
+    ) -> ResponseAction {
+        ResponseAction {
+            id: "resp-001".to_string(),
+            action_type,
+            target: target.to_string(),
+            ttl_secs: 60,
+            created_at_ns: 0,
+            expires_at_ns: 60_000_000_000,
+            rule_id: "response-resp-001".to_string(),
+            rate_pps,
+            revoked: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_block_reaches_the_blacklist_and_withdraw_lifts_it() {
+        let (ips, rl) = services();
+        let action = action(ResponseActionType::BlockIp, "1.2.3.4", None);
+        let target: IpAddr = "1.2.3.4".parse().unwrap();
+
+        enforce(&ips, &rl, &action, target).await.unwrap();
+        assert!(ips.load().is_blacklisted(target));
+
+        withdraw(&ips, &rl, &action).await;
+        assert!(!ips.load().is_blacklisted(target));
+    }
+
+    #[tokio::test]
+    async fn a_throttle_installs_a_host_bucket_and_withdraw_lifts_it() {
+        let (ips, rl) = services();
+        let action = action(ResponseActionType::ThrottleIp, "1.2.3.4", Some(500));
+        let target: IpAddr = "1.2.3.4".parse().unwrap();
+
+        enforce(&ips, &rl, &action, target).await.unwrap();
+        {
+            let guard = rl.read().await;
+            let policies = guard.policies();
+            assert_eq!(policies.len(), 1);
+            assert_eq!(policies[0].rate, 500);
+            assert_eq!(policies[0].burst, 500);
+            assert_eq!(
+                policies[0].src_ip,
+                IpCidr::V4 {
+                    addr: u32::from(std::net::Ipv4Addr::new(1, 2, 3, 4)),
+                    prefix_len: 32,
+                }
+            );
+        }
+
+        withdraw(&ips, &rl, &action).await;
+        assert_eq!(rl.read().await.policies().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_throttle_without_a_rate_installs_nothing() {
+        let (ips, rl) = services();
+        let action = action(ResponseActionType::ThrottleIp, "1.2.3.4", None);
+
+        let err = enforce(&ips, &rl, &action, "1.2.3.4".parse().unwrap())
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("rate_pps"));
+        assert_eq!(rl.read().await.policies().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_throttle_on_an_ipv6_target_installs_nothing() {
+        let (ips, rl) = services();
+        let action = action(ResponseActionType::ThrottleIp, "2001:db8::1", Some(500));
+
+        let err = enforce(&ips, &rl, &action, "2001:db8::1".parse().unwrap())
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("IPv4"));
+        assert_eq!(rl.read().await.policies().len(), 0);
     }
 }

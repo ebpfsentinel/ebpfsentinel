@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseActionType {
-    /// Block an IP or CIDR via a temporary firewall deny rule.
+    /// Blacklist a host in the IPS, which drops all of its traffic.
     BlockIp,
-    /// Apply a temporary rate limit to an IP.
+    /// Give a host a token bucket in the rate limiter, which shapes it
+    /// instead of cutting it off.
     ThrottleIp,
 }
 
@@ -17,7 +18,9 @@ pub struct ResponseAction {
     pub id: String,
     /// Action type (block or throttle).
     pub action_type: ResponseActionType,
-    /// Target IP or CIDR (e.g. "1.2.3.4" or "10.0.0.0/24").
+    /// Target host address (e.g. `1.2.3.4` or `2001:db8::1`). Both the
+    /// blacklist and the rate limiter are keyed by a single address, so a
+    /// prefix is not a target a response could install.
     pub target: String,
     /// TTL in seconds.
     pub ttl_secs: u64,

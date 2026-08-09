@@ -954,12 +954,15 @@ pub async fn run(
     ));
     app_state = app_state.with_response_engine(Arc::clone(&response_engine));
 
-    // Background sweeper: drop response actions whose TTL has elapsed and emit
-    // a `responses` audit entry for each genuine expiry (revokes are audited at
-    // revoke time, so they are skipped here to avoid a duplicate event).
+    // Background sweeper: lift response actions whose TTL has elapsed off the
+    // data plane and emit a `responses` audit entry for each genuine expiry
+    // (revokes are lifted and audited at revoke time, so they are skipped here
+    // to avoid a duplicate event).
     {
         let sweeper_engine = Arc::clone(&response_engine);
         let sweeper_audit = Arc::clone(&audit_svc);
+        let sweeper_ips = Arc::clone(&ips_svc);
+        let sweeper_rl = Arc::clone(&rl_svc);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
             loop {
@@ -978,6 +981,8 @@ pub async fn run(
                     if action.revoked {
                         continue;
                     }
+                    crate::http::response_handler::withdraw(&sweeper_ips, &sweeper_rl, &action)
+                        .await;
                     sweeper_audit.record_response_action(
                         domain::audit::entity::AuditAction::RuleRemoved,
                         &action.target,

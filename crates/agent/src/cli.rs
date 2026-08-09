@@ -421,13 +421,13 @@ pub enum ResponsesCommand {
         /// Action type: `block_ip` or `throttle_ip`
         #[arg(long)]
         action: String,
-        /// Target IP or CIDR
+        /// Target host address (a prefix is not a response target)
         #[arg(long)]
         target: String,
         /// TTL duration (e.g. 1h, 30m, 3600s)
         #[arg(long)]
         ttl: String,
-        /// Rate limit in pps (for `throttle_ip`)
+        /// Rate limit in pps, required on `throttle_ip` (IPv4 targets only)
         #[arg(long)]
         rate_pps: Option<u64>,
     },
