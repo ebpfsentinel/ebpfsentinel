@@ -1762,6 +1762,15 @@ pub async fn run(
             Err(e) => warn!("initial dynamic alias refresh failed: {e}"),
         }
 
+        // Firewall rules name aliases, which the kernel cannot look up: the
+        // service is told what each name covers so those rules match on
+        // addresses, ports and MACs instead of being left unrestricted.
+        {
+            let bindings =
+                application::firewall_aliases::collect_bindings(&*alias_svc.read().await);
+            firewall_svc.write().await.set_alias_bindings(bindings);
+        }
+
         // Wire FW → LB (slot 2) when ratelimit is NOT active but LB + FW are.
         // When ratelimit IS active, the RL→LB wiring was already done above.
         if fw_ok
@@ -3081,6 +3090,7 @@ pub async fn run(
 
         if refresh_interval_secs > 0 {
             let alias_svc_clone = Arc::clone(&alias_svc);
+            let fw_svc_clone = Arc::clone(&firewall_svc);
             let refresh_cancel = cancel_token.clone();
             tokio::spawn(async move {
                 let mut interval =
@@ -3095,6 +3105,12 @@ pub async fn run(
                         Ok(n) => info!(count = n, "periodic dynamic alias refresh completed"),
                         Err(e) => warn!("periodic dynamic alias refresh failed: {e}"),
                     }
+                    // A refresh can give an alias its first content, and with
+                    // it the IP set the firewall rules naming it match against.
+                    let bindings = application::firewall_aliases::collect_bindings(
+                        &*alias_svc_clone.read().await,
+                    );
+                    fw_svc_clone.write().await.set_alias_bindings(bindings);
                 }
             });
             info!(

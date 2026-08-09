@@ -109,13 +109,7 @@ impl AliasAppService {
         // Sync to eBPF IP set map
         let set_id = self.get_or_assign_set_id(alias_name);
         if let Some(ref mut ipset_port) = self.ipset_port {
-            let addrs: Vec<u32> = ips
-                .iter()
-                .filter_map(|ip| match ip {
-                    IpNetwork::V4 { addr, .. } => Some(*addr),
-                    IpNetwork::V6 { .. } => None,
-                })
-                .collect();
+            let addrs = ipset_host_addrs(alias_name, ips);
             if let Err(e) = ipset_port.load_ipset_v4(set_id, &addrs) {
                 tracing::warn!(alias = alias_name, "failed to load external IP set: {e}");
             }
@@ -173,13 +167,7 @@ impl AliasAppService {
                 let set_id = self.get_or_assign_set_id(name);
 
                 if let Some(ref mut ipset_port) = self.ipset_port {
-                    let addrs: Vec<u32> = ips
-                        .iter()
-                        .filter_map(|ip| match ip {
-                            IpNetwork::V4 { addr, .. } => Some(*addr),
-                            IpNetwork::V6 { .. } => None,
-                        })
-                        .collect();
+                    let addrs = ipset_host_addrs(name, &ips);
 
                     if let Err(e) = ipset_port.load_ipset_v4(set_id, &addrs) {
                         tracing::warn!(alias = name, "failed to load IP set: {e}");
@@ -222,6 +210,18 @@ impl AliasAppService {
     /// Return the number of loaded aliases.
     pub fn alias_count(&self) -> usize {
         self.resolver.aliases().len()
+    }
+
+    /// Names of every loaded alias.
+    pub fn alias_names(&self) -> Vec<String> {
+        self.resolver.aliases().keys().cloned().collect()
+    }
+
+    /// `set_id` already assigned to an alias, if its addresses were loaded into
+    /// the kernel IP set map. Unlike [`Self::get_or_assign_set_id`] this never
+    /// hands out an id for an alias the map does not hold.
+    pub fn assigned_set_id(&self, alias_name: &str) -> Option<u8> {
+        self.set_id_map.get(alias_name).copied()
     }
 
     /// Country codes backing a `GeoIP` alias, if the named alias is a `GeoIp` kind.
@@ -293,6 +293,31 @@ impl AliasAppService {
         self.metrics
             .set_rules_loaded("aliases", self.resolver.aliases().len() as u64);
     }
+}
+
+/// Addresses of an alias that the kernel IP set map can hold.
+///
+/// The map is keyed by an exact address, so only IPv4 host addresses fit.
+/// A CIDR would have to be stored as every address it covers, and IPv6 has no
+/// set map at all; both are reported so a rule that relies on them is not
+/// silently narrowed to the network address alone.
+fn ipset_host_addrs(alias_name: &str, ips: &[IpNetwork]) -> Vec<u32> {
+    let mut addrs = Vec::with_capacity(ips.len());
+    let mut skipped = 0usize;
+    for ip in ips {
+        match ip {
+            IpNetwork::V4 { addr, prefix_len } if *prefix_len == 32 => addrs.push(*addr),
+            _ => skipped += 1,
+        }
+    }
+    if skipped > 0 {
+        tracing::warn!(
+            alias = alias_name,
+            skipped,
+            "alias members that are not IPv4 host addresses stay out of the kernel IP set"
+        );
+    }
+    addrs
 }
 
 /// Convert domain `IpNetwork` CIDRs to eBPF LPM Trie entry types.

@@ -67,6 +67,7 @@ pub mod dns_cache_service_impl;
 pub mod dns_feed_update;
 pub mod domain_reputation_service_impl;
 pub mod feed_update;
+pub mod firewall_aliases;
 pub mod firewall_service_impl;
 pub mod ids_service_impl;
 pub mod ips_service_impl;

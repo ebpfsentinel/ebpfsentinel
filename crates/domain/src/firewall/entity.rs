@@ -4,10 +4,10 @@ use crate::common::entity::{Protocol, RuleId};
 use ebpf_common::firewall::{
     ACTION_DROP, ACTION_LOG, ACTION_PASS, ACTION_REJECT, CT_MATCH_ESTABLISHED, CT_MATCH_INVALID,
     CT_MATCH_NEW, CT_MATCH_RELATED, FirewallRuleEntry, FirewallRuleEntryV6, ICMP_WILDCARD,
-    MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT,
-    MATCH2_DSCP, MATCH2_DST_MAC, MATCH2_ICMP_CODE, MATCH2_ICMP_TYPE, MATCH2_NEGATE_DST,
-    MATCH2_NEGATE_SRC, MATCH2_SRC_MAC, MATCH2_TCP_FLAGS, ROUTE_ACTION_DUP_TO, ROUTE_ACTION_NONE,
-    ROUTE_ACTION_REPLY_TO, ROUTE_ACTION_ROUTE_TO, VLAN_ANY,
+    MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_DST_SET, MATCH_PROTO, MATCH_SRC_IP,
+    MATCH_SRC_PORT, MATCH_SRC_SET, MATCH2_DSCP, MATCH2_DST_MAC, MATCH2_ICMP_CODE, MATCH2_ICMP_TYPE,
+    MATCH2_NEGATE_DST, MATCH2_NEGATE_SRC, MATCH2_SRC_MAC, MATCH2_TCP_FLAGS, ROUTE_ACTION_DUP_TO,
+    ROUTE_ACTION_NONE, ROUTE_ACTION_REPLY_TO, ROUTE_ACTION_ROUTE_TO, VLAN_ANY,
 };
 
 use super::error::FirewallError;
@@ -501,9 +501,26 @@ impl FirewallRule {
     /// - Wildcard fields have their `MATCH_*` flag unset.
     /// - CIDR addresses are pre-masked (`addr & mask`).
     /// - Port ranges encode both start and end.
-    #[allow(clippy::too_many_lines)]
     pub fn to_ebpf_entry(&self) -> FirewallRuleEntry {
+        self.to_ebpf_entry_with_sets(0, 0)
+    }
+
+    /// Convert to an IPv4 eBPF rule entry that matches its source and/or
+    /// destination against a kernel IP set instead of a literal CIDR.
+    ///
+    /// A set id of 0 means "no set on that side", which is what
+    /// [`Self::to_ebpf_entry`] passes. The ids come from the alias service,
+    /// which owns the set contents; the rule itself only names the alias.
+    #[allow(clippy::too_many_lines)]
+    pub fn to_ebpf_entry_with_sets(&self, src_set_id: u8, dst_set_id: u8) -> FirewallRuleEntry {
         let mut flags: u8 = 0;
+
+        if src_set_id != 0 {
+            flags |= MATCH_SRC_SET;
+        }
+        if dst_set_id != 0 {
+            flags |= MATCH_DST_SET;
+        }
 
         // Source IP
         let (src_ip, src_mask) = match self.src_ip {
@@ -624,8 +641,8 @@ impl FirewallRule {
             vlan_id: self.vlan_id.unwrap_or(VLAN_ANY),
             action: action_to_u8(self.action),
             ct_state_mask,
-            src_set_id: 0,
-            dst_set_id: 0,
+            src_set_id,
+            dst_set_id,
             tcp_flags_match,
             tcp_flags_mask,
             icmp_type,
@@ -1370,6 +1387,30 @@ mod tests {
 
         rule.action = FirewallAction::Reject;
         assert_eq!(rule.to_ebpf_entry().action, ACTION_REJECT);
+    }
+
+    #[test]
+    fn to_ebpf_entry_without_sets_leaves_set_flags_clear() {
+        let entry = make_rule("r", 1).to_ebpf_entry();
+        assert_eq!(entry.src_set_id, 0);
+        assert_eq!(entry.dst_set_id, 0);
+        assert_eq!(entry.match_flags & MATCH_SRC_SET, 0);
+        assert_eq!(entry.match_flags & MATCH_DST_SET, 0);
+    }
+
+    #[test]
+    fn to_ebpf_entry_with_sets_raises_the_set_flags() {
+        let rule = make_rule("r", 1);
+
+        let src_only = rule.to_ebpf_entry_with_sets(3, 0);
+        assert_eq!(src_only.src_set_id, 3);
+        assert_ne!(src_only.match_flags & MATCH_SRC_SET, 0);
+        assert_eq!(src_only.match_flags & MATCH_DST_SET, 0);
+
+        let both = rule.to_ebpf_entry_with_sets(3, 7);
+        assert_eq!(both.dst_set_id, 7);
+        assert_ne!(both.match_flags & MATCH_SRC_SET, 0);
+        assert_ne!(both.match_flags & MATCH_DST_SET, 0);
     }
 
     // ── to_ebpf_entry_v6() tests ────────────────────────────────────

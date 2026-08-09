@@ -460,6 +460,24 @@ impl ConfigReloadService {
         (dnat.rules, snat.rules)
     }
 
+    /// Republish to the firewall service what every alias resolves to.
+    ///
+    /// Firewall rules keep their alias references, so the kernel projection has
+    /// to be rebuilt whenever either the rules or the aliases change.
+    async fn refresh_firewall_alias_bindings(&self) {
+        let Some(ref alias_svc) = self.alias_service else {
+            return;
+        };
+        let bindings = {
+            let aliases = alias_svc.read().await;
+            crate::firewall_aliases::collect_bindings(&aliases)
+        };
+        self.firewall_service
+            .write()
+            .await
+            .set_alias_bindings(bindings);
+    }
+
     /// Reload aliases.
     pub async fn reload_aliases(&self, aliases: Vec<Alias>) -> Result<(), anyhow::Error> {
         let Some(ref alias_svc) = self.alias_service else {
@@ -471,6 +489,11 @@ impl ConfigReloadService {
         let count = aliases.len();
         svc.reload_aliases(aliases)
             .map_err(|e| anyhow::anyhow!("alias reload failed: {e}"))?;
+        drop(svc);
+
+        // Firewall rules name aliases, and what those names cover has just
+        // changed, so the kernel projection of the rules is rebuilt.
+        self.refresh_firewall_alias_bindings().await;
 
         self.metrics.record_config_reload("aliases", "success");
         tracing::info!(count, "alias configuration reloaded");
@@ -540,6 +563,8 @@ impl ConfigReloadService {
         match svc.reload_rules(effective_rules) {
             Ok(()) => {
                 drop(svc);
+                // The new rules may name aliases the previous set did not.
+                self.refresh_firewall_alias_bindings().await;
                 self.metrics.record_config_reload("firewall", "success");
                 tracing::info!(
                     rule_count = rule_count,

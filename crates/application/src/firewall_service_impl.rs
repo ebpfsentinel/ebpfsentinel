@@ -6,6 +6,8 @@ use domain::common::error::DomainError;
 use domain::firewall::engine::FirewallEngine;
 use domain::firewall::entity::{FirewallAction, FirewallRule, PortRange, Scope};
 use domain::firewall::error::FirewallError;
+
+use crate::firewall_aliases::AliasBindings;
 use ports::secondary::conntrack_kill_port::ConnTrackKillPort;
 use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
 use ports::secondary::metrics_port::MetricsPort;
@@ -43,6 +45,9 @@ pub struct FirewallAppService {
     mode: DomainMode,
     enabled: bool,
     anti_lockout: AntiLockoutSettings,
+    /// What the aliases named by rules resolve to. Refreshed by whoever owns
+    /// the alias service; the rules themselves keep their alias references.
+    alias_bindings: AliasBindings,
 }
 
 impl FirewallAppService {
@@ -59,7 +64,18 @@ impl FirewallAppService {
             mode: DomainMode::default(),
             enabled: true,
             anti_lockout: AntiLockoutSettings::default(),
+            alias_bindings: AliasBindings::default(),
         }
+    }
+
+    /// Publish what the aliases resolve to and re-project the rules onto the
+    /// kernel maps, so a rule naming an alias starts matching as soon as the
+    /// alias has content.
+    pub fn set_alias_bindings(&mut self, bindings: AliasBindings) {
+        let count = bindings.len();
+        self.alias_bindings = bindings;
+        self.sync_ebpf_maps();
+        tracing::debug!(aliases = count, "firewall alias bindings refreshed");
     }
 
     /// Return the current operating mode.
@@ -329,6 +345,7 @@ impl FirewallAppService {
         };
 
         let rules = self.engine.rules();
+        let alias_bindings = &self.alias_bindings;
 
         // Partition into V4 and V6, applying alert-mode override
         let mut v4_entries = Vec::new();
@@ -346,10 +363,32 @@ impl FirewallAppService {
                 rule.clone()
             };
 
-            if effective_rule.is_v6() {
-                v6_entries.push(effective_rule.to_ebpf_entry_v6());
-            } else {
-                v4_entries.push(effective_rule.to_ebpf_entry());
+            // Alias references name something the kernel cannot look up, so
+            // they are resolved into set ids or literal criteria here.
+            let kernel_rules =
+                match crate::firewall_aliases::expand_for_kernel(&effective_rule, alias_bindings) {
+                    Ok(kernel_rules) => kernel_rules,
+                    Err(reason) => {
+                        tracing::warn!(
+                            component = "firewall",
+                            rule = %effective_rule.id.0,
+                            "rule not installed: {reason}"
+                        );
+                        continue;
+                    }
+                };
+
+            for kernel_rule in kernel_rules {
+                if kernel_rule.rule.is_v6() {
+                    v6_entries.push(kernel_rule.rule.to_ebpf_entry_v6());
+                } else {
+                    v4_entries.push(
+                        kernel_rule.rule.to_ebpf_entry_with_sets(
+                            kernel_rule.src_set_id,
+                            kernel_rule.dst_set_id,
+                        ),
+                    );
+                }
             }
         }
 
@@ -414,6 +453,40 @@ mod tests {
         }
     }
 
+    /// Map port that keeps the last bulk load, so tests can inspect what the
+    /// kernel would have been given.
+    #[derive(Clone, Default)]
+    struct RecordingMap {
+        v4: Arc<std::sync::Mutex<Vec<ebpf_common::firewall::FirewallRuleEntry>>>,
+        v6: Arc<std::sync::Mutex<Vec<ebpf_common::firewall::FirewallRuleEntryV6>>>,
+    }
+
+    impl FirewallArrayMapPort for RecordingMap {
+        fn load_v4_rules(
+            &mut self,
+            rules: &[ebpf_common::firewall::FirewallRuleEntry],
+        ) -> Result<(), DomainError> {
+            *self.v4.lock().unwrap() = rules.to_vec();
+            Ok(())
+        }
+
+        fn load_v6_rules(
+            &mut self,
+            rules: &[ebpf_common::firewall::FirewallRuleEntryV6],
+        ) -> Result<(), DomainError> {
+            *self.v6.lock().unwrap() = rules.to_vec();
+            Ok(())
+        }
+
+        fn set_default_policy(&mut self, _policy: u8) -> Result<(), DomainError> {
+            Ok(())
+        }
+
+        fn rule_count(&self) -> Result<usize, DomainError> {
+            Ok(self.v4.lock().unwrap().len() + self.v6.lock().unwrap().len())
+        }
+    }
+
     fn make_service() -> FirewallAppService {
         let mut svc = FirewallAppService::new(FirewallEngine::new(), None, Arc::new(NoopMetrics));
         // Disable anti-lockout for unit tests to avoid extra synthetic rules.
@@ -422,6 +495,66 @@ mod tests {
             ..Default::default()
         });
         svc
+    }
+
+    #[test]
+    fn set_backed_alias_reaches_the_kernel_entry() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(map.clone()));
+
+        let mut rule = make_rule("fw-alias", 10);
+        rule.src_alias = Some("blocklist".to_string());
+        svc.add_rule(rule).unwrap();
+
+        // Before the alias is bound the rule cannot be installed: matching on
+        // an unknown name would mean matching everything.
+        assert!(map.v4.lock().unwrap().is_empty());
+
+        let mut bindings = AliasBindings::default();
+        bindings.bind_set("blocklist", 4);
+        svc.set_alias_bindings(bindings);
+
+        let entries = map.v4.lock().unwrap().clone();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].src_set_id, 4);
+        assert_ne!(
+            entries[0].match_flags & ebpf_common::firewall::MATCH_SRC_SET,
+            0
+        );
+    }
+
+    #[test]
+    fn statically_resolved_alias_expands_into_one_entry_per_network() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(map.clone()));
+
+        let mut rule = make_rule("fw-alias", 10);
+        rule.src_alias = Some("lan".to_string());
+        svc.add_rule(rule).unwrap();
+
+        let mut bindings = AliasBindings::default();
+        bindings.bind_ips(
+            "lan",
+            vec![
+                domain::firewall::entity::IpNetwork::V4 {
+                    addr: 0x0A00_0000,
+                    prefix_len: 24,
+                },
+                domain::firewall::entity::IpNetwork::V4 {
+                    addr: 0xC0A8_0000,
+                    prefix_len: 16,
+                },
+            ],
+        );
+        svc.set_alias_bindings(bindings);
+
+        let entries = map.v4.lock().unwrap().clone();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e.src_set_id == 0));
+        assert_eq!(entries[0].src_ip, 0x0A00_0000);
+        assert_eq!(entries[1].src_ip, 0xC0A8_0000);
     }
 
     #[test]
