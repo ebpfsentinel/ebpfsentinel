@@ -503,6 +503,10 @@ pub async fn run(
     routing_svc.set_metrics(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     routing_svc.set_enabled(config.routing.enabled);
     if config.routing.enabled {
+        // Election only becomes failover once the kernel forwards through the
+        // elected gateway, so give the service the port that writes the route.
+        routing_svc.set_route_port(Arc::new(adapters::net::IpDefaultRoute::new())
+            as Arc<dyn ports::secondary::default_route_port::DefaultRoutePort>);
         let gateways: Vec<_> = config
             .routing
             .gateways
@@ -2872,8 +2876,7 @@ pub async fn run(
             ti_svc.store(Arc::new(svc));
         }
         rl_svc.write().await.set_geoip_port(Arc::clone(geoip));
-        routing_svc.write().await.set_geoip_port(Arc::clone(geoip));
-        info!("GeoIP wired to DDoS, IPS, IDS, L7, ThreatIntel, RateLimit, Routing");
+        info!("GeoIP wired to DDoS, IPS, IDS, L7, ThreatIntel, RateLimit");
     }
 
     // Wire ThreatIntel country confidence boost from config

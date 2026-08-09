@@ -3,17 +3,23 @@ use std::sync::Arc;
 
 use domain::routing::entity::{Gateway, GatewayId, GatewayState, GatewayStatus};
 use domain::routing::error::RoutingError;
-use ports::secondary::geoip_port::GeoIpPort;
+use ports::secondary::default_route_port::DefaultRoutePort;
 use ports::secondary::metrics_port::MetricsPort;
 
 /// Application-level gateway monitoring and multi-WAN routing service.
 ///
-/// Manages gateway definitions, tracks health-check results, and provides
-/// gateway selection logic for policy routing rules.
+/// Manages gateway definitions, tracks health-check results, elects the best
+/// usable gateway, and installs that election as the host default route so a
+/// failover moves packets instead of only moving a status field.
 pub struct RoutingAppService {
     gateways: HashMap<GatewayId, GatewayState>,
-    geoip: Option<Arc<dyn GeoIpPort>>,
     metrics: Option<Arc<dyn MetricsPort>>,
+    /// Programs the default route. Absent leaves the election advisory, which
+    /// is what the API-only and unit-test paths want.
+    route: Option<Arc<dyn DefaultRoutePort>>,
+    /// Gateway the default route currently points at, so an unchanged election
+    /// costs nothing and a failed install is retried on the next probe.
+    routed_via: Option<GatewayId>,
     enabled: bool,
 }
 
@@ -27,8 +33,9 @@ impl RoutingAppService {
     pub fn new() -> Self {
         Self {
             gateways: HashMap::new(),
-            geoip: None,
             metrics: None,
+            route: None,
+            routed_via: None,
             enabled: false,
         }
     }
@@ -38,6 +45,51 @@ impl RoutingAppService {
         self.metrics = Some(metrics);
     }
 
+    /// Set the port that installs the elected gateway as the default route.
+    pub fn set_route_port(&mut self, route: Arc<dyn DefaultRoutePort>) {
+        self.route = Some(route);
+        // A port arriving after the gateways were loaded still has to program
+        // the current election, otherwise nothing moves until the first probe.
+        self.apply_selected_route();
+    }
+
+    /// Install the currently elected gateway as the host default route.
+    ///
+    /// A no-op when routing is disabled, when no route port is wired, or when
+    /// the election is unchanged. A failed install leaves `routed_via` alone so
+    /// the next probe retries it.
+    fn apply_selected_route(&mut self) {
+        if !self.enabled || self.route.is_none() {
+            return;
+        }
+        let Some(selected) = self.select_gateway() else {
+            // Every gateway is down: the last programmed route is the least-bad
+            // path left, and the all-down alert already carries the news.
+            return;
+        };
+        let (id, gateway_ip, interface, name) = (
+            selected.gateway.id,
+            selected.gateway.gateway_ip.clone(),
+            selected.gateway.interface.clone(),
+            selected.gateway.name.clone(),
+        );
+        if self.routed_via == Some(id) {
+            return;
+        }
+        let Some(ref route) = self.route else {
+            return;
+        };
+        match route.replace_default_route(&gateway_ip, &interface) {
+            Ok(()) => {
+                self.routed_via = Some(id);
+                tracing::info!(gateway = %name, %gateway_ip, %interface, "default route now points at the elected gateway");
+            }
+            Err(e) => {
+                tracing::warn!(gateway = %name, error = %e, "could not program the default route, retrying on the next probe");
+            }
+        }
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled
     }
@@ -45,6 +97,7 @@ impl RoutingAppService {
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
         tracing::info!(enabled, "routing service toggled");
+        self.apply_selected_route();
     }
 
     /// Reload gateways from configuration.
@@ -71,6 +124,7 @@ impl RoutingAppService {
             m.set_routing_gateways_total(count as u64);
         }
         tracing::info!(count, "routing gateways reloaded");
+        self.apply_selected_route();
         Ok(())
     }
 
@@ -88,6 +142,7 @@ impl RoutingAppService {
             m.set_routing_gateways_total(self.gateways.len() as u64);
         }
         tracing::info!(id, count = self.gateways.len(), "routing gateway added");
+        self.apply_selected_route();
         Ok(id)
     }
 
@@ -100,6 +155,11 @@ impl RoutingAppService {
             m.set_routing_gateways_total(self.gateways.len() as u64);
         }
         tracing::info!(id, count = self.gateways.len(), "routing gateway removed");
+        if self.routed_via == Some(id) {
+            // The programmed next hop is gone: force a fresh install.
+            self.routed_via = None;
+        }
+        self.apply_selected_route();
         Ok(())
     }
 
@@ -123,6 +183,7 @@ impl RoutingAppService {
             tracing::info!(gateway = %state.gateway.name, "gateway recovered");
         }
         tracing::debug!(gateway = %state.gateway.name, status = ?state.status, "probe success");
+        self.apply_selected_route();
         Ok(())
     }
 
@@ -147,6 +208,7 @@ impl RoutingAppService {
             tracing::warn!(gateway = %state.gateway.name, "gateway went down, failover triggered");
         }
         tracing::debug!(gateway = %state.gateway.name, status = ?state.status, "probe failure");
+        self.apply_selected_route();
         Ok(())
     }
 
@@ -172,39 +234,18 @@ impl RoutingAppService {
         self.gateways.len()
     }
 
-    /// Set the `GeoIP` port for country-based gateway selection.
-    pub fn set_geoip_port(&mut self, port: Arc<dyn GeoIpPort>) {
-        self.geoip = Some(port);
-    }
-
-    /// Select a gateway preferred for a given destination country.
-    ///
-    /// Returns the first usable gateway whose `preferred_for_countries` contains
-    /// the given country code (case-insensitive). Falls back to [`select_gateway`]
-    /// if no country-specific gateway is usable.
-    pub fn select_gateway_for_country(&self, dst_country: Option<&str>) -> Option<&GatewayState> {
-        if let Some(cc) = dst_country {
-            let preferred = self.list_gateways().into_iter().find(|s| {
-                s.is_usable()
-                    && s.gateway
-                        .preferred_for_countries
-                        .as_ref()
-                        .is_some_and(|countries| {
-                            countries.iter().any(|c| c.eq_ignore_ascii_case(cc))
-                        })
-            });
-            if preferred.is_some() {
-                return preferred;
-            }
-        }
-        self.select_gateway()
+    /// Gateway the default route currently points at, if one was programmed.
+    pub fn routed_via(&self) -> Option<GatewayId> {
+        self.routed_via
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use domain::common::error::DomainError;
     use domain::routing::entity::Gateway;
+    use std::sync::Mutex;
 
     fn make_gateway(id: u8, priority: u32) -> Gateway {
         Gateway {
@@ -215,8 +256,44 @@ mod tests {
             priority,
             enabled: true,
             health_check: None,
-            preferred_for_countries: None,
         }
+    }
+
+    /// Records every install, and can be told to fail them.
+    #[derive(Default)]
+    struct RecordingRoute {
+        installs: Mutex<Vec<(String, String)>>,
+        fail: Mutex<bool>,
+    }
+
+    impl RecordingRoute {
+        fn installs(&self) -> Vec<(String, String)> {
+            self.installs.lock().unwrap().clone()
+        }
+    }
+
+    impl DefaultRoutePort for RecordingRoute {
+        fn replace_default_route(
+            &self,
+            gateway_ip: &str,
+            interface: &str,
+        ) -> Result<(), DomainError> {
+            if *self.fail.lock().unwrap() {
+                return Err(DomainError::EngineError("no CAP_NET_ADMIN".into()));
+            }
+            self.installs
+                .lock()
+                .unwrap()
+                .push((gateway_ip.to_owned(), interface.to_owned()));
+            Ok(())
+        }
+    }
+
+    fn routed_service(route: &Arc<RecordingRoute>) -> RoutingAppService {
+        let mut svc = RoutingAppService::new();
+        svc.set_enabled(true);
+        svc.set_route_port(Arc::clone(route) as Arc<dyn DefaultRoutePort>);
+        svc
     }
 
     #[test]
@@ -326,6 +403,79 @@ mod tests {
         let id = svc.add_gateway(make_gateway(0, 20)).unwrap();
         assert_eq!(id, 1); // 0 taken, lowest free is 1
         assert_eq!(svc.gateway_count(), 2);
+    }
+
+    #[test]
+    fn the_elected_gateway_becomes_the_default_route() {
+        let route = Arc::new(RecordingRoute::default());
+        let mut svc = routed_service(&route);
+        svc.reload_gateways(vec![make_gateway(1, 10), make_gateway(2, 20)])
+            .unwrap();
+        assert_eq!(route.installs(), vec![("10.0.1.1".into(), "eth1".into())]);
+        assert_eq!(svc.routed_via(), Some(1));
+    }
+
+    #[test]
+    fn a_failover_reprograms_the_default_route_and_a_recovery_puts_it_back() {
+        let route = Arc::new(RecordingRoute::default());
+        let mut svc = routed_service(&route);
+        svc.reload_gateways(vec![make_gateway(1, 10), make_gateway(2, 20)])
+            .unwrap();
+
+        for _ in 0..3 {
+            svc.record_probe_failure(1).unwrap();
+        }
+        assert_eq!(svc.routed_via(), Some(2));
+
+        for _ in 0..2 {
+            svc.record_probe_success(1).unwrap();
+        }
+        assert_eq!(
+            route.installs(),
+            vec![
+                ("10.0.1.1".into(), "eth1".into()),
+                ("10.0.2.1".into(), "eth2".into()),
+                ("10.0.1.1".into(), "eth1".into()),
+            ]
+        );
+        assert_eq!(svc.routed_via(), Some(1));
+    }
+
+    #[test]
+    fn an_unchanged_election_programs_nothing() {
+        let route = Arc::new(RecordingRoute::default());
+        let mut svc = routed_service(&route);
+        svc.reload_gateways(vec![make_gateway(1, 10), make_gateway(2, 20)])
+            .unwrap();
+        // Probes that never cross a threshold must not rewrite the route.
+        for _ in 0..5 {
+            svc.record_probe_success(1).unwrap();
+        }
+        assert_eq!(route.installs().len(), 1);
+    }
+
+    #[test]
+    fn a_failed_install_is_retried_on_the_next_probe() {
+        let route = Arc::new(RecordingRoute::default());
+        *route.fail.lock().unwrap() = true;
+        let mut svc = routed_service(&route);
+        svc.reload_gateways(vec![make_gateway(1, 10)]).unwrap();
+        assert_eq!(svc.routed_via(), None);
+        assert!(route.installs().is_empty());
+
+        *route.fail.lock().unwrap() = false;
+        svc.record_probe_success(1).unwrap();
+        assert_eq!(route.installs(), vec![("10.0.1.1".into(), "eth1".into())]);
+        assert_eq!(svc.routed_via(), Some(1));
+    }
+
+    #[test]
+    fn a_disabled_service_programs_nothing() {
+        let route = Arc::new(RecordingRoute::default());
+        let mut svc = RoutingAppService::new();
+        svc.set_route_port(Arc::clone(&route) as Arc<dyn DefaultRoutePort>);
+        svc.reload_gateways(vec![make_gateway(1, 10)]).unwrap();
+        assert!(route.installs().is_empty());
     }
 
     #[test]

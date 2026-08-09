@@ -206,7 +206,6 @@ pub async fn create_gateway(
                 interval_secs,
                 ..HealthCheck::default()
             }),
-        preferred_for_countries: None,
     };
     let mut svc = routing.write().await;
     let id = svc

@@ -374,6 +374,9 @@ impl AgentConfig {
         // Validate container resolver config
         self.container.validate()?;
 
+        // Validate multi-WAN gateways
+        self.routing.validate()?;
+
         // Validate TLS config
         if self.agent.tls.enabled {
             if self.agent.tls.cert_path.is_empty() {

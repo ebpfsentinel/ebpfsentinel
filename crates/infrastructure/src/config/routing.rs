@@ -1,4 +1,9 @@
+use std::collections::HashSet;
+use std::net::Ipv4Addr;
+
 use serde::{Deserialize, Serialize};
+
+use super::common::ConfigError;
 
 /// Top-level routing configuration section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -7,6 +12,100 @@ pub struct RoutingConfig {
     pub enabled: bool,
     #[serde(default)]
     pub gateways: Vec<GatewayConfig>,
+}
+
+impl RoutingConfig {
+    /// Reject gateways the routing service could never program.
+    ///
+    /// Failover writes a default route out of these values, so a duplicate id,
+    /// an unparsable next hop or a misspelt probe protocol is caught at load
+    /// rather than discovered when a WAN link drops.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] naming the offending field.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let mut seen_ids = HashSet::new();
+        let mut seen_names = HashSet::new();
+        for (index, gw) in self.gateways.iter().enumerate() {
+            let at = |field: &str| format!("routing.gateways[{index}].{field}");
+            if !seen_ids.insert(gw.id) {
+                return Err(ConfigError::Validation {
+                    field: at("id"),
+                    message: format!("gateway id {} is already used", gw.id),
+                });
+            }
+            if gw.name.trim().is_empty() {
+                return Err(ConfigError::Validation {
+                    field: at("name"),
+                    message: "a gateway needs a name: it is what the alerts and metrics report"
+                        .to_string(),
+                });
+            }
+            if !seen_names.insert(gw.name.clone()) {
+                return Err(ConfigError::Validation {
+                    field: at("name"),
+                    message: format!("gateway name '{}' is already used", gw.name),
+                });
+            }
+            if gw.interface.trim().is_empty() {
+                return Err(ConfigError::Validation {
+                    field: at("interface"),
+                    message: "a gateway needs an egress interface to route through".to_string(),
+                });
+            }
+            if gw.gateway_ip.parse::<Ipv4Addr>().is_err() {
+                return Err(ConfigError::Validation {
+                    field: at("gateway_ip"),
+                    message: format!(
+                        "'{}' is not an IPv4 next hop: the default route is written from it",
+                        gw.gateway_ip
+                    ),
+                });
+            }
+            if let Some(hc) = &gw.health_check {
+                if hc.target.trim().is_empty() {
+                    return Err(ConfigError::Validation {
+                        field: at("health_check.target"),
+                        message: "a health check needs an address to probe".to_string(),
+                    });
+                }
+                if !is_health_protocol(&hc.protocol) {
+                    return Err(ConfigError::Validation {
+                        field: at("health_check.protocol"),
+                        message: format!(
+                            "'{}' is not a probe protocol: use 'icmp' or 'tcp:<port>'",
+                            hc.protocol
+                        ),
+                    });
+                }
+                if hc.interval_secs == 0 {
+                    return Err(ConfigError::Validation {
+                        field: at("health_check.interval_secs"),
+                        message: "a probe interval of zero would spin the prober".to_string(),
+                    });
+                }
+                if hc.timeout_secs == 0 {
+                    return Err(ConfigError::Validation {
+                        field: at("health_check.timeout_secs"),
+                        message: "a probe timeout of zero fails every probe".to_string(),
+                    });
+                }
+                if hc.failure_threshold == 0 || hc.recovery_threshold == 0 {
+                    return Err(ConfigError::Validation {
+                        field: at("health_check.failure_threshold"),
+                        message: "failure and recovery thresholds count probes, so both need to \
+                                  be at least one"
+                            .to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Configuration for a single multi-WAN gateway.
@@ -29,9 +128,6 @@ pub struct GatewayConfig {
     /// Health-check probe configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check: Option<HealthCheckConfig>,
-    /// Country codes this gateway is preferred for.
-    #[serde(default)]
-    pub preferred_for_countries: Option<Vec<String>>,
 }
 
 /// Health-check probe configuration.
@@ -98,9 +194,15 @@ impl GatewayConfig {
                     recovery_threshold: hc.recovery_threshold,
                 }
             }),
-            preferred_for_countries: self.preferred_for_countries.clone(),
         }
     }
+}
+
+/// Whether a probe protocol string is one [`parse_health_protocol`] understands.
+fn is_health_protocol(s: &str) -> bool {
+    s.eq_ignore_ascii_case("icmp")
+        || s.strip_prefix("tcp:")
+            .is_some_and(|port| port.parse::<u16>().is_ok_and(|p| p != 0))
 }
 
 fn parse_health_protocol(s: &str) -> domain::routing::entity::HealthCheckProto {
@@ -164,12 +266,98 @@ mod tests {
                 failure_threshold: 3,
                 recovery_threshold: 2,
             }),
-            preferred_for_countries: None,
         };
         let gw = cfg.to_domain();
         assert_eq!(gw.id, 1);
         assert_eq!(gw.name, "primary");
         assert!(gw.health_check.is_some());
+    }
+
+    fn gateway(id: u8, name: &str, ip: &str) -> GatewayConfig {
+        GatewayConfig {
+            id,
+            name: name.to_string(),
+            interface: "eth1".to_string(),
+            gateway_ip: ip.to_string(),
+            priority: 10,
+            enabled: true,
+            health_check: None,
+        }
+    }
+
+    #[test]
+    fn validate_accepts_distinct_gateways() {
+        let cfg = RoutingConfig {
+            enabled: true,
+            gateways: vec![
+                gateway(1, "wan1", "203.0.113.1"),
+                gateway(2, "wan2", "198.51.100.1"),
+            ],
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_duplicate_id() {
+        let cfg = RoutingConfig {
+            enabled: true,
+            gateways: vec![
+                gateway(1, "wan1", "203.0.113.1"),
+                gateway(1, "wan2", "198.51.100.1"),
+            ],
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_a_duplicate_name() {
+        let cfg = RoutingConfig {
+            enabled: true,
+            gateways: vec![
+                gateway(1, "wan", "203.0.113.1"),
+                gateway(2, "wan", "198.51.100.1"),
+            ],
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_a_next_hop_that_is_not_an_address() {
+        let cfg = RoutingConfig {
+            enabled: true,
+            gateways: vec![gateway(1, "wan1", "203.0.113.0/24")],
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_an_unknown_probe_protocol() {
+        let mut gw = gateway(1, "wan1", "203.0.113.1");
+        gw.health_check = Some(HealthCheckConfig {
+            target: "1.1.1.1".to_string(),
+            protocol: "udp:53".to_string(),
+            interval_secs: 10,
+            timeout_secs: 5,
+            failure_threshold: 3,
+            recovery_threshold: 2,
+        });
+        let cfg = RoutingConfig {
+            enabled: true,
+            gateways: vec![gw],
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_skips_a_disabled_section() {
+        let cfg = RoutingConfig {
+            enabled: false,
+            gateways: vec![
+                gateway(1, "wan1", "not-an-ip"),
+                gateway(1, "wan1", "not-an-ip"),
+            ],
+        };
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]
