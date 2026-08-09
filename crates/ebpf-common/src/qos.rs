@@ -115,7 +115,7 @@ pub struct QosQueueConfig {
 ///
 /// Size: 16 bytes.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct QosClassifierKey {
     /// Source IPv4 address (0 = wildcard).
     pub src_ip: u32,

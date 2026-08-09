@@ -175,7 +175,8 @@ impl QosMapManager {
                 .map_err(|e| anyhow::anyhow!("QOS_CLASSIFIERS clear failed: {e}"))?;
         }
 
-        for cls in classifiers {
+        for index in winning_classifier_indices(classifiers, queues) {
+            let cls = &classifiers[index];
             let queue_index = queues
                 .iter()
                 .position(|q| q.id == cls.queue_id)
@@ -282,6 +283,46 @@ impl QosMapPort for QosMapManager {
     fn classifier_count(&self) -> Result<usize, DomainError> {
         Ok(self.classifier_count_raw())
     }
+}
+
+/// Pick which classifiers actually reach the eBPF map, in load order.
+///
+/// Several classifiers can collapse onto the same key: the map is keyed by the
+/// match tuple, and a wildcard is encoded as a zero in that tuple rather than
+/// stored beside it, so two rules that differ only in what they leave open are
+/// indistinguishable to the kernel lookup. Nothing in the data plane can
+/// arbitrate between them, so the tie is settled here by the documented meaning
+/// of `priority` — lower is matched first. Ties on priority keep the earlier
+/// rule, which is the order the configuration file lists them in.
+fn winning_classifier_indices(classifiers: &[QosClassifier], queues: &[QosQueue]) -> Vec<usize> {
+    let mut winner_by_key: std::collections::HashMap<QosClassifierKey, usize> =
+        std::collections::HashMap::new();
+    let mut order: Vec<usize> = Vec::new();
+
+    for (index, cls) in classifiers.iter().enumerate() {
+        #[allow(clippy::cast_possible_truncation)]
+        let queue_index = queues
+            .iter()
+            .position(|q| q.id == cls.queue_id)
+            .unwrap_or(0) as u8;
+        let (key, _) = QosMapManager::classifier_to_ebpf(cls, queue_index);
+
+        match winner_by_key.get(&key).copied() {
+            Some(current) if classifiers[current].priority <= cls.priority => {}
+            Some(current) => {
+                order.retain(|&i| i != current);
+                order.push(index);
+                winner_by_key.insert(key, index);
+            }
+            None => {
+                order.push(index);
+                winner_by_key.insert(key, index);
+            }
+        }
+    }
+
+    order.sort_unstable();
+    order
 }
 
 /// Encode a domain direction for the eBPF pipe config.
@@ -464,5 +505,73 @@ mod tests {
         assert_eq!(value.queue_id, 0);
         // priority clamped to u8
         assert_eq!(value.priority, 255);
+    }
+
+    fn classifier_on_port(id: &str, queue_id: &str, dst_port: u16, priority: u32) -> QosClassifier {
+        use domain::qos::entity::QosMatchRule;
+        QosClassifier {
+            id: id.to_string(),
+            queue_id: queue_id.to_string(),
+            direction: QosDirection::Egress,
+            match_rule: QosMatchRule {
+                dst_port,
+                ..QosMatchRule::default()
+            },
+            priority,
+            group_mask: 0,
+        }
+    }
+
+    fn queue(id: &str) -> QosQueue {
+        QosQueue {
+            id: id.to_string(),
+            pipe_id: "p-1".to_string(),
+            weight: 50,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn classifiers_on_distinct_keys_are_all_written() {
+        let queues = vec![queue("q-1")];
+        let classifiers = vec![
+            classifier_on_port("c-1", "q-1", 80, 100),
+            classifier_on_port("c-2", "q-1", 443, 100),
+        ];
+        assert_eq!(
+            winning_classifier_indices(&classifiers, &queues),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn the_lowest_priority_number_wins_a_shared_key() {
+        let queues = vec![queue("q-1"), queue("q-2")];
+        let classifiers = vec![
+            classifier_on_port("c-loser", "q-1", 5201, 200),
+            classifier_on_port("c-winner", "q-2", 5201, 10),
+        ];
+        assert_eq!(winning_classifier_indices(&classifiers, &queues), vec![1]);
+    }
+
+    #[test]
+    fn a_shared_key_keeps_the_first_rule_when_priorities_tie() {
+        let queues = vec![queue("q-1"), queue("q-2")];
+        let classifiers = vec![
+            classifier_on_port("c-first", "q-1", 5201, 100),
+            classifier_on_port("c-second", "q-2", 5201, 100),
+        ];
+        assert_eq!(winning_classifier_indices(&classifiers, &queues), vec![0]);
+    }
+
+    #[test]
+    fn a_later_rule_does_not_reclaim_a_key_it_already_lost() {
+        let queues = vec![queue("q-1")];
+        let classifiers = vec![
+            classifier_on_port("c-mid", "q-1", 5201, 50),
+            classifier_on_port("c-best", "q-1", 5201, 10),
+            classifier_on_port("c-worst", "q-1", 5201, 900),
+        ];
+        assert_eq!(winning_classifier_indices(&classifiers, &queues), vec![1]);
     }
 }
