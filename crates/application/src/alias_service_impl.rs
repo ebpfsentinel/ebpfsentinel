@@ -25,7 +25,8 @@ pub struct AliasAppService {
     metrics: Arc<dyn MetricsPort>,
     /// Maps alias name → `set_id` for eBPF IP set maps.
     set_id_map: HashMap<String, u8>,
-    next_set_id: u8,
+    /// Next free set id, or `None` once all 255 have been handed out.
+    next_set_id: Option<u8>,
 }
 
 impl AliasAppService {
@@ -37,7 +38,7 @@ impl AliasAppService {
             lpm_coordinator: None,
             metrics,
             set_id_map: HashMap::new(),
-            next_set_id: 1,
+            next_set_id: Some(1),
         }
     }
 
@@ -107,7 +108,11 @@ impl AliasAppService {
         }
 
         // Sync to eBPF IP set map
-        let set_id = self.get_or_assign_set_id(alias_name);
+        let Some(set_id) = self.get_or_assign_set_id(alias_name) else {
+            return Err(DomainError::InvalidRule(format!(
+                "no kernel IP set left for alias '{alias_name}'"
+            )));
+        };
         if let Some(ref mut ipset_port) = self.ipset_port {
             let addrs = ipset_host_addrs(alias_name, ips);
             if let Err(e) = ipset_port.load_ipset_v4(set_id, &addrs) {
@@ -120,14 +125,19 @@ impl AliasAppService {
     }
 
     /// Get or assign a `set_id` for an alias name (for eBPF IP set maps).
-    pub fn get_or_assign_set_id(&mut self, alias_name: &str) -> u8 {
+    ///
+    /// Ids run from 1 to 255; 0 is what a rule carries when it matches no set,
+    /// so it can never name an alias. Once the range is exhausted no further
+    /// alias gets a set, because reusing an id would silently make one alias
+    /// match another's addresses.
+    pub fn get_or_assign_set_id(&mut self, alias_name: &str) -> Option<u8> {
         if let Some(&id) = self.set_id_map.get(alias_name) {
-            return id;
+            return Some(id);
         }
-        let id = self.next_set_id;
+        let id = self.next_set_id?;
         self.set_id_map.insert(alias_name.to_string(), id);
-        self.next_set_id = self.next_set_id.wrapping_add(1);
-        id
+        self.next_set_id = id.checked_add(1);
+        Some(id)
     }
 
     /// Refresh dynamic aliases (URL tables, DNS, `GeoIP`) using the resolution port.
@@ -164,7 +174,13 @@ impl AliasAppService {
                 all_geoip_v6_src.extend(v6_entries);
             } else {
                 // Other dynamic aliases → IP set maps
-                let set_id = self.get_or_assign_set_id(name);
+                let Some(set_id) = self.get_or_assign_set_id(name) else {
+                    tracing::warn!(
+                        alias = name,
+                        "no kernel IP set left; rules naming this alias are not installed"
+                    );
+                    continue;
+                };
 
                 if let Some(ref mut ipset_port) = self.ipset_port {
                     let addrs = ipset_host_addrs(name, &ips);
@@ -419,6 +435,26 @@ mod tests {
         let id1_again = svc.get_or_assign_set_id("alias-a");
         assert_ne!(id1, id2);
         assert_eq!(id1, id1_again);
+        // 0 means "this rule matches no set", so it is never handed out.
+        assert!(id1.is_some_and(|id| id != 0));
+    }
+
+    #[test]
+    fn set_ids_run_out_instead_of_repeating() {
+        let mut svc = make_service();
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..255 {
+            let id = svc
+                .get_or_assign_set_id(&format!("alias-{i}"))
+                .expect("255 ids are available");
+            assert!(seen.insert(id), "id {id} handed out twice");
+        }
+        assert_eq!(svc.get_or_assign_set_id("alias-256"), None);
+        // An alias that already holds an id keeps it once the range is spent.
+        assert_eq!(
+            svc.get_or_assign_set_id("alias-0"),
+            svc.assigned_set_id("alias-0")
+        );
     }
 
     #[test]
