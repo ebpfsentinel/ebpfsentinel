@@ -15,8 +15,6 @@ use aya_ebpf::{
 use aya_ebpf_bindings::helpers::{
     bpf_clone_redirect, bpf_get_socket_cookie, bpf_skb_cgroup_id, bpf_skb_load_bytes,
 };
-#[cfg(debug_assertions)]
-use aya_log_ebpf::info;
 use ebpf_common::{
     event::{
         EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, FLAG_VLAN, MAX_L7_PAYLOAD, MAX_L7_PORTS,
@@ -623,12 +621,6 @@ fn process_ids_pattern(_ctx: &TcContext, flow: &FlowMeta, protocol: u8) -> Resul
     }
 
     if pattern.action == IDS_ACTION_DROP {
-        #[cfg(debug_assertions)]
-        info!(
-            _ctx,
-            "IDS DROP {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port
-        );
-
         // Mark the kernel netfilter conntrack entry as DYING so the
         // next packet of this flow is dropped by netfilter without a
         // userspace round-trip. The userspace IdsAppService counter
@@ -650,11 +642,6 @@ fn process_ids_pattern(_ctx: &TcContext, flow: &FlowMeta, protocol: u8) -> Resul
         increment_metric(METRIC_DROPPED);
         Ok(TC_ACT_SHOT)
     } else {
-        #[cfg(debug_assertions)]
-        info!(
-            _ctx,
-            "IDS ALERT {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port
-        );
         Ok(TC_ACT_OK)
     }
 }

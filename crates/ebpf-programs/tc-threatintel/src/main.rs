@@ -8,8 +8,6 @@ use aya_ebpf::{
     maps::{Array, LruHashMap, PerCpuArray, RingBuf, bloom_filter::BloomFilter},
     programs::TcContext,
 };
-#[cfg(debug_assertions)]
-use aya_log_ebpf::info;
 use ebpf_common::{
     event::{EVENT_TYPE_THREATINTEL, FLAG_IPV6, FLAG_VLAN},
     threatintel::{
@@ -335,19 +333,9 @@ fn apply_threatintel_action(
     })();
 
     if matched.action == THREATINTEL_ACTION_DROP {
-        #[cfg(debug_assertions)]
-        info!(
-            _ctx,
-            "THREATINTEL DROP {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port
-        );
         increment_metric(THREATINTEL_METRIC_DROPPED);
         Ok(TC_ACT_SHOT)
     } else {
-        #[cfg(debug_assertions)]
-        info!(
-            _ctx,
-            "THREATINTEL ALERT {:i} -> {:i}:{}", src_addr[0], dst_addr[0], dst_port
-        );
         Ok(TC_ACT_OK)
     }
 }

@@ -20,8 +20,6 @@ use aya_ebpf_bindings::bindings::{iphdr, ipv6hdr, tcphdr};
 use aya_ebpf_bindings::helpers::{
     bpf_ktime_get_coarse_ns, bpf_tcp_raw_check_syncookie_ipv4, bpf_tcp_raw_check_syncookie_ipv6,
 };
-#[cfg(debug_assertions)]
-use aya_log_ebpf::info;
 use ebpf_common::{
     ddos::{
         AmpProtectConfig, AmpProtectKey, CONN_ESTABLISHED, CONN_NEW, CONNTRACK_SUB_ACK_FLOOD,
@@ -540,8 +538,6 @@ fn process_ratelimit_v4(
             ctx, &src_addr, &dst_addr, src_port, dst_port, protocol, flags, vlan_id,
         );
         increment_metric(METRIC_THROTTLED);
-        #[cfg(debug_assertions)]
-        info!(ctx, "RATELIMIT {:i} throttled", src_ip);
         Ok(xdp_action::XDP_DROP)
     }
 }
@@ -658,8 +654,6 @@ fn process_ratelimit_v6(
             ctx, &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
         );
         increment_metric(METRIC_THROTTLED);
-        #[cfg(debug_assertions)]
-        info!(ctx, "RATELIMIT6 {:i} throttled", src_addr[0]);
         Ok(xdp_action::XDP_DROP)
     }
 }
