@@ -364,14 +364,16 @@ pub async fn run(
 
     // ── 5c¾. Build DLP service ──────────────────────────────────────
     let mut dlp_engine = DlpEngine::new();
-    // Always load built-in patterns, alert mode only
-    let defaults = domain::dlp::entity::default_patterns();
-    let dlp_pattern_count = defaults.len();
+    // The built-in patterns, with whatever the config restates folded in.
+    let patterns = config.dlp_patterns()?;
+    let dlp_pattern_count = patterns.len();
     if config.dlp.enabled {
-        dlp_engine.reload(defaults)?;
+        dlp_engine.reload(patterns)?;
     }
     let mut dlp_svc = DlpAppService::new(dlp_engine, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
-    dlp_svc.set_mode(domain::common::entity::DomainMode::Alert)?;
+    // Block mode is enterprise-only and the config validator has already
+    // refused it, so this only ever sets alert on an OSS agent.
+    dlp_svc.set_mode(config.dlp_mode()?)?;
     dlp_svc.set_enabled(config.dlp.enabled);
     let dlp_svc = Arc::new(ArcSwap::from_pointee(dlp_svc));
     info!(

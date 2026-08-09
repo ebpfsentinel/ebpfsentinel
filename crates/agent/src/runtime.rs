@@ -200,12 +200,14 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
 
     // ── DLP ──────────────────────────────────────────────────────
     let mut dlp_engine = DlpEngine::new();
-    let defaults = domain::dlp::entity::default_patterns();
+    // The built-in patterns, with whatever the config restates folded in.
     if config.dlp.enabled {
-        dlp_engine.reload(defaults)?;
+        dlp_engine.reload(config.dlp_patterns()?)?;
     }
     let mut dlp_svc = DlpAppService::new(dlp_engine, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
-    dlp_svc.set_mode(domain::common::entity::DomainMode::Alert)?;
+    // Block mode is enterprise-only and the config validator has already
+    // refused it, so this only ever sets alert on an OSS agent.
+    dlp_svc.set_mode(config.dlp_mode()?)?;
     dlp_svc.set_enabled(config.dlp.enabled);
     let dlp_svc = Arc::new(ArcSwap::from_pointee(dlp_svc));
 

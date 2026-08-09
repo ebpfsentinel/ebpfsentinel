@@ -901,14 +901,21 @@ impl AgentConfig {
         pdm(&self.dlp.mode)
     }
 
-    /// Convert all DLP pattern configs to domain patterns.
-    /// If no custom patterns are defined, returns an empty vec (caller loads defaults).
+    /// The DLP patterns to load: the built-in set, with every pattern the
+    /// config restates replaced by the configured one. Listing a pattern is
+    /// how an operator re-tunes or switches off a built-in, so the merge is
+    /// by id rather than a wholesale replacement that would drop the
+    /// patterns the operator did not mention.
     pub fn dlp_patterns(&self) -> Result<Vec<DlpPattern>, ConfigError> {
-        self.dlp
-            .patterns
-            .iter()
-            .map(|p| p.to_domain_pattern(&self.dlp.mode))
-            .collect()
+        let mut patterns = domain::dlp::entity::default_patterns();
+        for pattern_cfg in &self.dlp.patterns {
+            let pattern = pattern_cfg.to_domain_pattern(&self.dlp.mode)?;
+            match patterns.iter_mut().find(|p| p.id == pattern.id) {
+                Some(existing) => *existing = pattern,
+                None => patterns.push(pattern),
+            }
+        }
+        Ok(patterns)
     }
 
     /// Convert all L7 rule configs to domain L7 rules.
@@ -2749,12 +2756,53 @@ dlp:
 "#;
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let patterns = config.dlp_patterns().unwrap();
-        assert_eq!(patterns.len(), 1);
-        assert_eq!(patterns[0].id.0, "dlp-pii-test");
-        assert_eq!(patterns[0].severity, Severity::Medium);
-        assert_eq!(patterns[0].mode, DomainMode::Alert);
-        assert_eq!(patterns[0].data_type, "custom");
-        assert_eq!(patterns[0].description, "A test pattern");
+        let added = patterns
+            .iter()
+            .find(|p| p.id.0 == "dlp-pii-test")
+            .expect("configured pattern is loaded alongside the built-in set");
+        assert_eq!(added.severity, Severity::Medium);
+        assert_eq!(added.mode, DomainMode::Alert);
+        assert_eq!(added.data_type, "custom");
+        assert_eq!(added.description, "A test pattern");
+        assert!(
+            patterns.len() > 1,
+            "the built-in patterns are kept alongside it"
+        );
+    }
+
+    #[test]
+    fn dlp_pattern_with_builtin_id_overrides_the_builtin() {
+        let builtin = domain::dlp::entity::default_patterns();
+        let target = &builtin[0];
+        let yaml = format!(
+            r#"
+agent:
+  interfaces: [eth0]
+dlp:
+  mode: alert
+  patterns:
+    - id: {}
+      name: Retuned
+      regex: "\\bretuned\\b"
+      severity: low
+      data_type: custom
+      enabled: false
+"#,
+            target.id.0
+        );
+        let config = AgentConfig::from_yaml(&yaml).unwrap();
+        let patterns = config.dlp_patterns().unwrap();
+        assert_eq!(
+            patterns.len(),
+            builtin.len(),
+            "restating a built-in replaces it rather than adding a second entry"
+        );
+        let overridden = patterns
+            .iter()
+            .find(|p| p.id == target.id)
+            .expect("the built-in id is still present");
+        assert_eq!(overridden.severity, Severity::Low);
+        assert!(!overridden.enabled);
     }
 
     #[test]
@@ -2866,7 +2914,11 @@ dlp:
 "#;
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let patterns = config.dlp_patterns().unwrap();
-        assert!(!patterns[0].enabled);
+        let configured = patterns
+            .iter()
+            .find(|p| p.id.0 == "dlp-pci-off")
+            .expect("the configured pattern is loaded");
+        assert!(!configured.enabled);
     }
 
     // ── Threat Intel config tests ───────────────────────────────────
