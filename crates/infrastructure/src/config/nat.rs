@@ -17,6 +17,36 @@ pub(super) const MAX_NAT_RULES: usize = 256;
 /// Maximum `NPTv6` prefix translation rules.
 pub(super) const MAX_NPTV6_RULES: usize = 64;
 
+/// Every accepted `match_protocol` spelling.
+///
+/// `icmp` and `icmpv6` both mean "the ICMP of this rule's family", so either
+/// one resolves to the number the matching data plane compares. Anything else
+/// is refused here rather than silently dropped when the rule is written to
+/// the map, where an unread protocol widens the rule to every protocol.
+const NAT_MATCH_PROTOCOLS: [&str; 4] = ["tcp", "udp", "icmp", "icmpv6"];
+
+/// Whether `value` parses as the CIDR or bare address the data plane reads,
+/// and which family it belongs to (`true` for IPv6).
+///
+/// Mirrors the map writers: a value with no `/` is a host address, and a
+/// prefix wider than its family is not a prefix at all.
+fn match_cidr_family(value: &str) -> Option<bool> {
+    let (addr, prefix) = match value.split_once('/') {
+        Some((addr, prefix)) => (addr, Some(prefix)),
+        None => (value, None),
+    };
+    let (is_v6, max) = match addr.parse::<IpAddr>().ok()? {
+        IpAddr::V4(_) => (false, 32),
+        IpAddr::V6(_) => (true, 128),
+    };
+    if let Some(prefix) = prefix
+        && prefix.parse::<u16>().ok()? > max
+    {
+        return None;
+    }
+    Some(is_v6)
+}
+
 /// Full NAT configuration section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NatConfig {
@@ -389,7 +419,7 @@ impl NatRuleConfig {
                 }
             }
             "masquerade" => {
-                if self.interface.is_none() {
+                if self.interface.as_deref().unwrap_or("").is_empty() {
                     return Err(ConfigError::Validation {
                         field: format!("{prefix}.interface"),
                         message: "masquerade requires interface".to_string(),
@@ -402,6 +432,12 @@ impl NatRuleConfig {
                         field: prefix.clone(),
                         message: "one_to_one requires external_addr and internal_addr".to_string(),
                     });
+                }
+                for (field, value) in [
+                    ("external_addr", &self.external_addr),
+                    ("internal_addr", &self.internal_addr),
+                ] {
+                    Self::parse_addr(&prefix, field, value.as_deref())?;
                 }
             }
             "redirect" => {
@@ -423,6 +459,7 @@ impl NatRuleConfig {
                             .to_string(),
                     });
                 }
+                Self::parse_addr(&prefix, "internal_addr", self.internal_addr.as_deref())?;
             }
             other => {
                 return Err(ConfigError::InvalidValue {
@@ -434,7 +471,106 @@ impl NatRuleConfig {
             }
         }
 
+        self.validate_match(&prefix)?;
+
         Ok(())
+    }
+
+    /// Parse an address field, naming it in the error.
+    fn parse_addr(prefix: &str, field: &str, value: Option<&str>) -> Result<IpAddr, ConfigError> {
+        value
+            .unwrap_or("")
+            .parse::<IpAddr>()
+            .map_err(|e| ConfigError::Validation {
+                field: format!("{prefix}.{field}"),
+                message: format!("invalid IP address: {e}"),
+            })
+    }
+
+    /// Validate the match criteria, which the data plane reads by parsing.
+    ///
+    /// A match it cannot parse is not an error there: the rule is written with
+    /// that criterion left out, so a mistyped source CIDR turns a rule meant
+    /// for one subnet into one that matches every address. The same is true of
+    /// an unknown protocol. Both are refused here instead.
+    ///
+    /// The family is checked for the same reason: a rule is written to the v4
+    /// or the v6 map as a whole, and a match CIDR of one family beside a
+    /// translated address of the other lands in the map where the address
+    /// cannot be represented, translating to the unspecified address.
+    fn validate_match(&self, prefix: &str) -> Result<(), ConfigError> {
+        let mut family: Option<(bool, String)> = None;
+
+        for (field, value) in [
+            ("match_src", &self.match_src),
+            ("match_dst", &self.match_dst),
+        ] {
+            let Some(cidr) = value.as_deref().filter(|c| !c.is_empty()) else {
+                continue;
+            };
+            let is_v6 = match_cidr_family(cidr).ok_or_else(|| ConfigError::InvalidCidr {
+                value: cidr.to_string(),
+                reason: format!("{prefix}.{field} expects an address or CIDR"),
+            })?;
+            Self::merge_family(prefix, &mut family, is_v6, field)?;
+        }
+
+        for (field, addr) in self.type_addrs() {
+            Self::merge_family(prefix, &mut family, addr.is_ipv6(), field)?;
+        }
+
+        if let Some(proto) = self.match_protocol.as_deref().filter(|p| !p.is_empty())
+            && !NAT_MATCH_PROTOCOLS.contains(&proto.to_lowercase().as_str())
+        {
+            return Err(ConfigError::InvalidValue {
+                field: format!("{prefix}.match_protocol"),
+                value: proto.to_string(),
+                expected: NAT_MATCH_PROTOCOLS.join(", "),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// The addresses this rule's type carries, already parsed by `validate`.
+    fn type_addrs(&self) -> Vec<(&'static str, IpAddr)> {
+        let parse = |field: &'static str, value: &Option<String>| {
+            Some((field, value.as_deref()?.parse::<IpAddr>().ok()?))
+        };
+        match self.nat_type.as_str() {
+            "snat" | "dnat" => vec![parse("translated_addr", &self.translated_addr)],
+            "one_to_one" => vec![
+                parse("external_addr", &self.external_addr),
+                parse("internal_addr", &self.internal_addr),
+            ],
+            "port_forward" => vec![parse("internal_addr", &self.internal_addr)],
+            _ => vec![],
+        }
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// Record `is_v6` as the rule's family, or reject the field that disagrees.
+    fn merge_family(
+        prefix: &str,
+        family: &mut Option<(bool, String)>,
+        is_v6: bool,
+        field: &str,
+    ) -> Result<(), ConfigError> {
+        match family {
+            Some((seen, seen_field)) if *seen != is_v6 => Err(ConfigError::Validation {
+                field: format!("{prefix}.{field}"),
+                message: format!(
+                    "address family disagrees with {seen_field}: a rule is IPv4 or IPv6 as a whole"
+                ),
+            }),
+            Some(_) => Ok(()),
+            None => {
+                *family = Some((is_v6, field.to_string()));
+                Ok(())
+            }
+        }
     }
 
     /// Convert to a domain `NatRule`. `group_bits` maps every configured
@@ -720,6 +856,93 @@ mod tests {
         let mut cfg = snat_config();
         cfg.nat_type = "unknown".to_string();
         assert!(cfg.validate(0, "nat.snat_rules").is_err());
+    }
+
+    #[test]
+    fn validate_masquerade_empty_interface() {
+        let mut cfg = snat_config();
+        cfg.nat_type = "masquerade".to_string();
+        cfg.translated_addr = None;
+        cfg.interface = Some(String::new());
+        assert!(cfg.validate(0, "nat.snat_rules").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_unparseable_match_cidr() {
+        for bad in ["192.168.0/16", "192.168.0.0/33", "10.0.0.0/", "not-an-ip"] {
+            let mut cfg = snat_config();
+            cfg.match_src = Some(bad.to_string());
+            assert!(
+                cfg.validate(0, "nat.snat_rules").is_err(),
+                "{bad} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_host_and_prefix_matches() {
+        for good in ["10.0.0.1", "10.0.0.0/8", "0.0.0.0/0"] {
+            let mut cfg = snat_config();
+            cfg.match_src = Some(good.to_string());
+            assert!(cfg.validate(0, "nat.snat_rules").is_ok(), "{good}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_mixed_address_families() {
+        let mut cfg = snat_config();
+        cfg.match_src = Some("2001:db8::/32".to_string());
+        let err = cfg.validate(0, "nat.snat_rules").unwrap_err().to_string();
+        assert!(err.contains("family"), "{err}");
+    }
+
+    #[test]
+    fn validate_accepts_a_consistent_v6_rule() {
+        let mut cfg = snat_config();
+        cfg.translated_addr = Some("2001:db8::1".to_string());
+        cfg.match_src = Some("2001:db8:1::/48".to_string());
+        cfg.match_dst = Some("2001:db8:2::/48".to_string());
+        assert!(cfg.validate(0, "nat.snat_rules").is_ok());
+    }
+
+    #[test]
+    fn validate_match_protocol_vocabulary() {
+        for proto in NAT_MATCH_PROTOCOLS {
+            let mut cfg = snat_config();
+            cfg.match_protocol = Some(proto.to_uppercase());
+            assert!(cfg.validate(0, "nat.snat_rules").is_ok(), "{proto}");
+        }
+        let mut cfg = snat_config();
+        cfg.match_protocol = Some("sctp".to_string());
+        let err = cfg.validate(0, "nat.snat_rules").unwrap_err().to_string();
+        assert!(err.contains("icmpv6"), "{err}");
+    }
+
+    #[test]
+    fn validate_one_to_one_addresses_are_parsed() {
+        let mut cfg = snat_config();
+        cfg.nat_type = "one_to_one".to_string();
+        cfg.translated_addr = None;
+        cfg.match_src = None;
+        cfg.external_addr = Some("203.0.113.10".to_string());
+        cfg.internal_addr = Some("10.0.1.300".to_string());
+        assert!(cfg.validate(0, "nat.snat_rules").is_err());
+        cfg.internal_addr = Some("10.0.1.10".to_string());
+        assert!(cfg.validate(0, "nat.snat_rules").is_ok());
+    }
+
+    #[test]
+    fn validate_port_forward_internal_addr_is_parsed() {
+        let mut cfg = snat_config();
+        cfg.nat_type = "port_forward".to_string();
+        cfg.translated_addr = None;
+        cfg.match_src = None;
+        cfg.ext_port = Some(PortRangeConfig::Single(443));
+        cfg.int_port = Some(PortRangeConfig::Single(8443));
+        cfg.internal_addr = Some("10.0.1".to_string());
+        assert!(cfg.validate(0, "nat.dnat_rules").is_err());
+        cfg.internal_addr = Some("10.0.1.10".to_string());
+        assert!(cfg.validate(0, "nat.dnat_rules").is_ok());
     }
 
     #[test]
