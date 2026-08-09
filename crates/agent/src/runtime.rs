@@ -122,6 +122,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     );
     ids_svc.set_mode(ids_mode);
     ids_svc.set_enabled(config.ids.enabled);
+    ids_svc.set_sampling(config.ids_sampling()?);
     let ids_svc = Arc::new(ArcSwap::from_pointee(ids_svc));
     info!(
         enabled = config.ids.enabled,
@@ -140,6 +141,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     );
     ips_svc.set_mode(ips_mode);
     ips_svc.set_enabled(config.ips.enabled);
+    ips_svc.set_sampling(config.ips_sampling()?);
     ips_svc.reload_whitelist(ips_whitelist);
     ips_svc.reload_rules(ips_rules.clone())?;
     let ips_svc = Arc::new(ArcSwap::from_pointee(ips_svc));
