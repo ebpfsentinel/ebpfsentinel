@@ -299,10 +299,12 @@ fn nat_rule_to_ebpf_entry(rule: &NatRule) -> ebpf_common::nat::NatRuleEntry {
     }
 
     if let Some(ref proto_str) = rule.match_protocol {
+        // `icmp` and `icmpv6` both mean "the ICMP of this rule's family", so
+        // either spelling reaches the number the v4 data plane compares.
         let proto = match proto_str.to_lowercase().as_str() {
             "tcp" => 6,
             "udp" => 17,
-            "icmp" => 1,
+            "icmp" | "icmpv6" => 1,
             _ => 0,
         };
         if proto > 0 {
@@ -391,6 +393,12 @@ fn parse_cidr_to_ip_mask(cidr: &str) -> Option<(u32, u32)> {
     let (ip_str, prefix_str) = cidr.split_once('/').unwrap_or((cidr, "32"));
     let ip: std::net::Ipv4Addr = ip_str.parse().ok()?;
     let prefix_len: u32 = prefix_str.parse().ok()?;
+    // A prefix wider than the address is not a v4 CIDR: refusing it here keeps
+    // `32 - prefix_len` from underflowing, and the caller already treats
+    // `None` as "this rule states no source or destination match".
+    if prefix_len > 32 {
+        return None;
+    }
     let mask = if prefix_len == 0 {
         0
     } else {
@@ -434,7 +442,9 @@ fn is_v6_rule(rule: &NatRule) -> bool {
     }
     if let Some(ref dst) = rule.match_dst
         && dst.contains(':')
-    {}
+    {
+        return true;
+    }
 
     false
 }
@@ -499,10 +509,11 @@ fn nat_rule_to_ebpf_entry_v6(rule: &NatRule) -> ebpf_common::nat::NatRuleEntryV6
     }
 
     if let Some(ref proto_str) = rule.match_protocol {
+        // Same two spellings as the v4 path, resolved to ICMPv6 here.
         let proto = match proto_str.to_lowercase().as_str() {
             "tcp" => 6,
             "udp" => 17,
-            "icmpv6" => 58,
+            "icmp" | "icmpv6" => 58,
             _ => 0,
         };
         if proto > 0 {
@@ -803,6 +814,48 @@ mod tests {
         let (ip, mask) = parse_cidr_to_ip_mask("10.0.0.1").unwrap();
         assert_eq!(ip, u32::from(std::net::Ipv4Addr::new(10, 0, 0, 1)));
         assert_eq!(mask, 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn parse_cidr_to_ip_mask_refuses_prefix_wider_than_the_address() {
+        // A /33 has no v4 meaning, and computing `32 - 33` would underflow.
+        assert!(parse_cidr_to_ip_mask("10.0.0.0/33").is_none());
+        assert!(parse_cidr_to_ip_mask("10.0.0.0/255").is_none());
+    }
+
+    #[test]
+    fn v6_match_dst_alone_selects_the_v6_map() {
+        // A masquerade rule carries no address of its own, so the match CIDR
+        // is the only thing that says which family it belongs to.
+        let mut rule = make_snat_rule("masq-v6");
+        rule.nat_type = NatType::Masquerade {
+            interface: "eth0".to_string(),
+            port_range: None,
+        };
+        rule.match_src = None;
+        rule.match_dst = Some("2001:db8::/32".to_string());
+        assert!(is_v6_rule(&rule));
+    }
+
+    #[test]
+    fn icmp_spelling_resolves_per_family() {
+        let mut rule = make_dnat_rule("icmp-v4");
+        rule.match_protocol = Some("icmp".to_string());
+        assert_eq!(nat_rule_to_ebpf_entry(&rule).match_protocol, 1);
+
+        rule.match_protocol = Some("icmpv6".to_string());
+        assert_eq!(nat_rule_to_ebpf_entry(&rule).match_protocol, 1);
+
+        let mut v6 = make_dnat_rule("icmp-v6");
+        v6.nat_type = NatType::Dnat {
+            addr: "2001:db8::1".parse().unwrap(),
+            port: Some(80),
+        };
+        v6.match_protocol = Some("icmp".to_string());
+        assert_eq!(nat_rule_to_ebpf_entry_v6(&v6).match_protocol, 58);
+
+        v6.match_protocol = Some("icmpv6".to_string());
+        assert_eq!(nat_rule_to_ebpf_entry_v6(&v6).match_protocol, 58);
     }
 
     // ── NPTv6 tests ────────────────────────────────────────────────
