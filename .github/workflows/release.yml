@@ -1,13 +1,22 @@
+# Builds and signs this component. It does NOT publish a release: releases are
+# cut from ebpfsentinel-release, which dispatches this workflow at the version
+# its manifest declares and pulls `release-bundle` back out of the run.
+#
+# Running this by hand is fine — it produces the same signed artifacts — but
+# nothing reaches a customer until that repository publishes them.
 name: Release
 
+run-name: Release ${{ inputs.version }} ${{ inputs.tracking-id }}
+
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
-      force_version:
-        description: "Force a specific version (optional, format: YYYY.M.X)"
+      version:
+        description: "Version to build (YYYY.M.X) — normally supplied by the release manifest"
+        required: true
+        type: string
+      tracking-id:
+        description: "Correlation id stamped by the orchestrating release run"
         required: false
         type: string
 
@@ -15,7 +24,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ── Prepare: resolve version (no tag creation yet) ────────────────
+  # ── Prepare: take the version we were given ───────────────────────
+  # Deliberately not inferred from tags here. This repository carries no
+  # release tags any more, so any inference would restart at .1 every month
+  # and quietly disagree with the version the release manifest declares.
   prepare:
     name: Prepare
     runs-on: ubuntu-latest
@@ -25,39 +37,18 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
     steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Resolve version
+      - name: Validate version
         id: version
         env:
-          FORCE_VERSION: ${{ github.event.inputs.force_version }}
+          VERSION: ${{ inputs.version }}
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          elif [ -n "$FORCE_VERSION" ]; then
-            VERSION="$FORCE_VERSION"
-            if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[1-9][0-9]?\.[0-9]+$'; then
-              echo "::error::Invalid version format: $VERSION (expected YYYY.M.X)"
-              exit 1
-            fi
-          else
-            git fetch --tags
-            YEAR=$(date +'%Y')
-            MONTH=$(date +'%-m')
-            LATEST_TAG=$(git tag -l "v${YEAR}.${MONTH}.*" | sort -V | tail -n 1)
-            if [ -z "$LATEST_TAG" ]; then
-              VERSION="${YEAR}.${MONTH}.1"
-            else
-              PATCH=$(echo "$LATEST_TAG" | sed "s/^v${YEAR}\.${MONTH}\.\([0-9]*\).*/\1/")
-              VERSION="${YEAR}.${MONTH}.$((PATCH + 1))"
-            fi
+          if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[1-9][0-9]?\.[0-9]+$'; then
+            echo "::error::Invalid version format: $VERSION (expected YYYY.M.X)"
+            exit 1
           fi
-
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: ${VERSION}"
+          echo "Building version: ${VERSION}"
 
   # ── Build release tarballs (multi-arch) ───────────────────────────
   build-release:
@@ -160,7 +151,6 @@ jobs:
           cp dist/ebpfsentinel.service "${STAGING}/"
           cp dist/install.sh "${STAGING}/"
           cp LICENSE "${STAGING}/" 2>/dev/null || true
-          cp CHANGELOG.md "${STAGING}/" 2>/dev/null || true
           find crates/ebpf-programs/*/target/bpfel-unknown-none/release \
             -maxdepth 1 -type f ! -name '*.d' ! -name '*.fingerprint' \
             -exec cp {} "${STAGING}/ebpf/" \; 2>/dev/null || true
@@ -220,54 +210,34 @@ jobs:
     with:
       version: ${{ needs.prepare.outputs.version }}
 
-  # ── Tag + GitHub Release (only after tarballs AND Docker succeed) ──
-  publish:
-    name: Publish Release
-    runs-on: ubuntu-latest
-    needs: [prepare, build-release, docker, sign-blobs]
+  # ── Helm chart, stamped with the same version as the image ────────
+  helm:
+    name: Helm Chart
+    needs: [prepare, docker]
     permissions:
-      contents: write
+      contents: read
+      packages: write
+      id-token: write # nested cosign-keyless sign job needs to mint an OIDC token
+    uses: ./.github/workflows/release-helm.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+
+  # ── Hand off ──────────────────────────────────────────────────────
+  # No release is created here. ebpfsentinel-release downloads the two
+  # artifacts named below and publishes them as part of the product release.
+  handoff:
+    name: Ready for release
+    runs-on: ubuntu-latest
+    needs: [prepare, build-release, docker, sign-blobs, helm]
     steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Create and push tag
-        if: github.event_name == 'workflow_dispatch'
+      - name: Summary
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          TAG="${{ needs.prepare.outputs.tag }}"
-          git tag "${TAG}"
-          git push origin "${TAG}"
-          echo "Created tag: ${TAG}"
-
-      - uses: actions/download-artifact@v8
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Extract release notes from CHANGELOG
-        run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          if [ -f CHANGELOG.md ]; then
-            NOTES=$(awk -v ver="$VERSION" '
-              /^## / { if (found) exit; if (index($0, ver)) found=1; next }
-              found { print }
-            ' CHANGELOG.md)
-          fi
-          if [ -z "$NOTES" ]; then
-            NOTES="Release ${{ needs.prepare.outputs.tag }}"
-          fi
-          echo "$NOTES" > release-notes.md
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "${{ needs.prepare.outputs.tag }}" \
-            artifacts/*.tar.gz artifacts/openapi.json \
-            artifacts/*.sig artifacts/*.crt artifacts/*.bundle \
-            artifacts/SHA256SUMS \
-            --title "eBPFsentinel ${{ needs.prepare.outputs.tag }}" \
-            --notes-file release-notes.md
+          {
+            echo "### ebpfsentinel ${VERSION} built and signed"
+            echo
+            echo "Artifacts \`release-bundle\` and \`release-bundle-signatures\` are"
+            echo "ready for collection. Publish them from **ebpfsentinel-release**"
+            echo "(Cut release, version \`${VERSION}\`)."
+          } >> "$GITHUB_STEP_SUMMARY"

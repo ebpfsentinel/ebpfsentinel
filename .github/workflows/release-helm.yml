@@ -1,7 +1,18 @@
 name: Release Helm Chart
 
 on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Chart + appVersion to stamp (YYYY.M.X)"
+        required: true
+        type: string
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Chart + appVersion to stamp (YYYY.M.X)"
+        required: true
+        type: string
 
 jobs:
   release:
@@ -16,8 +27,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
 
       - name: Install Helm
         uses: azure/setup-helm@v4
@@ -28,13 +37,19 @@ jobs:
           OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "owner=${OWNER_LOWER}" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve version from latest git tag
+      # The chart version is the agent version it deploys, handed down by the
+      # caller. Reading it back from a git tag would be guesswork now that
+      # releases are tagged in ebpfsentinel-release rather than here.
+      - name: Validate version
         id: version
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
-          TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0-dev")
-          VERSION="${TAG#v}"
+          if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[1-9][0-9]?\.[0-9]+$'; then
+            echo "::error::Invalid version format: $VERSION (expected YYYY.M.X)"
+            exit 1
+          fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: ${VERSION} (from tag: ${TAG})"
 
       - name: Stamp version in Chart.yaml
         run: |
