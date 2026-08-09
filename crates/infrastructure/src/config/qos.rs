@@ -126,10 +126,11 @@ pub struct QosClassifierConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct QosMatchConfig {
-    /// Source IP CIDR filter.
+    /// Source host, as a bare address or a `/32`. Shorter prefixes and IPv6
+    /// are refused: the classifier map matches one exact address.
     #[serde(default)]
     pub src_ip: Option<String>,
-    /// Destination IP CIDR filter.
+    /// Destination host, same shape as [`QosMatchConfig::src_ip`].
     #[serde(default)]
     pub dst_ip: Option<String>,
     /// Source port filter.

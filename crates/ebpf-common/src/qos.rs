@@ -155,18 +155,34 @@ pub struct QosClassifierValue {
     pub tenant_id: u32,
 }
 
+/// Per-pipe token bucket state managed by the eBPF program.
+///
+/// The bucket belongs to the pipe, not to the flow: a pipe declaring 100 Mbps
+/// caps the traffic reaching it at 100 Mbps in total, however many flows are
+/// classified into it. The entry is shared by every CPU, so concurrent
+/// accounting on a multi-queue NIC is approximate at the packet level.
+///
+/// Size: 16 bytes (aligned to 8 bytes due to u64 fields).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct QosPipeState {
+    /// Current token count (bytes). Zero on a never-used pipe, which the
+    /// first packet turns into a full bucket via the elapsed-time refill.
+    pub tokens: u64,
+    /// Last token refill timestamp from `bpf_ktime_get_boot_ns()`.
+    pub last_refill_ns: u64,
+}
+
 /// Per-flow `QoS` state managed by the eBPF program.
 ///
-/// Tracks token bucket state for bandwidth enforcement and EDT pacing.
+/// Pacing is the one thing that has to be tracked per flow: the departure
+/// time of the next packet is only meaningful relative to the previous packet
+/// of the same flow. Bandwidth lives on [`QosPipeState`].
 ///
-/// Size: 32 bytes (aligned to 8 bytes due to u64 fields).
+/// Size: 16 bytes (aligned to 8 bytes due to the u64 field).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct QosFlowState {
-    /// Current token count (bytes).
-    pub tokens: u64,
-    /// Last token refill timestamp from `bpf_ktime_get_ns()`.
-    pub last_refill_ns: u64,
     /// Earliest departure time for next packet (monotonic ns).
     /// Used by EDT pacing to space out packets according to `delay_ns`.
     pub last_edt_ns: u64,
@@ -189,6 +205,8 @@ unsafe impl aya::Pod for QosClassifierKey {}
 unsafe impl aya::Pod for QosClassifierValue {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for QosFlowState {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for QosPipeState {}
 
 #[cfg(test)]
 mod tests {
@@ -239,12 +257,22 @@ mod tests {
 
     #[test]
     fn qos_flow_state_size() {
-        assert_eq!(mem::size_of::<QosFlowState>(), 32);
+        assert_eq!(mem::size_of::<QosFlowState>(), 16);
     }
 
     #[test]
     fn qos_flow_state_alignment() {
         assert_eq!(mem::align_of::<QosFlowState>(), 8);
+    }
+
+    #[test]
+    fn qos_pipe_state_size() {
+        assert_eq!(mem::size_of::<QosPipeState>(), 16);
+    }
+
+    #[test]
+    fn qos_pipe_state_alignment() {
+        assert_eq!(mem::align_of::<QosPipeState>(), 8);
     }
 
     // ── Field offset tests ───────────────────────────────────────────
@@ -317,12 +345,16 @@ mod tests {
 
     #[test]
     fn qos_flow_state_field_offsets() {
-        assert_eq!(mem::offset_of!(QosFlowState, tokens), 0);
-        assert_eq!(mem::offset_of!(QosFlowState, last_refill_ns), 8);
-        assert_eq!(mem::offset_of!(QosFlowState, last_edt_ns), 16);
-        assert_eq!(mem::offset_of!(QosFlowState, pipe_id), 24);
-        assert_eq!(mem::offset_of!(QosFlowState, queue_id), 25);
-        assert_eq!(mem::offset_of!(QosFlowState, _padding), 26);
+        assert_eq!(mem::offset_of!(QosFlowState, last_edt_ns), 0);
+        assert_eq!(mem::offset_of!(QosFlowState, pipe_id), 8);
+        assert_eq!(mem::offset_of!(QosFlowState, queue_id), 9);
+        assert_eq!(mem::offset_of!(QosFlowState, _padding), 10);
+    }
+
+    #[test]
+    fn qos_pipe_state_field_offsets() {
+        assert_eq!(mem::offset_of!(QosPipeState, tokens), 0);
+        assert_eq!(mem::offset_of!(QosPipeState, last_refill_ns), 8);
     }
 
     // ── Constant tests ───────────────────────────────────────────────

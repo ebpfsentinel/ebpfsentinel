@@ -16,8 +16,8 @@ use ebpf_common::{
     qos::{
         QOS_METRIC_COUNT, QOS_METRIC_DELAYED, QOS_METRIC_DROPPED_LOSS, QOS_METRIC_DROPPED_QUEUE,
         QOS_METRIC_ERRORS, QOS_METRIC_EVENTS_DROPPED, QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN,
-        QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig, QosQueueConfig,
-        VLAN_ANY, qos_direction_matches,
+        QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig, QosPipeState,
+        QosQueueConfig, VLAN_ANY, qos_direction_matches,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
@@ -52,7 +52,17 @@ static QOS_QUEUE_CONFIG: Array<QosQueueConfig, 256> = Array::new();
 #[btf_map]
 static QOS_CLASSIFIERS: HashMap<QosClassifierKey, QosClassifierValue, 1024> = HashMap::new();
 
-/// Per-flow `QoS` state (token bucket). Per-CPU LRU eliminates cross-CPU contention.
+/// Per-pipe token bucket. Index = pipe_id (0-63).
+///
+/// Shared across CPUs on purpose: a pipe's rate is a cap on everything
+/// classified into it, so the credit has to be drawn from one place. A
+/// per-CPU bucket would hand each core the full rate and multiply the cap by
+/// the core count.
+#[btf_map]
+static QOS_PIPE_STATE: Array<QosPipeState, 64> = Array::new();
+
+/// Per-flow pacing state. Per-CPU LRU eliminates cross-CPU contention, and a
+/// flow's departure times only ever matter relative to its own past packets.
 #[btf_map]
 static QOS_FLOW_STATE: LruPerCpuHashMap<u32, QosFlowState, 65536> = LruPerCpuHashMap::new();
 
@@ -619,22 +629,25 @@ fn apply_qos(
         }
     }
 
-    // Step 4: Token bucket bandwidth enforcement
+    // Step 4: Token bucket bandwidth enforcement, charged to the pipe.
     if pipe_cfg.ns_per_byte > 0 {
         let now_ns = unsafe { bpf_ktime_get_boot_ns() };
-        let fh = flow_hash(src_ip, dst_ip, src_port, dst_port, protocol);
         let pkt_len = ctx.data_end().saturating_sub(ctx.data()) as u64;
 
-        let should_drop = match QOS_FLOW_STATE.get_ptr_mut(&fh) {
+        let should_drop = match QOS_PIPE_STATE.get_ptr_mut(pipe_id) {
             Some(state_ptr) => {
                 let state = unsafe { &mut *state_ptr };
-                // Refill tokens — use division (supported) not multiplication
+                // Refill tokens - use division (supported) not multiplication
                 // (u64*u64 triggers __multi3 which eBPF lacks).
                 // ns_per_byte is precomputed by userspace; grant one byte of
                 // credit per ns_per_byte elapsed: new_tokens = elapsed_ns / ns_per_byte.
+                //
+                // A never-used pipe holds zeros, so the first packet measures
+                // its elapsed time from the boot clock's origin and fills the
+                // bucket to the brim, which is where a fresh pipe should start.
                 let elapsed_ns = now_ns.saturating_sub(state.last_refill_ns);
                 let new_tokens = elapsed_ns / pipe_cfg.ns_per_byte;
-                state.tokens = (state.tokens + new_tokens).min(pipe_cfg.burst_bytes);
+                state.tokens = state.tokens.saturating_add(new_tokens).min(pipe_cfg.burst_bytes);
                 state.last_refill_ns = now_ns;
 
                 // Check if we can consume tokens
@@ -652,19 +665,9 @@ fn apply_qos(
                     true // over bandwidth
                 }
             }
-            None => {
-                // First packet for this flow — initialize state
-                let new_state = QosFlowState {
-                    tokens: pipe_cfg.burst_bytes.saturating_sub(pkt_len),
-                    last_refill_ns: now_ns,
-                    last_edt_ns: 0,
-                    pipe_id: pipe_id as u8,
-                    queue_id: queue_id as u8,
-                    _padding: [0; 6],
-                };
-                let _ = QOS_FLOW_STATE.insert(&fh, &new_state, 0);
-                false // First packet passes
-            }
+            // The array is sized for every pipe id a config can hold, so this
+            // is unreachable; passing is the safe reading of "no bucket".
+            None => false,
         };
 
         if should_drop {
@@ -701,8 +704,6 @@ fn apply_qos(
                 // No flow state yet (delay-only pipe without bandwidth shaping).
                 let departure = now_ns_edt.saturating_add(pipe_cfg.delay_ns);
                 let new_state = QosFlowState {
-                    tokens: 0,
-                    last_refill_ns: now_ns_edt,
                     last_edt_ns: departure,
                     pipe_id: pipe_id as u8,
                     queue_id: queue_id as u8,

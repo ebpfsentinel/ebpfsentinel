@@ -3,7 +3,8 @@
 #
 # Dummynet-inspired QoS with pipes, queues, and classifiers.
 # Enforces bandwidth limits, delay, and packet loss via a TC classifier
-# with per-flow token bucket enforcement.
+# with one token bucket per pipe: the rate below caps everything classified
+# into a pipe, not each flow separately.
 #
 # Architecture:
 #   Classifiers → Queues → Pipes
