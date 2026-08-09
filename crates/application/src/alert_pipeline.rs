@@ -13,9 +13,7 @@ use domain::dlp::entity::DlpAlert;
 use domain::dns::entity::{DnsAlert, DnsAlertReason};
 use domain::firewall::entity::IpCidr;
 use domain::ids::entity::IdsAlert;
-use domain::ratelimit::entity::{
-    RateLimitAction, RateLimitAlgorithm, RateLimitPolicy, RateLimitScope,
-};
+use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm, RateLimitPolicy};
 use ports::secondary::alert_enrichment_port::AlertEnrichmentPort;
 use ports::secondary::alert_sender::AlertSender;
 use ports::secondary::alert_store::AlertStore;
@@ -91,6 +89,10 @@ impl AutoResponseHandler {
     /// Install a per-source token bucket in the XDP rate limiter and schedule
     /// its removal. Unlike a blacklist entry the rate limiter holds no expiry
     /// of its own, so the caller's TTL has to be honoured here.
+    ///
+    /// The rate limiter's config map is keyed by a 32-bit source address, so
+    /// an IPv6 source is refused by the policy's own validation and reported
+    /// to the caller. Blacklisting is the response that covers IPv6.
     async fn throttle(
         &self,
         src_ip: IpAddr,
@@ -106,15 +108,12 @@ impl AutoResponseHandler {
         let rule_id = auto_response_rule_id(&policy.name, src_ip);
         let entry = RateLimitPolicy {
             id: rule_id.clone(),
-            scope: RateLimitScope::SourceIp,
             rate,
             burst: rate,
             action: RateLimitAction::Drop,
-            src_ip: Some(host_cidr(src_ip)),
+            src_ip: host_cidr(src_ip),
             enabled: true,
             algorithm: RateLimitAlgorithm::TokenBucket,
-            country_codes: None,
-            src_ip_alias: None,
             group_mask: 0,
         };
 
@@ -1855,13 +1854,12 @@ mod tests {
         let policies = installed.policies();
         assert_eq!(policies.len(), 1);
         assert_eq!(policies[0].rate, 500);
-        assert_eq!(policies[0].scope, RateLimitScope::SourceIp);
         assert_eq!(
             policies[0].src_ip,
-            Some(IpCidr::V4 {
+            IpCidr::V4 {
                 addr: 0xC0A8_0001,
                 prefix_len: 32,
-            })
+            }
         );
         // Throttling shapes the source; blacklisting it would cut it off.
         assert!(!ips.load().is_blacklisted(IpAddr::from([192, 168, 0, 1])));

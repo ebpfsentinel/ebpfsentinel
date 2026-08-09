@@ -7,9 +7,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use domain::auth::entity::JwtClaims;
 use domain::common::entity::RuleId;
-use domain::ratelimit::entity::{
-    RateLimitAction, RateLimitAlgorithm, RateLimitPolicy, RateLimitScope,
-};
+use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm, RateLimitPolicy};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -27,12 +25,10 @@ pub struct CreateRateLimitRuleRequest {
     pub id: String,
     pub rate: u64,
     pub burst: u64,
-    #[serde(default)]
-    pub src_ip: Option<String>,
+    /// Source host to limit, as a bare address or a `/32`.
+    pub src_ip: String,
     #[serde(default = "default_action")]
     pub action: String,
-    #[serde(default = "default_scope")]
-    pub scope: String,
     #[serde(default = "default_algorithm")]
     pub algorithm: String,
     #[serde(default = "default_enabled")]
@@ -41,9 +37,6 @@ pub struct CreateRateLimitRuleRequest {
 
 fn default_action() -> String {
     "drop".to_string()
-}
-fn default_scope() -> String {
-    "source_ip".to_string()
 }
 fn default_algorithm() -> String {
     "token_bucket".to_string()
@@ -55,31 +48,24 @@ fn default_enabled() -> bool {
 #[derive(Serialize, ToSchema)]
 pub struct RateLimitRuleResponse {
     pub id: String,
-    pub scope: String,
     pub rate: u64,
     pub burst: u64,
     pub action: String,
     pub algorithm: String,
-    pub src_ip: Option<String>,
+    pub src_ip: String,
     pub enabled: bool,
-    /// ISO-3166 country codes this rule is scoped to (userspace annotation;
-    /// enforced by the GeoIP-aware ratelimit pipeline). Absent when unscoped.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub country_codes: Option<Vec<String>>,
 }
 
 impl RateLimitRuleResponse {
     fn from_policy(p: &RateLimitPolicy) -> Self {
         Self {
             id: p.id.0.clone(),
-            scope: format_scope(p.scope),
             rate: p.rate,
             burst: p.burst,
             action: format_action(p.action),
             algorithm: format_algorithm(p.algorithm),
-            src_ip: p.src_ip.map(format_cidr),
+            src_ip: format_cidr(p.src_ip),
             enabled: p.enabled,
-            country_codes: p.country_codes.clone(),
         }
     }
 }
@@ -217,11 +203,8 @@ pub async fn delete_ratelimit_rule(
 fn parse_request(req: CreateRateLimitRuleRequest) -> Result<RateLimitPolicy, ApiError> {
     validate_string_length("id", &req.id, MAX_ID_LENGTH)?;
     validate_string_length("action", &req.action, MAX_SHORT_STRING_LENGTH)?;
-    validate_string_length("scope", &req.scope, MAX_SHORT_STRING_LENGTH)?;
     validate_string_length("algorithm", &req.algorithm, MAX_SHORT_STRING_LENGTH)?;
-    if let Some(ref s) = req.src_ip {
-        validate_string_length("src_ip", s, MAX_PATTERN_LENGTH)?;
-    }
+    validate_string_length("src_ip", &req.src_ip, MAX_PATTERN_LENGTH)?;
 
     let action = match req.action.to_lowercase().as_str() {
         "drop" | "deny" | "block" => RateLimitAction::Drop,
@@ -230,20 +213,6 @@ fn parse_request(req: CreateRateLimitRuleRequest) -> Result<RateLimitPolicy, Api
             return Err(ApiError::BadRequest {
                 code: "VALIDATION_ERROR",
                 message: format!("invalid action '{}': expected drop or pass", req.action),
-            });
-        }
-    };
-
-    let scope = match req.scope.to_lowercase().as_str() {
-        "source_ip" | "src_ip" | "per_ip" | "per-ip" => RateLimitScope::SourceIp,
-        "global" => RateLimitScope::Global,
-        _ => {
-            return Err(ApiError::BadRequest {
-                code: "VALIDATION_ERROR",
-                message: format!(
-                    "invalid scope '{}': expected source_ip or global",
-                    req.scope
-                ),
             });
         }
     };
@@ -264,40 +233,34 @@ fn parse_request(req: CreateRateLimitRuleRequest) -> Result<RateLimitPolicy, Api
         }
     };
 
-    let src_ip = if let Some(ref cidr_str) = req.src_ip {
-        Some(
-            infrastructure::config::parse_cidr(cidr_str).map_err(|e| ApiError::BadRequest {
-                code: "VALIDATION_ERROR",
-                message: format!("invalid CIDR: {e}"),
-            })?,
-        )
-    } else {
-        None
-    };
+    let src_ip =
+        infrastructure::config::parse_cidr(&req.src_ip).map_err(|e| ApiError::BadRequest {
+            code: "VALIDATION_ERROR",
+            message: format!("invalid CIDR: {e}"),
+        })?;
 
-    Ok(RateLimitPolicy {
+    let policy = RateLimitPolicy {
         id: RuleId(req.id),
-        scope,
         rate: req.rate,
         burst: req.burst,
         action,
         src_ip,
         enabled: req.enabled,
         algorithm,
-        country_codes: None,
-        src_ip_alias: None,
         group_mask: 0,
-    })
+    };
+
+    // Surface the source-address rules (single host, IPv4, not the default
+    // entry) as a 400 rather than a 500 from the engine.
+    policy.validate().map_err(|e| ApiError::BadRequest {
+        code: "VALIDATION_ERROR",
+        message: e.to_string(),
+    })?;
+
+    Ok(policy)
 }
 
 // ── Formatting helpers ──────────────────────────────────────────────
-
-fn format_scope(s: RateLimitScope) -> String {
-    match s {
-        RateLimitScope::SourceIp => "source_ip".to_string(),
-        RateLimitScope::Global => "global".to_string(),
-    }
-}
 
 fn format_action(a: RateLimitAction) -> String {
     match a {
@@ -334,12 +297,6 @@ fn format_cidr(cidr: domain::firewall::entity::IpNetwork) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn format_scope_variants() {
-        assert_eq!(format_scope(RateLimitScope::SourceIp), "source_ip");
-        assert_eq!(format_scope(RateLimitScope::Global), "global");
-    }
 
     #[test]
     fn format_action_variants() {
@@ -393,112 +350,78 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_create_request_valid() {
-        let req = CreateRateLimitRuleRequest {
+    fn request(src_ip: &str, action: &str, algorithm: &str) -> CreateRateLimitRuleRequest {
+        CreateRateLimitRuleRequest {
             id: "rl-001".to_string(),
             rate: 1000,
             burst: 2000,
-            src_ip: Some("10.0.0.0/8".to_string()),
-            action: "drop".to_string(),
-            scope: "source_ip".to_string(),
-            algorithm: "token_bucket".to_string(),
+            src_ip: src_ip.to_string(),
+            action: action.to_string(),
+            algorithm: algorithm.to_string(),
             enabled: true,
-        };
-        let policy = parse_request(req).unwrap();
+        }
+    }
+
+    #[test]
+    fn parse_create_request_valid() {
+        let policy = parse_request(request("10.0.0.7", "drop", "token_bucket")).unwrap();
         assert_eq!(policy.id.0, "rl-001");
         assert_eq!(policy.rate, 1000);
         assert_eq!(policy.burst, 2000);
-        assert!(policy.src_ip.is_some());
         assert_eq!(policy.action, RateLimitAction::Drop);
-        assert_eq!(policy.scope, RateLimitScope::SourceIp);
         assert_eq!(policy.algorithm, RateLimitAlgorithm::TokenBucket);
     }
 
     #[test]
     fn parse_create_request_with_algorithm() {
-        let req = CreateRateLimitRuleRequest {
-            id: "rl-001".to_string(),
-            rate: 1000,
-            burst: 2000,
-            src_ip: None,
-            action: "drop".to_string(),
-            scope: "source_ip".to_string(),
-            algorithm: "leaky_bucket".to_string(),
-            enabled: true,
-        };
-        let policy = parse_request(req).unwrap();
+        let policy = parse_request(request("10.0.0.7", "drop", "leaky_bucket")).unwrap();
         assert_eq!(policy.algorithm, RateLimitAlgorithm::LeakyBucket);
     }
 
     #[test]
     fn parse_create_request_invalid_action() {
-        let req = CreateRateLimitRuleRequest {
-            id: "rl-001".to_string(),
-            rate: 1000,
-            burst: 2000,
-            src_ip: None,
-            action: "nuke".to_string(),
-            scope: "source_ip".to_string(),
-            algorithm: "token_bucket".to_string(),
-            enabled: true,
-        };
-        assert!(parse_request(req).is_err());
+        assert!(parse_request(request("10.0.0.7", "nuke", "token_bucket")).is_err());
     }
 
     #[test]
     fn parse_create_request_invalid_algorithm() {
-        let req = CreateRateLimitRuleRequest {
-            id: "rl-001".to_string(),
-            rate: 1000,
-            burst: 2000,
-            src_ip: None,
-            action: "drop".to_string(),
-            scope: "source_ip".to_string(),
-            algorithm: "random".to_string(),
-            enabled: true,
-        };
-        assert!(parse_request(req).is_err());
+        assert!(parse_request(request("10.0.0.7", "drop", "random")).is_err());
     }
 
     #[test]
     fn parse_create_request_invalid_cidr() {
-        let req = CreateRateLimitRuleRequest {
-            id: "rl-001".to_string(),
-            rate: 1000,
-            burst: 2000,
-            src_ip: Some("not-a-cidr".to_string()),
-            action: "drop".to_string(),
-            scope: "source_ip".to_string(),
-            algorithm: "token_bucket".to_string(),
-            enabled: true,
-        };
-        assert!(parse_request(req).is_err());
+        assert!(parse_request(request("not-a-cidr", "drop", "token_bucket")).is_err());
+    }
+
+    /// A prefix would be narrowed to its network address by the exact-match
+    /// config map, so the request is refused instead of silently misapplied.
+    #[test]
+    fn parse_create_request_rejects_a_prefix() {
+        assert!(parse_request(request("10.0.0.0/8", "drop", "token_bucket")).is_err());
     }
 
     #[test]
     fn response_from_policy() {
         let policy = RateLimitPolicy {
             id: RuleId("rl-001".to_string()),
-            scope: RateLimitScope::SourceIp,
             rate: 1000,
             burst: 2000,
             action: RateLimitAction::Drop,
-            src_ip: None,
+            src_ip: domain::firewall::entity::IpNetwork::V4 {
+                addr: 0xC0A8_0001,
+                prefix_len: 32,
+            },
             enabled: true,
             algorithm: RateLimitAlgorithm::TokenBucket,
-            country_codes: None,
-            src_ip_alias: None,
             group_mask: 0,
         };
         let resp = RateLimitRuleResponse::from_policy(&policy);
         assert_eq!(resp.id, "rl-001");
-        assert_eq!(resp.scope, "source_ip");
         assert_eq!(resp.rate, 1000);
         assert_eq!(resp.burst, 2000);
         assert_eq!(resp.action, "drop");
         assert_eq!(resp.algorithm, "token_bucket");
-        assert!(resp.src_ip.is_none());
+        assert_eq!(resp.src_ip, "192.168.0.1/32");
         assert!(resp.enabled);
     }
 
@@ -506,40 +429,38 @@ mod tests {
     fn response_from_policy_leaky_bucket() {
         let policy = RateLimitPolicy {
             id: RuleId("rl-002".to_string()),
-            scope: RateLimitScope::Global,
             rate: 500,
             burst: 1000,
             action: RateLimitAction::Pass,
-            src_ip: None,
+            src_ip: domain::firewall::entity::IpNetwork::V4 {
+                addr: 0x0A00_0007,
+                prefix_len: 32,
+            },
             enabled: true,
             algorithm: RateLimitAlgorithm::LeakyBucket,
-            country_codes: None,
-            src_ip_alias: None,
             group_mask: 0,
         };
         let resp = RateLimitRuleResponse::from_policy(&policy);
         assert_eq!(resp.algorithm, "leaky_bucket");
         assert_eq!(resp.action, "pass");
-        assert_eq!(resp.scope, "global");
+        assert_eq!(resp.src_ip, "10.0.0.7/32");
     }
 
     #[test]
     fn response_serialization() {
         let resp = RateLimitRuleResponse {
             id: "rl-001".to_string(),
-            scope: "source_ip".to_string(),
             rate: 1000,
             burst: 2000,
             action: "drop".to_string(),
             algorithm: "token_bucket".to_string(),
-            src_ip: Some("10.0.0.0/8".to_string()),
+            src_ip: "10.0.0.7/32".to_string(),
             enabled: true,
-            country_codes: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "rl-001");
         assert_eq!(json["rate"], 1000);
-        assert_eq!(json["src_ip"], "10.0.0.0/8");
+        assert_eq!(json["src_ip"], "10.0.0.7/32");
         assert_eq!(json["algorithm"], "token_bucket");
     }
 }

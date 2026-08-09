@@ -507,9 +507,7 @@ impl AgentConfig {
         }
 
         // Validate ratelimit rules
-        for (idx, rule_cfg) in self.ratelimit.rules.iter().enumerate() {
-            rule_cfg.validate(idx)?;
-        }
+        self.ratelimit.validate_rules()?;
 
         // Validate ratelimit country tiers
         for (idx, tier_cfg) in self.ratelimit.country_tiers.iter().enumerate() {
@@ -1616,7 +1614,7 @@ mod tests {
     use domain::common::entity::{DomainMode, Protocol, Severity};
     use domain::firewall::entity::{FirewallAction, IpNetwork};
     use domain::l7::entity::L7Matcher;
-    use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm, RateLimitScope};
+    use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm};
     use domain::threatintel::entity::FeedFormat;
 
     // ── VLAN config validation ─────────────────────────────────────
@@ -2515,14 +2513,14 @@ ratelimit:
     - id: rl-001
       rate: 100
       burst: 200
-      src_ip: "10.0.0.0/8"
+      src_ip: "10.0.0.7"
       action: drop
       enabled: true
     - id: rl-002
       rate: 50
       burst: 100
+      src_ip: "10.0.0.8/32"
       action: pass
-      scope: global
 "#;
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert!(config.ratelimit.enabled);
@@ -2535,17 +2533,17 @@ ratelimit:
         assert_eq!(policies[0].id.0, "rl-001");
         assert_eq!(policies[0].rate, 100);
         assert_eq!(policies[0].burst, 200);
-        assert!(policies[0].src_ip.is_some());
         assert!(matches!(
             policies[0].src_ip,
-            Some(IpNetwork::V4 { prefix_len: 8, .. })
+            IpNetwork::V4 {
+                addr: 0x0A00_0007,
+                prefix_len: 32
+            }
         ));
         assert_eq!(policies[0].action, RateLimitAction::Drop);
-        assert_eq!(policies[0].scope, RateLimitScope::SourceIp);
 
         assert_eq!(policies[1].id.0, "rl-002");
         assert_eq!(policies[1].action, RateLimitAction::Pass);
-        assert_eq!(policies[1].scope, RateLimitScope::Global);
     }
 
     #[test]
@@ -2558,6 +2556,7 @@ ratelimit:
     - id: bad
       rate: 0
       burst: 100
+      src_ip: 10.0.0.7
 ";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
@@ -2572,6 +2571,7 @@ ratelimit:
     - id: bad
       rate: 100
       burst: 0
+      src_ip: 10.0.0.7
 ";
         assert!(AgentConfig::from_yaml(yaml).is_err());
     }
@@ -2586,6 +2586,7 @@ ratelimit:
     - id: bad
       rate: 100
       burst: 200
+      src_ip: 10.0.0.7
       action: nuke
 ";
         assert!(AgentConfig::from_yaml(yaml).is_err());
@@ -2616,14 +2617,17 @@ ratelimit:
     - id: rl-deny
       rate: 100
       burst: 200
+      src_ip: 10.0.0.1
       action: deny
     - id: rl-block
       rate: 100
       burst: 200
+      src_ip: 10.0.0.2
       action: block
     - id: rl-allow
       rate: 100
       burst: 200
+      src_ip: 10.0.0.3
       action: allow
 ";
         let config = AgentConfig::from_yaml(yaml).unwrap();
@@ -2633,31 +2637,58 @@ ratelimit:
         assert_eq!(policies[2].action, RateLimitAction::Pass);
     }
 
+    /// A prefix would be narrowed to its network address by the exact-match
+    /// config map, so it is refused at load with the reason.
     #[test]
-    fn ratelimit_scope_aliases() {
-        let yaml = r"
+    fn ratelimit_prefix_source_fails() {
+        let yaml = r#"
 agent:
   interfaces: [eth0]
 ratelimit:
   rules:
-    - id: rl-per-ip
+    - id: bad
       rate: 100
       burst: 200
-      scope: per_ip
-    - id: rl-src-ip
+      src_ip: "10.0.0.0/8"
+"#;
+        assert!(AgentConfig::from_yaml(yaml).is_err());
+    }
+
+    /// 0.0.0.0 is the entry the section defaults own.
+    #[test]
+    fn ratelimit_default_entry_source_fails() {
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+ratelimit:
+  rules:
+    - id: bad
       rate: 100
       burst: 200
-      scope: src_ip
-    - id: rl-global
+      src_ip: "0.0.0.0"
+"#;
+        assert!(AgentConfig::from_yaml(yaml).is_err());
+    }
+
+    /// One source carries one bucket, so a second rule on the same host
+    /// would replace the first instead of adding to it.
+    #[test]
+    fn ratelimit_duplicate_source_fails() {
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+ratelimit:
+  rules:
+    - id: first
       rate: 100
       burst: 200
-      scope: global
-";
-        let config = AgentConfig::from_yaml(yaml).unwrap();
-        let policies = config.ratelimit_policies().unwrap();
-        assert_eq!(policies[0].scope, RateLimitScope::SourceIp);
-        assert_eq!(policies[1].scope, RateLimitScope::SourceIp);
-        assert_eq!(policies[2].scope, RateLimitScope::Global);
+      src_ip: "10.0.0.7"
+    - id: second
+      rate: 50
+      burst: 100
+      src_ip: "10.0.0.7/32"
+"#;
+        assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
     // ── Ratelimit algorithm config ───────────────────────────────────
@@ -2672,6 +2703,7 @@ ratelimit:
     - id: rl-001
       rate: 100
       burst: 200
+      src_ip: 10.0.0.7
 ";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.ratelimit.default_algorithm, "token_bucket");
@@ -2689,18 +2721,22 @@ ratelimit:
     - id: rl-tb
       rate: 100
       burst: 200
+      src_ip: 10.0.0.1
       algorithm: token_bucket
     - id: rl-fw
       rate: 100
       burst: 200
+      src_ip: 10.0.0.2
       algorithm: fixed_window
     - id: rl-sw
       rate: 100
       burst: 200
+      src_ip: 10.0.0.3
       algorithm: sliding_window
     - id: rl-lb
       rate: 100
       burst: 200
+      src_ip: 10.0.0.4
       algorithm: leaky_bucket
 ";
         let config = AgentConfig::from_yaml(yaml).unwrap();
@@ -2721,18 +2757,22 @@ ratelimit:
     - id: rl-tb
       rate: 100
       burst: 200
+      src_ip: 10.0.0.1
       algorithm: tokenbucket
     - id: rl-fw
       rate: 100
       burst: 200
+      src_ip: 10.0.0.2
       algorithm: fixedwindow
     - id: rl-sw
       rate: 100
       burst: 200
+      src_ip: 10.0.0.3
       algorithm: slidingwindow
     - id: rl-lb
       rate: 100
       burst: 200
+      src_ip: 10.0.0.4
       algorithm: leakybucket
 ";
         let config = AgentConfig::from_yaml(yaml).unwrap();
@@ -2753,6 +2793,7 @@ ratelimit:
     - id: bad
       rate: 100
       burst: 200
+      src_ip: 10.0.0.7
       algorithm: random_algo
 ";
         assert!(AgentConfig::from_yaml(yaml).is_err());

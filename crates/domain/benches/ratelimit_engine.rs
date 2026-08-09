@@ -2,23 +2,23 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 use domain::common::entity::RuleId;
+use domain::firewall::entity::IpNetwork;
 use domain::ratelimit::engine::RateLimitEngine;
-use domain::ratelimit::entity::{
-    RateLimitAction, RateLimitAlgorithm, RateLimitPolicy, RateLimitScope,
-};
+use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm, RateLimitPolicy};
 
 fn make_policy(id: usize, rate: u64, burst: u64) -> RateLimitPolicy {
     RateLimitPolicy {
         id: RuleId(format!("rl-{id:05}")),
-        scope: RateLimitScope::SourceIp,
         rate,
         burst,
         action: RateLimitAction::Drop,
-        src_ip: None,
+        // One host per policy, the way the config map is keyed.
+        src_ip: IpNetwork::V4 {
+            addr: 0x0A00_0000 + u32::try_from(id).unwrap_or(0) + 1,
+            prefix_len: 32,
+        },
         enabled: true,
         algorithm: RateLimitAlgorithm::default(),
-        country_codes: None,
-        src_ip_alias: None,
         group_mask: 0,
     }
 }

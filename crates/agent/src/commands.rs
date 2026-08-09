@@ -291,20 +291,19 @@ pub async fn cmd_ratelimit_list(client: &ApiClient, output: OutputFormat) -> Res
     }
 
     println!(
-        "{:<16}  {:<12}  {:>8}  {:>8}  {:<6}  {:<16}  {:<18}  {:<7}",
-        "ID", "SCOPE", "RATE", "BURST", "ACTION", "ALGORITHM", "SRC IP", "ENABLED"
+        "{:<16}  {:<18}  {:>8}  {:>8}  {:<6}  {:<16}  {:<7}",
+        "ID", "SRC IP", "RATE", "BURST", "ACTION", "ALGORITHM", "ENABLED"
     );
 
     for rule in &rules {
         println!(
-            "{:<16}  {:<12}  {:>8}  {:>8}  {:<6}  {:<16}  {:<18}  {:<7}",
+            "{:<16}  {:<18}  {:>8}  {:>8}  {:<6}  {:<16}  {:<7}",
             rule.id,
-            rule.scope,
+            rule.src_ip,
             rule.rate,
             rule.burst,
             rule.action,
             rule.algorithm,
-            rule.src_ip.as_deref().unwrap_or("-"),
             yes_no(rule.enabled),
         );
     }
@@ -324,8 +323,8 @@ pub async fn cmd_ratelimit_add(client: &ApiClient, json: &str, output: OutputFor
     }
 
     println!(
-        "Rate limit rule created: {} (rate={}, burst={}, scope={})",
-        rule.id, rule.rate, rule.burst, rule.scope
+        "Rate limit rule created: {} (src_ip={}, rate={}, burst={})",
+        rule.id, rule.src_ip, rule.rate, rule.burst
     );
     Ok(())
 }

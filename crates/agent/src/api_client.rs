@@ -101,12 +101,11 @@ pub struct DomainBlockResponse {
 #[derive(Deserialize, Serialize)]
 pub struct RateLimitRuleResponse {
     pub id: String,
-    pub scope: String,
     pub rate: u64,
     pub burst: u64,
     pub action: String,
     pub algorithm: String,
-    pub src_ip: Option<String>,
+    pub src_ip: String,
     pub enabled: bool,
 }
 

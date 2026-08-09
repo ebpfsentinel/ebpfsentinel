@@ -1,9 +1,14 @@
 # eBPFsentinel — Rate Limiting (DDoS Protection) Configuration Example
 # ====================================================================
 #
-# XDP-based rate limiting with four algorithms. Enforces per-IP or global
-# packet rate limits at wire speed using per-CPU lock-free hash maps
+# XDP-based rate limiting with four algorithms. Every source address gets
+# its own token bucket at wire speed, held in per-CPU lock-free hash maps
 # (PerCpuHashMap) for zero cross-CPU contention.
+#
+# Two ways to set a limit:
+#   - the section defaults, which apply to every source no rule names
+#   - a rule, which overrides the defaults for exactly one source host
+#   - a country tier, which covers whole countries through an LPM trie
 #
 # Advanced features:
 #   - Per-CPU buckets: each CPU maintains independent counters (effective
@@ -30,13 +35,6 @@ interface_groups:
   dmz:
     interfaces: [eth3]
 
-# ── Top-level Aliases (shared across all domains) ────────────────────
-
-aliases:
-  trusted_internal:
-    type: ip_set
-    values: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
-
 ratelimit:
   enabled: true
 
@@ -57,73 +55,41 @@ ratelimit:
 
   # ── Rules ──────────────────────────────────────────────────────────
   #
+  # A rule overrides the defaults for one source host. Sources no rule
+  # names are limited by default_rate / default_burst above, each with its
+  # own bucket, so there is nothing to write for the general case.
+  #
   # Fields:
   #   id        — Unique rule identifier (required, non-empty)
   #   enabled   — Whether this rule is active (default: true)
   #   rate      — Tokens per second (required, must be > 0)
   #   burst     — Maximum burst / bucket size (required, must be > 0)
-  #   src_ip    — Source CIDR filter (optional; omit to match all sources)
+  #   src_ip    — Source host, bare address or /32 (required). Shorter
+  #               prefixes and IPv6 are refused: the kernel map matches one
+  #               exact address. Use country_tiers to cover a range.
   #   action    — "drop" (block excess) or "pass" (allow + log excess)
   #              Aliases: "deny"/"block" = drop, "allow" = pass
-  #   scope     — "source_ip" (per-IP tracking) or "global" (aggregate limit)
-  #              Aliases: "src_ip"/"per_ip"/"per-ip" = source_ip
   #   algorithm — Per-rule algorithm override (see default_algorithm above)
+  #   interfaces — Interface groups the rule applies to (default: all)
 
   rules:
-    # ── Per-IP rate limits ─────────────────────────────────────────
-    # General per-IP limit: 500 packets/sec with token bucket (default)
-    - id: rl-general-per-ip
-      rate: 500
-      burst: 1000
-      scope: source_ip
-      algorithm: token_bucket
-      action: drop
-
-    # Stricter limit for traffic from external networks (WAN only)
-    - id: rl-external-strict
+    # A scraper that keeps hammering the WAN: far below the default.
+    - id: rl-scraper-strict
       rate: 100
       burst: 200
-      src_ip: "0.0.0.0/0"
-      scope: source_ip
+      src_ip: 203.0.113.10
       algorithm: sliding_window
       action: drop
       interfaces: [wan]           # Apply only to the "wan" interface group (optional, default: all)
       # interfaces: ["!lan"]      # Alternative: apply to all EXCEPT "lan" group (inversion)
 
-    # Lenient limit for trusted internal network
-    - id: rl-internal-lenient
+    # A backup host that legitimately bursts: raise the ceiling, log only.
+    - id: rl-backup-lenient
       rate: 5000
       burst: 10000
-      src_ip: "10.0.0.0/8"
-      scope: source_ip
+      src_ip: 10.0.0.20/32
       algorithm: token_bucket
-      action: pass          # Monitor only, don't drop internal traffic
-
-    # Lenient limit using alias (same as above, but uses shared alias)
-    - id: rl-internal-alias
-      rate: 5000
-      burst: 10000
-      src_ip_alias: trusted_internal
-      scope: source_ip
-      algorithm: token_bucket
-      action: pass
-
-    # ── Global rate limits ─────────────────────────────────────────
-    # Global ICMP rate limit (aggregate across all sources)
-    - id: rl-icmp-global
-      rate: 200
-      burst: 500
-      scope: global
-      algorithm: leaky_bucket
-      action: drop
-
-    # Global DNS rate limit (prevent DNS amplification)
-    - id: rl-dns-global
-      rate: 1000
-      burst: 2000
-      scope: global
-      algorithm: fixed_window
-      action: drop
+      action: pass          # Monitor only, don't drop this host
 
     # ── Algorithm comparison examples ──────────────────────────────
     # Same rate with different algorithms to illustrate behavior:
@@ -132,33 +98,24 @@ ratelimit:
     - id: rl-demo-fixed
       rate: 300
       burst: 600
-      scope: source_ip
+      src_ip: 192.0.2.1
       algorithm: fixed_window
       action: drop
       enabled: false         # Disabled — for documentation only
-
-    # Sliding window: smoother than fixed, weighted average of windows
-    - id: rl-demo-sliding
-      rate: 300
-      burst: 600
-      scope: source_ip
-      algorithm: sliding_window
-      action: drop
-      enabled: false
 
     # Leaky bucket: strictest smoothing, constant drain rate
     - id: rl-demo-leaky
       rate: 300
       burst: 600
-      scope: source_ip
+      src_ip: 192.0.2.2
       algorithm: leaky_bucket
       action: drop
       enabled: false
 
     # ── Per-country rate limit tiers ───────────────────────────────
     # Country-specific rate limits enforced via kernel-side LPM Trie maps.
-    # Each tier maps country codes to a rate limit profile. Traffic from
-    # matched countries uses the tier config instead of per-IP rules.
+    # Each tier maps country codes to a rate limit profile. A country tier
+    # is checked before the per-host rules and covers IPv6 as well.
     # tier_id must be 1–15. Requires GeoIP to be enabled.
 
   country_tiers:

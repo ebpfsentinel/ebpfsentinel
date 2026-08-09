@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use domain::common::entity::RuleId;
+use domain::firewall::entity::IpNetwork;
 use domain::ratelimit::entity::{
-    CountryTierConfig, RateLimitAction, RateLimitAlgorithm, RateLimitPolicy, RateLimitScope,
+    CountryTierConfig, RateLimitAction, RateLimitAlgorithm, RateLimitPolicy,
 };
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +57,36 @@ impl Default for RateLimitSectionConfig {
             rules: Vec::new(),
             country_tiers: Vec::new(),
         }
+    }
+}
+
+impl RateLimitSectionConfig {
+    /// Validate every rule, and reject two rules naming the same source.
+    ///
+    /// The config map holds one entry per source address, so a second rule on
+    /// the same host would overwrite the first with nothing to show for it.
+    pub(super) fn validate_rules(&self) -> Result<(), ConfigError> {
+        let mut seen: HashMap<u32, &str> = HashMap::new();
+
+        for (idx, rule) in self.rules.iter().enumerate() {
+            rule.validate(idx)?;
+
+            let IpNetwork::V4 { addr, .. } = parse_cidr(&rule.src_ip)? else {
+                continue; // Rejected by the rule's own validation above.
+            };
+            if let Some(first) = seen.insert(addr, &rule.id) {
+                return Err(ConfigError::Validation {
+                    field: format!("ratelimit.rules[{idx}].src_ip"),
+                    message: format!(
+                        "source {} is already limited by rule '{first}': one source carries \
+                         one bucket, so the second rule would replace the first",
+                        rule.src_ip
+                    ),
+                });
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -151,6 +182,13 @@ impl CountryTierConfigYaml {
     }
 }
 
+/// A per-source override of the section defaults.
+///
+/// One rule limits one source host: the eBPF config map is an exact-match
+/// hash on the packet's 32-bit source address. Sources no rule names get the
+/// section defaults, each with its own bucket. To limit a whole country, use
+/// `country_tiers`, which resolves country codes to CIDRs and matches them
+/// with an LPM trie.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitRuleConfig {
     pub id: String,
@@ -161,17 +199,13 @@ pub struct RateLimitRuleConfig {
     /// Maximum burst (bucket size).
     pub burst: u64,
 
-    /// Optional source IP CIDR filter.
-    #[serde(default)]
-    pub src_ip: Option<String>,
+    /// Source host, as a bare address or a `/32`. Shorter prefixes and IPv6
+    /// are refused: the config map matches one exact address.
+    pub src_ip: String,
 
     /// Action on limit exceeded: "drop" or "pass".
     #[serde(default = "default_ratelimit_action")]
     pub action: String,
-
-    /// Scope: `source_ip` (default) or `global`.
-    #[serde(default = "default_ratelimit_scope")]
-    pub scope: String,
 
     /// Algorithm: `token_bucket`, `fixed_window`, `sliding_window`, `leaky_bucket`.
     #[serde(default = "default_ratelimit_algorithm")]
@@ -179,14 +213,6 @@ pub struct RateLimitRuleConfig {
 
     #[serde(default = "default_true")]
     pub enabled: bool,
-
-    /// Optional country code filter (userspace annotation only).
-    #[serde(default)]
-    pub country_codes: Option<Vec<String>>,
-
-    /// Source IP alias reference.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub src_ip_alias: Option<String>,
 
     /// Interface groups this rule applies to. Empty = all (floating).
     /// Prefix with "!" for inversion (e.g., `"!lan"` = all except lan).
@@ -196,10 +222,6 @@ pub struct RateLimitRuleConfig {
 
 fn default_ratelimit_action() -> String {
     "drop".to_string()
-}
-
-fn default_ratelimit_scope() -> String {
-    "source_ip".to_string()
 }
 
 impl RateLimitRuleConfig {
@@ -233,24 +255,13 @@ impl RateLimitRuleConfig {
             expected: "drop, pass".to_string(),
         })?;
 
-        parse_ratelimit_scope(&self.scope).map_err(|()| ConfigError::InvalidValue {
-            field: format!("{prefix}.scope"),
-            value: self.scope.clone(),
-            expected: "source_ip, global".to_string(),
-        })?;
-
         parse_ratelimit_algorithm(&self.algorithm).map_err(|()| ConfigError::InvalidValue {
             field: format!("{prefix}.algorithm"),
             value: self.algorithm.clone(),
             expected: "token_bucket, fixed_window, sliding_window, leaky_bucket".to_string(),
         })?;
 
-        if let Some(ref cidr) = self.src_ip {
-            parse_cidr(cidr).map_err(|e| ConfigError::InvalidCidr {
-                value: cidr.clone(),
-                reason: e.to_string(),
-            })?;
-        }
+        validate_source_host(format!("{prefix}.src_ip"), &self.src_ip)?;
 
         Ok(())
     }
@@ -270,12 +281,6 @@ impl RateLimitRuleConfig {
                 expected: "drop, pass".to_string(),
             })?;
 
-        let scope = parse_ratelimit_scope(&self.scope).map_err(|()| ConfigError::InvalidValue {
-            field: "scope".to_string(),
-            value: self.scope.clone(),
-            expected: "source_ip, global".to_string(),
-        })?;
-
         let algorithm =
             parse_ratelimit_algorithm(&self.algorithm).map_err(|()| ConfigError::InvalidValue {
                 field: "algorithm".to_string(),
@@ -283,27 +288,19 @@ impl RateLimitRuleConfig {
                 expected: "token_bucket, fixed_window, sliding_window, leaky_bucket".to_string(),
             })?;
 
-        let src_ip = self
-            .src_ip
-            .as_deref()
-            .map(parse_cidr)
-            .transpose()
-            .map_err(|e| ConfigError::InvalidCidr {
-                value: self.src_ip.clone().unwrap_or_default(),
-                reason: e.to_string(),
-            })?;
+        let src_ip = parse_cidr(&self.src_ip).map_err(|e| ConfigError::InvalidCidr {
+            value: self.src_ip.clone(),
+            reason: e.to_string(),
+        })?;
 
         Ok(RateLimitPolicy {
             id: RuleId(self.id.clone()),
-            scope,
             rate: self.rate,
             burst: self.burst,
             action,
             src_ip,
             enabled: self.enabled,
             algorithm,
-            country_codes: self.country_codes.clone(),
-            src_ip_alias: self.src_ip_alias.clone(),
             group_mask: super::parse_group_mask(&self.interfaces, group_bits).map_err(
                 |message| ConfigError::Validation {
                     field: "ratelimit.rules.interfaces".to_string(),
@@ -322,11 +319,43 @@ fn parse_ratelimit_action(s: &str) -> Result<RateLimitAction, ()> {
     }
 }
 
-fn parse_ratelimit_scope(s: &str) -> Result<RateLimitScope, ()> {
-    match s.to_lowercase().as_str() {
-        "source_ip" | "src_ip" | "per_ip" | "per-ip" => Ok(RateLimitScope::SourceIp),
-        "global" => Ok(RateLimitScope::Global),
-        _ => Err(()),
+/// Validate a rule's source address.
+///
+/// The config map is an exact-match hash on a 32-bit source address, so a
+/// prefix shorter than `/32` would be narrowed to its network address and an
+/// IPv6 source has no key at all. `0.0.0.0` is the entry the section defaults
+/// own; a rule claiming it would silently replace them for every source no
+/// other rule names. All three are refused here with the reason rather than
+/// accepted and then quietly misapplied.
+fn validate_source_host(field: String, value: &str) -> Result<(), ConfigError> {
+    match parse_cidr(value).map_err(|e| ConfigError::InvalidCidr {
+        value: value.to_string(),
+        reason: e.to_string(),
+    })? {
+        IpNetwork::V4 {
+            addr: 0,
+            prefix_len: 32,
+        } => Err(ConfigError::Validation {
+            field,
+            message: "0.0.0.0 is the entry ratelimit.default_rate and default_burst own; \
+                      change those instead of naming it in a rule"
+                .to_string(),
+        }),
+        IpNetwork::V4 { prefix_len: 32, .. } => Ok(()),
+        IpNetwork::V4 { prefix_len, .. } => Err(ConfigError::Validation {
+            field,
+            message: format!(
+                "prefix /{prefix_len} cannot be enforced: a rule limits one exact source \
+                 address, so only a single host (or /32) is accepted. Use country_tiers to \
+                 cover a range"
+            ),
+        }),
+        IpNetwork::V6 { .. } => Err(ConfigError::Validation {
+            field,
+            message: "IPv6 sources cannot be enforced: the per-source config map is keyed by a \
+                      32-bit IPv4 address. Use country_tiers, which carries an IPv6 trie"
+                .to_string(),
+        }),
     }
 }
 
@@ -365,8 +394,8 @@ mod tests {
 id: rl1
 rate: 500
 burst: 1000
+src_ip: 10.0.0.7
 action: drop
-scope: source_ip
 algorithm: token_bucket
 ",
         )
@@ -408,14 +437,6 @@ algorithm: token_bucket
     }
 
     #[test]
-    fn validate_invalid_scope_error() {
-        let mut rule = valid_rule();
-        rule.scope = "per_subnet".to_string();
-        let err = rule.validate(0).unwrap_err();
-        assert!(err.to_string().contains("per_subnet"));
-    }
-
-    #[test]
     fn validate_invalid_algorithm_error() {
         let mut rule = valid_rule();
         rule.algorithm = "magic".to_string();
@@ -426,9 +447,44 @@ algorithm: token_bucket
     #[test]
     fn validate_invalid_cidr_error() {
         let mut rule = valid_rule();
-        rule.src_ip = Some("not-a-cidr".to_string());
+        rule.src_ip = "not-a-cidr".to_string();
         let err = rule.validate(0).unwrap_err();
         assert!(err.to_string().contains("not-a-cidr"));
+    }
+
+    /// A prefix has nothing to match in an exact-match config map.
+    #[test]
+    fn validate_prefix_source_error() {
+        let mut rule = valid_rule();
+        rule.src_ip = "10.0.0.0/8".to_string();
+        let err = rule.validate(0).unwrap_err();
+        assert!(err.to_string().contains("single host"));
+    }
+
+    /// Key 0 belongs to the section defaults.
+    #[test]
+    fn validate_default_entry_source_error() {
+        let mut rule = valid_rule();
+        rule.src_ip = "0.0.0.0".to_string();
+        let err = rule.validate(0).unwrap_err();
+        assert!(err.to_string().contains("default_rate"));
+    }
+
+    /// The config map holds one entry per source address.
+    #[test]
+    fn validate_rules_rejects_a_duplicate_source() {
+        let mut first = valid_rule();
+        first.id = "first".to_string();
+        let mut second = valid_rule();
+        second.id = "second".to_string();
+        second.src_ip = format!("{}/32", first.src_ip);
+
+        let section = RateLimitSectionConfig {
+            rules: vec![first, second],
+            ..RateLimitSectionConfig::default()
+        };
+        let err = section.validate_rules().unwrap_err();
+        assert!(err.to_string().contains("already limited by rule 'first'"));
     }
 
     #[test]
@@ -447,9 +503,8 @@ id: rl-test
 rate: 200
 burst: 400
 action: pass
-scope: global
 algorithm: sliding_window
-src_ip: "10.0.0.0/8"
+src_ip: "10.0.0.7"
 "#,
         )
         .unwrap();
@@ -459,12 +514,17 @@ src_ip: "10.0.0.0/8"
         assert_eq!(policy.rate, 200);
         assert_eq!(policy.burst, 400);
         assert!(matches!(policy.action, RateLimitAction::Pass));
-        assert!(matches!(policy.scope, RateLimitScope::Global));
         assert!(matches!(
             policy.algorithm,
             RateLimitAlgorithm::SlidingWindow
         ));
-        assert!(policy.src_ip.is_some());
+        assert!(matches!(
+            policy.src_ip,
+            IpNetwork::V4 {
+                addr: 0x0A00_0007,
+                prefix_len: 32
+            }
+        ));
         assert!(policy.enabled);
     }
 

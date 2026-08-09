@@ -93,20 +93,20 @@ impl Default for RateLimitEngine {
 mod tests {
     use super::*;
     use crate::firewall::entity::IpNetwork;
-    use crate::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm, RateLimitScope};
+    use crate::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm};
 
     fn make_policy(id: &str, rate: u64, burst: u64) -> RateLimitPolicy {
         RateLimitPolicy {
             id: RuleId(id.to_string()),
-            scope: RateLimitScope::SourceIp,
             rate,
             burst,
             action: RateLimitAction::Drop,
-            src_ip: None,
+            src_ip: IpNetwork::V4 {
+                addr: 0xC0A8_0164,
+                prefix_len: 32,
+            },
             enabled: true,
             algorithm: RateLimitAlgorithm::default(),
-            country_codes: None,
-            src_ip_alias: None,
             group_mask: 0,
         }
     }
@@ -246,27 +246,29 @@ mod tests {
         assert_eq!(engine.policies()[2].id.0, "rl-003");
     }
 
-    // ── Policy with CIDR ─────────────────────────────────────────────
+    // ── Policy source address ────────────────────────────────────────
 
     #[test]
-    fn policy_with_valid_cidr() {
+    fn policy_with_a_host_source() {
         let mut engine = RateLimitEngine::new();
-        let mut policy = make_policy("rl-cidr", 1000, 2000);
-        policy.src_ip = Some(IpNetwork::V4 {
-            addr: 0x0A00_0000,
-            prefix_len: 8,
-        });
+        let mut policy = make_policy("rl-host", 1000, 2000);
+        policy.src_ip = IpNetwork::V4 {
+            addr: 0x0A00_0007,
+            prefix_len: 32,
+        };
         assert!(engine.add_policy(policy).is_ok());
     }
 
+    /// The config map matches one exact address, so a prefix is refused
+    /// rather than narrowed to its network address.
     #[test]
-    fn policy_with_invalid_cidr() {
+    fn policy_with_a_prefix_source() {
         let mut engine = RateLimitEngine::new();
         let mut policy = make_policy("rl-bad", 1000, 2000);
-        policy.src_ip = Some(IpNetwork::V4 {
-            addr: 0,
-            prefix_len: 33,
-        });
+        policy.src_ip = IpNetwork::V4 {
+            addr: 0x0A00_0000,
+            prefix_len: 8,
+        };
         assert!(engine.add_policy(policy).is_err());
     }
 
@@ -308,15 +310,15 @@ mod tests {
                 let mut engine = RateLimitEngine::new();
                 let policy = RateLimitPolicy {
                     id: RuleId("prop-test".to_string()),
-                    scope: RateLimitScope::SourceIp,
                     rate,
                     burst,
                     action: RateLimitAction::Drop,
-                    src_ip: None,
+                    src_ip: IpNetwork::V4 {
+                        addr: 0xC0A8_0164,
+                        prefix_len: 32,
+                    },
                     enabled: true,
                     algorithm: RateLimitAlgorithm::default(),
-                    country_codes: None,
-                    src_ip_alias: None,
                     group_mask: 0,
                 };
                 let result = engine.add_policy(policy);
@@ -329,15 +331,15 @@ mod tests {
                 let mut engine = RateLimitEngine::new();
                 let policy = RateLimitPolicy {
                     id: RuleId("prop-invalid".to_string()),
-                    scope: RateLimitScope::SourceIp,
                     rate: 0,
                     burst,
                     action: RateLimitAction::Drop,
-                    src_ip: None,
+                    src_ip: IpNetwork::V4 {
+                        addr: 0xC0A8_0164,
+                        prefix_len: 32,
+                    },
                     enabled: true,
                     algorithm: RateLimitAlgorithm::default(),
-                    country_codes: None,
-                    src_ip_alias: None,
                     group_mask: 0,
                 };
                 let result = engine.add_policy(policy);

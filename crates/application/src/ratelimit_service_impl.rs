@@ -215,7 +215,7 @@ impl RateLimitAppService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm, RateLimitScope};
+    use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm};
     use ports::test_utils::NoopMetrics;
 
     fn make_service() -> RateLimitAppService {
@@ -225,15 +225,15 @@ mod tests {
     fn make_policy(id: &str, rate: u64, burst: u64) -> RateLimitPolicy {
         RateLimitPolicy {
             id: RuleId(id.to_string()),
-            scope: RateLimitScope::SourceIp,
             rate,
             burst,
             action: RateLimitAction::Drop,
-            src_ip: None,
+            src_ip: domain::firewall::entity::IpNetwork::V4 {
+                addr: 0xC0A8_0164,
+                prefix_len: 32,
+            },
             enabled: true,
             algorithm: RateLimitAlgorithm::default(),
-            country_codes: None,
-            src_ip_alias: None,
             group_mask: 0,
         }
     }

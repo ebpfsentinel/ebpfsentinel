@@ -10,15 +10,6 @@ use ebpf_common::ratelimit::{
 
 use super::error::RateLimitError;
 
-/// Scope of rate limiting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RateLimitScope {
-    /// Per-source-IP rate limiting (each source IP has its own bucket).
-    SourceIp,
-    /// Global rate limiting (single bucket for all traffic).
-    Global,
-}
-
 /// Action when rate limit is exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RateLimitAction {
@@ -43,28 +34,28 @@ pub enum RateLimitAlgorithm {
     LeakyBucket,
 }
 
-/// A rate limit policy.
+/// A rate limit policy: one source host, one bucket.
+///
+/// The eBPF config map is keyed by the source address, so a policy names
+/// exactly one host. Everything the policies do not name falls back to the
+/// section defaults, which give every unnamed source its own bucket. Whole
+/// countries are covered by [`CountryTierConfig`], which resolves to CIDRs
+/// and matches with an LPM trie.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitPolicy {
     pub id: RuleId,
-    pub scope: RateLimitScope,
     /// Tokens per second (refill rate).
     pub rate: u64,
     /// Maximum tokens (bucket size). Must be >= 1.
     pub burst: u64,
     /// Action when rate is exceeded.
     pub action: RateLimitAction,
-    /// Optional source IP CIDR filter. `None` = all source IPs.
-    pub src_ip: Option<IpCidr>,
+    /// Source host this policy limits. Must be an IPv4 `/32`: the config map
+    /// is an exact-match hash on a 32-bit address, so nothing else can match.
+    pub src_ip: IpCidr,
     pub enabled: bool,
     /// Rate limiting algorithm to use.
     pub algorithm: RateLimitAlgorithm,
-    /// Optional country code filter (userspace annotation only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub country_codes: Option<Vec<String>>,
-    /// Source IP alias reference.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub src_ip_alias: Option<String>,
     /// Interface group bitmask for multi-interface rule scoping.
     /// 0 = floating (applies to all interfaces). Bit 31 = invert.
     #[serde(default)]
@@ -85,46 +76,38 @@ impl RateLimitPolicy {
             return Err(RateLimitError::InvalidBurst);
         }
 
-        if let Some(ref cidr) = self.src_ip {
-            match cidr {
-                IpCidr::V4 { prefix_len, .. } => {
-                    if *prefix_len > 32 {
-                        return Err(RateLimitError::InvalidPolicy(format!(
-                            "invalid CIDR prefix length: {prefix_len}",
-                        )));
-                    }
+        match self.src_ip {
+            IpCidr::V4 { addr, prefix_len } => {
+                if prefix_len != 32 {
+                    return Err(RateLimitError::InvalidPolicy(format!(
+                        "source must be a single host, got a /{prefix_len} prefix",
+                    )));
                 }
-                IpCidr::V6 { prefix_len, .. } => {
-                    if *prefix_len > 128 {
-                        return Err(RateLimitError::InvalidPolicy(format!(
-                            "invalid CIDR prefix length: {prefix_len}",
-                        )));
-                    }
+                if addr == 0 {
+                    return Err(RateLimitError::InvalidPolicy(
+                        "source 0.0.0.0 is the entry the section defaults own".to_string(),
+                    ));
                 }
+            }
+            IpCidr::V6 { .. } => {
+                return Err(RateLimitError::InvalidPolicy(
+                    "the per-source config map holds IPv4 addresses only".to_string(),
+                ));
             }
         }
 
         Ok(())
     }
 
-    /// Convert to an eBPF map key. For `SourceIp` scope with a specific IP,
-    /// uses that IP. For `Global`, uses key 0.
+    /// Convert to an eBPF map key: the source host this policy limits.
     pub fn to_ebpf_key(&self) -> EbpfKey {
-        match self.scope {
-            RateLimitScope::SourceIp => {
-                let src_ip = self.src_ip.map_or(0, |c| match c {
-                    IpCidr::V4 { addr, .. } => addr,
-                    IpCidr::V6 { .. } => 0,
-                });
-                EbpfKey {
-                    tenant_id: 0,
-                    src_ip,
-                }
-            }
-            RateLimitScope::Global => EbpfKey {
-                tenant_id: 0,
-                src_ip: 0,
-            },
+        let src_ip = match self.src_ip {
+            IpCidr::V4 { addr, .. } => addr,
+            IpCidr::V6 { .. } => 0,
+        };
+        EbpfKey {
+            tenant_id: 0,
+            src_ip,
         }
     }
 
@@ -268,15 +251,15 @@ mod tests {
     fn make_policy(id: &str, rate: u64, burst: u64) -> RateLimitPolicy {
         RateLimitPolicy {
             id: RuleId(id.to_string()),
-            scope: RateLimitScope::SourceIp,
             rate,
             burst,
             action: RateLimitAction::Drop,
-            src_ip: None,
+            src_ip: IpNetwork::V4 {
+                addr: 0xC0A8_0164,
+                prefix_len: 32,
+            },
             enabled: true,
             algorithm: RateLimitAlgorithm::default(),
-            country_codes: None,
-            src_ip_alias: None,
             group_mask: 0,
         }
     }
@@ -301,51 +284,51 @@ mod tests {
         assert!(make_policy("rl-001", 1000, 0).validate().is_err());
     }
 
+    /// A prefix would be silently narrowed to its network address by the
+    /// exact-match config map, so it is refused instead.
     #[test]
-    fn validate_invalid_cidr() {
+    fn validate_rejects_a_prefix() {
         let mut policy = make_policy("rl-001", 1000, 2000);
-        policy.src_ip = Some(IpNetwork::V4 {
+        policy.src_ip = IpNetwork::V4 {
+            addr: 0x0A00_0000,
+            prefix_len: 8,
+        };
+        assert!(policy.validate().is_err());
+    }
+
+    /// The config map key is a 32-bit address; an IPv6 source cannot be one.
+    #[test]
+    fn validate_rejects_ipv6() {
+        let mut policy = make_policy("rl-001", 1000, 2000);
+        policy.src_ip = IpNetwork::V6 {
+            addr: [0; 16],
+            prefix_len: 128,
+        };
+        assert!(policy.validate().is_err());
+    }
+
+    /// Key 0 is where the section defaults live; a policy claiming it would
+    /// replace them for every unnamed source.
+    #[test]
+    fn validate_rejects_the_default_entry() {
+        let mut policy = make_policy("rl-001", 1000, 2000);
+        policy.src_ip = IpNetwork::V4 {
             addr: 0,
-            prefix_len: 33,
-        });
+            prefix_len: 32,
+        };
         assert!(policy.validate().is_err());
     }
 
     #[test]
-    fn validate_valid_cidr() {
+    fn to_ebpf_key_is_the_source_host() {
         let mut policy = make_policy("rl-001", 1000, 2000);
-        policy.src_ip = Some(IpNetwork::V4 {
-            addr: 0x0A00_0000,
-            prefix_len: 8,
-        });
-        assert!(policy.validate().is_ok());
-    }
-
-    #[test]
-    fn to_ebpf_key_source_ip_no_cidr() {
-        let policy = make_policy("rl-001", 1000, 2000);
+        policy.src_ip = IpNetwork::V4 {
+            addr: 0xC0A8_0101,
+            prefix_len: 32,
+        };
         let key = policy.to_ebpf_key();
-        assert_eq!(key.src_ip, 0);
+        assert_eq!(key.src_ip, 0xC0A8_0101);
         assert_eq!(key.tenant_id, 0);
-    }
-
-    #[test]
-    fn to_ebpf_key_source_ip_with_cidr() {
-        let mut policy = make_policy("rl-001", 1000, 2000);
-        policy.src_ip = Some(IpNetwork::V4 {
-            addr: 0xC0A8_0100,
-            prefix_len: 24,
-        });
-        let key = policy.to_ebpf_key();
-        assert_eq!(key.src_ip, 0xC0A8_0100);
-    }
-
-    #[test]
-    fn to_ebpf_key_global() {
-        let mut policy = make_policy("rl-001", 1000, 2000);
-        policy.scope = RateLimitScope::Global;
-        let key = policy.to_ebpf_key();
-        assert_eq!(key.src_ip, 0);
     }
 
     #[test]
