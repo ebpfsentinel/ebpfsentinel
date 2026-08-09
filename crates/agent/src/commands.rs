@@ -1441,7 +1441,6 @@ pub async fn cmd_qos_status(client: &ApiClient, output: OutputFormat) -> Result<
 
     println!("QoS / Traffic Shaping Status");
     println!("  Enabled:          {}", yes_no(status.enabled));
-    println!("  Scheduler:        {}", status.scheduler);
     println!("  Pipe count:       {}", status.pipe_count);
     println!("  Queue count:      {}", status.queue_count);
     println!("  Classifier count: {}", status.classifier_count);
@@ -1496,12 +1495,14 @@ pub async fn cmd_qos_queues(client: &ApiClient, output: OutputFormat) -> Result<
         return Ok(());
     }
 
-    println!("{:<16}  {:<16}  {:>6}", "ID", "PIPE ID", "WEIGHT");
+    println!("{:<16}  {:<16}  {:<8}", "ID", "PIPE ID", "STATE");
 
     for queue in &queues {
         println!(
-            "{:<16}  {:<16}  {:>6}",
-            queue.id, queue.pipe_id, queue.weight,
+            "{:<16}  {:<16}  {:<8}",
+            queue.id,
+            queue.pipe_id,
+            if queue.enabled { "enabled" } else { "disabled" }
         );
     }
 
@@ -1565,10 +1566,7 @@ pub async fn cmd_qos_add_queue(client: &ApiClient, json: &str, output: OutputFor
         return Ok(());
     }
 
-    println!(
-        "QoS queue created: {} (pipe={}, weight={})",
-        queue.id, queue.pipe_id, queue.weight
-    );
+    println!("QoS queue created: {} (pipe={})", queue.id, queue.pipe_id);
     Ok(())
 }
 

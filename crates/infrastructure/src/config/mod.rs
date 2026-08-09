@@ -1077,11 +1077,6 @@ impl AgentConfig {
             .to_domain_classifiers(&self.interface_group_bitmasks())
     }
 
-    /// Parse the configured `QoS` scheduler into its domain entity.
-    pub fn qos_scheduler(&self) -> Result<domain::qos::entity::QosScheduler, ConfigError> {
-        self.qos.to_domain_scheduler()
-    }
-
     /// Assign a bit position (0-30) to each group name (sorted alphabetically).
     /// Returns mapping from group name to its single-bit bitmask.
     pub fn interface_group_bitmasks(&self) -> HashMap<String, u32> {

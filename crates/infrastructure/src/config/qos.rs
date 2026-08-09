@@ -2,9 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use domain::qos::entity::{
-    QosClassifier, QosDirection, QosMatchRule, QosPipe, QosQueue, QosScheduler,
-};
+use domain::qos::entity::{QosClassifier, QosDirection, QosMatchRule, QosPipe, QosQueue};
 use serde::{Deserialize, Serialize};
 
 use super::common::{ConfigError, default_true, parse_cidr};
@@ -20,10 +18,6 @@ pub(super) const MAX_QOS_CLASSIFIERS: usize = 1024;
 
 // ── Serde defaults ──────────────────────────────────────────────────
 
-fn default_scheduler() -> String {
-    "fifo".to_string()
-}
-
 fn default_burst() -> String {
     "64kb".to_string()
 }
@@ -36,19 +30,12 @@ fn default_direction() -> String {
     "egress".to_string()
 }
 
-fn default_weight() -> u16 {
-    100
-}
-
 // ── Section config ──────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QosSectionConfig {
     #[serde(default)]
     pub enabled: bool,
-
-    #[serde(default = "default_scheduler")]
-    pub scheduler: String,
 
     #[serde(default)]
     pub pipes: Vec<QosPipeConfig>,
@@ -58,18 +45,6 @@ pub struct QosSectionConfig {
 
     #[serde(default)]
     pub classifiers: Vec<QosClassifierConfig>,
-}
-
-impl Default for QosSectionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            scheduler: default_scheduler(),
-            pipes: Vec::new(),
-            queues: Vec::new(),
-            classifiers: Vec::new(),
-        }
-    }
 }
 
 // ── Pipe config ─────────────────────────────────────────────────────
@@ -93,10 +68,6 @@ pub struct QosPipeConfig {
     #[serde(default = "default_burst")]
     pub burst: String,
 
-    /// Priority (lower = higher priority).
-    #[serde(default = "default_priority")]
-    pub priority: u8,
-
     /// Direction: "egress" | "ingress" | "both".
     #[serde(default = "default_direction")]
     pub direction: String,
@@ -119,10 +90,6 @@ pub struct QosQueueConfig {
 
     /// Pipe this queue is attached to.
     pub pipe_id: String,
-
-    /// Scheduling weight (1-100).
-    #[serde(default = "default_weight")]
-    pub weight: u16,
 
     /// Whether this queue is enabled.
     #[serde(default = "default_true")]
@@ -263,18 +230,6 @@ pub fn parse_direction(s: &str) -> Result<QosDirection, String> {
     }
 }
 
-/// Parse a scheduler string to a domain `QosScheduler`.
-pub fn parse_scheduler(s: &str) -> Result<QosScheduler, String> {
-    match s.to_lowercase().as_str() {
-        "fifo" => Ok(QosScheduler::Fifo),
-        "wf2q" | "wf2q+" | "wfq" => Ok(QosScheduler::Wf2q),
-        "fq_codel" | "fqcodel" | "codel" => Ok(QosScheduler::FqCodel),
-        _ => Err(format!(
-            "invalid scheduler: '{s}' (expected fifo, wf2q, or fq_codel)"
-        )),
-    }
-}
-
 /// Parse a protocol string to a protocol number.
 fn parse_protocol_number(s: &str) -> Result<u8, String> {
     match s.to_lowercase().as_str() {
@@ -293,13 +248,6 @@ fn parse_protocol_number(s: &str) -> Result<u8, String> {
 impl QosSectionConfig {
     /// Validate all pipes, queues, classifiers, and referential integrity.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        // Validate scheduler
-        parse_scheduler(&self.scheduler).map_err(|msg| ConfigError::InvalidValue {
-            field: "qos.scheduler".to_string(),
-            value: self.scheduler.clone(),
-            expected: msg,
-        })?;
-
         // Validate pipe count
         super::common::check_limit("qos.pipes", self.pipes.len(), MAX_QOS_PIPES)?;
         super::common::check_limit("qos.queues", self.queues.len(), MAX_QOS_QUEUES)?;
@@ -403,15 +351,6 @@ impl QosSectionConfig {
             .map(|c| c.to_domain_classifier(group_bits))
             .collect()
     }
-
-    /// Parse the configured scheduler string into its domain `QosScheduler`.
-    pub fn to_domain_scheduler(&self) -> Result<QosScheduler, ConfigError> {
-        parse_scheduler(&self.scheduler).map_err(|msg| ConfigError::InvalidValue {
-            field: "qos.scheduler".to_string(),
-            value: self.scheduler.clone(),
-            expected: msg,
-        })
-    }
 }
 
 // ── Pipe validation & conversion ────────────────────────────────────
@@ -488,7 +427,6 @@ impl QosPipeConfig {
             burst_bytes,
             delay_ms: self.delay,
             loss_pct: self.loss,
-            priority: self.priority,
             direction,
             enabled: self.enabled,
             group_mask: super::parse_group_mask(&self.interfaces, group_bits).map_err(
@@ -521,13 +459,6 @@ impl QosQueueConfig {
             });
         }
 
-        if self.weight == 0 || self.weight > 100 {
-            return Err(ConfigError::Validation {
-                field: format!("{prefix}.weight"),
-                message: format!("weight must be 1-100, got {}", self.weight),
-            });
-        }
-
         Ok(())
     }
 
@@ -535,7 +466,6 @@ impl QosQueueConfig {
         Ok(QosQueue {
             id: self.id.clone(),
             pipe_id: self.pipe_id.clone(),
-            weight: self.weight,
             enabled: self.enabled,
         })
     }
@@ -670,7 +600,6 @@ mod tests {
     fn default_config() {
         let cfg = QosSectionConfig::default();
         assert!(!cfg.enabled);
-        assert_eq!(cfg.scheduler, "fifo");
         assert!(cfg.pipes.is_empty());
         assert!(cfg.queues.is_empty());
         assert!(cfg.classifiers.is_empty());
@@ -784,26 +713,6 @@ mod tests {
 
     // ── Scheduler parsing ───────────────────────────────────────────
 
-    #[test]
-    fn parse_scheduler_valid() {
-        assert_eq!(parse_scheduler("fifo").unwrap(), QosScheduler::Fifo);
-        assert_eq!(parse_scheduler("wf2q").unwrap(), QosScheduler::Wf2q);
-        assert_eq!(parse_scheduler("fq_codel").unwrap(), QosScheduler::FqCodel);
-        assert_eq!(parse_scheduler("wf2q+").unwrap(), QosScheduler::Wf2q);
-        assert_eq!(parse_scheduler("fqcodel").unwrap(), QosScheduler::FqCodel);
-        assert_eq!(parse_scheduler("codel").unwrap(), QosScheduler::FqCodel);
-    }
-
-    #[test]
-    fn parse_scheduler_case_insensitive() {
-        assert_eq!(parse_scheduler("FIFO").unwrap(), QosScheduler::Fifo);
-    }
-
-    #[test]
-    fn parse_scheduler_invalid() {
-        assert!(parse_scheduler("priority").is_err());
-    }
-
     // ── Pipe validation ─────────────────────────────────────────────
 
     fn valid_pipe_yaml() -> QosPipeConfig {
@@ -875,7 +784,6 @@ direction: egress
             r"
 id: q-1
 pipe_id: pipe-1
-weight: 50
 ",
         )
         .unwrap()
@@ -897,20 +805,6 @@ weight: 50
     fn queue_validate_empty_pipe_id() {
         let mut q = valid_queue_yaml();
         q.pipe_id = String::new();
-        assert!(q.validate(0).is_err());
-    }
-
-    #[test]
-    fn queue_validate_weight_zero() {
-        let mut q = valid_queue_yaml();
-        q.weight = 0;
-        assert!(q.validate(0).is_err());
-    }
-
-    #[test]
-    fn queue_validate_weight_over_100() {
-        let mut q = valid_queue_yaml();
-        q.weight = 101;
         assert!(q.validate(0).is_err());
     }
 
@@ -983,7 +877,6 @@ match_rule:
         serde_yaml_ng::from_str(
             r"
 enabled: true
-scheduler: fifo
 pipes:
   - id: pipe-1
     bandwidth: 100mbps
@@ -1005,13 +898,6 @@ classifiers:
     #[test]
     fn section_validate_ok() {
         valid_section_yaml().validate().unwrap();
-    }
-
-    #[test]
-    fn section_validate_invalid_scheduler() {
-        let mut cfg = valid_section_yaml();
-        cfg.scheduler = "random".to_string();
-        assert!(cfg.validate().is_err());
     }
 
     #[test]
@@ -1072,7 +958,6 @@ direction: both
         assert_eq!(domain.delay_ms, 20);
         assert!((domain.loss_pct - 1.5).abs() < f32::EPSILON);
         assert_eq!(domain.burst_bytes, 1_048_576);
-        assert_eq!(domain.priority, 5);
         assert_eq!(domain.direction, QosDirection::Both);
         assert!(domain.enabled);
     }
@@ -1083,7 +968,6 @@ direction: both
             r"
 id: q-test
 pipe_id: pipe-1
-weight: 75
 ",
         )
         .unwrap();
@@ -1091,7 +975,6 @@ weight: 75
         let domain = q.to_domain_queue().unwrap();
         assert_eq!(domain.id, "q-test");
         assert_eq!(domain.pipe_id, "pipe-1");
-        assert_eq!(domain.weight, 75);
         assert!(domain.enabled);
     }
 
@@ -1200,7 +1083,6 @@ bandwidth: 100mbps
         assert_eq!(pipe.delay, 0);
         assert!(pipe.loss.abs() < f32::EPSILON);
         assert_eq!(pipe.burst, "64kb");
-        assert_eq!(pipe.priority, 0);
         assert_eq!(pipe.direction, "egress");
         assert!(pipe.enabled);
     }
@@ -1216,7 +1098,6 @@ pipe_id: pipe-1
 ",
         )
         .unwrap();
-        assert_eq!(q.weight, 100);
         assert!(q.enabled);
     }
 }

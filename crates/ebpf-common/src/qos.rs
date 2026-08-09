@@ -93,20 +93,19 @@ pub const fn qos_direction_matches(direction: u8, is_ingress: bool) -> bool {
 
 /// `QoS` queue configuration written by userspace, read by eBPF.
 ///
-/// Each queue is attached to a pipe and has a scheduling weight.
+/// A queue names the pipe that shapes the traffic reaching it. Shaping itself
+/// lives entirely on the pipe, so the queue carries no scheduling parameters.
 ///
-/// Size: 8 bytes.
+/// Size: 4 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct QosQueueConfig {
     /// Pipe this queue is attached to.
     pub pipe_id: u8,
-    pub _padding1: u8,
-    /// Scheduling weight for `WF2Q+` (1-100).
-    pub weight: u16,
     /// Whether this queue is enabled (1) or disabled (0).
     pub enabled: u8,
-    pub _padding2: [u8; 3],
+    /// Explicit trailing padding to reach 4-byte alignment.
+    pub _padding: [u8; 2],
 }
 
 /// Key for the `QoS` classifier `HashMap`.
@@ -139,7 +138,7 @@ pub struct QosClassifierKey {
 
 /// Value for the `QoS` classifier `HashMap`.
 ///
-/// Maps a classified flow to a queue and priority.
+/// Maps a classified flow to the queue that carries it.
 ///
 /// Size: 12 bytes.
 #[repr(C)]
@@ -147,9 +146,8 @@ pub struct QosClassifierKey {
 pub struct QosClassifierValue {
     /// Queue ID this flow is assigned to.
     pub queue_id: u8,
-    /// Priority within the queue (lower = higher priority).
-    pub priority: u8,
-    pub _padding: [u8; 2],
+    /// Explicit padding before the 4-byte-aligned fields below.
+    pub _padding: [u8; 3],
     /// Interface group bitmask (0 = floating/all interfaces).
     /// Bits 0-30: group membership, bit 31: invert flag.
     pub group_mask: u32,
@@ -211,12 +209,12 @@ mod tests {
 
     #[test]
     fn qos_queue_config_size() {
-        assert_eq!(mem::size_of::<QosQueueConfig>(), 8);
+        assert_eq!(mem::size_of::<QosQueueConfig>(), 4);
     }
 
     #[test]
     fn qos_queue_config_alignment() {
-        assert_eq!(mem::align_of::<QosQueueConfig>(), 2);
+        assert_eq!(mem::align_of::<QosQueueConfig>(), 1);
     }
 
     #[test]
@@ -294,10 +292,8 @@ mod tests {
     #[test]
     fn qos_queue_config_field_offsets() {
         assert_eq!(mem::offset_of!(QosQueueConfig, pipe_id), 0);
-        assert_eq!(mem::offset_of!(QosQueueConfig, _padding1), 1);
-        assert_eq!(mem::offset_of!(QosQueueConfig, weight), 2);
-        assert_eq!(mem::offset_of!(QosQueueConfig, enabled), 4);
-        assert_eq!(mem::offset_of!(QosQueueConfig, _padding2), 5);
+        assert_eq!(mem::offset_of!(QosQueueConfig, enabled), 1);
+        assert_eq!(mem::offset_of!(QosQueueConfig, _padding), 2);
     }
 
     #[test]
@@ -314,8 +310,7 @@ mod tests {
     #[test]
     fn qos_classifier_value_field_offsets() {
         assert_eq!(mem::offset_of!(QosClassifierValue, queue_id), 0);
-        assert_eq!(mem::offset_of!(QosClassifierValue, priority), 1);
-        assert_eq!(mem::offset_of!(QosClassifierValue, _padding), 2);
+        assert_eq!(mem::offset_of!(QosClassifierValue, _padding), 1);
         assert_eq!(mem::offset_of!(QosClassifierValue, group_mask), 4);
         assert_eq!(mem::offset_of!(QosClassifierValue, tenant_id), 8);
     }

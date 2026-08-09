@@ -81,10 +81,8 @@ impl QosMapManager {
     fn queue_to_ebpf(queue: &QosQueue, pipe_index: u8) -> QosQueueConfig {
         QosQueueConfig {
             pipe_id: pipe_index,
-            _padding1: 0,
-            weight: queue.weight.min(100),
             enabled: u8::from(queue.enabled),
-            _padding2: [0; 3],
+            _padding: [0; 2],
         }
     }
 
@@ -117,9 +115,7 @@ impl QosMapManager {
         };
         let value = QosClassifierValue {
             queue_id: queue_index,
-            #[allow(clippy::cast_possible_truncation)]
-            priority: cls.priority.min(255) as u8,
-            _padding: [0; 2],
+            _padding: [0; 3],
             group_mask: cls.group_mask,
             tenant_id: 0,
         };
@@ -216,10 +212,8 @@ impl QosMapManager {
     fn clear_queues(&mut self, count: u32) {
         let zero = QosQueueConfig {
             pipe_id: 0,
-            _padding1: 0,
-            weight: 0,
             enabled: 0,
-            _padding2: [0; 3],
+            _padding: [0; 2],
         };
         for i in 0..count {
             let _ = self.queue_config.set(i, zero, 0);
@@ -369,7 +363,6 @@ mod tests {
             burst_bytes: 1_000_000,
             delay_ms: 0,
             loss_pct: 0.0,
-            priority: 0,
             direction: domain::qos::entity::QosDirection::Egress,
             enabled: true,
             group_mask: 0,
@@ -390,7 +383,6 @@ mod tests {
             burst_bytes: 0,
             delay_ms: 0,
             loss_pct: 0.0,
-            priority: 0,
             direction: domain::qos::entity::QosDirection::Egress,
             enabled: true,
             group_mask: 0,
@@ -413,7 +405,6 @@ mod tests {
                 burst_bytes: 64_000,
                 delay_ms: 0,
                 loss_pct: 0.0,
-                priority: 0,
                 direction,
                 enabled: true,
                 group_mask: 0,
@@ -429,26 +420,23 @@ mod tests {
         let queue = QosQueue {
             id: "q-1".to_string(),
             pipe_id: "p-1".to_string(),
-            weight: 50,
             enabled: true,
         };
         let config = QosMapManager::queue_to_ebpf(&queue, 3);
         assert_eq!(config.pipe_id, 3);
-        assert_eq!(config.weight, 50);
         assert_eq!(config.enabled, 1);
     }
 
     #[test]
-    fn queue_to_ebpf_weight_clamped() {
+    fn a_disabled_queue_reaches_the_map_disabled() {
         use domain::qos::entity::QosQueue;
         let queue = QosQueue {
             id: "q-2".to_string(),
             pipe_id: "p-1".to_string(),
-            weight: 200,
-            enabled: true,
+            enabled: false,
         };
         let config = QosMapManager::queue_to_ebpf(&queue, 0);
-        assert_eq!(config.weight, 100);
+        assert_eq!(config.enabled, 0);
     }
 
     #[test]
@@ -470,7 +458,6 @@ mod tests {
         assert_eq!(key.dscp, 0);
         assert_eq!(key.vlan_id, VLAN_ANY);
         assert_eq!(value.queue_id, 2);
-        assert_eq!(value.priority, 100);
     }
 
     #[test]
@@ -501,8 +488,6 @@ mod tests {
         // Some(0) is untagged-only, not the wildcard.
         assert_eq!(key.vlan_id, 0);
         assert_eq!(value.queue_id, 0);
-        // priority clamped to u8
-        assert_eq!(value.priority, 255);
     }
 
     fn classifier_on_port(id: &str, queue_id: &str, dst_port: u16, priority: u32) -> QosClassifier {
@@ -523,7 +508,6 @@ mod tests {
         QosQueue {
             id: id.to_string(),
             pipe_id: "p-1".to_string(),
-            weight: 50,
             enabled: true,
         }
     }

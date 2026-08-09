@@ -2247,9 +2247,6 @@ pub async fn run(
                     }
                     {
                         let mut svc = qos_svc.write().await;
-                        if let Ok(scheduler) = config.qos_scheduler() {
-                            svc.set_scheduler(scheduler);
-                        }
                         // Bind the eBPF maps, then resync config so the just-wired
                         // maps reflect the pipes/queues/classifiers from config.
                         svc.set_map_port(Box::new(qos_mgr));

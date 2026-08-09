@@ -20,7 +20,6 @@ use super::validation::{MAX_ID_LENGTH, validate_string_length};
 #[derive(Serialize, ToSchema)]
 pub struct QosStatusResponse {
     pub enabled: bool,
-    pub scheduler: String,
     pub pipe_count: usize,
     pub queue_count: usize,
     pub classifier_count: usize,
@@ -42,7 +41,7 @@ pub struct QosPipeResponse {
 pub struct QosQueueResponse {
     pub id: String,
     pub pipe_id: String,
-    pub weight: u32,
+    pub enabled: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -93,12 +92,6 @@ fn default_direction() -> String {
 pub struct CreateQosQueueRequest {
     pub id: String,
     pub pipe_id: String,
-    #[serde(default = "default_weight")]
-    pub weight: u32,
-}
-
-fn default_weight() -> u32 {
-    50
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -155,7 +148,7 @@ impl QosQueueResponse {
         Self {
             id: queue.id.clone(),
             pipe_id: queue.pipe_id.clone(),
-            weight: u32::from(queue.weight),
+            enabled: queue.enabled,
         }
     }
 }
@@ -201,7 +194,6 @@ pub async fn get_qos_status(
     let svc = svc.read().await;
     Ok(Json(QosStatusResponse {
         enabled: svc.enabled(),
-        scheduler: svc.scheduler().as_str().to_string(),
         pipe_count: svc.pipes().len(),
         queue_count: svc.queues().len(),
         classifier_count: svc.classifiers().len(),
@@ -289,7 +281,6 @@ pub async fn create_qos_pipe(
         burst_bytes: req.burst_bytes,
         delay_ms: req.delay_ms,
         loss_pct: req.loss_pct,
-        priority: 0,
         direction,
         enabled: true,
         group_mask: 0,
@@ -398,7 +389,6 @@ pub async fn create_qos_queue(
     let queue = QosQueue {
         id: req.id,
         pipe_id: req.pipe_id,
-        weight: u16::try_from(req.weight.min(u32::from(u16::MAX))).unwrap_or(u16::MAX),
         enabled: true,
     };
 
@@ -582,7 +572,6 @@ mod tests {
             burst_bytes: 125_000,
             delay_ms: 0,
             loss_pct: 0.0,
-            priority: 0,
             direction: QosDirection::Egress,
             enabled: true,
             group_mask: 0,
@@ -601,13 +590,12 @@ mod tests {
         let queue = QosQueue {
             id: "q-1".to_string(),
             pipe_id: "p-1".to_string(),
-            weight: 50,
             enabled: true,
         };
         let resp = QosQueueResponse::from_domain(&queue);
         assert_eq!(resp.id, "q-1");
         assert_eq!(resp.pipe_id, "p-1");
-        assert_eq!(resp.weight, 50);
+        assert!(resp.enabled);
     }
 
     #[test]
@@ -661,12 +649,12 @@ mod tests {
         let resp = QosQueueResponse {
             id: "q-1".to_string(),
             pipe_id: "p-1".to_string(),
-            weight: 50,
+            enabled: true,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "q-1");
         assert_eq!(json["pipe_id"], "p-1");
-        assert_eq!(json["weight"], 50);
+        assert!(json["enabled"].as_bool().unwrap());
     }
 
     #[test]
@@ -696,14 +684,12 @@ mod tests {
     fn status_response_serialization() {
         let resp = QosStatusResponse {
             enabled: true,
-            scheduler: "fifo".to_string(),
             pipe_count: 2,
             queue_count: 4,
             classifier_count: 8,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["enabled"], true);
-        assert_eq!(json["scheduler"], "fifo");
         assert_eq!(json["pipe_count"], 2);
         assert_eq!(json["queue_count"], 4);
         assert_eq!(json["classifier_count"], 8);

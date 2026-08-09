@@ -501,7 +501,6 @@ pub struct DdosPolicyResponse {
 #[derive(Deserialize, Serialize)]
 pub struct QosStatusResponse {
     pub enabled: bool,
-    pub scheduler: String,
     pub pipe_count: usize,
     pub queue_count: usize,
     pub classifier_count: usize,
@@ -522,7 +521,7 @@ pub struct QosPipeResponse {
 pub struct QosQueueResponse {
     pub id: String,
     pub pipe_id: String,
-    pub weight: u32,
+    pub enabled: bool,
 }
 
 #[derive(Deserialize, Serialize)]

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use domain::common::error::DomainError;
 use domain::qos::engine::QosEngine;
-use domain::qos::entity::{QosClassifier, QosPipe, QosQueue, QosScheduler};
+use domain::qos::entity::{QosClassifier, QosPipe, QosQueue};
 use ports::secondary::metrics_port::MetricsPort;
 use ports::secondary::qos_map_port::QosMapPort;
 
@@ -15,7 +15,6 @@ pub struct QosAppService {
     map_port: Option<Box<dyn QosMapPort + Send>>,
     metrics: Arc<dyn MetricsPort>,
     enabled: bool,
-    scheduler: QosScheduler,
 }
 
 impl QosAppService {
@@ -25,7 +24,6 @@ impl QosAppService {
             map_port: None,
             metrics,
             enabled: false,
-            scheduler: QosScheduler::default(),
         }
     }
 
@@ -49,17 +47,6 @@ impl QosAppService {
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
         tracing::info!(enabled, "qos service toggled");
-    }
-
-    /// Return the current scheduler type.
-    pub fn scheduler(&self) -> &QosScheduler {
-        &self.scheduler
-    }
-
-    /// Set the scheduler type.
-    pub fn set_scheduler(&mut self, scheduler: QosScheduler) {
-        self.scheduler = scheduler;
-        tracing::info!(?scheduler, "qos scheduler updated");
     }
 
     // ── Pipe operations ──────────────────────────────────────────────
@@ -217,18 +204,16 @@ mod tests {
             burst_bytes: rate_bps / 8,
             delay_ms: 0,
             loss_pct: 0.0,
-            priority: 0,
             direction: QosDirection::Egress,
             enabled: true,
             group_mask: 0,
         }
     }
 
-    fn make_queue(id: &str, pipe_id: &str, weight: u16) -> QosQueue {
+    fn make_queue(id: &str, pipe_id: &str) -> QosQueue {
         QosQueue {
             id: id.to_string(),
             pipe_id: pipe_id.to_string(),
-            weight,
             enabled: true,
         }
     }
@@ -298,21 +283,21 @@ mod tests {
     #[test]
     fn add_queue_succeeds() {
         let mut svc = make_service();
-        assert!(svc.add_queue(make_queue("q-1", "pipe-1", 50)).is_ok());
+        assert!(svc.add_queue(make_queue("q-1", "pipe-1")).is_ok());
         assert_eq!(svc.queues().len(), 1);
     }
 
     #[test]
     fn add_duplicate_queue_fails() {
         let mut svc = make_service();
-        svc.add_queue(make_queue("q-1", "pipe-1", 50)).unwrap();
-        assert!(svc.add_queue(make_queue("q-1", "pipe-2", 100)).is_err());
+        svc.add_queue(make_queue("q-1", "pipe-1")).unwrap();
+        assert!(svc.add_queue(make_queue("q-1", "pipe-2")).is_err());
     }
 
     #[test]
     fn remove_queue_succeeds() {
         let mut svc = make_service();
-        svc.add_queue(make_queue("q-1", "pipe-1", 50)).unwrap();
+        svc.add_queue(make_queue("q-1", "pipe-1")).unwrap();
         assert!(svc.remove_queue("q-1").is_ok());
         assert_eq!(svc.queues().len(), 0);
     }
@@ -326,10 +311,10 @@ mod tests {
     #[test]
     fn reload_queues_replaces_all() {
         let mut svc = make_service();
-        svc.add_queue(make_queue("old", "pipe-1", 50)).unwrap();
+        svc.add_queue(make_queue("old", "pipe-1")).unwrap();
         svc.reload_queues(vec![
-            make_queue("new-1", "pipe-1", 50),
-            make_queue("new-2", "pipe-1", 100),
+            make_queue("new-1", "pipe-1"),
+            make_queue("new-2", "pipe-1"),
         ])
         .unwrap();
         assert_eq!(svc.queues().len(), 2);
@@ -338,7 +323,7 @@ mod tests {
     #[test]
     fn reload_queues_empty_clears() {
         let mut svc = make_service();
-        svc.add_queue(make_queue("q-1", "pipe-1", 50)).unwrap();
+        svc.add_queue(make_queue("q-1", "pipe-1")).unwrap();
         svc.reload_queues(vec![]).unwrap();
         assert_eq!(svc.queues().len(), 0);
     }
@@ -412,15 +397,5 @@ mod tests {
         assert!(svc.enabled());
         svc.set_enabled(false);
         assert!(!svc.enabled());
-    }
-
-    #[test]
-    fn scheduler_set_and_get() {
-        let mut svc = make_service();
-        let default = *svc.scheduler();
-        assert_eq!(default, QosScheduler::default());
-
-        svc.set_scheduler(QosScheduler::Wf2q);
-        assert_eq!(*svc.scheduler(), QosScheduler::Wf2q);
     }
 }

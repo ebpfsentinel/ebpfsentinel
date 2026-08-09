@@ -191,7 +191,6 @@ mod tests {
             burst_bytes: 125_000,
             delay_ms: 0,
             loss_pct: 0.0,
-            priority: 0,
             direction: QosDirection::Egress,
             enabled: true,
             group_mask: 0,
@@ -202,7 +201,6 @@ mod tests {
         QosQueue {
             id: id.to_string(),
             pipe_id: pipe_id.to_string(),
-            weight: 50,
             enabled: true,
         }
     }
