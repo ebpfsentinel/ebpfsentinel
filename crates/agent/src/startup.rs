@@ -2532,14 +2532,19 @@ pub async fn run(
             } else {
                 config.container.kubernetes.node_name.clone()
             };
+            // The watcher takes the selector the API server understands: the
+            // configured `k=v` pairs joined by commas, empty for every pod.
+            let label_selector = config.container.kubernetes.label_filter.join(",");
             let _watcher = adapters::container::spawn_pod_watcher(
                 client,
                 node_name.clone(),
+                label_selector.clone(),
                 cache,
                 metrics_handle,
             );
             info!(
                 node = %node_name,
+                labels = %label_selector,
                 "Kubernetes metadata enricher initialized"
             );
             Some(Arc::new(enricher) as _)

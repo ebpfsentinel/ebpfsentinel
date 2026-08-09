@@ -357,21 +357,28 @@ pub async fn try_build_client() -> Option<Client> {
 /// Spawn a background task that watches pods on the given node and keeps
 /// the [`PodCache`] in sync. The returned [`JoinHandle`] can be used to
 /// cancel the watcher (via the wrapping cancellation token in the agent).
+/// `label_selector` narrows the watch to the pods matching it (`k=v` pairs
+/// joined by commas, as the API server expects); empty watches every pod on
+/// the node.
 pub fn spawn_pod_watcher(
     client: Client,
     node_name: String,
+    label_selector: String,
     cache: Arc<PodCache>,
     metrics: Arc<K8sEnricherMetrics>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let pods: Api<Pod> = Api::all(client);
-        let config = if node_name.is_empty() {
-            watcher::Config::default()
-        } else {
-            watcher::Config::default().fields(&format!("spec.nodeName={node_name}"))
-        };
+        let mut config = watcher::Config::default();
+        if !node_name.is_empty() {
+            config = config.fields(&format!("spec.nodeName={node_name}"));
+        }
+        if !label_selector.is_empty() {
+            config = config.labels(&label_selector);
+        }
         info!(
             node = %node_name,
+            labels = %label_selector,
             "kubernetes pod watcher started"
         );
         let mut stream = watcher::watcher(pods, config).boxed();

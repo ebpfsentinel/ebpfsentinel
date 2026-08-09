@@ -40,8 +40,8 @@ container:
   # Kubernetes pod metadata enrichment (requires in-cluster SA).
   kubernetes:
     enabled: true
-    # node_name: auto          # Auto-detected from NODE_NAME env or hostname
-    label_filter: []           # Empty = enrich all pods
+    # node_name: ""           # Empty = EBPFSENTINEL_NODE_NAME, HOSTNAME, then kernel hostname
+    label_filter: []           # One key=value pair per entry; empty = every pod on the node
 
 # ── Example: DLP with pod context ─────────────────────────────────
 #
