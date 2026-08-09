@@ -390,6 +390,22 @@ impl AgentConfig {
             }
             validate_key_path(&self.agent.tls.cert_path, "agent.tls.cert_path")?;
             validate_key_path(&self.agent.tls.key_path, "agent.tls.key_path")?;
+
+            // The hybrid group only exists in TLS 1.3, and `require` offers
+            // nothing else, so a TLS 1.2 client would find no usable key
+            // exchange and fail the handshake. The pair reads like a
+            // compatibility fallback and is in fact a listener no 1.2 client
+            // can reach, which is worth refusing rather than discovering
+            // through handshake failures in production.
+            if self.agent.tls.allow_tls12 && self.agent.tls.pq_mode == PqMode::Require {
+                return Err(ConfigError::Validation {
+                    field: "agent.tls.allow_tls12".to_string(),
+                    message: "TLS 1.2 cannot be allowed while pq_mode is 'require': the hybrid \
+                              key exchange group is TLS 1.3 only, so no TLS 1.2 client could \
+                              complete a handshake"
+                        .to_string(),
+                });
+            }
         }
 
         // Validate JWT key path
@@ -3487,6 +3503,65 @@ agent:
 ";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.agent.tls.pq_mode, PqMode::Disable);
+    }
+
+    #[test]
+    fn tls12_is_refused_alongside_a_required_hybrid_key_exchange() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+  tls:
+    enabled: true
+    cert_path: /etc/tls/cert.pem
+    key_path: /etc/tls/key.pem
+    pq_mode: require
+    allow_tls12: true
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err();
+        let ConfigError::Validation { field, message } = err else {
+            panic!("expected a validation error, got: {err:?}");
+        };
+        assert_eq!(field, "agent.tls.allow_tls12");
+        assert!(message.contains("TLS 1.3 only"), "message: {message}");
+    }
+
+    #[test]
+    fn tls12_is_accepted_when_the_hybrid_key_exchange_is_only_preferred() {
+        // `prefer` and `disable` both leave a classical group on the wire,
+        // which a TLS 1.2 client can still negotiate.
+        for mode in ["prefer", "disable"] {
+            let yaml = format!(
+                "
+agent:
+  interfaces: [eth0]
+  tls:
+    enabled: true
+    cert_path: /etc/tls/cert.pem
+    key_path: /etc/tls/key.pem
+    pq_mode: {mode}
+    allow_tls12: true
+"
+            );
+            let config = AgentConfig::from_yaml(&yaml)
+                .unwrap_or_else(|e| panic!("pq_mode {mode} should accept TLS 1.2: {e}"));
+            assert!(config.agent.tls.allow_tls12);
+        }
+    }
+
+    #[test]
+    fn tls12_is_ignored_while_the_listener_is_off() {
+        // The pair only describes a listener, so it cannot be contradictory
+        // while there is no listener to reach.
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+  tls:
+    enabled: false
+    pq_mode: require
+    allow_tls12: true
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.agent.tls.pq_mode, PqMode::Require);
     }
 
     #[test]

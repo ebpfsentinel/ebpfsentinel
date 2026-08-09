@@ -44,4 +44,13 @@ agent:
     #   prefer  — Offer PQ hybrid first, fall back to classical (default)
     #   require — Reject clients without PQ support (gov/high-security)
     #   disable — Classical only (X25519, secp256r1)
+    #
+    # "require" is an inbound admission policy. Outbound connections keep the
+    # classical fallback under it, so requiring PQ of API clients does not make
+    # every CTI feed, webhook and identity provider without hybrid key exchange
+    # unreachable. Only "disable" removes the hybrid group in both directions.
+    #
+    # The hybrid group exists only in TLS 1.3, so "require" cannot be combined
+    # with allow_tls12: true — that pair leaves a TLS 1.2 client no usable key
+    # exchange, and it is refused when this file is read.
     pq_mode: prefer

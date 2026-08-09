@@ -67,6 +67,9 @@ agent:
   #   key_path: /etc/ebpfsentinel/tls/tls.key
   #   pq_mode: prefer        # prefer | require | disable (post-quantum hybrid X25519MLKEM768)
   #   allow_tls12: false      # default: TLS 1.3 only. Set true for legacy clients.
+  # The hybrid group is TLS 1.3 only, so allow_tls12 and pq_mode: require are
+  # refused together. "require" governs inbound clients; outbound connections
+  # keep the classical fallback so CTI feeds and webhooks stay reachable.
 
   # gRPC reflection — disabled by default (prevents unauthenticated API schema enumeration).
   # Enable only for development/debugging.
