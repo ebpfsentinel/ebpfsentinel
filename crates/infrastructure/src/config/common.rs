@@ -250,6 +250,25 @@ pub(super) fn check_limit(field: &str, count: usize, max: usize) -> Result<(), C
     Ok(())
 }
 
+/// Validate a content regex with the same limits, against the byte engine
+/// the detection path runs it on.
+///
+/// The two engines do not accept the same patterns: one that can match
+/// bytes which are not valid UTF-8, such as `(?-u)\xC0`, is legal here and
+/// refused by the text engine, so a content pattern has to be checked
+/// against the engine that will actually run it.
+pub(super) fn validate_bytes_regex(pattern: &str, field: &str) -> Result<(), ConfigError> {
+    regex::bytes::RegexBuilder::new(pattern)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .nest_limit(REGEX_NEST_LIMIT)
+        .build()
+        .map_err(|e| ConfigError::Validation {
+            field: field.to_string(),
+            message: format!("invalid regex: {e}"),
+        })?;
+    Ok(())
+}
+
 /// Validate a regex pattern with size and nesting limits.
 pub(super) fn validate_regex(pattern: &str, field: &str) -> Result<(), ConfigError> {
     regex::RegexBuilder::new(pattern)

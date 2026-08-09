@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use regex::Regex;
+use regex::bytes::Regex as BytesRegex;
 
 use crate::common::entity::RuleId;
 use crate::common::error::DomainError;
@@ -10,6 +11,7 @@ use ebpf_common::event::PacketEvent;
 
 use super::entity::{DomainMatchMode, IdsRule, SamplingMode, ThresholdType};
 use super::error::IdsError;
+use crate::common::entity::Protocol;
 use crate::dns::entity::DomainPattern;
 
 /// Internal state for per-rule, per-track-key threshold tracking.
@@ -48,7 +50,7 @@ impl CompiledDomainMatcher {
 #[derive(Debug, Clone)]
 pub struct IdsEngine {
     rules: Vec<IdsRule>,
-    compiled_patterns: Vec<Option<Regex>>,
+    compiled_patterns: Vec<Option<BytesRegex>>,
     compiled_domain_patterns: Vec<Option<CompiledDomainMatcher>>,
     sampling: SamplingMode,
     threshold_tracker: Arc<Mutex<HashMap<(RuleId, u64), ThresholdState>>>,
@@ -157,9 +159,35 @@ impl IdsEngine {
         self.rules.len()
     }
 
-    /// Access the compiled pattern for a rule at the given index.
-    pub fn compiled_pattern(&self, index: usize) -> Option<&Regex> {
+    /// Access the compiled content pattern for a rule at the given index.
+    pub fn compiled_pattern(&self, index: usize) -> Option<&BytesRegex> {
         self.compiled_patterns.get(index).and_then(Option::as_ref)
+    }
+
+    /// Return `true` if any loaded rule carries a content pattern.
+    ///
+    /// Lets the L7 path skip the whole content scan when no rule asks for
+    /// one, which is the common case.
+    #[must_use]
+    pub fn has_content_rules(&self) -> bool {
+        self.compiled_patterns.iter().any(Option::is_some)
+    }
+
+    /// The ports whose traffic has to be captured for the content rules to
+    /// have a payload to match against. A rule may name either leg, so both
+    /// are reported.
+    pub fn content_ports(&self) -> Vec<u16> {
+        let mut ports: Vec<u16> = self
+            .rules
+            .iter()
+            .zip(self.compiled_patterns.iter())
+            .filter(|(rule, pattern)| rule.enabled && pattern.is_some())
+            .flat_map(|(rule, _)| [rule.dst_port, rule.src_port])
+            .flatten()
+            .collect();
+        ports.sort_unstable();
+        ports.dedup();
+        ports
     }
 
     /// Set the sampling mode for event processing.
@@ -214,6 +242,15 @@ impl IdsEngine {
             return None;
         }
 
+        // A content rule is decided on the payload, which this event does not
+        // carry: the kernel classifier keys on port and protocol alone. Firing
+        // here would alert on every packet to the port and make the pattern
+        // decorative. The captured payload reaches the rule through
+        // `evaluate_payload_with_context` instead.
+        if self.compiled_patterns.get(idx).is_some_and(Option::is_some) {
+            return None;
+        }
+
         // If the rule has a domain pattern, check it against resolved domains
         if let Some(matcher) = self
             .compiled_domain_patterns
@@ -230,6 +267,49 @@ impl IdsEngine {
 
         // No domain pattern — standard IP+port match
         Some((idx, rule, None))
+    }
+
+    /// Match the captured payload of a TCP segment against the content
+    /// rules, returning the first rule whose pattern matches.
+    ///
+    /// `event` is the header of the captured segment: its ports select the
+    /// rules that apply, and its addresses feed the same sampling decision
+    /// the port-only path makes, so a sampled-out flow stays sampled out
+    /// whichever way its rules match.
+    ///
+    /// Only TCP carries a captured payload, so `udp` and `icmp` rules never
+    /// match here even when they name a matching port.
+    pub fn evaluate_payload_with_context(
+        &self,
+        event: &PacketEvent,
+        payload: &[u8],
+        src_country: Option<&str>,
+    ) -> Option<(usize, &IdsRule)> {
+        if payload.is_empty() {
+            return None;
+        }
+        if !self
+            .sampling
+            .should_process_with_country(event.src_ip(), event.dst_ip(), src_country)
+        {
+            return None;
+        }
+
+        self.rules
+            .iter()
+            .zip(self.compiled_patterns.iter())
+            .enumerate()
+            .find(|(_, (rule, pattern))| {
+                let Some(pattern) = pattern else {
+                    return false;
+                };
+                rule.enabled
+                    && matches!(rule.protocol, Protocol::Tcp | Protocol::Any)
+                    && (rule.dst_port == Some(event.dst_port)
+                        || rule.src_port == Some(event.src_port))
+                    && pattern.is_match(payload)
+            })
+            .map(|(idx, (rule, _))| (idx, rule))
     }
 
     /// Check whether an alert for the matched rule should be emitted
@@ -348,16 +428,20 @@ const REGEX_SIZE_LIMIT: usize = 10 * (1 << 20);
 /// Maximum regex nesting depth to prevent stack overflow.
 const REGEX_NEST_LIMIT: u32 = 200;
 
-/// Compile a pattern string to a `Regex`. Empty patterns return `None`.
-/// Invalid patterns return an error.
+/// Compile a content pattern into a byte regex. Empty patterns return
+/// `None`. Invalid patterns return an error.
+///
+/// The payload it runs against is raw bytes off the wire, not text, so the
+/// byte engine is the right one: it matches binary protocols and never has
+/// to reject or lossily rewrite a segment that is not valid UTF-8.
 ///
 /// Uses `RegexBuilder` with size and nesting limits to prevent
 /// denial-of-service via malicious patterns.
-fn compile_pattern(pattern: &str) -> Result<Option<Regex>, DomainError> {
+fn compile_pattern(pattern: &str) -> Result<Option<BytesRegex>, DomainError> {
     if pattern.is_empty() {
         return Ok(None);
     }
-    regex::RegexBuilder::new(pattern)
+    regex::bytes::RegexBuilder::new(pattern)
         .size_limit(REGEX_SIZE_LIMIT)
         .nest_limit(REGEX_NEST_LIMIT)
         .build()
@@ -608,8 +692,129 @@ mod tests {
             .add_rule(rule_with_pattern("ids-001", r"^SSH-2\.0"))
             .unwrap();
         let re = engine.compiled_pattern(0).unwrap();
-        assert!(re.is_match("SSH-2.0-OpenSSH_8.9"));
-        assert!(!re.is_match("HTTP/1.1 200 OK"));
+        assert!(re.is_match(b"SSH-2.0-OpenSSH_8.9"));
+        assert!(!re.is_match(b"HTTP/1.1 200 OK"));
+    }
+
+    // ── content rules ─────────────────────────────────────────────
+
+    #[test]
+    fn an_engine_without_a_pattern_has_no_content_rule() {
+        let mut engine = IdsEngine::new();
+        engine.add_rule(rule("ids-001")).unwrap();
+        assert!(!engine.has_content_rules());
+        assert!(engine.content_ports().is_empty());
+    }
+
+    #[test]
+    fn content_ports_cover_both_legs_a_rule_names() {
+        let mut engine = IdsEngine::new();
+        engine
+            .add_rule(IdsRule {
+                src_port: Some(2222),
+                ..rule_with_pattern("ids-001", "root")
+            })
+            .unwrap();
+        engine.add_rule(rule("ids-002")).unwrap();
+        assert!(engine.has_content_rules());
+        // 22 from the destination leg, 2222 from the source leg; the
+        // patternless rule contributes nothing.
+        assert_eq!(engine.content_ports(), vec![22, 2222]);
+    }
+
+    #[test]
+    fn a_disabled_content_rule_asks_for_no_capture() {
+        let mut engine = IdsEngine::new();
+        engine
+            .add_rule(IdsRule {
+                enabled: false,
+                ..rule_with_pattern("ids-001", "root")
+            })
+            .unwrap();
+        assert!(engine.content_ports().is_empty());
+    }
+
+    #[test]
+    fn a_content_rule_does_not_fire_on_the_port_alone() {
+        let mut engine = IdsEngine::new();
+        engine
+            .add_rule(rule_with_pattern("ids-001", "GET /admin"))
+            .unwrap();
+        assert!(engine.evaluate_event(&make_event(0)).is_none());
+    }
+
+    #[test]
+    fn a_content_rule_fires_on_the_payload_it_names() {
+        let mut engine = IdsEngine::new();
+        engine
+            .add_rule(rule_with_pattern("ids-001", "GET /admin"))
+            .unwrap();
+        let (idx, matched) = engine
+            .evaluate_payload_with_context(&make_event(0), b"GET /admin HTTP/1.1\r\n", None)
+            .unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(matched.id.0, "ids-001");
+    }
+
+    #[test]
+    fn a_content_rule_ignores_a_payload_it_does_not_name() {
+        let mut engine = IdsEngine::new();
+        engine
+            .add_rule(rule_with_pattern("ids-001", "GET /admin"))
+            .unwrap();
+        assert!(
+            engine
+                .evaluate_payload_with_context(&make_event(0), b"GET / HTTP/1.1\r\n", None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_content_rule_matches_a_payload_that_is_not_text() {
+        let mut engine = IdsEngine::new();
+        engine
+            // `(?-u)` drops Unicode mode, so `\x90` is the raw byte rather
+            // than the two bytes that encode U+0090.
+            .add_rule(rule_with_pattern("ids-001", r"(?-u)\x90{4}"))
+            .unwrap();
+        assert!(
+            engine
+                .evaluate_payload_with_context(&make_event(0), &[0x90, 0x90, 0x90, 0x90], None)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_content_rule_stays_on_the_ports_it_names() {
+        let mut engine = IdsEngine::new();
+        engine
+            .add_rule(rule_with_pattern("ids-001", "GET /admin"))
+            .unwrap();
+        let other_port = PacketEvent {
+            dst_port: 80,
+            ..make_event(0)
+        };
+        assert!(
+            engine
+                .evaluate_payload_with_context(&other_port, b"GET /admin HTTP/1.1\r\n", None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_udp_rule_never_matches_a_captured_payload() {
+        let mut engine = IdsEngine::new();
+        engine
+            .add_rule(IdsRule {
+                protocol: Protocol::Udp,
+                ..rule_with_pattern("ids-001", "GET /admin")
+            })
+            .unwrap();
+        assert!(
+            engine
+                .evaluate_payload_with_context(&make_event(0), b"GET /admin HTTP/1.1\r\n", None)
+                .is_none()
+        );
     }
 
     // ── evaluate_event ────────────────────────────────────────────

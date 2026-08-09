@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::common::{
     ConfigError, default_mode, default_true, parse_domain_mode, parse_protocol, parse_severity,
-    validate_regex,
+    validate_bytes_regex, validate_regex,
 };
 
 /// Maximum number of country codes in sampling config (ISO 3166-1 has ~249).
@@ -348,11 +348,22 @@ impl IdsRuleConfig {
             parse_domain_mode(mode)?;
         }
 
-        // Validate regex pattern if present (with ReDoS prevention limits)
+        // Validate the content pattern if present (with ReDoS prevention
+        // limits). A pattern is matched against a captured TCP payload, and
+        // only TCP is captured, so a rule on another protocol would carry a
+        // pattern that can never run.
         if let Some(ref pattern) = self.pattern
             && !pattern.is_empty()
         {
-            validate_regex(pattern, &format!("{prefix}.pattern"))?;
+            validate_bytes_regex(pattern, &format!("{prefix}.pattern"))?;
+            if !super::is_tcp_or_any(&self.protocol) {
+                return Err(ConfigError::Validation {
+                    field: format!("{prefix}.protocol"),
+                    message: "a rule carrying a pattern matches the captured payload, \
+                              which only TCP traffic provides; use tcp or any"
+                        .to_string(),
+                });
+            }
         }
 
         // Validate threshold if present

@@ -194,6 +194,25 @@ impl IdsAppService {
             .evaluate_event_with_context(event, dst_domains, src_country)
     }
 
+    /// Evaluate the captured payload of a TCP segment against the content
+    /// rules. Returns `(rule_index, rule)` on match.
+    pub fn evaluate_payload_with_context<'a>(
+        &'a self,
+        event: &PacketEvent,
+        payload: &[u8],
+        src_country: Option<&str>,
+    ) -> Option<(usize, &'a IdsRule)> {
+        self.engine
+            .evaluate_payload_with_context(event, payload, src_country)
+    }
+
+    /// Return `true` if any loaded rule carries a content pattern, so the
+    /// L7 path can skip the payload scan when none do.
+    #[must_use]
+    pub fn has_content_rules(&self) -> bool {
+        self.engine.has_content_rules()
+    }
+
     /// Check whether an alert should be emitted after a rule match,
     /// based on the rule's threshold config. Returns `true` to emit.
     pub fn check_threshold(

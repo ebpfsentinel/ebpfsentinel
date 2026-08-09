@@ -529,10 +529,11 @@ impl AgentConfig {
         }
 
         // Validate L7 inspection ports count against the kernel map capacity.
-        // Dedup first so a config with repeated ports does not trip the limit.
+        // Counted after the union with the content-rule ports, which share
+        // the same map, and deduped so repeated ports do not trip the limit.
+        check_limit("l7.ports", self.l7_ports().len(), MAX_L7_PORTS)?;
         let unique_l7_ports: std::collections::BTreeSet<u16> =
             self.l7.ports.iter().copied().collect();
-        check_limit("l7.ports", unique_l7_ports.len(), MAX_L7_PORTS)?;
 
         // The classifier only copies a payload to userspace when one end of
         // the conversation is a configured port, and that copy is the sole
@@ -992,11 +993,41 @@ impl AgentConfig {
     }
 
     /// Extract the unique set of L7-inspected ports for the eBPF `L7_PORTS` map.
+    ///
+    /// Carries the ports the content rules name as well as the ones L7
+    /// inspection lists: the classifier copies a payload only for a listed
+    /// port, and a content rule with no payload to read never matches.
     pub fn l7_ports(&self) -> Vec<u16> {
         let mut ports = self.l7.ports.clone();
+        ports.extend(self.content_rule_ports());
         ports.sort_unstable();
         ports.dedup();
         ports
+    }
+
+    /// The ports named by the enabled IDS and IPS rules that carry a content
+    /// pattern. Only TCP traffic is captured, so rules on another protocol
+    /// ask for nothing.
+    fn content_rule_ports(&self) -> Vec<u16> {
+        let ids_ports = self
+            .ids
+            .rules
+            .iter()
+            .filter(|rule| {
+                self.ids.enabled && rule.enabled && has_content_pattern(rule.pattern.as_ref())
+            })
+            .filter(|rule| is_tcp_or_any(&rule.protocol))
+            .flat_map(|rule| [rule.dst_port, rule.src_port]);
+        let ips_ports = self
+            .ips
+            .rules
+            .iter()
+            .filter(|rule| {
+                self.ips.enabled && rule.enabled && has_content_pattern(rule.pattern.as_ref())
+            })
+            .filter(|rule| is_tcp_or_any(&rule.protocol))
+            .map(|rule| rule.dst_port);
+        ids_ports.chain(ips_ports).flatten().collect()
     }
 
     /// Convert alerting route configs to domain `AlertRoute` vec.
@@ -1170,6 +1201,18 @@ pub fn parse_group_mask(
         mask |= GROUP_FLAG_INVERT;
     }
     Ok(mask)
+}
+
+/// Whether a rule's optional pattern actually asks for content matching.
+/// An absent key and an empty string both mean it does not.
+pub(super) fn has_content_pattern(pattern: Option<&String>) -> bool {
+    pattern.is_some_and(|p| !p.is_empty())
+}
+
+/// Whether a rule's protocol covers TCP, the only protocol whose payload
+/// the classifier captures.
+pub(super) fn is_tcp_or_any(protocol: &str) -> bool {
+    matches!(protocol, "tcp" | "any")
 }
 
 // ── Auto-capture ──────────────────────────────────────────────────
@@ -4208,5 +4251,157 @@ auto_response:
 ";
         let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
         assert!(err.contains("already taken"), "unexpected error: {err}");
+    }
+
+    // ── Content patterns and payload capture ───────────────────────
+
+    #[test]
+    fn a_content_rule_adds_the_ports_it_names_to_the_capture_set() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+l7:
+  enabled: true
+  ports: [80]
+ids:
+  enabled: true
+  rules:
+    - id: ids-shell
+      severity: high
+      protocol: tcp
+      dst_port: 2222
+      src_port: 22
+      pattern: 'uname -a'
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.l7_ports(), vec![22, 80, 2222]);
+    }
+
+    #[test]
+    fn an_ips_content_rule_adds_its_port_to_the_capture_set() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+ips:
+  enabled: true
+  rules:
+    - id: ips-shell
+      severity: high
+      protocol: tcp
+      dst_port: 8080
+      pattern: '/etc/passwd'
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.l7_ports(), vec![8080]);
+    }
+
+    #[test]
+    fn a_disabled_content_rule_asks_for_no_capture() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+ids:
+  enabled: true
+  rules:
+    - id: ids-shell
+      severity: high
+      protocol: tcp
+      dst_port: 2222
+      pattern: 'uname -a'
+      enabled: false
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert!(config.l7_ports().is_empty());
+    }
+
+    #[test]
+    fn a_rule_without_a_pattern_asks_for_no_capture() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+ids:
+  enabled: true
+  rules:
+    - id: ids-port
+      severity: high
+      protocol: tcp
+      dst_port: 2222
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert!(config.l7_ports().is_empty());
+    }
+
+    #[test]
+    fn a_content_rule_on_udp_is_rejected() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+ids:
+  enabled: true
+  rules:
+    - id: ids-udp
+      severity: high
+      protocol: udp
+      dst_port: 53
+      pattern: 'example'
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("only TCP traffic provides"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn an_ips_content_rule_without_a_port_is_rejected() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+ips:
+  enabled: true
+  rules:
+    - id: ips-noport
+      severity: high
+      protocol: tcp
+      pattern: 'example'
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("dst_port"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn a_content_rule_accepts_a_raw_byte_pattern() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+ids:
+  enabled: true
+  rules:
+    - id: ids-bytes
+      severity: high
+      protocol: tcp
+      dst_port: 445
+      pattern: '(?-u)\xffSMB'
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.l7_ports(), vec![445]);
+    }
+
+    #[test]
+    fn a_broken_content_pattern_is_rejected() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+ids:
+  enabled: true
+  rules:
+    - id: ids-broken
+      severity: high
+      protocol: tcp
+      dst_port: 445
+      pattern: '(unclosed'
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("pattern"), "unexpected error: {err}");
     }
 }

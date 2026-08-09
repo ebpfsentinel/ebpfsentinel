@@ -585,32 +585,57 @@ impl EventDispatcher {
         self.metrics.record_packet("ids", action);
 
         // Evaluate and threshold check (all methods are now &self via interior mutability)
+        let svc = self.ids_service.load();
+
+        // Reverse DNS lookup only when a domain-aware rule is loaded; otherwise
+        // skip the cache RwLock read + Vec<String> allocation on the hot path.
+        let dst_domains = if svc.has_domain_rules() {
+            self.dns_cache
+                .as_ref()
+                .map(|cache| {
+                    let dst_ip = addr_to_ip(event.dst_addr, event.is_ipv6());
+                    cache.lookup_ip(&dst_ip)
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Resolve source country for country-aware sampling and thresholds
+        let src_country = svc.resolve_country(event.src_addr, event.is_ipv6());
+
+        let Some((idx, rule, matched_domain)) =
+            svc.evaluate_event_with_context(&event, &dst_domains, src_country.as_deref())
+        else {
+            return;
+        };
+
+        self.report_ids_match(
+            &event,
+            &svc,
+            idx,
+            rule,
+            matched_domain,
+            src_country.as_deref(),
+        );
+    }
+
+    /// Turn a rule match into an audit record and an alert, applying the
+    /// service toggles and the rule threshold on the way.
+    ///
+    /// Shared by the two ways a rule can match: the kernel classifier event,
+    /// which decides on port and protocol, and the captured payload, which
+    /// the content rules match in userspace.
+    fn report_ids_match(
+        &self,
+        event: &PacketEvent,
+        svc: &IdsAppService,
+        idx: usize,
+        rule: &domain::ids::entity::IdsRule,
+        matched_domain: Option<String>,
+        src_country: Option<&str>,
+    ) {
         let (alert, detail, prevention) = {
-            let svc = self.ids_service.load();
-
-            // Reverse DNS lookup only when a domain-aware rule is loaded; otherwise
-            // skip the cache RwLock read + Vec<String> allocation on the hot path.
-            let dst_domains = if svc.has_domain_rules() {
-                self.dns_cache
-                    .as_ref()
-                    .map(|cache| {
-                        let dst_ip = addr_to_ip(event.dst_addr, event.is_ipv6());
-                        cache.lookup_ip(&dst_ip)
-                    })
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-
-            // Resolve source country for country-aware sampling and thresholds
-            let src_country = svc.resolve_country(event.src_addr, event.is_ipv6());
-
-            let Some((idx, rule, matched_domain)) =
-                svc.evaluate_event_with_context(&event, &dst_domains, src_country.as_deref())
-            else {
-                return;
-            };
-
             // Both rule sets are matched by the same kernel program, so the
             // IDS toggle gates detection rules only: a prevention rule keeps
             // firing while detection is muted, and answers to `ips.enabled`.
@@ -635,7 +660,7 @@ impl EventDispatcher {
             } else {
                 format!("IDS rule {} matched", rule.id)
             };
-            let mut alert = IdsAlert::from_event(&event, rule);
+            let mut alert = IdsAlert::from_event(event, rule);
             if matched_domain.is_some() {
                 self.metrics.record_ids_domain_match(&rule.id.0);
             }
@@ -649,7 +674,7 @@ impl EventDispatcher {
                     rule,
                     event.src_addr[0],
                     event.dst_addr[0],
-                    src_country.as_deref(),
+                    src_country,
                 )
             {
                 return; // Suppressed by threshold
@@ -690,7 +715,7 @@ impl EventDispatcher {
         if let Some(ref prevention) = prevention {
             self.emit_packet_security_alert_with_severity(
                 domain::alert::entity::PacketAlertComponent::Ips,
-                &event,
+                event,
                 &alert.rule_id.0,
                 prevention.mode.as_str(),
                 &detail,
@@ -700,7 +725,39 @@ impl EventDispatcher {
             self.metrics.record_event_dropped("alert_channel_full");
         }
 
-        self.feed_ips_counter(&event, prevention);
+        self.feed_ips_counter(event, prevention);
+    }
+
+    /// Match a captured TCP payload against the IDS and IPS content rules.
+    ///
+    /// A rule that carries a pattern is decided here rather than on the
+    /// kernel classifier event, which knows only the port and the protocol.
+    /// The capture itself is arranged at load time: the ports such rules
+    /// name are added to the set the kernel program copies payload for.
+    fn process_ids_content(&self, header: &PacketEvent, payload: &[u8]) {
+        let svc = self.ids_service.load();
+        if !svc.has_content_rules() {
+            return;
+        }
+
+        let src_country = svc.resolve_country(header.src_addr, header.is_ipv6());
+        let Some((idx, rule)) =
+            svc.evaluate_payload_with_context(header, payload, src_country.as_deref())
+        else {
+            return;
+        };
+
+        // The header the capture carries describes an L7 event: its
+        // `rule_id` holds the captured length, and its type says L7. The
+        // alert names an IDS rule, so it travels on an event that says so.
+        let event = PacketEvent {
+            event_type: EVENT_TYPE_IDS,
+            rule_id: idx as u32,
+            ..*header
+        };
+        self.metrics
+            .record_packet("ids", action_label(event.action));
+        self.report_ids_match(&event, &svc, idx, rule, None, src_country.as_deref());
     }
 
     /// Feed a rule match into the IPS auto-blacklist counter.
@@ -878,6 +935,8 @@ impl EventDispatcher {
     /// and the reassembler idle-flush path ([`flush_reassembled`](Self::flush_reassembled))
     /// so flushed partial buffers receive identical treatment.
     fn process_l7_payload(&self, header: &PacketEvent, payload: &[u8]) {
+        self.process_ids_content(header, payload);
+
         let protocol = detect_protocol(payload);
         let mut protocol_label = match protocol {
             DetectedProtocol::Http => "http",

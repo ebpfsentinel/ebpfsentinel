@@ -147,6 +147,30 @@ impl IpsRuleConfig {
             parse_domain_mode(mode)?;
         }
 
+        // A pattern is matched against a captured TCP payload, which the
+        // classifier copies only for the port the rule names.
+        if let Some(ref pattern) = self.pattern
+            && !pattern.is_empty()
+        {
+            super::common::validate_bytes_regex(pattern, &format!("{prefix}.pattern"))?;
+            if !super::is_tcp_or_any(&self.protocol) {
+                return Err(ConfigError::Validation {
+                    field: format!("{prefix}.protocol"),
+                    message: "a rule carrying a pattern matches the captured payload, \
+                              which only TCP traffic provides; use tcp or any"
+                        .to_string(),
+                });
+            }
+            if self.dst_port.is_none() {
+                return Err(ConfigError::Validation {
+                    field: format!("{prefix}.dst_port"),
+                    message: "a rule carrying a pattern must name the port whose \
+                              payload is captured"
+                        .to_string(),
+                });
+            }
+        }
+
         if let Some(ref threshold) = self.threshold {
             threshold.validate(&prefix)?;
         }
