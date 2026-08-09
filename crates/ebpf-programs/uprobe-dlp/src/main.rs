@@ -2,9 +2,11 @@
 #![no_main]
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_ktime_get_boot_ns, generated},
-    macros::{btf_map, uprobe, uretprobe},
     btf_maps::{LruHashMap, PerCpuArray, RingBuf},
+    helpers::{
+        bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_ktime_get_boot_ns, generated,
+    },
+    macros::{btf_map, uprobe, uretprobe},
     programs::{ProbeContext, RetProbeContext},
 };
 use core::ffi::c_void;
@@ -164,37 +166,23 @@ fn try_ssl_read_ret(ctx: &RetProbeContext) -> Result<(), ()> {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-/// Emit a `DlpEvent` to the EVENTS `RingBuf`.
+/// Emit a `DlpEvent` to the EVENTS `RingBuf`, picking a size tier:
+/// - `data_len <= 256` -> `DlpEventSmall` (280 bytes)
+/// - `data_len > 256`  -> `DlpEvent` (4120 bytes, full capture)
 ///
-/// # RingBuf fixed-size reservation tradeoff
+/// # Why two types rather than one runtime-sized reservation
 ///
-/// We always reserve `size_of::<DlpEvent>()` bytes, which includes a
-/// `DLP_MAX_EXCERPT` (4096) byte excerpt buffer, regardless of the actual
-/// `data_len`. This wastes ring buffer space when `data_len` is small, but
-/// is necessary because:
+/// `bpf_ringbuf_reserve` takes a size argument, and aya exposes it as
+/// `reserve_bytes`, so a per-payload reservation looks reachable. It is not:
+/// the verifier requires that size to be a compile-time constant, which is
+/// what `reserve_untyped::<T>` already gives us. Tiering by type is therefore
+/// the same mechanism with the bound stated in the type system, and adding
+/// tiers is the only way to cut waste further.
 ///
-/// 1. **Verifier constraints**: `RingBuf::reserve` in aya-ebpf requires a
-///    compile-time type parameter (`reserve::<T>`). The eBPF verifier
-///    needs a statically-known reservation size to validate memory access
-///    bounds on the returned pointer.
-///
-/// 2. **`bpf_probe_read_user` length**: the read length is clamped to
-///    `data_len`, capped at the excerpt size, so only the bytes the SSL
-///    payload actually holds are copied — never adjacent process memory
-///    past the buffer. The verifier accepts this runtime length because
-///    the clamp proves `copy_len <= ` the destination excerpt size.
-///
-/// 3. **No variable-size ring entries**: The BPF ring buffer does support
-///    `bpf_ringbuf_reserve` with a runtime size at the C API level, but
-///    the Rust/aya binding only exposes the typed `reserve::<T>()` API.
-///    Even with a raw helper call, the verifier would need to track the
-///    dynamic allocation size through all subsequent pointer arithmetic,
-///    which is fragile and version-dependent.
-///
-/// The `data_len` field in the event header tells userspace how many bytes
-/// Emit a DLP event with tiered RingBuf reservation:
-/// - `data_len ≤ 256` → `DlpEventSmall` (280 bytes, saves ~94%)
-/// - `data_len > 256`  → `DlpEvent` (4120 bytes, full capture)
+/// The copy length is separate from the reservation size: it is clamped to
+/// `data_len` capped at the tier's excerpt, so only bytes the SSL buffer holds
+/// are read, never adjacent process memory. `data_len` in the header tells
+/// userspace how many of the excerpt bytes are meaningful.
 #[inline(always)]
 fn emit_dlp_event(user_buf: *const u8, data_len: u32, direction: u8) {
     if data_len <= DLP_SMALL_EXCERPT as u32 {

@@ -24,7 +24,8 @@ use core::mem;
 use ebpf_common::{
     conntrack::{
         CT_SRC_COUNTER_MAX, CT_STATE_ESTABLISHED, CT_STATE_NEW, CT_STATE_RELATED, ConnTrackConfig,
-        NfConnOffsets, OVERLOAD_SET_ID, SRC_COUNTER_FLAG_OVERLOADED, SrcStateCounter,
+        IPS_CONFIRMED, IPS_DYING, IPS_EXPECTED, IPS_SEEN_REPLY, NfConnOffsets, OVERLOAD_SET_ID,
+        SRC_COUNTER_FLAG_OVERLOADED, SrcStateCounter,
     },
     event::{
         EVENT_TYPE_FIREWALL, FLAG_IPV6, FLAG_VLAN, META_FLAG_PRESENT, PacketEvent, XdpMetadata,
@@ -309,7 +310,7 @@ fn ringbuf_has_backpressure() -> bool {
 /// Get the interface group membership for the current packet's ingress interface.
 #[inline(always)]
 fn get_iface_groups(ctx: &XdpContext) -> u32 {
-    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    let ifindex = ctx.ingress_ifindex() as u32;
     match unsafe { INTERFACE_GROUPS.get(&ifindex) } {
         Some(&groups) => groups,
         None => 0, // no group membership = floating rules only
@@ -684,7 +685,7 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
 /// Resolve the security zone of the packet's ingress interface.
 #[inline(always)]
 fn zone_for_ingress(ctx: &XdpContext) -> u8 {
-    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    let ifindex = ctx.ingress_ifindex() as u32;
     match unsafe { ZONE_MAP.get(&ifindex) } {
         Some(&zone) => zone,
         None => ZONE_NONE,
@@ -741,7 +742,7 @@ fn egress_ifindex(
             (*params).__bindgen_anon_3.ipv4_src = src[0];
             (*params).__bindgen_anon_4.ipv4_dst = dst[0];
         }
-        (*params).ifindex = (*ctx.ctx).ingress_ifindex;
+        (*params).ifindex = ctx.ingress_ifindex() as u32;
     }
 
     let rc = unsafe {
@@ -1130,7 +1131,7 @@ fn process_firewall_v4(
     // kernel 6.17+ requires the bpf_loop callback_ctx (R3) to be a stack
     // frame pointer, not a map_value pointer.
     let iface_groups = get_iface_groups(ctx);
-    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    let ifindex = ctx.ingress_ifindex() as u32;
     let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) };
 
     let mut scan_ctx = RuleScanCtx {
@@ -1511,23 +1512,22 @@ fn read_kernel_ct_state(ct: *mut ebpf_helpers::kfuncs::nf_conn) -> u8 {
     };
     let base = ct as *const u8;
     let mut status: u64 = 0;
-    unsafe {
-        let _ = bpf_probe_read_kernel(
+    // A failed probe read leaves `status` at 0, which every branch below reads
+    // as "no IPS_* bit set" and so reports as a brand-new connection. That is a
+    // fabricated answer: a stale BTF offset or an unmapped page would silently
+    // downgrade an established flow to NEW and change which rules match. Report
+    // the unknown sentinel instead and let the caller decide.
+    let read = unsafe {
+        bpf_probe_read_kernel(
             &raw mut status as *mut core::ffi::c_void,
             core::mem::size_of::<u64>() as u32,
             base.add(offsets.status_offset as usize) as *const core::ffi::c_void,
-        );
+        )
+    };
+    if read < 0 {
+        return 0xFF;
     }
     // Map kernel IPS_* flags → domain CT_STATE_* constants.
-    // IPS_DYING (0x0200) → INVALID
-    // IPS_EXPECTED (0x0001) → RELATED
-    // IPS_CONFIRMED (0x0008) or IPS_SEEN_REPLY (0x0002) → ESTABLISHED
-    // otherwise → NEW
-    const IPS_EXPECTED: u64 = 0x0001;
-    const IPS_SEEN_REPLY: u64 = 0x0002;
-    const IPS_CONFIRMED: u64 = 0x0008;
-    const IPS_DYING: u64 = 0x0200;
-
     if status & IPS_DYING != 0 {
         3 // CT_STATE_INVALID
     } else if status & IPS_EXPECTED != 0 {
@@ -1682,7 +1682,7 @@ fn process_firewall_v6(
     // Stack-allocated context (kernel 6.17+ requires bpf_loop callback_ctx
     // to be a stack frame pointer, not a map_value pointer).
     let iface_groups = get_iface_groups(ctx);
-    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    let ifindex = ctx.ingress_ifindex() as u32;
     let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr) };
 
     let mut scan_ctx = RuleScanCtxV6 {

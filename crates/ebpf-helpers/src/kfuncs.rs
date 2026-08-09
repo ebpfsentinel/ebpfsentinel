@@ -1441,20 +1441,26 @@ pub unsafe fn skb_l7_probe(skb: *mut core::ffi::c_void, l7_offset: u32) -> Optio
     let mut magic: u32 = 0;
     if l7_offset < total {
         #[cfg(target_arch = "bpf")]
-        let _ = unsafe { bpf_dynptr_adjust(&raw const inner, l7_offset, total) };
+        let adjusted = unsafe { bpf_dynptr_adjust(&raw const inner, l7_offset, total) };
         #[cfg(not(target_arch = "bpf"))]
-        let _ = unsafe { host_stubs::bpf_dynptr_adjust(&raw const inner, l7_offset, total) };
+        let adjusted = unsafe { host_stubs::bpf_dynptr_adjust(&raw const inner, l7_offset, total) };
 
-        let mut buf = core::mem::MaybeUninit::<u32>::uninit();
-        #[cfg(target_arch = "bpf")]
-        let ptr = unsafe { bpf_dynptr_slice(&raw const inner, 0, buf.as_mut_ptr().cast(), 4) };
-        #[cfg(not(target_arch = "bpf"))]
-        let ptr = unsafe {
-            host_stubs::bpf_dynptr_slice(&raw const inner, 0, buf.as_mut_ptr().cast(), 4)
-        };
-        if !ptr.is_null() {
-            // SAFETY: `slice` populated 4 bytes at `ptr`.
-            magic = unsafe { core::ptr::read_unaligned(ptr.cast::<u32>()) };
+        // The slice below reads from the dynptr's *current* start, so an
+        // unadjusted dynptr yields the first four bytes of the L2 header and
+        // they would be reported as the L7 magic. Leave the magic at 0
+        // (unknown) rather than hand back a confident wrong answer.
+        if adjusted == 0 {
+            let mut buf = core::mem::MaybeUninit::<u32>::uninit();
+            #[cfg(target_arch = "bpf")]
+            let ptr = unsafe { bpf_dynptr_slice(&raw const inner, 0, buf.as_mut_ptr().cast(), 4) };
+            #[cfg(not(target_arch = "bpf"))]
+            let ptr = unsafe {
+                host_stubs::bpf_dynptr_slice(&raw const inner, 0, buf.as_mut_ptr().cast(), 4)
+            };
+            if !ptr.is_null() {
+                // SAFETY: `slice` populated 4 bytes at `ptr`.
+                magic = unsafe { core::ptr::read_unaligned(ptr.cast::<u32>()) };
+            }
         }
     }
     Some((total, magic))

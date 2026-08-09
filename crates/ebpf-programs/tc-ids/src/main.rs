@@ -730,20 +730,29 @@ fn emit_l7_small(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_ava
     let to_load = opaque_usize(to_load).clamp(1, SMALL_L7_PAYLOAD);
     if let Some(mut entry) = EVENTS.reserve_untyped::<L7EventSmall>(0) {
         let ptr = entry.as_mut_ptr();
-        unsafe {
+        let loaded = unsafe {
             fill_l7_header(ctx, &mut (*ptr).header, flow, to_load as u32);
             // `bpf_skb_load_bytes` marks its destination region initialized
             // for the verifier, so no separate memset of the payload is
             // needed — an explicit memset of a RingBuf reservation explodes
             // verifier state on the byte-by-byte `compiler_builtins` lowering.
-            let _ = bpf_skb_load_bytes(
+            bpf_skb_load_bytes(
                 ctx.skb.skb as *const _,
                 l7_offset as u32,
                 (*ptr).payload.as_mut_ptr() as *mut _,
                 to_load as u32,
-            );
+            )
+        };
+        // Skipping the memset is what makes a failed load dangerous: the
+        // payload would still hold whatever the ring last carried, and the
+        // header would advertise it as `to_load` bytes of this packet. Drop
+        // the record rather than hand userspace someone else's traffic.
+        if loaded < 0 {
+            entry.discard(0);
+            increment_metric(METRIC_ERRORS);
+        } else {
+            entry.submit(0);
         }
-        entry.submit(0);
     } else {
         increment_metric(METRIC_EVENTS_DROPPED);
     }
@@ -781,20 +790,27 @@ fn emit_l7_full(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_avai
     let to_load = opaque_usize(to_load).clamp(1, MAX_L7_PAYLOAD);
     if let Some(mut entry) = EVENTS.reserve_untyped::<L7EventBuf>(0) {
         let ptr = entry.as_mut_ptr();
-        unsafe {
+        let loaded = unsafe {
             fill_l7_header(ctx, &mut (*ptr).header, flow, to_load as u32);
             // `bpf_skb_load_bytes` marks its destination region initialized
             // for the verifier, so no separate memset of the payload is
             // needed — an explicit memset of a RingBuf reservation explodes
             // verifier state on the byte-by-byte `compiler_builtins` lowering.
-            let _ = bpf_skb_load_bytes(
+            bpf_skb_load_bytes(
                 ctx.skb.skb as *const _,
                 l7_offset as u32,
                 (*ptr).payload.as_mut_ptr() as *mut _,
                 to_load as u32,
-            );
+            )
+        };
+        // See `emit_l7_small`: with no memset, a failed load would ship the
+        // ring's previous contents to userspace under this packet's header.
+        if loaded < 0 {
+            entry.discard(0);
+            increment_metric(METRIC_ERRORS);
+        } else {
+            entry.submit(0);
         }
-        entry.submit(0);
     } else {
         increment_metric(METRIC_EVENTS_DROPPED);
     }

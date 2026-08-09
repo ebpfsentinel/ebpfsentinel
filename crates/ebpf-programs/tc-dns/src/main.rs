@@ -3,8 +3,8 @@
 
 use aya_ebpf::{
     bindings::TC_ACT_OK,
-    helpers::{bpf_get_current_cgroup_id, bpf_ktime_get_boot_ns},
     btf_maps::{PerCpuArray, RingBuf},
+    helpers::{bpf_get_current_cgroup_id, bpf_ktime_get_boot_ns},
     macros::{btf_map, classifier},
     programs::TcContext,
 };
@@ -13,7 +13,7 @@ use core::mem;
 use ebpf_common::dns::{
     DNS_DIRECTION_QUERY, DNS_DIRECTION_RESPONSE, DNS_MAX_PAYLOAD, DNS_METRIC_ERRORS,
     DNS_METRIC_EVENTS_DROPPED, DNS_METRIC_EVENTS_EMITTED, DNS_METRIC_PACKETS_INSPECTED,
-    DNS_METRIC_TOTAL_SEEN, DnsEvent, DnsEventBuf,
+    DNS_METRIC_TOTAL_SEEN, DNS_SMALL_PAYLOAD, DnsEvent, DnsEventBuf, DnsEventSmall,
 };
 use ebpf_common::event::{FLAG_IPV6, FLAG_TCP, FLAG_VLAN};
 use ebpf_helpers::net::{
@@ -245,14 +245,34 @@ fn dns_ringbuf_has_backpressure() -> bool {
     ebpf_helpers::ringbuf_has_backpressure!(DNS_EVENTS, DNS_BACKPRESSURE_THRESHOLD)
 }
 
-/// Emit a DnsEventBuf to the DNS_EVENTS RingBuf. Skips emission under
+/// Header fields shared by both event tiers, gathered once so the two
+/// reservation paths write the same header from the same values.
+struct DnsHeaderFields {
+    src_addr: [u32; 4],
+    dst_addr: [u32; 4],
+    payload_len: u16,
+    direction: u8,
+    flags: u8,
+    vlan_id: u16,
+}
+
+/// Emit a DNS record to the DNS_EVENTS RingBuf. Skips emission under
 /// backpressure (>75% full). Copies the DnsEvent header and up to
 /// DNS_MAX_PAYLOAD bytes of raw DNS payload from the packet.
 ///
-/// Calls `bpf_skb_load_bytes` directly with a compile-time constant
-/// length (`DNS_MAX_PAYLOAD`) so the kernel 6.17+ verifier sees a
-/// fixed-size read instead of the variable `[0, 511]` range that
-/// aya's `load_bytes()` wrapper produces.
+/// The reservation is tiered by captured length: a payload that fits in
+/// `DNS_SMALL_PAYLOAD` takes a 192-byte record instead of 576, which is the
+/// common case (a query carrying one name) and triples how many records the
+/// 256 KB ring holds before it drops. The two tiers are separate `#[repr(C)]`
+/// types rather than one runtime-sized reservation because `bpf_ringbuf_reserve`
+/// demands a size the verifier can see as constant; a tier per type gives it
+/// exactly that. Userspace is unaffected - the header is byte-identical and the
+/// reader already bounds the payload by `dns_payload_len` against the record it
+/// actually received.
+///
+/// `bpf_skb_load_bytes` is called directly rather than through aya's
+/// `load_bytes()` wrapper, whose variable `[0, len]` range the kernel 6.17+
+/// verifier rejects.
 #[inline(always)]
 fn emit_dns_event(
     ctx: &TcContext,
@@ -284,59 +304,163 @@ fn emit_dns_event(
         available
     };
 
+    let fields = DnsHeaderFields {
+        src_addr: *src_addr,
+        dst_addr: *dst_addr,
+        payload_len: payload_len as u16,
+        direction,
+        flags,
+        vlan_id,
+    };
+
     // bpf_skb_load_bytes handles fragmented packets natively (via
     // skb_header_pointer), so linearization is unnecessary.
-
+    //
     // RingBuf path (copy-based). TC programs are not sleepable, so the
     // sleepable arena-alloc kfunc is unavailable here.
-    if let Some(mut entry) = DNS_EVENTS.reserve(0) {
-        let ptr = entry.as_mut_ptr();
-        unsafe {
-            // Fill header
-            (*ptr).header.timestamp_ns = bpf_ktime_get_boot_ns();
-            (*ptr).header.src_addr = *src_addr;
-            (*ptr).header.dst_addr = *dst_addr;
-            (*ptr).header.dns_payload_len = payload_len as u16;
-            (*ptr).header.dns_payload_offset = DnsEvent::HEADER_SIZE;
-            (*ptr).header.direction = direction;
-            (*ptr).header.flags = flags;
-            (*ptr).header.vlan_id = vlan_id;
-            (*ptr).header._padding = [0; 8];
-            // Valid on egress queries where the current task owns the
-            // skb; 0 on ingress softirq (DNS responses).
-            (*ptr).header.cgroup_id = bpf_get_current_cgroup_id();
+    let emitted = if payload_len <= DNS_SMALL_PAYLOAD {
+        emit_dns_small(ctx, &fields, dns_offset, payload_len)
+    } else {
+        emit_dns_full(ctx, &fields, dns_offset, payload_len)
+    };
 
-            // Zero the payload buffer so bytes beyond the captured DNS
-            // payload are deterministic.
-            core::ptr::write_bytes((*ptr).payload.as_mut_ptr(), 0, DNS_MAX_PAYLOAD);
-
-            // Load exactly the bytes the packet carries (clamped to the
-            // buffer), not a fixed DNS_MAX_PAYLOAD. `bpf_skb_load_bytes` is
-            // all-or-nothing: a constant 512-byte read fails whenever the
-            // remaining skb is shorter — the common case for DNS — leaving
-            // the payload all-zero while `dns_payload_len` still advertises
-            // `available`. Loading the real length captures the query/answer.
-            //
-            // `payload_len` is already in `1..=DNS_MAX_PAYLOAD` (dns_offset <
-            // total_len, so `available >= 1`), but the RingBuf reserve above
-            // spills the register and the verifier loses the lower bound,
-            // rejecting the zero case ("R4 invalid zero-sized read") on
-            // kernel 6.17+. Route the value through a barrier then re-clamp
-            // so the `[1, DNS_MAX_PAYLOAD]` bound survives the spill/reload.
-            // The load always fits (dns_offset + load_len <= total_len =
-            // skb len), so it never fails on bounds.
-            let load_len = opaque_usize(payload_len).clamp(1, DNS_MAX_PAYLOAD);
-            let _ = bpf_skb_load_bytes(
-                ctx.skb.skb as *const _,
-                dns_offset as u32,
-                (*ptr).payload.as_mut_ptr() as *mut _,
-                load_len as u32,
-            );
-        }
-        entry.submit(0);
+    if emitted {
         increment_metric(DNS_METRIC_EVENTS_EMITTED);
     } else {
         increment_metric(DNS_METRIC_EVENTS_DROPPED);
+    }
+}
+
+/// Write the tier-independent header into a reserved record.
+///
+/// # Safety
+///
+/// `ptr` must point at a live ring-buffer reservation of at least
+/// `DnsEvent::HEADER_SIZE` bytes.
+#[inline(always)]
+unsafe fn write_dns_header(ptr: *mut DnsEvent, f: &DnsHeaderFields) {
+    unsafe {
+        (*ptr).timestamp_ns = bpf_ktime_get_boot_ns();
+        (*ptr).src_addr = f.src_addr;
+        (*ptr).dst_addr = f.dst_addr;
+        (*ptr).dns_payload_len = f.payload_len;
+        (*ptr).dns_payload_offset = DnsEvent::HEADER_SIZE;
+        (*ptr).direction = f.direction;
+        (*ptr).flags = f.flags;
+        (*ptr).vlan_id = f.vlan_id;
+        (*ptr)._padding = [0; 8];
+        // Valid on egress queries where the current task owns the skb; 0 on
+        // ingress softirq (DNS responses).
+        (*ptr).cgroup_id = bpf_get_current_cgroup_id();
+    }
+}
+
+/// Small tier (192 bytes): payloads up to `DNS_SMALL_PAYLOAD`.
+///
+/// `#[inline(never)]` gives each tier its own stack frame, which keeps the two
+/// reservation sizes from compounding into one function's verifier state.
+#[inline(never)]
+fn emit_dns_small(
+    ctx: &TcContext,
+    fields: &DnsHeaderFields,
+    dns_offset: usize,
+    payload_len: usize,
+) -> bool {
+    let Some(mut entry) = DNS_EVENTS.reserve_untyped::<DnsEventSmall>(0) else {
+        return false;
+    };
+    let ptr = entry.as_mut_ptr();
+    let loaded = unsafe {
+        write_dns_header(core::ptr::addr_of_mut!((*ptr).header), fields);
+        load_dns_payload::<DNS_SMALL_PAYLOAD>(
+            ctx,
+            (*ptr).payload.as_mut_ptr(),
+            dns_offset,
+            payload_len,
+        )
+    };
+    if !loaded {
+        entry.discard(0);
+        increment_metric(DNS_METRIC_ERRORS);
+        return false;
+    }
+    entry.submit(0);
+    true
+}
+
+/// Full tier (576 bytes): payloads above `DNS_SMALL_PAYLOAD`.
+#[inline(never)]
+fn emit_dns_full(
+    ctx: &TcContext,
+    fields: &DnsHeaderFields,
+    dns_offset: usize,
+    payload_len: usize,
+) -> bool {
+    let Some(mut entry) = DNS_EVENTS.reserve_untyped::<DnsEventBuf>(0) else {
+        return false;
+    };
+    let ptr = entry.as_mut_ptr();
+    let loaded = unsafe {
+        write_dns_header(core::ptr::addr_of_mut!((*ptr).header), fields);
+        load_dns_payload::<DNS_MAX_PAYLOAD>(
+            ctx,
+            (*ptr).payload.as_mut_ptr(),
+            dns_offset,
+            payload_len,
+        )
+    };
+    if !loaded {
+        entry.discard(0);
+        increment_metric(DNS_METRIC_ERRORS);
+        return false;
+    }
+    entry.submit(0);
+    true
+}
+
+/// Zero a tier's payload buffer and load the captured bytes into it.
+///
+/// Returns whether the load succeeded. A failure leaves the zeroed buffer
+/// behind, which the header would still advertise as `payload_len` bytes of
+/// DNS, so the caller drops the record instead of publishing a blank one.
+///
+/// # Safety
+///
+/// `dst` must point at a live reservation with at least `CAP` writable bytes.
+#[inline(always)]
+unsafe fn load_dns_payload<const CAP: usize>(
+    ctx: &TcContext,
+    dst: *mut u8,
+    dns_offset: usize,
+    payload_len: usize,
+) -> bool {
+    unsafe {
+        // Zero the payload buffer so bytes beyond the captured DNS payload are
+        // deterministic rather than whatever the ring last held.
+        core::ptr::write_bytes(dst, 0, CAP);
+
+        // Load exactly the bytes the packet carries (clamped to the buffer),
+        // not a fixed CAP. `bpf_skb_load_bytes` is all-or-nothing: a constant
+        // full-buffer read fails whenever the remaining skb is shorter — the
+        // common case for DNS — leaving the payload all-zero while
+        // `dns_payload_len` still advertises the real length. Loading the real
+        // length captures the query/answer.
+        //
+        // `payload_len` is already in `1..=CAP` (dns_offset < total_len, so
+        // `available >= 1`, and the caller picked the tier by that length), but
+        // the RingBuf reserve spills the register and the verifier loses the
+        // lower bound, rejecting the zero case ("R4 invalid zero-sized read")
+        // on kernel 6.17+. Route the value through a barrier then re-clamp so
+        // the `[1, CAP]` bound survives the spill/reload. The load always fits
+        // (dns_offset + load_len <= total_len = skb len), so it never fails on
+        // bounds.
+        let load_len = opaque_usize(payload_len).clamp(1, CAP);
+        bpf_skb_load_bytes(
+            ctx.skb.skb as *const _,
+            dns_offset as u32,
+            dst as *mut _,
+            load_len as u32,
+        ) >= 0
     }
 }
 

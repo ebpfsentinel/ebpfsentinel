@@ -47,7 +47,37 @@ pub const CT_METRIC_KFUNC_LOOKUPS: u32 = 9;
 pub const CT_METRIC_KFUNC_HITS: u32 = 10;
 /// Kernel netfilter CT lookup returned null (miss).
 pub const CT_METRIC_KFUNC_MISSES: u32 = 11;
-pub const CT_METRIC_COUNT: u32 = 12;
+/// Kernel CT entry carried no `IPS_*` state bit yet (unconfirmed, no reply).
+pub const CT_METRIC_KFUNC_STATE_NEW: u32 = 12;
+/// Kernel CT entry was confirmed or had seen a reply.
+pub const CT_METRIC_KFUNC_STATE_ESTABLISHED: u32 = 13;
+/// Kernel CT entry came from an expectation (`IPS_EXPECTED`).
+pub const CT_METRIC_KFUNC_STATE_RELATED: u32 = 14;
+/// Kernel CT entry was dying (`IPS_DYING`).
+pub const CT_METRIC_KFUNC_STATE_INVALID: u32 = 15;
+/// Kernel CT entry carried a non-zero `nf_conn.mark`, meaning some other
+/// netfilter policy on the host has tagged the flow.
+pub const CT_METRIC_KFUNC_MARKED: u32 = 16;
+/// `bpf_probe_read_kernel` of an `nf_conn` field failed. Non-zero here means
+/// the BTF offsets are stale for the running kernel and the state counters
+/// above are undercounting.
+pub const CT_METRIC_KFUNC_READ_ERRORS: u32 = 17;
+pub const CT_METRIC_COUNT: u32 = 18;
+
+// ── Kernel netfilter `nf_conn.status` bits ───────────────────────────
+//
+// Read out of a live `nf_conn` with `bpf_probe_read_kernel`, so these must
+// match the kernel's `enum ip_conntrack_status`. Only the bits the datapath
+// classifies on are listed.
+
+/// Entry was expected by a helper (an FTP data channel, for instance).
+pub const IPS_EXPECTED: u64 = 0x0001;
+/// Traffic has been seen in the reply direction.
+pub const IPS_SEEN_REPLY: u64 = 0x0002;
+/// Entry is confirmed and published in the kernel CT table.
+pub const IPS_CONFIRMED: u64 = 0x0008;
+/// Entry is being torn down.
+pub const IPS_DYING: u64 = 0x0200;
 
 // ── Connection states ────────────────────────────────────────────────
 

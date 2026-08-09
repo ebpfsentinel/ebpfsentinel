@@ -264,7 +264,7 @@ fn increment_ddos_metric(index: u32) {
 /// Get the interface group membership for the current packet's ingress interface.
 #[inline(always)]
 fn get_iface_groups(ctx: &XdpContext) -> u32 {
-    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    let ifindex = ctx.ingress_ifindex() as u32;
     match unsafe { INTERFACE_GROUPS.get(&ifindex) } {
         Some(&groups) => groups,
         None => 0,
@@ -473,7 +473,7 @@ fn process_ratelimit_v4(
 
     // Resolve the packet's tenant once; rate-limit config + buckets are
     // tenant-scoped with a fall back to the global (tenant 0) config.
-    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    let ifindex = ctx.ingress_ifindex() as u32;
     let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) };
 
     // ── Country-tier LPM lookup (before per-IP) ────────────────────
@@ -586,7 +586,7 @@ fn process_ratelimit_v6(
 
     // Resolve the packet's tenant once; rate-limit config + buckets are
     // tenant-scoped with a fall back to the global (tenant 0) config.
-    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    let ifindex = ctx.ingress_ifindex() as u32;
     let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr) };
 
     // ── Country-tier LPM lookup (IPv6, before per-IP) ──────────────

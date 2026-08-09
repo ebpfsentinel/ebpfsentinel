@@ -31,10 +31,58 @@ setup_file() {
 }
 
 teardown_file() {
+    _stop_stub_resolver
     stop_ebpf_agent 2>/dev/null || true
     destroy_test_netns 2>/dev/null || true
     rm -rf "${DATA_DIR:-/tmp/ebpfsentinel-test-data-dns-$$}"
     rm -f "${PREPARED_CONFIG:-}"
+}
+
+# _start_stub_resolver ANSWER_COUNT FIRST_IP — bind the stub responder inside
+# the test namespace, so queries leave the host and answers come back in on the
+# veth where tc-dns sits. The program attaches on ingress only, which is the
+# real deployment direction: the resolver is remote and its answers arrive.
+# Only responses carry answer records and only responses are parsed into the
+# cache, so no payload assertion is possible without one.
+_start_stub_resolver() {
+    local answers="$1" first_ip="$2"
+    _stop_stub_resolver
+    # `3>&-` matters: bats waits for FD 3 to close before finishing the run, and
+    # a daemon that inherits it hangs the whole suite after the last test.
+    setsid ip netns exec "${EBPF_TEST_NS}" \
+        python3 "${PROJECT_ROOT}/tests/integration/scripts/dns-stub-responder.py" \
+        "${EBPF_NS_IP}" "${answers}" "${first_ip}" \
+        < /dev/null > "${DATA_DIR}/stub-resolver.log" 2>&1 3>&- &
+    STUB_RESOLVER_PID=$!
+    # Give the socket a moment to bind before the first query goes out.
+    local i
+    for i in $(seq 1 20); do
+        if ip netns exec "${EBPF_TEST_NS}" ss -lun 2>/dev/null \
+            | grep -q "${EBPF_NS_IP}:53"; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "stub resolver did not bind ${EBPF_NS_IP}:53" >&2
+    cat "${DATA_DIR}/stub-resolver.log" >&2 || true
+    return 1
+}
+
+_stop_stub_resolver() {
+    if [ -n "${STUB_RESOLVER_PID:-}" ]; then
+        kill -9 "${STUB_RESOLVER_PID}" 2>/dev/null || true
+        unset STUB_RESOLVER_PID
+    fi
+    pkill -9 -f dns-stub-responder.py 2>/dev/null || true
+}
+
+# _cached_ips DOMAIN — the IP list the agent cached for a domain, one per line.
+# An empty result is a normal poll outcome, not a command failure.
+_cached_ips() {
+    local domain="$1"
+    api_get "/api/v1/dns/cache?domain=${domain}" 2>/dev/null \
+        | tr ',' '\n' \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' || true
 }
 
 # ── TC program attachment ────────────────────────────────────────
@@ -164,6 +212,80 @@ _dns_observed_metric() {
     after="$(_dns_observed_metric)"
     [ "${after:-0}" -gt "${before:-0}" ] || {
         echo "DNS observation counter did not grow under dnsperf load: ${before} -> ${after}" >&2
+        return 1
+    }
+}
+
+# ── Ring-buffer payload integrity ────────────────────────────────
+#
+# The kernel picks a ring-buffer record size from the captured payload length.
+# Both sizes carry the same header, so a tier chosen wrongly, or a payload
+# copied short, shows up as answers missing from the cache rather than as an
+# error anywhere. These two tests pin a response either side of the boundary.
+
+@test "a short DNS response is cached with its answer intact" {
+    require_tool dig
+    require_tool python3
+
+    _start_stub_resolver 1 203.0.113.7
+
+    local domain="tier-small.example.test"
+    dig +tries=1 +time=2 "@${EBPF_NS_IP}" "${domain}" A > /dev/null 2>&1 || true
+
+    local i ips=""
+    for i in $(seq 1 20); do
+        ips="$(_cached_ips "${domain}")"
+        [ -n "${ips}" ] && break
+        sleep 0.5
+    done
+
+    _stop_stub_resolver
+
+    [ -n "${ips}" ] || {
+        echo "no cache entry for ${domain}" >&2
+        echo "cache API says: $(api_get "/api/v1/dns/cache?domain=${domain}")" >&2
+        echo "responder log: $(cat "${DATA_DIR}/stub-resolver.log" 2>/dev/null)" >&2
+        return 1
+    }
+    echo "${ips}" | grep -qx "203.0.113.7" || {
+        echo "cached IPs for ${domain} lack the answered address: ${ips}" >&2
+        return 1
+    }
+}
+
+@test "a DNS response larger than the small record tier keeps every answer" {
+    require_tool dig
+    require_tool python3
+
+    # 20 A records put the response near 360 bytes, comfortably past the
+    # small tier and inside the full one.
+    _start_stub_resolver 20 203.0.113.7
+
+    local domain="tier-full.example.test"
+    dig +tries=1 +time=2 "@${EBPF_NS_IP}" "${domain}" A > /dev/null 2>&1 || true
+
+    local i ips=""
+    for i in $(seq 1 20); do
+        ips="$(_cached_ips "${domain}")"
+        [ -n "${ips}" ] && break
+        sleep 0.5
+    done
+
+    _stop_stub_resolver
+
+    [ -n "${ips}" ] || {
+        echo "no cache entry for ${domain}" >&2
+        echo "cache API says: $(api_get "/api/v1/dns/cache?domain=${domain}")" >&2
+        echo "responder log: $(cat "${DATA_DIR}/stub-resolver.log" 2>/dev/null)" >&2
+        return 1
+    }
+    # Every answer carries the same name, and the cache keeps one entry per
+    # domain, so the surviving address is whichever record was parsed last.
+    # That makes it the exact witness we want: the 20th answer starts ~340
+    # bytes into the payload, far past the small record's 128-byte payload.
+    # A short copy would leave an earlier address here, or nothing at all.
+    echo "${ips}" | grep -qx "203.0.113.26" || {
+        echo "last answer missing — payload truncated. cached: ${ips}" >&2
         return 1
     }
 }

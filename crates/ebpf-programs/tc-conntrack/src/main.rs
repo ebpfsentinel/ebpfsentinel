@@ -4,14 +4,17 @@
 
 use aya_ebpf::{
     bindings::TC_ACT_OK,
-    macros::{btf_map, classifier},
     btf_maps::{Array, PerCpuArray},
+    macros::{btf_map, classifier},
     programs::TcContext,
 };
 use aya_ebpf_bindings::helpers::bpf_probe_read_kernel;
 use ebpf_common::conntrack::{
     CT_METRIC_COUNT, CT_METRIC_ERRORS, CT_METRIC_KFUNC_HITS, CT_METRIC_KFUNC_LOOKUPS,
-    CT_METRIC_KFUNC_MISSES, CT_METRIC_TOTAL_SEEN, ConnTrackConfig, NfConnOffsets,
+    CT_METRIC_KFUNC_MARKED, CT_METRIC_KFUNC_MISSES, CT_METRIC_KFUNC_READ_ERRORS,
+    CT_METRIC_KFUNC_STATE_ESTABLISHED, CT_METRIC_KFUNC_STATE_INVALID, CT_METRIC_KFUNC_STATE_NEW,
+    CT_METRIC_KFUNC_STATE_RELATED, CT_METRIC_TOTAL_SEEN, ConnTrackConfig, IPS_CONFIRMED, IPS_DYING,
+    IPS_EXPECTED, IPS_SEEN_REPLY, NfConnOffsets,
 };
 use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, with_skb_ct_lookup};
 use ebpf_helpers::net::{
@@ -252,7 +255,14 @@ fn kfunc_ct_probe(skb_raw: *mut core::ffi::c_void, tuple: CtTuple, protocol: u8)
 }
 
 /// Read `nf_conn->status` and `nf_conn->mark` from a live kernel CT
-/// entry using `bpf_probe_read_kernel` with runtime BTF offsets.
+/// entry using `bpf_probe_read_kernel` with runtime BTF offsets, and
+/// account both.
+///
+/// The offsets come from userspace vmlinux BTF and can go stale against the
+/// running kernel, in which case the reads fail and the values would be
+/// indistinguishable from a genuine zero status. Failures are counted
+/// separately so a non-zero `kfunc_read_errors` says the state counters are
+/// undercounting rather than the traffic being idle.
 #[inline(always)]
 fn read_nf_conn_fields(ct: *mut ebpf_helpers::kfuncs::nf_conn) {
     let offsets = match CT_NF_CONN_OFFSETS.get(0) {
@@ -260,21 +270,40 @@ fn read_nf_conn_fields(ct: *mut ebpf_helpers::kfuncs::nf_conn) {
         _ => return,
     };
     let base = ct as *const u8;
-    let mut _status: u64 = 0;
-    let mut _mark: u32 = 0;
-    unsafe {
-        let _ = bpf_probe_read_kernel(
-            &raw mut _status as *mut core::ffi::c_void,
-            core::mem::size_of::<u64>() as u32,
-            base.add(offsets.status_offset as usize) as *const core::ffi::c_void,
-        );
-        let _ = bpf_probe_read_kernel(
-            &raw mut _mark as *mut core::ffi::c_void,
-            core::mem::size_of::<u32>() as u32,
-            base.add(offsets.mark_offset as usize) as *const core::ffi::c_void,
-        );
+    let mut status: u64 = 0;
+    let mut mark: u32 = 0;
+    let (status_read, mark_read) = unsafe {
+        (
+            bpf_probe_read_kernel(
+                &raw mut status as *mut core::ffi::c_void,
+                core::mem::size_of::<u64>() as u32,
+                base.add(offsets.status_offset as usize) as *const core::ffi::c_void,
+            ),
+            bpf_probe_read_kernel(
+                &raw mut mark as *mut core::ffi::c_void,
+                core::mem::size_of::<u32>() as u32,
+                base.add(offsets.mark_offset as usize) as *const core::ffi::c_void,
+            ),
+        )
+    };
+
+    if status_read < 0 {
+        increment_metric(CT_METRIC_KFUNC_READ_ERRORS);
+    } else if status & IPS_DYING != 0 {
+        increment_metric(CT_METRIC_KFUNC_STATE_INVALID);
+    } else if status & IPS_EXPECTED != 0 {
+        increment_metric(CT_METRIC_KFUNC_STATE_RELATED);
+    } else if status & (IPS_CONFIRMED | IPS_SEEN_REPLY) != 0 {
+        increment_metric(CT_METRIC_KFUNC_STATE_ESTABLISHED);
+    } else {
+        increment_metric(CT_METRIC_KFUNC_STATE_NEW);
     }
-    let _ = (_status, _mark);
+
+    if mark_read < 0 {
+        increment_metric(CT_METRIC_KFUNC_READ_ERRORS);
+    } else if mark != 0 {
+        increment_metric(CT_METRIC_KFUNC_MARKED);
+    }
 }
 
 #[panic_handler]

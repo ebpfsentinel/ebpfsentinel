@@ -10,6 +10,11 @@ pub const DNS_DIRECTION_RESPONSE: u8 = 1;
 /// Maximum DNS payload bytes captured per event (standard UDP DNS).
 pub const DNS_MAX_PAYLOAD: usize = 512;
 
+/// Small DNS payload tier. A query carrying one name fits well inside this,
+/// and queries are the bulk of DNS traffic, so reserving the full
+/// `DNS_MAX_PAYLOAD` for them wastes two thirds of every ring-buffer record.
+pub const DNS_SMALL_PAYLOAD: usize = 128;
+
 /// DNS port number.
 pub const DNS_PORT: u16 = 53;
 
@@ -60,7 +65,7 @@ pub struct DnsEvent {
 }
 
 /// Fixed-size buffer for DNS events in the RingBuf: header + raw payload.
-/// Userspace extracts the DNS payload from bytes[48..48+dns_payload_len].
+/// Userspace extracts the DNS payload from bytes[64..64+dns_payload_len].
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DnsEventBuf {
@@ -68,12 +73,27 @@ pub struct DnsEventBuf {
     pub payload: [u8; DNS_MAX_PAYLOAD],
 }
 
-// SAFETY: Both types are #[repr(C)], Copy, 'static, and contain only primitive
-// types. Safe for zero-copy eBPF RingBuf operations via aya.
+/// Small-tier DNS ring-buffer record: the same header, a shorter payload.
+///
+/// The kernel reserves this instead of [`DnsEventBuf`] when the captured
+/// payload fits, which is the common case for queries. Userspace needs no
+/// knowledge of the tier: the header is byte-identical and the reader already
+/// bounds the payload by `dns_payload_len` against the record length.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DnsEventSmall {
+    pub header: DnsEvent,
+    pub payload: [u8; DNS_SMALL_PAYLOAD],
+}
+
+// SAFETY: all three types are #[repr(C)], Copy, 'static, and contain only
+// primitive types. Safe for zero-copy eBPF RingBuf operations via aya.
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for DnsEvent {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for DnsEventBuf {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for DnsEventSmall {}
 
 impl DnsEvent {
     /// Size of the DnsEvent header in bytes (payload offset).
@@ -144,6 +164,38 @@ mod tests {
     #[test]
     fn test_dns_max_payload() {
         assert_eq!(DNS_MAX_PAYLOAD, 512);
+    }
+
+    #[test]
+    fn test_dns_event_small_size() {
+        assert_eq!(mem::size_of::<DnsEventSmall>(), 64 + DNS_SMALL_PAYLOAD);
+        assert_eq!(mem::size_of::<DnsEventSmall>(), 192);
+        assert_eq!(mem::align_of::<DnsEventSmall>(), 8);
+    }
+
+    #[test]
+    fn test_dns_small_tier_is_a_strict_saving() {
+        const { assert!(DNS_SMALL_PAYLOAD < DNS_MAX_PAYLOAD) };
+        assert!(mem::size_of::<DnsEventSmall>() < mem::size_of::<DnsEventBuf>());
+    }
+
+    #[test]
+    fn test_dns_event_small_header_compatible() {
+        // Userspace reads one header layout whatever the tier, so the header
+        // must sit at the same offset and the payload must start where
+        // `dns_payload_offset` says it does.
+        assert_eq!(
+            mem::offset_of!(DnsEventSmall, header),
+            mem::offset_of!(DnsEventBuf, header)
+        );
+        assert_eq!(
+            mem::offset_of!(DnsEventSmall, payload),
+            mem::offset_of!(DnsEventBuf, payload)
+        );
+        assert_eq!(
+            mem::offset_of!(DnsEventSmall, payload),
+            DnsEvent::HEADER_SIZE as usize
+        );
     }
 
     #[test]

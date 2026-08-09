@@ -128,7 +128,7 @@ fn try_announce(ctx: &XdpContext) -> Result<u32, ()> {
     // Resolve the MAC to answer with: prefer the per-VIP self-owned
     // binding (authoritative, set by userspace while speaker), fall
     // back to this interface's NIC MAC.
-    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    let ifindex = ctx.ingress_ifindex() as u32;
     let nic_mac = match unsafe { SELF_OWNED_BINDINGS.get(&vip_key) } {
         Some(b) => b.mac,
         None => match unsafe { IFACE_MAC.get(&ifindex) } {

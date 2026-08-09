@@ -140,6 +140,15 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (6, "lookups"),
             (7, "hits"),
             (8, "total_seen"),
+            (9, "kfunc_lookups"),
+            (10, "kfunc_hits"),
+            (11, "kfunc_misses"),
+            (12, "kfunc_state_new"),
+            (13, "kfunc_state_established"),
+            (14, "kfunc_state_related"),
+            (15, "kfunc_state_invalid"),
+            (16, "kfunc_marked"),
+            (17, "kfunc_read_errors"),
         ],
         "NAT_METRICS" => &[
             (0, "snat_applied"),
@@ -290,6 +299,20 @@ mod tests {
             labels.iter().find(|(idx, _)| *idx == 5).map(|(_, l)| *l),
             Some("cgroup_resolved")
         );
+    }
+
+    #[test]
+    fn ct_metrics_label_every_index_the_kernel_writes() {
+        // tc-conntrack sizes CT_METRICS from CT_METRIC_COUNT. An index it
+        // writes but this table omits is exported under a positional label
+        // like "metric_17", which tells an operator nothing.
+        let labels = metric_labels("CT_METRICS");
+        for idx in 0..ebpf_common::conntrack::CT_METRIC_COUNT {
+            assert!(
+                labels.iter().any(|(i, _)| *i == idx),
+                "CT_METRICS index {idx} has no label"
+            );
+        }
     }
 
     #[test]
