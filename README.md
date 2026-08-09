@@ -151,13 +151,21 @@ flowchart TB
 
 ### Install (prebuilt)
 
-Grab the latest tarball for your architecture from the [releases page](https://github.com/ebpfsentinel/ebpfsentinel/releases) — it ships the agent, prebuilt eBPF objects, a systemd unit, and an `install.sh`:
+Grab the latest tarball for your architecture from the
+[releases page](https://github.com/ebpfsentinel/ebpfsentinel-release/releases) —
+every component is released together from there, so the release you download
+also tells you which operator and dashboard versions it was tested with. The
+tarball ships the agent, prebuilt eBPF objects, a systemd unit, and an
+`install.sh`:
 
 ```bash
-tar xzf ebpfsentinel-<version>-linux-x86_64.tar.gz
-cd ebpfsentinel-<version>-linux-x86_64
+tar xzf ebpfsentinel-<version>-linux-amd64.tar.gz
+cd ebpfsentinel-<version>-linux-amd64
 sudo ./install.sh            # installs to /usr/local, wires up the systemd unit
 ```
+
+Each release carries a dual-signed inventory of every binary hash and image
+digest; verify before installing with `policy/verify.sh` from the same release.
 
 ### Build from source
 
