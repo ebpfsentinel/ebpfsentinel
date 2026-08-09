@@ -331,6 +331,19 @@ impl IdsRuleConfig {
             expected: "tcp, udp, icmp, any".to_string(),
         })?;
 
+        // The classifier is the only source of IDS events and keys its
+        // lookup on a port, so a rule naming neither would be loaded,
+        // reported and never able to fire. Protocols without ports are
+        // reached with port 0, which is what the classifier reads for them.
+        if self.dst_port.is_none() && self.src_port.is_none() {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.dst_port"),
+                message: "a rule must set dst_port or src_port; use 0 for a \
+                          protocol that carries no port, such as ICMP"
+                    .to_string(),
+            });
+        }
+
         if let Some(ref mode) = self.mode {
             parse_domain_mode(mode)?;
         }
@@ -503,6 +516,30 @@ mod tests {
             country_thresholds: None,
             interfaces: Vec::new(),
         }
+    }
+
+    #[test]
+    fn validate_without_any_port_fails() {
+        let mut rule = base_rule();
+        rule.dst_port = None;
+        rule.src_port = None;
+        assert!(rule.validate(0).is_err());
+    }
+
+    #[test]
+    fn validate_with_src_port_only_ok() {
+        let mut rule = base_rule();
+        rule.dst_port = None;
+        rule.src_port = Some(53);
+        assert!(rule.validate(0).is_ok());
+    }
+
+    #[test]
+    fn validate_with_port_zero_ok() {
+        let mut rule = base_rule();
+        rule.protocol = "icmp".to_string();
+        rule.dst_port = Some(0);
+        assert!(rule.validate(0).is_ok());
     }
 
     #[test]

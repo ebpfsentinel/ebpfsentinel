@@ -219,17 +219,18 @@ impl IdsAppService {
             if self.mode == DomainMode::Alert {
                 value.action = IDS_ACTION_ALERT;
             }
-            // A rule may match on dst_port, src_port, or both; wildcard
-            // (neither) rules are handled only by the userspace engine.
-            if let Some(key) = rule.to_ebpf_key()
-                && let Err(e) = map.insert_pattern(&key, &value)
-            {
-                tracing::warn!(rule_id = %rule.id, "failed to sync IDS rule to eBPF map: {e}");
+            // A rule may match on dst_port, src_port, or both, and a rule
+            // that covers every protocol installs one key per protocol the
+            // classifier can observe.
+            for key in rule.to_ebpf_keys() {
+                if let Err(e) = map.insert_pattern(&key, &value) {
+                    tracing::warn!(rule_id = %rule.id, "failed to sync IDS rule to eBPF map: {e}");
+                }
             }
-            if let Some(src_key) = rule.to_ebpf_src_key()
-                && let Err(e) = map.insert_src_pattern(&src_key, &value)
-            {
-                tracing::warn!(rule_id = %rule.id, "failed to sync IDS src rule to eBPF map: {e}");
+            for src_key in rule.to_ebpf_src_keys() {
+                if let Err(e) = map.insert_src_pattern(&src_key, &value) {
+                    tracing::warn!(rule_id = %rule.id, "failed to sync IDS src rule to eBPF map: {e}");
+                }
             }
         }
     }

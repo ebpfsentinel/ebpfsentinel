@@ -219,31 +219,58 @@ impl IdsRule {
         Ok(())
     }
 
-    /// Convert to an eBPF map key for the `IDS_PATTERNS` `HashMap`.
-    /// Returns `None` if `dst_port` is not set (wildcard rules cannot be
-    /// represented in the exact-match eBPF `HashMap`).
-    pub fn to_ebpf_key(&self) -> Option<IdsPatternKey> {
-        let dst_port = self.dst_port?;
-        Some(IdsPatternKey {
-            tenant_id: 0,
-            dst_port,
-            protocol: self.protocol.to_u8(),
-            _padding: 0,
-        })
+    /// The protocol bytes this rule installs a key for. The classifier keys
+    /// on the protocol the packet actually carries, so `any` has to be
+    /// expanded into the protocols it stands for: installed as its own byte
+    /// it would be a key no packet can produce.
+    fn ebpf_protocols(&self) -> Vec<u8> {
+        match self.protocol {
+            Protocol::Any => vec![
+                Protocol::Tcp.to_u8(),
+                Protocol::Udp.to_u8(),
+                Protocol::Icmp.to_u8(),
+            ],
+            other => vec![other.to_u8()],
+        }
     }
 
-    /// Convert to an eBPF key for the source-port `IDS_SRC_PATTERNS`
-    /// `HashMap`. Returns `None` when `src_port` is not set. The
-    /// `dst_port` field of the key carries the source port (the eBPF side
-    /// keys this map by `src_port`).
-    pub fn to_ebpf_src_key(&self) -> Option<IdsPatternKey> {
-        let src_port = self.src_port?;
-        Some(IdsPatternKey {
-            tenant_id: 0,
-            dst_port: src_port,
-            protocol: self.protocol.to_u8(),
-            _padding: 0,
-        })
+    /// Convert to the eBPF map keys for the `IDS_PATTERNS` `HashMap` — one
+    /// per protocol the rule covers. Empty when `dst_port` is not set:
+    /// wildcard-port rules cannot be represented in an exact-match
+    /// `HashMap`, and the classifier is the only source of IDS events, so
+    /// such a rule never fires. `Config::validate` rejects them.
+    pub fn to_ebpf_keys(&self) -> Vec<IdsPatternKey> {
+        let Some(dst_port) = self.dst_port else {
+            return Vec::new();
+        };
+        self.ebpf_protocols()
+            .into_iter()
+            .map(|protocol| IdsPatternKey {
+                tenant_id: 0,
+                dst_port,
+                protocol,
+                _padding: 0,
+            })
+            .collect()
+    }
+
+    /// Convert to the keys for the source-port `IDS_SRC_PATTERNS`
+    /// `HashMap`. Empty when `src_port` is not set. The `dst_port` field of
+    /// the key carries the source port (the eBPF side keys this map by
+    /// `src_port`).
+    pub fn to_ebpf_src_keys(&self) -> Vec<IdsPatternKey> {
+        let Some(src_port) = self.src_port else {
+            return Vec::new();
+        };
+        self.ebpf_protocols()
+            .into_iter()
+            .map(|protocol| IdsPatternKey {
+                tenant_id: 0,
+                dst_port: src_port,
+                protocol,
+                _padding: 0,
+            })
+            .collect()
     }
 
     /// Convert to an eBPF map value for the `IDS_PATTERNS` `HashMap`.
@@ -445,16 +472,29 @@ mod tests {
     #[test]
     fn ids_rule_to_ebpf_key_with_port() {
         let rule = sample_rule();
-        let key = rule.to_ebpf_key().unwrap();
-        assert_eq!(key.dst_port, 22);
-        assert_eq!(key.protocol, 6); // TCP
+        let keys = rule.to_ebpf_keys();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].dst_port, 22);
+        assert_eq!(keys[0].protocol, 6); // TCP
     }
 
     #[test]
-    fn ids_rule_to_ebpf_key_no_port_returns_none() {
+    fn ids_rule_to_ebpf_key_no_port_is_empty() {
         let mut rule = sample_rule();
         rule.dst_port = None;
-        assert!(rule.to_ebpf_key().is_none());
+        assert!(rule.to_ebpf_keys().is_empty());
+    }
+
+    #[test]
+    fn ids_rule_any_protocol_expands_to_one_key_per_protocol() {
+        let mut rule = sample_rule();
+        rule.protocol = Protocol::Any;
+        rule.src_port = Some(1234);
+        let protocols: Vec<u8> = rule.to_ebpf_keys().iter().map(|k| k.protocol).collect();
+        assert_eq!(protocols, vec![6, 17, 1]);
+        let src_protocols: Vec<u8> = rule.to_ebpf_src_keys().iter().map(|k| k.protocol).collect();
+        assert_eq!(src_protocols, vec![6, 17, 1]);
+        assert!(rule.to_ebpf_src_keys().iter().all(|k| k.dst_port == 1234));
     }
 
     #[test]

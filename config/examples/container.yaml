@@ -57,7 +57,11 @@ dlp:
 ids:
   mode: alert
   rules:
+    # The classifier keys on a port, so a payload rule has to name the port
+    # it inspects; here the callback port a reverse shell dials out to.
     - id: detect-reverse-shell
+      protocol: tcp
+      dst_port: 4444
       pattern: "(?i)(bash\\s+-i|/dev/tcp/|nc\\s+-e)"
       severity: critical
       description: "Reverse shell attempt"

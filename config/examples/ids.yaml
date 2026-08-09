@@ -131,11 +131,13 @@ ids:
         window_secs: 10
         track_by: src_ip
 
-    # Detect ICMP flood (combined limit + threshold tracking both directions)
+    # Detect ICMP flood (combined limit + threshold tracking both directions).
+    # ICMP carries no port, so the classifier reads port 0 for it.
     - id: ids-icmp-flood
       description: "ICMP flood detection"
       severity: medium
       protocol: icmp
+      dst_port: 0
       threshold:
         type: both
         count: 100
@@ -184,6 +186,7 @@ ids:
       description: "Traffic to suspicious wildcard domain"
       severity: high
       protocol: tcp
+      dst_port: 443
       domain_pattern: "*.evil-domain.net"
       domain_match_mode: wildcard
 
