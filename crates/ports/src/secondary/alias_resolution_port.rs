@@ -28,6 +28,9 @@ pub trait AliasResolutionPort: Send + Sync {
 
     /// Look up all CIDR prefixes announced by the given AS numbers.
     fn lookup_bgp_asn(&self, asn_numbers: &[u32]) -> Result<Vec<IpNetwork>, DomainError>;
+
+    /// Addresses currently assigned to the named network interfaces.
+    fn resolve_interfaces(&self, interfaces: &[String]) -> Result<Vec<IpNetwork>, DomainError>;
 }
 
 #[cfg(test)]

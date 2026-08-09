@@ -215,6 +215,16 @@ impl AliasResolutionPort for AliasResolutionAdapter {
         };
         Ok(adapter.networks_by_asn(asn_numbers))
     }
+
+    fn resolve_interfaces(&self, interfaces: &[String]) -> Result<Vec<IpNetwork>, DomainError> {
+        let addrs = crate::net::iface_addrs::resolve_interface_addrs(interfaces)?;
+        debug!(
+            interfaces = ?interfaces,
+            addresses = addrs.len(),
+            "interface group resolved"
+        );
+        Ok(addrs)
+    }
 }
 
 /// Parse a CIDR or bare IP into an `IpNetwork`.

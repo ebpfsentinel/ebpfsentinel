@@ -285,6 +285,13 @@ impl AliasAppService {
                     Vec::new()
                 }
             },
+            AliasKind::InterfaceGroup { interfaces } => match port.resolve_interfaces(interfaces) {
+                Ok(ips) => ips,
+                Err(e) => {
+                    tracing::warn!(alias = %alias.id, "interface address lookup failed: {e}");
+                    Vec::new()
+                }
+            },
             _ => Vec::new(),
         }
     }
@@ -540,6 +547,64 @@ mod tests {
         fn lookup_bgp_asn(&self, _asns: &[u32]) -> Result<Vec<IpNetwork>, DomainError> {
             Ok(Vec::new())
         }
+        fn resolve_interfaces(&self, interfaces: &[String]) -> Result<Vec<IpNetwork>, DomainError> {
+            // One host address per named interface, as a real host would report.
+            Ok(interfaces
+                .iter()
+                .enumerate()
+                .map(|(idx, _)| IpNetwork::V4 {
+                    addr: 0x0A00_0001 + idx as u32,
+                    prefix_len: 32,
+                })
+                .collect())
+        }
+    }
+
+    /// Records what each set id was loaded with, so a test can assert the
+    /// addresses the kernel would match against.
+    /// One recorded `load_ipset_v4` call: the set id and its addresses.
+    type IpSetLoad = (u8, Vec<u32>);
+
+    #[derive(Clone, Default)]
+    struct RecordingIpSet {
+        loaded: Arc<std::sync::Mutex<Vec<IpSetLoad>>>,
+    }
+
+    impl IpSetMapPort for RecordingIpSet {
+        fn load_ipset_v4(&mut self, set_id: u8, addrs: &[u32]) -> Result<(), DomainError> {
+            self.loaded.lock().unwrap().push((set_id, addrs.to_vec()));
+            Ok(())
+        }
+        fn clear_ipset_v4(&mut self, _set_id: u8) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn ipset_entry_count(&self) -> Result<usize, DomainError> {
+            Ok(self.loaded.lock().unwrap().len())
+        }
+    }
+
+    #[test]
+    fn interface_group_alias_loads_its_addresses_into_a_kernel_set() {
+        let mut svc = make_service();
+        let recorder = RecordingIpSet::default();
+        svc.set_ipset_port(Box::new(recorder.clone()));
+        svc.set_resolution_port(Arc::new(MockResolutionPort));
+        svc.reload_aliases(vec![Alias {
+            id: AliasId("lan-addrs".to_string()),
+            kind: AliasKind::InterfaceGroup {
+                interfaces: vec!["eth0".to_string(), "eth1".to_string()],
+            },
+            description: None,
+        }])
+        .unwrap();
+
+        assert_eq!(svc.refresh_dynamic().unwrap(), 1);
+
+        let set_id = svc
+            .assigned_set_id("lan-addrs")
+            .expect("interface group alias gets a set id");
+        let loaded = recorder.loaded.lock().unwrap().clone();
+        assert_eq!(loaded, vec![(set_id, vec![0x0A00_0001, 0x0A00_0002])]);
     }
 
     #[test]

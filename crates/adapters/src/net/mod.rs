@@ -5,6 +5,7 @@
 
 pub mod default_route;
 pub mod gratuitous_arp;
+pub mod iface_addrs;
 pub mod iface_mac;
 pub mod pcap_capture;
 
