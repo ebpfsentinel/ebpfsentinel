@@ -377,8 +377,9 @@ fn nat_rule_to_ebpf_entry(rule: &NatRule) -> ebpf_common::nat::NatRuleEntry {
         }
     }
 
-    // Copy IPsec steering + FOU/GUE overlay fields from domain rule.
+    // Copy scoping, IPsec steering + FOU/GUE overlay fields from domain rule.
     entry.group_mask = rule.group_mask;
+    entry.tenant_id = rule.tenant_id;
     entry.xfrm_if_id = rule.xfrm_if_id;
     entry.xfrm_link = rule.xfrm_link;
     entry.fou_sport = rule.fou_sport;
@@ -476,7 +477,7 @@ fn nat_rule_to_ebpf_entry_v6(rule: &NatRule) -> ebpf_common::nat::NatRuleEntryV6
         nat_port_end: 0,
         nat_interface: 0,
         group_mask: rule.group_mask,
-        tenant_id: 0,
+        tenant_id: rule.tenant_id,
         xfrm_if_id: 0,
         xfrm_link: 0,
         fou_sport: 0,
@@ -707,6 +708,7 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            tenant_id: 0,
             xfrm_if_id: 0,
             xfrm_link: 0,
             fou_sport: 0,
@@ -734,6 +736,7 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            tenant_id: 0,
             xfrm_if_id: 0,
             xfrm_link: 0,
             fou_sport: 0,
@@ -747,6 +750,22 @@ mod tests {
         let svc = make_service();
         assert!(!svc.enabled());
         assert_eq!(svc.rule_count(), 0);
+    }
+
+    #[test]
+    fn ebpf_entries_carry_the_rule_tenant() {
+        let mut rule = make_snat_rule("snat-tenant");
+        rule.tenant_id = 6;
+        assert_eq!(nat_rule_to_ebpf_entry(&rule).tenant_id, 6);
+        assert_eq!(nat_rule_to_ebpf_entry_v6(&rule).tenant_id, 6);
+    }
+
+    #[test]
+    fn a_rule_without_a_tenant_is_written_global() {
+        let rule = make_snat_rule("snat-global");
+        assert_eq!(rule.tenant_id, 0);
+        assert_eq!(nat_rule_to_ebpf_entry(&rule).tenant_id, 0);
+        assert_eq!(nat_rule_to_ebpf_entry_v6(&rule).tenant_id, 0);
     }
 
     #[test]

@@ -254,6 +254,11 @@ pub struct FirewallRuleConfig {
     /// Prefix with "!" for inversion (e.g., `"!lan"` = all except lan).
     #[serde(default)]
     pub interfaces: Vec<String>,
+
+    /// Tenant this rule belongs to. 0 (the default) is global and applies to
+    /// every tenant, which is all a standalone agent resolves.
+    #[serde(default)]
+    pub tenant_id: u32,
 }
 
 fn default_protocol() -> String {
@@ -463,6 +468,7 @@ impl FirewallRuleConfig {
                     message,
                 },
             )?,
+            tenant_id: self.tenant_id,
         })
     }
 }
@@ -586,6 +592,39 @@ mod tests {
     use super::*;
 
     // ── Port range config ─────────────────────────────────────────
+
+    #[test]
+    fn to_domain_rule_carries_the_configured_tenant() {
+        let rule: FirewallRuleConfig = serde_yaml_ng::from_str(
+            r"
+id: fw-tenant
+priority: 10
+action: deny
+protocol: tcp
+tenant_id: 4
+",
+        )
+        .unwrap();
+
+        let domain_rule = rule.to_domain_rule(&HashMap::new()).unwrap();
+        assert_eq!(domain_rule.tenant_id, 4);
+        assert_eq!(domain_rule.to_ebpf_entry().tenant_id, 4);
+    }
+
+    #[test]
+    fn to_domain_rule_without_a_tenant_is_global() {
+        let rule: FirewallRuleConfig = serde_yaml_ng::from_str(
+            r"
+id: fw-global
+priority: 10
+action: deny
+protocol: tcp
+",
+        )
+        .unwrap();
+
+        assert_eq!(rule.to_domain_rule(&HashMap::new()).unwrap().tenant_id, 0);
+    }
 
     #[test]
     fn port_range_single() {

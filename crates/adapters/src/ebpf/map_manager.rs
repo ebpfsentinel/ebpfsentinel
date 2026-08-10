@@ -116,6 +116,23 @@ impl FirewallMapManager {
     }
 }
 
+/// Whether a rule carries a criterion the fast-path hash maps cannot express,
+/// so it has to go through the linear array scan instead.
+///
+/// The hash keys hold a tuple and nothing else. A rule scoped to an interface
+/// group or to a tenant would therefore have its verdict served to traffic the
+/// scope excludes - and for a tenant that is the whole point of the scope,
+/// since two tenants may run the same private range behind the same ports.
+fn has_extended_match(rule: &FirewallRuleEntry) -> bool {
+    rule.match_flags2 != 0
+        || rule.vlan_id != VLAN_ANY
+        || rule.ct_state_mask != 0
+        || rule.group_mask != 0
+        || rule.tenant_id != 0
+        || rule.src_set_id != 0
+        || rule.dst_set_id != 0
+}
+
 impl FirewallArrayMapPort for FirewallMapManager {
     #[allow(clippy::cast_possible_truncation)] // count ≤ MAX_FIREWALL_RULES (4096)
     fn load_v4_rules(&mut self, rules: &[FirewallRuleEntry]) -> Result<(), DomainError> {
@@ -139,12 +156,7 @@ impl FirewallArrayMapPort for FirewallMapManager {
 
         for rule in rules {
             let flags = rule.match_flags;
-            let has_extended = rule.match_flags2 != 0
-                || rule.vlan_id != VLAN_ANY
-                || rule.ct_state_mask != 0
-                || rule.group_mask != 0
-                || rule.src_set_id != 0
-                || rule.dst_set_id != 0;
+            let has_extended = has_extended_match(rule);
 
             if !seen_array_rule
                 && !has_extended
@@ -261,5 +273,70 @@ impl FirewallArrayMapPort for FirewallMapManager {
 
     fn rule_count(&self) -> Result<usize, DomainError> {
         Ok(self.cached_v4_count + self.cached_v6_count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An exact 5-tuple rule, the shape the fast path exists for.
+    fn fast_path_candidate() -> FirewallRuleEntry {
+        FirewallRuleEntry {
+            src_ip: 0x0A00_0001,
+            src_mask: 0xFFFF_FFFF,
+            dst_ip: 0x0A00_0002,
+            dst_mask: 0xFFFF_FFFF,
+            src_port_start: 1024,
+            src_port_end: 1024,
+            dst_port_start: 443,
+            dst_port_end: 443,
+            protocol: 6,
+            match_flags: MATCH_SRC_IP
+                | MATCH_DST_IP
+                | MATCH_SRC_PORT
+                | MATCH_DST_PORT
+                | MATCH_PROTO,
+            vlan_id: VLAN_ANY,
+            action: 0,
+            ct_state_mask: 0,
+            src_set_id: 0,
+            dst_set_id: 0,
+            tcp_flags_match: 0,
+            tcp_flags_mask: 0,
+            icmp_type: 0,
+            icmp_code: 0,
+            match_flags2: 0,
+            dscp_match: 0,
+            max_states: 0,
+            src_mac: [0; 6],
+            dst_mac: [0; 6],
+            dscp_mark: 0xFF,
+            route_action: 0,
+            route_ifindex: 0,
+            group_mask: 0,
+            tenant_id: 0,
+        }
+    }
+
+    #[test]
+    fn a_global_exact_tuple_rule_stays_on_the_fast_path() {
+        assert!(!has_extended_match(&fast_path_candidate()));
+    }
+
+    #[test]
+    fn a_tenant_scoped_rule_is_demoted_to_the_array_scan() {
+        let mut rule = fast_path_candidate();
+        rule.tenant_id = 3;
+        // The hash key holds no tenant, so a cached verdict here would reach
+        // every tenant using the same tuple.
+        assert!(has_extended_match(&rule));
+    }
+
+    #[test]
+    fn an_interface_scoped_rule_is_demoted_the_same_way() {
+        let mut rule = fast_path_candidate();
+        rule.group_mask = 0b10;
+        assert!(has_extended_match(&rule));
     }
 }

@@ -407,6 +407,12 @@ pub struct FirewallRule {
     /// 0 = floating (applies to all interfaces). Bit 31 = invert.
     #[serde(default)]
     pub group_mask: u32,
+    /// Tenant this rule belongs to. 0 = global: the rule applies whichever
+    /// tenant the packet resolves to, which is the only behaviour a standalone
+    /// agent can produce. A non-zero value makes the kernel skip the rule for
+    /// traffic resolved to any other tenant.
+    #[serde(default)]
+    pub tenant_id: u32,
 }
 
 /// Connection state names for stateful rule matching.
@@ -656,7 +662,7 @@ impl FirewallRule {
             route_action: route_action_to_u8(self.route_action),
             route_ifindex: route_action_ifindex(self.route_action),
             group_mask: self.group_mask,
-            tenant_id: 0,
+            tenant_id: self.tenant_id,
         }
     }
 
@@ -803,7 +809,7 @@ impl FirewallRule {
             route_action: route_action_to_u8(self.route_action),
             route_ifindex: route_action_ifindex(self.route_action),
             group_mask: self.group_mask,
-            tenant_id: 0,
+            tenant_id: self.tenant_id,
         }
     }
 }
@@ -1126,6 +1132,7 @@ mod tests {
             system: false,
             route_action: None,
             group_mask: 0,
+            tenant_id: 0,
         }
     }
 
@@ -1133,6 +1140,22 @@ mod tests {
     fn rule_validate_ok() {
         let rule = make_rule("rule-1", 10);
         assert!(rule.validate().is_ok());
+    }
+
+    #[test]
+    fn ebpf_entries_carry_the_rule_tenant() {
+        let mut rule = make_rule("rule-tenant", 10);
+        rule.tenant_id = 4;
+        assert_eq!(rule.to_ebpf_entry().tenant_id, 4);
+        assert_eq!(rule.to_ebpf_entry_v6().tenant_id, 4);
+    }
+
+    #[test]
+    fn a_rule_without_a_tenant_is_written_global() {
+        let rule = make_rule("rule-global", 10);
+        assert_eq!(rule.tenant_id, 0);
+        assert_eq!(rule.to_ebpf_entry().tenant_id, 0);
+        assert_eq!(rule.to_ebpf_entry_v6().tenant_id, 0);
     }
 
     #[test]

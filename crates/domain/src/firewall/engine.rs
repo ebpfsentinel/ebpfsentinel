@@ -218,6 +218,7 @@ mod tests {
             system: false,
             route_action: None,
             group_mask: 0,
+            tenant_id: 0,
         }
     }
 

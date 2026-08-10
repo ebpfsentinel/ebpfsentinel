@@ -217,6 +217,7 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            tenant_id: 0,
             xfrm_if_id: 0,
             xfrm_link: 0,
             fou_sport: 0,

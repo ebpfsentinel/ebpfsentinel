@@ -57,6 +57,12 @@ pub struct NatRule {
     /// 0 = floating (applies to all interfaces). Bit 31 = invert.
     #[serde(default)]
     pub group_mask: u32,
+    /// Tenant this rule belongs to. 0 = global: the translation applies
+    /// whichever tenant the packet resolves to. A non-zero value makes the
+    /// kernel skip the rule for traffic resolved to any other tenant, which is
+    /// what lets two tenants keep overlapping private ranges.
+    #[serde(default)]
+    pub tenant_id: u32,
     /// `IPsec` `xfrm` interface id for steering egress traffic through
     /// a specific `xfrmi` virtual device. 0 = disabled.
     #[serde(default)]
@@ -206,6 +212,7 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            tenant_id: 0,
             xfrm_if_id: 0,
             xfrm_link: 0,
             fou_sport: 0,
@@ -252,6 +259,7 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            tenant_id: 0,
             xfrm_if_id: 0,
             xfrm_link: 0,
             fou_sport: 0,
@@ -281,6 +289,7 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            tenant_id: 0,
             xfrm_if_id: 0,
             xfrm_link: 0,
             fou_sport: 0,
@@ -307,6 +316,7 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            tenant_id: 0,
             xfrm_if_id: 0,
             xfrm_link: 0,
             fou_sport: 0,
@@ -330,6 +340,7 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            tenant_id: 0,
             xfrm_if_id: 0,
             xfrm_link: 0,
             fou_sport: 0,
@@ -360,6 +371,7 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            tenant_id: 0,
             xfrm_if_id: 0,
             xfrm_link: 0,
             fou_sport: 0,
@@ -390,6 +402,7 @@ mod tests {
             match_dst_alias: None,
             enabled: true,
             group_mask: 0,
+            tenant_id: 0,
             xfrm_if_id: 0,
             xfrm_link: 0,
             fou_sport: 0,

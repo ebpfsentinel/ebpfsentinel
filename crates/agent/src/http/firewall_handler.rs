@@ -303,6 +303,7 @@ impl CreateRuleRequest {
             system: false,
             route_action: None,
             group_mask: 0,
+            tenant_id: 0,
         })
     }
 }
@@ -859,6 +860,7 @@ mod tests {
             system: false,
             route_action: None,
             group_mask: 0,
+            tenant_id: 0,
         };
         let resp = RuleResponse::from(&rule);
         assert_eq!(resp.id, "fw-001");

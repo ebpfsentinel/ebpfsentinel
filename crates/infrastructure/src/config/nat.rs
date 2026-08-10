@@ -280,6 +280,12 @@ pub struct NatRuleConfig {
     /// Prefix with "!" for inversion (e.g., `"!lan"` = all except lan).
     #[serde(default)]
     pub interfaces: Vec<String>,
+
+    /// Tenant this rule belongs to. 0 (the default) is global and translates
+    /// for every tenant. A non-zero value is what lets two tenants keep
+    /// overlapping private ranges behind separate translations.
+    #[serde(default)]
+    pub tenant_id: u32,
 }
 
 fn default_priority() -> u32 {
@@ -711,6 +717,7 @@ impl NatRuleConfig {
                     message,
                 },
             )?,
+            tenant_id: self.tenant_id,
             xfrm_if_id: 0,
             xfrm_link: 0,
             fou_sport: 0,
@@ -771,6 +778,7 @@ mod tests {
             match_src_alias: None,
             match_dst_alias: None,
             interfaces: Vec::new(),
+            tenant_id: 0,
         }
     }
 
@@ -822,6 +830,7 @@ mod tests {
             match_src_alias: None,
             match_dst_alias: None,
             interfaces: Vec::new(),
+            tenant_id: 0,
         };
         assert!(cfg.validate(0, "nat.dnat_rules").is_ok());
     }
@@ -848,6 +857,7 @@ mod tests {
             match_src_alias: None,
             match_dst_alias: None,
             interfaces: Vec::new(),
+            tenant_id: 0,
         };
         assert!(cfg.validate(0, "nat.snat_rules").is_err());
     }
@@ -954,6 +964,20 @@ mod tests {
     }
 
     #[test]
+    fn to_domain_rule_carries_the_configured_tenant() {
+        let mut cfg = snat_config();
+        cfg.tenant_id = 6;
+        assert_eq!(cfg.to_domain_rule(&HashMap::new()).unwrap().tenant_id, 6);
+    }
+
+    #[test]
+    fn to_domain_rule_without_a_tenant_is_global() {
+        let cfg = snat_config();
+        assert_eq!(cfg.tenant_id, 0);
+        assert_eq!(cfg.to_domain_rule(&HashMap::new()).unwrap().tenant_id, 0);
+    }
+
+    #[test]
     fn to_domain_dnat() {
         let cfg = NatRuleConfig {
             id: "dnat-1".to_string(),
@@ -975,6 +999,7 @@ mod tests {
             match_src_alias: None,
             match_dst_alias: None,
             interfaces: Vec::new(),
+            tenant_id: 0,
         };
         let rule = cfg.to_domain_rule(&HashMap::new()).unwrap();
         assert!(matches!(
