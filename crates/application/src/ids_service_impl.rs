@@ -224,14 +224,20 @@ impl IdsAppService {
             .evaluate_index_with_context(idx, event, dst_domains, src_country)
     }
 
-    /// Rules that watch a port this event carries but lost the kernel slot to
-    /// `matched`, in array order.
+    /// Detection rules that watch a port this event carries but lost the
+    /// kernel slot to `matched`, in array order.
     ///
     /// A slot holds one rule, so an IDS rule watching the same port as an IPS
     /// rule is never named by the classifier. Without this the operator's
     /// detection rule is silently dead, which is a policy change the kernel
     /// map layout has no business making. Empty whenever no slot is contested,
     /// which is the usual case.
+    ///
+    /// Prevention rules are never returned. Only the rule the kernel named
+    /// enforced anything, so replaying a prevention rule would raise an IPS
+    /// alert naming a block that did not happen. Prevention rules also sit
+    /// last in the array and so only ever lose a slot to another prevention
+    /// rule, which means nothing is left silent by leaving them out.
     #[must_use]
     pub fn shadowed_peers(&self, event: &PacketEvent, matched: usize) -> Vec<usize> {
         if self.contested_slots.is_empty() {
@@ -250,7 +256,7 @@ impl IdsAppService {
                 continue;
             };
             for &idx in claimants {
-                if idx != matched && !peers.contains(&idx) {
+                if idx != matched && !self.is_prevention_index(idx) && !peers.contains(&idx) {
                     peers.push(idx);
                 }
             }
@@ -529,8 +535,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(svc.shadowed_peers(&make_event(22), 1), vec![0]);
-        // Symmetric: the winner is never its own peer.
-        assert_eq!(svc.shadowed_peers(&make_event(22), 0), vec![1]);
+        // Not symmetric: only the rule the kernel named enforced anything, so
+        // a prevention rule is never replayed in the other direction.
+        assert!(svc.shadowed_peers(&make_event(22), 0).is_empty());
     }
 
     #[test]
