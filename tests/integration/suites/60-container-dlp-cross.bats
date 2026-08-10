@@ -247,7 +247,8 @@ PY
 
     [ "${has_container}" -ge 1 ] || {
         echo "no DLP alert carried container provenance" >&2
-        echo "${body}" | jq -c '[.alerts[]? // .[]? | select(.component == "dlp") | {container}] | .[0:5]' >&2 || true
+        echo "${body}" \
+            | jq -c '[(.alerts // .)[] | select(.component == "dlp") | {container}] | .[0:5]' >&2 || true
         return 1
     }
 }
