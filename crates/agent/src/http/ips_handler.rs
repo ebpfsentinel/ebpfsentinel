@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
+use super::ids_handler::SlotContentionResponse;
 use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 
@@ -33,6 +34,11 @@ pub struct IpsRuleResponse {
     pub domain_pattern: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_match_mode: Option<String>,
+    /// Present only when another rule holds a kernel map slot this rule also
+    /// claims. A prevention rule that lost its slot is never replayed in
+    /// userspace, so it blocks nothing until the conflict is resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kernel_slot: Option<SlotContentionResponse>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -95,6 +101,13 @@ pub struct BlacklistMutationResponse {
 )]
 pub async fn list_ips_rules(State(state): State<Arc<AppState>>) -> Json<Vec<IpsRuleResponse>> {
     let svc = state.ips_service.load();
+    // The IDS service owns the kernel pattern maps for both halves of the rule
+    // array, so it is the only place that knows which rule holds a slot.
+    let shadows = state
+        .ids_service
+        .as_ref()
+        .map(|ids| ids.load().slot_shadows())
+        .unwrap_or_default();
     let rules: Vec<IpsRuleResponse> = svc
         .list_rules()
         .iter()
@@ -109,6 +122,7 @@ pub async fn list_ips_rules(State(state): State<Arc<AppState>>) -> Json<Vec<IpsR
             enabled: r.enabled,
             domain_pattern: r.domain_pattern.clone(),
             domain_match_mode: r.domain_match_mode.as_ref().map(format_domain_match_mode),
+            kernel_slot: shadows.get(&r.id.0).map(SlotContentionResponse::from),
         })
         .collect();
     Json(rules)
@@ -169,7 +183,7 @@ pub async fn patch_ips_rule_mode(
     }
 
     // Return the updated rule
-    let rule = svc
+    let mut rule = svc
         .list_rules()
         .iter()
         .find(|r| r.id.0 == id)
@@ -184,6 +198,9 @@ pub async fn patch_ips_rule_mode(
             enabled: r.enabled,
             domain_pattern: r.domain_pattern.clone(),
             domain_match_mode: r.domain_match_mode.as_ref().map(format_domain_match_mode),
+            // Filled after the reinstall below: slot ownership is only settled
+            // once the prevention rules are back in the array the IDS owns.
+            kernel_slot: None,
         });
 
     // Capture after snapshot and record rule change
@@ -198,6 +215,13 @@ pub async fn patch_ips_rule_mode(
     state.ips_service.store(Arc::new(svc));
     if let Some(ref ids_service) = state.ids_service {
         application::ids_service_impl::install_prevention_rules(ids_service, prevention_rules)?;
+        if let Some(ref mut resp) = rule {
+            resp.kernel_slot = ids_service
+                .load()
+                .slot_shadows()
+                .get(&id)
+                .map(SlotContentionResponse::from);
+        }
     }
 
     if old_mode != new_mode {
@@ -488,6 +512,7 @@ mod tests {
             enabled: true,
             domain_pattern: None,
             domain_match_mode: None,
+            kernel_slot: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "ips-001");
@@ -495,6 +520,32 @@ mod tests {
         assert_eq!(json["dst_port"], 22);
         // domain fields should be absent when None
         assert!(json.get("domain_pattern").is_none());
+        // An uncontested rule carries no slot block at all, so the field only
+        // ever appears when there is something to report.
+        assert!(json.get("kernel_slot").is_none());
+    }
+
+    #[test]
+    fn ips_rule_response_reports_a_lost_kernel_slot() {
+        let resp = IpsRuleResponse {
+            id: "ips-003".to_string(),
+            description: "Shadowed".to_string(),
+            severity: "high".to_string(),
+            mode: "block".to_string(),
+            protocol: "tcp".to_string(),
+            dst_port: Some(22),
+            pattern: String::new(),
+            enabled: true,
+            domain_pattern: None,
+            domain_match_mode: None,
+            kernel_slot: Some(SlotContentionResponse {
+                shadowed_by: vec!["ips-004".to_string()],
+                evaluated_in_userspace: false,
+            }),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["kernel_slot"]["shadowed_by"][0], "ips-004");
+        assert_eq!(json["kernel_slot"]["evaluated_in_userspace"], false);
     }
 
     #[test]
@@ -510,6 +561,7 @@ mod tests {
             enabled: true,
             domain_pattern: Some("*.evil.com".to_string()),
             domain_match_mode: Some("wildcard".to_string()),
+            kernel_slot: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["domain_pattern"], "*.evil.com");

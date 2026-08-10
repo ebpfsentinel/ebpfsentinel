@@ -208,6 +208,7 @@ use super::zone_handler;
         // IDS
         ids_handler::IdsStatusResponse,
         ids_handler::IdsRuleResponse,
+        ids_handler::SlotContentionResponse,
         // Rate Limiting
         ratelimit_handler::CreateRateLimitRuleRequest,
         ratelimit_handler::RateLimitRuleResponse,

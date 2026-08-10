@@ -29,6 +29,30 @@ pub struct IdsRuleResponse {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub threshold: Option<ThresholdResponse>,
+    /// Present only when another rule holds a kernel map slot this rule also
+    /// claims.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kernel_slot: Option<SlotContentionResponse>,
+}
+
+/// A kernel map slot holds one rule, so two rules watching the same port and
+/// protocol cannot both be installed. This says which rule took the slot and
+/// whether the loser is still evaluated.
+#[derive(Serialize, ToSchema)]
+pub struct SlotContentionResponse {
+    /// Ids of the rules holding a slot this rule also claims.
+    pub shadowed_by: Vec<String>,
+    /// `false` means the rule is loaded, enabled, and matches nothing.
+    pub evaluated_in_userspace: bool,
+}
+
+impl From<&application::ids_service_impl::SlotShadow> for SlotContentionResponse {
+    fn from(shadow: &application::ids_service_impl::SlotShadow) -> Self {
+        Self {
+            shadowed_by: shadow.shadowed_by.clone(),
+            evaluated_in_userspace: shadow.evaluated_in_userspace,
+        }
+    }
 }
 
 /// Per-rule threshold/rate detection, surfaced for rate-based IDS rules.
@@ -95,6 +119,7 @@ pub async fn list_ids_rules(
         message: "IDS service is not enabled".to_string(),
     })?;
     let svc = svc_arc.load();
+    let shadows = svc.slot_shadows();
     let rules: Vec<IdsRuleResponse> = svc
         .list_rules()
         .iter()
@@ -113,6 +138,7 @@ pub async fn list_ids_rules(
                 window_secs: t.window_secs,
                 track_by: format!("{:?}", t.track_by),
             }),
+            kernel_slot: shadows.get(&r.id.0).map(SlotContentionResponse::from),
         })
         .collect();
     Ok(Json(rules))
@@ -152,10 +178,34 @@ mod tests {
                 window_secs: 30,
                 track_by: "SrcIp".to_string(),
             }),
+            kernel_slot: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "ids-001");
         assert_eq!(json["dst_port"], 22);
         assert_eq!(json["threshold"]["count"], 5);
+        assert!(json.get("kernel_slot").is_none());
+    }
+
+    #[test]
+    fn ids_rule_response_reports_a_lost_kernel_slot() {
+        let resp = IdsRuleResponse {
+            id: "ids-002".to_string(),
+            description: "Shadowed by an IPS rule".to_string(),
+            severity: "High".to_string(),
+            mode: "Alert".to_string(),
+            protocol: "Tcp".to_string(),
+            dst_port: Some(22),
+            pattern: String::new(),
+            enabled: true,
+            threshold: None,
+            kernel_slot: Some(SlotContentionResponse {
+                shadowed_by: vec!["ips-001".to_string()],
+                evaluated_in_userspace: true,
+            }),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["kernel_slot"]["shadowed_by"][0], "ips-001");
+        assert_eq!(json["kernel_slot"]["evaluated_in_userspace"], true);
     }
 }

@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 
 use anyhow::Result;
 
-use crate::api_client::ApiClient;
+use crate::api_client::{ApiClient, IpsRuleResponse};
 use crate::cli::OutputFormat;
 
 // ── Health ──────────────────────────────────────────────────────────────
@@ -205,6 +205,30 @@ pub async fn cmd_ips_list(client: &ApiClient, output: OutputFormat) -> Result<()
     }
 
     println!("\n{} rule(s) total.", rules.len());
+
+    // A rule that lost its kernel slot still prints as enabled above, which is
+    // exactly the reading an operator must not walk away with.
+    let shadowed: Vec<&IpsRuleResponse> =
+        rules.iter().filter(|r| r.kernel_slot.is_some()).collect();
+    if !shadowed.is_empty() {
+        println!("\nKernel map slot conflicts:");
+        for rule in shadowed {
+            let Some(ref slot) = rule.kernel_slot else {
+                continue;
+            };
+            let fate = if slot.evaluated_in_userspace {
+                "still evaluated in userspace"
+            } else {
+                "ENFORCES NOTHING"
+            };
+            println!(
+                "  {} loses its slot to {} - {}",
+                rule.id,
+                slot.shadowed_by.join(", "),
+                fate,
+            );
+        }
+    }
     Ok(())
 }
 

@@ -79,6 +79,15 @@ pub struct IpsRuleResponse {
     pub enabled: bool,
     pub domain_pattern: Option<String>,
     pub domain_match_mode: Option<String>,
+    /// Absent unless another rule holds a kernel map slot this rule claims.
+    pub kernel_slot: Option<SlotContentionResponse>,
+}
+
+/// Reported by the agent when two rules claim the same kernel map slot.
+#[derive(Deserialize, Serialize)]
+pub struct SlotContentionResponse {
+    pub shadowed_by: Vec<String>,
+    pub evaluated_in_userspace: bool,
 }
 
 #[derive(Deserialize, Serialize)]

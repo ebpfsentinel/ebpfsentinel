@@ -20,6 +20,16 @@ type SharedIdsMapPort = Arc<Mutex<Box<dyn IdsMapPort + Send>>>;
 /// slot lives in the source-port map rather than the destination-port one.
 type KernelSlot = (u32, u16, u8, bool);
 
+/// What became of a rule that lost the kernel map slot it claims.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SlotShadow {
+    /// Ids of the rules holding a slot this rule also claims, sorted.
+    pub shadowed_by: Vec<String>,
+    /// Whether the rule is still evaluated in userspace despite the loss.
+    /// When false the rule is loaded, enabled, and inert.
+    pub evaluated_in_userspace: bool,
+}
+
 /// Application-level IDS service.
 ///
 /// Orchestrates the domain engine, optional eBPF map sync, and metrics updates.
@@ -263,6 +273,53 @@ impl IdsAppService {
         }
         peers.sort_unstable();
         peers
+    }
+
+    /// Every rule that claims a kernel slot another rule holds, keyed by rule
+    /// id.
+    ///
+    /// The startup log already names each eviction, but a log line is gone by
+    /// the time an operator lists the rules, and the listing shows two enabled
+    /// rules with nothing to say one of them never reaches the classifier.
+    /// Empty whenever no slot is contested, which is the usual case.
+    #[must_use]
+    pub fn slot_shadows(&self) -> HashMap<String, SlotShadow> {
+        let rules = self.engine.rules();
+        let mut shadows: HashMap<String, SlotShadow> = HashMap::new();
+        for claimants in self.contested_slots.values() {
+            // `sync_ebpf_maps` writes in array order, so the slot ends up held
+            // by the highest-indexed claimant.
+            let Some(&owner) = claimants.iter().max() else {
+                continue;
+            };
+            let Some(owner_id) = rules.get(owner).map(|r| r.id.0.as_str()) else {
+                continue;
+            };
+            for &idx in claimants {
+                let Some(rule) = rules.get(idx) else { continue };
+                // Two rules sharing an id are one rule to the operator, and the
+                // map write is idempotent, so nothing was displaced.
+                if idx == owner || rule.id.0 == owner_id {
+                    continue;
+                }
+                let entry = shadows
+                    .entry(rule.id.0.clone())
+                    .or_insert_with(|| SlotShadow {
+                        shadowed_by: Vec::new(),
+                        // Mirrors `shadowed_peers`, which replays detection
+                        // rules only: a prevention rule that loses its slot
+                        // enforces nothing at all.
+                        evaluated_in_userspace: !self.is_prevention_index(idx),
+                    });
+                if !entry.shadowed_by.iter().any(|id| id == owner_id) {
+                    entry.shadowed_by.push(owner_id.to_string());
+                }
+            }
+        }
+        for shadow in shadows.values_mut() {
+            shadow.shadowed_by.sort_unstable();
+        }
+        shadows
     }
 
     fn rebuild_contested_slots(&mut self) {
@@ -564,6 +621,46 @@ mod tests {
             .unwrap();
 
         assert!(svc.shadowed_peers(&make_event(22), 1).is_empty());
+    }
+
+    #[test]
+    fn a_shadowed_detection_rule_is_named_with_the_rule_that_took_its_slot() {
+        let mut svc = make_service();
+        svc.add_rule(make_rule("ids-001")).unwrap();
+        svc.set_prevention_rules(vec![make_rule("ips-001")])
+            .unwrap();
+
+        let shadows = svc.slot_shadows();
+        let shadow = shadows.get("ids-001").expect("detection rule shadowed");
+        assert_eq!(shadow.shadowed_by, vec!["ips-001".to_string()]);
+        assert!(shadow.evaluated_in_userspace);
+        // The winner is not itself shadowed.
+        assert!(!shadows.contains_key("ips-001"));
+    }
+
+    #[test]
+    fn a_shadowed_prevention_rule_is_reported_as_inert() {
+        // Two prevention rules on one port: the loser is not replayed, so the
+        // listing has to say the rule enforces nothing.
+        let mut svc = make_service();
+        svc.set_prevention_rules(vec![make_rule("ips-001"), make_rule("ips-002")])
+            .unwrap();
+
+        let shadows = svc.slot_shadows();
+        let shadow = shadows.get("ips-001").expect("prevention rule shadowed");
+        assert_eq!(shadow.shadowed_by, vec!["ips-002".to_string()]);
+        assert!(!shadow.evaluated_in_userspace);
+    }
+
+    #[test]
+    fn uncontested_rules_report_no_shadow() {
+        let mut svc = make_service();
+        svc.add_rule(make_rule("ids-001")).unwrap();
+        let mut prevention = make_rule("ips-001");
+        prevention.dst_port = Some(2222);
+        svc.set_prevention_rules(vec![prevention]).unwrap();
+
+        assert!(svc.slot_shadows().is_empty());
     }
 
     #[test]
