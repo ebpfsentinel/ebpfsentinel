@@ -101,6 +101,51 @@ archive_agent_log() {
     return 0
 }
 
+# assert_config_loaded <config_file> [pid]
+# Verifies the agent answering on the API port parsed the config file it was
+# handed, and - when a pid is given - that it is still the process this call
+# started.
+#
+# Two failures look identical from the outside and both leave a suite green
+# while it measures built-in defaults: a fixture the agent refused (it exits
+# before logging anything, and a stale agent from an earlier suite keeps
+# answering on the same port), and a helper that started the agent without the
+# fixture at all. The startup line carries the path the agent actually parsed,
+# so it settles both. The pid is optional because the eBPF lane launches
+# through setsid and a staged binary, where $! is not reliably the agent.
+assert_config_loaded() {
+    local config_file="${1:?usage: assert_config_loaded <config_file> [pid]}"
+    local pid="${2:-}"
+
+    # Written before the listener binds, so a healthy agent has emitted it
+    # already; the retry only covers the writer's buffer.
+    local attempt=0
+    local found=false
+    while [ "$attempt" -lt 10 ]; do
+        if grep -F -- "$config_file" "$AGENT_LOG_FILE" 2>/dev/null |
+            grep -q "eBPFsentinel agent starting"; then
+            found=true
+            break
+        fi
+        sleep 0.2
+        attempt=$((attempt + 1))
+    done
+
+    if [ "$found" != true ]; then
+        echo "Agent never reported loading ${config_file}; it is not running this fixture. Log tail:" >&2
+        tail -20 "$AGENT_LOG_FILE" >&2
+        return 1
+    fi
+
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+        echo "Agent ${pid} is gone yet the port still answers - a stale agent is serving this suite." >&2
+        tail -20 "$AGENT_LOG_FILE" >&2
+        return 1
+    fi
+
+    return 0
+}
+
 # start_agent <config_file> [extra_args...]
 # Starts the agent in the background with the given config.
 # Sets AGENT_PID and writes to AGENT_PID_FILE.
@@ -150,6 +195,8 @@ start_agent() {
         tail -20 "$AGENT_LOG_FILE" >&2
         return 1
     }
+
+    assert_config_loaded "$config_file" "$AGENT_PID"
 }
 
 # start_agent_expect_fail <config_file> [extra_args...]

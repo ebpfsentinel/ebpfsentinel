@@ -359,6 +359,11 @@ start_ebpf_agent() {
         fi
         return 1
     }
+
+    # No pid: this lane launches through setsid, and under the warden broker
+    # the agent re-execs itself as a staged binary inside a user namespace, so
+    # $! names neither of the processes that end up serving the API.
+    assert_config_loaded "$config_file"
 }
 
 # stop_ebpf_agent — stop agent launched by start_ebpf_agent
