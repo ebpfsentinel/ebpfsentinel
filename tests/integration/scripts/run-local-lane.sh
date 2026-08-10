@@ -42,6 +42,19 @@ clean_slate() {
     sleep 1
 }
 
+# A bare `skip` in a suite always reports success, whatever the lane asked
+# for: it is invisible to EBPFSENTINEL_STRICT_SKIPS. Refuse to start the lane
+# while one is left, rather than reporting a green run that measured nothing.
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
+    if ! bash scripts/audit-skips.sh >/tmp/skip-audit.txt 2>&1; then
+        cat /tmp/skip-audit.txt
+        echo "skip audit failed - fix the suites before running the lane" >&2
+        exit 1
+    fi
+else
+    echo "WARNING: python3 + PyYAML absent, skip audit not run" | tee -a "$OUT"
+fi
+
 for s in "$@"; do
     suite="$(ls suites/${s}-*.bats 2>/dev/null | head -1)"
     if [ -z "$suite" ]; then
