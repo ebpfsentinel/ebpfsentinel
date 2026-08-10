@@ -774,7 +774,6 @@ mod tests {
         "bpf_xdp_metadata_rx_timestamp",
         "bpf_xdp_metadata_rx_vlan_tag",
         "bpf_xdp_xfrm_state_release",
-        "bpf_user_ringbuf_drain",
     ];
 
     /// Pull the `bpf_*(` call names out of a source file, ignoring `//`

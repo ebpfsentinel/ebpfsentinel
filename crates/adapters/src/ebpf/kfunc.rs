@@ -4,7 +4,7 @@
 //!
 //! The eBPF programs call kernel kfuncs (e.g. `bpf_skb_ct_lookup`,
 //! `bpf_ct_release` from `nf_conntrack`, plus the dynptr / xdp-metadata
-//! families from vmlinux). aya 0.13 has no kfunc support, so the
+//! families from vmlinux). aya 0.14.0 has no kfunc support, so the
 //! userspace loader resolves each kfunc symbol to its kernel BTF id
 //! itself and patches the call instruction at load time — the same
 //! "do it outside aya via raw syscalls" approach used for BPF tokens.

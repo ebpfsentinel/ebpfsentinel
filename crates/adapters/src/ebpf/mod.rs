@@ -3,7 +3,6 @@ pub mod bpf_token;
 // NOTE: `netkit` uses raw BPF_LINK_CREATE syscall — the module itself
 // has #[allow(unsafe_code)] at the top.
 pub mod config_flags_manager;
-pub mod config_ringbuf_writer;
 pub mod conntrack_map_manager;
 pub mod cpumap;
 pub mod dlp_attach;

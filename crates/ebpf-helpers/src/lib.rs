@@ -26,7 +26,6 @@ pub mod metrics;
 pub mod net;
 pub mod ringbuf;
 pub mod tc;
-pub mod user_ringbuf;
 pub mod xdp;
 
 /// Compiler barrier: prevents LLVM from reordering memory accesses across this

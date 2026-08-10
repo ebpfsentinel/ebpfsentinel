@@ -6,7 +6,7 @@
 //! which map types, program types, and attach types an unprivileged
 //! consumer is allowed to load — without giving the consumer
 //! `CAP_BPF` / `CAP_NET_ADMIN`. This module wraps `BPF_TOKEN_CREATE`
-//! directly via `libc::syscall(SYS_bpf, …)` because aya 0.13 does not
+//! directly via `libc::syscall(SYS_bpf, …)` because aya 0.14.0 does not
 //! expose the syscall yet (upstream PR #1515 is in-flight at time of
 //! writing).
 //!

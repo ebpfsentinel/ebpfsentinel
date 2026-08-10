@@ -185,6 +185,65 @@ crates/ebpf-programs/<program>/
 
 Programs share types via `ebpf-common` (`#[repr(C)]` structs).
 
+### The eBPF Loader Diverges from Upstream aya
+
+The agent does **not** load eBPF with aya. Everything goes through
+`crates/adapters/src/ebpf/kfunc_loader.rs::load_object_token`, which creates the
+maps and loads the programs with raw `bpf(2)` syscalls. aya is used only as the
+typed-map wrapper: the raw map fds are wrapped back into `aya::maps::Map`
+variants so every map manager and event reader consumes them unchanged. Expect
+to work inside this divergence rather than around it; it is permanent, not a
+migration in progress.
+
+Two kernel features force it, and aya 0.14.0 supports neither:
+
+- **BPF token delegation.** The agent runs with no `CAP_BPF`. Every
+  `BPF_MAP_CREATE` and `BPF_PROG_LOAD` must carry `BPF_F_TOKEN_FD` plus a token
+  fd. aya has no field for either, so no aya call can load anything here.
+- **kfunc relocation.** A kfunc call is a `BPF_PSEUDO_KFUNC_CALL` instruction
+  whose `imm` holds a kernel BTF id and whose `off` indexes a program-load
+  `fd_array` of module BTF fds. aya emits neither, and `relocate_calls` would
+  otherwise read the call as a BPF-to-BPF call to an unknown function.
+
+#### Upstream surface we depend on
+
+Only the pieces below are load-bearing. A bump breaks the loader only if one of
+them moves.
+
+| Item | Crate | Used for |
+|---|---|---|
+| `Object::parse`, `fixup_and_sanitize_btf`, `ProgramSection` | `aya-obj` | Parsing the prepatched ELF and walking its programs |
+| `btf::Btf::to_bytes`, `btf::BtfFeatures::new` | `aya-obj` | Building the BTF blob loaded before map creation |
+| `aya_obj::Map` (`Map::Btf` in particular) | `aya-obj` | Reading map definitions for `raw_map_create` |
+| `aya_obj::generated::{bpf_insn, bpf_map_type}` | `aya-obj` | Instruction rewriting and map-type dispatch |
+| `aya::maps::{Map, MapData}` | `aya` | Wrapping raw fds back into typed maps |
+| `aya::features()` | `aya` | `devmap_prog_id` / `cpumap_prog_id` probes, so our raw create agrees with what the wrapper expects |
+| `aya::programs::{loaded_links, links::LinkType}` | `aya` | Best-effort attach introspection when `CAP_SYS_ADMIN` happens to be present |
+
+`BtfFeatures::new` is the sharpest edge: it is a positional constructor and
+gained an eighth argument (`btf_datasec_zero`) in `aya-obj` 0.3.0. A future
+argument lands as a compile error, which is the good case; an argument whose
+*meaning* changes lands as a verifier rejection at runtime.
+
+#### Costing the next aya bump
+
+1. Re-read `aya::maps::Map::from` (`maps/mod.rs`) for map types newly promoted
+   out of `Self::Unsupported`. `BPF_MAP_TYPE_USER_RINGBUF` is still unsupported
+   as of 0.14.0, which is why no config-push path exists.
+2. Re-check `BtfFeatures::new`'s arity and argument order.
+3. Diff `aya::sys::bpf::bpf_create_map` against our `map_create_attr`: our raw
+   create is a deliberate re-derivation of it and must stay behaviourally
+   identical, or a map the kernel creates one way gets bound another.
+4. Grep for `aya 0.14.0` in `crates/adapters/src/ebpf/` - each occurrence is a
+   claim about upstream that must be re-verified, not just renumbered.
+5. Run the loader unit tests plus at least one VM lane; the map-create layout
+   tests catch mismatches that compile fine.
+
+Adopting upstream `EbpfLoader` only becomes possible once aya can pass a token
+fd on map-create and prog-load **and** relocate kfunc calls. Until then, treat
+`kfunc_loader.rs`, `kfunc_attach.rs`, `bpf_token.rs` and `map_store.rs` as one
+unit: they are the load path.
+
 ### Adding a New Security Domain
 
 1. Create engine in `crates/domain/src/<name>/` (entity, engine, error, mod)

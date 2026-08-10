@@ -124,7 +124,7 @@ impl ThreatIntelMapManager {
 
     // ── Batch map operations (kernel 5.6+) ──────────────────────────────
     //
-    // aya 0.13.1 does not expose BPF_MAP_UPDATE_BATCH. When available,
+    // aya 0.14.0 does not expose BPF_MAP_UPDATE_BATCH. When available,
     // batch operations can load thousands of IOCs 10-100x faster:
     //
     //   let keys: Vec<ThreatIntelKey> = iocs.iter().map(|i| i.to_key()).collect();

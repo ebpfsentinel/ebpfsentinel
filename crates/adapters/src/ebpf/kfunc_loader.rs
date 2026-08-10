@@ -2,36 +2,37 @@
 
 //! kfunc-aware eBPF program loader (kernel 5.18+ for module kfuncs).
 //!
-//! aya 0.13 cannot relocate kfunc calls: a kfunc call is a
+//! aya 0.14.0 cannot relocate kfunc calls: a kfunc call is a
 //! `BPF_PSEUDO_KFUNC_CALL` instruction whose `imm` must hold the kfunc's
 //! kernel BTF id and whose `off` indexes a program-load `fd_array` of module
-//! BTF fds — neither of which aya emits. This module fills that gap outside
+//! BTF fds - neither of which aya emits. This module fills that gap outside
 //! aya, the same way [`super::bpf_token`] adds features aya lacks via raw
-//! syscalls.
+//! syscalls. `CONTRIBUTING.md` records the full upstream surface this loader
+//! depends on and what a future aya bump costs.
 //!
 //! The loader is deliberately surgical so the rest of the agent is untouched:
 //!
 //! 1. [`prepatch_kfunc_calls`] rewrites every kfunc call site in the raw ELF
 //!    to `src_reg = BPF_PSEUDO_KFUNC_CALL` and stashes a sentinel name-index in
-//!    `imm`. aya's `EbpfLoader::load` then parses, creates and **hosts all
-//!    maps**, and relocates the rest — its `relocate_calls` skips these sites
-//!    because `insn_is_call` only matches `src_reg == 1`. Every existing map
-//!    manager and event reader keeps working against aya's hosted maps.
-//! 2. The caller reads aya's hosted map fds back by full name (every
-//!    `aya::maps::Map` variant wraps a `MapData` whose `fd()` is public) and
-//!    hands them to [`load_kfunc_programs`], which re-parses the same prepatched
-//!    ELF, relocates the programs against those exact kernel maps, rewrites each
-//!    sentinel back to its real `(btf_id, fd_array index)`, and issues a raw
-//!    `BPF_PROG_LOAD` with the module BTF `fd_array`.
+//!    `imm`, so the later relocation pass cannot mistake a kfunc call for a
+//!    BPF-to-BPF call to an unknown function.
+//! 2. [`load_object_token`] parses the prepatched ELF with `aya_obj`, loads the
+//!    program BTF, creates every map itself through the token, then hands the
+//!    map fds to [`load_kfunc_programs`], which relocates the programs against
+//!    those exact kernel maps, rewrites each sentinel back to its real
+//!    `(btf_id, fd_array index)`, and issues a raw `BPF_PROG_LOAD` with the
+//!    module BTF `fd_array`.
+//! 3. Each created map fd is wrapped back into the matching `aya::maps::Map`
+//!    variant (`wrap_map_data`) and handed to [`super::map_store::TokenMaps`],
+//!    so every existing map manager and event reader keeps working against
+//!    aya's typed wrappers without knowing who created the map.
 //!
-//! The fds come straight from aya keyed by full ELF name, so the bridge is
-//! exact: no pinning (`BPF_OBJ_PIN` is refused on integrity-enforcing kernels)
-//! and no kernel-name matching (the kernel truncates map names to 15 bytes,
-//! which collides distinct maps like `FIREWALL_RULE_COUNT` and
-//! `FIREWALL_RULE_COUNT_V6`).
+//! Maps are keyed by full ELF name, never by kernel name: the kernel truncates
+//! map names to 15 bytes, which collides distinct maps like
+//! `FIREWALL_RULE_COUNT` and `FIREWALL_RULE_COUNT_V6`.
 //!
-//! aya never loads the kfunc programs themselves — the caller attaches the
-//! returned program fds directly (see the raw-attach helpers).
+//! aya loads nothing here - not the maps, not the programs. The caller attaches
+//! the returned program fds directly (see the raw-attach helpers).
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
@@ -1091,9 +1092,8 @@ fn map_create_attr(name: &str, def: &aya_obj::Map, btf_fd: Option<RawFd>) -> Map
 
 /// Attach the process-global BPF token to a map-create request, if there is one.
 ///
-/// Token mode and capability mode share `raw_map_create`, so this is the entire
-/// difference between them: the same layout, plus a token fd the kernel checks
-/// the request against.
+/// Every map goes through `raw_map_create` with the same layout; the token is
+/// the only addition: a flag plus an fd the kernel checks the request against.
 fn apply_bpf_token(attr: &mut MapCreateAttr, token: Option<i32>) {
     if let Some(token) = token {
         attr.map_flags |= super::bpf_token::BPF_F_TOKEN_FD;
@@ -1299,9 +1299,8 @@ pub fn load_object_token(
 
     // Pre-patch every kfunc call to a sentinel (no-op when the object has no
     // kfuncs) so `relocate_calls` does not mistake a kfunc call for a BPF-to-BPF
-    // call to an unknown function — exactly what the capability-mode HasModule
-    // path does before `load_kfunc_programs`. `load_kfunc_programs` restores the
-    // real `(btf_id, fd_array idx)` afterward.
+    // call to an unknown function. `load_kfunc_programs` restores the real
+    // `(btf_id, fd_array idx)` afterward.
     let patched = prepatch_kfunc_calls(elf)?;
 
     // The program BTF must exist before map creation so BTF-typed maps can
@@ -1330,8 +1329,8 @@ pub fn load_object_token(
         .map_err(|e| KfuncLoaderError::MapWrap(e.to_string()))?;
 
     let resolver = KfuncResolver::new()?;
-    // Mirror the capability-mode device-bound metadata fallback: try device
-    // bound first (so `bpf_xdp_metadata_rx_*` resolve), then retry neutralized.
+    // Device-bound metadata fallback: try device bound first (so
+    // `bpf_xdp_metadata_rx_*` resolve), then retry neutralized.
     let programs = if dev_bound_ifindex.is_some() && uses_dev_bound_metadata_kfuncs(&patched) {
         match load_kfunc_programs(&patched, &resolver, &hosted, dev_bound_ifindex) {
             Ok(p) => p,
@@ -1371,11 +1370,11 @@ mod tests {
 
     #[test]
     fn a_bpf_token_only_adds_to_the_map_create_request() {
-        // Token mode and capability mode share this request, and only the
-        // former runs on a delegated bpffs. If a token could reach any of the
-        // layout fields, the two modes would create maps the typed userspace
-        // wrapper binds differently - the failure being silent in both
-        // directions. Nothing but the flag and the fd may differ.
+        // The token authorizes the request, it must not shape it. If a token
+        // could reach any of the layout fields, a tokened and an untokened
+        // create would produce maps the typed userspace wrapper binds
+        // differently - the failure being silent in both directions. Nothing
+        // but the flag and the fd may differ.
         let layout = MapCreateAttr {
             map_type: 1,
             key_size: 8,

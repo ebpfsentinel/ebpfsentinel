@@ -10,12 +10,12 @@
 //! - TC: `BPF_LINK_CREATE` with `attach_type = BPF_TCX_INGRESS|EGRESS` (TCX,
 //!   kernel 6.6+ — the same path aya uses for modern TC attach).
 //! - tail calls: a raw `BPF_MAP_UPDATE_ELEM` into a `PROG_ARRAY`, so a slot can
-//!   point at either an aya-loaded or a raw-loaded program fd.
+//!   point at a raw-loaded program fd.
 //! - uprobe: `perf_event_open` against the kernel `uprobe` PMU (one event per
 //!   online CPU for system-wide coverage), then `PERF_EVENT_IOC_SET_BPF` to
-//!   bind the program fd and `PERF_EVENT_IOC_ENABLE`. In capability mode aya
-//!   loads and attaches uprobes itself; this path exists for BPF-token mode,
-//!   where aya never created a program handle for the raw-loaded fd.
+//!   bind the program fd and `PERF_EVENT_IOC_ENABLE`. aya would load and
+//!   attach uprobes itself, but it never created a program handle for a
+//!   raw-loaded fd.
 
 use std::ffi::CString;
 use std::io;

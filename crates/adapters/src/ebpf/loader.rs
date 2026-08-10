@@ -535,7 +535,7 @@ impl EbpfLoader {
     // a link without any gap. Packets are processed by the old program until
     // the exact moment the new program takes over.
     //
-    // aya 0.13.1: Link::update() is not exposed. Use raw syscall:
+    // aya 0.14.0: Link::update() is not exposed. Use raw syscall:
     //   bpf(BPF_LINK_UPDATE, &bpf_attr { link_update: { link_fd, new_prog_fd, ... } })
     //
     // Requires storing link FDs after initial attachment (currently discarded).
@@ -556,7 +556,7 @@ impl EbpfLoader {
     //   assert_eq!(result.return_val, XDP_DROP); // or TC_ACT_OK etc.
     //   println!("Duration: {}ns per packet", result.duration / 1000);
     //
-    // aya 0.13.1: Program::test_run() is available.
+    // aya 0.14.0: Program::test_run() is available.
     //
     // TODO(Wave 7): Add eBPF unit test suite using test_run with crafted packets.
 
@@ -566,7 +566,8 @@ impl EbpfLoader {
     // RL_TIER_CONFIG), call `BPF_MAP_FREEZE` via `libc::syscall(SYS_bpf, BPF_MAP_FREEZE, ...)` to
     // prevent any subsequent writes — this hardens against userspace-side map tampering after init.
     //
-    // Blocked by: aya 0.13.1 does not expose a `Map::freeze()` method. The underlying kernel
+    // Blocked by: aya 0.14.0 exposes no public `Map::freeze()`; it freezes rodata maps
+    // internally only. The underlying kernel
     // syscall is available since Linux 5.2 (BPF_MAP_FREEZE cmd). When aya adds freeze support,
     // wire it here after each static map population. Maps that receive runtime updates
     // (CONFIG_FLAGS, CT_CONFIG, DDOS_SYN_CONFIG, ICMP_CONFIG, QOS_PIPE_CONFIG, etc.) must NOT
