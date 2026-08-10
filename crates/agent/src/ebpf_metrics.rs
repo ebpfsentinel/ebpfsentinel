@@ -106,7 +106,19 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (4, "total_seen"),
             (5, "mtu_exceeded"),
         ],
-        "IDS_METRICS" | "THREATINTEL_METRICS" => &[
+        // tc-ids carries one index tc-threatintel does not: attribution to
+        // the sending cgroup, which is counted separately from a tenant
+        // resolved through the cgroup map.
+        "IDS_METRICS" => &[
+            (0, "matched"),
+            (1, "dropped"),
+            (2, "errors"),
+            (3, "events_dropped"),
+            (4, "total_seen"),
+            (5, "cgroup_resolved"),
+            (6, "cgroup_attributed"),
+        ],
+        "THREATINTEL_METRICS" => &[
             (0, "matched"),
             (1, "dropped"),
             (2, "errors"),
@@ -298,6 +310,24 @@ mod tests {
         assert_eq!(
             labels.iter().find(|(idx, _)| *idx == 5).map(|(_, l)| *l),
             Some("cgroup_resolved")
+        );
+    }
+
+    #[test]
+    fn ids_metrics_separate_attribution_from_tenant_resolution() {
+        // The two events are unrelated: attribution happens for any packet
+        // whose sending cgroup is visible, tenant resolution only for one
+        // the cgroup map names. One shared index would report a tenant that
+        // was never resolved.
+        let labels = metric_labels("IDS_METRICS");
+        assert_eq!(
+            labels.iter().find(|(idx, _)| *idx == 6).map(|(_, l)| *l),
+            Some("cgroup_attributed")
+        );
+        assert!(
+            !metric_labels("THREATINTEL_METRICS")
+                .iter()
+                .any(|(idx, _)| *idx == 6)
         );
     }
 

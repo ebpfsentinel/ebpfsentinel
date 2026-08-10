@@ -83,9 +83,9 @@ static IDS_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue, 10240> = HashMap::n
 #[btf_map]
 static IDS_SRC_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue, 10240> = HashMap::new();
 
-/// Per-CPU packet counters. Index: 0=matched, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen, 5=cgroup_tenant_resolved.
+/// Per-CPU packet counters. Index: 0=matched, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen, 5=cgroup_tenant_resolved, 6=cgroup_attributed.
 #[btf_map]
-static IDS_METRICS: PerCpuArray<u64, 6> = PerCpuArray::new();
+static IDS_METRICS: PerCpuArray<u64, 7> = PerCpuArray::new();
 
 /// Shared kernel→userspace event ring buffer (4 MB).
 ///
@@ -185,6 +185,11 @@ const METRIC_EVENTS_DROPPED: u32 = 3;
 const METRIC_TOTAL_SEEN: u32 = 4;
 /// Tenant resolved via cgroup_id → TENANT_CGROUP_MAP lookup.
 const METRIC_CGROUP_TENANT_RESOLVED: u32 = 5;
+/// A classified packet was attributed to the cgroup that sent it. Distinct
+/// from the tenant counter above: attribution needs no map entry, so
+/// sharing one index would make a mapped tenant indistinguishable from any
+/// container sending traffic.
+const METRIC_CGROUP_ATTRIBUTED: u32 = 6;
 
 /// 75% threshold for the 4 MiB EVENTS ring buffer. Must stay in sync
 /// with the `RingBuf::with_byte_size` call above.
@@ -324,7 +329,7 @@ unsafe fn resolve_skb_cgroup_id(ctx: &TcContext) -> u64 {
     unsafe {
         let from_skb = bpf_skb_cgroup_id(ctx.skb.skb as *mut _);
         if from_skb != 0 {
-            increment_metric(METRIC_CGROUP_TENANT_RESOLVED);
+            increment_metric(METRIC_CGROUP_ATTRIBUTED);
             return from_skb;
         }
         bpf_get_current_cgroup_id()
