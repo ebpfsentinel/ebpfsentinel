@@ -40,6 +40,10 @@ RETRY_MAX_DELAY="${RETRY_MAX_DELAY:-10}"
 AGENT_PID_FILE="${AGENT_PID_FILE:-/tmp/ebpfsentinel-test.pid}"
 AGENT_LOG_FILE="${AGENT_LOG_FILE:-/tmp/ebpfsentinel-test.log}"
 
+# Where every agent log is preserved, pass or fail. A log kept only when a
+# test fails is missing exactly when a test passes for the wrong reason.
+TEST_ARTIFACT_DIR="${TEST_ARTIFACT_DIR:-/tmp/ebpfsentinel-artifacts}"
+
 # ── HTTP status persistence (workaround for subshell variable scoping) ─
 # Suffix with the effective uid so a suite run as root and one run as the
 # unprivileged test user never fight over a single /tmp inode (the loser hits

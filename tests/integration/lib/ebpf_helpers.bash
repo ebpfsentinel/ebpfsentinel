@@ -367,6 +367,8 @@ stop_ebpf_agent() {
         docker rm -f "$EBPF_DOCKER_CONTAINER" >/dev/null 2>&1 || true
         rm -f "$AGENT_PID_FILE"
         EBPF_AGENT_VIA_DOCKER="false"
+        # The container is gone, but the mirrored log stays on disk.
+        archive_agent_log "docker"
     else
         stop_agent 2>/dev/null || true
         # Stop the warden broker started alongside the local-binary agent.

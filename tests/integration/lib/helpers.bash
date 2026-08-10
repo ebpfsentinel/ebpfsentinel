@@ -63,6 +63,44 @@ _kill_port_holders() {
 
 # ── Agent lifecycle ────────────────────────────────────────────────
 
+# archive_agent_log [label]
+# Copies the current agent log (and its warden sidecar) into
+# TEST_ARTIFACT_DIR, whatever the outcome of the test that produced it.
+#
+# Called on every stop and before every start, because start truncates the
+# log: a suite that dies between the two would otherwise take its evidence
+# with it. The size of what was archived is remembered next to the log so a
+# stop followed by a start does not file the same bytes twice.
+archive_agent_log() {
+    local label="${1:-}"
+    [ -s "$AGENT_LOG_FILE" ] || return 0
+
+    local size marker
+    size="$(wc -c <"$AGENT_LOG_FILE" 2>/dev/null || echo 0)"
+    marker="${AGENT_LOG_FILE}.archived"
+    [ "$(cat "$marker" 2>/dev/null || echo -1)" = "$size" ] && return 0
+
+    local suite="manual"
+    if [ -n "${BATS_TEST_FILENAME:-}" ]; then
+        suite="$(basename "$BATS_TEST_FILENAME" .bats)"
+    fi
+    local dir="${TEST_ARTIFACT_DIR}/${suite}"
+    mkdir -p "$dir" 2>/dev/null || return 0
+
+    local n=1
+    while [ -e "${dir}/agent-${n}.log" ]; do
+        n=$((n + 1))
+    done
+    local dest="${dir}/agent-${n}.log"
+    [ -n "$label" ] && dest="${dir}/agent-${n}-${label}.log"
+
+    cp "$AGENT_LOG_FILE" "$dest" 2>/dev/null || return 0
+    [ -s "${AGENT_LOG_FILE}.warden" ] &&
+        cp "${AGENT_LOG_FILE}.warden" "${dest%.log}.warden.log" 2>/dev/null
+    echo "$size" >"$marker" 2>/dev/null || true
+    return 0
+}
+
 # start_agent <config_file> [extra_args...]
 # Starts the agent in the background with the given config.
 # Sets AGENT_PID and writes to AGENT_PID_FILE.
@@ -72,6 +110,10 @@ start_agent() {
 
     # Kill stale agent if PID file exists
     stop_agent 2>/dev/null || true
+
+    # The redirection below truncates the log, so anything a previous run
+    # left is preserved first.
+    archive_agent_log "pre-start"
 
     # Kill any process still listening on our ports (catches stale agents from previous runs)
     _kill_port_holders "${AGENT_HTTP_PORT}" "${AGENT_GRPC_PORT}"
@@ -137,12 +179,14 @@ stop_agent() {
     fi
 
     if [ -z "$pid" ]; then
+        archive_agent_log
         return 0
     fi
 
     # Check if process is still alive
     if ! kill -0 "$pid" 2>/dev/null; then
         rm -f "$AGENT_PID_FILE"
+        archive_agent_log
         return 0
     fi
 
@@ -167,6 +211,7 @@ stop_agent() {
 
     rm -f "$AGENT_PID_FILE"
     unset AGENT_PID
+    archive_agent_log
 }
 
 # wait_for_agent [url] [max_attempts]
