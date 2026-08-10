@@ -1,23 +1,30 @@
+# Builds the container images to prove they still build. Nothing is pushed.
+#
+# Every image a customer can pull is produced by `cut-release.yml` in
+# ebpfsentinel-release, from a commit the release manifest pins. That is what
+# makes the signed inventory complete: an image that exists in the registry but
+# not in a release run could not have been signed by it. So this workflow stops
+# at `push: false` - its job is to catch a broken Dockerfile in the pull request
+# that broke it, not to publish.
 name: Docker
 
 on:
-  workflow_call:
-    inputs:
-      version:
-        description: "Version to build (e.g. 2026.3.1). If empty, auto-resolves from git."
-        required: false
-        type: string
+  pull_request:
+    paths:
+      - "Dockerfile.*"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/docker.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile.*"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/docker.yml"
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to build (e.g. 2026.3.1). If empty, auto-resolves from git."
-        required: false
-        type: string
-
-env:
-  REGISTRY: ghcr.io
-  IMAGE_DESCRIPTION: High-performance eBPF network security agent
-  WARDEN_DESCRIPTION: Privileged kernel-operation control plane for a rootless eBPFsentinel agent
 
 permissions:
   contents: read
@@ -27,43 +34,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── Prepare: resolve version and repo name ────────────────────────
-  prepare:
-    name: Prepare
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      name_lower: ${{ steps.repo.outputs.name_lower }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Resolve version
-        id: version
-        run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            VERSION="${{ inputs.version }}"
-          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION="0.0.0-dev.$(git rev-parse --short HEAD)"
-          fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: ${VERSION}"
-
-      - name: Lowercase repository name
-        id: repo
-        run: |
-          echo "name_lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
-  # ── Build eBPF programs once on amd64 (output is arch-independent) ─
+  # The agent image ships the compiled eBPF objects from the build context, so
+  # they exist before any image build starts. Output is arch-independent, so
+  # one build serves every platform.
   build-ebpf:
     name: Build eBPF
-    needs: prepare
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -77,10 +55,6 @@ jobs:
 
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev
-
-      - uses: ./.github/actions/stamp-version
-        with:
-          version: ${{ needs.prepare.outputs.version }}
 
       - name: Build eBPF programs
         run: |
@@ -97,190 +71,43 @@ jobs:
           path: ebpf-out/
           retention-days: 7
 
-  # ── Build per-platform Docker images ──────────────────────────────
-  #
-  # Two images per platform, because a deployment needs both halves. The agent
-  # image is the rootless agent alone: every capability dropped, its own user
-  # namespace, its eBPF loaded through a token against a bpffs the warden
-  # delegated to it. Publish only the agent and every install path reaches
-  # API-only mode and attaches nothing.
-  build-images:
-    name: Build ${{ matrix.component }} (${{ matrix.platform }})
-    needs: [prepare, build-ebpf]
-    runs-on: ${{ matrix.runner }}
+  # Two images, because a deployment needs both halves: the rootless agent and
+  # the warden that delegates the privileged kernel operations to it. A change
+  # that breaks either one breaks the install.
+  build:
+    name: Build ${{ matrix.component }}
+    needs: [build-ebpf]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     strategy:
       fail-fast: false
       matrix:
         component: [agent, warden]
-        platform: [linux/amd64, linux/arm64]
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-          - component: agent
-            dockerfile: Dockerfile.agent
-            suffix: ""
-            title: eBPFsentinel
-          - component: warden
-            dockerfile: Dockerfile.warden
-            suffix: "-warden"
-            title: eBPFsentinel-warden
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      # Only the agent image carries the compiled programs; the warden loads no
-      # eBPF and holds no maps.
       - uses: actions/download-artifact@v8
         if: matrix.component == 'agent'
         with:
           name: ebpf-programs
           path: ebpf-out/
 
-      - uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v4
 
-      - name: Extract platform architecture
-        run: echo "PLATFORM_ARCH=${platform##*/}" >> "$GITHUB_ENV"
-        env:
-          platform: ${{ matrix.platform }}
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: ./.github/actions/stamp-version
-        with:
-          version: ${{ needs.prepare.outputs.version }}
-
-      - name: Generate metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.name_lower }}${{ matrix.suffix }}
-          tags: |
-            type=raw,value=${{ needs.prepare.outputs.version }}-${{ env.PLATFORM_ARCH }}
-          labels: |
-            org.opencontainers.image.title=${{ matrix.title }}
-            org.opencontainers.image.description=${{ matrix.component == 'agent' && env.IMAGE_DESCRIPTION || env.WARDEN_DESCRIPTION }} (${{ env.PLATFORM_ARCH }})
-            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
-            org.opencontainers.image.vendor=eBPFsentinel
-            org.opencontainers.image.licenses=AGPL-3.0-only
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.documentation=https://github.com/ebpfsentinel/ebpfsentinel-docs
-            org.opencontainers.image.revision=${{ github.sha }}
-
-      - name: Build and push platform image
-        uses: docker/build-push-action@v6
+      # amd64 only: these stages compile the whole Rust workspace, and doing it
+      # a second time under arm64 emulation costs an hour to catch the same
+      # Dockerfile mistakes. The release build does both, natively.
+      - name: Build image
+        uses: docker/build-push-action@v7
         env:
           DOCKER_BUILD_SUMMARY: false
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
-          platforms: ${{ matrix.platform }}
-          push: true
+          file: Dockerfile.${{ matrix.component }}
+          platforms: linux/amd64
+          push: false
           provenance: false
           sbom: false
-          build-args: |
-            VERSION=${{ needs.prepare.outputs.version }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.component }}-${{ env.PLATFORM_ARCH }}
-          cache-to: type=gha,scope=${{ matrix.component }}-${{ env.PLATFORM_ARCH }},mode=max
-          outputs: type=image,oci-mediatypes=true
-
-  # ── Create multi-arch manifests ───────────────────────────────────
-  #
-  # Both images in one job rather than a matrix: the signing jobs below need a
-  # digest per image, and matrix job outputs are last-writer-wins.
-  create-manifest:
-    name: Multi-arch Manifests
-    needs: [prepare, build-images]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    outputs:
-      agent_image: ${{ steps.manifests.outputs.agent_image }}
-      agent_digest: ${{ steps.manifests.outputs.agent_digest }}
-      warden_image: ${{ steps.manifests.outputs.warden_image }}
-      warden_digest: ${{ steps.manifests.outputs.warden_digest }}
-    steps:
-      - uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Create and push multi-arch manifests
-        id: manifests
-        env:
-          REGISTRY: ${{ env.REGISTRY }}
-          NAME: ${{ needs.prepare.outputs.name_lower }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-          AGENT_DESCRIPTION: ${{ env.IMAGE_DESCRIPTION }}
-          WARDEN_DESCRIPTION: ${{ env.WARDEN_DESCRIPTION }}
-          SOURCE: https://github.com/${{ github.repository }}
-        run: |
-          set -euo pipefail
-          for component in agent warden; do
-            case "$component" in
-              agent)
-                image="${REGISTRY}/${NAME}"
-                description="${AGENT_DESCRIPTION}"
-                ;;
-              warden)
-                image="${REGISTRY}/${NAME}-warden"
-                description="${WARDEN_DESCRIPTION}"
-                ;;
-            esac
-
-            docker buildx imagetools create \
-              -t "${image}:${VERSION}" \
-              -t "${image}:latest" \
-              --annotation="index:org.opencontainers.image.description=${description}" \
-              --annotation="index:org.opencontainers.image.source=${SOURCE}" \
-              --annotation="index:org.opencontainers.image.licenses=AGPL-3.0-only" \
-              "${image}:${VERSION}-amd64" \
-              "${image}:${VERSION}-arm64"
-
-            docker buildx imagetools inspect "${image}:${VERSION}"
-            digest="$(docker buildx imagetools inspect "${image}:${VERSION}" --format '{{.Manifest.Digest}}')"
-
-            echo "${component}_image=${image}" >> "$GITHUB_OUTPUT"
-            echo "${component}_digest=${digest}" >> "$GITHUB_OUTPUT"
-            echo "${component}: ${image}@${digest}"
-          done
-
-  # cosign keyless signature + SBOM of each multi-arch manifest, under the
-  # single ebpfsentinel-release signing identity. Both images are admission-
-  # gated, so an unsigned warden would block the agent it has to serve.
-  sign:
-    name: Sign & attest agent
-    needs: [create-manifest]
-    permissions:
-      id-token: write
-      packages: write
-      contents: read
-    uses: ebpfsentinel/ebpfsentinel-release/.github/workflows/sign-image.yml@v1
-    with:
-      image: ${{ needs.create-manifest.outputs.agent_image }}
-      digest: ${{ needs.create-manifest.outputs.agent_digest }}
-
-  sign-warden:
-    name: Sign & attest warden
-    needs: [create-manifest]
-    permissions:
-      id-token: write
-      packages: write
-      contents: read
-    uses: ebpfsentinel/ebpfsentinel-release/.github/workflows/sign-image.yml@v1
-    with:
-      image: ${{ needs.create-manifest.outputs.warden_image }}
-      digest: ${{ needs.create-manifest.outputs.warden_digest }}
+          cache-from: type=gha,scope=ci-${{ matrix.component }}
+          cache-to: type=gha,scope=ci-${{ matrix.component }},mode=max
