@@ -680,6 +680,12 @@ impl EventDispatcher {
                 return; // Suppressed by threshold
             }
 
+            // The classifier already resolved the sending cgroup, so a match
+            // coming out of a container can name it. Resolve after the
+            // threshold check: a suppressed match never reaches an operator,
+            // and the lookup is a cgroupfs walk on a cache miss.
+            alert.container = self.resolve_container_by_id(event.cgroup_id);
+
             // Block-mode IDS verdicts mark the matching conntrack
             // entry `IPS_DYING` via `bpf_ct_change_status` on the
             // kernel side (tc-ids program). Record the verdict on
@@ -825,6 +831,10 @@ impl EventDispatcher {
         // downstream may drop the alert, but the IOC did match.
         self.metrics.record_threatintel_match(&feed_id);
 
+        // Both alerts describe the same packet, so they carry the same
+        // provenance: resolve once and hand the result to each.
+        let container = self.resolve_container_by_id(event.cgroup_id);
+
         let ti_alert = ThreatIntelAlert {
             feed_id,
             confidence,
@@ -837,7 +847,7 @@ impl EventDispatcher {
             dst_port: event.dst_port,
             protocol: event.protocol,
             timestamp_ns: event.timestamp_ns,
-            container: None,
+            container: container.clone(),
         };
 
         // Reuse the IDS alert channel — AlertPipeline handles both IDS and ThreatIntel.
@@ -859,7 +869,7 @@ impl EventDispatcher {
             rule_index: 0,
             timestamp_ns: event.timestamp_ns,
             matched_domain: None,
-            container: None,
+            container,
             rate_based: false,
         };
 
@@ -1253,7 +1263,7 @@ impl EventDispatcher {
                 },
                 severity: domain::common::entity::Severity::Medium,
                 timestamp_ns: header.timestamp_ns,
-                container: None,
+                container: self.resolve_container_by_id(header.cgroup_id),
             };
             let _ = self.alert_tx.try_send(AlertEvent::Dns(dns_alert));
         }
@@ -1798,6 +1808,66 @@ mod tests {
         assert_eq!(alert.severity, Severity::High);
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "ids");
+    }
+
+    #[tokio::test]
+    async fn ids_alert_carries_the_container_the_datapath_resolved() {
+        // The classifier writes the sending cgroup into the event, so an
+        // alert raised for a containerised process has to name it. Left
+        // unset, the field reads as "host traffic" and the operator loses
+        // the only attribution the kernel could provide.
+        struct StubIds(String);
+        impl domain::container::engine::CgroupIdResolver for StubIds {
+            fn path_for_id(&self, cgroup_id: u64) -> Option<String> {
+                (cgroup_id == 42).then(|| self.0.clone())
+            }
+        }
+        struct NoProc;
+        impl domain::container::engine::CgroupReader for NoProc {
+            fn read_cgroup(&self, _pid: u32) -> std::io::Result<String> {
+                Err(std::io::Error::other("no proc in this test"))
+            }
+        }
+
+        let cid = "b".repeat(64);
+        let resolver = Arc::new(
+            domain::container::engine::ContainerResolverEngine::new(Arc::new(NoProc), 16)
+                .with_id_resolver(Arc::new(StubIds(format!(
+                    "/system.slice/docker-{cid}.scope"
+                )))),
+        );
+
+        let ids = make_service_with_rules(vec![make_ids_rule("ids-001")]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_container_resolver(resolver);
+
+        let mut event = make_event(EVENT_TYPE_IDS, 0);
+        event.cgroup_id = 42;
+        dispatcher.dispatch_event(event);
+
+        let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
+        assert_eq!(
+            alert.container.as_ref().and_then(|c| c.container_id()),
+            Some(cid.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn ids_alert_from_host_traffic_names_no_container() {
+        // cgroup_id 0 is the datapath saying it captured no cgroup, not a
+        // resolution failure, so nothing is looked up and no container is
+        // claimed.
+        let ids = make_service_with_rules(vec![make_ids_rule("ids-001")]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 0));
+
+        let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
+        assert!(alert.container.is_none());
     }
 
     #[tokio::test]
