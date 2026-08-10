@@ -25,11 +25,15 @@ setup_file() {
     require_tool jq
     require_tool bc
     require_tool curl
-    require_slowhttptest
 
+    # Topology before tooling: setup-attacker.sh installs slowhttptest on the
+    # attacker VM only, so anywhere else its absence is the wrong lane rather
+    # than a missing package, and naming the package sends the reader after an
+    # install that host was never meant to carry.
     if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
         env_skip "suite 39 requires EBPF_2VM_MODE=true (attacker VM driving real slow flood)"
     fi
+    require_slowhttptest
 
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"
