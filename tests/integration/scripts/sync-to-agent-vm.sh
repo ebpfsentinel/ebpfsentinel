@@ -44,6 +44,26 @@ DOCKER_IMAGE="${DOCKER_IMAGE:-ebpfsentinel:integration-test}"
 # points at the object dir, so keep the two in step.
 REMOTE_EBPF_DIR="/usr/local/lib/ebpfsentinel"
 
+# THE LANE RESOLVES TWO DIFFERENT SETS OF PATHS, AND INSTALLING ONLY THE FIRST
+# IS INDISTINGUISHABLE FROM A SUCCESSFUL SYNC. The API suites read the installed
+# binary under /usr/local, but `_has_local_ebpf` in lib/ebpf_helpers.bash gates
+# on ${PROJECT_ROOT}/target/release/ebpfsentinel-agent and runs whatever it
+# finds there - and Vagrant excludes target/ from its rsync, so that tree is
+# whatever was last built inside the VM. Push both, or an eBPF suite quietly
+# validates a stale datapath while this script prints "ready for testing".
+REMOTE_LANE_ROOT="${REMOTE_LANE_ROOT:-/home/vagrant/ebpfsentinel}"
+REMOTE_LANE_BIN="${REMOTE_LANE_ROOT}/target/release"
+REMOTE_LANE_EBPF="${REMOTE_LANE_ROOT}/target/bpfel-unknown-none/release"
+
+# Mirror an installed artifact into the lane tree. Ownership goes back to
+# vagrant so a later in-VM `cargo build` can still overwrite it.
+_mirror_to_lane() {
+    local src="$1" dest_dir="$2" name="$3"
+    _ssh "sudo mkdir -p ${dest_dir} && sudo cp ${src} ${dest_dir}/${name} && \
+          sudo chown vagrant:vagrant ${dest_dir}/${name} && \
+          sudo chmod 755 ${dest_dir}/${name}"
+}
+
 SYNC_BINARY=true
 SYNC_WARDEN=true
 SYNC_EBPF=true
@@ -131,9 +151,21 @@ if [ "$SYNC_BINARY" = true ]; then
     _ssh "sudo mv /tmp/ebpfsentinel-agent-new /usr/local/bin/ebpfsentinel-agent && \
           sudo chmod 755 /usr/local/bin/ebpfsentinel-agent"
 
+    _mirror_to_lane /usr/local/bin/ebpfsentinel-agent "$REMOTE_LANE_BIN" ebpfsentinel-agent
+
     # Verify
     remote_version="$(_ssh "/usr/local/bin/ebpfsentinel-agent --version 2>/dev/null || echo 'unknown'")"
     echo "    Installed: ${remote_version}"
+
+    # Both copies must be the same bytes, because which one runs depends on
+    # which suite is running.
+    lane_sum="$(_ssh "md5sum ${REMOTE_LANE_BIN}/ebpfsentinel-agent | cut -d' ' -f1")"
+    installed_sum="$(_ssh "md5sum /usr/local/bin/ebpfsentinel-agent | cut -d' ' -f1")"
+    if [ "$lane_sum" != "$installed_sum" ]; then
+        echo "ERROR: lane copy differs from installed binary (${lane_sum} vs ${installed_sum})" >&2
+        exit 1
+    fi
+    echo "    Mirrored: ${REMOTE_LANE_BIN}/ebpfsentinel-agent (same bytes)"
     echo "==> Binary sync complete."
 fi
 
@@ -164,6 +196,10 @@ if [ "$SYNC_WARDEN" = true ]; then
         echo "ERROR: warden size mismatch (local ${warden_size}, remote ${remote_warden_size})" >&2
         exit 1
     fi
+    # start_ebpf_agent looks for the warden beside the agent it chose, so the
+    # lane tree needs its own copy for the same reason the agent does.
+    _mirror_to_lane /usr/local/bin/warden "$REMOTE_LANE_BIN" warden
+
     echo "    Installed: ${remote_warden_size} bytes (matches local)"
     echo "==> Warden sync complete."
 fi
@@ -193,8 +229,21 @@ if [ "$SYNC_EBPF" = true ]; then
           sudo cp /tmp/ebpf-objs-new/* ${REMOTE_EBPF_DIR}/ && \
           sudo chmod 644 ${REMOTE_EBPF_DIR}/* && rm -rf /tmp/ebpf-objs-new"
 
+    # Same split as the binaries: EBPF_PROGRAM_DIR points into the lane tree
+    # whenever the lane picked the lane-tree agent, so mirror the objects too.
+    # A stale object here is the quietest failure of all - it loads, it runs,
+    # and it is the previous datapath.
+    _ssh "sudo mkdir -p ${REMOTE_LANE_EBPF} && \
+          sudo cp ${REMOTE_EBPF_DIR}/* ${REMOTE_LANE_EBPF}/ && \
+          sudo chown -R vagrant:vagrant ${REMOTE_LANE_EBPF}"
+
     remote_count="$(_ssh "ls -1 ${REMOTE_EBPF_DIR} | wc -l")"
-    echo "    Installed: ${remote_count} objects"
+    lane_count="$(_ssh "ls -1 ${REMOTE_LANE_EBPF} | wc -l")"
+    if [ "$remote_count" != "$lane_count" ]; then
+        echo "ERROR: lane object count differs (${lane_count} vs ${remote_count})" >&2
+        exit 1
+    fi
+    echo "    Installed: ${remote_count} objects (mirrored to ${REMOTE_LANE_EBPF})"
     echo "==> eBPF object sync complete."
 fi
 

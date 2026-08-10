@@ -74,7 +74,7 @@ ratelimit:
     - id: rl-amp-udp-cap
       rate: 100
       burst: 200
-      scope: global
+      src_ip: "__NS_IP__"
       algorithm: token_bucket
       action: drop
       enabled: true

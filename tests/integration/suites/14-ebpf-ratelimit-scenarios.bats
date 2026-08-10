@@ -111,7 +111,7 @@ teardown_file() {
 
     # Add a very strict rate limit rule (10 tok/s)
     local body
-    body='{"id":"rl-dynamic-strict","rate":10,"burst":10,"scope":"global","algorithm":"token_bucket","action":"drop","enabled":true}'
+    body='{"id":"rl-dynamic-strict","rate":10,"burst":10,"src_ip":"203.0.113.11/32","algorithm":"token_bucket","action":"drop","enabled":true}'
     api_post /api/v1/ratelimit/rules "$body"
     _load_http_status
 
@@ -152,7 +152,7 @@ teardown_file() {
     require_root
 
     local body
-    body='{"id":"rl-sliding-window","rate":200,"burst":50,"scope":"global","algorithm":"sliding_window","action":"drop","enabled":true}'
+    body='{"id":"rl-sliding-window","rate":200,"burst":50,"src_ip":"203.0.113.12/32","algorithm":"sliding_window","action":"drop","enabled":true}'
     api_post /api/v1/ratelimit/rules "$body"
     _load_http_status
 
@@ -185,7 +185,7 @@ teardown_file() {
     found="$(echo "$rules" | jq '[.[] | select(.id == "rl-sliding-window")] | length' 2>/dev/null)" || true
     if [ "${found:-0}" -eq 0 ]; then
         local body
-        body='{"id":"rl-sliding-window","rate":200,"burst":50,"scope":"global","algorithm":"sliding_window","action":"drop","enabled":true}'
+        body='{"id":"rl-sliding-window","rate":200,"burst":50,"src_ip":"203.0.113.12/32","algorithm":"sliding_window","action":"drop","enabled":true}'
         api_post /api/v1/ratelimit/rules "$body" >/dev/null 2>&1
         sleep 1
     fi
@@ -270,11 +270,14 @@ teardown_file() {
 @test "sliding_window algorithm via API" {
     require_root
 
-    local rule='{"id":"rl-sliding-001","src_ip":"0.0.0.0/0","rate":50,"burst":100,"algorithm":"sliding_window","action":"drop","enabled":true}'
+    # One exact source: the data plane keys its buckets by address, so a
+    # prefix wider than /32 is refused rather than silently narrowed.
+    local rule='{"id":"rl-sliding-001","src_ip":"203.0.113.50/32","rate":50,"burst":100,"algorithm":"sliding_window","action":"drop","enabled":true}'
     local body
     body="$(api_post /api/v1/ratelimit/rules "$rule")"
     _load_http_status
-    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+    assert_http_status "201" "$HTTP_STATUS"
+    assert_json_field "$body" '.algorithm' 'sliding_window'
 
     api_delete /api/v1/ratelimit/rules/rl-sliding-001 >/dev/null 2>&1 || true
 }

@@ -139,7 +139,12 @@ teardown_file() {
     local max_bps=12582912   # 12 * 1024 * 1024
     local bps_int
     bps_int="$(echo "$bps" | cut -d. -f1)"
-    [ "$bps_int" -le "$max_bps" ]
+    [ "$bps_int" -le "$max_bps" ] || {
+        echo "throughput above the pipe cap: ${bps_int} bps (ceiling ${max_bps})" >&2
+        echo "qos drops: $(get_metrics_value ebpfsentinel_packets_total \
+            '{interface="QOS_METRICS",action="dropped"}' 2>/dev/null)" >&2
+        return 1
+    }
 }
 
 # ── Classifiers ──────────────────────────────────────────────────
@@ -241,7 +246,12 @@ teardown_file() {
     local max_bps=15728640   # 15 * 1024 * 1024
     local bps_int
     bps_int="$(echo "$bps" | cut -d. -f1)"
-    [ "$bps_int" -le "$max_bps" ]
+    [ "$bps_int" -le "$max_bps" ] || {
+        echo "upload above the pipe cap: ${bps_int} bps (ceiling ${max_bps})" >&2
+        echo "qos drops: $(get_metrics_value ebpfsentinel_packets_total \
+            '{interface="QOS_METRICS",action="dropped"}' 2>/dev/null)" >&2
+        return 1
+    }
 }
 
 # ── Classifier priority ordering ────────────────────────────────
@@ -290,47 +300,60 @@ teardown_file() {
     api_delete "/api/v1/qos/classifiers/${id_high}" >/dev/null 2>&1 || true
 }
 
-# ── Queue weight distribution ───────────────────────────────────
+# ── Queue to pipe binding ───────────────────────────────────────
 
-@test "QoS queue weight distribution — multiple queues" {
+@test "QoS queues bind to their pipe and carry no scheduling of their own" {
     require_root
 
-    # Create two queues with different weights in the test pipe
-    local body_w1 body_w3
-    body_w1="$(api_post /api/v1/qos/queues \
-        '{"id":"weight-q1","pipe_id":"pipe-test-10m","weight":1}')"
+    # Shaping lives entirely on the pipe, so a queue is a binding and nothing
+    # more. Two queues on the same pipe therefore differ only by id: any
+    # scheduling parameter on the response would be a surface the data plane
+    # does not read.
+    local body_q1 body_q2
+    body_q1="$(api_post /api/v1/qos/queues \
+        '{"id":"bind-q1","pipe_id":"pipe-test-10m"}')"
     _load_http_status
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
-    local id_w1
-    id_w1="$(echo "$body_w1" | jq -r '.id // .queue_id' 2>/dev/null)" || true
 
-    body_w3="$(api_post /api/v1/qos/queues \
-        '{"id":"weight-q3","pipe_id":"pipe-test-10m","weight":3}')"
+    body_q2="$(api_post /api/v1/qos/queues \
+        '{"id":"bind-q2","pipe_id":"pipe-test-10m"}')"
     _load_http_status
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
-    local id_w3
-    id_w3="$(echo "$body_w3" | jq -r '.id // .queue_id' 2>/dev/null)" || true
 
-    # Verify both queues are listed
     local list_body
     list_body="$(api_get /api/v1/qos/queues)"
     _load_http_status
     [ "$HTTP_STATUS" = "200" ]
 
-    local count
-    count="$(echo "$list_body" | jq 'if type == "array" then length else .queues | length end' 2>/dev/null)" || true
-    [ "${count:-0}" -ge 2 ]
-
-    # Verify the weights are correctly stored
     local queues
     queues="$(echo "$list_body" | jq 'if type == "array" then . else .queues end' 2>/dev/null)" || true
-    local w3_weight
-    w3_weight="$(echo "$queues" | jq -r ".[] | select(.id == \"$id_w3\" or .queue_id == \"$id_w3\") | .weight" 2>/dev/null)" || true
-    [ "$w3_weight" = "3" ]
 
-    # Clean up
-    api_delete "/api/v1/qos/queues/${id_w1}" >/dev/null 2>&1 || true
-    api_delete "/api/v1/qos/queues/${id_w3}" >/dev/null 2>&1 || true
+    # Both queues are listed against the pipe they named.
+    local bound
+    bound="$(echo "$queues" | jq '[.[]
+        | select(.id == "bind-q1" or .id == "bind-q2")
+        | select(.pipe_id == "pipe-test-10m")] | length' 2>/dev/null)" || bound=0
+    [ "${bound:-0}" -eq 2 ] || {
+        echo "queues did not come back bound to pipe-test-10m" >&2
+        echo "${queues}" | jq -c '.' >&2 || true
+        api_delete /api/v1/qos/queues/bind-q1 >/dev/null 2>&1 || true
+        api_delete /api/v1/qos/queues/bind-q2 >/dev/null 2>&1 || true
+        return 1
+    }
+
+    # A weight would imply a scheduler the pipe does not run.
+    local weights
+    weights="$(echo "$queues" | jq '[.[] | select(has("weight"))] | length' 2>/dev/null)" || weights=0
+    [ "${weights:-0}" -eq 0 ] || {
+        echo "queue response carries a scheduling parameter the data plane ignores" >&2
+        echo "${queues}" | jq -c '.' >&2 || true
+        api_delete /api/v1/qos/queues/bind-q1 >/dev/null 2>&1 || true
+        api_delete /api/v1/qos/queues/bind-q2 >/dev/null 2>&1 || true
+        return 1
+    }
+
+    api_delete /api/v1/qos/queues/bind-q1 >/dev/null 2>&1 || true
+    api_delete /api/v1/qos/queues/bind-q2 >/dev/null 2>&1 || true
 }
 
 # ── Pipe rate persistence ───────────────────────────────────────

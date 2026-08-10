@@ -48,13 +48,22 @@ dlp:
 ratelimit:
   enabled: true
   rules:
-    - id: rl-test-country
+    - id: rl-test-host
       rate: 100
       burst: 200
-      scope: source_ip
+      src_ip: "__NS_IP__"
       action: drop
+  # A country covers a range, which a per-host rule cannot express: tiers
+  # resolve the codes to CIDRs and load them into the LPM trie. KP is the
+  # country the test mmdb maps the namespace source range to, so the
+  # resolution yields real prefixes rather than an empty set.
+  country_tiers:
+    - tier_id: 1
       country_codes:
-        - "CN"
+        - "KP"
+      rate: 100
+      burst: 200
+      action: drop
 
 threatintel:
   enabled: false

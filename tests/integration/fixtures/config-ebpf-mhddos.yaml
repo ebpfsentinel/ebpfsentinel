@@ -86,7 +86,7 @@ ratelimit:
     - id: rl-mhddos-global
       rate: 200
       burst: 400
-      scope: global
+      src_ip: "__NS_IP__"
       algorithm: token_bucket
       action: drop
       enabled: true

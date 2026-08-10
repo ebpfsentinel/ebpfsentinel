@@ -67,11 +67,16 @@ teardown_file() {
 }
 
 @test "Rate Limit: POST creates rule and returns 201" {
-    local rule='{"id":"it-rl-001","scope":"global","rate":100,"burst":200,"action":"drop","algorithm":"token_bucket"}'
+    # A rule names one source host: the data plane keys the token bucket by
+    # source address, so `src_ip` is required and there is no global scope.
+    local rule='{"id":"it-rl-001","src_ip":"203.0.113.10/32","rate":100,"burst":200,"action":"drop","algorithm":"token_bucket"}'
     local body
     body="$(api_post /api/v1/ratelimit/rules "$rule")"
     assert_http_status "201" "$HTTP_STATUS"
     assert_json_field "$body" '.id' 'it-rl-001'
+    # The host the rule limits has to survive the round trip: a 201 carrying a
+    # different source would enforce against traffic the caller never named.
+    assert_json_field "$body" '.src_ip' '203.0.113.10/32'
 }
 
 @test "Rate Limit: DELETE rule returns 204" {

@@ -66,12 +66,15 @@ ips:
 ratelimit:
   enabled: true
   rules:
-    - id: rl-ipv6-source
+    # The per-source config map is keyed by a 32-bit address, so a rule names
+    # one IPv4 host. IPv6 sources are covered by country_tiers, which carries
+    # the v6 trie; the suite asserts that boundary rather than assuming a v6
+    # rule the data plane could not key.
+    - id: rl-v4-source
       rate: 5
       burst: 10
-      src_ip: "fd00:59::/64"
+      src_ip: "__NS_IP__"
       action: drop
-      scope: source_ip
       algorithm: token_bucket
       enabled: true
 

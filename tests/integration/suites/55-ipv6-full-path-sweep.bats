@@ -178,17 +178,34 @@ teardown_file() {
     api_delete "/api/v1/ips/blacklist/${target}" >/dev/null 2>&1 || true
 }
 
-# ── Ratelimit — per-IPv6-source rule surfaces ──────────────────────
+# ── Ratelimit — the v4/v6 source boundary holds ────────────────────
 
-@test "ratelimit surfaces the per-IPv6-source rule" {
+@test "ratelimit surfaces the per-source rule" {
     local body
     body="$(api_get /api/v1/ratelimit/rules)" || true
     _load_http_status
     [ "${HTTP_STATUS}" = "200" ]
 
-    echo "${body}" | grep -qi 'rl-ipv6-source' || {
-        echo "rl-ipv6-source not surfaced via /api/v1/ratelimit/rules" >&2
+    echo "${body}" | grep -qi 'rl-v4-source' || {
+        echo "rl-v4-source not surfaced via /api/v1/ratelimit/rules" >&2
         echo "${body}" >&2
+        return 1
+    }
+}
+
+@test "ratelimit refuses an IPv6 source rather than keying it as zero" {
+    # The per-source map holds 32-bit addresses. Accepting a v6 source would
+    # collapse it to key 0 and limit traffic the caller never named, so the
+    # rule has to be refused at the edge instead of silently mis-keyed.
+    local body
+    body="$(api_post /api/v1/ratelimit/rules \
+        '{"id":"rl-v6-refused","rate":5,"burst":10,"src_ip":"fd00:59::1","action":"drop"}')" || true
+    _load_http_status
+
+    [ "${HTTP_STATUS}" = "400" ] || {
+        echo "expected 400 for an IPv6 source, got ${HTTP_STATUS}" >&2
+        echo "${body}" >&2
+        api_delete /api/v1/ratelimit/rules/rl-v6-refused >/dev/null 2>&1 || true
         return 1
     }
 }

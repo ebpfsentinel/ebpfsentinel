@@ -47,12 +47,15 @@ qos:
       loss: 0.0
       burst: "64kb"
       priority: 1
-      direction: egress
+      # The load generator sits in the test namespace, so its bulk transfer
+      # reaches the inspected interface on ingress. An egress-only pipe would
+      # let that traffic through unshaped and the throughput assertions would
+      # measure an unshaped path while reporting on the shaper.
+      direction: both
       enabled: true
   queues:
     - id: queue-test-1
       pipe_id: pipe-test-10m
-      weight: 100
       enabled: true
   classifiers:
     - id: cls-test-iperf

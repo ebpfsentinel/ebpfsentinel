@@ -165,27 +165,24 @@ teardown_file() {
 
 # ── Cross-domain: ratelimit country tiers ────────────────────────
 
-@test "GeoIP cross-domain: ratelimit country tiers configured" {
+@test "GeoIP cross-domain: ratelimit country tiers reach the LPM trie" {
     require_root
+    require_tool bpftool
+    _require_geoip_mmdb
 
-    local body
-    body="$(api_get /api/v1/ratelimit/rules)"
-    _load_http_status
+    # A country tier is not a rule and is not served by the rules API: the
+    # codes are resolved to CIDRs at load and written into the rate limiter's
+    # LPM trie, so the trie is the only place the tier is observable.
+    local map_id
+    map_id="$(bpftool -j map show 2>/dev/null |
+        jq -r 'first(.[] | select((.name // "") | startswith("RL_LPM_SRC_V4")) | .id) // empty')"
+    [ -n "$map_id" ]
 
-    [ "$HTTP_STATUS" = "200" ]
-
-    # Fixture has a ratelimit rule with country_codes (CN) — verify at least 1 rule
-    local count
-    count="$(echo "$body" | jq 'if type == "array" then length else .rules | length end' 2>/dev/null)" || true
-    [ "${count:-0}" -ge 1 ]
-
-    # Verify at least one rule has country_codes configured
-    local country_rules
-    country_rules="$(echo "$body" | \
-        jq '[if type == "array" then .[] else .rules[] end | select(.country_codes != null and (.country_codes | length) > 0)] | length' \
-        2>/dev/null)" || country_rules=0
-
-    [ "${country_rules:-0}" -ge 1 ]
+    # An empty trie means the codes resolved to nothing and the tier limits no
+    # traffic at all — the failure this assertion exists to catch.
+    local entries
+    entries="$(bpftool -j map dump id "$map_id" 2>/dev/null | jq 'length' 2>/dev/null)" || entries=0
+    [ "${entries:-0}" -ge 1 ]
 }
 
 # ── Metrics ──────────────────────────────────────────────────────

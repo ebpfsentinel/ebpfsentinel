@@ -137,6 +137,14 @@ _wait_cgroup_resolved_above() {
     return 1
 }
 
+# True when a bpftool lookup dump holds the probe tenant id, in either the
+# BTF-decoded form (`"value": 7`) or the untyped hex form (`07 00 00 00`).
+_lookup_holds_probe_tenant() {
+    local dump="$1"
+    [ "$(echo "${dump}" | jq -r '.value // empty' 2>/dev/null)" = "${TENANT_PROBE_ID}" ] && return 0
+    echo "${dump}" | grep -q "$(_le_hex "${TENANT_PROBE_ID}" 4)"
+}
+
 _tenant_cgroup_cleanup() {
     local map_id="${1:-}" cgroup_id="${2:-}"
     if [ -n "${map_id}" ] && [ -n "${cgroup_id}" ]; then
@@ -327,9 +335,12 @@ teardown_file() {
 
     # Geometry is the contract between the kernel program and the userspace
     # manager: u64 cgroup id → u32 tenant id, one entry per live container.
+    # bpftool renamed these keys (key_size/value_size before v7, bytes_key/
+    # bytes_value after), so read whichever the installed version emits — a
+    # missing key would otherwise read as a geometry change that never happened.
     local geometry
     geometry="$(bpftool -j map show id "${map_id}" 2>/dev/null |
-        jq -r '"\(.key_size) \(.value_size) \(.max_entries)"')"
+        jq -r '"\(.bytes_key // .key_size) \(.bytes_value // .value_size) \(.max_entries)"')"
     [ "${geometry}" = "8 4 4096" ]
 }
 
@@ -355,7 +366,18 @@ teardown_file() {
     # shellcheck disable=SC2046
     run bpftool map lookup id "${map_id}" key hex $(_le_hex "${cgroup_id}" 8)
     [ "${status}" -eq 0 ]
-    echo "${output}" | grep -q "$(_le_hex "${TENANT_PROBE_ID}" 4)"
+    # The map carries BTF, so bpftool decodes the entry to typed JSON instead
+    # of printing raw bytes. Read the decoded value, and fall back to the hex
+    # form for a bpftool that has no type information to work from.
+    _lookup_holds_probe_tenant "${output}" || {
+        echo "lookup returned a value the write never put there" >&2
+        echo "  map id   : ${map_id}" >&2
+        echo "  cgroup id: ${cgroup_id} (key $(_le_hex "${cgroup_id}" 8))" >&2
+        echo "  expected : $(_le_hex "${TENANT_PROBE_ID}" 4)" >&2
+        echo "  lookup   : ${output}" >&2
+        _tenant_cgroup_cleanup "${map_id}" "${cgroup_id}"
+        return 1
+    }
 
     _tenant_cgroup_cleanup "${map_id}" "${cgroup_id}"
 }
@@ -411,6 +433,20 @@ teardown_file() {
     # removal path is what keeps that from happening.
     _tenant_cgroup_cleanup "${map_id}" "${cgroup_id}"
     mkdir -p "${TENANT_CGROUP_DIR}"
+
+    # A cleanup that quietly failed would make the rest of this test assert
+    # nothing, so prove the entry is gone before drawing any conclusion from
+    # the counter. Re-read the id: recreating the directory can hand out a
+    # different inode, and only the live one is what the probe will use.
+    cgroup_id="$(stat -c %i "${TENANT_CGROUP_DIR}")"
+    _tenant_cgroup_cleanup "${map_id}" "${cgroup_id}"
+    # shellcheck disable=SC2046
+    run bpftool map lookup id "${map_id}" key hex $(_le_hex "${cgroup_id}" 8)
+    if [ "${status}" -eq 0 ] && _lookup_holds_probe_tenant "${output}"; then
+        echo "cgroup ${cgroup_id} still maps to the probe tenant after removal" >&2
+        echo "${output}" >&2
+        return 1
+    fi
 
     # Let any resolution still in flight land before the snapshot.
     sleep 12
