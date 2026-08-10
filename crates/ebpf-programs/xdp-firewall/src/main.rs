@@ -175,6 +175,10 @@ static FW_HASH_PORT: HashMap<FwHashKeyPort, FwHashValue, { MAX_FW_HASH_PORT as u
 #[btf_map]
 static FIREWALL_METRICS: PerCpuArray<u64, 8> = PerCpuArray::new();
 
+/// Per-CPU scratch slot the conntrack state is laundered through.
+#[btf_map]
+static CT_STATE_SCRATCH: PerCpuArray<u32, 1> = PerCpuArray::new();
+
 /// Per-CPU scratch buffer for packet context shared across action/event helpers.
 /// Avoids passing 8+ arguments through inlined functions that would blow
 /// the 512-byte BPF stack.
@@ -1076,8 +1080,14 @@ fn process_firewall_v4(
     // Phase 0: Kernel CT lookup via bpf_xdp_ct_lookup kfunc.
     // Reads nf_conn->status via bpf_probe_read_kernel at runtime
     // BTF-resolved offsets. Replaces the CT_TABLE_V4 shadow map.
-    let ct_state: u8 =
-        kernel_ct_lookup_v4(ctx_raw, src_ip, dst_ip, src_port, dst_port, protocol as u8);
+    let ct_state: u8 = launder_ct_state(kernel_ct_lookup_v4(
+        ctx_raw,
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        protocol as u8,
+    ));
 
     // Phase 1: LPM Trie lookup — O(log n) for CIDR-only rules.
     // Keys use network byte order for correct prefix matching.
@@ -1482,6 +1492,33 @@ fn conntrack_lookup_v6(
         .unwrap_or(0xFF)
 }
 
+/// Pass the conntrack state through a per-CPU map slot so the verifier stops
+/// tracking which of its five constants this path produced.
+///
+/// Conntrack state is read once and then consulted everywhere downstream: the
+/// rule scan, the connection-limit gate and the established-flow bypass. While
+/// the verifier knows the exact constant, it walks that whole tail again for
+/// each state a lookup can return, which is what put this program within reach
+/// of `BPF_COMPLEXITY_LIMIT_INSNS`. A map value is opaque to the verifier, so
+/// the tail is walked once against a single unknown scalar. Runtime cost is one
+/// per-CPU store and load.
+#[inline(always)]
+fn launder_ct_state(state: u8) -> u8 {
+    let Some(slot) = CT_STATE_SCRATCH.get_ptr_mut(0) else {
+        return state;
+    };
+    unsafe {
+        *slot = u32::from(state);
+    }
+    match CT_STATE_SCRATCH.get(0) {
+        // The value read back is the one just written; the truncation is what
+        // the callers expect and cannot lose information.
+        #[allow(clippy::cast_possible_truncation)]
+        Some(&v) => v as u8,
+        None => state,
+    }
+}
+
 /// IPv4 kernel CT lookup via `bpf_xdp_ct_lookup` + `bpf_probe_read_kernel`.
 #[inline(always)]
 fn kernel_ct_lookup_v4(
@@ -1657,8 +1694,9 @@ fn process_firewall_v6(
     // Phase 0: Conntrack lookup (IPv6).
     // Look up the connection state once; used for fast-path bypass and
     // ct_state_mask matching during the rule scan.
-    let ct_state: u8 =
-        conntrack_lookup_v6(ctx_raw, &src_addr, &dst_addr, src_port, dst_port, next_hdr);
+    let ct_state: u8 = launder_ct_state(conntrack_lookup_v6(
+        ctx_raw, &src_addr, &dst_addr, src_port, dst_port, next_hdr,
+    ));
 
     // Phase 1: LPM Trie lookup — O(log n) for CIDR-only rules.
     // Read raw bytes from off-stack PKT_CTX.

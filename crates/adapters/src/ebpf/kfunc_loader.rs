@@ -723,6 +723,72 @@ fn sanitize_line_info(bytes: &[u8], rec_size: u32) -> Vec<u8> {
     out
 }
 
+/// Verifier-log flag asking the kernel for its complexity accounting and
+/// nothing else: `print_verification_stats` is gated on this bit alone, while
+/// the instruction-by-instruction trace needs `BPF_LOG_LEVEL1`.
+const BPF_LOG_STATS: u32 = 4;
+
+/// Instruction budget the verifier allows one program (`BPF_COMPLEXITY_LIMIT_INSNS`).
+/// Used only when the kernel's stats line omits the limit it enforced.
+const BPF_COMPLEXITY_LIMIT_INSNS: u64 = 1_000_000;
+
+/// Set to a non-empty, non-`0` value to have every successful program load
+/// report how much of the verifier's instruction budget it consumed.
+const VERIFIER_STATS_ENV: &str = "EBPFSENTINEL_BPF_VERIFIER_STATS";
+
+/// Percentage of the budget above which a program is reported as a warning
+/// rather than as information: past this point the next feature added to it is
+/// the one that gets rejected.
+const VERIFIER_BUDGET_WARN_PCT: u64 = 80;
+
+fn verifier_stats_enabled() -> bool {
+    std::env::var_os(VERIFIER_STATS_ENV).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Pull `(processed, limit)` out of the verifier's accounting line, which reads
+/// `processed 214301 insns (limit 1000000) max_states_per_insn 4 ...`.
+fn parse_processed_insns(log: &str) -> Option<(u64, u64)> {
+    let after = log.split("processed ").nth(1)?;
+    let (count, rest) = after.split_once(" insns")?;
+    let processed = count.trim().parse().ok()?;
+    // Older kernels print the count without the parenthesised limit; fall back
+    // to the compiled-in constant rather than dropping the measurement.
+    let limit = rest
+        .split_once("(limit ")
+        .and_then(|(_, tail)| tail.split_once(')'))
+        .and_then(|(value, _)| value.trim().parse().ok())
+        .unwrap_or(BPF_COMPLEXITY_LIMIT_INSNS);
+    Some((processed, limit))
+}
+
+/// Log what the verifier charged this program. Reported as integer percent so
+/// the number is comparable across runs without float formatting noise.
+fn report_verifier_stats(name: &str, log: &[u8]) {
+    let text = String::from_utf8_lossy(log);
+    let Some((processed, limit)) = parse_processed_insns(text.trim_end_matches('\0')) else {
+        tracing::debug!(program = name, "verifier emitted no complexity accounting");
+        return;
+    };
+    let used_pct = processed.saturating_mul(100) / limit.max(1);
+    if used_pct >= VERIFIER_BUDGET_WARN_PCT {
+        tracing::warn!(
+            program = name,
+            processed,
+            limit,
+            used_pct,
+            "eBPF program is near the verifier complexity limit"
+        );
+    } else {
+        tracing::info!(
+            program = name,
+            processed,
+            limit,
+            used_pct,
+            "eBPF verifier budget"
+        );
+    }
+}
+
 /// Issue a raw `BPF_PROG_LOAD`, returning the loaded program fd or a verifier
 /// log on rejection.
 fn raw_prog_load(req: &RawProgLoad<'_>) -> Result<OwnedFd, KfuncLoaderError> {
@@ -806,7 +872,29 @@ fn raw_prog_load(req: &RawProgLoad<'_>) -> Result<OwnedFd, KfuncLoaderError> {
     // lines) overruns any fixed buffer, and the kernel then fails the load with
     // ENOSPC even though verification itself passed. Requesting no log sidesteps
     // that on the happy path and is faster.
-    if let Ok(fd) = issue_prog_load(&mut attr, 0, &mut []) {
+    //
+    // Unless budget reporting is asked for: `BPF_LOG_STATS` alone emits the
+    // verifier's one-line accounting and nothing else, so the buffer stays
+    // small and the happy path stays fast. Without it, how close a program sits
+    // to the complexity limit is only ever learnt by crossing it.
+    if verifier_stats_enabled() {
+        let mut stats = vec![0u8; 4096];
+        match issue_prog_load(&mut attr, BPF_LOG_STATS, &mut stats) {
+            Ok(fd) => {
+                report_verifier_stats(req.name, &stats);
+                return Ok(fd);
+            }
+            // A stats-only load can fail for reasons of its own (a kernel that
+            // rejects the flag, a buffer the stats line outgrows), so fall
+            // through to the plain load rather than reporting a rejection the
+            // program did not earn.
+            Err(_) => {
+                if let Ok(fd) = issue_prog_load(&mut attr, 0, &mut []) {
+                    return Ok(fd);
+                }
+            }
+        }
+    } else if let Ok(fd) = issue_prog_load(&mut attr, 0, &mut []) {
         return Ok(fd);
     }
     // Phase 2: the load genuinely failed. Retry with a large log buffer so the
@@ -1358,6 +1446,29 @@ pub fn load_object_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_verifier_accounting_line_yields_processed_and_limit() {
+        let log = "processed 214301 insns (limit 1000000) max_states_per_insn 4 \
+                   total_states 1421 peak_states 1421 mark_read 12\n";
+        assert_eq!(parse_processed_insns(log), Some((214_301, 1_000_000)));
+    }
+
+    #[test]
+    fn a_stats_line_without_a_limit_falls_back_to_the_kernel_constant() {
+        // Losing the measurement because the kernel phrased it differently
+        // would defeat the point of asking for it.
+        assert_eq!(
+            parse_processed_insns("processed 900000 insns total_states 3\n"),
+            Some((900_000, BPF_COMPLEXITY_LIMIT_INSNS))
+        );
+    }
+
+    #[test]
+    fn a_log_without_accounting_reports_nothing_rather_than_a_wrong_number() {
+        assert_eq!(parse_processed_insns(""), None);
+        assert_eq!(parse_processed_insns("processed insns"), None);
+    }
 
     #[test]
     fn prepatch_noop_without_kfuncs() {
