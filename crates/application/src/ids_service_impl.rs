@@ -41,6 +41,15 @@ pub struct IdsAppService {
     /// last means the two halves can be reloaded independently without
     /// renumbering the other.
     prevention_offset: usize,
+    /// Kernel slots claimed by more than one rule, mapped to every rule that
+    /// claims them in array order.
+    ///
+    /// A slot holds one rule, so the later one wins and the others never
+    /// reach the classifier. Recording the contested slots lets the pipeline
+    /// replay the losers in userspace instead of leaving a loaded rule silent.
+    /// Uncontested slots are absent, so the map is empty in the common case
+    /// and the pipeline skips the lookup entirely.
+    contested_slots: Arc<HashMap<KernelSlot, Vec<usize>>>,
 }
 
 impl IdsAppService {
@@ -52,6 +61,7 @@ impl IdsAppService {
         // Whatever the engine already holds is detection: prevention rules
         // only ever arrive through `set_prevention_rules`.
         let prevention_offset = engine.rule_count();
+        let contested_slots = Arc::new(Self::index_contested_slots(engine.rules()));
         Self {
             engine,
             map_port: map_port.map(|p| Arc::new(Mutex::new(p))),
@@ -60,6 +70,7 @@ impl IdsAppService {
             enabled: true,
             geoip: None,
             prevention_offset,
+            contested_slots,
         }
     }
 
@@ -102,6 +113,7 @@ impl IdsAppService {
         rules.insert(self.prevention_offset, rule);
         self.engine.reload(rules)?;
         self.prevention_offset += 1;
+        self.rebuild_contested_slots();
         self.sync_ebpf_maps();
         self.update_metrics();
         Ok(())
@@ -115,6 +127,7 @@ impl IdsAppService {
         }
         self.engine.remove_rule(id)?;
         self.prevention_offset -= 1;
+        self.rebuild_contested_slots();
         self.sync_ebpf_maps();
         self.update_metrics();
         Ok(())
@@ -128,6 +141,7 @@ impl IdsAppService {
         all.extend(prevention);
         self.engine.reload(all)?;
         self.prevention_offset = count;
+        self.rebuild_contested_slots();
         self.sync_ebpf_maps();
         self.update_metrics();
         tracing::info!(count, "IDS rules reloaded");
@@ -144,6 +158,7 @@ impl IdsAppService {
         let mut all = self.list_rules().to_vec();
         all.extend(rules);
         self.engine.reload(all)?;
+        self.rebuild_contested_slots();
         self.sync_ebpf_maps();
         self.update_metrics();
         tracing::info!(count, "IPS prevention rules synced to the IDS pattern maps");
@@ -192,6 +207,84 @@ impl IdsAppService {
     ) -> Option<(usize, &'a IdsRule, Option<String>)> {
         self.engine
             .evaluate_event_with_context(event, dst_domains, src_country)
+    }
+
+    /// Evaluate one named rule index against an event.
+    ///
+    /// Used to replay the rules a contested kernel slot left out; the index
+    /// comes from [`Self::shadowed_peers`] rather than from the event.
+    pub fn evaluate_index_with_context<'a>(
+        &'a self,
+        idx: usize,
+        event: &PacketEvent,
+        dst_domains: &[String],
+        src_country: Option<&str>,
+    ) -> Option<(usize, &'a IdsRule, Option<String>)> {
+        self.engine
+            .evaluate_index_with_context(idx, event, dst_domains, src_country)
+    }
+
+    /// Rules that watch a port this event carries but lost the kernel slot to
+    /// `matched`, in array order.
+    ///
+    /// A slot holds one rule, so an IDS rule watching the same port as an IPS
+    /// rule is never named by the classifier. Without this the operator's
+    /// detection rule is silently dead, which is a policy change the kernel
+    /// map layout has no business making. Empty whenever no slot is contested,
+    /// which is the usual case.
+    #[must_use]
+    pub fn shadowed_peers(&self, event: &PacketEvent, matched: usize) -> Vec<usize> {
+        if self.contested_slots.is_empty() {
+            return Vec::new();
+        }
+        // Either port could be the one the classifier keyed on, and a rule
+        // claiming a slot for a port this packet carries applies to it either
+        // way, so both slots contribute.
+        let slots = [
+            (0, event.dst_port, event.protocol, false),
+            (0, event.src_port, event.protocol, true),
+        ];
+        let mut peers: Vec<usize> = Vec::new();
+        for slot in slots {
+            let Some(claimants) = self.contested_slots.get(&slot) else {
+                continue;
+            };
+            for &idx in claimants {
+                if idx != matched && !peers.contains(&idx) {
+                    peers.push(idx);
+                }
+            }
+        }
+        peers.sort_unstable();
+        peers
+    }
+
+    fn rebuild_contested_slots(&mut self) {
+        self.contested_slots = Arc::new(Self::index_contested_slots(self.engine.rules()));
+    }
+
+    /// Collect the kernel slots more than one enabled rule claims.
+    fn index_contested_slots(rules: &[IdsRule]) -> HashMap<KernelSlot, Vec<usize>> {
+        let mut claims: HashMap<KernelSlot, Vec<usize>> = HashMap::new();
+        for (idx, rule) in rules.iter().enumerate() {
+            if !rule.enabled {
+                continue;
+            }
+            for key in rule.to_ebpf_keys() {
+                claims
+                    .entry((key.tenant_id, key.dst_port, key.protocol, false))
+                    .or_default()
+                    .push(idx);
+            }
+            for key in rule.to_ebpf_src_keys() {
+                claims
+                    .entry((key.tenant_id, key.dst_port, key.protocol, true))
+                    .or_default()
+                    .push(idx);
+            }
+        }
+        claims.retain(|_, claimants| claimants.len() > 1);
+        claims
     }
 
     /// Evaluate the captured payload of a TCP segment against the content
@@ -277,7 +370,8 @@ impl IdsAppService {
     /// watch the same port cannot both be installed: the later one wins.
     /// Rules are written in array order, which puts the prevention rules last
     /// and lets an IPS rule take over a port an IDS rule also watches. The
-    /// losing rule is named in a warning rather than dropped silently.
+    /// losing rule is not lost: the contested slot is recorded so the pipeline
+    /// replays it in userspace on every event the winner raises.
     fn sync_ebpf_maps(&self) {
         let Some(ref map_port) = self.map_port else {
             return;
@@ -346,7 +440,7 @@ impl IdsAppService {
                 rule_id,
                 port = key.dst_port,
                 protocol = key.protocol,
-                "two rules watch the same port: only the later one is installed in the kernel map"
+                "two rules watch the same port: the later one holds the kernel map slot and the other is evaluated in userspace"
             );
         }
     }
@@ -399,6 +493,70 @@ mod tests {
 
     fn make_service() -> IdsAppService {
         IdsAppService::new(IdsEngine::new(), None, Arc::new(NoopMetrics))
+    }
+
+    fn make_event(dst_port: u16) -> PacketEvent {
+        PacketEvent {
+            timestamp_ns: 0,
+            src_addr: [0xC0A8_0001, 0, 0, 0],
+            dst_addr: [0x0A00_0001, 0, 0, 0],
+            src_port: 40000,
+            dst_port,
+            protocol: 6,
+            event_type: 0,
+            action: 0,
+            flags: 0,
+            vlan_id: 0,
+            cpu_id: 0,
+            socket_cookie: 0,
+            cgroup_id: 0,
+            cgroup1_id: 0,
+            rss_hash: 0,
+            rss_hash_type: 0,
+            rx_hw_timestamp_ns: 0,
+            rule_id: 0,
+        }
+    }
+
+    #[test]
+    fn a_prevention_rule_taking_a_port_leaves_the_detection_rule_reachable() {
+        // Both rules watch TCP/22 and the kernel map holds one of them, so the
+        // detection rule has to be recoverable from the winner's index or it
+        // never fires again.
+        let mut svc = make_service();
+        svc.add_rule(make_rule("ids-001")).unwrap();
+        svc.set_prevention_rules(vec![make_rule("ips-001")])
+            .unwrap();
+
+        assert_eq!(svc.shadowed_peers(&make_event(22), 1), vec![0]);
+        // Symmetric: the winner is never its own peer.
+        assert_eq!(svc.shadowed_peers(&make_event(22), 0), vec![1]);
+    }
+
+    #[test]
+    fn rules_on_separate_ports_share_no_kernel_slot() {
+        let mut svc = make_service();
+        svc.add_rule(make_rule("ids-001")).unwrap();
+        let mut prevention = make_rule("ips-001");
+        prevention.dst_port = Some(2222);
+        svc.set_prevention_rules(vec![prevention]).unwrap();
+
+        assert!(svc.shadowed_peers(&make_event(22), 0).is_empty());
+        assert!(svc.shadowed_peers(&make_event(2222), 1).is_empty());
+    }
+
+    #[test]
+    fn a_disabled_rule_contests_no_slot() {
+        // A disabled rule is never written to the kernel map, so replaying it
+        // in userspace would resurrect a rule the operator switched off.
+        let mut svc = make_service();
+        let mut disabled = make_rule("ids-001");
+        disabled.enabled = false;
+        svc.add_rule(disabled).unwrap();
+        svc.set_prevention_rules(vec![make_rule("ips-001")])
+            .unwrap();
+
+        assert!(svc.shadowed_peers(&make_event(22), 1).is_empty());
     }
 
     #[test]

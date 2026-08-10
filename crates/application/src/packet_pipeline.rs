@@ -617,7 +617,32 @@ impl EventDispatcher {
             rule,
             matched_domain,
             src_country.as_deref(),
+            true,
         );
+
+        // A kernel map slot holds one rule, so a rule watching a port another
+        // rule already claims is never named by the classifier. Replay those
+        // rules here: which of two rules wins a map slot is a kernel storage
+        // detail, and letting it decide whether a loaded rule ever fires would
+        // silently drop the operator's policy.
+        for peer in svc.shadowed_peers(&event, idx) {
+            if let Some((peer_idx, peer_rule, peer_domain)) =
+                svc.evaluate_index_with_context(peer, &event, &dst_domains, src_country.as_deref())
+            {
+                // The IPS detection counter answers to the packet, not to the
+                // number of rules that matched it, so only the kernel match
+                // feeds it.
+                self.report_ids_match(
+                    &event,
+                    &svc,
+                    peer_idx,
+                    peer_rule,
+                    peer_domain,
+                    src_country.as_deref(),
+                    false,
+                );
+            }
+        }
     }
 
     /// Turn a rule match into an audit record and an alert, applying the
@@ -626,6 +651,12 @@ impl EventDispatcher {
     /// Shared by the two ways a rule can match: the kernel classifier event,
     /// which decides on port and protocol, and the captured payload, which
     /// the content rules match in userspace.
+    ///
+    /// `counts_toward_ips` is false when the match is a userspace replay of a
+    /// rule the kernel could not name: the packet has already been counted
+    /// once toward the IPS auto-blacklist, and counting it again per matching
+    /// rule would trip the threshold early.
+    #[allow(clippy::too_many_arguments)] // one match, described in full
     fn report_ids_match(
         &self,
         event: &PacketEvent,
@@ -634,6 +665,7 @@ impl EventDispatcher {
         rule: &domain::ids::entity::IdsRule,
         matched_domain: Option<String>,
         src_country: Option<&str>,
+        counts_toward_ips: bool,
     ) {
         let (alert, detail, prevention) = {
             // Both rule sets are matched by the same kernel program, so the
@@ -731,7 +763,9 @@ impl EventDispatcher {
             self.metrics.record_event_dropped("alert_channel_full");
         }
 
-        self.feed_ips_counter(event, prevention);
+        if counts_toward_ips {
+            self.feed_ips_counter(event, prevention);
+        }
     }
 
     /// Match a captured TCP payload against the IDS and IPS content rules.
@@ -763,7 +797,7 @@ impl EventDispatcher {
         };
         self.metrics
             .record_packet("ids", action_label(event.action));
-        self.report_ids_match(&event, &svc, idx, rule, None, src_country.as_deref());
+        self.report_ids_match(&event, &svc, idx, rule, None, src_country.as_deref(), true);
     }
 
     /// Feed a rule match into the IPS auto-blacklist counter.
@@ -1868,6 +1902,102 @@ mod tests {
 
         let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
         assert!(alert.container.is_none());
+    }
+
+    #[tokio::test]
+    async fn detection_rule_sharing_a_port_with_a_prevention_rule_still_alerts() {
+        // The kernel pattern map holds one rule per (port, protocol), so an
+        // IPS rule on TCP/22 displaces an IDS rule watching the same port and
+        // the classifier only ever names the IPS rule. The detection rule the
+        // operator loaded must still fire: which of the two owns a map slot
+        // is a kernel storage detail, not a policy decision.
+        let ids = make_service_with_rules(vec![make_ids_rule("ids-ssh-bruteforce")]);
+        let mut with_prevention = (**ids.load()).clone();
+        let mut prevention = make_ids_rule("ips-ssh-bruteforce");
+        prevention.mode = DomainMode::Block;
+        with_prevention
+            .set_prevention_rules(vec![prevention])
+            .unwrap();
+        ids.store(Arc::new(with_prevention));
+
+        let ips_metrics: Arc<dyn MetricsPort> = Arc::new(TestMetrics::new());
+        let ips = Arc::new(ArcSwap::from_pointee(IpsAppService::new(
+            domain::ips::engine::IpsEngine::new(domain::ips::entity::IpsPolicy::default()),
+            ips_metrics,
+        )));
+
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dispatcher =
+            make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx).with_ips_service(ips);
+
+        // rule_id 1 is the prevention rule: it won the map slot.
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 1));
+
+        let mut detection_ids = Vec::new();
+        let mut prevention_ids = Vec::new();
+        while let Ok(event) = alert_rx.try_recv() {
+            match event {
+                AlertEvent::Ids(a) => detection_ids.push(a.rule_id.0),
+                AlertEvent::PacketSecurity(a)
+                    if a.component == domain::alert::entity::PacketAlertComponent::Ips =>
+                {
+                    prevention_ids.push(a.rule_id);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(detection_ids, vec!["ids-ssh-bruteforce".to_string()]);
+        assert!(
+            prevention_ids.contains(&"ips-ssh-bruteforce".to_string()),
+            "prevention alert missing: {prevention_ids:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shadowed_detection_rule_does_not_double_count_toward_auto_blacklist() {
+        // One packet is one detection however many rules name it. Counting the
+        // userspace replay as well would trip the IPS auto-blacklist threshold
+        // at half the configured burst.
+        let ids = make_service_with_rules(vec![make_ids_rule("ids-ssh-bruteforce")]);
+        let mut with_prevention = (**ids.load()).clone();
+        let mut prevention = make_ids_rule("ips-ssh-bruteforce");
+        prevention.mode = DomainMode::Block;
+        with_prevention
+            .set_prevention_rules(vec![prevention])
+            .unwrap();
+        ids.store(Arc::new(with_prevention));
+
+        let ips_metrics: Arc<dyn MetricsPort> = Arc::new(TestMetrics::new());
+        let mut ips_svc = IpsAppService::new(
+            domain::ips::engine::IpsEngine::new(domain::ips::entity::IpsPolicy {
+                auto_blacklist_threshold: 2,
+                ..domain::ips::entity::IpsPolicy::default()
+            }),
+            ips_metrics,
+        );
+        ips_svc.set_mode(DomainMode::Block);
+        let ips = Arc::new(ArcSwap::from_pointee(ips_svc));
+
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(32);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_ips_service(Arc::clone(&ips));
+
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 1));
+
+        let mut blacklisted = false;
+        while let Ok(event) = alert_rx.try_recv() {
+            if let AlertEvent::PacketSecurity(a) = event
+                && a.action_label == "blacklist"
+            {
+                blacklisted = true;
+            }
+        }
+        assert!(
+            !blacklisted,
+            "a single packet reached the 2-detection auto-blacklist threshold"
+        );
     }
 
     #[tokio::test]

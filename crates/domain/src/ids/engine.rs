@@ -230,13 +230,30 @@ impl IdsEngine {
         dst_domains: &[String],
         src_country: Option<&str>,
     ) -> Option<(usize, &'a IdsRule, Option<String>)> {
+        self.evaluate_index_with_context(event.rule_id as usize, event, dst_domains, src_country)
+    }
+
+    /// Evaluate one named rule index against an event, applying the same
+    /// sampling, content and domain gating as [`Self::evaluate_event_with_context`].
+    ///
+    /// The kernel names a single rule per event because a map slot holds one
+    /// rule, so a rule that shares a port with the slot's owner never reaches
+    /// the classifier. The pipeline replays those rules through this entry
+    /// point; the sampling decision is a pure function of the addresses, so
+    /// evaluating several rules for one packet keeps the same verdict.
+    pub fn evaluate_index_with_context<'a>(
+        &'a self,
+        idx: usize,
+        event: &PacketEvent,
+        dst_domains: &[String],
+        src_country: Option<&str>,
+    ) -> Option<(usize, &'a IdsRule, Option<String>)> {
         if !self
             .sampling
             .should_process_with_country(event.src_ip(), event.dst_ip(), src_country)
         {
             return None;
         }
-        let idx = event.rule_id as usize;
         let rule = self.rules.get(idx)?;
         if !rule.enabled {
             return None;
