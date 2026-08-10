@@ -484,6 +484,15 @@ pub struct EbpfLoadResult {
     /// loading to wire interface-based tenant identification, which the kernel
     /// consults after the VLAN map and before the subnet tries.
     pub tenant_ifindex_mgr: TenantIfindexMapManager,
+    /// Offset-driven DLP uprobe attacher, present when `uprobe-dlp` loaded.
+    ///
+    /// The OSS scan finds a TLS library by its exported `SSL_write` /
+    /// `SSL_read`. A caller that resolved a library's write and read entry
+    /// points some other way - a `GnuTLS` build, a statically linked `BoringSSL` -
+    /// attaches through this one instead. It is held here, with the generation
+    /// that loaded the programs, so a teardown detaches those probes with all
+    /// the others rather than leaving links on a program nothing else owns.
+    pub extended_tls_attacher: Option<adapters::ebpf::DlpUprobeAttacher>,
     /// Manager for `TENANT_SUBNET_V4` LPM trie maps across all loaded programs.
     ///
     /// Enterprise callers can populate this with `(ip, prefix_len, tenant_id)`
@@ -542,6 +551,7 @@ pub async fn load_ebpf_programs(
     let mut iface_groups_mgr = InterfaceGroupsManager::new();
     let mut tenant_vlan_mgr = TenantVlanMapManager::new();
     let mut tenant_ifindex_mgr = TenantIfindexMapManager::new();
+    let mut extended_tls_attacher: Option<adapters::ebpf::DlpUprobeAttacher> = None;
     let mut tenant_subnet_mgr = TenantSubnetMapManager::new();
     let mut tenant_cgroup_mgr = TenantCgroupMapManager::new();
     let mut program_status = std::collections::HashMap::new();
@@ -778,7 +788,8 @@ pub async fn load_ebpf_programs(
     // ── Uprobe DLP ──────────────────────────────────────────────
     let dlp_ok = if config.dlp.enabled {
         match startup::try_load_uprobe_dlp(&ebpf_dir, config, startup::DLP_PIN_PATH) {
-            Ok((mut loader, dlp_rdr, reader, attacher)) => {
+            Ok((mut loader, dlp_rdr, reader, attacher, extended)) => {
+                extended_tls_attacher = Some(extended);
                 let event_tx_clone = event_tx.clone();
                 let rb_obs = RingBufObserver::new(
                     "uprobe-dlp",
@@ -973,6 +984,7 @@ pub async fn load_ebpf_programs(
         event_rx: Some(event_rx),
         tenant_vlan_mgr,
         tenant_ifindex_mgr,
+        extended_tls_attacher,
         tenant_subnet_mgr,
         tenant_cgroup_mgr,
         ids_mirror_mgr,

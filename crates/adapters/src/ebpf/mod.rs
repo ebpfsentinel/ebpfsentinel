@@ -57,8 +57,9 @@ pub use config_flags_manager::{
 };
 pub use conntrack_map_manager::ConnTrackMapManager;
 pub use dlp_attach::{
-    AttachedUprobe, DLP_ATTACH_POLL_INTERVAL, DlpUprobeAttacher, ReconcileOutcome, UprobeTarget,
-    attached_uprobes, clear_uprobe_inventory,
+    AttachedUprobe, DLP_ATTACH_POLL_INTERVAL, DlpUprobeAttacher, ReconcileOutcome,
+    UPROBE_OWNER_EXTENDED_TLS, UPROBE_OWNER_SCAN, UprobeTarget, attached_uprobes,
+    clear_uprobe_inventory,
 };
 pub use dlp_event_reader::DlpEventReader;
 pub use dns_event_reader::DnsEventReader;

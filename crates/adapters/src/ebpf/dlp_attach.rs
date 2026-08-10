@@ -74,6 +74,13 @@ pub struct UprobeTarget {
     /// scan or system fallback, a library the agent can read) offsets are
     /// resolved on demand.
     preresolved: bool,
+    /// Symbol names the offsets belong to, as `(write, read)`, when they are
+    /// not OpenSSL's. A library whose write and read entry points take the same
+    /// `(handle, buffer, length)` shape is read correctly by the same programs,
+    /// but reporting `SSL_write` on a library that exports no such symbol would
+    /// make the inventory describe a probe that does not exist. `None` for
+    /// OpenSSL and its ABI-compatible dynamic builds, which do export it.
+    symbol_names: Option<(String, String)>,
 }
 
 impl UprobeTarget {
@@ -89,6 +96,7 @@ impl UprobeTarget {
             ssl_write_offset: t.ssl_write_offset,
             ssl_read_offset: t.ssl_read_offset,
             preresolved: true,
+            symbol_names: None,
         }
     }
 }
@@ -126,7 +134,7 @@ pub struct AttachedUprobe {
     /// Loader name of the eBPF program behind the probe.
     pub program: &'static str,
     /// Exported symbol the probe sits on.
-    pub symbol: &'static str,
+    pub symbol: String,
     /// File offset the link was created at.
     pub offset: u64,
     /// The probe fires on return rather than on entry.
@@ -143,22 +151,32 @@ struct PlannedProbe {
     /// Index into [`SSL_UPROBES`], and so into the program fd array.
     index: usize,
     program: &'static str,
-    symbol: &'static str,
+    symbol: String,
     offset: u64,
     retprobe: bool,
 }
 
-/// Snapshot of every uprobe the process currently holds a link for.
+/// Snapshot of every uprobe the process currently holds a link for, per owner.
 ///
-/// Published by the one [`DlpUprobeAttacher`] a process runs, so an operator can
-/// read the live attach set over HTTP without the attacher having to be reachable
-/// from the handler - it is owned by the lifecycle watcher task. Each publish
-/// replaces the snapshot wholesale, so the registry can never drift out of step
-/// with the attacher that owns the links.
-fn inventory() -> &'static Mutex<Vec<AttachedUprobe>> {
-    static INVENTORY: OnceLock<Mutex<Vec<AttachedUprobe>>> = OnceLock::new();
-    INVENTORY.get_or_init(|| Mutex::new(Vec::new()))
+/// Published by each [`DlpUprobeAttacher`] a process runs, so an operator can
+/// read the live attach set over HTTP without the attacher having to be
+/// reachable from the handler - it is owned by the lifecycle watcher task.
+/// A publish replaces that owner's slice wholesale, so an owner's entry can
+/// never drift out of step with the links it holds, while an attacher that
+/// probes libraries a second attacher found cannot blank the other's set.
+fn inventory() -> &'static Mutex<BTreeMap<&'static str, Vec<AttachedUprobe>>> {
+    static INVENTORY: OnceLock<Mutex<BTreeMap<&'static str, Vec<AttachedUprobe>>>> =
+        OnceLock::new();
+    INVENTORY.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
+
+/// Owner label of the attacher driven by the OSS `/proc` scan and its
+/// lifecycle watcher.
+pub const UPROBE_OWNER_SCAN: &str = "dlp-scan";
+
+/// Owner label of the attacher fed by pre-resolved offsets, for TLS libraries
+/// the symbol scan cannot name.
+pub const UPROBE_OWNER_EXTENDED_TLS: &str = "extended-tls";
 
 /// Every uprobe the DLP attacher currently holds a link for, ordered by inode
 /// then symbol so two runs are directly comparable.
@@ -168,7 +186,14 @@ fn inventory() -> &'static Mutex<Vec<AttachedUprobe>> {
 /// TLS payload is being read right now.
 #[must_use]
 pub fn attached_uprobes() -> Vec<AttachedUprobe> {
-    inventory().lock().map(|i| i.clone()).unwrap_or_default()
+    let Ok(inv) = inventory().lock() else {
+        return Vec::new();
+    };
+    let mut probes: Vec<AttachedUprobe> = inv.values().flatten().cloned().collect();
+    probes.sort_by(|a, b| {
+        (a.dev, a.ino, &a.symbol, a.retprobe).cmp(&(b.dev, b.ino, &b.symbol, b.retprobe))
+    });
+    probes
 }
 
 /// Drop the published attach set. Called when the datapath is torn down, so a
@@ -326,6 +351,11 @@ pub struct DlpUprobeAttacher {
     /// drop, so an attacher that never attached anything cannot blank a set it
     /// does not own.
     published: bool,
+    /// Which attach set in the published inventory this attacher owns. Two
+    /// attachers run in the same process - the `/proc` scan with its lifecycle
+    /// watcher, and the offset-driven set for libraries that scan cannot name -
+    /// and neither may publish over the other's probes.
+    owner: &'static str,
 }
 
 impl DlpUprobeAttacher {
@@ -338,6 +368,7 @@ impl DlpUprobeAttacher {
             warden_sock: None,
             attached: HashMap::new(),
             published: false,
+            owner: UPROBE_OWNER_SCAN,
         }
     }
 
@@ -359,6 +390,7 @@ impl DlpUprobeAttacher {
             warden_sock: None,
             attached: HashMap::new(),
             published: false,
+            owner: UPROBE_OWNER_SCAN,
         })
     }
 
@@ -368,6 +400,15 @@ impl DlpUprobeAttacher {
     #[must_use]
     pub fn with_warden_socket(mut self, sock: impl Into<PathBuf>) -> Self {
         self.warden_sock = Some(sock.into());
+        self
+    }
+
+    /// Publish this attacher's probes under `owner` rather than the scan slot,
+    /// so a second attacher in the same process reports alongside the first
+    /// instead of replacing it.
+    #[must_use]
+    pub fn with_owner(mut self, owner: &'static str) -> Self {
+        self.owner = owner;
         self
     }
 
@@ -417,6 +458,7 @@ impl DlpUprobeAttacher {
                     ssl_write_offset: 0,
                     ssl_read_offset: 0,
                     preresolved: false,
+                    symbol_names: None,
                 });
             }
         }
@@ -568,6 +610,64 @@ impl DlpUprobeAttacher {
             ssl_write_offset: 0,
             ssl_read_offset: 0,
             preresolved: false,
+            symbol_names: None,
+        };
+        let (links, probes) = self.attach_target_links(&target, true)?;
+        self.attached.insert(
+            key,
+            Attachment {
+                links,
+                probes,
+                sticky: true,
+            },
+        );
+        self.publish_inventory();
+        Ok(())
+    }
+
+    /// Attach the DLP uprobe set to one library at offsets resolved elsewhere,
+    /// as a **sticky** attachment.
+    ///
+    /// The OSS scan finds a library by looking for `SSL_write` and `SSL_read`.
+    /// A TLS library that exports neither is invisible to it even when its
+    /// write and read entry points take the same `(handle, buffer, length)`
+    /// shape, which is all the uprobe programs depend on - `gnutls_record_send`
+    /// and a statically linked `SSL_write` are read correctly by exactly the
+    /// same code. This is the seam for a caller that resolved those offsets by
+    /// other means: it supplies the symbol names so the inventory reports what
+    /// the probe actually sits on, and the offsets are taken as authoritative.
+    ///
+    /// A zero offset means the caller did not find that symbol, and its probes
+    /// are skipped rather than attached at the start of the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path cannot be stat'ed or if any link fails to
+    /// attach; a partial set is dropped rather than left half-attached.
+    pub fn attach_at_offsets(
+        &mut self,
+        path: &str,
+        write: (&str, u64),
+        read: (&str, u64),
+    ) -> anyhow::Result<()> {
+        let meta = std::fs::metadata(path)
+            .map_err(|e| anyhow::anyhow!("stat TLS library '{path}': {e}"))?;
+        let key = (meta.dev(), meta.ino());
+        if self.attached.contains_key(&key) {
+            // Already probed through the OSS scan or an earlier plan; a second
+            // set on the same inode would double every captured buffer.
+            return Ok(());
+        }
+        let base = path.rsplit('/').next().unwrap_or(path).to_owned();
+        let target = UprobeTarget {
+            attach_path: PathBuf::from(path),
+            lib: base,
+            dev: key.0,
+            ino: key.1,
+            ssl_write_offset: write.1,
+            ssl_read_offset: read.1,
+            preresolved: true,
+            symbol_names: Some((write.0.to_owned(), read.0.to_owned())),
         };
         let (links, probes) = self.attach_target_links(&target, true)?;
         self.attached.insert(
@@ -611,10 +711,22 @@ impl DlpUprobeAttacher {
                 // fallback), in either posture.
                 kfunc_attach::resolve_symbol_offset(path, symbol)?
             };
+            // A GnuTLS or BoringSSL target carries its own symbol names; the
+            // static entry stays the selector for which offset applies.
+            let reported = match &t.symbol_names {
+                Some((write, read)) => {
+                    if *symbol == "SSL_write" {
+                        write.clone()
+                    } else {
+                        read.clone()
+                    }
+                }
+                None => (*symbol).to_owned(),
+            };
             planned.push(PlannedProbe {
                 index,
                 program,
-                symbol,
+                symbol: reported,
                 offset,
                 retprobe: *retprobe,
             });
@@ -670,7 +782,7 @@ impl DlpUprobeAttacher {
                     p.program,
                     self.fds[p.index],
                     path,
-                    p.symbol,
+                    &p.symbol,
                     p.offset,
                     p.retprobe,
                 )?
@@ -701,15 +813,16 @@ impl DlpUprobeAttacher {
             .flat_map(|a| a.probes.iter().cloned())
             .collect();
         probes.sort_by(|a, b| {
-            (a.dev, a.ino, a.symbol, a.retprobe).cmp(&(b.dev, b.ino, b.symbol, b.retprobe))
+            (a.dev, a.ino, &a.symbol, a.retprobe).cmp(&(b.dev, b.ino, &b.symbol, b.retprobe))
         });
         probes
     }
 
     /// Republish the attach set after any change to it.
     fn publish_inventory(&mut self) {
+        let snapshot = self.inventory_snapshot();
         if let Ok(mut i) = inventory().lock() {
-            *i = self.inventory_snapshot();
+            i.insert(self.owner, snapshot);
             self.published = true;
         }
     }
@@ -755,8 +868,10 @@ impl Drop for DlpUprobeAttacher {
     /// old set would be told TLS payload is being inspected when nothing is
     /// attached any more - the same silent lie a stale map handle tells.
     fn drop(&mut self) {
-        if self.published {
-            clear_uprobe_inventory();
+        if self.published
+            && let Ok(mut i) = inventory().lock()
+        {
+            i.remove(self.owner);
         }
     }
 }
@@ -1033,6 +1148,62 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_with_its_own_symbol_names_reports_them_instead_of_the_openssl_ones() {
+        // A GnuTLS probe sits on `gnutls_record_send`. Reporting `SSL_write`
+        // would describe a probe on a symbol that library does not export, and
+        // the inventory is what a post-upgrade run is compared against.
+        let t = UprobeTarget {
+            attach_path: PathBuf::from("/lib/libgnutls.so.30"),
+            lib: "libgnutls.so.30".to_owned(),
+            dev: 4,
+            ino: 88,
+            ssl_write_offset: 0x3000,
+            ssl_read_offset: 0x4000,
+            preresolved: true,
+            symbol_names: Some((
+                "gnutls_record_send".to_owned(),
+                "gnutls_record_recv".to_owned(),
+            )),
+        };
+
+        let planned = DlpUprobeAttacher::plan_probes(&t, "/lib/libgnutls.so.30").unwrap();
+
+        assert_eq!(planned.len(), SSL_UPROBES.len());
+        let write = planned
+            .iter()
+            .find(|p| p.symbol == "gnutls_record_send")
+            .unwrap();
+        assert_eq!(write.offset, 0x3000);
+        // The programs behind the probes are unchanged - only the reported
+        // symbol differs, since the calling convention is what they depend on.
+        assert_eq!(write.program, "ssl_write");
+        let reads: Vec<_> = planned
+            .iter()
+            .filter(|p| p.symbol == "gnutls_record_recv")
+            .collect();
+        assert_eq!(reads.len(), 2);
+        assert!(reads.iter().all(|p| p.offset == 0x4000));
+        assert_eq!(reads.iter().filter(|p| p.retprobe).count(), 1);
+    }
+
+    #[test]
+    fn attaching_at_offsets_for_a_path_that_does_not_exist_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut attacher = DlpUprobeAttacher::new(dir.path());
+        let missing = dir.path().join("libgnutls.so.30");
+
+        let err = attacher
+            .attach_at_offsets(
+                missing.to_str().unwrap(),
+                ("gnutls_record_send", 0x10),
+                ("gnutls_record_recv", 0x20),
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("stat TLS library"));
+    }
+
+    #[test]
     fn a_local_target_whose_elf_cannot_be_read_fails_the_plan() {
         // Not preresolved means the agent resolves the symbol itself. A path it
         // cannot parse must fail the attach rather than yield offset 0.
@@ -1047,6 +1218,7 @@ mod tests {
             ssl_write_offset: 0,
             ssl_read_offset: 0,
             preresolved: false,
+            symbol_names: None,
         };
 
         assert!(DlpUprobeAttacher::plan_probes(&t, bogus.to_str().unwrap()).is_err());
@@ -1062,7 +1234,7 @@ mod tests {
             dev: 1,
             ino,
             program: "ssl_write",
-            symbol,
+            symbol: symbol.to_owned(),
             offset,
             retprobe,
             brokered: false,
@@ -1095,7 +1267,7 @@ mod tests {
         // or two runs of the same host would diff against each other.
         let order: Vec<(u64, &str, bool)> = snapshot
             .iter()
-            .map(|p| (p.ino, p.symbol, p.retprobe))
+            .map(|p| (p.ino, p.symbol.as_str(), p.retprobe))
             .collect();
         assert_eq!(
             order,
@@ -1125,7 +1297,7 @@ mod tests {
                     dev: 1,
                     ino: 10,
                     program: "ssl_write",
-                    symbol: "SSL_write",
+                    symbol: "SSL_write".to_owned(),
                     offset: 0x10,
                     retprobe: false,
                     brokered: false,

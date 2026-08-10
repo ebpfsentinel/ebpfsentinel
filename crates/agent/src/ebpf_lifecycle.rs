@@ -520,7 +520,10 @@ impl EbpfProgramManager {
     }
 
     async fn enable_uprobe_dlp(&mut self, config: &AgentConfig) -> anyhow::Result<()> {
-        let (mut loader, dlp_rdr, reader, attacher) =
+        // The offset-driven attacher is dropped here: nothing on the hot-reload
+        // path feeds it plans, and an attacher that never attached holds no
+        // links, so dropping it detaches nothing.
+        let (mut loader, dlp_rdr, reader, attacher, _extended) =
             startup::try_load_uprobe_dlp(&self.ebpf_dir, config, startup::DLP_PIN_PATH)?;
 
         let cancel = CancellationToken::new();

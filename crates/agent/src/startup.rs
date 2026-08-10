@@ -2070,7 +2070,9 @@ pub async fn run(
         // 10f. Uprobe DLP
         dlp_ok = if config.dlp.enabled {
             match try_load_uprobe_dlp(&ebpf_dir, &config, DLP_PIN_PATH) {
-                Ok((loader, dlp_rdr, reader, attacher)) => {
+                // No extended-TLS consumer on this path; see the hot-reload
+                // path for why dropping an attacher that never attached is safe.
+                Ok((loader, dlp_rdr, reader, attacher, _extended)) => {
                     let event_tx_clone = event_tx.clone();
                     let rb_obs = RingBufObserver::new(
                         "uprobe-dlp",
@@ -4100,6 +4102,7 @@ pub fn try_load_uprobe_dlp(
     Option<MetricsReader>,
     DlpEventReader,
     adapters::ebpf::DlpUprobeAttacher,
+    adapters::ebpf::DlpUprobeAttacher,
 )> {
     let program_bytes = read_ebpf_program(ebpf_dir, "uprobe-dlp")?;
     let mut loader = EbpfLoader::load_with_pin_path(&program_bytes, pin_path)?;
@@ -4111,6 +4114,14 @@ pub fn try_load_uprobe_dlp(
     // a brokered attach needs no path translation.
     let proc_root = host_proc_root();
     let mut attacher = adapters::ebpf::DlpUprobeAttacher::with_programs(&proc_root, &loader)?;
+    // Second attacher over the same programs, for libraries the symbol scan
+    // cannot find because they export neither `SSL_write` nor `SSL_read`. It
+    // discovers nothing on its own: a caller hands it a path and the offsets it
+    // resolved. Separate from the scan attacher so a reconcile pass, which
+    // detaches whatever no live process maps, cannot tear down a probe placed
+    // from a plan, and so each publishes its own half of the inventory.
+    let mut extended = adapters::ebpf::DlpUprobeAttacher::with_programs(&proc_root, &loader)?
+        .with_owner(adapters::ebpf::UPROBE_OWNER_EXTENDED_TLS);
 
     // Rootless posture: discovery (reading other processes' `/proc`) and the
     // privileged uprobe `BPF_LINK_CREATE` are both brokered to the warden. The
@@ -4119,6 +4130,7 @@ pub fn try_load_uprobe_dlp(
     // performs the first scan and every attach asynchronously. Startup only arms
     // the module.
     if let Some(sock) = warden_sock_from_env() {
+        extended = extended.with_warden_socket(sock.clone());
         attacher = attacher.with_warden_socket(sock);
     } else {
         // Direct posture: the agent scans `/proc` itself (fast, local). Attach to
@@ -4147,7 +4159,7 @@ pub fn try_load_uprobe_dlp(
     let reader = DlpEventReader::new(loader.ebpf_mut())?;
 
     info!("uprobe-dlp armed (discovery + attach run via the lifecycle watcher)");
-    Ok((loader, dlp_metrics_rdr, reader, attacher))
+    Ok((loader, dlp_metrics_rdr, reader, attacher, extended))
 }
 
 /// Search for a usable SSL/TLS shared library on the system.
