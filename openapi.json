@@ -2299,6 +2299,55 @@
         ]
       }
     },
+    "/api/v1/ebpf/kernel-features": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Return what the startup helper probe learned about this kernel.",
+        "operationId": "get_kernel_features",
+        "responses": {
+          "200": {
+            "description": "Kernel helper support as probed at startup",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KernelFeaturesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/ebpf/status": {
       "get": {
         "tags": [
@@ -2313,6 +2362,55 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/EbpfStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ebpf/uprobes": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Return the DLP uprobe set the agent currently holds links for.",
+        "operationId": "get_uprobes",
+        "responses": {
+          "200": {
+            "description": "Attached DLP uprobes with their resolved offsets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UprobeInventoryResponse"
                 }
               }
             }
@@ -6760,6 +6858,32 @@
           }
         }
       },
+      "AttachBlockEntry": {
+        "type": "object",
+        "description": "One attach the kernel refused, and what is standing in the way.",
+        "required": [
+          "program",
+          "interface",
+          "reason",
+          "nested_xdp"
+        ],
+        "properties": {
+          "interface": {
+            "type": "string"
+          },
+          "nested_xdp": {
+            "type": "boolean",
+            "description": "True when the interface already carries somebody else's XDP program,\nthe nested-XDP case that Docker and Kubernetes produce."
+          },
+          "program": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Operator-readable sentence: what the kernel said, translated against\nwhat is actually on the interface right now."
+          }
+        }
+      },
       "AuditEntryResponse": {
         "type": "object",
         "required": [
@@ -7461,9 +7585,6 @@
           "queue_id"
         ],
         "properties": {
-          "direction": {
-            "type": "string"
-          },
           "id": {
             "type": "string"
           },
@@ -7523,8 +7644,12 @@
             "minimum": 0
           },
           "vlan_id": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32",
+            "description": "802.1Q VLAN ID: omit for any VLAN, 0 for untagged only, 1-4094 exact.",
             "minimum": 0
           }
         }
@@ -7541,8 +7666,23 @@
             "format": "int64",
             "minimum": 0
           },
+          "delay_ms": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Added latency in milliseconds, paced on egress via the fq qdisc.",
+            "minimum": 0
+          },
+          "direction": {
+            "type": "string",
+            "description": "Which hook the pipe shapes: `ingress`, `egress` or `both`."
+          },
           "id": {
             "type": "string"
+          },
+          "loss_pct": {
+            "type": "number",
+            "format": "float",
+            "description": "Random packet loss, 0.0 to 100.0."
           },
           "rate_bps": {
             "type": "integer",
@@ -7563,11 +7703,6 @@
           },
           "pipe_id": {
             "type": "string"
-          },
-          "weight": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
           }
         }
       },
@@ -7576,7 +7711,8 @@
         "required": [
           "id",
           "rate",
-          "burst"
+          "burst",
+          "src_ip"
         ],
         "properties": {
           "action": {
@@ -7601,14 +7737,9 @@
             "format": "int64",
             "minimum": 0
           },
-          "scope": {
-            "type": "string"
-          },
           "src_ip": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string",
+            "description": "Source host to limit, as a bare address or a `/32`."
           }
         }
       },
@@ -7635,7 +7766,7 @@
           },
           "target": {
             "type": "string",
-            "description": "Target IP or CIDR (e.g. \"1.2.3.4\" or \"10.0.0.0/24\")."
+            "description": "Target host address (e.g. `1.2.3.4` or `2001:db8::1`). The blacklist\nand the rate limiter are both keyed by a single address, so a prefix\nis refused rather than silently narrowed."
           },
           "ttl": {
             "type": "string",
@@ -7745,26 +7876,6 @@
             "type": "string",
             "description": "Destination zone identifier."
           },
-          "enabled": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "priority": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "minimum": 0
-          },
           "source_zone": {
             "type": "string",
             "description": "Source zone identifier."
@@ -7777,17 +7888,12 @@
           "name"
         ],
         "properties": {
-          "description": {
+          "default_policy": {
             "type": [
               "string",
               "null"
-            ]
-          },
-          "enabled": {
-            "type": [
-              "boolean",
-              "null"
-            ]
+            ],
+            "description": "Policy applied when no rule and no inter-zone policy decided the\npacket. `allow` permits; anything else, including an absent value,\ndenies."
           },
           "interfaces": {
             "type": [
@@ -7797,21 +7903,11 @@
             "items": {
               "type": "string"
             },
-            "description": "Network interfaces grouped into this zone."
+            "description": "Network interfaces grouped into this zone. A zone with no interface\ncarries no traffic: the datapath matches on the ingress interface."
           },
           "name": {
             "type": "string",
             "description": "Zone name; used as the zone identifier."
-          },
-          "subnets": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "type": "string"
-            },
-            "description": "Subnets are accepted for forward-compatibility but not yet enforced."
           }
         }
       },
@@ -8231,6 +8327,13 @@
           "programs"
         ],
         "properties": {
+          "attach_blocked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttachBlockEntry"
+            },
+            "description": "Attaches that lost, if any. `programs[].loaded` says a program is in\nthe kernel; this says whether it reached the wire."
+          },
           "programs": {
             "type": "array",
             "items": {
@@ -8507,6 +8610,26 @@
           }
         }
       },
+      "HelperSupportEntry": {
+        "type": "object",
+        "description": "One `(program type, helper)` answer from the startup probe.",
+        "required": [
+          "program_type",
+          "helper",
+          "supported"
+        ],
+        "properties": {
+          "helper": {
+            "type": "string"
+          },
+          "program_type": {
+            "type": "string"
+          },
+          "supported": {
+            "type": "boolean"
+          }
+        }
+      },
       "IdsRuleResponse": {
         "type": "object",
         "required": [
@@ -8693,6 +8816,50 @@
             "format": "int64",
             "description": "Cache TTL in seconds.",
             "minimum": 0
+          }
+        }
+      },
+      "KernelFeaturesResponse": {
+        "type": "object",
+        "description": "What the kernel answered when the agent probed it at startup.\n\n`probed = false` means the probe could not run, **not** that the kernel\nlacks anything: `helpers` and `missing_required` are then empty because\nnothing was measured, and `reason` says why. Treating that as a capability\nreport would invert its meaning.",
+        "required": [
+          "probed",
+          "load_mode",
+          "program_types",
+          "helpers",
+          "missing_required"
+        ],
+        "properties": {
+          "helpers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HelperSupportEntry"
+            }
+          },
+          "load_mode": {
+            "type": "string",
+            "description": "How the agent loads its objects, which is why a probe needing\n`CAP_BPF` can be unavailable on a host where every program loads."
+          },
+          "missing_required": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MissingHelperEntry"
+            }
+          },
+          "probed": {
+            "type": "boolean"
+          },
+          "program_types": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProgramTypeSupport"
+            }
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -8985,6 +9152,31 @@
           }
         }
       },
+      "MissingHelperEntry": {
+        "type": "object",
+        "description": "A helper an object needs that this kernel does not offer for its type.",
+        "required": [
+          "object",
+          "program_type",
+          "helper",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "The same fact as one sentence, for logs and support tickets."
+          },
+          "helper": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string"
+          },
+          "program_type": {
+            "type": "string"
+          }
+        }
+      },
       "MitreCoverageResponse": {
         "type": "object",
         "description": "MITRE ATT&CK coverage response.",
@@ -9122,19 +9314,30 @@
           }
         }
       },
+      "ProgramTypeSupport": {
+        "type": "object",
+        "required": [
+          "program_type",
+          "supported"
+        ],
+        "properties": {
+          "program_type": {
+            "type": "string"
+          },
+          "supported": {
+            "type": "boolean"
+          }
+        }
+      },
       "QosClassifierResponse": {
         "type": "object",
         "required": [
           "id",
           "queue_id",
-          "direction",
           "priority",
           "match_rule"
         ],
         "properties": {
-          "direction": {
-            "type": "string"
-          },
           "id": {
             "type": "string"
           },
@@ -9157,8 +9360,7 @@
           "src_port",
           "dst_port",
           "protocol",
-          "dscp",
-          "vlan_id"
+          "dscp"
         ],
         "properties": {
           "dscp": {
@@ -9194,8 +9396,12 @@
             "minimum": 0
           },
           "vlan_id": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32",
+            "description": "802.1Q VLAN ID: absent = any VLAN, 0 = untagged only, 1-4094 = exact.",
             "minimum": 0
           }
         }
@@ -9205,7 +9411,11 @@
         "required": [
           "id",
           "rate_bps",
-          "burst_bytes"
+          "burst_bytes",
+          "direction",
+          "delay_ms",
+          "loss_pct",
+          "enabled"
         ],
         "properties": {
           "burst_bytes": {
@@ -9213,8 +9423,24 @@
             "format": "int64",
             "minimum": 0
           },
+          "delay_ms": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "direction": {
+            "type": "string",
+            "description": "Which hook the pipe shapes: `ingress`, `egress` or `both`."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
           "id": {
             "type": "string"
+          },
+          "loss_pct": {
+            "type": "number",
+            "format": "float"
           },
           "rate_bps": {
             "type": "integer",
@@ -9228,19 +9454,17 @@
         "required": [
           "id",
           "pipe_id",
-          "weight"
+          "enabled"
         ],
         "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
           "id": {
             "type": "string"
           },
           "pipe_id": {
             "type": "string"
-          },
-          "weight": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
           }
         }
       },
@@ -9248,7 +9472,6 @@
         "type": "object",
         "required": [
           "enabled",
-          "scheduler",
           "pipe_count",
           "queue_count",
           "classifier_count"
@@ -9268,9 +9491,6 @@
           "queue_count": {
             "type": "integer",
             "minimum": 0
-          },
-          "scheduler": {
-            "type": "string"
           }
         }
       },
@@ -9278,11 +9498,11 @@
         "type": "object",
         "required": [
           "id",
-          "scope",
           "rate",
           "burst",
           "action",
           "algorithm",
+          "src_ip",
           "enabled"
         ],
         "properties": {
@@ -9297,16 +9517,6 @@
             "format": "int64",
             "minimum": 0
           },
-          "country_codes": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "type": "string"
-            },
-            "description": "ISO-3166 country codes this rule is scoped to (userspace annotation;\nenforced by the GeoIP-aware ratelimit pipeline). Absent when unscoped."
-          },
           "enabled": {
             "type": "boolean"
           },
@@ -9318,14 +9528,8 @@
             "format": "int64",
             "minimum": 0
           },
-          "scope": {
-            "type": "string"
-          },
           "src_ip": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           }
         }
       },
@@ -9336,9 +9540,23 @@
           "ebpf_loaded"
         ],
         "properties": {
+          "attach_blocked": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Attachments the kernel refused, one operator-readable sentence each,\nnaming the program, the interface and what is holding the slot. A\nnon-empty list is why this host is not ready; an empty one means the\nagent never lost an attach, which is a different situation from having\nno programs at all."
+          },
           "ebpf_loaded": {
             "type": "boolean",
             "description": "Whether eBPF programs are successfully loaded."
+          },
+          "kernel_helpers_missing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Helpers the startup probe found missing, one sentence each. Empty both\nwhen the kernel offers everything and when the probe could not run -\n`/api/v1/ebpf/kernel-features` distinguishes the two."
           },
           "status": {
             "type": "string",
@@ -9918,6 +10136,92 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "UprobeEntry": {
+        "type": "object",
+        "description": "One uprobe the DLP module currently holds a link for.",
+        "required": [
+          "lib",
+          "path",
+          "dev",
+          "ino",
+          "program",
+          "symbol",
+          "offset",
+          "retprobe",
+          "brokered",
+          "sticky"
+        ],
+        "properties": {
+          "brokered": {
+            "type": "boolean",
+            "description": "`BPF_LINK_CREATE` was issued by the warden (rootless posture) rather than\nby the agent itself."
+          },
+          "dev": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Block device of the probed file.",
+            "minimum": 0
+          },
+          "ino": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Inode of the probed file. With `dev`, the identity two runs are compared\non: the same path can name a different file after a package upgrade.",
+            "minimum": 0
+          },
+          "lib": {
+            "type": "string",
+            "description": "Library basename."
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "File offset the link was created at. A changed offset for an unchanged\ninode is a resolution regression, not a new build.",
+            "minimum": 0
+          },
+          "path": {
+            "type": "string",
+            "description": "Path the link was created against, as the loader saw it."
+          },
+          "program": {
+            "type": "string",
+            "description": "Loader name of the eBPF program behind the probe."
+          },
+          "retprobe": {
+            "type": "boolean",
+            "description": "The probe fires on return rather than on entry."
+          },
+          "sticky": {
+            "type": "boolean",
+            "description": "The attachment survives a reconcile that finds no process mapping the\ninode - the cold-start system-library fallback."
+          },
+          "symbol": {
+            "type": "string",
+            "description": "Exported symbol the probe sits on."
+          }
+        }
+      },
+      "UprobeInventoryResponse": {
+        "type": "object",
+        "description": "The uprobe set the DLP module currently holds.\n\nAn empty list is a real answer, and always the same one: no TLS payload is\nbeing read. It covers a DLP module that is not loaded, a scan that resolved\nnothing, and a datapath that has been detached.",
+        "required": [
+          "libraries",
+          "probes"
+        ],
+        "properties": {
+          "libraries": {
+            "type": "integer",
+            "description": "Distinct libraries carrying probes.",
+            "minimum": 0
+          },
+          "probes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UprobeEntry"
+            },
+            "description": "Every probe, ordered by inode then symbol so two runs diff cleanly."
           }
         }
       },
