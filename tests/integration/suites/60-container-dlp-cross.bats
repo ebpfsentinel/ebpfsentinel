@@ -297,7 +297,7 @@ _uprobe_inode_count() {
 
     # Every probe names the inode it sits on, which is what makes the entry
     # comparable across runs.
-    echo "${body}" | jq -e '[.probes[] | select(.ino > 0)] | length == (.probes | length)' >/dev/null
+    echo "${body}" | jq -e '(.probes | map(select(.ino > 0)) | length) == (.probes | length)' >/dev/null
 }
 
 @test "one library inode carries one probe set, however many processes map it" {
