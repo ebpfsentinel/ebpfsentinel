@@ -1509,6 +1509,10 @@ pub async fn run(
     register_module_btf_fds();
 
     let mut ebpf_state = EbpfState::new();
+    // Every task spawned below outlives the loaders unless something stops
+    // it, and each one holds a map taken out of this generation. Hand them
+    // the state's token so a detach closes their descriptors with it.
+    let readers = ebpf_state.readers.clone();
     if let Some(handle) = bpf_handle {
         ebpf_state.attach_bpf_handle(handle);
     }
@@ -1549,10 +1553,9 @@ pub async fn run(
                         "xdp-firewall",
                         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                     );
+                    let task_cancel_1 = readers.clone();
                     tokio::spawn(async move {
-                        reader
-                            .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                            .await;
+                        reader.run(event_tx_clone, task_cancel_1, rb_obs).await;
                     });
                     let mut svc = firewall_svc.write().await;
                     svc.set_map_port(Box::new(map_manager));
@@ -1610,10 +1613,9 @@ pub async fn run(
                         "xdp-ratelimit",
                         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                     );
+                    let task_cancel_2 = readers.clone();
                     tokio::spawn(async move {
-                        reader
-                            .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                            .await;
+                        reader.run(event_tx_clone, task_cancel_2, rb_obs).await;
                     });
                     metrics_readers.extend(rl_rdrs);
                     if let Some(rl_mgr) = rl_mgr_opt {
@@ -1684,10 +1686,9 @@ pub async fn run(
                                     "xdp-loadbalancer",
                                     Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                                 );
+                                let task_cancel_3 = readers.clone();
                                 tokio::spawn(async move {
-                                    lb_reader
-                                        .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                                        .await;
+                                    lb_reader.run(event_tx_clone, task_cancel_3, rb_obs).await;
                                 });
                                 lb_svc.write().await.set_map_port(Box::new(lb_mgr));
                                 if let Some(rdr) = lb_metrics_rdr {
@@ -1830,10 +1831,9 @@ pub async fn run(
                         "xdp-loadbalancer",
                         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                     );
+                    let task_cancel_4 = readers.clone();
                     tokio::spawn(async move {
-                        lb_reader
-                            .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                            .await;
+                        lb_reader.run(event_tx_clone, task_cancel_4, rb_obs).await;
                     });
                     lb_svc.write().await.set_map_port(Box::new(lb_mgr));
                     if let Some(rdr) = lb_metrics_rdr {
@@ -1933,10 +1933,9 @@ pub async fn run(
                         "tc-ids",
                         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                     );
+                    let task_cancel_5 = readers.clone();
                     tokio::spawn(async move {
-                        reader
-                            .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                            .await;
+                        reader.run(event_tx_clone, task_cancel_5, rb_obs).await;
                     });
                     if let Some(ids_mgr) = ids_mgr_opt {
                         {
@@ -1981,10 +1980,9 @@ pub async fn run(
                             "tc-threatintel",
                             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                         );
+                        let task_cancel_6 = readers.clone();
                         tokio::spawn(async move {
-                            reader
-                                .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                                .await;
+                            reader.run(event_tx_clone, task_cancel_6, rb_obs).await;
                         });
                         if let Some(rdr) = ti_rdr {
                             metrics_readers.push(rdr);
@@ -2036,10 +2034,9 @@ pub async fn run(
                         "tc-dns",
                         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                     );
+                    let task_cancel_7 = readers.clone();
                     tokio::spawn(async move {
-                        reader
-                            .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                            .await;
+                        reader.run(event_tx_clone, task_cancel_7, rb_obs).await;
                     });
                     if let Some(rdr) = dns_rdr {
                         metrics_readers.push(rdr);
@@ -2069,19 +2066,16 @@ pub async fn run(
                         "uprobe-dlp",
                         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                     );
+                    let task_cancel_8 = readers.clone();
                     tokio::spawn(async move {
-                        reader
-                            .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                            .await;
+                        reader.run(event_tx_clone, task_cancel_8, rb_obs).await;
                     });
                     // Lifecycle watcher: attach SSL uprobes to containers as they
                     // appear and detach them on teardown.
+                    let task_cancel_9 = readers.clone();
                     tokio::spawn(async move {
                         attacher
-                            .watch(
-                                adapters::ebpf::DLP_ATTACH_POLL_INTERVAL,
-                                CancellationToken::new(),
-                            )
+                            .watch(adapters::ebpf::DLP_ATTACH_POLL_INTERVAL, task_cancel_9)
                             .await;
                     });
                     if let Some(rdr) = dlp_rdr {
@@ -2113,10 +2107,9 @@ pub async fn run(
                             "tc-conntrack",
                             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                         );
+                        let task_cancel_10 = readers.clone();
                         tokio::spawn(async move {
-                            reader
-                                .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                                .await;
+                            reader.run(event_tx_clone, task_cancel_10, rb_obs).await;
                         });
                     }
                     conntrack_svc.write().await.set_map_port(Box::new(ct_mgr));
@@ -2223,10 +2216,9 @@ pub async fn run(
                             "tc-qos",
                             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                         );
+                        let task_cancel_11 = readers.clone();
                         tokio::spawn(async move {
-                            reader
-                                .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                                .await;
+                            reader.run(event_tx_clone, task_cancel_11, rb_obs).await;
                         });
                     }
                     {
@@ -2281,10 +2273,9 @@ pub async fn run(
                         "xdp-loadbalancer",
                         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                     );
+                    let task_cancel_12 = readers.clone();
                     tokio::spawn(async move {
-                        lb_reader
-                            .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                            .await;
+                        lb_reader.run(event_tx_clone, task_cancel_12, rb_obs).await;
                     });
                     lb_svc.write().await.set_map_port(Box::new(lb_mgr));
                     if let Some(rdr) = lb_metrics_rdr {
@@ -3257,6 +3248,16 @@ pub struct EbpfState {
     /// process. Dropping them would invalidate any programs loaded
     /// through the token.
     pub bpf_handle: Option<adapters::ebpf::BpfLoadingHandle>,
+    /// Cancels every task this generation spawned: ring-buffer readers and
+    /// the DLP uprobe watcher.
+    ///
+    /// Those tasks own map handles taken out of the loaders, so dropping the
+    /// loaders alone does not close the descriptors - the reader keeps polling
+    /// a ring buffer whose programs are gone. In a long-lived process that
+    /// re-attaches (HA promotion, config reload), each generation would leave
+    /// its readers behind and the map descriptors would pile up for the
+    /// lifetime of the agent.
+    pub readers: CancellationToken,
 }
 
 impl Default for EbpfState {
@@ -3267,7 +3268,10 @@ impl Default for EbpfState {
 
 impl Drop for EbpfState {
     fn drop(&mut self) {
-        // Loaders are dropped first (aya detaches programs via link FDs).
+        // Readers first: they hold map handles this generation handed them, and
+        // a still-running reader keeps those descriptors open past the detach.
+        self.readers.cancel();
+        // Loaders are dropped next (aya detaches programs via link FDs).
         // Then clean up any pinned maps left on the BPF filesystem.
         self.loaders.clear();
         EbpfLoader::cleanup_pin_path_because(
@@ -3282,6 +3286,7 @@ impl EbpfState {
         Self {
             loaders: Vec::new(),
             bpf_handle: None,
+            readers: CancellationToken::new(),
         }
     }
 
@@ -3353,6 +3358,26 @@ fn check_kernel_version_from(path: &std::path::Path) -> anyhow::Result<()> {
         },
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod ebpf_state_tests {
+    use super::*;
+
+    /// The ring-buffer readers and the DLP watcher own map handles taken out of
+    /// the loaders, so detaching without stopping them leaves the descriptors
+    /// open. A process that re-attaches - HA promotion, config reload - would
+    /// then accumulate one set of map fds per generation.
+    #[test]
+    fn dropping_the_state_stops_the_tasks_it_spawned() {
+        let state = EbpfState::new();
+        let readers = state.readers.clone();
+
+        assert!(!readers.is_cancelled());
+        drop(state);
+        assert!(readers.is_cancelled());
+    }
 }
 
 #[cfg(test)]

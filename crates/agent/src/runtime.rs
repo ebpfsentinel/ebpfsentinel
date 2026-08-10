@@ -453,7 +453,6 @@ use adapters::ebpf::{
 };
 use application::packet_pipeline::AgentEvent;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use crate::reload::EbpfMapHolder;
 use crate::startup::{self, EbpfState};
@@ -528,6 +527,10 @@ pub async fn load_ebpf_programs(
     );
 
     let mut ebpf_state = EbpfState::new();
+    // Every task spawned below outlives the loaders unless something stops
+    // it, and each one holds a map taken out of this generation. Hand them
+    // the state's token so a detach closes their descriptors with it.
+    let readers = ebpf_state.readers.clone();
     let mut ebpf_map_holder = EbpfMapHolder::new();
     let mut metrics_readers: Vec<MetricsReader> = Vec::new();
     let mut iface_groups_mgr = InterfaceGroupsManager::new();
@@ -551,10 +554,9 @@ pub async fn load_ebpf_programs(
                     "xdp-firewall",
                     Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
                 );
+                let task_cancel_1 = readers.clone();
                 tokio::spawn(async move {
-                    reader
-                        .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                        .await;
+                    reader.run(event_tx_clone, task_cancel_1, rb_obs).await;
                 });
                 let mut svc = services.firewall_svc.write().await;
                 svc.set_map_port(Box::new(map_manager));
@@ -594,10 +596,9 @@ pub async fn load_ebpf_programs(
                     "xdp-ratelimit",
                     Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
                 );
+                let task_cancel_2 = readers.clone();
                 tokio::spawn(async move {
-                    reader
-                        .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                        .await;
+                    reader.run(event_tx_clone, task_cancel_2, rb_obs).await;
                 });
                 metrics_readers.extend(rl_rdrs);
                 if let Some(rl_mgr) = rl_mgr_opt {
@@ -654,10 +655,9 @@ pub async fn load_ebpf_programs(
                     "tc-ids",
                     Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
                 );
+                let task_cancel_3 = readers.clone();
                 tokio::spawn(async move {
-                    reader
-                        .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                        .await;
+                    reader.run(event_tx_clone, task_cancel_3, rb_obs).await;
                 });
                 if let Some(ids_mgr) = ids_mgr_opt {
                     let mut svc = (**services.ids_svc.load()).clone();
@@ -704,10 +704,9 @@ pub async fn load_ebpf_programs(
                     "tc-threatintel",
                     Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
                 );
+                let task_cancel_4 = readers.clone();
                 tokio::spawn(async move {
-                    reader
-                        .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                        .await;
+                    reader.run(event_tx_clone, task_cancel_4, rb_obs).await;
                 });
                 if let Some(rdr) = ti_rdr {
                     metrics_readers.push(rdr);
@@ -743,10 +742,9 @@ pub async fn load_ebpf_programs(
                     "tc-dns",
                     Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
                 );
+                let task_cancel_5 = readers.clone();
                 tokio::spawn(async move {
-                    reader
-                        .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                        .await;
+                    reader.run(event_tx_clone, task_cancel_5, rb_obs).await;
                 });
                 if let Some(rdr) = dns_rdr {
                     metrics_readers.push(rdr);
@@ -774,19 +772,16 @@ pub async fn load_ebpf_programs(
                     "uprobe-dlp",
                     Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
                 );
+                let task_cancel_6 = readers.clone();
                 tokio::spawn(async move {
-                    reader
-                        .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                        .await;
+                    reader.run(event_tx_clone, task_cancel_6, rb_obs).await;
                 });
                 // Lifecycle watcher: attach SSL uprobes to containers as they
                 // appear and detach them on teardown.
+                let task_cancel_7 = readers.clone();
                 tokio::spawn(async move {
                     attacher
-                        .watch(
-                            adapters::ebpf::DLP_ATTACH_POLL_INTERVAL,
-                            CancellationToken::new(),
-                        )
+                        .watch(adapters::ebpf::DLP_ATTACH_POLL_INTERVAL, task_cancel_7)
                         .await;
                 });
                 if let Some(rdr) = dlp_rdr {
@@ -816,10 +811,9 @@ pub async fn load_ebpf_programs(
                         "tc-conntrack",
                         Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
                     );
+                    let task_cancel_8 = readers.clone();
                     tokio::spawn(async move {
-                        reader
-                            .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                            .await;
+                        reader.run(event_tx_clone, task_cancel_8, rb_obs).await;
                     });
                 }
                 services
@@ -907,10 +901,9 @@ pub async fn load_ebpf_programs(
                     "xdp-loadbalancer",
                     Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
                 );
+                let task_cancel_9 = readers.clone();
                 tokio::spawn(async move {
-                    reader
-                        .run(event_tx_clone, CancellationToken::new(), rb_obs)
-                        .await;
+                    reader.run(event_tx_clone, task_cancel_9, rb_obs).await;
                 });
                 services.lb_svc.write().await.set_map_port(Box::new(lb_mgr));
                 if let Some(rdr) = lb_metrics_rdr {
