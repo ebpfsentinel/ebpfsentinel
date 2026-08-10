@@ -983,5 +983,8 @@ pub fn detach_ebpf(state: EbpfState) {
     // next activate would keep readiness pinned to a conflict the agent has
     // already stopped competing for.
     adapters::ebpf::clear_attach_blocks();
+    // Same reasoning for the DLP uprobe set: the links died with the loaders, so
+    // continuing to publish them would report TLS inspection that is not running.
+    adapters::ebpf::clear_uprobe_inventory();
     info!(program_count = count, "eBPF programs detached");
 }

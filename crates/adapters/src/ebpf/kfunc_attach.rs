@@ -264,17 +264,24 @@ struct UprobeMultiLinkAttr {
     _tail: [u64; 2],
 }
 
-/// Attach a raw uprobe program fd to `symbol` in `target` (a binary / shared
-/// object path) via a `uprobe_multi` `BPF_LINK_CREATE`. System-wide (`pid=0`).
-/// `is_ret` selects a uretprobe. Returns the link fd; dropping it detaches.
-pub fn attach_uprobe_raw(
+/// Attach a raw uprobe program fd at `offset` within `target` (a binary /
+/// shared object path) via a `uprobe_multi` `BPF_LINK_CREATE`. System-wide
+/// (`pid=0`). `is_ret` selects a uretprobe. Returns the link fd; dropping it
+/// detaches.
+///
+/// The offset is taken as an argument rather than resolved here so the caller
+/// keeps the value it attached at: an operator comparing two runs needs the
+/// resolved offset, and a symbol resolved twice (once to attach, once to
+/// report) could disagree with itself if the file changed in between.
+/// [`resolve_symbol_offset`] turns a symbol name into that offset.
+pub fn attach_uprobe_at_offset(
     program: &str,
     prog_fd: RawFd,
     target: &str,
     symbol: &str,
+    offset: u64,
     is_ret: bool,
 ) -> Result<OwnedFd, KfuncAttachError> {
-    let offset = resolve_symbol_offset(target, symbol)?;
     let path_c = CString::new(target).map_err(|e| KfuncAttachError::UprobeSymbol {
         target: target.to_owned(),
         symbol: symbol.to_owned(),

@@ -99,6 +99,7 @@ use super::zone_handler;
         ops_handler::get_config,
         ops_handler::get_ebpf_status,
         ops_handler::get_kernel_features,
+        ops_handler::get_uprobes,
         // DNS
         dns_handler::dns_status,
         dns_handler::list_dns_cache,
@@ -236,6 +237,8 @@ use super::zone_handler;
         ops_handler::ProgramTypeSupport,
         ops_handler::HelperSupportEntry,
         ops_handler::MissingHelperEntry,
+        ops_handler::UprobeEntry,
+        ops_handler::UprobeInventoryResponse,
         // DNS
         dns_handler::DnsStatusResponse,
         dns_handler::DnsCacheEntryResponse,

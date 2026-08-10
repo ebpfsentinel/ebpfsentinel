@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::os::fd::{OwnedFd, RawFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -95,12 +96,87 @@ impl UprobeTarget {
 /// The uprobe links attached to one SSL library inode, held for their lifetime
 /// (dropping the fds detaches the probes).
 struct Attachment {
-    /// Owned uprobe link fds — one per [`SSL_UPROBES`] entry.
+    /// Owned uprobe link fds — one per attached [`SSL_UPROBES`] entry.
     links: Vec<OwnedFd>,
+    /// What each of those links attached to, as resolved at attach time.
+    probes: Vec<AttachedUprobe>,
     /// Sticky attachments survive a reconcile even when no process maps the
     /// inode. The cold-start system-library fallback is sticky so its probe
     /// stays armed before any workload maps the library.
     sticky: bool,
+}
+
+/// One uprobe the agent currently holds a link for, described the way it was
+/// resolved at attach time.
+///
+/// A probe is only as good as the offset it landed on, and an offset is a
+/// property of one build of one file. Reporting the target path alone would
+/// make two runs look identical while probing different code, so the inode
+/// identity and the resolved offset travel with the symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachedUprobe {
+    /// Library basename.
+    pub lib: String,
+    /// Path the link was created against.
+    pub path: String,
+    /// Block device of the probed file.
+    pub dev: u64,
+    /// Inode of the probed file.
+    pub ino: u64,
+    /// Loader name of the eBPF program behind the probe.
+    pub program: &'static str,
+    /// Exported symbol the probe sits on.
+    pub symbol: &'static str,
+    /// File offset the link was created at.
+    pub offset: u64,
+    /// The probe fires on return rather than on entry.
+    pub retprobe: bool,
+    /// `BPF_LINK_CREATE` was issued by the warden rather than by the agent.
+    pub brokered: bool,
+    /// The attachment survives a reconcile that finds nothing mapping the inode.
+    pub sticky: bool,
+}
+
+/// One probe resolved and ready to attach: everything the link needs, decided
+/// before any syscall is issued.
+struct PlannedProbe {
+    /// Index into [`SSL_UPROBES`], and so into the program fd array.
+    index: usize,
+    program: &'static str,
+    symbol: &'static str,
+    offset: u64,
+    retprobe: bool,
+}
+
+/// Snapshot of every uprobe the process currently holds a link for.
+///
+/// Published by the one [`DlpUprobeAttacher`] a process runs, so an operator can
+/// read the live attach set over HTTP without the attacher having to be reachable
+/// from the handler - it is owned by the lifecycle watcher task. Each publish
+/// replaces the snapshot wholesale, so the registry can never drift out of step
+/// with the attacher that owns the links.
+fn inventory() -> &'static Mutex<Vec<AttachedUprobe>> {
+    static INVENTORY: OnceLock<Mutex<Vec<AttachedUprobe>>> = OnceLock::new();
+    INVENTORY.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Every uprobe the DLP attacher currently holds a link for, ordered by inode
+/// then symbol so two runs are directly comparable.
+///
+/// Empty when the DLP uprobe module is not loaded, when nothing resolved, and
+/// after a detach - all three of which are the same statement to a caller: no
+/// TLS payload is being read right now.
+#[must_use]
+pub fn attached_uprobes() -> Vec<AttachedUprobe> {
+    inventory().lock().map(|i| i.clone()).unwrap_or_default()
+}
+
+/// Drop the published attach set. Called when the datapath is torn down, so a
+/// reader never sees probes belonging to a generation that is gone.
+pub fn clear_uprobe_inventory() {
+    if let Ok(mut i) = inventory().lock() {
+        i.clear();
+    }
 }
 
 /// Outcome of one [`DlpUprobeAttacher::reconcile`] pass.
@@ -246,6 +322,10 @@ pub struct DlpUprobeAttacher {
     /// Currently-attached libraries keyed by `(dev, ino)` — dedup, idempotency,
     /// and the owning handle whose drop detaches.
     attached: HashMap<(u64, u64), Attachment>,
+    /// This attacher has published an attach set. Only a publisher retracts on
+    /// drop, so an attacher that never attached anything cannot blank a set it
+    /// does not own.
+    published: bool,
 }
 
 impl DlpUprobeAttacher {
@@ -257,6 +337,7 @@ impl DlpUprobeAttacher {
             fds: [-1; SSL_UPROBES.len()],
             warden_sock: None,
             attached: HashMap::new(),
+            published: false,
         }
     }
 
@@ -277,6 +358,7 @@ impl DlpUprobeAttacher {
             fds,
             warden_sock: None,
             attached: HashMap::new(),
+            published: false,
         })
     }
 
@@ -428,12 +510,13 @@ impl DlpUprobeAttacher {
             let Some(t) = live_map.get(&k) else {
                 continue;
             };
-            match self.attach_target_links(t) {
-                Ok(links) => {
+            match self.attach_target_links(t, false) {
+                Ok((links, probes)) => {
                     self.attached.insert(
                         k,
                         Attachment {
                             links,
+                            probes,
                             sticky: false,
                         },
                     );
@@ -453,6 +536,10 @@ impl DlpUprobeAttacher {
                     "DLP uprobe attach failed; skipping library"
                 ),
             }
+        }
+
+        if attached > 0 || !to_detach.is_empty() {
+            self.publish_inventory();
         }
 
         ReconcileOutcome {
@@ -482,74 +569,149 @@ impl DlpUprobeAttacher {
             ssl_read_offset: 0,
             preresolved: false,
         };
-        let links = self.attach_target_links(&target)?;
+        let (links, probes) = self.attach_target_links(&target, true)?;
         self.attached.insert(
             key,
             Attachment {
                 links,
+                probes,
                 sticky: true,
             },
         );
+        self.publish_inventory();
         Ok(())
     }
 
-    /// Attach the full SSL uprobe set (`SSL_write`, `SSL_read` entry + ret) to one
-    /// resolved target, returning the owned link fds. A partial failure drops the
-    /// links already created, detaching them, so no half-attached set lingers.
-    fn attach_target_links(&self, t: &UprobeTarget) -> anyhow::Result<Vec<OwnedFd>> {
-        let path = t
-            .attach_path
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("non-UTF-8 library path"))?;
-        let mut links = Vec::with_capacity(SSL_UPROBES.len());
-        for (i, (prog, sym, is_ret)) in SSL_UPROBES.iter().enumerate() {
-            if let Some(sock) = &self.warden_sock {
-                // Rootless: the warden — which holds the tracing capability and
-                // can read the target — creates the link and passes back its fd.
-                let preset = if *sym == "SSL_write" {
+    /// Resolve every probe of the SSL uprobe set against one target, without
+    /// attaching anything.
+    ///
+    /// Resolution and attachment are separated so the offset the link is created
+    /// at is a value this module holds, not a side effect buried in the attach
+    /// call: it is what the inventory reports, and what a post-upgrade run is
+    /// compared against.
+    fn plan_probes(t: &UprobeTarget, path: &str) -> anyhow::Result<Vec<PlannedProbe>> {
+        let mut planned = Vec::with_capacity(SSL_UPROBES.len());
+        for (index, (program, symbol, retprobe)) in SSL_UPROBES.iter().enumerate() {
+            let offset = if t.preresolved {
+                // Authoritative: the agent cannot read this neighbour's ELF, so
+                // the warden's offsets stand. A `0` offset means the symbol is
+                // absent from that build - skip its probe rather than attach at
+                // the start of the file.
+                let preset = if *symbol == "SSL_write" {
                     t.ssl_write_offset
                 } else {
                     t.ssl_read_offset
                 };
-                let offset = if t.preresolved {
-                    // Authoritative: the agent cannot read this neighbour's ELF.
-                    // A `0` offset means the symbol is absent — skip its probe.
-                    if preset == 0 {
-                        continue;
-                    }
-                    preset
-                } else {
-                    // A library the agent itself can read (system fallback).
-                    kfunc_attach::resolve_symbol_offset(path, sym)?
-                };
+                if preset == 0 {
+                    continue;
+                }
+                preset
+            } else {
+                // A library the agent itself can read (local scan or the system
+                // fallback), in either posture.
+                kfunc_attach::resolve_symbol_offset(path, symbol)?
+            };
+            planned.push(PlannedProbe {
+                index,
+                program,
+                symbol,
+                offset,
+                retprobe: *retprobe,
+            });
+        }
+        Ok(planned)
+    }
+
+    /// Attach the full SSL uprobe set (`SSL_write`, `SSL_read` entry + ret) to one
+    /// resolved target, returning the owned link fds alongside a description of
+    /// what each one attached to. A partial failure drops the links already
+    /// created, detaching them, so no half-attached set lingers.
+    fn attach_target_links(
+        &self,
+        t: &UprobeTarget,
+        sticky: bool,
+    ) -> anyhow::Result<(Vec<OwnedFd>, Vec<AttachedUprobe>)> {
+        let path = t
+            .attach_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("non-UTF-8 library path"))?;
+        let planned = Self::plan_probes(t, path)?;
+        let mut links = Vec::with_capacity(planned.len());
+        let mut probes = Vec::with_capacity(planned.len());
+        for p in planned {
+            let link = if let Some(sock) = &self.warden_sock {
+                // Rootless: the warden — which holds the tracing capability and
+                // can read the target — creates the link and passes back its fd.
                 let link = crate::warden::uprobe::attach_via_warden(
                     sock,
-                    self.fds[i],
+                    self.fds[p.index],
                     path,
-                    offset,
-                    *is_ret,
+                    p.offset,
+                    p.retprobe,
                 )?;
                 // The warden created the link, so the direct path's log line
                 // never fires here. Say the same thing anyway: an operator
                 // debugging a rootless deployment needs the same evidence
                 // that a probe attached, whoever issued BPF_LINK_CREATE.
-                let probe = if *is_ret { "uretprobe" } else { "uprobe" };
+                let probe = if p.retprobe { "uretprobe" } else { "uprobe" };
                 tracing::info!(
-                    program = prog,
+                    program = p.program,
                     target = path,
-                    symbol = sym,
+                    symbol = p.symbol,
+                    offset = p.offset,
                     probe,
                     "uprobe kfunc program attached (uprobe_multi link) via warden"
                 );
-                links.push(link);
+                link
             } else {
                 // Direct: the agent creates the link itself (bare-metal / single
                 // privileged container).
-                let link = kfunc_attach::attach_uprobe_raw(prog, self.fds[i], path, sym, *is_ret)?;
-                links.push(link);
-            }
+                kfunc_attach::attach_uprobe_at_offset(
+                    p.program,
+                    self.fds[p.index],
+                    path,
+                    p.symbol,
+                    p.offset,
+                    p.retprobe,
+                )?
+            };
+            links.push(link);
+            probes.push(AttachedUprobe {
+                lib: t.lib.clone(),
+                path: path.to_owned(),
+                dev: t.dev,
+                ino: t.ino,
+                program: p.program,
+                symbol: p.symbol,
+                offset: p.offset,
+                retprobe: p.retprobe,
+                brokered: self.warden_sock.is_some(),
+                sticky,
+            });
         }
-        Ok(links)
+        Ok((links, probes))
+    }
+
+    /// Every probe this attacher holds, ordered by inode then symbol so two runs
+    /// are directly comparable.
+    fn inventory_snapshot(&self) -> Vec<AttachedUprobe> {
+        let mut probes: Vec<AttachedUprobe> = self
+            .attached
+            .values()
+            .flat_map(|a| a.probes.iter().cloned())
+            .collect();
+        probes.sort_by(|a, b| {
+            (a.dev, a.ino, a.symbol, a.retprobe).cmp(&(b.dev, b.ino, b.symbol, b.retprobe))
+        });
+        probes
+    }
+
+    /// Republish the attach set after any change to it.
+    fn publish_inventory(&mut self) {
+        if let Ok(mut i) = inventory().lock() {
+            *i = self.inventory_snapshot();
+            self.published = true;
+        }
     }
 
     /// Long-running watcher: reconcile the attached SSL library set every
@@ -583,6 +745,18 @@ impl DlpUprobeAttacher {
                     }
                 }
             }
+        }
+    }
+}
+
+impl Drop for DlpUprobeAttacher {
+    /// Dropping the attacher drops every link fd, which detaches every probe.
+    /// The published inventory has to go with them: a reader that still saw the
+    /// old set would be told TLS payload is being inspected when nothing is
+    /// attached any more - the same silent lie a stale map handle tells.
+    fn drop(&mut self) {
+        if self.published {
+            clear_uprobe_inventory();
         }
     }
 }
@@ -813,6 +987,161 @@ mod tests {
         assert_eq!(targets[0].attach_path, map_files.join("400000-401000"));
     }
 
+    /// A warden-scanned target: offsets are authoritative and the ELF is not
+    /// readable by the agent.
+    fn warden_target(write: u64, read: u64) -> UprobeTarget {
+        UprobeTarget::from_warden(ebpfsentinel_warden_client::DlpTarget {
+            path: "/proc/9/root/lib/libssl.so.3".to_owned(),
+            dev: 3,
+            ino: 77,
+            ssl_write_offset: write,
+            ssl_read_offset: read,
+        })
+    }
+
+    #[test]
+    fn a_preresolved_target_attaches_at_the_offsets_the_warden_resolved() {
+        // The agent cannot read a neighbour container's library, so it must take
+        // the warden's offsets verbatim rather than re-resolving against some
+        // same-named file on its own rootfs.
+        let t = warden_target(0x1_1000, 0x2_2000);
+
+        let planned = DlpUprobeAttacher::plan_probes(&t, "/proc/9/root/lib/libssl.so.3").unwrap();
+
+        assert_eq!(planned.len(), SSL_UPROBES.len());
+        let write = planned.iter().find(|p| p.symbol == "SSL_write").unwrap();
+        assert_eq!(write.offset, 0x1_1000);
+        assert!(!write.retprobe);
+        // Both SSL_read probes - entry and return - sit on the same offset.
+        let reads: Vec<_> = planned.iter().filter(|p| p.symbol == "SSL_read").collect();
+        assert_eq!(reads.len(), 2);
+        assert!(reads.iter().all(|p| p.offset == 0x2_2000));
+        assert_eq!(reads.iter().filter(|p| p.retprobe).count(), 1);
+    }
+
+    #[test]
+    fn a_symbol_the_warden_could_not_resolve_is_skipped_not_attached_at_zero() {
+        // `0` from an authoritative scan means "absent from this build". Attaching
+        // there would probe the ELF header: a probe that never fires, reported as
+        // if DLP were watching that library's reads.
+        let t = warden_target(0x1_1000, 0);
+
+        let planned = DlpUprobeAttacher::plan_probes(&t, "/proc/9/root/lib/libssl.so.3").unwrap();
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].symbol, "SSL_write");
+    }
+
+    #[test]
+    fn a_local_target_whose_elf_cannot_be_read_fails_the_plan() {
+        // Not preresolved means the agent resolves the symbol itself. A path it
+        // cannot parse must fail the attach rather than yield offset 0.
+        let dir = tempfile::tempdir().unwrap();
+        let bogus = dir.path().join("libssl.so.3");
+        std::fs::write(&bogus, b"not-an-elf").unwrap();
+        let t = UprobeTarget {
+            attach_path: bogus.clone(),
+            lib: "libssl.so.3".to_owned(),
+            dev: 1,
+            ino: 2,
+            ssl_write_offset: 0,
+            ssl_read_offset: 0,
+            preresolved: false,
+        };
+
+        assert!(DlpUprobeAttacher::plan_probes(&t, bogus.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn the_inventory_reports_every_probe_ordered_by_inode_then_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut attacher = DlpUprobeAttacher::new(dir.path());
+        let probe = |ino: u64, symbol: &'static str, retprobe: bool, offset: u64| AttachedUprobe {
+            lib: "libssl.so.3".to_owned(),
+            path: "/lib/libssl.so.3".to_owned(),
+            dev: 1,
+            ino,
+            program: "ssl_write",
+            symbol,
+            offset,
+            retprobe,
+            brokered: false,
+            sticky: false,
+        };
+        attacher.attached.insert(
+            (1, 20),
+            Attachment {
+                links: Vec::new(),
+                probes: vec![probe(20, "SSL_write", false, 0x30)],
+                sticky: false,
+            },
+        );
+        attacher.attached.insert(
+            (1, 10),
+            Attachment {
+                links: Vec::new(),
+                probes: vec![
+                    probe(10, "SSL_read", true, 0x20),
+                    probe(10, "SSL_read", false, 0x20),
+                    probe(10, "SSL_write", false, 0x10),
+                ],
+                sticky: false,
+            },
+        );
+
+        let snapshot = attacher.inventory_snapshot();
+
+        // A HashMap iterates in no particular order; the inventory must not,
+        // or two runs of the same host would diff against each other.
+        let order: Vec<(u64, &str, bool)> = snapshot
+            .iter()
+            .map(|p| (p.ino, p.symbol, p.retprobe))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (10, "SSL_read", false),
+                (10, "SSL_read", true),
+                (10, "SSL_write", false),
+                (20, "SSL_write", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn dropping_the_attacher_retracts_the_published_inventory() {
+        // The links die with the attacher. A published set that outlived them
+        // would report TLS inspection that is not running - the same silent lie
+        // a stale map handle tells.
+        let dir = tempfile::tempdir().unwrap();
+        let mut attacher = DlpUprobeAttacher::new(dir.path());
+        attacher.attached.insert(
+            (1, 10),
+            Attachment {
+                links: Vec::new(),
+                probes: vec![AttachedUprobe {
+                    lib: "libssl.so.3".to_owned(),
+                    path: "/lib/libssl.so.3".to_owned(),
+                    dev: 1,
+                    ino: 10,
+                    program: "ssl_write",
+                    symbol: "SSL_write",
+                    offset: 0x10,
+                    retprobe: false,
+                    brokered: false,
+                    sticky: false,
+                }],
+                sticky: false,
+            },
+        );
+        attacher.publish_inventory();
+        assert_eq!(attached_uprobes().len(), 1);
+
+        drop(attacher);
+
+        assert!(attached_uprobes().is_empty());
+    }
+
     #[test]
     fn plan_reconcile_attaches_new_and_detaches_vanished() {
         let live: BTreeSet<(u64, u64)> = [(1, 10), (1, 20)].into_iter().collect();
@@ -859,6 +1188,7 @@ mod tests {
             (1, 10),
             Attachment {
                 links: Vec::new(),
+                probes: Vec::new(),
                 sticky: false,
             },
         );

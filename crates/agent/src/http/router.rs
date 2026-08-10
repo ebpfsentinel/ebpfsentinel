@@ -70,7 +70,9 @@ use super::nat_handler::{
     create_nptv6_rule, delete_nptv6_rule, list_nat_rules, list_nptv6_rules, nat_status,
 };
 use super::openapi::ApiDoc;
-use super::ops_handler::{get_config, get_ebpf_status, get_kernel_features, reload_config};
+use super::ops_handler::{
+    get_config, get_ebpf_status, get_kernel_features, get_uprobes, reload_config,
+};
 use super::qos_handler::{
     create_qos_classifier, create_qos_pipe, create_qos_queue, delete_qos_classifier,
     delete_qos_pipe, delete_qos_queue, get_qos_status, list_qos_classifiers, list_qos_pipes,
@@ -211,6 +213,7 @@ pub fn build_router(
             .route("/api/v1/config", get(get_config))
             .route("/api/v1/ebpf/status", get(get_ebpf_status))
             .route("/api/v1/ebpf/kernel-features", get(get_kernel_features))
+            .route("/api/v1/ebpf/uprobes", get(get_uprobes))
             .route("/api/v1/dns/status", get(dns_status))
             .route("/api/v1/dns/cache", get(list_dns_cache))
             .route("/api/v1/dns/stats", get(dns_stats))

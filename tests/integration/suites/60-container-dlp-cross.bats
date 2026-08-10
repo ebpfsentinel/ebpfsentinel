@@ -251,3 +251,148 @@ PY
         return 1
     }
 }
+
+# ── Attached-uprobe inventory ───────────────────────────────────────
+#
+# The alert tests above prove capture happened. These prove WHAT is attached:
+# which inode, which symbol, at which offset. That is the only form in which two
+# runs of the same host can be compared - an alert count says a probe fired
+# somewhere, not that it fired where it did last time.
+
+# Every probe the agent currently holds a link for.
+_uprobe_inventory() {
+    api_get /api/v1/ebpf/uprobes
+}
+
+# Distinct library inodes carrying probes.
+_uprobe_inode_count() {
+    _uprobe_inventory | jq '[.probes[]? | "\(.dev):\(.ino)"] | unique | length' 2>/dev/null || echo 0
+}
+
+@test "the uprobe inventory reports the resolved offset of every attached probe" {
+    require_root
+
+    local body
+    body="$(_uprobe_inventory)"
+    _load_http_status
+    [ "${HTTP_STATUS}" = "200" ]
+
+    local count
+    count="$(echo "${body}" | jq '.probes | length')"
+    [ "${count}" -ge 1 ] || {
+        echo "no uprobe is attached, so DLP is inspecting nothing" >&2
+        echo "${body}" >&2
+        return 1
+    }
+
+    # An offset of 0 is the ELF header: a probe that can never fire, reported as
+    # if the library were covered.
+    local zero
+    zero="$(echo "${body}" | jq '[.probes[] | select(.offset == 0)] | length')"
+    [ "${zero}" -eq 0 ] || {
+        echo "${zero} probe(s) attached at offset 0" >&2
+        echo "${body}" | jq -c '[.probes[] | select(.offset == 0)]' >&2
+        return 1
+    }
+
+    # Every probe names the inode it sits on, which is what makes the entry
+    # comparable across runs.
+    echo "${body}" | jq -e '[.probes[] | select(.ino > 0)] | length == (.probes | length)' >/dev/null
+}
+
+@test "one library inode carries one probe set, however many processes map it" {
+    require_root
+
+    local body
+    body="$(_uprobe_inventory)"
+    # Duplicate (inode, symbol, probe kind) tuples mean the dedup key failed and
+    # the same code is being probed twice - two links where one was intended.
+    local total unique
+    total="$(echo "${body}" | jq '[.probes[] | "\(.dev):\(.ino):\(.symbol):\(.retprobe)"] | length')"
+    unique="$(echo "${body}" | jq '[.probes[] | "\(.dev):\(.ino):\(.symbol):\(.retprobe)"] | unique | length')"
+    [ "${total}" -eq "${unique}" ] || {
+        echo "duplicate probes: ${total} entries, ${unique} distinct" >&2
+        echo "${body}" | jq -c '.probes' >&2
+        return 1
+    }
+
+    # The set attached per inode is bounded by the program set the loader holds
+    # (SSL_write, SSL_read entry, SSL_read return).
+    echo "${body}" | jq -e '
+        [.probes | group_by("\(.dev):\(.ino)")[] | length] | all(. <= 3)' >/dev/null
+}
+
+@test "resolved offsets do not move while the library does not" {
+    require_root
+
+    # Same host, same inodes, two reads a watcher pass apart. An offset that
+    # changed here is the resolver disagreeing with itself, not a new binary.
+    local before after
+    before="$(_uprobe_inventory | jq -S '[.probes[] | {dev, ino, symbol, retprobe, offset}] | sort_by(.dev, .ino, .symbol, .retprobe)')"
+    sleep 7
+    after="$(_uprobe_inventory | jq -S '[.probes[] | {dev, ino, symbol, retprobe, offset}] | sort_by(.dev, .ino, .symbol, .retprobe)')"
+
+    # Compare only inodes present in both reads: a container that appeared or
+    # left in between is a legitimate difference, a moved offset is not.
+    local moved
+    moved="$(jq -n --argjson a "${before}" --argjson b "${after}" '
+        [ $a[] as $x | $b[] | select(.dev == $x.dev and .ino == $x.ino
+              and .symbol == $x.symbol and .retprobe == $x.retprobe
+              and .offset != $x.offset) ] | length')"
+    [ "${moved}" -eq 0 ] || {
+        echo "${moved} probe(s) changed offset without the inode changing" >&2
+        echo "before: ${before}" >&2
+        echo "after:  ${after}" >&2
+        return 1
+    }
+}
+
+@test "a container's library enters the inventory while it runs and leaves when it stops" {
+    require_root
+    _docker_available || env_skip "Docker engine not available"
+
+    local cname="ebpfsentinel-dlp-inventory-$$"
+    local baseline during after
+    baseline="$(_uprobe_inode_count)"
+
+    # A container with its own libssl kept mapped for the whole window, so the
+    # watcher has several passes to see it appear and, later, disappear.
+    _docker_cmd rm -f "${cname}" >/dev/null 2>&1 || true
+    _docker_cmd run -d --name "${cname}" alpine:latest sh -c '
+        apk add --no-cache openssl >/dev/null 2>&1 || exit 3
+        openssl req -x509 -newkey rsa:2048 -keyout /tmp/k.pem -out /tmp/c.pem \
+            -days 1 -nodes -subj /CN=localhost >/dev/null 2>&1 || exit 4
+        exec openssl s_server -accept 19444 -cert /tmp/c.pem -key /tmp/k.pem -quiet
+    ' >/dev/null 2>&1 || soft_skip "inventory neighbour container could not start"
+
+    during="${baseline}"
+    for _ in $(seq 1 30); do
+        during="$(_uprobe_inode_count)"
+        [ "${during}" -gt "${baseline}" ] && break
+        sleep 1
+    done
+
+    if [ "${during}" -le "${baseline}" ]; then
+        _docker_cmd rm -f "${cname}" >/dev/null 2>&1 || true
+        echo "container libssl never entered the inventory (${baseline} inodes throughout)" >&2
+        soft_skip "container libssl not discovered (image has no libssl mapping)"
+    fi
+
+    _docker_cmd rm -f "${cname}" >/dev/null 2>&1 || true
+
+    # The teardown side is the one that leaks: a link nobody detaches keeps the
+    # probe - and the inode - alive for the life of the agent.
+    after="${during}"
+    for _ in $(seq 1 30); do
+        after="$(_uprobe_inode_count)"
+        [ "${after}" -le "${baseline}" ] && break
+        sleep 1
+    done
+
+    echo "inventory inodes: ${baseline} -> ${during} -> ${after}" >&2
+    [ "${after}" -le "${baseline}" ] || {
+        echo "the container's probes outlived the container" >&2
+        _uprobe_inventory | jq -c '.probes' >&2
+        return 1
+    }
+}

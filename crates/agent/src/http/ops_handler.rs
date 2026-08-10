@@ -68,6 +68,48 @@ pub struct MissingHelperEntry {
     pub detail: String,
 }
 
+/// One uprobe the DLP module currently holds a link for.
+#[derive(Serialize, ToSchema)]
+pub struct UprobeEntry {
+    /// Library basename.
+    pub lib: String,
+    /// Path the link was created against, as the loader saw it.
+    pub path: String,
+    /// Block device of the probed file.
+    pub dev: u64,
+    /// Inode of the probed file. With `dev`, the identity two runs are compared
+    /// on: the same path can name a different file after a package upgrade.
+    pub ino: u64,
+    /// Loader name of the eBPF program behind the probe.
+    pub program: String,
+    /// Exported symbol the probe sits on.
+    pub symbol: String,
+    /// File offset the link was created at. A changed offset for an unchanged
+    /// inode is a resolution regression, not a new build.
+    pub offset: u64,
+    /// The probe fires on return rather than on entry.
+    pub retprobe: bool,
+    /// `BPF_LINK_CREATE` was issued by the warden (rootless posture) rather than
+    /// by the agent itself.
+    pub brokered: bool,
+    /// The attachment survives a reconcile that finds no process mapping the
+    /// inode - the cold-start system-library fallback.
+    pub sticky: bool,
+}
+
+/// The uprobe set the DLP module currently holds.
+///
+/// An empty list is a real answer, and always the same one: no TLS payload is
+/// being read. It covers a DLP module that is not loaded, a scan that resolved
+/// nothing, and a datapath that has been detached.
+#[derive(Serialize, ToSchema)]
+pub struct UprobeInventoryResponse {
+    /// Distinct libraries carrying probes.
+    pub libraries: usize,
+    /// Every probe, ordered by inode then symbol so two runs diff cleanly.
+    pub probes: Vec<UprobeEntry>,
+}
+
 /// What the kernel answered when the agent probed it at startup.
 ///
 /// `probed = false` means the probe could not run, **not** that the kernel
@@ -241,6 +283,52 @@ pub async fn get_ebpf_status(State(state): State<Arc<AppState>>) -> Json<EbpfSta
         programs,
         attach_blocked,
     })
+}
+
+/// Return the DLP uprobe set the agent currently holds links for.
+#[utoipa::path(
+    get, path = "/api/v1/ebpf/uprobes",
+    tag = "Operations",
+    responses(
+        (status = 200, description = "Attached DLP uprobes with their resolved offsets", body = UprobeInventoryResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn get_uprobes() -> Json<UprobeInventoryResponse> {
+    Json(uprobe_inventory_body(adapters::ebpf::attached_uprobes()))
+}
+
+/// Build the response from an attach set.
+///
+/// Takes the set as an argument so the shape of the answer is testable without
+/// a kernel, a loaded program, or the process-wide registry.
+fn uprobe_inventory_body(probes: Vec<adapters::ebpf::AttachedUprobe>) -> UprobeInventoryResponse {
+    let mut inodes: Vec<(u64, u64)> = probes.iter().map(|p| (p.dev, p.ino)).collect();
+    inodes.sort_unstable();
+    inodes.dedup();
+    UprobeInventoryResponse {
+        libraries: inodes.len(),
+        probes: probes
+            .into_iter()
+            .map(|p| UprobeEntry {
+                lib: p.lib,
+                path: p.path,
+                dev: p.dev,
+                ino: p.ino,
+                program: p.program.to_string(),
+                symbol: p.symbol.to_string(),
+                offset: p.offset,
+                retprobe: p.retprobe,
+                brokered: p.brokered,
+                sticky: p.sticky,
+            })
+            .collect(),
+    }
 }
 
 /// Return what the startup helper probe learned about this kernel.
@@ -494,6 +582,48 @@ mod tests {
         let Json(value) = get_config(State(state)).await;
         let keys = value["auth"]["api_keys"].as_array().unwrap();
         assert_eq!(keys[0]["key"].as_str().unwrap(), "***");
+    }
+
+    #[test]
+    fn an_empty_uprobe_set_reports_no_libraries_rather_than_omitting_the_field() {
+        // "DLP is not inspecting anything" has to be readable as an answer, not
+        // inferred from a missing key.
+        let resp = uprobe_inventory_body(Vec::new());
+        assert_eq!(resp.libraries, 0);
+        assert!(resp.probes.is_empty());
+    }
+
+    #[test]
+    fn the_uprobe_inventory_counts_libraries_by_inode_not_by_probe() {
+        // Three probes on one library is one library. Counting probes would make
+        // a single-library host look like three.
+        let probe =
+            |ino: u64, symbol: &'static str, retprobe: bool| adapters::ebpf::AttachedUprobe {
+                lib: "libssl.so.3".to_string(),
+                path: "/lib/libssl.so.3".to_string(),
+                dev: 1,
+                ino,
+                program: "ssl_write",
+                symbol,
+                offset: 0x1000 + ino,
+                retprobe,
+                brokered: true,
+                sticky: false,
+            };
+        let resp = uprobe_inventory_body(vec![
+            probe(10, "SSL_read", false),
+            probe(10, "SSL_read", true),
+            probe(10, "SSL_write", false),
+            probe(20, "SSL_write", false),
+        ]);
+
+        assert_eq!(resp.libraries, 2);
+        assert_eq!(resp.probes.len(), 4);
+        // The offset is the whole point of the endpoint: it must survive the
+        // conversion, per probe, unrounded.
+        assert_eq!(resp.probes[0].offset, 0x100A);
+        assert_eq!(resp.probes[3].offset, 0x1014);
+        assert!(resp.probes.iter().all(|p| p.brokered));
     }
 
     #[tokio::test]
