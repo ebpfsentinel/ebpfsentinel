@@ -20,6 +20,10 @@ firewall:
 ids:
   enabled: true
   mode: alert
+  # Inspect both directions so a rule can be exercised against a listener that
+  # lives in the test namespace rather than on the host, where the port may
+  # already be taken.
+  inspect_egress: true
   rules:
     # Detect reverse shell on TCP/4444
     - id: ids-reverse-shell
@@ -29,7 +33,9 @@ ids:
       dst_port: 4444
       enabled: true
 
-    # SSH brute-force (threshold: >3 in 30s for fast test cycles)
+    # SSH brute-force. `both` is the suppressing form: after 3 matches in the
+    # window it alerts once and stays quiet until the window rolls. `threshold`
+    # would alert every 3rd packet instead, which grows with traffic volume.
     - id: ids-ssh-bruteforce
       description: "SSH brute-force detection"
       severity: high
@@ -37,7 +43,7 @@ ids:
       dst_port: 22
       enabled: true
       threshold:
-        type: threshold
+        type: both
         count: 3
         window_secs: 30
         track_by: src_ip

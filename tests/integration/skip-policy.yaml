@@ -21,7 +21,6 @@
 
 
 env:
-  - "TCP/22 already bound by another listener — the SSH threshold test needs the port to itself"
   - "ebpfsentinel:integration-test image not built — run the docker build first"
   - "minikube cluster could not start on this host"
   - "eth2 not present — NPTv6 needs the multi-NIC topology"

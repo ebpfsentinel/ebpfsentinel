@@ -181,6 +181,51 @@ send_tcp_from_ns() {
         timeout "$timeout" ncat -w "$timeout" "$dst" "$port" 2>/dev/null || true
 }
 
+# start_ns_tcp_listener <port> [duration_secs]
+# Binds a TCP listener on $EBPF_NS_IP inside $EBPF_TEST_NS and prints its pid.
+#
+# The host side of the veth shares the box's port space, so a listener there
+# collides with whatever the host already runs - sshd on 22 being the case that
+# turns a threshold assertion into a measurement of sshd's banner behaviour.
+# The namespace has its own port space and no daemons, so the port is always
+# free. Traffic to it leaves the host through $EBPF_VETH_HOST, which the agent
+# inspects on egress when `ids.inspect_egress` is set in the fixture.
+start_ns_tcp_listener() {
+    local port="${1:?usage: start_ns_tcp_listener <port> [duration_secs]}"
+    local duration="${2:-15}"
+
+    ip netns exec "$EBPF_TEST_NS" \
+        timeout "$duration" ncat -l "$EBPF_NS_IP" "$port" -k >/dev/null 2>&1 &
+    local pid=$!
+
+    # Give ncat time to bind before the first probe, otherwise the connection
+    # is refused and the payload never crosses the veth.
+    local attempt=0
+    while [ "$attempt" -lt 25 ]; do
+        if ip netns exec "$EBPF_TEST_NS" ss -tlnH "sport = :${port}" 2>/dev/null \
+            | grep -q .; then
+            break
+        fi
+        sleep 0.1
+        attempt=$((attempt + 1))
+    done
+
+    echo "$pid"
+}
+
+# send_tcp_to_ns <dst_port> [data] [timeout_secs]
+# Drives a TCP connection from the host toward $EBPF_NS_IP, the mirror image of
+# send_tcp_from_ns. Packets carry the tested destination port on the egress side
+# of $EBPF_VETH_HOST.
+send_tcp_to_ns() {
+    local port="${1:?usage: send_tcp_to_ns <dst_port>}"
+    local data="${2:-TESTDATA}"
+    local timeout="${3:-2}"
+
+    echo "$data" | timeout "$timeout" \
+        ncat -w "$timeout" "$EBPF_NS_IP" "$port" 2>/dev/null || true
+}
+
 # send_udp_from_ns <dst_ip> <dst_port> [data] [timeout_secs]
 send_udp_from_ns() {
     local dst="${1:?usage: send_udp_from_ns <dst_ip> <dst_port>}"

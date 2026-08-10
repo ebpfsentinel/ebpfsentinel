@@ -98,33 +98,33 @@ teardown_file() {
     require_root
     require_tool ncat
 
-    # This test needs TCP/22 to itself. Where an sshd already owns the port
-    # the listener below never binds, the probe reaches the real sshd, and
-    # its banner exchange feeds the IDS — the alert count then depends on
-    # sshd's behaviour rather than on the threshold under test. That is the
-    # case in 2-VM mode and on any lane whose host runs sshd, so gate on the
-    # actual condition rather than on the lane flag.
-    if ss -tlnH 'sport = :22' 2>/dev/null | grep -q .; then
-        env_skip "TCP/22 already bound by another listener — the SSH threshold test needs the port to itself"
-    fi
+    # The SSH-like listener lives in the test namespace, not on the host: an
+    # sshd owning the host's TCP/22 would take the probe instead, and its banner
+    # exchange would feed the IDS, so the count would measure sshd rather than
+    # the threshold under test. The namespace has its own port space and no
+    # daemons, so the port is free on every lane. Traffic then runs host ->
+    # namespace, which the fixture's ids.inspect_egress makes visible.
+    local listener_pid
+    listener_pid="$(start_ns_tcp_listener 22 20)"
 
-    # Start SSH-like listener
-    timeout 15 ncat -l "$EBPF_HOST_IP" 22 -k >/dev/null 2>&1 &
-    sleep 0.5
-
-    send_tcp_from_ns "$EBPF_HOST_IP" 22 "SSH1" 1
-    sleep 0.5
+    # Well past the rule's count of 3, so suppression is what is being measured
+    # rather than whether the threshold was ever reached.
+    local i
+    for i in 1 2 3 4 5 6; do
+        send_tcp_to_ns 22 "SSH${i}" 1
+    done
 
     sleep 3
 
-    kill %1 2>/dev/null || true
-    wait 2>/dev/null || true
+    kill "$listener_pid" 2>/dev/null || true
+    wait "$listener_pid" 2>/dev/null || true
 
     local body
     body="$(api_get /api/v1/alerts)"
     local ssh_alerts
     ssh_alerts="$(echo "$body" | jq '[.alerts[] | select(.rule_id == "ids-ssh-bruteforce")] | length' 2>/dev/null)" || true
 
+    [ "${ssh_alerts:-0}" -ge 1 ]
     [ "${ssh_alerts:-0}" -le 3 ]
 }
 
