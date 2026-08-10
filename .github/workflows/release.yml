@@ -150,6 +150,14 @@ jobs:
           cp dist/ebpfsentinel-warden.service "${STAGING}/"
           cp dist/ebpfsentinel.service "${STAGING}/"
           cp dist/install.sh "${STAGING}/"
+          # install.sh reads both of these on hosts that gate unprivileged user
+          # namespaces behind AppArmor (Ubuntu 24.04 and up): the per-binary
+          # profile when apparmor_parser is present, the sysctl drop-in when it
+          # is not. Ship them or the agent cannot unshare the namespace it loads
+          # its eBPF in. The seccomp profile is deliberately absent: it applies
+          # to the container deployment, not to a systemd unit.
+          cp -a dist/apparmor.d "${STAGING}/"
+          cp -a dist/sysctl.d "${STAGING}/"
           cp LICENSE "${STAGING}/" 2>/dev/null || true
           find crates/ebpf-programs/*/target/bpfel-unknown-none/release \
             -maxdepth 1 -type f ! -name '*.d' ! -name '*.fingerprint' \

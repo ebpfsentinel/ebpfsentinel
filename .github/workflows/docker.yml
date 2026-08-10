@@ -17,6 +17,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_DESCRIPTION: High-performance eBPF network security agent
+  WARDEN_DESCRIPTION: Privileged kernel-operation control plane for a rootless eBPFsentinel agent
 
 permissions:
   contents: read
@@ -97,8 +98,14 @@ jobs:
           retention-days: 7
 
   # ── Build per-platform Docker images ──────────────────────────────
+  #
+  # Two images per platform, because a deployment needs both halves. The agent
+  # image is the rootless agent alone: every capability dropped, its own user
+  # namespace, its eBPF loaded through a token against a bpffs the warden
+  # delegated to it. Publish only the agent and every install path reaches
+  # API-only mode and attaches nothing.
   build-images:
-    name: Build (${{ matrix.platform }})
+    name: Build ${{ matrix.component }} (${{ matrix.platform }})
     needs: [prepare, build-ebpf]
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -107,15 +114,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        component: [agent, warden]
+        platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
             runner: ubuntu-latest
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
+          - component: agent
+            dockerfile: Dockerfile.agent
+            suffix: ""
+            title: eBPFsentinel
+          - component: warden
+            dockerfile: Dockerfile.warden
+            suffix: "-warden"
+            title: eBPFsentinel-warden
     steps:
       - uses: actions/checkout@v6
 
+      # Only the agent image carries the compiled programs; the warden loads no
+      # eBPF and holds no maps.
       - uses: actions/download-artifact@v8
+        if: matrix.component == 'agent'
         with:
           name: ebpf-programs
           path: ebpf-out/
@@ -141,12 +161,12 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.name_lower }}
+          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.name_lower }}${{ matrix.suffix }}
           tags: |
             type=raw,value=${{ needs.prepare.outputs.version }}-${{ env.PLATFORM_ARCH }}
           labels: |
-            org.opencontainers.image.title=eBPFsentinel
-            org.opencontainers.image.description=${{ env.IMAGE_DESCRIPTION }} (${{ env.PLATFORM_ARCH }})
+            org.opencontainers.image.title=${{ matrix.title }}
+            org.opencontainers.image.description=${{ matrix.component == 'agent' && env.IMAGE_DESCRIPTION || env.WARDEN_DESCRIPTION }} (${{ env.PLATFORM_ARCH }})
             org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
             org.opencontainers.image.vendor=eBPFsentinel
             org.opencontainers.image.licenses=AGPL-3.0-only
@@ -160,7 +180,7 @@ jobs:
           DOCKER_BUILD_SUMMARY: false
         with:
           context: .
-          file: Dockerfile.agent
+          file: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platform }}
           push: true
           provenance: false
@@ -169,21 +189,26 @@ jobs:
             VERSION=${{ needs.prepare.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ env.PLATFORM_ARCH }}
-          cache-to: type=gha,scope=${{ env.PLATFORM_ARCH }},mode=max
+          cache-from: type=gha,scope=${{ matrix.component }}-${{ env.PLATFORM_ARCH }}
+          cache-to: type=gha,scope=${{ matrix.component }}-${{ env.PLATFORM_ARCH }},mode=max
           outputs: type=image,oci-mediatypes=true
 
-  # ── Create multi-arch manifest ────────────────────────────────────
+  # ── Create multi-arch manifests ───────────────────────────────────
+  #
+  # Both images in one job rather than a matrix: the signing jobs below need a
+  # digest per image, and matrix job outputs are last-writer-wins.
   create-manifest:
-    name: Multi-arch Manifest
+    name: Multi-arch Manifests
     needs: [prepare, build-images]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     outputs:
-      image: ${{ steps.name.outputs.image }}
-      digest: ${{ steps.digest.outputs.digest }}
+      agent_image: ${{ steps.manifests.outputs.agent_image }}
+      agent_digest: ${{ steps.manifests.outputs.agent_digest }}
+      warden_image: ${{ steps.manifests.outputs.warden_image }}
+      warden_digest: ${{ steps.manifests.outputs.warden_digest }}
     steps:
       - uses: docker/login-action@v3
         with:
@@ -193,59 +218,69 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Generate manifest metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.name_lower }}
-          tags: |
-            type=raw,value=${{ needs.prepare.outputs.version }}
-            type=raw,value=latest
-
-      - name: Create and push multi-arch manifest
-        run: |
-          docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            --annotation='index:org.opencontainers.image.description=${{ env.IMAGE_DESCRIPTION }}' \
-            --annotation='index:org.opencontainers.image.source=https://github.com/${{ github.repository }}' \
-            --annotation='index:org.opencontainers.image.licenses=AGPL-3.0-only' \
-            '${{ env.REGISTRY }}/${{ needs.prepare.outputs.name_lower }}:${{ needs.prepare.outputs.version }}-amd64' \
-            '${{ env.REGISTRY }}/${{ needs.prepare.outputs.name_lower }}:${{ needs.prepare.outputs.version }}-arm64'
-
-      - name: Inspect manifest
-        run: |
-          docker buildx imagetools inspect \
-            '${{ env.REGISTRY }}/${{ needs.prepare.outputs.name_lower }}:${{ needs.prepare.outputs.version }}'
-
-      - name: Image base name
-        id: name
-        run: echo "image=${REGISTRY}/${NAME}" >> "$GITHUB_OUTPUT"
-        env:
-          REGISTRY: ${{ env.REGISTRY }}
-          NAME: ${{ needs.prepare.outputs.name_lower }}
-
-      - name: Capture manifest digest
-        id: digest
-        run: |
-          REF="${REGISTRY}/${NAME}:${VERSION}"
-          DIGEST="$(docker buildx imagetools inspect "$REF" --format '{{.Manifest.Digest}}')"
-          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "Manifest digest: ${DIGEST}"
+      - name: Create and push multi-arch manifests
+        id: manifests
         env:
           REGISTRY: ${{ env.REGISTRY }}
           NAME: ${{ needs.prepare.outputs.name_lower }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          AGENT_DESCRIPTION: ${{ env.IMAGE_DESCRIPTION }}
+          WARDEN_DESCRIPTION: ${{ env.WARDEN_DESCRIPTION }}
+          SOURCE: https://github.com/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for component in agent warden; do
+            case "$component" in
+              agent)
+                image="${REGISTRY}/${NAME}"
+                description="${AGENT_DESCRIPTION}"
+                ;;
+              warden)
+                image="${REGISTRY}/${NAME}-warden"
+                description="${WARDEN_DESCRIPTION}"
+                ;;
+            esac
 
-  # cosign keyless signature + SBOM of the multi-arch manifest, under the
-  # single ebpfsentinel-release signing identity.
+            docker buildx imagetools create \
+              -t "${image}:${VERSION}" \
+              -t "${image}:latest" \
+              --annotation="index:org.opencontainers.image.description=${description}" \
+              --annotation="index:org.opencontainers.image.source=${SOURCE}" \
+              --annotation="index:org.opencontainers.image.licenses=AGPL-3.0-only" \
+              "${image}:${VERSION}-amd64" \
+              "${image}:${VERSION}-arm64"
+
+            docker buildx imagetools inspect "${image}:${VERSION}"
+            digest="$(docker buildx imagetools inspect "${image}:${VERSION}" --format '{{.Manifest.Digest}}')"
+
+            echo "${component}_image=${image}" >> "$GITHUB_OUTPUT"
+            echo "${component}_digest=${digest}" >> "$GITHUB_OUTPUT"
+            echo "${component}: ${image}@${digest}"
+          done
+
+  # cosign keyless signature + SBOM of each multi-arch manifest, under the
+  # single ebpfsentinel-release signing identity. Both images are admission-
+  # gated, so an unsigned warden would block the agent it has to serve.
   sign:
-    name: Sign & attest
-    needs: [prepare, create-manifest]
+    name: Sign & attest agent
+    needs: [create-manifest]
     permissions:
       id-token: write
       packages: write
       contents: read
     uses: ebpfsentinel/ebpfsentinel-release/.github/workflows/sign-image.yml@v1
     with:
-      image: ${{ needs.create-manifest.outputs.image }}
-      digest: ${{ needs.create-manifest.outputs.digest }}
+      image: ${{ needs.create-manifest.outputs.agent_image }}
+      digest: ${{ needs.create-manifest.outputs.agent_digest }}
+
+  sign-warden:
+    name: Sign & attest warden
+    needs: [create-manifest]
+    permissions:
+      id-token: write
+      packages: write
+      contents: read
+    uses: ebpfsentinel/ebpfsentinel-release/.github/workflows/sign-image.yml@v1
+    with:
+      image: ${{ needs.create-manifest.outputs.warden_image }}
+      digest: ${{ needs.create-manifest.outputs.warden_digest }}
