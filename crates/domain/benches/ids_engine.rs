@@ -24,6 +24,7 @@ fn make_rule(id: usize) -> IdsRule {
         domain_match_mode: None,
         country_thresholds: None,
         group_mask: 0,
+        tenant_id: 0,
     }
 }
 

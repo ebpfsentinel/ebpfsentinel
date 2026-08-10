@@ -71,7 +71,7 @@ impl QosMapManager {
             pipe_id: index,
             enabled: u8::from(pipe.enabled),
             group_mask: pipe.group_mask,
-            tenant_id: 0,
+            tenant_id: pipe.tenant_id,
             direction: direction_to_ebpf(pipe.direction),
             _pad: [0; 3],
         }
@@ -117,7 +117,7 @@ impl QosMapManager {
             queue_id: queue_index,
             _padding: [0; 3],
             group_mask: cls.group_mask,
-            tenant_id: 0,
+            tenant_id: cls.tenant_id,
         };
         (key, value)
     }
@@ -366,6 +366,7 @@ mod tests {
             direction: domain::qos::entity::QosDirection::Egress,
             enabled: true,
             group_mask: 0,
+            tenant_id: 0,
         };
         let config = QosMapManager::pipe_to_ebpf(&pipe, 0);
         assert_eq!(config.pipe_id, 0);
@@ -386,10 +387,27 @@ mod tests {
             direction: domain::qos::entity::QosDirection::Egress,
             enabled: true,
             group_mask: 0,
+            tenant_id: 0,
         };
         let config = QosMapManager::pipe_to_ebpf(&pipe, 5);
         assert_eq!(config.ns_per_byte, 0);
         assert_eq!(config.pipe_id, 5);
+    }
+
+    #[test]
+    fn pipe_to_ebpf_carries_the_configured_tenant() {
+        let pipe = QosPipe {
+            id: "p-tenant".to_string(),
+            rate_bps: 1_000_000,
+            burst_bytes: 64_000,
+            delay_ms: 0,
+            loss_pct: 0.0,
+            direction: QosDirection::Egress,
+            enabled: true,
+            group_mask: 0,
+            tenant_id: 4,
+        };
+        assert_eq!(QosMapManager::pipe_to_ebpf(&pipe, 0).tenant_id, 4);
     }
 
     #[test]
@@ -408,6 +426,7 @@ mod tests {
                 direction,
                 enabled: true,
                 group_mask: 0,
+                tenant_id: 0,
             };
             let config = QosMapManager::pipe_to_ebpf(&pipe, 1);
             assert_eq!(config.direction, expected, "direction {direction}");
@@ -448,6 +467,7 @@ mod tests {
             match_rule: QosMatchRule::default(),
             priority: 100,
             group_mask: 0,
+            tenant_id: 0,
         };
         let (key, value) = QosMapManager::classifier_to_ebpf(&cls, 2);
         assert_eq!(key.src_ip, 0);
@@ -458,6 +478,21 @@ mod tests {
         assert_eq!(key.dscp, 0);
         assert_eq!(key.vlan_id, VLAN_ANY);
         assert_eq!(value.queue_id, 2);
+    }
+
+    #[test]
+    fn classifier_to_ebpf_carries_the_configured_tenant() {
+        use domain::qos::entity::{QosClassifier, QosMatchRule};
+        let cls = QosClassifier {
+            id: "c-tenant".to_string(),
+            queue_id: "q-1".to_string(),
+            match_rule: QosMatchRule::default(),
+            priority: 100,
+            group_mask: 0,
+            tenant_id: 4,
+        };
+        let (_, value) = QosMapManager::classifier_to_ebpf(&cls, 0);
+        assert_eq!(value.tenant_id, 4);
     }
 
     #[test]
@@ -477,6 +512,7 @@ mod tests {
             },
             priority: 300,
             group_mask: 0,
+            tenant_id: 0,
         };
         let (key, value) = QosMapManager::classifier_to_ebpf(&cls, 0);
         assert_eq!(key.src_ip, 0x0A00_0000);
@@ -501,6 +537,7 @@ mod tests {
             },
             priority,
             group_mask: 0,
+            tenant_id: 0,
         }
     }
 

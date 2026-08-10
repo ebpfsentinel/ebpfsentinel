@@ -524,6 +524,7 @@ mod tests {
             domain_pattern: None,
             domain_match_mode: None,
             group_mask: 0,
+            tenant_id: 0,
         }
     }
 

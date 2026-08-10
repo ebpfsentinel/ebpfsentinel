@@ -302,6 +302,12 @@ pub struct IdsRuleConfig {
     /// Prefix with "!" for inversion (e.g., `"!lan"` = all except lan).
     #[serde(default)]
     pub interfaces: Vec<String>,
+
+    /// Tenant this rule belongs to. 0 (the default) is global and applies to
+    /// every tenant; a standalone agent resolves nothing else, so leaving it
+    /// unset keeps single-tenant behaviour.
+    #[serde(default)]
+    pub tenant_id: u32,
 }
 
 fn default_protocol_any() -> String {
@@ -502,6 +508,7 @@ impl IdsRuleConfig {
                     message,
                 },
             )?,
+            tenant_id: self.tenant_id,
         })
     }
 }
@@ -526,6 +533,7 @@ mod tests {
             domain_match_mode: None,
             country_thresholds: None,
             interfaces: Vec::new(),
+            tenant_id: 0,
         }
     }
 
@@ -639,6 +647,23 @@ mod tests {
         let rule = base_rule();
         let domain_rule = rule.to_domain_rule("alert", &HashMap::new()).unwrap();
         assert_eq!(domain_rule.group_mask, 0);
+    }
+
+    #[test]
+    fn to_domain_rule_carries_the_configured_tenant() {
+        let mut rule = base_rule();
+        rule.tenant_id = 12;
+        let domain_rule = rule.to_domain_rule("alert", &HashMap::new()).unwrap();
+        assert_eq!(domain_rule.tenant_id, 12);
+        assert!(domain_rule.to_ebpf_keys().iter().all(|k| k.tenant_id == 12));
+    }
+
+    #[test]
+    fn to_domain_rule_without_a_tenant_is_global() {
+        let domain_rule = base_rule()
+            .to_domain_rule("alert", &HashMap::new())
+            .unwrap();
+        assert_eq!(domain_rule.tenant_id, 0);
     }
 
     #[test]

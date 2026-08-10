@@ -108,6 +108,7 @@ mod tests {
             enabled: true,
             algorithm: RateLimitAlgorithm::default(),
             group_mask: 0,
+            tenant_id: 0,
         }
     }
 
@@ -320,6 +321,7 @@ mod tests {
                     enabled: true,
                     algorithm: RateLimitAlgorithm::default(),
                     group_mask: 0,
+                    tenant_id: 0,
                 };
                 let result = engine.add_policy(policy);
                 prop_assert!(result.is_ok());
@@ -341,6 +343,7 @@ mod tests {
                     enabled: true,
                     algorithm: RateLimitAlgorithm::default(),
                     group_mask: 0,
+                    tenant_id: 0,
                 };
                 let result = engine.add_policy(policy);
                 prop_assert!(result.is_err());

@@ -1168,6 +1168,7 @@ mod tests {
             domain_match_mode: None,
             country_thresholds: None,
             group_mask: 0,
+            tenant_id: 0,
         }
     }
 
@@ -1539,6 +1540,7 @@ mod tests {
             domain_match_mode: None,
             country_thresholds: None,
             group_mask: 0,
+            tenant_id: 0,
         }
     }
 
@@ -1932,6 +1934,7 @@ mod tests {
             enabled: true,
             algorithm: RateLimitAlgorithm::default(),
             group_mask: 0,
+            tenant_id: 0,
         }
     }
 

@@ -60,6 +60,12 @@ pub struct RateLimitPolicy {
     /// 0 = floating (applies to all interfaces). Bit 31 = invert.
     #[serde(default)]
     pub group_mask: u32,
+    /// Tenant this policy belongs to. 0 = global: the policy applies to every
+    /// tenant, which is the only behaviour a standalone agent can produce.
+    /// A non-zero value keys the policy under that tenant, and the data plane
+    /// falls back to the global entry for traffic it resolves elsewhere.
+    #[serde(default)]
+    pub tenant_id: u32,
 }
 
 impl RateLimitPolicy {
@@ -106,7 +112,7 @@ impl RateLimitPolicy {
             IpCidr::V6 { .. } => 0,
         };
         EbpfKey {
-            tenant_id: 0,
+            tenant_id: self.tenant_id,
             src_ip,
         }
     }
@@ -129,7 +135,7 @@ impl RateLimitPolicy {
                     algorithm: ALGO_TOKEN_BUCKET,
                     _padding: [0; 2],
                     group_mask: self.group_mask,
-                    tenant_id: 0,
+                    tenant_id: self.tenant_id,
                     _pad2: [0; 4],
                 }
             }
@@ -140,7 +146,7 @@ impl RateLimitPolicy {
                 algorithm: ALGO_FIXED_WINDOW,
                 _padding: [0; 2],
                 group_mask: self.group_mask,
-                tenant_id: 0,
+                tenant_id: self.tenant_id,
                 _pad2: [0; 4],
             },
             RateLimitAlgorithm::SlidingWindow => EbpfConfig {
@@ -150,7 +156,7 @@ impl RateLimitPolicy {
                 algorithm: ALGO_SLIDING_WINDOW,
                 _padding: [0; 2],
                 group_mask: self.group_mask,
-                tenant_id: 0,
+                tenant_id: self.tenant_id,
                 _pad2: [0; 4],
             },
             RateLimitAlgorithm::LeakyBucket => EbpfConfig {
@@ -160,7 +166,7 @@ impl RateLimitPolicy {
                 algorithm: ALGO_LEAKY_BUCKET,
                 _padding: [0; 2],
                 group_mask: self.group_mask,
-                tenant_id: 0,
+                tenant_id: self.tenant_id,
                 _pad2: [0; 4],
             },
         }
@@ -261,6 +267,7 @@ mod tests {
             enabled: true,
             algorithm: RateLimitAlgorithm::default(),
             group_mask: 0,
+            tenant_id: 0,
         }
     }
 
@@ -329,6 +336,14 @@ mod tests {
         let key = policy.to_ebpf_key();
         assert_eq!(key.src_ip, 0xC0A8_0101);
         assert_eq!(key.tenant_id, 0);
+    }
+
+    #[test]
+    fn ebpf_key_and_config_carry_the_policy_tenant() {
+        let mut policy = make_policy("rl-001", 1000, 2000);
+        policy.tenant_id = 9;
+        assert_eq!(policy.to_ebpf_key().tenant_id, 9);
+        assert_eq!(policy.to_ebpf_config().tenant_id, 9);
     }
 
     #[test]

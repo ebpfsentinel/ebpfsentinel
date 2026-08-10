@@ -235,6 +235,7 @@ mod tests {
             enabled: true,
             algorithm: RateLimitAlgorithm::default(),
             group_mask: 0,
+            tenant_id: 0,
         }
     }
 

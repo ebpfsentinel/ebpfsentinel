@@ -114,6 +114,12 @@ pub struct IpsRuleConfig {
 
     #[serde(default)]
     pub threshold: Option<ThresholdRuleConfig>,
+
+    /// Tenant this rule belongs to. 0 (the default) is global and applies to
+    /// every tenant; a standalone agent resolves nothing else, so leaving it
+    /// unset keeps single-tenant behaviour.
+    #[serde(default)]
+    pub tenant_id: u32,
 }
 
 fn default_protocol_any() -> String {
@@ -215,6 +221,7 @@ impl IpsRuleConfig {
             domain_match_mode: None,
             country_thresholds: None,
             group_mask: 0,
+            tenant_id: self.tenant_id,
         })
     }
 }
@@ -235,6 +242,7 @@ mod tests {
             pattern: None,
             enabled: true,
             threshold: None,
+            tenant_id: 0,
         }
     }
 

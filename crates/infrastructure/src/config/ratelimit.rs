@@ -218,6 +218,12 @@ pub struct RateLimitRuleConfig {
     /// Prefix with "!" for inversion (e.g., `"!lan"` = all except lan).
     #[serde(default)]
     pub interfaces: Vec<String>,
+
+    /// Tenant this rule belongs to. 0 (the default) is global and applies to
+    /// every tenant; a standalone agent resolves nothing else, so leaving it
+    /// unset keeps single-tenant behaviour.
+    #[serde(default)]
+    pub tenant_id: u32,
 }
 
 fn default_ratelimit_action() -> String {
@@ -307,6 +313,7 @@ impl RateLimitRuleConfig {
                     message,
                 },
             )?,
+            tenant_id: self.tenant_id,
         })
     }
 }
@@ -494,6 +501,39 @@ algorithm: token_bucket
     }
 
     // ── RateLimitRuleConfig::to_domain_policy() ──────────────────────
+
+    #[test]
+    fn to_domain_policy_carries_the_configured_tenant() {
+        let rule: RateLimitRuleConfig = serde_yaml_ng::from_str(
+            r#"
+id: rl-tenant
+rate: 100
+burst: 200
+src_ip: "10.0.0.7"
+tenant_id: 5
+"#,
+        )
+        .unwrap();
+
+        let policy = rule.to_domain_policy(&HashMap::new()).unwrap();
+        assert_eq!(policy.tenant_id, 5);
+        assert_eq!(policy.to_ebpf_key().tenant_id, 5);
+    }
+
+    #[test]
+    fn to_domain_policy_without_a_tenant_is_global() {
+        let rule: RateLimitRuleConfig = serde_yaml_ng::from_str(
+            r#"
+id: rl-global
+rate: 100
+burst: 200
+src_ip: "10.0.0.7"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(rule.to_domain_policy(&HashMap::new()).unwrap().tenant_id, 0);
+    }
 
     #[test]
     fn to_domain_policy_correct_conversion() {

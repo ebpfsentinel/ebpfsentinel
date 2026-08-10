@@ -187,6 +187,13 @@ pub struct IdsRule {
     /// 0 = floating (applies to all interfaces). Bit 31 = invert.
     #[serde(default)]
     pub group_mask: u32,
+    /// Tenant this rule belongs to. 0 = global: the rule applies to every
+    /// tenant, which is the only behaviour a standalone agent can produce.
+    /// A non-zero value installs the rule under that tenant's key, and the
+    /// classifier prefers it over the global entry for traffic it resolves to
+    /// that tenant.
+    #[serde(default)]
+    pub tenant_id: u32,
 }
 
 impl IdsRule {
@@ -246,7 +253,7 @@ impl IdsRule {
         self.ebpf_protocols()
             .into_iter()
             .map(|protocol| IdsPatternKey {
-                tenant_id: 0,
+                tenant_id: self.tenant_id,
                 dst_port,
                 protocol,
                 _padding: 0,
@@ -265,7 +272,7 @@ impl IdsRule {
         self.ebpf_protocols()
             .into_iter()
             .map(|protocol| IdsPatternKey {
-                tenant_id: 0,
+                tenant_id: self.tenant_id,
                 dst_port: src_port,
                 protocol,
                 _padding: 0,
@@ -408,6 +415,7 @@ mod tests {
             domain_match_mode: None,
             country_thresholds: None,
             group_mask: 0,
+            tenant_id: 0,
         }
     }
 
@@ -476,6 +484,22 @@ mod tests {
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].dst_port, 22);
         assert_eq!(keys[0].protocol, 6); // TCP
+    }
+
+    #[test]
+    fn ids_rule_keys_carry_the_rule_tenant() {
+        let mut rule = sample_rule();
+        rule.src_port = Some(2222);
+        rule.tenant_id = 7;
+        assert!(rule.to_ebpf_keys().iter().all(|k| k.tenant_id == 7));
+        assert!(rule.to_ebpf_src_keys().iter().all(|k| k.tenant_id == 7));
+    }
+
+    #[test]
+    fn ids_rule_without_a_tenant_installs_the_global_key() {
+        let rule = sample_rule();
+        assert_eq!(rule.tenant_id, 0);
+        assert!(rule.to_ebpf_keys().iter().all(|k| k.tenant_id == 0));
     }
 
     #[test]

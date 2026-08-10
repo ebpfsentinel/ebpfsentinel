@@ -46,6 +46,12 @@ pub struct QosPipe {
     /// Interface group bitmask for multi-interface rule scoping.
     /// 0 = floating (applies to all interfaces). Bit 31 = invert.
     pub group_mask: u32,
+    /// Tenant this pipe shapes for. 0 = global: the pipe applies to every
+    /// tenant, which is the only behaviour a standalone agent can produce.
+    /// A non-zero value makes the shaper skip traffic resolved to any other
+    /// tenant.
+    #[serde(default)]
+    pub tenant_id: u32,
 }
 
 /// A `QoS` queue — the indirection classifiers point at to reach a pipe.
@@ -107,6 +113,12 @@ pub struct QosClassifier {
     /// Interface group bitmask for multi-interface rule scoping.
     /// 0 = floating (applies to all interfaces). Bit 31 = invert.
     pub group_mask: u32,
+    /// Tenant this classifier applies to. 0 = global: it matches traffic from
+    /// every tenant, which is the only behaviour a standalone agent can
+    /// produce. A non-zero value makes the classifier skip traffic resolved to
+    /// any other tenant.
+    #[serde(default)]
+    pub tenant_id: u32,
 }
 
 #[cfg(test)]

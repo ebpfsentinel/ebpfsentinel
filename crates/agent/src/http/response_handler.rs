@@ -349,6 +349,7 @@ async fn enforce(
                 enabled: true,
                 algorithm: RateLimitAlgorithm::TokenBucket,
                 group_mask: 0,
+                tenant_id: 0,
             };
             let mut rl = ratelimit_service.write().await;
             rl.add_policy(policy).map_err(|e| ApiError::BadRequest {

@@ -284,6 +284,7 @@ pub async fn create_qos_pipe(
         direction,
         enabled: true,
         group_mask: 0,
+        tenant_id: 0,
     };
 
     let svc = state.qos_service()?;
@@ -512,6 +513,7 @@ pub async fn create_qos_classifier(
         match_rule,
         priority: req.priority,
         group_mask: 0,
+        tenant_id: 0,
     };
 
     let svc = state.qos_service()?;
@@ -575,6 +577,7 @@ mod tests {
             direction: QosDirection::Egress,
             enabled: true,
             group_mask: 0,
+            tenant_id: 0,
         };
         let resp = QosPipeResponse::from_domain(&pipe);
         assert_eq!(resp.id, "p-1");
@@ -614,6 +617,7 @@ mod tests {
             },
             priority: 100,
             group_mask: 0,
+            tenant_id: 0,
         };
         let resp = QosClassifierResponse::from_domain(&cls);
         assert_eq!(resp.id, "c-1");

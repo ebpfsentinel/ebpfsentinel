@@ -123,6 +123,7 @@ impl AutoResponseHandler {
             enabled: true,
             algorithm: RateLimitAlgorithm::TokenBucket,
             group_mask: 0,
+            tenant_id: 0,
         };
 
         {

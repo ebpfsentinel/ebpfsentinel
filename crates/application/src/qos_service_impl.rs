@@ -207,6 +207,7 @@ mod tests {
             direction: QosDirection::Egress,
             enabled: true,
             group_mask: 0,
+            tenant_id: 0,
         }
     }
 
@@ -225,6 +226,7 @@ mod tests {
             match_rule: QosMatchRule::default(),
             priority: 100,
             group_mask: 0,
+            tenant_id: 0,
         }
     }
 

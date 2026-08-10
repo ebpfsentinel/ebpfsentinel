@@ -248,6 +248,7 @@ fn parse_request(req: CreateRateLimitRuleRequest) -> Result<RateLimitPolicy, Api
         enabled: req.enabled,
         algorithm,
         group_mask: 0,
+        tenant_id: 0,
     };
 
     // Surface the source-address rules (single host, IPv4, not the default
@@ -414,6 +415,7 @@ mod tests {
             enabled: true,
             algorithm: RateLimitAlgorithm::TokenBucket,
             group_mask: 0,
+            tenant_id: 0,
         };
         let resp = RateLimitRuleResponse::from_policy(&policy);
         assert_eq!(resp.id, "rl-001");
@@ -439,6 +441,7 @@ mod tests {
             enabled: true,
             algorithm: RateLimitAlgorithm::LeakyBucket,
             group_mask: 0,
+            tenant_id: 0,
         };
         let resp = RateLimitRuleResponse::from_policy(&policy);
         assert_eq!(resp.algorithm, "leaky_bucket");

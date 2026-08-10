@@ -20,6 +20,7 @@ fn make_policy(id: usize, rate: u64, burst: u64) -> RateLimitPolicy {
         enabled: true,
         algorithm: RateLimitAlgorithm::default(),
         group_mask: 0,
+        tenant_id: 0,
     }
 }
 

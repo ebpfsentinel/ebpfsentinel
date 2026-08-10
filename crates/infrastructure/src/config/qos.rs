@@ -82,6 +82,12 @@ pub struct QosPipeConfig {
     /// Prefix with "!" for inversion (e.g., `"!lan"` = all except lan).
     #[serde(default)]
     pub interfaces: Vec<String>,
+
+    /// Tenant this pipe shapes for. 0 (the default) is global and applies to
+    /// every tenant; a standalone agent resolves nothing else, so leaving it
+    /// unset keeps single-tenant behaviour.
+    #[serde(default)]
+    pub tenant_id: u32,
 }
 
 // ── Queue config ────────────────────────────────────────────────────
@@ -120,6 +126,12 @@ pub struct QosClassifierConfig {
     /// Prefix with "!" for inversion (e.g., `"!lan"` = all except lan).
     #[serde(default)]
     pub interfaces: Vec<String>,
+
+    /// Tenant this classifier applies to. 0 (the default) is global and
+    /// applies to every tenant; a standalone agent resolves nothing else, so
+    /// leaving it unset keeps single-tenant behaviour.
+    #[serde(default)]
+    pub tenant_id: u32,
 }
 
 // ── Match config ────────────────────────────────────────────────────
@@ -466,6 +478,7 @@ impl QosPipeConfig {
                     message,
                 },
             )?,
+            tenant_id: self.tenant_id,
         })
     }
 }
@@ -609,6 +622,7 @@ impl QosClassifierConfig {
                     message,
                 },
             )?,
+            tenant_id: self.tenant_id,
         })
     }
 }
@@ -1013,6 +1027,32 @@ direction: both
         assert_eq!(domain.burst_bytes, 1_048_576);
         assert_eq!(domain.direction, QosDirection::Both);
         assert!(domain.enabled);
+    }
+
+    #[test]
+    fn to_domain_pipe_and_classifier_carry_the_configured_tenant() {
+        let pipe: QosPipeConfig = serde_yaml_ng::from_str(
+            r"
+id: pipe-tenant
+bandwidth: 1gbps
+tenant_id: 6
+",
+        )
+        .unwrap();
+        assert_eq!(pipe.to_domain_pipe(&HashMap::new()).unwrap().tenant_id, 6);
+
+        let cls: QosClassifierConfig = serde_yaml_ng::from_str(
+            r"
+id: cls-tenant
+queue_id: q-1
+tenant_id: 6
+",
+        )
+        .unwrap();
+        assert_eq!(
+            cls.to_domain_classifier(&HashMap::new()).unwrap().tenant_id,
+            6
+        );
     }
 
     #[test]
