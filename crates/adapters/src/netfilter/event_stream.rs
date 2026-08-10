@@ -1,9 +1,12 @@
-//! Conntrack event stream via `/proc/net/nf_conntrack` snapshot diffs.
+//! Conntrack event stream built from snapshot diffs.
 //!
-//! Every `poll_interval` the poller reads the proc file, diffs against
-//! the previous snapshot, and emits [`ConntrackEvent`] messages into a
+//! Every `poll_interval` the poller takes a conntrack snapshot, diffs it
+//! against the previous one, and emits [`ConntrackEvent`] messages into a
 //! `broadcast::Sender`. Latency is bounded by the poll interval
 //! (default 2 s) — acceptable for admin observability.
+//!
+//! The snapshot comes from whichever source the port resolves: the proc file
+//! where the kernel exposes it, a conntrack-tools dump where it does not.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -39,8 +42,8 @@ fn connection_changed(old: &Connection, new: &Connection) -> bool {
         || old.bytes_rev != new.bytes_rev
 }
 
-/// Long-running poller task that diffs `/proc/net/nf_conntrack`
-/// snapshots and emits lifecycle events into the broadcast channel.
+/// Long-running poller task that diffs conntrack snapshots and emits
+/// lifecycle events into the broadcast channel.
 ///
 /// Stops when `cancel` fires. Best-effort: dropped events on channel
 /// lag are silently ignored (admin monitoring is not critical path).
@@ -54,8 +57,8 @@ pub async fn run_conntrack_event_poller(
     let mut ticker = tokio::time::interval(poll_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Suppress repeated identical snapshot errors: a persistent failure (e.g. a
-    // non-root agent that cannot read /proc/net/nf_conntrack — its eBPF conntrack
-    // path keeps working) would otherwise warn on every tick. Warn once, then
+    // non-root agent that can read neither the proc file nor a conntrack dump)
+    // would otherwise warn on every tick. Warn once, then
     // demote identical follow-ups to debug; reset on the next success.
     let mut last_err: Option<String> = None;
 

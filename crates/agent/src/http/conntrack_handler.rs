@@ -168,7 +168,7 @@ pub async fn flush_connections(
 /// `GET /api/v1/conntrack/events` — Server-Sent Events stream of
 /// conntrack lifecycle events (new / update / destroy).
 ///
-/// The poller diffs `/proc/net/nf_conntrack` snapshots every 2 s and
+/// The poller diffs conntrack snapshots every 2 s and
 /// pushes changes into a broadcast channel. Each SSE client receives
 /// a copy. Lagged clients silently skip missed events.
 pub async fn conntrack_events(

@@ -10,17 +10,16 @@ use ports::secondary::metrics_port::MetricsPort;
 /// Orchestrates conntrack configuration and eBPF map access.
 /// Designed to be wrapped in `RwLock` for shared access from HTTP handlers.
 ///
-/// When a `netfilter_port` is injected (reading kernel netfilter via
-/// `/proc/net/nf_conntrack`), `get_connections` and `connection_count`
-/// prefer it as the authoritative source of truth — coherent with
-/// `conntrack -L` and any firewall tooling on the host. The BPF
-/// `map_port` remains for shadow-table config sync and as a fallback
-/// when the netfilter port is unavailable.
+/// Reads and writes are served by different ports, deliberately. The
+/// `netfilter_port` is the only source of connections, and is coherent with
+/// `conntrack -L` and any firewall tooling on the host; the BPF `map_port`
+/// carries the shadow-table config sync and the write path (add, remove,
+/// flush) and holds no connections to read back.
 pub struct ConnTrackAppService {
     settings: ConnTrackSettings,
     map_port: Option<Box<dyn ConnTrackMapPort + Send>>,
-    /// Kernel netfilter reader (via `/proc/net/nf_conntrack`). When
-    /// present, takes priority over `map_port` for read operations.
+    /// Kernel netfilter reader, from the proc file or a conntrack-tools dump.
+    /// Sole source for `get_connections` and `connection_count`.
     netfilter_port: Option<Box<dyn ConnTrackMapPort + Send>>,
     metrics: Arc<dyn MetricsPort>,
     enabled: bool,
@@ -75,21 +74,17 @@ impl ConnTrackAppService {
         Ok(())
     }
 
-    /// Get active connections, up to `limit`. Prefers the kernel
-    /// netfilter port when available (authoritative), falls back to
-    /// the BPF shadow.
+    /// Get active connections, up to `limit`, from the kernel netfilter port.
+    /// Empty when no port is wired, an error when the table cannot be read.
     pub fn get_connections(&self, limit: usize) -> Result<Vec<Connection>, DomainError> {
-        // Prefer the kernel netfilter reader, but fall back to the BPF shadow
-        // when it cannot be read — e.g. a kernel built without
-        // CONFIG_NF_CONNTRACK_PROCFS, where the sysctl knobs are still present
-        // (so the port is wired for writes) but /proc/net/nf_conntrack is not.
-        if let Some(ref nf) = self.netfilter_port
-            && let Ok(conns) = nf.get_connections(limit)
-        {
-            return Ok(conns);
-        }
-        match self.map_port {
-            Some(ref port) => port.get_connections(limit),
+        // The netfilter port is the only source of connections: the BPF shadow
+        // tables were deleted, so ConnTrackMapManager::get_connections answers
+        // Ok(empty) by construction. Falling back to it therefore reported "no
+        // connections" for "could not read the connections" - the same answer a
+        // genuinely idle host gives, on an endpoint an operator uses to decide
+        // whether traffic is flowing. Surface the read failure instead.
+        match self.netfilter_port {
+            Some(ref nf) => nf.get_connections(limit),
             None => Ok(Vec::new()),
         }
     }
@@ -117,16 +112,13 @@ impl ConnTrackAppService {
         Ok(count)
     }
 
-    /// Return the current connection count. Prefers kernel netfilter
-    /// when available.
+    /// Return the current connection count, from the kernel netfilter port.
+    /// Zero when no port is wired, an error when the table cannot be read.
     pub fn connection_count(&self) -> Result<u64, DomainError> {
-        if let Some(ref nf) = self.netfilter_port
-            && let Ok(count) = nf.connection_count()
-        {
-            return Ok(count);
-        }
-        match self.map_port {
-            Some(ref port) => port.connection_count(),
+        // Same reasoning as `get_connections`: the shadow counts nothing, so
+        // masking a read failure with it reports an idle host.
+        match self.netfilter_port {
+            Some(ref nf) => nf.connection_count(),
             None => Ok(0),
         }
     }

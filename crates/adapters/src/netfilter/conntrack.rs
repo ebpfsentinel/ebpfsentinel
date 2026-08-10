@@ -85,6 +85,34 @@ impl ProcNetfilterConntrackPort {
             warden: None,
         }
     }
+
+    /// Dump the conntrack table through `conntrack -L` when the proc file is
+    /// unreadable.
+    ///
+    /// Carries the original open error into every failure message: "conntrack
+    /// is unreadable" and "conntrack-tools is missing" call for different
+    /// operator actions, and reporting only the second would hide a proc file
+    /// that exists but is being refused.
+    fn dump_via_conntrack_cli(&self, proc_err: &std::io::Error) -> Result<Vec<u8>, DomainError> {
+        let path = self.nf_conntrack_path.display();
+        let output = std::process::Command::new("conntrack")
+            .args(["-L"])
+            .output()
+            .map_err(|e| {
+                DomainError::EngineError(format!(
+                    "failed to open {path}: {proc_err}; `conntrack -L` fallback \
+                     failed: {e} (conntrack-tools installed?)"
+                ))
+            })?;
+        if !output.status.success() {
+            return Err(DomainError::EngineError(format!(
+                "failed to open {path}: {proc_err}; `conntrack -L` exited with \
+                 status {}",
+                output.status
+            )));
+        }
+        Ok(output.stdout)
+    }
 }
 
 impl Default for ProcNetfilterConntrackPort {
@@ -174,13 +202,19 @@ impl ConnTrackMapPort for ProcNetfilterConntrackPort {
                 })?;
             Box::new(std::io::Cursor::new(bytes))
         } else {
-            let file = std::fs::File::open(&self.nf_conntrack_path).map_err(|e| {
-                DomainError::EngineError(format!(
-                    "failed to open {}: {e}",
-                    self.nf_conntrack_path.display()
-                ))
-            })?;
-            Box::new(std::io::BufReader::new(file))
+            match std::fs::File::open(&self.nf_conntrack_path) {
+                Ok(file) => Box::new(std::io::BufReader::new(file)),
+                // A kernel built without CONFIG_NF_CONNTRACK_PROCFS has no proc
+                // file while conntrack itself is entirely live, and dropping
+                // that deprecated interface is the direction distributions are
+                // moving. Fall back to the same conntrack-tools binary this
+                // port already drives for -D and -F: its dump differs from the
+                // proc file only by the two leading address-family fields,
+                // which the parser detects rather than assumes.
+                Err(proc_err) => Box::new(std::io::Cursor::new(
+                    self.dump_via_conntrack_cli(&proc_err)?,
+                )),
+            }
         };
         let mut conns = Vec::new();
 
@@ -309,25 +343,38 @@ fn write_sysctl(key: &str, value: u64) {
 /// ```text
 /// ipv4     2 udp      17 29 src=10.0.0.1 dst=8.8.8.8 sport=53422 dport=53 src=8.8.8.8 dst=10.0.0.1 sport=53 dport=53422 [ASSURED] mark=0 use=2
 /// ```
+///
+/// `conntrack -L` emits the same line without the leading address family and
+/// its number, so the head is located rather than assumed and one parser
+/// serves both sources:
+/// ```text
+/// tcp      6 299 ESTABLISHED src=1.2.3.4 dst=5.6.7.8 sport=12345 dport=443 ...
+/// ```
 fn parse_nf_conntrack_line(line: &str) -> Option<Connection> {
     let tokens: Vec<&str> = line.split_whitespace().collect();
-    // Minimum: family + pad + proto_name + proto_num + timeout + tuple fields
-    if tokens.len() < 10 {
+    // The proc file prefixes every line with "ipv4 2" / "ipv6 10"; the CLI
+    // dump starts straight at the protocol name.
+    let base = usize::from(matches!(tokens.first().copied(), Some("ipv4" | "ipv6"))) * 2;
+    // Minimum past the head: proto_name + proto_num + timeout + state + a
+    // full tuple. Kept identical to the pre-fallback proc threshold rather
+    // than relaxed to the shortest CLI line that could exist, since conntrack
+    // always prints both tuples plus mark/use and a shorter line is malformed.
+    if tokens.len() < base + 8 {
         return None;
     }
 
-    let protocol = tokens[3].parse::<u8>().ok()?;
-    // Timeout in seconds (tokens[4])
-    let _timeout_secs: u64 = tokens[4].parse().unwrap_or(0);
+    let protocol = tokens[base + 1].parse::<u8>().ok()?;
+    // Timeout in seconds.
+    let _timeout_secs: u64 = tokens[base + 2].parse().unwrap_or(0);
 
-    // For TCP (proto 6), token[5] is the state string; tuple starts at [6].
-    // For other protocols, tuple starts at [5].
+    // For TCP (proto 6) the next token is the state string and the tuple
+    // follows it; for other protocols the tuple starts immediately.
     let (state, tuple_start) = if protocol == 6 {
         // TCP state
-        let s = parse_kernel_tcp_state(tokens.get(5).copied().unwrap_or(""));
-        (s, 6)
+        let s = parse_kernel_tcp_state(tokens.get(base + 3).copied().unwrap_or(""));
+        (s, base + 4)
     } else {
-        (ConnectionState::Established, 5)
+        (ConnectionState::Established, base + 3)
     };
 
     // Parse original tuple (first set of src=/dst=/sport=/dport=)
@@ -413,10 +460,33 @@ fn parse_kernel_tcp_state(s: &str) -> ConnectionState {
     }
 }
 
-/// Check whether `/proc/net/nf_conntrack` is readable. Used at startup
-/// to decide whether to inject the netfilter port.
+/// Check whether `/proc/net/nf_conntrack` is readable.
+#[must_use]
 pub fn is_proc_conntrack_available() -> bool {
     Path::new(DEFAULT_NF_CONNTRACK_PATH).exists()
+}
+
+/// Check whether the conntrack table can be read at all, by either source.
+///
+/// Used at startup to decide whether the event stream is wired. Gating that on
+/// the proc file alone silently retired the whole feature on any kernel built
+/// without `CONFIG_NF_CONNTRACK_PROCFS` - a deprecated interface distributions
+/// are dropping - even though conntrack itself was live and `conntrack -L`
+/// could dump it.
+#[must_use]
+pub fn is_conntrack_readable() -> bool {
+    if is_proc_conntrack_available() {
+        return true;
+    }
+    // Probing the binary rather than merely locating it: conntrack-tools can be
+    // installed and still fail here, because a dump needs CAP_NET_ADMIN and the
+    // rootless agent does not hold it.
+    std::process::Command::new("conntrack")
+        .args(["-L"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 #[cfg(test)]
@@ -506,6 +576,52 @@ mod tests {
         assert!(parse_nf_conntrack_line("").is_none());
         assert!(parse_nf_conntrack_line("short").is_none());
         assert!(parse_nf_conntrack_line("ipv4 2 tcp 6 100 ESTABLISHED").is_none());
+        // The CLI layout is one field shorter at the head, so a truncated CLI
+        // line must not read as a complete proc line shifted by two.
+        assert!(parse_nf_conntrack_line("tcp 6 100 ESTABLISHED").is_none());
+    }
+
+    /// The CLI dump omits the leading address family, and the whole
+    /// procfs-optional fallback rests on both layouts yielding one connection.
+    #[test]
+    fn cli_and_proc_layouts_parse_to_the_same_connection() {
+        let tuple = "src=192.168.1.1 dst=10.0.0.1 sport=12345 dport=443 \
+                     src=10.0.0.1 dst=192.168.1.1 sport=443 dport=12345 \
+                     [ASSURED] mark=0 use=2";
+        let from_proc =
+            parse_nf_conntrack_line(&format!("ipv4     2 tcp      6 431999 ESTABLISHED {tuple}"))
+                .unwrap();
+        let from_cli =
+            parse_nf_conntrack_line(&format!("tcp      6 431999 ESTABLISHED {tuple}")).unwrap();
+        assert_eq!(from_proc.src_ip, from_cli.src_ip);
+        assert_eq!(from_proc.dst_ip, from_cli.dst_ip);
+        assert_eq!(from_proc.src_port, from_cli.src_port);
+        assert_eq!(from_proc.dst_port, from_cli.dst_port);
+        assert_eq!(from_proc.protocol, from_cli.protocol);
+        assert_eq!(from_proc.state, from_cli.state);
+    }
+
+    #[test]
+    fn cli_layout_parses_udp_without_a_state_field() {
+        let line = "udp      17 29 src=10.0.0.1 dst=8.8.8.8 sport=53422 dport=53 \
+                    src=8.8.8.8 dst=10.0.0.1 sport=53 dport=53422 mark=0 use=2";
+        let conn = parse_nf_conntrack_line(line).unwrap();
+        assert_eq!(conn.protocol, 17);
+        assert_eq!(conn.src_ip, "10.0.0.1");
+        assert_eq!(conn.dst_port, 53);
+    }
+
+    #[test]
+    fn cli_layout_parses_ipv6_and_counters() {
+        let line = "tcp      6 299 ESTABLISHED src=2001:db8::1 dst=2001:db8::2 \
+                    sport=443 dport=8080 packets=100 bytes=50000 \
+                    src=2001:db8::2 dst=2001:db8::1 sport=8080 dport=443 \
+                    packets=200 bytes=150000 [ASSURED] mark=0 use=2";
+        let conn = parse_nf_conntrack_line(line).unwrap();
+        assert_eq!(conn.src_ip, "2001:db8::1");
+        assert_eq!(conn.dst_port, 8080);
+        assert_eq!(conn.packets_fwd, 100);
+        assert_eq!(conn.bytes_rev, 150_000);
     }
 
     #[test]

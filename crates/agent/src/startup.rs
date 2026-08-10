@@ -419,23 +419,33 @@ pub async fn run(
     // sysctl writes (timeouts + tcp_loose hardening). Wire it whenever
     // conntrack is enabled, BEFORE reload_settings, so the settings sync
     // actually reaches the kernel — those writes are no-ops until the port is
-    // present. Reads degrade gracefully to the BPF shadow on kernels without
-    // CONFIG_NF_CONNTRACK_PROCFS, where the sysctl knobs still exist but
-    // /proc/net/nf_conntrack does not.
+    // present. On kernels without CONFIG_NF_CONNTRACK_PROCFS the sysctl knobs
+    // still exist but /proc/net/nf_conntrack does not, and the port falls back
+    // to dumping through conntrack-tools.
     if config.conntrack.enabled {
         ct_svc.set_netfilter_port(Box::new(
             adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new(),
         ));
     }
-    let nf_ct_available = adapters::netfilter::conntrack::is_proc_conntrack_available();
+    let nf_ct_available = adapters::netfilter::conntrack::is_conntrack_readable();
     let conntrack_event_tx = if nf_ct_available {
-        info!("kernel netfilter conntrack reader injected via /proc/net/nf_conntrack");
+        info!(
+            proc_interface = adapters::netfilter::conntrack::is_proc_conntrack_available(),
+            "kernel netfilter conntrack reader injected"
+        );
         // Broadcast channel created now; poller spawned later after
         // cancel_token exists (see section 6c below).
         let (tx, _) =
             tokio::sync::broadcast::channel::<domain::conntrack::entity::ConntrackEvent>(256);
         Some(tx)
     } else {
+        // Say so rather than leaving the endpoint's 404 as the only evidence:
+        // the stream going missing is a host capability gap, and an operator
+        // reading the boot log should not have to probe an endpoint to find it.
+        warn!(
+            "conntrack table unreadable (no /proc/net/nf_conntrack and no \
+             usable conntrack-tools): event stream disabled"
+        );
         None
     };
     if config.conntrack.enabled
