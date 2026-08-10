@@ -100,6 +100,13 @@ static INTERFACE_GROUPS: HashMap<u32, u32, 64> = HashMap::new();
 #[btf_map]
 static TENANT_VLAN_MAP: HashMap<u32, u32, 1024> = HashMap::new();
 
+/// Tenant resolution: ifindex -> `tenant_id`.
+///
+/// Distinct from `INTERFACE_GROUPS`, whose value is a group bitmask: an
+/// interface in group 2 is not the property of tenant 2.
+#[btf_map]
+static TENANT_IFINDEX_MAP: HashMap<u32, u32, 1024> = HashMap::new();
+
 /// LPM trie for subnet-based tenant resolution (IPv4).
 #[btf_map]
 static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32, { MAX_TENANT_SUBNET_LPM_ENTRIES as usize }> = LpmTrie::new();
@@ -170,7 +177,7 @@ unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
             }
         }
         // Priority 2: Interface-based
-        if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+        if let Some(&tid) = TENANT_IFINDEX_MAP.get(&ifindex) {
             return tid;
         }
         // Priority 3: Subnet-based (LPM trie on src_ip)
@@ -198,7 +205,7 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) 
             }
         }
         // Priority 2: Interface-based
-        if let Some(&tid) = INTERFACE_GROUPS.get(&ifindex) {
+        if let Some(&tid) = TENANT_IFINDEX_MAP.get(&ifindex) {
             return tid;
         }
         // Priority 3: Subnet-based (LPM trie on IPv6 src_addr)

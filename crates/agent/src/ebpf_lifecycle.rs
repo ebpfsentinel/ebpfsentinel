@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use adapters::ebpf::{
     ConfigFlagsManager, EbpfLoader, InterfaceGroupsManager, L7PortsManager, MetricsReader,
-    RingBufObserver, TenantCgroupMapManager, TenantSubnetMapManager, TenantVlanMapManager,
+    RingBufObserver, TenantCgroupMapManager, TenantIfindexMapManager, TenantSubnetMapManager,
+    TenantVlanMapManager,
 };
 use application::packet_pipeline::AgentEvent;
 use infrastructure::config::AgentConfig;
@@ -42,6 +43,8 @@ pub struct EbpfProgramManager {
     pub iface_groups: InterfaceGroupsManager,
     /// Cross-program tenant VLAN map manager.
     pub tenant_vlan: TenantVlanMapManager,
+    /// Cross-program tenant interface map manager.
+    pub tenant_ifindex: TenantIfindexMapManager,
     /// Cross-program tenant subnet map manager.
     pub tenant_subnet: TenantSubnetMapManager,
     /// Tenant cgroup map manager (from tc-ids, the only program that resolves
@@ -70,6 +73,7 @@ impl EbpfProgramManager {
             l7_ports: None,
             iface_groups: InterfaceGroupsManager::new(),
             tenant_vlan: TenantVlanMapManager::new(),
+            tenant_ifindex: TenantIfindexMapManager::new(),
             tenant_subnet: TenantSubnetMapManager::new(),
             tenant_cgroup: TenantCgroupMapManager::new(),
             metrics_readers: Arc::new(RwLock::new(Vec::new())),
@@ -284,6 +288,7 @@ impl EbpfProgramManager {
 
         self.iface_groups.add_map(loader.ebpf_mut());
         self.tenant_vlan.add_map(loader.ebpf_mut());
+        self.tenant_ifindex.add_map(loader.ebpf_mut());
         self.tenant_subnet.add_map(loader.ebpf_mut());
         self.tenant_subnet.add_v6_map(loader.ebpf_mut());
         self.tenant_cgroup.add_map(loader.ebpf_mut());
@@ -329,6 +334,7 @@ impl EbpfProgramManager {
         }
 
         self.tenant_vlan.add_map(loader.ebpf_mut());
+        self.tenant_ifindex.add_map(loader.ebpf_mut());
 
         self.services
             .metrics
@@ -364,6 +370,7 @@ impl EbpfProgramManager {
         }
 
         self.tenant_vlan.add_map(loader.ebpf_mut());
+        self.tenant_ifindex.add_map(loader.ebpf_mut());
 
         self.services
             .metrics
@@ -406,6 +413,7 @@ impl EbpfProgramManager {
         }
 
         self.tenant_vlan.add_map(loader.ebpf_mut());
+        self.tenant_ifindex.add_map(loader.ebpf_mut());
 
         self.services
             .metrics
@@ -443,7 +451,9 @@ impl EbpfProgramManager {
         self.iface_groups.add_map(ingress_loader.ebpf_mut());
         self.iface_groups.add_map(egress_loader.ebpf_mut());
         self.tenant_vlan.add_map(ingress_loader.ebpf_mut());
+        self.tenant_ifindex.add_map(ingress_loader.ebpf_mut());
         self.tenant_vlan.add_map(egress_loader.ebpf_mut());
+        self.tenant_ifindex.add_map(egress_loader.ebpf_mut());
         self.tenant_subnet.add_map(ingress_loader.ebpf_mut());
         self.tenant_subnet.add_v6_map(ingress_loader.ebpf_mut());
         self.tenant_subnet.add_map(egress_loader.ebpf_mut());
@@ -489,6 +499,7 @@ impl EbpfProgramManager {
         }
 
         self.tenant_vlan.add_map(loader.ebpf_mut());
+        self.tenant_ifindex.add_map(loader.ebpf_mut());
 
         self.services
             .metrics
@@ -535,6 +546,7 @@ impl EbpfProgramManager {
         }
 
         self.tenant_vlan.add_map(loader.ebpf_mut());
+        self.tenant_ifindex.add_map(loader.ebpf_mut());
 
         self.services
             .metrics
@@ -677,6 +689,7 @@ impl EbpfProgramManager {
 
                 self.iface_groups.add_map(loader.ebpf_mut());
                 self.tenant_vlan.add_map(loader.ebpf_mut());
+                self.tenant_ifindex.add_map(loader.ebpf_mut());
                 self.tenant_subnet.add_map(loader.ebpf_mut());
                 self.tenant_subnet.add_v6_map(loader.ebpf_mut());
 
@@ -736,6 +749,7 @@ impl EbpfProgramManager {
 
                 self.iface_groups.add_map(loader.ebpf_mut());
                 self.tenant_vlan.add_map(loader.ebpf_mut());
+                self.tenant_ifindex.add_map(loader.ebpf_mut());
                 self.tenant_subnet.add_map(loader.ebpf_mut());
                 self.tenant_subnet.add_v6_map(loader.ebpf_mut());
 
@@ -792,6 +806,7 @@ impl EbpfProgramManager {
                 }
 
                 self.tenant_vlan.add_map(loader.ebpf_mut());
+                self.tenant_ifindex.add_map(loader.ebpf_mut());
 
                 self.services
                     .metrics

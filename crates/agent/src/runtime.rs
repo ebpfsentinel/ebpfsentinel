@@ -449,7 +449,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
 
 use adapters::ebpf::{
     EbpfLoader, IdsMirrorMapManager, InterfaceGroupsManager, MetricsReader, RingBufObserver,
-    TenantCgroupMapManager, TenantSubnetMapManager, TenantVlanMapManager,
+    TenantCgroupMapManager, TenantIfindexMapManager, TenantSubnetMapManager, TenantVlanMapManager,
 };
 use application::packet_pipeline::AgentEvent;
 use tokio::sync::mpsc;
@@ -478,6 +478,12 @@ pub struct EbpfLoadResult {
     /// Enterprise callers can populate this with `(vlan_id, tenant_id)` pairs
     /// after loading to wire multi-tenant VLAN identification.
     pub tenant_vlan_mgr: TenantVlanMapManager,
+    /// Manager for `TENANT_IFINDEX_MAP` maps across all loaded programs.
+    ///
+    /// Enterprise callers populate this with `(ifindex, tenant_id)` pairs after
+    /// loading to wire interface-based tenant identification, which the kernel
+    /// consults after the VLAN map and before the subnet tries.
+    pub tenant_ifindex_mgr: TenantIfindexMapManager,
     /// Manager for `TENANT_SUBNET_V4` LPM trie maps across all loaded programs.
     ///
     /// Enterprise callers can populate this with `(ip, prefix_len, tenant_id)`
@@ -535,6 +541,7 @@ pub async fn load_ebpf_programs(
     let mut metrics_readers: Vec<MetricsReader> = Vec::new();
     let mut iface_groups_mgr = InterfaceGroupsManager::new();
     let mut tenant_vlan_mgr = TenantVlanMapManager::new();
+    let mut tenant_ifindex_mgr = TenantIfindexMapManager::new();
     let mut tenant_subnet_mgr = TenantSubnetMapManager::new();
     let mut tenant_cgroup_mgr = TenantCgroupMapManager::new();
     let mut program_status = std::collections::HashMap::new();
@@ -620,6 +627,7 @@ pub async fn load_ebpf_programs(
                 }
                 iface_groups_mgr.add_map(rl_loader.ebpf_mut());
                 tenant_vlan_mgr.add_map(rl_loader.ebpf_mut());
+                tenant_ifindex_mgr.add_map(rl_loader.ebpf_mut());
                 tenant_subnet_mgr.add_map(rl_loader.ebpf_mut());
                 tenant_subnet_mgr.add_v6_map(rl_loader.ebpf_mut());
                 ebpf_state.add_loader(rl_loader);
@@ -639,6 +647,7 @@ pub async fn load_ebpf_programs(
     if let Some(ref mut loader) = fw_loader {
         iface_groups_mgr.add_map(loader.ebpf_mut());
         tenant_vlan_mgr.add_map(loader.ebpf_mut());
+        tenant_ifindex_mgr.add_map(loader.ebpf_mut());
         tenant_subnet_mgr.add_map(loader.ebpf_mut());
         tenant_subnet_mgr.add_v6_map(loader.ebpf_mut());
     }
@@ -679,6 +688,7 @@ pub async fn load_ebpf_programs(
                 ids_mirror_mgr = IdsMirrorMapManager::new(loader.ebpf_mut());
                 iface_groups_mgr.add_map(loader.ebpf_mut());
                 tenant_vlan_mgr.add_map(loader.ebpf_mut());
+                tenant_ifindex_mgr.add_map(loader.ebpf_mut());
                 tenant_subnet_mgr.add_map(loader.ebpf_mut());
                 tenant_subnet_mgr.add_v6_map(loader.ebpf_mut());
                 tenant_cgroup_mgr.add_map(loader.ebpf_mut());
@@ -720,6 +730,7 @@ pub async fn load_ebpf_programs(
                     ebpf_map_holder.config_flags.push(cfg_mgr);
                 }
                 tenant_vlan_mgr.add_map(loader.ebpf_mut());
+                tenant_ifindex_mgr.add_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 true
             }
@@ -750,6 +761,7 @@ pub async fn load_ebpf_programs(
                     metrics_readers.push(rdr);
                 }
                 tenant_vlan_mgr.add_map(loader.ebpf_mut());
+                tenant_ifindex_mgr.add_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 true
             }
@@ -788,6 +800,7 @@ pub async fn load_ebpf_programs(
                     metrics_readers.push(rdr);
                 }
                 tenant_vlan_mgr.add_map(loader.ebpf_mut());
+                tenant_ifindex_mgr.add_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 true
             }
@@ -825,6 +838,7 @@ pub async fn load_ebpf_programs(
                     metrics_readers.push(rdr);
                 }
                 tenant_vlan_mgr.add_map(loader.ebpf_mut());
+                tenant_ifindex_mgr.add_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 true
             }
@@ -851,7 +865,9 @@ pub async fn load_ebpf_programs(
                 iface_groups_mgr.add_map(ingress_loader.ebpf_mut());
                 iface_groups_mgr.add_map(egress_loader.ebpf_mut());
                 tenant_vlan_mgr.add_map(ingress_loader.ebpf_mut());
+                tenant_ifindex_mgr.add_map(ingress_loader.ebpf_mut());
                 tenant_vlan_mgr.add_map(egress_loader.ebpf_mut());
+                tenant_ifindex_mgr.add_map(egress_loader.ebpf_mut());
                 tenant_subnet_mgr.add_map(ingress_loader.ebpf_mut());
                 tenant_subnet_mgr.add_v6_map(ingress_loader.ebpf_mut());
                 tenant_subnet_mgr.add_map(egress_loader.ebpf_mut());
@@ -879,6 +895,7 @@ pub async fn load_ebpf_programs(
                     metrics_readers.push(rdr);
                 }
                 tenant_vlan_mgr.add_map(loader.ebpf_mut());
+                tenant_ifindex_mgr.add_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 true
             }
@@ -910,6 +927,7 @@ pub async fn load_ebpf_programs(
                     metrics_readers.push(rdr);
                 }
                 tenant_vlan_mgr.add_map(loader.ebpf_mut());
+                tenant_ifindex_mgr.add_map(loader.ebpf_mut());
                 ebpf_state.add_loader(loader);
                 true
             }
@@ -954,6 +972,7 @@ pub async fn load_ebpf_programs(
         program_status,
         event_rx: Some(event_rx),
         tenant_vlan_mgr,
+        tenant_ifindex_mgr,
         tenant_subnet_mgr,
         tenant_cgroup_mgr,
         ids_mirror_mgr,
