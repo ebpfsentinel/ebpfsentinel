@@ -28,11 +28,16 @@ setup_file() {
     require_tool jq
     require_tool bc
     require_tool curl
-    require_mhddos
 
+    # Topology before tooling: MHDDoS is provisioned on the attacker VM only,
+    # so on any other host the missing tool is a consequence of the wrong lane,
+    # not a provisioning gap. Checking it first made the local lane report
+    # "MHDDoS not provisioned" and sent readers after a provisioner that was
+    # never meant to run there.
     if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
         env_skip "suite 38 requires EBPF_2VM_MODE=true (attacker VM driving real flood)"
     fi
+    require_mhddos
 
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"
