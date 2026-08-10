@@ -640,6 +640,10 @@ impl DlpUprobeAttacher {
     /// A zero offset means the caller did not find that symbol, and its probes
     /// are skipped rather than attached at the start of the file.
     ///
+    /// Returns whether this call created the attachment. A caller that runs on
+    /// a timer counts attaches, and an inode already probed must not be counted
+    /// again on every cycle.
+    ///
     /// # Errors
     ///
     /// Returns an error if the path cannot be stat'ed or if any link fails to
@@ -649,14 +653,14 @@ impl DlpUprobeAttacher {
         path: &str,
         write: (&str, u64),
         read: (&str, u64),
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         let meta = std::fs::metadata(path)
             .map_err(|e| anyhow::anyhow!("stat TLS library '{path}': {e}"))?;
         let key = (meta.dev(), meta.ino());
         if self.attached.contains_key(&key) {
             // Already probed through the OSS scan or an earlier plan; a second
             // set on the same inode would double every captured buffer.
-            return Ok(());
+            return Ok(false);
         }
         let base = path.rsplit('/').next().unwrap_or(path).to_owned();
         let target = UprobeTarget {
@@ -679,7 +683,7 @@ impl DlpUprobeAttacher {
             },
         );
         self.publish_inventory();
-        Ok(())
+        Ok(true)
     }
 
     /// Resolve every probe of the SSL uprobe set against one target, without
