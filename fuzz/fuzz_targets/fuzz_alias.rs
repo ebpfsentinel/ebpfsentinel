@@ -6,6 +6,18 @@ use domain::alias::entity::{Alias, AliasId, AliasKind};
 use domain::alias::resolver::AliasResolver;
 use domain::firewall::entity::{IpNetwork, PortRange};
 
+// Derive an optional exclusion list from the tail of a chunk, so subtraction is
+// covered as often as the plain inclusion path.
+fn exclusions(chunk: &[u8]) -> Vec<IpNetwork> {
+    if chunk[6] & 1 == 0 {
+        return Vec::new();
+    }
+    vec![IpNetwork::V4 {
+        addr: u32::from_le_bytes([chunk[7], chunk[8], chunk[9], chunk[6]]),
+        prefix_len: chunk[9] % 33,
+    }]
+}
+
 // Fuzz the AliasResolver with random aliases: validate, load, resolve IPs/ports,
 // exercise circular reference detection.
 //
@@ -32,7 +44,11 @@ fuzz_target!(|data: &[u8]| {
                 let addr = u32::from_le_bytes([chunk[1], chunk[2], chunk[3], chunk[4]]);
                 let prefix = chunk[5] % 33;
                 AliasKind::IpSet {
-                    values: vec![IpNetwork::V4 { addr, prefix_len: prefix }],
+                    values: vec![IpNetwork::V4 {
+                        addr,
+                        prefix_len: prefix,
+                    }],
+                    exclude: exclusions(chunk),
                 }
             }
             // PortSet
@@ -48,6 +64,7 @@ fuzz_target!(|data: &[u8]| {
                 let ref_idx = (chunk[1] as usize) % 16;
                 AliasKind::Nested {
                     aliases: vec![format!("alias-{ref_idx}")],
+                    exclude: exclusions(chunk),
                 }
             }
             // GeoIp

@@ -9,7 +9,7 @@ use domain::ids::engine::IdsEngine;
 use domain::ids::entity::{IdsRule, ThresholdConfig, ThresholdType, TrackBy};
 use domain::ips::engine::IpsEngine;
 use domain::ips::entity::{IpsPolicy, WhitelistEntry};
-use ebpf_common::event::{PacketEvent, EVENT_TYPE_IDS};
+use ebpf_common::event::{EVENT_TYPE_IDS, PacketEvent};
 
 // Interpret fuzz bytes as structured IDS/IPS inputs.
 //
@@ -53,12 +53,15 @@ fuzz_target!(|data: &[u8]| {
                     mode: DomainMode::Alert,
                     protocol: Protocol::Tcp,
                     dst_port: if dst_port == 0 { None } else { Some(dst_port) },
+                    src_port: if src_port == 0 { None } else { Some(src_port) },
                     pattern: pattern.to_string(),
                     enabled: true,
                     threshold: None,
                     domain_pattern: None,
                     domain_match_mode: None,
                     country_thresholds: None,
+                    group_mask: u32::from(data[14]),
+                    tenant_id: u32::from(data[15] % 4),
                 };
                 // Exercise regex compilation with DoS limits.
                 let _ = engine.add_rule(rule);
@@ -77,12 +80,15 @@ fuzz_target!(|data: &[u8]| {
                     mode: DomainMode::Alert,
                     protocol: Protocol::Tcp,
                     dst_port: Some(22),
+                    src_port: None,
                     pattern: String::new(),
                     enabled: i % 2 == 0,
                     threshold: None,
                     domain_pattern: None,
                     domain_match_mode: None,
                     country_thresholds: None,
+                    group_mask: 0,
+                    tenant_id: u32::from(i % 3),
                 });
             }
 
@@ -101,6 +107,10 @@ fuzz_target!(|data: &[u8]| {
                 cpu_id: 0,
                 socket_cookie: 0,
                 cgroup_id: 0,
+                cgroup1_id: 0,
+                rss_hash: 0,
+                rss_hash_type: 0,
+                rx_hw_timestamp_ns: 0,
             };
 
             // Exercise event evaluation (index lookup + sampling).
@@ -134,8 +144,8 @@ fuzz_target!(|data: &[u8]| {
             // Also exercise WhitelistEntry::matches with fuzzed IPs.
             let ipv4 = IpAddr::V4(Ipv4Addr::from(src_ip));
             let ipv6_bytes: [u8; 16] = [
-                data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8],
-                data[9], data[10], data[11], data[12], data[13], data[14], data[15], data[16],
+                data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9],
+                data[10], data[11], data[12], data[13], data[14], data[15], data[16],
             ];
             let ipv6 = IpAddr::V6(Ipv6Addr::from(ipv6_bytes));
 
@@ -157,7 +167,7 @@ fuzz_target!(|data: &[u8]| {
                 max_blacklist_size: 100,
                 country_thresholds: None,
             };
-            let mut engine = IpsEngine::new(policy);
+            let engine = IpsEngine::new(policy);
 
             let ip = IpAddr::V4(Ipv4Addr::from(src_ip));
             let _ = engine.record_detection(ip);

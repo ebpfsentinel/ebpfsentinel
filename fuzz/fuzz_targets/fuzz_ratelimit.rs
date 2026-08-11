@@ -3,11 +3,9 @@
 use libfuzzer_sys::fuzz_target;
 
 use domain::common::entity::RuleId;
-use domain::firewall::entity::IpNetwork;
+use domain::firewall::entity::IpCidr;
 use domain::ratelimit::engine::RateLimitEngine;
-use domain::ratelimit::entity::{
-    RateLimitAction, RateLimitAlgorithm, RateLimitPolicy, RateLimitScope,
-};
+use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm, RateLimitPolicy};
 
 // Fuzz the RateLimitEngine with random policies: add, remove, reload.
 //
@@ -35,12 +33,6 @@ fuzz_target!(|data: &[u8]| {
             chunk[8], chunk[9], chunk[10], chunk[11], chunk[12], chunk[13], chunk[14], chunk[15],
         ]);
 
-        let scope = if chunk[16] & 1 != 0 {
-            RateLimitScope::Global
-        } else {
-            RateLimitScope::SourceIp
-        };
-
         let action = if chunk[16] & 2 != 0 {
             RateLimitAction::Pass
         } else {
@@ -54,26 +46,39 @@ fuzz_target!(|data: &[u8]| {
             _ => RateLimitAlgorithm::LeakyBucket,
         };
 
-        let src_ip = if chunk[18] & 1 != 0 {
-            Some(IpNetwork::V4 {
-                addr: u32::from_le_bytes([chunk[18], chunk[19], chunk[17], chunk[16]]),
+        let addr = u32::from_le_bytes([chunk[18], chunk[19], chunk[17], chunk[16]]);
+        // A policy only validates as a non-zero IPv4 /32, so keep that the common
+        // shape and let the other bytes produce the rejected forms.
+        let src_ip = match chunk[18] % 4 {
+            0 => IpCidr::V4 {
+                addr,
                 prefix_len: chunk[19] % 33,
-            })
-        } else {
-            None
+            },
+            1 => {
+                let mut v6 = [0u8; 16];
+                v6[..4].copy_from_slice(&addr.to_le_bytes());
+                IpCidr::V6 {
+                    addr: v6,
+                    prefix_len: chunk[19] % 129,
+                }
+            }
+            _ => IpCidr::V4 {
+                addr,
+                prefix_len: 32,
+            },
         };
 
         let id = format!("rl-{}", policies.len());
         let policy = RateLimitPolicy {
             id: RuleId(id),
-            scope,
             rate,
             burst,
             action,
             src_ip,
             enabled: chunk[18] & 2 != 0,
             algorithm,
-            country_codes: None,
+            group_mask: u32::from_le_bytes([chunk[16], chunk[17], chunk[18], chunk[19]]),
+            tenant_id: u32::from(chunk[17] % 4),
         };
         policies.push(policy);
     }

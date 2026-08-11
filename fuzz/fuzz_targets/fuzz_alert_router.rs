@@ -1,5 +1,6 @@
 #![no_main]
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use libfuzzer_sys::fuzz_target;
@@ -44,6 +45,11 @@ fuzz_target!(|data: &[u8]| {
             },
             _ => AlertDestination::Webhook {
                 url: "https://hooks.example.com/alert".to_string(),
+                headers: if byte & 0x40 != 0 {
+                    BTreeMap::from([("x-fuzz-token".to_string(), byte.to_string())])
+                } else {
+                    BTreeMap::new()
+                },
             },
         };
         let event_types = if byte & 0x20 != 0 {
@@ -53,11 +59,7 @@ fuzz_target!(|data: &[u8]| {
                 .filter(|(j, _)| byte & (1 << (j + 4)) != 0)
                 .map(|(_, t)| t.to_string())
                 .collect();
-            if types.is_empty() {
-                None
-            } else {
-                Some(types)
-            }
+            if types.is_empty() { None } else { Some(types) }
         } else {
             None
         };
@@ -88,7 +90,10 @@ fuzz_target!(|data: &[u8]| {
         let rule_id = format!("fuzz-{}-{}", component, chunk[2]);
 
         let alert = Alert {
-            id: format!("alert-{}", u32::from_le_bytes([chunk[3], chunk[4], chunk[5], chunk[6]])),
+            id: format!(
+                "alert-{}",
+                u32::from_le_bytes([chunk[3], chunk[4], chunk[5], chunk[6]])
+            ),
             timestamp_ns: u64::from_le_bytes([
                 chunk[7], chunk[8], chunk[9], chunk[10], chunk[11], chunk[12], chunk[13], chunk[14],
             ]),
@@ -141,6 +146,14 @@ fuzz_target!(|data: &[u8]| {
             ml_anomaly_score: None,
             ml_top_feature: None,
             ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
         };
 
         let _ = router.process_alert(&alert);
@@ -196,6 +209,14 @@ fuzz_target!(|data: &[u8]| {
             ml_anomaly_score: None,
             ml_top_feature: None,
             ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
         };
         let _ = router.process_alert(&alert);
     }

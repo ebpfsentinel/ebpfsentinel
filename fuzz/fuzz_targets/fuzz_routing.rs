@@ -26,12 +26,7 @@ fuzz_target!(|data: &[u8]| {
         id: data[9],
         name: format!("gw-fuzz-{}", data[9]),
         interface: format!("eth{}", data[10] % 4),
-        gateway_ip: format!(
-            "{}.{}.{}.1",
-            data[10],
-            data[11],
-            data[9]
-        ),
+        gateway_ip: format!("{}.{}.{}.1", data[10], data[11], data[9]),
         priority: u32::from(data[10]),
         enabled: data[11] & 1 == 0,
         health_check: if data[11] & 2 != 0 {
@@ -49,7 +44,6 @@ fuzz_target!(|data: &[u8]| {
         } else {
             None
         },
-        preferred_for_countries: None,
     };
 
     let mut state = GatewayState::new(gateway);

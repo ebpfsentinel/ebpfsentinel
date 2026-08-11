@@ -4,7 +4,9 @@ use libfuzzer_sys::fuzz_target;
 
 use domain::common::entity::{Protocol, RuleId};
 use domain::firewall::engine::FirewallEngine;
-use domain::firewall::entity::{FirewallAction, FirewallRule, IpNetwork, PacketInfo, PortRange, Scope};
+use domain::firewall::entity::{
+    FirewallAction, FirewallRule, IpNetwork, PacketInfo, PortRange, Scope,
+};
 
 // Deserialize fuzz data into a firewall scenario: rules + packets.
 //
@@ -81,6 +83,14 @@ fuzz_target!(|data: &[u8]| {
             None
         };
 
+        // Bias toward a small tenant set (0 = global) so rules collide across
+        // tenants, with the wide value kept reachable for boundary handling.
+        let tenant_id = if chunk[26] & 1 != 0 {
+            u32::from(chunk[27] % 4)
+        } else {
+            u32::from(u16::from_le_bytes([chunk[26], chunk[27]]))
+        };
+
         let rule = FirewallRule {
             id: RuleId(format!("fuzz-{i}")),
             priority,
@@ -114,6 +124,7 @@ fuzz_target!(|data: &[u8]| {
             system: false,
             route_action: None,
             group_mask: 0,
+            tenant_id,
         };
         rules.push(rule);
     }

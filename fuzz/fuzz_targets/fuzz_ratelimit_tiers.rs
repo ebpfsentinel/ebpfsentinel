@@ -2,11 +2,11 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use domain::ratelimit::entity::{
-    CountryTierConfig, RateLimitAction, RateLimitAlgorithm, RateLimitPolicy, RateLimitScope,
-};
 use domain::common::entity::RuleId;
-use domain::firewall::entity::IpNetwork;
+use domain::firewall::entity::IpCidr;
+use domain::ratelimit::entity::{
+    CountryTierConfig, RateLimitAction, RateLimitAlgorithm, RateLimitPolicy,
+};
 
 // Fuzz CountryTierConfig.to_ebpf_config() and RateLimitPolicy.to_ebpf_config()
 // with extreme values (u64::MAX rate/burst, all algorithm variants).
@@ -55,39 +55,33 @@ fuzz_target!(|data: &[u8]| {
         let _ = cfg.ns_per_token;
         let _ = cfg.burst;
 
-        // Fuzz RateLimitPolicy eBPF conversion (all algorithms × scopes)
-        let scope = if scope_byte & 1 != 0 {
-            RateLimitScope::Global
-        } else {
-            RateLimitScope::SourceIp
-        };
-
+        // Fuzz RateLimitPolicy eBPF conversion (all algorithms × address forms)
         let src_ip = if scope_byte & 2 != 0 {
-            Some(IpNetwork::V4 {
+            IpCidr::V4 {
                 addr: u32::from_le_bytes(ip_bytes),
                 prefix_len,
-            })
+            }
         } else if scope_byte & 4 != 0 {
             let mut addr = [0u8; 16];
             addr[..4].copy_from_slice(&ip_bytes);
-            Some(IpNetwork::V6 {
-                addr,
-                prefix_len,
-            })
+            IpCidr::V6 { addr, prefix_len }
         } else {
-            None
+            IpCidr::V4 {
+                addr: u32::from_le_bytes(ip_bytes),
+                prefix_len: 32,
+            }
         };
 
         let policy = RateLimitPolicy {
             id: RuleId("fuzz-rl".to_string()),
-            scope,
             rate,
             burst,
             action,
             src_ip,
             enabled: true,
             algorithm,
-            country_codes: None,
+            group_mask: u32::from_le_bytes(ip_bytes),
+            tenant_id: u32::from(scope_byte % 4),
         };
 
         // validate() should not panic

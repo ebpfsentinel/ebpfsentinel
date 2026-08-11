@@ -6,7 +6,9 @@ use libfuzzer_sys::fuzz_target;
 
 use domain::common::entity::RuleId;
 use domain::loadbalancer::engine::LbEngine;
-use domain::loadbalancer::entity::{LbAlgorithm, LbBackend, LbProtocol, LbService};
+use domain::loadbalancer::entity::{
+    LbAlgorithm, LbBackend, LbForwardingMode, LbProtocol, LbService,
+};
 
 // Fuzz the LbEngine with random services, backend selection, connection
 // tracking, and health transitions.
@@ -55,6 +57,7 @@ fuzz_target!(|data: &[u8]| {
                 port: 8080 + u16::from(i),
                 weight,
                 enabled: chunk[9] & (1 << (i % 8)) == 0 || i == 0, // ensure at least one enabled
+                same_segment: chunk[9] & 0x80 != 0,
             });
         }
 
@@ -65,6 +68,11 @@ fuzz_target!(|data: &[u8]| {
             protocol,
             listen_port,
             algorithm,
+            mode: if chunk[8] & 2 != 0 {
+                LbForwardingMode::L2Dsr
+            } else {
+                LbForwardingMode::Dnat
+            },
             backends,
             enabled: chunk[8] & 1 == 0,
             health_check: None,

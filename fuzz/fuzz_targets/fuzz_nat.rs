@@ -29,11 +29,17 @@ fuzz_target!(|data: &[u8]| {
         let priority = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         let addr_bytes = [chunk[4], chunk[5], chunk[6], chunk[7]];
         let addr = IpAddr::V4(std::net::Ipv4Addr::new(
-            addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3],
+            addr_bytes[0],
+            addr_bytes[1],
+            addr_bytes[2],
+            addr_bytes[3],
         ));
         let addr2_bytes = [chunk[8], chunk[9], chunk[10], chunk[11]];
         let addr2 = IpAddr::V4(std::net::Ipv4Addr::new(
-            addr2_bytes[0], addr2_bytes[1], addr2_bytes[2], addr2_bytes[3],
+            addr2_bytes[0],
+            addr2_bytes[1],
+            addr2_bytes[2],
+            addr2_bytes[3],
         ));
 
         let port_start = u16::from_le_bytes([chunk[12], chunk[13]]);
@@ -45,19 +51,29 @@ fuzz_target!(|data: &[u8]| {
             (0, 0) => NatType::Snat {
                 addr,
                 port_range: if chunk[19] & 1 != 0 {
-                    Some(PortRange { start: port_start, end: port_end })
+                    Some(PortRange {
+                        start: port_start,
+                        end: port_end,
+                    })
                 } else {
                     None
                 },
             },
             (0, _) => NatType::Dnat {
                 addr,
-                port: if chunk[19] & 1 != 0 { Some(port_start) } else { None },
+                port: if chunk[19] & 1 != 0 {
+                    Some(port_start)
+                } else {
+                    None
+                },
             },
             (1, 0) => NatType::Masquerade {
                 interface: format!("eth{}", chunk[4] % 4),
                 port_range: if chunk[19] & 1 != 0 {
-                    Some(PortRange { start: port_start, end: port_end })
+                    Some(PortRange {
+                        start: port_start,
+                        end: port_end,
+                    })
                 } else {
                     None
                 },
@@ -66,13 +82,17 @@ fuzz_target!(|data: &[u8]| {
                 external: addr,
                 internal: addr2,
             },
-            (_, 0) => NatType::Redirect {
-                port: port_start,
-            },
+            (_, 0) => NatType::Redirect { port: port_start },
             (_, _) => NatType::PortForward {
-                ext_port: PortRange { start: port_start, end: port_end },
+                ext_port: PortRange {
+                    start: port_start,
+                    end: port_end,
+                },
                 int_addr: addr,
-                int_port: PortRange { start: int_port_start, end: int_port_end },
+                int_port: PortRange {
+                    start: int_port_start,
+                    end: int_port_end,
+                },
             },
         };
 
@@ -91,7 +111,10 @@ fuzz_target!(|data: &[u8]| {
                 None
             },
             match_dst_port: if chunk[19] & 8 != 0 {
-                Some(PortRange { start: port_start, end: port_end })
+                Some(PortRange {
+                    start: port_start,
+                    end: port_end,
+                })
             } else {
                 None
             },
@@ -100,7 +123,26 @@ fuzz_target!(|data: &[u8]| {
             } else {
                 None
             },
+            match_src_alias: if chunk[19] & 64 != 0 {
+                Some("fuzz-src-alias".to_string())
+            } else {
+                None
+            },
+            match_dst_alias: if chunk[19] & 128 != 0 {
+                Some("fuzz-dst-alias".to_string())
+            } else {
+                None
+            },
             enabled: chunk[19] & 32 == 0,
+            group_mask: u32::from(chunk[18]),
+            tenant_id: u32::from(chunk[19] % 4),
+            // IPsec/FOU encapsulation knobs: 0 keeps them disabled, which is the
+            // shape a plain translation has.
+            xfrm_if_id: u32::from(chunk[17]),
+            xfrm_link: i32::from(chunk[16]),
+            fou_sport: u16::from(chunk[15]),
+            fou_dport: u16::from(chunk[14]),
+            fou_type: chunk[13] % 2,
         };
 
         rules.push(rule);
