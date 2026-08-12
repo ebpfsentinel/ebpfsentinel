@@ -91,15 +91,26 @@ pub fn build_all() -> Result<()> {
         .unwrap_or(&workspace_root)
         .join("ebpf-programs");
 
-    // Workspace-level output directory expected by integration tests and
-    // the agent's dev-fallback path resolution.
-    let output_dir = workspace_root
+    let repo_root = workspace_root
         .parent()
         .and_then(|p| p.parent())
         .unwrap_or(&workspace_root)
+        .to_path_buf();
+
+    // Workspace-level output directory expected by integration tests and
+    // the agent's dev-fallback path resolution.
+    let output_dir = repo_root
         .join("target")
         .join("bpfel-unknown-none")
         .join("release");
+
+    // Every program is its own crate outside the workspace, so each would
+    // otherwise get its own target dir and rebuild `core`, `compiler_builtins`
+    // and the aya crates from source: ~600 MB per program, ~9 GB for the set,
+    // which overruns the disk of a CI runner that also builds an image. One
+    // shared dir builds those dependencies once, and the flags are identical
+    // across programs so the artifacts are interchangeable.
+    let build_dir = repo_root.join("target").join("ebpf");
 
     std::fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create output dir {}", output_dir.display()))?;
@@ -117,6 +128,7 @@ pub fn build_all() -> Result<()> {
             .arg("--target")
             .arg("bpfel-unknown-none")
             .env("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags())
+            .env("CARGO_TARGET_DIR", &build_dir)
             .current_dir(&program_dir)
             .status()
             .with_context(|| format!("failed to run cargo for {program}"))?;
@@ -127,8 +139,7 @@ pub fn build_all() -> Result<()> {
 
         // Copy the built binary to the workspace-level target directory
         // so that integration tests and the agent's dev-fallback can find it.
-        let src = program_dir
-            .join("target")
+        let src = build_dir
             .join("bpfel-unknown-none")
             .join("release")
             .join(program);

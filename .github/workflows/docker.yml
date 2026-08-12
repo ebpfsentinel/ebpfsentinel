@@ -60,9 +60,7 @@ jobs:
         run: |
           cargo xtask ebpf-build
           mkdir -p ebpf-out
-          find crates/ebpf-programs/*/target/bpfel-unknown-none/release \
-            -maxdepth 1 -type f ! -name '*.d' ! -name '*.fingerprint' \
-            -exec cp {} ebpf-out/ \;
+          cp target/bpfel-unknown-none/release/* ebpf-out/
           ls -la ebpf-out/
 
       - uses: actions/upload-artifact@v7

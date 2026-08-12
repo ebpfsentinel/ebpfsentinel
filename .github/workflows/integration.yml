@@ -247,9 +247,7 @@ jobs:
       - name: Prepare eBPF programs for Docker build
         run: |
           mkdir -p ebpf-out
-          find crates/ebpf-programs/*/target/bpfel-unknown-none/release \
-            -maxdepth 1 -type f ! -name '*.d' ! -name '*.fingerprint' \
-            -exec cp {} ebpf-out/ \; 2>/dev/null || true
+          cp target/bpfel-unknown-none/release/* ebpf-out/ 2>/dev/null || true
           ls ebpf-out/ 2>/dev/null || echo "No eBPF programs found (agent-only Docker image)"
 
       - name: Build Docker image
