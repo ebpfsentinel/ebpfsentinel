@@ -122,7 +122,7 @@ pcap = "2.4"
 regex = "1"
 
 # LRU cache
-lru = "0.18.0"
+lru = "0.18.2"
 
 # Kubernetes (optional, behind `kubernetes` feature in adapters)
 kube = { version = "3.1", default-features = false, features = ["client", "runtime", "rustls-tls"] }
