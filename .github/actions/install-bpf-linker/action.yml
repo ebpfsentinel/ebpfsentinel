@@ -1,17 +1,39 @@
 name: Install bpf-linker
-description: Install LLVM dev libraries and bpf-linker for building eBPF programs
+description: Install the LLVM bpf-linker links against, then bpf-linker itself
 
 runs:
   using: composite
   steps:
-    - name: Install llvm-dev and bpf-linker
+    - name: Install LLVM and bpf-linker
       shell: bash
+      # The version is pinned rather than taken from the distribution: Ubuntu
+      # 24.04 packages LLVM 18 and bpf-linker 0.11 targets 23. Nothing catches
+      # the mismatch while installing - bpf-linker pulls llvm-sys with
+      # `no-llvm-linking` and does the linking itself, so no build step compares
+      # the two - and it surfaces later as an undefined symbol, or as a crash
+      # while linking a kernel program. Moving bpf-linker to a new major means
+      # moving this too.
+      env:
+        LLVM_VERSION: "23"
       run: |
-        sudo apt-get update && sudo apt-get install -y llvm-dev
-        if ! command -v llvm-config &>/dev/null; then
-          LLC=$(ls /usr/bin/llvm-config-* 2>/dev/null | sort -V | tail -1)
-          [ -n "$LLC" ] && sudo ln -sf "$LLC" /usr/bin/llvm-config
-        fi
-        llvm-config --version
-        cargo +nightly install bpf-linker
+        set -euo pipefail
+
+        codename="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
+        curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+          | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+        echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-${LLVM_VERSION} main" \
+          | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends "llvm-${LLVM_VERSION}-dev"
+
+        # `LLVM_PREFIX` is what selects the LLVM to link. Without it bpf-linker's
+        # build script looks for `llvm-config` on PATH and takes its grandparent
+        # directory as the prefix, which is `/usr` - and `/usr/lib64` exists there
+        # holding nothing but the dynamic loader, so the search stops at a
+        # directory with no libLLVM in it and the link fails. Naming the prefix
+        # skips that search, which is also why symlinking a versioned llvm-config
+        # onto the PATH never helped.
+        export LLVM_PREFIX="/usr/lib/llvm-${LLVM_VERSION}"
+
+        cargo +nightly install bpf-linker --locked
         bpf-linker --version
