@@ -47,7 +47,7 @@ rust-version = "1.95"
 # eBPF
 aya = "0.14.0"
 aya-obj = "0.3.0"
-object = { version = "0.39.1", default-features = false, features = ["elf", "read_core"] }
+object = { version = "0.40", default-features = false, features = ["elf", "read_core"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -96,7 +96,7 @@ notify = "8"
 notify-debouncer-mini = "0.7"
 
 # JWT & Crypto
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 sha2 = "0.11.0"
 
 # OpenTelemetry
@@ -141,7 +141,7 @@ anyhow = "1"
 
 # Testing & Benchmarking
 tempfile = "3"
-base64 = "0.22"
+base64 = "0.23"
 criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1.11"
 
