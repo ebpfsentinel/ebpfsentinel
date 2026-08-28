@@ -4,18 +4,18 @@
   <img src="./assets/ebpfsentinel-lockup-light.svg" width="600">
 </p>
 
-A unified, kernel-native **Network & Security platform** for Linux — one Rust binary that replaces your firewall, IDS/IPS, DDoS mitigation, DLP, and 10+ more tools, all running in-kernel via eBPF at wire speed. Not an endpoint agent — it enforces security inline, right where your traffic flows.
+A unified, kernel-native **Network & Security platform** for Linux - one Rust binary that replaces your firewall, IDS/IPS, DDoS mitigation, DLP, and 10+ more tools, all running in-kernel via eBPF at wire speed. Not an endpoint agent - it enforces security inline, right where your traffic flows.
 
 ## Why eBPFsentinel
 
-- **One agent, not a stack.** Firewall, IDS/IPS, DDoS, DLP, threat intel, NAT, and QoS normally mean a rack of appliances or a pile of daemons — each with its own config, parser, and packet copy. eBPFsentinel runs them as a single binary sharing one kernel pipeline: less to deploy, less to patch, less attack surface.
-- **In-kernel, at the source.** Programs attach at XDP/TC/uprobe hook points, so traffic is inspected and dropped in the kernel — no packet copy to userspace on the fast path, no sidecar hop. Malicious traffic dies on the wire instead of costing you CPU upstack.
-- **Network placement, not endpoint sprawl.** It runs where traffic flows — host NIC, node boundary — not as an agent on every workload. One enforcement point per node sees east-west and north-south alike, with no per-app instrumentation.
-- **Built for trust.** Pure Rust with `#![forbid(unsafe_code)]` across the domain and application layers and a hexagonal/DDD design. It runs **rootless** via BPF token delegation — zero `CAP_BPF` / `CAP_NET_ADMIN` — and tags every alert with MITRE ATT&CK for your SIEM.
+- **One agent, not a stack.** Firewall, IDS/IPS, DDoS, DLP, threat intel, NAT, and QoS normally mean a rack of appliances or a pile of daemons - each with its own config, parser, and packet copy. eBPFsentinel runs them as a single binary sharing one kernel pipeline: less to deploy, less to patch, less attack surface.
+- **In-kernel, at the source.** Programs attach at XDP/TC/uprobe hook points, so traffic is inspected and dropped in the kernel - no packet copy to userspace on the fast path, no sidecar hop. Malicious traffic dies on the wire instead of costing you CPU upstack.
+- **Network placement, not endpoint sprawl.** It runs where traffic flows - host NIC, node boundary - not as an agent on every workload. One enforcement point per node sees east-west and north-south alike, with no per-app instrumentation.
+- **Built for trust.** Pure Rust with `#![forbid(unsafe_code)]` across the domain and application layers and a hexagonal/DDD design. It runs **rootless** via BPF token delegation - zero `CAP_BPF` / `CAP_NET_ADMIN` - and tags every alert with MITRE ATT&CK for your SIEM.
 
 ## What it does
 
-A snapshot of the capabilities below — see the [Features guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/overview.md) for the full reference on each engine.
+A snapshot of the capabilities below - see the [Features guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/features/overview.md) for the full reference on each engine.
 
 ### Network Security & Control
 
@@ -72,7 +72,7 @@ A snapshot of the capabilities below — see the [Features guide](https://github
 flowchart TB
     subgraph kernel["Linux Kernel (16 eBPF programs)"]
         direction TB
-        subgraph xdp["XDP — wire-speed packet processing"]
+        subgraph xdp["XDP - wire-speed packet processing"]
             fw["xdp-firewall\n(stateful L3/L4)"]
             fw_rej["xdp-firewall-reject\n(TCP RST / ICMP)"]
             rl["xdp-ratelimit\n(DDoS / rate limit)"]
@@ -81,7 +81,7 @@ flowchart TB
             vip["xdp-vip-announcer\n(VIP ARP reply)"]
             pass["xdp-pass\n(veth peer · test rig)"]
         end
-        subgraph tc["TC — deep packet inspection & rewriting"]
+        subgraph tc["TC - deep packet inspection & rewriting"]
             ct[tc-conntrack]
             scrub[tc-scrub]
             nat_i[tc-nat-ingress]
@@ -147,12 +147,12 @@ flowchart TB
 
 ## Quick start
 
-**Requirements:** Linux kernel 6.9+ on x86_64 or aarch64, with BTF (`CONFIG_DEBUG_INFO_BTF=y`). The 6.9 floor unlocks **BPF token delegation** — the agent loads its eBPF programs with zero `CAP_BPF` / `CAP_NET_ADMIN` (rootless).
+**Requirements:** Linux kernel 6.9+ on x86_64 or aarch64, with BTF (`CONFIG_DEBUG_INFO_BTF=y`). The 6.9 floor unlocks **BPF token delegation** - the agent loads its eBPF programs with zero `CAP_BPF` / `CAP_NET_ADMIN` (rootless).
 
 ### Install (prebuilt)
 
 Grab the latest tarball for your architecture from the
-[releases page](https://github.com/ebpfsentinel/ebpfsentinel-release/releases) —
+[releases page](https://github.com/ebpfsentinel/ebpfsentinel-release/releases) -
 every component is released together from there, so the release you download
 also tells you which operator and dashboard versions it was tested with. The
 tarball ships the agent, prebuilt eBPF objects, a systemd unit, and an
@@ -178,17 +178,17 @@ cargo xtask ebpf-build        # eBPF programs (nightly)
 # eBPF loads only through a BPF token (a user-namespace feature). The privileged
 # `warden` broker (bpffs delegation, conntrack, routes, ARP, pcap) runs alongside
 # the agent, which self-unshares a user namespace and loads its own eBPF through
-# the token — never CAP_BPF. Start the broker, then the agent:
+# the token - never CAP_BPF. Start the broker, then the agent:
 sudo ./target/release/warden serve /run/ebpfsentinel/warden.sock --uid 0 &
 sudo EBPFSENTINEL_WARDEN_SOCK=/run/ebpfsentinel/warden.sock \
   ./target/release/ebpfsentinel-agent --config config/ebpfsentinel.yaml
 ```
 
-The systemd install (`dist/install.sh`) wires this as two units — `ebpfsentinel-warden.service` (broker) + `ebpfsentinel.service` (agent) — mirroring the Docker split.
+The systemd install (`dist/install.sh`) wires this as two units - `ebpfsentinel-warden.service` (broker) + `ebpfsentinel.service` (agent) - mirroring the Docker split.
 
 ### Docker (rootless)
 
-The agent loads eBPF **exclusively** through a BPF token (kernel 6.9+) — never `CAP_BPF`, never `--privileged`. The deployment is two containers: the privileged `warden` broker and the rootless `agent`, sharing a control socket. `docker compose up` wires both:
+The agent loads eBPF **exclusively** through a BPF token (kernel 6.9+) - never `CAP_BPF`, never `--privileged`. The deployment is two containers: the privileged `warden` broker and the rootless `agent`, sharing a control socket. `docker compose up` wires both:
 
 ```bash
 # The agent runs as uid 65534 and rejects a world-readable config; make it
@@ -198,7 +198,7 @@ docker compose up -d        # starts the warden broker + the agent
 docker compose logs -f
 ```
 
-The capabilities are held by the `warden` broker (bpffs delegation, conntrack/routes, the pcap pool + ARP); the agent drops every capability — it self-unshares a user namespace and loads its own eBPF through the token. See the [BPF token guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/operations/deployment/bpf-token.md) for the systemd and Kubernetes paths and the full capability matrix.
+The capabilities are held by the `warden` broker (bpffs delegation, conntrack/routes, the pcap pool + ARP); the agent drops every capability - it self-unshares a user namespace and loads its own eBPF through the token. See the [BPF token guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/operations/deployment/bpf-token.md) for the systemd and Kubernetes paths and the full capability matrix.
 
 ### Minimal config
 
@@ -216,7 +216,7 @@ curl http://127.0.0.1:8080/healthz     # liveness probe (no auth)
 ebpfsentinel-agent status              # agent + per-engine status
 ```
 
-See the [Getting Started guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/getting-started/quickstart.md) for detailed setup instructions.
+See the [Getting Started guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/getting-started/quickstart.md) for detailed setup instructions.
 
 ## Documentation
 
@@ -224,20 +224,20 @@ Full documentation is available at [ebpfsentinel/ebpfsentinel-docs](https://gith
 
 | Section | Description |
 | ------- | ----------- |
-| [Getting Started](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/getting-started/quickstart.md) | Installation, prerequisites, first run |
-| [Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/overview.md) | Detailed feature guides (firewall, IDS, DLP, ...) |
-| [Configuration](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/configuration/overview.md) | YAML reference for all sections |
-| [Architecture](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/architecture/overview.md) | Hexagonal/DDD design, eBPF pipeline, data flow |
-| [Kernel Reference](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/kernel/overview.md) | eBPF programs, maps, helpers, pipeline |
-| [Hot Reload](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/operations/hot-reload.md) | Dynamic eBPF program loading/unloading |
-| [REST API](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/api-reference/rest-api.md) | All endpoints with request/response formats |
-| [gRPC API](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/api-reference/grpc-api.md) | Alert streaming service |
-| [CLI Reference](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/cli-reference/index.md) | All commands and options |
-| [Prometheus Metrics](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/api-reference/prometheus-metrics.md) | Metric names and labels |
-| [Deployment](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/operations/deployment/docker.md) | Docker, Kubernetes, binary |
-| [Security](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/architecture/security-model.md) | TLS, auth, hardening |
-| [Development](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/development/building.md) | Building, testing, contributing |
-| [Examples](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/examples/index.md) | Real-world deployment scenarios |
+| [Getting Started](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/getting-started/quickstart.md) | Installation, prerequisites, first run |
+| [Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/features/overview.md) | Detailed feature guides (firewall, IDS, DLP, ...) |
+| [Configuration](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/configuration/overview.md) | YAML reference for all sections |
+| [Architecture](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/architecture/overview.md) | Hexagonal/DDD design, eBPF pipeline, data flow |
+| [Kernel Reference](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/kernel/overview.md) | eBPF programs, maps, helpers, pipeline |
+| [Hot Reload](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/operations/hot-reload.md) | Dynamic eBPF program loading/unloading |
+| [REST API](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/api-reference/rest-api.md) | All endpoints with request/response formats |
+| [gRPC API](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/api-reference/grpc-api.md) | Alert streaming service |
+| [CLI Reference](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/cli-reference/index.md) | All commands and options |
+| [Prometheus Metrics](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/api-reference/prometheus-metrics.md) | Metric names and labels |
+| [Deployment](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/operations/deployment/docker.md) | Docker, Kubernetes, binary |
+| [Security](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/architecture/security-model.md) | TLS, auth, hardening |
+| [Development](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/development/building.md) | Building, testing, contributing |
+| [Examples](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/examples/index.md) | Real-world deployment scenarios |
 
 Per-feature configuration examples are in [`config/examples/`](config/examples/).
 
@@ -248,7 +248,7 @@ Per-feature configuration examples are in [`config/examples/`](config/examples/)
 - **Arch:** x86_64 (primary), aarch64 (cross-tested)
 - **Runtime:** Docker, Podman, Kubernetes (DaemonSet), Nomad
 
-See [Compatibility](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/operations/compatibility.md) for the full matrix.
+See [Compatibility](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/operations/compatibility.md) for the full matrix.
 
 ## OSS vs Enterprise
 
@@ -269,8 +269,8 @@ The **enterprise edition** layers on capabilities for fleets and regulated envir
 | Kubernetes operator | CRD-driven deployment & lifecycle management for the agent fleet |
 | Web dashboard | Multi-tenant web UI & control plane (MSSP front-end) |
 
-See [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for the full list and per-feature detail.
+See [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/features/enterprise/overview.md) for the full list and per-feature detail.
 
 ## License
 
-GNU Affero General Public License v3.0 — see [LICENSE](LICENSE).
+GNU Affero General Public License v3.0 - see [LICENSE](LICENSE).
