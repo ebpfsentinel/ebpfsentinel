@@ -3117,6 +3117,31 @@ pub async fn run(
         });
     }
 
+    // ── 11c¾. Spawn datapath state reader (periodic, every 30s) ──────
+    // What the kernel granted, rather than what the configuration asked for:
+    // programs that loaded and were refused an attachment, and the XDP mode
+    // each interface ended up in. Only where eBPF is in play at all, because on
+    // a build running without it every answer would be "nothing attached",
+    // which is configuration rather than a measurement.
+    if ebpf_loaded.load(Ordering::Relaxed) {
+        let ds_cancel = cancel_token.clone();
+        let ds_metrics = Arc::clone(&metrics) as Arc<dyn MetricsPort>;
+        let ds_interfaces = config.agent.interfaces.clone();
+        info!(
+            interfaces = ?ds_interfaces,
+            "datapath state reader starting (30s interval)"
+        );
+        tokio::spawn(async move {
+            crate::ebpf_metrics::run_datapath_state_loop(
+                ds_interfaces,
+                ds_metrics,
+                Duration::from_secs(30),
+                ds_cancel,
+            )
+            .await;
+        });
+    }
+
     // ── 11d. Spawn schedule evaluator (periodic, every 60s) ──────────
     let _schedule_handle = if config.firewall.schedules.is_empty() {
         None

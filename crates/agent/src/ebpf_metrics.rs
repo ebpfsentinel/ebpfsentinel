@@ -297,9 +297,86 @@ pub async fn run_zone_metrics_loop(
     }
 }
 
+/// Periodically export what the datapath actually achieved, as opposed to what
+/// was asked of it.
+///
+/// Two facts, both states of the machine rather than counts, and both invisible
+/// in every other metric this agent exports:
+///
+/// * how many programs loaded and were then refused an attachment, which leaves
+///   a process running, answering its health check and reporting zeros while
+///   watching nothing;
+/// * which XDP mode each interface's program is running in, which is the
+///   kernel's answer rather than the configured one - a driver that refused
+///   native and a fallback that landed on generic look identical in the
+///   configuration and cost an order of magnitude in the datapath.
+///
+/// Polled rather than recorded at attach time because neither fact is ours to
+/// keep: an attachment can be replaced, an interface can go down, and a value
+/// written once at startup would go on asserting a mode that stopped being true
+/// hours ago. An interface the kernel will not answer for is cleared rather than
+/// left standing, because the last known mode of an interface that no longer
+/// carries a program is the one answer worse than none.
+pub async fn run_datapath_state_loop(
+    interfaces: Vec<String>,
+    metrics: Arc<dyn MetricsPort>,
+    interval: Duration,
+    cancel: CancellationToken,
+) {
+    let mut ticker = tokio::time::interval(interval);
+
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            _ = ticker.tick() => {}
+        }
+
+        let blocked = adapters::ebpf::blocked_attaches().len();
+        metrics.set_ebpf_attach_blocked(u64::try_from(blocked).unwrap_or(u64::MAX));
+
+        for interface in &interfaces {
+            match xdp_mode_of(interface) {
+                Some(mode) => metrics.set_xdp_attach_mode(interface, mode),
+                None => metrics.clear_xdp_attach_mode(interface),
+            }
+        }
+    }
+}
+
+/// The XDP mode the kernel reports for one interface, or nothing.
+///
+/// Nothing covers all three ways there is no answer - the name does not
+/// resolve, the interface carries no XDP program, the question could not be
+/// asked - because none of them is a mode and reporting one would be inventing
+/// a measurement.
+fn xdp_mode_of(interface: &str) -> Option<&'static str> {
+    let ifindex = adapters::ebpf::kfunc_attach::iface_to_ifindex(interface).ok()?;
+    match adapters::ebpf::xdp_attachment(ifindex) {
+        Ok(Some(attachment)) => Some(attachment.mode.as_str()),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::debug!(
+                interface,
+                error = %e,
+                "XDP attachment could not be read"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::metric_labels;
+    use super::{metric_labels, xdp_mode_of};
+
+    #[test]
+    fn an_interface_no_kernel_knows_reports_no_mode_rather_than_an_unknown_one() {
+        // The three ways there is no answer are one answer here. A name that
+        // does not resolve is not an interface running XDP in an unrecognised
+        // mode, and reporting it as one would put a machine on a screen as
+        // misconfigured rather than as unmeasured.
+        assert_eq!(xdp_mode_of("no-such-interface-0"), None);
+    }
 
     #[test]
     fn ids_metrics_expose_the_cgroup_tenant_counter() {

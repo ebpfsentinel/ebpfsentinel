@@ -35,6 +35,30 @@ pub trait FirewallMetrics: Send + Sync {
 
     /// Set the load status of an eBPF program (true=loaded, false=failed).
     fn set_ebpf_program_status(&self, _program: &str, _loaded: bool) {}
+
+    /// Set how many programs loaded but could not be attached.
+    ///
+    /// Distinct from the load status beside it: a program that loaded and was
+    /// then refused an attachment is running nowhere, and the load gauge says
+    /// it is fine. Zero here is a measurement, so a build that cannot look must
+    /// not call this at all rather than call it with nothing.
+    fn set_ebpf_attach_blocked(&self, _count: u64) {}
+
+    /// Set the XDP mode an interface's program is actually running in.
+    ///
+    /// The requested mode is configuration; this is what the kernel granted,
+    /// which is a different fact whenever a driver refused native and the
+    /// attach fell back. `mode` is one of `native`, `generic`, `offloaded`,
+    /// `multiple` or `unknown`, and every other mode for that interface is
+    /// cleared, so exactly one series carries one at a time.
+    fn set_xdp_attach_mode(&self, _interface: &str, _mode: &str) {}
+
+    /// Forget every XDP mode recorded for an interface.
+    ///
+    /// An interface carrying no XDP program at all has no mode, which is not
+    /// the same answer as a mode nobody recognises: leaving the last known one
+    /// standing would report an attachment that has gone.
+    fn clear_xdp_attach_mode(&self, _interface: &str) {}
 }
 
 // ── Alert pipeline metrics ─────────────────────────────────────────

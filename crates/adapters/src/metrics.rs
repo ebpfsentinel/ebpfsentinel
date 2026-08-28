@@ -1,3 +1,4 @@
+use crate::ebpf::XDP_ATTACH_MODES;
 use ports::secondary::metrics_port::{
     AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
     DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics,
@@ -51,6 +52,13 @@ pub struct ComponentLabels {
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct ProgramLabels {
     pub program: String,
+}
+
+/// One interface and one of the XDP modes it could be running in.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct XdpModeLabels {
+    pub interface: String,
+    pub mode: String,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -142,6 +150,12 @@ pub struct AgentMetrics {
     pub events_dropped_total: Family<ReasonLabels, Counter>,
     pub rules_loaded: Family<ComponentLabels, Gauge>,
     pub ebpf_program_status: Family<ProgramLabels, Gauge>,
+    /// A family with no labels rather than a bare gauge: a bare one is exported
+    /// at zero from the moment the registry exists, and zero here is a
+    /// measurement - a datapath that attached everything it loaded. A family
+    /// exports nothing until something has actually looked.
+    pub ebpf_attach_blocked: Family<Vec<(String, String)>, Gauge>,
+    pub xdp_attach_mode: Family<XdpModeLabels, Gauge>,
     pub packet_processing_duration: Family<ProgramLabels, Histogram>,
     pub rules_reloads_total: Family<ReloadLabels, Counter>,
     pub alerts_total: Family<AlertLabels, Counter>,
@@ -256,6 +270,20 @@ impl AgentMetrics {
             "ebpf_program_status",
             "eBPF program load status (1=loaded, 0=failed)",
             ebpf_program_status.clone(),
+        );
+
+        let ebpf_attach_blocked = Family::<Vec<(String, String)>, Gauge>::default();
+        registry.register(
+            "ebpf_attach_blocked",
+            "eBPF programs that loaded but could not be attached",
+            ebpf_attach_blocked.clone(),
+        );
+
+        let xdp_attach_mode = Family::<XdpModeLabels, Gauge>::default();
+        registry.register(
+            "xdp_attach_mode",
+            "XDP mode an interface's program is running in (1=in force)",
+            xdp_attach_mode.clone(),
         );
 
         let packet_processing_duration =
@@ -688,6 +716,8 @@ impl AgentMetrics {
             events_dropped_total,
             rules_loaded,
             ebpf_program_status,
+            ebpf_attach_blocked,
+            xdp_attach_mode,
             packet_processing_duration,
             rules_reloads_total,
             alerts_total,
@@ -825,6 +855,34 @@ impl FirewallMetrics for AgentMetrics {
                 program: program.to_string(),
             })
             .set(i64::from(loaded));
+    }
+
+    fn set_ebpf_attach_blocked(&self, count: u64) {
+        self.ebpf_attach_blocked
+            .get_or_create(&Vec::new())
+            .set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn set_xdp_attach_mode(&self, interface: &str, mode: &str) {
+        for known in XDP_ATTACH_MODES {
+            self.xdp_attach_mode
+                .get_or_create(&XdpModeLabels {
+                    interface: interface.to_string(),
+                    mode: (*known).to_string(),
+                })
+                .set(i64::from(*known == *mode));
+        }
+    }
+
+    fn clear_xdp_attach_mode(&self, interface: &str) {
+        for known in XDP_ATTACH_MODES {
+            self.xdp_attach_mode
+                .get_or_create(&XdpModeLabels {
+                    interface: interface.to_string(),
+                    mode: (*known).to_string(),
+                })
+                .set(0);
+        }
     }
 }
 
@@ -1267,6 +1325,59 @@ mod tests {
         let encoded = metrics.encode();
         assert!(encoded.contains("ebpfsentinel_ebpf_program_status"));
         assert!(encoded.contains("program=\"xdp_firewall\""));
+    }
+
+    #[test]
+    fn a_build_that_never_looked_exports_no_blocked_count_at_all() {
+        // Zero blocked is a datapath with nothing wrong, so it must not be what
+        // a build with no eBPF at all reports by simply existing.
+        let metrics = AgentMetrics::new();
+
+        assert!(!metrics.encode().contains("ebpf_attach_blocked"));
+    }
+
+    #[test]
+    fn attach_blocked_counts_programs_that_loaded_and_attached_nowhere() {
+        let metrics = AgentMetrics::new();
+        metrics.set_ebpf_attach_blocked(2);
+
+        let encoded = metrics.encode();
+        assert!(encoded.contains("ebpfsentinel_ebpf_attach_blocked{} 2"));
+    }
+
+    #[test]
+    fn exactly_one_xdp_mode_is_in_force_for_an_interface() {
+        let metrics = AgentMetrics::new();
+        metrics.set_xdp_attach_mode("eth0", "generic");
+
+        let encoded = metrics.encode();
+        assert!(encoded.contains("interface=\"eth0\",mode=\"generic\"} 1"));
+        assert!(encoded.contains("interface=\"eth0\",mode=\"native\"} 0"));
+    }
+
+    #[test]
+    fn a_mode_that_stopped_being_true_is_taken_down_rather_than_left_standing() {
+        // An interface that fell back from native to generic must not go on
+        // reporting native: two modes at one would be read as two attachments.
+        let metrics = AgentMetrics::new();
+        metrics.set_xdp_attach_mode("eth0", "native");
+        metrics.set_xdp_attach_mode("eth0", "generic");
+
+        let encoded = metrics.encode();
+        assert!(encoded.contains("interface=\"eth0\",mode=\"native\"} 0"));
+        assert!(encoded.contains("interface=\"eth0\",mode=\"generic\"} 1"));
+    }
+
+    #[test]
+    fn an_interface_carrying_nothing_reports_no_mode_at_all() {
+        let metrics = AgentMetrics::new();
+        metrics.set_xdp_attach_mode("eth0", "native");
+        metrics.clear_xdp_attach_mode("eth0");
+
+        let encoded = metrics.encode();
+        for mode in XDP_ATTACH_MODES {
+            assert!(encoded.contains(&format!("mode=\"{mode}\"}} 0")));
+        }
     }
 
     #[test]

@@ -44,7 +44,7 @@ pub mod vip_map_manager;
 pub mod zone_map_manager;
 
 pub use attach_inspect::{
-    AttachBlock, XdpAttachMode, XdpAttachment, blocked_attaches,
+    AttachBlock, XDP_ATTACH_MODES, XdpAttachMode, XdpAttachment, blocked_attaches,
     clear_all_blocks as clear_attach_blocks, xdp_attachment,
 };
 pub use bpf_token::{

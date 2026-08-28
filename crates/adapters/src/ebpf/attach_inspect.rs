@@ -59,6 +59,31 @@ pub enum XdpAttachMode {
     Unknown,
 }
 
+/// Every XDP mode this build can report, as the label it is exported under.
+///
+/// The vocabulary is here rather than in the metrics registry because this is
+/// the file that decides what the kernel's answer is called, and a second list
+/// somewhere else is how a mode comes to be exported under a name nothing reads.
+pub const XDP_ATTACH_MODES: [&str; 5] = ["native", "generic", "offloaded", "multiple", "unknown"];
+
+impl XdpAttachMode {
+    /// The label this mode is exported under.
+    ///
+    /// A slug rather than the sentence [`Display`](std::fmt::Display) writes: a
+    /// label value is matched on at the far end, and "multiple modes" would put
+    /// a space in the thing being matched.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Driver => "native",
+            Self::Generic => "generic",
+            Self::Hardware => "offloaded",
+            Self::Multiple => "multiple",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 impl std::fmt::Display for XdpAttachMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
@@ -574,6 +599,25 @@ mod tests {
         out.extend_from_slice(payload);
         out.resize(nla_align(len), 0);
         out
+    }
+
+    #[test]
+    fn every_mode_this_build_can_report_is_on_the_exported_vocabulary() {
+        // The list is what a reader at the far end matches against, so a
+        // variant whose label is not on it would be exported under a name
+        // nothing looks for.
+        for mode in [
+            XdpAttachMode::Driver,
+            XdpAttachMode::Generic,
+            XdpAttachMode::Hardware,
+            XdpAttachMode::Multiple,
+            XdpAttachMode::Unknown,
+        ] {
+            assert!(
+                XDP_ATTACH_MODES.contains(&mode.as_str()),
+                "{mode} is exported as a label nothing reads"
+            );
+        }
     }
 
     #[test]
