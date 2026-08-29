@@ -64,7 +64,7 @@ fn validate_http_url(field: &str, value: &str) -> Result<(), ConfigError> {
             message: format!("URL scheme must be `http` or `https`, got `{scheme}` in {value:?}"),
         });
     }
-    let host_end = rest.find(['/', '?', '#']).map_or(rest.len(), |idx| idx);
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let host = &rest[..host_end];
     if host.is_empty() {
         return Err(ConfigError::Validation {

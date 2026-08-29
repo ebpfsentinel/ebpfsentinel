@@ -274,12 +274,10 @@ impl IdsEngine {
             .get(idx)
             .and_then(Option::as_ref)
         {
-            // Domain-aware rule: must match at least one resolved domain
-            let matched = dst_domains.iter().find(|d| matcher.matches(d));
-            match matched {
-                Some(domain) => return Some((idx, rule, Some(domain.clone()))),
-                None => return None, // Domain pattern set but no match
-            }
+            // Domain-aware rule: must match at least one resolved domain.
+            // No match means the rule does not apply at all.
+            let domain = dst_domains.iter().find(|d| matcher.matches(d))?;
+            return Some((idx, rule, Some(domain.clone())));
         }
 
         // No domain pattern — standard IP+port match

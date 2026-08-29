@@ -5,7 +5,7 @@
 | Requirement | Version | Purpose |
 |-------------|---------|---------|
 | Linux kernel | 6.9+ with BTF | eBPF program loading (BPF token delegation, cgroup1 kfunc, XDP metadata kfuncs) |
-| Rust stable | 1.93+ | Userspace crates |
+| Rust stable | 1.98+ | Userspace crates |
 | Rust nightly | latest | eBPF kernel programs (`bpfel-unknown-none`) |
 | `bpftool` | any | eBPF program inspection |
 | `iproute2` | any | Network interface management |

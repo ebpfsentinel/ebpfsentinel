@@ -53,7 +53,7 @@ serde_json = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 tokio-util = { workspace = true }
-k8s-openapi = { workspace = true, features = ["v1_31"], optional = true }
+k8s-openapi = { workspace = true, features = ["v1_32"], optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

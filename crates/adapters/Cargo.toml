@@ -75,7 +75,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 base64 = { workspace = true }
 criterion = { workspace = true }
-k8s-openapi = { workspace = true, features = ["v1_31"] }
+k8s-openapi = { workspace = true, features = ["v1_32"] }
 
 [[bench]]
 name = "storage"

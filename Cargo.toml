@@ -41,7 +41,7 @@ edition = "2024"
 license = "AGPL-3.0-only"
 publish = false
 repository = "https://github.com/ebpfsentinel/ebpfsentinel"
-rust-version = "1.95"
+rust-version = "1.98"
 
 [workspace.dependencies]
 # eBPF
@@ -73,7 +73,7 @@ prost = "0.14"
 tokio-stream = "0.1"
 
 # Storage
-redb = "4.1.0"
+redb = "4.2.0"
 
 # Logging
 tracing = "0.1"
@@ -111,22 +111,22 @@ serde_yaml_ng = "0.10"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 
 # GeoIP
-maxminddb = "0.28.1"
+maxminddb = "0.30.3"
 flate2 = "1"
 tar = "0.4"
 
 # Packet capture
-pcap = "2.4"
+pcap = "2.5"
 
 # Regex
 regex = "1"
 
 # LRU cache
-lru = "0.18.2"
+lru = "0.18.3"
 
 # Kubernetes (optional, behind `kubernetes` feature in adapters)
-kube = { version = "3.1", default-features = false, features = ["client", "runtime", "rustls-tls"] }
-k8s-openapi = "0.27"
+kube = { version = "4.2", default-features = false, features = ["client", "runtime", "rustls-tls"] }
+k8s-openapi = "0.28"
 
 # Async utilities
 futures-util = "0.3"

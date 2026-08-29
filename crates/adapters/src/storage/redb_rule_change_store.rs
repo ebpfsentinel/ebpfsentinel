@@ -126,7 +126,7 @@ impl RuleChangeStore for RedbRuleChangeStore {
         let max_version = iter
             .filter_map(Result::ok)
             .map(|(k, _v)| k.value().1)
-            .last() // entries are ordered ascending, last is max
+            .next_back() // entries are ordered ascending, last is max
             .unwrap_or(0);
 
         Ok(max_version + 1)

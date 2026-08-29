@@ -420,13 +420,15 @@ pub async fn list_ips_domain_blocks(
         .list_blacklist()
         .iter()
         .filter_map(|e| {
-            let (source, domain) = if let Some(d) = e.reason.strip_prefix("dns-blocklist: ") {
-                ("dns-blocklist".to_string(), d.to_string())
-            } else if let Some(d) = e.reason.strip_prefix("reputation: ") {
-                ("reputation".to_string(), d.to_string())
-            } else {
-                return None;
-            };
+            let (source, domain) = e
+                .reason
+                .strip_prefix("dns-blocklist: ")
+                .map(|d| ("dns-blocklist".to_string(), d.to_string()))
+                .or_else(|| {
+                    e.reason
+                        .strip_prefix("reputation: ")
+                        .map(|d| ("reputation".to_string(), d.to_string()))
+                })?;
 
             let elapsed = e.added_at.elapsed();
             let remaining = e.ttl.saturating_sub(elapsed);

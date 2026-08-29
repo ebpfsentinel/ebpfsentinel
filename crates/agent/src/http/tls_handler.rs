@@ -83,7 +83,7 @@ mod tests {
     fn post_quantum_flag_matches_hybrid_group() {
         // The PQ hybrid group is the only one flagged post-quantum.
         assert_eq!(group_name(NamedGroup::X25519MLKEM768), "X25519MLKEM768");
-        assert!(NamedGroup::X25519MLKEM768 == NamedGroup::X25519MLKEM768);
-        assert!(NamedGroup::X25519 != NamedGroup::X25519MLKEM768);
+        assert_eq!(NamedGroup::X25519MLKEM768, NamedGroup::X25519MLKEM768);
+        assert_ne!(NamedGroup::X25519, NamedGroup::X25519MLKEM768);
     }
 }
