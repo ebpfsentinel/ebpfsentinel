@@ -1,7 +1,7 @@
 #![allow(unsafe_code)] // Required for eBPF RingBuf event parsing (read_unaligned)
 
 use crate::ebpf::map_store::MapStore;
-use crate::ebpf::ringbuf_observer::{RingBufObserver, event_timestamp_ns};
+use crate::ebpf::ringbuf_observer::RingBufObserver;
 use aya::maps::{MapData, RingBuf};
 use domain::common::agent_event::AgentEvent;
 use ebpf_common::event::{EVENT_TYPE_L7, PacketEvent};
@@ -100,9 +100,8 @@ impl EventReader {
             let now_ns = observer.now_ns();
             let rb = guard.get_inner_mut();
             while let Some(item) = rb.next() {
-                if let Some(agent_event) = decode_event(&item) {
-                    let event_ts_ns = event_timestamp_ns(&agent_event);
-                    observer.drained(now_ns, event_ts_ns);
+                if let Some(mut agent_event) = decode_event(&item) {
+                    observer.accept(now_ns, &mut agent_event);
                     // Backpressure: drop on full channel
                     if tx.try_send(agent_event).is_err() {
                         observer.dropped("channel_full");

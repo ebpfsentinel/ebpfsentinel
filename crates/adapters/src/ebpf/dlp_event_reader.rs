@@ -1,7 +1,7 @@
 #![allow(unsafe_code)] // Required for eBPF RingBuf event parsing (read_unaligned)
 
 use crate::ebpf::map_store::MapStore;
-use crate::ebpf::ringbuf_observer::{RingBufObserver, event_timestamp_ns};
+use crate::ebpf::ringbuf_observer::RingBufObserver;
 use aya::maps::{MapData, RingBuf};
 use domain::common::agent_event::AgentEvent;
 use ebpf_common::dlp::{DLP_MAX_EXCERPT, DlpEvent};
@@ -110,8 +110,8 @@ impl DlpEventReader {
                     let copy_len = excerpt_bytes.len().min(DLP_MAX_EXCERPT);
                     event.data_excerpt[..copy_len].copy_from_slice(&excerpt_bytes[..copy_len]);
 
-                    let event = AgentEvent::Dlp(Box::new(event));
-                    observer.drained(now_ns, event_timestamp_ns(&event));
+                    let mut event = AgentEvent::Dlp(Box::new(event));
+                    observer.accept(now_ns, &mut event);
                     if tx.try_send(event).is_err() {
                         observer.dropped("channel_full");
                         debug!("DLP event channel full, dropping event");
