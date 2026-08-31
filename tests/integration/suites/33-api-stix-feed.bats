@@ -244,7 +244,11 @@ teardown_file() {
     body="$(api_post /api/v1/threatintel/feeds/refresh '{"feed_id":"test-stix"}')"
     _load_http_status
 
-    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "202" ] || [ "$HTTP_STATUS" = "204" ]
+    # 409 means a feed cycle was already fetching when the request landed, which
+    # is the same outcome for this test: a re-fetch is running. The route is
+    # single-flight so a second caller is refused rather than queued.
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "202" ] \
+        || [ "$HTTP_STATUS" = "204" ] || [ "$HTTP_STATUS" = "409" ]
 
     # Wait briefly for refresh to complete
     sleep 3

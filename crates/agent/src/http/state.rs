@@ -84,6 +84,15 @@ pub struct AppState {
     /// fetcher task is running (threat intel enabled with ≥1 feed); `None`
     /// otherwise, in which case the refresh endpoint reports unavailable.
     pub feed_refresh_trigger: Option<mpsc::Sender<()>>,
+    /// Set for as long as one threat-intel feed cycle is fetching. The write
+    /// rate limit bounds how often the refresh route is called and not how many
+    /// outbound fetches stack up behind each other, so the route claims this
+    /// flag and refuses a second caller instead of queueing a second download.
+    /// Replaced by [`Self::with_feed_refresh_trigger`] with the flag the feed
+    /// fetcher itself holds; the placeholder installed here is only ever read
+    /// when there is no trigger, in which case the route reports unavailable
+    /// before touching it.
+    pub feed_refresh_in_flight: Arc<AtomicBool>,
     pub ebpf_program_status: Arc<RwLock<HashMap<String, bool>>>,
     pub fingerprint_cache: Option<Arc<domain::l7::ja4::FingerprintCache>>,
     pub ja4s_fingerprint_cache: Option<Arc<domain::l7::ja4::Ja4sFingerprintCache>>,
@@ -154,6 +163,7 @@ impl AppState {
             config_path: None,
             reload_complete: None,
             feed_refresh_trigger: None,
+            feed_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             ebpf_program_status,
             fingerprint_cache: None,
             ja4s_fingerprint_cache: None,
@@ -166,10 +176,17 @@ impl AppState {
         }
     }
 
-    /// Attach a manual threat-intel feed re-fetch trigger.
+    /// Attach a manual threat-intel feed re-fetch trigger, together with the
+    /// flag the feed fetcher raises while a cycle is running. Both come from
+    /// the same task, so a caller can never be handed one without the other.
     #[must_use]
-    pub fn with_feed_refresh_trigger(mut self, tx: mpsc::Sender<()>) -> Self {
+    pub fn with_feed_refresh_trigger(
+        mut self,
+        tx: mpsc::Sender<()>,
+        in_flight: Arc<AtomicBool>,
+    ) -> Self {
         self.feed_refresh_trigger = Some(tx);
+        self.feed_refresh_in_flight = in_flight;
         self
     }
 

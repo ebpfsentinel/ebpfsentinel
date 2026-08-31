@@ -188,7 +188,11 @@ pub fn build_router(
     );
 
     let api_routes = {
-        // Read-only routes (no rate limiting)
+        // Read-only routes: every route mounted here is a `GET`, throttled by
+        // the lighter read limit. Anything that changes state or reaches out to
+        // the network belongs in `write_routes` below, whatever it costs to
+        // serve, so one authenticated caller cannot use the agent as an
+        // amplifier by repeating a mutation the read limit barely notices.
         let read_routes = Router::new()
             .route("/api/v1/agent/status", get(agent_status))
             .route("/api/v1/agent/identity", get(agent_identity))
@@ -205,7 +209,6 @@ pub fn build_router(
             .route("/api/v1/threatintel/urls", get(list_url_iocs))
             .route("/api/v1/tls/status", get(tls_status))
             .route("/api/v1/threatintel/feeds", get(list_feeds))
-            .route("/api/v1/threatintel/feeds/refresh", post(refresh_feeds))
             .route("/api/v1/alerts", get(list_alerts))
             .route("/api/v1/alerts/stream", get(stream_alerts))
             .route("/api/v1/audit/logs", get(list_audit_logs))
@@ -230,16 +233,8 @@ pub fn build_router(
             .route("/api/v1/dlp/patterns", get(list_dlp_patterns))
             .route("/api/v1/nat/status", get(nat_status))
             .route("/api/v1/nat/rules", get(list_nat_rules))
-            .route(
-                "/api/v1/nat/nptv6",
-                get(list_nptv6_rules).post(create_nptv6_rule),
-            )
-            .route("/api/v1/nat/nptv6/{id}", delete(delete_nptv6_rule))
+            .route("/api/v1/nat/nptv6", get(list_nptv6_rules))
             .route("/api/v1/aliases/status", get(alias_status))
-            .route(
-                "/api/v1/aliases/{id}/content",
-                put(set_external_alias_content),
-            )
             .route("/api/v1/routing/status", get(routing_status))
             .route("/api/v1/routing/gateways", get(list_gateways))
             .route("/api/v1/routing/routes", get(list_routes))
@@ -263,7 +258,9 @@ pub fn build_router(
             .route("/api/v1/captures", get(list_captures))
             .layer(GovernorLayer::new(read_governor));
 
-        // Write routes (rate limited: 60 req/min per IP)
+        // Write routes (rate limited: 60 req/min per IP). Every non-`GET` route
+        // on the surface is mounted here; the split is asserted by the tests
+        // below rather than left to whoever adds the next one.
         let write_routes = Router::new()
             .route("/api/v1/firewall/rules", post(create_rule))
             .route("/api/v1/firewall/rules/{id}", delete(delete_rule))
@@ -280,6 +277,13 @@ pub fn build_router(
             .route(
                 "/api/v1/alerts/{id}/false-positive",
                 post(mark_false_positive),
+            )
+            .route("/api/v1/threatintel/feeds/refresh", post(refresh_feeds))
+            .route("/api/v1/nat/nptv6", post(create_nptv6_rule))
+            .route("/api/v1/nat/nptv6/{id}", delete(delete_nptv6_rule))
+            .route(
+                "/api/v1/aliases/{id}/content",
+                put(set_external_alias_content),
             )
             .route("/api/v1/ddos/policies", post(create_ddos_policy))
             .route("/api/v1/ddos/policies/{id}", delete(delete_ddos_policy))
@@ -682,6 +686,260 @@ mod tests {
             throttled > 0,
             "loopback should be throttled when exemption is off"
         );
+    }
+
+    // ── Every mutating route is throttled as a write ─────────────────
+    //
+    // The surface is declared in two blocks and nothing but a reader stops a
+    // mutating route being added to the read one, where it would be throttled
+    // at the read limit and could be repeated as an amplifier. The blocks are
+    // therefore not trusted: this file is parsed for every route it mounts,
+    // and the mutating ones are then driven through the built router to prove
+    // the write limiter really covers them.
+
+    /// One `.route(path, method(handler))` declaration, with the byte offset it
+    /// was declared at so it can be placed in the read or the write block.
+    #[derive(Debug)]
+    struct MountedRoute {
+        path: String,
+        method: &'static str,
+        offset: usize,
+    }
+
+    const METHOD_VERBS: &[&str] = &["get", "post", "put", "patch", "delete"];
+
+    /// Read the argument list of the `.route(` call starting at `open`, which is
+    /// the index of its opening parenthesis, skipping over string literals so a
+    /// parenthesis inside a path cannot end the scan early.
+    fn route_call_args(src: &str, open: usize) -> &str {
+        let bytes = src.as_bytes();
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut i = open;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if c == b'\\' {
+                    escaped = true;
+                } else if c == b'"' {
+                    in_string = false;
+                }
+            } else if c == b'"' {
+                in_string = true;
+            } else if c == b'(' {
+                depth += 1;
+            } else if c == b')' {
+                depth -= 1;
+                if depth == 0 {
+                    return &src[open + 1..i];
+                }
+            }
+            i += 1;
+        }
+        panic!("unbalanced .route( call at byte {open}");
+    }
+
+    /// The first string literal in a `.route(` argument list, which is the path.
+    fn first_string_literal(args: &str) -> String {
+        let start = args.find('"').expect("route declares a path literal");
+        let rest = &args[start + 1..];
+        let end = rest.find('"').expect("route path literal is closed");
+        rest[..end].to_string()
+    }
+
+    /// Every method verb applied in a `.route(` argument list. `get(handler)`
+    /// counts, `delete(delete_rule)` counts once, and a handler name that merely
+    /// starts with a verb does not, since a verb is only a verb when a `(`
+    /// follows it directly.
+    fn method_verbs(args: &str) -> Vec<&'static str> {
+        let bytes = args.as_bytes();
+        let mut found = Vec::new();
+        for verb in METHOD_VERBS {
+            let mut from = 0usize;
+            while let Some(rel) = args[from..].find(verb) {
+                let at = from + rel;
+                let after = at + verb.len();
+                let preceded_by_word =
+                    at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+                let followed_by_paren = args.as_bytes().get(after) == Some(&b'(');
+                if !preceded_by_word && followed_by_paren {
+                    found.push(*verb);
+                }
+                from = after;
+            }
+        }
+        found
+    }
+
+    /// Parse every route this file mounts, ignoring the test module below so a
+    /// path named in an assertion is not mistaken for a mounted route.
+    fn parse_mounted_routes() -> Vec<MountedRoute> {
+        let src = include_str!("router.rs");
+        let shipped = &src[..src.find("#[cfg(test)]").expect("test module marker")];
+        let mut routes = Vec::new();
+        let mut from = 0usize;
+        while let Some(rel) = shipped[from..].find(".route(") {
+            let at = from + rel;
+            let open = at + ".route".len();
+            let args = route_call_args(shipped, open);
+            let path = first_string_literal(args);
+            for method in method_verbs(args) {
+                routes.push(MountedRoute {
+                    path: path.clone(),
+                    method,
+                    offset: at,
+                });
+            }
+            from = open + 1;
+        }
+        routes
+    }
+
+    /// Byte range of the write-routes block, from its `Router::new()` to the
+    /// line that merges it with the read block. Routes declared after that
+    /// point - the metrics fragment, the probes - are their own groups and are
+    /// judged by the same rule: nothing mutating outside this range.
+    fn write_block_range() -> std::ops::Range<usize> {
+        let src = include_str!("router.rs");
+        let start = src
+            .find("let write_routes = Router::new()")
+            .expect("write block marker");
+        let end = src[start..]
+            .find("let r = read_routes")
+            .expect("write block end marker")
+            + start;
+        start..end
+    }
+
+    #[test]
+    fn every_mutating_route_is_declared_in_the_write_block() {
+        let routes = parse_mounted_routes();
+        let write_block = write_block_range();
+        assert!(
+            routes.len() > 90,
+            "route parser found only {} routes, which means it stopped matching",
+            routes.len()
+        );
+
+        let mutating: Vec<&MountedRoute> = routes.iter().filter(|r| r.method != "get").collect();
+        assert!(
+            mutating.len() > 30,
+            "route parser found only {} mutating routes",
+            mutating.len()
+        );
+        for route in mutating {
+            assert!(
+                write_block.contains(&route.offset),
+                "{} {} is mounted outside the write block, so it is not throttled as a write",
+                route.method.to_uppercase(),
+                route.path
+            );
+        }
+    }
+
+    #[test]
+    fn the_write_block_mounts_no_read() {
+        let write_block = write_block_range();
+        for route in parse_mounted_routes() {
+            if write_block.contains(&route.offset) {
+                assert_ne!(
+                    route.method, "get",
+                    "GET {} belongs in the read block",
+                    route.path
+                );
+            }
+        }
+    }
+
+    /// Substitute a value for every `{placeholder}` so the path can be requested.
+    fn concrete_path(path: &str) -> String {
+        let mut out = String::with_capacity(path.len());
+        let mut skipping = false;
+        for c in path.chars() {
+            match c {
+                '{' => {
+                    skipping = true;
+                    out.push('1');
+                }
+                '}' => skipping = false,
+                _ if skipping => {}
+                _ => out.push(c),
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn every_mutating_route_passes_through_the_write_limiter() {
+        use tower::ServiceExt;
+
+        let cfg = ApiRateLimitConfig {
+            write_per_second: 1,
+            write_burst: 1,
+            exempt_loopback: false,
+        };
+        let router = build_router(limiter_test_state(), false, false, cfg);
+
+        let mutating: Vec<MountedRoute> = parse_mounted_routes()
+            .into_iter()
+            .filter(|r| r.method != "get")
+            .collect();
+
+        for (index, route) in mutating.iter().enumerate() {
+            // One peer per route: the limiter is keyed by IP, so a shared peer
+            // would leave the first route to spend the burst for all of them.
+            let peer: SocketAddr = format!("198.51.100.{}:40000", index + 1).parse().unwrap();
+            let uri = concrete_path(&route.path);
+            let mut statuses = Vec::new();
+            for _ in 0..2 {
+                let req = Request::builder()
+                    .method(route.method.to_uppercase().as_str())
+                    .uri(&uri)
+                    .header("content-type", "application/json")
+                    .extension(ConnectInfo(peer))
+                    .body(axum::body::Body::from("{}"))
+                    .unwrap();
+                statuses.push(router.clone().oneshot(req).await.unwrap().status());
+            }
+            assert_eq!(
+                statuses[1],
+                StatusCode::TOO_MANY_REQUESTS,
+                "{} {} is not behind the write limiter (statuses {statuses:?})",
+                route.method.to_uppercase(),
+                route.path
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_read_route_is_not_behind_the_write_limiter() {
+        use tower::ServiceExt;
+
+        let cfg = ApiRateLimitConfig {
+            write_per_second: 1,
+            write_burst: 1,
+            exempt_loopback: false,
+        };
+        let router = build_router(limiter_test_state(), false, false, cfg);
+        let peer: SocketAddr = "198.51.100.200:40000".parse().unwrap();
+
+        for _ in 0..5 {
+            let req = Request::builder()
+                .method("GET")
+                .uri("/api/v1/agent/status")
+                .extension(ConnectInfo(peer))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let status = router.clone().oneshot(req).await.unwrap().status();
+            assert_ne!(
+                status,
+                StatusCode::TOO_MANY_REQUESTS,
+                "a read must not spend the write budget"
+            );
+        }
     }
 
     // ── CORS localhost origin validation ─────────────────────────────

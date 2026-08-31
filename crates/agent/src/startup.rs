@@ -76,6 +76,26 @@ use tracing::{debug, error, info, warn};
 
 use infrastructure::config::{LogFormat, LogLevel};
 
+/// Raises the shared "a feed cycle is fetching" flag for as long as it is held.
+///
+/// The manual refresh route reads that flag to refuse a second outbound fetch,
+/// so the flag has to fall again however the cycle ends - which is what makes
+/// this a guard rather than a pair of stores around the call.
+struct FeedCycleGuard(Arc<AtomicBool>);
+
+impl FeedCycleGuard {
+    fn claim(flag: &Arc<AtomicBool>) -> Self {
+        flag.store(true, Ordering::SeqCst);
+        Self(Arc::clone(flag))
+    }
+}
+
+impl Drop for FeedCycleGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Run one threat-intel feed fetch cycle: fetch every enabled feed, reload
 /// the IOC set, stamp `last_fetched`, and inject any STIX domain indicators
 /// into the DNS blocklist. Shared by the startup fetch, the periodic timer,
@@ -736,6 +756,11 @@ pub async fn run(
     } else {
         None
     };
+    // Raised for as long as a feed cycle is fetching, so the manual refresh
+    // route can refuse a second outbound fetch rather than queue one behind the
+    // first. Shared with the fetcher task below, which clears it when the cycle
+    // it started ends.
+    let feed_refresh_in_flight = Arc::new(AtomicBool::new(false));
     let ebpf_program_status: Arc<RwLock<std::collections::HashMap<String, bool>>> =
         Arc::new(RwLock::new(std::collections::HashMap::new()));
 
@@ -812,7 +837,7 @@ pub async fn run(
     app_state.config_path = Some(Arc::from(config_path));
     app_state.reload_complete = Some(Arc::clone(&reload_complete));
     if let Some(tx) = feed_refresh_tx {
-        app_state = app_state.with_feed_refresh_trigger(tx);
+        app_state = app_state.with_feed_refresh_trigger(tx, Arc::clone(&feed_refresh_in_flight));
     }
     if let Some(ref store) = alert_store {
         app_state = app_state.with_alert_store(Arc::clone(store));
@@ -3002,16 +3027,20 @@ pub async fn run(
         let mut refresh_rx = feed_refresh_rx
             .take()
             .expect("feed refresh rx present when feeds active");
+        let cycle_flag = Arc::clone(&feed_refresh_in_flight);
         Some(tokio::spawn(async move {
             // Initial fetch at startup.
-            run_ti_feed_cycle(
-                &feed_ti_svc,
-                &fetcher,
-                &feed_metrics,
-                feed_dns_blocklist.as_ref(),
-                "initial",
-            )
-            .await;
+            {
+                let _running = FeedCycleGuard::claim(&cycle_flag);
+                run_ti_feed_cycle(
+                    &feed_ti_svc,
+                    &fetcher,
+                    &feed_metrics,
+                    feed_dns_blocklist.as_ref(),
+                    "initial",
+                )
+                .await;
+            }
 
             let mut interval = tokio::time::interval(Duration::from_secs(refresh_secs));
             interval.tick().await; // skip the first immediate tick (already fetched above)
@@ -3019,6 +3048,7 @@ pub async fn run(
                 tokio::select! {
                     () = feed_cancel.cancelled() => break,
                     _ = interval.tick() => {
+                        let _running = FeedCycleGuard::claim(&cycle_flag);
                         run_ti_feed_cycle(
                             &feed_ti_svc,
                             &fetcher,
@@ -3031,6 +3061,10 @@ pub async fn run(
                     msg = refresh_rx.recv() => match msg {
                         Some(()) => {
                             info!("manual threat intel feed refresh triggered");
+                            // The route already claimed the slot before queueing
+                            // this message; claiming again keeps the flag raised
+                            // for the whole cycle and releases it on the way out.
+                            let _running = FeedCycleGuard::claim(&cycle_flag);
                             run_ti_feed_cycle(
                                 &feed_ti_svc,
                                 &fetcher,

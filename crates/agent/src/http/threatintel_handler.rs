@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use axum::Extension;
 use axum::Json;
@@ -198,6 +199,7 @@ pub async fn list_feeds(State(state): State<Arc<AppState>>) -> Json<Vec<FeedResp
     responses((status = 200, description = "Feed refresh triggered", body = RefreshResponse),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 409, description = "A feed refresh is already running", body = ErrorBody),
         (status = 503, description = "Threat intel feeds not enabled", body = ErrorBody),
     ),
     security(
@@ -221,6 +223,24 @@ pub async fn refresh_feeds(
             .ok_or_else(|| ApiError::ServiceUnavailable {
                 message: "threat intel feeds are not enabled".to_string(),
             })?;
+    // Claim the single fetch slot. The write rate limit bounds how often this
+    // route may be called; it does not bound how many outbound feed downloads
+    // are in flight, so a caller staying inside the limit could still stack one
+    // full fetch of every configured feed per request and point the agent at
+    // somebody else's server. One cycle runs at a time and a second caller is
+    // told so rather than queued behind the first. The flag is cleared by the
+    // feed fetcher when the cycle it started ends, whatever the outcome.
+    if state
+        .feed_refresh_in_flight
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(ApiError::Conflict {
+            code: "REFRESH_IN_PROGRESS",
+            message: "a threat intel feed refresh is already running".to_string(),
+        });
+    }
+
     match trigger.try_send(()) {
         // Sent, or a refresh is already queued — both mean a fetch will run.
         Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
@@ -231,6 +251,9 @@ pub async fn refresh_feeds(
             }))
         }
         Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+            // Nothing will run, so nothing will clear the flag: release it here
+            // or the route answers `409` for the life of the process.
+            state.feed_refresh_in_flight.store(false, Ordering::SeqCst);
             Err(ApiError::ServiceUnavailable {
                 message: "feed fetcher is not running".to_string(),
             })
@@ -315,5 +338,130 @@ mod tests {
         assert!(req.feed_id.is_none());
         let req: RefreshFeedRequest = serde_json::from_str(r#"{"feed_id":"x"}"#).unwrap();
         assert_eq!(req.feed_id.as_deref(), Some("x"));
+    }
+
+    // ── Manual refresh is single-flight ──────────────────────────────
+
+    use std::sync::atomic::AtomicBool;
+
+    use adapters::metrics::AgentMetrics;
+    use application::audit_service_impl::AuditAppService;
+    use application::firewall_service_impl::FirewallAppService;
+    use application::ips_service_impl::IpsAppService;
+    use application::l7_service_impl::L7AppService;
+    use application::ratelimit_service_impl::RateLimitAppService;
+    use application::threatintel_service_impl::ThreatIntelAppService;
+    use domain::audit::entity::AuditEntry;
+    use domain::audit::error::AuditError;
+    use domain::firewall::engine::FirewallEngine;
+    use domain::ips::engine::IpsEngine;
+    use domain::l7::engine::L7Engine;
+    use domain::ratelimit::engine::RateLimitEngine;
+    use domain::threatintel::engine::ThreatIntelEngine;
+    use ports::secondary::audit_sink::AuditSink;
+    use ports::secondary::metrics_port::MetricsPort;
+    use ports::test_utils::NoopMetrics;
+
+    struct NoopSink;
+    impl AuditSink for NoopSink {
+        fn write_entry(&self, _entry: &AuditEntry) -> Result<(), AuditError> {
+            Ok(())
+        }
+    }
+
+    fn bare_state() -> AppState {
+        let noop: Arc<dyn MetricsPort> = Arc::new(NoopMetrics);
+        let fw_svc = FirewallAppService::new(FirewallEngine::new(), None, Arc::clone(&noop));
+        let ips_svc = IpsAppService::new(IpsEngine::default(), Arc::clone(&noop));
+        let l7_svc = L7AppService::new(L7Engine::new(), Arc::clone(&noop));
+        let rl_svc = RateLimitAppService::new(RateLimitEngine::new(), Arc::clone(&noop));
+        let ti_svc = ThreatIntelAppService::new(
+            ThreatIntelEngine::new(1_000_000),
+            Arc::clone(&noop),
+            vec![],
+        );
+        let audit_svc = AuditAppService::new(Arc::new(NoopSink) as Arc<dyn AuditSink>);
+        let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(1);
+        AppState::new(
+            Arc::new(AgentMetrics::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(tokio::sync::RwLock::new(fw_svc)),
+            Arc::new(arc_swap::ArcSwap::from_pointee(ips_svc)),
+            Arc::new(arc_swap::ArcSwap::from_pointee(l7_svc)),
+            Arc::new(tokio::sync::RwLock::new(rl_svc)),
+            Arc::new(arc_swap::ArcSwap::from_pointee(ti_svc)),
+            Arc::new(audit_svc),
+            Arc::new(tokio::sync::RwLock::new(
+                infrastructure::config::AgentConfig::from_yaml("agent:\n  interfaces: [eth0]")
+                    .unwrap(),
+            )),
+            reload_tx,
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        )
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_a_second_caller_while_a_cycle_is_running() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<()>(4);
+        let flag = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(bare_state().with_feed_refresh_trigger(tx, Arc::clone(&flag)));
+
+        let first = refresh_feeds(State(Arc::clone(&state)), None, None).await;
+        assert!(first.is_ok(), "the first caller starts the cycle");
+        assert!(flag.load(Ordering::SeqCst), "the fetch slot is claimed");
+
+        match refresh_feeds(State(Arc::clone(&state)), None, None).await {
+            Err(ApiError::Conflict { code, .. }) => assert_eq!(code, "REFRESH_IN_PROGRESS"),
+            _ => panic!("a second caller must not queue a second fetch"),
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_runs_again_once_the_cycle_has_ended() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+        let flag = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(bare_state().with_feed_refresh_trigger(tx, Arc::clone(&flag)));
+
+        assert!(
+            refresh_feeds(State(Arc::clone(&state)), None, None)
+                .await
+                .is_ok()
+        );
+        assert_eq!(rx.try_recv(), Ok(()), "one fetch was asked for");
+        // What the feed fetcher's own guard does when the cycle ends.
+        flag.store(false, Ordering::SeqCst);
+
+        assert!(
+            refresh_feeds(State(Arc::clone(&state)), None, None)
+                .await
+                .is_ok(),
+            "the slot is free again once the cycle has ended"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_releases_the_slot_when_the_fetcher_is_gone() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<()>(4);
+        drop(rx);
+        let flag = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(bare_state().with_feed_refresh_trigger(tx, Arc::clone(&flag)));
+
+        match refresh_feeds(State(Arc::clone(&state)), None, None).await {
+            Err(ApiError::ServiceUnavailable { .. }) => {}
+            _ => panic!("a dead fetcher must report unavailable"),
+        }
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "nothing will clear a slot claimed for a fetch that never starts"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_reports_unavailable_without_a_trigger() {
+        let state = Arc::new(bare_state());
+        match refresh_feeds(State(Arc::clone(&state)), None, None).await {
+            Err(ApiError::ServiceUnavailable { .. }) => {}
+            _ => panic!("feeds switched off must report unavailable"),
+        }
     }
 }

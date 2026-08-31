@@ -5720,6 +5720,16 @@
               }
             }
           },
+          "409": {
+            "description": "A feed refresh is already running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Threat intel feeds not enabled",
             "content": {
@@ -8659,6 +8669,17 @@
           "id": {
             "type": "string"
           },
+          "kernel_slot": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SlotContentionResponse",
+                "description": "Present only when another rule holds a kernel map slot this rule also\nclaims."
+              }
+            ]
+          },
           "mode": {
             "type": "string"
           },
@@ -8772,6 +8793,17 @@
           },
           "id": {
             "type": "string"
+          },
+          "kernel_slot": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SlotContentionResponse",
+                "description": "Present only when another rule holds a kernel map slot this rule also\nclaims. A prevention rule that lost its slot is never replayed in\nuserspace, so it blocks nothing until the conflict is resolved."
+              }
+            ]
           },
           "mode": {
             "type": "string"
@@ -9957,6 +9989,27 @@
             ],
             "format": "int32",
             "minimum": 0
+          }
+        }
+      },
+      "SlotContentionResponse": {
+        "type": "object",
+        "description": "A kernel map slot holds one rule, so two rules watching the same port and\nprotocol cannot both be installed. This says which rule took the slot and\nwhether the loser is still evaluated.",
+        "required": [
+          "shadowed_by",
+          "evaluated_in_userspace"
+        ],
+        "properties": {
+          "evaluated_in_userspace": {
+            "type": "boolean",
+            "description": "`false` means the rule is loaded, enabled, and matches nothing."
+          },
+          "shadowed_by": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ids of the rules holding a slot this rule also claims."
           }
         }
       },
