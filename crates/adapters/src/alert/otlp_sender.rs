@@ -6,11 +6,13 @@ use std::time::Duration;
 use domain::alert::entity::{Alert, AlertRoute};
 use domain::common::error::DomainError;
 use opentelemetry::InstrumentationScope;
-use opentelemetry::logs::{LogRecord as _, Logger, LoggerProvider as _};
+use opentelemetry::logs::{Logger, LoggerProvider as _};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use ports::secondary::alert_sender::AlertSender;
 use ports::secondary::metrics_port::MetricsPort;
+
+use crate::alert::otlp_record::{OtlpLogRecord, now_unix_nano};
 
 /// Alert sender that exports alerts as OTLP Logs (fire-and-forget).
 pub struct OtlpAlertSender {
@@ -87,22 +89,10 @@ impl AlertSender for OtlpAlertSender {
                 .build();
             let logger = self.logger_provider.logger_with_scope(scope);
 
-            let body = serde_json::to_string(alert).unwrap_or_default();
+            let mapped = OtlpLogRecord::from_alert(alert, now_unix_nano())?;
 
             let mut record = logger.create_log_record();
-            record.set_body(body.into());
-            record.set_severity_number(alert_severity_to_otel(alert.severity));
-            record.set_severity_text(severity_label(alert.severity));
-
-            record.add_attribute(
-                "mitre.technique.id",
-                alert
-                    .mitre_attack
-                    .as_ref()
-                    .map_or(String::new(), |m| m.technique_id.clone()),
-            );
-            record.add_attribute("alert.component", alert.component.clone());
-            record.add_attribute("alert.rule_id", alert.rule_id.0.clone());
+            mapped.apply(&mut record);
 
             logger.emit(record);
 
@@ -123,48 +113,163 @@ impl Drop for OtlpAlertSender {
     }
 }
 
-fn alert_severity_to_otel(
-    severity: domain::common::entity::Severity,
-) -> opentelemetry::logs::Severity {
-    match severity {
-        domain::common::entity::Severity::Low => opentelemetry::logs::Severity::Info,
-        domain::common::entity::Severity::Medium => opentelemetry::logs::Severity::Warn,
-        domain::common::entity::Severity::High => opentelemetry::logs::Severity::Error,
-        domain::common::entity::Severity::Critical => opentelemetry::logs::Severity::Fatal,
-    }
-}
-
-fn severity_label(severity: domain::common::entity::Severity) -> &'static str {
-    match severity {
-        domain::common::entity::Severity::Low => "low",
-        domain::common::entity::Severity::Medium => "medium",
-        domain::common::entity::Severity::High => "high",
-        domain::common::entity::Severity::Critical => "critical",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use domain::common::entity::{DomainMode, RuleId, Severity};
+    use opentelemetry::logs::Severity as OtelSeverity;
 
-    #[test]
-    fn severity_mapping() {
-        use domain::common::entity::Severity;
-        assert!(matches!(
-            alert_severity_to_otel(Severity::Low),
-            opentelemetry::logs::Severity::Info
-        ));
-        assert!(matches!(
-            alert_severity_to_otel(Severity::Critical),
-            opentelemetry::logs::Severity::Fatal
-        ));
+    /// A log record the sender can write onto without an SDK behind it.
+    #[derive(Default)]
+    struct RecordedLog {
+        timestamp: Option<std::time::SystemTime>,
+        observed: Option<std::time::SystemTime>,
+        body: Option<String>,
+        severity_number: Option<OtelSeverity>,
+        severity_text: Option<String>,
+        attributes: Vec<(String, String)>,
+    }
+
+    impl opentelemetry::logs::LogRecord for RecordedLog {
+        fn set_event_name(&mut self, _name: &'static str) {}
+
+        fn set_timestamp(&mut self, timestamp: std::time::SystemTime) {
+            self.timestamp = Some(timestamp);
+        }
+
+        fn set_observed_timestamp(&mut self, timestamp: std::time::SystemTime) {
+            self.observed = Some(timestamp);
+        }
+
+        fn set_severity_text(&mut self, text: &'static str) {
+            self.severity_text = Some(text.to_string());
+        }
+
+        fn set_severity_number(&mut self, number: OtelSeverity) {
+            self.severity_number = Some(number);
+        }
+
+        fn set_body(&mut self, body: opentelemetry::logs::AnyValue) {
+            if let opentelemetry::logs::AnyValue::String(s) = body {
+                self.body = Some(s.to_string());
+            }
+        }
+
+        fn add_attributes<I, K, V>(&mut self, attributes: I)
+        where
+            I: IntoIterator<Item = (K, V)>,
+            K: Into<opentelemetry::Key>,
+            V: Into<opentelemetry::logs::AnyValue>,
+        {
+            for (key, value) in attributes {
+                self.add_attribute(key, value);
+            }
+        }
+
+        fn set_target<T>(&mut self, _target: T)
+        where
+            T: Into<std::borrow::Cow<'static, str>>,
+        {
+        }
+
+        fn add_attribute<K, V>(&mut self, key: K, value: V)
+        where
+            K: Into<opentelemetry::Key>,
+            V: Into<opentelemetry::logs::AnyValue>,
+        {
+            let value = match value.into() {
+                opentelemetry::logs::AnyValue::String(s) => s.to_string(),
+                other => format!("{other:?}"),
+            };
+            self.attributes.push((key.into().to_string(), value));
+        }
+
+        fn set_trace_context(
+            &mut self,
+            _trace_id: opentelemetry::trace::TraceId,
+            _span_id: opentelemetry::trace::SpanId,
+            _trace_flags: Option<opentelemetry::trace::TraceFlags>,
+        ) {
+        }
+    }
+
+    fn sample_alert() -> Alert {
+        Alert {
+            id: "1000000000-ids-001".to_string(),
+            timestamp_ns: 1_709_913_600_123_000_000,
+            component: "ids".to_string(),
+            severity: Severity::Critical,
+            rule_id: RuleId("ids-001".to_string()),
+            action: DomainMode::Alert,
+            src_addr: [0xC0A8_0001, 0, 0, 0],
+            dst_addr: [0x0A00_0001, 0, 0, 0],
+            src_port: 12345,
+            dst_port: 22,
+            protocol: 6,
+            is_ipv6: false,
+            message: "SSH bruteforce detected".to_string(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: None,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: None,
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+        }
     }
 
     #[test]
-    fn severity_label_values() {
-        use domain::common::entity::Severity;
-        assert_eq!(severity_label(Severity::Low), "low");
-        assert_eq!(severity_label(Severity::High), "high");
+    fn the_sender_writes_the_shared_record_onto_the_sdk() {
+        let alert = sample_alert();
+        let mapped = OtlpLogRecord::from_alert(&alert, 1_709_913_601_000_000_000)
+            .expect("the alert serialises");
+
+        let mut record = RecordedLog::default();
+        mapped.apply(&mut record);
+
+        assert_eq!(record.severity_text.as_deref(), Some("critical"));
+        assert!(matches!(record.severity_number, Some(OtelSeverity::Fatal)));
+        assert_eq!(record.body.as_deref(), Some(mapped.body.as_str()));
+        assert_eq!(record.attributes, mapped.attributes);
+        assert_eq!(
+            record
+                .timestamp
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|d| u64::try_from(d.as_nanos()).ok()),
+            Some(alert.timestamp_ns)
+        );
+        assert_eq!(
+            record
+                .observed
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|d| u64::try_from(d.as_nanos()).ok()),
+            Some(1_709_913_601_000_000_000)
+        );
     }
 }
 

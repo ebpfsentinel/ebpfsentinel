@@ -1,4 +1,5 @@
 pub mod email_sender;
 pub mod log_sender;
+pub mod otlp_record;
 pub mod otlp_sender;
 pub mod webhook_sender;
