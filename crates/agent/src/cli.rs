@@ -207,6 +207,33 @@ pub enum Command {
 
     /// Manual packet capture (pcap)
     Capture(DomainArgs<CaptureCommand>),
+
+    /// Security zones and inter-zone policies
+    Zones(DomainArgs<ZonesCommand>),
+
+    /// Policy routing: gateways and routes
+    Routing(DomainArgs<RoutingCommand>),
+
+    /// Intrusion Detection System: status and rules
+    Ids(DomainArgs<IdsCommand>),
+
+    /// `GeoIP` database status and address lookup
+    Geoip(DomainArgs<GeoipCommand>),
+
+    /// eBPF programs, uprobes and kernel feature support
+    Ebpf(DomainArgs<EbpfCommand>),
+
+    /// Running configuration: show and reload
+    Config(DomainArgs<ConfigCommand>),
+
+    /// Data Loss Prevention: status and patterns
+    Dlp(DomainArgs<DlpCommand>),
+
+    /// TLS posture of the agent API listener
+    Tls(DomainArgs<TlsCommand>),
+
+    /// External alias lists: status and content
+    Aliases(DomainArgs<AliasesCommand>),
 }
 
 /// Generic domain args: connection + subcommand.
@@ -237,6 +264,8 @@ pub enum ConntrackAction {
     },
     /// Show conntrack status (enabled, connection count)
     Status,
+    /// Flush the connection tracking table
+    Flush,
 }
 
 // ── Firewall ────────────────────────────────────────────────────────────
@@ -283,8 +312,12 @@ pub enum L7Command {
 pub enum IpsCommand {
     /// List all IPS rules
     List,
-    /// List blacklisted IPs
-    Blacklist,
+    /// Blacklisted IPs: list, add, delete
+    Blacklist {
+        /// Omit to list the blacklist
+        #[command(subcommand)]
+        action: Option<BlacklistAction>,
+    },
     /// List domain-based IPS blocks (from DNS blocklist or reputation)
     DomainBlocks,
     /// Set IPS rule mode (alert or block)
@@ -294,6 +327,26 @@ pub enum IpsCommand {
         /// New mode
         #[arg(long)]
         mode: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BlacklistAction {
+    /// Blacklist an IP address
+    Add {
+        /// IP address to blacklist
+        ip: String,
+        /// Why the address is being blacklisted
+        #[arg(long)]
+        reason: Option<String>,
+        /// Lifetime in seconds; omit for the configured default
+        #[arg(long)]
+        ttl_secs: Option<u64>,
+    },
+    /// Remove an IP address from the blacklist
+    Delete {
+        /// IP address to remove
+        ip: String,
     },
 }
 
@@ -324,8 +377,24 @@ pub enum ThreatintelCommand {
     Status,
     /// List Indicators of Compromise
     Iocs,
-    /// List configured feeds
-    Feeds,
+    /// List URL Indicators of Compromise
+    Urls,
+    /// Configured feeds: list, refresh
+    Feeds {
+        /// Omit to list the feeds
+        #[command(subcommand)]
+        action: Option<FeedsAction>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum FeedsAction {
+    /// Refresh feeds now
+    Refresh {
+        /// Refresh a single feed instead of all of them
+        #[arg(long)]
+        feed_id: Option<String>,
+    },
 }
 
 // ── Alerts ──────────────────────────────────────────────────────────────
@@ -380,6 +449,8 @@ pub enum MitreCommand {
 pub enum FingerprintsCommand {
     /// Show JA4+ fingerprint cache summary
     Summary,
+    /// Show the JA4S server-fingerprint cache summary
+    Ja4s,
 }
 
 // ── Capture ─────────────────────────────────────────────────────────────
@@ -624,6 +695,8 @@ pub enum DnsCommand {
         #[arg(long, default_value_t = 50)]
         page_size: usize,
     },
+    /// Show DNS interception status
+    Status,
     /// Show DNS cache and blocklist statistics
     Stats,
     /// List loaded blocklist rules
@@ -668,6 +741,142 @@ pub enum NptV6Command {
     Delete {
         /// Rule ID to delete
         id: String,
+    },
+}
+
+// ── Zones ───────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum ZonesCommand {
+    /// Show zone engine status
+    Status,
+    /// List all zones
+    List,
+    /// Add a new zone from inline JSON
+    Add {
+        /// JSON zone body
+        #[arg(long)]
+        json: String,
+    },
+    /// Delete a zone by ID
+    Delete {
+        /// Zone ID to delete
+        id: String,
+    },
+    /// List inter-zone policies
+    Policies,
+    /// Add an inter-zone policy from inline JSON
+    AddPolicy {
+        /// JSON policy body
+        #[arg(long)]
+        json: String,
+    },
+    /// Delete an inter-zone policy by ID
+    DeletePolicy {
+        /// Policy ID to delete, in `from__to` form
+        id: String,
+    },
+}
+
+// ── Policy routing ──────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum RoutingCommand {
+    /// Show policy routing status
+    Status,
+    /// List configured gateways
+    Gateways,
+    /// Add a gateway from inline JSON
+    AddGateway {
+        /// JSON gateway body
+        #[arg(long)]
+        json: String,
+    },
+    /// Delete a gateway by ID
+    DeleteGateway {
+        /// Gateway ID to delete
+        id: String,
+    },
+    /// List active routes and the gateway each resolves to
+    Routes,
+}
+
+// ── IDS ─────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum IdsCommand {
+    /// Show IDS status
+    Status,
+    /// List IDS rules
+    Rules,
+}
+
+// ── GeoIP ───────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum GeoipCommand {
+    /// Show `GeoIP` database status
+    Status,
+    /// Look up an IP address
+    Lookup {
+        /// IP address to look up
+        ip: String,
+    },
+}
+
+// ── eBPF ────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum EbpfCommand {
+    /// Show loaded programs and the attaches the kernel refused
+    Status,
+    /// List uprobe attachments and the libraries behind them
+    Uprobes,
+    /// Show the kernel feature probe: load mode, program types, helpers
+    KernelFeatures,
+}
+
+// ── Config ──────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommand {
+    /// Print the running configuration
+    Show,
+    /// Reload the configuration from disk
+    Reload,
+}
+
+// ── DLP ─────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum DlpCommand {
+    /// Show Data Loss Prevention status
+    Status,
+    /// List DLP patterns
+    Patterns,
+}
+
+// ── TLS ─────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum TlsCommand {
+    /// Show the TLS posture of the API listener
+    Status,
+}
+
+// ── Aliases ─────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum AliasesCommand {
+    /// Show alias engine status
+    Status,
+    /// Replace the content of an external alias
+    SetContent {
+        /// Alias ID
+        id: String,
+        /// JSON body `{"ips":["192.0.2.1","198.51.100.0/24"]}`
+        #[arg(long)]
+        json: String,
     },
 }
 
@@ -840,7 +1049,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Ips(DomainArgs {
-                command: IpsCommand::Blacklist,
+                command: IpsCommand::Blacklist { action: None },
                 ..
             }))
         ));
@@ -923,7 +1132,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Threatintel(DomainArgs {
-                command: ThreatintelCommand::Feeds,
+                command: ThreatintelCommand::Feeds { action: None },
                 ..
             }))
         ));
@@ -1644,6 +1853,480 @@ mod tests {
                 _ => panic!("expected Nptv6 Delete"),
             },
             _ => panic!("expected Nat command"),
+        }
+    }
+
+    #[test]
+    fn cli_ips_blacklist_add() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "ips",
+            "blacklist",
+            "add",
+            "192.0.2.1",
+            "--reason",
+            "scanner",
+            "--ttl-secs",
+            "3600",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Ips(args)) => match args.command {
+                IpsCommand::Blacklist {
+                    action:
+                        Some(BlacklistAction::Add {
+                            ip,
+                            reason,
+                            ttl_secs,
+                        }),
+                } => {
+                    assert_eq!(ip, "192.0.2.1");
+                    assert_eq!(reason.as_deref(), Some("scanner"));
+                    assert_eq!(ttl_secs, Some(3600));
+                }
+                _ => panic!("expected Blacklist Add"),
+            },
+            _ => panic!("expected Ips command"),
+        }
+    }
+
+    #[test]
+    fn cli_ips_blacklist_delete() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "ips",
+            "blacklist",
+            "delete",
+            "192.0.2.1",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Ips(args)) => match args.command {
+                IpsCommand::Blacklist {
+                    action: Some(BlacklistAction::Delete { ip }),
+                } => assert_eq!(ip, "192.0.2.1"),
+                _ => panic!("expected Blacklist Delete"),
+            },
+            _ => panic!("expected Ips command"),
+        }
+    }
+
+    #[test]
+    fn cli_threatintel_urls() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "threatintel", "urls"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Threatintel(DomainArgs {
+                command: ThreatintelCommand::Urls,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_threatintel_feeds_refresh() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "threatintel",
+            "feeds",
+            "refresh",
+            "--feed-id",
+            "abuse-ch",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Threatintel(args)) => match args.command {
+                ThreatintelCommand::Feeds {
+                    action: Some(FeedsAction::Refresh { feed_id }),
+                } => assert_eq!(feed_id.as_deref(), Some("abuse-ch")),
+                _ => panic!("expected Feeds Refresh"),
+            },
+            _ => panic!("expected Threatintel command"),
+        }
+    }
+
+    #[test]
+    fn cli_fingerprints_ja4s() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "fingerprints", "ja4s"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Fingerprints(DomainArgs {
+                command: FingerprintsCommand::Ja4s,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_conntrack_flush() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "conntrack", "flush"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Conntrack {
+                action: ConntrackAction::Flush,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_dns_status() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "dns", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Dns(DomainArgs {
+                command: DnsCommand::Status,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_zones_status() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "zones", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Zones(DomainArgs {
+                command: ZonesCommand::Status,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_zones_list() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "zones", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Zones(DomainArgs {
+                command: ZonesCommand::List,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_zones_add() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "zones",
+            "add",
+            "--json",
+            r#"{"id":"lan"}"#,
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Zones(args)) => match args.command {
+                ZonesCommand::Add { json } => assert_eq!(json, r#"{"id":"lan"}"#),
+                _ => panic!("expected Zones Add"),
+            },
+            _ => panic!("expected Zones command"),
+        }
+    }
+
+    #[test]
+    fn cli_zones_delete() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "zones", "delete", "lan"]).unwrap();
+        match cli.command {
+            Some(Command::Zones(args)) => match args.command {
+                ZonesCommand::Delete { id } => assert_eq!(id, "lan"),
+                _ => panic!("expected Zones Delete"),
+            },
+            _ => panic!("expected Zones command"),
+        }
+    }
+
+    #[test]
+    fn cli_zones_policies() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "zones", "policies"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Zones(DomainArgs {
+                command: ZonesCommand::Policies,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_zones_add_policy() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "zones",
+            "add-policy",
+            "--json",
+            r#"{"from":"lan","to":"wan"}"#,
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Zones(args)) => match args.command {
+                ZonesCommand::AddPolicy { json } => {
+                    assert_eq!(json, r#"{"from":"lan","to":"wan"}"#);
+                }
+                _ => panic!("expected Zones AddPolicy"),
+            },
+            _ => panic!("expected Zones command"),
+        }
+    }
+
+    #[test]
+    fn cli_zones_delete_policy() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "zones", "delete-policy", "lan__wan"])
+            .unwrap();
+        match cli.command {
+            Some(Command::Zones(args)) => match args.command {
+                ZonesCommand::DeletePolicy { id } => assert_eq!(id, "lan__wan"),
+                _ => panic!("expected Zones DeletePolicy"),
+            },
+            _ => panic!("expected Zones command"),
+        }
+    }
+
+    #[test]
+    fn cli_routing_status() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "routing", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Routing(DomainArgs {
+                command: RoutingCommand::Status,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_routing_gateways() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "routing", "gateways"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Routing(DomainArgs {
+                command: RoutingCommand::Gateways,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_routing_add_gateway() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "routing",
+            "add-gateway",
+            "--json",
+            r#"{"id":"wan1"}"#,
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Routing(args)) => match args.command {
+                RoutingCommand::AddGateway { json } => assert_eq!(json, r#"{"id":"wan1"}"#),
+                _ => panic!("expected Routing AddGateway"),
+            },
+            _ => panic!("expected Routing command"),
+        }
+    }
+
+    #[test]
+    fn cli_routing_delete_gateway() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "routing", "delete-gateway", "wan1"])
+            .unwrap();
+        match cli.command {
+            Some(Command::Routing(args)) => match args.command {
+                RoutingCommand::DeleteGateway { id } => assert_eq!(id, "wan1"),
+                _ => panic!("expected Routing DeleteGateway"),
+            },
+            _ => panic!("expected Routing command"),
+        }
+    }
+
+    #[test]
+    fn cli_routing_routes() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "routing", "routes"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Routing(DomainArgs {
+                command: RoutingCommand::Routes,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_ids_status() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ids", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ids(DomainArgs {
+                command: IdsCommand::Status,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_ids_rules() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ids", "rules"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ids(DomainArgs {
+                command: IdsCommand::Rules,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_geoip_status() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "geoip", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Geoip(DomainArgs {
+                command: GeoipCommand::Status,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_geoip_lookup() {
+        let cli =
+            Cli::try_parse_from(["ebpfsentinel-agent", "geoip", "lookup", "1.1.1.1"]).unwrap();
+        match cli.command {
+            Some(Command::Geoip(args)) => match args.command {
+                GeoipCommand::Lookup { ip } => assert_eq!(ip, "1.1.1.1"),
+                GeoipCommand::Status => panic!("expected Geoip Lookup"),
+            },
+            _ => panic!("expected Geoip command"),
+        }
+    }
+
+    #[test]
+    fn cli_ebpf_status() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ebpf", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ebpf(DomainArgs {
+                command: EbpfCommand::Status,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_ebpf_uprobes() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ebpf", "uprobes"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ebpf(DomainArgs {
+                command: EbpfCommand::Uprobes,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_ebpf_kernel_features() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ebpf", "kernel-features"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ebpf(DomainArgs {
+                command: EbpfCommand::KernelFeatures,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_config_show() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "config", "show"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config(DomainArgs {
+                command: ConfigCommand::Show,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_config_reload() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "config", "reload"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config(DomainArgs {
+                command: ConfigCommand::Reload,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_dlp_status() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "dlp", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Dlp(DomainArgs {
+                command: DlpCommand::Status,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_dlp_patterns() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "dlp", "patterns"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Dlp(DomainArgs {
+                command: DlpCommand::Patterns,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_tls_status() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "tls", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Tls(DomainArgs {
+                command: TlsCommand::Status,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_aliases_status() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "aliases", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Aliases(DomainArgs {
+                command: AliasesCommand::Status,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_aliases_set_content() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "aliases",
+            "set-content",
+            "bogons",
+            "--json",
+            r#"{"ips":["192.0.2.1"]}"#,
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Aliases(args)) => match args.command {
+                AliasesCommand::SetContent { id, json } => {
+                    assert_eq!(id, "bogons");
+                    assert_eq!(json, r#"{"ips":["192.0.2.1"]}"#);
+                }
+                AliasesCommand::Status => panic!("expected Aliases SetContent"),
+            },
+            _ => panic!("expected Aliases command"),
         }
     }
 }

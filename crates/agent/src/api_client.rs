@@ -393,6 +393,14 @@ pub struct TopQueriedEntry {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct DnsStatusResponse {
+    pub enabled: bool,
+    pub blocklist_pattern_count: usize,
+    pub blocklist_domains_blocked: u64,
+    pub blocklist_ips_injected: usize,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct BlocklistRuleResponse {
     pub pattern: String,
     pub action: String,
@@ -463,13 +471,26 @@ pub struct ConnectionResponse {
 #[derive(Deserialize, Serialize)]
 pub struct EbpfStatusResponse {
     pub programs: Vec<EbpfProgramStatus>,
+    /// Attaches the kernel refused. `programs[].loaded` says a program is in
+    /// the kernel; this says whether it reached the wire.
+    #[serde(default)]
+    pub attach_blocked: Vec<EbpfAttachBlockEntry>,
 }
 
 #[derive(Deserialize, Serialize)]
 pub struct EbpfProgramStatus {
     pub name: String,
     pub loaded: bool,
-    pub hook: String,
+}
+
+/// One attach the kernel refused, and what is standing in the way.
+#[derive(Deserialize, Serialize)]
+pub struct EbpfAttachBlockEntry {
+    pub program: String,
+    pub interface: String,
+    pub reason: String,
+    /// The interface already carries somebody else's XDP program.
+    pub nested_xdp: bool,
 }
 
 // ── DDoS Protection ─────────────────────────────────────────────────
@@ -622,6 +643,259 @@ pub struct NptV6RuleResponse {
     pub internal_prefix: String,
     pub external_prefix: String,
     pub prefix_len: u8,
+}
+
+// ── Zones ─────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct ZoneStatusResponse {
+    pub enabled: bool,
+    pub zone_count: usize,
+    pub policy_count: usize,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ZoneResponse {
+    pub id: String,
+    pub interfaces: Vec<String>,
+    pub default_policy: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ZonePolicyResponse {
+    /// Stable identifier `{from}__{to}`, which is also what the delete route takes.
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    pub policy: String,
+    pub action: String,
+}
+
+// ── Policy routing ───────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct RoutingStatusResponse {
+    pub enabled: bool,
+    pub gateway_count: usize,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct GatewayResponse {
+    pub id: String,
+    pub name: String,
+    pub interface: String,
+    pub gateway_ip: String,
+    pub priority: u32,
+    pub weight: u32,
+    pub enabled: bool,
+    pub status: String,
+    pub health_status: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct RouteResponse {
+    pub destination: String,
+    pub gateway_id: String,
+    pub gateway_ip: String,
+}
+
+// ── IDS ──────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct IdsStatusResponse {
+    pub enabled: bool,
+    pub mode: String,
+    pub rule_count: usize,
+}
+
+/// Per-rule threshold detection, present only on rate-based IDS rules.
+#[derive(Deserialize, Serialize)]
+pub struct IdsThresholdResponse {
+    pub threshold_type: String,
+    pub count: u32,
+    pub window_secs: u64,
+    pub track_by: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct IdsRuleResponse {
+    pub id: String,
+    pub description: String,
+    pub severity: String,
+    pub mode: String,
+    pub protocol: String,
+    pub dst_port: Option<u16>,
+    pub pattern: String,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<IdsThresholdResponse>,
+    /// Present only when another rule holds a kernel map slot this rule also claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_slot: Option<SlotContentionResponse>,
+}
+
+// ── GeoIP ───────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct GeoIpStatusResponse {
+    pub enabled: bool,
+    /// A database is loaded and answering.
+    pub ready: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct GeoIpLookupResponse {
+    pub ip: String,
+    pub country_code: Option<String>,
+    pub country_name: Option<String>,
+    pub city: Option<String>,
+    pub asn: Option<u32>,
+    pub as_org: Option<String>,
+}
+
+// ── DLP ──────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct DlpStatusResponse {
+    pub enabled: bool,
+    pub mode: String,
+    pub pattern_count: usize,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct DlpPatternResponse {
+    pub id: String,
+    pub name: String,
+    pub regex: String,
+    pub severity: String,
+    pub data_type: String,
+    pub enabled: bool,
+}
+
+// ── TLS ──────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct TlsStatusResponse {
+    /// The request that asked reached the agent over TLS.
+    pub tls: bool,
+    pub negotiated_group: Option<String>,
+    /// The negotiated group is a post-quantum hybrid.
+    pub post_quantum: bool,
+}
+
+// ── Aliases ──────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct AliasStatusResponse {
+    pub alias_count: usize,
+}
+
+// ── eBPF inventory ───────────────────────────
+
+/// One uprobe the DLP module currently holds a link for.
+#[derive(Deserialize, Serialize)]
+pub struct UprobeEntry {
+    pub lib: String,
+    pub path: String,
+    pub dev: u64,
+    pub ino: u64,
+    pub program: String,
+    pub symbol: String,
+    pub offset: u64,
+    pub retprobe: bool,
+    pub brokered: bool,
+    pub sticky: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct UprobeInventoryResponse {
+    pub libraries: usize,
+    pub probes: Vec<UprobeEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ProgramTypeSupport {
+    pub program_type: String,
+    pub supported: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct HelperSupportEntry {
+    pub program_type: String,
+    pub helper: String,
+    pub supported: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct MissingHelperEntry {
+    pub object: String,
+    pub program_type: String,
+    pub helper: String,
+    pub detail: String,
+}
+
+/// What the kernel answered when the agent probed it at startup.
+///
+/// `probed = false` means the probe could not run, not that the kernel lacks
+/// anything: nothing was measured, and `reason` says why.
+#[derive(Deserialize, Serialize)]
+pub struct KernelFeaturesResponse {
+    pub probed: bool,
+    pub reason: Option<String>,
+    pub load_mode: String,
+    pub program_types: Vec<ProgramTypeSupport>,
+    pub helpers: Vec<HelperSupportEntry>,
+    pub missing_required: Vec<MissingHelperEntry>,
+}
+
+// ── Operations ───────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct ReloadResponse {
+    pub status: String,
+    pub message: String,
+}
+
+// ── Threat intelligence URLs ────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct UrlIocResponse {
+    pub url: String,
+    pub feed_id: String,
+    pub confidence: u8,
+    pub threat_type: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct RefreshResponse {
+    pub status: String,
+    pub message: String,
+}
+
+// ── IPS blacklist mutation ─────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct BlacklistMutationResponse {
+    pub ip: String,
+    pub reason: String,
+    pub ttl_remaining_secs: u64,
+}
+
+// ── JA4S ────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct Ja4sSummaryResponse {
+    pub cached_count: usize,
+    pub max_size: usize,
+    pub ttl_seconds: u64,
+    pub persistent: bool,
+}
+
+// ── Conntrack flush ──────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct ConnTrackFlushResponse {
+    pub flushed: usize,
 }
 
 #[derive(Deserialize)]
@@ -1112,16 +1386,18 @@ impl ApiClient {
         page: usize,
         page_size: usize,
     ) -> anyhow::Result<DomainReputationListResponse> {
-        use std::fmt::Write;
-        let mut url = format!("/api/v1/domains/reputation?page={page}&page_size={page_size}");
+        let mut req = self.request(reqwest::Method::GET, "/api/v1/domains/reputation");
+        req = req.query(&[
+            ("page", page.to_string()),
+            ("page_size", page_size.to_string()),
+        ]);
         if let Some(d) = domain {
-            let _ = write!(url, "&domain={d}");
+            req = req.query(&[("domain", d)]);
         }
         if let Some(s) = min_score {
-            let _ = write!(url, "&min_score={s}");
+            req = req.query(&[("min_score", s.to_string())]);
         }
-        let resp = self
-            .request(reqwest::Method::GET, &url)
+        let resp = req
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;
@@ -1515,6 +1791,361 @@ impl ApiClient {
             .map_err(|e| connection_error(&self.base_url, &e))?;
         handle_delete(resp).await
     }
+
+    // ── Zones ───────────────────────────────────────────────────────
+
+    pub async fn zone_status(&self) -> anyhow::Result<ZoneStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/zones/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn list_zones(&self) -> anyhow::Result<Vec<ZoneResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/zones")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn create_zone(&self, body: &serde_json::Value) -> anyhow::Result<ZoneResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/zones")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn delete_zone(&self, id: &str) -> anyhow::Result<()> {
+        let resp = self
+            .request(reqwest::Method::DELETE, &format!("/api/v1/zones/{id}"))
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_delete(resp).await
+    }
+
+    pub async fn list_zone_policies(&self) -> anyhow::Result<Vec<ZonePolicyResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/zones/policies")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn create_zone_policy(
+        &self,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<ZonePolicyResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/zones/policies")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn delete_zone_policy(&self, id: &str) -> anyhow::Result<()> {
+        let resp = self
+            .request(
+                reqwest::Method::DELETE,
+                &format!("/api/v1/zones/policies/{id}"),
+            )
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_delete(resp).await
+    }
+
+    // ── Policy routing ──────────────────────────────────────────────
+
+    pub async fn routing_status(&self) -> anyhow::Result<RoutingStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/routing/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn list_gateways(&self) -> anyhow::Result<Vec<GatewayResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/routing/gateways")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn create_gateway(
+        &self,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<GatewayResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/routing/gateways")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn delete_gateway(&self, id: &str) -> anyhow::Result<()> {
+        let resp = self
+            .request(
+                reqwest::Method::DELETE,
+                &format!("/api/v1/routing/gateways/{id}"),
+            )
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_delete(resp).await
+    }
+
+    pub async fn list_routes(&self) -> anyhow::Result<Vec<RouteResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/routing/routes")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── IDS ─────────────────────────────────────────────────────────
+
+    pub async fn ids_status(&self) -> anyhow::Result<IdsStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ids/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn list_ids_rules(&self) -> anyhow::Result<Vec<IdsRuleResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ids/rules")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── GeoIP ───────────────────────────────────────────────────────
+
+    pub async fn geoip_status(&self) -> anyhow::Result<GeoIpStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/geoip/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn geoip_lookup(&self, ip: &str) -> anyhow::Result<GeoIpLookupResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/geoip/lookup")
+            .query(&[("ip", ip)])
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── DLP ─────────────────────────────────────────────────────────
+
+    pub async fn dlp_status(&self) -> anyhow::Result<DlpStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/dlp/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn list_dlp_patterns(&self) -> anyhow::Result<Vec<DlpPatternResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/dlp/patterns")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── TLS ─────────────────────────────────────────────────────────
+
+    pub async fn tls_status(&self) -> anyhow::Result<TlsStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/tls/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── Aliases ─────────────────────────────────────────────────────
+
+    pub async fn alias_status(&self) -> anyhow::Result<AliasStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/aliases/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn set_alias_content(
+        &self,
+        id: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let resp = self
+            .request(
+                reqwest::Method::PUT,
+                &format!("/api/v1/aliases/{id}/content"),
+            )
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── eBPF inventory ──────────────────────────────────────────────
+
+    pub async fn list_uprobes(&self) -> anyhow::Result<UprobeInventoryResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ebpf/uprobes")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn kernel_features(&self) -> anyhow::Result<KernelFeaturesResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ebpf/kernel-features")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── Operations ──────────────────────────────────────────────────
+
+    pub async fn get_config(&self) -> anyhow::Result<serde_json::Value> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/config")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn reload_config(&self) -> anyhow::Result<ReloadResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/config/reload")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── Threat intelligence URLs and refresh ────────────────────────
+
+    pub async fn list_url_iocs(&self) -> anyhow::Result<Vec<UrlIocResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/threatintel/urls")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn refresh_feeds(&self, feed_id: Option<&str>) -> anyhow::Result<RefreshResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/threatintel/feeds/refresh")
+            .json(&serde_json::json!({ "feed_id": feed_id }))
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── IPS blacklist mutation ──────────────────────────────────────
+
+    pub async fn add_blacklist_entry(
+        &self,
+        ip: &str,
+        reason: Option<&str>,
+        ttl_secs: Option<u64>,
+    ) -> anyhow::Result<BlacklistMutationResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/ips/blacklist")
+            .json(&serde_json::json!({
+                "ip": ip,
+                "reason": reason,
+                "ttl_secs": ttl_secs,
+            }))
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn remove_blacklist_entry(
+        &self,
+        ip: &str,
+    ) -> anyhow::Result<BlacklistMutationResponse> {
+        let resp = self
+            .request(
+                reqwest::Method::DELETE,
+                &format!("/api/v1/ips/blacklist/{ip}"),
+            )
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── JA4S ────────────────────────────────────────────────────────
+
+    pub async fn ja4s_summary(&self) -> anyhow::Result<Ja4sSummaryResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/fingerprints/ja4s")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── DNS status and conntrack flush ──────────────────────────────
+
+    pub async fn dns_status(&self) -> anyhow::Result<DnsStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/dns/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn conntrack_flush(&self) -> anyhow::Result<ConnTrackFlushResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/conntrack/flush")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
 }
 
 fn connection_error(base_url: &str, err: &reqwest::Error) -> anyhow::Error {
@@ -1552,4 +2183,207 @@ async fn handle_delete(resp: reqwest::Response) -> anyhow::Result<()> {
         bail!("{} ({}): {}", body.error.message, body.error.code, status);
     }
     bail!("request failed with status {status}");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    /// Routes the command tree deliberately does not call, and why. A route
+    /// listed here is a decision somebody wrote down; a route missing from
+    /// both the client and this list is an oversight the test below catches.
+    const UNREACHED_ROUTES: &[(&str, &str, &str)] = &[
+        (
+            "GET",
+            "/api/v1/alerts/stream",
+            "Server-Sent Events: the stream never ends, so a request-and-print \
+             client cannot consume it. `watch` polls the paged list instead.",
+        ),
+        (
+            "GET",
+            "/api/v1/conntrack/events",
+            "Server-Sent Events: same shape as the alert stream. \
+             `conntrack watch` polls the connection list instead.",
+        ),
+    ];
+
+    /// Collapse `{id}` and friends so a path with a parameter compares equal
+    /// however the two sides spell the placeholder.
+    fn normalise(path: &str) -> String {
+        let path = path.split('?').next().unwrap_or(path);
+        let mut out = String::with_capacity(path.len());
+        let mut depth = 0usize;
+        for ch in path.chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    if depth == 1 {
+                        out.push_str("{}");
+                    }
+                }
+                '}' => depth = depth.saturating_sub(1),
+                _ if depth == 0 => out.push(ch),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Every `/api/v1` operation the checked-in document describes. The
+    /// document is pinned to the mounted router in both directions by the
+    /// router's own suite, and CI fails when it drifts from the annotations,
+    /// so reading it here is reading the mounted surface.
+    fn documented_api_routes() -> BTreeSet<(String, String)> {
+        let spec: serde_json::Value = serde_json::from_str(include_str!("../../../openapi.json"))
+            .expect("openapi.json is valid JSON");
+        let paths = spec["paths"]
+            .as_object()
+            .expect("openapi.json carries a paths object");
+
+        let mut pairs = BTreeSet::new();
+        for (path, item) in paths {
+            if !path.starts_with("/api/v1") {
+                continue;
+            }
+            let item = item.as_object().expect("a path item is an object");
+            for method in item.keys() {
+                let upper = method.to_uppercase();
+                if matches!(
+                    upper.as_str(),
+                    "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
+                ) {
+                    pairs.insert((upper, normalise(path)));
+                }
+            }
+        }
+        pairs
+    }
+
+    /// The shipped half of this file, so a route named in this test module is
+    /// not mistaken for a route the client calls.
+    fn shipped_source() -> &'static str {
+        let src = include_str!("api_client.rs");
+        &src[..src.find("#[cfg(test)]").expect("test module marker")]
+    }
+
+    /// Every method and path pair this client requests. Each call is written
+    /// as `request(Method::X, "<literal>")`, so the literal that follows the
+    /// verb is the route. A call whose path is built somewhere else has no
+    /// literal to find, which `every_request_names_its_route` refuses.
+    fn requested_routes() -> BTreeSet<(String, String)> {
+        let mut pairs = BTreeSet::new();
+        for (method, literal) in request_sites() {
+            if let Some(literal) = literal {
+                pairs.insert((method, normalise(&literal)));
+            }
+        }
+        pairs
+    }
+
+    /// One entry per `reqwest::Method::` occurrence: the verb, and the string
+    /// literal that follows it before the next call boundary, if there is one.
+    fn request_sites() -> Vec<(String, Option<String>)> {
+        const MARKER: &str = "reqwest::Method::";
+        let src = shipped_source();
+        let mut sites = Vec::new();
+        let mut from = 0usize;
+
+        while let Some(rel) = src[from..].find(MARKER) {
+            let at = from + rel;
+            let after = at + MARKER.len();
+            let verb: String = src[after..]
+                .chars()
+                .take_while(char::is_ascii_uppercase)
+                .collect();
+            let rest = &src[after + verb.len()..];
+
+            // The literal, if any, sits between the comma and the closing
+            // paren of this one call. Stop at the paren so the next call's
+            // literal is never attributed to this verb.
+            let end = rest.find(')').unwrap_or(rest.len());
+            let head = &rest[..end];
+            let literal = head.find('"').and_then(|open| {
+                head[open + 1..]
+                    .find('"')
+                    .map(|close| head[open + 1..open + 1 + close].to_string())
+            });
+
+            sites.push((verb, literal));
+            from = after;
+        }
+        sites
+    }
+
+    #[test]
+    fn every_request_names_its_route() {
+        let anonymous: Vec<String> = request_sites()
+            .into_iter()
+            .filter(|(_, literal)| literal.is_none())
+            .map(|(verb, _)| verb)
+            .collect();
+        assert!(
+            anonymous.is_empty(),
+            "a request builds its path away from the verb, so route coverage \
+             cannot see it: {anonymous:?}. Pass the route as a literal and put \
+             the parameters on `query`."
+        );
+    }
+
+    #[test]
+    fn the_client_reaches_every_mounted_route() {
+        let documented = documented_api_routes();
+        assert!(
+            documented.len() > 90,
+            "the document describes only {} operations under /api/v1, which \
+             means it failed to load",
+            documented.len()
+        );
+
+        let exempt: BTreeSet<(String, String)> = UNREACHED_ROUTES
+            .iter()
+            .map(|(method, path, _)| ((*method).to_string(), normalise(path)))
+            .collect();
+
+        let reachable: BTreeSet<(String, String)> =
+            requested_routes().union(&exempt).cloned().collect();
+
+        let unreachable: Vec<String> = documented
+            .difference(&reachable)
+            .map(|(method, path)| format!("{method} {path}"))
+            .collect();
+
+        assert!(
+            unreachable.is_empty(),
+            "mounted but reachable from no command, and carried on no \
+             exemption: {unreachable:?}"
+        );
+    }
+
+    #[test]
+    fn every_exemption_is_a_route_that_exists() {
+        let documented = documented_api_routes();
+        for (method, path, reason) in UNREACHED_ROUTES {
+            assert!(
+                documented.contains(&((*method).to_string(), normalise(path))),
+                "{method} {path} is exempted from the command tree but is \
+                 mounted nowhere, so the exemption outlived its route"
+            );
+            assert!(
+                reason.len() > 30,
+                "{method} {path} is exempted without saying why"
+            );
+        }
+    }
+
+    #[test]
+    fn no_exemption_is_also_called() {
+        let requested = requested_routes();
+        for (method, path, _) in UNREACHED_ROUTES {
+            assert!(
+                !requested.contains(&((*method).to_string(), normalise(path))),
+                "{method} {path} is called by the client and exempted at the \
+                 same time, so the exemption is stale"
+            );
+        }
+    }
 }

@@ -2565,6 +2565,724 @@ pub async fn cmd_nat_nptv6_delete(client: &ApiClient, id: &str) -> Result<()> {
     Ok(())
 }
 
+// ── Zones ───────────────────────────────────────────────────────────────
+
+pub async fn cmd_zones_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let status = client.zone_status().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!("Zone Engine");
+    println!("  Enabled:   {}", yes_no(status.enabled));
+    println!("  Zones:     {}", status.zone_count);
+    println!("  Policies:  {}", status.policy_count);
+    Ok(())
+}
+
+pub async fn cmd_zones_list(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let zones = client.list_zones().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&zones)?);
+        return Ok(());
+    }
+
+    if zones.is_empty() {
+        println!("No zones configured.");
+        return Ok(());
+    }
+
+    println!("{:<16}  {:<40}  {:<14}", "ID", "INTERFACES", "DEFAULT");
+
+    for zone in &zones {
+        println!(
+            "{:<16}  {:<40}  {:<14}",
+            zone.id,
+            zone.interfaces.join(","),
+            zone.default_policy,
+        );
+    }
+
+    println!("\n{} zone(s) total.", zones.len());
+    Ok(())
+}
+
+pub async fn cmd_zones_add(client: &ApiClient, json: &str, output: OutputFormat) -> Result<()> {
+    let body: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?;
+    let zone = client.create_zone(&body).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&zone)?);
+        return Ok(());
+    }
+
+    println!(
+        "Zone created: {} (interfaces={}, default={})",
+        zone.id,
+        zone.interfaces.join(","),
+        zone.default_policy
+    );
+    Ok(())
+}
+
+pub async fn cmd_zones_delete(client: &ApiClient, id: &str) -> Result<()> {
+    client.delete_zone(id).await?;
+    println!("Zone deleted: {id}");
+    Ok(())
+}
+
+pub async fn cmd_zones_policies(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let policies = client.list_zone_policies().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&policies)?);
+        return Ok(());
+    }
+
+    if policies.is_empty() {
+        println!("No inter-zone policies configured.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<24}  {:<12}  {:<12}  {:<10}  {:<8}",
+        "ID", "FROM", "TO", "POLICY", "ACTION"
+    );
+
+    for policy in &policies {
+        println!(
+            "{:<24}  {:<12}  {:<12}  {:<10}  {:<8}",
+            policy.id, policy.from, policy.to, policy.policy, policy.action,
+        );
+    }
+
+    println!("\n{} policy(ies) total.", policies.len());
+    Ok(())
+}
+
+pub async fn cmd_zones_add_policy(
+    client: &ApiClient,
+    json: &str,
+    output: OutputFormat,
+) -> Result<()> {
+    let body: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?;
+    let policy = client.create_zone_policy(&body).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&policy)?);
+        return Ok(());
+    }
+
+    println!(
+        "Zone policy created: {} ({} -> {}, action={})",
+        policy.id, policy.from, policy.to, policy.action
+    );
+    Ok(())
+}
+
+pub async fn cmd_zones_delete_policy(client: &ApiClient, id: &str) -> Result<()> {
+    client.delete_zone_policy(id).await?;
+    println!("Zone policy deleted: {id}");
+    Ok(())
+}
+
+// ── Policy routing ──────────────────────────────────────────────────────
+
+pub async fn cmd_routing_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let status = client.routing_status().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!("Policy Routing");
+    println!("  Enabled:   {}", yes_no(status.enabled));
+    println!("  Gateways:  {}", status.gateway_count);
+    Ok(())
+}
+
+pub async fn cmd_routing_gateways(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let gateways = client.list_gateways().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&gateways)?);
+        return Ok(());
+    }
+
+    if gateways.is_empty() {
+        println!("No gateways configured.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<16}  {:<16}  {:<10}  {:<18}  {:>4}  {:>6}  {:<7}  {:<10}  {:<10}",
+        "ID", "NAME", "INTERFACE", "GATEWAY IP", "PRI", "WEIGHT", "ENABLED", "STATUS", "HEALTH"
+    );
+
+    for gw in &gateways {
+        println!(
+            "{:<16}  {:<16}  {:<10}  {:<18}  {:>4}  {:>6}  {:<7}  {:<10}  {:<10}",
+            gw.id,
+            gw.name,
+            gw.interface,
+            gw.gateway_ip,
+            gw.priority,
+            gw.weight,
+            yes_no(gw.enabled),
+            gw.status,
+            gw.health_status,
+        );
+    }
+
+    println!("\n{} gateway(s) total.", gateways.len());
+    Ok(())
+}
+
+pub async fn cmd_routing_add_gateway(
+    client: &ApiClient,
+    json: &str,
+    output: OutputFormat,
+) -> Result<()> {
+    let body: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?;
+    let gw = client.create_gateway(&body).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&gw)?);
+        return Ok(());
+    }
+
+    println!(
+        "Gateway created: {} (interface={}, gateway={}, priority={})",
+        gw.id, gw.interface, gw.gateway_ip, gw.priority
+    );
+    Ok(())
+}
+
+pub async fn cmd_routing_delete_gateway(client: &ApiClient, id: &str) -> Result<()> {
+    client.delete_gateway(id).await?;
+    println!("Gateway deleted: {id}");
+    Ok(())
+}
+
+pub async fn cmd_routing_routes(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let routes = client.list_routes().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&routes)?);
+        return Ok(());
+    }
+
+    if routes.is_empty() {
+        println!("No routes configured.");
+        return Ok(());
+    }
+
+    println!("{:<24}  {:<16}  {:<18}", "DESTINATION", "GATEWAY ID", "VIA");
+
+    for route in &routes {
+        println!(
+            "{:<24}  {:<16}  {:<18}",
+            route.destination, route.gateway_id, route.gateway_ip,
+        );
+    }
+
+    println!("\n{} route(s) total.", routes.len());
+    Ok(())
+}
+
+// ── IDS ─────────────────────────────────────────────────────────────────
+
+pub async fn cmd_ids_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let status = client.ids_status().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!("Intrusion Detection");
+    println!("  Enabled:  {}", yes_no(status.enabled));
+    println!("  Mode:     {}", status.mode);
+    println!("  Rules:    {}", status.rule_count);
+    Ok(())
+}
+
+pub async fn cmd_ids_rules(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let rules = client.list_ids_rules().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&rules)?);
+        return Ok(());
+    }
+
+    if rules.is_empty() {
+        println!("No IDS rules configured.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<16}  {:<30}  {:<8}  {:<6}  {:<6}  {:>8}  {:<7}  {:<20}",
+        "ID", "DESCRIPTION", "SEVERITY", "MODE", "PROTO", "DST PORT", "ENABLED", "PATTERN"
+    );
+
+    for rule in &rules {
+        let dst_port = rule
+            .dst_port
+            .map_or_else(|| "-".to_string(), |p| p.to_string());
+        println!(
+            "{:<16}  {:<30}  {:<8}  {:<6}  {:<6}  {:>8}  {:<7}  {:<20}",
+            rule.id,
+            rule.description,
+            rule.severity,
+            rule.mode,
+            rule.protocol,
+            dst_port,
+            yes_no(rule.enabled),
+            rule.pattern,
+        );
+    }
+
+    println!("\n{} rule(s) total.", rules.len());
+    Ok(())
+}
+
+// ── GeoIP ───────────────────────────────────────────────────────────────
+
+pub async fn cmd_geoip_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let status = client.geoip_status().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!("GeoIP");
+    println!("  Enabled:  {}", yes_no(status.enabled));
+    println!("  Ready:    {}", yes_no(status.ready));
+    Ok(())
+}
+
+pub async fn cmd_geoip_lookup(client: &ApiClient, ip: &str, output: OutputFormat) -> Result<()> {
+    let resp = client.geoip_lookup(ip).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    let asn = resp.asn.map_or_else(|| "-".to_string(), |a| a.to_string());
+    println!("GeoIP lookup: {}", resp.ip);
+    println!(
+        "  Country:  {} ({})",
+        resp.country_name.as_deref().unwrap_or("-"),
+        resp.country_code.as_deref().unwrap_or("-")
+    );
+    println!("  City:     {}", resp.city.as_deref().unwrap_or("-"));
+    println!("  ASN:      {asn}");
+    println!("  AS org:   {}", resp.as_org.as_deref().unwrap_or("-"));
+    Ok(())
+}
+
+// ── eBPF ────────────────────────────────────────────────────────────────
+
+pub async fn cmd_ebpf_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let status = client.ebpf_status().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    if status.programs.is_empty() {
+        println!("No eBPF programs reported.");
+    } else {
+        println!("{:<28}  {:<7}", "PROGRAM", "LOADED");
+        for prog in &status.programs {
+            println!("{:<28}  {:<7}", prog.name, yes_no(prog.loaded));
+        }
+        println!("\n{} program(s) reported.", status.programs.len());
+    }
+
+    if status.attach_blocked.is_empty() {
+        return Ok(());
+    }
+
+    println!("\nAttaches refused by the kernel:");
+    println!(
+        "{:<28}  {:<12}  {:<11}  REASON",
+        "PROGRAM", "INTERFACE", "NESTED XDP"
+    );
+    for block in &status.attach_blocked {
+        println!(
+            "{:<28}  {:<12}  {:<11}  {}",
+            block.program,
+            block.interface,
+            yes_no(block.nested_xdp),
+            block.reason,
+        );
+    }
+    Ok(())
+}
+
+pub async fn cmd_ebpf_uprobes(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.list_uprobes().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("Uprobe inventory: {} library(ies)", resp.libraries);
+
+    if resp.probes.is_empty() {
+        println!("No uprobes attached.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<10}  {:<40}  {:<20}  {:<16}  {:<8}  {:<8}  {:<8}  {:<6}",
+        "LIB", "PATH", "PROGRAM", "SYMBOL", "OFFSET", "RETPROBE", "BROKERED", "STICKY"
+    );
+
+    for probe in &resp.probes {
+        println!(
+            "{:<10}  {:<40}  {:<20}  {:<16}  {:<8}  {:<8}  {:<8}  {:<6}",
+            probe.lib,
+            probe.path,
+            probe.program,
+            probe.symbol,
+            probe.offset,
+            yes_no(probe.retprobe),
+            yes_no(probe.brokered),
+            yes_no(probe.sticky),
+        );
+    }
+
+    println!("\n{} probe(s) attached.", resp.probes.len());
+    Ok(())
+}
+
+pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.kernel_features().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("Kernel feature probe");
+    println!("  Probed:     {}", yes_no(resp.probed));
+    println!("  Load mode:  {}", resp.load_mode);
+    if let Some(reason) = &resp.reason {
+        println!("  Reason:     {reason}");
+    }
+
+    if !resp.program_types.is_empty() {
+        println!("\n{:<24}  {:<9}", "PROGRAM TYPE", "SUPPORTED");
+        for pt in &resp.program_types {
+            println!("{:<24}  {:<9}", pt.program_type, yes_no(pt.supported));
+        }
+    }
+
+    if !resp.helpers.is_empty() {
+        println!(
+            "\n{:<24}  {:<32}  {:<9}",
+            "PROGRAM TYPE", "HELPER", "SUPPORTED"
+        );
+        for helper in &resp.helpers {
+            println!(
+                "{:<24}  {:<32}  {:<9}",
+                helper.program_type,
+                helper.helper,
+                yes_no(helper.supported),
+            );
+        }
+    }
+
+    if resp.missing_required.is_empty() {
+        println!("\nNo required helper is missing.");
+    } else {
+        println!("\nRequired helpers the kernel does not provide:");
+        println!(
+            "{:<24}  {:<24}  {:<32}  DETAIL",
+            "OBJECT", "PROGRAM TYPE", "HELPER"
+        );
+        for missing in &resp.missing_required {
+            println!(
+                "{:<24}  {:<24}  {:<32}  {}",
+                missing.object, missing.program_type, missing.helper, missing.detail,
+            );
+        }
+    }
+    Ok(())
+}
+
+// ── Config ──────────────────────────────────────────────────────────────
+
+pub async fn cmd_config_show(client: &ApiClient) -> Result<()> {
+    let config = client.get_config().await?;
+    println!("{}", serde_json::to_string_pretty(&config)?);
+    Ok(())
+}
+
+pub async fn cmd_config_reload(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.reload_config().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("Reload {}: {}", resp.status, resp.message);
+    Ok(())
+}
+
+// ── DLP ─────────────────────────────────────────────────────────────────
+
+pub async fn cmd_dlp_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let status = client.dlp_status().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!("Data Loss Prevention");
+    println!("  Enabled:   {}", yes_no(status.enabled));
+    println!("  Mode:      {}", status.mode);
+    println!("  Patterns:  {}", status.pattern_count);
+    Ok(())
+}
+
+pub async fn cmd_dlp_patterns(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let patterns = client.list_dlp_patterns().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&patterns)?);
+        return Ok(());
+    }
+
+    if patterns.is_empty() {
+        println!("No DLP patterns configured.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<16}  {:<20}  {:<8}  {:<14}  {:<7}  {:<30}",
+        "ID", "NAME", "SEVERITY", "DATA TYPE", "ENABLED", "REGEX"
+    );
+
+    for pattern in &patterns {
+        println!(
+            "{:<16}  {:<20}  {:<8}  {:<14}  {:<7}  {:<30}",
+            pattern.id,
+            pattern.name,
+            pattern.severity,
+            pattern.data_type,
+            yes_no(pattern.enabled),
+            pattern.regex,
+        );
+    }
+
+    println!("\n{} pattern(s) total.", patterns.len());
+    Ok(())
+}
+
+// ── TLS ─────────────────────────────────────────────────────────────────
+
+pub async fn cmd_tls_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let status = client.tls_status().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!("API listener TLS");
+    println!("  TLS:              {}", yes_no(status.tls));
+    println!(
+        "  Negotiated group: {}",
+        status.negotiated_group.as_deref().unwrap_or("-")
+    );
+    println!("  Post-quantum:     {}", yes_no(status.post_quantum));
+    Ok(())
+}
+
+// ── Aliases ─────────────────────────────────────────────────────────────
+
+pub async fn cmd_aliases_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let status = client.alias_status().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!("Alias Engine");
+    println!("  Aliases:  {}", status.alias_count);
+    Ok(())
+}
+
+pub async fn cmd_aliases_set_content(
+    client: &ApiClient,
+    id: &str,
+    json: &str,
+    output: OutputFormat,
+) -> Result<()> {
+    let body: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?;
+    let resp = client.set_alias_content(id, &body).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("Alias content replaced: {id}");
+    Ok(())
+}
+
+// ── Threat intelligence: URLs and refresh ───────────────────────────────
+
+pub async fn cmd_threatintel_urls(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let urls = client.list_url_iocs().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&urls)?);
+        return Ok(());
+    }
+
+    if urls.is_empty() {
+        println!("No URL indicators loaded.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<60}  {:<16}  {:>4}  {:<16}",
+        "URL", "FEED", "CONF", "THREAT TYPE"
+    );
+
+    for url in &urls {
+        println!(
+            "{:<60}  {:<16}  {:>4}  {:<16}",
+            url.url, url.feed_id, url.confidence, url.threat_type,
+        );
+    }
+
+    println!("\n{} URL indicator(s) total.", urls.len());
+    Ok(())
+}
+
+pub async fn cmd_threatintel_feeds_refresh(
+    client: &ApiClient,
+    feed_id: Option<&str>,
+    output: OutputFormat,
+) -> Result<()> {
+    let resp = client.refresh_feeds(feed_id).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("Refresh {}: {}", resp.status, resp.message);
+    Ok(())
+}
+
+// ── IPS blacklist mutation ──────────────────────────────────────────────
+
+pub async fn cmd_ips_blacklist_add(
+    client: &ApiClient,
+    ip: &str,
+    reason: Option<&str>,
+    ttl_secs: Option<u64>,
+    output: OutputFormat,
+) -> Result<()> {
+    let resp = client.add_blacklist_entry(ip, reason, ttl_secs).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!(
+        "Blacklisted {} ({}), TTL {}s",
+        resp.ip, resp.reason, resp.ttl_remaining_secs
+    );
+    Ok(())
+}
+
+pub async fn cmd_ips_blacklist_delete(
+    client: &ApiClient,
+    ip: &str,
+    output: OutputFormat,
+) -> Result<()> {
+    let resp = client.remove_blacklist_entry(ip).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("Removed from blacklist: {}", resp.ip);
+    Ok(())
+}
+
+// ── JA4S ────────────────────────────────────────────────────────────────
+
+pub async fn cmd_fingerprints_ja4s(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.ja4s_summary().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("JA4S Fingerprint Cache");
+    println!("  Cached entries:  {}", resp.cached_count);
+    println!("  Max size:        {}", resp.max_size);
+    println!("  TTL:             {}s", resp.ttl_seconds);
+    println!("  Persistent:      {}", yes_no(resp.persistent));
+    Ok(())
+}
+
+// ── DNS status and conntrack flush ──────────────────────────────────────
+
+pub async fn cmd_dns_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let status = client.dns_status().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!("DNS Interception");
+    println!("  Enabled:            {}", yes_no(status.enabled));
+    println!("  Blocklist patterns: {}", status.blocklist_pattern_count);
+    println!("  Domains blocked:    {}", status.blocklist_domains_blocked);
+    println!("  IPs injected:       {}", status.blocklist_ips_injected);
+    Ok(())
+}
+
+pub async fn cmd_conntrack_flush(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.conntrack_flush().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("Conntrack table flushed: {} entry(ies).", resp.flushed);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

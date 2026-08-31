@@ -8,9 +8,11 @@ use anyhow::Result;
 
 use api_client::ApiClient;
 use cli::{
-    AlertsCommand, AuditCommand, CaptureCommand, Command, DdosCommand, DnsCommand, DomainsCommand,
-    FingerprintsCommand, FirewallCommand, IpsCommand, L7Command, LbCommand, MitreCommand,
-    NatCommand, NptV6Command, QosCommand, RatelimitCommand, ResponsesCommand, ThreatintelCommand,
+    AlertsCommand, AliasesCommand, AuditCommand, BlacklistAction, CaptureCommand, Command,
+    ConfigCommand, DdosCommand, DlpCommand, DnsCommand, DomainsCommand, EbpfCommand, FeedsAction,
+    FingerprintsCommand, FirewallCommand, GeoipCommand, IdsCommand, IpsCommand, L7Command,
+    LbCommand, MitreCommand, NatCommand, NptV6Command, QosCommand, RatelimitCommand,
+    ResponsesCommand, RoutingCommand, ThreatintelCommand, TlsCommand, ZonesCommand,
 };
 
 fn main() -> Result<()> {
@@ -106,6 +108,7 @@ async fn run_cli(cli: cli::Cli) -> Result<()> {
                 cli::ConntrackAction::Status => {
                     commands::cmd_conntrack_status(&client, output).await
                 }
+                cli::ConntrackAction::Flush => commands::cmd_conntrack_flush(&client, output).await,
             }
         }
 
@@ -133,7 +136,26 @@ async fn run_cli(cli: cli::Cli) -> Result<()> {
             let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
             match args.command {
                 IpsCommand::List => commands::cmd_ips_list(&client, output).await,
-                IpsCommand::Blacklist => commands::cmd_ips_blacklist(&client, output).await,
+                IpsCommand::Blacklist { action } => match action {
+                    None => commands::cmd_ips_blacklist(&client, output).await,
+                    Some(BlacklistAction::Add {
+                        ip,
+                        reason,
+                        ttl_secs,
+                    }) => {
+                        commands::cmd_ips_blacklist_add(
+                            &client,
+                            &ip,
+                            reason.as_deref(),
+                            ttl_secs,
+                            output,
+                        )
+                        .await
+                    }
+                    Some(BlacklistAction::Delete { ip }) => {
+                        commands::cmd_ips_blacklist_delete(&client, &ip, output).await
+                    }
+                },
                 IpsCommand::DomainBlocks => commands::cmd_ips_domain_blocks(&client, output).await,
                 IpsCommand::SetMode { id, mode } => {
                     commands::cmd_ips_set_mode(&client, &id, &mode).await
@@ -161,7 +183,14 @@ async fn run_cli(cli: cli::Cli) -> Result<()> {
                     commands::cmd_threatintel_status(&client, output).await
                 }
                 ThreatintelCommand::Iocs => commands::cmd_threatintel_iocs(&client, output).await,
-                ThreatintelCommand::Feeds => commands::cmd_threatintel_feeds(&client, output).await,
+                ThreatintelCommand::Urls => commands::cmd_threatintel_urls(&client, output).await,
+                ThreatintelCommand::Feeds { action } => match action {
+                    None => commands::cmd_threatintel_feeds(&client, output).await,
+                    Some(FeedsAction::Refresh { feed_id }) => {
+                        commands::cmd_threatintel_feeds_refresh(&client, feed_id.as_deref(), output)
+                            .await
+                    }
+                },
             }
         }
 
@@ -241,6 +270,7 @@ async fn run_cli(cli: cli::Cli) -> Result<()> {
                     )
                     .await
                 }
+                DnsCommand::Status => commands::cmd_dns_status(&client, output).await,
                 DnsCommand::Stats => commands::cmd_dns_stats(&client, output).await,
                 DnsCommand::Blocklist => commands::cmd_dns_blocklist(&client, output).await,
                 DnsCommand::Flush => commands::cmd_dns_flush(&client, output).await,
@@ -419,6 +449,101 @@ async fn run_cli(cli: cli::Cli) -> Result<()> {
             match args.command {
                 FingerprintsCommand::Summary => {
                     commands::cmd_fingerprints_summary(&client, output).await
+                }
+                FingerprintsCommand::Ja4s => commands::cmd_fingerprints_ja4s(&client, output).await,
+            }
+        }
+
+        Some(Command::Zones(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                ZonesCommand::Status => commands::cmd_zones_status(&client, output).await,
+                ZonesCommand::List => commands::cmd_zones_list(&client, output).await,
+                ZonesCommand::Add { json } => commands::cmd_zones_add(&client, &json, output).await,
+                ZonesCommand::Delete { id } => commands::cmd_zones_delete(&client, &id).await,
+                ZonesCommand::Policies => commands::cmd_zones_policies(&client, output).await,
+                ZonesCommand::AddPolicy { json } => {
+                    commands::cmd_zones_add_policy(&client, &json, output).await
+                }
+                ZonesCommand::DeletePolicy { id } => {
+                    commands::cmd_zones_delete_policy(&client, &id).await
+                }
+            }
+        }
+
+        Some(Command::Routing(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                RoutingCommand::Status => commands::cmd_routing_status(&client, output).await,
+                RoutingCommand::Gateways => commands::cmd_routing_gateways(&client, output).await,
+                RoutingCommand::AddGateway { json } => {
+                    commands::cmd_routing_add_gateway(&client, &json, output).await
+                }
+                RoutingCommand::DeleteGateway { id } => {
+                    commands::cmd_routing_delete_gateway(&client, &id).await
+                }
+                RoutingCommand::Routes => commands::cmd_routing_routes(&client, output).await,
+            }
+        }
+
+        Some(Command::Ids(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                IdsCommand::Status => commands::cmd_ids_status(&client, output).await,
+                IdsCommand::Rules => commands::cmd_ids_rules(&client, output).await,
+            }
+        }
+
+        Some(Command::Geoip(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                GeoipCommand::Status => commands::cmd_geoip_status(&client, output).await,
+                GeoipCommand::Lookup { ip } => {
+                    commands::cmd_geoip_lookup(&client, &ip, output).await
+                }
+            }
+        }
+
+        Some(Command::Ebpf(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                EbpfCommand::Status => commands::cmd_ebpf_status(&client, output).await,
+                EbpfCommand::Uprobes => commands::cmd_ebpf_uprobes(&client, output).await,
+                EbpfCommand::KernelFeatures => {
+                    commands::cmd_ebpf_kernel_features(&client, output).await
+                }
+            }
+        }
+
+        Some(Command::Config(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                ConfigCommand::Show => commands::cmd_config_show(&client).await,
+                ConfigCommand::Reload => commands::cmd_config_reload(&client, output).await,
+            }
+        }
+
+        Some(Command::Dlp(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                DlpCommand::Status => commands::cmd_dlp_status(&client, output).await,
+                DlpCommand::Patterns => commands::cmd_dlp_patterns(&client, output).await,
+            }
+        }
+
+        Some(Command::Tls(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                TlsCommand::Status => commands::cmd_tls_status(&client, output).await,
+            }
+        }
+
+        Some(Command::Aliases(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                AliasesCommand::Status => commands::cmd_aliases_status(&client, output).await,
+                AliasesCommand::SetContent { id, json } => {
+                    commands::cmd_aliases_set_content(&client, &id, &json, output).await
                 }
             }
         }
