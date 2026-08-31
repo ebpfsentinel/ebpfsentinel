@@ -67,9 +67,24 @@ pub trait AlertMetrics: Send + Sync {
     /// Record an alert dropped (dedup, throttle, backpressure, etc.).
     fn record_alert_dropped(&self, _reason: &str) {}
 
-    /// Record an alert successfully handed off to an external sender,
-    /// labelled by destination (`webhook`, `email`, `otlp`).
+    /// Record an alert accepted by an external sender's transport, labelled
+    /// by destination (`webhook`, `email`, `otlp`).
+    ///
+    /// Acceptance is where the destination stops being able to refuse: an HTTP
+    /// 2xx for a webhook, an SMTP hand-over for an email, a place in the batch
+    /// queue for OTLP. It is deliberately not a claim that a collector stored
+    /// the record, because a batched exporter reports that after the fact and
+    /// never per alert - that half is what `record_alert_export_failed`
+    /// reports.
     fn record_alert_exported(&self, _destination: &str) {}
+
+    /// Record an export that failed, labelled by the same destination the
+    /// successful one carries, so the two series are comparable.
+    ///
+    /// A failure is counted once per alert the sender gave up on, and once per
+    /// batch a flush could not deliver, since a batched exporter cannot say
+    /// which alerts were in the batch it lost.
+    fn record_alert_export_failed(&self, _destination: &str) {}
 
     /// Record an alert for per-rule counting (enables FP rate computation).
     fn record_alert_by_rule(&self, _component: &str, _rule_id: &str) {}

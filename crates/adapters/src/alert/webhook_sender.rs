@@ -243,12 +243,13 @@ impl AlertSender for WebhookAlertSender {
 
             // 5. Record success/failure in circuit breaker and update metric
             let mut cb = self.circuit_breaker.lock().await;
-            match &result {
-                Ok(()) => {
-                    cb.record_success();
-                    self.metrics.record_alert_exported(&self.destination_name);
-                }
-                Err(_) => cb.record_failure(),
+            if result.is_ok() {
+                cb.record_success();
+                self.metrics.record_alert_exported(&self.destination_name);
+            } else {
+                cb.record_failure();
+                self.metrics
+                    .record_alert_export_failed(&self.destination_name);
             }
             self.metrics
                 .record_circuit_state(&self.destination_name, cb.state().as_u8());
@@ -460,6 +461,37 @@ mod tests {
         let _ = sender.send(&alert, &route).await;
 
         assert!(metrics.circuit_state_calls.load(Ordering::Relaxed) >= 1);
+    }
+
+    /// A webhook that refused every attempt has to be a number as well as a
+    /// log line, on the same destination label the delivered one carries.
+    #[tokio::test]
+    async fn a_refused_webhook_is_counted_against_its_destination() {
+        let metrics = Arc::new(crate::metrics::AgentMetrics::new());
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
+        let mut sender = WebhookAlertSender::new(
+            cb,
+            fast_retry(),
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            "webhook".to_string(),
+        );
+        sender.skip_url_validation = true;
+
+        let alert = sample_alert();
+        let route = webhook_route("http://127.0.0.1:1/unreachable");
+
+        assert!(sender.send(&alert, &route).await.is_err());
+
+        let encoded = metrics.encode();
+        assert!(
+            encoded
+                .contains("ebpfsentinel_alerts_export_failures_total{destination=\"webhook\"} 1"),
+            "the refused webhook was not counted: {encoded}"
+        );
+        assert!(
+            !encoded.contains("ebpfsentinel_alerts_exported_total{destination=\"webhook\"}"),
+            "a refused webhook must not count as accepted: {encoded}"
+        );
     }
 
     #[tokio::test]

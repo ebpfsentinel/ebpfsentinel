@@ -1007,7 +1007,22 @@ impl AlertPipeline {
         let futures: Vec<_> = matched_routes
             .iter()
             .filter_map(|(idx, route)| {
-                self.sender_for(&route.destination).map(|sender| {
+                let Some(sender) = self.sender_for(&route.destination) else {
+                    // A route naming a destination nothing was built for sends
+                    // nowhere. Counting it as its own reason keeps it apart
+                    // from a duplicate, a throttle and an alert no route
+                    // wanted, which are the three the drop counter already
+                    // tells apart.
+                    self.metrics.record_alert_dropped("no_sender");
+                    tracing::warn!(
+                        alert_id = %alert.id,
+                        route_name = %route.name,
+                        route_index = *idx,
+                        "alert route has no sender configured"
+                    );
+                    return None;
+                };
+                Some({
                     let idx = *idx;
                     let route_name = route.name.clone();
                     async move {
@@ -1159,7 +1174,10 @@ mod tests {
     }
 
     #[allow(clippy::similar_names)]
-    fn make_pipeline(routes: Vec<AlertRoute>, metrics: Arc<TestMetrics>) -> AlertPipeline {
+    fn make_pipeline_without_senders(
+        routes: Vec<AlertRoute>,
+        metrics: Arc<TestMetrics>,
+    ) -> AlertPipeline {
         let router = AlertRouter::new(
             routes,
             Duration::from_secs(0), // no dedup for tests
@@ -1171,6 +1189,13 @@ mod tests {
             metrics as Arc<dyn MetricsPort>,
             make_audit_service(),
         )
+    }
+
+    /// Routing tests want a pipeline that can actually deliver, since a route
+    /// whose destination was never built is itself a counted drop.
+    fn make_pipeline(routes: Vec<AlertRoute>, metrics: Arc<TestMetrics>) -> AlertPipeline {
+        make_pipeline_without_senders(routes, metrics)
+            .with_log_sender(Arc::new(MockSender::new()) as Arc<dyn AlertSender>)
     }
 
     #[tokio::test]
@@ -1201,7 +1226,8 @@ mod tests {
             router,
             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
             make_audit_service(),
-        );
+        )
+        .with_log_sender(Arc::new(MockSender::new()) as Arc<dyn AlertSender>);
 
         pipeline
             .process_alert(&make_ids_alert("ids-001", Severity::High))
@@ -1230,7 +1256,8 @@ mod tests {
             router,
             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
             make_audit_service(),
-        );
+        )
+        .with_log_sender(Arc::new(MockSender::new()) as Arc<dyn AlertSender>);
 
         // First alert passes
         let mut alert1 = make_ids_alert("ids-001", Severity::High);
@@ -1394,20 +1421,24 @@ mod tests {
         assert_eq!(metrics.alert_calls.load(Ordering::Relaxed), 1);
     }
 
+    /// A route the router matched and nothing was built for delivers nothing,
+    /// which is a drop with a reason of its own rather than a silent success.
     #[tokio::test]
-    async fn no_sender_defaults_to_log_only() {
+    async fn a_route_with_no_sender_is_counted_under_its_own_reason() {
         let metrics = Arc::new(TestMetrics::new());
-        // Pipeline without any senders configured
-        let mut pipeline =
-            make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics));
+        let mut pipeline = make_pipeline_without_senders(
+            vec![make_route("all", Severity::Low)],
+            Arc::clone(&metrics),
+        );
 
         pipeline
             .process_alert(&make_ids_alert("ids-001", Severity::High))
             .await;
 
-        // Alert processed and metric recorded, but no sender called
+        // The alert is still observed - the drop is about delivery only.
         assert_eq!(metrics.alert_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(metrics.dropped_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.dropped_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.last_drop_reason.lock().unwrap(), "no_sender");
     }
 
     // ── DLP alert tests ────────────────────────────────────────────

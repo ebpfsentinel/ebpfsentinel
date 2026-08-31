@@ -134,12 +134,13 @@ impl AlertSender for EmailAlertSender {
 
             // 5. Record success/failure in circuit breaker and update metric
             let mut cb = self.circuit_breaker.lock().await;
-            match &result {
-                Ok(()) => {
-                    cb.record_success();
-                    self.metrics.record_alert_exported(&self.destination_name);
-                }
-                Err(_) => cb.record_failure(),
+            if result.is_ok() {
+                cb.record_success();
+                self.metrics.record_alert_exported(&self.destination_name);
+            } else {
+                cb.record_failure();
+                self.metrics
+                    .record_alert_export_failed(&self.destination_name);
             }
             self.metrics
                 .record_circuit_state(&self.destination_name, cb.state().as_u8());
@@ -339,6 +340,43 @@ mod tests {
         let _ = sender.send(&sample_alert(), &email_route()).await;
 
         assert!(metrics.circuit_state_calls.load(Ordering::Relaxed) >= 1);
+    }
+
+    /// An SMTP server that refused the hand-over has to be a number as well as
+    /// a log line, on the same destination label the delivered one carries.
+    #[tokio::test]
+    async fn a_refused_email_is_counted_against_its_destination() {
+        let metrics = Arc::new(crate::metrics::AgentMetrics::new());
+        let cb = CircuitBreaker::new(5, Duration::from_mins(1));
+        let sender = EmailAlertSender::new(
+            "127.0.0.1",
+            1,
+            None,
+            None,
+            false,
+            "alerts@example.com".to_string(),
+            cb,
+            RetryConfig {
+                max_retries: 0,
+                backoff_schedule: vec![Duration::from_millis(1)],
+                timeout: Duration::from_millis(100),
+            },
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            "email".to_string(),
+        )
+        .unwrap();
+
+        assert!(sender.send(&sample_alert(), &email_route()).await.is_err());
+
+        let encoded = metrics.encode();
+        assert!(
+            encoded.contains("ebpfsentinel_alerts_export_failures_total{destination=\"email\"} 1"),
+            "the refused email was not counted: {encoded}"
+        );
+        assert!(
+            !encoded.contains("ebpfsentinel_alerts_exported_total{destination=\"email\"}"),
+            "a refused email must not count as accepted: {encoded}"
+        );
     }
 
     #[tokio::test]

@@ -182,6 +182,7 @@ pub struct AgentMetrics {
     pub alerts_total: Family<AlertLabels, Counter>,
     pub alerts_dropped_total: Family<ReasonLabels, Counter>,
     pub alerts_exported_total: Family<DestinationLabels, Counter>,
+    pub alerts_export_failures_total: Family<DestinationLabels, Counter>,
     pub threatintel_matches_total: Family<FeedLabels, Counter>,
     pub zone_interfaces: Family<ZoneLabels, Gauge>,
     pub zone_policies: Family<ZoneLabels, Gauge>,
@@ -350,8 +351,15 @@ impl AgentMetrics {
         let alerts_exported_total = Family::<DestinationLabels, Counter>::default();
         registry.register(
             "alerts_exported",
-            "Alerts successfully handed off to an external sender, by destination",
+            "Alerts accepted by an external sender's transport, by destination; acceptance is an HTTP 2xx, an SMTP hand-over or a place in the OTLP batch queue, and for a batched destination it is not confirmation from the collector",
             alerts_exported_total.clone(),
+        );
+
+        let alerts_export_failures_total = Family::<DestinationLabels, Counter>::default();
+        registry.register(
+            "alerts_export_failures",
+            "Alert exports that failed, by destination; one per alert a sender gave up on and one per batch a flush could not deliver",
+            alerts_export_failures_total.clone(),
         );
 
         let threatintel_matches_total = Family::<FeedLabels, Counter>::default();
@@ -733,6 +741,7 @@ impl AgentMetrics {
             alerts_total,
             alerts_dropped_total,
             alerts_exported_total,
+            alerts_export_failures_total,
             threatintel_matches_total,
             zone_interfaces,
             zone_policies,
@@ -926,6 +935,14 @@ impl AlertMetrics for AgentMetrics {
 
     fn record_alert_exported(&self, destination: &str) {
         self.alerts_exported_total
+            .get_or_create(&DestinationLabels {
+                destination: destination.to_string(),
+            })
+            .inc();
+    }
+
+    fn record_alert_export_failed(&self, destination: &str) {
+        self.alerts_export_failures_total
             .get_or_create(&DestinationLabels {
                 destination: destination.to_string(),
             })
@@ -1592,6 +1609,20 @@ mod tests {
     }
 
     #[test]
+    fn alert_export_failure_counter_increments() {
+        let metrics = AgentMetrics::new();
+        metrics.record_alert_export_failed("otlp");
+
+        let encoded = metrics.encode();
+        assert!(
+            encoded.contains("ebpfsentinel_alerts_export_failures_total{destination=\"otlp\"} 1")
+        );
+        // A failure is not an acceptance: the two series stay comparable only
+        // while nothing writes both for one attempt.
+        assert!(!encoded.contains("ebpfsentinel_alerts_exported_total{destination=\"otlp\"}"));
+    }
+
+    #[test]
     fn alert_exported_counter_increments() {
         let metrics = AgentMetrics::new();
         metrics.record_alert_exported("otlp");
@@ -1709,6 +1740,7 @@ mod tests {
         ("alerts", "counter"),
         ("alerts_by_rule", "counter"),
         ("alerts_dropped", "counter"),
+        ("alerts_export_failures", "counter"),
         ("alerts_exported", "counter"),
         ("alerts_sse_subscribers", "gauge"),
         ("audit_events", "counter"),
@@ -1882,6 +1914,11 @@ mod tests {
             })
             .inc();
         m.alerts_exported_total
+            .get_or_create(&DestinationLabels {
+                destination: "webhook".into(),
+            })
+            .inc();
+        m.alerts_export_failures_total
             .get_or_create(&DestinationLabels {
                 destination: "webhook".into(),
             })

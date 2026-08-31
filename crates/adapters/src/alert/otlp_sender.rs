@@ -14,6 +14,9 @@ use ports::secondary::metrics_port::MetricsPort;
 
 use crate::alert::otlp_record::{OtlpLogRecord, now_unix_nano};
 
+/// The label both alert-export series carry for this sender.
+const OTLP_DESTINATION: &str = "otlp";
+
 /// Alert sender that exports alerts as OTLP Logs (fire-and-forget).
 pub struct OtlpAlertSender {
     logger_provider: SdkLoggerProvider,
@@ -89,16 +92,23 @@ impl AlertSender for OtlpAlertSender {
                 .build();
             let logger = self.logger_provider.logger_with_scope(scope);
 
-            let mapped = OtlpLogRecord::from_alert(alert, now_unix_nano())?;
+            let mapped = match OtlpLogRecord::from_alert(alert, now_unix_nano()) {
+                Ok(mapped) => mapped,
+                Err(e) => {
+                    self.metrics.record_alert_export_failed(OTLP_DESTINATION);
+                    return Err(e);
+                }
+            };
 
             let mut record = logger.create_log_record();
             mapped.apply(&mut record);
 
             logger.emit(record);
 
-            // Fire-and-forget: count the hand-off to the OTLP batch exporter.
-            // No retry and no delivery confirmation (batched export).
-            self.metrics.record_alert_exported("otlp");
+            // Count the acceptance by the OTLP batch queue. There is no retry
+            // and no per-alert delivery confirmation here, so what a failed
+            // batch costs is reported once per flush rather than per alert.
+            self.metrics.record_alert_exported(OTLP_DESTINATION);
 
             Ok(())
         })
@@ -106,7 +116,17 @@ impl AlertSender for OtlpAlertSender {
 }
 
 impl Drop for OtlpAlertSender {
+    /// Flush before shutting down, and count what the flush could not deliver.
+    ///
+    /// `shutdown()` answers `Ok(())` even when every export in the batch
+    /// failed, so a process ending with a collector down would report a clean
+    /// stop. `force_flush()` is the call that reports the batch, which makes
+    /// it the last chance to turn a lost export into a number.
     fn drop(&mut self) {
+        if let Err(e) = self.logger_provider.force_flush() {
+            self.metrics.record_alert_export_failed(OTLP_DESTINATION);
+            tracing::warn!(error = %e, "OTLP export flush failed");
+        }
         if let Err(e) = self.logger_provider.shutdown() {
             tracing::warn!(error = %e, "OTLP logger provider shutdown failed");
         }
@@ -269,6 +289,46 @@ mod tests {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .and_then(|d| u64::try_from(d.as_nanos()).ok()),
             Some(1_709_913_601_000_000_000)
+        );
+    }
+
+    /// A collector nobody can reach has to end up as two numbers: the alert
+    /// the batch queue accepted, and the batch the flush could not deliver.
+    #[tokio::test]
+    async fn a_collector_nobody_can_reach_moves_both_series() {
+        let metrics = Arc::new(crate::metrics::AgentMetrics::new());
+        let sender = OtlpAlertSender::new(
+            "http://127.0.0.1:1",
+            "http",
+            Duration::from_millis(200),
+            metrics.clone(),
+        )
+        .expect("the exporter builds without reaching anything");
+
+        let alert = sample_alert();
+        let route = AlertRoute {
+            name: "otlp".to_string(),
+            destination: domain::alert::entity::AlertDestination::Otlp,
+            min_severity: Severity::Low,
+            event_types: None,
+        };
+        sender
+            .send(&alert, &route)
+            .await
+            .expect("the emit is local");
+
+        let accepted = metrics.encode();
+        assert!(
+            accepted.contains("ebpfsentinel_alerts_exported_total{destination=\"otlp\"} 1"),
+            "the batch queue accepting the alert was not counted: {accepted}"
+        );
+
+        drop(sender);
+
+        let flushed = metrics.encode();
+        assert!(
+            flushed.contains("ebpfsentinel_alerts_export_failures_total{destination=\"otlp\"} 1"),
+            "the flush that reached nothing was not counted: {flushed}"
         );
     }
 }
