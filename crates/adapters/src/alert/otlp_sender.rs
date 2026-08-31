@@ -5,14 +5,17 @@ use std::time::Duration;
 
 use domain::alert::entity::{Alert, AlertRoute};
 use domain::common::error::DomainError;
-use opentelemetry::InstrumentationScope;
 use opentelemetry::logs::{Logger, LoggerProvider as _};
+use opentelemetry::{InstrumentationScope, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::logs::SdkLoggerProvider;
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::logs::{LogExporter, SdkLogger, SdkLoggerProvider};
 use ports::secondary::alert_sender::AlertSender;
 use ports::secondary::metrics_port::MetricsPort;
 
-use crate::alert::otlp_record::{OtlpLogRecord, now_unix_nano};
+use crate::alert::otlp_record::{
+    OtlpLogRecord, OtlpResourceEnv, now_unix_nano, resource_attributes,
+};
 
 /// The label both alert-export series carry for this sender.
 const OTLP_DESTINATION: &str = "otlp";
@@ -20,6 +23,10 @@ const OTLP_DESTINATION: &str = "otlp";
 /// Alert sender that exports alerts as OTLP Logs (fire-and-forget).
 pub struct OtlpAlertSender {
     logger_provider: SdkLoggerProvider,
+    /// Built once: a scope and a logger are the same two values for every
+    /// alert, and building them per send was work done on the alert path for
+    /// no result that differed.
+    logger: SdkLogger,
     metrics: Arc<dyn MetricsPort>,
 }
 
@@ -50,15 +57,40 @@ impl OtlpAlertSender {
                 })?,
         };
 
-        let logger_provider = SdkLoggerProvider::builder()
-            .with_batch_exporter(exporter)
-            .build();
+        let logger_provider = build_provider(exporter);
+        let logger = logger_provider.logger_with_scope(scope());
 
         Ok(Self {
             logger_provider,
+            logger,
             metrics,
         })
     }
+}
+
+/// The scope every record this agent exports is written under.
+fn scope() -> InstrumentationScope {
+    InstrumentationScope::builder("ebpfsentinel")
+        .with_version(env!("CARGO_PKG_VERSION"))
+        .build()
+}
+
+/// Build the provider with the resource that says which agent a record came
+/// from, so a collector holding a fleet can tell two of them apart.
+fn build_provider<E: LogExporter + 'static>(exporter: E) -> SdkLoggerProvider {
+    let attributes = resource_attributes(&OtlpResourceEnv::from_process());
+    let resource = Resource::builder_empty()
+        .with_attributes(
+            attributes
+                .into_iter()
+                .map(|(key, value)| KeyValue::new(key, value)),
+        )
+        .build();
+
+    SdkLoggerProvider::builder()
+        .with_resource(resource)
+        .with_batch_exporter(exporter)
+        .build()
 }
 
 /// Resolve the OTLP/HTTP logs URL from a configured endpoint.
@@ -87,11 +119,6 @@ impl AlertSender for OtlpAlertSender {
         _route: &'a AlertRoute,
     ) -> Pin<Box<dyn Future<Output = Result<(), DomainError>> + Send + 'a>> {
         Box::pin(async move {
-            let scope = InstrumentationScope::builder("ebpfsentinel")
-                .with_version(env!("CARGO_PKG_VERSION"))
-                .build();
-            let logger = self.logger_provider.logger_with_scope(scope);
-
             let mapped = match OtlpLogRecord::from_alert(alert, now_unix_nano()) {
                 Ok(mapped) => mapped,
                 Err(e) => {
@@ -100,10 +127,10 @@ impl AlertSender for OtlpAlertSender {
                 }
             };
 
-            let mut record = logger.create_log_record();
+            let mut record = self.logger.create_log_record();
             mapped.apply(&mut record);
 
-            logger.emit(record);
+            self.logger.emit(record);
 
             // Count the acceptance by the OTLP batch queue. There is no retry
             // and no per-alert delivery confirmation here, so what a failed
@@ -289,6 +316,64 @@ mod tests {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .and_then(|d| u64::try_from(d.as_nanos()).ok()),
             Some(1_709_913_601_000_000_000)
+        );
+    }
+
+    /// A collector is handed the resource, not the record alone: without it
+    /// every agent in a fleet arrives as the same nameless service.
+    #[derive(Debug, Default, Clone)]
+    struct CapturingExporter {
+        resource: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        exported: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl opentelemetry_sdk::logs::LogExporter for CapturingExporter {
+        fn export(
+            &self,
+            batch: opentelemetry_sdk::logs::LogBatch<'_>,
+        ) -> impl Future<Output = opentelemetry_sdk::error::OTelSdkResult> {
+            self.exported
+                .fetch_add(batch.iter().count(), std::sync::atomic::Ordering::SeqCst);
+            std::future::ready(Ok(()))
+        }
+
+        fn set_resource(&mut self, resource: &Resource) {
+            let mut held = self.resource.lock().expect("no test holds this poisoned");
+            *held = resource
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect();
+        }
+    }
+
+    #[test]
+    fn an_exported_record_carries_the_agents_resource() {
+        let exporter = CapturingExporter::default();
+        let resource = exporter.resource.clone();
+        let exported = exporter.exported.clone();
+
+        let provider = build_provider(exporter);
+        let logger = provider.logger_with_scope(scope());
+        let alert = sample_alert();
+        let mapped =
+            OtlpLogRecord::from_alert(&alert, now_unix_nano()).expect("the alert serialises");
+        let mut record = logger.create_log_record();
+        mapped.apply(&mut record);
+        logger.emit(record);
+        provider.force_flush().expect("the exporter accepts");
+
+        assert_eq!(exported.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let held = resource.lock().expect("no test holds this poisoned");
+        let named = |key: &str| {
+            held.iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(named("service.name").as_deref(), Some("ebpfsentinel"));
+        assert_eq!(
+            named("service.version").as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
         );
     }
 

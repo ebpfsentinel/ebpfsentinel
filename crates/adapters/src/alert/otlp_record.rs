@@ -125,6 +125,117 @@ impl OtlpLogRecord {
     }
 }
 
+/// The service every OTLP export from this agent names when an operator has
+/// not named one.
+const DEFAULT_SERVICE_NAME: &str = "ebpfsentinel";
+
+/// What an operator asked for through the environment.
+///
+/// The two variables are read into a value rather than consulted where they
+/// are needed, because a process-wide variable is not something one test can
+/// set while its neighbours are running.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OtlpResourceEnv {
+    /// `OTEL_SERVICE_NAME`.
+    pub service_name: Option<String>,
+    /// `OTEL_RESOURCE_ATTRIBUTES`, still in its `key=value,key=value` form.
+    pub resource_attributes: Option<String>,
+}
+
+impl OtlpResourceEnv {
+    /// Read the two variables the OpenTelemetry specification defines.
+    #[must_use]
+    pub fn from_process() -> Self {
+        Self {
+            service_name: non_empty(std::env::var("OTEL_SERVICE_NAME").ok()),
+            resource_attributes: non_empty(std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok()),
+        }
+    }
+}
+
+/// The resource attributes an export carries, so two agents reporting into
+/// one collector are told apart.
+///
+/// The defaults are what this build knows about itself: the product name, the
+/// version that produced the record, and the machine it ran on. An operator's
+/// environment wins over all three, because a resource that cannot be
+/// overridden is worse than none in a collector holding a whole fleet:
+/// `OTEL_RESOURCE_ATTRIBUTES` replaces or adds any key, and
+/// `OTEL_SERVICE_NAME` then wins over the `service.name` that string may
+/// itself have carried, which is the precedence the specification states.
+#[must_use]
+pub fn resource_attributes(env: &OtlpResourceEnv) -> Vec<(String, String)> {
+    let mut attributes = vec![
+        ("service.name".to_string(), DEFAULT_SERVICE_NAME.to_string()),
+        (
+            "service.version".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        ),
+    ];
+
+    // An identity the agent could not read is left off rather than sent as a
+    // word standing in for one: a fleet of records all claiming the same
+    // placeholder is exactly the confusion this attribute exists to end.
+    if let Some(instance) = instance_id() {
+        attributes.push(("service.instance.id".to_string(), instance));
+    }
+
+    if let Some(raw) = env.resource_attributes.as_deref() {
+        for entry in raw.split_terminator(',') {
+            if let Some((key, value)) = entry.split_once('=') {
+                set_attribute(&mut attributes, key.trim(), value.trim());
+            }
+        }
+    }
+
+    if let Some(name) = env.service_name.as_deref() {
+        set_attribute(&mut attributes, "service.name", name);
+    }
+
+    attributes
+}
+
+/// The resource as one OTLP/HTTP JSON `resource`, for the sender that writes
+/// the payload itself rather than handing it to the SDK.
+#[must_use]
+pub fn resource_to_json(attributes: &[(String, String)]) -> serde_json::Value {
+    let attributes: Vec<serde_json::Value> = attributes
+        .iter()
+        .map(|(key, value)| serde_json::json!({"key": key, "value": {"stringValue": value}}))
+        .collect();
+
+    serde_json::json!({ "attributes": attributes })
+}
+
+/// The machine this agent runs on, under the names an orchestrator and a
+/// container image already carry it.
+fn instance_id() -> Option<String> {
+    for variable in ["EBPFSENTINEL_NODE_NAME", "HOSTNAME"] {
+        if let Some(name) = non_empty(std::env::var(variable).ok()) {
+            return Some(name);
+        }
+    }
+    non_empty(
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .ok()
+            .map(|name| name.trim().to_string()),
+    )
+}
+
+/// Replace the value of an attribute already present, or append it.
+fn set_attribute(attributes: &mut Vec<(String, String)>, key: &str, value: &str) {
+    if let Some(existing) = attributes.iter_mut().find(|(name, _)| name == key) {
+        existing.1 = value.to_string();
+    } else {
+        attributes.push((key.to_string(), value.to_string()));
+    }
+}
+
+/// A variable an operator set to nothing at all is a variable they did not set.
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
+}
+
 /// The moment an exporter is handing a record over, on the clock the alert
 /// stamps are already on.
 #[must_use]
@@ -173,6 +284,86 @@ mod tests {
     use super::*;
     use domain::alert::mitre::MitreAttackInfo;
     use domain::common::entity::{DomainMode, RuleId};
+
+    /// The value of one attribute, so a test reads what a collector would.
+    fn value_of<'a>(attributes: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        attributes
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn the_defaults_name_the_product_and_the_build() {
+        let attributes = resource_attributes(&OtlpResourceEnv::default());
+
+        assert_eq!(value_of(&attributes, "service.name"), Some("ebpfsentinel"));
+        assert_eq!(
+            value_of(&attributes, "service.version"),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn the_operators_service_name_wins() {
+        let env = OtlpResourceEnv {
+            service_name: Some("fleet-edge".to_string()),
+            resource_attributes: None,
+        };
+
+        let attributes = resource_attributes(&env);
+
+        assert_eq!(value_of(&attributes, "service.name"), Some("fleet-edge"));
+        assert_eq!(
+            attributes
+                .iter()
+                .filter(|(name, _)| name == "service.name")
+                .count(),
+            1,
+            "the name was added again rather than replaced: {attributes:?}"
+        );
+    }
+
+    /// `OTEL_RESOURCE_ATTRIBUTES` replaces what this build set and adds what
+    /// it never knew, and `OTEL_SERVICE_NAME` still wins over the name that
+    /// string carried.
+    #[test]
+    fn the_operators_attributes_replace_and_add() {
+        let env = OtlpResourceEnv {
+            service_name: Some("named-last".to_string()),
+            resource_attributes: Some(
+                "service.name=named-first, deployment.environment = staging ,broken".to_string(),
+            ),
+        };
+
+        let attributes = resource_attributes(&env);
+
+        assert_eq!(value_of(&attributes, "service.name"), Some("named-last"));
+        assert_eq!(
+            value_of(&attributes, "deployment.environment"),
+            Some("staging"),
+            "the spaces around a pair were not trimmed: {attributes:?}"
+        );
+        assert!(
+            !attributes.iter().any(|(name, _)| name == "broken"),
+            "an entry with no value became an attribute: {attributes:?}"
+        );
+    }
+
+    #[test]
+    fn the_resource_renders_as_otlp_json() {
+        let rendered =
+            resource_to_json(&[("service.name".to_string(), "ebpfsentinel".to_string())]);
+
+        assert_eq!(
+            rendered,
+            serde_json::json!({
+                "attributes": [
+                    {"key": "service.name", "value": {"stringValue": "ebpfsentinel"}}
+                ]
+            })
+        );
+    }
 
     fn sample_alert() -> Alert {
         Alert {
