@@ -1,7 +1,9 @@
 name: CI
 
 on:
-  pull_request:
+  # This repository is worked on by pushing straight to main, so a pull
+  # request trigger is a gate that never fires. The push is the change.
+  push:
     branches: [main]
   workflow_dispatch:
 
@@ -21,6 +23,7 @@ jobs:
   coverage-audit:
     name: Coverage Matrix Audit
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - name: Install PyYAML
@@ -34,6 +37,7 @@ jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -45,6 +49,7 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust-build
@@ -56,6 +61,7 @@ jobs:
   test:
     name: Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust-build
@@ -65,6 +71,7 @@ jobs:
   openapi:
     name: OpenAPI
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust-build
@@ -86,6 +93,7 @@ jobs:
   deny:
     name: Cargo Deny
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -94,6 +102,7 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: [test]
     steps:
       - uses: actions/checkout@v7
@@ -102,13 +111,18 @@ jobs:
           toolchain-components: llvm-tools-preview
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      # One instrumented run of the workspace, then two reports off the
+      # profile data it left behind. `--lcov` and `--text` as two invocations
+      # re-ran the whole test suite to say the same thing twice.
+      - name: Run the workspace under instrumentation
+        run: cargo llvm-cov --workspace --exclude ebpf-common --no-report
       - name: Generate coverage
         run: |
-          cargo llvm-cov --workspace --exclude ebpf-common \
+          cargo llvm-cov report --workspace --exclude ebpf-common \
             --lcov --output-path lcov.info
       - name: Per-crate coverage summary
         run: |
-          cargo llvm-cov --workspace --exclude ebpf-common --text 2>&1 | tee coverage-summary.txt
+          cargo llvm-cov report --workspace --exclude ebpf-common --text 2>&1 | tee coverage-summary.txt
           echo "## Coverage Summary" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           tail -20 coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
@@ -146,6 +160,7 @@ jobs:
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
@@ -158,6 +173,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     needs: [fmt, clippy, test]
     steps:
       - uses: actions/checkout@v7

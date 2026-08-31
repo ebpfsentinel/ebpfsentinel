@@ -22,6 +22,7 @@ jobs:
   bench-compile:
     name: Compile benchmarks
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -34,6 +35,7 @@ jobs:
   bench-domain:
     name: Domain benchmarks
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: [bench-compile]
     steps:
       - uses: actions/checkout@v7

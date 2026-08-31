@@ -40,6 +40,7 @@ jobs:
   build-ebpf:
     name: Build eBPF
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -76,6 +77,7 @@ jobs:
     name: Build ${{ matrix.component }}
     needs: [build-ebpf]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
     strategy:

@@ -51,13 +51,17 @@ env:
 
 concurrency:
   group: integration-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A commit on top of a running check makes that run's verdict about a tree
+  # nobody has any more. Cancelling on a push as well as on a pull request is
+  # what stops a burst of commits from paying for one full run each.
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
   # ── Decide which profile this run executes ───────────────────────
   plan:
     name: Resolve Profile
     runs-on: ubuntu-latest
+    timeout-minutes: 480
     outputs:
       profile: ${{ steps.resolve.outputs.profile }}
       pr_suites: ${{ steps.resolve.outputs.pr_suites }}
@@ -111,6 +115,7 @@ jobs:
   build:
     name: Build Agent
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     needs: plan
     steps:
       - uses: actions/checkout@v7
@@ -225,6 +230,7 @@ jobs:
   pr-docker:
     name: PR Docker Suite
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     needs: [plan, build]
     if: needs.plan.outputs.profile == 'pr' || needs.plan.outputs.profile == 'full'
     steps:
@@ -260,6 +266,7 @@ jobs:
   pr-ebpf:
     name: PR eBPF Suite
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     needs: [plan, build]
     if: (needs.plan.outputs.profile == 'pr' || needs.plan.outputs.profile == 'full') && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     steps:
@@ -379,6 +386,7 @@ jobs:
     needs: [plan, nightly-suites, nightly-soak]
     if: always() && needs.plan.outputs.profile == 'nightly' && github.event_name == 'schedule' && (needs.nightly-suites.result == 'failure' || needs.nightly-soak.result == 'failure')
     runs-on: ubuntu-latest
+    timeout-minutes: 480
     steps:
       - name: Open / update nightly-regression issue
         uses: actions/github-script@v9
