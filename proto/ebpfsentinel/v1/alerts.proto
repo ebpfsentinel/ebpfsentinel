@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package ebpfsentinel.v1;
 
-// Real-time alert streaming service (FR31, FR52).
+// Real-time alert streaming service.
 service AlertStreamService {
   // Server-streaming RPC: client subscribes and receives alerts in real time.
   rpc StreamAlerts(StreamAlertsRequest) returns (stream AlertEvent);
