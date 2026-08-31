@@ -10,6 +10,8 @@ use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::{Histogram, exponential_buckets_range};
 use prometheus_client::registry::Registry;
+use std::collections::HashSet;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 
 // ── Label types ─────────────────────────────────────────────────────
@@ -137,6 +139,31 @@ pub struct VipLabels {
     pub vip: String,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct PolicyLabels {
+    pub policy: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct EncryptedDnsLabels {
+    pub protocol: String,
+    pub resolver: String,
+}
+
+/// Distinct `resolver` values `encrypted_dns_detections` names before the
+/// rest fold onto [`ENCRYPTED_DNS_RESOLVER_OVERFLOW`].
+///
+/// A `DoT` detection takes the resolver straight out of the `ClientHello`
+/// SNI, which the client writes, so an unlabelled cap would let one peer
+/// mint a series per connection and grow the registry until the process
+/// dies. An estate talks to a handful of resolvers, so the cap keeps every
+/// real one named and turns a flood into a single series.
+const ENCRYPTED_DNS_RESOLVER_CAP: usize = 64;
+
+/// The `resolver` label everything past [`ENCRYPTED_DNS_RESOLVER_CAP`]
+/// carries.
+const ENCRYPTED_DNS_RESOLVER_OVERFLOW: &str = "other";
+
 // ── Agent metrics registry ──────────────────────────────────────────
 
 /// Prometheus metrics registry for the agent.
@@ -171,6 +198,10 @@ pub struct AgentMetrics {
     pub alerts_sse_subscribers: Gauge,
     pub ips_blacklist_size: Gauge,
     pub ips_blocks_total: Counter,
+    /// Auto-response enforcements applied, by the policy that matched.
+    /// Policy names come out of the configuration file, so the label set is
+    /// as bounded as the estate's own configuration.
+    pub auto_responses_total: Family<PolicyLabels, Counter>,
     pub alerts_by_rule_total: Family<RuleLabels, Counter>,
     pub false_positives_total: Family<RuleLabels, Counter>,
     pub memory_usage_bytes: Gauge,
@@ -183,6 +214,12 @@ pub struct AgentMetrics {
     pub dns_cache_evictions_total: Counter,
     pub dns_blocked_domains_total: Counter,
     pub dns_injected_ips: Gauge,
+    /// Encrypted DNS connections detected, by protocol and resolver. The
+    /// resolver label is bounded: see [`ENCRYPTED_DNS_RESOLVER_CAP`].
+    pub encrypted_dns_detections_total: Family<EncryptedDnsLabels, Counter>,
+    /// Resolver names already given a series, so a value past the cap can be
+    /// told from one already on the wire.
+    encrypted_dns_resolvers: Mutex<HashSet<String>>,
     pub domain_reputation_high_risk: Gauge,
     pub domain_auto_blocked_total: Counter,
     pub geoip_lookups_total: Family<GeoLookupLabels, Counter>,
@@ -231,6 +268,10 @@ pub struct AgentMetrics {
     /// mark a conntrack entry `IPS_DYING` to terminate a live flow
     /// following a block-mode rule match.
     pub ids_ct_dying_total: Counter,
+    /// TLS `ClientHello` fingerprints computed, counted and not named: see
+    /// the `FingerprintMetrics` implementation for why the JA4 value is not
+    /// a label.
+    pub fingerprints_seen_total: Counter,
     /// Whether eBPF is loaded through a BPF token: `1` when the agent
     /// loaded its programs via `BPF_TOKEN_CREATE` (the only supported
     /// path), `0` when running in API-only mode with no eBPF attached.
@@ -381,6 +422,13 @@ impl AgentMetrics {
             ips_blocks_total.clone(),
         );
 
+        let auto_responses_total = Family::<PolicyLabels, Counter>::default();
+        registry.register(
+            "auto_responses",
+            "Auto-response enforcements applied, by policy",
+            auto_responses_total.clone(),
+        );
+
         let alerts_by_rule_total = Family::<RuleLabels, Counter>::default();
         registry.register(
             "alerts_by_rule",
@@ -463,6 +511,13 @@ impl AgentMetrics {
             "dns_injected_ips",
             "Current number of IPs injected from DNS blocklist",
             dns_injected_ips.clone(),
+        );
+
+        let encrypted_dns_detections_total = Family::<EncryptedDnsLabels, Counter>::default();
+        registry.register(
+            "encrypted_dns_detections",
+            "Encrypted DNS connections detected, by protocol and resolver",
+            encrypted_dns_detections_total.clone(),
         );
 
         let domain_reputation_high_risk = Gauge::default();
@@ -703,6 +758,13 @@ impl AgentMetrics {
             ids_ct_dying_total.clone(),
         );
 
+        let fingerprints_seen_total = Counter::default();
+        registry.register(
+            "fingerprints_seen",
+            "TLS ClientHello JA4 fingerprints computed by the L7 pipeline",
+            fingerprints_seen_total.clone(),
+        );
+
         let bpf_token_used = Gauge::default();
         registry.register(
             "bpf_token_used",
@@ -731,6 +793,7 @@ impl AgentMetrics {
             alerts_sse_subscribers,
             ips_blacklist_size,
             ips_blocks_total,
+            auto_responses_total,
             alerts_by_rule_total,
             false_positives_total,
             memory_usage_bytes,
@@ -743,6 +806,8 @@ impl AgentMetrics {
             dns_cache_evictions_total,
             dns_blocked_domains_total,
             dns_injected_ips,
+            encrypted_dns_detections_total,
+            encrypted_dns_resolvers: Mutex::new(HashSet::new()),
             domain_reputation_high_risk,
             domain_auto_blocked_total,
             geoip_lookups_total,
@@ -776,8 +841,29 @@ impl AgentMetrics {
             container_resolver_cache_misses_total,
             container_resolver_errors_total,
             ids_ct_dying_total,
+            fingerprints_seen_total,
             bpf_token_used,
         }
+    }
+
+    /// The `resolver` label to export for a detection, folding everything
+    /// past [`ENCRYPTED_DNS_RESOLVER_CAP`] distinct values onto
+    /// [`ENCRYPTED_DNS_RESOLVER_OVERFLOW`].
+    fn bounded_resolver(&self, resolver: &str) -> String {
+        let Ok(mut seen) = self.encrypted_dns_resolvers.lock() else {
+            // A poisoned guard means a panic while holding it. Counting the
+            // detection under the overflow label keeps the series moving
+            // rather than losing it to a lock nobody can repair.
+            return ENCRYPTED_DNS_RESOLVER_OVERFLOW.to_string();
+        };
+        if seen.contains(resolver) {
+            return resolver.to_string();
+        }
+        if seen.len() >= ENCRYPTED_DNS_RESOLVER_CAP {
+            return ENCRYPTED_DNS_RESOLVER_OVERFLOW.to_string();
+        }
+        seen.insert(resolver.to_string());
+        resolver.to_string()
     }
 
     /// Record whether eBPF was loaded through a BPF token (`true`) or the
@@ -961,6 +1047,14 @@ impl IpsMetrics for AgentMetrics {
     fn record_ips_block(&self) {
         self.ips_blocks_total.inc();
     }
+
+    fn record_auto_response(&self, policy_name: &str) {
+        self.auto_responses_total
+            .get_or_create(&PolicyLabels {
+                policy: policy_name.to_string(),
+            })
+            .inc();
+    }
 }
 
 impl ThreatIntelMetrics for AgentMetrics {
@@ -1021,6 +1115,15 @@ impl DnsMetrics for AgentMetrics {
     fn set_dns_injected_ips(&self, count: u64) {
         self.dns_injected_ips
             .set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn record_encrypted_dns(&self, protocol: &str, resolver: &str) {
+        self.encrypted_dns_detections_total
+            .get_or_create(&EncryptedDnsLabels {
+                protocol: protocol.to_string(),
+                resolver: self.bounded_resolver(resolver),
+            })
+            .inc();
     }
 }
 
@@ -1254,7 +1357,19 @@ impl LbMetrics for AgentMetrics {
     }
 }
 
-impl ports::secondary::metrics_port::FingerprintMetrics for AgentMetrics {}
+impl ports::secondary::metrics_port::FingerprintMetrics for AgentMetrics {
+    /// Count the fingerprint without naming it.
+    ///
+    /// A JA4 is computed from bytes the client chose, so a label carrying
+    /// the value is a series per client stack and a memory-exhaustion path
+    /// the peer controls. Unlike a resolver name it has no small real
+    /// vocabulary to cap onto - the distinct count is unbounded by design -
+    /// so the values are not exported here at all. They stay readable per
+    /// flow through the fingerprint cache the API and the CLI serve.
+    fn record_fingerprint_seen(&self, _ja4: &str) {
+        self.fingerprints_seen_total.inc();
+    }
+}
 
 impl ports::secondary::metrics_port::ContainerMetrics for AgentMetrics {
     fn record_container_cache_hit(&self) {
@@ -1445,6 +1560,103 @@ mod tests {
     }
 
     #[test]
+    fn the_auto_response_call_site_moves_a_series_per_policy() {
+        let metrics = AgentMetrics::new();
+        let port: &dyn MetricsPort = &metrics;
+        port.record_auto_response("block-critical");
+        port.record_auto_response("block-critical");
+        port.record_auto_response("throttle-high");
+
+        let encoded = metrics.encode();
+        assert!(
+            encoded.contains("ebpfsentinel_auto_responses_total{policy=\"block-critical\"} 2"),
+            "{encoded}"
+        );
+        assert!(
+            encoded.contains("ebpfsentinel_auto_responses_total{policy=\"throttle-high\"} 1"),
+            "{encoded}"
+        );
+    }
+
+    #[test]
+    fn the_encrypted_dns_call_site_moves_a_series_per_protocol_and_resolver() {
+        let metrics = AgentMetrics::new();
+        let port: &dyn MetricsPort = &metrics;
+        port.record_encrypted_dns("dot", "dns.google");
+        port.record_encrypted_dns("dot", "dns.google");
+        port.record_encrypted_dns("doh", "cloudflare-dns.com");
+
+        let encoded = metrics.encode();
+        assert!(
+            encoded.contains(
+                "ebpfsentinel_encrypted_dns_detections_total{protocol=\"dot\",resolver=\"dns.google\"} 2"
+            ),
+            "{encoded}"
+        );
+        assert!(
+            encoded.contains(
+                "ebpfsentinel_encrypted_dns_detections_total{protocol=\"doh\",resolver=\"cloudflare-dns.com\"} 1"
+            ),
+            "{encoded}"
+        );
+    }
+
+    #[test]
+    fn a_resolver_past_the_cap_folds_onto_one_series() {
+        // The SNI a DoT client sends is the resolver label, so a peer that
+        // varies it must not be able to add a series per connection.
+        let metrics = AgentMetrics::new();
+        let port: &dyn MetricsPort = &metrics;
+        for i in 0..ENCRYPTED_DNS_RESOLVER_CAP {
+            port.record_encrypted_dns("dot", &format!("resolver-{i}.example"));
+        }
+        for i in 0..1_000 {
+            port.record_encrypted_dns("dot", &format!("flood-{i}.example"));
+        }
+
+        let encoded = metrics.encode();
+        let series = encoded
+            .lines()
+            .filter(|line| line.starts_with("ebpfsentinel_encrypted_dns_detections_total{"))
+            .count();
+        assert_eq!(
+            series,
+            ENCRYPTED_DNS_RESOLVER_CAP + 1,
+            "the cap plus one overflow series and nothing more: {encoded}"
+        );
+        assert!(
+            encoded.contains(
+                "ebpfsentinel_encrypted_dns_detections_total{protocol=\"dot\",resolver=\"other\"} 1000"
+            ),
+            "{encoded}"
+        );
+        assert!(
+            !encoded.contains("flood-0.example"),
+            "a resolver past the cap must not reach the exposition: {encoded}"
+        );
+    }
+
+    #[test]
+    fn the_fingerprint_call_site_counts_without_naming_the_value() {
+        // A JA4 is attacker-chosen, so the count moves and the value never
+        // becomes a label.
+        let metrics = AgentMetrics::new();
+        let port: &dyn MetricsPort = &metrics;
+        port.record_fingerprint_seen("t13d1516h2_8daaf6152771_02713d6af862");
+        port.record_fingerprint_seen("t13d1517h2_8daaf6152771_e5627efa2ab1");
+
+        let encoded = metrics.encode();
+        assert!(
+            encoded.contains("ebpfsentinel_fingerprints_seen_total 2"),
+            "{encoded}"
+        );
+        assert!(
+            !encoded.contains("t13d1516h2"),
+            "the fingerprint value must not reach the exposition: {encoded}"
+        );
+    }
+
+    #[test]
     fn alert_counter_increments() {
         let metrics = AgentMetrics::new();
         metrics.record_alert("ids", "high", "T1071");
@@ -1609,6 +1821,7 @@ mod tests {
         ("alerts_sse_subscribers", "gauge"),
         ("audit_events", "counter"),
         ("audit_failures", "counter"),
+        ("auto_responses", "counter"),
         ("bpf_token_used", "gauge"),
         ("bytes_processed", "counter"),
         ("container_resolver_cache_hits", "counter"),
@@ -1635,8 +1848,10 @@ mod tests {
         ("domain_reputation_high_risk", "gauge"),
         ("ebpf_attach_blocked", "gauge"),
         ("ebpf_program_status", "gauge"),
+        ("encrypted_dns_detections", "counter"),
         ("events_dropped", "counter"),
         ("false_positives", "counter"),
+        ("fingerprints_seen", "counter"),
         ("geoip_lookups", "counter"),
         ("ids_ct_dying", "counter"),
         ("ids_domain_matches", "counter"),
@@ -1826,6 +2041,17 @@ mod tests {
         m.ddos_mitigations_total
             .get_or_create(&AttackTypeLabels {
                 attack_type: "syn_flood".into(),
+            })
+            .inc();
+        m.auto_responses_total
+            .get_or_create(&PolicyLabels {
+                policy: "block-critical".into(),
+            })
+            .inc();
+        m.encrypted_dns_detections_total
+            .get_or_create(&EncryptedDnsLabels {
+                protocol: "dot".into(),
+                resolver: "dns.google".into(),
             })
             .inc();
     }

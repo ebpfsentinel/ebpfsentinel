@@ -1061,9 +1061,11 @@ mod tests {
     struct TestMetrics {
         alert_calls: AtomicU32,
         dropped_calls: AtomicU32,
+        auto_response_calls: AtomicU32,
         last_component: std::sync::Mutex<String>,
         last_severity: std::sync::Mutex<String>,
         last_drop_reason: std::sync::Mutex<String>,
+        last_auto_response_policy: std::sync::Mutex<String>,
     }
 
     impl TestMetrics {
@@ -1071,9 +1073,11 @@ mod tests {
             Self {
                 alert_calls: AtomicU32::new(0),
                 dropped_calls: AtomicU32::new(0),
+                auto_response_calls: AtomicU32::new(0),
                 last_component: std::sync::Mutex::new(String::new()),
                 last_severity: std::sync::Mutex::new(String::new()),
                 last_drop_reason: std::sync::Mutex::new(String::new()),
+                last_auto_response_policy: std::sync::Mutex::new(String::new()),
             }
         }
     }
@@ -1091,7 +1095,12 @@ mod tests {
             *self.last_drop_reason.lock().unwrap() = reason.to_string();
         }
     }
-    impl IpsMetrics for TestMetrics {}
+    impl IpsMetrics for TestMetrics {
+        fn record_auto_response(&self, policy_name: &str) {
+            self.auto_response_calls.fetch_add(1, Ordering::Relaxed);
+            *self.last_auto_response_policy.lock().unwrap() = policy_name.to_string();
+        }
+    }
     impl DnsMetrics for TestMetrics {}
     impl DomainMetrics for TestMetrics {}
     impl SystemMetrics for TestMetrics {}
@@ -1921,6 +1930,33 @@ mod tests {
             ttl_secs: 3600,
             rate_pps,
         }
+    }
+
+    #[tokio::test]
+    async fn an_enforced_policy_records_the_auto_response_metric() {
+        // The enforcement itself is covered below. What is asserted here is
+        // that the call site reaches the metrics port, since the port gives
+        // every method a default empty body and a call that reaches nothing
+        // still compiles.
+        let metrics = Arc::new(TestMetrics::new());
+        let (ips, rl) = make_auto_response_services(&metrics);
+        let mut pipeline =
+            make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics))
+                .with_auto_response(
+                    vec![make_auto_response_policy(
+                        domain::response::entity::ResponseActionType::BlockIp,
+                        None,
+                    )],
+                    Arc::clone(&ips),
+                    Arc::clone(&rl),
+                );
+
+        pipeline
+            .process_alert(&make_ids_alert("ids-001", Severity::High))
+            .await;
+
+        assert_eq!(metrics.auto_response_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.last_auto_response_policy.lock().unwrap(), "auto");
     }
 
     #[tokio::test]

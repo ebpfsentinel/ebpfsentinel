@@ -1563,8 +1563,12 @@ mod tests {
     struct TestMetrics {
         packet_calls: AtomicU32,
         dropped_calls: AtomicU32,
+        fingerprint_calls: AtomicU32,
+        encrypted_dns_calls: AtomicU32,
         last_component: std::sync::Mutex<String>,
         last_action: std::sync::Mutex<String>,
+        last_fingerprint: std::sync::Mutex<String>,
+        last_encrypted_dns: std::sync::Mutex<(String, String)>,
     }
 
     impl TestMetrics {
@@ -1572,8 +1576,12 @@ mod tests {
             Self {
                 packet_calls: AtomicU32::new(0),
                 dropped_calls: AtomicU32::new(0),
+                fingerprint_calls: AtomicU32::new(0),
+                encrypted_dns_calls: AtomicU32::new(0),
                 last_component: std::sync::Mutex::new(String::new()),
                 last_action: std::sync::Mutex::new(String::new()),
+                last_fingerprint: std::sync::Mutex::new(String::new()),
+                last_encrypted_dns: std::sync::Mutex::new((String::new(), String::new())),
             }
         }
     }
@@ -1588,7 +1596,12 @@ mod tests {
     impl FirewallMetrics for TestMetrics {}
     impl AlertMetrics for TestMetrics {}
     impl IpsMetrics for TestMetrics {}
-    impl DnsMetrics for TestMetrics {}
+    impl DnsMetrics for TestMetrics {
+        fn record_encrypted_dns(&self, protocol: &str, resolver: &str) {
+            self.encrypted_dns_calls.fetch_add(1, Ordering::Relaxed);
+            *self.last_encrypted_dns.lock().unwrap() = (protocol.to_string(), resolver.to_string());
+        }
+    }
     impl DomainMetrics for TestMetrics {}
     impl SystemMetrics for TestMetrics {}
     impl ConfigMetrics for TestMetrics {}
@@ -1603,7 +1616,12 @@ mod tests {
     impl RoutingMetrics for TestMetrics {}
     impl AuditMetrics for TestMetrics {}
     impl LbMetrics for TestMetrics {}
-    impl FingerprintMetrics for TestMetrics {}
+    impl FingerprintMetrics for TestMetrics {
+        fn record_fingerprint_seen(&self, ja4: &str) {
+            self.fingerprint_calls.fetch_add(1, Ordering::Relaxed);
+            *self.last_fingerprint.lock().unwrap() = ja4.to_string();
+        }
+    }
     impl ContainerMetrics for TestMetrics {}
     impl CtMetrics for TestMetrics {}
     impl ThreatIntelMetrics for TestMetrics {}
@@ -1812,6 +1830,38 @@ mod tests {
         assert_eq!(
             flushed, 0,
             "no flow should remain buffered after inline parse"
+        );
+    }
+
+    // The two L7 call sites that reach the metrics port sit on the same
+    // path: a ClientHello is fingerprinted, then handed to the encrypted-DNS
+    // detector. The port gives both methods a default empty body, so a call
+    // that reaches no implementation still compiles - what is asserted here
+    // is that the pipeline reaches the port at all.
+    #[tokio::test]
+    async fn a_clienthello_records_the_fingerprint_and_the_encrypted_dns_metrics() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let reassembler = Arc::new(domain::l7::reassembler::StreamReassembler::new(
+            domain::l7::reassembler::ReassemblerConfig::default(),
+        ));
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_stream_reassembler(reassembler);
+
+        let mut header = make_event(EVENT_TYPE_L7, 0);
+        header.dst_port = 853;
+        dispatcher.process_l7_event(header, &build_tls_client_hello("dot.example"));
+
+        assert_eq!(metrics.fingerprint_calls.load(Ordering::Relaxed), 1);
+        assert!(
+            metrics.last_fingerprint.lock().unwrap().starts_with('t'),
+            "the JA4 value the pipeline computed reaches the port"
+        );
+        assert_eq!(metrics.encrypted_dns_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *metrics.last_encrypted_dns.lock().unwrap(),
+            ("dot".to_string(), "dot.example".to_string())
         );
     }
 
