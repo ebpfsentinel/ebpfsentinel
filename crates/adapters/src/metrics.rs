@@ -142,7 +142,7 @@ pub struct VipLabels {
 /// Prometheus metrics registry for the agent.
 ///
 /// All metric families use interior mutability (atomics), so recording
-/// metrics only requires `&self`. The registry itself is NOT Clone —
+/// metrics only requires `&self`. The registry itself is NOT Clone -
 /// wrap in `Arc` for multi-task sharing.
 pub struct AgentMetrics {
     registry: Registry,
@@ -227,7 +227,7 @@ pub struct AgentMetrics {
     pub container_resolver_cache_hits_total: Counter,
     pub container_resolver_cache_misses_total: Counter,
     pub container_resolver_errors_total: Counter,
-    /// IDS flow-kill counter — times the IDS pipeline decided to
+    /// IDS flow-kill counter - times the IDS pipeline decided to
     /// mark a conntrack entry `IPS_DYING` to terminate a live flow
     /// following a block-mode rule match.
     pub ids_ct_dying_total: Counter,
@@ -620,7 +620,7 @@ impl AgentMetrics {
 
         let lb_vip_arp_replies = Family::<VipLabels, Gauge>::default();
         registry.register(
-            "lb_vip_arp_replies_total",
+            "lb_vip_arp_replies",
             "Forged ARP replies per announced VIP",
             lb_vip_arp_replies.clone(),
         );
@@ -698,7 +698,7 @@ impl AgentMetrics {
 
         let ids_ct_dying_total = Counter::default();
         registry.register(
-            "ids_ct_dying_total",
+            "ids_ct_dying",
             "IDS verdict pipeline marked a conntrack entry IPS_DYING (flow kill)",
             ids_ct_dying_total.clone(),
         );
@@ -1300,10 +1300,15 @@ mod tests {
         metrics.record_packet("eth0", "drop");
 
         let encoded = metrics.encode();
-        assert!(encoded.contains("ebpfsentinel_packets"));
-        assert!(encoded.contains("interface=\"eth0\""));
-        assert!(encoded.contains("action=\"pass\""));
-        assert!(encoded.contains("action=\"drop\""));
+        // Named exactly rather than by substring: a substring of the right
+        // name is still a substring of a wrong one.
+        assert!(encoded.contains("# TYPE ebpfsentinel_packets counter"));
+        assert!(
+            encoded.contains("ebpfsentinel_packets_total{interface=\"eth0\",action=\"pass\"} 2")
+        );
+        assert!(
+            encoded.contains("ebpfsentinel_packets_total{interface=\"eth0\",action=\"drop\"} 1")
+        );
     }
 
     #[test]
@@ -1446,12 +1451,15 @@ mod tests {
         metrics.record_alert("ids", "critical", "T1041");
 
         let encoded = metrics.encode();
-        assert!(encoded.contains("ebpfsentinel_alerts"));
-        assert!(encoded.contains("component=\"ids\""));
-        assert!(encoded.contains("severity=\"high\""));
-        assert!(encoded.contains("severity=\"critical\""));
-        assert!(encoded.contains("technique_id=\"T1071\""));
-        assert!(encoded.contains("technique_id=\"T1041\""));
+        // `ebpfsentinel_alerts` is a substring of four other series, so the
+        // whole name and its labels are asserted instead.
+        assert!(encoded.contains("# TYPE ebpfsentinel_alerts counter"));
+        assert!(encoded.contains(
+            "ebpfsentinel_alerts_total{component=\"ids\",severity=\"high\",technique_id=\"T1071\"} 1"
+        ));
+        assert!(encoded.contains(
+            "ebpfsentinel_alerts_total{component=\"ids\",severity=\"critical\",technique_id=\"T1041\"} 1"
+        ));
     }
 
     #[test]
@@ -1576,5 +1584,408 @@ mod tests {
         assert!(encoded.contains("component=\"firewall\""));
         assert!(encoded.contains("result=\"success\""));
         assert!(encoded.contains("result=\"failure\""));
+    }
+
+    /// Every metric this registry holds, as the name it is registered under
+    /// and the metric type it encodes as.
+    ///
+    /// The series an operator queries is derived from the pair rather than
+    /// written here: the `ebpfsentinel_` prefix in front, and the `_total`
+    /// suffix the text encoder appends to every counter and to nothing else.
+    /// Deriving it is the whole point - a counter registered under a name
+    /// that already ends in `_total` is exported as `_total_total`, which is
+    /// a series no dashboard, alert rule or runbook naming the intended one
+    /// will ever match.
+    ///
+    /// Adding, renaming or removing a metric means editing this list, and
+    /// that is deliberate: the edit is where somebody notices that a query
+    /// written against the old name has just stopped returning anything.
+    const REGISTERED_METRICS: &[(&str, &str)] = &[
+        ("alert_sender_circuit_state", "gauge"),
+        ("alerts", "counter"),
+        ("alerts_by_rule", "counter"),
+        ("alerts_dropped", "counter"),
+        ("alerts_exported", "counter"),
+        ("alerts_sse_subscribers", "gauge"),
+        ("audit_events", "counter"),
+        ("audit_failures", "counter"),
+        ("bpf_token_used", "gauge"),
+        ("bytes_processed", "counter"),
+        ("container_resolver_cache_hits", "counter"),
+        ("container_resolver_cache_misses", "counter"),
+        ("container_resolver_errors", "counter"),
+        ("conntrack_active", "gauge"),
+        ("conntrack_expired", "counter"),
+        ("conntrack_kfunc_hits", "gauge"),
+        ("conntrack_kfunc_lookups", "gauge"),
+        ("conntrack_kfunc_misses", "gauge"),
+        ("cpu_usage_percent", "gauge"),
+        ("ddos_attacks_active", "gauge"),
+        ("ddos_attacks_detected", "counter"),
+        ("ddos_mitigations", "counter"),
+        ("dlp_matches", "counter"),
+        ("dlp_scan_duration_seconds", "histogram"),
+        ("dlp_scans", "counter"),
+        ("dns_blocked_domains", "counter"),
+        ("dns_cache_entries", "gauge"),
+        ("dns_cache_evictions", "counter"),
+        ("dns_cache_hits", "counter"),
+        ("dns_injected_ips", "gauge"),
+        ("domain_auto_blocked", "counter"),
+        ("domain_reputation_high_risk", "gauge"),
+        ("ebpf_attach_blocked", "gauge"),
+        ("ebpf_program_status", "gauge"),
+        ("events_dropped", "counter"),
+        ("false_positives", "counter"),
+        ("geoip_lookups", "counter"),
+        ("ids_ct_dying", "counter"),
+        ("ids_domain_matches", "counter"),
+        ("ips_blacklist_size", "gauge"),
+        ("ips_blocks", "counter"),
+        ("lb_backends_healthy", "gauge"),
+        ("lb_forwarded", "counter"),
+        ("lb_vip_arp_replies", "gauge"),
+        ("lb_vip_takeovers", "counter"),
+        ("memory_usage_bytes", "gauge"),
+        ("open_fds", "gauge"),
+        ("packet_processing_duration_seconds", "histogram"),
+        ("packets", "counter"),
+        ("ringbuf_events", "counter"),
+        ("ringbuf_events_dropped", "counter"),
+        ("ringbuf_latency_seconds", "histogram"),
+        ("routing_failovers", "counter"),
+        ("routing_gateway_status", "gauge"),
+        ("routing_gateways", "gauge"),
+        ("rules_loaded", "gauge"),
+        ("rules_reloads", "counter"),
+        ("thread_count", "gauge"),
+        ("threatintel_matches", "counter"),
+        ("worker_events", "counter"),
+        ("worker_processing_duration_seconds", "histogram"),
+        ("xdp_attach_mode", "gauge"),
+        ("zone_interfaces", "gauge"),
+        ("zone_packets", "counter"),
+        ("zone_policies", "gauge"),
+    ];
+
+    /// The family name the `# TYPE` line carries: the prefix and nothing
+    /// else, whatever the kind.
+    fn family_name(registered: &str) -> String {
+        format!("ebpfsentinel_{registered}")
+    }
+
+    /// The series name a query has to name, which is the family name plus the
+    /// `_total` suffix the text encoder appends to a counter sample and to
+    /// nothing else.
+    fn queried_name(registered: &str, kind: &str) -> String {
+        if kind == "counter" {
+            format!("ebpfsentinel_{registered}_total")
+        } else {
+            format!("ebpfsentinel_{registered}")
+        }
+    }
+
+    /// `# TYPE <name> <kind>` lines of an exposition, in encounter order.
+    fn type_lines(encoded: &str) -> Vec<(String, String)> {
+        encoded
+            .lines()
+            .filter_map(|line| line.strip_prefix("# TYPE "))
+            .filter_map(|rest| rest.split_once(' '))
+            .map(|(name, kind)| (name.to_string(), kind.to_string()))
+            .collect()
+    }
+
+    /// A registry with one child in every labelled family.
+    ///
+    /// A `Family` with no children is silent, so an empty registry exposes
+    /// only the metrics that are not families and a name check over it would
+    /// cover half the surface. Fields are touched directly rather than
+    /// through the recording methods on purpose: what is being checked here
+    /// is the name a metric is exported under, not whether the pipeline
+    /// reaches it.
+    fn populated_registry() -> AgentMetrics {
+        let m = AgentMetrics::new();
+        populate_datapath_counter_families(&m);
+        populate_detection_counter_families(&m);
+        populate_gauge_families(&m);
+        populate_histograms(&m);
+        m
+    }
+
+    /// One child in every labelled counter family on the packet path.
+    fn populate_datapath_counter_families(m: &AgentMetrics) {
+        m.packets_total
+            .get_or_create(&PacketLabels {
+                interface: "eth0".into(),
+                action: "pass".into(),
+            })
+            .inc();
+        m.events_dropped_total
+            .get_or_create(&ReasonLabels {
+                reason: "backpressure".into(),
+            })
+            .inc();
+        m.rules_reloads_total
+            .get_or_create(&ReloadLabels {
+                component: "firewall".into(),
+                result: "success".into(),
+            })
+            .inc();
+        m.zone_packets_total
+            .get_or_create(&ZonePacketLabels {
+                zone: "wan".into(),
+                action: "pass".into(),
+            })
+            .inc();
+        m.bytes_processed_total
+            .get_or_create(&BytesLabels {
+                interface: "eth0".into(),
+                direction: "rx".into(),
+            })
+            .inc_by(1500);
+        m.geoip_lookups_total
+            .get_or_create(&GeoLookupLabels {
+                result: "hit".into(),
+            })
+            .inc();
+        m.lb_vip_takeovers_total
+            .get_or_create(&VipLabels {
+                vip: "web-vip".into(),
+            })
+            .inc();
+        m.worker_events_total
+            .get_or_create(&WorkerLabels {
+                worker_id: "0".into(),
+            })
+            .inc();
+        m.ringbuf_events_total
+            .get_or_create(&RingBufLabels {
+                source: "tc-ids".into(),
+            })
+            .inc();
+        m.ringbuf_events_dropped_total
+            .get_or_create(&RingBufDropLabels {
+                source: "tc-ids".into(),
+                reason: "parse".into(),
+            })
+            .inc();
+    }
+
+    /// One child in every labelled counter family that counts a
+    /// detection or its delivery.
+    fn populate_detection_counter_families(m: &AgentMetrics) {
+        m.alerts_total
+            .get_or_create(&AlertLabels {
+                component: "ids".into(),
+                severity: "high".into(),
+                technique_id: "T1071".into(),
+            })
+            .inc();
+        m.alerts_dropped_total
+            .get_or_create(&ReasonLabels {
+                reason: "dedup".into(),
+            })
+            .inc();
+        m.alerts_exported_total
+            .get_or_create(&DestinationLabels {
+                destination: "webhook".into(),
+            })
+            .inc();
+        m.threatintel_matches_total
+            .get_or_create(&FeedLabels {
+                feed: "abuse-ch".into(),
+            })
+            .inc();
+        m.alerts_by_rule_total
+            .get_or_create(&RuleLabels {
+                component: "ids".into(),
+                rule_id: "ids-001".into(),
+            })
+            .inc();
+        m.false_positives_total
+            .get_or_create(&RuleLabels {
+                component: "ids".into(),
+                rule_id: "ids-001".into(),
+            })
+            .inc();
+        m.ids_domain_matches_total
+            .get_or_create(&RuleIdLabels {
+                rule_id: "ids-002".into(),
+            })
+            .inc();
+        m.dlp_matches_total
+            .get_or_create(&RuleIdLabels {
+                rule_id: "dlp-001".into(),
+            })
+            .inc();
+        m.ddos_attacks_detected_total
+            .get_or_create(&AttackTypeLabels {
+                attack_type: "syn_flood".into(),
+            })
+            .inc();
+        m.ddos_mitigations_total
+            .get_or_create(&AttackTypeLabels {
+                attack_type: "syn_flood".into(),
+            })
+            .inc();
+    }
+
+    /// One child in every labelled gauge family.
+    fn populate_gauge_families(m: &AgentMetrics) {
+        m.rules_loaded
+            .get_or_create(&ComponentLabels {
+                component: "firewall".into(),
+            })
+            .set(1);
+        m.ebpf_program_status
+            .get_or_create(&ProgramLabels {
+                program: "xdp-firewall".into(),
+            })
+            .set(1);
+        m.ebpf_attach_blocked.get_or_create(&Vec::new()).set(0);
+        m.xdp_attach_mode
+            .get_or_create(&XdpModeLabels {
+                interface: "eth0".into(),
+                mode: "native".into(),
+            })
+            .set(1);
+        m.zone_interfaces
+            .get_or_create(&ZoneLabels { zone: "wan".into() })
+            .set(1);
+        m.zone_policies
+            .get_or_create(&ZoneLabels { zone: "wan".into() })
+            .set(1);
+        m.alert_sender_circuit_state
+            .get_or_create(&DestinationLabels {
+                destination: "webhook".into(),
+            })
+            .set(0);
+        m.routing_gateway_status
+            .get_or_create(&GatewayLabels {
+                gateway: "gw0".into(),
+            })
+            .set(1);
+        m.lb_backends_healthy
+            .get_or_create(&ServiceLabels {
+                service: "web".into(),
+            })
+            .set(2);
+        m.lb_vip_arp_replies
+            .get_or_create(&VipLabels {
+                vip: "web-vip".into(),
+            })
+            .set(3);
+    }
+
+    /// One observation in every histogram, family or not: a histogram is
+    /// sampled as `_bucket`, `_sum` and `_count`, and an unobserved family
+    /// emits none of them.
+    fn populate_histograms(m: &AgentMetrics) {
+        m.packet_processing_duration
+            .get_or_create(&ProgramLabels {
+                program: "xdp-firewall".into(),
+            })
+            .observe(0.000_01);
+        m.worker_processing_duration
+            .get_or_create(&WorkerLabels {
+                worker_id: "0".into(),
+            })
+            .observe(0.000_01);
+        m.ringbuf_latency_seconds
+            .get_or_create(&RingBufLabels {
+                source: "tc-ids".into(),
+            })
+            .observe(0.000_01);
+        m.dlp_scan_duration_seconds.observe(0.000_01);
+    }
+
+    #[test]
+    fn the_exposition_carries_exactly_the_series_the_list_names() {
+        let encoded = populated_registry().encode();
+
+        let mut on_the_wire = type_lines(&encoded);
+        on_the_wire.sort();
+
+        let mut expected: Vec<(String, String)> = REGISTERED_METRICS
+            .iter()
+            .map(|(name, kind)| (family_name(name), (*kind).to_string()))
+            .collect();
+        expected.sort();
+
+        assert_eq!(
+            on_the_wire, expected,
+            "the exposition and the checked-in list disagree; a metric was added, renamed or removed without updating the list"
+        );
+
+        // The `# TYPE` line names the family; a query names the sample, which
+        // for a counter carries the suffix the encoder appends. Both are
+        // checked, because it is the second one an alert rule is written
+        // against.
+        for (name, kind) in REGISTERED_METRICS {
+            let queried = queried_name(name, kind);
+            // A histogram is sampled as `_bucket`, `_sum` and `_count` rather
+            // than under the family name, so the count line stands for it.
+            let sampled = if *kind == "histogram" {
+                format!("{queried}_count")
+            } else {
+                queried.clone()
+            };
+            assert!(
+                encoded.contains(&format!("\n{sampled}{{"))
+                    || encoded.contains(&format!("\n{sampled} ")),
+                "{sampled} is on no sample line of the exposition"
+            );
+        }
+    }
+
+    #[test]
+    fn the_list_names_every_metric_the_registry_registers() {
+        // Read off the source rather than off an exposition, because a family
+        // nothing has written is silent and would slip past a wire check.
+        let source = include_str!("metrics.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .map_or(source, |(before, _)| before);
+
+        let mut registered: Vec<&str> = Vec::new();
+        let mut lines = production.lines();
+        while let Some(line) = lines.next() {
+            if line.trim() != "registry.register(" {
+                continue;
+            }
+            let name = lines
+                .next()
+                .expect("a register call is followed by its name")
+                .trim()
+                .trim_end_matches(',')
+                .trim_matches('"');
+            registered.push(name);
+        }
+        registered.sort_unstable();
+
+        let mut listed: Vec<&str> = REGISTERED_METRICS.iter().map(|(name, _)| *name).collect();
+        listed.sort_unstable();
+
+        assert_eq!(
+            registered, listed,
+            "the checked-in list and the registrations in this file disagree"
+        );
+    }
+
+    #[test]
+    fn no_registered_name_carries_a_suffix_the_encoder_owns() {
+        for (name, kind) in REGISTERED_METRICS {
+            assert!(
+                !name.ends_with("_total"),
+                "{name} is registered with the `_total` suffix the text encoder appends to counters; a counter becomes `_total_total` and anything else claims to be a counter"
+            );
+
+            let queried = queried_name(name, kind);
+            assert_eq!(
+                *kind == "counter",
+                queried.ends_with("_total"),
+                "{queried} carries `_total` and is a {kind}, which is not valid OpenMetrics"
+            );
+        }
     }
 }

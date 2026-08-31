@@ -130,7 +130,7 @@ teardown_file() {
 
 # ── Per-VIP forged-reply metric ──────────────────────────────────────
 
-@test "lb_vip_arp_replies_total increments after an ARP for the VIP" {
+@test "lb_vip_arp_replies increments after an ARP for the VIP" {
     require_root
     require_scapy
 
@@ -138,9 +138,9 @@ teardown_file() {
     arp_probe "$VIP_ADDR" >/dev/null
 
     # The kernel per-CPU counter is mirrored into Prometheus on a 15s
-    # cadence — allow one full refresh cycle plus slack.
+    # cadence - allow one full refresh cycle plus slack.
     local value
-    value="$(wait_for_metric ebpfsentinel_lb_vip_arp_replies_total 1 25 '{vip="web-vip"}')" || {
+    value="$(wait_for_metric ebpfsentinel_lb_vip_arp_replies 1 25 '{vip="web-vip"}')" || {
         echo "arp replies metric never reached >= 1" >&2
         return 1
     }

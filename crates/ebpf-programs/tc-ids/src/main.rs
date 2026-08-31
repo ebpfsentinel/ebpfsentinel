@@ -640,7 +640,7 @@ fn process_ids_pattern(_ctx: &TcContext, flow: &FlowMeta, protocol: u8) -> Resul
         // Mark the kernel netfilter conntrack entry as DYING so the
         // next packet of this flow is dropped by netfilter without a
         // userspace round-trip. The userspace IdsAppService counter
-        // (ids_ct_dying_total) is incremented by the packet pipeline.
+        // (ids_ct_dying) is incremented by the packet pipeline.
         let tuple = if (flags & FLAG_IPV6) != 0 {
             CtTuple::v6(*src_addr, *dst_addr, src_port, dst_port)
         } else {

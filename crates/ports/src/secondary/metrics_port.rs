@@ -16,7 +16,7 @@ pub trait PacketMetrics: Send + Sync {
     ///
     /// Used by the kernel-metrics poll loop to mirror a cumulative eBPF
     /// counter: it reads the absolute per-CPU value, computes the delta
-    /// since the previous poll, and adds only that delta — so the exposed
+    /// since the previous poll, and adds only that delta - so the exposed
     /// counter tracks the real kernel counter rather than the poll cadence.
     fn record_packets_by(&self, _interface: &str, _action: &str, _count: u64) {}
 
@@ -110,8 +110,8 @@ pub trait IpsMetrics: Send + Sync {
 // ── DNS metrics ────────────────────────────────────────────────────
 
 /// Zone observability. Zone enforcement itself lives in eBPF, so these
-/// describe the programmed state — which interfaces each zone owns and how
-/// many inter-zone policies reference it — rather than per-packet decisions.
+/// describe the programmed state - which interfaces each zone owns and how
+/// many inter-zone policies reference it - rather than per-packet decisions.
 pub trait ZoneMetrics: Send + Sync {
     /// Set the number of interfaces bound to a zone.
     fn set_zone_interfaces(&self, _zone: &str, _count: u64) {}
@@ -307,7 +307,7 @@ pub trait ContainerMetrics: Send + Sync {
 /// path. Today the only consumer is the IDS kill-flow primitive,
 /// but this trait will grow as more CT kfuncs land.
 pub trait CtMetrics: Send + Sync {
-    /// Increment the `ids_ct_dying_total` counter — a flow was
+    /// Increment the `ids_ct_dying` counter - a flow was
     /// marked `IPS_DYING` by the IDS verdict pipeline.
     fn record_ids_ct_dying(&self) {}
 }
