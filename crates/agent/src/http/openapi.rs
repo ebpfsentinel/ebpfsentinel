@@ -121,6 +121,7 @@ use super::zone_handler;
         conntrack_handler::conntrack_status,
         conntrack_handler::list_connections,
         conntrack_handler::flush_connections,
+        conntrack_handler::conntrack_events,
         // DLP
         dlp_handler::dlp_status,
         dlp_handler::list_dlp_patterns,

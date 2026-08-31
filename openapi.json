@@ -1175,6 +1175,62 @@
         ]
       }
     },
+    "/api/v1/conntrack/events": {
+      "get": {
+        "tags": [
+          "ConnTrack"
+        ],
+        "summary": "`GET /api/v1/conntrack/events` - Server-Sent Events stream of\nconntrack lifecycle events (new / update / destroy).",
+        "description": "The poller diffs conntrack snapshots every 2 s and\npushes changes into a broadcast channel. Each SSE client receives\na copy. Lagged clients silently skip missed events.",
+        "operationId": "conntrack_events",
+        "responses": {
+          "200": {
+            "description": "SSE stream of `event: new`, `event: update` and `event: destroy` frames. Each frame's `data` is one JSON object carrying `event_type` and the `connection` it happened to; `:keepalive` is sent every 15 s.",
+            "content": {
+              "text/event-stream": {}
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Conntrack event stream not enabled, which is also what a kernel built without `CONFIG_NF_CONNTRACK_PROCFS` answers, since the poller has nothing to read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/conntrack/flush": {
       "post": {
         "tags": [

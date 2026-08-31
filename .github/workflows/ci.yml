@@ -61,6 +61,27 @@ jobs:
       - uses: ./.github/actions/setup-rust-build
       - run: cargo test
 
+  # ── OpenAPI document is current ───────────────────────────────────
+  openapi:
+    name: OpenAPI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust-build
+      # The document is generated from the `#[utoipa::path]` annotations, so a
+      # route described in code and not regenerated here leaves the committed
+      # artifact describing an agent that no longer exists. `info.version` is
+      # read from the crate version, which this workflow builds unstamped, so
+      # the comparison is only meaningful on the pull requests it runs on.
+      - name: Regenerate the OpenAPI document
+        run: cargo run --quiet -p xtask -- emit-openapi
+      - name: Fail if the committed document is stale
+        run: |
+          if ! git diff --exit-code -- openapi.json; then
+            echo "::error file=openapi.json::openapi.json is out of date. Run 'cargo run -p xtask -- emit-openapi' and commit the result."
+            exit 1
+          fi
+
   # ── Dependency audit (license, advisories, bans) ─────────────────
   deny:
     name: Cargo Deny

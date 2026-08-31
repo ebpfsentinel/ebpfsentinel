@@ -165,12 +165,39 @@ pub async fn flush_connections(
     ))
 }
 
-/// `GET /api/v1/conntrack/events` — Server-Sent Events stream of
+/// `GET /api/v1/conntrack/events` - Server-Sent Events stream of
 /// conntrack lifecycle events (new / update / destroy).
 ///
 /// The poller diffs conntrack snapshots every 2 s and
 /// pushes changes into a broadcast channel. Each SSE client receives
 /// a copy. Lagged clients silently skip missed events.
+#[utoipa::path(
+    get, path = "/api/v1/conntrack/events",
+    tag = "ConnTrack",
+    responses(
+        (
+            status = 200,
+            description = "SSE stream of `event: new`, `event: update` and \
+                `event: destroy` frames. Each frame's `data` is one JSON object \
+                carrying `event_type` and the `connection` it happened to; \
+                `:keepalive` is sent every 15 s.",
+            content_type = "text/event-stream",
+        ),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (
+            status = 404,
+            description = "Conntrack event stream not enabled, which is also \
+                what a kernel built without `CONFIG_NF_CONNTRACK_PROCFS` \
+                answers, since the poller has nothing to read",
+            body = ErrorBody,
+        ),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
 pub async fn conntrack_events(
     State(state): State<Arc<AppState>>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {

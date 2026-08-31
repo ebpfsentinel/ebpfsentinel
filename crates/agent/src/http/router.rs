@@ -512,6 +512,7 @@ async fn security_headers_with_hsts(mut response: Response) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::sync::atomic::AtomicBool;
 
     use adapters::metrics::AgentMetrics;
@@ -940,6 +941,99 @@ mod tests {
                 "a read must not spend the write budget"
             );
         }
+    }
+
+    // ── The document describes the surface ───────────────────────────
+    //
+    // `ApiDoc` is a hand-kept list of `#[utoipa::path]` annotations, so a
+    // route can be mounted and never described, or described after being
+    // unmounted. Either way a generated client is wrong about the agent.
+    // The two sets are compared here, in both directions.
+
+    /// Every method and path pair `ApiDoc` describes, upper-cased to match
+    /// the parsed router.
+    fn documented_routes() -> BTreeSet<(String, String)> {
+        use utoipa::OpenApi;
+
+        let spec = crate::http::openapi::ApiDoc::openapi();
+        let mut pairs = BTreeSet::new();
+        for (path, item) in spec.paths.paths {
+            // `PathItem` carries one `Option<Operation>` per verb rather than a
+            // map, so every verb is named here. A verb this list forgets would
+            // make the comparison silently one-sided, which is the failure the
+            // two tests below exist to prevent.
+            let operations = [
+                ("GET", item.get.is_some()),
+                ("POST", item.post.is_some()),
+                ("PUT", item.put.is_some()),
+                ("PATCH", item.patch.is_some()),
+                ("DELETE", item.delete.is_some()),
+                ("HEAD", item.head.is_some()),
+                ("OPTIONS", item.options.is_some()),
+                ("TRACE", item.trace.is_some()),
+            ];
+            for (method, present) in operations {
+                if present {
+                    pairs.insert((method.to_string(), path.clone()));
+                }
+            }
+        }
+        pairs
+    }
+
+    /// Every method and path pair the router mounts.
+    fn mounted_route_pairs() -> BTreeSet<(String, String)> {
+        parse_mounted_routes()
+            .into_iter()
+            .map(|r| (r.method.to_uppercase(), r.path))
+            .collect()
+    }
+
+    #[test]
+    fn the_document_describes_every_mounted_route() {
+        let mounted = mounted_route_pairs();
+        assert!(
+            mounted.len() > 90,
+            "route parser found only {} routes, which means it stopped matching",
+            mounted.len()
+        );
+        let undocumented: Vec<String> = mounted
+            .difference(&documented_routes())
+            .map(|(m, p)| format!("{m} {p}"))
+            .collect();
+        assert!(
+            undocumented.is_empty(),
+            "mounted but absent from ApiDoc, so a generated client cannot reach them: {undocumented:?}"
+        );
+    }
+
+    #[test]
+    fn the_document_describes_nothing_that_is_not_mounted() {
+        let documented = documented_routes();
+        assert!(
+            documented.len() > 90,
+            "ApiDoc describes only {} operations, which means the spec failed to build",
+            documented.len()
+        );
+        let unmounted: Vec<String> = documented
+            .difference(&mounted_route_pairs())
+            .map(|(m, p)| format!("{m} {p}"))
+            .collect();
+        assert!(
+            unmounted.is_empty(),
+            "described by ApiDoc but mounted nowhere, so a generated client calls a 404: {unmounted:?}"
+        );
+    }
+
+    #[test]
+    fn the_document_is_versioned_from_the_build() {
+        use utoipa::OpenApi;
+
+        // The release pipeline rewrites the workspace `0.0.0-dev` placeholder
+        // before building, so reading the crate version is what makes the spec
+        // track the release. A literal here would freeze at whatever was typed.
+        let spec = crate::http::openapi::ApiDoc::openapi();
+        assert_eq!(spec.info.version, concat!("v", env!("CARGO_PKG_VERSION")));
     }
 
     // ── CORS localhost origin validation ─────────────────────────────
