@@ -6,6 +6,12 @@ use serde::{Deserialize, Serialize};
 /// HTTP client for the eBPFsentinel REST API.
 pub struct ApiClient {
     client: reqwest::Client,
+    /// Second client for the two Server-Sent Events routes. The ordinary one
+    /// carries a total request deadline, which a stream that is meant to stay
+    /// open would trip on its first quiet minute; this one has no deadline and
+    /// a per-read timeout instead, so a connection that has gone silent past
+    /// several keepalives is still noticed.
+    stream_client: reqwest::Client,
     base_url: String,
     token: Option<String>,
 }
@@ -466,6 +472,15 @@ pub struct ConnectionResponse {
     pub bytes_rev: u32,
 }
 
+/// One frame of `GET /api/v1/conntrack/events`. The stream serialises the
+/// agent's own lifecycle record, so `event_type` arrives capitalised where
+/// the list endpoint's fields do not; the printer lowercases it.
+#[derive(Deserialize, Serialize)]
+pub struct ConntrackEventFrame {
+    pub event_type: String,
+    pub connection: ConnectionResponse,
+}
+
 // ── eBPF Status ─────────────────────────────────────────────────────
 
 #[derive(Deserialize, Serialize)]
@@ -918,8 +933,15 @@ impl ApiClient {
             .pool_max_idle_per_host(4)
             .build()
             .expect("failed to build HTTP client");
+        let stream_client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(STREAM_READ_TIMEOUT_SECS))
+            .tcp_nodelay(true)
+            .build()
+            .expect("failed to build streaming HTTP client");
         Self {
             client,
+            stream_client,
             base_url: format!("http://{host}:{port}"),
             token,
         }
@@ -928,6 +950,18 @@ impl ApiClient {
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let mut req = self
             .client
+            .request(method, format!("{}{path}", self.base_url));
+        if let Some(ref token) = self.token {
+            req = req.bearer_auth(token);
+        }
+        req
+    }
+
+    /// Same as [`Self::request`] but on the deadline-free client, for the
+    /// routes whose answer is a stream rather than a body.
+    fn stream_request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        let mut req = self
+            .stream_client
             .request(method, format!("{}{path}", self.base_url));
         if let Some(ref token) = self.token {
             req = req.bearer_auth(token);
@@ -2146,6 +2180,224 @@ impl ApiClient {
             .map_err(|e| connection_error(&self.base_url, &e))?;
         handle_response(resp).await
     }
+
+    // ── Server-Sent Events ───────────────────────────────────────────
+
+    /// Open the live alert stream. `resume_from` is the id of the last alert
+    /// already printed; the agent replays what came after it from its own
+    /// buffer, so a reconnect does not leave a hole.
+    pub async fn stream_alerts(
+        &self,
+        component: Option<&str>,
+        severity_min: Option<&str>,
+        resume_from: Option<&str>,
+    ) -> Result<SseStream, StreamOpenError> {
+        let mut req = self.stream_request(reqwest::Method::GET, "/api/v1/alerts/stream");
+        if let Some(component) = component {
+            req = req.query(&[("component", component)]);
+        }
+        if let Some(severity_min) = severity_min {
+            req = req.query(&[("severity_min", severity_min)]);
+        }
+        if let Some(resume_from) = resume_from {
+            req = req.header("Last-Event-ID", resume_from);
+        }
+        self.open_stream(req, resume_from).await
+    }
+
+    /// Open the live conntrack lifecycle stream. The route answers 404 where
+    /// the poller has nothing to read, which is what a kernel built without
+    /// `CONFIG_NF_CONNTRACK_PROCFS` gives, so the caller falls back to polling
+    /// the connection list rather than retrying for ever.
+    pub async fn stream_conntrack_events(&self) -> Result<SseStream, StreamOpenError> {
+        let req = self.stream_request(reqwest::Method::GET, "/api/v1/conntrack/events");
+        self.open_stream(req, None).await
+    }
+
+    async fn open_stream(
+        &self,
+        req: reqwest::RequestBuilder,
+        resume_from: Option<&str>,
+    ) -> Result<SseStream, StreamOpenError> {
+        let resp = req
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+            .map_err(|e| StreamOpenError::Failed(connection_error(&self.base_url, &e)))?;
+
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(SseStream {
+                resp,
+                buf: Vec::new(),
+                last_id: resume_from.map(ToString::to_string),
+            });
+        }
+
+        // 404 and 503 are both the server saying this build serves no such
+        // stream. Every other status is a refusal of this request in
+        // particular - a token that expired, a filter the server rejected -
+        // and retrying it unchanged would loop on the same answer.
+        let message = stream_error_message(resp).await;
+        if matches!(
+            status,
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ) {
+            return Err(StreamOpenError::NotAvailable { message });
+        }
+        Err(StreamOpenError::Failed(anyhow::anyhow!(
+            "{message} ({status})"
+        )))
+    }
+}
+
+/// How long a stream may stay silent before the client calls the connection
+/// dead. The agent sends a keepalive comment every 15 seconds, so this is
+/// three of them.
+const STREAM_READ_TIMEOUT_SECS: u64 = 45;
+
+/// Why a Server-Sent Events route could not be opened.
+#[derive(Debug)]
+pub enum StreamOpenError {
+    /// The server answered and said it serves no such stream. Nothing about
+    /// retrying will change that, so the caller degrades to polling.
+    NotAvailable { message: String },
+    /// Anything else: the agent is unreachable, the connection broke, the
+    /// request was refused. Worth retrying, not worth degrading for.
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for StreamOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAvailable { message } => f.write_str(message),
+            Self::Failed(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+/// One Server-Sent Event, assembled from the `id:`, `event:` and `data:`
+/// lines of a frame. Comment lines - which is what the keepalive is - are
+/// consumed by the reader and never surface here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SseEvent {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub data: String,
+}
+
+/// A live Server-Sent Events response, read one frame at a time.
+pub struct SseStream {
+    resp: reqwest::Response,
+    buf: Vec<u8>,
+    last_id: Option<String>,
+}
+
+impl SseStream {
+    /// The id of the last event that carried one, which a reconnect passes
+    /// back as `Last-Event-ID` to resume where this stream stopped.
+    pub fn last_event_id(&self) -> Option<&str> {
+        self.last_id.as_deref()
+    }
+
+    /// The next event, or `None` when the server closed the stream.
+    pub async fn next_event(&mut self) -> anyhow::Result<Option<SseEvent>> {
+        loop {
+            while let Some(frame) = take_frame(&mut self.buf) {
+                if let Some(event) = parse_frame(&frame) {
+                    if let Some(ref id) = event.id {
+                        self.last_id = Some(id.clone());
+                    }
+                    return Ok(Some(event));
+                }
+            }
+            match self.resp.chunk().await {
+                Ok(Some(bytes)) => self.buf.extend_from_slice(&bytes),
+                Ok(None) => return Ok(None),
+                Err(e) => bail!("stream read failed: {e}"),
+            }
+        }
+    }
+}
+
+/// Read whatever the server put in the body of a refusal, so the caller can
+/// say why rather than only which status.
+async fn stream_error_message(resp: reqwest::Response) -> String {
+    let status = resp.status();
+    match resp.json::<ApiErrorBody>().await {
+        Ok(body) => body.error.message,
+        Err(_) => format!("request failed with status {status}"),
+    }
+}
+
+/// Cut the first complete frame out of the buffer. A frame ends at the first
+/// blank line; the terminator goes with it. `None` means what is buffered is
+/// still a partial frame.
+fn take_frame(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
+    for i in 0..buf.len() {
+        if buf[i] != b'\n' {
+            continue;
+        }
+        // A blank line is LF LF, or LF CR LF where the server writes CRLF.
+        let terminator = match (buf.get(i + 1), buf.get(i + 2)) {
+            (Some(b'\n'), _) => i + 1,
+            (Some(b'\r'), Some(b'\n')) => i + 2,
+            _ => continue,
+        };
+        let frame = buf[..i].to_vec();
+        buf.drain(..=terminator);
+        return Some(frame);
+    }
+    None
+}
+
+/// Assemble one frame's fields. Returns `None` for a frame carrying nothing
+/// but comments, which is what a keepalive is.
+fn parse_frame(frame: &[u8]) -> Option<SseEvent> {
+    let text = String::from_utf8_lossy(frame);
+    let mut event = SseEvent::default();
+    let mut data = String::new();
+    let mut carries_a_field = false;
+
+    for line in text.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        let (field, value) = match line.find(':') {
+            Some(at) => {
+                let value = &line[at + 1..];
+                (&line[..at], value.strip_prefix(' ').unwrap_or(value))
+            }
+            None => (line, ""),
+        };
+        match field {
+            "id" => {
+                event.id = Some(value.to_string());
+                carries_a_field = true;
+            }
+            "event" => {
+                event.name = Some(value.to_string());
+                carries_a_field = true;
+            }
+            "data" => {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(value);
+                carries_a_field = true;
+            }
+            // `retry` and anything else the spec adds later: the reconnect
+            // delay here is the caller's backoff, not the server's suggestion.
+            _ => {}
+        }
+    }
+
+    if !carries_a_field {
+        return None;
+    }
+    event.data = data;
+    Some(event)
 }
 
 fn connection_error(base_url: &str, err: &reqwest::Error) -> anyhow::Error {
@@ -2192,20 +2444,10 @@ mod tests {
     /// Routes the command tree deliberately does not call, and why. A route
     /// listed here is a decision somebody wrote down; a route missing from
     /// both the client and this list is an oversight the test below catches.
-    const UNREACHED_ROUTES: &[(&str, &str, &str)] = &[
-        (
-            "GET",
-            "/api/v1/alerts/stream",
-            "Server-Sent Events: the stream never ends, so a request-and-print \
-             client cannot consume it. `watch` polls the paged list instead.",
-        ),
-        (
-            "GET",
-            "/api/v1/conntrack/events",
-            "Server-Sent Events: same shape as the alert stream. \
-             `conntrack watch` polls the connection list instead.",
-        ),
-    ];
+    /// Empty on purpose: the two Server-Sent Events routes that used to sit
+    /// here are consumed by `watch` and `conntrack watch`, so every mounted
+    /// route is now reached from a command.
+    const UNREACHED_ROUTES: &[(&str, &str, &str)] = &[];
 
     /// Collapse `{id}` and friends so a path with a parameter compares equal
     /// however the two sides spell the placeholder.
@@ -2372,6 +2614,305 @@ mod tests {
                 reason.len() > 30,
                 "{method} {path} is exempted without saying why"
             );
+        }
+    }
+
+    #[test]
+    fn a_frame_carries_its_id_event_and_data() {
+        let mut buf = b"id: alert-7\nevent: alert\ndata: {\"id\":\"alert-7\"}\n\n".to_vec();
+        let frame = super::take_frame(&mut buf).expect("one complete frame");
+        assert!(buf.is_empty(), "the terminator goes with the frame");
+        let event = super::parse_frame(&frame).expect("the frame carries fields");
+        assert_eq!(event.id.as_deref(), Some("alert-7"));
+        assert_eq!(event.name.as_deref(), Some("alert"));
+        assert_eq!(event.data, "{\"id\":\"alert-7\"}");
+    }
+
+    #[test]
+    fn a_partial_frame_waits_for_the_rest() {
+        let mut buf = b"event: alert\ndata: {\"id\":\"al".to_vec();
+        let before = buf.len();
+        assert!(super::take_frame(&mut buf).is_none());
+        assert_eq!(buf.len(), before, "nothing was consumed");
+
+        buf.extend_from_slice(b"ert-7\"}\n\n");
+        let frame = super::take_frame(&mut buf).expect("the frame completed");
+        let event = super::parse_frame(&frame).expect("fields");
+        assert_eq!(event.data, "{\"id\":\"alert-7\"}");
+    }
+
+    #[test]
+    fn a_keepalive_comment_is_not_an_event() {
+        let mut buf = b":keepalive\n\n".to_vec();
+        let frame = super::take_frame(&mut buf).expect("a complete frame");
+        assert!(
+            super::parse_frame(&frame).is_none(),
+            "a frame of nothing but comments is the keepalive, not an event"
+        );
+    }
+
+    #[test]
+    fn two_frames_come_out_one_at_a_time() {
+        let mut buf = b"data: one\n\ndata: two\n\n".to_vec();
+        let first = super::parse_frame(&super::take_frame(&mut buf).expect("first")).expect("a");
+        assert_eq!(first.data, "one");
+        let second = super::parse_frame(&super::take_frame(&mut buf).expect("second")).expect("b");
+        assert_eq!(second.data, "two");
+        assert!(super::take_frame(&mut buf).is_none());
+    }
+
+    #[test]
+    fn carriage_returns_are_a_line_ending_and_not_content() {
+        let mut buf = b"event: new\r\ndata: {}\r\n\r\n".to_vec();
+        let frame = super::take_frame(&mut buf).expect("a complete frame");
+        assert!(buf.is_empty());
+        let event = super::parse_frame(&frame).expect("fields");
+        assert_eq!(event.name.as_deref(), Some("new"));
+        assert_eq!(event.data, "{}");
+    }
+
+    #[test]
+    fn several_data_lines_join_with_a_newline() {
+        let mut buf = b"data: one\ndata: two\n\n".to_vec();
+        let frame = super::take_frame(&mut buf).expect("a complete frame");
+        let event = super::parse_frame(&frame).expect("fields");
+        assert_eq!(event.data, "one\ntwo");
+    }
+
+    #[test]
+    fn a_frame_split_across_a_multibyte_character_is_not_corrupted() {
+        // A chunk boundary can land inside a UTF-8 sequence, which is why the
+        // reader buffers bytes and decodes a whole frame rather than decoding
+        // every chunk as it arrives.
+        let whole = "data: caf\u{e9}\n\n".as_bytes().to_vec();
+        let split = whole.len() - 3; // inside the two bytes of the accent
+        let mut buf = whole[..split].to_vec();
+        assert!(super::take_frame(&mut buf).is_none());
+        buf.extend_from_slice(&whole[split..]);
+        let frame = super::take_frame(&mut buf).expect("the frame completed");
+        assert_eq!(
+            super::parse_frame(&frame).expect("fields").data,
+            "caf\u{e9}"
+        );
+    }
+
+    #[test]
+    fn an_alert_frame_parses_into_the_shape_the_printer_reads() {
+        // The stream serialises the agent's own alert record, so the severity
+        // and the action arrive capitalised and the addresses as an array.
+        let body = serde_json::json!({
+            "id": "alert-1",
+            "timestamp_ns": 1_700_000_000_000_000_000u64,
+            "component": "ids",
+            "severity": "High",
+            "rule_id": "ids-001",
+            "action": "Alert",
+            "src_addr": [0xC0A8_0001u32, 0, 0, 0],
+            "dst_addr": [0x0A00_0001u32, 0, 0, 0],
+            "src_port": 4444,
+            "dst_port": 80,
+            "protocol": 6,
+            "is_ipv6": false,
+            "message": "signature match",
+            "mitre_attack": { "technique_id": "T1071" },
+        })
+        .to_string();
+
+        let alert: super::AlertResponse =
+            serde_json::from_str(&body).expect("the frame body is an alert");
+        assert_eq!(alert.id, "alert-1");
+        assert_eq!(alert.severity, "High");
+        assert_eq!(alert.src_ip_str(), "192.168.0.1");
+        assert_eq!(alert.dst_ip_str(), "10.0.0.1");
+        assert!(!alert.false_positive, "an absent field takes its default");
+    }
+
+    #[test]
+    fn a_conntrack_frame_parses_into_an_event_and_a_connection() {
+        let body = serde_json::json!({
+            "event_type": "New",
+            "connection": {
+                "src_ip": "10.0.0.2",
+                "dst_ip": "10.0.0.3",
+                "src_port": 51_000,
+                "dst_port": 443,
+                "protocol": 6,
+                "state": "Established",
+                "packets_fwd": 3,
+                "packets_rev": 2,
+                "bytes_fwd": 300,
+                "bytes_rev": 200,
+                "first_seen_ns": 1u64,
+                "last_seen_ns": 2u64,
+            },
+        })
+        .to_string();
+
+        let frame: super::ConntrackEventFrame =
+            serde_json::from_str(&body).expect("the frame body is a conntrack event");
+        assert_eq!(frame.event_type, "New");
+        assert_eq!(frame.connection.src_ip, "10.0.0.2");
+        assert_eq!(frame.connection.dst_port, 443);
+    }
+
+    /// Serve `app` on a loopback port and hand back a client pointed at it.
+    async fn client_for(app: axum::Router) -> super::ApiClient {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let port = listener.local_addr().expect("the bound address").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        super::ApiClient::new("127.0.0.1", port, None)
+    }
+
+    #[tokio::test]
+    async fn the_client_reads_a_live_stream_frame_by_frame() {
+        use axum::response::sse::{Event, Sse};
+        use axum::routing::get;
+
+        async fn stream()
+        -> Sse<impl tokio_stream::Stream<Item = Result<Event, std::convert::Infallible>>> {
+            let events = vec![
+                Ok(Event::default().comment("keepalive")),
+                Ok(Event::default()
+                    .id("alert-1")
+                    .event("alert")
+                    .data("{\"n\":1}")),
+                Ok(Event::default()
+                    .id("alert-2")
+                    .event("alert")
+                    .data("{\"n\":2}")),
+            ];
+            Sse::new(tokio_stream::iter(events))
+        }
+
+        let app = axum::Router::new().route("/api/v1/alerts/stream", get(stream));
+        let client = client_for(app).await;
+
+        let mut stream = client
+            .stream_alerts(None, None, None)
+            .await
+            .expect("the stream opened");
+
+        let first = stream
+            .next_event()
+            .await
+            .expect("a read")
+            .expect("an event");
+        assert_eq!(
+            first.id.as_deref(),
+            Some("alert-1"),
+            "the keepalive is not an event"
+        );
+        assert_eq!(first.name.as_deref(), Some("alert"));
+        assert_eq!(first.data, "{\"n\":1}");
+
+        let second = stream
+            .next_event()
+            .await
+            .expect("a read")
+            .expect("an event");
+        assert_eq!(second.id.as_deref(), Some("alert-2"));
+
+        assert!(
+            stream.next_event().await.expect("a read").is_none(),
+            "the server closed the stream"
+        );
+        assert_eq!(
+            stream.last_event_id(),
+            Some("alert-2"),
+            "a reconnect resumes after the last event that carried an id"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_hands_back_the_last_event_id() {
+        use axum::http::HeaderMap;
+        use axum::response::sse::{Event, Sse};
+        use axum::routing::get;
+
+        async fn stream(
+            headers: HeaderMap,
+        ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, std::convert::Infallible>>>
+        {
+            let seen = headers
+                .get("last-event-id")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            Sse::new(tokio_stream::iter(vec![Ok(Event::default().data(seen))]))
+        }
+
+        let app = axum::Router::new().route("/api/v1/alerts/stream", get(stream));
+        let client = client_for(app).await;
+
+        let mut stream = client
+            .stream_alerts(None, None, Some("alert-9"))
+            .await
+            .expect("the stream opened");
+        let event = stream
+            .next_event()
+            .await
+            .expect("a read")
+            .expect("an event");
+        assert_eq!(event.data, "alert-9");
+    }
+
+    #[tokio::test]
+    async fn a_404_is_the_answer_that_makes_the_caller_poll() {
+        use axum::http::StatusCode;
+        use axum::routing::get;
+
+        async fn refuse() -> (StatusCode, axum::Json<serde_json::Value>) {
+            (
+                StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({
+                    "error": {
+                        "code": "SERVICE_NOT_AVAILABLE",
+                        "message": "Conntrack event stream not enabled",
+                    }
+                })),
+            )
+        }
+
+        let app = axum::Router::new().route("/api/v1/conntrack/events", get(refuse));
+        let client = client_for(app).await;
+
+        match client.stream_conntrack_events().await {
+            Err(super::StreamOpenError::NotAvailable { message }) => {
+                assert_eq!(message, "Conntrack event stream not enabled");
+            }
+            Err(other) => panic!("a 404 must degrade to polling, got {other}"),
+            Ok(_) => panic!("a 404 is not an open stream"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_that_is_not_about_the_stream_is_worth_retrying() {
+        use axum::http::StatusCode;
+        use axum::routing::get;
+
+        async fn refuse() -> (StatusCode, axum::Json<serde_json::Value>) {
+            (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({
+                    "error": { "code": "UNAUTHORIZED", "message": "Authentication required" }
+                })),
+            )
+        }
+
+        let app = axum::Router::new().route("/api/v1/alerts/stream", get(refuse));
+        let client = client_for(app).await;
+
+        match client.stream_alerts(None, None, None).await {
+            Err(super::StreamOpenError::Failed(e)) => {
+                let said = e.to_string();
+                assert!(said.contains("Authentication required"), "said {said}");
+            }
+            Err(other) => panic!("a 401 is not the server saying it has no stream: {other}"),
+            Ok(_) => panic!("a 401 is not an open stream"),
         }
     }
 

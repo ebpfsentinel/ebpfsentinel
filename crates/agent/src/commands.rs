@@ -2,7 +2,10 @@ use std::net::Ipv4Addr;
 
 use anyhow::Result;
 
-use crate::api_client::{ApiClient, IpsRuleResponse};
+use crate::api_client::{
+    AlertResponse, ApiClient, ConnectionResponse, ConntrackEventFrame, IpsRuleResponse,
+    StreamOpenError,
+};
 use crate::cli::OutputFormat;
 
 // ── Health ──────────────────────────────────────────────────────────────
@@ -1628,7 +1631,108 @@ pub async fn cmd_qos_delete_classifier(client: &ApiClient, id: &str) -> Result<(
 
 // ── Watch ───────────────────────────────────────────────────────────
 
+/// First wait between reconnect attempts, so a restarting agent is picked up
+/// again straight away.
+const RECONNECT_BACKOFF_START_SECS: u64 = 1;
+/// Ceiling the wait doubles up to, so an agent that is down is not hammered.
+const RECONNECT_BACKOFF_MAX_SECS: u64 = 30;
+
+fn next_backoff(current: std::time::Duration) -> std::time::Duration {
+    let doubled = current.as_secs().saturating_mul(2);
+    std::time::Duration::from_secs(doubled.min(RECONNECT_BACKOFF_MAX_SECS))
+}
+
+fn backoff_start() -> std::time::Duration {
+    std::time::Duration::from_secs(RECONNECT_BACKOFF_START_SECS)
+}
+
+/// One alert, printed the same way whether it arrived on the stream or came
+/// back from the paged list.
+fn print_alert_line(alert: &AlertResponse) {
+    // The stream serialises the agent's own record, where a severity is
+    // `High`; the list endpoint lowercases it on the way out. Print one
+    // spelling either way, so a fallback does not look like another agent.
+    let severity = alert.severity.to_ascii_lowercase();
+    let severity = match severity.as_str() {
+        "critical" => format!("\x1b[91m{severity:<8}\x1b[0m"),
+        "high" => format!("\x1b[93m{severity:<8}\x1b[0m"),
+        "medium" => format!("\x1b[33m{severity:<8}\x1b[0m"),
+        _ => format!("{severity:<8}"),
+    };
+
+    println!(
+        "  {:<10}  {}  {:<18} -> {:<18}  {}",
+        alert.component,
+        severity,
+        alert.src_ip_str(),
+        alert.dst_ip_str(),
+        truncate(&alert.message, 50),
+    );
+}
+
 pub async fn cmd_watch(
+    client: &ApiClient,
+    interval_secs: u64,
+    component: Option<&str>,
+    severity: Option<&str>,
+) -> Result<()> {
+    let filter_desc = match (component, severity) {
+        (Some(c), Some(s)) => format!(" (component={c}, severity>={s})"),
+        (Some(c), None) => format!(" (component={c})"),
+        (None, Some(s)) => format!(" (severity>={s})"),
+        _ => String::new(),
+    };
+    eprintln!("Watching alerts{filter_desc} - live stream. Press Ctrl+C to stop.\n");
+
+    // The id of the last alert printed. A reconnect hands it back so the
+    // agent replays what happened while the connection was down.
+    let mut resume_from: Option<String> = None;
+    let mut backoff = backoff_start();
+
+    loop {
+        match client
+            .stream_alerts(component, severity, resume_from.as_deref())
+            .await
+        {
+            Ok(mut stream) => {
+                backoff = backoff_start();
+                loop {
+                    match stream.next_event().await {
+                        Ok(Some(event)) => match serde_json::from_str::<AlertResponse>(&event.data)
+                        {
+                            Ok(alert) => print_alert_line(&alert),
+                            Err(e) => eprintln!("  [skipped] unreadable alert frame: {e}"),
+                        },
+                        Ok(None) => break,
+                        Err(e) => {
+                            eprintln!("  [stream] {e}");
+                            break;
+                        }
+                    }
+                }
+                resume_from = stream.last_event_id().map(ToString::to_string);
+            }
+            Err(StreamOpenError::NotAvailable { message }) => {
+                eprintln!(
+                    "  [polling] this agent serves no alert stream ({message}); \
+                     polling every {interval_secs}s instead, so an alert can be \
+                     up to that late."
+                );
+                return watch_alerts_by_polling(client, interval_secs, component, severity).await;
+            }
+            Err(StreamOpenError::Failed(e)) => eprintln!("  [stream] {e}"),
+        }
+
+        eprintln!("  [stream] reconnecting in {}s", backoff.as_secs());
+        tokio::time::sleep(backoff).await;
+        backoff = next_backoff(backoff);
+    }
+}
+
+/// What `watch` falls back to where the agent serves no alert stream: the
+/// paged list, re-read on an interval, with the ids already printed
+/// remembered so nothing is shown twice.
+async fn watch_alerts_by_polling(
     client: &ApiClient,
     interval_secs: u64,
     component: Option<&str>,
@@ -1648,16 +1752,6 @@ pub async fn cmd_watch(
             seen.insert(a.id.clone());
         }
     }
-
-    let filter_desc = match (component, severity) {
-        (Some(c), Some(s)) => format!(" (component={c}, severity>={s})"),
-        (Some(c), None) => format!(" (component={c})"),
-        (None, Some(s)) => format!(" (severity>={s})"),
-        _ => String::new(),
-    };
-    eprintln!(
-        "Watching alerts{filter_desc} — poll every {interval_secs}s. Press Ctrl+C to stop.\n"
-    );
 
     loop {
         tokio::time::sleep(interval).await;
@@ -1683,22 +1777,7 @@ pub async fn cmd_watch(
 
         for a in &new_alerts {
             seen.insert(a.id.clone());
-
-            let sev_colored = match a.severity.as_str() {
-                "critical" => format!("\x1b[91m{:<8}\x1b[0m", a.severity),
-                "high" => format!("\x1b[93m{:<8}\x1b[0m", a.severity),
-                "medium" => format!("\x1b[33m{:<8}\x1b[0m", a.severity),
-                _ => format!("{:<8}", a.severity),
-            };
-
-            println!(
-                "  {:<10}  {}  {:<18} -> {:<18}  {}",
-                a.component,
-                sev_colored,
-                a.src_ip_str(),
-                a.dst_ip_str(),
-                truncate(&a.message, 50),
-            );
+            print_alert_line(a);
         }
     }
 }
@@ -1898,28 +1977,91 @@ pub async fn cmd_conntrack_list(
     Ok(())
 }
 
+/// The five-tuple a flow is printed under, identical on the stream and on
+/// the polled fallback so one line means the same thing either way.
+fn conntrack_key(c: &ConnectionResponse) -> String {
+    format!(
+        "{}:{}-{}:{}/{}",
+        c.src_ip, c.src_port, c.dst_ip, c.dst_port, c.protocol,
+    )
+}
+
+fn print_conntrack_line(kind: &str, key: &str, state: Option<&str>) {
+    let kind = kind.to_uppercase();
+    let now = chrono_or_now();
+    match state {
+        Some(state) => println!("[{kind}] {now} {key} state={state}"),
+        None => println!("[{kind}] {now} {key}"),
+    }
+}
+
 pub async fn cmd_conntrack_watch(client: &ApiClient, interval: u64) -> Result<()> {
-    // Poll /api/v1/conntrack/connections periodically and show diffs.
-    // SSE requires EventSource which isn't in reqwest — use polling as
-    // fallback (matches the existing cmd_watch pattern for alerts).
-    let mut prev_keys = std::collections::HashSet::new();
+    eprintln!("Watching conntrack events - live stream. Press Ctrl+C to stop.");
+
+    let mut backoff = backoff_start();
+
+    loop {
+        match client.stream_conntrack_events().await {
+            Ok(mut stream) => {
+                backoff = backoff_start();
+                loop {
+                    match stream.next_event().await {
+                        Ok(Some(event)) => {
+                            match serde_json::from_str::<ConntrackEventFrame>(&event.data) {
+                                Ok(frame) => print_conntrack_line(
+                                    &frame.event_type,
+                                    &conntrack_key(&frame.connection),
+                                    Some(&frame.connection.state),
+                                ),
+                                Err(e) => {
+                                    eprintln!("  [skipped] unreadable conntrack frame: {e}");
+                                }
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            eprintln!("  [stream] {e}");
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(StreamOpenError::NotAvailable { message }) => {
+                eprintln!(
+                    "  [polling] this agent serves no conntrack event stream \
+                     ({message}); polling every {interval}s instead, so a short \
+                     flow can open and close between two reads and never appear."
+                );
+                return watch_conntrack_by_polling(client, interval).await;
+            }
+            Err(StreamOpenError::Failed(e)) => eprintln!("  [stream] {e}"),
+        }
+
+        eprintln!("  [stream] reconnecting in {}s", backoff.as_secs());
+        tokio::time::sleep(backoff).await;
+        backoff = next_backoff(backoff);
+    }
+}
+
+/// What `conntrack watch` falls back to where the agent serves no event
+/// stream, which is what a kernel built without `CONFIG_NF_CONNTRACK_PROCFS`
+/// leaves: successive reads of the connection list, diffed.
+async fn watch_conntrack_by_polling(client: &ApiClient, interval: u64) -> Result<()> {
+    let mut prev_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
         let conns = client.list_connections(10_000).await?;
         let mut curr_keys = std::collections::HashSet::new();
         for c in &conns {
-            let key = format!(
-                "{}:{}-{}:{}/{}",
-                c.src_ip, c.src_port, c.dst_ip, c.dst_port, c.protocol,
-            );
+            let key = conntrack_key(c);
             if !prev_keys.contains(&key) {
-                println!("[NEW] {} {} state={}", chrono_or_now(), key, c.state);
+                print_conntrack_line("new", &key, Some(&c.state));
             }
             curr_keys.insert(key);
         }
         for old_key in &prev_keys {
             if !curr_keys.contains(old_key) {
-                println!("[DESTROY] {} {old_key}", chrono_or_now());
+                print_conntrack_line("destroy", old_key, None);
             }
         }
         prev_keys = curr_keys;

@@ -83,12 +83,15 @@ pub enum Command {
         conn: ConnectionArgs,
     },
 
-    /// Watch alerts in real-time (like tail -f for security events)
+    /// Stream alerts as they happen, reconnecting on its own if the agent
+    /// restarts. Falls back to polling, and says so, where the agent serves
+    /// no alert stream.
     Watch {
         #[command(flatten)]
         conn: ConnectionArgs,
 
-        /// Poll interval in seconds
+        /// Seconds between reads of the alert list, used only by the polling
+        /// fallback
         #[arg(short, long, default_value_t = 2)]
         interval: u64,
 
@@ -250,9 +253,12 @@ pub struct DomainArgs<T: Subcommand> {
 
 #[derive(Subcommand, Debug)]
 pub enum ConntrackAction {
-    /// Watch conntrack flow events in real-time (new / update / destroy)
+    /// Stream conntrack flow events as they happen (new / update / destroy),
+    /// reconnecting on its own. Falls back to diffing the connection list,
+    /// and says so, on a kernel that gives the agent nothing to stream.
     Watch {
-        /// Poll interval in seconds for the SSE stream reconnect
+        /// Seconds between reads of the connection list, used only by the
+        /// polling fallback
         #[arg(short, long, default_value_t = 2)]
         interval: u64,
     },
