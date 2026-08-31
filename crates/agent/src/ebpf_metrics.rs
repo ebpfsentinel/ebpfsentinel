@@ -124,7 +124,6 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (2, "errors"),
             (3, "events_dropped"),
             (4, "total_seen"),
-            (5, "cgroup_resolved"),
         ],
         // Per-zone counters are indexed by zone id, not by a fixed action
         // list, so they are read by `zone_metric_labels` instead.
@@ -170,6 +169,11 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (4, "errors"),
             (5, "total_seen"),
             (6, "nptv6_translated"),
+            (7, "hairpin_applied"),
+            (8, "kfunc_delegated"),
+            (9, "kfunc_fallback"),
+            (10, "xfrm_steered"),
+            (11, "fou_encap"),
         ],
         "SCRUB_METRICS" => &[
             (0, "packets"),
@@ -193,6 +197,14 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (3, "icmp_drop"),
             (4, "amp_passed"),
             (5, "amp_dropped"),
+            (6, "oversized_icmp"),
+            (7, "errors"),
+            (8, "events_dropped"),
+            (9, "conn_tracked"),
+            (10, "half_open_drops"),
+            (11, "rst_flood_drops"),
+            (12, "fin_flood_drops"),
+            (13, "ack_flood_drops"),
             (14, "total_seen"),
             (15, "syncookie_sent"),
             (16, "syncookie_valid"),
@@ -408,42 +420,156 @@ mod tests {
         );
     }
 
+    /// Every `*_METRICS` per-CPU array the metrics loop reads, with the
+    /// `ebpf-common` constant the kernel program sizes it from.
+    ///
+    /// A map is here or its slots are exported under positional names like
+    /// `metric_17`, which tells an operator nothing.
+    const KERNEL_METRIC_MAPS: &[(&str, u32)] = &[
+        (
+            "FIREWALL_METRICS",
+            ebpf_common::firewall::FIREWALL_METRIC_COUNT,
+        ),
+        (
+            "RATELIMIT_METRICS",
+            ebpf_common::ratelimit::RATELIMIT_METRIC_COUNT,
+        ),
+        ("IDS_METRICS", ebpf_common::ids::IDS_METRIC_COUNT),
+        (
+            "THREATINTEL_METRICS",
+            ebpf_common::threatintel::THREATINTEL_METRIC_COUNT,
+        ),
+        ("DNS_METRICS", ebpf_common::dns::DNS_METRIC_COUNT),
+        ("DLP_METRICS", ebpf_common::dlp::DLP_METRIC_COUNT),
+        ("CT_METRICS", ebpf_common::conntrack::CT_METRIC_COUNT),
+        ("NAT_METRICS", ebpf_common::nat::NAT_METRIC_COUNT),
+        ("SCRUB_METRICS", ebpf_common::scrub::SCRUB_METRIC_COUNT),
+        ("DDOS_METRICS", ebpf_common::ddos::DDOS_METRIC_COUNT),
+        ("LB_METRICS", ebpf_common::loadbalancer::LB_METRIC_COUNT),
+        ("QOS_METRICS", ebpf_common::qos::QOS_METRIC_COUNT),
+    ];
+
     #[test]
-    fn ct_metrics_label_every_index_the_kernel_writes() {
-        // tc-conntrack sizes CT_METRICS from CT_METRIC_COUNT. An index it
-        // writes but this table omits is exported under a positional label
-        // like "metric_17", which tells an operator nothing.
-        let labels = metric_labels("CT_METRICS");
-        for idx in 0..ebpf_common::conntrack::CT_METRIC_COUNT {
+    fn every_map_labels_every_index_the_kernel_writes() {
+        // The kernel program sizes each map from its `*_METRIC_COUNT`
+        // constant, so a slot added there and not here is a counter the
+        // kernel increments and nobody can read. Reading the count rather
+        // than a number written out here is what makes that a build failure
+        // in this file rather than a gap somebody notices under attack.
+        for (map, count) in KERNEL_METRIC_MAPS {
+            let labels = metric_labels(map);
+            for idx in 0..*count {
+                assert!(
+                    labels.iter().any(|(i, _)| *i == idx),
+                    "{map} index {idx} has no label"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_map_labels_an_index_the_kernel_never_writes() {
+        // A label past the end of the array is read back as an error on every
+        // poll and exports nothing, so it reads as a counter that stays at
+        // zero rather than as a table naming a slot that does not exist.
+        for (map, count) in KERNEL_METRIC_MAPS {
+            for (idx, label) in metric_labels(map) {
+                assert!(
+                    idx < count,
+                    "{map} labels index {idx} as {label}, past the {count} slots the map holds"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_labelled_map_is_held_to_its_kernel_slot_count() {
+        // Read the arms off the source rather than listing them here, so a
+        // map added to the table without a slot count fails this test instead
+        // of quietly escaping both assertions above.
+        let source = include_str!("ebpf_metrics.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .map_or(source, |(before, _)| before);
+        let arms: Vec<&str> = production
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                let rest = trimmed.strip_prefix('"')?;
+                let (name, tail) = rest.split_once('"')?;
+                tail.trim_start().starts_with("=>").then_some(name)
+            })
+            .collect();
+        assert!(
+            !arms.is_empty(),
+            "no map arm was read out of the label table"
+        );
+
+        for arm in arms {
             assert!(
-                labels.iter().any(|(i, _)| *i == idx),
-                "CT_METRICS index {idx} has no label"
+                KERNEL_METRIC_MAPS.iter().any(|(map, _)| *map == arm),
+                "{arm} is labelled but carries no kernel slot count"
+            );
+        }
+    }
+
+    #[test]
+    fn every_map_the_agent_polls_carries_a_label_table() {
+        // A map opened by the startup path and missing from the label table
+        // falls through to the positional fallback, which exports every slot
+        // as `index_0`, `index_1` and `errors` regardless of what the kernel
+        // counts there. The per-zone maps are indexed by zone id rather than
+        // by a fixed action list, so they are read by `zone_metric_labels`.
+        let startup = include_str!("startup.rs");
+        let mut polled: Vec<&str> = Vec::new();
+        for (_, rest) in startup
+            .match_indices("MetricsReader::new(")
+            .map(|(i, _)| (i, &startup[i + "MetricsReader::new(".len()..]))
+        {
+            let Some(open) = rest.find('"') else { continue };
+            let Some(len) = rest[open + 1..].find('"') else {
+                continue;
+            };
+            let name = &rest[open + 1..open + 1 + len];
+            if !name.starts_with("ZONE_METRICS") && !polled.contains(&name) {
+                polled.push(name);
+            }
+        }
+        assert!(
+            !polled.is_empty(),
+            "no polled map name was read out of the startup path"
+        );
+
+        for name in polled {
+            assert!(
+                KERNEL_METRIC_MAPS.iter().any(|(map, _)| *map == name),
+                "{name} is polled but has no label table, so its slots export as positional names"
             );
         }
     }
 
     #[test]
     fn every_metric_index_is_declared_once() {
-        for map in [
-            "FIREWALL_METRICS",
-            "RATELIMIT_METRICS",
-            "IDS_METRICS",
-            "THREATINTEL_METRICS",
-            "DNS_METRICS",
-            "DLP_METRICS",
-            "CT_METRICS",
-            "NAT_METRICS",
-            "SCRUB_METRICS",
-            "DDOS_METRICS",
-            "LB_METRICS",
-            "QOS_METRICS",
-        ] {
+        for (map, _) in KERNEL_METRIC_MAPS {
             let labels = metric_labels(map);
             let mut indices: Vec<u32> = labels.iter().map(|(idx, _)| *idx).collect();
             indices.sort_unstable();
             let before = indices.len();
             indices.dedup();
             assert_eq!(indices.len(), before, "{map} declares an index twice");
+        }
+    }
+
+    #[test]
+    fn every_action_label_is_unique_within_its_map() {
+        // Two slots sharing a label add together on the wire, so a flood
+        // counter would be indistinguishable from the one beside it.
+        for (map, _) in KERNEL_METRIC_MAPS {
+            let mut labels: Vec<&str> = metric_labels(map).iter().map(|(_, l)| *l).collect();
+            labels.sort_unstable();
+            let before = labels.len();
+            labels.dedup();
+            assert_eq!(labels.len(), before, "{map} declares an action label twice");
         }
     }
 

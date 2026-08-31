@@ -13,6 +13,26 @@ pub const L7_PROTO_DNS: u8 = 4;
 pub const IDS_SAMPLING_NONE: u8 = 0; // No sampling — emit all events
 pub const IDS_SAMPLING_RANDOM: u8 = 1; // Random sampling via `bpf_get_prandom_u32`
 
+// ── IDS metric indices ──────────────────────────────────────────────
+
+/// Metric index: packets matching an IDS pattern.
+pub const IDS_METRIC_MATCHED: u32 = 0;
+/// Metric index: packets dropped by an `IDS_ACTION_DROP` pattern.
+pub const IDS_METRIC_DROPPED: u32 = 1;
+/// Metric index: errors.
+pub const IDS_METRIC_ERRORS: u32 = 2;
+/// Metric index: events dropped (`RingBuf` backpressure).
+pub const IDS_METRIC_EVENTS_DROPPED: u32 = 3;
+/// Metric index: total packets seen (unconditional, first instruction).
+pub const IDS_METRIC_TOTAL_SEEN: u32 = 4;
+/// Metric index: tenant resolved from the packet's cgroup id.
+pub const IDS_METRIC_CGROUP_TENANT_RESOLVED: u32 = 5;
+/// Metric index: classified packet attributed to the cgroup that sent it.
+/// Distinct from the tenant counter above, which needs a map entry.
+pub const IDS_METRIC_CGROUP_ATTRIBUTED: u32 = 6;
+/// Total number of IDS metric slots (one past the last index).
+pub const IDS_METRIC_COUNT: u32 = 7;
+
 /// Kernel-side IDS sampling configuration.
 /// Stored in a single-entry Array map (`IDS_SAMPLING_CONFIG`).
 /// Size: 8 bytes (aligned to 4 bytes).

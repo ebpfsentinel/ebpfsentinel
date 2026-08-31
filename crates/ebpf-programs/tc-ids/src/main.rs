@@ -22,7 +22,10 @@ use ebpf_common::{
         PacketEvent, SMALL_L7_PAYLOAD,
     },
     ids::{
-        IDS_ACTION_DROP, IDS_SAMPLING_RANDOM, IdsPatternKey, IdsPatternValue, IdsSamplingConfig,
+        IDS_ACTION_DROP, IDS_METRIC_CGROUP_ATTRIBUTED, IDS_METRIC_CGROUP_TENANT_RESOLVED,
+        IDS_METRIC_COUNT, IDS_METRIC_DROPPED, IDS_METRIC_ERRORS, IDS_METRIC_EVENTS_DROPPED,
+        IDS_METRIC_MATCHED, IDS_METRIC_TOTAL_SEEN, IDS_SAMPLING_RANDOM, IdsPatternKey,
+        IdsPatternValue, IdsSamplingConfig,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
@@ -85,7 +88,7 @@ static IDS_SRC_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue, 10240> = HashMa
 
 /// Per-CPU packet counters. Index: 0=matched, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen, 5=cgroup_tenant_resolved, 6=cgroup_attributed.
 #[btf_map]
-static IDS_METRICS: PerCpuArray<u64, 7> = PerCpuArray::new();
+static IDS_METRICS: PerCpuArray<u64, { IDS_METRIC_COUNT as usize }> = PerCpuArray::new();
 
 /// Shared kernel→userspace event ring buffer (4 MB).
 ///
@@ -184,19 +187,23 @@ struct L7EventBuf {
 }
 
 // ── Metric indices ──────────────────────────────────────────────────
+//
+// Owned by `ebpf-common` so the userspace label table is sized off the same
+// constant this map is, and a slot added here without a label there fails
+// the build rather than exporting a positional name.
 
-const METRIC_MATCHED: u32 = 0;
-const METRIC_DROPPED: u32 = 1;
-const METRIC_ERRORS: u32 = 2;
-const METRIC_EVENTS_DROPPED: u32 = 3;
-const METRIC_TOTAL_SEEN: u32 = 4;
-/// Tenant resolved via cgroup_id → TENANT_CGROUP_MAP lookup.
-const METRIC_CGROUP_TENANT_RESOLVED: u32 = 5;
+const METRIC_MATCHED: u32 = IDS_METRIC_MATCHED;
+const METRIC_DROPPED: u32 = IDS_METRIC_DROPPED;
+const METRIC_ERRORS: u32 = IDS_METRIC_ERRORS;
+const METRIC_EVENTS_DROPPED: u32 = IDS_METRIC_EVENTS_DROPPED;
+const METRIC_TOTAL_SEEN: u32 = IDS_METRIC_TOTAL_SEEN;
+/// Tenant resolved via cgroup_id -> TENANT_CGROUP_MAP lookup.
+const METRIC_CGROUP_TENANT_RESOLVED: u32 = IDS_METRIC_CGROUP_TENANT_RESOLVED;
 /// A classified packet was attributed to the cgroup that sent it. Distinct
 /// from the tenant counter above: attribution needs no map entry, so
 /// sharing one index would make a mapped tenant indistinguishable from any
 /// container sending traffic.
-const METRIC_CGROUP_ATTRIBUTED: u32 = 6;
+const METRIC_CGROUP_ATTRIBUTED: u32 = IDS_METRIC_CGROUP_ATTRIBUTED;
 
 /// 75% threshold for the 4 MiB EVENTS ring buffer. Must stay in sync
 /// with the `RingBuf::with_byte_size` call above.

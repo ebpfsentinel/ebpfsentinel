@@ -38,6 +38,9 @@ use ebpf_common::{
     ratelimit::{
         ALGO_FIXED_WINDOW, ALGO_LEAKY_BUCKET, ALGO_SLIDING_WINDOW, ALGO_TOKEN_BUCKET,
         FixedWindowValue, LeakyBucketValue, MAX_RL_BUCKET_ENTRIES, MAX_RL_LPM_ENTRIES,
+        RATELIMIT_METRIC_COUNT, RATELIMIT_METRIC_ERRORS, RATELIMIT_METRIC_EVENTS_DROPPED,
+        RATELIMIT_METRIC_MTU_EXCEEDED, RATELIMIT_METRIC_PASSED, RATELIMIT_METRIC_THROTTLED,
+        RATELIMIT_METRIC_TOTAL_SEEN,
         MAX_RL_TIERS, RATELIMIT_ACTION_DROP, RateLimitBucketUnion, RateLimitConfig, RateLimitKey,
         RateLimitTierValue, RateLimitValue, SLIDING_WINDOW_NUM_SLOTS, SlidingWindowValue,
     },
@@ -131,7 +134,8 @@ static RL_BUCKETS: LruPerCpuHashMap<RateLimitKey, RateLimitBucketUnion, { MAX_RL
 
 /// Per-CPU counters. Index: 0=passed, 1=throttled, 2=errors, 3=events_dropped, 4=total_seen.
 #[btf_map]
-static RATELIMIT_METRICS: PerCpuArray<u64, 6> = PerCpuArray::new();
+static RATELIMIT_METRICS: PerCpuArray<u64, { RATELIMIT_METRIC_COUNT as usize }> =
+    PerCpuArray::new();
 
 /// Shared kernel→userspace event ring buffer (1 MB).
 #[btf_map]
@@ -224,12 +228,15 @@ static FLOOD_COUNTERS: LruPerCpuHashMap<FloodCounterKey, FixedWindowValue, 65536
 
 // ── Metric indices ──────────────────────────────────────────────────
 
-const METRIC_PASSED: u32 = 0;
-const METRIC_THROTTLED: u32 = 1;
-const METRIC_ERRORS: u32 = 2;
-const METRIC_EVENTS_DROPPED: u32 = 3;
-const METRIC_TOTAL_SEEN: u32 = 4;
-const METRIC_MTU_EXCEEDED: u32 = 5;
+// Owned by `ebpf-common` so the userspace label table is sized off the same
+// constant this map is, and a slot added here without a label there fails
+// the build rather than exporting a positional name.
+const METRIC_PASSED: u32 = RATELIMIT_METRIC_PASSED;
+const METRIC_THROTTLED: u32 = RATELIMIT_METRIC_THROTTLED;
+const METRIC_ERRORS: u32 = RATELIMIT_METRIC_ERRORS;
+const METRIC_EVENTS_DROPPED: u32 = RATELIMIT_METRIC_EVENTS_DROPPED;
+const METRIC_TOTAL_SEEN: u32 = RATELIMIT_METRIC_TOTAL_SEEN;
+const METRIC_MTU_EXCEEDED: u32 = RATELIMIT_METRIC_MTU_EXCEEDED;
 
 // Local asm macros removed — using ebpf_helpers::copy_mac_asm! and copy_16b_asm!.
 

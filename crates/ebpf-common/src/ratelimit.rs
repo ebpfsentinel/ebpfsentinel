@@ -29,6 +29,23 @@ pub const ALGO_LEAKY_BUCKET: u8 = 3;
 /// Algorithm: SYN cookie (XDP-based SYN flood mitigation).
 pub const ALGO_SYNCOOKIE: u8 = 4;
 
+// ── Rate limit metric indices ───────────────────────────────────────
+
+/// Metric index: packets allowed through the rate limiter.
+pub const RATELIMIT_METRIC_PASSED: u32 = 0;
+/// Metric index: packets throttled by the rate limiter.
+pub const RATELIMIT_METRIC_THROTTLED: u32 = 1;
+/// Metric index: errors.
+pub const RATELIMIT_METRIC_ERRORS: u32 = 2;
+/// Metric index: events dropped (`RingBuf` backpressure).
+pub const RATELIMIT_METRIC_EVENTS_DROPPED: u32 = 3;
+/// Metric index: total packets seen (unconditional, first instruction).
+pub const RATELIMIT_METRIC_TOTAL_SEEN: u32 = 4;
+/// Metric index: packets whose reject reply would exceed the interface MTU.
+pub const RATELIMIT_METRIC_MTU_EXCEEDED: u32 = 5;
+/// Total number of rate limit metric slots (one past the last index).
+pub const RATELIMIT_METRIC_COUNT: u32 = 6;
+
 /// Number of slots in the sliding window algorithm.
 pub const SLIDING_WINDOW_NUM_SLOTS: usize = 8;
 

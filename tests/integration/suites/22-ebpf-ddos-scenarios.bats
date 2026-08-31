@@ -114,6 +114,30 @@ teardown_file() {
     echo "$metrics" | grep -qE "ebpfsentinel_ddos|ebpfsentinel_packets"
 }
 
+# Labels of the connection-tracking counter the xdp-ratelimit program bumps for
+# every SYN it files in the connection table. It is a per-packet counter mirrored
+# from the kernel map, so a before/after delta proves the flood crossed the
+# datapath and that the slot really reaches /metrics under its own action name,
+# rather than being folded into a positional label or dropped on the floor.
+DDOS_CONN_TRACKED_LABELS='{interface="DDOS_METRICS",action="conn_tracked"}'
+
+@test "SYN flood grows the DDoS connection-tracking action on /metrics" {
+    require_root
+
+    local before
+    before="$(get_metrics_value ebpfsentinel_packets_total \
+        "$DDOS_CONN_TRACKED_LABELS" 2>/dev/null || true)"
+    [ -n "$before" ] || before=0
+
+    for i in $(seq 1 50); do
+        send_tcp_from_ns "$EBPF_HOST_IP" 8888 "CT${i}" 1 &
+    done
+    wait
+
+    assert_metric_increased ebpfsentinel_packets_total "$before" 1 \
+        "$DDOS_CONN_TRACKED_LABELS"
+}
+
 # ── Attack history ───────────────────────────────────────────────
 
 @test "DDoS attacks endpoint is accessible" {
