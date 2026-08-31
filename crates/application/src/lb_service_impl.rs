@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -23,6 +24,10 @@ pub struct LbAppService {
     map_port: Option<Box<dyn LoadBalancerMapPort + Send>>,
     metrics: Arc<dyn MetricsPort>,
     enabled: bool,
+    /// Service ids the healthy-backend gauge currently carries a value for,
+    /// so a service that goes away can be zeroed instead of leaving its last
+    /// reading standing for ever.
+    published_services: HashSet<String>,
 }
 
 impl LbAppService {
@@ -32,6 +37,7 @@ impl LbAppService {
             map_port: None,
             metrics,
             enabled: false,
+            published_services: HashSet::new(),
         }
     }
 
@@ -131,6 +137,8 @@ impl LbAppService {
             }
         }
 
+        self.publish_backend_health();
+
         Ok(())
     }
 
@@ -226,9 +234,30 @@ impl LbAppService {
         }
     }
 
-    fn update_metrics(&self) {
+    fn update_metrics(&mut self) {
         self.metrics
             .set_rules_loaded("loadbalancer", self.engine.service_count() as u64);
+        self.publish_backend_health();
+    }
+
+    /// Publish the healthy-backend count of every configured service, and
+    /// zero the gauge of every service that has since been removed.
+    fn publish_backend_health(&mut self) {
+        let mut live = HashSet::new();
+        for service in self.engine.services() {
+            let id = service.id.0.clone();
+            let healthy = self
+                .engine
+                .backend_states(&id)
+                .map_or(0, |states| states.iter().filter(|s| s.is_healthy()).count());
+            self.metrics.set_lb_backends_healthy(&id, healthy as u64);
+            live.insert(id);
+        }
+
+        for gone in self.published_services.difference(&live) {
+            self.metrics.set_lb_backends_healthy(gone, 0);
+        }
+        self.published_services = live;
     }
 }
 
@@ -338,6 +367,99 @@ mod tests {
             enabled: true,
             health_check: None,
         }
+    }
+
+    /// Records every healthy-backend reading so the test can assert what the
+    /// gauge was told rather than what the engine holds.
+    #[derive(Default)]
+    struct RecordingMetrics {
+        backends_healthy: std::sync::Mutex<Vec<(String, u64)>>,
+    }
+
+    impl ports::secondary::metrics_port::LbMetrics for RecordingMetrics {
+        fn set_lb_backends_healthy(&self, service: &str, count: u64) {
+            self.backends_healthy
+                .lock()
+                .expect("the recording lock is never poisoned")
+                .push((service.to_string(), count));
+        }
+    }
+
+    macro_rules! empty_metrics_impls {
+        ($($trait_name:ident),* $(,)?) => {
+            $(impl ports::secondary::metrics_port::$trait_name for RecordingMetrics {})*
+        };
+    }
+
+    empty_metrics_impls!(
+        PacketMetrics,
+        FirewallMetrics,
+        AlertMetrics,
+        IpsMetrics,
+        ZoneMetrics,
+        ThreatIntelMetrics,
+        DnsMetrics,
+        DomainMetrics,
+        SystemMetrics,
+        ConfigMetrics,
+        EventMetrics,
+        DlpMetrics,
+        DdosMetrics,
+        ConntrackMetrics,
+        RoutingMetrics,
+        AuditMetrics,
+        FingerprintMetrics,
+        ContainerMetrics,
+        CtMetrics,
+    );
+
+    #[test]
+    fn healthy_backend_count_is_published_per_service() {
+        let metrics = Arc::new(RecordingMetrics::default());
+        let mut svc = LbAppService::new(LbEngine::new(), metrics.clone());
+
+        svc.add_service(make_lb_service("svc-1", 80))
+            .expect("the service is valid");
+        assert_eq!(
+            metrics
+                .backends_healthy
+                .lock()
+                .expect("the recording lock is never poisoned")
+                .last(),
+            Some(&("svc-1".to_string(), 2))
+        );
+
+        svc.update_backend_health("svc-1", "be-1", false, 1)
+            .expect("the backend exists");
+        assert_eq!(
+            metrics
+                .backends_healthy
+                .lock()
+                .expect("the recording lock is never poisoned")
+                .last(),
+            Some(&("svc-1".to_string(), 1))
+        );
+    }
+
+    #[test]
+    fn a_service_that_goes_away_has_its_gauge_zeroed() {
+        let metrics = Arc::new(RecordingMetrics::default());
+        let mut svc = LbAppService::new(LbEngine::new(), metrics.clone());
+
+        svc.add_service(make_lb_service("svc-1", 80))
+            .expect("the service is valid");
+        svc.remove_service(&RuleId("svc-1".to_string()))
+            .expect("the service exists");
+
+        assert_eq!(
+            metrics
+                .backends_healthy
+                .lock()
+                .expect("the recording lock is never poisoned")
+                .last(),
+            Some(&("svc-1".to_string(), 0)),
+            "a removed service keeps reporting its last healthy count"
+        );
     }
 
     #[test]

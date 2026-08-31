@@ -20,9 +20,6 @@ pub trait PacketMetrics: Send + Sync {
     /// counter tracks the real kernel counter rather than the poll cadence.
     fn record_packets_by(&self, _interface: &str, _action: &str, _count: u64) {}
 
-    /// Record bytes processed on a given interface and direction (rx/tx).
-    fn record_bytes_processed(&self, _interface: &str, _direction: &str, _bytes: u64) {}
-
     /// Observe a packet processing duration in seconds.
     fn observe_processing_duration(&self, _program: &str, _duration_seconds: f64) {}
 }
@@ -157,9 +154,6 @@ pub trait DomainMetrics: Send + Sync {
     /// Set the number of high-risk domains tracked by the reputation engine.
     fn set_domain_reputation_high_risk(&self, _count: u64) {}
 
-    /// Increment the counter of domains auto-blocked by reputation engine.
-    fn increment_domain_auto_blocked(&self) {}
-
     /// Record a reputation-driven auto-block event for the given domain.
     fn record_reputation_auto_block(&self, _domain: &str) {}
 
@@ -243,13 +237,6 @@ pub trait DdosMetrics: Send + Sync {
 
 pub trait ConntrackMetrics: Send + Sync {
     fn set_conntrack_active(&self, _count: u64) {}
-    fn record_conntrack_expired(&self) {}
-    /// Set the total kernel netfilter CT kfunc lookup count.
-    fn set_conntrack_kfunc_lookups(&self, _count: u64) {}
-    /// Set the kernel netfilter CT kfunc hit count.
-    fn set_conntrack_kfunc_hits(&self, _count: u64) {}
-    /// Set the kernel netfilter CT kfunc miss count.
-    fn set_conntrack_kfunc_misses(&self, _count: u64) {}
 }
 
 // ── Routing metrics ──────────────────────────────────────────────
@@ -270,7 +257,12 @@ pub trait AuditMetrics: Send + Sync {
 // ── Load balancer metrics ────────────────────────────────────────
 
 pub trait LbMetrics: Send + Sync {
-    fn record_lb_forwarded(&self) {}
+    /// Set the number of backends currently passing health checks for a
+    /// service.
+    ///
+    /// Set for every configured service whenever the set changes, and set to
+    /// zero for a service that has gone, because a gauge left standing at its
+    /// last value reports backends for a service nobody is running.
     fn set_lb_backends_healthy(&self, _service: &str, _count: u64) {}
 
     /// Mirror the kernel's cumulative forged-ARP-reply count for a VIP
@@ -389,14 +381,12 @@ mod tests {
             port.record_false_positive("ids", "ids-001");
             port.set_memory_usage_bytes(1024);
             port.set_cpu_usage_percent(12.5);
-            port.record_bytes_processed("eth0", "rx", 1500);
             port.set_dns_cache_entries(42);
             port.increment_dns_cache_hits();
             port.increment_dns_cache_evictions();
             port.increment_dns_blocked_domains();
             port.set_dns_injected_ips(5);
             port.set_domain_reputation_high_risk(5);
-            port.increment_domain_auto_blocked();
             port.record_dlp_scan();
             port.record_dlp_match("pci-001");
             port.observe_dlp_scan_duration(0.001);
@@ -404,13 +394,11 @@ mod tests {
             port.set_ddos_attacks_active(2);
             port.record_ddos_mitigation("syn_flood");
             port.set_conntrack_active(100);
-            port.record_conntrack_expired();
             port.set_routing_gateway_status("gw-1", true);
             port.record_routing_failover();
             port.set_routing_gateways_total(3);
             port.record_audit_event();
             port.record_audit_failure();
-            port.record_lb_forwarded();
             port.set_lb_backends_healthy("web", 3);
             port.record_fingerprint_seen("t13d0305h2_abc_def");
         }

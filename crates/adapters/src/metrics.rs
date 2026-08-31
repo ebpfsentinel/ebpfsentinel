@@ -93,12 +93,6 @@ pub struct RuleIdLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct BytesLabels {
-    pub interface: String,
-    pub direction: String,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct AttackTypeLabels {
     pub attack_type: String,
 }
@@ -208,7 +202,6 @@ pub struct AgentMetrics {
     pub cpu_usage_percent: Gauge<f64, AtomicU64>,
     pub open_fds: Gauge,
     pub thread_count: Gauge,
-    pub bytes_processed_total: Family<BytesLabels, Counter>,
     pub dns_cache_entries: Gauge,
     pub dns_cache_hits_total: Counter,
     pub dns_cache_evictions_total: Counter,
@@ -231,16 +224,11 @@ pub struct AgentMetrics {
     pub ddos_attacks_active: Gauge,
     pub ddos_mitigations_total: Family<AttackTypeLabels, Counter>,
     pub conntrack_active: Gauge,
-    pub conntrack_expired_total: Counter,
-    pub conntrack_kfunc_lookups: Gauge,
-    pub conntrack_kfunc_hits: Gauge,
-    pub conntrack_kfunc_misses: Gauge,
     pub routing_gateway_status: Family<GatewayLabels, Gauge>,
     pub routing_failovers_total: Counter,
     pub routing_gateways_total: Gauge,
     pub audit_events_total: Counter,
     pub audit_failures_total: Counter,
-    pub lb_forwarded_total: Counter,
     pub lb_backends_healthy: Family<ServiceLabels, Gauge>,
     /// Cumulative forged ARP replies per VIP, mirrored from the kernel
     /// `VIP_ARP_REPLIES` map (gauge mirror of a kernel counter).
@@ -471,13 +459,6 @@ impl AgentMetrics {
             thread_count.clone(),
         );
 
-        let bytes_processed_total = Family::<BytesLabels, Counter>::default();
-        registry.register(
-            "bytes_processed",
-            "Total bytes processed by interface and direction",
-            bytes_processed_total.clone(),
-        );
-
         let dns_cache_entries = Gauge::default();
         registry.register(
             "dns_cache_entries",
@@ -598,32 +579,6 @@ impl AgentMetrics {
             conntrack_active.clone(),
         );
 
-        let conntrack_expired_total = Counter::default();
-        registry.register(
-            "conntrack_expired",
-            "Total expired connection tracking entries",
-            conntrack_expired_total.clone(),
-        );
-
-        let conntrack_kfunc_lookups = Gauge::default();
-        registry.register(
-            "conntrack_kfunc_lookups",
-            "Kernel netfilter CT kfunc lookup attempts from BPF",
-            conntrack_kfunc_lookups.clone(),
-        );
-        let conntrack_kfunc_hits = Gauge::default();
-        registry.register(
-            "conntrack_kfunc_hits",
-            "Kernel netfilter CT kfunc lookup hits from BPF",
-            conntrack_kfunc_hits.clone(),
-        );
-        let conntrack_kfunc_misses = Gauge::default();
-        registry.register(
-            "conntrack_kfunc_misses",
-            "Kernel netfilter CT kfunc lookup misses from BPF",
-            conntrack_kfunc_misses.clone(),
-        );
-
         let routing_gateway_status = Family::<GatewayLabels, Gauge>::default();
         registry.register(
             "routing_gateway_status",
@@ -657,13 +612,6 @@ impl AgentMetrics {
             "audit_failures",
             "Total audit write failures",
             audit_failures_total.clone(),
-        );
-
-        let lb_forwarded_total = Counter::default();
-        registry.register(
-            "lb_forwarded",
-            "Total load-balanced packets forwarded",
-            lb_forwarded_total.clone(),
         );
 
         let lb_backends_healthy = Family::<ServiceLabels, Gauge>::default();
@@ -800,7 +748,6 @@ impl AgentMetrics {
             cpu_usage_percent,
             open_fds,
             thread_count,
-            bytes_processed_total,
             dns_cache_entries,
             dns_cache_hits_total,
             dns_cache_evictions_total,
@@ -819,16 +766,11 @@ impl AgentMetrics {
             ddos_attacks_active,
             ddos_mitigations_total,
             conntrack_active,
-            conntrack_expired_total,
-            conntrack_kfunc_lookups,
-            conntrack_kfunc_hits,
-            conntrack_kfunc_misses,
             routing_gateway_status,
             routing_failovers_total,
             routing_gateways_total,
             audit_events_total,
             audit_failures_total,
-            lb_forwarded_total,
             lb_backends_healthy,
             lb_vip_arp_replies,
             lb_vip_takeovers_total,
@@ -906,15 +848,6 @@ impl PacketMetrics for AgentMetrics {
                 action: action.to_string(),
             })
             .inc_by(count);
-    }
-
-    fn record_bytes_processed(&self, interface: &str, direction: &str, bytes: u64) {
-        self.bytes_processed_total
-            .get_or_create(&BytesLabels {
-                interface: interface.to_string(),
-                direction: direction.to_string(),
-            })
-            .inc_by(bytes);
     }
 
     fn observe_processing_duration(&self, program: &str, duration_seconds: f64) {
@@ -1133,10 +1066,6 @@ impl DomainMetrics for AgentMetrics {
             .set(count.try_into().unwrap_or(i64::MAX));
     }
 
-    fn increment_domain_auto_blocked(&self) {
-        self.domain_auto_blocked_total.inc();
-    }
-
     fn record_reputation_auto_block(&self, _domain: &str) {
         self.domain_auto_blocked_total.inc();
     }
@@ -1277,25 +1206,6 @@ impl ConntrackMetrics for AgentMetrics {
         self.conntrack_active
             .set(count.try_into().unwrap_or(i64::MAX));
     }
-
-    fn record_conntrack_expired(&self) {
-        self.conntrack_expired_total.inc();
-    }
-
-    fn set_conntrack_kfunc_lookups(&self, count: u64) {
-        self.conntrack_kfunc_lookups
-            .set(count.try_into().unwrap_or(i64::MAX));
-    }
-
-    fn set_conntrack_kfunc_hits(&self, count: u64) {
-        self.conntrack_kfunc_hits
-            .set(count.try_into().unwrap_or(i64::MAX));
-    }
-
-    fn set_conntrack_kfunc_misses(&self, count: u64) {
-        self.conntrack_kfunc_misses
-            .set(count.try_into().unwrap_or(i64::MAX));
-    }
 }
 
 impl RoutingMetrics for AgentMetrics {
@@ -1328,10 +1238,6 @@ impl AuditMetrics for AgentMetrics {
 }
 
 impl LbMetrics for AgentMetrics {
-    fn record_lb_forwarded(&self) {
-        self.lb_forwarded_total.inc();
-    }
-
     fn set_lb_backends_healthy(&self, service: &str, count: u64) {
         self.lb_backends_healthy
             .get_or_create(&ServiceLabels {
@@ -1556,7 +1462,6 @@ mod tests {
         port.record_false_positive("ids", "ids-001");
         port.set_memory_usage_bytes(1024 * 1024);
         port.set_cpu_usage_percent(25.5);
-        port.record_bytes_processed("eth0", "rx", 1500);
     }
 
     #[test]
@@ -1773,19 +1678,6 @@ mod tests {
     }
 
     #[test]
-    fn bytes_processed_counter() {
-        let metrics = AgentMetrics::new();
-        metrics.record_bytes_processed("eth0", "rx", 1500);
-        metrics.record_bytes_processed("eth0", "tx", 800);
-
-        let encoded = metrics.encode();
-        assert!(encoded.contains("ebpfsentinel_bytes_processed"));
-        assert!(encoded.contains("interface=\"eth0\""));
-        assert!(encoded.contains("direction=\"rx\""));
-        assert!(encoded.contains("direction=\"tx\""));
-    }
-
-    #[test]
     fn config_reload_counter() {
         let metrics = AgentMetrics::new();
         metrics.record_config_reload("firewall", "success");
@@ -1823,15 +1715,10 @@ mod tests {
         ("audit_failures", "counter"),
         ("auto_responses", "counter"),
         ("bpf_token_used", "gauge"),
-        ("bytes_processed", "counter"),
         ("container_resolver_cache_hits", "counter"),
         ("container_resolver_cache_misses", "counter"),
         ("container_resolver_errors", "counter"),
         ("conntrack_active", "gauge"),
-        ("conntrack_expired", "counter"),
-        ("conntrack_kfunc_hits", "gauge"),
-        ("conntrack_kfunc_lookups", "gauge"),
-        ("conntrack_kfunc_misses", "gauge"),
         ("cpu_usage_percent", "gauge"),
         ("ddos_attacks_active", "gauge"),
         ("ddos_attacks_detected", "counter"),
@@ -1858,7 +1745,6 @@ mod tests {
         ("ips_blacklist_size", "gauge"),
         ("ips_blocks", "counter"),
         ("lb_backends_healthy", "gauge"),
-        ("lb_forwarded", "counter"),
         ("lb_vip_arp_replies", "gauge"),
         ("lb_vip_takeovers", "counter"),
         ("memory_usage_bytes", "gauge"),
@@ -1952,12 +1838,6 @@ mod tests {
                 action: "pass".into(),
             })
             .inc();
-        m.bytes_processed_total
-            .get_or_create(&BytesLabels {
-                interface: "eth0".into(),
-                direction: "rx".into(),
-            })
-            .inc_by(1500);
         m.geoip_lookups_total
             .get_or_create(&GeoLookupLabels {
                 result: "hit".into(),
@@ -2195,6 +2075,136 @@ mod tests {
         assert_eq!(
             registered, listed,
             "the checked-in list and the registrations in this file disagree"
+        );
+    }
+
+    /// Collect every `.rs` file under `dir`, recursively.
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            panic!(
+                "the metrics reachability test cannot read {}",
+                dir.display()
+            );
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn every_registered_family_is_written_from_outside_this_file() {
+        // A family nothing ever writes is silent on the wire, so a dashboard
+        // panel or an alert rule naming it stays empty for ever and reads as
+        // an estate with nothing happening rather than as a metric nobody
+        // wired. The registrations, the methods that write them and the call
+        // sites are all read off the sources, because a family with no child
+        // encodes to nothing and cannot be caught on an exposition.
+        let source = include_str!("metrics.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .map_or(source, |(before, _)| before);
+
+        // Registration name -> the struct field it publishes.
+        let mut fields: Vec<(&str, &str)> = Vec::new();
+        let mut lines = production.lines();
+        while let Some(line) = lines.next() {
+            if line.trim() != "registry.register(" {
+                continue;
+            }
+            let name = lines
+                .next()
+                .expect("a register call is followed by its name")
+                .trim()
+                .trim_end_matches(',')
+                .trim_matches('"');
+            let _help = lines.next();
+            let field = lines
+                .next()
+                .expect("a register call is followed by the field it publishes")
+                .trim()
+                .trim_end_matches(',')
+                .trim_end_matches(".clone()");
+            fields.push((name, field));
+        }
+        assert_eq!(
+            fields.len(),
+            REGISTERED_METRICS.len(),
+            "a registration was read without the field it publishes"
+        );
+
+        // Field -> the methods of this file that write it.
+        let mut writers: Vec<(&str, Vec<&str>)> =
+            fields.iter().map(|(_, f)| (*f, Vec::new())).collect();
+        let mut current: Option<&str> = None;
+        for line in production.lines() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed
+                .strip_prefix("pub fn ")
+                .or_else(|| trimmed.strip_prefix("fn "))
+                && let Some((name, _)) = rest.split_once('(')
+            {
+                current = Some(name);
+            }
+            let Some(method) = current else { continue };
+            for (field, methods) in &mut writers {
+                if line.contains(&format!("self.{field}")) && !methods.contains(&method) {
+                    methods.push(method);
+                }
+            }
+        }
+
+        // Every call site the agent has, minus this file and minus test code,
+        // because the port's own exerciser and this module's tests call every
+        // method and would make an unwired family look reached.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        for dir in [
+            "src",
+            "../agent/src",
+            "../application/src",
+            "../domain/src",
+            "../infrastructure/src",
+        ] {
+            rust_sources(&root.join(dir), &mut files);
+        }
+        let here = root.join("src").join("metrics.rs");
+        let corpus: String = files
+            .iter()
+            .filter(|path| **path != here)
+            .map(|path| {
+                let text = std::fs::read_to_string(path).expect("a listed source file is readable");
+                text.split_once("#[cfg(test)]")
+                    .map_or(text.clone(), |(before, _)| before.to_string())
+            })
+            .collect();
+
+        let mut unreached: Vec<&str> = Vec::new();
+        for (name, field) in &fields {
+            let methods = writers
+                .iter()
+                .find(|(f, _)| f == field)
+                .map(|(_, m)| m.as_slice())
+                .unwrap_or_default();
+            assert!(
+                !methods.is_empty(),
+                "{name} is registered but no method in this file writes {field}"
+            );
+            if !methods
+                .iter()
+                .any(|method| corpus.contains(&format!(".{method}(")))
+            {
+                unreached.push(name);
+            }
+        }
+
+        assert!(
+            unreached.is_empty(),
+            "these families are registered and nothing outside this file ever writes them: {unreached:?}"
         );
     }
 
