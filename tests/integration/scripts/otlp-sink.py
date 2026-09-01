@@ -1,96 +1,94 @@
 #!/usr/bin/env python3
-"""Minimal OTLP/HTTP sink used to assert alert export over OpenTelemetry.
+"""Minimal OTLP/HTTP logs sink used by the alert-delivery integration suite.
 
-The agent's OTLP sender batches alerts through the OpenTelemetry SDK and
-POSTs them to `<endpoint>/v1/logs` as protobuf. Decoding protobuf would
-need a dependency, so this sink records the raw body decoded permissively:
-the serialized alert JSON travels inside the payload as a length-prefixed
-string, which makes a substring assertion (on the rule id, say) both simple
-and sufficient to prove the export reached the collector.
+Every accepted export is decoded and appended to the log file as one JSON
+object per line:
 
-Every request is recorded as one JSON object per line:
+    {"index": 1, "transport": "http", "path": "/v1/logs",
+     "content_type": "application/x-protobuf", "length": 812,
+     "resource": {"service.name": "ebpfsentinel", ...},
+     "scope": "ebpfsentinel",
+     "records": [{"severity_number": 17, "time_unix_seconds": 1756..., ...}]}
 
-    {"index": 1, "path": "/v1/logs", "content_type": "application/x-protobuf",
-     "length": 512, "body_text": "..."}
-
-The response is an empty 200 with `application/x-protobuf`, which the SDK
-accepts as a successful export (an empty ExportLogsServiceResponse).
-
-Usage:
-    otlp-sink.py --bind 127.0.0.1 --port 18088 --log /tmp/otlp.jsonl
+The raw body is deliberately not recorded: a test matching substrings inside
+an encoded payload proves an export arrived and nothing more, while the
+decoded record makes the resource, the severity and the clock assertable.
 """
 
 import argparse
 import json
+import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-_LOCK = threading.Lock()
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from otlp_decode import DecodeError, decode_export  # noqa: E402
 
-def build_handler(log_path: str):
-    state = {"seen": 0}
+LOG_LOCK = threading.Lock()
 
-    class Handler(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
+class OtlpSinkHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    log_path = None
+    counter = 0
 
-        def do_POST(self):  # noqa: N802 — BaseHTTPRequestHandler API
-            length = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(length) if length else b""
+    def do_POST(self):  # noqa: N802 - name fixed by BaseHTTPRequestHandler
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        body = self.rfile.read(length) if length else b""
+        content_type = self.headers.get("Content-Type", "")
 
-            with _LOCK:
-                state["seen"] += 1
-                entry = {
-                    "index": state["seen"],
-                    "path": self.path,
-                    "content_type": self.headers.get("Content-Type", ""),
-                    "length": len(body),
-                    "body_text": body.decode("utf-8", errors="replace"),
-                }
-                with open(log_path, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(entry) + "\n")
-                    fh.flush()
+        try:
+            export = decode_export(body, content_type)
+            status = 200
+        except (DecodeError, ValueError) as error:
+            export = {"format": "undecodable", "error": str(error), "resource": {}, "scope": "", "records": []}
+            status = 400
 
-            self.send_response(200)
-            self.send_header("Content-Type", "application/x-protobuf")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+        with LOG_LOCK:
+            OtlpSinkHandler.counter += 1
+            entry = {
+                "index": OtlpSinkHandler.counter,
+                "transport": "http",
+                "path": self.path,
+                "content_type": content_type,
+                "length": length,
+            }
+            entry.update(export)
+            if self.log_path:
+                with open(self.log_path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(entry) + "\n")
+                    handle.flush()
 
-        def do_GET(self):  # noqa: N802 — readiness probe for the suite
-            payload = b'{"ready":true}'
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+        self.send_response(status)
+        self.send_header("Content-Type", "application/x-protobuf")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
-        def log_message(self, fmt, *args):  # silence stderr noise
-            return
+    def do_GET(self):  # noqa: N802 - readiness probe for the test harness
+        payload = json.dumps({"ready": True}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
-    return Handler
+    def log_message(self, fmt, *args):
+        return
 
+def main():
+    parser = argparse.ArgumentParser(description="OTLP/HTTP logs sink")
+    parser.add_argument("--bind", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=18088)
+    parser.add_argument("--log", required=True)
+    args = parser.parse_args()
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--bind", required=True)
-    ap.add_argument("--port", type=int, required=True)
-    ap.add_argument("--log", required=True)
-    args = ap.parse_args()
-
+    OtlpSinkHandler.log_path = args.log
     with open(args.log, "w", encoding="utf-8"):
         pass
 
-    server = ThreadingHTTPServer((args.bind, args.port), build_handler(args.log))
-    server.daemon_threads = True
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
-    return 0
-
+    server = ThreadingHTTPServer((args.bind, args.port), OtlpSinkHandler)
+    server.serve_forever()
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

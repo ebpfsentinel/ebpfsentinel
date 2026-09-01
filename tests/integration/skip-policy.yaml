@@ -161,3 +161,5 @@ masking:
   - "inventory neighbour container could not start"
   - "vip announcer never ran — no speaker transition in this topology"
   - "warden failed to build: $(cat /tmp/warden-build-$$.log)"
+  - "agent did not reload with the gRPC fixture"
+  - "no gRPC export recorded yet"

@@ -1,14 +1,14 @@
 #!/usr/bin/env bats
-# 61-alert-sink-delivery.bats — outbound alert delivery to every sink.
+# 61-alert-sink-delivery.bats - outbound alert delivery to every sink.
 #
 # Everything upstream of the senders is already covered (25 asserts the
 # alert lands in the store, 34 asserts the SSE fan-out). This suite covers
 # the egress half: what the agent actually hands to an external sink over
-# each of the three transports — webhook, SMTP and OTLP.
+# each of the three transports - webhook, SMTP and OTLP.
 #
 #   * An IDS alert on TCP/4444 reaches the sink as an HTTP POST with
 #     Content-Type: application/json.
-#   * The delivered body is the serialized alert — same id, rule_id and
+#   * The delivered body is the serialized alert - same id, rule_id and
 #     severity the REST API reports for that alert.
 #   * A 5xx answer is retried: the sink is configured to fail the first
 #     request, and the same alert id must arrive again.
@@ -16,11 +16,17 @@
 #     displacing the Content-Type the sender declares.
 #   * The delivery is counted on alerts_exported_total and the circuit
 #     breaker gauge is exposed for the webhook destination.
-#   * A route pointing at loopback delivers nothing — the sender's runtime
+#   * A route pointing at loopback delivers nothing - the sender's runtime
 #     SSRF guard refuses the connection even though config validation
 #     accepted the URL (it only checks the scheme).
 #   * The same alert reaches the SMTP sink as a mail with the configured
 #     envelope, and the OTLP sink as an export on /v1/logs.
+#   * The OTLP sinks decode what they receive, so the resource attributes,
+#     the severity number and the record clock are asserted rather than
+#     matched as substrings inside an encoded payload.
+#   * The export lands over gRPC as well as HTTP, gRPC being the protocol a
+#     deployment that configures nothing actually uses.
+#   * A refused delivery is counted on alerts_export_failures_total.
 #
 # The webhook sink binds 203.0.113.10 (TEST-NET-3) on a dummy interface
 # because that sender's SSRF guard rejects loopback/private/link-local
@@ -38,6 +44,7 @@ SINK_IFACE="ebpfsent-sink0"
 LOOPBACK_SINK_PORT="18086"
 SMTP_SINK_PORT="18087"
 OTLP_SINK_PORT="18088"
+OTLP_GRPC_SINK_PORT="18089"
 
 _start_sink() {
     local bind="${1}" port="${2}" log="${3}" fail_first="${4:-0}"
@@ -58,7 +65,7 @@ _start_script_sink() {
     echo "$!"
 }
 
-# _wait_for_tcp <host> <port> — the SMTP sink speaks no HTTP, so readiness
+# _wait_for_tcp <host> <port> - the SMTP sink speaks no HTTP, so readiness
 # is a plain connect.
 _wait_for_tcp() {
     local host="${1}" port="${2}" attempt=0
@@ -84,7 +91,7 @@ _wait_for_sink() {
     return 1
 }
 
-# _drive_ids_alert — send traffic matching the ids-sink-test rule.
+# _drive_ids_alert - send traffic matching the ids-sink-test rule.
 _drive_ids_alert() {
     timeout 10 ncat -l "$EBPF_HOST_IP" 4444 >/dev/null 2>&1 &
     local listener_pid=$!
@@ -94,17 +101,17 @@ _drive_ids_alert() {
     wait "$listener_pid" 2>/dev/null || true
 }
 
-# _sink_deliveries <log> — number of recorded requests.
+# _sink_deliveries <log> - number of recorded requests.
 _sink_deliveries() {
     local log="${1}" n
     [ -f "${log}" ] || { echo 0; return 0; }
-    # `grep -c` exits 1 on zero matches, so capture first and default after —
+    # `grep -c` exits 1 on zero matches, so capture first and default after -
     # `grep -c ... || echo 0` would print both the count and the fallback.
     n="$(grep -c . "${log}" 2>/dev/null)" || n=0
     echo "${n:-0}"
 }
 
-# _wait_for_delivery <log> <max_attempts> — wait until the sink recorded
+# _wait_for_delivery <log> <max_attempts> - wait until the sink recorded
 # at least one request carrying the ids-sink-test rule.
 _wait_for_delivery() {
     local log="${1}" max="${2:-30}" attempt=0
@@ -137,6 +144,7 @@ setup_file() {
     export LOOPBACK_SINK_LOG="${DATA_DIR}/webhook-sink-loopback.jsonl"
     export SMTP_SINK_LOG="${DATA_DIR}/smtp-sink.jsonl"
     export OTLP_SINK_LOG="${DATA_DIR}/otlp-sink.jsonl"
+    export OTLP_GRPC_SINK_LOG="${DATA_DIR}/otlp-grpc-sink.jsonl"
 
     # The sink address must not be loopback/private for the sender's SSRF
     # guard to allow it; a dummy interface carries TEST-NET-3 locally.
@@ -155,6 +163,9 @@ setup_file() {
     export SMTP_SINK_PID
     OTLP_SINK_PID="$(_start_script_sink otlp-sink.py 127.0.0.1 "${OTLP_SINK_PORT}" "${OTLP_SINK_LOG}")"
     export OTLP_SINK_PID
+    OTLP_GRPC_SINK_PID="$(_start_script_sink otlp-grpc-sink.py 127.0.0.1 \
+        "${OTLP_GRPC_SINK_PORT}" "${OTLP_GRPC_SINK_LOG}")"
+    export OTLP_GRPC_SINK_PID
 
     _wait_for_sink "http://${SINK_IP}:${SINK_PORT}/ready" || {
         echo "webhook sink did not come up on ${SINK_IP}:${SINK_PORT}" >&2
@@ -172,6 +183,12 @@ setup_file() {
         echo "OTLP sink did not come up on ${OTLP_SINK_PORT}" >&2
         return 1
     }
+    # The gRPC sink speaks h2c and answers no readiness request, so readiness
+    # is a plain connect the way the SMTP sink's is.
+    _wait_for_tcp 127.0.0.1 "${OTLP_GRPC_SINK_PORT}" || {
+        echo "OTLP gRPC sink did not come up on ${OTLP_GRPC_SINK_PORT}" >&2
+        return 1
+    }
 
     create_test_netns
 
@@ -181,6 +198,10 @@ setup_file() {
         "${FIXTURE_DIR}/config-alert-sink-ssrf.yaml" \
         "/tmp/ebpfsentinel-test-alert-sink-ssrf-$$.yaml")"
     export PREPARED_SSRF_CONFIG
+    PREPARED_GRPC_CONFIG="$(prepare_ebpf_config \
+        "${FIXTURE_DIR}/config-alert-sink-otlp-grpc.yaml" \
+        "/tmp/ebpfsentinel-test-alert-sink-otlp-grpc-$$.yaml")"
+    export PREPARED_GRPC_CONFIG
 
     start_ebpf_agent "$PREPARED_CONFIG"
     wait_for_ebpf_loaded 30 || {
@@ -197,9 +218,10 @@ teardown_file() {
     kill "${LOOPBACK_SINK_PID:-0}" 2>/dev/null || true
     kill "${SMTP_SINK_PID:-0}" 2>/dev/null || true
     kill "${OTLP_SINK_PID:-0}" 2>/dev/null || true
+    kill "${OTLP_GRPC_SINK_PID:-0}" 2>/dev/null || true
     ip link del "${SINK_IFACE}" 2>/dev/null || true
     rm -rf "${DATA_DIR:-/tmp/ebpfsentinel-test-data-alert-sink-$$}"
-    rm -f "${PREPARED_CONFIG:-}" "${PREPARED_SSRF_CONFIG:-}"
+    rm -f "${PREPARED_CONFIG:-}" "${PREPARED_SSRF_CONFIG:-}" "${PREPARED_GRPC_CONFIG:-}"
 }
 
 # ── Delivery ───────────────────────────────────────────────────────
@@ -210,7 +232,7 @@ teardown_file() {
     # The alert must exist agent-side first; only then can a delivery be
     # attributed to a missing sender rather than a missing alert.
     wait_for_alert '.[] | select(.rule_id == "ids-sink-test")' 20 1 >/dev/null || {
-        echo "no ids-sink-test alert produced — nothing to deliver" >&2
+        echo "no ids-sink-test alert produced - nothing to deliver" >&2
         api_get /api/v1/alerts >&2 || true
         return 1
     }
@@ -303,7 +325,7 @@ teardown_file() {
         return 1
     }
 
-    # The delivered id must be one the store knows about — the sink cannot be
+    # The delivered id must be one the store knows about - the sink cannot be
     # receiving some other pipeline's alert.
     local delivered_id
     delivered_id="$(echo "${delivered}" | jq -r '.id')"
@@ -334,7 +356,7 @@ teardown_file() {
     done
 
     [ "${repeated:-0}" -ge 1 ] || {
-        echo "no alert id was delivered twice — the 500 was not retried" >&2
+        echo "no alert id was delivered twice - the 500 was not retried" >&2
         echo "sink log:" >&2
         cat "${SINK_LOG}" >&2 2>/dev/null || true
         return 1
@@ -401,7 +423,7 @@ teardown_file() {
 
 # ── SMTP sink ──────────────────────────────────────────────────────
 
-# _wait_for_mail <max_attempts> — wait until the SMTP sink accepted a
+# _wait_for_mail <max_attempts> - wait until the SMTP sink accepted a
 # message whose body carries the suite's rule id.
 _wait_for_mail() {
     local max="${1:-30}" attempt=0
@@ -480,33 +502,77 @@ _wait_for_mail() {
 
 # ── OTLP sink ──────────────────────────────────────────────────────
 
-# _wait_for_otlp <max_attempts> — the OTLP sender batches, so the export
-# lands a beat after the alert.
+# The sinks decode every export, so a record is asserted field by field. A
+# substring match inside an encoded payload can only prove that something
+# arrived: it cannot tell a record stamped 1970 from a correct one, and it
+# reads a resource attribute and a body byte the same way.
+
+# _otlp_match <log> - every decoded record the suite's alert produced, each
+# carrying the resource and the transport of the export it arrived in.
+_otlp_match() {
+    jq -s '
+        [ .[] as $export
+          | ($export.records // [])[]
+          | select((.body | fromjson? | .rule_id) == "ids-sink-test")
+          | . + {resource: $export.resource, scope: $export.scope,
+                 transport: $export.transport, path: $export.path,
+                 content_type: $export.content_type} ]
+    ' "${1}" 2>/dev/null
+}
+
+# _otlp_field <log> <filter> - one value off the matching records.
+_otlp_field() {
+    _otlp_match "${1}" | jq -r "${2}" 2>/dev/null
+}
+
+# _wait_for_otlp <log> <max_attempts> - the OTLP sender batches, so the
+# export lands a beat after the alert.
 _wait_for_otlp() {
-    local max="${1:-30}" attempt=0
+    local log="${1}" max="${2:-30}" attempt=0 count
     while [ "${attempt}" -lt "${max}" ]; do
-        if [ -f "${OTLP_SINK_LOG}" ] && jq -sre '
-            [.[] | select(.body_text | contains("ids-sink-test"))] | length >= 1
-        ' "${OTLP_SINK_LOG}" >/dev/null 2>&1; then
-            return 0
-        fi
+        count="$(_otlp_field "${log}" 'length')"
+        case "${count}" in
+            ''|*[!0-9]*) count=0 ;;
+        esac
+        [ "${count}" -ge 1 ] && return 0
         sleep 1
         attempt=$((attempt + 1))
     done
     return 1
 }
 
+# _assert_otlp_clock <log> - the record's own timestamp against this host's
+# wall clock. The agent stamps the record from the alert, which the kernel
+# stamped, so a record arriving with a 1970 or a far-future instant means
+# that chain lost the clock somewhere.
+_assert_otlp_clock() {
+    local log="${1}" now stamp observed
+    now="$(date +%s)"
+    stamp="$(_otlp_field "${log}" '.[0].time_unix_seconds')"
+    observed="$(_otlp_field "${log}" '.[0].observed_time_unix_seconds')"
+
+    jq -ne --argjson now "${now}" --argjson stamp "${stamp:-0}" \
+        --argjson observed "${observed:-0}" '
+        ($stamp > 0) and ($observed > 0)
+        and (($now - $stamp) | fabs) <= 300
+        and (($now - $observed) | fabs) <= 300
+    ' >/dev/null || {
+        echo "OTLP record clock off the wall clock: record ${stamp}, observed ${observed}, now ${now}" >&2
+        return 1
+    }
+}
+
 @test "the alert is exported to the OTLP sink" {
-    _wait_for_otlp 30 || {
+    _wait_for_otlp "${OTLP_SINK_LOG}" 30 || {
         echo "OTLP sink received no export carrying ids-sink-test" >&2
         echo "sink log:" >&2
-        jq -sc '[.[] | {index, path, content_type, length}]' "${OTLP_SINK_LOG}" >&2 2>/dev/null || true
+        jq -sc '[.[] | {index, path, content_type, format, length}]' "${OTLP_SINK_LOG}" >&2 2>/dev/null || true
         return 1
     }
 
     local path ctype
-    path="$(jq -sr '[.[] | select(.body_text | contains("ids-sink-test"))][0].path' "${OTLP_SINK_LOG}")"
-    ctype="$(jq -sr '[.[] | select(.body_text | contains("ids-sink-test"))][0].content_type' "${OTLP_SINK_LOG}")"
+    path="$(_otlp_field "${OTLP_SINK_LOG}" '.[0].path')"
+    ctype="$(_otlp_field "${OTLP_SINK_LOG}" '.[0].content_type')"
 
     # OTLP/HTTP logs are POSTed to <endpoint>/v1/logs as protobuf.
     [ "${path}" = "/v1/logs" ] || {
@@ -519,22 +585,113 @@ _wait_for_otlp() {
     esac
 }
 
-@test "the OTLP export carries the alert attributes" {
-    _wait_for_otlp 30 || soft_skip "no OTLP export recorded yet"
+@test "the OTLP record carries the alert and its attributes" {
+    _wait_for_otlp "${OTLP_SINK_LOG}" 30 || soft_skip "no OTLP export recorded yet"
 
-    local body
-    body="$(jq -sr '[.[] | select(.body_text | contains("ids-sink-test"))][0].body_text' "${OTLP_SINK_LOG}")"
-
-    # The sender sets these attribute keys on every record; they travel as
-    # plain strings inside the protobuf payload.
-    echo "${body}" | grep -q "alert.rule_id" || {
-        echo "alert.rule_id attribute missing from the OTLP payload" >&2
+    # The body is the serialized alert, so the identity the REST API reports
+    # must be readable out of the decoded record.
+    _otlp_match "${OTLP_SINK_LOG}" | jq -e '
+        .[0] as $record
+        | ($record.body | fromjson) as $alert
+        | ($alert.rule_id == "ids-sink-test")
+        and ($alert.id | type == "string" and length > 0)
+        and ($record.attributes["alert.rule_id"] == "ids-sink-test")
+        and ($record.attributes["alert.component"] | type == "string" and length > 0)
+    ' >/dev/null || {
+        echo "decoded OTLP record missing the alert or its attributes" >&2
+        _otlp_match "${OTLP_SINK_LOG}" | jq -c '.[0]' >&2 2>/dev/null || true
         return 1
     }
-    echo "${body}" | grep -q "alert.component" || {
-        echo "alert.component attribute missing from the OTLP payload" >&2
+}
+
+@test "the OTLP resource names the service and its version" {
+    _wait_for_otlp "${OTLP_SINK_LOG}" 30 || soft_skip "no OTLP export recorded yet"
+
+    local name version
+    name="$(_otlp_field "${OTLP_SINK_LOG}" '.[0].resource["service.name"] // ""')"
+    version="$(_otlp_field "${OTLP_SINK_LOG}" '.[0].resource["service.version"] // ""')"
+
+    [ "${name}" = "ebpfsentinel" ] || {
+        echo "expected service.name ebpfsentinel; got '${name}'" >&2
         return 1
     }
+    # The version is the agent's own crate version, so it is asserted by shape
+    # rather than by value: pinning the number here would fail on every bump.
+    echo "${version}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+' || {
+        echo "service.version is not a version: '${version}'" >&2
+        return 1
+    }
+}
+
+@test "the OTLP record carries the product severity" {
+    _wait_for_otlp "${OTLP_SINK_LOG}" 30 || soft_skip "no OTLP export recorded yet"
+
+    local number text
+    number="$(_otlp_field "${OTLP_SINK_LOG}" '.[0].severity_number')"
+    text="$(_otlp_field "${OTLP_SINK_LOG}" '.[0].severity_text')"
+
+    # The rule fires at high, which is ERROR on the OTLP scale; the text keeps
+    # the product's own word beside it.
+    [ "${number}" = "17" ] || {
+        echo "expected severityNumber 17 for a high alert; got '${number}'" >&2
+        return 1
+    }
+    [ "${text}" = "high" ] || {
+        echo "expected severityText high; got '${text}'" >&2
+        return 1
+    }
+}
+
+@test "the OTLP record timestamp tracks the wall clock" {
+    _wait_for_otlp "${OTLP_SINK_LOG}" 30 || soft_skip "no OTLP export recorded yet"
+
+    _assert_otlp_clock "${OTLP_SINK_LOG}"
+}
+
+# ── OTLP over gRPC (restarts the agent onto the gRPC fixture) ───────
+
+@test "the alert is exported over gRPC, the default protocol" {
+    stop_ebpf_agent 2>/dev/null || true
+    start_ebpf_agent "$PREPARED_GRPC_CONFIG"
+    wait_for_ebpf_loaded 30 || soft_skip "agent did not reload with the gRPC fixture"
+
+    _drive_ids_alert
+    wait_for_alert '.[] | select(.rule_id == "ids-sink-test")' 20 1 >/dev/null || {
+        echo "no alert produced under the gRPC fixture - nothing to export" >&2
+        return 1
+    }
+
+    _wait_for_otlp "${OTLP_GRPC_SINK_LOG}" 30 || {
+        echo "gRPC sink received no export carrying ids-sink-test" >&2
+        cat "${DATA_DIR}/sink.stderr" >&2 2>/dev/null || true
+        return 1
+    }
+
+    local transport
+    transport="$(_otlp_field "${OTLP_GRPC_SINK_LOG}" '.[0].transport')"
+    [ "${transport}" = "grpc" ] || {
+        echo "expected the export over grpc; got '${transport}'" >&2
+        return 1
+    }
+}
+
+@test "the gRPC export carries the same record as the HTTP one" {
+    _wait_for_otlp "${OTLP_GRPC_SINK_LOG}" 30 || soft_skip "no gRPC export recorded yet"
+
+    _otlp_match "${OTLP_GRPC_SINK_LOG}" | jq -e '
+        .[0] as $record
+        | ($record.body | fromjson | .rule_id) == "ids-sink-test"
+        and ($record.severity_number == 17)
+        and ($record.severity_text == "high")
+        and ($record.resource["service.name"] == "ebpfsentinel")
+        and ($record.attributes["alert.rule_id"] == "ids-sink-test")
+    ' >/dev/null || {
+        echo "the gRPC export decoded to a different record than the HTTP one" >&2
+        _otlp_match "${OTLP_GRPC_SINK_LOG}" | jq -c '.[0]' >&2 2>/dev/null || true
+        return 1
+    }
+
+    _assert_otlp_clock "${OTLP_GRPC_SINK_LOG}"
 }
 
 # ── SSRF guard (runs last: it restarts the agent) ──────────────────
@@ -553,7 +710,7 @@ _wait_for_otlp() {
 
     _drive_ids_alert
     wait_for_alert '.[] | select(.rule_id == "ids-sink-test")' 20 1 >/dev/null || {
-        echo "no alert produced under the SSRF fixture — inconclusive" >&2
+        echo "no alert produced under the SSRF fixture - inconclusive" >&2
         return 1
     }
 
@@ -565,6 +722,37 @@ _wait_for_otlp() {
     [ "${after}" -eq 0 ] || {
         echo "SSRF guard did not block loopback: ${after} deliveries" >&2
         cat "${LOOPBACK_SINK_LOG}" >&2 2>/dev/null || true
+        return 1
+    }
+}
+
+@test "the refused delivery is counted on alerts_export_failures_total" {
+    # The agent is still on the SSRF fixture from the phase above, and its
+    # metrics were reset by that restart, so any failure counted here is the
+    # refusal that phase produced. A sink that is never reached must move a
+    # counter: an alert silently dropped on the floor is the failure mode the
+    # export counters exist to make visible.
+    local attempt=0 metrics count=""
+    while [ "${attempt}" -lt 20 ]; do
+        metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || metrics=""
+        count="$(echo "${metrics}" \
+            | grep -E '^ebpfsentinel_alerts_export_failures_total\{[^}]*destination="webhook"' \
+            | awk '{print $2}' | head -1)"
+        case "${count%.*}" in
+            ''|*[!0-9]*) ;;
+            *) [ "${count%.*}" -ge 1 ] && break ;;
+        esac
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+
+    [ -n "${count}" ] || {
+        echo "no alerts_export_failures_total series for destination=webhook" >&2
+        echo "${metrics}" | grep -E 'alerts_export' >&2 || true
+        return 1
+    }
+    [ "${count%.*}" -ge 1 ] || {
+        echo "expected at least one export failure; got ${count}" >&2
         return 1
     }
 }

@@ -60,3 +60,7 @@ ebpf-out/
 /controlplane.yaml
 /worker.yaml
 /talosconfig
+
+# Python bytecode from the integration harness scripts
+__pycache__/
+*.pyc
