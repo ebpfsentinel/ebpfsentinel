@@ -64,10 +64,19 @@ alerting:
   #   endpoint   — OTLP collector URL (required, e.g. "http://otel-collector:4317")
   #   protocol   — Transport: "grpc" (default) or "http"
   #   timeout_ms — Export timeout in milliseconds (default: 5000)
+  #   headers    — Sent with every export, which is how a hosted collector
+  #                authenticates the agent (default: none)
+  #   ca_cert    — PEM bundle trusted on top of the system roots (default: none)
+  #   verify_tls — Verify the collector certificate. Turning it off is only
+  #                accepted with protocol "http" (default: true)
   # otlp:
-  #   endpoint: "http://otel-collector:4317"
+  #   endpoint: "https://otel-collector:4317"
   #   protocol: grpc
   #   timeout_ms: 5000
+  #   headers:
+  #     authorization: "Bearer <token>"
+  #   ca_cert: "/etc/ebpfsentinel/collector-ca.pem"
+  #   verify_tls: true
 
   routes:
     # Log everything (catch-all for observability)

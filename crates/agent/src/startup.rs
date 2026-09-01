@@ -2971,23 +2971,20 @@ pub async fn run(
         .routes
         .iter()
         .any(|r| r.destination.eq_ignore_ascii_case("otlp"));
-    if has_otlp_routes {
-        if let Some(ref otlp_cfg) = config.alerting.otlp {
-            let otlp_sender = adapters::alert::otlp_sender::OtlpAlertSender::new(
-                &otlp_cfg.endpoint,
-                &otlp_cfg.protocol,
-                std::time::Duration::from_millis(otlp_cfg.timeout_ms),
-                Arc::clone(&metrics) as Arc<dyn MetricsPort>,
-            )?;
-            alert_pipeline = alert_pipeline.with_otlp_sender(Arc::new(otlp_sender));
-            info!(
-                endpoint = %otlp_cfg.endpoint,
-                protocol = %otlp_cfg.protocol,
-                "OTLP alert sender initialized"
-            );
-        } else {
-            tracing::warn!("OTLP route configured but no [alerting.otlp] config — skipping");
-        }
+    // A route with no collector block is refused by configuration validation
+    // rather than dropped here, so what reaches this point either exports or
+    // is not asked to.
+    if has_otlp_routes && let Some(ref otlp_cfg) = config.alerting.otlp {
+        let otlp_sender = adapters::alert::otlp_sender::OtlpAlertSender::new(
+            otlp_cfg,
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+        )?;
+        alert_pipeline = alert_pipeline.with_otlp_sender(Arc::new(otlp_sender));
+        info!(
+            endpoint = %otlp_cfg.endpoint,
+            protocol = %otlp_cfg.protocol,
+            "OTLP alert sender initialized"
+        );
     }
 
     info!(

@@ -5,13 +5,16 @@ use std::time::Duration;
 
 use domain::alert::entity::{Alert, AlertRoute};
 use domain::common::error::DomainError;
+use infrastructure::config::{OtlpExportConfig, OtlpProtocol};
 use opentelemetry::logs::{Logger, LoggerProvider as _};
 use opentelemetry::{InstrumentationScope, KeyValue};
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_otlp::{WithExportConfig, WithHttpConfig, WithTonicConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::{LogExporter, SdkLogger, SdkLoggerProvider};
 use ports::secondary::alert_sender::AlertSender;
 use ports::secondary::metrics_port::MetricsPort;
+use tonic::metadata::{MetadataKey, MetadataMap, MetadataValue};
+use tonic::transport::{Certificate, ClientTlsConfig};
 
 use crate::alert::otlp_record::{
     OtlpLogRecord, OtlpResourceEnv, now_unix_nano, resource_attributes,
@@ -31,30 +34,60 @@ pub struct OtlpAlertSender {
 }
 
 impl OtlpAlertSender {
-    /// Create a new OTLP sender. `protocol` is `"grpc"` or `"http"`.
+    /// Create a new OTLP sender from the collector block the configuration
+    /// carries.
+    ///
+    /// The block is taken whole rather than field by field because what the
+    /// exporter needs is the protocol, the credential and the trust decision
+    /// together: which of them applies depends on the other two.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError::EngineError`] when the protocol is not one of
+    /// the two accepted words, when a configured certificate authority cannot
+    /// be read, or when the exporter itself refuses to start.
     pub fn new(
-        endpoint: &str,
-        protocol: &str,
-        timeout: Duration,
+        config: &OtlpExportConfig,
         metrics: Arc<dyn MetricsPort>,
     ) -> Result<Self, DomainError> {
+        let protocol = config
+            .protocol()
+            .map_err(|e| DomainError::EngineError(e.to_string()))?;
+        let timeout = Duration::from_millis(config.timeout_ms);
+        let headers: Vec<(String, String)> = config
+            .headers
+            .iter()
+            .flatten()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+
         let exporter = match protocol {
-            "http" => opentelemetry_otlp::LogExporter::builder()
-                .with_http()
-                .with_endpoint(http_logs_endpoint(endpoint))
-                .with_timeout(timeout)
-                .build()
-                .map_err(|e| {
+            OtlpProtocol::Http => {
+                let mut builder = opentelemetry_otlp::LogExporter::builder()
+                    .with_http()
+                    .with_endpoint(http_logs_endpoint(&config.endpoint))
+                    .with_timeout(timeout)
+                    .with_headers(headers.into_iter().collect());
+                if let Some(client) = http_client(config, timeout)? {
+                    builder = builder.with_http_client(client);
+                }
+                builder.build().map_err(|e| {
                     DomainError::EngineError(format!("OTLP HTTP exporter init failed: {e}"))
-                })?,
-            _ => opentelemetry_otlp::LogExporter::builder()
-                .with_tonic()
-                .with_endpoint(endpoint)
-                .with_timeout(timeout)
-                .build()
-                .map_err(|e| {
+                })?
+            }
+            OtlpProtocol::Grpc => {
+                let mut builder = opentelemetry_otlp::LogExporter::builder()
+                    .with_tonic()
+                    .with_endpoint(&config.endpoint)
+                    .with_timeout(timeout)
+                    .with_metadata(metadata(&headers)?);
+                if let Some(tls) = grpc_tls(config)? {
+                    builder = builder.with_tls_config(tls);
+                }
+                builder.build().map_err(|e| {
                     DomainError::EngineError(format!("OTLP gRPC exporter init failed: {e}"))
-                })?,
+                })?
+            }
         };
 
         let logger_provider = build_provider(exporter);
@@ -66,6 +99,86 @@ impl OtlpAlertSender {
             metrics,
         })
     }
+}
+
+/// The configured headers as gRPC metadata, since a header on this transport
+/// is a metadata entry rather than an HTTP header.
+fn metadata(headers: &[(String, String)]) -> Result<MetadataMap, DomainError> {
+    let mut map = MetadataMap::with_capacity(headers.len());
+    for (name, value) in headers {
+        let key = MetadataKey::from_bytes(name.to_ascii_lowercase().as_bytes()).map_err(|_| {
+            DomainError::EngineError(format!(
+                "OTLP header name '{name}' is not a valid gRPC metadata key"
+            ))
+        })?;
+        let value = MetadataValue::try_from(value.as_str()).map_err(|_| {
+            DomainError::EngineError(format!("value of OTLP header '{name}' is not sendable"))
+        })?;
+        map.insert(key, value);
+    }
+    Ok(map)
+}
+
+/// The TLS settings for the gRPC transport, or `None` where the endpoint is
+/// plain HTTP and nothing about trust was configured.
+///
+/// Verification cannot be turned off here, which is why the configuration
+/// refuses that pair before this is reached: tonic offers no way to accept a
+/// certificate it could not verify, and pretending otherwise would export to
+/// a verified collector an operator believed was not one.
+fn grpc_tls(config: &OtlpExportConfig) -> Result<Option<ClientTlsConfig>, DomainError> {
+    let secure = config.endpoint.trim().starts_with("https://");
+    let Some(ca_cert) = config.ca_cert.as_deref() else {
+        return Ok(secure.then(|| ClientTlsConfig::new().with_enabled_roots()));
+    };
+    let pem = std::fs::read(ca_cert).map_err(|e| {
+        DomainError::EngineError(format!(
+            "OTLP certificate authority '{ca_cert}' could not be read: {e}"
+        ))
+    })?;
+    Ok(Some(
+        ClientTlsConfig::new()
+            .with_enabled_roots()
+            .ca_certificate(Certificate::from_pem(pem)),
+    ))
+}
+
+/// The HTTP client the exporter posts through, or `None` where the built-in
+/// one already does what the configuration asked for.
+fn http_client(
+    config: &OtlpExportConfig,
+    timeout: Duration,
+) -> Result<Option<reqwest::Client>, DomainError> {
+    if config.verify_tls && config.ca_cert.is_none() {
+        return Ok(None);
+    }
+
+    let mut builder = reqwest::Client::builder().timeout(timeout);
+    if let Some(ca_cert) = config.ca_cert.as_deref() {
+        let pem = std::fs::read(ca_cert).map_err(|e| {
+            DomainError::EngineError(format!(
+                "OTLP certificate authority '{ca_cert}' could not be read: {e}"
+            ))
+        })?;
+        let certificate = reqwest::Certificate::from_pem(&pem).map_err(|e| {
+            DomainError::EngineError(format!(
+                "OTLP certificate authority '{ca_cert}' is not a PEM certificate: {e}"
+            ))
+        })?;
+        builder = builder.add_root_certificate(certificate);
+    }
+    if !config.verify_tls {
+        tracing::warn!(
+            destination = OTLP_DESTINATION,
+            "TLS certificate verification disabled, the collector is not authenticated"
+        );
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+
+    builder
+        .build()
+        .map_err(|e| DomainError::EngineError(format!("OTLP HTTP client init failed: {e}")))
+        .map(Some)
 }
 
 /// The scope every record this agent exports is written under.
@@ -377,18 +490,72 @@ mod tests {
         );
     }
 
+    /// A collector block carrying nothing but the two fields a test names.
+    fn collector(endpoint: &str, protocol: &str) -> OtlpExportConfig {
+        OtlpExportConfig {
+            endpoint: endpoint.to_string(),
+            protocol: protocol.to_string(),
+            timeout_ms: 200,
+            headers: None,
+            ca_cert: None,
+            verify_tls: true,
+        }
+    }
+
+    /// A protocol the sender has no branch for is refused where the sender is
+    /// built, so a spelling that escaped validation cannot fall through to a
+    /// transport nobody chose.
+    #[test]
+    fn a_protocol_the_sender_cannot_speak_is_refused() {
+        let metrics = Arc::new(crate::metrics::AgentMetrics::new());
+        let Err(error) = OtlpAlertSender::new(&collector("http://127.0.0.1:1", "kafka"), metrics)
+        else {
+            panic!("a third protocol has no exporter");
+        };
+        assert!(
+            error.to_string().contains("grpc, http"),
+            "the refusal did not name both accepted words: {error}"
+        );
+    }
+
+    /// A certificate authority the agent cannot read is a collector it cannot
+    /// authenticate, so it is refused at build rather than fallen back to the
+    /// system roots.
+    #[test]
+    fn an_unreadable_certificate_authority_is_refused() {
+        let metrics = Arc::new(crate::metrics::AgentMetrics::new());
+        let mut config = collector("https://127.0.0.1:1", "grpc");
+        config.ca_cert = Some("/nonexistent/collector-ca.pem".to_string());
+        let Err(error) = OtlpAlertSender::new(&config, metrics) else {
+            panic!("the certificate authority file is not there");
+        };
+        assert!(
+            error.to_string().contains("could not be read"),
+            "the refusal did not name the unreadable authority: {error}"
+        );
+    }
+
+    /// A header an operator wrote reaches both transports: on gRPC it becomes
+    /// a metadata entry, which is the shape a name has to survive.
+    #[test]
+    fn an_authentication_header_becomes_grpc_metadata() {
+        let map = metadata(&[("Authorization".to_string(), "Bearer token".to_string())])
+            .expect("a bearer token is sendable");
+        assert_eq!(
+            map.get("authorization")
+                .map(|value| value.to_str().expect("ASCII")),
+            Some("Bearer token")
+        );
+    }
+
     /// A collector nobody can reach has to end up as two numbers: the alert
     /// the batch queue accepted, and the batch the flush could not deliver.
     #[tokio::test]
     async fn a_collector_nobody_can_reach_moves_both_series() {
         let metrics = Arc::new(crate::metrics::AgentMetrics::new());
-        let sender = OtlpAlertSender::new(
-            "http://127.0.0.1:1",
-            "http",
-            Duration::from_millis(200),
-            metrics.clone(),
-        )
-        .expect("the exporter builds without reaching anything");
+        let sender =
+            OtlpAlertSender::new(&collector("http://127.0.0.1:1", "http"), metrics.clone())
+                .expect("the exporter builds without reaching anything");
 
         let alert = sample_alert();
         let route = AlertRoute {

@@ -102,7 +102,7 @@ sha2 = "0.11.0"
 # OpenTelemetry
 opentelemetry = { version = "0.32.0", features = ["logs"] }
 opentelemetry_sdk = { version = "0.32.1", features = ["logs", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.32.0", features = ["logs", "grpc-tonic", "http-proto"] }
+opentelemetry-otlp = { version = "0.32.0", features = ["logs", "grpc-tonic", "http-proto", "reqwest-client", "tls-aws-lc", "tls-roots"] }
 
 # Config & Serialization
 serde = { version = "1", features = ["derive"] }

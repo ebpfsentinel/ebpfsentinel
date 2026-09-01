@@ -34,7 +34,9 @@ mod zone;
 // Everything that was previously `pub` in config.rs must remain accessible
 // as `infrastructure::config::X`.
 
-pub use alerting::{AlertRouteConfig, AlertingConfig, SmtpConfig};
+pub use alerting::{
+    AlertRouteConfig, AlertingConfig, OtlpExportConfig, OtlpProtocol, SmtpConfig, validate_header,
+};
 pub use alias::AliasConfig;
 pub use audit::AuditConfig;
 pub use auth::{ApiKeyConfig, AuthConfig, JwtAlgorithm, JwtConfig, JwtKeySource, OidcConfig};
@@ -691,10 +693,14 @@ impl AgentConfig {
             }
         }
 
-        // Validate alerting routes
+        // Validate alerting routes and the blocks they read
         let smtp_present = self.alerting.smtp.is_some();
+        if let Some(otlp_cfg) = self.alerting.otlp.as_ref() {
+            otlp_cfg.validate()?;
+        }
+        let otlp_present = self.alerting.otlp.is_some();
         for (idx, route_cfg) in self.alerting.routes.iter().enumerate() {
-            route_cfg.validate(idx, smtp_present)?;
+            route_cfg.validate(idx, smtp_present, otlp_present)?;
         }
 
         // Validate aliases (top-level + firewall.aliases for backward compat)

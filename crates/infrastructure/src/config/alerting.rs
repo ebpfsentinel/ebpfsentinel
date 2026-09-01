@@ -29,6 +29,45 @@ pub struct AlertingConfig {
     pub routes: Vec<AlertRouteConfig>,
 }
 
+/// The wire an OTLP export travels on.
+///
+/// Two values and no third: the exporter has one branch per value, so a word
+/// outside this set is a collector nobody is exporting to. It is parsed
+/// rather than matched at the point of use, because a spelling that fell
+/// through to gRPC was an estate that believed it was exporting over HTTP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OtlpProtocol {
+    /// OTLP over gRPC, the collector's 4317 port.
+    Grpc,
+    /// OTLP over HTTP with a protobuf body, the collector's 4318 port.
+    Http,
+}
+
+impl OtlpProtocol {
+    /// The two words an operator may write, in the order the error names them.
+    pub const ACCEPTED: &'static str = "grpc, http";
+
+    /// Parse a configured protocol, ignoring case. `None` for any word that
+    /// is neither `grpc` nor `http`.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "grpc" => Some(Self::Grpc),
+            "http" => Some(Self::Http),
+            _ => None,
+        }
+    }
+
+    /// The word this protocol is written as.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Grpc => "grpc",
+            Self::Http => "http",
+        }
+    }
+}
+
 /// OTLP export configuration for alert delivery via OpenTelemetry Protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OtlpExportConfig {
@@ -40,6 +79,92 @@ pub struct OtlpExportConfig {
     /// Export timeout in milliseconds.
     #[serde(default = "default_otlp_timeout_ms")]
     pub timeout_ms: u64,
+    /// Headers sent with every export, which is how a hosted collector is
+    /// authenticated. The value reaches the wire verbatim.
+    #[serde(default)]
+    pub headers: Option<std::collections::HashMap<String, String>>,
+    /// PEM bundle trusted in addition to the system roots, for a collector
+    /// behind a private certificate authority.
+    #[serde(default)]
+    pub ca_cert: Option<String>,
+    /// Whether the collector's certificate is verified. Turning it off is
+    /// only honoured on `http`, so the configuration refuses the pair rather
+    /// than exporting to a verified collector an operator believed was not.
+    #[serde(default = "default_true")]
+    pub verify_tls: bool,
+}
+
+impl OtlpExportConfig {
+    /// The protocol this block names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidValue`] naming both accepted words when
+    /// the configured protocol is neither of them.
+    pub fn protocol(&self) -> Result<OtlpProtocol, ConfigError> {
+        OtlpProtocol::parse(&self.protocol).ok_or_else(|| ConfigError::InvalidValue {
+            field: "alerting.otlp.protocol".to_string(),
+            value: self.protocol.clone(),
+            expected: OtlpProtocol::ACCEPTED.to_string(),
+        })
+    }
+
+    pub(super) fn validate(&self) -> Result<(), ConfigError> {
+        let endpoint = self.endpoint.trim();
+        if endpoint.is_empty() {
+            return Err(ConfigError::Validation {
+                field: "alerting.otlp.endpoint".to_string(),
+                message: "otlp export requires a collector endpoint".to_string(),
+            });
+        }
+        // Both transports dial an HTTP origin: tonic builds its channel from
+        // one and the HTTP exporter posts to one, so a scheme neither of them
+        // can dial is a boot-time refusal rather than an export that never
+        // leaves.
+        let authority = endpoint
+            .strip_prefix("http://")
+            .or_else(|| endpoint.strip_prefix("https://"));
+        match authority {
+            Some(rest) if !rest.split('/').next().unwrap_or_default().is_empty() => {}
+            _ => {
+                return Err(ConfigError::Validation {
+                    field: "alerting.otlp.endpoint".to_string(),
+                    message: format!(
+                        "collector endpoint must be http://host:port or https://host:port, got '{}'",
+                        self.endpoint
+                    ),
+                });
+            }
+        }
+
+        let protocol = self.protocol()?;
+
+        for (name, value) in self.headers.iter().flatten() {
+            validate_header(name, value).map_err(|message| ConfigError::Validation {
+                field: "alerting.otlp.headers".to_string(),
+                message,
+            })?;
+        }
+
+        if let Some(path) = self.ca_cert.as_deref()
+            && path.trim().is_empty()
+        {
+            return Err(ConfigError::Validation {
+                field: "alerting.otlp.ca_cert".to_string(),
+                message: "certificate authority path must not be empty".to_string(),
+            });
+        }
+
+        if !self.verify_tls && protocol == OtlpProtocol::Grpc {
+            return Err(ConfigError::Validation {
+                field: "alerting.otlp.verify_tls".to_string(),
+                message: "certificate verification can only be turned off on the http protocol"
+                    .to_string(),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 fn default_otlp_protocol() -> String {
@@ -122,7 +247,12 @@ pub struct AlertRouteConfig {
 }
 
 impl AlertRouteConfig {
-    pub(super) fn validate(&self, idx: usize, smtp_present: bool) -> Result<(), ConfigError> {
+    pub(super) fn validate(
+        &self,
+        idx: usize,
+        smtp_present: bool,
+        otlp_present: bool,
+    ) -> Result<(), ConfigError> {
         let prefix = format!("alerting.routes[{idx}]");
 
         if self.name.is_empty() {
@@ -167,11 +297,9 @@ impl AlertRouteConfig {
             // Custom headers reach the wire verbatim, so reject anything that
             // could forge a second header or overwrite the body encoding.
             for (name, value) in self.webhook_headers.iter().flatten() {
-                validate_webhook_header(name, value).map_err(|message| {
-                    ConfigError::Validation {
-                        field: format!("{prefix}.webhook_headers"),
-                        message,
-                    }
+                validate_header(name, value).map_err(|message| ConfigError::Validation {
+                    field: format!("{prefix}.webhook_headers"),
+                    message,
                 })?;
             }
         }
@@ -190,6 +318,17 @@ impl AlertRouteConfig {
                     message: "email route requires smtp configuration".to_string(),
                 });
             }
+        }
+
+        // An OTLP route carries no endpoint of its own, so without the block
+        // there is nothing to export to. It is refused here for the same
+        // reason an email route with no relay is: a route that silently sends
+        // nowhere is discovered as an absence of alerts.
+        if self.destination.eq_ignore_ascii_case("otlp") && !otlp_present {
+            return Err(ConfigError::Validation {
+                field: "alerting.otlp".to_string(),
+                message: "otlp route requires otlp configuration".to_string(),
+            });
         }
 
         Ok(())
@@ -236,13 +375,19 @@ impl AlertRouteConfig {
     }
 }
 
-/// Validate a custom webhook header pair.
+/// Validate a header pair an operator wrote, whether it rides a webhook post
+/// or an OTLP export.
 ///
 /// The name must be an RFC 7230 token and the value must carry no CR, LF or
-/// NUL — otherwise a crafted config could inject an extra header or split the
-/// request. `Content-Type` is reserved: the sender sets it to
-/// `application/json` and a second value would make the request ambiguous.
-fn validate_webhook_header(name: &str, value: &str) -> Result<(), String> {
+/// NUL, otherwise a crafted config could inject an extra header or split the
+/// request. `Content-Type` is reserved: the sender sets it to the encoding it
+/// is writing and a second value would make the request ambiguous.
+///
+/// # Errors
+///
+/// Returns the sentence naming what is wrong with the pair, which is the
+/// message the configuration error carries.
+pub fn validate_header(name: &str, value: &str) -> Result<(), String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err("header name must not be empty".to_string());
@@ -353,7 +498,7 @@ routes:
             email_to: None,
             webhook_headers: None,
         };
-        assert!(route.validate(0, false).is_err());
+        assert!(route.validate(0, false, true).is_err());
     }
 
     #[test]
@@ -367,7 +512,7 @@ routes:
             email_to: None,
             webhook_headers: None,
         };
-        assert!(route.validate(0, false).is_err());
+        assert!(route.validate(0, false, true).is_err());
     }
 
     #[test]
@@ -381,7 +526,7 @@ routes:
             email_to: None,
             webhook_headers: None,
         };
-        assert!(route.validate(0, false).is_err());
+        assert!(route.validate(0, false, true).is_err());
     }
 
     #[test]
@@ -395,7 +540,7 @@ routes:
             email_to: None,
             webhook_headers: None,
         };
-        assert!(route.validate(0, false).is_err());
+        assert!(route.validate(0, false, true).is_err());
     }
 
     #[test]
@@ -409,7 +554,7 @@ routes:
             email_to: None,
             webhook_headers: None,
         };
-        assert!(route.validate(0, true).is_err());
+        assert!(route.validate(0, true, true).is_err());
     }
 
     #[test]
@@ -423,7 +568,7 @@ routes:
             email_to: Some("a@b.com".to_string()),
             webhook_headers: None,
         };
-        assert!(route.validate(0, false).is_err());
+        assert!(route.validate(0, false, true).is_err());
     }
 
     // ── to_domain_route tests ───────────────────────────────────────
@@ -573,7 +718,7 @@ routes: []
     #[test]
     fn webhook_headers_reach_the_domain_route() {
         let route = webhook_route_with_headers(&[("X-Auth-Token", "s3cret")]);
-        route.validate(0, false).unwrap();
+        route.validate(0, false, true).unwrap();
 
         let domain = route.to_domain_route().unwrap();
         match domain.destination {
@@ -608,27 +753,27 @@ routes: []
     #[test]
     fn webhook_header_value_with_crlf_is_rejected() {
         let route = webhook_route_with_headers(&[("X-Auth", "a\r\nX-Injected: yes")]);
-        assert!(route.validate(0, false).is_err());
+        assert!(route.validate(0, false, true).is_err());
     }
 
     #[test]
     fn webhook_header_name_with_separator_is_rejected() {
         let route = webhook_route_with_headers(&[("X-Bad: Name", "value")]);
-        assert!(route.validate(0, false).is_err());
+        assert!(route.validate(0, false, true).is_err());
     }
 
     #[test]
     fn webhook_header_cannot_override_content_type() {
         let route = webhook_route_with_headers(&[("Content-Type", "text/plain")]);
-        assert!(route.validate(0, false).is_err());
+        assert!(route.validate(0, false, true).is_err());
         let route = webhook_route_with_headers(&[("content-type", "text/plain")]);
-        assert!(route.validate(0, false).is_err());
+        assert!(route.validate(0, false, true).is_err());
     }
 
     #[test]
     fn webhook_header_with_empty_name_is_rejected() {
         let route = webhook_route_with_headers(&[("   ", "value")]);
-        assert!(route.validate(0, false).is_err());
+        assert!(route.validate(0, false, true).is_err());
     }
 
     #[test]
@@ -638,6 +783,105 @@ routes: []
         let mut route = webhook_route_with_headers(&[("Content-Type", "text/plain")]);
         route.destination = "log".to_string();
         route.webhook_url = None;
-        assert!(route.validate(0, false).is_ok());
+        assert!(route.validate(0, false, true).is_ok());
+    }
+
+    // - OTLP collector block ------------------------------------------
+
+    fn collector(yaml: &str) -> OtlpExportConfig {
+        serde_yaml_ng::from_str(yaml).expect("the block parses")
+    }
+
+    #[test]
+    fn a_protocol_is_read_whatever_case_it_was_written_in() {
+        for written in ["grpc", "gRPC", "  GRPC "] {
+            assert_eq!(OtlpProtocol::parse(written), Some(OtlpProtocol::Grpc));
+        }
+        for written in ["http", "HTTP", "Http"] {
+            assert_eq!(OtlpProtocol::parse(written), Some(OtlpProtocol::Http));
+        }
+    }
+
+    #[test]
+    fn a_third_protocol_names_both_accepted_words() {
+        let config = collector("endpoint: http://collector:4317\nprotocol: kafka");
+        let error = config.validate().expect_err("kafka is not a transport");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("grpc") && rendered.contains("http"),
+            "the refusal named neither accepted word: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_endpoint_that_dials_nowhere_is_refused() {
+        for endpoint in [
+            "",
+            "   ",
+            "collector:4317",
+            "grpc://collector:4317",
+            "http://",
+        ] {
+            let config = OtlpExportConfig {
+                endpoint: endpoint.to_string(),
+                protocol: "grpc".to_string(),
+                timeout_ms: 5000,
+                headers: None,
+                ca_cert: None,
+                verify_tls: true,
+            };
+            assert!(
+                config.validate().is_err(),
+                "'{endpoint}' was accepted as a collector endpoint"
+            );
+        }
+    }
+
+    #[test]
+    fn a_collector_header_is_held_to_the_webhook_rule() {
+        let config = collector(
+            "endpoint: http://collector:4317\nheaders:\n  Authorization: \"a\\r\\nX-Injected: yes\"",
+        );
+        assert!(config.validate().is_err());
+
+        let config =
+            collector("endpoint: http://collector:4317\nheaders:\n  Authorization: Bearer t");
+        config.validate().expect("a bearer token is a header");
+    }
+
+    #[test]
+    fn verification_cannot_be_turned_off_on_grpc() {
+        let config = collector("endpoint: https://collector:4317\nverify_tls: false");
+        let error = config
+            .validate()
+            .expect_err("tonic offers no way to skip verification");
+        assert!(
+            error.to_string().contains("http"),
+            "the refusal did not name the protocol that honours it: {error}"
+        );
+
+        let config =
+            collector("endpoint: https://collector:4318\nprotocol: http\nverify_tls: false");
+        config.validate().expect("the http exporter honours it");
+    }
+
+    #[test]
+    fn an_otlp_route_without_a_collector_refuses_to_boot() {
+        let route = AlertRouteConfig {
+            name: "otlp".to_string(),
+            destination: "otlp".to_string(),
+            min_severity: "low".to_string(),
+            event_types: None,
+            webhook_url: None,
+            email_to: None,
+            webhook_headers: None,
+        };
+        assert!(
+            route.validate(0, false, false).is_err(),
+            "a route with nowhere to export was accepted"
+        );
+        route
+            .validate(0, false, true)
+            .expect("the same route with a collector configured");
     }
 }
