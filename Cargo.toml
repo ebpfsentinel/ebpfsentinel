@@ -100,9 +100,12 @@ jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 sha2 = "0.11.0"
 
 # OpenTelemetry
-opentelemetry = { version = "0.32.0", features = ["logs"] }
-opentelemetry_sdk = { version = "0.32.1", features = ["logs", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.32.0", features = ["logs", "grpc-tonic", "http-proto", "reqwest-client", "tls-aws-lc", "tls-roots"] }
+# Defaults off on all three: they carry the trace and metrics signals this
+# product does not emit, and the exporter's default HTTP client is the
+# blocking one, which has no place inside an asynchronous agent.
+opentelemetry = { version = "0.32.0", default-features = false, features = ["logs", "internal-logs"] }
+opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["logs", "internal-logs", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["logs", "internal-logs", "grpc-tonic", "http-proto", "reqwest-client", "tls-aws-lc", "tls-roots"] }
 
 # Config & Serialization
 serde = { version = "1", features = ["derive"] }
