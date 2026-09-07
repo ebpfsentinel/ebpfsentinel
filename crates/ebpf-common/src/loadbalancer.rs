@@ -25,6 +25,9 @@ pub const LB_MODE_L2DSR: u8 = 1;
 pub const LB_MAX_BACKENDS: usize = 16;
 
 /// Maximum backends per service (V2 two-level architecture).
+///
+/// This is the count `LbServiceConfigV2.backend_count` has to be able to
+/// carry, which is why that field is sixteen bits wide.
 pub const LB_MAX_BACKENDS_V2: u32 = 256;
 /// Maximum LB services (V2).
 pub const MAX_LB_SERVICES: u32 = 4096;
@@ -103,11 +106,12 @@ pub struct LbServiceConfig {
 pub struct LbServiceConfigV2 {
     /// Balancing algorithm: `LB_ALG_ROUND_ROBIN`, etc.
     pub algorithm: u8,
-    /// Number of active backends (0..=255).
-    pub backend_count: u8,
     /// Forwarding mode: `LB_MODE_DNAT` (default) or `LB_MODE_L2DSR`.
     pub mode: u8,
-    pub _pad: u8,
+    /// Number of active backends, `0..=LB_MAX_BACKENDS_V2`. Sixteen bits
+    /// because the maximum is 256: a `u8` cannot hold it, and a service
+    /// at exactly the maximum would publish a count of zero.
+    pub backend_count: u16,
     /// First backend ID in the global `LB_BACKENDS` map.
     /// Backends are at IDs `backend_start_id..backend_start_id + backend_count`.
     pub backend_start_id: u32,
@@ -319,9 +323,8 @@ mod tests {
     #[test]
     fn lb_service_config_v2_offsets() {
         assert_eq!(mem::offset_of!(LbServiceConfigV2, algorithm), 0);
-        assert_eq!(mem::offset_of!(LbServiceConfigV2, backend_count), 1);
-        assert_eq!(mem::offset_of!(LbServiceConfigV2, mode), 2);
-        assert_eq!(mem::offset_of!(LbServiceConfigV2, _pad), 3);
+        assert_eq!(mem::offset_of!(LbServiceConfigV2, mode), 1);
+        assert_eq!(mem::offset_of!(LbServiceConfigV2, backend_count), 2);
         assert_eq!(mem::offset_of!(LbServiceConfigV2, backend_start_id), 4);
     }
 

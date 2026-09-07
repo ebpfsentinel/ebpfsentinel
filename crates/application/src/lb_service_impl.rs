@@ -176,7 +176,10 @@ impl LbAppService {
                 continue;
             }
 
-            // Sync backends with globally unique IDs
+            // Sync backends with globally unique IDs. Validation already
+            // refuses a service above the cap; the `take` keeps a service
+            // that slipped through inside its own backend-ID window rather
+            // than letting it walk into the next service's slot.
             for (idx, backend) in service
                 .backends
                 .iter()
@@ -289,14 +292,16 @@ fn service_to_ebpf_config(service: &LbService, backend_start_id: u32) -> LbServi
         LbForwardingMode::L2Dsr => LB_MODE_L2DSR,
     };
 
-    #[allow(clippy::cast_possible_truncation)]
-    let backend_count = service.backends.len().min(LB_MAX_BACKENDS_V2 as usize) as u8;
+    // `LbService::validate` refuses a service above the cap, so the `min`
+    // here is a bound rather than a policy. `backend_count` is sixteen bits
+    // wide precisely so a service at the cap survives the conversion.
+    let capped = service.backends.len().min(LB_MAX_BACKENDS_V2 as usize);
+    let backend_count = u16::try_from(capped).unwrap_or(u16::MAX);
 
     LbServiceConfigV2 {
         algorithm,
-        backend_count,
         mode,
-        _pad: 0,
+        backend_count,
         backend_start_id,
     }
 }
@@ -367,6 +372,30 @@ mod tests {
             enabled: true,
             health_check: None,
         }
+    }
+
+    #[test]
+    fn a_service_at_the_backend_cap_publishes_that_count() {
+        let mut svc = make_lb_service("svc-cap", 443);
+        svc.backends = (0..LB_MAX_BACKENDS_V2)
+            .map(|i| make_backend(&format!("be-{i}"), 8080))
+            .collect();
+
+        let config = service_to_ebpf_config(&svc, 0);
+
+        assert_eq!(config.backend_count, 256);
+    }
+
+    #[test]
+    fn a_service_one_backend_short_of_the_cap_publishes_that_count() {
+        let mut svc = make_lb_service("svc-cap-1", 443);
+        svc.backends = (0..LB_MAX_BACKENDS_V2 - 1)
+            .map(|i| make_backend(&format!("be-{i}"), 8080))
+            .collect();
+
+        let config = service_to_ebpf_config(&svc, 0);
+
+        assert_eq!(config.backend_count, 255);
     }
 
     /// Records every healthy-backend reading so the test can assert what the

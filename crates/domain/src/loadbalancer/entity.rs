@@ -3,7 +3,9 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::entity::RuleId;
+use ebpf_common::loadbalancer::LB_MAX_BACKENDS_V2;
+
+use crate::common::entity::{MAX_RULE_ID_LENGTH, RuleId};
 use crate::routing::entity::HealthCheck;
 
 use super::error::LbError;
@@ -156,12 +158,27 @@ impl LbService {
             ));
         }
 
+        if self.backends.len() > LB_MAX_BACKENDS_V2 as usize {
+            return Err(LbError::InvalidService(format!(
+                "service '{}' has {} backends; the maximum is {}",
+                self.id,
+                self.backends.len(),
+                LB_MAX_BACKENDS_V2
+            )));
+        }
+
         let mut seen_ids = HashSet::new();
         for backend in &self.backends {
             if backend.id.is_empty() {
                 return Err(LbError::InvalidBackend(
                     "backend ID must not be empty".to_string(),
                 ));
+            }
+            if backend.id.len() > MAX_RULE_ID_LENGTH {
+                return Err(LbError::InvalidBackend(format!(
+                    "backend ID exceeds the maximum length of {MAX_RULE_ID_LENGTH} characters                      (got {})",
+                    backend.id.len()
+                )));
             }
             if !seen_ids.insert(&backend.id) {
                 return Err(LbError::InvalidBackend(format!(
@@ -303,6 +320,42 @@ mod tests {
     fn valid_service() {
         let svc = test_service(vec![test_backend("be-1"), test_backend("be-2")]);
         assert!(svc.validate().is_ok());
+    }
+
+    #[test]
+    fn a_service_at_the_backend_cap_is_accepted() {
+        let backends = (0..LB_MAX_BACKENDS_V2)
+            .map(|i| test_backend(&format!("be-{i}")))
+            .collect();
+        let svc = test_service(backends);
+        assert!(svc.validate().is_ok());
+    }
+
+    #[test]
+    fn a_service_one_backend_past_the_cap_is_refused() {
+        let backends = (0..=LB_MAX_BACKENDS_V2)
+            .map(|i| test_backend(&format!("be-{i}")))
+            .collect();
+        let svc = test_service(backends);
+        let err = svc
+            .validate()
+            .expect_err("one past the cap must be refused");
+        assert!(err.to_string().contains("the maximum is 256"), "{err}");
+    }
+
+    #[test]
+    fn a_backend_id_past_the_length_cap_is_refused() {
+        let mut backend = test_backend("be-1");
+        backend.id = "b".repeat(MAX_RULE_ID_LENGTH + 1);
+        let svc = test_service(vec![backend]);
+        assert!(svc.validate().is_err());
+    }
+
+    #[test]
+    fn a_service_id_past_the_length_cap_is_refused() {
+        let mut svc = test_service(vec![test_backend("be-1")]);
+        svc.id = RuleId("s".repeat(MAX_RULE_ID_LENGTH + 1));
+        assert!(svc.validate().is_err());
     }
 
     #[test]

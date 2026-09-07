@@ -4,12 +4,23 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RuleId(pub String);
 
+/// Maximum length of a rule identifier, in bytes.
+///
+/// The same bound the HTTP surface applies, held here so a configuration
+/// file is validated by the rule the API is validated by rather than by
+/// no rule at all.
+pub const MAX_RULE_ID_LENGTH: usize = 256;
+
 impl RuleId {
-    /// Validate that the rule ID is non-empty and contains only
-    /// alphanumeric characters, dashes, and underscores.
+    /// Validate that the rule ID is non-empty, within
+    /// [`MAX_RULE_ID_LENGTH`], and contains only alphanumeric characters,
+    /// dashes, and underscores.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.0.is_empty() {
             return Err("rule ID must not be empty");
+        }
+        if self.0.len() > MAX_RULE_ID_LENGTH {
+            return Err("rule ID exceeds the maximum length of 256 characters");
         }
         if !self
             .0
