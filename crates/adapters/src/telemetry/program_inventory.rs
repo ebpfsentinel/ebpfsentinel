@@ -51,18 +51,21 @@ mod tests {
 
     #[tokio::test]
     async fn every_program_the_agent_knows_about_is_reported_with_its_state() {
+        // The map is filled with the published names, which is what makes the
+        // beacon's programs the ones an operator reads off `/metrics` and off
+        // the ops endpoint rather than a third spelling nobody sees anywhere.
         let status = Arc::new(RwLock::new(HashMap::from([
-            ("xdp_firewall".to_string(), true),
-            ("tc_dns".to_string(), false),
+            ("xdp-firewall".to_string(), true),
+            ("tc-dns".to_string(), false),
         ])));
 
         let mut reported = SharedProgramInventory::new(status).programs().await;
         reported.sort_by(|a, b| a.program.cmp(&b.program));
 
         assert_eq!(reported.len(), 2);
-        assert_eq!(reported[0].program, "tc_dns");
+        assert_eq!(reported[0].program, "tc-dns");
         assert_eq!(reported[0].state, ProgramState::NotLoaded);
-        assert_eq!(reported[1].program, "xdp_firewall");
+        assert_eq!(reported[1].program, "xdp-firewall");
         assert_eq!(reported[1].state, ProgramState::Loaded);
     }
 

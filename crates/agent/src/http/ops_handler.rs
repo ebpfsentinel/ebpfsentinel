@@ -638,18 +638,18 @@ mod tests {
         let (state, _rx) = make_state();
         {
             let mut status = state.ebpf_program_status.write().await;
-            status.insert("xdp_firewall".to_string(), true);
-            status.insert("tc_ids".to_string(), false);
+            status.insert("xdp-firewall".to_string(), true);
+            status.insert("tc-ids".to_string(), false);
         }
 
         let Json(resp) = get_ebpf_status(State(state)).await;
         assert_eq!(resp.programs.len(), 2);
 
-        let fw = resp.programs.iter().find(|p| p.name == "xdp_firewall");
+        let fw = resp.programs.iter().find(|p| p.name == "xdp-firewall");
         assert!(fw.is_some());
         assert!(fw.unwrap().loaded);
 
-        let ids = resp.programs.iter().find(|p| p.name == "tc_ids");
+        let ids = resp.programs.iter().find(|p| p.name == "tc-ids");
         assert!(ids.is_some());
         assert!(!ids.unwrap().loaded);
     }

@@ -189,6 +189,12 @@ pub fn held_by_link(prog_id: u32) -> Option<bool> {
 // ── attach blocks, recorded for /readyz and the ops endpoint ────────────
 
 /// An attach the agent could not perform, with the reason in operator terms.
+///
+/// Both surfaces this reaches - `/readyz` and the ops endpoint - are read by an
+/// operator, so the program is stored under the name they read everywhere else.
+/// The loader hands over the symbol name it looked the program up by, and
+/// [`record_block`] and [`clear_block`] translate it, which is why they are the
+/// only way in and out of the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachBlock {
     /// eBPF program that could not attach.
@@ -222,6 +228,10 @@ pub fn record_block(block: AttachBlock) {
     let Ok(mut guard) = blocks().lock() else {
         return;
     };
+    let block = AttachBlock {
+        program: super::published_program_name(&block.program),
+        ..block
+    };
     guard.retain(|b| !(b.program == block.program && b.interface == block.interface));
     guard.push(block);
 }
@@ -234,6 +244,7 @@ pub fn clear_block(program: &str, interface: &str) {
     let Ok(mut guard) = blocks().lock() else {
         return;
     };
+    let program = super::published_program_name(program);
     guard.retain(|b| !(b.program == program && b.interface == interface));
 }
 

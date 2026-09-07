@@ -2362,22 +2362,27 @@ pub async fn run(
         ebpf_map_holder.iface_groups = Some(iface_groups_mgr);
     } // end if ebpf_capable
 
-    // Populate eBPF program status for ops endpoint
+    // Populate eBPF program status for the ops endpoint and the heartbeat.
+    //
+    // Both of those are read outside the agent, so the names here are the
+    // published ones rather than the symbols the loader is asked for: an
+    // operator reading `/api/v1/ebpf/status` and an operator reading `/metrics`
+    // have to be looking at the same word for the same program.
     {
         let mut status = ebpf_program_status.write().await;
-        status.insert("xdp_firewall".to_string(), fw_ok);
-        status.insert("xdp_ratelimit".to_string(), rl_ok);
-        status.insert("tc_ids".to_string(), ids_ok);
-        status.insert("tc_threatintel".to_string(), ti_ok);
-        status.insert("tc_dns".to_string(), dns_ok);
-        status.insert("uprobe_dlp".to_string(), dlp_ok);
-        status.insert("tc_conntrack".to_string(), ct_ok);
-        status.insert("tc_nat_ingress".to_string(), nat_ok);
-        status.insert("tc_nat_egress".to_string(), nat_ok);
-        status.insert("tc_scrub".to_string(), scrub_ok);
-        status.insert("tc_qos".to_string(), qos_ok);
-        status.insert("xdp_loadbalancer".to_string(), lb_ok);
-        status.insert("xdp_vip_announcer".to_string(), vip_announcer_ok);
+        status.insert("xdp-firewall".to_string(), fw_ok);
+        status.insert("xdp-ratelimit".to_string(), rl_ok);
+        status.insert("tc-ids".to_string(), ids_ok);
+        status.insert("tc-threatintel".to_string(), ti_ok);
+        status.insert("tc-dns".to_string(), dns_ok);
+        status.insert("uprobe-dlp".to_string(), dlp_ok);
+        status.insert("tc-conntrack".to_string(), ct_ok);
+        status.insert("tc-nat-ingress".to_string(), nat_ok);
+        status.insert("tc-nat-egress".to_string(), nat_ok);
+        status.insert("tc-scrub".to_string(), scrub_ok);
+        status.insert("tc-qos".to_string(), qos_ok);
+        status.insert("xdp-loadbalancer".to_string(), lb_ok);
+        status.insert("xdp-vip-announcer".to_string(), vip_announcer_ok);
     }
 
     // ── Anonymous usage telemetry ───────────────────────────────

@@ -878,9 +878,11 @@ impl FirewallMetrics for AgentMetrics {
     }
 
     fn set_ebpf_program_status(&self, program: &str, loaded: bool) {
+        // Callers hold the symbol name, since it is what they looked the
+        // program up by; the label carries the name every other surface uses.
         self.ebpf_program_status
             .get_or_create(&ProgramLabels {
-                program: program.to_string(),
+                program: crate::ebpf::published_program_name(program),
             })
             .set(i64::from(loaded));
     }
@@ -1367,7 +1369,11 @@ mod tests {
 
         let encoded = metrics.encode();
         assert!(encoded.contains("ebpfsentinel_ebpf_program_status"));
-        assert!(encoded.contains("program=\"xdp_firewall\""));
+        // The caller passes the symbol it loaded the program by and the label
+        // carries the artefact name, which is the one the ops endpoint, the
+        // documentation and the fleet API all use for the same program.
+        assert!(encoded.contains("program=\"xdp-firewall\""));
+        assert!(!encoded.contains("program=\"xdp_firewall\""));
     }
 
     #[test]
