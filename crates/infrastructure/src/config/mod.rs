@@ -26,6 +26,7 @@ mod nat;
 mod qos;
 mod ratelimit;
 mod routing;
+mod telemetry;
 mod threatintel;
 mod zone;
 
@@ -67,6 +68,7 @@ pub use nat::{HairpinNatConfig, NatConfig, NatRuleConfig, NptV6RuleConfig};
 pub use qos::{QosClassifierConfig, QosPipeConfig, QosQueueConfig, QosSectionConfig};
 pub use ratelimit::{RateLimitRuleConfig, RateLimitSectionConfig};
 pub use routing::{GatewayConfig, HealthCheckConfig, RoutingConfig};
+pub use telemetry::{DISABLE_ENV as TELEMETRY_DISABLE_ENV, TelemetryConfig};
 pub use threatintel::{ThreatIntelConfig, ThreatIntelFeedConfig};
 pub use zone::{ZoneEntryConfig, ZonePairConfig, ZoneSectionConfig};
 
@@ -195,6 +197,12 @@ pub struct AgentConfig {
     /// agents and deep-link to the operator UI.
     #[serde(default)]
     pub management: ManagementConfig,
+
+    /// Anonymous usage telemetry: a random installation identifier, the agent
+    /// version, and which eBPF programs are loaded. On by default, and what it
+    /// reports is fixed in the domain rather than widenable from here.
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 
     /// Enterprise configuration block. The OSS agent never reads this — the
     /// enterprise edition parses it with its own loader. It is declared here
@@ -372,6 +380,9 @@ impl AgentConfig {
 
         // Validate management metadata block
         self.management.validate()?;
+
+        // Validate the telemetry block
+        self.telemetry.validate()?;
 
         // Validate container resolver config
         self.container.validate()?;

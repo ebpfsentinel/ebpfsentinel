@@ -30,6 +30,7 @@ pub mod qos_map_port;
 pub mod ratelimit_lpm_port;
 pub mod ratelimit_map_port;
 pub mod rule_change_store;
+pub mod telemetry_port;
 pub mod threatintel_map_port;
 pub mod vip_announcer_port;
 pub mod zone_map_port;

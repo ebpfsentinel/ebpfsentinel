@@ -2380,7 +2380,37 @@ pub async fn run(
         status.insert("xdp_vip_announcer".to_string(), vip_announcer_ok);
     }
 
-    // ── 10½a. Build netkit hot-plug registry + spawn watcher ─────────
+    // ── Anonymous usage telemetry ───────────────────────────────
+    //
+    // Spawned here rather than earlier because it reports which programs are
+    // loaded, and the map above is the only place that answer exists. A build
+    // carrying no endpoint has nowhere to report, which is what a community
+    // build of these sources is.
+    if config.telemetry.is_active() {
+        match adapters::telemetry::beacon_http::HttpTelemetryBeacon::from_build() {
+            Ok(beacon) => {
+                let service = application::telemetry_service::TelemetryService::new(
+                    Arc::new(beacon),
+                    Arc::new(
+                        adapters::telemetry::installation_file::FileInstallationStore::new(
+                            &config.telemetry.state_path,
+                        ),
+                    ),
+                    Arc::new(
+                        adapters::telemetry::program_inventory::SharedProgramInventory::new(
+                            Arc::clone(&ebpf_program_status),
+                        ),
+                    ),
+                    env!("CARGO_PKG_VERSION"),
+                );
+                let telemetry_cancel = cancel_token.clone();
+                tokio::spawn(service.run(telemetry_cancel));
+            }
+            Err(e) => debug!("telemetry not enabled in this build: {e}"),
+        }
+    }
+
+    // ── Build netkit hot-plug registry + spawn watcher ─────────
     if config.agent.attach_mode != infrastructure::config::AttachMode::Tc && ebpf_capable {
         let tc_program_names = [
             ("tc_ids", ids_ok),

@@ -22,5 +22,6 @@ pub mod qos;
 pub mod ratelimit;
 pub mod response;
 pub mod routing;
+pub mod telemetry;
 pub mod threatintel;
 pub mod zone;

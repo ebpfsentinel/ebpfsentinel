@@ -82,6 +82,7 @@ pub mod ratelimit_service_impl;
 pub mod reputation_enforcement;
 pub mod routing_service_impl;
 pub mod schedule_service_impl;
+pub mod telemetry_service;
 pub mod threatintel_service_impl;
 pub mod vip_announcer_service_impl;
 pub mod zone_service_impl;

@@ -14,5 +14,6 @@ pub mod netfilter;
 pub mod storage;
 pub mod system;
 pub mod system_metrics;
+pub mod telemetry;
 pub mod threatintel;
 pub mod warden;

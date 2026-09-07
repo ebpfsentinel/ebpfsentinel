@@ -218,3 +218,19 @@ qos:
 management:
   # operator_managed: false
   # operator_endpoint: https://operator.example.com
+
+# Anonymous usage telemetry, on by default. Every 30 minutes the agent
+# sends three things and nothing else: a random installation identifier,
+# the agent version, and the name and load state of each eBPF program.
+#
+# What the agent runs goes out. What the agent is configured with never
+# does: no configuration, no rules, no addresses, no interface names, no
+# host names, no packet contents, no credentials. The message has no field
+# any of those could travel in.
+#
+# Switch it off here, or with EBPFSENTINEL_TELEMETRY_DISABLE=1 in the
+# environment, which wins over this file. See the telemetry configuration
+# page in the documentation for the exact message that is sent.
+telemetry:
+  enabled: true
+  # state_path: /var/lib/ebpfsentinel/telemetry/installation
