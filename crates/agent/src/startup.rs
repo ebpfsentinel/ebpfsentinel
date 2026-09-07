@@ -3659,14 +3659,26 @@ pub type XdpFirewallLoad = (
     Option<ZoneMetricsSource>,
 );
 
+/// The datapath byte for the configured catch-all policy.
+///
+/// Read by the loader that writes it into the map and by the runtime that tells
+/// the firewall service what to restore after a deny-all posture is lifted, so
+/// the two cannot disagree about what "configured" means.
+pub fn firewall_policy_byte(policy: infrastructure::config::DefaultPolicy) -> u8 {
+    use ebpf_common::firewall::{DEFAULT_POLICY_DROP, DEFAULT_POLICY_PASS};
+    use infrastructure::config::DefaultPolicy;
+
+    match policy {
+        DefaultPolicy::Drop => DEFAULT_POLICY_DROP,
+        DefaultPolicy::Pass => DEFAULT_POLICY_PASS,
+    }
+}
+
 pub fn try_load_xdp_firewall(
     ebpf_dir: &str,
     config: &AgentConfig,
     domain_rules: &[FirewallRule],
 ) -> anyhow::Result<XdpFirewallLoad> {
-    use ebpf_common::firewall::{DEFAULT_POLICY_DROP, DEFAULT_POLICY_PASS};
-    use infrastructure::config::DefaultPolicy;
-
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-firewall")?;
     let mut loader = EbpfLoader::load_with_pin_path_dev_bound(
         &program_bytes,
@@ -3690,11 +3702,7 @@ pub fn try_load_xdp_firewall(
         warn!("xdp-firewall: nf_conn offset push failed: {e}");
     }
 
-    let policy_byte = match config.firewall.default_policy {
-        DefaultPolicy::Drop => DEFAULT_POLICY_DROP,
-        DefaultPolicy::Pass => DEFAULT_POLICY_PASS,
-    };
-    map_manager.set_default_policy(policy_byte)?;
+    map_manager.set_default_policy(firewall_policy_byte(config.firewall.default_policy))?;
 
     let mut v4_entries = Vec::new();
     let mut v6_entries = Vec::new();

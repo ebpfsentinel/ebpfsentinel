@@ -7,10 +7,33 @@ use domain::firewall::engine::FirewallEngine;
 use domain::firewall::entity::{FirewallAction, FirewallRule, PortRange, Scope};
 use domain::firewall::error::FirewallError;
 
+use domain::firewall::entity::IpNetwork;
+use ebpf_common::firewall::{DEFAULT_POLICY_DROP, DEFAULT_POLICY_PASS};
+
 use crate::firewall_aliases::AliasBindings;
 use ports::secondary::conntrack_kill_port::ConnTrackKillPort;
 use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
 use ports::secondary::metrics_port::MetricsPort;
+
+/// The rule identifiers the deny-all posture installs.
+///
+/// They are `system` rules, so the API cannot delete them while the posture is
+/// in force, and they are named rather than generated so an operator reading
+/// `firewall list` on a closed node sees why nothing is getting through.
+pub const DENY_ALL_RULE_ID_V4: &str = "fail-closed-deny-all-v4";
+pub const DENY_ALL_RULE_ID_V6: &str = "fail-closed-deny-all-v6";
+
+/// What the service puts back when the deny-all posture is lifted.
+///
+/// The posture changes three things and each of them has to be restored, not
+/// recomputed: the rules an operator loaded, the mode the deployment chose, and
+/// whether anti-lockout was on. Recomputing any of them from configuration
+/// would lose every change made through the API since boot.
+struct DenyAllSnapshot {
+    rules: Vec<FirewallRule>,
+    mode: DomainMode,
+    anti_lockout_enabled: bool,
+}
 
 /// Anti-lockout configuration (mirrors infrastructure config).
 #[derive(Debug, Clone)]
@@ -38,7 +61,7 @@ pub struct FirewallAppService {
     engine: FirewallEngine,
     map_port: Option<Box<dyn FirewallArrayMapPort + Send>>,
     /// Optional kernel-conntrack kill port. When a deny/reject rule is added
-    /// while enforcing, matching ESTABLISHED flows are torn down here — the
+    /// while enforcing, matching ESTABLISHED flows are torn down here - the
     /// XDP drop alone cannot evict an existing conntrack entry.
     kill_port: Option<Box<dyn ConnTrackKillPort + Send>>,
     metrics: Arc<dyn MetricsPort>,
@@ -48,6 +71,12 @@ pub struct FirewallAppService {
     /// What the aliases named by rules resolve to. Refreshed by whoever owns
     /// the alias service; the rules themselves keep their alias references.
     alias_bindings: AliasBindings,
+    /// The catch-all byte the datapath falls back to for a packet no rule
+    /// matched. Held here as well as in the map because the deny-all posture
+    /// overwrites it and has to put the configured one back.
+    default_policy: u8,
+    /// `Some` while the deny-all posture is in force, carrying what to restore.
+    deny_all: Option<DenyAllSnapshot>,
 }
 
 impl FirewallAppService {
@@ -65,6 +94,8 @@ impl FirewallAppService {
             enabled: true,
             anti_lockout: AntiLockoutSettings::default(),
             alias_bindings: AliasBindings::default(),
+            default_policy: DEFAULT_POLICY_PASS,
+            deny_all: None,
         }
     }
 
@@ -255,6 +286,189 @@ impl FirewallAppService {
     /// Return a slice of all loaded rules (sorted by priority).
     pub fn list_rules(&self) -> &[FirewallRule] {
         self.engine.rules()
+    }
+
+    /// Record the configured catch-all policy and push it to the datapath.
+    ///
+    /// Called once the map port is wired, because until then the byte the
+    /// loader wrote is known to the map manager and to nobody else, and the
+    /// deny-all posture needs something to restore.
+    pub fn set_default_policy(&mut self, policy: u8) {
+        self.default_policy = policy;
+        // While the posture is in force the datapath byte is the posture's, and
+        // the configured one is what gets restored when it is lifted.
+        if self.deny_all.is_none() {
+            self.push_default_policy(policy);
+        }
+    }
+
+    /// Return the configured catch-all policy byte.
+    pub fn default_policy(&self) -> u8 {
+        self.default_policy
+    }
+
+    /// Whether the deny-all posture is currently in force.
+    pub fn is_deny_all(&self) -> bool {
+        self.deny_all.is_some()
+    }
+
+    /// Install the deny-all posture: nothing crosses this node except the
+    /// anti-lockout ports.
+    ///
+    /// Three things make this more than flipping the catch-all byte to drop.
+    ///
+    /// The datapath passes an ESTABLISHED or RELATED flow before it ever
+    /// consults the catch-all, so a node that only flipped the byte would keep
+    /// carrying every connection that was already open, which is exactly the
+    /// traffic a closed node is closed against. What actually stops them is a
+    /// catch-all deny rule with no connection-state match on it, because a rule
+    /// that names no state is evaluated against every state.
+    ///
+    /// A rule carrying no address at all is installed into the v4 array only,
+    /// since the array a rule lands in is decided by whether it names a v6
+    /// address. So the posture is two rules, `0.0.0.0/0` and `::/0`.
+    ///
+    /// And a deny is rewritten into a log line in alert mode, so the posture
+    /// forces block mode for its duration. An alert-mode node that entered
+    /// fail-closed and dropped nothing would be the worst outcome available:
+    /// the cluster believes the node is closed and the node is wide open.
+    ///
+    /// Anti-lockout is forced on for the duration, and that is deliberate.
+    /// This posture is entered by the cluster rather than by an operator
+    /// command, so a node that closed its own management port would need
+    /// somebody physically present to reopen it, and a safety measure with
+    /// that cost is a safety measure that gets configured off.
+    ///
+    /// Repeating the call while the posture is already in force is a no-op, so
+    /// a cluster that reports the same degradation twice does not overwrite the
+    /// snapshot with the deny-all rules themselves.
+    pub fn enter_deny_all(&mut self) -> Result<(), DomainError> {
+        if self.deny_all.is_some() {
+            return Ok(());
+        }
+
+        self.deny_all = Some(DenyAllSnapshot {
+            rules: self
+                .engine
+                .rules()
+                .iter()
+                .filter(|r| !r.system)
+                .cloned()
+                .collect(),
+            mode: self.mode,
+            anti_lockout_enabled: self.anti_lockout.enabled,
+        });
+
+        self.mode = DomainMode::Block;
+        self.anti_lockout.enabled = true;
+
+        let result = self.reload_rules(Self::deny_all_rules());
+        if let Err(ref e) = result {
+            tracing::error!(error = %e, "failed to install the deny-all posture");
+        }
+        self.push_default_policy(DEFAULT_POLICY_DROP);
+
+        tracing::warn!(
+            anti_lockout_ports = ?self.anti_lockout.ports,
+            "firewall deny-all posture installed: only the anti-lockout ports remain reachable"
+        );
+        result
+    }
+
+    /// Lift the deny-all posture, putting back the rules, the mode, the
+    /// anti-lockout setting and the catch-all byte that were in force when it
+    /// was installed.
+    ///
+    /// A no-op when the posture is not installed, so a cluster that reports
+    /// recovery without ever having reported degradation does not wipe the
+    /// rules an operator loaded in the meantime.
+    pub fn exit_deny_all(&mut self) -> Result<(), DomainError> {
+        let Some(snapshot) = self.deny_all.take() else {
+            return Ok(());
+        };
+
+        self.mode = snapshot.mode;
+        self.anti_lockout.enabled = snapshot.anti_lockout_enabled;
+        let result = self.reload_rules(snapshot.rules);
+        if let Err(ref e) = result {
+            tracing::error!(error = %e, "failed to lift the deny-all posture");
+        }
+        self.push_default_policy(self.default_policy);
+
+        tracing::info!("firewall deny-all posture lifted");
+        result
+    }
+
+    /// The two catch-all denies the posture installs.
+    ///
+    /// Priority 1 rather than 0: the anti-lockout rules own 0 and are what
+    /// keeps the node reachable, so the deny has to sit below them.
+    fn deny_all_rules() -> Vec<FirewallRule> {
+        [
+            (
+                DENY_ALL_RULE_ID_V4,
+                IpNetwork::V4 {
+                    addr: 0,
+                    prefix_len: 0,
+                },
+            ),
+            (
+                DENY_ALL_RULE_ID_V6,
+                IpNetwork::V6 {
+                    addr: [0u8; 16],
+                    prefix_len: 0,
+                },
+            ),
+        ]
+        .into_iter()
+        .map(|(id, dst_ip)| FirewallRule {
+            id: RuleId(id.to_string()),
+            enabled: true,
+            priority: 1,
+            action: FirewallAction::Deny,
+            protocol: Protocol::Any,
+            src_ip: None,
+            dst_ip: Some(dst_ip),
+            src_port: None,
+            src_port_alias: None,
+            dst_port: None,
+            dst_port_alias: None,
+            src_mac_alias: None,
+            dst_mac_alias: None,
+            vlan_id: None,
+            scope: Scope::Global,
+            // No connection-state match, so the rule is evaluated against
+            // every state. This is what closes flows that were already open.
+            ct_states: None,
+            src_alias: None,
+            dst_alias: None,
+            tcp_flags: None,
+            icmp_type: None,
+            icmp_code: None,
+            negate_src: false,
+            negate_dst: false,
+            dscp_match: None,
+            dscp_mark: None,
+            max_states: None,
+            src_mac: None,
+            dst_mac: None,
+            schedule: None,
+            system: true,
+            route_action: None,
+            group_mask: 0,
+            tenant_id: 0,
+        })
+        .collect()
+    }
+
+    /// Write a catch-all policy byte to the datapath without recording it as
+    /// the configured one.
+    fn push_default_policy(&mut self, policy: u8) {
+        if let Some(ref mut map) = self.map_port
+            && let Err(e) = map.set_default_policy(policy)
+        {
+            tracing::warn!("failed to set firewall default policy: {e}");
+        }
     }
 
     /// Return the number of active rules.
@@ -461,6 +675,7 @@ mod tests {
     struct RecordingMap {
         v4: Arc<std::sync::Mutex<Vec<ebpf_common::firewall::FirewallRuleEntry>>>,
         v6: Arc<std::sync::Mutex<Vec<ebpf_common::firewall::FirewallRuleEntryV6>>>,
+        policy: Arc<std::sync::Mutex<Option<u8>>>,
     }
 
     impl FirewallArrayMapPort for RecordingMap {
@@ -480,7 +695,8 @@ mod tests {
             Ok(())
         }
 
-        fn set_default_policy(&mut self, _policy: u8) -> Result<(), DomainError> {
+        fn set_default_policy(&mut self, policy: u8) -> Result<(), DomainError> {
+            *self.policy.lock().unwrap() = Some(policy);
             Ok(())
         }
 
@@ -497,6 +713,148 @@ mod tests {
             ..Default::default()
         });
         svc
+    }
+
+    /// A service whose anti-lockout list is empty, so the posture's own rules
+    /// are the only ones in the arrays and can be counted.
+    fn make_service_without_management_ports() -> FirewallAppService {
+        let mut svc = FirewallAppService::new(FirewallEngine::new(), None, Arc::new(NoopMetrics));
+        svc.set_anti_lockout(AntiLockoutSettings {
+            enabled: false,
+            interfaces: Vec::new(),
+            ports: Vec::new(),
+        });
+        svc
+    }
+
+    #[test]
+    fn deny_all_posture_closes_both_families_and_drops_the_catch_all() {
+        let map = RecordingMap::default();
+        let mut svc = make_service_without_management_ports();
+        svc.set_map_port(Box::new(map.clone()));
+        svc.set_default_policy(DEFAULT_POLICY_PASS);
+        svc.add_rule(make_rule("allow-web", 10)).unwrap();
+
+        svc.enter_deny_all().unwrap();
+
+        assert!(svc.is_deny_all());
+        // One deny in each array: a rule naming no address would only ever be
+        // installed into the v4 one, so the v6 half of the estate would stay
+        // open.
+        assert_eq!(map.v4.lock().unwrap().len(), 1);
+        assert_eq!(map.v6.lock().unwrap().len(), 1);
+        assert_eq!(*map.policy.lock().unwrap(), Some(DEFAULT_POLICY_DROP));
+
+        let installed: Vec<&str> = svc.list_rules().iter().map(|r| r.id.0.as_str()).collect();
+        assert_eq!(installed, vec![DENY_ALL_RULE_ID_V4, DENY_ALL_RULE_ID_V6]);
+    }
+
+    #[test]
+    fn deny_all_posture_matches_every_connection_state() {
+        let mut svc = make_service();
+        svc.enter_deny_all().unwrap();
+
+        // The datapath passes an established flow before it consults the
+        // catch-all byte, so a posture whose rules named a connection state
+        // would leave every open connection running.
+        for rule in svc.list_rules() {
+            assert!(rule.ct_states.is_none(), "{} names a state", rule.id.0);
+        }
+    }
+
+    #[test]
+    fn deny_all_posture_forces_block_mode_and_restores_the_configured_one() {
+        let map = RecordingMap::default();
+        let mut svc = make_service_without_management_ports();
+        svc.set_map_port(Box::new(map.clone()));
+        svc.set_mode(DomainMode::Alert);
+
+        svc.enter_deny_all().unwrap();
+        // Alert mode rewrites a deny into a log line, which would make the
+        // posture drop nothing at all.
+        assert_eq!(svc.mode(), DomainMode::Block);
+        assert_eq!(
+            map.v4.lock().unwrap()[0].action,
+            ebpf_common::firewall::ACTION_DROP,
+            "the installed rule was downgraded to a log line"
+        );
+
+        svc.exit_deny_all().unwrap();
+        assert_eq!(svc.mode(), DomainMode::Alert);
+    }
+
+    #[test]
+    fn deny_all_posture_keeps_the_management_ports_reachable() {
+        let mut svc = FirewallAppService::new(FirewallEngine::new(), None, Arc::new(NoopMetrics));
+        svc.set_anti_lockout(AntiLockoutSettings {
+            enabled: false,
+            interfaces: Vec::new(),
+            ports: vec![8080],
+        });
+
+        svc.enter_deny_all().unwrap();
+
+        // The posture is entered by the cluster rather than by an operator, so
+        // a node closing its own management port would need somebody on site.
+        let pass = svc
+            .list_rules()
+            .iter()
+            .find(|r| r.action == FirewallAction::Allow)
+            .expect("anti-lockout rule missing under the deny-all posture");
+        assert_eq!(pass.priority, 0);
+        assert_eq!(pass.dst_port.map(|p| p.start), Some(8080));
+
+        svc.exit_deny_all().unwrap();
+        // And the deployment's own choice comes back when the posture lifts.
+        assert!(
+            svc.list_rules()
+                .iter()
+                .all(|r| r.action != FirewallAction::Allow)
+        );
+    }
+
+    #[test]
+    fn exiting_the_deny_all_posture_puts_back_what_was_there() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(map.clone()));
+        svc.set_default_policy(DEFAULT_POLICY_PASS);
+        svc.add_rule(make_rule("allow-web", 10)).unwrap();
+        svc.add_rule(make_rule("allow-db", 20)).unwrap();
+
+        svc.enter_deny_all().unwrap();
+        svc.exit_deny_all().unwrap();
+
+        assert!(!svc.is_deny_all());
+        let restored: Vec<&str> = svc.list_rules().iter().map(|r| r.id.0.as_str()).collect();
+        assert_eq!(restored, vec!["allow-web", "allow-db"]);
+        assert_eq!(*map.policy.lock().unwrap(), Some(DEFAULT_POLICY_PASS));
+    }
+
+    #[test]
+    fn entering_the_deny_all_posture_twice_does_not_lose_the_rules() {
+        let mut svc = make_service();
+        svc.add_rule(make_rule("allow-web", 10)).unwrap();
+
+        // A cluster that reports the same degradation twice must not snapshot
+        // the posture's own rules over the operator's.
+        svc.enter_deny_all().unwrap();
+        svc.enter_deny_all().unwrap();
+        svc.exit_deny_all().unwrap();
+
+        let restored: Vec<&str> = svc.list_rules().iter().map(|r| r.id.0.as_str()).collect();
+        assert_eq!(restored, vec!["allow-web"]);
+    }
+
+    #[test]
+    fn exiting_a_posture_that_was_never_entered_changes_nothing() {
+        let mut svc = make_service();
+        svc.add_rule(make_rule("allow-web", 10)).unwrap();
+
+        svc.exit_deny_all().unwrap();
+
+        let kept: Vec<&str> = svc.list_rules().iter().map(|r| r.id.0.as_str()).collect();
+        assert_eq!(kept, vec!["allow-web"]);
     }
 
     #[test]

@@ -577,6 +577,12 @@ pub async fn load_ebpf_programs(
                 });
                 let mut svc = services.firewall_svc.write().await;
                 svc.set_map_port(Box::new(map_manager));
+                // The loader wrote the catch-all byte into the map; the service
+                // needs to know it too, because the deny-all posture overwrites
+                // it and has to put this one back.
+                svc.set_default_policy(startup::firewall_policy_byte(
+                    config.firewall.default_policy,
+                ));
                 if let Some(rdr) = fw_metrics_rdr {
                     metrics_readers.push(rdr);
                 }
