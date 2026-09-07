@@ -1,14 +1,14 @@
-# eBPFsentinel — Multi-stage Docker build (rootless agent image)
+# eBPFsentinel - Multi-stage Docker build (rootless agent image)
 #
 # Build:  docker build -f Dockerfile.agent -t ebpfsentinel .
 #
 # This image is the rootless agent ONLY. It runs alongside a `warden` broker
-# (Dockerfile.warden) reached over a shared AF_UNIX socket — see docker-compose.yml
+# (Dockerfile.warden) reached over a shared AF_UNIX socket - see docker-compose.yml
 # (the `warden` + `agent` services) or the Helm chart (warden sidecar). Point the
 # agent at the broker with EBPFSENTINEL_WARDEN_SOCK.
 #
 # The agent drops every capability, self-unshares a user namespace, has the warden
-# delegate a bpffs, and loads its own eBPF through a BPF token — never root, never
+# delegate a bpffs, and loads its own eBPF through a BPF token - never root, never
 # CAP_BPF. It does the userns + mount + bpf syscalls itself, so it needs
 # apparmor/seccomp unconfined (no CAP_SYS_ADMIN to satisfy the default profiles).
 # A container's /sys is read-only, so back the bpffs mountpoint with a writable
@@ -58,8 +58,18 @@ COPY config/ebpfsentinel.yaml config/ebpfsentinel.yaml
 
 ENV LIBPCAP_LIBDIR=/usr/local/musl/lib
 
+# Where the anonymous heartbeat goes, baked in here and named nowhere in the
+# sources. Empty by default, and an empty endpoint is refused at boot, so a
+# build from these sources - a fork, a local build, a pull-request build - has
+# nowhere to report and telemetry never starts. Not a secret: it ends up in a
+# shipped binary and `strings` will show it. The build script declares
+# `rerun-if-env-changed` on it, so a cached target directory cannot keep a
+# stale value.
+ARG TELEMETRY_ENDPOINT=""
+ENV EBPFSENTINEL_TELEMETRY_ENDPOINT=${TELEMETRY_ENDPOINT}
+
 # Build the agent (static, musl). It loads its own eBPF through a BPF token (a
-# user-namespace feature) — rootless. The warden broker ships in its own image
+# user-namespace feature) - rootless. The warden broker ships in its own image
 # (Dockerfile.warden).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     case "${TARGETARCH}" in \
@@ -79,7 +89,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # ── Stage 2: Minimal runtime image ──────────────────────────────────
 #
-# distroless/static: ca-certificates only — no libc, no shell, no package manager.
+# distroless/static: ca-certificates only - no libc, no shell, no package manager.
 # Requires a fully statically-linked binary (musl).
 
 FROM gcr.io/distroless/static-debian13
@@ -95,9 +105,9 @@ COPY --from=agent-builder /build/ebpfsentinel-agent /usr/local/bin/ebpfsentinel-
 COPY ebpf-out/ /usr/local/lib/ebpfsentinel/
 
 # Config dir (0755, traversable) + file (0640, the agent rejects a world-readable
-# config — it may hold secrets). Staged in the builder and copied as a tree:
+# config - it may hold secrets). Staged in the builder and copied as a tree:
 # `COPY --chmod` on a single file also re-modes the auto-created parent dir, which
-# would leave /etc/ebpfsentinel at 0640 (no execute) — un-traversable, so even the
+# would leave /etc/ebpfsentinel at 0640 (no execute) - un-traversable, so even the
 # owner cannot stat the file inside (breaks the rootless agent reading its config
 # through its user namespace). This baked copy is a fallback; deployments that run
 # the agent as a non-root uid (the compose `agent` service, the Helm chart)
@@ -105,7 +115,7 @@ COPY ebpf-out/ /usr/local/lib/ebpfsentinel/
 # Kubernetes).
 COPY --from=agent-builder /build/etc/ebpfsentinel /etc/ebpfsentinel
 
-# distroless has no shell — create the directory in the builder stage and COPY it.
+# distroless has no shell - create the directory in the builder stage and COPY it.
 COPY --from=agent-builder /build/captures-dir /var/lib/ebpfsentinel/captures
 
 ENV EBPF_PROGRAM_DIR=/usr/local/lib/ebpfsentinel

@@ -9,5 +9,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .compile_protos(&[proto_path], &["../../proto"])?;
 
     println!("cargo:rerun-if-changed={proto_path}");
+
+    // The telemetry destination is read with `option_env!`, which is baked into
+    // the object file. Without this line cargo has no reason to rebuild when the
+    // variable changes, so a cached target directory - which is what every CI
+    // build and every Docker layer cache is - would keep yesterday's endpoint,
+    // or keep none at all after somebody sets one.
+    println!("cargo:rerun-if-env-changed=EBPFSENTINEL_TELEMETRY_ENDPOINT");
     Ok(())
 }
