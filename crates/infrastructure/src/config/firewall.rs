@@ -378,7 +378,7 @@ impl FirewallRuleConfig {
             .map(PortRangeConfig::to_domain)
             .transpose()?;
 
-        let scope = self.scope.to_domain();
+        let scope = self.scope.to_domain()?;
 
         let ct_states = self
             .state
@@ -570,20 +570,26 @@ impl Default for ScopeConfig {
 }
 
 impl ScopeConfig {
-    pub fn to_domain(&self) -> DomainScope {
-        match self {
-            Self::Simple(s) if s.eq_ignore_ascii_case("global") => DomainScope::Global,
-            Self::Simple(s) => DomainScope::Interface(s.clone()),
+    /// Resolve the scope, applying the same length and character rules the
+    /// API applies, so a value refused over HTTP is refused in a file too.
+    pub fn to_domain(&self) -> Result<DomainScope, ConfigError> {
+        let (field, value) = match self {
+            Self::Simple(s) => ("scope", s.clone()),
             Self::Map(m) => {
                 if let Some(ref iface) = m.interface {
-                    DomainScope::Interface(iface.clone())
+                    ("scope.interface", format!("interface:{iface}"))
                 } else if let Some(ref ns) = m.namespace {
-                    DomainScope::Namespace(ns.clone())
+                    ("scope.namespace", format!("namespace:{ns}"))
                 } else {
-                    DomainScope::Global
+                    return Ok(DomainScope::Global);
                 }
             }
-        }
+        };
+        DomainScope::parse(&value).map_err(|e| ConfigError::InvalidValue {
+            field: field.to_string(),
+            value,
+            expected: e.to_string(),
+        })
     }
 }
 
@@ -685,6 +691,40 @@ protocol: tcp
     #[test]
     fn scope_defaults_to_global() {
         let scope = ScopeConfig::default();
-        assert!(matches!(scope.to_domain(), DomainScope::Global));
+        assert!(matches!(scope.to_domain(), Ok(DomainScope::Global)));
+    }
+
+    #[test]
+    fn a_scope_a_file_names_is_held_to_the_rules_the_api_applies() {
+        let scope = ScopeConfig::Simple("../../../etc".to_string());
+        assert!(scope.to_domain().is_err());
+
+        let scope = ScopeConfig::Map(ScopeMap {
+            interface: Some("this_is_way_too_long_a_name".to_string()),
+            namespace: None,
+        });
+        assert!(scope.to_domain().is_err());
+
+        let scope = ScopeConfig::Map(ScopeMap {
+            interface: None,
+            namespace: Some("UPPER".to_string()),
+        });
+        assert!(scope.to_domain().is_err());
+    }
+
+    #[test]
+    fn a_scope_a_file_names_is_accepted_in_each_of_its_forms() {
+        assert!(matches!(
+            ScopeConfig::Simple("eth0".to_string()).to_domain(),
+            Ok(DomainScope::Interface(_))
+        ));
+        assert!(matches!(
+            ScopeConfig::Map(ScopeMap {
+                interface: None,
+                namespace: Some("prod".to_string()),
+            })
+            .to_domain(),
+            Ok(DomainScope::Namespace(_))
+        ));
     }
 }

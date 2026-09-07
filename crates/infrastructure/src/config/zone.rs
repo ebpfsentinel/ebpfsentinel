@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::common::ConfigError;
 
-/// Maximum number of zones.
-pub(super) const MAX_ZONES: usize = 64;
+pub(super) use domain::zone::entity::MAX_ZONES;
 
 /// Top-level zone section config.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

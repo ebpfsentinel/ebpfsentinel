@@ -48,6 +48,9 @@ pub enum FirewallError {
 
     #[error("cannot delete system rule: {id}")]
     SystemRuleProtected { id: String },
+
+    #[error("invalid scope: {reason}")]
+    InvalidScope { reason: String },
 }
 
 impl From<FirewallError> for DomainError {

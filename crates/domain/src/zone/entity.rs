@@ -2,6 +2,13 @@ use serde::{Deserialize, Serialize};
 
 use super::error::ZoneError;
 
+/// Maximum number of security zones.
+///
+/// The zone ID is an eight-bit value in the kernel maps, and the bound is
+/// held here so that a configuration file and `POST /api/v1/zones` are
+/// refused by the same rule.
+pub const MAX_ZONES: usize = 64;
+
 /// Default policy for a security zone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -68,6 +75,15 @@ pub struct ZoneConfig {
 
 impl ZoneConfig {
     pub fn validate(&self) -> Result<(), ZoneError> {
+        if self.zones.len() > MAX_ZONES {
+            return Err(ZoneError::Invalid {
+                reason: format!(
+                    "{} zones configured; the maximum is {MAX_ZONES}",
+                    self.zones.len()
+                ),
+            });
+        }
+
         // Validate zones
         let mut zone_ids = std::collections::HashSet::new();
         for zone in &self.zones {
@@ -133,6 +149,37 @@ impl ZoneConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn zones(count: usize) -> Vec<Zone> {
+        (0..count)
+            .map(|i| Zone {
+                id: format!("z{i}"),
+                interfaces: vec![format!("eth{i}")],
+                default_policy: ZonePolicy::Deny,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_config_at_the_zone_maximum_is_accepted() {
+        let config = ZoneConfig {
+            zones: zones(MAX_ZONES),
+            zone_policies: Vec::new(),
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn a_config_one_zone_past_the_maximum_is_refused() {
+        let config = ZoneConfig {
+            zones: zones(MAX_ZONES + 1),
+            zone_policies: Vec::new(),
+        };
+        let err = config
+            .validate()
+            .expect_err("a config past the maximum must be refused");
+        assert!(err.to_string().contains("maximum is 64"), "{err}");
+    }
 
     #[test]
     fn zone_validate_ok() {

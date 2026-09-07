@@ -156,59 +156,12 @@ fn parse_protocol(s: &str) -> Result<Protocol, ApiError> {
 }
 
 fn parse_scope(s: &str) -> Result<Scope, ApiError> {
-    if s.eq_ignore_ascii_case("global") {
-        Ok(Scope::Global)
-    } else if let Some(iface) = s.strip_prefix("interface:") {
-        validate_interface_name(iface)?;
-        Ok(Scope::Interface(iface.to_string()))
-    } else if let Some(ns) = s.strip_prefix("namespace:") {
-        validate_namespace_name(ns)?;
-        Ok(Scope::Namespace(ns.to_string()))
-    } else {
-        // Default: treat as interface name
-        validate_interface_name(s)?;
-        Ok(Scope::Interface(s.to_string()))
-    }
-}
-
-/// Validate Linux interface name: max 15 chars (IFNAMSIZ-1), alphanumeric + `_-.:`.
-fn validate_interface_name(name: &str) -> Result<(), ApiError> {
-    if name.is_empty() || name.len() > 15 {
-        return Err(ApiError::BadRequest {
-            code: "VALIDATION_ERROR",
-            message: format!("interface name must be 1-15 characters, got '{name}'"),
-        });
-    }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.' || b == b':')
-    {
-        return Err(ApiError::BadRequest {
-            code: "VALIDATION_ERROR",
-            message: format!("interface name contains invalid characters: '{name}'"),
-        });
-    }
-    Ok(())
-}
-
-/// Validate K8s namespace name: max 63 chars, lowercase alphanumeric + `-`.
-fn validate_namespace_name(name: &str) -> Result<(), ApiError> {
-    if name.is_empty() || name.len() > 63 {
-        return Err(ApiError::BadRequest {
-            code: "VALIDATION_ERROR",
-            message: format!("namespace must be 1-63 characters, got '{name}'"),
-        });
-    }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    {
-        return Err(ApiError::BadRequest {
-            code: "VALIDATION_ERROR",
-            message: format!("namespace contains invalid characters: '{name}'"),
-        });
-    }
-    Ok(())
+    // The length and character rules are the domain's, so a value refused
+    // here is refused in a configuration file by the same code.
+    Scope::parse(s).map_err(|e| ApiError::BadRequest {
+        code: "VALIDATION_ERROR",
+        message: e.to_string(),
+    })
 }
 
 impl CreateRuleRequest {

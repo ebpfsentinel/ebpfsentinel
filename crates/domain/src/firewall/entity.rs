@@ -323,6 +323,78 @@ pub enum Scope {
     Namespace(String),
 }
 
+impl Scope {
+    /// Maximum interface name length, `IFNAMSIZ - 1` as the kernel defines it.
+    pub const MAX_INTERFACE_NAME_LENGTH: usize = 15;
+
+    /// Maximum Kubernetes namespace length, as RFC 1123 label rules give it.
+    pub const MAX_NAMESPACE_NAME_LENGTH: usize = 63;
+
+    /// Parse a scope from the textual form used by both the API and a
+    /// configuration file: `global`, `interface:<name>`, `namespace:<name>`,
+    /// or a bare name, which is taken as an interface.
+    ///
+    /// The length and character rules live here so that a value the API
+    /// refuses is refused in a YAML file too.
+    pub fn parse(value: &str) -> Result<Self, FirewallError> {
+        if value.eq_ignore_ascii_case("global") {
+            return Ok(Self::Global);
+        }
+        if let Some(iface) = value.strip_prefix("interface:") {
+            Self::check_interface_name(iface)?;
+            return Ok(Self::Interface(iface.to_string()));
+        }
+        if let Some(namespace) = value.strip_prefix("namespace:") {
+            Self::check_namespace_name(namespace)?;
+            return Ok(Self::Namespace(namespace.to_string()));
+        }
+        Self::check_interface_name(value)?;
+        Ok(Self::Interface(value.to_string()))
+    }
+
+    /// Linux interface name: 1 to 15 characters, alphanumeric plus `_-.:`.
+    fn check_interface_name(name: &str) -> Result<(), FirewallError> {
+        if name.is_empty() || name.len() > Self::MAX_INTERFACE_NAME_LENGTH {
+            return Err(FirewallError::InvalidScope {
+                reason: format!(
+                    "interface name must be 1-{} characters, got '{name}'",
+                    Self::MAX_INTERFACE_NAME_LENGTH
+                ),
+            });
+        }
+        if !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.' || b == b':')
+        {
+            return Err(FirewallError::InvalidScope {
+                reason: format!("interface name contains invalid characters: '{name}'"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Kubernetes namespace: 1 to 63 characters, lowercase alphanumeric plus `-`.
+    fn check_namespace_name(name: &str) -> Result<(), FirewallError> {
+        if name.is_empty() || name.len() > Self::MAX_NAMESPACE_NAME_LENGTH {
+            return Err(FirewallError::InvalidScope {
+                reason: format!(
+                    "namespace must be 1-{} characters, got '{name}'",
+                    Self::MAX_NAMESPACE_NAME_LENGTH
+                ),
+            });
+        }
+        if !name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(FirewallError::InvalidScope {
+                reason: format!("namespace contains invalid characters: '{name}'"),
+            });
+        }
+        Ok(())
+    }
+}
+
 // ── Firewall rule ───────────────────────────────────────────────────
 
 #[allow(clippy::struct_excessive_bools)]
@@ -893,6 +965,53 @@ impl PacketInfo {
 
 #[cfg(test)]
 mod tests {
+
+    // ── Scope ─────────────────────────────────────────────────────
+
+    #[test]
+    fn a_scope_is_parsed_from_each_of_its_written_forms() {
+        assert_eq!(Scope::parse("global").expect("global"), Scope::Global);
+        assert_eq!(
+            Scope::parse("interface:eth0").expect("interface"),
+            Scope::Interface("eth0".to_string())
+        );
+        assert_eq!(
+            Scope::parse("namespace:prod").expect("namespace"),
+            Scope::Namespace("prod".to_string())
+        );
+        assert_eq!(
+            Scope::parse("wlan0").expect("bare name"),
+            Scope::Interface("wlan0".to_string())
+        );
+    }
+
+    #[test]
+    fn an_interface_name_past_the_kernel_limit_is_refused() {
+        let name = "e".repeat(Scope::MAX_INTERFACE_NAME_LENGTH + 1);
+        assert!(Scope::parse(&name).is_err());
+        assert!(Scope::parse(&format!("interface:{name}")).is_err());
+    }
+
+    #[test]
+    fn a_scope_carrying_a_path_is_refused() {
+        assert!(Scope::parse("../etc").is_err());
+        assert!(Scope::parse("interface:../../../etc").is_err());
+        assert!(Scope::parse("namespace:../../etc").is_err());
+    }
+
+    #[test]
+    fn a_namespace_outside_the_lowercase_alphabet_is_refused() {
+        assert!(Scope::parse("namespace:UPPER").is_err());
+        assert!(Scope::parse("namespace:has space").is_err());
+        assert!(Scope::parse("namespace:has_underscore").is_err());
+        assert!(
+            Scope::parse(&format!(
+                "namespace:{}",
+                "n".repeat(Scope::MAX_NAMESPACE_NAME_LENGTH + 1)
+            ))
+            .is_err()
+        );
+    }
     use super::*;
     use crate::common::entity::RuleId;
 

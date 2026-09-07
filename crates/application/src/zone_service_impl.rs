@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use domain::zone::entity::{Zone, ZoneConfig, ZonePair, ZonePolicy};
+use domain::zone::entity::{MAX_ZONES, Zone, ZoneConfig, ZonePair, ZonePolicy};
 use domain::zone::error::ZoneError;
 use ports::secondary::metrics_port::MetricsPort;
 use ports::secondary::zone_map_port::ZoneMapPort;
@@ -115,6 +115,16 @@ impl ZoneAppService {
         let cfg = self.config_mut();
         if cfg.zones.iter().any(|z| z.id == zone.id) {
             return Err(ZoneError::Duplicate { id: zone.id });
+        }
+        // The same bound the configuration loader applies. The map manager's
+        // conversion to an eight-bit zone ID stays the last line of defence.
+        if cfg.zones.len() >= MAX_ZONES {
+            return Err(ZoneError::Invalid {
+                reason: format!(
+                    "{} zones configured; the maximum is {MAX_ZONES}",
+                    cfg.zones.len() + 1
+                ),
+            });
         }
         cfg.zones.push(zone);
         self.refresh_metrics();
@@ -303,6 +313,34 @@ mod tests {
         })
         .expect("add zone");
         assert_eq!(maps.calls().last().copied(), Some((3, 1)));
+    }
+
+    #[test]
+    fn the_zone_past_the_maximum_is_refused_over_the_api() {
+        let maps = Arc::new(RecordingMaps::default());
+        let mut svc = wired(&maps);
+        svc.reload(ZoneConfig {
+            zones: (0..MAX_ZONES)
+                .map(|i| Zone {
+                    id: format!("z{i}"),
+                    interfaces: vec![format!("eth{i}")],
+                    default_policy: ZonePolicy::Deny,
+                })
+                .collect(),
+            zone_policies: Vec::new(),
+        })
+        .expect("reload");
+
+        let err = svc
+            .add_zone(Zone {
+                id: "one-too-many".to_string(),
+                interfaces: vec!["eth99".to_string()],
+                default_policy: ZonePolicy::Deny,
+            })
+            .expect_err("the zone past the maximum must be refused");
+
+        assert!(err.to_string().contains("maximum is 64"), "{err}");
+        assert_eq!(svc.zone_count(), MAX_ZONES);
     }
 
     #[test]
