@@ -283,16 +283,15 @@ pub(super) fn validate_regex(pattern: &str, field: &str) -> Result<(), ConfigErr
 }
 
 /// Parse a domain mode string to the domain enum.
+///
+/// The vocabulary itself is the domain's, because a per-feed override reads it
+/// too and a second copy here would be a second answer to the same word.
 pub fn parse_domain_mode(s: &str) -> Result<DomainMode, ConfigError> {
-    match s.to_lowercase().as_str() {
-        "alert" | "monitor" | "observe" => Ok(DomainMode::Alert),
-        "block" | "enforce" => Ok(DomainMode::Block),
-        _ => Err(ConfigError::InvalidValue {
-            field: "mode".to_string(),
-            value: s.to_string(),
-            expected: "alert, block".to_string(),
-        }),
-    }
+    DomainMode::parse(s).ok_or_else(|| ConfigError::InvalidValue {
+        field: "mode".to_string(),
+        value: s.to_string(),
+        expected: "alert, block".to_string(),
+    })
 }
 
 pub(super) fn parse_action(s: &str) -> Result<FirewallAction, ()> {

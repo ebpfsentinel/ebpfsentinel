@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::ebpf::map_store::MapStore;
 use aya::maps::{BloomFilter, HashMap, MapData};
+use domain::common::entity::DomainMode;
 use domain::common::error::DomainError;
 use domain::threatintel::entity::Ioc;
 use ebpf_common::threatintel::{
@@ -142,22 +143,25 @@ impl ThreatIntelMapManager {
     /// Partitions IOCs by IP version: V4 goes to `THREATINTEL_IOCS`,
     /// V6 goes to `THREATINTEL_IOCS_V6` (skipped if V6 map not present).
     ///
-    /// `block_mode` determines the eBPF action for all entries:
-    /// - `true` -> `THREATINTEL_ACTION_DROP` (block + alert)
-    /// - `false` -> `THREATINTEL_ACTION_ALERT` (alert only, pass traffic)
+    /// Each IOC carries the mode it is enforced in, because a feed may override
+    /// the global one:
+    /// - `DomainMode::Block` -> `THREATINTEL_ACTION_DROP` (block + alert)
+    /// - `DomainMode::Alert` -> `THREATINTEL_ACTION_ALERT` (alert only, pass traffic)
     #[allow(clippy::too_many_lines)]
-    pub fn load_iocs(&mut self, iocs: &[Ioc], block_mode: bool) -> Result<(), DomainError> {
+    pub fn load_iocs(&mut self, iocs: &[(Ioc, DomainMode)]) -> Result<(), DomainError> {
         self.clear_iocs()?;
-        let action = if block_mode {
-            THREATINTEL_ACTION_DROP
-        } else {
-            THREATINTEL_ACTION_ALERT
-        };
 
         let mut v4_count = 0usize;
         let mut v6_count = 0usize;
+        let mut blocking = 0usize;
 
-        for (idx, ioc) in iocs.iter().enumerate() {
+        for (idx, (ioc, mode)) in iocs.iter().enumerate() {
+            let action = if *mode == DomainMode::Block {
+                blocking += 1;
+                THREATINTEL_ACTION_DROP
+            } else {
+                THREATINTEL_ACTION_ALERT
+            };
             let value = ThreatIntelValue {
                 action,
                 #[allow(clippy::cast_possible_truncation)]
@@ -210,6 +214,7 @@ impl ThreatIntelMapManager {
         info!(
             v4_count,
             v6_count,
+            blocking,
             total = iocs.len(),
             "threat intel IOCs loaded into eBPF maps"
         );
@@ -218,8 +223,8 @@ impl ThreatIntelMapManager {
 }
 
 impl ThreatIntelMapPort for ThreatIntelMapManager {
-    fn load_all_iocs(&mut self, iocs: &[Ioc], block_mode: bool) -> Result<(), DomainError> {
-        self.load_iocs(iocs, block_mode)
+    fn load_all_iocs(&mut self, iocs: &[(Ioc, DomainMode)]) -> Result<(), DomainError> {
+        self.load_iocs(iocs)
     }
 
     fn insert_ioc(

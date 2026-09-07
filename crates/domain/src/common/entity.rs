@@ -110,6 +110,21 @@ impl DomainMode {
             Self::Block => "block",
         }
     }
+
+    /// Read a configured word, or `None` when it names neither mode.
+    ///
+    /// `monitor` and `observe` have always been accepted spellings of `alert`,
+    /// and `enforce` of `block`. The parse lives here rather than beside the
+    /// configuration loader because a per-feed override reads the same
+    /// vocabulary, and two parsers for one word drift.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "alert" | "monitor" | "observe" => Some(Self::Alert),
+            "block" | "enforce" => Some(Self::Block),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for DomainMode {
@@ -229,6 +244,23 @@ mod tests {
     fn domain_mode_display() {
         assert_eq!(format!("{}", DomainMode::Alert), "alert");
         assert_eq!(format!("{}", DomainMode::Block), "block");
+    }
+
+    #[test]
+    fn domain_mode_parse_reads_every_accepted_spelling() {
+        for word in ["alert", "monitor", "observe", "ALERT", " Monitor "] {
+            assert_eq!(DomainMode::parse(word), Some(DomainMode::Alert), "{word}");
+        }
+        for word in ["block", "enforce", "BLOCK", " Enforce "] {
+            assert_eq!(DomainMode::parse(word), Some(DomainMode::Block), "{word}");
+        }
+    }
+
+    #[test]
+    fn domain_mode_parse_names_neither_mode() {
+        for word in ["", "drop", "warn", "alerting"] {
+            assert_eq!(DomainMode::parse(word), None, "{word}");
+        }
     }
 
     #[test]

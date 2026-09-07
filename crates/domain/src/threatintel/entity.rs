@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
+use crate::common::entity::DomainMode;
+
 // ── Threat type ─────────────────────────────────────────────────────
 
 /// Categorization of threat indicators. Matches kernel-side `THREAT_TYPE_*`
@@ -271,6 +273,19 @@ fn default_max_iocs() -> usize {
 }
 
 impl FeedConfig {
+    /// The mode this feed is enforced in, when it overrides the global one.
+    ///
+    /// `None` means the feed inherits, which is both the absent key and a word
+    /// that names neither mode. An unreadable word cannot be a refusal here:
+    /// the configuration loader already rejects one at load, and a feed
+    /// reaching this call with a word nobody can read has come from somewhere
+    /// that skipped that check, where inheriting the global mode is the safe
+    /// reading rather than silently blocking or silently letting traffic past.
+    #[must_use]
+    pub fn action_override(&self) -> Option<DomainMode> {
+        self.default_action.as_deref().and_then(DomainMode::parse)
+    }
+
     /// Validate feed configuration fields.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.id.is_empty() {
@@ -497,6 +512,27 @@ mod tests {
             field_mapping: None,
             auth_header: None,
         }
+    }
+
+    #[test]
+    fn feed_config_action_override_absent_inherits() {
+        assert_eq!(make_feed().action_override(), None);
+    }
+
+    #[test]
+    fn feed_config_action_override_reads_both_modes() {
+        let mut f = make_feed();
+        f.default_action = Some("block".to_string());
+        assert_eq!(f.action_override(), Some(DomainMode::Block));
+        f.default_action = Some("monitor".to_string());
+        assert_eq!(f.action_override(), Some(DomainMode::Alert));
+    }
+
+    #[test]
+    fn feed_config_action_override_unreadable_word_inherits() {
+        let mut f = make_feed();
+        f.default_action = Some("quarantine".to_string());
+        assert_eq!(f.action_override(), None);
     }
 
     #[test]

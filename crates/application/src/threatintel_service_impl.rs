@@ -188,24 +188,45 @@ impl ThreatIntelAppService {
         iocs
     }
 
+    /// The mode an IOC from `feed_id` is enforced in.
+    ///
+    /// A feed that sets `default_action` overrides the service mode for its own
+    /// indicators and for nothing else. An IOC whose feed is not configured -
+    /// one added through the API, or one left behind by a feed removed from the
+    /// configuration - inherits the service mode, which is what the operator
+    /// asked for globally.
+    fn mode_for_feed(&self, feed_id: &str) -> DomainMode {
+        self.feeds
+            .iter()
+            .find(|feed| feed.id == feed_id)
+            .and_then(FeedConfig::action_override)
+            .unwrap_or(self.mode)
+    }
+
     /// Full-reload sync: bulk-load all engine IOCs into eBPF maps.
     ///
-    /// In `Alert` mode, IOCs are loaded with `block_mode = false`
-    /// (observation only - traffic is not dropped).
+    /// In `Alert` mode, IOCs are loaded as alert-only (observation only -
+    /// traffic is not dropped), unless the feed they came from overrides it.
     fn sync_ebpf_maps(&self) {
         let Some(ref map_port) = self.map_port else {
             return;
         };
 
-        let block_mode = self.mode != DomainMode::Alert;
-        let iocs: Vec<Ioc> = self.engine.all_iocs().cloned().collect();
+        let iocs: Vec<(Ioc, DomainMode)> = self
+            .engine
+            .all_iocs()
+            .map(|ioc| {
+                let mode = self.mode_for_feed(&ioc.feed_id);
+                (ioc.clone(), mode)
+            })
+            .collect();
 
         let Ok(mut map) = map_port.lock() else {
             tracing::warn!("threat intel map port lock poisoned, skipping eBPF sync");
             return;
         };
 
-        if let Err(e) = map.load_all_iocs(&iocs, block_mode) {
+        if let Err(e) = map.load_all_iocs(&iocs) {
             tracing::warn!("failed to sync threat intel IOCs to eBPF maps: {e}");
         }
     }
@@ -359,6 +380,141 @@ mod tests {
         // A subsequent reload replaces the snapshot.
         svc.reload_urls(Vec::new());
         assert!(svc.urls().is_empty());
+    }
+
+    /// Records what the last sync handed the map. A per-feed override changes
+    /// nothing the service reports about itself, so the map is the only place
+    /// it is observable.
+    struct RecordingMapPort {
+        loaded: Arc<Mutex<Vec<(String, DomainMode)>>>,
+    }
+
+    impl ThreatIntelMapPort for RecordingMapPort {
+        fn insert_ioc(
+            &mut self,
+            _key: &ebpf_common::threatintel::ThreatIntelKey,
+            _value: &ebpf_common::threatintel::ThreatIntelValue,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+
+        fn remove_ioc(
+            &mut self,
+            _key: &ebpf_common::threatintel::ThreatIntelKey,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+
+        fn clear_iocs(&mut self) -> Result<(), DomainError> {
+            Ok(())
+        }
+
+        fn ioc_count(&self) -> Result<usize, DomainError> {
+            Ok(self.loaded.lock().unwrap().len())
+        }
+
+        fn load_all_iocs(&mut self, iocs: &[(Ioc, DomainMode)]) -> Result<(), DomainError> {
+            *self.loaded.lock().unwrap() = iocs
+                .iter()
+                .map(|(ioc, mode)| (ioc.ip.to_string(), *mode))
+                .collect();
+            Ok(())
+        }
+    }
+
+    fn feed_with_action(id: &str, action: Option<&str>) -> FeedConfig {
+        FeedConfig {
+            id: id.to_string(),
+            default_action: action.map(str::to_string),
+            ..make_feed()
+        }
+    }
+
+    fn ioc_from(ip: &str, feed_id: &str) -> Ioc {
+        Ioc {
+            feed_id: feed_id.to_string(),
+            ..make_ioc(ip)
+        }
+    }
+
+    /// Sync with the given feeds and IOCs, and report the mode each IOC landed
+    /// in the map under, keyed by address.
+    fn synced_modes(
+        mode: DomainMode,
+        feeds: Vec<FeedConfig>,
+        iocs: Vec<Ioc>,
+    ) -> Vec<(String, DomainMode)> {
+        let metrics = Arc::new(TestMetrics::new());
+        let mut svc = ThreatIntelAppService::new(
+            ThreatIntelEngine::new(1_000_000),
+            metrics as Arc<dyn MetricsPort>,
+            feeds,
+        );
+        svc.set_mode(mode);
+        let loaded = Arc::new(Mutex::new(Vec::new()));
+        svc.set_map_port(Box::new(RecordingMapPort {
+            loaded: Arc::clone(&loaded),
+        }));
+        svc.reload_iocs(iocs).unwrap();
+        let mut out = loaded.lock().unwrap().clone();
+        out.sort_by(|(a, _), (b, _)| a.cmp(b));
+        out
+    }
+
+    #[test]
+    fn a_feed_action_overrides_the_service_mode() {
+        let modes = synced_modes(
+            DomainMode::Alert,
+            vec![
+                feed_with_action("blocking", Some("block")),
+                feed_with_action("inheriting", None),
+            ],
+            vec![
+                ioc_from("10.0.0.1", "blocking"),
+                ioc_from("10.0.0.2", "inheriting"),
+            ],
+        );
+        assert_eq!(
+            modes,
+            vec![
+                ("10.0.0.1".to_string(), DomainMode::Block),
+                ("10.0.0.2".to_string(), DomainMode::Alert),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_feed_action_holds_a_feed_back_while_the_estate_blocks() {
+        let modes = synced_modes(
+            DomainMode::Block,
+            vec![
+                feed_with_action("evaluating", Some("alert")),
+                feed_with_action("inheriting", None),
+            ],
+            vec![
+                ioc_from("10.0.0.1", "evaluating"),
+                ioc_from("10.0.0.2", "inheriting"),
+            ],
+        );
+        assert_eq!(
+            modes,
+            vec![
+                ("10.0.0.1".to_string(), DomainMode::Alert),
+                ("10.0.0.2".to_string(), DomainMode::Block),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_ioc_from_no_configured_feed_inherits_the_service_mode() {
+        // What an IOC added through the API carries: a feed identifier that no
+        // configured feed answers to.
+        let modes = synced_modes(
+            DomainMode::Block,
+            vec![feed_with_action("blocking", Some("alert"))],
+            vec![ioc_from("10.0.0.9", "manual")],
+        );
+        assert_eq!(modes, vec![("10.0.0.9".to_string(), DomainMode::Block)]);
     }
 
     #[test]

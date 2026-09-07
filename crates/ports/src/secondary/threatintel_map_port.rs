@@ -1,3 +1,4 @@
+use domain::common::entity::DomainMode;
 use domain::common::error::DomainError;
 use domain::threatintel::entity::Ioc;
 use ebpf_common::threatintel::{ThreatIntelKey, ThreatIntelValue};
@@ -25,9 +26,13 @@ pub trait ThreatIntelMapPort: Send + Sync {
 
     /// Bulk-reload all IOCs into the eBPF maps.
     ///
-    /// Clears existing entries, then inserts all provided IOCs with the
-    /// appropriate action based on `block_mode`.
-    fn load_all_iocs(&mut self, iocs: &[Ioc], block_mode: bool) -> Result<(), DomainError>;
+    /// Clears existing entries, then inserts each IOC under the mode it is
+    /// paired with. The mode is per IOC rather than per reload because a feed
+    /// may override the global one: a list somebody is still evaluating stays
+    /// on `Alert` while the rest of the estate blocks, and a feed of known-bad
+    /// infrastructure blocks while the agent is being rolled out in
+    /// observation.
+    fn load_all_iocs(&mut self, iocs: &[(Ioc, DomainMode)]) -> Result<(), DomainError>;
 }
 
 #[cfg(test)]
