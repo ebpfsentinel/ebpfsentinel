@@ -22,15 +22,44 @@ use utoipa_swagger_ui::SwaggerUi;
 /// Maximum request body size for API endpoints (64 KiB).
 const MAX_BODY_SIZE: usize = 64 * 1024;
 
-/// Rate limit for read endpoints: 200 requests per 60 seconds per IP.
+// Two rate-limiting crates are in use here on purpose, and the names they share
+// do not mean the same thing.
+//
+// `tower_governor::GovernorConfigBuilder` configures a *replenish period*: the
+// interval after which one cell of the quota comes back. Its `per_second(n)`
+// therefore means "one request every n seconds", not "n requests a second".
+// `governor::Quota::per_second(n)`, used by the write limiter below, means the
+// opposite - n cells a second. Reading either name as a rate is what made the
+// read and auth limiters 24x and 60x tighter than the doc comments beside them.
+//
+// Every constant here is therefore a sustained rate, with its window in the
+// name, stated the way the documentation states it; the conversion into the
+// period the crate wants happens in `replenish_period_ms` and nowhere else.
+//
+// The split between the two crates stays: `tower_governor` gives a `Layer` that
+// wraps a whole router and answers `429` with a `Retry-After` on its own, which
+// is what the read, auth and metrics limits need; the write limit needs a
+// per-request loopback exemption and a quota built from operator configuration,
+// which is a middleware over a bare `governor::RateLimiter`. Consolidating onto
+// one crate would mean re-implementing one of those two shapes for no gain.
+
+/// Rate limit for read endpoints: 200 requests a minute per IP sustained,
+/// with a 200-request burst.
 /// Prevents enumeration and resource exhaustion on list queries.
-const READ_RATE_LIMIT_PER_SECOND: u64 = 4;
+const READ_RATE_LIMIT_PER_MINUTE: u64 = 200;
 const READ_RATE_LIMIT_BURST: u32 = 200;
 
-/// Auth-specific rate limit: 10 requests per second per IP, burst 30.
+/// Auth-specific rate limit: 600 requests a minute per IP sustained, which is
+/// the documented 10 a second, with a 30-request burst.
 /// Applied as an extra layer when auth is enabled to mitigate brute-force attacks.
-const AUTH_RATE_LIMIT_PER_SECOND: u64 = 10;
+const AUTH_RATE_LIMIT_PER_MINUTE: u64 = 600;
 const AUTH_RATE_LIMIT_BURST: u32 = 30;
+
+/// Scrape-DoS guard on `/metrics`: 30 requests a minute per IP sustained, with
+/// a 10-request burst. A scraper on any ordinary interval sits far below this;
+/// a loop does not.
+const METRICS_RATE_LIMIT_PER_MINUTE: u64 = 30;
+const METRICS_RATE_LIMIT_BURST: u32 = 10;
 
 use super::agent_handler::{agent_identity, agent_status};
 use super::alert_handler::{list_alerts, mark_false_positive, stream_alerts};
@@ -101,6 +130,31 @@ use super::zone_handler::{
 /// bucket per client IP.
 type WriteRateLimiter = RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>;
 
+/// The interval after which `tower_governor` replenishes one cell, for a
+/// sustained rate stated in requests a minute. This is the one place a rate
+/// becomes a period.
+const fn replenish_period_ms(per_minute: u64) -> u64 {
+    60_000 / per_minute
+}
+
+/// Build a per-IP `tower_governor` configuration from a sustained rate in
+/// requests a minute and a burst size. Once the burst is spent the limiter
+/// admits `per_minute` requests a minute, refilling continuously rather than
+/// resetting on a window boundary.
+fn build_governor(
+    per_minute: u64,
+    burst: u32,
+) -> tower_governor::governor::GovernorConfig<
+    tower_governor::key_extractor::PeerIpKeyExtractor,
+    governor::middleware::NoOpMiddleware<governor::clock::QuantaInstant>,
+> {
+    GovernorConfigBuilder::default()
+        .per_millisecond(replenish_period_ms(per_minute))
+        .burst_size(burst)
+        .finish()
+        .expect("governor config built from non-zero period and burst")
+}
+
 /// Build the write-API rate limiter from config. `write_per_second` and
 /// `write_burst` are validated `>= 1` at config load; clamp defensively so a
 /// direct/in-test construction can never panic on `NonZeroU32`.
@@ -150,9 +204,9 @@ async fn write_rate_limit(
 /// Build the main Axum router with all REST API routes.
 ///
 /// Routes are split into three groups:
-/// 1. **Public** (no auth): `/healthz`, `/readyz` — K8s probes
-/// 2. **Metrics** (conditional auth): `/metrics` — auth only when configured
-/// 3. **API** (protected): `/api/v1/*` — auth when provider is present
+/// 1. **Public** (no auth): `/healthz`, `/readyz` - K8s probes
+/// 2. **Metrics** (conditional auth): `/metrics` - auth only when configured
+/// 3. **API** (protected): `/api/v1/*` - auth when provider is present
 #[allow(clippy::too_many_lines)]
 pub fn build_router(
     state: Arc<AppState>,
@@ -160,7 +214,7 @@ pub fn build_router(
     tls_enabled: bool,
     rate_limit: ApiRateLimitConfig,
 ) -> Router {
-    // Group 1: Public routes — never require auth (K8s probes)
+    // Group 1: Public routes - never require auth (K8s probes)
     let public_routes = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz));
@@ -170,7 +224,7 @@ pub fn build_router(
     // reach metrics even when the control-API port is firewalled off.
     let metrics_routes = metrics_routes_fragment(&state);
 
-    // Group 3: Protected API routes — split into read and write
+    // Group 3: Protected API routes - split into read and write
     //
     // Write routes: configurable per-IP GCRA token bucket (default 60 burst,
     // refill 1/s = 60 req/min), with optional loopback exemption so same-host
@@ -179,13 +233,10 @@ pub fn build_router(
     // enumeration and brute-force on auth-protected endpoints.
     let write_limiter = Arc::new(build_write_rate_limiter(rate_limit));
     let exempt_loopback = rate_limit.exempt_loopback;
-    let read_governor = Arc::new(
-        GovernorConfigBuilder::default()
-            .per_second(READ_RATE_LIMIT_PER_SECOND)
-            .burst_size(READ_RATE_LIMIT_BURST)
-            .finish()
-            .expect("read governor config should build"),
-    );
+    let read_governor = Arc::new(build_governor(
+        READ_RATE_LIMIT_PER_MINUTE,
+        READ_RATE_LIMIT_BURST,
+    ));
 
     let api_routes = {
         // Read-only routes: every route mounted here is a `GET`, throttled by
@@ -330,13 +381,10 @@ pub fn build_router(
 
         if state.auth_provider.is_some() {
             // Stricter per-IP rate limit when auth is enabled to mitigate brute-force.
-            let auth_governor = Arc::new(
-                GovernorConfigBuilder::default()
-                    .per_second(AUTH_RATE_LIMIT_PER_SECOND)
-                    .burst_size(AUTH_RATE_LIMIT_BURST)
-                    .finish()
-                    .expect("auth governor config should build"),
-            );
+            let auth_governor = Arc::new(build_governor(
+                AUTH_RATE_LIMIT_PER_MINUTE,
+                AUTH_RATE_LIMIT_BURST,
+            ));
             r.layer(middleware::from_fn_with_state(
                 Arc::clone(&state),
                 jwt_auth_middleware,
@@ -388,7 +436,7 @@ pub fn build_router(
 
     let router = router.layer(cors);
 
-    // Security response headers — applied to every response.
+    // Security response headers - applied to every response.
     let router = if tls_enabled {
         router.layer(middleware::map_response(security_headers_with_hsts))
     } else {
@@ -402,13 +450,10 @@ pub fn build_router(
 /// even without auth) and conditionally auth-protected. Shared by the main API
 /// router and the dedicated metrics listener so both enforce the same policy.
 fn metrics_routes_fragment(state: &Arc<AppState>) -> Router<Arc<AppState>> {
-    let metrics_governor = Arc::new(
-        GovernorConfigBuilder::default()
-            .per_second(2)
-            .burst_size(10)
-            .finish()
-            .expect("metrics governor config should build"),
-    );
+    let metrics_governor = Arc::new(build_governor(
+        METRICS_RATE_LIMIT_PER_MINUTE,
+        METRICS_RATE_LIMIT_BURST,
+    ));
     let r = Router::new()
         .route("/metrics", get(metrics))
         .layer(GovernorLayer::new(metrics_governor));
@@ -445,7 +490,7 @@ pub fn build_metrics_router(state: Arc<AppState>, tls_enabled: bool) -> Router {
 /// `127.0.0.1`, `localhost`, or `[::1]`. Rejects subdomains like
 /// `localhost.attacker.com` by requiring the host to end at `:` or EOL.
 fn is_localhost_origin(origin: &str) -> bool {
-    // Allowed hosts — after stripping the scheme, the remainder must be
+    // Allowed hosts - after stripping the scheme, the remainder must be
     // exactly one of these OR one of these followed by `:<port>`.
     const ALLOWED_HOSTS: &[&str] = &["127.0.0.1", "localhost", "[::1]"];
 
@@ -487,7 +532,7 @@ async fn security_headers(mut response: Response) -> Response {
     response
 }
 
-/// Security headers with HSTS — only when TLS is enabled.
+/// Security headers with HSTS - only when TLS is enabled.
 async fn security_headers_with_hsts(mut response: Response) -> Response {
     let headers = response.headers_mut();
     headers.insert(
@@ -611,7 +656,7 @@ mod tests {
     }
 
     // POST to a write route from `peer`, returning the HTTP status. The body is
-    // deliberately empty — the rate limiter runs before the handler, so any
+    // deliberately empty - the rate limiter runs before the handler, so any
     // non-429 status means the request passed the limiter.
     async fn write_post_status(router: &Router, peer: SocketAddr) -> StatusCode {
         use tower::ServiceExt;
@@ -686,6 +731,125 @@ mod tests {
         assert!(
             throttled > 0,
             "loopback should be throttled when exemption is off"
+        );
+    }
+
+    // The read, auth and metrics limiters are `tower_governor`, whose builder
+    // takes a replenish period where `governor` takes a rate. The tests below
+    // pin the meaning of that period, so a crate upgrade that swaps it back
+    // fails here rather than in production seven minutes into a poll loop.
+
+    fn governor_router(per_minute: u64, burst: u32) -> Router {
+        Router::new()
+            .route("/", get(|| async { StatusCode::OK }))
+            .layer(GovernorLayer::new(Arc::new(build_governor(
+                per_minute, burst,
+            ))))
+    }
+
+    async fn governor_get_status(router: &Router, peer: SocketAddr) -> StatusCode {
+        use tower::ServiceExt;
+        let req = Request::builder()
+            .uri("/")
+            .extension(ConnectInfo(peer))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        router.clone().oneshot(req).await.unwrap().status()
+    }
+
+    // Spend `burst` cells, assert the next request is refused, then assert one
+    // cell comes back after the replenish period the rate implies.
+    async fn assert_burst_then_replenish(per_minute: u64, burst: u32, peer: &str) {
+        let router = governor_router(per_minute, burst);
+        let peer: SocketAddr = peer.parse().unwrap();
+        let period_ms = replenish_period_ms(per_minute);
+
+        for i in 0..burst {
+            assert_eq!(
+                governor_get_status(&router, peer).await,
+                StatusCode::OK,
+                "request {i} of the {burst}-request burst must be admitted"
+            );
+        }
+        assert_eq!(
+            governor_get_status(&router, peer).await,
+            StatusCode::TOO_MANY_REQUESTS,
+            "the request past the burst must be refused"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(period_ms + 100)).await;
+        assert_eq!(
+            governor_get_status(&router, peer).await,
+            StatusCode::OK,
+            "one cell must replenish after {period_ms} ms; a period read as a rate would not"
+        );
+    }
+
+    #[tokio::test]
+    async fn governor_period_is_a_replenish_interval_not_a_rate() {
+        // Three cells, 200 a minute, so one back every 300 ms. Were the
+        // builder's argument a rate, the fourth request would be admitted and
+        // this would fail.
+        assert_burst_then_replenish(200, 3, "203.0.113.10:40000").await;
+    }
+
+    #[tokio::test]
+    async fn read_limit_admits_its_documented_burst_and_rate() {
+        assert_burst_then_replenish(
+            READ_RATE_LIMIT_PER_MINUTE,
+            READ_RATE_LIMIT_BURST,
+            "203.0.113.11:40000",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn auth_limit_admits_its_documented_burst_and_rate() {
+        assert_burst_then_replenish(
+            AUTH_RATE_LIMIT_PER_MINUTE,
+            AUTH_RATE_LIMIT_BURST,
+            "203.0.113.12:40000",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn metrics_limit_admits_its_documented_burst() {
+        // The replenish half is covered by the three tests above, which share
+        // `build_governor`; two seconds of sleep buys nothing here.
+        let router = governor_router(METRICS_RATE_LIMIT_PER_MINUTE, METRICS_RATE_LIMIT_BURST);
+        let peer: SocketAddr = "203.0.113.13:40000".parse().unwrap();
+
+        for i in 0..METRICS_RATE_LIMIT_BURST {
+            assert_eq!(
+                governor_get_status(&router, peer).await,
+                StatusCode::OK,
+                "scrape {i} of the burst must be admitted"
+            );
+        }
+        assert_eq!(
+            governor_get_status(&router, peer).await,
+            StatusCode::TOO_MANY_REQUESTS,
+            "a scrape loop past the burst must be refused"
+        );
+    }
+
+    #[test]
+    fn documented_rates_convert_to_the_periods_the_crate_wants() {
+        assert_eq!(
+            replenish_period_ms(READ_RATE_LIMIT_PER_MINUTE),
+            300,
+            "200 read requests a minute is one cell every 300 ms"
+        );
+        assert_eq!(
+            replenish_period_ms(AUTH_RATE_LIMIT_PER_MINUTE),
+            100,
+            "the documented 10 auth requests a second is one cell every 100 ms"
+        );
+        assert_eq!(
+            replenish_period_ms(METRICS_RATE_LIMIT_PER_MINUTE),
+            2_000,
+            "30 scrapes a minute is one cell every 2 s"
         );
     }
 
