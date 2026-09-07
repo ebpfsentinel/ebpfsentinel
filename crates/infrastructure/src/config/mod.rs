@@ -9,6 +9,7 @@ mod alerting;
 mod alias;
 mod audit;
 mod auth;
+mod capture;
 mod common;
 mod conntrack;
 mod container;
@@ -25,6 +26,7 @@ mod management;
 mod nat;
 mod qos;
 mod ratelimit;
+mod response;
 mod routing;
 mod telemetry;
 mod threatintel;
@@ -41,6 +43,9 @@ pub use alerting::{
 pub use alias::AliasConfig;
 pub use audit::AuditConfig;
 pub use auth::{ApiKeyConfig, AuthConfig, JwtAlgorithm, JwtConfig, JwtKeySource, OidcConfig};
+pub use capture::{
+    CaptureConfig, DEFAULT_MAX_CAPTURE_DURATION_SECS, MAX_CAPTURE_DURATION_CEILING_SECS,
+};
 pub use common::{ConfigError, parse_cidr, parse_domain_mode};
 pub use conntrack::ConnTrackSectionConfig;
 pub use container::{ContainerConfig, ResolverConfig as ContainerResolverConfig};
@@ -67,6 +72,7 @@ pub use management::ManagementConfig;
 pub use nat::{HairpinNatConfig, NatConfig, NatRuleConfig, NptV6RuleConfig};
 pub use qos::{QosClassifierConfig, QosPipeConfig, QosQueueConfig, QosSectionConfig};
 pub use ratelimit::{RateLimitRuleConfig, RateLimitSectionConfig};
+pub use response::{DEFAULT_MAX_RESPONSE_TTL_SECS, MAX_RESPONSE_TTL_CEILING_SECS, ResponseConfig};
 pub use routing::{GatewayConfig, HealthCheckConfig, RoutingConfig};
 pub use telemetry::{DISABLE_ENV as TELEMETRY_DISABLE_ENV, TelemetryConfig};
 pub use threatintel::{ThreatIntelConfig, ThreatIntelFeedConfig};
@@ -191,6 +197,18 @@ pub struct AgentConfig {
     /// flow timeline, and forensics API.
     #[serde(default)]
     pub auto_capture: AutoCaptureConfig,
+
+    /// Manual packet capture: the ceiling `POST /api/v1/capture` is held to.
+    /// Separate from `auto_capture`, which decides whether a capture starts
+    /// on its own.
+    #[serde(default)]
+    pub capture: CaptureConfig,
+
+    /// Manual response actions: the TTL ceiling `POST /api/v1/response` is
+    /// held to. Separate from `auto_response`, which decides whether an
+    /// action fires on its own.
+    #[serde(default)]
+    pub response: ResponseConfig,
 
     /// Management metadata exposed via `GET /api/v1/agent/identity`. Used
     /// by the dashboard to lock the config-edit UI on operator-managed
@@ -377,6 +395,10 @@ impl AgentConfig {
 
         // Validate control-plane write-API rate limit
         self.agent.api_rate_limit.validate()?;
+
+        // Validate the manual capture and response ceilings
+        self.capture.validate()?;
+        self.response.validate()?;
 
         // Validate management metadata block
         self.management.validate()?;

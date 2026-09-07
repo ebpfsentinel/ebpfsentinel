@@ -850,10 +850,11 @@ pub async fn run(
         );
     }
 
-    // Wire capture engine for manual packet capture
-    let capture_engine = Arc::new(RwLock::new(
-        domain::capture::engine::CaptureEngine::new(300), // max duration: 5 min
-    ));
+    // Wire capture engine for manual packet capture. The ceiling is the
+    // `capture.max_duration_secs` key, validated at load.
+    let capture_engine = Arc::new(RwLock::new(domain::capture::engine::CaptureEngine::new(
+        config.capture.max_duration_secs,
+    )));
     app_state = app_state.with_capture_engine(Arc::clone(&capture_engine));
 
     // Adopt the AF_PACKET sockets the privileged launcher pre-opened for
@@ -867,10 +868,11 @@ pub async fn run(
         app_state = app_state.with_pcap_pool(Arc::clone(pool));
     }
 
-    // Wire response engine for manual TTL actions
-    let response_engine = Arc::new(RwLock::new(
-        domain::response::engine::ResponseEngine::new(86400), // max TTL: 24h
-    ));
+    // Wire response engine for manual TTL actions. The ceiling is the
+    // `response.max_ttl_secs` key, validated at load.
+    let response_engine = Arc::new(RwLock::new(domain::response::engine::ResponseEngine::new(
+        config.response.max_ttl_secs,
+    )));
     app_state = app_state.with_response_engine(Arc::clone(&response_engine));
 
     // Background sweeper: lift response actions whose TTL has elapsed off the
