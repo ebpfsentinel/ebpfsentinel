@@ -42,7 +42,7 @@ pub struct GeoIpLookupQuery {
 
 // ── Handlers ──────────────────────────────────────────────────────
 
-/// `GET /api/v1/geoip/status` — `GeoIP` enrichment status.
+/// `GET /api/v1/geoip/status` - `GeoIP` enrichment status.
 #[utoipa::path(
     get, path = "/api/v1/geoip/status",
     tag = "GeoIP",
@@ -67,7 +67,7 @@ pub async fn geoip_status(State(state): State<Arc<AppState>>) -> Json<GeoIpStatu
     Json(GeoIpStatusResponse { enabled, ready })
 }
 
-/// `GET /api/v1/geoip/lookup?ip=<addr>` — resolve an IP to `GeoIP` info.
+/// `GET /api/v1/geoip/lookup?ip=<addr>` - resolve an IP to `GeoIP` info.
 #[utoipa::path(
     get, path = "/api/v1/geoip/lookup",
     tag = "GeoIP",

@@ -24,17 +24,17 @@ pub struct KernelFeatures {
     pub major: u32,
     pub minor: u32,
     pub btf_available: bool,
-    /// `BPF_TOKEN_CREATE` + `BPF_F_TOKEN_FD` — kernel 6.9.
+    /// `BPF_TOKEN_CREATE` + `BPF_F_TOKEN_FD` - kernel 6.9.
     pub bpf_token: bool,
-    /// `BPF_MAP_TYPE_ARENA` — kernel 6.9.
+    /// `BPF_MAP_TYPE_ARENA` - kernel 6.9.
     pub arena_map: bool,
-    /// `bpf_task_get_cgroup1` kfunc — kernel 6.8.
+    /// `bpf_task_get_cgroup1` kfunc - kernel 6.8.
     pub cgroup1_kfunc: bool,
-    /// `bpf_xdp_metadata_rx_vlan_tag` kfunc — kernel 6.8.
+    /// `bpf_xdp_metadata_rx_vlan_tag` kfunc - kernel 6.8.
     pub xdp_vlan_metadata: bool,
-    /// `bpf_xdp_get_xfrm_state` kfunc — kernel 6.8.
+    /// `bpf_xdp_get_xfrm_state` kfunc - kernel 6.8.
     pub xdp_xfrm_state: bool,
-    /// `bpf_iter_css_task` kfunc — kernel 6.7.
+    /// `bpf_iter_css_task` kfunc - kernel 6.7.
     pub css_task_iter: bool,
 }
 

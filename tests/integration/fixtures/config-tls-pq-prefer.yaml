@@ -1,4 +1,4 @@
-# config-tls-pq-prefer.yaml — TLS with PQ hybrid key exchange in "prefer" mode.
+# config-tls-pq-prefer.yaml - TLS with PQ hybrid key exchange in "prefer" mode.
 #
 # The agent offers X25519MLKEM768 first and falls back to classical
 # groups (X25519, secp256r1) for clients that lack PQ support. This is

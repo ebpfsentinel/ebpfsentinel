@@ -1,4 +1,4 @@
-# eBPFsentinel — DNS Intelligence Configuration Example
+# eBPFsentinel - DNS Intelligence Configuration Example
 # =====================================================
 #
 # Passive DNS capture via TC eBPF classifier. Builds a domain-to-IP resolution
@@ -20,7 +20,7 @@ dns:
   # Stores resolved domain-to-IP mappings from observed DNS traffic.
   # Used by domain-aware IDS rules and reputation scoring.
   cache:
-    # Maximum cache entries. Range: 1,000 – 1,000,000.
+    # Maximum cache entries. Range: 1,000 - 1,000,000.
     # Size based on expected unique domains in your environment.
     max_entries: 100000
 
@@ -35,7 +35,7 @@ dns:
   # When a DNS response resolves to a blocked domain, the resolved IPs
   # are injected into an eBPF map for wire-speed enforcement.
   blocklist:
-    # Inline blocked domains — exact or wildcard patterns.
+    # Inline blocked domains - exact or wildcard patterns.
     # Wildcard patterns match any subdomain: "*.evil.com" blocks
     # "a.evil.com", "b.c.evil.com", etc. Maximum depth: 5 label levels.
     domains:
@@ -46,15 +46,15 @@ dns:
       - "*.tracking-adware.com"
 
     # Action when a blocked domain resolves:
-    #   "block" — inject resolved IPs into the enforcement map
-    #   "alert" — log the resolution but don't block
-    #   "log"   — same as alert (lightweight logging)
+    #   "block" - inject resolved IPs into the enforcement map
+    #   "alert" - log the resolution but don't block
+    #   "log"   - same as alert (lightweight logging)
     action: block
 
     # eBPF map to inject blocked IPs into:
-    #   "threatintel" — adds to the threat intel IOC map (default)
-    #   "firewall"    — adds as firewall deny rules
-    #   "ips"         — adds to the IPS blacklist
+    #   "threatintel" - adds to the threat intel IOC map (default)
+    #   "firewall"    - adds as firewall deny rules
+    #   "ips"         - adds to the IPS blacklist
     inject_target: threatintel
 
     # Grace period (seconds) before removing injected IPs after a domain
@@ -65,11 +65,11 @@ dns:
     # Periodically fetched domain blocklists. Maximum 10 feeds.
     #
     # Fields:
-    #   name                  — Human-readable feed name (required)
-    #   url                   — Feed URL (required, http:// or https://)
-    #   format                — "plaintext" (one domain per line) or
+    #   name                  - Human-readable feed name (required)
+    #   url                   - Feed URL (required, http:// or https://)
+    #   format                - "plaintext" (one domain per line) or
     #                           "hosts" (/etc/hosts format: "0.0.0.0 domain")
-    #   refresh_interval_secs — Refresh interval (minimum 60 seconds)
+    #   refresh_interval_secs - Refresh interval (minimum 60 seconds)
     feeds:
       # Steven Black's unified hosts file (ad + malware domains)
       - name: steven-black-hosts
@@ -96,10 +96,10 @@ dns:
     # Enable reputation tracking (requires DNS cache to be active).
     enabled: true
 
-    # Maximum domains to track simultaneously. Range: 1,000 – 100,000.
+    # Maximum domains to track simultaneously. Range: 1,000 - 100,000.
     max_tracked_domains: 50000
 
-    # Score threshold (0.0 – 1.0) above which a domain is considered malicious.
+    # Score threshold (0.0 - 1.0) above which a domain is considered malicious.
     # 0.8 = 80% confidence that the domain is malicious.
     auto_block_threshold: 0.8
 

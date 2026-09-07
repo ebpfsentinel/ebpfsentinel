@@ -1,6 +1,6 @@
-# config-ebpf-l7-edge.yaml — L7 SMTP/FTP/SMB edge-case scenario fixture.
+# config-ebpf-l7-edge.yaml - L7 SMTP/FTP/SMB edge-case scenario fixture.
 #
-# Pre-loads three L7 rules — one per protocol — so the suite can assert
+# Pre-loads three L7 rules - one per protocol - so the suite can assert
 # they round-trip through the REST surface as the agent boots, and so
 # the L7 parser is wired into the dataplane when the suite later drives
 # malformed/edge traffic.

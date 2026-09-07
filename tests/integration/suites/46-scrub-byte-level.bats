@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 46-scrub-byte-level.bats — tc-scrub byte-level normalization, 3-VM.
+# 46-scrub-byte-level.bats - tc-scrub byte-level normalization, 3-VM.
 #
 # Crafted IPv4 + TCP SYNs are emitted by scapy on the attacker VM
 # toward the backend through the agent's transit datapath. tc-scrub
@@ -7,13 +7,13 @@
 # post-scrub bytes off its NIC and tcpdump verifies field-level changes.
 #
 # Asserted rewrites (config-ebpf-scrub-byte.yaml):
-#   * IPv4 TTL floor   — min_ttl: 64       → send ttl=10, expect ttl >= 64
-#   * IPv4 DF flag     — clear_df: true    → send DF=1,  expect DF cleared
-#   * IPv4 IP-ID rand  — random_ip_id: true→ send id=12345, expect id != 12345
-#   * TCP MSS option   — max_mss: 1400     → send MSS=65535, expect MSS <= 1400
+#   * IPv4 TTL floor   - min_ttl: 64       → send ttl=10, expect ttl >= 64
+#   * IPv4 DF flag     - clear_df: true    → send DF=1,  expect DF cleared
+#   * IPv4 IP-ID rand  - random_ip_id: true→ send id=12345, expect id != 12345
+#   * TCP MSS option   - max_mss: 1400     → send MSS=65535, expect MSS <= 1400
 #
 # Fragment policy AC: the current ScrubConfig (firewall.rs) has no
-# fragment_policy / drop_fragments / reassemble field — the kernel
+# fragment_policy / drop_fragments / reassemble field - the kernel
 # program only normalizes headers on first-fragment / unfragmented
 # packets. The fragment-policy AC is deferred to a follow-up Rust
 # feature story and explicitly skipped here so the suite remains
@@ -56,7 +56,7 @@ teardown_file() {
     rm -f "${PREPARED_CONFIG:-}"
 }
 
-# Common capture filter — TCP SYNs from attacker toward backend:80.
+# Common capture filter - TCP SYNs from attacker toward backend:80.
 _scrub_bpf() {
     echo "tcp and src host ${ATTACKER_VM_IP} and dst port 80"
 }
@@ -184,14 +184,14 @@ _scrub_bpf() {
 
     local local_pcap
     local_pcap="$(stop_capture backend "$pcap")"
-    [ -s "$local_pcap" ] || soft_skip "pcap empty — transit path did not deliver the control packet"
+    [ -s "$local_pcap" ] || soft_skip "pcap empty - transit path did not deliver the control packet"
 
     # The control SYN (unfragmented, dst port 80) must reach the backend.
     local control
     control="$(tshark -r "$local_pcap" \
         -Y 'tcp.dstport == 80 and ip.flags.mf == 0 and ip.frag_offset == 0' \
         2>/dev/null | wc -l)"
-    [ "${control:-0}" -ge 1 ] || soft_skip "control SYN never reached backend — transit inconclusive"
+    [ "${control:-0}" -ge 1 ] || soft_skip "control SYN never reached backend - transit inconclusive"
 
     # No fragment (MF set or non-zero offset) may reach the backend.
     local frags

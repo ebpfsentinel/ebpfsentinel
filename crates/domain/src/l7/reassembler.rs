@@ -60,7 +60,7 @@ impl FlowId {
 }
 
 /// Tunables for the reassembler. All fields are capped at config load
-/// time — zero/negative values are rejected.
+/// time - zero/negative values are rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReassemblerConfig {
     /// Maximum number of tracked flows. Oldest flow is evicted on overflow.
@@ -92,7 +92,7 @@ struct FlowBuffer {
 ///
 /// `Complete` means the reassembler recognised a protocol boundary and
 /// the caller should parse the returned bytes now. `Pending` means the
-/// bytes were buffered and no boundary was detected — the next call or
+/// bytes were buffered and no boundary was detected - the next call or
 /// an `flush_expired` sweep may emit them later.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ingest {
@@ -127,7 +127,7 @@ impl StreamReassembler {
     /// when a protocol boundary is recognised (currently: HTTP/1.x
     /// `Content-Length` request/response), otherwise [`Ingest::Pending`].
     ///
-    /// `now_ns` is the caller's notion of "now" in nanoseconds —
+    /// `now_ns` is the caller's notion of "now" in nanoseconds -
     /// `PacketEvent::timestamp_ns` or `CLOCK_MONOTONIC` are both fine.
     pub fn ingest(&self, flow: FlowId, payload: &[u8], now_ns: u64) -> Ingest {
         if payload.is_empty() {
@@ -174,7 +174,7 @@ impl StreamReassembler {
     ///
     /// The returned buffers may be partial (truncated at
     /// `max_buffer_per_flow`). Callers that still want to parse them can
-    /// feed them to [`parse_payload`] — the protocol parser tolerates
+    /// feed them to [`parse_payload`] - the protocol parser tolerates
     /// truncated data.
     ///
     /// [`parse_payload`]: crate::l7::parser::parse_payload
@@ -241,7 +241,7 @@ fn find_double_crlf(buf: &[u8]) -> Option<usize> {
 /// `length` bytes of fragment. A `ClientHello` is a self-contained handshake
 /// record (content type `0x16`), so recognising the record boundary lets the
 /// reassembler emit it immediately instead of buffering it until the idle
-/// flush — which is what JA4 fingerprinting needs to run in real time.
+/// flush - which is what JA4 fingerprinting needs to run in real time.
 fn tls_record_is_complete(buf: &[u8]) -> bool {
     if buf.len() < 5 {
         return false;
@@ -261,7 +261,7 @@ fn extract_content_length(headers: &[u8]) -> Option<usize> {
     let text = std::str::from_utf8(headers).ok()?;
     for line in text.split("\r\n") {
         let Some((name, value)) = line.split_once(':') else {
-            // Request/status line has no colon — skip instead of aborting.
+            // Request/status line has no colon - skip instead of aborting.
             continue;
         };
         if name.eq_ignore_ascii_case("Content-Length") {
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn default_config_has_bounded_memory_budget() {
         let cfg = ReassemblerConfig::default();
-        // 1 000 × 16 KiB = 16 MiB — matches the story budget.
+        // 1 000 × 16 KiB = 16 MiB - matches the story budget.
         assert_eq!(cfg.max_flows * cfg.max_buffer_per_flow, 16 * 1024 * 1000);
         assert_eq!(cfg.idle_timeout_ns, 5_000_000_000);
     }

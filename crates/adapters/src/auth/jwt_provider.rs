@@ -11,8 +11,8 @@ use ports::secondary::auth_provider::AuthProvider;
 ///
 /// Two algorithms are supported:
 ///
-/// - `RS256` — RSA-2048+ (legacy default).
-/// - ``EdDSA`` — Ed25519 (used by the dashboard's short-lived per-tenant
+/// - `RS256` - RSA-2048+ (legacy default).
+/// - ``EdDSA`` - Ed25519 (used by the dashboard's short-lived per-tenant
 ///   tokens; rotation is handled by the JWKS-based provider, not this one).
 ///
 /// The decoding key is held behind a `std::sync::RwLock` for concurrent
@@ -201,7 +201,7 @@ impl JwtAuthProvider {
         Ok(())
     }
 
-    /// Algorithm advertised by this provider — exposed for diagnostics.
+    /// Algorithm advertised by this provider - exposed for diagnostics.
     #[must_use]
     pub fn algorithm(&self) -> Algorithm {
         self.algorithm
@@ -270,7 +270,7 @@ mod tests {
         aud: Option<String>,
     }
 
-    // Test RSA keypair (2048-bit, generated for tests only — NOT a real secret)
+    // Test RSA keypair (2048-bit, generated for tests only - NOT a real secret)
     const TEST_RSA_PRIVATE_KEY: &[u8] = include_bytes!("../../tests/fixtures/jwt_test_key.pem");
     const TEST_RSA_PUBLIC_KEY: &[u8] = include_bytes!("../../tests/fixtures/jwt_test_key.pub.pem");
 
@@ -329,7 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_key_rejected() {
-        // Use the private key as "public key" — will fail to parse or validate
+        // Use the private key as "public key" - will fail to parse or validate
         let provider = JwtAuthProvider::new(TEST_RSA_PUBLIC_KEY, None, None).unwrap();
         // Sign with a different key pair (we just use a tampered token)
         let token = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjo5OTk5OTk5OTk5fQ.invalid-signature";

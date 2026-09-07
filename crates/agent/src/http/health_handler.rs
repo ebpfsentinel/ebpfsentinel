@@ -54,7 +54,7 @@ fn missing_kernel_helpers() -> Vec<String> {
     })
 }
 
-/// Liveness probe — always returns 200 if the process is running.
+/// Liveness probe - always returns 200 if the process is running.
 #[utoipa::path(
     get, path = "/healthz",
     tag = "Health",
@@ -66,7 +66,7 @@ pub async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
-/// Readiness probe — returns 200 when eBPF programs are loaded, 503 otherwise.
+/// Readiness probe - returns 200 when eBPF programs are loaded, 503 otherwise.
 #[utoipa::path(
     get, path = "/readyz",
     tag = "Health",

@@ -25,7 +25,7 @@ pub trait RateLimitMapPort: Send + Sync {
     /// to that tenant, while `tenant_id == 0` is the global/floating entry. The
     /// kernel resolves the packet's tenant and falls back to the global entry
     /// when no tenant-specific one exists. Unlike [`load_policies`], this is an
-    /// incremental upsert that does not clear the map — it is the write path the
+    /// incremental upsert that does not clear the map - it is the write path the
     /// enterprise control plane uses to push per-tenant rules without disturbing
     /// the global (tenant-0) configuration.
     ///

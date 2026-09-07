@@ -1,4 +1,4 @@
-# eBPFsentinel — Alert Pipeline Configuration Example
+# eBPFsentinel - Alert Pipeline Configuration Example
 # ===================================================
 #
 # Routes security alerts to multiple destinations (log, email, webhook, otlp)
@@ -31,12 +31,12 @@ alerting:
   # Required when any route uses destination: "email".
   #
   # Fields:
-  #   host         — SMTP server hostname (required)
-  #   port         — SMTP port (default: 587 for STARTTLS)
-  #   username     — SMTP auth username (optional)
-  #   password     — SMTP auth password (optional; masked in sanitized config)
-  #   from_address — Sender email address (required)
-  #   tls          — Enable STARTTLS (default: true)
+  #   host         - SMTP server hostname (required)
+  #   port         - SMTP port (default: 587 for STARTTLS)
+  #   username     - SMTP auth username (optional)
+  #   password     - SMTP auth password (optional; masked in sanitized config)
+  #   from_address - Sender email address (required)
+  #   tls          - Enable STARTTLS (default: true)
   smtp:
     host: smtp.example.com
     port: 587
@@ -48,26 +48,26 @@ alerting:
   # ── Alert routes ───────────────────────────────────────────────────
   #
   # Fields:
-  #   name            — Unique route name (required, non-empty)
-  #   destination     — "log", "email", "webhook", or "otlp"
-  #   min_severity    — Minimum severity to route: "low", "medium", "high", "critical"
-  #   event_types     — Optional filter by source domain (e.g., ["ids", "ips", "dlp"])
-  #   webhook_url     — Webhook endpoint URL (required for destination: "webhook")
-  #   email_to        — Recipient address (required for destination: "email")
-  #   webhook_headers — Optional custom HTTP headers for webhook requests
+  #   name            - Unique route name (required, non-empty)
+  #   destination     - "log", "email", "webhook", or "otlp"
+  #   min_severity    - Minimum severity to route: "low", "medium", "high", "critical"
+  #   event_types     - Optional filter by source domain (e.g., ["ids", "ips", "dlp"])
+  #   webhook_url     - Webhook endpoint URL (required for destination: "webhook")
+  #   email_to        - Recipient address (required for destination: "email")
+  #   webhook_headers - Optional custom HTTP headers for webhook requests
 
   # ── OTLP export ───────────────────────────────────────────────────
   # Export alerts as OpenTelemetry Logs to any OTLP-compatible backend.
   # Required when any route uses destination: "otlp".
   #
   # Fields:
-  #   endpoint   — OTLP collector URL (required, e.g. "http://otel-collector:4317")
-  #   protocol   — Transport: "grpc" (default) or "http"
-  #   timeout_ms — Export timeout in milliseconds (default: 5000)
-  #   headers    — Sent with every export, which is how a hosted collector
+  #   endpoint   - OTLP collector URL (required, e.g. "http://otel-collector:4317")
+  #   protocol   - Transport: "grpc" (default) or "http"
+  #   timeout_ms - Export timeout in milliseconds (default: 5000)
+  #   headers    - Sent with every export, which is how a hosted collector
   #                authenticates the agent (default: none)
-  #   ca_cert    — PEM bundle trusted on top of the system roots (default: none)
-  #   verify_tls — Verify the collector certificate. Turning it off is only
+  #   ca_cert    - PEM bundle trusted on top of the system roots (default: none)
+  #   verify_tls - Verify the collector certificate. Turning it off is only
   #                accepted with protocol "http" (default: true)
   # otlp:
   #   endpoint: "https://otel-collector:4317"
@@ -120,7 +120,7 @@ alerting:
       event_types: [dlp]
       webhook_url: "https://security.example.com/api/dlp-alerts"
 
-    # OTLP export — all alerts to OpenTelemetry collector (requires otlp config above)
+    # OTLP export - all alerts to OpenTelemetry collector (requires otlp config above)
     # - name: otlp-all
     #   destination: otlp
     #   min_severity: low

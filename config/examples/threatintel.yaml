@@ -1,4 +1,4 @@
-# eBPFsentinel — Threat Intelligence Configuration Example
+# eBPFsentinel - Threat Intelligence Configuration Example
 # ========================================================
 #
 # Integrates external OSINT feeds (IP blocklists, IOC databases) for
@@ -8,7 +8,7 @@
 #   2. Full HashMap lookup only on Bloom filter hit
 #
 # Feeds are SOURCE-AGNOSTIC: any HTTP/HTTPS endpoint serving indicators
-# in plaintext, CSV, JSON, or STIX 2.1 works through field mappings —
+# in plaintext, CSV, JSON, or STIX 2.1 works through field mappings -
 # no provider-specific code. Just configure id, url, format, and field
 # mapping. STIX feeds automatically distribute indicators to the
 # appropriate engines (IPs → threat intel, domains → DNS blocklist,
@@ -33,15 +33,15 @@ threatintel:
   enabled: true
 
   # Mode controls kernel-side enforcement:
-  #   "alert" — TC_ACT_OK (pass packet) + emit event to userspace
-  #   "block" — TC_ACT_SHOT (drop packet) + emit event to userspace
+  #   "alert" - TC_ACT_OK (pass packet) + emit event to userspace
+  #   "block" - TC_ACT_SHOT (drop packet) + emit event to userspace
   # Per-feed "default_action" can override this for individual feeds.
   mode: alert
 
   # ── Country confidence boost ─────────────────────────────────────
   # Adjusts IOC confidence score based on the source IP's country.
   # Positive values increase confidence (more likely to trigger action),
-  # negative values decrease it. Values are clamped to 0–100.
+  # negative values decrease it. Values are clamped to 0-100.
   # Use this to prioritize IOCs from known high-risk regions.
   country_confidence_boost:
     RU: 10                # +10 confidence for IOCs from Russia
@@ -59,21 +59,21 @@ threatintel:
   #
   # Required fields: id, name, url
   # Optional fields (with defaults):
-  #   format                — "plaintext" (also: "csv", "json", "stix")
-  #   enabled               — true
-  #   refresh_interval_secs — 3600 (1 hour)
-  #   max_iocs              — 500000
-  #   default_action        — inherits global mode
-  #   min_confidence        — 0 (accept all)
-  #   auth_header           — none
+  #   format                - "plaintext" (also: "csv", "json", "stix")
+  #   enabled               - true
+  #   refresh_interval_secs - 3600 (1 hour)
+  #   max_iocs              - 500000
+  #   default_action        - inherits global mode
+  #   min_confidence        - 0 (accept all)
+  #   auth_header           - none
   #
   # Field mapping (CSV/JSON only):
-  #   ip_field              — column/field name for IP (default: "ip")
-  #   confidence_field      — column/field for confidence score
-  #   category_field        — column/field for threat category
-  #   separator             — CSV separator (default: ",")
-  #   comment_prefix        — lines starting with this are skipped
-  #   skip_header           — skip first line (CSV header)
+  #   ip_field              - column/field name for IP (default: "ip")
+  #   confidence_field      - column/field for confidence score
+  #   category_field        - column/field for threat category
+  #   separator             - CSV separator (default: ",")
+  #   comment_prefix        - lines starting with this are skipped
+  #   skip_header           - skip first line (CSV header)
 
   feeds:
     # ── Plaintext feeds ────────────────────────────────────────────
@@ -82,7 +82,7 @@ threatintel:
     # All IOCs receive confidence=100 (no confidence field).
     # CIDR entries (containing "/") are skipped.
 
-    # Spamhaus DROP — well-known IP blocklist
+    # Spamhaus DROP - well-known IP blocklist
     - id: spamhaus-drop
       name: Spamhaus DROP
       url: https://www.spamhaus.org/drop/drop.txt
@@ -90,7 +90,7 @@ threatintel:
       comment_prefix: ";"           # Spamhaus uses ; for comments
       refresh_interval_secs: 86400  # Daily
 
-    # Spamhaus EDROP — extended drop list
+    # Spamhaus EDROP - extended drop list
     - id: spamhaus-edrop
       name: Spamhaus EDROP
       url: https://www.spamhaus.org/drop/edrop.txt
@@ -161,7 +161,7 @@ threatintel:
     # ── STIX 2.1 feed ─────────────────────────────────────────────
     #
     # Format: STIX 2.1 bundle ({"type": "bundle", "objects": [...]}).
-    # Multi-type extraction — a single STIX feed populates multiple engines:
+    # Multi-type extraction - a single STIX feed populates multiple engines:
     #   - ipv4-addr / ipv6-addr indicators → threat intel eBPF maps
     #   - domain-name indicators → DNS blocklist + domain reputation
     #   - url indicators → L7 firewall rules (HTTP host+path blocking)

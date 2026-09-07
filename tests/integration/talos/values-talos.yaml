@@ -16,7 +16,7 @@ wardenImage:
 
 agent:
   # Attach to the Talos node's primary NIC (qemu virtio_net, alias net0). This is
-  # a throwaway qemu VM, NOT the operator's host — XDP_PASS-by-default keeps
+  # a throwaway qemu VM, NOT the operator's host - XDP_PASS-by-default keeps
   # node/CNI traffic flowing.
   interfaces:
     - enp0s2

@@ -71,7 +71,7 @@ impl IdsEngine {
     ///
     /// Lets the packet pipeline skip the reverse-DNS lookup (an `RwLock` read
     /// plus a `Vec<String>` allocation) on every IDS event when no rule needs
-    /// resolved domains — the common case.
+    /// resolved domains - the common case.
     #[must_use]
     pub fn has_domain_rules(&self) -> bool {
         self.compiled_domain_patterns.iter().any(Option::is_some)
@@ -280,7 +280,7 @@ impl IdsEngine {
             return Some((idx, rule, Some(domain.clone())));
         }
 
-        // No domain pattern — standard IP+port match
+        // No domain pattern - standard IP+port match
         Some((idx, rule, None))
     }
 
@@ -1380,7 +1380,7 @@ mod tests {
             .unwrap();
 
         let event = make_event(0);
-        // Multiple domains resolved for the same IP — one matches
+        // Multiple domains resolved for the same IP - one matches
         let domains = vec![
             "good.com".to_string(),
             "evil.com".to_string(),

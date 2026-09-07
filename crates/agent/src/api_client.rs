@@ -1004,7 +1004,7 @@ impl ApiClient {
         handle_response(resp).await
     }
 
-    /// `GET /api/v1/agent/identity` — operator-managed metadata.
+    /// `GET /api/v1/agent/identity` - operator-managed metadata.
     pub async fn get_identity(&self) -> anyhow::Result<AgentIdentityResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/agent/identity")
@@ -2402,7 +2402,7 @@ fn parse_frame(frame: &[u8]) -> Option<SseEvent> {
 
 fn connection_error(base_url: &str, err: &reqwest::Error) -> anyhow::Error {
     if err.is_connect() {
-        anyhow::anyhow!("cannot connect to agent at {base_url} — is the agent running?")
+        anyhow::anyhow!("cannot connect to agent at {base_url} - is the agent running?")
     } else if err.is_timeout() {
         anyhow::anyhow!("connection to agent at {base_url} timed out")
     } else {

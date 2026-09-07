@@ -1,4 +1,4 @@
-# eBPFsentinel — Multi-WAN Routing Configuration Example
+# eBPFsentinel - Multi-WAN Routing Configuration Example
 # =====================================================
 #
 # Policy-based routing with multiple WAN gateways, health-check probes,
@@ -10,21 +10,21 @@
 # probes before the gateway is marked healthy again.
 #
 # Fields (GatewayConfig):
-#   id                — Unique gateway ID (0-255)
-#   name              — Human-readable name
-#   interface         — Egress network interface (e.g. "eth1")
-#   gateway_ip        — Gateway IPv4 address
-#   priority          — Priority ranking (lower = preferred, default: 100)
-#   enabled           — Administrative enable flag (default: true)
-#   health_check      — Optional health-check probe configuration
+#   id                - Unique gateway ID (0-255)
+#   name              - Human-readable name
+#   interface         - Egress network interface (e.g. "eth1")
+#   gateway_ip        - Gateway IPv4 address
+#   priority          - Priority ranking (lower = preferred, default: 100)
+#   enabled           - Administrative enable flag (default: true)
+#   health_check      - Optional health-check probe configuration
 #
 # Fields (HealthCheckConfig):
-#   target             — Probe target address (e.g. "8.8.8.8")
-#   protocol           — "icmp" or "tcp:<port>" (default: "icmp")
-#   interval_secs      — Probe interval in seconds (default: 10)
-#   timeout_secs       — Probe timeout in seconds (default: 5)
-#   failure_threshold  — Failures before marking down (default: 3)
-#   recovery_threshold — Successes before marking healthy (default: 2)
+#   target             - Probe target address (e.g. "8.8.8.8")
+#   protocol           - "icmp" or "tcp:<port>" (default: "icmp")
+#   interval_secs      - Probe interval in seconds (default: 10)
+#   timeout_secs       - Probe timeout in seconds (default: 5)
+#   failure_threshold  - Failures before marking down (default: 3)
+#   recovery_threshold - Successes before marking healthy (default: 2)
 #
 # Usage:
 #   sudo ebpfsentinel-agent --config config/examples/routing.yaml
@@ -40,7 +40,7 @@ routing:
   enabled: true
 
   gateways:
-    # Primary WAN — fiber link (highest priority)
+    # Primary WAN - fiber link (highest priority)
     - id: 1
       name: wan-fiber
       interface: eth1
@@ -55,7 +55,7 @@ routing:
         failure_threshold: 3
         recovery_threshold: 2
 
-    # Secondary WAN — cable link (failover)
+    # Secondary WAN - cable link (failover)
     - id: 2
       name: wan-cable
       interface: eth2
@@ -70,7 +70,7 @@ routing:
         failure_threshold: 3
         recovery_threshold: 2
 
-    # Tertiary WAN — LTE backup (last resort)
+    # Tertiary WAN - LTE backup (last resort)
     - id: 3
       name: wan-lte
       interface: wwan0

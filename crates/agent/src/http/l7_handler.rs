@@ -260,7 +260,7 @@ impl From<&L7Rule> for L7RuleResponse {
 
 // ── Handlers ────────────────────────────────────────────────────────
 
-/// `GET /api/v1/firewall/l7-rules` — list all L7 rules.
+/// `GET /api/v1/firewall/l7-rules` - list all L7 rules.
 #[utoipa::path(
     get, path = "/api/v1/firewall/l7-rules",
     tag = "L7 Firewall",
@@ -279,7 +279,7 @@ pub async fn list_l7_rules(State(state): State<Arc<AppState>>) -> Json<Vec<L7Rul
     Json(rules)
 }
 
-/// `POST /api/v1/firewall/l7-rules` — create a new L7 rule.
+/// `POST /api/v1/firewall/l7-rules` - create a new L7 rule.
 #[utoipa::path(
     post, path = "/api/v1/firewall/l7-rules",
     tag = "L7 Firewall",
@@ -326,7 +326,7 @@ pub async fn create_l7_rule(
     Ok((StatusCode::CREATED, Json(response)))
 }
 
-/// `DELETE /api/v1/firewall/l7-rules/:id` — delete an L7 rule by ID.
+/// `DELETE /api/v1/firewall/l7-rules/:id` - delete an L7 rule by ID.
 #[utoipa::path(
     delete, path = "/api/v1/firewall/l7-rules/{id}",
     tag = "L7 Firewall",

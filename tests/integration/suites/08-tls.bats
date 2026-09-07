@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 08-tls.bats — TLS termination tests (HTTPS and gRPC over TLS)
+# 08-tls.bats - TLS termination tests (HTTPS and gRPC over TLS)
 
 load '../lib/helpers'
 

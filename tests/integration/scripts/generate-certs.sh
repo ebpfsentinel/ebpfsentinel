@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# generate-certs.sh — Generate self-signed CA + server certificate with SAN
+# generate-certs.sh - Generate self-signed CA + server certificate with SAN
 #
 # Usage: generate-certs.sh [--out-dir /tmp/ebpfsentinel-test-certs]
 #
 # Produces:
-#   ca.pem, ca-key.pem           — Self-signed CA
-#   server.pem, server-key.pem   — Server cert signed by CA (SAN: localhost, 127.0.0.1)
+#   ca.pem, ca-key.pem           - Self-signed CA
+#   server.pem, server-key.pem   - Server cert signed by CA (SAN: localhost, 127.0.0.1)
 set -euo pipefail
 
 OUT_DIR="${1:-/tmp/ebpfsentinel-test-certs}"

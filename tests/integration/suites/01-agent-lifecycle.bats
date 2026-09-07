@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 01-agent-lifecycle.bats — Agent startup, shutdown, and signal handling
+# 01-agent-lifecycle.bats - Agent startup, shutdown, and signal handling
 
 load '../lib/helpers'
 

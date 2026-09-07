@@ -122,7 +122,7 @@ fn default_enabled() -> bool {
 
 // ── Handlers ──────────────────────────────────────────────────────
 
-/// `GET /api/v1/lb/status` — load balancer status.
+/// `GET /api/v1/lb/status` - load balancer status.
 #[utoipa::path(
     get, path = "/api/v1/lb/status",
     tag = "Load Balancer",
@@ -152,7 +152,7 @@ pub async fn lb_status(
     }))
 }
 
-/// `GET /api/v1/lb/services` — list LB services.
+/// `GET /api/v1/lb/services` - list LB services.
 #[utoipa::path(
     get, path = "/api/v1/lb/services",
     tag = "Load Balancer",
@@ -184,7 +184,7 @@ pub async fn list_lb_services(
     Ok(Json(services))
 }
 
-/// `GET /api/v1/lb/services/{id}` — get LB service detail.
+/// `GET /api/v1/lb/services/{id}` - get LB service detail.
 #[utoipa::path(
     get, path = "/api/v1/lb/services/{id}",
     tag = "Load Balancer",
@@ -263,7 +263,7 @@ pub async fn get_lb_service(
     }))
 }
 
-/// `POST /api/v1/lb/services` — create an LB service.
+/// `POST /api/v1/lb/services` - create an LB service.
 #[utoipa::path(
     post, path = "/api/v1/lb/services",
     tag = "Load Balancer",
@@ -320,7 +320,7 @@ pub async fn create_lb_service(
     ))
 }
 
-/// `DELETE /api/v1/lb/services/{id}` — delete an LB service.
+/// `DELETE /api/v1/lb/services/{id}` - delete an LB service.
 #[utoipa::path(
     delete, path = "/api/v1/lb/services/{id}",
     tag = "Load Balancer",
@@ -433,7 +433,7 @@ fn default_vip_role() -> String {
 
 // ── VIP announcer handlers ────────────────────────────────────────
 
-/// `GET /api/v1/lb/vips` — VIP announcer status.
+/// `GET /api/v1/lb/vips` - VIP announcer status.
 #[utoipa::path(
     get, path = "/api/v1/lb/vips",
     tag = "Load Balancer",
@@ -462,7 +462,7 @@ pub async fn list_lb_vips(
     Ok(Json(snapshot_status(&svc)?))
 }
 
-/// `POST /api/v1/lb/vips` — apply a new VIP announce configuration.
+/// `POST /api/v1/lb/vips` - apply a new VIP announce configuration.
 #[utoipa::path(
     post, path = "/api/v1/lb/vips",
     tag = "Load Balancer",

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 04-rest-api-domains.bats — Domain-specific API endpoints (L7, IPS, Rate Limit, etc.)
+# 04-rest-api-domains.bats - Domain-specific API endpoints (L7, IPS, Rate Limit, etc.)
 
 load '../lib/helpers'
 

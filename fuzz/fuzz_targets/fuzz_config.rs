@@ -7,7 +7,7 @@ use infrastructure::config::AgentConfig;
 // Fuzz the configuration parser with arbitrary YAML input.
 //
 // Exercises serde_yaml_ng deserialization + AgentConfig::validate().
-// Must never panic — only return Ok or Err.
+// Must never panic - only return Ok or Err.
 fuzz_target!(|data: &[u8]| {
     // Only try UTF-8 valid strings (YAML requires valid text)
     if let Ok(yaml) = std::str::from_utf8(data) {

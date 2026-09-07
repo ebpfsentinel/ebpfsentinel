@@ -1,10 +1,10 @@
 #!/usr/bin/env bats
-# 40-scapy-amplification.bats — UDP reflection/amplification protection
+# 40-scapy-amplification.bats - UDP reflection/amplification protection
 # against an agent with scrub + amplification DDoS policy.
 #
 # Topology: 2vm. Profile: nightly. Requires:
-#   - Attacker VM with python3 + scapy (Story 34.3)
-#   - Agent VM reachable via 2VM SSH helpers (Story 34.2)
+#   - Attacker VM with python3 + scapy
+#   - Agent VM reachable via 2VM SSH helpers
 #   - Kernel >= 6.9
 #
 # Each vector test floods the agent (victim side) with the reflected
@@ -65,7 +65,7 @@ teardown_file() {
 
 # _run_amp_and_assert <vector> <metric>
 # Snapshot metric, run probe, assert metric grew and a T1498.002 alert
-# was emitted. Vector exits non-zero only on argv errors — we ignore
+# was emitted. Vector exits non-zero only on argv errors - we ignore
 # that here and gate on agent-side side-effects.
 _run_amp_and_assert() {
     local vector="$1"
@@ -129,7 +129,7 @@ _run_amp_and_assert() {
 # its assistant a canned key sequence under a hard timeout; we never
 # assert on its exit code, only on the agent-side observed-packet delta.
 
-# _amp_packet_metric — sum every observed-packet counter the agent exposes.
+# _amp_packet_metric - sum every observed-packet counter the agent exposes.
 _amp_packet_metric() {
     local metrics
     metrics="$(curl -sf --max-time 5 \
@@ -166,7 +166,7 @@ EOF
     local after
     after="$(_amp_packet_metric)"
     if [ "${after:-0}" -le "${before:-0}" ]; then
-        # The tool ran but no flood reached the datapath — its menu layout
+        # The tool ran but no flood reached the datapath - its menu layout
         # varies across builds. Flag for the live lane rather than assert a
         # false product failure here.
         soft_skip "hyenae-ng produced no observable flood on this build"
@@ -180,7 +180,7 @@ EOF
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite - MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

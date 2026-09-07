@@ -1,4 +1,4 @@
-# eBPFsentinel — NAT Configuration Example
+# eBPFsentinel - NAT Configuration Example
 # =========================================
 #
 # Network Address Translation via TC classifiers with conntrack integration.
@@ -15,9 +15,9 @@
 # automatically un-NATed using the conntrack mapping.
 #
 # Packet rewriting uses:
-#   - bpf_skb_store_bytes    — overwrite IP/port fields
-#   - bpf_l3_csum_replace    — incremental IP header checksum update (IPv4 only)
-#   - bpf_l4_csum_replace    — incremental TCP/UDP pseudo-header checksum update (IPv4/IPv6)
+#   - bpf_skb_store_bytes    - overwrite IP/port fields
+#   - bpf_l3_csum_replace    - incremental IP header checksum update (IPv4 only)
+#   - bpf_l4_csum_replace    - incremental TCP/UDP pseudo-header checksum update (IPv4/IPv6)
 #
 # Port allocation for SNAT/masquerade uses a hash-based scheme over an
 # LRU HashMap (65536 entries), ensuring even distribution across the
@@ -80,18 +80,18 @@ nat:
   # Applied on egress: rewrite the source address/port of outgoing packets.
   #
   # Fields:
-  #   id              — Unique rule identifier
-  #   type            — "snat", "masquerade", or "one_to_one"
-  #   match_src       — Source CIDR to match (packets from this network)
-  #   match_dst       — Destination CIDR to match (optional)
-  #   match_protocol  — "tcp", "udp", "icmp", "icmpv6" or "any" (optional,
+  #   id              - Unique rule identifier
+  #   type            - "snat", "masquerade", or "one_to_one"
+  #   match_src       - Source CIDR to match (packets from this network)
+  #   match_dst       - Destination CIDR to match (optional)
+  #   match_protocol  - "tcp", "udp", "icmp", "icmpv6" or "any" (optional,
   #                     default: any). "icmp" and "icmpv6" both mean the ICMP
   #                     of the rule's own address family.
-  #   translated_addr — New source IP (SNAT only)
-  #   interface       — Outgoing interface for masquerade (uses its IP)
-  #   port_range      — Ephemeral port range for SNAT/masquerade
-  #   external_addr   — External IP (1:1 NAT)
-  #   internal_addr   — Internal IP (1:1 NAT)
+  #   translated_addr - New source IP (SNAT only)
+  #   interface       - Outgoing interface for masquerade (uses its IP)
+  #   port_range      - Ephemeral port range for SNAT/masquerade
+  #   external_addr   - External IP (1:1 NAT)
+  #   internal_addr   - Internal IP (1:1 NAT)
 
   snat_rules:
     # Masquerade: rewrite source to the IP of eth0 for LAN traffic.
@@ -126,7 +126,7 @@ nat:
       port_range: "10000-60000"
 
     # IPv6 SNAT: rewrite source to a specific IPv6 address for ULA traffic.
-    # IPv6 rules use the same snat_rules list — address family is auto-detected.
+    # IPv6 rules use the same snat_rules list - address family is auto-detected.
     - id: nat-snat-ula
       type: snat
       translated_addr: "2001:db8:1::1"
@@ -138,15 +138,15 @@ nat:
   # Applied on ingress: rewrite the destination address/port of incoming packets.
   #
   # Fields:
-  #   id              — Unique rule identifier
-  #   type            — "dnat", "redirect", or "port_forward"
-  #   match_dst       — Destination CIDR to match (optional)
-  #   match_dst_port  — Destination port or range to match
-  #   match_protocol  — "tcp", "udp", "icmp", "icmpv6" or "any" (optional,
+  #   id              - Unique rule identifier
+  #   type            - "dnat", "redirect", or "port_forward"
+  #   match_dst       - Destination CIDR to match (optional)
+  #   match_dst_port  - Destination port or range to match
+  #   match_protocol  - "tcp", "udp", "icmp", "icmpv6" or "any" (optional,
   #                     default: any). "icmp" and "icmpv6" both mean the ICMP
   #                     of the rule's own address family.
-  #   translated_addr — New destination IP
-  #   translated_port — New destination port
+  #   translated_addr - New destination IP
+  #   translated_port - New destination port
 
   dnat_rules:
     # Port forwarding: redirect public port 8080 to internal web server port 80.
@@ -167,7 +167,7 @@ nat:
       match_protocol: tcp
 
     # Redirect: send all DNS traffic arriving on this host to a local resolver.
-    # Unlike DNAT, redirect keeps the same interface — only the port changes.
+    # Unlike DNAT, redirect keeps the same interface - only the port changes.
     - id: nat-redirect-dns
       type: redirect
       translated_port: 5353
@@ -194,7 +194,7 @@ nat:
       match_protocol: tcp
 
     # IPv6 DNAT: redirect public port 8080 to an internal IPv6 web server.
-    # IPv6 rules use the same dnat_rules list — address family is auto-detected.
+    # IPv6 rules use the same dnat_rules list - address family is auto-detected.
     - id: nat-pf-web-v6
       type: dnat
       translated_addr: "fd00::10"
@@ -202,7 +202,7 @@ nat:
       match_dst_port: 8080
       match_protocol: tcp
 
-  # Hairpin NAT (NAT reflection) — allows internal clients to access
+  # Hairpin NAT (NAT reflection) - allows internal clients to access
   # internal services via the external IP. The firewall applies DNAT +
   # SNAT so return traffic routes back through tc-nat-ingress.
   hairpin:
@@ -216,16 +216,16 @@ nat:
   # Ingress: rewrites destination (external -> internal).
   # Egress:  rewrites source (internal -> external).
   #
-  # Unlike SNAT/DNAT, NPTv6 does not use conntrack — it is fully
+  # Unlike SNAT/DNAT, NPTv6 does not use conntrack - it is fully
   # stateless and rewrites only the prefix portion of the IPv6 address,
   # adjusting a single IID word for checksum neutrality (RFC 6296 §3.1).
   #
   # Fields:
-  #   id              — Unique rule identifier
-  #   enabled         — Whether this rule is active (default: true)
-  #   internal_prefix — Site-local IPv6 prefix (e.g. ULA)
-  #   external_prefix — Provider-assigned or globally-routable prefix
-  #   prefix_len      — Length of the prefix in bits (1-64)
+  #   id              - Unique rule identifier
+  #   enabled         - Whether this rule is active (default: true)
+  #   internal_prefix - Site-local IPv6 prefix (e.g. ULA)
+  #   external_prefix - Provider-assigned or globally-routable prefix
+  #   prefix_len      - Length of the prefix in bits (1-64)
 
   nptv6_rules:
     # Map ULA site prefix fd00:1::/48 to provider prefix 2001:db8:1::/48

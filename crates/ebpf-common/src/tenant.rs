@@ -10,17 +10,17 @@
 //! Rule maps are keyed so a rule can be scoped to a single tenant while the
 //! standalone OSS agent keeps working unchanged. The shared rules are:
 //!
-//! - **`xdp-firewall`** — `FIREWALL_RULES` / `FIREWALL_RULES_V6` are priority
+//! - **`xdp-firewall`** - `FIREWALL_RULES` / `FIREWALL_RULES_V6` are priority
 //!   ordered arrays; each [`crate::firewall::FirewallRuleEntry`] carries a
 //!   `tenant_id`. The kernel scan matches an entry when
 //!   `entry.tenant_id == 0 || entry.tenant_id == packet_tenant`, so a
 //!   tenant-specific rule placed ahead of a global one wins and a global
 //!   (`tenant_id == 0`) rule still applies to every tenant.
-//! - **`tc-ids`** — `IDS_PATTERNS` / `IDS_SRC_PATTERNS` are keyed by
+//! - **`tc-ids`** - `IDS_PATTERNS` / `IDS_SRC_PATTERNS` are keyed by
 //!   [`crate::ids::IdsPatternKey`] `(tenant_id, dst_port, protocol)`. The
 //!   kernel looks up the packet's tenant first, then falls back to the
 //!   `tenant_id == 0` entry.
-//! - **`xdp-ratelimit`** — `RATELIMIT_CONFIG` / buckets are keyed by
+//! - **`xdp-ratelimit`** - `RATELIMIT_CONFIG` / buckets are keyed by
 //!   [`crate::ratelimit::RateLimitKey`] `(tenant_id, src_ip)`. Lookup falls
 //!   back `(tenant, src_ip) → (tenant, 0) → (0, src_ip) → (0, 0)`.
 //!

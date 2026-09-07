@@ -1,4 +1,4 @@
-# config-ebpf-reject.yaml — Firewall reject-action fixture for Suite 46.
+# config-ebpf-reject.yaml - Firewall reject-action fixture for Suite 46.
 #
 # Drives the xdp-firewall-reject tail-call program: matched packets are
 # answered with a forged TCP RST (TCP) or ICMP Destination-Port-Unreachable
@@ -40,7 +40,7 @@ firewall:
       scope: global
       enabled: true
 
-    # Priority 20: TCP reject — agent forges RST back to the source.
+    # Priority 20: TCP reject - agent forges RST back to the source.
     - id: fw-reject-tcp-8081
       priority: 20
       action: reject
@@ -49,7 +49,7 @@ firewall:
       scope: global
       enabled: true
 
-    # Priority 30: UDP reject — agent forges ICMP Dest-Port-Unreachable.
+    # Priority 30: UDP reject - agent forges ICMP Dest-Port-Unreachable.
     - id: fw-reject-udp-9999
       priority: 30
       action: reject

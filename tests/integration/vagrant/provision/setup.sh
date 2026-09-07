@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup.sh — Single-VM provisioner (alternative to 2-VM setup)
+# setup.sh - Single-VM provisioner (alternative to 2-VM setup)
 #
 # Runs on the agent VM only. Builds from source, generates certs/keys,
 # prepares configs, installs BATS. Agent runs locally on loopback.

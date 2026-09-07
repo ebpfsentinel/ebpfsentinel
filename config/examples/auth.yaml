@@ -1,12 +1,12 @@
-# eBPFsentinel — Authentication & RBAC Configuration Example
+# eBPFsentinel - Authentication & RBAC Configuration Example
 # ==========================================================
 #
 # Three authentication methods available. API keys can be combined with
 # either JWT or OIDC (but not both JWT and OIDC simultaneously).
 #
-#   1. API Keys — standalone, no external identity provider required
-#   2. JWT      — RSA public key validation (RS256 algorithm)
-#   3. OIDC     — JWKS-based token validation (Kubernetes, Auth0, Okta, etc.)
+#   1. API Keys - standalone, no external identity provider required
+#   2. JWT      - RSA public key validation (RS256 algorithm)
+#   3. OIDC     - JWKS-based token validation (Kubernetes, Auth0, Okta, etc.)
 #
 # RBAC roles: admin (full access), operator (namespace-scoped writes),
 # viewer (read-only).
@@ -33,10 +33,10 @@ auth:
   # ── Static API keys ────────────────────────────────────────────────
   #
   # Fields:
-  #   name       — Human-readable key name (required, non-empty)
-  #   key        — Secret key value (required, non-empty; masked in sanitized config)
-  #   role       — RBAC role: "admin", "operator", or "viewer" (default: "viewer")
-  #   namespaces — Optional namespace scoping (empty = unrestricted)
+  #   name       - Human-readable key name (required, non-empty)
+  #   key        - Secret key value (required, non-empty; masked in sanitized config)
+  #   role       - RBAC role: "admin", "operator", or "viewer" (default: "viewer")
+  #   namespaces - Optional namespace scoping (empty = unrestricted)
   #
   # Use with X-API-Key header:
   #   curl -H "X-API-Key: sk-admin-CHANGE-ME" http://localhost:8080/api/v1/firewall/rules

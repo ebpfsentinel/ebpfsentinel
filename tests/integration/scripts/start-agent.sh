@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# start-agent.sh — Start eBPFsentinel agent in background
+# start-agent.sh - Start eBPFsentinel agent in background
 #
 # Usage: start-agent.sh <config_file> [extra_args...]
 #
 # Environment:
-#   AGENT_BIN       — Path to agent binary (default: target/release/ebpfsentinel-agent)
-#   AGENT_PID_FILE  — PID file location (default: /tmp/ebpfsentinel-test.pid)
-#   AGENT_LOG_FILE  — Log file location (default: /tmp/ebpfsentinel-test.log)
+#   AGENT_BIN       - Path to agent binary (default: target/release/ebpfsentinel-agent)
+#   AGENT_PID_FILE  - PID file location (default: /tmp/ebpfsentinel-test.pid)
+#   AGENT_LOG_FILE  - Log file location (default: /tmp/ebpfsentinel-test.log)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

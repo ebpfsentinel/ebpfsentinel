@@ -23,7 +23,7 @@ use super::state::AppState;
 pub struct ConnTrackStatusResponse {
     pub enabled: bool,
     pub connection_count: u64,
-    /// Conntrack table capacity — the maximum number of flows the
+    /// Conntrack table capacity - the maximum number of flows the
     /// agent tracks before eviction (the BPF connection-table size).
     pub max_connections: u64,
 }
@@ -56,7 +56,7 @@ fn default_limit() -> usize {
 
 // ── Handlers ──────────────────────────────────────────────────────
 
-/// `GET /api/v1/conntrack/status` — connection tracking status.
+/// `GET /api/v1/conntrack/status` - connection tracking status.
 #[utoipa::path(
     get, path = "/api/v1/conntrack/status",
     tag = "ConnTrack",
@@ -85,7 +85,7 @@ pub async fn conntrack_status(
     }))
 }
 
-/// `GET /api/v1/conntrack/connections` — list tracked connections.
+/// `GET /api/v1/conntrack/connections` - list tracked connections.
 #[utoipa::path(
     get, path = "/api/v1/conntrack/connections",
     tag = "ConnTrack",
@@ -130,7 +130,7 @@ pub async fn list_connections(
     Ok(Json(result))
 }
 
-/// `POST /api/v1/conntrack/flush` — flush all tracked connections.
+/// `POST /api/v1/conntrack/flush` - flush all tracked connections.
 #[utoipa::path(
     post, path = "/api/v1/conntrack/flush",
     tag = "ConnTrack",
@@ -216,7 +216,7 @@ pub async fn conntrack_events(
                 .event(evt.event_type.as_str())
                 .data(json)))
         }
-        Err(_) => None, // lagged — skip
+        Err(_) => None, // lagged - skip
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }

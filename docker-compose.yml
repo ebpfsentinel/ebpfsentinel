@@ -1,4 +1,4 @@
-# eBPFsentinel — Docker Compose deployment (split: warden broker + agent)
+# eBPFsentinel - Docker Compose deployment (split: warden broker + agent)
 #
 # Usage:
 #   docker compose up -d        # start the warden broker + the agent
@@ -24,7 +24,7 @@
 #     kernel.apparmor_restrict_unprivileged_userns=1), unprivileged user-namespace
 #     creation is gated by AppArmor. The agent runs as uid 65534 (non-root), so it
 #     is subject to this and the userns self-map fails (uid_map: Operation not
-#     permitted) regardless of the agent's in-container seccomp/apparmor below —
+#     permitted) regardless of the agent's in-container seccomp/apparmor below -
 #     this is a host-level gate. Allow it on the host:
 #       sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 #     (persist via /etc/sysctl.d/), or scope it to the agent binary with an
@@ -37,7 +37,7 @@
 #   - SYN-cookie DDoS protection (if enabled) needs net.ipv4.tcp_syncookies=2.
 #     With network_mode: host set it on the HOST: sysctl -w net.ipv4.tcp_syncookies=2
 #
-# Hot-reload: edit config/ebpfsentinel.yaml while running — the agent detects
+# Hot-reload: edit config/ebpfsentinel.yaml while running - the agent detects
 # changes automatically and reloads rules without restart.
 
 services:
@@ -94,7 +94,7 @@ services:
     # which host IP the API listens on.
     network_mode: host
     # Share the host PID namespace for cross-container TLS DLP (see the warden).
-    # SECURITY NOTE: this lets the agent see every process on the host — the
+    # SECURITY NOTE: this lets the agent see every process on the host - the
     # irreducible cost of node-wide DLP. Drop `pid: host` to scope DLP to the
     # agent's own container.
     pid: host
@@ -102,11 +102,11 @@ services:
     cap_drop: [ALL] # the warden holds every host capability
     security_opt:
       # The agent self-unshares a user namespace, mounts the delegated bpffs, and
-      # loads its own eBPF through the token — so it issues mount/userns/bpf
+      # loads its own eBPF through the token - so it issues mount/userns/bpf
       # syscalls. It holds NO CAP_SYS_ADMIN, so the Docker default seccomp profile
       # (which gates those syscalls on CAP_SYS_ADMIN) blocks them. Rather than go
       # fully unconfined, this is the Docker default profile plus an unconditional
-      # allow for exactly that syscall set (unshare/mount family/bpf) — strictly
+      # allow for exactly that syscall set (unshare/mount family/bpf) - strictly
       # tighter than seccomp=unconfined. Path resolves from the compose working
       # dir (run `docker compose` from the repo root). Regenerate from a newer
       # Docker default: keep the leading allow block, replace the rest.
@@ -117,7 +117,7 @@ services:
       # (No-op on hosts without AppArmor.)
       - apparmor=unconfined
     volumes:
-      # Agent configuration — writable for hot-reload via file watcher
+      # Agent configuration - writable for hot-reload via file watcher
       - ./config/ebpfsentinel.yaml:/etc/ebpfsentinel/config.yaml
       # Read-only host cgroupfs. The container resolver maps a packet's cgroup
       # id (recovered on the TC egress hook via bpf_skb_cgroup_id) to a
@@ -129,7 +129,7 @@ services:
       # Read-only host /proc (EBPFSENTINEL_HOST_PROC) so the agent resolves every
       # node process's libssl for cross-container TLS DLP.
       - /proc:/host/proc:ro
-      # The warden's control socket (read-only — the agent only connects).
+      # The warden's control socket (read-only - the agent only connects).
       - warden-sock:/run/ebpfsentinel:ro
       # Persistent data: audit logs, alerts, rule change history (redb)
       - ebpfsentinel-data:/data

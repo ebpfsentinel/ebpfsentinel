@@ -10,7 +10,7 @@ use crate::threatintel::error::ThreatIntelError;
 /// Stores IOCs in a `HashMap` keyed by IP address. Provides CRUD operations,
 /// deduplication (highest confidence wins), and capacity enforcement.
 ///
-/// This engine is source-agnostic — it doesn't know about feed providers,
+/// This engine is source-agnostic - it doesn't know about feed providers,
 /// only about validated IOC entries.
 #[derive(Clone)]
 pub struct ThreatIntelEngine {
@@ -248,7 +248,7 @@ mod tests {
         let mut engine = ThreatIntelEngine::new(2);
         engine.add_ioc(ioc("10.0.0.1", "f", 80)).unwrap();
         engine.add_ioc(ioc("10.0.0.2", "f", 80)).unwrap();
-        // Same IP, different feed — dedup replaces, doesn't add
+        // Same IP, different feed - dedup replaces, doesn't add
         engine.add_ioc(ioc("10.0.0.1", "g", 95)).unwrap();
         assert_eq!(engine.ioc_count(), 2);
     }

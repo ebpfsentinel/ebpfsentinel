@@ -16,7 +16,7 @@ pub trait CgroupReader: Send + Sync {
 
 /// Resolves a kernel cgroup v2 id (as returned by
 /// `bpf_get_current_cgroup_id`) to its cgroup filesystem path. Used to
-/// attribute events that carry only a `cgroup_id` and no pid — e.g. the
+/// attribute events that carry only a `cgroup_id` and no pid - e.g. the
 /// TC ingress datapath, where the connect hooks recorded the cgroup but
 /// no process context is available. An adapter implements this by
 /// scanning the cgroup v2 mount and matching directory inode numbers.
@@ -42,7 +42,7 @@ pub fn parse_cgroup_v2(line: &str, pid: u32) -> Option<ContainerInfo> {
     Some(resolve_path_to_info(path, pid))
 }
 
-/// Parser for legacy cgroup v1 output — multiple lines of
+/// Parser for legacy cgroup v1 output - multiple lines of
 /// `<hierarchy>:<controller_list>:<path>`. We look at the `memory` or
 /// `pids` controller (or the first non-empty line) and parse the path.
 pub fn parse_cgroup_v1(lines: &[&str], pid: u32) -> Option<ContainerInfo> {
@@ -194,7 +194,7 @@ impl CgroupCache {
     }
 }
 
-/// Outcome of a resolution attempt — used by services to update
+/// Outcome of a resolution attempt - used by services to update
 /// hit/miss/error counters without re-matching on `ContainerInfo`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveOutcome {
@@ -284,7 +284,7 @@ impl ContainerResolverEngine {
     /// Resolve a DLP uprobe event's `(pid, cgroup_id)` to a `ContainerInfo`,
     /// preferring the `cgroup_id`. A uprobe runs in process context so its
     /// `cgroup_id` is reliable, and resolving by id maps it against the host
-    /// cgroupfs — attributing a neighbouring container's TLS without needing the
+    /// cgroupfs - attributing a neighbouring container's TLS without needing the
     /// neighbour's pid to be visible to the agent. Falls back to the pid cgroup
     /// read when the id resolves to the host or is `0` (cgroup v1 hosts).
     pub fn resolve_dlp(&self, pid: u32, cgroup_id: u64) -> (ContainerInfo, ResolveOutcome) {
@@ -664,7 +664,7 @@ mod tests {
     #[test]
     fn resolve_dlp_falls_back_to_pid_when_id_has_no_match() {
         // The id resolver finds no live cgroup for the id (ReadError, not
-        // cached), so the pid cgroup read decides — here it names a container.
+        // cached), so the pid cgroup read decides - here it names a container.
         let reader = Arc::new(FakeReader::new());
         reader.insert(4242, &format!("0::/system.slice/docker-{HEX64}.scope"));
         let engine =

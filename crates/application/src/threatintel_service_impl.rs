@@ -191,7 +191,7 @@ impl ThreatIntelAppService {
     /// Full-reload sync: bulk-load all engine IOCs into eBPF maps.
     ///
     /// In `Alert` mode, IOCs are loaded with `block_mode = false`
-    /// (observation only — traffic is not dropped).
+    /// (observation only - traffic is not dropped).
     fn sync_ebpf_maps(&self) {
         let Some(ref map_port) = self.map_port else {
             return;

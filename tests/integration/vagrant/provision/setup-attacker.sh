@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-attacker.sh — Fully autonomous provisioner for the attacker VM (192.168.56.20)
+# setup-attacker.sh - Fully autonomous provisioner for the attacker VM (192.168.56.20)
 #
 # Sets up SSH key auth to agent VM, installs test tools, generates local
 # certs/keys, waits for agent readiness, and runs a connectivity check.
@@ -127,7 +127,7 @@ for i in $(seq 1 "$MAX_RETRIES"); do
     if [ "$i" -eq "$MAX_RETRIES" ]; then
         # Non-fatal: the agent readiness marker is a convenience sync only.
         # Each suite's setup_file starts the agent itself, and the attack
-        # toolkit installed below does not depend on the agent — so do NOT
+        # toolkit installed below does not depend on the agent - so do NOT
         # abort the whole provision (which would leave tshark/hping/etc.
         # uninstalled) just because the marker is absent.
         echo "WARNING: agent readiness marker not seen within $((MAX_RETRIES * RETRY_INTERVAL))s; continuing (suites start the agent themselves)" >&2
@@ -148,17 +148,17 @@ PROVISION_DIR="${INTEGRATION_DIR}/vagrant/provision"
 echo "  [tk/1] apt-managed tools"
 sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
 # Essential capture/analysis + build tooling. Suites gate on tcpdump/tshark/nmap,
-# so these MUST install — kept in one transaction so a failure is loud.
+# so these MUST install - kept in one transaction so a failure is loud.
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     tcpdump tshark nmap wrk slowhttptest \
     python3-venv python3-pip cmake build-essential pkg-config \
     libpcap-dev unzip jq golang-go
-# Optional exotic attack tools — not present in every mirror (t50/ncrack in
+# Optional exotic attack tools - not present in every mirror (t50/ncrack in
 # particular). Install best-effort so one missing package can't atomically fail
 # the apt transaction and leave the essential tools above uninstalled.
 for pkg in t50 dnsperf hydra ncrack; do
     sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" \
-        || echo "  (optional tool '$pkg' unavailable in repo — skipping)"
+        || echo "  (optional tool '$pkg' unavailable in repo - skipping)"
 done
 
 # [tk/2] vendored MHDDoS submodule + venv
@@ -175,7 +175,7 @@ if [ -d "${PROJECT_DIR}/.git" ]; then
         || echo "    WARN: submodule update failed; will try pinned clone"
 fi
 if [ ! -f "${MHDDOS_SRC}/start.py" ]; then
-    echo "    submodule empty — cloning MHDDoS at pinned commit ${MHDDOS_COMMIT}"
+    echo "    submodule empty - cloning MHDDoS at pinned commit ${MHDDOS_COMMIT}"
     rm -rf "${MHDDOS_SRC}"
     git clone https://github.com/MatrixTM/MHDDoS "${MHDDOS_SRC}"
     (cd "${MHDDOS_SRC}" && git checkout --detach "${MHDDOS_COMMIT}")
@@ -198,7 +198,7 @@ if [ -f /opt/MHDDoS/start.py ] && ! [ -f /opt/MHDDoS/.tor-disabled ]; then
 fi
 
 # [tk/3] scapy venv
-# Gate on whether scapy actually imports — a bare `[ -d .../bin ]` check passes
+# Gate on whether scapy actually imports - a bare `[ -d .../bin ]` check passes
 # even when an earlier run left the venv without pip/scapy, which then wedges
 # every re-provision. Recreate cleanly and drive pip via `python -m pip` so a
 # missing pip launcher script can't block the install.
@@ -218,7 +218,7 @@ sudo mkdir -p /opt/mitmproxy-venv && sudo chown "${USER}:${USER}" /opt/mitmproxy
 /opt/mitmproxy-venv/bin/pip install --upgrade pip >/dev/null
 /opt/mitmproxy-venv/bin/pip install "mitmproxy==12.2.3"
 
-# [tk/5] release tarballs (sha256-verified — pins kept in TOOL_VERSIONS.md)
+# [tk/5] release tarballs (sha256-verified - pins kept in TOOL_VERSIONS.md)
 echo "  [tk/5] release tarballs"
 install_release() {
     local name="$1" url="$2" sha="$3" install_cmd="$4"

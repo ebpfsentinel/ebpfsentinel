@@ -1,4 +1,4 @@
-//! XDP firewall reject program — tail-called from `xdp-firewall` (slot 1).
+//! XDP firewall reject program - tail-called from `xdp-firewall` (slot 1).
 //!
 //! Forges TCP RST or ICMP/ICMPv6 Unreachable responses for packets matching
 //! `ACTION_REJECT` rules. Runs in its own XDP entry point with a fresh
@@ -215,7 +215,7 @@ fn send_tcp_rst_v4(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Result<u32
     let in_flags: u8 = unsafe { *(tcphdr as *const u8).add(13) };
 
     // Step 2: Truncate to fixed Eth(14) + IP(20) + TCP(20) = 54 bytes.
-    // VLAN tag (if any) is stripped — the response is a clean packet.
+    // VLAN tag (if any) is stripped - the response is a clean packet.
     const RST4_LEN: usize = 14 + 20 + 20;
     let current_len = ctx.data_end().saturating_sub(ctx.data());
     let delta = RST4_LEN as i32 - current_len as i32;

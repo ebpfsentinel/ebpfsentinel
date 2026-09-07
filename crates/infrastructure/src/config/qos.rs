@@ -166,7 +166,7 @@ pub struct QosMatchConfig {
 // ── Parsing helpers ─────────────────────────────────────────────────
 
 /// Parse a bandwidth string like "100mbps", "1gbps", "500kbps", "1000bps"
-/// into bits per second (the suffixes denote bits — "mbps" = megabits/sec).
+/// into bits per second (the suffixes denote bits - "mbps" = megabits/sec).
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn parse_bandwidth(s: &str) -> Result<u64, String> {
     let lower = s.to_lowercase();

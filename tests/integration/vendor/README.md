@@ -1,4 +1,4 @@
-# tests/integration/vendor — Third-Party Attack Tools
+# tests/integration/vendor - Third-Party Attack Tools
 
 Submodules vendored here are runtime-invoked attack/load tools used by
 the BATS integration suites. They are **not** linked into any
@@ -9,10 +9,10 @@ agent's data plane to generate adversarial traffic.
 |---|---|---|---|---|
 | `MHDDoS/` | https://github.com/MatrixTM/MHDDoS | GPL-3.0 | `804f989712d9bbaa14d329436724aecb71b0d0e7` | Suites 41 (L7 attacks), 63 (DLP MITM stress) |
 
-## MHDDoS — Notice
+## MHDDoS - Notice
 
 - **License**: GPL-3.0 (preserved at `MHDDoS/LICENSE`)
-- **Usage**: runtime fork only — invoked from L7-attack BATS suites to
+- **Usage**: runtime fork only - invoked from L7-attack BATS suites to
   generate traffic against the ebpfsentinel agent. No ebpfsentinel
   source file imports, includes, or transcribes MHDDoS code.
 - **AGPL boundary**: ebpfsentinel is AGPL-3.0; MHDDoS is GPL-3.0. Both

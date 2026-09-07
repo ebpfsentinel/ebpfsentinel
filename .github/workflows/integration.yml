@@ -1,10 +1,10 @@
 name: Integration Tests
 
-# CI split — fast PR feedback vs. heavy nightly attack/perf coverage.
+# CI split - fast PR feedback vs. heavy nightly attack/perf coverage.
 #
-#   pull_request / push: profile=pr — existing fast suites + 15-min
+#   pull_request / push: profile=pr - existing fast suites + 15-min
 #     PR budget guard. ≤30 s/suite p95 by design.
-#   schedule (02:00 UTC): profile=nightly — attack-realism suites
+#   schedule (02:00 UTC): profile=nightly - attack-realism suites
 #     (41-63), perf benches (15/29/30), feature overhead, soak job,
 #     3-VM transit topology.
 #   workflow_dispatch: choose profile = pr | nightly | full. Nightly
@@ -13,7 +13,7 @@ name: Integration Tests
 # The suite ↔ profile mapping is sourced from
 # tests/integration/coverage-matrix.yaml via
 # scripts/list-suites-by-profile.sh so adding a suite needs no
-# workflow edit — just a profile entry in the matrix.
+# workflow edit - just a profile entry in the matrix.
 
 on:
   # pull_request:
@@ -44,7 +44,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
-  # PR job budget — fails the run if total wall-clock exceeds this.
+  # PR job budget - fails the run if total wall-clock exceeds this.
   # Tracked as p95 across the last 30 runs in `tests/integration/README.md`
   # under "CI profiles & budget guard".
   PR_BUDGET_MINUTES: 15
@@ -192,7 +192,7 @@ jobs:
           for id in $ids; do
             bats_path="$(ls tests/integration/suites/${id}-*.bats 2>/dev/null | head -n1 || true)"
             [ -z "$bats_path" ] && continue
-            # Skip suites that require root / privileged docker / k8s — those
+            # Skip suites that require root / privileged docker / k8s - those
             # run in the dedicated nightly jobs below. The PR job is the
             # userspace REST/gRPC fast lane.
             case "$id" in
@@ -203,7 +203,7 @@ jobs:
                 continue
                 ;;
               09)
-                echo "::group::Skipping suite 09 (docker — see docker job)"
+                echo "::group::Skipping suite 09 (docker - see docker job)"
                 echo "::endgroup::"
                 continue
                 ;;
@@ -222,7 +222,7 @@ jobs:
           elapsed_min=$(( (now - start) / 60 ))
           echo "PR job wall-clock: ${elapsed_min} min (budget: ${PR_BUDGET_MINUTES} min)"
           if [ "$elapsed_min" -gt "${PR_BUDGET_MINUTES}" ]; then
-            echo "::error::PR CI budget exceeded — ${elapsed_min} min > ${PR_BUDGET_MINUTES} min"
+            echo "::error::PR CI budget exceeded - ${elapsed_min} min > ${PR_BUDGET_MINUTES} min"
             exit 1
           fi
 
@@ -259,7 +259,7 @@ jobs:
       - name: Build Docker image
         run: docker build -f Dockerfile.agent -t ebpfsentinel:integration-test .
 
-      - name: Suite 09 — Docker Deployment
+      - name: Suite 09 - Docker Deployment
         run: bats --timing tests/integration/suites/09-docker.bats
 
   # ── PR eBPF (privileged, main/dispatch only) ─────────────────────
@@ -289,12 +289,12 @@ jobs:
           sudo apt-get install -y jq python3-scapy
           sudo apt-get install -y "linux-tools-$(uname -r)" 2>/dev/null \
             || sudo apt-get install -y linux-tools-common linux-tools-generic 2>/dev/null \
-            || echo "::warning::bpftool not available — eBPF tests will be skipped"
+            || echo "::warning::bpftool not available - eBPF tests will be skipped"
 
-      - name: Suite 06 — eBPF Programs
+      - name: Suite 06 - eBPF Programs
         run: sudo bats --timing tests/integration/suites/06-ebpf-programs.bats
 
-      - name: Suite 40 — L2 VIP Announcer
+      - name: Suite 40 - L2 VIP Announcer
         run: sudo bats --timing tests/integration/suites/37-ebpf-vip-announcer-scenarios.bats
 
   # ── Nightly attack/perf bats matrix (self-hosted Vagrant) ────────
@@ -349,7 +349,7 @@ jobs:
           VAGRANT_3VM=1 vagrant destroy -f agent attacker backend || true
           vagrant destroy -f agent attacker || true
 
-  # ── 8 h soak — gated to schedule + dispatch only ─────────────────
+  # ── 8 h soak - gated to schedule + dispatch only ─────────────────
   nightly-soak:
     name: Nightly Soak (${{ needs.plan.outputs.soak_duration }}s)
     needs: [plan, build]
@@ -395,7 +395,7 @@ jobs:
             const suiteResult = '${{ needs.nightly-suites.result }}';
             const soakResult = '${{ needs.nightly-soak.result }}';
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const title = `nightly regression — ${new Date().toISOString().slice(0, 10)}`;
+            const title = `nightly regression - ${new Date().toISOString().slice(0, 10)}`;
             const body = [
               `Nightly integration run failed.`,
               ``,

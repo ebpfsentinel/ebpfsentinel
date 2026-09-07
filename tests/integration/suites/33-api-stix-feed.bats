@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 33-api-stix-feed.bats — STIX 2.1 feed parsing via REST API (userspace-only)
+# 33-api-stix-feed.bats - STIX 2.1 feed parsing via REST API (userspace-only)
 # Does NOT require eBPF or root privileges.
 # Starts a local HTTP server to serve the STIX bundle fixture.
 
@@ -230,7 +230,7 @@ teardown_file() {
 
     [ "$HTTP_STATUS" = "200" ]
 
-    # IDS engine should be active — STIX IP IOCs may create threat signatures
+    # IDS engine should be active - STIX IP IOCs may create threat signatures
     local enabled
     enabled="$(echo "$body" | jq -r '.enabled' 2>/dev/null)" || true
     [ "$enabled" = "true" ]
@@ -348,7 +348,7 @@ teardown_file() {
         # Fall back to generic config/packets metrics
         echo "$metrics" | grep -qE "ebpfsentinel_rules_reloads|ebpfsentinel_rules_loaded"
     else
-        # Threat intel metrics found — verify at least one line exists
+        # Threat intel metrics found - verify at least one line exists
         [ -n "$ti_metrics" ]
     fi
 }

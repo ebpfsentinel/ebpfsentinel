@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 09-docker.bats — Docker build, deployment, and overhead tests
+# 09-docker.bats - Docker build, deployment, and overhead tests
 #
 # Requires: Docker Engine on native Linux with kernel 6.9+ and BTF.
 #
@@ -74,7 +74,7 @@ setup_file() {
     # suite reports a cascade of failures that all mean "nothing was built",
     # so gate once, explicitly.
     if ! _docker_cmd image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
-        env_skip "ebpfsentinel:integration-test image not built — run the docker build first"
+        env_skip "ebpfsentinel:integration-test image not built - run the docker build first"
     fi
 
     export PROJECT_ROOT
@@ -149,7 +149,7 @@ setup_file() {
         # there is no plain Dockerfile for the default build to pick up.
         _docker_cmd build -f "${PROJECT_ROOT}/Dockerfile.agent" \
             -t "$DOCKER_IMAGE" "${PROJECT_ROOT}" || {
-            echo "# Docker build failed — tests will be skipped" >&3
+            echo "# Docker build failed - tests will be skipped" >&3
         }
     fi
 

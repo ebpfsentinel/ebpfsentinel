@@ -94,8 +94,8 @@ impl Protocol {
 
 /// Domain operating mode for progressive feature activation (FR50).
 ///
-/// - `Alert`: observation only — deny actions become log (no traffic dropped)
-/// - `Block`: full enforcement — deny actions drop traffic
+/// - `Alert`: observation only - deny actions become log (no traffic dropped)
+/// - `Block`: full enforcement - deny actions drop traffic
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DomainMode {
     #[default]

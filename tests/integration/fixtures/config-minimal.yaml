@@ -1,4 +1,4 @@
-# config-minimal.yaml — Minimal agent configuration for integration tests.
+# config-minimal.yaml - Minimal agent configuration for integration tests.
 # Uses loopback interface, firewall-only mode, non-default ports to avoid conflicts.
 
 agent:

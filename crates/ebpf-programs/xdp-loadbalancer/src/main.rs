@@ -74,8 +74,8 @@ static LB_RR_STATE: PerCpuArray<u32, { MAX_LB_SERVICES as usize }> = PerCpuArray
 
 /// Per-service Maglev lookup ring: svc_index → precomputed permutation.
 /// Written by userspace (pure domain table generator), rebuilt only on
-/// healthy-backend-set change. Read with a single O(1) index — no
-/// per-packet state write — giving consistent flow pinning across nodes.
+/// healthy-backend-set change. Read with a single O(1) index - no
+/// per-packet state write - giving consistent flow pinning across nodes.
 #[btf_map]
 static LB_MAGLEV: HashMap<u32, MaglevLookup, { MAX_MAGLEV_SERVICES as usize }> = HashMap::new();
 
@@ -191,7 +191,7 @@ fn process_v4(
     let dst_addr = [u32::from_ne_bytes(dst_addr_raw), 0, 0, 0];
 
     // Probe kernel CT for flow stickiness: if the flow already has a
-    // conntrack entry, the kernel has seen it before — the same
+    // conntrack entry, the kernel has seen it before - the same
     // backend should handle subsequent packets for connection affinity.
     let tuple = CtTuple::v4(src_ip, u32::from_be_bytes(dst_addr_raw), src_port, dst_port);
     let mut ct_opts = if protocol == PROTO_TCP {
@@ -596,7 +596,7 @@ fn select_backend<'a>(
         }
         // Maglev: O(1) lookup into the precomputed permutation ring.
         // Deterministic software hash of the source IP (NOT the NIC RSS
-        // hash) so every node maps a flow to the same slot — required
+        // hash) so every node maps a flow to the same slot - required
         // for L2 DSR / multi-node ECMP. The userspace table already
         // contains only healthy backend slots; the linear probe below
         // still covers a backend that went down between rebuilds.
@@ -605,7 +605,7 @@ fn select_backend<'a>(
                 // `% MAGLEV_RING_SIZE` provably yields a slot in
                 // `[0, MAGLEV_RING_SIZE)`, but the ring size is prime so the
                 // compiler proves the `if slot < MAGLEV_RING_SIZE` guard
-                // redundant and elides it — leaving the verifier with the
+                // redundant and elides it - leaving the verifier with the
                 // unbounded modulo result and rejecting the `entries[slot]`
                 // deref ("unbounded memory access"). Routing the slot through
                 // a value barrier first turns the guard into a real runtime
@@ -618,7 +618,7 @@ fn select_backend<'a>(
                     0
                 }
             }
-            // Table not synced yet — safe RR fallback.
+            // Table not synced yet - safe RR fallback.
             None => {
                 let rr_ptr = LB_RR_STATE.get_ptr_mut(svc_index)?;
                 let rr = unsafe { *rr_ptr };
@@ -729,7 +729,7 @@ fn update_l4_checksum_v4(
     }
 }
 
-/// Incremental L4 checksum update for port-only change (IPv6 — no IP checksum).
+/// Incremental L4 checksum update for port-only change (IPv6 - no IP checksum).
 #[inline(always)]
 fn update_l4_checksum_port_only(
     ctx: &XdpContext,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 25-alert-end-to-end.bats — Alert lifecycle end-to-end tests
+# 25-alert-end-to-end.bats - Alert lifecycle end-to-end tests
 # Requires: root, kernel >= 6.9, bpftool, ncat, jq
 #
 # Tests the full alert lifecycle:
@@ -48,7 +48,7 @@ teardown_file() {
 
 # ── Tests ──────────────────────────────────────────────────────────
 
-# _drive_alert_traffic — one IDS-matching flow on the rule's port.
+# _drive_alert_traffic - one IDS-matching flow on the rule's port.
 _drive_alert_traffic() {
     timeout 10 ncat -l "$EBPF_HOST_IP" 4444 >/dev/null 2>&1 &
     local listener_pid=$!
@@ -172,7 +172,7 @@ _drive_alert_traffic() {
     alert_id="$(cat "$DATA_DIR/alert_id.txt" 2>/dev/null)"
     [ -n "$alert_id" ] || soft_skip "no alert_id from previous test"
 
-    # No GET /alerts/{id} endpoint — query the list and filter
+    # No GET /alerts/{id} endpoint - query the list and filter
     local body
     body="$(api_get '/api/v1/alerts?false_positive=true')"
     _load_http_status
@@ -274,7 +274,7 @@ _drive_alert_traffic() {
     # Dedup gates *delivery*, not persistence: the pipeline stores, streams and
     # counts every alert before consulting the router. So counting rows in
     # /api/v1/alerts measures how many alerts the datapath produced, and says
-    # nothing about dedup — that is why an earlier version of this test saw a
+    # nothing about dedup - that is why an earlier version of this test saw a
     # burst grow the store by more than the number of flows sent and could not
     # explain it. The suppression is observable in exactly one place, the drop
     # counter, and it now carries its own reason label.
@@ -294,7 +294,7 @@ _drive_alert_traffic() {
     local alerts_after produced
     alerts_after="$(api_get /api/v1/alerts | jq '[.alerts[] | select(.component == "ids")] | length' 2>/dev/null)" || alerts_after=0
     produced=$(( alerts_after - alerts_before ))
-    [ "${produced}" -ge 2 ] || soft_skip "burst produced ${produced} ids alerts — nothing for dedup to collapse"
+    [ "${produced}" -ge 2 ] || soft_skip "burst produced ${produced} ids alerts - nothing for dedup to collapse"
 
     local dropped_after deduped
     dropped_after="$(get_metrics_value ebpfsentinel_alerts_dropped_total '{reason="dedup"}')" || dropped_after=0
@@ -380,7 +380,7 @@ _drive_alert_traffic() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite - MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }
@@ -390,12 +390,12 @@ _drive_alert_traffic() {
 @test "Last-Event-ID resume returns missed events without duplication" {
     require_tool jq
 
-    # This suite has driven IDS traffic, so the buffer holds real alerts —
+    # This suite has driven IDS traffic, so the buffer holds real alerts -
     # the precondition suite 34 cannot satisfy on its detector-less config.
     local first_id
     first_id="$(api_get '/api/v1/alerts?limit=1' | jq -r '.alerts[0].id // empty')"
     [ -n "${first_id}" ] || {
-        echo "no alert buffered — the suite should have produced one by now" >&2
+        echo "no alert buffered - the suite should have produced one by now" >&2
         api_get /api/v1/alerts >&2 || true
         return 1
     }

@@ -1294,7 +1294,7 @@ mod tests {
     fn to_ebpf_entry_cidr_24() {
         let mut rule = make_rule("r", 1);
         rule.protocol = Protocol::Any;
-        // 192.168.1.123/24 — addr should be pre-masked to 192.168.1.0
+        // 192.168.1.123/24 - addr should be pre-masked to 192.168.1.0
         rule.src_ip = Some(IpNetwork::V4 {
             addr: 0xC0A8_017B, // 192.168.1.123
             prefix_len: 24,
@@ -1474,7 +1474,7 @@ mod tests {
     fn to_ebpf_entry_v6_subnet_premasked() {
         let mut rule = make_rule("r", 1);
         rule.protocol = Protocol::Any;
-        // 2001:db8:1234:5678::1/32 — should mask to 2001:db8::
+        // 2001:db8:1234:5678::1/32 - should mask to 2001:db8::
         let mut addr = [0u8; 16];
         addr[0] = 0x20;
         addr[1] = 0x01;

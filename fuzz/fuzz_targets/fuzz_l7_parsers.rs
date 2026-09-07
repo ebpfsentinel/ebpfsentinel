@@ -8,10 +8,10 @@ use domain::l7::parser::{
 };
 
 fuzz_target!(|data: &[u8]| {
-    // Top-level dispatcher — must never panic on any input.
+    // Top-level dispatcher - must never panic on any input.
     let _ = parse_payload(data);
 
-    // Individual parsers — each must gracefully handle arbitrary bytes.
+    // Individual parsers - each must gracefully handle arbitrary bytes.
     let _ = detect_protocol(data);
     let _ = parse_http(data);
     let _ = parse_tls_client_hello(data);

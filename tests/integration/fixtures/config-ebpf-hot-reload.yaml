@@ -1,4 +1,4 @@
-# config-ebpf-hot-reload.yaml — Hot-reload test config
+# config-ebpf-hot-reload.yaml - Hot-reload test config
 # Tests: SIGHUP config reload with firewall rules
 #
 # Initial state: 3 firewall rules

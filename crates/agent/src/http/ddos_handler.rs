@@ -99,7 +99,7 @@ fn default_limit() -> usize {
 
 // ── Handlers ──────────────────────────────────────────────────────
 
-/// `GET /api/v1/ddos/status` — `DDoS` protection status.
+/// `GET /api/v1/ddos/status` - `DDoS` protection status.
 #[utoipa::path(
     get, path = "/api/v1/ddos/status",
     tag = "DDoS",
@@ -128,7 +128,7 @@ pub async fn ddos_status(
     }))
 }
 
-/// `GET /api/v1/ddos/attacks` — list active `DDoS` attacks.
+/// `GET /api/v1/ddos/attacks` - list active `DDoS` attacks.
 #[utoipa::path(
     get, path = "/api/v1/ddos/attacks",
     tag = "DDoS",
@@ -166,7 +166,7 @@ pub async fn ddos_attacks(
     Ok(Json(attacks))
 }
 
-/// `GET /api/v1/ddos/attacks/history` — attack history.
+/// `GET /api/v1/ddos/attacks/history` - attack history.
 #[utoipa::path(
     get, path = "/api/v1/ddos/attacks/history",
     tag = "DDoS",
@@ -205,7 +205,7 @@ pub async fn ddos_history(
     Ok(Json(attacks))
 }
 
-/// `GET /api/v1/ddos/policies` — list `DDoS` policies.
+/// `GET /api/v1/ddos/policies` - list `DDoS` policies.
 #[utoipa::path(
     get, path = "/api/v1/ddos/policies",
     tag = "DDoS",
@@ -234,7 +234,7 @@ pub async fn list_ddos_policies(
     Ok(Json(policies))
 }
 
-/// `POST /api/v1/ddos/policies` — create a `DDoS` policy.
+/// `POST /api/v1/ddos/policies` - create a `DDoS` policy.
 #[utoipa::path(
     post, path = "/api/v1/ddos/policies",
     tag = "DDoS",
@@ -288,7 +288,7 @@ pub async fn create_ddos_policy(
     ))
 }
 
-/// `DELETE /api/v1/ddos/policies/{id}` — delete a `DDoS` policy.
+/// `DELETE /api/v1/ddos/policies/{id}` - delete a `DDoS` policy.
 #[utoipa::path(
     delete, path = "/api/v1/ddos/policies/{id}",
     tag = "DDoS",

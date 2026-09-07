@@ -29,7 +29,7 @@ pub const fn zone_pair_key(from_zone: u8, to_zone: u8) -> u16 {
     ((from_zone as u16) << 8) | (to_zone as u16)
 }
 
-/// Zone policy entry — maps (from_zone, to_zone) to an action.
+/// Zone policy entry - maps (from_zone, to_zone) to an action.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZonePolicyEntry {

@@ -964,6 +964,6 @@ mod tests {
         let mut svc = make_service(); // map_port = None
         svc.add_rule(make_rule("fw-001", 10)).unwrap();
         svc.remove_rule(&RuleId("fw-001".to_string())).unwrap();
-        // No panic — graceful degraded mode
+        // No panic - graceful degraded mode
     }
 }

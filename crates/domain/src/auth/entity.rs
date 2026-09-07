@@ -8,7 +8,7 @@ use super::rbac::Role;
 /// access control (role, namespaces).
 #[derive(Debug, Clone, Deserialize)]
 pub struct JwtClaims {
-    /// Subject — the authenticated identity (required).
+    /// Subject - the authenticated identity (required).
     pub sub: String,
 
     /// Expiration time (Unix timestamp, required).
@@ -18,10 +18,10 @@ pub struct JwtClaims {
     #[serde(default)]
     pub iat: u64,
 
-    /// Issuer — optional, validated when configured.
+    /// Issuer - optional, validated when configured.
     pub iss: Option<String>,
 
-    /// Audience — optional, validated when configured.
+    /// Audience - optional, validated when configured.
     pub aud: Option<String>,
 
     /// RBAC role claim: "admin", "operator", or "viewer".
@@ -82,7 +82,7 @@ impl JwtClaims {
 
     /// Check whether the claims grant access to the given namespace.
     ///
-    /// - `None` → no namespaces granted (deny all — secure default).
+    /// - `None` → no namespaces granted (deny all - secure default).
     /// - `Some(list)` → access granted if `ns` is in the list.
     ///
     /// Admin role bypasses this check entirely in the RBAC middleware,

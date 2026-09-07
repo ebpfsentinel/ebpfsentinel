@@ -40,7 +40,7 @@ pub struct TacticSummary {
     pub components: Vec<String>,
 }
 
-/// `GET /api/v1/mitre/coverage` — MITRE ATT&CK coverage matrix.
+/// `GET /api/v1/mitre/coverage` - MITRE ATT&CK coverage matrix.
 #[utoipa::path(
     get, path = "/api/v1/mitre/coverage",
     tag = "MITRE ATT&CK",

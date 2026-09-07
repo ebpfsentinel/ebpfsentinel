@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""ntp_monlist.py — Flood an agent with reflected NTP amplification responses.
+"""ntp_monlist.py - Flood an agent with reflected NTP amplification responses.
 
 NTP monlist is a textbook amplification vector: a 234-byte response is
 generated for a ~30-byte request, multiplied across thousands of stored
-client addresses. This script models the victim-facing leg — a flood
+client addresses. This script models the victim-facing leg - a flood
 sourced *from* the NTP port (123), the amplified responses a reflector
 blasts at a spoofed victim. The agent's UDP amplification protection
 rate-limits per source/amplifier-port and drops the flood beyond the
@@ -41,7 +41,7 @@ def _is_rfc1918(addr: str) -> bool:
     return any(ip in net for net in _PRIVATE_NETS)
 
 
-# NTP mode-7 (private) MON_GETLIST_1 — the classic monlist payload.
+# NTP mode-7 (private) MON_GETLIST_1 - the classic monlist payload.
 # Byte 0: 0x17 = version=2, mode=7
 # Byte 1: 0x00 = request, more=0, error=0, opcode=0
 # Byte 2: 0x03 = MON_GETLIST_1

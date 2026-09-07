@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# setup-agent.sh — Fully autonomous provisioner for the agent VM (192.168.56.10)
+# setup-agent.sh - Fully autonomous provisioner for the agent VM (192.168.56.10)
 #
 # Builds everything from source (agent + eBPF programs), generates certs/keys,
 # prepares configs, installs BATS, and verifies eBPF programs load.
 #
 # Modes (via PROVISION_MODE env var):
-#   "full"   — build from source + Docker image (default, ~5min)
-#   "fast"   — build from source only, skip Docker (saves ~2min)
-#   "docker" — extract from Docker image only (requires pre-built image tar)
+#   "full"   - build from source + Docker image (default, ~5min)
+#   "fast"   - build from source only, skip Docker (saves ~2min)
+#   "docker" - extract from Docker image only (requires pre-built image tar)
 #
 # Environment:
-#   PROVISION_MODE        — "full" (default), "fast", or "docker"
-#   EBPF_SKIP_VALIDATION  — set to "true" to skip the eBPF load verification step
+#   PROVISION_MODE        - "full" (default), "fast", or "docker"
+#   EBPF_SKIP_VALIDATION  - set to "true" to skip the eBPF load verification step
 set -euxo pipefail
 
 PROVISION_MODE="${PROVISION_MODE:-full}"
@@ -106,7 +106,7 @@ install_from_prebuilt() {
     # runs the privileged `warden` broker alongside the agent: the agent
     # self-unshares a userns, has the warden delegate a bpffs, and creates the
     # token. Without the warden the agent starts in "API-only mode (no eBPF)" and
-    # every datapath suite sees ebpf_loaded=false — so the warden MUST be installed
+    # every datapath suite sees ebpf_loaded=false - so the warden MUST be installed
     # alongside the agent (the test harness starts both).
     local warden_src="${PROJECT_DIR}/target/release/warden"
     if [ -f "$warden_src" ]; then
@@ -213,9 +213,9 @@ else
             make -j"$(nproc)" >/dev/null
             sudo make install_sw >/dev/null
         ) && echo "  installed: $("${OPENSSL_PQ_PREFIX}/bin/openssl" version)" \
-            || echo "  WARNING: OpenSSL ${OPENSSL_PQ_VERSION} build failed — PQ client tests will skip"
+            || echo "  WARNING: OpenSSL ${OPENSSL_PQ_VERSION} build failed - PQ client tests will skip"
     else
-        echo "  WARNING: OpenSSL ${OPENSSL_PQ_VERSION} download failed — PQ client tests will skip"
+        echo "  WARNING: OpenSSL ${OPENSSL_PQ_VERSION} download failed - PQ client tests will skip"
     fi
     rm -rf "${tmp}"
 fi
@@ -296,7 +296,7 @@ fi
 # 39-agent-jwks signs an EdDSA JWT and serves a matching JWKS to prove the
 # auth middleware accepts it. The helper scripts call the system `python3`
 # directly (build_eddsa_jwks.py needs `cryptography`, mint_eddsa_jwt.py needs
-# PyJWT), so both modules must be importable from the system interpreter — a
+# PyJWT), so both modules must be importable from the system interpreter - a
 # venv won't do, the suite hard-codes bare python3. Install via apt to dodge
 # PEP-668 (externally-managed-environment) on the system Python.
 echo "=== Installing JWKS/JWT deps (python3-jwt, python3-cryptography) ==="
@@ -336,14 +336,14 @@ else
         echo "  openssl: $(/opt/openssl-3.5/bin/openssl version 2>&1)" \
              "| MLKEM: $(/opt/openssl-3.5/bin/openssl list -groups 2>/dev/null | grep -c X25519MLKEM768)"
     else
-        echo "  WARN: openssl ${OSSL_VER} download failed — suite 61 PQ tests will skip"
+        echo "  WARN: openssl ${OSSL_VER} download failed - suite 61 PQ tests will skip"
         rm -rf "${tmp_ossl}"
     fi
 fi
 
 # ── Scapy venv (agent-local netns suites) ──────────────────────────
-# The agent-local (netns) suites — VIP-announcer ARP probes, byte-level
-# scrub, DSR/Maglev — craft raw frames with scapy on the agent itself.
+# The agent-local (netns) suites - VIP-announcer ARP probes, byte-level
+# scrub, DSR/Maglev - craft raw frames with scapy on the agent itself.
 # lib/ebpf_helpers.bash resolves EBPF_SCAPY_PY=/opt/scapy-venv/bin/python3;
 # without the venv those suites silently skip. Pin matches setup-attacker.sh.
 echo "=== Installing scapy venv ==="

@@ -82,7 +82,7 @@ impl std::fmt::Display for AliasId {
     }
 }
 
-/// The kind of alias — determines how IPs/ports are resolved.
+/// The kind of alias - determines how IPs/ports are resolved.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AliasKind {
@@ -126,7 +126,7 @@ pub enum AliasKind {
     },
     /// BGP AS numbers resolved to CIDR prefixes via `MaxMind` ASN database.
     BgpAsn { asn_numbers: Vec<u32> },
-    /// Externally managed placeholder — content pushed via API.
+    /// Externally managed placeholder - content pushed via API.
     External,
 }
 

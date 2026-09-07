@@ -1,4 +1,4 @@
-# config-ebpf-pktgen-drop.yaml — XDP early-drop fixture for perf/04.
+# config-ebpf-pktgen-drop.yaml - XDP early-drop fixture for perf/04.
 #
 # Boots the agent with a single XDP firewall rule that **drops** the
 # pktgen UDP flood (dst port 9). Used to demonstrate the CPU savings

@@ -13,11 +13,11 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use domain::common::error::DomainError;
 use ports::secondary::vip_announcer_port::IfaceMacResolverPort;
 
-/// `SIOCGIFHWADDR` — get hardware (MAC) address. Stable Linux ioctl.
+/// `SIOCGIFHWADDR` - get hardware (MAC) address. Stable Linux ioctl.
 /// Typed `libc::Ioctl` so it matches the `ioctl(2)` request parameter on
 /// both glibc (`c_ulong`) and musl (`c_int`) targets.
 const SIOCGIFHWADDR: libc::Ioctl = 0x8927;
-/// `SIOCGIFINDEX` — get interface index. Stable Linux ioctl.
+/// `SIOCGIFINDEX` - get interface index. Stable Linux ioctl.
 const SIOCGIFINDEX: libc::Ioctl = 0x8933;
 
 /// Hand-rolled `struct ifreq`. libc's `ifreq` exposes its `ifr_ifru`

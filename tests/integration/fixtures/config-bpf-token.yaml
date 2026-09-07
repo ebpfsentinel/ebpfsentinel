@@ -1,4 +1,4 @@
-# config-bpf-token.yaml — BPF-token-only loading (integration suite 61).
+# config-bpf-token.yaml - BPF-token-only loading (integration suite 61).
 #
 # eBPF is loaded ONLY through a BPF token (the agent has no capability-based
 # loading path): it MUST create a BPF token against the delegated bpffs and

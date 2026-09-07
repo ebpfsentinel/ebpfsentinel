@@ -3,7 +3,7 @@
 //! Conntrack teardown (`conntrack -D`/`-F`), multi-WAN route programming
 //! (`ip route`), gratuitous ARP on VIP takeover, and opening an `AF_PACKET`
 //! capture socket all need `CAP_NET_ADMIN`/`CAP_NET_RAW` over the host network
-//! namespace — capabilities the BPF token can never grant. They therefore live
+//! namespace - capabilities the BPF token can never grant. They therefore live
 //! here in the warden, which holds them, rather than in the agent.
 //!
 //! The command-building cores (`conntrack_delete_args`, `route_args`,
@@ -18,9 +18,9 @@ use ebpfsentinel_warden_proto::{ConntrackTuple, RouteSpec};
 
 // ── interface name / ifindex / MAC ────────────────────────────────────────
 
-/// `SIOCGIFINDEX` — get interface index (stable Linux ioctl).
+/// `SIOCGIFINDEX` - get interface index (stable Linux ioctl).
 const SIOCGIFINDEX: libc::Ioctl = 0x8933;
-/// `SIOCGIFHWADDR` — get hardware (MAC) address (stable Linux ioctl).
+/// `SIOCGIFHWADDR` - get hardware (MAC) address (stable Linux ioctl).
 const SIOCGIFHWADDR: libc::Ioctl = 0x8927;
 
 const ETH_P_ARP: u16 = 0x0806;
@@ -30,7 +30,7 @@ const ARP_HW_ETHERNET: u16 = 1;
 const ARP_OP_REPLY: u16 = 2;
 const BROADCAST: [u8; 6] = [0xff; 6];
 
-/// Flat 24-byte-tail `struct ifreq` — the stable kernel ABI every ifreq ioctl uses.
+/// Flat 24-byte-tail `struct ifreq` - the stable kernel ABI every ifreq ioctl uses.
 #[repr(C)]
 struct IfReq {
     ifr_name: [libc::c_char; libc::IFNAMSIZ],
@@ -395,7 +395,7 @@ fn run(cmd: &str, args: &[String]) -> Result<(), String> {
 }
 
 /// Run `cmd args`, treating a non-zero exit as success (used for `conntrack -D`,
-/// which exits non-zero when no flow matched — not an error here).
+/// which exits non-zero when no flow matched - not an error here).
 fn run_allow_nonzero(cmd: &str, args: &[String]) -> Result<(), String> {
     Command::new(cmd)
         .args(args)

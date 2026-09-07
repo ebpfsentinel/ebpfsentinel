@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 15-rest-api-ddos.bats — DDoS protection API endpoints
+# 15-rest-api-ddos.bats - DDoS protection API endpoints
 
 load '../lib/helpers'
 

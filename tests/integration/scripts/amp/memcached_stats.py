@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""memcached_stats.py — Flood an agent with reflected memcached responses.
+"""memcached_stats.py - Flood an agent with reflected memcached responses.
 
 Memcached on UDP/11211 yields the largest-known amplification factor
 (~50000x in the wild). This script models the victim-facing leg: a

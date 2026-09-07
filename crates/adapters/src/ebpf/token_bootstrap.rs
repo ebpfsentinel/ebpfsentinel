@@ -6,7 +6,7 @@
 //! `CAP_BPF` / `CAP_NET_ADMIN` / `CAP_SYS_ADMIN`. A privileged setup
 //! component (systemd `ExecStartPre`, a Kubernetes init container, or
 //! the `ebpfsentinel-token-setup.sh` helper) mounts the delegated
-//! bpffs; the agent process — which may be fully unprivileged — opens
+//! bpffs; the agent process - which may be fully unprivileged - opens
 //! it and creates the token.
 //!
 //! [`bootstrap`] probes the kernel, creates the token, and returns a
@@ -40,7 +40,7 @@ impl BpfTokenPolicy {
 }
 
 /// Outcome of [`bootstrap`]. Owns the token + bpffs fds so they stay
-/// alive for the lifetime of the agent — the kernel authorizes every
+/// alive for the lifetime of the agent - the kernel authorizes every
 /// map/BTF/program load against the token fd, so dropping it would break
 /// subsequent loads.
 pub struct BpfLoadingHandle {
@@ -67,7 +67,7 @@ pub enum BootstrapError {
     KernelProbe(#[from] KernelProbeError),
 
     #[error(
-        "kernel {major}.{minor} lacks BPF_TOKEN_CREATE — eBPFsentinel loads eBPF \
+        "kernel {major}.{minor} lacks BPF_TOKEN_CREATE - eBPFsentinel loads eBPF \
          only through a BPF token (kernel 6.9+ required). Upgrade the host kernel."
     )]
     KernelTooOld { major: u32, minor: u32 },

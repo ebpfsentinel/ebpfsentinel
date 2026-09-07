@@ -6,7 +6,7 @@ use super::entity::{DnsCacheConfig, DnsCacheEntry, DnsCacheStats};
 /// In-memory DNS resolution cache with forward and reverse indices.
 ///
 /// Thread safety: callers wrap this in `RwLock` at the application layer.
-/// The engine itself is single-threaded — all mutation goes through `&mut self`.
+/// The engine itself is single-threaded - all mutation goes through `&mut self`.
 pub struct DnsCacheEngine {
     /// Forward index: domain → cache entry.
     forward: HashMap<String, DnsCacheEntry>,
@@ -283,7 +283,7 @@ mod tests {
         // Access a.com so it's not LRU
         engine.lookup_domain("a.com", ts(3));
 
-        // Insert d.com — should evict b.com (oldest last_queried_ns)
+        // Insert d.com - should evict b.com (oldest last_queried_ns)
         engine.insert("d.com".to_string(), ip(4), 300, ts(4));
 
         assert_eq!(engine.entry_count(), 3);

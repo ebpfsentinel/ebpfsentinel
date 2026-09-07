@@ -1,4 +1,4 @@
-//! Wire protocol for the eBPFsentinel **warden** — the small privileged component
+//! Wire protocol for the eBPFsentinel **warden** - the small privileged component
 //! that performs kernel operations on behalf of a fully rootless agent.
 //!
 //! The agent runs non-root with every capability dropped and the runtime-default
@@ -8,7 +8,7 @@
 //! messages and a length-prefixed [`write_frame`]/[`read_frame`] codec over any
 //! [`Read`]/[`Write`].
 //!
-//! The codec is pure serialization — no `unsafe`, no `libc`. The few commands that
+//! The codec is pure serialization - no `unsafe`, no `libc`. The few commands that
 //! must hand a file descriptor across the boundary (bpffs delegation, module-BTF
 //! and pcap fds) ride that fd in an `SCM_RIGHTS` control message *alongside* the
 //! frame defined here; the privileged warden binary owns that fd-passing, keeping
@@ -50,13 +50,13 @@ pub struct ConntrackTuple {
 /// so the agent never reads a neighbouring container's `/proc` itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DlpTarget {
-    /// Path the warden resolves for the attach — the library seen through the
+    /// Path the warden resolves for the attach - the library seen through the
     /// owning process's root (`/proc/<pid>/root/<lib>`), in the warden's
     /// namespace. The agent passes it back verbatim in [`Command::AttachUprobe`].
     pub path: String,
-    /// Block device of the resolved file — first half of the dedup key.
+    /// Block device of the resolved file - first half of the dedup key.
     pub dev: u64,
-    /// Inode of the resolved file — second half of the dedup key.
+    /// Inode of the resolved file - second half of the dedup key.
     pub ino: u64,
     /// File offset of `SSL_write` (`0` if not exported by this library).
     pub ssl_write_offset: u64,
@@ -130,9 +130,9 @@ pub enum Command {
     /// Attach a uprobe (`is_ret` = uretprobe) at `offset` within the ELF at
     /// `path`, binding the eBPF program whose fd rides in the accompanying
     /// `SCM_RIGHTS` cmsg (sent right after this frame). The warden creates the
-    /// `uprobe_multi` `BPF_LINK_CREATE` — it holds the tracing capability the
+    /// `uprobe_multi` `BPF_LINK_CREATE` - it holds the tracing capability the
     /// rootless agent dropped, and resolves `path` in its own (init) mount + pid
-    /// namespace — then returns the link fd via [`Response::FdReady`]. This lets
+    /// namespace - then returns the link fd via [`Response::FdReady`]. This lets
     /// the agent probe a neighbouring container's `libssl` under `cap-drop: ALL`.
     /// The program fd is the agent's own verified eBPF object, and the kernel
     /// rejects a program whose type does not match a uprobe link, so the warden
@@ -149,14 +149,14 @@ pub enum Command {
     /// Scan `/proc` for SSL libraries mapped by any process and return one
     /// [`DlpTarget`] per unique `(dev, ino)`, with `SSL_write` / `SSL_read`
     /// offsets pre-resolved. Reading another process's `/proc/<pid>/maps` and ELF
-    /// needs `CAP_SYS_PTRACE`, which the rootless agent dropped — so it delegates
+    /// needs `CAP_SYS_PTRACE`, which the rootless agent dropped - so it delegates
     /// the whole discovery to the warden and only keeps the attach lifecycle.
     DlpScan,
     /// An opaque, namespaced extension operation. The OSS warden does not
     /// interpret it: a downstream build (e.g. the enterprise warden) installs an
     /// extension handler keyed on `kind` that owns the `payload` semantics, and an
     /// OSS warden with no handler answers [`Response::Unimplemented`]. This keeps
-    /// build-specific privileged operations out of the shared protocol — `kind`
+    /// build-specific privileged operations out of the shared protocol - `kind`
     /// namespaces the op, `payload` is its serialized request, and the reply rides
     /// in [`Response::Extension`]. Carries no enterprise-specific fields, so the
     /// AGPL protocol stays agnostic to whatever a handler does with it.
@@ -220,7 +220,7 @@ pub enum Response {
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
 /// `postcard` encoding of `msg`. The leading byte of the postcard body is the
-/// enum-variant tag — the command discriminant — so a reader can dispatch on it
+/// enum-variant tag - the command discriminant - so a reader can dispatch on it
 /// without decoding the whole payload.
 pub fn write_frame<W: Write, T: Serialize>(w: &mut W, msg: &T) -> io::Result<()> {
     let body = postcard::to_allocvec(msg).map_err(io::Error::other)?;

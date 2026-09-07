@@ -1,4 +1,4 @@
-//! XDP SYN cookie forging program — tail-called from `xdp-ratelimit`.
+//! XDP SYN cookie forging program - tail-called from `xdp-ratelimit`.
 //!
 //! Forges SYN+ACK responses with **kernel-issued** SYN cookies for detected
 //! SYN floods, via the `bpf_tcp_raw_gen_syncookie_ipv4/ipv6` helpers. Because

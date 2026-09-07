@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lb_helpers.bash — Load balancer (DSR + Maglev) integration test helpers.
+# lb_helpers.bash - Load balancer (DSR + Maglev) integration test helpers.
 #
 # Active when sourced by a suite running in EBPF_3VM_MODE=true. Wraps the
 # agent's LB REST surface and the in-kernel Maglev map to drive end-to-end

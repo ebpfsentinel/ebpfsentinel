@@ -1,12 +1,12 @@
 #!/usr/bin/env bats
-# 42-xdp-firewall-reject.bats — wire-validates the xdp-firewall-reject
+# 42-xdp-firewall-reject.bats - wire-validates the xdp-firewall-reject
 # tail-call program: TCP RST forging for `action: reject` on TCP rules,
 # ICMP Destination-Port-Unreachable forging for UDP rules, and
 # whitelist bypass (no RST/ICMP for trusted sources).
 #
 # Topology: 2vm. Profile: nightly. Requires:
-#   - Attacker VM with tcpdump, tshark, ncat, scapy (Story 34.3)
-#   - Agent VM reachable via 2VM SSH helpers (Story 34.2)
+#   - Attacker VM with tcpdump, tshark, ncat, scapy
+#   - Agent VM reachable via 2VM SSH helpers
 #   - Kernel >= 6.9
 #
 # Asserts (per AC):
@@ -199,7 +199,7 @@ _attacker_iface() {
 
 @test "whitelisted source NOT rejected (no RST when src is in whitelist)" {
     if ! "$EBPF_SCAPY_PY" -c "import scapy.all" >/dev/null 2>&1; then
-        echo "scapy not available — cannot forge whitelisted-source SYN" >&2
+        echo "scapy not available - cannot forge whitelisted-source SYN" >&2
         return 1
     fi
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 35-operator-managed-flag.bats — agent identity + operator-managed config.
+# 35-operator-managed-flag.bats - agent identity + operator-managed config.
 #
 # Validates the contract documented in `api-reference/rest-api.md`:
 #   - `GET /api/v1/agent/identity` returns the management metadata.
@@ -94,8 +94,8 @@ _reload_config() {
 
     local body
     body="$(curl -sf --max-time 3 "${BASE_URL}/api/v1/agent/identity")"
-    # Either the previous (false / absent) state is preserved, or — if a
-    # file-watcher fallback re-applied the bad config — the gate refused
+    # Either the previous (false / absent) state is preserved, or - if a
+    # file-watcher fallback re-applied the bad config - the gate refused
     # to flip the flag. Both are acceptable; what is NOT acceptable is
     # advertising the malformed URL.
     [ "$(jq -r '.operator_endpoint // "absent"' <<<"$body")" != "not-a-valid-url" ]

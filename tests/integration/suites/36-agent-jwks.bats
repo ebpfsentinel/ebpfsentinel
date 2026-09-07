@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 36-agent-jwks.bats — agent verifies EdDSA JWTs against a fake JWKS server.
+# 36-agent-jwks.bats - agent verifies EdDSA JWTs against a fake JWKS server.
 #
 # Boots a tiny Python `http.server` that serves a JWKS containing the
 # matching Ed25519 public key, signs a JWT with `python -m jwt`, and
@@ -32,7 +32,7 @@ setup_file() {
         "kid-test"
 
     # Serve the JWKS on localhost. Launch python directly (no cd subshell)
-    # so $! is the real server PID — a subshell wrapper makes $! the
+    # so $! is the real server PID - a subshell wrapper makes $! the
     # subshell, and killing it leaves the python orphaned. Close bats' FD 3
     # (3>&-) so a stray server can never hold the TAP stream open and hang
     # teardown.

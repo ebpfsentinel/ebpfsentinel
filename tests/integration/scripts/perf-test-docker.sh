@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# perf-test-docker.sh — Comprehensive performance test (binary or Docker mode)
+# perf-test-docker.sh - Comprehensive performance test (binary or Docker mode)
 #
 # Measures throughput, latency, PPS, CPU/memory overhead, and API performance
 # across multiple agent modes (alert, block, firewall-only, ratelimit-only).
@@ -8,8 +8,8 @@
 #   sudo ./perf-test-docker.sh [--mode binary|docker] [--skip-build] [--quick] [--soak] [--report-dir DIR]
 #
 # Modes:
-#   docker  (default) — run agent via docker compose
-#   binary  — run agent as a local binary process
+#   docker  (default) - run agent via docker compose
+#   binary  - run agent as a local binary process
 #
 # Requirements: root, kernel >= 6.9, iperf3, hping3, bpftool, bc, jq
 #   Docker mode additionally requires: Docker
@@ -408,7 +408,7 @@ services:
 YAML
 }
 
-# compose_up — start the agent container via docker compose
+# compose_up - start the agent container via docker compose
 compose_up() {
     docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" up -d --wait >/dev/null 2>&1 || \
     docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" up -d >/dev/null 2>&1
@@ -424,7 +424,7 @@ compose_up() {
         >"$AGENT_LOG_FILE" 2>&1 &
 }
 
-# compose_down — stop and remove the agent container
+# compose_down - stop and remove the agent container
 compose_down() {
     docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" down 2>/dev/null || true
     rm -f "$AGENT_PID_FILE"
@@ -451,7 +451,7 @@ binary_up() {
     fi
 }
 
-# binary_down — stop the agent process
+# binary_down - stop the agent process
 binary_down() {
     if [ -f "$AGENT_PID_FILE" ]; then
         local pid
@@ -472,7 +472,7 @@ binary_down() {
     fi
 }
 
-# agent_down — stop agent regardless of mode
+# agent_down - stop agent regardless of mode
 agent_down() {
     if [ "$MODE" = "docker" ]; then
         compose_down "$@"
@@ -775,7 +775,7 @@ run_block_mode() {
     # Verify blocked port 9999
     echo "  Verifying port 9999 is blocked..."
     local blocked_result="pass"
-    # Try to send TCP data to blocked port — should fail or get 0 bytes
+    # Try to send TCP data to blocked port - should fail or get 0 bytes
     local blocked_output
     blocked_output="$(ip netns exec "$EBPF_TEST_NS" \
         timeout 3 ncat -w 2 "$EBPF_HOST_IP" 9999 </dev/null 2>&1)" || true
@@ -949,7 +949,7 @@ run_api_benchmarks() {
 
 run_soak_test() {
     if [ "$SOAK" != "true" ]; then
-        echo "=== Phase 6: Soak Test (skipped — use --soak to enable) ==="
+        echo "=== Phase 6: Soak Test (skipped - use --soak to enable) ==="
         echo ""
         return
     fi

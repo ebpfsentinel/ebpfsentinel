@@ -1,4 +1,4 @@
-# Skip policy — every skip reason used by the bats fleet, classified.
+# Skip policy - every skip reason used by the bats fleet, classified.
 #
 # A skipped test reports as success, so the two cases must not be
 # conflated:
@@ -11,7 +11,7 @@
 #   masking  a prerequisite the suite itself provides is missing, or an
 #            earlier step produced nothing to assert on. Skipping keeps a
 #            degraded dev box usable, but in the canonical lane it hides a
-#            regression — so `soft_skip` FAILS under
+#            regression - so `soft_skip` FAILS under
 #            EBPFSENTINEL_STRICT_SKIPS=1.
 #
 # Entries are matched as prefixes, so a reason ending in a shell
@@ -21,13 +21,13 @@
 
 
 env:
-  - "ebpfsentinel:integration-test image not built — run the docker build first"
+  - "ebpfsentinel:integration-test image not built - run the docker build first"
   - "minikube cluster could not start on this host"
-  - "eth2 not present — NPTv6 needs the multi-NIC topology"
+  - "eth2 not present - NPTv6 needs the multi-NIC topology"
   - "capture interface"
   - "kdig (knot-dnsutils) not available on attacker VM"
   - "no eBPF objects available to build the agent image"
-  - "agent VM lacks eth2 — NPTv6 needs the multi-NIC topology"
+  - "agent VM lacks eth2 - NPTv6 needs the multi-NIC topology"
   - "no alert-producing test on this lane (v6 wire probe is local-lane only)"
   - "no system libssl.so.3 to copy"
   - "nuclei not available on attacker VM"
@@ -35,7 +35,7 @@ env:
   - "${tool} not available on attacker VM"
   - "${tool} not installed"
   - "${tool} not installed on agent VM"
-  - "/proc/net/nf_conntrack unavailable — event stream not wired"
+  - "/proc/net/nf_conntrack unavailable - event stream not wired"
   - "Agent binary not found:"
   - "Docker agent not healthy"
   - "Docker daemon not running"
@@ -118,7 +118,7 @@ masking:
   - "cannot read memory after traffic"
   - "capture_on backend returned no pcap"
   - "capture_on failed on agent VM"
-  - "control SYN never reached backend — transit inconclusive"
+  - "control SYN never reached backend - transit inconclusive"
   - "could not resolve MAC for"
   - "could not start TLS target on agent VM at port"
   - "could not start ncat listener on agent VM at port"
@@ -134,16 +134,16 @@ masking:
   - "neighbour TLS container could not run (image pull / apk / openssl)"
   - "no GeoIP-specific metrics found"
   - "no IPS rules available to patch"
-  - "no IPv6 probe reached backend — transit link not established"
+  - "no IPv6 probe reached backend - transit link not established"
   - "no OTLP export recorded yet"
   - "no TLS client available to drive ServerHello"
   - "no TLS client available to drive malicious SNI"
   - "burst produced"
   - "no alert_id from previous test"
-  - "no alerts emitted by this suite — MITRE assertion not applicable here"
-  - "no alerts emitted during reload cycle — duplication check N/A"
-  - "no alerts generated — cannot verify GeoIP enrichment"
-  - "no alerts generated — traffic may not have matched a country-deny rule"
+  - "no alerts emitted by this suite - MITRE assertion not applicable here"
+  - "no alerts emitted during reload cycle - duplication check N/A"
+  - "no alerts generated - cannot verify GeoIP enrichment"
+  - "no alerts generated - traffic may not have matched a country-deny rule"
   - "no blacklist entries to check TTL on"
   - "no broker socket to probe"
   - "no delivery recorded yet"
@@ -151,15 +151,15 @@ masking:
   - "hyenae-ng produced no observable flood on this build"
   - "no ids-alert-test alert available"
   - "no mail recorded yet"
-  - "no warden pid recorded — agent started without the broker"
+  - "no warden pid recorded - agent started without the broker"
   - "no zone-labelled metrics found"
   - "only"
   - "pcap empty (transit may not have reached backend)"
-  - "pcap empty — transit path did not deliver the control packet"
+  - "pcap empty - transit path did not deliver the control packet"
   - "stop_capture failed on agent VM"
   - "tcpdump unavailable on backend VM"
   - "inventory neighbour container could not start"
-  - "vip announcer never ran — no speaker transition in this topology"
+  - "vip announcer never ran - no speaker transition in this topology"
   - "warden failed to build: $(cat /tmp/warden-build-$$.log)"
   - "agent did not reload with the gRPC fixture"
   - "no gRPC export recorded yet"

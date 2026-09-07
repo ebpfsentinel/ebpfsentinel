@@ -38,7 +38,7 @@ pub fn discover_netkit_interfaces() -> Vec<String> {
 /// Returns a list of `(pid, ns_inode)` pairs, deduplicated by inode
 /// (pods sharing a network namespace only appear once).
 ///
-/// This is a best-effort scan — processes may exit between listing
+/// This is a best-effort scan - processes may exit between listing
 /// and reading. Errors are silently skipped.
 pub fn discover_pod_network_namespaces() -> Vec<(u32, u64)> {
     let proc_dir = Path::new("/proc");
@@ -146,7 +146,7 @@ pub async fn watch_netkit_devices(
                     );
                 }
 
-                // New netkit devices — attach + correlate with pods.
+                // New netkit devices - attach + correlate with pods.
                 for iface in current_ifaces.difference(&known_ifaces) {
                     let peer = iface_peer_ifindex(iface);
                     info!(
@@ -158,7 +158,7 @@ pub async fn watch_netkit_devices(
                     on_new_device(iface, &new_pods);
                 }
 
-                // Removed devices (log only — link fd drop handles detach).
+                // Removed devices (log only - link fd drop handles detach).
                 for iface in known_ifaces.difference(&current_ifaces) {
                     debug!(iface, "netkit device removed");
                 }

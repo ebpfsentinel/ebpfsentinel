@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""ssdp_search.py — Flood an agent with reflected SSDP amplification responses.
+"""ssdp_search.py - Flood an agent with reflected SSDP amplification responses.
 
 SSDP (UDP/1900) yields a multi-line UPnP response from any discovered
-device — a ~30x amplification vector. This script models the victim-
+device - a ~30x amplification vector. This script models the victim-
 facing leg: a flood sourced *from* the SSDP port (1900), the amplified
 responses a reflector blasts at a spoofed victim. The agent's UDP
 amplification protection rate-limits per source/amplifier-port and

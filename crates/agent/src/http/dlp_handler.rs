@@ -29,7 +29,7 @@ pub struct DlpPatternResponse {
 
 // ── Handlers ──────────────────────────────────────────────────────
 
-/// `GET /api/v1/dlp/status` — DLP status.
+/// `GET /api/v1/dlp/status` - DLP status.
 #[utoipa::path(
     get, path = "/api/v1/dlp/status",
     tag = "DLP",
@@ -57,7 +57,7 @@ pub async fn dlp_status(
     }))
 }
 
-/// `GET /api/v1/dlp/patterns` — list DLP patterns.
+/// `GET /api/v1/dlp/patterns` - list DLP patterns.
 #[utoipa::path(
     get, path = "/api/v1/dlp/patterns",
     tag = "DLP",

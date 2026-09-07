@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# mhddos_helpers.bash — Drive MHDDoS from BATS suites.
+# mhddos_helpers.bash - Drive MHDDoS from BATS suites.
 #
-# MHDDoS is provisioned at /opt/MHDDoS on the attacker VM (Story 34.3),
+# MHDDoS is provisioned at /opt/MHDDoS on the attacker VM,
 # with a dedicated venv at /opt/MHDDoS/.venv and a `.tor-disabled` flag
 # that the helper honours to force deterministic origin IPs (no exit
 # rotation, no Internet fan-out). Use from BATS via:
@@ -17,7 +17,7 @@
 #
 # Skip-on-network-error guard: if the local route to the target is the
 # default gateway (rather than the private 192.168.56.0/24 link), the
-# helper aborts via `skip` — accidentally aiming MHDDoS at the public
+# helper aborts via `skip` - accidentally aiming MHDDoS at the public
 # Internet during a CI accident must NOT silently succeed.
 
 MHDDOS_DIR="${MHDDOS_DIR:-/opt/MHDDoS}"
@@ -30,7 +30,7 @@ MHDDOS_DEFAULT_THREADS="${MHDDOS_DEFAULT_THREADS:-10}"
 MHDDOS_DEFAULT_DURATION="${MHDDOS_DEFAULT_DURATION:-30}"
 # Layer7 methods require a proxylist argument. An existing but EMPTY file makes
 # start.py run proxyless (direct single-source flood) instead of downloading a
-# proxy pool — which is what the per-source rate-limit assertions need.
+# proxy pool - which is what the per-source rate-limit assertions need.
 MHDDOS_PROXY_NONE="${MHDDOS_PROXY_NONE:-none.txt}"
 
 # ── Guards ────────────────────────────────────────────────────────────
@@ -62,7 +62,7 @@ _mhddos_validate_target() {
             return 0
             ;;
         *)
-            env_skip "MHDDoS target ${ip} is not RFC1918 — refusing to flood public address"
+            env_skip "MHDDoS target ${ip} is not RFC1918 - refusing to flood public address"
             ;;
     esac
 }
@@ -101,7 +101,7 @@ _mhddos_method_args() {
 
 # run_mhddos <method> [duration_secs] [threads] [path]
 # Drive MHDDoS against the agent's HTTP port. Captures stdout+stderr to
-# MHDDOS_LOG and ALWAYS returns 0 — callers MUST assert on the agent's
+# MHDDOS_LOG and ALWAYS returns 0 - callers MUST assert on the agent's
 # observable side-effects (metrics / alerts / blacklist), never on
 # MHDDoS's own exit code.
 run_mhddos() {

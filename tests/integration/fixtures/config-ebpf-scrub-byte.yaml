@@ -1,4 +1,4 @@
-# config-ebpf-scrub-byte.yaml — tc-scrub byte-level normalization, 3-VM.
+# config-ebpf-scrub-byte.yaml - tc-scrub byte-level normalization, 3-VM.
 #
 # Attaches tc-scrub to both transit interfaces; the agent rewrites IPv4
 # headers (TTL floor, IP-ID randomize, DF clear) and the TCP MSS option

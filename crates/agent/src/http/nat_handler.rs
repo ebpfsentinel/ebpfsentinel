@@ -30,7 +30,7 @@ pub struct NatRuleResponse {
 
 // ── Handlers ──────────────────────────────────────────────────────
 
-/// `GET /api/v1/nat/status` — NAT status.
+/// `GET /api/v1/nat/status` - NAT status.
 #[utoipa::path(
     get, path = "/api/v1/nat/status",
     tag = "NAT",
@@ -57,7 +57,7 @@ pub async fn nat_status(
     }))
 }
 
-/// `GET /api/v1/nat/rules` — list NAT rules.
+/// `GET /api/v1/nat/rules` - list NAT rules.
 #[utoipa::path(
     get, path = "/api/v1/nat/rules",
     tag = "NAT",

@@ -21,7 +21,7 @@ pub trait L2BindingPort: Send + Sync {
     /// Remove the binding for `ip` (idempotent if absent).
     fn deregister_binding(&mut self, ip: IpAddr) -> Result<(), DomainError>;
 
-    /// Remove every entry — called on speaker loss so a standby node
+    /// Remove every entry - called on speaker loss so a standby node
     /// owns nothing (keeps the kernel map split-brain safe).
     fn clear_bindings(&mut self) -> Result<(), DomainError>;
 }

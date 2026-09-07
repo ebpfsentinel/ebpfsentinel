@@ -1,4 +1,4 @@
-# config-ebpf-loadbalancer.yaml — Load balancer eBPF scenario test config
+# config-ebpf-loadbalancer.yaml - Load balancer eBPF scenario test config
 # Tests: XDP load balancer program loading, service config, backend selection
 #
 # Network topology:

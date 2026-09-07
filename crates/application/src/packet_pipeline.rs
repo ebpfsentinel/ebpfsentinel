@@ -179,8 +179,8 @@ impl EventDispatcher {
     }
 
     /// Resolve container provenance for a DLP uprobe event. Prefers the event's
-    /// `cgroup_id` — reliably populated by the uprobe and resolvable from the
-    /// host cgroupfs without host-PID visibility — so a neighbouring container's
+    /// `cgroup_id` - reliably populated by the uprobe and resolvable from the
+    /// host cgroupfs without host-PID visibility - so a neighbouring container's
     /// TLS is attributed to that container, mirroring the cgroup-id attribution
     /// on the TC datapath. Falls back to the pid cgroup read for cgroup v1 hosts
     /// where the kernel reports `cgroup_id == 0`.
@@ -204,7 +204,7 @@ impl EventDispatcher {
         cgroup_id: u64,
     ) -> Option<domain::container::entity::ContainerInfo> {
         // cgroup_id 0 = the datapath captured no cgroup (softirq ingress on
-        // a real NIC before demux). Not an error — skip silently so routine
+        // a real NIC before demux). Not an error - skip silently so routine
         // host traffic does not churn the resolver error counter.
         if cgroup_id == 0 {
             return None;
@@ -700,7 +700,7 @@ impl EventDispatcher {
 
             // Threshold check with country-aware overrides (now &self, no write lock
             // needed). `rule` is borrowed for the duration of this block, so the
-            // check borrows it directly — no per-match deep clone of the rule.
+            // check borrows it directly - no per-match deep clone of the rule.
             if rule.threshold.is_some()
                 && !svc.check_threshold_with_country(
                     rule,
@@ -841,7 +841,7 @@ impl EventDispatcher {
             return;
         }
 
-        // The eBPF program already matched the IP — look up the IOC for context.
+        // The eBPF program already matched the IP - look up the IOC for context.
         // Try both src and dst IPs (the kernel fires one event per match direction).
         let src_ip = addr_to_ip(event.src_addr, event.is_ipv6());
         let dst_ip = addr_to_ip(event.dst_addr, event.is_ipv6());
@@ -884,7 +884,7 @@ impl EventDispatcher {
             container: container.clone(),
         };
 
-        // Reuse the IDS alert channel — AlertPipeline handles both IDS and ThreatIntel.
+        // Reuse the IDS alert channel - AlertPipeline handles both IDS and ThreatIntel.
         // Convert to IdsAlert for channel compatibility (same shape).
         let ids_alert = IdsAlert {
             rule_id: domain::common::entity::RuleId(format!("ti-{}", ti_alert.feed_id)),
@@ -960,7 +960,7 @@ impl EventDispatcher {
                     &reassembled_buf
                 }
                 domain::l7::reassembler::Ingest::Pending => {
-                    // Still buffered — wait for more fragments or a
+                    // Still buffered - wait for more fragments or a
                     // periodic `flush_expired` sweep.
                     return;
                 }
@@ -1126,7 +1126,7 @@ impl EventDispatcher {
                 src_ip = %header.src_ip(),
                 dst_ip = %header.dst_ip(),
                 l7_protocol = protocol_label,
-                "L7 event — no rule matched"
+                "L7 event - no rule matched"
             );
             self.metrics.record_packet("l7", protocol_label);
         }
@@ -1175,7 +1175,7 @@ impl EventDispatcher {
             dst_addr: flow.dst_addr,
             src_port: flow.src_port,
             dst_port: flow.dst_port,
-            protocol: 6, // IPPROTO_TCP — L7 capture is TCP-only
+            protocol: 6, // IPPROTO_TCP - L7 capture is TCP-only
             event_type: ebpf_common::event::EVENT_TYPE_L7,
             action: 0,
             flags,
@@ -1794,7 +1794,7 @@ mod tests {
     }
 
     // A complete TLS ClientHello is a self-contained record, so the
-    // reassembler recognises its boundary and emits it inline — the L7 parser
+    // reassembler recognises its boundary and emits it inline - the L7 parser
     // (and JA4 fingerprinting) runs immediately, not deferred to the idle
     // flush. Nothing is left buffered for a later flush.
     #[tokio::test]
@@ -1825,7 +1825,7 @@ mod tests {
             _ => panic!("expected AlertEvent::Dns emitted inline"),
         }
 
-        // The flow was emitted, not buffered — the idle flush has nothing left.
+        // The flow was emitted, not buffered - the idle flush has nothing left.
         let flushed = dispatcher.flush_reassembled(10_000_000_000);
         assert_eq!(
             flushed, 0,
@@ -2134,7 +2134,7 @@ mod tests {
         // Cancel immediately
         cancel.cancel();
 
-        // Run the dispatcher — it should drain both events then exit
+        // Run the dispatcher - it should drain both events then exit
         dispatcher.run(event_rx, cancel).await;
 
         // The IDS event should have produced an alert
@@ -2486,7 +2486,7 @@ mod tests {
         let metrics = Arc::new(TestMetrics::new());
         let (alert_tx, mut alert_rx) = mpsc::channel(10);
 
-        // Empty DNS cache — no domains resolved for this IP
+        // Empty DNS cache - no domains resolved for this IP
         let dns: Arc<dyn DnsCachePort> = Arc::new(MockDnsCache::new());
 
         let dispatcher =
@@ -2494,7 +2494,7 @@ mod tests {
 
         dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 0));
 
-        // Domain rule should not match — no alert
+        // Domain rule should not match - no alert
         assert!(alert_rx.try_recv().is_err());
     }
 
@@ -2531,11 +2531,11 @@ mod tests {
         // No DNS cache (dns_cache = None)
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
 
-        // Event for rule index 0 (domain rule) — should NOT match
+        // Event for rule index 0 (domain rule) - should NOT match
         dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 0));
         assert!(alert_rx.try_recv().is_err());
 
-        // Event for rule index 1 (IP-only rule) — should match
+        // Event for rule index 1 (IP-only rule) - should match
         dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 1));
         let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
         assert_eq!(alert.rule_id.0, "ids-002");

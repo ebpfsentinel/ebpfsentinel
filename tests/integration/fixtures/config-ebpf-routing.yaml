@@ -1,5 +1,5 @@
-# config-ebpf-routing.yaml — Dynamic routing eBPF scenario test config
-# Note: gateway 10.200.0.254 does not exist — health will be "unknown"/"down".
+# config-ebpf-routing.yaml - Dynamic routing eBPF scenario test config
+# Note: gateway 10.200.0.254 does not exist - health will be "unknown"/"down".
 
 agent:
   interfaces:

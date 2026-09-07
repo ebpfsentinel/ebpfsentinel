@@ -42,7 +42,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{/*
-Selector labels (immutable — used in matchLabels).
+Selector labels (immutable - used in matchLabels).
 */}}
 {{- define "ebpfsentinel.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "ebpfsentinel.name" . }}

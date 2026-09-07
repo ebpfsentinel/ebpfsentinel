@@ -10,7 +10,7 @@
 //! privileged `warden` and handed to the agent on delegation.
 //!
 //! eBPF is loaded token-only, so the agent runs inside a child user namespace
-//! and cannot create an `AF_PACKET` socket itself — `CAP_NET_RAW` is checked
+//! and cannot create an `AF_PACKET` socket itself - `CAP_NET_RAW` is checked
 //! against the host network namespace, which is owned by the initial user
 //! namespace. The warden creates the sockets while it holds `CAP_NET_RAW` and
 //! passes their fds to the agent over the control socket (advertised via
@@ -32,7 +32,7 @@ pub struct PcapSocketPool {
 
 impl PcapSocketPool {
     /// Build a pool from the `EBPFSENTINEL_PCAP_FDS` env var (a comma-separated
-    /// fd list set by the launcher). Returns `None` when unset or empty — packet
+    /// fd list set by the launcher). Returns `None` when unset or empty - packet
     /// capture then degrades gracefully (no sockets to capture on).
     #[must_use]
     pub fn from_env() -> Option<Arc<Self>> {
@@ -131,7 +131,7 @@ pub fn run_capture(
 
     let ifindex = resolve_ifindex(interface)?;
     bind_packet(fd, ifindex)?;
-    // Promiscuous mode is best effort — some links (loopback, "any") reject it.
+    // Promiscuous mode is best effort - some links (loopback, "any") reject it.
     let promisc = ifindex != 0 && set_promisc(fd, ifindex, true).is_ok();
 
     // A dead capture handle compiles filters and writes the pcap file without
@@ -142,7 +142,7 @@ pub fn run_capture(
     } else {
         let prog = dead
             .compile(filter, true)
-            .map_err(|_| "BPF filter compilation failed — check filter syntax".to_string())?;
+            .map_err(|_| "BPF filter compilation failed - check filter syntax".to_string())?;
         attach_filter(fd, prog.get_instructions())?;
         true
     };
@@ -175,7 +175,7 @@ pub fn run_capture(
             savefile.write(&Packet::new(&header, &buf[..caplen]));
             packets += 1;
         } else {
-            // No frame ready (EAGAIN) — yield briefly and re-check the deadline
+            // No frame ready (EAGAIN) - yield briefly and re-check the deadline
             // without busy-spinning.
             std::thread::sleep(std::time::Duration::from_millis(50));
         }

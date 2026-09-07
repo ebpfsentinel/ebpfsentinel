@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 /// Circuit breaker state for alert sender destinations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitState {
-    /// Normal operation — all attempts allowed.
+    /// Normal operation - all attempts allowed.
     Closed = 0,
     /// Single probe attempt allowed after open duration elapsed.
     HalfOpen = 1,
@@ -57,14 +57,14 @@ impl CircuitBreaker {
         }
     }
 
-    /// Record a successful attempt — resets the circuit breaker to Closed.
+    /// Record a successful attempt - resets the circuit breaker to Closed.
     pub fn record_success(&mut self) {
         self.state = CircuitState::Closed;
         self.failure_count = 0;
         self.opened_at = None;
     }
 
-    /// Record a failed attempt — increments the failure count and opens
+    /// Record a failed attempt - increments the failure count and opens
     /// the circuit if the threshold is reached.
     pub fn record_failure(&mut self) {
         self.failure_count += 1;

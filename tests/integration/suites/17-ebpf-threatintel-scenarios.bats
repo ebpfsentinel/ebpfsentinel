@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 17-ebpf-threatintel-scenarios.bats — Threat intel eBPF scenario tests
+# 17-ebpf-threatintel-scenarios.bats - Threat intel eBPF scenario tests
 # Requires: root, kernel >= 6.9, bpftool, ncat
 
 load '../lib/helpers'
@@ -105,7 +105,7 @@ teardown_file() {
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ]
-    # Feed count depends on config — may be 0 if no feeds configured
+    # Feed count depends on config - may be 0 if no feeds configured
     local count
     count="$(echo "$body" | jq 'if type == "array" then length else (.feeds // []) | length end' 2>/dev/null)" || count="0"
     [ "${count:-0}" -ge 0 ]
@@ -135,7 +135,7 @@ teardown_file() {
 
     [ "$HTTP_STATUS" = "200" ]
 
-    # mode field should be "alert" or "block" — not empty/null
+    # mode field should be "alert" or "block" - not empty/null
     local mode
     mode="$(echo "$body" | jq -r '.mode' 2>/dev/null)" || true
     [ -n "$mode" ] && [ "$mode" != "null" ]
@@ -149,7 +149,7 @@ teardown_file() {
     _load_http_status
 
     # 200 or 204 indicates the reload was accepted; 404 if the endpoint does not
-    # exist in this build — any of these is acceptable as long as the agent stays up.
+    # exist in this build - any of these is acceptable as long as the agent stays up.
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ] || [ "$HTTP_STATUS" = "404" ]
 
     # Give the agent a moment to complete the reload
@@ -219,7 +219,7 @@ teardown_file() {
 @test "duplicate IOC deduplication across feeds" {
     require_root
 
-    # List IOCs — duplicates should be deduplicated
+    # List IOCs - duplicates should be deduplicated
     local body
     body="$(api_get /api/v1/threatintel/iocs)"
     _load_http_status

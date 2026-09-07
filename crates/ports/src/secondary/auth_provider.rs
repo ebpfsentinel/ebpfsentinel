@@ -5,7 +5,7 @@ use domain::auth::error::AuthError;
 /// Port for token-based authentication.
 ///
 /// `async` because JWKS-backed providers may refresh their key set
-/// inline when an unknown `kid` arrives — that refresh is an HTTPS
+/// inline when an unknown `kid` arrives - that refresh is an HTTPS
 /// round-trip and must not block a Tokio worker. Static-PEM and API-key
 /// providers do no I/O on the hot path; their implementations just
 /// trampoline the synchronous decoder.

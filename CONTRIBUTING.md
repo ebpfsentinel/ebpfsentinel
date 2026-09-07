@@ -152,7 +152,7 @@ domain ← ports ← application
 ```
 
 **Rules:**
-- `domain` depends on **nothing** — pure business logic, `#![forbid(unsafe_code)]`
+- `domain` depends on **nothing** - pure business logic, `#![forbid(unsafe_code)]`
 - `ports` defines traits consumed by adapters (primary) and implemented by adapters (secondary)
 - `application` orchestrates domain engines via port traits
 - `adapters` implements port traits (HTTP, gRPC, eBPF, redb storage)

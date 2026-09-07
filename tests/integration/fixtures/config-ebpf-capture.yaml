@@ -1,4 +1,4 @@
-# config-ebpf-capture.yaml — Time-bounded packet capture (suite 53).
+# config-ebpf-capture.yaml - Time-bounded packet capture (suite 53).
 #
 # Drives the manual capture endpoint at /api/v1/captures/manual and the
 # matching `ebpfsentinel-agent capture start` CLI. The agent writes the

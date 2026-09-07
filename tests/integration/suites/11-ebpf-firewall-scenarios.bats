@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 11-ebpf-firewall-scenarios.bats — Firewall eBPF packet-level tests
+# 11-ebpf-firewall-scenarios.bats - Firewall eBPF packet-level tests
 # Requires: root, kernel >= 6.9, bpftool, ncat, ip
 #
 # Tests array-based rule matching with:

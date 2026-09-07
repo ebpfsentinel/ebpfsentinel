@@ -1,4 +1,4 @@
-# config-ebpf-ratelimit.yaml — Rate limiting eBPF scenario test config
+# config-ebpf-ratelimit.yaml - Rate limiting eBPF scenario test config
 # Tests: 100 tok/s global rate limit, token_bucket algorithm
 
 agent:

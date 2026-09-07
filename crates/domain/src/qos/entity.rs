@@ -26,7 +26,7 @@ impl std::fmt::Display for QosDirection {
     }
 }
 
-/// A `QoS` pipe — bandwidth limiter with optional delay and loss.
+/// A `QoS` pipe - bandwidth limiter with optional delay and loss.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QosPipe {
     /// Unique pipe identifier.
@@ -54,7 +54,7 @@ pub struct QosPipe {
     pub tenant_id: u32,
 }
 
-/// A `QoS` queue — the indirection classifiers point at to reach a pipe.
+/// A `QoS` queue - the indirection classifiers point at to reach a pipe.
 ///
 /// Traffic is shaped by the pipe, not by the queue: disabling a queue detaches
 /// every classifier that names it in one move, without editing them.
@@ -99,7 +99,7 @@ pub struct QosMatchRule {
     pub vlan_id: Option<u16>,
 }
 
-/// A `QoS` classifier — maps traffic to a queue based on match rules.
+/// A `QoS` classifier - maps traffic to a queue based on match rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QosClassifier {
     /// Unique classifier identifier.

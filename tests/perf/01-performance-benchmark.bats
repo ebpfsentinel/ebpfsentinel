@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 01-performance-benchmark.bats — Performance benchmarks (throughput + resource usage)
+# 01-performance-benchmark.bats - Performance benchmarks (throughput + resource usage)
 # Requires: root, kernel >= 6.9, bpftool, iperf3
 #
 # Each throughput point is sampled IPERF_SAMPLES times and reduced to a median;
@@ -17,8 +17,8 @@ load '../integration/lib/ebpf_helpers'
 BENCHMARK_REPORT="/tmp/ebpfsentinel-benchmark-latest.json"
 
 # Every number below travels through printf, sort -g, awk, bc and jq. Under a
-# comma-decimal locale those disagree about what "941772835.6" means — sort -g
-# stops ordering and printf rejects the value outright — so the whole suite
+# comma-decimal locale those disagree about what "941772835.6" means - sort -g
+# stops ordering and printf rejects the value outright - so the whole suite
 # runs in the C locale.
 export LC_ALL=C
 
@@ -41,7 +41,7 @@ IPERF_DURATION="${IPERF_DURATION:-5}"
 TCP_OVERHEAD_BUDGET_PCT="${TCP_OVERHEAD_BUDGET_PCT:-20}"
 
 # A run whose own baseline samples spread wider than this cannot resolve the
-# budget at all — the box is too unstable to benchmark on, and any verdict it
+# budget at all - the box is too unstable to benchmark on, and any verdict it
 # produced would be a coin flip.
 MAX_BASELINE_NOISE_PCT="${MAX_BASELINE_NOISE_PCT:-25}"
 
@@ -72,7 +72,7 @@ setup_file() {
     echo '{}' > "$BENCHMARK_REPORT"
 
     # Start the iperf3 server. In 2-VM mode the agent is the iperf target
-    # (EBPF_HOST_IP = the agent VM), so the server must run ON THE AGENT — not on
+    # (EBPF_HOST_IP = the agent VM), so the server must run ON THE AGENT - not on
     # the attacker VM that runs bats. Starting it locally there fails to bind the
     # agent's IP, leaving the baseline client with no server (it hangs/skips).
     if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
@@ -123,7 +123,7 @@ _report_set_str() {
 
 # ── Helper: sampled throughput ─────────────────────────────────────
 
-# _iperf_samples [extra iperf3 args] — echo IPERF_SAMPLES bits/s readings,
+# _iperf_samples [extra iperf3 args] - echo IPERF_SAMPLES bits/s readings,
 # space separated. Failed runs are dropped rather than counted as zero, which
 # would drag the median toward a number no measurement produced.
 _iperf_samples() {
@@ -160,7 +160,7 @@ _median() {
         }'
 }
 
-# Spread of the samples as a percentage of their median — the smallest
+# Spread of the samples as a percentage of their median - the smallest
 # overhead this run can tell apart from noise.
 _spread_pct() {
     printf '%s\n' "$@" | sort -g | awk '
@@ -340,7 +340,7 @@ _report_samples() {
     _report_set_str "tcp_overhead_threshold_pct" "$threshold"
 
     if [ "$(echo "$noise > $MAX_BASELINE_NOISE_PCT" | bc -l 2>/dev/null)" = "1" ]; then
-        skip "baseline spread ${noise}% exceeds ${MAX_BASELINE_NOISE_PCT}% — too noisy to resolve a ${TCP_OVERHEAD_BUDGET_PCT}% budget"
+        skip "baseline spread ${noise}% exceeds ${MAX_BASELINE_NOISE_PCT}% - too noisy to resolve a ${TCP_OVERHEAD_BUDGET_PCT}% budget"
     fi
 
     if [ "$(echo "$overhead <= $threshold" | bc -l 2>/dev/null)" != "1" ]; then

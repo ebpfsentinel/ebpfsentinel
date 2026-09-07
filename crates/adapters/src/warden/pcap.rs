@@ -6,8 +6,8 @@
 //! the sockets and passes them via `EBPFSENTINEL_PCAP_FDS`; in the warden
 //! deployment the warden performs the privileged `socket()`+`bind()` and hands the
 //! fd over `SCM_RIGHTS`. Either way the agent only ever *binds*, *filters* and
-//! *reads* an already-created socket — operations the kernel allows with no
-//! capability — so the same [`PcapSocketPool`] consumes the fds unchanged.
+//! *reads* an already-created socket - operations the kernel allows with no
+//! capability - so the same [`PcapSocketPool`] consumes the fds unchanged.
 //!
 //! The warden binds each socket to a real interface at `socket()` time, but the
 //! agent rebinds it to the requested capture interface per capture (rebinding an

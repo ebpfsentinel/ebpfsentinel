@@ -18,7 +18,7 @@ use ports::secondary::vip_announcer_port::{GratuitousArpPort, IfaceMacResolverPo
 /// XDP responder never answers.
 ///
 /// Gratuitous ARP on takeover is emitted from userspace via
-/// [`GratuitousArpPort`] — never from eBPF.
+/// [`GratuitousArpPort`] - never from eBPF.
 pub struct VipAnnouncerService {
     config: VipAnnounceConfig,
     map_port: Option<Box<dyn VipMapPort + Send>>,
@@ -113,7 +113,7 @@ impl VipAnnouncerService {
         &self.config.vips
     }
 
-    /// Snapshot of the current announce configuration (clone — used by
+    /// Snapshot of the current announce configuration (clone - used by
     /// the CLI / REST surfaces and by reload to round-trip the request).
     #[must_use]
     pub fn config_snapshot(&self) -> VipAnnounceConfig {
@@ -131,7 +131,7 @@ impl VipAnnouncerService {
     ///
     /// Equivalent to checking `(ip, resolved_iface_mac)` against
     /// [`Self::is_self_announced`] without requiring the caller to know
-    /// the MAC — handy for status / observability surfaces.
+    /// the MAC - handy for status / observability surfaces.
     #[must_use]
     pub fn vip_is_self_announced(&self, ip: IpAddr) -> bool {
         self.bindings.contains_ip(&ip)
@@ -230,7 +230,7 @@ impl VipAnnouncerService {
         for vip in &self.config.vips {
             // Only ever broadcast a pair we actually own. reconcile()
             // registered the binding just before this; a miss means a
-            // resolver/registration mismatch — skip rather than poison
+            // resolver/registration mismatch - skip rather than poison
             // upstream ARP caches with a pair we cannot back.
             if !self.bindings.is_self_announced(vip.addr, mac) {
                 tracing::warn!(

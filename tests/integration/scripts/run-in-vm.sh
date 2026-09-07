@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-in-vm.sh — Main integration test runner
+# run-in-vm.sh - Main integration test runner
 #
 # Usage: run-in-vm.sh [--suite <name>] [--k8s-only] [--ebpf-scenarios] [--performance] [--skip-build]
 #

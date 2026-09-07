@@ -1,4 +1,4 @@
-# eBPFsentinel — Performance & Benchmark Tests
+# eBPFsentinel - Performance & Benchmark Tests
 
 Dedicated home for the **performance** test suites (throughput overhead, per-feature
 cost, control-plane map-op latency, high-pps). They are kept separate from the
@@ -33,8 +33,8 @@ fixtures live here; there is no separate Vagrant box.
 | `05-ebpf-feature-overhead-extended` | isolated per-feature throughput overhead: scrub, DNS, QoS, conntrack | 2VM |
 | `06-ebpf-feature-overhead-nat-dlp` | NAT translation overhead (SNAT egress / DNAT ingress / both) + DLP uprobe SSL-inspection cost | local + 2VM |
 
-Remaining per-feature datapath suites — **L4 LB** (forwarded, 3VM) and **L7**
-(HTTP via `run_http_bench`) — are planned alongside these; they need the 3VM
+Remaining per-feature datapath suites - **L4 LB** (forwarded, 3VM) and **L7**
+(HTTP via `run_http_bench`) - are planned alongside these; they need the 3VM
 transit lane / an HTTP target and are added once calibrated on the agent VM.
 
 ## Running
@@ -61,7 +61,7 @@ Methodology (baseline subtraction, 3-run averaging, thresholds) is documented in
 ## Notes
 
 - These are **nightly** in CI (heavy); they are not part of the fast PR lane.
-- 3VM-lane suites (forwarded NAT / LB perf) need the transit topology — see
+- 3VM-lane suites (forwarded NAT / LB perf) need the transit topology - see
   `../integration/vagrant/` and the per-suite headers.
 - Numbers are environment-sensitive (vCPU, NIC, nesting). Thresholds are set with
   headroom; treat absolute figures as indicative, regressions as the signal.

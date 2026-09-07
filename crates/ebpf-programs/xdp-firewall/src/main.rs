@@ -88,12 +88,12 @@ use network_types::{
 // Benefits:
 //   - Atomic per-tenant rule table swap (replace inner map FD)
 //   - No cross-tenant interference during rule updates
-//   - Natural isolation — one tenant's lookup never touches another's data
+//   - Natural isolation - one tenant's lookup never touches another's data
 //
 // aya-ebpf support: aya::maps::HashMap can be used as outer map.
 // Inner maps are created by userspace and inserted as values.
 //
-// NOTE(future): HASH_OF_MAPS for per-tenant rule tables — requires aya map-in-map API.
+// NOTE(future): HASH_OF_MAPS for per-tenant rule tables - requires aya map-in-map API.
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -185,7 +185,7 @@ static CT_STATE_SCRATCH: PerCpuArray<u32, 1> = PerCpuArray::new();
 #[btf_map]
 // Pinned by name so the tail-called xdp-firewall-reject program shares this
 // exact scratch buffer (same BPF-fs pin path) instead of binding its own
-// zero-filled copy — otherwise reject reads protocol/offsets as 0 and forges
+// zero-filled copy - otherwise reject reads protocol/offsets as 0 and forges
 // a malformed ICMP from offset 0 for every packet.
 static PKT_CTX: PerCpuArray<PacketCtx, 1> = PerCpuArray::new();
 
@@ -626,7 +626,7 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
             // the operator expects unparseable traffic to be dropped, which
             // closes a fail-open inspection bypass. Default-allow still passes
             // on error (NFR15). No event is emitted because PKT_CTX may be
-            // unpopulated on an early parse failure — only metrics are bumped.
+            // unpopulated on an early parse failure - only metrics are bumped.
             increment_metric(METRIC_ERRORS);
             if read_default_policy() == DEFAULT_POLICY_DROP {
                 increment_metric(METRIC_DROPPED);
@@ -658,7 +658,7 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         return xdp_action::XDP_PASS;
     }
     if action == xdp_action::XDP_PASS {
-        // Check MTU before passing — drop genuinely oversized packets early.
+        // Check MTU before passing - drop genuinely oversized packets early.
         //
         // `bpf_check_mtu` returns a positive `BPF_MTU_CHK_RET_*` code on an
         // actual MTU violation (FRAG_NEEDED / SEGS_TOOBIG) and a *negative*
@@ -678,13 +678,13 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         //
         // SAFETY: if ratelimit is loaded between these two tail_calls
         // (hot-reload race), the next packet will take the correct path.
-        // Each individual packet is processed atomically — no packet sees
+        // Each individual packet is processed atomically - no packet sees
         // a partial chain. The worst case is one packet skipping ratelimit
         // or LB during the reload window (microseconds).
         unsafe {
             XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_RATELIMIT);
         }
-        // Ratelimit not loaded — try loadbalancer directly.
+        // Ratelimit not loaded - try loadbalancer directly.
         unsafe {
             XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_LOADBALANCER);
         }
@@ -723,12 +723,12 @@ const FIB_AF_INET6: u8 = 10;
 /// interface the packet would leave by. `bpf_fib_lookup` answers exactly
 /// that. `BPF_FIB_LOOKUP_DIRECT` keeps the lookup to the FIB alone (no
 /// neighbour resolution), which is all that is needed to name the interface.
-/// Returns `None` whenever the route cannot be resolved — the caller then
+/// Returns `None` whenever the route cannot be resolved - the caller then
 /// falls back to the zone's own posture rather than guessing.
 ///
 /// `src`/`dst` carry the addresses in wire order: word 0 alone for IPv4, all
 /// four for IPv6. The scratch buffer is per-CPU and reused across packets, so
-/// every field the kernel reads is written on each call — a stale port from
+/// every field the kernel reads is written on each call - a stale port from
 /// the previous packet must not leak into this lookup.
 #[inline(always)]
 fn egress_ifindex(
@@ -774,7 +774,7 @@ fn egress_ifindex(
 }
 
 /// Reinterpret 16 header bytes as four words with their wire byte order
-/// preserved — what `bpf_fib_lookup` expects for `ipv6_src`/`ipv6_dst`.
+/// preserved - what `bpf_fib_lookup` expects for `ipv6_src`/`ipv6_dst`.
 #[inline(always)]
 fn wire_words(bytes: &[u8; 16]) -> [u32; 4] {
     [
@@ -850,7 +850,7 @@ fn apply_default_policy(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void) -> Re
             None => return Err(()),
         };
         // `src_addr`/`dst_addr` hold host-order words for IPv6, while the FIB
-        // struct expects them exactly as they appear on the wire — so the v6
+        // struct expects them exactly as they appear on the wire - so the v6
         // path feeds the raw header bytes, not the converted words.
         let (family, src, dst) = if (pkt.flags & FLAG_IPV6) == 0 {
             (
@@ -1096,7 +1096,7 @@ fn process_firewall_v4(
         protocol as u8,
     ));
 
-    // Phase 1: LPM Trie lookup — O(log n) for CIDR-only rules.
+    // Phase 1: LPM Trie lookup - O(log n) for CIDR-only rules.
     // Keys use network byte order for correct prefix matching.
     let src_key = Key::new(32, src_ip.to_be_bytes());
     if let Some(val) = FW_LPM_SRC_V4.get(&src_key) {
@@ -1107,7 +1107,7 @@ fn process_firewall_v4(
         return apply_action(ctx, ctx_raw, val.action);
     }
 
-    // Phase 1b: 5-tuple exact-match HashMap lookup — O(1).
+    // Phase 1b: 5-tuple exact-match HashMap lookup - O(1).
     let hash_key_5t = FwHashKey5Tuple {
         src_ip,
         dst_ip,
@@ -1120,7 +1120,7 @@ fn process_firewall_v4(
         return apply_action(ctx, ctx_raw, val.action);
     }
 
-    // Phase 1c: protocol+port HashMap lookup — O(1).
+    // Phase 1c: protocol+port HashMap lookup - O(1).
     let hash_key_port = FwHashKeyPort {
         dst_port,
         protocol: protocol as u8,
@@ -1133,7 +1133,7 @@ fn process_firewall_v4(
     // Phase 2: Linear scan for complex rules (port ranges, VLAN, MAC, CT state).
     // ESTABLISHED/RELATED flows run this scan too, so an explicit deny rule of
     // any shape (port range, VLAN, MAC, tcp-flags, ct-state mask, ICMP) is
-    // enforced mid-flow against an already-established connection —
+    // enforced mid-flow against an already-established connection -
     // apply_action(DROP) then kills the kernel CT entry via kill_flow_via_xdp_ct.
     // Conntrack state only grants passage in the ABSENCE of a matching rule
     // (handled after the scan), never over one.
@@ -1213,7 +1213,7 @@ fn process_firewall_v4(
         return Ok(xdp_action::XDP_PASS);
     }
 
-    // No rule matched — apply default policy
+    // No rule matched - apply default policy
     apply_default_policy(ctx, ctx_raw)
 }
 
@@ -1395,7 +1395,7 @@ fn check_connection_limits(src_ip: u32, rule_idx: i32, max_rule_states: u16) -> 
                         flags: counter.flags | SRC_COUNTER_FLAG_OVERLOADED,
                         _pad: [0; 7],
                     };
-                    // Insert may fail if map is full — acceptable: the overload
+                    // Insert may fail if map is full - acceptable: the overload
                     // flag is best-effort. The packet is still dropped below.
                     // No logging available in eBPF context.
                     let _ = CT_SRC_COUNTERS.insert(&src_ip, &overloaded, 0);
@@ -1416,7 +1416,7 @@ fn check_connection_limits(src_ip: u32, rule_idx: i32, max_rule_states: u16) -> 
             let window_ns = (cfg.conn_rate_window_secs as u64) * 1_000_000_000;
             let elapsed = now.saturating_sub(existing.window_start_ns);
             if elapsed >= window_ns {
-                // Rate window expired — reset rate counter.
+                // Rate window expired - reset rate counter.
                 SrcStateCounter {
                     conn_count: existing.conn_count + 1,
                     conn_rate: 1,
@@ -1474,7 +1474,7 @@ fn ct_state_to_bitmask(state: u8) -> u8 {
         // For sub-states (SYN_SENT, SYN_RECV, FIN_WAIT, etc.) treat as NEW
         CT_STATE_SYN_SENT | CT_STATE_SYN_RECV => CT_MATCH_NEW,
         CT_STATE_FIN_WAIT | CT_STATE_CLOSE_WAIT | CT_STATE_TIME_WAIT => CT_MATCH_ESTABLISHED,
-        _ => 0, // Unknown / no entry — matches nothing
+        _ => 0, // Unknown / no entry - matches nothing
     }
 }
 
@@ -1640,7 +1640,7 @@ fn process_firewall_v6(
 
     // NOTE: IPsec/XFRM state detection (bpf_skb_get_xfrm_state) requires TC
     // classifier context. The IPv6 extension header parser already handles ESP
-    // (proto 50) as a terminal header — see the skip_ipv6_ext_headers fix.
+    // (proto 50) as a terminal header - see the skip_ipv6_ext_headers fix.
 
     // Skip IPv6 extension headers to find the actual L4 protocol.
     let (next_hdr, l4_offset) =
@@ -1705,7 +1705,7 @@ fn process_firewall_v6(
         ctx_raw, &src_addr, &dst_addr, src_port, dst_port, next_hdr,
     ));
 
-    // Phase 1: LPM Trie lookup — O(log n) for CIDR-only rules.
+    // Phase 1: LPM Trie lookup - O(log n) for CIDR-only rules.
     // Read raw bytes from off-stack PKT_CTX.
     let lpm_action = lpm_lookup_v6(pkt_ctx);
     if lpm_action >= 0 {
@@ -1715,7 +1715,7 @@ fn process_firewall_v6(
     // Phase 2: Linear scan for complex rules (port, protocol, VLAN, MAC,
     // tcp-flags, ct-state mask, ICMP). ESTABLISHED/RELATED flows run this scan
     // too, so an explicit deny rule of any shape is enforced mid-flow against an
-    // already-established connection — apply_action(DROP) then kills the kernel
+    // already-established connection - apply_action(DROP) then kills the kernel
     // CT entry via kill_flow_via_xdp_ct. Conntrack state only grants passage in
     // the ABSENCE of a matching rule (handled after the scan), never over one.
     // Read V6 rule count
@@ -1792,7 +1792,7 @@ fn process_firewall_v6(
         return Ok(xdp_action::XDP_PASS);
     }
 
-    // No rule matched — apply default policy
+    // No rule matched - apply default policy
     apply_default_policy(ctx, ctx_raw)
 }
 
@@ -1915,7 +1915,7 @@ fn match_rule_v6(
 ///
 /// Returns the XDP action. The tail_call to the ratelimit program is
 /// performed by the entry point (`xdp_firewall`) when the result is
-/// `XDP_PASS` — this satisfies the kernel 6.17+ verifier requirement
+/// `XDP_PASS` - this satisfies the kernel 6.17+ verifier requirement
 /// that tail_call only happens in functions returning `int`.
 #[inline(always)]
 fn apply_action(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void, action: u8) -> Result<u32, ()> {
@@ -1963,7 +1963,7 @@ fn apply_action(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void, action: u8) -
         ACTION_REJECT => {
             emit_event(ctx_raw, ACTION_REJECT);
             increment_metric(METRIC_REJECTED);
-            // Return sentinel — the entry point will tail-call to
+            // Return sentinel - the entry point will tail-call to
             // xdp-firewall-reject which has its own 512B stack.
             Ok(XDP_ACTION_REJECT)
         }
@@ -2012,14 +2012,14 @@ fn write_xdp_metadata(ctx: &XdpContext, action: u8, rule_id: u32) {
     let meta_size = mem::size_of::<XdpMetadata>() as i32;
     let ret = unsafe { bpf_xdp_adjust_meta(ctx.ctx, -meta_size) };
     if ret != 0 {
-        return; // Driver doesn't support metadata — skip silently
+        return; // Driver doesn't support metadata - skip silently
     }
     // After adjust_meta, re-read pointers from the XDP context so the
     // verifier knows the metadata area is valid.
     let data_meta = ctx.metadata();
     let data = ctx.data();
     if data_meta + mem::size_of::<XdpMetadata>() > data {
-        return; // Safety check — required by verifier
+        return; // Safety check - required by verifier
     }
     let meta_ptr = data_meta as *mut XdpMetadata;
     unsafe {
@@ -2040,7 +2040,7 @@ fn write_xdp_metadata(ctx: &XdpContext, action: u8, rule_id: u32) {
 /// `bpf_xdp_metadata_rx_timestamp` kfuncs to attach hardware-offloaded
 /// RSS hash and RX timestamps when the underlying NIC driver supports
 /// them. Drivers without metadata offload return `-EOPNOTSUPP` and the
-/// fields stay 0 — userspace consumers gate on
+/// fields stay 0 - userspace consumers gate on
 /// `PacketEvent::has_hw_rss_hash` / `has_hw_timestamp`.
 #[inline(always)]
 fn emit_event(ctx_raw: *mut core::ffi::c_void, action: u8) {

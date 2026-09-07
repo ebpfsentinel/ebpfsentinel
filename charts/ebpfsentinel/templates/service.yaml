@@ -11,7 +11,7 @@ metadata:
   {{- end }}
 spec:
   type: ClusterIP
-  clusterIP: None  # headless — each node is its own endpoint
+  clusterIP: None  # headless - each node is its own endpoint
   selector:
     {{- include "ebpfsentinel.selectorLabels" . | nindent 4 }}
   ports:

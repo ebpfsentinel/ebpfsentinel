@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# helpers.bash — Common helper functions for BATS integration tests
+# helpers.bash - Common helper functions for BATS integration tests
 
 HELPERS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -286,7 +286,7 @@ wait_for_agent_tls() {
 # subshell and lost.  Each function persists the status to $_HTTP_STATUS_FILE.
 # Call _load_http_status after the substitution to recover it.
 
-# _load_http_status — recover HTTP_STATUS lost in command substitution
+# _load_http_status - recover HTTP_STATUS lost in command substitution
 _load_http_status() {
     HTTP_STATUS="$(cat "$_HTTP_STATUS_FILE" 2>/dev/null)"
 }

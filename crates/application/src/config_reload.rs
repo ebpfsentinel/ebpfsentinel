@@ -536,7 +536,7 @@ impl ConfigReloadService {
         enabled: bool,
         mode: DomainMode,
     ) -> Result<(), anyhow::Error> {
-        // Serialize concurrent firewall reloads only — other domains
+        // Serialize concurrent firewall reloads only - other domains
         // can reload in parallel.
         let _guard = self.reload_locks.firewall.lock().await;
 

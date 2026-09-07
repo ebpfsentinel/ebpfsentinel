@@ -72,7 +72,7 @@ static NAT_SNAT_RULE_COUNT_V6: Array<u32, 1> = Array::new();
 #[btf_map]
 static NAT_HASH_SNAT: HashMap<NatHashKeyExact, NatHashValue, { MAX_NAT_HASH_EXACT as usize }> = HashMap::new();
 
-// CT_TABLE_V4/V6 shadow maps removed — kernel netfilter is the sole
+// CT_TABLE_V4/V6 shadow maps removed - kernel netfilter is the sole
 // CT source. NAT info delegated via bpf_ct_set_nat_info (e30-5).
 
 /// NAT port allocation table (LRU): tracks which translated port is
@@ -440,7 +440,7 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         _ => return Ok(TC_ACT_OK),
     };
 
-    // Fast-path: exact-match SNAT HashMap lookup — O(1).
+    // Fast-path: exact-match SNAT HashMap lookup - O(1).
     // Key uses (src_ip, src_port, protocol) for SNAT rules with exact match criteria.
     let hash_key = NatHashKeyExact {
         dst_ip: src_ip, // For SNAT, we key on source IP (the address being rewritten)

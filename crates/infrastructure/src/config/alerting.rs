@@ -235,10 +235,10 @@ pub struct AlertRouteConfig {
     pub destination: String,
     pub min_severity: String,
     pub event_types: Option<Vec<String>>,
-    /// Webhook URL — required when `destination` is "webhook".
+    /// Webhook URL - required when `destination` is "webhook".
     #[serde(default)]
     pub webhook_url: Option<String>,
-    /// Email recipient address — required when `destination` is "email".
+    /// Email recipient address - required when `destination` is "email".
     #[serde(default)]
     pub email_to: Option<String>,
     /// Optional custom HTTP headers for webhook requests.

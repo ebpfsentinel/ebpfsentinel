@@ -1,18 +1,18 @@
-# eBPFsentinel — Performance Benchmarks
+# eBPFsentinel - Performance Benchmarks
 
 Two complementary datasets:
 
-1. **Cross-VM measurement (2026-06-14)** — the bats perf suites (`tests/perf/`)
+1. **Cross-VM measurement (2026-06-14)** - the bats perf suites (`tests/perf/`)
    run over the **real vmxnet3 NIC** between two VMs (attacker → agent), kernel
    6.17, agent loaded via the BPF-token launcher. Real network path, real eBPF.
-2. **Production CPU-overhead matrix (2026-03-22)** — a per-feature CPU% matrix at
+2. **Production CPU-overhead matrix (2026-03-22)** - a per-feature CPU% matrix at
    fixed traffic volumes, kept as the production-sizing reference.
 
 > **On absolute throughput.** iperf3 over the paravirtual vmxnet3 NIC is
 > CPU-bound on the host, so the *baseline* (no-agent) link rate varies with how
-> busy the host is — ~8.3 Gbps on an idle host, ~3–4 Gbps when the host is
+> busy the host is - ~8.3 Gbps on an idle host, ~3-4 Gbps when the host is
 > loaded. What is **reproducible** is the agent's *own* behaviour relative to a
-> baseline measured the same way on the same path — that is what the tables
+> baseline measured the same way on the same path - that is what the tables
 > below report. Earlier revisions of this file showed ~59 Gbps "throughput":
 > that was an in-VM **veth** measurement (no NIC in the path, kernel `memcpy`
 > ceiling) and has been removed as misleading.
@@ -30,20 +30,20 @@ Two complementary datasets:
 
 ### Link baseline (no agent)
 
-iperf3 between the two VMs, no agent in the path — the link ceiling under the
+iperf3 between the two VMs, no agent in the path - the link ceiling under the
 current host load.
 
 | Test               | Idle host  | Loaded host |
 | ------------------ | ---------- | ----------- |
 | TCP, single stream | 8.31 Gbps  | ~3.2 Gbps   |
-| TCP, 4 streams     | 8.69 Gbps  | —           |
+| TCP, 4 streams     | 8.69 Gbps  | -           |
 | UDP, single stream | 1.40 Gbps  | iperf3 sender-CPU bound |
 
 ### Per-feature datapath cost (isolated, idle host)
 
 Each feature measured alone over a firewall-pass base, vs the no-agent baseline
-on the same path (idle host, ~8–8.7 Gbps baseline). This is the **true
-per-packet eBPF cost** — every program here is cheap:
+on the same path (idle host, ~8-8.7 Gbps baseline). This is the **true
+per-packet eBPF cost** - every program here is cheap:
 
 | Feature              | Overhead | Source   |
 | -------------------- | -------- | -------- |
@@ -56,20 +56,20 @@ per-packet eBPF cost** — every program here is cheap:
 | conntrack (tc)       | 5.5 %    | perf/05  |
 
 - **The whole datapath costs ≤ ~5.5 % per feature** on a single TCP flow.
-  Firewall and IDS are within noise — the XDP HashMap/LPM fast-path is effectively
+  Firewall and IDS are within noise - the XDP HashMap/LPM fast-path is effectively
   free for iperf3's single 5-tuple. The TC programs (scrub/dns/qos/conntrack/nat)
   add a few percent each. Consistent with the production CPU matrix below.
 
-### XDP attachment mode — native vs generic (vmxnet3)
+### XDP attachment mode - native vs generic (vmxnet3)
 
 The agent's XDP datapath loads in either **native** (driver, pre-`sk_buff`) or
 **generic** (SKB, post-`sk_buff`) mode; `xdp_mode: auto` (default) picks native.
-vmxnet3 supports both — **offloaded is not available** (paravirtual NIC, no
+vmxnet3 supports both - **offloaded is not available** (paravirtual NIC, no
 SmartNIC). Same firewall-pass config, single TCP flow, idle host:
 
 | Mode                  | Throughput | Overhead vs baseline |
 | --------------------- | ---------- | -------------------- |
-| baseline (no agent)   | ~7.76 Gbps | —                    |
+| baseline (no agent)   | ~7.76 Gbps | -                    |
 | native (`xdp`)        | ~7.84 Gbps | ~0 %                 |
 | generic (`xdpgeneric`)| ~6.0 Gbps  | **~23 %**            |
 
@@ -77,13 +77,13 @@ SmartNIC). Same firewall-pass config, single TCP flow, idle host:
   runs after the kernel allocates an `sk_buff` (same position as a TC hook),
   losing native's pre-allocation fast-path. This is why `xdp_mode: auto`
   (native-first) is the right default, and a large part of why the earlier
-  single-VM **veth** lane (generic XDP, no NIC) showed 85–95 % "overhead" —
+  single-VM **veth** lane (generic XDP, no NIC) showed 85-95 % "overhead" -
   generic mode *and* no physical NIC compounded.
 
-### Full eBPF stack — throughput is rate-limit-bound, not CPU-bound
+### Full eBPF stack - throughput is rate-limit-bound, not CPU-bound
 
 With **every** program enabled the single-flow TCP throughput collapses to
-~1.4–2 Gbps ("73–83 % overhead"). **This is not eBPF CPU cost — it is the rate
+~1.4-2 Gbps ("73-83 % overhead"). **This is not eBPF CPU cost - it is the rate
 limiter enforcing its policy.** The benchmark config enables a **global rate
 limit of 100 000 pps**; iperf3 floods at ~666 000 pps (8 Gbps ÷ 1500 B), so
 xdp-ratelimit drops the excess and pins throughput at ~the configured rate.
@@ -106,7 +106,7 @@ xdp-ratelimit drops the excess and pins throughput at ~the configured rate.
 
 End-to-end REST latency of the two newly-covered write paths, run from
 `127.0.0.1` (loopback is exempt from the write rate limit by default, so the
-full bulk lands). Lane-independent — these are control-plane, not datapath.
+full bulk lands). Lane-independent - these are control-plane, not datapath.
 
 | Op                    | Count | Wall      | per-op | ok        |
 | --------------------- | ----- | --------- | ------ | --------- |
@@ -115,19 +115,19 @@ full bulk lands). Lane-independent — these are control-plane, not datapath.
 | NPTv6 prefix-rule add | 10    | 377 ms    | ~38 ms | 10/10     |
 | NPTv6 prefix-rule add | 100   | 2620 ms   | ~26 ms | 100/100   |
 
-Per-op latency is dominated by the `curl` round-trip, not the kernel map write —
+Per-op latency is dominated by the `curl` round-trip, not the kernel map write -
 an end-to-end REST cost for capacity planning of bulk reconfiguration. The write
 API is governed at 60 burst / 1 req-s per IP; loopback is exempt (configurable
 via `agent.api_rate_limit.*`), so bulk loads from the same host are not throttled
-— from a remote host past the burst they 429 by design.
+- from a remote host past the burst they 429 by design.
 
-> **perf/04 (pktgen ≥ 1 Mpps)** is not in this table — it drives pktgen from the
+> **perf/04 (pktgen ≥ 1 Mpps)** is not in this table - it drives pktgen from the
 > attacker NIC and needs a calibrated high-pps setup; its XDP-drop CPU-savings
 > figures are in the production matrix.
 
 ---
 
-## Production reference — 2-VM real-NIC CPU overhead (2026-03-22)
+## Production reference - 2-VM real-NIC CPU overhead (2026-03-22)
 
 > Headline: **with all eBPF programs enabled the agent adds 0 % measurable CPU at
 > 1 Gbps and < 1 % at 5 Gbps** at fixed traffic volumes below the configured rate
@@ -162,7 +162,7 @@ the same traffic volume, averaged over 3 runs.
 
 - At 1 Gbps and below every feature adds 0 % measurable CPU. At 5 Gbps the
   costliest are IDS (3.0 %) and conntrack (1.8 %); firewall is cheap (0.9 %).
-  RSS constant at 6.4–6.6 MB.
+  RSS constant at 6.4-6.6 MB.
 
 ### Feature combinations
 
@@ -195,9 +195,9 @@ threatintel + ddos + dns) under attack-like traffic.
 | Throughput Target | Recommended vCPUs | Notes                              |
 | ----------------- | ----------------- | ---------------------------------- |
 | ≤ 1 Gbps          | 1 vCPU            | All features, 0 % eBPF overhead    |
-| 1–5 Gbps          | 1 vCPU            | All features, < 3 % eBPF overhead  |
-| 5–10 Gbps         | 2 vCPU            | comfortable headroom               |
-| 10+ Gbps          | scale w/ traffic + flows | DPI is per-flow CPU-bound — spread load across flows/queues |
+| 1-5 Gbps          | 1 vCPU            | All features, < 3 % eBPF overhead  |
+| 5-10 Gbps         | 2 vCPU            | comfortable headroom               |
+| 10+ Gbps          | scale w/ traffic + flows | DPI is per-flow CPU-bound - spread load across flows/queues |
 
 Memory: **32 MB minimum**, 64 MB recommended (agent ~6.5 MB constant).
 
@@ -217,7 +217,7 @@ EBPF_2VM_MODE=true AGENT_VM_IP=192.168.56.10 ATTACKER_VM_IP=192.168.56.20 \
 ```
 
 > **Reliable numbers need an idle host** (the vmxnet3 baseline halves under host
-> load) and **one suite at a time / a clean agent between suites** — the per-suite
+> load) and **one suite at a time / a clean agent between suites** - the per-suite
 > teardown reaps the launcher's userns child by process name and strips eth1, but
 > a contended host or a back-to-back sweep can still skew the absolute baselines.
 > The per-feature *ratios* are stable; the absolute Gbps are host-dependent.

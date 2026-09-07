@@ -1,4 +1,4 @@
-# config-ebpf-dlp.yaml — DLP (uprobe-dlp) eBPF scenario test config
+# config-ebpf-dlp.yaml - DLP (uprobe-dlp) eBPF scenario test config
 # Tests: uprobe-dlp program loading, pattern matching, alert mode
 #
 # Network topology:
@@ -30,7 +30,7 @@ ips:
 dlp:
   enabled: true
   mode: alert
-  # All default OSS patterns — tests validate each regex matches real data
+  # All default OSS patterns - tests validate each regex matches real data
   patterns:
     # ── PCI ──
     - id: dlp-pci-visa

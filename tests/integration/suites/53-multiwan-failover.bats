@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 53-multiwan-failover.bats — Multi-WAN gateway selection + failover surface.
+# 53-multiwan-failover.bats - Multi-WAN gateway selection + failover surface.
 #
 # Scope:
 #   The full end-to-end transit-failover path (egress shifts on link-down
@@ -25,7 +25,7 @@
 #     based on interval_secs is not wired into the agent runtime. Health
 #     status currently stays at "unknown" without explicit state writes.
 #   * Real link-down → egress reroute (AC #2/#3). Requires the 3-VM
-#     transit topology — covered by a future tagging in coverage-matrix.yaml.
+#     transit topology - covered by a future tagging in coverage-matrix.yaml.
 #   * WAN_ALL_DOWN alert (AC #2 simultaneous failure). Tied to the missing
 #     probe loop above.
 #
@@ -215,7 +215,7 @@ PY
     local pid_after
     pid_after="$(_agent_pid_local)"
     [ "${pid_after}" = "${pid_before}" ] || {
-        echo "agent PID changed across SIGHUP (${pid_before} → ${pid_after}) — crash suspected" >&2
+        echo "agent PID changed across SIGHUP (${pid_before} → ${pid_after}) - crash suspected" >&2
         return 1
     }
 

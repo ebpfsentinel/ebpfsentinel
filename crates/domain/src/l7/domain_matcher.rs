@@ -34,17 +34,17 @@ pub struct DomainMatcher {
 enum DomainMatcherKind {
     /// Exact match (lowercased).
     Exact(String),
-    /// `*.suffix` — matches subdomains of suffix.
+    /// `*.suffix` - matches subdomains of suffix.
     WildcardPrefix {
         /// The suffix after `*.`, lowercased (e.g., `example.com`).
         suffix: String,
     },
-    /// `prefix.*` — matches domains starting with prefix.
+    /// `prefix.*` - matches domains starting with prefix.
     WildcardSuffix {
         /// The prefix before `.*`, lowercased (e.g., `example`).
         prefix: String,
     },
-    /// `~regex` — compiled case-insensitive regex.
+    /// `~regex` - compiled case-insensitive regex.
     Regex(Regex),
     /// Legacy substring match (backward compat), lowercased.
     Substring(String),

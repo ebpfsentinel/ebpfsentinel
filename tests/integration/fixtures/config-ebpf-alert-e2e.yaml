@@ -1,4 +1,4 @@
-# config-ebpf-alert-e2e.yaml — Alert lifecycle end-to-end test config
+# config-ebpf-alert-e2e.yaml - Alert lifecycle end-to-end test config
 # Tests: trigger IDS alert on port 4444, query, mark false positive
 
 agent:

@@ -14,15 +14,15 @@ use ebpf_common::event::{EVENT_TYPE_IDS, PacketEvent};
 // Interpret fuzz bytes as structured IDS/IPS inputs.
 //
 // Layout (minimum 20 bytes):
-//   [0]      — sub-target selector
-//   [1..5]   — src_ip (u32 BE)
-//   [5..9]   — dst_ip (u32 BE)
-//   [9..11]  — src_port (u16 BE)
-//   [11..13] — dst_port (u16 BE)
-//   [13]     — protocol
-//   [14]     — rule_id (index)
-//   [15..19] — threshold params (type, count, track_by, window_secs)
-//   [19..]   — text payload (regex pattern, whitelist string, etc.)
+//   [0]      - sub-target selector
+//   [1..5]   - src_ip (u32 BE)
+//   [5..9]   - dst_ip (u32 BE)
+//   [9..11]  - src_port (u16 BE)
+//   [11..13] - dst_port (u16 BE)
+//   [13]     - protocol
+//   [14]     - rule_id (index)
+//   [15..19] - threshold params (type, count, track_by, window_secs)
+//   [19..]   - text payload (regex pattern, whitelist string, etc.)
 fuzz_target!(|data: &[u8]| {
     if data.len() < 20 {
         return;

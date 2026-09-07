@@ -9,10 +9,10 @@ use tracing::{debug, info};
 
 /// Manages the bounded XDP VIP announcer's eBPF maps.
 ///
-/// * `VIP_SET` — owned VIPs keyed by the IPv4 address as a big-endian
+/// * `VIP_SET` - owned VIPs keyed by the IPv4 address as a big-endian
 ///   numeric `u32` (same key the kernel program derives from `arp.tpa`).
-/// * `IFACE_MAC` — resolved NIC MAC keyed by ifindex.
-/// * `VIP_ARP_REPLIES` — per-CPU forged-reply counter keyed like `VIP_SET`.
+/// * `IFACE_MAC` - resolved NIC MAC keyed by ifindex.
+/// * `VIP_ARP_REPLIES` - per-CPU forged-reply counter keyed like `VIP_SET`.
 ///
 /// Split-brain safety is enforced by the caller: `VIP_SET` is only
 /// populated while this node is the elected speaker.

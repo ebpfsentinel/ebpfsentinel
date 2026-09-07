@@ -1,4 +1,4 @@
-# docker-compose-test.yml — Integration test compose file
+# docker-compose-test.yml - Integration test compose file
 #
 # Uses loopback interface and minimal config for CI/test environments.
 # Requires: Linux kernel 6.6+ with BTF, Docker Engine (not Desktop).
@@ -16,11 +16,11 @@ services:
       - /tmp:size=64m
 
     volumes:
-      # BTF type info — required for eBPF CO-RE
+      # BTF type info - required for eBPF CO-RE
       - /sys/kernel/btf:/sys/kernel/btf:ro
-      # eBPF filesystem — required for map pinning
+      # eBPF filesystem - required for map pinning
       - /sys/fs/bpf:/sys/fs/bpf
-      # Debug filesystem — required for eBPF tracing
+      # Debug filesystem - required for eBPF tracing
       - /sys/kernel/debug:/sys/kernel/debug:ro
       # Test config (loopback interface, all features disabled except firewall)
       - ./config-docker-test.yaml:/etc/ebpfsentinel/config.yaml:ro

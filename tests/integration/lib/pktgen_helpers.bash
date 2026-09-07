@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# pktgen_helpers.bash — Drive the kernel pktgen module from BATS suites.
+# pktgen_helpers.bash - Drive the kernel pktgen module from BATS suites.
 #
-# pktgen is auto-loaded on the attacker VM (Story 34.3) via
+# pktgen is auto-loaded on the attacker VM via
 # /etc/modules-load.d/pktgen.conf. This helper opens /proc/net/pktgen/*
 # control files to configure a single TX thread, then echoes "start"
 # into pgctrl. Rate is controlled via the "delay" knob (ns between
@@ -70,7 +70,7 @@ _pktgen_validate_target() {
             return 0
             ;;
         *)
-            env_skip "pktgen target ${ip} is not RFC1918 — refusing to flood"
+            env_skip "pktgen target ${ip} is not RFC1918 - refusing to flood"
             ;;
     esac
 }
@@ -85,7 +85,7 @@ _pktgen_resolve_dst_mac() {
     # `ip neigh show <ip> dev <iface>` omits the "dev <iface>" column, so the
     # lladdr lands in a different field than the unfiltered form. Locate it by
     # name (print the token after "lladdr") instead of a fixed column, which a
-    # prior `$5` read got wrong (the MAC sits at $3 here) — leaving pktgen with
+    # prior `$5` read got wrong (the MAC sits at $3 here) - leaving pktgen with
     # an empty dst_mac and generating zero packets.
     _extract_lladdr() {
         awk '{for (i = 1; i <= NF; i++) if ($i == "lladdr") { print $(i + 1); exit }}'
@@ -114,7 +114,7 @@ _pg() {
 }
 
 # pktgen_stop
-# Best-effort teardown — safe to call from teardown handlers.
+# Best-effort teardown - safe to call from teardown handlers.
 pktgen_stop() {
     if [ -e "${PKTGEN_PROCROOT}/pgctrl" ]; then
         _pg pgctrl "stop" 2>/dev/null || true

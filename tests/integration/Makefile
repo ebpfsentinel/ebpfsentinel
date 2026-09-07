@@ -1,4 +1,4 @@
-# tests/integration/Makefile — Integration test orchestration
+# tests/integration/Makefile - Integration test orchestration
 #
 # Usage:
 #   make test            Run all suites locally or in VM
@@ -107,7 +107,7 @@ test-performance: ## Run the throughput-overhead benchmark (perf suite 15, requi
 	sudo bats --timing $(PERF_DIR)/01-performance-benchmark.bats
 
 .PHONY: test-perf
-test-perf: ## Run the full performance suite (perf/01-05, requires root) — see tests/perf/
+test-perf: ## Run the full performance suite (perf/01-05, requires root) - see tests/perf/
 	sudo bats --timing $(PERF_DIR)/*.bats
 
 .PHONY: test-ebpf-all

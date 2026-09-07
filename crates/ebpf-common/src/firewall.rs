@@ -1,4 +1,4 @@
-/// Firewall action constants — used in `FirewallRuleEntry.action`
+/// Firewall action constants - used in `FirewallRuleEntry.action`
 pub const ACTION_PASS: u8 = 0;
 pub const ACTION_DROP: u8 = 1;
 pub const ACTION_LOG: u8 = 2;
@@ -7,7 +7,7 @@ pub const ACTION_REJECT: u8 = 3;
 
 /// Maximum number of firewall rules per address family (V4 / V6).
 ///
-/// Requires kernel 6.9+ (project minimum) — uses the `bpf_loop` helper so the
+/// Requires kernel 6.9+ (project minimum) - uses the `bpf_loop` helper so the
 /// XDP firewall can iterate over this many rules without hitting verifier
 /// complexity limits.
 pub const MAX_FIREWALL_RULES: u32 = 4096;
@@ -113,7 +113,7 @@ pub const ICMP_WILDCARD: u8 = 0xFF;
 ///
 /// 802.1Q leaves VID 0 meaning "no VLAN, priority only", which the parsers
 /// report as `vlan_id == 0` exactly as they do for an untagged frame. So 0 is
-/// a real, matchable value and cannot double as "any" — a rule asking for
+/// a real, matchable value and cannot double as "any" - a rule asking for
 /// VLAN 0 wants untagged traffic and nothing else. Outside the 12-bit VID
 /// space, `0xFFFF` can never come off the wire, which is what makes it usable
 /// as the wildcard.

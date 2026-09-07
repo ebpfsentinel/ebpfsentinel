@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# nptv6_helpers.bash — IPv6 packet crafting + capture assertion for suite 54.
+# nptv6_helpers.bash - IPv6 packet crafting + capture assertion for suite 54.
 #
 # NPTv6 (RFC 6296) is a stateless, checksum-neutral prefix translation.
 # We assert it from the outside: ship an IPv6 packet from the attacker
@@ -9,7 +9,7 @@
 # Requires: vm_helpers.bash already sourced. The attacker VM ships scapy
 # at /opt/scapy-venv (see setup-attacker.sh); the backend ships tcpdump.
 
-# _attacker_ssh defined elsewhere — guard against duplicate definition.
+# _attacker_ssh defined elsewhere - guard against duplicate definition.
 if ! declare -F _attacker_ssh >/dev/null 2>&1; then
     _attacker_ssh() {
         ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
@@ -25,7 +25,7 @@ fi
 # the frames must be L2-addressed to the gateway, not the destination. scapy's
 # L3 send() does not reliably NDP-resolve an off-link next hop on these VMs (it
 # falls back to an L2 broadcast, which the kernel never forwards), so we resolve
-# the gateway MAC explicitly with getmacbyip6 and send at L2 with sendp — what a
+# the gateway MAC explicitly with getmacbyip6 and send at L2 with sendp - what a
 # real host's stack does for an off-link route. Echoes 0 on success.
 scapy_send_ipv6_via() {
     local src="${1:?usage: scapy_send_ipv6_via <src_v6> <dst_v6> [count] [iface] [gw]}"

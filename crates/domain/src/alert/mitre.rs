@@ -41,19 +41,19 @@ pub enum DnsMitreReason {
 /// ML anomaly type for MITRE mapping (feature-driven classification).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MlAnomalyType {
-    /// `packet_rate` or `byte_rate` drift — volumetric anomaly.
+    /// `packet_rate` or `byte_rate` drift - volumetric anomaly.
     TrafficVolumeDrift,
-    /// `tcp_ratio`/`udp_ratio`/`icmp_ratio`/`other_ratio` drift — protocol tunneling.
+    /// `tcp_ratio`/`udp_ratio`/`icmp_ratio`/`other_ratio` drift - protocol tunneling.
     ProtocolRatioDrift,
-    /// `port_entropy` spike — port scanning.
+    /// `port_entropy` spike - port scanning.
     PortEntropySpike,
-    /// `unique_src_ips` spike — distributed source anomaly.
+    /// `unique_src_ips` spike - distributed source anomaly.
     SourceDiversitySpike,
-    /// `unique_dst_ports` spike — lateral movement / service discovery.
+    /// `unique_dst_ports` spike - lateral movement / service discovery.
     DestPortDiversitySpike,
-    /// `avg_payload_size` or `std_payload_size` spike — data staging.
+    /// `avg_payload_size` or `std_payload_size` spike - data staging.
     PayloadSizeAnomaly,
-    /// `connection_count` spike — brute force / worm propagation.
+    /// `connection_count` spike - brute force / worm propagation.
     ConnectionCountSpike,
 }
 
@@ -81,9 +81,9 @@ pub enum TlsIntelligenceMitreReason {
     PqcNonCompliant,
     /// Cipher suite or TLS version downgrade to a previously unseen weak profile.
     CipherDowngrade,
-    /// SNI does not match server certificate CN or SAN — potential MITM.
+    /// SNI does not match server certificate CN or SAN - potential MITM.
     SniCertMismatch,
-    /// TLS session ticket reused across multiple destinations — lateral movement.
+    /// TLS session ticket reused across multiple destinations - lateral movement.
     SessionResumeAnomaly,
     /// TLS fingerprint deviates from container peer group baseline.
     PeerGroupAnomaly,
@@ -112,7 +112,7 @@ pub enum MitreContext<'a> {
 
 /// Return the ATT&CK technique for the given alert context.
 ///
-/// The mapping is static and zero-heap in the registry itself — every
+/// The mapping is static and zero-heap in the registry itself - every
 /// returned [`MitreAttackInfo`] is built from `&'static str` literals.
 pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
     match ctx {
@@ -221,7 +221,7 @@ pub fn lookup(ctx: &MitreContext<'_>) -> MitreAttackInfo {
 /// than one on port 443 (HTTPS) or port 53 (DNS tunneling).
 fn lookup_ids(dst_port: u16, rate_based: bool) -> MitreAttackInfo {
     if rate_based {
-        // A rate/threshold rule counts repeated attempts against a service —
+        // A rate/threshold rule counts repeated attempts against a service -
         // that is brute-force behaviour, not a single signature match. Login
         // services map to the matching brute-force sub-technique.
         return match dst_port {
@@ -338,7 +338,7 @@ pub struct CoverageReport {
     pub by_tactic: Vec<TacticCoverage>,
 }
 
-/// Static coverage table — all technique mappings the agent can produce.
+/// Static coverage table - all technique mappings the agent can produce.
 /// Map ML anomaly feature type to the most relevant ATT&CK technique.
 fn lookup_ml_anomaly(anomaly_type: MlAnomalyType) -> MitreAttackInfo {
     match anomaly_type {

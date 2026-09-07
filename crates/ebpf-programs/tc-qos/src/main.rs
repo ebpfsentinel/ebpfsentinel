@@ -481,15 +481,15 @@ fn classify_at_dscp(
     if let Some(val) = lookup(src_ip, dst_ip, src_port, dst_port, protocol, dscp, vlan_id) {
         return Some(val);
     }
-    // 2. Wildcard src_port — the ephemeral side of a connection is never named.
+    // 2. Wildcard src_port - the ephemeral side of a connection is never named.
     if let Some(val) = lookup(src_ip, dst_ip, 0, dst_port, protocol, dscp, vlan_id) {
         return Some(val);
     }
-    // 3. Wildcard both ports — a host-to-host rule.
+    // 3. Wildcard both ports - a host-to-host rule.
     if let Some(val) = lookup(src_ip, dst_ip, 0, 0, protocol, dscp, vlan_id) {
         return Some(val);
     }
-    // 4. Wildcard IPs, exact ports — a port pair that applies to any host.
+    // 4. Wildcard IPs, exact ports - a port pair that applies to any host.
     if let Some(val) = lookup(0, 0, src_port, dst_port, protocol, dscp, vlan_id) {
         return Some(val);
     }
@@ -622,7 +622,7 @@ fn apply_qos(
         return Ok(TC_ACT_OK); // tenant mismatch -> pass
     }
 
-    // Step 3: Loss emulation — random drop
+    // Step 3: Loss emulation - random drop
     if pipe_cfg.loss_rate > 0 {
         let rand = unsafe { bpf_get_prandom_u32() } % 10000;
         if rand < u32::from(pipe_cfg.loss_rate) {

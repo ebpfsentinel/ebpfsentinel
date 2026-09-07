@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# wait-for-agent.sh — Poll agent healthz with exponential backoff
+# wait-for-agent.sh - Poll agent healthz with exponential backoff
 #
 # Usage: wait-for-agent.sh [--proto https] [--port 8080] [--host 127.0.0.1]
 #                          [--endpoint /healthz] [--max-attempts 20] [--ca-cert ca.pem]
@@ -42,7 +42,7 @@ while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
         exit 0
     fi
 
-    echo "  attempt ${ATTEMPT}/${MAX_ATTEMPTS} — not ready, retrying in ${DELAY}s..."
+    echo "  attempt ${ATTEMPT}/${MAX_ATTEMPTS} - not ready, retrying in ${DELAY}s..."
     sleep "$DELAY"
     DELAY="$(awk "BEGIN { d = $DELAY * 2; print (d > $MAX_DELAY) ? $MAX_DELAY : d }")"
     ATTEMPT=$((ATTEMPT + 1))

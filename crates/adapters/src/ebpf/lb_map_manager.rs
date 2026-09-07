@@ -20,10 +20,10 @@ pub struct LbMapManager {
     /// forwarding instead of MAC swap + `XDP_TX`.
     devmap: Option<DevMap<MapData>>,
     /// `LB_MAGLEV`: per-service Maglev lookup ring (consistent hashing).
-    /// Optional — only present in the `xdp-loadbalancer` program.
+    /// Optional - only present in the `xdp-loadbalancer` program.
     maglev_map: Option<HashMap<MapData, u32, MaglevLookup>>,
     /// `LB_BACKEND_MAC`: resolved backend MACs for L2 DSR forwarding.
-    /// Optional — only present in the `xdp-loadbalancer` program.
+    /// Optional - only present in the `xdp-loadbalancer` program.
     backend_mac_map: Option<HashMap<MapData, u32, BackendMac>>,
 }
 
@@ -41,7 +41,7 @@ impl LbMapManager {
             .ok_or_else(|| anyhow::anyhow!("map 'LB_BACKENDS' not found in eBPF object"))?;
         let backends_map = HashMap::try_from(be_map)?;
 
-        // DevMap is optional — only present in xdp-loadbalancer programs.
+        // DevMap is optional - only present in xdp-loadbalancer programs.
         let devmap = ebpf
             .take_map("LB_DEVMAP")
             .and_then(|m| match DevMap::try_from(m) {
@@ -55,7 +55,7 @@ impl LbMapManager {
                 }
             });
 
-        // LB_MAGLEV is optional — only the xdp-loadbalancer program has it.
+        // LB_MAGLEV is optional - only the xdp-loadbalancer program has it.
         let maglev_map = ebpf
             .take_map("LB_MAGLEV")
             .and_then(|m| HashMap::try_from(m).ok());
@@ -63,7 +63,7 @@ impl LbMapManager {
             info!("LB_MAGLEV acquired for consistent-hash selection");
         }
 
-        // LB_BACKEND_MAC is optional — only the xdp-loadbalancer has it.
+        // LB_BACKEND_MAC is optional - only the xdp-loadbalancer has it.
         let backend_mac_map = ebpf
             .take_map("LB_BACKEND_MAC")
             .and_then(|m| HashMap::try_from(m).ok());
@@ -104,7 +104,7 @@ impl LbMapManager {
         Ok(())
     }
 
-    /// Remove a service's Maglev ring (best-effort — a missing entry is fine).
+    /// Remove a service's Maglev ring (best-effort - a missing entry is fine).
     pub fn remove_maglev_table(&mut self, svc_index: u32) -> Result<(), anyhow::Error> {
         if let Some(ref mut map) = self.maglev_map
             && let Err(e) = map.remove(&svc_index)
@@ -124,7 +124,7 @@ impl LbMapManager {
         Ok(())
     }
 
-    /// Remove a backend's MAC (best-effort — a missing entry is fine).
+    /// Remove a backend's MAC (best-effort - a missing entry is fine).
     pub fn remove_backend_mac(&mut self, backend_id: u32) -> Result<(), anyhow::Error> {
         if let Some(ref mut map) = self.backend_mac_map
             && let Err(e) = map.remove(&backend_id)
@@ -342,7 +342,7 @@ impl LoadBalancerMapPort for LbMapManager {
 /// Resolve the link-layer (MAC) address for a backend IP via the kernel
 /// neighbor table (`ip neigh show <ip>`). Used to populate
 /// `LB_BACKEND_MAC` for L2 DSR forwarding. Returns `None` when the
-/// neighbor is not yet resolved — the eBPF data plane then falls back to
+/// neighbor is not yet resolved - the eBPF data plane then falls back to
 /// the DNAT path with no regression.
 fn resolve_mac_for_ip(addr_v4: u32, addr_v6: &[u32; 4], is_ipv6: bool) -> Option<[u8; 6]> {
     let ip = if is_ipv6 {

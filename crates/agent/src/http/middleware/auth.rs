@@ -10,18 +10,18 @@ use super::super::state::AppState;
 /// Axum middleware that validates authentication via the `AuthProvider`.
 ///
 /// Supports two authentication methods (tried in order):
-/// 1. `Authorization: Bearer <token>` — JWT/OIDC tokens
-/// 2. `X-API-Key: <key>` — static API keys
+/// 1. `Authorization: Bearer <token>` - JWT/OIDC tokens
+/// 2. `X-API-Key: <key>` - static API keys
 ///
 /// When no `auth_provider` is configured in state, requests pass through
-/// (backward compatible — auth disabled).
+/// (backward compatible - auth disabled).
 pub async fn jwt_auth_middleware(
     State(state): State<Arc<AppState>>,
     mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
     let Some(ref auth_provider) = state.auth_provider else {
-        // No auth provider configured — pass through
+        // No auth provider configured - pass through
         return Ok(next.run(request).await);
     };
 
@@ -36,7 +36,7 @@ pub async fn jwt_auth_middleware(
 ///
 /// Checks `Authorization: Bearer <token>` first, then `X-API-Key: <key>`.
 fn extract_token(request: &Request) -> Result<&str, ApiError> {
-    // Try Bearer token first — must look like a JWT (3 dot-separated parts).
+    // Try Bearer token first - must look like a JWT (3 dot-separated parts).
     if let Some(auth_header) = request
         .headers()
         .get(axum::http::header::AUTHORIZATION)
@@ -316,7 +316,7 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        // AlwaysOkProvider returns "test-user" for any token — the key point is
+        // AlwaysOkProvider returns "test-user" for any token - the key point is
         // that Bearer was used (the token passed to validate_token is "jwt.token.here",
         // not "sk-api-key"), verified by the 200 response.
     }

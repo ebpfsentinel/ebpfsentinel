@@ -1,4 +1,4 @@
-# config-perf-firewall-only.yaml — Only firewall enabled
+# config-perf-firewall-only.yaml - Only firewall enabled
 # For measuring isolated firewall overhead without other domains.
 
 agent:

@@ -3,14 +3,14 @@
 //!
 //! The buffer is shared between the alert pipeline (push side) and the
 //! HTTP / SSE adapter (snapshot side) via `Arc`. Locking is brief and
-//! synchronous (`std::sync::Mutex`) — the critical section never awaits.
+//! synchronous (`std::sync::Mutex`) - the critical section never awaits.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use domain::alert::entity::Alert;
 
-/// Default replay window — five thousand alerts. Sized so that a client
+/// Default replay window - five thousand alerts. Sized so that a client
 /// reconnecting within a typical TCP keep-alive window can resume without
 /// a gap, while keeping the upper bound on memory predictable
 /// (~5 000 × ~2 KiB ≈ 10 MiB).
@@ -64,7 +64,7 @@ impl AlertReplayBuffer {
     /// An id already present is not pushed again. The `Last-Event-ID` resume
     /// contract resolves a client's position by locating that id in the
     /// buffer, so a second copy would make every alert between the two
-    /// copies replay twice — and the acknowledged event itself come back.
+    /// copies replay twice - and the acknowledged event itself come back.
     /// The alert store cannot show this because it is keyed by id and a
     /// re-store is idempotent; this buffer is append-only, so it must
     /// enforce uniqueness itself.
@@ -87,7 +87,7 @@ impl AlertReplayBuffer {
     /// If `last_id` is `None`, an empty vector is returned (a fresh
     /// subscriber receives only future events from the broadcast channel).
     /// If `last_id` is `Some(id)` but `id` is not in the buffer (the
-    /// client missed too much), an empty vector is also returned — the
+    /// client missed too much), an empty vector is also returned - the
     /// client should fall back to the REST `GET /api/v1/alerts` endpoint
     /// to backfill.
     #[must_use]

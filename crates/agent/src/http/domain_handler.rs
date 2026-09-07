@@ -20,7 +20,7 @@ use super::validation::{MAX_PATTERN_LENGTH, validate_string_length};
 pub struct ReputationQueryParams {
     /// Filter by domain (exact match).
     pub domain: Option<String>,
-    /// Minimum reputation score (0.0–1.0).
+    /// Minimum reputation score (0.0-1.0).
     pub min_score: Option<f64>,
     /// Page number (0-indexed).
     #[serde(default)]
@@ -72,7 +72,7 @@ pub struct BlocklistRemoveResponse {
 
 // ── Handlers ────────────────────────────────────────────────────────
 
-/// `GET /api/v1/domains/reputation` — query domain reputations.
+/// `GET /api/v1/domains/reputation` - query domain reputations.
 #[utoipa::path(
     get, path = "/api/v1/domains/reputation",
     tag = "Domain Intelligence",
@@ -153,7 +153,7 @@ pub async fn list_domain_reputations(
     }))
 }
 
-/// `POST /api/v1/domains/blocklist` — add a domain to the runtime blocklist.
+/// `POST /api/v1/domains/blocklist` - add a domain to the runtime blocklist.
 #[utoipa::path(
     post, path = "/api/v1/domains/blocklist",
     tag = "Domain Intelligence",
@@ -200,7 +200,7 @@ pub async fn add_to_blocklist(
     }))
 }
 
-/// `DELETE /api/v1/domains/blocklist/{domain}` — remove a domain from the runtime blocklist.
+/// `DELETE /api/v1/domains/blocklist/{domain}` - remove a domain from the runtime blocklist.
 #[utoipa::path(
     delete, path = "/api/v1/domains/blocklist/{domain}",
     tag = "Domain Intelligence",

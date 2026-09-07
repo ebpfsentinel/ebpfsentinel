@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ebpf_helpers.bash — Shared helpers for eBPF scenario tests (suites 11-15, 18-23)
+# ebpf_helpers.bash - Shared helpers for eBPF scenario tests (suites 11-15, 18-23)
 #
 # Agent launch strategy:
 #   1. Local binary + local eBPF programs (cargo xtask ebpf-build)
@@ -17,7 +17,7 @@ EBPF_HELPERS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source core helpers if not already loaded. Guard on a helper *function*,
 # not on PROJECT_ROOT: that variable is exported and leaks into a later
 # suite's bats subshell from an earlier suite's setup_file, but functions do
-# not cross subshells — so keying off the variable would skip sourcing while
+# not cross subshells - so keying off the variable would skip sourcing while
 # api_get/assert_* are actually absent.
 if ! declare -F api_get >/dev/null 2>&1; then
     source "${EBPF_HELPERS_DIR}/helpers.bash"
@@ -26,7 +26,7 @@ fi
 # ── Constants ────────────────────────────────────────────────────────
 
 # Scapy lives in a dedicated venv on the attacker VM (the system python
-# has no scapy — see setup-attacker.sh). Resolve the interpreter once so
+# has no scapy - see setup-attacker.sh). Resolve the interpreter once so
 # every suite drives scapy through the venv and stops silently skipping;
 # fall back to the bare interpreter only where the venv is absent.
 EBPF_SCAPY_PY="${EBPF_SCAPY_PY:-/opt/scapy-venv/bin/python3}"
@@ -50,16 +50,16 @@ EBPF_AGENT_VIA_DOCKER="false"
 
 # ── Skip guards ──────────────────────────────────────────────────────
 
-# require_root — skip test/suite if not running as root
+# require_root - skip test/suite if not running as root
 require_root() {
     if [ "$(id -u)" -ne 0 ]; then
         env_skip "requires root privileges"
     fi
 }
 
-# require_kernel <major> <minor> — skip if kernel is older than given version.
+# require_kernel <major> <minor> - skip if kernel is older than given version.
 # In 2-VM / 3-VM mode the suite runs on the traffic-generating attacker VM, but
-# the eBPF programs load on the agent VM — so the kernel floor must be checked
+# the eBPF programs load on the agent VM - so the kernel floor must be checked
 # against the agent's kernel, not the local one.
 require_kernel() {
     local req_major="${1:-5}"
@@ -81,7 +81,7 @@ require_kernel() {
     fi
 }
 
-# require_tool <command> — skip if command is not in PATH
+# require_tool <command> - skip if command is not in PATH
 require_tool() {
     local tool="${1:?usage: require_tool <command>}"
     if ! command -v "$tool" &>/dev/null; then
@@ -89,7 +89,7 @@ require_tool() {
     fi
 }
 
-# _has_local_ebpf — returns 0 if local binary + eBPF programs exist
+# _has_local_ebpf - returns 0 if local binary + eBPF programs exist
 _has_local_ebpf() {
     local ebpf_dir="${PROJECT_ROOT}/target/bpfel-unknown-none/release"
     [ -x "${PROJECT_ROOT}/target/release/ebpfsentinel-agent" ] && \
@@ -97,13 +97,13 @@ _has_local_ebpf() {
     [ -f "${ebpf_dir}/xdp-firewall" ]
 }
 
-# _has_docker_image — returns 0 if Docker image is available
+# _has_docker_image - returns 0 if Docker image is available
 _has_docker_image() {
     command -v docker &>/dev/null && \
     docker image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -qF "$EBPF_DOCKER_IMAGE"
 }
 
-# require_ebpf_env — skip if neither local eBPF nor Docker image available
+# require_ebpf_env - skip if neither local eBPF nor Docker image available
 require_ebpf_env() {
     if _has_local_ebpf; then
         return 0
@@ -116,7 +116,7 @@ require_ebpf_env() {
 
 # ── Network namespace / veth pair management ─────────────────────────
 
-# create_test_netns — creates a veth pair with one end in a network namespace
+# create_test_netns - creates a veth pair with one end in a network namespace
 #   Host side: $EBPF_VETH_HOST  with $EBPF_HOST_IP/$EBPF_SUBNET
 #   NS side:   $EBPF_VETH_NS    with $EBPF_NS_IP/$EBPF_SUBNET   inside $EBPF_TEST_NS
 create_test_netns() {
@@ -142,8 +142,8 @@ create_test_netns() {
     ip netns exec "$EBPF_TEST_NS" ip link set lo up
 
     # Attach a pass-through XDP program on the namespace-side veth. The kernel
-    # only arms a veth's receive-side XDP path — and therefore only delivers
-    # XDP_TX'd frames sent from the host side — when that end carries a native
+    # only arms a veth's receive-side XDP path - and therefore only delivers
+    # XDP_TX'd frames sent from the host side - when that end carries a native
     # XDP program. The agent forges ARP replies (VIP announcer) and TCP RSTs
     # (firewall reject) and XDP_TX's them back out the host veth; without this
     # the reflections are silently dropped before reaching the namespace. A
@@ -162,7 +162,7 @@ create_test_netns() {
     sleep 0.5
 }
 
-# destroy_test_netns — tear down namespace and veth pair
+# destroy_test_netns - tear down namespace and veth pair
 destroy_test_netns() {
     ip netns del "$EBPF_TEST_NS" 2>/dev/null || true
     ip link delete "$EBPF_VETH_HOST" 2>/dev/null || true
@@ -307,7 +307,7 @@ start_ebpf_agent() {
         # eBPF loads EXCLUSIVELY through a BPF token (a user-namespace feature),
         # so the deployment is split: a privileged `warden` broker runs alongside
         # the agent, which self-unshares a user namespace, has the warden delegate
-        # a bpffs, and loads its own eBPF — exactly as production (systemd / Docker
+        # a bpffs, and loads its own eBPF - exactly as production (systemd / Docker
         # / K8s) does. Run the agent alone and it cannot reach a warden, so it
         # starts in API-only mode (no eBPF). The agent needs unprivileged user
         # namespaces; enable them in the (root, throwaway) VM.
@@ -325,7 +325,7 @@ start_ebpf_agent() {
             echo "  [strategy] eBPF via warden broker: $warden" >&2
             # The agent execs itself inside a child user namespace, where any path
             # component owned by an unmapped uid (e.g. the 0750 /home/<user> build
-            # tree) is inaccessible — to both exec and read. Stage the agent binary
+            # tree) is inaccessible - to both exec and read. Stage the agent binary
             # + eBPF objects under /tmp (world-traversable, root-owned) so the
             # userns agent can reach them. The config already lives under /tmp
             # ($DATA_DIR).
@@ -389,7 +389,7 @@ start_ebpf_agent() {
         docker logs -f "$EBPF_DOCKER_CONTAINER" >"$AGENT_LOG_FILE" 2>&1 &
 
     else
-        echo "No local eBPF build and no Docker image — cannot start agent" >&2
+        echo "No local eBPF build and no Docker image - cannot start agent" >&2
         return 1
     fi
 
@@ -411,7 +411,7 @@ start_ebpf_agent() {
     assert_config_loaded "$config_file"
 }
 
-# stop_ebpf_agent — stop agent launched by start_ebpf_agent
+# stop_ebpf_agent - stop agent launched by start_ebpf_agent
 stop_ebpf_agent() {
     if [ "${EBPF_AGENT_VIA_DOCKER}" = "true" ]; then
         docker rm -f "$EBPF_DOCKER_CONTAINER" >/dev/null 2>&1 || true
@@ -576,7 +576,7 @@ wait_for_ebpf_loaded() {
         fi
         # /readyz reports {"status":"not_ready","ebpf_loaded":false} both while
         # the programs are still loading AND when the agent is genuinely
-        # degraded — the status field is derived solely from ebpf_loaded, so the
+        # degraded - the status field is derived solely from ebpf_loaded, so the
         # two are indistinguishable over HTTP. We therefore keep polling on
         # false (startup takes ~2s to attach XDP) and only declare degraded once
         # the timeout elapses; failing fast on the first false reading skipped

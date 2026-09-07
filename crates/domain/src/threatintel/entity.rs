@@ -160,7 +160,7 @@ pub struct CtiUrl {
 
 // ── Feed format ─────────────────────────────────────────────────────
 
-/// Feed format — defines HOW to parse, not WHO publishes.
+/// Feed format - defines HOW to parse, not WHO publishes.
 /// Adding support for a new format requires implementing one parser trait;
 /// no changes to the engine or config model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,7 +179,7 @@ pub enum FeedFormat {
 // ── Field mapping ───────────────────────────────────────────────────
 
 /// Configurable field mapping for generic feed parsing.
-/// Allows any CSV/JSON/plaintext feed to be ingested without code changes —
+/// Allows any CSV/JSON/plaintext feed to be ingested without code changes -
 /// just define which column or field holds the IP, confidence, etc.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldMapping {
@@ -224,7 +224,7 @@ impl Default for FieldMapping {
 /// Source-agnostic feed descriptor.
 ///
 /// Any HTTP/HTTPS URL serving IOCs in a supported format can be configured
-/// via YAML — no provider-specific code needed. Pre-built YAML templates
+/// via YAML - no provider-specific code needed. Pre-built YAML templates
 /// for popular feeds are
 /// provided as examples, not hardcoded adapters.
 #[derive(Debug, Clone, Serialize, Deserialize)]

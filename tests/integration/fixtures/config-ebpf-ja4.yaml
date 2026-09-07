@@ -1,12 +1,12 @@
-# config-ebpf-ja4.yaml — Suite 45 (JA4 client-diversity) fixture.
+# config-ebpf-ja4.yaml - Suite 45 (JA4 client-diversity) fixture.
 #
 # Enables L7 inspection on the test-target TLS port (8443) so that
 # ClientHello bytes are parsed → JA4 fingerprint computed → cached.
 # Two SNI rules drive the alert path:
 #
-#   * deny on  "malicious-ja4.test" — sentinel SNI used by the
+#   * deny on  "malicious-ja4.test" - sentinel SNI used by the
 #     "malicious" client variant, emits an alert + MITRE tag.
-#   * allow on "legit-ja4.test"      — sentinel SNI used by the FP
+#   * allow on "legit-ja4.test"      - sentinel SNI used by the FP
 #     guard, must NOT emit an L7 deny alert.
 #
 # The agent does not terminate TLS; clients connect to an

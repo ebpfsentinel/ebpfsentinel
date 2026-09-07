@@ -286,7 +286,7 @@ impl QosMapPort for QosMapManager {
 /// stored beside it, so two rules that differ only in what they leave open are
 /// indistinguishable to the kernel lookup. Nothing in the data plane can
 /// arbitrate between them, so the tie is settled here by the documented meaning
-/// of `priority` — lower is matched first. Ties on priority keep the earlier
+/// of `priority` - lower is matched first. Ties on priority keep the earlier
 /// rule, which is the order the configuration file lists them in.
 fn winning_classifier_indices(classifiers: &[QosClassifier], queues: &[QosQueue]) -> Vec<usize> {
     let mut winner_by_key: std::collections::HashMap<QosClassifierKey, usize> =

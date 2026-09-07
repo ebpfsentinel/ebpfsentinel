@@ -1,4 +1,4 @@
-# config-ebpf-syncookie.yaml — XDP ratelimit + SYN-cookie fixture for
+# config-ebpf-syncookie.yaml - XDP ratelimit + SYN-cookie fixture for
 # Suite 47. Mirrors the suite-42 syncookie fixture but targets a TCP
 # listener port (default 11443) instead of the pktgen UDP path so the
 # legitimate attacker can complete the 3-way handshake via the cookie.

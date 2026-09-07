@@ -1,6 +1,6 @@
-# config-perf-block.yaml — Full stack, firewall=block, ips=block
+# config-perf-block.yaml - Full stack, firewall=block, ips=block
 # Derived from config-ebpf-benchmark.yaml for Docker performance tests.
-# Active blocking on ports 9999 and 7777 — verifies blocked traffic = 0 bps.
+# Active blocking on ports 9999 and 7777 - verifies blocked traffic = 0 bps.
 
 agent:
   interfaces:

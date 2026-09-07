@@ -1,7 +1,7 @@
 //! Minimal Docker Engine API client over Unix socket.
 //!
 //! Performs a single-request HTTP/1.1 `GET /v1.43/containers/{id}/json` on
-//! `/var/run/docker.sock`. No external Docker SDK dependency — raw
+//! `/var/run/docker.sock`. No external Docker SDK dependency - raw
 //! [`tokio::net::UnixStream`] with manual request framing and response
 //! parsing. Keeps the OSS dependency surface tiny.
 
@@ -20,7 +20,7 @@ use domain::container::error::ContainerError;
 pub const DEFAULT_SOCKET: &str = "/var/run/docker.sock";
 /// Default request timeout.
 pub const DEFAULT_TIMEOUT_MS: u64 = 2_000;
-/// Max response body size we accept (1 MiB — Docker inspect payloads are tiny).
+/// Max response body size we accept (1 MiB - Docker inspect payloads are tiny).
 const MAX_BODY_BYTES: usize = 1 << 20;
 
 /// Subset of the Docker inspect payload we consume.
@@ -70,7 +70,7 @@ impl DockerClient {
         &self.socket
     }
 
-    /// `GET /v1.43/containers/{id}/json` — returns parsed metadata.
+    /// `GET /v1.43/containers/{id}/json` - returns parsed metadata.
     pub async fn inspect_container(&self, id: &str) -> Result<DockerMetadata, ContainerError> {
         let request = format!(
             "GET /v1.43/containers/{id}/json HTTP/1.1\r\n\

@@ -1,4 +1,4 @@
-# eBPFsentinel — Security Zones Configuration Example
+# eBPFsentinel - Security Zones Configuration Example
 # ===================================================
 #
 # Zone-based firewall segmentation. Interfaces are grouped into security
@@ -33,22 +33,22 @@ zones:
   # ── Zone Definitions ─────────────────────────────────────────
 
   zones:
-    # WAN zone — untrusted internet-facing interfaces
+    # WAN zone - untrusted internet-facing interfaces
     - id: wan
       interfaces: [eth0]
       default_policy: deny
 
-    # LAN zone — trusted internal network
+    # LAN zone - trusted internal network
     - id: lan
       interfaces: [eth1]
       default_policy: allow
 
-    # DMZ zone — semi-trusted servers (web, mail, DNS)
+    # DMZ zone - semi-trusted servers (web, mail, DNS)
     - id: dmz
       interfaces: [eth2]
       default_policy: deny
 
-    # Management zone — out-of-band admin access
+    # Management zone - out-of-band admin access
     - id: mgmt
       interfaces: [eth3]
       default_policy: deny

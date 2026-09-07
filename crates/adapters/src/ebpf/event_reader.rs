@@ -126,7 +126,7 @@ impl EventReader {
 /// For L7 events the kernel reserves a fixed-size buffer (512 or 2048 B)
 /// but only fills `header.rule_id` bytes via `bpf_skb_load_bytes`; the
 /// remaining bytes are uninitialised kernel memory. The payload is trimmed
-/// to that captured length so downstream parsers never read — nor leak —
+/// to that captured length so downstream parsers never read - nor leak -
 /// the stale tail.
 fn decode_event(bytes: &[u8]) -> Option<AgentEvent> {
     let header_len = std::mem::size_of::<PacketEvent>();
@@ -221,7 +221,7 @@ mod tests {
         let rss_hash: u32 = 0xDEAD_BEEF;
         bytes[80..84].copy_from_slice(&rss_hash.to_ne_bytes());
 
-        // rss_hash_type at offset 84 (u32) — L3_IPV4 | L4 | L4_TCP
+        // rss_hash_type at offset 84 (u32) - L3_IPV4 | L4 | L4_TCP
         let rss_type: u32 = 1 | 8 | 16;
         bytes[84..88].copy_from_slice(&rss_type.to_ne_bytes());
 

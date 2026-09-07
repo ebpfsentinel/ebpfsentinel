@@ -14,7 +14,7 @@ fuzz_target!(|data: &[u8]| {
     // This mirrors what the adapter does when reading from the eBPF RingBuf.
     let event: PacketEvent = unsafe { core::ptr::read_unaligned(data.as_ptr().cast()) };
 
-    // Exercise all accessor methods — none should panic.
+    // Exercise all accessor methods - none should panic.
     let _ = event.src_ip();
     let _ = event.dst_ip();
     let _ = event.is_ipv6();
@@ -22,6 +22,6 @@ fuzz_target!(|data: &[u8]| {
     let _ = is_ipv6(event.flags);
     let _ = has_vlan(event.flags);
 
-    // Exercise Debug formatting — should never panic.
+    // Exercise Debug formatting - should never panic.
     let _ = format!("{event:?}");
 });

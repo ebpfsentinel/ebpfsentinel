@@ -12,9 +12,9 @@ use domain::common::entity::{DomainMode, RuleId, Severity};
 // Fuzz the AlertRouter: dedup, throttle, route matching, and reload.
 //
 // Layout:
-//   [0]    = number of routes (1–6)
-//   [1]    = dedup_window_secs (0–255)
-//   [2]    = throttle_max (1–255)
+//   [0]    = number of routes (1-6)
+//   [1]    = dedup_window_secs (0-255)
+//   [2]    = throttle_max (1-255)
 //   [3]    = selector (0=process, 1=reload+process)
 //   rest   = consumed in 16-byte chunks as alerts
 fuzz_target!(|data: &[u8]| {

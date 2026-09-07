@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-ebpf-docker.sh — Run eBPF integration tests inside a privileged Docker container
+# run-ebpf-docker.sh - Run eBPF integration tests inside a privileged Docker container
 #
 # The container runs as root so it can create network namespaces, attach
 # eBPF programs, and use bpftool.  The host binary + eBPF programs are

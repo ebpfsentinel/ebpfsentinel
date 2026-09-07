@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# alert_helpers.bash — MITRE ATT&CK assertion helpers for alert-producing suites.
+# alert_helpers.bash - MITRE ATT&CK assertion helpers for alert-producing suites.
 #
 # The agent's alert handler (crates/adapters/src/http/alert_handler.rs) flattens
 # the domain MitreAttackInfo into three top-level fields on the alert DTO:
@@ -16,7 +16,7 @@
 # assert_alert_has_mitre_technique <technique_id> [max_attempts]
 #
 # Polls for at least one alert whose flattened `mitre_technique_id` matches
-# the given value (case-insensitive). Sub-technique suffixes are honoured —
+# the given value (case-insensitive). Sub-technique suffixes are honoured -
 # pass "T1499" to accept any T1499.* mapping, or "T1499.002" for the exact
 # sub-technique. Returns 0 on match, 1 on timeout with a stderr diagnostic.
 assert_alert_has_mitre_technique() {

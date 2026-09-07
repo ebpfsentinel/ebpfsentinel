@@ -23,7 +23,7 @@ pub enum AlertDecision<'a> {
 }
 
 impl<'a> AlertDecision<'a> {
-    /// Routes to deliver to — empty when the alert was suppressed or matched nothing.
+    /// Routes to deliver to - empty when the alert was suppressed or matched nothing.
     pub fn routes(&self) -> &[(usize, &'a AlertRoute)] {
         match self {
             Self::Deduplicated | Self::Throttled => &[],

@@ -1,16 +1,16 @@
 //! Shared `#[repr(C)]` types for the L2 VIP announcer (ARP responder).
 //!
-//! The announcer is a small, bounded XDP path — kept separate from the LB
-//! hot path — that answers ARP requests for configured virtual IPs when
+//! The announcer is a small, bounded XDP path - kept separate from the LB
+//! hot path - that answers ARP requests for configured virtual IPs when
 //! this node is the elected speaker. Userspace populates [`VIP_SET`] with
 //! the owned VIPs **only while this node is the speaker**, so a standby
 //! node has an empty set and never answers (split-brain safe). The node's
 //! per-ifindex NIC MAC is resolved in userspace and pushed to `IFACE_MAC`.
 //!
 //! Map names (created by the `xdp-vip-announcer` program):
-//! - `VIP_SET`     — `HashMap<u32 vip_be, VipEntry>`
-//! - `IFACE_MAC`   — `HashMap<u32 ifindex, IfaceMac>`
-//! - `VIP_METRICS` — `PerCpuArray<u64>` ([`VIP_METRIC_COUNT`] slots)
+//! - `VIP_SET`     - `HashMap<u32 vip_be, VipEntry>`
+//! - `IFACE_MAC`   - `HashMap<u32 ifindex, IfaceMac>`
+//! - `VIP_METRICS` - `PerCpuArray<u64>` ([`VIP_METRIC_COUNT`] slots)
 
 /// Maximum number of VIPs the announcer can own.
 pub const MAX_VIPS: u32 = 256;

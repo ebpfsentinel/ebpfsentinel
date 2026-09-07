@@ -12,13 +12,13 @@ const MAX_SERVICES: usize = 64;
 /// Maglev ring size. Prime, sufficiently larger than the max backend
 /// count so the permutation fills every slot. Mirrors
 /// `ebpf_common::loadbalancer::MAGLEV_RING_SIZE` (the adapter asserts
-/// equality when converting — domain stays free of internal deps).
+/// equality when converting - domain stays free of internal deps).
 pub const MAGLEV_RING_SIZE: usize = 65537;
 
 /// FNV-1a offset basis for the Maglev `offset` permutation component.
 const MAGLEV_BASIS_OFFSET: u32 = 0x811c_9dc5;
 /// Independent basis for the Maglev `skip` permutation component
-/// (golden-ratio constant) — decorrelates the two hashes.
+/// (golden-ratio constant) - decorrelates the two hashes.
 const MAGLEV_BASIS_SKIP: u32 = 0x9e37_79b1;
 
 /// Cached Maglev lookup table plus the healthy-backend signature it was
@@ -238,7 +238,7 @@ impl LbEngine {
     /// disabled, not using Maglev, or has no healthy backend.
     ///
     /// Live producer for the `LB_MAGLEV` eBPF map (consumed by the
-    /// loadbalancer map adapter — no dead code).
+    /// loadbalancer map adapter - no dead code).
     pub fn maglev_table(&mut self, service_id: &str) -> Option<&[u16]> {
         let state = self.states.get_mut(service_id)?;
         if !state.service.enabled || state.service.algorithm != LbAlgorithm::Maglev {
@@ -739,7 +739,7 @@ mod tests {
         );
         engine.add_service(svc).unwrap();
 
-        // Both have 0 connections — should pick first healthy
+        // Both have 0 connections - should pick first healthy
         let selected = engine.select_backend("svc-1", client_addr(1)).unwrap();
         assert_eq!(selected.id, "be-1");
     }
@@ -854,7 +854,7 @@ mod tests {
         let mut still_present = 0usize;
         for slot in 0..MAGLEV_RING_SIZE {
             if before[slot] == removed {
-                continue; // these MUST move — the ~1/N share
+                continue; // these MUST move - the ~1/N share
             }
             still_present += 1;
             if before[slot] != after[slot] {

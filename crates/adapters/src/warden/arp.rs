@@ -3,8 +3,8 @@
 //! On VIP-speaker takeover the agent broadcasts a gratuitous ARP so upstream
 //! switches relearn the MAC. That needs an `AF_PACKET`/`SOCK_RAW` socket, which
 //! the capability-dropped agent cannot create (`CAP_NET_RAW`). The rootless agent
-//! therefore asks the warden — which holds the capability and resolves the
-//! interface MAC itself — to emit the gratuitous ARP over its typed protocol.
+//! therefore asks the warden - which holds the capability and resolves the
+//! interface MAC itself - to emit the gratuitous ARP over its typed protocol.
 
 use std::net::IpAddr;
 use std::path::PathBuf;

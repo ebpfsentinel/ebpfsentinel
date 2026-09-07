@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 21-ebpf-nat-scenarios.bats — NAT eBPF scenario tests
+# 21-ebpf-nat-scenarios.bats - NAT eBPF scenario tests
 # Requires: root, kernel >= 6.9, bpftool
 
 load '../lib/helpers'
@@ -126,7 +126,7 @@ teardown_file() {
 
 # ── NPTv6 CRUD ───────────────────────────────────────────────────
 
-@test "NPTv6 rule CRUD — create" {
+@test "NPTv6 rule CRUD - create" {
     require_root
 
     local rule='{"id":"nptv6-test","internal_prefix":"fd00::","external_prefix":"2001:db8::","prefix_len":48}'
@@ -140,7 +140,7 @@ teardown_file() {
     [ "$id" = "nptv6-test" ]
 }
 
-@test "NPTv6 rule CRUD — delete" {
+@test "NPTv6 rule CRUD - delete" {
     require_root
 
     api_delete /api/v1/nat/nptv6/nptv6-test >/dev/null

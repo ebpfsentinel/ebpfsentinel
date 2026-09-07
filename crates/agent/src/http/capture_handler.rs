@@ -73,7 +73,7 @@ fn ensure_path_safe_id(id: &str) -> Result<(), ApiError> {
     }
 }
 
-/// `POST /api/v1/captures/manual` — start a time-bounded packet capture.
+/// `POST /api/v1/captures/manual` - start a time-bounded packet capture.
 #[utoipa::path(
     post, path = "/api/v1/captures/manual",
     tag = "Captures",
@@ -210,7 +210,7 @@ pub async fn start_capture(
     Ok(Json(resp))
 }
 
-/// `GET /api/v1/captures` — list all captures.
+/// `GET /api/v1/captures` - list all captures.
 #[utoipa::path(
     get, path = "/api/v1/captures",
     tag = "Captures",
@@ -240,7 +240,7 @@ pub async fn list_captures(
     Ok(Json(CaptureListResponse { captures }))
 }
 
-/// `DELETE /api/v1/captures/{id}` — stop a running capture.
+/// `DELETE /api/v1/captures/{id}` - stop a running capture.
 #[utoipa::path(
     delete, path = "/api/v1/captures/{id}",
     tag = "Captures",

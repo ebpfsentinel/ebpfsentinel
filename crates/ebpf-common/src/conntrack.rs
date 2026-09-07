@@ -99,7 +99,7 @@ pub const CT_FLAG_NAT_SRC: u8 = 0x04;
 pub const CT_FLAG_NAT_DST: u8 = 0x08;
 pub const CT_FLAG_NAT_HAIRPIN: u8 = 0x10;
 
-// ── Conntrack key (IPv4) — 16 bytes ─────────────────────────────────
+// ── Conntrack key (IPv4) - 16 bytes ─────────────────────────────────
 
 /// Normalized 5-tuple key for IPv4 connections.
 ///
@@ -116,7 +116,7 @@ pub struct ConnKey {
     pub _pad: [u8; 3],
 }
 
-// ── Conntrack key (IPv6) — 40 bytes ─────────────────────────────────
+// ── Conntrack key (IPv6) - 40 bytes ─────────────────────────────────
 
 /// Normalized 5-tuple key for IPv6 connections.
 #[repr(C)]
@@ -130,7 +130,7 @@ pub struct ConnKeyV6 {
     pub _pad: [u8; 3],
 }
 
-// ── Conntrack value — 48 bytes ──────────────────────────────────────
+// ── Conntrack value - 48 bytes ──────────────────────────────────────
 
 /// Connection state and counters stored in the conntrack table.
 #[repr(C)]
@@ -162,7 +162,7 @@ pub struct ConnValue {
     pub _pad2: [u8; 2],
 }
 
-// ── Conntrack value (IPv6) — 64 bytes ──────────────────────────────
+// ── Conntrack value (IPv6) - 64 bytes ──────────────────────────────
 
 /// Connection state and counters for IPv6 connections.
 ///
@@ -198,7 +198,7 @@ pub struct ConnValueV6 {
     pub _pad2: [u8; 2],
 }
 
-// ── Conntrack configuration — 80 bytes ──────────────────────────────
+// ── Conntrack configuration - 80 bytes ──────────────────────────────
 
 /// Global conntrack configuration, stored in a single-element Array map.
 #[repr(C)]

@@ -83,7 +83,7 @@ pub struct OidcConfig {
 /// Signing algorithm advertised by the JWT verifier.
 ///
 /// `RS256` (legacy default) verifies with an RSA-2048+ public key.
-/// `EdDSA` verifies with an Ed25519 public key — required for the
+/// `EdDSA` verifies with an Ed25519 public key - required for the
 /// dashboard's short-lived per-tenant tokens with JWKS rotation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]

@@ -117,7 +117,7 @@ impl AliasResolver {
             | AliasKind::DynamicDns { .. }
             | AliasKind::InterfaceGroup { .. }
             | AliasKind::External => {
-                // These need external resolution — return empty for now,
+                // These need external resolution - return empty for now,
                 // the adapter will populate them.
                 Ok(Vec::new())
             }

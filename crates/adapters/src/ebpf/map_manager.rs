@@ -65,7 +65,7 @@ impl FirewallMapManager {
                 .ok_or_else(|| anyhow::anyhow!("map 'FIREWALL_DEFAULT_POLICY' not found"))?,
         )?;
 
-        // Fast-path HashMap maps (optional — absent if program doesn't have them)
+        // Fast-path HashMap maps (optional - absent if program doesn't have them)
         let hash_5tuple = ebpf
             .take_map("FW_HASH_5TUPLE")
             .and_then(|m| HashMap::try_from(m).ok());
@@ -144,7 +144,7 @@ impl FirewallArrayMapPort for FirewallMapManager {
         // `rules` arrive sorted by ascending priority (lowest number wins). The
         // eBPF datapath checks the O(1) hash fast-paths BEFORE the linear array
         // scan, so a rule may only be fast-pathed while no higher-priority rule
-        // has already been routed to the array — otherwise the hash hit would
+        // has already been routed to the array - otherwise the hash hit would
         // short-circuit and skip that higher-priority rule (e.g. a broad
         // whitelist `allow` losing to a narrow `reject` on the same port).
         // Once the first array-bound rule is seen, every subsequent fast-path

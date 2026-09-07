@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 14-ebpf-ratelimit-scenarios.bats — Rate limiting eBPF scenario tests
+# 14-ebpf-ratelimit-scenarios.bats - Rate limiting eBPF scenario tests
 # Requires: root, kernel >= 6.9, bpftool, ncat, hping3
 
 load '../lib/helpers'
@@ -148,7 +148,7 @@ teardown_file() {
 
 # ── Extended ratelimit tests ────────────────────────────────────
 
-@test "ratelimit rule CRUD — create sliding window rule" {
+@test "ratelimit rule CRUD - create sliding window rule" {
     require_root
 
     local body
@@ -175,7 +175,7 @@ teardown_file() {
     [ "$algo" = "sliding_window" ]
 }
 
-@test "ratelimit rule CRUD — delete rule" {
+@test "ratelimit rule CRUD - delete rule" {
     require_root
 
     # Ensure the sliding window rule from the previous test exists (create it if not)
@@ -224,7 +224,7 @@ teardown_file() {
     local alert
     alert="$(poll_for_alert ratelimit 10)" || true
 
-    # Either an alert was raised, or rate-limit drop metrics increased — either is valid
+    # Either an alert was raised, or rate-limit drop metrics increased - either is valid
     local metrics
     metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
 
@@ -312,7 +312,7 @@ teardown_file() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite - MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

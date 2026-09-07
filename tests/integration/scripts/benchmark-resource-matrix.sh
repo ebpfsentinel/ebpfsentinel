@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# benchmark-resource-matrix.sh — Feature × Volume resource consumption matrix
+# benchmark-resource-matrix.sh - Feature × Volume resource consumption matrix
 #
 # Measures CPU% and RSS for each eBPF feature combination under different
 # traffic volumes. Produces a JSON report and a markdown table suitable
@@ -99,7 +99,7 @@ declare -a FEATURE_FLAGS=(
 # signal is lost in measurement noise.
 declare -a VOLUME_LABELS=("idle" "100mbps" "500mbps" "1gbps" "5gbps")
 declare -a VOLUME_IPERF_ARGS=("" "-b 100M" "-b 500M" "-b 1G" "-b 5G")
-# Number of runs per measurement — averaged to reduce variance
+# Number of runs per measurement - averaged to reduce variance
 RUNS_PER_MEASURE="${RUNS_PER_MEASURE:-3}"
 
 # ── Parse arguments ────────────────────────────────────────────────
@@ -147,7 +147,7 @@ if [ "$MERGE_MODE" = true ]; then
     echo ""
     echo "## Resource Consumption Matrix"
     echo ""
-    echo "> CPU% = system-wide busy / total — compare against 'no-agent' baseline for true eBPF cost."
+    echo "> CPU% = system-wide busy / total - compare against 'no-agent' baseline for true eBPF cost."
     echo ""
     echo "| Feature | Traffic | CPU % ($profile1) | RSS MB ($profile1) | CPU % ($profile2) | RSS MB ($profile2) |"
     echo "|---------|---------|-------------------|--------------------|-------------------|--------------------|"
@@ -155,8 +155,8 @@ if [ "$MERGE_MODE" = true ]; then
     jq -r '.measurements[] | "\(.feature)|\(.volume)"' "$MERGE_FILE1" | while IFS='|' read -r feat vol; do
         cpu1=$(jq -r --arg f "$feat" --arg v "$vol" '.measurements[] | select(.feature == $f and .volume == $v) | .cpu_pct' "$MERGE_FILE1")
         rss1=$(jq -r --arg f "$feat" --arg v "$vol" '.measurements[] | select(.feature == $f and .volume == $v) | .rss_mb' "$MERGE_FILE1")
-        cpu2=$(jq -r --arg f "$feat" --arg v "$vol" '.measurements[] | select(.feature == $f and .volume == $v) | .cpu_pct // "—"' "$MERGE_FILE2")
-        rss2=$(jq -r --arg f "$feat" --arg v "$vol" '.measurements[] | select(.feature == $f and .volume == $v) | .rss_mb // "—"' "$MERGE_FILE2")
+        cpu2=$(jq -r --arg f "$feat" --arg v "$vol" '.measurements[] | select(.feature == $f and .volume == $v) | .cpu_pct // "-"' "$MERGE_FILE2")
+        rss2=$(jq -r --arg f "$feat" --arg v "$vol" '.measurements[] | select(.feature == $f and .volume == $v) | .rss_mb // "-"' "$MERGE_FILE2")
         printf "| %-20s | %-7s | %17s | %18s | %17s | %18s |\n" "$feat" "$vol" "${cpu1}%" "${rss1}" "${cpu2}%" "${rss2}"
     done
 
@@ -652,7 +652,7 @@ for feat_idx in $(seq 0 $(( total_features - 1 ))); do
         for vol_idx in $(seq 0 $(( total_volumes - 1 ))); do
             vol_label="${VOLUME_LABELS[$vol_idx]}"
             tmp="$(jq --arg f "$feat_label" --arg v "$vol_label" \
-                '.measurements += [{"feature":$f,"volume":$v,"cpu_pct":"—","rss_mb":"—","rss_kb":0}]' "$OUTPUT")"
+                '.measurements += [{"feature":$f,"volume":$v,"cpu_pct":"-","rss_mb":"-","rss_kb":0}]' "$OUTPUT")"
             echo "$tmp" > "$OUTPUT"
         done
         _stop_agent 2>/dev/null || true
@@ -705,11 +705,11 @@ _stop_iperf_server
 # ── Print markdown table ───────────────────────────────────────────
 echo ""
 echo ""
-echo "## Resource Consumption — ${PROFILE}"
+echo "## Resource Consumption - ${PROFILE}"
 echo ""
 echo "> CPU% = (system CPU with agent) − (baseline system CPU at same volume, no agent)."
 echo "> Each measurement averaged over ${RUNS_PER_MEASURE} runs to reduce variance."
-echo "> Isolates agent + eBPF overhead only — excludes iperf3, kernel networking, etc."
+echo "> Isolates agent + eBPF overhead only - excludes iperf3, kernel networking, etc."
 echo "> max-bandwidth = ~${MAX_BW_GBPS} Gbps (measured link maximum, no rate cap)."
 echo ""
 echo "| Feature | Traffic | CPU % | RSS (MB) |"

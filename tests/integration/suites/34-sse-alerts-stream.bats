@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 34-sse-alerts-stream.bats — Server-Sent Events alerts stream
+# 34-sse-alerts-stream.bats - Server-Sent Events alerts stream
 #
 # Validates the contract documented in `api-reference/rest-api.md`:
 #   - response headers: `Content-Type: text/event-stream`,
@@ -93,7 +93,7 @@ teardown_file() {
     if grep -q '"severity":"low"' "$out_file" \
         || grep -q '"severity":"medium"' "$out_file" \
         || grep -q '"severity":"high"' "$out_file"; then
-        echo "filter bypassed — non-critical alert reached client:"
+        echo "filter bypassed - non-critical alert reached client:"
         cat "$out_file"
         false
     fi

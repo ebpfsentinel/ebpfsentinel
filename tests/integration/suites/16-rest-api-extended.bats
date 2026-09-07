@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 16-rest-api-extended.bats — Extended domain REST API endpoints
+# 16-rest-api-extended.bats - Extended domain REST API endpoints
 # Covers: IDS, DLP, Conntrack, NAT, Routing, Aliases, Load Balancer, Operations
 
 load '../lib/helpers'
@@ -79,7 +79,7 @@ teardown_file() {
     # The event stream is only wired when the kernel exposes
     # /proc/net/nf_conntrack (see startup: nf_ct_available).
     if [ ! -r /proc/net/nf_conntrack ]; then
-        env_skip "/proc/net/nf_conntrack unavailable — event stream not wired"
+        env_skip "/proc/net/nf_conntrack unavailable - event stream not wired"
     fi
 
     local headers

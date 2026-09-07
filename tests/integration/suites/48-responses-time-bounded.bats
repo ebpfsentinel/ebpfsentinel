@@ -1,15 +1,15 @@
 #!/usr/bin/env bats
-# 48-responses-time-bounded.bats — Time-bounded response action lifecycle.
+# 48-responses-time-bounded.bats - Time-bounded response action lifecycle.
 #
 # Exercises the agent's response engine via the REST surface that backs
 # the `ebpfsentinel-agent responses {create,list,revoke}` CLI:
 #
-#   * POST   /api/v1/responses/manual  — create a TTL-bound block_ip action
-#   * GET    /api/v1/responses          — list active actions
-#   * DELETE /api/v1/responses/{id}     — revoke an action before TTL
+#   * POST   /api/v1/responses/manual  - create a TTL-bound block_ip action
+#   * GET    /api/v1/responses          - list active actions
+#   * DELETE /api/v1/responses/{id}     - revoke an action before TTL
 #
 # The response engine is in-memory (HashMap keyed by id). Manual response
-# entries do NOT mirror into the firewall map — that is reserved for the
+# entries do NOT mirror into the firewall map - that is reserved for the
 # auto_response pipeline. Suite 52 therefore asserts engine visibility +
 # TTL expiry + early revoke; firewall-map mirroring is out of scope.
 #
@@ -35,7 +35,7 @@ setup_file() {
     mkdir -p "$DATA_DIR"
 
     # The responses fixture enables xdp-firewall on the netns interface, so the
-    # veth must exist before the agent starts — this suite is otherwise
+    # veth must exist before the agent starts - this suite is otherwise
     # self-contained (the response engine is in-memory).
     create_test_netns
 
@@ -153,7 +153,7 @@ teardown_file() {
     local id
     id="$(echo "${out}" | jq -r '.id // empty' 2>/dev/null)" || true
     if [ -z "${id}" ]; then
-        # Best-effort fallback — list and pick the most recent matching target.
+        # Best-effort fallback - list and pick the most recent matching target.
         id="$(list_responses \
             | jq -r '.actions[] | select(.target == "198.51.100.45") | .id' \
             | tail -1)"

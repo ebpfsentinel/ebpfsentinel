@@ -70,7 +70,7 @@ use network_types::{
 //   - Full packet (not truncated like RingBuf events)
 //   - Bidirectional (can re-inject modified packets)
 //
-// NOTE(future): XskMap for AF_XDP zero-copy DPI — requires kernel 4.18+ and aya XskMap wiring.
+// NOTE(future): XskMap for AF_XDP zero-copy DPI - requires kernel 4.18+ and aya XskMap wiring.
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -93,7 +93,7 @@ static IDS_METRICS: PerCpuArray<u64, { IDS_METRIC_COUNT as usize }> = PerCpuArra
 /// Shared kernel→userspace event ring buffer (4 MB).
 ///
 /// Bumped from 1 MiB to 4 MiB alongside the L7 payload capture bump to
-/// 2048 B — larger events would otherwise cause frequent backpressure
+/// 2048 B - larger events would otherwise cause frequent backpressure
 /// drops. The extra 3 MiB of kernel memory is acceptable on any
 /// modern deployment.
 #[btf_map]
@@ -144,14 +144,14 @@ static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRI
 
 /// Cgroup-based tenant resolution: cgroup v2 id → tenant_id.
 /// Populated by userspace from the container resolver. Used as the
-/// lowest-priority fallback (after VLAN, interface, subnet) — only
+/// lowest-priority fallback (after VLAN, interface, subnet) - only
 /// meaningful on egress where the current task owns the skb.
 #[btf_map]
 static TENANT_CGROUP_MAP: HashMap<u64, u32, 4096> = HashMap::new();
 
 /// L7 port lookup: service port → enabled flag. When set, TCP packets of a
 /// conversation with this port have their payload captured and sent to
-/// userspace for L7 protocol parsing. Capacity is `MAX_L7_PORTS` (256) —
+/// userspace for L7 protocol parsing. Capacity is `MAX_L7_PORTS` (256) -
 /// enough to cover databases, message brokers, caches, and custom services
 /// concurrently.
 #[btf_map]
@@ -161,7 +161,7 @@ static L7_PORTS: HashMap<u16, u8, { MAX_L7_PORTS as usize }> = HashMap::new();
 ///
 /// A configured port identifies a *service*, and only the client→server
 /// direction carries it as the destination. Matching the destination alone
-/// would therefore capture requests and drop every response — no server
+/// would therefore capture requests and drop every response - no server
 /// banner, no `ServerHello`, so no JA4S. Both ends are checked so a
 /// conversation is captured whole, whichever hook sees the packet.
 #[inline(always)]
@@ -170,7 +170,7 @@ fn l7_port_configured(src_port: u16, dst_port: u16) -> bool {
 }
 
 /// Small L7 event buffer: `PacketEvent` header + `SMALL_L7_PAYLOAD` bytes
-/// of payload (512 B). Used when TCP payload ≤ 512 bytes — saves ~75%
+/// of payload (512 B). Used when TCP payload ≤ 512 bytes - saves ~75%
 /// RingBuf space vs the full buffer.
 #[repr(C)]
 struct L7EventSmall {
@@ -276,7 +276,7 @@ unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
                 return tid;
             }
         }
-        // Priority 4: Cgroup-based (egress only — cgroup_id is 0 in softirq)
+        // Priority 4: Cgroup-based (egress only - cgroup_id is 0 in softirq)
         let cgroup_id = bpf_get_current_cgroup_id();
         if cgroup_id != 0
             && let Some(&tid) = TENANT_CGROUP_MAP.get(&cgroup_id)
@@ -331,7 +331,7 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) 
 /// On the egress path (where tc-ids is also attached when container
 /// awareness is enabled) the kernel has already bound the originating
 /// socket to the skb, so `bpf_skb_cgroup_id` returns the cgroup of the
-/// process that generated the packet — i.e. the container that opened the
+/// process that generated the packet - i.e. the container that opened the
 /// outbound connection. On ingress `skb->sk` is not yet set and this
 /// returns 0, in which case the current task's cgroup is tried as a
 /// best-effort fallback for locally-generated traffic.
@@ -532,7 +532,7 @@ fn process_ids_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
     {
         let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
         let l7_offset = l4_offset + tcp_data_off;
-        // bpf_skb_load_bytes handles fragments natively — no
+        // bpf_skb_load_bytes handles fragments natively - no
         // linearization needed (see IPv4 path comment).
         emit_l7_event(ctx, &flow, l7_offset);
     }
@@ -575,7 +575,7 @@ unsafe fn lookup_ids_pattern<const MAX_ENTRIES: usize>(
     }
 }
 
-/// IDS pattern lookup and action (shared by v4/v6 — key is tenant+port+protocol).
+/// IDS pattern lookup and action (shared by v4/v6 - key is tenant+port+protocol).
 #[inline(always)]
 fn process_ids_pattern(_ctx: &TcContext, flow: &FlowMeta, protocol: u8) -> Result<i32, ()> {
     let src_addr = &flow.src_addr;
@@ -699,7 +699,7 @@ fn emit_l7_event(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize) {
     }
 
     // Detect incoming FOU/GUE overlay encapsulation. Non-None means
-    // the packet arrived through a FOU/GUE tunnel — useful for
+    // the packet arrived through a FOU/GUE tunnel - useful for
     // overlay-aware IDS rules in cloud environments.
     let _fou_encap = unsafe { skb_get_fou_encap(ctx.skb.skb as *mut _) };
 
@@ -741,7 +741,7 @@ fn emit_l7_small(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_ava
     // The verifier snapshots a register's range into its spill slot *at spill
     // time* and never back-propagates a later refinement. The RingBuf reserve
     // below spills `to_load`, and LLVM places that spill before the `== 0`
-    // guard above — so the reloaded length feeding `bpf_skb_load_bytes` carries
+    // guard above - so the reloaded length feeding `bpf_skb_load_bytes` carries
     // `[0, CAP]` and the helper rejects the zero case ("R4 invalid zero-sized
     // read"). Route the value through a barrier (so LLVM cannot re-prove it
     // non-zero and elide the lower clamp) then clamp to `[1, CAP]`: the stored
@@ -753,7 +753,7 @@ fn emit_l7_small(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_ava
             fill_l7_header(ctx, &mut (*ptr).header, flow, to_load as u32);
             // `bpf_skb_load_bytes` marks its destination region initialized
             // for the verifier, so no separate memset of the payload is
-            // needed — an explicit memset of a RingBuf reservation explodes
+            // needed - an explicit memset of a RingBuf reservation explodes
             // verifier state on the byte-by-byte `compiler_builtins` lowering.
             bpf_skb_load_bytes(
                 ctx.skb.skb as *const _,
@@ -801,7 +801,7 @@ fn emit_l7_full(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_avai
     // The verifier snapshots a register's range into its spill slot *at spill
     // time* and never back-propagates a later refinement. The RingBuf reserve
     // below spills `to_load`, and LLVM places that spill before the `== 0`
-    // guard above — so the reloaded length feeding `bpf_skb_load_bytes` carries
+    // guard above - so the reloaded length feeding `bpf_skb_load_bytes` carries
     // `[0, CAP]` and the helper rejects the zero case ("R4 invalid zero-sized
     // read"). Route the value through a barrier (so LLVM cannot re-prove it
     // non-zero and elide the lower clamp) then clamp to `[1, CAP]`: the stored
@@ -813,7 +813,7 @@ fn emit_l7_full(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_avai
             fill_l7_header(ctx, &mut (*ptr).header, flow, to_load as u32);
             // `bpf_skb_load_bytes` marks its destination region initialized
             // for the verifier, so no separate memset of the payload is
-            // needed — an explicit memset of a RingBuf reservation explodes
+            // needed - an explicit memset of a RingBuf reservation explodes
             // verifier state on the byte-by-byte `compiler_builtins` lowering.
             bpf_skb_load_bytes(
                 ctx.skb.skb as *const _,

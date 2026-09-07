@@ -20,5 +20,5 @@ management:
 
   # Optional URL the operator exposes (typically a Kubernetes-native UI
   # or the operator's web admin). Must be an absolute http/https URL.
-  # Validated at config load — malformed URLs reject the reload.
+  # Validated at config load - malformed URLs reject the reload.
   operator_endpoint: https://operator.example.com:9443/ui

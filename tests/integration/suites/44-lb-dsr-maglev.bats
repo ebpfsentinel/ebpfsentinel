@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 44-lb-dsr-maglev.bats — L4 LB DSR + Maglev disruption-bound, 3-VM.
+# 44-lb-dsr-maglev.bats - L4 LB DSR + Maglev disruption-bound, 3-VM.
 #
 # Drives a real client→VIP→backend flow across the three-VM transit
 # topology (client .20, agent .10 dual-NIC, backend .30) and asserts:
@@ -13,7 +13,7 @@
 #   * the XDP ARP responder answers ARP for the VIP on the client subnet
 #   * a gratuitous ARP is emitted on speaker takeover (metric incremented)
 #   * the agent does NOT alert on its own ARP announcements
-#     (is_self_announced predicate — ARP-guard foundation)
+#     (is_self_announced predicate - ARP-guard foundation)
 #
 # Requires: 3-VM mode (EBPF_3VM_MODE=true), root on each VM, kernel >= 6.9
 # on the agent, bpftool + tcpdump on agent + backend, python3 + scapy

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sync-to-agent-vm.sh — Sync local build artifacts and/or Docker image to agent VM
+# sync-to-agent-vm.sh - Sync local build artifacts and/or Docker image to agent VM
 #
 # Pushes the locally-built agent binary, warden broker, eBPF objects and Docker
 # image to the agent VM without rebuilding on the VM. Much faster than compiling

@@ -17,8 +17,8 @@ use tracing::info;
 ///
 /// Unlike VLANs and subnets, a cgroup id is not a stable identifier: the
 /// kernel reuses ids once a cgroup is destroyed. Callers own the lifecycle and
-/// must drop an entry when its container goes away — hence
-/// [`remove_tenant_cgroup`](Self::remove_tenant_cgroup) — otherwise a recycled
+/// must drop an entry when its container goes away - hence
+/// [`remove_tenant_cgroup`](Self::remove_tenant_cgroup) - otherwise a recycled
 /// id would attribute a new container's traffic to the previous tenant.
 pub struct TenantCgroupMapManager {
     maps: Vec<HashMap<MapData, u64, u32>>,
@@ -80,7 +80,7 @@ impl TenantCgroupMapManager {
     ///
     /// # Errors
     ///
-    /// Never returns an error today — the signature mirrors
+    /// Never returns an error today - the signature mirrors
     /// [`set_tenant_cgroups`](Self::set_tenant_cgroups) so callers can handle
     /// both uniformly.
     pub fn remove_tenant_cgroup(&mut self, cgroup_id: u64) -> Result<(), anyhow::Error> {
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn set_tenant_cgroups_empty_entries_is_noop() {
         let mut mgr = TenantCgroupMapManager::new();
-        // No maps registered, empty entries — should succeed without error.
+        // No maps registered, empty entries - should succeed without error.
         let result = mgr.set_tenant_cgroups(&[]);
         assert!(result.is_ok());
     }
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn set_tenant_cgroups_no_maps_succeeds() {
         let mut mgr = TenantCgroupMapManager::new();
-        // Non-empty entries but no maps — loop body never executes.
+        // Non-empty entries but no maps - loop body never executes.
         let result = mgr.set_tenant_cgroups(&[(4_294_967_296, 1), (4_294_967_297, 2)]);
         assert!(result.is_ok());
     }

@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn priority_determines_evaluation_order() {
         let mut engine = FirewallEngine::new();
-        // Both rules match everything — highest priority (lowest number) wins
+        // Both rules match everything - highest priority (lowest number) wins
         engine
             .add_rule(make_rule("allow-all", 100, FirewallAction::Allow))
             .unwrap();

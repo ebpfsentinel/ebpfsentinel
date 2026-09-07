@@ -1,4 +1,4 @@
-# eBPFsentinel — Intrusion Detection (IDS) Configuration Example
+# eBPFsentinel - Intrusion Detection (IDS) Configuration Example
 # ==============================================================
 #
 # Network intrusion detection via TC classifier eBPF programs. Supports
@@ -37,8 +37,8 @@ ids:
   enabled: true
 
   # Mode controls enforcement:
-  #   "alert"  — log detections only (observe)
-  #   "block"  — actively drop matching traffic
+  #   "alert"  - log detections only (observe)
+  #   "block"  - actively drop matching traffic
   # Individual rules can override the global mode.
   mode: alert
 
@@ -46,22 +46,22 @@ ids:
   # Reduces processing load by analyzing only a fraction of events.
   #
   # mode:
-  #   "none"   — process every event (default)
-  #   "random" — randomly sample events at the given rate
+  #   "none"   - process every event (default)
+  #   "random" - randomly sample events at the given rate
   #              When kernel_sampling is true, uses bpf_get_prandom_u32 in the
-  #              eBPF program itself — sampled-out packets never reach userspace.
-  #   "hash"   — deterministic hash-based sampling (consistent per-flow)
-  # rate: 0.0 – 1.0 (required for random/hash modes)
-  # kernel_sampling: true/false — push sampling into eBPF (default: true for random)
+  #              eBPF program itself - sampled-out packets never reach userspace.
+  #   "hash"   - deterministic hash-based sampling (consistent per-flow)
+  # rate: 0.0 - 1.0 (required for random/hash modes)
+  # kernel_sampling: true/false - push sampling into eBPF (default: true for random)
   # mode:
-  #   "none"          — process every event (default)
-  #   "random"        — randomly sample events at the given rate
-  #   "hash"          — deterministic hash-based sampling (consistent per-flow)
-  #   "country_based" — full inspection for high-risk countries, reduced for others
+  #   "none"          - process every event (default)
+  #   "random"        - randomly sample events at the given rate
+  #   "hash"          - deterministic hash-based sampling (consistent per-flow)
+  #   "country_based" - full inspection for high-risk countries, reduced for others
   sampling:
     mode: country_based
     rate: 0.5              # Fallback rate for random/hash modes
-    kernel_sampling: true  # bpf_get_prandom_u32 — zero userspace overhead
+    kernel_sampling: true  # bpf_get_prandom_u32 - zero userspace overhead
     high_risk_countries: [RU, CN, KP, IR]  # Full inspection (100%) for these countries
     high_risk_rate: 1.0    # Sample rate for high-risk countries (1.0 = all events)
     default_rate: 0.1      # Sample rate for all other countries (10%)
@@ -69,27 +69,27 @@ ids:
   # ── Rules ──────────────────────────────────────────────────────────
   #
   # Fields:
-  #   id               — Unique rule identifier (required, non-empty)
-  #   description      — Human-readable description (optional)
-  #   enabled          — Whether this rule is active (default: true)
-  #   severity         — "low", "medium", "high", or "critical"
-  #   mode             — Per-rule mode override ("alert" or "block"); inherits global if omitted
-  #   protocol         — "tcp", "udp", "icmp", or "any" (default: "any")
-  #   dst_port         — Destination port to match (optional, single port only)
-  #   pattern          — Regex pattern for payload inspection (optional; ReDoS-safe)
-  #   threshold        — Rate-based detection config (optional, see below)
-  #   country_thresholds — Per-country threshold overrides (optional, see below)
-  #   domain_pattern   — Domain name pattern for DNS-aware matching (optional)
-  #   domain_match_mode — How to interpret domain_pattern: "exact", "wildcard", or "regex"
+  #   id               - Unique rule identifier (required, non-empty)
+  #   description      - Human-readable description (optional)
+  #   enabled          - Whether this rule is active (default: true)
+  #   severity         - "low", "medium", "high", or "critical"
+  #   mode             - Per-rule mode override ("alert" or "block"); inherits global if omitted
+  #   protocol         - "tcp", "udp", "icmp", or "any" (default: "any")
+  #   dst_port         - Destination port to match (optional, single port only)
+  #   pattern          - Regex pattern for payload inspection (optional; ReDoS-safe)
+  #   threshold        - Rate-based detection config (optional, see below)
+  #   country_thresholds - Per-country threshold overrides (optional, see below)
+  #   domain_pattern   - Domain name pattern for DNS-aware matching (optional)
+  #   domain_match_mode - How to interpret domain_pattern: "exact", "wildcard", or "regex"
   #                       Required when domain_pattern is set (and vice versa).
 
   rules:
     # ── Threshold detection ──────────────────────────────────────────
     #
     # threshold.type:
-    #   "limit"     — Alert on first N occurrences, then suppress
-    #   "threshold" — Alert only after N occurrences within window
-    #   "both"      — Combine limit and threshold behavior
+    #   "limit"     - Alert on first N occurrences, then suppress
+    #   "threshold" - Alert only after N occurrences within window
+    #   "both"      - Combine limit and threshold behavior
     # threshold.count: Number of occurrences (must be > 0)
     # threshold.window_secs: Time window in seconds (must be > 0)
     # threshold.track_by: "src_ip", "dst_ip", or "both"

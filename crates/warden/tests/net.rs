@@ -73,7 +73,7 @@ fn host_network_ops_error_cleanly_and_keep_the_stream_in_sync() {
     );
 
     // Route deletion against a bogus spec returns a typed result (either `ip`
-    // fails or is absent) — never a desync. We only require it to round-trip.
+    // fails or is absent) - never a desync. We only require it to round-trip.
     let route = RouteSpec {
         dst_cidr: "203.0.113.0/24".to_owned(),
         gateway: "192.0.2.254".to_owned(),

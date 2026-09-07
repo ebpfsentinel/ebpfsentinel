@@ -69,7 +69,7 @@ pub struct AutoCaptureHandler {
 }
 
 /// Simple auto-response: evaluates alerts against severity-based policies
-/// and enforces the matching one — a block through the IPS blacklist, a
+/// and enforces the matching one - a block through the IPS blacklist, a
 /// throttle through the XDP rate limiter.
 pub struct AutoResponseHandler {
     policies: Vec<domain::response::entity::SimpleResponsePolicy>,
@@ -295,7 +295,7 @@ impl AlertPipeline {
     }
 
     /// Attach an auto-capture handler (OSS).
-    /// Captures are triggered via an `mpsc` channel — the receiver spawns the
+    /// Captures are triggered via an `mpsc` channel - the receiver spawns the
     /// actual pcap task in the adapters layer.
     #[must_use]
     pub fn with_auto_capture(
@@ -413,7 +413,7 @@ impl AlertPipeline {
         self.evaluate_auto_capture(&alert).await;
 
         // Dedup, throttle, route matching. Suppression here only stops
-        // delivery — the alert is already stored and streamed above.
+        // delivery - the alert is already stored and streamed above.
         let matched_routes = self.resolve_routes(&alert);
         if matched_routes.is_empty() {
             return;
@@ -486,7 +486,7 @@ impl AlertPipeline {
         self.evaluate_auto_capture(&alert).await;
 
         // Dedup, throttle, route matching. Suppression here only stops
-        // delivery — the alert is already stored and streamed above.
+        // delivery - the alert is already stored and streamed above.
         let matched_routes = self.resolve_routes(&alert);
         if matched_routes.is_empty() {
             return;
@@ -509,7 +509,7 @@ impl AlertPipeline {
         protocol: u8,
     ) {
         let description = format!(
-            "DDoS {:?} attack {} — status: {:?}, peak: {} pps, current: {} pps",
+            "DDoS {:?} attack {} - status: {:?}, peak: {} pps, current: {} pps",
             attack.attack_type,
             attack.id,
             attack.mitigation_status,
@@ -563,7 +563,7 @@ impl AlertPipeline {
         self.evaluate_auto_capture(&alert).await;
 
         // Dedup, throttle, route matching. Suppression here only stops
-        // delivery — the alert is already stored and streamed above.
+        // delivery - the alert is already stored and streamed above.
         let matched_routes = self.resolve_routes(&alert);
         if matched_routes.is_empty() {
             return;
@@ -607,7 +607,7 @@ impl AlertPipeline {
         self.evaluate_auto_capture(&alert).await;
 
         // Dedup, throttle, route matching. Suppression here only stops
-        // delivery — the alert is already stored and streamed above.
+        // delivery - the alert is already stored and streamed above.
         let matched_routes = self.resolve_routes(&alert);
         if matched_routes.is_empty() {
             return;
@@ -670,7 +670,7 @@ impl AlertPipeline {
         }
 
         // Dedup, throttle, route matching. Suppression here only stops
-        // delivery — the alert is already stored and streamed above.
+        // delivery - the alert is already stored and streamed above.
         let matched_routes = self.resolve_routes(&alert);
         if matched_routes.is_empty() {
             return;
@@ -766,7 +766,7 @@ impl AlertPipeline {
         }
 
         // Dedup, throttle, route matching. Suppression here only stops
-        // delivery — the alert is already stored and streamed above.
+        // delivery - the alert is already stored and streamed above.
         let matched_routes = self.resolve_routes(&alert);
         if matched_routes.is_empty() {
             return;
@@ -783,8 +783,8 @@ impl AlertPipeline {
     /// rate instead, which shapes the source rather than cutting it off.
     ///
     /// Both responses act on the address the alert names, so an alert that
-    /// names none — DLP and ML anomalies are process-level and zero their
-    /// address fields — is left alone rather than contained at 0.0.0.0.
+    /// names none - DLP and ML anomalies are process-level and zero their
+    /// address fields - is left alone rather than contained at 0.0.0.0.
     async fn evaluate_auto_response(&self, alert: &domain::alert::entity::Alert) {
         let Some(ref handler) = self.auto_response else {
             return;
@@ -856,8 +856,8 @@ impl AlertPipeline {
     /// Evaluate an alert against auto-capture policy.
     ///
     /// If it matches and no capture is running, start one filtered on the
-    /// address the alert names. An alert that names none — DLP and ML
-    /// anomalies are process-level and zero their address fields — starts no
+    /// address the alert names. An alert that names none - DLP and ML
+    /// anomalies are process-level and zero their address fields - starts no
     /// capture: `host 0.0.0.0` records nothing while holding the single
     /// capture slot for the whole policy duration, which is exactly when the
     /// next alert would have deserved it.
@@ -1698,7 +1698,7 @@ mod tests {
     async fn alert_broadcast_no_receiver_ok() {
         let metrics = Arc::new(TestMetrics::new());
         let (tx, _) = broadcast::channel::<Alert>(16);
-        // Drop all receivers — send should not panic
+        // Drop all receivers - send should not panic
         let mut pipeline =
             make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics))
                 .with_stream_sender(tx);

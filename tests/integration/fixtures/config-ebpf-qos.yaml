@@ -1,4 +1,4 @@
-# config-ebpf-qos.yaml — QoS (tc-qos) eBPF scenario test config
+# config-ebpf-qos.yaml - QoS (tc-qos) eBPF scenario test config
 
 agent:
   interfaces:

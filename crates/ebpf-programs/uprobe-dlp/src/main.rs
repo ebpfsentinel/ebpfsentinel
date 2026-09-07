@@ -41,7 +41,7 @@ use ebpf_helpers::increment_metric;
 //   2. Update cumulative stats
 //   3. Alert if thresholds exceeded (e.g., >100KB PII data on one connection)
 //
-// NOTE(future): SK_STORAGE for per-connection DLP context — requires aya kfunc support.
+// NOTE(future): SK_STORAGE for per-connection DLP context - requires aya kfunc support.
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -213,8 +213,8 @@ fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
             (*ptr).direction = direction;
             (*ptr)._padding = [0; 3];
             core::ptr::write_bytes((*ptr).data_excerpt.as_mut_ptr(), 0, DLP_SMALL_EXCERPT);
-            // Read only the bytes the payload actually holds — never the
-            // full excerpt — so we don't capture adjacent process memory past
+            // Read only the bytes the payload actually holds - never the
+            // full excerpt - so we don't capture adjacent process memory past
             // the SSL buffer. This is `#[inline(never)]`, so the caller's
             // `data_len <= DLP_SMALL_EXCERPT` invariant is lost across the
             // frame and a plain branch leaves the helper reading the unmasked
@@ -222,7 +222,7 @@ fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
             // the bound the verifier needs to accept a runtime length. A
             // payload of exactly DLP_SMALL_EXCERPT bytes copies the first
             // DLP_SMALL_EXCERPT-1 (the buffer is pre-zeroed, so the last byte
-            // stays 0) — acceptable for an excerpt preview.
+            // stays 0) - acceptable for an excerpt preview.
             let copy_len = (if data_len >= DLP_SMALL_EXCERPT as u32 {
                 DLP_SMALL_EXCERPT as u32 - 1
             } else {

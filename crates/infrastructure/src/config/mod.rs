@@ -204,7 +204,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub telemetry: TelemetryConfig,
 
-    /// Enterprise configuration block. The OSS agent never reads this — the
+    /// Enterprise configuration block. The OSS agent never reads this - the
     /// enterprise edition parses it with its own loader. It is declared here
     /// only so a *combined* agent+enterprise config file (the enterprise
     /// deployment model) still parses under `deny_unknown_fields` instead of
@@ -300,7 +300,7 @@ impl AgentConfig {
                 feed.auth_header = Some("***".to_string());
             }
         }
-        // Mask webhook header values — they commonly carry an `Authorization`
+        // Mask webhook header values - they commonly carry an `Authorization`
         // bearer token or API key. Keep the header names so the sanitized view
         // still shows which headers are set, but never the secret values.
         for route in &mut sanitized.alerting.routes {
@@ -601,7 +601,7 @@ impl AgentConfig {
 
         // Validate auth config
         if self.auth.enabled {
-            // Resolve the JWT key source — counts both the static-PEM path and
+            // Resolve the JWT key source - counts both the static-PEM path and
             // the EdDSA/JWKS path, and surfaces ambiguous/bad-scheme configs.
             let jwt_source =
                 self.auth
@@ -631,7 +631,7 @@ impl AgentConfig {
                 });
             }
 
-            // Validate OIDC JWKS URL scheme — block non-HTTP schemes (SSRF prevention)
+            // Validate OIDC JWKS URL scheme - block non-HTTP schemes (SSRF prevention)
             if let Some(ref oidc) = self.auth.oidc {
                 if !oidc.jwks_url.starts_with("http://") && !oidc.jwks_url.starts_with("https://") {
                     return Err(ConfigError::Validation {
@@ -645,7 +645,7 @@ impl AgentConfig {
                 if !oidc.jwks_url.starts_with("https://") {
                     tracing::warn!(
                         jwks_url = %oidc.jwks_url,
-                        "OIDC JWKS URL does not use HTTPS — tokens may be fetched over an insecure channel"
+                        "OIDC JWKS URL does not use HTTPS - tokens may be fetched over an insecure channel"
                     );
                 }
             }
@@ -680,8 +680,8 @@ impl AgentConfig {
 
         // Refuse to serve the control API (HTTP + gRPC) on a network-reachable
         // address while authentication is disabled. A non-loopback bind with
-        // `auth.enabled: false` exposes an unauthenticated control plane —
-        // firewall, IPS, config reload — to anyone who can reach the port.
+        // `auth.enabled: false` exposes an unauthenticated control plane -
+        // firewall, IPS, config reload - to anyone who can reach the port.
         // Operators who fence the API off by other means can opt in explicitly.
         if !self.auth.enabled && !self.agent.allow_unauthenticated_api {
             let bind_is_loopback = self
@@ -1509,7 +1509,7 @@ impl Default for ApiRateLimitConfig {
 }
 
 impl ApiRateLimitConfig {
-    /// Reject a zero rate or burst — both would make the token bucket reject
+    /// Reject a zero rate or burst - both would make the token bucket reject
     /// every request, locking out the write API entirely.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.write_per_second == 0 {
@@ -1635,9 +1635,9 @@ pub enum PqMode {
     /// Prefer PQ hybrid, fall back to classical (default).
     #[default]
     Prefer,
-    /// Require PQ hybrid — reject clients without support.
+    /// Require PQ hybrid - reject clients without support.
     Require,
-    /// Classical only — no PQ key exchange offered.
+    /// Classical only - no PQ key exchange offered.
     Disable,
 }
 
@@ -2596,7 +2596,7 @@ l7:
 
     #[test]
     fn l7_ports_validate_dedupes_before_limit_check() {
-        // Duplicate entries must not trip the cap — only unique ports count.
+        // Duplicate entries must not trip the cap - only unique ports count.
         let mut ports: Vec<String> = (1..=MAX_L7_PORTS).map(|p| p.to_string()).collect();
         ports.extend((1..=MAX_L7_PORTS).map(|p| p.to_string()));
         let yaml = format!(

@@ -1,6 +1,6 @@
 //! Agent self-bootstrap trampoline (rootless, token-only eBPF loading).
 //!
-//! In the split deployment the rootless **agent** loads its own eBPF — it is not
+//! In the split deployment the rootless **agent** loads its own eBPF - it is not
 //! a passive consumer. But `BPF_TOKEN_CREATE` only succeeds inside a user
 //! namespace that owns the delegated bpffs, and applying the `delegate_*` mount
 //! options needs `CAP_SYS_ADMIN` in the *init* user namespace, which the agent
@@ -8,7 +8,7 @@
 //! the control socket:
 //!
 //! 1. The agent enters a fresh user + mount namespace (dropping to an
-//!    unprivileged id first under a container runtime — see
+//!    unprivileged id first under a container runtime - see
 //!    [`drop_to_unpriv_if_needed`]).
 //! 2. It `fsopen("bpf")` (the superblock is owned by *its* userns) and sends the
 //!    fs fd to the warden with a [`Command::Delegate`]. The warden applies
@@ -54,7 +54,7 @@ const WARDEN_SOCK_ENV: &str = "EBPFSENTINEL_WARDEN_SOCK";
 /// called single-threaded, before any async runtime is built. On success it
 /// re-execs the process (never returns); on the second pass, or when no warden
 /// socket is configured, it returns and normal startup continues. A bootstrap
-/// failure is fatal — a token-only agent cannot load eBPF without it.
+/// failure is fatal - a token-only agent cannot load eBPF without it.
 pub fn maybe_bootstrap_from_env() {
     if std::env::var_os(READY_ENV).is_some() {
         return;

@@ -1,4 +1,4 @@
-# eBPFsentinel — DDoS Protection Configuration Example
+# eBPFsentinel - DDoS Protection Configuration Example
 # =====================================================
 #
 # Multi-layer DDoS detection and mitigation combining eBPF-side enforcement
@@ -14,9 +14,9 @@
 #   fin_flood, ack_flood, volumetric
 #
 # Mitigation actions:
-#   alert     — log the event (no enforcement)
-#   throttle  — rate-limit the source (aliases: ratelimit)
-#   block     — drop all traffic from the source (aliases: drop, deny)
+#   alert     - log the event (no enforcement)
+#   throttle  - rate-limit the source (aliases: ratelimit)
+#   block     - drop all traffic from the source (aliases: drop, deny)
 #
 # Prerequisites:
 #   - Rate limiting must be enabled: the guards run inside its eBPF program
@@ -56,7 +56,7 @@ ddos:
   # When the SYN rate exceeds the threshold, SYN cookie validation
   # is activated in the XDP pipeline. The XDP program forges a
   # SYN+ACK with an HMAC-based cookie (using a 32-byte secret set
-  # at agent startup) and replies via XDP_TX — no packet reaches
+  # at agent startup) and replies via XDP_TX - no packet reaches
   # the kernel TCP stack. Returning ACKs are validated against the
   # cookie; valid ones are passed through, invalid ones are dropped.
   # Legitimate connections complete the handshake; spoofed SYNs
@@ -121,13 +121,13 @@ ddos:
   # ── Detection Policies (userspace domain engine) ──────────────
   #
   # Fields:
-  #   id                       — Unique policy identifier
-  #   attack_type              — Detection type (see list above)
-  #   detection_threshold_pps  — Packets/sec threshold to trigger
-  #   mitigation_action        — alert, throttle, or block
-  #   auto_block_duration_secs — Seconds to block offending source (0 = indefinite)
-  #   enabled                  — Whether this policy is active
-  #   country_thresholds       — Per-country PPS overrides (ISO 3166-1 alpha-2).
+  #   id                       - Unique policy identifier
+  #   attack_type              - Detection type (see list above)
+  #   detection_threshold_pps  - Packets/sec threshold to trigger
+  #   mitigation_action        - alert, throttle, or block
+  #   auto_block_duration_secs - Seconds to block offending source (0 = indefinite)
+  #   enabled                  - Whether this policy is active
+  #   country_thresholds       - Per-country PPS overrides (ISO 3166-1 alpha-2).
   #                              When traffic from a country exceeds its threshold,
   #                              all CIDRs for that country are auto-injected into
   #                              the firewall LPM maps for kernel-side blocking.

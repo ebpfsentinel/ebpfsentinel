@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 03-rest-api-firewall.bats — Firewall CRUD via REST API
+# 03-rest-api-firewall.bats - Firewall CRUD via REST API
 
 load '../lib/helpers'
 

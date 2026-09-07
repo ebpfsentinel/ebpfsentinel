@@ -77,7 +77,7 @@ impl DdosAppService {
         changed
     }
 
-    /// Periodic tick — call once per second to update attack statuses.
+    /// Periodic tick - call once per second to update attack statuses.
     pub fn tick(&self) {
         if !self.enabled {
             return;

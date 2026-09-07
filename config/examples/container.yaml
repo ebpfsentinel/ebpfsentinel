@@ -1,4 +1,4 @@
-# eBPFsentinel — Container Awareness Configuration Example
+# eBPFsentinel - Container Awareness Configuration Example
 # =========================================================
 #
 # Enriches alerts and events with container/pod identity:

@@ -21,7 +21,7 @@ pub trait VipMapPort: Send + Sync {
     fn remove_vip(&mut self, addr: IpAddr) -> Result<(), DomainError>;
 
     /// Remove every entry from the `VIP_SET` map (used when this node
-    /// transitions to standby/disabled — guarantees split-brain safety).
+    /// transitions to standby/disabled - guarantees split-brain safety).
     fn clear_vips(&mut self) -> Result<(), DomainError>;
 
     /// Insert or update an interface's resolved NIC MAC in the

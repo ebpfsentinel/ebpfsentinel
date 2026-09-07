@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 54-container-cgroup-enrichment.bats — Container cgroup → identity surface.
+# 54-container-cgroup-enrichment.bats - Container cgroup → identity surface.
 #
 # Asserts that with the cgroup resolver + Docker enricher enabled the
 # agent (a) exposes the container resolver Prometheus surface and (b)
@@ -8,10 +8,10 @@
 #
 # Coverage matrix maps:
 #
-#   * cgroup resolver — container_resolver_cache_{hits,misses,errors}
+#   * cgroup resolver - container_resolver_cache_{hits,misses,errors}
 #     counters are registered when container.resolver.enabled=true and
 #     advance once a containerised process emits events.
-#   * Docker enricher — docker.enabled=true ensures the agent attempts
+#   * Docker enricher - docker.enabled=true ensures the agent attempts
 #     to talk to /var/run/docker.sock; on success the enricher records
 #     name/image metadata against the resolved cgroup.
 #
@@ -25,8 +25,8 @@
 #
 # OSS scope: container (Docker cgroup) enrichment, plus the cgroup → tenant
 # datapath mechanism (TENANT_CGROUP_MAP and its kernel lookup). Kubernetes pod
-# enrichment is exercised by suite 10. Deciding *which* tenant owns a cgroup —
-# label conventions, container lifecycle, map upkeep — is an enterprise feature
+# enrichment is exercised by suite 10. Deciding *which* tenant owns a cgroup -
+# label conventions, container lifecycle, map upkeep - is an enterprise feature
 # and is tested in the enterprise repo; here the map is written by hand.
 
 load '../lib/helpers'
@@ -92,7 +92,7 @@ _tenant_cgroup_map_id() {
 # reports to bpf_get_current_cgroup_id is the directory's inode number.
 # Attribution reads the cgroup v2 id of the emitting task. A host running the
 # legacy v1 hierarchy exposes no unified controller file and has no such id, so
-# nothing downstream can be attributed — the only genuine environment gap here.
+# nothing downstream can be attributed - the only genuine environment gap here.
 _require_cgroup_v2() {
     [ -f /sys/fs/cgroup/cgroup.controllers ] ||
         env_skip "cgroup v2 unified hierarchy not mounted"
@@ -336,7 +336,7 @@ teardown_file() {
     # Geometry is the contract between the kernel program and the userspace
     # manager: u64 cgroup id → u32 tenant id, one entry per live container.
     # bpftool renamed these keys (key_size/value_size before v7, bytes_key/
-    # bytes_value after), so read whichever the installed version emits — a
+    # bytes_value after), so read whichever the installed version emits - a
     # missing key would otherwise read as a geometry change that never happened.
     local geometry
     geometry="$(bpftool -j map show id "${map_id}" 2>/dev/null |

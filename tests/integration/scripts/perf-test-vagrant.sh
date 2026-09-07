@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# perf-test-vagrant.sh — Binary vs Docker performance comparison in Vagrant VM
+# perf-test-vagrant.sh - Binary vs Docker performance comparison in Vagrant VM
 #
 # Boots a Vagrant VM, runs perf-test-docker.sh twice (once as a local binary,
 # once via Docker), then prints a side-by-side comparison with overhead %.
@@ -47,7 +47,7 @@ done
 # ── Pre-flight ─────────────────────────────────────────────────────
 
 preflight() {
-    echo "=== Vagrant Perf Test — Pre-flight ==="
+    echo "=== Vagrant Perf Test - Pre-flight ==="
 
     if ! command -v vagrant &>/dev/null; then
         echo "ERROR: vagrant not found in PATH" >&2
@@ -76,21 +76,21 @@ preflight() {
 
 vm_up() {
     if [ "$SKIP_PROVISION" = "true" ]; then
-        echo "=== VM — skip provision (--skip-provision) ==="
+        echo "=== VM - skip provision (--skip-provision) ==="
         # Just make sure it's running
         cd "$VAGRANT_DIR" && vagrant status | grep -q running || {
-            echo "  VM not running — starting without provision..."
+            echo "  VM not running - starting without provision..."
             cd "$VAGRANT_DIR" && vagrant up --no-provision
         }
     else
-        echo "=== VM — vagrant up ==="
+        echo "=== VM - vagrant up ==="
         cd "$VAGRANT_DIR" && vagrant up
     fi
     echo ""
 }
 
 vm_sync() {
-    echo "=== VM — rsync latest code ==="
+    echo "=== VM - rsync latest code ==="
     cd "$VAGRANT_DIR" && vagrant rsync
     echo ""
 }
@@ -98,7 +98,7 @@ vm_sync() {
 # ── Build steps inside VM ─────────────────────────────────────────
 
 vm_build_binary() {
-    echo "=== VM — Build agent binary (cargo build --release) ==="
+    echo "=== VM - Build agent binary (cargo build --release) ==="
     cd "$VAGRANT_DIR" && vagrant ssh -c \
         'source "$HOME/.cargo/env" && cd ~/ebpfsentinel && cargo build --release 2>&1' \
         -- -q
@@ -107,7 +107,7 @@ vm_build_binary() {
 }
 
 vm_build_docker() {
-    echo "=== VM — Build Docker image ==="
+    echo "=== VM - Build Docker image ==="
     cd "$VAGRANT_DIR" && vagrant ssh -c \
         'cd ~/ebpfsentinel && docker build -f Dockerfile.agent -t ebpfsentinel:latest . 2>&1' \
         -- -q
@@ -116,7 +116,7 @@ vm_build_docker() {
 }
 
 vm_extract_ebpf_programs() {
-    echo "=== VM — Extract eBPF programs from Docker image ==="
+    echo "=== VM - Extract eBPF programs from Docker image ==="
     cd "$VAGRANT_DIR" && vagrant ssh -c '
         set -e
         EBPF_DIR=/usr/local/lib/ebpfsentinel
@@ -144,7 +144,7 @@ vm_extract_ebpf_programs() {
 vm_run_perf() {
     local mode="${1:?usage: vm_run_perf <binary|docker>}"
 
-    echo "=== VM — Performance test (mode: ${mode}) ==="
+    echo "=== VM - Performance test (mode: ${mode}) ==="
     cd "$VAGRANT_DIR" && vagrant ssh -c \
         "sudo bash ~/ebpfsentinel/tests/integration/scripts/perf-test-docker.sh \
             --mode ${mode} --skip-build ${EXTRA_FLAGS[*]:-}" \
@@ -335,7 +335,7 @@ main() {
     echo ""
     echo "============================================================"
     echo "  eBPFsentinel Vagrant Performance Comparison"
-    echo "  Binary vs Docker — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "  Binary vs Docker - $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "============================================================"
     echo ""
 

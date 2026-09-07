@@ -843,13 +843,13 @@ mod tests {
     #[tokio::test]
     async fn fetch_all_partial_success() {
         // We need two feeds but MockSource is shared. The first feed will
-        // succeed, the second will use the same source — but since MockSource
+        // succeed, the second will use the same source - but since MockSource
         // cannot vary per feed, we test partial success by using one enabled
         // feed that returns data and one that triggers failure.
         //
         // Strategy: use a successful source for fetch_all_feeds with 2 feeds,
         // but make one disabled and create a separate call. Instead, let's
-        // test via two calls and merge — but actually the simplest approach
+        // test via two calls and merge - but actually the simplest approach
         // is to accept the MockSource limitation and test the metrics path.
         //
         // Better: we can test partial success by having the source succeed
@@ -859,10 +859,10 @@ mod tests {
             fail: false,
         };
         let metrics = Arc::new(TestMetrics::new());
-        // Feed 1: Plaintext format — will parse the plaintext response fine
+        // Feed 1: Plaintext format - will parse the plaintext response fine
         let mut feed1 = make_feed("good-feed", true);
         feed1.format = FeedFormat::Plaintext;
-        // Feed 2: JSON format — the plaintext data is not valid JSON → parse error
+        // Feed 2: JSON format - the plaintext data is not valid JSON → parse error
         let mut feed2 = make_feed("bad-json-feed", true);
         feed2.format = FeedFormat::Json;
 

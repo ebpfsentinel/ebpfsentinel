@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 56-l7-smtp-ftp-smb-edge.bats — L7 SMTP/FTP/SMB edge-case sweep.
+# 56-l7-smtp-ftp-smb-edge.bats - L7 SMTP/FTP/SMB edge-case sweep.
 #
 # Asserts that the L7 inspector exposes the SMTP/FTP/SMB protocol
 # surface end-to-end:
@@ -224,7 +224,7 @@ _post_l7_rule() {
 @test "truncated TCP segments on L7-hooked ports leave the agent ready" {
     require_tool ncat
 
-    # Start three brief listeners — one per L7 hook port — so the TCP
+    # Start three brief listeners - one per L7 hook port - so the TCP
     # handshake completes and the segment hits the L7 inspector path.
     local pids=()
     for port in 25 21 445; do
@@ -234,7 +234,7 @@ _post_l7_rule() {
     done
     sleep 0.5
 
-    # Fire truncated payloads — half a SMTP greeting, half an FTP
+    # Fire truncated payloads - half a SMTP greeting, half an FTP
     # banner, three SMB header bytes. Each is well under the parser's
     # minimum-frame threshold so the parser must reject or no-op without
     # panicking.
@@ -265,7 +265,7 @@ _post_l7_rule() {
 
 # ── Wire-level per-command behaviour ───────────────────────────────
 
-# _l7_host_listeners — start one recv-only TCP listener per L7 port on
+# _l7_host_listeners - start one recv-only TCP listener per L7 port on
 # the host side of the veth (default netns) so the netns client's
 # handshake completes and its first command segment is transmitted on
 # the wire, where tc-ids ingress captures it. Echoes the listener PIDs.
@@ -280,7 +280,7 @@ _l7_host_listeners() {
     echo "${pids[@]}"
 }
 
-# _drive_l7_commands — fire a genuine command per protocol from the test
+# _drive_l7_commands - fire a genuine command per protocol from the test
 # netns a few times (capture is best-effort per segment).
 #   SMTP EHLO            -> l7-smtp-ehlo-log  (action log  -> audit only)
 #   FTP  PORT            -> l7-ftp-port-deny  (action deny -> l7 alert)
@@ -361,7 +361,7 @@ _drive_l7_commands() {
 #
 # The tests above synthesise each command byte-for-byte. These drive the
 # genuine client tools (swaks/lftp/smbclient) so the exact dialogue a real
-# SMTP/FTP/SMB peer emits — banners, capability negotiation, login state —
+# SMTP/FTP/SMB peer emits - banners, capability negotiation, login state -
 # crosses the L7-hooked ports and exercises the parser against real framing,
 # not just a hand-rolled minimal frame.
 
@@ -519,7 +519,7 @@ RESP
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite - MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

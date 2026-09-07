@@ -113,7 +113,7 @@
         "tags": [
           "Alerts"
         ],
-        "summary": "`GET /api/v1/alerts` — query stored alerts with optional filters.",
+        "summary": "`GET /api/v1/alerts` - query stored alerts with optional filters.",
         "operationId": "list_alerts",
         "parameters": [
           {
@@ -300,7 +300,7 @@
         "tags": [
           "Alerts"
         ],
-        "summary": "`GET /api/v1/alerts/stream` — Server-Sent Events live alert feed.",
+        "summary": "`GET /api/v1/alerts/stream` - Server-Sent Events live alert feed.",
         "description": "Server-side filtering happens on every alert before it is forwarded.\nReconnects can pass `Last-Event-ID` to backfill missed alerts from\nthe in-memory replay buffer (≤ 5 000 events). Lagged subscribers\nsilently skip the gap; clients should refetch via\n`GET /api/v1/alerts` to backfill in that case.",
         "operationId": "stream_alerts",
         "parameters": [
@@ -404,7 +404,7 @@
         "tags": [
           "Alerts"
         ],
-        "summary": "`POST /api/v1/alerts/{id}/false-positive` — mark an alert as false positive.",
+        "summary": "`POST /api/v1/alerts/{id}/false-positive` - mark an alert as false positive.",
         "operationId": "mark_false_positive",
         "parameters": [
           {
@@ -474,7 +474,7 @@
         "tags": [
           "Aliases"
         ],
-        "summary": "`GET /api/v1/aliases/status` — alias service status.",
+        "summary": "`GET /api/v1/aliases/status` - alias service status.",
         "operationId": "alias_status",
         "responses": {
           "200": {
@@ -523,7 +523,7 @@
         "tags": [
           "Aliases"
         ],
-        "summary": "`PUT /api/v1/aliases/{id}/content` — push content for an External alias.",
+        "summary": "`PUT /api/v1/aliases/{id}/content` - push content for an External alias.",
         "operationId": "set_external_alias_content",
         "parameters": [
           {
@@ -605,7 +605,7 @@
         "tags": [
           "Audit"
         ],
-        "summary": "`GET /api/v1/audit/logs` — query stored audit log entries.",
+        "summary": "`GET /api/v1/audit/logs` - query stored audit log entries.",
         "operationId": "list_audit_logs",
         "parameters": [
           {
@@ -756,7 +756,7 @@
         "tags": [
           "Audit"
         ],
-        "summary": "`GET /api/v1/audit/rules/{id}/history` — query rule version history.",
+        "summary": "`GET /api/v1/audit/rules/{id}/history` - query rule version history.",
         "operationId": "rule_history",
         "parameters": [
           {
@@ -839,7 +839,7 @@
         "tags": [
           "Captures"
         ],
-        "summary": "`GET /api/v1/captures` — list all captures.",
+        "summary": "`GET /api/v1/captures` - list all captures.",
         "operationId": "list_captures",
         "responses": {
           "200": {
@@ -888,7 +888,7 @@
         "tags": [
           "Captures"
         ],
-        "summary": "`POST /api/v1/captures/manual` — start a time-bounded packet capture.",
+        "summary": "`POST /api/v1/captures/manual` - start a time-bounded packet capture.",
         "operationId": "start_capture",
         "requestBody": {
           "content": {
@@ -957,7 +957,7 @@
         "tags": [
           "Captures"
         ],
-        "summary": "`DELETE /api/v1/captures/{id}` — stop a running capture.",
+        "summary": "`DELETE /api/v1/captures/{id}` - stop a running capture.",
         "operationId": "stop_capture",
         "parameters": [
           {
@@ -1128,7 +1128,7 @@
         "tags": [
           "ConnTrack"
         ],
-        "summary": "`GET /api/v1/conntrack/connections` — list tracked connections.",
+        "summary": "`GET /api/v1/conntrack/connections` - list tracked connections.",
         "operationId": "list_connections",
         "responses": {
           "200": {
@@ -1236,7 +1236,7 @@
         "tags": [
           "ConnTrack"
         ],
-        "summary": "`POST /api/v1/conntrack/flush` — flush all tracked connections.",
+        "summary": "`POST /api/v1/conntrack/flush` - flush all tracked connections.",
         "operationId": "flush_connections",
         "responses": {
           "200": {
@@ -1278,7 +1278,7 @@
         "tags": [
           "ConnTrack"
         ],
-        "summary": "`GET /api/v1/conntrack/status` — connection tracking status.",
+        "summary": "`GET /api/v1/conntrack/status` - connection tracking status.",
         "operationId": "conntrack_status",
         "responses": {
           "200": {
@@ -1327,7 +1327,7 @@
         "tags": [
           "DDoS"
         ],
-        "summary": "`GET /api/v1/ddos/attacks` — list active `DDoS` attacks.",
+        "summary": "`GET /api/v1/ddos/attacks` - list active `DDoS` attacks.",
         "operationId": "ddos_attacks",
         "responses": {
           "200": {
@@ -1379,7 +1379,7 @@
         "tags": [
           "DDoS"
         ],
-        "summary": "`GET /api/v1/ddos/attacks/history` — attack history.",
+        "summary": "`GET /api/v1/ddos/attacks/history` - attack history.",
         "operationId": "ddos_history",
         "responses": {
           "200": {
@@ -1431,7 +1431,7 @@
         "tags": [
           "DDoS"
         ],
-        "summary": "`GET /api/v1/ddos/policies` — list `DDoS` policies.",
+        "summary": "`GET /api/v1/ddos/policies` - list `DDoS` policies.",
         "operationId": "list_ddos_policies",
         "responses": {
           "200": {
@@ -1481,7 +1481,7 @@
         "tags": [
           "DDoS"
         ],
-        "summary": "`POST /api/v1/ddos/policies` — create a `DDoS` policy.",
+        "summary": "`POST /api/v1/ddos/policies` - create a `DDoS` policy.",
         "operationId": "create_ddos_policy",
         "requestBody": {
           "content": {
@@ -1550,7 +1550,7 @@
         "tags": [
           "DDoS"
         ],
-        "summary": "`DELETE /api/v1/ddos/policies/{id}` — delete a `DDoS` policy.",
+        "summary": "`DELETE /api/v1/ddos/policies/{id}` - delete a `DDoS` policy.",
         "operationId": "delete_ddos_policy",
         "parameters": [
           {
@@ -1613,7 +1613,7 @@
         "tags": [
           "DDoS"
         ],
-        "summary": "`GET /api/v1/ddos/status` — `DDoS` protection status.",
+        "summary": "`GET /api/v1/ddos/status` - `DDoS` protection status.",
         "operationId": "ddos_status",
         "responses": {
           "200": {
@@ -1662,7 +1662,7 @@
         "tags": [
           "DLP"
         ],
-        "summary": "`GET /api/v1/dlp/patterns` — list DLP patterns.",
+        "summary": "`GET /api/v1/dlp/patterns` - list DLP patterns.",
         "operationId": "list_dlp_patterns",
         "responses": {
           "200": {
@@ -1714,7 +1714,7 @@
         "tags": [
           "DLP"
         ],
-        "summary": "`GET /api/v1/dlp/status` — DLP status.",
+        "summary": "`GET /api/v1/dlp/status` - DLP status.",
         "operationId": "dlp_status",
         "responses": {
           "200": {
@@ -1763,7 +1763,7 @@
         "tags": [
           "DNS Intelligence"
         ],
-        "summary": "`GET /api/v1/dns/blocklist` — list loaded blocklist rules.",
+        "summary": "`GET /api/v1/dns/blocklist` - list loaded blocklist rules.",
         "operationId": "list_dns_blocklist",
         "responses": {
           "200": {
@@ -1825,7 +1825,7 @@
         "tags": [
           "DNS Intelligence"
         ],
-        "summary": "`GET /api/v1/dns/cache` — list DNS cache entries.",
+        "summary": "`GET /api/v1/dns/cache` - list DNS cache entries.",
         "operationId": "list_dns_cache",
         "parameters": [
           {
@@ -1928,7 +1928,7 @@
         "tags": [
           "DNS Intelligence"
         ],
-        "summary": "`DELETE /api/v1/dns/cache` — flush the DNS cache.",
+        "summary": "`DELETE /api/v1/dns/cache` - flush the DNS cache.",
         "operationId": "flush_dns_cache",
         "responses": {
           "200": {
@@ -1987,7 +1987,7 @@
         "tags": [
           "DNS Intelligence"
         ],
-        "summary": "`GET /api/v1/dns/stats` — DNS cache and blocklist statistics.",
+        "summary": "`GET /api/v1/dns/stats` - DNS cache and blocklist statistics.",
         "operationId": "dns_stats",
         "responses": {
           "200": {
@@ -2046,7 +2046,7 @@
         "tags": [
           "DNS Intelligence"
         ],
-        "summary": "`GET /api/v1/dns/status` — DNS intelligence subsystem status.",
+        "summary": "`GET /api/v1/dns/status` - DNS intelligence subsystem status.",
         "operationId": "dns_status",
         "responses": {
           "200": {
@@ -2095,7 +2095,7 @@
         "tags": [
           "Domain Intelligence"
         ],
-        "summary": "`POST /api/v1/domains/blocklist` — add a domain to the runtime blocklist.",
+        "summary": "`POST /api/v1/domains/blocklist` - add a domain to the runtime blocklist.",
         "operationId": "add_to_blocklist",
         "requestBody": {
           "content": {
@@ -2174,7 +2174,7 @@
         "tags": [
           "Domain Intelligence"
         ],
-        "summary": "`DELETE /api/v1/domains/blocklist/{domain}` — remove a domain from the runtime blocklist.",
+        "summary": "`DELETE /api/v1/domains/blocklist/{domain}` - remove a domain from the runtime blocklist.",
         "operationId": "remove_from_blocklist",
         "parameters": [
           {
@@ -2254,7 +2254,7 @@
         "tags": [
           "Domain Intelligence"
         ],
-        "summary": "`GET /api/v1/domains/reputation` — query domain reputations.",
+        "summary": "`GET /api/v1/domains/reputation` - query domain reputations.",
         "operationId": "list_domain_reputations",
         "parameters": [
           {
@@ -2272,7 +2272,7 @@
           {
             "name": "min_score",
             "in": "query",
-            "description": "Minimum reputation score (0.0–1.0).",
+            "description": "Minimum reputation score (0.0-1.0).",
             "required": false,
             "schema": {
               "type": [
@@ -2507,7 +2507,7 @@
         "tags": [
           "Fingerprints"
         ],
-        "summary": "`GET /api/v1/fingerprints/ja4s` — JA4S server-side fingerprint cache status.",
+        "summary": "`GET /api/v1/fingerprints/ja4s` - JA4S server-side fingerprint cache status.",
         "operationId": "ja4s_summary",
         "responses": {
           "200": {
@@ -2556,7 +2556,7 @@
         "tags": [
           "Fingerprints"
         ],
-        "summary": "`GET /api/v1/fingerprints/summary` — fingerprint cache status.",
+        "summary": "`GET /api/v1/fingerprints/summary` - fingerprint cache status.",
         "operationId": "fingerprint_summary",
         "responses": {
           "200": {
@@ -2605,7 +2605,7 @@
         "tags": [
           "L7 Firewall"
         ],
-        "summary": "`GET /api/v1/firewall/l7-rules` — list all L7 rules.",
+        "summary": "`GET /api/v1/firewall/l7-rules` - list all L7 rules.",
         "operationId": "list_l7_rules",
         "responses": {
           "200": {
@@ -2655,7 +2655,7 @@
         "tags": [
           "L7 Firewall"
         ],
-        "summary": "`POST /api/v1/firewall/l7-rules` — create a new L7 rule.",
+        "summary": "`POST /api/v1/firewall/l7-rules` - create a new L7 rule.",
         "operationId": "create_l7_rule",
         "requestBody": {
           "content": {
@@ -2734,7 +2734,7 @@
         "tags": [
           "L7 Firewall"
         ],
-        "summary": "`DELETE /api/v1/firewall/l7-rules/:id` — delete an L7 rule by ID.",
+        "summary": "`DELETE /api/v1/firewall/l7-rules/:id` - delete an L7 rule by ID.",
         "operationId": "delete_l7_rule",
         "parameters": [
           {
@@ -2797,7 +2797,7 @@
         "tags": [
           "Firewall"
         ],
-        "summary": "`GET /api/v1/firewall/rules` — list all active rules.",
+        "summary": "`GET /api/v1/firewall/rules` - list all active rules.",
         "operationId": "list_rules",
         "responses": {
           "200": {
@@ -2847,7 +2847,7 @@
         "tags": [
           "Firewall"
         ],
-        "summary": "`POST /api/v1/firewall/rules` — create a new rule.",
+        "summary": "`POST /api/v1/firewall/rules` - create a new rule.",
         "operationId": "create_rule",
         "requestBody": {
           "content": {
@@ -2926,7 +2926,7 @@
         "tags": [
           "Firewall"
         ],
-        "summary": "`DELETE /api/v1/firewall/rules/:id` — delete a rule by ID.",
+        "summary": "`DELETE /api/v1/firewall/rules/:id` - delete a rule by ID.",
         "operationId": "delete_rule",
         "parameters": [
           {
@@ -2989,7 +2989,7 @@
         "tags": [
           "GeoIP"
         ],
-        "summary": "`GET /api/v1/geoip/lookup?ip=<addr>` — resolve an IP to `GeoIP` info.",
+        "summary": "`GET /api/v1/geoip/lookup?ip=<addr>` - resolve an IP to `GeoIP` info.",
         "operationId": "geoip_lookup",
         "parameters": [
           {
@@ -3069,7 +3069,7 @@
         "tags": [
           "GeoIP"
         ],
-        "summary": "`GET /api/v1/geoip/status` — `GeoIP` enrichment status.",
+        "summary": "`GET /api/v1/geoip/status` - `GeoIP` enrichment status.",
         "operationId": "geoip_status",
         "responses": {
           "200": {
@@ -3118,7 +3118,7 @@
         "tags": [
           "IDS"
         ],
-        "summary": "`GET /api/v1/ids/rules` — list all IDS rules.",
+        "summary": "`GET /api/v1/ids/rules` - list all IDS rules.",
         "operationId": "list_ids_rules",
         "responses": {
           "200": {
@@ -3180,7 +3180,7 @@
         "tags": [
           "IDS"
         ],
-        "summary": "`GET /api/v1/ids/status` — IDS service status.",
+        "summary": "`GET /api/v1/ids/status` - IDS service status.",
         "operationId": "ids_status",
         "responses": {
           "200": {
@@ -3239,7 +3239,7 @@
         "tags": [
           "IPS"
         ],
-        "summary": "`GET /api/v1/ips/blacklist` — list current IPS blacklist entries.",
+        "summary": "`GET /api/v1/ips/blacklist` - list current IPS blacklist entries.",
         "operationId": "list_ips_blacklist",
         "responses": {
           "200": {
@@ -3289,7 +3289,7 @@
         "tags": [
           "IPS"
         ],
-        "summary": "`POST /api/v1/ips/blacklist` — manually add an IP to the IPS blacklist.",
+        "summary": "`POST /api/v1/ips/blacklist` - manually add an IP to the IPS blacklist.",
         "description": "Drives the same `add_to_blacklist` path the DNS-blocklist and reputation\nauto-block features already use, so the entry is visible via `GET` and\nsubject to the policy's TTL cap + expiry sweeper.",
         "operationId": "add_ips_blacklist",
         "requestBody": {
@@ -3359,7 +3359,7 @@
         "tags": [
           "IPS"
         ],
-        "summary": "`DELETE /api/v1/ips/blacklist/{ip}` — remove an IP from the IPS blacklist.",
+        "summary": "`DELETE /api/v1/ips/blacklist/{ip}` - remove an IP from the IPS blacklist.",
         "operationId": "delete_ips_blacklist",
         "parameters": [
           {
@@ -3432,7 +3432,7 @@
         "tags": [
           "IPS"
         ],
-        "summary": "`GET /api/v1/ips/domain-blocks` — list IPS blacklist entries originating from domain mechanisms.",
+        "summary": "`GET /api/v1/ips/domain-blocks` - list IPS blacklist entries originating from domain mechanisms.",
         "operationId": "list_ips_domain_blocks",
         "responses": {
           "200": {
@@ -3484,7 +3484,7 @@
         "tags": [
           "IPS"
         ],
-        "summary": "`GET /api/v1/ips/rules` — list all IPS rules.",
+        "summary": "`GET /api/v1/ips/rules` - list all IPS rules.",
         "operationId": "list_ips_rules",
         "responses": {
           "200": {
@@ -3536,7 +3536,7 @@
         "tags": [
           "IPS"
         ],
-        "summary": "`PATCH /api/v1/ips/rules/{id}` — toggle a rule's mode.",
+        "summary": "`PATCH /api/v1/ips/rules/{id}` - toggle a rule's mode.",
         "operationId": "patch_ips_rule_mode",
         "parameters": [
           {
@@ -3626,7 +3626,7 @@
         "tags": [
           "Load Balancer"
         ],
-        "summary": "`GET /api/v1/lb/services` — list LB services.",
+        "summary": "`GET /api/v1/lb/services` - list LB services.",
         "operationId": "list_lb_services",
         "responses": {
           "200": {
@@ -3676,7 +3676,7 @@
         "tags": [
           "Load Balancer"
         ],
-        "summary": "`POST /api/v1/lb/services` — create an LB service.",
+        "summary": "`POST /api/v1/lb/services` - create an LB service.",
         "operationId": "create_lb_service",
         "requestBody": {
           "content": {
@@ -3745,7 +3745,7 @@
         "tags": [
           "Load Balancer"
         ],
-        "summary": "`GET /api/v1/lb/services/{id}` — get LB service detail.",
+        "summary": "`GET /api/v1/lb/services/{id}` - get LB service detail.",
         "operationId": "get_lb_service",
         "parameters": [
           {
@@ -3813,7 +3813,7 @@
         "tags": [
           "Load Balancer"
         ],
-        "summary": "`DELETE /api/v1/lb/services/{id}` — delete an LB service.",
+        "summary": "`DELETE /api/v1/lb/services/{id}` - delete an LB service.",
         "operationId": "delete_lb_service",
         "parameters": [
           {
@@ -3876,7 +3876,7 @@
         "tags": [
           "Load Balancer"
         ],
-        "summary": "`GET /api/v1/lb/status` — load balancer status.",
+        "summary": "`GET /api/v1/lb/status` - load balancer status.",
         "operationId": "lb_status",
         "responses": {
           "200": {
@@ -3925,7 +3925,7 @@
         "tags": [
           "Load Balancer"
         ],
-        "summary": "`GET /api/v1/lb/vips` — VIP announcer status.",
+        "summary": "`GET /api/v1/lb/vips` - VIP announcer status.",
         "operationId": "list_lb_vips",
         "responses": {
           "200": {
@@ -3982,7 +3982,7 @@
         "tags": [
           "Load Balancer"
         ],
-        "summary": "`POST /api/v1/lb/vips` — apply a new VIP announce configuration.",
+        "summary": "`POST /api/v1/lb/vips` - apply a new VIP announce configuration.",
         "operationId": "apply_lb_announce",
         "requestBody": {
           "content": {
@@ -4061,7 +4061,7 @@
         "tags": [
           "MITRE ATT&CK"
         ],
-        "summary": "`GET /api/v1/mitre/coverage` — MITRE ATT&CK coverage matrix.",
+        "summary": "`GET /api/v1/mitre/coverage` - MITRE ATT&CK coverage matrix.",
         "operationId": "mitre_coverage",
         "responses": {
           "200": {
@@ -4292,7 +4292,7 @@
         "tags": [
           "NAT"
         ],
-        "summary": "`GET /api/v1/nat/rules` — list NAT rules.",
+        "summary": "`GET /api/v1/nat/rules` - list NAT rules.",
         "operationId": "list_nat_rules",
         "responses": {
           "200": {
@@ -4344,7 +4344,7 @@
         "tags": [
           "NAT"
         ],
-        "summary": "`GET /api/v1/nat/status` — NAT status.",
+        "summary": "`GET /api/v1/nat/status` - NAT status.",
         "operationId": "nat_status",
         "responses": {
           "200": {
@@ -5018,7 +5018,7 @@
         "tags": [
           "Rate Limiting"
         ],
-        "summary": "`GET /api/v1/ratelimit/rules` — list all rate limit rules.",
+        "summary": "`GET /api/v1/ratelimit/rules` - list all rate limit rules.",
         "operationId": "list_ratelimit_rules",
         "responses": {
           "200": {
@@ -5068,7 +5068,7 @@
         "tags": [
           "Rate Limiting"
         ],
-        "summary": "`POST /api/v1/ratelimit/rules` — create a new rate limit rule.",
+        "summary": "`POST /api/v1/ratelimit/rules` - create a new rate limit rule.",
         "operationId": "create_ratelimit_rule",
         "requestBody": {
           "content": {
@@ -5147,7 +5147,7 @@
         "tags": [
           "Rate Limiting"
         ],
-        "summary": "`DELETE /api/v1/ratelimit/rules/{id}` — delete a rate limit rule.",
+        "summary": "`DELETE /api/v1/ratelimit/rules/{id}` - delete a rate limit rule.",
         "operationId": "delete_ratelimit_rule",
         "parameters": [
           {
@@ -5210,7 +5210,7 @@
         "tags": [
           "Responses"
         ],
-        "summary": "`GET /api/v1/responses` — list active response actions.",
+        "summary": "`GET /api/v1/responses` - list active response actions.",
         "operationId": "list_response_actions",
         "responses": {
           "200": {
@@ -5259,7 +5259,7 @@
         "tags": [
           "Responses"
         ],
-        "summary": "`POST /api/v1/responses/manual` — create a time-bounded response action.",
+        "summary": "`POST /api/v1/responses/manual` - create a time-bounded response action.",
         "operationId": "create_response_action",
         "requestBody": {
           "content": {
@@ -5328,7 +5328,7 @@
         "tags": [
           "Responses"
         ],
-        "summary": "`DELETE /api/v1/responses/{id}` — revoke a response action early.",
+        "summary": "`DELETE /api/v1/responses/{id}` - revoke a response action early.",
         "operationId": "revoke_response_action",
         "parameters": [
           {
@@ -5398,7 +5398,7 @@
         "tags": [
           "Routing"
         ],
-        "summary": "`GET /api/v1/routing/gateways` — list routing gateways.",
+        "summary": "`GET /api/v1/routing/gateways` - list routing gateways.",
         "operationId": "list_gateways",
         "responses": {
           "200": {
@@ -5448,7 +5448,7 @@
         "tags": [
           "Routing"
         ],
-        "summary": "`POST /api/v1/routing/gateways` — add a routing gateway.",
+        "summary": "`POST /api/v1/routing/gateways` - add a routing gateway.",
         "operationId": "create_gateway",
         "requestBody": {
           "content": {
@@ -5517,7 +5517,7 @@
         "tags": [
           "Routing"
         ],
-        "summary": "`DELETE /api/v1/routing/gateways/{id}` — remove a routing gateway.",
+        "summary": "`DELETE /api/v1/routing/gateways/{id}` - remove a routing gateway.",
         "operationId": "delete_gateway",
         "parameters": [
           {
@@ -5580,7 +5580,7 @@
         "tags": [
           "Routing"
         ],
-        "summary": "`GET /api/v1/routing/routes` — effective default route(s) from gateway selection.",
+        "summary": "`GET /api/v1/routing/routes` - effective default route(s) from gateway selection.",
         "operationId": "list_routes",
         "responses": {
           "200": {
@@ -5632,7 +5632,7 @@
         "tags": [
           "Routing"
         ],
-        "summary": "`GET /api/v1/routing/status` — routing status.",
+        "summary": "`GET /api/v1/routing/status` - routing status.",
         "operationId": "routing_status",
         "responses": {
           "200": {
@@ -5681,7 +5681,7 @@
         "tags": [
           "Threat Intelligence"
         ],
-        "summary": "`GET /api/v1/threatintel/feeds` — list configured feeds.",
+        "summary": "`GET /api/v1/threatintel/feeds` - list configured feeds.",
         "operationId": "list_feeds",
         "responses": {
           "200": {
@@ -5733,7 +5733,7 @@
         "tags": [
           "Threat Intelligence"
         ],
-        "summary": "`POST /api/v1/threatintel/feeds/refresh` — trigger an immediate re-fetch\nof all enabled threat-intel feeds.",
+        "summary": "`POST /api/v1/threatintel/feeds/refresh` - trigger an immediate re-fetch\nof all enabled threat-intel feeds.",
         "operationId": "refresh_feeds",
         "requestBody": {
           "content": {
@@ -5812,7 +5812,7 @@
         "tags": [
           "Threat Intelligence"
         ],
-        "summary": "`GET /api/v1/threatintel/iocs` — list loaded IOCs.",
+        "summary": "`GET /api/v1/threatintel/iocs` - list loaded IOCs.",
         "operationId": "list_iocs",
         "responses": {
           "200": {
@@ -5864,7 +5864,7 @@
         "tags": [
           "Threat Intelligence"
         ],
-        "summary": "`GET /api/v1/threatintel/status` — threat intel subsystem status.",
+        "summary": "`GET /api/v1/threatintel/status` - threat intel subsystem status.",
         "operationId": "threatintel_status",
         "responses": {
           "200": {
@@ -5913,7 +5913,7 @@
         "tags": [
           "Threat Intelligence"
         ],
-        "summary": "`GET /api/v1/threatintel/urls` — list malicious URL indicators ingested\nfrom CTI feeds. The threat-intel engine is IP-only, so URL indicators are\nsurfaced from the service's retained snapshot.",
+        "summary": "`GET /api/v1/threatintel/urls` - list malicious URL indicators ingested\nfrom CTI feeds. The threat-intel engine is IP-only, so URL indicators are\nsurfaced from the service's retained snapshot.",
         "operationId": "list_url_iocs",
         "responses": {
           "200": {
@@ -5965,7 +5965,7 @@
         "tags": [
           "TLS"
         ],
-        "summary": "`GET /api/v1/tls/status` — report the negotiated TLS key-exchange group\nfor the current connection.",
+        "summary": "`GET /api/v1/tls/status` - report the negotiated TLS key-exchange group\nfor the current connection.",
         "operationId": "tls_status",
         "responses": {
           "200": {
@@ -6014,7 +6014,7 @@
         "tags": [
           "Zones"
         ],
-        "summary": "`GET /api/v1/zones` — list security zones.",
+        "summary": "`GET /api/v1/zones` - list security zones.",
         "operationId": "list_zones",
         "responses": {
           "200": {
@@ -6064,7 +6064,7 @@
         "tags": [
           "Zones"
         ],
-        "summary": "`POST /api/v1/zones` — create a security zone.",
+        "summary": "`POST /api/v1/zones` - create a security zone.",
         "operationId": "create_zone",
         "requestBody": {
           "content": {
@@ -6143,7 +6143,7 @@
         "tags": [
           "Zones"
         ],
-        "summary": "`GET /api/v1/zones/policies` — list inter-zone policies.",
+        "summary": "`GET /api/v1/zones/policies` - list inter-zone policies.",
         "operationId": "list_zone_policies",
         "responses": {
           "200": {
@@ -6193,7 +6193,7 @@
         "tags": [
           "Zones"
         ],
-        "summary": "`POST /api/v1/zones/policies` — create an inter-zone policy.",
+        "summary": "`POST /api/v1/zones/policies` - create an inter-zone policy.",
         "operationId": "create_zone_policy",
         "requestBody": {
           "content": {
@@ -6262,7 +6262,7 @@
         "tags": [
           "Zones"
         ],
-        "summary": "`DELETE /api/v1/zones/policies/{id}` — remove an inter-zone policy.",
+        "summary": "`DELETE /api/v1/zones/policies/{id}` - remove an inter-zone policy.",
         "operationId": "delete_zone_policy",
         "parameters": [
           {
@@ -6335,7 +6335,7 @@
         "tags": [
           "Zones"
         ],
-        "summary": "`GET /api/v1/zones/status` — zone service status.",
+        "summary": "`GET /api/v1/zones/status` - zone service status.",
         "operationId": "zone_status",
         "responses": {
           "200": {
@@ -6384,7 +6384,7 @@
         "tags": [
           "Zones"
         ],
-        "summary": "`DELETE /api/v1/zones/{id}` — remove a security zone.",
+        "summary": "`DELETE /api/v1/zones/{id}` - remove a security zone.",
         "operationId": "delete_zone",
         "parameters": [
           {
@@ -6447,7 +6447,7 @@
         "tags": [
           "Health"
         ],
-        "summary": "Liveness probe — always returns 200 if the process is running.",
+        "summary": "Liveness probe - always returns 200 if the process is running.",
         "operationId": "healthz",
         "responses": {
           "200": {
@@ -6485,7 +6485,7 @@
         "tags": [
           "Health"
         ],
-        "summary": "Readiness probe — returns 200 when eBPF programs are loaded, 503 otherwise.",
+        "summary": "Readiness probe - returns 200 when eBPF programs are loaded, 503 otherwise.",
         "operationId": "readyz",
         "responses": {
           "200": {
@@ -6537,7 +6537,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Optional TTL in seconds. Defaults to — and is capped at — the policy's\nmaximum blacklist duration.",
+            "description": "Optional TTL in seconds. Defaults to - and is capped at - the policy's\nmaximum blacklist duration.",
             "minimum": 0
           }
         }
@@ -7230,7 +7230,7 @@
           "max_connections": {
             "type": "integer",
             "format": "int64",
-            "description": "Conntrack table capacity — the maximum number of flows the\nagent tracks before eviction (the BPF connection-table size).",
+            "description": "Conntrack table capacity - the maximum number of flows the\nagent tracks before eviction (the BPF connection-table size).",
             "minimum": 0
           }
         }

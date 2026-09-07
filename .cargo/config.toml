@@ -3,7 +3,7 @@ xtask = "run --package xtask --"
 
 # k8s-openapi requires the final binary to select a Kubernetes API version.
 # `adapters`/`agent` enable the `kubernetes` feature but, per k8s-openapi's
-# library-crate rule, do not pin a version in their normal dependency — so
+# library-crate rule, do not pin a version in their normal dependency - so
 # building those crates in isolation (e.g. `cargo build -p adapters` in CI)
 # panics with "None of the v1_* features are enabled". Setting the version
 # here makes isolated builds and `cargo check`/`cargo doc` work without an

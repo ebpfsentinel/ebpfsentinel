@@ -50,7 +50,7 @@ pub struct EbpfProgramManager {
     /// Tenant cgroup map manager (from tc-ids, the only program that resolves
     /// a tenant from the originating cgroup).
     pub tenant_cgroup: TenantCgroupMapManager,
-    /// Shared metrics readers — the kernel metrics loop reads from this.
+    /// Shared metrics readers - the kernel metrics loop reads from this.
     pub metrics_readers: Arc<RwLock<Vec<MetricsReader>>>,
     /// Programs loaded during startup (loaders kept alive in `EbpfState`).
     /// These are tracked by name so `is_loaded()` returns true without
@@ -209,7 +209,7 @@ impl EbpfProgramManager {
             _ => {}
         }
 
-        // Drop the loader — this detaches the eBPF program from interfaces
+        // Drop the loader - this detaches the eBPF program from interfaces
         drop(handle);
 
         self.services.metrics.set_ebpf_program_status(name, false);
@@ -466,7 +466,7 @@ impl EbpfProgramManager {
             .metrics
             .set_ebpf_program_status("tc_nat_egress", true);
 
-        // NAT uses two loaders — store ingress as the primary handle, egress as a second.
+        // NAT uses two loaders - store ingress as the primary handle, egress as a second.
         let cancel = CancellationToken::new();
         self.programs.insert(
             "tc_nat".to_string(),
@@ -606,7 +606,7 @@ impl EbpfProgramManager {
                 info!("XDP chain: firewall → ratelimit wired (slot 0)");
             }
         } else if fw_loaded {
-            // Ratelimit absent — clear slot 0
+            // Ratelimit absent - clear slot 0
             if let Some(fw) = self.programs.get_mut("xdp_firewall") {
                 let _ = fw.loader.clear_tail_call_target("XDP_PROG_ARRAY", 0);
             }

@@ -8,7 +8,7 @@
 //! place of the OSS regex engine.
 //!
 //! The returned matches' `pattern_index` MUST align with the pattern list the
-//! owning `DlpAppService` reports via `list_patterns()` — the caller loads the
+//! owning `DlpAppService` reports via `list_patterns()` - the caller loads the
 //! same patterns, in the same order, into both.
 
 use domain::dlp::entity::DlpMatch;

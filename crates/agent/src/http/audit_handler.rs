@@ -62,7 +62,7 @@ pub struct AuditEntryResponse {
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 1000;
 
-/// `GET /api/v1/audit/logs` — query stored audit log entries.
+/// `GET /api/v1/audit/logs` - query stored audit log entries.
 #[utoipa::path(
     get, path = "/api/v1/audit/logs",
     tag = "Audit",
@@ -163,7 +163,7 @@ pub struct RuleChangeResponse {
 const HISTORY_DEFAULT_LIMIT: usize = 50;
 const HISTORY_MAX_LIMIT: usize = 500;
 
-/// `GET /api/v1/audit/rules/{id}/history` — query rule version history.
+/// `GET /api/v1/audit/rules/{id}/history` - query rule version history.
 #[utoipa::path(
     get, path = "/api/v1/audit/rules/{id}/history",
     tag = "Audit",

@@ -1,12 +1,12 @@
 #!/usr/bin/env bats
-# 58-pqc-handshake.bats — X25519MLKEM768 PQ-hybrid TLS handshake sweep.
+# 58-pqc-handshake.bats - X25519MLKEM768 PQ-hybrid TLS handshake sweep.
 #
 # Verifies the agent's PQ-hybrid key exchange path end-to-end:
 #
-#   * pq_mode=prefer  — classical client (no PQ groups offered) still
+#   * pq_mode=prefer  - classical client (no PQ groups offered) still
 #     negotiates, proving the classical fallback path; a PQ-aware client
 #     lands on the X25519MLKEM768 hybrid named group.
-#   * pq_mode=require — classical-only clients are rejected at the
+#   * pq_mode=require - classical-only clients are rejected at the
 #     handshake; PQ-aware client still succeeds, proving enforcement is
 #     wired and not silently ignored.
 #
@@ -30,7 +30,7 @@ setup_file() {
     export CERT_DIR="${CERT_DIR:-/tmp/ebpfsentinel-test-certs}"
     mkdir -p "${DATA_DIR}"
 
-    # This suite runs a local userspace agent for a localhost TLS handshake —
+    # This suite runs a local userspace agent for a localhost TLS handshake -
     # no kernel/transit path. Prefer a build tree, then the installed binary.
     # In 2VM/3VM mode bats runs on the client VM, which has neither (target/ is
     # rsync-excluded), so pull the binary from the agent VM over the existing
@@ -124,7 +124,7 @@ setup_file() {
 
 setup() {
     # bats re-sources the file (and thus constants.bash) before each test,
-    # which recomputes TLS_URL from the inherited AGENT_HOST — in 2VM/3VM mode
+    # which recomputes TLS_URL from the inherited AGENT_HOST - in 2VM/3VM mode
     # that is the remote agent VM. This suite's agent runs locally, so re-pin
     # every test to localhost (mirrors the setup_file pin).
     export AGENT_HOST="127.0.0.1"
@@ -180,7 +180,7 @@ _s_client_named_group() {
 # Readiness probe by TCP connect rather than a completed TLS handshake.
 # In pq_mode=require the server rejects any client that cannot offer the PQ
 # hybrid group, so a curl/openssl health probe on a host without MLKEM support
-# can never succeed even though the agent is up — confirming the port is
+# can never succeed even though the agent is up - confirming the port is
 # listening is the correct restart check; the require-mode rejection itself is
 # asserted by the test body.
 _wait_for_tls_port() {

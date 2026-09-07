@@ -114,7 +114,7 @@ fuzz_target!(|data: &[u8]| {
                 };
 
                 if settings.validate().is_ok() {
-                    // Exercise eBPF conversion — may overflow on large timeout values
+                    // Exercise eBPF conversion - may overflow on large timeout values
                     let _ = settings.to_ebpf_config();
                 }
             }

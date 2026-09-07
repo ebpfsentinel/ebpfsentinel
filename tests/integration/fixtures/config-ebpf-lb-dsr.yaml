@@ -1,4 +1,4 @@
-# config-ebpf-lb-dsr.yaml — 3-VM L4 LB DSR + Maglev scenario config.
+# config-ebpf-lb-dsr.yaml - 3-VM L4 LB DSR + Maglev scenario config.
 #
 # Topology (set EBPF_3VM_MODE=true to drive):
 #   Client VM   192.168.56.20 ── 56.0/24 ──┐

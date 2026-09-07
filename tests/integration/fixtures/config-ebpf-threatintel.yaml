@@ -1,4 +1,4 @@
-# config-ebpf-threatintel.yaml — Threat intel eBPF scenario test config
+# config-ebpf-threatintel.yaml - Threat intel eBPF scenario test config
 # Tests: IOC-based blocking, feed loading, threat intel metrics
 #
 # Network topology:

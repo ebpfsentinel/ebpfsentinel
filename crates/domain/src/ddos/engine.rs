@@ -144,7 +144,7 @@ impl DdosEngine {
         }
     }
 
-    /// Periodic tick — call once per second to update attack statuses.
+    /// Periodic tick - call once per second to update attack statuses.
     pub fn tick(&self) {
         let mut active_attacks = self
             .active_attacks

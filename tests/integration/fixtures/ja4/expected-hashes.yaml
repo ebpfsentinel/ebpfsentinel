@@ -1,14 +1,14 @@
-# expected-hashes.yaml — reference JA4 / JA4S hashes per TLS client.
+# expected-hashes.yaml - reference JA4 / JA4S hashes per TLS client.
 #
 # Each client entry pins:
-#   client       — short name used by `ja4_helpers.bash`
-#   tool         — system-installed binary or Python module driving the
+#   client       - short name used by `ja4_helpers.bash`
+#   tool         - system-installed binary or Python module driving the
 #                  ClientHello.
-#   version_pin  — pinning that controls the observed JA4 hash. Bumping
+#   version_pin  - pinning that controls the observed JA4 hash. Bumping
 #                  the listed package WILL drift the hash; treat any
 #                  mismatch in CI as either a real regression or a
 #                  re-pin job.
-#   notes        — caveats: hashes depend on OpenSSL/BoringSSL build
+#   notes        - caveats: hashes depend on OpenSSL/BoringSSL build
 #                  flags, Python ssl module backports, Go version, etc.
 #                  Empty `ja4` / `ja4s` mean "not yet recorded on the
 #                  CI baseline image"; the suite still passes since it

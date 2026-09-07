@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# generate-jwt-keys.sh — Generate RSA keypair and pre-sign JWT tokens
+# generate-jwt-keys.sh - Generate RSA keypair and pre-sign JWT tokens
 #
 # Usage: generate-jwt-keys.sh [--out-dir /tmp/ebpfsentinel-test-jwt]
 #
 # Produces:
-#   jwt-private.pem, jwt-public.pem    — RSA 2048 keypair
-#   token-admin.jwt                    — Admin role, all namespaces
-#   token-viewer.jwt                   — Viewer role (read-only)
-#   token-operator.jwt                 — Operator role, namespace:prod only
-#   token-expired.jwt                  — Expired token (exp in past)
+#   jwt-private.pem, jwt-public.pem    - RSA 2048 keypair
+#   token-admin.jwt                    - Admin role, all namespaces
+#   token-viewer.jwt                   - Viewer role (read-only)
+#   token-operator.jwt                 - Operator role, namespace:prod only
+#   token-expired.jwt                  - Expired token (exp in past)
 set -euo pipefail
 
 OUT_DIR="${1:-/tmp/ebpfsentinel-test-jwt}"

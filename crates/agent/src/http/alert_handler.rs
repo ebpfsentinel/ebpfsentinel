@@ -249,7 +249,7 @@ fn container_identity(
 
 // ── Handlers ────────────────────────────────────────────────────────
 
-/// `GET /api/v1/alerts` — query stored alerts with optional filters.
+/// `GET /api/v1/alerts` - query stored alerts with optional filters.
 #[utoipa::path(
     get, path = "/api/v1/alerts",
     tag = "Alerts",
@@ -353,7 +353,7 @@ pub async fn list_alerts(
     }))
 }
 
-/// `POST /api/v1/alerts/{id}/false-positive` — mark an alert as false positive.
+/// `POST /api/v1/alerts/{id}/false-positive` - mark an alert as false positive.
 #[utoipa::path(
     post, path = "/api/v1/alerts/{id}/false-positive",
     tag = "Alerts",
@@ -395,7 +395,7 @@ pub async fn mark_false_positive(
     })?;
 
     if alert.false_positive {
-        // Already marked — return idempotent success.
+        // Already marked - return idempotent success.
         return Ok(Json(FalsePositiveResponse {
             alert_id: id,
             marked: true,
@@ -539,7 +539,7 @@ fn last_event_id(headers: &HeaderMap) -> Option<String> {
         .map(ToString::to_string)
 }
 
-/// `GET /api/v1/alerts/stream` — Server-Sent Events live alert feed.
+/// `GET /api/v1/alerts/stream` - Server-Sent Events live alert feed.
 ///
 /// Server-side filtering happens on every alert before it is forwarded.
 /// Reconnects can pass `Last-Event-ID` to backfill missed alerts from

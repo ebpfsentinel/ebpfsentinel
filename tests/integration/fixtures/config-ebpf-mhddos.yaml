@@ -1,4 +1,4 @@
-# config-ebpf-mhddos.yaml — Suite 41 (MHDDoS L7 multi-method) fixture.
+# config-ebpf-mhddos.yaml - Suite 41 (MHDDoS L7 multi-method) fixture.
 #
 # Enables the three surfaces under test in one agent instance:
 #   - L7 firewall (HTTP path + TLS SNI matching)

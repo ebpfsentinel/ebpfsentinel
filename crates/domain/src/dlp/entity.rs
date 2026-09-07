@@ -20,10 +20,10 @@ pub struct DlpPattern {
 /// Maximum regex source length (4 KiB) to reject unreasonably large patterns early.
 const MAX_REGEX_SOURCE_LEN: usize = 4096;
 
-/// Maximum compiled regex size (10 MiB) — matches engine limit.
+/// Maximum compiled regex size (10 MiB) - matches engine limit.
 const REGEX_SIZE_LIMIT: usize = 10 * (1 << 20);
 
-/// Maximum regex nesting depth — matches engine limit.
+/// Maximum regex nesting depth - matches engine limit.
 const REGEX_NEST_LIMIT: u32 = 200;
 
 impl DlpPattern {
@@ -53,7 +53,7 @@ impl DlpPattern {
 }
 
 /// Result of scanning data against a compiled DLP pattern.
-/// Contains NO raw matched text — only offset and length for redaction.
+/// Contains NO raw matched text - only offset and length for redaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DlpMatch {
     pub pattern_index: usize,
@@ -62,7 +62,7 @@ pub struct DlpMatch {
 }
 
 /// Domain-level DLP alert produced when a pattern matches captured data.
-/// The actual sensitive data is NEVER included — only a redacted placeholder (FR17).
+/// The actual sensitive data is NEVER included - only a redacted placeholder (FR17).
 #[derive(Debug, Clone)]
 pub struct DlpAlert {
     pub pattern_id: RuleId,
@@ -73,7 +73,7 @@ pub struct DlpAlert {
     pub pid: u32,
     pub tgid: u32,
     pub direction: u8,
-    /// Always `[REDACTED:{data_type}]` — never the actual matched content.
+    /// Always `[REDACTED:{data_type}]` - never the actual matched content.
     pub redacted_excerpt: String,
     pub timestamp_ns: u64,
     /// Container context resolved from the event's `cgroup_id` (if any).

@@ -110,7 +110,7 @@ fn map_routing_error(err: &RoutingError) -> ApiError {
 
 // ── Handlers ──────────────────────────────────────────────────────
 
-/// `GET /api/v1/routing/status` — routing status.
+/// `GET /api/v1/routing/status` - routing status.
 #[utoipa::path(
     get, path = "/api/v1/routing/status",
     tag = "Routing",
@@ -137,7 +137,7 @@ pub async fn routing_status(
     }))
 }
 
-/// `GET /api/v1/routing/gateways` — list routing gateways.
+/// `GET /api/v1/routing/gateways` - list routing gateways.
 #[utoipa::path(
     get, path = "/api/v1/routing/gateways",
     tag = "Routing",
@@ -166,7 +166,7 @@ pub async fn list_gateways(
     Ok(Json(gateways))
 }
 
-/// `POST /api/v1/routing/gateways` — add a routing gateway.
+/// `POST /api/v1/routing/gateways` - add a routing gateway.
 #[utoipa::path(
     post, path = "/api/v1/routing/gateways",
     tag = "Routing",
@@ -222,7 +222,7 @@ pub async fn create_gateway(
     Ok((axum::http::StatusCode::CREATED, Json(resp)))
 }
 
-/// `DELETE /api/v1/routing/gateways/{id}` — remove a routing gateway.
+/// `DELETE /api/v1/routing/gateways/{id}` - remove a routing gateway.
 #[utoipa::path(
     delete, path = "/api/v1/routing/gateways/{id}",
     tag = "Routing",
@@ -259,7 +259,7 @@ pub async fn delete_gateway(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-/// `GET /api/v1/routing/routes` — effective default route(s) from gateway selection.
+/// `GET /api/v1/routing/routes` - effective default route(s) from gateway selection.
 #[utoipa::path(
     get, path = "/api/v1/routing/routes",
     tag = "Routing",

@@ -2,13 +2,13 @@
 
 //! Raw attach for kfunc programs the [`super::kfunc_loader`] loads outside aya.
 //!
-//! A program loaded via raw `BPF_PROG_LOAD` is just an `OwnedFd` — aya never
+//! A program loaded via raw `BPF_PROG_LOAD` is just an `OwnedFd` - aya never
 //! created a `Program` handle for it, so aya's attach helpers cannot reach it.
 //! This module attaches such fds the same way aya would, via raw syscalls:
 //!
 //! - XDP: `BPF_LINK_CREATE` with `attach_type = BPF_XDP` and `target_ifindex`.
 //! - TC: `BPF_LINK_CREATE` with `attach_type = BPF_TCX_INGRESS|EGRESS` (TCX,
-//!   kernel 6.6+ — the same path aya uses for modern TC attach).
+//!   kernel 6.6+ - the same path aya uses for modern TC attach).
 //! - tail calls: a raw `BPF_MAP_UPDATE_ELEM` into a `PROG_ARRAY`, so a slot can
 //!   point at a raw-loaded program fd.
 //! - uprobe: `perf_event_open` against the kernel `uprobe` PMU (one event per
@@ -37,7 +37,7 @@ const BPF_TCX_EGRESS: u32 = 47;
 ///
 /// Field offsets match the kernel UAPI exactly: `prog_fd` (0),
 /// `target_ifindex` aliasing `target_fd` (4), `attach_type` (8), `flags` (12),
-/// then the per-type union (16+) — here the TCX/netkit shape
+/// then the per-type union (16+) - here the TCX/netkit shape
 /// `{ relative_fd; expected_revision }`. The trailing padding covers the
 /// largest union member so the kernel always reads a fully-initialised attr.
 #[repr(C)]
@@ -55,7 +55,7 @@ struct LinkCreateAttr {
 
 /// Subset of `union bpf_attr` for map element ops.
 ///
-/// `map_fd` (0), `key` pointer (8), `value` pointer (16), `flags` (24) —
+/// `map_fd` (0), `key` pointer (8), `value` pointer (16), `flags` (24) -
 /// matching the kernel's `__aligned_u64` layout.
 #[repr(C)]
 #[derive(Default)]
@@ -241,7 +241,7 @@ const BPF_F_UPROBE_MULTI_RETURN: u32 = 1;
 /// `union bpf_attr` for `BPF_LINK_CREATE` with the `uprobe_multi` member.
 ///
 /// Unlike `perf_event_open`, `BPF_LINK_CREATE` is a `bpf(2)` command, so it is
-/// authorised by a delegated BPF token (`delegate_attachs`) — the path that
+/// authorised by a delegated BPF token (`delegate_attachs`) - the path that
 /// lets a token-only process attach a uprobe without `CAP_PERFMON`. Field
 /// offsets match the kernel UAPI: `prog_fd` (0), `attach_type` (8), `flags`
 /// (12), then the `uprobe_multi` block `{ path(16), offsets(24),
@@ -332,7 +332,7 @@ pub fn attach_uprobe_at_offset(
 }
 
 /// Resolve a symbol name to its file offset within an ELF binary / shared
-/// object — the offset the `uprobe_multi` link expects. Prefers the dynamic
+/// object - the offset the `uprobe_multi` link expects. Prefers the dynamic
 /// symbol table (exported functions), falling back to the static one.
 pub fn resolve_symbol_offset(target: &str, symbol: &str) -> Result<u64, KfuncAttachError> {
     let err = |message: String| KfuncAttachError::UprobeSymbol {

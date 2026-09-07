@@ -1,4 +1,4 @@
-# eBPFsentinel — Docker integration test configuration (loopback interface)
+# eBPFsentinel - Docker integration test configuration (loopback interface)
 agent:
   interfaces: [lo]
   bind_address: "0.0.0.0"

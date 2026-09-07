@@ -1,7 +1,7 @@
 //! `warden serve` handles the `Delegate` bpffs handshake. The happy path needs a real
 //! `fsopen("bpf")` fd from a child user namespace and `CAP_SYS_ADMIN`, so it runs
 //! in the VM lane; here we drive the protocol with a non-bpffs fd and assert the
-//! delegation is refused cleanly — proving the command frame is read, the
+//! delegation is refused cleanly - proving the command frame is read, the
 //! `SCM_RIGHTS` fd is received (not swallowed by buffering), and a failure is
 //! reported as a typed error.
 
@@ -37,7 +37,7 @@ fn current_uid() -> u32 {
 }
 
 /// Send one fd alongside a single sentinel byte (the warden's `Delegate` fd wire
-/// shape — what the agent launcher does after the `Delegate` frame).
+/// shape - what the agent launcher does after the `Delegate` frame).
 fn send_one_fd(sock: RawFd, fd: RawFd) -> bool {
     let mut byte = [0u8; 1];
     let mut iov = libc::iovec {

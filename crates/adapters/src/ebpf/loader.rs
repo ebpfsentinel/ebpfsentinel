@@ -30,7 +30,7 @@ pub const XDP_MODE_HW: u32 = 1 << 3;
 ///
 /// eBPF is loaded **exclusively** through the raw BPF-token loader
 /// ([`kfunc_loader::load_object_token`]): the agent holds no `CAP_BPF`,
-/// so aya — which cannot pass a token fd on its syscalls — is never used
+/// so aya - which cannot pass a token fd on its syscalls - is never used
 /// to load or attach. Maps live in `token_maps`, programs in
 /// `kfunc_progs`, and attaches go through the raw `kfunc_attach` paths.
 pub struct EbpfLoader {
@@ -47,8 +47,8 @@ pub struct EbpfLoader {
     kfunc_links: Vec<OwnedFd>,
     /// Independent `dup`s of the maps aya hosts for a kfunc object, keyed by
     /// map name. Captured at load time (aya exposes no fd accessor and pinning
-    /// is refused on integrity kernels) so raw map syscalls — e.g. wiring a
-    /// `ProgramArray` tail-call via [`Self::set_tail_call_raw`] — can reach the
+    /// is refused on integrity kernels) so raw map syscalls - e.g. wiring a
+    /// `ProgramArray` tail-call via [`Self::set_tail_call_raw`] - can reach the
     /// exact kernel map aya created. Empty for non-kfunc loads.
     kfunc_hosted_maps: HashMap<String, OwnedFd>,
 }
@@ -104,7 +104,7 @@ impl EbpfLoader {
     /// kfuncs resolve against its `xdp_metadata_ops` and read real hardware
     /// hints. If the driver lacks that support the verifier rejects the load,
     /// and the token loader transparently falls back to neutralizing the
-    /// metadata kfuncs (`r0 = -EOPNOTSUPP`) so the program still loads — the
+    /// metadata kfuncs (`r0 = -EOPNOTSUPP`) so the program still loads - the
     /// program's wrapper degrades gracefully, exactly as on a driver answering
     /// `-EOPNOTSUPP`. `None` (multiple or zero interfaces) always neutralizes,
     /// so a single program fd can attach to every interface.
@@ -125,11 +125,11 @@ impl EbpfLoader {
     ///
     /// A `ProgramArray` records the load attributes of the first program to
     /// reference it and rejects any later-inserted program whose attributes
-    /// differ — `bpf_prog_map_compatible` compares `prog_type`, `jited`,
+    /// differ - `bpf_prog_map_compatible` compares `prog_type`, `jited`,
     /// `xdp_has_frags`, and `attach_func_proto`. The firewall and ratelimit
     /// programs that own `XDP_PROG_ARRAY` / `RL_PROG_ARRAY` load through the
-    /// token, so their tail-call targets — even the kfunc-free
-    /// `xdp-firewall-reject` and `xdp-ratelimit-syncookie` — must take the
+    /// token, so their tail-call targets - even the kfunc-free
+    /// `xdp-firewall-reject` and `xdp-ratelimit-syncookie` - must take the
     /// identical path or the kernel refuses the slot update with `EINVAL`.
     /// The token loader creates the object's maps (reusing the owner's
     /// pin-shared maps and creating this program's private ones, e.g.
@@ -345,7 +345,7 @@ impl EbpfLoader {
     /// `interface` (the same program may also be attached on ingress). On
     /// egress the kernel has bound the originating socket to the skb, so
     /// `bpf_skb_cgroup_id` yields the cgroup of the process that generated
-    /// the packet — used for container attribution of locally-originated
+    /// the packet - used for container attribution of locally-originated
     /// (e.g. container outbound) traffic, which the ingress hook cannot
     /// resolve. Mirrors [`Self::attach_tc_program`] but for `Egress`.
     pub fn attach_tc_egress(
@@ -469,7 +469,7 @@ impl EbpfLoader {
     ///
     /// Issues a raw `BPF_MAP_UPDATE_ELEM` against the captured fd to the same
     /// kernel map aya created so the slot can point at either an aya-loaded or a
-    /// raw-loaded program fd — aya's `ProgramArray` only accepts the former. The
+    /// raw-loaded program fd - aya's `ProgramArray` only accepts the former. The
     /// same array can be wired multiple times. Only available for kfunc objects,
     /// whose maps are captured at load time; the `ProgramArray`s wired this way
     /// (`XDP_PROG_ARRAY`, `RL_PROG_ARRAY`) all belong to such objects.
@@ -564,14 +564,14 @@ impl EbpfLoader {
     //
     // After populating static config maps at startup (e.g. SYNCOOKIE_SECRET, AMP_PROTECT_CONFIG,
     // RL_TIER_CONFIG), call `BPF_MAP_FREEZE` via `libc::syscall(SYS_bpf, BPF_MAP_FREEZE, ...)` to
-    // prevent any subsequent writes — this hardens against userspace-side map tampering after init.
+    // prevent any subsequent writes - this hardens against userspace-side map tampering after init.
     //
     // Blocked by: aya 0.14.0 exposes no public `Map::freeze()`; it freezes rodata maps
     // internally only. The underlying kernel
     // syscall is available since Linux 5.2 (BPF_MAP_FREEZE cmd). When aya adds freeze support,
     // wire it here after each static map population. Maps that receive runtime updates
     // (CONFIG_FLAGS, CT_CONFIG, DDOS_SYN_CONFIG, ICMP_CONFIG, QOS_PIPE_CONFIG, etc.) must NOT
-    // be frozen — only truly write-once maps are candidates.
+    // be frozen - only truly write-once maps are candidates.
 }
 
 /// How many times to retry an XDP attach that fails with `EBUSY`, and the
@@ -610,7 +610,7 @@ fn attach_xdp_ebusy_retry(
                         interface,
                         attempt,
                         retries = XDP_ATTACH_EBUSY_RETRIES,
-                        "XDP interface busy (errno 16) — a previous instance may still hold the \
+                        "XDP interface busy (errno 16) - a previous instance may still hold the \
                          link after a restart; retrying after a short delay"
                     );
                     std::thread::sleep(XDP_ATTACH_EBUSY_DELAY);

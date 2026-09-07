@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# ja4_helpers.bash — Drive diverse TLS clients against an agent-side
+# ja4_helpers.bash - Drive diverse TLS clients against an agent-side
 # TLS target so the agent's JA4 fingerprint cache is populated with
 # distinct ClientHello signatures.
 #
 # Public entrypoints:
-#   require_ja4_min                — require curl + openssl (skip otherwise)
-#   ja4_have_client <name>         — return 0 if the named client is available
-#   start_tls_target [port]        — start openssl s_server on agent VM
-#   stop_tls_target                — kill it
-#   ja4_connect <client> <sni>     — single TLS connect from attacker VM
-#   ja4_summary_count              — GET /api/v1/fingerprints/summary → cached_count
-#   ja4_summary_persistent         — GET /api/v1/fingerprints/summary → persistent flag
-#   ja4s_summary_count             — GET /api/v1/fingerprints/ja4s → cached_count
-#   ja4_alert_hashes [filter]      — distinct ja4_fingerprint values across alerts
+#   require_ja4_min                - require curl + openssl (skip otherwise)
+#   ja4_have_client <name>         - return 0 if the named client is available
+#   start_tls_target [port]        - start openssl s_server on agent VM
+#   stop_tls_target                - kill it
+#   ja4_connect <client> <sni>     - single TLS connect from attacker VM
+#   ja4_summary_count              - GET /api/v1/fingerprints/summary → cached_count
+#   ja4_summary_persistent         - GET /api/v1/fingerprints/summary → persistent flag
+#   ja4s_summary_count             - GET /api/v1/fingerprints/ja4s → cached_count
+#   ja4_alert_hashes [filter]      - distinct ja4_fingerprint values across alerts
 #
 # Clients (subset, gated by availability):
 #   curl, openssl, urllib3, aiohttp, go, mhddos
@@ -110,7 +110,7 @@ start_tls_target() {
     local port="${1:-$JA4_TLS_PORT}"
 
     # Create the scratch dir as the same (non-root) user that writes the cert
-    # below — a root-owned dir (sudo mkdir) makes the user-run openssl req fail
+    # below - a root-owned dir (sudo mkdir) makes the user-run openssl req fail
     # with permission denied, leaving no cert and a server that never binds.
     _ja4_remote_exec_user mkdir -p "$JA4_REMOTE_DIR" >/dev/null 2>&1 || true
 
@@ -148,7 +148,7 @@ start_tls_target() {
     return 1
 }
 
-# stop_tls_target — best-effort kill of the s_server started above.
+# stop_tls_target - best-effort kill of the s_server started above.
 stop_tls_target() {
     _ja4_remote_exec bash -c "\
         if [ -s '${JA4_TLS_PID_FILE}' ]; then \
@@ -164,7 +164,7 @@ stop_tls_target() {
 # ── Per-client connect routines ───────────────────────────────────────
 #
 # Each routine emits exactly one TLS ClientHello to the target. We
-# never assert on the client's exit code — the agent observes packets
+# never assert on the client's exit code - the agent observes packets
 # regardless of whether the handshake completes cleanly.
 
 _ja4_connect_curl() {
@@ -308,7 +308,7 @@ _ja4_connect_mitmproxy() {
     # Run mitmdump as a reverse proxy in front of the agent TLS target.
     # curl drives a plain request into it; mitmproxy opens the *upstream*
     # TLS connection with its own stack, emitting a distinct ClientHello
-    # the agent observes. SNI on the upstream leg is the target host —
+    # the agent observes. SNI on the upstream leg is the target host -
     # the diversity test only needs a distinct fingerprint, not a match.
     local lport=8931
     "$bin" --mode "reverse:https://${JA4_TARGET_HOST}:${JA4_TLS_PORT}" \
@@ -343,7 +343,7 @@ ja4_connect() {
 
 # ── Observation helpers ───────────────────────────────────────────────
 
-# ja4_summary_count — return the agent's cached fingerprint count.
+# ja4_summary_count - return the agent's cached fingerprint count.
 ja4_summary_count() {
     local body
     body="$(api_get /api/v1/fingerprints/summary 2>/dev/null)" || return 1
@@ -352,7 +352,7 @@ ja4_summary_count() {
     echo "$body" | jq -r '.cached_count // 0'
 }
 
-# ja4_summary_persistent — return "true"/"false" for cache persistence.
+# ja4_summary_persistent - return "true"/"false" for cache persistence.
 ja4_summary_persistent() {
     local body
     body="$(api_get /api/v1/fingerprints/summary 2>/dev/null)" || return 1
@@ -361,7 +361,7 @@ ja4_summary_persistent() {
     echo "$body" | jq -r '.persistent // false'
 }
 
-# ja4s_summary_count — return the agent's cached JA4S server fingerprint count.
+# ja4s_summary_count - return the agent's cached JA4S server fingerprint count.
 ja4s_summary_count() {
     local body
     body="$(api_get /api/v1/fingerprints/ja4s 2>/dev/null)" || return 1

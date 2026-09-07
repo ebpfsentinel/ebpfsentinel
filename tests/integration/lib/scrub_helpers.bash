@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scrub_helpers.bash — Byte-level pcap assertions for tc-scrub.
+# scrub_helpers.bash - Byte-level pcap assertions for tc-scrub.
 #
 # Backend captures crafted client → backend packets after they transit
 # the agent's tc-scrub. The pcap is fetched locally; these helpers run
@@ -112,7 +112,7 @@ assert_ip_id_not() {
 # scapy_send_via <dst_ip> <ttl> <ip_id> <mss> <df> [count]
 #
 # Drive scapy on the attacker VM to emit count crafted TCP SYNs with the
-# given header values toward dst_ip:port (port hardcoded to 80 — the
+# given header values toward dst_ip:port (port hardcoded to 80 - the
 # backend's nginx listens). Bash-side wrapper for use in 3-VM suites.
 # Echoes the remote scapy exit code on stdout (0 = sent).
 scapy_send_via() {
@@ -125,7 +125,7 @@ scapy_send_via() {
     # Pass a non-empty sentinel ("none") for the DF-clear case. An empty-string
     # argv element is silently dropped when ssh re-joins the remote command with
     # spaces and the login shell re-splits it, which would shift `count` into the
-    # flags slot and crash the unpack below — so every positional must be
+    # flags slot and crash the unpack below - so every positional must be
     # non-empty over the wire. The python side maps "none" back to no flags.
     local flags="DF"
     [ "$df" = "0" ] && flags="none"

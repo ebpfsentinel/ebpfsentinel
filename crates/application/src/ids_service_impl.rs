@@ -427,7 +427,7 @@ impl IdsAppService {
     /// Full-reload sync: clear the eBPF map and re-insert all engine rules.
     ///
     /// In `Alert` mode, all actions are overridden to `IDS_ACTION_ALERT`
-    /// (observation only — no traffic dropped).
+    /// (observation only - no traffic dropped).
     ///
     /// The kernel maps are keyed by `(protocol, port)`, so two rules that
     /// watch the same port cannot both be installed: the later one wins.

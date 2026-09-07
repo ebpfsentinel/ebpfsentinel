@@ -65,7 +65,7 @@ pub unsafe fn ptr_at_mut<T>(ctx: &XdpContext, offset: usize) -> Result<*mut T, (
 /// Hop-by-hop (0), Routing (43), Fragment (44), AH (51),
 /// Destination (60), and Mobility (135).
 ///
-/// ESP (50) is a terminal header and is not consumed — when encountered it is
+/// ESP (50) is a terminal header and is not consumed - when encountered it is
 /// returned immediately as the upper-layer protocol.
 /// Parse IPv6 extension headers using raw pointer advancement.
 ///

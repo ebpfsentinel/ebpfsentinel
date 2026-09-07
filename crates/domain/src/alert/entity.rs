@@ -748,7 +748,7 @@ impl Alert {
     /// `{timestamp_ns}-{rule_id}` alone is not unique: the kernel stamps
     /// events from a clock the userspace does not control, so two distinct
     /// events matching the same rule can carry the same nanosecond. That
-    /// collision is not cosmetic — the alert store is keyed by id, so one of
+    /// collision is not cosmetic - the alert store is keyed by id, so one of
     /// the two alerts silently replaces the other, and the SSE resume
     /// contract locates a client's position by finding its id in the replay
     /// buffer. A process-lifetime counter makes the id unique regardless of

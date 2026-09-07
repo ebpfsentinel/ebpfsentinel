@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 29-ebpf-l7-scenarios.bats — L7 inspection eBPF scenario tests
+# 29-ebpf-l7-scenarios.bats - L7 inspection eBPF scenario tests
 # Requires: root, kernel >= 6.9, bpftool, ncat
 
 load '../lib/helpers'
@@ -63,7 +63,7 @@ teardown_file() {
     local listener_pid=$!
     sleep 0.5
 
-    # Send HTTP GET /admin from namespace to host — the L7 rule should generate an alert
+    # Send HTTP GET /admin from namespace to host - the L7 rule should generate an alert
     send_tcp_from_ns "$EBPF_HOST_IP" 8888 "GET /admin HTTP/1.1\r\nHost: testhost\r\n\r\n" 3
 
     sleep 3
@@ -97,7 +97,7 @@ teardown_file() {
     local listener_pid=$!
     sleep 0.5
 
-    # Send HTTP GET /api/health from namespace — the allow rule should not generate a new alert
+    # Send HTTP GET /api/health from namespace - the allow rule should not generate a new alert
     send_tcp_from_ns "$EBPF_HOST_IP" 8888 "GET /api/health HTTP/1.1\r\nHost: testhost\r\n\r\n" 3
 
     sleep 2
@@ -142,12 +142,12 @@ teardown_file() {
 
     [ "$HTTP_STATUS" = "200" ]
     # Alerts endpoint accessible; SNI alert may or may not appear depending on
-    # whether TLS inspection reached the SNI bytes — the API must respond 200.
+    # whether TLS inspection reached the SNI bytes - the API must respond 200.
 }
 
 # ── Rule CRUD ────────────────────────────────────────────────────
 
-@test "L7 rule CRUD — create HTTP rule" {
+@test "L7 rule CRUD - create HTTP rule" {
     require_root
 
     local create_body
@@ -166,7 +166,7 @@ teardown_file() {
     export L7_CRUD_RULE_ID="$rule_id"
 }
 
-@test "L7 rule CRUD — delete HTTP rule" {
+@test "L7 rule CRUD - delete HTTP rule" {
     require_root
 
     # Re-create if the previous test's export did not carry over
@@ -242,7 +242,7 @@ teardown_file() {
 
     [ "$HTTP_STATUS" = "200" ]
 
-    # Config has HTTP and TLS rules — verify at least 2 are present (from fixture)
+    # Config has HTTP and TLS rules - verify at least 2 are present (from fixture)
     local count
     count="$(echo "$body" | jq 'if type == "array" then length else .rules | length end' 2>/dev/null)" || true
     [ "${count:-0}" -ge 2 ]
@@ -424,7 +424,7 @@ teardown_file() {
 
     sleep 1
 
-    # Send HTTP GET /wp-admin from namespace — should generate an alert
+    # Send HTTP GET /wp-admin from namespace - should generate an alert
     send_tcp_from_ns "$EBPF_HOST_IP" 8889 "GET /wp-admin HTTP/1.1\r\nHost: testhost\r\n\r\n" 3
 
     sleep 3

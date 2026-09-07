@@ -23,17 +23,17 @@ pub struct SamplingConfig {
     #[serde(default = "default_sampling_mode")]
     pub mode: String,
 
-    /// Sampling rate (0.0–1.0). Required for "random" and "hash" modes.
+    /// Sampling rate (0.0-1.0). Required for "random" and "hash" modes.
     pub rate: Option<f64>,
 
     /// High-risk countries for `country_based` mode (ISO 3166-1 alpha-2).
     #[serde(default)]
     pub high_risk_countries: Option<Vec<String>>,
 
-    /// Sampling rate for high-risk countries (0.0–1.0). Default 1.0.
+    /// Sampling rate for high-risk countries (0.0-1.0). Default 1.0.
     pub high_risk_rate: Option<f64>,
 
-    /// Default sampling rate for non-high-risk traffic (0.0–1.0). Default 0.1.
+    /// Default sampling rate for non-high-risk traffic (0.0-1.0). Default 0.1.
     pub default_rate: Option<f64>,
 }
 
@@ -271,7 +271,7 @@ pub struct IdsRuleConfig {
 
     pub dst_port: Option<u16>,
 
-    /// Optional source-port match — fires on a reply leg (source port equal
+    /// Optional source-port match - fires on a reply leg (source port equal
     /// to this value). Used for ingress detection of server responses.
     #[serde(default)]
     pub src_port: Option<u16>,

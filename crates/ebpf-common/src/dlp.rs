@@ -3,7 +3,7 @@
 /// Maximum bytes of plaintext captured per SSL_write/SSL_read call.
 pub const DLP_MAX_EXCERPT: usize = 4096;
 
-/// Small DLP excerpt tier (256 bytes) — covers most HTTP request/response
+/// Small DLP excerpt tier (256 bytes) - covers most HTTP request/response
 /// headers, JSON API payloads, and PCI/PII pattern matches. Used when
 /// `data_len ≤ 256`, saving ~94% RingBuf space vs full 4K buffer.
 pub const DLP_SMALL_EXCERPT: usize = 256;

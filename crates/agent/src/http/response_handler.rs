@@ -60,7 +60,7 @@ pub struct ResponseListResponse {
 
 // ── Handlers ─────────────────────────────────────────────────────────
 
-/// `POST /api/v1/responses/manual` — create a time-bounded response action.
+/// `POST /api/v1/responses/manual` - create a time-bounded response action.
 #[utoipa::path(
     post, path = "/api/v1/responses/manual",
     tag = "Responses",
@@ -191,7 +191,7 @@ pub async fn create_response_action(
     Ok(Json(resp))
 }
 
-/// `GET /api/v1/responses` — list active response actions.
+/// `GET /api/v1/responses` - list active response actions.
 #[utoipa::path(
     get, path = "/api/v1/responses",
     tag = "Responses",
@@ -234,7 +234,7 @@ pub async fn list_response_actions(
     }))
 }
 
-/// `DELETE /api/v1/responses/{id}` — revoke a response action early.
+/// `DELETE /api/v1/responses/{id}` - revoke a response action early.
 #[utoipa::path(
     delete, path = "/api/v1/responses/{id}",
     tag = "Responses",

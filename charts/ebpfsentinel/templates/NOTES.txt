@@ -35,24 +35,24 @@ Prometheus metrics:
   http://{{ include "ebpfsentinel.fullname" . }}.{{ .Release.Namespace }}:{{ .Values.agent.metricsPort }}/metrics
 {{- if .Values.metrics.serviceMonitor.enabled }}
 
-  ServiceMonitor created — Prometheus will auto-discover metrics.
+  ServiceMonitor created - Prometheus will auto-discover metrics.
 {{- end }}
 {{- if .Values.daemonset.hostPID }}
 
-  hostPID is ENABLED — DLP has full visibility into all node processes.
+  hostPID is ENABLED - DLP has full visibility into all node processes.
 {{- else }}
 
-  hostPID is DISABLED — DLP only sees agent pod processes.
+  hostPID is DISABLED - DLP only sees agent pod processes.
   Enable with: --set daemonset.hostPID=true
 {{- end }}
 {{- if .Values.auto_response.enabled }}
 
-Auto-response is ENABLED — the agent will automatically block/throttle
+Auto-response is ENABLED - the agent will automatically block/throttle
 source IPs matching severity-based policies.
 {{- end }}
 {{- if .Values.auto_capture.enabled }}
 
-Auto-capture is ENABLED — the agent will start PCAP captures
+Auto-capture is ENABLED - the agent will start PCAP captures
 when high-severity alerts fire.
 {{- end }}
 
@@ -62,13 +62,13 @@ Security context:
   ({{ .Values.daemonset.warden.securityContext.capabilities.add | join ", " }}); it delegates a bpffs at
   {{ .Values.daemonset.bpfToken.bpffsPath }}. The agent (uid {{ .Values.daemonset.securityContext.runAsUser }}, all caps dropped)
   self-unshares a user namespace, has the warden delegate the bpffs, then loads
-  its own eBPF through the token — holding no host capabilities.
+  its own eBPF through the token - holding no host capabilities.
   Verify: kubectl -n {{ .Release.Namespace }} exec ds/{{ include "ebpfsentinel.fullname" . }} -c agent -- \
     sh -c 'curl -s localhost:{{ .Values.agent.metricsPort }}/metrics | grep bpf_token_used'
 
 Secrets management (TLS certs, JWT keys, API keys):
 
-  Option A — Kubernetes Secrets (mount via extraVolumes/extraVolumeMounts):
+  Option A - Kubernetes Secrets (mount via extraVolumes/extraVolumeMounts):
 
     kubectl create secret tls ebpfsentinel-tls --cert=cert.pem --key=key.pem
     helm upgrade {{ .Release.Name }} ... \
@@ -78,7 +78,7 @@ Secrets management (TLS certs, JWT keys, API keys):
       --set 'daemonset.extraVolumeMounts[0].mountPath=/etc/ebpfsentinel/tls' \
       --set 'daemonset.extraVolumeMounts[0].readOnly=true'
 
-  Option B — External Secrets Operator:
+  Option B - External Secrets Operator:
 
     apiVersion: external-secrets.io/v1beta1
     kind: ExternalSecret
@@ -96,7 +96,7 @@ Secrets management (TLS certs, JWT keys, API keys):
         - secretKey: tls.key
           remoteRef: { key: ebpfsentinel/tls-key }
 
-  Option C — Sealed Secrets (GitOps):
+  Option C - Sealed Secrets (GitOps):
 
     kubeseal --format yaml < secret.yaml > sealed-secret.yaml
-    # Commit sealed-secret.yaml to Git — decrypted at deploy time by the controller.
+    # Commit sealed-secret.yaml to Git - decrypted at deploy time by the controller.

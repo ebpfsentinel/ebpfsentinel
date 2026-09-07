@@ -1,4 +1,4 @@
-# config-ebpf-multiwan.yaml — Multi-WAN failover scenario fixture.
+# config-ebpf-multiwan.yaml - Multi-WAN failover scenario fixture.
 #
 # Defines two gateways (primary, secondary) with active health checks.
 # Both probe targets are unreachable so the routing service tracks them

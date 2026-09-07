@@ -116,7 +116,7 @@ fuzz_target!(|data: &[u8]| {
                     assert!(entry.confidence <= 100);
                 }
             }
-            // Apply with None country — must be no-op
+            // Apply with None country - must be no-op
             for ioc in &iocs {
                 let mut entry = ioc.clone();
                 let original = entry.confidence;

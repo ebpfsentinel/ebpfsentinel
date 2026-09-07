@@ -1,18 +1,18 @@
 #!/usr/bin/env bats
-# 43-xdp-ratelimit-syncookie.bats — wire-validates the
+# 43-xdp-ratelimit-syncookie.bats - wire-validates the
 # xdp-ratelimit-syncookie tail-call program. Under a SYN flood:
 #   - legitimate (state-keeping) sockets complete the 3-way handshake
 #     via the returned cookie;
-#   - spoofed-source attackers cannot complete the handshake — kernel
+#   - spoofed-source attackers cannot complete the handshake - kernel
 #     TcpExtSyncookiesRecv does NOT track ACKs from unreachable sources.
 #
 # Topology: 2vm. Profile: nightly. Requires:
-#   - Attacker VM with hping3, scapy, nstat, ncat (Story 34.3)
-#   - Agent VM reachable via 2VM SSH helpers (Story 34.2)
+#   - Attacker VM with hping3, scapy, nstat, ncat
+#   - Agent VM reachable via 2VM SSH helpers
 #   - Kernel >= 6.9 (bpf_tcp_raw_check_syncookie)
 #
 # Asserts (per AC):
-#   1. Under flood, agent generates SYN cookies — both
+#   1. Under flood, agent generates SYN cookies - both
 #      `TcpExtSyncookiesSent` AND `ebpfsentinel_packets_total{action="syncookie_sent"}`
 #      grow.
 #   2. A real ncat TCP connect on the same port still completes
@@ -139,12 +139,12 @@ _metric_or_zero() {
     recv_after="$(nstat_read TcpExtSyncookiesRecv)"
     recv_delta="$(echo "$recv_after - $recv_before" | bc -l)"
 
-    # Spoofed traffic comes from unroutable hosts (198.18.0.0/15) — no
+    # Spoofed traffic comes from unroutable hosts (198.18.0.0/15) - no
     # cookie ACK can come back, so the kernel-side validated-cookie
     # counter must stay flat. Allow tiny jitter (≤5) for unrelated
     # background traffic in shared CI environments.
     if [ "$(echo "$recv_delta > 5" | bc -l)" = "1" ]; then
-        echo "spoofed flood caused TcpExtSyncookiesRecv Δ=${recv_delta} — handshake should not complete from unreachable srcs" >&2
+        echo "spoofed flood caused TcpExtSyncookiesRecv Δ=${recv_delta} - handshake should not complete from unreachable srcs" >&2
         return 1
     fi
 }
@@ -167,7 +167,7 @@ _metric_or_zero() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite - MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

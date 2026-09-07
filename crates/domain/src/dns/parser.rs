@@ -803,7 +803,7 @@ mod tests {
         use proptest::prelude::*;
 
         proptest! {
-            /// Arbitrary bytes must never panic — only Ok or Err.
+            /// Arbitrary bytes must never panic - only Ok or Err.
             #[test]
             fn dns_parser_never_panics(data in proptest::collection::vec(any::<u8>(), 0..2048)) {
                 let _ = parse_dns_packet(

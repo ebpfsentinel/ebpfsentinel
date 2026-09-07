@@ -221,7 +221,7 @@ impl LbAppService {
                         );
                     }
                 }
-                // No healthy backend — drop any stale ring.
+                // No healthy backend - drop any stale ring.
                 None => {
                     if let Err(e) = port.remove_maglev_table(svc_index) {
                         tracing::warn!(

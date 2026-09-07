@@ -1,11 +1,11 @@
 #!/usr/bin/env bats
-# 38-mhddos-l7-attacks.bats — Exercise MHDDoS L7 multi-method floods
+# 38-mhddos-l7-attacks.bats - Exercise MHDDoS L7 multi-method floods
 # against a single agent instance with L7 firewall, IPS auto-blacklist,
 # and global rate limiter all enabled.
 #
 # Topology: 2vm. Profile: nightly. Requires:
-#   - Attacker VM provisioned per Story 34.3 (MHDDoS at /opt/MHDDoS)
-#   - Agent VM reachable via 2VM SSH helpers (Story 34.2)
+#   - Attacker VM provisioned (MHDDoS at /opt/MHDDoS)
+#   - Agent VM reachable via 2VM SSH helpers
 #   - Kernel >= 6.9, bpftool on agent side
 #
 # Each per-method test:
@@ -87,7 +87,7 @@ teardown() {
 # _run_attack_and_assert <method> <metric> <label> [path]
 # Single helper that captures the shared assertion shape across all eight
 # methods. The agent exposes per-subsystem drop/detect counts via the labeled
-# packets_total family (and dedicated counters), not flat per-feature totals —
+# packets_total family (and dedicated counters), not flat per-feature totals -
 # so each method asserts the labeled metric its flood actually moves.
 _run_attack_and_assert() {
     local method="$1"
@@ -162,10 +162,10 @@ _RL_LABEL='{interface="ratelimit",action="drop"}'
 # HTTP requests (path traversal / SQLi markers) at the agent, which the
 # tc-ids / L7 datapath observes. We assert on the broad observed-packet
 # counter rather than a specific signature so the test is robust to the
-# fixture's exact rule set — the point is that a real scanner's traffic
+# fixture's exact rule set - the point is that a real scanner's traffic
 # reaches the datapath.
 
-# _l7_packet_metric — sum every observed-packet counter the agent exposes.
+# _l7_packet_metric - sum every observed-packet counter the agent exposes.
 _l7_packet_metric() {
     local metrics
     metrics="$(curl -sf --max-time 5 \
@@ -183,7 +183,7 @@ _l7_packet_metric() {
         env_skip "nuclei not available on attacker VM"
     fi
 
-    # Self-contained template — no nuclei-templates DB download required,
+    # Self-contained template - no nuclei-templates DB download required,
     # so the scan runs offline in the test VM.
     local tmpl="${DATA_DIR}/ebpfsentinel-probe.yaml"
     cat > "${tmpl}" <<'YAML'
@@ -233,7 +233,7 @@ YAML
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite - MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

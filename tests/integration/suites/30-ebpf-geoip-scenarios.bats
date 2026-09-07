@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 30-ebpf-geoip-scenarios.bats — GeoIP enrichment eBPF scenario tests
+# 30-ebpf-geoip-scenarios.bats - GeoIP enrichment eBPF scenario tests
 # Requires: root, kernel >= 6.9, bpftool
 # Note: most tests skip gracefully when no GeoLite2 mmdb files are present.
 
@@ -107,7 +107,7 @@ teardown_file() {
     require_root
     _require_geoip_mmdb
 
-    # Trigger traffic to generate an alert — send packets from the namespace to the host.
+    # Trigger traffic to generate an alert - send packets from the namespace to the host.
     # The firewall has a country-deny rule that triggers an alert action on matching traffic.
     send_tcp_from_ns "$EBPF_HOST_IP" 9999 "GEOIP_TRIGGER" 3
     sleep 3
@@ -124,7 +124,7 @@ teardown_file() {
     count="$(echo "$alerts" | jq 'length' 2>/dev/null)" || count=0
 
     if [ "${count:-0}" -eq 0 ]; then
-        soft_skip "no alerts generated — traffic may not have matched a country-deny rule"
+        soft_skip "no alerts generated - traffic may not have matched a country-deny rule"
     fi
 
     # At least one alert should carry GeoIP enrichment fields when mmdb is loaded
@@ -179,7 +179,7 @@ teardown_file() {
     [ -n "$map_id" ]
 
     # An empty trie means the codes resolved to nothing and the tier limits no
-    # traffic at all — the failure this assertion exists to catch.
+    # traffic at all - the failure this assertion exists to catch.
     local entries
     entries="$(bpftool -j map dump id "$map_id" 2>/dev/null | jq 'length' 2>/dev/null)" || entries=0
     [ "${entries:-0}" -ge 1 ]
@@ -226,7 +226,7 @@ teardown_file() {
     before_body="$(api_get /api/v1/alerts)" || true
     before_count="$(echo "$before_body" | jq '(.alerts // .) | length' 2>/dev/null)" || before_count=0
 
-    # Send traffic from the namespace — firewall has a country-deny rule
+    # Send traffic from the namespace - firewall has a country-deny rule
     send_tcp_from_ns "$EBPF_HOST_IP" 9999 "GEOIP_COUNTRY_DENY_TEST" 3
     send_udp_from_ns "$EBPF_HOST_IP" 9999 "GEOIP_UDP_TEST" 3
 
@@ -244,7 +244,7 @@ teardown_file() {
     count="$(echo "$alerts" | jq 'length' 2>/dev/null)" || count=0
 
     if [ "${count:-0}" -eq 0 ]; then
-        soft_skip "no alerts generated — traffic may not have matched a country-deny rule"
+        soft_skip "no alerts generated - traffic may not have matched a country-deny rule"
     fi
 
     # At least one new alert should exist
@@ -272,7 +272,7 @@ teardown_file() {
     count="$(echo "$alerts" | jq 'length' 2>/dev/null)" || count=0
 
     if [ "${count:-0}" -eq 0 ]; then
-        soft_skip "no alerts generated — cannot verify GeoIP enrichment"
+        soft_skip "no alerts generated - cannot verify GeoIP enrichment"
     fi
 
     # Check that at least one alert has a country_code or src_country field
@@ -295,7 +295,7 @@ teardown_file() {
 
     [ "$HTTP_STATUS" = "200" ]
 
-    # Fixture may have L7 rules with country_codes configured — verify endpoint is accessible
+    # Fixture may have L7 rules with country_codes configured - verify endpoint is accessible
     local count
     count="$(echo "$body" | jq 'if type == "array" then length else .rules | length end' 2>/dev/null)" || true
 
@@ -308,7 +308,7 @@ teardown_file() {
         jq '[if type == "array" then .[] else .rules[] end | select(.country_codes != null and (.country_codes | length) > 0)] | length' \
         2>/dev/null)" || country_l7=0
 
-    # This is a cross-domain integration check — country_l7 may be 0 if not configured
+    # This is a cross-domain integration check - country_l7 may be 0 if not configured
     [ "${country_l7:-0}" -ge 0 ]
 }
 
@@ -371,7 +371,7 @@ teardown_file() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite - MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

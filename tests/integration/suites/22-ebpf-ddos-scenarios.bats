@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 22-ebpf-ddos-scenarios.bats — DDoS/scrub eBPF scenario tests
+# 22-ebpf-ddos-scenarios.bats - DDoS/scrub eBPF scenario tests
 # Requires: root, kernel >= 6.9, bpftool, ncat
 
 load '../lib/helpers'
@@ -243,7 +243,7 @@ DDOS_CONN_TRACKED_LABELS='{interface="DDOS_METRICS",action="conn_tracked"}'
 
 # ── Policy CRUD ───────────────────────────────────────────────────
 
-@test "DDoS policy CRUD — create" {
+@test "DDoS policy CRUD - create" {
     require_root
 
     local policy='{"id":"test-policy","attack_type":"syn_flood","detection_threshold_pps":100,"mitigation_action":"block"}'
@@ -257,7 +257,7 @@ DDOS_CONN_TRACKED_LABELS='{interface="DDOS_METRICS",action="conn_tracked"}'
     [ "$id" = "test-policy" ]
 }
 
-@test "DDoS policy CRUD — delete" {
+@test "DDoS policy CRUD - delete" {
     require_root
 
     api_delete /api/v1/ddos/policies/test-policy >/dev/null
@@ -360,11 +360,11 @@ DDOS_CONN_TRACKED_LABELS='{interface="DDOS_METRICS",action="conn_tracked"}'
 # XDP ratelimit/scrub datapath with real flood generators and assert the
 # observed-packet counter actually *grows*, which is a stronger claim.
 
-# _ddos_packet_metric — sum the agent's observed-packet counters
+# _ddos_packet_metric - sum the agent's observed-packet counters
 # (ebpfsentinel_packets_total across every interface/action) so a before/after
 # delta proves the flood really crossed the datapath. This family is a
 # monotonic per-packet counter, unlike the ddos_* gauges which can fall as
-# attacks age out — mixing those in makes the delta non-monotonic and flaky.
+# attacks age out - mixing those in makes the delta non-monotonic and flaky.
 _ddos_packet_metric() {
     local metrics
     metrics="$(curl -sf --max-time 5 \
@@ -377,7 +377,7 @@ _ddos_packet_metric() {
                END { if (sum == "") print 0; else print sum }'
 }
 
-# _wait_metric_grows <before> [tries] — poll the packet metric until it
+# _wait_metric_grows <before> [tries] - poll the packet metric until it
 # exceeds <before>, echoing the observed value. The userspace metric is
 # refreshed from the eBPF maps on a heartbeat, not synchronously with each
 # packet, so a flood's packets can take a good few seconds to surface; poll

@@ -54,7 +54,7 @@ pub const SLIDING_WINDOW_NUM_SLOTS: usize = 8;
 /// Tenant-scoped: the key is `(tenant_id, src_ip)`. `tenant_id == 0` is the
 /// global/floating tenant and preserves the standalone OSS behaviour (a
 /// standalone agent only ever resolves tenant 0). Lookup falls back to the
-/// global tenant when no tenant-specific entry exists — see the kernel
+/// global tenant when no tenant-specific entry exists - see the kernel
 /// `lookup_config` for the `(tenant, src_ip) → (tenant, 0) → (0, src_ip) →
 /// (0, 0)` fallback chain. Key `{ tenant_id: 0, src_ip: 0 }` is the global
 /// default config.
@@ -177,7 +177,7 @@ pub struct RateLimitBucketUnion {
     /// Algorithm discriminant: `ALGO_TOKEN_BUCKET`, `ALGO_FIXED_WINDOW`, etc.
     pub algorithm: u8,
     pub _pad: [u8; 7],
-    /// Raw data region — reinterpreted as the correct value type.
+    /// Raw data region - reinterpreted as the correct value type.
     /// Use [`Self::as_token_bucket`], [`Self::as_fixed_window`], etc.
     pub data: [u64; 7],
 }

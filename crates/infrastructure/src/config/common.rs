@@ -29,9 +29,9 @@ pub(super) const MAX_THREATINTEL_FEEDS: usize = 100;
 pub(super) const MAX_RATELIMIT_RULES: usize = 10_000;
 /// Maximum alerting routes.
 pub(super) const MAX_ALERTING_ROUTES: usize = 100;
-/// Maximum compiled regex size (10 MiB) — matches domain engine limit.
+/// Maximum compiled regex size (10 MiB) - matches domain engine limit.
 pub(super) const REGEX_SIZE_LIMIT: usize = 10 * (1 << 20);
-/// Maximum regex nesting depth — matches domain engine limit.
+/// Maximum regex nesting depth - matches domain engine limit.
 pub(super) const REGEX_NEST_LIMIT: u32 = 200;
 
 // ── Config errors ──────────────────────────────────────────────────
@@ -177,7 +177,7 @@ pub(super) fn reject_if_world_readable(path: &Path, label: &str) -> Result<(), C
             return Err(ConfigError::Validation {
                 field: label.to_string(),
                 message: format!(
-                    "{} is world-readable (mode {mode:04o}) — chmod 640 or stricter",
+                    "{} is world-readable (mode {mode:04o}) - chmod 640 or stricter",
                     path.display()
                 ),
             });
@@ -210,7 +210,7 @@ pub(super) fn validate_key_path(path: &str, field: &str) -> Result<(), ConfigErr
     use std::path::{Component, Path};
 
     // Reject any `..` component first: a textual `starts_with` check alone is
-    // bypassable by traversal — `/etc/ebpfsentinel/../../root/.ssh/id_rsa`
+    // bypassable by traversal - `/etc/ebpfsentinel/../../root/.ssh/id_rsa`
     // starts with an allowed prefix yet resolves outside it.
     if Path::new(path)
         .components()
@@ -232,7 +232,7 @@ pub(super) fn validate_key_path(path: &str, field: &str) -> Result<(), ConfigErr
     Err(ConfigError::Validation {
         field: field.to_string(),
         message: format!(
-            "path '{path}' is not under an allowed directory — \
+            "path '{path}' is not under an allowed directory - \
              accepted prefixes: /etc/ebpfsentinel/, /etc/ssl/, /etc/tls/, \
              /etc/pki/, /var/lib/ebpfsentinel/, /run/secrets/, /tmp/"
         ),
@@ -530,7 +530,7 @@ mod tests {
         use proptest::prelude::*;
 
         proptest! {
-            /// Arbitrary strings must never panic — only Ok or Err.
+            /// Arbitrary strings must never panic - only Ok or Err.
             #[test]
             fn cidr_parser_never_panics(s in ".*") {
                 let _ = parse_cidr(&s);

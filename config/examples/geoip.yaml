@@ -1,8 +1,8 @@
 # eBPFsentinel GeoIP Configuration Example
 #
 # GeoIP provides two capabilities:
-#   1. Alert enrichment — adds geographic location and ASN info to alerts
-#   2. Country blocking — blocks traffic from/to entire countries via
+#   1. Alert enrichment - adds geographic location and ASN info to alerts
+#   2. Country blocking - blocks traffic from/to entire countries via
 #      kernel-side LPM Trie maps for O(log n) CIDR matching
 #
 # Requires MaxMind GeoLite2 or GeoIP2 databases in .mmdb format.
@@ -52,7 +52,7 @@ geoip:
 # ISO 3166-1 alpha-2 country codes from the MaxMind City database and
 # loads them into kernel-side LPM Trie maps (FW_LPM_SRC_V4/V6).
 #
-# This provides O(log n) per-packet matching in XDP — no userspace
+# This provides O(log n) per-packet matching in XDP - no userspace
 # involvement after the initial load.
 
 firewall:
@@ -74,7 +74,7 @@ firewall:
     #   country_codes: [IR, SY, CU]
 
   rules:
-    # GeoIP blocking is applied automatically via LPM Trie maps —
+    # GeoIP blocking is applied automatically via LPM Trie maps -
     # no explicit rule is needed for country-based blocking.
     # The aliases above are loaded at startup and refreshed periodically.
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# setup-backend.sh — Provisioner for the backend VM (192.168.57.30)
+# setup-backend.sh - Provisioner for the backend VM (192.168.57.30)
 #
 # In 3-VM transit mode the backend hosts the real services that traffic
 # from the client traverses through the agent to reach. We install:
 #   - iperf3 server (port 5201)
-#   - nginx HTTP server (ports 80, 443) — used for L4 LB / L7 inspection
-#   - sshd (port 22)                   — used for SSH brute-force tests
-#   - openssl s_server (port 8443)     — minimal TLS endpoint
+#   - nginx HTTP server (ports 80, 443) - used for L4 LB / L7 inspection
+#   - sshd (port 22)                   - used for SSH brute-force tests
+#   - openssl s_server (port 8443)     - minimal TLS endpoint
 #
 # Plus a small helper script that dumps the backend's MAC + ARP table so
 # the agent (and tests) can populate L2-DSR maps without guessing.
@@ -29,7 +29,7 @@ wait_for_apt_lock() {
     while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock \
             /var/lib/dpkg/lock >/dev/null 2>&1; do
         if [ "${waited}" -ge 300 ]; then
-            echo "dpkg lock still held after ${waited}s — proceeding anyway" >&2
+            echo "dpkg lock still held after ${waited}s - proceeding anyway" >&2
             break
         fi
         echo "  apt/dpkg lock held; waiting (${waited}s)…"
@@ -122,7 +122,7 @@ if ! id -u testuser >/dev/null 2>&1; then
 fi
 sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
 # On Ubuntu 24.04 the unit is `ssh` (socket-activated); reload fails when it
-# is not active, and `sshd` does not exist — restart as a fallback and never
+# is not active, and `sshd` does not exist - restart as a fallback and never
 # let this abort provisioning.
 sudo systemctl reload ssh 2>/dev/null || sudo systemctl restart ssh 2>/dev/null || true
 
@@ -150,7 +150,7 @@ sudo systemctl enable --now s-server-backend.service
 # ── [4c/5] openssl s_server systemd unit on :853 (DoT endpoint) ──────
 # Minimal TLS listener used by the DoH/DoT detection suite. The cert
 # is the same self-signed one nginx ships with; the listener does not
-# implement DNS-over-TLS — the agent only inspects the ClientHello.
+# implement DNS-over-TLS - the agent only inspects the ClientHello.
 echo "=== [4c/5] Configuring DoT-style listener on :853 ==="
 sudo tee /etc/systemd/system/dot-backend.service >/dev/null <<'UNIT'
 [Unit]

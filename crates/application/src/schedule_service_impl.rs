@@ -26,9 +26,9 @@ pub struct Schedule {
 #[derive(Debug, Clone)]
 pub struct ScheduleEntry {
     pub days: Vec<DayOfWeek>,
-    /// Start time as minutes since midnight (0–1439).
+    /// Start time as minutes since midnight (0-1439).
     pub start_minutes: u16,
-    /// End time as minutes since midnight (0–1439).
+    /// End time as minutes since midnight (0-1439).
     pub end_minutes: u16,
 }
 

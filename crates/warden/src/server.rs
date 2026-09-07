@@ -3,7 +3,7 @@
 //! The `warden` binary is a pure privilege broker: it loads no eBPF and holds no
 //! maps (the rootless agent loads its own programs against the bpffs the warden
 //! delegates). This loop answers only the privileged operations the agent cannot
-//! perform from its user namespace — bpffs delegation + module-BTF/pcap fd hand-off
+//! perform from its user namespace - bpffs delegation + module-BTF/pcap fd hand-off
 //! (`Delegate`), an on-demand pcap capture socket (`PcapOpen`), the conntrack-table
 //! read, conntrack teardown, route programming, and gratuitous ARP.
 
@@ -19,7 +19,7 @@ use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame,
 use crate::host_ops::HostOps;
 use crate::{delegate_over_fd, dlp_scan, net_ops, recv_fd, send_msg_fds, uprobe_ops};
 
-/// A handler for [`Command::Extension`] requests — the hook a downstream warden
+/// A handler for [`Command::Extension`] requests - the hook a downstream warden
 /// build (e.g. the enterprise warden) installs to add privileged operations the
 /// OSS warden does not know about, without forking this server loop or leaking its
 /// concepts into the shared protocol.
@@ -42,7 +42,7 @@ pub trait ExtHandler: Send + Sync {
 /// long-lived `ReconnectingClient` connections open and idle between calls; a
 /// single-threaded accept loop would block on one such idle connection's blocking
 /// read and never serve any other (a `DlpScan` after a held conntrack/ARP client
-/// would deadlock). Thread-per-connection keeps every channel independent — the
+/// would deadlock). Thread-per-connection keeps every channel independent - the
 /// op rate is low and the connection count small.
 pub fn serve_loop(
     listener: &UnixListener,
@@ -270,7 +270,7 @@ fn serve_delegate(writer: &mut UnixStream, btf: &[(String, RawFd)], pcap: &[RawF
     if write_frame(writer, &resp).is_err() {
         return false;
     }
-    // BTF fds first (in `btf_names` order), then the pcap fds — the order the
+    // BTF fds first (in `btf_names` order), then the pcap fds - the order the
     // agent reconstructs from `Delegated`.
     let mut fds: Vec<RawFd> = btf.iter().map(|(_, fd)| *fd).collect();
     fds.extend_from_slice(pcap);
@@ -280,8 +280,8 @@ fn serve_delegate(writer: &mut UnixStream, btf: &[(String, RawFd)], pcap: &[RawF
 /// Serve an `AttachUprobe`: receive the agent's program fd (sent in an
 /// `SCM_RIGHTS` cmsg right after the command frame), create the `uprobe_multi`
 /// link, then reply `FdReady` + the link fd. The warden closes its own copy of
-/// both the program fd and the link fd — the link fd is dup'd into the agent by
-/// `SCM_RIGHTS` and the link keeps the program alive — so neither leaks.
+/// both the program fd and the link fd - the link fd is dup'd into the agent by
+/// `SCM_RIGHTS` and the link keeps the program alive - so neither leaks.
 fn serve_attach_uprobe(writer: &mut UnixStream, path: &str, offset: u64, is_ret: bool) -> bool {
     let prog_fd = recv_fd(writer.as_raw_fd());
     if prog_fd < 0 {
@@ -350,8 +350,8 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::thread::JoinHandle;
 
-    /// No host-network op is exercised by the extension tests — only the `Hello`
-    /// handshake and `Extension` commands are sent — so every method is a stub.
+    /// No host-network op is exercised by the extension tests - only the `Hello`
+    /// handshake and `Extension` commands are sent - so every method is a stub.
     struct NullHost;
     impl HostOps for NullHost {
         fn conntrack_dump(&self) -> Result<Vec<u8>, String> {

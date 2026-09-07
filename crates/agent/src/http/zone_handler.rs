@@ -120,7 +120,7 @@ pub struct CreateZonePolicyRequest {
 
 // ── Handlers ──────────────────────────────────────────────────────
 
-/// `GET /api/v1/zones/status` — zone service status.
+/// `GET /api/v1/zones/status` - zone service status.
 #[utoipa::path(
     get, path = "/api/v1/zones/status",
     tag = "Zones",
@@ -148,7 +148,7 @@ pub async fn zone_status(
     }))
 }
 
-/// `GET /api/v1/zones` — list security zones.
+/// `GET /api/v1/zones` - list security zones.
 #[utoipa::path(
     get, path = "/api/v1/zones",
     tag = "Zones",
@@ -181,7 +181,7 @@ pub async fn list_zones(
     Ok(Json(zones))
 }
 
-/// `GET /api/v1/zones/policies` — list inter-zone policies.
+/// `GET /api/v1/zones/policies` - list inter-zone policies.
 #[utoipa::path(
     get, path = "/api/v1/zones/policies",
     tag = "Zones",
@@ -210,7 +210,7 @@ pub async fn list_zone_policies(
     Ok(Json(policies))
 }
 
-/// `POST /api/v1/zones` — create a security zone.
+/// `POST /api/v1/zones` - create a security zone.
 #[utoipa::path(
     post, path = "/api/v1/zones",
     tag = "Zones",
@@ -259,7 +259,7 @@ pub async fn create_zone(
     ))
 }
 
-/// `DELETE /api/v1/zones/{id}` — remove a security zone.
+/// `DELETE /api/v1/zones/{id}` - remove a security zone.
 #[utoipa::path(
     delete, path = "/api/v1/zones/{id}",
     tag = "Zones",
@@ -291,7 +291,7 @@ pub async fn delete_zone(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-/// `POST /api/v1/zones/policies` — create an inter-zone policy.
+/// `POST /api/v1/zones/policies` - create an inter-zone policy.
 #[utoipa::path(
     post, path = "/api/v1/zones/policies",
     tag = "Zones",
@@ -332,7 +332,7 @@ pub async fn create_zone_policy(
     ))
 }
 
-/// `DELETE /api/v1/zones/policies/{id}` — remove an inter-zone policy.
+/// `DELETE /api/v1/zones/policies/{id}` - remove an inter-zone policy.
 #[utoipa::path(
     delete, path = "/api/v1/zones/policies/{id}",
     tag = "Zones",

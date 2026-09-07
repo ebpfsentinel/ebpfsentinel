@@ -36,7 +36,7 @@ PATCH="${SCRIPT_DIR}/patch-all.yaml"
 # Resolve the invoking user even under sudo (sudoers here forbids `-E`, so HOME
 # is reset to /root and PATH is sanitized). Point HOME/PATH at the real user so
 # talosctl (in ~/.local/bin) is found and talosconfig/kubeconfig land in the
-# user's home — then chown state back at the end of `up`.
+# user's home - then chown state back at the end of `up`.
 REAL_USER="${SUDO_USER:-$(id -un)}"
 REAL_HOME="$(getent passwd "${REAL_USER}" | cut -d: -f6)"
 [ -n "${REAL_HOME}" ] || REAL_HOME="${HOME}"
@@ -50,10 +50,10 @@ die() { printf '\033[1;31m[talos-e2e] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 prep() {
   command -v docker >/dev/null || die "docker not found"
 
-  # Rebuild by default so each iteration deploys the CURRENT source — the
+  # Rebuild by default so each iteration deploys the CURRENT source - the
   # registry is re-pushed below and nodes pull :latest (pullPolicy: Always).
   # Set PREP_NO_REBUILD=1 to reuse existing local images (faster, but may be
-  # stale — skips the build only when the image already exists).
+  # stale - skips the build only when the image already exists).
   if [ "${PREP_NO_REBUILD:-0}" != "1" ] || ! docker image inspect ebpfsentinel:latest >/dev/null 2>&1; then
     log "Staging eBPF objects + building ebpfsentinel:latest"
     mkdir -p "${PROJECT_ROOT}/ebpf-out"
@@ -83,7 +83,7 @@ prep() {
   docker tag ebpfsentinel-warden:latest "${WARDEN_LOCAL}"
   docker push "${WARDEN_LOCAL}"
 
-  log "prep done — agent + warden images in registry (pulled in-cluster via ${GATEWAY}:${REGISTRY_PORT})"
+  log "prep done - agent + warden images in registry (pulled in-cluster via ${GATEWAY}:${REGISTRY_PORT})"
 }
 
 # ── up: cluster + deploy + verify (root) ──────────────────────────────────────
@@ -95,7 +95,7 @@ cluster_up() {
   # runs here as root (root can reach the docker socket); HOME already points at
   # the real user's home (set above), so docker uses their config, not /root.
   if ! docker ps --format '{{.Names}}' | grep -qx "${REGISTRY_NAME}"; then
-    log "local registry not running — auto-provisioning (build + registry + push)"
+    log "local registry not running - auto-provisioning (build + registry + push)"
     prep
   fi
 
@@ -115,12 +115,12 @@ cluster_up() {
     # A state dir alone does not mean the cluster is alive: the qemu VMs are
     # processes that do not survive a host reboot, leaving stale state that makes
     # `cluster create` refuse and the deploy time out against a dead apiserver.
-    # Probe the apiserver; if it is unreachable, the cluster is stale — tear just
+    # Probe the apiserver; if it is unreachable, the cluster is stale - tear just
     # the cluster down (leaving the local registry intact) and recreate it.
     if timeout 5 bash -c "exec 3<>/dev/tcp/${GATEWAY}/6443" 2>/dev/null; then
-      log "Cluster '${CLUSTER_NAME}' is up (apiserver reachable) — resuming deploy"
+      log "Cluster '${CLUSTER_NAME}' is up (apiserver reachable) - resuming deploy"
     else
-      log "Cluster '${CLUSTER_NAME}' state is stale (apiserver unreachable) — destroying and recreating"
+      log "Cluster '${CLUSTER_NAME}' state is stale (apiserver unreachable) - destroying and recreating"
       talosctl cluster destroy --name "${CLUSTER_NAME}" -f || true
       create_cluster
     fi
@@ -142,7 +142,7 @@ deploy() {
   command -v kubectl >/dev/null || die "kubectl not found"
   command -v helm >/dev/null || die "helm not found"
 
-  log "Namespace ${NAMESPACE} (PodSecurity: privileged — warden holds CAP_SYS_ADMIN, agent runs unconfined)"
+  log "Namespace ${NAMESPACE} (PodSecurity: privileged - warden holds CAP_SYS_ADMIN, agent runs unconfined)"
   kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
   kubectl label namespace "${NAMESPACE}" \
     pod-security.kubernetes.io/enforce=privileged --overwrite
@@ -170,7 +170,7 @@ verify() {
   kubectl -n "${NAMESPACE}" logs "${pod}" --tail=40 2>/dev/null | \
     grep -iE 'attach|loaded|token|bpffs|ready|listening|error|warn' || true
 
-  # Distroless image has no shell — curl the hostNetwork node IP from the host
+  # Distroless image has no shell - curl the hostNetwork node IP from the host
   # instead (the qemu bridge gives the host a route into the cluster CIDR).
   local host_ip
   host_ip="$(kubectl -n "${NAMESPACE}" get pod "${pod}" \

@@ -1,4 +1,4 @@
-# config-ebpf-ddos-amplification.yaml — Suite 44 (scapy amplification) fixture.
+# config-ebpf-ddos-amplification.yaml - Suite 44 (scapy amplification) fixture.
 #
 # Combines the scrub layer (which performs the RPF-style check used to
 # drop spoofed-source packets before they reach a daemon) with explicit

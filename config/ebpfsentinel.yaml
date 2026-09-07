@@ -1,4 +1,4 @@
-# eBPFsentinel — Default Configuration
+# eBPFsentinel - Default Configuration
 #
 # Adapt `agent.interfaces` to your host network interface(s).
 # See config/ebpfsentinel.example.yaml for all available options.
@@ -11,7 +11,7 @@ agent:
   # IP address to bind HTTP/gRPC/metrics listeners to.
   # Use "0.0.0.0" to listen on all interfaces, "127.0.0.1" for localhost only.
   # Note: with Docker network_mode: host, this controls the actual host bind
-  # address — "127.0.0.1" means only local access, even in a container.
+  # address - "127.0.0.1" means only local access, even in a container.
   bind_address: "127.0.0.1"
 
   # Allow the control API to listen on a non-loopback address while
@@ -38,9 +38,9 @@ agent:
 
   # XDP attachment mode: auto, native, generic, or offloaded.
   # auto (default): kernel picks best available (native → generic fallback).
-  # native: driver-mode XDP (fastest, requires driver support — e.g. virtio_net, mlx5, i40e).
-  # generic: SKB-mode XDP (universal but slower — packets allocated as sk_buff first).
-  # offloaded: hardware offload to SmartNIC (requires NIC support — e.g. Netronome NFP).
+  # native: driver-mode XDP (fastest, requires driver support - e.g. virtio_net, mlx5, i40e).
+  # generic: SKB-mode XDP (universal but slower - packets allocated as sk_buff first).
+  # offloaded: hardware offload to SmartNIC (requires NIC support - e.g. Netronome NFP).
   # If the requested mode is unsupported, falls back to auto with a warning.
   xdp_mode: auto
 
@@ -51,7 +51,7 @@ agent:
   metrics_port: 9090
 
   # BPF token delegation (kernel 6.9+ REQUIRED). eBPF is loaded
-  # exclusively through a BPF token — the agent never loads programs with
+  # exclusively through a BPF token - the agent never loads programs with
   # CAP_BPF. BPF tokens are a user-namespace feature, so the agent self-unshares
   # a user namespace and has the `warden` broker delegate a bpffs there, then
   # creates the token and loads its own programs (rootless). `bpffs_path` MUST
@@ -71,7 +71,7 @@ agent:
   # refused together. "require" governs inbound clients; outbound connections
   # keep the classical fallback so CTI feeds and webhooks stay reachable.
 
-  # gRPC reflection — disabled by default (prevents unauthenticated API schema enumeration).
+  # gRPC reflection - disabled by default (prevents unauthenticated API schema enumeration).
   # Enable only for development/debugging.
   grpc_reflection: false
 
@@ -158,14 +158,14 @@ alerting:
 audit:
   enabled: false
 
-# Authentication. When disabled, /metrics is unauthenticated — rely on
+# Authentication. When disabled, /metrics is unauthenticated - rely on
 # network isolation (K8s NetworkPolicy, firewall rules) to restrict access.
 # When enabled, /metrics requires a token by default (metrics_auth_required).
 auth:
   enabled: false
   # JWT verification path. Two modes:
   #   - static PEM   (algorithm: RS256 + public_key_path)
-  #   - JWKS          (algorithm: EdDSA + jwks_url) — required by the
+  #   - JWKS          (algorithm: EdDSA + jwks_url) - required by the
   #                   dashboard's short-lived per-tenant tokens with key
   #                   rotation.
   jwt:
@@ -194,7 +194,7 @@ loadbalancer:
   enabled: false
 
 # GeoIP is disabled by default: leave the whole block commented out.
-# Unlike other sections it has no standalone on/off — enabling it requires a
+# Unlike other sections it has no standalone on/off - enabling it requires a
 # `source` (maxmind_account / url / file). See config/examples/geoip.yaml.
 # geoip:
 #   enabled: true

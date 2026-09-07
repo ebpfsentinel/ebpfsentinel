@@ -16,7 +16,7 @@ const AUDIT_TABLE: TableDefinition<(u64, u64), &[u8]> = TableDefinition::new("au
 ///
 /// Stores entries keyed by `(timestamp_ns, seq)` so that entries with
 /// identical timestamps are still unique. Supports configurable buffer
-/// size (max entries) — oldest entries are evicted when the limit is
+/// size (max entries) - oldest entries are evicted when the limit is
 /// reached.
 pub struct RedbAuditStore {
     db: Database,

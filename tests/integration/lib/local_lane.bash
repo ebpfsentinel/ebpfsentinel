@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# local_lane.bash — agent-drive helpers for the single-VM lane.
+# local_lane.bash - agent-drive helpers for the single-VM lane.
 #
 # `vm_helpers.bash` teaches the fleet to drive an agent that lives on
 # another machine: `_agent_ssh`, `_agent_ssh_sudo` and `_agent_scp` reach it
 # over SSH. helpers.bash only sources that file when EBPF_2VM_MODE=true.
 #
 # In the local lane the suite runs *on* the agent host, so those functions
-# were simply undefined — and because nearly every call site ends in
+# were simply undefined - and because nearly every call site ends in
 # `|| true` (they are best-effort setup steps), the failure was invisible:
 # directories were never created, services never started, and the tests that
 # depended on them degraded into skips. This file supplies the local
@@ -15,7 +15,7 @@
 # Sourced by helpers.bash on the else-branch of the 2-VM check, so it never
 # competes with vm_helpers.bash.
 
-# _local_exec <command...> — mirror SSH argument semantics.
+# _local_exec <command...> - mirror SSH argument semantics.
 #
 # Callers use two shapes: separate argv (`_agent_ssh test -x /path`) and a
 # single string carrying a whole shell command (`_agent_ssh_sudo "agent
@@ -31,7 +31,7 @@ _local_exec() {
     fi
 }
 
-# _agent_ssh <command...> — run a command on the agent host (here: locally).
+# _agent_ssh <command...> - run a command on the agent host (here: locally).
 _agent_ssh() {
     if [ $# -eq 0 ]; then
         echo "usage: _agent_ssh <command...>" >&2
@@ -40,7 +40,7 @@ _agent_ssh() {
     _local_exec "$@"
 }
 
-# _agent_ssh_sudo <command...> — same, with privileges.
+# _agent_ssh_sudo <command...> - same, with privileges.
 _agent_ssh_sudo() {
     if [ $# -eq 0 ]; then
         echo "usage: _agent_ssh_sudo <command...>" >&2
@@ -57,7 +57,7 @@ _agent_ssh_sudo() {
     fi
 }
 
-# _agent_scp <local_path> <remote_path> — "copy to the agent host". Both
+# _agent_scp <local_path> <remote_path> - "copy to the agent host". Both
 # paths are on this filesystem, so this is a copy, and a no-op when they
 # resolve to the same file.
 _agent_scp() {

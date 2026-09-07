@@ -12,7 +12,7 @@ use aya::maps::Map;
 
 /// The three map-access operations the map managers and event readers need.
 pub trait MapStore {
-    /// Remove and return the named map (destructive — each map is taken once).
+    /// Remove and return the named map (destructive - each map is taken once).
     fn take_map(&mut self, name: &str) -> Option<Map>;
     /// Borrow the named map.
     fn map(&self, name: &str) -> Option<&Map>;
@@ -37,7 +37,7 @@ impl TokenMaps {
 
     /// Merge another object's maps in. Shared maps (same pinned name) are
     /// reused, so the first insert wins and later identical entries are
-    /// dropped — they wrap the same kernel object.
+    /// dropped - they wrap the same kernel object.
     pub fn extend(&mut self, maps: HashMap<String, Map>) {
         for (name, map) in maps {
             self.maps.entry(name).or_insert(map);

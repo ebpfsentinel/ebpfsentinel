@@ -11,7 +11,7 @@ use ports::secondary::metrics_port::MetricsPort;
 /// Application-level DLP service.
 ///
 /// Orchestrates the domain engine and metrics updates.
-/// Unlike IDS, DLP is purely userspace — no eBPF map synchronization needed.
+/// Unlike IDS, DLP is purely userspace - no eBPF map synchronization needed.
 #[derive(Clone)]
 pub struct DlpAppService {
     engine: DlpEngine,
@@ -43,7 +43,7 @@ impl DlpAppService {
     /// with the pattern list it scans against. Once set,
     /// [`scan_data`](Self::scan_data) routes through the matcher and
     /// [`list_patterns`](Self::list_patterns) returns `patterns`, so match
-    /// indices resolve to the matcher's patterns — including enterprise custom
+    /// indices resolve to the matcher's patterns - including enterprise custom
     /// ones the OSS regex engine would reject.
     pub fn set_external_matcher(
         &mut self,
@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn external_matcher_replaces_regex_engine() {
         // A matcher that always reports one match at a fixed index, regardless
-        // of the data — stands in for the Enterprise Vectorscan engine.
+        // of the data - stands in for the Enterprise Vectorscan engine.
         struct StubMatcher;
         impl DlpMatcherPort for StubMatcher {
             fn scan_data(&self, _data: &[u8]) -> Vec<DlpMatch> {

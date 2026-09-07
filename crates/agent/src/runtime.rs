@@ -1,4 +1,4 @@
-//! Reusable OSS agent runtime — service handles and lifecycle control.
+//! Reusable OSS agent runtime - service handles and lifecycle control.
 //!
 //! Provides [`ServiceHandles`] + [`build_services`] for creating all OSS
 //! services, and [`load_ebpf_programs`] + [`EbpfLoadResult`] for attaching
@@ -459,7 +459,7 @@ use crate::startup::{self, EbpfState};
 
 /// Result of loading all eBPF programs.
 pub struct EbpfLoadResult {
-    /// eBPF loaders — dropping this detaches all programs.
+    /// eBPF loaders - dropping this detaches all programs.
     pub state: EbpfState,
     /// Map managers needed for config hot-reload.
     pub map_holder: EbpfMapHolder,

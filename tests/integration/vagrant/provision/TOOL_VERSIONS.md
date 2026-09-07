@@ -1,4 +1,4 @@
-# Attacker VM — Pinned Tool Versions
+# Attacker VM - Pinned Tool Versions
 
 Reproducibility matters for the Wave-2 attack suites: a `vegeta -rate 10000`
 on tool version N may emit a different burst profile from version N+1 and
@@ -7,7 +7,7 @@ quietly invalidate a regression assertion. Every tool the
 `attacker_tools_check.sh` script verifies every pin at the end of
 provisioning and on demand.
 
-## apt packages (Ubuntu 24.04 LTS — agent VM base box)
+## apt packages (Ubuntu 24.04 LTS - agent VM base box)
 
 | Tool | apt package | Pinned series | Verified via |
 |---|---|---|---|
@@ -43,7 +43,7 @@ and trust the submodule pin for transitives.
 All sha256 values below were captured from the upstream-published
 checksum files (or `assets[].digest` on GitHub's release API) on
 2026-05-20. Bumping a pin requires refreshing the hash from the same
-authoritative source — never compute it locally on an arbitrary download.
+authoritative source - never compute it locally on an arbitrary download.
 
 | Tool | Version | sha256 | URL |
 |---|---|---|---|
@@ -55,7 +55,7 @@ authoritative source — never compute it locally on an arbitrary download.
 
 Mismatch behaviour: `setup-attacker.sh::install_release` aborts with a
 non-zero exit when the computed sha256 disagrees with the pin above.
-There is no "soft fallthrough" mode — a drift here is a release-asset
+There is no "soft fallthrough" mode - a drift here is a release-asset
 republish or a tampered mirror, both of which warrant a manual review.
 
 ## source builds

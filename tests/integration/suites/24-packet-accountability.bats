@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 24-packet-accountability.bats — Packet processing accountability tests
+# 24-packet-accountability.bats - Packet processing accountability tests
 # Requires: root, kernel >= 6.9, bpftool, ncat
 #
 # Validates that every packet entering an eBPF program is accounted for:
@@ -57,7 +57,7 @@ teardown_file() {
 # get_kernel_metric <map_label> <action_label>
 # Reads the cumulative kernel counter value from the /metrics endpoint.
 # Returns the ebpfsentinel_packets_total value for the given map name and
-# action — the poll loop mirrors each eBPF map counter onto this family
+# action - the poll loop mirrors each eBPF map counter onto this family
 # under interface="<MAP>_METRICS",action="<label>".
 get_kernel_metric() {
     local map_name="${1:?usage: get_kernel_metric <map_name> <action>}"
@@ -113,7 +113,7 @@ wait_for_metrics_flush() {
 
     echo "total_seen before=$before after=$after delta=$delta"
 
-    # We sent 10 ICMP packets — firewall should have seen at least 10
+    # We sent 10 ICMP packets - firewall should have seen at least 10
     # (may see more due to ARP, other background traffic on the veth)
     [ "$delta" -ge 10 ]
 }

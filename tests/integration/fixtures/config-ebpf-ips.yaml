@@ -1,4 +1,4 @@
-# config-ebpf-ips.yaml — IPS eBPF scenario test config
+# config-ebpf-ips.yaml - IPS eBPF scenario test config
 # Tests: block mode, auto-blacklist threshold 3, reverse shell + SSH
 
 agent:

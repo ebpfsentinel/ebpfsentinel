@@ -182,7 +182,7 @@ pub trait SystemMetrics: Send + Sync {
     /// Set the current process memory usage (RSS) in bytes.
     fn set_memory_usage_bytes(&self, _bytes: u64) {}
 
-    /// Set the current process CPU usage as a percentage (0.0–100.0+).
+    /// Set the current process CPU usage as a percentage (0.0-100.0+).
     fn set_cpu_usage_percent(&self, _percent: f64) {}
 
     /// Set the number of open file descriptors for the process.

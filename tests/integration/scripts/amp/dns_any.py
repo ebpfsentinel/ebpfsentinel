@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""dns_any.py — Flood an agent with reflected DNS amplification responses.
+"""dns_any.py - Flood an agent with reflected DNS amplification responses.
 
 Used by suite 44 (scapy amplification). The attacker VM models the
 victim-facing leg of a DNS reflection attack: a flood of UDP datagrams
-sourced *from* the DNS port (53) — the amplified responses a reflector
+sourced *from* the DNS port (53) - the amplified responses a reflector
 blasts at a spoofed victim. The source address is an arbitrary RFC1918
 reflector. The agent's UDP amplification protection rate-limits traffic
 per source/amplifier-port and drops the flood once it exceeds the
@@ -82,7 +82,7 @@ def main() -> int:
     if args.query:
         # Reflector-protection direction: a spoofed-source ANY query *to*
         # the DNS port. The firewall deny / scrub layer blocks the query
-        # before any daemon can answer — used by the egress-zero guard to
+        # before any daemon can answer - used by the egress-zero guard to
         # confirm the agent never emits an amplified response.
         layer4 = UDP(sport=33333, dport=53) / DNS(
             rd=1, qd=DNSQR(qname=args.qname, qtype=255)

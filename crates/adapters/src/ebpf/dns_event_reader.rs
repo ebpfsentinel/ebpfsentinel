@@ -88,7 +88,7 @@ impl DnsEventReader {
                     {
                         bytes[header_size..payload_end].to_vec()
                     } else {
-                        // Overflow or partial payload — take what we have
+                        // Overflow or partial payload - take what we have
                         bytes[header_size..].to_vec()
                     };
 

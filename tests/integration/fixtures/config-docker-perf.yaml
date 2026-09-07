@@ -1,4 +1,4 @@
-# config-docker-perf.yaml — agent config for the Docker overhead suite.
+# config-docker-perf.yaml - agent config for the Docker overhead suite.
 #
 # Unlike config-docker-test.yaml (loopback, everything off), this one binds a
 # real interface so the suite can measure throughput and latency with the
@@ -6,7 +6,7 @@
 # before the file is mounted: the host veth in the local lane, eth1 on the
 # agent VM in the 2-VM lane.
 #
-# The feature set is deliberately the cheap one — firewall only — so the
+# The feature set is deliberately the cheap one - firewall only - so the
 # numbers describe baseline datapath overhead rather than a full detection
 # stack.
 

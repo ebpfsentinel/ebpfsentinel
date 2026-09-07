@@ -164,7 +164,7 @@ pub async fn reload_config(
     // Validate the on-disk config before triggering the reload so a bad edit
     // is rejected up front instead of crashing the reload task. The load
     // reads files and compiles every rule regex, which measured 16 s cold on
-    // a test VM — far too long to run on a runtime worker, where it would
+    // a test VM - far too long to run on a runtime worker, where it would
     // stall every other request in flight. Hand it to a blocking thread.
     if let Some(path) = state.config_path.as_deref() {
         let path = path.to_string();

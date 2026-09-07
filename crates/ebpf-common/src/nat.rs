@@ -64,7 +64,7 @@ pub const MAX_NAT_HASH_EXACT: u32 = 16_384;
 
 /// Key for NAT exact-match HashMap lookup (O(1) fast path).
 ///
-/// NAT rules with exact (proto, dst_ip, dst_port) — covers port_forward,
+/// NAT rules with exact (proto, dst_ip, dst_port) - covers port_forward,
 /// dnat, and redirect rules. Checked before the Array+bpf_loop scan.
 ///
 /// Size: 8 bytes (aligned to 4 bytes).
@@ -104,7 +104,7 @@ pub struct NatHashValue {
     pub nat_interface: u32,
 }
 
-// ── NAT rule entry — 44 bytes ───────────────────────────────────────
+// ── NAT rule entry - 44 bytes ───────────────────────────────────────
 
 /// NAT rule stored in Array maps, scanned linearly.
 #[repr(C)]
@@ -160,7 +160,7 @@ pub struct NatRuleEntry {
 /// Maximum NAT rules per direction (IPv6).
 pub const MAX_NAT_RULES_V6: u32 = 128;
 
-// ── NAT rule entry (IPv6) — 100 bytes ──────────────────────────────
+// ── NAT rule entry (IPv6) - 100 bytes ──────────────────────────────
 
 /// NAT rule for IPv6 traffic, stored in Array maps and scanned linearly.
 #[repr(C)]
@@ -211,9 +211,9 @@ pub struct NatRuleEntryV6 {
     pub _pad2: [u8; 3],
 }
 
-// ── NPTv6 rule entry — 40 bytes ─────────────────────────────────────
+// ── NPTv6 rule entry - 40 bytes ─────────────────────────────────────
 
-/// NPTv6 rule entry — stateless IPv6 prefix translation (RFC 6296).
+/// NPTv6 rule entry - stateless IPv6 prefix translation (RFC 6296).
 /// Bidirectional: egress rewrites src (internal->external),
 /// ingress rewrites dst (external->internal).
 #[repr(C)]
@@ -279,7 +279,7 @@ pub struct HairpinCtValue {
 /// Maximum hairpin conntrack entries.
 pub const MAX_HAIRPIN_CT: u32 = 16_384;
 
-// ── NAT port allocation key — 8 bytes ───────────────────────────────
+// ── NAT port allocation key - 8 bytes ───────────────────────────────
 
 /// Key for NAT port allocation (LRU HashMap).
 #[repr(C)]
@@ -290,7 +290,7 @@ pub struct NatPortAllocKey {
     pub _pad: u16,
 }
 
-/// Value for NAT port allocation — allocated translated port.
+/// Value for NAT port allocation - allocated translated port.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NatPortAllocValue {

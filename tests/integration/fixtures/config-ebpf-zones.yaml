@@ -1,4 +1,4 @@
-# config-ebpf-zones.yaml — Zone management eBPF scenario test config
+# config-ebpf-zones.yaml - Zone management eBPF scenario test config
 # Network topology:
 #   Host: 10.200.0.1 (veth-ebpf0)
 #   NS:   10.200.0.2 (veth-ebpf1 inside ebpf-test-ns)

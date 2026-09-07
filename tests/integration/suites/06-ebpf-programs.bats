@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 06-ebpf-programs.bats — eBPF program loading and attachment tests
+# 06-ebpf-programs.bats - eBPF program loading and attachment tests
 # Requires: CAP_BPF or root, kernel >= 6.9, bpftool, ip
 
 load '../lib/helpers'
@@ -85,7 +85,7 @@ teardown_file() {
     body="$(curl -s --max-time 5 \
         "http://${AGENT_HOST:-127.0.0.1}:${AGENT_HTTP_PORT:-8080}/readyz" 2>/dev/null)" || true
 
-    # Accept any valid response — "ok", "ready", or ebpf_loaded:true
+    # Accept any valid response - "ok", "ready", or ebpf_loaded:true
     [ -n "$body" ]
 }
 

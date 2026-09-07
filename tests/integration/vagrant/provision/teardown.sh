@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# teardown.sh — Clean up test environment in the VM
+# teardown.sh - Clean up test environment in the VM
 set -euxo pipefail
 
 echo "=== Tearing down test environment ==="

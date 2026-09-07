@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 49-capture-pcap-export.bats — Manual packet capture lifecycle + pcap export.
+# 49-capture-pcap-export.bats - Manual packet capture lifecycle + pcap export.
 #
 # Drives the agent's capture engine via /api/v1/captures/manual (and the
 # matching `ebpfsentinel-agent capture start` CLI). The capture engine is
@@ -27,8 +27,8 @@ setup_file() {
     require_ebpf_env
 
     # The agent must be attached to the very interface this suite captures
-    # on. prepare_ebpf_config otherwise substitutes EBPF_VETH_HOST — the
-    # netns veth — which this suite never creates, so every program would
+    # on. prepare_ebpf_config otherwise substitutes EBPF_VETH_HOST - the
+    # netns veth - which this suite never creates, so every program would
     # fail to load with "resolve ifindex for veth-ebpf0".
     EBPF_VETH_HOST="$(_capture_iface)"
     export EBPF_VETH_HOST
@@ -73,10 +73,10 @@ _drive_traffic_to_port() {
     local port="${1:?usage: _drive_traffic_to_port <port>}"
     # Fire a couple of TCP SYN+payload bursts to the loopback of the agent
     # on the target port. The capture filter is "tcp port <port>"; the
-    # destination doesn't have to be listening — we just need wire
+    # destination doesn't have to be listening - we just need wire
     # traffic that tcpdump can record. Loop on the test host (one nc per
     # iteration) so the remote shell never re-parses a multi-statement
-    # script — SSH flattens args, which would mangle a remote for-loop.
+    # script - SSH flattens args, which would mangle a remote for-loop.
     local i
     for i in 1 2 3 4 5; do
         printf 'probe\n' | _agent_ssh_sudo nc -w1 127.0.0.1 "${port}" >/dev/null 2>&1 || true

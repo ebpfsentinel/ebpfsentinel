@@ -72,7 +72,7 @@ pub struct RefreshResponse {
 
 // ── Handlers ────────────────────────────────────────────────────────
 
-/// `GET /api/v1/threatintel/status` — threat intel subsystem status.
+/// `GET /api/v1/threatintel/status` - threat intel subsystem status.
 #[utoipa::path(
     get, path = "/api/v1/threatintel/status",
     tag = "Threat Intelligence",
@@ -97,7 +97,7 @@ pub async fn threatintel_status(
     })
 }
 
-/// `GET /api/v1/threatintel/iocs` — list loaded IOCs.
+/// `GET /api/v1/threatintel/iocs` - list loaded IOCs.
 #[utoipa::path(
     get, path = "/api/v1/threatintel/iocs",
     tag = "Threat Intelligence",
@@ -126,7 +126,7 @@ pub async fn list_iocs(State(state): State<Arc<AppState>>) -> Json<Vec<IocRespon
     Json(iocs)
 }
 
-/// `GET /api/v1/threatintel/urls` — list malicious URL indicators ingested
+/// `GET /api/v1/threatintel/urls` - list malicious URL indicators ingested
 /// from CTI feeds. The threat-intel engine is IP-only, so URL indicators are
 /// surfaced from the service's retained snapshot.
 #[utoipa::path(
@@ -156,7 +156,7 @@ pub async fn list_url_iocs(State(state): State<Arc<AppState>>) -> Json<Vec<UrlIo
     Json(urls)
 }
 
-/// `GET /api/v1/threatintel/feeds` — list configured feeds.
+/// `GET /api/v1/threatintel/feeds` - list configured feeds.
 #[utoipa::path(
     get, path = "/api/v1/threatintel/feeds",
     tag = "Threat Intelligence",
@@ -190,7 +190,7 @@ pub async fn list_feeds(State(state): State<Arc<AppState>>) -> Json<Vec<FeedResp
     Json(feeds)
 }
 
-/// `POST /api/v1/threatintel/feeds/refresh` — trigger an immediate re-fetch
+/// `POST /api/v1/threatintel/feeds/refresh` - trigger an immediate re-fetch
 /// of all enabled threat-intel feeds.
 #[utoipa::path(
     post, path = "/api/v1/threatintel/feeds/refresh",
@@ -242,7 +242,7 @@ pub async fn refresh_feeds(
     }
 
     match trigger.try_send(()) {
-        // Sent, or a refresh is already queued — both mean a fetch will run.
+        // Sent, or a refresh is already queued - both mean a fetch will run.
         Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
             tracing::info!(feed_id = ?req.feed_id, "threat intel feed refresh requested");
             Ok(Json(RefreshResponse {

@@ -37,7 +37,7 @@ fn group_name(group: NamedGroup) -> String {
     }
 }
 
-/// `GET /api/v1/tls/status` — report the negotiated TLS key-exchange group
+/// `GET /api/v1/tls/status` - report the negotiated TLS key-exchange group
 /// for the current connection.
 #[utoipa::path(
     get, path = "/api/v1/tls/status",

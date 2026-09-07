@@ -1,4 +1,4 @@
-# eBPFsentinel — Rate Limiting (DDoS Protection) Configuration Example
+# eBPFsentinel - Rate Limiting (DDoS Protection) Configuration Example
 # ====================================================================
 #
 # XDP-based rate limiting with four algorithms. Every source address gets
@@ -46,10 +46,10 @@ ratelimit:
   default_burst: 2000
 
   # Default algorithm for rules that don't specify one:
-  #   "token_bucket"    — Smooth rate limiting with burst allowance (recommended)
-  #   "fixed_window"    — Simple counter reset each window (can allow 2x burst at boundary)
-  #   "sliding_window"  — Weighted hybrid of current + previous window (smoother than fixed)
-  #   "leaky_bucket"    — Constant drain rate, queues excess (strict smoothing)
+  #   "token_bucket"    - Smooth rate limiting with burst allowance (recommended)
+  #   "fixed_window"    - Simple counter reset each window (can allow 2x burst at boundary)
+  #   "sliding_window"  - Weighted hybrid of current + previous window (smoother than fixed)
+  #   "leaky_bucket"    - Constant drain rate, queues excess (strict smoothing)
   # Note: SYN cookie protection has moved to the DDoS module (see ddos.yaml).
   default_algorithm: token_bucket
 
@@ -60,17 +60,17 @@ ratelimit:
   # own bucket, so there is nothing to write for the general case.
   #
   # Fields:
-  #   id        — Unique rule identifier (required, non-empty)
-  #   enabled   — Whether this rule is active (default: true)
-  #   rate      — Tokens per second (required, must be > 0)
-  #   burst     — Maximum burst / bucket size (required, must be > 0)
-  #   src_ip    — Source host, bare address or /32 (required). Shorter
+  #   id        - Unique rule identifier (required, non-empty)
+  #   enabled   - Whether this rule is active (default: true)
+  #   rate      - Tokens per second (required, must be > 0)
+  #   burst     - Maximum burst / bucket size (required, must be > 0)
+  #   src_ip    - Source host, bare address or /32 (required). Shorter
   #               prefixes and IPv6 are refused: the kernel map matches one
   #               exact address. Use country_tiers to cover a range.
-  #   action    — "drop" (block excess) or "pass" (allow + log excess)
+  #   action    - "drop" (block excess) or "pass" (allow + log excess)
   #              Aliases: "deny"/"block" = drop, "allow" = pass
-  #   algorithm — Per-rule algorithm override (see default_algorithm above)
-  #   interfaces — Interface groups the rule applies to (default: all)
+  #   algorithm - Per-rule algorithm override (see default_algorithm above)
+  #   interfaces - Interface groups the rule applies to (default: all)
 
   rules:
     # A scraper that keeps hammering the WAN: far below the default.
@@ -101,7 +101,7 @@ ratelimit:
       src_ip: 192.0.2.1
       algorithm: fixed_window
       action: drop
-      enabled: false         # Disabled — for documentation only
+      enabled: false         # Disabled - for documentation only
 
     # Leaky bucket: strictest smoothing, constant drain rate
     - id: rl-demo-leaky
@@ -116,7 +116,7 @@ ratelimit:
     # Country-specific rate limits enforced via kernel-side LPM Trie maps.
     # Each tier maps country codes to a rate limit profile. A country tier
     # is checked before the per-host rules and covers IPv6 as well.
-    # tier_id must be 1–15. Requires GeoIP to be enabled.
+    # tier_id must be 1-15. Requires GeoIP to be enabled.
 
   country_tiers:
     - tier_id: 1

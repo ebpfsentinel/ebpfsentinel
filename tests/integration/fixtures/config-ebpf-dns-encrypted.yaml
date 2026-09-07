@@ -1,4 +1,4 @@
-# config-ebpf-dns-encrypted.yaml — DoH/DoT detection scenario, 3-VM transit.
+# config-ebpf-dns-encrypted.yaml - DoH/DoT detection scenario, 3-VM transit.
 #
 # Drives the encrypted-DNS detector wired into the agent's L7 TLS handshake
 # parser. ClientHellos that match a known DoH SNI (built-in resolver list +

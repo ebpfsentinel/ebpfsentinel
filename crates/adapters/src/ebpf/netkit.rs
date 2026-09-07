@@ -8,8 +8,8 @@
 //! Cilium uses netkit by default since 1.16.
 //!
 //! This module provides:
-//! - `is_netkit_device(iface)` — detect netkit interfaces
-//! - `netkit_attach` — raw `BPF_LINK_CREATE` attach
+//! - `is_netkit_device(iface)` - detect netkit interfaces
+//! - `netkit_attach` - raw `BPF_LINK_CREATE` attach
 
 use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -17,16 +17,16 @@ use std::path::Path;
 
 use tracing::info;
 
-/// `ARPHRD_NONE` — the ARP hardware type reported by netkit devices.
+/// `ARPHRD_NONE` - the ARP hardware type reported by netkit devices.
 const ARPHRD_NONE: u32 = 65534;
 
 /// `BPF_LINK_CREATE` command for the `bpf()` syscall.
 const BPF_LINK_CREATE: u32 = 28;
 
-/// `BPF_NETKIT_PRIMARY` attach type — ingress side of the netkit pair.
+/// `BPF_NETKIT_PRIMARY` attach type - ingress side of the netkit pair.
 pub const BPF_NETKIT_PRIMARY: u32 = 54;
 
-/// `BPF_NETKIT_PEER` attach type — egress side of the netkit pair.
+/// `BPF_NETKIT_PEER` attach type - egress side of the netkit pair.
 pub const BPF_NETKIT_PEER: u32 = 55;
 
 /// Subset of `union bpf_attr` for `BPF_LINK_CREATE`.
@@ -75,9 +75,9 @@ pub fn list_netkit_devices() -> Vec<String> {
 /// `BPF_LINK_CREATE` syscall. Returns an `OwnedFd` for the link
 /// (dropping it detaches the program).
 ///
-/// `prog_fd` — fd of the loaded BPF program (from aya).
-/// `ifindex` — network interface index of the netkit device.
-/// `attach_type` — `BPF_NETKIT_PRIMARY` (ingress) or `BPF_NETKIT_PEER` (egress).
+/// `prog_fd` - fd of the loaded BPF program (from aya).
+/// `ifindex` - network interface index of the netkit device.
+/// `attach_type` - `BPF_NETKIT_PRIMARY` (ingress) or `BPF_NETKIT_PEER` (egress).
 pub fn netkit_attach(
     prog_fd: RawFd,
     ifindex: u32,
@@ -277,7 +277,7 @@ mod tests {
     fn list_netkit_devices_returns_empty_on_standard_host() {
         // Most hosts don't have netkit devices unless Cilium is running.
         let devices = list_netkit_devices();
-        // Either empty or non-empty — both valid, no panic.
+        // Either empty or non-empty - both valid, no panic.
         let _ = devices;
     }
 
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn hotplug_attach_all_on_non_netkit_device_warns() {
         let mut reg = NetkitHotPlugRegistry::new();
-        // fd -1 is invalid — attach will fail gracefully.
+        // fd -1 is invalid - attach will fail gracefully.
         reg.register("tc_ids".to_string(), -1);
         // Should not panic, just log warnings.
         reg.attach_all("lo", &[]);

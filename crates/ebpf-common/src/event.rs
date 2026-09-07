@@ -1,4 +1,4 @@
-/// Event type constants — stored as u8 in PacketEvent.event_type
+/// Event type constants - stored as u8 in PacketEvent.event_type
 pub const EVENT_TYPE_FIREWALL: u8 = 0;
 pub const EVENT_TYPE_IDS: u8 = 1;
 pub const EVENT_TYPE_IPS: u8 = 2;
@@ -17,7 +17,7 @@ pub const EVENT_TYPE_QOS: u8 = 8;
 /// `docs/kernel/limits.md` for the full rationale.
 pub const MAX_L7_PAYLOAD: usize = 2048;
 
-/// Small L7 payload tier (512 bytes) — covers HTTP method lines, TLS record
+/// Small L7 payload tier (512 bytes) - covers HTTP method lines, TLS record
 /// headers, SSH banners, and most protocol signatures. Used when the packet's
 /// TCP payload is ≤ 512 bytes, saving 1 536 bytes per RingBuf entry (75%).
 pub const SMALL_L7_PAYLOAD: usize = 512;
@@ -26,7 +26,7 @@ pub const SMALL_L7_PAYLOAD: usize = 512;
 /// in the `tc-ids` eBPF program.
 ///
 /// Each entry is ~64 B (HashMap overhead), so the kernel-side footprint
-/// is ~16 KiB — negligible, and the lookup is O(1) regardless of the
+/// is ~16 KiB - negligible, and the lookup is O(1) regardless of the
 /// entry count.
 pub const MAX_L7_PORTS: u32 = 256;
 

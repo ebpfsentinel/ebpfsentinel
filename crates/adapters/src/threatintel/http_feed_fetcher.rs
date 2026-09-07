@@ -16,8 +16,8 @@ const MAX_FEED_RESPONSE_SIZE: usize = 100 * 1024 * 1024;
 /// reqwest DNS resolver that rejects any host resolving to a loopback, private,
 /// or link-local address.
 ///
-/// Validating the *resolved* address — the one reqwest will actually connect to
-/// — closes SSRF vectors that the config-time URL check alone cannot: numeric
+/// Validating the *resolved* address, the one reqwest will actually connect to,
+/// closes SSRF vectors that the config-time URL check alone cannot: numeric
 /// host encodings that resolve via libc `inet_aton` (`http://2130706433/`) and
 /// DNS rebinding (a public hostname whose A record points at `169.254.169.254`).
 struct SsrfGuardResolver;

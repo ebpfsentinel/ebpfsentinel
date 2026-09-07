@@ -48,7 +48,7 @@ impl ThreatIntelMapManager {
             .and_then(|m| HashMap::try_from(m).ok())
             .map(|m| Arc::new(Mutex::new(m)));
 
-        // Bloom filters are optional — graceful if absent (older eBPF object).
+        // Bloom filters are optional - graceful if absent (older eBPF object).
         let bloom_v4 = ebpf
             .take_map("THREATINTEL_BLOOM_V4")
             .and_then(|m| BloomFilter::try_from(m).ok())

@@ -376,7 +376,7 @@ mod tests {
         }
         assert_eq!(svc.gateway_status(1), Some(GatewayStatus::Down));
 
-        // Reload with same gateway — state should be preserved
+        // Reload with same gateway - state should be preserved
         svc.reload_gateways(vec![make_gateway(1, 10)]).unwrap();
         assert_eq!(svc.gateway_status(1), Some(GatewayStatus::Down));
     }

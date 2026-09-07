@@ -19,7 +19,7 @@ fi
 #   - BPF token delegation (BPF_TOKEN_CREATE, BPF_F_TOKEN_FD)
 #   - BPF_MAP_TYPE_ARENA mmap'd zero-copy map
 #   - kfuncs bpf_task_get_cgroup1, bpf_xdp_metadata_rx_vlan_tag,
-#     bpf_xdp_get_xfrm_state, bpf_iter_css_task (kernel 6.7–6.8)
+#     bpf_xdp_get_xfrm_state, bpf_iter_css_task (kernel 6.7-6.8)
 KERNEL_VERSION=$(uname -r | cut -d. -f1-2)
 KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
 KERNEL_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
@@ -37,11 +37,11 @@ if [[ ! -f /sys/kernel/btf/vmlinux ]]; then
   exit 1
 fi
 
-# Check for libpcap (optional — only needed for manual packet capture)
+# Check for libpcap (optional - only needed for manual packet capture)
 if ! ldconfig -p 2>/dev/null | grep -q libpcap; then
   echo "Warning: libpcap not found. Packet capture (POST /api/v1/captures/manual) will not work." >&2
   echo "         Install with: apt-get install libpcap0.8 (Debian/Ubuntu) or dnf install libpcap (RHEL/Fedora)." >&2
-  echo "         This is optional — all other features work without it." >&2
+  echo "         This is optional - all other features work without it." >&2
   echo ""
 fi
 
@@ -105,18 +105,18 @@ systemctl daemon-reload
 # (kernel.apparmor_restrict_unprivileged_userns=1), a process without
 # CAP_SYS_ADMIN in the init user namespace cannot create one. The bare-metal unit
 # runs the agent as root (exempt), so this only bites if the agent is reconfigured
-# to run unprivileged — handle it anyway for that case and for parity with the
+# to run unprivileged - handle it anyway for that case and for parity with the
 # container deployments. Prefer a per-binary AppArmor profile (scoped to the
 # agent, keeps the host-wide restriction); fall back to a sysctl drop-in
 # (host-wide) only when apparmor_parser is unavailable to load the profile.
 APPARMOR_SYSCTL="kernel.apparmor_restrict_unprivileged_userns"
 if [[ "$(sysctl -n "$APPARMOR_SYSCTL" 2>/dev/null || echo 0)" == "1" ]]; then
   if command -v apparmor_parser >/dev/null 2>&1; then
-    echo "AppArmor restricts unprivileged user namespaces — installing agent profile..."
+    echo "AppArmor restricts unprivileged user namespaces - installing agent profile..."
     install -Dm644 "${SCRIPT_DIR}/apparmor.d/ebpfsentinel-agent" /etc/apparmor.d/ebpfsentinel-agent
     apparmor_parser -r -W /etc/apparmor.d/ebpfsentinel-agent
   else
-    echo "AppArmor restricts unprivileged user namespaces (no apparmor_parser) — installing sysctl drop-in..."
+    echo "AppArmor restricts unprivileged user namespaces (no apparmor_parser) - installing sysctl drop-in..."
     install -Dm644 "${SCRIPT_DIR}/sysctl.d/60-ebpfsentinel-userns.conf" /etc/sysctl.d/60-ebpfsentinel-userns.conf
     sysctl --system >/dev/null
   fi

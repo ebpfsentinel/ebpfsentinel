@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 04-pktgen-high-pps.bats — Sustain ≥1 Mpps from the attacker NIC and
+# 04-pktgen-high-pps.bats - Sustain ≥1 Mpps from the attacker NIC and
 # measure the agent's XDP early-drop CPU savings against a plain pass
 # baseline. Validates that pktgen + XDP firewall + rate-limiter behave
 # at production volumes.
@@ -7,13 +7,13 @@
 # Topology: 2vm. Profile: nightly. Kernel >= 6.9.
 #
 # Test plan:
-#   1. Baseline (no XDP rule effect) — record achievable pps + CPU.
-#   2. XDP firewall PASS rule — record CPU under load (high).
-#   3. XDP firewall DROP rule — assert CPU < baseline + 30%
+#   1. Baseline (no XDP rule effect) - record achievable pps + CPU.
+#   2. XDP firewall PASS rule - record CPU under load (high).
+#   3. XDP firewall DROP rule - assert CPU < baseline + 30%
 #      and dropped_total metric grew ≥ realised pps × duration / 2.
-#   4. XDP ratelimit + SYN cookie — assert syncookie counter grew,
+#   4. XDP ratelimit + SYN cookie - assert syncookie counter grew,
 #      no kernel-level SYN backlog overflow (via nstat ListenDrops).
-#   5. tc-ids passive observation — assert ringbuf overruns are
+#   5. tc-ids passive observation - assert ringbuf overruns are
 #      reported as metric increments, not panics.
 #
 # Numeric reporting: per-test rows appended to
@@ -32,7 +32,7 @@ CPU_PASS_MULTIPLIER="${CPU_PASS_MULTIPLIER:-100}"
 
 # Floor used on a virtual NIC that cannot sustain PKTGEN_MIN_PPS. Real
 # hardware keeps the 1 Mpps target; a virtual NIC (vmxnet3/virtio/…) is
-# env-limited — same class as perf/01 — so the floor auto-lowers and
+# env-limited - same class as perf/01 - so the floor auto-lowers and
 # the run validates the control path at whatever the NIC sustains instead
 # of skipping the suite outright.
 PKTGEN_VIRT_FLOOR="${PKTGEN_VIRT_FLOOR:-50000}"
@@ -77,7 +77,7 @@ teardown() {
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
-# _num <value> [default] — coerce a measurement to a valid JSON number.
+# _num <value> [default] - coerce a measurement to a valid JSON number.
 # Measurement helpers can return an empty string (sampler missed, ssh
 # hiccup), a locale comma, or a stray suffix; any of those would make a
 # downstream `jq --argjson` abort the whole test. Strip everything but
@@ -90,7 +90,7 @@ _num() {
     echo "${out:-$def}"
 }
 
-# _pktgen_is_virtual_nic — true when the pktgen NIC uses a virtual driver
+# _pktgen_is_virtual_nic - true when the pktgen NIC uses a virtual driver
 # that cannot sustain PKTGEN_MIN_PPS (same class as perf/01). Pure
 # predicate (no side effects) so it is safe to call from a subshell; the
 # caller sets PKTGEN_ENV_LIMITED + the floor in its own shell.
@@ -103,7 +103,7 @@ _pktgen_is_virtual_nic() {
     esac
 }
 
-# _agent_cpu_pct — sample agent VM CPU usage over 1s
+# _agent_cpu_pct - sample agent VM CPU usage over 1s
 _agent_cpu_pct() {
     _agent_ssh "top -bn2 -d1 | awk '/Cpu\\(s\\)/{u=\$2; gsub(\",\",\"\",u); print u; exit}'" \
         2>/dev/null | tail -1
@@ -144,7 +144,7 @@ _metric_or_zero() {
     echo "$v"
 }
 
-# _firewall_dropped — the cumulative XDP firewall drop count. The kernel
+# _firewall_dropped - the cumulative XDP firewall drop count. The kernel
 # datapath drops in XDP, so the count surfaces via the FIREWALL_METRICS map
 # counter exposed as ebpfsentinel_packets_total{interface="FIREWALL_METRICS",
 # action="dropped"} (there is no ebpfsentinel_xdp_dropped_total). Labels are
@@ -162,7 +162,7 @@ _firewall_dropped() {
 
 # ── Tests ─────────────────────────────────────────────────────────────
 
-@test "pktgen baseline — measures achievable pps and idle CPU" {
+@test "pktgen baseline - measures achievable pps and idle CPU" {
     # No agent rules in effect for the duration of the baseline; we just
     # need pktgen + driver characterisation.
     _start_with config-ebpf-pktgen-pass.yaml
@@ -199,7 +199,7 @@ _firewall_dropped() {
             && [ "$(echo "$realised >= $PKTGEN_SANITY_PPS" | bc -l)" = "1" ]; then
             echo "# env-limited: ${realised} pps < floor ${floor} on virtual NIC ${PKTGEN_IFACE}; proceeding with control-path validation (cf. perf/01)" >&3
         else
-            skip "achievable pps ${realised} below floor ${floor} — pktgen not generating"
+            skip "achievable pps ${realised} below floor ${floor} - pktgen not generating"
         fi
     fi
     # bats runs each @test in its own subshell, so `export` does not cross
@@ -213,7 +213,7 @@ _firewall_dropped() {
     } > "${DATA_DIR}/pktgen-state.env"
 }
 
-@test "XDP pass rule — high CPU confirms stack traversal" {
+@test "XDP pass rule - high CPU confirms stack traversal" {
     # shellcheck disable=SC1090
     [ -f "${DATA_DIR}/pktgen-state.env" ] && source "${DATA_DIR}/pktgen-state.env"
     [ -n "${BASELINE_PPS:-}" ] || skip "baseline test did not record BASELINE_PPS"
@@ -237,7 +237,7 @@ _firewall_dropped() {
     echo "PASS_CPU=$(_num "$cpu_during")" >> "${DATA_DIR}/pktgen-state.env"
 }
 
-@test "XDP drop rule — CPU stays low and dropped_total grows" {
+@test "XDP drop rule - CPU stays low and dropped_total grows" {
     # shellcheck disable=SC1090
     [ -f "${DATA_DIR}/pktgen-state.env" ] && source "${DATA_DIR}/pktgen-state.env"
     [ -n "${BASELINE_CPU:-}" ] || skip "baseline test did not record BASELINE_CPU"
@@ -256,7 +256,7 @@ _firewall_dropped() {
     _record xdp_drop "$realised" "$cpu_during" "$delta" "{}"
 
     # Acceptance criterion 2.3: CPU stays below baseline + 30%. The CPU
-    # comparisons are only meaningful at high volume — at the reduced pps a
+    # comparisons are only meaningful at high volume - at the reduced pps a
     # virtual NIC sustains, the delta sinks into sampler noise, so under
     # PKTGEN_ENV_LIMITED they are reported but not gated (cf. perf/01).
     local cpu_budget
@@ -302,7 +302,7 @@ _firewall_dropped() {
     listen_drops_before="$(_agent_ssh 'nstat -az TcpExtListenDrops 2>/dev/null | awk "NR==2 {print \$2}"')"
     listen_drops_before="${listen_drops_before:-0}"
 
-    # Drive SYN flood: pkt_size 60, dport 80 (HTTP) — pktgen emits UDP,
+    # Drive SYN flood: pkt_size 60, dport 80 (HTTP) - pktgen emits UDP,
     # which the rate-limiter still observes as ingress pps; the SYN
     # cookie counter is exercised when the conntrack path sees the
     # rate-limit verdict. For real TCP SYN flooding we'd use hping3,
@@ -331,7 +331,7 @@ _firewall_dropped() {
         # increment means the rate-limiter let SYNs reach the listen
         # queue. We allow up to 100 (jitter), beyond that we fail.
         if [ "$(echo "$listen_delta > 100" | bc -l)" = "1" ]; then
-            echo "TcpExtListenDrops grew by ${listen_delta} — SYN backlog overflow" >&2
+            echo "TcpExtListenDrops grew by ${listen_delta} - SYN backlog overflow" >&2
             return 1
         fi
     fi
@@ -353,7 +353,7 @@ _firewall_dropped() {
     fi
 }
 
-@test "tc-ids passive observation — ringbuf overruns logged, no panic" {
+@test "tc-ids passive observation - ringbuf overruns logged, no panic" {
     _start_with config-ebpf-pktgen-drop.yaml
 
     local overruns_before overruns_after realised cpu_during

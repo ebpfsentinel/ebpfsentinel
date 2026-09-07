@@ -3,7 +3,7 @@
 //!
 //! Drives `AlertFilter::compile` with arbitrary attacker-controlled query
 //! parameters and `AlertFilter::matches` against a synthetic alert. Must
-//! never panic — `compile` returns `Result`, `matches` returns `bool`.
+//! never panic - `compile` returns `Result`, `matches` returns `bool`.
 //! Any panic is a crash worth reproducing.
 
 use libfuzzer_sys::fuzz_target;

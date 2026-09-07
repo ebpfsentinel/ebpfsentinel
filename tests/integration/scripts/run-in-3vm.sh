@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-in-3vm.sh — Run integration tests using the 3-VM transit topology
+# run-in-3vm.sh - Run integration tests using the 3-VM transit topology
 #
 # Boots three Vagrant VMs (client/attacker + agent-router + backend),
 # then runs BATS suites on the client VM. Traffic from the client is
@@ -8,8 +8,8 @@
 # be exercised end-to-end.
 #
 # Subnets:
-#   192.168.56.0/24 — client (.20) ↔ agent.eth1 (.10)
-#   192.168.57.0/24 — agent.eth2 (.10) ↔ backend (.30)
+#   192.168.56.0/24 - client (.20) ↔ agent.eth1 (.10)
+#   192.168.57.0/24 - agent.eth2 (.10) ↔ backend (.30)
 #
 # Usage:
 #   ./run-in-3vm.sh                        # Run all 3-VM-tagged suites
@@ -141,14 +141,14 @@ for s in sorted(suites):
 PY
         local rc=$?
         if [ "$rc" -eq 2 ]; then
-            # PyYAML missing — fall through to grep heuristic
+            # PyYAML missing - fall through to grep heuristic
             :
         else
             return $rc
         fi
     fi
-    # grep fallback: rows with "topology: 3vm" — only correct when each row
-    # lists exactly one suite (good enough for early Epic 34 work).
+    # grep fallback: rows with "topology: 3vm" - only correct when each row
+    # lists exactly one suite (good enough for the transit suites).
     awk '/topology: 3vm/{flag=1} flag && /- suites:/{getline; gsub(/[ \-]/,""); print; flag=0}' \
         "${COVERAGE_MATRIX}" 2>/dev/null || true
 }
@@ -233,7 +233,7 @@ done
 
 # ── Heal attacker → backend SSH trust ──────────────────────────────
 # Vagrant provisions VMs in definition order, so a combined `up` runs the
-# attacker's backend-key copy before the backend VM exists — leaving the
+# attacker's backend-key copy before the backend VM exists - leaving the
 # transit suites (50/51 capture + iperf3) unable to reach the backend.
 # Re-copy the key here (idempotent) now that all three VMs are up.
 cd "$VAGRANT_DIR"

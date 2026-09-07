@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ct_helpers.bash — Kernel netfilter conntrack helpers for 3-VM suites.
+# ct_helpers.bash - Kernel netfilter conntrack helpers for 3-VM suites.
 #
 # These wrap two needs:
 #   - establish a long-lived iperf3 flow from the attacker through the
@@ -25,10 +25,10 @@ _attacker_ssh() {
 #
 # Verify the `conntrack` CLI is available on the agent VM (provided by
 # the conntrack-tools package). Returns 0 when present; 1 + a hint
-# otherwise. Suites should `skip` on non-zero return rather than fail —
+# otherwise. Suites should `skip` on non-zero return rather than fail -
 # kernel CT itself is always on, only the userspace inspector is gated.
 ensure_conntrack_tool() {
-    # `command -v` is a shell builtin, so it must run inside a shell — a
+    # `command -v` is a shell builtin, so it must run inside a shell - a
     # bare `sudo command -v` tries to exec a binary named "command" and
     # always fails. conntrack lives in /usr/sbin and needs no privilege to
     # locate, so check over a plain (non-sudo) SSH shell.
@@ -54,7 +54,7 @@ establish_iperf_flow() {
     # Pass the whole pipeline as a SINGLE argument to the remote login shell.
     # `_attacker_ssh sh -c "..."` would arrive as `sh -c <word1> <word2>...`
     # (ssh space-joins its args), so the remote `sh -c` runs only the first
-    # word — here `nohup` with no operand — and iperf3 never launches while
+    # word - here `nohup` with no operand - and iperf3 never launches while
     # `echo $!` still returns a pid, masking the failure (no CT entry forms).
     pid="$(_attacker_ssh "nohup iperf3 -c '${dst_ip}' -p '${dst_port}' -t ${duration} -b 1M --json >'${out_log}' 2>&1 & echo \$!")" || return 1
     [ -n "$pid" ] || return 1
@@ -79,7 +79,7 @@ stop_iperf_flow() {
 # even when no rows match (echoes "0"). Returns non-zero only when the
 # conntrack tool itself is missing.
 #
-# "Live" means a flow that is up or coming up — ESTABLISHED, or the
+# "Live" means a flow that is up or coming up - ESTABLISHED, or the
 # SYN_SENT/SYN_RECV handshake. Teardown states (CLOSE, CLOSE_WAIT,
 # FIN_WAIT, LAST_ACK, TIME_WAIT) are deliberately excluded: when the
 # firewall kills a flow, the kernel CT entry is destroyed but the
@@ -131,7 +131,7 @@ assert_ct_entry_absent() {
 
 # wait_for_ct_entry <dst_ip> <dst_port> [protocol] [retries] [sleep_s]
 #
-# Inverse poll — wait for at least one CT row to appear. Useful right
+# Inverse poll - wait for at least one CT row to appear. Useful right
 # after establish_iperf_flow before the block-rule injection.
 wait_for_ct_entry() {
     local dst_ip="${1:?usage: wait_for_ct_entry <dst_ip> <dst_port>}"

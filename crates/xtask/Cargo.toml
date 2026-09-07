@@ -11,7 +11,7 @@ anyhow = { workspace = true }
 ebpfsentinel-agent = { workspace = true }
 serde_json = { workspace = true }
 utoipa = { workspace = true }
-# Pin a k8s-openapi version feature here — the agent's default `kubernetes`
+# Pin a k8s-openapi version feature here - the agent's default `kubernetes`
 # feature pulls k8s-openapi as a library dep, and any binary crate at the top
 # of the dep graph must select a version.
 k8s-openapi = { workspace = true, features = ["v1_32"] }

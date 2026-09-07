@@ -1,4 +1,4 @@
-# config-ebpf-l7-timeout.yaml — Suite 43 (slowhttptest) fixture.
+# config-ebpf-l7-timeout.yaml - Suite 43 (slowhttptest) fixture.
 #
 # Combines:
 #   - L7 reassembly with a tight idle_timeout_secs so half-completed
@@ -10,7 +10,7 @@
 #   - A DDoS policy as a secondary signal; the IDS/IPS alerts on the
 #     HTTP port carry their web-facing MITRE technique via alert::mitre.
 #
-# Whitelist: loopback only — the attacker subnet stays floodable.
+# Whitelist: loopback only - the attacker subnet stays floodable.
 
 agent:
   interfaces:

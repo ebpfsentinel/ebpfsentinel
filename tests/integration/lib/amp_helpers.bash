@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# amp_helpers.bash — Drive the scapy amplification scripts from BATS.
+# amp_helpers.bash - Drive the scapy amplification scripts from BATS.
 #
 # Each script under scripts/amp/{dns_any,ntp_monlist,ssdp_search,
 # memcached_stats}.py crafts spoofed-source UDP packets pointed at the
@@ -7,7 +7,7 @@
 # the script directory, and runs each probe synchronously.
 #
 # Public entrypoints:
-#   require_amp                      — skip if python3+scapy missing
+#   require_amp                      - skip if python3+scapy missing
 #   amp_run <vector> [count] [rate] [spoof-src] [extra...]
 #       Foreground run of one amplification probe. Captures stdout into
 #       AMP_LOG and returns the script's exit code.
@@ -64,7 +64,7 @@ _amp_resolve_script() {
 
 # amp_run <vector> [count] [rate] [spoof-src] [extra-args...]
 # Run one amplification probe synchronously. Returns the script's exit
-# code (non-zero only on argv / sanity errors — packet send is best-
+# code (non-zero only on argv / sanity errors - packet send is best-
 # effort and never aborts on partial delivery). Any args past the fourth
 # (e.g. --query) are forwarded verbatim to the vector script.
 amp_run() {

@@ -1,4 +1,4 @@
-# config-tls.yaml — TLS-enabled agent configuration for integration tests.
+# config-tls.yaml - TLS-enabled agent configuration for integration tests.
 # Cert/key path placeholders replaced by provisioning scripts.
 
 agent:

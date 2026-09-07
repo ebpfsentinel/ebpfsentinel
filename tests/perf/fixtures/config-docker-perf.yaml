@@ -1,4 +1,4 @@
-# config-docker-perf.yaml — Docker performance/overhead test config
+# config-docker-perf.yaml - Docker performance/overhead test config
 # Uses eth1 (private network) for traffic measurement via iperf3
 # All features enabled to measure worst-case Docker overhead
 agent:

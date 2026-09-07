@@ -1,4 +1,4 @@
-/// DDoS event type constants — stored as u8 in `PacketEvent.event_type`.
+/// DDoS event type constants - stored as u8 in `PacketEvent.event_type`.
 pub const EVENT_TYPE_DDOS_SYN: u8 = 10;
 pub const EVENT_TYPE_DDOS_ICMP: u8 = 11;
 pub const EVENT_TYPE_DDOS_AMP: u8 = 12;
@@ -99,7 +99,7 @@ pub struct IcmpConfig {
 
 // ── UDP Amplification Protection ─────────────────────────────────
 
-/// Key for the `AMP_PROTECT_CONFIG` HashMap — identifies a service port.
+/// Key for the `AMP_PROTECT_CONFIG` HashMap - identifies a service port.
 ///
 /// Size: 4 bytes.
 #[repr(C)]
@@ -185,7 +185,7 @@ pub const CONN_ESTABLISHED: u8 = 1;
 /// Connection state: FIN or RST received.
 pub const CONN_CLOSING: u8 = 2;
 
-/// Flood counter key — tracks per-source per-flood-type rate.
+/// Flood counter key - tracks per-source per-flood-type rate.
 ///
 /// Size: 8 bytes.
 #[repr(C)]

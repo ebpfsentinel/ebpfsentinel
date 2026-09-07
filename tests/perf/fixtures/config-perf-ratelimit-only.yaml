@@ -1,4 +1,4 @@
-# config-perf-ratelimit-only.yaml — Only ratelimit enabled (1M pps limit)
+# config-perf-ratelimit-only.yaml - Only ratelimit enabled (1M pps limit)
 # For measuring isolated ratelimit overhead without other domains.
 
 agent:

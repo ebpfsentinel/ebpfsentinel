@@ -18,7 +18,7 @@ use crate::ebpf_lifecycle::{EbpfProgramManager, program_config_map, xdp_config_m
 pub enum AuthProviderHandle {
     Jwt(Arc<JwtAuthProvider>),
     Oidc(Arc<OidcAuthProvider>),
-    /// API keys only — no key rotation needed (keys live in config YAML).
+    /// API keys only - no key rotation needed (keys live in config YAML).
     ApiKeyOnly,
 }
 
@@ -76,7 +76,7 @@ pub fn spawn_reload_task(
         let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<()>(4);
 
         // File watcher with 500ms debounce. A failure here only disables the
-        // file-watch trigger — SIGHUP and API-driven reloads keep working — so
+        // file-watch trigger - SIGHUP and API-driven reloads keep working - so
         // we log and continue rather than aborting the task. The debouncer is
         // bound for the task's lifetime; dropping it would stop delivering
         // events.
@@ -684,14 +684,14 @@ async fn perform_reload(
                 }
             }
             AuthProviderHandle::ApiKeyOnly => {
-                // API keys are reloaded from config — no separate rotation needed.
+                // API keys are reloaded from config - no separate rotation needed.
                 // A full config reload (phases 1-6) already picks up new YAML values.
                 tracing::debug!("API key auth: no key rotation required");
             }
         }
     }
 
-    // Phase 9: eBPF program lifecycle — load/unload programs based on enabled flags
+    // Phase 9: eBPF program lifecycle - load/unload programs based on enabled flags
     {
         let mut mgr = ebpf_manager.lock().await;
 

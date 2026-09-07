@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 02-ebpf-feature-overhead.bats — Per-feature eBPF overhead measurement
+# 02-ebpf-feature-overhead.bats - Per-feature eBPF overhead measurement
 # Measures TCP throughput with incremental feature enablement to isolate
 # the cost of each eBPF subsystem.
 #

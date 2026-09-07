@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 47-conntrack-kernel-ct-kill.bats — kernel-CT kill-flow path, 3-VM.
+# 47-conntrack-kernel-ct-kill.bats - kernel-CT kill-flow path, 3-VM.
 #
 # Exercises the kill_flow_via_xdp_ct / kill_flow_via_skb_ct kfunc path:
 # an established TCP flow is forwarded through the agent (which acts as
@@ -68,7 +68,7 @@ teardown_file() {
         return 1
     }
 
-    # Step 1 — wait for the kernel CT entry to land on the agent.
+    # Step 1 - wait for the kernel CT entry to land on the agent.
     local pre_count
     pre_count="$(wait_for_ct_entry "$dst" "$dport" tcp 15 1)" || {
         stop_iperf_flow "$iperf_pid"
@@ -77,7 +77,7 @@ teardown_file() {
     }
     [ "${pre_count:-0}" -gt 0 ]
 
-    # Step 2 — inject a deny rule covering this destination. The XDP
+    # Step 2 - inject a deny rule covering this destination. The XDP
     # firewall's next match should drop and invoke kill_flow_via_xdp_ct.
     local rule
     rule='{"id":"fw-ctkill-block-5201","priority":1,"action":"deny","protocol":"tcp","dst_port":5201,"scope":"global","enabled":true}'
@@ -89,7 +89,7 @@ teardown_file() {
         return 1
     }
 
-    # Step 3 — the CT entry should be gone shortly after the next
+    # Step 3 - the CT entry should be gone shortly after the next
     # packet on the 4-tuple traverses XDP. iperf3 is still emitting
     # data, so packets keep arriving; allow up to 15s for the kfunc
     # destroy to land and the table to settle.
@@ -112,13 +112,13 @@ teardown_file() {
     local dst="${BACKEND_VM_IP:-192.168.57.30}"
     local dport=5201
 
-    # Rule from the previous test is still in place — but be defensive
+    # Rule from the previous test is still in place - but be defensive
     # in case the suite is re-entered out of order.
     local rule
     rule='{"id":"fw-ctkill-block-5201","priority":1,"action":"deny","protocol":"tcp","dst_port":5201,"scope":"global","enabled":true}'
     api_post /api/v1/firewall/rules "$rule" >/dev/null 2>&1 || true
 
-    # Try once more — XDP should still drop the SYN, so no fresh CT
+    # Try once more - XDP should still drop the SYN, so no fresh CT
     # entry should appear. Pass the whole pipeline as one argument so the
     # remote login shell runs it (a nested `sh -c` would only run the first
     # word and silently never launch iperf3).

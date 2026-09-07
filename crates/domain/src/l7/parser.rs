@@ -159,7 +159,7 @@ fn is_ssh(payload: &[u8]) -> bool {
 }
 
 fn is_redis(payload: &[u8]) -> bool {
-    // Array-bulk: `*N\r\n$L\r\n...` — minimum 8 bytes.
+    // Array-bulk: `*N\r\n$L\r\n...` - minimum 8 bytes.
     if payload.len() < 8 || payload[0] != b'*' {
         return false;
     }
@@ -259,7 +259,7 @@ fn is_smtp(payload: &[u8]) -> bool {
         }
     }
 
-    // "220 " greeting — check for SMTP-like content (domain greeting)
+    // "220 " greeting - check for SMTP-like content (domain greeting)
     if upper.len() >= 4 && &upper[..4] == b"220 " {
         // SMTP 220 greeting typically contains a domain name
         // FTP 220 greeting typically contains "FTP" or "FileZilla" etc.
@@ -1094,7 +1094,7 @@ pub fn parse_ssh(payload: &[u8]) -> Result<SshBanner, L7Error> {
 
 /// Parse the leading RESP array of a Redis pipeline.
 ///
-/// Only the first array (the command) is decoded — subsequent pipelined
+/// Only the first array (the command) is decoded - subsequent pipelined
 /// commands are ignored to keep this helper O(n) in payload length.
 pub fn parse_redis(payload: &[u8]) -> Result<RedisCommand, L7Error> {
     if payload.first() != Some(&b'*') {
@@ -1295,7 +1295,7 @@ fn read_dns_qname(bytes: &[u8]) -> Result<String, L7Error> {
         if len == 0 {
             return Ok(out);
         }
-        // Reject compression pointers and oversized labels — this is the
+        // Reject compression pointers and oversized labels - this is the
         // first question, so they should never appear.
         if len & 0xC0 != 0 || len > 63 {
             return Err(L7Error::InvalidFormat {
@@ -2156,7 +2156,7 @@ mod tests {
     #[test]
     fn parse_redis_rejects_overflowing_bulk_length() {
         // A bulk length near usize::MAX must not wrap the bounds check and
-        // panic on an inverted slice range — it must return an error.
+        // panic on an inverted slice range - it must return an error.
         let payload = b"*1\r\n$18446744073709551615\r\nx";
         assert!(parse_redis(payload).is_err());
     }

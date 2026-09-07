@@ -104,7 +104,7 @@ pub enum Command {
         severity: Option<String>,
     },
 
-    /// Top talkers — live view of most active connections by traffic volume
+    /// Top talkers - live view of most active connections by traffic volume
     Top {
         #[command(flatten)]
         conn: ConnectionArgs,
@@ -118,7 +118,7 @@ pub enum Command {
         sort: String,
     },
 
-    /// Network flows — aggregated connection map from conntrack
+    /// Network flows - aggregated connection map from conntrack
     Flows {
         #[command(flatten)]
         conn: ConnectionArgs,
@@ -128,7 +128,7 @@ pub enum Command {
         limit: usize,
     },
 
-    /// Network risk score — single 0-10 metric summarizing security posture
+    /// Network risk score - single 0-10 metric summarizing security posture
     Score {
         #[command(flatten)]
         conn: ConnectionArgs,
@@ -138,7 +138,7 @@ pub enum Command {
         alert_limit: u64,
     },
 
-    /// Investigate an IP — correlate alerts, connections, DNS, blacklist, and fingerprints
+    /// Investigate an IP - correlate alerts, connections, DNS, blacklist, and fingerprints
     Investigate {
         #[command(flatten)]
         conn: ConnectionArgs,
@@ -151,7 +151,7 @@ pub enum Command {
         alert_limit: u64,
     },
 
-    /// Connection tracking — live flow events and status
+    /// Connection tracking - live flow events and status
     Conntrack {
         #[command(subcommand)]
         action: ConntrackAction,
@@ -550,7 +550,7 @@ pub enum DomainsCommand {
         /// Filter by domain (exact match)
         #[arg(long)]
         domain: Option<String>,
-        /// Minimum reputation score (0.0–1.0)
+        /// Minimum reputation score (0.0-1.0)
         #[arg(long)]
         min_score: Option<f64>,
         /// Page number (0-indexed)

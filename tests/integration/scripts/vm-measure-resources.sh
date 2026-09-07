@@ -1,5 +1,5 @@
 #!/bin/bash
-# vm-measure-resources.sh — Measure agent CPU and RSS from /proc
+# vm-measure-resources.sh - Measure agent CPU and RSS from /proc
 #
 # Used by perf-test-host-to-vm.sh. Runs inside the VM via vagrant ssh.
 #

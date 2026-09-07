@@ -1,4 +1,4 @@
-/// Load balancer event type constant — stored as u8 in `PacketEvent.event_type`.
+/// Load balancer event type constant - stored as u8 in `PacketEvent.event_type`.
 pub const EVENT_TYPE_LB: u8 = 14;
 
 /// LB action constants for `PacketEvent.action`.
@@ -33,7 +33,7 @@ pub const MAX_LB_BACKENDS_TOTAL: u32 = 65536;
 
 // ── Shared service index hash ──────────────────────────────────
 
-/// FNV-1a hash of a `u32` — shared by the eBPF data plane and userspace
+/// FNV-1a hash of a `u32` - shared by the eBPF data plane and userspace
 /// so both derive an identical per-service index (single source of
 /// truth, no drift between `LB_RR_STATE` / `LB_MAGLEV` keys).
 #[must_use]
@@ -92,7 +92,7 @@ pub struct LbServiceConfig {
 
 /// Compact service config for the two-level LB architecture.
 ///
-/// Backend IDs are no longer embedded — instead, `backend_start_id`
+/// Backend IDs are no longer embedded - instead, `backend_start_id`
 /// points into the global `LB_BACKENDS` map. The eBPF program iterates
 /// `backend_start_id..backend_start_id + backend_count` to find a
 /// healthy backend.
@@ -132,7 +132,7 @@ pub const MAX_MAGLEV_SERVICES: u32 = 256;
 /// Value for the `LB_MAGLEV` `HashMap`, keyed by service slot index.
 ///
 /// Built by userspace (pure domain table generator), read by eBPF with
-/// a single `entries[hash(5-tuple) % MAGLEV_RING_SIZE]` index — no
+/// a single `entries[hash(5-tuple) % MAGLEV_RING_SIZE]` index - no
 /// per-packet state write. Each entry is a slot index into the
 /// service's backend window (`0..backend_count`), or `MAGLEV_EMPTY`.
 ///
@@ -190,7 +190,7 @@ pub struct LbBackendEntry {
 ///
 /// Populated by userspace neighbor/ARP/ND resolution in the eBPF loader
 /// adapter. Read by the eBPF data plane only when a service is in
-/// `LB_MODE_L2DSR` — the destination Ethernet address is rewritten to
+/// `LB_MODE_L2DSR` - the destination Ethernet address is rewritten to
 /// `mac` and the packet is L2-redirected with no L3/L4 mutation.
 ///
 /// A dedicated 8-byte struct (not a bare `[u8; 6]`) so the type is a

@@ -11,7 +11,7 @@ use domain::firewall::entity::{
 // Deserialize fuzz data into a firewall scenario: rules + packets.
 //
 // Layout (variable-length):
-//   [0]    = number of rules (1–8)
+//   [0]    = number of rules (1-8)
 //   [1]    = selector byte (sub-target: 0=evaluate, 1=add+remove, 2=reload)
 //   rest   = consumed in 28-byte chunks (rule) and 20-byte chunks (packet)
 fuzz_target!(|data: &[u8]| {

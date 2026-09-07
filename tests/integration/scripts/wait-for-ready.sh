@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# wait-for-ready.sh — Poll agent readyz (eBPF loaded check)
+# wait-for-ready.sh - Poll agent readyz (eBPF loaded check)
 #
 # Usage: wait-for-ready.sh [--port 8080] [--host 127.0.0.1] [--max-attempts 30]
 set -euo pipefail
@@ -32,13 +32,13 @@ while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
         STATUS="$(echo "$RESPONSE" | jq -r '.status' 2>/dev/null)" || true
 
         if [ "$EBPF_LOADED" = "true" ]; then
-            echo "Agent is ready — eBPF programs loaded (attempt ${ATTEMPT}/${MAX_ATTEMPTS})"
+            echo "Agent is ready - eBPF programs loaded (attempt ${ATTEMPT}/${MAX_ATTEMPTS})"
             exit 0
         fi
 
-        echo "  attempt ${ATTEMPT}/${MAX_ATTEMPTS} — status=${STATUS} ebpf_loaded=${EBPF_LOADED}"
+        echo "  attempt ${ATTEMPT}/${MAX_ATTEMPTS} - status=${STATUS} ebpf_loaded=${EBPF_LOADED}"
     else
-        echo "  attempt ${ATTEMPT}/${MAX_ATTEMPTS} — no response"
+        echo "  attempt ${ATTEMPT}/${MAX_ATTEMPTS} - no response"
     fi
 
     sleep "$DELAY"

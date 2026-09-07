@@ -13,7 +13,7 @@ members = [
     "crates/warden",
     "crates/xtask",
 ]
-# eBPF program crates target bpfel-unknown-none (nightly) — excluded from default build
+# eBPF program crates target bpfel-unknown-none (nightly) - excluded from default build
 # Build via: cargo xtask ebpf-build
 exclude = [
     "crates/ebpf-helpers",

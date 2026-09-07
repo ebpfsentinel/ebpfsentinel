@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# perf-test-host-to-vm.sh — Host-to-VM performance test over VirtualBox private network
+# perf-test-host-to-vm.sh - Host-to-VM performance test over VirtualBox private network
 #
 # Topology:
 #   Host (192.168.56.1) ──> Vagrant VM (192.168.56.10)
@@ -98,7 +98,7 @@ else
 fi
 
 # --soak-duration N overrides whatever profile picked. Sampling cadence
-# scales with duration so an 8-hour soak doesn't emit 1920 samples — cap
+# scales with duration so an 8-hour soak doesn't emit 1920 samples - cap
 # at one sample every 5 minutes for long runs, floor at 30 s.
 if [ -n "$SOAK_DURATION_OVERRIDE" ]; then
     SOAK_DURATION="$SOAK_DURATION_OVERRIDE"
@@ -226,13 +226,13 @@ preflight_host() {
 
     # hping3 requires sudo for raw sockets
     if ! command -v hping3 &>/dev/null; then
-        echo "WARNING: hping3 not found — PPS and TCP latency tests will be skipped" >&2
+        echo "WARNING: hping3 not found - PPS and TCP latency tests will be skipped" >&2
     elif ! sudo -n true 2>/dev/null; then
-        echo "WARNING: hping3 requires passwordless sudo — PPS and TCP latency tests will be skipped" >&2
+        echo "WARNING: hping3 requires passwordless sudo - PPS and TCP latency tests will be skipped" >&2
     fi
 
     if ! command -v hey &>/dev/null; then
-        echo "WARNING: hey not found — API benchmarks will be skipped" >&2
+        echo "WARNING: hey not found - API benchmarks will be skipped" >&2
     fi
 
     if [ ! -f "${VAGRANT_DIR}/Vagrantfile" ]; then
@@ -253,26 +253,26 @@ preflight_host() {
 
 vm_up() {
     if [ "$SKIP_PROVISION" = "true" ]; then
-        echo "=== VM — skip provision (--skip-provision) ==="
+        echo "=== VM - skip provision (--skip-provision) ==="
         cd "$VAGRANT_DIR" && vagrant status | grep -q running || {
-            echo "  VM not running — starting without provision..."
+            echo "  VM not running - starting without provision..."
             cd "$VAGRANT_DIR" && vagrant up --no-provision
         }
     else
-        echo "=== VM — vagrant up ==="
+        echo "=== VM - vagrant up ==="
         cd "$VAGRANT_DIR" && vagrant up
     fi
     echo ""
 }
 
 vm_sync() {
-    echo "=== VM — rsync latest code ==="
+    echo "=== VM - rsync latest code ==="
     cd "$VAGRANT_DIR" && vagrant rsync
     echo ""
 }
 
 vm_detect_interface() {
-    echo "=== VM — Detect private network interface ==="
+    echo "=== VM - Detect private network interface ==="
     VM_INTERFACE="$(vm_ssh "ip -o addr show | grep '${VM_IP}/' | awk '{print \$2}'" | tr -d '\r\n')"
     if [ -z "$VM_INTERFACE" ]; then
         echo "ERROR: Could not find interface with IP $VM_IP in VM" >&2
@@ -286,7 +286,7 @@ vm_detect_interface() {
 # ── Build steps inside VM ─────────────────────────────────────────
 
 vm_build_binary() {
-    echo "=== VM — Build agent binary (cargo build --release) ==="
+    echo "=== VM - Build agent binary (cargo build --release) ==="
     cd "$VAGRANT_DIR" && vagrant ssh -c \
         'source "$HOME/.cargo/env" && cd ~/ebpfsentinel && cargo build --release 2>&1' \
         -- -q
@@ -295,7 +295,7 @@ vm_build_binary() {
 }
 
 vm_build_docker() {
-    echo "=== VM — Build Docker image ==="
+    echo "=== VM - Build Docker image ==="
     cd "$VAGRANT_DIR" && vagrant ssh -c \
         'cd ~/ebpfsentinel && docker build -f Dockerfile.agent -t ebpfsentinel:latest . 2>&1' \
         -- -q
@@ -304,7 +304,7 @@ vm_build_docker() {
 }
 
 vm_extract_ebpf_programs() {
-    echo "=== VM — Extract eBPF programs from Docker image ==="
+    echo "=== VM - Extract eBPF programs from Docker image ==="
     cd "$VAGRANT_DIR" && vagrant ssh -c '
         set -e
         EBPF_DIR=/usr/local/lib/ebpfsentinel
@@ -476,7 +476,7 @@ host_measure_icmp_latency() {
     echo "{\"avg_ms\": ${avg_ms:-0}, \"min_ms\": ${min_ms:-0}, \"max_ms\": ${max_ms:-0}}"
 }
 
-# _has_sudo — check if passwordless sudo is available
+# _has_sudo - check if passwordless sudo is available
 _has_sudo() {
     sudo -n true 2>/dev/null
 }
@@ -558,9 +558,9 @@ host_verify_blocked_port() {
     local port="${1:?usage: host_verify_blocked_port <port>}"
 
     if timeout 3 bash -c "echo '' | ncat -w 2 $VM_IP $port" >/dev/null 2>&1; then
-        return 1  # Connection succeeded — not blocked
+        return 1  # Connection succeeded - not blocked
     else
-        return 0  # Connection failed — blocked
+        return 0  # Connection failed - blocked
     fi
 }
 

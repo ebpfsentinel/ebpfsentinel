@@ -48,7 +48,7 @@ def build_handler(log_path: str, fail_first: int):
                     fh.flush()
             return index
 
-        def do_POST(self):  # noqa: N802 — BaseHTTPRequestHandler API
+        def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
             index = self._record(body)
@@ -63,7 +63,7 @@ def build_handler(log_path: str, fail_first: int):
             self.end_headers()
             self.wfile.write(payload)
 
-        def do_GET(self):  # noqa: N802 — readiness probe for the suite
+        def do_GET(self):  # noqa: N802 - readiness probe for the suite
             payload = b'{"ready":true}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

@@ -333,7 +333,7 @@ pub enum ReputationFactor {
 }
 
 impl ReputationFactor {
-    /// Base weight for this factor type (0.0–1.0).
+    /// Base weight for this factor type (0.0-1.0).
     pub fn weight(&self) -> f64 {
         match self {
             Self::BlocklistHit { .. } => 0.9,

@@ -1,4 +1,4 @@
-# config-ebpf-ddos.yaml — DDoS/scrub eBPF scenario test config
+# config-ebpf-ddos.yaml - DDoS/scrub eBPF scenario test config
 # Tests: tc-scrub program loading, DDoS detection, policy enforcement
 #
 # Network topology:

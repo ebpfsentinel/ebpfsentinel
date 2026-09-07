@@ -41,7 +41,7 @@ pub enum LbAlgorithm {
     Weighted,
     IpHash,
     LeastConn,
-    /// Maglev consistent hashing — O(1) lookup, ~1/N flow disruption
+    /// Maglev consistent hashing - O(1) lookup, ~1/N flow disruption
     /// on backend set change. Required for L2 DSR / multi-node ECMP.
     Maglev,
 }

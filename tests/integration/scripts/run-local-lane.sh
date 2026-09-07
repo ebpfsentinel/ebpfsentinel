@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-local-lane.sh — run a set of agent-local (netns) bats suites on the agent
+# run-local-lane.sh - run a set of agent-local (netns) bats suites on the agent
 # VM, one at a time with a clean eBPF/netns slate between each, and write a
 # compact pass/skip/fail summary to /tmp/local-lane-result.txt.
 #
@@ -11,7 +11,7 @@ PROJECT_ROOT="${PROJECT_ROOT:-/home/vagrant/ebpfsentinel}"
 # The canonical lane provisions every prerequisite a suite owns, so a
 # `soft_skip` here means a regression rather than a missing capability.
 # Export EBPFSENTINEL_STRICT_SKIPS=1 before calling this script to turn those
-# skips into failures (env_skip is unaffected — see lib/skip_policy.bash).
+# skips into failures (env_skip is unaffected - see lib/skip_policy.bash).
 export EBPFSENTINEL_STRICT_SKIPS="${EBPFSENTINEL_STRICT_SKIPS:-0}"
 cd "${PROJECT_ROOT}/tests/integration" || exit 1
 OUT=/tmp/local-lane-result.txt

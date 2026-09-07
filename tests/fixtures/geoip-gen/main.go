@@ -33,7 +33,7 @@ type geo struct {
 	asnOrg  string
 }
 
-// One row per network. Kept tiny on purpose — these are test fixtures.
+// One row per network. Kept tiny on purpose - these are test fixtures.
 var rows = []geo{
 	{"10.200.0.0/24", "KP", 65001, "ebpfsentinel-test-kp"},
 	{"192.168.56.0/24", "CU", 65002, "ebpfsentinel-test-cu"},

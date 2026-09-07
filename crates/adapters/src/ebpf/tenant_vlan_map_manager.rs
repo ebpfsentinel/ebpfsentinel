@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn set_tenant_vlans_empty_entries_is_noop() {
         let mut mgr = TenantVlanMapManager::new();
-        // No maps registered, empty entries — should succeed without error.
+        // No maps registered, empty entries - should succeed without error.
         let result = mgr.set_tenant_vlans(&[]);
         assert!(result.is_ok());
     }
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn set_tenant_vlans_no_maps_succeeds() {
         let mut mgr = TenantVlanMapManager::new();
-        // Non-empty entries but no maps — loop body never executes.
+        // Non-empty entries but no maps - loop body never executes.
         let result = mgr.set_tenant_vlans(&[(100, 1), (200, 2)]);
         assert!(result.is_ok());
     }

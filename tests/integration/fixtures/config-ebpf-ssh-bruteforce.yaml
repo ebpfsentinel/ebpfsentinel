@@ -1,4 +1,4 @@
-# config-ebpf-ssh-bruteforce.yaml — SSH brute-force scenario fixture.
+# config-ebpf-ssh-bruteforce.yaml - SSH brute-force scenario fixture.
 #
 # Pre-loads an IDS threshold rule and an IPS auto-block rule for TCP/22
 # so the suite can drive a synthetic connection burst from the test

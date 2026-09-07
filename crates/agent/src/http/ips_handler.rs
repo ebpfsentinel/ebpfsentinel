@@ -71,7 +71,7 @@ pub struct AddBlacklistRequest {
     /// Optional human-readable reason. Defaults to `manual-api`.
     #[serde(default)]
     pub reason: Option<String>,
-    /// Optional TTL in seconds. Defaults to — and is capped at — the policy's
+    /// Optional TTL in seconds. Defaults to - and is capped at - the policy's
     /// maximum blacklist duration.
     #[serde(default)]
     pub ttl_secs: Option<u64>,
@@ -86,7 +86,7 @@ pub struct BlacklistMutationResponse {
 
 // ── Handlers ────────────────────────────────────────────────────────
 
-/// `GET /api/v1/ips/rules` — list all IPS rules.
+/// `GET /api/v1/ips/rules` - list all IPS rules.
 #[utoipa::path(
     get, path = "/api/v1/ips/rules",
     tag = "IPS",
@@ -128,7 +128,7 @@ pub async fn list_ips_rules(State(state): State<Arc<AppState>>) -> Json<Vec<IpsR
     Json(rules)
 }
 
-/// `PATCH /api/v1/ips/rules/{id}` — toggle a rule's mode.
+/// `PATCH /api/v1/ips/rules/{id}` - toggle a rule's mode.
 #[utoipa::path(
     patch, path = "/api/v1/ips/rules/{id}",
     tag = "IPS",
@@ -244,7 +244,7 @@ pub async fn patch_ips_rule_mode(
     }
 }
 
-/// `GET /api/v1/ips/blacklist` — list current IPS blacklist entries.
+/// `GET /api/v1/ips/blacklist` - list current IPS blacklist entries.
 #[utoipa::path(
     get, path = "/api/v1/ips/blacklist",
     tag = "IPS",
@@ -278,7 +278,7 @@ pub async fn list_ips_blacklist(
     Json(entries)
 }
 
-/// `POST /api/v1/ips/blacklist` — manually add an IP to the IPS blacklist.
+/// `POST /api/v1/ips/blacklist` - manually add an IP to the IPS blacklist.
 ///
 /// Drives the same `add_to_blacklist` path the DNS-blocklist and reputation
 /// auto-block features already use, so the entry is visible via `GET` and
@@ -347,7 +347,7 @@ pub async fn add_ips_blacklist(
     ))
 }
 
-/// `DELETE /api/v1/ips/blacklist/{ip}` — remove an IP from the IPS blacklist.
+/// `DELETE /api/v1/ips/blacklist/{ip}` - remove an IP from the IPS blacklist.
 #[utoipa::path(
     delete, path = "/api/v1/ips/blacklist/{ip}",
     tag = "IPS",
@@ -399,7 +399,7 @@ pub async fn delete_ips_blacklist(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `GET /api/v1/ips/domain-blocks` — list IPS blacklist entries originating from domain mechanisms.
+/// `GET /api/v1/ips/domain-blocks` - list IPS blacklist entries originating from domain mechanisms.
 #[utoipa::path(
     get, path = "/api/v1/ips/domain-blocks",
     tag = "IPS",

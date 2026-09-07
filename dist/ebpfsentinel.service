@@ -6,7 +6,7 @@ Wants=network-online.target
 # The agent brokers the privileged kernel ops it cannot perform from its user
 # namespace (conntrack/routes/ARP/pcap) to the warden, and needs it for the
 # one-shot bpffs delegation at startup. `Wants` (not `Requires`) so a warden
-# restart does not tear the agent down — the agent holds its own eBPF + maps and
+# restart does not tear the agent down - the agent holds its own eBPF + maps and
 # its warden client reconnects.
 Wants=ebpfsentinel-warden.service
 
@@ -15,7 +15,7 @@ Type=simple
 
 # eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+), a user-namespace
 # feature. The agent self-unshares a user namespace, has the warden delegate a
-# bpffs over the socket, and loads its own eBPF through the token — holding NO
+# bpffs over the socket, and loads its own eBPF through the token - holding NO
 # capabilities over the host (no CAP_BPF). It runs as root only so it can map
 # namespace-0 to real root and create the bpffs mountpoint under /sys/fs/bpf; do
 # NOT set NoNewPrivileges (it would block the userns setup). Needs unprivileged

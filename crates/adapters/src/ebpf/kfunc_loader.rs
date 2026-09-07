@@ -52,7 +52,7 @@ const BPF_PROG_LOAD: u32 = 5;
 const BPF_BTF_LOAD: u32 = 18;
 
 /// The process-global BPF token fd (set by the agent after `BPF_TOKEN_CREATE`),
-/// or `None` when loading via capabilities — so every raw BTF/program load this
+/// or `None` when loading via capabilities - so every raw BTF/program load this
 /// module issues is token-authorized.
 fn global_token_fd() -> Option<i32> {
     super::bpf_token::global_token_fd()
@@ -70,7 +70,7 @@ const BPF_PROG_TYPE_XDP: u32 = 6;
 
 /// `BPF_TRACE_UPROBE_MULTI` (`enum bpf_attach_type`). A KPROBE-type program
 /// must be loaded with this `expected_attach_type` to be attachable via a
-/// `uprobe_multi` `BPF_LINK_CREATE` — the token-friendly uprobe attach path.
+/// `uprobe_multi` `BPF_LINK_CREATE` - the token-friendly uprobe attach path.
 const BPF_TRACE_UPROBE_MULTI: u32 = 48;
 
 /// `BPF_F_*` prog-load flags.
@@ -78,10 +78,10 @@ const BPF_F_SLEEPABLE: u32 = 1 << 4;
 const BPF_F_XDP_HAS_FRAGS: u32 = 1 << 5;
 /// Bind the program to one netdev at load so the verifier resolves
 /// `bpf_xdp_metadata_rx_*` against that device's `xdp_metadata_ops` (no HW
-/// offload — the program still runs on the CPU). Kernel 6.3+.
+/// offload - the program still runs on the CPU). Kernel 6.3+.
 const BPF_F_XDP_DEV_BOUND_ONLY: u32 = 1 << 6;
 
-/// `BPF_ALU64 | BPF_MOV | BPF_K` — `dst = imm`. Used to neutralize a
+/// `BPF_ALU64 | BPF_MOV | BPF_K` - `dst = imm`. Used to neutralize a
 /// device-bound metadata kfunc call into `r0 = imm` when the program is not
 /// loaded device-bound.
 const BPF_MOV64_IMM: u8 = 0xb7;
@@ -92,7 +92,7 @@ const NEG_EOPNOTSUPP: i32 = -95;
 
 /// Device-bound-only XDP receive-metadata kfuncs. The verifier rejects these
 /// unless the program is loaded device-bound, so an object calling any of them
-/// must route through this loader even when it uses no module kfuncs — aya can
+/// must route through this loader even when it uses no module kfuncs - aya can
 /// neither set `prog_ifindex` nor neutralize the calls.
 const DEV_BOUND_METADATA_KFUNCS: &[&str] = &[
     "bpf_xdp_metadata_rx_hash",
@@ -225,10 +225,10 @@ fn unique_names(sites: &[KfuncSite]) -> Vec<String> {
 /// How an object's kfunc usage decides its load strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KfuncClass {
-    /// No kfunc calls — load with plain aya.
+    /// No kfunc calls - load with plain aya.
     None,
     /// Only vmlinux kfuncs (`off == 0`, no `fd_array`) **and** none that require
-    /// a device-bound program — prepatch the resolved btf ids and let aya load
+    /// a device-bound program - prepatch the resolved btf ids and let aya load
     /// **and** attach the program unchanged.
     VmlinuxOnly,
     /// Needs the raw loader because aya cannot emit what the object requires: a
@@ -256,7 +256,7 @@ pub fn classify(elf: &[u8], resolver: &KfuncResolver) -> Result<KfuncClass, Kfun
     let mut needs_raw = false;
     for name in &names {
         // A module kfunc needs the fd_array; a device-bound metadata kfunc
-        // needs prog_ifindex or neutralization — neither is expressible in aya.
+        // needs prog_ifindex or neutralization - neither is expressible in aya.
         if resolver.resolve(name)?.module_name.is_some() || is_dev_bound_metadata_kfunc(name) {
             needs_raw = true;
         }
@@ -331,7 +331,7 @@ pub fn prepatch_kfunc_calls(elf: &[u8]) -> Result<Vec<u8>, KfuncLoaderError> {
 
 /// Rewrite every kfunc call in `elf` to its resolved vmlinux `btf_id`
 /// (`off == 0`), producing an object aya can load **and** attach unchanged.
-/// Errors if any site resolves to a module kfunc — those must route through
+/// Errors if any site resolves to a module kfunc - those must route through
 /// [`prepatch_kfunc_calls`] + [`load_kfunc_programs`] instead. Use for
 /// [`KfuncClass::VmlinuxOnly`] objects.
 pub fn prepatch_vmlinux_kfuncs(
@@ -670,7 +670,7 @@ struct ProgLoadAttr {
     // real, zero-initialised field: were it left as struct tail padding, Rust
     // leaves those bytes uninitialised, the kernel interprets the garbage as a
     // non-zero count, and then walks `fd_array` (which is NULL here) for that
-    // many entries — faulting every `BPF_PROG_LOAD` with `EFAULT`, 0 insns
+    // many entries - faulting every `BPF_PROG_LOAD` with `EFAULT`, 0 insns
     // processed. `BPF_MAP_CREATE`/`BPF_BTF_LOAD` have no such trailing field,
     // which is why only program loads were affected.
     fd_array_cnt: u32,
@@ -699,8 +699,8 @@ struct RawProgLoad<'a> {
 /// The kernel requires `line_info` records to have strictly-increasing
 /// `insn_off` (the first `u32` of each record) and rejects the program with
 /// `EINVAL` (`"Invalid line_info[N].insn_off"`) otherwise. Some codegen maps two
-/// source spans to a single instruction — most notably a zero-width inline-asm
-/// barrier — producing two records at the same offset. Drop any record that
+/// source spans to a single instruction - most notably a zero-width inline-asm
+/// barrier - producing two records at the same offset. Drop any record that
 /// does not advance the offset; `line_info` is debug metadata used only to
 /// annotate the verifier log, so dropping a duplicate keeps the program
 /// loadable without affecting its behaviour.
@@ -794,7 +794,7 @@ fn report_verifier_stats(name: &str, log: &[u8]) {
 fn raw_prog_load(req: &RawProgLoad<'_>) -> Result<OwnedFd, KfuncLoaderError> {
     // func_info/line_info are passed straight through. They are not merely
     // debug metadata: a kfunc called from a BPF-to-BPF *subprogram* needs its
-    // owning subprogram's BTF, which the kernel locates via func_info — without
+    // owning subprogram's BTF, which the kernel locates via func_info - without
     // it the load fails (`EINVAL`, with no verifier-log line). `relocate_calls`
     // already produced the correct *combined* multi-subprogram table (each
     // subprogram's records appended with `insn_off` rebased and `num_info`
@@ -968,7 +968,7 @@ unsafe fn bpf(cmd: u32, attr: *mut core::ffi::c_void, size: usize) -> i64 {
 // ── Full token-mode object loader ───────────────────────────────────────
 //
 // When the agent holds a BPF token (kernel 6.9+, no CAP_BPF), aya cannot load
-// anything — every map_create / btf_load / prog_load needs the token fd in its
+// anything - every map_create / btf_load / prog_load needs the token fd in its
 // attr, which stock aya does not pass. This loader does the whole object via
 // raw syscalls (token-authorized), reusing `load_kfunc_programs` for the BTF
 // load + relocation + program load (already token-aware), and adds the one
@@ -1148,7 +1148,7 @@ fn map_create_attr(name: &str, def: &aya_obj::Map, btf_fd: Option<RawFd>) -> Map
         attr.value_size = size;
     }
 
-    // BTF-defined maps carry key/value BTF type ids — except a set of map types
+    // BTF-defined maps carry key/value BTF type ids - except a set of map types
     // the kernel rejects BTF for (mirrors libbpf issue #355 / aya).
     //
     // Every program this repo ships now defines its maps in `.maps`, so `def` is
@@ -1334,8 +1334,8 @@ fn is_shareable_map(map_type: u32) -> bool {
 /// a ring named `EVENTS`, each with its own record layout and byte size, and
 /// each loaded program gets its own reader task. Collapsing them onto one
 /// kernel object made every reader drain the same ring, so a single kernel
-/// record was decoded once per loaded program — the duplicate alerts that made
-/// the dedup window look broken — and let a `uprobe-dlp` record land in a
+/// record was decoded once per loaded program - the duplicate alerts that made
+/// the dedup window look broken - and let a `uprobe-dlp` record land in a
 /// packet-event reader. A private ring per object is also what the aya path
 /// produces, since none of these maps ask for pinning in their definition.
 fn create_object_maps(
@@ -1360,7 +1360,7 @@ fn create_object_maps(
         }
         let fd = raw_map_create(name, def, btf_fd)?;
         // Best-effort pin so sibling objects reuse the same map. A racing
-        // EEXIST is fine — re-fetch the existing pin instead.
+        // EEXIST is fine - re-fetch the existing pin instead.
         match obj_pin(fd.as_raw_fd(), &pin) {
             Ok(()) => out.insert(name.clone(), (fd, map_type)),
             Err(_) => match obj_get(&pin) {
@@ -1373,7 +1373,7 @@ fn create_object_maps(
 }
 
 /// Load a complete eBPF object through the BPF token: create all maps, load
-/// BTF, relocate, and load every program — all token-authorized, no aya, no
+/// BTF, relocate, and load every program - all token-authorized, no aya, no
 /// `CAP_BPF`. Returns the maps (wrapped for the managers) and program fds.
 pub fn load_object_token(
     elf: &[u8],
@@ -1659,7 +1659,7 @@ mod tests {
         // Seven programs declare a ring named `EVENTS`; one kernel ring behind
         // them would be drained once per loaded program.
         assert!(!is_shareable_map(BPF_MAP_TYPE_RINGBUF as u32));
-        // Lookup tables stay shared — that is what the pinning is for.
+        // Lookup tables stay shared - that is what the pinning is for.
         for shared in [
             BPF_MAP_TYPE_ARRAY,
             BPF_MAP_TYPE_PERCPU_ARRAY,

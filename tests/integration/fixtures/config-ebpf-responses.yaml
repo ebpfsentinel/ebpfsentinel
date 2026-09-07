@@ -1,4 +1,4 @@
-# config-ebpf-responses.yaml — Response engine lifecycle (suite 52).
+# config-ebpf-responses.yaml - Response engine lifecycle (suite 52).
 #
 # Drives the in-memory response engine via /api/v1/responses/manual.
 # Firewall is enabled so the audit subsystem has a sensible context;

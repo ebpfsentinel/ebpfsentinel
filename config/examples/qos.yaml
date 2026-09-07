@@ -1,4 +1,4 @@
-# eBPFsentinel — Traffic Shaping / QoS Configuration Example
+# eBPFsentinel - Traffic Shaping / QoS Configuration Example
 # =========================================================
 #
 # Dummynet-inspired QoS with pipes, queues, and classifiers.
@@ -23,35 +23,35 @@
 # and has no effect on an ingress-only pipe.
 #
 # Fields (QosPipe):
-#   id         — Unique pipe identifier (required)
-#   bandwidth  — Max bandwidth ("100mbps", "1gbps", "500kbps", "1000bps")
-#   delay      — Added latency in milliseconds (default: 0)
-#   loss       — Packet loss percentage, 0.0–100.0 (default: 0.0)
-#   burst      — Token bucket burst size ("64kb", "1mb", "4096b")
-#   direction  — Hook shaped: "egress", "ingress", or "both" (default: "egress")
-#   enabled    — Administrative enable flag (default: true)
+#   id         - Unique pipe identifier (required)
+#   bandwidth  - Max bandwidth ("100mbps", "1gbps", "500kbps", "1000bps")
+#   delay      - Added latency in milliseconds (default: 0)
+#   loss       - Packet loss percentage, 0.0-100.0 (default: 0.0)
+#   burst      - Token bucket burst size ("64kb", "1mb", "4096b")
+#   direction  - Hook shaped: "egress", "ingress", or "both" (default: "egress")
+#   enabled    - Administrative enable flag (default: true)
 #
 # Fields (QosQueue):
-#   id         — Unique queue identifier (required)
-#   pipe_id    — Pipe this queue is attached to (required)
-#   enabled    — Administrative enable flag (default: true)
+#   id         - Unique queue identifier (required)
+#   pipe_id    - Pipe this queue is attached to (required)
+#   enabled    - Administrative enable flag (default: true)
 #
 # Fields (QosClassifier):
-#   id         — Unique classifier identifier (required)
-#   queue_id   — Target queue (required)
-#   priority   — Tie-break between classifiers whose match criteria collapse
+#   id         - Unique classifier identifier (required)
+#   queue_id   - Target queue (required)
+#   priority   - Tie-break between classifiers whose match criteria collapse
 #                onto the same lookup key; lower wins (default: 0)
-#   match      — Traffic match criteria (all optional, omit = wildcard):
-#     src_ip     — Source host ("10.0.0.7", or "10.0.0.7/32")
-#     dst_ip     — Destination host ("192.168.1.10")
+#   match      - Traffic match criteria (all optional, omit = wildcard):
+#     src_ip     - Source host ("10.0.0.7", or "10.0.0.7/32")
+#     dst_ip     - Destination host ("192.168.1.10")
 #                  Classifiers are keyed on an exact IPv4 address, so a
 #                  shorter prefix or an IPv6 address is refused at load;
 #                  shape IPv6 by port, protocol or DSCP instead.
-#     src_port   — Source port
-#     dst_port   — Destination port
-#     protocol   — "tcp", "udp", "icmp", or protocol number
-#     dscp       — DSCP value 0–63 (e.g. 46 = EF, 34 = AF41)
-#     vlan_id    — 802.1Q VLAN ID (0-4094); omit to match any VLAN,
+#     src_port   - Source port
+#     dst_port   - Destination port
+#     protocol   - "tcp", "udp", "icmp", or protocol number
+#     dscp       - DSCP value 0-63 (e.g. 46 = EF, 34 = AF41)
+#     vlan_id    - 802.1Q VLAN ID (0-4094); omit to match any VLAN,
 #                  0 to match untagged traffic only
 #
 # Usage:
@@ -81,7 +81,7 @@ qos:
   # Each pipe is an independent shaper with its own bandwidth/delay/loss.
 
   pipes:
-    # WAN uplink — shape outbound to match ISP speed (100 Mbps)
+    # WAN uplink - shape outbound to match ISP speed (100 Mbps)
     - id: pipe-wan
       bandwidth: "100mbps"
       delay: 0
@@ -91,7 +91,7 @@ qos:
       interfaces: [wan]           # Apply only to the "wan" interface group (optional, default: all)
       enabled: true
 
-    # VoIP pipe — reserved 10 Mbps
+    # VoIP pipe - reserved 10 Mbps
     - id: pipe-voip
       bandwidth: "10mbps"
       delay: 0
@@ -100,7 +100,7 @@ qos:
       direction: both
       enabled: true
 
-    # Bulk/background pipe — limited to 20 Mbps
+    # Bulk/background pipe - limited to 20 Mbps
     - id: pipe-bulk
       bandwidth: "20mbps"
       delay: 0
@@ -109,20 +109,20 @@ qos:
       direction: egress
       enabled: true
 
-    # WAN emulation — simulate a degraded link (for testing)
+    # WAN emulation - simulate a degraded link (for testing)
     - id: pipe-wan-emulation
       bandwidth: "10mbps"
       delay: 50                # 50ms added latency
       loss: 1.0                # 1% random packet loss
       burst: "32kb"
       direction: egress
-      enabled: false           # Disabled — for testing only
+      enabled: false           # Disabled - for testing only
 
   # ── Queues ─────────────────────────────────────────────────────────
   # Queues group the classifiers that share a pipe.
 
   queues:
-    # Default queue on the WAN pipe — catch-all traffic
+    # Default queue on the WAN pipe - catch-all traffic
     - id: queue-default
       pipe_id: pipe-wan
       enabled: true
@@ -132,12 +132,12 @@ qos:
       pipe_id: pipe-wan
       enabled: true
 
-    # VoIP queue — attached to the reserved VoIP pipe
+    # VoIP queue - attached to the reserved VoIP pipe
     - id: queue-voip
       pipe_id: pipe-voip
       enabled: true
 
-    # Video conferencing — shares the VoIP pipe
+    # Video conferencing - shares the VoIP pipe
     - id: queue-video
       pipe_id: pipe-voip
       enabled: true
@@ -152,7 +152,7 @@ qos:
   # so a wildcard classifier is what puts everything else under a pipe.
 
   classifiers:
-    # VoIP — SIP signaling (UDP 5060) and RTP (DSCP EF = 46)
+    # VoIP - SIP signaling (UDP 5060) and RTP (DSCP EF = 46)
     - id: cls-sip
       queue_id: queue-voip
       interfaces: [lan]           # Apply only to the "lan" interface group (optional, default: all)
@@ -166,7 +166,7 @@ qos:
       match:
         dscp: 46               # EF (Expedited Forwarding)
 
-    # Video conferencing — common ports
+    # Video conferencing - common ports
     - id: cls-zoom
       queue_id: queue-video
       match:
@@ -179,48 +179,48 @@ qos:
         protocol: udp
         dst_port: 3478
 
-    # Interactive — SSH
+    # Interactive - SSH
     - id: cls-ssh
       queue_id: queue-interactive
       match:
         protocol: tcp
         dst_port: 22
 
-    # Interactive — HTTPS (web browsing)
+    # Interactive - HTTPS (web browsing)
     - id: cls-https
       queue_id: queue-interactive
       match:
         protocol: tcp
         dst_port: 443
 
-    # Interactive — HTTP
+    # Interactive - HTTP
     - id: cls-http
       queue_id: queue-interactive
       match:
         protocol: tcp
         dst_port: 80
 
-    # Bulk — large file transfers, backups (DSCP CS1 = 8)
+    # Bulk - large file transfers, backups (DSCP CS1 = 8)
     - id: cls-bulk-dscp
       queue_id: queue-bulk
       match:
         dscp: 8                # CS1 (Scavenger)
 
-    # Bulk — rsync traffic
+    # Bulk - rsync traffic
     - id: cls-rsync
       queue_id: queue-bulk
       match:
         protocol: tcp
         dst_port: 873
 
-    # Bulk — BitTorrent range (common ephemeral ports)
+    # Bulk - BitTorrent range (common ephemeral ports)
     - id: cls-torrent
       queue_id: queue-bulk
       match:
         protocol: tcp
         dst_port: 6881
 
-    # Default catch-all — everything else goes to default queue
+    # Default catch-all - everything else goes to default queue
     - id: cls-default
       queue_id: queue-default
       match: {}                # Empty match = wildcard (all traffic)

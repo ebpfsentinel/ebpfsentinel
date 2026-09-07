@@ -1,24 +1,24 @@
 #!/usr/bin/env bats
-# 55-ipv6-full-path-sweep.bats — IPv6 parity sweep across dataplane features.
+# 55-ipv6-full-path-sweep.bats - IPv6 parity sweep across dataplane features.
 #
 # Scope:
 #   Single-VM topology asserts the observable contract for every feature
 #   that should accept IPv6 inputs:
 #
-#     * Firewall — IPv6 CIDR rule loads + surfaces on REST with the v6
+#     * Firewall - IPv6 CIDR rule loads + surfaces on REST with the v6
 #       prefix preserved; a matching IPv4 rule co-exists without state
 #       cross-contamination.
-#     * IDS — IPv6-scoped signature loads + surfaces via REST; rule count
+#     * IDS - IPv6-scoped signature loads + surfaces via REST; rule count
 #       in the rules_loaded gauge reflects the IDS rule.
-#     * IPS — auto-blacklist surface accepts both v4 and v6 sources
+#     * IPS - auto-blacklist surface accepts both v4 and v6 sources
 #       (blacklist endpoint is family-agnostic).
-#     * Ratelimit — per-IPv6 source rule loads + surfaces on REST.
-#     * NAT — covered by suite 50 (NPTv6); here we re-assert the routing
+#     * Ratelimit - per-IPv6 source rule loads + surfaces on REST.
+#     * NAT - covered by suite 50 (NPTv6); here we re-assert the routing
 #       NAT REST surface is reachable when IPv6 prefixes are configured.
-#     * DNS — AAAA query observation: the DNS subsystem accepts AAAA on
+#     * DNS - AAAA query observation: the DNS subsystem accepts AAAA on
 #       the observer surface and the metrics family is exposed.
 #
-# Coverage gaps (tracked, deferred — require multi-VM topology):
+# Coverage gaps (tracked, deferred - require multi-VM topology):
 #
 #   * Wire-level IPv6 traffic that triggers an IDS alert via tc-ids on
 #     the veth pair. The tc-ids program inspects both families, but the
@@ -36,7 +36,7 @@ load '../lib/helpers'
 load '../lib/ebpf_helpers'
 load '../lib/nptv6_helpers'
 
-# IPv6 endpoints — link-local-ish ULA bound on the host + namespace.
+# IPv6 endpoints - link-local-ish ULA bound on the host + namespace.
 EBPF_HOST_V6="fd00:59::1"
 EBPF_NS_V6="fd00:59::2"
 EBPF_V6_PREFIX_LEN="64"
@@ -88,7 +88,7 @@ teardown_file() {
     rm -f "${PREPARED_CONFIG:-}"
 }
 
-# ── Firewall — IPv6 CIDR rule surfaces with prefix preserved ───────
+# ── Firewall - IPv6 CIDR rule surfaces with prefix preserved ───────
 
 @test "firewall surfaces the configured IPv6 rule with the v6 prefix" {
     local body
@@ -131,7 +131,7 @@ teardown_file() {
     }
 }
 
-# ── IDS — IPv6-scoped signature loaded ─────────────────────────────
+# ── IDS - IPv6-scoped signature loaded ─────────────────────────────
 
 @test "IDS surfaces the IPv6 probe signature" {
     local body
@@ -149,7 +149,7 @@ teardown_file() {
     }
 }
 
-# ── IPS — auto-blacklist surface accepts an IPv6 source ────────────
+# ── IPS - auto-blacklist surface accepts an IPv6 source ────────────
 
 @test "IPS blacklist endpoint accepts an IPv6 entry" {
     local target="fd00:59::dead"
@@ -178,7 +178,7 @@ teardown_file() {
     api_delete "/api/v1/ips/blacklist/${target}" >/dev/null 2>&1 || true
 }
 
-# ── Ratelimit — the v4/v6 source boundary holds ────────────────────
+# ── Ratelimit - the v4/v6 source boundary holds ────────────────────
 
 @test "ratelimit surfaces the per-source rule" {
     local body
@@ -224,7 +224,7 @@ teardown_file() {
         send_tcp_from_ns "${EBPF_HOST_IP}" 65511 "probe-v4" 1 || true
     done
 
-    # v6 burst (best-effort — kernel must accept the v6 socket call).
+    # v6 burst (best-effort - kernel must accept the v6 socket call).
     for _ in 1 2 3; do
         ip netns exec "${EBPF_TEST_NS}" timeout 2 \
             ncat -6 -w 2 "${EBPF_HOST_V6}" 65510 </dev/null 2>/dev/null || true
@@ -237,7 +237,7 @@ teardown_file() {
     [ -n "${after}" ] || after=0
 
     # On the degraded path the packets counter can stay flat if the
-    # kernel rejects the v6 socket before tc sees it — fall back to
+    # kernel rejects the v6 socket before tc sees it - fall back to
     # asserting the metric remained exposed (no agent crash) in that
     # case, which is the contract the v4/v6 cross-contamination AC
     # actually relies on.
@@ -256,7 +256,7 @@ teardown_file() {
     }
 }
 
-# ── DNS observer — AAAA query surface ──────────────────────────────
+# ── DNS observer - AAAA query surface ──────────────────────────────
 
 @test "DNS subsystem stays ready when AAAA queries are issued" {
     require_tool ncat
@@ -267,7 +267,7 @@ teardown_file() {
     local hex_query='AAAA0100000100000000000007 6578616D706C6503636F6D0000 1C0001'
     hex_query="${hex_query// /}"
 
-    # Send to a sink port (the host won't reply — that's fine, we only
+    # Send to a sink port (the host won't reply - that's fine, we only
     # need the agent's DNS parser to ingest the packet).
     echo -ne "$(printf '%b' "$(echo "${hex_query}" \
         | sed 's/\(..\)/\\x\1/g')")" \
@@ -341,7 +341,7 @@ teardown_file() {
     # Each step is an idempotent `replace` so the test self-heals if a reboot
     # dropped the imperative provisioner addresses. Unlike suite 50 (NPTv6),
     # no prefix rewrite is configured, so the backend must observe the
-    # attacker's *unchanged* source — proving the agent forwards IPv6 across
+    # attacker's *unchanged* source - proving the agent forwards IPv6 across
     # both transit NICs while the eBPF datapath is attached.
     local attacker_v6="fd00:56::20"
     local backend_v6="fd00:57::30"
@@ -411,7 +411,7 @@ teardown_file() {
     # Nothing reached the backend at all → transit link never came up; skip
     # rather than register a false negative (same convention as suite 50).
     if [ "${src_hits:-0}" -eq 0 ]; then
-        soft_skip "no IPv6 probe reached backend — transit link not established"
+        soft_skip "no IPv6 probe reached backend - transit link not established"
     fi
 
     [ "${src_hits:-0}" -ge 1 ]
@@ -432,7 +432,7 @@ teardown_file() {
         if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
             env_skip "no alert-producing test on this lane (v6 wire probe is local-lane only)"
         fi
-        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite - MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

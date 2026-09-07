@@ -2,12 +2,12 @@
 //!
 //! Surfaces two pieces of information to the dashboard:
 //!
-//! - `operator_managed` — when `true`, the agent's configuration is
+//! - `operator_managed` - when `true`, the agent's configuration is
 //!   reconciled by the Kubernetes operator (CRD-driven). The dashboard
 //!   uses this flag to lock its config-edit UI on this agent and prevent
 //!   two-way drift between the dashboard and the operator's source of
 //!   truth.
-//! - `operator_endpoint` — optional URL the operator exposes (typically
+//! - `operator_endpoint` - optional URL the operator exposes (typically
 //!   a Kubernetes-native UI). The dashboard deep-links to it from the
 //!   "this agent is operator-managed" badge.
 //!

@@ -1,4 +1,4 @@
-# config-ebpf-vip-announcer.yaml — L2 VIP announcer (speaker) scenario config
+# config-ebpf-vip-announcer.yaml - L2 VIP announcer (speaker) scenario config
 # Tests: bounded XDP ARP responder, gratuitous ARP on takeover, metrics.
 #
 # Network topology:

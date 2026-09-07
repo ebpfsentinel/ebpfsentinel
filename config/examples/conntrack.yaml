@@ -1,9 +1,9 @@
-# eBPFsentinel — Connection Tracking Configuration Example
+# eBPFsentinel - Connection Tracking Configuration Example
 # ========================================================
 #
 # Connection tracking probes kernel netfilter via bpf_skb_ct_lookup
 # (TC) and bpf_xdp_ct_lookup (XDP) kfuncs. The kernel manages all
-# TCP/UDP/ICMP state, timeouts, and eviction — no BPF-side shadow
+# TCP/UDP/ICMP state, timeouts, and eviction - no BPF-side shadow
 # tables or state machine.
 #
 # Architecture:
@@ -11,13 +11,13 @@
 #     packet, reads nf_conn->status and nf_conn->mark via
 #     bpf_probe_read_kernel at runtime BTF-resolved offsets.
 #   - xdp-firewall (XDP): uses bpf_xdp_ct_lookup for fast-path
-#     bypass — ESTABLISHED/RELATED packets skip rule evaluation.
+#     bypass - ESTABLISHED/RELATED packets skip rule evaluation.
 #   - Userspace: parses /proc/net/nf_conntrack for the REST API
 #     and SSE event stream.
 #
 # Shared maps (pinned to /sys/fs/bpf/ebpfsentinel/):
-#   ct_config         (Array, 1 entry — thresholds + enabled flag)
-#   ct_nf_conn_offsets (Array, 1 entry — runtime BTF offsets)
+#   ct_config         (Array, 1 entry - thresholds + enabled flag)
+#   ct_nf_conn_offsets (Array, 1 entry - runtime BTF offsets)
 #
 # Kernel-side timeouts are managed by netfilter (sysctl):
 #   net.netfilter.nf_conntrack_tcp_timeout_established = 432000
@@ -37,7 +37,7 @@ conntrack:
   enabled: true
 
   # Flood detection thresholds (alert when exceeded).
-  # These are BPF-side counters — kernel netfilter handles actual CT.
+  # These are BPF-side counters - kernel netfilter handles actual CT.
   half_open_threshold: 128
   rst_threshold: 50
   fin_threshold: 50
@@ -56,7 +56,7 @@ firewall:
 
   rules:
     # Fast-path: ESTABLISHED/RELATED are handled by XDP Phase 0
-    # (bpf_xdp_ct_lookup) before rule evaluation — this rule is a
+    # (bpf_xdp_ct_lookup) before rule evaluation - this rule is a
     # safety net for edge cases where the kfunc returns no match.
     - id: fw-allow-established
       priority: 1

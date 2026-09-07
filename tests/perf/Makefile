@@ -1,4 +1,4 @@
-# eBPFsentinel — performance test runner (run on the agent VM, as root).
+# eBPFsentinel - performance test runner (run on the agent VM, as root).
 #
 # These suites reuse the integration harness (../integration/lib + the agent VM).
 # From the host, prefer `make -C ../integration test-perf`; this Makefile is the

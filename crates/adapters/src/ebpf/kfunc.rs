@@ -6,7 +6,7 @@
 //! `bpf_ct_release` from `nf_conntrack`, plus the dynptr / xdp-metadata
 //! families from vmlinux). aya 0.14.0 has no kfunc support, so the
 //! userspace loader resolves each kfunc symbol to its kernel BTF id
-//! itself and patches the call instruction at load time — the same
+//! itself and patches the call instruction at load time - the same
 //! "do it outside aya via raw syscalls" approach used for BPF tokens.
 //!
 //! A `BPF_PSEUDO_KFUNC_CALL` instruction encodes the target as:
@@ -42,7 +42,7 @@ const MODULE_BTF_DIR: &str = "/sys/kernel/btf";
 /// Module-name → BTF-object fd, supplied by a privileged helper.
 ///
 /// Opening a module's BTF object fd needs `CAP_SYS_ADMIN`
-/// (`BTF_GET_FD_BY_ID`), which a BPF-token process deliberately lacks — the
+/// (`BTF_GET_FD_BY_ID`), which a BPF-token process deliberately lacks - the
 /// token authorises program/map loads but not global-object introspection. To
 /// load a program that calls a *module* kfunc (e.g. `bpf_xdp_ct_lookup` from
 /// `nf_conntrack`) the owning module's BTF fd must still go into the
@@ -396,7 +396,7 @@ impl KfuncResolver {
         // Discover module kfuncs by reading every per-module split BTF blob
         // directly from sysfs. Listing the directory and reading the blobs is an
         // *unprivileged* file operation, so module-kfunc names resolve even in
-        // BPF-token mode — unlike the BTF-object-id enumeration below, which
+        // BPF-token mode - unlike the BTF-object-id enumeration below, which
         // needs `CAP_SYS_ADMIN` and yields nothing under a token.
         let mut module_funcs = HashMap::new();
         if let Ok(entries) = std::fs::read_dir(MODULE_BTF_DIR) {

@@ -1,4 +1,4 @@
-# config-tls-pq-require.yaml — TLS in PQ "require" mode.
+# config-tls-pq-require.yaml - TLS in PQ "require" mode.
 #
 # The agent only offers X25519MLKEM768. Clients that cannot negotiate a
 # PQ-hybrid named group must be rejected at the handshake. The suite

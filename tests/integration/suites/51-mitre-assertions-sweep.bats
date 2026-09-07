@@ -1,13 +1,13 @@
 #!/usr/bin/env bats
-# 51-mitre-assertions-sweep.bats — Meta-test enforcing MITRE coverage.
+# 51-mitre-assertions-sweep.bats - Meta-test enforcing MITRE coverage.
 #
 # Every alert-producing suite must invoke at least one MITRE assertion
 # (assert_alert_has_mitre_technique or assert_alert_has_any_mitre_technique
 # from lib/alert_helpers.bash). This suite enforces that contract via
-# grep-based introspection of the .bats sources — no agent is started.
+# grep-based introspection of the .bats sources - no agent is started.
 #
 # Suites that only exercise a REST surface are tagged "rest-only" and are
-# exempt — but the exemption is itself checked: a rest-only suite that turns
+# exempt - but the exemption is itself checked: a rest-only suite that turns
 # out to assert alerts fails the audit, so the tag cannot be used to silence
 # a suite that grew an attack path.
 #
@@ -108,7 +108,7 @@ teardown_file() {
 @test "a rest-only tag cannot hide an alert-producing suite" {
     # Otherwise the tag becomes an escape hatch: label a suite rest-only and
     # its alerts stop being checked. A rest-only suite must genuinely make no
-    # MITRE claim — and must not be asserting alerts by other means either.
+    # MITRE claim - and must not be asserting alerts by other means either.
     local liars=()
     local suite_num suite_file mapping alert_type
     for suite_num in "${MITRE_SCOPE_SUITES[@]}"; do

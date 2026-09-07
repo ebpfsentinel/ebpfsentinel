@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 05-ebpf-feature-overhead-extended.bats — isolated per-feature eBPF datapath
+# 05-ebpf-feature-overhead-extended.bats - isolated per-feature eBPF datapath
 # overhead for the subsystems NOT covered by perf/02 (which layers
 # firewall→IDS→ratelimit→threatintel→conntrack). Here each feature is measured
 # ALONE against the no-agent baseline, so its standalone TCP-throughput cost is
@@ -75,7 +75,7 @@ _report_set_str() {
     local tmp; tmp="$(jq --arg k "$1" --arg v "$2" '. + {($k): $v}' "$OVERHEAD_REPORT")"; echo "$tmp" > "$OVERHEAD_REPORT"
 }
 
-# _make_feature_config <feature> — write a config enabling only <feature>
+# _make_feature_config <feature> - write a config enabling only <feature>
 # (firewall stays in pass mode as the XDP base for every variant).
 _make_feature_config() {
     local feature="$1"
@@ -149,7 +149,7 @@ _measure_tcp_throughput() {
     echo "$bps"
 }
 
-# _run_feature <feature> <json-key> — start the agent with only <feature>,
+# _run_feature <feature> <json-key> - start the agent with only <feature>,
 # measure throughput, record overhead vs the recorded baseline. Returns the
 # overhead pct (echo) for the caller to assert on.
 _run_feature() {
@@ -170,7 +170,7 @@ _run_feature() {
     echo "$overhead"
 }
 
-# _assert_overhead <overhead> — sanity-bound the per-feature overhead. The
+# _assert_overhead <overhead> - sanity-bound the per-feature overhead. The
 # absolute numbers are heavily environment-limited: in the single-VM netns lane
 # the datapath runs generic (SKB-mode) XDP over a veth, which is far slower than
 # a physical NIC in native mode, so overheads of 80-90 % are normal here. The
@@ -183,7 +183,7 @@ _assert_overhead() {
     case "$overhead" in SKIP_NO_BASELINE) skip "baseline not recorded";; ERR_NOT_LOADED) echo "eBPF not loaded" >&2; return 1;; ERR_IPERF) skip "iperf3 failed";; esac
     local limit=95
     [ "${EBPF_2VM_MODE:-false}" = "true" ] && limit=80
-    echo "# overhead: ${overhead}% (sanity limit: ${limit}%, env-limited — see header)"
+    echo "# overhead: ${overhead}% (sanity limit: ${limit}%, env-limited - see header)"
     [ "$(echo "$overhead < $limit" | bc -l 2>/dev/null)" = "1" ]
 }
 

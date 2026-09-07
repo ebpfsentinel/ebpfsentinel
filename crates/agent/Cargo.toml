@@ -35,7 +35,7 @@ reqwest = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
-# HTTP control-plane (driving adapter) deps — the REST API layer lives here.
+# HTTP control-plane (driving adapter) deps - the REST API layer lives here.
 axum = { workspace = true }
 http-body-util = { workspace = true }
 tower = { workspace = true }

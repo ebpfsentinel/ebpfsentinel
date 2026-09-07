@@ -165,7 +165,7 @@ impl ContainerConfig {
         if self.kubernetes.enabled {
             // The entries are joined into the label selector the API server
             // parses. A malformed one is rejected there, at watch time, in a
-            // background task nobody is reading — so reject it here instead.
+            // background task nobody is reading - so reject it here instead.
             for (idx, entry) in self.kubernetes.label_filter.iter().enumerate() {
                 let field = format!("container.kubernetes.label_filter[{idx}]");
                 let Some((key, _value)) = entry.split_once('=') else {

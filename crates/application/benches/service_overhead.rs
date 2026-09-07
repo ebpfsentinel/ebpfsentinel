@@ -145,7 +145,7 @@ fn bench_firewall_evaluate_overhead(c: &mut Criterion) {
         // packet evaluation at runtime is performed inside the eBPF kernel
         // program. The domain engine's `evaluate` is used only in tests and
         // config validation. We therefore benchmark the engine directly for
-        // both arms — this group exists to show that the engine evaluation
+        // both arms - this group exists to show that the engine evaluation
         // cost itself scales predictably with rule count.
     }
 

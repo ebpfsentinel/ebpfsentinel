@@ -1,16 +1,16 @@
-/// IDS action constants — used in `IdsPatternValue.action`.
+/// IDS action constants - used in `IdsPatternValue.action`.
 pub const IDS_ACTION_ALERT: u8 = 0; // Log event, pass packet (TC_ACT_OK)
 pub const IDS_ACTION_DROP: u8 = 1; // Log event, drop packet (TC_ACT_SHOT)
 
-/// L7 protocol detection constants — used by kernel-side payload inspection.
+/// L7 protocol detection constants - used by kernel-side payload inspection.
 pub const L7_PROTO_UNKNOWN: u8 = 0;
 pub const L7_PROTO_HTTP: u8 = 1;
 pub const L7_PROTO_TLS: u8 = 2;
 pub const L7_PROTO_SSH: u8 = 3;
 pub const L7_PROTO_DNS: u8 = 4;
 
-/// IDS sampling mode constants — used in `IdsSamplingConfig.mode`.
-pub const IDS_SAMPLING_NONE: u8 = 0; // No sampling — emit all events
+/// IDS sampling mode constants - used in `IdsSamplingConfig.mode`.
+pub const IDS_SAMPLING_NONE: u8 = 0; // No sampling - emit all events
 pub const IDS_SAMPLING_RANDOM: u8 = 1; // Random sampling via `bpf_get_prandom_u32`
 
 // ── IDS metric indices ──────────────────────────────────────────────

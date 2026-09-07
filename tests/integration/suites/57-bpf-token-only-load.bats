@@ -1,9 +1,9 @@
 #!/usr/bin/env bats
-# 57-bpf-token-only-load.bats — every eBPF program loads + attaches through a
+# 57-bpf-token-only-load.bats - every eBPF program loads + attaches through a
 # BPF token alone, with no CAP_BPF / CAP_SYS_ADMIN / CAP_PERFMON.
 #
-# The shipped `warden` broker delegates a bpffs and passes module BTF fds —
-# exactly what runs in production under systemd / Docker / K8s — and the agent,
+# The shipped `warden` broker delegates a bpffs and passes module BTF fds -
+# exactly what runs in production under systemd / Docker / K8s - and the agent,
 # started against it over the socket, self-unshares a capability-less user
 # namespace, creates a BPF token, and loads/attaches the full program set through
 # it. Driving the real warden + agent means CI validates the binaries we ship.
@@ -91,7 +91,7 @@ teardown_file() {
 }
 
 @test "the kernel helper probe reports not-probed rather than a false gap" {
-    # The probe issues a plain BPF_PROG_LOAD, which needs CAP_BPF — exactly what
+    # The probe issues a plain BPF_PROG_LOAD, which needs CAP_BPF - exactly what
     # this path deliberately does not hold. "Not probed" is the only honest
     # answer: reporting a helper as missing here would be a false negative, and
     # refusing to start on it would break every rootless deployment. The
@@ -112,12 +112,12 @@ teardown_file() {
 
 @test "uprobe-dlp loads through the token" {
     # Load only. Under the warden posture the attach is deliberately kept off
-    # the startup path — `try_load_uprobe_dlp` arms the module and the
+    # the startup path - `try_load_uprobe_dlp` arms the module and the
     # lifecycle watcher does the /proc scan and every BPF_LINK_CREATE
     # asynchronously, because the brokered scan can be slow on a busy node.
     # Whether a link is created therefore depends on a TLS process existing
     # and on the watcher's poll landing inside this suite's short run window
-    # — neither of which this suite controls. The attach itself is asserted
+    # - neither of which this suite controls. The attach itself is asserted
     # by suites 27 and 60, which run a full agent against real TLS traffic.
     bpf_token_log_has 'eBPF uprobe-dlp active'
 }

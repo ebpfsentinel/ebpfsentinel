@@ -93,7 +93,7 @@ gen_icmp_flood() {
 gen_dns_traffic() {
     local end=$((SECONDS + DUR))
     while [ $SECONDS -lt $end ]; do
-        # Raw DNS query bytes — tc-dns sees UDP:53 and captures
+        # Raw DNS query bytes - tc-dns sees UDP:53 and captures
         printf '\x00\x1c\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01' | \
             timeout 0.5 ncat -u -w 0 $AGENT 53 &
         printf '\x00\x1d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07malware\x04evil\x03com\x00\x00\x01\x00\x01' | \

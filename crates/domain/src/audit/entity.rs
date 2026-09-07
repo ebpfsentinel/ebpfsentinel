@@ -111,7 +111,7 @@ impl std::fmt::Display for AuditAction {
 ///
 /// Every security engine produces these entries for every decision
 /// (pass, drop, alert). Payload content is systematically sanitized
-/// — no raw sensitive data appears in audit entries (FR35, NFR10).
+/// - no raw sensitive data appears in audit entries (FR35, NFR10).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
     /// Monotonic timestamp in nanoseconds (from eBPF event or wall clock).
@@ -234,7 +234,7 @@ fn sanitize_detail(detail: &str) -> String {
 }
 
 /// Parse a response target into a `[u32; 4]` `src_addr`. Returns the zeroed
-/// address (and `is_ipv6 = false`) for CIDRs or non-IPv4 literals — those keep
+/// address (and `is_ipv6 = false`) for CIDRs or non-IPv4 literals - those keep
 /// their full representation in the entry's `detail`.
 fn parse_target_ipv4(target: &str) -> ([u32; 4], bool) {
     if let Ok(addr) = target.parse::<std::net::Ipv4Addr>() {

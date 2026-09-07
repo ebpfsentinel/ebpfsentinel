@@ -1,12 +1,12 @@
 #!/usr/bin/env bats
-# 06-ebpf-feature-overhead-nat-dlp.bats — datapath overhead for the two eBPF
+# 06-ebpf-feature-overhead-nat-dlp.bats - datapath overhead for the two eBPF
 # subsystems NOT covered by perf/02 (firewall→IDS→ratelimit→threatintel→conntrack)
 # or perf/05 (scrub, dns, qos, conntrack):
 #
 #   - NAT translation: tc-nat-egress (SNAT/masquerade) + tc-nat-ingress (DNAT).
 #     Measured as TCP-throughput cost vs the no-agent baseline, the same way as
 #     perf/05, for egress alone, ingress alone, and both together. NAT runs on
-#     top of conntrack, so the conntrack cost is included — the delta vs perf/05's
+#     top of conntrack, so the conntrack cost is included - the delta vs perf/05's
 #     conntrack-only number is the translation cost.
 #
 #   - DLP uprobe: uprobe-dlp hooks SSL_write/SSL_read on libssl. iperf3 never
@@ -86,7 +86,7 @@ _report_set_str() {
     local tmp; tmp="$(jq --arg k "$1" --arg v "$2" '. + {($k): $v}' "$OVERHEAD_REPORT")"; echo "$tmp" > "$OVERHEAD_REPORT"
 }
 
-# _make_nat_config <variant> — write a config that enables conntrack + NAT with
+# _make_nat_config <variant> - write a config that enables conntrack + NAT with
 # only the requested translation direction. The firewall stays in pass mode so
 # the measured cost is the NAT datapath, not policy lookups.
 #   egress  → SNAT (masquerade) on tc-nat-egress
@@ -139,7 +139,7 @@ EOF
     echo "$cfg"
 }
 
-# _make_dlp_config — firewall pass base + DLP enabled (uprobe-dlp attaches to libssl).
+# _make_dlp_config - firewall pass base + DLP enabled (uprobe-dlp attaches to libssl).
 _make_dlp_config() {
     local cfg="${DATA_DIR}/config-dlp-$$.yaml"
     cat > "$cfg" <<EOF
@@ -177,7 +177,7 @@ _measure_tcp_throughput() {
     echo "$bps"
 }
 
-# _run_nat <variant> <json-key> — start the agent with the NAT variant, measure
+# _run_nat <variant> <json-key> - start the agent with the NAT variant, measure
 # throughput, record overhead vs baseline. Echoes the overhead pct (or a marker).
 _run_nat() {
     local variant="$1" key="$2"
@@ -207,11 +207,11 @@ _assert_overhead() {
     case "$overhead" in SKIP_NO_BASELINE) skip "baseline not recorded";; ERR_NOT_LOADED) echo "eBPF not loaded" >&2; return 1;; ERR_IPERF) skip "iperf3 failed";; esac
     local limit=95
     [ "${EBPF_2VM_MODE:-false}" = "true" ] && limit=80
-    echo "# overhead: ${overhead}% (sanity limit: ${limit}%, env-limited — see header)"
+    echo "# overhead: ${overhead}% (sanity limit: ${limit}%, env-limited - see header)"
     [ "$(echo "$overhead < $limit" | bc -l 2>/dev/null)" = "1" ]
 }
 
-# _openssl_goodput — start a local TLS echo server, push DLP_PAYLOAD_MB through
+# _openssl_goodput - start a local TLS echo server, push DLP_PAYLOAD_MB through
 # an s_client, return MB/s. Pure-loopback so it works in either lane.
 _openssl_goodput() {
     local key="$1"

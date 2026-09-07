@@ -1,4 +1,4 @@
-# config-ebpf-dns.yaml — DNS intelligence eBPF scenario test config
+# config-ebpf-dns.yaml - DNS intelligence eBPF scenario test config
 # Tests: DNS cache, blocklist enforcement, domain reputation
 #
 # Network topology:

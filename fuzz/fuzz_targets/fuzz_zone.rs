@@ -9,7 +9,7 @@ use domain::zone::entity::{Zone, ZoneConfig, ZonePair, ZonePolicy};
 //
 // Layout:
 //   [0]    = selector (0=validate, 1=lookups, 2=zone pairs)
-//   [1]    = number of zones (1–8)
+//   [1]    = number of zones (1-8)
 //   rest   = consumed in chunks (zones + pairs)
 fuzz_target!(|data: &[u8]| {
     if data.len() < 14 {

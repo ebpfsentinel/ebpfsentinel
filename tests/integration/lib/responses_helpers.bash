@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# responses_helpers.bash — Response engine + audit helpers for suite 52.
+# responses_helpers.bash - Response engine + audit helpers for suite 52.
 #
 # The agent's response engine is in-memory: actions live in a HashMap
 # keyed by response id. Manual entries land via POST /api/v1/responses/manual
@@ -112,7 +112,7 @@ wait_for_response_expired() {
 # audit_log_count <component> <action> [limit]
 #
 # Echo the number of audit entries with the given component + action. The
-# audit API is best-effort here — when the storage backend has no entries
+# audit API is best-effort here - when the storage backend has no entries
 # yet, the endpoint returns an empty array. Default limit 200.
 audit_log_count() {
     local component="${1:?usage: audit_log_count <component> <action> [limit]}"

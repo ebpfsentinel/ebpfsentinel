@@ -1,4 +1,4 @@
-# config-ebpf-dlp-container.yaml — cross-container DLP scenario config.
+# config-ebpf-dlp-container.yaml - cross-container DLP scenario config.
 #
 # DLP (uprobe-dlp) plus the container resolver, so the agent attaches the SSL
 # uprobe to a NEIGHBOURING container's libssl (resolved through the host /proc)

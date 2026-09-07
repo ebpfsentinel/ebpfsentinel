@@ -50,7 +50,7 @@ static DNS_METRICS: PerCpuArray<u64, 5> = PerCpuArray::new();
 
 /// TC classifier entry point. Captures DNS packets (UDP/TCP port 53) and
 /// emits them to the DNS_EVENTS RingBuf. Always returns TC_ACT_OK
-/// (passthrough — observation only, no blocking).
+/// (passthrough - observation only, no blocking).
 #[classifier]
 pub fn tc_dns(ctx: TcContext) -> i32 {
     increment_metric(DNS_METRIC_TOTAL_SEEN);
@@ -292,7 +292,7 @@ fn emit_dns_event(
     // frames and GRO-aggregated DNS responses are measured correctly.
     let total_len = ctx.len() as usize;
 
-    // No DNS payload available — nothing to emit
+    // No DNS payload available - nothing to emit
     if dns_offset >= total_len {
         return;
     }
@@ -441,8 +441,8 @@ unsafe fn load_dns_payload<const CAP: usize>(
 
         // Load exactly the bytes the packet carries (clamped to the buffer),
         // not a fixed CAP. `bpf_skb_load_bytes` is all-or-nothing: a constant
-        // full-buffer read fails whenever the remaining skb is shorter — the
-        // common case for DNS — leaving the payload all-zero while
+        // full-buffer read fails whenever the remaining skb is shorter - the
+        // common case for DNS - leaving the payload all-zero while
         // `dns_payload_len` still advertises the real length. Loading the real
         // length captures the query/answer.
         //

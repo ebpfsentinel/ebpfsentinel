@@ -1,4 +1,4 @@
-# config-alert-sink-webhook.yaml — outbound alert delivery (every sink)
+# config-alert-sink-webhook.yaml - outbound alert delivery (every sink)
 #
 # One IDS rule on TCP/4444 feeds the alert pipeline; the pipeline fans the
 # alert out concurrently to a webhook, an email and an OTLP route, plus the

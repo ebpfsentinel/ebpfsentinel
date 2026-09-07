@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 37-ebpf-vip-announcer-scenarios.bats — L2 VIP announcer eBPF scenarios
+# 37-ebpf-vip-announcer-scenarios.bats - L2 VIP announcer eBPF scenarios
 #
 # Validates the bounded XDP ARP responder + userspace gratuitous ARP:
 #   * a speaker answers ARP for an owned VIP with its own NIC MAC

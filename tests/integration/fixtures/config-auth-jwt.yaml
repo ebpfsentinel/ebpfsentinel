@@ -1,4 +1,4 @@
-# config-auth-jwt.yaml — JWT authentication-enabled agent configuration.
+# config-auth-jwt.yaml - JWT authentication-enabled agent configuration.
 # Public key path placeholder replaced by provisioning scripts.
 
 agent:

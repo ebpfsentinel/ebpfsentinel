@@ -1,4 +1,4 @@
-# eBPFsentinel — Intrusion Prevention (IPS) Configuration Example
+# eBPFsentinel - Intrusion Prevention (IPS) Configuration Example
 # ===============================================================
 #
 # Active intrusion prevention with automatic IP blacklisting. When an IP
@@ -95,7 +95,7 @@ ips:
   # Use with caution in block mode: sampled-out events won't trigger blocks.
   sampling:
     mode: hash
-    rate: 1.0              # 100% — no sampling in block mode (safety first)
+    rate: 1.0              # 100% - no sampling in block mode (safety first)
 
   # ── Rules ──────────────────────────────────────────────────────────
   #

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# perf_helpers.bash — Measurement functions for Docker performance tests
+# perf_helpers.bash - Measurement functions for Docker performance tests
 #
 # Provides:
 #   - TCP/UDP throughput measurement (iperf3)

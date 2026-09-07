@@ -1,4 +1,4 @@
-# eBPFsentinel — Data Loss Prevention (DLP) Configuration Example
+# eBPFsentinel - Data Loss Prevention (DLP) Configuration Example
 # ===============================================================
 #
 # Userspace DLP engine inspects TLS-decrypted payloads (via uprobe on
@@ -25,7 +25,7 @@ dlp:
   # ── Built-in patterns (OSS) ────────────────────────────────────────
   #
   # OSS ships a FIXED set of nine built-in patterns. They are always loaded in
-  # alert mode whenever `dlp.enabled: true` — there is nothing to declare here.
+  # alert mode whenever `dlp.enabled: true` - there is nothing to declare here.
   # Inspect the active set at runtime: GET /api/v1/dlp/patterns.
   #
   #   PCI:         dlp-pci-visa, dlp-pci-mastercard, dlp-pci-amex
@@ -35,9 +35,9 @@ dlp:
   #
   # The OSS validator accepts a `patterns:` list only for built-in IDs
   # (prefixes dlp-pci-*, dlp-pii-*, dlp-cred-*) in alert mode, but the engine
-  # always runs the built-in definitions — listing them here has no effect.
+  # always runs the built-in definitions - listing them here has no effect.
 
-  # ── Custom patterns — ENTERPRISE ───────────────────────────────────
+  # ── Custom patterns - ENTERPRISE ───────────────────────────────────
   #
   # Defining your own regex patterns (any non-built-in ID), per-pattern mode
   # overrides, and block/enforce enforcement require an Enterprise license.

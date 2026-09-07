@@ -1,4 +1,4 @@
-# config-alert-sink-ssrf.yaml — outbound alert delivery, SSRF-blocked target
+# config-alert-sink-ssrf.yaml - outbound alert delivery, SSRF-blocked target
 #
 # Identical to config-alert-sink-webhook.yaml except the webhook route points
 # at loopback. Config validation accepts it (it only checks the scheme), so

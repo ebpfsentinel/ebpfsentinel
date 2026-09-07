@@ -78,7 +78,7 @@ pub fn load_rustls_config(
     })?;
 
     let versions: Vec<&'static tokio_rustls::rustls::SupportedProtocolVersion> = if allow_tls12 {
-        tracing::warn!("TLS 1.2 enabled — consider upgrading clients to TLS 1.3");
+        tracing::warn!("TLS 1.2 enabled - consider upgrading clients to TLS 1.3");
         vec![
             &tokio_rustls::rustls::version::TLS13,
             &tokio_rustls::rustls::version::TLS12,

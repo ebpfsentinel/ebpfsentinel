@@ -1,4 +1,4 @@
-# AppArmor profile — allow the eBPFsentinel agent to create user namespaces.
+# AppArmor profile - allow the eBPFsentinel agent to create user namespaces.
 #
 # The agent is rootless: it self-unshares a user namespace and loads its eBPF
 # through a BPF token (no host capabilities). On kernels that gate unprivileged

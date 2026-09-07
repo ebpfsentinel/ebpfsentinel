@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 02-rest-api-health.bats — REST API health and observability endpoints
+# 02-rest-api-health.bats - REST API health and observability endpoints
 
 load '../lib/helpers'
 

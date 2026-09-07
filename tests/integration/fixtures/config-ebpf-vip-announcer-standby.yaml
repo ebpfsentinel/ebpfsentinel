@@ -1,4 +1,4 @@
-# config-ebpf-vip-announcer-standby.yaml — L2 VIP announcer (standby) config
+# config-ebpf-vip-announcer-standby.yaml - L2 VIP announcer (standby) config
 # Tests split-brain safety: a standby node must NEVER answer ARP for a VIP
 # and must NEVER emit gratuitous ARP (VIP_SET stays empty).
 #

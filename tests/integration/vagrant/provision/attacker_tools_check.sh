@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# attacker_tools_check.sh — Verify every attack tool installed by
+# attacker_tools_check.sh - Verify every attack tool installed by
 # setup-attacker.sh is present and matches its pinned series.
 #
 # Invoked at the tail of setup-attacker.sh (failure aborts the boot)
 # and on demand by `make check-attacker-tools` from the host.
 #
 # Exit codes:
-#   0  — all tools present and within pin range
-#   1  — at least one tool missing or out-of-range
-#   2  — script invocation error (bad args, etc.)
+#   0  - all tools present and within pin range
+#   1  - at least one tool missing or out-of-range
+#   2  - script invocation error (bad args, etc.)
 
 set -euo pipefail
 
@@ -83,7 +83,7 @@ check_bin "scapy-cli"     /opt/scapy-venv/bin/python3 -V "Python"
 check_bin "sshpass"       sshpass      -V       "sshpass"
 check_bin "go"            go           version  "go version"
 
-# Release tarballs / source-built binaries — pinned to exact versions
+# Release tarballs / source-built binaries - pinned to exact versions
 check_bin "vegeta"        vegeta       -version "12.13.0"
 check_bin "k6"            k6           version  "k6 v2.0.0"
 check_bin "nuclei"        nuclei       -version "3.8.0"

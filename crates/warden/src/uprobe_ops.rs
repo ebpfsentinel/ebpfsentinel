@@ -3,7 +3,7 @@
 //! Creates a `uprobe_multi` `BPF_LINK_CREATE` on behalf of the rootless agent,
 //! which dropped the tracing capability the link needs. The agent resolves the
 //! symbol offset (a plain ELF read) and hands the warden the target `path`, the
-//! `offset`, the `is_ret` flag, and — over `SCM_RIGHTS` — its own verified eBPF
+//! `offset`, the `is_ret` flag, and - over `SCM_RIGHTS` - its own verified eBPF
 //! program fd. The warden resolves `path` in its init mount + pid namespace, so a
 //! neighbouring container's `/proc/<pid>/root/<lib>` is reachable, and returns the
 //! resulting link fd to the agent.

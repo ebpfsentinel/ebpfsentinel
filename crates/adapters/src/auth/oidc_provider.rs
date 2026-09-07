@@ -15,7 +15,7 @@ use ports::secondary::auth_provider::AuthProvider;
 /// The hook is constructed with the JWKS URL captured from the agent's
 /// config so the provider can refetch + replace its cached `JwkSet`
 /// without holding a `reqwest::Client` itself. Implementations must be
-/// `Send + Sync` and idempotent — they can be called once per request
+/// `Send + Sync` and idempotent - they can be called once per request
 /// in the worst case.
 #[async_trait]
 pub trait JwksRefresher: Send + Sync {
@@ -53,7 +53,7 @@ pub struct OidcAuthProvider {
 
 /// Default minimum interval between two inline JWKS refreshes.
 ///
-/// A legitimate key rotation only needs a single refresh — the fetched set
+/// A legitimate key rotation only needs a single refresh - the fetched set
 /// is cached, so subsequent requests find the new `kid` without refetching.
 /// This window therefore only ever throttles requests whose `kid` is *still*
 /// unknown after a recent refresh, i.e. exactly the amplification pattern.
@@ -259,13 +259,13 @@ impl AuthProvider for OidcAuthProvider {
                 // Gate the outbound fetch behind a global cooldown. Without this,
                 // any unauthenticated client can force one upstream JWKS request
                 // per token by supplying a random `kid` (the header is read before
-                // signature verification) — a reflected-DoS / connection-exhaustion
+                // signature verification) - a reflected-DoS / connection-exhaustion
                 // amplifier that a per-IP rate limit cannot contain.
                 if !self.try_claim_refresh() {
                     tracing::debug!(kid = %kid, "JWKS refresh suppressed by cooldown");
                     return Err(AuthError::TokenInvalid("invalid token".to_string()));
                 }
-                tracing::debug!(kid = %kid, "JWKS unknown kid — forcing refresh");
+                tracing::debug!(kid = %kid, "JWKS unknown kid - forcing refresh");
                 let new_set = refresher.refresh().await.map_err(|e| {
                     tracing::warn!(error = %e, "JWKS inline refresh failed");
                     AuthError::TokenInvalid("invalid token".to_string())
@@ -314,7 +314,7 @@ impl JwksRefresher for HttpJwksRefresher {
 /// Whether a JWKS URL may be fetched over plaintext HTTP.
 ///
 /// Only loopback hosts (`localhost`, `127.0.0.0/8`, `::1`) are exempt from
-/// the HTTPS requirement — these never leave the host, so there is no MITM
+/// the HTTPS requirement - these never leave the host, so there is no MITM
 /// surface. Every other host must use HTTPS. Mirrors the OAuth "localhost is
 /// exempt" carve-out and lets dashboards/sidecars co-located with the agent
 /// serve JWKS without provisioning TLS.
@@ -753,7 +753,7 @@ mod tests {
 
     // ── Inline force-refresh on unknown kid ────────────────────────
 
-    /// In-memory `JwksRefresher` for tests — returns a pre-baked JWKS
+    /// In-memory `JwksRefresher` for tests - returns a pre-baked JWKS
     /// the next time `refresh()` is called and counts invocations.
     struct StubRefresher {
         next: std::sync::Mutex<Option<JwkSet>>,
@@ -808,7 +808,7 @@ mod tests {
         assert_eq!(claims.sub, "rotated");
         assert_eq!(refresher.calls(), 1);
 
-        // Second call hits the cache — no extra refresh.
+        // Second call hits the cache - no extra refresh.
         let _ = provider.validate_token(&token).await.unwrap();
         assert_eq!(refresher.calls(), 1);
     }
@@ -890,7 +890,7 @@ mod tests {
             // Long window so the whole burst falls inside one cooldown.
             .with_refresh_cooldown(Duration::from_hours(1));
 
-        // A flood of distinct unknown kids — the amplification pattern an
+        // A flood of distinct unknown kids - the amplification pattern an
         // unauthenticated attacker would use (header kid is read before any
         // signature check).
         for i in 0..20 {

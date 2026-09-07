@@ -7,7 +7,7 @@ use tracing::info;
 
 /// Manages the eBPF conntrack configuration map.
 ///
-/// The `CT_TABLE_V4`/`V6` shadow maps have been deleted — kernel
+/// The `CT_TABLE_V4`/`V6` shadow maps have been deleted - kernel
 /// netfilter is the sole connection tracking engine. This manager now
 /// only handles `CT_CONFIG` (timeouts, enable flag) pushed to BPF.
 ///
@@ -33,13 +33,13 @@ impl ConnTrackMapManager {
 
 impl ConnTrackMapPort for ConnTrackMapManager {
     fn get_connections(&self, _limit: usize) -> Result<Vec<Connection>, DomainError> {
-        // Shadow tables deleted — connection reads served by
+        // Shadow tables deleted - connection reads served by
         // ProcNetfilterConntrackPort via /proc/net/nf_conntrack.
         Ok(Vec::new())
     }
 
     fn flush_all(&mut self) -> Result<u64, DomainError> {
-        // Shadow tables deleted — flush via ProcNetfilterConntrackPort
+        // Shadow tables deleted - flush via ProcNetfilterConntrackPort
         // (conntrack -F).
         Ok(0)
     }
@@ -57,7 +57,7 @@ impl ConnTrackMapPort for ConnTrackMapManager {
     }
 
     fn connection_count(&self) -> Result<u64, DomainError> {
-        // Shadow tables deleted — count via ProcNetfilterConntrackPort.
+        // Shadow tables deleted - count via ProcNetfilterConntrackPort.
         Ok(0)
     }
 }

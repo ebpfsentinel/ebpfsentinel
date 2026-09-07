@@ -1,14 +1,14 @@
 #!/usr/bin/env bats
-# 50-nptv6-prefix-translation.bats — NPTv6 (RFC 6296) prefix translation.
+# 50-nptv6-prefix-translation.bats - NPTv6 (RFC 6296) prefix translation.
 #
 # tc-nat-egress carries a checksum-neutral IPv6 prefix swap for packets
 # matching nptv6_rules. The fixture configures fd00:54::/64 (internal) →
 # 2001:db8:54::/64 (external).
 #
 # Suite layers:
-#   * REST surface — GET /api/v1/nat/nptv6 lists the configured rule
-#   * CLI surface  — `nat nptv6 list` shows the same rule
-#   * Wire-level   — attacker ships an IPv6 packet through the agent and
+#   * REST surface - GET /api/v1/nat/nptv6 lists the configured rule
+#   * CLI surface  - `nat nptv6 list` shows the same rule
+#   * Wire-level   - attacker ships an IPv6 packet through the agent and
 #                    the backend pcap proves the source-prefix swap. The
 #                    wire test requires IPv6 link addresses + routes on
 #                    the test VMs; it skips when those aren't present.
@@ -20,7 +20,7 @@ load '../lib/nptv6_helpers'
 # NPTv6 maps the internal prefix 1:1 onto the external prefix: an internal
 # host fd00:54::X appears to the outside as 2001:db8:54::X. The backend plays
 # an *outside* host and therefore must live on a third network that is NEITHER
-# prefix — otherwise the agent's ingress reverse-translation would rewrite the
+# prefix - otherwise the agent's ingress reverse-translation would rewrite the
 # probe's destination and misroute it instead of forwarding to the backend.
 INTERNAL_PREFIX="fd00:54::"
 EXTERNAL_PREFIX="2001:db8:54::"
@@ -46,14 +46,14 @@ setup_file() {
     # must target the agent there; in the local lane it is the same host.
     if declare -F _agent_ssh >/dev/null 2>&1; then
         _agent_ssh ip link show eth2 >/dev/null 2>&1 \
-            || env_skip "agent VM lacks eth2 — NPTv6 needs the multi-NIC topology"
+            || env_skip "agent VM lacks eth2 - NPTv6 needs the multi-NIC topology"
     else
         ip link show eth2 >/dev/null 2>&1 \
-            || env_skip "eth2 not present — NPTv6 needs the multi-NIC topology"
+            || env_skip "eth2 not present - NPTv6 needs the multi-NIC topology"
     fi
 
     # prepare_ebpf_config points the agent at the netns veth, so the
-    # namespace has to exist before the agent starts — otherwise every
+    # namespace has to exist before the agent starts - otherwise every
     # program fails to load with "resolve ifindex".
     create_test_netns
 
@@ -183,7 +183,7 @@ teardown_file() {
         via "${agent_v6_ext}" dev eth1 >/dev/null 2>&1 || true
 
     # Let DAD settle so every address is usable (a tentative addr makes the
-    # sender — and the agent's forwarding path — drop the packet).
+    # sender - and the agent's forwarding path - drop the packet).
     sleep 4
 
     # Warm the neighbour caches on every hop of the forward path. The kernel
@@ -235,7 +235,7 @@ teardown_file() {
     # No probe reached the backend at all → the IPv6 transit link is down, not a
     # translation failure; surface as a skip rather than a false negative.
     if [ "${external_hits:-0}" -eq 0 ] && [ "${internal_hits:-0}" -eq 0 ]; then
-        soft_skip "no IPv6 probe reached backend — transit link not established"
+        soft_skip "no IPv6 probe reached backend - transit link not established"
     fi
 
     # The probe reached the backend: assert NPTv6 swapped the source prefix

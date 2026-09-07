@@ -1,4 +1,4 @@
-# config-ebpf-nptv6.yaml — NPTv6 prefix translation (suite 54).
+# config-ebpf-nptv6.yaml - NPTv6 prefix translation (suite 54).
 #
 # Drives the tc-nat-ingress/egress eBPF programs in NPTv6 mode (RFC 6296).
 # Internal site-local prefix fd00:54::/64 is translated to external

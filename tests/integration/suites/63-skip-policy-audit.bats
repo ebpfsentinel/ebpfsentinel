@@ -1,11 +1,11 @@
 #!/usr/bin/env bats
-# 63-skip-policy-audit.bats — meta-test keeping skips honest.
+# 63-skip-policy-audit.bats - meta-test keeping skips honest.
 #
 # A skipped bats test reports as success, so an unclassified skip is a
 # regression waiting to hide. This suite enforces the contract that
 # lib/skip_policy.bash sets up:
 #
-#   * no bare `skip "…"` is left in suites/ or lib/ — every call goes
+#   * no bare `skip "…"` is left in suites/ or lib/ - every call goes
 #     through env_skip (capability genuinely absent) or soft_skip (a
 #     prerequisite the suite itself owns)
 #   * every reason is registered in skip-policy.yaml under the class
@@ -24,7 +24,7 @@ setup_file() {
     export INTEG_DIR="${BATS_TEST_DIRNAME}/.."
 }
 
-# _run_helper <strict> <helper> — invoke a skip helper in a clean bash
+# _run_helper <strict> <helper> - invoke a skip helper in a clean bash
 # subshell with `skip` stubbed out, so its control flow can be asserted
 # without skipping this test.
 _run_helper() {
@@ -56,7 +56,7 @@ _run_helper() {
     soft_calls="$(echo "${output}" | sed -n 's/.*soft_skip call sites *: *//p')"
 
     [ "${env_calls:-0}" -ge 1 ] || {
-        echo "no env_skip call sites found — did the audit scan anything?" >&2
+        echo "no env_skip call sites found - did the audit scan anything?" >&2
         echo "${output}" >&2
         return 1
     }

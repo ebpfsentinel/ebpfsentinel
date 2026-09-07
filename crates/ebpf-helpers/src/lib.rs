@@ -51,7 +51,7 @@ pub unsafe fn barrier() {
 /// treat it as an opaque runtime value at this point.
 ///
 /// Use it when a value is mathematically in range but the compiler can prove
-/// the fact statically and so elides the bound check the verifier needs — the
+/// the fact statically and so elides the bound check the verifier needs - the
 /// canonical case being `x % N` for a constant `N`. Without the barrier LLVM
 /// drops the `if idx < N` guard as redundant, leaving the verifier with the
 /// unbounded modulo result ("unbounded memory access" on the following array

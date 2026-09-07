@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 26-hot-reload-rules.bats — Configuration hot-reload tests
+# 26-hot-reload-rules.bats - Configuration hot-reload tests
 # Requires: root, kernel >= 6.9, bpftool, jq
 #
 # Tests hot-reload of firewall rules via SIGHUP:
@@ -91,7 +91,7 @@ teardown_file() {
 import sys
 with open(sys.argv[1], 'r') as f:
     lines = f.readlines()
-# Find the line 'ids:' at column 0 — insert new rules before it
+# Find the line 'ids:' at column 0 - insert new rules before it
 insert_idx = next(i for i, l in enumerate(lines) if l.startswith('ids:'))
 new_rules = [
     '\n',

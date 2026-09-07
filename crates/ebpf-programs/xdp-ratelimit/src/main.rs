@@ -238,7 +238,7 @@ const METRIC_EVENTS_DROPPED: u32 = RATELIMIT_METRIC_EVENTS_DROPPED;
 const METRIC_TOTAL_SEEN: u32 = RATELIMIT_METRIC_TOTAL_SEEN;
 const METRIC_MTU_EXCEEDED: u32 = RATELIMIT_METRIC_MTU_EXCEEDED;
 
-// Local asm macros removed — using ebpf_helpers::copy_mac_asm! and copy_16b_asm!.
+// Local asm macros removed - using ebpf_helpers::copy_mac_asm! and copy_16b_asm!.
 
 /// Returns `true` if the EVENTS RingBuf has backpressure (>75% full).
 #[inline(always)]
@@ -797,7 +797,7 @@ fn check_syn_flood_v4(
             src_ip,
         };
         if !syn_rate_exceeds_threshold(&key, cfg.threshold_pps, now) {
-            return None; // Below threshold — let kernel handle normally
+            return None; // Below threshold - let kernel handle normally
         }
     }
 
@@ -832,7 +832,7 @@ fn check_syn_flood_v4(
             (*sctx).flags = flags;
         }
     }
-    // Return sentinel — the entry point will tail-call to syncookie program.
+    // Return sentinel - the entry point will tail-call to syncookie program.
     Some(XDP_ACTION_SYNCOOKIE)
 }
 
@@ -972,13 +972,13 @@ fn process_icmp_v4(
     let icmphdr: *const IcmpHdr = unsafe { ptr_at(ctx, l4_offset)? };
     let icmp_type = unsafe { (*icmphdr).icmp_type };
 
-    // Only rate limit echo requests — pass other ICMP types through
+    // Only rate limit echo requests - pass other ICMP types through
     if icmp_type != ICMP_ECHO_REQUEST {
         increment_metric(METRIC_PASSED);
         return Ok(xdp_action::XDP_PASS);
     }
 
-    // Check payload size — drop oversized ICMP echo
+    // Check payload size - drop oversized ICMP echo
     let payload_start = l4_offset + ICMP_HDR_LEN;
     let pkt_end = ctx.data_end();
     let pkt_start = ctx.data();
@@ -1172,7 +1172,7 @@ fn check_udp_amplification(
 
     if amp_rate_check(bucket_key, amp_cfg.max_pps as u64, now) {
         increment_ddos_metric(DDOS_METRIC_AMP_PASSED);
-        None // Under limit — fall through
+        None // Under limit - fall through
     } else {
         let src_addr = [src_ip, 0, 0, 0];
         let dst_addr = [dst_ip, 0, 0, 0];
@@ -1513,7 +1513,7 @@ fn process_conntrack_tcp(
                     }
                 }
             } else {
-                // ACK to non-existent connection — potential ACK flood
+                // ACK to non-existent connection - potential ACK flood
                 if check_flood_rate(src_ip, FLOOD_TYPE_ACK, cfg.ack_threshold as u64, now) {
                     emit_ddos_event(
                         ctx,

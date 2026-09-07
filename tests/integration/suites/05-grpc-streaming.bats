@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 05-grpc-streaming.bats — gRPC service tests (health, reflection, streaming)
+# 05-grpc-streaming.bats - gRPC service tests (health, reflection, streaming)
 # Requires: grpcurl
 
 load '../lib/helpers'
@@ -51,11 +51,11 @@ teardown_file() {
 @test "StreamAlerts connects without error" {
     command -v grpcurl &>/dev/null || { echo "grpcurl not installed" >&2; return 1; }
 
-    # Connect to the stream with a short timeout — we just verify the connection works
+    # Connect to the stream with a short timeout - we just verify the connection works
     local output
     output="$(timeout 3 grpcurl -plaintext -d '{}' "$GRPC_ADDR" \
         ebpfsentinel.AlertStreamService/StreamAlerts 2>&1)" || true
-    # Connection should succeed (may timeout or return empty — both are fine)
+    # Connection should succeed (may timeout or return empty - both are fine)
     # A connection error would contain "failed to connect" or "connection refused"
     [[ "$output" != *"connection refused"* ]]
 }

@@ -11,7 +11,7 @@ use tracing::{debug, info};
 /// Manages the `SELF_OWNED_BINDINGS` eBPF map of the `xdp-vip-announcer`
 /// object.
 ///
-/// Keyed by the VIP IPv4 as a big-endian numeric `u32` — the same key
+/// Keyed by the VIP IPv4 as a big-endian numeric `u32` - the same key
 /// space the kernel responder derives from `arp.tpa` and `VIP_SET`.
 /// Only the elected speaker writes here; on speaker loss the caller
 /// clears every entry so a standby node owns nothing (split-brain safe).

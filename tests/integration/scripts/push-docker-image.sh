@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# push-docker-image.sh — Build Docker image on host and push to agent VM
+# push-docker-image.sh - Build Docker image on host and push to agent VM
 #
 # Builds ebpfsentinel:integration-test locally (where CPU/RAM are plentiful),
 # then streams the image to the agent VM via SSH + docker load.

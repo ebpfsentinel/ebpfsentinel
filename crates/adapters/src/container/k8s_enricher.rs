@@ -3,7 +3,7 @@
 //! Runs a `kube-rs` reflector on the `Pod` resource scoped to the current
 //! node and maintains a reverse index from container ID (as seen in
 //! `status.containerStatuses[].containerID`) to the owning pod. On lookup
-//! it returns a [`KubernetesMetadata`] value from the local cache — no API
+//! it returns a [`KubernetesMetadata`] value from the local cache - no API
 //! call per alert.
 //!
 //! When the agent is not running inside a Kubernetes cluster (no
@@ -330,7 +330,7 @@ impl MetadataEnricher for KubernetesEnricher {
             self.metrics.misses_total.fetch_add(1, Ordering::Relaxed);
             return Ok(None);
         };
-        // Fire the namespace hook (best-effort — enterprise multi-tenancy).
+        // Fire the namespace hook (best-effort - enterprise multi-tenancy).
         if let Some(hook) = self.namespace_hook.lock().await.as_ref() {
             let _ = hook.on_namespace_resolved(&pod.namespace);
         }
@@ -348,7 +348,7 @@ pub async fn try_build_client() -> Option<Client> {
     match Client::try_default().await {
         Ok(c) => Some(c),
         Err(err) => {
-            warn!(error = %err, "failed to build kube client — enricher disabled");
+            warn!(error = %err, "failed to build kube client - enricher disabled");
             None
         }
     }

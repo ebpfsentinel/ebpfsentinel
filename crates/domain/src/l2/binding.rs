@@ -47,7 +47,7 @@ pub struct OwnedBindings {
 }
 
 impl OwnedBindings {
-    /// An empty set (this node owns nothing — e.g. standby/disabled).
+    /// An empty set (this node owns nothing - e.g. standby/disabled).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -72,7 +72,7 @@ impl OwnedBindings {
     /// Whether `(ip, mac)` is a binding this node itself announces.
     ///
     /// Returns `false` for an unknown IP, and `false` when the IP is
-    /// known but the MAC differs (a *foreign* claim — exactly the case
+    /// known but the MAC differs (a *foreign* claim - exactly the case
     /// the ARP-guard must still flag).
     #[must_use]
     pub fn is_self_announced(&self, ip: IpAddr, mac: [u8; 6]) -> bool {

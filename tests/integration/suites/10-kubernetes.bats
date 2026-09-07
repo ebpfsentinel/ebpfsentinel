@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 10-kubernetes.bats — Kubernetes (Minikube) deployment tests
+# 10-kubernetes.bats - Kubernetes (Minikube) deployment tests
 # Requires: minikube, kubectl
 # NOTE: This suite is designed for VM-only execution (not CI).
 
@@ -22,7 +22,7 @@ setup_file() {
 
     # Start minikube if not running. A cluster that refuses to come up (no
     # nested virtualisation, no usable driver) is a missing capability, not a
-    # product regression — gate on it instead of failing setup opaquely.
+    # product regression - gate on it instead of failing setup opaquely.
     # The suite runs under sudo (the agent DaemonSet needs privileged eBPF), and
     # the docker driver refuses to run as root without --force. Passing it is
     # the only way to have one cluster shared by the root-run kubectl calls
@@ -40,7 +40,7 @@ setup_file() {
     # Ensure the agent image exists, then load it into minikube. The DaemonSet
     # pulls ebpfsentinel:latest with imagePullPolicy:IfNotPresent, so the image
     # must be present inside the cluster (otherwise ImagePullBackOff). Build it
-    # from source if it is missing — staging the pre-built eBPF objects into
+    # from source if it is missing - staging the pre-built eBPF objects into
     # ebpf-out/ first (the Dockerfile COPYs that dir) so the in-cluster agent
     # can actually load its datapath and reach readiness.
     if ! docker image inspect ebpfsentinel:latest &>/dev/null 2>&1; then
@@ -49,7 +49,7 @@ setup_file() {
             || env_skip "no eBPF objects available to build the agent image"
         echo "# Building ebpfsentinel:latest..." >&3
         docker build -f "${PROJECT_ROOT}/Dockerfile.agent" -t ebpfsentinel:latest "${PROJECT_ROOT}" || {
-            echo "# Docker build failed — tests will be skipped" >&3
+            echo "# Docker build failed - tests will be skipped" >&3
         }
     fi
     if docker image inspect ebpfsentinel:latest &>/dev/null 2>&1; then

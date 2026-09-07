@@ -1,4 +1,4 @@
-# config-ebpf-container.yaml — Container cgroup enrichment scenario fixture.
+# config-ebpf-container.yaml - Container cgroup enrichment scenario fixture.
 #
 # Enables the cgroup resolver + Docker enricher so containerised processes
 # are mapped from cgroup_id back to a container id, runtime, and image.

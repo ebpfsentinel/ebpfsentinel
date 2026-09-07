@@ -9,7 +9,7 @@ use domain::dns::reputation::DomainReputationEngine;
 // Fuzz the DomainReputationEngine: updates, scoring, LRU eviction, auto-block.
 //
 // Layout:
-//   [0]    = max_tracked_domains (1–50)
+//   [0]    = max_tracked_domains (1-50)
 //   [1]    = auto_block_threshold byte (threshold = byte / 255.0)
 //   [2]    = flags (bit 0: auto_block_enabled)
 //   rest   = consumed in 12-byte chunks as reputation events

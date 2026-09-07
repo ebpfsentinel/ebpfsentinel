@@ -11,8 +11,8 @@ data:
       interfaces:
         - eth0
       # Bind on all interfaces (default is 127.0.0.1) so the kubelet's
-      # liveness/readiness HTTP probes — which hit the pod/node IP, not
-      # loopback — can reach /healthz and /readyz.
+      # liveness/readiness HTTP probes - which hit the pod/node IP, not
+      # loopback - can reach /healthz and /readyz.
       bind_address: "0.0.0.0"
       # Non-loopback bind with auth disabled is rejected at config validation
       # unless explicitly acknowledged. This is a deployment-mechanics test on

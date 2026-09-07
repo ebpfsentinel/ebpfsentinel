@@ -34,7 +34,7 @@ pub struct Ja4sSummaryResponse {
     pub persistent: bool,
 }
 
-/// `GET /api/v1/fingerprints/summary` — fingerprint cache status.
+/// `GET /api/v1/fingerprints/summary` - fingerprint cache status.
 #[utoipa::path(
     get, path = "/api/v1/fingerprints/summary",
     tag = "Fingerprints",
@@ -65,7 +65,7 @@ pub async fn fingerprint_summary(
     })
 }
 
-/// `GET /api/v1/fingerprints/ja4s` — JA4S server-side fingerprint cache status.
+/// `GET /api/v1/fingerprints/ja4s` - JA4S server-side fingerprint cache status.
 #[utoipa::path(
     get, path = "/api/v1/fingerprints/ja4s",
     tag = "Fingerprints",

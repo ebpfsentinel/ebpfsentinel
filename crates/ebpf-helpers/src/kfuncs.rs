@@ -66,10 +66,10 @@ pub struct xfrm_state {
     _unused: [u8; 0],
 }
 
-/// Opaque kernel `struct bpf_dynptr` — 16 bytes, 8-byte aligned,
+/// Opaque kernel `struct bpf_dynptr` - 16 bytes, 8-byte aligned,
 /// layout stable from kernel 6.4+. Programs declare dynptrs on the
 /// stack and hand `&mut BpfDynptr` to the `from_{skb,xdp}` kfuncs,
-/// which initialise them. Treat the inner field as opaque — the
+/// which initialise them. Treat the inner field as opaque - the
 /// verifier enforces that BPF reads/writes only go through the
 /// dedicated helpers.
 #[repr(C)]
@@ -100,11 +100,11 @@ pub struct nf_conn {
     _unused: [u8; 0],
 }
 
-/// Opaque kernel `struct nf_conn___init` — refcount-tagged
+/// Opaque kernel `struct nf_conn___init` - refcount-tagged
 /// subtype returned by the `bpf_{skb,xdp}_ct_alloc` kfuncs, kernel
 /// 6.0+. The verifier distinguishes it from [`nf_conn`] by BTF type
 /// id so that only "not yet inserted" objects can be configured
-/// with `bpf_ct_set_*` helpers. `bpf_ct_release` accepts both — the
+/// with `bpf_ct_set_*` helpers. `bpf_ct_release` accepts both - the
 /// safe wrapper's [`CtBuilder::drop`] relies on that to release
 /// un-inserted builders.
 #[repr(C)]
@@ -112,7 +112,7 @@ pub struct nf_conn_init {
     _unused: [u8; 0],
 }
 
-/// `union nf_inet_addr` — 16 bytes, matches both IPv4 `__be32`
+/// `union nf_inet_addr` - 16 bytes, matches both IPv4 `__be32`
 /// inside the `ip` arm and IPv6 `__be32[4]` inside the `ip6` arm.
 /// We expose a single `[u32; 4]` field and let the helpers below
 /// pick the right arm based on the caller's intent.
@@ -140,20 +140,20 @@ impl NfInetAddr {
     }
 }
 
-/// `enum nf_nat_manip_type` — selects whether the NAT rewrite
+/// `enum nf_nat_manip_type` - selects whether the NAT rewrite
 /// applies to the source tuple or the destination tuple.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NfNatManipType {
-    /// `NF_NAT_MANIP_SRC` — SNAT, rewrite source address + port.
+    /// `NF_NAT_MANIP_SRC` - SNAT, rewrite source address + port.
     Src = 0,
-    /// `NF_NAT_MANIP_DST` — DNAT, rewrite destination address +
+    /// `NF_NAT_MANIP_DST` - DNAT, rewrite destination address +
     /// port.
     Dst = 1,
 }
 
 /// `struct bpf_xfrm_info` from `include/uapi/linux/bpf.h`. Stable
-/// layout from kernel 6.2 — 8 bytes, used by
+/// layout from kernel 6.2 - 8 bytes, used by
 /// `bpf_skb_{get,set}_xfrm_info` to steer a TC skb towards a
 /// specific `xfrm` interface (`if_id`) on a given `link`. Setting it
 /// effectively pushes the packet into a virtual `xfrmi` device the
@@ -190,9 +190,9 @@ pub struct BpfFouEncap {
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FouEncapType {
-    /// `FOU_BPF_ENCAP_FOU` — plain Foo-over-UDP.
+    /// `FOU_BPF_ENCAP_FOU` - plain Foo-over-UDP.
     Fou = 0,
-    /// `FOU_BPF_ENCAP_GUE` — Generic UDP Encapsulation.
+    /// `FOU_BPF_ENCAP_GUE` - Generic UDP Encapsulation.
     Gue = 1,
 }
 
@@ -250,7 +250,7 @@ pub mod ips_status {
     pub const SEEN_REPLY: u32 = 0x0002;
     /// Connection is confirmed (seen by CT helpers and accepted).
     pub const CONFIRMED: u32 = 0x0008;
-    /// Connection is being destroyed — packets are dropped and no
+    /// Connection is being destroyed - packets are dropped and no
     /// new additions are accepted. Setting this bit on a live
     /// `nf_conn` is the "terminate flow" primitive that IDS
     /// verdicts use to kill misbehaving connections.
@@ -259,7 +259,7 @@ pub mod ips_status {
     pub const ASSURED: u32 = 0x0004;
 }
 
-/// `bpf_sock_tuple` flavour — picks which union arm the caller
+/// `bpf_sock_tuple` flavour - picks which union arm the caller
 /// populated. The kernel consults `tuple__sz` to pick the arm at
 /// runtime, but the type-safety of the Rust wrapper uses this enum
 /// to keep callers from passing a mis-sized struct.
@@ -303,7 +303,7 @@ pub struct BpfSockTupleIpv6 {
     pub dport: u16,
 }
 
-/// `bpf_ct_opts` — kernel 5.18+ layout from
+/// `bpf_ct_opts` - kernel 5.18+ layout from
 /// `net/netfilter/nf_conntrack_bpf.c`. 12 bytes, padding accounted
 /// for via `reserved`.
 #[repr(C)]
@@ -349,7 +349,7 @@ impl BpfCtOpts {
     }
 }
 
-/// Options struct passed to `bpf_xdp_get_xfrm_state` — stable layout
+/// Options struct passed to `bpf_xdp_get_xfrm_state` - stable layout
 /// from kernel 6.8 `include/uapi/linux/bpf.h` (`bpf_xfrm_state_opts`).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -397,7 +397,7 @@ unsafe extern "C" {
     -> i32;
 
     /// Look up the `xfrm_state` matching the packet. Kernel 6.8.
-    /// `KF_ACQUIRE | KF_RET_NULL` — pair with
+    /// `KF_ACQUIRE | KF_RET_NULL` - pair with
     /// [`bpf_xdp_xfrm_state_release`].
     pub fn bpf_xdp_get_xfrm_state(
         ctx: *mut core::ffi::c_void,
@@ -449,7 +449,7 @@ unsafe extern "C" {
     // `bpf_skb_ct_lookup` / `bpf_xdp_ct_lookup` query the kernel
     // netfilter conntrack table for a tuple extracted from the
     // current packet. `KF_ACQUIRE | KF_RET_NULL | KF_TRUSTED_ARGS`
-    // — every non-null return must be released via
+    // - every non-null return must be released via
     // [`bpf_ct_release`] on every control-flow path.
 
     /// Look up the `nf_conn` matching a tuple in the TC skb's
@@ -475,7 +475,7 @@ unsafe extern "C" {
     /// Release an `nf_conn*` acquired from `bpf_skb_ct_lookup`,
     /// `bpf_xdp_ct_lookup`, or one of the `_alloc` / `insert_entry`
     /// kfuncs. `KF_RELEASE`. Also accepts `nf_conn___init*` from
-    /// the alloc kfuncs — the refcount layout is shared.
+    /// the alloc kfuncs - the refcount layout is shared.
     pub fn bpf_ct_release(nfct: *mut nf_conn);
 
     // ── Kernel 6.0/6.1 conntrack allocate + NAT delegation ─────
@@ -508,7 +508,7 @@ unsafe extern "C" {
 
     /// Commit an allocated `nf_conn___init` into the kernel
     /// conntrack table. Consumes the `___init` reference and
-    /// returns a live `nf_conn*` on success (still KF_ACQUIRE —
+    /// returns a live `nf_conn*` on success (still KF_ACQUIRE -
     /// must be released by the caller). Kernel 6.0.
     pub fn bpf_ct_insert_entry(nfct_i: *mut nf_conn_init) -> *mut nf_conn;
 
@@ -1337,7 +1337,7 @@ pub unsafe fn xdp_rx_hash(ctx: *const core::ffi::c_void) -> Option<(u32, u32)> {
 
 /// Hardware RX timestamp (nanoseconds since boot) for the current
 /// XDP frame. Returns `None` when the driver lacks hardware
-/// timestamping. Used by E17 beaconing detection to record arrival
+/// timestamping. Used by beaconing detection to record arrival
 /// times with zero CPU jitter.
 ///
 /// # Safety
@@ -1400,21 +1400,21 @@ where
 // that slot, which the verifier rejects with `invalid read from
 // stack`. So both the TC and XDP sides expose their dynptr work as
 // standalone functions that create and consume the dynptr entirely
-// within one frame — accessed only through `&raw mut` / `&raw const`,
-// never moved — letting only scalars escape.
+// within one frame - accessed only through `&raw mut` / `&raw const`,
+// never moved - letting only scalars escape.
 
 /// Probe a TC skb's L7 payload without linearising the packet.
 ///
 /// Creates a dynptr over `skb`, then returns the full packet size
 /// (including non-linear fragments) and the 4-byte protocol magic at
-/// `l7_offset` — e.g. `0x1603xx` for TLS, `"HTTP"` for HTTP/1.x, the
+/// `l7_offset` - e.g. `0x1603xx` for TLS, `"HTTP"` for HTTP/1.x, the
 /// HTTP/2 client preface. The magic is `0` when `l7_offset` is past the
 /// end of the packet or the window read fails.
 ///
 /// Like [`xdp_frame_size`], the `bpf_dynptr` is a kernel-managed stack
 /// object that must stay pinned in the slot the kfunc wrote it to, so
-/// it is created and consumed entirely within this one frame — accessed
-/// only through `&raw mut` / `&raw const`, never moved — and only the
+/// it is created and consumed entirely within this one frame - accessed
+/// only through `&raw mut` / `&raw const`, never moved - and only the
 /// two scalars escape. This exercises the full TC dynptr path:
 /// `from_skb` → `size` → `adjust` → `slice`.
 ///
@@ -1474,8 +1474,8 @@ pub unsafe fn skb_l7_probe(skb: *mut core::ffi::c_void, l7_offset: u32) -> Optio
 /// wrote it to. Wrapping it in a struct and returning that struct
 /// moves the dynptr out of its slot, which the verifier rejects with
 /// `invalid read from stack`. So the dynptr is created and consumed
-/// entirely within this one frame — accessed only through
-/// `&raw mut` / `&raw const`, never moved — and only the scalar size
+/// entirely within this one frame - accessed only through
+/// `&raw mut` / `&raw const`, never moved - and only the scalar size
 /// escapes.
 ///
 /// Returns `None` when the dynptr cannot be created.
@@ -1669,7 +1669,7 @@ where
 // `release` releases the `___init` entry via `bpf_ct_release`,
 // which the kernel accepts on both subtypes. Calling `insert`
 // consumes the builder and returns a live `*mut nf_conn` on
-// success — the caller takes over the release duty and usually
+// success - the caller takes over the release duty and usually
 // runs it through one of the `ct_change_*` helpers before calling
 // [`ct_release`].
 
@@ -1736,7 +1736,7 @@ impl CtBuilder {
     }
 
     /// Raw pointer to the underlying `nf_conn___init`. Intended for
-    /// kfunc calls only — keep it inside the BPF program scope.
+    /// kfunc calls only - keep it inside the BPF program scope.
     #[inline(always)]
     #[must_use]
     pub fn as_raw(&self) -> *mut nf_conn_init {
@@ -1792,13 +1792,13 @@ impl CtBuilder {
     /// it exposes no errno to BPF (and the alloc-time `opts.error` is
     /// already `0` for any builder that exists, since allocation
     /// succeeded). This fixed value is therefore the only failure signal
-    /// available — it is a sentinel, not a kernel error code.
+    /// available - it is a sentinel, not a kernel error code.
     pub const INSERT_FAILED: i32 = -1;
 
     /// Commit the builder into the kernel conntrack table,
     /// consuming `self`. On success returns a live `*mut nf_conn`
     /// the caller is responsible for releasing via [`ct_release`].
-    /// On failure returns `Err(Self::INSERT_FAILED)` — the kernel
+    /// On failure returns `Err(Self::INSERT_FAILED)` - the kernel
     /// consumes the `___init` reference either way, matching
     /// `bpf_ct_insert_entry` semantics (which surfaces no errno).
     #[inline(always)]
@@ -1878,7 +1878,7 @@ impl CtEntry {
     }
 
     /// Mark the flow as dying so the kernel drops subsequent
-    /// packets. Equivalent to `change_status(ips_status::DYING)` —
+    /// packets. Equivalent to `change_status(ips_status::DYING)` -
     /// provided as a named method so call sites explicitly document
     /// the IDS verdict semantics.
     #[inline(always)]
@@ -1909,10 +1909,10 @@ pub unsafe fn kill_flow_via_skb_ct(
             // Collapse the timeout so the conntrack gc reaps the entry
             // promptly. Marking DYING alone leaves the entry hashed and
             // visible in `conntrack -L` until its original (often multi-day)
-            // ESTABLISHED timeout — a dropped flow never re-enters netfilter
+            // ESTABLISHED timeout - a dropped flow never re-enters netfilter
             // to trigger deletion, so the short timeout is what evicts it.
             entry.change_timeout(1);
-            // Leak the wrapper so Drop doesn't run — the outer
+            // Leak the wrapper so Drop doesn't run - the outer
             // `with_skb_ct_lookup` already releases via the kfunc.
             core::mem::forget(entry);
             ok
@@ -1939,7 +1939,7 @@ pub unsafe fn kill_flow_via_xdp_ct(
             // Collapse the timeout so the conntrack gc reaps the entry
             // promptly. XDP drops run before netfilter, so once the flow is
             // blocked no further packet re-enters conntrack to act on the
-            // DYING bit — the short timeout is what evicts the entry from
+            // DYING bit - the short timeout is what evicts the entry from
             // `conntrack -L` instead of leaving it at its ESTABLISHED timeout.
             entry.change_timeout(1);
             core::mem::forget(entry);
@@ -2049,7 +2049,7 @@ mod tests {
     // ── Dynptr free-function tests ───────────────────────────────
     //
     // The dynptr wrappers are standalone functions (`skb_l7_probe`,
-    // `xdp_frame_size`) — a `bpf_dynptr` must stay pinned in its stack
+    // `xdp_frame_size`) - a `bpf_dynptr` must stay pinned in its stack
     // slot, so it is never wrapped in a returnable struct. Each test
     // seeds deterministic backing via `host_queue_dynptr`, which the
     // host init stub installs into the dynptr the function creates
@@ -2131,7 +2131,7 @@ mod tests {
     fn bpf_ct_opts_layout_is_stable() {
         // 4 (netns_id) + 4 (error) + 1 (l4proto) + 1 (dir) + 2
         // (reserved) = 12 bytes. Rust + repr(C) on this field
-        // ordering produces exactly 12 — mismatch means we drifted
+        // ordering produces exactly 12 - mismatch means we drifted
         // from the kernel struct and the verifier will reject
         // programs at load time.
         assert_eq!(core::mem::size_of::<BpfCtOpts>(), 12);

@@ -4,7 +4,7 @@
 //!
 //! BPF tokens let a privileged process create a token fd that scopes
 //! which map types, program types, and attach types an unprivileged
-//! consumer is allowed to load — without giving the consumer
+//! consumer is allowed to load - without giving the consumer
 //! `CAP_BPF` / `CAP_NET_ADMIN`. This module wraps `BPF_TOKEN_CREATE`
 //! directly via `libc::syscall(SYS_bpf, …)` because aya 0.14.0 does not
 //! expose the syscall yet (upstream PR #1515 is in-flight at time of
@@ -81,7 +81,7 @@ pub enum BpfTokenError {
 }
 
 /// Arguments for `BPF_TOKEN_CREATE`. The kernel's `token_create` attr
-/// is only `{ flags, bpffs_fd }` — the set of delegated commands, maps,
+/// is only `{ flags, bpffs_fd }` - the set of delegated commands, maps,
 /// programs, and attach types is **not** part of the syscall; it is
 /// configured through the bpffs *mount* options (`delegate_cmds`,
 /// `delegate_maps`, `delegate_progs`, `delegate_attachs`) when the
@@ -112,7 +112,7 @@ impl TokenCreateAttr {
 /// } token_create;
 /// ```
 ///
-/// Only these two fields exist — passing any non-zero trailing bytes
+/// Only these two fields exist - passing any non-zero trailing bytes
 /// makes the kernel reject the syscall with `EINVAL`. Keeping it
 /// private + `#[repr(C)]` so we control the layout passed to `bpf(2)`.
 #[repr(C)]
@@ -195,7 +195,7 @@ pub fn open_bpffs_dir(path: &Path) -> Result<OwnedFd, BpfTokenError> {
         }
     })?;
     // SAFETY: c_path lives until after the syscall returns. The bpffs
-    // dir fd must be a regular open fd — BPF_TOKEN_CREATE inspects the
+    // dir fd must be a regular open fd - BPF_TOKEN_CREATE inspects the
     // file's superblock magic and rejects an O_PATH fd with EBADF, so we
     // open it O_RDONLY | O_DIRECTORY.
     let raw = unsafe {
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn create_token_propagates_errno_on_bad_fd() {
-        // Passing fd=-1 triggers EBADF on any kernel — we just need to
+        // Passing fd=-1 triggers EBADF on any kernel - we just need to
         // observe that the wrapper reports a `SyscallFailed` variant
         // rather than silently returning Ok.
         let attr = TokenCreateAttr::enterprise_default(-1);

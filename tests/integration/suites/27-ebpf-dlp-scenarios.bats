@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 26-ebpf-dlp-scenarios.bats — DLP (uprobe-dlp) eBPF scenario tests
+# 26-ebpf-dlp-scenarios.bats - DLP (uprobe-dlp) eBPF scenario tests
 # Requires: root, kernel >= 6.9, bpftool
 #
 # Tests DLP program with:
@@ -179,7 +179,7 @@ teardown_file() {
 # data with openssl s_client locally. The uprobe intercepts the
 # plaintext in the s_client process, sends it to the DLP engine.
 #
-# All TLS happens on localhost — no namespace, no cross-VM traffic.
+# All TLS happens on localhost - no namespace, no cross-VM traffic.
 
 _start_tls_echo_server() {
     openssl req -x509 -newkey rsa:2048 -keyout "$DATA_DIR/tls.key" \
@@ -195,7 +195,7 @@ _stop_tls_echo_server() {
 }
 
 _send_tls_data() {
-    # Local TLS send — uprobe on libssl captures the plaintext from s_client
+    # Local TLS send - uprobe on libssl captures the plaintext from s_client
     local data="$1"
     echo "$data" | timeout 3 openssl s_client -connect 127.0.0.1:9443 -quiet 2>/dev/null || true
 }
@@ -385,7 +385,7 @@ _send_tls_data() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite - MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

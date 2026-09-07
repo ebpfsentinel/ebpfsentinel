@@ -1,7 +1,7 @@
 //! Privileged DLP target discovery.
 //!
 //! Scans `/proc` for SSL libraries mapped by any process and resolves the
-//! `SSL_write` / `SSL_read` offsets — both of which require reading another
+//! `SSL_write` / `SSL_read` offsets - both of which require reading another
 //! process's `/proc/<pid>/maps` and ELF, gated by `CAP_SYS_PTRACE`. The rootless
 //! agent dropped that capability, so it asks the warden (which holds it) for the
 //! result and keeps only the attach lifecycle.
@@ -23,7 +23,7 @@ const DELETED_MARKER: &str = " (deleted)";
 /// Scan `/proc` and return one [`DlpTarget`] per unique `(dev, ino)` SSL library
 /// any process maps, with offsets pre-resolved. Unreadable processes / files are
 /// skipped silently (they vanish between listing and reading, or are simply not
-/// SSL). A library whose `SSL_write` cannot be resolved is dropped — there is no
+/// SSL). A library whose `SSL_write` cannot be resolved is dropped - there is no
 /// DLP value without the write probe.
 pub fn scan_dlp_targets() -> Vec<DlpTarget> {
     let mut seen: HashSet<(u64, u64)> = HashSet::new();

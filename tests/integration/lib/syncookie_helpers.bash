@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# syncookie_helpers.bash — Drive the xdp-ratelimit-syncookie tail-call
+# syncookie_helpers.bash - Drive the xdp-ratelimit-syncookie tail-call
 # program. Two attackers exercise the program from opposite sides:
-#   - Real socket (state-keeping) — completes the 3-way handshake using
+#   - Real socket (state-keeping) - completes the 3-way handshake using
 #     the cookie returned by the agent's SYN-ACK.
-#   - Spoofed source (scapy) — never sends the cookie ACK because the
+#   - Spoofed source (scapy) - never sends the cookie ACK because the
 #     source is unreachable; cookie validation cannot complete.
 #
 # Public entrypoints:
 #   require_syncookie_tools
-#   syncookie_start_target <port>          — start ncat listener on agent
+#   syncookie_start_target <port>          - start ncat listener on agent
 #   syncookie_stop_target <port>
-#   syncookie_real_flood <port> <count>    — SYN flood via hping3 (real src)
-#   syncookie_real_connect <port>          — single completed ncat connect
-#   syncookie_spoofed_flood <port> <count> — scapy SYN flood w/ rand src
-#   nstat_read <key>                       — read one nstat -az counter
+#   syncookie_real_flood <port> <count>    - SYN flood via hping3 (real src)
+#   syncookie_real_connect <port>          - single completed ncat connect
+#   syncookie_spoofed_flood <port> <count> - scapy SYN flood w/ rand src
+#   nstat_read <key>                       - read one nstat -az counter
 #                                             from the agent VM
 
 SYNCOOKIE_TARGET_PORT="${SYNCOOKIE_TARGET_PORT:-11443}"
@@ -85,7 +85,7 @@ syncookie_real_flood() {
 }
 
 # syncookie_real_connect <port>
-# A single ncat TCP connect from the real source — must complete the
+# A single ncat TCP connect from the real source - must complete the
 # 3-way handshake to prove the cookie path round-trips correctly.
 syncookie_real_connect() {
     local port="${1:-$SYNCOOKIE_TARGET_PORT}"
@@ -99,7 +99,7 @@ syncookie_real_connect() {
 # syncookie_spoofed_flood <port> <count>
 # Scapy SYN flood with randomised spoofed source IPs in the 198.18.0.0/15
 # benchmark range (RFC2544). These hosts do NOT exist, so the legitimate
-# 3-way handshake completion path can never run for them — kernel
+# 3-way handshake completion path can never run for them - kernel
 # TcpExtSyncookiesRecv must stay flat for this traffic class.
 syncookie_spoofed_flood() {
     local port="${1:-$SYNCOOKIE_TARGET_PORT}"

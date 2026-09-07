@@ -3,7 +3,7 @@
 //! Every `poll_interval` the poller takes a conntrack snapshot, diffs it
 //! against the previous one, and emits [`ConntrackEvent`] messages into a
 //! `broadcast::Sender`. Latency is bounded by the poll interval
-//! (default 2 s) — acceptable for admin observability.
+//! (default 2 s) - acceptable for admin observability.
 //!
 //! The snapshot comes from whichever source the port resolves: the proc file
 //! where the kernel exposes it, a conntrack-tools dump where it does not.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 07-authentication.bats — JWT authentication and RBAC tests
+# 07-authentication.bats - JWT authentication and RBAC tests
 
 load '../lib/helpers'
 
@@ -43,7 +43,7 @@ teardown_file() {
 
 # ── Helper ─────────────────────────────────────────────────────────
 
-# get_token <name> — returns the raw JWT string for the given token name
+# get_token <name> - returns the raw JWT string for the given token name
 get_token() {
     cat "${JWT_DIR}/token-${1}.jwt" 2>/dev/null
 }
@@ -59,7 +59,7 @@ get_token() {
 @test "readyz is accessible without token (public route)" {
     local status_code
     status_code="$(api_status /readyz)"
-    # 200 or 503 are both acceptable — just not 401
+    # 200 or 503 are both acceptable - just not 401
     [[ "$status_code" == "200" ]] || [[ "$status_code" == "503" ]]
 }
 

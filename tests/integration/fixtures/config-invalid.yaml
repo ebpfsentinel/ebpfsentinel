@@ -1,4 +1,4 @@
-# config-invalid.yaml — Intentionally invalid config for negative testing.
+# config-invalid.yaml - Intentionally invalid config for negative testing.
 # Missing required agent.interfaces field (empty list).
 
 agent:

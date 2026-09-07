@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 32-ebpf-routing-scenarios.bats — Dynamic routing eBPF scenario tests
+# 32-ebpf-routing-scenarios.bats - Dynamic routing eBPF scenario tests
 # Requires: root, kernel >= 6.9, bpftool
 
 load '../lib/helpers'
@@ -81,7 +81,7 @@ teardown_file() {
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ]
-    # health_status may be "unknown" or "down" since no real gateway exists —
+    # health_status may be "unknown" or "down" since no real gateway exists -
     # the important thing is that the field is present in the response
     local health
     health="$(echo "$body" | jq -r '
@@ -105,9 +105,9 @@ teardown_file() {
     echo "$metrics" | grep -qE "ebpfsentinel_routing|ebpfsentinel_packets"
 }
 
-# ── Gateway CRUD — create and delete ────────────────────────────
+# ── Gateway CRUD - create and delete ────────────────────────────
 
-@test "Gateway CRUD — create and delete" {
+@test "Gateway CRUD - create and delete" {
     require_root
 
     # Create a new gateway

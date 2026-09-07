@@ -1,10 +1,10 @@
-# config-ebpf-ipv6-sweep.yaml — IPv6 full-path sweep scenario fixture.
+# config-ebpf-ipv6-sweep.yaml - IPv6 full-path sweep scenario fixture.
 #
 # Configures one IPv6-scoped rule per dataplane feature (firewall, IDS,
 # IPS auto-blacklist, ratelimit per-source) so the suite can assert each
 # loads, surfaces via REST, and survives a v4↔v6 mixed traffic burst.
 # Conntrack + DNS observation are enabled so AAAA queries are accepted
-# by the parser surface (DNS captures only — no rule firing required).
+# by the parser surface (DNS captures only - no rule firing required).
 
 agent:
   interfaces:

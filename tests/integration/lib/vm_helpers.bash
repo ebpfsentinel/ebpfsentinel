@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# vm_helpers.bash — Cross-VM test helpers for 2-VM topology
+# vm_helpers.bash - Cross-VM test helpers for 2-VM topology
 #
 # Sourced automatically by ebpf_helpers.bash when EBPF_2VM_MODE=true.
 # Overrides network namespace, agent lifecycle, and packet generation
 # functions to work across the private network (192.168.56.0/24).
 #
 # Topology:
-#   Agent VM   (192.168.56.10) — runs ebpfsentinel-agent, reached via SSH
-#   Attacker VM (192.168.56.20) — runs BATS tests, sends traffic locally
+#   Agent VM   (192.168.56.10) - runs ebpfsentinel-agent, reached via SSH
+#   Attacker VM (192.168.56.20) - runs BATS tests, sends traffic locally
 
 VM_HELPERS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -68,7 +68,7 @@ _agent_scp() {
     # the remote parent directory before the copy, otherwise scp fails with
     # "failed to upload file ... to ...". The agent-local test mode (sudo bats
     # on the agent) can also leave root-owned files at the same fixed /tmp
-    # paths, which the unprivileged scp cannot overwrite — so prepare the
+    # paths, which the unprivileged scp cannot overwrite - so prepare the
     # directory with sudo, hand it back to the vagrant user, and clear any
     # stale destination file first.
     local remote_dir
@@ -83,12 +83,12 @@ _agent_scp() {
 
 # ── Skip guards (overrides) ──────────────────────────────────────
 
-# require_root — no-op in 2VM mode; root operations happen on agent VM via SSH
+# require_root - no-op in 2VM mode; root operations happen on agent VM via SSH
 require_root() {
     :
 }
 
-# require_ebpf_env — verify SSH connectivity to agent VM instead of
+# require_ebpf_env - verify SSH connectivity to agent VM instead of
 # checking for local binary/Docker image
 require_ebpf_env() {
     if ! _agent_ssh true 2>/dev/null; then
@@ -100,7 +100,7 @@ require_ebpf_env() {
     fi
 }
 
-# require_tool — in 2VM mode, check tool availability on the agent VM
+# require_tool - in 2VM mode, check tool availability on the agent VM
 # for privileged tools (bpftool, ip, tc), check on attacker for others
 require_tool() {
     local tool="${1:?usage: require_tool <command>}"
@@ -120,7 +120,7 @@ require_tool() {
 
 # ── Remote command wrappers ──────────────────────────────────────
 
-# bpftool — wrapper that runs bpftool on the agent VM via SSH
+# bpftool - wrapper that runs bpftool on the agent VM via SSH
 bpftool() {
     _agent_ssh_sudo bpftool "$@"
 }
@@ -128,15 +128,15 @@ bpftool() {
 # Override EBPF_VETH_HOST to match the agent VM's private network interface
 EBPF_VETH_HOST="${EBPF_AGENT_INTERFACE}"
 
-# ── Network namespace (overrides — no-ops) ────────────────────────
+# ── Network namespace (overrides - no-ops) ────────────────────────
 
-# create_test_netns — no-op in 2VM mode.
+# create_test_netns - no-op in 2VM mode.
 # The private network (192.168.56.0/24) IS the test network.
 create_test_netns() {
     :
 }
 
-# destroy_test_netns — no-op in 2VM mode.
+# destroy_test_netns - no-op in 2VM mode.
 destroy_test_netns() {
     :
 }
@@ -185,11 +185,11 @@ start_agent() {
     local config_file="${1:?usage: start_agent <config_file> [extra_args...]}"
     shift
 
-    # Reuse start_ebpf_agent — in 2VM mode both do the same thing
+    # Reuse start_ebpf_agent - in 2VM mode both do the same thing
     start_ebpf_agent "$config_file" "$@"
 }
 
-# stop_agent — overrides helpers.bash stop_agent
+# stop_agent - overrides helpers.bash stop_agent
 stop_agent() {
     stop_ebpf_agent "$@"
 }
@@ -225,7 +225,7 @@ wait_for_agent_exit() {
 }
 
 # start_agent_expect_fail <config_file> [extra_args...]
-# Overrides helpers.bash — runs the agent on the agent VM, expects non-zero exit.
+# Overrides helpers.bash - runs the agent on the agent VM, expects non-zero exit.
 start_agent_expect_fail() {
     local config_file="${1:?usage: start_agent_expect_fail <config_file>}"
     shift
@@ -346,7 +346,7 @@ start_ebpf_agent() {
     }
 }
 
-# stop_ebpf_agent — stop agent running on the agent VM via SSH
+# stop_ebpf_agent - stop agent running on the agent VM via SSH
 stop_ebpf_agent() {
     local remote_pid
     remote_pid="$(_agent_ssh cat "${_REMOTE_PID_FILE}" 2>/dev/null)" || true
@@ -380,8 +380,8 @@ stop_ebpf_agent() {
     # tracked launcher pid) and WAIT for it to actually die. The agent attaches
     # XDP via a BPF_LINK held by its process fd; that link only auto-detaches
     # once the process is gone. If a lingering userns child stays attached, it
-    # keeps throttling eth1 — contaminating the next suite's "no agent" baseline
-    # — and its XDP hook makes the next attach fail with EBUSY (errno 16).
+    # keeps throttling eth1 - contaminating the next suite's "no agent" baseline
+    # - and its XDP hook makes the next attach fail with EBUSY (errno 16).
     #
     # Stop the warden broker started alongside the agent (its PID file is the
     # agent's with a .warden suffix).
@@ -392,7 +392,7 @@ stop_ebpf_agent() {
     # Match by process name (comm), NOT `pkill -f "… --config"`: `_agent_ssh_sudo`
     # sends the command through ssh, which re-joins argv with spaces and drops
     # the quotes, so a multi-word `-f` pattern arrives as `pkill -f name --config`
-    # — pkill then treats `--config` as a flag and silently kills nothing. The
+    # - pkill then treats `--config` as a flag and silently kills nothing. The
     # binary's comm is truncated to 15 chars (`ebpfsentinel-ag`); a bare
     # single-token pattern survives ssh and never matches the pkill command line.
     local _reap=0
@@ -421,7 +421,7 @@ stop_ebpf_agent() {
     unset AGENT_PID
 }
 
-# ── Packet generation helpers (overrides — no netns, run locally) ─
+# ── Packet generation helpers (overrides - no netns, run locally) ─
 
 # send_tcp_from_ns <dst_ip> <dst_port> [data] [timeout_secs]
 send_tcp_from_ns() {
@@ -660,7 +660,7 @@ capture_on() {
     # `sshrun` forwards through `ssh -- sudo "$@"`, which space-joins its args
     # into one string re-parsed by the remote shell. A BPF filter like
     # `udp and (src port 53 or ...)` carries spaces and parens, so it must be
-    # shell-escaped (printf %q) and handed to tcpdump as a single argument —
+    # shell-escaped (printf %q) and handed to tcpdump as a single argument -
     # otherwise the parens reach the remote shell bare and it dies with
     # "syntax error near unexpected token '('".
     local -a filter=()
@@ -715,7 +715,7 @@ stop_capture() {
     # Stop the transient capture unit. systemctl stop is synchronous: it returns
     # only after tcpdump has received SIGTERM and exited (flushing its pcap), so
     # the file is complete before the scp below. Call systemctl directly through
-    # sshrun (which already prepends sudo) — wrapping it in `sh -c` dropped the
+    # sshrun (which already prepends sudo) - wrapping it in `sh -c` dropped the
     # unit argument through the quoting layers and left captures running.
     "${sshrun[@]}" systemctl stop "${unit}" >/dev/null 2>&1 || true
     # Pull pcap locally with the key that authenticates to THIS vm (the backend

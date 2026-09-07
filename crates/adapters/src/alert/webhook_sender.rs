@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 ///
 /// `validate_webhook_url` only inspects the URL string, so it catches literal-IP
 /// and known hostnames but not a public hostname whose A record points inside
-/// (DNS rebinding) — reqwest connects to whatever the name resolves to. Checking
+/// (DNS rebinding) - reqwest connects to whatever the name resolves to. Checking
 /// the *resolved* IP at connect time closes that gap, matching the threat-intel
 /// feed fetcher. Reuses [`FeedConfig::is_forbidden_ip`] so both egress paths
 /// share one block list and cannot drift apart.
@@ -408,7 +408,7 @@ mod tests {
 
         // First attempt: will fail (connection refused)
         let _ = sender.send(&alert, &route).await;
-        // Second attempt: will fail — opens circuit
+        // Second attempt: will fail - opens circuit
         let _ = sender.send(&alert, &route).await;
 
         let cb_guard = sender.circuit_breaker.lock().await;
@@ -690,7 +690,7 @@ mod tests {
         let route = webhook_route(&url);
 
         // The 302 is treated as a failed delivery (non-2xx), not chased to the
-        // metadata host — proving redirects are not followed.
+        // metadata host - proving redirects are not followed.
         let result = sender.send(&alert, &route).await;
         assert!(result.is_err(), "redirect must not be followed to success");
         let err = result.unwrap_err().to_string();

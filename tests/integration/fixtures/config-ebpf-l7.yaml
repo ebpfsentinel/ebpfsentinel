@@ -1,4 +1,4 @@
-# config-ebpf-l7.yaml — L7 inspection eBPF scenario test config
+# config-ebpf-l7.yaml - L7 inspection eBPF scenario test config
 
 agent:
   interfaces:

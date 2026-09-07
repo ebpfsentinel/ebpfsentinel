@@ -1,11 +1,11 @@
 #!/usr/bin/env bats
-# 60-container-dlp-cross.bats — cross-container TLS DLP.
+# 60-container-dlp-cross.bats - cross-container TLS DLP.
 #
 # Proves the agent captures a NEIGHBOURING container's TLS plaintext, not just
 # its own. A uprobe fires only for processes mapping the exact target inode, so a
 # container running its own libssl (a different inode from the host's) is captured
 # ONLY if the agent resolved that container's library through the host /proc and
-# attached a uprobe to it — the cross-container coverage this epic adds.
+# attached a uprobe to it - the cross-container coverage this epic adds.
 #
 # Topology:
 #   * The agent runs on the host with DLP + the container resolver enabled.
@@ -23,7 +23,7 @@
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
 
-# A Visa test number carried over the neighbour's TLS — matches dlp-pci-visa.
+# A Visa test number carried over the neighbour's TLS - matches dlp-pci-visa.
 SENTINEL_VISA="4111111111111111"
 
 # ── Docker availability (mirrors suite 54) ──────────────────────────
@@ -209,7 +209,7 @@ PY
 
     # The neighbour container does TLS with its OWN libssl (a different inode
     # from the host's), so a captured Visa alert proves the agent attached to the
-    # container's library — cross-container coverage, not the agent's own TLS.
+    # container's library - cross-container coverage, not the agent's own TLS.
     if ! _run_neighbour_tls_container "${cname}" >/dev/null 2>&1; then
         soft_skip "neighbour TLS container could not run (image pull / apk / openssl)"
     fi
@@ -231,7 +231,7 @@ PY
     # for a DLP entry carrying container provenance (resolved from the event's
     # cgroup id). The DLP probes are uprobes, which always run in process
     # context, so the cgroup id is populated whenever the host runs the unified
-    # hierarchy — that mount is the one genuine gap.
+    # hierarchy - that mount is the one genuine gap.
     [ -f /sys/fs/cgroup/cgroup.controllers ] ||
         env_skip "cgroup v2 unified hierarchy not mounted"
 

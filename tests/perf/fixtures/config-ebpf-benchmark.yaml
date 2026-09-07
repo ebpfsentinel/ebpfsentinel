@@ -1,4 +1,4 @@
-# config-ebpf-benchmark.yaml — Full-stack eBPF benchmark config
+# config-ebpf-benchmark.yaml - Full-stack eBPF benchmark config
 # All domains enabled with production-like limits for throughput testing
 
 agent:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 20-ebpf-loadbalancer-scenarios.bats — Load balancer eBPF scenario tests
+# 20-ebpf-loadbalancer-scenarios.bats - Load balancer eBPF scenario tests
 # Requires: root, kernel >= 6.9, bpftool, ncat
 
 load '../lib/helpers'
@@ -142,7 +142,7 @@ teardown_file() {
 
 # ── CRUD lifecycle (round-robin service) ─────────────────────────
 
-@test "LB service CRUD — create TCP service" {
+@test "LB service CRUD - create TCP service" {
     require_root
 
     # listen_port must not collide with the agent's own management ports
@@ -171,7 +171,7 @@ teardown_file() {
     assert_json_field "$body" '.id' 'test-svc'
 }
 
-@test "LB service CRUD — delete service" {
+@test "LB service CRUD - delete service" {
     require_root
 
     api_delete /api/v1/lb/services/test-svc >/dev/null

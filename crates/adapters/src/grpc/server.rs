@@ -24,7 +24,7 @@ pub struct GrpcTlsConfig {
 /// The server exposes:
 /// - `AlertStreamService` for real-time alert streaming
 /// - `grpc.health.v1.Health` for K8s liveness/readiness probes
-/// - gRPC reflection for service discovery and debugging (NFR32) — only when
+/// - gRPC reflection for service discovery and debugging (NFR32) - only when
 ///   `enable_reflection` is `true`. Disabled by default in production to prevent
 ///   unauthenticated API schema enumeration.
 ///
@@ -42,7 +42,7 @@ pub async fn run_grpc_server(
 ) -> anyhow::Result<()> {
     let addr: SocketAddr = format!("{bind_address}:{port}").parse()?;
 
-    // Health service — mark AlertStreamService as serving
+    // Health service - mark AlertStreamService as serving
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
         .set_serving::<AlertStreamServiceServer<AlertStreamServiceImpl>>()
@@ -72,7 +72,7 @@ pub async fn run_grpc_server(
 
     let mut router = builder.add_service(health_service);
 
-    // Reflection service for service discovery (NFR32) — only when explicitly enabled
+    // Reflection service for service discovery (NFR32) - only when explicitly enabled
     if enable_reflection {
         let reflection_service = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(super::proto::FILE_DESCRIPTOR_SET)

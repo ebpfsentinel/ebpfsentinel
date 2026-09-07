@@ -27,7 +27,7 @@ pub struct ExternalAliasContent {
 
 // ── Handlers ──────────────────────────────────────────────────────
 
-/// `GET /api/v1/aliases/status` — alias service status.
+/// `GET /api/v1/aliases/status` - alias service status.
 #[utoipa::path(
     get, path = "/api/v1/aliases/status",
     tag = "Aliases",
@@ -53,7 +53,7 @@ pub async fn alias_status(
     }))
 }
 
-/// `PUT /api/v1/aliases/{id}/content` — push content for an External alias.
+/// `PUT /api/v1/aliases/{id}/content` - push content for an External alias.
 #[utoipa::path(
     put, path = "/api/v1/aliases/{id}/content",
     tag = "Aliases",

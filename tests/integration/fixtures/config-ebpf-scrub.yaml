@@ -1,4 +1,4 @@
-# config-ebpf-scrub.yaml — Scrub (packet normalization) eBPF scenario test config
+# config-ebpf-scrub.yaml - Scrub (packet normalization) eBPF scenario test config
 # Tests: tc-scrub program loading, packet normalization, fragment reassembly
 #
 # Network topology:

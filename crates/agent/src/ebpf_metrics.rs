@@ -41,7 +41,7 @@ pub async fn run_kernel_metrics_loop(
     cancel: CancellationToken,
 ) {
     let mut ticker = tokio::time::interval(interval);
-    // Skip first immediate tick — metrics are 0 at startup
+    // Skip first immediate tick - metrics are 0 at startup
     ticker.tick().await;
 
     // Last absolute value seen per (map name, index), to derive deltas.

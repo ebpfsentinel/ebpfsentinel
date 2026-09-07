@@ -1,6 +1,6 @@
-# config-stix-feed.yaml — STIX 2.1 feed parsing integration test config
+# config-stix-feed.yaml - STIX 2.1 feed parsing integration test config
 # Tests: STIX bundle parsing, IOC loading, domain propagation, expired indicator filtering
-# This config does NOT require eBPF — it is a userspace-only test.
+# This config does NOT require eBPF - it is a userspace-only test.
 
 agent:
   interfaces:

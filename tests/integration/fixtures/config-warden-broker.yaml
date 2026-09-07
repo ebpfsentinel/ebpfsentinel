@@ -1,4 +1,4 @@
-# config-warden-broker.yaml — exercises every privileged operation the agent
+# config-warden-broker.yaml - exercises every privileged operation the agent
 # delegates to the warden broker, in one agent run.
 #
 #   conntrack      → ConntrackDelete / ConntrackFlush (netlink teardown)

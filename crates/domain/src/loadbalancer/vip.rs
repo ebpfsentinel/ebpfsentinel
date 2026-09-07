@@ -3,7 +3,7 @@
 //! Owns the L2 VIP-announce policy: which IPs this node may claim via ARP,
 //! and whether this node is the elected speaker. Election is config-driven
 //! (explicit `primary`/`standby`); there is no gossip or leader-lease layer
-//! in the domain — the Kubernetes Lease seam is documented in the operator
+//! in the domain - the Kubernetes Lease seam is documented in the operator
 //! but deliberately not implemented here.
 //!
 //! Split-brain safety is a property of the wiring, not just this model: the

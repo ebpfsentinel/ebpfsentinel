@@ -1,8 +1,8 @@
-# eBPFsentinel — Firewall Configuration Example
+# eBPFsentinel - Firewall Configuration Example
 # ===============================================
 #
 # Stateful L3/L4 packet filtering via XDP with three-phase matching:
-#   0. Conntrack fast-path (O(1)) — ESTABLISHED/RELATED connections bypass rules entirely
+#   0. Conntrack fast-path (O(1)) - ESTABLISHED/RELATED connections bypass rules entirely
 #   1. LPM Trie (O(log n)) for CIDR-only rules (source/destination subnet)
 #   2. Linear scan for rules with port/protocol/VLAN/ct_state/IP set filters (priority order)
 #
@@ -66,13 +66,13 @@ firewall:
   enabled: true
 
   # Mode controls enforcement behavior:
-  #   "alert"  — deny rules are logged but traffic is passed (observe-only)
-  #   "block"  — deny rules are actively enforced (packets dropped)
+  #   "alert"  - deny rules are logged but traffic is passed (observe-only)
+  #   "block"  - deny rules are actively enforced (packets dropped)
   mode: block
 
   # Default policy when no rule matches:
-  #   "pass" — allow unmatched traffic (allowlist approach: deny what you specify)
-  #   "drop" — deny unmatched traffic (blocklist approach: allow what you specify)
+  #   "pass" - allow unmatched traffic (allowlist approach: deny what you specify)
+  #   "drop" - deny unmatched traffic (blocklist approach: allow what you specify)
   default_policy: drop
 
   # ── Aliases ────────────────────────────────────────────────────────
@@ -86,7 +86,7 @@ firewall:
   # GeoIP aliases use LPM Trie maps for O(log n) CIDR-based matching.
 
   aliases:
-    # Static IP set — RFC 1918 private networks
+    # Static IP set - RFC 1918 private networks
     rfc1918:
       type: ip_set
       values: ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
@@ -106,13 +106,13 @@ firewall:
       type: nested
       aliases: [rfc1918, web_servers]
 
-    # URL table — fetched periodically from remote source
+    # URL table - fetched periodically from remote source
     blocklist:
       type: url_table
       url: "https://www.spamhaus.org/drop/drop.txt"
       refresh_interval: 3600
 
-    # GeoIP — block traffic from entire countries via LPM Trie maps.
+    # GeoIP - block traffic from entire countries via LPM Trie maps.
     # Extracts all CIDR blocks from the MaxMind City database for the
     # given ISO country codes and loads them as DROP rules on source IP.
     # Requires geoip.enabled: true with a valid .mmdb database.
@@ -121,38 +121,38 @@ firewall:
     #   type: geoip
     #   country_codes: [CN, RU, KP]
 
-    # Dynamic DNS — resolve hostnames periodically
+    # Dynamic DNS - resolve hostnames periodically
     # vpn_gateway:
     #   type: dynamic_dns
     #   hostnames: ["vpn.example.com"]
     #   refresh_interval: 300
 
-    # IP set with exclusions — all RFC 1918 except a specific subnet
+    # IP set with exclusions - all RFC 1918 except a specific subnet
     # rfc1918_except_lab:
     #   type: ip_set
     #   values: ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
     #   exclude: ["10.0.5.0/24"]
 
-    # MAC address set — group known server NICs
+    # MAC address set - group known server NICs
     # trusted_macs:
     #   type: mac_set
     #   values: ["aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66"]
 
-    # URL table (JSON) — fetch IPs from a JSON API with JSONPointer path
+    # URL table (JSON) - fetch IPs from a JSON API with JSONPointer path
     # abuseipdb_blocklist:
     #   type: url_table_json
     #   url: "https://api.example.com/blocklist.json"
     #   json_path: "/data/ips"
     #   refresh_interval: 3600
 
-    # BGP ASN — block all networks announced by specific AS numbers.
+    # BGP ASN - block all networks announced by specific AS numbers.
     # Uses the MaxMind GeoLite2-ASN database (same as GeoIP lookup).
     # Requires geoip.enabled: true with an ASN .mmdb database.
     # bulletproof_hosters:
     #   type: bgp_asn
     #   asn_numbers: [4134, 4837]
 
-    # External — placeholder whose content is pushed via REST API.
+    # External - placeholder whose content is pushed via REST API.
     # Use PUT /api/v1/aliases/{id}/content with {"ips": ["1.2.3.0/24"]}
     # Useful for SOAR/orchestrator integration (Ansible, Terraform, etc.)
     # soar_blocklist:
@@ -161,41 +161,41 @@ firewall:
   # ── Rules ──────────────────────────────────────────────────────────
   #
   # Fields:
-  #   id         — Unique rule identifier (required, non-empty)
-  #   enabled    — Whether this rule is active (default: true)
-  #   priority   — Lower number = higher precedence; first match wins
-  #   action     — "allow", "deny", "log", or "reject"
+  #   id         - Unique rule identifier (required, non-empty)
+  #   enabled    - Whether this rule is active (default: true)
+  #   priority   - Lower number = higher precedence; first match wins
+  #   action     - "allow", "deny", "log", or "reject"
   #                "reject" drops the packet and sends TCP RST (for TCP)
   #                or ICMP Destination Unreachable (for UDP)
-  #   protocol   — "tcp", "udp", "icmp", or "any" (default: "any")
-  #   src_ip     — Source CIDR filter; omit to match any source
-  #   dst_ip     — Destination CIDR filter; omit to match any destination
-  #   src_port   — Source port: single (22), range ("1024-65535"), or
+  #   protocol   - "tcp", "udp", "icmp", or "any" (default: "any")
+  #   src_ip     - Source CIDR filter; omit to match any source
+  #   dst_ip     - Destination CIDR filter; omit to match any destination
+  #   src_port   - Source port: single (22), range ("1024-65535"), or
   #                explicit ({start: 1024, end: 65535}); omit to match any
-  #   dst_port   — Destination port (same formats as src_port)
-  #   vlan_id    — 802.1Q VLAN ID (0-4094); omit to match any VLAN,
+  #   dst_port   - Destination port (same formats as src_port)
+  #   vlan_id    - 802.1Q VLAN ID (0-4094); omit to match any VLAN,
   #                0 to match untagged traffic only
-  #   state      — Conntrack state filter: [new, established, related, invalid]
-  #   src_alias  — Source IP set alias name; omit to match any
-  #   dst_alias  — Destination IP set alias name; omit to match any
-  #   scope      — "global", interface name, or {interface: "eth0"} / {namespace: "prod"}
+  #   state      - Conntrack state filter: [new, established, related, invalid]
+  #   src_alias  - Source IP set alias name; omit to match any
+  #   dst_alias  - Destination IP set alias name; omit to match any
+  #   scope      - "global", interface name, or {interface: "eth0"} / {namespace: "prod"}
   #
   # Extended fields (advanced):
-  #   flags              — TCP flags specification (e.g. "S/SA" = SYN set, SYN+ACK mask)
-  #   icmp_type          — ICMP type to match (0-255)
-  #   icmp_code          — ICMP code to match (0-255)
-  #   negate_source      — Invert source IP match (match everything except src_ip)
-  #   negate_destination — Invert destination IP match
-  #   dscp_match         — Match packets with this DSCP value (0-63)
-  #   dscp_mark          — Rewrite DSCP value on matched packets (0-63)
-  #   max_states         — Maximum concurrent conntrack states for this rule
-  #   src_mac            — Source MAC address filter (e.g. "aa:bb:cc:dd:ee:ff")
-  #   dst_mac            — Destination MAC address filter
-  #   schedule           — Schedule name for time-based rule activation
-  #   src_port_alias     — Source port set alias name
-  #   dst_port_alias     — Destination port set alias name
-  #   src_mac_alias      — Source MAC set alias name
-  #   dst_mac_alias      — Destination MAC set alias name
+  #   flags              - TCP flags specification (e.g. "S/SA" = SYN set, SYN+ACK mask)
+  #   icmp_type          - ICMP type to match (0-255)
+  #   icmp_code          - ICMP code to match (0-255)
+  #   negate_source      - Invert source IP match (match everything except src_ip)
+  #   negate_destination - Invert destination IP match
+  #   dscp_match         - Match packets with this DSCP value (0-63)
+  #   dscp_mark          - Rewrite DSCP value on matched packets (0-63)
+  #   max_states         - Maximum concurrent conntrack states for this rule
+  #   src_mac            - Source MAC address filter (e.g. "aa:bb:cc:dd:ee:ff")
+  #   dst_mac            - Destination MAC address filter
+  #   schedule           - Schedule name for time-based rule activation
+  #   src_port_alias     - Source port set alias name
+  #   dst_port_alias     - Destination port set alias name
+  #   src_mac_alias      - Source MAC set alias name
+  #   dst_mac_alias      - Destination MAC set alias name
   #
   # Maximum 4096 rules per address family (IPv4 / IPv6).
   # CIDR-only rules are automatically loaded into LPM Trie maps for O(log n) lookup.
@@ -258,7 +258,7 @@ firewall:
       scope: global
 
     # ── Reject example ───────────────────────────────────────────────
-    # Reject connections to closed admin port — sends TCP RST for TCP
+    # Reject connections to closed admin port - sends TCP RST for TCP
     # and ICMP Destination Unreachable (port unreachable) for UDP.
     # This signals to the client that the port is explicitly closed,
     # unlike "deny" which silently drops the packet.

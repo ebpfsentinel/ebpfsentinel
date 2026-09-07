@@ -156,7 +156,7 @@ fn scrub_ipv4(ctx: &mut TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result
 
     // Snapshot every mutable IPv4 header field up front. The scrub helpers below
     // call bpf_skb_store_bytes / bpf_l3_csum_replace, which invalidate direct
-    // packet pointers, so each field must be read before the first mutation —
+    // packet pointers, so each field must be read before the first mutation -
     // re-dereferencing `ipv4hdr` afterwards is a verifier-rejected scalar access.
     let ttl = unsafe { (*ipv4hdr).ttl };
     let frag_off = u16::from_be_bytes(unsafe { (*ipv4hdr).frags });
@@ -354,7 +354,7 @@ fn scrub_ipv4_header_fields(
 /// Collapsing all five 2-byte pairs into one `bpf_skb_store_bytes` (rather than
 /// five store + `bpf_l4_csum_replace` pairs) avoids the repeated in-place
 /// packet-pointer invalidation that hard-wedges the kernel when the skb is on
-/// the forward path under a generic-XDP program — the same coalescing the IPv4
+/// the forward path under a generic-XDP program - the same coalescing the IPv4
 /// header rewrite relies on. The checksum is fixed from a raw-byte diff via
 /// `bpf_csum_diff` instead of passing host-order field values to
 /// `bpf_l4_csum_replace` (which corrupts the L4 checksum and makes the kernel
@@ -365,7 +365,7 @@ fn strip_ts_option(ctx: &mut TcContext, pos: usize, tcp_csum_offset: u32) -> Res
     let old: [u8; 10] = ctx.load(pos).map_err(|_| ())?;
     let new: [u8; 10] = [TCP_OPT_NOP; 10];
     if old == new {
-        return Ok(()); // already all NOPs — nothing to change
+        return Ok(()); // already all NOPs - nothing to change
     }
     ctx.store(pos, &new, 0).map_err(|_| ())?;
 

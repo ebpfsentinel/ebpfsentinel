@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# retry.bash — Exponential backoff retry function
+# retry.bash - Exponential backoff retry function
 
 # retry <max_attempts> <command...>
 # Retries a command with exponential backoff.

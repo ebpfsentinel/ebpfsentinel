@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 18-ebpf-conntrack-scenarios.bats — Connection tracking eBPF scenario tests
+# 18-ebpf-conntrack-scenarios.bats - Connection tracking eBPF scenario tests
 # Requires: root, kernel >= 6.9, bpftool, ncat
 
 load '../lib/helpers'
@@ -164,7 +164,7 @@ teardown_file() {
     # The table is the kernel's, shared with everything else on this host:
     # the administration SSH session and the test's own HTTP calls are
     # tracked too, and are re-tracked the moment their next packet flows.
-    # An empty table is therefore not something a flush can promise — what
+    # An empty table is therefore not something a flush can promise - what
     # it must deliver is that the flow this test created is gone and that
     # the table did not grow.
     local status_body after

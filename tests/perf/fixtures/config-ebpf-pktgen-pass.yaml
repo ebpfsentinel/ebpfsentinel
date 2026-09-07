@@ -1,4 +1,4 @@
-# config-ebpf-pktgen-pass.yaml — Baseline fixture for perf/04 (pktgen).
+# config-ebpf-pktgen-pass.yaml - Baseline fixture for perf/04 (pktgen).
 #
 # Boots the agent with a single XDP firewall rule that **passes** the
 # pktgen UDP flood (dst port 9). Used to measure the worst-case CPU

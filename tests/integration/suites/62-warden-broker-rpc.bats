@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 62-warden-broker-rpc.bats — the privilege broker itself.
+# 62-warden-broker-rpc.bats - the privilege broker itself.
 #
 # Suite 57 asserts that every eBPF program loads through a BPF token, which
 # exercises the broker's `Delegate` path as a side effect. This suite covers
@@ -8,10 +8,10 @@
 # its own.
 #
 #   * The warden runs as a separate root process and owns a mode-0666 unix
-#     socket (the file mode is deliberately permissive — SO_PEERCRED is the
+#     socket (the file mode is deliberately permissive - SO_PEERCRED is the
 #     auth gate, not the mode).
 #   * The agent runs in its own user namespace, distinct from init's, and
-#     still ends up with eBPF loaded — only the broker can explain that.
+#     still ends up with eBPF loaded - only the broker can explain that.
 #   * A peer whose uid is not the served one is dropped without being
 #     served, while the served uid keeps its connection open.
 #   * Every privileged operation the agent delegates succeeds end-to-end,
@@ -23,7 +23,7 @@
 #       ArpAnnounce     gratuitous ARP on VIP speaker takeover
 #
 # The feature suites (18 conntrack, 27 DLP, 37 VIP, 49 capture) own the
-# behaviour of each feature; here the claim is narrower — the broker served
+# behaviour of each feature; here the claim is narrower - the broker served
 # the privileged half.
 #
 # `RouteAdd` / `RouteDel` are deliberately absent: the proto, the client and
@@ -56,7 +56,7 @@ _warden_log() {
     echo "${AGENT_LOG_FILE}.warden"
 }
 
-# _staged_probe — the probe must be readable by the unprivileged uid we run
+# _staged_probe - the probe must be readable by the unprivileged uid we run
 # it as, and the build tree is 0750. Stage it under /tmp, like the harness
 # already does for the agent binary.
 _staged_probe() {
@@ -65,7 +65,7 @@ _staged_probe() {
     echo "${staged}"
 }
 
-# _probe_as <uid|root> — run the peer probe, optionally as another uid.
+# _probe_as <uid|root> - run the peer probe, optionally as another uid.
 _probe_as() {
     local who="${1}"
     local sock probe
@@ -94,7 +94,7 @@ setup_file() {
 
     export AGENT_BIN="${AGENT_BIN:-${PROJECT_ROOT}/target/release/ebpfsentinel-agent}"
     [ -x "$(dirname "${AGENT_BIN}")/warden" ] \
-        || env_skip "warden binary not found next to ${AGENT_BIN} — split deployment not built"
+        || env_skip "warden binary not found next to ${AGENT_BIN} - split deployment not built"
 
     export DATA_DIR="/tmp/ebpfsentinel-test-data-warden-$$"
     mkdir -p "$DATA_DIR"
@@ -126,7 +126,7 @@ teardown_file() {
     wpid="$(_warden_pid)"
     apid="$(_agent_pid)"
 
-    [ -n "${wpid}" ] || soft_skip "no warden pid recorded — agent started without the broker"
+    [ -n "${wpid}" ] || soft_skip "no warden pid recorded - agent started without the broker"
     kill -0 "${wpid}" 2>/dev/null || {
         echo "warden pid ${wpid} is not alive" >&2
         tail -30 "${AGENT_LOG_FILE}" >&2 || true
@@ -134,7 +134,7 @@ teardown_file() {
     }
 
     [ "${wpid}" != "${apid}" ] || {
-        echo "warden and agent share pid ${wpid} — not a split deployment" >&2
+        echo "warden and agent share pid ${wpid} - not a split deployment" >&2
         return 1
     }
 
@@ -159,7 +159,7 @@ teardown_file() {
     mode="$(stat -c '%a' "${sock}")"
     owner="$(stat -c '%u' "${sock}")"
     # 0666 is intentional: the rootless agent may run under another uid, and
-    # SO_PEERCRED — not the file mode — is what authenticates it.
+    # SO_PEERCRED - not the file mode - is what authenticates it.
     [ "${mode}" = "666" ] || {
         echo "expected socket mode 666; got ${mode}" >&2
         return 1
@@ -207,7 +207,7 @@ teardown_file() {
     [ -n "${agent_ns}" ] && [ -n "${init_ns}" ] || env_skip "user namespaces not readable"
 
     [ "${agent_ns}" != "${init_ns}" ] || {
-        echo "agent shares init's user namespace (${agent_ns}) — not rootless" >&2
+        echo "agent shares init's user namespace (${agent_ns}) - not rootless" >&2
         return 1
     }
 
@@ -386,7 +386,7 @@ teardown_file() {
         [.programs[] | select((.name | test("uprobe.?dlp"; "i")) and .loaded)] | length
     ')"
     [ "${loaded:-0}" -ge 1 ] || {
-        echo "uprobe-dlp not loaded — nothing could have been attached: ${body}" >&2
+        echo "uprobe-dlp not loaded - nothing could have been attached: ${body}" >&2
         return 1
     }
 }
@@ -405,10 +405,10 @@ teardown_file() {
     done
 
     if [ "${sent}" -eq 0 ]; then
-        # No takeover happened at all (no speaker transition) — that is a
+        # No takeover happened at all (no speaker transition) - that is a
         # fixture/topology issue, not a broker refusal, so surface it as such.
         grep -q "vip announcer" "${AGENT_LOG_FILE}" \
-            || soft_skip "vip announcer never ran — no speaker transition in this topology"
+            || soft_skip "vip announcer never ran - no speaker transition in this topology"
         echo "vip announcer ran but emitted no gratuitous ARP" >&2
         grep -i "vip announcer" "${AGENT_LOG_FILE}" | tail -10 >&2
         return 1

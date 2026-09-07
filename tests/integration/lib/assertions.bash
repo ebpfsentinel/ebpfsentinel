@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# assertions.bash — Custom BATS assertions for eBPFsentinel integration tests
+# assertions.bash - Custom BATS assertions for eBPFsentinel integration tests
 
 # assert_http_status <expected_code> [actual_code]
 # If actual_code is empty (lost in subshell), recovers from the status file.

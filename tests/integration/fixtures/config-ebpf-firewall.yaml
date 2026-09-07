@@ -1,4 +1,4 @@
-# config-ebpf-firewall.yaml — Firewall eBPF scenario test config
+# config-ebpf-firewall.yaml - Firewall eBPF scenario test config
 #
 # Tests array-based rule matching with:
 #   - Wildcard rules (any src_ip, any port)
@@ -28,7 +28,7 @@ firewall:
   default_policy: pass
   rules:
     # Priority 5: Allow ICMP from __WHITELIST_SUBNET__ subnet (CIDR match)
-    # This tests CIDR subnet matching — any host in the /24 subnet can ping
+    # This tests CIDR subnet matching - any host in the /24 subnet can ping
     - id: fw-allow-icmp-subnet
       priority: 5
       action: allow
@@ -39,7 +39,7 @@ firewall:
       enabled: true
 
     # Priority 10: Deny ALL ICMP (wildcard: no src/dst IP filter)
-    # Lower priority than the subnet allow — tests first-match-wins ordering
+    # Lower priority than the subnet allow - tests first-match-wins ordering
     - id: fw-deny-icmp-all
       priority: 10
       action: deny

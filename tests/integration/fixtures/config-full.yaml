@@ -1,4 +1,4 @@
-# config-full.yaml — Full-featured agent configuration for integration tests.
+# config-full.yaml - Full-featured agent configuration for integration tests.
 # All features enabled with test-safe settings.
 
 agent:

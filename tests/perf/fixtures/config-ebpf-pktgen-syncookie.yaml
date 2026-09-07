@@ -1,4 +1,4 @@
-# config-ebpf-pktgen-syncookie.yaml — Rate limit + SYN cookie fixture
+# config-ebpf-pktgen-syncookie.yaml - Rate limit + SYN cookie fixture
 # for the perf/04 SYN-flood scenario. Drops UDP at the firewall and
 # arms the XDP rate-limiter with a SYN-cookie response on the TCP path.
 

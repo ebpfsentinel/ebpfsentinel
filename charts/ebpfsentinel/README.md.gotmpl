@@ -6,7 +6,7 @@
 
 ## Overview
 
-Deploys [eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel) — a kernel-native **Network & Security platform** — as a Kubernetes DaemonSet. One agent per node, attached to host network interfaces via eBPF (XDP/TC). eBPF loads **exclusively** through a BPF token. Each pod runs two containers: a privileged `warden` broker (native sidecar) and the rootless `agent`. The agent self-unshares a user namespace, has the warden delegate a bpffs over a shared socket, and creates the token there — so the agent holds **no** host capabilities and only the warden sidecar is granted them (never `privileged: true`).
+Deploys [eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel) - a kernel-native **Network & Security platform** - as a Kubernetes DaemonSet. One agent per node, attached to host network interfaces via eBPF (XDP/TC). eBPF loads **exclusively** through a BPF token. Each pod runs two containers: a privileged `warden` broker (native sidecar) and the rootless `agent`. The agent self-unshares a user namespace, has the warden delegate a bpffs over a shared socket, and creates the token there - so the agent holds **no** host capabilities and only the warden sidecar is granted them (never `privileged: true`).
 
 ## Edition: OSS (AGPL-3.0)
 
@@ -48,7 +48,7 @@ See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/m
 | Requirement | Reason |
 |-------------|--------|
 | `hostNetwork: true` | XDP/TC programs attach to host interfaces, not pod veth |
-| `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` + `CAP_NET_RAW` on the **warden sidecar** only | eBPF loads **exclusively** through a BPF token — there is no capability-based loading path. The warden broker holds these capabilities for bpffs delegation, conntrack/routes, and the pcap pool/ARP. The `agent` container drops every capability (`cap_drop: ALL`, non-root): it self-unshares a user namespace and loads its own eBPF through the token. Both run Unconfined seccomp/AppArmor (the mount/userns/bpf syscalls). |
+| `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` + `CAP_NET_RAW` on the **warden sidecar** only | eBPF loads **exclusively** through a BPF token - there is no capability-based loading path. The warden broker holds these capabilities for bpffs delegation, conntrack/routes, and the pcap pool/ARP. The `agent` container drops every capability (`cap_drop: ALL`, non-root): it self-unshares a user namespace and loads its own eBPF through the token. Both run Unconfined seccomp/AppArmor (the mount/userns/bpf syscalls). |
 | unprivileged user namespaces enabled on the node | `BPF_TOKEN_CREATE` is `EOPNOTSUPP` outside a user namespace |
 | `/sys/fs/bpf` mount | BPF filesystem for map pinning + delegated token bpffs |
 | `/sys/kernel/debug` mount | eBPF tracing (debugfs) |
@@ -58,10 +58,10 @@ See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/m
 
 | Feature | DaemonSet | Notes |
 |---------|-----------|-------|
-| Firewall, IDS, DDoS, Rate Limiting | Full | Attached to host NIC — sees all node traffic |
+| Firewall, IDS, DDoS, Rate Limiting | Full | Attached to host NIC - sees all node traffic |
 | DLP | Partial | Only sees pod processes unless `hostPID: true` |
 | Multi-WAN Routing | Full | `hostNetwork` shares the routing table; route application (`ip rule`/`ip route`) is brokered to the `warden`, which holds `CAP_NET_ADMIN` in the init network namespace. Same path as `conntrack -D` flow-kill and gratuitous ARP |
-| Sidecar mode | Not recommended | XDP works on veth (generic mode) but only sees the pod's own traffic — no host or cross-pod visibility |
+| Sidecar mode | Not recommended | XDP works on veth (generic mode) but only sees the pod's own traffic - no host or cross-pod visibility |
 
 **DLP full coverage** requires `hostPID: true` in the DaemonSet spec:
 
@@ -79,7 +79,7 @@ eBPFsentinel attaches to the **host physical interface** (e.g., `eth0`), not to 
 - It does **not** interfere with pod-to-pod (east-west) traffic managed by the CNI
 - It **only** sees north-south traffic entering/leaving the node
 - Compatible with: Calico, Flannel, Cilium, Weave, any CNI
-- Firewall rules apply to the host interface — they affect all pods on the node equally
+- Firewall rules apply to the host interface - they affect all pods on the node equally
 
 For per-pod network policy, use your CNI's native policy engine (e.g., Cilium NetworkPolicy). eBPFsentinel complements CNI by adding network security capabilities (IDS, DLP, threat intel, DDoS) at the node boundary.
 

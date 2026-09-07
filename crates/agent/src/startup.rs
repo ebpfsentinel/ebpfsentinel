@@ -218,7 +218,7 @@ pub async fn run(
     let log_format = log_format_override.unwrap_or(config.agent.log_format);
     init_logging(log_level, log_format)?;
 
-    // Service root span — fields appear in every subsequent log entry
+    // Service root span - fields appear in every subsequent log entry
     let _root_span = tracing::span!(
         tracing::Level::INFO,
         "service",
@@ -438,7 +438,7 @@ pub async fn run(
     // authoritative read view (coherent with `conntrack -L`) and the kernel
     // sysctl writes (timeouts + tcp_loose hardening). Wire it whenever
     // conntrack is enabled, BEFORE reload_settings, so the settings sync
-    // actually reaches the kernel — those writes are no-ops until the port is
+    // actually reaches the kernel - those writes are no-ops until the port is
     // present. On kernels without CONFIG_NF_CONNTRACK_PROCFS the sysctl knobs
     // still exist but /proc/net/nf_conntrack does not, and the port falls back
     // to dumping through conntrack-tools.
@@ -669,7 +669,7 @@ pub async fn run(
     audit_svc.set_metrics(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     audit_svc.set_enabled(config.audit.enabled);
 
-    // Attach persistent audit store (redb) — graceful degradation on failure
+    // Attach persistent audit store (redb) - graceful degradation on failure
     let storage_path = Path::new(&config.audit.storage_path);
     match RedbAuditStore::open(storage_path, config.audit.buffer_size) {
         Ok(store) => {
@@ -691,7 +691,7 @@ pub async fn run(
         }
     }
 
-    // Attach rule change store (redb) — graceful degradation on failure
+    // Attach rule change store (redb) - graceful degradation on failure
     let rule_change_path = storage_path.with_file_name("rule_changes.redb");
     match RedbRuleChangeStore::open(&rule_change_path) {
         Ok(store) => {
@@ -714,7 +714,7 @@ pub async fn run(
     let audit_svc = Arc::new(audit_svc);
     info!(enabled = config.audit.enabled, "audit service initialized");
 
-    // Attach alert store (redb) — graceful degradation on failure
+    // Attach alert store (redb) - graceful degradation on failure
     let alert_store_path = storage_path.with_file_name("alerts.redb");
     let alert_store: Option<Arc<dyn AlertStore>> = match RedbAlertStore::open(&alert_store_path) {
         Ok(store) => {
@@ -858,7 +858,7 @@ pub async fn run(
 
     // Adopt the AF_PACKET sockets the privileged launcher pre-opened for
     // rootless packet capture (advertised via EBPFSENTINEL_PCAP_FDS). Absent in
-    // a non-launcher run — fall back to the warden (rootless warden-client mode),
+    // a non-launcher run - fall back to the warden (rootless warden-client mode),
     // which performs the privileged socket() and hands the fd over SCM_RIGHTS;
     // capture degrades gracefully when neither source provisions a socket.
     let pcap_pool = adapters::net::pcap_capture::PcapSocketPool::from_env()
@@ -1181,7 +1181,7 @@ pub async fn run(
             });
             let dns_blocklist_svc = DnsBlocklistAppService::new(
                 blocklist_config,
-                None, // eBPF map writer — wired after tc-threatintel loads
+                None, // eBPF map writer - wired after tc-threatintel loads
                 Arc::clone(&metrics) as Arc<dyn MetricsPort>,
             )
             .with_alert_tx(alert_tx.clone());
@@ -1343,7 +1343,7 @@ pub async fn run(
                 bind_address = %http_bind,
                 "control plane is UNAUTHENTICATED on a non-loopback address \
                  (auth.enabled=false, allow_unauthenticated_api=true): firewall, \
-                 IPS and config-reload APIs are reachable without credentials — \
+                 IPS and config-reload APIs are reachable without credentials - \
                  ensure the port is fenced off by other means"
             );
         }
@@ -1453,7 +1453,7 @@ pub async fn run(
     // ── 10. Load eBPF programs ─────────────────────────────────────
     //
     // Kernel version is MANDATORY: 6.9+ is required unconditionally.
-    // No "API-only" fallback when the kernel is too old — every eBPF
+    // No "API-only" fallback when the kernel is too old - every eBPF
     // program depends on kfuncs introduced in 6.4 → 6.9 and the
     // verifier rejects them at load time on older kernels. The
     // correct remediation is upgrading the host kernel; running the
@@ -1464,8 +1464,8 @@ pub async fn run(
     // agent never loads programs with CAP_BPF / CAP_NET_ADMIN: a
     // privileged setup step (systemd ExecStartPre, a Kubernetes init
     // container, or ebpfsentinel-token-setup.sh) must have mounted the
-    // delegated bpffs before the agent started, and the agent — which
-    // may run fully unprivileged — creates the token against it. If the
+    // delegated bpffs before the agent started, and the agent - which
+    // may run fully unprivileged - creates the token against it. If the
     // token cannot be created the agent stays up in API-only mode
     // (REST/gRPC live, no eBPF attach); there is deliberately no
     // capability-based fallback.
@@ -1473,7 +1473,7 @@ pub async fn run(
     // bpffs the warden mounted for it (the self-bootstrap trampoline created the
     // user namespace, had the warden delegate the bpffs, and mounted it before
     // this runtime started). `EBPFSENTINEL_WARDEN_SOCK` no longer means "load
-    // nothing" — the agent still loads here; it only proxies the host-network ops
+    // nothing" - the agent still loads here; it only proxies the host-network ops
     // it cannot perform from its user namespace (conntrack teardown, routes,
     // gratuitous ARP, packet capture) to the warden over that socket.
     let warden_sock = warden_sock_from_env();
@@ -1516,7 +1516,7 @@ pub async fn run(
         Err(e) => {
             error!(
                 error = %e,
-                "BPF token unavailable — running in API-only mode (no eBPF). In the rootless \
+                "BPF token unavailable - running in API-only mode (no eBPF). In the rootless \
                  split the warden must mount + delegate the bpffs; in the all-in-one layout a \
                  privileged setup (ebpfsentinel-token-setup.sh / init container) must mount it."
             );
@@ -1956,7 +1956,7 @@ pub async fn run(
             ebpf_state.add_loader(loader);
         }
 
-        // 10c. TC IDS — also the L7 capture vehicle (TLS ClientHello / HTTP
+        // 10c. TC IDS - also the L7 capture vehicle (TLS ClientHello / HTTP
         // pre-classification feeds the L7 parser and encrypted-DNS detector).
         // L7 payload emission is gated on the L7_PORTS map, not the IDS config
         // flag, so the program must load whenever IDS *or* L7 is enabled.
@@ -2578,7 +2578,7 @@ pub async fn run(
         if !socket_path.exists() {
             warn!(
                 socket = %config.container.docker.socket,
-                "Docker socket not found — enricher will stay dormant until it appears"
+                "Docker socket not found - enricher will stay dormant until it appears"
             );
         }
         let client = adapters::container::DockerClient::new(
@@ -2607,7 +2607,7 @@ pub async fn run(
         Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>,
     > = if config.container.kubernetes.enabled {
         if !adapters::container::is_running_in_kubernetes() {
-            info!("kubernetes.enabled=true but no KUBERNETES_SERVICE_HOST — enricher disabled");
+            info!("kubernetes.enabled=true but no KUBERNETES_SERVICE_HOST - enricher disabled");
             None
         } else if let Some(client) = adapters::container::try_build_client().await {
             let cache = Arc::new(adapters::container::PodCache::new());
@@ -2635,7 +2635,7 @@ pub async fn run(
             );
             Some(Arc::new(enricher) as _)
         } else {
-            warn!("kubernetes enricher failed to build kube client — disabled");
+            warn!("kubernetes enricher failed to build kube client - disabled");
             None
         }
     } else {
@@ -2847,7 +2847,7 @@ pub async fn run(
         alert_pipeline =
             alert_pipeline.with_auto_capture(policy, Arc::clone(&capture_engine), capture_tx);
 
-        // Spawn capture receiver — bridges application → adapters layer.
+        // Spawn capture receiver - bridges application → adapters layer.
         let cap_engine_clone = Arc::clone(&capture_engine);
         #[cfg(feature = "pcap-capture")]
         let cap_pcap_pool = pcap_pool.clone();
@@ -3101,7 +3101,7 @@ pub async fn run(
                             )
                             .await;
                         }
-                        // All refresh senders dropped — happens only at shutdown.
+                        // All refresh senders dropped - happens only at shutdown.
                         None => break,
                     },
                 }
@@ -3305,13 +3305,13 @@ pub async fn run(
         }
     }
 
-    // ── 12. Ready — wait for cancellation ───────────────────────────
+    // ── 12. Ready - wait for cancellation ───────────────────────────
     info!("agent ready, waiting for shutdown signal");
     cancel_token.cancelled().await;
 
     // ── 13. Ordered shutdown sequence ───────────────────────────────
     info!("shutdown phase 1: cancelling tasks");
-    // Token is already cancelled — all tasks received the signal.
+    // Token is already cancelled - all tasks received the signal.
 
     info!("shutdown phase 2: draining HTTP and gRPC connections");
     let _ = tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, http_handle).await;
@@ -3400,7 +3400,7 @@ impl EbpfState {
 /// Validate a health-check probe target before passing it to `ping`.
 ///
 /// The target is config/API-sourced and lands in a `Command` argument
-/// array (no shell), so the only risk is argument injection — a value
+/// array (no shell), so the only risk is argument injection - a value
 /// beginning with `-` being parsed as a `ping` flag. We pair `--` at the
 /// call site with this allow-list (valid IPv4/IPv6/hostname characters,
 /// never leading `-`) for defense in depth.
@@ -3415,13 +3415,13 @@ fn is_safe_probe_target(target: &str) -> bool {
 
 /// Verify the kernel version is **>= 6.9**.
 ///
-/// The 6.9 floor is mandatory — there is **no graceful fallback on
+/// The 6.9 floor is mandatory - there is **no graceful fallback on
 /// older kernels**. The agent relies on the following kernel features
 /// across every eBPF program:
 ///
-/// - `BPF_TOKEN_CREATE` + `BPF_F_TOKEN_FD` (6.9) — container-aware
+/// - `BPF_TOKEN_CREATE` + `BPF_F_TOKEN_FD` (6.9) - container-aware
 ///   least-privilege loading
-/// - `bpf_task_get_cgroup1` kfunc (6.8) — cgroup1 inode enrichment
+/// - `bpf_task_get_cgroup1` kfunc (6.8) - cgroup1 inode enrichment
 /// - `bpf_xdp_metadata_rx_vlan_tag` / `bpf_xdp_get_xfrm_state` /
 ///   `bpf_iter_css_task` kfuncs (6.7 / 6.8)
 /// - netfilter conntrack lookup / alloc / NAT delegation kfuncs
@@ -3429,10 +3429,10 @@ fn is_safe_probe_target(target: &str) -> bool {
 /// - dynptr skb / xdp slice helpers (6.4 / 6.5)
 ///
 /// A kernel that fails this check **cannot** run the agent in a
-/// degraded mode — the eBPF verifier rejects every program at load
+/// degraded mode - the eBPF verifier rejects every program at load
 /// time because the kfuncs are not present in `vmlinux` BTF. The
-/// correct response is to upgrade the kernel. `BPF_TOKEN_CREATE` —
-/// the agent's only eBPF loading path — also requires 6.9+.
+/// correct response is to upgrade the kernel. `BPF_TOKEN_CREATE` -
+/// the agent's only eBPF loading path - also requires 6.9+.
 fn check_kernel_version() -> anyhow::Result<()> {
     check_kernel_version_from(std::path::Path::new("/proc/sys/kernel/osrelease"))
 }
@@ -3442,15 +3442,15 @@ fn check_kernel_version_from(path: &std::path::Path) -> anyhow::Result<()> {
 
     // The version floor + parsing live in `adapters::ebpf::kernel_probe`,
     // the single source of truth. BTF presence is irrelevant to the gate,
-    // so a missing `/sys/kernel/btf/vmlinux` is non-fatal here — only the
+    // so a missing `/sys/kernel/btf/vmlinux` is non-fatal here - only the
     // version comparison decides pass/fail.
     probe_kernel_features_from(path, std::path::Path::new("/sys/kernel/btf/vmlinux")).map_err(
         |e| {
             anyhow::anyhow!(
                 "kernel is below the mandatory minimum {MIN_KERNEL_MAJOR}.{MIN_KERNEL_MINOR} \
-                 ({e}) — eBPFsentinel refuses to start. Required features: BPF token \
+                 ({e}) - eBPFsentinel refuses to start. Required features: BPF token \
                  delegation, cgroup1 kfunc, XDP metadata kfuncs, netfilter conntrack kfuncs, \
-                 dynptr helpers. No fallback path exists — upgrade the host kernel to 6.9+ \
+                 dynptr helpers. No fallback path exists - upgrade the host kernel to 6.9+ \
                  and restart the agent."
             )
         },
@@ -3766,7 +3766,7 @@ pub fn try_load_xdp_firewall(
 ///
 /// The reject program is loaded with the same pin path so that `PKT_CTX` and
 /// `FIREWALL_METRICS` maps are shared with xdp-firewall. It is loaded but NOT
-/// attached to any interface — it is invoked only via tail-call from
+/// attached to any interface - it is invoked only via tail-call from
 /// xdp-firewall (`ProgramArray` slot 1).
 pub fn try_load_xdp_firewall_reject(
     ebpf_dir: &str,
@@ -3802,7 +3802,7 @@ pub type XdpRatelimitResult = (
 /// Load the xdp-ratelimit-syncookie program and wire it as a tail-call target.
 ///
 /// Shared maps: `SYNCOOKIE_CTX`, `SYNCOOKIE_SECRET`, `DDOS_METRICS`.
-/// Loaded but NOT attached — invoked via tail-call from xdp-ratelimit (`RL_PROG_ARRAY` slot 0).
+/// Loaded but NOT attached - invoked via tail-call from xdp-ratelimit (`RL_PROG_ARRAY` slot 0).
 pub fn try_load_xdp_ratelimit_syncookie(
     ebpf_dir: &str,
     rl_loader: &mut EbpfLoader,
@@ -3852,7 +3852,7 @@ fn arm_ddos_ebpf_configs(loader: &mut EbpfLoader, config: &AgentConfig) {
         // The XDP syncookie path issues kernel cookies via
         // `bpf_tcp_raw_gen_syncookie`; the kernel only completes a legitimate
         // client's handshake from the passed cookie-ACK when it always
-        // validates syncookies (mode 2 — mode 1 engages only on SYN-backlog
+        // validates syncookies (mode 2 - mode 1 engages only on SYN-backlog
         // overflow, which never happens because XDP absorbs the flood SYNs).
         // In the default token deployment the privileged launcher already set
         // this before the user-namespace unshare; this best-effort write only
@@ -3935,7 +3935,7 @@ pub fn try_load_xdp_ratelimit(
     // firewall is active it owns XDP_PROG_ARRAY and is loaded raw (non
     // device-bound, since the non-kfunc reject/syncookie chain cannot be
     // device-bound), so a device-bound ratelimit fd is rejected with EINVAL
-    // when wired into slot 0 — leaving the firewall→ratelimit hop dead and
+    // when wired into slot 0 - leaving the firewall→ratelimit hop dead and
     // every DDoS/syncookie check unreachable. Neutralize the dev-bind in the
     // chained form (mirrors `try_load_xdp_loadbalancer`); only device-bind in
     // standalone mode where ratelimit attaches to the interface directly.
@@ -3992,7 +3992,7 @@ pub fn try_load_xdp_ratelimit(
 
     // SYN cookies are now issued and validated by the kernel
     // `bpf_tcp_raw_*_syncookie` helpers, so there is no userspace secret to
-    // seed — the kernel keeps its own cookie key.
+    // seed - the kernel keeps its own cookie key.
 
     // Arm the xdp-ratelimit DDoS protections gated by zeroed config maps
     // (SYN cookie, ICMP flood, conntrack flood). Without these writes the
@@ -4034,7 +4034,7 @@ pub fn try_load_tc_ids(ebpf_dir: &str, config: &AgentConfig) -> anyhow::Result<T
 
     // Also attach tc-ids on egress so locally-originated (e.g. container
     // outbound) traffic is seen with the originating socket's cgroup available
-    // via `bpf_skb_cgroup_id` — the ingress softirq path cannot recover it.
+    // via `bpf_skb_cgroup_id` - the ingress softirq path cannot recover it.
     // This is needed for container attribution, so it fires whenever the
     // container resolver is on; `inspect_egress` keeps it available even when
     // attribution is off. NOTE: an egress-attached tc-ids also enforces IDS
@@ -4220,7 +4220,7 @@ pub fn try_load_uprobe_dlp(
     // Rootless posture: discovery (reading other processes' `/proc`) and the
     // privileged uprobe `BPF_LINK_CREATE` are both brokered to the warden. The
     // brokered `/proc` scan can be slow on a busy node, so it MUST NOT run on the
-    // synchronous startup path — the lifecycle watcher (spawned by the caller)
+    // synchronous startup path - the lifecycle watcher (spawned by the caller)
     // performs the first scan and every attach asynchronously. Startup only arms
     // the module.
     if let Some(sock) = warden_sock_from_env() {
@@ -4240,7 +4240,7 @@ pub fn try_load_uprobe_dlp(
         }
         if attached == 0 {
             anyhow::bail!(
-                "no SSL library found (no process maps one, and none on the system — tried: {}). \
+                "no SSL library found (no process maps one, and none on the system - tried: {}). \
                  DLP uprobe requires OpenSSL or BoringSSL. \
                  Install libssl-dev or equivalent package.",
                 SSL_LIBRARY_CANDIDATES.join(", ")
@@ -4305,7 +4305,7 @@ fn find_ssl_library_path(proc_root: &std::path::Path) -> Option<String> {
     ];
 
     // First search under the host init's root (`{proc_root}/1/root`). When the
-    // host proc is mounted, this is the host's library tree — and the same path
+    // host proc is mounted, this is the host's library tree - and the same path
     // is valid in the warden's namespace, so a brokered attach reaches it. Skipped
     // silently when unreadable (e.g. no host proc, or insufficient access).
     let host_root = proc_root.join("1").join("root");
@@ -4318,7 +4318,7 @@ fn find_ssl_library_path(proc_root: &std::path::Path) -> Option<String> {
         }
     }
 
-    // Then the agent's own rootfs: ldconfig (most reliable — gives full paths),
+    // Then the agent's own rootfs: ldconfig (most reliable - gives full paths),
     // then the bare directories. Used in the direct (non-brokered) posture.
     if let Ok(output) = Command::new("ldconfig").arg("-p").output() {
         let cache = String::from_utf8_lossy(&output.stdout);
@@ -4435,11 +4435,11 @@ pub fn try_load_tc_conntrack(
             );
         }
     } else {
-        warn!("failed to resolve nf_conn BTF offsets — kernel CT field reads disabled");
+        warn!("failed to resolve nf_conn BTF offsets - kernel CT field reads disabled");
     }
 
     // tc-conntrack has no EVENTS RingBuf (pure state tracking, no events).
-    // EventReader is optional — skip if the map doesn't exist.
+    // EventReader is optional - skip if the map doesn't exist.
     let opt_reader = EventReader::new(loader.ebpf_mut()).ok();
 
     Ok((loader, ct_mgr, ct_metrics_rdr, opt_reader))
@@ -4636,12 +4636,12 @@ pub fn build_geoip_adapter(
         ),
         infrastructure::config::GeoIpSource::Url { .. } => {
             anyhow::bail!(
-                "GeoIP URL mode requires async download — use `file` mode or pre-download databases"
+                "GeoIP URL mode requires async download - use `file` mode or pre-download databases"
             );
         }
         infrastructure::config::GeoIpSource::MaxMindAccount { .. } => {
             anyhow::bail!(
-                "GeoIP MaxMind account mode requires async download — use `file` mode or pre-download databases"
+                "GeoIP MaxMind account mode requires async download - use `file` mode or pre-download databases"
             );
         }
     }
@@ -4650,7 +4650,7 @@ pub fn build_geoip_adapter(
 /// Load the XDP load balancer program.
 ///
 /// When `xdp_chain_active` is true (firewall or ratelimit is on the same
-/// interfaces), the LB is loaded without attaching — it will be invoked
+/// interfaces), the LB is loaded without attaching - it will be invoked
 /// via tail-call from the upstream program. When false, it attaches
 /// directly to the interfaces (standalone mode).
 pub fn try_load_xdp_loadbalancer(
@@ -4679,11 +4679,11 @@ pub fn try_load_xdp_loadbalancer(
     )?;
 
     if xdp_chain_active {
-        // Another XDP program owns the interface — load only (tail-call target).
+        // Another XDP program owns the interface - load only (tail-call target).
         loader.load_xdp_program("xdp_loadbalancer")?;
         info!("xdp-loadbalancer loaded as tail-call target (XDP chain active)");
     } else {
-        // Standalone mode — attach directly.
+        // Standalone mode - attach directly.
         let xdp_flags = adapters::ebpf::xdp_mode_to_flags(config.agent.xdp_mode);
         for iface in &config.agent.interfaces {
             loader.attach_xdp_program("xdp_loadbalancer", iface, xdp_flags)?;

@@ -1,4 +1,4 @@
-# config-ebpf-conntrack-kill.yaml — Stateful firewall + kernel-CT kill, 3-VM.
+# config-ebpf-conntrack-kill.yaml - Stateful firewall + kernel-CT kill, 3-VM.
 #
 # Drives the kill_flow_via_xdp_ct / kill_flow_via_skb_ct kfunc path: an
 # established TCP flow is matched by a block rule injected mid-flow,

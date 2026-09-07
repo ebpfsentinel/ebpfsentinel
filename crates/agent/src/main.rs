@@ -19,7 +19,7 @@ fn main() -> Result<()> {
     let cli = cli::parse();
 
     // The rootless daemon self-bootstraps its user namespace + delegated bpffs
-    // (via the warden) before any async runtime starts — the userns unshare must
+    // (via the warden) before any async runtime starts - the userns unshare must
     // run single-threaded. A no-op unless a warden socket is configured, or on
     // the post-`execv` second pass. Only the daemon loads eBPF, so gate on it.
     if cli.command.is_none() {

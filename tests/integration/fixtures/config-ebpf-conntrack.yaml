@@ -1,4 +1,4 @@
-# config-ebpf-conntrack.yaml — Connection tracking eBPF scenario test config
+# config-ebpf-conntrack.yaml - Connection tracking eBPF scenario test config
 # Tests: connection state tracking, half-open detection, flush
 #
 # Network topology:

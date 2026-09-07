@@ -9,7 +9,7 @@
 //! Split-brain safety: userspace populates `VIP_SET` **only** while this
 //! node is the speaker, so a standby node has an empty set and never
 //! answers. Gratuitous ARP on takeover is emitted from userspace (a rare
-//! event) via a raw socket — never from eBPF.
+//! event) via a raw socket - never from eBPF.
 
 #![no_std]
 #![no_main]

@@ -2,13 +2,13 @@
 //!
 //! Implements [`ConnTrackMapPort`] by reading the kernel's authoritative
 //! conntrack table rather than the BPF shadow maps. Zero new dependencies
-//! beyond `std` — the proc filesystem is stable since Linux 2.6 and the
+//! beyond `std` - the proc filesystem is stable since Linux 2.6 and the
 //! format has not changed.
 //!
 //! `/proc/net/nf_conntrack` is mode `0440 root:root`, so reading it requires the
 //! reader to be root (or hold a usable `CAP_DAC_*` override). This reader (and
 //! the conntrack event poller that diffs its snapshots) therefore works only when
-//! the agent runs as real root in the host user namespace — i.e. the
+//! the agent runs as real root in the host user namespace - i.e. the
 //! single-container mode where the launcher keeps the agent as root (e.g. under
 //! Docker). Under the rootless token deployment the agent is a non-root uid in a
 //! child user namespace, where `CAP_DAC_OVERRIDE` is unusable against a file owned
@@ -39,13 +39,13 @@ const DEFAULT_NF_CONNTRACK_COUNT_PATH: &str = "/proc/sys/net/netfilter/nf_conntr
 /// Env var set for the rootless agent with the warden control-plane socket. When
 /// present, every conntrack operation (table read, flush, targeted delete) is
 /// proxied to the warden over its typed protocol instead of touching `/proc` or
-/// the `conntrack` CLI directly — the rootless agent holds none of the required
+/// the `conntrack` CLI directly - the rootless agent holds none of the required
 /// privileges.
 const WARDEN_SOCK_ENV: &str = "EBPFSENTINEL_WARDEN_SOCK";
 
 /// Reads the kernel netfilter conntrack table via `/proc/net/nf_conntrack`.
 ///
-/// This is the same data `conntrack -L` displays — the kernel's
+/// This is the same data `conntrack -L` displays - the kernel's
 /// authoritative view, not the BPF shadow copy. Userspace REST endpoints
 /// backed by this port are guaranteed coherent with the `conntrack` CLI
 /// and any firewall or NAT tooling that inspects the kernel CT table.
@@ -128,7 +128,7 @@ impl ConnTrackKillPort for ProcNetfilterConntrackPort {
             17 => "udp",
             1 => "icmp",
             132 => "sctp",
-            // Wildcard / unsupported protocol — no precise tuple to target,
+            // Wildcard / unsupported protocol - no precise tuple to target,
             // so refuse rather than risk a table-wide delete.
             _ => return Ok(0),
         };
@@ -167,7 +167,7 @@ impl ConnTrackKillPort for ProcNetfilterConntrackPort {
             })?;
         // `conntrack -D` summarises the result on stderr as
         // "... N flow entries have been deleted." and exits non-zero when
-        // nothing matched — that is not an error here, so parse the count
+        // nothing matched - that is not an error here, so parse the count
         // from the output regardless of exit status.
         let deleted = parse_deleted_count(&String::from_utf8_lossy(&output.stderr));
         debug!(
@@ -298,7 +298,7 @@ impl ConnTrackMapPort for ProcNetfilterConntrackPort {
             settings.icmp_timeout_secs,
         );
         // Disable mid-stream connection pickup. A stateful security gateway must
-        // not adopt a TCP flow whose opening SYN it never observed — honoring
+        // not adopt a TCP flow whose opening SYN it never observed - honoring
         // such flows is a known firewall-evasion vector. It is also what makes a
         // firewall-driven flow teardown durable: once the kernel conntrack entry
         // for a denied flow is destroyed, an in-flight reply packet must not
@@ -339,7 +339,7 @@ fn write_sysctl(key: &str, value: u64) {
 /// ipv4     2 tcp      6 431999 ESTABLISHED src=1.2.3.4 dst=5.6.7.8 sport=12345 dport=443 src=5.6.7.8 dst=1.2.3.4 sport=443 dport=12345 [ASSURED] mark=0 use=2
 /// ```
 ///
-/// Format (UDP / ICMP — no state field):
+/// Format (UDP / ICMP - no state field):
 /// ```text
 /// ipv4     2 udp      17 29 src=10.0.0.1 dst=8.8.8.8 sport=53422 dport=53 src=8.8.8.8 dst=10.0.0.1 sport=53 dport=53422 [ASSURED] mark=0 use=2
 /// ```
@@ -544,7 +544,7 @@ mod tests {
         let line = "ipv4     2 icmp     1 29 src=10.0.0.1 dst=10.0.0.2 type=8 code=0 id=1234 src=10.0.0.2 dst=10.0.0.1 type=0 code=0 id=1234 mark=0 use=2";
         let conn = parse_nf_conntrack_line(line).unwrap();
         assert_eq!(conn.protocol, 1);
-        // ICMP has no sport/dport in the tuple — those fields stay 0.
+        // ICMP has no sport/dport in the tuple - those fields stay 0.
         assert_eq!(conn.src_ip, "10.0.0.1");
         assert_eq!(conn.dst_ip, "10.0.0.2");
     }

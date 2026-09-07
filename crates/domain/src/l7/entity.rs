@@ -171,7 +171,7 @@ pub struct Pop3Command {
     pub params: String,
 }
 
-/// Result of parsing an L7 payload — one variant per supported protocol.
+/// Result of parsing an L7 payload - one variant per supported protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedProtocol {
     Http(HttpRequest),
@@ -195,7 +195,7 @@ pub enum ParsedProtocol {
 
 /// Protocol-specific matcher for L7 firewall rules.
 ///
-/// Each field is `Option` — `None` means wildcard (match any value).
+/// Each field is `Option` - `None` means wildcard (match any value).
 /// `Some(pattern)` performs case-insensitive substring matching.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "protocol", rename_all = "lowercase")]

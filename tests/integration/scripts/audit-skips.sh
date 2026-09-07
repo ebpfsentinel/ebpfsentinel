@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# audit-skips.sh — keep every skip in the fleet classified and declared.
+# audit-skips.sh - keep every skip in the fleet classified and declared.
 #
 # A skipped bats test reports as success. That is the right answer when the
 # capability is genuinely absent, and a silent regression when the suite's
@@ -13,7 +13,7 @@
 #   - every registered reason is still used somewhere (no rotting entries)
 #
 # Modes:
-#   audit-skips.sh            check only — exit 1 on any violation
+#   audit-skips.sh            check only - exit 1 on any violation
 #   audit-skips.sh --report   print the per-class inventory, exit 0
 #   audit-skips.sh --help
 #
@@ -127,7 +127,7 @@ for path in files:
 
 stale = sorted((env_keys - used_env) | (mask_keys - used_mask))
 
-print("Skip audit — tests/integration/skip-policy.yaml")
+print("Skip audit - tests/integration/skip-policy.yaml")
 print(f"  files scanned          : {len(files)}")
 print(f"  env_skip call sites    : {counts['env']}")
 print(f"  soft_skip call sites   : {counts['masking']}")

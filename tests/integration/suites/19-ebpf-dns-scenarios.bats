@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 19-ebpf-dns-scenarios.bats — DNS intelligence eBPF scenario tests
+# 19-ebpf-dns-scenarios.bats - DNS intelligence eBPF scenario tests
 # Requires: root, kernel >= 6.9, bpftool
 
 load '../lib/helpers'
@@ -38,7 +38,7 @@ teardown_file() {
     rm -f "${PREPARED_CONFIG:-}"
 }
 
-# _start_stub_resolver ANSWER_COUNT FIRST_IP — bind the stub responder inside
+# _start_stub_resolver ANSWER_COUNT FIRST_IP - bind the stub responder inside
 # the test namespace, so queries leave the host and answers come back in on the
 # veth where tc-dns sits. The program attaches on ingress only, which is the
 # real deployment direction: the resolver is remote and its answers arrive.
@@ -76,7 +76,7 @@ _stop_stub_resolver() {
     pkill -9 -f dns-stub-responder.py 2>/dev/null || true
 }
 
-# _cached_ips DOMAIN — the IP list the agent cached for a domain, one per line.
+# _cached_ips DOMAIN - the IP list the agent cached for a domain, one per line.
 # An empty result is a normal poll outcome, not a command failure.
 _cached_ips() {
     local domain="$1"
@@ -156,7 +156,7 @@ _cached_ips() {
     echo "$metrics" | grep -qE "ebpfsentinel_dns|ebpfsentinel_packets"
 }
 
-# _dns_observed_metric — sum the agent's observed-packet counters so a
+# _dns_observed_metric - sum the agent's observed-packet counters so a
 # before/after delta can prove real query volume reached the datapath.
 # DNS observation is exposed as ebpfsentinel_packets_total{interface=
 # "DNS_METRICS",...}; prefer the DNS-labelled rows and fall back to the
@@ -192,7 +192,7 @@ _dns_observed_metric() {
     before="$(_dns_observed_metric)"
 
     # Drive a few seconds of real DNS queries from the netns at the agent's
-    # :53 hook. No resolver is bound, so dnsperf records timeouts — but every
+    # :53 hook. No resolver is bound, so dnsperf records timeouts - but every
     # query packet still crosses the tc-dns hook, which is what we assert.
     local out
     out="$(ip netns exec "${EBPF_TEST_NS}" \
@@ -285,7 +285,7 @@ _dns_observed_metric() {
     # bytes into the payload, far past the small record's 128-byte payload.
     # A short copy would leave an earlier address here, or nothing at all.
     echo "${ips}" | grep -qx "203.0.113.26" || {
-        echo "last answer missing — payload truncated. cached: ${ips}" >&2
+        echo "last answer missing - payload truncated. cached: ${ips}" >&2
         return 1
     }
 }

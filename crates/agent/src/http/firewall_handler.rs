@@ -473,7 +473,7 @@ impl From<&FirewallRule> for RuleResponse {
 
 // ── Handlers ────────────────────────────────────────────────────────
 
-/// `GET /api/v1/firewall/rules` — list all active rules.
+/// `GET /api/v1/firewall/rules` - list all active rules.
 #[utoipa::path(
     get, path = "/api/v1/firewall/rules",
     tag = "Firewall",
@@ -512,7 +512,7 @@ pub async fn list_rules(State(state): State<Arc<AppState>>) -> Json<Vec<RuleResp
     Json(rules)
 }
 
-/// `POST /api/v1/firewall/rules` — create a new rule.
+/// `POST /api/v1/firewall/rules` - create a new rule.
 #[utoipa::path(
     post, path = "/api/v1/firewall/rules",
     tag = "Firewall",
@@ -556,7 +556,7 @@ pub async fn create_rule(
     Ok((StatusCode::CREATED, Json(response)))
 }
 
-/// `DELETE /api/v1/firewall/rules/:id` — delete a rule by ID.
+/// `DELETE /api/v1/firewall/rules/:id` - delete a rule by ID.
 #[utoipa::path(
     delete, path = "/api/v1/firewall/rules/{id}",
     tag = "Firewall",

@@ -26,7 +26,7 @@ fuzz_target!(|data: &[u8]| {
     };
 
     match selector {
-        // Sub-target 0: DomainMatcher::new() — exercise all pattern types
+        // Sub-target 0: DomainMatcher::new() - exercise all pattern types
         0 => {
             let _ = DomainMatcher::new(pattern);
         }

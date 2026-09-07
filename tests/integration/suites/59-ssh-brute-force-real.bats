@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 59-ssh-brute-force-real.bats — SSH brute-force IDS + IPS sweep.
+# 59-ssh-brute-force-real.bats - SSH brute-force IDS + IPS sweep.
 #
 # Drives a synthetic SYN burst from the test netns at the agent on
 # TCP/22 with pre-loaded IDS + IPS threshold rules and asserts:
@@ -70,7 +70,7 @@ teardown_file() {
 
 # ── Helpers ─────────────────────────────────────────────────────────
 
-# _drive_ssh_burst <count> — open <count> TCP connections from the test
+# _drive_ssh_burst <count> - open <count> TCP connections from the test
 # netns toward the agent's TCP/22 listener. Each connection completes
 # the handshake so the IDS sees a distinct flow per attempt.
 _drive_ssh_burst() {
@@ -106,7 +106,7 @@ _drive_ssh_burst() {
         return 1
     }
 
-    # Rule should declare port 22 — exact field name varies by serializer.
+    # Rule should declare port 22 - exact field name varies by serializer.
     echo "${rule}" | grep -qE '"dst_port"[^0-9]*22|"port"[^0-9]*22' || {
         echo "ids-ssh-bruteforce did not preserve dst_port=22: ${rule}" >&2
         return 1
@@ -147,7 +147,7 @@ _drive_ssh_burst() {
     # after the burst lands.
     # wait_for_alert already unwraps `.alerts`, so the filter selects over the
     # alert array directly (matching the convention used by suites 12/26/45)
-    # and emits the matching alert objects — non-empty output means a match.
+    # and emits the matching alert objects - non-empty output means a match.
     local alerts
     alerts="$(wait_for_alert \
         '.[] | select(.rule_id == "ids-ssh-bruteforce")' \
@@ -197,7 +197,7 @@ _drive_ssh_burst() {
 
 # ── Real hydra credential burst ────────────────────────────────────
 
-# _drive_ssh_hydra <user> <pwfile> — run an SSH credential burst from the
+# _drive_ssh_hydra <user> <pwfile> - run an SSH credential burst from the
 # test netns against the agent host's sshd on TCP/22. Each password is a
 # distinct authentication attempt (one flow), so a wordlist of >= the IDS
 # threshold drives the brute-force detection. The agent's host sshd
@@ -252,7 +252,7 @@ _drive_ssh_hydra() {
 
 # ── Real ncrack credential burst (second attack tool) ─────────────
 
-# _drive_ssh_ncrack <user> <pwfile> — run an ncrack SSH credential burst
+# _drive_ssh_ncrack <user> <pwfile> - run an ncrack SSH credential burst
 # from the test netns against the agent host's sshd on TCP/22. ncrack is a
 # different engine from hydra (its own timing/parallelism), so it validates
 # the IDS threshold is engine-agnostic. Output captured in _NCRACK_OUT.
@@ -312,7 +312,7 @@ _drive_ssh_ncrack() {
         > "${pwfile}"
 
     # Target the key-only `vagrant` account with a wordlist that cannot
-    # hold its real (absent/disabled) password — every attempt must fail.
+    # hold its real (absent/disabled) password - every attempt must fail.
     _drive_ssh_hydra vagrant "${pwfile}"
 
     # Negative auth: a hydra success prints a "[22][ssh] host: ... login:
@@ -343,7 +343,7 @@ _drive_ssh_ncrack() {
     require_tool sshpass
 
     # Unlike hydra/ncrack, this drives the genuine OpenSSH client one attempt
-    # at a time — the exact handshake a human attacker's ssh(1) emits. Force
+    # at a time - the exact handshake a human attacker's ssh(1) emits. Force
     # password auth (no pubkey) against the key-only vagrant account so every
     # attempt is a real, failed SSH authentication.
     local i out cracked=0

@@ -6,7 +6,7 @@
 //! asm that LLVM cannot decompose or outline.
 //!
 //! Uses u16 loads/stores (not u32) because `[u8; 6]` arrays on the BPF stack
-//! may only be 2-byte aligned — u32 stores would trigger "misaligned stack
+//! may only be 2-byte aligned - u32 stores would trigger "misaligned stack
 //! access" from the verifier.
 
 /// Copy 6 bytes (MAC address) via inline asm using 3×u16 loads/stores.

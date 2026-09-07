@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# dns_encrypted_helpers.bash — DoH/DoT probe + alert filter helpers.
+# dns_encrypted_helpers.bash - DoH/DoT probe + alert filter helpers.
 #
 # The agent's encrypted-DNS detector consumes TLS ClientHello SNI plus
-# destination port. We don't need a real DoH proxy to drive detection —
+# destination port. We don't need a real DoH proxy to drive detection -
 # any TLS handshake whose SNI matches the built-in / configured resolver
 # list (or whose dst_port is 853) is enough. These helpers drive that
 # handshake from the attacker VM and filter the alerts surface for the
@@ -23,7 +23,7 @@ fi
 #
 # Drive a TLS ClientHello with the named SNI from the attacker VM
 # towards host_ip:port via openssl s_client. The handshake may fail
-# (cert mismatch, peer drops) — the agent only needs to observe the
+# (cert mismatch, peer drops) - the agent only needs to observe the
 # ClientHello bytes on transit. Returns 0 once openssl exits.
 tls_probe_sni() {
     local host="${1:?usage: tls_probe_sni <host_ip> <port> <sni>}"
@@ -89,8 +89,8 @@ wait_for_encrypted_dns_alert() {
 # when it POSTs the DNS query to https://<resolver_host>/dns-query. The DoH
 # exchange itself fails (the backend is not a real DoH server) but the
 # ClientHello has already traversed the datapath, which is all the detector
-# needs. A single one-shot curl per iteration — no background proxy, no
-# heredoc — so the ssh session cannot self-terminate (status 255).
+# needs. A single one-shot curl per iteration - no background proxy, no
+# heredoc - so the ssh session cannot self-terminate (status 255).
 real_doh_probe() {
     local backend="${1:?usage: real_doh_probe <backend_ip> <resolver_host>}"
     local resolver="${2:?usage: real_doh_probe <backend_ip> <resolver_host>}"

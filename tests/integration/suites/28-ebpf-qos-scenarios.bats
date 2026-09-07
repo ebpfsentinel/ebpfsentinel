@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 28-ebpf-qos-scenarios.bats — QoS eBPF scenario tests
+# 28-ebpf-qos-scenarios.bats - QoS eBPF scenario tests
 # Requires: root, kernel >= 6.9, bpftool, iperf3
 
 load '../lib/helpers'
@@ -79,7 +79,7 @@ teardown_file() {
     [ "${count:-0}" -ge 1 ]
 }
 
-@test "QoS pipe CRUD — create and delete" {
+@test "QoS pipe CRUD - create and delete" {
     require_root
 
     # Create a new pipe
@@ -113,7 +113,7 @@ teardown_file() {
     iperf3 -s -p 5201 -D --logfile /tmp/iperf3-qos-server-$$.log 2>/dev/null || true
     sleep 1
 
-    # Run iperf3 client from the network namespace at 50Mbps — pipe cap is 10Mbps
+    # Run iperf3 client from the network namespace at 50Mbps - pipe cap is 10Mbps
     local result
     result="$(iperf3_from_ns "$EBPF_HOST_IP" 5 "" -p 5201 -b 50M 2>/dev/null)" || true
 
@@ -164,7 +164,7 @@ teardown_file() {
 
 # ── Queues ───────────────────────────────────────────────────────
 
-@test "QoS queue CRUD — create and delete" {
+@test "QoS queue CRUD - create and delete" {
     require_root
 
     # Create a queue in the existing test pipe
@@ -207,7 +207,7 @@ teardown_file() {
 
 # ── Pipe bandwidth enforcement ──────────────────────────────────
 
-@test "QoS pipe bandwidth enforcement — upload capped" {
+@test "QoS pipe bandwidth enforcement - upload capped" {
     require_root
     require_tool iperf3
 
@@ -221,7 +221,7 @@ teardown_file() {
     iperf3 -s -p 5202 -D --logfile /tmp/iperf3-qos-upload-$$.log 2>/dev/null || true
     sleep 1
 
-    # Run iperf3 client from the namespace — upload (ns->host) at 100Mbps
+    # Run iperf3 client from the namespace - upload (ns->host) at 100Mbps
     local result
     result="$(iperf3_from_ns "$EBPF_HOST_IP" 3 "" -p 5202 -b 100M 2>/dev/null)" || true
 
@@ -443,7 +443,7 @@ teardown_file() {
 
 # ── Classifier CRUD ─────────────────────────────────────────────
 
-@test "QoS classifier CRUD — create and delete" {
+@test "QoS classifier CRUD - create and delete" {
     require_root
 
     # Create a new classifier

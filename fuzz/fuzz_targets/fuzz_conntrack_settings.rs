@@ -6,7 +6,7 @@ use domain::conntrack::entity::ConnTrackSettings;
 
 // Fuzz ConnTrackSettings.validate() + to_ebpf_config() with extreme timeout values.
 //
-// The to_ebpf_config() multiplies u64 seconds by 1_000_000_000 — this can overflow
+// The to_ebpf_config() multiplies u64 seconds by 1_000_000_000 - this can overflow
 // on large values. This fuzzer ensures no panic occurs on arbitrary inputs.
 //
 // Layout: 56 bytes per settings struct (7 × u64 timeout fields)
@@ -43,7 +43,7 @@ fuzz_target!(|data: &[u8]| {
     // validate() should not panic
     let _ = settings.validate();
 
-    // to_ebpf_config() multiplies u64 × 1_000_000_000 — must not panic
+    // to_ebpf_config() multiplies u64 × 1_000_000_000 - must not panic
     let cfg = settings.to_ebpf_config();
     let _ = cfg.enabled;
     let _ = cfg.tcp_established_timeout_ns;

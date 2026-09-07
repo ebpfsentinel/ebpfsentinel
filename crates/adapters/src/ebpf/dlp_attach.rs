@@ -3,11 +3,11 @@
 //! TLS plaintext only exists inside a userspace `libssl`/`BoringSSL`, so DLP is a
 //! uprobe on `SSL_write`/`SSL_read`. A uprobe fires only for processes that map
 //! the exact target inode, so to inspect every container's TLS the agent must
-//! attach to each container's own SSL library — not a single library on its own
+//! attach to each container's own SSL library - not a single library on its own
 //! rootfs. This module resolves the SSL library every process actually maps
 //! (parsing `/proc/<pid>/maps`), deduplicates by `(dev, ino)` so processes that
-//! share a file — e.g. pods of the same image over a shared overlayfs lower
-//! layer — get a single probe set, and attaches the uprobes per unique inode.
+//! share a file - e.g. pods of the same image over a shared overlayfs lower
+//! layer - get a single probe set, and attaches the uprobes per unique inode.
 //!
 //! Containers come and go, so the attach is not one-shot: [`DlpUprobeAttacher`]
 //! holds the link fds keyed by `(dev, ino)` and a [`watch`](DlpUprobeAttacher::watch)
@@ -34,13 +34,13 @@ pub const DLP_ATTACH_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// SSL library basename markers whose mappings export `SSL_write`/`SSL_read`.
 /// OpenSSL exports them from `libssl`; `BoringSSL` from `libssl`/`libboringssl`.
-/// `libcrypto` is intentionally excluded — it carries the primitives, not the
+/// `libcrypto` is intentionally excluded - it carries the primitives, not the
 /// `SSL_*` record functions the DLP uprobes hook.
 const SSL_LIB_MARKERS: &[&str] = &["libssl.so", "libboringssl.so"];
 
 /// Marker the kernel appends to a mapping whose backing file was unlinked after
 /// the process mapped it. The inode stays alive and mapped; only its name is
-/// gone, so the mapping is still a valid — and still interesting — uprobe target.
+/// gone, so the mapping is still a valid - and still interesting - uprobe target.
 const DELETED_MARKER: &str = " (deleted)";
 
 /// SSL uprobe attach points: (loader program name, exported symbol, `is_uretprobe`).
@@ -53,23 +53,23 @@ const SSL_UPROBES: &[(&str, &str, bool)] = &[
 /// A unique SSL library to attach the DLP uprobe set to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UprobeTarget {
-    /// Path the loader opens to resolve symbols and attach — the library seen
+    /// Path the loader opens to resolve symbols and attach - the library seen
     /// through the owning process's root (`/proc/<pid>/root/<lib>`), so it
     /// resolves inside that process's mount namespace, or the mapping's
     /// `/proc/<pid>/map_files` entry when the file has been unlinked.
     pub attach_path: PathBuf,
     /// Library basename, for logging.
     pub lib: String,
-    /// Block device of the resolved file — first half of the dedup key.
+    /// Block device of the resolved file - first half of the dedup key.
     pub dev: u64,
-    /// Inode of the resolved file — second half of the dedup key.
+    /// Inode of the resolved file - second half of the dedup key.
     pub ino: u64,
     /// `SSL_write` offset pre-resolved by the warden scan (`0` = resolve locally).
     ssl_write_offset: u64,
     /// `SSL_read` offset pre-resolved by the warden scan (`0` = resolve locally).
     ssl_read_offset: u64,
     /// When `true` the offsets are authoritative and the agent must NOT read the
-    /// ELF (a neighbour container's library it cannot access) — a `0` offset then
+    /// ELF (a neighbour container's library it cannot access) - a `0` offset then
     /// means the symbol is absent and its probe is skipped. When `false` (local
     /// scan or system fallback, a library the agent can read) offsets are
     /// resolved on demand.
@@ -84,7 +84,7 @@ pub struct UprobeTarget {
 }
 
 impl UprobeTarget {
-    /// Build a target from a warden `/proc` scan result — offsets are
+    /// Build a target from a warden `/proc` scan result - offsets are
     /// authoritative (the agent cannot read the neighbour's ELF itself).
     fn from_warden(t: ebpfsentinel_warden_client::DlpTarget) -> Self {
         let lib = t.path.rsplit('/').next().unwrap_or(&t.path).to_owned();
@@ -104,7 +104,7 @@ impl UprobeTarget {
 /// The uprobe links attached to one SSL library inode, held for their lifetime
 /// (dropping the fds detaches the probes).
 struct Attachment {
-    /// Owned uprobe link fds — one per attached [`SSL_UPROBES`] entry.
+    /// Owned uprobe link fds - one per attached [`SSL_UPROBES`] entry.
     links: Vec<OwnedFd>,
     /// What each of those links attached to, as resolved at attach time.
     probes: Vec<AttachedUprobe>,
@@ -226,7 +226,7 @@ struct SslMapping {
     /// Name of this mapping's `/proc/<pid>/map_files` entry.
     map_file: String,
     /// The backing file was unlinked after the process mapped it, so `path` no
-    /// longer names this inode — and may since name a different one.
+    /// longer names this inode - and may since name a different one.
     deleted: bool,
 }
 
@@ -263,7 +263,7 @@ fn map_files_name(range: &str) -> Option<String> {
 }
 
 /// Extract the distinct SSL library mappings from the contents of a
-/// `/proc/<pid>/maps` file, one entry per (path, deleted) pair — a process that
+/// `/proc/<pid>/maps` file, one entry per (path, deleted) pair - a process that
 /// maps both a replaced library and its replacement holds two live inodes and
 /// both are probe targets.
 fn ssl_mappings_in_maps(maps: &str) -> Vec<SslMapping> {
@@ -304,7 +304,7 @@ fn ssl_mappings_in_maps(maps: &str) -> Vec<SslMapping> {
     out.into_values().collect()
 }
 
-/// `(inodes_to_attach, inodes_to_detach)` — the result of one reconcile diff,
+/// `(inodes_to_attach, inodes_to_detach)` - the result of one reconcile diff,
 /// each inode keyed by `(dev, ino)`.
 type ReconcilePlan = (Vec<(u64, u64)>, Vec<(u64, u64)>);
 
@@ -344,7 +344,7 @@ pub struct DlpUprobeAttacher {
     /// `BPF_LINK_CREATE` is brokered to the warden; when `None`, the agent
     /// attaches directly (bare-metal / single privileged container).
     warden_sock: Option<PathBuf>,
-    /// Currently-attached libraries keyed by `(dev, ino)` — dedup, idempotency,
+    /// Currently-attached libraries keyed by `(dev, ino)` - dedup, idempotency,
     /// and the owning handle whose drop detaches.
     attached: HashMap<(u64, u64), Attachment>,
     /// This attacher has published an attach set. Only a publisher retracts on
@@ -360,7 +360,7 @@ pub struct DlpUprobeAttacher {
 
 impl DlpUprobeAttacher {
     /// Build a scan-only attacher over an explicit proc root. The uprobe program
-    /// fds are unset, so it can discover targets but not attach — used in tests.
+    /// fds are unset, so it can discover targets but not attach - used in tests.
     pub fn new(proc_root: impl Into<PathBuf>) -> Self {
         Self {
             proc_root: proc_root.into(),
@@ -439,11 +439,11 @@ impl DlpUprobeAttacher {
             };
             let maps_path = self.proc_root.join(pid.to_string()).join("maps");
             let Ok(maps) = std::fs::read_to_string(&maps_path) else {
-                continue; // process gone or unreadable — skip
+                continue; // process gone or unreadable - skip
             };
             for m in ssl_mappings_in_maps(&maps) {
                 let Some((attach_path, meta)) = self.resolve_mapping(pid, &m) else {
-                    continue; // not reachable from the agent — skip
+                    continue; // not reachable from the agent - skip
                 };
                 let key = (meta.dev(), meta.ino());
                 if !seen.insert(key) {
@@ -471,7 +471,7 @@ impl DlpUprobeAttacher {
     /// A live mapping is opened through the owning process's root, so the path
     /// resolves inside that process's mount namespace. An unlinked mapping has no
     /// name left there, and worse, the name it used to have may since have been
-    /// taken by a *replacement* library — an in-place package upgrade unlinks the
+    /// taken by a *replacement* library - an in-place package upgrade unlinks the
     /// old file and renames the new one over it, while every already-running
     /// process keeps the old inode mapped. Resolving such a mapping by name would
     /// silently probe the wrong file, so it goes through `/proc/<pid>/map_files`
@@ -605,7 +605,7 @@ impl DlpUprobeAttacher {
             lib: base,
             dev: key.0,
             ino: key.1,
-            // A system library the agent can read itself — resolve offsets on
+            // A system library the agent can read itself - resolve offsets on
             // demand (works in both postures).
             ssl_write_offset: 0,
             ssl_read_offset: 0,
@@ -756,8 +756,8 @@ impl DlpUprobeAttacher {
         let mut probes = Vec::with_capacity(planned.len());
         for p in planned {
             let link = if let Some(sock) = &self.warden_sock {
-                // Rootless: the warden — which holds the tracing capability and
-                // can read the target — creates the link and passes back its fd.
+                // Rootless: the warden - which holds the tracing capability and
+                // can read the target - creates the link and passes back its fd.
                 let link = crate::warden::uprobe::attach_via_warden(
                     sock,
                     self.fds[p.index],

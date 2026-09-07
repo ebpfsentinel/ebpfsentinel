@@ -1,4 +1,4 @@
-//! `warden` — the privileged kernel-operation control plane for a fully rootless
+//! `warden` - the privileged kernel-operation control plane for a fully rootless
 //! eBPFsentinel agent.
 //!
 //! The agent runs non-root with every capability dropped and the runtime-default
@@ -6,7 +6,7 @@
 //! It connects to this process over an `AF_UNIX` socket and asks for a narrow set
 //! of typed operations defined by `ebpfsentinel-warden-proto`. The warden holds
 //! the extended privileges (`CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_NET_RAW`) and
-//! does nothing on its own initiative — it only answers validated requests.
+//! does nothing on its own initiative - it only answers validated requests.
 //!
 //! This binary is a pure privilege broker: it loads no eBPF and holds no maps (the
 //! rootless agent loads its own programs against the bpffs the warden delegates).
@@ -26,7 +26,7 @@ use ebpfsentinel_warden::{
 };
 use ebpfsentinel_warden_proto::PROTOCOL_VERSION;
 
-/// Default peer uid the warden accepts — the rootless agent's id. Override with
+/// Default peer uid the warden accepts - the rootless agent's id. Override with
 /// `--uid <n>`.
 const DEFAULT_UID: u32 = 65534;
 
@@ -64,7 +64,7 @@ fn parse_opt(args: &[String], flag: &str) -> Option<String> {
 /// The warden is a pure privilege broker: it loads no eBPF and holds no maps (the
 /// rootless agent loads its own programs against the bpffs the warden delegates).
 /// It answers only the privileged operations the agent cannot perform from its
-/// user namespace — bpffs delegation + module-BTF/pcap fd hand-off (`Delegate`),
+/// user namespace - bpffs delegation + module-BTF/pcap fd hand-off (`Delegate`),
 /// conntrack read/teardown, route programming, and gratuitous ARP.
 fn serve(sockpath: &str, allowed_uid: u32) -> ExitCode {
     // Privileged setup the agent cannot perform once rootless (the XDP syncookie
@@ -91,7 +91,7 @@ fn serve(sockpath: &str, allowed_uid: u32) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // 0666 so the rootless agent (a different uid — nobody under a container
+    // 0666 so the rootless agent (a different uid - nobody under a container
     // runtime) can connect; `SO_PEERCRED == allowed_uid` (not the file mode) is
     // the auth gate, checked at accept.
     if let Err(e) = fs::set_permissions(sockpath, fs::Permissions::from_mode(0o666)) {
@@ -102,7 +102,7 @@ fn serve(sockpath: &str, allowed_uid: u32) -> ExitCode {
     );
 
     // The warden runs as host root in the init netns, so it performs host-network
-    // ops directly. It serves no map elements — the agent holds its own maps.
+    // ops directly. It serves no map elements - the agent holds its own maps.
     // Shared (read-only) across the per-connection threads via `Arc`.
     // The OSS warden installs no extension handler: an `Extension` command
     // answers `Unimplemented`. A downstream build (the enterprise warden) reuses

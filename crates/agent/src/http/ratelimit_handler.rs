@@ -72,7 +72,7 @@ impl RateLimitRuleResponse {
 
 // ── Handlers ────────────────────────────────────────────────────────
 
-/// `GET /api/v1/ratelimit/rules` — list all rate limit rules.
+/// `GET /api/v1/ratelimit/rules` - list all rate limit rules.
 #[utoipa::path(
     get, path = "/api/v1/ratelimit/rules",
     tag = "Rate Limiting",
@@ -97,7 +97,7 @@ pub async fn list_ratelimit_rules(
     Json(rules)
 }
 
-/// `POST /api/v1/ratelimit/rules` — create a new rate limit rule.
+/// `POST /api/v1/ratelimit/rules` - create a new rate limit rule.
 #[utoipa::path(
     post, path = "/api/v1/ratelimit/rules",
     tag = "Rate Limiting",
@@ -147,7 +147,7 @@ pub async fn create_ratelimit_rule(
     ))
 }
 
-/// `DELETE /api/v1/ratelimit/rules/{id}` — delete a rate limit rule.
+/// `DELETE /api/v1/ratelimit/rules/{id}` - delete a rate limit rule.
 #[utoipa::path(
     delete, path = "/api/v1/ratelimit/rules/{id}",
     tag = "Rate Limiting",

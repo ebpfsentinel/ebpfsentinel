@@ -1,11 +1,11 @@
 #!/usr/bin/env bats
-# 41-ja4-fingerprint-diversity.bats — diverse TLS clients populate the
+# 41-ja4-fingerprint-diversity.bats - diverse TLS clients populate the
 # agent's JA4 cache and surface distinct hashes on enriched alerts.
 #
 # Topology: 2vm. Profile: nightly. Requires:
 #   - Attacker VM with curl, openssl, python3 (urllib3 / aiohttp), go
-#     (Story 34.3); MHDDoS optional
-#   - Agent VM reachable via 2VM SSH helpers (Story 34.2)
+#    ; MHDDoS optional
+#   - Agent VM reachable via 2VM SSH helpers
 #   - Kernel >= 6.9
 #
 # What's asserted:
@@ -100,7 +100,7 @@ _ja4_drive_available_clients() {
 
     local fired
     fired="$(_ja4_drive_available_clients "$LEGIT_SNI")"
-    [ "$fired" -ge 2 ] || soft_skip "only ${fired} TLS clients available — need at least 2"
+    [ "$fired" -ge 2 ] || soft_skip "only ${fired} TLS clients available - need at least 2"
 
     # Give the userspace L7 pipeline a moment to ingest each handshake.
     sleep 2
@@ -109,7 +109,7 @@ _ja4_drive_available_clients() {
     after="$(ja4_summary_count || echo 0)"
     [ -z "$after" ] && after=0
 
-    # We assert growth, not "exactly fired" — different clients on the
+    # We assert growth, not "exactly fired" - different clients on the
     # same source/dest 4-tuple over short windows can collapse onto a
     # single flow-keyed cache slot.
     [ "$after" -gt "$before" ] || {

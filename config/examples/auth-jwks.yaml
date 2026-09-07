@@ -1,4 +1,4 @@
-# Auth example — EdDSA JWT signed by the dashboard, verified via JWKS.
+# Auth example - EdDSA JWT signed by the dashboard, verified via JWKS.
 #
 # Pairs the agent with the dashboard's short-lived per-tenant token flow:
 # the dashboard mints Ed25519-signed JWTs with a rotating key, exposes the

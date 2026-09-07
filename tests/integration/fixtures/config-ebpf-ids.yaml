@@ -1,4 +1,4 @@
-# config-ebpf-ids.yaml — IDS eBPF scenario test config
+# config-ebpf-ids.yaml - IDS eBPF scenario test config
 # Tests: detect reverse shell (4444), SSH brute-force (22), HTTP scan (80)
 
 agent:

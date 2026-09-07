@@ -1,4 +1,4 @@
-# config-ebpf-nat.yaml — NAT eBPF scenario test config
+# config-ebpf-nat.yaml - NAT eBPF scenario test config
 # Tests: tc-nat-ingress/egress program loading, SNAT/DNAT rule config
 #
 # Network topology:

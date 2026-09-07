@@ -678,7 +678,7 @@ mod tests {
         let mut engine = IpsEngine::new(test_policy());
         let addr = ip(10, 0, 0, 1);
         engine.set_whitelist(vec![wl_exact(10, 0, 0, 1)]);
-        // Record 3+ detections — should never trigger blacklist
+        // Record 3+ detections - should never trigger blacklist
         assert!(engine.record_detection(addr).is_empty());
         assert!(engine.record_detection(addr).is_empty());
         assert!(engine.record_detection(addr).is_empty());
@@ -690,9 +690,9 @@ mod tests {
     fn cidr_whitelist_match() {
         let mut engine = IpsEngine::new(test_policy());
         engine.set_whitelist(vec![wl_cidr(192, 168, 1, 0, 24)]);
-        // IP in the /24 range — whitelisted
+        // IP in the /24 range - whitelisted
         assert!(engine.is_whitelisted(ip(192, 168, 1, 50)));
-        // IP outside the range — not whitelisted
+        // IP outside the range - not whitelisted
         assert!(!engine.is_whitelisted(ip(192, 168, 2, 1)));
     }
 

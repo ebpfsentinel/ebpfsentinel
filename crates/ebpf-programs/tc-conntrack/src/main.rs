@@ -105,7 +105,7 @@ fn try_tc_conntrack(ctx: &TcContext, skb_raw: *mut core::ffi::c_void) -> Result<
 
 /// IPv4 conntrack: parse 5-tuple, probe kernel netfilter CT.
 ///
-/// The shadow CT_TABLE_V4/V6 maps are deleted — kernel netfilter is
+/// The shadow CT_TABLE_V4/V6 maps are deleted - kernel netfilter is
 /// the sole connection tracking engine. This program now only:
 /// 1. Checks the enabled flag from CT_CONFIG
 /// 2. Parses the 5-tuple

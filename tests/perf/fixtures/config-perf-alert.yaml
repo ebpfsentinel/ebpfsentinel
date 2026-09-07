@@ -1,6 +1,6 @@
-# config-perf-alert.yaml — Full stack, all modes = alert (observe only)
+# config-perf-alert.yaml - Full stack, all modes = alert (observe only)
 # Derived from config-ebpf-benchmark.yaml for Docker performance tests.
-# No blocking — measures pure overhead of full eBPF observation pipeline.
+# No blocking - measures pure overhead of full eBPF observation pipeline.
 
 agent:
   interfaces:

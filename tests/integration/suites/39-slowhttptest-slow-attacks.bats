@@ -1,10 +1,10 @@
 #!/usr/bin/env bats
-# 39-slowhttptest-slow-attacks.bats — Slow L7 attacks against an agent
+# 39-slowhttptest-slow-attacks.bats - Slow L7 attacks against an agent
 # with a slow-request timeout policy.
 #
 # Topology: 2vm. Profile: nightly. Requires:
-#   - Attacker VM with slowhttptest installed (Story 34.3)
-#   - Agent VM reachable via 2VM SSH helpers (Story 34.2)
+#   - Attacker VM with slowhttptest installed
+#   - Agent VM reachable via 2VM SSH helpers
 #   - Kernel >= 6.9
 #
 # Three offensive variants (Slowloris, RUDY, Slowread) and one
@@ -75,7 +75,7 @@ teardown() {
 # Foreground attack, then assert the IDS alert metric grew and the
 # attacker is blacklisted. MITRE tagging is covered once by the
 # dedicated coverage test below (a port-8080 IDS/IPS alert is mapped to
-# its web-facing technique via alert::mitre — there is no slow-attack →
+# its web-facing technique via alert::mitre - there is no slow-attack →
 # T1499 path in the OSS agent, so this per-variant check stays
 # behavioral, mirroring the sibling flood suite 38).
 _run_slow_and_assert() {
@@ -94,7 +94,7 @@ _run_slow_and_assert() {
 }
 
 # IDS alerts are exported as the labelled family `ebpfsentinel_alerts_total`
-# with `component="ids"` — there is no `ebpfsentinel_ids_alerts_total` series.
+# with `component="ids"` - there is no `ebpfsentinel_ids_alerts_total` series.
 IDS_ALERTS_METRIC='ebpfsentinel_alerts_total'
 IDS_ALERTS_LABEL='{component="ids"'
 
@@ -134,7 +134,7 @@ IDS_ALERTS_LABEL='{component="ids"'
     [ -z "$after_count" ] && after_count="0"
 
     if [ "$(echo "$after_count > $before_count" | bc -l 2>/dev/null)" = "1" ]; then
-        # A new blacklist entry appeared — verify it is NOT the legit-client IP.
+        # A new blacklist entry appeared - verify it is NOT the legit-client IP.
         local body
         body="$(api_get /api/v1/ips/blacklist 2>/dev/null || echo '[]')"
         local hit
@@ -155,7 +155,7 @@ IDS_ALERTS_LABEL='{component="ids"'
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite - MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

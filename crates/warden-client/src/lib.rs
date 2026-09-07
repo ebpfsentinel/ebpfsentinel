@@ -10,7 +10,7 @@
 //! [`Hello`](ebpfsentinel_warden_proto::Command::Hello) handshake once, then issues
 //! one [`Command`] per call and reads back its [`Response`]. The control path
 //! (conntrack reads/teardown, route programming, gratuitous ARP) is rare, so a
-//! simple synchronous request/response loop over the raw stream is sufficient —
+//! simple synchronous request/response loop over the raw stream is sufficient -
 //! the hot event path never crosses this client.
 //!
 //! The optional `fd-pass` feature adds [`WardenClient::pcap_open`], which receives
@@ -122,7 +122,7 @@ impl WardenClient {
         self.expect_ok(&Command::ConntrackFlush, "ConntrackFlush")
     }
 
-    /// Add (idempotent `replace`) a route — multi-WAN gateway programming.
+    /// Add (idempotent `replace`) a route - multi-WAN gateway programming.
     pub fn route_add(&mut self, route: RouteSpec) -> io::Result<()> {
         self.expect_ok(&Command::RouteAdd { route }, "RouteAdd")
     }
@@ -211,9 +211,9 @@ fn is_connection_lost(err: &io::Error) -> bool {
 /// A [`WardenClient`] that survives the warden restarting underneath it.
 ///
 /// The warden is expected to be supervised (native sidecar / systemd) and may
-/// bounce independently of the agent. The hot event path is unaffected — the
+/// bounce independently of the agent. The hot event path is unaffected - the
 /// agent holds the ring-buffer fds directly and the pinned kernel objects outlive
-/// the warden — but every control call crosses the socket, so a bounce breaks the
+/// the warden - but every control call crosses the socket, so a bounce breaks the
 /// connection. This wrapper reconnects lazily and, on a connection-loss error,
 /// drops the dead client, re-handshakes, and retries the call exactly once. A
 /// warden that is still down surfaces a clear `io::Error` rather than hanging.
@@ -326,7 +326,7 @@ impl ReconnectingClient {
     }
 }
 
-/// `SCM_RIGHTS` fd receive — the sole `unsafe`/`libc` in this crate, compiled only
+/// `SCM_RIGHTS` fd receive - the sole `unsafe`/`libc` in this crate, compiled only
 /// under the `fd-pass` feature.
 #[cfg(feature = "fd-pass")]
 mod fd_pass {
@@ -336,7 +336,7 @@ mod fd_pass {
     use std::os::unix::net::UnixStream;
     use std::ptr;
 
-    /// Send exactly one fd alongside a single sentinel byte — the wire shape the
+    /// Send exactly one fd alongside a single sentinel byte - the wire shape the
     /// warden expects for an inbound fd (mirrors its `Delegate` fs-fd receive).
     pub fn send_one_fd(sock: RawFd, fd: RawFd) -> io::Result<()> {
         let mut byte = [0u8; 1];
@@ -446,7 +446,7 @@ mod fd_pass_tests {
     use std::os::unix::net::UnixStream;
     use std::ptr;
 
-    /// Send one fd alongside a single sentinel byte — the warden's wire shape.
+    /// Send one fd alongside a single sentinel byte - the warden's wire shape.
     unsafe fn send_one_fd(sock: RawFd, fd: RawFd) -> bool {
         let mut byte = [0u8; 1];
         let mut iov = libc::iovec {
@@ -486,7 +486,7 @@ mod fd_pass_tests {
         let received: OwnedFd = recv_one_fd(&receiver).expect("recv fd");
 
         // Drop our copy of the original read end; the received fd must still read
-        // bytes written to the write end — proving it is the same pipe.
+        // bytes written to the write end - proving it is the same pipe.
         unsafe { libc::close(read_fd) };
         let mut writer = unsafe { std::fs::File::from_raw_fd(write_fd) };
         writer.write_all(b"hi").unwrap();

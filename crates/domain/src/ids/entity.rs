@@ -163,7 +163,7 @@ pub struct IdsRule {
     pub protocol: Protocol,
     pub dst_port: Option<u16>,
     /// Optional source-port match. Fires on packets whose source port
-    /// equals this value — used to detect the *reply* leg of a flow (e.g.
+    /// equals this value - used to detect the *reply* leg of a flow (e.g.
     /// a response from a server port) on the TC ingress path, where only
     /// the reply, not the request, traverses the inspected hook.
     #[serde(default)]
@@ -241,7 +241,7 @@ impl IdsRule {
         }
     }
 
-    /// Convert to the eBPF map keys for the `IDS_PATTERNS` `HashMap` — one
+    /// Convert to the eBPF map keys for the `IDS_PATTERNS` `HashMap` - one
     /// per protocol the rule covers. Empty when `dst_port` is not set:
     /// wildcard-port rules cannot be represented in an exact-match
     /// `HashMap`, and the classifier is the only source of IDS events, so

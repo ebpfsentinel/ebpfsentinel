@@ -42,7 +42,7 @@ use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 // Network constants and header structs imported from ebpf_helpers.
 
 // NOTE: bpf_skb_change_proto (v4.8) enables IPv4↔IPv6 protocol translation
-// (NAT64/NAT46). Not currently used — our NAT operates within the same
+// (NAT64/NAT46). Not currently used - our NAT operates within the same
 // address family. Available for future cross-AF NAT implementation.
 
 /// Offset of src_addr within Ipv4Hdr (standard IP header).
@@ -80,7 +80,7 @@ static NAT_DNAT_RULE_COUNT_V6: Array<u32, 1> = Array::new();
 #[btf_map]
 static NAT_HASH_DNAT: HashMap<NatHashKeyExact, NatHashValue, { MAX_NAT_HASH_EXACT as usize }> = HashMap::new();
 
-// CT_TABLE_V4/V6 shadow maps removed — kernel netfilter is the
+// CT_TABLE_V4/V6 shadow maps removed - kernel netfilter is the
 // authoritative CT source. NAT info delegated via bpf_ct_set_nat_info
 // (e30-5). Cached NAT fast-path removed; hash-exact + rule scan remain.
 
@@ -468,7 +468,7 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         return Ok(TC_ACT_OK);
     }
 
-    // Fast-path: exact-match DNAT HashMap lookup — O(1).
+    // Fast-path: exact-match DNAT HashMap lookup - O(1).
     let hash_key = NatHashKeyExact {
         dst_ip,
         dst_port,
@@ -511,7 +511,7 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
 
     // Read IPsec xfrm interface metadata from the incoming packet.
     // Non-zero xfrm_if_id means the packet arrived through an xfrmi
-    // device — NAT rules with NAT_MATCH_XFRM can match on the tunnel.
+    // device - NAT rules with NAT_MATCH_XFRM can match on the tunnel.
     let xfrm_if_id = unsafe { skb_get_xfrm_info(ctx.skb.skb as *mut _) }
         .map(|info| info.if_id)
         .unwrap_or(0);
@@ -554,7 +554,7 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         }
 
         // NAT info delegated to kernel CT via kfunc_delegate_nat_v4
-        // below — no shadow write needed.
+        // below - no shadow write needed.
 
         increment_metric(NAT_METRIC_DNAT_APPLIED);
 

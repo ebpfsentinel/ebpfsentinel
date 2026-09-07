@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 52-hot-reload-under-load.bats — SIGHUP map-swap safety under sustained load.
+# 52-hot-reload-under-load.bats - SIGHUP map-swap safety under sustained load.
 #
 # Drives a sustained HTTP + TCP background workload while flipping firewall
 # rules in/out via SIGHUP every 5 seconds. The suite asserts:
@@ -13,7 +13,7 @@
 #   * Alert list shows no duplicate (id) entries from any concurrent firings
 #
 # Load generators are best-effort: wrk drives HTTP, iperf3 drives TCP. When a
-# generator is missing the test still runs but with reduced traffic — the
+# generator is missing the test still runs but with reduced traffic - the
 # correctness assertions above remain valid.
 
 load '../lib/helpers'
@@ -35,7 +35,7 @@ setup_file() {
     destroy_test_netns 2>/dev/null || true
 
     # prepare_ebpf_config points the agent at the netns veth, so the
-    # namespace has to exist before the agent starts — otherwise every
+    # namespace has to exist before the agent starts - otherwise every
     # program fails to load with "resolve ifindex".
     create_test_netns
 
@@ -139,7 +139,7 @@ PY
     fi
 }
 
-# _have_http_loadgen — echo the strongest real HTTP load generator present
+# _have_http_loadgen - echo the strongest real HTTP load generator present
 # (vegeta > k6 > wrk), or empty if only the curl fallback is available.
 _have_http_loadgen() {
     local g
@@ -191,7 +191,7 @@ K6
     echo "$!"
 }
 
-# _http_loadgen_requests <gen> — parse the request count a finished
+# _http_loadgen_requests <gen> - parse the request count a finished
 # generator reported into stdout (0 if unparseable).
 _http_loadgen_requests() {
     case "$1" in
@@ -274,7 +274,7 @@ _start_tcp_load() {
     local pid_after
     pid_after="$(_agent_pid_local)"
     [ "${pid_after}" = "${pid_before}" ] || {
-        echo "agent PID changed from ${pid_before} to ${pid_after} — likely crash + restart" >&2
+        echo "agent PID changed from ${pid_before} to ${pid_after} - likely crash + restart" >&2
         return 1
     }
 
@@ -286,7 +286,7 @@ _start_tcp_load() {
         return 1
     fi
 
-    # 3. FD drift bounded. Tolerate up to 25% growth or +20 raw — covers
+    # 3. FD drift bounded. Tolerate up to 25% growth or +20 raw - covers
     #    transient socket churn from the load generators without masking
     #    a real leak (which would balloon multiples-of).
     local fd_after
@@ -341,7 +341,7 @@ _start_tcp_load() {
         | jq -r '(.alerts // []) | map(.id // .alert_id // "") | unique | length' 2>/dev/null)" \
             || unique=0
     if [ "${total:-0}" -lt 1 ]; then
-        soft_skip "no alerts emitted during reload cycle — duplication check N/A"
+        soft_skip "no alerts emitted during reload cycle - duplication check N/A"
     fi
     [ "${total}" = "${unique}" ] || {
         echo "duplicate alert ids observed: ${total} entries, ${unique} unique" >&2

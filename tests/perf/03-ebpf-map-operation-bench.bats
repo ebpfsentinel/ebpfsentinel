@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 03-ebpf-map-operation-bench.bats — eBPF map operation benchmarks at scale
+# 03-ebpf-map-operation-bench.bats - eBPF map operation benchmarks at scale
 # Requires: root, kernel >= 6.9, bpftool, jq
 #
 # Measures bulk REST API operation latencies for eBPF-backed domains:
@@ -8,8 +8,8 @@
 #   - Ratelimit policy add (100 / 1K)
 #   - LB backend update (10 / 100)
 #   - DNS blocklist sync (1K / 10K)
-#   - IPS blacklist injection (100 / 1K)   — in-kernel blocklist write path
-#   - NAT NPTv6 rule add (10 / 100)        — stateless prefix-map write path
+#   - IPS blacklist injection (100 / 1K)   - in-kernel blocklist write path
+#   - NAT NPTv6 rule add (10 / 100)        - stateless prefix-map write path
 #
 # Outputs JSON report to /tmp/ebpfsentinel-map-ops-latest.json
 

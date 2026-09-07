@@ -66,7 +66,7 @@ pub struct ThresholdResponse {
 
 // ── Handlers ────────────────────────────────────────────────────────
 
-/// `GET /api/v1/ids/status` — IDS service status.
+/// `GET /api/v1/ids/status` - IDS service status.
 #[utoipa::path(
     get, path = "/api/v1/ids/status",
     tag = "IDS",
@@ -96,7 +96,7 @@ pub async fn ids_status(
     }))
 }
 
-/// `GET /api/v1/ids/rules` — list all IDS rules.
+/// `GET /api/v1/ids/rules` - list all IDS rules.
 #[utoipa::path(
     get, path = "/api/v1/ids/rules",
     tag = "IDS",

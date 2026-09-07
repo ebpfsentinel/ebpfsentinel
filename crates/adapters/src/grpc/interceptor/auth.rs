@@ -20,7 +20,7 @@ use tower::{Layer, Service};
 /// per request lets a flood of bogus-`kid` tokens starve the runtime.
 ///
 /// Extraction order (HTTP-middleware parity):
-/// 1. `authorization: Bearer <token>` — must look like a JWT (3 dot parts)
+/// 1. `authorization: Bearer <token>` - must look like a JWT (3 dot parts)
 /// 2. `x-api-key: <key>`
 ///
 /// Health and reflection services must NOT be wrapped with this layer.

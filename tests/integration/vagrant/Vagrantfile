@@ -52,7 +52,7 @@ VAGRANT_3VM = %w[1 true yes on].include?((ENV["VAGRANT_3VM"] || "").downcase)
 Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 
   # ============================================================
-  # Agent VM — primary, runs the eBPF security agent
+  # Agent VM - primary, runs the eBPF security agent
   # ============================================================
   config.vm.define "agent", primary: true do |agent|
     agent.vm.box = "bento/ubuntu-24.04"
@@ -128,10 +128,10 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
       # this VM: dnsperf (19 DNS load), t50 (22 multi-proto flood), swaks/lftp/
       # smbclient (56 L7 SMTP/FTP/SMB clients), ncrack/sshpass (59 SSH brute).
       # Best-effort: not every one is in every mirror, so a miss must not fail
-      # the batch — the matching test env-skips instead of masking.
+      # the batch - the matching test env-skips instead of masking.
       for optpkg in dnsperf t50 swaks lftp smbclient ncrack sshpass; do
         apt-get install -y --no-install-recommends "$optpkg" \
-          || echo "  (optional tool '$optpkg' unavailable in repo — its scenario test will skip)"
+          || echo "  (optional tool '$optpkg' unavailable in repo - its scenario test will skip)"
       done
 
       # Install bpftool if available
@@ -198,7 +198,7 @@ LIMITS
       set -euxo pipefail
 
       cat > /etc/sysctl.d/99-network-perf.conf <<SYSCTL
-# TCP buffer sizes (min, default, max) — 128 MB max
+# TCP buffer sizes (min, default, max) - 128 MB max
 net.core.rmem_max=134217728
 net.core.wmem_max=134217728
 net.ipv4.tcp_rmem=4096 87380 134217728
@@ -215,7 +215,7 @@ SYSCTL
 
       # MTU 1500 on the transit interface. vmxnet3 rejects native XDP when
       # MTU > ~3000 ("MTU 9000 too large for XDP"), and the kfunc XDP datapath
-      # (firewall/reject/ratelimit/LB) requires native attach — so jumbo
+      # (firewall/reject/ratelimit/LB) requires native attach - so jumbo
       # frames and native XDP are mutually exclusive here. 1500 keeps the
       # XDP datapath suites (46/47/48/51) working. Per-driver max-MTU matrix:
       #   https://docs.ebpf.io/linux/program-type/BPF_PROG_TYPE_XDP/#max-mtu
@@ -246,7 +246,7 @@ NETPLAN
     # unprivileged user namespaces restricted by AppArmor
     # (kernel.apparmor_restrict_unprivileged_userns=1), so on a fresh box the
     # launcher cannot create its userns / delegated bpffs and the agent falls
-    # back to "API-only mode (no eBPF)" — every datapath suite then sees
+    # back to "API-only mode (no eBPF)" - every datapath suite then sees
     # ebpf_loaded=false. Relax the restriction persistently and make sure
     # /sys/fs/bpf is a bpffs mount so the launcher has somewhere to delegate.
     # ----------------------------------------------------------
@@ -296,8 +296,8 @@ SYSCTL
     # ----------------------------------------------------------
     # Provisioner: kubernetes-tools (kubectl + minikube)
     # Installs the binaries the 10-kubernetes suite needs. minikube runs
-    # with the docker driver (no nested VM), and conntrack — required by the
-    # kube-proxy/kubelet on the node — is part of the base-packages set.
+    # with the docker driver (no nested VM), and conntrack - required by the
+    # kube-proxy/kubelet on the node - is part of the base-packages set.
     # ----------------------------------------------------------
     agent.vm.provision "shell", name: "kubernetes-tools", inline: <<-SHELL
       set -euxo pipefail
@@ -406,7 +406,7 @@ NETPLAN
         # between the client (192.168.56.0/24) and backend (192.168.57.0/24)
         # subnets. Rules added once at provision time are lost on reboot, so
         # install a boot-time oneshot (ordered after docker) that re-inserts
-        # idempotent ACCEPT rules into DOCKER-USER — the Docker-sanctioned hook
+        # idempotent ACCEPT rules into DOCKER-USER - the Docker-sanctioned hook
         # for user rules.
         cat > /usr/local/sbin/ebpf-transit-forward.sh <<'FWD'
 #!/usr/bin/env bash
@@ -427,7 +427,7 @@ if iptables -L DOCKER-USER -n >/dev/null 2>&1; then
   add_rule -s "$CLIENT_NET"  -d "$BACKEND_NET" -j ACCEPT
   add_rule -s "$BACKEND_NET" -d "$CLIENT_NET"  -j ACCEPT
 else
-  # No Docker chain (docker not installed/running) — fall back to the main
+  # No Docker chain (docker not installed/running) - fall back to the main
   # FORWARD chain so plain kernel forwarding still works.
   iptables -C FORWARD -s "$CLIENT_NET"  -d "$BACKEND_NET" -j ACCEPT 2>/dev/null || iptables -I FORWARD -s "$CLIENT_NET"  -d "$BACKEND_NET" -j ACCEPT
   iptables -C FORWARD -s "$BACKEND_NET" -d "$CLIENT_NET"  -j ACCEPT 2>/dev/null || iptables -I FORWARD -s "$BACKEND_NET" -d "$CLIENT_NET"  -j ACCEPT
@@ -466,7 +466,7 @@ UNIT
   end
 
   # ============================================================
-  # Attacker VM — runs attack and test tools against the agent
+  # Attacker VM - runs attack and test tools against the agent
   # ============================================================
   config.vm.define "attacker" do |attacker|
     attacker.vm.box = "bento/ubuntu-24.04"
@@ -526,7 +526,7 @@ UNIT
       # best-effort: not in every mirror, so a miss must not fail the batch.
       for optpkg in dnsperf t50; do
         apt-get install -y --no-install-recommends "$optpkg" \
-          || echo "  (optional tool '$optpkg' unavailable in repo — its load test will skip)"
+          || echo "  (optional tool '$optpkg' unavailable in repo - its load test will skip)"
       done
 
       # pktgen kernel module for suite 42 (≥1 Mpps generation from the NIC).
@@ -544,7 +544,7 @@ UNIT
       chmod -R a+rx /opt/scapy-venv
 
       # Install bats. Prefer the distro package (Ubuntu 24.04 ships bats 1.10
-      # in universe) — the from-source clone kept failing on transient NAT DNS
+      # in universe) - the from-source clone kept failing on transient NAT DNS
       # hiccups and left the attacker without bats, which makes every 2-VM suite
       # die with "bats: command not found". Fall back to the source build only
       # if apt has no candidate.
@@ -575,7 +575,7 @@ UNIT
     # Provisioner: kernel-hwe
     #
     # bats runs on this VM, so its kernel gates the require_kernel checks
-    # of every eBPF suite, and suite 61 starts a local agent here — and the
+    # of every eBPF suite, and suite 61 starts a local agent here - and the
     # agent hard-refuses to start below 6.9. The bento/ubuntu-24.04 box
     # ships 6.8, so without this the kernel-gated suites all skip and the
     # PQ-handshake suite's setup_file fails. Mirror the agent VM: install
@@ -640,7 +640,7 @@ NETPLAN
         # agent so attack traffic traverses the agent's eBPF datapath instead
         # of short-circuiting over the shared NAT segment. Persist via netplan
         # (networkd-dispatcher drop-ins only fire on routable transitions and
-        # were unreliable — the route silently reverted to the NAT path).
+        # were unreliable - the route silently reverted to the NAT path).
         ip route replace 192.168.57.0/24 via 192.168.56.10 dev eth1 || true
 
         cat > /etc/netplan/99-3vm-route.yaml <<NETPLAN
@@ -703,7 +703,7 @@ NETPLAN
   end
 
   # ============================================================
-  # Backend VM — only created in 3-VM transit mode.
+  # Backend VM - only created in 3-VM transit mode.
   # ============================================================
   if VAGRANT_3VM
     config.vm.define "backend" do |backend|

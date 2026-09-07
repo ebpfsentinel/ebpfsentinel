@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# reject_helpers.bash — Wire-level assertions for the xdp-firewall-reject
+# reject_helpers.bash - Wire-level assertions for the xdp-firewall-reject
 # tail-call program. Captures inbound RST / ICMP-Unreachable replies on
 # the attacker VM and validates them with tcpdump + tshark.
 #
 # Public entrypoints:
-#   require_reject_tools                       — skip if tcpdump/tshark/ncat missing
-#   reject_start_capture <bpf-filter>          — start tcpdump on attacker, echo pcap path
-#   reject_stop_capture <pcap-path>            — stop tcpdump, return local pcap path
-#   reject_count_rst <pcap> [src_ip]           — count RST packets sourced from src_ip
-#   reject_count_icmp_unreach <pcap> [src_ip]  — count ICMP type 3 code 3 from src_ip
-#   reject_assert_checksums_valid <pcap>       — tshark -V over pcap, no checksum errors
+#   require_reject_tools                       - skip if tcpdump/tshark/ncat missing
+#   reject_start_capture <bpf-filter>          - start tcpdump on attacker, echo pcap path
+#   reject_stop_capture <pcap-path>            - stop tcpdump, return local pcap path
+#   reject_count_rst <pcap> [src_ip]           - count RST packets sourced from src_ip
+#   reject_count_icmp_unreach <pcap> [src_ip]  - count ICMP type 3 code 3 from src_ip
+#   reject_assert_checksums_valid <pcap>       - tshark -V over pcap, no checksum errors
 #   reject_first_rst_swapped <pcap> <orig_src> <orig_dst> <orig_dport>
-#       — verify the first RST has src/dst swapped vs the original SYN
-#   reject_tcp_connect_refused <host> <port>   — TCP connect, succeed iff ECONNREFUSED
+#       - verify the first RST has src/dst swapped vs the original SYN
+#   reject_tcp_connect_refused <host> <port>   - TCP connect, succeed iff ECONNREFUSED
 
 REJECT_TOOL_PORT_TCP="${REJECT_TOOL_PORT_TCP:-8081}"
 REJECT_TOOL_PORT_UDP="${REJECT_TOOL_PORT_UDP:-9999}"
@@ -44,7 +44,7 @@ reject_start_capture() {
     # Capture tcpdump's startup banner so we can block until it is actually
     # listening. A fixed `sleep` races the trigger on virtual NICs: the kernel
     # receives the forged RST (ncat reports "refused") but the capture isn't
-    # live yet, so the pcap shows zero RSTs — a false negative.
+    # live yet, so the pcap shows zero RSTs - a false negative.
     sudo -n nohup tcpdump -n -U -w "$pcap" -i "$iface" "$bpf" \
         >/dev/null 2>"$readyfile" &
     echo $! > "$pidfile"
@@ -71,7 +71,7 @@ reject_stop_capture() {
 
     # Drain the kernel capture ring BEFORE signalling tcpdump. On SIGTERM
     # tcpdump flushes only the frames its userspace read loop has already
-    # pulled off the AF_PACKET ring — it does NOT drain entries still queued
+    # pulled off the AF_PACKET ring - it does NOT drain entries still queued
     # in the ring. On virtual NICs (vmxnet3) that userspace read lags the
     # kernel by a beat, so a forged reply that lands microseconds after the
     # trigger can still be sitting unread in the ring when the caller stops

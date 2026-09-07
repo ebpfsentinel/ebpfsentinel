@@ -128,7 +128,7 @@ fn get_dns_services(
 
 // ── Handlers ────────────────────────────────────────────────────────
 
-/// `GET /api/v1/dns/status` — DNS intelligence subsystem status.
+/// `GET /api/v1/dns/status` - DNS intelligence subsystem status.
 #[utoipa::path(
     get, path = "/api/v1/dns/status",
     tag = "DNS Intelligence",
@@ -157,7 +157,7 @@ pub async fn dns_status(State(state): State<Arc<AppState>>) -> Json<DnsStatusRes
     }
 }
 
-/// `GET /api/v1/dns/cache` — list DNS cache entries.
+/// `GET /api/v1/dns/cache` - list DNS cache entries.
 #[utoipa::path(
     get, path = "/api/v1/dns/cache",
     tag = "DNS Intelligence",
@@ -244,7 +244,7 @@ pub async fn list_dns_cache(
     }))
 }
 
-/// `GET /api/v1/dns/stats` — DNS cache and blocklist statistics.
+/// `GET /api/v1/dns/stats` - DNS cache and blocklist statistics.
 #[utoipa::path(
     get, path = "/api/v1/dns/stats",
     tag = "DNS Intelligence",
@@ -284,7 +284,7 @@ pub async fn dns_stats(State(state): State<Arc<AppState>>) -> Result<impl IntoRe
     }))
 }
 
-/// `GET /api/v1/dns/blocklist` — list loaded blocklist rules.
+/// `GET /api/v1/dns/blocklist` - list loaded blocklist rules.
 #[utoipa::path(
     get, path = "/api/v1/dns/blocklist",
     tag = "DNS Intelligence",
@@ -316,7 +316,7 @@ pub async fn list_dns_blocklist(
     Ok(Json(rules))
 }
 
-/// `DELETE /api/v1/dns/cache` — flush the DNS cache.
+/// `DELETE /api/v1/dns/cache` - flush the DNS cache.
 #[utoipa::path(
     delete, path = "/api/v1/dns/cache",
     tag = "DNS Intelligence",

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-in-2vm.sh — Run integration tests using the 2-VM topology
+# run-in-2vm.sh - Run integration tests using the 2-VM topology
 #
 # Boots both Vagrant VMs (agent + attacker), then runs BATS suites
 # on the attacker VM which sends traffic to the agent VM over the

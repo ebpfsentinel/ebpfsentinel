@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Coverage audit gate — enumerates the agent's observable surface
+# Coverage audit gate - enumerates the agent's observable surface
 # (eBPF programs, CLI subcommands, domain modules) and verifies that
 # every entry has a row in tests/integration/coverage-matrix.yaml.
 #
 # Modes:
-#   audit-coverage.sh             check only — exit 1 on any missing row
+#   audit-coverage.sh             check only - exit 1 on any missing row
 #   audit-coverage.sh --render    update the fenced coverage block in
 #                                 tests/integration/README.md in-place
 #   audit-coverage.sh --check-render
@@ -187,7 +187,7 @@ extra_profile_for_suite = sorted(suite_profile_keys - known_suites)
 def banner(t: str) -> None:
     print(f"\n== {t} ==")
 
-print("Coverage audit — tests/integration/coverage-matrix.yaml")
+print("Coverage audit - tests/integration/coverage-matrix.yaml")
 print(f"  eBPF programs on disk : {len(disk_ebpf)}")
 print(f"  CLI subcommands       : {len(disk_cli)}")
 print(f"  Domain modules        : {len(disk_domains)} (skipped: {sorted(skip_domains)})")
@@ -238,16 +238,16 @@ def render_table(kind: str, header: str, disk: list[str]) -> str:
     for feat in sorted(disk):
         row = bucket.get(feat)
         if row is None:
-            out.append(f"| `{feat}` | _MISSING_ | — | — | — | — |")
+            out.append(f"| `{feat}` | _MISSING_ | - | - | - | - |")
             continue
         suites = row.get("suites") or []
-        suites_s = ", ".join(suites) if suites else "—"
+        suites_s = ", ".join(suites) if suites else "-"
         out.append(
             f"| `{feat}` "
             f"| {suites_s} "
-            f"| {row.get('topology', '—')} "
-            f"| {row.get('kernel_min', '—')} "
-            f"| {row.get('profile', '—')} "
+            f"| {row.get('topology', '-')} "
+            f"| {row.get('kernel_min', '-')} "
+            f"| {row.get('profile', '-')} "
             f"| {row.get('notes', '')} |"
         )
     out.append("")
@@ -306,7 +306,7 @@ elif mode == "--check-render":
         sys.exit(2)
     if new_text != text:
         sys.stderr.write(
-            "README coverage block is stale — run "
+            "README coverage block is stale - run "
             "`tests/integration/scripts/audit-coverage.sh --render` and commit.\n"
         )
         failed = True

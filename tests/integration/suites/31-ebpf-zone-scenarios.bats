@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 31-ebpf-zone-scenarios.bats — Zone management eBPF scenario tests
+# 31-ebpf-zone-scenarios.bats - Zone management eBPF scenario tests
 # Requires: root, kernel >= 6.9, bpftool
 
 load '../lib/helpers'
@@ -119,9 +119,9 @@ teardown_file() {
     echo "$metrics" | grep -qE "ebpfsentinel_zone_interfaces|ebpfsentinel_zone_policies"
 }
 
-# ── Zone CRUD — create and delete ───────────────────────────────
+# ── Zone CRUD - create and delete ───────────────────────────────
 
-@test "Zone CRUD — create and delete" {
+@test "Zone CRUD - create and delete" {
     require_root
 
     # Create a new zone
@@ -227,13 +227,13 @@ teardown_file() {
     local has_default
     has_default="$(echo "$zones" | jq '[.[] | select(.name == "default" or .is_default == true)] | length' 2>/dev/null)" || has_default=0
 
-    # At minimum, zones are configured — default zone may be implicit
+    # At minimum, zones are configured - default zone may be implicit
     [ "${count:-0}" -ge 1 ]
 }
 
-# ── Zone policy CRUD — create and delete ────────────────────────
+# ── Zone policy CRUD - create and delete ────────────────────────
 
-@test "Zone policy CRUD — create and delete" {
+@test "Zone policy CRUD - create and delete" {
     require_root
 
     # Create a new inter-zone policy

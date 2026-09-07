@@ -81,7 +81,7 @@ fn handshake_then_conntrack() {
     );
 
     // ConntrackDump is wired: a Conntrack reply (table may be empty when the proc
-    // file is unreadable as a test user) — never an error.
+    // file is unreadable as a test user) - never an error.
     write_frame(&mut s, &Command::ConntrackDump).unwrap();
     let resp: Response = read_frame(&mut s).unwrap();
     assert!(matches!(resp, Response::Conntrack { .. }), "got {resp:?}");

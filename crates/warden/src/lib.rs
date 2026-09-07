@@ -1,4 +1,4 @@
-//! `ebpfsentinel-warden` — shared privileged primitives for the `warden`
+//! `ebpfsentinel-warden` - shared privileged primitives for the `warden`
 //! control-plane broker and the rootless agent's self-bootstrap trampoline (see
 //! [`userns_bootstrap`]).
 //!
@@ -6,21 +6,21 @@
 //! succeeds against a bpffs whose superblock is owned by a user namespace the
 //! caller is in. In the initial user namespace it returns `EOPNOTSUPP`, so a
 //! token-only agent cannot load eBPF directly under systemd/Docker in the host
-//! user namespace — it must run inside a child user namespace that owns the
+//! user namespace - it must run inside a child user namespace that owns the
 //! delegated bpffs. The agent enters that namespace itself and asks the warden to
 //! apply the `delegate_*` mount options (which need `CAP_SYS_ADMIN` in
 //! `init_user_ns`) over the control socket.
 //!
 //! This library holds the syscall primitives both halves share:
 //!
-//! * [`collect_module_btf_fds`] / [`open_pcap_pool`] / [`prioritize_and_cap_btf`]
-//!   — the warden opens these while privileged (BTF enumeration needs
+//! * [`collect_module_btf_fds`] / [`open_pcap_pool`] / [`prioritize_and_cap_btf`]:
+//!   the warden opens these while privileged (BTF enumeration needs
 //!   `CAP_SYS_ADMIN`, the `AF_PACKET` pool needs `CAP_NET_RAW`) and hands them to
 //!   the agent on `Delegate`, so module kfuncs (`nf_conntrack`, `fou`) resolve and
 //!   packet capture works without those capabilities in the agent.
 //! * [`enter_userns`] / [`fsopen_bpf`] / [`mount_bpffs`] / [`delegate_over_fd`] +
 //!   the `SCM_RIGHTS` helpers ([`send_fd`] / [`recv_fd`] / [`send_msg_fds`] /
-//!   [`recv_msg_fds`]) — the bpffs delegation handshake: the agent `fsopen`s a
+//!   [`recv_msg_fds`]) - the bpffs delegation handshake: the agent `fsopen`s a
 //!   bpffs in its own userns and sends the fs fd to the warden, which applies
 //!   `delegate_*=any` + `FSCONFIG_CMD_CREATE`, then the agent `fsmount`s +
 //!   `move_mount`s it and creates the token.
@@ -28,7 +28,7 @@
 //! The agent stays in the host network namespace, so the host-netns ops it cannot
 //! perform from its user namespace (conntrack teardown, route programming,
 //! gratuitous ARP, packet capture) are brokered by the warden over the same
-//! socket — see [`server`] and [`host_ops`].
+//! socket - see [`server`] and [`host_ops`].
 
 #![allow(unsafe_code)] // Raw mount/bpf/userns syscalls require libc + unsafe.
 #![allow(
@@ -96,7 +96,7 @@ struct BpfAttrInfo {
     info: u64,
 }
 
-/// Subset of `struct bpf_btf_info` — only the fields we read (`name`).
+/// Subset of `struct bpf_btf_info` - only the fields we read (`name`).
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct BpfBtfInfo {
@@ -217,7 +217,7 @@ pub fn open_pcap_pool() -> Vec<RawFd> {
         let fd = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, 0) };
         if fd < 0 {
             // No CAP_NET_RAW (or AF_PACKET unavailable): leave capture
-            // unprovisioned — the agent degrades gracefully.
+            // unprovisioned - the agent degrades gracefully.
             perror("socket(AF_PACKET) for pcap pool");
             break;
         }
@@ -385,7 +385,7 @@ fn fsconfig_string(fs: RawFd, key: &str, value: &str) {
 
 /// Apply `delegate_*=any` + `FSCONFIG_CMD_CREATE` to a bpffs `fs_fd` whose
 /// superblock is owned by a (descendant) user namespace. Requires `CAP_SYS_ADMIN`
-/// in `init_user_ns` — done by the all-in-one parent or the bare-metal `warden
+/// in `init_user_ns` - done by the all-in-one parent or the bare-metal `warden
 /// serve`. Returns `true` on success.
 pub fn delegate_over_fd(fs: RawFd) -> bool {
     fsconfig_string(fs, "delegate_cmds", "any");
@@ -546,7 +546,7 @@ pub fn perror(ctx: &str) {
 
 /// `SCM_RIGHTS` cannot carry more than `SCM_MAX_FD` (253) fds per message.
 const SCM_MAX_FDS: usize = 253;
-/// Modules whose BTF the eBPF programs need (conntrack/fou kfuncs) — kept at the
+/// Modules whose BTF the eBPF programs need (conntrack/fou kfuncs) - kept at the
 /// front of the fd set so a cap never drops them.
 const NEEDED_MODULE_BTF: &[&str] = &["nf_conntrack", "fou"];
 
@@ -603,7 +603,7 @@ pub fn prioritize_and_cap_btf(
 /// `bpf_tcp_raw_gen_syncookie`; the kernel only completes a legitimate
 /// client's handshake from the passed cookie-ACK when it always validates
 /// syncookies. Mode 1 engages only on SYN-backlog overflow, which never
-/// happens because XDP absorbs the flood SYNs — so mode 2 is required. The
+/// happens because XDP absorbs the flood SYNs - so mode 2 is required. The
 /// agent cannot set this itself once it is inside the child user namespace,
 /// which lacks host-netns `CAP_NET_ADMIN`.
 pub fn enable_tcp_syncookies() {

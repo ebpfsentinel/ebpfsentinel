@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# constants.bash — Shared constants for integration tests
+# constants.bash - Shared constants for integration tests
 
 # ── Paths ──────────────────────────────────────────────────────────
 # Check installed path first (Docker image extraction), then project build

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 23-ebpf-scrub-scenarios.bats — Packet normalization (tc-scrub) eBPF tests
+# 23-ebpf-scrub-scenarios.bats - Packet normalization (tc-scrub) eBPF tests
 # Requires: root, kernel >= 6.9, bpftool, ping
 #
 # Tests tc-scrub program with:

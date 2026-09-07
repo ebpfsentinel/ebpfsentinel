@@ -1,4 +1,4 @@
-# Tool-coverage action plan — wire every provisioned tool into a real test
+# Tool-coverage action plan - wire every provisioned tool into a real test
 
 Goal: every tool the provisioners install is exercised by at least one bats
 assertion against the agent data plane, and every tool a suite needs is
@@ -7,7 +7,7 @@ provisioned. No installed-but-unused tools; no gated-on-a-missing-tool suites.
 Lane legend: local = bats netns on agent VM · 2VM = attacker NIC → agent ·
 3VM = transit · k8s = minikube · perf = 2VM real-NIC.
 
-## WS1 — provisioning gaps (make gated tools present)
+## WS1 - provisioning gaps (make gated tools present)
 
 | # | Fix | File | Check |
 |---|---|---|---|
@@ -17,7 +17,7 @@ Lane legend: local = bats netns on agent VM · 2VM = attacker NIC → agent ·
 | 1.4 | kubectl/minikube pin + retry | Vagrantfile | `kubectl version --client` |
 | 1.5 | extend attacker_tools_check to Go + every tk tool | attacker_tools_check.sh | 0 missing |
 
-## WS2 — wire every dead-provisioned tool to a real assertion
+## WS2 - wire every dead-provisioned tool to a real assertion
 
 | Tool | Target suite | Assertion |
 |---|---|---|
@@ -26,7 +26,7 @@ Lane legend: local = bats netns on agent VM · 2VM = attacker NIC → agent ·
 | smbclient | 56 | real SMB1 negotiate → l7 deny (l7-smb-smb1-deny) |
 | vegeta | 52 | HTTP load drives hot-reload-under-load (alt to curl burst) |
 | k6 | 52 | scripted HTTP load sustains during rule swap |
-| wrk | 52 | already fallback — assert it drives when present |
+| wrk | 52 | already fallback - assert it drives when present |
 | nuclei | 12 / 29 | HTTP attack templates trip IDS/L7 patterns |
 | cloudflared | 45 | DoH client → DoH detection alert |
 | dnscrypt-proxy | 45 | DoT/DoH client → encrypted-DNS detection |
@@ -39,13 +39,13 @@ Lane legend: local = bats netns on agent VM · 2VM = attacker NIC → agent ·
 | stress-ng | perf/01 | CPU-noise sensitivity guard on baseline spread |
 | mitmproxy | 60 | TLS MITM → DLP alert on intercepted flow |
 
-## WS3 — harden defensive skips now that tools are guaranteed
+## WS3 - harden defensive skips now that tools are guaranteed
 
 Convert `env_skip "<tool> not installed/available"` for provisioned tools to
 FAIL under EBPFSENTINEL_STRICT_SKIPS=1 (reclassify masking, or require_tool
 hard). Register new reasons; audit-skips.sh RC=0.
 
-## WS4 — live validation matrix (needs booted VMs)
+## WS4 - live validation matrix (needs booted VMs)
 
 Run each lane with EBPFSENTINEL_STRICT_SKIPS=1; exit criterion = every suite
 PASS or legitimately env-skipped (capability truly absent from the lane), zero

@@ -1,4 +1,4 @@
-# config-ebpf-geoip.yaml — GeoIP enrichment + country firewall scenario test config
+# config-ebpf-geoip.yaml - GeoIP enrichment + country firewall scenario test config
 # Note: GeoIP tests skip gracefully if the mmdb file is not present.
 
 agent:

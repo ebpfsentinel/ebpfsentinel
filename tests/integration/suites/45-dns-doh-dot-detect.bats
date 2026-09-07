@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 45-dns-doh-dot-detect.bats — DoH/DoT detection across the 3-VM transit.
+# 45-dns-doh-dot-detect.bats - DoH/DoT detection across the 3-VM transit.
 #
 # Drives TLS handshakes from the attacker VM to the backend VM through
 # the agent's transit datapath and asserts:
@@ -45,7 +45,7 @@ setup_file() {
 
     # Install BOTH transit routes: the client (attacker) must reach the
     # backend subnet via the agent's eth1 so its ClientHello crosses the
-    # eBPF datapath on the forward path — without this the probe egresses
+    # eBPF datapath on the forward path - without this the probe egresses
     # via the host NAT and the agent never observes the SNI. The backend
     # route is the symmetric return path.
     route_via_agent client >/dev/null 2>&1 || true
@@ -112,7 +112,7 @@ teardown_file() {
 
     # Verify the backend's DoT listener is reachable; if dot-backend.service
     # didn't come up (older provisioner, missing systemd unit) the
-    # agent still has nothing to observe — skip rather than fail.
+    # agent still has nothing to observe - skip rather than fail.
     if ! _attacker_ssh \
             "nc -z -w2 ${BACKEND_VM_IP:-192.168.57.30} 853"; then
         soft_skip "backend DoT listener (:853) unreachable; dot-backend.service not running"
@@ -140,7 +140,7 @@ teardown_file() {
 
     # Send a handful of UDP/53 packets through the agent transit. The
     # backend has no resolver bound on :53 so each query yields ICMP
-    # port-unreach, but the packet still crosses the agent — which is
+    # port-unreach, but the packet still crosses the agent - which is
     # what we want to assert against.
     _attacker_ssh \
         "for i in 1 2 3; do (echo 'q'; sleep 0.2) | nc -u -w1 ${BACKEND_VM_IP:-192.168.57.30} 53 >/dev/null 2>&1 || true; done"
@@ -218,7 +218,7 @@ teardown_file() {
     body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
     count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
     if [ "${count:-0}" -lt 1 ]; then
-        soft_skip "no alerts emitted by this suite — MITRE assertion not applicable here"
+        soft_skip "no alerts emitted by this suite - MITRE assertion not applicable here"
     fi
     assert_alert_has_any_mitre_technique 15
 }

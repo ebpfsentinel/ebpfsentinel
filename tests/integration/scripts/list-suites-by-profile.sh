@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# list-suites-by-profile.sh — Resolve coverage-matrix.yaml per-feature
+# list-suites-by-profile.sh - Resolve coverage-matrix.yaml per-feature
 # profile tags down to a flat list of bats suite ids per CI profile
 # (pr | nightly | manual). Used by .github/workflows/integration.yml
 # to build the matrix without baking the suite list into the workflow.

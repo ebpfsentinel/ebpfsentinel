@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# slowhttp_helpers.bash — Drive slowhttptest from BATS suites.
+# slowhttp_helpers.bash - Drive slowhttptest from BATS suites.
 #
-# slowhttptest is provisioned on the attacker VM (Story 34.3) via the
+# slowhttptest is provisioned on the attacker VM via the
 # distro package and exposes three attack modes:
-#   -H  Slowloris    — slow GET headers (default)
-#   -B  RUDY         — slow POST body
-#   -X  Slowread     — slow TCP receive window
+#   -H  Slowloris    - slow GET headers (default)
+#   -B  RUDY         - slow POST body
+#   -X  Slowread     - slow TCP receive window
 #
 # Helpers stay declarative: tests call run_slowhttp <mode> [duration]
 # and the helper picks sane defaults for connection count, rate, and
@@ -13,14 +13,14 @@
 # under 30 s.
 #
 # Public entrypoints:
-#   require_slowhttptest     — skip the calling test if not installed
+#   require_slowhttptest     - skip the calling test if not installed
 #   run_slowhttp <mode> [duration] [conns] [rate] [path]
-#                            — foreground attack, returns slowhttptest's
+#                            - foreground attack, returns slowhttptest's
 #                              exit code (captured in SLOWHTTP_LOG)
-#   run_slowhttp_background  — same args, returns immediately, exports
+#   run_slowhttp_background  - same args, returns immediately, exports
 #                              SLOWHTTP_PID for later wait/kill
-#   stop_slowhttp            — best-effort kill of the background run
-#   attacker_ip              — agent-visible source IP for blacklist asserts
+#   stop_slowhttp            - best-effort kill of the background run
+#   attacker_ip              - agent-visible source IP for blacklist asserts
 #
 # Tests MUST assert on agent-side side-effects (metric / alert / IPS),
 # NOT on slowhttptest's exit code: the tool returns non-zero whenever
@@ -43,7 +43,7 @@ require_slowhttptest() {
 }
 
 # _slowhttp_validate_target <ip>
-# Refuse non-RFC1918 targets — guards against accidental public-net flooding.
+# Refuse non-RFC1918 targets - guards against accidental public-net flooding.
 _slowhttp_validate_target() {
     local ip="${1:?usage: _slowhttp_validate_target <ip>}"
     case "$ip" in
@@ -53,7 +53,7 @@ _slowhttp_validate_target() {
             return 0
             ;;
         *)
-            env_skip "slowhttptest target ${ip} is not RFC1918 — refusing to flood"
+            env_skip "slowhttptest target ${ip} is not RFC1918 - refusing to flood"
             ;;
     esac
 }
@@ -170,7 +170,7 @@ stop_slowhttp() {
 
 # slowhttp_legit_request <duration> [path]
 # Open a single connection that streams a request just slow enough to
-# stay *inside* the agent's slow-request timeout — used as a false-
+# stay *inside* the agent's slow-request timeout - used as a false-
 # positive guard. Writes one CRLF every floor(duration/2) seconds.
 #
 # We use curl --limit-rate against a fast-responding path; the body is

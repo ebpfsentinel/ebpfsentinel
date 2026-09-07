@@ -197,7 +197,7 @@ impl AlertStreamService for AlertStreamServiceImpl {
                     Some(Ok(alert_to_event(&alert)))
                 }
                 Err(_) => {
-                    // Lagged — skip missed messages silently
+                    // Lagged - skip missed messages silently
                     None
                 }
             }
