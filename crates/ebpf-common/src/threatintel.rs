@@ -1,9 +1,17 @@
-/// Threat intel action constants — used in `ThreatIntelValue.action`
+/// Threat intel action constants - used in `ThreatIntelValue.action`
+///
+/// The vocabulary is these two values and there is deliberately no third.
+/// A VLAN quarantine action was declared here once and implemented nowhere:
+/// `tc-threatintel` runs on the TC ingress hook, so re-tagging a matched packet
+/// there would move it onto no other segment - the skb is already bound for the
+/// local stack. Isolating a source means redirecting on egress, which is a
+/// different program at a different hook, not a third value in this byte.
+/// The per-feed configuration vocabulary (`default_action`) is `alert` or
+/// `block` and mirrors these two.
 pub const THREATINTEL_ACTION_ALERT: u8 = 0; // Log event, pass packet (TC_ACT_OK)
 pub const THREATINTEL_ACTION_DROP: u8 = 1; // Log event, drop packet (TC_ACT_SHOT)
-pub const THREATINTEL_ACTION_QUARANTINE: u8 = 2; // Re-tag into quarantine VLAN
 
-/// Threat type constants — extensible categorization of IOCs.
+/// Threat type constants - extensible categorization of IOCs.
 pub const THREAT_TYPE_OTHER: u8 = 0;
 pub const THREAT_TYPE_MALWARE: u8 = 1;
 pub const THREAT_TYPE_C2: u8 = 2;
@@ -105,6 +113,15 @@ mod tests {
     fn action_constants() {
         assert_eq!(THREATINTEL_ACTION_ALERT, 0);
         assert_eq!(THREATINTEL_ACTION_DROP, 1);
+    }
+
+    #[test]
+    fn drop_is_the_most_severe_action() {
+        // When a packet matches an IOC on both its source and its destination,
+        // `tc-threatintel` keeps the higher action value. That tie-break is a
+        // severity ordering, so the enforcing action has to be the highest
+        // value in the vocabulary.
+        const _: () = assert!(THREATINTEL_ACTION_DROP > THREATINTEL_ACTION_ALERT);
     }
 
     #[test]
