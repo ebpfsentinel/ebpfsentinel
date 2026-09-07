@@ -16,9 +16,10 @@ use ebpf_common::dns::{
     DNS_METRIC_TOTAL_SEEN, DNS_SMALL_PAYLOAD, DnsEvent, DnsEventBuf, DnsEventSmall,
 };
 use ebpf_common::event::{FLAG_IPV6, FLAG_TCP, FLAG_VLAN};
+use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
-    VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
+    ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
+    ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
 };
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{increment_metric, opaque_usize};
@@ -75,25 +76,14 @@ fn try_tc_dns(ctx: &TcContext) -> Result<i32, ()> {
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
     let mut l3_offset = EthHdr::LEN;
-    let mut vlan_id: u16 = 0;
     let mut flags: u8 = 0;
 
-    // Check for 802.1Q VLAN tag
-    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
-        let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
-        let tci = u16::from_be(unsafe { (*vhdr).tci });
-        vlan_id = tci & 0x0FFF;
-        ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
-        l3_offset += VLAN_HDR_LEN;
+    // 802.1Q / 802.1ad tags. The outer tag is the one carried onward: on a
+    // QinQ frame that is the service provider's tag, which is what a policy
+    // is written against, and the inner customer tag is left in the frame.
+    let (vlan_id, vlan_tagged) = parse_vlan_tags!(ctx, ether_type, l3_offset);
+    if vlan_tagged {
         flags |= FLAG_VLAN;
-
-        // QinQ: parse second VLAN tag if present
-        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
-            let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
-            vlan_id = u16::from_be(unsafe { (*vhdr2).tci }) & 0x0FFF;
-            ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
-            l3_offset += VLAN_HDR_LEN;
-        }
     }
 
     if ether_type == ETH_P_IP {

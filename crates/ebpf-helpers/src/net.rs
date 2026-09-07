@@ -155,3 +155,51 @@ pub fn prefix_to_mask(prefix_len: u8) -> [u32; 4] {
     }
     mask
 }
+
+// ── VLAN tag parsing ────────────────────────────────────────────────
+
+/// Walk up to two stacked VLAN tags, advancing `$ether_type` and
+/// `$l3_offset` onto the encapsulated L3 header.
+///
+/// Expands to `(vlan_id, tagged)`:
+///
+/// - `vlan_id` is the **outer** tag. On a QinQ frame that is the service
+///   provider's S-VLAN, which is what a policy is written against; the
+///   inner customer C-VLAN is walked so the offsets land correctly and is
+///   deliberately not reported, because a `PacketEvent` carries one VLAN
+///   ID and nothing in the datapath strips the inner tag off the frame.
+/// - `tagged` says whether any tag was present, which an untagged frame
+///   and a priority-tagged frame carrying VLAN 0 cannot otherwise be
+///   told apart by.
+///
+/// `$ctx` is the program context and `$ether_type` / `$l3_offset` are
+/// mutable locals the macro assigns through. The caller must have a
+/// `ptr_at` for its own context in scope, and must be in a function
+/// returning `Option` or `Result`, because a truncated tag propagates
+/// with `?`.
+#[macro_export]
+macro_rules! parse_vlan_tags {
+    ($ctx:expr, $ether_type:ident, $l3_offset:ident) => {{
+        let mut vlan_id: u16 = 0;
+        let mut tagged = false;
+
+        if $ether_type == $crate::net::ETH_P_8021Q || $ether_type == $crate::net::ETH_P_8021AD {
+            let vhdr: *const $crate::net::VlanHdr = unsafe { ptr_at($ctx, $l3_offset)? };
+            vlan_id = u16::from_be(unsafe { (*vhdr).tci }) & 0x0FFF;
+            $ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
+            $l3_offset += $crate::net::VLAN_HDR_LEN;
+            tagged = true;
+
+            // QinQ: walk the inner customer tag. Only the EtherType and the
+            // offset advance - the outer service tag stays in `vlan_id`.
+            if $ether_type == $crate::net::ETH_P_8021Q || $ether_type == $crate::net::ETH_P_8021AD
+            {
+                let vhdr2: *const $crate::net::VlanHdr = unsafe { ptr_at($ctx, $l3_offset)? };
+                $ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
+                $l3_offset += $crate::net::VLAN_HDR_LEN;
+            }
+        }
+
+        (vlan_id, tagged)
+    }};
+}

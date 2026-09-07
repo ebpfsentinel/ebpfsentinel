@@ -30,9 +30,10 @@ use ebpf_helpers::increment_metric;
 use ebpf_helpers::kfuncs::{
     BpfCtOpts, CtBuilder, CtTuple, NfInetAddr, NfNatManipType, skb_get_xfrm_info,
 };
+use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_ICMPV6,
-    PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, ipv6_mask_match,
+    ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_ICMPV6,
+    PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4, ipv6_mask_match,
     ones_complement_add, prefix_to_mask, u16_from_be_bytes, u32_from_be_bytes, u32x4_to_bytes,
 };
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
@@ -384,23 +385,11 @@ fn try_nat_ingress(ctx: &TcContext) -> Result<i32, ()> {
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
     let mut l3_offset = EthHdr::LEN;
-    let mut vlan_id: u16 = 0;
 
-    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
-        let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
-        let tci = u16::from_be(unsafe { (*vhdr).tci });
-        vlan_id = tci & 0x0FFF;
-        ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
-        l3_offset += VLAN_HDR_LEN;
-
-        // QinQ: parse second VLAN tag if present
-        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
-            let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
-            vlan_id = u16::from_be(unsafe { (*vhdr2).tci }) & 0x0FFF;
-            ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
-            l3_offset += VLAN_HDR_LEN;
-        }
-    }
+    // 802.1Q / 802.1ad tags. The outer tag is the one carried onward: on a
+    // QinQ frame that is the service provider's tag, which is what a policy
+    // is written against, and the inner customer tag is left in the frame.
+    let (vlan_id, _) = parse_vlan_tags!(ctx, ether_type, l3_offset);
 
     if ether_type == ETH_P_IP {
         process_dnat_v4(ctx, l3_offset, vlan_id)

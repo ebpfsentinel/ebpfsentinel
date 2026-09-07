@@ -22,9 +22,10 @@ use ebpf_common::{
     },
 };
 use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, with_xdp_ct_lookup, xdp_rx_hash, xdp_rx_timestamp};
+use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
-    VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4, u32x4_to_ipv6_bytes,
+    ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
+    ipv6_addr_to_u32x4, u32x4_to_ipv6_bytes,
 };
 use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
 use ebpf_helpers::{
@@ -123,23 +124,11 @@ fn try_xdp_loadbalancer(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void) -> Re
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
     let mut l3_offset = EthHdr::LEN;
-    let mut vlan_id: u16 = 0;
 
-    // Handle 802.1Q VLAN
-    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
-        let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
-        vlan_id = u16::from_be(unsafe { (*vhdr).tci }) & 0x0FFF;
-        ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
-        l3_offset += VLAN_HDR_LEN;
-
-        // QinQ: parse second VLAN tag if present
-        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
-            let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
-            vlan_id = u16::from_be(unsafe { (*vhdr2).tci }) & 0x0FFF;
-            ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
-            l3_offset += VLAN_HDR_LEN;
-        }
-    }
+    // 802.1Q / 802.1ad tags. The outer tag is the one carried onward: on a
+    // QinQ frame that is the service provider's tag, which is what a policy
+    // is written against, and the inner customer tag is left in the frame.
+    let (vlan_id, _) = parse_vlan_tags!(ctx, ether_type, l3_offset);
 
     match ether_type {
         ETH_P_IP => process_v4(ctx, ctx_raw, l3_offset, vlan_id),

@@ -50,9 +50,10 @@ use ebpf_helpers::kfuncs::{
     BpfCtOpts, CtTuple, bpf_xfrm_state_opts, kill_flow_via_xdp_ct, with_xdp_ct_lookup,
     with_xdp_xfrm_state, xdp_frame_size, xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag,
 };
+use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, IcmpHdr, Ipv6Hdr,
-    PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4,
+    ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, IcmpHdr, Ipv6Hdr,
+    PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4,
     u16_from_be_bytes, u32_from_be_bytes,
 };
 use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
@@ -900,25 +901,14 @@ fn try_xdp_firewall(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void) -> Result
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
     let mut l3_offset = EthHdr::LEN;
-    let mut vlan_id: u16 = 0;
     let mut flags: u8 = 0;
 
-    // Check for 802.1Q VLAN tag
-    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
-        let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
-        let tci = u16::from_be(unsafe { (*vhdr).tci });
-        vlan_id = tci & 0x0FFF;
-        ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
-        l3_offset += VLAN_HDR_LEN;
+    // 802.1Q / 802.1ad tags. The outer tag is the one carried onward: on a
+    // QinQ frame that is the service provider's tag, which is what a policy
+    // is written against, and the inner customer tag is left in the frame.
+    let (mut vlan_id, vlan_tagged) = parse_vlan_tags!(ctx, ether_type, l3_offset);
+    if vlan_tagged {
         flags |= FLAG_VLAN;
-
-        // QinQ: parse second VLAN tag if present
-        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
-            let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
-            vlan_id = u16::from_be(unsafe { (*vhdr2).tci }) & 0x0FFF;
-            ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
-            l3_offset += VLAN_HDR_LEN;
-        }
     }
 
     // Hardware VLAN offload: when the NIC strips the 802.1Q tag before
