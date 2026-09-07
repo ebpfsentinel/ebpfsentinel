@@ -30,7 +30,7 @@ use ebpf_common::{
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
 use ebpf_helpers::kfuncs::{
-    BpfCtOpts, CtTuple, kill_flow_via_skb_ct, skb_get_fou_encap, skb_l7_probe,
+    BpfCtOpts, CtTuple, kill_flow_via_skb_ct, skb_get_fou_encap, skb_packet_size,
 };
 use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::net::{
@@ -678,7 +678,7 @@ fn increment_metric(index: u32) {
 /// Both tiers use compile-time constant lengths for `bpf_skb_load_bytes`
 /// (required by the eBPF verifier on kernel 6.1+).
 ///
-/// Uses `SkbDynptr` (kernel 6.4+ kfunc) to query the full packet size
+/// Uses a `bpf_dynptr` (kernel 6.4+ kfunc) to query the full packet size
 /// including fragments without linearization, then falls back to
 /// `ctx.len()` if the dynptr creation fails (should not happen on 6.9+).
 #[inline(always)]
@@ -693,15 +693,12 @@ fn emit_l7_event(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize) {
     // overlay-aware IDS rules in cloud environments.
     let _fou_encap = unsafe { skb_get_fou_encap(ctx.skb.skb as *mut _) };
 
-    // Probe the dynptr for the full packet size and the first 4 bytes
-    // of the L7 payload. This exercises the dynptr from_skb/size/
-    // adjust/slice path in TC context and provides a protocol magic
-    // number for pre-classification (e.g. 0x16030x for TLS, "HTTP" for
-    // HTTP/1.x, 0x505249 for HTTP/2 preface). Falls back to `ctx.len()`
-    // if the dynptr cannot be created (should not happen on 6.9+).
-    let (pkt_len, _l7_magic) = unsafe { skb_l7_probe(ctx.skb.skb as *mut _, l7_offset as u32) }
-        .map(|(total, magic)| (total as usize, magic))
-        .unwrap_or((ctx.len() as usize, 0));
+    // Full packet size including non-linear fragments, which `ctx.len()`
+    // alone does not count. Falls back to `ctx.len()` if the dynptr cannot
+    // be created (should not happen on 6.9+). Protocol classification is
+    // userspace work: the payload below is what it runs on.
+    let pkt_len = unsafe { skb_packet_size(ctx.skb.skb as *mut _) }
+        .map_or(ctx.len() as usize, |total| total as usize);
     let payload_avail = pkt_len.saturating_sub(l7_offset);
 
     if payload_avail <= SMALL_L7_PAYLOAD {

@@ -1403,20 +1403,17 @@ where
 // within one frame - accessed only through `&raw mut` / `&raw const`,
 // never moved - letting only scalars escape.
 
-/// Probe a TC skb's L7 payload without linearising the packet.
+/// Full TC packet size (including non-linear fragments) without
+/// linearising the packet.
 ///
-/// Creates a dynptr over `skb`, then returns the full packet size
-/// (including non-linear fragments) and the 4-byte protocol magic at
-/// `l7_offset` - e.g. `0x1603xx` for TLS, `"HTTP"` for HTTP/1.x, the
-/// HTTP/2 client preface. The magic is `0` when `l7_offset` is past the
-/// end of the packet or the window read fails.
+/// Creates a dynptr over `skb` and returns `bpf_dynptr_size`, which counts
+/// the fragments `__sk_buff::len` alone does not.
 ///
 /// Like [`xdp_frame_size`], the `bpf_dynptr` is a kernel-managed stack
 /// object that must stay pinned in the slot the kfunc wrote it to, so
 /// it is created and consumed entirely within this one frame - accessed
 /// only through `&raw mut` / `&raw const`, never moved - and only the
-/// two scalars escape. This exercises the full TC dynptr path:
-/// `from_skb` → `size` → `adjust` → `slice`.
+/// scalar size escapes.
 ///
 /// Returns `None` when the dynptr cannot be created.
 ///
@@ -1424,7 +1421,7 @@ where
 /// `skb` must be a live `__sk_buff*` owned by the current TC program
 /// invocation.
 #[inline(always)]
-pub unsafe fn skb_l7_probe(skb: *mut core::ffi::c_void, l7_offset: u32) -> Option<(u32, u32)> {
+pub unsafe fn skb_packet_size(skb: *mut core::ffi::c_void) -> Option<u32> {
     let mut inner = BpfDynptr::uninit();
     #[cfg(target_arch = "bpf")]
     let rc = unsafe { bpf_dynptr_from_skb(skb, 0, &raw mut inner) };
@@ -1437,33 +1434,7 @@ pub unsafe fn skb_l7_probe(skb: *mut core::ffi::c_void, l7_offset: u32) -> Optio
     let total = unsafe { bpf_dynptr_size(&raw const inner) };
     #[cfg(not(target_arch = "bpf"))]
     let total = unsafe { host_stubs::bpf_dynptr_size(&raw const inner) };
-
-    let mut magic: u32 = 0;
-    if l7_offset < total {
-        #[cfg(target_arch = "bpf")]
-        let adjusted = unsafe { bpf_dynptr_adjust(&raw const inner, l7_offset, total) };
-        #[cfg(not(target_arch = "bpf"))]
-        let adjusted = unsafe { host_stubs::bpf_dynptr_adjust(&raw const inner, l7_offset, total) };
-
-        // The slice below reads from the dynptr's *current* start, so an
-        // unadjusted dynptr yields the first four bytes of the L2 header and
-        // they would be reported as the L7 magic. Leave the magic at 0
-        // (unknown) rather than hand back a confident wrong answer.
-        if adjusted == 0 {
-            let mut buf = core::mem::MaybeUninit::<u32>::uninit();
-            #[cfg(target_arch = "bpf")]
-            let ptr = unsafe { bpf_dynptr_slice(&raw const inner, 0, buf.as_mut_ptr().cast(), 4) };
-            #[cfg(not(target_arch = "bpf"))]
-            let ptr = unsafe {
-                host_stubs::bpf_dynptr_slice(&raw const inner, 0, buf.as_mut_ptr().cast(), 4)
-            };
-            if !ptr.is_null() {
-                // SAFETY: `slice` populated 4 bytes at `ptr`.
-                magic = unsafe { core::ptr::read_unaligned(ptr.cast::<u32>()) };
-            }
-        }
-    }
-    Some((total, magic))
+    Some(total)
 }
 
 /// Full XDP frame size (including multi-buffer fragments) without
@@ -2048,7 +2019,7 @@ mod tests {
 
     // ── Dynptr free-function tests ───────────────────────────────
     //
-    // The dynptr wrappers are standalone functions (`skb_l7_probe`,
+    // The dynptr wrappers are standalone functions (`skb_packet_size`,
     // `xdp_frame_size`) - a `bpf_dynptr` must stay pinned in its stack
     // slot, so it is never wrapped in a returnable struct. Each test
     // seeds deterministic backing via `host_queue_dynptr`, which the
@@ -2062,51 +2033,18 @@ mod tests {
     }
 
     #[test]
-    fn skb_l7_probe_reads_magic_at_offset_zero() {
+    fn skb_packet_size_counts_the_whole_packet() {
         let bytes = [0x16u8, 0x03, 0x01, 0x00, 0xAA, 0xBB];
         host_stubs::host_queue_dynptr(&bytes, 0);
-        let (total, magic) = unsafe { skb_l7_probe(core::ptr::null_mut(), 0) }.unwrap();
+        let total = unsafe { skb_packet_size(core::ptr::null_mut()) }.unwrap();
         assert_eq!(total, bytes.len() as u32);
-        // First 4 bytes read back little-endian (e.g. a TLS record header).
-        assert_eq!(magic, u32::from_le_bytes([0x16, 0x03, 0x01, 0x00]));
     }
 
     #[test]
-    fn skb_l7_probe_reads_magic_at_nonzero_offset() {
-        // 14-byte L2/L3 prefix then a 4-byte magic at offset 14.
-        let mut bytes = [0u8; 18];
-        bytes[14..18].copy_from_slice(b"HTTP");
-        host_stubs::host_queue_dynptr(&bytes, 0);
-        let (total, magic) = unsafe { skb_l7_probe(core::ptr::null_mut(), 14) }.unwrap();
-        assert_eq!(total, 18);
-        assert_eq!(magic, u32::from_le_bytes(*b"HTTP"));
-    }
-
-    #[test]
-    fn skb_l7_probe_magic_zero_past_end() {
-        let bytes = [0u8; 2];
-        host_stubs::host_queue_dynptr(&bytes, 0);
-        let (total, magic) = unsafe { skb_l7_probe(core::ptr::null_mut(), 10) }.unwrap();
-        assert_eq!(total, 2);
-        // Offset past the packet end: the window read is skipped.
-        assert_eq!(magic, 0);
-    }
-
-    #[test]
-    fn skb_l7_probe_magic_zero_when_window_too_short() {
-        // Only 3 bytes available: the 4-byte magic slice fails.
-        let bytes = [0xAAu8, 0xBB, 0xCC];
-        host_stubs::host_queue_dynptr(&bytes, 0);
-        let (total, magic) = unsafe { skb_l7_probe(core::ptr::null_mut(), 0) }.unwrap();
-        assert_eq!(total, 3);
-        assert_eq!(magic, 0);
-    }
-
-    #[test]
-    fn skb_l7_probe_returns_none_on_init_failure() {
+    fn skb_packet_size_returns_none_on_init_failure() {
         // Non-zero rc from the init kfunc → wrapper bails out.
         host_stubs::host_queue_dynptr(&[], -22);
-        let r = unsafe { skb_l7_probe(core::ptr::null_mut(), 0) };
+        let r = unsafe { skb_packet_size(core::ptr::null_mut()) };
         assert!(r.is_none());
     }
 

@@ -192,8 +192,7 @@ macro_rules! parse_vlan_tags {
 
             // QinQ: walk the inner customer tag. Only the EtherType and the
             // offset advance - the outer service tag stays in `vlan_id`.
-            if $ether_type == $crate::net::ETH_P_8021Q || $ether_type == $crate::net::ETH_P_8021AD
-            {
+            if $ether_type == $crate::net::ETH_P_8021Q || $ether_type == $crate::net::ETH_P_8021AD {
                 let vhdr2: *const $crate::net::VlanHdr = unsafe { ptr_at($ctx, $l3_offset)? };
                 $ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
                 $l3_offset += $crate::net::VLAN_HDR_LEN;
