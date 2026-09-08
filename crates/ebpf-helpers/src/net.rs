@@ -6,15 +6,16 @@
 pub const ETH_P_IP: u16 = 0x0800;
 /// IPv6 `EtherType`.
 pub const ETH_P_IPV6: u16 = 0x86DD;
-/// 802.1Q VLAN `EtherType`.
-pub const ETH_P_8021Q: u16 = 0x8100;
-/// 802.1ad (QinQ) `EtherType`.
-pub const ETH_P_8021AD: u16 = 0x88A8;
 /// ARP `EtherType`.
 pub const ETH_P_ARP: u16 = 0x0806;
 
-/// Size of an 802.1Q VLAN tag in bytes.
-pub const VLAN_HDR_LEN: usize = 4;
+// The VLAN vocabulary and the walk itself live in `ebpf-common`, which is in
+// the workspace and therefore under test. They are re-exported here so the
+// programs keep reaching for them at one address.
+pub use ebpf_common::vlan::{
+    ETH_P_8021AD, ETH_P_8021Q, VLAN_HDR_LEN, VlanHdr, VlanWalk, walk_vlan_tags,
+};
+
 /// Size of the IPv6 fixed header in bytes.
 pub const IPV6_HDR_LEN: usize = 40;
 
@@ -38,13 +39,6 @@ pub struct Ipv6Hdr {
     pub hop_limit: u8,
     pub src_addr: [u8; 16],
     pub dst_addr: [u8; 16],
-}
-
-/// 802.1Q VLAN tag (4 bytes after `EthHdr` when `ether_type` == 0x8100).
-#[repr(C)]
-pub struct VlanHdr {
-    pub tci: u16,
-    pub ether_type: u16,
 }
 
 /// ICMP fixed header (8 bytes: type, code, checksum, rest-of-header).
@@ -172,33 +166,24 @@ pub fn prefix_to_mask(prefix_len: u8) -> [u32; 4] {
 ///   and a priority-tagged frame carrying VLAN 0 cannot otherwise be
 ///   told apart by.
 ///
-/// `$ctx` is the program context and `$ether_type` / `$l3_offset` are
-/// mutable locals the macro assigns through. The caller must have a
-/// `ptr_at` for its own context in scope, and must be in a function
-/// returning `Option` or `Result`, because a truncated tag propagates
-/// with `?`.
+/// The walk itself is [`ebpf_common::vlan::walk_vlan_tags`]; this is the
+/// half that hands it the packet window, which is why it stays a macro:
+/// `$ether_type` and `$l3_offset` are mutable locals it assigns through.
+/// The caller must be in a function returning `Result<_, ()>`, because a
+/// truncated tag propagates with `?`.
 #[macro_export]
 macro_rules! parse_vlan_tags {
     ($ctx:expr, $ether_type:ident, $l3_offset:ident) => {{
-        let mut vlan_id: u16 = 0;
-        let mut tagged = false;
-
-        if $ether_type == $crate::net::ETH_P_8021Q || $ether_type == $crate::net::ETH_P_8021AD {
-            let vhdr: *const $crate::net::VlanHdr = unsafe { ptr_at($ctx, $l3_offset)? };
-            vlan_id = u16::from_be(unsafe { (*vhdr).tci }) & 0x0FFF;
-            $ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
-            $l3_offset += $crate::net::VLAN_HDR_LEN;
-            tagged = true;
-
-            // QinQ: walk the inner customer tag. Only the EtherType and the
-            // offset advance - the outer service tag stays in `vlan_id`.
-            if $ether_type == $crate::net::ETH_P_8021Q || $ether_type == $crate::net::ETH_P_8021AD {
-                let vhdr2: *const $crate::net::VlanHdr = unsafe { ptr_at($ctx, $l3_offset)? };
-                $ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
-                $l3_offset += $crate::net::VLAN_HDR_LEN;
-            }
+        // SAFETY: `data()..data_end()` is the readable packet window the
+        // kernel handed this program invocation.
+        let walk = unsafe {
+            $crate::net::walk_vlan_tags($ctx.data(), $ctx.data_end(), $ether_type, $l3_offset)
         }
+        .ok_or(())?;
 
-        (vlan_id, tagged)
+        $ether_type = walk.ether_type;
+        $l3_offset = walk.l3_offset;
+
+        (walk.vlan_id, walk.tagged)
     }};
 }

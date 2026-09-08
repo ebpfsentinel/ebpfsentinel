@@ -19,4 +19,5 @@ pub mod scrub;
 pub mod tenant;
 pub mod threatintel;
 pub mod vip;
+pub mod vlan;
 pub mod zone;
