@@ -375,8 +375,9 @@ pub fn feature_index_to_ml_anomaly_type(feature_idx: usize) -> MlAnomalyType {
 }
 
 fn all_coverage_entries() -> Vec<CoverageEntry> {
-    let mut entries = Vec::with_capacity(51);
-    entries.extend(firewall_ips_coverage_entries());
+    let mut entries = Vec::with_capacity(74);
+    entries.extend(firewall_coverage_entries());
+    entries.extend(ips_coverage_entries());
     entries.extend(ratelimit_coverage_entries());
     entries.extend(l7_coverage_entries());
     entries.extend(detection_coverage_entries());
@@ -535,7 +536,7 @@ fn ml_anomaly_coverage_entries() -> Vec<CoverageEntry> {
     ]
 }
 
-fn firewall_ips_coverage_entries() -> Vec<CoverageEntry> {
+fn firewall_coverage_entries() -> Vec<CoverageEntry> {
     vec![
         entry(
             "firewall",
@@ -588,11 +589,23 @@ fn firewall_ips_coverage_entries() -> Vec<CoverageEntry> {
         ),
         entry(
             "firewall",
+            "T1021.005",
+            "VNC",
+            "lateral-movement",
+            "Firewall deny on VNC (5900-5999)",
+        ),
+        entry(
+            "firewall",
             "T1046",
             "Network Service Scanning",
             "discovery",
             "Firewall deny on other ports",
         ),
+    ]
+}
+
+fn ips_coverage_entries() -> Vec<CoverageEntry> {
+    vec![
         entry(
             "ips",
             "T1110.001",
@@ -606,6 +619,48 @@ fn firewall_ips_coverage_entries() -> Vec<CoverageEntry> {
             "Exploit Public-Facing Application",
             "initial-access",
             "IPS auto-blacklist on HTTP/DB",
+        ),
+        entry(
+            "ips",
+            "T1021",
+            "Remote Services",
+            "lateral-movement",
+            "IPS auto-blacklist on Telnet (23)",
+        ),
+        entry(
+            "ips",
+            "T1071.003",
+            "Mail Protocols",
+            "command-and-control",
+            "IPS auto-blacklist on SMTP (25/587)",
+        ),
+        entry(
+            "ips",
+            "T1071.004",
+            "DNS",
+            "command-and-control",
+            "IPS auto-blacklist on DNS (53)",
+        ),
+        entry(
+            "ips",
+            "T1021.001",
+            "Remote Desktop Protocol",
+            "lateral-movement",
+            "IPS auto-blacklist on RDP (3389)",
+        ),
+        entry(
+            "ips",
+            "T1021.002",
+            "SMB/Windows Admin Shares",
+            "lateral-movement",
+            "IPS auto-blacklist on SMB (445)",
+        ),
+        entry(
+            "ips",
+            "T1021.005",
+            "VNC",
+            "lateral-movement",
+            "IPS auto-blacklist on VNC (5900-5999)",
         ),
         entry(
             "ips",
@@ -668,6 +723,13 @@ fn l7_coverage_entries() -> Vec<CoverageEntry> {
         ),
         entry(
             "l7",
+            "T1071.004",
+            "DNS",
+            "command-and-control",
+            "L7 deny on DNS",
+        ),
+        entry(
+            "l7",
             "T1021.002",
             "SMB/Windows Admin Shares",
             "lateral-movement",
@@ -684,7 +746,7 @@ fn l7_coverage_entries() -> Vec<CoverageEntry> {
 }
 
 fn detection_coverage_entries() -> Vec<CoverageEntry> {
-    let mut entries = Vec::with_capacity(22);
+    let mut entries = Vec::with_capacity(23);
     entries.extend(ids_coverage_entries());
     entries.extend(threatintel_coverage_entries());
     entries.extend(dlp_dns_coverage_entries());
@@ -734,6 +796,34 @@ fn ids_coverage_entries() -> Vec<CoverageEntry> {
             "SMB/Windows Admin Shares",
             "lateral-movement",
             "IDS match on SMB (445)",
+        ),
+        entry(
+            "ids",
+            "T1021",
+            "Remote Services",
+            "lateral-movement",
+            "IDS match on Telnet (23)",
+        ),
+        entry(
+            "ids",
+            "T1071.002",
+            "File Transfer Protocols",
+            "command-and-control",
+            "IDS match on FTP (21)",
+        ),
+        entry(
+            "ids",
+            "T1110.001",
+            "Password Guessing",
+            "credential-access",
+            "IDS rate rule on SSH (22) or RDP (3389)",
+        ),
+        entry(
+            "ids",
+            "T1110",
+            "Brute Force",
+            "credential-access",
+            "IDS rate rule on other ports",
         ),
         entry(
             "ids",
@@ -948,6 +1038,8 @@ fn info(id: &'static str, name: &'static str, tactic: &'static str) -> MitreAtta
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -1260,7 +1352,7 @@ mod tests {
     #[test]
     fn coverage_report_packet_security_components() {
         let report = coverage_report(&["firewall", "ratelimit", "l7", "ips"]);
-        assert_eq!(report.total_techniques, 19);
+        assert_eq!(report.total_techniques, 27);
     }
 
     #[test]
@@ -1346,7 +1438,7 @@ mod tests {
             "ai-security",
         ]);
         assert_eq!(report.attack_version, "v18");
-        assert_eq!(report.total_techniques, 47);
+        assert_eq!(report.total_techniques, 59);
         assert!(!report.by_tactic.is_empty());
     }
 
@@ -1393,7 +1485,7 @@ mod tests {
     #[test]
     fn coverage_report_case_insensitive() {
         let report = coverage_report(&["IDS", "DLP"]);
-        assert_eq!(report.total_techniques, 10); // 7 IDS + 3 DLP
+        assert_eq!(report.total_techniques, 14); // 11 IDS + 3 DLP
     }
 
     #[test]
@@ -1655,5 +1747,133 @@ mod tests {
         assert!(technique_ids.contains(&"T1071.001"));
         assert!(technique_ids.contains(&"T1573.001"));
         assert!(technique_ids.contains(&"T1600.001"));
+    }
+
+    /// Every technique a lookup can return, paired with the component name
+    /// the coverage table files it under.
+    fn techniques_every_lookup_can_raise() -> BTreeSet<(String, String)> {
+        let mut raised = BTreeSet::new();
+        let mut record = |component: &str, i: MitreAttackInfo| {
+            raised.insert((component.to_string(), i.technique_id));
+        };
+
+        for port in 0..=u16::MAX {
+            for (component, name) in [
+                (PacketSecurityComponent::Firewall, "firewall"),
+                (PacketSecurityComponent::Ips, "ips"),
+                (PacketSecurityComponent::Ratelimit, "ratelimit"),
+                (PacketSecurityComponent::L7, "l7"),
+            ] {
+                record(
+                    name,
+                    lookup(&MitreContext::PacketSecurity(PacketSecurityMitreContext {
+                        component,
+                        dst_port: port,
+                        protocol: 6,
+                    })),
+                );
+            }
+            for rate_based in [false, true] {
+                record(
+                    "ids",
+                    lookup(&MitreContext::Ids {
+                        dst_port: port,
+                        rate_based,
+                    }),
+                );
+            }
+            for threat_type in [
+                ThreatType::Other,
+                ThreatType::Malware,
+                ThreatType::C2,
+                ThreatType::Scanner,
+                ThreatType::Spam,
+            ] {
+                record(
+                    "threatintel",
+                    lookup(&MitreContext::ThreatIntel {
+                        threat_type,
+                        dst_port: port,
+                    }),
+                );
+            }
+        }
+
+        for data_type in ["pii", "credentials", "pci", "anything-else"] {
+            record("dlp", lookup(&MitreContext::Dlp(data_type)));
+        }
+        for reason in [
+            DnsMitreReason::BlocklistOrEncrypted,
+            DnsMitreReason::Reputation,
+        ] {
+            record("dns", lookup(&MitreContext::Dns(reason)));
+        }
+        for attack_type in [
+            DdosAttackType::SynFlood,
+            DdosAttackType::UdpAmplification,
+            DdosAttackType::IcmpFlood,
+            DdosAttackType::RstFlood,
+            DdosAttackType::FinFlood,
+            DdosAttackType::AckFlood,
+            DdosAttackType::Volumetric,
+        ] {
+            record("ddos", lookup(&MitreContext::Ddos(attack_type)));
+        }
+        for anomaly_type in [
+            MlAnomalyType::TrafficVolumeDrift,
+            MlAnomalyType::ProtocolRatioDrift,
+            MlAnomalyType::PortEntropySpike,
+            MlAnomalyType::SourceDiversitySpike,
+            MlAnomalyType::DestPortDiversitySpike,
+            MlAnomalyType::PayloadSizeAnomaly,
+            MlAnomalyType::ConnectionCountSpike,
+        ] {
+            record("ml-anomaly", lookup(&MitreContext::MlAnomaly(anomaly_type)));
+        }
+        for reason in [
+            AiSecurityMitreReason::ShadowAi,
+            AiSecurityMitreReason::AiDlp,
+            AiSecurityMitreReason::DataExfiltration,
+        ] {
+            record("ai-security", lookup(&MitreContext::AiSecurity(reason)));
+        }
+        record("ai-security", lookup(&MitreContext::EncryptedDnsPolicy));
+        for reason in [
+            TlsIntelligenceMitreReason::ThreatMatch,
+            TlsIntelligenceMitreReason::BehaviorAnomaly,
+            TlsIntelligenceMitreReason::WeakCrypto,
+            TlsIntelligenceMitreReason::PqcNonCompliant,
+            TlsIntelligenceMitreReason::CipherDowngrade,
+            TlsIntelligenceMitreReason::SniCertMismatch,
+            TlsIntelligenceMitreReason::SessionResumeAnomaly,
+            TlsIntelligenceMitreReason::PeerGroupAnomaly,
+        ] {
+            record(
+                "tls-intelligence",
+                lookup(&MitreContext::TlsIntelligence(reason)),
+            );
+        }
+
+        raised
+    }
+
+    #[test]
+    fn the_coverage_table_names_exactly_the_techniques_the_agent_raises() {
+        // The report is what an operator hands an auditor: a technique an
+        // alert carries and the table does not name is an under-report, and a
+        // row nothing can raise is a claim the agent cannot keep.
+        let declared: BTreeSet<(String, String)> = all_coverage_entries()
+            .into_iter()
+            .map(|e| (e.component, e.technique_id))
+            .collect();
+        let raised = techniques_every_lookup_can_raise();
+
+        let missing: Vec<_> = raised.difference(&declared).collect();
+        assert!(missing.is_empty(), "raised and not declared: {missing:?}");
+        let unreachable: Vec<_> = declared.difference(&raised).collect();
+        assert!(
+            unreachable.is_empty(),
+            "declared and not raised: {unreachable:?}"
+        );
     }
 }
