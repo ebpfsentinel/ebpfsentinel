@@ -115,41 +115,61 @@ pub async fn fetch_all_feeds_v2(
             }
         };
 
-        match feed.format {
-            FeedFormat::Stix => match parse_stix_feed(&raw_data, feed, parse_stix_json) {
-                Ok(indicators) => {
-                    tracing::info!(
-                        feed_id = %feed.id,
-                        iocs = indicators.iocs.len(),
-                        domains = indicators.domains.len(),
-                        urls = indicators.urls.len(),
-                        "STIX feed loaded"
-                    );
-                    metrics.record_config_reload(&feed.id, "success");
-                    result.iocs.extend(indicators.iocs);
-                    result.domains.extend(indicators.domains);
-                    result.urls.extend(indicators.urls);
-                }
-                Err(e) => {
-                    tracing::warn!(feed_id = %feed.id, error = %e, "STIX feed parse failed");
-                    metrics.record_config_reload(&feed.id, "failure");
-                }
-            },
-            _ => match parse_feed(&raw_data, feed, parse_json_feed) {
-                Ok(iocs) => {
-                    tracing::info!(feed_id = %feed.id, ioc_count = iocs.len(), "feed loaded");
-                    metrics.record_config_reload(&feed.id, "success");
-                    result.iocs.extend(iocs);
-                }
-                Err(e) => {
-                    tracing::warn!(feed_id = %feed.id, error = %e, "feed parse failed");
-                    metrics.record_config_reload(&feed.id, "failure");
-                }
-            },
+        match parse_feed_data(feed, &raw_data) {
+            Ok(parsed) => {
+                tracing::info!(
+                    feed_id = %feed.id,
+                    iocs = parsed.iocs.len(),
+                    domains = parsed.domains.len(),
+                    urls = parsed.urls.len(),
+                    "feed loaded"
+                );
+                metrics.record_config_reload(&feed.id, "success");
+                result.iocs.extend(parsed.iocs);
+                result.domains.extend(parsed.domains);
+                result.urls.extend(parsed.urls);
+            }
+            Err(e) => {
+                tracing::warn!(feed_id = %feed.id, error = %e, "feed parse failed");
+                metrics.record_config_reload(&feed.id, "failure");
+            }
         }
     }
 
     result
+}
+
+/// Parse one already-fetched feed body into multi-type indicators.
+///
+/// This is the whole of the format handling: which parser a feed body goes
+/// through, and the confidence and count limits its configuration carries.
+/// It is separated from the fetch so that a caller holding bytes from
+/// somewhere other than an HTTP feed - an offline bundle carried into an
+/// air-gapped estate, say - parses them exactly the way the online path does,
+/// rather than growing a second implementation that drifts.
+///
+/// # Errors
+///
+/// Returns [`DomainError`] when the body does not parse in the format the feed
+/// configuration declares.
+pub fn parse_feed_data(
+    feed: &FeedConfig,
+    raw_data: &[u8],
+) -> Result<FeedUpdateResult, DomainError> {
+    match feed.format {
+        FeedFormat::Stix => {
+            let indicators = parse_stix_feed(raw_data, feed, parse_stix_json)?;
+            Ok(FeedUpdateResult {
+                iocs: indicators.iocs,
+                domains: indicators.domains,
+                urls: indicators.urls,
+            })
+        }
+        _ => Ok(FeedUpdateResult {
+            iocs: parse_feed(raw_data, feed, parse_json_feed)?,
+            ..FeedUpdateResult::default()
+        }),
+    }
 }
 
 // ── JSON depth guard ──────────────────────────────────────────────────
