@@ -10,6 +10,29 @@
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
 
+# Two IPv6 sources inside one /64. The guard keys on the whole address, so
+# these are two sources rather than one prefix, and the shared /64 is what
+# makes that worth asserting.
+EBPF_HOST_V6="fd00:65::1"
+EBPF_NS_V6_A="fd00:65::2"
+EBPF_NS_V6_B="fd00:65::3"
+EBPF_V6_PREFIX_LEN="64"
+
+# create_test_netns assigns IPv4 only, so the v6 addresses are layered on top
+# of the veth pair it made rather than pushed into the shared helper.
+_assign_v6_to_veth() {
+    ip addr add "${EBPF_HOST_V6}/${EBPF_V6_PREFIX_LEN}" nodad \
+        dev "${EBPF_VETH_HOST}" 2>/dev/null || true
+    local addr
+    for addr in "$EBPF_NS_V6_A" "$EBPF_NS_V6_B"; do
+        ip netns exec "$EBPF_TEST_NS" \
+            ip addr add "${addr}/${EBPF_V6_PREFIX_LEN}" nodad \
+                dev "${EBPF_VETH_NS}" 2>/dev/null || true
+    done
+    # Even with DAD off, the addresses take a moment to leave tentative.
+    sleep 1
+}
+
 setup_file() {
     require_root
     require_kernel 5 17
@@ -24,6 +47,7 @@ setup_file() {
     mkdir -p "$DATA_DIR"
 
     create_test_netns
+    _assign_v6_to_veth
 
     PREPARED_CONFIG="$(prepare_ebpf_config "${FIXTURE_DIR}/config-ebpf-conntrack-guard.yaml")"
     export PREPARED_CONFIG
@@ -77,6 +101,21 @@ knock() {
     local i=0
     while [ "$i" -lt "$count" ]; do
         send_tcp_from_ns "$EBPF_HOST_IP" 9971 "GUARD" 1
+        i=$((i + 1))
+    done
+}
+
+# knock_v6 <source_address> <count>
+# The same knock over IPv6, from a source address the caller names, because
+# the whole point is which of two neighbours is being judged.
+knock_v6() {
+    local src="${1:?usage: knock_v6 <source_address> <count>}"
+    local count="${2:?usage: knock_v6 <source_address> <count>}"
+    local i=0
+    while [ "$i" -lt "$count" ]; do
+        ip netns exec "$EBPF_TEST_NS" \
+            timeout 2 ncat -6 -s "$src" -w 1 "$EBPF_HOST_V6" 9971 \
+            </dev/null >/dev/null 2>&1 || true
         i=$((i + 1))
     done
 }
@@ -149,6 +188,59 @@ knock() {
 
     [ "$delta" -ge 1 ] || {
         echo "an overloaded source was served again inside its overload window" >&2
+        return 1
+    }
+}
+
+# ── The ceiling is the whole address, not the prefix ────────────────
+
+@test "a v6 source past the connection rate is dropped" {
+    require_root
+
+    local before
+    before="$(firewall_metric "dropped")"
+
+    knock_v6 "$EBPF_NS_V6_A" 12
+
+    sleep 12
+
+    local after
+    after="$(firewall_metric "dropped")"
+    local delta=$((after - before))
+
+    echo "firewall dropped before=${before} after=${after} delta=${delta}"
+
+    [ "$delta" -ge 1 ] || {
+        echo "the guard let every v6 connection through: no packet was dropped" >&2
+        tail -20 "$AGENT_LOG_FILE" >&2
+        return 1
+    }
+}
+
+@test "a neighbour in the same /64 is judged on its own address" {
+    require_root
+
+    # The previous test took fd00:65::2 past the ceiling and left its mark
+    # standing for an hour. fd00:65::3 shares its /64 and has sent nothing,
+    # so a key that stopped at the prefix would refuse it here.
+    local before
+    before="$(firewall_metric "dropped")"
+
+    # Three is the ceiling rather than past it, so nothing this source sends
+    # is refused on its own account either.
+    knock_v6 "$EBPF_NS_V6_B" 3
+
+    sleep 12
+
+    local after
+    after="$(firewall_metric "dropped")"
+    local delta=$((after - before))
+
+    echo "firewall dropped before=${before} after=${after} delta=${delta}"
+
+    [ "$delta" -eq 0 ] || {
+        echo "a source was refused for its neighbour's traffic: the guard is keyed on the prefix" >&2
+        tail -20 "$AGENT_LOG_FILE" >&2
         return 1
     }
 }

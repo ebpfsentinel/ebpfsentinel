@@ -31,6 +31,18 @@ firewall:
       dst_port: "9971"
       scope: global
       enabled: true
+    # A rule carrying no address at all is an IPv4 rule, so the guard is only
+    # reached over IPv6 through a rule that names a v6 prefix. This one is the
+    # /64 the two test sources share, which is the point: the guard keys on the
+    # whole address, so the prefix admits both and judges neither.
+    - id: fw-allow-tcp-guarded-v6
+      priority: 10
+      action: allow
+      protocol: tcp
+      dst_port: "9971"
+      src_ip: "fd00:65::/64"
+      scope: global
+      enabled: true
 
 conntrack:
   enabled: true
