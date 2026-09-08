@@ -248,10 +248,66 @@ impl ConnTrackConfig {
 
 // ── Per-source state counter ────────────────────────────────────────
 
+/// Third word of an IPv4-mapped [`SrcCounterKey`]: the bytes `00 00 ff ff`
+/// read the way the datapath reads a packet word, natively and without a byte
+/// swap.
+pub const SRC_COUNTER_V4_MAPPED: u32 = u32::from_ne_bytes([0x00, 0x00, 0xff, 0xff]);
+
+/// Key of the per-source connection counter map.
+///
+/// A source is its own counter whichever family it arrived on, so the key is
+/// the whole address rather than one word of it: two IPv6 sources sharing a
+/// /32 prefix - which is every address in a single provider allocation - are
+/// one counter under a 32-bit key, so one of them exhausts the limit for all
+/// of them and the guard turns into a denial of service against the customer's
+/// own traffic.
+///
+/// The words are held exactly as the datapath read them out of the packet, and
+/// an IPv4 source is encoded the way IPv6 encodes one, `::ffff:a.b.c.d`, so a
+/// single map serves both families and an IPv4 address can never collide with
+/// an IPv6 address that happens to start with the same word.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SrcCounterKey {
+    /// The source address, four packet words.
+    pub addr: [u32; 4],
+}
+
+impl SrcCounterKey {
+    /// Key for an IPv4 source, held as `::ffff:a.b.c.d`.
+    #[must_use]
+    pub const fn from_v4(addr: u32) -> Self {
+        Self {
+            addr: [0, 0, SRC_COUNTER_V4_MAPPED, addr],
+        }
+    }
+
+    /// Key for an IPv6 source.
+    #[must_use]
+    pub const fn from_v6(addr: [u32; 4]) -> Self {
+        Self { addr }
+    }
+
+    /// The IPv4 address this key stands for, or `None` when the source arrived
+    /// on IPv6 with an address of its own.
+    ///
+    /// The IPv4-only surfaces - the overload IP set among them - are reached
+    /// through this, so a v6 source is never inserted into a v4 table under a
+    /// word of its address.
+    #[must_use]
+    pub const fn mapped_v4(&self) -> Option<u32> {
+        if self.addr[0] == 0 && self.addr[1] == 0 && self.addr[2] == SRC_COUNTER_V4_MAPPED {
+            Some(self.addr[3])
+        } else {
+            None
+        }
+    }
+}
+
 /// Per-source-IP connection counter for overload protection.
 ///
 /// Tracks concurrent connections and connection rate per source.
-/// Stored in `CT_SRC_COUNTERS` HashMap, keyed by source IPv4 address (u32).
+/// Stored in the `CT_SRC_COUNTERS` HashMap, keyed by [`SrcCounterKey`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SrcStateCounter {
@@ -366,6 +422,8 @@ unsafe impl aya::Pod for ConnValueV6 {}
 unsafe impl aya::Pod for ConnTrackConfig {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for SrcStateCounter {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for SrcCounterKey {}
 
 // ── Tests ────────────────────────────────────────────────────────────
 
@@ -373,6 +431,61 @@ unsafe impl aya::Pod for SrcStateCounter {}
 mod tests {
     use super::*;
     use core::mem;
+
+    // ── Per-source counter key ─────────────────────────────────────
+
+    #[test]
+    fn src_counter_key_is_sixteen_bytes() {
+        assert_eq!(mem::size_of::<SrcCounterKey>(), 16);
+        assert_eq!(mem::align_of::<SrcCounterKey>(), 4);
+    }
+
+    #[test]
+    fn an_ipv4_source_round_trips_through_the_mapped_form() {
+        let addr = u32::from_ne_bytes([203, 0, 113, 7]);
+        let key = SrcCounterKey::from_v4(addr);
+        assert_eq!(key.mapped_v4(), Some(addr));
+        assert_eq!(key.addr[0], 0);
+        assert_eq!(key.addr[1], 0);
+    }
+
+    #[test]
+    fn an_ipv6_source_is_not_taken_for_an_ipv4_one() {
+        // A global unicast address whose last word looks like an IPv4 address.
+        let key = SrcCounterKey::from_v6([1, 2, 3, u32::from_ne_bytes([203, 0, 113, 7])]);
+        assert_eq!(key.mapped_v4(), None);
+    }
+
+    #[test]
+    fn an_ipv6_mapped_source_is_the_ipv4_source_it_names() {
+        // ::ffff:203.0.113.7 arriving on the wire keys the same counter as
+        // 203.0.113.7 arriving on IPv4, which is what it is.
+        let addr = u32::from_ne_bytes([203, 0, 113, 7]);
+        let on_the_wire = SrcCounterKey::from_v6([0, 0, SRC_COUNTER_V4_MAPPED, addr]);
+        assert_eq!(on_the_wire, SrcCounterKey::from_v4(addr));
+        assert_eq!(on_the_wire.mapped_v4(), Some(addr));
+    }
+
+    #[test]
+    fn two_sources_in_one_prefix_are_two_counters() {
+        // The failure the whole-address key exists to stop: every address in
+        // a provider allocation shares its first word.
+        let a = SrcCounterKey::from_v6([0x2001_0db8, 0, 0, 1]);
+        let b = SrcCounterKey::from_v6([0x2001_0db8, 0, 0, 2]);
+        assert_ne!(a, b);
+
+        let c = SrcCounterKey::from_v6([0x2001_0db8, 0xdead_beef, 0, 1]);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn a_v4_address_never_collides_with_a_v6_one_starting_with_it() {
+        let addr = u32::from_ne_bytes([198, 51, 100, 4]);
+        assert_ne!(
+            SrcCounterKey::from_v4(addr),
+            SrcCounterKey::from_v6([addr, 0, 0, 0])
+        );
+    }
 
     #[test]
     fn conn_key_size() {

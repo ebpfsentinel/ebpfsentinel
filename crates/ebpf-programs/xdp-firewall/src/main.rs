@@ -25,7 +25,7 @@ use ebpf_common::{
     conntrack::{
         CT_SRC_COUNTER_MAX, CT_STATE_ESTABLISHED, CT_STATE_NEW, CT_STATE_RELATED, ConnTrackConfig,
         IPS_CONFIRMED, IPS_DYING, IPS_EXPECTED, IPS_SEEN_REPLY, NfConnOffsets, OVERLOAD_SET_ID,
-        SRC_COUNTER_FLAG_OVERLOADED, SrcStateCounter,
+        SRC_COUNTER_FLAG_OVERLOADED, SrcCounterKey, SrcStateCounter,
     },
     event::{
         EVENT_TYPE_FIREWALL, FLAG_IPV6, FLAG_VLAN, META_FLAG_PRESENT, PacketEvent, XdpMetadata,
@@ -278,11 +278,11 @@ static FW_IPSET_V4: HashMap<IpSetKeyV4, u8, { MAX_IPSET_ENTRIES_V4 as usize }> =
 
 // ── Connection limit maps ───────────────────────────────────────────
 
-/// Per-source-IP state counter. Keyed by source IPv4 address (u32).
-/// Tracks concurrent connections and connection rate for overload protection.
-/// Pinned at /sys/fs/bpf/ebpfsentinel/ct_src_counters, shared with tc-conntrack.
+/// Per-source state counter, keyed by the whole source address of either
+/// family. Tracks concurrent connections and connection rate for overload
+/// protection.
 #[btf_map]
-static CT_SRC_COUNTERS: HashMap<u32, SrcStateCounter, { CT_SRC_COUNTER_MAX as usize }> =
+static CT_SRC_COUNTERS: HashMap<SrcCounterKey, SrcStateCounter, { CT_SRC_COUNTER_MAX as usize }> =
     HashMap::new();
 
 /// Global conntrack configuration (single element). Read by XDP for limit thresholds.
@@ -1183,7 +1183,11 @@ fn process_firewall_v4(
         if (action == ACTION_PASS || action == ACTION_LOG)
             && (ct_state == CT_STATE_NEW || ct_state == 0xFF)
         {
-            if !check_connection_limits(src_ip, matched_rule_idx, matched_max_states) {
+            if !check_connection_limits(
+                SrcCounterKey::from_v4(src_ip),
+                matched_rule_idx,
+                matched_max_states,
+            ) {
                 // Connection limit exceeded → DROP.
                 emit_event(ctx_raw, ACTION_DROP);
                 increment_metric(METRIC_DROPPED);
@@ -1352,7 +1356,7 @@ fn mac_eq(a: &[u8; 6], b: &[u8; 6]) -> bool {
 /// Only called for NEW connections (ct_state == CT_STATE_NEW or 0xFF)
 /// that matched an ALLOW rule.
 #[inline(never)]
-fn check_connection_limits(src_ip: u32, rule_idx: i32, max_rule_states: u16) -> bool {
+fn check_connection_limits(src_key: SrcCounterKey, rule_idx: i32, max_rule_states: u16) -> bool {
     // Read conntrack config for global limits.
     let cfg = match CT_CONFIG.get(0) {
         Some(c) => c,
@@ -1361,7 +1365,7 @@ fn check_connection_limits(src_ip: u32, rule_idx: i32, max_rule_states: u16) -> 
 
     // Check per-source limits.
     if cfg.max_src_states > 0 || cfg.max_src_conn_rate > 0 {
-        if let Some(counter) = unsafe { CT_SRC_COUNTERS.get(&src_ip) } {
+        if let Some(counter) = unsafe { CT_SRC_COUNTERS.get(&src_key) } {
             // Already overloaded → DROP immediately.
             if (counter.flags & SRC_COUNTER_FLAG_OVERLOADED) != 0 {
                 return false;
@@ -1388,21 +1392,27 @@ fn check_connection_limits(src_ip: u32, rule_idx: i32, max_rule_states: u16) -> 
                     // Insert may fail if map is full - acceptable: the overload
                     // flag is best-effort. The packet is still dropped below.
                     // No logging available in eBPF context.
-                    let _ = CT_SRC_COUNTERS.insert(&src_ip, &overloaded, 0);
-                    // Add to overload IP set for fast-path rejection.
-                    let ipset_key = IpSetKeyV4 {
-                        set_id: OVERLOAD_SET_ID as u16,
-                        _pad: [0; 2],
-                        addr: src_ip,
-                    };
-                    let _ = FW_IPSET_V4.insert(&ipset_key, &1u8, 0);
+                    let _ = CT_SRC_COUNTERS.insert(&src_key, &overloaded, 0);
+                    // Add to the overload IP set for fast-path rejection.
+                    // That set is IPv4-only, so an IPv6 source is refused by
+                    // the overload flag on its own counter above rather than
+                    // by the fast path, and never by one word of its address
+                    // standing in for an IPv4 one.
+                    if let Some(v4) = src_key.mapped_v4() {
+                        let ipset_key = IpSetKeyV4 {
+                            set_id: OVERLOAD_SET_ID as u16,
+                            _pad: [0; 2],
+                            addr: v4,
+                        };
+                        let _ = FW_IPSET_V4.insert(&ipset_key, &1u8, 0);
+                    }
                     return false;
                 }
             }
         }
         // Increment counters (insert new entry if absent).
         let now = unsafe { bpf_ktime_get_boot_ns() };
-        let new_counter = if let Some(existing) = unsafe { CT_SRC_COUNTERS.get(&src_ip) } {
+        let new_counter = if let Some(existing) = unsafe { CT_SRC_COUNTERS.get(&src_key) } {
             let window_ns = (cfg.conn_rate_window_secs as u64) * 1_000_000_000;
             let elapsed = now.saturating_sub(existing.window_start_ns);
             if elapsed >= window_ns {
@@ -1432,7 +1442,7 @@ fn check_connection_limits(src_ip: u32, rule_idx: i32, max_rule_states: u16) -> 
                 _pad: [0; 7],
             }
         };
-        let _ = CT_SRC_COUNTERS.insert(&src_ip, &new_counter, 0);
+        let _ = CT_SRC_COUNTERS.insert(&src_key, &new_counter, 0);
     }
 
     // Check per-rule state limit.
@@ -1759,11 +1769,14 @@ fn process_firewall_v6(
     if matched_action >= 0 {
         let action = matched_action as u8;
         // For PASS/LOG on NEW connections, enforce connection limits.
-        // Use src_addr[0] as the source key for the IPv4-keyed counter map.
         if (action == ACTION_PASS || action == ACTION_LOG)
             && (ct_state == CT_STATE_NEW || ct_state == 0xFF)
         {
-            if !check_connection_limits(src_addr[0], matched_rule_idx, matched_max_states) {
+            if !check_connection_limits(
+                SrcCounterKey::from_v6(src_addr),
+                matched_rule_idx,
+                matched_max_states,
+            ) {
                 emit_event(ctx_raw, ACTION_DROP);
                 increment_metric(METRIC_DROPPED);
                 return Ok(xdp_action::XDP_DROP);
