@@ -3,6 +3,9 @@
 
 use aya_ebpf::programs::XdpContext;
 use core::mem;
+use ebpf_common::ipv6::{
+    IPV6_EXT_MAX_HEADERS, IPV6_EXT_MAX_OFFSET, ipv6_ext_header_len, is_ipv6_ext_header,
+};
 
 /// Bounds-checked read-only pointer access for XDP programs.
 ///
@@ -84,49 +87,34 @@ pub fn skip_ipv6_ext_headers(
     let mut pos = start + start_offset;
 
     let mut i = 0u32;
-    while i < 6 {
-        match next_hdr {
-            0 | 43 | 44 | 51 | 60 | 135 => {
-                // Bounds check: need at least 2 bytes (next_hdr + len)
-                if pos + 2 > end {
-                    return None;
-                }
-                let hdr_ptr = pos as *const u8;
-                next_hdr = unsafe { *hdr_ptr };
-
-                if next_hdr == 44 {
-                    // Fragment header: fixed 8 bytes
-                    pos += 8;
-                } else {
-                    // Use the full 8-bit Hdr-Ext-Len field. Masking it (e.g.
-                    // `& 0x1F`) makes this parser advance fewer bytes than the
-                    // host stack for headers longer than the mask, so the L4
-                    // offset diverges and crafted IPv6 extension chains evade
-                    // inspection. `u8 as usize` is provably 0..=255, so the
-                    // multiply stays bounded for the verifier.
-                    let hdr_len_byte = unsafe { *hdr_ptr.add(1) } as usize;
-                    if next_hdr == 51 {
-                        // AH header: length in 4-byte units, max (255+2)*4 = 1028.
-                        pos += (hdr_len_byte + 2) * 4;
-                    } else {
-                        // Other ext headers: length in 8-byte units,
-                        // max (255+1)*8 = 2048.
-                        pos += (hdr_len_byte + 1) * 8;
-                    }
-                }
-                // Bounds check after each header advancement
-                if pos > end {
-                    return None;
-                }
-            }
-            _ => break,
+    while i < IPV6_EXT_MAX_HEADERS {
+        if !is_ipv6_ext_header(next_hdr) {
+            break;
+        }
+        // Bounds check: need at least 2 bytes (next_hdr + len)
+        if pos + 2 > end {
+            return None;
+        }
+        let hdr_ptr = pos as *const u8;
+        // The header being measured is the one this iteration entered on, not
+        // the Next Header value read out of it: those two are one header apart,
+        // and measuring the following one is how a Fragment header carrying a
+        // non-zero reserved byte moves this parser off the L4 offset the host
+        // stack lands on.
+        let this_hdr = next_hdr;
+        next_hdr = unsafe { *hdr_ptr };
+        let hdr_ext_len = unsafe { *hdr_ptr.add(1) };
+        pos += ipv6_ext_header_len(this_hdr, hdr_ext_len);
+        // Bounds check after each header advancement
+        if pos > end {
+            return None;
         }
         i += 1;
     }
 
     let final_offset = pos - start;
     // Sanity cap
-    if final_offset > 512 {
+    if final_offset > IPV6_EXT_MAX_OFFSET {
         return None;
     }
     Some((next_hdr, final_offset))
