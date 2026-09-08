@@ -1,15 +1,22 @@
 #![no_main]
 
-use std::net::IpAddr;
-
 use libfuzzer_sys::fuzz_target;
 
-use domain::common::error::DomainError;
-use domain::threatintel::entity::{FeedConfig, FeedFormat, FieldMapping, Ioc, ThreatType};
-use domain::threatintel::parser::{parse_feed, parse_threat_type};
+use application::feed_update::parse_feed_data;
+use domain::threatintel::entity::{FeedConfig, FeedFormat, FieldMapping};
 
-/// Build a minimal `FeedConfig` for the given format.
-fn feed_config(format: FeedFormat) -> FeedConfig {
+/// Every format a feed body can arrive in, including STIX, which the target
+/// used to leave out because its hand-copied parser had no equivalent.
+const FORMATS: [FeedFormat; 4] = [
+    FeedFormat::Plaintext,
+    FeedFormat::Csv,
+    FeedFormat::Json,
+    FeedFormat::Stix,
+];
+
+/// Build a `FeedConfig` for the given format, with the ceilings the control
+/// byte asked for.
+fn feed_config(format: FeedFormat, control: u8) -> FeedConfig {
     FeedConfig {
         id: "fuzz".to_string(),
         name: "fuzz-feed".to_string(),
@@ -17,9 +24,12 @@ fn feed_config(format: FeedFormat) -> FeedConfig {
         format,
         enabled: true,
         refresh_interval_secs: 3600,
-        max_iocs: 10_000,
+        // Both ceilings are cut from the same byte so a body can be parsed
+        // against a limit it actually reaches: pinning them high meant the
+        // truncation and the confidence filter were never entered.
+        max_iocs: usize::from(control),
         default_action: None,
-        min_confidence: 0,
+        min_confidence: control,
         field_mapping: Some(FieldMapping {
             ip_field: "ip".to_string(),
             confidence_field: Some("confidence".to_string()),
@@ -32,69 +42,17 @@ fn feed_config(format: FeedFormat) -> FeedConfig {
     }
 }
 
-/// JSON feed parser (mirrors the application-layer implementation).
-fn json_parser(text: &str, config: &FeedConfig) -> Result<Vec<Ioc>, DomainError> {
-    let mapping = config.field_mapping.clone().unwrap_or_default();
-
-    let parsed: serde_json::Value = serde_json::from_str(text)
-        .map_err(|e| DomainError::EngineError(format!("JSON parse error: {e}")))?;
-
-    let items = match &parsed {
-        serde_json::Value::Array(arr) => arr.as_slice(),
-        _ => {
-            return Err(DomainError::EngineError(
-                "JSON feed must be a top-level array".to_string(),
-            ));
-        }
-    };
-
-    let mut iocs = Vec::new();
-
-    for item in items {
-        let ip_str = item
-            .get(&mapping.ip_field)
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        let ip: IpAddr = match ip_str.parse() {
-            Ok(ip) => ip,
-            Err(_) => continue,
-        };
-
-        let confidence = mapping
-            .confidence_field
-            .as_ref()
-            .and_then(|cf| item.get(cf.as_str()))
-            .and_then(serde_json::Value::as_u64)
-            .map_or(100, |v| v.min(100) as u8);
-
-        let threat_type = mapping
-            .category_field
-            .as_ref()
-            .and_then(|cf| item.get(cf.as_str()))
-            .and_then(serde_json::Value::as_str)
-            .map_or(ThreatType::Other, parse_threat_type);
-
-        iocs.push(Ioc {
-            ip,
-            feed_id: config.id.clone(),
-            confidence,
-            threat_type,
-            last_seen: 0,
-            source_feed: config.name.clone(),
-        });
-    }
-
-    Ok(iocs)
-}
-
 fuzz_target!(|data: &[u8]| {
-    // Plaintext: one IP per line
-    let _ = parse_feed(data, &feed_config(FeedFormat::Plaintext), json_parser);
+    let (control, body) = data
+        .split_first()
+        .map_or((0u8, &[][..]), |(first, rest)| (*first, rest));
 
-    // CSV: columnar data with field mapping
-    let _ = parse_feed(data, &feed_config(FeedFormat::Csv), json_parser);
+    for format in FORMATS {
+        let config = feed_config(format, control);
 
-    // JSON: structured IOC data
-    let _ = parse_feed(data, &feed_config(FeedFormat::Json), json_parser);
+        // The parse the agent actually runs, rather than a copy of it living
+        // in this file: a feed body reaching the engine goes through this one
+        // call whether it came off HTTP or out of an offline bundle.
+        let _ = parse_feed_data(&config, body);
+    }
 });

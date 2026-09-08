@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+application = { path = "../crates/application" }
 domain = { path = "../crates/domain" }
 ebpf-common = { path = "../crates/ebpf-common" }
 infrastructure = { path = "../crates/infrastructure" }
