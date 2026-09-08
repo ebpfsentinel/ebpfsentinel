@@ -114,40 +114,39 @@ jobs:
       # One instrumented run of the workspace, then two reports off the
       # profile data it left behind. `--lcov` and `--text` as two invocations
       # re-ran the whole test suite to say the same thing twice.
+      # `--exclude` selects what to test and `report` runs nothing, so it is
+      # rejected there; ebpf-common is compiled into the crates that are
+      # tested either way, and the report drops it by filename instead.
+      # The summary step asks for the per-file table rather than `--text`,
+      # which prints every source line and would put a listing rather than
+      # a TOTAL in the last twenty lines of the job summary.
       - name: Run the workspace under instrumentation
         run: cargo llvm-cov --workspace --exclude ebpf-common --no-report
       - name: Generate coverage
         run: |
-          cargo llvm-cov report --workspace --exclude ebpf-common \
+          cargo llvm-cov report --ignore-filename-regex 'crates/ebpf-common/' \
             --lcov --output-path lcov.info
       - name: Per-crate coverage summary
         run: |
-          cargo llvm-cov report --workspace --exclude ebpf-common --text 2>&1 | tee coverage-summary.txt
+          cargo llvm-cov report --ignore-filename-regex 'crates/ebpf-common/' --summary-only 2>&1 | tee coverage-summary.txt
           echo "## Coverage Summary" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           tail -20 coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+      # `--fail-under-lines` is the tool's own comparison. Reading the
+      # percentage out of the table with `awk '{print $NF}'` pinned a column
+      # position, and the last column is the branch figure, which is a dash,
+      # so `bc` was handed an empty operand and the floor never tripped
+      # whatever the coverage was.
       - name: Enforce coverage floors
         run: |
-          domain_cov=$(cargo llvm-cov --package domain --text 2>&1 | grep 'TOTAL' | awk '{print $NF}' | tr -d '%')
-          app_cov=$(cargo llvm-cov --package application --text 2>&1 | grep 'TOTAL' | awk '{print $NF}' | tr -d '%')
-          adapters_cov=$(cargo llvm-cov --package adapters --text 2>&1 | grep 'TOTAL' | awk '{print $NF}' | tr -d '%')
-          echo "domain: ${domain_cov}% (floor: 90%)"
-          echo "application: ${app_cov}% (floor: 80%)"
-          echo "adapters: ${adapters_cov}% (floor: 60%)"
           failed=0
-          if [ "$(echo "$domain_cov < 90" | bc -l)" = "1" ]; then
-            echo "::error::Domain coverage ${domain_cov}% is below 90% floor"
-            failed=1
-          fi
-          if [ "$(echo "$app_cov < 80" | bc -l)" = "1" ]; then
-            echo "::error::Application coverage ${app_cov}% is below 80% floor"
-            failed=1
-          fi
-          if [ "$(echo "$adapters_cov < 60" | bc -l)" = "1" ]; then
-            echo "::error::Adapters coverage ${adapters_cov}% is below 60% floor"
-            failed=1
-          fi
+          cargo llvm-cov --package domain --summary-only --fail-under-lines 90 \
+            || { echo "::error::Domain line coverage is below the 90% floor"; failed=1; }
+          cargo llvm-cov --package application --summary-only --fail-under-lines 80 \
+            || { echo "::error::Application line coverage is below the 80% floor"; failed=1; }
+          cargo llvm-cov --package adapters --summary-only --fail-under-lines 60 \
+            || { echo "::error::Adapters line coverage is below the 60% floor"; failed=1; }
           exit $failed
       - name: Upload coverage report
         uses: actions/upload-artifact@v7
