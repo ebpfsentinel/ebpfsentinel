@@ -112,6 +112,8 @@ suite_profiles:
   "62": nightly
   # 63 is pure introspection (no agent, no root): cheap enough for every PR.
   "63": pr
+  "64": nightly
+  "65": nightly
   "perf/01": nightly
   "perf/02": nightly
   "perf/03": nightly
@@ -250,7 +252,7 @@ coverage:
     profile: pr
     notes: "SSL/TLS DLP via uprobes; per-container uprobe attach across cgroups in suite 60; TLS-MITM inspection is enterprise-only; uprobe SSL-inspection goodput cost (loopback libssl) measured in perf/06"
 
-  # ── CLI subcommands (28) ────────────────────────────────────────
+  # ── CLI subcommands (37) ────────────────────────────────────────
   - kind: cli_subcommand
     feature: version
     suites: ["01"]
@@ -476,6 +478,78 @@ coverage:
     notes: "Manual packet capture (start/list/stop) with tcpdump-parseable pcap export asserted in 49"
 
   - kind: cli_subcommand
+    feature: aliases
+    suites: ["16"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Alias status and resolved content read back through /api/v1/aliases in 16, including an alias that does not exist"
+
+  - kind: cli_subcommand
+    feature: config
+    suites: ["16", "17", "23", "25", "35", "52"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Effective configuration and reload through /api/v1/config; reload asserted under sustained load in 52 and against the operator-managed flag in 35"
+
+  - kind: cli_subcommand
+    feature: dlp
+    suites: ["16", "27"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "DLP status and pattern list; the uprobe datapath behind them is asserted in 27"
+
+  - kind: cli_subcommand
+    feature: ebpf
+    suites: ["16", "60", "62"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Program load status through /api/v1/ebpf/status; the per-container uprobe inventory in 60"
+
+  - kind: cli_subcommand
+    feature: geoip
+    suites: ["30"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "GeoIP status and address lookup against the fixture database in 30"
+
+  - kind: cli_subcommand
+    feature: ids
+    suites: ["12", "16", "33", "55", "59"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "IDS status and rule list; the rules are asserted over IPv6 in 55 and under a real SSH brute force in 59"
+
+  - kind: cli_subcommand
+    feature: routing
+    suites: ["16", "32", "53"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Gateway and route list through /api/v1/routing; failover ordering in 53"
+
+  - kind: cli_subcommand
+    feature: tls
+    suites: ["58"]
+    topology: none
+    kernel_min: "n/a"
+    profile: nightly
+    notes: "TLS status through /api/v1/tls/status, read while the PQ-hybrid handshake sweep runs in 58"
+
+  - kind: cli_subcommand
+    feature: zones
+    suites: ["31"]
+    topology: 2vm
+    kernel_min: "6.9"
+    profile: pr
+    notes: "Zone, policy and status reads through /api/v1/zones in 31"
+
+  - kind: cli_subcommand
     feature: nptv6
     suites: ["50", "perf/03"]
     topology: 2vm
@@ -483,7 +557,7 @@ coverage:
     profile: nightly
     notes: "NPTv6 prefix-translation CRUD + listing asserted via REST + `nat nptv6 list` CLI parity in 50; prefix-rule add control-plane latency (10/100) benched in perf/03"
 
-  # ── Domain modules (23, excl. common) ───────────────────────────
+  # ── Domain modules (24, excl. common) ───────────────────────────
   - kind: domain_module
     feature: alert
     suites: ["04", "25", "34", "61"]
@@ -651,6 +725,14 @@ coverage:
     kernel_min: "6.9"
     profile: nightly
     notes: "Multi-WAN routing; failover ordering + REST + metrics surface asserted in 53 (priority-ordered list, gateways_total gauge, failovers_total counter, SIGHUP-driven priority swap). Active health probe loop + WAN_ALL_DOWN alert + real link-down egress reroute tracked as deferred ACs in the suite header"
+
+  - kind: domain_module
+    feature: telemetry
+    suites: ["TBD"]
+    topology: none
+    kernel_min: "n/a"
+    profile: manual
+    notes: "Anonymous heartbeat of version and eBPF load state. No suite exercises it: the destination is a build-time constant that no test build carries, so a community or CI binary has nowhere to send one and there is nothing to receive it"
 
   - kind: domain_module
     feature: threatintel

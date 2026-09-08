@@ -193,22 +193,28 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `xdp-ratelimit-syncookie` | 43 | 2vm | 6.9 | nightly | SYN cookie forging tail-call; suite 43 asserts TcpExtSyncookiesSent + agent metric grow, legit ncat completes, spoofed flood leaves TcpExtSyncookiesRecv flat |
 | `xdp-vip-announcer` | 37, 44 | 2vm | 6.9 | nightly | L2 VIP announcer / ARP responder; suite 44 (3-VM) drives the responder + gratuitous-ARP + is_self_announced predicate from a real client |
 
-#### CLI subcommands (28)
+#### CLI subcommands (37)
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
 | `alerts` | 04, 25, 34 | 2vm | 6.9 | pr | Alert list + e2e + SSE stream |
+| `aliases` | 16 | 2vm | 6.9 | pr | Alias status and resolved content read back through /api/v1/aliases in 16, including an alias that does not exist |
 | `audit` | 04 | none | n/a | pr | Audit log + rule history |
 | `capture` | 49 | 2vm | 6.9 | nightly | Manual packet capture (start/list/stop) with tcpdump-parseable pcap export asserted in 49 |
+| `config` | 16, 17, 23, 25, 35, 52 | 2vm | 6.9 | pr | Effective configuration and reload through /api/v1/config; reload asserted under sustained load in 52 and against the operator-managed flag in 35 |
 | `conntrack` | 18, 16 | 2vm | 6.9 | pr | Connection tracking inspection + flush |
 | `ddos` | 15, 22, 38, 39, 40 | 2vm | 6.9 | pr | DDoS protection + scrub; MHDDoS flood matrix in 38; slow-attack T1499.002 in 39; amplification T1498.002 in 40 |
+| `dlp` | 16, 27 | 2vm | 6.9 | pr | DLP status and pattern list; the uprobe datapath behind them is asserted in 27 |
 | `dns` | 04, 19 | 2vm | 6.9 | pr | DNS cache, stats, blocklist |
 | `domains` | 04 | none | n/a | pr | Domain reputation + blocklist |
+| `ebpf` | 16, 60, 62 | 2vm | 6.9 | pr | Program load status through /api/v1/ebpf/status; the per-container uprobe inventory in 60 |
 | `fingerprints` | 29, 41 | 2vm | 6.9 | nightly | JA4+ cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 41 |
 | `firewall` | 03, 11, 26, 40 | 2vm | 6.9 | pr | L3/L4 rule CRUD + eBPF scenarios; amplification UDP-port denies in 40 |
 | `flows` | 04, 18 | 2vm | 6.9 | pr | Aggregated connection map |
+| `geoip` | 30 | 2vm | 6.9 | pr | GeoIP status and address lookup against the fixture database in 30 |
 | `health` | 02 | none | n/a | pr | /healthz + /readyz |
 | `identity` | 35 | none | n/a | pr | Operator-managed flag, hostname, version |
+| `ids` | 12, 16, 33, 55, 59 | 2vm | 6.9 | pr | IDS status and rule list; the rules are asserted over IPv6 in 55 and under a real SSH brute force in 59 |
 | `investigate` | 04 | none | n/a | pr | IP correlation across alerts/CT/DNS/blacklist |
 | `ips` | 13, 16, 38, 39 | 2vm | 6.9 | pr | Intrusion prevention + auto-blacklist; MHDDoS flood matrix in 38; slowhttptest in 39 |
 | `l7` | 16, 29, 38, 39 | 2vm | 6.9 | pr | L7 firewall rules (HTTP/SMTP/FTP/SMB inspection); MHDDoS flood matrix in 38; slow-request timeout in 39 |
@@ -219,14 +225,17 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `qos` | 16, 28 | 2vm | 6.9 | pr | QoS / traffic shaping |
 | `ratelimit` | 04, 14, 16, 38 | 2vm | 6.9 | pr | Rate limit policies; MHDDoS flood matrix in 38 |
 | `responses` | 48 | 2vm | 6.9 | nightly | Manual time-bounded response actions (create/list/revoke + TTL auto-expire) asserted via REST + CLI parity in 48 |
+| `routing` | 16, 32, 53 | 2vm | 6.9 | pr | Gateway and route list through /api/v1/routing; failover ordering in 53 |
 | `score` | 04 | none | n/a | pr | 0-10 network risk score |
 | `status` | 01, 02 | none | n/a | pr | Runtime status query |
 | `threatintel` | 16, 17, 33 | 2vm | 6.9 | pr | OSINT feed CRUD + IOC matching + STIX feed |
+| `tls` | 58 | none | n/a | nightly | TLS status through /api/v1/tls/status, read while the PQ-hybrid handshake sweep runs in 58 |
 | `top` | 04 | none | n/a | pr | Top talkers by traffic volume |
 | `version` | 01 | none | n/a | pr | Version + build info |
 | `watch` | 34 | none | n/a | pr | SSE alerts stream (tail -f) |
+| `zones` | 31 | 2vm | 6.9 | pr | Zone, policy and status reads through /api/v1/zones in 31 |
 
-#### Domain modules (23)
+#### Domain modules (24)
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
@@ -251,6 +260,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `ratelimit` | 04, 14, 38 | 2vm | 6.9 | pr | Token bucket + variants; exhaustion under flood in 38 |
 | `response` | 48 | 2vm | 6.9 | nightly | In-memory ResponseEngine create/list/revoke + TTL auto-expire asserted in 48; auto_response → IpsService → firewall-map mirroring exercised separately by the auto-response pipeline (not in 48) |
 | `routing` | 32, 53 | 2vm | 6.9 | nightly | Multi-WAN routing; failover ordering + REST + metrics surface asserted in 53 (priority-ordered list, gateways_total gauge, failovers_total counter, SIGHUP-driven priority swap). Active health probe loop + WAN_ALL_DOWN alert + real link-down egress reroute tracked as deferred ACs in the suite header |
+| `telemetry` | TBD | none | n/a | manual | Anonymous heartbeat of version and eBPF load state. No suite exercises it: the destination is a build-time constant that no test build carries, so a community or CI binary has nowhere to send one and there is nothing to receive it |
 | `threatintel` | 16, 17, 33 | 2vm | 6.9 | pr | OSINT feeds + IOC + STIX |
 | `zone` | 31 | 2vm | 6.9 | pr | Zone-based policy |
 
