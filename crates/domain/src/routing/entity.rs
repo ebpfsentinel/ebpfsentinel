@@ -9,8 +9,6 @@ pub enum GatewayStatus {
     /// Gateway is reachable and healthy.
     #[default]
     Healthy,
-    /// Gateway is reachable but experiencing packet loss.
-    Degraded { loss_percent: u8 },
     /// Gateway is unreachable.
     Down,
 }
@@ -178,6 +176,16 @@ mod tests {
         // Should not go down on next failure (count reset)
         state.record_failure(3);
         assert_ne!(state.status, GatewayStatus::Down);
+    }
+
+    #[test]
+    fn every_status_renders_as_one_word_on_the_wire() {
+        // The HTTP layer writes the status as a lowercased Debug rendering, so
+        // a variant carrying a field would reach a client as "x { .. }".
+        for status in [GatewayStatus::Healthy, GatewayStatus::Down] {
+            let word = format!("{status:?}").to_lowercase();
+            assert!(word.chars().all(|c| c.is_ascii_lowercase()), "{word}");
+        }
     }
 
     #[test]

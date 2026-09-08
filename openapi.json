@@ -8594,7 +8594,7 @@
           },
           "status": {
             "type": "string",
-            "description": "Health-check observed status (`healthy` / `degraded` / `down`)."
+            "description": "Health-check observed status (`healthy` / `down`)."
           },
           "weight": {
             "type": "integer",

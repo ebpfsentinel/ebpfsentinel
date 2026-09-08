@@ -33,7 +33,7 @@ pub struct GatewayResponse {
     /// Alias of `priority`, exposed as a routing weight.
     pub weight: u32,
     pub enabled: bool,
-    /// Health-check observed status (`healthy` / `degraded` / `down`).
+    /// Health-check observed status (`healthy` / `down`).
     pub status: String,
     /// Alias of `status` for clients expecting a `health_status` field.
     pub health_status: String,
