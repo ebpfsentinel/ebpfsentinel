@@ -1,0 +1,68 @@
+# config-ebpf-conntrack-guard.yaml - Per-source connection guard test config
+#
+# The guard runs in xdp-firewall on NEW connections that matched an allow
+# rule, so the fixture carries exactly one such rule, on a single port, to
+# keep the counters this test reads about the traffic it sends.
+#
+# Network topology (placeholders substituted by prepare_ebpf_config):
+#   Host: __HOST_IP__  (veth-ebpf0 or agent VM eth1)
+#   NS:   __NS_IP__    (veth-ebpf1 or attacker VM)
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: pass
+  rules:
+    - id: fw-allow-tcp-guarded
+      priority: 10
+      action: allow
+      protocol: tcp
+      dst_port: "9971"
+      scope: global
+      enabled: true
+
+conntrack:
+  enabled: true
+  # Three new connections per source per minute, and a source that goes past
+  # that is refused for the rest of the run: the window is wider than the
+  # test so nothing it sends is measured against a second one.
+  max_src_states: 0
+  max_src_conn_rate: 3
+  conn_rate_window_secs: 60
+  overload_ttl_secs: 3600
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

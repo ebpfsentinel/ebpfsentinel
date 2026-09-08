@@ -1060,15 +1060,21 @@ fn process_firewall_v4(
     }
 
     // Phase 0: Overload blacklist fast-path check.
-    // If source IP is in the overload set (set_id=255), drop immediately.
+    // If source IP is in the overload set (set_id=255), drop immediately -
+    // unless the mark it was written for has run out, in which case the set
+    // entry is the stale half of a decision the counter has already let go of
+    // and leaving it there would make an overload TTL a ban.
     let overload_key = IpSetKeyV4 {
         set_id: OVERLOAD_SET_ID as u16,
         _pad: [0; 2],
         addr: src_ip,
     };
     if unsafe { FW_IPSET_V4.get(&overload_key) }.is_some() {
-        increment_metric(METRIC_DROPPED);
-        return Ok(xdp_action::XDP_DROP);
+        if overload_still_stands(SrcCounterKey::from_v4(src_ip)) {
+            increment_metric(METRIC_DROPPED);
+            return Ok(xdp_action::XDP_DROP);
+        }
+        let _ = FW_IPSET_V4.remove(&overload_key);
     }
 
     // Phase 0: Conntrack lookup.
@@ -1348,6 +1354,27 @@ fn mac_eq(a: &[u8; 6], b: &[u8; 6]) -> bool {
     a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3] && a[4] == b[4] && a[5] == b[5]
 }
 
+/// Whether an entry in the overload IP set is still to be enforced.
+///
+/// That set is read on the fast path before a rule is looked at, which is
+/// where a mark that has run out costs most: the source is refused without
+/// the counter that earned the refusal ever being consulted.
+#[inline(always)]
+fn overload_still_stands(src_key: SrcCounterKey) -> bool {
+    // No configuration yet is no TTL to judge against: keep refusing rather
+    // than opening the fast path on a map userspace has not filled.
+    let ttl_secs = match CT_CONFIG.get(0) {
+        Some(cfg) => cfg.overload_ttl_secs,
+        None => 0,
+    };
+    match unsafe { CT_SRC_COUNTERS.get(&src_key) } {
+        Some(counter) => counter.is_overloaded(ttl_secs, unsafe { bpf_ktime_get_boot_ns() }),
+        // The counter is gone, so nothing is left to say when the mark was
+        // set. The set entry is then the whole of a decision nobody can date.
+        None => false,
+    }
+}
+
 /// Check per-source connection limits and per-rule state limits.
 ///
 /// Returns `true` if the connection should be allowed, `false` if it
@@ -1366,8 +1393,12 @@ fn check_connection_limits(src_key: SrcCounterKey, rule_idx: i32, max_rule_state
     // Check per-source limits.
     if cfg.max_src_states > 0 || cfg.max_src_conn_rate > 0 {
         if let Some(counter) = unsafe { CT_SRC_COUNTERS.get(&src_key) } {
-            // Already overloaded → DROP immediately.
-            if (counter.flags & SRC_COUNTER_FLAG_OVERLOADED) != 0 {
+            // Already overloaded and the mark still stands → DROP immediately.
+            // A mark that has run out is cleared on the way through, below,
+            // rather than here, so the source is measured again from the
+            // instant it stopped being refused.
+            let now = unsafe { bpf_ktime_get_boot_ns() };
+            if counter.is_overloaded(cfg.overload_ttl_secs, now) {
                 return false;
             }
             // Check concurrent connection limit.
@@ -1376,7 +1407,6 @@ fn check_connection_limits(src_key: SrcCounterKey, rule_idx: i32, max_rule_state
             }
             // Check connection rate limit.
             if cfg.max_src_conn_rate > 0 {
-                let now = unsafe { bpf_ktime_get_boot_ns() };
                 let window_ns = (cfg.conn_rate_window_secs as u64) * 1_000_000_000;
                 let elapsed = now.saturating_sub(counter.window_start_ns);
                 // Within the current rate window.
@@ -1388,6 +1418,7 @@ fn check_connection_limits(src_key: SrcCounterKey, rule_idx: i32, max_rule_state
                         window_start_ns: counter.window_start_ns,
                         flags: counter.flags | SRC_COUNTER_FLAG_OVERLOADED,
                         _pad: [0; 7],
+                        overloaded_at_ns: now,
                     };
                     // Insert may fail if map is full - acceptable: the overload
                     // flag is best-effort. The packet is still dropped below.
@@ -1415,22 +1446,33 @@ fn check_connection_limits(src_key: SrcCounterKey, rule_idx: i32, max_rule_state
         let new_counter = if let Some(existing) = unsafe { CT_SRC_COUNTERS.get(&src_key) } {
             let window_ns = (cfg.conn_rate_window_secs as u64) * 1_000_000_000;
             let elapsed = now.saturating_sub(existing.window_start_ns);
+            // Reaching here means the mark, if there is one, has run out: the
+            // branch above returned for one that still stands. Write it out of
+            // the counter so the source is measured from now rather than
+            // carrying a flag nothing reads.
+            let (flags, overloaded_at_ns) = if existing.flags & SRC_COUNTER_FLAG_OVERLOADED != 0 {
+                (existing.flags & !SRC_COUNTER_FLAG_OVERLOADED, 0)
+            } else {
+                (existing.flags, existing.overloaded_at_ns)
+            };
             if elapsed >= window_ns {
                 // Rate window expired - reset rate counter.
                 SrcStateCounter {
                     conn_count: existing.conn_count + 1,
                     conn_rate: 1,
                     window_start_ns: now,
-                    flags: existing.flags,
+                    flags,
                     _pad: [0; 7],
+                    overloaded_at_ns,
                 }
             } else {
                 SrcStateCounter {
                     conn_count: existing.conn_count + 1,
                     conn_rate: existing.conn_rate + 1,
                     window_start_ns: existing.window_start_ns,
-                    flags: existing.flags,
+                    flags,
                     _pad: [0; 7],
+                    overloaded_at_ns,
                 }
             }
         } else {
@@ -1440,6 +1482,7 @@ fn check_connection_limits(src_key: SrcCounterKey, rule_idx: i32, max_rule_state
                 window_start_ns: now,
                 flags: 0,
                 _pad: [0; 7],
+                overloaded_at_ns: 0,
             }
         };
         let _ = CT_SRC_COUNTERS.insert(&src_key, &new_counter, 0);

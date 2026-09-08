@@ -43,6 +43,14 @@ conntrack:
   fin_threshold: 50
   ack_threshold: 100
 
+  # Per-source connection guard, enforced by the XDP firewall on new
+  # connections that matched an allow rule. Both ceilings default to 0,
+  # which is no ceiling at all.
+  max_src_states: 512          # Concurrent connections one source may hold
+  max_src_conn_rate: 64        # New connections one source may open per window
+  conn_rate_window_secs: 10    # Width of that window
+  overload_ttl_secs: 600       # How long a source that exceeded it stays refused
+
 # ── Firewall (stateful rules using conntrack) ──────────────────────
 #
 # With conntrack enabled, firewall rules can use the `state` field

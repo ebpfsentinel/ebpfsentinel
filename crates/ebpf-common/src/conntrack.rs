@@ -198,7 +198,7 @@ pub struct ConnValueV6 {
     pub _pad2: [u8; 2],
 }
 
-// ── Conntrack configuration - 80 bytes ──────────────────────────────
+// ── Conntrack configuration - 72 bytes ──────────────────────────────
 
 /// Global conntrack configuration, stored in a single-element Array map.
 #[repr(C)]
@@ -225,6 +225,9 @@ pub struct ConnTrackConfig {
     pub max_src_conn_rate: u32,
     /// Rate window duration in seconds (default: 5).
     pub conn_rate_window_secs: u32,
+    /// How long a source stays marked overloaded, in seconds (0 = for ever).
+    pub overload_ttl_secs: u32,
+    pub _pad2: [u8; 4],
 }
 
 impl ConnTrackConfig {
@@ -242,6 +245,8 @@ impl ConnTrackConfig {
             icmp_timeout_ns: 30 * 1_000_000_000,                 // 30s
             max_src_conn_rate: 0,
             conn_rate_window_secs: 5,
+            overload_ttl_secs: 3600,
+            _pad2: [0; 4],
         }
     }
 }
@@ -320,6 +325,30 @@ pub struct SrcStateCounter {
     /// Flags: 0x01 = overloaded (source added to blacklist).
     pub flags: u8,
     pub _pad: [u8; 7],
+    /// When the overload mark was set, in nanoseconds
+    /// (`bpf_ktime_get_boot_ns`). Meaningless while the flag is clear.
+    pub overloaded_at_ns: u64,
+}
+
+impl SrcStateCounter {
+    /// Whether this source is still to be refused.
+    ///
+    /// The overload mark is a decision taken at one instant, so it needs an
+    /// end: without one, a source that tripped the rate limit once is refused
+    /// until the agent restarts, which is a permanent ban earned by a burst.
+    /// A zero TTL is the deliberate way to ask for exactly that, and any other
+    /// value is a window measured from the moment the mark was set.
+    #[must_use]
+    pub const fn is_overloaded(&self, overload_ttl_secs: u32, now_ns: u64) -> bool {
+        if self.flags & SRC_COUNTER_FLAG_OVERLOADED == 0 {
+            return false;
+        }
+        if overload_ttl_secs == 0 {
+            return true;
+        }
+        let ttl_ns = (overload_ttl_secs as u64) * 1_000_000_000;
+        now_ns.saturating_sub(self.overloaded_at_ns) < ttl_ns
+    }
 }
 
 /// Flag indicating the source has been added to the overload table.
@@ -487,6 +516,55 @@ mod tests {
         );
     }
 
+    fn overloaded_at(at_ns: u64) -> SrcStateCounter {
+        SrcStateCounter {
+            conn_count: 1,
+            conn_rate: 1,
+            window_start_ns: at_ns,
+            flags: SRC_COUNTER_FLAG_OVERLOADED,
+            _pad: [0; 7],
+            overloaded_at_ns: at_ns,
+        }
+    }
+
+    #[test]
+    fn a_source_that_was_never_marked_is_not_overloaded() {
+        let mut counter = overloaded_at(0);
+        counter.flags = 0;
+        assert!(!counter.is_overloaded(3600, 0));
+        assert!(!counter.is_overloaded(0, 0));
+    }
+
+    #[test]
+    fn a_mark_holds_for_the_length_of_its_window() {
+        let counter = overloaded_at(1_000_000_000);
+        assert!(counter.is_overloaded(10, 1_000_000_000));
+        assert!(counter.is_overloaded(10, 10_000_000_000));
+    }
+
+    #[test]
+    fn a_mark_runs_out_once_the_window_has_passed() {
+        let counter = overloaded_at(1_000_000_000);
+        // Exactly one window later the mark is spent: a source refused for
+        // the whole of its TTL and one nanosecond more is refused for ever.
+        assert!(!counter.is_overloaded(10, 11_000_000_000));
+        assert!(!counter.is_overloaded(10, 60_000_000_000));
+    }
+
+    #[test]
+    fn a_zero_ttl_is_a_mark_that_never_runs_out() {
+        let counter = overloaded_at(1_000_000_000);
+        assert!(counter.is_overloaded(0, u64::MAX));
+    }
+
+    #[test]
+    fn a_clock_that_went_backwards_does_not_clear_a_mark() {
+        // bpf_ktime_get_boot_ns does not go backwards, but a counter written
+        // by one CPU and read by another can be read at an earlier instant.
+        let counter = overloaded_at(10_000_000_000);
+        assert!(counter.is_overloaded(10, 9_000_000_000));
+    }
+
     #[test]
     fn conn_key_size() {
         assert_eq!(mem::size_of::<ConnKey>(), 16);
@@ -557,7 +635,7 @@ mod tests {
 
     #[test]
     fn conn_track_config_size() {
-        assert_eq!(mem::size_of::<ConnTrackConfig>(), 64);
+        assert_eq!(mem::size_of::<ConnTrackConfig>(), 72);
     }
 
     #[test]
@@ -567,7 +645,7 @@ mod tests {
 
     #[test]
     fn src_state_counter_size() {
-        assert_eq!(mem::size_of::<SrcStateCounter>(), 24);
+        assert_eq!(mem::size_of::<SrcStateCounter>(), 32);
     }
 
     #[test]
@@ -581,6 +659,7 @@ mod tests {
         assert_eq!(mem::offset_of!(SrcStateCounter, conn_rate), 4);
         assert_eq!(mem::offset_of!(SrcStateCounter, window_start_ns), 8);
         assert_eq!(mem::offset_of!(SrcStateCounter, flags), 16);
+        assert_eq!(mem::offset_of!(SrcStateCounter, overloaded_at_ns), 24);
     }
 
     #[test]
@@ -693,5 +772,7 @@ mod tests {
         assert_eq!(cfg.tcp_syn_timeout_ns, 120_000_000_000);
         assert_eq!(cfg.udp_timeout_ns, 30_000_000_000);
         assert_eq!(cfg.icmp_timeout_ns, 30_000_000_000);
+        assert_eq!(cfg.conn_rate_window_secs, 5);
+        assert_eq!(cfg.overload_ttl_secs, 3600);
     }
 }

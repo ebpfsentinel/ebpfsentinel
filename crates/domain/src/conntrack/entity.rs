@@ -210,6 +210,17 @@ impl ConnTrackSettings {
                 field: "icmp_timeout_secs",
             });
         }
+        // A rate ceiling with no window is a ceiling nothing is measured
+        // against: the datapath divides the window into the count, so a zero
+        // there is a limit that either never trips or trips on the first
+        // packet, depending on which side of the comparison rounds first.
+        if self.max_src_conn_rate > 0 && self.conn_rate_window_secs == 0 {
+            return Err(ConnTrackError::InvalidConfig {
+                reason:
+                    "conn_rate_window_secs must be greater than zero when max_src_conn_rate is set"
+                        .to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -229,6 +240,8 @@ impl ConnTrackSettings {
             icmp_timeout_ns: self.icmp_timeout_secs.saturating_mul(1_000_000_000),
             max_src_conn_rate: self.max_src_conn_rate,
             conn_rate_window_secs: self.conn_rate_window_secs,
+            overload_ttl_secs: self.overload_ttl_secs,
+            _pad2: [0; 4],
         }
     }
 }
@@ -286,6 +299,41 @@ mod tests {
         assert_eq!(cfg.tcp_syn_timeout_ns, 10_000_000_000);
         assert_eq!(cfg.udp_timeout_ns, 5_000_000_000);
         assert_eq!(cfg.icmp_timeout_ns, 3_000_000_000);
+        assert_eq!(cfg.overload_ttl_secs, 3600);
+    }
+
+    #[test]
+    fn the_overload_window_reaches_the_datapath() {
+        // It was declared here and copied nowhere, so a source marked
+        // overloaded stayed marked whatever the setting said.
+        let settings = ConnTrackSettings {
+            max_src_conn_rate: 20,
+            overload_ttl_secs: 60,
+            ..ConnTrackSettings::default()
+        };
+        let cfg = settings.to_ebpf_config();
+        assert_eq!(cfg.max_src_conn_rate, 20);
+        assert_eq!(cfg.overload_ttl_secs, 60);
+    }
+
+    #[test]
+    fn a_rate_ceiling_with_no_window_is_rejected() {
+        let settings = ConnTrackSettings {
+            max_src_conn_rate: 100,
+            conn_rate_window_secs: 0,
+            ..ConnTrackSettings::default()
+        };
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn a_window_of_zero_is_allowed_while_no_rate_is_asked_for() {
+        let settings = ConnTrackSettings {
+            max_src_conn_rate: 0,
+            conn_rate_window_secs: 0,
+            ..ConnTrackSettings::default()
+        };
+        assert!(settings.validate().is_ok());
     }
 
     #[test]

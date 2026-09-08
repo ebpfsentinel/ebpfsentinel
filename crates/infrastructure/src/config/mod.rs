@@ -412,6 +412,14 @@ impl AgentConfig {
         // Validate multi-WAN gateways
         self.routing.validate()?;
 
+        // Validate the conntrack block, the per-source guard included
+        self.conntrack_settings()
+            .validate()
+            .map_err(|e| ConfigError::Validation {
+                field: "conntrack".to_string(),
+                message: e.to_string(),
+            })?;
+
         // Validate TLS config
         if self.agent.tls.enabled {
             if self.agent.tls.cert_path.is_empty() {
@@ -1169,6 +1177,10 @@ impl AgentConfig {
     pub fn conntrack_settings(&self) -> ConnTrackSettings {
         ConnTrackSettings {
             enabled: self.conntrack.enabled,
+            max_src_states: self.conntrack.max_src_states,
+            max_src_conn_rate: self.conntrack.max_src_conn_rate,
+            conn_rate_window_secs: self.conntrack.conn_rate_window_secs,
+            overload_ttl_secs: self.conntrack.overload_ttl_secs,
             ..ConnTrackSettings::default()
         }
     }
@@ -4100,6 +4112,45 @@ conntrack:
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let settings = config.conntrack_settings();
         assert!(settings.enabled);
+        assert_eq!(settings.max_src_states, 0);
+        assert_eq!(settings.conn_rate_window_secs, 5);
+        assert_eq!(settings.overload_ttl_secs, 3600);
+    }
+
+    #[test]
+    fn conntrack_per_source_guard_reaches_the_settings() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+conntrack:
+  enabled: true
+  max_src_states: 200
+  max_src_conn_rate: 50
+  conn_rate_window_secs: 10
+  overload_ttl_secs: 600
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        config.validate().expect("guard settings are valid");
+        let settings = config.conntrack_settings();
+        assert_eq!(settings.max_src_states, 200);
+        assert_eq!(settings.max_src_conn_rate, 50);
+        assert_eq!(settings.conn_rate_window_secs, 10);
+        assert_eq!(settings.overload_ttl_secs, 600);
+    }
+
+    #[test]
+    fn conntrack_rate_ceiling_without_a_window_is_refused() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+conntrack:
+  enabled: true
+  max_src_conn_rate: 50
+  conn_rate_window_secs: 0
+";
+        // from_yaml validates, so the refusal lands before anything holds a
+        // configuration carrying a ceiling nothing is measured against.
+        assert!(AgentConfig::from_yaml(yaml).is_err());
     }
 
     #[test]
