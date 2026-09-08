@@ -9,6 +9,25 @@ use domain::loadbalancer::engine::LbEngine;
 use domain::loadbalancer::entity::{
     LbAlgorithm, LbBackend, LbForwardingMode, LbProtocol, LbService,
 };
+use ebpf_common::loadbalancer::{LB_MAX_BACKENDS, LB_MAX_BACKENDS_V2};
+
+/// How many backends a service carries.
+///
+/// The pool is 256 deep and the Maglev ring is sized against it, so a count
+/// drawn as `chunk[4] % 4` never reached the ceiling, never reached the
+/// sixteen-deep per-service array underneath it, and left both boundaries to
+/// unit tests. Small counts stay the common case because that is what a fuzz
+/// iteration can afford; the four interesting values are named rather than
+/// waited for, since random bytes land on 256 about once in 256 draws.
+fn backend_count(control: u8) -> u32 {
+    match control % 16 {
+        12 => LB_MAX_BACKENDS_V2 - 1,
+        13 => LB_MAX_BACKENDS_V2,
+        14 => LB_MAX_BACKENDS_V2 + 1,
+        15 => LB_MAX_BACKENDS as u32,
+        n => u32::from(n % 4) + 1,
+    }
+}
 
 // Fuzz the LbEngine with random services, backend selection, connection
 // tracking, and health transitions.
@@ -47,16 +66,25 @@ fuzz_target!(|data: &[u8]| {
         // Avoid port 0 which is rejected by validation
         let listen_port = if listen_port == 0 { 1 } else { listen_port };
 
-        let backend_count = (chunk[4] % 4) + 1; // 1..=4 backends
-        let mut backends = Vec::new();
-        for i in 0..backend_count {
+        let count = backend_count(chunk[4]);
+        let mut backends = Vec::with_capacity(count as usize);
+        for i in 0..count {
             let weight = u32::from(chunk[5 + (i as usize) % 5]).max(1);
             backends.push(LbBackend {
                 id: format!("be-{}-{i}", services.len()),
-                addr: IpAddr::V4(Ipv4Addr::new(10, 0, services.len() as u8, i + 1)),
-                port: 8080 + u16::from(i),
+                // The last octet wraps rather than saturating, so a service at
+                // the ceiling carries addresses that repeat instead of 254
+                // copies of one.
+                addr: IpAddr::V4(Ipv4Addr::new(
+                    10,
+                    (i / 254) as u8,
+                    services.len() as u8,
+                    (i % 254) as u8 + 1,
+                )),
+                port: 8080u16.wrapping_add(i as u16),
                 weight,
-                enabled: chunk[9] & (1 << (i % 8)) == 0 || i == 0, // ensure at least one enabled
+                // Ensure at least one enabled.
+                enabled: chunk[9] & (1 << (i % 8)) == 0 || i == 0,
                 same_segment: chunk[9] & 0x80 != 0,
             });
         }
