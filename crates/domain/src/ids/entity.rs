@@ -28,7 +28,12 @@ pub enum SamplingMode {
     /// Process all events (default).
     #[default]
     None,
-    /// Probabilistic sampling: each event has `rate` chance (0.0-1.0) of being processed.
+    /// Rate-based sampling of the address pair (0.0-1.0).
+    ///
+    /// Deterministic despite the name: the kernel draws a random number per
+    /// packet, this side selects on a hash of `src_ip` and `dst_ip` so that a
+    /// source the counters already saw keeps being counted. It differs from
+    /// [`SamplingMode::Hash`] only in the mixing.
     Random { rate: f64 },
     /// Deterministic per-flow sampling: hash of `src_ip` ^ `dst_ip` determines selection.
     Hash { rate: f64 },
