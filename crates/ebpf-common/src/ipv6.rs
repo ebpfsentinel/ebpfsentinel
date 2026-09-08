@@ -1,9 +1,15 @@
-//! IPv6 extension header walking rules, shared by the XDP and TC helpers.
+//! IPv6 extension header walking, shared by the XDP and TC helpers.
 //!
-//! The kernel-side walk lives in `ebpf-helpers`, which is `no_std`, links
-//! `aya-ebpf` and is excluded from the workspace, so nothing there is reachable
-//! from `cargo test`. The part that decides how far the walk advances is pure
-//! arithmetic, so it lives here where it is covered.
+//! The walk lives here rather than beside its two callers because
+//! `ebpf-helpers` is `no_std`, links `aya-ebpf` and is excluded from the
+//! workspace, so nothing there is reachable from `cargo test`. It took only
+//! the packet window as two addresses and an offset, never a context, so
+//! moving it costs the callers one line each and puts the loop, its bounds
+//! checks and its two caps under test.
+//!
+//! The XDP and TC copies were identical to the byte before the move, which is
+//! the other half of the reason: a rule that has to be stated twice is a rule
+//! that gets fixed once.
 
 /// Hop-by-Hop Options header.
 pub const IPV6_EXT_HOP_BY_HOP: u8 = 0;
@@ -69,6 +75,66 @@ pub const fn ipv6_ext_header_len(hdr_type: u8, hdr_ext_len: u8) -> usize {
         IPV6_EXT_AUTH => (hdr_ext_len as usize + 2) * 4,
         _ => (hdr_ext_len as usize + 1) * 8,
     }
+}
+
+/// Walk the IPv6 extension header chain, returning the upper-layer protocol
+/// and the offset just past the last extension header.
+///
+/// `start` and `end` are the packet window as the datapath holds it, and
+/// `start_offset` is where the chain begins inside it. Advancement is by a
+/// single pointer rather than by `start + variable_offset`, because the
+/// verifier rejects the latter as an unbounded minimum value.
+///
+/// Returns `None` when the chain runs past the end of the packet, so a caller
+/// treats an unparsed packet as one it has nothing to say about.
+///
+/// The header being measured is the one the iteration entered on, never the
+/// `Next Header` value read out of it: those two are one header apart, and
+/// measuring the following one is how a Fragment header carrying a non-zero
+/// reserved byte moves the walk off the offset the host stack lands on.
+///
+/// ESP (50) is terminal and is returned rather than consumed, since everything
+/// after it is encrypted.
+///
+/// # Safety
+///
+/// `start..end` must be a readable window for the current program invocation,
+/// with `start <= end`.
+#[inline(always)]
+#[must_use]
+pub unsafe fn walk_ipv6_ext_headers(
+    start: usize,
+    end: usize,
+    start_offset: usize,
+    mut next_hdr: u8,
+) -> Option<(u8, usize)> {
+    let mut pos = start + start_offset;
+
+    let mut i = 0u32;
+    while i < IPV6_EXT_MAX_HEADERS {
+        if !is_ipv6_ext_header(next_hdr) {
+            break;
+        }
+        // Two bytes are needed: the Next Header value and the length byte.
+        if pos + 2 > end {
+            return None;
+        }
+        let hdr_ptr = pos as *const u8;
+        let this_hdr = next_hdr;
+        next_hdr = unsafe { *hdr_ptr };
+        let hdr_ext_len = unsafe { *hdr_ptr.add(1) };
+        pos += ipv6_ext_header_len(this_hdr, hdr_ext_len);
+        if pos > end {
+            return None;
+        }
+        i += 1;
+    }
+
+    let final_offset = pos - start;
+    if final_offset > IPV6_EXT_MAX_OFFSET {
+        return None;
+    }
+    Some((next_hdr, final_offset))
 }
 
 #[cfg(test)]
@@ -172,5 +238,130 @@ mod tests {
         }
         assert_eq!(offset, 16 + 8 + 24);
         assert!(offset <= IPV6_EXT_MAX_OFFSET);
+    }
+
+    // ── The walk over a packet window ──────────────────────────────
+
+    /// Run the walk over `packet` as though the datapath had handed it the
+    /// whole frame, with the chain starting at `start_offset`.
+    fn walk(packet: &[u8], start_offset: usize, first_hdr: u8) -> Option<(u8, usize)> {
+        let start = packet.as_ptr() as usize;
+        let end = start + packet.len();
+        unsafe { walk_ipv6_ext_headers(start, end, start_offset, first_hdr) }
+    }
+
+    /// One extension header: its Next Header byte, its length byte, and the
+    /// padding that takes it to `total` bytes.
+    fn ext(next_hdr: u8, len_byte: u8, total: usize) -> Vec<u8> {
+        let mut v = vec![0u8; total];
+        v[0] = next_hdr;
+        v[1] = len_byte;
+        v
+    }
+
+    const TCP: u8 = 6;
+    const ESP: u8 = 50;
+
+    #[test]
+    fn a_chain_of_no_extension_headers_advances_nothing() {
+        let packet = vec![0u8; 64];
+        assert_eq!(walk(&packet, 0, TCP), Some((TCP, 0)));
+    }
+
+    #[test]
+    fn a_fragment_header_in_front_of_tcp_is_eight_bytes_whatever_the_reserved_byte_says() {
+        // The evasion this walk exists to refuse: the reserved byte is the
+        // sender's to choose, and reading it as a length takes the walk
+        // 2048 bytes past a header that is eight bytes long.
+        for reserved in [0x00u8, 0x07, 0x80, 0xFF] {
+            let mut packet = ext(TCP, reserved, 8);
+            packet.extend_from_slice(&[0u8; 20]);
+            assert_eq!(
+                walk(&packet, 0, IPV6_EXT_FRAGMENT),
+                Some((TCP, 8)),
+                "reserved byte {reserved:#04x} moved the walk off the L4 offset"
+            );
+        }
+    }
+
+    #[test]
+    fn an_auth_header_in_front_of_tcp_counts_in_four_byte_units() {
+        // RFC 4302: (len + 2) * 4, so len 4 is 24 bytes. Measuring it in
+        // eight-byte units would land on 40.
+        let mut packet = ext(TCP, 4, 24);
+        packet.extend_from_slice(&[0u8; 20]);
+        assert_eq!(walk(&packet, 0, IPV6_EXT_AUTH), Some((TCP, 24)));
+    }
+
+    #[test]
+    fn a_hop_by_hop_header_in_front_of_a_fragment_header_keeps_its_own_length() {
+        // The Hop-by-Hop header is 24 bytes and the Fragment header after it
+        // is eight, so TCP starts at 32. Selecting the fixed-size rule from
+        // the following header would have advanced 8 for the first one.
+        let mut packet = ext(IPV6_EXT_FRAGMENT, 2, 24);
+        packet.extend_from_slice(&ext(TCP, 0xFF, 8));
+        packet.extend_from_slice(&[0u8; 20]);
+        assert_eq!(walk(&packet, 0, IPV6_EXT_HOP_BY_HOP), Some((TCP, 32)));
+    }
+
+    #[test]
+    fn the_walk_starts_where_it_is_told_to() {
+        let mut packet = vec![0xAAu8; 40];
+        packet.extend_from_slice(&ext(TCP, 0, 8));
+        packet.extend_from_slice(&[0u8; 20]);
+        // The offset comes back relative to the start of the window, so it
+        // carries the 40 bytes of IPv6 header the caller skipped.
+        assert_eq!(walk(&packet, 40, IPV6_EXT_ROUTING), Some((TCP, 48)));
+    }
+
+    #[test]
+    fn esp_is_returned_rather_than_walked() {
+        let mut packet = ext(ESP, 0, 8);
+        packet.extend_from_slice(&[0u8; 20]);
+        assert_eq!(walk(&packet, 0, IPV6_EXT_DESTINATION), Some((ESP, 8)));
+    }
+
+    #[test]
+    fn a_chain_running_past_the_packet_is_refused() {
+        // A Destination Options header claiming 2048 bytes inside a 64-byte
+        // packet: the walk says nothing rather than reading past the end.
+        let packet = ext(TCP, 0xFF, 64);
+        assert_eq!(walk(&packet, 0, IPV6_EXT_DESTINATION), None);
+    }
+
+    #[test]
+    fn a_header_with_no_room_for_its_length_byte_is_refused() {
+        // One byte left in the window, and the walk needs two.
+        let packet = vec![TCP; 1];
+        assert_eq!(walk(&packet, 0, IPV6_EXT_ROUTING), None);
+    }
+
+    #[test]
+    fn the_walk_gives_up_after_the_bounded_number_of_headers() {
+        // Seven Destination Options headers: the walk consumes six, stops on
+        // the iteration cap and reports the seventh as the upper layer.
+        let mut packet = Vec::new();
+        for _ in 0..6 {
+            packet.extend_from_slice(&ext(IPV6_EXT_DESTINATION, 0, 8));
+        }
+        packet.extend_from_slice(&ext(TCP, 0, 8));
+        packet.extend_from_slice(&[0u8; 20]);
+
+        let advanced = usize::try_from(IPV6_EXT_MAX_HEADERS).unwrap() * 8;
+        assert_eq!(
+            walk(&packet, 0, IPV6_EXT_DESTINATION),
+            Some((IPV6_EXT_DESTINATION, advanced))
+        );
+    }
+
+    #[test]
+    fn a_chain_past_the_offset_cap_is_refused() {
+        // Two Authentication headers of 1028 bytes each clear every bounds
+        // check inside a packet that large and still land past the cap.
+        let mut packet = ext(IPV6_EXT_AUTH, 255, 1028);
+        packet.extend_from_slice(&ext(TCP, 255, 1028));
+        packet.extend_from_slice(&[0u8; 20]);
+        assert!(packet.len() > IPV6_EXT_MAX_OFFSET);
+        assert_eq!(walk(&packet, 0, IPV6_EXT_AUTH), None);
     }
 }

@@ -3,9 +3,7 @@
 
 use aya_ebpf::programs::TcContext;
 use core::mem;
-use ebpf_common::ipv6::{
-    IPV6_EXT_MAX_HEADERS, IPV6_EXT_MAX_OFFSET, ipv6_ext_header_len, is_ipv6_ext_header,
-};
+use ebpf_common::ipv6::walk_ipv6_ext_headers;
 
 /// Bounds-checked read-only pointer access for TC programs.
 ///
@@ -37,53 +35,16 @@ pub unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> 
 /// Skip IPv6 extension headers, returning the final `next_header` (protocol)
 /// and the byte offset after the last extension header.
 ///
-/// Bounded to 6 iterations for eBPF verifier compliance. Handles:
-/// Hop-by-hop (0), Routing (43), Fragment (44), AH (51),
-/// Destination (60), and Mobility (135).
-///
-/// ESP (50) is a terminal header and is not consumed - when encountered it is
-/// returned immediately as the upper-layer protocol.
-/// Parse IPv6 extension headers using raw pointer advancement (TC variant).
+/// The walk itself is [`ebpf_common::ipv6::walk_ipv6_ext_headers`], which is in
+/// the workspace and therefore under test; this is the TC half of handing it
+/// the packet window.
 #[inline(always)]
 pub fn skip_ipv6_ext_headers(
     ctx: &TcContext,
     start_offset: usize,
-    mut next_hdr: u8,
+    next_hdr: u8,
 ) -> Option<(u8, usize)> {
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let mut pos = start + start_offset;
-
-    let mut i = 0u32;
-    while i < IPV6_EXT_MAX_HEADERS {
-        if !is_ipv6_ext_header(next_hdr) {
-            break;
-        }
-        // Bounds check: need at least 2 bytes (next_hdr + len)
-        if pos + 2 > end {
-            return None;
-        }
-        let hdr_ptr = pos as *const u8;
-        // The header being measured is the one this iteration entered on, not
-        // the Next Header value read out of it: those two are one header apart,
-        // and measuring the following one is how a Fragment header carrying a
-        // non-zero reserved byte moves this parser off the L4 offset the host
-        // stack lands on.
-        let this_hdr = next_hdr;
-        next_hdr = unsafe { *hdr_ptr };
-        let hdr_ext_len = unsafe { *hdr_ptr.add(1) };
-        pos += ipv6_ext_header_len(this_hdr, hdr_ext_len);
-        // Bounds check after each header advancement
-        if pos > end {
-            return None;
-        }
-        i += 1;
-    }
-
-    let final_offset = pos - start;
-    // Sanity cap
-    if final_offset > IPV6_EXT_MAX_OFFSET {
-        return None;
-    }
-    Some((next_hdr, final_offset))
+    // SAFETY: `data()..data_end()` is the readable packet window the kernel
+    // handed this program invocation.
+    unsafe { walk_ipv6_ext_headers(ctx.data(), ctx.data_end(), start_offset, next_hdr) }
 }
