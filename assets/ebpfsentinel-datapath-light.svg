@@ -1,12 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 64 900 336" width="900" height="336"
-     role="img" aria-labelledby="dp-t dp-d">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 64 900 364"
+     width="900" height="364" role="img" aria-labelledby="dp-t dp-d">
   <title id="dp-t">Where an eBPFsentinel verdict is taken</title>
-  <desc id="dp-d">A packet arrives on the wire and meets XDP in the network card driver, which is
-    where the verdict is taken: unwanted traffic is dropped there, with no copy, no socket and no
-    kernel stack, while what passes goes on to the TC programs for inspection and rewriting, then
-    to the kernel stack and the application. Every program reports through a ring buffer to the
-    eBPFsentinel agent in user space, one rootless Rust binary, which writes the next rule back
-    into the eBPF maps.</desc>
+  <desc id="dp-d">A packet arrives on the wire and meets XDP in the network card driver, which
+    is where the verdict is taken: unwanted traffic is dropped there, with no copy, no socket
+    and no kernel stack, while what passes goes on to the TC programs for inspection and
+    rewriting, then to the kernel stack and the application. In user space a DLP uprobe sits in
+    the application's own TLS library, where the plaintext is. Every program reports through one
+    ring buffer to the eBPFsentinel agent, one rootless Rust binary, which writes the next rule
+    back into the eBPF maps and serves REST, gRPC and OTLP alerts.</desc>
 
   <defs>
     <!-- Cards are lit from above rather than filled flat, which is the difference between a
@@ -47,21 +48,23 @@
     .rail-up { animation: crawl-up 1.4s linear infinite; }
     @keyframes crawl-up { to { stroke-dashoffset: 14; } }
 
-    /* One beat, one journey. Everything else on the drawing fires against it. */
+    /* One beat, one journey. Everything else on the drawing fires against it. Without the
+       backwards fill a delayed packet sits at its origin, fully opaque, until it starts. */
     .pkt { animation-duration: 5s; animation-timing-function: linear;
             animation-iteration-count: infinite; animation-fill-mode: backwards; }
     .pkt-pass { animation-name: pass; }
     .pkt-drop { animation-name: drop; animation-delay: 2.5s; }
     .pkt-event { animation-name: event; }
     .pkt-rule { animation-name: rule; }
+    .pkt-dlp { animation-name: dlp; animation-delay: 1.25s; }
 
-    /* Held at the driver and again at TC, because a verdict takes a moment and a packet
-       that never pauses reads as a packet nobody looked at. */
+    /* Held at the left edge of the card about to judge it, rather than at its centre, which
+       is what keeps both lines of a card readable while a packet sits on it. */
     @keyframes pass {
       0%   { transform: translateX(0); opacity: 0; }
       6%   { opacity: 1; }
-      22%, 32% { transform: translateX(132px); }
-      48%, 56% { transform: translateX(360px); }
+      22%, 32% { transform: translateX(164px); }
+      48%, 56% { transform: translateX(376px); }
       74%  { transform: translateX(588px); }
       94%  { opacity: 1; }
       100% { transform: translateX(880px); opacity: 0; }
@@ -71,25 +74,31 @@
     @keyframes drop {
       0%   { transform: translate(0, 0); opacity: 0; }
       6%   { opacity: 1; }
-      22%, 32% { transform: translate(132px, 0); }
-      52%  { transform: translate(132px, 72px); opacity: 1; }
-      66%  { transform: translate(146px, 72px); opacity: 0.9; }
-      76%, 100% { transform: translate(146px, 72px); opacity: 0; }
+      22%, 32% { transform: translate(164px, 0); }
+      52%  { transform: translate(164px, 58px); opacity: 1; }
+      66%  { transform: translate(174px, 58px); opacity: 0.9; }
+      76%, 100% { transform: translate(174px, 58px); opacity: 0; }
     }
 
-    /* What the kernel saw goes down as the packet leaves TC; the rule comes back up
+    /* What the programs saw goes down as the packet leaves TC; the rule comes back up
        while the next one is still on its way in. */
     @keyframes event {
       0%, 54%  { transform: translateY(0); opacity: 0; }
       58%  { opacity: 1; }
-      70%  { transform: translateY(56px); opacity: 1; }
-      74%, 100% { transform: translateY(56px); opacity: 0; }
+      70%  { transform: translateY(70px); opacity: 1; }
+      74%, 100% { transform: translateY(70px); opacity: 0; }
     }
     @keyframes rule {
       0%, 76%  { transform: translateY(0); opacity: 0; }
       80%  { opacity: 1; }
-      92%  { transform: translateY(-56px); opacity: 1; }
-      96%, 100% { transform: translateY(-56px); opacity: 0; }
+      92%  { transform: translateY(-70px); opacity: 1; }
+      96%, 100% { transform: translateY(-70px); opacity: 0; }
+    }
+    @keyframes dlp {
+      0%, 10%  { transform: translateY(0); opacity: 0; }
+      16%  { opacity: 1; }
+      34%  { transform: translateY(96px); opacity: 1; }
+      40%, 100% { transform: translateY(96px); opacity: 0; }
     }
 
     /* The ring fires on the beat the packet lands at the driver. SVG geometry has its
@@ -118,136 +127,180 @@
     /* Every moving thing above is decoration: the labels carry the argument, so all of
        it stops rather than slowing down. */
     @media (prefers-reduced-motion: reduce) {
-      .rail, .rail-down, .rail-up, .pkt, .ring, .bloom, .agent-lit {
-        animation: none;
-      }
+      .rail, .rail-down, .rail-up, .pkt, .ring, .bloom, .agent-lit { animation: none; }
       .ring, .agent-lit { display: none; }
-      /* Four packets stopped at the four places they happen to start from is a drawing of
+      /* Five packets stopped at the five places they happen to start from is a drawing of
          nothing. What is left is the one held at the verdict, which is the whole claim. */
       .pkt { opacity: 0; }
-      .pkt-pass { opacity: 1; transform: translateX(132px); }
+      .pkt-pass { opacity: 1; transform: translateX(164px); }
     }
   </style>
 
-  <rect y="64" width="900" height="336" fill="#ffffff"/>
-  <rect y="64" width="900" height="336" fill="url(#grid)"/>
+  <rect y="64" width="900" height="364" fill="#ffffff"/>
+  <rect y="64" width="900" height="364" fill="url(#grid)"/>
 
   <!-- The bloom sits under everything, so the eye lands on the verdict node first. -->
-  <ellipse class="bloom" cx="246" cy="178" rx="196" ry="72" fill="url(#bloom)"/>
+  <ellipse class="bloom" cx="274" cy="178" rx="190" ry="72" fill="url(#bloom)"/>
 
-  <!-- Kernel -->
-  <rect x="136" y="126" width="616" height="106" rx="16" fill="#15142b" fill-opacity="0.035"
-        stroke="#15142b" stroke-opacity="0.14"/>
-  <text x="150" y="144" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="10" font-weight="700"
+  <rect x="168" y="126" width="580" height="106" rx="16" fill="#15142b"
+        fill-opacity="0.035" stroke="#15142b" stroke-opacity="0.14"/>
+  <text x="182" y="144" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="10" font-weight="700"
         letter-spacing="1.4" fill="#15142b" opacity="0.55">LINUX KERNEL - eBPF, ON THE PACKET</text>
 
-  <path d="M116,178 H144" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
-  <path class="rail" d="M116,178 H144" stroke="#6c50de" stroke-opacity="0.85" stroke-width="1.5" stroke-dasharray="3 9"/>
-  <path d="M139,174 l4,4 -4,4" fill="none" stroke="#15142b" stroke-opacity="0.35" stroke-width="1.5"/>
-  <path d="M344,178 H372" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
-  <path class="rail" d="M344,178 H372" stroke="#6c50de" stroke-opacity="0.85" stroke-width="1.5" stroke-dasharray="3 9"/>
-  <path d="M367,174 l4,4 -4,4" fill="none" stroke="#15142b" stroke-opacity="0.35" stroke-width="1.5"/>
-  <path d="M572,178 H600" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
-  <path class="rail" d="M572,178 H600" stroke="#15142b" stroke-opacity="0.45" stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M156,178 H176" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail" d="M156,178 H176" stroke="#6c50de" stroke-opacity="0.85" stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M171,174 l4,4 -4,4" fill="none" stroke="#15142b" stroke-opacity="0.35" stroke-width="1.5"/>
+  <path d="M368,178 H388" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail" d="M368,178 H388" stroke="#6c50de" stroke-opacity="0.85" stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M383,174 l4,4 -4,4" fill="none" stroke="#15142b" stroke-opacity="0.35" stroke-width="1.5"/>
+  <path d="M580,178 H600" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail" d="M580,178 H600" stroke="#15142b" stroke-opacity="0.45" stroke-width="1.5" stroke-dasharray="3 9"/>
   <path d="M595,174 l4,4 -4,4" fill="none" stroke="#15142b" stroke-opacity="0.35" stroke-width="1.5"/>
-  <path d="M740,178 H768" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
-  <path class="rail" d="M740,178 H768" stroke="#15142b" stroke-opacity="0.45" stroke-width="1.5" stroke-dasharray="3 9"/>
-  <path d="M763,174 l4,4 -4,4" fill="none" stroke="#15142b" stroke-opacity="0.35" stroke-width="1.5"/>
+  <path d="M736,178 H756" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail" d="M736,178 H756" stroke="#15142b" stroke-opacity="0.45" stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M751,174 l4,4 -4,4" fill="none" stroke="#15142b" stroke-opacity="0.35" stroke-width="1.5"/>
   <g>
-    <rect x="20" y="150" width="92" height="56" rx="12" fill="url(#face)"
-          stroke="#15142b" stroke-opacity="0.26" stroke-width="1.3"/>
-    <path d="M32,150.5 H100" stroke="#15142b" stroke-opacity="0.22" stroke-width="1"/>
-    <text x="66" y="174" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
-          font-size="13.5" font-weight="600" fill="#15142b">wire</text>
-    <text x="66" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+    <rect x="20" y="150" width="132" height="56" rx="12" fill="url(#face)"
+          stroke="#15142b"
+          stroke-opacity="0.26" stroke-width="1.3"/>
+    <path d="M32,150.5 H140" stroke="#15142b" stroke-opacity="0.22"
+          stroke-width="1"/>
+    <text x="86" y="174" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          font-size="13.5" font-weight="600"
+          fill="#15142b">wire</text>
+    <text x="86" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
           font-size="10.5" fill="#15142b" opacity="0.62">the packet arrives</text>
   </g>
   <g>
-    <rect x="152" y="150" width="188" height="56" rx="12" fill="url(#face-accent)"
-          stroke="#6c50de" stroke-opacity="0.9" stroke-width="1.3"/>
-    <path d="M164,150.5 H328" stroke="#15142b" stroke-opacity="0.22" stroke-width="1"/>
-    <text x="246" y="174" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
-          font-size="13.5" font-weight="600" fill="#6c50de">XDP</text>
-    <text x="246" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+    <rect x="184" y="150" width="180" height="56" rx="12" fill="url(#face-accent)"
+          stroke="#6c50de"
+          stroke-opacity="0.9" stroke-width="1.3"/>
+    <path d="M196,150.5 H352" stroke="#15142b" stroke-opacity="0.22"
+          stroke-width="1"/>
+    <text x="274" y="174" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          font-size="13.5" font-weight="600"
+          fill="#6c50de">XDP</text>
+    <text x="274" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
           font-size="10.5" fill="#15142b" opacity="0.62">in the NIC driver</text>
   </g>
   <g>
-    <rect x="380" y="150" width="188" height="56" rx="12" fill="url(#face)"
-          stroke="#15142b" stroke-opacity="0.26" stroke-width="1.3"/>
-    <path d="M392,150.5 H556" stroke="#15142b" stroke-opacity="0.22" stroke-width="1"/>
-    <text x="474" y="174" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
-          font-size="13.5" font-weight="600" fill="#15142b">TC</text>
-    <text x="474" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+    <rect x="396" y="150" width="180" height="56" rx="12" fill="url(#face)"
+          stroke="#15142b"
+          stroke-opacity="0.26" stroke-width="1.3"/>
+    <path d="M408,150.5 H564" stroke="#15142b" stroke-opacity="0.22"
+          stroke-width="1"/>
+    <text x="486" y="174" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          font-size="13.5" font-weight="600"
+          fill="#15142b">TC</text>
+    <text x="486" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
           font-size="10.5" fill="#15142b" opacity="0.62">inspect - rewrite - meter</text>
   </g>
   <g>
-    <rect x="608" y="150" width="128" height="56" rx="12" fill="url(#face)"
-          stroke="#15142b" stroke-opacity="0.26" stroke-width="1.3"/>
-    <path d="M620,150.5 H724" stroke="#15142b" stroke-opacity="0.22" stroke-width="1"/>
-    <text x="672" y="174" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
-          font-size="13.5" font-weight="600" fill="#15142b">kernel stack</text>
-    <text x="672" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+    <rect x="608" y="150" width="124" height="56" rx="12" fill="url(#face)"
+          stroke="#15142b"
+          stroke-opacity="0.26" stroke-width="1.3"/>
+    <path d="M620,150.5 H720" stroke="#15142b" stroke-opacity="0.22"
+          stroke-width="1"/>
+    <text x="670" y="174" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          font-size="13.5" font-weight="600"
+          fill="#15142b">kernel stack</text>
+    <text x="670" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
           font-size="10.5" fill="#15142b" opacity="0.62">sockets</text>
   </g>
   <g>
-    <rect x="776" y="150" width="104" height="56" rx="12" fill="url(#face)"
-          stroke="#15142b" stroke-opacity="0.26" stroke-width="1.3"/>
-    <path d="M788,150.5 H868" stroke="#15142b" stroke-opacity="0.22" stroke-width="1"/>
-    <text x="828" y="174" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
-          font-size="13.5" font-weight="600" fill="#15142b">your app</text>
-    <text x="828" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+    <rect x="764" y="150" width="116" height="56" rx="12" fill="url(#face)"
+          stroke="#15142b"
+          stroke-opacity="0.26" stroke-width="1.3"/>
+    <path d="M776,150.5 H868" stroke="#15142b" stroke-opacity="0.22"
+          stroke-width="1"/>
+    <text x="822" y="174" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          font-size="13.5" font-weight="600"
+          fill="#15142b">your app</text>
+    <text x="822" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
           font-size="10.5" fill="#15142b" opacity="0.62">userspace</text>
   </g>
 
-  <!-- The drop, taken at the same edge the packet is held at, with the cost it saves
-       spelled out where it happens rather than in the caption. -->
-  <path d="M152,206 v44 h14" fill="none" stroke="#a01b14" stroke-opacity="0.85"
+  <!-- The drop, taken at the same edge the packet is held at. Two short lines centred under
+       the driver rather than one long one, which used to run into the rail labels. -->
+  <path d="M184,206 v30 h10" fill="none" stroke="#a01b14" stroke-opacity="0.85"
         stroke-width="1.5"/>
-  <text x="176" y="254" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="11.5"
-        font-weight="600" fill="#a01b14">dropped at the driver - no copy, no socket, no stack</text>
+  <text x="274" y="252" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="11.5"
+        font-weight="600" fill="#a01b14">dropped at the driver</text>
+  <text x="274" y="268" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="11.5"
+        fill="#a01b14" opacity="0.85">no copy, no socket, no stack</text>
 
-  <!-- The loop: what the kernel saw goes down, what the agent decided comes back up. -->
-  <path d="M660,232 V288" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
-  <path class="rail-down" d="M660,232 V288" stroke="#15142b" stroke-opacity="0.45"
-        stroke-width="1.5" stroke-dasharray="3 9"/>
-  <path d="M656,284 l4,5 4,-5" fill="none" stroke="#15142b" stroke-opacity="0.35"
+  <!-- The loop. Both rails leave the eBPF band rather than the kernel stack, because the
+       ring buffer is written by the programs and the kernel stack writes nothing. -->
+  <path d="M520,232 V310" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail-down" d="M520,232 V310" stroke="#15142b"
+        stroke-opacity="0.45" stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M516,306 l4,5 4,-5" fill="none" stroke="#15142b" stroke-opacity="0.35"
         stroke-width="1.5"/>
-  <text x="682" y="264" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#15142b"
-        opacity="0.62">RingBuf - events</text>
-
-  <path d="M520,288 V232" stroke="#6c50de" stroke-opacity="0.22" stroke-width="1.5"/>
-  <path class="rail-up" d="M520,288 V232" stroke="#6c50de" stroke-opacity="0.85"
-        stroke-width="1.5" stroke-dasharray="3 9"/>
-  <path d="M516,237 l4,-5 4,5" fill="none" stroke="#6c50de" stroke-opacity="0.6"
+  <text x="532" y="292" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5"
+        fill="#15142b" opacity="0.62">RingBuf - events</text>
+  <path d="M430,310 V232" stroke="#6c50de" stroke-opacity="0.22" stroke-width="1.5"/>
+  <path class="rail-up" d="M430,310 V232" stroke="#6c50de"
+        stroke-opacity="0.85" stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M426,237 l4,-5 4,5" fill="none" stroke="#6c50de" stroke-opacity="0.6"
         stroke-width="1.5"/>
-  <text x="498" y="264" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5"
+  <text x="418" y="292" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5"
         fill="#6c50de">maps - rules</text>
+  <path d="M822,206 V310" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail-down" d="M822,206 V310" stroke="#15142b"
+        stroke-opacity="0.45" stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M818,306 l4,5 4,-5" fill="none" stroke="#15142b" stroke-opacity="0.35"
+        stroke-width="1.5"/>
+  <text x="810" y="292" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5"
+        fill="#15142b" opacity="0.62">SSL_write - SSL_read</text>
 
-  <!-- Userspace -->
-  <rect x="136" y="288" width="616" height="66" rx="16" fill="#15142b" fill-opacity="0.035"
-        stroke="#15142b" stroke-opacity="0.14"/>
-  <rect class="agent-lit" x="136" y="288" width="616" height="66" rx="16" fill="#6c50de"
-        fill-opacity="0.10" stroke="#6c50de" stroke-opacity="0.8" stroke-width="1.5"/>
-  <text x="444" y="315" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="700"
-        fill="#15142b">eBPFsentinel agent</text>
-  <text x="444" y="334" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#15142b"
-        opacity="0.62">one rootless Rust binary - domain engines, services, adapters</text>
+  <text x="20" y="302" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="10" font-weight="700"
+        letter-spacing="1.4" fill="#15142b" opacity="0.55">USER SPACE</text>
+
+  <rect x="152" y="310" width="584" height="72" rx="16" fill="#15142b"
+        fill-opacity="0.035" stroke="#15142b" stroke-opacity="0.14"/>
+  <rect class="agent-lit" x="152" y="310" width="584" height="72" rx="16"
+        fill="#6c50de" fill-opacity="0.10" stroke="#6c50de" stroke-opacity="0.8"
+        stroke-width="1.5"/>
+  <text x="444" y="350" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="14"
+        font-weight="700" fill="#15142b">eBPFsentinel agent</text>
+  <text x="444" y="368" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5"
+        fill="#15142b" opacity="0.62">one rootless Rust binary - domain engines, services, adapters</text>
 
   <g>
-    <rect x="776" y="288" width="104" height="66" rx="12" fill="url(#face)" stroke="#15142b"
+    <rect x="20" y="310" width="104" height="72" rx="12" fill="url(#face)"
+          stroke="#15142b"
           stroke-opacity="0.26" stroke-width="1.3"/>
-    <path d="M788,288.5 H868" stroke="#15142b" stroke-opacity="0.22" stroke-width="1"/>
-    <text x="828" y="313" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="13.5"
-          font-weight="600" fill="#15142b">REST - gRPC</text>
-    <text x="828" y="331" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#15142b"
-          opacity="0.62">OTLP alerts</text>
+    <path d="M32,310.5 H112" stroke="#15142b" stroke-opacity="0.22"
+          stroke-width="1"/>
+    <text x="72" y="334" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          font-size="13.5" font-weight="600"
+          fill="#15142b">REST - gRPC</text>
+    <text x="72" y="352" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="10.5" fill="#15142b" opacity="0.62">OTLP alerts</text>
   </g>
-  <path d="M756,321 H768" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
-  <path class="rail" d="M756,321 H768" stroke="#15142b" stroke-opacity="0.45" stroke-width="1.5"
-        stroke-dasharray="3 9"/>
+  <g>
+    <rect x="752" y="310" width="128" height="72" rx="12" fill="url(#face)"
+          stroke="#15142b"
+          stroke-opacity="0.26" stroke-width="1.3"/>
+    <path d="M764,310.5 H868" stroke="#15142b" stroke-opacity="0.22"
+          stroke-width="1"/>
+    <text x="816" y="334" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          font-size="13.5" font-weight="600"
+          fill="#15142b">DLP uprobe</text>
+    <text x="816" y="352" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="10.5" fill="#15142b" opacity="0.62">TLS plaintext</text>
+  </g>
+
+  <!-- What the agent serves out, and what the uprobe reports in. -->
+  <path d="M148,346 H128" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail" d="M148,346 H128" stroke="#15142b" stroke-opacity="0.45"
+        stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M752,346 H740" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail" d="M752,346 H740" stroke="#15142b" stroke-opacity="0.45"
+        stroke-width="1.5" stroke-dasharray="3 9"/>
 
   <!-- The ring the verdict throws when it rules. -->
-  <g transform="translate(152 178)">
+  <g transform="translate(184 178)">
     <circle class="ring" r="10" fill="none" stroke="#6c50de" stroke-width="1.5"/>
   </g>
 
@@ -266,16 +319,20 @@
     </g>
   </g>
 
-  <g transform="translate(660 236)">
+  <g transform="translate(520 236)">
     <g class="pkt pkt-event"><circle r="7" fill="#15142b" opacity="0.18"/>
       <circle r="3.2" fill="#15142b" opacity="0.8"/></g>
   </g>
-  <g transform="translate(520 284)">
+  <g transform="translate(430 306)">
     <g class="pkt pkt-rule"><circle r="7" fill="#6c50de" opacity="0.22"/>
       <circle r="3.2" fill="#6c50de"/></g>
   </g>
+  <g transform="translate(822 210)">
+    <g class="pkt pkt-dlp"><circle r="7" fill="#15142b" opacity="0.18"/>
+      <circle r="3.2" fill="#15142b" opacity="0.8"/></g>
+  </g>
 
-  <text x="450" y="384" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#15142b"
-        opacity="0.72">The verdict is taken in the driver. The agent sets the policy, the kernel
-    enforces it on the packet.</text>
+  <text x="450" y="408" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="12.5"
+        fill="#15142b" opacity="0.72">The verdict is taken in the driver. The agent sets the
+    policy, the kernel enforces it on the packet.</text>
 </svg>
