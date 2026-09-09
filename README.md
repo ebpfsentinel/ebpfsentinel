@@ -68,6 +68,17 @@ A snapshot of the capabilities below - see the [Features guide](https://github.c
 
 ## Architecture
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/ebpfsentinel-datapath-dark.svg">
+    <img src="./assets/ebpfsentinel-datapath-light.svg" width="900"
+         alt="A looping animation of the datapath. A packet arrives on the wire and is held at XDP in the network card driver, which is where the verdict is taken: what is unwanted is dropped there, with no copy, no socket and no kernel stack, and what passes goes on to the TC programs for inspection, rewriting and metering, then to the kernel stack and the application. The kernel reports through a ring buffer to the eBPFsentinel agent in user space, one rootless Rust binary, which writes the next rule back into the eBPF maps and serves REST, gRPC and OTLP alerts.">
+  </picture>
+</p>
+
+<details>
+<summary><b>Every program and every tail call</b></summary>
+
 ```mermaid
 flowchart TB
     subgraph kernel["Linux Kernel (16 eBPF programs)"]
@@ -144,6 +155,8 @@ flowchart TB
     as --> otlp
     otlp --> otel(("OTLP collector"))
 ```
+
+</details>
 
 ## Quick start
 

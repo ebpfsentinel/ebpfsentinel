@@ -1,0 +1,281 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 64 900 336" width="900" height="336"
+     role="img" aria-labelledby="dp-t dp-d">
+  <title id="dp-t">Where an eBPFsentinel verdict is taken</title>
+  <desc id="dp-d">A packet arrives on the wire and meets XDP in the network card driver, which is
+    where the verdict is taken: unwanted traffic is dropped there, with no copy, no socket and no
+    kernel stack, while what passes goes on to the TC programs for inspection and rewriting, then
+    to the kernel stack and the application. Every program reports through a ring buffer to the
+    eBPFsentinel agent in user space, one rootless Rust binary, which writes the next rule back
+    into the eBPF maps.</desc>
+
+  <defs>
+    <!-- Cards are lit from above rather than filled flat, which is the difference between a
+         box and an object with a surface. Two ramps: one neutral, one accent. -->
+    <linearGradient id="face" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ecedff" stop-opacity="0.13"/>
+      <stop offset="1" stop-color="#ecedff" stop-opacity="0.03"/>
+    </linearGradient>
+    <linearGradient id="face-accent" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a78bfa" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0.06"/>
+    </linearGradient>
+
+    <!-- A packet is a moving light, so it gets a wake: opaque at the leading edge,
+         dissolving behind it. -->
+    <linearGradient id="wake" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a78bfa" stop-opacity="0"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0.75"/>
+    </linearGradient>
+
+    <radialGradient id="bloom">
+      <stop offset="0" stop-color="#a78bfa" stop-opacity="0.55"/>
+      <stop offset="0.45" stop-color="#a78bfa" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+    </radialGradient>
+
+    <pattern id="grid" width="19" height="19" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="1" fill="#ecedff" opacity="0.09"/>
+    </pattern>
+  </defs>
+
+  <style>
+    .rail { animation: crawl 1.1s linear infinite; }
+    @keyframes crawl { to { stroke-dashoffset: -12; } }
+
+    .rail-down { animation: crawl-down 1.4s linear infinite; }
+    @keyframes crawl-down { to { stroke-dashoffset: -14; } }
+    .rail-up { animation: crawl-up 1.4s linear infinite; }
+    @keyframes crawl-up { to { stroke-dashoffset: 14; } }
+
+    /* One beat, one journey. Everything else on the drawing fires against it. */
+    .pkt { animation-duration: 5s; animation-timing-function: linear;
+            animation-iteration-count: infinite; animation-fill-mode: backwards; }
+    .pkt-pass { animation-name: pass; }
+    .pkt-drop { animation-name: drop; animation-delay: 2.5s; }
+    .pkt-event { animation-name: event; }
+    .pkt-rule { animation-name: rule; }
+
+    /* Held at the driver and again at TC, because a verdict takes a moment and a packet
+       that never pauses reads as a packet nobody looked at. */
+    @keyframes pass {
+      0%   { transform: translateX(0); opacity: 0; }
+      6%   { opacity: 1; }
+      22%, 32% { transform: translateX(132px); }
+      48%, 56% { transform: translateX(360px); }
+      74%  { transform: translateX(588px); }
+      94%  { opacity: 1; }
+      100% { transform: translateX(880px); opacity: 0; }
+    }
+
+    /* Same arrival, different answer: down the elbow at the driver and gone. */
+    @keyframes drop {
+      0%   { transform: translate(0, 0); opacity: 0; }
+      6%   { opacity: 1; }
+      22%, 32% { transform: translate(132px, 0); }
+      52%  { transform: translate(132px, 72px); opacity: 1; }
+      66%  { transform: translate(146px, 72px); opacity: 0.9; }
+      76%, 100% { transform: translate(146px, 72px); opacity: 0; }
+    }
+
+    /* What the kernel saw goes down as the packet leaves TC; the rule comes back up
+       while the next one is still on its way in. */
+    @keyframes event {
+      0%, 54%  { transform: translateY(0); opacity: 0; }
+      58%  { opacity: 1; }
+      70%  { transform: translateY(56px); opacity: 1; }
+      74%, 100% { transform: translateY(56px); opacity: 0; }
+    }
+    @keyframes rule {
+      0%, 76%  { transform: translateY(0); opacity: 0; }
+      80%  { opacity: 1; }
+      92%  { transform: translateY(-56px); opacity: 1; }
+      96%, 100% { transform: translateY(-56px); opacity: 0; }
+    }
+
+    /* The ring fires on the beat the packet lands at the driver. SVG geometry has its
+       transform origin at 0 0, so a circle drawn at the origin scales about its centre. */
+    .ring { animation: ring 5s ease-out infinite; opacity: 0; }
+    @keyframes ring {
+      0%, 20%  { transform: scale(0.5); opacity: 0; }
+      26%  { opacity: 0.9; }
+      56%, 100% { transform: scale(4.2); opacity: 0; }
+    }
+
+    .bloom { animation: breathe 5s ease-in-out infinite; }
+    @keyframes breathe {
+      0%, 12%, 62%, 100% { opacity: 0.5; }
+      30% { opacity: 1; }
+    }
+
+    /* The agent lights when the event lands on it, not on a clock of its own. */
+    .agent-lit { animation: agent 5s ease-out infinite; opacity: 0; }
+    @keyframes agent {
+      0%, 66% { opacity: 0; }
+      72% { opacity: 1; }
+      88%, 100% { opacity: 0; }
+    }
+
+    /* Every moving thing above is decoration: the labels carry the argument, so all of
+       it stops rather than slowing down. */
+    @media (prefers-reduced-motion: reduce) {
+      .rail, .rail-down, .rail-up, .pkt, .ring, .bloom, .agent-lit {
+        animation: none;
+      }
+      .ring, .agent-lit { display: none; }
+      /* Four packets stopped at the four places they happen to start from is a drawing of
+         nothing. What is left is the one held at the verdict, which is the whole claim. */
+      .pkt { opacity: 0; }
+      .pkt-pass { opacity: 1; transform: translateX(132px); }
+    }
+  </style>
+
+  <rect y="64" width="900" height="336" fill="#0d1117"/>
+  <rect y="64" width="900" height="336" fill="url(#grid)"/>
+
+  <!-- The bloom sits under everything, so the eye lands on the verdict node first. -->
+  <ellipse class="bloom" cx="246" cy="178" rx="196" ry="72" fill="url(#bloom)"/>
+
+  <!-- Kernel -->
+  <rect x="136" y="126" width="616" height="106" rx="16" fill="#ecedff" fill-opacity="0.045"
+        stroke="#ecedff" stroke-opacity="0.14"/>
+  <text x="150" y="144" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="10" font-weight="700"
+        letter-spacing="1.4" fill="#ecedff" opacity="0.55">LINUX KERNEL - eBPF, ON THE PACKET</text>
+
+  <path d="M116,178 H144" stroke="#ecedff" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail" d="M116,178 H144" stroke="#a78bfa" stroke-opacity="0.85" stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M139,174 l4,4 -4,4" fill="none" stroke="#ecedff" stroke-opacity="0.35" stroke-width="1.5"/>
+  <path d="M344,178 H372" stroke="#ecedff" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail" d="M344,178 H372" stroke="#a78bfa" stroke-opacity="0.85" stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M367,174 l4,4 -4,4" fill="none" stroke="#ecedff" stroke-opacity="0.35" stroke-width="1.5"/>
+  <path d="M572,178 H600" stroke="#ecedff" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail" d="M572,178 H600" stroke="#ecedff" stroke-opacity="0.45" stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M595,174 l4,4 -4,4" fill="none" stroke="#ecedff" stroke-opacity="0.35" stroke-width="1.5"/>
+  <path d="M740,178 H768" stroke="#ecedff" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail" d="M740,178 H768" stroke="#ecedff" stroke-opacity="0.45" stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M763,174 l4,4 -4,4" fill="none" stroke="#ecedff" stroke-opacity="0.35" stroke-width="1.5"/>
+  <g>
+    <rect x="20" y="150" width="92" height="56" rx="12" fill="url(#face)"
+          stroke="#ecedff" stroke-opacity="0.26" stroke-width="1.3"/>
+    <path d="M32,150.5 H100" stroke="#ecedff" stroke-opacity="0.22" stroke-width="1"/>
+    <text x="66" y="174" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          font-size="13.5" font-weight="600" fill="#ecedff">wire</text>
+    <text x="66" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="10.5" fill="#ecedff" opacity="0.60">the packet arrives</text>
+  </g>
+  <g>
+    <rect x="152" y="150" width="188" height="56" rx="12" fill="url(#face-accent)"
+          stroke="#a78bfa" stroke-opacity="0.9" stroke-width="1.3"/>
+    <path d="M164,150.5 H328" stroke="#ecedff" stroke-opacity="0.22" stroke-width="1"/>
+    <text x="246" y="174" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          font-size="13.5" font-weight="600" fill="#a78bfa">XDP</text>
+    <text x="246" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="10.5" fill="#ecedff" opacity="0.60">in the NIC driver</text>
+  </g>
+  <g>
+    <rect x="380" y="150" width="188" height="56" rx="12" fill="url(#face)"
+          stroke="#ecedff" stroke-opacity="0.26" stroke-width="1.3"/>
+    <path d="M392,150.5 H556" stroke="#ecedff" stroke-opacity="0.22" stroke-width="1"/>
+    <text x="474" y="174" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          font-size="13.5" font-weight="600" fill="#ecedff">TC</text>
+    <text x="474" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="10.5" fill="#ecedff" opacity="0.60">inspect - rewrite - meter</text>
+  </g>
+  <g>
+    <rect x="608" y="150" width="128" height="56" rx="12" fill="url(#face)"
+          stroke="#ecedff" stroke-opacity="0.26" stroke-width="1.3"/>
+    <path d="M620,150.5 H724" stroke="#ecedff" stroke-opacity="0.22" stroke-width="1"/>
+    <text x="672" y="174" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          font-size="13.5" font-weight="600" fill="#ecedff">kernel stack</text>
+    <text x="672" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="10.5" fill="#ecedff" opacity="0.60">sockets</text>
+  </g>
+  <g>
+    <rect x="776" y="150" width="104" height="56" rx="12" fill="url(#face)"
+          stroke="#ecedff" stroke-opacity="0.26" stroke-width="1.3"/>
+    <path d="M788,150.5 H868" stroke="#ecedff" stroke-opacity="0.22" stroke-width="1"/>
+    <text x="828" y="174" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          font-size="13.5" font-weight="600" fill="#ecedff">your app</text>
+    <text x="828" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="10.5" fill="#ecedff" opacity="0.60">userspace</text>
+  </g>
+
+  <!-- The drop, taken at the same edge the packet is held at, with the cost it saves
+       spelled out where it happens rather than in the caption. -->
+  <path d="M152,206 v44 h14" fill="none" stroke="#ff6a5c" stroke-opacity="0.85"
+        stroke-width="1.5"/>
+  <text x="176" y="254" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="11.5"
+        font-weight="600" fill="#ff6a5c">dropped at the driver - no copy, no socket, no stack</text>
+
+  <!-- The loop: what the kernel saw goes down, what the agent decided comes back up. -->
+  <path d="M660,232 V288" stroke="#ecedff" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail-down" d="M660,232 V288" stroke="#ecedff" stroke-opacity="0.45"
+        stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M656,284 l4,5 4,-5" fill="none" stroke="#ecedff" stroke-opacity="0.35"
+        stroke-width="1.5"/>
+  <text x="682" y="264" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#ecedff"
+        opacity="0.60">RingBuf - events</text>
+
+  <path d="M520,288 V232" stroke="#a78bfa" stroke-opacity="0.22" stroke-width="1.5"/>
+  <path class="rail-up" d="M520,288 V232" stroke="#a78bfa" stroke-opacity="0.85"
+        stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M516,237 l4,-5 4,5" fill="none" stroke="#a78bfa" stroke-opacity="0.6"
+        stroke-width="1.5"/>
+  <text x="498" y="264" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5"
+        fill="#a78bfa">maps - rules</text>
+
+  <!-- Userspace -->
+  <rect x="136" y="288" width="616" height="66" rx="16" fill="#ecedff" fill-opacity="0.045"
+        stroke="#ecedff" stroke-opacity="0.14"/>
+  <rect class="agent-lit" x="136" y="288" width="616" height="66" rx="16" fill="#a78bfa"
+        fill-opacity="0.10" stroke="#a78bfa" stroke-opacity="0.8" stroke-width="1.5"/>
+  <text x="444" y="315" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="700"
+        fill="#ecedff">eBPFsentinel agent</text>
+  <text x="444" y="334" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#ecedff"
+        opacity="0.60">one rootless Rust binary - domain engines, services, adapters</text>
+
+  <g>
+    <rect x="776" y="288" width="104" height="66" rx="12" fill="url(#face)" stroke="#ecedff"
+          stroke-opacity="0.26" stroke-width="1.3"/>
+    <path d="M788,288.5 H868" stroke="#ecedff" stroke-opacity="0.22" stroke-width="1"/>
+    <text x="828" y="313" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="13.5"
+          font-weight="600" fill="#ecedff">REST - gRPC</text>
+    <text x="828" y="331" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#ecedff"
+          opacity="0.60">OTLP alerts</text>
+  </g>
+  <path d="M756,321 H768" stroke="#ecedff" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail" d="M756,321 H768" stroke="#ecedff" stroke-opacity="0.45" stroke-width="1.5"
+        stroke-dasharray="3 9"/>
+
+  <!-- The ring the verdict throws when it rules. -->
+  <g transform="translate(152 178)">
+    <circle class="ring" r="10" fill="none" stroke="#a78bfa" stroke-width="1.5"/>
+  </g>
+
+  <!-- The packets. -->
+  <g transform="translate(20 178)">
+    <g class="pkt pkt-pass">
+      <rect x="-38" y="-2" width="38" height="4" rx="2" fill="url(#wake)"/>
+      <circle r="9" fill="#a78bfa" opacity="0.22"/>
+      <circle r="4" fill="#a78bfa"/>
+    </g>
+    <!-- No wake on this one: it turns a corner, and a straight tail on a falling packet
+         points at where it is not going. -->
+    <g class="pkt pkt-drop">
+      <circle r="9" fill="#ff6a5c" opacity="0.2"/>
+      <circle r="4" fill="#ff6a5c"/>
+    </g>
+  </g>
+
+  <g transform="translate(660 236)">
+    <g class="pkt pkt-event"><circle r="7" fill="#ecedff" opacity="0.18"/>
+      <circle r="3.2" fill="#ecedff" opacity="0.8"/></g>
+  </g>
+  <g transform="translate(520 284)">
+    <g class="pkt pkt-rule"><circle r="7" fill="#a78bfa" opacity="0.22"/>
+      <circle r="3.2" fill="#a78bfa"/></g>
+  </g>
+
+  <text x="450" y="384" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#ecedff"
+        opacity="0.72">The verdict is taken in the driver. The agent sets the policy, the kernel
+    enforces it on the packet.</text>
+</svg>
