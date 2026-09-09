@@ -278,15 +278,15 @@
           font-size="10.5" fill="#15142b" opacity="0.62">control, alerts</text>
   </g>
   <g>
-    <rect x="752" y="310" width="128" height="72" rx="12" fill="url(#face)"
+    <rect x="764" y="310" width="116" height="72" rx="12" fill="url(#face)"
           stroke="#15142b"
           stroke-opacity="0.26" stroke-width="1.3"/>
-    <path d="M764,310.5 H868" stroke="#15142b" stroke-opacity="0.22"
+    <path d="M776,310.5 H868" stroke="#15142b" stroke-opacity="0.22"
           stroke-width="1"/>
-    <text x="816" y="334" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+    <text x="822" y="334" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
           font-size="13.5" font-weight="600"
           fill="#15142b">DLP uprobe</text>
-    <text x="816" y="352" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+    <text x="822" y="352" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
           font-size="10.5" fill="#15142b" opacity="0.62">TLS plaintext</text>
   </g>
 
@@ -321,10 +321,10 @@
         stroke-width="1.5"/>
   <path d="M145,342 l5,4 -5,4" fill="none" stroke="#15142b" stroke-opacity="0.5"
         stroke-width="1.5"/>
-  <path d="M752,346 H738" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
-  <path class="rail" d="M752,346 H738" stroke="#15142b" stroke-opacity="0.45"
+  <path d="M762,346 H738" stroke="#15142b" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail" d="M762,346 H738" stroke="#15142b" stroke-opacity="0.45"
         stroke-width="1.5" stroke-dasharray="3 9"/>
-  <path d="M743,342 l-5,4 5,4" fill="none" stroke="#15142b" stroke-opacity="0.35"
+  <path d="M745,342 l-5,4 5,4" fill="none" stroke="#15142b" stroke-opacity="0.35"
         stroke-width="1.5"/>
 
   <!-- The ring the verdict throws when it rules. -->
