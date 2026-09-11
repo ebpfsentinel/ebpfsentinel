@@ -34,7 +34,13 @@ pub const fn is_vlan_ether_type(ether_type: u16) -> bool {
 }
 
 /// 802.1Q VLAN tag as it sits on the wire.
-#[repr(C)]
+///
+/// `packed` rather than plain `#[repr(C)]`: the tag sits at whatever offset the
+/// Ethernet header and any outer tags left off at, inside a buffer the parser
+/// does not own and cannot align, so a two-byte field read at an odd address is
+/// reachable and is undefined behaviour under `#[repr(C)]`. Packed makes every
+/// field access an unaligned load, which is what the wire actually needs.
+#[repr(C, packed)]
 pub struct VlanHdr {
     /// Tag Control Information: priority, drop-eligible indicator, VLAN ID.
     pub tci: u16,
