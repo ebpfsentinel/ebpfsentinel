@@ -182,6 +182,17 @@ pub async fn reload_config(
         }
     }
 
+    Ok(Json(trigger_and_confirm_reload(&state).await?))
+}
+
+/// Trigger a reload and wait, bounded, for the reload task to confirm it.
+///
+/// Shared with the configuration write route, which has to do exactly this
+/// once the new file is on disk: two copies of a notify-before-trigger
+/// sequence is one copy away from a route that misses the signal.
+pub(crate) async fn trigger_and_confirm_reload(
+    state: &AppState,
+) -> Result<ReloadResponse, ApiError> {
     // Register for the completion signal *before* triggering so we never
     // miss the notify_waiters() fired by the reload task.
     let notified = state.reload_complete.as_ref().map(|n| {
@@ -210,18 +221,18 @@ pub async fn reload_config(
     };
 
     if confirmed {
-        Ok(Json(ReloadResponse {
+        Ok(ReloadResponse {
             status: "ok".to_string(),
             message: "configuration reloaded".to_string(),
-        }))
+        })
     } else {
-        Ok(Json(ReloadResponse {
+        Ok(ReloadResponse {
             status: "pending".to_string(),
             message: format!(
                 "reload triggered but not confirmed within {}s; it is still in progress",
                 RELOAD_CONFIRM_TIMEOUT.as_secs()
             ),
-        }))
+        })
     }
 }
 

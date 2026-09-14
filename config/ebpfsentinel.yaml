@@ -25,6 +25,13 @@ agent:
   # Serve the Swagger UI at /swagger-ui (useful for development/debugging).
   swagger_ui: false
 
+  # Whether PUT /api/v1/config/{section} may rewrite this file. Refused by
+  # default: where this file is rendered by the Kubernetes operator from a
+  # custom resource, a write accepted here is reverted at the next reconcile
+  # and nobody is told why the setting went back. Set to `allowed` only where
+  # the file on disk is what decides what this agent does.
+  # config_writes: refused
+
   # Rate limit for the mutating (POST/DELETE/PATCH/PUT) control-plane API,
   # per client IP (GCRA token bucket). Read endpoints keep a separate, looser
   # limit. Defaults shown: 60-request burst refilling at 1/s (= 60/min). Raise

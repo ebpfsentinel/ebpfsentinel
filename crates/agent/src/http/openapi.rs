@@ -8,6 +8,7 @@ use super::alert_handler;
 use super::alias_handler;
 use super::audit_handler;
 use super::capture_handler;
+use super::config_handler;
 use super::conntrack_handler;
 use super::ddos_handler;
 use super::dlp_handler;
@@ -96,6 +97,7 @@ use super::zone_handler;
         threatintel_handler::refresh_feeds,
         // Ops
         ops_handler::reload_config,
+        config_handler::put_config_section,
         ops_handler::get_config,
         ops_handler::get_ebpf_status,
         ops_handler::get_kernel_features,
@@ -232,6 +234,7 @@ use super::zone_handler;
         threatintel_handler::RefreshResponse,
         // Ops
         ops_handler::ReloadResponse,
+        config_handler::ConfigSectionWrite,
         ops_handler::AttachBlockEntry,
         ops_handler::EbpfStatusResponse,
         ops_handler::ProgramStatus,

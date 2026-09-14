@@ -66,6 +66,7 @@ use super::alert_handler::{list_alerts, mark_false_positive, stream_alerts};
 use super::alias_handler::{alias_status, set_external_alias_content};
 use super::audit_handler::{list_audit_logs, rule_history};
 use super::capture_handler::{list_captures, start_capture, stop_capture};
+use super::config_handler::put_config_section;
 use super::conntrack_handler::{
     conntrack_events, conntrack_status, flush_connections, list_connections,
 };
@@ -339,6 +340,7 @@ pub fn build_router(
             .route("/api/v1/ddos/policies", post(create_ddos_policy))
             .route("/api/v1/ddos/policies/{id}", delete(delete_ddos_policy))
             .route("/api/v1/config/reload", post(reload_config))
+            .route("/api/v1/config/{section}", put(put_config_section))
             .route("/api/v1/conntrack/flush", post(flush_connections))
             .route("/api/v1/dns/cache", delete(flush_dns_cache))
             .route("/api/v1/domains/blocklist", post(add_to_blocklist))

@@ -1508,6 +1508,30 @@ pub struct AgentInfo {
     /// Control-plane HTTP write-API rate limit (per client IP).
     #[serde(default)]
     pub api_rate_limit: ApiRateLimitConfig,
+
+    /// Whether the control API may rewrite this agent's own configuration
+    /// file.
+    #[serde(default)]
+    pub config_writes: ConfigWrites,
+}
+
+/// Whether a configuration screen may write back to the file this agent was
+/// started from.
+///
+/// Refused by default, and the default is the important half: where the
+/// Kubernetes operator renders this file from a custom resource, a write
+/// accepted here is reverted at the next reconcile and nobody is told why
+/// the setting went back. Allow it only where the file on disk is what
+/// decides what this agent does.
+///
+/// Two named states rather than a boolean, because `config_writes: allowed`
+/// says in the file what a bare `true` beside a long name only implies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigWrites {
+    #[default]
+    Refused,
+    Allowed,
 }
 
 /// Rate limit applied to the mutating (POST/DELETE/PATCH/PUT) control-plane
