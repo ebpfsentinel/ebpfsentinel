@@ -253,8 +253,12 @@ fn container_identity(
 ///
 /// Shared by the list and the single-alert reading so the two can never
 /// describe the same alert differently: a console opening a row out of the
-/// queue has to be shown the queue's own fields.
-fn alert_response(a: Alert) -> AlertResponse {
+/// queue has to be shown the queue's own fields. It is public because the
+/// enterprise agent serves this same route off the same store, and a second
+/// mapping there would answer `Severity::High` where this one answers
+/// `"high"` - one queue reading two ways depending on which edition
+/// answered.
+pub fn alert_response(a: Alert) -> AlertResponse {
     AlertResponse {
         id: a.id,
         timestamp_ns: a.timestamp_ns,
