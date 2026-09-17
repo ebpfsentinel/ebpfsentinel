@@ -570,12 +570,27 @@ fn subscriber_counter() -> Arc<AtomicI64> {
 }
 
 /// Render an alert as an SSE event (`id:`, `event: alert`, `data: <json>`).
+///
+/// The frame carries the same fields the query answers, because the live
+/// feed and the backlog fill one queue: serialising the entity here instead
+/// writes `High` where the query writes `high`, `Block` where it writes
+/// `block`, and the MITRE mapping as a nested object rather than as three
+/// flat fields - so an alert that arrived live and the same alert read back
+/// after a refresh would be two different rows.
 fn alert_to_event(alert: &Alert) -> Event {
-    let json = serde_json::to_string(alert).unwrap_or_else(|_| "{}".to_string());
+    let json = alert_frame_json(alert);
     Event::default()
         .id(alert.id.clone())
         .event("alert")
         .data(json)
+}
+
+/// The body of one SSE frame.
+///
+/// Split out of [`alert_to_event`] because `Event` hands its data back to
+/// nobody, so this is the only shape a test can hold the feed to.
+fn alert_frame_json(alert: &Alert) -> String {
+    serde_json::to_string(&alert_response(alert.clone())).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// Read the `Last-Event-ID` HTTP header per the SSE reconnection
@@ -750,6 +765,46 @@ mod tests {
         assert_eq!(resp.severity, "high");
         assert_eq!(resp.rule_id, "ids-001");
         assert!(!resp.false_positive);
+    }
+
+    /// The live feed carries the query's own words. Serialising the entity
+    /// into the frame instead writes `High`, `Block` and a nested MITRE
+    /// object, so an alert seen arriving and the same alert read back after
+    /// a refresh would disagree on every one of them.
+    #[test]
+    fn a_frame_carries_what_the_query_carries() {
+        use domain::alert::entity::{PacketAlertComponent, PacketSecurityAlert};
+
+        let alert = Alert::from_packet_security_alert(&PacketSecurityAlert {
+            component: PacketAlertComponent::Firewall,
+            src_addr: [0xC0A8_0001, 0, 0, 0],
+            dst_addr: [0x0A00_0001, 0, 0, 0],
+            src_port: 12345,
+            dst_port: 443,
+            protocol: 6,
+            is_ipv6: false,
+            timestamp_ns: 1_000_000_000,
+            rule_id: "fw-deny-egress".to_string(),
+            action_label: "deny".to_string(),
+            severity: Severity::High,
+            detail: "denied by policy".to_string(),
+            ja4_fingerprint: None,
+            container: None,
+        });
+
+        let frame: serde_json::Value =
+            serde_json::from_str(&alert_frame_json(&alert)).expect("a frame is JSON");
+        let object = frame.as_object().expect("a frame is an object");
+
+        assert_eq!(frame["severity"], "high");
+        assert_eq!(frame["action"], "block");
+        assert_eq!(frame["component"], "firewall");
+        assert!(!object.contains_key("mitre_attack"));
+        assert!(object.contains_key("mitre_technique_id"));
+        // The entity's enterprise context has no room on this shape, so it
+        // is absent rather than arriving as a null the screen must ignore.
+        assert!(!object.contains_key("ml_anomaly_score"));
+        assert!(!object.contains_key("container_metadata"));
     }
 
     #[test]
