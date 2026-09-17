@@ -62,7 +62,7 @@ const METRICS_RATE_LIMIT_PER_MINUTE: u64 = 30;
 const METRICS_RATE_LIMIT_BURST: u32 = 10;
 
 use super::agent_handler::{agent_identity, agent_status};
-use super::alert_handler::{list_alerts, mark_false_positive, stream_alerts};
+use super::alert_handler::{get_alert, list_alerts, mark_false_positive, stream_alerts};
 use super::alias_handler::{alias_status, set_external_alias_content};
 use super::audit_handler::{list_audit_logs, rule_history};
 use super::capture_handler::{list_captures, start_capture, stop_capture};
@@ -263,6 +263,7 @@ pub fn build_router(
             .route("/api/v1/threatintel/feeds", get(list_feeds))
             .route("/api/v1/alerts", get(list_alerts))
             .route("/api/v1/alerts/stream", get(stream_alerts))
+            .route("/api/v1/alerts/{id}", get(get_alert))
             .route("/api/v1/audit/logs", get(list_audit_logs))
             .route("/api/v1/audit/rules/{id}/history", get(rule_history))
             .route("/api/v1/config", get(get_config))

@@ -83,6 +83,7 @@ use super::zone_handler;
         ratelimit_handler::delete_ratelimit_rule,
         // Alerts
         alert_handler::list_alerts,
+        alert_handler::get_alert,
         alert_handler::mark_false_positive,
         alert_handler::stream_alerts,
         // Audit

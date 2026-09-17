@@ -217,6 +217,7 @@ async fn run_cli(cli: cli::Cli) -> Result<()> {
                     )
                     .await
                 }
+                AlertsCommand::Show { id } => commands::cmd_alerts_show(&client, &id, output).await,
                 AlertsCommand::MarkFp { id } => {
                     commands::cmd_alerts_mark_fp(&client, &id, output).await
                 }
@@ -519,6 +520,9 @@ async fn run_cli(cli: cli::Cli) -> Result<()> {
             let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
             match args.command {
                 ConfigCommand::Show => commands::cmd_config_show(&client).await,
+                ConfigCommand::Set { section, file } => {
+                    commands::cmd_config_set(&client, &section, file.as_deref(), output).await
+                }
                 ConfigCommand::Reload => commands::cmd_config_reload(&client, output).await,
             }
         }

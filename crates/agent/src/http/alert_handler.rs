@@ -249,6 +249,53 @@ fn container_identity(
 
 // ── Handlers ────────────────────────────────────────────────────────
 
+/// One stored alert as the API writes it.
+///
+/// Shared by the list and the single-alert reading so the two can never
+/// describe the same alert differently: a console opening a row out of the
+/// queue has to be shown the queue's own fields.
+fn alert_response(a: Alert) -> AlertResponse {
+    AlertResponse {
+        id: a.id,
+        timestamp_ns: a.timestamp_ns,
+        component: a.component,
+        severity: severity_label(a.severity).to_string(),
+        rule_id: a.rule_id.0,
+        action: a.action.as_str().to_string(),
+        src_addr: a.src_addr.to_vec(),
+        dst_addr: a.dst_addr.to_vec(),
+        src_port: a.src_port,
+        dst_port: a.dst_port,
+        protocol: a.protocol,
+        is_ipv6: a.is_ipv6,
+        message: a.message,
+        false_positive: a.false_positive,
+        src_domain: a.src_domain,
+        dst_domain: a.dst_domain,
+        src_domain_score: a.src_domain_score,
+        dst_domain_score: a.dst_domain_score,
+        src_geo: a.src_geo,
+        dst_geo: a.dst_geo,
+        confidence: a.confidence,
+        threat_type: a.threat_type,
+        data_type: a.data_type,
+        pid: a.pid,
+        tgid: a.tgid,
+        direction: a.direction,
+        matched_domain: a.matched_domain,
+        attack_type: a.attack_type,
+        peak_pps: a.peak_pps,
+        current_pps: a.current_pps,
+        mitigation_status: a.mitigation_status,
+        total_packets: a.total_packets,
+        mitre_technique_id: a.mitre_attack.as_ref().map(|m| m.technique_id.clone()),
+        mitre_technique_name: a.mitre_attack.as_ref().map(|m| m.technique_name.clone()),
+        mitre_tactic: a.mitre_attack.map(|m| m.tactic),
+        ja4_fingerprint: a.ja4_fingerprint,
+        container: container_identity(a.container.as_ref(), a.container_metadata.as_ref()),
+    }
+}
+
 /// `GET /api/v1/alerts` - query stored alerts with optional filters.
 #[utoipa::path(
     get, path = "/api/v1/alerts",
@@ -302,48 +349,7 @@ pub async fn list_alerts(
         message: format!("alert query failed: {e}"),
     })?;
 
-    let response_alerts: Vec<AlertResponse> = alerts
-        .into_iter()
-        .map(|a| AlertResponse {
-            id: a.id,
-            timestamp_ns: a.timestamp_ns,
-            component: a.component,
-            severity: severity_label(a.severity).to_string(),
-            rule_id: a.rule_id.0,
-            action: a.action.as_str().to_string(),
-            src_addr: a.src_addr.to_vec(),
-            dst_addr: a.dst_addr.to_vec(),
-            src_port: a.src_port,
-            dst_port: a.dst_port,
-            protocol: a.protocol,
-            is_ipv6: a.is_ipv6,
-            message: a.message,
-            false_positive: a.false_positive,
-            src_domain: a.src_domain,
-            dst_domain: a.dst_domain,
-            src_domain_score: a.src_domain_score,
-            dst_domain_score: a.dst_domain_score,
-            src_geo: a.src_geo,
-            dst_geo: a.dst_geo,
-            confidence: a.confidence,
-            threat_type: a.threat_type,
-            data_type: a.data_type,
-            pid: a.pid,
-            tgid: a.tgid,
-            direction: a.direction,
-            matched_domain: a.matched_domain,
-            attack_type: a.attack_type,
-            peak_pps: a.peak_pps,
-            current_pps: a.current_pps,
-            mitigation_status: a.mitigation_status,
-            total_packets: a.total_packets,
-            mitre_technique_id: a.mitre_attack.as_ref().map(|m| m.technique_id.clone()),
-            mitre_technique_name: a.mitre_attack.as_ref().map(|m| m.technique_name.clone()),
-            mitre_tactic: a.mitre_attack.map(|m| m.tactic),
-            ja4_fingerprint: a.ja4_fingerprint,
-            container: container_identity(a.container.as_ref(), a.container_metadata.as_ref()),
-        })
-        .collect();
+    let response_alerts: Vec<AlertResponse> = alerts.into_iter().map(alert_response).collect();
 
     Ok(Json(AlertListResponse {
         alerts: response_alerts,
@@ -351,6 +357,46 @@ pub async fn list_alerts(
         limit,
         offset,
     }))
+}
+
+/// `GET /api/v1/alerts/{id}` - one stored alert by identifier.
+#[utoipa::path(
+    get, path = "/api/v1/alerts/{id}",
+    tag = "Alerts",
+    params(("id" = String, Path, description = "Alert identifier")),
+    responses(
+        (status = 200, description = "The stored alert", body = AlertResponse),
+        (status = 404, description = "Alert not found", body = ErrorBody),
+        (status = 503, description = "Alert store not configured", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn get_alert(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<AlertResponse>, ApiError> {
+    let store = state
+        .alert_store
+        .as_ref()
+        .ok_or(ApiError::ServiceUnavailable {
+            message: "alert store not configured".to_string(),
+        })?;
+
+    let alert = store.get_alert(&id).map_err(|e| ApiError::Internal {
+        message: format!("alert lookup failed: {e}"),
+    })?;
+
+    let alert = alert.ok_or(ApiError::NotFound {
+        code: "ALERT_NOT_FOUND",
+        message: format!("alert {id} not found"),
+    })?;
+
+    Ok(Json(alert_response(alert)))
 }
 
 /// `POST /api/v1/alerts/{id}/false-positive` - mark an alert as false positive.
@@ -633,6 +679,74 @@ pub async fn stream_alerts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use domain::common::entity::{DomainMode, RuleId};
+
+    /// A row opened out of the queue is the row the queue showed: the two
+    /// readings share one mapping, so a field can never be written on the
+    /// list and left off the single alert.
+    #[test]
+    fn a_stored_alert_maps_to_what_the_queue_prints() {
+        let stored = {
+            let id = "alert-1";
+            let component = "ids";
+            Alert {
+                id: id.to_string(),
+                timestamp_ns: 1_000_000_000,
+                component: component.to_string(),
+                severity: Severity::High,
+                rule_id: RuleId(format!("{component}-001")),
+                action: DomainMode::Alert,
+                src_addr: [0xC0A8_0001, 0, 0, 0],
+                dst_addr: [0x0A00_0001, 0, 0, 0],
+                src_port: 12345,
+                dst_port: 80,
+                protocol: 6,
+                is_ipv6: false,
+                message: "test alert".to_string(),
+                false_positive: false,
+                src_domain: None,
+                dst_domain: None,
+                src_domain_score: None,
+                dst_domain_score: None,
+                src_geo: None,
+                dst_geo: None,
+                confidence: None,
+                threat_type: None,
+                data_type: None,
+                pid: None,
+                tgid: None,
+                direction: None,
+                matched_domain: None,
+                attack_type: None,
+                peak_pps: None,
+                current_pps: None,
+                mitigation_status: None,
+                total_packets: None,
+                mitre_attack: None,
+                ja4_fingerprint: None,
+                ml_anomaly_score: None,
+                ml_top_feature: None,
+                ml_engine: None,
+                ai_provider: None,
+                ai_sni: None,
+                ai_bytes_sent: None,
+                ai_exfil_type: None,
+                tls_threat_category: None,
+                tls_pqc_status: None,
+                container: None,
+                container_metadata: None,
+            }
+        };
+
+        let resp = alert_response(stored);
+
+        assert_eq!(resp.id, "alert-1");
+        assert_eq!(resp.component, "ids");
+        assert_eq!(resp.severity, "high");
+        assert_eq!(resp.rule_id, "ids-001");
+        assert!(!resp.false_positive);
+    }
 
     #[test]
     fn alert_response_serialization() {

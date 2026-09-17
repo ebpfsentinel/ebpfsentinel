@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::api_client::{
     AlertResponse, ApiClient, ConnectionResponse, ConntrackEventFrame, IpsRuleResponse,
@@ -520,6 +520,51 @@ pub async fn cmd_alerts_list(
         resp.total,
         resp.offset
     );
+    Ok(())
+}
+
+pub async fn cmd_alerts_show(client: &ApiClient, id: &str, output: OutputFormat) -> Result<()> {
+    let alert = client.get_alert(id).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&alert)?);
+        return Ok(());
+    }
+
+    println!("Alert {}", alert.id);
+    println!("  Component:      {}", alert.component);
+    println!("  Severity:       {}", alert.severity);
+    println!("  Rule:           {}", alert.rule_id);
+    println!("  Action:         {}", alert.action);
+    println!("  Timestamp (ns): {}", alert.timestamp_ns);
+    println!(
+        "  Source:         {}:{}",
+        alert.src_ip_str(),
+        alert.src_port
+    );
+    println!(
+        "  Destination:    {}:{}",
+        alert.dst_ip_str(),
+        alert.dst_port
+    );
+    println!("  Protocol:       {}", alert.protocol);
+    println!("  False positive: {}", yes_no(alert.false_positive));
+    if let Some(domain) = alert.src_domain.as_deref() {
+        println!("  Source domain:  {domain}");
+    }
+    if let Some(domain) = alert.dst_domain.as_deref() {
+        println!("  Dest domain:    {domain}");
+    }
+    if let Some(geo) = alert.src_geo.as_deref() {
+        println!("  Source country: {geo}");
+    }
+    if let Some(geo) = alert.dst_geo.as_deref() {
+        println!("  Dest country:   {geo}");
+    }
+    if let Some(ja4) = alert.ja4_fingerprint.as_deref() {
+        println!("  JA4:            {ja4}");
+    }
+    println!("  Message:        {}", alert.message);
     Ok(())
 }
 
@@ -3171,6 +3216,40 @@ pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) 
 pub async fn cmd_config_show(client: &ApiClient) -> Result<()> {
     let config = client.get_config().await?;
     println!("{}", serde_json::to_string_pretty(&config)?);
+    Ok(())
+}
+
+/// Write one section of the configuration file and reload.
+///
+/// The document is read from `path`, or from standard input where none is
+/// named, so a section can be piped straight back out of an editor. It is
+/// rooted at the section's own key, exactly the way `config show` renders
+/// it.
+pub async fn cmd_config_set(
+    client: &ApiClient,
+    section: &str,
+    path: Option<&str>,
+    output: OutputFormat,
+) -> Result<()> {
+    let yaml = if let Some(path) = path {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("configuration section unreadable at {path}"))?
+    } else {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+            .context("configuration section unreadable on standard input")?;
+        buf
+    };
+
+    let resp = client.put_config_section(section, &yaml).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("Section {section} written.");
+    println!("Reload {}: {}", resp.status, resp.message);
     Ok(())
 }
 

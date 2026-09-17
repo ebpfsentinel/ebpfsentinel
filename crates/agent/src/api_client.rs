@@ -1239,6 +1239,19 @@ impl ApiClient {
         handle_response(resp).await
     }
 
+    /// One stored alert by identifier.
+    ///
+    /// A console opens a row out of the queue without paging the queue again
+    /// to find it, and the fields it reads are the queue's own.
+    pub async fn get_alert(&self, id: &str) -> anyhow::Result<AlertResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, &format!("/api/v1/alerts/{id}"))
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
     pub async fn mark_false_positive(&self, id: &str) -> anyhow::Result<FalsePositiveResponse> {
         let resp = self
             .request(
@@ -2078,6 +2091,25 @@ impl ApiClient {
     pub async fn get_config(&self) -> anyhow::Result<serde_json::Value> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/config")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    /// Write one section of the configuration file and reload.
+    ///
+    /// The document is rooted at the section's own key, exactly as
+    /// `get_config` renders it, so the text an operator edited is the text
+    /// that goes back.
+    pub async fn put_config_section(
+        &self,
+        section: &str,
+        yaml: &str,
+    ) -> anyhow::Result<ReloadResponse> {
+        let resp = self
+            .request(reqwest::Method::PUT, &format!("/api/v1/config/{section}"))
+            .json(&serde_json::json!({ "yaml": yaml }))
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

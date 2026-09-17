@@ -428,6 +428,11 @@ pub enum AlertsCommand {
         #[arg(long, default_value_t = 0)]
         offset: u64,
     },
+    /// Show one alert by identifier
+    Show {
+        /// Alert ID to read
+        id: String,
+    },
     /// Mark an alert as false positive
     MarkFp {
         /// Alert ID to mark
@@ -848,6 +853,14 @@ pub enum EbpfCommand {
 pub enum ConfigCommand {
     /// Print the running configuration
     Show,
+    /// Write one section of the configuration file and reload
+    Set {
+        /// Configuration key, dotted for a nested one
+        section: String,
+        /// YAML document rooted at that key; standard input when omitted
+        #[arg(long)]
+        file: Option<String>,
+    },
     /// Reload the configuration from disk
     Reload,
 }
@@ -1229,6 +1242,57 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn cli_alerts_show() {
+        let cli =
+            Cli::try_parse_from(["ebpfsentinel-agent", "alerts", "show", "alert-001"]).unwrap();
+        match cli.command {
+            Some(Command::Alerts(args)) => match args.command {
+                AlertsCommand::Show { id } => assert_eq!(id, "alert-001"),
+                _ => panic!("expected Show"),
+            },
+            _ => panic!("expected Alerts command"),
+        }
+    }
+
+    /// The section is positional and the document is a file or standard
+    /// input, so a section piped in carries no path at all.
+    #[test]
+    fn cli_config_set_reads_a_file_or_standard_input() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "config",
+            "set",
+            "firewall",
+            "--file",
+            "firewall.yaml",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Config(args)) => match args.command {
+                ConfigCommand::Set { section, file } => {
+                    assert_eq!(section, "firewall");
+                    assert_eq!(file.as_deref(), Some("firewall.yaml"));
+                }
+                _ => panic!("expected Set"),
+            },
+            _ => panic!("expected Config command"),
+        }
+
+        let cli =
+            Cli::try_parse_from(["ebpfsentinel-agent", "config", "set", "ids.rules"]).unwrap();
+        match cli.command {
+            Some(Command::Config(args)) => match args.command {
+                ConfigCommand::Set { section, file } => {
+                    assert_eq!(section, "ids.rules");
+                    assert!(file.is_none());
+                }
+                _ => panic!("expected Set"),
+            },
+            _ => panic!("expected Config command"),
+        }
     }
 
     #[test]
