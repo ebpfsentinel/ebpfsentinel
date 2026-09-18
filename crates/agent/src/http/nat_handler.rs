@@ -122,6 +122,11 @@ pub struct NptV6RuleResponse {
     pub internal_prefix: String,
     pub external_prefix: String,
     pub prefix_len: u8,
+    /// The interface groups this rule is scoped to, in the words the
+    /// configuration file used, `!` prefix included. Empty is a floating
+    /// rule, which translates on every interface the programs are on.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 /// Request DTO for creating an `NPTv6` prefix translation rule.
@@ -161,6 +166,7 @@ pub async fn list_nptv6_rules(
         code: "SERVICE_NOT_AVAILABLE",
         message: "NAT not enabled".to_string(),
     })?;
+    let group_bits = state.config.read().await.interface_group_bitmasks();
     let svc = nat.read().await;
     let rules: Vec<NptV6RuleResponse> = svc
         .nptv6_rules()
@@ -171,6 +177,7 @@ pub async fn list_nptv6_rules(
             internal_prefix: r.internal_prefix.to_string(),
             external_prefix: r.external_prefix.to_string(),
             prefix_len: r.prefix_len,
+            interfaces: group_mask_words(r.group_mask, &group_bits),
         })
         .collect();
     Ok(Json(rules))
@@ -241,6 +248,8 @@ pub async fn create_nptv6_rule(
         internal_prefix: internal_prefix.to_string(),
         external_prefix: external_prefix.to_string(),
         prefix_len: req.prefix_len,
+        // A rule created here is floating: the request carries no group.
+        interfaces: Vec::new(),
     }))
 }
 
@@ -278,4 +287,33 @@ pub async fn delete_nptv6_rule(
         message: e.to_string(),
     })?;
     Ok(Json(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A floating rule is every interface the programs are on, so the field
+    /// is absent rather than an empty list a reader would take for a scope
+    /// nothing is in.
+    #[test]
+    fn interface_scope_is_absent_on_a_floating_rule_and_named_otherwise() {
+        let floating = NptV6RuleResponse {
+            id: "npt-1".to_string(),
+            enabled: true,
+            internal_prefix: "fd00:1::".to_string(),
+            external_prefix: "2001:db8:1::".to_string(),
+            prefix_len: 48,
+            interfaces: Vec::new(),
+        };
+        let json = serde_json::to_value(&floating).unwrap();
+        assert!(json.get("interfaces").is_none());
+
+        let scoped = NptV6RuleResponse {
+            interfaces: vec!["wan".to_string(), "!dmz".to_string()],
+            ..floating
+        };
+        let json = serde_json::to_value(&scoped).unwrap();
+        assert_eq!(json["interfaces"], serde_json::json!(["wan", "!dmz"]));
+    }
 }

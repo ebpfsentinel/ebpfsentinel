@@ -9680,6 +9680,13 @@
           "id": {
             "type": "string"
           },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The interface groups this rule is scoped to, in the words the\nconfiguration file used, `!` prefix included. Empty is a floating\nrule, which translates on every interface the programs are on."
+          },
           "internal_prefix": {
             "type": "string"
           },

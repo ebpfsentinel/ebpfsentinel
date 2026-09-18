@@ -710,6 +710,10 @@ pub struct NptV6RuleResponse {
     pub internal_prefix: String,
     pub external_prefix: String,
     pub prefix_len: u8,
+    /// Interface groups the rule is scoped to, in the words the agent's
+    /// configuration file used. Empty is a floating rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 // ── Zones ─────────────────────────────────────

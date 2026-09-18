@@ -2737,16 +2737,17 @@ pub async fn cmd_nat_nptv6_list(client: &ApiClient, output: OutputFormat) -> Res
     }
 
     println!(
-        "{:<20}  {:<24}  {:<24}  {:>6}  {:<7}",
-        "ID", "INTERNAL", "EXTERNAL", "PREFIX", "ENABLED"
+        "{:<20}  {:<24}  {:<24}  {:>6}  {:<16}  {:<7}",
+        "ID", "INTERNAL", "EXTERNAL", "PREFIX", "INTERFACES", "ENABLED"
     );
     for r in &rules {
         println!(
-            "{:<20}  {:<24}  {:<24}  {:>6}  {:<7}",
+            "{:<20}  {:<24}  {:<24}  {:>6}  {:<16}  {:<7}",
             r.id,
             r.internal_prefix,
             r.external_prefix,
             format!("/{}", r.prefix_len),
+            interface_scope(&r.interfaces),
             yes_no(r.enabled)
         );
     }
