@@ -4,6 +4,7 @@ use std::sync::Arc;
 use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use domain::auth::entity::JwtClaims;
 use domain::firewall::entity::PortRange;
 use domain::nat::entity::{NatRule, NatType};
@@ -347,7 +348,7 @@ pub async fn create_nptv6_rule(
     State(state): State<Arc<AppState>>,
     claims: Option<Extension<JwtClaims>>,
     Json(req): Json<CreateNptV6RuleRequest>,
-) -> Result<Json<NptV6RuleResponse>, ApiError> {
+) -> Result<(StatusCode, Json<NptV6RuleResponse>), ApiError> {
     if let Some(Extension(ref claims)) = claims {
         require_write_access(claims)?;
     }
@@ -386,15 +387,18 @@ pub async fn create_nptv6_rule(
         message: e.to_string(),
     })?;
 
-    Ok(Json(NptV6RuleResponse {
-        id: req.id,
-        enabled: req.enabled,
-        internal_prefix: internal_prefix.to_string(),
-        external_prefix: external_prefix.to_string(),
-        prefix_len: req.prefix_len,
-        // A rule created here is floating: the request carries no group.
-        interfaces: Vec::new(),
-    }))
+    Ok((
+        StatusCode::CREATED,
+        Json(NptV6RuleResponse {
+            id: req.id,
+            enabled: req.enabled,
+            internal_prefix: internal_prefix.to_string(),
+            external_prefix: external_prefix.to_string(),
+            prefix_len: req.prefix_len,
+            // A rule created here is floating: the request carries no group.
+            interfaces: Vec::new(),
+        }),
+    ))
 }
 
 /// `DELETE /api/v1/nat/nptv6/{id}` -- delete an `NPTv6` rule.
@@ -417,7 +421,7 @@ pub async fn delete_nptv6_rule(
     State(state): State<Arc<AppState>>,
     claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
-) -> Result<Json<()>, ApiError> {
+) -> Result<StatusCode, ApiError> {
     if let Some(Extension(ref claims)) = claims {
         require_write_access(claims)?;
     }
@@ -430,7 +434,7 @@ pub async fn delete_nptv6_rule(
         code: "RULE_NOT_FOUND",
         message: e.to_string(),
     })?;
-    Ok(Json(()))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

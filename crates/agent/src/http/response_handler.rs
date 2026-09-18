@@ -8,6 +8,7 @@ use arc_swap::ArcSwap;
 use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use domain::audit::entity::AuditAction;
 use domain::auth::entity::JwtClaims;
 use domain::common::entity::RuleId;
@@ -80,7 +81,7 @@ pub async fn create_response_action(
     State(state): State<Arc<AppState>>,
     claims: Option<Extension<JwtClaims>>,
     Json(req): Json<CreateResponseRequest>,
-) -> Result<Json<ResponseActionResponse>, ApiError> {
+) -> Result<(StatusCode, Json<ResponseActionResponse>), ApiError> {
     if let Some(Extension(ref claims)) = claims {
         require_write_access(claims)?;
     }
@@ -188,7 +189,7 @@ pub async fn create_response_action(
     );
 
     let resp = to_response(&action, now_ns);
-    Ok(Json(resp))
+    Ok((StatusCode::CREATED, Json(resp)))
 }
 
 /// `GET /api/v1/responses` - list active response actions.

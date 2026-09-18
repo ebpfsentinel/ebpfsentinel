@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use domain::auth::entity::JwtClaims;
 use domain::capture::entity::{CaptureSession, CaptureStatus};
 use serde::{Deserialize, Serialize};
@@ -93,7 +94,7 @@ pub async fn start_capture(
     State(state): State<Arc<AppState>>,
     claims: Option<Extension<JwtClaims>>,
     Json(req): Json<StartCaptureRequest>,
-) -> Result<Json<CaptureResponse>, ApiError> {
+) -> Result<(StatusCode, Json<CaptureResponse>), ApiError> {
     if let Some(Extension(ref claims)) = claims {
         require_write_access(claims)?;
     }
@@ -207,7 +208,7 @@ pub async fn start_capture(
         // Session is registered but no actual capture runs without the feature
     }
 
-    Ok(Json(resp))
+    Ok((StatusCode::CREATED, Json(resp)))
 }
 
 /// `GET /api/v1/captures` - list all captures.

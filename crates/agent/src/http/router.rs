@@ -627,7 +627,9 @@ mod tests {
         let _router_tls = build_metrics_router(limiter_test_state(), true);
     }
 
-    fn limiter_test_state() -> Arc<AppState> {
+    /// The shared shape of a state these tests drive a router with. Handed back
+    /// unshared so a test can hang the optional services it needs on it.
+    fn base_test_state() -> AppState {
         let noop: Arc<dyn MetricsPort> = Arc::new(NoopMetrics);
         let fw_svc = FirewallAppService::new(FirewallEngine::new(), None, Arc::clone(&noop));
         let ips_svc = IpsAppService::new(IpsEngine::default(), Arc::clone(&noop));
@@ -640,7 +642,7 @@ mod tests {
         );
         let audit_svc = AuditAppService::new(Arc::new(NoopSink) as Arc<dyn AuditSink>);
         let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(1);
-        Arc::new(AppState::new(
+        AppState::new(
             Arc::new(AgentMetrics::new()),
             Arc::new(AtomicBool::new(false)),
             Arc::new(tokio::sync::RwLock::new(fw_svc)),
@@ -655,7 +657,11 @@ mod tests {
             )),
             reload_tx,
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        ))
+        )
+    }
+
+    fn limiter_test_state() -> Arc<AppState> {
+        Arc::new(base_test_state())
     }
 
     // POST to a write route from `peer`, returning the HTTP status. The body is
@@ -1038,6 +1044,74 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Send a request and hand back nothing but the status the router answered
+    /// with, from loopback so the write limiter stays out of the way.
+    async fn status_of(router: &Router, method: &str, uri: &str, body: &str) -> StatusCode {
+        use tower::ServiceExt;
+
+        let peer: SocketAddr = "127.0.0.1:40000".parse().unwrap();
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .extension(ConnectInfo(peer))
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        router.clone().oneshot(req).await.unwrap().status()
+    }
+
+    /// A route answers with the status its own specification declares. The
+    /// dashboard's client is generated from that document, so a handler
+    /// sending 200 where the document promises 201 is a client refusing the
+    /// agent it was generated from, and a 204 carrying a JSON body is a
+    /// response no cache and no proxy is obliged to keep.
+    #[tokio::test]
+    async fn a_created_thing_answers_with_the_status_the_specification_declares() {
+        let state = Arc::new(
+            base_test_state()
+                .with_nat_service(Arc::new(tokio::sync::RwLock::new(
+                    application::nat_service_impl::NatAppService::new(Arc::new(NoopMetrics)),
+                )))
+                .with_capture_engine(Arc::new(tokio::sync::RwLock::new(
+                    domain::capture::engine::CaptureEngine::new(600),
+                )))
+                .with_response_engine(Arc::new(tokio::sync::RwLock::new(
+                    domain::response::engine::ResponseEngine::new(3600),
+                ))),
+        );
+        let router = build_router(state, false, false, ApiRateLimitConfig::default());
+
+        let created = status_of(
+            &router,
+            "POST",
+            "/api/v1/nat/nptv6",
+            r#"{"id":"npt-1","internal_prefix":"fd00::","external_prefix":"2001:db8::","prefix_len":48}"#,
+        )
+        .await;
+        assert_eq!(created, StatusCode::CREATED, "NPTv6 rule created");
+
+        let deleted = status_of(&router, "DELETE", "/api/v1/nat/nptv6/npt-1", "").await;
+        assert_eq!(deleted, StatusCode::NO_CONTENT, "NPTv6 rule deleted");
+
+        let capture = status_of(
+            &router,
+            "POST",
+            "/api/v1/captures/manual",
+            r#"{"filter":"host 203.0.113.9","duration_seconds":10}"#,
+        )
+        .await;
+        assert_eq!(capture, StatusCode::CREATED, "capture started");
+
+        let response = status_of(
+            &router,
+            "POST",
+            "/api/v1/responses/manual",
+            r#"{"action":"block_ip","target":"203.0.113.9","ttl":"1h"}"#,
+        )
+        .await;
+        assert_eq!(response, StatusCode::CREATED, "response action created");
     }
 
     #[tokio::test]
