@@ -8,7 +8,7 @@ use axum::response::IntoResponse;
 use domain::auth::entity::JwtClaims;
 use domain::common::entity::{Protocol, RuleId};
 use domain::firewall::entity::{FirewallAction, FirewallRule, IpCidr, IpNetwork, PortRange, Scope};
-use infrastructure::config::parse_cidr;
+use infrastructure::config::{group_mask_words, parse_cidr};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -120,6 +120,11 @@ pub struct RuleResponse {
     /// referenced alias is a `GeoIP` kind.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub country_codes: Option<Vec<String>>,
+    /// The interface groups this rule is scoped to, in the words the
+    /// configuration file used, `!` prefix included. Empty is a floating
+    /// rule, which is the only thing a rule created through this API can be.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -420,6 +425,7 @@ impl From<&FirewallRule> for RuleResponse {
             system: rule.system,
             route_action: rule.route_action.map(format_route_action),
             country_codes: None,
+            interfaces: Vec::new(),
         }
     }
 }
@@ -441,9 +447,20 @@ impl From<&FirewallRule> for RuleResponse {
     )
 )]
 pub async fn list_rules(State(state): State<Arc<AppState>>) -> Json<Vec<RuleResponse>> {
+    // A rule scoped to one interface group is not a rule on every interface,
+    // so the listing names the groups rather than leaving the reader to
+    // assume the widest of them.
+    let group_bits = state.config.read().await.interface_group_bitmasks();
     let mut rules: Vec<RuleResponse> = {
         let svc = state.firewall_service.read().await;
-        svc.list_rules().iter().map(RuleResponse::from).collect()
+        svc.list_rules()
+            .iter()
+            .map(|rule| {
+                let mut response = RuleResponse::from(rule);
+                response.interfaces = group_mask_words(rule.group_mask, &group_bits);
+                response
+            })
+            .collect()
     };
 
     // Surface ISO-3166 codes for rules referencing a GeoIP alias.
@@ -822,5 +839,39 @@ mod tests {
         assert_eq!(resp.src_ip.as_deref(), Some("192.168.1.0/24"));
         assert_eq!(resp.dst_port.as_deref(), Some("22"));
         assert_eq!(resp.scope, "global");
+    }
+
+    /// A floating rule and a rule scoped to a group have to read differently,
+    /// so the field is absent rather than empty when there is no scope: an
+    /// empty list beside a named one reads as a rule nothing applies to.
+    #[test]
+    fn interface_scope_is_absent_on_a_floating_rule_and_named_otherwise() {
+        let req = CreateRuleRequest {
+            id: "fw-001".to_string(),
+            priority: 100,
+            action: "deny".to_string(),
+            protocol: "tcp".to_string(),
+            src_ip: None,
+            dst_ip: None,
+            src_port: None,
+            dst_port: Some(22),
+            scope: "global".to_string(),
+            enabled: true,
+            vlan_id: None,
+            src_mac: None,
+            dst_mac: None,
+        };
+        let rule = req.into_domain_rule().unwrap();
+        let mut resp = RuleResponse::from(&rule);
+        assert!(
+            serde_json::to_value(&resp)
+                .unwrap()
+                .get("interfaces")
+                .is_none()
+        );
+
+        resp.interfaces = vec!["!wan".to_string()];
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["interfaces"], serde_json::json!(["!wan"]));
     }
 }

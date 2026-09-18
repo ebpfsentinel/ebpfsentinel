@@ -59,6 +59,10 @@ pub struct RuleResponse {
     pub src_port: Option<String>,
     pub dst_port: Option<String>,
     pub scope: String,
+    /// Interface groups the rule is scoped to, in the words the agent's
+    /// configuration file used. Empty is a floating rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -87,6 +91,10 @@ pub struct IpsRuleResponse {
     pub domain_match_mode: Option<String>,
     /// Absent unless another rule holds a kernel map slot this rule claims.
     pub kernel_slot: Option<SlotContentionResponse>,
+    /// Interface groups the rule is scoped to, in the words the agent's
+    /// configuration file used. Empty is a floating rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 /// Reported by the agent when two rules claim the same kernel map slot.
@@ -122,6 +130,10 @@ pub struct RateLimitRuleResponse {
     pub algorithm: String,
     pub src_ip: String,
     pub enabled: bool,
+    /// Interface groups the rule is scoped to, in the words the agent's
+    /// configuration file used. Empty is a floating rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -587,6 +599,10 @@ pub struct QosPipeResponse {
     pub delay_ms: u32,
     pub loss_pct: f32,
     pub enabled: bool,
+    /// Interface groups the rule is scoped to, in the words the agent's
+    /// configuration file used. Empty is a floating rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -602,6 +618,10 @@ pub struct QosClassifierResponse {
     pub queue_id: String,
     pub priority: u32,
     pub match_rule: serde_json::Value,
+    /// Interface groups the rule is scoped to, in the words the agent's
+    /// configuration file used. Empty is a floating rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 // ── Load Balancer ────────────────────────────────────────────────
@@ -677,6 +697,10 @@ pub struct NatRuleResponse {
     pub direction: String,
     pub priority: u32,
     pub enabled: bool,
+    /// Interface groups the rule is scoped to, in the words the agent's
+    /// configuration file used. Empty is a floating rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -787,6 +811,10 @@ pub struct IdsRuleResponse {
     /// Present only when another rule holds a kernel map slot this rule also claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel_slot: Option<SlotContentionResponse>,
+    /// Interface groups the rule is scoped to, in the words the agent's
+    /// configuration file used. Empty is a floating rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 // ── GeoIP ───────────────────────────────────

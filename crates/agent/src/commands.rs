@@ -53,7 +53,7 @@ pub async fn cmd_firewall_list(client: &ApiClient, output: OutputFormat) -> Resu
     }
 
     println!(
-        "{:<16} {:>4}  {:<6}  {:<5}  {:<18}  {:<18}  {:>8}  {:>8}  {:<12}  {:<7}",
+        "{:<16} {:>4}  {:<6}  {:<5}  {:<18}  {:<18}  {:>8}  {:>8}  {:<12}  {:<16}  {:<7}",
         "ID",
         "PRI",
         "ACTION",
@@ -63,12 +63,13 @@ pub async fn cmd_firewall_list(client: &ApiClient, output: OutputFormat) -> Resu
         "SRC PORT",
         "DST PORT",
         "SCOPE",
+        "INTERFACES",
         "ENABLED"
     );
 
     for rule in &rules {
         println!(
-            "{:<16} {:>4}  {:<6}  {:<5}  {:<18}  {:<18}  {:>8}  {:>8}  {:<12}  {:<7}",
+            "{:<16} {:>4}  {:<6}  {:<5}  {:<18}  {:<18}  {:>8}  {:>8}  {:<12}  {:<16}  {:<7}",
             rule.id,
             rule.priority,
             rule.action,
@@ -78,6 +79,7 @@ pub async fn cmd_firewall_list(client: &ApiClient, output: OutputFormat) -> Resu
             rule.src_port.as_deref().unwrap_or("-"),
             rule.dst_port.as_deref().unwrap_or("-"),
             rule.scope,
+            interface_scope(&rule.interfaces),
             yes_no(rule.enabled),
         );
     }
@@ -185,8 +187,8 @@ pub async fn cmd_ips_list(client: &ApiClient, output: OutputFormat) -> Result<()
     }
 
     println!(
-        "{:<16}  {:<8}  {:<7}  {:<5}  {:>8}  {:<30}  {:<7}",
-        "ID", "SEVERITY", "MODE", "PROTO", "DST PORT", "PATTERN", "ENABLED"
+        "{:<16}  {:<8}  {:<7}  {:<5}  {:>8}  {:<30}  {:<16}  {:<7}",
+        "ID", "SEVERITY", "MODE", "PROTO", "DST PORT", "PATTERN", "INTERFACES", "ENABLED"
     );
 
     for rule in &rules {
@@ -194,13 +196,14 @@ pub async fn cmd_ips_list(client: &ApiClient, output: OutputFormat) -> Result<()
             .dst_port
             .map_or_else(|| "-".to_string(), |p| p.to_string());
         println!(
-            "{:<16}  {:<8}  {:<7}  {:<5}  {:>8}  {:<30}  {:<7}",
+            "{:<16}  {:<8}  {:<7}  {:<5}  {:>8}  {:<30}  {:<16}  {:<7}",
             rule.id,
             rule.severity,
             rule.mode,
             rule.protocol,
             dst_port,
             rule.pattern,
+            interface_scope(&rule.interfaces),
             yes_no(rule.enabled),
         );
     }
@@ -316,19 +319,20 @@ pub async fn cmd_ratelimit_list(client: &ApiClient, output: OutputFormat) -> Res
     }
 
     println!(
-        "{:<16}  {:<18}  {:>8}  {:>8}  {:<6}  {:<16}  {:<7}",
-        "ID", "SRC IP", "RATE", "BURST", "ACTION", "ALGORITHM", "ENABLED"
+        "{:<16}  {:<18}  {:>8}  {:>8}  {:<6}  {:<16}  {:<16}  {:<7}",
+        "ID", "SRC IP", "RATE", "BURST", "ACTION", "ALGORITHM", "INTERFACES", "ENABLED"
     );
 
     for rule in &rules {
         println!(
-            "{:<16}  {:<18}  {:>8}  {:>8}  {:<6}  {:<16}  {:<7}",
+            "{:<16}  {:<18}  {:>8}  {:>8}  {:<6}  {:<16}  {:<16}  {:<7}",
             rule.id,
             rule.src_ip,
             rule.rate,
             rule.burst,
             rule.action,
             rule.algorithm,
+            interface_scope(&rule.interfaces),
             yes_no(rule.enabled),
         );
     }
@@ -1540,19 +1544,20 @@ pub async fn cmd_qos_pipes(client: &ApiClient, output: OutputFormat) -> Result<(
     }
 
     println!(
-        "{:<16}  {:>14}  {:>14}  {:<8}  {:>9}  {:>7}  {:<8}",
-        "ID", "RATE (bps)", "BURST (bytes)", "DIR", "DELAY(ms)", "LOSS(%)", "STATE"
+        "{:<16}  {:>14}  {:>14}  {:<8}  {:>9}  {:>7}  {:<16}  {:<8}",
+        "ID", "RATE (bps)", "BURST (bytes)", "DIR", "DELAY(ms)", "LOSS(%)", "INTERFACES", "STATE"
     );
 
     for pipe in &pipes {
         println!(
-            "{:<16}  {:>14}  {:>14}  {:<8}  {:>9}  {:>7.2}  {:<8}",
+            "{:<16}  {:>14}  {:>14}  {:<8}  {:>9}  {:>7.2}  {:<16}  {:<8}",
             pipe.id,
             pipe.rate_bps,
             pipe.burst_bytes,
             pipe.direction,
             pipe.delay_ms,
             pipe.loss_pct,
+            interface_scope(&pipe.interfaces),
             if pipe.enabled { "enabled" } else { "disabled" },
         );
     }
@@ -1602,10 +1607,19 @@ pub async fn cmd_qos_classifiers(client: &ApiClient, output: OutputFormat) -> Re
         return Ok(());
     }
 
-    println!("{:<16}  {:<16}  {:>4}", "ID", "QUEUE ID", "PRI");
+    println!(
+        "{:<16}  {:<16}  {:>4}  {:<16}",
+        "ID", "QUEUE ID", "PRI", "INTERFACES"
+    );
 
     for cls in &classifiers {
-        println!("{:<16}  {:<16}  {:>4}", cls.id, cls.queue_id, cls.priority);
+        println!(
+            "{:<16}  {:<16}  {:>4}  {:<16}",
+            cls.id,
+            cls.queue_id,
+            cls.priority,
+            interface_scope(&cls.interfaces),
+        );
     }
 
     println!("\n{} classifier(s) total.", classifiers.len());
@@ -2639,6 +2653,16 @@ fn yes_no(val: bool) -> &'static str {
     if val { "yes" } else { "no" }
 }
 
+/// How a rule's interface scope prints. A floating rule is every interface the
+/// programs are attached to, so it prints as `*` rather than as a blank cell
+/// that reads like a rule nothing applies to.
+fn interface_scope(groups: &[String]) -> String {
+    if groups.is_empty() {
+        return "*".to_string();
+    }
+    groups.join(",")
+}
+
 fn format_uptime(seconds: u64) -> String {
     let h = seconds / 3600;
     let m = (seconds % 3600) / 60;
@@ -2682,16 +2706,17 @@ pub async fn cmd_nat_rules(client: &ApiClient, output: OutputFormat) -> Result<(
     }
 
     println!(
-        "{:<20}  {:<12}  {:<8}  {:>8}  {:<7}",
-        "ID", "TYPE", "DIR", "PRIORITY", "ENABLED"
+        "{:<20}  {:<12}  {:<8}  {:>8}  {:<16}  {:<7}",
+        "ID", "TYPE", "DIR", "PRIORITY", "INTERFACES", "ENABLED"
     );
     for r in &rules {
         println!(
-            "{:<20}  {:<12}  {:<8}  {:>8}  {:<7}",
+            "{:<20}  {:<12}  {:<8}  {:>8}  {:<16}  {:<7}",
             r.id,
             r.nat_type,
             r.direction,
             r.priority,
+            interface_scope(&r.interfaces),
             yes_no(r.enabled)
         );
     }
@@ -3026,19 +3051,28 @@ pub async fn cmd_ids_rules(client: &ApiClient, output: OutputFormat) -> Result<(
     }
 
     println!(
-        "{:<16}  {:<30}  {:<8}  {:<6}  {:<6}  {:<24}  {:<7}  {:<20}",
-        "ID", "DESCRIPTION", "SEVERITY", "MODE", "PROTO", "MATCHES", "ENABLED", "PATTERN"
+        "{:<16}  {:<30}  {:<8}  {:<6}  {:<6}  {:<24}  {:<16}  {:<7}  {:<20}",
+        "ID",
+        "DESCRIPTION",
+        "SEVERITY",
+        "MODE",
+        "PROTO",
+        "MATCHES",
+        "INTERFACES",
+        "ENABLED",
+        "PATTERN"
     );
 
     for rule in &rules {
         println!(
-            "{:<16}  {:<30}  {:<8}  {:<6}  {:<6}  {:<24}  {:<7}  {:<20}",
+            "{:<16}  {:<30}  {:<8}  {:<6}  {:<6}  {:<24}  {:<16}  {:<7}  {:<20}",
             rule.id,
             rule.description,
             rule.severity,
             rule.mode,
             rule.protocol,
             ids_rule_match(rule),
+            interface_scope(&rule.interfaces),
             yes_no(rule.enabled),
             rule.pattern,
         );
@@ -3625,6 +3659,22 @@ mod tests {
     #[test]
     fn yes_no_false() {
         assert_eq!(yes_no(false), "no");
+    }
+
+    #[test]
+    fn interface_scope_names_every_group_a_rule_was_declared_in() {
+        assert_eq!(
+            interface_scope(&["dmz".to_string(), "wan".to_string()]),
+            "dmz,wan"
+        );
+        assert_eq!(interface_scope(&["!wan".to_string()]), "!wan");
+    }
+
+    /// A rule in no group is on every interface, so an empty cell would read
+    /// as the opposite of what the agent enforces.
+    #[test]
+    fn interface_scope_reads_a_floating_rule_as_every_interface() {
+        assert_eq!(interface_scope(&[]), "*");
     }
 
     #[test]

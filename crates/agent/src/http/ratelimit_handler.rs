@@ -8,6 +8,7 @@ use axum::response::IntoResponse;
 use domain::auth::entity::JwtClaims;
 use domain::common::entity::RuleId;
 use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm, RateLimitPolicy};
+use infrastructure::config::group_mask_words;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -54,6 +55,11 @@ pub struct RateLimitRuleResponse {
     pub algorithm: String,
     pub src_ip: String,
     pub enabled: bool,
+    /// The interface groups this rule is scoped to, in the words the
+    /// configuration file used, `!` prefix included. Empty is a floating
+    /// rule, which meters every interface the programs are on.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 impl RateLimitRuleResponse {
@@ -66,6 +72,7 @@ impl RateLimitRuleResponse {
             algorithm: format_algorithm(p.algorithm),
             src_ip: format_cidr(p.src_ip),
             enabled: p.enabled,
+            interfaces: Vec::new(),
         }
     }
 }
@@ -88,11 +95,19 @@ impl RateLimitRuleResponse {
 pub async fn list_ratelimit_rules(
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<RateLimitRuleResponse>> {
+    // A rule scoped to one interface group does not meter everywhere, so the
+    // listing names the groups rather than leaving the reader to assume the
+    // widest of them.
+    let group_bits = state.config.read().await.interface_group_bitmasks();
     let svc = state.ratelimit_service.read().await;
     let rules: Vec<RateLimitRuleResponse> = svc
         .policies()
         .iter()
-        .map(RateLimitRuleResponse::from_policy)
+        .map(|p| {
+            let mut response = RateLimitRuleResponse::from_policy(p);
+            response.interfaces = group_mask_words(p.group_mask, &group_bits);
+            response
+        })
         .collect();
     Json(rules)
 }
@@ -459,11 +474,39 @@ mod tests {
             algorithm: "token_bucket".to_string(),
             src_ip: "10.0.0.7/32".to_string(),
             enabled: true,
+            interfaces: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "rl-001");
         assert_eq!(json["rate"], 1000);
         assert_eq!(json["src_ip"], "10.0.0.7/32");
         assert_eq!(json["algorithm"], "token_bucket");
+    }
+
+    /// A floating rule and a rule scoped to a group have to read differently,
+    /// so the field is absent rather than empty when there is no scope: an
+    /// empty list beside a named one reads as a rule nothing applies to.
+    #[test]
+    fn interface_scope_is_absent_on_a_floating_rule_and_named_otherwise() {
+        let mut resp = RateLimitRuleResponse {
+            id: "rl-001".to_string(),
+            rate: 1000,
+            burst: 2000,
+            action: "drop".to_string(),
+            algorithm: "token_bucket".to_string(),
+            src_ip: "10.0.0.7/32".to_string(),
+            enabled: true,
+            interfaces: Vec::new(),
+        };
+        assert!(
+            serde_json::to_value(&resp)
+                .unwrap()
+                .get("interfaces")
+                .is_none()
+        );
+
+        resp.interfaces = vec!["wan".to_string()];
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["interfaces"], serde_json::json!(["wan"]));
     }
 }

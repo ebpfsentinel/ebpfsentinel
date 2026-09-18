@@ -7,6 +7,8 @@ use domain::auth::entity::JwtClaims;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use infrastructure::config::group_mask_words;
+
 use super::error::{ApiError, ErrorBody};
 use super::middleware::rbac::require_write_access;
 use super::state::AppState;
@@ -26,6 +28,11 @@ pub struct NatRuleResponse {
     pub direction: String,
     pub priority: u32,
     pub enabled: bool,
+    /// The interface groups this rule is scoped to, in the words the
+    /// configuration file used, `!` prefix included. Empty is a floating
+    /// rule, which translates on every interface the programs are on.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────
@@ -77,6 +84,10 @@ pub async fn list_nat_rules(
         code: "SERVICE_NOT_AVAILABLE",
         message: "NAT not enabled".to_string(),
     })?;
+    // A rule scoped to one interface group does not translate everywhere, so
+    // the listing names the groups rather than leaving the reader to assume
+    // the widest of them.
+    let group_bits = state.config.read().await.interface_group_bitmasks();
     let svc = nat.read().await;
     let mut rules: Vec<NatRuleResponse> = svc
         .dnat_rules()
@@ -87,6 +98,7 @@ pub async fn list_nat_rules(
             direction: "dnat".to_string(),
             priority: r.priority,
             enabled: r.enabled,
+            interfaces: group_mask_words(r.group_mask, &group_bits),
         })
         .collect();
     rules.extend(svc.snat_rules().iter().map(|r| NatRuleResponse {
@@ -95,6 +107,7 @@ pub async fn list_nat_rules(
         direction: "snat".to_string(),
         priority: r.priority,
         enabled: r.enabled,
+        interfaces: group_mask_words(r.group_mask, &group_bits),
     }));
     Ok(Json(rules))
 }

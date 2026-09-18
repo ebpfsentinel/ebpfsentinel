@@ -7,6 +7,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use domain::auth::entity::JwtClaims;
 use domain::qos::entity::{QosClassifier, QosDirection, QosMatchRule, QosPipe, QosQueue};
+use infrastructure::config::group_mask_words;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -35,6 +36,11 @@ pub struct QosPipeResponse {
     pub delay_ms: u32,
     pub loss_pct: f32,
     pub enabled: bool,
+    /// The interface groups this rule is scoped to, in the words the
+    /// configuration file used, `!` prefix included. Empty is a floating
+    /// rule, which shapes every interface the programs are on.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -50,6 +56,11 @@ pub struct QosClassifierResponse {
     pub queue_id: String,
     pub priority: u32,
     pub match_rule: QosMatchRuleResponse,
+    /// The interface groups this rule is scoped to, in the words the
+    /// configuration file used, `!` prefix included. Empty is a floating
+    /// rule, which shapes every interface the programs are on.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -139,6 +150,7 @@ impl QosPipeResponse {
             delay_ms: pipe.delay_ms,
             loss_pct: pipe.loss_pct,
             enabled: pipe.enabled,
+            interfaces: Vec::new(),
         }
     }
 }
@@ -168,6 +180,7 @@ impl QosClassifierResponse {
                 dscp: cls.match_rule.dscp,
                 vlan_id: cls.match_rule.vlan_id,
             },
+            interfaces: Vec::new(),
         }
     }
 }
@@ -216,12 +229,20 @@ pub async fn get_qos_status(
 pub async fn list_qos_pipes(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<QosPipeResponse>>, ApiError> {
+    // A pipe scoped to one interface group does not shape everywhere, so the
+    // listing names the groups rather than leaving the reader to assume the
+    // widest of them.
+    let group_bits = state.config.read().await.interface_group_bitmasks();
     let svc = state.qos_service()?;
     let svc = svc.read().await;
     let pipes: Vec<QosPipeResponse> = svc
         .pipes()
         .iter()
-        .map(QosPipeResponse::from_domain)
+        .map(|pipe| {
+            let mut response = QosPipeResponse::from_domain(pipe);
+            response.interfaces = group_mask_words(pipe.group_mask, &group_bits);
+            response
+        })
         .collect();
     Ok(Json(pipes))
 }
@@ -455,12 +476,19 @@ pub async fn delete_qos_queue(
 pub async fn list_qos_classifiers(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<QosClassifierResponse>>, ApiError> {
+    // Same for a classifier: the group it was declared in decides which
+    // interfaces it can ever match on.
+    let group_bits = state.config.read().await.interface_group_bitmasks();
     let svc = state.qos_service()?;
     let svc = svc.read().await;
     let classifiers: Vec<QosClassifierResponse> = svc
         .classifiers()
         .iter()
-        .map(QosClassifierResponse::from_domain)
+        .map(|cls| {
+            let mut response = QosClassifierResponse::from_domain(cls);
+            response.interfaces = group_mask_words(cls.group_mask, &group_bits);
+            response
+        })
         .collect();
     Ok(Json(classifiers))
 }
@@ -639,6 +667,7 @@ mod tests {
             delay_ms: 20,
             loss_pct: 0.5,
             enabled: true,
+            interfaces: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "p-1");
@@ -676,6 +705,7 @@ mod tests {
                 dscp: 0,
                 vlan_id: None,
             },
+            interfaces: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "c-1");
@@ -697,5 +727,34 @@ mod tests {
         assert_eq!(json["pipe_count"], 2);
         assert_eq!(json["queue_count"], 4);
         assert_eq!(json["classifier_count"], 8);
+    }
+
+    /// A floating rule and a rule scoped to a group have to read differently,
+    /// so the field is absent rather than empty when there is no scope: an
+    /// empty list beside a named one reads as a rule nothing applies to.
+    #[test]
+    fn interface_scope_is_absent_on_a_floating_pipe_and_named_otherwise() {
+        let pipe = QosPipe {
+            id: "p-1".to_string(),
+            rate_bps: 1_000_000,
+            burst_bytes: 125_000,
+            direction: QosDirection::Egress,
+            delay_ms: 0,
+            loss_pct: 0.0,
+            enabled: true,
+            group_mask: 0,
+            tenant_id: 0,
+        };
+        let mut resp = QosPipeResponse::from_domain(&pipe);
+        assert!(
+            serde_json::to_value(&resp)
+                .unwrap()
+                .get("interfaces")
+                .is_none()
+        );
+
+        resp.interfaces = vec!["wan".to_string()];
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["interfaces"], serde_json::json!(["wan"]));
     }
 }

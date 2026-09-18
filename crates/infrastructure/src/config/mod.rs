@@ -1288,6 +1288,43 @@ pub fn parse_group_mask(
     Ok(mask)
 }
 
+/// The reverse of [`parse_group_mask`]: the words a `group_mask` was written
+/// with, so a rule read back through the API names the same interface groups
+/// the file that declared it named.
+///
+/// An empty result is a floating rule. A bit no group name holds is named by
+/// its position rather than dropped, since a scope read back short of one
+/// group is a rule that looks wider than it is.
+#[allow(clippy::implicit_hasher)]
+#[must_use]
+pub fn group_mask_words(mask: u32, group_bits: &HashMap<String, u32>) -> Vec<String> {
+    let bits = mask & !GROUP_FLAG_INVERT;
+    if bits == 0 {
+        return Vec::new();
+    }
+    let prefix = if mask & GROUP_FLAG_INVERT == 0 {
+        ""
+    } else {
+        "!"
+    };
+    let mut names: Vec<String> = Vec::new();
+    for position in 0..31 {
+        let bit = 1u32 << position;
+        if bits & bit == 0 {
+            continue;
+        }
+        match group_bits
+            .iter()
+            .find(|&(_, &group_bit)| group_bit == bit)
+            .map(|(name, _)| name.clone())
+        {
+            Some(name) => names.push(format!("{prefix}{name}")),
+            None => names.push(format!("{prefix}bit-{position}")),
+        }
+    }
+    names
+}
+
 /// Whether a rule's optional pattern actually asks for content matching.
 /// An absent key and an empty string both mean it does not.
 pub(super) fn has_content_pattern(pattern: Option<&String>) -> bool {
@@ -4266,6 +4303,43 @@ agent:
         assert!(config.interface_groups.is_empty());
         assert!(config.interface_group_bitmasks().is_empty());
         assert!(config.interface_membership().is_empty());
+    }
+
+    /// A rule read back through the API names the groups its file named, so
+    /// the two directions are one another's inverse.
+    #[test]
+    fn group_mask_words_are_the_words_the_mask_was_parsed_from() {
+        let bits: HashMap<String, u32> = [
+            ("dmz".to_string(), 1),
+            ("lan".to_string(), 2),
+            ("wan".to_string(), 4),
+        ]
+        .into_iter()
+        .collect();
+
+        for written in [
+            vec![],
+            vec!["wan".to_string()],
+            vec!["dmz".to_string(), "wan".to_string()],
+            vec!["!wan".to_string()],
+            vec!["!dmz".to_string(), "!wan".to_string()],
+        ] {
+            let mask = parse_group_mask(&written, &bits).unwrap();
+            assert_eq!(group_mask_words(mask, &bits), written);
+            assert_eq!(
+                parse_group_mask(&group_mask_words(mask, &bits), &bits),
+                Ok(mask)
+            );
+        }
+    }
+
+    /// A bit nothing names is still a narrowing, so it is named by position
+    /// rather than dropped: a scope short of one group reads as a wider rule.
+    #[test]
+    fn group_mask_words_name_a_bit_no_group_holds() {
+        let bits: HashMap<String, u32> = [("wan".to_string(), 4)].into_iter().collect();
+
+        assert_eq!(group_mask_words(0b1_0100, &bits), ["wan", "bit-4"]);
     }
 
     #[test]

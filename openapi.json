@@ -9010,6 +9010,13 @@
           "id": {
             "type": "string"
           },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The interface groups this rule is scoped to, in the words the\nconfiguration file used, `!` prefix included. Empty is a floating\nrule, which sees every interface the classifier is attached to."
+          },
           "kernel_slot": {
             "oneOf": [
               {
@@ -9143,6 +9150,13 @@
           },
           "id": {
             "type": "string"
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The interface groups this rule is scoped to, in the words the\nconfiguration file used, `!` prefix included. Empty is a floating\nrule, which enforces on every interface the classifier is on."
           },
           "kernel_slot": {
             "oneOf": [
@@ -9613,6 +9627,13 @@
           "id": {
             "type": "string"
           },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The interface groups this rule is scoped to, in the words the\nconfiguration file used, `!` prefix included. Empty is a floating\nrule, which translates on every interface the programs are on."
+          },
           "nat_type": {
             "type": "string"
           },
@@ -9723,6 +9744,13 @@
           "id": {
             "type": "string"
           },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The interface groups this rule is scoped to, in the words the\nconfiguration file used, `!` prefix included. Empty is a floating\nrule, which shapes every interface the programs are on."
+          },
           "match_rule": {
             "$ref": "#/components/schemas/QosMatchRuleResponse"
           },
@@ -9820,6 +9848,13 @@
           "id": {
             "type": "string"
           },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The interface groups this rule is scoped to, in the words the\nconfiguration file used, `!` prefix included. Empty is a floating\nrule, which shapes every interface the programs are on."
+          },
           "loss_pct": {
             "type": "number",
             "format": "float"
@@ -9904,6 +9939,13 @@
           },
           "id": {
             "type": "string"
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The interface groups this rule is scoped to, in the words the\nconfiguration file used, `!` prefix included. Empty is a floating\nrule, which meters every interface the programs are on."
           },
           "rate": {
             "type": "integer",
@@ -10255,6 +10297,13 @@
           },
           "id": {
             "type": "string"
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The interface groups this rule is scoped to, in the words the\nconfiguration file used, `!` prefix included. Empty is a floating\nrule, which is the only thing a rule created through this API can be."
           },
           "max_states": {
             "type": [

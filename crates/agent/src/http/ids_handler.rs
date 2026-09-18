@@ -4,6 +4,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 use domain::ids::entity::ThresholdConfig;
+use infrastructure::config::group_mask_words;
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -48,6 +49,11 @@ pub struct IdsRuleResponse {
     /// them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub country_thresholds: Option<BTreeMap<String, ThresholdResponse>>,
+    /// The interface groups this rule is scoped to, in the words the
+    /// configuration file used, `!` prefix included. Empty is a floating
+    /// rule, which sees every interface the classifier is attached to.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
     /// Present only when another rule holds a kernel map slot this rule also
     /// claims.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -148,6 +154,10 @@ pub async fn list_ids_rules(
         code: "SERVICE_NOT_AVAILABLE",
         message: "IDS service is not enabled".to_string(),
     })?;
+    // A rule scoped to one interface group inspects that slice and nothing
+    // else, so the listing names the groups rather than reading as a rule on
+    // every interface.
+    let group_bits = state.config.read().await.interface_group_bitmasks();
     let svc = svc_arc.load();
     let shadows = svc.slot_shadows();
     let rules: Vec<IdsRuleResponse> = svc
@@ -172,6 +182,7 @@ pub async fn list_ids_rules(
                     .map(|(code, t)| (code.clone(), ThresholdResponse::from(t)))
                     .collect()
             }),
+            interfaces: group_mask_words(r.group_mask, &group_bits),
             kernel_slot: shadows.get(&r.id.0).map(SlotContentionResponse::from),
         })
         .collect();
@@ -234,6 +245,7 @@ mod tests {
             domain_match_mode: None,
             country_thresholds: None,
             kernel_slot: None,
+            interfaces: Vec::new(),
         }
     }
 
@@ -357,5 +369,23 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["kernel_slot"]["shadowed_by"][0], "ips-001");
         assert_eq!(json["kernel_slot"]["evaluated_in_userspace"], true);
+    }
+
+    /// A floating rule and a rule scoped to a group have to read differently,
+    /// so the field is absent rather than empty when there is no scope: an
+    /// empty list beside a named one reads as a rule nothing applies to.
+    #[test]
+    fn interface_scope_is_absent_on_a_floating_rule_and_named_otherwise() {
+        let mut resp = a_rule_response();
+        assert!(
+            serde_json::to_value(&resp)
+                .unwrap()
+                .get("interfaces")
+                .is_none()
+        );
+
+        resp.interfaces = vec!["dmz".to_string(), "!wan".to_string()];
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["interfaces"], serde_json::json!(["dmz", "!wan"]));
     }
 }

@@ -9,7 +9,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use domain::auth::entity::JwtClaims;
-use infrastructure::config::parse_domain_mode;
+use infrastructure::config::{group_mask_words, parse_domain_mode};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -36,6 +36,11 @@ pub struct IpsRuleResponse {
     pub domain_pattern: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_match_mode: Option<String>,
+    /// The interface groups this rule is scoped to, in the words the
+    /// configuration file used, `!` prefix included. Empty is a floating
+    /// rule, which enforces on every interface the classifier is on.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
     /// Present only when another rule holds a kernel map slot this rule also
     /// claims. A prevention rule that lost its slot is never replayed in
     /// userspace, so it blocks nothing until the conflict is resolved.
@@ -102,6 +107,9 @@ pub struct BlacklistMutationResponse {
     )
 )]
 pub async fn list_ips_rules(State(state): State<Arc<AppState>>) -> Json<Vec<IpsRuleResponse>> {
+    // The same rule array the detection listing answers, so it names what a
+    // rule is scoped to in the same words.
+    let group_bits = state.config.read().await.interface_group_bitmasks();
     let svc = state.ips_service.load();
     // The IDS service owns the kernel pattern maps for both halves of the rule
     // array, so it is the only place that knows which rule holds a slot.
@@ -124,6 +132,7 @@ pub async fn list_ips_rules(State(state): State<Arc<AppState>>) -> Json<Vec<IpsR
             enabled: r.enabled,
             domain_pattern: r.domain_pattern.clone(),
             domain_match_mode: r.domain_match_mode.as_ref().map(format_domain_match_mode),
+            interfaces: group_mask_words(r.group_mask, &group_bits),
             kernel_slot: shadows.get(&r.id.0).map(SlotContentionResponse::from),
         })
         .collect();
@@ -163,6 +172,7 @@ pub async fn patch_ips_rule_mode(
     })?;
 
     // Capture before snapshot for audit trail
+    let group_bits = state.config.read().await.interface_group_bitmasks();
     let before_json = {
         let svc = state.ips_service.load();
         svc.list_rules()
@@ -200,6 +210,7 @@ pub async fn patch_ips_rule_mode(
             enabled: r.enabled,
             domain_pattern: r.domain_pattern.clone(),
             domain_match_mode: r.domain_match_mode.as_ref().map(format_domain_match_mode),
+            interfaces: group_mask_words(r.group_mask, &group_bits),
             // Filled after the reinstall below: slot ownership is only settled
             // once the prevention rules are back in the array the IDS owns.
             kernel_slot: None,
@@ -488,6 +499,7 @@ mod tests {
             domain_pattern: None,
             domain_match_mode: None,
             kernel_slot: None,
+            interfaces: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "ips-001");
@@ -517,6 +529,7 @@ mod tests {
                 shadowed_by: vec!["ips-004".to_string()],
                 evaluated_in_userspace: false,
             }),
+            interfaces: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["kernel_slot"]["shadowed_by"][0], "ips-004");
@@ -537,6 +550,7 @@ mod tests {
             domain_pattern: Some("*.evil.com".to_string()),
             domain_match_mode: Some("wildcard".to_string()),
             kernel_slot: None,
+            interfaces: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["domain_pattern"], "*.evil.com");
@@ -576,5 +590,36 @@ mod tests {
     fn parse_invalid_mode_is_caught() {
         let result = parse_domain_mode("banana");
         assert!(result.is_err());
+    }
+
+    /// A floating rule and a rule scoped to a group have to read differently,
+    /// so the field is absent rather than empty when there is no scope: an
+    /// empty list beside a named one reads as a rule nothing applies to.
+    #[test]
+    fn interface_scope_is_absent_on_a_floating_rule_and_named_otherwise() {
+        let mut resp = IpsRuleResponse {
+            id: "ips-001".to_string(),
+            description: "Test".to_string(),
+            severity: "high".to_string(),
+            mode: "block".to_string(),
+            protocol: "tcp".to_string(),
+            dst_port: Some(22),
+            pattern: String::new(),
+            enabled: true,
+            domain_pattern: None,
+            domain_match_mode: None,
+            kernel_slot: None,
+            interfaces: Vec::new(),
+        };
+        assert!(
+            serde_json::to_value(&resp)
+                .unwrap()
+                .get("interfaces")
+                .is_none()
+        );
+
+        resp.interfaces = vec!["wan".to_string()];
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["interfaces"], serde_json::json!(["wan"]));
     }
 }
