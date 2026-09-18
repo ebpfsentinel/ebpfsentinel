@@ -335,13 +335,30 @@ pub struct AuditEntryResponse {
     pub timestamp_ns: u64,
     pub component: String,
     pub action: String,
-    pub src_ip: u32,
-    pub dst_ip: u32,
+    /// Source address as four big-endian u32 words, IPv4 in the first.
+    #[serde(default)]
+    pub src_addr: Vec<u32>,
+    /// Destination address, same encoding as `src_addr`.
+    #[serde(default)]
+    pub dst_addr: Vec<u32>,
+    #[serde(default)]
+    pub is_ipv6: bool,
     pub src_port: u32,
     pub dst_port: u32,
     pub protocol: u32,
     pub rule_id: String,
     pub detail: String,
+}
+
+impl AuditEntryResponse {
+    /// Format source IP as string.
+    pub fn src_ip_str(&self) -> String {
+        addr_to_string(&self.src_addr, self.is_ipv6)
+    }
+    /// Format destination IP as string.
+    pub fn dst_ip_str(&self) -> String {
+        addr_to_string(&self.dst_addr, self.is_ipv6)
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -2757,6 +2774,53 @@ mod tests {
         assert_eq!(alert.src_ip_str(), "192.168.0.1");
         assert_eq!(alert.dst_ip_str(), "10.0.0.1");
         assert!(!alert.false_positive, "an absent field takes its default");
+    }
+
+    /// The entry carries the whole address, so an IPv6 decision reads as
+    /// one rather than as a dotted quad made of its first 32 bits.
+    #[test]
+    fn an_audit_entry_reads_both_address_families() {
+        let body = serde_json::json!({
+            "entries": [
+                {
+                    "timestamp_ns": 1_000_000_000u64,
+                    "component": "firewall",
+                    "action": "drop",
+                    "src_addr": [0xC0A8_0001u32, 0, 0, 0],
+                    "dst_addr": [0x0A00_0001u32, 0, 0, 0],
+                    "is_ipv6": false,
+                    "src_port": 4444,
+                    "dst_port": 80,
+                    "protocol": 6,
+                    "rule_id": "fw-001",
+                    "detail": "Denied by rule",
+                },
+                {
+                    "timestamp_ns": 2_000_000_000u64,
+                    "component": "firewall",
+                    "action": "drop",
+                    "src_addr": [0x2001_0DB8u32, 0, 0, 1],
+                    "dst_addr": [0xFD00_0000u32, 0, 0, 2],
+                    "is_ipv6": true,
+                    "src_port": 4445,
+                    "dst_port": 443,
+                    "protocol": 6,
+                    "rule_id": "fw-006",
+                    "detail": "Denied by rule",
+                },
+            ],
+            "total": 2,
+            "limit": 100,
+            "offset": 0,
+        })
+        .to_string();
+
+        let resp: super::AuditLogResponse =
+            serde_json::from_str(&body).expect("the body is an audit log page");
+        assert_eq!(resp.entries[0].src_ip_str(), "192.168.0.1");
+        assert_eq!(resp.entries[0].dst_ip_str(), "10.0.0.1");
+        assert_eq!(resp.entries[1].src_ip_str(), "2001:db8::1");
+        assert_eq!(resp.entries[1].dst_ip_str(), "fd00::2");
     }
 
     #[test]

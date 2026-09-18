@@ -48,8 +48,17 @@ pub struct AuditEntryResponse {
     pub timestamp_ns: u64,
     pub component: String,
     pub action: String,
-    pub src_ip: u32,
-    pub dst_ip: u32,
+    // The entry stores the whole address; serving only the first word
+    // rendered an IPv6 decision as a dotted quad built from its first 32
+    // bits, which reads exactly like an IPv4 address that was never seen.
+    // The shape is the one the alert API already uses.
+    /// Source address as four big-endian u32 words.
+    /// IPv4: `[v4, 0, 0, 0]`. IPv6: full 128-bit address.
+    pub src_addr: Vec<u32>,
+    /// Destination address (same encoding as `src_addr`).
+    pub dst_addr: Vec<u32>,
+    /// `true` if the addresses are IPv6.
+    pub is_ipv6: bool,
     pub src_port: u16,
     pub dst_port: u16,
     pub protocol: u8,
@@ -117,8 +126,9 @@ pub async fn list_audit_logs(
             timestamp_ns: e.timestamp_ns,
             component: e.component.as_str().to_string(),
             action: e.action.as_str().to_string(),
-            src_ip: e.src_ip(),
-            dst_ip: e.dst_ip(),
+            src_addr: e.src_addr.to_vec(),
+            dst_addr: e.dst_addr.to_vec(),
+            is_ipv6: e.is_ipv6,
             src_port: e.src_port,
             dst_port: e.dst_port,
             protocol: e.protocol,
@@ -235,8 +245,9 @@ mod tests {
             timestamp_ns: 1_000_000_000,
             component: "firewall".to_string(),
             action: "drop".to_string(),
-            src_ip: 0xC0A8_0001,
-            dst_ip: 0x0A00_0001,
+            src_addr: vec![0xC0A8_0001, 0, 0, 0],
+            dst_addr: vec![0x0A00_0001, 0, 0, 0],
+            is_ipv6: false,
             src_port: 12345,
             dst_port: 80,
             protocol: 6,
@@ -248,6 +259,48 @@ mod tests {
         assert_eq!(json["action"], "drop");
         assert_eq!(json["rule_id"], "fw-001");
         assert_eq!(json["timestamp_ns"], 1_000_000_000_u64);
+    }
+
+    /// A decision taken on an IPv6 flow, which the response used to carry
+    /// as the first 32 bits of the address and nothing saying so.
+    #[test]
+    fn audit_entry_response_keeps_the_whole_ipv6_address() {
+        let entry = domain::audit::entity::AuditEntry::security_decision(
+            AuditComponent::Firewall,
+            AuditAction::Drop,
+            1_000_000_000,
+            [0x2001_0DB8, 0, 0, 0x0000_0001],
+            [0xFD00_0000, 0, 0, 0x0000_0002],
+            true,
+            443,
+            8080,
+            6,
+            "fw-006",
+            "Denied by rule",
+        );
+        let resp = AuditEntryResponse {
+            timestamp_ns: entry.timestamp_ns,
+            component: entry.component.as_str().to_string(),
+            action: entry.action.as_str().to_string(),
+            src_addr: entry.src_addr.to_vec(),
+            dst_addr: entry.dst_addr.to_vec(),
+            is_ipv6: entry.is_ipv6,
+            src_port: entry.src_port,
+            dst_port: entry.dst_port,
+            protocol: entry.protocol,
+            rule_id: entry.rule_id.clone(),
+            detail: entry.detail.clone(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["is_ipv6"], true);
+        assert_eq!(
+            json["src_addr"],
+            serde_json::json!([0x2001_0DB8_u32, 0, 0, 1])
+        );
+        assert_eq!(
+            json["dst_addr"],
+            serde_json::json!([0xFD00_0000_u32, 0, 0, 2])
+        );
     }
 
     #[test]

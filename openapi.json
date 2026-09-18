@@ -7126,8 +7126,9 @@
           "timestamp_ns",
           "component",
           "action",
-          "src_ip",
-          "dst_ip",
+          "src_addr",
+          "dst_addr",
+          "is_ipv6",
           "src_port",
           "dst_port",
           "protocol",
@@ -7144,15 +7145,23 @@
           "detail": {
             "type": "string"
           },
-          "dst_ip": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
+          "dst_addr": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Destination address (same encoding as `src_addr`)."
           },
           "dst_port": {
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          },
+          "is_ipv6": {
+            "type": "boolean",
+            "description": "`true` if the addresses are IPv6."
           },
           "protocol": {
             "type": "integer",
@@ -7162,10 +7171,14 @@
           "rule_id": {
             "type": "string"
           },
-          "src_ip": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
+          "src_addr": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Source address as four big-endian u32 words.\nIPv4: `[v4, 0, 0, 0]`. IPv6: full 128-bit address."
           },
           "src_port": {
             "type": "integer",

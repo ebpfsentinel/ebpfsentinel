@@ -1,5 +1,3 @@
-use std::net::Ipv4Addr;
-
 use anyhow::{Context, Result};
 
 use crate::api_client::{
@@ -915,8 +913,8 @@ pub async fn cmd_audit_logs(
             "{:<12}  {:<14}  {:<18}  {:<18}  {:>5}  {:>5}  {:<10}  {:<30}",
             entry.component,
             entry.action,
-            format_ip(entry.src_ip),
-            format_ip(entry.dst_ip),
+            entry.src_ip_str(),
+            entry.dst_ip_str(),
             entry.src_port,
             entry.dst_port,
             entry.rule_id,
@@ -2620,14 +2618,6 @@ fn yes_no(val: bool) -> &'static str {
     if val { "yes" } else { "no" }
 }
 
-fn format_ip(raw: u32) -> String {
-    if raw == 0 {
-        "-".to_string()
-    } else {
-        Ipv4Addr::from(raw).to_string()
-    }
-}
-
 fn format_uptime(seconds: u64) -> String {
     let h = seconds / 3600;
     let m = (seconds % 3600) / 60;
@@ -3544,20 +3534,5 @@ mod tests {
         assert_eq!(ConntrackEventType::New.as_str(), "new");
         assert_eq!(ConntrackEventType::Update.as_str(), "update");
         assert_eq!(ConntrackEventType::Destroy.as_str(), "destroy");
-    }
-
-    #[test]
-    fn format_ip_zero_is_dash() {
-        assert_eq!(format_ip(0), "-");
-    }
-
-    #[test]
-    fn format_ip_localhost() {
-        assert_eq!(format_ip(0x7F00_0001), "127.0.0.1");
-    }
-
-    #[test]
-    fn format_ip_private() {
-        assert_eq!(format_ip(0xC0A8_0101), "192.168.1.1");
     }
 }
