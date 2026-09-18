@@ -821,6 +821,32 @@ impl ConfigReloadService {
         }
     }
 
+    /// Resolve the alias each L7 rule may name into the criterion it matches on.
+    ///
+    /// A rule naming none is returned untouched, and a rule whose alias cannot
+    /// become a single network or port range is dropped with its reason rather
+    /// than installed with that side of it unrestricted.
+    async fn l7_rules_with_aliases(&self, rules: Vec<L7Rule>) -> Vec<L7Rule> {
+        if !rules.iter().any(|r| {
+            r.src_ip_alias.is_some() || r.dst_ip_alias.is_some() || r.dst_port_alias.is_some()
+        }) {
+            return rules;
+        }
+        let Some(ref alias_service) = self.alias_service else {
+            tracing::warn!(
+                component = "l7",
+                "L7 rule aliases ignored: no alias service is wired"
+            );
+            return rules;
+        };
+        let resolved = {
+            let guard = alias_service.read().await;
+            crate::l7_aliases::resolve_rule_aliases(rules, &guard)
+        };
+        crate::l7_aliases::log_failures(&resolved.failures);
+        resolved.rules
+    }
+
     /// Reload L7 rules atomically with enabled awareness.
     pub async fn reload_l7(&self, rules: Vec<L7Rule>, enabled: bool) -> Result<(), anyhow::Error> {
         let _guard = self.reload_locks.l7.lock().await;
@@ -829,7 +855,11 @@ impl ConfigReloadService {
 
         svc.set_enabled(enabled);
 
-        let effective_rules = if enabled { rules } else { Vec::new() };
+        let effective_rules = if enabled {
+            self.l7_rules_with_aliases(rules).await
+        } else {
+            Vec::new()
+        };
         let rule_count = effective_rules.len();
 
         match svc.reload_rules(effective_rules) {

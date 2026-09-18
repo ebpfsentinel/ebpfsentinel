@@ -566,6 +566,14 @@ pub async fn run(
     if config.nat.enabled {
         application::nat_aliases::apply_rule_aliases(&mut *nat_svc.write().await, &alias_svc);
     }
+    // And L7 rules, which is the same problem one layer up: a rule whose only
+    // source restriction is an alias name carries no criterion at all until
+    // that name is resolved, so it matches every address there is.
+    if config.l7.enabled {
+        let mut svc = (**l7_svc.load()).clone();
+        application::l7_aliases::apply_rule_aliases(&mut svc, &alias_svc);
+        l7_svc.store(Arc::new(svc));
+    }
     let alias_svc = Arc::new(RwLock::new(alias_svc));
     info!("alias service initialized");
 
