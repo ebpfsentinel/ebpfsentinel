@@ -544,10 +544,15 @@ pub struct DdosAttackResponse {
     pub attack_type: String,
     pub status: String,
     pub start_time_ns: u64,
+    #[serde(default)]
+    pub last_seen_ns: u64,
     pub peak_pps: u64,
     pub current_pps: u64,
     pub total_packets: u64,
     pub source_count: u64,
+    /// Absent where `GeoIP` resolved no country for the sources.
+    #[serde(default)]
+    pub src_country: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -558,6 +563,9 @@ pub struct DdosPolicyResponse {
     pub mitigation_action: String,
     pub auto_block_duration_secs: u64,
     pub enabled: bool,
+    /// Absent where the policy judges every source against one threshold.
+    #[serde(default)]
+    pub country_thresholds: Option<std::collections::HashMap<String, u64>>,
 }
 
 // ── QoS ─────────────────────────────────────────────────────────

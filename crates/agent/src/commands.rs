@@ -1214,16 +1214,17 @@ pub async fn cmd_ddos_attacks(client: &ApiClient, output: OutputFormat) -> Resul
     }
 
     println!(
-        "{:<16}  {:<18}  {:<10}  {:>10}  {:>10}  {:>12}  {:>8}",
-        "ID", "ATTACK TYPE", "STATUS", "PEAK PPS", "CUR PPS", "TOTAL PKTS", "SOURCES"
+        "{:<16}  {:<18}  {:<10}  {:<7}  {:>10}  {:>10}  {:>12}  {:>8}",
+        "ID", "ATTACK TYPE", "STATUS", "COUNTRY", "PEAK PPS", "CUR PPS", "TOTAL PKTS", "SOURCES"
     );
 
     for a in &attacks {
         println!(
-            "{:<16}  {:<18}  {:<10}  {:>10}  {:>10}  {:>12}  {:>8}",
+            "{:<16}  {:<18}  {:<10}  {:<7}  {:>10}  {:>10}  {:>12}  {:>8}",
             a.id,
             a.attack_type,
             a.status,
+            a.src_country.as_deref().unwrap_or("-"),
             a.peak_pps,
             a.current_pps,
             a.total_packets,
@@ -1253,16 +1254,17 @@ pub async fn cmd_ddos_history(
     }
 
     println!(
-        "{:<16}  {:<18}  {:<10}  {:>10}  {:>10}  {:>12}  {:>8}",
-        "ID", "ATTACK TYPE", "STATUS", "PEAK PPS", "CUR PPS", "TOTAL PKTS", "SOURCES"
+        "{:<16}  {:<18}  {:<10}  {:<7}  {:>10}  {:>10}  {:>12}  {:>8}",
+        "ID", "ATTACK TYPE", "STATUS", "COUNTRY", "PEAK PPS", "CUR PPS", "TOTAL PKTS", "SOURCES"
     );
 
     for a in &attacks {
         println!(
-            "{:<16}  {:<18}  {:<10}  {:>10}  {:>10}  {:>12}  {:>8}",
+            "{:<16}  {:<18}  {:<10}  {:<7}  {:>10}  {:>10}  {:>12}  {:>8}",
             a.id,
             a.attack_type,
             a.status,
+            a.src_country.as_deref().unwrap_or("-"),
             a.peak_pps,
             a.current_pps,
             a.total_packets,
@@ -1288,19 +1290,27 @@ pub async fn cmd_ddos_policies(client: &ApiClient, output: OutputFormat) -> Resu
     }
 
     println!(
-        "{:<16}  {:<18}  {:>12}  {:<10}  {:>12}  {:<7}",
-        "ID", "ATTACK TYPE", "THRESH PPS", "ACTION", "BLOCK (s)", "ENABLED"
+        "{:<16}  {:<18}  {:>12}  {:<10}  {:>12}  {:<7}  {:>9}",
+        "ID", "ATTACK TYPE", "THRESH PPS", "ACTION", "BLOCK (s)", "ENABLED", "COUNTRIES"
     );
 
     for p in &policies {
+        // The per-country thresholds are a map: the table says how many
+        // there are, since a policy firing under its own threshold is
+        // explained by one of them, and `--output json` carries them in full.
+        let countries = p
+            .country_thresholds
+            .as_ref()
+            .map_or(0, std::collections::HashMap::len);
         println!(
-            "{:<16}  {:<18}  {:>12}  {:<10}  {:>12}  {:<7}",
+            "{:<16}  {:<18}  {:>12}  {:<10}  {:>12}  {:<7}  {:>9}",
             p.id,
             p.attack_type,
             p.detection_threshold_pps,
             p.mitigation_action,
             p.auto_block_duration_secs,
             yes_no(p.enabled),
+            countries,
         );
     }
 

@@ -8191,11 +8191,13 @@
       },
       "DdosAttackResponse": {
         "type": "object",
+        "description": "One flood the detector is tracking, or tracked until it expired.",
         "required": [
           "id",
           "attack_type",
           "status",
           "start_time_ns",
+          "last_seen_ns",
           "peak_pps",
           "current_pps",
           "total_packets",
@@ -8203,7 +8205,8 @@
         ],
         "properties": {
           "attack_type": {
-            "type": "string"
+            "type": "string",
+            "description": "`syn_flood`, `udp_amplification`, `icmp_flood`, `rst_flood`,\n`fin_flood`, `ack_flood` or `volumetric`: the same spelling the\nconfiguration file uses and `POST /api/v1/ddos/policies` accepts."
           },
           "current_pps": {
             "type": "integer",
@@ -8212,6 +8215,12 @@
           },
           "id": {
             "type": "string"
+          },
+          "last_seen_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the detector last counted a packet against this attack. On the\nhistory route this is where the flood stopped, which a start alone\ncannot say.",
+            "minimum": 0
           },
           "peak_pps": {
             "type": "integer",
@@ -8223,13 +8232,21 @@
             "format": "int64",
             "minimum": 0
           },
+          "src_country": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Source country, `null` where `GeoIP` resolved none. A policy carrying\n`country_thresholds` is judged against this, and a `block` policy\ninjects this country's CIDRs into the firewall, so an attack with no\ncountry here is one no country rule acted on."
+          },
           "start_time_ns": {
             "type": "integer",
             "format": "int64",
             "minimum": 0
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "`detecting`, `active`, `mitigated` or `expired`."
           },
           "total_packets": {
             "type": "integer",
@@ -8250,12 +8267,28 @@
         ],
         "properties": {
           "attack_type": {
-            "type": "string"
+            "type": "string",
+            "description": "Spelled the way the configuration file and the create route spell it."
           },
           "auto_block_duration_secs": {
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "country_thresholds": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Per-country thresholds that replace `detection_threshold_pps` for\ntraffic from those countries, absent where the policy carries none.\nReading it back is the only way to explain a policy that fired well\nunder the threshold beside it.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "detection_threshold_pps": {
             "type": "integer",
@@ -8269,7 +8302,8 @@
             "type": "string"
           },
           "mitigation_action": {
-            "type": "string"
+            "type": "string",
+            "description": "`alert`, `throttle` or `block`."
           }
         }
       },

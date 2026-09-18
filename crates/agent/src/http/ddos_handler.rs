@@ -28,37 +28,78 @@ pub struct DdosStatusResponse {
     pub policy_count: usize,
 }
 
+/// One flood the detector is tracking, or tracked until it expired.
 #[derive(Serialize, ToSchema)]
 pub struct DdosAttackResponse {
     pub id: String,
+    /// `syn_flood`, `udp_amplification`, `icmp_flood`, `rst_flood`,
+    /// `fin_flood`, `ack_flood` or `volumetric`: the same spelling the
+    /// configuration file uses and `POST /api/v1/ddos/policies` accepts.
     pub attack_type: String,
+    /// `detecting`, `active`, `mitigated` or `expired`.
     pub status: String,
     pub start_time_ns: u64,
+    /// When the detector last counted a packet against this attack. On the
+    /// history route this is where the flood stopped, which a start alone
+    /// cannot say.
+    pub last_seen_ns: u64,
     pub peak_pps: u64,
     pub current_pps: u64,
     pub total_packets: u64,
     pub source_count: u64,
+    /// Source country, `null` where `GeoIP` resolved none. A policy carrying
+    /// `country_thresholds` is judged against this, and a `block` policy
+    /// injects this country's CIDRs into the firewall, so an attack with no
+    /// country here is one no country rule acted on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_country: Option<String>,
+}
+
+impl DdosAttackResponse {
+    fn from_attack(a: &domain::ddos::entity::DdosAttack) -> Self {
+        Self {
+            id: a.id.clone(),
+            attack_type: format_attack_type(a.attack_type),
+            status: format_status(a.mitigation_status),
+            start_time_ns: a.start_time_ns,
+            last_seen_ns: a.last_seen_ns,
+            peak_pps: a.peak_pps,
+            current_pps: a.current_pps,
+            total_packets: a.total_packets,
+            source_count: a.source_count,
+            src_country: a.src_country.clone(),
+        }
+    }
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct DdosPolicyResponse {
     pub id: String,
+    /// Spelled the way the configuration file and the create route spell it.
     pub attack_type: String,
     pub detection_threshold_pps: u64,
+    /// `alert`, `throttle` or `block`.
     pub mitigation_action: String,
     pub auto_block_duration_secs: u64,
     pub enabled: bool,
+    /// Per-country thresholds that replace `detection_threshold_pps` for
+    /// traffic from those countries, absent where the policy carries none.
+    /// Reading it back is the only way to explain a policy that fired well
+    /// under the threshold beside it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country_thresholds: Option<std::collections::HashMap<String, u64>>,
 }
 
 impl DdosPolicyResponse {
     fn from_policy(p: &DdosPolicy) -> Self {
         Self {
             id: p.id.0.clone(),
-            attack_type: format!("{:?}", p.attack_type).to_lowercase(),
+            attack_type: format_attack_type(p.attack_type),
+            mitigation_action: format_action(p.mitigation_action),
             detection_threshold_pps: p.detection_threshold_pps,
-            mitigation_action: format!("{:?}", p.mitigation_action).to_lowercase(),
             auto_block_duration_secs: p.auto_block_duration_secs,
             enabled: p.enabled,
+            country_thresholds: p.country_thresholds.clone(),
         }
     }
 }
@@ -152,16 +193,7 @@ pub async fn ddos_attacks(
     let attacks: Vec<DdosAttackResponse> = svc
         .active_attacks()
         .iter()
-        .map(|a| DdosAttackResponse {
-            id: a.id.clone(),
-            attack_type: format!("{:?}", a.attack_type).to_lowercase(),
-            status: format_status(a.mitigation_status),
-            start_time_ns: a.start_time_ns,
-            peak_pps: a.peak_pps,
-            current_pps: a.current_pps,
-            total_packets: a.total_packets,
-            source_count: a.source_count,
-        })
+        .map(DdosAttackResponse::from_attack)
         .collect();
     Ok(Json(attacks))
 }
@@ -191,16 +223,7 @@ pub async fn ddos_history(
     let attacks: Vec<DdosAttackResponse> = svc
         .attack_history(query.limit)
         .iter()
-        .map(|a| DdosAttackResponse {
-            id: a.id.clone(),
-            attack_type: format!("{:?}", a.attack_type).to_lowercase(),
-            status: format_status(a.mitigation_status),
-            start_time_ns: a.start_time_ns,
-            peak_pps: a.peak_pps,
-            current_pps: a.current_pps,
-            total_packets: a.total_packets,
-            source_count: a.source_count,
-        })
+        .map(DdosAttackResponse::from_attack)
         .collect();
     Ok(Json(attacks))
 }
@@ -355,6 +378,35 @@ fn format_status(status: DdosMitigationStatus) -> String {
     }
 }
 
+/// Spell an attack type the way the configuration file and the create route
+/// spell it.
+///
+/// `{:?}` would print `SynFlood`, whose lower-case form is `synflood` - a
+/// word no configuration file, no error message and no other reading of this
+/// product uses, and one the reader would then have to translate back before
+/// posting it to the create route.
+fn format_attack_type(attack_type: DdosAttackType) -> String {
+    match attack_type {
+        DdosAttackType::SynFlood => "syn_flood",
+        DdosAttackType::UdpAmplification => "udp_amplification",
+        DdosAttackType::IcmpFlood => "icmp_flood",
+        DdosAttackType::RstFlood => "rst_flood",
+        DdosAttackType::FinFlood => "fin_flood",
+        DdosAttackType::AckFlood => "ack_flood",
+        DdosAttackType::Volumetric => "volumetric",
+    }
+    .to_string()
+}
+
+fn format_action(action: DdosMitigationAction) -> String {
+    match action {
+        DdosMitigationAction::Alert => "alert",
+        DdosMitigationAction::Throttle => "throttle",
+        DdosMitigationAction::Block => "block",
+    }
+    .to_string()
+}
+
 fn parse_attack_type(s: &str) -> Result<DdosAttackType, ApiError> {
     match s.to_lowercase().as_str() {
         "syn_flood" | "synflood" => Ok(DdosAttackType::SynFlood),
@@ -506,5 +558,71 @@ mod tests {
         assert_eq!(resp.id, "ddos-001");
         assert_eq!(resp.detection_threshold_pps, 5000);
         assert!(resp.enabled);
+    }
+
+    /// Every type reads back in the spelling the create route takes, so a
+    /// policy listed here can be posted straight back.
+    #[test]
+    fn every_attack_type_reads_back_in_the_spelling_it_is_written_in() {
+        for ty in [
+            DdosAttackType::SynFlood,
+            DdosAttackType::UdpAmplification,
+            DdosAttackType::IcmpFlood,
+            DdosAttackType::RstFlood,
+            DdosAttackType::FinFlood,
+            DdosAttackType::AckFlood,
+            DdosAttackType::Volumetric,
+        ] {
+            let word = format_attack_type(ty);
+            assert_eq!(
+                parse_attack_type(&word).expect("round trip"),
+                ty,
+                "failed for {word}"
+            );
+        }
+        assert_eq!(format_attack_type(DdosAttackType::SynFlood), "syn_flood");
+    }
+
+    #[test]
+    fn a_policy_says_which_countries_carry_their_own_threshold() {
+        let policy = DdosPolicy {
+            id: RuleId("ddos-geo".to_string()),
+            attack_type: DdosAttackType::SynFlood,
+            detection_threshold_pps: 5000,
+            mitigation_action: DdosMitigationAction::Block,
+            auto_block_duration_secs: 300,
+            enabled: true,
+            country_thresholds: Some(std::collections::HashMap::from([("KP".to_string(), 500)])),
+        };
+        let resp = DdosPolicyResponse::from_policy(&policy);
+        assert_eq!(resp.country_thresholds.expect("thresholds")["KP"], 500);
+    }
+
+    #[test]
+    fn an_attack_carries_the_country_a_block_policy_acts_on() {
+        let mut attack = domain::ddos::entity::DdosAttack::new(
+            "atk-1".to_string(),
+            DdosAttackType::SynFlood,
+            1_000_000_000,
+        );
+        attack.src_country = Some("KP".to_string());
+        attack.last_seen_ns = 9_000_000_000;
+
+        let resp = DdosAttackResponse::from_attack(&attack);
+        assert_eq!(resp.attack_type, "syn_flood");
+        assert_eq!(resp.src_country.as_deref(), Some("KP"));
+        assert_eq!(resp.last_seen_ns, 9_000_000_000);
+    }
+
+    #[test]
+    fn an_attack_no_country_was_resolved_for_carries_none() {
+        let attack = domain::ddos::entity::DdosAttack::new(
+            "atk-2".to_string(),
+            DdosAttackType::Volumetric,
+            1_000_000_000,
+        );
+        let resp = DdosAttackResponse::from_attack(&attack);
+        assert!(resp.src_country.is_none());
+        assert_eq!(resp.attack_type, "volumetric");
     }
 }
