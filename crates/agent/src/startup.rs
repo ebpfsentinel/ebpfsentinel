@@ -946,117 +946,122 @@ pub async fn run(
     // service's consecutive failure/success counters (which flip a gateway to
     // Down past its failure_threshold), and raise a single critical
     // WAN_ALL_DOWN alert the first time every enabled gateway is down.
+    //
+    // The gateway list is read afresh on every tick rather than snapshotted at
+    // boot, because a gateway added through the HTTP API carries a health check
+    // of its own: a snapshot left it reporting healthy for ever with nothing
+    // probing it, went on probing one that had been removed, and never started
+    // at all when no gateway in the file carried a check.
     if config.routing.enabled {
-        let probe_specs: Vec<(u8, String, domain::routing::entity::HealthCheck)> = {
-            let svc = routing_svc.read().await;
-            svc.list_gateways()
-                .into_iter()
-                .filter(|s| s.gateway.enabled)
-                .filter_map(|s| {
-                    s.gateway
-                        .health_check
-                        .clone()
-                        .map(|hc| (s.gateway.id, s.gateway.name.clone(), hc))
-                })
-                .collect()
-        };
-
-        if !probe_specs.is_empty() {
-            let probe_routing = Arc::clone(&routing_svc);
-            let probe_alert_tx = alert_tx.clone();
-            let tick_secs = probe_specs
-                .iter()
-                .map(|(_, _, hc)| u64::from(hc.interval_secs).max(1))
-                .min()
-                .unwrap_or(5);
-            tokio::spawn(async move {
-                use domain::routing::entity::HealthCheckProto;
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(tick_secs));
-                let mut was_all_down = false;
-                loop {
-                    tick.tick().await;
-                    for (id, _name, hc) in &probe_specs {
-                        let timeout =
-                            std::time::Duration::from_secs(u64::from(hc.timeout_secs).max(1));
-                        let ok = match hc.protocol {
-                            HealthCheckProto::Tcp { port } => {
-                                let addr = format!("{}:{port}", hc.target);
-                                matches!(
-                                    tokio::time::timeout(
-                                        timeout,
-                                        tokio::net::TcpStream::connect(&addr)
-                                    )
-                                    .await,
-                                    Ok(Ok(_))
-                                )
-                            }
-                            HealthCheckProto::Icmp => {
-                                if is_safe_probe_target(&hc.target) {
-                                    let secs = timeout.as_secs().max(1).to_string();
-                                    // `--` terminates option parsing so a target
-                                    // beginning with `-` can never be read as a flag.
-                                    tokio::process::Command::new("ping")
-                                        .args(["-c", "1", "-W", &secs, "--", &hc.target])
-                                        .stdout(std::process::Stdio::null())
-                                        .stderr(std::process::Stdio::null())
-                                        .status()
-                                        .await
-                                        .is_ok_and(|s| s.success())
-                                } else {
-                                    tracing::warn!(
-                                        target = %hc.target,
-                                        "skipping ICMP health probe: invalid target"
-                                    );
-                                    false
-                                }
-                            }
-                        };
-                        let mut svc = probe_routing.write().await;
-                        let _ = if ok {
-                            svc.record_probe_success(*id)
-                        } else {
-                            svc.record_probe_failure(*id)
-                        };
+        let probe_routing = Arc::clone(&routing_svc);
+        let probe_alert_tx = alert_tx.clone();
+        tokio::spawn(async move {
+            use domain::routing::entity::HealthCheckProto;
+            use std::collections::HashMap;
+            // One tick a second, with each gateway probed on the interval it
+            // was configured with: a tick shared across the estate charged the
+            // shortest interval in it to every other gateway.
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut was_all_down = false;
+            let mut due: HashMap<u8, tokio::time::Instant> = HashMap::new();
+            loop {
+                tick.tick().await;
+                let probe_specs: Vec<(u8, domain::routing::entity::HealthCheck)> = {
+                    let svc = probe_routing.read().await;
+                    svc.list_gateways()
+                        .into_iter()
+                        .filter(|s| s.gateway.enabled)
+                        .filter_map(|s| s.gateway.health_check.clone().map(|hc| (s.gateway.id, hc)))
+                        .collect()
+                };
+                due.retain(|id, _| probe_specs.iter().any(|(spec_id, _)| spec_id == id));
+                for (id, hc) in &probe_specs {
+                    let now = tokio::time::Instant::now();
+                    let next = due.entry(*id).or_insert(now);
+                    if *next > now {
+                        continue;
                     }
-
-                    // Edge-detect the all-down transition under one lock.
-                    let down_names: Vec<String> = {
-                        let svc = probe_routing.read().await;
-                        let gws = svc.list_gateways();
-                        let enabled: Vec<_> = gws.iter().filter(|s| s.gateway.enabled).collect();
-                        let all_down = !enabled.is_empty()
-                            && enabled
-                                .iter()
-                                .all(|s| s.status == domain::routing::entity::GatewayStatus::Down);
-                        if all_down {
-                            enabled.iter().map(|s| s.gateway.name.clone()).collect()
-                        } else {
-                            Vec::new()
+                    *next = now + Duration::from_secs(u64::from(hc.interval_secs).max(1));
+                    let timeout = Duration::from_secs(u64::from(hc.timeout_secs).max(1));
+                    let ok = match hc.protocol {
+                        HealthCheckProto::Tcp { port } => {
+                            let addr = format!("{}:{port}", hc.target);
+                            matches!(
+                                tokio::time::timeout(
+                                    timeout,
+                                    tokio::net::TcpStream::connect(&addr)
+                                )
+                                .await,
+                                Ok(Ok(_))
+                            )
+                        }
+                        HealthCheckProto::Icmp => {
+                            if is_safe_probe_target(&hc.target) {
+                                let secs = timeout.as_secs().max(1).to_string();
+                                // `--` terminates option parsing so a target
+                                // beginning with `-` can never be read as a flag.
+                                tokio::process::Command::new("ping")
+                                    .args(["-c", "1", "-W", &secs, "--", &hc.target])
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .status()
+                                    .await
+                                    .is_ok_and(|s| s.success())
+                            } else {
+                                tracing::warn!(
+                                    target = %hc.target,
+                                    "skipping ICMP health probe: invalid target"
+                                );
+                                false
+                            }
                         }
                     };
-
-                    if !down_names.is_empty() && !was_all_down {
-                        was_all_down = true;
-                        let now_ns = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_nanos()
-                            .try_into()
-                            .unwrap_or(u64::MAX);
-                        let alert = domain::alert::entity::Alert::wan_all_down(&down_names, now_ns);
-                        let _ = probe_alert_tx
-                            .send(application::alert_event::AlertEvent::System(Box::new(
-                                alert,
-                            )))
-                            .await;
-                        tracing::warn!(gateways = ?down_names, "multi-WAN all gateways down");
-                    } else if down_names.is_empty() {
-                        was_all_down = false;
-                    }
+                    let mut svc = probe_routing.write().await;
+                    let _ = if ok {
+                        svc.record_probe_success(*id)
+                    } else {
+                        svc.record_probe_failure(*id)
+                    };
                 }
-            });
-            info!("multi-WAN health-probe loop started");
-        }
+
+                // Edge-detect the all-down transition under one lock.
+                let down_names: Vec<String> = {
+                    let svc = probe_routing.read().await;
+                    let gws = svc.list_gateways();
+                    let enabled: Vec<_> = gws.iter().filter(|s| s.gateway.enabled).collect();
+                    let all_down = !enabled.is_empty()
+                        && enabled
+                            .iter()
+                            .all(|s| s.status == domain::routing::entity::GatewayStatus::Down);
+                    if all_down {
+                        enabled.iter().map(|s| s.gateway.name.clone()).collect()
+                    } else {
+                        Vec::new()
+                    }
+                };
+
+                if !down_names.is_empty() && !was_all_down {
+                    was_all_down = true;
+                    let now_ns = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                        .try_into()
+                        .unwrap_or(u64::MAX);
+                    let alert = domain::alert::entity::Alert::wan_all_down(&down_names, now_ns);
+                    let _ = probe_alert_tx
+                        .send(application::alert_event::AlertEvent::System(Box::new(
+                            alert,
+                        )))
+                        .await;
+                    tracing::warn!(gateways = ?down_names, "multi-WAN all gateways down");
+                } else if down_names.is_empty() {
+                    was_all_down = false;
+                }
+            }
+        });
+        info!("multi-WAN health-probe loop started");
     }
 
     // ── Load-balancer backend health-probe loop ─────────────────────
