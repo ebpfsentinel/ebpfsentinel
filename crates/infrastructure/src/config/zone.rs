@@ -132,7 +132,7 @@ impl ZoneEntryConfig {
         parse_zone_policy(&self.default_policy).map_err(|()| ConfigError::InvalidValue {
             field: format!("{prefix}.default_policy"),
             value: self.default_policy.clone(),
-            expected: "allow, deny".to_string(),
+            expected: ZonePolicy::WORDS.to_string(),
         })?;
 
         Ok(())
@@ -143,7 +143,7 @@ impl ZoneEntryConfig {
             parse_zone_policy(&self.default_policy).map_err(|()| ConfigError::InvalidValue {
                 field: "default_policy".to_string(),
                 value: self.default_policy.clone(),
-                expected: "allow, deny".to_string(),
+                expected: ZonePolicy::WORDS.to_string(),
             })?;
 
         Ok(Zone {
@@ -183,7 +183,7 @@ impl ZonePairConfig {
         parse_zone_policy(&self.policy).map_err(|()| ConfigError::InvalidValue {
             field: format!("{prefix}.policy"),
             value: self.policy.clone(),
-            expected: "allow, deny".to_string(),
+            expected: ZonePolicy::WORDS.to_string(),
         })?;
 
         Ok(())
@@ -193,7 +193,7 @@ impl ZonePairConfig {
         let policy = parse_zone_policy(&self.policy).map_err(|()| ConfigError::InvalidValue {
             field: "policy".to_string(),
             value: self.policy.clone(),
-            expected: "allow, deny".to_string(),
+            expected: ZonePolicy::WORDS.to_string(),
         })?;
 
         Ok(ZonePair {
@@ -205,11 +205,7 @@ impl ZonePairConfig {
 }
 
 fn parse_zone_policy(s: &str) -> Result<ZonePolicy, ()> {
-    match s.to_lowercase().as_str() {
-        "allow" | "permit" | "accept" => Ok(ZonePolicy::Allow),
-        "deny" | "drop" | "reject" => Ok(ZonePolicy::Deny),
-        _ => Err(()),
-    }
+    ZonePolicy::parse(s).ok_or(())
 }
 
 #[cfg(test)]

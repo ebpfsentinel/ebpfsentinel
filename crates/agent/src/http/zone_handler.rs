@@ -60,14 +60,18 @@ fn format_zone_policy(policy: ZonePolicy) -> &'static str {
     }
 }
 
-/// Map an `allow`/`deny`/anything-else action string to a domain policy.
-/// Only `allow` permits traffic; every other verb (deny, alert, …) denies.
-fn parse_zone_action(action: &str) -> ZonePolicy {
-    if action.eq_ignore_ascii_case("allow") {
-        ZonePolicy::Allow
-    } else {
-        ZonePolicy::Deny
-    }
+/// Read a policy word in the vocabulary the configuration file reads, so a
+/// zone written in a file and the same zone posted here mean the same thing.
+/// A word outside it is refused rather than turned into a deny: `permit` used
+/// to be read as `deny`, which is the opposite of what the caller asked for.
+fn parse_zone_action(action: &str) -> Result<ZonePolicy, ApiError> {
+    ZonePolicy::parse(action).ok_or(ApiError::BadRequest {
+        code: "ZONE_INVALID",
+        message: format!(
+            "unknown policy '{action}', expected one of: {}",
+            ZonePolicy::WORDS
+        ),
+    })
 }
 
 fn map_zone_error(err: &ZoneError) -> ApiError {
@@ -102,8 +106,8 @@ pub struct CreateZoneRequest {
     #[serde(default)]
     pub interfaces: Option<Vec<String>>,
     /// Policy applied when no rule and no inter-zone policy decided the
-    /// packet. `allow` permits; anything else, including an absent value,
-    /// denies.
+    /// packet. `allow`, `permit` and `accept` permit; `deny`, `drop` and
+    /// `reject` deny, as does an absent value. Any other word is refused.
     #[serde(default)]
     pub default_policy: Option<String>,
 }
@@ -114,7 +118,8 @@ pub struct CreateZonePolicyRequest {
     pub source_zone: String,
     /// Destination zone identifier.
     pub dest_zone: String,
-    /// `allow` permits traffic; any other verb denies.
+    /// `allow`, `permit` or `accept` to permit traffic; `deny`, `drop` or
+    /// `reject` to deny it. Any other word is refused.
     pub action: String,
 }
 
@@ -244,7 +249,7 @@ pub async fn create_zone(
         default_policy: req
             .default_policy
             .as_deref()
-            .map_or(ZonePolicy::Deny, parse_zone_action),
+            .map_or(Ok(ZonePolicy::Deny), parse_zone_action)?,
     };
     let mut svc = zone.write().await;
     svc.add_zone(new_zone.clone())
@@ -321,7 +326,7 @@ pub async fn create_zone_policy(
     let pair = ZonePair {
         from: req.source_zone,
         to: req.dest_zone,
-        policy: parse_zone_action(&req.action),
+        policy: parse_zone_action(&req.action)?,
     };
     let mut svc = zone.write().await;
     svc.add_policy(pair.clone())
@@ -368,4 +373,36 @@ pub async fn delete_zone_policy(
     svc.remove_policy(from, to)
         .map_err(|e| map_zone_error(&e))?;
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_permitting_word_the_config_file_takes_permits_here_too() {
+        for word in ["allow", "permit", "accept", "ALLOW", "Permit"] {
+            assert_eq!(parse_zone_action(word).unwrap(), ZonePolicy::Allow);
+        }
+    }
+
+    #[test]
+    fn every_denying_word_the_config_file_takes_denies_here_too() {
+        for word in ["deny", "drop", "reject", "DENY", "Reject"] {
+            assert_eq!(parse_zone_action(word).unwrap(), ZonePolicy::Deny);
+        }
+    }
+
+    #[test]
+    fn a_word_outside_the_vocabulary_is_refused_rather_than_denied() {
+        let err = parse_zone_action("pass").unwrap_err();
+        match err {
+            ApiError::BadRequest { code, ref message } => {
+                assert_eq!(code, "ZONE_INVALID");
+                assert!(message.contains("pass"), "{message}");
+                assert!(message.contains("permit"), "{message}");
+            }
+            other => panic!("expected a bad request, got {other:?}"),
+        }
+    }
 }

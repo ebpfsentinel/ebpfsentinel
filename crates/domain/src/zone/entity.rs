@@ -17,6 +17,32 @@ pub enum ZonePolicy {
     Deny,
 }
 
+impl ZonePolicy {
+    /// Read a policy word, in the one vocabulary the configuration file and
+    /// `POST /api/v1/zones/policies` both answer to. A word outside it is
+    /// `None` rather than a deny, so a caller writing `pass` is told rather
+    /// than quietly given the opposite of what it asked for.
+    #[must_use]
+    pub fn parse(word: &str) -> Option<Self> {
+        if ["allow", "permit", "accept"]
+            .iter()
+            .any(|w| word.eq_ignore_ascii_case(w))
+        {
+            Some(Self::Allow)
+        } else if ["deny", "drop", "reject"]
+            .iter()
+            .any(|w| word.eq_ignore_ascii_case(w))
+        {
+            Some(Self::Deny)
+        } else {
+            None
+        }
+    }
+
+    /// Every word `parse` accepts, for an error message that can name them.
+    pub const WORDS: &'static str = "allow, permit, accept, deny, drop, reject";
+}
+
 /// A security zone grouping network interfaces.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Zone {
@@ -149,6 +175,33 @@ impl ZoneConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policy_words_read_the_same_whatever_the_case() {
+        assert_eq!(ZonePolicy::parse("allow"), Some(ZonePolicy::Allow));
+        assert_eq!(ZonePolicy::parse("PERMIT"), Some(ZonePolicy::Allow));
+        assert_eq!(ZonePolicy::parse("Accept"), Some(ZonePolicy::Allow));
+        assert_eq!(ZonePolicy::parse("deny"), Some(ZonePolicy::Deny));
+        assert_eq!(ZonePolicy::parse("DROP"), Some(ZonePolicy::Deny));
+        assert_eq!(ZonePolicy::parse("Reject"), Some(ZonePolicy::Deny));
+    }
+
+    #[test]
+    fn a_word_outside_the_vocabulary_reads_as_nothing() {
+        assert_eq!(ZonePolicy::parse("pass"), None);
+        assert_eq!(ZonePolicy::parse("alert"), None);
+        assert_eq!(ZonePolicy::parse(""), None);
+    }
+
+    #[test]
+    fn every_word_parse_takes_is_named_in_the_error_vocabulary() {
+        for word in ZonePolicy::WORDS.split(',') {
+            assert!(
+                ZonePolicy::parse(word.trim()).is_some(),
+                "WORDS names '{word}', which parse refuses"
+            );
+        }
+    }
 
     fn zones(count: usize) -> Vec<Zone> {
         (0..count)

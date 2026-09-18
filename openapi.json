@@ -8148,7 +8148,7 @@
         "properties": {
           "action": {
             "type": "string",
-            "description": "`allow` permits traffic; any other verb denies."
+            "description": "`allow`, `permit` or `accept` to permit traffic; `deny`, `drop` or\n`reject` to deny it. Any other word is refused."
           },
           "dest_zone": {
             "type": "string",
@@ -8171,7 +8171,7 @@
               "string",
               "null"
             ],
-            "description": "Policy applied when no rule and no inter-zone policy decided the\npacket. `allow` permits; anything else, including an absent value,\ndenies."
+            "description": "Policy applied when no rule and no inter-zone policy decided the\npacket. `allow`, `permit` and `accept` permit; `deny`, `drop` and\n`reject` deny, as does an absent value. Any other word is refused."
           },
           "interfaces": {
             "type": [
