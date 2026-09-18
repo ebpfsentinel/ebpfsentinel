@@ -7411,12 +7411,14 @@
         "type": "object",
         "required": [
           "enabled",
-          "connection_count",
           "max_connections"
         ],
         "properties": {
           "connection_count": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "minimum": 0
           },

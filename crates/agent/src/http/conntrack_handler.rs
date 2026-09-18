@@ -22,7 +22,10 @@ use super::state::AppState;
 #[derive(Serialize, ToSchema)]
 pub struct ConnTrackStatusResponse {
     pub enabled: bool,
-    pub connection_count: u64,
+    // Absent rather than zero when the kernel count could not be read, or
+    // when no netfilter reader is wired at all: an unreadable table and an
+    // idle host are different answers, and only the second is a reading.
+    pub connection_count: Option<u64>,
     /// Conntrack table capacity - the maximum number of flows the
     /// agent tracks before eviction (the BPF connection-table size).
     pub max_connections: u64,
@@ -77,7 +80,7 @@ pub async fn conntrack_status(
         message: "Conntrack not enabled".to_string(),
     })?;
     let svc = ct.read().await;
-    let count = svc.connection_count().unwrap_or(0);
+    let count = svc.connection_count().ok().flatten();
     Ok(Json(ConnTrackStatusResponse {
         enabled: svc.enabled(),
         connection_count: count,
@@ -228,5 +231,29 @@ mod tests {
     #[test]
     fn default_limit_is_100() {
         assert_eq!(default_limit(), 100);
+    }
+
+    /// A table nobody could read must not answer with the figure an idle
+    /// host answers with, so the field is null rather than absent or zero.
+    #[test]
+    fn an_unreadable_table_reports_no_count() {
+        let body = serde_json::to_value(ConnTrackStatusResponse {
+            enabled: true,
+            connection_count: None,
+            max_connections: 65_536,
+        })
+        .expect("the status serialises");
+        assert_eq!(body["connection_count"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_read_table_reports_the_figure_it_read() {
+        let body = serde_json::to_value(ConnTrackStatusResponse {
+            enabled: true,
+            connection_count: Some(0),
+            max_connections: 65_536,
+        })
+        .expect("the status serialises");
+        assert_eq!(body["connection_count"], 0);
     }
 }

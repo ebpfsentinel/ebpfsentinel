@@ -1981,9 +1981,12 @@ pub async fn cmd_conntrack_status(client: &ApiClient, output: OutputFormat) -> R
     if output == OutputFormat::Json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
     } else {
+        let count = resp
+            .connection_count
+            .map_or_else(|| "unknown".to_string(), |c| c.to_string());
         println!(
             "enabled: {}\nconnections: {} / {}",
-            resp.enabled, resp.connection_count, resp.max_connections
+            resp.enabled, count, resp.max_connections
         );
     }
     Ok(())
@@ -2217,7 +2220,12 @@ pub async fn cmd_score(client: &ApiClient, alert_limit: u64, output: OutputForma
 
     // ── Connection anomaly score (0-1) ──
     let mut conn_score: f64 = 0.0;
-    let conn_count = conntrack_res.as_ref().map_or(0, |c| c.connection_count);
+    // A table nobody could read scores nothing rather than scoring clean.
+    let conn_count = conntrack_res
+        .as_ref()
+        .ok()
+        .and_then(|c| c.connection_count)
+        .unwrap_or(0);
     // Very rough heuristic: >10k connections = suspicious
     if conn_count > 10_000 {
         conn_score = 1.0;
@@ -2353,7 +2361,10 @@ pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Re
 
     // Connection tracking
     if let Ok(ct) = conntrack {
-        println!("  Conntrack  {} active connections", ct.connection_count);
+        match ct.connection_count {
+            Some(count) => println!("  Conntrack  {count} active connections"),
+            None => println!("  Conntrack  active connections unreadable"),
+        }
     }
 
     // DDoS

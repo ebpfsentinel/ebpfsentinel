@@ -113,13 +113,17 @@ impl ConnTrackAppService {
     }
 
     /// Return the current connection count, from the kernel netfilter port.
-    /// Zero when no port is wired, an error when the table cannot be read.
-    pub fn connection_count(&self) -> Result<u64, DomainError> {
+    /// `None` when no port is wired, an error when the table cannot be read.
+    ///
+    /// Nothing counted is not a count of nothing: a host with no netfilter
+    /// port reports no figure at all, because answering zero there is the
+    /// same answer an idle host gives and an operator acts on the second.
+    pub fn connection_count(&self) -> Result<Option<u64>, DomainError> {
         // Same reasoning as `get_connections`: the shadow counts nothing, so
         // masking a read failure with it reports an idle host.
         match self.netfilter_port {
-            Some(ref nf) => nf.connection_count(),
-            None => Ok(0),
+            Some(ref nf) => nf.connection_count().map(Some),
+            None => Ok(None),
         }
     }
 
@@ -173,7 +177,7 @@ mod tests {
     #[test]
     fn connection_count_without_map() {
         let svc = make_service();
-        assert_eq!(svc.connection_count().unwrap(), 0);
+        assert_eq!(svc.connection_count().unwrap(), None);
     }
 
     #[test]

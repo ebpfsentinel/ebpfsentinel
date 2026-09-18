@@ -471,7 +471,10 @@ pub struct BlocklistRemoveResponse {
 #[derive(Deserialize, Serialize)]
 pub struct ConnTrackStatusResponse {
     pub enabled: bool,
-    pub connection_count: u64,
+    // Absent when the agent could not read the kernel conntrack table, which
+    // is a different answer from a table holding nothing.
+    #[serde(default)]
+    pub connection_count: Option<u64>,
     pub max_connections: u64,
 }
 
