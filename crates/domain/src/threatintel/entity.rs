@@ -96,7 +96,9 @@ pub struct ThreatIntelAlert {
     pub confidence: u8,
     /// Threat type category.
     pub threat_type: ThreatType,
-    /// Alert or Block, from the global threat intel mode.
+    /// What the datapath did with the packet: `Block` where it was dropped,
+    /// `Alert` otherwise. A feed carrying its own `default_action` overrides
+    /// the service mode, so this is not always the mode the service is on.
     pub mode: crate::common::entity::DomainMode,
     /// Source address: `[v4, 0, 0, 0]` for IPv4, full 128-bit for IPv6.
     pub src_addr: [u32; 4],

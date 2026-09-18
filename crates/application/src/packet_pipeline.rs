@@ -23,6 +23,7 @@ use ebpf_common::event::{
     EVENT_TYPE_FIREWALL, EVENT_TYPE_IDS, EVENT_TYPE_RATELIMIT, EVENT_TYPE_THREATINTEL, PacketEvent,
 };
 use ebpf_common::loadbalancer::{EVENT_TYPE_LB, LB_ACTION_FORWARD, LB_ACTION_NO_BACKEND};
+use ebpf_common::threatintel::THREATINTEL_ACTION_DROP;
 use ports::secondary::dns_cache_port::DnsCachePort;
 use ports::secondary::metrics_port::MetricsPort;
 use tokio::sync::mpsc;
@@ -848,8 +849,17 @@ impl EventDispatcher {
         let dst_ip = addr_to_ip(event.dst_addr, event.is_ipv6());
 
         let ioc = svc.lookup(&src_ip).or_else(|| svc.lookup(&dst_ip)).cloned();
-        let mode = svc.mode();
         drop(svc);
+
+        // Read back what the datapath did with this packet rather than the
+        // service mode: a feed carrying its own `default_action` is loaded
+        // into the map with that action, so a match on it can be dropped
+        // while the service mode still reads `alert`.
+        let mode = if event.action == THREATINTEL_ACTION_DROP {
+            DomainMode::Block
+        } else {
+            DomainMode::Alert
+        };
 
         let Some(ioc) = ioc else {
             // IOC was in eBPF map but not in userspace engine (race during reload)
@@ -897,7 +907,11 @@ impl EventDispatcher {
         );
         self.audit_service.record_security_decision(
             AuditComponent::Threatintel,
-            AuditAction::Alert,
+            if mode == DomainMode::Block {
+                AuditAction::Drop
+            } else {
+                AuditAction::Alert
+            },
             event.timestamp_ns,
             event.src_addr,
             event.dst_addr,
@@ -2734,7 +2748,53 @@ mod tests {
                 assert_eq!(a.feed_id, "test-feed");
                 assert_eq!(a.confidence, 90);
                 assert_eq!(a.threat_type, ThreatType::Malware);
+                // The kernel passed the packet, so the alert says so.
+                assert_eq!(a.mode, DomainMode::Alert);
             }
+            _ => panic!("expected AlertEvent::ThreatIntel from threatintel"),
+        }
+    }
+
+    #[tokio::test]
+    async fn threatintel_alert_reports_the_action_the_kernel_took() {
+        let ti = make_ti_service();
+        // The service is on `alert`, which is what a feed with its own
+        // `default_action: block` overrides when its IOCs are loaded.
+        assert_eq!(ti.load().mode(), DomainMode::Alert);
+
+        let src_ip: IpAddr = "192.168.0.1".parse().unwrap();
+        {
+            let mut svc = (**ti.load()).clone();
+            svc.add_ioc(Ioc {
+                ip: src_ip,
+                feed_id: "blocking-feed".to_string(),
+                confidence: 95,
+                threat_type: ThreatType::C2,
+                last_seen: 0,
+                source_feed: "test".to_string(),
+            })
+            .unwrap();
+            ti.store(Arc::new(svc));
+        }
+
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dispatcher = EventDispatcher::new(
+            make_service_with_rules(vec![]),
+            make_l7_service(),
+            Arc::clone(&ti),
+            make_audit_service(),
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            alert_tx,
+            None,
+        );
+
+        let mut event = make_event(EVENT_TYPE_THREATINTEL, 0);
+        event.action = THREATINTEL_ACTION_DROP;
+        dispatcher.dispatch_event(event);
+
+        match alert_rx.try_recv().unwrap() {
+            AlertEvent::ThreatIntel(a) => assert_eq!(a.mode, DomainMode::Block),
             _ => panic!("expected AlertEvent::ThreatIntel from threatintel"),
         }
     }
