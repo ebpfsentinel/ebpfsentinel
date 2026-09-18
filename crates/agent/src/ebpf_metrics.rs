@@ -98,8 +98,12 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (6, "mtu_exceeded"),
             (7, "reject_throttled"),
         ],
+        // The rate limiter counts what it let through rather than what it
+        // recognised: slot 0 is incremented on every XDP_PASS, including the
+        // packets no rule names and the ones an interface group excluded, so
+        // calling it "matched" reported the whole link as rule matches.
         "RATELIMIT_METRICS" => &[
-            (0, "matched"),
+            (0, "passed"),
             (1, "dropped"),
             (2, "errors"),
             (3, "events_dropped"),
