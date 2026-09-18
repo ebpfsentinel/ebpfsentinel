@@ -10730,7 +10730,7 @@
               "string",
               "null"
             ],
-            "description": "Network interface (default: first configured interface)."
+            "description": "Network interface to capture on, \"any\" or absent for every interface.\n\nAn absent value binds the socket to interface index 0, which is every\nlink on the host rather than the first one the agent is configured\nfor: a capture is a diagnostic and the filter is what narrows it."
           },
           "snap_length": {
             "type": "integer",

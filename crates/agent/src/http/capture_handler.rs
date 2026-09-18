@@ -29,7 +29,11 @@ pub struct StartCaptureRequest {
     /// Snap length: max bytes per packet (default 1500).
     #[serde(default = "default_snap_length")]
     pub snap_length: u32,
-    /// Network interface (default: first configured interface).
+    /// Network interface to capture on, "any" or absent for every interface.
+    ///
+    /// An absent value binds the socket to interface index 0, which is every
+    /// link on the host rather than the first one the agent is configured
+    /// for: a capture is a diagnostic and the filter is what narrows it.
     #[serde(default)]
     pub interface: Option<String>,
 }
