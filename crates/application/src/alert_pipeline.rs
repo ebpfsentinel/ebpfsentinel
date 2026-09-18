@@ -889,7 +889,7 @@ impl AlertPipeline {
                         policy = %policy.name,
                         alert_id = %alert.id,
                         src_ip = %src_ip,
-                        action = ?policy.action,
+                        action = policy.action.as_str(),
                         ttl_secs = policy.ttl_secs,
                         severity = ?alert.severity,
                         component = %alert.component,

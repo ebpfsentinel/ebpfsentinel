@@ -11,6 +11,29 @@ pub enum ResponseActionType {
     ThrottleIp,
 }
 
+impl ResponseActionType {
+    /// The one spelling this type travels under, in a request, in an answer,
+    /// on the command line and in an audit line.
+    ///
+    /// It is the serde spelling written out, so a caller can send back what
+    /// it was handed.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BlockIp => "block_ip",
+            Self::ThrottleIp => "throttle_ip",
+        }
+    }
+
+    /// Reads that spelling back, and nothing else.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "block_ip" => Some(Self::BlockIp),
+            "throttle_ip" => Some(Self::ThrottleIp),
+            _ => None,
+        }
+    }
+}
+
 /// A time-bounded manual response action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseAction {
@@ -65,6 +88,26 @@ pub struct SimpleResponsePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_type_spelling_round_trips() {
+        for action in [ResponseActionType::BlockIp, ResponseActionType::ThrottleIp] {
+            assert_eq!(ResponseActionType::parse(action.as_str()), Some(action));
+        }
+        assert_eq!(ResponseActionType::parse("blockip"), None);
+    }
+
+    #[test]
+    fn action_type_spelling_is_the_serde_one() {
+        // The answer is read by a client that sent the request, so the word
+        // it gets back has to be the word it sent.
+        for action in [ResponseActionType::BlockIp, ResponseActionType::ThrottleIp] {
+            assert_eq!(
+                serde_json::to_value(action).unwrap(),
+                serde_json::Value::String(action.as_str().to_string())
+            );
+        }
+    }
 
     fn make_action(ttl_secs: u64) -> ResponseAction {
         let now = 1_000_000_000_000u64;

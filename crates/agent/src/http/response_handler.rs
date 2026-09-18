@@ -85,19 +85,14 @@ pub async fn create_response_action(
     if let Some(Extension(ref claims)) = claims {
         require_write_access(claims)?;
     }
-    let action_type = match req.action.as_str() {
-        "block_ip" => ResponseActionType::BlockIp,
-        "throttle_ip" => ResponseActionType::ThrottleIp,
-        _ => {
-            return Err(ApiError::BadRequest {
-                code: "INVALID_REQUEST",
-                message: format!(
-                    "unknown action type: '{}'. Expected block_ip or throttle_ip",
-                    req.action
-                ),
-            });
-        }
-    };
+    let action_type =
+        ResponseActionType::parse(&req.action).ok_or_else(|| ApiError::BadRequest {
+            code: "INVALID_REQUEST",
+            message: format!(
+                "unknown action type: '{}'. Expected block_ip or throttle_ip",
+                req.action
+            ),
+        })?;
 
     let target: IpAddr = req
         .target
@@ -182,7 +177,7 @@ pub async fn create_response_action(
         &action.rule_id,
         &format!(
             "created {} response on {} (ttl {}s)",
-            to_response(&action, now_ns).action_type,
+            action.action_type.as_str(),
             action.target,
             action.ttl_secs
         ),
@@ -392,7 +387,10 @@ pub(crate) async fn withdraw(
 fn to_response(action: &ResponseAction, now_ns: u64) -> ResponseActionResponse {
     ResponseActionResponse {
         id: action.id.clone(),
-        action_type: format!("{:?}", action.action_type).to_lowercase(),
+        // The word the request carried, not the variant's own name: lowering
+        // `BlockIp` spelled it `blockip`, which no caller can send back and
+        // no other surface of this product prints.
+        action_type: action.action_type.as_str().to_string(),
         target: action.target.clone(),
         ttl_secs: action.ttl_secs,
         remaining_secs: action.remaining_secs(now_ns),
@@ -454,6 +452,28 @@ mod tests {
     fn parse_ttl_invalid() {
         assert_eq!(parse_ttl(""), None);
         assert_eq!(parse_ttl("abc"), None);
+    }
+
+    #[test]
+    fn to_response_spells_the_action_as_the_request_did() {
+        let now = 1_000_000_000_000u64;
+        for (action_type, expected) in [
+            (ResponseActionType::BlockIp, "block_ip"),
+            (ResponseActionType::ThrottleIp, "throttle_ip"),
+        ] {
+            let action = ResponseAction {
+                id: "resp-001".to_string(),
+                action_type,
+                target: "1.2.3.4".to_string(),
+                ttl_secs: 3600,
+                created_at_ns: now,
+                expires_at_ns: now + 3600 * 1_000_000_000,
+                rule_id: "response-resp-001".to_string(),
+                rate_pps: None,
+                revoked: false,
+            };
+            assert_eq!(to_response(&action, now).action_type, expected);
+        }
     }
 
     #[test]
