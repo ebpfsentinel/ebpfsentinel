@@ -323,6 +323,21 @@ impl FingerprintCache {
     pub fn is_persistent(&self) -> bool {
         self.persist.is_some()
     }
+
+    /// How many entries the cache holds before it evicts, as it was built.
+    ///
+    /// Read rather than restated, because a reader asking how full the cache
+    /// is compares this against `len()` and two copies of the number drift.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.max_size
+    }
+
+    /// How long an entry stays before it expires, as the cache was built.
+    #[must_use]
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
 }
 
 fn evict_expired_or_oldest<T>(
@@ -432,6 +447,21 @@ impl Ja4sFingerprintCache {
 
     pub fn is_persistent(&self) -> bool {
         self.persist.is_some()
+    }
+
+    /// How many entries the cache holds before it evicts, as it was built.
+    ///
+    /// Read rather than restated, because a reader asking how full the cache
+    /// is compares this against `len()` and two copies of the number drift.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.max_size
+    }
+
+    /// How long an entry stays before it expires, as the cache was built.
+    #[must_use]
+    pub fn ttl(&self) -> Duration {
+        self.ttl
     }
 }
 
@@ -658,5 +688,16 @@ mod tests {
         cache.insert(make_flow_key(3), fp.clone());
         // Should have evicted one entry
         assert!(cache.len() <= 2);
+    }
+
+    #[test]
+    fn cache_reports_the_ceiling_and_the_ttl_it_was_built_with() {
+        let cache = FingerprintCache::new(64, Duration::from_secs(90));
+        assert_eq!(cache.capacity(), 64);
+        assert_eq!(cache.ttl(), Duration::from_secs(90));
+
+        let server = Ja4sFingerprintCache::new(32, Duration::from_secs(45));
+        assert_eq!(server.capacity(), 32);
+        assert_eq!(server.ttl(), Duration::from_secs(45));
     }
 }

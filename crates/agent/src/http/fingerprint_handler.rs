@@ -51,17 +51,17 @@ pub struct Ja4sSummaryResponse {
 pub async fn fingerprint_summary(
     State(state): State<Arc<AppState>>,
 ) -> Json<FingerprintSummaryResponse> {
-    let cached_count = state.fingerprint_cache.as_ref().map_or(0, |c| c.len());
-    let persistent = state
-        .fingerprint_cache
-        .as_ref()
-        .is_some_and(|c| c.is_persistent());
+    // The ceiling and the TTL are read off the cache rather than restated
+    // here: a screen judges how full the cache is by comparing the count
+    // against them, and a second copy of either number drifts the day the
+    // cache is built with a different one.
+    let cache = state.fingerprint_cache.as_ref();
 
     Json(FingerprintSummaryResponse {
-        cached_count,
-        max_size: 10_000,
-        ttl_seconds: 300,
-        persistent,
+        cached_count: cache.map_or(0, |c| c.len()),
+        max_size: cache.map_or(0, |c| c.capacity()),
+        ttl_seconds: cache.map_or(0, |c| c.ttl().as_secs()),
+        persistent: cache.is_some_and(|c| c.is_persistent()),
     })
 }
 
@@ -80,17 +80,13 @@ pub async fn fingerprint_summary(
     )
 )]
 pub async fn ja4s_summary(State(state): State<Arc<AppState>>) -> Json<Ja4sSummaryResponse> {
-    let cached_count = state.ja4s_fingerprint_cache.as_ref().map_or(0, |c| c.len());
-    let persistent = state
-        .ja4s_fingerprint_cache
-        .as_ref()
-        .is_some_and(|c| c.is_persistent());
+    let cache = state.ja4s_fingerprint_cache.as_ref();
 
     Json(Ja4sSummaryResponse {
-        cached_count,
-        max_size: 10_000,
-        ttl_seconds: 300,
-        persistent,
+        cached_count: cache.map_or(0, |c| c.len()),
+        max_size: cache.map_or(0, |c| c.capacity()),
+        ttl_seconds: cache.map_or(0, |c| c.ttl().as_secs()),
+        persistent: cache.is_some_and(|c| c.is_persistent()),
     })
 }
 
