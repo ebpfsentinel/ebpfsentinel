@@ -857,7 +857,7 @@ impl AgentConfig {
                 });
             }
             for component in &policy.components {
-                if !AUTO_RESPONSE_COMPONENTS
+                if !AUTO_REACTION_COMPONENTS
                     .iter()
                     .any(|c| component.eq_ignore_ascii_case(c))
                 {
@@ -866,18 +866,18 @@ impl AgentConfig {
                         message: format!(
                             "'{component}' names no source a response could contain; \
                              expected one of: {}",
-                            AUTO_RESPONSE_COMPONENTS.join(", ")
+                            AUTO_REACTION_COMPONENTS.join(", ")
                         ),
                     });
                 }
             }
-            let valid_severities = ["low", "medium", "high", "critical"];
-            if !valid_severities.contains(&policy.min_severity.as_str()) {
+            if !ALERT_SEVERITIES.contains(&policy.min_severity.as_str()) {
                 return Err(ConfigError::Validation {
                     field: format!("auto_response.policies[{i}].min_severity"),
                     message: format!(
-                        "invalid severity '{}', expected one of: low, medium, high, critical",
-                        policy.min_severity
+                        "invalid severity '{}', expected one of: {}",
+                        policy.min_severity,
+                        ALERT_SEVERITIES.join(", ")
                     ),
                 });
             }
@@ -903,15 +903,45 @@ impl AgentConfig {
         }
 
         // Validate auto-capture
-        if self.auto_capture.enabled && self.auto_capture.duration_secs > MAX_AUTO_CAPTURE_DURATION
-        {
-            return Err(ConfigError::Validation {
-                field: "auto_capture.duration_secs".to_string(),
-                message: format!(
-                    "OSS auto-capture max duration is {MAX_AUTO_CAPTURE_DURATION}s (got {}s)",
-                    self.auto_capture.duration_secs
-                ),
-            });
+        if self.auto_capture.enabled {
+            // The severity and the components are read the same way an
+            // auto-response policy reads them, so a word this block would
+            // silently round to "high" - or one no alert ever carries - is
+            // refused here rather than at the moment nothing happens.
+            if !ALERT_SEVERITIES.contains(&self.auto_capture.min_severity.as_str()) {
+                return Err(ConfigError::Validation {
+                    field: "auto_capture.min_severity".to_string(),
+                    message: format!(
+                        "invalid severity '{}', expected one of: {}",
+                        self.auto_capture.min_severity,
+                        ALERT_SEVERITIES.join(", ")
+                    ),
+                });
+            }
+            for component in &self.auto_capture.components {
+                if !AUTO_REACTION_COMPONENTS
+                    .iter()
+                    .any(|c| component.eq_ignore_ascii_case(c))
+                {
+                    return Err(ConfigError::Validation {
+                        field: "auto_capture.components".to_string(),
+                        message: format!(
+                            "'{component}' names no source a capture could filter on; \
+                             expected one of: {}",
+                            AUTO_REACTION_COMPONENTS.join(", ")
+                        ),
+                    });
+                }
+            }
+            if self.auto_capture.duration_secs > MAX_AUTO_CAPTURE_DURATION {
+                return Err(ConfigError::Validation {
+                    field: "auto_capture.duration_secs".to_string(),
+                    message: format!(
+                        "OSS auto-capture max duration is {MAX_AUTO_CAPTURE_DURATION}s (got {}s)",
+                        self.auto_capture.duration_secs
+                    ),
+                });
+            }
         }
 
         Ok(())
@@ -1412,7 +1442,7 @@ pub struct AutoResponsePolicyConfig {
 
     /// Component filter, matched case-insensitively against the alert's
     /// component. If empty, matches every component a response can contain.
-    /// See [`AUTO_RESPONSE_COMPONENTS`] for the accepted names.
+    /// See [`AUTO_REACTION_COMPONENTS`] for the accepted names.
     #[serde(default)]
     pub components: Vec<String>,
 
@@ -1439,17 +1469,21 @@ fn default_response_ttl() -> u64 {
     3600
 }
 
+/// The severity words an alert is filed under, and the only ones a policy
+/// may name.
+pub const ALERT_SEVERITIES: [&str; 4] = ["low", "medium", "high", "critical"];
+
 /// Maximum number of auto-response policies in OSS.
 pub const MAX_AUTO_RESPONSE_POLICIES: usize = 3;
 
-/// Alert components an auto-response policy may name.
+/// Alert components an automatic reaction - a response or a capture - may
+/// name.
 ///
-/// Both responses act on the address the alert carries, so only components
-/// whose alerts name a source belong here. DLP and ML anomalies are
-/// process-level, and DNS and routing alerts describe a name or a gateway
-/// rather than a peer: a policy filtered on those would match alerts and
-/// contain nothing.
-pub const AUTO_RESPONSE_COMPONENTS: [&str; 8] = [
+/// Both act on the address the alert carries, so only components whose alerts
+/// name a source belong here. DLP and ML anomalies are process-level, and DNS
+/// and routing alerts describe a name or a gateway rather than a peer: a
+/// filter on those would match alerts and contain nothing.
+pub const AUTO_REACTION_COMPONENTS: [&str; 8] = [
     "ai-security",
     "ddos",
     "firewall",
@@ -4543,6 +4577,50 @@ auto_response:
 ";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.auto_response.policies[0].components.len(), 2);
+    }
+
+    #[test]
+    fn auto_capture_rejects_a_severity_no_alert_carries() {
+        // Startup reads this word with a match whose fallback is "high", so a
+        // typo here would quietly widen or narrow what starts a capture.
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+auto_capture:
+  enabled: true
+  min_severity: sever
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("invalid severity"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn auto_capture_rejects_a_component_that_names_no_source() {
+        // The BPF filter is built from the alert's source address, so a DNS
+        // alert names a domain and there is nothing to capture on.
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+auto_capture:
+  enabled: true
+  components: [dns]
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("names no source"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn auto_capture_accepts_a_component_written_in_any_case() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+auto_capture:
+  enabled: true
+  min_severity: critical
+  components: [IDS, ThreatIntel]
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.auto_capture.components.len(), 2);
     }
 
     #[test]
