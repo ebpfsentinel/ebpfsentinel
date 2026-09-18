@@ -40,8 +40,8 @@ use ebpf_common::{
         FixedWindowValue, LeakyBucketValue, MAX_RL_BUCKET_ENTRIES, MAX_RL_LPM_ENTRIES,
         RATELIMIT_METRIC_COUNT, RATELIMIT_METRIC_ERRORS, RATELIMIT_METRIC_EVENTS_DROPPED,
         RATELIMIT_METRIC_MTU_EXCEEDED, RATELIMIT_METRIC_PASSED, RATELIMIT_METRIC_THROTTLED,
-        RATELIMIT_METRIC_TOTAL_SEEN,
-        MAX_RL_TIERS, RATELIMIT_ACTION_DROP, RateLimitBucketUnion, RateLimitConfig, RateLimitKey,
+        RATELIMIT_METRIC_THROTTLED_PASSED, RATELIMIT_METRIC_TOTAL_SEEN,
+        MAX_RL_TIERS, RATELIMIT_ACTION_PASS, RateLimitBucketUnion, RateLimitConfig, RateLimitKey,
         RateLimitTierValue, RateLimitValue, SLIDING_WINDOW_NUM_SLOTS, SlidingWindowValue,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
@@ -238,6 +238,7 @@ const METRIC_ERRORS: u32 = RATELIMIT_METRIC_ERRORS;
 const METRIC_EVENTS_DROPPED: u32 = RATELIMIT_METRIC_EVENTS_DROPPED;
 const METRIC_TOTAL_SEEN: u32 = RATELIMIT_METRIC_TOTAL_SEEN;
 const METRIC_MTU_EXCEEDED: u32 = RATELIMIT_METRIC_MTU_EXCEEDED;
+const METRIC_THROTTLED_PASSED: u32 = RATELIMIT_METRIC_THROTTLED_PASSED;
 
 // Local asm macros removed - using ebpf_helpers::copy_mac_asm! and copy_16b_asm!.
 
@@ -497,8 +498,23 @@ fn process_ratelimit_v4(
         let dst_addr = [dst_ip, 0, 0, 0];
         let (src_port, dst_port) = read_l4_ports_v4(ctx, l4_offset);
         emit_ratelimit_event(
-            ctx, &src_addr, &dst_addr, src_port, dst_port, protocol, flags, vlan_id,
+            ctx,
+            &src_addr,
+            &dst_addr,
+            src_port,
+            dst_port,
+            protocol,
+            flags,
+            vlan_id,
+            tier_cfg.action,
         );
+        // A rule configured to pass counts the excess and forwards it: the
+        // limit is being sized against real traffic, so the verdict the
+        // operator asked for is the one taken.
+        if tier_cfg.action == RATELIMIT_ACTION_PASS {
+            increment_metric(METRIC_THROTTLED_PASSED);
+            return Ok(xdp_action::XDP_PASS);
+        }
         increment_metric(METRIC_THROTTLED);
         return Ok(xdp_action::XDP_DROP);
     }
@@ -526,8 +542,23 @@ fn process_ratelimit_v4(
         let (src_port, dst_port) = read_l4_ports_v4(ctx, l4_offset);
 
         emit_ratelimit_event(
-            ctx, &src_addr, &dst_addr, src_port, dst_port, protocol, flags, vlan_id,
+            ctx,
+            &src_addr,
+            &dst_addr,
+            src_port,
+            dst_port,
+            protocol,
+            flags,
+            vlan_id,
+            config.action,
         );
+        // A rule configured to pass counts the excess and forwards it: the
+        // limit is being sized against real traffic, so the verdict the
+        // operator asked for is the one taken.
+        if config.action == RATELIMIT_ACTION_PASS {
+            increment_metric(METRIC_THROTTLED_PASSED);
+            return Ok(xdp_action::XDP_PASS);
+        }
         increment_metric(METRIC_THROTTLED);
         Ok(xdp_action::XDP_DROP)
     }
@@ -612,8 +643,23 @@ fn process_ratelimit_v6(
         }
         let (src_port, dst_port) = read_l4_ports_raw(ctx, l4_offset, next_hdr);
         emit_ratelimit_event(
-            ctx, &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
+            ctx,
+            &src_addr,
+            &dst_addr,
+            src_port,
+            dst_port,
+            next_hdr,
+            flags,
+            vlan_id,
+            tier_cfg.action,
         );
+        // A rule configured to pass counts the excess and forwards it: the
+        // limit is being sized against real traffic, so the verdict the
+        // operator asked for is the one taken.
+        if tier_cfg.action == RATELIMIT_ACTION_PASS {
+            increment_metric(METRIC_THROTTLED_PASSED);
+            return Ok(xdp_action::XDP_PASS);
+        }
         increment_metric(METRIC_THROTTLED);
         return Ok(xdp_action::XDP_DROP);
     }
@@ -642,8 +688,23 @@ fn process_ratelimit_v6(
         let (src_port, dst_port) = read_l4_ports_raw(ctx, l4_offset, next_hdr);
 
         emit_ratelimit_event(
-            ctx, &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
+            ctx,
+            &src_addr,
+            &dst_addr,
+            src_port,
+            dst_port,
+            next_hdr,
+            flags,
+            vlan_id,
+            config.action,
         );
+        // A rule configured to pass counts the excess and forwards it: the
+        // limit is being sized against real traffic, so the verdict the
+        // operator asked for is the one taken.
+        if config.action == RATELIMIT_ACTION_PASS {
+            increment_metric(METRIC_THROTTLED_PASSED);
+            return Ok(xdp_action::XDP_PASS);
+        }
         increment_metric(METRIC_THROTTLED);
         Ok(xdp_action::XDP_DROP)
     }
@@ -1958,6 +2019,10 @@ fn increment_metric(index: u32) {
 /// emission under backpressure (>75% full); increments the dropped
 /// metric when the ring is saturated. At 96 B per event the 4 MiB
 /// ring holds ~50k drops, outperforming a same-size arena.
+///
+/// `action` is the verdict the configuration asked for, carried through so
+/// userspace can tell an enforced drop from a `pass` rule that only counted
+/// the excess.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn emit_ratelimit_event(
@@ -1969,6 +2034,7 @@ fn emit_ratelimit_event(
     protocol: u8,
     flags: u8,
     vlan_id: u16,
+    action: u8,
 ) {
     if ringbuf_has_backpressure() {
         increment_metric(METRIC_EVENTS_DROPPED);
@@ -1987,7 +2053,7 @@ fn emit_ratelimit_event(
             (*ptr).dst_port = dst_port;
             (*ptr).protocol = protocol;
             (*ptr).event_type = EVENT_TYPE_RATELIMIT;
-            (*ptr).action = RATELIMIT_ACTION_DROP;
+            (*ptr).action = action;
             (*ptr).flags = flags;
             (*ptr).rule_id = 0;
             (*ptr).vlan_id = vlan_id;

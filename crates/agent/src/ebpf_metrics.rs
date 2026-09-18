@@ -102,6 +102,9 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
         // recognised: slot 0 is incremented on every XDP_PASS, including the
         // packets no rule names and the ones an interface group excluded, so
         // calling it "matched" reported the whole link as rule matches.
+        // Slot 6 is the excess a `pass` rule forwarded anyway, kept apart from
+        // slot 1 so a rule observing rather than enforcing does not read as
+        // drops that never happened.
         "RATELIMIT_METRICS" => &[
             (0, "passed"),
             (1, "dropped"),
@@ -109,6 +112,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (3, "events_dropped"),
             (4, "total_seen"),
             (5, "mtu_exceeded"),
+            (6, "throttled_passed"),
         ],
         // tc-ids carries one index tc-threatintel does not: attribution to
         // the sending cgroup, which is counted separately from a tenant

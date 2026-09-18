@@ -549,15 +549,15 @@ impl EventDispatcher {
             "ratelimit event"
         );
 
-        let audit_action = if event.action == 1 {
-            AuditAction::RateExceeded
-        } else {
-            AuditAction::Pass
-        };
+        // The kernel emits a rate limit event only once a bucket is empty, so
+        // every one of them is an exceeded limit whatever verdict followed: a
+        // rule configured to pass forwards the excess and is still reporting
+        // that the source went over. Recording the pass as a pass would have
+        // left the audit trail unable to say a limit was reached at all.
         let detail = format!("ratelimit {action}");
         self.audit_service.record_security_decision(
             AuditComponent::Ratelimit,
-            audit_action,
+            AuditAction::RateExceeded,
             event.timestamp_ns,
             event.src_addr,
             event.dst_addr,
@@ -569,15 +569,16 @@ impl EventDispatcher {
             &detail,
         );
 
-        if event.action == 1 {
-            self.emit_packet_security_alert(
-                domain::alert::entity::PacketAlertComponent::Ratelimit,
-                &event,
-                "",
-                action,
-                &detail,
-            );
-        }
+        // A `pass` rule is how a limit is sized against real traffic, so the
+        // excess it forwards is alerted on as well, carrying the verdict word
+        // that says nothing was dropped.
+        self.emit_packet_security_alert(
+            domain::alert::entity::PacketAlertComponent::Ratelimit,
+            &event,
+            "",
+            action,
+            &detail,
+        );
     }
 
     fn process_ids_event(&self, event: PacketEvent) {
@@ -2185,6 +2186,33 @@ mod tests {
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "ratelimit");
         assert_eq!(*metrics.last_action.lock().unwrap(), "pass");
+    }
+
+    #[tokio::test]
+    async fn ratelimit_event_pass_still_alerts() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        // A `pass` rule forwards the excess, and the kernel emits the event
+        // only once the bucket is empty: staying silent would have made a
+        // limit sized against live traffic report nothing at all.
+        let event = make_event(EVENT_TYPE_RATELIMIT, 0);
+        dispatcher.dispatch_event(event);
+
+        let alert = alert_rx.try_recv().unwrap();
+        match alert {
+            AlertEvent::PacketSecurity(a) => {
+                assert_eq!(
+                    a.component,
+                    domain::alert::entity::PacketAlertComponent::Ratelimit
+                );
+                assert_eq!(a.action_label, "pass");
+                assert_eq!(a.detail, "ratelimit pass");
+            }
+            _ => panic!("expected AlertEvent::PacketSecurity from ratelimit"),
+        }
     }
 
     // ── L7 dispatch tests ──────────────────────────────────────────

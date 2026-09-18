@@ -43,8 +43,15 @@ pub const RATELIMIT_METRIC_EVENTS_DROPPED: u32 = 3;
 pub const RATELIMIT_METRIC_TOTAL_SEEN: u32 = 4;
 /// Metric index: packets whose reject reply would exceed the interface MTU.
 pub const RATELIMIT_METRIC_MTU_EXCEEDED: u32 = 5;
+/// Metric index: packets over the limit that a `pass` rule forwarded anyway.
+///
+/// Counted apart from `RATELIMIT_METRIC_THROTTLED`, which is the drops: a
+/// rule configured to observe rather than enforce has to be readable as the
+/// dry run it is, and folding the two together would report drops that never
+/// happened.
+pub const RATELIMIT_METRIC_THROTTLED_PASSED: u32 = 6;
 /// Total number of rate limit metric slots (one past the last index).
-pub const RATELIMIT_METRIC_COUNT: u32 = 6;
+pub const RATELIMIT_METRIC_COUNT: u32 = 7;
 
 /// Number of slots in the sliding window algorithm.
 pub const SLIDING_WINDOW_NUM_SLOTS: usize = 8;

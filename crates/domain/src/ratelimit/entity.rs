@@ -15,7 +15,10 @@ use super::error::RateLimitError;
 pub enum RateLimitAction {
     /// Drop the packet (`XDP_DROP`).
     Drop,
-    /// Pass the packet but mark as throttled (for alerting).
+    /// Forward the packet the bucket had no token for (`XDP_PASS`), counting
+    /// it apart from the drops so a limit can be sized against live traffic:
+    /// the event, the audit line and the alert are produced exactly as for a
+    /// drop, and nothing is enforced.
     Pass,
 }
 
