@@ -1108,9 +1108,19 @@ impl AgentConfig {
     /// Carries the ports the content rules name as well as the ones L7
     /// inspection lists: the classifier copies a payload only for a listed
     /// port, and a content rule with no payload to read never matches.
+    ///
+    /// Carries the `DoT` port too where L7 inspection is on and the DNS engine
+    /// with it. Encrypted-DNS detection reads the `ClientHello` the classifier
+    /// shipped, so a detection keyed on a port nothing captures is a method
+    /// that can never fire. `DoH` is left to the list, because it is decided on
+    /// the SNI of an ordinary TLS session and folding 443 in would copy the
+    /// payload of every TLS connection on the host.
     pub fn l7_ports(&self) -> Vec<u16> {
         let mut ports = self.l7.ports.clone();
         ports.extend(self.content_rule_ports());
+        if self.l7.enabled && self.dns.enabled {
+            ports.push(DOT_PORT);
+        }
         ports.sort_unstable();
         ports.dedup();
         ports
@@ -1407,6 +1417,10 @@ fn default_capture_duration() -> u64 {
 fn default_capture_snap_length() -> u32 {
     1500
 }
+
+/// The DNS-over-TLS port, which is the whole of the `DoT` detection: a TLS
+/// session to it is encrypted DNS whatever the SNI says.
+const DOT_PORT: u16 = 853;
 
 /// Maximum auto-capture duration in OSS (seconds).
 pub const MAX_AUTO_CAPTURE_DURATION: u64 = 60;
@@ -4680,7 +4694,38 @@ ids:
       pattern: 'uname -a'
 ";
         let config = AgentConfig::from_yaml(yaml).unwrap();
-        assert_eq!(config.l7_ports(), vec![22, 80, 2222]);
+        // 853 rides along: L7 inspection is on and the DNS engine with it.
+        assert_eq!(config.l7_ports(), vec![22, 80, 853, 2222]);
+    }
+
+    #[test]
+    fn l7_inspection_captures_the_dot_port_for_the_dns_engine() {
+        // A TLS session to 853 is the whole of the DoT detection, so the
+        // classifier has to ship that payload or the method never fires.
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+l7:
+  enabled: true
+  ports: [443]
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.l7_ports(), vec![443, 853]);
+    }
+
+    #[test]
+    fn a_disabled_dns_engine_asks_for_no_dot_capture() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+l7:
+  enabled: true
+  ports: [443]
+dns:
+  enabled: false
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.l7_ports(), vec![443]);
     }
 
     #[test]
