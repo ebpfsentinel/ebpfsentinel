@@ -75,6 +75,25 @@ pub struct L7RuleResponse {
     pub src_ip: Option<String>,
     pub dst_ip: Option<String>,
     pub dst_port: Option<String>,
+    /// ISO-3166 country codes the rule narrows its source to. A rule scoped
+    /// to a handful of countries and served without them reads as a rule
+    /// acting on every source there is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_country_codes: Option<Vec<String>>,
+    /// The same, on the destination.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_country_codes: Option<Vec<String>>,
+    /// The alias the rule was declared against, in the words the
+    /// configuration file used, so a reader can find the line that wrote it.
+    /// A rule created through this API names none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_ip_alias: Option<String>,
+    /// The same, on the destination address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_ip_alias: Option<String>,
+    /// The same, on the destination port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_port_alias: Option<String>,
     pub enabled: bool,
 }
 
@@ -253,6 +272,11 @@ impl From<&L7Rule> for L7RuleResponse {
             src_ip: rule.src_ip.map(format_ip),
             dst_ip: rule.dst_ip.map(format_ip),
             dst_port: rule.dst_port.map(format_port),
+            src_country_codes: rule.src_country_codes.clone(),
+            dst_country_codes: rule.dst_country_codes.clone(),
+            src_ip_alias: rule.src_ip_alias.clone(),
+            dst_ip_alias: rule.dst_ip_alias.clone(),
+            dst_port_alias: rule.dst_port_alias.clone(),
             enabled: rule.enabled,
         }
     }
@@ -577,5 +601,43 @@ mod tests {
         assert_eq!(resp.src_ip.as_deref(), Some("10.0.0.0/8"));
         assert_eq!(resp.dst_port.as_deref(), Some("8080"));
         assert!(resp.matcher.is_object());
+        assert!(resp.src_country_codes.is_none());
+        assert!(resp.src_ip_alias.is_none());
+    }
+
+    /// A rule the configuration file narrowed to three countries and an
+    /// alias must say so on the wire: served without them it reads as a
+    /// rule denying the protocol outright.
+    #[test]
+    fn response_carries_what_a_rule_is_narrowed_to() {
+        let rule = L7Rule {
+            id: RuleId("block-http-sanctioned".to_string()),
+            priority: 10,
+            action: FirewallAction::Deny,
+            matcher: L7Matcher::Http {
+                method: None,
+                path_pattern: None,
+                host_pattern: None,
+                content_type: None,
+            },
+            src_ip: None,
+            dst_ip: None,
+            dst_port: None,
+            enabled: true,
+            src_country_codes: Some(vec!["KP".to_string(), "IR".to_string()]),
+            dst_country_codes: None,
+            src_ip_alias: Some("sanctioned-nets".to_string()),
+            dst_ip_alias: None,
+            dst_port_alias: Some("web-ports".to_string()),
+        };
+        let resp = L7RuleResponse::from(&rule);
+        assert_eq!(
+            resp.src_country_codes.as_deref(),
+            Some(["KP".to_string(), "IR".to_string()].as_slice())
+        );
+        assert_eq!(resp.src_ip_alias.as_deref(), Some("sanctioned-nets"));
+        assert_eq!(resp.dst_port_alias.as_deref(), Some("web-ports"));
+        assert!(resp.dst_country_codes.is_none());
+        assert!(resp.dst_ip_alias.is_none());
     }
 }

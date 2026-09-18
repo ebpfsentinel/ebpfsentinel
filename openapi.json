@@ -9272,17 +9272,41 @@
           "action": {
             "type": "string"
           },
+          "dst_country_codes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The same, on the destination."
+          },
           "dst_ip": {
             "type": [
               "string",
               "null"
             ]
           },
+          "dst_ip_alias": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The same, on the destination address."
+          },
           "dst_port": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "dst_port_alias": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The same, on the destination port."
           },
           "enabled": {
             "type": "boolean"
@@ -9296,11 +9320,28 @@
             "format": "int32",
             "minimum": 0
           },
+          "src_country_codes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "ISO-3166 country codes the rule narrows its source to. A rule scoped\nto a handful of countries and served without them reads as a rule\nacting on every source there is."
+          },
           "src_ip": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "src_ip_alias": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The alias the rule was declared against, in the words the\nconfiguration file used, so a reader can find the line that wrote it.\nA rule created through this API names none."
           }
         }
       },
