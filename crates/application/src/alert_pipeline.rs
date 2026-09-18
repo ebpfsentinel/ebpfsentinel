@@ -14,6 +14,7 @@ use domain::dns::entity::{DnsAlert, DnsAlertReason};
 use domain::firewall::entity::IpCidr;
 use domain::ids::entity::IdsAlert;
 use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm, RateLimitPolicy};
+use domain::threatintel::entity::ThreatIntelAlert;
 use ports::secondary::alert_enrichment_port::AlertEnrichmentPort;
 use ports::secondary::alert_sender::AlertSender;
 use ports::secondary::alert_store::AlertStore;
@@ -422,6 +423,63 @@ impl AlertPipeline {
         self.send_to_destinations(&alert, matched_routes).await;
     }
 
+    /// Process a single threat intel match: convert to domain Alert, record
+    /// metric, pass through router, and dispatch to matching senders.
+    ///
+    /// Kept apart from [`process_alert`](Self::process_alert) because an IOC
+    /// match is not a signature match: the alert it becomes names the feed
+    /// that resolved it, carries the confidence and the threat type, and is
+    /// filed under the component an operator writes in a policy or a filter.
+    pub async fn process_threatintel_alert(&mut self, ti_alert: &ThreatIntelAlert) {
+        let description = format!(
+            "Threat intel IOC matched: feed {} confidence {} type {}",
+            ti_alert.feed_id, ti_alert.confidence, ti_alert.threat_type,
+        );
+        let mut alert = Alert::from_threatintel_alert(ti_alert, &description);
+
+        // Enrich with domain context (best-effort)
+        if let Some(ref enricher) = self.enricher {
+            enricher.enrich_alert(&mut alert);
+        }
+
+        self.apply_metadata_enrichers(&mut alert).await;
+
+        // Record alert metrics
+        let severity_str = severity_label(alert.severity);
+        let technique_id = alert
+            .mitre_attack
+            .as_ref()
+            .map_or("", |m| m.technique_id.as_str());
+        self.metrics
+            .record_alert(&alert.component, severity_str, technique_id);
+        self.metrics
+            .record_alert_by_rule(&alert.component, &alert.rule_id.0);
+
+        // Persist alert to store (best-effort)
+        if let Some(ref store) = self.alert_store
+            && let Err(e) = store.store_alert(&alert)
+        {
+            tracing::warn!(alert_id = %alert.id, error = %e, "failed to store alert");
+        }
+
+        // Broadcast to gRPC stream subscribers (best-effort, non-blocking)
+        self.push_replay(&alert);
+        if let Some(ref tx) = self.stream_tx {
+            let _ = tx.send(alert.clone());
+        }
+
+        // Auto-response: evaluate and enforce if policies match
+        self.evaluate_auto_response(&alert).await;
+        self.evaluate_auto_capture(&alert).await;
+
+        let matched_routes = self.resolve_routes(&alert);
+        if matched_routes.is_empty() {
+            return;
+        }
+
+        self.send_to_destinations(&alert, matched_routes).await;
+    }
+
     /// Process a single DLP alert: convert to domain Alert, record metric,
     /// pass through router, and dispatch to matching senders.
     pub async fn process_dlp_alert(&mut self, dlp_alert: &DlpAlert) {
@@ -732,6 +790,7 @@ impl AlertPipeline {
                 .await;
             }
             AlertEvent::Dns(dns_alert) => self.process_dns_alert(&dns_alert).await,
+            AlertEvent::ThreatIntel(ti_alert) => self.process_threatintel_alert(&ti_alert).await,
             AlertEvent::PacketSecurity(psa) => {
                 self.process_packet_security_alert(&psa).await;
             }
@@ -1149,6 +1208,23 @@ mod tests {
             matched_domain: None,
             container: None,
             rate_based: false,
+        }
+    }
+
+    fn make_ti_alert() -> ThreatIntelAlert {
+        ThreatIntelAlert {
+            feed_id: "abuse-ch".to_string(),
+            confidence: 90,
+            threat_type: domain::threatintel::entity::ThreatType::C2,
+            mode: DomainMode::Block,
+            src_addr: [0xC0A8_0001, 0, 0, 0],
+            dst_addr: [0x0A00_0001, 0, 0, 0],
+            src_port: 12345,
+            dst_port: 443,
+            protocol: 6,
+            is_ipv6: false,
+            timestamp_ns: 1_000_000_000,
+            container: None,
         }
     }
 
@@ -1988,6 +2064,27 @@ mod tests {
 
         assert_eq!(metrics.auto_response_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_auto_response_policy.lock().unwrap(), "auto");
+    }
+
+    #[tokio::test]
+    async fn an_ioc_match_is_filed_under_the_component_a_policy_names() {
+        // A policy naming a component that no alert ever carries validates at
+        // boot and enforces nothing, so what is asserted here is that the word
+        // the configuration admits is the word the alert arrives with.
+        let metrics = Arc::new(TestMetrics::new());
+        let (ips, rl) = make_auto_response_services(&metrics);
+        let mut policy =
+            make_auto_response_policy(domain::response::entity::ResponseActionType::BlockIp, None);
+        policy.components = vec!["threatintel".to_string()];
+        let mut pipeline =
+            make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics))
+                .with_auto_response(vec![policy], Arc::clone(&ips), Arc::clone(&rl));
+
+        pipeline.process_threatintel_alert(&make_ti_alert()).await;
+
+        assert_eq!(*metrics.last_component.lock().unwrap(), "threatintel");
+        assert_eq!(metrics.auto_response_calls.load(Ordering::Relaxed), 1);
+        assert!(ips.load().is_blacklisted(IpAddr::from([192, 168, 0, 1])));
     }
 
     #[tokio::test]

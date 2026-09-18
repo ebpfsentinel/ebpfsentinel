@@ -865,10 +865,6 @@ impl EventDispatcher {
         // downstream may drop the alert, but the IOC did match.
         self.metrics.record_threatintel_match(&feed_id);
 
-        // Both alerts describe the same packet, so they carry the same
-        // provenance: resolve once and hand the result to each.
-        let container = self.resolve_container_by_id(event.cgroup_id);
-
         let ti_alert = ThreatIntelAlert {
             feed_id,
             confidence,
@@ -881,30 +877,7 @@ impl EventDispatcher {
             dst_port: event.dst_port,
             protocol: event.protocol,
             timestamp_ns: event.timestamp_ns,
-            container: container.clone(),
-        };
-
-        // Reuse the IDS alert channel - AlertPipeline handles both IDS and ThreatIntel.
-        // Convert to IdsAlert for channel compatibility (same shape).
-        let ids_alert = IdsAlert {
-            rule_id: domain::common::entity::RuleId(format!("ti-{}", ti_alert.feed_id)),
-            severity: domain::common::entity::Severity::High,
-            mode: if mode == DomainMode::Block {
-                DomainMode::Block
-            } else {
-                DomainMode::Alert
-            },
-            src_addr: event.src_addr,
-            dst_addr: event.dst_addr,
-            is_ipv6: event.is_ipv6(),
-            src_port: event.src_port,
-            dst_port: event.dst_port,
-            protocol: event.protocol,
-            rule_index: 0,
-            timestamp_ns: event.timestamp_ns,
-            matched_domain: None,
-            container,
-            rate_based: false,
+            container: self.resolve_container_by_id(event.cgroup_id),
         };
 
         tracing::info!(
@@ -935,7 +908,11 @@ impl EventDispatcher {
             &detail,
         );
 
-        if self.alert_tx.try_send(AlertEvent::Ids(ids_alert)).is_err() {
+        if self
+            .alert_tx
+            .try_send(AlertEvent::ThreatIntel(ti_alert))
+            .is_err()
+        {
             self.metrics.record_event_dropped("alert_channel_full");
         }
     }
@@ -2723,10 +2700,14 @@ mod tests {
 
         let alert = alert_rx.try_recv().unwrap();
         match alert {
-            AlertEvent::Ids(a) => {
-                assert!(a.rule_id.0.starts_with("ti-"));
+            AlertEvent::ThreatIntel(a) => {
+                // The feed that resolved the IOC, the confidence it carried
+                // and the type it was filed under all survive the channel.
+                assert_eq!(a.feed_id, "test-feed");
+                assert_eq!(a.confidence, 90);
+                assert_eq!(a.threat_type, ThreatType::Malware);
             }
-            _ => panic!("expected AlertEvent::Ids from threatintel"),
+            _ => panic!("expected AlertEvent::ThreatIntel from threatintel"),
         }
     }
 

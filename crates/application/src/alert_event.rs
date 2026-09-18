@@ -3,6 +3,7 @@ use domain::ddos::entity::DdosAttack;
 use domain::dlp::entity::DlpAlert;
 use domain::dns::entity::DnsAlert;
 use domain::ids::entity::IdsAlert;
+use domain::threatintel::entity::ThreatIntelAlert;
 
 /// Unified alert event type for the alert pipeline channel.
 ///
@@ -21,6 +22,10 @@ pub enum AlertEvent {
         protocol: u8,
     },
     Dns(DnsAlert),
+    /// An IOC match. It travels on its own arm rather than as an IDS alert
+    /// so the alert it becomes carries the feed, the confidence and the
+    /// threat type, and answers to the component an operator filters on.
+    ThreatIntel(ThreatIntelAlert),
     PacketSecurity(PacketSecurityAlert),
     /// A pre-built system alert (e.g. multi-WAN total failure) that does not
     /// originate from a kernel security event. Boxed to keep the envelope small.
