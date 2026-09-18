@@ -187,21 +187,18 @@ pub async fn cmd_ips_list(client: &ApiClient, output: OutputFormat) -> Result<()
     }
 
     println!(
-        "{:<16}  {:<8}  {:<7}  {:<5}  {:>8}  {:<30}  {:<16}  {:<7}",
-        "ID", "SEVERITY", "MODE", "PROTO", "DST PORT", "PATTERN", "INTERFACES", "ENABLED"
+        "{:<16}  {:<8}  {:<7}  {:<5}  {:<24}  {:<30}  {:<16}  {:<7}",
+        "ID", "SEVERITY", "MODE", "PROTO", "MATCHES", "PATTERN", "INTERFACES", "ENABLED"
     );
 
     for rule in &rules {
-        let dst_port = rule
-            .dst_port
-            .map_or_else(|| "-".to_string(), |p| p.to_string());
         println!(
-            "{:<16}  {:<8}  {:<7}  {:<5}  {:>8}  {:<30}  {:<16}  {:<7}",
+            "{:<16}  {:<8}  {:<7}  {:<5}  {:<24}  {:<30}  {:<16}  {:<7}",
             rule.id,
             rule.severity,
             rule.mode,
             rule.protocol,
-            dst_port,
+            ips_rule_match(rule),
             rule.pattern,
             interface_scope(&rule.interfaces),
             yes_no(rule.enabled),
@@ -234,6 +231,24 @@ pub async fn cmd_ips_list(client: &ApiClient, output: OutputFormat) -> Result<()
         }
     }
     Ok(())
+}
+
+/// What a prevention rule narrows on, the way the detection listing says it.
+/// A rule decided on a resolved name carries no payload pattern, so a table
+/// printing the port alone reads as a rule watching every packet on it.
+fn ips_rule_match(rule: &IpsRuleResponse) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(port) = rule.dst_port {
+        parts.push(format!("dst {port}"));
+    }
+    if let Some(ref domain) = rule.domain_pattern {
+        let mode = rule.domain_match_mode.as_deref().unwrap_or("exact");
+        parts.push(format!("{domain} ({mode})"));
+    }
+    if parts.is_empty() {
+        return "-".to_string();
+    }
+    parts.join(" ")
 }
 
 pub async fn cmd_ips_blacklist(client: &ApiClient, output: OutputFormat) -> Result<()> {
@@ -3676,6 +3691,56 @@ mod tests {
     #[test]
     fn interface_scope_reads_a_floating_rule_as_every_interface() {
         assert_eq!(interface_scope(&[]), "*");
+    }
+
+    fn an_ips_rule() -> IpsRuleResponse {
+        IpsRuleResponse {
+            id: "ips-001".to_string(),
+            description: "Reverse shell callback".to_string(),
+            severity: "critical".to_string(),
+            mode: "block".to_string(),
+            protocol: "tcp".to_string(),
+            dst_port: Some(4444),
+            pattern: "/bin/sh".to_string(),
+            enabled: true,
+            domain_pattern: None,
+            domain_match_mode: None,
+            kernel_slot: None,
+            interfaces: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ips_rule_match_names_the_port_a_rule_is_pinned_to() {
+        assert_eq!(ips_rule_match(&an_ips_rule()), "dst 4444");
+    }
+
+    /// A rule decided on a resolved name carries no payload pattern, so the
+    /// port alone would read as a rule watching everything on it.
+    #[test]
+    fn ips_rule_match_names_the_resolved_name_a_rule_is_decided_on() {
+        let rule = IpsRuleResponse {
+            dst_port: Some(443),
+            pattern: String::new(),
+            domain_pattern: Some("*.c2-hosting.example".to_string()),
+            domain_match_mode: Some("wildcard".to_string()),
+            ..an_ips_rule()
+        };
+        assert_eq!(
+            ips_rule_match(&rule),
+            "dst 443 *.c2-hosting.example (wildcard)"
+        );
+    }
+
+    /// A rule narrowed by nothing but its protocol reads as a dash rather
+    /// than as a blank cell.
+    #[test]
+    fn ips_rule_match_says_a_rule_narrows_on_nothing() {
+        let rule = IpsRuleResponse {
+            dst_port: None,
+            ..an_ips_rule()
+        };
+        assert_eq!(ips_rule_match(&rule), "-");
     }
 
     #[test]
