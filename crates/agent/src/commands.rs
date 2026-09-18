@@ -890,6 +890,10 @@ pub async fn cmd_fingerprints_summary(client: &ApiClient, output: OutputFormat) 
     println!("  Cached entries:  {}", resp.cached_count);
     println!("  Max size:        {}", resp.max_size);
     println!("  TTL:             {}s", resp.ttl_seconds);
+    // The server-side listing says this and this one did not, so a cache that
+    // fell back to memory because its store would not open read as persistent
+    // on one command and said nothing on the other.
+    println!("  Persistent:      {}", yes_no(resp.persistent));
 
     Ok(())
 }

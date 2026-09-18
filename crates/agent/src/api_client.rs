@@ -332,6 +332,10 @@ pub struct FingerprintSummaryResponse {
     pub cached_count: usize,
     pub max_size: usize,
     pub ttl_seconds: u64,
+    /// Whether the cache is mirrored to a store that survives a restart. The
+    /// route has always answered it and this side dropped it, so a cache that
+    /// fell back to memory looked the same as one that did not.
+    pub persistent: bool,
 }
 
 #[derive(Deserialize, Serialize)]
