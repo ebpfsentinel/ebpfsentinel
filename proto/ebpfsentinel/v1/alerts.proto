@@ -120,4 +120,8 @@ message ContainerIdentity {
   string pod = 5;
   // Kubernetes container name (empty unless a k8s enricher attached metadata).
   string container_name = 6;
+  // Container name (empty unless the Docker enricher attached metadata).
+  string name = 7;
+  // Image tag (empty unless the Docker enricher attached metadata).
+  string image = 8;
 }

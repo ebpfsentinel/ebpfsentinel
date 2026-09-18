@@ -83,6 +83,12 @@ fn container_context(alert: &Alert) -> Option<proto::ContainerIdentity> {
         ),
         _ => (String::new(), String::new(), String::new()),
     };
+    // Carried for the same reason the REST reading carries it: an enriched
+    // Docker host was paying for metadata that reached no consumer at all.
+    let (name, image) = match alert.container_metadata.as_ref() {
+        Some(ContainerMetadata::Docker(d)) => (d.name.clone(), d.image.clone()),
+        _ => (String::new(), String::new()),
+    };
 
     Some(proto::ContainerIdentity {
         runtime: runtime.to_string(),
@@ -91,6 +97,8 @@ fn container_context(alert: &Alert) -> Option<proto::ContainerIdentity> {
         namespace,
         pod,
         container_name,
+        name,
+        image,
     })
 }
 
@@ -322,6 +330,43 @@ mod tests {
         assert_eq!(ctx.namespace, "prod");
         assert_eq!(ctx.pod, "web-0");
         assert_eq!(ctx.container_name, "web");
+        // No Docker enricher answered, so its half stays empty rather than
+        // repeating the Kubernetes container name under a second spelling.
+        assert_eq!(ctx.name, "");
+        assert_eq!(ctx.image, "");
+    }
+
+    /// The stream carries what the REST reading carries. A Docker host used
+    /// to enrich an alert and have the result dropped on both, so a consumer
+    /// got a cgroup id for a workload the agent could already name.
+    #[test]
+    fn container_context_folds_docker_metadata() {
+        use domain::container::entity::{
+            ContainerInfo, ContainerMetadata, ContainerRuntime, DockerMetadata,
+        };
+
+        let mut alert = make_alert("ids", Severity::High, "ids-003");
+        alert.container = Some(ContainerInfo::Container {
+            container_id: "abc123".to_string(),
+            runtime: ContainerRuntime::Docker,
+            cgroup_path: "/docker/abc123".to_string(),
+            pid: 4242,
+        });
+        alert.container_metadata = Some(ContainerMetadata::Docker(DockerMetadata {
+            name: "web".to_string(),
+            image: "nginx:1.25".to_string(),
+            labels: Vec::new(),
+            created_at: String::new(),
+            status: "running".to_string(),
+        }));
+
+        let ctx = alert_to_event(&alert)
+            .container
+            .expect("container context surfaced for a resolved container");
+        assert_eq!(ctx.name, "web");
+        assert_eq!(ctx.image, "nginx:1.25");
+        assert_eq!(ctx.namespace, "");
+        assert_eq!(ctx.pod, "");
     }
 
     #[test]

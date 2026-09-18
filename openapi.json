@@ -7496,7 +7496,7 @@
       },
       "ContainerIdentity": {
         "type": "object",
-        "description": "Container provenance surfaced on an alert. `kind` is `container` for a\nresolved container and `host` for a host-namespace process; the Docker /\nKubernetes fields are populated only when an enricher attached metadata.",
+        "description": "Container provenance surfaced on an alert.\n\nThe field is absent altogether for a host-namespace process, so `kind` is\nalways `container` where the object exists at all. It is kept because a\nreader that has to tell a container apart from a host should be told so by\na value rather than by an absence it has to interpret.\n\nThe Kubernetes and the Docker halves are filled by whichever enricher\nattached metadata, and never both, since the pipeline keeps the first\nenricher that answered.",
         "required": [
           "kind",
           "runtime",
@@ -7517,11 +7517,25 @@
           },
           "id": {
             "type": "string",
-            "description": "Container ID (empty for host)."
+            "description": "Container ID."
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Image tag (only when the Docker enricher attached metadata)."
           },
           "kind": {
             "type": "string",
-            "description": "`container` or `host`."
+            "description": "Always `container`: a host-namespace process carries no identity."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Container name (only when the Docker enricher attached metadata)."
           },
           "namespace": {
             "type": [

@@ -153,16 +153,23 @@ pub struct AlertResponse {
     pub container: Option<ContainerIdentity>,
 }
 
-/// Container provenance surfaced on an alert. `kind` is `container` for a
-/// resolved container and `host` for a host-namespace process; the Docker /
-/// Kubernetes fields are populated only when an enricher attached metadata.
+/// Container provenance surfaced on an alert.
+///
+/// The field is absent altogether for a host-namespace process, so `kind` is
+/// always `container` where the object exists at all. It is kept because a
+/// reader that has to tell a container apart from a host should be told so by
+/// a value rather than by an absence it has to interpret.
+///
+/// The Kubernetes and the Docker halves are filled by whichever enricher
+/// attached metadata, and never both, since the pipeline keeps the first
+/// enricher that answered.
 #[derive(Serialize, ToSchema)]
 pub struct ContainerIdentity {
-    /// `container` or `host`.
+    /// Always `container`: a host-namespace process carries no identity.
     pub kind: String,
     /// Detected runtime (docker, containerd, crio, podman, unknown).
     pub runtime: String,
-    /// Container ID (empty for host).
+    /// Container ID.
     pub id: String,
     /// cgroup path the resolver matched.
     pub cgroup_path: String,
@@ -175,6 +182,12 @@ pub struct ContainerIdentity {
     /// Kubernetes container name (only when a k8s enricher attached metadata).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container_name: Option<String>,
+    /// Container name (only when the Docker enricher attached metadata).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Image tag (only when the Docker enricher attached metadata).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -209,7 +222,12 @@ fn severity_label(s: Severity) -> &'static str {
 
 /// Build the alert's [`ContainerIdentity`] DTO from the domain container
 /// context. Returns `None` for a host-namespace process (nothing to surface)
-/// and folds any Kubernetes enricher metadata into the namespace/pod fields.
+/// and folds whichever enricher answered into the fields that enricher fills.
+///
+/// Both halves are carried, because a Docker host pays a daemon round-trip per
+/// container and had nothing to show for it here: an alert naming a cgroup id
+/// the operator has to look up elsewhere is a worse reading than one naming
+/// the image it came from.
 fn container_identity(
     info: Option<&domain::container::entity::ContainerInfo>,
     metadata: Option<&domain::container::entity::ContainerMetadata>,
@@ -235,6 +253,10 @@ fn container_identity(
         ),
         _ => (None, None, None),
     };
+    let (name, image) = match metadata {
+        Some(ContainerMetadata::Docker(d)) => (Some(d.name.clone()), Some(d.image.clone())),
+        _ => (None, None),
+    };
 
     Some(ContainerIdentity {
         kind: "container".to_string(),
@@ -244,6 +266,8 @@ fn container_identity(
         namespace,
         pod,
         container_name,
+        name,
+        image,
     })
 }
 
@@ -805,6 +829,83 @@ mod tests {
         // is absent rather than arriving as a null the screen must ignore.
         assert!(!object.contains_key("ml_anomaly_score"));
         assert!(!object.contains_key("container_metadata"));
+    }
+
+    /// A Docker host pays a daemon round-trip per container, and until this
+    /// reading carried the two fields it produced, every consumer got a
+    /// cgroup id and had to go and look the workload up by hand.
+    #[test]
+    fn a_docker_enriched_alert_names_the_image_it_came_from() {
+        use domain::container::entity::{
+            ContainerInfo, ContainerMetadata, ContainerRuntime, DockerMetadata,
+        };
+
+        let info = ContainerInfo::Container {
+            container_id: "abcdef1234567890".to_string(),
+            runtime: ContainerRuntime::Docker,
+            cgroup_path: "/docker/abcdef".to_string(),
+            pid: 4242,
+        };
+        let metadata = ContainerMetadata::Docker(DockerMetadata {
+            name: "web".to_string(),
+            image: "nginx:1.25".to_string(),
+            labels: vec![],
+            created_at: String::new(),
+            status: "running".to_string(),
+        });
+
+        let identity =
+            container_identity(Some(&info), Some(&metadata)).expect("a container has an identity");
+
+        assert_eq!(identity.name.as_deref(), Some("web"));
+        assert_eq!(identity.image.as_deref(), Some("nginx:1.25"));
+        // The Kubernetes half stays absent rather than arriving empty: only
+        // one enricher ever answers for a given alert.
+        assert_eq!(identity.namespace, None);
+        assert_eq!(identity.pod, None);
+    }
+
+    #[test]
+    fn a_kubernetes_enriched_alert_names_the_pod_and_no_image() {
+        use domain::container::entity::{
+            ContainerInfo, ContainerMetadata, ContainerRuntime, KubernetesMetadata,
+        };
+
+        let info = ContainerInfo::Container {
+            container_id: "abcdef1234567890".to_string(),
+            runtime: ContainerRuntime::Containerd,
+            cgroup_path: "/kubepods/cri-containerd-abcdef.scope".to_string(),
+            pid: 4242,
+        };
+        let metadata = ContainerMetadata::Kubernetes(KubernetesMetadata {
+            pod_name: "my-app-7b8f9".to_string(),
+            namespace: "production".to_string(),
+            container_name: "app".to_string(),
+            labels: vec![],
+            annotations: vec![],
+            service_account: String::new(),
+            owner_kind: None,
+            owner_name: None,
+            node_name: String::new(),
+        });
+
+        let identity =
+            container_identity(Some(&info), Some(&metadata)).expect("a container has an identity");
+
+        assert_eq!(identity.namespace.as_deref(), Some("production"));
+        assert_eq!(identity.pod.as_deref(), Some("my-app-7b8f9"));
+        assert_eq!(identity.name, None);
+        assert_eq!(identity.image, None);
+    }
+
+    /// `kind` never reads `host`, because a host process produces no object
+    /// at all. A reader told otherwise would write a branch nothing reaches.
+    #[test]
+    fn a_host_process_carries_no_container_identity() {
+        use domain::container::entity::ContainerInfo;
+
+        assert!(container_identity(Some(&ContainerInfo::Host), None).is_none());
+        assert!(container_identity(None, None).is_none());
     }
 
     #[test]
