@@ -235,11 +235,16 @@ impl DdosEngine {
         self.total_mitigated.load(Ordering::Relaxed)
     }
 
-    /// Return recent attack history (most recent first).
+    /// Return recent attack history, most recent first.
+    ///
+    /// The store appends, so the tail holds the newest entries: taking the
+    /// last `limit` of them and reversing is what makes `--limit 10` the ten
+    /// latest floods in the order somebody reads a history, rather than the
+    /// ten latest printed oldest-first.
     pub fn attack_history(&self, limit: usize) -> Vec<DdosAttack> {
         let history = self.history.lock().unwrap_or_else(PoisonError::into_inner);
         let start = history.len().saturating_sub(limit);
-        history[start..].to_vec()
+        history[start..].iter().rev().cloned().collect()
     }
 
     // ── Policy Management ─────────────────────────────────────────
@@ -503,6 +508,26 @@ mod tests {
         let engine = DdosEngine::new();
         let history = engine.attack_history(10);
         assert!(history.is_empty());
+    }
+
+    /// A history read newest-first is the promise every caller is written
+    /// against: the command line prints what it is handed, so the order here
+    /// is the order on screen.
+    #[test]
+    fn attack_history_answers_the_newest_flood_first() {
+        let engine = DdosEngine::new();
+        for (i, start) in [10_u64, 20, 30].into_iter().enumerate() {
+            let mut attack = DdosAttack::new(format!("a-{i}"), DdosAttackType::SynFlood, start);
+            attack.mitigation_status = DdosMitigationStatus::Expired;
+            engine.push_history(attack);
+        }
+
+        let history = engine.attack_history(2);
+
+        assert_eq!(
+            history.iter().map(|a| a.start_time_ns).collect::<Vec<_>>(),
+            vec![30, 20]
+        );
     }
 
     #[test]
