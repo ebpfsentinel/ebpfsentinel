@@ -3307,17 +3307,18 @@ pub async fn cmd_dlp_patterns(client: &ApiClient, output: OutputFormat) -> Resul
     }
 
     println!(
-        "{:<16}  {:<20}  {:<8}  {:<14}  {:<7}  {:<30}",
-        "ID", "NAME", "SEVERITY", "DATA TYPE", "ENABLED", "REGEX"
+        "{:<16}  {:<20}  {:<8}  {:<14}  {:<6}  {:<7}  {:<30}",
+        "ID", "NAME", "SEVERITY", "DATA TYPE", "MODE", "ENABLED", "REGEX"
     );
 
     for pattern in &patterns {
         println!(
-            "{:<16}  {:<20}  {:<8}  {:<14}  {:<7}  {:<30}",
+            "{:<16}  {:<20}  {:<8}  {:<14}  {:<6}  {:<7}  {:<30}",
             pattern.id,
             pattern.name,
             pattern.severity,
             pattern.data_type,
+            pattern.mode,
             yes_no(pattern.enabled),
             pattern.regex,
         );

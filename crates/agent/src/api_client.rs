@@ -809,9 +809,14 @@ pub struct DlpStatusResponse {
 pub struct DlpPatternResponse {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub description: String,
     pub regex: String,
     pub severity: String,
     pub data_type: String,
+    /// `alert` or `block`, this pattern's own rather than the service's.
+    #[serde(default)]
+    pub mode: String,
     pub enabled: bool,
 }
 

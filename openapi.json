@@ -8339,20 +8339,31 @@
         "required": [
           "id",
           "name",
+          "description",
           "regex",
           "severity",
           "data_type",
+          "mode",
           "enabled"
         ],
         "properties": {
           "data_type": {
-            "type": "string"
+            "type": "string",
+            "description": "`pci`, `pii`, `credentials` or `custom`."
+          },
+          "description": {
+            "type": "string",
+            "description": "What the pattern is for, as the configuration file wrote it. Empty\nwhere none was written."
           },
           "enabled": {
             "type": "boolean"
           },
           "id": {
             "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "description": "`alert` or `block`, this pattern's own. A pattern may block while the\nservice default alerts, so a listing carrying only the service mode\nreads as a set of patterns that all merely report."
           },
           "name": {
             "type": "string"
@@ -8361,7 +8372,8 @@
             "type": "string"
           },
           "severity": {
-            "type": "string"
+            "type": "string",
+            "description": "`low`, `medium`, `high` or `critical`."
           }
         }
       },
