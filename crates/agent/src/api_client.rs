@@ -489,9 +489,9 @@ pub struct ConnectionResponse {
     pub bytes_rev: u32,
 }
 
-/// One frame of `GET /api/v1/conntrack/events`. The stream serialises the
-/// agent's own lifecycle record, so `event_type` arrives capitalised where
-/// the list endpoint's fields do not; the printer lowercases it.
+/// One frame of `GET /api/v1/conntrack/events`. The body carries the same
+/// spelling as the SSE event name and as the list endpoint, so a state read
+/// off one route is the state read off the other.
 #[derive(Deserialize, Serialize)]
 pub struct ConntrackEventFrame {
     pub event_type: String,
@@ -2826,14 +2826,14 @@ mod tests {
     #[test]
     fn a_conntrack_frame_parses_into_an_event_and_a_connection() {
         let body = serde_json::json!({
-            "event_type": "New",
+            "event_type": "new",
             "connection": {
                 "src_ip": "10.0.0.2",
                 "dst_ip": "10.0.0.3",
                 "src_port": 51_000,
                 "dst_port": 443,
                 "protocol": 6,
-                "state": "Established",
+                "state": "established",
                 "packets_fwd": 3,
                 "packets_rev": 2,
                 "bytes_fwd": 300,
@@ -2846,7 +2846,8 @@ mod tests {
 
         let frame: super::ConntrackEventFrame =
             serde_json::from_str(&body).expect("the frame body is a conntrack event");
-        assert_eq!(frame.event_type, "New");
+        assert_eq!(frame.event_type, "new");
+        assert_eq!(frame.connection.state, "established");
         assert_eq!(frame.connection.src_ip, "10.0.0.2");
         assert_eq!(frame.connection.dst_port, 443);
     }

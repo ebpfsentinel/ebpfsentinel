@@ -3,7 +3,12 @@ use serde::{Deserialize, Serialize};
 use super::error::ConnTrackError;
 
 /// Domain-level connection state.
+///
+/// Serialised in the spelling `as_str` gives, because the list endpoint maps
+/// through `as_str` while the event stream serialises this enum: two
+/// spellings of one state read as two states to whoever consumes both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConnectionState {
     New,
     Established,
@@ -86,7 +91,11 @@ pub struct Connection {
 
 /// Type of conntrack lifecycle event detected by the snapshot-diff
 /// poller that compares successive reads of `/proc/net/nf_conntrack`.
+///
+/// Serialised in the spelling `as_str` gives, which is the spelling the SSE
+/// event name already carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConntrackEventType {
     /// Flow appeared since the last snapshot.
     New,
@@ -350,5 +359,38 @@ mod tests {
     fn connection_state_display() {
         assert_eq!(format!("{}", ConnectionState::Established), "established");
         assert_eq!(format!("{}", ConnectionState::SynSent), "syn_sent");
+    }
+
+    /// The list endpoint prints `as_str`; the event stream serialises the
+    /// enum. A reader of both must see one word per state.
+    #[test]
+    fn connection_state_serialises_as_it_prints() {
+        for state in [
+            ConnectionState::New,
+            ConnectionState::Established,
+            ConnectionState::Related,
+            ConnectionState::Invalid,
+            ConnectionState::SynSent,
+            ConnectionState::SynRecv,
+            ConnectionState::FinWait,
+            ConnectionState::CloseWait,
+            ConnectionState::TimeWait,
+        ] {
+            let json = serde_json::to_string(&state).expect("a state serialises");
+            assert_eq!(json, format!("\"{}\"", state.as_str()));
+        }
+    }
+
+    /// The SSE event name is `as_str`; the frame body carries the same field.
+    #[test]
+    fn event_type_serialises_as_the_event_name() {
+        for kind in [
+            ConntrackEventType::New,
+            ConntrackEventType::Update,
+            ConntrackEventType::Destroy,
+        ] {
+            let json = serde_json::to_string(&kind).expect("an event type serialises");
+            assert_eq!(json, format!("\"{}\"", kind.as_str()));
+        }
     }
 }
