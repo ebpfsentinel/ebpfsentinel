@@ -768,10 +768,22 @@ pub struct IdsRuleResponse {
     pub mode: String,
     pub protocol: String,
     pub dst_port: Option<u16>,
+    /// Source-port match, set on rules watching the reply leg of a flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_port: Option<u16>,
     pub pattern: String,
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold: Option<IdsThresholdResponse>,
+    /// Domain the rule matches on, for rules evaluated against resolved names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_pattern: Option<String>,
+    /// How `domain_pattern` is read: `exact`, `wildcard` or `regex`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_match_mode: Option<String>,
+    /// Per-country threshold overrides, keyed by ISO 3166-1 alpha-2 code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_thresholds: Option<std::collections::BTreeMap<String, IdsThresholdResponse>>,
     /// Present only when another rule holds a kernel map slot this rule also claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel_slot: Option<SlotContentionResponse>,

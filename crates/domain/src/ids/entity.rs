@@ -138,6 +138,30 @@ pub enum TrackBy {
     Both,
 }
 
+impl ThresholdType {
+    /// The spelling the configuration file uses, so a reading of a rule and
+    /// the file that declared it say the same word.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Limit => "limit",
+            Self::Threshold => "threshold",
+            Self::Both => "both",
+        }
+    }
+}
+
+impl TrackBy {
+    /// The spelling the configuration file uses, so a reading of a rule and
+    /// the file that declared it say the same word.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SrcIp => "src_ip",
+            Self::DstIp => "dst_ip",
+            Self::Both => "both",
+        }
+    }
+}
+
 /// Per-rule threshold configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThresholdConfig {
@@ -720,5 +744,17 @@ mod tests {
     fn track_by_both() {
         let key = TrackBy::Both.track_key(1, 2);
         assert_eq!(key, (1u64 << 32) | 2);
+    }
+
+    /// The configuration loader reads these exact words, so a rule read back
+    /// over the API says what the file that declared it said.
+    #[test]
+    fn threshold_words_match_the_configuration_spelling() {
+        assert_eq!(ThresholdType::Limit.as_str(), "limit");
+        assert_eq!(ThresholdType::Threshold.as_str(), "threshold");
+        assert_eq!(ThresholdType::Both.as_str(), "both");
+        assert_eq!(TrackBy::SrcIp.as_str(), "src_ip");
+        assert_eq!(TrackBy::DstIp.as_str(), "dst_ip");
+        assert_eq!(TrackBy::Both.as_str(), "both");
     }
 }

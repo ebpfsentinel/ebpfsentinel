@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
-use super::ids_handler::SlotContentionResponse;
+use super::ids_handler::{
+    SlotContentionResponse, format_domain_match_mode, format_protocol, format_severity,
+};
 use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 
@@ -442,35 +444,6 @@ pub async fn list_ips_domain_blocks(
         })
         .collect();
     Json(entries)
-}
-
-// ── Formatting helpers ──────────────────────────────────────────────
-
-fn format_severity(s: domain::common::entity::Severity) -> String {
-    match s {
-        domain::common::entity::Severity::Low => "low".to_string(),
-        domain::common::entity::Severity::Medium => "medium".to_string(),
-        domain::common::entity::Severity::High => "high".to_string(),
-        domain::common::entity::Severity::Critical => "critical".to_string(),
-    }
-}
-
-fn format_domain_match_mode(m: &domain::ids::entity::DomainMatchMode) -> String {
-    match m {
-        domain::ids::entity::DomainMatchMode::Exact => "exact".to_string(),
-        domain::ids::entity::DomainMatchMode::Wildcard => "wildcard".to_string(),
-        domain::ids::entity::DomainMatchMode::Regex => "regex".to_string(),
-    }
-}
-
-fn format_protocol(p: domain::common::entity::Protocol) -> String {
-    match p {
-        domain::common::entity::Protocol::Tcp => "tcp".to_string(),
-        domain::common::entity::Protocol::Udp => "udp".to_string(),
-        domain::common::entity::Protocol::Icmp => "icmp".to_string(),
-        domain::common::entity::Protocol::Any => "any".to_string(),
-        domain::common::entity::Protocol::Other(n) => format!("other({n})"),
-    }
 }
 
 #[cfg(test)]

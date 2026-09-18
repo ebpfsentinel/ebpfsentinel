@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 
 use crate::api_client::{
-    AlertResponse, ApiClient, ConnectionResponse, ConntrackEventFrame, IpsRuleResponse,
-    StreamOpenError,
+    AlertResponse, ApiClient, ConnectionResponse, ConntrackEventFrame, IdsRuleResponse,
+    IpsRuleResponse, StreamOpenError,
 };
 use crate::cli::OutputFormat;
 
@@ -3026,29 +3026,106 @@ pub async fn cmd_ids_rules(client: &ApiClient, output: OutputFormat) -> Result<(
     }
 
     println!(
-        "{:<16}  {:<30}  {:<8}  {:<6}  {:<6}  {:>8}  {:<7}  {:<20}",
-        "ID", "DESCRIPTION", "SEVERITY", "MODE", "PROTO", "DST PORT", "ENABLED", "PATTERN"
+        "{:<16}  {:<30}  {:<8}  {:<6}  {:<6}  {:<24}  {:<7}  {:<20}",
+        "ID", "DESCRIPTION", "SEVERITY", "MODE", "PROTO", "MATCHES", "ENABLED", "PATTERN"
     );
 
     for rule in &rules {
-        let dst_port = rule
-            .dst_port
-            .map_or_else(|| "-".to_string(), |p| p.to_string());
         println!(
-            "{:<16}  {:<30}  {:<8}  {:<6}  {:<6}  {:>8}  {:<7}  {:<20}",
+            "{:<16}  {:<30}  {:<8}  {:<6}  {:<6}  {:<24}  {:<7}  {:<20}",
             rule.id,
             rule.description,
             rule.severity,
             rule.mode,
             rule.protocol,
-            dst_port,
+            ids_rule_match(rule),
             yes_no(rule.enabled),
             rule.pattern,
         );
     }
 
     println!("\n{} rule(s) total.", rules.len());
+    print_ids_thresholds(&rules);
+    print_ids_slot_conflicts(&rules);
     Ok(())
+}
+
+/// What a rule narrows on, so a rule watching a reply port or a resolved name
+/// does not print as one matching every packet of its protocol.
+fn ids_rule_match(rule: &IdsRuleResponse) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(port) = rule.dst_port {
+        parts.push(format!("dst {port}"));
+    }
+    if let Some(port) = rule.src_port {
+        parts.push(format!("src {port}"));
+    }
+    if let Some(ref domain) = rule.domain_pattern {
+        let mode = rule.domain_match_mode.as_deref().unwrap_or("exact");
+        parts.push(format!("{domain} ({mode})"));
+    }
+    if parts.is_empty() {
+        return "-".to_string();
+    }
+    parts.join(" ")
+}
+
+/// A rate-based rule alerts on a count over a window rather than on every
+/// match, and a per-country override makes it stricter for some traffic than
+/// the table above can say.
+fn print_ids_thresholds(rules: &[IdsRuleResponse]) {
+    let rated: Vec<&IdsRuleResponse> = rules
+        .iter()
+        .filter(|r| r.threshold.is_some() || r.country_thresholds.is_some())
+        .collect();
+    if rated.is_empty() {
+        return;
+    }
+    println!("\nRate thresholds:");
+    for rule in rated {
+        if let Some(ref t) = rule.threshold {
+            println!(
+                "  {}: {} {} per {}s tracked by {}",
+                rule.id, t.threshold_type, t.count, t.window_secs, t.track_by,
+            );
+        }
+        let Some(ref by_country) = rule.country_thresholds else {
+            continue;
+        };
+        for (code, t) in by_country {
+            println!(
+                "  {} [{}]: {} {} per {}s tracked by {}",
+                rule.id, code, t.threshold_type, t.count, t.window_secs, t.track_by,
+            );
+        }
+    }
+}
+
+/// A detection rule that lost its kernel slot still prints as enabled above,
+/// which is exactly the reading an operator must not walk away with.
+fn print_ids_slot_conflicts(rules: &[IdsRuleResponse]) {
+    let shadowed: Vec<&IdsRuleResponse> =
+        rules.iter().filter(|r| r.kernel_slot.is_some()).collect();
+    if shadowed.is_empty() {
+        return;
+    }
+    println!("\nKernel map slot conflicts:");
+    for rule in shadowed {
+        let Some(ref slot) = rule.kernel_slot else {
+            continue;
+        };
+        let fate = if slot.evaluated_in_userspace {
+            "still evaluated in userspace"
+        } else {
+            "DETECTS NOTHING"
+        };
+        println!(
+            "  {} loses its slot to {} - {}",
+            rule.id,
+            slot.shadowed_by.join(", "),
+            fate,
+        );
+    }
 }
 
 // ── GeoIP ───────────────────────────────────────────────────────────────

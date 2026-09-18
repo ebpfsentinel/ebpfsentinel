@@ -517,6 +517,31 @@ impl IdsRuleConfig {
 mod tests {
     use super::*;
 
+    /// The API reads a threshold back with the domain's own word, so every
+    /// word it can emit has to be a word this loader accepts. Otherwise a
+    /// rule copied off a screen back into the file is refused.
+    #[test]
+    fn every_word_the_domain_prints_is_a_word_the_file_accepts() {
+        for threshold_type in [
+            ThresholdType::Limit,
+            ThresholdType::Threshold,
+            ThresholdType::Both,
+        ] {
+            for track_by in [TrackBy::SrcIp, TrackBy::DstIp, TrackBy::Both] {
+                let cfg = ThresholdRuleConfig {
+                    threshold_type: threshold_type.as_str().to_string(),
+                    count: 5,
+                    window_secs: 60,
+                    track_by: track_by.as_str().to_string(),
+                };
+                cfg.validate("ids.rules[0]").unwrap();
+                let parsed = cfg.to_domain_threshold().unwrap();
+                assert_eq!(parsed.threshold_type, threshold_type);
+                assert_eq!(parsed.track_by, track_by);
+            }
+        }
+    }
+
     fn base_rule() -> IdsRuleConfig {
         IdsRuleConfig {
             id: "ids-001".to_string(),

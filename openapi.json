@@ -8966,8 +8966,35 @@
           "enabled"
         ],
         "properties": {
+          "country_thresholds": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Per-country threshold overrides, keyed by ISO 3166-1 alpha-2 code. A\nrule stricter for one country reads as a single threshold without\nthem.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ThresholdResponse"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "description": {
             "type": "string"
+          },
+          "domain_match_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How `domain_pattern` is read: `exact`, `wildcard` or `regex`."
+          },
+          "domain_pattern": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Domain the rule matches on, for rules evaluated against resolved names\nrather than against a port."
           },
           "dst_port": {
             "type": [
@@ -9005,6 +9032,15 @@
           },
           "severity": {
             "type": "string"
+          },
+          "src_port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Source-port match, set on rules watching the reply leg of a flow. A\nrule carrying one fires on nothing else, so a listing that dropped it\nread as matching every port.",
+            "minimum": 0
           },
           "threshold": {
             "oneOf": [
