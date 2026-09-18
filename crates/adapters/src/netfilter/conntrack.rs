@@ -441,8 +441,6 @@ fn parse_nf_conntrack_line(line: &str) -> Option<Connection> {
         packets_rev,
         bytes_fwd,
         bytes_rev,
-        first_seen_ns: 0,
-        last_seen_ns: 0,
     })
 }
 

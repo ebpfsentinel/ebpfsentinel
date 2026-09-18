@@ -73,6 +73,13 @@ impl std::fmt::Display for ConnectionState {
 }
 
 /// Domain-level connection entry (userspace view).
+///
+/// Carries no start or last-packet instant, because the source does not hold
+/// one: connections are read from the kernel's own table, which reports
+/// counters and a state and no per-flow timestamp. The two fields that used to
+/// sit here were written as zero at every call site and published as though
+/// they were measurements, so a reader drew a flow graph on instants that were
+/// all 1970.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Connection {
     pub src_ip: String,
@@ -85,8 +92,6 @@ pub struct Connection {
     pub packets_rev: u32,
     pub bytes_fwd: u32,
     pub bytes_rev: u32,
-    pub first_seen_ns: u64,
-    pub last_seen_ns: u64,
 }
 
 /// Type of conntrack lifecycle event detected by the snapshot-diff

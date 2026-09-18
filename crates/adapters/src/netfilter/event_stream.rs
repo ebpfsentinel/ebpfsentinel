@@ -141,8 +141,6 @@ mod tests {
             packets_rev: 5,
             bytes_fwd: 1000,
             bytes_rev: 500,
-            first_seen_ns: 0,
-            last_seen_ns: 0,
         }
     }
 
