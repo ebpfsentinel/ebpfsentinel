@@ -721,10 +721,87 @@ pub struct NatRuleResponse {
     pub direction: String,
     pub priority: u32,
     pub enabled: bool,
+    /// What the rule rewrites to. Two rules of the same type read alike
+    /// without it, since the addresses are the whole of what they do.
+    pub translation: NatTranslationResponse,
+    /// What the rule is narrowed to, each absent where the rule names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_src: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_dst: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_dst_port: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_src_alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_dst_alias: Option<String>,
     /// Interface groups the rule is scoped to, in the words the agent's
     /// configuration file used. Empty is a floating rule.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interfaces: Vec<String>,
+}
+
+/// The addresses and ports a translation rewrites to, as the agent answers
+/// them.
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NatTranslationResponse {
+    Snat {
+        addr: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        port_range: Option<String>,
+    },
+    Dnat {
+        addr: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        port: Option<u16>,
+    },
+    Masquerade {
+        interface: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        port_range: Option<String>,
+    },
+    OneToOne {
+        external: String,
+        internal: String,
+    },
+    Redirect {
+        port: u16,
+    },
+    PortForward {
+        ext_port: String,
+        int_addr: String,
+        int_port: String,
+    },
+}
+
+impl NatTranslationResponse {
+    /// The rewrite written on one line, in the vocabulary the rule used.
+    #[must_use]
+    pub fn words(&self) -> String {
+        fn with_ports(addr: &str, ports: Option<&String>) -> String {
+            ports.map_or_else(|| addr.to_string(), |p| format!("{addr}:{p}"))
+        }
+        match self {
+            Self::Snat { addr, port_range } => with_ports(addr, port_range.as_ref()),
+            Self::Dnat { addr, port } => {
+                port.map_or_else(|| addr.clone(), |p| format!("{addr}:{p}"))
+            }
+            Self::Masquerade {
+                interface,
+                port_range,
+            } => with_ports(interface, port_range.as_ref()),
+            Self::OneToOne { external, internal } => format!("{external} <-> {internal}"),
+            Self::Redirect { port } => format!("localhost:{port}"),
+            Self::PortForward {
+                ext_port,
+                int_addr,
+                int_port,
+            } => format!("{ext_port} -> {int_addr}:{int_port}"),
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]

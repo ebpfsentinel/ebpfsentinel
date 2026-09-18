@@ -9713,7 +9713,8 @@
           "nat_type",
           "direction",
           "priority",
-          "enabled"
+          "enabled",
+          "translation"
         ],
         "properties": {
           "direction": {
@@ -9732,13 +9733,56 @@
             },
             "description": "The interface groups this rule is scoped to, in the words the\nconfiguration file used, `!` prefix included. Empty is a floating\nrule, which translates on every interface the programs are on."
           },
+          "match_dst": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "match_dst_alias": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "match_dst_port": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "match_protocol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "match_src": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the rule is narrowed to. A rule carrying none of these translates\nevery packet the direction carries, so each is absent rather than an\nempty value a reader would take for a restriction."
+          },
+          "match_src_alias": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The alias a rule still names, which is a rule whose match criteria the\nalias service has not resolved into CIDRs yet."
+          },
           "nat_type": {
-            "type": "string"
+            "type": "string",
+            "description": "The translation this rule performs, spelled as the configuration file\nspells it: `snat`, `dnat`, `masquerade`, `one_to_one`, `redirect` or\n`port_forward`."
           },
           "priority": {
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          },
+          "translation": {
+            "$ref": "#/components/schemas/NatTranslation",
+            "description": "What the rule rewrites to. The fields are the type's own, so a reader\nsees the address and the ports the rule was written with rather than\nthe type word alone."
           }
         }
       },
@@ -9757,6 +9801,153 @@
             "minimum": 0
           }
         }
+      },
+      "NatTranslation": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "addr",
+              "type"
+            ],
+            "properties": {
+              "addr": {
+                "type": "string"
+              },
+              "port_range": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "snat"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "addr",
+              "type"
+            ],
+            "properties": {
+              "addr": {
+                "type": "string"
+              },
+              "port": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "dnat"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "interface",
+              "type"
+            ],
+            "properties": {
+              "interface": {
+                "type": "string"
+              },
+              "port_range": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "masquerade"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "external",
+              "internal",
+              "type"
+            ],
+            "properties": {
+              "external": {
+                "type": "string"
+              },
+              "internal": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "one_to_one"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "port",
+              "type"
+            ],
+            "properties": {
+              "port": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "redirect"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "ext_port",
+              "int_addr",
+              "int_port",
+              "type"
+            ],
+            "properties": {
+              "ext_port": {
+                "type": "string"
+              },
+              "int_addr": {
+                "type": "string"
+              },
+              "int_port": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "port_forward"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "The addresses and ports a translation rewrites to.\n\nTagged with the same word `nat_type` carries, since a reader deciding what\na rule does reads the two together."
       },
       "NptV6RuleResponse": {
         "type": "object",

@@ -2745,21 +2745,52 @@ pub async fn cmd_nat_rules(client: &ApiClient, output: OutputFormat) -> Result<(
     }
 
     println!(
-        "{:<20}  {:<12}  {:<8}  {:>8}  {:<16}  {:<7}",
-        "ID", "TYPE", "DIR", "PRIORITY", "INTERFACES", "ENABLED"
+        "{:<20}  {:<12}  {:<5}  {:>5}  {:<30}  {:<28}  {:<14}  {:<7}",
+        "ID", "TYPE", "DIR", "PRIO", "TRANSLATES TO", "MATCHES", "INTERFACES", "ENABLED"
     );
     for r in &rules {
         println!(
-            "{:<20}  {:<12}  {:<8}  {:>8}  {:<16}  {:<7}",
+            "{:<20}  {:<12}  {:<5}  {:>5}  {:<30}  {:<28}  {:<14}  {:<7}",
             r.id,
             r.nat_type,
             r.direction,
             r.priority,
+            r.translation.words(),
+            nat_match_words(r),
             interface_scope(&r.interfaces),
             yes_no(r.enabled)
         );
     }
     Ok(())
+}
+
+/// What a NAT rule is narrowed to, written on one line.
+///
+/// A rule naming none of the criteria translates every packet its direction
+/// carries, which is wider than any of the others rather than a blank cell.
+fn nat_match_words(rule: &crate::api_client::NatRuleResponse) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(ref src) = rule.match_src {
+        parts.push(format!("src {src}"));
+    } else if let Some(ref alias) = rule.match_src_alias {
+        parts.push(format!("src @{alias}"));
+    }
+    if let Some(ref dst) = rule.match_dst {
+        parts.push(format!("dst {dst}"));
+    } else if let Some(ref alias) = rule.match_dst_alias {
+        parts.push(format!("dst @{alias}"));
+    }
+    if let Some(ref port) = rule.match_dst_port {
+        parts.push(format!("port {port}"));
+    }
+    if let Some(ref proto) = rule.match_protocol {
+        parts.push(proto.clone());
+    }
+    if parts.is_empty() {
+        "any".to_string()
+    } else {
+        parts.join(" ")
+    }
 }
 
 pub async fn cmd_nat_nptv6_list(client: &ApiClient, output: OutputFormat) -> Result<()> {

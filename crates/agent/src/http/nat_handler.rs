@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
 use domain::auth::entity::JwtClaims;
+use domain::firewall::entity::PortRange;
+use domain::nat::entity::{NatRule, NatType};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -24,15 +27,166 @@ pub struct NatStatusResponse {
 #[derive(Serialize, ToSchema)]
 pub struct NatRuleResponse {
     pub id: String,
+    /// The translation this rule performs, spelled as the configuration file
+    /// spells it: `snat`, `dnat`, `masquerade`, `one_to_one`, `redirect` or
+    /// `port_forward`.
     pub nat_type: String,
     pub direction: String,
     pub priority: u32,
     pub enabled: bool,
+    /// What the rule rewrites to. The fields are the type's own, so a reader
+    /// sees the address and the ports the rule was written with rather than
+    /// the type word alone.
+    pub translation: NatTranslation,
+    /// What the rule is narrowed to. A rule carrying none of these translates
+    /// every packet the direction carries, so each is absent rather than an
+    /// empty value a reader would take for a restriction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_src: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_dst: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_dst_port: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_protocol: Option<String>,
+    /// The alias a rule still names, which is a rule whose match criteria the
+    /// alias service has not resolved into CIDRs yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_src_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_dst_alias: Option<String>,
     /// The interface groups this rule is scoped to, in the words the
     /// configuration file used, `!` prefix included. Empty is a floating
     /// rule, which translates on every interface the programs are on.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub interfaces: Vec<String>,
+}
+
+/// The addresses and ports a translation rewrites to.
+///
+/// Tagged with the same word `nat_type` carries, since a reader deciding what
+/// a rule does reads the two together.
+#[derive(Serialize, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NatTranslation {
+    Snat {
+        addr: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        port_range: Option<String>,
+    },
+    Dnat {
+        addr: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        port: Option<u16>,
+    },
+    Masquerade {
+        interface: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        port_range: Option<String>,
+    },
+    OneToOne {
+        external: String,
+        internal: String,
+    },
+    Redirect {
+        port: u16,
+    },
+    PortForward {
+        ext_port: String,
+        int_addr: String,
+        int_port: String,
+    },
+}
+
+/// A port range as the configuration file writes one: a single port where
+/// both ends are the same, the two ends otherwise.
+fn port_range_words(range: PortRange) -> String {
+    if range.start == range.end {
+        range.start.to_string()
+    } else {
+        format!("{}-{}", range.start, range.end)
+    }
+}
+
+/// The type word and the values behind it, read off the rule itself.
+///
+/// The word is the one the configuration file uses rather than the Rust
+/// variant's own rendering, which ran the words together and carried the
+/// addresses along inside it as a debug dump.
+fn translation_of(nat_type: &NatType) -> (String, NatTranslation) {
+    match nat_type {
+        NatType::Snat { addr, port_range } => (
+            "snat".to_string(),
+            NatTranslation::Snat {
+                addr: addr.to_string(),
+                port_range: port_range.map(port_range_words),
+            },
+        ),
+        NatType::Dnat { addr, port } => (
+            "dnat".to_string(),
+            NatTranslation::Dnat {
+                addr: addr.to_string(),
+                port: *port,
+            },
+        ),
+        NatType::Masquerade {
+            interface,
+            port_range,
+        } => (
+            "masquerade".to_string(),
+            NatTranslation::Masquerade {
+                interface: interface.clone(),
+                port_range: port_range.map(port_range_words),
+            },
+        ),
+        NatType::OneToOne { external, internal } => (
+            "one_to_one".to_string(),
+            NatTranslation::OneToOne {
+                external: external.to_string(),
+                internal: internal.to_string(),
+            },
+        ),
+        NatType::Redirect { port } => (
+            "redirect".to_string(),
+            NatTranslation::Redirect { port: *port },
+        ),
+        NatType::PortForward {
+            ext_port,
+            int_addr,
+            int_port,
+        } => (
+            "port_forward".to_string(),
+            NatTranslation::PortForward {
+                ext_port: port_range_words(*ext_port),
+                int_addr: int_addr.to_string(),
+                int_port: port_range_words(*int_port),
+            },
+        ),
+    }
+}
+
+/// One rule read into the shape the listing answers with.
+fn rule_response(
+    rule: &NatRule,
+    direction: &str,
+    group_bits: &HashMap<String, u32>,
+) -> NatRuleResponse {
+    let (nat_type, translation) = translation_of(&rule.nat_type);
+    NatRuleResponse {
+        id: rule.id.0.clone(),
+        nat_type,
+        direction: direction.to_string(),
+        priority: rule.priority,
+        enabled: rule.enabled,
+        translation,
+        match_src: rule.match_src.clone(),
+        match_dst: rule.match_dst.clone(),
+        match_dst_port: rule.match_dst_port.map(port_range_words),
+        match_protocol: rule.match_protocol.clone(),
+        match_src_alias: rule.match_src_alias.clone(),
+        match_dst_alias: rule.match_dst_alias.clone(),
+        interfaces: group_mask_words(rule.group_mask, group_bits),
+    }
 }
 
 // ── Handlers ──────────────────────────────────────────────────────
@@ -92,23 +246,13 @@ pub async fn list_nat_rules(
     let mut rules: Vec<NatRuleResponse> = svc
         .dnat_rules()
         .iter()
-        .map(|r| NatRuleResponse {
-            id: r.id.0.clone(),
-            nat_type: format!("{:?}", r.nat_type).to_lowercase(),
-            direction: "dnat".to_string(),
-            priority: r.priority,
-            enabled: r.enabled,
-            interfaces: group_mask_words(r.group_mask, &group_bits),
-        })
+        .map(|r| rule_response(r, "dnat", &group_bits))
         .collect();
-    rules.extend(svc.snat_rules().iter().map(|r| NatRuleResponse {
-        id: r.id.0.clone(),
-        nat_type: format!("{:?}", r.nat_type).to_lowercase(),
-        direction: "snat".to_string(),
-        priority: r.priority,
-        enabled: r.enabled,
-        interfaces: group_mask_words(r.group_mask, &group_bits),
-    }));
+    rules.extend(
+        svc.snat_rules()
+            .iter()
+            .map(|r| rule_response(r, "snat", &group_bits)),
+    );
     Ok(Json(rules))
 }
 
@@ -292,6 +436,163 @@ pub async fn delete_nptv6_rule(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use domain::common::entity::RuleId;
+    use std::collections::HashMap;
+
+    fn rule(nat_type: NatType) -> NatRule {
+        NatRule {
+            id: RuleId("nat-1".to_string()),
+            priority: 10,
+            nat_type,
+            match_src: None,
+            match_dst: None,
+            match_dst_port: None,
+            match_protocol: None,
+            match_src_alias: None,
+            match_dst_alias: None,
+            enabled: true,
+            group_mask: 0,
+            tenant_id: 0,
+            xfrm_if_id: 0,
+            xfrm_link: 0,
+            fou_sport: 0,
+            fou_dport: 0,
+            fou_type: 0,
+        }
+    }
+
+    fn response(rule: &NatRule) -> serde_json::Value {
+        serde_json::to_value(rule_response(rule, "dnat", &HashMap::new())).unwrap()
+    }
+
+    /// The word on the wire is the one the configuration file is written
+    /// with, so a rule on screen matches the line that declared it.
+    #[test]
+    fn the_type_word_is_the_one_the_file_uses() {
+        let words = [
+            (
+                NatType::Snat {
+                    addr: "203.0.113.9".parse().unwrap(),
+                    port_range: None,
+                },
+                "snat",
+            ),
+            (
+                NatType::Dnat {
+                    addr: "10.0.1.10".parse().unwrap(),
+                    port: Some(8443),
+                },
+                "dnat",
+            ),
+            (
+                NatType::Masquerade {
+                    interface: "eth0".to_string(),
+                    port_range: None,
+                },
+                "masquerade",
+            ),
+            (
+                NatType::OneToOne {
+                    external: "203.0.113.40".parse().unwrap(),
+                    internal: "10.0.9.40".parse().unwrap(),
+                },
+                "one_to_one",
+            ),
+            (NatType::Redirect { port: 8080 }, "redirect"),
+            (
+                NatType::PortForward {
+                    ext_port: PortRange {
+                        start: 443,
+                        end: 443,
+                    },
+                    int_addr: "10.0.1.10".parse().unwrap(),
+                    int_port: PortRange {
+                        start: 8443,
+                        end: 8443,
+                    },
+                },
+                "port_forward",
+            ),
+        ];
+        for (nat_type, word) in words {
+            let json = response(&rule(nat_type));
+            assert_eq!(json["nat_type"], word);
+            assert_eq!(json["translation"]["type"], word);
+        }
+    }
+
+    /// The addresses are fields rather than something a reader has to pick
+    /// out of a rendering, and a port range collapses to the port where both
+    /// ends are the same.
+    #[test]
+    fn the_addresses_and_ports_are_fields() {
+        let json = response(&rule(NatType::PortForward {
+            ext_port: PortRange {
+                start: 443,
+                end: 443,
+            },
+            int_addr: "10.0.1.10".parse().unwrap(),
+            int_port: PortRange {
+                start: 8443,
+                end: 8443,
+            },
+        }));
+        assert_eq!(json["translation"]["ext_port"], "443");
+        assert_eq!(json["translation"]["int_addr"], "10.0.1.10");
+        assert_eq!(json["translation"]["int_port"], "8443");
+
+        let json = response(&rule(NatType::Snat {
+            addr: "203.0.113.9".parse().unwrap(),
+            port_range: Some(PortRange {
+                start: 1024,
+                end: 2048,
+            }),
+        }));
+        assert_eq!(json["translation"]["addr"], "203.0.113.9");
+        assert_eq!(json["translation"]["port_range"], "1024-2048");
+    }
+
+    /// A rule restricted to nothing translates everything its direction
+    /// carries, so the criteria are absent rather than empty values a reader
+    /// would take for a restriction.
+    #[test]
+    fn a_rule_naming_no_restriction_carries_no_criterion() {
+        let json = response(&rule(NatType::Redirect { port: 8080 }));
+        for field in [
+            "match_src",
+            "match_dst",
+            "match_dst_port",
+            "match_protocol",
+            "match_src_alias",
+            "match_dst_alias",
+        ] {
+            assert!(json.get(field).is_none(), "{field} should be absent");
+        }
+    }
+
+    /// What the rule is narrowed to is answered in the words the file used,
+    /// including the alias a rule still names before expansion has run.
+    #[test]
+    fn what_a_rule_is_narrowed_to_is_answered() {
+        let mut narrowed = rule(NatType::Dnat {
+            addr: "10.0.1.10".parse().unwrap(),
+            port: Some(8443),
+        });
+        narrowed.match_src = Some("10.0.0.0/8".to_string());
+        narrowed.match_dst_port = Some(PortRange {
+            start: 443,
+            end: 443,
+        });
+        narrowed.match_protocol = Some("tcp".to_string());
+        narrowed.match_dst_alias = Some("dmz-hosts".to_string());
+
+        let json = response(&narrowed);
+        assert_eq!(json["match_src"], "10.0.0.0/8");
+        assert_eq!(json["match_dst_port"], "443");
+        assert_eq!(json["match_protocol"], "tcp");
+        assert_eq!(json["match_dst_alias"], "dmz-hosts");
+    }
 
     /// A floating rule is every interface the programs are on, so the field
     /// is absent rather than an empty list a reader would take for a scope
