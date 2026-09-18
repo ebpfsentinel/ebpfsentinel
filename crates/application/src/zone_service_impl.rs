@@ -105,13 +105,11 @@ impl ZoneAppService {
         Ok(())
     }
 
-    /// Add a security zone. Validates the zone id is non-empty and unique.
+    /// Add a security zone, held to the rules a configuration file is held
+    /// to: a non-empty and unique id, at least one interface, an interface no
+    /// other zone already claims, and the zone ceiling.
     pub fn add_zone(&mut self, zone: Zone) -> Result<(), ZoneError> {
-        if zone.id.is_empty() {
-            return Err(ZoneError::Invalid {
-                reason: "zone ID must not be empty".to_string(),
-            });
-        }
+        zone.validate()?;
         let cfg = self.config_mut();
         if cfg.zones.iter().any(|z| z.id == zone.id) {
             return Err(ZoneError::Duplicate { id: zone.id });
@@ -126,7 +124,13 @@ impl ZoneAppService {
                 ),
             });
         }
-        cfg.zones.push(zone);
+        // The whole set is validated as the loader validates a file, so an
+        // interface a zone already claims is refused here too rather than
+        // landing in the map that the other zone's id already holds.
+        let mut candidate = cfg.clone();
+        candidate.zones.push(zone);
+        candidate.validate()?;
+        *cfg = candidate;
         self.refresh_metrics();
         Ok(())
     }
@@ -142,6 +146,9 @@ impl ZoneAppService {
         if cfg.zones.len() == before {
             return Err(ZoneError::NotFound { id: id.to_string() });
         }
+        // A policy naming a zone that is gone decides nothing, and leaving it
+        // listed would report a rule the datapath skips.
+        cfg.zone_policies.retain(|p| p.from != id && p.to != id);
         self.refresh_metrics();
         Ok(())
     }
@@ -150,6 +157,14 @@ impl ZoneAppService {
     pub fn add_policy(&mut self, pair: ZonePair) -> Result<(), ZoneError> {
         pair.validate()?;
         let cfg = self.config_mut();
+        // The loader refuses a policy naming a zone that does not exist, and
+        // the map manager skips one, so accepting it here would list a policy
+        // that decides no packet.
+        for name in [&pair.from, &pair.to] {
+            if !cfg.zones.iter().any(|z| &z.id == name) {
+                return Err(ZoneError::NotFound { id: name.clone() });
+            }
+        }
         if let Some(existing) = cfg
             .zone_policies
             .iter_mut()
@@ -341,6 +356,66 @@ mod tests {
 
         assert!(err.to_string().contains("maximum is 64"), "{err}");
         assert_eq!(svc.zone_count(), MAX_ZONES);
+    }
+
+    #[test]
+    fn a_zone_with_no_interface_is_refused_over_the_api() {
+        let maps = Arc::new(RecordingMaps::default());
+        let mut svc = wired(&maps);
+        svc.reload(make_config()).expect("reload");
+        let err = svc
+            .add_zone(Zone {
+                id: "dmz".to_string(),
+                interfaces: Vec::new(),
+                default_policy: ZonePolicy::Deny,
+            })
+            .expect_err("a zone carrying no interface carries no traffic");
+        assert!(err.to_string().contains("at least one interface"), "{err}");
+        assert_eq!(svc.zone_count(), 2);
+    }
+
+    #[test]
+    fn an_interface_another_zone_claims_is_refused_over_the_api() {
+        let maps = Arc::new(RecordingMaps::default());
+        let mut svc = wired(&maps);
+        svc.reload(make_config()).expect("reload");
+        let err = svc
+            .add_zone(Zone {
+                id: "dmz".to_string(),
+                // Already in `lan`, and the datapath holds one zone per
+                // ifindex, so one of the two would decide nothing.
+                interfaces: vec!["eth1".to_string()],
+                default_policy: ZonePolicy::Deny,
+            })
+            .expect_err("an interface belongs to one zone");
+        assert!(err.to_string().contains("eth1"), "{err}");
+        assert_eq!(svc.zone_count(), 2);
+    }
+
+    #[test]
+    fn a_policy_naming_an_unknown_zone_is_refused_over_the_api() {
+        let maps = Arc::new(RecordingMaps::default());
+        let mut svc = wired(&maps);
+        svc.reload(make_config()).expect("reload");
+        let err = svc
+            .add_policy(ZonePair {
+                from: "lan".to_string(),
+                to: "nowhere".to_string(),
+                policy: ZonePolicy::Allow,
+            })
+            .expect_err("the datapath skips a policy naming an unknown zone");
+        assert!(err.to_string().contains("nowhere"), "{err}");
+        assert_eq!(svc.policy_count(), 1);
+    }
+
+    #[test]
+    fn removing_a_zone_takes_the_policies_naming_it_with_it() {
+        let maps = Arc::new(RecordingMaps::default());
+        let mut svc = wired(&maps);
+        svc.reload(make_config()).expect("reload");
+        svc.remove_zone("wan").expect("remove zone");
+        assert_eq!(svc.policy_count(), 0);
+        assert_eq!(maps.calls().last().copied(), Some((1, 0)));
     }
 
     #[test]
