@@ -9355,6 +9355,7 @@
           "enabled",
           "same_segment",
           "status",
+          "probed",
           "active_connections"
         ],
         "properties": {
@@ -9377,6 +9378,10 @@
             "format": "int32",
             "minimum": 0
           },
+          "probed": {
+            "type": "boolean",
+            "description": "Whether anything ever measured the status above. A backend of a service\nwith no health check, a disabled backend and a backend of a disabled\nservice are never probed, and each of them reads `healthy` for ever."
+          },
           "same_segment": {
             "type": "boolean"
           },
@@ -9384,6 +9389,42 @@
             "type": "string"
           },
           "weight": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "LbHealthCheckResponse": {
+        "type": "object",
+        "description": "What a service is probed with, in the words the configuration file used.\n\nThe probe carries no target of its own: every enabled backend is reached on\nthe address and port it serves on.",
+        "required": [
+          "protocol",
+          "interval_secs",
+          "timeout_secs",
+          "failure_threshold",
+          "recovery_threshold"
+        ],
+        "properties": {
+          "failure_threshold": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "interval_secs": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "protocol": {
+            "type": "string"
+          },
+          "recovery_threshold": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "timeout_secs": {
             "type": "integer",
             "format": "int32",
             "minimum": 0
@@ -9415,6 +9456,17 @@
           "enabled": {
             "type": "boolean"
           },
+          "health_check": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LbHealthCheckResponse",
+                "description": "The probe behind the backend statuses below, omitted where the service\ncarries none and nothing is ever measured."
+              }
+            ]
+          },
           "id": {
             "type": "string"
           },
@@ -9444,6 +9496,7 @@
           "algorithm",
           "mode",
           "backend_count",
+          "health_checked",
           "enabled"
         ],
         "properties": {
@@ -9456,6 +9509,10 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "health_checked": {
+            "type": "boolean",
+            "description": "Whether the service carries a health check at all. A backend of a\nservice that carries none starts healthy and is never probed, so its\nstatus is a default rather than a measurement."
           },
           "id": {
             "type": "string"

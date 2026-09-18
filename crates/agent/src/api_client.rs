@@ -643,7 +643,11 @@ pub struct LbServiceResponse {
     pub protocol: String,
     pub listen_port: u16,
     pub algorithm: String,
+    /// How packets reach the backend: `dnat` rewrites, `l2dsr` does not.
+    pub mode: String,
     pub backend_count: usize,
+    /// Whether the service carries a health check at all.
+    pub health_checked: bool,
     pub enabled: bool,
 }
 
@@ -654,8 +658,20 @@ pub struct LbServiceDetailResponse {
     pub protocol: String,
     pub listen_port: u16,
     pub algorithm: String,
+    pub mode: String,
     pub enabled: bool,
+    /// The probe behind the backend statuses, absent where there is none.
+    pub health_check: Option<LbHealthCheckResponse>,
     pub backends: Vec<LbBackendResponse>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct LbHealthCheckResponse {
+    pub protocol: String,
+    pub interval_secs: u32,
+    pub timeout_secs: u32,
+    pub failure_threshold: u32,
+    pub recovery_threshold: u32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -665,7 +681,11 @@ pub struct LbBackendResponse {
     pub port: u16,
     pub weight: u32,
     pub enabled: bool,
+    /// Whether the backend sits on the LB's own segment, which l2dsr requires.
+    pub same_segment: bool,
     pub status: String,
+    /// Whether anything ever measured the status beside it.
+    pub probed: bool,
     pub active_connections: u64,
 }
 

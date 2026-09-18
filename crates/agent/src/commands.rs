@@ -1393,20 +1393,24 @@ pub async fn cmd_lb_services(client: &ApiClient, output: OutputFormat) -> Result
         return Ok(());
     }
 
+    // MODE decides whether the reply leaves through the balancer at all, and
+    // PROBED says whether the statuses on the detail screen were measured.
     println!(
-        "{:<16}  {:<20}  {:<8}  {:>6}  {:<14}  {:>8}  {:<7}",
-        "ID", "NAME", "PROTO", "PORT", "ALGORITHM", "BACKENDS", "ENABLED"
+        "{:<16}  {:<20}  {:<8}  {:>6}  {:<14}  {:<6}  {:>8}  {:<7}  {:<7}",
+        "ID", "NAME", "PROTO", "PORT", "ALGORITHM", "MODE", "BACKENDS", "PROBED", "ENABLED"
     );
 
     for svc in &services {
         println!(
-            "{:<16}  {:<20}  {:<8}  {:>6}  {:<14}  {:>8}  {:<7}",
+            "{:<16}  {:<20}  {:<8}  {:>6}  {:<14}  {:<6}  {:>8}  {:<7}  {:<7}",
             svc.id,
             truncate(&svc.name, 20),
             svc.protocol,
             svc.listen_port,
             svc.algorithm,
+            svc.mode,
             svc.backend_count,
+            yes_no(svc.health_checked),
             yes_no(svc.enabled),
         );
     }
@@ -1427,23 +1431,39 @@ pub async fn cmd_lb_service(client: &ApiClient, id: &str, output: OutputFormat) 
     println!("  Protocol:  {}", svc.protocol);
     println!("  Port:      {}", svc.listen_port);
     println!("  Algorithm: {}", svc.algorithm);
+    println!("  Mode:      {}", svc.mode);
     println!("  Enabled:   {}", yes_no(svc.enabled));
+    // A backend nothing probes keeps the status it was created with, so the
+    // probe has to be named beside the statuses it did or did not produce.
+    match &svc.health_check {
+        Some(hc) => println!(
+            "  Health:    {} every {}s, timeout {}s, {} failure(s) to fail, {} to recover",
+            hc.protocol,
+            hc.interval_secs,
+            hc.timeout_secs,
+            hc.failure_threshold,
+            hc.recovery_threshold,
+        ),
+        None => println!("  Health:    none - every backend below reads healthy by default"),
+    }
 
     if svc.backends.is_empty() {
         println!("\n  No backends.");
     } else {
         println!(
-            "\n  {:<12}  {:<18}  {:>6}  {:>6}  {:<9}  {:>6}  {:<7}",
-            "BACKEND", "ADDR", "PORT", "WEIGHT", "STATUS", "CONNS", "ENABLED"
+            "\n  {:<12}  {:<18}  {:>6}  {:>6}  {:<8}  {:<9}  {:<7}  {:>6}  {:<7}",
+            "BACKEND", "ADDR", "PORT", "WEIGHT", "SAME-SEG", "STATUS", "PROBED", "CONNS", "ENABLED"
         );
         for be in &svc.backends {
             println!(
-                "  {:<12}  {:<18}  {:>6}  {:>6}  {:<9}  {:>6}  {:<7}",
+                "  {:<12}  {:<18}  {:>6}  {:>6}  {:<8}  {:<9}  {:<7}  {:>6}  {:<7}",
                 be.id,
                 be.addr,
                 be.port,
                 be.weight,
+                yes_no(be.same_segment),
                 be.status,
+                yes_no(be.probed),
                 be.active_connections,
                 yes_no(be.enabled),
             );

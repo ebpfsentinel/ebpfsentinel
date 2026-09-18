@@ -10,6 +10,7 @@ use domain::loadbalancer::entity::{
     LbAlgorithm, LbBackend, LbForwardingMode, LbProtocol, LbService,
 };
 use domain::loadbalancer::vip::{AnnounceRole, Vip, VipAnnounceConfig};
+use domain::routing::entity::{HealthCheck, HealthCheckProto};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -35,6 +36,10 @@ pub struct LbServiceResponse {
     pub algorithm: String,
     pub mode: String,
     pub backend_count: usize,
+    /// Whether the service carries a health check at all. A backend of a
+    /// service that carries none starts healthy and is never probed, so its
+    /// status is a default rather than a measurement.
+    pub health_checked: bool,
     pub enabled: bool,
 }
 
@@ -48,6 +53,7 @@ impl LbServiceResponse {
             algorithm: s.algorithm.as_str().to_string(),
             mode: s.mode.as_str().to_string(),
             backend_count: s.backends.len(),
+            health_checked: s.health_check.is_some(),
             enabled: s.enabled,
         }
     }
@@ -62,7 +68,39 @@ pub struct LbServiceDetailResponse {
     pub algorithm: String,
     pub mode: String,
     pub enabled: bool,
+    /// The probe behind the backend statuses below, omitted where the service
+    /// carries none and nothing is ever measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_check: Option<LbHealthCheckResponse>,
     pub backends: Vec<LbBackendResponse>,
+}
+
+/// What a service is probed with, in the words the configuration file used.
+///
+/// The probe carries no target of its own: every enabled backend is reached on
+/// the address and port it serves on.
+#[derive(Serialize, ToSchema)]
+pub struct LbHealthCheckResponse {
+    pub protocol: String,
+    pub interval_secs: u32,
+    pub timeout_secs: u32,
+    pub failure_threshold: u32,
+    pub recovery_threshold: u32,
+}
+
+impl From<&HealthCheck> for LbHealthCheckResponse {
+    fn from(hc: &HealthCheck) -> Self {
+        Self {
+            protocol: match hc.protocol {
+                HealthCheckProto::Icmp => "icmp".to_string(),
+                HealthCheckProto::Tcp { .. } => "tcp".to_string(),
+            },
+            interval_secs: hc.interval_secs,
+            timeout_secs: hc.timeout_secs,
+            failure_threshold: hc.failure_threshold,
+            recovery_threshold: hc.recovery_threshold,
+        }
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -74,6 +112,10 @@ pub struct LbBackendResponse {
     pub enabled: bool,
     pub same_segment: bool,
     pub status: String,
+    /// Whether anything ever measured the status above. A backend of a service
+    /// with no health check, a disabled backend and a backend of a disabled
+    /// service are never probed, and each of them reads `healthy` for ever.
+    pub probed: bool,
     pub active_connections: u64,
 }
 
@@ -221,6 +263,7 @@ pub async fn get_lb_service(
             message: format!("service '{id}' not found"),
         })?;
 
+    let probing = probes_backends(service);
     let backends: Vec<LbBackendResponse> = match svc.backend_states(&id) {
         Some(states) => states
             .iter()
@@ -232,6 +275,7 @@ pub async fn get_lb_service(
                 enabled: bs.backend.enabled,
                 same_segment: bs.backend.same_segment,
                 status: bs.status.as_str().to_string(),
+                probed: probing && bs.backend.enabled,
                 active_connections: bs.active_connections,
             })
             .collect(),
@@ -246,6 +290,7 @@ pub async fn get_lb_service(
                 enabled: b.enabled,
                 same_segment: b.same_segment,
                 status: "healthy".to_string(),
+                probed: false,
                 active_connections: 0,
             })
             .collect(),
@@ -259,6 +304,10 @@ pub async fn get_lb_service(
         algorithm: service.algorithm.as_str().to_string(),
         mode: service.mode.as_str().to_string(),
         enabled: service.enabled,
+        health_check: service
+            .health_check
+            .as_ref()
+            .map(LbHealthCheckResponse::from),
         backends,
     }))
 }
@@ -700,9 +749,85 @@ fn parse_create_request(req: CreateLbServiceRequest) -> Result<LbService, ApiErr
     Ok(service)
 }
 
+/// Whether anything ever probes this service's backends.
+///
+/// A probe is built at startup for an enabled service carrying a health check,
+/// over its enabled backends. Everything outside that set keeps the status it
+/// was created with, which is `healthy`, so a status read off an unprobed
+/// backend is a default rather than a measurement.
+fn probes_backends(service: &LbService) -> bool {
+    service.enabled && service.health_check.is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A service as `parse_create_request` builds one: no health check.
+    fn a_service(enabled: bool) -> LbService {
+        parse_create_request(CreateLbServiceRequest {
+            id: "lb-probe".to_string(),
+            name: "web".to_string(),
+            protocol: "tcp".to_string(),
+            listen_port: 443,
+            algorithm: "round_robin".to_string(),
+            mode: "dnat".to_string(),
+            backends: vec![CreateLbBackendRequest {
+                id: "be-1".to_string(),
+                addr: "10.0.0.1".to_string(),
+                port: 8080,
+                weight: 1,
+                enabled: true,
+                same_segment: false,
+            }],
+            enabled,
+        })
+        .expect("valid service")
+    }
+
+    #[test]
+    fn a_service_created_over_http_carries_no_health_check() {
+        let svc = a_service(true);
+        assert!(svc.health_check.is_none());
+        assert!(!LbServiceResponse::from_service(&svc).health_checked);
+        assert!(!probes_backends(&svc));
+    }
+
+    #[test]
+    fn a_service_carrying_a_health_check_is_probed_only_while_enabled() {
+        let mut svc = a_service(true);
+        svc.health_check = Some(HealthCheck::default());
+        assert!(LbServiceResponse::from_service(&svc).health_checked);
+        assert!(probes_backends(&svc));
+
+        svc.enabled = false;
+        // The listing still says the service carries a probe, because it does,
+        // while nothing runs it.
+        assert!(LbServiceResponse::from_service(&svc).health_checked);
+        assert!(!probes_backends(&svc));
+    }
+
+    #[test]
+    fn the_probe_reads_back_in_the_words_the_file_used() {
+        let hc = HealthCheck {
+            protocol: HealthCheckProto::Tcp { port: 8080 },
+            interval_secs: 7,
+            timeout_secs: 2,
+            failure_threshold: 4,
+            recovery_threshold: 1,
+            ..HealthCheck::default()
+        };
+        let resp = LbHealthCheckResponse::from(&hc);
+        assert_eq!(resp.protocol, "tcp");
+        assert_eq!(resp.interval_secs, 7);
+        assert_eq!(resp.timeout_secs, 2);
+        assert_eq!(resp.failure_threshold, 4);
+        assert_eq!(resp.recovery_threshold, 1);
+        assert_eq!(
+            LbHealthCheckResponse::from(&HealthCheck::default()).protocol,
+            "icmp"
+        );
+    }
 
     #[test]
     fn parse_valid_create_request() {
