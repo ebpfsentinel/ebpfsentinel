@@ -967,16 +967,21 @@ pub async fn run(
             let mut due: HashMap<u8, tokio::time::Instant> = HashMap::new();
             loop {
                 tick.tick().await;
-                let probe_specs: Vec<(u8, domain::routing::entity::HealthCheck)> = {
+                let probe_specs: Vec<(u8, String, domain::routing::entity::HealthCheck)> = {
                     let svc = probe_routing.read().await;
                     svc.list_gateways()
                         .into_iter()
                         .filter(|s| s.gateway.enabled)
-                        .filter_map(|s| s.gateway.health_check.clone().map(|hc| (s.gateway.id, hc)))
+                        .filter_map(|s| {
+                            s.gateway
+                                .health_check
+                                .clone()
+                                .map(|hc| (s.gateway.id, s.gateway.interface.clone(), hc))
+                        })
                         .collect()
                 };
-                due.retain(|id, _| probe_specs.iter().any(|(spec_id, _)| spec_id == id));
-                for (id, hc) in &probe_specs {
+                due.retain(|id, _| probe_specs.iter().any(|(spec_id, _, _)| spec_id == id));
+                for (id, interface, hc) in &probe_specs {
                     let now = tokio::time::Instant::now();
                     let next = due.entry(*id).or_insert(now);
                     if *next > now {
@@ -999,10 +1004,19 @@ pub async fn run(
                         HealthCheckProto::Icmp => {
                             if is_safe_probe_target(&hc.target) {
                                 let secs = timeout.as_secs().max(1).to_string();
+                                let mut probe = tokio::process::Command::new("ping");
+                                probe.args(["-c", "1", "-W", &secs]);
+                                // A probe leaving by whatever path the default
+                                // route currently takes measures the elected
+                                // gateway rather than this one, so every WAN
+                                // reads healthy until the last of them drops.
+                                if is_safe_interface_name(interface) {
+                                    probe.args(["-I", interface]);
+                                }
                                 // `--` terminates option parsing so a target
                                 // beginning with `-` can never be read as a flag.
-                                tokio::process::Command::new("ping")
-                                    .args(["-c", "1", "-W", &secs, "--", &hc.target])
+                                probe
+                                    .args(["--", &hc.target])
                                     .stdout(std::process::Stdio::null())
                                     .stderr(std::process::Stdio::null())
                                     .status()
@@ -3424,6 +3438,18 @@ impl EbpfState {
 /// beginning with `-` being parsed as a `ping` flag. We pair `--` at the
 /// call site with this allow-list (valid IPv4/IPv6/hostname characters,
 /// never leading `-`) for defense in depth.
+/// Whether a name is one the kernel could carry on an interface.
+///
+/// The health probe binds to it, so an empty or malformed name leaves the
+/// probe unbound rather than failing every gateway that carries one.
+fn is_safe_interface_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() < 16
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'@'))
+}
+
 fn is_safe_probe_target(target: &str) -> bool {
     if target.is_empty() || target.len() > 253 || target.starts_with('-') {
         return false;
@@ -3592,6 +3618,20 @@ mod kernel_version_tests {
         assert!(!is_safe_probe_target("$(whoami)"));
         assert!(!is_safe_probe_target("a b"));
         assert!(!is_safe_probe_target(&"a".repeat(254)));
+    }
+
+    #[test]
+    fn probe_binds_to_a_real_interface_name_only() {
+        assert!(is_safe_interface_name("eth0"));
+        assert!(is_safe_interface_name("wan-1"));
+        assert!(is_safe_interface_name("eth0.100"));
+        assert!(is_safe_interface_name("br_lan"));
+        // An empty name is the API default, meaning the agent's own path.
+        assert!(!is_safe_interface_name(""));
+        // Longer than IFNAMSIZ, so no interface could carry it.
+        assert!(!is_safe_interface_name("aaaaaaaaaaaaaaaa"));
+        assert!(!is_safe_interface_name("eth0; rm -rf /"));
+        assert!(!is_safe_interface_name("eth 0"));
     }
 }
 
