@@ -15,7 +15,15 @@ VM_HELPERS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_VM_IP="${AGENT_VM_IP:-192.168.56.10}"
 ATTACKER_VM_IP="${ATTACKER_VM_IP:-192.168.56.20}"
 AGENT_SSH_KEY="${AGENT_SSH_KEY:-${HOME}/.ssh/agent_key}"
-AGENT_SSH_CMD="ssh -i ${AGENT_SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=5 vagrant@${AGENT_VM_IP}"
+# ConnectTimeout bounds the handshake and nothing after it. The attack suites
+# exist to make the agent block this host, and what they block is every packet
+# on the wire, including the one carrying a reply to a session that was already
+# open - so a remote call issued a moment before the mitigation lands waits on a
+# TCP retransmit that will never be answered and the whole lane stops. The
+# keepalives give the session its own deadline: three unanswered probes five
+# seconds apart and ssh gives up, so a blocked runner loses fifteen seconds
+# instead of the run. BatchMode keeps a prompt from taking the place of a hang.
+AGENT_SSH_CMD="ssh -i ${AGENT_SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes vagrant@${AGENT_VM_IP}"
 
 # Override host/URL to point at agent VM
 AGENT_HOST="${AGENT_VM_IP}"
@@ -57,6 +65,30 @@ _agent_ssh_sudo() {
     $AGENT_SSH_CMD -- sudo "$@"
 }
 
+# _agent_ssh_wait_reachable [seconds]
+# Blocks until a remote call answers, or until the budget runs out.
+#
+# A suite that provokes a mitigation leaves this host dropped at the agent's
+# datapath for as long as the block lasts, and the lane's next remote call is
+# whatever teardown does first. With the keepalives above that call now fails
+# rather than hanging, but failing fifteen times in a row leaves the agent
+# running and poisons the suite after it. Waiting for the block to lapse once,
+# before the teardown sequence starts, is what makes the stop reliable; the
+# budget covers the longest auto_block_duration_secs any fixture asks for.
+_agent_ssh_wait_reachable() {
+    local budget="${1:-90}"
+    local waited=0
+
+    while [ "$waited" -lt "$budget" ]; do
+        if _agent_ssh true >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 3
+        waited=$((waited + 3))
+    done
+    return 1
+}
+
 # _agent_scp <local_path> <remote_path>
 # Copies a file to the agent VM.
 _agent_scp() {
@@ -77,7 +109,7 @@ _agent_scp() {
 
     scp -i "${AGENT_SSH_KEY}" \
         -o StrictHostKeyChecking=no \
-        -o ConnectTimeout=5 \
+        -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes \
         "$local_path" "vagrant@${AGENT_VM_IP}:${remote_path}"
 }
 
@@ -348,6 +380,11 @@ start_ebpf_agent() {
 
 # stop_ebpf_agent - stop agent running on the agent VM via SSH
 stop_ebpf_agent() {
+    # An attack suite can still have this host blocked when teardown runs; every
+    # call below would then fail in turn and leave the agent alive for the next
+    # suite. Wait the block out once, here, rather than once per call.
+    _agent_ssh_wait_reachable || true
+
     local remote_pid
     remote_pid="$(_agent_ssh cat "${_REMOTE_PID_FILE}" 2>/dev/null)" || true
 
@@ -515,7 +552,7 @@ wait_for_ebpf_loaded() {
 BACKEND_VM_IP="${BACKEND_VM_IP:-192.168.57.30}"
 AGENT_BACKEND_IP="${AGENT_BACKEND_IP:-192.168.57.10}"
 BACKEND_SSH_KEY="${BACKEND_SSH_KEY:-${HOME}/.ssh/backend_key}"
-BACKEND_SSH_CMD="ssh -i ${BACKEND_SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=5 vagrant@${BACKEND_VM_IP}"
+BACKEND_SSH_CMD="ssh -i ${BACKEND_SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes vagrant@${BACKEND_VM_IP}"
 EBPF_AGENT_BACKEND_IFACE="${EBPF_AGENT_BACKEND_IFACE:-eth2}"
 EBPF_BACKEND_IFACE="${EBPF_BACKEND_IFACE:-eth1}"
 
@@ -553,7 +590,7 @@ route_via_agent() {
             # Client (attacker) reaches 192.168.57.0/24 via agent's 56.10
             $AGENT_SSH_CMD -- true >/dev/null 2>&1 || true
             ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
-                -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+                -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes \
                 "vagrant@${ATTACKER_VM_IP}" -- \
                 sudo ip route replace 192.168.57.0/24 via "${AGENT_VM_IP}" dev eth1
             ;;
@@ -643,7 +680,7 @@ capture_on() {
         backend) sshrun=("_backend_ssh_sudo") ;;
         client)
             sshrun=(ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key"
-                    -o StrictHostKeyChecking=no -o ConnectTimeout=5
+                    -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes
                     "vagrant@${ATTACKER_VM_IP}" -- sudo)
             ;;
         *)
@@ -702,7 +739,7 @@ stop_capture() {
             ;;
         client)
             sshrun=(ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key"
-                    -o StrictHostKeyChecking=no -o ConnectTimeout=5
+                    -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes
                     "vagrant@${ATTACKER_VM_IP}" -- sudo)
             scpsrc="vagrant@${ATTACKER_VM_IP}:${pcap}"
             scpkey="${AGENT_SSH_KEY%agent_key}attacker_key"

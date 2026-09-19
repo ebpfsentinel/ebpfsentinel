@@ -140,12 +140,12 @@ fi
 # pair here as well. ssh-copy-id is idempotent.
 cd "$VAGRANT_DIR"
 vagrant ssh attacker -c '
-  if ! ssh -i ~/.ssh/agent_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+  if ! ssh -i ~/.ssh/agent_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes \
         -o BatchMode=yes vagrant@192.168.56.10 true 2>/dev/null; then
     [ -f ~/.ssh/agent_key ] || ssh-keygen -t ed25519 -f ~/.ssh/agent_key -N "" -q
     if command -v sshpass >/dev/null 2>&1; then
       sshpass -p vagrant ssh-copy-id -i ~/.ssh/agent_key.pub \
-        -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes \
         vagrant@192.168.56.10 >/dev/null 2>&1 \
         && echo "agent SSH trust established" \
         || echo "WARN: could not establish agent SSH trust"

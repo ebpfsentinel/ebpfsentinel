@@ -14,7 +14,7 @@
 if ! declare -F _attacker_ssh >/dev/null 2>&1; then
     _attacker_ssh() {
         ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
-            -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+            -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes \
             "vagrant@${ATTACKER_VM_IP}" -- "$@"
     }
 fi

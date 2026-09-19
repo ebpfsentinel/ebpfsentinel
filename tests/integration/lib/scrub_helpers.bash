@@ -130,7 +130,7 @@ scapy_send_via() {
     local flags="DF"
     [ "$df" = "0" ] && flags="none"
     ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
-        -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes \
         "vagrant@${ATTACKER_VM_IP}" -- \
         sudo /opt/scapy-venv/bin/python3 - "${dst_ip}" "${ttl}" "${ip_id}" "${mss}" "${flags}" "${count}" <<'PY'
 import random
@@ -164,7 +164,7 @@ scapy_send_fragment_via() {
     local dst_ip="${1:?usage: scapy_send_fragment_via <dst_ip> [count]}"
     local count="${2:-1}"
     ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
-        -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes \
         "vagrant@${ATTACKER_VM_IP}" -- \
         sudo /opt/scapy-venv/bin/python3 - "${dst_ip}" "${count}" <<'PY'
 import random

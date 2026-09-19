@@ -13,7 +13,7 @@
 if ! declare -F _attacker_ssh >/dev/null 2>&1; then
     _attacker_ssh() {
         ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
-            -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+            -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes \
             "vagrant@${ATTACKER_VM_IP}" -- "$@"
     }
 fi
@@ -34,7 +34,7 @@ scapy_send_ipv6_via() {
     local iface="${4:-eth1}"
     local gw="${5:-fd00:54::254}"
     ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
-        -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes \
         "vagrant@${ATTACKER_VM_IP}" -- \
         sudo /opt/scapy-venv/bin/python3 - "${src}" "${dst}" "${count}" "${iface}" "${gw}" <<'PY'
 import re
