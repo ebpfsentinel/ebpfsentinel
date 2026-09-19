@@ -171,16 +171,27 @@ impl AlertSender for WebhookAlertSender {
         route: &'a AlertRoute,
     ) -> Pin<Box<dyn Future<Output = Result<(), DomainError>> + Send + 'a>> {
         Box::pin(async move {
+            // An alert refused before a request leaves is still an alert that
+            // never arrived, so every way out of here but the delivered one
+            // moves the failure counter: a destination the guard refuses for
+            // ever would otherwise be a silent drop, which is exactly what
+            // these counters exist to make visible.
+            let counted = |e: DomainError| -> DomainError {
+                self.metrics
+                    .record_alert_export_failed(&self.destination_name);
+                e
+            };
+
             // 1. Check circuit breaker
             {
                 let mut cb = self.circuit_breaker.lock().await;
                 if !cb.can_attempt() {
                     self.metrics
                         .record_circuit_state(&self.destination_name, cb.state().as_u8());
-                    return Err(DomainError::EngineError(format!(
+                    return Err(counted(DomainError::EngineError(format!(
                         "circuit breaker open for destination '{}'",
                         self.destination_name
-                    )));
+                    ))));
                 }
             }
 
@@ -189,22 +200,25 @@ impl AlertSender for WebhookAlertSender {
                 AlertDestination::Webhook { url, headers } => {
                     #[cfg(test)]
                     if !self.skip_url_validation {
-                        validate_webhook_url(url)?;
+                        validate_webhook_url(url).map_err(&counted)?;
                     }
                     #[cfg(not(test))]
-                    validate_webhook_url(url)?;
+                    validate_webhook_url(url).map_err(&counted)?;
                     (url.clone(), headers.clone())
                 }
                 _ => {
-                    return Err(DomainError::EngineError(
+                    return Err(counted(DomainError::EngineError(
                         "webhook sender received non-webhook route".to_string(),
-                    ));
+                    )));
                 }
             };
 
             // 3. Serialize alert to JSON
-            let body = serde_json::to_string(alert)
-                .map_err(|e| DomainError::EngineError(format!("failed to serialize alert: {e}")))?;
+            let body = serde_json::to_string(alert).map_err(|e| {
+                counted(DomainError::EngineError(format!(
+                    "failed to serialize alert: {e}"
+                )))
+            })?;
 
             // 4. Retry with backoff: POST to webhook URL
             let client = &self.client;
