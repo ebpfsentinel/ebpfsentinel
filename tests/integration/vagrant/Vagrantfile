@@ -675,8 +675,17 @@ NETPLAN
     # authorized_keys via the password auth the agent's ssh-access provisioner
     # enables (sshpass is installed above). Runs unprivileged so the key lands
     # in the vagrant user's home; best-effort retry while the agent settles.
+    #
+    # It runs on every boot rather than once, because the trust is a pair and
+    # only one half of it lives here: an agent VM destroyed and rebuilt comes
+    # back with an empty authorized_keys while the attacker keeps the key it
+    # generated months earlier, and a provisioner that already ran is never
+    # re-run, so nothing puts the pair back together. The failure is silent -
+    # every 2-VM and transit test reads the refused login as a topology it was
+    # not given and skips - so the cost of re-copying an installed key on each
+    # boot is worth paying. ssh-copy-id is idempotent.
     # ----------------------------------------------------------
-    attacker.vm.provision "shell", name: "agent-ssh-key", privileged: false, inline: <<-SHELL
+    attacker.vm.provision "shell", name: "agent-ssh-key", privileged: false, run: "always", inline: <<-SHELL
       set -uo pipefail
       KEY="$HOME/.ssh/agent_key"
       mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"

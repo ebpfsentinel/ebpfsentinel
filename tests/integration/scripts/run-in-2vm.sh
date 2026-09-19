@@ -131,6 +131,29 @@ if [ "$PERF_COMPARISON" = "true" ]; then
     exit 0
 fi
 
+# ── Heal attacker -> agent SSH trust ───────────────────────────────
+# Every suite that drives the agent from here reaches it over ~/.ssh/agent_key,
+# and a refused login is the quietest failure on the lane: the helpers read it
+# as a topology the run was not given, so the whole suite skips and the lane
+# reports green having tested nothing. The attacker re-copies the key on each
+# boot, but a run with --skip-provision boots nothing, so check and repair the
+# pair here as well. ssh-copy-id is idempotent.
+cd "$VAGRANT_DIR"
+vagrant ssh attacker -c '
+  if ! ssh -i ~/.ssh/agent_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        -o BatchMode=yes vagrant@192.168.56.10 true 2>/dev/null; then
+    [ -f ~/.ssh/agent_key ] || ssh-keygen -t ed25519 -f ~/.ssh/agent_key -N "" -q
+    if command -v sshpass >/dev/null 2>&1; then
+      sshpass -p vagrant ssh-copy-id -i ~/.ssh/agent_key.pub \
+        -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        vagrant@192.168.56.10 >/dev/null 2>&1 \
+        && echo "agent SSH trust established" \
+        || echo "WARN: could not establish agent SSH trust"
+    fi
+  fi
+' || true
+cd "$INTEGRATION_DIR"
+
 # ── Run BATS suites on attacker VM ─────────────────────────────────
 SUITES="$(build_suite_args)"
 

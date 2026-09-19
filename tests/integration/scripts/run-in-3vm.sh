@@ -231,6 +231,29 @@ for s in $SUITES; do
     REMOTE_SUITES="${REMOTE_SUITES} suites/${bn}"
 done
 
+# ── Heal attacker -> agent SSH trust ───────────────────────────────
+# Every suite that drives the agent from here reaches it over ~/.ssh/agent_key,
+# and a refused login is the quietest failure on the lane: the helpers read it
+# as a topology the run was not given, so the whole suite skips and the lane
+# reports green having tested nothing. The attacker re-copies the key on each
+# boot, but a run with --skip-provision boots nothing, so check and repair the
+# pair here as well. ssh-copy-id is idempotent.
+cd "$VAGRANT_DIR"
+VAGRANT_3VM=1 vagrant ssh attacker -c '
+  if ! ssh -i ~/.ssh/agent_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        -o BatchMode=yes vagrant@192.168.56.10 true 2>/dev/null; then
+    [ -f ~/.ssh/agent_key ] || ssh-keygen -t ed25519 -f ~/.ssh/agent_key -N "" -q
+    if command -v sshpass >/dev/null 2>&1; then
+      sshpass -p vagrant ssh-copy-id -i ~/.ssh/agent_key.pub \
+        -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        vagrant@192.168.56.10 >/dev/null 2>&1 \
+        && echo "agent SSH trust established" \
+        || echo "WARN: could not establish agent SSH trust"
+    fi
+  fi
+' || true
+cd "$INTEGRATION_DIR"
+
 # ── Heal attacker → backend SSH trust ──────────────────────────────
 # Vagrant provisions VMs in definition order, so a combined `up` runs the
 # attacker's backend-key copy before the backend VM exists - leaving the
