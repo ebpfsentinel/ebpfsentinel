@@ -95,6 +95,20 @@ docker save "$IMAGE_NAME" | gzip | $SSH_CMD 'gunzip | sudo docker load'
 
 echo "==> Image '${IMAGE_NAME}' loaded on agent VM."
 
+# The kubernetes suite's DaemonSet pulls ebpfsentinel:latest with
+# imagePullPolicy:IfNotPresent and only builds that tag when it is missing, so
+# a tag left over from an earlier push would make it exercise an older build
+# while every other suite runs the one we just streamed across. Point the tag
+# at this image, and drop minikube's own cached copy so the suite's
+# `minikube image load` cannot be answered from the cluster's store.
+echo "==> Tagging '${IMAGE_NAME}' as ebpfsentinel:latest on agent VM..."
+$SSH_CMD "sudo docker tag '${IMAGE_NAME}' ebpfsentinel:latest" || {
+    echo "ERROR: could not tag the image as ebpfsentinel:latest on the agent VM" >&2
+    exit 1
+}
+$SSH_CMD "command -v minikube >/dev/null 2>&1 && minikube image rm ebpfsentinel:latest" \
+    >/dev/null 2>&1 || true
+
 # ── Verify ───────────────────────────────────────────────────────
 echo "==> Verifying image on agent VM..."
 REMOTE_IMAGE="$($SSH_CMD "sudo docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -F '${IMAGE_NAME}'" 2>/dev/null)" || true
