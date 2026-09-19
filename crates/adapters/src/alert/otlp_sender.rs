@@ -145,15 +145,21 @@ fn grpc_tls(config: &OtlpExportConfig) -> Result<Option<ClientTlsConfig>, Domain
 
 /// The HTTP client the exporter posts through, or `None` where the built-in
 /// one already does what the configuration asked for.
+///
+/// It is a blocking client on purpose. The batch processor exports from a
+/// dedicated thread of its own, which carries no Tokio reactor, so an async
+/// client would reach the connector and find nothing to register the socket
+/// with. A blocking client owns the runtime it drives, so it answers from any
+/// thread, and the export is already off the alert path.
 fn http_client(
     config: &OtlpExportConfig,
     timeout: Duration,
-) -> Result<Option<reqwest::Client>, DomainError> {
+) -> Result<Option<reqwest::blocking::Client>, DomainError> {
     if config.verify_tls && config.ca_cert.is_none() {
         return Ok(None);
     }
 
-    let mut builder = reqwest::Client::builder().timeout(timeout);
+    let mut builder = reqwest::blocking::Client::builder().timeout(timeout);
     if let Some(ca_cert) = config.ca_cert.as_deref() {
         let pem = std::fs::read(ca_cert).map_err(|e| {
             DomainError::EngineError(format!(

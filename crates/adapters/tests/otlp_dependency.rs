@@ -52,20 +52,23 @@ fn the_exporter_asks_for_no_signal_it_does_not_emit() {
 }
 
 #[test]
-fn the_http_exporter_never_links_the_blocking_client() {
+fn the_http_exporter_links_the_blocking_client() {
     let line = declaration(&workspace_manifest(), "opentelemetry-otlp");
     assert!(
-        !line.contains("reqwest-blocking-client"),
-        "a blocking HTTP client inside an asynchronous agent parks a runtime thread per export: {line}"
+        line.contains("reqwest-blocking-client"),
+        "the batch log processor exports from a thread of its own with no \
+         reactor on it, where an asynchronous client panics and takes the \
+         agent down with it: {line}"
     );
     assert!(
-        line.contains("\"reqwest-client\""),
-        "the HTTP exporter needs the asynchronous client named explicitly: {line}"
+        !line.contains("\"reqwest-client\""),
+        "two HTTP clients compiled in is one of them exporting nothing: {line}"
     );
     let reqwest = declaration(&workspace_manifest(), "reqwest");
     assert!(
-        !reqwest.contains("\"blocking\""),
-        "feature unification would hand the exporter a blocking client anyway: {reqwest}"
+        reqwest.contains("\"blocking\""),
+        "the sender builds the blocking client itself, so the feature is \
+         ours to declare rather than another crate's to unify in: {reqwest}"
     );
 }
 
