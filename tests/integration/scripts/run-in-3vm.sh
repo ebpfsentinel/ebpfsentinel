@@ -12,9 +12,10 @@
 #   192.168.57.0/24 - agent.eth2 (.10) ↔ backend (.30)
 #
 # Usage:
-#   ./run-in-3vm.sh                        # Run all 3-VM-tagged suites
+#   ./run-in-3vm.sh                        # Run the transit suites
 #   ./run-in-3vm.sh --suite 28             # Run a single suite by number
-#   ./run-in-3vm.sh --transit-only         # Only suites tagged topology=3vm
+#   ./run-in-3vm.sh --transit-only         # Same as the default, kept explicit
+#   ./run-in-3vm.sh --all                  # Every suite on disk, lane faults included
 #   ./run-in-3vm.sh --profile nightly      # Only suites with suite_profiles==nightly
 #   ./run-in-3vm.sh --skip-provision       # Skip vagrant up
 #
@@ -35,6 +36,7 @@ export EBPFSENTINEL_STRICT_SKIPS="${EBPFSENTINEL_STRICT_SKIPS:-0}"
 # ── Parse arguments ────────────────────────────────────────────────
 SUITE=""
 TRANSIT_ONLY=false
+ALL_SUITES=false
 SKIP_PROVISION=false
 PROFILE=""
 
@@ -42,6 +44,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --suite)          SUITE="$2"; shift 2 ;;
         --transit-only)   TRANSIT_ONLY=true; shift ;;
+        --all)            ALL_SUITES=true; shift ;;
         --skip-provision) SKIP_PROVISION=true; shift ;;
         --profile)        PROFILE="$2"; shift 2 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -132,72 +135,25 @@ cd "$INTEGRATION_DIR"
 
 # ── Build suite list ───────────────────────────────────────────────
 list_transit_suites() {
-    # Emit the suite numbers whose coverage-matrix row is tagged topology=3vm.
+    # Emit the suites that actually exercise the transit path.
     #
-    # The matrix holds two lists, and both carry transit rows: `coverage`, one
-    # row per eBPF program, CLI subcommand or domain module, keyed by `kind`
-    # and listing its suites under `suites`; and `attack_suites`, one row per
-    # attack-realism suite, naming a single suite under `suite`. An earlier
-    # version of this function read three top-level keys that the file has
-    # never had, so it silently produced nothing: --transit-only then died on
-    # "No suites tagged topology=3vm" and the default lane fell through to all
-    # sixty-five suites. Reading a key that does not exist must fail loudly
-    # rather than quietly, so the schema is checked before the rows are read.
-    if command -v python3 >/dev/null 2>&1; then
-        python3 - <<PYEOF
-import sys
-try:
-    import yaml
-except ImportError:
-    sys.exit(2)
-with open("${COVERAGE_MATRIX}") as f:
-    doc = yaml.safe_load(f)
-missing = [k for k in ("coverage", "attack_suites") if k not in doc]
-if missing:
-    sys.stderr.write(
-        "coverage-matrix.yaml has no %s section - the 3VM suite list cannot "
-        "be derived\n" % ", ".join(missing)
-    )
-    sys.exit(3)
-suites = set()
-for row in doc.get("coverage") or []:
-    if row.get("topology") == "3vm":
-        for s in row.get("suites") or []:
-            if s != "TBD":
-                suites.add(str(s))
-for row in doc.get("attack_suites") or []:
-    if row.get("topology") == "3vm" and row.get("suite"):
-        suites.add(str(row["suite"]))
-for s in sorted(suites):
-    print(s)
-PYEOF
-        local rc=$?
-        if [ "$rc" -eq 2 ]; then
-            # PyYAML missing - fall through to grep heuristic
-            :
-        else
-            return $rc
-        fi
-    fi
-    # grep fallback: the row's suite list sits on the line before `topology`,
-    # as `suites: ["18", "24", "47"]` in `coverage` or `suite: "44"` in
-    # `attack_suites`, so keep the last one seen and emit it when the topology
-    # line says 3vm.
-    awk '
-        /^[[:space:]]*-?[[:space:]]*suites?:/ { last = $0 }
-        /^[[:space:]]*topology:/ {
-            if ($0 ~ /3vm/ && last != "") {
-                line = last
-                sub(/^[^:]*:/, "", line)
-                gsub(/[][",]/, " ", line)
-                n = split(line, parts, " ")
-                for (i = 1; i <= n; i++)
-                    if (parts[i] != "" && parts[i] != "TBD")
-                        print parts[i]
-            }
-            last = ""
-        }
-    ' "${COVERAGE_MATRIX}" 2>/dev/null | sort -u || true
+    # The list comes from the suites themselves rather than from
+    # coverage-matrix.yaml, because the matrix's `topology` field describes a
+    # feature and not a suite: the firewall row is tagged 3vm and lists every
+    # suite touching the firewall, most of which drive traffic out of a local
+    # network namespace that exists on no VM of this lane. Reading it gave
+    # sixteen suites, of which five failed for want of that namespace and one
+    # passed for the wrong reason - asserting a connection was refused when
+    # nothing had tried to open one.
+    #
+    # A transit suite is one that names the third VM: it gates on
+    # skip_if_not_3vm, reaches the backend, or asks for the route through the
+    # agent. Deriving the list from that keeps a suite written tomorrow in the
+    # lane without a second list to remember to update.
+    grep -lE 'skip_if_not_3vm|_backend_ssh|BACKEND_VM_IP|route_via_agent|start_backend_service' \
+        "${SUITE_DIR}"/*.bats 2>/dev/null \
+        | while IFS= read -r f; do basename "$f" | sed 's/-.*//'; done \
+        | sort -u
 }
 
 # Emit suite numbers whose suite_profiles entry matches $PROFILE.
@@ -247,7 +203,7 @@ build_suite_args() {
         local names paths
         names="$(list_transit_suites)"
         if [ -z "$names" ]; then
-            echo "ERROR: No suites tagged topology=3vm in coverage-matrix.yaml" >&2
+            echo "ERROR: No suite under ${SUITE_DIR} exercises the transit topology" >&2
             exit 1
         fi
         paths=""
@@ -261,9 +217,30 @@ build_suite_args() {
         return
     fi
 
-    # Default: every suite that exists. Tests gate themselves via
-    # skip_if_not_3vm so non-3VM suites no-op cleanly.
-    ls "${SUITE_DIR}"/*.bats 2>/dev/null
+    # Default: the transit suites, which is what this lane exists to run and
+    # what its usage has always said it runs. Running every suite here was the
+    # older behaviour and it was wrong: the local-lane suites need a network
+    # namespace the client VM does not have, so they failed on a lane fault
+    # that reads exactly like a product regression. `--all` is still there for
+    # a deliberate sweep.
+    if [ "$ALL_SUITES" = "true" ]; then
+        ls "${SUITE_DIR}"/*.bats 2>/dev/null
+        return
+    fi
+    local names paths
+    names="$(list_transit_suites)"
+    if [ -z "$names" ]; then
+        echo "ERROR: No suite under ${SUITE_DIR} exercises the transit topology" >&2
+        exit 1
+    fi
+    paths=""
+    while IFS= read -r n; do
+        [ -z "$n" ] && continue
+        local p
+        p="$(ls "${SUITE_DIR}/${n}"* 2>/dev/null | head -1)" || true
+        [ -n "$p" ] && paths="${paths} ${p}"
+    done <<< "$names"
+    echo "$paths"
 }
 
 SUITES="$(build_suite_args)"

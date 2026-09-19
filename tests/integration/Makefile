@@ -239,7 +239,7 @@ vagrant-ssh-backend: ## SSH into the backend VM
 	cd $(VAGRANT_DIR) && VAGRANT_3VM=1 vagrant ssh backend
 
 .PHONY: test-3vm
-test-3vm: vagrant-3vm-up ## Run all 3-VM-tagged suites via transit topology
+test-3vm: vagrant-3vm-up ## Run the transit suites via the 3-VM topology
 	$(SCRIPT_DIR)/run-in-3vm.sh --skip-provision
 
 .PHONY: test-3vm-suite
@@ -250,7 +250,7 @@ endif
 	$(SCRIPT_DIR)/run-in-3vm.sh --skip-provision --suite $(SUITE)
 
 .PHONY: test-3vm-transit
-test-3vm-transit: vagrant-3vm-up ## Run only suites tagged topology=3vm
+test-3vm-transit: vagrant-3vm-up ## Same as test-3vm, kept for the explicit flag
 	$(SCRIPT_DIR)/run-in-3vm.sh --skip-provision --transit-only
 
 # ── Utilities ────────────────────────────────────────────────────
