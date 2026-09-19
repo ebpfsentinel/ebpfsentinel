@@ -70,10 +70,19 @@ ratelimit:
     # one IPv4 host. IPv6 sources are covered by country_tiers, which carries
     # the v6 trie; the suite asserts that boundary rather than assuming a v6
     # rule the data plane could not key.
+    #
+    # The host it names is deliberately a documentation address rather than the
+    # lane's own client. Nothing in this suite drives traffic through the rule -
+    # the two ratelimit tests read the REST surface - but the rule is loaded into
+    # the data plane all the same, and off the single-VM lane the client is the
+    # host running bats: it reaches the agent over the wire the rule is attached
+    # to, and reaches the backend across it. Keying the bucket on that address
+    # therefore rate-limits the suite's own SSH and its transit probe to five
+    # packets a second, which reads as an IPv6 link that never came up.
     - id: rl-v4-source
       rate: 5
       burst: 10
-      src_ip: "__NS_IP__"
+      src_ip: "192.0.2.1"
       action: drop
       algorithm: token_bucket
       enabled: true

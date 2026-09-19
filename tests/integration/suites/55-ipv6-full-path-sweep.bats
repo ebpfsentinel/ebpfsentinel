@@ -367,19 +367,44 @@ teardown_file() {
     _backend_ssh_sudo ip -6 addr replace "${backend_v6}/64" dev eth1 >/dev/null 2>&1 || true
     _backend_ssh_sudo ip -6 route replace "fd00:56::/64" via "${agent_gw_ext}" dev eth1 >/dev/null 2>&1 || true
 
-    # Let DAD settle so the source address is usable.
-    sleep 2
+    # Let DAD settle so every address is usable: a sender will not source from
+    # a tentative address, and the forwarding path drops what it cannot source.
+    sleep 4
 
-    # Warm the attacker neighbour cache for the gateway (scapy reads lladdr).
+    # Warm the neighbour cache on every hop of the forward path, not only the
+    # first. The kernel reads the neighbour table for the next-hop MAC and an
+    # unresolved entry costs the packet that triggers the NS, so with five
+    # probes and a short capture the whole run can be lost on the agent's eth2
+    # hop while the client side looks perfectly configured - which reads as a
+    # transit link that never came up rather than as a cold cache:
+    #   * attacker -> agent gateway (eth1 ingress; scapy reads this lladdr)
+    #   * agent    -> backend       (eth2 egress, so the forwarded packet is
+    #                                L2-delivered instead of stalling on NS)
+    #   * backend  -> agent gateway (return-path symmetry)
     ssh -i "${AGENT_SSH_KEY%agent_key}attacker_key" \
         -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
         "vagrant@${ATTACKER_VM_IP}" "ping6 -c2 -W2 ${agent_gw_int} >/dev/null 2>&1" \
         >/dev/null 2>&1 || true
+    _agent_ssh_sudo ping6 -c2 -W2 "${backend_v6}" >/dev/null 2>&1 || true
+    _backend_ssh_sudo ping6 -c2 -W2 "${agent_gw_ext}" >/dev/null 2>&1 || true
 
     # Capture on the backend, then drive the probe (UDP dport 4546).
     local pcap="${DATA_DIR}/ipv6-forward.pcap"
-    ( capture_backend_ipv6 "${pcap}" 8 eth1 ) 3>&- &
+    ( capture_backend_ipv6 "${pcap}" 12 eth1 ) 3>&- &
     local cap_pid=$!
+
+    # Wait for the capture to actually be running rather than for a second of
+    # wall clock. The helper reaches the backend over SSH and the probe burst
+    # lasts about fifty milliseconds, so a tcpdump that starts a moment late
+    # misses the whole run and the test reads as a transit link that never came
+    # up. Poll for the process; fall through on the budget so a backend without
+    # pgrep degrades to the timed behaviour instead of failing here.
+    local cap_wait=0
+    while [ "$cap_wait" -lt 10 ]; do
+        _backend_ssh_sudo pgrep -x tcpdump >/dev/null 2>&1 && break
+        sleep 1
+        cap_wait=$((cap_wait + 1))
+    done
     sleep 1
 
     scapy_send_ipv6_via "${attacker_v6}" "${backend_v6}" 5 eth1 "${agent_gw_int}" \
