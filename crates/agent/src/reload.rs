@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,7 +7,7 @@ use adapters::auth::jwt_provider::JwtAuthProvider;
 use adapters::auth::oidc_provider::{self, OidcAuthProvider};
 use application::config_reload::ConfigReloadService;
 use infrastructure::config::AgentConfig;
-use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
+use notify::Watcher as _;
 use tokio::sync::{Mutex, Notify, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -46,6 +47,88 @@ impl EbpfMapHolder {
     }
 }
 
+/// How long a burst of file events is left to settle before the
+/// configuration is read. One save is several events - the write, the
+/// permissions set on it, the rename over the old file - and each of them
+/// deserves the same single reload.
+const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// Watch the configuration file and send one notification per change.
+///
+/// The watch is put on the directory holding the configuration rather than on
+/// the file itself, because a write here is an atomic replace: the API's own
+/// write stages a file and renames it over the configuration, and a watch on
+/// a file follows the inode that was replaced, so it would go deaf after the
+/// first change it reported. Every other name in that directory is dropped on
+/// the way in.
+///
+/// A read is never a change. The kernel reports opens as well as writes, and
+/// a reload opens the configuration to parse it, so a watcher reacting to
+/// every event reloads because it has just reloaded, for ever, at the pace of
+/// its own debounce. Access is excluded rather than a list of kinds being
+/// admitted, because a backend reporting a change as something this code has
+/// never heard of must still be heard.
+///
+/// A failure only disables the file-watch trigger - SIGHUP and API-driven
+/// reloads keep working - so it is logged rather than fatal. The returned
+/// watcher must be held for as long as events are wanted; dropping it stops
+/// them.
+fn watch_config_file(
+    config_path: &str,
+    notify_tx: mpsc::Sender<()>,
+) -> Option<notify::RecommendedWatcher> {
+    let watched_name: Option<OsString> = Path::new(config_path)
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string);
+    let watched_dir: PathBuf = Path::new(config_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+
+    let mut watcher =
+        match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            let Ok(event) = res else { return };
+            if matches!(event.kind, notify::EventKind::Access(_)) {
+                return;
+            }
+            let touched = event.paths.iter().any(|p| {
+                watched_name
+                    .as_deref()
+                    .is_some_and(|n| p.file_name() == Some(n))
+            });
+            if touched {
+                // A full channel already holds a reload nobody has run yet,
+                // so a dropped notification costs nothing. This runs on the
+                // watcher's own thread, which must never block.
+                let _ = notify_tx.try_send(());
+            }
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to create file watcher, file-driven hot-reload disabled"
+                );
+                return None;
+            }
+        };
+
+    match watcher.watch(&watched_dir, notify::RecursiveMode::NonRecursive) {
+        Ok(()) => {
+            tracing::info!(path = %config_path, "config file watcher started");
+            Some(watcher)
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %config_path,
+                error = %e,
+                "failed to watch config file, file-driven hot-reload disabled"
+            );
+            None
+        }
+    }
+}
+
 /// Spawn a background task that watches the config file for changes,
 /// listens for SIGHUP signals, and accepts API-triggered reloads via
 /// the `api_trigger` channel.
@@ -75,55 +158,13 @@ pub fn spawn_reload_task(
         // Channel for file watcher events → async task
         let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<()>(4);
 
-        // File watcher with 500ms debounce. A failure here only disables the
-        // file-watch trigger - SIGHUP and API-driven reloads keep working - so
-        // we log and continue rather than aborting the task. The debouncer is
-        // bound for the task's lifetime; dropping it would stop delivering
-        // events.
-        let tx_for_watcher = notify_tx.clone();
-        let _debouncer = match new_debouncer(
-            Duration::from_millis(500),
-            move |res: Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>| {
-                if let Ok(events) = res {
-                    for event in &events {
-                        if event.kind == DebouncedEventKind::Any {
-                            let _ = tx_for_watcher.blocking_send(());
-                            return; // one notification per batch is enough
-                        }
-                    }
-                }
-            },
-        ) {
-            Ok(mut d) => match d
-                .watcher()
-                .watch(Path::new(&config_path), notify::RecursiveMode::NonRecursive)
-            {
-                Ok(()) => {
-                    tracing::info!(path = %config_path, "config file watcher started");
-                    Some(d)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        path = %config_path,
-                        error = %e,
-                        "failed to watch config file, file-driven hot-reload disabled"
-                    );
-                    None
-                }
-            },
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "failed to create file watcher, file-driven hot-reload disabled"
-                );
-                None
-            }
-        };
+        let _watcher = watch_config_file(&config_path, notify_tx.clone());
         // Keep `notify_tx` alive so the watcher channel never closes (a closed
         // channel would make `notify_rx.recv()` return immediately and spin).
         let _notify_tx_keepalive = notify_tx;
 
         loop {
+            let mut from_watcher = false;
             #[cfg(unix)]
             {
                 tokio::select! {
@@ -132,7 +173,7 @@ pub fn spawn_reload_task(
                         break;
                     }
                     _ = notify_rx.recv() => {
-                        tracing::info!("config file change detected, reloading");
+                        from_watcher = true;
                     }
                     _ = sighup.recv() => {
                         tracing::info!("SIGHUP received, reloading configuration");
@@ -151,7 +192,7 @@ pub fn spawn_reload_task(
                         break;
                     }
                     _ = notify_rx.recv() => {
-                        tracing::info!("config file change detected, reloading");
+                        from_watcher = true;
                     }
                     _ = api_trigger.recv() => {
                         tracing::info!("API reload trigger received, reloading configuration");
@@ -162,6 +203,14 @@ pub fn spawn_reload_task(
             // If we broke out due to cancellation, don't reload
             if cancel_token.is_cancelled() {
                 break;
+            }
+
+            if from_watcher {
+                // Let the rest of the burst land, then take the whole of it
+                // as the one change it is.
+                tokio::time::sleep(WATCH_DEBOUNCE).await;
+                while notify_rx.try_recv().is_ok() {}
+                tracing::info!("config file change detected, reloading");
             }
 
             // 2-phase validation: serde (phase 1) then domain (phase 2)
