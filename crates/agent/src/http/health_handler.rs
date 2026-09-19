@@ -44,7 +44,12 @@ pub struct ReadyResponse {
 /// the agent stays up and `ebpf_loaded` stays true. Readiness has to look at
 /// the gap itself, or a host missing a helper would report ready while
 /// silently running without that program.
-fn missing_kernel_helpers() -> Vec<String> {
+///
+/// Public because the enterprise binary serves its own readiness probe off a
+/// router that has no OSS `AppState`, and two readings of the same cache would
+/// be two answers to one question.
+#[must_use]
+pub fn missing_kernel_helpers() -> Vec<String> {
     adapters::ebpf::cached_kernel_helpers().map_or_else(Vec::new, |report| {
         report
             .missing_required
@@ -87,7 +92,10 @@ pub async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// orchestrator's own program owns the interface, our attach loses, and without
 /// this the only signal is a 503 that looks identical to "the agent has not
 /// finished starting".
-fn blocked_attaches() -> Vec<String> {
+///
+/// Public for the same reason as [`missing_kernel_helpers`].
+#[must_use]
+pub fn blocked_attaches() -> Vec<String> {
     adapters::ebpf::blocked_attaches()
         .iter()
         .map(ToString::to_string)
