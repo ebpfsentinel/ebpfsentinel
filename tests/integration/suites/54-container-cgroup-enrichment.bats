@@ -166,7 +166,13 @@ _docker_available() {
 
 _docker_cmd() {
     if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
-        _agent_ssh_sudo docker "$@"
+        # ssh joins its argv with spaces and hands the result to a remote
+        # shell, so an argument carrying spaces, quotes or newlines - which is
+        # every `sh -c <script>` below - arrives as several words and the
+        # remote parse fails. Requote the whole command line here so the
+        # escaping survives that join and the remote shell rebuilds the same
+        # argv we were called with.
+        _agent_ssh_sudo "$(printf '%q ' docker "$@")"
     else
         docker "$@"
     fi
