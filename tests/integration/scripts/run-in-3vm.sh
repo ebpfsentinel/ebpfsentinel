@@ -114,6 +114,20 @@ if ! _backend_routes_via_agent; then
 fi
 
 echo "    OK"
+
+# `vagrant up` synchronises the rsync folders on its way past, so a lane that
+# boots the VMs always tests the working tree. A lane started with
+# --skip-provision boots nothing and therefore synchronises nothing: it runs
+# whatever was last copied onto the VMs, which is the worst kind of stale,
+# because an edit made since then is simply invisible and the run reports on
+# code nobody is looking at. Synchronise explicitly, every time.
+echo "=== Synchronising the working tree onto the VMs ==="
+if ! VAGRANT_3VM=1 vagrant rsync agent attacker backend; then
+    echo "ERROR: could not synchronise the working tree - the lane would test a stale copy." >&2
+    exit 1
+fi
+echo "    OK"
+
 cd "$INTEGRATION_DIR"
 
 # ── Build suite list ───────────────────────────────────────────────
