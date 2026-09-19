@@ -180,7 +180,7 @@ vagrant-ssh-attacker: ## SSH into the attacker VM
 	cd $(VAGRANT_DIR) && vagrant ssh attacker
 
 .PHONY: test-2vm
-test-2vm: vagrant-2vm-up ## Run all suites via 2-VM topology
+test-2vm: vagrant-2vm-up ## Run the two-machine suites via the 2-VM topology
 	$(SCRIPT_DIR)/run-in-2vm.sh --skip-provision
 
 .PHONY: test-2vm-suite

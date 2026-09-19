@@ -6,7 +6,8 @@
 # private network (192.168.56.0/24).
 #
 # Usage:
-#   ./run-in-2vm.sh                        # Run all suites
+#   ./run-in-2vm.sh                        # Run the two-machine suites
+#   ./run-in-2vm.sh --all                  # Every suite on disk, lane faults included
 #   ./run-in-2vm.sh --suite 11             # Run a single suite by number
 #   ./run-in-2vm.sh --ebpf                 # eBPF scenario suites only
 #   ./run-in-2vm.sh --performance          # Performance suites only
@@ -34,6 +35,7 @@ PERF_ONLY=false
 PERF_COMPARISON=false
 SKIP_PROVISION=false
 QUICK=false
+ALL_SUITES=false
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -42,6 +44,7 @@ while [ $# -gt 0 ]; do
         --performance) PERF_ONLY=true; shift ;;
         --perf-comparison) PERF_COMPARISON=true; shift ;;
         --skip-provision)  SKIP_PROVISION=true; shift ;;
+        --all)             ALL_SUITES=true; shift ;;
         --quick)       QUICK=true; shift ;;
         *)             echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -56,6 +59,37 @@ if [ "$SKIP_PROVISION" != "true" ]; then
 fi
 
 # ── Build suite list ───────────────────────────────────────────────
+list_2vm_suites() {
+    # Emit the suites that actually need a second machine.
+    #
+    # The list comes from the `attack_suites` section of coverage-matrix.yaml,
+    # which is the one part of that file keyed by suite rather than by feature:
+    # each row names a suite and the topology it is written for. The `coverage`
+    # section above it cannot answer this question, because a row there is a
+    # feature and its `suites` list spans every lane the feature is touched on.
+    #
+    # Running every suite here was the older behaviour and it was wrong for the
+    # same reason it was wrong on the transit lane: the local-lane suites drive
+    # traffic out of a network namespace the attacker VM does not have, so they
+    # fail on a lane fault that reads exactly like a product regression. `--all`
+    # is still there for a deliberate sweep.
+    #
+    # Performance suites stay behind --performance: the matrix tags perf/04 as
+    # two-machine, but it lives in tests/perf/ and is timed rather than asserted.
+    awk '
+        /^attack_suites:/ { inblk=1; next }
+        inblk && /^[a-z_]+:/ { inblk=0 }
+        inblk && /^[[:space:]]*-?[[:space:]]*suite:/ {
+            s=$NF; gsub(/[\042\047]/,"",s); last=s; next
+        }
+        inblk && /^[[:space:]]*topology:/ {
+            t=$NF; gsub(/[\042\047]/,"",t)
+            if (t=="2vm" && last!="" && last !~ /\//) print last
+            last=""
+        }
+    ' "${INTEGRATION_DIR}/coverage-matrix.yaml" | sort -u
+}
+
 build_suite_args() {
     if [ -n "$SUITE" ]; then
         # Single suite by number prefix
@@ -90,8 +124,26 @@ build_suite_args() {
         return
     fi
 
-    # All suites
-    ls "${SUITE_DIR}"/*.bats 2>/dev/null
+    if [ "$ALL_SUITES" = "true" ]; then
+        ls "${SUITE_DIR}"/*.bats 2>/dev/null
+        return
+    fi
+
+    # Default: the suites written for this topology.
+    local names paths
+    names="$(list_2vm_suites)"
+    if [ -z "$names" ]; then
+        echo "ERROR: No suite in coverage-matrix.yaml is tagged for the 2-VM topology" >&2
+        exit 1
+    fi
+    paths=""
+    while IFS= read -r n; do
+        [ -z "$n" ] && continue
+        local p
+        p="$(ls "${SUITE_DIR}/${n}"* 2>/dev/null | head -1)" || true
+        [ -n "$p" ] && paths="${paths} ${p}"
+    done <<< "$names"
+    echo "$paths"
 }
 
 # ── Performance comparison mode ────────────────────────────────────
