@@ -113,7 +113,7 @@ PY
         local rewritten="/tmp/ebpfsentinel-2vm-multiwan-$$.yaml"
         sed -e "s|/tmp/ebpfsentinel-test-data[^/]*|${_REMOTE_DATA_DIR}|g" \
             "${PREPARED_CONFIG}" >"${rewritten}"
-        _agent_scp "${rewritten}" "${remote_config}" 2>/dev/null || true
+        _agent_push_config "${rewritten}" "${remote_config}" 2>/dev/null || true
         rm -f "${rewritten}"
     fi
 }

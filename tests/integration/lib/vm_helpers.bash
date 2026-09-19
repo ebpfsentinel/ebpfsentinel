@@ -121,6 +121,26 @@ _agent_scp() {
         "$local_path" "vagrant@${AGENT_VM_IP}:${remote_path}"
 }
 
+# _agent_push_config <local_path> <remote_path>
+# Copy a configuration file to the agent and leave it with the ownership and
+# the mode the agent demands of one.
+#
+# scp lands a file owned by the login user under its umask, which is 0664 here,
+# and the agent refuses to load or reload a config it considers world-readable:
+#   "config file: ... is world-readable (mode 100664) - chmod 640 or stricter"
+# So a suite that rewrote a config mid-run and only scp'd it had every reload
+# rejected on the mode, which reads on the lane as the reload contract being
+# broken. The userns agent maps uid 0 only, so root has to own it as well.
+# start_ebpf_agent applies the same two rules to the config it starts with.
+_agent_push_config() {
+    local local_path="${1:?usage: _agent_push_config <local_path> <remote_path>}"
+    local remote_path="${2:?usage: _agent_push_config <local_path> <remote_path>}"
+
+    _agent_scp "$local_path" "$remote_path" || return 1
+    _agent_ssh_sudo chown root:root "$remote_path" 2>/dev/null || true
+    _agent_ssh_sudo chmod 640 "$remote_path" 2>/dev/null || true
+}
+
 # ── Skip guards (overrides) ──────────────────────────────────────
 
 # require_root - no-op in 2VM mode; root operations happen on agent VM via SSH

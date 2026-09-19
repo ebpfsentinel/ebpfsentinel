@@ -125,7 +125,7 @@ with open(sys.argv[1], 'w') as f:
         local rewritten="/tmp/ebpfsentinel-2vm-reload-$$.yaml"
         sed -e "s|/tmp/ebpfsentinel-test-data[^/]*|${_REMOTE_DATA_DIR}|g" \
             "$PREPARED_CONFIG" > "$rewritten"
-        _agent_scp "$rewritten" "$remote_config"
+        _agent_push_config "$rewritten" "$remote_config"
         rm -f "$rewritten"
     fi
 
@@ -179,7 +179,7 @@ with open(sys.argv[1], 'w') as f:
     # In 2VM mode, update the remote config
     if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
         local remote_config="${_REMOTE_CONFIG_DIR}/$(basename "$PREPARED_CONFIG")"
-        _agent_scp "$PREPARED_CONFIG" "$remote_config"
+        _agent_push_config "$PREPARED_CONFIG" "$remote_config"
     fi
 
     # Send SIGHUP with the corrupted config

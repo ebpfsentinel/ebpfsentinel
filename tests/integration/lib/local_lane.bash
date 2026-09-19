@@ -82,3 +82,15 @@ _agent_scp() {
         _agent_ssh_sudo cp -f "${src}" "${dest}"
     fi
 }
+
+# _agent_push_config <local_path> <remote_path> - copy a configuration file to
+# the agent host and leave it at the mode the agent demands of one: it refuses
+# to load or reload a config it considers world-readable. Same contract as the
+# two- and three-machine lanes, where the copy also crosses a user.
+_agent_push_config() {
+    local src="${1:?usage: _agent_push_config <local_path> <remote_path>}"
+    local dest="${2:?usage: _agent_push_config <local_path> <remote_path>}"
+
+    _agent_scp "${src}" "${dest}" || return 1
+    _agent_ssh_sudo chmod 640 "${dest}" 2>/dev/null || true
+}
