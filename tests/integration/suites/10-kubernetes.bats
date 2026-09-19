@@ -45,8 +45,19 @@ setup_file() {
         mk_force=(--force)
     fi
     if ! minikube status --format='{{.Host}}' 2>/dev/null | grep -q "Running"; then
+        reclaim_docker_residue
         if ! minikube start --driver=docker --cpus=2 --memory=2048 "${mk_force[@]}"; then
-            env_skip "minikube cluster could not start on this host"
+            # A profile left behind by an earlier lane is restarted rather than
+            # created, and a cluster whose container predates a Docker or kernel
+            # upgrade comes up without an apiserver - minikube waits six minutes
+            # for a process that never appears. That is residue of the harness,
+            # not a capability this host lacks, so it is cleared and tried once
+            # more. Only a start that fails on an empty profile is a real gate.
+            echo "# minikube start failed - deleting the profile and retrying" >&3
+            minikube delete --all &>/dev/null || true
+            if ! minikube start --driver=docker --cpus=2 --memory=2048 "${mk_force[@]}"; then
+                env_skip "minikube cluster could not start on this host"
+            fi
         fi
     fi
 

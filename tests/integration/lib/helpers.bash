@@ -431,6 +431,29 @@ stage_ebpf_objects() {
     return 0
 }
 
+# Give back the disk the lane's own Docker builds took, so a suite that needs
+# room to stand a cluster up is not defeated by the one that ran before it. The
+# build cache is the whole of it: a full lane leaves a couple of gigabytes of
+# layers nothing references, on a VM with a 31G rootfs, and a rootfs over ninety
+# percent full does not announce itself - kubelet refuses to place a pod under
+# disk pressure, so minikube waits out its timeout on an apiserver that never
+# appears and the suite reads that as a host with no Kubernetes on it. Only the
+# cache and the dangling layers go; a tagged image is either the agent under
+# test or a base somebody would have to pull again over the network.
+reclaim_docker_residue() {
+    local free_kb required_kb=6291456
+
+    command -v docker &>/dev/null || return 0
+    free_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+    [ -n "$free_kb" ] || return 0
+    [ "$free_kb" -ge "$required_kb" ] && return 0
+
+    echo "# Only $((free_kb / 1024))M free on / - reclaiming Docker build residue" >&3
+    docker builder prune -af &>/dev/null || true
+    docker image prune -f &>/dev/null || true
+    echo "# $(df -Ph / | awk 'NR==2 {print $4}') free on / after reclaim" >&3
+}
+
 # ── Cleanup helper ─────────────────────────────────────────────────
 
 cleanup_test_env() {
