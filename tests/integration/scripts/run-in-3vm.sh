@@ -132,27 +132,45 @@ cd "$INTEGRATION_DIR"
 
 # ── Build suite list ───────────────────────────────────────────────
 list_transit_suites() {
-    # Read coverage-matrix.yaml and emit suites whose topology field is 3vm.
-    # We rely on PyYAML being preinstalled on Ubuntu test runners; fall back
-    # to a grep heuristic if python3 is unavailable.
+    # Emit the suite numbers whose coverage-matrix row is tagged topology=3vm.
+    #
+    # The matrix holds two lists, and both carry transit rows: `coverage`, one
+    # row per eBPF program, CLI subcommand or domain module, keyed by `kind`
+    # and listing its suites under `suites`; and `attack_suites`, one row per
+    # attack-realism suite, naming a single suite under `suite`. An earlier
+    # version of this function read three top-level keys that the file has
+    # never had, so it silently produced nothing: --transit-only then died on
+    # "No suites tagged topology=3vm" and the default lane fell through to all
+    # sixty-five suites. Reading a key that does not exist must fail loudly
+    # rather than quietly, so the schema is checked before the rows are read.
     if command -v python3 >/dev/null 2>&1; then
-        python3 - <<PY
-import os, sys
+        python3 - <<PYEOF
+import sys
 try:
     import yaml
 except ImportError:
     sys.exit(2)
 with open("${COVERAGE_MATRIX}") as f:
     doc = yaml.safe_load(f)
+missing = [k for k in ("coverage", "attack_suites") if k not in doc]
+if missing:
+    sys.stderr.write(
+        "coverage-matrix.yaml has no %s section - the 3VM suite list cannot "
+        "be derived\n" % ", ".join(missing)
+    )
+    sys.exit(3)
 suites = set()
-for section in ("ebpf_programs", "cli_subcommands", "domain_modules"):
-    for row in doc.get(section, []) or []:
-        if row.get("topology") == "3vm":
-            for s in row.get("suites", []) or []:
-                suites.add(s)
+for row in doc.get("coverage") or []:
+    if row.get("topology") == "3vm":
+        for s in row.get("suites") or []:
+            if s != "TBD":
+                suites.add(str(s))
+for row in doc.get("attack_suites") or []:
+    if row.get("topology") == "3vm" and row.get("suite"):
+        suites.add(str(row["suite"]))
 for s in sorted(suites):
     print(s)
-PY
+PYEOF
         local rc=$?
         if [ "$rc" -eq 2 ]; then
             # PyYAML missing - fall through to grep heuristic
@@ -161,10 +179,25 @@ PY
             return $rc
         fi
     fi
-    # grep fallback: rows with "topology: 3vm" - only correct when each row
-    # lists exactly one suite (good enough for the transit suites).
-    awk '/topology: 3vm/{flag=1} flag && /- suites:/{getline; gsub(/[ \-]/,""); print; flag=0}' \
-        "${COVERAGE_MATRIX}" 2>/dev/null || true
+    # grep fallback: the row's suite list sits on the line before `topology`,
+    # as `suites: ["18", "24", "47"]` in `coverage` or `suite: "44"` in
+    # `attack_suites`, so keep the last one seen and emit it when the topology
+    # line says 3vm.
+    awk '
+        /^[[:space:]]*-?[[:space:]]*suites?:/ { last = $0 }
+        /^[[:space:]]*topology:/ {
+            if ($0 ~ /3vm/ && last != "") {
+                line = last
+                sub(/^[^:]*:/, "", line)
+                gsub(/[][",]/, " ", line)
+                n = split(line, parts, " ")
+                for (i = 1; i <= n; i++)
+                    if (parts[i] != "" && parts[i] != "TBD")
+                        print parts[i]
+            }
+            last = ""
+        }
+    ' "${COVERAGE_MATRIX}" 2>/dev/null | sort -u || true
 }
 
 # Emit suite numbers whose suite_profiles entry matches $PROFILE.
