@@ -76,6 +76,79 @@ _post_l7_rule() {
     api_post /api/v1/firewall/l7-rules "$1"
 }
 
+# ── Lane awareness ──────────────────────────────────────────────────
+#
+# EBPF_HOST_IP is the address the agent listens on: an address of this
+# machine on the local lane, and the agent VM on the two- and three-machine
+# lanes. Every listener in this suite has to be started where that address
+# lives, and every client has to be driven from the attacking side, which is
+# the test netns locally and this whole machine on the remote lanes. Binding
+# a listener here to an address this machine does not own leaves the client's
+# handshake unanswered, so no command segment ever reaches the L7 hook and the
+# suite reports a product failure for a lane fault.
+
+_l7_remote_lane() {
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || [ "${EBPF_3VM_MODE:-false}" = "true" ]
+}
+
+# _l7_client <command...>
+# Run a client tool on the attacking side of the wire.
+_l7_client() {
+    if _l7_remote_lane; then
+        "$@"
+    else
+        ip netns exec "${EBPF_TEST_NS}" "$@"
+    fi
+}
+
+# _l7_start_listener <port> [responder-script]
+# Start one TCP listener on the agent side of the wire: recv-only, or driven
+# by the responder script when one is given. Remote listeners are detached so
+# the SSH channel closes, and are reaped by _l7_stop_listeners.
+_l7_start_listener() {
+    local port="$1"
+    local responder="${2:-}"
+    if _l7_remote_lane; then
+        local remote_cmd
+        if [ -n "${responder}" ]; then
+            local remote_resp="/tmp/ebpfsentinel-l7-responder-${port}.sh"
+            _agent_scp "${responder}" "${remote_resp}" >/dev/null 2>&1 || return 1
+            _agent_ssh_sudo chmod +x "${remote_resp}" >/dev/null 2>&1 || true
+            remote_cmd="ncat -l ${EBPF_HOST_IP} ${port} -k --exec ${remote_resp}"
+        else
+            remote_cmd="ncat -l ${EBPF_HOST_IP} ${port} -k --recv-only"
+        fi
+        _agent_ssh_sudo "setsid nohup ${remote_cmd} >/dev/null 2>&1 </dev/null &" \
+            >/dev/null 2>&1 || return 1
+        _L7_REMOTE_PORTS="${_L7_REMOTE_PORTS:-} ${port}"
+    else
+        if [ -n "${responder}" ]; then
+            ncat -l "${EBPF_HOST_IP}" "${port}" -k --exec "${responder}" >/dev/null 2>&1 &
+        else
+            ncat -l "${EBPF_HOST_IP}" "${port}" -k --recv-only >/dev/null 2>&1 &
+        fi
+        _L7_LISTENER_PIDS="${_L7_LISTENER_PIDS:-} $!"
+    fi
+}
+
+# _l7_stop_listeners - stop every listener this test started, on whichever
+# side of the wire it was started.
+_l7_stop_listeners() {
+    local p port
+    # shellcheck disable=SC2086
+    for p in ${_L7_LISTENER_PIDS:-}; do kill "${p}" 2>/dev/null || true; done
+    _L7_LISTENER_PIDS=""
+    # shellcheck disable=SC2086
+    for port in ${_L7_REMOTE_PORTS:-}; do
+        # The trailing bracket expression matches one space in the listener's
+        # own command line and matches nothing in this pkill's, which carries
+        # the pattern literally and would otherwise have the shell running it
+        # killed along with the listener.
+        _agent_ssh_sudo "pkill -f 'ncat -l ${EBPF_HOST_IP} ${port}[ ]'" >/dev/null 2>&1 || true
+    done
+    _L7_REMOTE_PORTS=""
+}
+
 # ── Pre-loaded fixture rules round-trip ─────────────────────────────
 
 @test "L7 fixture rules expose SMTP/FTP/SMB matchers via REST" {
@@ -226,11 +299,9 @@ _post_l7_rule() {
 
     # Start three brief listeners - one per L7 hook port - so the TCP
     # handshake completes and the segment hits the L7 inspector path.
-    local pids=()
+    local port
     for port in 25 21 445; do
-        ip netns exec "${EBPF_TEST_NS}" \
-            ncat -l -p "${port}" -k --recv-only >/dev/null 2>&1 &
-        pids+=($!)
+        _l7_start_listener "${port}"
     done
     sleep 0.5
 
@@ -244,9 +315,7 @@ _post_l7_rule() {
 
     sleep 1
 
-    for p in "${pids[@]}"; do
-        kill "${p}" 2>/dev/null || true
-    done
+    _l7_stop_listeners
 
     # Agent must still answer /readyz with ebpf_loaded=true.
     local readyz
@@ -270,14 +339,11 @@ _post_l7_rule() {
 # handshake completes and its first command segment is transmitted on
 # the wire, where tc-ids ingress captures it. Echoes the listener PIDs.
 _l7_host_listeners() {
-    local pids=()
     local port
     for port in 25 21 445; do
-        ncat -l "${EBPF_HOST_IP}" "${port}" -k --recv-only >/dev/null 2>&1 &
-        pids+=($!)
+        _l7_start_listener "${port}"
     done
     sleep 0.5
-    echo "${pids[@]}"
 }
 
 # _drive_l7_commands - fire a genuine command per protocol from the test
@@ -294,7 +360,7 @@ _drive_l7_commands() {
         # "\xffSMB" magic + an SMB1 command header. The payload starts with
         # a NUL byte, which a bash variable cannot carry, so it is streamed
         # straight from printf into ncat (bypassing send_tcp_from_ns's echo).
-        ip netns exec "${EBPF_TEST_NS}" bash -c \
+        _l7_client bash -c \
             "printf '\\x00\\x00\\x00\\x55\\xffSMB\\x72\\x00\\x00\\x00\\x00\\x18\\x53\\xc8' \
              | timeout 2 ncat -w 2 ${EBPF_HOST_IP} 445" 2>/dev/null || true
     done
@@ -303,12 +369,9 @@ _drive_l7_commands() {
 @test "FTP PORT and SMB1 commands on the wire fire L7 deny alerts (component=l7)" {
     require_tool ncat
 
-    local pids
-    pids="$(_l7_host_listeners)"
+    _l7_host_listeners
     _drive_l7_commands
-
-    # shellcheck disable=SC2086
-    for p in ${pids}; do kill "${p}" 2>/dev/null || true; done
+    _l7_stop_listeners
 
     # FTP PORT deny -> component=l7 alert.
     wait_for_alert \
@@ -332,12 +395,9 @@ _drive_l7_commands() {
 @test "SMTP EHLO command is parsed and recorded on the L7 audit trail" {
     require_tool ncat
 
-    local pids
-    pids="$(_l7_host_listeners)"
+    _l7_host_listeners
     _drive_l7_commands
-
-    # shellcheck disable=SC2086
-    for p in ${pids}; do kill "${p}" 2>/dev/null || true; done
+    _l7_stop_listeners
 
     # The EHLO rule action is `log` -> no alert, but the L7 path audits
     # the decision under component=l7 / action=pass.
@@ -419,21 +479,20 @@ RESP
 
     local resp="${DATA_DIR}/smtp-responder.sh"
     _l7_write_smtp_responder "${resp}"
-    ncat -l "${EBPF_HOST_IP}" 25 -k --exec "${resp}" >/dev/null 2>&1 &
-    local pid=$!
+    _l7_start_listener 25 "${resp}"
     sleep 0.5
 
     # swaks speaks a full ESMTP dialogue; the EHLO crosses the L7 hook.
     local i
     for i in 1 2 3; do
-        ip netns exec "${EBPF_TEST_NS}" \
+        _l7_client \
             swaks --server "${EBPF_HOST_IP}:25" \
                 --helo probe.test \
                 --from probe@probe.test --to root@responder.test \
                 --timeout 4 >/dev/null 2>&1 || true
     done
 
-    kill "${pid}" 2>/dev/null || true
+    _l7_stop_listeners
 
     local count=0 attempt=0
     while [ "${attempt}" -lt 15 ]; do
@@ -457,20 +516,19 @@ RESP
 
     local resp="${DATA_DIR}/ftp-responder.sh"
     _l7_write_ftp_responder "${resp}"
-    ncat -l "${EBPF_HOST_IP}" 21 -k --exec "${resp}" >/dev/null 2>&1 &
-    local pid=$!
+    _l7_start_listener 21 "${resp}"
     sleep 0.5
 
     # Active mode (passive off) makes lftp issue PORT before the listing.
     local i
     for i in 1 2 3; do
-        ip netns exec "${EBPF_TEST_NS}" \
+        _l7_client \
             lftp -u probe,probe -e \
                 'set ftp:passive-mode false; set net:timeout 3; set net:max-retries 1; cd /; ls; bye' \
                 "${EBPF_HOST_IP}" >/dev/null 2>&1 || true
     done
 
-    kill "${pid}" 2>/dev/null || true
+    _l7_stop_listeners
 
     wait_for_alert \
         '.[] | select(.rule_id == "l7-ftp-port-deny" and .component == "l7")' \
@@ -487,21 +545,20 @@ RESP
 
     # SMB direct-TCP (445): the client speaks first, so a recv-only listener
     # completes the handshake and the negotiate crosses the L7 hook.
-    ncat -l "${EBPF_HOST_IP}" 445 -k --recv-only >/dev/null 2>&1 &
-    local pid=$!
+    _l7_start_listener 445
     sleep 0.5
 
     # Force SMB1 (NT1) so the negotiate matches the SMB1 deny rule.
     local i
     for i in 1 2 3; do
-        ip netns exec "${EBPF_TEST_NS}" \
+        _l7_client \
             smbclient -N -L "//${EBPF_HOST_IP}" -p 445 \
                 --option='client min protocol=NT1' \
                 --option='client max protocol=NT1' \
                 --socket-options='TCP_NODELAY' >/dev/null 2>&1 || true
     done
 
-    kill "${pid}" 2>/dev/null || true
+    _l7_stop_listeners
 
     wait_for_alert \
         '.[] | select(.rule_id == "l7-smb-smb1-deny" and .component == "l7")' \
