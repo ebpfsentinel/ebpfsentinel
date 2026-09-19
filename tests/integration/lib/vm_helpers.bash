@@ -105,7 +105,15 @@ _agent_scp() {
     # stale destination file first.
     local remote_dir
     remote_dir="$(dirname "$remote_path")"
-    _agent_ssh_sudo "mkdir -p '$remote_dir' && chown vagrant: '$remote_dir' && rm -f '$remote_path'" 2>/dev/null || true
+    # One sudo per command: _agent_ssh_sudo runs `sudo "$@"`, so a single
+    # string joined with && puts only the first command under sudo and leaves
+    # the rest running as the login user. That is how this call silently did
+    # nothing but the mkdir: the chown and the rm hit a root-owned directory,
+    # failed, and left the previous run's root-owned 0640 config in place for
+    # scp to be refused on.
+    _agent_ssh_sudo mkdir -p "$remote_dir" 2>/dev/null || true
+    _agent_ssh_sudo chown vagrant: "$remote_dir" 2>/dev/null || true
+    _agent_ssh_sudo rm -f "$remote_path" 2>/dev/null || true
 
     scp -i "${AGENT_SSH_KEY}" \
         -o StrictHostKeyChecking=no \
