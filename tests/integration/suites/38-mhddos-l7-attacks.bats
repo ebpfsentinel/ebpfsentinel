@@ -80,6 +80,111 @@ teardown_file() {
 
 teardown() {
     stop_mhddos 2>/dev/null || true
+    _clear_auto_blacklist
+}
+
+# -- Reading the agent from the agent ---------------------------------
+#
+# The flood leaves from the host running these tests, and the suite exists to
+# get that host auto-blacklisted: the moment the entry lands, every packet this
+# VM sends to the API port is dropped at the datapath. A reading taken from
+# here after the attack therefore answers nothing at all, which the shared
+# assertion reports as a counter that did not move - the wrong diagnosis, and
+# the one the first method escapes only because the entry is not installed yet
+# when it reads. The fixture whitelists 127.0.0.0/8 so the agent stays readable
+# from its own loopback whatever it decided about this VM, and that is where
+# these readings are taken. _agent_ssh is the lane-agnostic way there: a real
+# SSH hop on the 2-VM lane, a plain local call on the agent-local one.
+
+# _agent_api_get <path> - GET a path on the agent over its own loopback.
+#
+# The hop that carries the reading is still the wire the flood just came down,
+# so the call is given a deadline of its own: a session the datapath has stopped
+# answering costs ten seconds and is retried rather than holding the poll below
+# open for as long as ssh is willing to wait.
+_agent_api_get() {
+    local path="${1:?usage: _agent_api_get <path>}"
+    timeout 10 $AGENT_SSH_CMD -- curl -sf --max-time 5 \
+        "http://127.0.0.1:${AGENT_HTTP_PORT}${path}" 2>/dev/null
+}
+
+# _agent_metric_value <metric> <label> - one labelled counter, read there.
+_agent_metric_value() {
+    local key="${1}${2}"
+    _agent_api_get /metrics | awk -v key="$key" '$1 == key { print $2; exit }'
+}
+
+# _assert_agent_metric_increased <metric> <before> <label>
+# Polls the agent's own exposition until the deadline and asserts growth.
+#
+# The budget is wall clock rather than a number of attempts, because the two
+# methods that hold their connections open leave this host dropped long enough
+# that a read costs whole seconds instead of returning at once - counting
+# attempts then spends the whole allowance on three of them and reports a
+# counter that never moved when what happened is that nothing was ever read.
+# The counter itself only ever rises, so the only question is whether the poll
+# outlives the mitigation the flood earned.
+_assert_agent_metric_increased() {
+    local metric="$1"
+    local before="$2"
+    local label="$3"
+    local deadline=$((SECONDS + ${AGENT_READ_BUDGET_SECS:-150}))
+    local value=""
+
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        value="$(_agent_metric_value "$metric" "$label")"
+        if [ -n "$value" ] && \
+           [ "$(echo "$value > $before" | bc -l 2>/dev/null)" = "1" ]; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "Metric ${metric}${label} did not grow from ${before} (last=${value:-<none>})" >&2
+    return 1
+}
+
+# _assert_agent_ip_blacklisted <ip> - same poll, read over the loopback.
+_assert_agent_ip_blacklisted() {
+    local ip="${1:?usage: _assert_agent_ip_blacklisted <ip>}"
+    local deadline=$((SECONDS + ${AGENT_READ_BUDGET_SECS:-150}))
+
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        local hit
+        hit="$(_agent_api_get /api/v1/ips/blacklist \
+            | jq -r --arg ip "$ip" \
+                '.[]? | select(.ip == $ip or .source_ip == $ip or .src_ip == $ip)
+                      | .ip // .source_ip // .src_ip' 2>/dev/null | head -1)"
+        if [ -n "$hit" ] && [ "$hit" != "null" ]; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "IP ${ip} not present in the agent's IPS blacklist within the read budget" >&2
+    return 1
+}
+
+# _clear_auto_blacklist - drop the entry this suite's own flood installed.
+#
+# max_blacklist_duration_secs is 300 s in the fixture, which outlives the whole
+# suite, so the entry left by one method is still in force while the next one
+# runs. This does not restore the rate limiter's view of the source - the
+# detector puts the entry straight back, which is why the methods after the
+# first assert the firewall instead - but it does keep the API reachable from
+# this VM between tests, which is where the readings and the nuclei scan come
+# from.
+_clear_auto_blacklist() {
+    [ -n "${ATTACKER_IP:-}" ] || return 0
+    local deadline=$((SECONDS + ${AGENT_READ_BUDGET_SECS:-150}))
+
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if timeout 10 $AGENT_SSH_CMD -- curl -sf -X DELETE --max-time 5 \
+            "http://127.0.0.1:${AGENT_HTTP_PORT}/api/v1/ips/blacklist/${ATTACKER_IP}" \
+            >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 0
 }
 
 # ── Shared per-method assertions ──────────────────────────────────────
@@ -96,7 +201,7 @@ _run_attack_and_assert() {
     local path="${4:-/}"
 
     local before
-    before="$(get_metrics_value "$metric" "$label" || echo "0")"
+    before="$(_agent_metric_value "$metric" "$label")"
     [ -z "$before" ] && before="0"
 
     # Background MHDDoS, foreground latency probes.
@@ -110,21 +215,43 @@ _run_attack_and_assert() {
     wait "${MHDDOS_PID:-0}" 2>/dev/null || true
     stop_mhddos
 
-    # Deterministic datapath reaction: the flood is rate-limit dropped and the
-    # source is auto-blacklisted. DoS-alert emission for rate-limited L7 floods
+    # Deterministic datapath reaction: the flood is dropped by the stage the
+    # caller named, and the source is auto-blacklisted. DoS-alert emission for
+    # rate-limited L7 floods
     # is opportunistic (the volumetric detector does not fire on every run), so
     # MITRE-tag coverage is asserted once, suite-wide, by the dedicated test
     # below rather than per method.
-    assert_metric_increased "$metric" "$before" 1 "$label"
-    assert_ip_blacklisted "$ATTACKER_IP"
+    _assert_agent_metric_increased "$metric" "$before" "$label"
+    _assert_agent_ip_blacklisted "$ATTACKER_IP"
 }
 
-# All MHDDoS methods flood above the configured rate-limit threshold, so the
-# kernel rate-limiter drop counter is the reliable signal that the agent
-# reacted. Exposed as ebpfsentinel_packets_total{interface="ratelimit",
-# action="drop"}.
+# Which counter a method moves is decided by the order the methods run in,
+# not by the method. The datapath asks the firewall before it asks the rate
+# limiter, so an entry in the blacklist ends the rate limiter's involvement:
+# the packets are gone a stage earlier and the token bucket is never consulted.
+#
+# The first flood therefore meets an agent that has just started and a source
+# nothing has ever been decided about, and it meets the bucket immediately -
+# two hundred packets a second with a burst of four hundred, against ten
+# threads opening fresh connections. The IPS needs three detections of fifty
+# packets inside a ten-second window before it writes the entry, so the rate
+# limiter has already been dropping for tens of seconds by the time the source
+# is blacklisted. That first method is the one that can assert the bucket.
+#
+# Every method after it starts from a source the previous flood got
+# blacklisted, and the entry outlives the suite - max_blacklist_duration_secs
+# is three hundred seconds in the fixture. Deleting it between methods does not
+# help, and was tried: the detector's window is still full of the last flood,
+# so the entry is back before the next one has sent anything, and a run that
+# happens to win the race measures seventy-three rate-limiter drops where the
+# next one measures none. What those methods do move, by tens of thousands of
+# packets and on every run, is the firewall. So they assert that, which is the
+# true statement about them: the datapath dropped the flood.
 _RL_METRIC="ebpfsentinel_packets_total"
 _RL_LABEL='{interface="ratelimit",action="drop"}'
+
+_FW_METRIC="ebpfsentinel_packets_total"
+_FW_LABEL='{interface="FIREWALL_METRICS",action="dropped"}'
 
 # ── Per-method tests ──────────────────────────────────────────────────
 
@@ -132,20 +259,20 @@ _RL_LABEL='{interface="ratelimit",action="drop"}'
     _run_attack_and_assert GET "$_RL_METRIC" "$_RL_LABEL" "/"
 }
 
-@test "MHDDoS POST flood is rate-limited at the kernel datapath" {
-    _run_attack_and_assert POST "$_RL_METRIC" "$_RL_LABEL" "/login"
+@test "MHDDoS POST flood is dropped at the kernel datapath" {
+    _run_attack_and_assert POST "$_FW_METRIC" "$_FW_LABEL" "/login"
 }
 
-@test "MHDDoS STRESS (persistent conn) exhausts rate limit tokens" {
-    _run_attack_and_assert STRESS "$_RL_METRIC" "$_RL_LABEL" "/"
+@test "MHDDoS STRESS (persistent conn) flood is dropped at the kernel datapath" {
+    _run_attack_and_assert STRESS "$_FW_METRIC" "$_FW_LABEL" "/"
 }
 
-@test "MHDDoS BYPASS flood is rate-limited at the kernel datapath" {
-    _run_attack_and_assert BYPASS "$_RL_METRIC" "$_RL_LABEL" "/"
+@test "MHDDoS BYPASS flood over TLS is dropped at the kernel datapath" {
+    _run_attack_and_assert BYPASS "$_FW_METRIC" "$_FW_LABEL" "/"
 }
 
-@test "MHDDoS OVH volumetric flood is rate-limited at the kernel datapath" {
-    _run_attack_and_assert OVH "$_RL_METRIC" "$_RL_LABEL" "/"
+@test "MHDDoS OVH volumetric flood is dropped at the kernel datapath" {
+    _run_attack_and_assert OVH "$_FW_METRIC" "$_FW_LABEL" "/"
 }
 
 # The TLS, CFB and SLOW attack modes are deliberately absent from the list
