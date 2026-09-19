@@ -40,9 +40,21 @@ PROBE_PORT=65501
 
 # Spawn a re-listening TCP server inside the test netns so every container
 # connection to ${EBPF_NS_IP}:${PROBE_PORT} is accepted and replied to.
+# True on a lane where the traffic peer is a machine of its own rather than a
+# namespace of this one. There, ${EBPF_NS_IP} is the attacking VM's own address
+# and the test namespace does not exist, so a listener wrapped in `ip netns
+# exec` starts nowhere and every probe connection is refused.
+_probe_remote_lane() {
+    [ "${EBPF_2VM_MODE:-false}" = "true" ] || [ "${EBPF_3VM_MODE:-false}" = "true" ]
+}
+
 _start_probe_listener() {
-    ip netns exec "${EBPF_TEST_NS}" sh -c \
-        "while true; do nc -l -p ${PROBE_PORT} -w 2 >/dev/null 2>&1 || sleep 0.2; done" &
+    if _probe_remote_lane; then
+        sh -c "while true; do nc -l -p ${PROBE_PORT} -w 2 >/dev/null 2>&1 || sleep 0.2; done" &
+    else
+        ip netns exec "${EBPF_TEST_NS}" sh -c \
+            "while true; do nc -l -p ${PROBE_PORT} -w 2 >/dev/null 2>&1 || sleep 0.2; done" &
+    fi
     PROBE_LISTENER_PID=$!
     export PROBE_LISTENER_PID
 }
@@ -52,8 +64,12 @@ _stop_probe_listener() {
         kill "${PROBE_LISTENER_PID}" 2>/dev/null || true
         pkill -P "${PROBE_LISTENER_PID}" 2>/dev/null || true
     fi
-    # Belt-and-braces: clear any stray netns listener.
-    ip netns exec "${EBPF_TEST_NS}" pkill -f "nc -l -p ${PROBE_PORT}" 2>/dev/null || true
+    # Belt-and-braces: clear any stray listener left behind.
+    if _probe_remote_lane; then
+        pkill -f "nc -l -p ${PROBE_PORT}" 2>/dev/null || true
+    else
+        ip netns exec "${EBPF_TEST_NS}" pkill -f "nc -l -p ${PROBE_PORT}" 2>/dev/null || true
+    fi
 }
 
 # ── Tenant cgroup map (datapath mechanism) ──────────────────────────
@@ -93,25 +109,52 @@ _tenant_cgroup_map_id() {
 # Attribution reads the cgroup v2 id of the emitting task. A host running the
 # legacy v1 hierarchy exposes no unified controller file and has no such id, so
 # nothing downstream can be attributed - the only genuine environment gap here.
+# Every cgroup call here goes through the agent-host helpers rather than
+# straight to this filesystem. The cgroup whose id the datapath resolves is the
+# one the emitting task lives in, and the task has to be on the machine tc-ids
+# is attached to: on a two- or three-machine lane the suite itself runs on the
+# attacking VM, so asking this filesystem asked the wrong kernel - the guard
+# below reported "no unified hierarchy" about a host that runs no agent, and the
+# three datapath tests skipped for it. `_agent_ssh_sudo` is the identity on the
+# single-machine lane, so the same text means the same thing on all three.
+_agent_sh() {
+    _agent_ssh_sudo "$(printf '%q ' sh -c "$1")"
+}
+
+_agent_has_cgroup_v2() {
+    _agent_ssh_sudo test -f /sys/fs/cgroup/cgroup.controllers
+}
+
 _require_cgroup_v2() {
-    [ -f /sys/fs/cgroup/cgroup.controllers ] ||
+    _agent_has_cgroup_v2 ||
         env_skip "cgroup v2 unified hierarchy not mounted"
 }
 
 _probe_cgroup_id() {
-    [ -f /sys/fs/cgroup/cgroup.controllers ] || return 1
-    mkdir -p "${TENANT_CGROUP_DIR}" 2>/dev/null || return 1
-    stat -c %i "${TENANT_CGROUP_DIR}" 2>/dev/null
+    _agent_has_cgroup_v2 || return 1
+    _agent_ssh_sudo mkdir -p "${TENANT_CGROUP_DIR}" 2>/dev/null || return 1
+    _agent_ssh_sudo stat -c %i "${TENANT_CGROUP_DIR}" 2>/dev/null
 }
 
-# Dial the probe port a few times from inside the probe cgroup. The request
-# leg leaves through the inspected veth on egress, where the sending task is
-# still current, so tc-ids can read its cgroup.
+# Recreate the probe cgroup and echo the id the kernel just handed out: the
+# inode is not preserved across a destroy, and only the live one is the one the
+# probe traffic will carry.
+_recreate_probe_cgroup() {
+    _agent_ssh_sudo mkdir -p "${TENANT_CGROUP_DIR}" 2>/dev/null || return 1
+    _agent_ssh_sudo stat -c %i "${TENANT_CGROUP_DIR}" 2>/dev/null
+}
+
+_remove_probe_cgroup() {
+    _agent_ssh_sudo rmdir "${TENANT_CGROUP_DIR}" 2>/dev/null || true
+}
+
+# Dial the probe port a few times from inside the probe cgroup, on the agent
+# host. The request leg leaves through the inspected interface on egress, where
+# the sending task is still current, so tc-ids can read its cgroup.
 _probe_from_cgroup() {
     local i
     for i in 1 2 3 4 5; do
-        sh -c "echo \$\$ > '${TENANT_CGROUP_DIR}/cgroup.procs' 2>/dev/null || exit 0
-               (echo probe; sleep 0.1) | nc -w 1 '${EBPF_NS_IP}' '${PROBE_PORT}' >/dev/null 2>&1 || true" || true
+        _agent_sh "echo \$\$ > '${TENANT_CGROUP_DIR}/cgroup.procs' 2>/dev/null || exit 0; (echo probe; sleep 0.1) | nc -w 1 '${EBPF_NS_IP}' '${PROBE_PORT}' >/dev/null 2>&1 || true" || true
     done
 }
 
@@ -151,7 +194,7 @@ _tenant_cgroup_cleanup() {
         # shellcheck disable=SC2046  # the hex bytes must expand to separate args
         bpftool map delete id "${map_id}" key hex $(_le_hex "${cgroup_id}" 8) >/dev/null 2>&1 || true
     fi
-    rmdir "${TENANT_CGROUP_DIR}" 2>/dev/null || true
+    _remove_probe_cgroup
 }
 
 # ── Docker availability ─────────────────────────────────────────────
@@ -216,7 +259,7 @@ teardown_file() {
         _docker_cmd rm -f "ebpfsentinel-cgroup-probe-$$" >/dev/null 2>&1 || true
     fi
     _stop_probe_listener 2>/dev/null || true
-    rmdir "${TENANT_CGROUP_DIR}" 2>/dev/null || true
+    _remove_probe_cgroup
     stop_ebpf_agent 2>/dev/null || true
     destroy_test_netns 2>/dev/null || true
     rm -rf "${DATA_DIR:-/tmp/ebpfsentinel-test-data-container-$$}"
@@ -438,13 +481,13 @@ teardown_file() {
     # would attribute the next container's traffic to the wrong tenant. The
     # removal path is what keeps that from happening.
     _tenant_cgroup_cleanup "${map_id}" "${cgroup_id}"
-    mkdir -p "${TENANT_CGROUP_DIR}"
 
     # A cleanup that quietly failed would make the rest of this test assert
     # nothing, so prove the entry is gone before drawing any conclusion from
     # the counter. Re-read the id: recreating the directory can hand out a
     # different inode, and only the live one is what the probe will use.
-    cgroup_id="$(stat -c %i "${TENANT_CGROUP_DIR}")"
+    cgroup_id="$(_recreate_probe_cgroup)"
+    [ -n "${cgroup_id}" ]
     _tenant_cgroup_cleanup "${map_id}" "${cgroup_id}"
     # shellcheck disable=SC2046
     run bpftool map lookup id "${map_id}" key hex $(_le_hex "${cgroup_id}" 8)
@@ -467,7 +510,7 @@ teardown_file() {
     local after
     after="$(_cgroup_resolved_count)"
 
-    rmdir "${TENANT_CGROUP_DIR}" 2>/dev/null || true
+    _remove_probe_cgroup
 
     if [ "${after%%.*}" -ne "${before%%.*}" ]; then
         echo "tenant resolved from an unmapped cgroup (${before} → ${after})" >&2
