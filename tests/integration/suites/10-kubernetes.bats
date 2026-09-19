@@ -20,6 +20,19 @@ setup_file() {
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"
 
+    # minikube takes its inter-process locks in $TMPDIR, named after the
+    # operation rather than after the user, and this suite runs as root while
+    # the provisioner warmed the cluster as the login user. With
+    # fs.protected_regular on, which is the default, the second user cannot
+    # open the first one's lock file in a sticky directory and the run dies on
+    # HOST_JUJU_LOCK_PERMISSION - a stale file from the previous lane, not a
+    # product fault. Giving each user its own lock directory outside /tmp keeps
+    # the locking and drops the collision.
+    TMPDIR="/var/tmp/ebpfsentinel-minikube-$(id -u)"
+    export TMPDIR
+    mkdir -p "$TMPDIR"
+    chmod 700 "$TMPDIR"
+
     # Start minikube if not running. A cluster that refuses to come up (no
     # nested virtualisation, no usable driver) is a missing capability, not a
     # product regression - gate on it instead of failing setup opaquely.
