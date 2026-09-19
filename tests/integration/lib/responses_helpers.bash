@@ -58,6 +58,19 @@ response_remaining_secs() {
         '.actions[] | select(.id == $id) | .remaining_secs // empty'
 }
 
+# response_action_type <id>
+#
+# Echo the action_type field for response <id> from GET /api/v1/responses,
+# or empty string if no such id exists. The listing spells an action the way
+# the request that created it did, so this is the spelling the caller sent.
+response_action_type() {
+    local id="${1:?usage: response_action_type <id>}"
+    local body
+    body="$(list_responses)" || return 1
+    echo "${body}" | jq -r --arg id "${id}" \
+        '.actions[] | select(.id == $id) | .action_type // empty'
+}
+
 # response_present <id>
 #
 # Echo "1" when /api/v1/responses lists <id>, "0" otherwise.

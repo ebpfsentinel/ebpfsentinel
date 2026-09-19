@@ -124,10 +124,13 @@ teardown_file() {
 @test "Zone CRUD - create and delete" {
     require_root
 
-    # Create a new zone
+    # Create a new zone. The API is held to the rules the configuration
+    # loader applies: a zone carries at least one interface, and an
+    # interface no other zone already claims - the fixture holds the test
+    # link and dummy0, so this one names a link of its own.
     local create_body
     create_body="$(api_post /api/v1/zones \
-        '{"name":"test-crud-zone","description":"Integration test zone","subnets":["10.99.0.0/24"],"enabled":true}')"
+        '{"name":"test-crud-zone","interfaces":["dummy-crud0"],"default_policy":"deny"}')"
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
@@ -236,10 +239,19 @@ teardown_file() {
 @test "Zone policy CRUD - create and delete" {
     require_root
 
-    # Create a new inter-zone policy
+    # A policy is keyed on the pair it decides, so writing one over a pair
+    # the fixture already holds would replace that fixture policy and
+    # deleting it would leave the pair undecided for the rest of the suite.
+    # The test brings its own zone, pairs it with `internal`, and takes both
+    # away again.
+    api_post /api/v1/zones \
+        '{"name":"test-policy-zone","interfaces":["dummy-pol0"],"default_policy":"deny"}' >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+
     local create_body
     create_body="$(api_post /api/v1/zones/policies \
-        '{"name":"test-crud-policy","source_zone":"external","dest_zone":"internal","action":"alert","priority":99,"enabled":true}')"
+        '{"source_zone":"internal","dest_zone":"test-policy-zone","action":"deny"}')"
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
@@ -248,6 +260,13 @@ teardown_file() {
     policy_id="$(echo "$create_body" | jq -r '.id // .policy_id' 2>/dev/null)" || true
     [ -n "$policy_id" ]
     [ "$policy_id" != "null" ]
+    [ "$policy_id" = "internal__test-policy-zone" ]
+
+    # The policy reads back in the vocabulary it was written in.
+    echo "$create_body" | jq -e '.policy == "deny" and .action == "deny"' >/dev/null || {
+        echo "policy did not read back as written: ${create_body}" >&2
+        return 1
+    }
 
     # Verify the policy appears in the list
     local list_body
@@ -259,12 +278,41 @@ teardown_file() {
     found="$(echo "$list_body" | jq "[if type == \"array\" then .[] else (.policies // [])[] end | select(.id == \"$policy_id\" or .policy_id == \"$policy_id\")] | length" 2>/dev/null)" || found=0
     [ "${found:-0}" -ge 1 ]
 
-    # Delete the created policy
-    local delete_body
-    delete_body="$(api_delete "/api/v1/zones/policies/${policy_id}")"
+    # Delete the created policy, then the zone it was written for
+    api_delete "/api/v1/zones/policies/${policy_id}" >/dev/null
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ]
+
+    api_delete /api/v1/zones/test-policy-zone >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ]
+}
+
+@test "Zone policy with a word outside the vocabulary is refused" {
+    require_root
+
+    # `alert` is an IDS word, not a zone policy: the API reads the same
+    # vocabulary the configuration loader reads, so an unknown word is a
+    # refusal rather than a policy that silently denies.
+    local body
+    body="$(api_post /api/v1/zones/policies \
+        '{"name":"test-bad-policy","source_zone":"external","dest_zone":"internal","action":"alert","priority":98,"enabled":true}')"
+    _load_http_status
+
+    [ "$HTTP_STATUS" = "400" ] || {
+        echo "an unknown policy word returned HTTP ${HTTP_STATUS}: ${body}" >&2
+        # Do not leave a policy behind if the agent accepted it after all.
+        local stray
+        stray="$(echo "${body}" | jq -r '.id // .policy_id // empty' 2>/dev/null)" || true
+        [ -n "${stray}" ] && api_delete "/api/v1/zones/policies/${stray}" >/dev/null 2>&1
+        return 1
+    }
+
+    echo "${body}" | jq -e '.error.code == "ZONE_INVALID" or .code == "ZONE_INVALID"' >/dev/null || {
+        echo "refusal did not name ZONE_INVALID: ${body}" >&2
+        return 1
+    }
 }
 
 # ── Per-zone datapath counters ─────────────────────────────────────

@@ -75,6 +75,16 @@ teardown_file() {
         return 1
     }
 
+    # The listing answers the action in the spelling the request carried,
+    # so a caller filtering its own entries back out matches on one word.
+    local spelling
+    spelling="$(response_action_type "${id}")"
+    [ "${spelling}" = "block_ip" ] || {
+        echo "listing spells the action '${spelling}', not 'block_ip'" >&2
+        list_responses >&2
+        return 1
+    }
+
     local remaining
     remaining="$(response_remaining_secs "${id}")"
     [ -n "${remaining}" ] || {

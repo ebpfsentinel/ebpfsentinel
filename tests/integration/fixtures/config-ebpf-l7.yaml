@@ -11,6 +11,16 @@ agent:
   grpc_port: 50051
   metrics_port: 9090
 
+# An L7 rule may name an alias instead of a literal criterion. Until the
+# alias service has loaded, such a rule carries no criterion at all, which
+# is a rule matching every address there is rather than one waiting to be
+# resolved - so the suite reads the rule back and asserts the literal.
+aliases:
+  l7-test-alias-ports:
+    type: port_set
+    values:
+      - 8890
+
 firewall:
   enabled: true
   default_policy: pass
@@ -55,6 +65,13 @@ l7:
       action: allow
       protocol: http
       path: "/api"
+      enabled: true
+    - id: l7-test-alias-port
+      priority: 15
+      action: deny
+      protocol: http
+      path: "/aliased"
+      dst_port_alias: l7-test-alias-ports
       enabled: true
     - id: l7-test-deny-malware-sni
       priority: 10

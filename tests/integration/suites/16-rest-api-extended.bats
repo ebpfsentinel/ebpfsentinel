@@ -258,6 +258,88 @@ teardown_file() {
     assert_http_status "200" "$HTTP_STATUS"
 }
 
+# ── Writing one section back ──────────────────────────────────────
+
+@test "Ops: PUT config section writes a section back and reloads" {
+    # What a configuration screen does: render one section, let somebody
+    # edit it, put the same document back. The fixture turns the route on
+    # with `agent.config_writes: allowed`; it is refused everywhere else.
+    local body
+    body="$(api_put /api/v1/config/conntrack \
+        '{"yaml":"conntrack:\n  enabled: true\n"}' --max-time 30)"
+    assert_http_status "200" "$HTTP_STATUS"
+
+    # The answer is the reload's, because a section written and not applied
+    # is a file nobody is running.
+    echo "$body" | jq -e '.status != null and .message != null' >/dev/null || {
+        echo "PUT config section did not answer a reload: ${body}" >&2
+        return 1
+    }
+
+    # The merge replaced one section and left the rest of the document
+    # alone, which is what the running configuration says afterwards.
+    body="$(api_get /api/v1/config)"
+    assert_http_status "200" "$HTTP_STATUS"
+    echo "$body" | jq -e '.conntrack.enabled == true and .firewall.enabled == true
+                          and (.firewall.rules | length) >= 1' >/dev/null || {
+        echo "the rest of the configuration did not survive the write: ${body}" >&2
+        return 1
+    }
+}
+
+@test "Ops: PUT config section refuses a document that is not YAML" {
+    local body
+    body="$(api_put /api/v1/config/conntrack '{"yaml":"conntrack: [unterminated"}')"
+    assert_http_status "400" "$HTTP_STATUS"
+    echo "$body" | jq -e '.error.code == "INVALID_YAML"' >/dev/null || {
+        echo "expected INVALID_YAML: ${body}" >&2
+        return 1
+    }
+}
+
+@test "Ops: PUT config section refuses a document that does not carry the section" {
+    # A screen that posted the wrong key would otherwise write a section
+    # nobody edited, or nothing at all with a 200 on it.
+    local body
+    body="$(api_put /api/v1/config/conntrack '{"yaml":"nat:\n  enabled: true\n"}')"
+    assert_http_status "400" "$HTTP_STATUS"
+    echo "$body" | jq -e '.error.code == "SECTION_MISSING"' >/dev/null || {
+        echo "expected SECTION_MISSING: ${body}" >&2
+        return 1
+    }
+}
+
+@test "Ops: PUT config section refuses a section name outside the shape it allows" {
+    # The name is spliced into a walk down the document and echoed back in
+    # errors, so it is held to a shape rather than trusted. A name this long
+    # is refused before anything is read.
+    local body long
+    long="$(printf 'x%.0s' {1..65})"
+    body="$(api_put "/api/v1/config/${long}" '{"yaml":"conntrack:\n  enabled: true\n"}')"
+    assert_http_status "400" "$HTTP_STATUS"
+    echo "$body" | jq -e '.error.code == "INVALID_SECTION"' >/dev/null || {
+        echo "expected INVALID_SECTION: ${body}" >&2
+        return 1
+    }
+}
+
+@test "Ops: PUT config section refuses a configuration the agent would not boot on" {
+    # The merged document is validated by the same loader the agent boots
+    # with, and a rejected edit leaves the file exactly as it was - which
+    # the reload right after proves, since it re-reads that file.
+    local body
+    body="$(api_put /api/v1/config/conntrack \
+        '{"yaml":"conntrack:\n  enabled: not-a-boolean\n"}' --max-time 30)"
+    assert_http_status "400" "$HTTP_STATUS"
+    echo "$body" | jq -e '.error.code == "INVALID_CONFIG"' >/dev/null || {
+        echo "expected INVALID_CONFIG: ${body}" >&2
+        return 1
+    }
+
+    body="$(api_post /api/v1/config/reload '{}' --max-time 30)"
+    assert_http_status "200" "$HTTP_STATUS"
+}
+
 # ── IPS extended ──────────────────────────────────────────────────
 
 @test "IPS: GET domain-blocks returns 200" {

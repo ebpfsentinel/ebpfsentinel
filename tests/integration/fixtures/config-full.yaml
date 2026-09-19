@@ -9,6 +9,10 @@ agent:
   swagger_ui: true
   log_level: debug
   log_format: json
+  # The control API may write one section of this file back, which is what
+  # a configuration screen does with the document it renders. It is off by
+  # default, so the suite that exercises the route turns it on here.
+  config_writes: allowed
   http_port: 8080
   grpc_port: 50051
   metrics_port: 9090

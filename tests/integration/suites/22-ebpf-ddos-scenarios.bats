@@ -342,6 +342,17 @@ DDOS_CONN_TRACKED_LABELS='{interface="DDOS_METRICS",action="conn_tracked"}'
     body="$(api_get /api/v1/ddos/attacks/history)"
     _load_http_status
     [ "$HTTP_STATUS" = "200" ]
+
+    # The history answers newest first, which is how every caller reads it:
+    # a listing cut by `limit` must keep the most recent floods rather than
+    # the oldest ones the ring still holds.
+    echo "${body}" | jq -e '
+        [ .[] | .start_time_ns ] as $t
+        | ($t | length) < 2 or ([ range(1; $t | length) | $t[.-1] >= $t[.] ] | all)
+    ' >/dev/null || {
+        echo "attack history is not ordered newest first: ${body}" >&2
+        return 1
+    }
 }
 
 @test "DDoS metrics include all flood types" {

@@ -354,10 +354,16 @@ _drive_alert_traffic() {
     _load_http_status
     [ "$HTTP_STATUS" = "200" ]
 
-    # All returned alerts should be IDS-related
+    # The component filter is the store's own, so every row the reading
+    # returns carries the component that was asked for. An IOC match is
+    # filed under `threatintel` rather than under `ids`, which is exactly
+    # what a filter that lets other components through would hide.
     local non_ids
-    non_ids="$(echo "$body" | jq '[(.alerts // .)[] | select(.component != "ids" and .component != null)] | length' 2>/dev/null)" || non_ids="0"
-    [ "${non_ids:-0}" -eq 0 ] || true  # Filter may not be strict in all implementations
+    non_ids="$(echo "$body" | jq '[(.alerts // .)[] | select(.component != "ids")] | length' 2>/dev/null)" || non_ids=""
+    [ "${non_ids:-1}" -eq 0 ] || {
+        echo "?component=ids returned rows of another component: ${body}" >&2
+        return 1
+    }
 }
 
 @test "alert count endpoint returns aggregate" {
@@ -435,4 +441,68 @@ _drive_alert_traffic() {
         return 1
     }
     rm -f "$out_file"
+}
+
+@test "a live frame is the same row the query answers" {
+    # The live feed and the backlog fill one queue, so an alert seen
+    # arriving and the same alert read back after a refresh must agree on
+    # every word: lowercase severity, lowercase component, the MITRE
+    # mapping flat rather than nested.
+    local out_file pid_file
+    out_file="$(mktemp -t sse-shape.XXXXXX)"
+    pid_file="$(mktemp -t sse-shape-pid.XXXXXX)"
+
+    _start_sse_client "/api/v1/alerts/stream" "$out_file" "$pid_file"
+    sleep 1
+    _drive_alert_traffic
+    sleep 4
+    _stop_sse_client "$pid_file"
+
+    local frame
+    frame="$(grep -a '^data: ' "$out_file" | tail -1 | cut -c7-)"
+    [ -n "${frame}" ] || {
+        echo "no alert frame arrived on the stream:" >&2
+        cat "$out_file" >&2
+        rm -f "$out_file"
+        return 1
+    }
+    rm -f "$out_file"
+
+    echo "${frame}" | jq -e '
+        (.severity | test("^(low|medium|high|critical)$"))
+        and (.component | test("^[a-z0-9_-]+$"))
+        and (.action | test("^[a-z0-9_-]+$"))
+        and (.src_addr | type == "array")
+        and (.is_ipv6 | type == "boolean")
+        and (has("mitre") | not)
+    ' >/dev/null || {
+        echo "the frame is not in the query's shape: ${frame}" >&2
+        return 1
+    }
+
+    # Same identifier, same row: what arrived and what is read back are
+    # compared field by field on the words a caller filters on.
+    local id row
+    id="$(echo "${frame}" | jq -r '.id')"
+    row="$(api_get "/api/v1/alerts?limit=200" \
+        | jq -c --arg id "${id}" '.alerts[] | select(.id == $id)')"
+    _load_http_status
+    [ -n "${row}" ] || {
+        echo "the frame's alert ${id} is not in the query" >&2
+        return 1
+    }
+    echo "${row}" | jq -e --argjson frame "${frame}" '
+        .severity == $frame.severity
+        and .component == $frame.component
+        and .action == $frame.action
+        and .rule_id == $frame.rule_id
+        and .src_addr == $frame.src_addr
+        and .dst_addr == $frame.dst_addr
+        and .is_ipv6 == $frame.is_ipv6
+    ' >/dev/null || {
+        echo "the frame and the query disagree:" >&2
+        echo "frame: ${frame}" >&2
+        echo "row:   ${row}" >&2
+        return 1
+    }
 }

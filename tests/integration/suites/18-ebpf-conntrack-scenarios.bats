@@ -101,10 +101,21 @@ teardown_file() {
 
     [ "$HTTP_STATUS" = "200" ]
 
-    # connection_count should be a valid number
-    local count
+    # A table nobody could read answers null rather than zero, so the count
+    # is a reading only where conntrack is on and the kernel table was read.
+    # Null with conntrack enabled is a failed read, not an idle host.
+    local enabled count
+    enabled="$(echo "$body" | jq -r '.enabled' 2>/dev/null)" || true
     count="$(echo "$body" | jq -r '.connection_count' 2>/dev/null)" || true
-    [ -n "$count" ] && [ "$count" != "null" ]
+    if [ "$enabled" = "true" ]; then
+        [ "$count" != "null" ] || {
+            echo "conntrack is enabled but the table reported no count: ${body}" >&2
+            return 1
+        }
+        [[ "$count" =~ ^[0-9]+$ ]]
+    else
+        [ "$count" = "null" ]
+    fi
 }
 
 @test "conntrack flush clears connections" {

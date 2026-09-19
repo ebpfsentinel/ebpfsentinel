@@ -231,6 +231,34 @@ teardown_file() {
     api_delete "/api/v1/firewall/l7-rules/${id_high}" >/dev/null 2>&1 || true
 }
 
+@test "L7 rule naming a port alias is served with the port it resolved to" {
+    require_root
+
+    # A rule declared against an alias carries no criterion until the alias
+    # service has loaded, and a rule with no criterion matches everything.
+    # The listing must therefore answer the literal the alias stood for, and
+    # keep the alias name so the configuration line that wrote it is findable.
+    local list_body rule
+    list_body="$(api_get /api/v1/firewall/l7-rules)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+
+    rule="$(echo "$list_body" \
+        | jq -c 'if type == "array" then . else .rules end
+                 | .[] | select(.id == "l7-test-alias-port")')"
+    [ -n "${rule}" ] || {
+        echo "the alias-named rule is not in the listing: ${list_body}" >&2
+        return 1
+    }
+
+    echo "${rule}" | jq -e '
+        .dst_port == "8890" and .dst_port_alias == "l7-test-alias-ports"
+    ' >/dev/null || {
+        echo "the alias was not resolved into a criterion: ${rule}" >&2
+        return 1
+    }
+}
+
 # ── Multi-protocol status ────────────────────────────────────────
 
 @test "L7 status with multiple protocols" {

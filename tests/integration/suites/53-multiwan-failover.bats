@@ -270,3 +270,44 @@ PY
         return 1
     }
 }
+
+# ── A gateway added through the API is probed like a configured one ──
+
+@test "a gateway added through the API is probed rather than reported healthy for ever" {
+    # The probe loop reads the gateway list on every tick rather than taking
+    # a snapshot at boot: a gateway created here carries a health check of
+    # its own, and a snapshot left it reporting healthy with nothing behind
+    # the figure. It egresses an interface that does not exist, so the probe
+    # can only fail, whatever this host can otherwise reach.
+    local body id
+    body="$(api_post /api/v1/routing/gateways \
+        '{"name":"wan-api-probe","ip":"10.200.0.252","interface":"wan-probe-x0","weight":250,"health_check_interval_secs":1,"enabled":true}')"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ] || {
+        echo "gateway create refused (HTTP ${HTTP_STATUS}): ${body}" >&2
+        return 1
+    }
+    id="$(echo "${body}" | jq -r '.id // empty')"
+    [ -n "${id}" ] || {
+        echo "no gateway id in the create answer: ${body}" >&2
+        return 1
+    }
+
+    # interval 1s x failure_threshold 3, plus the tick the loop runs on.
+    local i status
+    status=""
+    for ((i = 0; i < 25; i++)); do
+        status="$(_gateways_array \
+            | jq -r --arg id "${id}" '.[] | select(.id == $id) | .status')" || status=""
+        [ "${status}" = "down" ] && break
+        sleep 1
+    done
+
+    api_delete "/api/v1/routing/gateways/${id}" >/dev/null 2>&1 || true
+
+    [ "${status}" = "down" ] || {
+        echo "the API-created gateway was never probed (status '${status}')" >&2
+        _gateways_array >&2
+        return 1
+    }
+}
