@@ -121,7 +121,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
         linux-headers-$(uname -r) iproute2 tcpdump curl wget jq git \
         ca-certificates openssl \
         iperf3 hping3 ncat stress-ng bc \
-        nmap wrk \
+        nmap wrk tshark \
         hydra \
         conntrack
       # Real-client tools that drive the local-lane netns scenario suites on
@@ -517,7 +517,7 @@ UNIT
 
       apt-get update
       apt-get install -y --no-install-recommends \
-        curl jq iperf3 hping3 ncat nmap bc openssl \
+        curl jq iperf3 hping3 ncat nmap bc openssl tcpdump tshark \
         sshpass stress-ng netcat-openbsd \
         swaks lftp smbclient hydra ncrack ldnsutils wrk \
         knot-dnsutils \
