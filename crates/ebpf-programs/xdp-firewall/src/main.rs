@@ -1096,11 +1096,23 @@ fn process_firewall_v4(
     // Keys use network byte order for correct prefix matching.
     let src_key = Key::new(32, src_ip.to_be_bytes());
     if let Some(val) = FW_LPM_SRC_V4.get(&src_key) {
-        return apply_action(ctx, ctx_raw, val.action);
+        return apply_fast_path_action(
+            ctx,
+            ctx_raw,
+            val.action,
+            ct_state,
+            SrcCounterKey::from_v4(src_ip),
+        );
     }
     let dst_key = Key::new(32, dst_ip.to_be_bytes());
     if let Some(val) = FW_LPM_DST_V4.get(&dst_key) {
-        return apply_action(ctx, ctx_raw, val.action);
+        return apply_fast_path_action(
+            ctx,
+            ctx_raw,
+            val.action,
+            ct_state,
+            SrcCounterKey::from_v4(src_ip),
+        );
     }
 
     // Phase 1b: 5-tuple exact-match HashMap lookup - O(1).
@@ -1113,7 +1125,13 @@ fn process_firewall_v4(
         _pad: [0; 3],
     };
     if let Some(val) = unsafe { FW_HASH_5TUPLE.get(&hash_key_5t) } {
-        return apply_action(ctx, ctx_raw, val.action);
+        return apply_fast_path_action(
+            ctx,
+            ctx_raw,
+            val.action,
+            ct_state,
+            SrcCounterKey::from_v4(src_ip),
+        );
     }
 
     // Phase 1c: protocol+port HashMap lookup - O(1).
@@ -1123,7 +1141,13 @@ fn process_firewall_v4(
         _pad: 0,
     };
     if let Some(val) = unsafe { FW_HASH_PORT.get(&hash_key_port) } {
-        return apply_action(ctx, ctx_raw, val.action);
+        return apply_fast_path_action(
+            ctx,
+            ctx_raw,
+            val.action,
+            ct_state,
+            SrcCounterKey::from_v4(src_ip),
+        );
     }
 
     // Phase 2: Linear scan for complex rules (port ranges, VLAN, MAC, CT state).
@@ -1752,7 +1776,13 @@ fn process_firewall_v6(
     // Read raw bytes from off-stack PKT_CTX.
     let lpm_action = lpm_lookup_v6(pkt_ctx);
     if lpm_action >= 0 {
-        return apply_action(ctx, ctx_raw, lpm_action as u8);
+        return apply_fast_path_action(
+            ctx,
+            ctx_raw,
+            lpm_action as u8,
+            ct_state,
+            SrcCounterKey::from_v6(src_addr),
+        );
     }
 
     // Phase 2: Linear scan for complex rules (port, protocol, VLAN, MAC,
@@ -1952,6 +1982,35 @@ fn match_rule_v6(
     }
 
     true
+}
+
+/// Apply a verdict a fast path answered with, the per-source connection guard
+/// still standing in front of it.
+///
+/// The hash and trie lookups are consulted before the rule scan, so an allow
+/// rule simple enough to be indexed there would otherwise buy its source an
+/// exemption from a ceiling the same rule is subject to once it is complex
+/// enough to be scanned - which is a guard nobody can predict the reach of.
+/// What cannot be enforced from here is the per-rule state ceiling, because
+/// these lookups answer with an action and no rule index; a rule carrying one
+/// is kept off the fast paths for exactly that reason.
+#[inline(always)]
+fn apply_fast_path_action(
+    ctx: &XdpContext,
+    ctx_raw: *mut core::ffi::c_void,
+    action: u8,
+    ct_state: u8,
+    src_key: SrcCounterKey,
+) -> Result<u32, ()> {
+    if (action == ACTION_PASS || action == ACTION_LOG)
+        && (ct_state == CT_STATE_NEW || ct_state == 0xFF)
+        && !check_connection_limits(src_key, -1, 0)
+    {
+        emit_event(ctx_raw, ACTION_DROP);
+        increment_metric(METRIC_DROPPED);
+        return Ok(xdp_action::XDP_DROP);
+    }
+    apply_action(ctx, ctx_raw, action)
 }
 
 /// Apply firewall action (shared by IPv4 and IPv6 paths).

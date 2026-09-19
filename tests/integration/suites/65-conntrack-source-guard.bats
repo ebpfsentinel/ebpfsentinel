@@ -60,6 +60,16 @@ setup_file() {
         destroy_test_netns 2>/dev/null || true
         { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     }
+    # The guard is configured when tc-conntrack loads, which is several
+    # programs after the firewall the readiness probe answers on, so knocking
+    # before that lands is knocking at a datapath whose ceiling is still zero.
+    wait_for_ebpf_program tc-conntrack 30 || {
+        echo "tc-conntrack never reported loaded. Log tail:" >&2
+        tail -5 "$AGENT_LOG_FILE" >&2
+        stop_ebpf_agent 2>/dev/null || true
+        destroy_test_netns 2>/dev/null || true
+        { echo "tc-conntrack not loaded, the source guard is unarmed" >&2; return 1; }
+    }
 }
 
 teardown_file() {

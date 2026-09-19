@@ -587,6 +587,33 @@ wait_for_ebpf_loaded() {
     return 1
 }
 
+# wait_for_ebpf_program <artefact-name> [max_attempts]
+# Polls /metrics until ebpf_program_status reports the named program loaded.
+#
+# /readyz flips on the xdp-firewall alone, and the programs load in order, so a
+# suite that depends on a later one (tc-conntrack arms the per-source guard the
+# firewall reads out of CT_CONFIG) is racing the rest of the sequence if it
+# starts sending traffic the moment readiness answers true. The per-program
+# gauge is written right after that program's maps are filled, so it is the
+# signal that the datapath can actually judge what arrives.
+wait_for_ebpf_program() {
+    local program="${1:?usage: wait_for_ebpf_program <artefact-name>}"
+    local max="${2:-30}"
+    local attempt=0
+
+    while [ "$attempt" -lt "$max" ]; do
+        local value
+        value="$(get_metrics_value ebpfsentinel_ebpf_program_status \
+            "{program=\"${program}\"}")" || true
+        if [ "$value" = "1" ]; then
+            return 0
+        fi
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
 # skip_if_not_3vm
 # Skip a bats test when EBPF_3VM_MODE is not set. Defined here (always
 # sourced) so suites can guard their setup before the heavier 3-VM

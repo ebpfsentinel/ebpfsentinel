@@ -123,6 +123,10 @@ impl FirewallMapManager {
 /// group or to a tenant would therefore have its verdict served to traffic the
 /// scope excludes - and for a tenant that is the whole point of the scope,
 /// since two tenants may run the same private range behind the same ports.
+///
+/// A per-rule state ceiling goes the same way: the datapath counts those
+/// against a rule index, and a fast-path hit answers with an action and no
+/// index, so a ceiling served from there would be a number nothing enforces.
 fn has_extended_match(rule: &FirewallRuleEntry) -> bool {
     rule.match_flags2 != 0
         || rule.vlan_id != VLAN_ANY
@@ -131,6 +135,7 @@ fn has_extended_match(rule: &FirewallRuleEntry) -> bool {
         || rule.tenant_id != 0
         || rule.src_set_id != 0
         || rule.dst_set_id != 0
+        || rule.max_states != 0
 }
 
 impl FirewallArrayMapPort for FirewallMapManager {
@@ -337,6 +342,15 @@ mod tests {
     fn an_interface_scoped_rule_is_demoted_the_same_way() {
         let mut rule = fast_path_candidate();
         rule.group_mask = 0b10;
+        assert!(has_extended_match(&rule));
+    }
+
+    #[test]
+    fn a_rule_carrying_a_state_ceiling_is_demoted_too() {
+        let mut rule = fast_path_candidate();
+        rule.max_states = 128;
+        // The ceiling is counted per rule index, and the fast path has none to
+        // count against, so serving the verdict from there drops the ceiling.
         assert!(has_extended_match(&rule));
     }
 }
