@@ -49,8 +49,16 @@ impl ConnTrackAppService {
     }
 
     /// Set the eBPF map port for kernel map access.
+    ///
+    /// The port is handed the settings the service is already holding. It is
+    /// wired once the programs are loaded, which is after the configuration
+    /// was read and pushed, so a port that waited for the next reload would
+    /// wait for one that never comes: `CT_CONFIG` would stay at the zeroes
+    /// the map was created with and the per-source guard in `xdp-firewall`
+    /// reads that as no limit to enforce.
     pub fn set_map_port(&mut self, port: Box<dyn ConnTrackMapPort + Send>) {
         self.map_port = Some(port);
+        self.sync_map_port();
     }
 
     /// Clear the eBPF map port (program unloaded).
@@ -130,15 +138,22 @@ impl ConnTrackAppService {
     /// Sync current settings to both the eBPF `CT_CONFIG` map and
     /// kernel netfilter sysctl timeouts.
     fn sync_ebpf_config(&mut self) {
-        if let Some(ref mut port) = self.map_port
-            && let Err(e) = port.set_config(&self.settings)
-        {
-            tracing::warn!("failed to sync conntrack config to eBPF: {e}");
-        }
+        self.sync_map_port();
         if let Some(ref mut nf) = self.netfilter_port
             && let Err(e) = nf.set_config(&self.settings)
         {
             tracing::warn!("failed to sync conntrack config to kernel sysctl: {e}");
+        }
+    }
+
+    /// Push the current settings to the eBPF `CT_CONFIG` map, where one is
+    /// wired. A failure is reported and never fatal: the map is a mirror of
+    /// settings the service holds either way.
+    fn sync_map_port(&mut self) {
+        if let Some(ref mut port) = self.map_port
+            && let Err(e) = port.set_config(&self.settings)
+        {
+            tracing::warn!("failed to sync conntrack config to eBPF: {e}");
         }
     }
 }
@@ -184,6 +199,55 @@ mod tests {
     fn flush_without_map() {
         let mut svc = make_service();
         assert_eq!(svc.flush_all().unwrap(), 0);
+    }
+
+    /// Records what the last `set_config` carried, so a test can assert a
+    /// port wired after the settings were read still received them.
+    struct RecordingMapPort {
+        last: Arc<std::sync::Mutex<Option<ConnTrackSettings>>>,
+    }
+
+    impl ConnTrackMapPort for RecordingMapPort {
+        fn get_connections(&self, _limit: usize) -> Result<Vec<Connection>, DomainError> {
+            Ok(Vec::new())
+        }
+
+        fn flush_all(&mut self) -> Result<u64, DomainError> {
+            Ok(0)
+        }
+
+        fn set_config(&mut self, settings: &ConnTrackSettings) -> Result<(), DomainError> {
+            *self.last.lock().expect("recording port lock") = Some(settings.clone());
+            Ok(())
+        }
+
+        fn connection_count(&self) -> Result<u64, DomainError> {
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn map_port_wired_after_reload_receives_the_settings() {
+        let mut svc = make_service();
+        svc.reload_settings(ConnTrackSettings {
+            enabled: true,
+            max_src_conn_rate: 3,
+            conn_rate_window_secs: 60,
+            overload_ttl_secs: 3600,
+            ..ConnTrackSettings::default()
+        })
+        .expect("reload");
+
+        let last = Arc::new(std::sync::Mutex::new(None));
+        svc.set_map_port(Box::new(RecordingMapPort {
+            last: Arc::clone(&last),
+        }));
+
+        let seen = last.lock().expect("recording port lock").clone();
+        let seen = seen.expect("wiring the map port pushed no settings");
+        assert_eq!(seen.max_src_conn_rate, 3);
+        assert_eq!(seen.conn_rate_window_secs, 60);
+        assert_eq!(seen.overload_ttl_secs, 3600);
     }
 
     #[test]
