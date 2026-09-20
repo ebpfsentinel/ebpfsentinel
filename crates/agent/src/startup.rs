@@ -4506,49 +4506,25 @@ pub fn try_load_tc_conntrack(
 }
 
 /// Resolve `nf_conn.status` and `nf_conn.mark` field offsets from the
-/// running kernel's vmlinux BTF. Uses `bpftool btf dump -j` to parse
-/// the type info rather than linking against libbpf.
+/// running kernel's vmlinux BTF, read off the sysfs blob by the same walker
+/// that resolves kfuncs. No `bpftool` is spawned: the JSON dump this used to
+/// parse cost the agent about 330 MB of heap it never gave back.
 fn resolve_nf_conn_offsets() -> anyhow::Result<ebpf_common::conntrack::NfConnOffsets> {
-    let output = std::process::Command::new("bpftool")
-        .args(["btf", "dump", "file", "/sys/kernel/btf/vmlinux", "-j"])
-        .output()
-        .map_err(|e| anyhow::anyhow!("bpftool not found: {e}"))?;
-    if !output.status.success() {
-        anyhow::bail!("bpftool btf dump failed");
-    }
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    let types = json["types"]
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("no types array in BTF dump"))?;
-
-    for t in types {
-        if t["name"].as_str() == Some("nf_conn") && t["kind"].as_str() == Some("STRUCT") {
-            let members = t["members"]
-                .as_array()
-                .ok_or_else(|| anyhow::anyhow!("no members in nf_conn"))?;
-            let mut status_offset: Option<u32> = None;
-            let mut mark_offset: Option<u32> = None;
-            for m in members {
-                let name = m["name"].as_str().unwrap_or("");
-                #[allow(clippy::cast_possible_truncation)]
-                let offset_bytes = (m["bits_offset"].as_u64().unwrap_or(0) / 8) as u32;
-                match name {
-                    "status" => status_offset = Some(offset_bytes),
-                    "mark" => mark_offset = Some(offset_bytes),
-                    _ => {}
-                }
-            }
-            return Ok(ebpf_common::conntrack::NfConnOffsets {
-                status_offset: status_offset
-                    .ok_or_else(|| anyhow::anyhow!("nf_conn.status not found in BTF"))?,
-                mark_offset: mark_offset
-                    .ok_or_else(|| anyhow::anyhow!("nf_conn.mark not found in BTF"))?,
-                valid: 1,
-                _pad: 0,
-            });
-        }
-    }
-    anyhow::bail!("struct nf_conn not found in vmlinux BTF")
+    let offsets =
+        adapters::ebpf::kfunc::vmlinux_struct_member_offsets("nf_conn", &["status", "mark"])?;
+    let member = |index: usize, name: &str| {
+        offsets
+            .get(index)
+            .copied()
+            .flatten()
+            .ok_or_else(|| anyhow::anyhow!("nf_conn.{name} not found in BTF"))
+    };
+    Ok(ebpf_common::conntrack::NfConnOffsets {
+        status_offset: member(0, "status")?,
+        mark_offset: member(1, "mark")?,
+        valid: 1,
+        _pad: 0,
+    })
 }
 
 /// Load the TC NAT programs (ingress + egress): attach TC, create map manager.

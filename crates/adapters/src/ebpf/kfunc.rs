@@ -31,8 +31,12 @@ use std::sync::{LazyLock, Mutex};
 const BPF_BTF_GET_FD_BY_ID: u32 = 19;
 const BPF_BTF_GET_NEXT_ID: u32 = 23;
 
-/// `BTF_KIND_FUNC` from `include/uapi/linux/btf.h`. The only kind we match.
+/// `BTF_KIND_FUNC` from `include/uapi/linux/btf.h`: the kind kfuncs are.
 const BTF_KIND_FUNC: u32 = 12;
+/// `BTF_KIND_STRUCT` from the same header: the kind member offsets are read off.
+const BTF_KIND_STRUCT: u32 = 4;
+/// `struct btf_member`: `name_off`, `type`, `offset`, each a `u32`.
+const BTF_MEMBER_SIZE: usize = 12;
 
 /// Path to the kernel base (vmlinux) BTF exposed by the kernel.
 const VMLINUX_BTF_PATH: &str = "/sys/kernel/btf/vmlinux";
@@ -82,6 +86,9 @@ pub enum KfuncError {
 
     #[error("kfunc `{0}` not found in vmlinux or any loaded module BTF")]
     Unresolved(String),
+
+    #[error("struct `{0}` not defined in vmlinux BTF")]
+    StructNotFound(String),
 
     #[error(
         "module `{0}` BTF object fd unavailable: no fd was passed in by a \
@@ -216,10 +223,10 @@ impl BtfBlob {
     fn func_ids(&self, base: Option<&BtfBlob>) -> Result<HashMap<String, u32>, KfuncError> {
         let mut out = HashMap::new();
         let mut id = self.start_id;
-        for_each_type(&self.data, &self.header, |name_off, kind, _vlen| {
-            if kind == BTF_KIND_FUNC
-                && name_off != 0
-                && let Some(name) = self.string_at(name_off, base)
+        for_each_type(&self.data, &self.header, |rec| {
+            if rec.kind == BTF_KIND_FUNC
+                && rec.name_off != 0
+                && let Some(name) = self.string_at(rec.name_off, base)
             {
                 out.insert(name.to_owned(), id);
             }
@@ -227,19 +234,102 @@ impl BtfBlob {
         })?;
         Ok(out)
     }
+
+    /// Byte offsets of the named `members` of the first non-empty `STRUCT`
+    /// called `struct_name`, in the order asked for. `None` in a slot means
+    /// the struct carries no member of that name; `None` overall means no
+    /// such struct is defined in this blob.
+    fn struct_member_byte_offsets(
+        &self,
+        base: Option<&BtfBlob>,
+        struct_name: &str,
+        members: &[&str],
+    ) -> Result<Option<Vec<Option<u32>>>, KfuncError> {
+        let mut found: Option<Vec<Option<u32>>> = None;
+        for_each_type(&self.data, &self.header, |rec| {
+            if found.is_some()
+                || rec.kind != BTF_KIND_STRUCT
+                || rec.vlen == 0
+                || rec.name_off == 0
+                || self.string_at(rec.name_off, base) != Some(struct_name)
+            {
+                return;
+            }
+            let mut offsets = vec![None; members.len()];
+            for member in rec.body.as_chunks::<BTF_MEMBER_SIZE>().0 {
+                let name_off = u32::from_le_bytes([member[0], member[1], member[2], member[3]]);
+                let offset = u32::from_le_bytes([member[8], member[9], member[10], member[11]]);
+                // With kind_flag set the high byte is the bitfield size and
+                // the low 24 bits the bit offset; without it the whole word
+                // is the bit offset.
+                let bit_offset = if rec.kind_flag {
+                    offset & 0x00ff_ffff
+                } else {
+                    offset
+                };
+                let Some(name) = self.string_at(name_off, base) else {
+                    continue;
+                };
+                for (slot, wanted) in offsets.iter_mut().zip(members) {
+                    if name == *wanted {
+                        *slot = Some(bit_offset / 8);
+                    }
+                }
+            }
+            found = Some(offsets);
+        })?;
+        Ok(found)
+    }
+}
+
+/// Byte offsets of the named `members` of `struct_name` in the running
+/// kernel, read straight off the vmlinux BTF blob in sysfs. One `None` per
+/// member the struct does not carry.
+///
+/// This is what the conntrack datapath asks for `nf_conn.status` and
+/// `nf_conn.mark`. It used to shell out to `bpftool btf dump -j` and parse
+/// the whole dump into a `serde_json::Value`: 24 MB of JSON became about
+/// 330 MB of small heap allocations for two integers, and glibc never handed
+/// that heap back, so every agent sat at 400 MB resident for the rest of its
+/// life. The raw blob is 7 MB, read into one allocation the allocator
+/// returns to the kernel on drop.
+pub fn vmlinux_struct_member_offsets(
+    struct_name: &str,
+    members: &[&str],
+) -> Result<Vec<Option<u32>>, KfuncError> {
+    let data = std::fs::read(VMLINUX_BTF_PATH).map_err(|source| KfuncError::ReadVmlinux {
+        path: VMLINUX_BTF_PATH.to_owned(),
+        source,
+    })?;
+    let vmlinux = BtfBlob::parse_base(data)?;
+    vmlinux
+        .struct_member_byte_offsets(None, struct_name, members)?
+        .ok_or_else(|| KfuncError::StructNotFound(struct_name.to_owned()))
 }
 
 /// Count the number of type records a blob defines.
 fn count_types(data: &[u8], header: &BtfHeader) -> Result<u32, KfuncError> {
     let mut n = 0u32;
-    for_each_type(data, header, |_, _, _| n += 1)?;
+    for_each_type(data, header, |_| n += 1)?;
     Ok(n)
 }
 
-/// Iterate every `btf_type` record, invoking `f(name_off, kind, vlen)`. Each
-/// record is a 12-byte common header (`name_off`, `info`, `size_or_type`)
-/// followed by kind-specific trailing data sized from `kind` and `vlen`.
-fn for_each_type<F: FnMut(u32, u32, u32)>(
+/// One `btf_type` record as the walker hands it out: the common header's
+/// fields plus the kind-specific trailing bytes that follow it.
+struct TypeRecord<'a> {
+    name_off: u32,
+    kind: u32,
+    vlen: u32,
+    /// `BTF_INFO_KFLAG`: for a struct, its member offsets carry a bitfield
+    /// size in the high byte.
+    kind_flag: bool,
+    body: &'a [u8],
+}
+
+/// Iterate every `btf_type` record, invoking `f(record)`. Each record is a
+/// 12-byte common header (`name_off`, `info`, `size_or_type`) followed by
+/// kind-specific trailing data sized from `kind` and `vlen`.
+fn for_each_type<F: FnMut(TypeRecord<'_>)>(
     data: &[u8],
     header: &BtfHeader,
     mut f: F,
@@ -260,12 +350,23 @@ fn for_each_type<F: FnMut(u32, u32, u32)>(
         let info = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]);
         let vlen = info & 0xffff;
         let kind = (info >> 24) & 0x1f;
-        f(name_off, kind, vlen);
+        let kind_flag = (info >> 31) & 1 == 1;
         let extra = kind_extra_size(kind, vlen)
             .ok_or(KfuncError::MalformedBtf("unknown btf kind in type stream"))?;
-        pos = pos
+        let next = pos
             .checked_add(12 + extra)
             .ok_or(KfuncError::MalformedBtf("type record size overflow"))?;
+        if next > end {
+            return Err(KfuncError::MalformedBtf("truncated btf_type body"));
+        }
+        f(TypeRecord {
+            name_off,
+            kind,
+            vlen,
+            kind_flag,
+            body: &data[pos + 12..next],
+        });
+        pos = next;
     }
     Ok(())
 }
@@ -579,21 +680,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn walk_minimal_btf_finds_func() {
-        // Hand-build a tiny BTF blob: header + one FUNC_PROTO + one FUNC.
-        // strings: "\0kf\0"
-        let strings = b"\0kf\0";
-        let mut types = Vec::new();
-        // type 1: FUNC_PROTO (kind 13), name_off 0, vlen 0, return void
-        types.extend_from_slice(&0u32.to_le_bytes()); // name_off
-        types.extend_from_slice(&(13u32 << 24).to_le_bytes()); // info: kind=13
-        types.extend_from_slice(&0u32.to_le_bytes()); // type (ret)
-        // type 2: FUNC (kind 12), name_off 1 ("kf"), type -> 1
-        types.extend_from_slice(&1u32.to_le_bytes()); // name_off "kf"
-        types.extend_from_slice(&(12u32 << 24).to_le_bytes()); // info: kind=12
-        types.extend_from_slice(&1u32.to_le_bytes()); // type -> proto
-
+    /// Wrap a hand-built type section and string section in a BTF header.
+    fn blob(types: &[u8], strings: &[u8]) -> Vec<u8> {
         let hdr_len = 24u32;
         let type_off = 0u32;
         let type_len = types.len() as u32;
@@ -609,13 +697,73 @@ mod tests {
         blob.extend_from_slice(&type_len.to_le_bytes());
         blob.extend_from_slice(&str_off.to_le_bytes());
         blob.extend_from_slice(&str_len.to_le_bytes());
-        blob.extend_from_slice(&types);
+        blob.extend_from_slice(types);
         blob.extend_from_slice(strings);
+        blob
+    }
 
-        let parsed = BtfBlob::parse_base(blob).expect("parse");
+    #[test]
+    fn walk_minimal_btf_finds_func() {
+        // Hand-build a tiny BTF blob: header + one FUNC_PROTO + one FUNC.
+        // strings: "\0kf\0"
+        let strings = b"\0kf\0";
+        let mut types = Vec::new();
+        // type 1: FUNC_PROTO (kind 13), name_off 0, vlen 0, return void
+        types.extend_from_slice(&0u32.to_le_bytes()); // name_off
+        types.extend_from_slice(&(13u32 << 24).to_le_bytes()); // info: kind=13
+        types.extend_from_slice(&0u32.to_le_bytes()); // type (ret)
+        // type 2: FUNC (kind 12), name_off 1 ("kf"), type -> 1
+        types.extend_from_slice(&1u32.to_le_bytes()); // name_off "kf"
+        types.extend_from_slice(&(12u32 << 24).to_le_bytes()); // info: kind=12
+        types.extend_from_slice(&1u32.to_le_bytes()); // type -> proto
+
+        let parsed = BtfBlob::parse_base(blob(&types, strings)).expect("parse");
         assert_eq!(parsed.type_count, 2);
         let funcs = parsed.func_ids(None).expect("func ids");
         // FUNC is the 2nd type -> global id 2.
         assert_eq!(funcs.get("kf"), Some(&2));
+    }
+
+    #[test]
+    fn struct_member_offsets_read_off_btf_members() {
+        // strings: "\0u32\0nf_conn\0status\0mark\0flag\0"
+        let strings = b"\0u32\0nf_conn\0status\0mark\0flag\0";
+        let (s_u32, s_nf_conn, s_status, s_mark, s_flag) = (1u32, 5u32, 13u32, 20u32, 25u32);
+        let mut types = Vec::new();
+        // type 1: INT u32 (kind 1), size 4, encoding word
+        types.extend_from_slice(&s_u32.to_le_bytes());
+        types.extend_from_slice(&(1u32 << 24).to_le_bytes());
+        types.extend_from_slice(&4u32.to_le_bytes());
+        types.extend_from_slice(&(32u32).to_le_bytes()); // bits=32
+        // type 2: STRUCT nf_conn (kind 4), kind_flag set, 3 members, size 24
+        types.extend_from_slice(&s_nf_conn.to_le_bytes());
+        types.extend_from_slice(&((1u32 << 31) | (4u32 << 24) | 3).to_le_bytes());
+        types.extend_from_slice(&24u32.to_le_bytes());
+        // member status: type 1 at bit 64
+        types.extend_from_slice(&s_status.to_le_bytes());
+        types.extend_from_slice(&1u32.to_le_bytes());
+        types.extend_from_slice(&64u32.to_le_bytes());
+        // member mark: type 1 at bit 128
+        types.extend_from_slice(&s_mark.to_le_bytes());
+        types.extend_from_slice(&1u32.to_le_bytes());
+        types.extend_from_slice(&128u32.to_le_bytes());
+        // member flag: a 1-bit bitfield at bit 160 (size in the high byte)
+        types.extend_from_slice(&s_flag.to_le_bytes());
+        types.extend_from_slice(&1u32.to_le_bytes());
+        types.extend_from_slice(&((1u32 << 24) | 0xa0).to_le_bytes());
+
+        let parsed = BtfBlob::parse_base(blob(&types, strings)).expect("parse");
+        assert_eq!(parsed.type_count, 2);
+        let offsets = parsed
+            .struct_member_byte_offsets(None, "nf_conn", &["mark", "status", "flag", "absent"])
+            .expect("walk")
+            .expect("nf_conn defined");
+        assert_eq!(offsets, vec![Some(16), Some(8), Some(20), None]);
+        assert_eq!(
+            parsed
+                .struct_member_byte_offsets(None, "nf_ct", &["mark"])
+                .expect("walk"),
+            None
+        );
     }
 }

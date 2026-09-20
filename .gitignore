@@ -64,3 +64,6 @@ ebpf-out/
 # Python bytecode from the integration harness scripts
 __pycache__/
 *.pyc
+
+# Perf-lane build for the VM (see ebpfsentinel-enterprise/tests/perf)
+target-docker/

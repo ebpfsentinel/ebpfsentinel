@@ -77,9 +77,14 @@ ratelimit:
   default_burst: 200000
   default_algorithm: token_bucket
   rules:
-    - id: rl-bench-global
-      rate: 100000
-      burst: 200000
+    # A rule is keyed on one source address, so it names the traffic
+    # generator. The rate is packets per second and sits above what a
+    # 10 GbE link carries, so the bucket is walked on every packet and
+    # never drops: the benchmark measures the path, not the limit.
+    - id: rl-bench-peer
+      src_ip: __NS_IP__
+      rate: 10000000
+      burst: 20000000
       scope: global
       algorithm: token_bucket
       action: drop

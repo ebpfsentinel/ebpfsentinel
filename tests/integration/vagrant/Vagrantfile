@@ -494,8 +494,13 @@ UNIT
 
     # VMware Workstation provider (alternative)
     attacker.vm.provider "vmware_desktop" do |v|
-      v.vmx["memsize"] = "2048"
-      v.vmx["numvcpus"] = "2"
+      v.vmx["memsize"] = ENV.fetch('ATTACKER_VM_MEMORY', '2048')
+      # 4 vCPU and vmxnet3 on both NICs: the perf lane drives ~8 Gbps of iperf3
+      # from here, and an e1000e sender on 2 vCPU tops out near 7.7 Gbps with
+      # the client at 97% CPU, which measures the attacker rather than the agent.
+      v.vmx["numvcpus"] = ENV.fetch('ATTACKER_VM_CPUS', '4')
+      v.vmx["ethernet0.virtualDev"] = "vmxnet3"
+      v.vmx["ethernet1.virtualDev"] = "vmxnet3"
       v.vmx["displayname"] = "eBPFsentinel Attacker VM"
       v.gui = false
       v.linked_clone = false
