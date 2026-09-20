@@ -498,6 +498,46 @@ send_tcp_from_ns() {
     echo "$data" | timeout "$timeout" ncat -w "$timeout" "$dst" "$port" 2>/dev/null || true
 }
 
+# start_ns_tcp_listener <port> [duration_secs]
+# Binds a TCP listener on the client VM, which is what plays the part the
+# namespace plays on the local lane. bats already runs here, so it is a local
+# listener rather than a remote one, and the port space is the client's own.
+start_ns_tcp_listener() {
+    local port="${1:?usage: start_ns_tcp_listener <port> [duration_secs]}"
+    local duration="${2:-15}"
+
+    timeout "$duration" ncat -l "$EBPF_NS_IP" "$port" -k >/dev/null 2>&1 &
+    local pid=$!
+
+    local attempt=0
+    while [ "$attempt" -lt 25 ]; do
+        if ss -tlnH "sport = :${port}" 2>/dev/null | grep -q .; then
+            break
+        fi
+        sleep 0.1
+        attempt=$((attempt + 1))
+    done
+
+    echo "$pid"
+}
+
+# send_tcp_to_ns <dst_port> [data] [timeout_secs]
+# The mirror image of send_tcp_from_ns, and the only helper here that has to
+# run somewhere other than where bats does. On the local lane the host sends
+# and the namespace receives; here the agent VM is the host, so the connection
+# is driven over SSH from the agent toward the client. Running it locally, the
+# way every other helper in this block does, would send the client's packets
+# to the client's own address and never put them on the agent's egress hook at
+# all - which is a test that passes while measuring nothing.
+send_tcp_to_ns() {
+    local port="${1:?usage: send_tcp_to_ns <dst_port>}"
+    local data="${2:-TESTDATA}"
+    local timeout="${3:-2}"
+
+    _agent_ssh "echo '${data}' | timeout ${timeout} ncat -w ${timeout} ${EBPF_NS_IP} ${port} 2>/dev/null || true" \
+        >/dev/null 2>&1 || true
+}
+
 # send_udp_from_ns <dst_ip> <dst_port> [data] [timeout_secs]
 send_udp_from_ns() {
     local dst="${1:?usage: send_udp_from_ns <dst_ip> <dst_port>}"

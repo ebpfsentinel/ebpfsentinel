@@ -30,8 +30,16 @@ pub const IDS_METRIC_CGROUP_TENANT_RESOLVED: u32 = 5;
 /// Metric index: classified packet attributed to the cgroup that sent it.
 /// Distinct from the tenant counter above, which needs a map entry.
 pub const IDS_METRIC_CGROUP_ATTRIBUTED: u32 = 6;
+/// Metric index: the kernel confirmed a flow kill.
+///
+/// Distinct from `IDS_METRIC_DROPPED`, which counts the packets a drop rule
+/// shot: this one counts the times the conntrack entry behind such a packet
+/// was found and marked, which is what the kernel actually applied. The two
+/// differ whenever the flow has no conntrack entry to mark, so folding them
+/// into one slot would report a decision as an enforcement.
+pub const IDS_METRIC_CT_KILL_CONFIRMED: u32 = 7;
 /// Total number of IDS metric slots (one past the last index).
-pub const IDS_METRIC_COUNT: u32 = 7;
+pub const IDS_METRIC_COUNT: u32 = 8;
 
 /// Kernel-side IDS sampling configuration.
 /// Stored in a single-entry Array map (`IDS_SAMPLING_CONFIG`).

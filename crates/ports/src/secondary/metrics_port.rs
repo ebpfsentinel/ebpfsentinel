@@ -336,8 +336,14 @@ pub trait ContainerMetrics: Send + Sync {
 /// path. Today the only consumer is the IDS kill-flow primitive,
 /// but this trait will grow as more CT kfuncs land.
 pub trait CtMetrics: Send + Sync {
-    /// Increment the `ids_ct_dying` counter - a flow was
-    /// marked `IPS_DYING` by the IDS verdict pipeline.
+    /// Increment the `ids_ct_dying` counter - the IDS verdict pipeline
+    /// decided a flow should be torn down.
+    ///
+    /// A verdict rather than an outcome: it is raised once per block-mode
+    /// match reaching userspace, and the kernel may find no conntrack entry
+    /// to mark behind it. What the kernel actually applied is counted in the
+    /// kernel, on the `ct_kill_confirmed` slot of `IDS_METRICS`, against the
+    /// drops of the same map as its denominator.
     fn record_ids_ct_dying(&self) {}
 }
 

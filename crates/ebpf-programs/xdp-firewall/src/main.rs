@@ -50,12 +50,11 @@ use ebpf_helpers::kfuncs::{
     BpfCtOpts, CtTuple, bpf_xfrm_state_opts, kill_flow_via_xdp_ct, with_xdp_ct_lookup,
     with_xdp_xfrm_state, xdp_frame_size, xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag,
 };
-use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::net::{
-    ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, IcmpHdr, Ipv6Hdr,
-    PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4,
-    u16_from_be_bytes, u32_from_be_bytes,
+    ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, IcmpHdr, Ipv6Hdr, PROTO_ICMPV6, PROTO_TCP,
+    PROTO_UDP, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
 };
+use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{copy_mac_asm, increment_metric, ringbuf_has_backpressure};
 use network_types::{
@@ -2029,9 +2028,12 @@ fn apply_action(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void, action: u8) -
             emit_event(ctx_raw, ACTION_DROP);
             increment_metric(METRIC_DROPPED);
 
-            // Mark the kernel netfilter CT entry as DYING so the rest
-            // of this flow is dropped by netfilter without re-matching
-            // firewall rules on every subsequent packet.
+            // Tear the kernel netfilter CT entry behind this flow
+            // down by collapsing its timeout, which is the only
+            // tear-down a BPF program gets: `IPS_DYING` sits in the
+            // kernel's unchangeable mask. An XDP drop runs before
+            // netfilter, so no later packet of this flow reaches
+            // conntrack and the collapsed timeout is what evicts it.
             if let Some(pkt) = PKT_CTX.get_ptr(0) {
                 let (s, d, sp, dp, proto) = unsafe {
                     (

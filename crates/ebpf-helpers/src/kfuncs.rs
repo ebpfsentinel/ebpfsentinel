@@ -251,9 +251,10 @@ pub mod ips_status {
     /// Connection is confirmed (seen by CT helpers and accepted).
     pub const CONFIRMED: u32 = 0x0008;
     /// Connection is being destroyed - packets are dropped and no
-    /// new additions are accepted. Setting this bit on a live
-    /// `nf_conn` is the "terminate flow" primitive that IDS
-    /// verdicts use to kill misbehaving connections.
+    /// new additions are accepted. The kernel sets it on its own
+    /// tear-down path and refuses it from a BPF program: it sits in
+    /// the unchangeable mask, so it is a bit to read, never one to
+    /// write. See [`CtEntry::change_status`].
     pub const DYING: u32 = 0x0200;
     /// Connection has been assured and will not time out early.
     pub const ASSURED: u32 = 0x0004;
@@ -303,14 +304,33 @@ pub struct BpfSockTupleIpv6 {
     pub dport: u16,
 }
 
+/// Look the conntrack entry up in the namespace the context belongs
+/// to, rather than in a namespace named by id.
+///
+/// The kernel treats `netns_id` as an id whenever it is zero or
+/// above, and resolves it through the caller's own namespace id
+/// table. Zero therefore means "the peer registered under id 0",
+/// which in a host namespace is usually nothing at all and in a test
+/// rig is whichever namespace `ip netns` happened to number first -
+/// so a lookup with it fails with `-ENONET` on a flow the kernel is
+/// tracking perfectly well. Only a negative value asks for the
+/// context's own namespace, and this is the one the datapath wants.
+pub const BPF_F_CURRENT_NETNS: i32 = -1;
+
 /// `bpf_ct_opts` - kernel 5.18+ layout from
 /// `net/netfilter/nf_conntrack_bpf.c`. 12 bytes, padding accounted
 /// for via `reserved`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct BpfCtOpts {
-    /// Network namespace id. `0` means current netns; `-1` means
-    /// "any".
+    /// Which network namespace to look the entry up in.
+    ///
+    /// [`BPF_F_CURRENT_NETNS`] is the namespace the context belongs
+    /// to, which is what a datapath program wants. Any value from
+    /// zero upwards is a namespace **id**, resolved through the
+    /// caller's own id table: a program running in a namespace that
+    /// has no peer registered under that id gets `-ENONET` and a null
+    /// entry rather than a miss it can tell apart from one.
     pub netns_id: i32,
     /// Kernel writes the lookup error here (`0` on success, negative
     /// errno otherwise).
@@ -328,7 +348,7 @@ impl BpfCtOpts {
     #[must_use]
     pub const fn tcp() -> Self {
         Self {
-            netns_id: 0,
+            netns_id: BPF_F_CURRENT_NETNS,
             error: 0,
             l4proto: 6,
             dir: 0,
@@ -340,7 +360,7 @@ impl BpfCtOpts {
     #[must_use]
     pub const fn udp() -> Self {
         Self {
-            netns_id: 0,
+            netns_id: BPF_F_CURRENT_NETNS,
             error: 0,
             l4proto: 17,
             dir: 0,
@@ -1071,7 +1091,22 @@ pub mod host_stubs {
         0
     }
 
+    /// Models the kernel's own refusal rather than accepting
+    /// anything. `nf_ct_change_status_common` compares the bits asked
+    /// for against the bits already set and returns `-EBUSY` as soon
+    /// as the difference touches `IPS_EXPECTED`, `IPS_CONFIRMED` or
+    /// `IPS_DYING`. A stub that answered zero to everything is what
+    /// let a call the kernel has never once accepted sit in the
+    /// datapath with a passing unit test beside it.
     pub unsafe fn bpf_ct_change_status(_nfct: *mut nf_conn, status: u32) -> i32 {
+        // Every entry a lookup can return is already confirmed, which
+        // is the whole reason the refusal is unconditional in practice.
+        let already = super::ips_status::CONFIRMED;
+        let unchangeable =
+            super::ips_status::EXPECTED | super::ips_status::CONFIRMED | super::ips_status::DYING;
+        if (already ^ status) & unchangeable != 0 {
+            return -16; // -EBUSY
+        }
         #[allow(clippy::cast_possible_wrap)]
         HOST_LAST_LIVE_STATUS.store(status as i32, Ordering::SeqCst);
         0
@@ -1510,27 +1545,49 @@ pub enum CtTuple {
 }
 
 impl CtTuple {
-    /// Build a TCP/UDP v4 tuple from host-order fields. The caller
-    /// is responsible for swapping to network order before calling
-    /// the kernel kfunc.
+    /// Build a TCP/UDP v4 tuple from host-order fields.
+    ///
+    /// The swap to network order happens here rather than at the call
+    /// site. A `bpf_sock_tuple` is read by the kernel as wire bytes,
+    /// while every datapath program in this tree holds addresses and
+    /// ports host-order because that is what comparing them against a
+    /// rule needs. Leaving the swap to the caller made the wrong thing
+    /// the shorter thing to write, and a tuple handed over in the wrong
+    /// order does not fail loudly: the lookup simply matches nothing,
+    /// which reads downstream as a flow the kernel is not tracking
+    /// rather than as a tuple nobody byte-swapped.
     #[must_use]
     pub const fn v4(saddr: u32, daddr: u32, sport: u16, dport: u16) -> Self {
         Self::Ipv4(BpfSockTupleIpv4 {
-            saddr,
-            daddr,
-            sport,
-            dport,
+            saddr: saddr.to_be(),
+            daddr: daddr.to_be(),
+            sport: sport.to_be(),
+            dport: dport.to_be(),
         })
     }
 
-    /// Build a TCP/UDP v6 tuple.
+    /// Build a TCP/UDP v6 tuple from host-order fields.
+    ///
+    /// Each of the four words is swapped on its own, which is what
+    /// undoes the per-word `u32::from_be_bytes` the datapath used to
+    /// read the address out of the header in the first place.
     #[must_use]
     pub const fn v6(saddr: [u32; 4], daddr: [u32; 4], sport: u16, dport: u16) -> Self {
         Self::Ipv6(BpfSockTupleIpv6 {
-            saddr,
-            daddr,
-            sport,
-            dport,
+            saddr: [
+                saddr[0].to_be(),
+                saddr[1].to_be(),
+                saddr[2].to_be(),
+                saddr[3].to_be(),
+            ],
+            daddr: [
+                daddr[0].to_be(),
+                daddr[1].to_be(),
+                daddr[2].to_be(),
+                daddr[3].to_be(),
+            ],
+            sport: sport.to_be(),
+            dport: dport.to_be(),
         })
     }
 
@@ -1826,19 +1883,27 @@ impl CtEntry {
         self.inner
     }
 
-    /// Update the timeout (seconds) on a live entry.
+    /// Update the timeout on a live entry. The unit is milliseconds,
+    /// which is what `bpf_ct_change_timeout` takes.
     #[inline(always)]
-    pub fn change_timeout(&mut self, seconds: u32) -> bool {
+    pub fn change_timeout(&mut self, millis: u32) -> bool {
         #[cfg(target_arch = "bpf")]
-        let rc = unsafe { bpf_ct_change_timeout(self.inner, seconds) };
+        let rc = unsafe { bpf_ct_change_timeout(self.inner, millis) };
         #[cfg(not(target_arch = "bpf"))]
-        let rc = unsafe { host_stubs::bpf_ct_change_timeout(self.inner, seconds) };
+        let rc = unsafe { host_stubs::bpf_ct_change_timeout(self.inner, millis) };
         rc == 0
     }
 
-    /// Update the `IPS_*` status bitmask on a live entry. Combined
-    /// with `IPS_DYING`, acts as a "terminate this flow" primitive
-    /// for IDS verdicts.
+    /// Update the `IPS_*` status bitmask on a live entry.
+    ///
+    /// Only the settable bits get through. The kernel compares what
+    /// is asked for against what is already set and answers `-EBUSY`
+    /// the moment the difference touches `IPS_EXPECTED`,
+    /// `IPS_CONFIRMED` or `IPS_DYING`, and every entry a lookup
+    /// returns is confirmed - so asking for `IPS_DYING` from a BPF
+    /// program is refused every time rather than sometimes. Tearing a
+    /// flow down is [`Self::change_timeout`] instead, which the
+    /// kernel does accept.
     #[inline(always)]
     pub fn change_status(&mut self, status: u32) -> bool {
         #[cfg(target_arch = "bpf")]
@@ -1847,22 +1912,18 @@ impl CtEntry {
         let rc = unsafe { host_stubs::bpf_ct_change_status(self.inner, status) };
         rc == 0
     }
-
-    /// Mark the flow as dying so the kernel drops subsequent
-    /// packets. Equivalent to `change_status(ips_status::DYING)` -
-    /// provided as a named method so call sites explicitly document
-    /// the IDS verdict semantics.
-    #[inline(always)]
-    pub fn mark_dying(&mut self) -> bool {
-        self.change_status(ips_status::DYING)
-    }
 }
 
-/// Look up a conntrack entry from a TC skb, mark it as dying, then
-/// release it. Packages the three-step kernel dance into a single
-/// call so `tc-ids` can terminate a flow verdict in one line. The
-/// return value reports whether a matching entry was found and
-/// successfully marked; lookups that fail surface via `opts.error`.
+/// Look up a conntrack entry from a TC skb, collapse its timeout so
+/// the kernel reaps it, then release it. Packages the three-step
+/// kernel dance into a single call so `tc-ids` can terminate a flow
+/// verdict in one line.
+///
+/// The return value is the kernel's own word on the tear-down: true
+/// when an entry was found and the kernel accepted the new timeout,
+/// false when the lookup matched nothing, which is ordinary rather
+/// than a fault - a flow netfilter is not tracking has no entry to
+/// tear down. A failed lookup surfaces its reason via `opts.error`.
 ///
 /// # Safety
 /// `skb` must be a live `__sk_buff*` owned by the current TC
@@ -1876,13 +1937,13 @@ pub unsafe fn kill_flow_via_skb_ct(
     unsafe {
         with_skb_ct_lookup(skb, tuple, opts, |ct| {
             let mut entry = CtEntry { inner: ct };
-            let ok = entry.change_status(ips_status::DYING);
-            // Collapse the timeout so the conntrack gc reaps the entry
-            // promptly. Marking DYING alone leaves the entry hashed and
-            // visible in `conntrack -L` until its original (often multi-day)
-            // ESTABLISHED timeout - a dropped flow never re-enters netfilter
-            // to trigger deletion, so the short timeout is what evicts it.
-            entry.change_timeout(1);
+            // Collapsing the timeout is the tear-down, not a tidy-up
+            // after one: `IPS_DYING` is in the kernel's unchangeable
+            // mask and a BPF program asking for it is refused every
+            // time. A millisecond puts the entry in the gc's hands
+            // immediately, which is what a dropped flow needs, since
+            // it never re-enters netfilter to be deleted on its own.
+            let ok = entry.change_timeout(1);
             // Leak the wrapper so Drop doesn't run - the outer
             // `with_skb_ct_lookup` already releases via the kfunc.
             core::mem::forget(entry);
@@ -1906,13 +1967,12 @@ pub unsafe fn kill_flow_via_xdp_ct(
     unsafe {
         with_xdp_ct_lookup(xdp, tuple, opts, |ct| {
             let mut entry = CtEntry { inner: ct };
-            let ok = entry.change_status(ips_status::DYING);
-            // Collapse the timeout so the conntrack gc reaps the entry
-            // promptly. XDP drops run before netfilter, so once the flow is
-            // blocked no further packet re-enters conntrack to act on the
-            // DYING bit - the short timeout is what evicts the entry from
-            // `conntrack -L` instead of leaving it at its ESTABLISHED timeout.
-            entry.change_timeout(1);
+            // Same tear-down as the TC side, and for a second reason
+            // here: an XDP drop runs before netfilter, so once the
+            // flow is blocked no further packet reaches conntrack at
+            // all and the collapsed timeout is the only thing that
+            // will ever evict the entry.
+            let ok = entry.change_timeout(1);
             core::mem::forget(entry);
             ok
         })
@@ -2074,6 +2134,50 @@ mod tests {
         // programs at load time.
         assert_eq!(core::mem::size_of::<BpfCtOpts>(), 12);
         assert_eq!(core::mem::align_of::<BpfCtOpts>(), 4);
+    }
+
+    #[test]
+    fn a_conntrack_lookup_asks_for_the_context_own_namespace() {
+        // The kernel reads any value from zero upwards as a namespace
+        // id and resolves it through the caller's id table, so a zero
+        // here is "the peer numbered 0" rather than "here". It fails
+        // with -ENONET on a flow the kernel is tracking, which reads
+        // downstream as an enforcement the kernel declined to carry
+        // out rather than as a lookup aimed at the wrong namespace.
+        assert_eq!(BPF_F_CURRENT_NETNS, -1);
+        assert_eq!(BpfCtOpts::tcp().netns_id, BPF_F_CURRENT_NETNS);
+        assert_eq!(BpfCtOpts::udp().netns_id, BPF_F_CURRENT_NETNS);
+    }
+
+    #[test]
+    fn a_tuple_reaches_the_kernel_in_network_order() {
+        // The datapath reads an address and a port out of the header
+        // with `from_be_bytes`, so what it holds is host order, and the
+        // kernel reads a `bpf_sock_tuple` as the bytes that are in
+        // memory. Asserting on `to_ne_bytes` is therefore asserting on
+        // what the kernel actually sees, rather than on a second
+        // spelling of the swap the constructor just performed. The swap
+        // is in the constructor rather than at the eleven call sites,
+        // because a tuple in the wrong order matches nothing instead of
+        // failing, which reads as a flow the kernel is not tracking.
+        let CtTuple::Ipv4(v4) = CtTuple::v4(0x0A00_0001, 0x0A00_0002, 443, 33_333) else {
+            panic!("a v4 tuple");
+        };
+        assert_eq!(v4.saddr.to_ne_bytes(), [10, 0, 0, 1]);
+        assert_eq!(v4.daddr.to_ne_bytes(), [10, 0, 0, 2]);
+        assert_eq!(v4.sport.to_ne_bytes(), [0x01, 0xBB]);
+        assert_eq!(v4.dport.to_ne_bytes(), 33_333_u16.to_be_bytes());
+
+        let CtTuple::Ipv6(v6) =
+            CtTuple::v6([0x2001_0DB8, 0, 0, 1], [0x2001_0DB8, 0, 0, 2], 443, 33_333)
+        else {
+            panic!("a v6 tuple");
+        };
+        assert_eq!(v6.saddr[0].to_ne_bytes(), [0x20, 0x01, 0x0D, 0xB8]);
+        assert_eq!(v6.saddr[3].to_ne_bytes(), [0, 0, 0, 1]);
+        assert_eq!(v6.daddr[3].to_ne_bytes(), [0, 0, 0, 2]);
+        assert_eq!(v6.sport.to_ne_bytes(), [0x01, 0xBB]);
+        assert_eq!(v6.dport.to_ne_bytes(), 33_333_u16.to_be_bytes());
     }
 
     #[test]
@@ -2249,9 +2353,15 @@ mod tests {
             unsafe { CtBuilder::from_skb(core::ptr::null_mut(), tuple, &mut opts).unwrap() };
         let mut entry = builder.insert().unwrap();
         assert!(entry.change_timeout(600));
-        assert!(entry.change_status(0x0200 /* IPS_DYING */));
         assert_eq!(host_stubs::host_last_live_timeout(), Some(600));
-        assert_eq!(host_stubs::host_last_live_status(), Some(0x0200));
+        // A settable bit gets through, and getting it through means
+        // carrying the bits already set along with it: the kernel
+        // compares the whole word against the whole word, so asking
+        // for `ASSURED` on its own reads as asking to clear
+        // `CONFIRMED` and is refused on that.
+        let settable = ips_status::CONFIRMED | ips_status::ASSURED;
+        assert!(entry.change_status(settable));
+        assert_eq!(host_stubs::host_last_live_status(), Some(settable));
         drop(entry);
         assert_eq!(host_stubs::host_ct_live_count(), 0);
     }
@@ -2281,29 +2391,39 @@ mod tests {
     }
 
     #[test]
-    fn ct_entry_mark_dying_sets_ips_dying_status() {
+    fn the_kernel_refuses_ips_dying_from_a_bpf_program() {
+        // `nf_ct_change_status_common` returns -EBUSY as soon as the
+        // difference between what is asked for and what is already set
+        // touches the unchangeable mask, and every entry a lookup can
+        // return is already confirmed - so this is refused every time
+        // rather than sometimes. Tearing a flow down is the timeout.
         host_stubs::host_reset_ct_state();
         let tuple = CtTuple::v4(0, 0, 0, 0);
         let mut opts = BpfCtOpts::tcp();
         let builder =
             unsafe { CtBuilder::from_skb(core::ptr::null_mut(), tuple, &mut opts).unwrap() };
         let mut entry = builder.insert().unwrap();
-        assert!(entry.mark_dying());
-        assert_eq!(host_stubs::host_last_live_status(), Some(ips_status::DYING));
+        assert!(!entry.change_status(ips_status::DYING));
+        assert!(!entry.change_status(ips_status::CONFIRMED | ips_status::DYING));
+        assert!(!entry.change_status(ips_status::EXPECTED));
+        assert_eq!(host_stubs::host_last_live_status(), None);
         drop(entry);
         assert_eq!(host_stubs::host_ct_live_count(), 0);
     }
 
     #[test]
-    fn kill_flow_via_skb_ct_marks_dying_and_releases() {
+    fn kill_flow_via_skb_ct_collapses_the_timeout_and_releases() {
         host_stubs::host_reset_ct_state();
         let tuple = CtTuple::v4(0x0100_007F, 0x0200_007F, 443, 12345);
         let mut opts = BpfCtOpts::tcp();
         let killed = unsafe { kill_flow_via_skb_ct(core::ptr::null_mut(), tuple, &mut opts) };
+        // True is the kernel's own word on the tear-down, and the
+        // tear-down is the timeout: what the datapath counts as a
+        // confirmation has to be something the kernel accepts.
         assert!(killed);
-        assert_eq!(host_stubs::host_last_live_status(), Some(ips_status::DYING));
-        // Lookup + release balanced even though we called
-        // change_status inside.
+        assert_eq!(host_stubs::host_last_live_timeout(), Some(1));
+        assert_eq!(host_stubs::host_last_live_status(), None);
+        // Lookup and release stay balanced across the call.
         assert_eq!(host_stubs::host_ct_live_count(), 0);
     }
 
@@ -2315,18 +2435,20 @@ mod tests {
         let mut opts = BpfCtOpts::tcp();
         let killed = unsafe { kill_flow_via_skb_ct(core::ptr::null_mut(), tuple, &mut opts) };
         assert!(!killed);
-        // status should not have been touched.
+        // Nothing was found, so nothing was touched.
+        assert_eq!(host_stubs::host_last_live_timeout(), None);
         assert_eq!(host_stubs::host_last_live_status(), None);
     }
 
     #[test]
-    fn kill_flow_via_xdp_ct_marks_dying() {
+    fn kill_flow_via_xdp_ct_collapses_the_timeout() {
         host_stubs::host_reset_ct_state();
         let tuple = CtTuple::v6([0; 4], [1; 4], 80, 33333);
         let mut opts = BpfCtOpts::tcp();
         let killed = unsafe { kill_flow_via_xdp_ct(core::ptr::null_mut(), tuple, &mut opts) };
         assert!(killed);
-        assert_eq!(host_stubs::host_last_live_status(), Some(ips_status::DYING));
+        assert_eq!(host_stubs::host_last_live_timeout(), Some(1));
+        assert_eq!(host_stubs::host_last_live_status(), None);
         assert_eq!(host_stubs::host_ct_live_count(), 0);
     }
 

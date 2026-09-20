@@ -23,20 +23,20 @@ use ebpf_common::{
     },
     ids::{
         IDS_ACTION_DROP, IDS_METRIC_CGROUP_ATTRIBUTED, IDS_METRIC_CGROUP_TENANT_RESOLVED,
-        IDS_METRIC_COUNT, IDS_METRIC_DROPPED, IDS_METRIC_ERRORS, IDS_METRIC_EVENTS_DROPPED,
-        IDS_METRIC_MATCHED, IDS_METRIC_TOTAL_SEEN, IDS_SAMPLING_RANDOM, IdsPatternKey,
-        IdsPatternValue, IdsSamplingConfig,
+        IDS_METRIC_COUNT, IDS_METRIC_CT_KILL_CONFIRMED, IDS_METRIC_DROPPED, IDS_METRIC_ERRORS,
+        IDS_METRIC_EVENTS_DROPPED, IDS_METRIC_MATCHED, IDS_METRIC_TOTAL_SEEN, IDS_SAMPLING_RANDOM,
+        IdsPatternKey, IdsPatternValue, IdsSamplingConfig,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
 use ebpf_helpers::kfuncs::{
     BpfCtOpts, CtTuple, kill_flow_via_skb_ct, skb_get_fou_encap, skb_packet_size,
 };
-use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::net::{
-    ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
-    ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
+    ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4,
+    u16_from_be_bytes, u32_from_be_bytes,
 };
+use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{emit_packet_event, increment_metric, opaque_usize, ringbuf_has_backpressure};
 use network_types::{
@@ -87,7 +87,7 @@ static IDS_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue, 10240> = HashMap::n
 #[btf_map]
 static IDS_SRC_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue, 10240> = HashMap::new();
 
-/// Per-CPU packet counters. Index: 0=matched, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen, 5=cgroup_tenant_resolved, 6=cgroup_attributed.
+/// Per-CPU packet counters. Index: 0=matched, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen, 5=cgroup_tenant_resolved, 6=cgroup_attributed, 7=ct_kill_confirmed.
 #[btf_map]
 static IDS_METRICS: PerCpuArray<u64, { IDS_METRIC_COUNT as usize }> = PerCpuArray::new();
 
@@ -205,6 +205,11 @@ const METRIC_CGROUP_TENANT_RESOLVED: u32 = IDS_METRIC_CGROUP_TENANT_RESOLVED;
 /// sharing one index would make a mapped tenant indistinguishable from any
 /// container sending traffic.
 const METRIC_CGROUP_ATTRIBUTED: u32 = IDS_METRIC_CGROUP_ATTRIBUTED;
+/// The kernel found the conntrack entry behind a dropped packet and accepted
+/// the tear-down. Counted apart from `METRIC_DROPPED` because a drop is what
+/// this program decided and this is what the kernel applied: a flow with no
+/// entry to tear down is dropped all the same and confirms nothing.
+const METRIC_CT_KILL_CONFIRMED: u32 = IDS_METRIC_CT_KILL_CONFIRMED;
 
 /// 75% threshold for the 4 MiB EVENTS ring buffer. Must stay in sync
 /// with the `RingBuf::with_byte_size` call above.
@@ -634,10 +639,22 @@ fn process_ids_pattern(_ctx: &TcContext, flow: &FlowMeta, protocol: u8) -> Resul
     }
 
     if pattern.action == IDS_ACTION_DROP {
-        // Mark the kernel netfilter conntrack entry as DYING so the
-        // next packet of this flow is dropped by netfilter without a
-        // userspace round-trip. The userspace IdsAppService counter
-        // (ids_ct_dying) is incremented by the packet pipeline.
+        // Tear the kernel netfilter conntrack entry behind this flow
+        // down, by collapsing its timeout onto the gc rather than by
+        // setting a status bit: `IPS_DYING` is in the kernel's
+        // unchangeable mask and refused from a BPF program every time.
+        // What it buys is that a dropped flow stops occupying an entry
+        // it will never close on its own, since it never re-enters
+        // netfilter. The userspace IdsAppService counter (ids_ct_dying)
+        // is incremented by the packet pipeline, and it counts verdicts
+        // rather than packets: it is what the agent decided, not what
+        // the kernel did about it.
+        //
+        // One attempt per packet this branch shoots, which is why
+        // METRIC_DROPPED below doubles as the attempt count and no
+        // second slot restates it. The attempt and the drop have to
+        // stay in this branch together, or the confirmation counter
+        // loses the denominator that makes it readable.
         let tuple = if (flags & FLAG_IPV6) != 0 {
             CtTuple::v6(*src_addr, *dst_addr, src_port, dst_port)
         } else {
@@ -648,8 +665,11 @@ fn process_ids_pattern(_ctx: &TcContext, flow: &FlowMeta, protocol: u8) -> Resul
         } else {
             BpfCtOpts::udp()
         };
-        unsafe {
-            kill_flow_via_skb_ct(_ctx.skb.skb as *mut _, tuple, &mut opts);
+        // The helper reports whether an entry was found and the kernel
+        // accepted the tear-down, which is the kernel's own word on the
+        // enforcement rather than ours.
+        if unsafe { kill_flow_via_skb_ct(_ctx.skb.skb as *mut _, tuple, &mut opts) } {
+            increment_metric(METRIC_CT_KILL_CONFIRMED);
         }
 
         increment_metric(METRIC_DROPPED);

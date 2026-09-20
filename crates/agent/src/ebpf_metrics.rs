@@ -65,9 +65,15 @@ pub async fn run_kernel_metrics_loop(
                         // Counter reset (map recreated on reload) → the
                         // current absolute value is the delta.
                         let delta = if value >= prev { value - prev } else { value };
-                        if delta > 0 {
-                            metrics.record_packets_by(map_name, action, delta);
-                        }
+                        // Recorded even at zero, so a loaded program's counter
+                        // exists from the first poll. Skipping it kept the
+                        // exposition shorter and made absence mean two things
+                        // at once: a slot this build never writes and a slot
+                        // it writes that nothing has hit yet. A reader cannot
+                        // tell those apart, and the second read as the first
+                        // is how a counter nobody measured gets defended as a
+                        // clean run.
+                        metrics.record_packets_by(map_name, action, delta);
                         last.insert(key, value);
                     }
                     Err(e) => {
@@ -114,9 +120,10 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (5, "mtu_exceeded"),
             (6, "throttled_passed"),
         ],
-        // tc-ids carries one index tc-threatintel does not: attribution to
+        // tc-ids carries two indices tc-threatintel does not: attribution to
         // the sending cgroup, which is counted separately from a tenant
-        // resolved through the cgroup map.
+        // resolved through the cgroup map, and the kernel's confirmation that
+        // the flow behind a dropped packet was actually marked dying.
         "IDS_METRICS" => &[
             (0, "matched"),
             (1, "dropped"),
@@ -125,6 +132,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (4, "total_seen"),
             (5, "cgroup_resolved"),
             (6, "cgroup_attributed"),
+            (7, "ct_kill_confirmed"),
         ],
         "THREATINTEL_METRICS" => &[
             (0, "matched"),
@@ -450,6 +458,23 @@ mod tests {
             !metric_labels("THREATINTEL_METRICS")
                 .iter()
                 .any(|(idx, _)| *idx == 6)
+        );
+    }
+
+    #[test]
+    fn what_the_kernel_applied_is_counted_apart_from_what_was_decided() {
+        // Slot 1 is the packet this program shot, slot 7 is the conntrack
+        // entry the kernel found and marked behind it. A flow with no entry
+        // is dropped and confirms nothing, so one label for both would report
+        // a decision as an enforcement.
+        let labels = metric_labels("IDS_METRICS");
+        assert_eq!(
+            labels.iter().find(|(idx, _)| *idx == 7).map(|(_, l)| *l),
+            Some("ct_kill_confirmed")
+        );
+        assert_eq!(
+            labels.iter().find(|(idx, _)| *idx == 1).map(|(_, l)| *l),
+            Some("dropped")
         );
     }
 
