@@ -56,6 +56,12 @@ pub struct ProgramLabels {
     pub program: String,
 }
 
+/// One eBPF map, by the full name the ELF gives it.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct MapLabels {
+    pub map: String,
+}
+
 /// One interface and one of the XDP modes it could be running in.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct XdpModeLabels {
@@ -176,6 +182,14 @@ pub struct AgentMetrics {
     /// measurement - a datapath that attached everything it loaded. A family
     /// exports nothing until something has actually looked.
     pub ebpf_attach_blocked: Family<Vec<(String, String)>, Gauge>,
+    /// A family with no labels for the same reason as the one above: zero here
+    /// is a verifier that refused nothing, and a bare gauge would export that
+    /// from the moment the registry existed, before anything had been loaded.
+    pub ebpf_verifier_rejections: Family<Vec<(String, String)>, Gauge>,
+    /// Occupancy per map, in parts per thousand. Only the maps that refuse an
+    /// insert when full are ever set, so a map with no series here is one
+    /// nobody could measure rather than one sitting empty.
+    pub ebpf_map_fill_permille: Family<MapLabels, Gauge>,
     pub xdp_attach_mode: Family<XdpModeLabels, Gauge>,
     pub packet_processing_duration: Family<ProgramLabels, Histogram>,
     pub rules_reloads_total: Family<ReloadLabels, Counter>,
@@ -307,6 +321,20 @@ impl AgentMetrics {
             "ebpf_attach_blocked",
             "eBPF programs that loaded but could not be attached",
             ebpf_attach_blocked.clone(),
+        );
+
+        let ebpf_verifier_rejections = Family::<Vec<(String, String)>, Gauge>::default();
+        registry.register(
+            "ebpf_verifier_rejections",
+            "eBPF program loads the kernel verifier refused",
+            ebpf_verifier_rejections.clone(),
+        );
+
+        let ebpf_map_fill_permille = Family::<MapLabels, Gauge>::default();
+        registry.register(
+            "ebpf_map_fill_permille",
+            "How full an eBPF map that refuses inserts is, in parts per thousand",
+            ebpf_map_fill_permille.clone(),
         );
 
         let xdp_attach_mode = Family::<XdpModeLabels, Gauge>::default();
@@ -735,6 +763,8 @@ impl AgentMetrics {
             rules_loaded,
             ebpf_program_status,
             ebpf_attach_blocked,
+            ebpf_verifier_rejections,
+            ebpf_map_fill_permille,
             xdp_attach_mode,
             packet_processing_duration,
             rules_reloads_total,
@@ -891,6 +921,24 @@ impl FirewallMetrics for AgentMetrics {
         self.ebpf_attach_blocked
             .get_or_create(&Vec::new())
             .set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn set_ebpf_verifier_rejections(&self, count: u64) {
+        self.ebpf_verifier_rejections
+            .get_or_create(&Vec::new())
+            .set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn set_ebpf_map_fill(&self, map: &str, permille: u16) {
+        self.ebpf_map_fill_permille
+            .get_or_create(&MapLabels {
+                map: map.to_string(),
+            })
+            .set(i64::from(permille));
+    }
+
+    fn clear_ebpf_map_fill(&self) {
+        self.ebpf_map_fill_permille.clear();
     }
 
     fn set_xdp_attach_mode(&self, interface: &str, mode: &str) {
@@ -1772,7 +1820,9 @@ mod tests {
         ("domain_auto_blocked", "counter"),
         ("domain_reputation_high_risk", "gauge"),
         ("ebpf_attach_blocked", "gauge"),
+        ("ebpf_map_fill_permille", "gauge"),
         ("ebpf_program_status", "gauge"),
+        ("ebpf_verifier_rejections", "gauge"),
         ("encrypted_dns_detections", "counter"),
         ("events_dropped", "counter"),
         ("false_positives", "counter"),
@@ -1992,6 +2042,12 @@ mod tests {
             })
             .set(1);
         m.ebpf_attach_blocked.get_or_create(&Vec::new()).set(0);
+        m.ebpf_verifier_rejections.get_or_create(&Vec::new()).set(0);
+        m.ebpf_map_fill_permille
+            .get_or_create(&MapLabels {
+                map: "IDS_PATTERNS".into(),
+            })
+            .set(0);
         m.xdp_attach_mode
             .get_or_create(&XdpModeLabels {
                 interface: "eth0".into(),

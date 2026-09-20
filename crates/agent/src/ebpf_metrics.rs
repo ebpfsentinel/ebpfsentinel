@@ -344,6 +344,7 @@ pub async fn run_datapath_state_loop(
     cancel: CancellationToken,
 ) {
     let mut ticker = tokio::time::interval(interval);
+    let mut tick: u32 = 0;
 
     loop {
         tokio::select! {
@@ -353,6 +354,7 @@ pub async fn run_datapath_state_loop(
 
         let blocked = adapters::ebpf::blocked_attaches().len();
         metrics.set_ebpf_attach_blocked(u64::try_from(blocked).unwrap_or(u64::MAX));
+        metrics.set_ebpf_verifier_rejections(adapters::ebpf::kfunc_loader::verifier_rejections());
 
         for interface in &interfaces {
             match xdp_mode_of(interface) {
@@ -360,8 +362,31 @@ pub async fn run_datapath_state_loop(
                 None => metrics.clear_xdp_attach_mode(interface),
             }
         }
+
+        if tick.is_multiple_of(MAP_FILL_EVERY_TICKS) {
+            let fills = adapters::ebpf::map_fills();
+            if fills.is_empty() {
+                // Nothing measurable is left, which is what a torn-down
+                // datapath looks like. Keeping the last occupancy standing
+                // would report maps that no longer exist.
+                metrics.clear_ebpf_map_fill();
+            } else {
+                for fill in fills {
+                    metrics.set_ebpf_map_fill(&fill.name, fill.permille());
+                }
+            }
+        }
+        tick = tick.wrapping_add(1);
     }
 }
+
+/// How many state ticks pass between two map-fullness measurements.
+///
+/// The measurement walks every map that can refuse an insert, key by key,
+/// which is thousands of syscalls the state loop has no reason to spend every
+/// time it looks at an attachment. A map filling up is a slow fault, so asking
+/// an order of magnitude less often costs nothing an operator would notice.
+const MAP_FILL_EVERY_TICKS: u32 = 10;
 
 /// The XDP mode the kernel reports for one interface, or nothing.
 ///

@@ -56,6 +56,28 @@ pub trait FirewallMetrics: Send + Sync {
     /// the same answer as a mode nobody recognises: leaving the last known one
     /// standing would report an attachment that has gone.
     fn clear_xdp_attach_mode(&self, _interface: &str) {}
+
+    /// Set how many program loads the kernel verifier has refused.
+    ///
+    /// Zero is a measurement and says the verifier accepted everything this
+    /// build asked it to load, so a build that cannot count must not call this
+    /// at all: a zero nobody measured reads as a clean verifier, which is the
+    /// worst kind of wrong figure because every figure beside it is right.
+    fn set_ebpf_verifier_rejections(&self, _count: u64) {}
+
+    /// Set how full one eBPF map is, in parts per thousand.
+    ///
+    /// Only the maps that refuse an insert when they are full are reported: an
+    /// LRU map evicts instead, so it sits at its ceiling in normal service and
+    /// its occupancy is not a fault. A map that is not reported was not
+    /// measured, which is not the same answer as a map sitting empty.
+    fn set_ebpf_map_fill(&self, _map: &str, _permille: u16) {}
+
+    /// Forget every map fullness recorded.
+    ///
+    /// The maps die with the loaders, so a measurement left standing would
+    /// report occupancy in a datapath that has been torn down.
+    fn clear_ebpf_map_fill(&self) {}
 }
 
 // ── Alert pipeline metrics ─────────────────────────────────────────

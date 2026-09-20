@@ -38,7 +38,8 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::hash::BuildHasher;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use aya::maps::{Map as AyaMap, MapData};
 use aya_obj::btf::BtfFeatures;
@@ -50,6 +51,23 @@ use super::kfunc::{KfuncError, KfuncResolver, KfuncTarget};
 /// `bpf(2)` commands. Numbers from `enum bpf_cmd`.
 const BPF_PROG_LOAD: u32 = 5;
 const BPF_BTF_LOAD: u32 = 18;
+
+/// Program loads the kernel verifier has refused, for the life of the process.
+///
+/// A rejection is counted where the verifier actually spoke: a load that failed
+/// with an empty log failed for a reason of its own (no permission, a kernel
+/// that does not know the program type) and is not the verifier saying no.
+static VERIFIER_REJECTIONS: AtomicU64 = AtomicU64::new(0);
+
+/// How many program loads the verifier has refused since the agent started.
+///
+/// Zero is a measurement here, which is the whole point of counting it: a
+/// build that never looked reports nothing at all rather than a zero that
+/// reads as a clean verifier.
+#[must_use]
+pub fn verifier_rejections() -> u64 {
+    VERIFIER_REJECTIONS.load(Ordering::Relaxed)
+}
 
 /// The process-global BPF token fd (set by the agent after `BPF_TOKEN_CREATE`),
 /// or `None` when loading via capabilities - so every raw BTF/program load this
@@ -976,6 +994,7 @@ unsafe fn bpf(cmd: u32, attr: *mut core::ffi::c_void, size: usize) -> i64 {
 // `aya::maps::Map` so the existing map managers consume them unchanged.
 
 const BPF_MAP_CREATE: u32 = 0;
+const BPF_MAP_GET_NEXT_KEY: u32 = 4;
 const BPF_OBJ_PIN: u32 = 6;
 const BPF_OBJ_GET: u32 = 7;
 
@@ -1266,6 +1285,75 @@ fn obj_get(path: &str) -> Option<OwnedFd> {
     Some(unsafe { OwnedFd::from_raw_fd(rc as RawFd) })
 }
 
+/// `union bpf_attr` member for the map element commands. Only
+/// `BPF_MAP_GET_NEXT_KEY` is issued here, which reads `key` and writes
+/// `next_key`.
+#[repr(C)]
+#[derive(Default)]
+struct MapElemAttr {
+    map_fd: u32,
+    _pad: u32,
+    key: u64,
+    next_key: u64,
+    flags: u64,
+}
+
+/// Count the entries a map holds by walking it with `BPF_MAP_GET_NEXT_KEY`.
+///
+/// `None` is the only honest answer when the walk could not be completed, and
+/// it is deliberately different from `Some(0)`: an empty map and a map nobody
+/// could read are not the same fact.
+///
+/// The walk stops at `max_entries` rather than running to exhaustion. A map the
+/// datapath is writing while it is read can hand back a key already seen, and a
+/// count that never terminates would cost more than the figure is worth; a map
+/// that really is full reaches the ceiling and reports it.
+pub fn count_map_entries(fd: BorrowedFd<'_>, key_size: u32, max_entries: u32) -> Option<u64> {
+    let map_fd = u32::try_from(fd.as_raw_fd()).ok()?;
+    let key_len = usize::try_from(key_size).ok()?;
+    if key_len == 0 {
+        return None;
+    }
+    let mut current = vec![0u8; key_len];
+    let mut next = vec![0u8; key_len];
+    let mut walked = false;
+    let mut seen = 0u64;
+    let ceiling = u64::from(max_entries);
+
+    while seen < ceiling {
+        let mut attr = MapElemAttr {
+            map_fd,
+            key: if walked {
+                current.as_mut_ptr() as u64
+            } else {
+                0
+            },
+            next_key: next.as_mut_ptr() as u64,
+            ..Default::default()
+        };
+        let rc = unsafe {
+            bpf(
+                BPF_MAP_GET_NEXT_KEY,
+                (&raw mut attr).cast(),
+                std::mem::size_of::<MapElemAttr>(),
+            )
+        };
+        if rc < 0 {
+            let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            // `ENOENT` is how the kernel says the walk reached the end.
+            return if errno == libc::ENOENT {
+                Some(seen)
+            } else {
+                None
+            };
+        }
+        current.copy_from_slice(&next);
+        walked = true;
+        seen += 1;
+    }
+    Some(seen)
+}
+
 /// Wrap a raw map fd into the `aya::maps::Map` variant matching its kernel map
 /// type, so the typed map managers (`Array::try_from`, `HashMap::try_from`, …)
 /// accept it. Mirrors aya's own `map_type → Map` table (`bpf.rs`).
@@ -1372,6 +1460,39 @@ fn create_object_maps(
     Ok(out)
 }
 
+/// Load every program in an object, falling back to a neutralized load when the
+/// device-bound attempt fails, and count the rejection the object finally
+/// earned.
+///
+/// Only the final answer is counted. The device-bound attempt is a question
+/// this loader asks on purpose - `bpf_xdp_metadata_rx_*` resolve only for a
+/// program bound to a netdev - so a verifier refusing it has answered the
+/// question rather than found a fault, and counting it would report every
+/// driver without metadata support as a broken build.
+fn load_programs_counting_rejections<S: BuildHasher>(
+    elf: &[u8],
+    resolver: &KfuncResolver,
+    hosted: &HashMap<String, OwnedFd, S>,
+    dev_bound_ifindex: Option<u32>,
+) -> Result<Vec<KfuncLoadedProgram>, KfuncLoaderError> {
+    // Device-bound metadata fallback: try device bound first (so
+    // `bpf_xdp_metadata_rx_*` resolve), then retry neutralized.
+    let result = if dev_bound_ifindex.is_some() && uses_dev_bound_metadata_kfuncs(elf) {
+        match load_kfunc_programs(elf, resolver, hosted, dev_bound_ifindex) {
+            Ok(programs) => Ok(programs),
+            Err(_) => load_kfunc_programs(elf, resolver, hosted, None),
+        }
+    } else {
+        load_kfunc_programs(elf, resolver, hosted, None)
+    };
+    if let Err(KfuncLoaderError::ProgLoad { log, .. }) = &result
+        && !log.is_empty()
+    {
+        VERIFIER_REJECTIONS.fetch_add(1, Ordering::Relaxed);
+    }
+    result
+}
+
 /// Load a complete eBPF object through the BPF token: create all maps, load
 /// BTF, relocate, and load every program - all token-authorized, no aya, no
 /// `CAP_BPF`. Returns the maps (wrapped for the managers) and program fds.
@@ -1417,16 +1538,8 @@ pub fn load_object_token(
         .map_err(|e| KfuncLoaderError::MapWrap(e.to_string()))?;
 
     let resolver = KfuncResolver::new()?;
-    // Device-bound metadata fallback: try device bound first (so
-    // `bpf_xdp_metadata_rx_*` resolve), then retry neutralized.
-    let programs = if dev_bound_ifindex.is_some() && uses_dev_bound_metadata_kfuncs(&patched) {
-        match load_kfunc_programs(&patched, &resolver, &hosted, dev_bound_ifindex) {
-            Ok(p) => p,
-            Err(_) => load_kfunc_programs(&patched, &resolver, &hosted, None)?,
-        }
-    } else {
-        load_kfunc_programs(&patched, &resolver, &hosted, None)?
-    };
+    let programs =
+        load_programs_counting_rejections(&patched, &resolver, &hosted, dev_bound_ifindex)?;
     drop(btf_fd);
 
     let mut maps = HashMap::new();

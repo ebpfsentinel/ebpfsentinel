@@ -1013,6 +1013,9 @@ pub fn detach_ebpf(state: EbpfState) {
     // next activate would keep readiness pinned to a conflict the agent has
     // already stopped competing for.
     adapters::ebpf::clear_attach_blocks();
+    // And for the map handles held for the fullness measurement: the maps died
+    // with the loaders, so walking them would report a datapath that is gone.
+    adapters::ebpf::clear_map_fills();
     // Same reasoning for the DLP uprobe set: the links died with the loaders, so
     // continuing to publish them would report TLS inspection that is not running.
     adapters::ebpf::clear_uprobe_inventory();

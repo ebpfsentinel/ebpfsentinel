@@ -247,6 +247,7 @@ impl EbpfProgramManager {
             "shutdown: all programs detached",
         );
         adapters::ebpf::clear_attach_blocks();
+        adapters::ebpf::clear_map_fills();
         info!("all eBPF programs detached");
     }
 

@@ -111,3 +111,43 @@ teardown_file() {
         ip link show "$VETH_NAME" &>/dev/null
     fi
 }
+
+@test "the verifier's refusals are counted rather than left unsaid" {
+    require_root
+
+    # A build that never looked exports no series at all, which is how the
+    # portal tells "no rejection" apart from "nobody counted". This build
+    # looks, so the series has to be here even when the figure is zero.
+    local value
+    value="$(get_metrics_value ebpfsentinel_ebpf_verifier_rejections)" || true
+    [ -n "$value" ]
+}
+
+@test "the maps that can refuse an insert say how full they are" {
+    require_root
+
+    # The measurement rides the datapath state loop, whose first tick fires as
+    # the loop starts and then every 30 seconds, so a fresh agent is given one
+    # full interval before the absence of the series counts as a failure.
+    local metrics_url="http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics"
+    local waited=0 body=""
+    while [ "$waited" -lt 40 ]; do
+        body="$(curl -sf --max-time "$HTTP_TIMEOUT" "$metrics_url" 2>/dev/null)" || true
+        if echo "$body" | grep -q '^ebpfsentinel_ebpf_map_fill_permille{'; then
+            break
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+
+    echo "$body" | grep -q '^ebpfsentinel_ebpf_map_fill_permille{'
+
+    # Per mille, so a map nobody has written to is zero and a full one is a
+    # thousand. Anything outside that is a figure nobody can act on.
+    local worst
+    worst="$(echo "$body" | grep '^ebpfsentinel_ebpf_map_fill_permille{' \
+        | awk '{print $2}' | sort -n | tail -1)"
+    [ -n "$worst" ]
+    [ "${worst%.*}" -ge 0 ]
+    [ "${worst%.*}" -le 1000 ]
+}

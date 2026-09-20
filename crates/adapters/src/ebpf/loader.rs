@@ -63,6 +63,9 @@ impl EbpfLoader {
             .into_iter()
             .map(|p| (p.name, p.fd))
             .collect();
+        // Take a handle on every map whose fullness an operator can act on,
+        // before this object's maps disperse into the managers that own them.
+        super::map_fill::register(&loaded.hosted);
         Self {
             token_maps: super::map_store::TokenMaps::new(loaded.maps),
             netkit_links: Vec::new(),

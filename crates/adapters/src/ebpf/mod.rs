@@ -23,6 +23,7 @@ pub mod l7_ports_manager;
 pub mod lb_map_manager;
 pub mod loader;
 pub mod lpm_coordinator;
+pub mod map_fill;
 pub mod map_manager;
 pub mod map_store;
 pub mod metrics_reader;
@@ -84,6 +85,9 @@ pub use l7_ports_manager::L7PortsManager;
 pub use lb_map_manager::LbMapManager;
 pub use loader::{DEFAULT_BPF_PIN_PATH, EbpfLoader, xdp_mode_to_flags};
 pub use lpm_coordinator::LpmCoordinator;
+pub use map_fill::{
+    MapFill, clear_all as clear_map_fills, measure as map_fills, register as register_map_fills,
+};
 pub use map_manager::FirewallMapManager;
 pub use metrics_reader::MetricsReader;
 pub use nat_map_manager::NatMapManager;
