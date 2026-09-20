@@ -35,7 +35,7 @@ env:
   - "${tool} not available on attacker VM"
   - "${tool} not installed"
   - "${tool} not installed on agent VM"
-  - "/proc/net/nf_conntrack unavailable - event stream not wired"
+  - "kernel conntrack table unreadable by either source - event stream not wired"
   - "Agent binary not found:"
   - "Docker agent not healthy"
   - "Docker daemon not running"

@@ -153,6 +153,18 @@ Require **root** and **kernel >= 6.9** (or 2-VM mode). Measure agent overhead us
 
 Per-suite mapping lives in the `suite_profiles:` block of `coverage-matrix.yaml`. The audit gate (`scripts/audit-coverage.sh`) fails the build if a new suite lands without an explicit profile pin. The workflow reads this block via `scripts/list-suites-by-profile.sh`, so adding a new suite needs **no** workflow edit.
 
+**Lanes** (consumed by the three runners):
+
+- `scripts/run-local-lane.sh` - one machine. The suite runs on the host that runs the agent, and traffic comes out of a network namespace beside it.
+- `scripts/run-in-2vm.sh` - the suite runs on the attacker VM and drives an agent on a machine of its own.
+- `scripts/run-in-3vm.sh` - the same, with a backend behind the agent so the agent is a transit hop.
+
+The `lanes` field on each `attack_suites` row names the lanes a suite is written for, and is the one field the three runners select on. It is deliberately not `topology`, which is the fewest machines a suite needs: a suite needing a second machine for its wire assertions can still carry API-surface tests that run on a single one, and a suite can be unrunnable on a lane for a reason of the lane rather than of the product - suite 59 drives TCP/22, which sshd already holds on the machine the two-machine lane reaches over SSH, so seven of its eight tests skipped there while all eight pass on one machine. A suite with no row runs on the local lane, which is every suite below 38.
+
+Running every suite on every lane was the older behaviour and it reported skips that were a fact about the lane rather than about the product: forty-one of the fifty-seven skips a full local run printed were a suite asking for a machine that lane does not have. Passing suite numbers to a runner still overrides the list, which is how a single suite is re-run after a fix.
+
+What scoping cannot remove is a suite written for more than one lane whose individual tests are not: suites 50 and 55 carry both a single-machine probe and a `skip_if_not_3vm` test, so each of those tests runs on exactly one of the three lanes and skips on the others. That is a test needing more machines than the lane has, not a gap: every one of them runs somewhere.
+
 ### CI profiles & budget guard
 
 | Trigger | Profile resolved | Jobs that run |

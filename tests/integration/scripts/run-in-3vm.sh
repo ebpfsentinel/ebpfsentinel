@@ -137,23 +137,47 @@ cd "$INTEGRATION_DIR"
 list_transit_suites() {
     # Emit the suites that actually exercise the transit path.
     #
-    # The list comes from the suites themselves rather than from
-    # coverage-matrix.yaml, because the matrix's `topology` field describes a
-    # feature and not a suite: the firewall row is tagged 3vm and lists every
-    # suite touching the firewall, most of which drive traffic out of a local
-    # network namespace that exists on no VM of this lane. Reading it gave
-    # sixteen suites, of which five failed for want of that namespace and one
-    # passed for the wrong reason - asserting a connection was refused when
-    # nothing had tried to open one.
+    # The list comes from the `lanes` field of the `attack_suites` section of
+    # coverage-matrix.yaml, which is the one part of that file keyed by suite
+    # rather than by feature. The `coverage` section above it cannot answer
+    # this question: a row there is a feature and its `suites` list spans every
+    # lane the feature is touched on, so reading it gave sixteen suites, of
+    # which five failed for want of a network namespace that exists on no VM of
+    # this lane and one passed for the wrong reason - asserting a connection was
+    # refused when nothing had tried to open one. Neither can `topology`, which
+    # is the fewest machines a suite needs rather than where it is meant to run.
     #
-    # A transit suite is one that names the third VM: it gates on
-    # skip_if_not_3vm, reaches the backend, or asks for the route through the
-    # agent. Deriving the list from that keeps a suite written tomorrow in the
-    # lane without a second list to remember to update.
-    grep -lE 'skip_if_not_3vm|_backend_ssh|BACKEND_VM_IP|route_via_agent|start_backend_service' \
+    # A suite kept out of every lane's list is a suite nothing runs, so the
+    # three runners read the same field and the check below asserts that what
+    # the suites say about themselves and what the matrix says agree.
+    local named derived
+    named="$(awk '
+        /^attack_suites:/ { inblk=1; next }
+        inblk && /^[a-z_]+:/ { inblk=0 }
+        inblk && /^[[:space:]]*-?[[:space:]]*suite:/ {
+            s=$NF; gsub(/[\042\047]/,"",s); last=s; next
+        }
+        inblk && /^[[:space:]]*lanes:/ {
+            if (last!="" && last !~ /\// && index($0, "3vm") > 0) print last
+            last=""
+        }
+    ' "${COVERAGE_MATRIX}" | sort -u)"
+
+    # A transit suite names the third VM: it gates on skip_if_not_3vm, reaches
+    # the backend, or asks for the route through the agent. A suite doing that
+    # and missing from the matrix would silently never run here.
+    derived="$(grep -lE 'skip_if_not_3vm|_backend_ssh|BACKEND_VM_IP|route_via_agent|start_backend_service' \
         "${SUITE_DIR}"/*.bats 2>/dev/null \
         | while IFS= read -r f; do basename "$f" | sed 's/-.*//'; done \
-        | sort -u
+        | sort -u)"
+
+    if [ "$named" != "$derived" ]; then
+        echo "ERROR: coverage-matrix.yaml lanes and the suites disagree on the transit lane" >&2
+        echo "  matrix: $(echo "$named" | tr '\n' ' ')" >&2
+        echo "  suites: $(echo "$derived" | tr '\n' ' ')" >&2
+        exit 1
+    fi
+    echo "$named"
 }
 
 # Emit suite numbers whose suite_profiles entry matches $PROFILE.

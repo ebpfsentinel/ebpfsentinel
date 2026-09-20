@@ -55,7 +55,54 @@ else
     echo "WARNING: python3 + PyYAML absent, skip audit not run" | tee -a "$OUT"
 fi
 
-for s in "$@"; do
+# ── Build suite list ───────────────────────────────────────────────
+# Suites named on the command line win: the lane is also how a single suite
+# is re-run after a fix. With no argument the lane runs what it is written
+# for, read off the `lanes` field of coverage-matrix.yaml.
+#
+# Running every suite on disk was the older behaviour and it was wrong the
+# same way it was wrong on the two- and three-machine lanes: a suite whose
+# traffic comes off a second machine has no way to produce it here, so it
+# skips test by test and the run reports thirty-four skips that are a fact
+# about the lane rather than about the product.
+list_off_lane_suites() {
+    awk '
+        /^attack_suites:/ { inblk=1; next }
+        inblk && /^[a-z_]+:/ { inblk=0 }
+        inblk && /^[[:space:]]*-?[[:space:]]*suite:/ {
+            s=$NF; gsub(/[\042\047]/,"",s); last=s; next
+        }
+        inblk && /^[[:space:]]*lanes:/ {
+            if (last != "" && index($0, "local") == 0) print last
+            last=""
+        }
+    ' coverage-matrix.yaml | sort -u
+}
+
+list_local_suites() {
+    local off
+    off=" $(list_off_lane_suites | tr '\n' ' ')"
+    for f in suites/*.bats; do
+        local n
+        n="$(basename "$f" | sed 's/-.*//')"
+        case "$off" in
+            *" ${n} "*) continue ;;
+        esac
+        echo "$n"
+    done
+}
+
+if [ "$#" -gt 0 ]; then
+    SUITES="$*"
+else
+    SUITES="$(list_local_suites | tr '\n' ' ')"
+    if [ -z "${SUITES// /}" ]; then
+        echo "ERROR: no suite under suites/ is written for the local lane" >&2
+        exit 1
+    fi
+fi
+
+for s in $SUITES; do
     suite="$(ls suites/${s}-*.bats 2>/dev/null | head -1)"
     if [ -z "$suite" ]; then
         echo "SUITE ${s}: NOT FOUND" >>"$OUT"

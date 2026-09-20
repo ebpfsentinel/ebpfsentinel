@@ -76,10 +76,17 @@ teardown_file() {
 }
 
 @test "Conntrack: GET events opens an SSE stream" {
-    # The event stream is only wired when the kernel exposes
-    # /proc/net/nf_conntrack (see startup: nf_ct_available).
-    if [ ! -r /proc/net/nf_conntrack ]; then
-        env_skip "/proc/net/nf_conntrack unavailable - event stream not wired"
+    # The stream is wired when the agent can read the kernel conntrack table by
+    # either source, which is the rule its own startup applies: the proc file
+    # when the kernel was built with CONFIG_NF_CONNTRACK_PROCFS, and otherwise a
+    # `conntrack -L` that succeeds. Asking only for the proc file asked for a
+    # deprecated interface distributions are dropping - it is unset on the
+    # kernel these VMs run - so this test skipped on a host where the feature
+    # was live. The question is put to the agent's own host, which is a machine
+    # of its own on the two- and three-machine lanes.
+    if ! _agent_ssh_sudo test -r /proc/net/nf_conntrack &&
+        ! _agent_ssh_sudo conntrack -L >/dev/null 2>&1; then
+        env_skip "kernel conntrack table unreadable by either source - event stream not wired"
     fi
 
     local headers

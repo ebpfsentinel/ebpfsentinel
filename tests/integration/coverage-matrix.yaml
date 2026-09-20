@@ -755,11 +755,24 @@ coverage:
 # attack suite individually so CI scheduling (nightly vs PR) and
 # topology requirements can be looked up by suite id without scanning
 # the cross-product of feature rows.
+#
+#   topology  the fewest machines the suite needs to exercise everything
+#             it asserts.
+#   lanes     the lanes the suite is written to run on, and the one field
+#             the three runners select on. It is not derivable from
+#             `topology`: a suite needing a second machine for its wire
+#             assertions can still carry API-surface tests that run on a
+#             single one, and a suite tagged `2vm` can be unrunnable there
+#             for a reason of the lane rather than of the product - 59
+#             drives TCP/22, which sshd already holds on a lane reached
+#             over SSH. A suite with no row here runs on the local lane,
+#             which is what every suite below 38 is.
 
 attack_suites:
   - suite: "38"
     name: mhddos-l7-attacks
     topology: 2vm
+    lanes: ["2vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["l7", "ips", "ratelimit", "ddos", "ids"]
@@ -768,6 +781,7 @@ attack_suites:
   - suite: "perf/04"
     name: pktgen-high-pps
     topology: 2vm
+    lanes: ["2vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["xdp-firewall", "xdp-ratelimit", "tc-ids"]
@@ -776,6 +790,7 @@ attack_suites:
   - suite: "39"
     name: slowhttptest-slow-attacks
     topology: 2vm
+    lanes: ["2vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["l7", "ids", "ips", "ddos"]
@@ -784,6 +799,7 @@ attack_suites:
   - suite: "40"
     name: scapy-amplification
     topology: 2vm
+    lanes: ["2vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["xdp-firewall", "tc-scrub", "ddos"]
@@ -792,6 +808,7 @@ attack_suites:
   - suite: "41"
     name: ja4-fingerprint-diversity
     topology: 2vm
+    lanes: ["2vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["l7", "fingerprints"]
@@ -800,6 +817,7 @@ attack_suites:
   - suite: "42"
     name: xdp-firewall-reject
     topology: 2vm
+    lanes: ["2vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["xdp-firewall", "xdp-firewall-reject"]
@@ -808,6 +826,7 @@ attack_suites:
   - suite: "43"
     name: xdp-ratelimit-syncookie
     topology: 2vm
+    lanes: ["2vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["xdp-ratelimit", "xdp-ratelimit-syncookie", "ddos"]
@@ -816,6 +835,7 @@ attack_suites:
   - suite: "44"
     name: lb-dsr-maglev
     topology: 3vm
+    lanes: ["3vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["xdp-loadbalancer", "xdp-vip-announcer", "loadbalancer"]
@@ -824,6 +844,7 @@ attack_suites:
   - suite: "45"
     name: dns-doh-dot-detect
     topology: 3vm
+    lanes: ["3vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["tc-dns", "l7", "dns"]
@@ -832,6 +853,7 @@ attack_suites:
   - suite: "46"
     name: scrub-byte-level
     topology: 3vm
+    lanes: ["3vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["tc-scrub", "firewall"]
@@ -840,6 +862,7 @@ attack_suites:
   - suite: "47"
     name: conntrack-kernel-ct-kill
     topology: 3vm
+    lanes: ["3vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["tc-conntrack", "xdp-firewall", "firewall", "conntrack"]
@@ -848,6 +871,7 @@ attack_suites:
   - suite: "48"
     name: responses-time-bounded
     topology: 2vm
+    lanes: ["local", "2vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["responses", "response"]
@@ -856,6 +880,7 @@ attack_suites:
   - suite: "49"
     name: capture-pcap-export
     topology: 2vm
+    lanes: ["local", "2vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["capture"]
@@ -863,15 +888,17 @@ attack_suites:
 
   - suite: "50"
     name: nptv6-prefix-translation
-    topology: 2vm
+    topology: 3vm
+    lanes: ["3vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["tc-nat-egress", "tc-nat-ingress", "nat", "nptv6"]
-    notes: "NPTv6 (RFC 6296) prefix translation surface: GET /api/v1/nat/nptv6 surfaces configured rule, POST + DELETE round-trip a rule, CLI `nat nptv6 list` mirrors the REST list; wire-level egress-source-prefix swap (fd00:54::/64 → 2001:db8:54::/64) gated on per-VM IPv6 reachability and skips when the test VMs lack the IPv6 link addresses + routes"
+    notes: "NPTv6 (RFC 6296) prefix translation surface: GET /api/v1/nat/nptv6 surfaces configured rule, POST + DELETE round-trip a rule, CLI `nat nptv6 list` mirrors the REST list - all three read a fixture bound to the external NIC, so the whole suite needs the multi-NIC topology and not only the wire test; wire-level egress-source-prefix swap (fd00:54::/64 → 2001:db8:54::/64) gated on per-VM IPv6 reachability and skips when the test VMs lack the IPv6 link addresses + routes"
 
   - suite: "51"
     name: mitre-assertions-sweep
     topology: none
+    lanes: ["local"]
     kernel_min: "n/a"
     profile: pr
     surfaces: ["alert", "mitre"]
@@ -880,6 +907,7 @@ attack_suites:
   - suite: "52"
     name: hot-reload-under-load
     topology: 2vm
+    lanes: ["local", "2vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["firewall", "config-reload"]
@@ -888,6 +916,7 @@ attack_suites:
   - suite: "53"
     name: multiwan-failover
     topology: 2vm
+    lanes: ["local", "2vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["routing"]
@@ -896,6 +925,7 @@ attack_suites:
   - suite: "54"
     name: container-cgroup-enrichment
     topology: 2vm
+    lanes: ["local", "2vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["container"]
@@ -903,7 +933,8 @@ attack_suites:
 
   - suite: "55"
     name: ipv6-full-path-sweep
-    topology: 2vm
+    topology: 3vm
+    lanes: ["local", "2vm", "3vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["firewall", "ids", "ips", "ratelimit", "dns"]
@@ -912,6 +943,7 @@ attack_suites:
   - suite: "56"
     name: l7-smtp-ftp-smb-edge
     topology: 2vm
+    lanes: ["local", "2vm"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["l7"]
@@ -919,7 +951,8 @@ attack_suites:
 
   - suite: "58"
     name: pqc-handshake
-    topology: 2vm
+    topology: none
+    lanes: ["local"]
     kernel_min: "n/a"
     profile: nightly
     surfaces: ["tls", "crypto"]
@@ -927,7 +960,8 @@ attack_suites:
 
   - suite: "59"
     name: ssh-brute-force-real
-    topology: 2vm
+    topology: none
+    lanes: ["local"]
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["ids", "ips"]

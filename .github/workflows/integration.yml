@@ -474,6 +474,21 @@ jobs:
               for s, k, t in bad:
                   print(f"::error::{s} entry '{k}' has invalid topology '{t}'", file=sys.stderr)
               sys.exit(1)
+
+          # Every attack-suite row names the lanes it is written for. That field
+          # is what the three runners select on, so a row without it is a suite
+          # no lane runs, which reads as coverage.
+          lanes_allowed = {"local", "2vm", "3vm"}
+          bad_lanes = []
+          for row in doc.get("attack_suites", []) or []:
+              suite = row.get("suite")
+              lanes = row.get("lanes")
+              if not lanes or not isinstance(lanes, list) or set(lanes) - lanes_allowed:
+                  bad_lanes.append((suite, lanes))
+          if bad_lanes:
+              for s, l in bad_lanes:
+                  print(f"::error::attack suite '{s}' has invalid lanes {l!r}", file=sys.stderr)
+              sys.exit(1)
           PY
 
       - name: Boot 3-VM transit topology

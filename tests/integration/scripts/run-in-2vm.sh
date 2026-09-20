@@ -60,13 +60,20 @@ fi
 
 # ── Build suite list ───────────────────────────────────────────────
 list_2vm_suites() {
-    # Emit the suites that actually need a second machine.
+    # Emit the suites this lane is written to run.
     #
     # The list comes from the `attack_suites` section of coverage-matrix.yaml,
     # which is the one part of that file keyed by suite rather than by feature:
-    # each row names a suite and the topology it is written for. The `coverage`
+    # each row names a suite and the lanes it is written for. The `coverage`
     # section above it cannot answer this question, because a row there is a
     # feature and its `suites` list spans every lane the feature is touched on.
+    #
+    # The field read is `lanes` rather than `topology`, because the two answer
+    # different questions: `topology` is the fewest machines a suite needs,
+    # while a lane has to know whether the suite can run here at all. Suite 59
+    # is the case that separated them - it drives TCP/22, which sshd already
+    # holds on the machine this lane reaches over SSH, so seven of its eight
+    # tests skipped here while all eight pass on the single-machine lane.
     #
     # Running every suite here was the older behaviour and it was wrong for the
     # same reason it was wrong on the transit lane: the local-lane suites drive
@@ -82,9 +89,8 @@ list_2vm_suites() {
         inblk && /^[[:space:]]*-?[[:space:]]*suite:/ {
             s=$NF; gsub(/[\042\047]/,"",s); last=s; next
         }
-        inblk && /^[[:space:]]*topology:/ {
-            t=$NF; gsub(/[\042\047]/,"",t)
-            if (t=="2vm" && last!="" && last !~ /\//) print last
+        inblk && /^[[:space:]]*lanes:/ {
+            if (last!="" && last !~ /\// && index($0, "2vm") > 0) print last
             last=""
         }
     ' "${INTEGRATION_DIR}/coverage-matrix.yaml" | sort -u
