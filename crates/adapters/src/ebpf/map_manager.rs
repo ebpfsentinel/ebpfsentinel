@@ -2,9 +2,9 @@ use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, HashMap, MapData};
 use domain::common::error::DomainError;
 use ebpf_common::firewall::{
-    FirewallRuleEntry, FirewallRuleEntryV6, FwHashKey5Tuple, FwHashKeyPort, FwHashValue,
-    MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MAX_FIREWALL_RULES,
-    VLAN_ANY,
+    ACTION_PASS, FirewallRuleEntry, FirewallRuleEntryV6, FwHashKey5Tuple, FwHashKeyPort,
+    FwHashValue, MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO, MATCH_SRC_IP,
+    MATCH_SRC_PORT, MAX_FIREWALL_RULES, VLAN_ANY,
 };
 use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
 use tracing::info;
@@ -35,6 +35,16 @@ pub struct FirewallMapManager {
     /// Cached counts for `rule_count()` without map reads.
     cached_v4_count: usize,
     cached_v6_count: usize,
+    /// Single-entry gate telling the datapath whether the conntrack probe can
+    /// still change a verdict. Absent on an object built before the gate.
+    ct_gate: Option<Array<MapData, u8>>,
+    /// Whether a loaded V4 rule reads conntrack state.
+    v4_needs_ct: bool,
+    /// Whether a loaded V6 rule reads conntrack state.
+    v6_needs_ct: bool,
+    /// Whether the default policy needs the ESTABLISHED/RELATED bypass, which
+    /// is exactly the case where it is not `pass`.
+    policy_needs_ct: bool,
 }
 
 impl FirewallMapManager {
@@ -72,6 +82,9 @@ impl FirewallMapManager {
         let hash_port = ebpf
             .take_map("FW_HASH_PORT")
             .and_then(|m| HashMap::try_from(m).ok());
+        let ct_gate = ebpf
+            .take_map("FW_CT_GATE")
+            .and_then(|m| Array::try_from(m).ok());
 
         if hash_5tuple.is_some() {
             info!("FW_HASH_5TUPLE fast-path map acquired");
@@ -91,6 +104,13 @@ impl FirewallMapManager {
             hash_port,
             cached_v4_count: 0,
             cached_v6_count: 0,
+            ct_gate,
+            // Every half starts asserted so the gate is open until a load has
+            // actually proved otherwise. A firewall that probes conntrack it
+            // did not need is slow; one that skips a probe it needed is wrong.
+            v4_needs_ct: true,
+            v6_needs_ct: true,
+            policy_needs_ct: true,
         })
     }
 }
@@ -114,6 +134,31 @@ impl FirewallMapManager {
             }
         }
     }
+
+    /// Publish whether the datapath still has to probe conntrack.
+    ///
+    /// Called after every load and after the default policy moves, because the
+    /// answer is a property of the two together. A failed write leaves the
+    /// previous value, which is why the gate defaults open: the worst outcome
+    /// of a stale gate is a probe nobody needed.
+    fn sync_ct_gate(&mut self) {
+        let open = self.v4_needs_ct || self.v6_needs_ct || self.policy_needs_ct;
+        if let Some(ref mut map) = self.ct_gate {
+            if let Err(e) = map.set(0, u8::from(open), 0) {
+                info!(error = %e, "conntrack gate not written, datapath keeps probing");
+                return;
+            }
+            info!(open, "conntrack gate published");
+        }
+    }
+}
+
+/// Whether a rule's verdict can depend on the packet's conntrack state.
+///
+/// Two criteria reach it: an explicit `ct_state` match, and a connection
+/// ceiling, which is only enforced on a flow the datapath believes is new.
+fn rule_reads_ct(match_flags: u8, max_states: u16) -> bool {
+    (match_flags & MATCH_CT_STATE) != 0 || max_states > 0
 }
 
 /// Whether a rule carries a criterion the fast-path hash maps cannot express,
@@ -236,6 +281,10 @@ impl FirewallArrayMapPort for FirewallMapManager {
             .map_err(|e| DomainError::EngineError(format!("set V4 count={count} failed: {e}")))?;
 
         self.cached_v4_count = count + hash_5tuple_count as usize + hash_port_count as usize;
+        self.v4_needs_ct = rules
+            .iter()
+            .any(|r| rule_reads_ct(r.match_flags, r.max_states));
+        self.sync_ct_gate();
         info!(
             array_count = count,
             hash_5tuple = hash_5tuple_count,
@@ -264,6 +313,10 @@ impl FirewallArrayMapPort for FirewallMapManager {
             .map_err(|e| DomainError::EngineError(format!("set V6 count={count} failed: {e}")))?;
 
         self.cached_v6_count = count;
+        self.v6_needs_ct = rules
+            .iter()
+            .any(|r| rule_reads_ct(r.match_flags, r.max_states));
+        self.sync_ct_gate();
         info!(count, "V6 firewall rules loaded into eBPF array");
         Ok(())
     }
@@ -272,6 +325,8 @@ impl FirewallArrayMapPort for FirewallMapManager {
         self.default_policy
             .set(0, policy, 0)
             .map_err(|e| DomainError::EngineError(format!("set default policy failed: {e}")))?;
+        self.policy_needs_ct = policy != ACTION_PASS;
+        self.sync_ct_gate();
         info!(policy, "firewall default policy set");
         Ok(())
     }
@@ -343,6 +398,23 @@ mod tests {
         let mut rule = fast_path_candidate();
         rule.group_mask = 0b10;
         assert!(has_extended_match(&rule));
+    }
+
+    #[test]
+    fn a_plain_rule_lets_the_conntrack_gate_close() {
+        assert!(!rule_reads_ct(MATCH_DST_PORT | MATCH_PROTO, 0));
+    }
+
+    #[test]
+    fn a_ct_state_match_holds_the_conntrack_gate_open() {
+        assert!(rule_reads_ct(MATCH_DST_PORT | MATCH_CT_STATE, 0));
+    }
+
+    #[test]
+    fn a_state_ceiling_holds_the_conntrack_gate_open_on_its_own() {
+        // The ceiling is enforced only on a flow the datapath believes is new,
+        // so it reads conntrack even with no ct_state criterion on the rule.
+        assert!(rule_reads_ct(MATCH_DST_PORT, 32));
     }
 
     #[test]

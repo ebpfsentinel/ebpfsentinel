@@ -3,25 +3,19 @@
 
 use aya_ebpf::{
     bindings::TC_ACT_OK,
-    btf_maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, lpm_trie::Key},
+    btf_maps::{Array, HashMap, LpmTrie, PerCpuArray, lpm_trie::Key},
     cty::c_void,
-    helpers::{
-        bpf_ktime_get_boot_ns, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop,
-        bpf_skb_store_bytes,
-    },
+    helpers::{bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop, bpf_skb_store_bytes},
     macros::{btf_map, classifier},
     programs::TcContext,
 };
 use ebpf_common::{
-    conntrack::normalize_key_v6,
     nat::{
-        MAX_NAT_HASH_EXACT, MAX_NAT_PORT_ALLOC, MAX_NAT_RULES, MAX_NAT_RULES_V6, MAX_NPTV6_RULES,
-        NAT_MATCH_DST_IP, NAT_MATCH_PROTO, NAT_MATCH_SRC_IP, NAT_METRIC_COUNT, NAT_METRIC_ERRORS,
-        NAT_METRIC_FOU_ENCAP, NAT_METRIC_KFUNC_DELEGATED, NAT_METRIC_KFUNC_FALLBACK,
-        NAT_METRIC_MASQ_APPLIED, NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_SNAT_APPLIED,
-        NAT_METRIC_TOTAL_SEEN, NAT_METRIC_XFRM_STEERED, NAT_TYPE_MASQUERADE, NAT_TYPE_SNAT,
-        NatHashKeyExact, NatHashValue, NatPortAllocKey, NatPortAllocValue, NatRuleEntry,
-        NatRuleEntryV6, NptV6RuleEntry,
+        MAX_NAT_RULES, MAX_NAT_RULES_V6, MAX_NPTV6_RULES, NAT_MATCH_DST_IP, NAT_MATCH_PROTO,
+        NAT_MATCH_SRC_IP, NAT_METRIC_COUNT, NAT_METRIC_ERRORS, NAT_METRIC_FOU_ENCAP,
+        NAT_METRIC_KFUNC_DELEGATED, NAT_METRIC_KFUNC_FALLBACK, NAT_METRIC_MASQ_APPLIED,
+        NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_SNAT_APPLIED, NAT_METRIC_TOTAL_SEEN,
+        NAT_METRIC_XFRM_STEERED, NAT_TYPE_MASQUERADE, NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
@@ -73,22 +67,12 @@ static NAT_SNAT_RULES_V6: Array<NatRuleEntryV6, { MAX_NAT_RULES_V6 as usize }> =
 #[btf_map]
 static NAT_SNAT_RULE_COUNT_V6: Array<u32, 1> = Array::new();
 
-/// Fast-path: exact-match SNAT HashMap (proto, src_ip, src_port) → NAT action.
-#[btf_map]
-static NAT_HASH_SNAT: HashMap<NatHashKeyExact, NatHashValue, { MAX_NAT_HASH_EXACT as usize }> =
-    HashMap::new();
-
 // CT_TABLE_V4/V6 shadow maps removed - kernel netfilter is the sole
-// CT source. NAT info delegated via bpf_ct_set_nat_info (e30-5).
-
-/// NAT port allocation table (LRU): tracks which translated port is
-/// assigned for each original (addr, port) pair.
-#[btf_map]
-static NAT_PORT_ALLOC: LruHashMap<
-    NatPortAllocKey,
-    NatPortAllocValue,
-    { MAX_NAT_PORT_ALLOC as usize },
-> = LruHashMap::new();
+// CT source. NAT info delegated via bpf_ct_set_nat_info (e30-5). The
+// exact-match hash fast-path and the port allocation table went with them:
+// no userspace code in either repository ever wrote either one, so every
+// packet paid a hash probe that could not hit and the agent locked a
+// 65 536-entry LRU nothing read. The rule scan is the only SNAT path.
 
 /// NPTv6 prefix translation rules (RFC 6296).
 #[btf_map]
@@ -422,6 +406,20 @@ fn try_nat_egress(ctx: &TcContext) -> Result<i32, ()> {
 // stack from exceeding 512 bytes.
 #[inline(never)]
 fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i32, ()> {
+    // Nothing is loaded, so there is nothing to look up, and the headers this
+    // function would parse are read for no reason. Without this gate a packet
+    // on a deployment carrying no SNAT rule still pays for two header reads, an
+    // interface-group lookup, a tenant resolution and a `bpf_loop` setup before
+    // discovering what this array read already knew. The rule array is written
+    // by userspace from the rule set, so a zero count means it is empty.
+    let snat_rule_count = match NAT_SNAT_RULE_COUNT.get(0) {
+        Some(&c) => c,
+        None => 0,
+    };
+    if snat_rule_count == 0 {
+        return Ok(TC_ACT_OK);
+    }
+
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });
     let dst_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).dst_addr });
@@ -448,41 +446,10 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         _ => return Ok(TC_ACT_OK),
     };
 
-    // Fast-path: exact-match SNAT HashMap lookup - O(1).
-    // Key uses (src_ip, src_port, protocol) for SNAT rules with exact match criteria.
-    let hash_key = NatHashKeyExact {
-        dst_ip: src_ip, // For SNAT, we key on source IP (the address being rewritten)
-        dst_port: src_port,
-        protocol,
-        _pad: 0,
-    };
-    if let Some(val) = unsafe { NAT_HASH_SNAT.get(&hash_key) } {
-        rewrite_src_ip(ctx, l3_offset, l4_offset, protocol, src_ip, val.nat_addr)?;
-        if val.nat_port_start != 0 {
-            rewrite_src_port(ctx, l4_offset, protocol, src_port, val.nat_port_start)?;
-        }
-        increment_metric(NAT_METRIC_SNAT_APPLIED);
-        kfunc_delegate_nat_v4(
-            ctx,
-            src_ip,
-            dst_ip,
-            src_port,
-            dst_port,
-            protocol,
-            val.nat_addr,
-            val.nat_port_start,
-            NfNatManipType::Src,
-        );
-        return Ok(TC_ACT_OK);
-    }
-
     // Scan SNAT rules for new connections via bpf_loop (kernel 5.17+).
     // The verifier analyzes the callback body only once, avoiding
     // complexity limits for large rule sets.
-    let count = match NAT_SNAT_RULE_COUNT.get(0) {
-        Some(&c) => c,
-        None => return Ok(TC_ACT_OK),
-    };
+    let count = snat_rule_count;
 
     let iface_groups = get_iface_groups(ctx);
     let ifindex = unsafe { (*ctx.skb.skb).ifindex };
@@ -589,6 +556,22 @@ fn apply_xfrm_and_fou(ctx: &TcContext, scan: &SnatScanCtx) {
 /// IPv6 SNAT processing.
 #[inline(never)]
 fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i32, ()> {
+    // Nothing is loaded on either IPv6 path, so the header this function would
+    // parse is read for no reason. NPTv6 is checked here as well as SNAT
+    // because both are reached from this one function, and both counts are
+    // written by userspace from the rule set.
+    let snat_v6_count = match NAT_SNAT_RULE_COUNT_V6.get(0) {
+        Some(&c) => c,
+        None => 0,
+    };
+    let nptv6_count = match NPTV6_RULE_COUNT.get(0) {
+        Some(&c) => c,
+        None => 0,
+    };
+    if snat_v6_count == 0 && nptv6_count == 0 {
+        return Ok(TC_ACT_OK);
+    }
+
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
@@ -638,8 +621,6 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         _ => 0u32,
     };
 
-    // Check existing conntrack entry for cached SNAT mapping.
-    let ct_key = normalize_key_v6(&src_addr, &dst_addr, src_port, dst_port, protocol);
     // Scan IPv6 SNAT rules via bpf_loop.
     let count = match NAT_SNAT_RULE_COUNT_V6.get(0) {
         Some(&c) => c,

@@ -5,24 +5,20 @@ use aya_ebpf::{
     bindings::TC_ACT_OK,
     btf_maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, lpm_trie::Key},
     cty::c_void,
-    helpers::{
-        bpf_ktime_get_boot_ns, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop,
-        bpf_skb_store_bytes,
-    },
+    helpers::{bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop, bpf_skb_store_bytes},
     macros::{btf_map, classifier},
     programs::TcContext,
 };
 
 use ebpf_common::{
-    conntrack::{ConnKey, normalize_key_v4, normalize_key_v6},
+    conntrack::{ConnKey, normalize_key_v4},
     nat::{
-        HairpinConfig, HairpinCtValue, MAX_HAIRPIN_CT, MAX_NAT_HASH_EXACT, MAX_NAT_RULES,
-        MAX_NAT_RULES_V6, MAX_NPTV6_RULES, NAT_MATCH_DST_IP, NAT_MATCH_DST_PORT, NAT_MATCH_PROTO,
-        NAT_MATCH_SRC_IP, NAT_MATCH_XFRM, NAT_METRIC_COUNT, NAT_METRIC_DNAT_APPLIED,
-        NAT_METRIC_ERRORS, NAT_METRIC_HAIRPIN_APPLIED, NAT_METRIC_KFUNC_DELEGATED,
-        NAT_METRIC_KFUNC_FALLBACK, NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_TOTAL_SEEN,
-        NAT_TYPE_DNAT, NAT_TYPE_ONETOONE, NAT_TYPE_REDIRECT, NatHashKeyExact, NatHashValue,
-        NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry,
+        HairpinConfig, HairpinCtValue, MAX_HAIRPIN_CT, MAX_NAT_RULES, MAX_NAT_RULES_V6,
+        MAX_NPTV6_RULES, NAT_MATCH_DST_IP, NAT_MATCH_DST_PORT, NAT_MATCH_PROTO, NAT_MATCH_SRC_IP,
+        NAT_MATCH_XFRM, NAT_METRIC_COUNT, NAT_METRIC_DNAT_APPLIED, NAT_METRIC_ERRORS,
+        NAT_METRIC_HAIRPIN_APPLIED, NAT_METRIC_KFUNC_DELEGATED, NAT_METRIC_KFUNC_FALLBACK,
+        NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_TOTAL_SEEN, NAT_TYPE_DNAT, NAT_TYPE_ONETOONE,
+        NAT_TYPE_REDIRECT, NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
@@ -80,15 +76,11 @@ static NAT_DNAT_RULES_V6: Array<NatRuleEntryV6, { MAX_NAT_RULES_V6 as usize }> =
 #[btf_map]
 static NAT_DNAT_RULE_COUNT_V6: Array<u32, 1> = Array::new();
 
-/// Fast-path: exact-match DNAT HashMap (proto, dst_ip, dst_port) → NAT action.
-/// Checked before the Array+bpf_loop scan for O(1) lookup.
-#[btf_map]
-static NAT_HASH_DNAT: HashMap<NatHashKeyExact, NatHashValue, { MAX_NAT_HASH_EXACT as usize }> =
-    HashMap::new();
-
 // CT_TABLE_V4/V6 shadow maps removed - kernel netfilter is the
 // authoritative CT source. NAT info delegated via bpf_ct_set_nat_info
-// (e30-5). Cached NAT fast-path removed; hash-exact + rule scan remain.
+// (e30-5). The exact-match hash fast-path is gone with them: no userspace
+// code in either repository ever wrote it, so every packet paid a hash probe
+// that could not hit. The rule scan is the only DNAT path.
 
 /// NPTv6 prefix translation rules (RFC 6296).
 #[btf_map]
@@ -420,6 +412,25 @@ fn try_nat_ingress(ctx: &TcContext) -> Result<i32, ()> {
 // stack from exceeding 512 bytes.
 #[inline(never)]
 fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i32, ()> {
+    // Nothing is loaded, so there is nothing to look up, and the header this
+    // function would parse is read for no reason. Without this gate a packet on
+    // a deployment carrying no DNAT rule still pays for two header reads, the
+    // hairpin LRU probe, an interface-group lookup, a tenant resolution, an
+    // xfrm kfunc call and a `bpf_loop` setup, and then discovers what these two
+    // array reads already knew. Both maps are derived from the rule set by
+    // userspace, so a zero count means both are empty.
+    let dnat_rule_count = match NAT_DNAT_RULE_COUNT.get(0) {
+        Some(&c) => c,
+        None => 0,
+    };
+    let hairpin_enabled = match NAT_HAIRPIN_CONFIG.get(0) {
+        Some(cfg) => cfg.enabled != 0,
+        None => false,
+    };
+    if dnat_rule_count == 0 && !hairpin_enabled {
+        return Ok(TC_ACT_OK);
+    }
+
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });
     let dst_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).dst_addr });
@@ -450,7 +461,12 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
     // hairpinned connection. If so, un-SNAT the destination back to the
     // original client and un-DNAT the source back to the external IP.
     let hp_key = normalize_key_v4(src_ip, dst_ip, src_port, dst_port, protocol);
-    if let Some(hp_val) = unsafe { NAT_HAIRPIN_CT.get(&hp_key) } {
+    let hairpin_hit = if hairpin_enabled {
+        unsafe { NAT_HAIRPIN_CT.get(&hp_key) }
+    } else {
+        None
+    };
+    if let Some(hp_val) = hairpin_hit {
         // Return traffic: dst is the firewall SNAT IP -> restore to original client
         rewrite_dst_ip(
             ctx,
@@ -473,42 +489,13 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         return Ok(TC_ACT_OK);
     }
 
-    // Fast-path: exact-match DNAT HashMap lookup - O(1).
-    let hash_key = NatHashKeyExact {
-        dst_ip,
-        dst_port,
-        protocol,
-        _pad: 0,
-    };
-    if let Some(val) = unsafe { NAT_HASH_DNAT.get(&hash_key) } {
-        // Apply DNAT from HashMap hit
-        rewrite_dst_ip(ctx, l3_offset, l4_offset, protocol, dst_ip, val.nat_addr)?;
-        if val.nat_port_start != 0 {
-            rewrite_dst_port(ctx, l4_offset, protocol, dst_port, val.nat_port_start)?;
-        }
-        // NAT info delegated to kernel CT via bpf_ct_set_nat_info.
-        increment_metric(NAT_METRIC_DNAT_APPLIED);
-        kfunc_delegate_nat_v4(
-            ctx,
-            src_ip,
-            dst_ip,
-            src_port,
-            dst_port,
-            protocol,
-            val.nat_addr,
-            val.nat_port_start,
-            NfNatManipType::Dst,
-        );
-        return Ok(TC_ACT_OK);
-    }
-
     // Scan DNAT rules for new connections via bpf_loop (kernel 5.17+).
     // The verifier analyzes the callback body only once, avoiding
     // complexity limits for large rule sets.
-    let count = match NAT_DNAT_RULE_COUNT.get(0) {
-        Some(&c) => c,
-        None => return Ok(TC_ACT_OK),
-    };
+    let count = dnat_rule_count;
+    if count == 0 {
+        return Ok(TC_ACT_OK);
+    }
 
     let iface_groups = get_iface_groups(ctx);
     let ifindex = unsafe { (*ctx.skb.skb).ifindex };
@@ -631,6 +618,22 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
 /// IPv6 DNAT processing.
 #[inline(never)]
 fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i32, ()> {
+    // Nothing is loaded on either IPv6 path, so the header this function would
+    // parse is read for no reason. NPTv6 is checked here as well as DNAT
+    // because both are reached from this one function, and both counts are
+    // written by userspace from the rule set.
+    let dnat_v6_count = match NAT_DNAT_RULE_COUNT_V6.get(0) {
+        Some(&c) => c,
+        None => 0,
+    };
+    let nptv6_count = match NPTV6_RULE_COUNT.get(0) {
+        Some(&c) => c,
+        None => 0,
+    };
+    if dnat_v6_count == 0 && nptv6_count == 0 {
+        return Ok(TC_ACT_OK);
+    }
+
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
@@ -670,8 +673,6 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         _ => return Ok(TC_ACT_OK),
     };
 
-    // Check existing conntrack entry for cached NAT mapping.
-    let ct_key = normalize_key_v6(&src_addr, &dst_addr, src_port, dst_port, protocol);
     // Pre-compute offsets for V6 rewriting (5-arg BPF limit).
     let ipv6_dst_off = (l3_offset + IPV6_DST_OFFSET) as u32;
     let l4_csum_off = match protocol {

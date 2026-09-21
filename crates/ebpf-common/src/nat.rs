@@ -6,9 +6,6 @@
 /// Maximum NAT rules per direction.
 pub const MAX_NAT_RULES: u32 = 256;
 
-/// Maximum NAT port allocation entries.
-pub const MAX_NAT_PORT_ALLOC: u32 = 65_536;
-
 // ── NAT type constants ──────────────────────────────────────────────
 
 pub const NAT_TYPE_NONE: u8 = 0;
@@ -56,53 +53,6 @@ pub const NAT_MATCH_PROTO: u8 = 0x08;
 /// Match only packets arriving through a specific IPsec `xfrmi`
 /// device (identified by `NatRuleEntry.xfrm_if_id`).
 pub const NAT_MATCH_XFRM: u8 = 0x10;
-
-// ── NAT HashMap fast-path types ─────────────────────────────────────
-
-/// Maximum entries in the NAT exact-match HashMap.
-pub const MAX_NAT_HASH_EXACT: u32 = 16_384;
-
-/// Key for NAT exact-match HashMap lookup (O(1) fast path).
-///
-/// NAT rules with exact (proto, dst_ip, dst_port) - covers port_forward,
-/// dnat, and redirect rules. Checked before the Array+bpf_loop scan.
-///
-/// Size: 8 bytes (aligned to 4 bytes).
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NatHashKeyExact {
-    /// Destination IPv4 address (host byte order).
-    pub dst_ip: u32,
-    /// Destination port.
-    pub dst_port: u16,
-    /// IP protocol (6=TCP, 17=UDP).
-    pub protocol: u8,
-    pub _pad: u8,
-}
-
-/// Value for NAT exact-match HashMap.
-///
-/// Contains the translated address/port and NAT type, allowing the eBPF
-/// program to perform the rewrite without scanning the rule array.
-///
-/// Size: 16 bytes (aligned to 4 bytes).
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NatHashValue {
-    /// Translated address (IPv4, host byte order).
-    pub nat_addr: u32,
-    /// Translated port start.
-    pub nat_port_start: u16,
-    /// Translated port end.
-    pub nat_port_end: u16,
-    /// NAT type (`NAT_TYPE_*`).
-    pub nat_type: u8,
-    /// IP protocol from the original rule.
-    pub protocol: u8,
-    pub _pad: [u8; 2],
-    /// Interface index for masquerade.
-    pub nat_interface: u32,
-}
 
 // ── NAT rule entry - 44 bytes ───────────────────────────────────────
 
@@ -279,26 +229,6 @@ pub struct HairpinCtValue {
 /// Maximum hairpin conntrack entries.
 pub const MAX_HAIRPIN_CT: u32 = 16_384;
 
-// ── NAT port allocation key - 8 bytes ───────────────────────────────
-
-/// Key for NAT port allocation (LRU HashMap).
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NatPortAllocKey {
-    pub orig_addr: u32,
-    pub orig_port: u16,
-    pub _pad: u16,
-}
-
-/// Value for NAT port allocation - allocated translated port.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NatPortAllocValue {
-    pub nat_addr: u32,
-    pub nat_port: u16,
-    pub _pad: u16,
-}
-
 // ── Pod impls ────────────────────────────────────────────────────────
 
 #[cfg(feature = "userspace")]
@@ -308,17 +238,9 @@ unsafe impl aya::Pod for NatRuleEntryV6 {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for NptV6RuleEntry {}
 #[cfg(feature = "userspace")]
-unsafe impl aya::Pod for NatPortAllocKey {}
-#[cfg(feature = "userspace")]
-unsafe impl aya::Pod for NatPortAllocValue {}
-#[cfg(feature = "userspace")]
 unsafe impl aya::Pod for HairpinConfig {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for HairpinCtValue {}
-#[cfg(feature = "userspace")]
-unsafe impl aya::Pod for NatHashKeyExact {}
-#[cfg(feature = "userspace")]
-unsafe impl aya::Pod for NatHashValue {}
 
 // ── Tests ────────────────────────────────────────────────────────────
 
@@ -407,16 +329,6 @@ mod tests {
     }
 
     #[test]
-    fn nat_port_alloc_key_size() {
-        assert_eq!(mem::size_of::<NatPortAllocKey>(), 8);
-    }
-
-    #[test]
-    fn nat_port_alloc_value_size() {
-        assert_eq!(mem::size_of::<NatPortAllocValue>(), 8);
-    }
-
-    #[test]
     fn nat_type_constants_distinct() {
         let types = [
             NAT_TYPE_NONE,
@@ -469,45 +381,6 @@ mod tests {
         assert_eq!(mem::offset_of!(HairpinCtValue, orig_dst_ip), 4);
         assert_eq!(mem::offset_of!(HairpinCtValue, orig_src_port), 8);
         assert_eq!(mem::offset_of!(HairpinCtValue, _pad), 10);
-    }
-
-    // ── HashMap fast-path types ─────────────────────────────────────
-
-    #[test]
-    fn nat_hash_key_exact_size() {
-        assert_eq!(mem::size_of::<NatHashKeyExact>(), 8);
-    }
-
-    #[test]
-    fn nat_hash_key_exact_alignment() {
-        assert_eq!(mem::align_of::<NatHashKeyExact>(), 4);
-    }
-
-    #[test]
-    fn nat_hash_key_exact_offsets() {
-        assert_eq!(mem::offset_of!(NatHashKeyExact, dst_ip), 0);
-        assert_eq!(mem::offset_of!(NatHashKeyExact, dst_port), 4);
-        assert_eq!(mem::offset_of!(NatHashKeyExact, protocol), 6);
-    }
-
-    #[test]
-    fn nat_hash_value_size() {
-        assert_eq!(mem::size_of::<NatHashValue>(), 16);
-    }
-
-    #[test]
-    fn nat_hash_value_alignment() {
-        assert_eq!(mem::align_of::<NatHashValue>(), 4);
-    }
-
-    #[test]
-    fn nat_hash_value_offsets() {
-        assert_eq!(mem::offset_of!(NatHashValue, nat_addr), 0);
-        assert_eq!(mem::offset_of!(NatHashValue, nat_port_start), 4);
-        assert_eq!(mem::offset_of!(NatHashValue, nat_port_end), 6);
-        assert_eq!(mem::offset_of!(NatHashValue, nat_type), 8);
-        assert_eq!(mem::offset_of!(NatHashValue, protocol), 9);
-        assert_eq!(mem::offset_of!(NatHashValue, nat_interface), 12);
     }
 
     #[test]

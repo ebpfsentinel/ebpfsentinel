@@ -118,6 +118,19 @@ static FIREWALL_RULE_COUNT_V6: Array<u32, 1> = Array::new();
 #[btf_map]
 static FIREWALL_DEFAULT_POLICY: Array<u8, 1> = Array::new();
 
+/// Whether this packet's verdict can depend on its conntrack state.
+///
+/// The kernel CT probe costs a kfunc call plus a `bpf_probe_read_kernel`, and
+/// its result reaches a verdict through exactly three paths: a rule carrying
+/// `MATCH_CT_STATE`, a rule carrying a connection ceiling, and the
+/// ESTABLISHED/RELATED bypass that keeps a default-deny from tearing down live
+/// flows. Userspace knows at load time whether any of the three is reachable,
+/// so it writes 0 here when none is and the probe is skipped. The map is read
+/// as 1 when it is absent or unwritten, so the costly path is the safe default
+/// and a stale object can only be slower, never wrong.
+#[btf_map]
+static FW_CT_GATE: Array<u8, 1> = Array::new();
+
 /// Security zones: ingress `ifindex` → `zone_id`. Written by userspace from
 /// `ZoneConfig`; absent or 0 means the interface belongs to no zone.
 #[btf_map]
@@ -1082,14 +1095,18 @@ fn process_firewall_v4(
     // Phase 0: Kernel CT lookup via bpf_xdp_ct_lookup kfunc.
     // Reads nf_conn->status via bpf_probe_read_kernel at runtime
     // BTF-resolved offsets. Replaces the CT_TABLE_V4 shadow map.
-    let ct_state: u8 = launder_ct_state(kernel_ct_lookup_v4(
-        ctx_raw,
-        src_ip,
-        dst_ip,
-        src_port,
-        dst_port,
-        protocol as u8,
-    ));
+    let ct_state: u8 = if ct_gate_open() {
+        launder_ct_state(kernel_ct_lookup_v4(
+            ctx_raw,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            protocol as u8,
+        ))
+    } else {
+        CT_STATE_UNKNOWN
+    };
 
     // Phase 1: LPM Trie lookup - O(log n) for CIDR-only rules.
     // Keys use network byte order for correct prefix matching.
@@ -1592,6 +1609,27 @@ fn launder_ct_state(state: u8) -> u8 {
     }
 }
 
+/// Conntrack state the datapath could not determine.
+///
+/// Every consumer already handles it: the rule matcher treats it as matching
+/// no `ct_state_mask` bit, the connection ceiling treats it like NEW, and the
+/// ESTABLISHED/RELATED bypass does not fire, so the packet falls through to
+/// the default policy. That is the same verdict the probe would have produced
+/// for every case the gate is closed in.
+const CT_STATE_UNKNOWN: u8 = 0xFF;
+
+/// Whether the conntrack probe can still change this packet's verdict.
+///
+/// Absent or unwritten reads as open, so the cost is paid rather than a
+/// verdict guessed.
+#[inline(always)]
+fn ct_gate_open() -> bool {
+    match FW_CT_GATE.get(0) {
+        Some(&gate) => gate != 0,
+        None => true,
+    }
+}
+
 /// IPv4 kernel CT lookup via `bpf_xdp_ct_lookup` + `bpf_probe_read_kernel`.
 #[inline(always)]
 fn kernel_ct_lookup_v4(
@@ -1767,9 +1805,13 @@ fn process_firewall_v6(
     // Phase 0: Conntrack lookup (IPv6).
     // Look up the connection state once; used for fast-path bypass and
     // ct_state_mask matching during the rule scan.
-    let ct_state: u8 = launder_ct_state(conntrack_lookup_v6(
-        ctx_raw, &src_addr, &dst_addr, src_port, dst_port, next_hdr,
-    ));
+    let ct_state: u8 = if ct_gate_open() {
+        launder_ct_state(conntrack_lookup_v6(
+            ctx_raw, &src_addr, &dst_addr, src_port, dst_port, next_hdr,
+        ))
+    } else {
+        CT_STATE_UNKNOWN
+    };
 
     // Phase 1: LPM Trie lookup - O(log n) for CIDR-only rules.
     // Read raw bytes from off-stack PKT_CTX.
