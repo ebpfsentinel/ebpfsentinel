@@ -37,28 +37,6 @@ pub const FLAG_VLAN: u8 = 0x02;
 /// Flag bit: DNS event captured over TCP (payload has 2-byte length prefix).
 pub const FLAG_TCP: u8 = 0x04;
 
-/// XDP-to-TC metadata passed via `bpf_xdp_adjust_meta`.
-///
-/// The XDP firewall prepends this struct before `xdp_md->data` so that
-/// TC programs can read the firewall verdict without re-parsing packets.
-/// 8 bytes, aligned to 4 bytes.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct XdpMetadata {
-    /// Firewall rule ID that matched (0 = no match / default policy).
-    pub rule_id: u32,
-    /// Firewall action (`ACTION_PASS`, `ACTION_DROP`, `ACTION_LOG`).
-    pub action: u8,
-    /// Ratelimit status (0 = not checked, 1 = passed, 2 = throttled).
-    pub ratelimit_status: u8,
-    /// Miscellaneous XDP metadata flags.
-    pub meta_flags: u8,
-    pub _pad: u8,
-}
-
-/// Flag: XDP metadata is present in `skb->data_meta`.
-pub const META_FLAG_PRESENT: u8 = 0x01;
-
 /// Returns `true` if the packet is IPv6.
 #[inline]
 pub const fn is_ipv6(flags: u8) -> bool {
@@ -145,8 +123,6 @@ pub struct PacketEvent {
 // types with explicit padding. Safe for zero-copy eBPF map/RingBuf operations via aya.
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for PacketEvent {}
-#[cfg(feature = "userspace")]
-unsafe impl aya::Pod for XdpMetadata {}
 
 impl PacketEvent {
     /// Extract the source IPv4 address (first element of `src_addr`).
@@ -202,16 +178,6 @@ mod tests {
     #[test]
     fn test_packet_event_alignment() {
         assert_eq!(mem::align_of::<PacketEvent>(), 8);
-    }
-
-    #[test]
-    fn test_xdp_metadata_size() {
-        assert_eq!(mem::size_of::<XdpMetadata>(), 8);
-    }
-
-    #[test]
-    fn test_xdp_metadata_alignment() {
-        assert_eq!(mem::align_of::<XdpMetadata>(), 4);
     }
 
     #[test]
