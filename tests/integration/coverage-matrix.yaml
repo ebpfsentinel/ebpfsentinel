@@ -114,6 +114,7 @@ suite_profiles:
   "63": pr
   "64": nightly
   "65": nightly
+  "66": nightly
   "perf/01": nightly
   "perf/02": nightly
   "perf/03": nightly
@@ -182,11 +183,11 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-ids
-    suites: ["12", "25", "perf/04", "39"]
+    suites: ["12", "25", "perf/04", "39", "66"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in perf/04; slow-attack signatures in 39"
+    notes: "Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in perf/04; slow-attack signatures in 39; what the agent decided to drop against what the kernel confirmed it tore down in 66, driven from both sides of the tc hook so the confirmation is not read as a copy of the drop count"
 
   - kind: ebpf_program
     feature: tc-threatintel
@@ -600,11 +601,11 @@ coverage:
 
   - kind: domain_module
     feature: conntrack
-    suites: ["16", "18", "24", "47", "62"]
+    suites: ["16", "18", "24", "47", "62", "66"]
     topology: 3vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; GET /api/v1/conntrack/events SSE stream asserted in 16 (skipped when /proc/net/nf_conntrack is absent); brokered teardown from the user-namespace agent asserted in 62"
+    notes: "Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; what the kernel confirmed it tore down against what the agent decided, on both sides of the tc hook order, in 66; GET /api/v1/conntrack/events SSE stream asserted in 16 (skipped when /proc/net/nf_conntrack is absent); brokered teardown from the user-namespace agent asserted in 62"
 
   - kind: domain_module
     feature: container
@@ -648,11 +649,11 @@ coverage:
 
   - kind: domain_module
     feature: ids
-    suites: ["12", "25", "38", "39", "55", "59"]
+    suites: ["12", "25", "38", "39", "55", "59", "66"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "Intrusion detection engine; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (wire-level v6 IDS alert via tc-ids deferred - needs dual-stack 2-VM topology); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (real hydra/ncrack credential bursts deferred - same dataplane contract is driven by the SYN-burst path)"
+    notes: "Intrusion detection engine; the block branch's two counters - the attempt and the kernel's own confirmation of the conntrack tear-down - asserted against each other in 66; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (wire-level v6 IDS alert via tc-ids deferred - needs dual-stack 2-VM topology); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (real hydra/ncrack credential bursts deferred - same dataplane contract is driven by the SYN-burst path)"
 
   - kind: domain_module
     feature: ips

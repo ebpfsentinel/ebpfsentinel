@@ -190,7 +190,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 |---|---|---|---|---|---|
 | `tc-conntrack` | 18, 24, 47 | 3vm | 6.9 | pr | Connection tracking; kernel-CT kill via kill_flow_via_xdp_ct/skb_ct asserted in 47 |
 | `tc-dns` | 19, 45 | 3vm | 6.9 | pr | Passive DNS capture; DoH/DoT detection via ClientHello SNI + dst_port 853 asserted in 45 |
-| `tc-ids` | 12, 25, perf/04, 39 | 2vm | 6.9 | pr | Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in perf/04; slow-attack signatures in 39 |
+| `tc-ids` | 12, 25, perf/04, 39, 66 | 2vm | 6.9 | pr | Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in perf/04; slow-attack signatures in 39; what the agent decided to drop against what the kernel confirmed it tore down in 66, driven from both sides of the tc hook so the confirmation is not read as a copy of the drop count |
 | `tc-nat-egress` | 21, 50, perf/06 | 2vm | 6.9 | pr | SNAT (TC egress); NPTv6 (RFC 6296) checksum-neutral prefix swap config + CLI/REST surface asserted in 50 (wire-level swap gated on IPv6 routability); SNAT/masquerade datapath throughput overhead measured in perf/06 |
 | `tc-nat-ingress` | 21, 50, perf/06 | 2vm | 6.9 | pr | DNAT (TC ingress); NPTv6 reverse-prefix translation surface asserted via REST + CLI in 50; DNAT datapath throughput overhead measured in perf/06 |
 | `tc-qos` | 28 | 2vm | 6.9 | pr | Traffic shaping (TC egress) |
