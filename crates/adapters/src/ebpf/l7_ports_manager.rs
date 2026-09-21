@@ -1,3 +1,4 @@
+use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
 use aya::maps::{HashMap, MapData};
 use tracing::info;
@@ -18,6 +19,12 @@ impl L7PortsManager {
             .take_map("L7_PORTS")
             .ok_or_else(|| anyhow::anyhow!("map 'L7_PORTS' not found in eBPF object"))?;
         let ports_map = HashMap::try_from(map)?;
+        // The map is shared by pin, so a previous run's ports can still be in
+        // it: count what is there rather than assuming a fresh map, because a
+        // gate published against an assumption would skip a probe that would
+        // have hit.
+        let configured = ports_map.keys().next().is_some();
+        feature_gates::publish(Feature::L7Ports, !configured);
         info!("L7_PORTS map acquired");
         Ok(Self { ports_map })
     }
@@ -39,6 +46,7 @@ impl L7PortsManager {
                 .map_err(|e| anyhow::anyhow!("L7_PORTS insert port={port} failed: {e}"))?;
         }
 
+        feature_gates::publish(Feature::L7Ports, ports.is_empty());
         info!(port_count = ports.len(), "L7_PORTS updated");
         Ok(())
     }

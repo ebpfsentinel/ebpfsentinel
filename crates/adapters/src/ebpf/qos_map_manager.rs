@@ -1,3 +1,4 @@
+use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, HashMap, MapData};
 use domain::common::error::DomainError;
@@ -40,6 +41,11 @@ impl QosMapManager {
             .ok_or_else(|| anyhow::anyhow!("map 'QOS_CLASSIFIERS' not found in eBPF object"))?;
         let classifiers = HashMap::try_from(cls_map)?;
         info!("QOS_CLASSIFIERS map acquired");
+
+        // The map is pinned, so it survives a restart: the answer has to be
+        // counted rather than assumed. An empty set closes the shaper's whole
+        // classification ladder, which is the widest lookup in the chain.
+        feature_gates::publish(Feature::QosClassifiers, classifiers.keys().next().is_none());
 
         Ok(Self {
             pipe_config,
@@ -163,6 +169,11 @@ impl QosMapManager {
         classifiers: &[QosClassifier],
         queues: &[QosQueue],
     ) -> Result<(), anyhow::Error> {
+        // Open the ladder before the first insert, so a rule is never loaded
+        // behind a gate still saying the table is empty. A load that fails
+        // half way leaves it open, which costs lookups and never a rule.
+        feature_gates::publish(Feature::QosClassifiers, false);
+
         // Clear existing entries first
         let keys: Vec<QosClassifierKey> = self.classifiers.keys().filter_map(Result::ok).collect();
         for key in &keys {
@@ -171,6 +182,7 @@ impl QosMapManager {
                 .map_err(|e| anyhow::anyhow!("QOS_CLASSIFIERS clear failed: {e}"))?;
         }
 
+        let mut loaded = 0usize;
         for index in winning_classifier_indices(classifiers, queues) {
             let cls = &classifiers[index];
             let queue_index = queues
@@ -181,7 +193,12 @@ impl QosMapManager {
             self.classifiers
                 .insert(key, value, 0)
                 .map_err(|e| anyhow::anyhow!("QOS_CLASSIFIERS insert failed: {e}"))?;
+            loaded += 1;
         }
+        // A rule set can win nothing - every classifier pointing at a queue
+        // that does not exist - so the gate follows what was actually written
+        // rather than what was handed in.
+        feature_gates::publish(Feature::QosClassifiers, loaded == 0);
         info!(
             count = classifiers.len(),
             "QoS classifiers loaded into eBPF map"
@@ -228,6 +245,7 @@ impl QosMapManager {
                 .remove(key)
                 .map_err(|e| anyhow::anyhow!("QOS_CLASSIFIERS clear failed: {e}"))?;
         }
+        feature_gates::publish(Feature::QosClassifiers, true);
         Ok(())
     }
 

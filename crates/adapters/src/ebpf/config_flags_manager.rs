@@ -203,6 +203,13 @@ impl AmpProtectConfigManager {
             .ok_or_else(|| anyhow::anyhow!("map 'AMP_PROTECT_CONFIG' not found in eBPF object"))?;
         let config_map = HashMap::try_from(map)?;
         info!("AMP_PROTECT_CONFIG map acquired");
+        // The map is shared by pin, so a previous run's ports can still be in
+        // it: count what is there rather than assuming a fresh map.
+        let armed = config_map.keys().next().is_some();
+        crate::ebpf::feature_gates::publish(
+            crate::ebpf::feature_gates::Feature::AmpProtectPorts,
+            !armed,
+        );
         Ok(Self { config_map })
     }
 
@@ -219,6 +226,12 @@ impl AmpProtectConfigManager {
             _pad: [0; 3],
             max_pps,
         };
+        // Open the probe before the insert, so a port is never armed behind a
+        // gate still saying nothing is.
+        crate::ebpf::feature_gates::publish(
+            crate::ebpf::feature_gates::Feature::AmpProtectPorts,
+            false,
+        );
         self.config_map
             .insert(key, cfg, 0)
             .map_err(|e| anyhow::anyhow!("AMP_PROTECT_CONFIG insert failed: {e}"))?;

@@ -28,8 +28,11 @@
 
 use aya::maps::{Array, MapData};
 use ebpf_common::firewall::{
-    FW_EMPTY_HASH_5TUPLE, FW_EMPTY_HASH_PORT, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_LPM_V4,
-    FW_EMPTY_LPM_V6, FW_EMPTY_SRC_LIMITS, FW_EMPTY_TENANTS, FW_EMPTY_ZONES,
+    FW_EMPTY_AMP_PORTS, FW_EMPTY_HASH_5TUPLE, FW_EMPTY_HASH_PORT, FW_EMPTY_IDS_PATTERNS,
+    FW_EMPTY_IDS_SRC_PATTERNS, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_L7_PORTS, FW_EMPTY_LPM_V4,
+    FW_EMPTY_LPM_V6, FW_EMPTY_QOS_CLASSIFIERS, FW_EMPTY_RL_TIERS_V4, FW_EMPTY_RL_TIERS_V6,
+    FW_EMPTY_SRC_LIMITS, FW_EMPTY_TENANTS, FW_EMPTY_THREAT_IOCS_V4, FW_EMPTY_THREAT_IOCS_V6,
+    FW_EMPTY_ZONES,
 };
 use std::sync::{Mutex, OnceLock};
 use tracing::{debug, info};
@@ -53,14 +56,35 @@ pub enum Feature {
     TenantIfindex,
     /// `TENANT_SUBNET_V4` and `TENANT_SUBNET_V6`.
     TenantSubnet,
+    /// `TENANT_CGROUP_MAP`, the last resort of the resolution order and the
+    /// only one of the four the firewall itself cannot reach.
+    TenantCgroup,
     /// `INTERFACE_GROUPS`.
     InterfaceGroups,
     /// The per-source connection ceilings in `CT_CONFIG`, which are the only
     /// thing that ever writes the overload set the datapath probes.
     SourceLimits,
+    /// `RL_LPM_SRC_V4`, the rate limiter's country-tier trie.
+    RateLimitTiersV4,
+    /// `RL_LPM_SRC_V6`.
+    RateLimitTiersV6,
+    /// `AMP_PROTECT_CONFIG`, the armed UDP amplification vector ports.
+    AmpProtectPorts,
+    /// `IDS_PATTERNS`, the classifier's destination-port rules.
+    IdsPatterns,
+    /// `IDS_SRC_PATTERNS`, its reply-leg rules.
+    IdsSrcPatterns,
+    /// `L7_PORTS`, the service ports whose payload is captured.
+    L7Ports,
+    /// `THREATINTEL_IOCS` and the v4 bloom filter in front of it.
+    ThreatIocsV4,
+    /// `THREATINTEL_IOCS_V6` and the v6 bloom filter in front of it.
+    ThreatIocsV6,
+    /// `QOS_CLASSIFIERS`, the shaper's rules.
+    QosClassifiers,
 }
 
-const FEATURE_COUNT: usize = 10;
+const FEATURE_COUNT: usize = 20;
 
 impl Feature {
     const fn slot(self) -> usize {
@@ -75,6 +99,16 @@ impl Feature {
             Feature::TenantSubnet => 7,
             Feature::InterfaceGroups => 8,
             Feature::SourceLimits => 9,
+            Feature::RateLimitTiersV4 => 10,
+            Feature::RateLimitTiersV6 => 11,
+            Feature::AmpProtectPorts => 12,
+            Feature::TenantCgroup => 13,
+            Feature::IdsPatterns => 14,
+            Feature::IdsSrcPatterns => 15,
+            Feature::L7Ports => 16,
+            Feature::ThreatIocsV4 => 17,
+            Feature::ThreatIocsV6 => 18,
+            Feature::QosClassifiers => 19,
         }
     }
 }
@@ -103,9 +137,12 @@ impl EmptyFeatures {
 
     /// The bitmask the datapath reads.
     ///
-    /// The three tenant sources fold into one bit, because the datapath
-    /// resolves a tenant through all three in turn and can skip the chain only
-    /// when none of them holds anything.
+    /// The four tenant sources fold into one bit, because the datapath
+    /// resolves a tenant through all four in turn and can skip the chain only
+    /// when none of them holds anything. The firewall reaches only the first
+    /// three, so folding the fourth in can leave a lookup it would have been
+    /// able to skip, which is the slower half of the trade and the only one
+    /// safe to get wrong.
     #[must_use]
     pub fn mask(&self) -> u32 {
         let mut mask = 0u32;
@@ -127,6 +164,7 @@ impl EmptyFeatures {
         if self.is_empty(Feature::TenantVlan)
             && self.is_empty(Feature::TenantIfindex)
             && self.is_empty(Feature::TenantSubnet)
+            && self.is_empty(Feature::TenantCgroup)
         {
             mask |= FW_EMPTY_TENANTS;
         }
@@ -135,6 +173,33 @@ impl EmptyFeatures {
         }
         if self.is_empty(Feature::SourceLimits) {
             mask |= FW_EMPTY_SRC_LIMITS;
+        }
+        if self.is_empty(Feature::RateLimitTiersV4) {
+            mask |= FW_EMPTY_RL_TIERS_V4;
+        }
+        if self.is_empty(Feature::RateLimitTiersV6) {
+            mask |= FW_EMPTY_RL_TIERS_V6;
+        }
+        if self.is_empty(Feature::AmpProtectPorts) {
+            mask |= FW_EMPTY_AMP_PORTS;
+        }
+        if self.is_empty(Feature::IdsPatterns) {
+            mask |= FW_EMPTY_IDS_PATTERNS;
+        }
+        if self.is_empty(Feature::IdsSrcPatterns) {
+            mask |= FW_EMPTY_IDS_SRC_PATTERNS;
+        }
+        if self.is_empty(Feature::L7Ports) {
+            mask |= FW_EMPTY_L7_PORTS;
+        }
+        if self.is_empty(Feature::ThreatIocsV4) {
+            mask |= FW_EMPTY_THREAT_IOCS_V4;
+        }
+        if self.is_empty(Feature::ThreatIocsV6) {
+            mask |= FW_EMPTY_THREAT_IOCS_V6;
+        }
+        if self.is_empty(Feature::QosClassifiers) {
+            mask |= FW_EMPTY_QOS_CLASSIFIERS;
         }
         mask
     }
@@ -268,6 +333,15 @@ mod tests {
             (Feature::Zones, FW_EMPTY_ZONES),
             (Feature::InterfaceGroups, FW_EMPTY_IFACE_GROUPS),
             (Feature::SourceLimits, FW_EMPTY_SRC_LIMITS),
+            (Feature::RateLimitTiersV4, FW_EMPTY_RL_TIERS_V4),
+            (Feature::RateLimitTiersV6, FW_EMPTY_RL_TIERS_V6),
+            (Feature::AmpProtectPorts, FW_EMPTY_AMP_PORTS),
+            (Feature::IdsPatterns, FW_EMPTY_IDS_PATTERNS),
+            (Feature::IdsSrcPatterns, FW_EMPTY_IDS_SRC_PATTERNS),
+            (Feature::L7Ports, FW_EMPTY_L7_PORTS),
+            (Feature::ThreatIocsV4, FW_EMPTY_THREAT_IOCS_V4),
+            (Feature::ThreatIocsV6, FW_EMPTY_THREAT_IOCS_V6),
+            (Feature::QosClassifiers, FW_EMPTY_QOS_CLASSIFIERS),
         ] {
             let mut features = EmptyFeatures::default();
             features.set(feature, true);
@@ -276,13 +350,16 @@ mod tests {
     }
 
     #[test]
-    fn the_tenant_bit_needs_all_three_sources_empty() {
+    fn the_tenant_bit_needs_all_four_sources_empty() {
         let mut features = EmptyFeatures::default();
         features.set(Feature::TenantVlan, true);
         features.set(Feature::TenantIfindex, true);
         assert_eq!(features.mask() & FW_EMPTY_TENANTS, 0);
 
         features.set(Feature::TenantSubnet, true);
+        assert_eq!(features.mask() & FW_EMPTY_TENANTS, 0);
+
+        features.set(Feature::TenantCgroup, true);
         assert_eq!(features.mask() & FW_EMPTY_TENANTS, FW_EMPTY_TENANTS);
 
         // One source filling again reopens the whole chain.
@@ -312,6 +389,15 @@ mod tests {
             Feature::Zones,
             Feature::InterfaceGroups,
             Feature::SourceLimits,
+            Feature::RateLimitTiersV4,
+            Feature::RateLimitTiersV6,
+            Feature::AmpProtectPorts,
+            Feature::IdsPatterns,
+            Feature::IdsSrcPatterns,
+            Feature::L7Ports,
+            Feature::ThreatIocsV4,
+            Feature::ThreatIocsV6,
+            Feature::QosClassifiers,
         ] {
             let mut features = EmptyFeatures::default();
             features.set(feature, true);

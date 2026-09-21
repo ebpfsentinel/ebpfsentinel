@@ -432,6 +432,46 @@ pub const FW_EMPTY_IFACE_GROUPS: u32 = 1 << 6;
 /// Neither per-source connection limit is configured, so nothing writes the
 /// overload set and probing it can only miss.
 pub const FW_EMPTY_SRC_LIMITS: u32 = 1 << 7;
+/// The v4 country-tier LPM trie holds no prefix, so the rate limiter reaches
+/// its generic path without looking a tier up.
+///
+/// Read by `xdp-ratelimit`, which shares this array by pin: the tenant sources
+/// and the interface groups are one kernel object across the two programs, so
+/// the same bitmask answers for both and a second array would be a second
+/// thing to keep in step.
+pub const FW_EMPTY_RL_TIERS_V4: u32 = 1 << 8;
+/// The v6 country-tier LPM trie holds no prefix.
+pub const FW_EMPTY_RL_TIERS_V6: u32 = 1 << 9;
+/// No amplification vector port is armed, so the rate limiter's per-packet
+/// UDP source-port probe can only miss.
+pub const FW_EMPTY_AMP_PORTS: u32 = 1 << 10;
+/// `IDS_PATTERNS` holds no rule, so the classifier's destination-port lookup
+/// can only miss.
+///
+/// Read by `tc-ids`, which shares this array by pin like the rate limiter
+/// does: the tenant sources and the interface groups it resolves through are
+/// the same kernel objects the firewall reads, so one bitmask answers for all
+/// three programs.
+pub const FW_EMPTY_IDS_PATTERNS: u32 = 1 << 11;
+/// `IDS_SRC_PATTERNS` holds no rule, so the reply-leg lookup can only miss.
+pub const FW_EMPTY_IDS_SRC_PATTERNS: u32 = 1 << 12;
+/// No L7 service port is configured, so the two-ended port probe that decides
+/// whether to capture a payload can only miss.
+pub const FW_EMPTY_L7_PORTS: u32 = 1 << 13;
+/// The v4 threat-intelligence set holds no indicator, so the bloom probe the
+/// classifier runs on both addresses of every packet can only miss.
+pub const FW_EMPTY_THREAT_IOCS_V4: u32 = 1 << 14;
+/// The v6 threat-intelligence set holds no indicator.
+pub const FW_EMPTY_THREAT_IOCS_V6: u32 = 1 << 15;
+/// `QOS_CLASSIFIERS` holds no rule, so the shaper's classification ladder can
+/// only miss. It is the widest lookup in the chain: the ladder walks a rule
+/// shape at a time from the exact five-tuple down to the catch-all, and it
+/// walks it twice, once scoped to the packet's VLAN and once for the rules
+/// naming none, so an unmarked packet costs sixteen hash lookups and a marked
+/// one thirty, every one of them against an empty table. Nothing below the
+/// match in that program fires either, so the gate also saves the
+/// interface-group read and the tenant resolution behind it.
+pub const FW_EMPTY_QOS_CLASSIFIERS: u32 = 1 << 16;
 
 #[cfg(test)]
 mod tests {

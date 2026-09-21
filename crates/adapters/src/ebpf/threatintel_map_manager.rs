@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
 use aya::maps::{BloomFilter, HashMap, MapData};
 use domain::common::entity::DomainMode;
@@ -59,6 +60,22 @@ impl ThreatIntelMapManager {
             .and_then(|m| BloomFilter::try_from(m).ok())
             .map(|m| Arc::new(Mutex::new(m)));
 
+        // The sets are shared by pin, so a previous run's indicators can still
+        // be in them. Count what is actually there rather than assuming a
+        // fresh map, because a gate published against an assumption would skip
+        // a probe that would have hit.
+        if let Ok(map) = iocs_map.lock() {
+            feature_gates::publish(Feature::ThreatIocsV4, map.keys().next().is_none());
+        }
+        // A v6 set this manager never got hold of is left looked up: the map
+        // is in the object either way, and closing a lookup on a table nothing
+        // here can account for is the half of the trade that is not safe.
+        if let Some(ref v6) = iocs_v6_map
+            && let Ok(map) = v6.lock()
+        {
+            feature_gates::publish(Feature::ThreatIocsV6, map.keys().next().is_none());
+        }
+
         info!(
             v6 = iocs_v6_map.is_some(),
             bloom_v4 = bloom_v4.is_some(),
@@ -97,6 +114,9 @@ impl ThreatIntelMapManager {
         key: &ThreatIntelKeyV6,
         value: &ThreatIntelValue,
     ) -> Result<(), DomainError> {
+        // Open the probe before the insert, so an indicator is never written
+        // behind a gate that is still saying the set is empty.
+        feature_gates::publish(Feature::ThreatIocsV6, false);
         let v6_arc = self.iocs_v6_map.as_ref().ok_or_else(|| {
             DomainError::EngineError("THREATINTEL_IOCS_V6 map not available".to_string())
         })?;
@@ -232,6 +252,7 @@ impl ThreatIntelMapPort for ThreatIntelMapManager {
         key: &ThreatIntelKey,
         value: &ThreatIntelValue,
     ) -> Result<(), DomainError> {
+        feature_gates::publish(Feature::ThreatIocsV4, false);
         let mut map = self
             .iocs_map
             .lock()
@@ -264,6 +285,10 @@ impl ThreatIntelMapPort for ThreatIntelMapManager {
                     .map_err(|e| DomainError::EngineError(format!("eBPF map clear failed: {e}")))?;
             }
         }
+        // Every key is gone. The bloom filter in front of the set cannot be
+        // cleared a bit at a time, so without this the datapath would go on
+        // probing a filter whose every answer is now a false positive.
+        feature_gates::publish(Feature::ThreatIocsV4, true);
 
         // Clear V6 map (if present)
         if let Some(ref v6_arc) = self.iocs_v6_map {
@@ -276,6 +301,7 @@ impl ThreatIntelMapPort for ThreatIntelMapManager {
                     DomainError::EngineError(format!("eBPF V6 map clear failed: {e}"))
                 })?;
             }
+            feature_gates::publish(Feature::ThreatIocsV6, true);
         }
 
         Ok(())

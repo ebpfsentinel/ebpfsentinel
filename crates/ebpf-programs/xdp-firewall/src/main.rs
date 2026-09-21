@@ -11,7 +11,6 @@ use aya_ebpf::{
     cty::c_void,
     helpers::{
         bpf_check_mtu, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns, bpf_loop,
-        bpf_xdp_adjust_meta,
     },
     macros::{btf_map, xdp},
     programs::XdpContext,
@@ -20,7 +19,6 @@ use aya_ebpf_bindings::bindings::{
     BPF_FIB_LKUP_RET_SUCCESS, BPF_FIB_LOOKUP_DIRECT, bpf_fib_lookup as BpfFibLookupParams,
 };
 use aya_ebpf_bindings::helpers::{bpf_fib_lookup, bpf_probe_read_kernel};
-use core::mem;
 use ebpf_common::{
     conntrack::{
         CT_SRC_COUNTER_MAX, CT_STATE_ESTABLISHED, CT_STATE_NEW, CT_STATE_RELATED, ConnTrackConfig,
@@ -28,7 +26,7 @@ use ebpf_common::{
         SRC_COUNTER_FLAG_OVERLOADED, SrcCounterKey, SrcStateCounter,
     },
     event::{
-        EVENT_TYPE_FIREWALL, FLAG_IPV6, FLAG_VLAN, META_FLAG_PRESENT, PacketEvent, XdpMetadata,
+        EVENT_TYPE_FIREWALL, FLAG_IPV6, FLAG_VLAN, PacketEvent,
     },
     firewall::{
         ACTION_DROP, ACTION_LOG, ACTION_PASS, ACTION_REJECT, CT_MATCH_ESTABLISHED,
@@ -74,9 +72,8 @@ use network_types::{
 // `bpf_get_socket_uid()` is available in TC classifier context for per-user
 // firewall rules.  In XDP context, socket metadata is not yet populated by
 // the kernel.  For process-aware (UID-based) firewall enforcement, consider a
-// TC classifier companion program that uses `bpf_get_socket_uid()` and writes
-// the UID into the XDP metadata area via `bpf_xdp_adjust_meta`, which this
-// program can then read after the TC pass.
+// TC classifier companion program that uses `bpf_get_socket_uid()` and carries
+// the UID to this program through a map keyed on the flow.
 
 // ── Multi-tenancy via HASH_OF_MAPS (kernel 4.12+) ──────────────────
 //
@@ -373,8 +370,8 @@ fn feature_empty(gates: u32, bit: u32) -> bool {
 /// With no interface assigned to a group, every rule is floating and the
 /// lookup can only miss, so the gate answers 0 without touching the map.
 #[inline(always)]
-fn get_iface_groups(ctx: &XdpContext) -> u32 {
-    if feature_empty(empty_features(), FW_EMPTY_IFACE_GROUPS) {
+fn get_iface_groups(ctx: &XdpContext, gates: u32) -> u32 {
+    if feature_empty(gates, FW_EMPTY_IFACE_GROUPS) {
         return 0;
     }
     let ifindex = ctx.ingress_ifindex() as u32;
@@ -413,10 +410,10 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
 /// // NOTE(future): Wire ns_cookie into tenant matching when namespace-based tenancy is enabled
 /// ```
 #[inline(always)]
-unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
+unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32, gates: u32) -> u32 {
     // With no tenant mapped by VLAN, interface or subnet, all three lookups
     // can only miss and every packet belongs to tenant 0.
-    if feature_empty(empty_features(), FW_EMPTY_TENANTS) {
+    if feature_empty(gates, FW_EMPTY_TENANTS) {
         return 0;
     }
     unsafe {
@@ -446,8 +443,8 @@ unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
 /// Resolve the tenant ID for an IPv6 packet.
 /// Priority: VLAN-based > interface-based > subnet V6 (LPM) > default (0).
 #[inline(always)]
-unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) -> u32 {
-    if feature_empty(empty_features(), FW_EMPTY_TENANTS) {
+unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4], gates: u32) -> u32 {
+    if feature_empty(gates, FW_EMPTY_TENANTS) {
         return 0;
     }
     unsafe {
@@ -721,21 +718,6 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         return xdp_action::XDP_PASS;
     }
     if action == xdp_action::XDP_PASS {
-        // Check MTU before passing - drop genuinely oversized packets early.
-        //
-        // `bpf_check_mtu` returns a positive `BPF_MTU_CHK_RET_*` code on an
-        // actual MTU violation (FRAG_NEEDED / SEGS_TOOBIG) and a *negative*
-        // errno when the helper itself cannot run (e.g. on some drivers/XDP
-        // modes the ingress device lookup fails for forwarded IPv6 transit
-        // packets). Dropping on the error case violated NFR15 (default-to-pass
-        // on internal error) and silently blackholed forwarded IPv6 traffic
-        // (e.g. NPTv6 transit). Only drop on a real violation; pass on error.
-        let mut mtu: u32 = 0;
-        let mtu_ret = unsafe { bpf_check_mtu(ctx.ctx as *mut _, 0, &mut mtu as *mut u32, 0, 0) };
-        if mtu_ret > 0 {
-            increment_metric(METRIC_MTU_EXCEEDED);
-            return xdp_action::XDP_DROP;
-        }
         // Chain: ratelimit (slot 0) → if empty, loadbalancer (slot 2).
         // If ratelimit is loaded, it tail-calls LB itself on PASS.
         //
@@ -750,6 +732,25 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         // Ratelimit not loaded - try loadbalancer directly.
         unsafe {
             XDP_PROG_ARRAY.tail_call(&ctx, PROG_IDX_LOADBALANCER);
+        }
+        // Neither is loaded, so this program is the tail of the XDP chain and
+        // the MTU guard belongs here. A tail-call never returns, so reaching
+        // this point is the only case where nothing further will check the
+        // frame; running the helper before the two calls above checked the
+        // same untouched frame two or three times over on a full chain.
+        //
+        // `bpf_check_mtu` returns a positive `BPF_MTU_CHK_RET_*` code on an
+        // actual MTU violation (FRAG_NEEDED / SEGS_TOOBIG) and a *negative*
+        // errno when the helper itself cannot run (e.g. on some drivers/XDP
+        // modes the ingress device lookup fails for forwarded IPv6 transit
+        // packets). Dropping on the error case violated NFR15 (default-to-pass
+        // on internal error) and silently blackholed forwarded IPv6 traffic
+        // (e.g. NPTv6 transit). Only drop on a real violation; pass on error.
+        let mut mtu: u32 = 0;
+        let mtu_ret = unsafe { bpf_check_mtu(ctx.ctx as *mut _, 0, &mut mtu as *mut u32, 0, 0) };
+        if mtu_ret > 0 {
+            increment_metric(METRIC_MTU_EXCEEDED);
+            return xdp_action::XDP_DROP;
         }
     }
     action
@@ -955,7 +956,6 @@ fn apply_default_policy(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void) -> Re
     } else {
         increment_metric(METRIC_PASSED);
         count_zone(zone, false);
-        write_xdp_metadata(ctx, ACTION_PASS, 0);
         Ok(xdp_action::XDP_PASS)
     }
 }
@@ -1024,17 +1024,6 @@ fn process_firewall_v4(
     // `XdpContext` for the helper/`ptr_at` reads, which only need PTR_TO_CTX.
     let ctx_owned = XdpContext::new(ctx_raw.cast());
     let ctx = &ctx_owned;
-
-    // Read MACs via inline asm (u32+u16 loads). LLVM cannot outline these
-    // into memcpy, and the bounds proof from ptr_at stays in this frame.
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let mut dst_mac = [0u8; 6];
-    let mut src_mac = [0u8; 6];
-    unsafe {
-        let p = ethhdr as *const u8;
-        copy_mac_asm!(dst_mac.as_mut_ptr(), p);
-        copy_mac_asm!(src_mac.as_mut_ptr(), p.add(6));
-    }
 
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });
@@ -1178,21 +1167,21 @@ fn process_firewall_v4(
         let src_key = Key::new(32, src_ip.to_be_bytes());
         if let Some(val) = FW_LPM_SRC_V4.get(&src_key) {
             return apply_fast_path_action(
-                ctx,
                 ctx_raw,
                 val.action,
                 ct_state,
                 SrcCounterKey::from_v4(src_ip),
+                gates,
             );
         }
         let dst_key = Key::new(32, dst_ip.to_be_bytes());
         if let Some(val) = FW_LPM_DST_V4.get(&dst_key) {
             return apply_fast_path_action(
-                ctx,
                 ctx_raw,
                 val.action,
                 ct_state,
                 SrcCounterKey::from_v4(src_ip),
+                gates,
             );
         }
     }
@@ -1209,11 +1198,11 @@ fn process_firewall_v4(
         };
         if let Some(val) = unsafe { FW_HASH_5TUPLE.get(&hash_key_5t) } {
             return apply_fast_path_action(
-                ctx,
                 ctx_raw,
                 val.action,
                 ct_state,
                 SrcCounterKey::from_v4(src_ip),
+                gates,
             );
         }
     }
@@ -1227,11 +1216,11 @@ fn process_firewall_v4(
         };
         if let Some(val) = unsafe { FW_HASH_PORT.get(&hash_key_port) } {
             return apply_fast_path_action(
-                ctx,
                 ctx_raw,
                 val.action,
                 ct_state,
                 SrcCounterKey::from_v4(src_ip),
+                gates,
             );
         }
     }
@@ -1260,9 +1249,23 @@ fn process_firewall_v4(
     let (matched_action, matched_rule_idx, matched_max_states): (i32, i32, u16) = if count == 0 {
         (-1, -1, 0)
     } else {
-        let iface_groups = get_iface_groups(ctx);
+        let iface_groups = get_iface_groups(ctx, gates);
         let ifindex = ctx.ingress_ifindex() as u32;
-        let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) };
+        let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip, gates) };
+
+        // Read MACs via inline asm (u32+u16 loads). LLVM cannot outline these
+        // into memcpy, and the bounds proof from ptr_at stays in this frame.
+        // Only the linear scan compares them, and only for a rule carrying
+        // MATCH2_SRC_MAC / MATCH2_DST_MAC, so a fast-path hit and a ruleless
+        // family pay nothing for the twelve bytes.
+        let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
+        let mut dst_mac = [0u8; 6];
+        let mut src_mac = [0u8; 6];
+        unsafe {
+            let p = ethhdr as *const u8;
+            copy_mac_asm!(dst_mac.as_mut_ptr(), p);
+            copy_mac_asm!(src_mac.as_mut_ptr(), p.add(6));
+        }
 
         let mut scan_ctx = RuleScanCtx {
             count,
@@ -1319,7 +1322,7 @@ fn process_firewall_v4(
                 return Ok(xdp_action::XDP_DROP);
             }
         }
-        return apply_action(ctx, ctx_raw, action);
+        return apply_action(ctx_raw, action);
     }
 
     // No explicit rule matched. ESTABLISHED/RELATED flows were already granted
@@ -1328,7 +1331,6 @@ fn process_firewall_v4(
     // NEW/unknown flows fall through to the default policy.
     if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
         increment_metric(METRIC_PASSED);
-        write_xdp_metadata(ctx, ACTION_PASS, 0);
         return Ok(xdp_action::XDP_PASS);
     }
 
@@ -1803,15 +1805,6 @@ fn process_firewall_v6(
     let ctx_owned = XdpContext::new(ctx_raw.cast());
     let ctx = &ctx_owned;
 
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let mut dst_mac = [0u8; 6];
-    let mut src_mac = [0u8; 6];
-    unsafe {
-        let p = ethhdr as *const u8;
-        copy_mac_asm!(dst_mac.as_mut_ptr(), p);
-        copy_mac_asm!(src_mac.as_mut_ptr(), p.add(6));
-    }
-
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
 
@@ -1892,20 +1885,22 @@ fn process_firewall_v6(
         CT_STATE_UNKNOWN
     };
 
+    let gates = empty_features();
+
     // Phase 1: LPM Trie lookup - O(log n) for CIDR-only rules.
     // Read raw bytes from off-stack PKT_CTX.
-    let lpm_action = if feature_empty(empty_features(), FW_EMPTY_LPM_V6) {
+    let lpm_action = if feature_empty(gates, FW_EMPTY_LPM_V6) {
         -1
     } else {
         lpm_lookup_v6(pkt_ctx)
     };
     if lpm_action >= 0 {
         return apply_fast_path_action(
-            ctx,
             ctx_raw,
             lpm_action as u8,
             ct_state,
             SrcCounterKey::from_v6(src_addr),
+            gates,
         );
     }
 
@@ -1930,9 +1925,23 @@ fn process_firewall_v6(
     let (matched_action, matched_rule_idx, matched_max_states): (i32, i32, u16) = if count == 0 {
         (-1, -1, 0)
     } else {
-        let iface_groups = get_iface_groups(ctx);
+        let iface_groups = get_iface_groups(ctx, gates);
         let ifindex = ctx.ingress_ifindex() as u32;
-        let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr) };
+        let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr, gates) };
+
+        // Read MACs via inline asm (u32+u16 loads). LLVM cannot outline these
+        // into memcpy, and the bounds proof from ptr_at stays in this frame.
+        // Only the linear scan compares them, and only for a rule carrying
+        // MATCH2_SRC_MAC / MATCH2_DST_MAC, so a fast-path hit and a ruleless
+        // family pay nothing for the twelve bytes.
+        let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
+        let mut dst_mac = [0u8; 6];
+        let mut src_mac = [0u8; 6];
+        unsafe {
+            let p = ethhdr as *const u8;
+            copy_mac_asm!(dst_mac.as_mut_ptr(), p);
+            copy_mac_asm!(src_mac.as_mut_ptr(), p.add(6));
+        }
 
         let mut scan_ctx = RuleScanCtxV6 {
             count,
@@ -1988,7 +1997,7 @@ fn process_firewall_v6(
                 return Ok(xdp_action::XDP_DROP);
             }
         }
-        return apply_action(ctx, ctx_raw, action);
+        return apply_action(ctx_raw, action);
     }
 
     // No explicit rule matched. ESTABLISHED/RELATED flows were already granted
@@ -1997,7 +2006,6 @@ fn process_firewall_v6(
     // NEW/unknown flows fall through to the default policy.
     if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
         increment_metric(METRIC_PASSED);
-        write_xdp_metadata(ctx, ACTION_PASS, 0);
         return Ok(xdp_action::XDP_PASS);
     }
 
@@ -2129,13 +2137,17 @@ fn match_rule_v6(
 /// is kept off the fast paths for exactly that reason.
 #[inline(always)]
 fn apply_fast_path_action(
-    ctx: &XdpContext,
     ctx_raw: *mut core::ffi::c_void,
     action: u8,
     ct_state: u8,
     src_key: SrcCounterKey,
+    gates: u32,
 ) -> Result<u32, ()> {
+    // With no per-source ceiling configured the probe below reads the config,
+    // finds both ceilings at zero and answers yes, so the gate that already
+    // covers the overload set covers this read too.
     if (action == ACTION_PASS || action == ACTION_LOG)
+        && !feature_empty(gates, FW_EMPTY_SRC_LIMITS)
         && (ct_state == CT_STATE_NEW || ct_state == 0xFF)
         && !check_connection_limits(src_key, -1, 0)
     {
@@ -2143,7 +2155,7 @@ fn apply_fast_path_action(
         increment_metric(METRIC_DROPPED);
         return Ok(xdp_action::XDP_DROP);
     }
-    apply_action(ctx, ctx_raw, action)
+    apply_action(ctx_raw, action)
 }
 
 /// Apply firewall action (shared by IPv4 and IPv6 paths).
@@ -2156,7 +2168,7 @@ fn apply_fast_path_action(
 /// `XDP_PASS` - this satisfies the kernel 6.17+ verifier requirement
 /// that tail_call only happens in functions returning `int`.
 #[inline(always)]
-fn apply_action(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void, action: u8) -> Result<u32, ()> {
+fn apply_action(ctx_raw: *mut core::ffi::c_void, action: u8) -> Result<u32, ()> {
     match action {
         ACTION_DROP => {
             emit_event(ctx_raw, ACTION_DROP);
@@ -2211,12 +2223,10 @@ fn apply_action(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void, action: u8) -
         ACTION_LOG => {
             emit_event(ctx_raw, ACTION_LOG);
             increment_metric(METRIC_PASSED);
-            write_xdp_metadata(ctx, ACTION_LOG, 0);
             Ok(xdp_action::XDP_PASS)
         }
         ACTION_PASS | _ => {
             increment_metric(METRIC_PASSED);
-            write_xdp_metadata(ctx, ACTION_PASS, 0);
             Ok(xdp_action::XDP_PASS)
         }
     }
@@ -2241,36 +2251,6 @@ fn increment_metric(index: u32) {
     increment_metric!(FIREWALL_METRICS, index);
 }
 
-/// Prepend `XdpMetadata` to the packet's data_meta area so that TC programs
-/// can read the firewall verdict without re-parsing. Best-effort: if
-/// `bpf_xdp_adjust_meta` fails (driver doesn't support it), silently skips.
-///
-/// After `bpf_xdp_adjust_meta`, we must re-read `data_meta` (via
-/// `ctx.metadata()`) and `data` (via `ctx.data()`) from the XDP context
-/// to satisfy the BPF verifier on kernel 6.17+.
-#[inline(always)]
-fn write_xdp_metadata(ctx: &XdpContext, action: u8, rule_id: u32) {
-    let meta_size = mem::size_of::<XdpMetadata>() as i32;
-    let ret = unsafe { bpf_xdp_adjust_meta(ctx.ctx, -meta_size) };
-    if ret != 0 {
-        return; // Driver doesn't support metadata - skip silently
-    }
-    // After adjust_meta, re-read pointers from the XDP context so the
-    // verifier knows the metadata area is valid.
-    let data_meta = ctx.metadata();
-    let data = ctx.data();
-    if data_meta + mem::size_of::<XdpMetadata>() > data {
-        return; // Safety check - required by verifier
-    }
-    let meta_ptr = data_meta as *mut XdpMetadata;
-    unsafe {
-        (*meta_ptr).rule_id = rule_id;
-        (*meta_ptr).action = action;
-        (*meta_ptr).ratelimit_status = 0;
-        (*meta_ptr).meta_flags = META_FLAG_PRESENT;
-        (*meta_ptr)._pad = 0;
-    }
-}
 
 /// Emit a `PacketEvent` to the EVENTS RingBuf. Reads packet metadata
 /// from the `PKT_CTX` per-CPU scratch buffer (must be populated before

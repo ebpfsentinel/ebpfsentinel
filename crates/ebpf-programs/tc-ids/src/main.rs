@@ -17,6 +17,10 @@ use aya_ebpf_bindings::helpers::{
 };
 use ebpf_common::{
     config_flags::ConfigFlags,
+    firewall::{
+        FW_EMPTY_IDS_PATTERNS, FW_EMPTY_IDS_SRC_PATTERNS, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_L7_PORTS,
+        FW_EMPTY_TENANTS,
+    },
     event::{
         EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, MAX_L7_PAYLOAD, MAX_L7_PORTS, PacketEvent,
         SMALL_L7_PAYLOAD,
@@ -117,6 +121,31 @@ static IDS_SAMPLING_CONFIG: Array<IdsSamplingConfig, 1> = Array::new();
 #[btf_map]
 static IDS_MIRROR_CONFIG: Array<u32, 2> = Array::new();
 
+/// Which optional tables userspace has loaded nothing into.
+///
+/// The same map the firewall and the rate limiter gate on, shared by pin
+/// because the tables behind it are shared too: the tenant sources and the
+/// interface groups are one kernel object across the three programs.
+/// Userspace publishes a bit per empty feature and the lookup is skipped. The
+/// sense is inverted on purpose: an unwritten map, or an object loaded by a
+/// userspace that never heard of it, reads 0 and every lookup still happens,
+/// so a stale value can only be slower, never wrong.
+#[btf_map]
+static FW_EMPTY_FEATURES: Array<u32, 1> = Array::new();
+
+#[inline(always)]
+fn empty_features() -> u32 {
+    match FW_EMPTY_FEATURES.get(0) {
+        Some(&mask) => mask,
+        None => 0,
+    }
+}
+
+#[inline(always)]
+fn feature_empty(gates: u32, bit: u32) -> bool {
+    (gates & bit) != 0
+}
+
 /// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
 #[btf_map]
 static INTERFACE_GROUPS: HashMap<u32, u32, 64> = HashMap::new();
@@ -165,7 +194,11 @@ static L7_PORTS: HashMap<u16, u8, { MAX_L7_PORTS as usize }> = HashMap::new();
 /// banner, no `ServerHello`, so no JA4S. Both ends are checked so a
 /// conversation is captured whole, whichever hook sees the packet.
 #[inline(always)]
-fn l7_port_configured(src_port: u16, dst_port: u16) -> bool {
+fn l7_port_configured(gates: u32, src_port: u16, dst_port: u16) -> bool {
+    // No service port is configured, so both probes below can only miss.
+    if feature_empty(gates, FW_EMPTY_L7_PORTS) {
+        return false;
+    }
     unsafe { L7_PORTS.get(&dst_port) }.is_some() || unsafe { L7_PORTS.get(&src_port) }.is_some()
 }
 
@@ -238,7 +271,12 @@ fn should_skip_by_sampling() -> bool {
 
 /// Get the interface group membership for the current packet's ingress interface.
 #[inline(always)]
-fn get_iface_groups(ctx: &TcContext) -> u32 {
+fn get_iface_groups(ctx: &TcContext, gates: u32) -> u32 {
+    // With no interface assigned to a group, every rule is floating and the
+    // lookup can only miss.
+    if feature_empty(gates, FW_EMPTY_IFACE_GROUPS) {
+        return 0;
+    }
     let ifindex = unsafe { (*ctx.skb.skb).ifindex };
     match unsafe { INTERFACE_GROUPS.get(&ifindex) } {
         Some(&groups) => groups,
@@ -261,7 +299,12 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
 /// Resolve the tenant ID for the current packet.
 /// Priority: VLAN-based > interface-based > subnet (LPM) > default (0).
 #[inline(always)]
-unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
+unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32, gates: u32) -> u32 {
+    // Nothing maps a tenant, so the four lookups below can only miss and the
+    // answer is the default tenant.
+    if feature_empty(gates, FW_EMPTY_TENANTS) {
+        return 0;
+    }
     unsafe {
         // Priority 1: VLAN-based (if packet has VLAN tag)
         if vlan_id != 0 {
@@ -297,7 +340,10 @@ unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
 /// Resolve the tenant ID for an IPv6 packet.
 /// Priority: VLAN-based > interface-based > subnet V6 (LPM) > default (0).
 #[inline(always)]
-unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) -> u32 {
+unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4], gates: u32) -> u32 {
+    if feature_empty(gates, FW_EMPTY_TENANTS) {
+        return 0;
+    }
     unsafe {
         // Priority 1: VLAN-based (if packet has VLAN tag)
         if vlan_id != 0 {
@@ -411,6 +457,8 @@ struct FlowMeta {
 /// IPv4 IDS processing path.
 #[inline(always)]
 fn process_ids_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) -> Result<i32, ()> {
+    // Read the empty-feature bitmask once: every gate below reads this copy.
+    let gates = empty_features();
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });
     let dst_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).dst_addr });
@@ -454,7 +502,7 @@ fn process_ids_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
     // L7 payload capture (independent of IDS patterns).
     // Reuse the TCP header pointer from the port parse above.
     if let Some(tcphdr) = tcp_hdr_ptr
-        && l7_port_configured(src_port, dst_port)
+        && l7_port_configured(gates, src_port, dst_port)
     {
         let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
         let l7_offset = l4_offset + tcp_data_off;
@@ -466,12 +514,13 @@ fn process_ids_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
     }
 
     // IDS pattern matching (key is port+protocol, no IP in key)
-    process_ids_pattern(ctx, &flow, protocol as u8)
+    process_ids_pattern(ctx, &flow, protocol as u8, gates)
 }
 
 /// IPv6 IDS processing path.
 #[inline(always)]
 fn process_ids_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) -> Result<i32, ()> {
+    let gates = empty_features();
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
@@ -513,7 +562,7 @@ fn process_ids_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
     // L7 payload capture for IPv6 TCP.
     // Reuse the TCP header pointer from the port parse above.
     if let Some(tcphdr) = tcp_hdr_ptr
-        && l7_port_configured(src_port, dst_port)
+        && l7_port_configured(gates, src_port, dst_port)
     {
         let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
         let l7_offset = l4_offset + tcp_data_off;
@@ -523,7 +572,7 @@ fn process_ids_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
     }
 
     // IDS pattern matching (key is port+protocol, same map for v4/v6)
-    process_ids_pattern(ctx, &flow, next_hdr)
+    process_ids_pattern(ctx, &flow, next_hdr, gates)
 }
 
 /// Look up an IDS pattern with the per-tenant rule contract: try the
@@ -562,13 +611,26 @@ unsafe fn lookup_ids_pattern<const MAX_ENTRIES: usize>(
 
 /// IDS pattern lookup and action (shared by v4/v6 - key is tenant+port+protocol).
 #[inline(always)]
-fn process_ids_pattern(_ctx: &TcContext, flow: &FlowMeta, protocol: u8) -> Result<i32, ()> {
+fn process_ids_pattern(
+    _ctx: &TcContext,
+    flow: &FlowMeta,
+    protocol: u8,
+    gates: u32,
+) -> Result<i32, ()> {
     let src_addr = &flow.src_addr;
     let dst_addr = &flow.dst_addr;
     let src_port = flow.src_port;
     let dst_port = flow.dst_port;
     let flags = flow.flags;
     let vlan_id = flow.vlan_id;
+
+    // No rule is loaded on either leg, so both lookups can only miss and
+    // nothing this program does below would fire.
+    if feature_empty(gates, FW_EMPTY_IDS_PATTERNS)
+        && feature_empty(gates, FW_EMPTY_IDS_SRC_PATTERNS)
+    {
+        return Ok(TC_ACT_OK);
+    }
 
     // Resolve the packet's tenant once per chain rather than once per
     // program: a classifier before this one may have left it, and what this
@@ -579,9 +641,9 @@ fn process_ids_pattern(_ctx: &TcContext, flow: &FlowMeta, protocol: u8) -> Resul
         None => {
             let ifindex = unsafe { (*_ctx.skb.skb).ifindex };
             let t = if (flags & FLAG_IPV6) != 0 {
-                unsafe { resolve_tenant_id_v6(ifindex, vlan_id, src_addr) }
+                unsafe { resolve_tenant_id_v6(ifindex, vlan_id, src_addr, gates) }
             } else {
-                unsafe { resolve_tenant_id(ifindex, vlan_id, src_addr[0]) }
+                unsafe { resolve_tenant_id(ifindex, vlan_id, src_addr[0], gates) }
             };
             pktmeta::write_tenant(_ctx, t);
             t
@@ -590,10 +652,17 @@ fn process_ids_pattern(_ctx: &TcContext, flow: &FlowMeta, protocol: u8) -> Resul
 
     // Match on destination port first (the request leg), then fall back to
     // source port (the reply leg) so server-response rules fire on ingress.
-    let pattern = match unsafe { lookup_ids_pattern(&IDS_PATTERNS, tenant_id, dst_port, protocol) }
-    {
+    let dst_hit = if feature_empty(gates, FW_EMPTY_IDS_PATTERNS) {
+        None
+    } else {
+        unsafe { lookup_ids_pattern(&IDS_PATTERNS, tenant_id, dst_port, protocol) }
+    };
+    let pattern = match dst_hit {
         Some(p) => p,
         None => {
+            if feature_empty(gates, FW_EMPTY_IDS_SRC_PATTERNS) {
+                return Ok(TC_ACT_OK);
+            }
             match unsafe { lookup_ids_pattern(&IDS_SRC_PATTERNS, tenant_id, src_port, protocol) } {
                 Some(p) => p,
                 None => return Ok(TC_ACT_OK),
@@ -602,7 +671,7 @@ fn process_ids_pattern(_ctx: &TcContext, flow: &FlowMeta, protocol: u8) -> Resul
     };
 
     // Check interface group membership before applying IDS action.
-    let iface_groups = get_iface_groups(_ctx);
+    let iface_groups = get_iface_groups(_ctx, gates);
     if !group_matches(pattern.group_mask, iface_groups) {
         return Ok(TC_ACT_OK); // group mismatch -> pass
     }

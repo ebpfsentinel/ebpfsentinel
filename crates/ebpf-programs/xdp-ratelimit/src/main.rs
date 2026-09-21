@@ -36,6 +36,10 @@ use ebpf_common::{
         MAX_DDOS_TRACKED_SOURCES, SynRateState, SyncookieCtx,
     },
     event::{EVENT_TYPE_RATELIMIT, FLAG_IPV6, FLAG_VLAN, PacketEvent},
+    firewall::{
+        FW_EMPTY_AMP_PORTS, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_RL_TIERS_V4, FW_EMPTY_RL_TIERS_V6,
+        FW_EMPTY_TENANTS,
+    },
     ratelimit::{
         ALGO_FIXED_WINDOW, ALGO_LEAKY_BUCKET, ALGO_SLIDING_WINDOW, ALGO_TOKEN_BUCKET,
         FixedWindowValue, LeakyBucketValue, MAX_RL_BUCKET_ENTRIES, MAX_RL_LPM_ENTRIES,
@@ -275,6 +279,36 @@ fn ringbuf_has_backpressure() -> bool {
     ringbuf_has_backpressure!(EVENTS)
 }
 
+/// Which optional tables userspace has loaded nothing into.
+///
+/// The same map the firewall gates on, shared by pin because both programs
+/// read the same tables: the tenant sources and the interface groups are one
+/// kernel object across the two. Userspace publishes a bit per empty feature
+/// and the lookup is skipped. The sense is inverted on purpose: an unwritten
+/// map, or an object loaded by a userspace that never heard of it, reads 0
+/// and every lookup still happens, so a stale value can only be slower,
+/// never wrong.
+#[btf_map]
+static FW_EMPTY_FEATURES: Array<u32, 1> = Array::new();
+
+/// The bitmask of features userspace has loaded nothing into.
+///
+/// An `Array` lookup is inlined by the verifier, so reading this costs a few
+/// instructions against the tens of nanoseconds a hash or LPM miss costs.
+#[inline(always)]
+fn empty_features() -> u32 {
+    match FW_EMPTY_FEATURES.get(0) {
+        Some(&mask) => mask,
+        None => 0,
+    }
+}
+
+/// Whether the tables behind `bit` are known to be empty.
+#[inline(always)]
+fn feature_empty(gates: u32, bit: u32) -> bool {
+    (gates & bit) != 0
+}
+
 /// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
 #[btf_map]
 static INTERFACE_GROUPS: HashMap<u32, u32, 64> = HashMap::new();
@@ -308,7 +342,12 @@ fn increment_ddos_metric(index: u32) {
 
 /// Get the interface group membership for the current packet's ingress interface.
 #[inline(always)]
-fn get_iface_groups(ctx: &XdpContext) -> u32 {
+fn get_iface_groups(ctx: &XdpContext, gates: u32) -> u32 {
+    // With no interface assigned to a group, every rule is floating and the
+    // lookup can only miss.
+    if feature_empty(gates, FW_EMPTY_IFACE_GROUPS) {
+        return 0;
+    }
     let ifindex = ctx.ingress_ifindex() as u32;
     match unsafe { INTERFACE_GROUPS.get(&ifindex) } {
         Some(&groups) => groups,
@@ -331,7 +370,12 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
 /// Resolve the tenant ID for the current packet.
 /// Priority: VLAN-based > interface-based > subnet (LPM) > default (0).
 #[inline(always)]
-unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
+unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32, gates: u32) -> u32 {
+    // Nothing maps a tenant, so the three lookups below can only miss and the
+    // answer is the default tenant.
+    if feature_empty(gates, FW_EMPTY_TENANTS) {
+        return 0;
+    }
     unsafe {
         // Priority 1: VLAN-based (if packet has VLAN tag)
         if vlan_id != 0 {
@@ -359,7 +403,10 @@ unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
 /// Resolve the tenant ID for an IPv6 packet.
 /// Priority: VLAN-based > interface-based > subnet V6 (LPM) > default (0).
 #[inline(always)]
-unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) -> u32 {
+unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4], gates: u32) -> u32 {
+    if feature_empty(gates, FW_EMPTY_TENANTS) {
+        return 0;
+    }
     unsafe {
         // Priority 1: VLAN-based (if packet has VLAN tag)
         if vlan_id != 0 {
@@ -405,8 +452,17 @@ pub fn xdp_ratelimit(ctx: XdpContext) -> u32 {
         }
         return xdp_action::XDP_DROP;
     }
-    // Chain: on PASS, check MTU then tail-call to loadbalancer (slot 1).
+    // Chain: on PASS, tail-call the loadbalancer (slot 1), and guard the MTU
+    // only where the frame actually leaves the chain.
     if action == xdp_action::XDP_PASS {
+        // No-op if LB is not loaded (slot empty).
+        unsafe {
+            RL_PROG_ARRAY.tail_call(&ctx, PROG_IDX_LOADBALANCER);
+        }
+        // The tail-call did not take, so this program is the tail and nothing
+        // further will look at the frame. Running the helper before the call
+        // meant checking an untouched frame that the firewall had already
+        // checked and the loadbalancer would check again.
         let mut mtu: u32 = 0;
         let mtu_ret = unsafe { bpf_check_mtu(ctx.ctx as *mut _, 0, &mut mtu as *mut u32, 0, 0) };
         // Only drop on a genuine MTU violation (positive BPF_MTU_CHK_RET_*);
@@ -415,10 +471,6 @@ pub fn xdp_ratelimit(ctx: XdpContext) -> u32 {
         if mtu_ret > 0 {
             increment_metric(METRIC_MTU_EXCEEDED);
             return xdp_action::XDP_DROP;
-        }
-        // No-op if LB is not loaded (slot empty).
-        unsafe {
-            RL_PROG_ARRAY.tail_call(&ctx, PROG_IDX_LOADBALANCER);
         }
     }
     action
@@ -467,6 +519,8 @@ fn process_ratelimit_v4(
     vlan_id: u16,
     flags: u8,
 ) -> Result<u32, ()> {
+    // Read the empty-feature bitmask once: every gate below reads this copy.
+    let gates = empty_features();
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });
     let dst_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).dst_addr });
@@ -498,7 +552,9 @@ fn process_ratelimit_v4(
     }
 
     // ── DDoS: UDP amplification protection ─────────────────────────
+    // No vector port is armed, so the source-port probe can only miss.
     if protocol == PROTO_UDP
+        && !feature_empty(gates, FW_EMPTY_AMP_PORTS)
         && let Some(action) =
             check_udp_amplification(ctx, l4_offset, src_ip, dst_ip, flags, vlan_id)
     {
@@ -508,11 +564,14 @@ fn process_ratelimit_v4(
     // Resolve the packet's tenant once; rate-limit config + buckets are
     // tenant-scoped with a fall back to the global (tenant 0) config.
     let ifindex = ctx.ingress_ifindex() as u32;
-    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) };
+    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip, gates) };
 
     // ── Country-tier LPM lookup (before per-IP) ────────────────────
+    // No tier CIDR is loaded, so the trie can only miss and every packet
+    // takes the generic path below.
     let lpm_key = Key::new(32, src_ip.to_be_bytes());
-    if let Some(tier_val) = RL_LPM_SRC_V4.get(&lpm_key)
+    if !feature_empty(gates, FW_EMPTY_RL_TIERS_V4)
+        && let Some(tier_val) = RL_LPM_SRC_V4.get(&lpm_key)
         && let Some(tier_cfg) = RL_TIER_CONFIG.get(tier_val.tier_id as u32)
         && tier_cfg.ns_per_token > 0
     {
@@ -553,7 +612,7 @@ fn process_ratelimit_v4(
     let config = lookup_config(&key)?;
 
     // Check interface group membership before applying rate limit.
-    let iface_groups = get_iface_groups(ctx);
+    let iface_groups = get_iface_groups(ctx, gates);
     if !group_matches(config.group_mask, iface_groups) {
         increment_metric(METRIC_PASSED);
         return Ok(xdp_action::XDP_PASS);
@@ -601,6 +660,7 @@ fn process_ratelimit_v6(
     vlan_id: u16,
     flags: u8,
 ) -> Result<u32, ()> {
+    let gates = empty_features();
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
@@ -641,6 +701,7 @@ fn process_ratelimit_v6(
 
     // ── DDoS: UDP amplification (IPv6) ─────────────────────────────
     if next_hdr == PROTO_UDP
+        && !feature_empty(gates, FW_EMPTY_AMP_PORTS)
         && let Some(action) = check_udp_amp_v6(
             ctx, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id,
         )
@@ -651,12 +712,13 @@ fn process_ratelimit_v6(
     // Resolve the packet's tenant once; rate-limit config + buckets are
     // tenant-scoped with a fall back to the global (tenant 0) config.
     let ifindex = ctx.ingress_ifindex() as u32;
-    let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr) };
+    let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr, gates) };
 
     // ── Country-tier LPM lookup (IPv6, before per-IP) ──────────────
     let src_bytes = unsafe { (*ipv6hdr).src_addr };
     let lpm_key_v6 = Key::new(128, src_bytes);
-    if let Some(tier_val) = RL_LPM_SRC_V6.get(&lpm_key_v6)
+    if !feature_empty(gates, FW_EMPTY_RL_TIERS_V6)
+        && let Some(tier_val) = RL_LPM_SRC_V6.get(&lpm_key_v6)
         && let Some(tier_cfg) = RL_TIER_CONFIG.get(tier_val.tier_id as u32)
         && tier_cfg.ns_per_token > 0
     {
@@ -701,7 +763,7 @@ fn process_ratelimit_v6(
     let config = lookup_config(&key)?;
 
     // Check interface group membership before applying rate limit.
-    let iface_groups = get_iface_groups(ctx);
+    let iface_groups = get_iface_groups(ctx, gates);
     if !group_matches(config.group_mask, iface_groups) {
         increment_metric(METRIC_PASSED);
         return Ok(xdp_action::XDP_PASS);

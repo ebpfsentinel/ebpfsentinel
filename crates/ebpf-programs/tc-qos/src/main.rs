@@ -13,6 +13,7 @@ use aya_ebpf_bindings::bindings::_bindgen_ty_28::BPF_SKB_TSTAMP_DELIVERY_MONO;
 use aya_ebpf_bindings::helpers::{bpf_skb_ecn_set_ce, bpf_skb_set_tstamp};
 use ebpf_common::{
     event::{EVENT_TYPE_QOS, FLAG_IPV6, PacketEvent},
+    firewall::FW_EMPTY_QOS_CLASSIFIERS,
     qos::{
         QOS_METRIC_COUNT, QOS_METRIC_DELAYED, QOS_METRIC_DROPPED_LOSS, QOS_METRIC_DROPPED_QUEUE,
         QOS_METRIC_ERRORS, QOS_METRIC_EVENTS_DROPPED, QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN,
@@ -51,6 +52,31 @@ static QOS_QUEUE_CONFIG: Array<QosQueueConfig, 256> = Array::new();
 /// `QoS` classifier lookup: 5-tuple+DSCP -> queue_id + priority.
 #[btf_map]
 static QOS_CLASSIFIERS: HashMap<QosClassifierKey, QosClassifierValue, 1024> = HashMap::new();
+
+/// Which tables userspace knows to be empty, one bit each.
+///
+/// The same kernel object the firewall reads: the loader pins every map under
+/// its ELF name, so one publisher answers for every program declaring it. A
+/// set bit means the lookups behind it can only miss. Zero means nothing has
+/// been published, so every lookup stays in place - a stale value here can
+/// only cost time, never a rule.
+#[btf_map]
+static FW_EMPTY_FEATURES: Array<u32, 1> = Array::new();
+
+/// Read the published emptiness mask, or zero when nothing was published.
+#[inline(always)]
+fn empty_features() -> u32 {
+    match FW_EMPTY_FEATURES.get(0) {
+        Some(&mask) => mask,
+        None => 0,
+    }
+}
+
+/// Whether the tables behind one gate bit are known to hold nothing.
+#[inline(always)]
+fn feature_empty(gates: u32, bit: u32) -> bool {
+    (gates & bit) != 0
+}
 
 /// Per-pipe token bucket. Index = pipe_id (0-63).
 ///
@@ -232,6 +258,14 @@ fn dispatch(ctx: &TcContext, is_ingress: bool) -> i32 {
 
 #[inline(always)]
 fn try_tc_qos(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
+    // No rule is loaded, so the classification ladder below can only miss on
+    // every one of its steps and nothing this program does past the match
+    // would fire. The parse goes with it: a program behind this one that
+    // needs it does its own.
+    if feature_empty(empty_features(), FW_EMPTY_QOS_CLASSIFIERS) {
+        return Ok(TC_ACT_OK);
+    }
+
     // The parse the chain already holds, or this program's own if it is
     // first.
     let meta = pktmeta::resolve(ctx)?;

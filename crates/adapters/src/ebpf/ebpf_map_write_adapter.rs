@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
+use crate::ebpf::feature_gates::{self, Feature};
 use aya::maps::{BloomFilter, HashMap, MapData};
 use domain::common::error::DomainError;
 use ebpf_common::threatintel::{
@@ -50,6 +51,10 @@ impl EbpfMapWritePort for EbpfMapWriteAdapter {
 
         match ip {
             IpAddr::V4(v4) => {
+                // This adapter writes the same sets the manager does, so it
+                // owes the same gate: open the probe before the insert, or the
+                // datapath skips an indicator this path has just added.
+                feature_gates::publish(Feature::ThreatIocsV4, false);
                 let key = ThreatIntelKey { ip: u32::from(v4) };
                 let mut map = self.threatintel_v4.lock().map_err(|e| {
                     DomainError::EngineError(format!("threatintel V4 map lock poisoned: {e}"))
@@ -69,6 +74,7 @@ impl EbpfMapWritePort for EbpfMapWriteAdapter {
                     warn!(ip = %ip, "V6 threatintel map not available, skipping inject");
                     return Ok(());
                 };
+                feature_gates::publish(Feature::ThreatIocsV6, false);
                 let octets = v6.octets();
                 let key = ThreatIntelKeyV6 {
                     ip: [

@@ -11,6 +11,7 @@ use aya_ebpf::{
 use ebpf_common::{
     config_flags::ConfigFlags,
     event::{EVENT_TYPE_THREATINTEL, PacketEvent},
+    firewall::{FW_EMPTY_THREAT_IOCS_V4, FW_EMPTY_THREAT_IOCS_V6},
     threatintel::{
         THREATINTEL_ACTION_DROP, THREATINTEL_MAX_ENTRIES, THREATINTEL_METRIC_DROPPED,
         THREATINTEL_METRIC_ERRORS, THREATINTEL_METRIC_EVENTS_DROPPED, THREATINTEL_METRIC_MATCHED,
@@ -84,6 +85,29 @@ static EVENTS: RingBuf<PacketEvent, { 256 * 4096 }> = RingBuf::new();
 #[btf_map]
 static CONFIG_FLAGS: Array<ConfigFlags, 1> = Array::new();
 
+/// Which optional tables userspace has loaded nothing into.
+///
+/// The same map the firewall, the rate limiter and the classifier gate on,
+/// shared by pin. Userspace publishes a bit per empty feature and the lookup
+/// is skipped. The sense is inverted on purpose: an unwritten map, or an
+/// object loaded by a userspace that never heard of it, reads 0 and every
+/// lookup still happens, so a stale value can only be slower, never wrong.
+#[btf_map]
+static FW_EMPTY_FEATURES: Array<u32, 1> = Array::new();
+
+#[inline(always)]
+fn empty_features() -> u32 {
+    match FW_EMPTY_FEATURES.get(0) {
+        Some(&mask) => mask,
+        None => 0,
+    }
+}
+
+#[inline(always)]
+fn feature_empty(gates: u32, bit: u32) -> bool {
+    (gates & bit) != 0
+}
+
 // ── Entry point ─────────────────────────────────────────────────────
 
 /// TC classifier entry point. Delegates to try_tc_threatintel; any error
@@ -115,14 +139,30 @@ fn try_tc_threatintel(ctx: &TcContext) -> Result<i32, ()> {
         }
     }
 
+    // Neither set holds an indicator, so both bloom probes can only answer
+    // that this packet is not in a set that is empty. Nothing below this
+    // point would fire, including the parse.
+    let gates = empty_features();
+    if feature_empty(gates, FW_EMPTY_THREAT_IOCS_V4)
+        && feature_empty(gates, FW_EMPTY_THREAT_IOCS_V6)
+    {
+        return Ok(TC_ACT_OK);
+    }
+
     // The parse the chain already holds, or this program's own if it is
     // first.
     let meta = pktmeta::resolve(ctx)?;
     let pkt_flags = meta.event_flags();
 
     if meta.is_ipv4() {
+        if feature_empty(gates, FW_EMPTY_THREAT_IOCS_V4) {
+            return Ok(TC_ACT_OK);
+        }
         process_threatintel_v4(ctx, meta.l3(), meta.vlan_id, pkt_flags)
     } else if meta.is_ipv6() {
+        if feature_empty(gates, FW_EMPTY_THREAT_IOCS_V6) {
+            return Ok(TC_ACT_OK);
+        }
         process_threatintel_v6(ctx, meta.l3(), meta.vlan_id, pkt_flags)
     } else {
         Ok(TC_ACT_OK)

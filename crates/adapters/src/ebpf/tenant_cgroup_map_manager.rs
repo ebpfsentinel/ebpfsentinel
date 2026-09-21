@@ -1,3 +1,4 @@
+use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
 use aya::maps::{HashMap, MapData};
 use tracing::info;
@@ -27,6 +28,7 @@ pub struct TenantCgroupMapManager {
 impl TenantCgroupMapManager {
     /// Create a new, empty `TenantCgroupMapManager`.
     pub fn new() -> Self {
+        feature_gates::publish(Feature::TenantCgroup, true);
         Self { maps: Vec::new() }
     }
 
@@ -56,6 +58,13 @@ impl TenantCgroupMapManager {
     ///
     /// Returns an error if an eBPF map write fails.
     pub fn set_tenant_cgroups(&mut self, entries: &[(u64, u32)]) -> Result<(), anyhow::Error> {
+        if !entries.is_empty() {
+            // The setter is additive - an empty slice removes nothing - so the
+            // only safe reading of "this map holds no entry" is that nothing
+            // has been put in it yet. Open the lookup before the first insert,
+            // so a cgroup is never mapped behind a gate still saying none is.
+            feature_gates::publish(Feature::TenantCgroup, false);
+        }
         for map in &mut self.maps {
             for &(cgroup_id, tenant_id) in entries {
                 map.insert(cgroup_id, tenant_id, 0)

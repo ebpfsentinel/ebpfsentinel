@@ -21,7 +21,7 @@ use ebpf_common::{
         MAX_MAGLEV_SERVICES, MaglevLookup, lb_fnv1a_u32, lb_service_index,
     },
 };
-use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, with_xdp_ct_lookup, xdp_rx_hash, xdp_rx_timestamp};
+use ebpf_helpers::kfuncs::{xdp_rx_hash, xdp_rx_timestamp};
 use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::net::{
     ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
@@ -178,18 +178,6 @@ fn process_v4(
 
     let src_addr = [u32::from_ne_bytes(src_addr_raw), 0, 0, 0];
     let dst_addr = [u32::from_ne_bytes(dst_addr_raw), 0, 0, 0];
-
-    // Probe kernel CT for flow stickiness: if the flow already has a
-    // conntrack entry, the kernel has seen it before - the same
-    // backend should handle subsequent packets for connection affinity.
-    let tuple = CtTuple::v4(src_ip, u32::from_be_bytes(dst_addr_raw), src_port, dst_port);
-    let mut ct_opts = if protocol == PROTO_TCP {
-        BpfCtOpts::tcp()
-    } else {
-        BpfCtOpts::udp()
-    };
-    let _ct_exists =
-        unsafe { with_xdp_ct_lookup(ctx_raw, tuple, &mut ct_opts, |_ct| true) }.unwrap_or(false);
 
     // Select backend using per-service round-robin index
     let svc_idx = service_key_index(&key);
