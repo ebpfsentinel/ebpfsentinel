@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use domain::common::entity::RuleId;
-use domain::firewall::entity::{FirewallRule, PortRange, Scope as DomainScope};
+use domain::firewall::entity::{FirewallAction, FirewallRule, PortRange, Scope as DomainScope};
 use serde::{Deserialize, Serialize};
 
 use super::alias::AliasConfig;
@@ -42,6 +42,24 @@ pub struct FirewallConfig {
     /// Schedules for time-based rule activation.
     #[serde(default)]
     pub schedules: HashMap<String, ScheduleConfig>,
+}
+
+impl FirewallConfig {
+    /// Whether any rule in this section forges a refusal rather than dropping
+    /// in silence.
+    ///
+    /// The reject program keeps a per-source throttle table so a forged RST
+    /// or ICMP message cannot itself become the flood. A section that names
+    /// no such rule never reaches that program, so the table it would fill is
+    /// sized down at the next start. The vocabulary is `parse_action`'s, read
+    /// through it rather than restated, because a word admitted there and not
+    /// here would size a table the datapath then fills.
+    #[must_use]
+    pub fn forges_a_refusal(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|rule| matches!(parse_action(&rule.action), Ok(FirewallAction::Reject)))
+    }
 }
 
 impl Default for FirewallConfig {

@@ -1608,6 +1608,22 @@ pub async fn run(
             "startup: previous generation's pins are not introspectable",
         );
 
+        // The kernel-filled tables take their capacity from the configuration
+        // at create time, so the plan has to be in force before the first
+        // object is loaded. This is the path every agent takes at start; the
+        // HA activate path installs the same plan, and whichever runs first
+        // wins, because a map keeps the capacity it was created with.
+        let sizing = adapters::ebpf::map_sizing::MapSizing::from_config(&config);
+        match adapters::ebpf::map_sizing::install(&sizing) {
+            Ok(()) => info!(plan = %sizing.describe(), "eBPF table capacities"),
+            Err(in_force) => warn!(
+                in_force = %in_force.describe(),
+                configured = %sizing.describe(),
+                "eBPF table capacities changed in the configuration; they apply at the next \
+                 agent start"
+            ),
+        }
+
         // 10a. XDP Firewall
         fw_ok = if config.firewall.enabled {
             match try_load_xdp_firewall(&ebpf_dir, &config, &domain_rules) {

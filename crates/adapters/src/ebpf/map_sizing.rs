@@ -25,6 +25,8 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use aya_obj::generated::bpf_map_type;
+use ebpf_common::conntrack::CT_SRC_COUNTER_MAX;
+use ebpf_common::nat::MAX_HAIRPIN_CT;
 use infrastructure::config::AgentConfig;
 
 /// The maps the plan sizes, with the configuration field each one follows.
@@ -45,7 +47,26 @@ pub const SIZED_MAPS: &[(&str, &str)] = &[
     ("HALF_OPEN_COUNTERS", "ddos.max_tracked_sources"),
     ("FLOOD_COUNTERS", "ddos.max_tracked_sources"),
     ("CONN_TABLE", "ddos.connection_tracking.max_entries"),
+    ("CT_SRC_COUNTERS", "conntrack.max_src_states"),
+    ("NAT_HAIRPIN_CT", "nat.hairpin.enabled"),
+    ("REJECT_RATELIMIT", "firewall.rules[].action"),
 ];
+
+/// What a table belonging to a feature the configuration switches off is
+/// created with.
+///
+/// It is not zero, because a map is created before a reload can turn the
+/// feature on and a table of no entries would refuse every insert until the
+/// next start. It is small enough that the buckets a live feature does use
+/// stay in cache: the three tables below are 14 MB between them at their full
+/// size on a four-CPU node, locked whether or not anything can ever be
+/// written into them.
+pub const IDLE_TABLE_ENTRIES: u32 = 1_024;
+
+/// The reject program's throttle table at full size, which is what its own
+/// declaration carries. It is declared here rather than imported because the
+/// program is built for another target and shares no crate with this one.
+pub const REJECT_RATELIMIT_ENTRIES: u32 = 65_536;
 
 /// The capacity every sized map is created with, derived from one
 /// configuration.
@@ -62,6 +83,32 @@ impl MapSizing {
         let buckets = config.ratelimit.max_buckets;
         let sources = config.ddos.max_tracked_sources;
         let conn_table = config.ddos.connection_tracking.capacity();
+        // The per-source state counters are written inside one branch of the
+        // firewall's connection-limit check, which is entered only when one of
+        // these two limits is set. Both default to zero, so the table is full
+        // size on every deployment that never asked for a per-source limit.
+        let src_counters =
+            if config.conntrack.max_src_states > 0 || config.conntrack.max_src_conn_rate > 0 {
+                CT_SRC_COUNTER_MAX
+            } else {
+                IDLE_TABLE_ENTRIES
+            };
+        // Hairpin NAT is the only writer of the reflection table, and the
+        // program gates on the same flag before it reads a header.
+        let hairpin = if config.nat.hairpin.enabled {
+            MAX_HAIRPIN_CT
+        } else {
+            IDLE_TABLE_ENTRIES
+        };
+        // The reject throttle is reached only through a rule that forges a
+        // refusal. A rule added through the API after the agent started lands
+        // in the table this plan created, which is the same rule every sized
+        // map already follows: a capacity applies at the next start.
+        let reject = if config.firewall.forges_a_refusal() {
+            REJECT_RATELIMIT_ENTRIES
+        } else {
+            IDLE_TABLE_ENTRIES
+        };
         let entries = SIZED_MAPS
             .iter()
             .map(|(name, field)| {
@@ -70,6 +117,9 @@ impl MapSizing {
                     "ratelimit.max_buckets" => buckets,
                     "ddos.max_tracked_sources" => sources,
                     "ddos.connection_tracking.max_entries" => conn_table,
+                    "conntrack.max_src_states" => src_counters,
+                    "nat.hairpin.enabled" => hairpin,
+                    "firewall.rules[].action" => reject,
                     other => unreachable!("unmapped sizing field {other}"),
                 };
                 (*name, n)
@@ -195,6 +245,60 @@ mod tests {
         assert_eq!(p.get("SYN_RATE_TRACKER"), Some(16_384));
         assert_eq!(p.get("FLOOD_COUNTERS"), Some(16_384));
         assert_eq!(p.get("CONN_TABLE"), Some(65_536));
+    }
+
+    #[test]
+    fn a_feature_the_configuration_switches_off_is_sized_down() {
+        let p = plan();
+        assert_eq!(p.get("CT_SRC_COUNTERS"), Some(IDLE_TABLE_ENTRIES));
+        assert_eq!(p.get("NAT_HAIRPIN_CT"), Some(IDLE_TABLE_ENTRIES));
+        assert_eq!(p.get("REJECT_RATELIMIT"), Some(IDLE_TABLE_ENTRIES));
+    }
+
+    #[test]
+    fn a_per_source_limit_brings_the_counter_table_back() {
+        let mut config = default_config();
+        config.conntrack.max_src_conn_rate = 40;
+        assert_eq!(
+            MapSizing::from_config(&config).get("CT_SRC_COUNTERS"),
+            Some(CT_SRC_COUNTER_MAX)
+        );
+        let mut config = default_config();
+        config.conntrack.max_src_states = 200;
+        assert_eq!(
+            MapSizing::from_config(&config).get("CT_SRC_COUNTERS"),
+            Some(CT_SRC_COUNTER_MAX)
+        );
+    }
+
+    #[test]
+    fn hairpin_nat_brings_the_reflection_table_back() {
+        let mut config = default_config();
+        config.nat.hairpin.enabled = true;
+        assert_eq!(
+            MapSizing::from_config(&config).get("NAT_HAIRPIN_CT"),
+            Some(MAX_HAIRPIN_CT)
+        );
+    }
+
+    #[test]
+    fn a_rule_that_forges_a_refusal_brings_the_throttle_back() {
+        let config = AgentConfig::from_yaml(
+            "agent:\n  interfaces: [eth0]\nfirewall:\n  rules:\n    - id: r1\n      priority: 10\n      action: reject\n",
+        )
+        .expect("config with a reject rule parses");
+        assert_eq!(
+            MapSizing::from_config(&config).get("REJECT_RATELIMIT"),
+            Some(REJECT_RATELIMIT_ENTRIES)
+        );
+        let config = AgentConfig::from_yaml(
+            "agent:\n  interfaces: [eth0]\nfirewall:\n  rules:\n    - id: r1\n      priority: 10\n      action: deny\n",
+        )
+        .expect("config with a deny rule parses");
+        assert_eq!(
+            MapSizing::from_config(&config).get("REJECT_RATELIMIT"),
+            Some(IDLE_TABLE_ENTRIES)
+        );
     }
 
     #[test]

@@ -270,16 +270,76 @@ comparable with the 2026-09-20 absolutes, which were taken on a quieter host):
 - `xdp_firewall` stays at about 60 % of the per-packet time and it is the
   next thing to look at, not the tc chain.
 - The full three-profile pass of the same day is in
-  `ebpfsentinel-enterprise/tests/perf/results/2026-09-21-pktgen-64/`. It
-  reads 6.0 runs a packet and 99 MB of maps for both agents, and per-run
-  figures 1.5 to 1.7 times the 2026-09-20 ones with the host's one-minute
-  load at 3.5 to 7.4 during the windows; the uncapped OSS cell is marked
-  `(host busy)`. Those absolutes are the host's, which is what the A/B above
-  is for.
+  `ebpfsentinel-enterprise/tests/perf/results/2026-09-21-pktgen-64/`, and it
+  is **not usable**. This sentence previously said it read 6.0 runs a packet
+  and 99 MB of maps for both agents; the OSS profile did, the enterprise one
+  read 7.0 and 93.6 MB. The enterprise binary in it was stale - it still
+  carried `tc_nat_egress` attached on TCX ingress, so it ran one extra
+  program on every packet and read as the dearer datapath for a reason that
+  was not in the tree. The host was contended on top of that: the lane
+  peaked at 52 kpps where a quiet host reaches 86, every per-packet figure
+  in it is about 1.75 times the same cell measured quiet, and the
+  `(host busy)` marker fired on one cell only because the threshold is too
+  lax for this box. The run is kept rather than deleted, since a benchmark
+  whose bad runs disappear cannot be audited. What it was trying to say is
+  in `.../2026-09-21-pktgen-64-rebuilt/`, both agents rebuilt from the same
+  clean tree, where both read 6.00 runs a packet and the enterprise layer
+  costs 2 % per packet in either direction, which is noise. The reasoning is
+  in `analysis.md` beside it.
+
+### Gating the lookups a packet does not need (2026-09-21)
+
+The pass above left `xdp_firewall` at about 60 % of the per-packet time and said
+it was the next thing to look at. It was, and what it was doing was not deciding
+anything: every program in the chain paid the full price of every feature it
+could perform before discovering the feature had nothing loaded. The firewall
+probed conntrack on every packet whether or not a rule read connection state and
+whether or not the default policy needed the established bypass; the two NAT
+classifiers hashed the 5-tuple and looked up their tables with no rule loaded at
+all; three maps were created, populated and never read.
+
+Each of those is now gated on a single-entry map the loader writes when it knows
+what is loaded: `FW_CT_GATE` for the conntrack probe, a rule count for each NAT
+direction, the hairpin switch for the reflection table. A gate opens on load and
+closes only once a load has proved it can, because a firewall that probes state
+it did not need is slow and one that skips a probe it needed is wrong.
+
+Measured on the lane, ns a packet in eBPF, median of three 15 s windows:
+
+| Profile | Target | before | after |
+| ------- | ------ | -----: | ----: |
+| oss | 25 kpps | 1 728 | 1 487 |
+| oss | 50 kpps | 1 329 | 1 160 |
+| oss | uncapped | 1 221 | 1 018 |
+| enterprise | 25 kpps | 1 757 | 1 495 |
+| enterprise | 50 kpps | 1 310 | 1 121 |
+| enterprise | uncapped | 1 191 | 993 |
+
+Per program at 25 kpps on the OSS profile: `xdp_firewall` 1 128 to 827 ns,
+`tc_nat_ingress` 156 to 34, `tc_threatintel` 85 to 79, `tc_ids` 234 to 236,
+`tc_dns` 24 to 28. `tc_conntrack` went the other way, 150 to 254, which is the
+work moving rather than disappearing: the flows the firewall used to look up on
+its own behalf are now looked up once, by the program whose job that is.
+
+Two lookups were deliberately left alone. The `tc_ids` pattern prefilter would
+need refcounting to know whether any rule still reads it, and the
+`tc_threatintel` bloom filter has two writers, so a gate over either is a
+correctness question rather than a performance one.
+
+**What this lane can and cannot resolve.** Two runs of the same binaries, on the
+same host, at a host load lower than either comparison run, differ by 10 % a
+packet; the three windows inside one run agree within 3 to 6 %, so the spread is
+between runs and looks like a fixed cost paid once per boot. The gains in the
+table above are 14 to 17 % and survive that, with a per-program split that says
+where they came from; a change worth less than 10 % on this lane is not
+measurable by it. The runs are
+`ebpfsentinel-enterprise/tests/perf/results/2026-09-21-pktgen-64-gated/`,
+`-sized/` and `-sized-repeat/`, with the reasoning in `analysis.md` beside the
+first two.
 
 ### Memory footprint (2026-09-21)
 
-Same measurement as the section below, re-taken on kernel 7.0.0-28-generic after the eBPF tables stopped being sized by compile-time constants and started being sized from the configuration at load. Resident size is the agent's own processes (agent plus warden, `VmRSS` once the datapath is up and before any traffic); map memory is `bytes_memlock` summed over the loaded maps, preallocated at load and the same at idle and under flood.
+Same measurement as the section below, re-taken on kernel 7.0.0-28-generic after the eBPF tables stopped carrying the capacity of their worst case. Resident size is the agent's own processes (agent plus warden, `VmRSS` once the datapath is up and before any traffic); map memory is `bytes_memlock` summed over the loaded maps, preallocated at load and the same at idle and under flood.
 
 | Configuration | eBPF programs | RSS (MB) | Map memory (MB) |
 |---|---|---|---|
@@ -292,6 +352,8 @@ Same measurement as the section below, re-taken on kernel 7.0.0-28-generic after
 Resident size did not move: the change is entirely in the tables. Threat intelligence went from 180 MB to 12 MB because its two IOC hashes and two Bloom filters were a fixed million entries each whatever the feeds carried, and are now `threatintel.max_entries`, derived from the feeds with a floor of 4,096. Rate limiting went from 160 MB to 46 MB on `ratelimit.max_buckets`, and the DDoS tables on `ddos.max_tracked_sources`. Nothing was made smaller than it needs to be: the defaults are what the fixture asks for, and an estate that wants the old capacity writes it in the configuration.
 
 The total splits in two on this 4 vCPU guest: about 43 MB is in per-CPU tables and scales with the CPU count at roughly 11 MB a CPU, and about 56 MB does not. The same fixture on 16 vCPU therefore locks about 230 MB rather than 99 MB, which is the figure to size a node against. Against the 512Mi limit the chart sets, 58 MB resident plus 99 MB of maps leaves about 355 MB on four CPUs and about 225 MB on sixteen, where the previous build left about 90 MB on four and did not fit on sixteen at all.
+
+What this table actually measured, corrected on 2026-09-21: the map column is the capacity the objects are **declared** with, not the capacity the configuration asks for. The load-time plan was installed on one of the two paths that create maps - the activate path the enterprise binary calls - and the path every OSS agent takes at start never called it, so the figures above are what the lowered object defaults cost (65,536 IOC slots rather than a million, 65,536 rate-limit buckets rather than 262,144) and not what the fixture asks for. Both paths install the plan since, and a table belonging to a section the configuration switches off is created at a 1,024-entry floor. Measured on the perf lane's own fixture, that is 91.4 MB down to 67.7 MB for the OSS agent and 75.9 MB down to 67.6 MB for the enterprise one, which is where the two agents stop differing in what they lock: five tables were carrying their declared capacity on the OSS side alone (the two IOC hashes and their bloom filters, the per-source conntrack counters, the hairpin reflection table and the reject throttle). The full run is in `ebpfsentinel-enterprise/tests/perf/results/2026-09-21-pktgen-64-sized/`.
 
 The per-packet effect of the same change, measured against the previous build under identical host load, is in the section above.
 
@@ -307,7 +369,7 @@ Resident size of the agent's own processes (agent plus warden, `VmRSS` once the 
 | Threat intelligence only | 16 | 42 | 180 |
 | Full benchmark fixture | 24 | 58 | 365 |
 
-The two big map holders are the threat intelligence IOC tables and the rate-limit buckets, both LRU hashes sized for their worst case at load; the conntrack table is 24 MB. Under the held-rate windows above the resident size stayed at 58 MB from idle to 5 Gbps, so what an operator sizes for is the map memory: with the fixture as it is, 58 MB resident plus 365 MB of maps against the 512Mi limit the chart sets leaves about 90 MB, and a feature that widens a map is a change to that limit. The map column of this table is superseded by the section above: every table it reports was sized by a compile-time constant, and they are sized from the configuration since 2026-09-21.
+The two big map holders are the threat intelligence IOC tables and the rate-limit buckets, both LRU hashes sized for their worst case at load; the conntrack table is 24 MB. Under the held-rate windows above the resident size stayed at 58 MB from idle to 5 Gbps, so what an operator sizes for is the map memory: with the fixture as it is, 58 MB resident plus 365 MB of maps against the 512Mi limit the chart sets leaves about 90 MB, and a feature that widens a map is a change to that limit. The map column of this table is superseded by the section above: every table it reports was sized by a compile-time constant, those constants were lowered on 2026-09-21, and the capacity is read from the configuration at load on both load paths since the same day.
 
 What changed on 2026-09-20: from 2026-04-16 the agent's resident size on this fixture was 360 to 408 MB, and the enterprise agent's about 430 MB, against the 6.5 MB the previous section reports for 2026-03-22. The cause was the conntrack offset resolution, which shelled out to `bpftool btf dump -j` for the whole vmlinux BTF and parsed the result as JSON; the parsed document was dropped but the allocator kept the arenas it had grown. The two struct members are now read from the BTF the kfunc loader already parses, and the figures in the table are what that build measures. The `RSS (MB)` columns of the 2026-03-22 matrix below are from a build that did not carry the regression and are consistent with this table's order of magnitude, not with its exact values.
 
