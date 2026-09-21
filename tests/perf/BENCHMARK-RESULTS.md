@@ -1,18 +1,18 @@
 # eBPFsentinel - Performance Benchmarks
 
-Three complementary datasets:
+**In one line: a packet walks 6 eBPF programs for about 1 microsecond of kernel
+time, and the full stack locks 71 MB of maps on a 4-vCPU node.** That is the
+section below; the other two datasets answer different questions.
 
-1. **Cross-VM measurement (2026-06-14)** - the bats perf suites (`tests/perf/`)
-   run over the **real vmxnet3 NIC** between two VMs (attacker → agent), kernel
-   6.17, agent loaded via the BPF-token launcher. Real network path, real eBPF.
-2. **Held-rate cost of the full stack (2026-09-20)** - whole-guest CPU with and
-   without the agent at rates held by iperf3, the eBPF share read off
-   `kernel.bpf_stats_enabled`, and the agent's resident size per feature. This
-   is the current sizing reference for memory.
-3. **Production CPU-overhead matrix (2026-03-22)** - a per-feature CPU% matrix at
-   fixed traffic volumes, kept as the production-sizing reference for CPU. Its
-   `RSS (MB)` columns predate the conntrack migration of 2026-04-16 and are
-   superseded by the memory footprint table in dataset 2.
+| dataset | question it answers | when |
+|---|---|---|
+| Cross-VM measurement | what a real vmxnet3 NIC does with the agent in the path | 2026-06-14 |
+| Cost of the full stack | what one packet costs, and what the maps cost | 2026-09-21 |
+| Production CPU matrix | CPU% per feature at fixed traffic volumes | 2026-03-22 |
+
+The 2026-03-22 matrix is kept for its per-feature CPU shape; its `RSS (MB)`
+columns predate the conntrack migration of 2026-04-16 and are superseded by the
+memory table in the 2026-09-21 section.
 
 > **On absolute throughput.** iperf3 over the paravirtual vmxnet3 NIC is
 > CPU-bound on the host, so the *baseline* (no-agent) link rate varies with how
@@ -133,292 +133,95 @@ via `agent.api_rate_limit.*`), so bulk loads from the same host are not throttle
 
 ---
 
-## Held-rate cost of the full stack (2026-09-20)
+## Cost of the full stack (2026-09-21)
 
-A driver on the host holds a TCP rate with four iperf3 client processes on the
-attacker VM and samples the agent VM for three windows of 15 s per rate; the
-median is reported. No agent runs in the baseline, so the difference between
-the two rows at the same rate is what the agent costs, softirq included. The
-agent is measured the way it is run: in its own user namespace over a BPF token
-behind the warden, whose cost is counted with it, with every feature of
-`fixtures/config-ebpf-benchmark.yaml` on at once (firewall, IDS, IPS, rate
-limit, conntrack, NAT, threat intelligence, alerting, audit; 24 programs). The
-rate-limit rule is keyed on the attacker with a rate above the link, so the
-bucket is walked on every packet and never drops.
+Measured by `../../../ebpfsentinel-enterprise/tests/perf/bench-oss-vs-enterprise.sh`
+on two VMware guests (agent VM: 4 vCPU, 3.9 GB, vmxnet3 at 10 Gbps, kernel 7.0),
+pktgen 64-byte UDP frames, three windows of 15 s per cell, median reported.
+Reference run: `ebpfsentinel-enterprise/tests/perf/results/2026-09-21-pktgen-64-head/`,
+both agents built from a clean checkout. Every earlier run is indexed in
+`results/README.md`.
 
-### Environment
+### Headline
 
-| Parameter   | Value                                                             |
-| ----------- | ----------------------------------------------------------------- |
-| Kernel      | 7.0.0-28-generic, both VMs                                        |
-| Agent VM    | 4 vCPU / 3.9 GB, vmxnet3 at 10 Gbps, native XDP on eth1           |
-| Attacker VM | 4 vCPU, vmxnet3                                                   |
-| Traffic     | iperf3 3.16 TCP, 4 client processes, each held at a quarter of the rate; then pktgen, 64-byte UDP frames from the attacker kernel, one thread |
-| Windows     | 3 x 15 s per rate, median                                         |
-| Host        | 20 cores, one-minute load under 35 % of the cores in every window |
+**A received packet walks 6 eBPF programs and pays about 1 microsecond of kernel
+time for the lot.** At the rate this pair of guests reaches - 90 kpps, 0.05 Gbps
+- that is under 0.1 of one core out of 4, and the whole guest's CPU is within
+0.01 core of the same guest with no agent loaded.
 
-### Whole guest, baseline against agent
+| | OSS | Enterprise |
+|---|---:|---:|
+| eBPF programs a received packet walks | 6 | 6 |
+| ns per packet at 25 kpps | 1458 | 1219 |
+| ns per packet at 50 kpps | 1057 | 1041 |
+| ns per packet at 90+ kpps | 967 | 865 |
+| eBPF cores at 90+ kpps | 0.087 | 0.082 |
+| guest cores above the no-agent baseline | +0.00 | +0.01 |
+| agent RSS | 60 MB | 89 MB |
+| map memory locked | 67.7 MB | 67.6 MB |
 
-| Target   | rx Gbps (baseline / agent) | Baseline busy cores | Agent busy cores | Agent cost | of which eBPF | ns per packet in eBPF | Agent RSS |
-| -------- | -------------------------- | ------------------- | ---------------- | ---------- | ------------- | --------------------- | --------- |
-| idle     | 0 / 0                      | 0.01                | 0.02             | +0.00      | 0.000         | -                     | 58 MB     |
-| 1 Gbps   | 1.05 / 1.05                | 0.12                | 0.17             | +0.05      | 0.052         | 600                   | 58 MB     |
-| 2.5 Gbps | 2.62 / 2.62                | 0.48                | 0.60             | +0.12      | 0.130         | 590                   | 58 MB     |
-| 5 Gbps   | 5.09 / 5.44                | 1.91                | 2.24             | +0.33      | 0.211         | 470                   | 58 MB     |
-| uncapped | 5.69 / 4.84                | 1.83                | 1.94             | +0.11      | 0.208         | 520                   | 58 MB     |
+Per-packet cost falls as the rate rises: the fixed part - a cold map line, the
+first packet of a flow - is amortised over more packets. Rank two profiles on
+ns/pkt and never on ns/run, since a profile running one extra cheap program
+reads as a lower ns/run while costing the packet more.
 
-- Busy cores are user+system+irq+softirq of the whole guest. The eBPF column
-  is `run_time_ns` summed over every loaded program, already inside the busy
-  figure; ns per packet is that sum over the packets the NIC counted.
-- At 1 and 2.5 Gbps the agent's cost is its eBPF run time and nothing else:
-  userspace stays at 0.001 cores because no rule fires, so what the process
-  does is metrics and heartbeats. `xdp_firewall` carries about 90 % of the eBPF
-  time, and that figure includes the programs it tail-calls (rate limit,
-  conntrack), which the kernel does not time apart.
-- At 5 Gbps and uncapped the vmxnet3 link is CPU-bound on the host (300 000
-  retransmits per window with the agent, 70 000 to 100 000 without), so the
-  two rows measure whichever side ran out of CPU first and their difference
-  is noise. The 1 and 2.5 Gbps rows are the comparable ones.
-- The loaded maps locked 365 MB on this build (`bytes_memlock` over every
-  map). That is kernel memory, not RSS, and it is charged to the cgroup that
-  created the maps, so a container limit has to hold both: the chart's 512 Mi
-  limit left about 90 MB over the agent and the fixture's maps. The tables
-  are sized from the configuration since 2026-09-21 and the same fixture
-  locks 99 MB; the memory section below has the figures.
+### Where the time goes (25 kpps)
 
-### Per-packet cost under a pktgen flood (2026-09-20)
+| program | OSS | Enterprise |
+|---|---:|---:|
+| `xdp_firewall` | 712 ns (50%) | 630 ns (52%) |
+| `tc_conntrack` | 292 ns | 226 ns |
+| `tc_ids` | 215 ns | 234 ns |
+| `tc_threatintel` | 126 ns | 60 ns |
+| `tc_dns` | 41 ns | 23 ns |
+| `tc_nat_ingress` | 39 ns | 34 ns |
+| `tc_nat_egress` | 0 ns | 0 ns |
+| **whole chain** | **1425 ns** | **1208 ns** |
 
-The same driver, with the attacker kernel's pktgen in place of iperf3: 64-byte
-UDP frames to the discard port, one kernel thread, the rate held in packets
-per second, three windows of 15 s per rate. This is the pass that prices the
-datapath per packet, which is what an XDP program is priced in; the TCP pass
-above prices it per byte on four flows.
+`tc_nat_egress` reads zero because it is on the egress path: it runs on what the
+machine sends, not on what it receives. The firewall is half the bill on both
+sides, which is where an optimisation is worth looking for.
 
-| Target   | rx kpps (baseline / agent) | Baseline busy cores | Agent busy cores | eBPF cores | eBPF runs per packet | ns per run | ns per packet in eBPF | Agent RSS |
-| -------- | -------------------------- | ------------------- | ---------------- | ---------- | -------------------- | ---------- | --------------------- | --------- |
-| 25 kpps  | 25 / 25                    | 0.02                | 0.02             | 0.053      | 7.0                  | 303        | 2 120                 | 61 MB     |
-| 50 kpps  | 50 / 50                    | 0.02                | 0.03             | 0.082      | 7.0                  | 236        | 1 650                 | 61 MB     |
-| uncapped | 82 / 81                    | 0.04                | 0.04             | 0.125      | 7.0                  | 216        | 1 510                 | 61 MB     |
+### Memory
 
-- Every UDP packet runs seven programs: `xdp_firewall`, with what it
-  tail-calls timed inside it, then the tc ingress chain (conntrack, NAT, IDS,
-  rate limit, audit). The TCP pass above ran about 1.2 per frame the NIC
-  counted, because XDP runs once per frame but tc runs once per skb and GRO
-  has merged the segments by then; a UDP flood is not merged, so it is the
-  honest count. `xdp_firewall` is half of the per-packet time, `tc_ids`,
-  `tc_conntrack` and `tc_nat_ingress` most of the rest.
-- The per-run cost falls as the rate rises, from 303 ns at 25 kpps to 216 ns
-  uncapped, which is cache warmth: the maps stay resident when the next packet
-  arrives sooner. Read the uncapped row as the per-packet figure and the
-  25 kpps row as the cold one.
-- The guest's busy-core columns undercount this pass. The kernel is built
-  without `CONFIG_IRQ_TIME_ACCOUNTING`, so softirq time is charged only when
-  a tick lands inside it, and at 80 000 small packets a second on an idle CPU
-  most of the packet path falls between ticks: the guest reads 0.04 busy cores
-  while the eBPF column, timed by `sched_clock` around every run, reads 0.125.
-  The eBPF column is the figure; the difference between the two busy columns
-  is not.
-- The virtual link carries about 105 000 small packets a second and no more,
-  from one pktgen thread or four, at 64 bytes or 1 400: the ceiling is the
-  hypervisor's per-packet cost on the vmnet path. At 1.5 µs a packet the
-  datapath would take about 650 000 pps of one core, but that number is an
-  extrapolation from two orders of magnitude below it and it is not claimed
-  here. The million-packet figure needs a physical NIC or a passed-through
-  one.
-- Userspace stays at 0.001 cores and the resident size at 61 MB: no rule
-  fires, so the process does metrics and heartbeats. The 3 MB over the TCP
-  pass is the peak over the window rather than the value at rest.
+Measured on the agent VM, one agent start per configuration, `bytes_memlock`
+summed over every loaded map.
 
-### Per-packet cost after the tc chain fix (2026-09-21)
+| configuration | programs | maps | map memory | agent RSS |
+|---|---:|---:|---:|---:|
+| no feature enabled | 15 | 2 | 0.3 MB | 27 MB |
+| firewall only | 17 | 40 | 14.9 MB | 42 MB |
+| rate limiting only | 17 | 27 | 48.0 MB | 42 MB |
+| threat intelligence only | 16 | 9 | 2.0 MB | 42 MB |
+| everything (lane fixture) | 24 | 89 | 71.0 MB | 57 MB |
 
-The 2026-09-20 pass above found two things in the tc chain that were not
-traffic: `tc_nat_egress` had been attached on TCX ingress since the attach
-helper was written, so SNAT ran on every inbound packet and the chain counted
-seven programs per packet, and every classifier re-parsed the Ethernet, VLAN,
-IP and transport headers the one before it had already parsed. Both are
-fixed: `tc_nat_egress` is on egress, and the first classifier to see an skb
-writes the offsets, protocol, ports and tenant into the five `skb->cb` words
-the kernel carries from one TCX program to the next, with a check word over
-the skb length and interface indexes so a stale control block is re-parsed
-rather than trusted. The kernel-filled tables were also cut to what the
-configuration asks for, which is the memory section below.
+The warden adds 2.3 MB whatever the configuration. Rate limiting is most of the
+map bill: `RL_BUCKETS` 22 MB and `CONN_TABLE` 12 MB, both LRU per-CPU hashes.
+**A per-CPU map costs its entries once per online CPU**, so these figures, read
+on a 4-vCPU VM, are larger on a bigger node - that is the one number to scale
+before sizing a container limit. Against the 512Mi the chart sets, the full
+fixture leaves comfortable room; it did not in September, see below.
 
-Measured as an A/B on the same VM in one session, the old build and the new
-one back to back under the same host load (one-minute load 4.3 to 5.2 on the
-20-core host, so both columns carry the same inflation and neither is
-comparable with the 2026-09-20 absolutes, which were taken on a quieter host):
+### What the September work bought
 
-| Build | Target   | rx kpps | eBPF runs per packet | ns per packet in eBPF | of which `xdp_firewall` | of which tc chain | Maps |
-| ----- | -------- | ------- | -------------------- | --------------------- | ----------------------- | ----------------- | ---- |
-| old   | 25 kpps  | 25      | 7.0                  | 3 326                 | 1 892                   | 1 434             | 365 MB |
-| new   | 25 kpps  | 25      | 6.0                  | 2 998                 | 1 799                   | 1 199             | 99 MB |
-| old   | uncapped | 54      | 7.0                  | 2 486                 | 1 363                   | 1 123             | 365 MB |
-| new   | uncapped | 54      | 6.0                  | 2 550                 | 1 496                   | 1 054             | 99 MB |
+| change | what it did | measured effect |
+|---|---|---|
+| tc chain on egress, parse once (2026-09-21) | SNAT moved to the egress hook, the parse result handed down the chain in `skb->cb` | 7 to 6 programs per received packet |
+| map capacity from the configuration (2026-09-21) | tables sized at load from what is configured rather than from a compile-time constant | 365 to 71 MB of locked maps, same fixture |
+| conntrack BTF offsets (2026-09-20) | offsets read from the BTF the kfunc loader already parses, instead of shelling out to `bpftool btf dump -j` and parsing the whole vmlinux as JSON | agent RSS 360-408 MB down to 57 MB |
+| empty-table gates (2026-09-21) | a lookup whose table is empty is skipped; userspace publishes a bitmask, an unwritten entry reads 0 so a stale value can only cost a lookup, never change a verdict | below the lane's resolution; measured per program with `BPF_PROG_TEST_RUN` |
 
-- The per-packet gain is the `tc_nat_egress` run that no longer happens on
-  ingress: 186 to 234 ns a packet, 7 to 10 % of the eBPF time. It now runs on
-  the locally originated packets only, a few dozen per window, cold, at about
-  1.1 µs each, which is nothing against the flood.
-- The once-per-chain parse is worth less than the noise on this lane. Per
-  program, `tc_ids`, `tc_conntrack`, `tc_nat_ingress`, `tc_threatintel` and
-  `tc_dns` each moved by under 10 % in either direction, and so did
-  `xdp_firewall`, which the change did not touch: parsing four headers out of
-  a linear skb was never where the time went, the map lookups are. The
-  handoff is kept for what it buys structurally - one parser to get right,
-  offsets every classifier agrees on, the tenant resolved once - not for a
-  figure this lane cannot see.
-- `xdp_firewall` stays at about 60 % of the per-packet time and it is the
-  next thing to look at, not the tc chain.
-- The full three-profile pass of the same day is in
-  `ebpfsentinel-enterprise/tests/perf/results/2026-09-21-pktgen-64/`, and it
-  is **not usable**. This sentence previously said it read 6.0 runs a packet
-  and 99 MB of maps for both agents; the OSS profile did, the enterprise one
-  read 7.0 and 93.6 MB. The enterprise binary in it was stale - it still
-  carried `tc_nat_egress` attached on TCX ingress, so it ran one extra
-  program on every packet and read as the dearer datapath for a reason that
-  was not in the tree. The host was contended on top of that: the lane
-  peaked at 52 kpps where a quiet host reaches 86, every per-packet figure
-  in it is about 1.75 times the same cell measured quiet, and the
-  `(host busy)` marker fired on one cell only because the threshold is too
-  lax for this box. The run is kept rather than deleted, since a benchmark
-  whose bad runs disappear cannot be audited. What it was trying to say is
-  in `.../2026-09-21-pktgen-64-rebuilt/`, both agents rebuilt from the same
-  clean tree, where both read 6.00 runs a packet and the enterprise layer
-  costs 2 % per packet in either direction, which is noise. The reasoning is
-  in `analysis.md` beside it.
+### What these numbers are not
 
-### Gating the lookups a packet does not need (2026-09-21)
-
-The pass above left `xdp_firewall` at about 60 % of the per-packet time and said
-it was the next thing to look at. It was, and what it was doing was not deciding
-anything: every program in the chain paid the full price of every feature it
-could perform before discovering the feature had nothing loaded. The firewall
-probed conntrack on every packet whether or not a rule read connection state and
-whether or not the default policy needed the established bypass; the two NAT
-classifiers hashed the 5-tuple and looked up their tables with no rule loaded at
-all; three maps were created, populated and never read.
-
-Each of those is now gated on a single-entry map the loader writes when it knows
-what is loaded: `FW_CT_GATE` for the conntrack probe, a rule count for each NAT
-direction, the hairpin switch for the reflection table. A gate opens on load and
-closes only once a load has proved it can, because a firewall that probes state
-it did not need is slow and one that skips a probe it needed is wrong.
-
-Measured on the lane, ns a packet in eBPF, median of three 15 s windows:
-
-| Profile | Target | before | after |
-| ------- | ------ | -----: | ----: |
-| oss | 25 kpps | 1 728 | 1 487 |
-| oss | 50 kpps | 1 329 | 1 160 |
-| oss | uncapped | 1 221 | 1 018 |
-| enterprise | 25 kpps | 1 757 | 1 495 |
-| enterprise | 50 kpps | 1 310 | 1 121 |
-| enterprise | uncapped | 1 191 | 993 |
-
-Per program at 25 kpps on the OSS profile: `xdp_firewall` 1 128 to 827 ns,
-`tc_nat_ingress` 156 to 34, `tc_threatintel` 85 to 79, `tc_ids` 234 to 236,
-`tc_dns` 24 to 28. `tc_conntrack` went the other way, 150 to 254, which is the
-work moving rather than disappearing: the flows the firewall used to look up on
-its own behalf are now looked up once, by the program whose job that is.
-
-Two lookups were deliberately left alone. The `tc_ids` pattern prefilter would
-need refcounting to know whether any rule still reads it, and the
-`tc_threatintel` bloom filter has two writers, so a gate over either is a
-correctness question rather than a performance one.
-
-**What this lane can and cannot resolve.** Two runs of the same binaries, on the
-same host, at a host load lower than either comparison run, differ by 10 % a
-packet; the three windows inside one run agree within 3 to 6 %, so the spread is
-between runs and looks like a fixed cost paid once per boot. The gains in the
-table above are 14 to 17 % and survive that, with a per-program split that says
-where they came from; a change worth less than 10 % on this lane is not
-measurable by it. The runs are
-`ebpfsentinel-enterprise/tests/perf/results/2026-09-21-pktgen-64-gated/`,
-`-sized/` and `-sized-repeat/`, with the reasoning in `analysis.md` beside the
-first two.
-
-### Gating inside the firewall, and measuring it against itself (2026-09-21)
-
-The pass above gated the lookups one program made on behalf of another and left
-`xdp_firewall` at about 55 % of the per-packet time, doing the same thing inside
-itself: four prefix tries, two hash fast paths, the zone map, the three tenant
-sources and the overload probe were read on every packet whether or not anything
-had been loaded into them, and the rule scan ran with a rule count of zero.
-
-They are now gated on one single-entry map, `FW_EMPTY_FEATURES`, holding one bit
-per table. The sense is inverted - a bit **set** means the table is empty, skip
-the lookup - so a map nobody wrote, and an object loaded by an older userspace,
-both read zero and every lookup happens exactly as it did before. A stale bit can
-only be slower, never wrong. Where a setter is additive the bit closes only until
-the first write and never again, because an empty slice removes nothing and
-cannot mean the table emptied; where a setter replaces, the lookup is opened
-before the mutation and the recomputed answer published after it succeeded.
-
-Measured against itself, with `BPF_PROG_TEST_RUN` on the loaded program, one
-64-byte UDP frame, two million repeats, the mask flipped between runs on the same
-load of the same object:
-
-| `FW_EMPTY_FEATURES` | ns a run |
-| ------------------- | -------- |
-| as the loader published it | 113, 111, 111 |
-| zero, every lookup runs | 145, 142, 144 |
-| published value again | 114, 108, 111 |
-
-About 33 ns a packet, 23 % of the program, repeatable to 3 ns. The middle row is
-the code as it was before this change, running in the same kernel a second
-earlier. It is a floor rather than an estimate: a test run has everything it
-touches in cache, and a miss in a cold trie under real traffic costs more.
-
-On the lane's own fixture the published mask is 247, every bit but the port hash,
-which the fixture's one port rule keeps open. Seven tables are read by nobody.
-
-**What this lane can and cannot resolve.** The pktgen lane reads 15 to 20 % a
-packet better than the run before it, and that is not this change: the no-agent
-baseline uncapped reads 94 kpps against 86 and 87, and every program in the chain
-fell with the firewall, including the five this change does not touch. The
-firewall against the rest of the chain it sits in reads 1.31, 1.23, 1.22 and now
-1.20, which moves the right way in both profiles and by less than two runs of
-identical binaries differ from each other. A program-level gate is now below this
-lane's floor: the next one is measured with `BPF_PROG_TEST_RUN` first, and taken
-to the lane only to prove nothing regressed. The run is
-`ebpfsentinel-enterprise/tests/perf/results/2026-09-21-pktgen-64-fwgated/`, with
-the reasoning in `analysis.md` beside it.
-
-### Memory footprint (2026-09-21)
-
-Same measurement as the section below, re-taken on kernel 7.0.0-28-generic after the eBPF tables stopped carrying the capacity of their worst case. Resident size is the agent's own processes (agent plus warden, `VmRSS` once the datapath is up and before any traffic); map memory is `bytes_memlock` summed over the loaded maps, preallocated at load and the same at idle and under flood.
-
-| Configuration | eBPF programs | RSS (MB) | Map memory (MB) |
-|---|---|---|---|
-| No feature enabled | 15 | 28 | 0.3 |
-| Firewall only | 17 | 43 | 27 |
-| Rate limiting only | 17 | 43 | 46 |
-| Threat intelligence only | 16 | 42 | 12 |
-| Full benchmark fixture | 24 | 58 | 99 |
-
-Resident size did not move: the change is entirely in the tables. Threat intelligence went from 180 MB to 12 MB because its two IOC hashes and two Bloom filters were a fixed million entries each whatever the feeds carried, and are now `threatintel.max_entries`, derived from the feeds with a floor of 4,096. Rate limiting went from 160 MB to 46 MB on `ratelimit.max_buckets`, and the DDoS tables on `ddos.max_tracked_sources`. Nothing was made smaller than it needs to be: the defaults are what the fixture asks for, and an estate that wants the old capacity writes it in the configuration.
-
-The total splits in two on this 4 vCPU guest: about 43 MB is in per-CPU tables and scales with the CPU count at roughly 11 MB a CPU, and about 56 MB does not. The same fixture on 16 vCPU therefore locks about 230 MB rather than 99 MB, which is the figure to size a node against. Against the 512Mi limit the chart sets, 58 MB resident plus 99 MB of maps leaves about 355 MB on four CPUs and about 225 MB on sixteen, where the previous build left about 90 MB on four and did not fit on sixteen at all.
-
-What this table actually measured, corrected on 2026-09-21: the map column is the capacity the objects are **declared** with, not the capacity the configuration asks for. The load-time plan was installed on one of the two paths that create maps - the activate path the enterprise binary calls - and the path every OSS agent takes at start never called it, so the figures above are what the lowered object defaults cost (65,536 IOC slots rather than a million, 65,536 rate-limit buckets rather than 262,144) and not what the fixture asks for. Both paths install the plan since, and a table belonging to a section the configuration switches off is created at a 1,024-entry floor. Measured on the perf lane's own fixture, that is 91.4 MB down to 67.7 MB for the OSS agent and 75.9 MB down to 67.6 MB for the enterprise one, which is where the two agents stop differing in what they lock: five tables were carrying their declared capacity on the OSS side alone (the two IOC hashes and their bloom filters, the per-source conntrack counters, the hairpin reflection table and the reject throttle). The full run is in `ebpfsentinel-enterprise/tests/perf/results/2026-09-21-pktgen-64-sized/`.
-
-The per-packet effect of the same change, measured against the previous build under identical host load, is in the section above.
-
-### Memory footprint (2026-09-20)
-
-Resident size of the agent's own processes (agent plus warden, `VmRSS` once the datapath is up and before any traffic) on kernel 7.0.0-28-generic, taken from the benchmark fixture with every section but the named one turned off. Map memory is `bytes_memlock` summed over the loaded maps: it is charged to the cgroup that created them, preallocated at load, and the same at idle and under flood, which is why it sits beside the resident size rather than inside it.
-
-| Configuration | eBPF programs | RSS (MB) | Map memory (MB) |
-|---|---|---|---|
-| No feature enabled | 15 | 28 | 0.3 |
-| Firewall only | 17 | 43 | 28 |
-| Rate limiting only | 17 | 43 | 160 |
-| Threat intelligence only | 16 | 42 | 180 |
-| Full benchmark fixture | 24 | 58 | 365 |
-
-The two big map holders are the threat intelligence IOC tables and the rate-limit buckets, both LRU hashes sized for their worst case at load; the conntrack table is 24 MB. Under the held-rate windows above the resident size stayed at 58 MB from idle to 5 Gbps, so what an operator sizes for is the map memory: with the fixture as it is, 58 MB resident plus 365 MB of maps against the 512Mi limit the chart sets leaves about 90 MB, and a feature that widens a map is a change to that limit. The map column of this table is superseded by the section above: every table it reports was sized by a compile-time constant, those constants were lowered on 2026-09-21, and the capacity is read from the configuration at load on both load paths since the same day.
-
-What changed on 2026-09-20: from 2026-04-16 the agent's resident size on this fixture was 360 to 408 MB, and the enterprise agent's about 430 MB, against the 6.5 MB the previous section reports for 2026-03-22. The cause was the conntrack offset resolution, which shelled out to `bpftool btf dump -j` for the whole vmlinux BTF and parsed the result as JSON; the parsed document was dropped but the allocator kept the arenas it had grown. The two struct members are now read from the BTF the kfunc loader already parses, and the figures in the table are what that build measures. The `RSS (MB)` columns of the 2026-03-22 matrix below are from a build that did not carry the regression and are consistent with this table's order of magnitude, not with its exact values.
+- **The lane resolves about 15%.** Builds differing by gates worth tens of
+  nanoseconds read 1241, 1458, 1487, 1566 and 1707 ns/pkt across the day's runs.
+  The lane proves the absence of a regression; a change to one program is
+  measured with `BPF_PROG_TEST_RUN`, which is repeatable to a few percent.
+- **90 kpps is the pair of guests, not the NIC.** Absolute throughput on a real
+  NIC is the cross-VM dataset above.
+- **Enterprise reading lower than OSS is not a property of enterprise.** The two
+  run under different launchers - OSS under the warden broker and a BPF token in
+  a user namespace, enterprise as root - and the gap sits inside the spread.
 
 ---
 
@@ -496,8 +299,7 @@ threatintel + ddos + dns) under attack-like traffic.
 
 Memory: the `RSS (MB)` columns of this section are from 2026-03-22 and were
 true then; the conntrack migration of 2026-04-16 moved the agent's resident
-size and the current figures, and the sizing that follows from them, are in
-the memory footprint table above.
+size. Size memory from the `### Memory` table of the 2026-09-21 section.
 
 ---
 
