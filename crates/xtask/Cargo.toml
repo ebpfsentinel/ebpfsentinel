@@ -7,6 +7,10 @@ publish = false
 
 [dependencies]
 clap = { workspace = true }
+adapters = { workspace = true }
+aya = { workspace = true }
+aya-obj = { workspace = true }
+libc = { workspace = true }
 anyhow = { workspace = true }
 ebpfsentinel-agent = { workspace = true }
 serde_json = { workspace = true }

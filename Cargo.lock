@@ -4620,10 +4620,14 @@ dependencies = [
 name = "xtask"
 version = "0.0.0"
 dependencies = [
+ "adapters",
  "anyhow",
+ "aya",
+ "aya-obj",
  "clap",
  "ebpfsentinel-agent",
  "k8s-openapi",
+ "libc",
  "serde_json",
  "utoipa",
 ]

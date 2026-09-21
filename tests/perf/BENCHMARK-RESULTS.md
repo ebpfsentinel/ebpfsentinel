@@ -179,8 +179,71 @@ reads as a lower ns/run while costing the packet more.
 | **whole chain** | **1425 ns** | **1208 ns** |
 
 `tc_nat_egress` reads zero because it is on the egress path: it runs on what the
-machine sends, not on what it receives. The firewall is half the bill on both
-sides, which is where an optimisation is worth looking for.
+machine sends, not on what it receives.
+
+Read the first row as a subtree rather than as a program. The kernel bills a
+tail call to whichever program was entered, so the 712 ns against
+`xdp_firewall` is the firewall plus `xdp_ratelimit` plus `xdp_loadbalancer`,
+and no row here says what any single program costs. The table below does.
+
+### Per-program cost (`BPF_PROG_TEST_RUN`)
+
+`cargo xtask ebpf-cost` loads one object at a time, pins its maps under a
+directory of its own so no table another program filled can be hit, and runs
+each program a million times on one 64-byte UDP frame, keeping the best of
+three rounds. Root, and the built objects. Two kernel modules export kfuncs
+three of the programs call, so `modprobe -a fou fou6 xfrm_interface` comes
+first or those three report a missing kfunc rather than a cost.
+
+Every program is measured twice: with the emptiness gates open, which is what a
+lookup costs when it runs and misses, and with every gate set, which is what
+the program costs when userspace has told it the tables behind it are empty.
+
+| program | hook | gates open | gates set | saved |
+|---|---|---:|---:|---:|
+| `tc_qos_ingress` | TC | 221 ns | 5 ns | 98% |
+| `tc_qos` | TC | 220 ns | 5 ns | 98% |
+| `xdp_firewall` | XDP | 46 ns | 18 ns | 61% |
+| `xdp_ratelimit` | XDP | 38 ns | 25 ns | 34% |
+| `tc_ids` | TC | 29 ns | 10 ns | 66% |
+| `xdp_firewall_reject` | XDP | 23 ns | 23 ns | 0% |
+| `xdp_loadbalancer` | XDP | 14 ns | 15 ns | 0% |
+| `xdp_ratelimit_syncookie` | XDP | 11 ns | 13 ns | 0% |
+| `tc_nat_ingress` | TC | 8 ns | 8 ns | 0% |
+| `tc_nat_egress` | TC | 7 ns | 7 ns | 0% |
+| `tc_dns`, `tc_conntrack` | TC | 6 ns | 6 ns | 0% |
+| `tc_threatintel`, `tc_scrub` | TC | 5 ns | 5 ns | 0% |
+| `xdp_vip_announcer`, `xdp_pass` | XDP | 4 ns | 9 ns | noise |
+| **sum** | | **647 ns** | **169 ns** | |
+
+The shaper is the most expensive program in the tree, ahead of the firewall by
+a factor of five, which the live lane could not show because it sits on the
+other hook. Its classification ladder walks a rule shape at a time from the
+exact five-tuple down to the catch-all, twice, once scoped to the packet's VLAN
+and once for the rules naming none, so an unmarked packet costs sixteen hash
+lookups and a marked one thirty. An estate loading no shaping rule pays none of
+it.
+
+Four cautions, because these numbers are not the live lane's and do not
+replace them:
+
+1. A tight loop on a warm cache with no DMA and no NIC. The floor is about
+   4 ns, which is the loop itself, so every row at 5 or 6 ns is at the floor
+   and has nothing left to give. The two rows marked noise read slower with
+   their gates set although they read no gate at all, which is the same floor
+   seen from below.
+2. No rule is loaded. The left column is a lookup that misses, not one that
+   matches, so it is a lower bound on what a configured estate pays.
+3. No configuration is loaded either, so `tc_conntrack`, `tc_dns`, `tc_scrub`
+   and `tc_threatintel` measure their disabled path and return before doing
+   any work. `tc_conntrack` costs 292 ns on the live lane and 6 ns here for
+   that reason, and its conntrack kfunc is never called.
+4. `uprobe-dlp` is absent: `BPF_PROG_TEST_RUN` takes a packet, so it reaches
+   the two hooks that carry one and no other.
+
+A TC program returns -1, which is `TCX_NEXT` and the pass verdict under TCX; an
+XDP program returns 2 for `XDP_PASS`. The two tail-call targets return 1,
+`XDP_DROP`, because nothing configured them.
 
 ### Memory
 

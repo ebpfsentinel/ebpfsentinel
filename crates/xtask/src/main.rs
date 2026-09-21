@@ -1,4 +1,5 @@
 mod build_ebpf;
+mod ebpf_cost;
 
 use std::path::PathBuf;
 
@@ -18,6 +19,12 @@ struct Cli {
 enum Commands {
     /// Build all eBPF kernel programs
     EbpfBuild,
+    /// Measure each eBPF program's own cost with `BPF_PROG_TEST_RUN`.
+    ///
+    /// Needs root and the built objects. Reports a program at a time, with
+    /// rules loaded and with every emptiness gate set, since `bpf_stats` on a
+    /// live interface bills a tail call to whichever program was entered.
+    EbpfCost,
     /// Generate code from proto files
     Codegen,
     /// Emit the agent's OpenAPI spec to JSON.
@@ -36,6 +43,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::EbpfBuild => build_ebpf::build_all(),
+        Commands::EbpfCost => ebpf_cost::run(),
         Commands::Codegen => {
             println!("codegen: not yet implemented");
             Ok(())

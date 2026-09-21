@@ -58,6 +58,27 @@ sudo bats *.bats                               # all
 Methodology (baseline subtraction, 3-run averaging, thresholds) is documented in
 [BENCHMARK-RESULTS.md](BENCHMARK-RESULTS.md).
 
+## Per-program cost, off any lane
+
+A suite measures what a packet pays through the whole chain, and the kernel
+bills a tail call to whichever program was entered, so no suite here says what
+one program costs. That is a separate command, needing root and the built
+objects and no VM at all:
+
+```bash
+cargo xtask ebpf-build
+sudo modprobe -a fou fou6 xfrm_interface     # kfuncs three programs call
+sudo target/release/xtask ebpf-cost
+```
+
+It loads one object at a time under a pin directory of its own, runs each
+program a million times on one 64-byte UDP frame with `BPF_PROG_TEST_RUN`, and
+reports the cost twice: with the emptiness gates open and with every gate set.
+It is a floor rather than a live figure, since no rule and no configuration are
+loaded, and the recorded run is in
+[BENCHMARK-RESULTS.md](BENCHMARK-RESULTS.md). It doubles as the cheapest way to
+find out whether every program still loads past the verifier.
+
 ## Notes
 
 - These are **nightly** in CI (heavy); they are not part of the fast PR lane.
